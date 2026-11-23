@@ -358,12 +358,12 @@
     const items: MenuItem[] = [];
     if (viewport.isPhone) {
       items.push(
-        { label: 'Add node…', icon: 'plus', action: () => { popRight = 8; popOpener = opener; paletteOpen = true; } },
+        { label: 'Add node…', icon: 'plus', action: () => { popRight = 8; popOpener = opener; runsOpen = false; paletteOpen = true; } },
         { label: 'Save', icon: 'check', disabled: !dirty || savingGraph, title: dirty ? undefined : 'No unsaved changes', action: () => void save() },
       );
     }
     items.push(
-      { label: 'Runs', icon: 'clock', title: 'Past and live runs of this workflow', action: () => { popRight = 8; popOpener = opener; runsOpen = true; void loadRuns(); } },
+      { label: 'Runs', icon: 'clock', title: 'Past and live runs of this workflow', action: () => { popRight = 8; popOpener = opener; paletteOpen = false; runsOpen = true; void loadRuns(); } },
       { separator: true },
       { label: 'Instructions', checked: workflowsUi.instructionsOpen, title: 'Standing rules every step follows, by the letter', action: () => (workflowsUi.instructionsOpen = !workflowsUi.instructionsOpen) },
       { label: 'Triggers', checked: workflowsUi.triggersOpen, title: 'Configure what starts this workflow', action: () => (workflowsUi.triggersOpen = !workflowsUi.triggersOpen) },
@@ -981,10 +981,10 @@
     e.preventDefault();
     runDetailMax = false;
     if (sideDock) {
-      // Side dock: drag the inspector's LEFT edge — leftward widens it.
-      const startX = e.clientX;
-      const startW = ui.wfInspSideWidth;
-      startMouseDrag(e, { onMove: (ev) => ui.setWfInspSideWidth(startW + (startX - ev.clientX)) });
+      // Side dock: flip drag sign in RTL where inset-inline-end puts the panel on the left.
+      const startX = e.clientX, startW = ui.wfInspSideWidth;
+      const sign = getComputedStyle(e.currentTarget instanceof Element ? e.currentTarget : document.documentElement).direction === 'rtl' ? -1 : 1;
+      startMouseDrag(e, { onMove: (ev) => ui.setWfInspSideWidth(startW + (startX - ev.clientX) * sign) });
       return;
     }
     const startY = e.clientY;
@@ -1009,11 +1009,10 @@
   function dotKey(status: string): string {
     return runStatus(status).key;
   }
-  // Open a step's session INLINE in the WF page's Agents tab (never navigate to
-  // the global Agents panel). Ensures the sidebar is open + on the Agents tab,
-  // then focuses the session (reset-then-set so re-clicking the same id retriggers).
+  // Open inline on desktop when the context sidebar is mounted; else navigate.
   let agentsFocusSid = $state<string | null>(null);
   function openSessionInline(sid: string): void {
+    if (!viewport.isDesktop || !run?.context_dir) { ws.navigateToSession(sid); return; }
     if (!ui.wfCtxOpen) ui.toggleWfCtx();
     ui.setWfCtxTab('agents');
     agentsFocusSid = null;
@@ -1308,7 +1307,7 @@
            Node/Save join the menu too, so there is never a second,
            auto-generated ⋯ next to ours. The ⋯ collapses first. -->
       {#if !viewport.isPhone}
-        <button class="btn small" data-overflow="1" data-icon="plus" aria-expanded={paletteOpen} aria-haspopup="dialog" onclick={(e) => { anchorPop(e, 280); paletteOpen = !paletteOpen; }}>
+        <button class="btn small" data-overflow="1" data-icon="plus" aria-expanded={paletteOpen} aria-haspopup="dialog" onclick={(e) => { anchorPop(e, 280); runsOpen = false; paletteOpen = !paletteOpen; }}>
           <Icon name="plus" size={12} /> Node
         </button>
         <button class="btn small" data-overflow="2" data-icon="check" disabled={!dirty || savingGraph} title={dirty ? 'Save the canvas changes' : 'No unsaved changes'} onclick={save}>Save</button>
@@ -1449,7 +1448,7 @@
 
       <!-- Manual-run input editor (RunInputPanel). -->
       {#if runForm.open}
-        <RunInputPanel form={runForm} {running} onrun={() => void confirmRun()} />
+        <RunInputPanel form={runForm} {graph} wsId={ws.currentId ?? ''} {pickers} {running} onrun={() => void confirmRun()} />
       {/if}
 
       <!-- The run's approval gate (RunApprovals): resumed note, preview, Approve / Deny. -->
@@ -1467,9 +1466,8 @@
       {/if}
       <div class="canvas-wrap">
         <WorkflowCanvas
-          bind:graph
-          {types}
-          {runStates}
+          bind:graph {types} {runStates}
+          dbConnections={pickers.dbConnections.rows(ws.currentId ?? '') ?? []}
           invalidNodes={validationIssues.flatMap((i) => i.node_id ? [i.node_id] : [])}
           invalidEdges={validationIssues.flatMap((i) => i.edge_id ? [i.edge_id] : [])}
           {selectedId}
@@ -1660,7 +1658,8 @@
               <div class="logs">{#each selectedRun.logs as l}<div>{l}</div>{/each}</div>
             {/if}
             {#if selectedRun?.output !== undefined && selectedRun?.output !== null}
-              <pre class="out">{JSON.stringify(selectedRun.output, null, 2).slice(0, 1200)}</pre>
+              {@const outJson = JSON.stringify(selectedRun.output, null, 2)}
+              <pre class="out">{outJson.length > 1200 ? `${outJson.slice(0, 1200)}\n… (truncated — ${outJson.length.toLocaleString()} chars; open Steps above for full output)` : outJson}</pre>
             {/if}
           {:else if selectedEdge}
             <div class="insp-h">
@@ -1771,26 +1770,9 @@
     height: 100%;
     min-height: 0;
   }
-  .wf {
-    flex: 1;
-    display: flex;
-    min-height: 0;
-  }
-  /* The list pane (Workflows + Running); its width + the hairline come from
-     the shared PaneDivider beside it. */
-  .side {
-    width: 270px;
-    flex-shrink: 0;
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    background: var(--surface);
-    min-height: 0;
-    /* The list pane's minimum is 220px. Size queries hide nonessential run meta
-       before the row spills across the divider. */
-    container-type: inline-size;
-    container-name: wf-side;
-  }
+  .wf { flex: 1; display: flex; min-width: 0; min-height: 0; overflow: hidden; }
+  .side { width: 270px; flex-shrink: 0; position: relative; display: flex; flex-direction: column; background: var(--surface); min-height: 0; container-type: inline-size; container-name: wf-side; }
+  @media (min-width: 641px) and (max-width: 1024px) { .side:not(.phone) { max-width: min(36vw, 240px); } }
   /* Phone: the list IS the first screen (push navigation). */
   .side.phone {
     flex: 1;
@@ -2136,7 +2118,7 @@
   /* Header popovers anchored at the top of the editor pane (right = inline). */
   .palette.wf-pop {
     top: 6px;
-    left: auto;
+    inset-inline-start: auto;
     inset-inline-end: auto;
     max-height: min(320px, calc(100% - 12px));
   }

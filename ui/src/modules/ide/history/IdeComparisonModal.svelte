@@ -93,6 +93,7 @@
   let rightExists = $state(true);
   let leftLabel = $state('Before');
   let activeComparePath = $state('');
+  const diskStateByPath = new Map<string, { exists: boolean; disk: string | null }>();
 
   $effect(() => {
     filterMode = initialFilter;
@@ -234,6 +235,7 @@
 
   // 3. Load left/right comparison contents for the active mode & selection.
   $effect(() => {
+    void reloadSeq;
     const curMode = mode;
     const entry = selectedEntry;
     const ref = selectedRef;
@@ -261,6 +263,7 @@
           // An open tab's live buffer is "Current" (unsaved edits included), not the disk copy.
           rightText = openTabBuffer(activeComparePath) ?? rightDisk;
           rightExists = res.current_exists;
+          diskStateByPath.set(activeComparePath, { exists: rightExists, disk: rightDisk });
           const ts = new Date(res.entry.timestamp_ms).toLocaleTimeString();
           leftLabel = `Before · ${ts} (${res.entry.label || res.entry.event_kind})`;
           if (autoPicked) {
@@ -290,6 +293,7 @@
           rightText = res.rightText;
           rightDisk = res.rightText;
           rightExists = res.rightExists;
+          diskStateByPath.set(activeComparePath, { exists: rightExists, disk: rightDisk });
           leftLabel = curMode === 'git-branch' ? `Branch · ${ref}` : `Revision · ${ref.slice(0, 8)}`;
         })
         .catch((e: unknown) => {
@@ -316,6 +320,7 @@
         rightText = cur.content;
         rightDisk = cur.content;
         rightExists = cur.exists;
+        diskStateByPath.set(activeComparePath, { exists: rightExists, disk: rightDisk });
         leftLabel = curMode === 'file' && secondPath ? ideBasename(secondPath) : (sourceLabel ?? 'Clipboard');
       } catch (e) {
         if (!ctl.signal.aborted && !isAbortError(e)) detailError = loadErrorText(e);
@@ -326,14 +331,21 @@
     return () => ctl.abort();
   });
 
-  async function applyToCurrent(nextText: string, reason: string): Promise<void> {
-    const dest = activeComparePath || targetPath;
+  async function applyToCurrent(nextText: string, reason: string, destPath?: string): Promise<void> {
+    const dest = destPath || activeComparePath || targetPath;
     if (!dest) return;
-    const written = await writeCurrentAndSyncIde(dest, nextText, !rightExists, rightDisk);
+    const isCurrentView = dest === (activeComparePath || targetPath);
+    const snapshot = diskStateByPath.get(dest);
+    const existsBefore = snapshot ? snapshot.exists : (isCurrentView ? rightExists : true);
+    const diskBefore = snapshot ? snapshot.disk : (isCurrentView ? rightDisk : null);
+    const written = await writeCurrentAndSyncIde(dest, nextText, !existsBefore, diskBefore);
     if (written !== null) {
-      rightDisk = written;
-      rightText = nextText;
-      rightExists = true;
+      diskStateByPath.set(dest, { exists: true, disk: written });
+      if (dest === (activeComparePath || targetPath)) {
+        rightDisk = written;
+        rightText = nextText;
+        rightExists = true;
+      }
       if (reason !== 'Edited Current') toasts.success(reason, ideBasename(dest));
     }
   }
@@ -439,21 +451,23 @@
       {#if mode === 'local-history' && !selectedEntry}
         <EmptyState icon="clock" title="Select a snapshot" body="Pick any timestamped snapshot on the start pane to compare and revert individual hunks or the whole file." headingLevel={3} />
       {:else if detailError}
-        <LoadState what="comparison" error={detailError} empty={true} variant="panel" />
+        <LoadState what="comparison" error={detailError} empty={true} variant="panel" onretry={() => (reloadSeq += 1)} />
       {:else if detailLoading && !leftText && !rightText}
         <LoadState what="comparison" loading={true} variant="panel" />
       {:else}
-        <IdeCompareDiffPane
-          filePath={activeComparePath || targetPath}
-          {leftLabel}
-          rightLabel={`Current · ${ideBasename(activeComparePath || targetPath)}`}
-          {leftText}
-          {rightText}
-          {rightExists}
-          canEditRight={Boolean(activeComparePath || !isDir)}
-          onApplyRight={applyToCurrent}
-          unifiedOnly={layout.unifiedOnly}
-        />
+        {#key activeComparePath || targetPath}
+          <IdeCompareDiffPane
+            filePath={activeComparePath || targetPath}
+            {leftLabel}
+            rightLabel={`Current · ${ideBasename(activeComparePath || targetPath)}`}
+            {leftText}
+            {rightText}
+            {rightExists}
+            canEditRight={Boolean(activeComparePath || !isDir)}
+            onApplyRight={applyToCurrent}
+            unifiedOnly={layout.unifiedOnly}
+          />
+        {/key}
       {/if}
     </section>
     {/if}
@@ -492,7 +506,7 @@
     display: flex; align-items: center; gap: 8px; flex-shrink: 0;
     min-block-size: 44px; padding-inline: 4px 8px; border-block-end: 1px solid var(--border);
   }
-  .icm-back, .icm-step-act { min-block-size: 36px; flex-shrink: 0; }
+  .icm-back, .icm-step-act { min-block-size: var(--hit-min); flex-shrink: 0; }
   .icm-step-what { flex: 1; min-inline-size: 0; font-size: var(--fs-xs); color: var(--text-dim); }
   /* The sheet's ✕ is a 24 px glyph; on this phone sheet it is the only way out,
      so it gets a full 44 px target. */

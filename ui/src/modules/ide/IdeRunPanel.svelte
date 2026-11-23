@@ -6,6 +6,8 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { router } from '../../lib/router.svelte';
   import { formatSeconds } from '../../lib/metric-format';
   import { loadPaneWidth } from '../../lib/paneResizer';
   import type { BadgeTone } from '../../lib/status';
@@ -18,6 +20,14 @@
   import { ideAgent } from './store/ideAgentController.svelte';
   import IdeConsoleView, { type ConsoleLineInput } from './debug/IdeConsoleView.svelte';
   import { stripAnsiCodes } from './debug/ideLogParser';
+  import {
+    browserPresetForDevice,
+    buildBrowserPreviewHash,
+    buildDevBrowserRoute,
+    detectDevServerUrls,
+  } from './devices/ideDevServerDetect';
+  import { ideDevices } from './devices/ideDevicesState.svelte';
+  import { planFailedTestDebug, type FailedTestDebugPlan } from './debug/ideFailedTestDebug';
   import { ideLayout } from './shell/ideLayout.svelte';
   import { runOutputSeqBase } from './store/ideDebugSnapshotSync';
 
@@ -28,6 +38,7 @@
   let query = $state('');
   let collapsedSuites = $state<Record<string, boolean>>({});
   let selectedTestKey = $state<string | null>(null);
+  let debuggingTestKey = $state<string | null>(null);
   let showTestsPane = $state(true);
   let treeW = $state(loadPaneWidth(LS_RUN_TREE_W, 320, 200, 620));
 
@@ -109,7 +120,48 @@
     return out;
   });
 
-  const cleanLines = $derived((shownRun?.output ?? []).map((line) => stripAnsiCodes(line)));
+  const detectedServers = $derived(detectDevServerUrls(shownRun?.output ?? []));
+  const httpServers = $derived(
+    detectedServers.filter((s) => s.scheme === 'http' || s.scheme === 'https'),
+  );
+
+  function openServerOnSimulator(url: string): void {
+    const dev = ideDevices.bootedDevices[0] ?? ideDevices.selectedDevice;
+    if (dev && dev.state === 'booted') {
+      void ideDevices.openUrl(dev, url);
+    } else {
+      ide.openBottomTab('devices');
+    }
+  }
+
+  function openServerInBrowser(url: string): void {
+    const dev = ideDevices.selectedDevice;
+    const target =
+      dev && dev.state === 'booted'
+        ? (`simulator:${dev.id}` as const)
+        : browserPresetForDevice(dev);
+    window.location.hash = buildBrowserPreviewHash({ url, device: target });
+  }
+
+  function openDevUrlInBrowser(e: MouseEvent): void {
+    if (httpServers.length === 0) return;
+    if (httpServers.length === 1) {
+      const route = buildDevBrowserRoute(httpServers[0].url);
+      if (route) router.go(route);
+      return;
+    }
+    ctxMenu.show(
+      e,
+      httpServers.map((s) => ({
+        label: s.url,
+        icon: 'globe',
+        action: () => {
+          const route = buildDevBrowserRoute(s.url);
+          if (route) router.go(route);
+        },
+      })),
+    );
+  }
   // Line `i` is sequence `base + i` (the daemon counts every line ever written),
   // so Clear and row keys survive the 2,000-line window sliding.
   const consoleLines = $derived.by((): readonly ConsoleLineInput[] => {
@@ -129,6 +181,20 @@
 
   function toggleSuite(suite: string): void {
     collapsedSuites = { ...collapsedSuites, [suite]: !collapsedSuites[suite] };
+  }
+
+  async function debugFailedTest(plan: FailedTestDebugPlan, key: string): Promise<void> {
+    if (debuggingTestKey !== null || ide.debugLoading) return;
+    debuggingTestKey = key;
+    try {
+      if (plan.kind === 'gutter') {
+        ide.runFromGutter(plan.item, 'debug');
+      } else {
+        await ide.startDebug({ language: plan.language, launch: plan.launch });
+      }
+    } finally {
+      debuggingTestKey = null;
+    }
   }
 </script>
 
@@ -232,6 +298,51 @@
       </button>
     </header>
 
+    {#if detectedServers.length > 0}
+      {@const primarySrv = detectedServers[0]}
+      <div class="run-devsrv-bar" role="region" aria-label="Detected local dev server" data-testid="ide-run-devserver-bar">
+        <Icon name="globe" size={12} />
+        <span class="run-devsrv-url mono ellipsis" dir="ltr">{primarySrv.url}</span>
+        {#if httpServers.length > 0}
+          <button
+            type="button"
+            class="btn small ghost run-compact-btn"
+            aria-haspopup={httpServers.length > 1 ? 'menu' : undefined}
+            title={httpServers.length === 1
+              ? `Open ${httpServers[0].url} in Otto Browser`
+              : `Open a detected local server (${httpServers.length}) in Otto Browser`}
+            onclick={openDevUrlInBrowser}
+            data-testid="ide-run-open-browser"
+          >
+            <Icon name="globe" size={12} />
+            <span>Open in Browser</span>
+          </button>
+        {/if}
+        <button
+          type="button"
+          class="btn small ghost run-compact-btn"
+          onclick={() => openServerOnSimulator(primarySrv.url)}
+          title={ideDevices.bootedDevices[0]
+            ? `Open ${primarySrv.url} on ${ideDevices.bootedDevices[0].name}`
+            : 'Open Mobile Devices tool window'}
+          data-testid="ide-run-open-sim"
+        >
+          <Icon name="phone" size={12} />
+          <span>{ideDevices.bootedDevices[0] ? `Open on ${ideDevices.bootedDevices[0].name}` : 'Open on Simulator'}</span>
+        </button>
+        <button
+          type="button"
+          class="btn small ghost run-compact-btn"
+          onclick={() => openServerInBrowser(primarySrv.url)}
+          title={`Preview ${primarySrv.url} in Otto Browser mobile emulator`}
+          data-testid="ide-run-open-browser-emu"
+        >
+          <Icon name="compass" size={12} />
+          <span>Browser Emulator</span>
+        </button>
+      </div>
+    {/if}
+
     <div class="run-flex">
       {#if tests.length > 0 && showTestsPane}
         <section
@@ -302,12 +413,42 @@
                           {/if}
                         </button>
                         {#if t.status === 'failed'}
+                          {@const debugPlan = ide.hasTarget && !ide.collabIsGuest
+                            ? planFailedTestDebug({
+                                test: t,
+                                runner: shownRun.runner,
+                                targetRoot: ide.target.root,
+                                activePath: ide.activePath,
+                                activeLanguage: ide.activeTab?.language,
+                                gutterByPath: ide.gutterByPath,
+                                resolvePath: (p) => ide.resolvePath(p),
+                              })
+                            : null}
+                          {#if debugPlan}
+                            <button
+                              type="button"
+                              class="btn small ghost run-debug-btn"
+                              aria-label="Debug {t.name}"
+                              title={ide.debugLoading || debuggingTestKey !== null ? 'Starting debug session…' : `Debug ${t.name}`}
+                              disabled={ide.debugLoading || debuggingTestKey !== null}
+                              onclick={() => void debugFailedTest(debugPlan, k)}
+                              data-testid="ide-test-debug-btn"
+                            >
+                              <Icon name="bug" size={12} />
+                              <span>{debuggingTestKey === k ? 'Starting…' : 'Debug'}</span>
+                            </button>
+                          {/if}
                           <button
                             type="button"
                             class="btn small ghost run-fix-btn"
                             aria-label="Fix with Agent"
                             title="Fix with Agent"
-                            onclick={() => ideAgent.attachTestFailure(t, cleanLines, { openPanel: true })}
+                            onclick={() =>
+                              ideAgent.attachTestFailure(
+                                t,
+                                (shownRun?.output ?? []).map((line) => stripAnsiCodes(line)),
+                                { openPanel: true },
+                              )}
                             data-testid="ide-test-fix-agent"
                           >
                             <Icon name="assistant" size={12} />
@@ -368,6 +509,12 @@
   .run-seg button { padding-block: 0; padding-inline: 8px; font-size: var(--fs-xs); }
   .run-filter { block-size: 22px; inline-size: 148px; font-size: var(--fs-xs); flex-shrink: 0; }
   .run-compact-btn { block-size: 22px; padding-block: 0; flex-shrink: 0; }
+  .run-devsrv-bar {
+    display: flex; align-items: center; gap: 6px; padding-block: 4px; padding-inline: 8px;
+    border-block-end: 1px solid var(--border); background: var(--surface-2); flex-shrink: 0;
+    overflow-x: auto; font-size: var(--fs-xs); min-inline-size: 0;
+  }
+  .run-devsrv-url { color: var(--accent-text); font-weight: 500; flex-shrink: 1; min-inline-size: 0; max-inline-size: 240px; }
   .run-flex { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; overflow: hidden; }
   .run-tree { flex-shrink: 0; min-block-size: 0; min-inline-size: 200px; overflow-y: auto; border-inline-end: 1px solid var(--border); }
   .run-filter-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 20px 12px; font-size: var(--fs-xs); }
@@ -381,6 +528,7 @@
   .run-test-head.is-selected { background: var(--accent-soft); }
   .run-test-row { display: flex; align-items: center; gap: 6px; flex: 1; min-inline-size: 0; padding-block: 4px; padding-inline: 12px 6px; border: 0; background: transparent; color: var(--text); font-size: var(--fs-xs); text-align: start; cursor: pointer; }
   .run-fix-btn { flex-shrink: 0; color: var(--accent-text); }
+  .run-debug-btn { flex-shrink: 0; }
   .run-icon { display: inline-flex; align-items: center; flex-shrink: 0; }
   .run-icon.is-ok, .run-test-status.is-ok { color: var(--success); }
   .run-icon.is-bad, .run-test-status.is-bad { color: var(--danger); }

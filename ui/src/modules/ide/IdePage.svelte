@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
+  import { announceShown } from '../../lib/announce.svelte';
   import { registry } from '../../lib/commands.svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -7,6 +8,7 @@
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import Modal from '../../lib/components/Modal.svelte';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { keyContext } from '../../lib/keys';
@@ -97,6 +99,22 @@
     const next = explorerRoom.step(explorerVisible, { width: ideLayout.width, treeW, sideW, sideOpen: sideW > 0 });
     if (next.hid) hintExplorerYield(ide.keymapPreset);
     if (next.visible !== explorerVisible) explorerVisible = next.visible;
+  });
+  // Narrow tablets (iPad portrait 834 px, Android tablet 712 px) stay in workbench mode
+  // so tabs/dock remain desktop-like, but collapse the explorer rail when a file opens
+  // so the code editor gets full breathing room.
+  let tabletCollapsedOnce = false;
+  $effect(() => {
+    const w = ideLayout.width;
+    const active = ide.activePath;
+    if (!stack && w > 0 && w < 900 && active && !tabletCollapsedOnce) {
+      tabletCollapsedOnce = true;
+      untrack(() => {
+        if (explorerVisible) explorerVisible = false;
+      });
+    } else if (w >= 960) {
+      tabletCollapsedOnce = false;
+    }
   });
   const agentShown = $derived(!ide.collabIsGuest && (stack ? pane === 'agent' : ideAgent.panelOpen));
   // Typing (code or agent composer) with the on-screen keyboard up: the page header
@@ -391,6 +409,7 @@
 
   // Preserve CodeMirror `EditorState` & ⌘Z undo stack across screen switches.
   onDestroy(() => {
+    idePhoneChrome.typing = false;
     ideWorkspacePort.setAgentDockOpen(false);
     ide.suspendOnPageLeave();
     ideAgent.dispose();
@@ -486,9 +505,19 @@
       </div>
     </div>
   {:else if ide.collabIsGuest && ide.collabError}
-    <div class="ide-collab-banner" role="alert">
+    <div class="ide-collab-banner" use:announceShown={{ text: ide.collabError, assertive: true }} data-testid="ide-collab-ended-banner">
       <Badge tone="warn" label="Session ended" />
       <span class="collab-title">{ide.collabError}</span>
+      <div class="collab-actions">
+        <button
+          type="button"
+          class="btn small"
+          onclick={() => { ide.leaveCollabRoom(); ide.attachDefaultWorkspace(); }}
+          data-testid="ide-collab-leave-ended"
+        >
+          Leave session
+        </button>
+      </div>
     </div>
   {/if}
 
@@ -629,6 +658,13 @@
   {#if compareTarget}
     <LazyMount lazy={IdeComparisonModalLazy} what="comparison tool" quiet props={{ ...compareTarget, onclose: () => (compareTarget = null) }} onerror={() => (compareTarget = null)} />
   {/if}
+  {#if ide.buildToolOpen && stack && !ide.collabIsGuest}
+    <Modal title="Build & Mobile Tools" width={540} onclose={() => ide.toggleBuildTool(false)}>
+      <div class="ide-bt-modal-body">
+        <LazyMount lazy={IdeBuildToolWindowLazy} what="build tool window" variant="panel" />
+      </div>
+    </Modal>
+  {/if}
 </div>
 
 <style>
@@ -654,6 +690,7 @@
   /* A short stacked page keeps its rows for code, unless the person asked for the toolbar (tab ▾). */
   .ide-page.short-stack :global(.ide-subbar:not(.asked)) { display: none; }
   .ide-page.typing :global(.page-header-bar), .ide-page.typing :global(.ide-subbar) { display: none; }
+  .ide-bt-modal-body { min-block-size: 360px; max-block-size: 70dvh; display: flex; flex-direction: column; overflow: hidden; }
   @media (max-width: 1024px) {
     .ide-workbench:not(.stack) > .ide-rail-wrap { max-inline-size: 32%; }
     .ide-bt-wrap, .ide-workbench:not(.stack) > .ide-agent-wrap { max-inline-size: 38%; }

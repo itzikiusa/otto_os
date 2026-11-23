@@ -6,6 +6,7 @@
 mod argv_guard_tests;
 pub mod branch_sync;
 pub mod causal_diff;
+mod clone;
 pub mod collections;
 #[cfg(test)]
 mod config_hardening_tests;
@@ -26,6 +27,7 @@ pub mod pr_checks;
 pub mod pr_reactions;
 pub mod pr_reviewers;
 mod pr_ws;
+pub mod preflight;
 pub mod providers;
 pub mod push;
 pub mod recovery;

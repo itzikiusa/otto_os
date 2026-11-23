@@ -306,9 +306,7 @@
   }
 
   let destroyed = false;
-  onDestroy(() => {
-    destroyed = true;
-  });
+  onDestroy(() => { destroyed = true; dl?.ctrl.abort(); searchCtrl?.abort(); });
 
   async function downloadToDir(o: S3Object, dir: string): Promise<void> {
     pickDirFor = null;
@@ -426,12 +424,10 @@
     if (!value) return;
     try {
       const r = await awsApi.s3Presign(account.id, bucket, o.key, Number(value));
-      await copyTextOrThrow(r.url);
-      toasts.success('Presigned link copied', `Expires ${fmtDate(r.expires_at)}`);
+      try { await copyTextOrThrow(r.url); toasts.success('Presigned link copied', `Expires ${fmtDate(r.expires_at)}`); }
+      catch { toasts.warn('Presigned link created — couldn’t copy', `Select the URL and copy it manually: ${r.url}`); }
       if (r.warning) toasts.warn('Link may expire early', r.warning);
-    } catch (e) {
-      toasts.error('Couldn’t create the link', awsErrorText(loadErrorText(e)));
-    }
+    } catch (e) { toasts.error('Couldn’t create the link', awsErrorText(loadErrorText(e))); }
   }
 
   async function deleteObject(o: S3Object): Promise<void> {
@@ -671,7 +667,7 @@
           {#if search?.loading}
             <p class="load-note">Searching the bucket for keys starting with “{prefix}{objFilter.trim()}”…</p>
           {:else if search?.error}
-            <p class="err">{awsErrorText(search.error)} <button class="btn small" onclick={() => void runSearch(objFilter.trim())}>Retry search</button></p>
+            <LoadState variant="compact" what="search results" error={awsErrorText(search.error)} empty onretry={() => void runSearch(objFilter.trim())} />
           {:else}
             <p class="dim">
               {#if searchedThis}
@@ -694,8 +690,7 @@
             {#if search?.loading && searchedThis}
               <span class="dim">Searching the bucket for keys starting with “{prefix}{objFilter.trim()}”…</span>
             {:else if search?.error && searchedThis}
-              <span class="err">{awsErrorText(search.error)}</span>
-              <button class="btn small" onclick={() => void runSearch(objFilter.trim())}>Retry search</button>
+              <LoadState variant="compact" what="search results" error={awsErrorText(search.error)} empty onretry={() => void runSearch(objFilter.trim())} />
             {:else if searchedThis}
               <span class="dim">Includes bucket matches for keys starting with “{prefix}{objFilter.trim()}” (case-sensitive).</span>
               {#if search?.next}<button class="btn small" onclick={() => void runSearch(objFilter.trim(), true)}>More matches</button>{/if}
@@ -876,10 +871,6 @@
   }
   .dim {
     color: var(--text-dim);
-  }
-  .err {
-    color: var(--danger);
-    font-size: var(--fs-m);
   }
   .crumbs {
     display: flex;

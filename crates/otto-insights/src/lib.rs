@@ -1202,7 +1202,10 @@ pub async fn run_insights<C: InsightsCtx>(
     };
     tokio::spawn(async move {
         if !host.submit_prompt(&sid, &prompt).await {
-            warn!(session = %sid, "insights: session TUI never became ready");
+            warn!(session = %sid, "insights: session TUI never became ready — archiving immediately");
+            ACTIVE_RUNS.lock().await.remove_run(&dir_for_watch, &sid);
+            let _ = host.manager().archive(&sid).await;
+            return;
         }
         // Once the run is over — report landed, session exited, stalled idle,
         // or the hard cap (S4-19b: never a fixed 15 min while it still
@@ -1288,7 +1291,11 @@ pub fn routes<C: InsightsCtx>() -> Router<C> {
 
 /// `GET /insights/runs/active` — runs still generating (oldest first), so the
 /// page restores its progress banner after being left and re-opened.
-async fn get_active_runs<C: InsightsCtx>(State(ctx): State<C>) -> ApiResult<Json<Vec<ActiveRun>>> {
+async fn get_active_runs<C: InsightsCtx>(
+    State(ctx): State<C>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<Vec<ActiveRun>>> {
+    require_root(&user)?;
     let dir = insights_dir(&ctx);
     Ok(Json(live_runs(&ctx, &dir).await))
 }
@@ -1320,7 +1327,11 @@ async fn cancel_run<C: InsightsCtx>(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
-async fn get_config<C: InsightsCtx>(State(ctx): State<C>) -> ApiResult<Json<InsightsConfigView>> {
+async fn get_config<C: InsightsCtx>(
+    State(ctx): State<C>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<InsightsConfigView>> {
+    require_root(&user)?;
     let dir = insights_dir(&ctx);
     // std::fs off the async workers, like every other insights file read.
     let cfg = tokio::task::spawn_blocking(move || InsightsConfigView {
@@ -1358,8 +1369,10 @@ async fn put_config<C: InsightsCtx>(
 
 async fn get_reports<C: InsightsCtx>(
     State(ctx): State<C>,
+    CurrentUser(user): CurrentUser,
     Query(q): Query<ReportsQuery>,
 ) -> ApiResult<Json<Vec<ReportView>>> {
+    require_root(&user)?;
     let dir = insights_dir(&ctx);
     // ~300 reads + ~900 stats of synchronous std::fs: off the async runtime
     // (the Insights page polls this every 3 s during a run — backlog B6 / SE-17).
@@ -1382,8 +1395,10 @@ struct StatusQuery {
 
 async fn get_report_status<C: InsightsCtx>(
     State(ctx): State<C>,
+    CurrentUser(user): CurrentUser,
     Query(q): Query<StatusQuery>,
 ) -> ApiResult<Json<ReportStatus>> {
+    require_root(&user)?;
     let dir = insights_dir(&ctx);
     let status = ctx::blocking(move || report_status(&dir, &q.key, q.summary))
         .await
@@ -1397,25 +1412,72 @@ struct ReportQuery {
     path: String,
 }
 
-/// Serve a report's HTML by absolute path, gated to the insights dir so an
-/// authed caller can never read arbitrary files off disk. The UI loads this
-/// (with the bearer token) into the report iframe.
+/// Resolve and validate `requested` against indexed HTML report artifacts under
+/// `dir`. Only `<dir>/{daily,weekly,monthly}/report-<word>-<YYYYMMDD>_<YYYYMMDD>.html`
+/// regular files are permitted — never `config.json`, `index.json`,
+/// `schedule-state.json`, `collectors/*.py`, metrics/summary files, or arbitrary
+/// files/symlinks.
+fn resolve_report_html_path(dir: &Path, requested: &str) -> Result<PathBuf, otto_core::Error> {
+    let base = std::fs::canonicalize(dir)
+        .map_err(|e| otto_core::Error::Internal(format!("insights dir: {e}")))?;
+    let req = std::fs::canonicalize(Path::new(requested))
+        .map_err(|_| otto_core::Error::NotFound("report".into()))?;
+    if !req.starts_with(&base) {
+        return Err(otto_core::Error::Forbidden(
+            "path is outside the insights directory".into(),
+        ));
+    }
+    let rel = req.strip_prefix(&base).map_err(|_| {
+        otto_core::Error::Forbidden("path is outside the insights directory".into())
+    })?;
+    let mut comps = rel.components();
+    let (
+        Some(std::path::Component::Normal(word_os)),
+        Some(std::path::Component::Normal(file_os)),
+        None,
+    ) = (comps.next(), comps.next(), comps.next())
+    else {
+        return Err(otto_core::Error::Forbidden(
+            "path is not an indexed insights report".into(),
+        ));
+    };
+    let (Some(word), Some(filename)) = (word_os.to_str(), file_os.to_str()) else {
+        return Err(otto_core::Error::Forbidden(
+            "path is not an indexed insights report".into(),
+        ));
+    };
+    if !matches!(word, "daily" | "weekly" | "monthly") {
+        return Err(otto_core::Error::Forbidden(
+            "path is not an indexed insights report".into(),
+        ));
+    }
+    let Some((start, end)) = parse_period_from_filename(filename, word) else {
+        return Err(otto_core::Error::Forbidden(
+            "path is not an indexed insights report".into(),
+        ));
+    };
+    let expected = format!("report-{word}-{start}_{end}.html");
+    if filename != expected || !req.is_file() {
+        return Err(otto_core::Error::Forbidden(
+            "path is not an indexed insights report".into(),
+        ));
+    }
+    Ok(req)
+}
+
+/// Serve an indexed report's HTML by path, gated to root and strictly limited
+/// to indexed `<insights_dir>/<word>/report-<word>-<YYYYMMDD>_<YYYYMMDD>.html`
+/// files. The UI loads this (with the bearer token) into the report iframe.
 async fn get_report<C: InsightsCtx>(
     State(ctx): State<C>,
+    CurrentUser(user): CurrentUser,
     Query(q): Query<ReportQuery>,
 ) -> ApiResult<Html<String>> {
-    // Canonicalize + read on the blocking pool, not a runtime worker.
+    require_root(&user)?;
+    // Canonicalize + validate + read on the blocking pool, not a runtime worker.
     let dir = insights_dir(&ctx);
     let html = tokio::task::spawn_blocking(move || -> Result<String, ApiError> {
-        let base = std::fs::canonicalize(dir)
-            .map_err(|e| ApiError(otto_core::Error::Internal(format!("insights dir: {e}"))))?;
-        let req = std::fs::canonicalize(Path::new(&q.path))
-            .map_err(|_| ApiError(otto_core::Error::NotFound("report".into())))?;
-        if !req.starts_with(&base) {
-            return Err(ApiError(otto_core::Error::Forbidden(
-                "path is outside the insights directory".into(),
-            )));
-        }
+        let req = resolve_report_html_path(&dir, &q.path).map_err(ApiError)?;
         std::fs::read_to_string(&req)
             .map_err(|_| ApiError(otto_core::Error::NotFound("report".into())))
     })
@@ -1594,6 +1656,27 @@ impl Drop for InsightsSchedulerHandle {
     }
 }
 
+/// RAII guard for the insights scheduler's single-slot `in_flight` flag.
+/// Clears the flag on drop — including when the spawned task panics — so a
+/// crashed run can never wedge scheduled catch-up runs until a restart.
+struct InFlightGuard(Arc<std::sync::atomic::AtomicBool>);
+
+impl InFlightGuard {
+    /// Atomically claim the single in-flight slot; returns `None` if busy.
+    fn claim(flag: &Arc<std::sync::atomic::AtomicBool>) -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| Self(Arc::clone(flag)))
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// The opt-in, catch-up insights scheduler. Ticks ~hourly; for each ENABLED
 /// cadence whose currently-due period has no report, it runs the skill (one run
 /// at a time via an in-flight set).
@@ -1673,42 +1756,49 @@ impl<C: InsightsCtx> InsightsScheduler<C> {
         let Some((kind, start, end)) = next_scheduled(&dir, &cfg, today, busy, attempts) else {
             return;
         };
+        let Some(flight_guard) = InFlightGuard::claim(in_flight) else {
+            return;
+        };
         let key = period_key(kind, start, end);
-        in_flight.store(true, Ordering::SeqCst);
         let attempt_no = attempts.count(&key);
 
         let ctx = self.ctx.clone();
-        let flight = Arc::clone(in_flight);
         let word = kind.word();
         info!(kind = word, "insights: scheduled catch-up run is due");
         tokio::spawn(async move {
             let mut failure: Option<String> = None;
-            // `today` (local) is both the due check's day and the
-            // collector's `--as-of`, so the run's key is the due key.
-            let session_id = match run_insights(&ctx, kind, 1, today, RunMode::Scheduled).await {
-                Ok(Some(id)) => Some(id),
-                Ok(None) => {
-                    // Skill not installed / no host — already logged inside.
-                    failure = Some(
-                                "the run couldn’t start: the insights skill is missing or no workspace can host it"
-                                    .into(),
-                            );
-                    None
+            let session_id = {
+                // The guard clears `in_flight` on drop — including on panic —
+                // while holding the slot until the headless run archives.
+                let _guard = flight_guard;
+                // `today` (local) is both the due check's day and the
+                // collector's `--as-of`, so the run's key is the due key.
+                let session_id = match run_insights(&ctx, kind, 1, today, RunMode::Scheduled).await
+                {
+                    Ok(Some(id)) => Some(id),
+                    Ok(None) => {
+                        // Skill not installed / no host — already logged inside.
+                        failure = Some(
+                            "the run couldn’t start: the insights skill is missing or no workspace can host it"
+                                .into(),
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        warn!(kind = word, "insights: scheduled run failed: {e}");
+                        failure = Some(format!("the run couldn’t start: {e}"));
+                        None
+                    }
+                };
+                // The session runs headlessly; hold the in-flight flag until
+                // its watcher archives it (S4-19b: liveness, not a fixed
+                // window), bounded by the cap, so no other scheduled run
+                // starts beside it.
+                if let Some(id) = session_id.as_ref() {
+                    wait_run_archived(&ctx, id).await;
                 }
-                Err(e) => {
-                    warn!(kind = word, "insights: scheduled run failed: {e}");
-                    failure = Some(format!("the run couldn’t start: {e}"));
-                    None
-                }
+                session_id
             };
-            // The session runs headlessly; hold the in-flight flag until
-            // its watcher archives it (S4-19b: liveness, not a fixed
-            // window), bounded by the cap, so no other scheduled run
-            // starts beside it.
-            if let Some(id) = session_id.as_ref() {
-                wait_run_archived(&ctx, id).await;
-            }
-            flight.store(false, Ordering::SeqCst);
 
             // After the grace window, check whether the period's report landed.
             // If so, emit `InsightReady` so the channel notifier + UI can react
@@ -2539,5 +2629,96 @@ mod tests {
         );
         // Junk file.
         assert_eq!(parse_period_from_filename("index.json", "weekly"), None);
+    }
+
+    #[tokio::test]
+    async fn in_flight_guard_releases_flag_on_drop_and_panic() {
+        use std::sync::atomic::Ordering;
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let guard = InFlightGuard::claim(&flag).expect("initial claim succeeds");
+        assert!(flag.load(Ordering::SeqCst));
+        assert!(
+            InFlightGuard::claim(&flag).is_none(),
+            "second claim must fail while held"
+        );
+        drop(guard);
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "normal drop must clear in_flight"
+        );
+
+        let guard = InFlightGuard::claim(&flag).expect("re-claim after drop succeeds");
+        let handle = tokio::spawn(async move {
+            let _guard = guard;
+            panic!("simulated insights scheduled run panic");
+        });
+        assert!(handle.await.is_err());
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "panic in spawned task must clear in_flight via Drop"
+        );
+        assert!(InFlightGuard::claim(&flag).is_some());
+    }
+
+    #[test]
+    fn resolve_report_html_path_only_allows_indexed_report_html_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let daily = dir.join("daily");
+        std::fs::create_dir_all(&daily).unwrap();
+        let report = daily.join("report-daily-20260617_20260617.html");
+        let metrics = daily.join("metrics-daily-20260617_20260617.json");
+        let summary = daily.join("summary-daily-20260617_20260617.md");
+        let arbitrary = daily.join("evil.html");
+        let config = dir.join("config.json");
+        let index = dir.join("index.json");
+        for (p, body) in [
+            (&report, "<html>ok</html>"),
+            (&metrics, "{}"),
+            (&summary, "# sum"),
+            (&arbitrary, "<html>bad</html>"),
+            (&config, "{}"),
+            (&index, "{}"),
+        ] {
+            std::fs::write(p, body).unwrap();
+        }
+
+        // Valid indexed report HTML passes.
+        let resolved = resolve_report_html_path(dir, &report.to_string_lossy()).unwrap();
+        assert_eq!(resolved, std::fs::canonicalize(&report).unwrap());
+
+        // Non-report files inside insights_dir are rejected with Forbidden.
+        for bad in [&metrics, &summary, &arbitrary, &config, &index] {
+            let err = resolve_report_html_path(dir, &bad.to_string_lossy()).unwrap_err();
+            assert!(
+                matches!(err, otto_core::Error::Forbidden(_)),
+                "expected Forbidden for {}, got {err:?}",
+                bad.display()
+            );
+        }
+
+        // Outside file is rejected with Forbidden.
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        let err = resolve_report_html_path(dir, &outside.path().to_string_lossy()).unwrap_err();
+        assert!(matches!(err, otto_core::Error::Forbidden(_)));
+    }
+
+    #[test]
+    fn require_root_rejects_non_root_and_accepts_root() {
+        let now = Utc::now();
+        let non_root = otto_core::domain::User {
+            id: "u1".into(),
+            username: "user1".into(),
+            display_name: "U".into(),
+            is_root: false,
+            disabled: false,
+            created_at: now,
+        };
+        let root = otto_core::domain::User {
+            is_root: true,
+            ..non_root.clone()
+        };
+        assert!(require_root(&non_root).is_err());
+        assert!(require_root(&root).is_ok());
     }
 }

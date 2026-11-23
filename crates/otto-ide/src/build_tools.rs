@@ -5,6 +5,8 @@
 
 #[path = "build_tools/gradle.rs"]
 mod gradle;
+#[path = "build_tools/mobile.rs"]
+pub(crate) mod mobile;
 
 use std::collections::HashSet;
 use std::fs;
@@ -168,11 +170,19 @@ pub fn build_tools_model(
         }
     }
 
+    let mobile = mobile::scan_mobile_roots(&canon_roots, home.as_deref(), is_root_user);
+
     IdeBuildToolsModelResp {
         has_maven,
         has_gradle,
+        has_xcode: mobile.has_xcode,
+        has_android: mobile.has_android,
+        has_flutter: mobile.has_flutter,
+        has_react_native: mobile.has_react_native,
+        has_capacitor: mobile.has_capacitor,
         profiles,
         projects,
+        mobile_projects: mobile.projects,
     }
 }
 

@@ -368,6 +368,26 @@ pub async fn acquire_slot(
     }
 }
 
+/// Sleep `delay` between staggered reviewer launches, returning `false`
+/// immediately if `cancel` is tripped so a cancelled review stops spawning.
+pub async fn stagger_wait(
+    delay: std::time::Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + delay;
+    let slice = std::time::Duration::from_millis(50);
+    loop {
+        if cancel.is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst)) {
+            return false;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return true;
+        }
+        tokio::time::sleep((deadline - now).min(slice)).await;
+    }
+}
+
 /// Only prose under docs/ has a safe deterministic scope. Agent instructions,
 /// executable examples and root manifests always require repository assessment.
 pub fn documentation_plan(diff: &str, head: &str) -> Option<ReviewScopePlan> {
@@ -988,5 +1008,26 @@ mod tests {
         assert_eq!(slots.available_permits(), 0);
         drop(active);
         assert_eq!(slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn stagger_wait_exits_promptly_when_cancelled() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let c = Arc::clone(&cancel);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            c.store(true, Ordering::SeqCst);
+        });
+        let proceeded = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            stagger_wait(std::time::Duration::from_secs(10), Some(&cancel)),
+        )
+        .await
+        .expect("stagger wait must abort on cancel");
+        assert!(!proceeded);
     }
 }

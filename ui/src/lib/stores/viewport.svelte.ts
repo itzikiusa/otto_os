@@ -47,6 +47,13 @@ class ViewportStore {
   /** Short touch screen (phone landscape). Only the shell chrome follows it
    *  (`navDrawer`); module layouts keep their width-based `mode`. */
   short: boolean = $state(computeShort());
+  /** Tablet-only (641-1024px): user's explicit fold/unfold choice between the
+   *  220px Navigator and 44px Rail. null = follow the page default. */
+  tabletNavFolded: boolean | null = $state(null);
+
+  toggleTabletRail(expanded?: boolean): void {
+    this.tabletNavFolded = expanded !== undefined ? !expanded : !(this.tabletNavFolded ?? false);
+  }
 
   // Hold references so the listeners can be (re)attached idempotently. Two
   // queries cover the three buckets: phone (≤640) and tablet (≤1024). When

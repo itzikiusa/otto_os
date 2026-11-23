@@ -43,4 +43,10 @@
   .as-btn:hover {
     filter: brightness(0.97);
   }
+  @media (pointer: coarse) {
+    .as-btn {
+      min-block-size: 40px;
+      padding-inline: 12px;
+    }
+  }
 </style>

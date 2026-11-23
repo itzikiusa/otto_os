@@ -1,7 +1,9 @@
 <script lang="ts">
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { toastError } from '../../lib/toastError';
-  import { api, baseUrl } from '../../lib/api/client';
+  import { loadErrorText } from '../../lib/loadError';
+  import { api, ApiError, baseUrl } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import { COPY_FAILED_BODY, copyTextOrThrow } from '../../lib/clipboard';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -43,7 +45,9 @@
   });
 
   let networkOpen = $state(false);
-  let networkError = $state(false);
+  let networkLoading = $state(true);
+  let networkForbidden = $state(false);
+  let networkError = $state<string | null>(null);
   let netEnabled = $state(false);
   let netPort = $state(7701);
   let netPortTouched = $state(false);
@@ -60,7 +64,9 @@
   }
 
   async function loadNetwork(): Promise<void> {
-    networkError = false;
+    networkLoading = true;
+    networkForbidden = false;
+    networkError = null;
     try {
       const settings = await api.get<Record<string, unknown>>('/settings');
       const listener = settings['network_listener'] as
@@ -73,8 +79,14 @@
       } else if (!netPortTouched) {
         netPort = loopbackPort + 1;
       }
-    } catch {
-      networkError = true;
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 403) {
+        networkForbidden = true;
+      } else {
+        networkError = loadErrorText(e);
+      }
+    } finally {
+      networkLoading = false;
     }
   }
 
@@ -94,7 +106,7 @@
       !netEnabled &&
       !(await confirmer.ask(
         `The daemon will also listen on 0.0.0.0:${netPort} (TLS, self-signed), so any machine that can reach this Mac on that port can try to connect. Every call still needs a valid access token. Takes effect after a daemon restart.`,
-        { title: 'Allow network access?', confirmLabel: 'Allow network access' },
+        { title: 'Allow network access?', confirmLabel: 'Allow network access', danger: true },
       ))
     ) {
       input.checked = false;
@@ -161,42 +173,52 @@
   </button>
   {#if networkOpen}
     <div class="network">
-      {#if networkError}
+      {#if networkForbidden}
         <p class="muted small">Network settings need settings:admin.</p>
       {:else}
-        <label class="netrow">
-          <input
-            type="checkbox"
-            checked={netEnabled}
-            disabled={netBusy || !isMcpAdmin || (!netEnabled && portConflict)}
-            onchange={(event) => void toggleNetwork(event.currentTarget)}
-          />
-          <div class="t-meta">
-            <span class="t-name">
-              Allow network access (TLS) on port
-              <input
-                class="port"
-                type="number"
-                min="1"
-                max="65535"
-                bind:value={netPort}
-                oninput={() => (netPortTouched = true)}
-                disabled={netEnabled || !isMcpAdmin}
-                aria-label="Network port"
-              />
-            </span>
-            <span class="t-desc">
-              Binds the daemon on <code>0.0.0.0:{netPort}</code> with a self-signed certificate so
-              remote clients can reach <code>https://&lt;this-host&gt;:{netPort}{HTTP_PATH}</code>.
-              Off by default; restart the daemon to apply.
-            </span>
-            {#if portConflict}
-              <span class="t-warn">
-                Choose a port other than the daemon’s loopback port ({loopbackPort}) — they would collide.
+        <LoadState
+          what="network settings"
+          variant="compact"
+          loading={networkLoading}
+          error={networkError}
+          empty={networkLoading || !!networkError}
+          rows={1}
+          onretry={() => void loadNetwork()}
+        >
+          <label class="netrow">
+            <input
+              type="checkbox"
+              checked={netEnabled}
+              disabled={netBusy || !isMcpAdmin || (!netEnabled && portConflict)}
+              onchange={(event) => void toggleNetwork(event.currentTarget)}
+            />
+            <div class="t-meta">
+              <span class="t-name">
+                Allow network access (TLS) on port
+                <input
+                  class="port"
+                  type="number"
+                  min="1"
+                  max="65535"
+                  bind:value={netPort}
+                  oninput={() => (netPortTouched = true)}
+                  disabled={netEnabled || !isMcpAdmin}
+                  aria-label="Network port"
+                />
               </span>
-            {/if}
-          </div>
-        </label>
+              <span class="t-desc">
+                Binds the daemon on <code>0.0.0.0:{netPort}</code> with a self-signed certificate so
+                remote clients can reach <code>https://&lt;this-host&gt;:{netPort}{HTTP_PATH}</code>.
+                Off by default; restart the daemon to apply.
+              </span>
+              {#if portConflict}
+                <span class="t-warn">
+                  Choose a port other than the daemon’s loopback port ({loopbackPort}) — they would collide.
+                </span>
+              {/if}
+            </div>
+          </label>
+        </LoadState>
       {/if}
     </div>
   {/if}

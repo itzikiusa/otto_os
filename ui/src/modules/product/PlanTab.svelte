@@ -20,6 +20,7 @@
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import AgentByline from '../../lib/components/AgentByline.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import PromoteToVaultButton from './PromoteToVaultButton.svelte';
   import { loadErrorText } from '../../lib/loadError';
 
   // ── Provider selection (Otto's REAL provider list, like NewSession) ──────────
@@ -132,23 +133,31 @@
     return best;
   }
 
+  /** Sequence counter bumped per story switch and load — drops stale reads. */
+  let loadSeq = 0;
+
   /** True only when the body actually loaded. From the poll a failure is
    *  recorded as a poll failure (no toast per tick); the poll keeps going. */
   async function loadPlanBody(v: ProductStoryVersion, fromPoll = false): Promise<boolean> {
+    const seq = ++loadSeq;
+    const owns = product.captureSelection();
+    const current = () => seq === loadSeq && owns();
     loading = true;
     try {
       const full = await product.getVersion(v.id);
+      if (!current()) return false;
       planVersion = full;
       body = full.body_md ?? '';
       return true;
     } catch (e) {
+      if (!current()) return false;
       // Nothing on screen yet → inline error with Retry; a refresh of a shown plan → toast.
       if (fromPoll) { pollFailures++; lastPollError = loadErrorText(e); }
       else if (planVersion) toastError('Couldn’t load plan', e);
       else loadError = loadErrorText(e);
       return false;
     } finally {
-      loading = false;
+      if (current()) loading = false;
     }
   }
 
@@ -207,13 +216,14 @@
   // ── Initial load + reset on story change ─────────────────────────────────────
   // Depends on the story id only (storyReset.svelte.ts).
   onStoryChange(() => product.selectedId, (sid) => {
+    ++loadSeq;
     planVersion = null;
     body = '';
     showRaw = false;
     planSessionIds = [];
     clearPoll();
     if (sid) void initialLoad();
-  }, clearPoll);
+  }, () => { ++loadSeq; clearPoll(); });
 
   // Subscribe to `product_changed { section: 'plan' }` WS events for faster feedback.
   $effect(() => {
@@ -255,16 +265,20 @@
   let loadError = $state<string | null>(null);
 
   async function initialLoad(): Promise<void> {
+    const seq = ++loadSeq;
+    const owns = product.captureSelection();
+    const current = () => seq === loadSeq && owns();
     loadError = null;
     loading = true;
     try {
       await product.loadVersions();
+      if (!current()) return;
       const plan = latestPlan();
       if (plan) await loadPlanBody(plan);
     } catch (e) {
-      loadError = loadErrorText(e);
+      if (current()) loadError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (current()) loading = false;
     }
   }
 
@@ -512,6 +526,7 @@
               <button class="btn small" onclick={() => (showRaw = !showRaw)}>
                 {showRaw ? 'Hide raw' : 'Raw'}
               </button>
+              <PromoteToVaultButton {story} bodyMd={product.detail?.source?.body_md ?? null} planMd={body} />
               <button class="btn small primary" onclick={regenerate} disabled={generating || pollTimer !== null}>
                 {pollTimer !== null ? 'Generating…' : 'Regenerate…'}
               </button>

@@ -191,11 +191,15 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p.starts_with("/plugin-host/") || p == "/plugins" {
         return Exempt;
     }
-    // Plugin management (install / enable / disable / remove): every handler
-    // is `require_root` (plugins.rs), so the policy tier matches the other
-    // root-only daemon settings — Settings:Admin, as the UI section gate is
-    // (S17-303; it said Users:Admin, a third gate for the same routes).
-    if p == "/plugin-admin" || p.starts_with("/plugin-admin/") {
+    // Plugin management (install / enable / disable / remove / restart / logs):
+    // every handler is `require_root` (plugins.rs), so the policy tier matches
+    // the other root-only daemon settings — Settings:Admin, as the UI section
+    // gate is (S17-303; it said Users:Admin, a third gate for the same routes).
+    if p == "/plugin-admin"
+        || p.starts_with("/plugin-admin/")
+        || p == "/plugins/{slug}/restart"
+        || p == "/plugins/{slug}/logs"
+    {
         return Require(Settings, Admin);
     }
     // Auth / personal-access-token self-management + identity. Any authed user
@@ -784,7 +788,18 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(Issues, if get { View } else { Edit });
     }
 
-    // ---- Product (stories / analyses / learnings / testcases) -----------------
+    // ---- Product (stories / analyses / learnings / testcases / TTS) -----------
+    // TTS provider registry mutations/tests register external endpoints and
+    // Keychain API keys → Product:Admin (and RouteClass::Admin below); voice
+    // reads = View, synthesis/clip management/export = Edit.
+    if matches!(
+        p,
+        "/product/tts/providers"
+            | "/product/tts/providers/{id}"
+            | "/product/tts/providers/{id}/test"
+    ) {
+        return Require(Product, if get { View } else { Admin });
+    }
     // §3.2: read stories/analyses=View; create/edit/run/publish=Edit.
     if p.starts_with("/product/")
         || p.starts_with("/workspaces/{ws}/product/")
@@ -794,14 +809,21 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     }
 
     // ---- Design Hall (the artifact graph: projects / artifacts / versions /
-    // links / search / signals; otto-design) ----------------------------------
+    // links / search / signals; otto-design + otto-media 3D providers) --------
     // Feature::Design (granted wherever Canvas was). Reads = View, every write
     // (create / content save / named commit / approve / link / signal) = Edit;
     // the legacy-import + opt-in retention-prune actions under `/design/admin/`
-    // = Admin. All routes are flat `/design/…` (workspace in the body / row);
-    // the handlers add the workspace-role gate. Root bypasses.
+    // and 3D provider CRUD/test under `/design/3d/providers*` = Admin. All
+    // routes are flat `/design/…` (workspace in the body / row); the handlers
+    // add the workspace-role gate. Root bypasses.
     if p.starts_with("/design/admin/") {
         return Require(Design, Admin);
+    }
+    if matches!(
+        p,
+        "/design/3d/providers" | "/design/3d/providers/{id}" | "/design/3d/providers/{id}/test"
+    ) {
+        return Require(Design, if get { View } else { Admin });
     }
     if p.starts_with("/design/") {
         return Require(Design, if get { View } else { Edit });
@@ -890,20 +912,14 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         if is_mcp_rules_path(p) {
             return Require(Mcp, if get { View } else { Admin });
         }
-        // Posture-changing routes → Admin: outward-server config, policy
-        // create/update/delete/import, and approval decisions (separation of
-        // duties is additionally enforced in the handler).
-        let posture = (p == "/mcp/otto-server" && !get)
-            || p == "/mcp/policies/import"
-            || (p == "/mcp/policies" && !get) // create policy
-            || p == "/mcp/policies/{id}" // update / delete policy
-            || p.ends_with("/approvals/{id}/decide");
+        // Posture-changing routes → Admin: outward-server config and approval
+        // decisions (separation of duties is additionally enforced in the
+        // handler; `/mcp/policies*` is already gated Admin above).
+        let posture = (p == "/mcp/otto-server" && !get) || p.ends_with("/approvals/{id}/decide");
         if posture {
             return Require(Mcp, Admin);
         }
-        // Non-mutating previews (export, evaluate) are POST but read-only → View.
-        let read = get || p == "/mcp/policies/export" || p == "/mcp/policies/evaluate";
-        return Require(Mcp, if read { View } else { Edit });
+        return Require(Mcp, if get { View } else { Edit });
     }
 
     // ---- Goal Loops -----------------------------------------------------------
@@ -1189,8 +1205,14 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/browser/tabs/{id}/live/nav"
         || p == "/browser/tabs/{id}/live/control"
         || p == "/browser/tabs/{id}/live/screenshot"
+        || p == "/browser/tabs/{id}/live/emulate"
     {
         return Require(Browser, Edit);
+    }
+
+    // ---- Mobile Simulators & Emulators (`/simulators/*`, Feature::Browser) ---
+    if let Some(d) = simulators_policy(p, get) {
+        return d;
     }
 
     // ---- AWS console (`/aws/*`) -------------------------------------------
@@ -1198,37 +1220,14 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return d;
     }
 
-    // ---- Kubernetes console (`/k8s/*`) --------------------------------------
-    // One key, three rungs: View = read everything (resources, describe, logs,
-    // top, capabilities); Edit = exec / k9s PTY sessions and every mutating
-    // action (restart, scale, delete pod, rollout + Argo verbs); Admin = manage
-    // the cluster (context) registry and install kubectl/k9s.
-    if let Some(rest) = p.strip_prefix("/k8s/clusters/{id}/") {
-        if rest == "test" {
-            return Require(Kubernetes, View);
-        }
-        if matches!(rest, "exec" | "k9s" | "actions") {
-            return Require(Kubernetes, Edit);
-        }
-        return Require(Kubernetes, if get { View } else { Edit });
+    // ---- Kubernetes console (`/k8s/*`) ------------------------------------
+    if let Some(d) = k8s_policy(p, get) {
+        return d;
     }
-    if p == "/k8s/clusters" {
-        return Require(Kubernetes, if get { View } else { Admin });
-    }
-    if p == "/k8s/clusters/{id}" {
-        return Require(Kubernetes, if get { View } else { Admin });
-    }
-    if p == "/k8s/clusters/import" {
-        return Require(Kubernetes, Admin);
-    }
-    // Monitoring dashboard: the cross-cluster overview is a read; the per-cluster
-    // `/monitor*` routes fall under the `{id}/` rule above (GET View, else Edit).
-    if matches!(p, "/k8s/status" | "/k8s/monitor/overview") || p.starts_with("/k8s/monitor/fleet/")
-    {
-        return Require(Kubernetes, View);
-    }
-    if matches!(p, "/k8s/install" | "/k8s/discover") {
-        return Require(Kubernetes, Admin);
+
+    // ---- Containers console (`/containers/*`) -----------------------------
+    if let Some(d) = containers_policy(p, get) {
+        return d;
     }
 
     // ----------------------------------------------------------------------
@@ -1466,6 +1465,80 @@ fn aws_policy(p: &str, method: &Method, get: bool) -> Option<PolicyDecision> {
     None
 }
 
+/// Kubernetes console (`/k8s/*`): View = read everything; Edit = exec / k9s
+/// PTY sessions and mutating actions; Admin = cluster registry & CLI install.
+fn k8s_policy(p: &str, get: bool) -> Option<PolicyDecision> {
+    use Capability::{Admin, Edit, View};
+    use Feature::Kubernetes;
+    use PolicyDecision::Require;
+    if let Some(rest) = p.strip_prefix("/k8s/clusters/{id}/") {
+        if rest == "test" {
+            return Some(Require(Kubernetes, View));
+        }
+        if matches!(rest, "exec" | "k9s" | "actions") {
+            return Some(Require(Kubernetes, Edit));
+        }
+        return Some(Require(Kubernetes, if get { View } else { Edit }));
+    }
+    if p == "/k8s/clusters" || p == "/k8s/clusters/{id}" {
+        return Some(Require(Kubernetes, if get { View } else { Admin }));
+    }
+    if p == "/k8s/clusters/import" || matches!(p, "/k8s/install" | "/k8s/discover") {
+        return Some(Require(Kubernetes, Admin));
+    }
+    if matches!(p, "/k8s/status" | "/k8s/monitor/overview") || p.starts_with("/k8s/monitor/fleet/")
+    {
+        return Some(Require(Kubernetes, View));
+    }
+    None
+}
+
+/// Mobile Simulators & Emulators (`/simulators/*`, Feature::Browser): reads
+/// (status, catalog, install/status, device listing/get, screenshot, recent logs,
+/// clipboard read, reverse port list) = View; creating/deleting simulators, installing
+/// host .app/.apk bundles, or running/cancelling the built-in SDK/runtime
+/// installer = Admin (matching `/browser/live/install`); lifecycle, open-url,
+/// input, controls, app launch/terminate and port forwarding = Edit.
+fn simulators_policy(p: &str, get: bool) -> Option<PolicyDecision> {
+    use Capability::{Admin, Edit, View};
+    use Feature::Browser;
+    use PolicyDecision::Require;
+    let rest = p.strip_prefix("/simulators/")?;
+    Some(match rest {
+        "devices" | "devices/{id}" | "install/status" => {
+            Require(Browser, if get { View } else { Admin })
+        }
+        "devices/{id}/apps/install" | "install" | "install/cancel" => Require(Browser, Admin),
+        "status"
+        | "catalog"
+        | "devices/{id}/screenshot"
+        | "devices/{id}/logs"
+        | "devices/{id}/clipboard"
+        | "devices/{id}/ports" => Require(Browser, if get { View } else { Edit }),
+        _ => Require(Browser, Edit),
+    })
+}
+
+/// Containers console (`/containers/*`): View = daemon status, contexts,
+/// lists, inspect, logs, stats; Edit = lifecycle, exec PTY, run, pull, delete,
+/// prune; Admin = switch active Docker context & start/stop/restart embedded
+/// Kiri runtime.
+fn containers_policy(p: &str, get: bool) -> Option<PolicyDecision> {
+    use Capability::{Admin, Edit, View};
+    use Feature::Containers;
+    use PolicyDecision::Require;
+    if p == "/containers/contexts/select" || p.starts_with("/containers/runtime/") {
+        return Some(Require(Containers, Admin));
+    }
+    if p == "/containers/{id}/secrets/reveal" {
+        return Some(Require(Containers, Edit));
+    }
+    if p == "/containers" || p.starts_with("/containers/") {
+        return Some(Require(Containers, if get { View } else { Edit }));
+    }
+    None
+}
+
 /// The credential class of `(method, matched_path)`, or `None` for an
 /// ordinary route. `matched_path` is the same `/api/v1`-prefixed template
 /// [`policy_for`] takes. Reads stay untagged unless they return secrets.
@@ -1479,6 +1552,7 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
     if matches!(
         p,
         "/browser/credentials/{id}/reveal"
+            | "/containers/{id}/secrets/reveal"
             | "/state/connections/export"
             | "/state/archive"
             | "/admin/secrets/status"
@@ -1514,6 +1588,7 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
             || (p.starts_with("/admin/") && p != "/admin/impersonate/stop")
             || p == "/plugin-admin"
             || p.starts_with("/plugin-admin/")
+            || p == "/plugins/{slug}/restart"
             || p == "/ide/plugins"
             || p.starts_with("/ide/plugins/")
             || p == "/ide/run-configs"
@@ -1545,8 +1620,27 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
                     | "/usage/install"
                     | "/aws/install"
                     | "/k8s/install"
+                    | "/containers/run"
+                    | "/containers/contexts/select"
+                    | "/containers/runtime/install"
+                    | "/containers/runtime/start"
+                    | "/containers/runtime/stop"
+                    | "/containers/runtime/restart"
                     | "/browser/live/install"
                     | "/browser/live/settings"
+                    | "/simulators/install"
+                    | "/simulators/install/cancel"
+                    | "/simulators/devices"
+                    | "/simulators/devices/{id}"
+                    | "/simulators/devices/{id}/apps/install"
+                    // 3D generation + TTS provider registration/modification/testing
+                    // (can register local CLI binaries, HTTP endpoints, and Keychain keys).
+                    | "/design/3d/providers"
+                    | "/design/3d/providers/{id}"
+                    | "/design/3d/providers/{id}/test"
+                    | "/product/tts/providers"
+                    | "/product/tts/providers/{id}"
+                    | "/product/tts/providers/{id}/test"
                     | "/ide/toolchains/install"
                     | "/ide/toolchains/local"
                     | "/ide/toolchains/python-venv"
@@ -1720,6 +1814,12 @@ mod tests {
         assert_eq!(c(Method::POST, "/api/v1/plugin-admin/install"), Some(A));
         assert_eq!(
             c(Method::POST, "/api/v1/plugin-admin/{slug}/enable"),
+            Some(A)
+        );
+        assert_eq!(c(Method::POST, "/api/v1/plugins/{slug}/restart"), Some(A));
+        assert_eq!(c(Method::GET, "/api/v1/plugins/{slug}/logs"), None);
+        assert_eq!(
+            c(Method::POST, "/api/v1/containers/runtime/install"),
             Some(A)
         );
         assert_eq!(c(Method::POST, "/api/v1/users"), Some(A));
@@ -2542,7 +2642,7 @@ mod tests {
             pol(Method::GET, "/api/v1/mcp/policies"),
             Require(Mcp, Admin)
         );
-        // Non-mutating previews (POST but read-only) = View.
+        // All `/mcp/policies*` routes (including export/evaluate) stay Admin.
         assert_eq!(
             pol(Method::GET, "/api/v1/mcp/policies/export"),
             Require(Mcp, Admin)
@@ -3290,7 +3390,7 @@ mod tests {
             pol(Method::DELETE, "/api/v1/browser/tabs/{id}/live"),
             Require(Browser, Edit)
         );
-        for p in ["nav", "control", "screenshot"] {
+        for p in ["nav", "control", "screenshot", "emulate"] {
             assert_eq!(
                 pol(
                     Method::POST,
@@ -3340,6 +3440,34 @@ mod tests {
         assert_eq!(
             pol(Method::POST, "/api/v1/workspaces/{wid}/browser/login"),
             Require(Browser, Edit)
+        );
+    }
+
+    #[test]
+    fn containers_run_and_secret_reveal_policies() {
+        assert_eq!(
+            pol(Method::POST, "/api/v1/containers/run"),
+            Require(Containers, Edit)
+        );
+        assert_eq!(
+            route_class(&Method::POST, "/api/v1/containers/run"),
+            Some(RouteClass::Admin)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/containers/{id}/secrets/reveal"),
+            Require(Containers, Edit)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/containers/{id}/secrets/reveal"),
+            Require(Containers, Edit)
+        );
+        assert_eq!(
+            route_class(&Method::POST, "/api/v1/containers/{id}/secrets/reveal"),
+            Some(RouteClass::Secret)
+        );
+        assert_eq!(
+            route_class(&Method::GET, "/api/v1/containers/{id}/secrets/reveal"),
+            Some(RouteClass::Secret)
         );
     }
 }

@@ -167,7 +167,7 @@
     white-space: nowrap;
     box-shadow: var(--glass-shadow);
     cursor: pointer;
-    z-index: 1;
+    z-index: var(--z-sticky);
   }
   .rt-pill:hover {
     background: var(--hover);

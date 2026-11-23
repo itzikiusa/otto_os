@@ -27,7 +27,7 @@
   let loadError = $state('');
   let compacting = $state(false);
   let last = $state<DbCompactReport | null>(null);
-  const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+  const msg = (e: unknown): string => loadErrorText(e);
 
   // Run-history retention (opt-in). `settings` is the stored map, so a change
   // writes the whole `data_retention` object back with one field changed.

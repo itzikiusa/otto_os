@@ -71,6 +71,10 @@ pub const REF_ARGS: &[(&str, &str, &str)] = &[
     ("design_links", "artifact_id", "design_artifact"),
     ("design_assist", "artifact_id", "design_artifact"),
     ("design_link", "artifact_id", "design_artifact"),
+    ("export_3d_artifact", "artifact_id", "design_artifact"),
+    ("design_comments", "artifact_id", "design_artifact"),
+    ("design_comment", "artifact_id", "design_artifact"),
+    ("design_resolve_comment", "artifact_id", "design_artifact"),
     ("get_product_story", "story_id", "product_story"),
     ("get_context_packet", "story_id", "product_story"),
     ("get_scheduled_task", "task_id", "scheduled_task"),
@@ -138,8 +142,16 @@ pub const DIRECTORY_TOOLS: &[(&str, &str)] = &[
 
 /// Tools that address ONE design artifact: the artifact's own workspace is
 /// filled in (`mcp_outward::fill_design_workspace` (otto-server)).
-pub const DESIGN_WS_TOOLS: &[&str] =
-    &["design_get", "design_links", "design_assist", "design_link"];
+pub const DESIGN_WS_TOOLS: &[&str] = &[
+    "design_get",
+    "design_links",
+    "design_assist",
+    "design_link",
+    "export_3d_artifact",
+    "design_comments",
+    "design_comment",
+    "design_resolve_comment",
+];
 
 /// Pin probes for id-only objects: `(tool, arg, route prefix, JSON pointer of
 /// the object's workspace)`. Run for EVERY call from a workspace-pinned token
@@ -183,6 +195,78 @@ pub const PIN_PROBES: &[(&str, &str, &str, &str)] = &[
         "/api/v1/improvement/runs/",
         "/run/workspace_id",
     ),
+    (
+        "get_3d_job",
+        "job_id",
+        "/api/v1/design/3d/jobs/",
+        "/workspace_id",
+    ),
+    (
+        "cancel_3d_job",
+        "job_id",
+        "/api/v1/design/3d/jobs/",
+        "/workspace_id",
+    ),
+    (
+        "delete_voice_clip",
+        "clip_id",
+        "/api/v1/product/tts/clips/",
+        "/workspace_id",
+    ),
+    (
+        "get_production",
+        "production_id",
+        "/api/v1/design/productions/",
+        "/workspace_id",
+    ),
+    (
+        "start_production",
+        "production_id",
+        "/api/v1/design/productions/",
+        "/workspace_id",
+    ),
+    (
+        "cancel_production",
+        "production_id",
+        "/api/v1/design/productions/",
+        "/workspace_id",
+    ),
+    (
+        "steer_production",
+        "production_id",
+        "/api/v1/design/productions/",
+        "/workspace_id",
+    ),
+    (
+        "redraw_production_item",
+        "production_id",
+        "/api/v1/design/productions/",
+        "/workspace_id",
+    ),
+    (
+        "revert_production",
+        "production_id",
+        "/api/v1/design/productions/",
+        "/workspace_id",
+    ),
+    (
+        "rebuild_production_scene",
+        "production_id",
+        "/api/v1/design/productions/",
+        "/workspace_id",
+    ),
+    (
+        "get_audio_job",
+        "job_id",
+        "/api/v1/product/audio/jobs/",
+        "/workspace_id",
+    ),
+    (
+        "cancel_audio_job",
+        "job_id",
+        "/api/v1/product/audio/jobs/",
+        "/workspace_id",
+    ),
 ];
 
 /// A personal agent's own-scope tools (routines, personality, instruction
@@ -212,6 +296,7 @@ pub fn pin_global(tool: &str) -> bool {
         || is_agent_own_tool(tool)
         || tool.starts_with("aws_")
         || tool.starts_with("k8s_")
+        || tool.starts_with("sim_")
         || DIRECTORY_TOOLS.iter().any(|(t, _)| *t == tool)
         || matches!(
             tool,
@@ -234,6 +319,10 @@ pub fn pin_global(tool: &str) -> bool {
                 | "get_usage_summary"
                 | "list_bundled_skills"
                 | "list_personal_agent_templates"
+                // Generator and voice-engine rows are global.
+                | "list_3d_providers"
+                | "list_tts_providers"
+                | "list_tts_voices"
         )
 }
 

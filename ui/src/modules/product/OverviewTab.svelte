@@ -24,6 +24,7 @@
   import { confirmOutward } from '../../lib/confirmOutward';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import PublishDialog from './PublishDialog.svelte';
+  import PromoteToVaultButton from './PromoteToVaultButton.svelte';
   import AttachmentsPanel from './AttachmentsPanel.svelte';
   import DraftEditor from './DraftEditor.svelte';
   import StoryDesignsLine from './StoryDesignsLine.svelte';
@@ -651,10 +652,8 @@
       </div>
 
       <span class="grow"></span>
-
+      <PromoteToVaultButton {story} {bodyMd} />
       {#if !isDraft}
-      <!-- Watch / Refresh follow the SOURCE issue/page — a draft has none. -->
-      <!-- Watch toggle -->
       <button
         class="btn small"
         aria-pressed={story.watch_enabled}
@@ -665,8 +664,6 @@
         <Icon name="eye" size={13} />
         {story.watch_enabled ? 'Watching' : 'Watch'}
       </button>
-
-      <!-- Refresh -->
       <button
         class="btn small"
         onclick={refresh}

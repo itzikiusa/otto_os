@@ -4,6 +4,7 @@
   // (its own composer for follow-ups) with two quiet actions — open it as a
   // normal thread, or dismiss it. Loaded lazily by ThreadInspector.
   import { enterSends } from '../../lib/enterSends';
+  import { toastError } from '../../lib/toastError';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -25,6 +26,7 @@
   const side = $derived(sideChatFor(mainId));
   let question = $state('');
   let busy = $state(false);
+  let acting = $state(false);
 
   async function ask(q: string): Promise<void> {
     if (!main || busy || !q.trim()) return;
@@ -37,13 +39,23 @@
     }
   }
 
+  async function runAction(fn: () => Promise<unknown>): Promise<void> {
+    if (acting) return;
+    acting = true;
+    try {
+      await fn();
+    } finally {
+      acting = false;
+    }
+  }
+
   // A `/btw <question>` from the main composer: ask it here (or, when a side
   // chat already runs, send it as its next message).
   $effect(() => {
     const req = threads.sideAsk;
     if (!req || req.mainId !== mainId || !main) return;
     threads.sideAsk = null;
-    if (side) void ws.sendInput(side.id, req.question);
+    if (side) void ws.sendInput(side.id, req.question).catch((e) => toastError('Couldn’t send to the side chat', e));
     else void ask(req.question);
   });
 
@@ -72,7 +84,8 @@
         aria-label="Open the side chat as a thread"
         title="Open as a thread (beside this one)"
         data-testid="side-chat-promote"
-        onclick={() => void promoteSideChat(side)}
+        disabled={acting}
+        onclick={() => void runAction(() => promoteSideChat(side))}
       >
         <Icon name="split" size={13} />
       </button>
@@ -82,7 +95,8 @@
         aria-label="Dismiss the side chat"
         title="Dismiss (archives the side chat)"
         data-testid="side-chat-dismiss"
-        onclick={() => void dismissSideChat(side)}
+        disabled={acting}
+        onclick={() => void runAction(() => dismissSideChat(side))}
       >
         <Icon name="x" size={13} />
       </button>

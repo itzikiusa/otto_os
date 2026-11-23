@@ -397,6 +397,10 @@ a client that never acks gets one frame and then nothing.
 {"type":"popup","url":"https://…"}                            // the page tried to open a new window; the popup is closed — the client may open `url` in a new tab
 {"type":"download","status":"blocked|quarantined","filename":"report.pdf","bytes":1234}
 {"type":"approval","approval_id":"…","status":"pending|approved|denied","title":"Submit form on example.com"}   // an agent's outward action is waiting on / was decided by a human
+{"type":"console","entry":{"seq":1,"level":"log|info|warning|error|debug","text":"…","timestamp":1.5,"source":"https://…:12"}}   // opt-in DevTools console/exception stream (bounded 200 entries)
+{"type":"network","entry":{"request_id":"…","method":"GET","url":"https://ex.com/api?…","resource_type":"Fetch","status":200,"failed":false,"duration_ms":42,"timestamp":1.5}}   // opt-in DevTools network metadata (query strings & credentials redacted)
+{"type":"devtools_snapshot","snapshot":{"enabled":true,"console":[…],"network":[…]}}
+{"type":"inspected","element":{"tag":"button","id":"save","classes":["primary"],"selector":"#save","text":"Save","outer_html":"…","rect":{"x":0,"y":0,"width":80,"height":32},"styles":{"display":"flex","position":"relative","color":"…","background":"…","font":"…"}}}
 {"type":"error","code":"forbidden|not_driver|bad_frame|nav_failed|input_failed|engine_unavailable","message":"…"}
 {"type":"closed","reason":"closed|idle|crashed|revoked|replaced"}   // the session ended; the socket closes right after
 ```
@@ -414,6 +418,10 @@ a client that never acks gets one frame and then nothing.
 {"type":"resize","width":1280,"height":800,"device_scale_factor":2}         // CSS px; clamped to 200..3840 × 200..2160, dsf 1..3
 {"type":"control","action":"take_over|hand_back"}
 {"type":"dialog","accept":true,"prompt_text":"…"}
+{"type":"emulate","viewport":{"width":393,"height":852,"device_scale_factor":3},"emulation":{"preset_id":"iphone-16-pro","mobile":true,"has_touch":true,"user_agent":"…","color_scheme":"dark","orientation":"portrait"}}
+{"type":"devtools","enabled":true}
+{"type":"clear_devtools"}
+{"type":"inspect","x":240,"y":180}
 ```
 
 - `x`/`y` are viewport CSS px (see the frame header). `modifiers` is the CDP
@@ -501,6 +509,37 @@ credentials are refused with 403 (`RootRoute::Lsp`).
     open should reconnect (with backoff; for `server_cap` that re-spawns the
     server and evicts the next least recently used one) and show that
     intelligence restarted; on `shutdown` it waits for the daemon.
+
+## 1d. Mobile Simulators screencast — `WS /ws/simulators/{id}/stream`
+
+Auth: `Sec-WebSocket-Protocol: otto-bearer, <token>` (never `?token=`), gated by `RootRoute::Simulators` (refuses share-scoped, MCP-only, and read-only agent credentials). Requires `Feature::Browser` `View` to watch frames, `Edit` to send drive actions (`tap`, `swipe`, `text`, `key_event`, `open_url`, `orientation`, `appearance`). Grants are re-checked every 5 s off the socket loop (revoked → close; narrowed → drop drive).
+
+Query: `?fps=1..10` (default `2`), `?format=png|jpeg` (default `png`).
+
+- **Server → Client (text JSON)**:
+  - `{"type":"hello","device":SimDevice,"fps":2,"can_drive":true}`
+  - `{"type":"state","device":SimDevice}`
+  - `{"type":"error","code":"...","message":"..."}`
+  - `{"type":"closed","reason":"revoked"}`
+- **Server → Client (binary frames)**: identical envelope to `/ws/browser/{tab_id}/live`:
+  `[version: u8 = 1][header_len: u32 BE][UTF-8 JSON SimFrameHeader][image bytes]`
+  where `SimFrameHeader` is `{"seq":u64,"mime":"image/png","width":u32,"height":u32,"orientation":"portrait"|"landscape"|...,"timestamp_ms":i64}`.
+- **Client → Server (text JSON, max 64 KiB)**:
+  - Viewer controls: `ack { seq }`, `set_fps { fps }`, `pause`, `resume`, `snapshot`.
+  - Drive actions (require `Browser:Edit`): `tap`, `swipe`, `text`, `key_event` (Android: `HOME`, `BACK`, `APP_SWITCH`, `ENTER`, `DEL`, `FORWARD_DEL`, `TAB`, `SPACE`, `ESCAPE`, `POWER`, `MENU`, `VOLUME_*`, `DPAD_*`, `CAMERA`, `SEARCH`, `MEDIA_PLAY_PAUSE`, `WAKEUP`, `SLEEP`, or `0..=320`; iOS with `idb`: `HOME`, `LOCK`/`POWER`, `SIRI`, `APPLE_PAY`), `open_url`, `orientation`, `appearance`.
+
+## 1e. Mobile Simulators logs — `WS /ws/simulators/{id}/logs`
+
+Auth: same `Sec-WebSocket-Protocol: otto-bearer, <token>` + `RootRoute::Simulators` + `Feature::Browser` `View` + 5 s grant re-check.
+
+Query: `?filter=<substring>` (case-insensitive match on tag or message), `?level=verbose|debug|info|warn|error|fatal`.
+
+Streams live output from `xcrun simctl spawn <udid> log stream --style compact` (iOS) or `adb -s <serial> logcat -v time` (Android), stopping and killing the child process cleanly when the socket closes:
+
+- **Server → Client (text JSON)**:
+  - `{"type":"status","state":"streaming"|"ended","detail":"..."}`
+  - `{"type":"log","ts":"...","level":"verbose"|"debug"|"info"|"warn"|"error"|"fatal"|"unknown","tag":"...","pid":123,"message":"..."}`
+  - `{"type":"error","code":"...","message":"..."}`
 
 ## 2. Event stream — `WS /ws/events`
 
@@ -664,7 +703,7 @@ Delivery scope: **session-family events** (`session_status`, `session_created`,
 `api_history_appended`) reach
 every member with `viewer`+ on the event's `workspace_id` (root receives all);
 **owner-scoped events** (`ui_control_requested`, `secret_request_updated`,
-`notifications_changed`) reach only the user named by their `user_id` (not root);
+`notifications_changed`, `ide_fs_changed`) reach only the user named by their `user_id` (not root);
 **broadcast events** (`Notice`, `resource_access_changed`, a workspace-less
 `mcp_approval_changed`) reach every authenticated client. The sections below
 cover every variant (`Event::type_name()` in
@@ -1587,6 +1626,39 @@ repository's working tree, index or refs change on disk: an editor save, a CLI
     a visible but unfocused window marks the diff stale and re-reads it once
     on its next focus/visibility.
 - TypeScript type: `{ type: 'repo_status_changed'; workspace_id: Id; repo_id: Id; paths?: string[] }`.
+
+### `ide_fs_changed`
+
+Owner-scoped. Emitted by `crates/otto-ide/src/fs_watch.rs` when entries are
+created, removed or renamed directly inside a folder an IDE project tree shows:
+a terminal, an agent session, git (checkout/pull/stash) or any other program
+changed the project on disk.
+
+```json
+{ "type": "ide_fs_changed", "user_id": "<Id>", "client_id": "<tree id>", "dirs": ["/abs/project/src"] }
+```
+
+- What is watched: each tree's lease, `POST /ide/fs/watch` (`api.md`, IDE):
+  its local project roots and the folders it shows (the primary root, expanded
+  folders, open attached roots). One OS watcher (FSEvents on macOS, inotify on
+  Linux) per root, shared by every lease naming it. It stops when no lease names
+  the root: a tree releases its lease when it leaves the project or unmounts,
+  and the daemon drops a lease not re-posted for 3 min (the UI re-posts every
+  60 s). Broad roots (`/`, `/Users`, …) and Remote SSH targets are not watched.
+- Filtering: only a change whose PARENT is a shown folder counts, so a build
+  writing into a collapsed `target/` (or `node_modules`, or `.git`) sends
+  nothing. Content and metadata writes (a save) never count.
+- Timing: one event per burst, 150 ms after the first change, and at most one
+  per 400 ms per root; a branch switch touching 10k files is one event naming
+  at most the tree's shown folders. A dropped-events rescan names all of them.
+- Payload: `dirs` are absolute, spelled as the tree registered them; one event
+  per lease (`client_id`) watching the root.
+- UI routing: a `liveEvents` subscriber in `IdeProjectTree.svelte` →
+  `IdeTreeLive.apply` (`ui/src/modules/ide/store/ideTreeLive.ts`): the tree with
+  that `client_id` re-lists the named folders it still shows, in place (one
+  listing per folder at a time). Window focus and a `resync` re-list every
+  shown folder — also the only refresh a Remote SSH tree gets.
+- TypeScript type: `{ type: 'ide_fs_changed'; user_id: Id; client_id: string; dirs: string[] }`.
 
 ### `transcript_appended` / `transcript_live` / `artifact_added`
 

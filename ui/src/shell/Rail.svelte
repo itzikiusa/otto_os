@@ -6,6 +6,8 @@
   import NotificationBell from './NotificationBell.svelte';
   import { router } from '../lib/router.svelte';
   import { navPending } from '../lib/navPending.svelte';
+  import { viewport } from '../lib/stores/viewport.svelte';
+  import { lightMode } from '../lib/lightMode.svelte';
   import { ui } from '../lib/stores/ui.svelte';
   import { auth } from '../lib/stores/auth.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
@@ -109,7 +111,7 @@
 <nav class="rail sidebar-material" aria-label="Modules">
   <button
     class="rail-btn"
-    onclick={() => ui.toggleRail()}
+    onclick={() => (viewport.isTablet ? viewport.toggleTabletRail(true) : ui.toggleRail())}
     title="Expand sidebar"
     aria-label="Expand sidebar"
     aria-keyshortcuts="Meta+1"
@@ -175,6 +177,19 @@
   </div>
 
   <div class="rail-bottom">
+    {#if lightMode.available}
+      <button
+        class="rail-btn"
+        class:active={lightMode.active}
+        aria-pressed={lightMode.active}
+        data-testid="rail-light-toggle"
+        onclick={() => void lightMode.set(!lightMode.active)}
+        title={lightMode.active ? 'Switch to Full app' : 'Switch to Light version'}
+        aria-label={lightMode.active ? 'Switch to Full app' : 'Switch to Light version'}
+      >
+        <Icon name={lightMode.active ? 'maximize' : 'minimize'} />
+      </button>
+    {/if}
     <button
       class="rail-btn"
       class:active={router.module === 'walkthroughs'}

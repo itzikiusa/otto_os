@@ -120,6 +120,8 @@ pub const AGENT_DATA_SUBDIRS: &[&str] = &[
     "db_assist",
     "canvas",
     "browser_summarize",
+    // Smart mode's planner turns (`otto_media::productions::agent::planner_root`).
+    "productions",
 ];
 
 /// Design Hall working copies: `<data>/design/<artifact>/work/**` is where a
@@ -132,13 +134,15 @@ pub const AGENT_DATA_SUBDIRS: &[&str] = &[
 const DESIGN_WORK_DIR: &str = "design";
 const DESIGN_BLOBS_DIR: &str = "design/blobs";
 
-/// Files/dirs of Otto's data dir an agent must not even READ: plaintext
-/// secrets, the state DB (sessions, roles, tokens) incl. WAL/SHM/journal and
-/// the `otto.db.*.bak` copies, the daemon's TLS key, and kubeconfigs. `prefix`
-/// entries match every path starting with that string.
+/// Files/dirs of Otto's data dir an agent must not even READ: plaintext and
+/// encrypted secrets (incl. migration backups, orphaned files, atomic temps),
+/// the state DB (sessions, roles, tokens) incl. WAL/SHM/journal and
+/// `otto.db.*.bak` / `backups/` pre-migration snapshots, the daemon's TLS key,
+/// logs, and kubeconfigs. `prefix` entries match every path starting with that
+/// string.
 const DATA_DIR_DENY_READ_LITERAL: &[&str] = &["secrets.json"];
-const DATA_DIR_DENY_READ_PREFIX: &[&str] = &["otto.db", "state.db"];
-const DATA_DIR_DENY_READ_SUBPATH: &[&str] = &["tls", "kube", "logs"];
+const DATA_DIR_DENY_READ_PREFIX: &[&str] = &["otto.db", "state.db", "secrets.", ".secrets."];
+const DATA_DIR_DENY_READ_SUBPATH: &[&str] = &["tls", "kube", "logs", "backups"];
 
 /// Where named provider accounts keep their CLI homes (`<data>/provider-accounts/<id>`,
 /// used as `CLAUDE_CONFIG_DIR` / `CODEX_HOME`). Read-denied as a whole — other
@@ -614,6 +618,26 @@ impl SandboxPolicy {
             r#"(deny network-outbound (remote unix-socket (path-regex #"/(oi-[0-9]+-[0-9]+|otto-sftp-[^/]+)/[^/]+$")))"#
                 .to_string(),
         );
+        // Container engine sockets (Docker Desktop, Kiri, Otto, OrbStack,
+        // Colima, Lima, Rancher Desktop, `/var/run/docker.sock`, plus any
+        // active `DOCKER_HOST`/`KIRI_SOCKET` local Unix sockets): talking to a
+        // container daemon lets a read-only session bind-mount the host
+        // filesystem and execute arbitrary commands outside the sandbox.
+        let docker_host = std::env::var("DOCKER_HOST").ok();
+        let kiri_socket = std::env::var("KIRI_SOCKET").ok();
+        let container_sockets = container_socket_deny_filters(
+            home,
+            docker_host.as_deref(),
+            kiri_socket.as_deref(),
+            &[
+                Path::new("/var/run/docker.sock"),
+                Path::new("/private/var/run/docker.sock"),
+            ],
+        );
+        pol.trailing_rules.push(format!(
+            "(deny network-outbound {})",
+            container_sockets.join(" ")
+        ));
         pol
     }
 
@@ -1092,6 +1116,92 @@ fn filter(kind: &str, p: &Path) -> String {
     format!("({kind} \"{}\")", escape(p))
 }
 
+/// Extract a local Unix socket path from a `DOCKER_HOST` or `KIRI_SOCKET` env value.
+fn parse_local_unix_socket(raw: &str) -> Option<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path_str = if let Some(rest) = trimmed.strip_prefix("unix://") {
+        rest
+    } else if trimmed.contains("://") {
+        return None;
+    } else {
+        trimmed
+    };
+    let path = Path::new(path_str);
+    if path.is_absolute() {
+        Some(path.to_path_buf())
+    } else {
+        None
+    }
+}
+
+/// Build Seatbelt `(remote unix-socket ...)` deny clauses for container runtimes.
+fn container_socket_deny_filters(
+    home: &Path,
+    docker_host: Option<&str>,
+    kiri_socket: Option<&str>,
+    sys_sockets: &[&Path],
+) -> Vec<String> {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut push_unique = |clause: String| {
+        if !clauses.contains(&clause) {
+            clauses.push(clause);
+        }
+    };
+
+    for rel in [
+        ".otto/run/docker.sock",
+        ".kiri/run/docker.sock",
+        ".docker/run/docker.sock",
+        ".orbstack/run/docker.sock",
+        ".colima/default/docker.sock",
+        ".rd/docker.sock",
+    ] {
+        push_unique(format!(
+            "(remote unix-socket {})",
+            filter("literal", &canonicalize_lenient(&home.join(rel)))
+        ));
+    }
+    for dir_rel in [
+        ".colima",
+        ".lima",
+        "Library/Containers/com.docker.docker/Data",
+    ] {
+        push_unique(format!(
+            "(remote unix-socket {})",
+            filter("subpath", &canonicalize_lenient(&home.join(dir_rel)))
+        ));
+    }
+    for sys_sock in sys_sockets {
+        push_unique(format!(
+            "(remote unix-socket {})",
+            filter("literal", sys_sock)
+        ));
+        let canonical = canonicalize_lenient(sys_sock);
+        if canonical != *sys_sock {
+            push_unique(format!(
+                "(remote unix-socket {})",
+                filter("literal", &canonical)
+            ));
+        }
+    }
+    for env_val in [docker_host, kiri_socket].into_iter().flatten() {
+        if let Some(path) = parse_local_unix_socket(env_val) {
+            push_unique(format!("(remote unix-socket {})", filter("literal", &path)));
+            let canonical = canonicalize_lenient(&path);
+            if canonical != path {
+                push_unique(format!(
+                    "(remote unix-socket {})",
+                    filter("literal", &canonical)
+                ));
+            }
+        }
+    }
+    clauses
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1173,8 +1283,11 @@ mod tests {
         );
         assert!(hidden > deny);
         assert!(sbpl.contains(&format!("(literal \"{data}/secrets.json\")")));
+        assert!(sbpl.contains(&format!("(prefix \"{data}/secrets.\")")));
+        assert!(sbpl.contains(&format!("(prefix \"{data}/.secrets.\")")));
         assert!(sbpl.contains(&format!("(prefix \"{data}/otto.db\")")));
         assert!(sbpl.contains(&format!("(subpath \"{data}/tls\")")));
+        assert!(sbpl.contains(&format!("(subpath \"{data}/backups\")")));
         // The carve-outs come after every grant, network included.
         assert!(deny > at(&sbpl, "(allow network-outbound)"));
         // No session reaches another session's holder socket.
@@ -1938,5 +2051,72 @@ mod tests {
                 PathBuf::from("/h/.config/muse/settings.json")
             ]
         );
+    }
+
+    #[test]
+    fn read_only_denies_docker_and_kiri_sockets() {
+        let home = Path::new("/nonexistent-otto-home/u");
+        let profile = agent_policy("/nonexistent-otto-test/Otto")
+            .harden_read_only(Path::new("/work/project"), home)
+            .to_sbpl();
+        for needle in [
+            "/.otto/run/docker.sock",
+            "/.kiri/run/docker.sock",
+            "/.docker/run/docker.sock",
+            "/.orbstack/run/docker.sock",
+            "/.colima/default/docker.sock",
+            "/.colima\"",
+            "/.lima\"",
+            "/Library/Containers/com.docker.docker/Data\"",
+            "/var/run/docker.sock",
+            "/private/var/run/docker.sock",
+        ] {
+            assert!(
+                profile.contains(needle),
+                "expected read-only Seatbelt profile to deny {needle}"
+            );
+        }
+    }
+
+    #[test]
+    fn container_socket_denies_canonicalize_symlinks_and_include_env_sockets() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("custom-engine.sock");
+        std::fs::write(&target, b"").unwrap();
+        let link = dir.path().join("docker.sock");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let home = Path::new("/nonexistent-otto-home/u");
+        let rules = container_socket_deny_filters(
+            home,
+            Some("unix:///tmp/custom-docker.sock"),
+            Some("/tmp/custom-kiri.sock"),
+            &[&link],
+        )
+        .join(" ");
+
+        let canonical_target = canonicalize_lenient(&target);
+        assert!(
+            rules.contains(&canonical_target.to_string_lossy().to_string()),
+            "expected symlink target to be canonicalized in Seatbelt deny rules: {rules}"
+        );
+        assert!(rules.contains("/tmp/custom-docker.sock"));
+        assert!(rules.contains("/tmp/custom-kiri.sock"));
+        assert!(rules.contains("(subpath \"/nonexistent-otto-home/u/.colima\")"));
+        assert!(rules.contains("(subpath \"/nonexistent-otto-home/u/.lima\")"));
+        assert!(rules.contains(
+            "(subpath \"/nonexistent-otto-home/u/Library/Containers/com.docker.docker/Data\")"
+        ));
+
+        // Non-Unix DOCKER_HOST schemes (e.g. tcp://) are ignored.
+        let tcp_rules = container_socket_deny_filters(
+            home,
+            Some("tcp://127.0.0.1:2375"),
+            Some("relative/not-abs.sock"),
+            &[],
+        )
+        .join(" ");
+        assert!(!tcp_rules.contains("127.0.0.1"));
+        assert!(!tcp_rules.contains("relative/not-abs.sock"));
     }
 }

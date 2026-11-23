@@ -75,6 +75,20 @@ pub trait RuntimeHost: Send + Sync + 'static {
         true
     }
 
+    /// Confine an agent-requested `cwd` for linked peer creation to
+    /// `ws.root_path`, the calling thread's own `caller_cwd`, or (on
+    /// `SessionManagerHost`) registered workspace repos / git worktrees.
+    /// Returns `Error::Forbidden` for any path outside those roots.
+    async fn check_agent_cwd(
+        &self,
+        ws: &Workspace,
+        _caller_id: &Id,
+        caller_cwd: &str,
+        cwd: Option<&str>,
+    ) -> Result<()> {
+        check_agent_cwd_basic(ws, caller_cwd, cwd)
+    }
+
     /// Deliver one event to WebSocket clients (owner / admin / root).
     fn publish(&self, session: &RuntimeSession, event: Arc<RuntimeEvent>);
 
@@ -85,6 +99,43 @@ pub trait RuntimeHost: Send + Sync + 'static {
     /// needs attention" notice ([`crate::attention`]). Called under the
     /// session lock: must not block.
     fn attention(&self, _session: &RuntimeSession, _what: Option<&str>) {}
+}
+
+/// Baseline agent `cwd` confinement used by [`RuntimeHost::check_agent_cwd`]:
+/// `cwd` must be absolute, exist, and canonicalize under `ws.root_path` or
+/// `caller_cwd`.
+pub(crate) fn check_agent_cwd_basic(
+    ws: &Workspace,
+    caller_cwd: &str,
+    cwd: Option<&str>,
+) -> Result<()> {
+    let Some(raw) = cwd.map(str::trim).filter(|c| !c.is_empty()) else {
+        return Ok(());
+    };
+    let want = std::path::Path::new(raw);
+    if !want.is_absolute() {
+        return Err(otto_core::Error::Forbidden(
+            "an agent may only open sessions at an absolute folder".into(),
+        ));
+    }
+    let want = std::fs::canonicalize(want).map_err(|_| {
+        otto_core::Error::Forbidden(format!("an agent may not open a session in {raw}"))
+    })?;
+    let mut bases = vec![std::path::PathBuf::from(&ws.root_path)];
+    if !caller_cwd.trim().is_empty() {
+        bases.push(std::path::PathBuf::from(caller_cwd));
+    }
+    let allowed = bases
+        .iter()
+        .filter_map(|b| std::fs::canonicalize(b).ok())
+        .any(|b| want.starts_with(b));
+    if allowed {
+        Ok(())
+    } else {
+        Err(otto_core::Error::Forbidden(format!(
+            "an agent may only open linked threads inside the workspace or its own folder (not {raw})"
+        )))
+    }
 }
 
 /// The synthetic PTY-shaped [`Session`] the safety helpers read (never
@@ -217,6 +268,19 @@ impl RuntimeHost for SessionManagerHost {
 
     async fn session_persistence_enabled(&self) -> bool {
         self.manager.session_persistence_enabled().await
+    }
+
+    async fn check_agent_cwd(
+        &self,
+        ws: &Workspace,
+        caller_id: &Id,
+        caller_cwd: &str,
+        cwd: Option<&str>,
+    ) -> Result<()> {
+        if check_agent_cwd_basic(ws, caller_cwd, cwd).is_ok() {
+            return Ok(());
+        }
+        self.manager.check_agent_cwd(ws, caller_id, cwd).await
     }
 
     fn attention(&self, session: &RuntimeSession, what: Option<&str>) {

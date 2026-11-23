@@ -245,6 +245,9 @@ pub(in crate::workflow_engine) async fn execute(
                     }
                 }
                 Err(e) => {
+                    if checkpoint_repo.is_canceled(run_id).await {
+                        return Err(e);
+                    }
                     let fline = format!("  [{i}/{sname}] ✗ {e}");
                     let _ = log_tx.send(fline.clone());
                     logs.push(fline);

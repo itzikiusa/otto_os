@@ -238,10 +238,17 @@ fn infer_sdk_kind(
             }
             IdeRunnerKind::Python | IdeRunnerKind::Pytest => return SdkKindHint::Python,
             IdeRunnerKind::CargoRun | IdeRunnerKind::CargoTest => return SdkKindHint::Rust,
-            IdeRunnerKind::Node | IdeRunnerKind::Npm | IdeRunnerKind::Vitest => {
+            IdeRunnerKind::Node
+            | IdeRunnerKind::Npm
+            | IdeRunnerKind::Vitest
+            | IdeRunnerKind::ReactNative => {
                 return SdkKindHint::Node;
             }
-            IdeRunnerKind::Shell | IdeRunnerKind::Compound | IdeRunnerKind::Custom => {}
+            IdeRunnerKind::Xcode
+            | IdeRunnerKind::Flutter
+            | IdeRunnerKind::Shell
+            | IdeRunnerKind::Compound
+            | IdeRunnerKind::Custom => {}
         }
     }
     if let Some(h) = lang_or_path_hint.map(str::trim) {

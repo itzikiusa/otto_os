@@ -1,6 +1,7 @@
 // Typed bridge + navigation/dive/blame/local-history/git helpers between
 // `IdeEditorArea` and `ideStore.svelte.ts`.
 
+import type { IdeLspJumpTarget } from '../../../lib/components/cm-ide-lsp-dive';
 import { idePreferences } from '../../../lib/idePreferences.svelte';
 import { ide, type IdeOpenTab } from '../ideStore.svelte';
 
@@ -141,7 +142,7 @@ export function classifyIdeFile(tab: IdeOpenTab, rootPath: string, additionalRoo
 export function performIdeDive(
   mode: 'definition' | 'implementation',
   fromPath: string,
-  target: { path?: string; line: number; column: number; symbol?: string; originLine?: number; originColumn?: number },
+  target: IdeLspJumpTarget,
   content: string,
 ): Promise<void> {
   return import('./ideEditorActionsLazy').then((m) => m.runPerformIdeDive(mode, fromPath, target, content));

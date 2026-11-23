@@ -6,8 +6,9 @@
   // Hall". It sits above the unchanged Design Arena and stays out of the way:
   // collapsible (remembered per device) and silent when Design Hall isn't
   // available (no feature grant, or a daemon without the graph routes).
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { router } from '../../lib/router.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { lsGet, lsSet } from '../../lib/storage';
@@ -86,6 +87,13 @@
 
   let seen = designBus.seq;
   let t: ReturnType<typeof setTimeout> | null = null;
+  onDestroy(() => {
+    ++seq;
+    if (t) {
+      clearTimeout(t);
+      t = null;
+    }
+  });
   $effect(() => {
     const now = designBus.seq;
     untrack(() => {
@@ -111,13 +119,14 @@
       <Icon name="designHall" size={14} />
       <span class="h">Design Hall</span>
       <span class="dim">
-        {#if phase === 'loading'}Loading designs…{:else if phase === 'error'}Couldn’t load linked designs{:else}{plural(artifacts.length, 'design')} linked to this {isEpic ? 'epic and its stories' : 'story'}{/if}
+        {#if phase === 'loading'}Loading designs…{:else if phase === 'error'}Linked designs unavailable{:else}{plural(artifacts.length, 'design')} linked to this {isEpic ? 'epic and its stories' : 'story'}{/if}
       </span>
-      {#if phase === 'error'}<button class="btn small ghost" onclick={() => void load()}>Retry</button>{/if}
       <span class="grow"></span>
       <button class="btn small" onclick={openHall} data-testid="design-open-in-hall"><Icon name="external" size={12} /> Open in Design Hall</button>
     </header>
-    {#if open && phase === 'ready'}
+    {#if phase === 'error'}
+      <LoadState what="linked designs" variant="compact" error="Check the connection and try again." empty onretry={() => void load()} />
+    {:else if open && phase === 'ready'}
       {#if artifacts.length === 0}
         <p class="empty dim">No design implements this story yet. Designs made here in the arena appear in Design Hall after its next import; designs made in Design Hall link here when they implement the story.</p>
       {:else}

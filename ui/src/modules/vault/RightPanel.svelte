@@ -1,6 +1,7 @@
 <script lang="ts">
   // Right panel: Backlinks (linked mentions) · Outgoing links · Outline ·
   // Properties (frontmatter) · OKF validation card (OKF vaults only).
+  import { tick } from 'svelte';
   import { scrollBehavior } from '../../lib/motion';
   import { confirmer } from '../../lib/confirm.svelte';
   import { vault } from './vault.svelte';
@@ -50,10 +51,15 @@
 
   const OKF_FIELDS = new Set(['type', 'title', 'description', 'resource', 'tags', 'timestamp', 'generated', 'verified', 'sources', 'usage_window', 'status', 'stale_after', 'computation', 'executor', 'attester']);
 
-  function jumpToHeading(text: string): void {
-    document
-      .querySelector(`.read #h-${CSS.escape(slugifyHeading(text))}`)
-      ?.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
+  async function jumpToHeading(text: string): Promise<void> {
+    if (vault.editing) {
+      vault.setView(false);
+      await tick();
+    }
+    const target = `#h-${CSS.escape(slugifyHeading(text))}`;
+    const scroll = () => document.querySelector(`.read ${target}`)?.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
+    if (document.querySelector(`.read ${target}`)) scroll();
+    else requestAnimationFrame(scroll);
   }
 </script>
 

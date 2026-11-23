@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { announceShown } from '../../lib/announce.svelte';
   import { sectionLabel } from './sections';
   import SectionIntro from './SectionIntro.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -197,7 +198,7 @@
       {/if}
     </div>
     {#if smtpError}
-      <div class="smtp-error" role="alert">
+      <div class="smtp-error" use:announceShown={{ text: `SMTP error: ${smtpError}`, assertive: true }}>
         <strong>SMTP error:</strong> {smtpError}
       </div>
     {/if}

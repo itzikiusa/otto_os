@@ -14,10 +14,13 @@ pub(in crate::workflow_engine) async fn execute(
     // the run is marked error (the pipeline isn't "done" until playable).
     if let Some(play_url) = input.get("play_url").and_then(Value::as_str) {
         let game_path = input.get("game_path").and_then(Value::as_str).unwrap_or("");
-        let exists = !game_path.is_empty() && std::path::Path::new(game_path).is_file();
-        let big_enough = std::fs::metadata(game_path)
-            .map(|m| m.len() > 1500)
-            .unwrap_or(false);
+        let meta = if game_path.is_empty() {
+            None
+        } else {
+            tokio::fs::metadata(game_path).await.ok()
+        };
+        let exists = meta.as_ref().is_some_and(|m| m.is_file());
+        let big_enough = meta.as_ref().is_some_and(|m| m.len() > 1500);
         let self_test = input
             .get("playable")
             .and_then(Value::as_bool)
@@ -47,18 +50,7 @@ pub(in crate::workflow_engine) async fn execute(
         ));
     }
 
-    let build = input.get("build").cloned().unwrap_or(input.clone());
-    let report = json!({
-        "checks": [
-            { "name": "asset_integrity", "passed": true },
-            { "name": "rng_distribution", "passed": true, "note": "scaffold sample" },
-            { "name": "rtp_within_target", "passed": true, "rtp": 0.96 },
-        ],
-        "passed": true,
-        "note": "Scaffold verifier: replace with the real certifier.",
-    });
-    Ok((
-        json!({ "verified": report, "build": build }),
-        vec!["verification passed (scaffold)".into()],
+    Err(otto_core::Error::Invalid(
+        "verifier: missing `play_url` / `game_path` artifact to verify".into(),
     ))
 }

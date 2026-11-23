@@ -17,6 +17,7 @@
   import Terminal from '../../lib/components/Terminal.svelte';
   import { PRIMARY_SCROLLBACK } from '../../lib/components/termFlow';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { getSharedSession, getShareWhoami, verifyShareOtp, extendShare } from '../../lib/api/share';
   import { forgetStoredShareToken, getShareToken } from '../../lib/router.svelte';
   import type { Session, SessionStatus } from '../../lib/api/types';
@@ -299,7 +300,7 @@
 <!-- ── No token ─────────────────────────────────────────────────────── -->
 {#if !token}
   <div class="share-error" style={`zoom:${ui.zoom}`}>
-    <div class="error-card" role="alert">
+    <div class="error-card" use:announceShown={{ text: 'This link is invalid or has expired.', assertive: true }}>
       <div class="error-icon"><Icon name="warning" size={26} /></div>
       <h2>This link is invalid or has expired</h2>
       <p>
@@ -353,7 +354,7 @@
         </button>
       </div>
       {#if otpError}
-        <p class="otp-error" role="alert">{otpError}</p>
+        <p class="otp-error" use:announceShown={{ text: otpError, assertive: true }}>{otpError}</p>
       {/if}
       <div class="otp-extend-row">
         <span class="dim">Code expired or not received?</span>
@@ -367,14 +368,15 @@
 <!-- ── Error (irrecoverable) ─────────────────────────────────────────── -->
 {:else if viewState === 'error'}
   <div class="share-error" style={`zoom:${ui.zoom}`}>
-    <div class="error-card" role="alert">
-      <div class="error-icon"><Icon name="warning" size={26} /></div>
-      <h2>Couldn’t open this session</h2>
-      <p>{loadCause}</p>
-      {#if loadError}<p class="hint">{loadError}</p>{/if}
-      {#if !linkDead}
-        <button class="btn ec-retry" onclick={() => void loadSession()}><Icon name="refresh" size={13} /> Retry</button>
-      {/if}
+    <div class="error-card">
+      <LoadState
+        what="this session"
+        errorTitle="Couldn’t open this session"
+        error={loadError ? `${loadCause} ${loadError}` : loadCause}
+        empty
+        variant="panel"
+        onretry={linkDead ? undefined : () => void loadSession()}
+      />
     </div>
   </div>
 
@@ -486,17 +488,6 @@
     color: var(--text-dim);
     margin: 0;
     line-height: 1.5;
-  }
-  .error-card .hint {
-    font-size: var(--fs-xs);
-    font-family: var(--font-mono);
-    overflow-wrap: anywhere;
-  }
-  .ec-retry {
-    align-self: center;
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
   }
   .dim {
     color: var(--text-dim);

@@ -123,24 +123,22 @@
     const open = reload || !openDbs[db];
     openDbs = { ...openDbs, [db]: open };
     if (open && !catalog?.tables[db] && !tablesLoading[db]) {
+      const seq = catalogGeneration, requestedRegion = rq;
       tablesLoading = { ...tablesLoading, [db]: true };
       try {
-        await aws.loadAthenaTables(account.id, db, rq);
-      } catch (e) {
-        tablesError = { ...tablesError, [db]: awsLoadText(e) };
-      } finally {
-        tablesLoading = { ...tablesLoading, [db]: false };
-      }
+        await aws.loadAthenaTables(account.id, db, requestedRegion);
+        if (seq === catalogGeneration && requestedRegion === rq && tablesError[db]) tablesError = { ...tablesError, [db]: '' };
+      } catch (e) { if (seq === catalogGeneration && requestedRegion === rq) tablesError = { ...tablesError, [db]: awsLoadText(e) }; }
+      finally { if (seq === catalogGeneration && requestedRegion === rq) tablesLoading = { ...tablesLoading, [db]: false }; }
     }
   }
 
   $effect(() => {
     void rq;
     untrack(() => {
-      historyGeneration++;
-      history = [];
-      historyError = '';
-      historyLoading = false;
+      catalogGeneration++; historyGeneration++;
+      tablesLoading = {}; tablesError = {};
+      history = []; historyError = ''; historyLoading = false;
       if (tab === 'history') void loadHistory();
       if (!catalog) void loadCatalog();
       else {

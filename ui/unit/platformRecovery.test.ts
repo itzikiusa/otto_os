@@ -22,7 +22,7 @@ test('template retry preserves the first created agent and schedule request key'
     busy: false, error: '', agent: null, createdAgent: null, pendingSchedule: null, scheduleOverride: null,
     fName: 'Recap', fAvatar: '', fSoul: '', fProvider: 'claude', fModel: '', fCwd: '', fBrowser: false,
     fEnabled: true, fDestType: 'none', fTemplate: 'recap', ws: { currentId: 'workspace' },
-    crypto: { randomUUID: () => 'stable-request' }, Intl,
+    newId: () => 'stable-request', Intl,
     templateById: () => ({ schedule: { cadence: 'interval', every_min: 60 }, directive: 'Recap' }),
     personalAgents: { create: async () => { creates++; return { id: 'first-agent', name: 'Recap' }; },
       update: async () => ({ id: 'first-agent', name: 'Recap' }),

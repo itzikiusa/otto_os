@@ -1,0 +1,78 @@
+{
+ "title": "The man and the chest",
+ "summary": "A tired man stands next to a chest of gold and says it is his.",
+ "items": [
+  {
+   "id": "man",
+   "kind": "character",
+   "name": "The man",
+   "description": "A tired fighter in worn armor.",
+   "enabled": true,
+   "details": {
+    "prompt": "a tired fighter in worn armor, stylized game character, full body",
+    "voice": "deep and a bit broken",
+    "moves": [
+     "idle",
+     "walk",
+     "run"
+    ],
+    "size_m": 1.8,
+    "body": "two_legs"
+   }
+  },
+  {
+   "id": "chest",
+   "kind": "object",
+   "name": "Treasure chest",
+   "description": "A wooden chest full of gold coins.",
+   "enabled": true,
+   "details": {
+    "prompt": "a small wooden treasure chest",
+    "size_m": 0.8
+   }
+  },
+  {
+   "id": "coins",
+   "kind": "object",
+   "name": "Gold coins",
+   "description": "A pile of shiny gold coins in the chest.",
+   "enabled": true,
+   "details": {
+    "prompt": "a pile of shiny gold coins",
+    "size_m": 0.4
+   }
+  },
+  {
+   "id": "line1",
+   "kind": "voice_line",
+   "name": "The man: “This chest is mine.”",
+   "description": "He says it in a deep voice.",
+   "enabled": true,
+   "details": {
+    "speaker": "man",
+    "text": "This chest is mine.",
+    "pace": "slow",
+    "mood": "proud"
+   }
+  }
+ ],
+ "notes": [],
+ "layout": [
+  {
+   "item": "man",
+   "place": "left",
+   "facing": "chest"
+  },
+  {
+   "item": "chest",
+   "place": "right"
+  },
+  {
+   "item": "coins",
+   "rel": {
+    "to": "chest",
+    "how": "in"
+   }
+  }
+ ]
+}

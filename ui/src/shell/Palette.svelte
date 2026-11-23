@@ -31,17 +31,17 @@
   import Icon, { type IconName } from '../lib/components/Icon.svelte';
   import { lsGet, lsSet } from '../lib/storage';
   import { COPY_FAILED_BODY, copyText } from '../lib/clipboard';
-  import { openHitInApp } from '../lib/searchHitOpen';
-  import { hitActions, hitContext, type HitAction } from '../lib/floatingBar';
+  import { openHitInApp, runHitPowerAction } from '../lib/searchHitOpen';
+  import { hitActions, hitContext, resolveHitKeyAction, type HitAction } from '../lib/floatingBar';
 
   const HIT_ACTION_LABEL: Record<HitAction, string> = {
-    open: 'Open',
-    'copy-context': 'Copy context',
-    'send-to-agent': 'Send to agent',
+    open: 'Open', rerun: 'Run again', review: 'Review', 'copy-context': 'Copy context', 'send-to-agent': 'Send to agent',
   };
 
   /** The keys that run a hit's actions from the keyboard (shown on the selected hit). */
-  const HIT_ACTION_KEY: Record<HitAction, string> = { open: '⏎', 'copy-context': '⌥⏎', 'send-to-agent': '⇧⏎' };
+  const HIT_ACTION_KEY: Record<HitAction, string> = {
+    open: '⏎', rerun: '⌘⏎', review: '⌘⏎', 'copy-context': '⌥⏎', 'send-to-agent': '⇧⏎',
+  };
 
   let mode: 'commands' | 'english' = $state('commands');
   let query = $state('');
@@ -142,6 +142,8 @@
     close();
     if (action === 'open') {
       openHitInApp(hit);
+    } else if (action === 'rerun' || action === 'review') {
+      void runHitPowerAction(hit, action);
     } else if (await copyText(hitContext(hit))) {
       toasts.success('Copied', hit.title);
     } else {
@@ -243,13 +245,9 @@
     listEl?.querySelector(`#${id}`)?.scrollIntoView({ block: 'nearest' });
   });
 
-  /** The default action for a hit on Enter: open it when it can be opened. */
+  /** Run the action matching Enter (+ ⌘ / ⌥ / ⇧ modifier) on a selected hit. */
   function hitDefault(hit: SearchHit, e?: KeyboardEvent): void {
-    // ⏎ opens; ⌥⏎ copies the hit as context; ⇧⏎ sends it to an agent (the pills
-    // under a hit are the mouse shortcut for the same actions).
-    const acts = hitActions(hit);
-    const want: HitAction | null = e?.altKey ? 'copy-context' : e?.shiftKey ? 'send-to-agent' : null;
-    const a = want && acts.includes(want) ? want : acts[0];
+    const a = resolveHitKeyAction(hitActions(hit), e);
     if (a) void hitAction(hit, a);
   }
 
@@ -554,11 +552,10 @@
               <div class="pal-hit-main">
                 <Icon name={hitIcon(hit.kind)} size={12} />
                 <span class="pal-hit-title" title={hit.title}>{hit.title}</span>
-                {#if hit.subtitle}
-                  <span class="pal-hit-sub" title={hit.subtitle}>{hit.subtitle}</span>
-                {/if}
+                {#if hit.subtitle}<span class="pal-hit-sub" title={hit.subtitle}>{hit.subtitle}</span>{/if}
                 <span class="grow"></span>
                 <span class="pal-group pal-hit-kind">{hit.kind.replace('_', ' ')}</span>
+                {#if selected === hitBase + h}<span class="sr-only">{hitActions(hit).map((a) => `${HIT_ACTION_LABEL[a]} ${HIT_ACTION_KEY[a]}`).join(', ')}</span>{/if}
               </div>
               <!-- The pills are a mouse shortcut only: out of the tab order and
                    hidden from AT (an option holds no interactive children); the

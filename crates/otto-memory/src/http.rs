@@ -294,27 +294,12 @@ async fn graph<C: MemoryCtx>(
     Query(q): Query<GraphQ>,
 ) -> ApiResult<Json<GraphData>> {
     require(&c, &user, &ws, WorkspaceRole::Viewer).await?;
-    let repo = c.memory().repo();
     let viewer = (!user.is_root).then_some(user.id.as_str());
-    let nodes: Vec<GraphNode> = repo
-        .graph_nodes_visible(&ws, q.collection.as_deref(), viewer)
-        .await?
-        .into_iter()
-        .map(|(id, label, kind, collection)| GraphNode {
-            id,
-            label,
-            kind,
-            collection,
-        })
-        .collect();
-    let ids: std::collections::HashSet<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
-    let edges = repo
-        .links_visible(&ws, None, viewer)
-        .await?
-        .into_iter()
-        .filter(|edge| ids.contains(edge.src_id.as_str()) && ids.contains(edge.dst_id.as_str()))
-        .collect();
-    Ok(Json(GraphData { nodes, edges }))
+    Ok(Json(
+        c.memory()
+            .graph_visible(&ws, q.collection.as_deref(), viewer)
+            .await?,
+    ))
 }
 
 async fn ingest_text<C: MemoryCtx>(

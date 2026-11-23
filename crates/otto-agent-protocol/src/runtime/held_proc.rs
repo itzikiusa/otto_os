@@ -156,6 +156,7 @@ pub(super) fn finalize_child_exit(
     stderr_tail: String,
 ) {
     live.proc_ended.notify_waiters();
+    st.released = false;
     retire(inner, &st.session);
     let step = proc.driver.on_exit(code);
     apply_step_opts(inner, live, st, step, true, true);

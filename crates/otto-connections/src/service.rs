@@ -14,7 +14,7 @@ use otto_pty::CommandSpec;
 use otto_state::{ConnectionSectionsRepo, ConnectionsRepo, NewConnection};
 use tokio::io::AsyncWriteExt;
 
-use crate::builders::{build_command, validate_params};
+use crate::builders::{build_command_async, validate_params};
 
 /// Test-connect timeout.
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -684,7 +684,7 @@ impl ConnectionsService {
             ));
         }
         let secret = self.fetch_secret(conn).await?;
-        let (spec, _warn_argv) = build_command(conn, secret.as_deref())?;
+        let (spec, _warn_argv) = build_command_async(conn, secret.as_deref()).await?;
         let session = spawner
             .spawn_connection(
                 ws_id,
@@ -852,7 +852,7 @@ async fn probe_into(
             hint: None,
         });
     }
-    let (spec, warn_argv) = build_command(conn, secret)?;
+    let (spec, warn_argv) = build_command_async(conn, secret).await?;
     let (spec, probe) = probe_spec(conn.kind, spec);
     // ssh (the SSH kind, or a DB client run on a jump host) prints notices
     // before its real error; pick the explanatory line + a fix hint.

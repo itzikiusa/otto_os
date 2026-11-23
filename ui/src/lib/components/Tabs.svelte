@@ -35,6 +35,7 @@
   import type { Snippet } from 'svelte';
   import Icon from './Icon.svelte';
   import { tabKeys, type TabKeyOptions } from '../tabKeys';
+  import { scrollBehavior } from '../motion';
 
   interface Props {
     tabs: readonly TabItem<T>[];
@@ -122,6 +123,11 @@
     list.addEventListener('wheel', onwheel, { passive: false });
     return () => list.removeEventListener('wheel', onwheel);
   });
+  /** The "more tabs" chevron: a touch screen has no wheel and no visible scrollbar. */
+  function scrollOn(): void {
+    const list = listEl;
+    if (list) list.scrollBy({ left: (getComputedStyle(list).direction === 'rtl' ? -1 : 1) * list.clientWidth * 0.8, behavior: scrollBehavior() });
+  }
   function onwheel(e: WheelEvent): void {
     const list = listEl;
     if (!list || list.scrollWidth <= list.clientWidth) return;
@@ -132,6 +138,8 @@
 </script>
 
 <div class="otabs" class:small={size === 's'} class:wrap-trailing={wrapTrailing} bind:this={rootEl}>
+  <!-- The strip and its "More tabs" chevron share one row, which a wrap keeps whole. -->
+  <div class="otabs-row">
   <div
     class="otabs-list"
     class:fade-start={fadeStart}
@@ -170,6 +178,10 @@
       </button>
     {/each}
   </div>
+  {#if fadeEnd}
+    <button type="button" class="icon-btn otabs-next" onclick={scrollOn} aria-label="More tabs" title="More tabs" data-testid="tabs-more"><Icon name="chevronRight" size={14} /></button>
+  {/if}
+  </div>
   {#if trailing}<div class="otabs-trailing" bind:this={trailEl}>{@render trailing()}</div>{/if}
 </div>
 
@@ -182,6 +194,13 @@
     border-block-end: 1px solid var(--border);
     min-width: 0;
     flex-shrink: 0;
+  }
+  .otabs-row {
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+    flex: 1;
+    min-width: 0;
   }
   .otabs-list {
     display: flex;
@@ -222,11 +241,18 @@
   .otabs.wrap-trailing {
     flex-wrap: wrap;
   }
-  .otabs.wrap-trailing .otabs-list {
+  .otabs.wrap-trailing .otabs-row {
     flex-basis: 100%;
   }
   .otabs.wrap-trailing .otabs-trailing {
     padding-block: 4px;
+  }
+  .otabs-next {
+    align-self: center;
+    flex-shrink: 0;
+  }
+  .otabs-next:dir(rtl) :global(svg) {
+    transform: scaleX(-1);
   }
   .otabs-trailing {
     display: flex;

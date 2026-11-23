@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { announce } from '../../lib/announce.svelte';
+  import { announce, announceShown } from '../../lib/announce.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   // First-run wizard: welcome → root password → first workspace → tools → done.
   import { tick } from 'svelte';
   import { api, setToken, ApiError } from '../../lib/api/client';
@@ -138,7 +139,7 @@
       skipWorkspace = false;
       step = 3;
     } catch (e) {
-      pathError = `Otto can’t open that folder: ${e instanceof Error ? e.message : String(e)}. Check the path, or choose it with Browse.`;
+      pathError = `Otto can’t open that folder: ${loadErrorText(e)}. Check the path, or choose it with Browse.`;
     } finally {
       checkingPath = false;
     }
@@ -247,7 +248,7 @@
           <span id="ob-mismatch" class="hint err" role="status">{password2.length > 0 && password !== password2 ? "Passwords don’t match" : ''}</span>
         </div>
 
-        {#if pwError}<div class="hint err" role="alert">{pwError}</div>{/if}
+        {#if pwError}<div class="hint err" use:announceShown={{ text: pwError, assertive: true }}>{pwError}</div>{/if}
 
         <div class="ob-actions">
           <button type="button" class="btn" disabled={busy} onclick={() => (step = 0)}>Back</button>
@@ -377,7 +378,7 @@
           {/if}
         </p>
 
-        {#if error}<div class="hint err" role="alert">{error}</div>{/if}
+        {#if error}<div class="hint err" use:announceShown={{ text: error, assertive: true }}>{error}</div>{/if}
 
         <div class="ob-actions">
           <button type="button" class="btn" disabled={busy} onclick={() => (step = 3)}>Back</button>

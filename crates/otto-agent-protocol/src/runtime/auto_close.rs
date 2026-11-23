@@ -93,6 +93,7 @@ fn release_locked(inner: &Arc<Inner>, live: &Live, st: &mut State) {
     };
     live.proc_ended.notify_waiters();
     stop_child(p, inner.config.close_grace);
+    st.released = true;
     retire(inner, &st.session);
     set_session_status(inner, live, st, ProviderSessionStatus::Stopped, None);
 }

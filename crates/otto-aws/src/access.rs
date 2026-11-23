@@ -186,6 +186,25 @@ pub fn require_setup_authority(user: &User) -> Result<()> {
     }
 }
 
+/// Writing S3 objects straight onto the daemon host filesystem (`$HOME` /
+/// `/Volumes`) is host authority — matching SFTP's root-only host-path rule
+/// (`otto-connections/src/transfers.rs`). Re-reads the live DB user row so a
+/// revoked or disabled root session cannot slip past.
+pub async fn require_host_download_root(pool: &DbPool, user: &User) -> Result<()> {
+    let current = otto_state::UsersRepo::new(pool.clone())
+        .get(&user.id)
+        .await?;
+    if otto_core::auth::root_authority(&current) && !current.disabled {
+        Ok(())
+    } else if current.is_root && !current.disabled {
+        Err(otto_core::auth::root_refusal())
+    } else {
+        Err(Error::Forbidden(
+            "only root can download S3 objects to the daemon host filesystem".into(),
+        ))
+    }
+}
+
 /// Legacy resources still require the original Admin feature tier to expose configuration.
 pub async fn can_configure(pool: &DbPool, user: &User, id: &Id) -> Result<bool> {
     if !allowed(pool, user, id, "configure", None).await? {
@@ -238,5 +257,43 @@ mod agent_confirm_tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn host_download_requires_active_human_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::open(&dir.path().join("otto.db")).await.unwrap();
+        let users = otto_state::UsersRepo::new(pool.clone());
+        let root = users.create("root", "Root", "h", true).await.unwrap();
+        let member = users.create("alice", "Alice", "h", false).await.unwrap();
+        let disabled_root = users.create("droot", "DRoot", "h", true).await.unwrap();
+        users
+            .update(&disabled_root.id, None, None, Some(true))
+            .await
+            .unwrap();
+
+        let person = RequestCredential::default();
+        assert!(
+            with_request_credential(person, require_host_download_root(&pool, &root))
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            with_request_credential(person, require_host_download_root(&pool, &member)).await,
+            Err(Error::Forbidden(_))
+        ));
+        assert!(matches!(
+            with_request_credential(person, require_host_download_root(&pool, &disabled_root))
+                .await,
+            Err(Error::Forbidden(_))
+        ));
+        let agent = RequestCredential {
+            agent: true,
+            root_withheld: true,
+        };
+        assert!(matches!(
+            with_request_credential(agent, require_host_download_root(&pool, &root)).await,
+            Err(Error::Forbidden(_))
+        ));
     }
 }

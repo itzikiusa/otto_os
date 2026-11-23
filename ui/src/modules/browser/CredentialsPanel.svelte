@@ -11,6 +11,7 @@
   //
   // Mounted from the Browser toolbar in a workspace-scoped modal.
 
+  import { onDestroy } from 'svelte';
   import * as browserApi from '../../lib/api/browser';
   import type { BrowserCredential } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
@@ -41,23 +42,42 @@
 
   // ── Reveal ───────────────────────────────────────────────────────────────
   /** The one credential whose password is currently shown, plus the value
-   *  itself — cleared on dismiss so it doesn't linger in memory/DOM. */
+   *  itself — cleared on dismiss or after 30 s so it doesn't linger in DOM. */
+  const REVEAL_AUTO_HIDE_MS = 30_000;
   let revealed: { id: string; password: string } | null = $state(null);
   let revealingId: string | null = $state(null);
+  let revealTimer: ReturnType<typeof setTimeout> | null = null;
 
+  function clearRevealTimer(): void {
+    if (revealTimer) {
+      clearTimeout(revealTimer);
+      revealTimer = null;
+    }
+  }
+  onDestroy(clearRevealTimer);
+
+  let loadSeq = 0;
   $effect(() => {
-    if (workspaceId) void load();
+    const id = workspaceId;
+    if (id) void load(id);
+    return () => {
+      loadSeq += 1;
+    };
   });
 
-  async function load(): Promise<void> {
+  async function load(id = workspaceId): Promise<void> {
+    const mine = ++loadSeq;
     loading = true;
     try {
-      creds = await browserApi.listCredentials(workspaceId);
+      const next = await browserApi.listCredentials(id);
+      if (mine !== loadSeq || id !== workspaceId) return;
+      creds = next;
       loadError = '';
     } catch (e) {
+      if (mine !== loadSeq || id !== workspaceId) return;
       loadError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (mine === loadSeq) loading = false;
     }
   }
 
@@ -92,14 +112,12 @@
   let fieldErrors = $state<Partial<Record<'domain' | 'username' | 'password', string>>>({});
 
   async function save(): Promise<void> {
-    if (!editing) {
-      const errs: typeof fieldErrors = {};
-      if (!fDomain.trim()) errs.domain = 'Enter the site’s domain, like example.com.';
-      if (!fUsername.trim()) errs.username = 'Enter the username to fill in.';
-      if (!fPassword) errs.password = 'Enter the password to store in the Keychain.';
-      fieldErrors = errs;
-      if (Object.keys(errs).length) return;
-    }
+    const errs: typeof fieldErrors = {};
+    if (!editing && !fDomain.trim()) errs.domain = 'Enter the site’s domain, like example.com.';
+    if (!fUsername.trim()) errs.username = 'Enter the username to fill in.';
+    if (!editing && !fPassword) errs.password = 'Enter the password to store in the Keychain.';
+    fieldErrors = errs;
+    if (Object.keys(errs).length) return;
     saving = true;
     try {
       if (editing) {
@@ -141,7 +159,7 @@
     try {
       await browserApi.deleteCredential(c.id);
       creds = creds.filter((x) => x.id !== c.id);
-      if (revealed?.id === c.id) revealed = null;
+      if (revealed?.id === c.id) dismissReveal();
       toasts.success('Credential deleted', `${c.domain} · ${c.username}`);
     } catch (e) {
       toastError('Couldn’t delete', e);
@@ -157,7 +175,9 @@
     revealingId = c.id;
     try {
       const resp = await browserApi.revealCredential(c.id);
+      clearRevealTimer();
       revealed = { id: c.id, password: resp.password };
+      revealTimer = setTimeout(dismissReveal, REVEAL_AUTO_HIDE_MS);
     } catch (e) {
       toastError('Couldn’t reveal', e);
     } finally {
@@ -166,6 +186,7 @@
   }
 
   function dismissReveal(): void {
+    clearRevealTimer();
     revealed = null;
   }
 
@@ -182,12 +203,9 @@
 
 <div class="panel">
   <div class="panel-head">
-    <div>
-      <h2>Site credentials</h2>
-      <div class="sub">
-        Stored in the macOS Keychain — Otto never keeps the password itself in
-        its database.
-      </div>
+    <div class="sub">
+      Stored in the macOS Keychain — Otto never keeps the password itself in
+      its database.
     </div>
     <button class="btn primary" onclick={openAdd}><Icon name="plus" size={14} /> Add credential</button>
   </div>
@@ -312,10 +330,6 @@
     align-items: flex-start;
     justify-content: space-between;
     gap: 0.6rem;
-  }
-  .panel-head h2 {
-    margin: 0;
-    font-size: var(--fs-m);
   }
   .sub {
     color: var(--text-dim);

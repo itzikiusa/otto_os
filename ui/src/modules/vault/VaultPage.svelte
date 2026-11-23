@@ -1,6 +1,6 @@
 <script lang="ts">
   import { loadErrorText } from '../../lib/loadError';
-  import { announce } from '../../lib/announce.svelte';
+  import { announce, announceShown } from '../../lib/announce.svelte';
   // Vault v3 — the docs home: Files / Search / Tags sidebar, note or graph center, and Note details as a
   // Side-panel tab (one right panel). Files on disk are the truth; the daemon keeps a derived index.
   import { onMount, untrack } from 'svelte';
@@ -35,6 +35,8 @@
   import Switcher from './Switcher.svelte';
   import TagsPanel from './TagsPanel.svelte';
   import { vault } from './vault.svelte';
+  import { shouldIgnoreVaultShortcut } from './vaultShortcuts';
+  import { consumeVaultDeepLink } from './ottoRefs';
   import { registerVaultPort } from '../../lib/uiCommands/vaultPort';
   import PathField from '../../lib/components/PathField.svelte';
   import Modal from '../../lib/components/Modal.svelte';
@@ -154,14 +156,10 @@
   }
 
   function onKeydown(e: KeyboardEvent): void {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'o') {
-      e.preventDefault();
-      vault.switcherOpen = true;
-    }
-    if ((e.metaKey || e.ctrlKey) && e.key === 'n' && vault.current) {
-      e.preventDefault();
-      openNewNote('');
-    }
+    if ((!e.metaKey && !e.ctrlKey) || shouldIgnoreVaultShortcut(e)) return;
+    const key = e.key.toLowerCase();
+    if (key === 'o') { e.preventDefault(); vault.switcherOpen = true; }
+    else if (key === 'n' && vault.current) { e.preventDefault(); openNewNote(''); }
   }
 
   // ⌘K: the page's verbs (the same ones the toolbar and ⌘O / ⌘N offer).
@@ -277,11 +275,9 @@
   let lastWs = $state('');
   $effect(() => {
     const id = ws.current?.id ?? '';
-    if (id && id !== lastWs) {
-      lastWs = id;
-      void vault.load();
-    }
+    if (id && id !== lastWs) { lastWs = id; void vault.load(); }
   });
+  $effect(() => { if (vault.vaults.length) void consumeVaultDeepLink(router.parts, vault, router); });
 </script>
 
 <svelte:window onkeydown={onKeydown} />
@@ -423,11 +419,8 @@
   {:else if vault.current}
     <PageBody fill padded={false}>
     {#if vault.noteOpenError}
-      <div class="note-open-error" role="alert" data-testid="note-open-error">
-        <span>Couldn’t open <bdi>{vault.noteOpenError.path}</bdi>. {vault.noteOpenError.message}</span>
-        <button class="btn small" onclick={() => { const failed = vault.noteOpenError; if (failed) void vault.open(failed.path, failed.opts); }}>Retry</button>
-        <button class="btn small ghost" onclick={() => (vault.noteOpenError = null)}>Dismiss</button>
-      </div>
+      {@const failed = vault.noteOpenError}
+      <div class="note-open-error" data-testid="note-open-error"><LoadState what={failed.path} errorTitle={`Couldn’t open ${failed.path}`} variant="compact" error={failed.message} empty onretry={() => void vault.open(failed.path, failed.opts)}>{#snippet errorActions()}<button class="btn small ghost" onclick={() => (vault.noteOpenError = null)}>Dismiss</button>{/snippet}</LoadState></div>
     {/if}
     <div class="panes">
       {#if phoneInSidebar || (!viewport.isPhone && leftOpen)}
@@ -489,7 +482,7 @@
           <!-- Each tab is a presentational wrapper around TWO real buttons (the
                tab + its close), so the close control isn't nested inside an
                interactive role=tab. Middle-click closes too. -->
-          <div class="tabstrip scroll-thin" role="tablist" aria-label="Open notes">
+          <div class="tabstrip scroll-thin" role="tablist" aria-label="Open notes"><!-- ui-guards: allow — closeable document tabstrip; keyboard-complete via onTabKey -->
             {#each vault.tabs as t, i (t.kind + ':' + t.path)}
               {@const tabName = t.kind === 'note'
                 ? (t.path.split('/').pop() ?? t.path).replace(/\.md$/i, '')
@@ -611,7 +604,7 @@
         OKF vault (Open Knowledge Format validation and templates)
       </label>
       {#if createError}
-        <div class="av-err" role="alert">Couldn’t add the vault. {createError}</div>
+        <div class="av-err" use:announceShown={{ text: `Couldn’t add the vault. ${createError}`, assertive: true }}>Couldn’t add the vault. {createError}</div>
       {/if}
     </form>
     {#snippet footer()}
@@ -915,21 +908,10 @@
     }
   }
 
-  /* Phone: push navigation — sidebar or center takes the full body height,
-   * and the status bar drops the on-disk path (it would take a whole row). */
+  @media (min-width: 641px) and (max-width: 1024px) { .left { max-width: min(38vw, 240px); } }
   @media (max-width: 640px) {
-    .vs-path {
-      display: none;
-    }
-    .panes {
-      flex-direction: column;
-    }
-    .left {
-      flex: 1;
-      width: 100% !important;
-      max-height: none;
-      border-inline-end: none;
-      border-bottom: none;
-    }
+    .vs-path { display: none; }
+    .panes { flex-direction: column; }
+    .left { flex: 1; width: 100% !important; max-height: none; border-inline-end: none; border-bottom: none; }
   }
 </style>

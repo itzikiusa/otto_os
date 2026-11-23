@@ -7,9 +7,21 @@
 use crate::DbPool;
 use chrono::Utc;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use sqlx::Row;
 
 use otto_core::{Error, Result};
+
+/// Prefix marking a SHA-256-hashed plugin token stored in `plugins.token`.
+const TOKEN_HASH_PREFIX: &str = "sha256:";
+
+/// Hash a raw plugin token for persistence/lookup so plaintext plugin
+/// credentials never sit in `otto.db` or pre-migration backups.
+pub fn hash_plugin_token(raw: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(raw.as_bytes());
+    format!("{TOKEN_HASH_PREFIX}{}", hex::encode(h.finalize()))
+}
 
 /// An installed runtime plugin. `token` is never serialized to clients.
 #[derive(Debug, Clone, Serialize)]
@@ -78,9 +90,11 @@ impl PluginsRepo {
     }
 
     /// Install or replace a plugin (preserves nothing; enabled defaults to off).
+    /// Only the SHA-256 hash of `p.token` is persisted in SQLite.
     pub async fn upsert(&self, p: NewPlugin) -> Result<PluginRecord> {
         let exec_json = serde_json::to_string(&p.exec)
             .map_err(|e| Error::Internal(format!("plugin exec encode: {e}")))?;
+        let token_hash = hash_plugin_token(&p.token);
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO plugins (slug, name, icon, version, description, source, exec_json, ui_dir, health, enabled, token, installed_at)
@@ -91,7 +105,7 @@ impl PluginsRepo {
                ui_dir=excluded.ui_dir, health=excluded.health, token=excluded.token, enabled=0",
         )
         .bind(&p.slug).bind(&p.name).bind(&p.icon).bind(&p.version).bind(&p.description)
-        .bind(&p.source).bind(&exec_json).bind(&p.ui_dir).bind(&p.health).bind(&p.token).bind(&now)
+        .bind(&p.source).bind(&exec_json).bind(&p.ui_dir).bind(&p.health).bind(&token_hash).bind(&now)
         .execute(&self.pool)
         .await
         .map_err(|e| Error::Internal(format!("plugin upsert: {e}")))?;
@@ -160,13 +174,69 @@ impl PluginsRepo {
 
     /// Resolve an enabled plugin by its host-API token (sidecar authentication).
     pub async fn find_enabled_by_token(&self, token: &str) -> Result<Option<PluginRecord>> {
+        let token_hash = hash_plugin_token(token);
         let row = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT {COLS} FROM plugins WHERE token = ? AND enabled = 1"
         )))
-        .bind(token)
+        .bind(&token_hash)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| Error::Internal(format!("plugin by token: {e}")))?;
         row.as_ref().map(row_to_record).transpose()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn plugin_tokens_are_hashed_at_rest_and_matched_by_raw_token() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let repo = PluginsRepo::new(pool.clone());
+
+        let raw = "raw-plugin-secret-token";
+        let rec = repo
+            .upsert(NewPlugin {
+                slug: "demo".into(),
+                name: "Demo".into(),
+                icon: "box".into(),
+                version: "1.0.0".into(),
+                description: String::new(),
+                source: "/tmp/demo".into(),
+                exec: vec!["/bin/true".into()],
+                ui_dir: None,
+                health: "/health".into(),
+                token: raw.into(),
+            })
+            .await
+            .unwrap();
+        // Plaintext token must never be stored in SQLite.
+        assert_ne!(rec.token, raw);
+        assert!(rec.token.starts_with(TOKEN_HASH_PREFIX));
+        let stored: String = sqlx::query_scalar("SELECT token FROM plugins WHERE slug = 'demo'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_ne!(stored, raw);
+        assert_eq!(stored, hash_plugin_token(raw));
+
+        // Disabled plugin must not authenticate.
+        assert!(repo.find_enabled_by_token(raw).await.unwrap().is_none());
+
+        repo.set_enabled("demo", true).await.unwrap();
+        // Raw token authenticates; presenting the stored hash string does not.
+        let found = repo
+            .find_enabled_by_token(raw)
+            .await
+            .unwrap()
+            .expect("enabled plugin resolves by raw token");
+        assert_eq!(found.slug, "demo");
+        assert!(repo.find_enabled_by_token(&stored).await.unwrap().is_none());
     }
 }

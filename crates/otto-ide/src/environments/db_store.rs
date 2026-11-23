@@ -27,7 +27,18 @@ pub(super) const RESERVED_MODULE_SDKS_KEY: &str = "__otto_module_sdks__";
 pub(super) const RESERVED_NETBRIDGE_KEY: &str = "__otto_network_bridge__";
 pub(super) const RESERVED_GO_BUILD_TAGS_KEY: &str = "__otto_go_build_tags__";
 pub(super) const RESERVED_MODULE_GO_BUILD_TAGS_KEY: &str = "__otto_module_go_build_tags__";
+pub(super) const RESERVED_MOBILE_SDKS_KEY: &str = "__otto_mobile_sdks__";
 pub(super) const RESERVED_RUN_COVERAGE_KEY: &str = "__otto_coverage__";
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(super) struct StoredMobileSdks {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) android_home: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) flutter_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) xcode_developer_dir: Option<String>,
+}
 
 pub(crate) fn is_reserved_internal_env_key(key: &str) -> bool {
     key.starts_with("__otto_")
@@ -37,6 +48,7 @@ pub(crate) fn is_reserved_internal_env_key(key: &str) -> bool {
                 | RESERVED_NETBRIDGE_KEY
                 | RESERVED_GO_BUILD_TAGS_KEY
                 | RESERVED_MODULE_GO_BUILD_TAGS_KEY
+                | RESERVED_MOBILE_SDKS_KEY
                 | RESERVED_RUN_COVERAGE_KEY
         )
 }
@@ -257,7 +269,17 @@ pub(super) fn apply_run_config_sdk_override(
                 push_unique(path_dirs, format!("{trimmed}/bin"));
             }
         }
-        IdeRunnerKind::Node | IdeRunnerKind::Npm | IdeRunnerKind::Vitest => {
+        IdeRunnerKind::Node
+        | IdeRunnerKind::Npm
+        | IdeRunnerKind::Vitest
+        | IdeRunnerKind::ReactNative => {
+            push_unique(path_dirs, format!("{trimmed}/bin"));
+        }
+        IdeRunnerKind::Xcode => {
+            map.insert("DEVELOPER_DIR".into(), trimmed.to_string());
+        }
+        IdeRunnerKind::Flutter => {
+            map.insert("FLUTTER_ROOT".into(), trimmed.to_string());
             push_unique(path_dirs, format!("{trimmed}/bin"));
         }
         IdeRunnerKind::Shell | IdeRunnerKind::Compound | IdeRunnerKind::Custom => {
@@ -396,6 +418,7 @@ fn decode_project_env_row(
     let mut network_bridge: Option<IdeNetworkBridgeConfig> = None;
     let mut go_build_tags: Vec<String> = Vec::new();
     let mut module_go_build_tags: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut mobile_sdks = StoredMobileSdks::default();
     let mut stored: Vec<StoredEnvVar> = Vec::with_capacity(raw_stored.len());
     for item in raw_stored {
         if item.key == RESERVED_MODULE_SDKS_KEY {
@@ -426,6 +449,12 @@ fn decode_project_env_row(
                         sanitize_module_go_build_tags(&parsed).unwrap_or_default();
                 }
             }
+        } else if item.key == RESERVED_MOBILE_SDKS_KEY {
+            if let Some(raw_mob) = &item.value {
+                if let Ok(parsed) = serde_json::from_str::<StoredMobileSdks>(raw_mob) {
+                    mobile_sdks = parsed;
+                }
+            }
         } else if !is_reserved_internal_env_key(&item.key) {
             stored.push(item);
         }
@@ -442,6 +471,9 @@ fn decode_project_env_row(
         rust_toolchain: row.try_get("rust_toolchain").ok().flatten(),
         node_home: row.try_get("node_home").ok().flatten(),
         python_interpreter: row.try_get("python_interpreter").ok().flatten(),
+        android_home: mobile_sdks.android_home,
+        flutter_root: mobile_sdks.flutter_root,
+        xcode_developer_dir: mobile_sdks.xcode_developer_dir,
         dotenv_path: row.try_get("dotenv_path").ok().flatten(),
         extra_path: row.try_get("extra_path").ok().flatten(),
         inherit_shell_env,

@@ -253,6 +253,12 @@ struct SafeExpressions {
 impl Visitor for SafeExpressions {
     type Break = Error;
     fn pre_visit_query(&mut self, query: &sqlparser::ast::Query) -> ControlFlow<Self::Break> {
+        if !query.locks.is_empty() {
+            return ControlFlow::Break(Error::Forbidden(
+                "locking SELECT clauses (FOR UPDATE / FOR SHARE) are unsupported in restricted SQL"
+                    .into(),
+            ));
+        }
         if !query_body_is_read(&query.body)
             || query.with.as_ref().is_some_and(|w| {
                 w.cte_tables
@@ -888,7 +894,8 @@ fn statement_is_pure_read(statement: &Statement) -> bool {
 }
 
 fn query_is_read(query: &sqlparser::ast::Query) -> bool {
-    query_body_is_read(&query.body)
+    query.locks.is_empty()
+        && query_body_is_read(&query.body)
         && query
             .with
             .as_ref()
@@ -900,14 +907,7 @@ fn query_body_is_read(body: &sqlparser::ast::SetExpr) -> bool {
     match body {
         SetExpr::Select(select) => select.into.is_none(),
         SetExpr::Values(_) => true,
-        SetExpr::Query(query) => {
-            query_body_is_read(&query.body)
-                && query.with.as_ref().is_none_or(|w| {
-                    w.cte_tables
-                        .iter()
-                        .all(|cte| query_body_is_read(&cte.query.body))
-                })
-        }
+        SetExpr::Query(query) => query_is_read(query),
         SetExpr::SetOperation { left, right, .. } => {
             query_body_is_read(left) && query_body_is_read(right)
         }
@@ -1368,5 +1368,30 @@ mod select_into_regressions {
             Engine::Postgres,
             "SELECT table_to_xml('shop.orders', true, false, '')"
         ));
+    }
+
+    #[test]
+    fn locking_select_clauses_are_not_reads_or_allowed_in_restricted_sql() {
+        for (engine, sql) in [
+            (Engine::Postgres, "SELECT * FROM orders FOR UPDATE"),
+            (Engine::Postgres, "SELECT * FROM orders FOR SHARE"),
+            (Engine::Postgres, "SELECT * FROM orders FOR NO KEY UPDATE"),
+            (
+                Engine::Postgres,
+                "WITH locked AS (SELECT id FROM orders FOR UPDATE) SELECT * FROM locked",
+            ),
+            (Engine::Postgres, "(SELECT * FROM orders FOR UPDATE)"),
+            (Engine::Mysql, "SELECT * FROM orders FOR UPDATE"),
+            (Engine::Mysql, "SELECT * FROM orders FOR SHARE"),
+        ] {
+            assert!(
+                !read_is_provable(engine, sql),
+                "locking SELECT must not be a provable read: {engine:?}: {sql}"
+            );
+            assert!(
+                operations(engine, sql).is_err(),
+                "locking SELECT must be rejected by restricted SQL: {engine:?}: {sql}"
+            );
+        }
     }
 }

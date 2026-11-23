@@ -1,11 +1,12 @@
 <script module lang="ts">
-  export type ProductMode = 'stories' | 'design' | 'learnings';
+  export type ProductMode = 'create' | 'stories' | 'design' | 'voice' | 'learnings';
   let pendingFocus: ProductMode | null = null;
 </script>
 
 <script lang="ts">
-  // Shared unified Product mode switcher (Stories · Designs · Learnings),
-  // rendered in PageHeader `tabs()` across ProductPage and Design Hall's Lobby.
+  // Shared unified Product mode switcher (Create · Stories · Designs · Voice · Learnings),
+  // rendered in PageHeader `tabs()` (placement "start", so it never moves with
+  // the page title) across ProductPage, Design Hall's Lobby and Voice Studio.
   // Avoids importing the `product` store statically so Design Hall's chunk does
   // not pull Product's store into its static import closure.
   import { onMount, tick } from 'svelte';
@@ -28,8 +29,10 @@
 
   const items = $derived.by(() => {
     const out: { id: ProductMode; label: string }[] = [];
+    if (canDesign) out.push({ id: 'create', label: 'Create' });
     if (canProduct) out.push({ id: 'stories', label: 'Stories' });
     if (canDesign) out.push({ id: 'design', label: 'Designs' });
+    if (canProduct || canDesign) out.push({ id: 'voice', label: 'Voice' });
     if (canProduct) out.push({ id: 'learnings', label: 'Learnings' });
     return out;
   });
@@ -52,7 +55,16 @@
     if (onselect) {
       await onselect(target);
     } else {
-      const route = target === 'design' ? 'design' : target === 'learnings' ? 'product/learnings' : 'product';
+      const route =
+        target === 'create'
+          ? 'design/create'
+          : target === 'design'
+          ? 'design'
+          : target === 'voice'
+            ? 'design/tts'
+            : target === 'learnings'
+              ? 'product/learnings'
+              : 'product';
       const ok = await router.goChecked(route);
       if (!ok && pendingFocus === target) pendingFocus = null;
     }

@@ -18,6 +18,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import DiffView from '../../lib/components/DiffView.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import { sourceLabel } from './skillGroups';
   import { noteKeptCopies } from './bundledActions';
@@ -36,11 +37,13 @@
     /** Read-only copies: what makes them editable. */
     oninstall?: () => void;
     oncopytolibrary?: () => void;
+    /** Jump to Skills Evaluator pre-selected for this skill. */
+    onevaluate?: () => void;
     /** Unsaved-edit state, so the parents can ask before a tab / skill switch
      *  unmounts the editor and drops the draft. */
     ondirty?: (dirty: boolean) => void;
   }
-  let { name, source, files, skillMd, initialFile = 'SKILL.md', onsaved, oninstall, oncopytolibrary, ondirty }: Props = $props();
+  let { name, source, files, skillMd, initialFile = 'SKILL.md', onsaved, oninstall, oncopytolibrary, onevaluate, ondirty }: Props = $props();
 
   const editable = $derived(source === 'library');
 
@@ -59,6 +62,10 @@
   // engine, a review fix, another window): their version, kept beside the
   // person's draft until they pick "Reload theirs" or "Keep mine".
   let conflict = $state<{ path: string; theirs: string; hash: string | null } | null>(null);
+  let showConflictDiff = $state(false);
+  $effect(() => {
+    if (!conflict) showConflictDiff = false;
+  });
   // Bumped whenever the text is replaced from outside (another file, Revert,
   // a reload) so the uncontrolled CodeEditor remounts on the new document.
   let docKey = $state(0);
@@ -276,6 +283,19 @@
       void save();
     }
   }
+  async function quickEval(): Promise<void> {
+    if (!onevaluate) return;
+    if (dirty) {
+      const ok = await confirmer.ask(
+        `Save your changes to ${currentFile} before evaluating ${name}?`,
+        { title: 'Save before evaluating?', confirmLabel: 'Save & evaluate', cancelLabel: 'Cancel' },
+      );
+      if (!ok) return;
+      await save();
+      if (dirty || disposed) return;
+    }
+    onevaluate();
+  }
 </script>
 
 <div class="editor-wrap">
@@ -332,14 +352,34 @@
           {/if}
           <button class="btn small primary" disabled={saving || !dirty} title={dirty ? 'Save (⌘S)' : 'No changes to save'} onclick={save} data-testid="save-skill">{saving ? 'Saving…' : 'Save'}</button>
         {/if}
+        {#if onevaluate}
+          <button type="button" class="btn small ghost" disabled={saving} onclick={() => void quickEval()} title="Run a quick evaluation of {name} in Skills Evaluator" data-testid="editor-quick-eval">
+            <Icon name="target" size={12} /> Quick eval…
+          </button>
+        {/if}
       </div>
       {#if conflict && conflict.path === currentFile}
         <div class="conflict" data-testid="skill-conflict" use:announceShown={{ text: `${currentFile} changed since you opened it. Your text is still in the editor.`, assertive: true }}>
           <Icon name="warning" size={14} />
           <span class="grow">{currentFile} changed since you opened it — by a review fix, the self-improvement engine or another window. Your text is still in the editor; nothing was saved.</span>
+          <button
+            type="button"
+            class="btn small ghost"
+            aria-expanded={showConflictDiff}
+            onclick={() => (showConflictDiff = !showConflictDiff)}
+            title="Compare the version on disk with your draft"
+          >{showConflictDiff ? 'Hide diff' : 'Compare'}</button>
           <button class="btn small ghost" onclick={reloadTheirs} disabled={saving} title="Drop your text and load the version on disk">Reload theirs</button>
           <button class="btn small primary" onclick={keepMine} disabled={saving} title="Save your text over the version on disk">{saving ? 'Saving…' : 'Keep mine'}</button>
         </div>
+        {#if showConflictDiff}
+          <div class="conflict-diff" data-testid="skill-conflict-diff">
+            <div class="conflict-diff-head">
+              <span class="section-title">On disk (theirs) → Your draft (mine)</span>
+            </div>
+            <DiffView before={conflict.theirs} after={content} mode="word" contextLines={3} />
+          </div>
+        {/if}
       {/if}
       {#if loadError && source === 'bundled'}
         <!-- Not a failure: a bundled skill's other files open once installed. -->
@@ -462,6 +502,11 @@
   .file-del:focus-visible {
     opacity: 1;
   }
+  @media (hover: none) {
+    .file-del {
+      opacity: 1;
+    }
+  }
   .pane {
     display: flex;
     flex-direction: column;
@@ -512,6 +557,20 @@
   .conflict .grow {
     flex: 1 1 220px;
     min-width: 0;
+  }
+  .conflict-diff {
+    padding: 8px 10px 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    max-height: 40vh;
+    overflow: auto;
+    flex: none;
+  }
+  .conflict-diff-head {
+    margin-bottom: 6px;
+  }
+  .conflict-diff-head .section-title {
+    margin: 0;
   }
   .save-hint {
     font-size: var(--fs-xs);

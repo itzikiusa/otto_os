@@ -140,13 +140,27 @@
     );
   }
 
+  let frameKeyAbort: AbortController | null = null;
+  $effect(() => () => {
+    frameKeyAbort?.abort();
+    frameKeyAbort = null;
+  });
+
   function onload() {
     frameLoaded = true;
+    frameKeyAbort?.abort();
+    frameKeyAbort = null;
     if (!slugOk) return;
     try {
-      frame?.contentWindow?.addEventListener('keydown', (e: KeyboardEvent) => {
-        if (e.key === 'Escape' && !e.defaultPrevented) relayKey({ key: 'Escape' });
-      });
+      const controller = new AbortController();
+      frameKeyAbort = controller;
+      frame?.contentWindow?.addEventListener(
+        'keydown',
+        (e: KeyboardEvent) => {
+          if (e.key === 'Escape' && !e.defaultPrevented) relayKey({ key: 'Escape' });
+        },
+        { signal: controller.signal },
+      );
     } catch { /* cross-origin */ }
     postPluginInit(slug, (extra) => postTheme('otto:init', extra), {
       baseUrl: baseUrl(),
@@ -165,6 +179,7 @@
   });
 
   function onMessage(ev: MessageEvent) {
+    if (ev.origin !== origin) return;
     const action = pluginFrameAction(ev, frame?.contentWindow);
     if (action?.kind === 'focus-leave') {
       document.querySelector<HTMLElement>('.plugin-page .icon-btn')?.focus();
@@ -184,7 +199,7 @@
       {#if probe === 'ok'}
         <!-- A plugin page can wedge or go stale like any web page: restart it
              in place (re-probes, reloads the frame, re-sends otto:init). -->
-        <button class="icon-btn" data-icon="refresh" onclick={() => void check()} aria-label="Restart {name}" title="Restart {name}">
+        <button class="icon-btn" data-icon="refresh" onclick={() => void check()} aria-label="Reload {name} page" title="Reload {name} page">
           <Icon name="refresh" size={14} />
         </button>
       {/if}

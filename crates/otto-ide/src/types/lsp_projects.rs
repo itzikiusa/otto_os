@@ -373,6 +373,8 @@ pub struct IdeLspServerStat {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     pub rss_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fd_count: Option<u32>,
     pub active_clients: usize,
     pub open_documents: usize,
     pub remote_ssh: bool,

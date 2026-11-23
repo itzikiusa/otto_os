@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { announce } from '../../lib/announce.svelte';
+  import { announce, announceShown } from '../../lib/announce.svelte';
   import { onDestroy } from 'svelte';
   import RestorePreviewPanel from './RestorePreviewPanel.svelte';
   import { api } from '../../lib/api/client';
   import type { StateArchive, RestoreConflictPolicy, RestorePreview, RestoreResult } from '../../lib/api/types';
   import { downloadText } from '../../lib/components/exporters';
   import Icon from '../../lib/components/Icon.svelte';
+  import { loadErrorText } from '../../lib/loadError';
 
   let exporting = $state(false);
   let busy = $state(false);
@@ -21,7 +22,7 @@
   let fileEl: HTMLInputElement | null = $state(null);
   onDestroy(() => { generation++; });
   // Inline errors say which step failed, then the daemon's reason.
-  const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+  const msg = (e: unknown): string => loadErrorText(e);
 
   async function exportArchive() {
     const seq = generation;
@@ -136,7 +137,7 @@
       Kept {result.records_skipped} existing records and {result.files_skipped} existing files.</div>
     {#if result.reconnect.length}<ul>{#each result.reconnect as item}<li>{item}</li>{/each}</ul>{/if}
   {/if}
-  {#if error}<p class="error" role="alert">{error}</p>{/if}
+  {#if error}<p class="error" use:announceShown={{ text: error, assertive: true }}>{error}</p>{/if}
 </section>
 
 <style>

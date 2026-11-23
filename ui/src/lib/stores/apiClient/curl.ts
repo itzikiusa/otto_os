@@ -10,6 +10,7 @@ import type { ImportCurlReq, ParsedCurl } from '../../api/types';
 import { isSecretRef } from '../../api/types';
 import type { ApiClientStore } from '../apiClient.svelte';
 import { liveKv, secretMasked, type ApiDraft } from './model';
+import { newId } from '../../id';
 
 /** The store members `importCurl` reads and calls. */
 export type CurlHost = Pick<ApiClientStore, 'workspaceOwner' | 'placeDraft' | 'isDirty' | 'draft'>;
@@ -25,7 +26,7 @@ export async function importCurl(host: CurlHost, curl: string): Promise<boolean>
     // Fills the current tab only while it holds nothing unsaved; otherwise
     // the import opens in a new tab (placeDraft).
     host.placeDraft({
-      tabId: crypto.randomUUID(),
+      tabId: newId(),
       requestId: null,
       name: host.isDirty(host.draft) ? '' : host.draft.name,
       kind: 'http',

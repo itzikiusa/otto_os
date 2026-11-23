@@ -77,7 +77,7 @@ a plane with `rotation: [-90, 0, 0]`; `text` 2 × 0.5 quad facing +Z.
 sun 0.8–2.5, point/spot 5–50 because they fall off with distance),
 `color`, `ground_color` (hemisphere only), `distance` (point/spot cutoff, 0 = ∞),
 `angle` (spot cone, degrees, ≤ 90), `shadow` (bool — one shadow-caster is usually
-enough; more cost frame rate), `visible`, `notes`. Max 64 lights.
+enough; more cost frame rate), `shadow_intensity` (0–1, default 1), `visible`, `notes`. Max 64 lights.
 
 ### Camera, groups, limits
 

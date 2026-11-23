@@ -51,7 +51,7 @@
         title={`${label} isn’t in the light version`}
         body="The light version shows Threads, Connections, Git, API and Usage. The full app has everything."
         actionLabel="Open the full app"
-        onaction={() => lightMode.set(false)}
+        onaction={() => void lightMode.set(false)}
       >
         <button class="btn ghost" onclick={() => router.go(LIGHT_HOME)}>Go to Threads</button>
       </EmptyState>

@@ -130,24 +130,21 @@
   function saveDrawerWidth(): void {
     try { localStorage.setItem(DRAWER_KEY, String(Math.round(drawerW))); } catch { /* ignore */ }
   }
+  let stopDragResize: (() => void) | null = null;
   function startResize(e: PointerEvent): void {
     e.preventDefault();
+    stopDragResize?.();
     resizing = true;
-    const startX = e.clientX;
-    const startW = visibleDrawerW;
-    const rtl = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl';
-    const onMove = (ev: PointerEvent): void => {
-      // Pointer motion follows the physical side occupied by the drawer.
-      drawerW = Math.max(320, Math.min(maxDrawerW, startW + (ev.clientX - startX) * (rtl ? 1 : -1)));
-    };
+    const startX = e.clientX, startW = visibleDrawerW;
+    const dir = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl' ? 1 : -1;
+    const onMove = (ev: PointerEvent): void => { drawerW = Math.max(320, Math.min(maxDrawerW, startW + (ev.clientX - startX) * dir)); };
     const onUp = (): void => {
-      resizing = false;
-      saveDrawerWidth();
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
+      resizing = false; saveDrawerWidth();
+      window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp); window.removeEventListener('pointercancel', onUp);
+      if (stopDragResize === onUp) stopDragResize = null;
     };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
+    stopDragResize = onUp;
+    window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', onUp); window.addEventListener('pointercancel', onUp);
   }
 
   // --- routing helpers ----------------------------------------------------------
@@ -198,6 +195,7 @@
   }
   $effect(() => () => {
     if (drawerTimer) clearTimeout(drawerTimer);
+    stopDragResize?.();
   });
   // K-1: the filter + drawer tab are remembered per cluster (and per kind for
   // the filter), so they survive a module switch, the Monitor and a reload.

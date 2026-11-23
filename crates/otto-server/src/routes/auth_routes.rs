@@ -266,8 +266,9 @@ pub async fn me(auth: CurrentAuthContext) -> Json<MeResp> {
 
 /// `POST /api/v1/auth/tokens` — mint a long-lived API token for the caller.
 /// The raw secret is returned exactly once (only its hash is stored). Use it as
-/// `Authorization: Bearer <token>` on every route, or as `?token=<token>` on
-/// the WebSocket endpoints.
+/// `Authorization: Bearer <token>` on HTTP routes, or via the WebSocket
+/// `Sec-WebSocket-Protocol: otto-auth.<token>` subprotocol (query-string
+/// `?token=` authentication is rejected).
 ///
 /// **Impersonation guardrail (Task 5.2):** an impersonated request (one whose
 /// bearer is an impersonation token — `real_user != effective_user`) may NOT

@@ -4,13 +4,11 @@
   // Diff tabs where they apply, Wrap, Reload, Open in Files, Copy path and a
   // full view (Modal). The host (ConversationView) owns placement: beside the
   // chat when the pane is wide, over it when narrow. Esc closes.
-  import { copyTextOrThrow } from '../../../lib/clipboard';
+  import { copyWithToast } from '../../../lib/clipboard';
   import { getContext, untrack } from 'svelte';
-  import { toastError } from '../../../lib/toastError';
   import Icon from '../../../lib/components/Icon.svelte';
   import Modal from '../../../lib/components/Modal.svelte';
   import { openFile } from '../../../lib/stores/openfile.svelte';
-  import { toasts } from '../../../lib/toast.svelte';
   import PreviewBody, { forgetRead, type PreviewMode } from './PreviewBody.svelte';
   import { previewKind, previewKindForLang, requestKind, splitName } from './preview';
   import { relPath, resolvePath } from './format';
@@ -73,12 +71,7 @@
   }
   async function copyPath(): Promise<void> {
     if (!path) return;
-    try {
-      await copyTextOrThrow(path);
-      toasts.info('Path copied', path);
-    } catch (e) {
-      toastError('Couldn’t copy to the clipboard', e);
-    }
+    await copyWithToast(path, 'path');
   }
   function onKey(e: KeyboardEvent): void {
     if (e.key === 'Escape' && !full) {
@@ -121,10 +114,13 @@
   });
   const canFiles = $derived(!!path && !!ctx.sessionId && !ctx.readonly);
   const fullWidth = $derived(typeof window === 'undefined' ? 1100 : Math.max(480, Math.min(1400, window.innerWidth - 80)));
+  function bindEscClose(node: HTMLElement): { destroy(): void } {
+    node.addEventListener('keydown', onKey);
+    return { destroy: () => node.removeEventListener('keydown', onKey) };
+  }
 </script>
 
-<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<aside class="pv" bind:this={panelEl} aria-label="Preview: {title.base}" data-preview={req.kind} onkeydown={onKey}>
+<aside class="pv" bind:this={panelEl} aria-label="Preview: {title.base}" data-preview={req.kind} use:bindEscClose>
   <header class="pv-head">
     <span class="pv-icon" aria-hidden="true"><Icon name={req.kind === 'diff' ? 'split' : req.kind === 'code' ? 'format' : 'file'} size={13} /></span>
     <span class="pv-title" title={path ?? title.base}>
@@ -136,7 +132,7 @@
   </header>
   <div class="pv-bar">
     {#if modes.length > 1}
-      <div class="pv-seg" role="tablist" aria-label="View">
+      <div class="segmented pv-seg" role="tablist" aria-label="View">
         {#each modes as m (m)}
           <button role="tab" aria-selected={mode === m} tabindex={mode === m ? 0 : -1} class:on={mode === m} onclick={() => (mode = m)} onkeydown={onTabKey} data-mode={m}>{LABEL[m]}</button>
         {/each}
@@ -168,7 +164,7 @@
   <Modal title={title.dir ? `${title.base} — ${title.dir}` : title.base} width={fullWidth} onclose={() => (full = false)}>
     <div class="pv-full">
       {#if modes.length > 1}
-        <div class="pv-seg" role="tablist" aria-label="View">
+        <div class="segmented pv-seg" role="tablist" aria-label="View">
           {#each modes as m (m)}
             <button role="tab" aria-selected={mode === m} tabindex={mode === m ? 0 : -1} class:on={mode === m} onclick={() => (mode = m)} onkeydown={onTabKey}>{LABEL[m]}</button>
           {/each}

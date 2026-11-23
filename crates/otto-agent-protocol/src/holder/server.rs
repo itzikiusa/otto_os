@@ -108,6 +108,29 @@ fn parse_socket_arg(mut args: impl Iterator<Item = String>) -> Result<PathBuf, S
     Err("missing required --socket <path> argument".into())
 }
 
+/// Temporarily applies a restrictive process umask and restores the prior mask
+/// on drop so child processes spawned afterwards inherit the caller's umask.
+struct UmaskGuard {
+    prev: libc::mode_t,
+}
+
+impl UmaskGuard {
+    fn set(mask: libc::mode_t) -> Self {
+        // SAFETY: `umask` is always safe to call and returns the previous mask.
+        let prev = unsafe { libc::umask(mask) };
+        Self { prev }
+    }
+}
+
+impl Drop for UmaskGuard {
+    fn drop(&mut self) {
+        // SAFETY: restores the process umask previously returned by `libc::umask`.
+        unsafe {
+            libc::umask(self.prev);
+        }
+    }
+}
+
 /// Read [`HolderSpawnSpec`] from stdin, bind `socket_path`, spawn the child,
 /// emit `READY_PREFIX` on stdout, detach stdio, and serve reconnects.
 #[allow(clippy::disallowed_methods)]
@@ -144,20 +167,29 @@ async fn serve_holder(socket_path: &Path, spec: HolderSpawnSpec) -> Result<(), S
         }
         let _ = tokio::fs::remove_file(socket_path).await;
     }
-    if let Some(parent) = socket_path.parent() {
-        tokio::fs::create_dir_all(parent)
+    // Restrict umask to 0077 only while creating the socket dir and binding the
+    // UDS (closing the bind-to-chmod TOCTOU window), then restore it before
+    // spawning the held agent so the child inherits the caller's normal umask.
+    let (listener, bound_socket_id) = {
+        let _umask = UmaskGuard::set(0o077);
+        if let Some(parent) = socket_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| format!("create holder socket dir {}: {e}", parent.display()))?;
+            let _ =
+                tokio::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).await;
+        }
+        let listener = UnixListener::bind(socket_path)
+            .map_err(|e| format!("bind holder socket {}: {e}", socket_path.display()))?;
+        tokio::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))
             .await
-            .map_err(|e| format!("create holder socket dir {}: {e}", parent.display()))?;
-    }
-    let listener = UnixListener::bind(socket_path)
-        .map_err(|e| format!("bind holder socket {}: {e}", socket_path.display()))?;
-    tokio::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))
-        .await
-        .map_err(|e| format!("chmod holder socket {}: {e}", socket_path.display()))?;
-    let bound_socket_id = tokio::fs::symlink_metadata(socket_path)
-        .await
-        .ok()
-        .map(|m| (m.dev(), m.ino()));
+            .map_err(|e| format!("chmod holder socket {}: {e}", socket_path.display()))?;
+        let bound_socket_id = tokio::fs::symlink_metadata(socket_path)
+            .await
+            .ok()
+            .map(|m| (m.dev(), m.ino()));
+        (listener, bound_socket_id)
+    };
 
     let mut cmd = Command::new(&spec.command.program);
     cmd.args(&spec.command.args)
@@ -355,12 +387,14 @@ async fn serve_holder(socket_path: &Path, spec: HolderSpawnSpec) -> Result<(), S
                                 }
                             }
                             DaemonFrame::Signal { signal } => {
-                                let sig = match signal {
-                                    HolderSignal::Interrupt => libc::SIGINT,
-                                    HolderSignal::Terminate => libc::SIGTERM,
-                                    HolderSignal::Kill => libc::SIGKILL,
-                                };
-                                signal_group(child_pid, sig);
+                                if exited.is_none() {
+                                    let sig = match signal {
+                                        HolderSignal::Interrupt => libc::SIGINT,
+                                        HolderSignal::Terminate => libc::SIGTERM,
+                                        HolderSignal::Kill => libc::SIGKILL,
+                                    };
+                                    signal_group(child_pid, sig);
+                                }
                             }
                             DaemonFrame::Checkpoint { checkpoint: cp } => {
                                 ring.prune_acked(checkpoint_acked_seq(&cp));
@@ -445,4 +479,25 @@ async fn serve_holder(socket_path: &Path, spec: HolderSpawnSpec) -> Result<(), S
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UmaskGuard;
+
+    #[test]
+    fn umask_guard_applies_077_and_restores_previous_mask_on_drop() {
+        let initial = unsafe {
+            let cur = libc::umask(0o022);
+            libc::umask(cur);
+            cur
+        };
+        {
+            let _guard = UmaskGuard::set(0o077);
+            let during = unsafe { libc::umask(0o077) };
+            assert_eq!(during, 0o077);
+        }
+        let after = unsafe { libc::umask(initial) };
+        assert_eq!(after, initial);
+    }
 }

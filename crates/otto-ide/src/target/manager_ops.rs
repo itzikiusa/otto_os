@@ -408,11 +408,17 @@ impl TargetManager {
                 }
                 if create_dirs {
                     if let Some(parent) = remote_parent(&remote_path) {
+                        // Confine the nearest existing ancestor BEFORE creating
+                        // missing directories so `mkdir -p` cannot traverse a
+                        // remote symlink outside `matched_root`.
+                        self.confine_remote_nearest_ancestor(target, &matched_root, &remote_path)
+                            .await?;
+                        let mkdir_args = super::remote_realpath::remote_mkdir_args(parent);
                         let _ = self
                             .exec_command(
                                 target,
                                 "mkdir",
-                                &["-p".into(), parent],
+                                &mkdir_args,
                                 None,
                                 &BTreeMap::new(),
                                 Duration::from_secs(10),
@@ -488,7 +494,17 @@ impl TargetManager {
                 actor_id,
             } => {
                 let sftp = self.acquire_sftp(actor_id, spec)?;
-                mutate_remote_fs(&sftp, root, additional_roots, op, path, dest_path).await
+                mutate_remote_fs(
+                    self,
+                    target,
+                    &sftp,
+                    root,
+                    additional_roots,
+                    op,
+                    path,
+                    dest_path,
+                )
+                .await
             }
         }
     }

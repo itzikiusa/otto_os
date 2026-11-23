@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use super::runner_java::GRADLE_BUILD_FILES;
 use super::{csv_list, resolve_program_in_env};
+use crate::environments::run_configs::is_valid_mobile_device_id;
 use crate::toolchains::is_executable_file;
 use crate::types::{IdeRunConfig, IdeRunnerKind, IdeTargetKind};
 
@@ -399,6 +400,107 @@ pub(super) fn build_shell_cmd(
         .unwrap_or(if is_bats { "bats" } else { "bash" })
         .to_string();
     (prog, script_then_args(cfg, build_flags, args))
+}
+
+pub(super) fn build_xcode_cmd(
+    env_map: &BTreeMap<String, String>,
+    cmd_opt: Option<&str>,
+    args: Vec<String>,
+    build_flags: Vec<String>,
+) -> (String, Vec<String>) {
+    let prog = cmd_opt.unwrap_or("xcodebuild").to_string();
+    let mut out = build_flags;
+    out.extend(args);
+    if prog == "xcodebuild" && !out.iter().any(|a| a == "-destination") {
+        if let Some(udid) = env_map
+            .get("OTTO_SIMULATOR_UDID")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|s| is_valid_mobile_device_id(s))
+        {
+            // Insert `-destination id=<udid>` right before the final action (`build`/`test`) if present.
+            let insert_at = out
+                .iter()
+                .position(|a| matches!(a.as_str(), "build" | "test" | "clean"))
+                .unwrap_or(out.len());
+            out.splice(
+                insert_at..insert_at,
+                ["-destination".to_string(), format!("id={udid}")],
+            );
+        }
+    }
+    (prog, out)
+}
+
+pub(super) fn build_flutter_cmd(
+    env_map: &BTreeMap<String, String>,
+    cmd_opt: Option<&str>,
+    args: Vec<String>,
+    build_flags: Vec<String>,
+) -> (String, Vec<String>) {
+    let prog = cmd_opt.unwrap_or("flutter").to_string();
+    let mut out = if args.is_empty() {
+        vec!["run".into()]
+    } else {
+        args
+    };
+    out.extend(build_flags);
+    let is_run = out.first().map(String::as_str) == Some("run");
+    let has_device_flag = out
+        .iter()
+        .any(|a| a == "-d" || a == "--device-id" || a.starts_with("--device-id="));
+    if is_run && !has_device_flag {
+        if let Some(did) = env_map
+            .get("OTTO_MOBILE_DEVICE_ID")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|s| is_valid_mobile_device_id(s))
+        {
+            out.extend(["-d".to_string(), did.to_string()]);
+        }
+    }
+    (prog, out)
+}
+
+pub(super) fn build_react_native_cmd(
+    env_map: &BTreeMap<String, String>,
+    cmd_opt: Option<&str>,
+    args: Vec<String>,
+    build_flags: Vec<String>,
+) -> (String, Vec<String>) {
+    let prog = cmd_opt.unwrap_or("npx").to_string();
+    let mut out = args;
+    out.extend(build_flags);
+    let udid = env_map
+        .get("OTTO_SIMULATOR_UDID")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|s| is_valid_mobile_device_id(s));
+    if let Some(udid) = udid {
+        let is_rn_ios = out.iter().any(|a| a == "run-ios");
+        let is_expo_ios = out.iter().any(|a| a == "run:ios");
+        let is_cap_ios = out.windows(3).any(|w| w == ["cap", "run", "ios"]);
+        if is_rn_ios
+            && !out
+                .iter()
+                .any(|a| a == "--udid" || a.starts_with("--udid="))
+        {
+            out.extend(["--udid".to_string(), udid.to_string()]);
+        } else if is_expo_ios
+            && !out
+                .iter()
+                .any(|a| a == "--device" || a == "-d" || a.starts_with("--device="))
+        {
+            out.extend(["--device".to_string(), udid.to_string()]);
+        } else if is_cap_ios
+            && !out
+                .iter()
+                .any(|a| a == "--target" || a.starts_with("--target="))
+        {
+            out.extend(["--target".to_string(), udid.to_string()]);
+        }
+    }
+    (prog, out)
 }
 
 pub(super) fn build_custom_cmd(

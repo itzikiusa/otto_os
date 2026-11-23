@@ -313,6 +313,11 @@ impl NetBridgeInstance {
         let weak_inst = Arc::downgrade(self);
         let weak_for_loop = weak_inst.clone();
 
+        /// Cap concurrent connections handled by a single direct local relay
+        /// so a runaway remote client cannot exhaust daemon FDs/tasks.
+        const MAX_DIRECT_RELAY_CONNS: usize = 64;
+        let conn_limit = Arc::new(tokio::sync::Semaphore::new(MAX_DIRECT_RELAY_CONNS));
+
         let join = tokio::spawn(async move {
             loop {
                 let Ok((mut inbound, _)) = listener.accept().await else {
@@ -321,8 +326,14 @@ impl NetBridgeInstance {
                 if weak_for_loop.upgrade().is_none() {
                     break;
                 }
+                let Ok(permit) = conn_limit.clone().try_acquire_owned() else {
+                    tracing::warn!("direct local relay connection cap ({MAX_DIRECT_RELAY_CONNS}) reached; dropping connection");
+                    drop(inbound);
+                    continue;
+                };
                 let th = target_host.clone();
                 tokio::spawn(async move {
+                    let _permit = permit;
                     if ensure_not_metadata_target(&th).is_err() {
                         return;
                     }

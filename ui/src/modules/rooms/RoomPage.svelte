@@ -56,6 +56,7 @@
   // Room windows run without the app shell, so its ⌘F / ⌘± / ⌘0 map is absent.
   function onKeydown(e: KeyboardEvent) {
     if (!e.metaKey || e.ctrlKey || e.altKey || !room?.session_id || !connected) return;
+    if (view !== 'terminal' || inviteOpen || ui.overlayOpen) return;
     const k = e.key;
     if (k === 'f' && !e.shiftKey) termRef?.openFind();
     else if (k === '=' || k === '+') ui.termZoomIn();
@@ -66,6 +67,17 @@
   }
   let client = $state<RoomClient | null>(null), joining = $state(false), name = $state(''), error = $state(''), ended = $state('');
   let waitingForRecap = $state(false);
+  let recapForceReady = $state(false);
+  $effect(() => {
+    if (!waitingForRecap) { recapForceReady = false; return; }
+    const timer = setTimeout(() => { recapForceReady = true; }, 10_000);
+    return () => clearTimeout(timer);
+  });
+  function forceEndWithoutRecap() {
+    waitingForRecap = false;
+    recapForceReady = false;
+    if (!send({type: 'end'})) finishing = false;
+  }
   let finishing = $state(false), needsName = $state(false), inviteOpen = $state(false), inviteRole = $state<'viewer' | 'editor'>('viewer');
   let invitation = $state<RoomInvite | null>(null), inviting = $state(false), copied = $state(false);
   let inviteError = $state('');
@@ -194,13 +206,24 @@
     catch (e) { inviteError = e instanceof Error ? e.message : 'Couldn’t create an invitation. Try again.'; }
     finally { inviting = false; }
   }
+  let roomPageEl = $state<HTMLDivElement | null>(null);
+  let inviteDoneEl = $state<HTMLButtonElement | null>(null);
+  function dismissError() {
+    error = '';
+    const target = roomPageEl?.querySelector<HTMLElement>('.room-status button, .view-switch button, main button');
+    target?.focus({preventScroll: true});
+  }
+  function dismissInviteError() {
+    inviteError = '';
+    inviteDoneEl?.focus({preventScroll: true});
+  }
   async function copyInvite() {
     if (!invitation) return;
     try { await copyTextOrThrow(invitation.url); copied = true; } catch { inviteError = 'Couldn’t copy. Select and copy the invitation link below.'; }
   }
 </script>
 <svelte:window onkeydown={onKeydown} />
-<div class="room-page">
+<div class="room-page" bind:this={roomPageEl}>
   <!-- Always mounted so a screen reader hears each new knock or request once. -->
   <div class="sr-only" aria-live="polite">{host ? announcement : ''}</div>
   <PageHeader title={room?.session_title ?? 'Session room'} subtitle={room ? `${room.provider ? `${providerName(room.provider)} · ` : ''}${room.members?.filter(m => m.admission === 'admitted').length ?? 1}/4 people` : ''}>
@@ -210,7 +233,7 @@
         <button class="btn small primary" disabled={!connected} onclick={() => { invitation = null; inviteError = ''; inviteOpen = true; }}>Invite someone…</button>
       {:else}
         {#if room.session_id && connected}<button class="icon-btn" data-keep aria-haspopup="menu" title="Terminal options" aria-label="Terminal options" onclick={(e) => moreMenu(e.currentTarget)}><Icon name="more" size={14} /></button>{/if}
-        <button class="btn small danger" disabled={finishing} onclick={leave}>{endLabel()}</button>
+        <button class="btn small" disabled={finishing} onclick={leave}>{endLabel()}</button>
       {/if}
     {/if}{/snippet}
   </PageHeader>
@@ -235,7 +258,8 @@
              swaps its label and action instead of unmounting the focused control. -->
         {#if !host && (canType || self?.role === 'editor')}<button class="btn small" aria-disabled={!canType && self?.control_requested} onclick={controlButton}>{canType ? 'Release control' : self?.control_requested ? 'Control requested' : 'Request control'}</button>{/if}
       </div>
-      {#if error}<div class="error">{error}<button class="btn small" onclick={() => error = ''}>Dismiss</button></div>{/if}
+      {#if waitingForRecap}<div class="room-status"><span>Finishing recap before ending the room…</span>{#if recapForceReady}<button class="btn small danger" onclick={forceEndWithoutRecap}>End room now</button>{/if}</div>{/if}
+      {#if error}<div class="error">{error}<button class="btn small" onclick={dismissError}>Dismiss</button></div>{/if}
       <RoomRecap bind:this={recapPanel} {room} {connected} {send} audioSources={() => mediaPanel?.getRecapAudioSources() ?? new Map()} screenStreams={() => mediaPanel?.getPresentationStreams() ?? new Map()} />
       <nav class="mobile-tabs" aria-label="Room view"><button class="btn" aria-pressed={tab === 'session'} onclick={() => tab = 'session'}>Session</button><button class="btn" aria-pressed={tab === 'conversation'} aria-label={host && requests.total ? `People & chat, ${requests.total} ${requests.total === 1 ? 'request' : 'requests'}` : undefined} onclick={() => tab = 'conversation'}>People & chat{#if host && requests.total}<span class="count" aria-hidden="true">{requests.total}</span>{/if}</button></nav>
       <div class="room-workspace"><main class:mobile-hidden={tab !== 'session'}><RoomMedia bind:this={mediaPanel} {room} {send} {connected} />{#if room.session_id && client && connected}<div class="view-switch" role="group" aria-label="Session view"><button class="btn small" aria-pressed={view === 'terminal'} onclick={() => view = 'terminal'}>Terminal</button><button class="btn small" aria-pressed={view === 'chat'} onclick={() => view = 'chat'}>Chat</button></div>{/if}
@@ -256,8 +280,8 @@
   <p>A single-use invitation expires after ten minutes. You still approve admission and terminal control.</p>
   <label>Maximum access <select bind:value={inviteRole}><option value="viewer">View only</option><option value="editor">May be granted control</option></select></label>
   {#if invitation}<label>Invitation link <input dir="ltr" readonly value={invitation.url} aria-label="Invitation link" /></label><p>Expires {new Date(invitation.expires_at).toLocaleTimeString()}.</p>{/if}
-  {#if inviteError}<p class="alert-text">{inviteError}<button class="btn small" type="button" onclick={() => inviteError = ''}>Dismiss</button></p>{/if}
-  {#snippet footer()}<button class="btn" onclick={() => inviteOpen = false}>Done</button>{#if invitation}<button class="btn primary" onclick={copyInvite}>{copied ? 'Copied' : 'Copy invitation'}</button>{:else}<button class="btn primary" disabled={inviting} onclick={makeInvite}>{inviting ? 'Creating…' : 'Create invitation'}</button>{/if}{/snippet}
+  {#if inviteError}<p class="alert-text">{inviteError}<button class="btn small" type="button" onclick={dismissInviteError}>Dismiss</button></p>{/if}
+  {#snippet footer()}<button class="btn" bind:this={inviteDoneEl} onclick={() => inviteOpen = false}>Done</button>{#if invitation}<button class="btn primary" onclick={copyInvite}>{copied ? 'Copied' : 'Copy invitation'}</button>{:else}<button class="btn primary" disabled={inviting} onclick={makeInvite}>{inviting ? 'Creating…' : 'Create invitation'}</button>{/if}{/snippet}
 </Modal>{/if}
 <style>
   .room-page { height: 100%; min-width: 0; display: flex; flex-direction: column; background: var(--bg); color: var(--text); }
@@ -273,7 +297,7 @@
      hidden (display:none gave it zero width — it shrank its font to fit 80
      columns and came back tiny, and could resize the shared PTY grid). */
   .session-area { position: relative; flex: 1; min-height: 160px; display: flex; flex-direction: column; }
-  .chat-pane { position: absolute; inset: 0; z-index: 1; display: flex; flex-direction: column; background: var(--bg); }
+  .chat-pane { position: absolute; inset: 0; z-index: var(--z-sticky); display: flex; flex-direction: column; background: var(--bg); }
   .view-switch { display: flex; gap: 4px; padding: 6px 12px 0; } .view-switch [aria-pressed='true'] { background: var(--accent-soft); color: var(--accent-text); }
   aside { min-width: 0; min-height: 0; overflow: hidden; border-inline-start: 1px solid var(--border); display: flex; flex-direction: column; background: var(--surface); }
   .people { flex: 0 1 auto; min-height: 0; overflow: auto; max-height: 45%; border-bottom: 1px solid var(--border); }

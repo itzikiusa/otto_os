@@ -107,6 +107,9 @@ async function flushDirtyOpenTabsForWorkspaceOp(
   }
 }
 
+const findReferencesGate = latestOnly();
+const previewRenameGate = latestOnly();
+
 export async function runFindReferences(
   host: IdeLspSearchHost,
   path: string,
@@ -115,15 +118,21 @@ export async function runFindReferences(
   symbol?: string,
   bufPerf?: IdeBufferPerfController,
 ): Promise<void> {
+  const ticket = findReferencesGate.begin();
   host.usagesLoading = true;
   host.openBottomTab('usages');
   try {
     await flushDirtyOpenTabsForWorkspaceOp(host, bufPerf, false);
+    if (!ticket.current) return;
     // A live server knows which `Put` this is; the daemon's answer is a whole-word text match.
     const lspLocs = await host.editorHandleForPath(host.resolvePath(path))?.lspReferences?.(line, column).catch(() => null);
+    if (!ticket.current) return;
     if (lspLocs) {
       const texts = new Map<string, string[]>();
-      for (const p of new Set(lspLocs.map((l) => l.path))) texts.set(p, (await readProjectFile(host, p)).split('\n'));
+      for (const p of new Set(lspLocs.map((l) => l.path))) {
+        texts.set(p, (await readProjectFile(host, p)).split('\n'));
+        if (!ticket.current) return;
+      }
       host.usagesSymbol = symbol || '';
       host.usages = lspLocs.map((l) => ({ ...l, preview: (texts.get(l.path)?.[l.line - 1] ?? '').trim() }));
       host.usagesSource = 'lsp';
@@ -137,14 +146,15 @@ export async function runFindReferences(
       column,
       symbol,
       content: host.getBuffer(path),
-    });
+    }, ticket.signal);
+    if (!ticket.current) return;
     host.usagesSymbol = resp.symbol || symbol || '';
     host.usages = resp.locations ?? [];
     host.usagesSource = 'text';
   } catch (e) {
-    toastError('Couldn’t find usages', e);
+    if (ticket.current) toastError('Couldn’t find usages', e);
   } finally {
-    host.usagesLoading = false;
+    if (ticket.current) host.usagesLoading = false;
   }
 }
 
@@ -155,21 +165,30 @@ export async function runPreviewRename(
 ): Promise<void> {
   const next = (newName ?? host.renameState.newName).trim();
   host.renameState.newName = next;
-  if (!next) return;
+  if (!next) {
+    previewRenameGate.cancel();
+    host.renameState.loading = false;
+    return;
+  }
+  const ticket = previewRenameGate.begin();
   host.renameState.loading = true;
   host.renameState.error = null;
   try {
     await flushDirtyOpenTabsForWorkspaceOp(host, bufPerf, false);
+    if (!ticket.current) return;
     const content = bufPerf ? bufPerf.flush(host, host.renameState.path) : host.getBuffer(host.renameState.path);
-    const resp = await api.post<IdeRenameResp>('/ide/lsp/rename', await renameBody(host, next, content, false));
+    const body = await renameBody(host, next, content, false);
+    if (!ticket.current) return;
+    const resp = await api.post<IdeRenameResp>('/ide/lsp/rename', body, ticket.signal);
+    if (!ticket.current) return;
     if (resp.symbol && !host.renameState.symbol) host.renameState.symbol = resp.symbol;
     host.renameState.edits = resp.edits ?? [];
     host.renameState.source = resp.source === 'lsp' ? 'lsp' : 'text';
     host.renameState.previewedName = next;
   } catch (e) {
-    host.renameState.error = loadErrorText(e);
+    if (ticket.current) host.renameState.error = loadErrorText(e);
   } finally {
-    host.renameState.loading = false;
+    if (ticket.current) host.renameState.loading = false;
   }
 }
 
@@ -213,9 +232,9 @@ export async function runApplyRename(
 export async function runFormatActiveFile(
   host: IdeLspSearchHost,
   bufPerf: IdeBufferPerfController,
-  opts: { organizeImports?: boolean } = {},
+  opts: { organizeImports?: boolean; path?: string } = {},
 ): Promise<void> {
-  const tab = host.activeTab;
+  const tab = opts.path ? (host.tabs.find((t) => t.path === opts.path) ?? null) : host.activeTab;
   if (!tab || tab.readOnly || tab.truncated) return;
   const targetPath = tab.path;
   const content = bufPerf.flush(host, targetPath);
@@ -506,6 +525,13 @@ const workspaceSearch = latestOnly();
 /** Drop any in-flight workspace search (the search sheet closed, or the project changed). */
 export function cancelWorkspaceSearch(): void {
   workspaceSearch.cancel();
+}
+
+/** Cancel all in-flight workspace search, find-references, and rename-preview requests on target reset. */
+export function cancelLspAndSearch(): void {
+  workspaceSearch.cancel();
+  findReferencesGate.cancel();
+  previewRenameGate.cancel();
 }
 
 export async function runReplaceInWorkspace(

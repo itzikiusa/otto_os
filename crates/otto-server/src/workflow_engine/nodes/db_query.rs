@@ -8,7 +8,11 @@ pub(in crate::workflow_engine) async fn execute(
     call: NodeCall<'_>,
 ) -> Result<(Value, Vec<String>)> {
     let NodeCall {
-        ctx, user, node, ..
+        ctx,
+        ws,
+        user,
+        node,
+        ..
     } = call;
     let p = &node.params;
     let conn_id: Id = p
@@ -16,12 +20,21 @@ pub(in crate::workflow_engine) async fn execute(
         .and_then(Value::as_str)
         .ok_or_else(|| otto_core::Error::Invalid("db_query: missing connection_id".into()))?
         .to_string();
+    let conn = otto_state::ConnectionsRepo::new(ctx.pool.clone())
+        .get(&conn_id)
+        .await?;
+    if conn.workspace_id.as_deref().is_some_and(|w| w != ws.id) {
+        return Err(otto_core::Error::Forbidden(
+            "db_query: connection belongs to another workspace".into(),
+        ));
+    }
     let stmt = p
         .get("statement")
         .and_then(Value::as_str)
         .ok_or_else(|| otto_core::Error::Invalid("db_query: missing statement".into()))?
         .to_string();
-    let max_rows = p.get("max_rows").and_then(Value::as_u64).unwrap_or(100) as usize;
+    let max_rows =
+        otto_workflows::http::clamp_db_max_rows(p.get("max_rows").and_then(Value::as_u64));
     let req = QueryRequest {
         statement: stmt.clone(),
         max_rows: Some(max_rows),

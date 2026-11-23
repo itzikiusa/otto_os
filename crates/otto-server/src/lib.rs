@@ -240,11 +240,10 @@ pub fn build_router_with_assets(
 fn cors_layer() -> CorsLayer {
     CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(|origin: &HeaderValue, parts| {
-            let request_host = parts
-                .headers
-                .get(header::HOST)
-                .and_then(|h| h.to_str().ok())
-                .map(host_guard::host_of);
+            let request_host = match host_guard::request_host_raw(&parts.headers, &parts.uri) {
+                Ok(v) => v.map(host_guard::host_of),
+                Err(()) => return false,
+            };
             origin
                 .to_str()
                 .map(|o| is_allowed_origin_for(o, request_host.as_deref()))
@@ -439,10 +438,46 @@ mod cors_tests {
             .is_none());
 
         let denied = app
+            .clone()
             .oneshot(preflight("https://evil.example"))
             .await
             .unwrap();
         assert!(denied
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none());
+
+        // HTTP/2 `:authority` (no `Host` header) resolves same-host LAN/Tailscale CORS.
+        let h2_lan = Request::builder()
+            .version(axum::http::Version::HTTP_2)
+            .method(Method::OPTIONS)
+            .uri("https://192.168.1.20:7443/api/v1/health")
+            .header(header::ORIGIN, "https://192.168.1.20:5173")
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+            .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "authorization")
+            .body(Body::empty())
+            .unwrap();
+        let h2_resp = app.clone().oneshot(h2_lan).await.unwrap();
+        assert_eq!(
+            h2_resp.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            "https://192.168.1.20:5173"
+        );
+
+        // Mismatched `Host` vs `:authority` gets no CORS grant.
+        let h2_mismatch = Request::builder()
+            .version(axum::http::Version::HTTP_2)
+            .method(Method::OPTIONS)
+            .uri("https://192.168.1.99:7443/api/v1/health")
+            .header(header::HOST, "192.168.1.20:7443")
+            .header(header::ORIGIN, "https://192.168.1.20:5173")
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+            .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "authorization")
+            .body(Body::empty())
+            .unwrap();
+        assert!(app
+            .oneshot(h2_mismatch)
+            .await
+            .unwrap()
             .headers()
             .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
             .is_none());

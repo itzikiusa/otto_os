@@ -20,6 +20,7 @@ import {
 } from './cm-ide-git-and-agent.ts';
 import { buildIdeVcsContextRows } from './cm-ide-history.ts';
 import { openReplaceInFile, wordAtCursor, type IdeEditorCallbacks } from './cm-ide-keymap.ts';
+import { requestIdeDiveAtPos } from './cm-ide-lsp-dive.ts';
 import { showIdeDocsAtCaret } from './cm-ide-touch.ts';
 import { isCoarsePointer, touchShapeIdeMenu } from './cm-ide-touch-menu.ts';
 import {
@@ -402,6 +403,8 @@ export function createIdeRefactorExtensions(opts: {
         view.dispatch({ selection: { anchor: pos, head: pos } });
       }
       const sym = wordAtCursor(view.state);
+      const symbolPos = view.state.selection.main.head;
+      const dive = (mode: 'definition' | 'implementation') => void requestIdeDiveAtPos(view, symbolPos, mode, cbs);
       const ro = view.state.readOnly;
       const hasSel = !view.state.selection.main.empty;
       const baseName = fPath.split('/').pop() || fPath;
@@ -535,8 +538,8 @@ export function createIdeRefactorExtensions(opts: {
         }
 
         const goToChildren: MenuItem[] = [];
-        if (cbs.onDefinitionJump) goToChildren.push({ label: 'Declaration or Usages', icon: 'arrow', hint: '⌘B', action: () => cbs.onDefinitionJump?.({ line: sym.line, column: sym.column, symbol: sym.word || undefined }) });
-        if (cbs.onImplementationJump) goToChildren.push({ label: 'Implementation(s)', icon: 'layers', hint: '⌥⌘B', action: () => cbs.onImplementationJump?.({ line: sym.line, column: sym.column, symbol: sym.word || undefined }) });
+        if (cbs.onDefinitionJump) goToChildren.push({ label: 'Go to Definition', icon: 'arrow', hint: '⌘B', action: () => dive('definition') });
+        if (cbs.onImplementationJump) goToChildren.push({ label: 'Implementation(s)', icon: 'layers', hint: '⌥⌘B', action: () => dive('implementation') });
         if (cbs.onFileStructure) goToChildren.push({ label: 'File Structure…', icon: 'book', hint: '⌘F12', action: () => cbs.onFileStructure?.() });
         // Moved here from the crumbs row; only where a file has functions (not prose or data).
         if (cbs.onJumpSymbol && !/\.(md|markdown|mdx|txt|rst|adoc|csv|tsv|jsonl?|ndjson|ya?ml|toml|xml|ini|lock|css|scss|less|sql)$/i.test(fPath)) {
@@ -668,7 +671,7 @@ export function createIdeRefactorExtensions(opts: {
         const at = { line: sym.line, column: sym.column, symbol: sym.word || undefined };
         ctxMenu.show(syn, touchShapeIdeMenu(items, {
           symbol: sym.word, readOnly: ro,
-          definition: cbs.onDefinitionJump ? () => cbs.onDefinitionJump?.(at) : null,
+          definition: cbs.onDefinitionJump ? () => dive('definition') : null,
           usages: cbs.onFindUsages ? () => cbs.onFindUsages?.(at) : null,
           docs: () => void showIdeDocsAtCaret(view),
           rename: cbs.onRenameSymbol ? () => cbs.onRenameSymbol?.({ line: sym.line, column: sym.column, symbol: sym.word }) : null,

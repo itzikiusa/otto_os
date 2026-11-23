@@ -1,6 +1,6 @@
 <script lang="ts">
   import LoadState from './LoadState.svelte';
-  import { announce } from '../announce.svelte';
+  import { announce, announceShown } from '../announce.svelte';
   import { api } from '../api/client';
   import type { Session, ProviderAccount } from '../api/types';
   import { ws } from '../stores/workspace.svelte';
@@ -89,7 +89,7 @@
     {/if}
   </div>
   {#if listLoading}<LoadState what="accounts" variant="compact" loading empty />{/if}
-  {#if listError}<p class="error" role="alert">{listError} <button class="btn small" type="button" onclick={loadAccounts} disabled={listLoading}>Retry accounts</button></p>{/if}
+  {#if listError}<p class="error" use:announceShown={{ text: listError, assertive: true }}>{listError} <button class="btn small" type="button" onclick={loadAccounts} disabled={listLoading}>Retry accounts</button></p>{/if}
   {#if adding}
     <div class="actions">
       <input dir="auto" class="input" aria-label="Account label" placeholder="Personal, Work…" maxlength="80" bind:value={label} />
@@ -99,7 +99,7 @@
   {/if}
   <!-- Spoken through announce() where it's set; this is the visible copy. -->
   {#if status}<p>{status}</p>{/if}
-  {#if error}<p class="error" role="alert">{error}</p>{/if}
+  {#if error}<p class="error" use:announceShown={{ text: error, assertive: true }}>{error}</p>{/if}
   {#if loginSession}
     <p>Complete the provider’s sign-in below, then check sign-in.</p>
     <div class="login-terminal"><LazyTerminal sessionId={loginSession.id} /></div>

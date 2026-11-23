@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { ApiError } from '../../lib/api/client';
 
@@ -52,7 +53,7 @@
       />
     </div>
 
-    {#if error}<div class="login-error" role="alert">{error}</div>{/if}
+    {#if error}<div class="login-error" use:announceShown={{ text: error, assertive: true }}>{error}</div>{/if}
 
     <button class="btn primary login-btn" type="submit" disabled={busy || !username || !password}>
       {busy ? 'Signing in…' : 'Sign In'}

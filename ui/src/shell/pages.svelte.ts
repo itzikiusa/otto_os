@@ -69,6 +69,7 @@ const LOADERS: Record<string, Loader> = {
   mcp: () => import('../modules/mcp/McpPage.svelte'),
   brokers: () => import('../modules/brokers/BrokersPage.svelte'),
   kubernetes: () => import('../modules/kubernetes/KubernetesPage.svelte'),
+  containers: () => import('../modules/containers/ContainersPage.svelte'),
   aws: () => import('../modules/aws/AwsPage.svelte'),
   insights: () => import('../modules/insights/InsightsPage.svelte'),
   usage: () => import('../modules/usage/UsagePage.svelte'),
@@ -112,7 +113,7 @@ export function loadedRightPanel(): PageComponent | null {
 }
 
 /** Routes the shell never renders as a page (the root App handles them). */
-const NOT_SHELL = new Set(['s', 'bar', 'tray', 'room', 'room-host']);
+const NOT_SHELL = new Set(['s', 'bar', 'tray', 'clipboard', 'room', 'room-host']);
 
 /** The page a route shows, or null for a route outside the shell:
  *  `connections` is the Database page, the bare route and a plugin route

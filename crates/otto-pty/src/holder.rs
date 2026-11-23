@@ -497,35 +497,42 @@ pub(crate) fn spawn_and_attach(
     };
 
     // One thread per holder this daemon launched: read its verdict, then
-    // reap it whenever it exits (after a daemon restart launchd does that).
+    // observe exit without reaping, mark `holder_state` exited (preventing
+    // timeout cleanup from signalling a recycled PID), and finally reap it.
+    let holder_state = Arc::new(crate::ChildState::default());
     let (tx, rx) = std::sync::mpsc::channel::<std::result::Result<(), String>>();
-    std::thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        let mut verdict = Err("pty holder exited before it was ready".to_string());
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    // Matched anywhere in the line: a test harness may have
-                    // printed an unterminated banner ("test x ... ") first.
-                    if line.contains(READY_PREFIX) {
-                        verdict = Ok(());
-                        break;
+    {
+        let holder_state = Arc::clone(&holder_state);
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            let mut verdict = Err("pty holder exited before it was ready".to_string());
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        // Matched anywhere in the line: a test harness may have
+                        // printed an unterminated banner ("test x ... ") first.
+                        if line.contains(READY_PREFIX) {
+                            verdict = Ok(());
+                            break;
+                        }
+                        if let Some(at) = line.find(ERROR_PREFIX) {
+                            verdict = Err(line[at + ERROR_PREFIX.len()..].trim().to_string());
+                            break;
+                        }
+                        // Anything else (a test harness banner) is noise.
                     }
-                    if let Some(at) = line.find(ERROR_PREFIX) {
-                        verdict = Err(line[at + ERROR_PREFIX.len()..].trim().to_string());
-                        break;
-                    }
-                    // Anything else (a test harness banner) is noise.
                 }
             }
-        }
-        let _ = tx.send(verdict);
-        drop(reader);
-        let _ = child.wait();
-    });
+            let _ = tx.send(verdict);
+            drop(reader);
+            crate::wait_exit_unreaped(holder_pid);
+            holder_state.mark_exited();
+            let _ = child.wait();
+        });
+    }
     match rx.recv_timeout(LAUNCH_TIMEOUT) {
         Ok(Ok(())) => {}
         Ok(Err(msg)) => return Err(Error::Internal(format!("pty holder: {msg}"))),
@@ -534,17 +541,23 @@ pub(crate) fn spawn_and_attach(
             // child: end it through the holder first (KILL escalates past an
             // ignored HUP), or SIGKILLing only the holder orphans a child
             // that ignores HUP (review S1-24). Bounded by the escalation.
-            if terminate(&socket).is_ok() {
-                let _ = crate::held::wait_holder_gone(
+            let ended_cleanly = if terminate(&socket).is_ok() {
+                crate::held::wait_holder_gone(
                     &socket,
                     Duration::from_secs(2 * crate::KILL_GRACE.as_secs() + 1),
-                );
-            }
-            // Still not ready, so not reaped either: its pid is still ours.
-            #[cfg(unix)]
-            // SAFETY: signalling our own unreaped child.
-            unsafe {
-                libc::kill(holder_pid as i32, libc::SIGKILL);
+                )
+                .is_ok()
+            } else {
+                false
+            };
+            // Signal ONLY under `holder_state` while the child is still
+            // unreaped — never a PID that exited (e.g. via `terminate`) and
+            // was already reaped by the waiter thread above.
+            if !ended_cleanly {
+                #[cfg(unix)]
+                {
+                    let _ = holder_state.signal_pid(holder_pid, libc::SIGKILL);
+                }
             }
             let _ = std::fs::remove_file(&socket);
             return Err(Error::Internal(format!(
@@ -847,15 +860,17 @@ impl Shared {
             return !connected && exited_at.elapsed() >= self.exit_linger;
         }
         if !reachable && !connected {
-            // Unreachable for good: end the child; exit once it is gone.
-            let _ = self.handle.kill();
-            self.released.store(true, Ordering::SeqCst);
+            // Unreachable for good: end the child once; exit once it is gone.
+            if !self.released.swap(true, Ordering::SeqCst) {
+                let _ = self.handle.kill();
+            }
             return false;
         }
         if !connected && lock(&self.last_client).elapsed() >= self.orphan_ttl {
-            // No daemon for a whole TTL: end the child; exit once it is gone.
-            let _ = self.handle.kill();
-            self.released.store(true, Ordering::SeqCst);
+            // No daemon for a whole TTL: end the child once; exit once it is gone.
+            if !self.released.swap(true, Ordering::SeqCst) {
+                let _ = self.handle.kill();
+            }
         }
         false
     }

@@ -508,16 +508,33 @@ impl Mirror {
                 .map(|p| p.retry_at)
                 .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600));
             tokio::select! {
-                _ = tokio::time::sleep_until(retry_at), if !pending_replies.is_empty() => {
+                _ = sleep_until_or_cancel(retry_at, &cancel), if !pending_replies.is_empty() => {
+                    if cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
                     let mut pending = pending_replies.pop_front().expect("guarded nonempty queue");
                     match pending.delivery.attempt(&pending.adapter, &pending.chat, pending.thread.as_deref()).await {
                         Ok(()) => {}
                         Err(error) if classify_send_error(&error) == FeedSend::RateLimited => {
-                            // A definite rejection is safe to retry. Retain completed
-                            // parts and the original destination across later turns.
-                            let delay = reply_retry_delay(&error).max(Duration::from_secs(1));
-                            pending.retry_at = tokio::time::Instant::now() + delay;
-                            pending_replies.push_front(pending);
+                            if cancel.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            if pending.record_rate_limit(&error, tokio::time::Instant::now()) {
+                                // A definite rejection is safe to retry. Retain completed
+                                // parts and the original destination across later turns.
+                                pending_replies.push_front(pending);
+                            } else {
+                                warn!(
+                                    session = %session_id,
+                                    attempts = pending.rate_limit_retries,
+                                    "mirror reply delivery dropped after repeated rate limits: {error}"
+                                );
+                                let _ = pending.adapter.send_notice(
+                                    &pending.chat,
+                                    pending.thread.as_deref(),
+                                    "Otto could not deliver the full reply after repeated rate limits. Open the session in Otto for the answer.",
+                                ).await;
+                            }
                         }
                         Err(error) => {
                             warn!(session = %session_id, "mirror reply delivery failed: {error}");
@@ -605,9 +622,12 @@ impl Mirror {
                                     if !cleaned.is_empty() {
                                         if pending_replies.len() < 64 {
                                             pending_replies.push_back(PendingReply {
-                                                adapter: Arc::clone(&adapter), chat: chat.clone(), thread: thread.clone(),
+                                                adapter: Arc::clone(&adapter),
+                                                chat: chat.clone(),
+                                                thread: thread.clone(),
                                                 delivery: ReplyDelivery::new(cleaned.to_owned()),
                                                 retry_at: tokio::time::Instant::now(),
+                                                rate_limit_retries: 0,
                                             });
                                         } else {
                                             let _ = adapter.send_notice(&chat, thread.as_deref(),
@@ -615,9 +635,14 @@ impl Mirror {
                                         }
                                     }
                                 }
-                                for path in &file_paths {
-                                    upload_file_path(&adapter, &chat, thread.as_deref(), path, &cwd).await;
-                                }
+                                upload_file_paths(
+                                    &adapter,
+                                    &chat,
+                                    thread.as_deref(),
+                                    &file_paths,
+                                    &cwd,
+                                )
+                                .await;
                                 last_queued_final = Some(joined);
 
                                 // Self-improvement: learn from this just-finished
@@ -671,7 +696,9 @@ impl Mirror {
                         ticks_since_liveness = 0;
                         match self.manager.get(&session_id).await {
                             Ok(s) if !s.archived && s.status != SessionStatus::Exited => {}
-                            _ if !pending_replies.is_empty() => {
+                            _ if !pending_replies.is_empty()
+                                && !cancel.load(Ordering::Relaxed) =>
+                            {
                                 // A completed/exited agent must not discard a
                                 // reply still waiting out the provider's cooldown.
                                 typing_active.send_replace(false);
@@ -1018,6 +1045,38 @@ fn strip_file_directives(text: &str) -> String {
     out
 }
 
+/// Maximum number of `⟦otto-file⟧` attachments uploaded from a single agent
+/// reply, preventing a prompt-injected or runaway reply from flooding the chat.
+pub(crate) const MAX_ATTACHMENTS_PER_REPLY: usize = 10;
+
+/// Upload up to [`MAX_ATTACHMENTS_PER_REPLY`] files requested in one reply,
+/// posting a single notice if additional directives were dropped.
+async fn upload_file_paths(
+    adapter: &Arc<dyn Adapter>,
+    chat: &str,
+    thread: Option<&str>,
+    file_paths: &[String],
+    cwd: &str,
+) {
+    for path in file_paths.iter().take(MAX_ATTACHMENTS_PER_REPLY) {
+        upload_file_path(adapter, chat, thread, path, cwd).await;
+    }
+    if file_paths.len() > MAX_ATTACHMENTS_PER_REPLY {
+        let skipped = file_paths.len() - MAX_ATTACHMENTS_PER_REPLY;
+        warn!(
+            total = file_paths.len(),
+            cap = MAX_ATTACHMENTS_PER_REPLY,
+            "mirror: capped ⟦otto-file⟧ attachments for reply"
+        );
+        let note = format!(
+            "⚠️ Otto attached only the first {MAX_ATTACHMENTS_PER_REPLY} files ({skipped} more skipped)."
+        );
+        if let Err(e) = adapter.send(chat, thread, &note).await {
+            warn!("mirror: attachment-cap note: {e}");
+        }
+    }
+}
+
 /// Read a local file the agent asked to attach (via ⟦otto-file⟧) and upload it
 /// to the chat. Best-effort: a missing/unreadable path is logged, not fatal.
 ///
@@ -1038,9 +1097,19 @@ async fn upload_file_path(
         .and_then(|s| s.to_str())
         .unwrap_or("attachment")
         .to_string();
-    let policy = AttachmentPolicy::for_session(cwd);
-    let canon = match policy.vet(path, cwd) {
-        Ok((canon, _len)) => canon,
+    let path_owned = path.to_string();
+    let cwd_owned = cwd.to_string();
+    // Vet and open with O_NOFOLLOW + fstat (dev, ino, nlink) verification off
+    // the async worker pool so a TOCTOU swap cannot redirect the open.
+    let opened = tokio::task::spawn_blocking(move || {
+        let policy = AttachmentPolicy::for_session(&cwd_owned);
+        policy.open_vetted(&path_owned, &cwd_owned)
+    })
+    .await
+    .map_err(|e| format!("attachment check task failed: {e}"))
+    .and_then(|r| r);
+    let (canon, std_file) = match opened {
+        Ok(pair) => pair,
         Err(reason) => {
             warn!(
                 path,
@@ -1055,31 +1124,21 @@ async fn upload_file_path(
             return;
         }
     };
-    // Read the CANONICAL path (no symlinks left to swap) and re-apply the size
-    // cap on the bytes actually read, so a file grown after the check can't
-    // blow the buffer.
-    let bytes = match tokio::fs::File::open(&canon).await {
-        Ok(f) => {
-            let mut buf = Vec::new();
-            match f.take(MAX_ATTACHMENT_BYTES + 1).read_to_end(&mut buf).await {
-                Ok(_) => buf,
-                Err(e) => {
-                    warn!(
-                        "mirror: could not read file to attach {}: {e}",
-                        canon.display()
-                    );
-                    return;
-                }
-            }
-        }
-        Err(e) => {
-            warn!(
-                "mirror: could not open file to attach {}: {e}",
-                canon.display()
-            );
-            return;
-        }
-    };
+    // Read from the ALREADY-VETTED file descriptor (never re-opening by path)
+    // and re-apply the size cap on the bytes actually read.
+    let f = tokio::fs::File::from_std(std_file);
+    let mut bytes = Vec::new();
+    if let Err(e) = f
+        .take(MAX_ATTACHMENT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .await
+    {
+        warn!(
+            "mirror: could not read file to attach {}: {e}",
+            canon.display()
+        );
+        return;
+    }
     if bytes.len() as u64 > MAX_ATTACHMENT_BYTES {
         warn!(path = %canon.display(), "mirror: refused ⟦otto-file⟧ attachment: grew past the size cap");
         return;
@@ -1148,6 +1207,27 @@ pub(crate) fn retry_after_hint(e: &anyhow::Error) -> Option<Duration> {
     digits.parse::<u64>().ok().map(Duration::from_secs)
 }
 
+/// Maximum consecutive rate-limit retries per pending reply before giving up,
+/// warning/notifying, and dropping it so a permanently throttled destination
+/// cannot wedge the tailer forever.
+const MAX_PENDING_REPLY_RETRIES: u32 = 5;
+
+/// Wait until `deadline` or until `cancel` flips true (checked in 250 ms
+/// slices), so a long `Retry-After` never blocks shutdown or tailer exit.
+async fn sleep_until_or_cancel(deadline: tokio::time::Instant, cancel: &AtomicBool) {
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return;
+        }
+        let step = deadline.min(now + Duration::from_millis(250));
+        tokio::time::sleep_until(step).await;
+    }
+}
+
 /// A reply waiting for transport acceptance, with its original destination.
 struct PendingReply {
     adapter: Arc<dyn Adapter>,
@@ -1155,6 +1235,22 @@ struct PendingReply {
     thread: Option<String>,
     delivery: ReplyDelivery,
     retry_at: tokio::time::Instant,
+    rate_limit_retries: u32,
+}
+
+impl PendingReply {
+    /// Record a `FeedSend::RateLimited` attempt. Returns `true` and schedules
+    /// the next `retry_at` while under [`MAX_PENDING_REPLY_RETRIES`], or
+    /// `false` once the retry cap is reached (caller warns, notifies & drops).
+    fn record_rate_limit(&mut self, error: &anyhow::Error, now: tokio::time::Instant) -> bool {
+        self.rate_limit_retries += 1;
+        if self.rate_limit_retries >= MAX_PENDING_REPLY_RETRIES {
+            return false;
+        }
+        let delay = reply_retry_delay(error).max(Duration::from_secs(1));
+        self.retry_at = now + delay;
+        true
+    }
 }
 
 /// Keep successful parts when a later part is rejected. Upload first: the
@@ -1989,5 +2085,116 @@ mod tests {
         );
         assert!(out.contains("step 199:"), "keeps the most recent step");
         assert!(!out.contains("step 0:"), "drops the oldest step");
+    }
+
+    #[tokio::test]
+    async fn upload_file_paths_caps_attachments_per_reply() {
+        #[derive(Default)]
+        struct RecordingAdapter {
+            uploads: StdMutex<Vec<String>>,
+            notes: StdMutex<Vec<String>>,
+        }
+        #[async_trait::async_trait]
+        impl Adapter for RecordingAdapter {
+            async fn send(&self, _: &str, _: Option<&str>, text: &str) -> anyhow::Result<String> {
+                self.notes.lock().unwrap().push(text.to_string());
+                Ok("m".into())
+            }
+            async fn edit(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn upload(
+                &self,
+                _: &str,
+                _: Option<&str>,
+                filename: &str,
+                _: &[u8],
+            ) -> anyhow::Result<()> {
+                self.uploads.lock().unwrap().push(filename.to_string());
+                Ok(())
+            }
+            fn channel(&self) -> Channel {
+                Channel::Slack
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!("otto-mirror-cap-{}", otto_core::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut paths = Vec::new();
+        for i in 0..(MAX_ATTACHMENTS_PER_REPLY + 4) {
+            let p = dir.join(format!("report-{i}.md"));
+            std::fs::write(&p, format!("file {i}")).unwrap();
+            paths.push(p.to_string_lossy().into_owned());
+        }
+
+        let rec = Arc::new(RecordingAdapter::default());
+        let adapter: Arc<dyn Adapter> = rec.clone();
+        upload_file_paths(&adapter, "C1", Some("1.0"), &paths, dir.to_str().unwrap()).await;
+
+        assert_eq!(rec.uploads.lock().unwrap().len(), MAX_ATTACHMENTS_PER_REPLY);
+        let notes = rec.notes.lock().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("4 more skipped"), "{notes:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn pending_reply_caps_consecutive_rate_limit_retries_and_honors_cancel() {
+        struct DummyAdapter;
+        #[async_trait::async_trait]
+        impl Adapter for DummyAdapter {
+            async fn send(&self, _: &str, _: Option<&str>, _: &str) -> anyhow::Result<String> {
+                Ok(String::new())
+            }
+            async fn edit(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn channel(&self) -> Channel {
+                Channel::Slack
+            }
+        }
+
+        let now = tokio::time::Instant::now();
+        let mut pending = PendingReply {
+            adapter: Arc::new(DummyAdapter),
+            chat: "C1".into(),
+            thread: None,
+            delivery: ReplyDelivery::new("hello".into()),
+            retry_at: now,
+            rate_limit_retries: 0,
+        };
+        let err = anyhow::anyhow!("Slack HTTP 429 Too Many Requests (retry after 3)");
+        for attempt in 1..MAX_PENDING_REPLY_RETRIES {
+            assert!(
+                pending.record_rate_limit(&err, now),
+                "attempt {attempt} should still schedule a retry"
+            );
+            assert!(pending.retry_at >= now + Duration::from_secs(3));
+        }
+        assert!(
+            !pending.record_rate_limit(&err, now),
+            "hitting MAX_PENDING_REPLY_RETRIES must stop retrying and drop"
+        );
+        assert_eq!(pending.rate_limit_retries, MAX_PENDING_REPLY_RETRIES);
+
+        // A long retry sleep wakes promptly on cancel instead of blocking shutdown.
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_flip = Arc::clone(&cancel);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel_flip.store(true, Ordering::Relaxed);
+        });
+        let started = Instant::now();
+        sleep_until_or_cancel(
+            tokio::time::Instant::now() + Duration::from_secs(600),
+            &cancel,
+        )
+        .await;
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "sleep_until_or_cancel should exit promptly on cancel, took {:?}",
+            started.elapsed()
+        );
     }
 }

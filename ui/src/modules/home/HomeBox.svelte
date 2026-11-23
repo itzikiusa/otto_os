@@ -14,6 +14,8 @@
     k8s: () => import('./boxes/K8sBox.svelte'),
     insights: () => import('./boxes/InsightsBox.svelte'),
     usage: () => import('./boxes/UsageBox.svelte'),
+    'pr-queue': () => import('./boxes/PrQueueBox.svelte'),
+    automations: () => import('./boxes/AutomationsBox.svelte'),
   };
   const bodies = new SvelteMap<string, BoxBody>();
   const inflight = new Map<string, Promise<void>>();
@@ -112,9 +114,19 @@
   // be threaded down; rows are the fixed ROW_PX unit.
   let el = $state<HTMLElement | null>(null);
   let resizing = $state(false);
+  let stopResize: (() => void) | null = null;
+  let dragging = false;
+  $effect(() => () => {
+    stopResize?.();
+    if (dragging) {
+      dragging = false;
+      home.interacting = false;
+    }
+  });
   function onResizeStart(e: PointerEvent): void {
     if (!el || viewport.isPhone) return;
     e.preventDefault();
+    stopResize?.();
     const target = e.currentTarget as HTMLElement;
     target.setPointerCapture(e.pointerId);
     const rect = el.getBoundingClientRect();
@@ -136,9 +148,11 @@
       target.removeEventListener('pointermove', move);
       target.removeEventListener('pointerup', up);
       target.removeEventListener('pointercancel', up);
+      if (stopResize === up) stopResize = null;
       resizing = false;
       home.interacting = false;
     };
+    stopResize = up;
     target.addEventListener('pointermove', move);
     target.addEventListener('pointerup', up);
     target.addEventListener('pointercancel', up);
@@ -159,10 +173,12 @@
   function onDragStart(e: DragEvent): void {
     e.dataTransfer?.setData('text/plain', box.id);
     if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+    dragging = true;
     home.interacting = true;
     ondragbox?.(box.id);
   }
   function onDragEnd(): void {
+    dragging = false;
     home.interacting = false;
   }
   function onDragOver(e: DragEvent): void {
@@ -174,6 +190,41 @@
     e.preventDefault();
     dragOver = false;
     ondropon?.(box.id);
+  }
+  // Double-clicking the header bar (outside its action buttons) toggles zoom;
+  // keyboard users use the explicit Zoom <button> right inside the header.
+  function headZoom(node: HTMLElement): { destroy(): void } {
+    const onDblClick = (e: MouseEvent): void => {
+      if ((e.target as HTMLElement | null)?.closest('button')) return;
+      home.toggleZoom(box.id);
+    };
+    node.addEventListener('dblclick', onDblClick);
+    return {
+      destroy() {
+        node.removeEventListener('dblclick', onDblClick);
+      },
+    };
+  }
+
+  function onDragLeave(): void {
+    dragOver = false;
+  }
+  // Attach context-menu and drop-target listeners to the landmark <section>;
+  // keyboard users reach the same actions via `use:rowMenu` and the header's
+  // explicit <button> controls (Refresh, Zoom, Widget options → Move left/right).
+  function boxSurface(node: HTMLElement): { destroy(): void } {
+    node.addEventListener('contextmenu', menu);
+    node.addEventListener('dragover', onDragOver);
+    node.addEventListener('dragleave', onDragLeave);
+    node.addEventListener('drop', onDrop);
+    return {
+      destroy() {
+        node.removeEventListener('contextmenu', menu);
+        node.removeEventListener('dragover', onDragOver);
+        node.removeEventListener('dragleave', onDragLeave);
+        node.removeEventListener('drop', onDrop);
+      },
+    };
   }
 
   function menu(e: MouseEvent | KeyboardEvent): void {
@@ -204,8 +255,9 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<section use:rowMenu
+<section
+  use:rowMenu
+  use:boxSurface
   class="hbox"
   class:zoomed
   class:resizing
@@ -218,12 +270,8 @@
   hidden={covered}
   inert={covered}
   aria-label={def.label}
-  oncontextmenu={menu}
-  ondragover={onDragOver}
-  ondragleave={() => (dragOver = false)}
-  ondrop={onDrop}
 >
-  <header class="hb-head" ondblclick={() => home.toggleZoom(box.id)}>
+  <header class="hb-head" use:headZoom>
     {#if !zoomed && !viewport.isPhone}
       <span class="grip" draggable="true" ondragstart={onDragStart} ondragend={onDragEnd} title="Drag to reorder" aria-hidden="true"><Icon name="grip" size={12} /></span>
     {/if}

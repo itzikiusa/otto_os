@@ -46,7 +46,8 @@ pub(crate) async fn summarize_and_persist(
     if review_is_cancelled(ctx, review_id).await {
         return Ok(());
     }
-    let cancel_flag = attempt_cancel_flag(ctx, review_id);
+    let cancel_guard = ctx.review_cancels.join(review_id);
+    let cancel_flag = Some(Arc::clone(cancel_guard.flag()));
     let flag_tripped = || {
         cancel_flag
             .as_ref()
@@ -212,23 +213,6 @@ pub(crate) async fn summarize_and_persist(
     // Not a verdict (status `error`, the findings stay stored): the message
     // names the failed step for the review panel and the workflow step.
     incomplete.map_or(Ok(()), |why| Err(Error::Invalid(why)))
-}
-
-/// THIS attempt's cancel flag (registered on first use). Held for the whole
-/// attempt: a retry may replace the registry entry while a cancelled attempt
-/// is still unwinding; it must stay cancelled. The in-memory flag is the fast
-/// path (the cancel endpoint always trips it first); the durable status only
-/// covers flagless paths, so it is read sparingly (the turn's cancel watch
-/// and the draft loop).
-fn attempt_cancel_flag(
-    ctx: &ServerCtx,
-    review_id: &Id,
-) -> Option<Arc<std::sync::atomic::AtomicBool>> {
-    ctx.review_cancels.lock().ok().map(|mut map| {
-        map.entry(review_id.clone())
-            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
-            .clone()
-    })
 }
 
 /// Persist the summary's draft comments AND promote each into a tracked
@@ -494,8 +478,17 @@ impl SummarizerTurn<'_> {
             &summarizer_cfg.model,
         )?;
         attempt.meta["review_id"] = serde_json::json!(review_id);
-        // Queue for a machine slot BEFORE the summarizer's hard budget starts.
-        let admission = ctx.manager.admit_background("review_summarizer").await;
+        // Queue for a machine slot BEFORE the summarizer's hard budget starts,
+        // racing against cancellation so a cancelled review never hangs queued.
+        let admission = tokio::select! {
+            biased;
+            _ = async {
+                while !flag_tripped() && !review_is_cancelled(ctx, review_id).await {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            } => return Err("review cancelled".into()),
+            a = ctx.manager.admit_background("review_summarizer") => a,
+        };
         admission.stamp(&mut attempt.meta);
         let prompt = attempt.prompt(summarizer_prompt);
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
@@ -511,6 +504,7 @@ impl SummarizerTurn<'_> {
             &prompt,
             summarizer_timeout,
             crate::agent_session::TurnOpts {
+                cancel: self.cancel_flag.cloned(),
                 done_file: Some(attempt.result_path()),
                 done_file_validator: Some(crate::review_summarizer::valid_result),
                 ..Default::default()

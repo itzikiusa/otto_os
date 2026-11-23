@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { announceShown } from '../../lib/announce.svelte';
   // Browser module page: tab strip + URL bar + reader page (a thin view over a $state store).
 
   import { untrack } from 'svelte';
@@ -7,17 +6,17 @@
   import { loadErrorText } from '../../lib/loadError';
   import { pollWhileVisible } from '../../lib/poll';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { router } from '../../lib/router.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { browser } from '../../lib/stores/browser.svelte';
   import { vault } from '../vault/vault.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { isAbortError } from '../../lib/api/client';
-  import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { nativeBrowser, nativeBrowserAvailable, type Rect } from '../../lib/nativeBrowser';
   import * as browserApi from '../../lib/api/browser';
-  import type { BrowserCredential } from '../../lib/api/types';
+  import type { BrowserCredential, BrowserInspectedElement, SimDevice } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
   import TabStrip from './TabStrip.svelte';
   import Modal from '../../lib/components/Modal.svelte';
@@ -27,24 +26,40 @@
     credentialsPanel = import('./CredentialsPanel.svelte');
     showCredentials = true;
   }
+  let showSimulators = $state(false);
+  let simulatorsPanel = $state<Promise<typeof import('./simulators/SimulatorPanel.svelte')> | null>(null);
+  function openSimulators(): void {
+    simulatorsPanel = import('./simulators/SimulatorPanel.svelte');
+    showSimulators = true;
+  }
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import BrowserMenu from './BrowserMenu.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import BrowserSummary from './BrowserSummary.svelte';
   import ReaderView from './ReaderView.svelte';
   import NotesRail from './NotesRail.svelte';
   import AgentDock from './AgentDock.svelte';
   import AskBar from './AskBar.svelte';
-  import RemoteLiveView from './live/RemoteLiveView.svelte';
+  import BrowserUrlBar from './BrowserUrlBar.svelte';
+  import type LiveBrowserStageView from './live/LiveBrowserStage.svelte';
   import type { LiveViewState } from './live/protocol';
   import LiveEngineSetup from './live/LiveEngineSetup.svelte';
+  import SimulatorView from './simulators/SimulatorView.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  // The live (remote engine) stage loads with the first live tab.
+  const LiveBrowserStage = lazyComponent(() => import('./live/LiveBrowserStage.svelte'));
+  import {
+    DEFAULT_EMULATION_STATE,
+    stateForPreset,
+    type DeviceEmulationState,
+  } from './live/devicePresets';
+  import { consumeBrowserDeepLink } from './deepLink';
+  import { browserBookmarks } from './bookmarks.svelte';
   import { browserLive } from '../../lib/stores/browserLive.svelte';
   import * as liveApi from '../../lib/api/browserLive';
-  // Raw source text of the picker overlay — `eval`'d into the live tab's own
-  // JS context via `browser_eval`, never bundled/imported as a module (see
-  // overlay.js's header for why).
-  import overlaySrc from './overlay.js?raw';
-  import { buildFillScript, fillAllowedForUrl, fillResult, fillTargetOk, hostOf, matchDomain } from './autofill';
-  import { liveWebviews, NATIVE_NAV_JS, type LiveNav } from './liveWebviews';
+  import { fillAllowedForUrl, hostOf, matchDomain } from './autofill';
+  import { drainOverlayTick, injectLiveOverlay, runLiveAutofill } from './autofillRunner';
+  import { liveWebviews, nativeEventHub, NATIVE_NAV_JS, type LiveNav } from './liveWebviews';
 
   interface Props {
     /** Hosted inside the agent-mode right panel (the "v2" Browser tab): no
@@ -59,11 +74,36 @@
   let urlInput = $state('');
   let vaultSaving = $state(false);
   let urlFocused = $state(false);
+  let emulation = $state<DeviceEmulationState>({ ...DEFAULT_EMULATION_STATE });
+  let inspectorOpen = $state(false);
+  let mirroredSim = $state<SimDevice | null>(null);
+  let simSplit = $state(true);
 
-  // (Re)load the tab list when the workspace changes.
+  // (Re)load the tab list & workspace bookmarks when the workspace changes.
   $effect(() => {
     const id = ws.currentId;
-    if (id) void browser.loadTabs(id);
+    if (id) {
+      void browser.loadTabs(id);
+      browserBookmarks.load(id);
+    }
+  });
+
+  // Single unified handler for `#/browser?...` deep-links (Git PR previews,
+  // IDE dev-server chips, device presets, and simulator handoffs).
+  $effect(() => {
+    if (embedded || !ws.currentId) return;
+    void router.parts;
+    const run = () =>
+      void consumeBrowserDeepLink({
+        setUrlInput: (u) => (urlInput = u),
+        setEmulation: (emu) => (emulation = emu),
+        onSimulator: (dev, split) => { mirroredSim = dev; simSplit = split; },
+        onSimulatorMissing: openSimulators,
+        liveCapable: untrack(() => liveCapable),
+      });
+    run();
+    window.addEventListener('hashchange', run);
+    return () => window.removeEventListener('hashchange', run);
   });
 
   // Keep the URL bar in sync with the active tab — unless the field is
@@ -73,21 +113,17 @@
     if (!urlFocused) urlInput = browser.activeTab?.url ?? urlInput;
   });
 
-  // ── Live tab: two renderers (browserLive.renderer) ─────────────────────
-  //   native — the desktop app's Tauri child webview overlaid on `liveHostEl`
-  //            (only inside Otto.app; the default there);
-  //   remote — the daemon-owned Chromium streamed into RemoteLiveView (any
-  //            device: remote web session, PWA, phone — and agent-drivable).
-  // Only a daemon that predates live streaming leaves a remote live tab on
-  // the old honest fallback (Reader + "Open in new tab").
+  // Live tab renderers: native (desktop Tauri child webview) or remote
+  // (daemon-owned Chromium streamed into RemoteLiveView).
   let liveHostEl = $state<HTMLDivElement | null>(null);
+  const fullSimActive = $derived(!!mirroredSim && !simSplit);
   const activeLive = $derived(
-    nativeBrowserAvailable && browserLive.renderer === 'native' && browser.activeTab?.mode === 'live'
+    !fullSimActive && nativeBrowserAvailable && browserLive.renderer === 'native' && browser.activeTab?.mode === 'live'
       ? browser.activeTab
       : null,
   );
   const activeRemote = $derived(
-    browserLive.renderer === 'remote' && browserLive.supported !== false && browser.activeTab?.mode === 'live'
+    !fullSimActive && browserLive.renderer === 'remote' && browserLive.supported !== false && browser.activeTab?.mode === 'live'
       ? browser.activeTab
       : null,
   );
@@ -108,12 +144,47 @@
     if (!browser.page && !browser.loadingPage && !browser.pageError) void browser.loadPage(tab.url);
   });
 
+  // Live tabs skip `loadPage()`, so load the active live URL's marks here on
+  // tab selection, mode switch, and in-page navigation (both native & remote).
+  $effect(() => {
+    const liveTab = activeLive ?? activeRemote;
+    const _ws = ws.currentId;
+    const _id = liveTab?.id;
+    const url = liveTab?.url;
+    if (!_ws || !_id || !url) return;
+    void browser.loadAnnotations(url);
+  });
+
+  // Marks rail visibility: auto-opens when the page has marks (or user clicks
+  // the Marks toggle), and stays collapsed when empty so narrow embedded panels
+  // and Reader view don't lose 260px to an empty rail.
+  let marksRailOverride = $state<boolean | null>(null);
+  let lastMarksTabId = $state<string | null>(null);
+  $effect(() => {
+    const id = browser.activeId;
+    if (id !== lastMarksTabId) {
+      lastMarksTabId = id;
+      marksRailOverride = null;
+    }
+  });
+  const canShowMarksRail = $derived(
+    !!activeLive || (!!activeRemote && browserLive.ready) || !!browser.page,
+  );
+  const showMarksRail = $derived(
+    canShowMarksRail && (marksRailOverride ?? browser.annotations.length > 0),
+  );
+  function closeMarksRail(): void {
+    marksRailOverride = false;
+    urlBar?.focusMarksToggle();
+  }
+
   // ── Remote live view state (nav buttons, ⌘L) ───────────────────────────
   // Element picking has no remote counterpart in the live protocol yet, so
   // the target button is simply absent for a remote tab (no dead control).
-  let remoteView = $state<ReturnType<typeof RemoteLiveView> | null>(null);
+  let remoteView = $state<ReturnType<typeof LiveBrowserStageView> | null>(null);
+  let readerView = $state<ReturnType<typeof ReaderView> | null>(null);
   let remoteState: LiveViewState | null = $state(null);
-  let urlEl = $state<HTMLInputElement | null>(null);
+  let urlBar = $state<ReturnType<typeof BrowserUrlBar> | null>(null);
   // A primitive, so a nav that replaces the tab object (trackLiveNav) doesn't
   // look like a tab switch.
   const activeRemoteId = $derived(activeRemote?.id ?? null);
@@ -131,8 +202,7 @@
   }
 
   function focusUrl(): void {
-    urlEl?.focus();
-    urlEl?.select();
+    urlBar?.focusUrl();
   }
 
   function chooseRenderer(e: MouseEvent): void {
@@ -212,32 +282,14 @@
     };
   });
 
-  // ── Live tab: element picker overlay ────────────────────────────────────
-  // The overlay can't call back into the app over IPC (child webviews are
-  // denied it — see Task 9's report), so the app polls it instead: every tick
-  // it pushes the current URL's marks in (for re-highlighting) and pulls out
-  // whatever the overlay queued since the last poll (marks made by clicking
-  // in pick mode). See overlay.js's header for the full protocol.
   let pickMode = $state(false);
-
-  async function injectOverlay(id: string): Promise<void> {
-    if (!nativeBrowserAvailable) return;
-    await nativeBrowser.eval(id, overlaySrc);
-    // Picking was already armed before this (re-)injection (e.g. an in-page
-    // nav reloaded the DOM mid-pick) — restore it on the fresh page.
-    if (pickMode && id === activeLive?.id) {
-      void nativeBrowser.eval(id, 'window.__ottoOverlay && window.__ottoOverlay.setPicking(true)');
-    }
-  }
+  const injectOverlay = (id: string) => injectLiveOverlay(id, pickMode && id === activeLive?.id);
 
   function togglePick(): void {
     const active = activeLive;
     if (!active) return;
     pickMode = !pickMode;
-    void nativeBrowser.eval(
-      active.id,
-      `window.__ottoOverlay && window.__ottoOverlay.setPicking(${pickMode})`,
-    );
+    void nativeBrowser.eval(active.id, `window.__ottoOverlay && window.__ottoOverlay.setPicking(${pickMode})`);
   }
 
   // Pick mode is per-tab-load, not per-tab — reset it when the active LIVE
@@ -253,43 +305,12 @@
     }
   });
 
-  // Backpressure: a `browser_eval` round-trip can outlive a single 700ms
-  // tick (a slow/busy page, or `createAnnotation` calls piling up for a
-  // multi-mark drain) — skip starting a new poll while one's still in
-  // flight rather than letting them queue up and land out of order.
   let pollInFlight = false;
-
   async function pollOverlay(id: string, url: string): Promise<void> {
     if (pollInFlight) return;
     pollInFlight = true;
     try {
-      const highlights = browser.annotations
-        .filter((a) => a.url === url)
-        .map((a) => ({ selector: a.selector, color: a.color || 'yellow' }));
-      const arg = JSON.stringify(JSON.stringify(highlights));
-      const raw = await nativeBrowser.eval(id, `window.__ottoOverlay && window.__ottoOverlay.tick(${arg})`);
-      if (!raw) return;
-      let drained: Array<{ selector: string; outerHtml: string; text: string }>;
-      try {
-        const parsed = JSON.parse(raw);
-        if (!Array.isArray(parsed)) return;
-        drained = parsed;
-      } catch {
-        return;
-      }
-      for (const m of drained) {
-        try {
-          await browser.createAnnotation({
-            url,
-            selector: m.selector,
-            excerpt: (m.outerHtml || '').slice(0, 2000),
-            text: (m.text || '').slice(0, 2000),
-            comment: '',
-          });
-        } catch (e) {
-          toastError('Couldn’t save mark', e);
-        }
-      }
+      await drainOverlayTick(id, url);
     } finally {
       pollInFlight = false;
     }
@@ -325,25 +346,32 @@
   let credentials: BrowserCredential[] = $state([]);
   $effect(() => {
     const id = ws.currentId;
-    if (!id) return;
+    if (!id) {
+      credentials = [];
+      return;
+    }
+    let aborted = false;
     void browserApi
       .listCredentials(id)
-      .then((c) => (credentials = c))
+      .then((c) => {
+        if (!aborted && ws.currentId === id) credentials = c;
+      })
       .catch(() => {
-        // No Editor role, or the call failed — the key icon simply never
-        // appears; autofill is a convenience, not something to surface an
-        // error toast for on every workspace switch.
-        credentials = [];
+        if (!aborted && ws.currentId === id) credentials = [];
       });
+    return () => {
+      aborted = true;
+    };
   });
 
-  const matchedCredential = $derived.by(() => {
+  const matchedCredentials = $derived.by(() => {
     const tab = activeLive;
-    if (!tab) return null;
+    if (!tab) return [] as BrowserCredential[];
     const host = hostOf(tab.url);
-    if (!host || !fillAllowedForUrl(tab.url)) return null;
-    return credentials.find((c) => matchDomain(host, c.domain)) ?? null;
+    if (!host || !fillAllowedForUrl(tab.url)) return [] as BrowserCredential[];
+    return credentials.filter((c) => matchDomain(host, c.domain));
   });
+  const matchedCredential = $derived(matchedCredentials[0] ?? null);
 
   // Whether the CURRENT page (not just the domain) actually has a password
   // field right now — polled only while a domain match exists, so a normal
@@ -376,82 +404,54 @@
     };
   });
 
-  const canAutofill = $derived(!!activeLive && !!matchedCredential && hasLoginForm);
+  const canAutofill = $derived(!!activeLive && matchedCredentials.length > 0 && hasLoginForm);
   let filling = $state(false);
 
-  async function autofill(): Promise<void> {
-    const tab = activeLive;
-    const cred = matchedCredential;
-    if (!tab || !cred || filling) return;
-    const ok = await confirmer.ask(
-      `Fill the saved credentials for "${cred.username}" on ${cred.domain} into this page? Nothing is submitted automatically — review it before you sign in.`,
-      { title: 'Autofill credentials', confirmLabel: 'Fill', danger: false },
+  function onAutofillClick(e: MouseEvent): void {
+    if (matchedCredentials.length === 0 || filling) return;
+    if (matchedCredentials.length === 1) {
+      void autofill(matchedCredentials[0]);
+      return;
+    }
+    ctxMenu.show(
+      e,
+      matchedCredentials.map((c) => ({
+        label: `${c.username} (${c.domain})`,
+        icon: 'key',
+        action: () => void autofill(c),
+      })),
     );
-    if (!ok) return;
+  }
+
+  async function autofill(cred: BrowserCredential): Promise<void> {
+    if (filling) return;
     filling = true;
     try {
-      // Reveal is Edit-gated and returns the plaintext password ONLY to this
-      // call — it's never stored beyond the local scope below, never logged
-      // (the eval string below is never passed to `toasts`/`console`), and
-      // it never re-enters this component's own $state.
-      const { password } = await browserApi.revealCredential(cred.id);
-      // Re-check AFTER both awaits (S18-04): the confirmation and the reveal
-      // can take seconds, and the tab may have redirected to another origin
-      // meanwhile. The script below re-checks the page's own origin too.
-      if (activeLive?.id !== tab.id || !fillTargetOk(activeLive.url, cred.domain)) {
-        toasts.warn('Not filled', `This tab left ${cred.domain} — nothing was filled.`);
-        return;
-      }
-      const js = buildFillScript(cred.domain, cred.username, password);
-      const result = await nativeBrowser.eval(tab.id, js);
-      const outcome = fillResult(result);
-      if (outcome === 'origin-changed') {
-        toasts.warn('Not filled', `This tab left ${cred.domain} — nothing was filled.`);
-      } else if (outcome === 'no-password-field') {
-        toasts.warn('Nothing to fill', 'The page no longer has a password field.');
-      } else {
-        toasts.success('Autofilled', `${cred.username} · ${cred.domain} — review before submitting`);
-      }
-    } catch (e) {
-      toastError('Couldn’t fill the login', e);
+      await runLiveAutofill(cred, () => activeLive);
     } finally {
       filling = false;
     }
   }
 
-  // Reflect a live tab's in-page navigations into the store + address bar.
-  // Event-driven (wry on_navigation) — never polls url().
+  // Reflect live-tab in-page navigations and `window.open()` through a single
+  // ref-counted native event hub so multiple mounted BrowserView instances
+  // (e.g. Browser page + embedded panels / split ThreadInspector) never open
+  // duplicate tabs or double-inject the overlay.
   $effect(() => {
     if (!nativeBrowserAvailable) return;
-    let unlisten = (): void => {};
-    let disposed = false;
-    void nativeBrowser
-      .onUrlChange((id, url) => {
+    return nativeEventHub.attach(nativeBrowser, {
+      onUrlChange(id, url) {
         liveWebviews.set(id, url); // keep the driver effect from re-navigating (loop)
         browser.trackLiveNav(id, url);
-        if (!urlFocused && id === browser.activeId) urlInput = url;
         void injectOverlay(id); // in-page nav reloaded the DOM — re-arm the picker
-      })
-      .then((un) => (disposed ? un() : (unlisten = un)));
-    return () => {
-      disposed = true;
-      unlisten();
-    };
-  });
-
-  // A live tab asked to open a new tab (window.open / target=_blank) — open a
-  // real in-app live tab for it and focus it.
-  $effect(() => {
-    if (!nativeBrowserAvailable) return;
-    let unlisten = (): void => {};
-    let disposed = false;
-    void nativeBrowser
-      .onNewTab((url) => void browser.openLiveTab(url))
-      .then((un) => (disposed ? un() : (unlisten = un)));
-    return () => {
-      disposed = true;
-      unlisten();
-    };
+      },
+      onLocalUrlChange(id, url) {
+        if (!urlFocused && id === browser.activeId) urlInput = url;
+      },
+      onNewTab(url) {
+        void browser.openLiveTab(url);
+      },
+    });
   });
 
   // Destroy the native webview for any live tab this view previously knew
@@ -488,7 +488,7 @@
   // Back / Forward / Reload / Stop for whichever engine renders the live tab.
   function liveNav(nav: LiveNav): void {
     if (activeRemote) {
-      if (nav !== 'stop') remoteView?.[nav]();
+      remoteView?.[nav]();
     } else if (activeLive) {
       if (nav === 'reload') void nativeBrowser.reload(activeLive.id);
       else void nativeBrowser.eval(activeLive.id, NATIVE_NAV_JS[nav]);
@@ -522,10 +522,6 @@
     } catch (e) {
       toastError('Couldn’t load page', e);
     }
-  }
-
-  function onkeydown(e: KeyboardEvent): void {
-    if (e.key === 'Enter') void go();
   }
 
   function newTab(): void {
@@ -612,6 +608,52 @@
     ctxMenu.show(e, items);
   }
 
+  function toggleDevicePreview(): void {
+    if (!emulation.enabled) {
+      if (nativeBrowserAvailable && browserLive.renderer === 'native') {
+        browserLive.setPref('remote');
+      }
+      if (browser.activeTab && browser.activeTab.mode !== 'live') {
+        void browser.setMode(browser.activeTab.id, 'live');
+      }
+      emulation = stateForPreset('iphone-16-pro', { colorScheme: emulation.colorScheme });
+    } else {
+      emulation = { ...DEFAULT_EMULATION_STATE };
+    }
+  }
+
+  function toggleInspector(): void {
+    if (!inspectorOpen && nativeBrowserAvailable && browserLive.renderer === 'native') {
+      browserLive.setPref('remote');
+    }
+    inspectorOpen = !inspectorOpen;
+  }
+
+  async function markInspectedElement(el: BrowserInspectedElement): Promise<void> {
+    const url = browser.activeTab?.url;
+    if (!url) return;
+    try {
+      await browser.createAnnotation({
+        url,
+        selector: el.selector,
+        excerpt: el.outer_html.slice(0, 2000),
+        text: el.text.slice(0, 2000),
+        comment: '',
+      });
+      toasts.success('Marked element', el.selector);
+    } catch (e) {
+      toastError('Couldn’t save mark', e);
+    }
+  }
+
+  function mirrorSimulator(d: SimDevice, split: boolean): void {
+    mirroredSim = d;
+    simSplit = split && !!browser.activeTab;
+    showSimulators = false;
+  }
+
+  const isBookmarked = $derived(browserBookmarks.has(browser.activeTab?.url));
+
   // ⌘K: the page's verbs (the module page only — the docked panel copy of this
   // view would register the same commands twice).
   $effect(() => {
@@ -624,6 +666,11 @@
       { id: 'browser.summarize', title: 'Summarize this page', group: 'Browser', keywords: 'tl;dr digest ai', disabled: !hasUrl, run: () => void doSummarize() },
       { id: 'browser.reader', title: 'Use Reader view', group: 'Browser', keywords: 'markdown text mode', disabled: !tab || tab.mode === 'reader', run: () => toggleMode('reader') },
       { id: 'browser.live', title: 'Use Live view', group: 'Browser', keywords: 'chromium interactive mode', disabled: !tab || tab.mode === 'live', run: () => toggleMode('live') },
+      { id: 'browser.devicePreview', title: emulation.enabled ? 'Exit device preview' : 'Toggle device preview (mobile/tablet)', group: 'Browser', keywords: 'responsive iphone android ipad viewport emulate', disabled: !tab, run: toggleDevicePreview },
+      { id: 'browser.inspector', title: inspectorOpen ? 'Close page inspector' : 'Open page inspector (Console & Network)', group: 'Browser', keywords: 'devtools console network element inspect', disabled: !activeRemote, run: toggleInspector },
+      { id: 'browser.simulators', title: 'iOS Simulators & Android Emulators…', group: 'Browser', keywords: 'simulator emulator xcode ios android avd mobile', run: openSimulators },
+      { id: 'browser.screenshot', title: 'Capture live page screenshot (PNG)', group: 'Browser', keywords: 'screenshot capture image png', disabled: !(activeRemote && browserLive.ready), run: () => void remoteView?.captureScreenshot('viewport') },
+      { id: 'browser.bookmark', title: isBookmarked ? 'Remove page bookmark' : 'Bookmark this page', group: 'Browser', keywords: 'favorite pin url save', disabled: !hasUrl, run: () => { if (tab?.url) { const added = browserBookmarks.toggle(tab.url, tab.title); toasts.info(added ? 'Bookmarked' : 'Removed bookmark', tab.title || tab.url); } } },
       { id: 'browser.external', title: 'Open this page in your browser', group: 'Browser', keywords: 'safari chrome external system', disabled: !hasUrl, run: openInOwnBrowser },
     ]);
   });
@@ -636,7 +683,11 @@
     <!-- Module page: the page tabs ride inline in the unified header bar. -->
     <PageHeader title="Browser">
       {#snippet actions()}
-        <BrowserMenu oncredentials={openCredentials} />
+        <BrowserMenu
+          oncredentials={openCredentials}
+          onsimulators={openSimulators}
+          simActive={!!mirroredSim}
+        />
       {/snippet}
       {#snippet tabs()}
         <TabStrip onnew={newTab} inbar />
@@ -644,190 +695,127 @@
     </PageHeader>
   {/if}
 
-  <div class="urlbar">
-    {#if (activeRemote && browserLive.ready) || activeLive}
-      {@const remote = activeRemote ? remoteState?.session : undefined}
-      <!-- A native webview reports no history, so its Back/Forward stay enabled
-           (a no-op at either end); the remote engine says what it can do. -->
-      <button class="icon-btn tool" onclick={() => liveNav('back')} disabled={remoteDown || (!!activeRemote && !remote?.can_go_back)} aria-label="Back" title="Back">
-        <Icon name="chevronLeft" size={14} />
-      </button>
-      <button class="icon-btn tool" onclick={() => liveNav('forward')} disabled={remoteDown || (!!activeRemote && !remote?.can_go_forward)} aria-label="Forward" title="Forward">
-        <Icon name="chevronRight" size={14} />
-      </button>
-      <button class="icon-btn tool" onclick={() => liveNav('reload')} disabled={remoteDown} aria-label="Reload page" title="Reload page (⌘R)">
-        <Icon name="refresh" size={14} />
-      </button>
-      {#if activeLive}
-        <button class="icon-btn tool" onclick={() => liveNav('stop')} aria-label="Stop loading" title="Stop loading">
-          <Icon name="stop" size={14} />
-        </button>
-      {/if}
-    {/if}
-    <input
-      type="text"
-      dir="ltr"
-      placeholder="e.g. https://example.com"
-      aria-label="Address"
-      enterkeyhint="go"
-      inputmode="url"
-      autocapitalize="off"
-      spellcheck="false"
-      bind:this={urlEl}
-      bind:value={urlInput}
-      onkeydown={onkeydown}
-      onfocus={() => (urlFocused = true)}
-      onblur={() => (urlFocused = false)}
-    />
-    <button class="icon-btn tool go-btn" onclick={go} title="Go" aria-label="Go" disabled={!urlInput.trim()}>
-      <Icon name="chevronRight" size={14} />
-    </button>
-    {#if browser.activeTab}
-      <div class="mode-toggle" role="group" aria-label="Tab mode">
-        <button
-          class="seg"
-          class:active={browser.activeTab.mode === 'reader'}
-          onclick={() => toggleMode('reader')}
-          aria-label="Reader mode"
-          aria-pressed={browser.activeTab.mode === 'reader'}
-          title="Reader mode — fetched and rendered as clean markdown"
-        >
-          <Icon name="file" size={13} />
-        </button>
-        <button
-          class="seg"
-          class:active={liveCapable && browser.activeTab.mode === 'live'}
-          onclick={() => toggleMode('live')}
-          aria-label={liveCapable ? 'Live mode' : 'Open in a new browser tab'}
-          aria-pressed={liveCapable && browser.activeTab.mode === 'live'}
-          title={liveCapable
-            ? 'Live mode — a real browser'
-            : 'Open this page in a new browser tab. This Otto daemon has no live browser.'}
-        >
-          <Icon name="globe" size={13} />
-        </button>
-      </div>
-      {#if nativeBrowserAvailable && browser.activeTab.mode === 'live'}
-        <button
-          class="icon-btn tool"
-          onclick={chooseRenderer}
-          aria-label="Live engine"
-          title={browserLive.renderer === 'native'
-            ? "Live engine: this Mac’s web view"
-            : "Live engine: Otto’s Chromium"}
-        >
-          <Icon name="chevronDown" size={14} />
-        </button>
-      {/if}
-    {/if}
-    {#if activeLive}
-      <button
-        class="icon-btn tool"
-        class:active={pickMode}
-        onclick={togglePick}
-        title={pickMode ? 'Picking… click an element in the page' : 'Pick an element to mark'}
-        aria-label="Pick an element to mark"
-        aria-pressed={pickMode}
-      >
-        <Icon name="target" size={14} />
-      </button>
-    {/if}
-    {#if canAutofill}
-      <button
-        class="icon-btn tool"
-        onclick={autofill}
-        disabled={filling}
-        aria-label="Autofill saved credentials"
-        title={`Autofill ${matchedCredential?.username ?? ''} for ${matchedCredential?.domain ?? ''}`}
-      >
-        <Icon name="key" size={14} />
-      </button>
-    {/if}
-    <!-- Page actions only exist once a page is open (no row of disabled
-         icons on the empty state). -->
-    {#if browser.activeTab}
-      <button
-        class="icon-btn tool"
-        onclick={doSummarize}
-        disabled={browser.summarizing}
-        aria-label="Summarize this page"
-        title={browser.summarizing ? 'Summarizing…' : 'Summarize this page'}
-      >
-        <Icon name="sparkle" size={14} />
-      </button>
-      <button
-        class="icon-btn tool"
-        onclick={doVaultSave}
-        disabled={vaultSaving}
-        aria-label="Save to vault"
-        title={vaultSaving ? 'Saving to vault…' : 'Save to vault'}
-      >
-        <Icon name="book" size={14} />
-      </button>
-    {/if}
-  </div>
+  <BrowserUrlBar
+    bind:this={urlBar}
+    {urlInput}
+    live={{
+      activeLive,
+      activeRemote,
+      remoteState,
+      remoteDown,
+      liveCapable,
+      pickMode,
+      canAutofill,
+      matchedCredential,
+      matchedCredentialsCount: matchedCredentials.length,
+      filling,
+    }}
+    tools={{
+      vaultSaving,
+      emulationEnabled: emulation.enabled,
+      inspectorOpen,
+      mirroredSim,
+      canShowMarksRail,
+      showMarksRail,
+    }}
+    actions={{
+      onUrlInput: (v) => (urlInput = v),
+      onUrlFocus: (f) => (urlFocused = f),
+      go: () => void go(),
+      liveNav,
+      toggleMode,
+      chooseRenderer,
+      setGuard: (on) => remoteView?.setGuard(on) ?? false,
+      togglePick,
+      autofill: onAutofillClick,
+      toggleDevice: toggleDevicePreview,
+      toggleInspector,
+      screenshot: () => void remoteView?.captureScreenshot('viewport'),
+      simulators: openSimulators,
+      summarize: () => void doSummarize(),
+      vaultSave: (e) => void doVaultSave(e),
+      toggleMarksRail: () => (marksRailOverride = !showMarksRail),
+    }}
+  />
 
-  {#if browser.summarizing && !browser.summary}
-    <div class="summary" use:announceShown={'Summarizing this page…'}>
-      <div class="summary-head"><span>Summary · drafted by Otto</span></div>
-      <p class="dim-line">Summarizing this page…</p>
-      <div><button class="btn small" onclick={() => browser.stopSummarize()}><Icon name="stop" size={12} /> Stop</button></div>
-    </div>
-  {:else if browser.summary}
-    <div class="summary">
-      <div class="summary-head">
-        <span>Summary · drafted by Otto</span>
-        <button class="icon-btn" onclick={() => (browser.summary = '')} aria-label="Close summary" title="Close summary"><Icon name="x" size={12} /></button>
-      </div>
-      <p class="dim-line">{#if browser.summaryAt}<time datetime={browser.summaryAt}>{new Date(browser.summaryAt).toLocaleTimeString()}</time> · {/if}Fetched with {browser.summaryEngine || 'the browser'}{#if browser.summaryDegraded} · No JavaScript ran; dynamic content may be missing.{/if}</p>
-      <p>{browser.summary}</p>
-    </div>
-  {/if}
+  <BrowserSummary />
 
-  <div class="body">
-    {#if browser.tabsError || (browser.loadingTabs && !browser.tabs.length)}
-      <LoadState what="browser tabs" variant="page" loading={browser.loadingTabs} error={browser.tabsError} empty
-        onretry={() => ws.currentId && void browser.loadTabs(ws.currentId)} />
-    {:else if activeLive}
-      <!-- The native child webview paints ABOVE this div's rect — the div
-           itself just holds the geometry the ResizeObserver above tracks. -->
-      <div class="live-host" bind:this={liveHostEl}></div>
-    {:else if activeRemote && browserLive.ready}
-      <RemoteLiveView
-        bind:this={remoteView}
-        tab={activeRemote}
-        onnav={onRemoteNav}
-        onstate={(st) => (remoteState = st)}
-        onfocusurl={focusUrl}
-        onnewtab={(url) => void browser.openLiveTab(url)}
-        onreader={() => toggleMode('reader')}
+  <div class="body" class:sim-split={!!mirroredSim && simSplit}>
+    {#if !fullSimActive}
+      <div class="web-pane">
+        {#if browser.tabsError || (browser.loadingTabs && !browser.tabs.length)}
+          <LoadState what="browser tabs" variant="page" loading={browser.loadingTabs} error={browser.tabsError} empty
+            onretry={() => ws.currentId && void browser.loadTabs(ws.currentId)} />
+        {:else if activeLive}
+          <!-- The native child webview paints ABOVE this div's rect — the div
+               itself just holds the geometry the ResizeObserver above tracks. -->
+          <div class="live-host" bind:this={liveHostEl}></div>
+        {:else if activeRemote && browserLive.ready && !LiveBrowserStage.component}
+          <LoadState what="the live browser" variant="panel" empty loading={!LiveBrowserStage.error}
+            error={LiveBrowserStage.error} onretry={() => LiveBrowserStage.retry()} />
+        {:else if activeRemote && browserLive.ready}
+          {@const Stage = LiveBrowserStage.component}
+          <Stage
+            bind:this={remoteView}
+            tab={activeRemote}
+            {emulation}
+            onemulationchange={(next) => (emulation = next)}
+            {inspectorOpen}
+            oninspectorchange={(open) => (inspectorOpen = open)}
+            onmark={(el) => void markInspectedElement(el)}
+            onnav={onRemoteNav}
+            onstate={(st) => (remoteState = st)}
+            onfocusurl={focusUrl}
+            onnewtab={(url) => void browser.openLiveTab(url)}
+            onreader={() => toggleMode('reader')}
+          />
+        {:else if activeRemote}
+          <LiveEngineSetup onreader={() => toggleMode('reader')} />
+        {:else}
+          {#if liveUnavailable}
+            <div class="live-note">
+              <Icon name="globe" size={13} />
+              <span>This tab is in live mode, but this Otto daemon has no live browser. You’re seeing Reader view here.</span>
+              <span class="grow"></span>
+              <button class="btn" onclick={openInOwnBrowser}>Open in new tab</button>
+              <button class="btn ghost" onclick={() => browser.activeTab && void browser.setMode(browser.activeTab.id, 'reader')}>Switch to Reader</button>
+            </div>
+          {/if}
+          <ReaderView
+            bind:this={readerView}
+            page={browser.page}
+            loading={browser.loadingPage}
+            error={browser.pageError}
+            onopenurl={focusUrl}
+            onnavigate={(url) => { urlInput = url; void go(); }}
+            onretry={() => {
+              const url = browser.activeTab?.url;
+              if (url) void browser.loadPage(url, { fresh: true });
+            }}
+          />
+        {/if}
+      </div>
+    {/if}
+
+    {#if mirroredSim}
+      <SimulatorView
+        device={mirroredSim}
+        currentUrl={browser.activeTab?.url ?? ''}
+        split={simSplit}
+        ontogglesplit={() => (simSplit = !simSplit)}
+        ondevicechange={(d) => (mirroredSim = d)}
+        onclose={() => (mirroredSim = null)}
       />
-    {:else if activeRemote}
-      <LiveEngineSetup onreader={() => toggleMode('reader')} />
-    {:else}
-      {#if liveUnavailable}
-        <div class="live-note">
-          <Icon name="globe" size={13} />
-          <span>This tab is in live mode, but this Otto daemon has no live browser. You’re seeing Reader view here.</span>
-          <span class="grow"></span>
-          <button class="btn" onclick={openInOwnBrowser}>Open in new tab</button>
-          <button class="btn ghost" onclick={() => browser.activeTab && void browser.setMode(browser.activeTab.id, 'reader')}>Switch to Reader</button>
-        </div>
-      {/if}
-      <ReaderView
-        page={browser.page}
-        loading={browser.loadingPage}
-        error={browser.pageError}
-        onopenurl={focusUrl}
-        onnavigate={(url) => { urlInput = url; void go(); }}
-        onretry={() => {
-          const url = browser.activeTab?.url;
-          if (url) void browser.loadPage(url, { fresh: true });
-        }}
-      />
-      {#if browser.page}
-        <NotesRail annotations={browser.annotations} />
-      {/if}
+    {/if}
+    {#if showMarksRail}
+      <div class="notes-wrap mobile-open">
+        <NotesRail
+          annotations={browser.annotations}
+          liveMode={!!activeLive || !!activeRemote}
+          onclose={closeMarksRail}
+          onfocusmark={!activeLive && !activeRemote && browser.page ? (sel) => readerView?.scrollToMark(sel) : undefined}
+        />
+      </div>
     {/if}
   </div>
 
@@ -850,6 +838,23 @@
   </Modal>
 {/if}
 
+{#if showSimulators}
+  <Modal title="iOS Simulators & Android Emulators" width={680} onclose={() => (showSimulators = false)}>
+    {#await simulatorsPanel}
+      <LoadState what="simulators" loading />
+    {:then panel}
+      {#if panel}
+        <panel.default
+          currentUrl={browser.activeTab?.url ?? ''}
+          onmirror={mirrorSimulator}
+        />
+      {/if}
+    {:catch error}
+      <LoadState what="simulators" error={loadErrorText(error)} onretry={openSimulators} />
+    {/await}
+  </Modal>
+{/if}
+
 <style>
   .browser {
     container-type: inline-size;
@@ -857,6 +862,7 @@
     flex-direction: column;
     height: 100%;
     min-height: 0;
+    min-width: 0;
   }
   .body {
     flex: 1;
@@ -865,7 +871,32 @@
     min-width: 0;
     position: relative;
   }
+  .web-pane {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+    min-width: 0;
+    position: relative;
+  }
+  .notes-wrap {
+    display: flex;
+    min-height: 0;
+    flex-shrink: 0;
+  }
   @media (max-width: 640px) {
+    .body.sim-split {
+      flex-direction: column;
+    }
+  }
+  @media (max-width: 640px), (max-height: 500px) {
+    .web-pane {
+      flex-direction: column;
+    }
+    .notes-wrap:not(.mobile-open) {
+      display: none;
+    }
+  }
+  @container (max-width: 640px) {
     .body {
       flex-direction: column;
     }
@@ -889,126 +920,9 @@
   .live-note .grow { flex: 1; }
   .live-host {
     flex: 1;
+    min-width: 0;
     min-height: 0;
     /* Empty on purpose — the Tauri child webview paints natively above this
        rect; ResizeObserver above keeps its bounds synced to this div. */
-  }
-  .mode-toggle {
-    display: flex;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    overflow: hidden;
-  }
-  .seg {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 30px;
-    border: none;
-    background: var(--surface);
-    color: var(--text-dim);
-    cursor: pointer;
-  }
-  .seg + .seg {
-    border-inline-start: 1px solid var(--border);
-  }
-  .seg:hover {
-    color: var(--text);
-  }
-  .seg.active {
-    background: var(--accent-soft);
-    color: var(--accent-text);
-  }
-  .urlbar {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 8px 12px;
-    border-bottom: 1px solid var(--border);
-    min-width: 0;
-  }
-  .urlbar input {
-    flex: 1;
-    min-width: 0;
-    background: var(--bg);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    padding: 6px 10px;
-    font: inherit;
-    font-size: var(--fs-m);
-  }
-  /* Urlbar tools: the shared .icon-btn, framed like the address field. */
-  .tool {
-    flex: none;
-    width: 30px;
-    height: 30px;
-    border: 1px solid var(--border);
-    background: var(--surface);
-    color: var(--text);
-  }
-  .tool:disabled {
-    opacity: var(--disabled-opacity);
-    cursor: not-allowed;
-  }
-  .tool.active {
-    background: var(--accent-soft);
-    color: var(--accent-text);
-    border-color: var(--accent);
-  }
-  @media (max-width: 640px) {
-    .urlbar {
-      flex-wrap: wrap;
-    }
-    .urlbar input {
-      flex-basis: 100%;
-      order: -1;
-    }
-    .tool {
-      width: 36px;
-      height: 36px;
-    }
-    /* The phone keyboard's Go key submits; a lone Go button on its own row
-       was dead weight. */
-    .go-btn {
-      display: none;
-    }
-  }
-  @container (max-width: 560px) {
-    .urlbar { flex-wrap: wrap; }
-    .urlbar input { flex-basis: 100%; order: -1; }
-    .tool { width: 36px; height: 36px; }
-  }
-  @media (pointer: coarse), (max-width: 640px) {
-    .seg { min-width: 36px; min-height: 36px; }
-  }
-  .summary {
-    margin: 10px 12px 0;
-    padding: 10px 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface);
-    font-size: var(--fs-m);
-  }
-  .summary-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    margin-bottom: 6px;
-  }
-  .summary .dim-line {
-    color: var(--text-dim);
-  }
-  .summary p {
-    /* A long summary scrolls in place instead of shoving the page off-screen. */
-    max-height: 30vh;
-    overflow-y: auto;
-    margin: 0;
-    color: var(--text);
-    line-height: 1.5;
   }
 </style>

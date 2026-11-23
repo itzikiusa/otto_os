@@ -690,6 +690,16 @@ pub enum Event {
     /// read-all, dismiss, clear). Owner-only; clients refetch
     /// `GET /notifications` (the tray's "needs you" glyph).
     NotificationsChanged { user_id: Id },
+    /// Entries were created, removed or renamed directly inside folders an IDE
+    /// window has expanded (`POST /ide/fs/watch`, `otto-ide` `fs_watch.rs`):
+    /// a terminal, an agent, git or any other program changed the project on
+    /// disk. `dirs` are absolute, spelled as that window registered them; the
+    /// window `client_id` re-lists them. Debounced per project root; owner-only.
+    IdeFsChanged {
+        user_id: Id,
+        client_id: String,
+        dirs: Vec<String>,
+    },
     /// Live agent MCP database activity (`otto_db_query`, `otto_query_db`,
     /// `otto_db_schema`, `otto_db_children`, `otto_db_object`). Emitted on
     /// `"started"` and again on `"finished"` or `"error"` so the Database
@@ -800,6 +810,7 @@ impl Event {
             Event::McpApprovalChanged { .. } => "mcp_approval_changed",
             Event::ResourceAccessChanged { .. } => "resource_access_changed",
             Event::NotificationsChanged { .. } => "notifications_changed",
+            Event::IdeFsChanged { .. } => "ide_fs_changed",
             Event::DbMcpActivity { .. } => "db_mcp_activity",
         }
     }
@@ -916,6 +927,11 @@ mod tests {
             },
             Event::NotificationsChanged {
                 user_id: "u".into(),
+            },
+            Event::IdeFsChanged {
+                user_id: "u".into(),
+                client_id: "c".into(),
+                dirs: vec!["/p/src".into()],
             },
             Event::DesignSourceChanged {
                 workspace_id: "w".into(),

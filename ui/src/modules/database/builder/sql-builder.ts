@@ -11,7 +11,7 @@
 // writes on purpose, exactly like the editor.
 
 import { quoteIdent, stringLiteral } from '../../../lib/database/sql-dialect.ts';
-
+import { loadErrorText } from '../../../lib/loadError.ts';
 // ── Model ─────────────────────────────────────────────────────────────────────
 
 export type Dialect = 'mysql' | 'postgres' | 'clickhouse';
@@ -770,7 +770,7 @@ export function parseSelect(sql: string, dialect: Dialect): ParseResult {
   try {
     toks = tokenize(sql, dialect);
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    return { ok: false, error: loadErrorText(e) };
   }
   const p = new Parser(toks, dialect);
   const q = emptyQuery(dialect);
@@ -1094,7 +1094,7 @@ export function parseSelect(sql: string, dialect: Dialect): ParseResult {
       throw new Error(`“${t.v}” is beyond what the builder can edit`);
     }
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    return { ok: false, error: loadErrorText(e) };
   }
   return { ok: true, query: q };
 }

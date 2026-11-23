@@ -417,7 +417,7 @@ impl UsageTailer {
                 };
                 // One timer per pass; dropping the handle wakes us at once.
                 tokio::select! {
-                    _ = tokio::time::sleep(timeout.min(SCAN_INTERVAL)) => {}
+                    _ = tokio::time::sleep(timeout) => {}
                     _ = fs_wake.notified() => {
                         // Debounce: an agent writes a burst of lines; take
                         // them in one pass.

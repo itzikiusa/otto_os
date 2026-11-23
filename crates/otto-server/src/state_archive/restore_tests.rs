@@ -375,7 +375,11 @@ fn archive_inert_settles_runtime_netbridge_and_rejects_plugin_state_spoofing() {
     ]
     .into_iter()
     .collect();
-    schema::inert("agent_runtime_entities", &mut rt_ent);
+    schema::inert_with(
+        "agent_runtime_entities",
+        &mut rt_ent,
+        otto_agent_protocol::settle_archived_entity_json,
+    );
     let settled: otto_core::agent_runtime::ProviderTurn =
         serde_json::from_str(rt_ent["payload_json"].as_str().unwrap()).unwrap();
     assert_eq!(

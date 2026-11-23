@@ -2,8 +2,9 @@
   // A "Quote" button over text selected inside `root` (only within an element
   // matching `within`, e.g. an assistant message): it hands the selection to
   // `onquote` and clears it. Fixed-positioned above the selection and clamped
-  // into the viewport.
+  // into the viewport (RTL-aware, tracks scroll/resize).
   import Icon from './Icon.svelte';
+  import { placeSelectionQuote } from '../quote/quote';
 
   interface Props {
     root: HTMLElement | null;
@@ -12,7 +13,7 @@
   }
   let { root, within, onquote }: Props = $props();
 
-  let pick = $state<{ text: string; top: number; left: number } | null>(null);
+  let pick = $state<{ text: string; top: number; inlineStart: number } | null>(null);
 
   function read(): void {
     const sel = typeof window === 'undefined' ? null : window.getSelection();
@@ -29,12 +30,13 @@
       return;
     }
     const r = range.getBoundingClientRect();
-    const W = 84;
-    pick = {
-      text,
-      top: Math.min(Math.max(8, r.top - 34), window.innerHeight - 40),
-      left: Math.min(Math.max(8, r.left + r.width / 2 - W / 2), window.innerWidth - W - 8),
-    };
+    if ((r.width === 0 && r.height === 0) || r.bottom < 0 || r.top > window.innerHeight) {
+      pick = null;
+      return;
+    }
+    const rtl = document.documentElement.dir === 'rtl';
+    const pos = placeSelectionQuote(r, { width: window.innerWidth, height: window.innerHeight }, rtl);
+    pick = { text, top: pos.top, inlineStart: pos.inlineStart };
   }
 
   $effect(() => {
@@ -44,9 +46,13 @@
       frame = requestAnimationFrame(read);
     };
     document.addEventListener('selectionchange', onChange);
+    document.addEventListener('scroll', onChange, { capture: true, passive: true });
+    window.addEventListener('resize', onChange);
     return () => {
       cancelAnimationFrame(frame);
       document.removeEventListener('selectionchange', onChange);
+      document.removeEventListener('scroll', onChange, { capture: true });
+      window.removeEventListener('resize', onChange);
     };
   });
 
@@ -63,7 +69,7 @@
     type="button"
     class="sq"
     style:top="{pick.top}px"
-    style:inset-inline-start="{pick.left}px"
+    style:inset-inline-start="{pick.inlineStart}px"
     onmousedown={(e) => e.preventDefault()}
     onclick={quote}
     title="Quote in your reply"

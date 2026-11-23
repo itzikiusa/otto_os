@@ -271,6 +271,8 @@ const PUBLIC_ROUTES: &[&str] = &[
     "GET /ws/lsp",
     "GET /ws/rooms/{id}",
     "GET /ws/rooms/{id}/terminal",
+    "GET /ws/simulators/{id}/logs",
+    "GET /ws/simulators/{id}/stream",
 ];
 
 #[test]

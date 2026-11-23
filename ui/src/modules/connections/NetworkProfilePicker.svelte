@@ -2,6 +2,7 @@
   import { announce } from '../../lib/announce.svelte';
   import { api } from '../../lib/api/client';
   import { loadErrorText } from '../../lib/loadError';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import type { NetworkProfile } from '../../lib/api/types';
   import NetworkProfiles from './NetworkProfiles.svelte';
   let { workspaceId, value = '', onchange, editable = false, disabled = false }: {
@@ -25,9 +26,7 @@
     if (!profile.archived) onchange(profile.id);
     else if (value === profile.id) onchange('');
   }
-  // Spoken at the state edge through the shell's always-mounted announcer: a
-  // live region inserted together with its text is not read (WebKit/VoiceOver).
-  $effect(() => { if (error) announce(`${error} Retry loading profiles.`, { assertive: true }); });
+  $effect(() => { if (error) announce(`${error}`, { assertive: true }); });
 </script>
 <div class="network-picker">
   <label>Network profile<select aria-label="Network profile" value={value} disabled={disabled || loading} onchange={(e) => onchange(e.currentTarget.value)}>
@@ -36,12 +35,11 @@
     {#if value && !profiles.some((p) => p.id === value && !p.archived)}<option value={value} disabled>Selected profile unavailable</option>{/if}
   </select></label>
   {#if editable}<button type="button" aria-expanded={managing} disabled={disabled || loading} onclick={() => managing = !managing}>Manage network profiles</button>{/if}
-  {#if error}<p>{error} <button type="button" onclick={() => reload++}>Retry loading profiles</button></p>{/if}
+  {#if error}<LoadState variant="compact" what="network profiles" {error} empty={false} onretry={() => reload++} />{/if}
   {#if managing}{#key workspaceId}<NetworkProfiles {workspaceId} {profiles} onsaved={saved} />{/key}{/if}
 </div>
 <style>
   .network-picker { display: grid; gap: 6px; min-width: 0; margin-block: 10px; }
   label { display: grid; gap: 4px; font-size: var(--fs-s); }
   select, button { min-width: 0; max-width: 100%; padding: 6px; color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-s); }
-  p { font-size: var(--fs-s); color: var(--danger); overflow-wrap: anywhere; }
 </style>

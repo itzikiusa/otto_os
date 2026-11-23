@@ -11,7 +11,9 @@
 mod appkit_guard;
 mod bar;
 mod browser;
+mod clipboard;
 mod host_rooms;
+mod keep_awake;
 mod lifecycle;
 mod panel;
 mod panes;
@@ -62,7 +64,6 @@ fn main() {
     });
     builder
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         // Forward native menu-bar clicks to the SPA (which owns all behavior).
@@ -132,6 +133,7 @@ fn main() {
                         let _ = popout::open_in_otto(app.clone(), None);
                     }
                     tray::MENU_ASK => tray::ask(app),
+                    id if id.starts_with(keep_awake::MENU_PREFIX) => keep_awake::on_menu(app, id),
                     tray::MENU_SETTINGS => {
                         let _ =
                             popout::open_in_otto(app.clone(), Some("settings/appearance".into()));
@@ -140,9 +142,20 @@ fn main() {
                     // boot path never kills one): `kickstart -k` it, or
                     // reinstall when the job isn't loaded (error-handling-5-01).
                     tray::MENU_RESTART_DAEMON => {
-                        tauri::async_runtime::spawn(async {
-                            if let Err(e) = supervisor::daemon_restart().await {
-                                eprintln!("restart daemon failed: {e}");
+                        let handle = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            match supervisor::daemon_restart().await {
+                                Ok(_) => {
+                                    let report = supervisor::daemon_status().await;
+                                    supervisor::publish(&handle, &report);
+                                }
+                                Err(e) => {
+                                    lifecycle::durable(&format!("tray restart daemon failed: {e}"));
+                                    let mut report = supervisor::daemon_status().await;
+                                    report.healthy = false;
+                                    report.detail = format!("restart failed: {e}");
+                                    supervisor::publish(&handle, &report);
+                                }
                             }
                         });
                     }
@@ -229,6 +242,21 @@ fn main() {
             tray::tray_set_status,
             tray::tray_popover_hide,
             tray::tray_info,
+            keep_awake::keep_awake_state,
+            keep_awake::keep_awake_start,
+            keep_awake::keep_awake_stop,
+            clipboard::clipboard_status,
+            clipboard::clipboard_set,
+            clipboard::clipboard_clear,
+            clipboard::clipboard_open_settings,
+            clipboard::clipboard_hide,
+            clipboard::clipboard_list,
+            clipboard::clipboard_text,
+            clipboard::clipboard_image,
+            clipboard::clipboard_icon,
+            clipboard::clipboard_paste,
+            clipboard::clipboard_pin,
+            clipboard::clipboard_delete,
             popout::open_popout,
             popout::open_in_otto,
             rooms::open_room_window,
@@ -264,10 +292,13 @@ fn main() {
             // input context routes arrow/function keys to navigation selectors.
             let _ = window.set_focus();
 
-            // Hidden, always-alive chrome: the assistant bar panel and the
-            // menu-bar item + popover. Each is non-fatal on failure.
+            // Hidden chrome: defer assistant bar pre-warm past cold paint (⌥Space
+            // still builds on demand) and init the menu-bar item + popover.
             bar::init(app.handle());
             tray::init(app.handle());
+            // Clipboard history: its store + pasteboard watcher (reads
+            // nothing until the person turns it on); the panel builds lazily.
+            clipboard::init(app.handle());
 
             // Every system-wide chord (snip ⌘⌃⇧2, assistant ⌥Space, voice)
             // from the shortcuts registry; a chord another app holds only
@@ -348,8 +379,15 @@ fn run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
             tauri::WindowEvent::Focused(false) if label == tray::POPOVER_LABEL => {
                 tray::on_blur(app);
             }
+            tauri::WindowEvent::Focused(false) if label == clipboard::LABEL => {
+                clipboard::on_blur(app);
+            }
             _ => {}
         },
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        tauri::RunEvent::Opened { urls } => {
+            popout::handle_open_urls(app, &urls);
+        }
         // Also AppKit's `terminate:` (AppleScript quit), which skips
         // ExitRequested: bound whatever teardown follows.
         tauri::RunEvent::Exit => {

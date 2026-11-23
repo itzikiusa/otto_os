@@ -309,7 +309,7 @@
 <div class="s3d-hier">
   <div class="s3d-hier-head">
     <span class="s3d-hier-title">Hierarchy</span>
-    <input dir="ltr" class="s3d-hier-filter" placeholder="Filter objects…" bind:value={filter} aria-label="Filter objects" />
+    <input dir="ltr" class="s3d-hier-filter" placeholder="Filter…" bind:value={filter} aria-label="Filter objects" />
     {#if !readonly}
       <button class="s3d-icon-btn" title="Add object, light or group" aria-label="Add object, light or group" onclick={addMenu}>
         <Icon name="plus" size={14} />
@@ -396,7 +396,7 @@
             rowMenu(e, r.id);
           }}
         >
-          <Icon name="dot" size={13} />
+          <Icon name="more" size={14} />
         </button>
       </div>
     {/each}
@@ -458,7 +458,7 @@
               rowMenu(e, l.id);
             }}
           >
-            <Icon name="dot" size={13} />
+            <Icon name="more" size={14} />
           </button>
         </div>
       {/each}
@@ -629,6 +629,19 @@
     .s3d-eye,
     .s3d-more {
       opacity: 1;
+    }
+  }
+  /* Fingers: rows, their eye / ⋯ buttons and the filter are touch-sized. */
+  @media (pointer: coarse) {
+    .s3d-row {
+      height: 40px;
+    }
+    .s3d-icon-btn {
+      width: 40px;
+      height: 40px;
+    }
+    .s3d-hier-filter {
+      min-block-size: 40px;
     }
   }
 </style>

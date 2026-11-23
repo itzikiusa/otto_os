@@ -335,6 +335,11 @@
     } else threads.selectThread(s.id, { split });
     onselect?.();
   }
+  let searchInputEl = $state<HTMLInputElement | null>(null);
+  function clearSearch(): void {
+    search = '';
+    searchInputEl?.focus();
+  }
 </script>
 
 <aside class="th-sidebar" aria-label="Threads" data-testid="threads-sidebar">
@@ -342,6 +347,7 @@
     <div class="th-search">
       <Icon name="search" size={14} />
       <input
+        bind:this={searchInputEl}
         type="search"
         dir="auto"
         bind:value={search}
@@ -349,6 +355,15 @@
         aria-label="Search threads, branches, projects"
         data-testid="threads-search"
       />
+      {#if search}
+        <button
+          type="button"
+          class="icon-btn th-search-clear"
+          aria-label="Clear search"
+          title="Clear search"
+          onclick={clearSearch}
+        ><Icon name="x" size={12} /></button>
+      {/if}
     </div>
     <button
       type="button"
@@ -416,7 +431,10 @@
     {/if}
 
     {#if ideProjectGroups.length === 0 && projectGroups.length === 0}
-      <p class="th-empty">{search.trim() ? 'No threads match' : 'No threads yet'}</p>
+      <div class="th-empty">
+        <p>{search.trim() ? 'No threads match' : 'No threads yet'}</p>
+        {#if search.trim()}<button type="button" class="btn small ghost" onclick={clearSearch}>Clear search</button>{/if}
+      </div>
     {:else}
       <div data-testid="threads-active-list">
         {#if ideProjectGroups.length > 0}
@@ -750,13 +768,9 @@
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
-  .th-empty {
-    margin: 0;
-    padding: 20px 8px;
-    text-align: center;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
+  .th-empty { margin: 0; padding: 20px 8px; text-align: center; font-size: var(--fs-s); color: var(--text-dim); display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .th-empty p { margin: 0; }
+  .th-search-clear { flex-shrink: 0; }
   .th-empty-row {
     margin: 0;
     padding-block: 4px;

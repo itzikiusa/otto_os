@@ -663,10 +663,7 @@ async fn create_artifact<S: DesignCtx>(
         .check(&user, &req.workspace_id, WorkspaceRole::Editor)
         .await?;
     let svc = ctx.design();
-    let content = decode_content(req.content, req.content_b64)?;
-    if let Some(bytes) = &content {
-        ctx.validate_content(&req.format, bytes)?;
-    }
+    let content = decode_and_validate_opt(&ctx, &req.format, req.content, req.content_b64).await?;
     if let Some(f) = &req.derived_from {
         // Forking needs read access to the source.
         load_artifact(&ctx, &svc, &user, &f.artifact_id, WorkspaceRole::Viewer).await?;
@@ -697,6 +694,7 @@ async fn create_artifact<S: DesignCtx>(
             created_at: None,
             version_kind: None,
             validate: true,
+            provenance: None,
         })
         .await?;
     Ok((StatusCode::CREATED, Json(saved)).into_response())
@@ -783,6 +781,52 @@ async fn get_content<S: DesignCtx>(
 /// the blocking pool: a 4 MB autosave used to do all three on a runtime
 /// worker (budgeted by `put_content_4mb_never_blocks_a_worker`).
 const CONTENT_OFF_RUNTIME_ABOVE: usize = 256 * 1024;
+
+/// Decode optional `content`/`content_b64` and run the host validator,
+/// offloading payloads above [`CONTENT_OFF_RUNTIME_ABOVE`] to the blocking pool.
+async fn decode_and_validate_opt<S: DesignCtx>(
+    ctx: &S,
+    format: &str,
+    content: Option<String>,
+    content_b64: Option<String>,
+) -> otto_core::Result<Option<Vec<u8>>> {
+    let raw_len =
+        content.as_ref().map_or(0, String::len) + content_b64.as_ref().map_or(0, String::len);
+    let (ctx, format) = (ctx.clone(), format.to_string());
+    let work = move || -> otto_core::Result<Option<Vec<u8>>> {
+        let Some(bytes) = decode_content(content, content_b64)? else {
+            return Ok(None);
+        };
+        ctx.validate_content(&format, &bytes)?;
+        Ok(Some(bytes))
+    };
+    if raw_len > CONTENT_OFF_RUNTIME_ABOVE {
+        tokio::task::spawn_blocking(work)
+            .await
+            .map_err(|e| Error::Internal(format!("design body worker: {e}")))?
+    } else {
+        work()
+    }
+}
+
+async fn validate_content_off_runtime<S: DesignCtx>(
+    ctx: &S,
+    format: &str,
+    bytes: Vec<u8>,
+) -> otto_core::Result<Vec<u8>> {
+    if bytes.len() > CONTENT_OFF_RUNTIME_ABOVE {
+        let (ctx, format) = (ctx.clone(), format.to_string());
+        tokio::task::spawn_blocking(move || {
+            ctx.validate_content(&format, &bytes)?;
+            Ok(bytes)
+        })
+        .await
+        .map_err(|e| Error::Internal(format!("design validator worker: {e}")))?
+    } else {
+        ctx.validate_content(format, &bytes)?;
+        Ok(bytes)
+    }
+}
 
 /// `Json<ContentPutReq>` + `decode_content` + the host validator, off the
 /// runtime for big bodies. Same contract as axum's extractor: 415 without a
@@ -956,11 +1000,14 @@ async fn commit_version<S: DesignCtx>(
     let svc = ctx.design();
     let a = load_artifact(&ctx, &svc, &user, &id, WorkspaceRole::Editor).await?;
     crate::mirror::ensure_editable(&a)?;
-    let bytes = match decode_content(req.content, req.content_b64)? {
+    let bytes = match decode_and_validate_opt(&ctx, &a.format, req.content, req.content_b64).await?
+    {
         Some(b) => b,
-        None => svc.working_bytes(&a).await?,
+        None => {
+            let b = svc.working_bytes(&a).await?;
+            validate_content_off_runtime(&ctx, &a.format, b).await?
+        }
     };
-    ctx.validate_content(&a.format, &bytes)?;
     let author = Author::from_request(&user.id, req.author_kind.as_deref(), req.session_id)?;
     let saved = svc
         .commit_named(
@@ -2266,6 +2313,7 @@ mod tests {
                 created_at: None,
                 version_kind: Some("import".into()),
                 validate: false,
+                provenance: None,
             })
             .await
             .unwrap()

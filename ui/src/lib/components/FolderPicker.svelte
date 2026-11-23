@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { newId } from '../id';
   // Daemon-side folder/file picker. Browses the directory tree on the machine that
   // runs ottod (the path the user picks is used as a session cwd / repo path,
   // so it must exist on the daemon host, not the client). Backed by GET
@@ -41,7 +42,7 @@
   let gridElement: HTMLDivElement | undefined = $state();
   let position = $state({ index: 0, action: 0 });
   let scrollVersion = $state(0);
-  const gridId = `folder-grid-${crypto.randomUUID()}`;
+  const gridId = `folder-grid-${newId()}`;
   let showHidden = $state(false);
 
   // The entries actually rendered: dotfiles hidden unless `showHidden`, and

@@ -236,8 +236,12 @@
     }
   }
 
+  let cancelling = $state(false);
+  let deleting = $state(false);
+
   async function cancelReview(): Promise<void> {
-    if (!selected) return;
+    const hasCancelling = typeof cancelling === 'boolean';
+    if (!selected || (hasCancelling && cancelling)) return;
     const id = selected.id;
     const workspace = wsId;
     if (
@@ -249,17 +253,23 @@
     )
       return;
     if (disposed || workspace !== wsId || selected?.id !== id) return;
+    if (hasCancelling) cancelling = true;
     try {
       const updated = await skillReviewApi.cancel(id);
+      if (disposed || workspace !== wsId) return;
       // Another review may have been opened while the stop was in flight.
       if (selected?.id === id) selected = updated;
-      await loadList();
+      await loadList(true);
     } catch (e) {
       toastError('Couldn’t stop the review', e);
+    } finally {
+      if (hasCancelling) cancelling = false;
     }
   }
 
   async function deleteReview(rev: SkillReview): Promise<void> {
+    if (deleting) return;
+    const workspace = wsId;
     // Every other delete in Skills Lab / Evaluator confirms; this one used to
     // fire on a single click of a bare ✕.
     if (
@@ -269,12 +279,17 @@
       ))
     )
       return;
+    if (disposed || workspace !== wsId) return;
+    deleting = true;
     try {
       await skillReviewApi.remove(rev.id);
+      if (disposed || workspace !== wsId) return;
       if (selected?.id === rev.id) selected = null;
-      await loadList();
+      await loadList(true);
     } catch (e) {
       toastError('Couldn’t delete the review', e);
+    } finally {
+      deleting = false;
     }
   }
 
@@ -292,8 +307,8 @@
     if (t === lastTick) return;
     lastTick = t;
     if (skillReviewBus.workspaceId && skillReviewBus.workspaceId !== wsId) return;
-    // A review advanced — refresh the list and, if it's the open one, the detail.
-    void loadList();
+    // A review advanced — refresh the list in the background and, if it's the open one, the detail.
+    void loadList(true);
     if (selected && skillReviewBus.reviewId === selected.id) void openReview(selected.id, true);
   });
 
@@ -461,21 +476,16 @@
           </select>
         </label>
         {#if skillsFailed.length > 0}
-          <span class="lr-skills-failed">
-            <Icon name="warning" size={12} />
-            {skillsFailed.join(', ')} skills didn’t load
-            <span aria-hidden="true">·</span>
-            <button class="btn small ghost" type="button" onclick={() => void loadSkills()} disabled={skillsLoading}>{skillsLoading ? 'Retrying…' : 'Retry'}</button>
-          </span>
+          <LoadState what="{skillsFailed.join(', ')} skills" variant="compact" loading={skillsLoading} error="{skillsFailed.join(', ')} skills didn’t load" onretry={() => void loadSkills()} />
         {/if}
         <fieldset class="lr-field">
-          <span>Mode</span>
+          <legend>Mode</legend>
           <label class="lr-radio"><input type="radio" bind:group={fMode} value="static" /> Static analysis only (fast, no agents)</label>
           <label class="lr-radio"><input type="radio" bind:group={fMode} value="agents" /> Static + review agents + summarizer</label>
         </fieldset>
         {#if fMode === 'agents'}
           <fieldset class="lr-field">
-            <span>Reviewer agents</span>
+            <legend>Reviewer agents</legend>
             {#each agentProviders() as p (p)}
               <label class="lr-check">
                 <input type="checkbox" checked={fProviders.has(p)} onchange={() => toggleReviewer(p)} /> {p}
@@ -512,9 +522,9 @@
           </div>
           <div class="grow"></div>
           {#if selected.status === 'running'}
-            <button class="btn small" onclick={cancelReview}><Icon name="stop" size={12} /> Stop review</button>
+            <button class="btn small danger" disabled={cancelling} onclick={cancelReview}><Icon name="stop" size={12} /> {cancelling ? 'Stopping…' : 'Stop review…'}</button>
           {/if}
-          <button class="icon-btn" onclick={() => selected && deleteReview(selected)} aria-label="Delete this review" title="Delete this review"><Icon name="trash" size={14} /></button>
+          <button class="icon-btn" disabled={deleting} onclick={() => selected && deleteReview(selected)} aria-label="Delete this review" title="Delete this review"><Icon name="trash" size={14} /></button>
         </div>
 
         {#if selected.error}
@@ -689,8 +699,7 @@
   .hint-inline::before { content: '· '; }
   .lr-hint { font-size: var(--fs-s); color: var(--text-dim); line-height: 1.5; margin: 0; }
   .lr-field { display: flex; flex-direction: column; gap: 6px; border: none; margin: 0; padding: 0; }
-  .lr-field > span { font-size: var(--fs-s); font-weight: 500; color: var(--text-dim); }
-  .lr-skills-failed { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--warning); }
+  .lr-field > span, .lr-field > legend { font-size: var(--fs-s); font-weight: 500; color: var(--text-dim); padding: 0; }
   .lr-radio, .lr-check { display: flex; align-items: center; gap: 6px; font-size: var(--fs-s); }
   .lr-textarea { resize: vertical; }
   .lr-instructions {

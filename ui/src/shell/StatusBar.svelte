@@ -12,6 +12,7 @@
   import { git } from '../lib/stores/git.svelte';
   import { router } from '../lib/router.svelte';
   import { nowMinute } from '../lib/stores/now.svelte';
+  import { keepAwake, timeLeft } from '../lib/keepAwake.svelte';
   import { daemonStatus } from '../modules/settings/daemonStatus.svelte';
   import { listenerIndicator } from '../modules/settings/daemonIndicators';
   import MachineChip from './MachineChip.svelte';
@@ -118,6 +119,14 @@
       <Icon name="globe" size={12} />
       {listener.text}
     </span>
+    {#if keepAwake.state.active}
+      {@const left = timeLeft(keepAwake.state, nowMinute())}
+      {@const what = `Keeping this Mac awake ${left ? `— ${left} left` : 'until turned off'}`}
+      <button class="sb-item sb-btn" onclick={() => void keepAwake.stop()} title="{what}. Click to turn off" aria-label="{what}. Turn off">
+        <Icon name="eye" size={12} />
+        Awake{left ? ` · ${left}` : ''}
+      </button>
+    {/if}
     <span class="sb-item dim">{clock}</span>
   </div>
 </footer>
@@ -129,22 +138,29 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 8px;
     padding: 0 12px;
     /* Chrome: toolbar glass over the ambient (.chrome-material). */
     border-top: 1px solid var(--separator);
     font-size: var(--fs-xs);
     color: var(--text);
     flex-shrink: 0;
+    min-width: 0;
+    overflow: hidden;
   }
   .sb-group {
     display: flex;
     align-items: center;
     gap: 14px;
+    min-width: 0;
+    overflow: hidden;
   }
   .sb-item {
     display: inline-flex;
     align-items: center;
     gap: 4px;
+    flex-shrink: 0;
+    white-space: nowrap;
   }
   .sb-btn {
     border: none;

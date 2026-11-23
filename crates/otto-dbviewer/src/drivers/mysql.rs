@@ -1846,10 +1846,16 @@ async fn build_pool(cfg: &ResolvedConfig) -> Result<sqlx::MySqlPool> {
 /// The per-connection session setup as ONE statement (one round trip): the
 /// session time zone plus cached `information_schema` statistics (avoids the
 /// expensive per-table stats recomputation that slows the tree on big servers).
+/// Escape a MySQL single-quoted string literal safely for both default
+/// (`NO_BACKSLASH_ESCAPES=OFF`) and ANSI modes: escape `\` before `'`.
+fn escape_mysql_str(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\'', "''")
+}
+
 fn connect_setup_sql(tz: &str) -> String {
     format!(
         "SET time_zone = '{}', SESSION information_schema_stats_expiry = 86400",
-        tz.replace('\'', "''")
+        escape_mysql_str(tz)
     )
 }
 
@@ -1857,14 +1863,23 @@ fn connect_setup_sql(tz: &str) -> String {
 /// failed (MySQL applies a multi-assignment `SET` all-or-nothing).
 fn connect_setup_fallback_sql(tz: &str) -> [String; 2] {
     [
-        format!("SET time_zone = '{}'", tz.replace('\'', "''")),
+        format!("SET time_zone = '{}'", escape_mysql_str(tz)),
         "SET SESSION information_schema_stats_expiry = 86400".to_string(),
     ]
 }
 
 fn mysql_session_tz(cfg: &ResolvedConfig) -> String {
     match cfg.param_str("timezone") {
-        Some(tz) if !tz.eq_ignore_ascii_case("UTC") => tz,
+        Some(tz)
+            if !tz.eq_ignore_ascii_case("UTC")
+                && !tz.is_empty()
+                && tz.len() <= 64
+                && tz.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'/' | b':' | b'+' | b'-')
+                }) =>
+        {
+            tz
+        }
         _ => "+00:00".to_string(),
     }
 }
@@ -3422,5 +3437,36 @@ mod cache_isolation_tests {
             "warm B waited behind unrelated pending handshake A"
         );
         assert!(result.unwrap().is_ok());
+    }
+
+    #[test]
+    fn session_timezone_escapes_backslashes_and_rejects_injection() {
+        // Direct SQL builder escapes both `\` and `'` so NO_BACKSLASH_ESCAPES=OFF
+        // cannot break out of the quoted literal via `\'`.
+        let sql = connect_setup_sql(r"UTC\', @@session.sql_mode='' -- ");
+        assert!(
+            sql.starts_with(r"SET time_zone = 'UTC\\'', @@session.sql_mode='''' -- ', "),
+            "{sql}"
+        );
+        let fb = connect_setup_fallback_sql(r"UTC\'");
+        assert_eq!(fb[0], r"SET time_zone = 'UTC\\'''");
+
+        // Config resolver additionally allowlists valid timezone characters.
+        let mut cfg = ResolvedConfig {
+            lifecycle: None,
+            engine: Engine::Mysql,
+            host: "127.0.0.1".into(),
+            port: 3306,
+            user: None,
+            password: None,
+            database: None,
+            tls: Default::default(),
+            params: serde_json::json!({ "timezone": r"UTC\', @@session.sql_mode=''" }),
+        };
+        assert_eq!(mysql_session_tz(&cfg), "+00:00");
+        cfg.params = serde_json::json!({ "timezone": "America/New_York" });
+        assert_eq!(mysql_session_tz(&cfg), "America/New_York");
+        cfg.params = serde_json::json!({ "timezone": "+03:00" });
+        assert_eq!(mysql_session_tz(&cfg), "+03:00");
     }
 }

@@ -8,11 +8,13 @@
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
-  import Switch from '../../../lib/components/Switch.svelte';
+  import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { pollWhileVisible } from '../../../lib/poll';
   import { router } from '../../../lib/router.svelte';
   import type { IdeDbEngine, IdeDbFieldChange } from '../../../lib/api/types/ide-db-watch';
   import { ide, ideBasename } from '../ideStore.svelte';
+  import { ideLayout } from '../shell/ideLayout.svelte';
+  import { isDbWatchPanelVisible } from './ideDbWatchModel';
   import {
     formatDbCellValue,
     IDE_DB_ENGINES,
@@ -75,9 +77,18 @@
     }
   });
 
-  // Optional 3s live watch poller — pauses automatically when dock or window is hidden.
+  const panelVisible = $derived(
+    isDbWatchPanelVisible({
+      stack: ideLayout.stack,
+      stackPane: ideLayout.pane,
+      bottomDockOpen: ide.bottomDockOpen,
+      activeBottomTab: ide.activeBottomTab,
+    }),
+  );
+
+  // Optional 3s live watch poller — pauses automatically when dock, stack pane, or window is hidden.
   $effect(() => {
-    if (!ideDbWatch.liveWatch || !ide.bottomDockOpen || ide.activeBottomTab !== 'dbwatch') return;
+    if (!ideDbWatch.liveWatch || !panelVisible) return;
     const root = ide.target.root;
     if (!root) return;
     const poller = pollWhileVisible(
@@ -98,6 +109,44 @@
 
   function changeForColumn(changes: readonly IdeDbFieldChange[], colName: string): IdeDbFieldChange | undefined {
     return changes.find((c) => c.column === colName);
+  }
+
+  function openOptionsMenu(e: MouseEvent): void {
+    const anchor = e.currentTarget as HTMLElement | null;
+    const items: MenuItem[] = [
+      {
+        label: 'Auto-diff on debug pause & run finish',
+        checked: ideDbWatch.autoRefreshOnExec,
+        action: () => {
+          ideDbWatch.autoRefreshOnExec = !ideDbWatch.autoRefreshOnExec;
+        },
+      },
+      {
+        label: 'Keep Testcontainers alive on exit',
+        checked: ide.keepTestcontainersAlive,
+        action: () => {
+          ide.keepTestcontainersAlive = !ide.keepTestcontainersAlive;
+        },
+      },
+      {
+        label: 'Live watch (poll every 3s)',
+        checked: ideDbWatch.liveWatch,
+        action: () => {
+          ideDbWatch.liveWatch = !ideDbWatch.liveWatch;
+        },
+      },
+    ];
+    if (selectedTarget?.target_kind === 'saved') {
+      items.push(
+        { separator: true },
+        {
+          label: 'Open in DB Explorer',
+          icon: 'external',
+          action: () => router.go('database'),
+        },
+      );
+    }
+    ctxMenu.showAt(anchor, items, { align: 'end' });
   }
 </script>
 
@@ -209,7 +258,7 @@
 
       <button
         type="button"
-        class="btn small primary"
+        class="btn small"
         disabled={!ideDbWatch.canCapture || ideDbWatch.snapshotLoading}
         title="Fetch latest rows and compare against baseline"
         onclick={() => void ideDbWatch.captureSnapshot(ide.target.root, ideDbWatch.baselineSnapshot ? 'diff' : 'baseline')}
@@ -219,45 +268,21 @@
         <span>{ideDbWatch.snapshotLoading ? 'Querying…' : ideDbWatch.baselineSnapshot ? 'Refresh & diff' : 'Query'}</span>
       </button>
 
-      <div class="dbw-toggle" title="Automatically re-query and diff when the debugger pauses or a test run finishes">
-        <Switch
-          checked={ideDbWatch.autoRefreshOnExec}
-          onchange={(next) => (ideDbWatch.autoRefreshOnExec = next)}
-          label="Auto-refresh on Debug step & Run finish"
-        />
-        <span class="dbw-toggle-text">Auto-diff</span>
-      </div>
-
-      <div class="dbw-toggle" title="Inject TESTCONTAINERS_RYUK_DISABLED=true on Run & Debug so Docker containers remain inspectable after tests exit">
-        <Switch
-          checked={ide.keepTestcontainersAlive}
-          onchange={(next) => (ide.keepTestcontainersAlive = next)}
-          label="Keep Testcontainers on exit"
-        />
-        <span class="dbw-toggle-text">Keep containers</span>
-      </div>
-
-      <div class="dbw-toggle" title="Poll every 3 seconds while this panel is visible">
-        <Switch
-          checked={ideDbWatch.liveWatch}
-          onchange={(next) => (ideDbWatch.liveWatch = next)}
-          label="Live watch every 3 seconds"
-        />
-        <span class="dbw-toggle-text">Live (3s)</span>
-      </div>
-
-      {#if selectedTarget?.target_kind === 'saved'}
-        <button
-          type="button"
-          class="btn small ghost"
-          title="Open saved connection in Database Explorer"
-          onclick={() => router.go('database')}
-          data-testid="ide-dbw-open-explorer"
-        >
-          <Icon name="external" size={12} />
-          <span>Open in DB Explorer</span>
-        </button>
+      {#if ideDbWatch.liveWatch}
+        <Badge tone="accent" dot label="Live" title="Polling every 3 seconds while visible" />
       {/if}
+
+      <button
+        type="button"
+        class="icon-btn"
+        aria-label="DB Watch options"
+        aria-haspopup="menu"
+        title="DB Watch options: auto-diff, keep containers, live watch"
+        onclick={openOptionsMenu}
+        data-testid="ide-dbw-options-btn"
+      >
+        <Icon name="more" size={14} />
+      </button>
     </div>
   </header>
 
@@ -521,16 +546,6 @@
     max-inline-size: 100%;
     block-size: 26px;
     font-size: var(--fs-xs);
-  }
-  .dbw-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--sp-2);
-  }
-  .dbw-toggle-text {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    white-space: nowrap;
   }
   .dbw-chips-bar {
     display: flex;

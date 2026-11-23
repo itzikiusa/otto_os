@@ -3,6 +3,7 @@
   // per-day stacked chart by model. Tokens lead; cost is a secondary column.
   // Data comes straight from UsageSummary.models / daily_models.
   import Icon from '../../lib/components/Icon.svelte';
+  import { handleBarChartKey } from './chartKeys';
   import { formatCount, formatUsd } from '../../lib/metric-format';
   import type { ModelUsage, DailyModelUsage } from '../../lib/api/usage.svelte';
 
@@ -59,7 +60,7 @@
   const maxDay = $derived(Math.max(1, ...byDay.map((d) => d.total)));
 
   let chartWidth = $state(500);
-  const W = $derived(chartWidth || 500);
+  const W = $derived(Math.max(240, chartWidth || 500));
   let selectedDayKey = $state('');
   const selectedDay = $derived(byDay.find(d => d.day === selectedDayKey) ?? byDay.at(-1));
   const H = 120;
@@ -147,11 +148,11 @@
               />
             {/if}
           {/each}
-          <rect class="bar-hit" x={cx - bw / 2} y="0" width={bw} height={plotH}
+          <rect class="bar-hit" data-model-bar={d.day} x={cx - bw / 2} y="0" width={bw} height={plotH}
             role="button" tabindex={selectedDay?.day === d.day ? 0 : -1}
             aria-label={dayTitle(d)} aria-pressed={selectedDay?.day === d.day}
             onclick={() => (selectedDayKey = d.day)} onfocus={() => (selectedDayKey = d.day)}
-            onkeydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectedDayKey = d.day; } }}
+            onkeydown={(event) => handleBarChartKey(event, byDay.map((x) => x.day), i, 'data-model-bar', (k) => (selectedDayKey = k))}
           ><title>{dayTitle(d)}</title></rect>
           {#if showX(i, byDay.length)}
             <text class="axis-label" x={cx} y={H - 4} text-anchor="middle">{shortDay(d.day)}</text>

@@ -361,6 +361,12 @@ pub enum IdeRunnerKind {
     Python,
     #[serde(alias = "sh", alias = "bash")]
     Shell,
+    #[serde(alias = "ios")]
+    Xcode,
+    #[serde(alias = "dart")]
+    Flutter,
+    #[serde(alias = "expo", alias = "rn")]
+    ReactNative,
     Compound,
     #[default]
     Custom,

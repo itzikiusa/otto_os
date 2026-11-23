@@ -2,7 +2,7 @@
   import { toastError } from '../../lib/toastError';
   // Skills Evaluator module: a left list of past runs + "New evaluation", and a
   // right pane showing either the start form or a selected run's live report.
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -138,19 +138,25 @@
   let compareFull = $state.raw<Record<string, SkillEval>>(initialEval.compareFull);
   let compareErrors = $state.raw<Record<string, string>>({});
   let compareLoading = $state.raw<Record<string, boolean>>({});
+  let disposed = false;
+  onDestroy(() => { disposed = true; });
   function loadCompareRun(id: string): void {
+    const workspace = ws.currentId;
     const nextErr = { ...compareErrors };
     delete nextErr[id];
     compareErrors = nextErr;
     compareLoading = { ...compareLoading, [id]: true };
     void skillsEvalApi.get(id).then(
       (e) => {
+        if (disposed || ws.currentId !== workspace) return;
         compareFull = { ...compareFull, [id]: e };
       },
       (err) => {
+        if (disposed || ws.currentId !== workspace) return;
         compareErrors = { ...compareErrors, [id]: loadErrorText(err) };
       },
     ).finally(() => {
+      if (disposed || ws.currentId !== workspace) return;
       const nextLoad = { ...compareLoading };
       delete nextLoad[id];
       compareLoading = nextLoad;
@@ -366,6 +372,19 @@
 
   function onRunDeleted(id: string): void {
     runs = runs.filter((r) => r.id !== id);
+    if (compareSel.has(id)) {
+      const next = new Set(compareSel);
+      next.delete(id);
+      compareSel = next;
+    }
+    if (compareFull[id]) {
+      const { [id]: _, ...rest } = compareFull;
+      compareFull = rest;
+    }
+    if (compareErrors[id]) {
+      const { [id]: _, ...rest } = compareErrors;
+      compareErrors = rest;
+    }
     if (selectedId === id) {
       selectedId = runs[0]?.id ?? null;
       mode = selectedId ? 'detail' : 'form';
@@ -683,10 +702,6 @@
     .se-main {
       flex: 1;
       min-height: 0;
-    }
-    .se-subhead {
-      overflow-x: auto;
-      padding: 8px;
     }
     .se-item {
       min-height: var(--hit-min);

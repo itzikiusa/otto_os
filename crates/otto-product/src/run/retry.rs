@@ -7,7 +7,7 @@ use tracing::warn;
 use super::analysis::{findings_json, LENS_TIMEOUT};
 use super::context::{skill_body, story_context_md, story_work};
 use super::prompts::{augment_with_out_path, build_analysis_prompt, extract_json_as};
-use super::scratch::{session_cwd, trust_session_cwd};
+use super::scratch::{scratch_root_dir, session_cwd, trust_session_cwd, write_context_file};
 use super::{Findings, SessionAppearance, SUPERSEDED};
 use crate::host::ProductRunHost;
 
@@ -121,45 +121,52 @@ pub(crate) async fn retry_analysis_agent_owned<C: ProductRunHost>(
     );
     trust_session_cwd(&agent.provider, &cwd);
 
-    // 6. Rebuild context file (shared with this analysis's context path, or
-    // fresh). Unlike the fan-out (which embeds daemon-minted ids), the retry ids
-    // arrive as route params — confine the temp-dir joins so a hostile id can't
-    // steer the scratch files (rust/path-injection).
-    let context_path = match otto_core::paths::confine_join(
-        &std::env::temp_dir(),
-        &format!("otto-product-{analysis_id}-context.md"),
-    ) {
-        Some(p) => p,
-        None => {
-            warn!("product_run(retry): unsafe analysis id {analysis_id}");
-            let _ = ctx
-                .product_repo()
-                .set_agent_status(
-                    &agent_id,
-                    "error",
-                    None,
-                    Some("retry: unsafe analysis id"),
-                    true,
-                )
-                .await;
-            return;
+    // 6. Build a fresh per-retry context file inside SCRATCH_ROOT. Unlike the
+    // fan-out (which embeds daemon-minted ids), the retry ids arrive as route
+    // params — confine the scratch-root join so a hostile id can't steer the
+    // scratch files (rust/path-injection).
+    let context_name = format!(
+        "otto-product-{analysis_id}-retry-{agent_id}-{}-context.md",
+        uuid::Uuid::new_v4()
+    );
+    if otto_core::paths::confine_join(&scratch_root_dir(), &context_name).is_none() {
+        warn!("product_run(retry): unsafe analysis/agent id {analysis_id}/{agent_id}");
+        let _ = ctx
+            .product_repo()
+            .set_agent_status(
+                &agent_id,
+                "error",
+                None,
+                Some("retry: unsafe analysis id"),
+                true,
+            )
+            .await;
+        return;
+    }
+    let context_md = story_context_md(
+        &ctx,
+        &analysis.story_id,
+        &story.title,
+        None,
+        "product_run(retry)",
+    )
+    .await;
+    let context_guard = match write_context_file(&context_name, &context_md).await {
+        Ok(g) => Some(g),
+        Err(e) => {
+            warn!("product_run(retry): write context file: {e}");
+            None
         }
     };
-    if !context_path.exists() {
-        // Context file was cleaned up; rebuild it.
-        let context_md = story_context_md(
-            &ctx,
-            &analysis.story_id,
-            &story.title,
-            None,
-            "product_run(retry)",
-        )
-        .await;
-        if let Err(e) = std::fs::write(&context_path, &context_md) {
-            warn!("product_run(retry): write context file: {e}");
-        }
-    }
-    let context_path_str = context_path.to_string_lossy().to_string();
+    let context_path_str = context_guard
+        .as_ref()
+        .map(|g| g.path_str())
+        .unwrap_or_else(|| {
+            scratch_root_dir()
+                .join(&context_name)
+                .to_string_lossy()
+                .to_string()
+        });
 
     // 7. Resolve skill body.
     let skill_body = skill_body(&ctx, &agent.skill);
@@ -255,6 +262,9 @@ pub(crate) async fn retry_analysis_agent_owned<C: ProductRunHost>(
                 });
             }
         }
+    }
+    if let Some(guard) = context_guard {
+        guard.cleanup().await;
     }
 }
 

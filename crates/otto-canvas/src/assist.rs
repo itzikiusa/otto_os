@@ -361,7 +361,7 @@ async fn stopped_document(
     let doc: Value = serde_json::from_str(&fresh.doc_json).map_err(Error::from)?;
     let format = doc_format(&doc);
     let source = current_source(&doc, &format);
-    tokio::fs::write(dir.join(file_name(&format)), &source)
+    write_file_atomic(&dir.join(file_name(&format)), source.as_bytes().to_vec())
         .await
         .map_err(|e| ApiError(Error::Internal(format!("restore stopped canvas: {e}"))))?;
     Ok((
@@ -378,7 +378,7 @@ async fn stopped_document(
 /// runs only while the scene's claim is held (a refused second Ask AI never
 /// reaches it and cannot overwrite the file a running turn edits).
 async fn write_scene_source(path: &std::path::Path, source: &str) -> otto_core::Result<()> {
-    tokio::fs::write(path, source)
+    write_file_atomic(path, source.as_bytes().to_vec())
         .await
         .map_err(|e| Error::Internal(format!("write canvas source: {e}")))
 }
@@ -692,24 +692,132 @@ fn inline_source(current: &str) -> String {
     }
 }
 
-/// Agent files obey the same byte budget as the scene upload surface.
-async fn read_agent_source(path: &std::path::Path) -> otto_core::Result<String> {
-    use tokio::io::AsyncReadExt;
-    let file = tokio::fs::File::open(path)
+/// Write `bytes` to `path` via an exclusive temp file in `path`'s parent dir
+/// followed by atomic `rename`, refusing any pre-existing symlink or
+/// non-regular target so a planted symlink in the agent's scratch directory
+/// cannot redirect writes outside the directory.
+async fn write_file_atomic(path: &std::path::Path, bytes: Vec<u8>) -> std::io::Result<()> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || write_file_atomic_sync(&path, &bytes))
         .await
-        .map_err(|e| Error::Internal(format!("open canvas source: {e}")))?;
-    let mut bytes = Vec::new();
+        .map_err(|e| std::io::Error::other(format!("atomic write task failed: {e}")))?
+}
+
+fn write_file_atomic_sync(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("refusing to write through symlink {}", path.display()),
+                ));
+            }
+            if !meta.is_file() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("refusing to overwrite non-regular file {}", path.display()),
+                ));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent dir")
+    })?;
+    let pid = std::process::id();
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = parent.join(format!(".otto-tmp-{pid}-{seq}"));
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+        options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+    }
+
+    let mut file = options.open(&tmp)?;
+    if let Err(e) = file.write_all(bytes).and_then(|()| file.flush()) {
+        drop(file);
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    drop(file);
+
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("refusing to write through symlink {}", path.display()),
+            ));
+        }
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Agent files obey the same byte budget as the scene upload surface, and are
+/// opened with `O_NOFOLLOW | O_NONBLOCK` + regular-file verification so a
+/// symlink or FIFO planted by the agent cannot escape the scratch dir.
+async fn read_agent_source(path: &std::path::Path) -> otto_core::Result<String> {
+    let path = path.to_path_buf();
+    let bytes = tokio::task::spawn_blocking(move || read_agent_source_sync(&path))
+        .await
+        .map_err(|e| Error::Internal(format!("read canvas source task: {e}")))??;
+    String::from_utf8(bytes)
+        .map_err(|e| Error::Invalid(format!("canvas source must be UTF-8: {e}")))
+}
+
+fn read_agent_source_sync(path: &std::path::Path) -> otto_core::Result<Vec<u8>> {
+    use std::io::Read;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(
+            (rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::NOFOLLOW).bits() as i32,
+        );
+    }
+
+    let file = options.open(path).map_err(|e| {
+        #[cfg(unix)]
+        if e.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) {
+            return Error::Forbidden("canvas source symlink refused".into());
+        }
+        Error::Internal(format!("open canvas source: {e}"))
+    })?;
+    let meta = file
+        .metadata()
+        .map_err(|e| Error::Internal(format!("stat canvas source: {e}")))?;
+    if !meta.is_file() {
+        return Err(Error::Forbidden(
+            "canvas source is not a regular file".into(),
+        ));
+    }
+
+    let mut bytes = Vec::with_capacity(crate::http::SCENE_BODY_LIMIT.min(64 * 1024));
     file.take(crate::http::SCENE_BODY_LIMIT as u64 + 1)
         .read_to_end(&mut bytes)
-        .await
         .map_err(|e| Error::Internal(format!("read canvas source: {e}")))?;
     if bytes.len() > crate::http::SCENE_BODY_LIMIT {
         return Err(Error::PayloadTooLarge(
             "canvas source exceeds scene byte limit".into(),
         ));
     }
-    String::from_utf8(bytes)
-        .map_err(|e| Error::Invalid(format!("canvas source must be UTF-8: {e}")))
+    Ok(bytes)
 }
 
 /// Decide the committed source: prefer the agent's in-place file edit; fall back
@@ -738,7 +846,7 @@ async fn resolve_source(
                     "canvas source exceeds scene byte limit".into(),
                 ));
             }
-            tokio::fs::write(file_path, &s)
+            write_file_atomic(file_path, s.as_bytes().to_vec())
                 .await
                 .map_err(|e| Error::Internal(format!("write canvas source: {e}")))?;
             Ok(s)
@@ -1287,6 +1395,54 @@ mod tests {
         );
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scratch_io_refuses_symlink_escape_on_read_and_write() {
+        let base = std::env::temp_dir().join(format!("otto-canvas-sym-{}", otto_core::new_id()));
+        let outside = base.join("outside");
+        let scratch = base.join("scratch");
+        tokio::fs::create_dir_all(&outside).await.unwrap();
+        tokio::fs::create_dir_all(&scratch).await.unwrap();
+
+        let secret = outside.join("secret.txt");
+        tokio::fs::write(&secret, b"TOP_SECRET").await.unwrap();
+
+        let link = scratch.join("canvas.mmd");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+        // read_agent_source refuses symlink via O_NOFOLLOW.
+        let err = read_agent_source(&link).await.unwrap_err();
+        assert!(matches!(err, Error::Forbidden(_)), "{err:?}");
+
+        // write_scene_source refuses symlink and leaves outside target untouched.
+        let err = write_scene_source(&link, "OVERWRITTEN").await.unwrap_err();
+        assert!(err.to_string().contains("symlink"), "{err}");
+        assert_eq!(tokio::fs::read(&secret).await.unwrap(), b"TOP_SECRET");
+
+        // resolve_source refuses symlink (cannot exfiltrate or overwrite).
+        let err = resolve_source(
+            &link,
+            "flowchart TD\n",
+            "mermaid",
+            &AssistResult {
+                mermaid: Some("flowchart LR\n  A-->B".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Forbidden(_)), "{err:?}");
+        assert_eq!(tokio::fs::read(&secret).await.unwrap(), b"TOP_SECRET");
+
+        // Regular directory is also rejected by read_agent_source.
+        let subdir = scratch.join("dir.mmd");
+        tokio::fs::create_dir(&subdir).await.unwrap();
+        let err = read_agent_source(&subdir).await.unwrap_err();
+        assert!(matches!(err, Error::Forbidden(_)), "{err:?}");
+
+        let _ = tokio::fs::remove_dir_all(&base).await;
     }
 }
 

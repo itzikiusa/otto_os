@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { announceShown } from '../../../lib/announce.svelte';
   import { rel } from '../../../lib/stores/now.svelte';
   import { rowMenu as rowMenuKeys } from '../../../lib/rowMenu';
   import { plural } from '../../../lib/plural';
@@ -610,7 +609,7 @@
                     {#if seriesLoading}
                       <Skeleton rows={2} height={60} />
                     {:else if seriesError}
-                      <div class="trend-error" use:announceShown={{ text: `Couldn’t load trends. ${seriesError}`, assertive: true }}><strong>Couldn’t load trends</strong><p>{seriesError}</p><button class="btn small" onclick={() => void loadTrends(r)}>Retry trends</button></div>
+                      <LoadState variant="compact" what="trends" error={seriesError} empty onretry={() => void loadTrends(r)} />
                     {:else}
                       <div class="charts">
                         <div class="chart">
@@ -811,8 +810,6 @@
     font-weight: 600;
     cursor: pointer;
   }
-  .trend-error { padding: 8px; }
-  .trend-error p { margin: 4px 0 8px; color: var(--text-dim); }
   .wlname {
     display: flex;
     align-items: baseline;

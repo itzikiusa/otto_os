@@ -11,7 +11,6 @@
   import Sparkline from './monitor/Sparkline.svelte';
   import { monitorPath } from '../../lib/k8s/viewState';
   import { pollWhileVisible } from '../../lib/poll';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText, providerErrorText } from '../../lib/loadError';
   import { k8sApi } from '../../lib/api/k8s';
@@ -157,20 +156,25 @@
       <span class="hist-title">History (Monitor) · last hour</span>
       <button class="btn small ghost" onclick={openInMonitor} title={workload ? `Open ${workload} in the Monitor` : 'Open the Monitor for this cluster'} data-testid="k8s-metrics-open-monitor">Open in Monitor</button>
     </div>
-    {#if historyLoading && !history}
-      <Skeleton rows={2} height={30} />
-    {:else if historyError}
-      <div class="dim">The Monitor has no history for this cluster ({historyError}). <button class="btn small" onclick={() => void loadHistory()}>Retry</button></div>
-    {:else if !history?.mem && !history?.rps}
-      <div class="dim">No Monitor samples for this pod in the last hour. Enable monitoring for this cluster (Monitor › Settings) to keep history.</div>
-    {:else}
+    <LoadState
+      variant="compact"
+      what="Monitor history"
+      loading={historyLoading}
+      error={historyError}
+      empty={!history?.mem && !history?.rps}
+      rows={2}
+      onretry={() => void loadHistory()}
+    >
+      {#snippet emptyView()}
+        <div class="dim">No Monitor samples for this pod in the last hour. Enable monitoring for this cluster (Monitor › Settings) to keep history.</div>
+      {/snippet}
       {#if history?.mem}
         <div class="hist-row"><span class="lbl">mem</span><Sparkline points={history.mem.points.map((p) => p.v)} width={260} height={36} label="memory history" /><span class="val mono">{formatBytes(history.mem.points[history.mem.points.length - 1]?.v ?? 0)}</span></div>
       {/if}
       {#if history?.rps}
         <div class="hist-row"><span class="lbl">req/s</span><Sparkline points={history.rps.points.map((p) => p.v)} width={260} height={36} stroke="var(--status-working)" label="request-rate history" /><span class="val mono">{(history.rps.points[history.rps.points.length - 1]?.v ?? 0).toFixed(2)}</span></div>
       {/if}
-    {/if}
+    </LoadState>
   </section>
 </div>
 

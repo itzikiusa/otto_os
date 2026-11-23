@@ -16,7 +16,12 @@
 
 
   let filter = $state('');
+  let filterEl = $state<HTMLInputElement | null>(null);
   let collapsed = $state<Record<string, boolean>>({});
+  function clearFilter(): void {
+    filter = '';
+    filterEl?.focus();
+  }
 
 
   const rows = $derived.by((): CanvasSceneSummary[] => {
@@ -80,8 +85,9 @@
       initial: s.section ?? '',
       placeholder: 'e.g. Platform/Staging — empty = no section',
       confirmLabel: 'Move',
+      allowEmpty: true,
     });
-    if (sec == null) return;
+    if (sec === null) return;
     try {
       await canvas.updateMeta(s.id, { section: sec.trim() || null });
     } catch (err) {
@@ -135,9 +141,9 @@
 <div class="scene-list">
   <div class="search">
     <Icon name="search" size={13} />
-    <input dir="auto" type="search" placeholder="Filter scenes…" aria-label="Filter scenes" bind:value={filter} spellcheck="false" />
+    <input dir="auto" bind:this={filterEl} type="search" placeholder="Filter scenes…" aria-label="Filter scenes" bind:value={filter} spellcheck="false" />
     {#if filter}
-      <button class="clear" onclick={() => (filter = '')} aria-label="Clear the filter" title="Clear the filter">
+      <button class="clear" onclick={clearFilter} aria-label="Clear the filter" title="Clear the filter">
         <Icon name="x" size={12} />
       </button>
     {/if}
@@ -163,7 +169,7 @@
       <div class="hint">
         {#if filter}
           No scenes match “{filter.trim()}”.
-          <button class="btn small" onclick={() => (filter = '')}>Clear search</button>
+          <button class="btn small" onclick={clearFilter}>Clear search</button>
         {:else}
           No scenes yet.
         {/if}

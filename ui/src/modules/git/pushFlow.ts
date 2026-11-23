@@ -14,6 +14,7 @@ import { toasts } from '../../lib/toast.svelte';
 import { confirmer } from '../../lib/confirm.svelte';
 import { runPull } from './pullFlow';
 import { pushRefusal } from './push-errors';
+import { runPushPreflight } from './pushPreflight';
 
 /** What the rejection dialog resolved to — exported for tests. */
 export type RejectedChoice = 'pull' | 'force' | null;
@@ -47,7 +48,7 @@ export async function runPush(
   repoId: string,
   status: Pick<RepoStatusResp, 'branch' | 'upstream'>,
   onstatus: (s: RepoStatusResp) => void,
-  opts?: { forceWithLease?: boolean; target?: PushTarget },
+  opts?: { forceWithLease?: boolean; target?: PushTarget; skipPreflight?: boolean },
 ): Promise<boolean> {
   const body: PushReq = {};
   if (opts?.forceWithLease) {
@@ -58,6 +59,15 @@ export async function runPush(
   // can still do a normal push, but cannot offer an unbound force retry.
   const target = opts?.target ?? await gitApi.pushTarget(repoId).catch(() => null);
   try {
+    if (!opts?.skipPreflight && typeof runPushPreflight === 'function') {
+      const remote = target?.remote ?? (status.upstream?.includes('/') ? status.upstream.split('/')[0] : undefined);
+      const gate = await runPushPreflight(repoId, {
+        remote,
+        branch: status.branch,
+        force: Boolean(opts?.forceWithLease),
+      });
+      if (!gate.ok) return false;
+    }
     const s = await git.push(repoId, body);
     onstatus(s);
     toasts.success(
@@ -66,8 +76,7 @@ export async function runPush(
     );
     return true;
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    const refusal = pushRefusal(e instanceof ApiError ? e.status : undefined, msg);
+    const refusal = e instanceof ApiError ? pushRefusal(e.status, e.message) : null;
     if (refusal === 'lease') {
       toasts.error(
         'Force push refused',
@@ -83,7 +92,9 @@ export async function runPush(
         await runPull(repoId, onstatus);
         return false;
       }
-      if (choice === 'force' && canForce) return runPush(repoId, status, onstatus, { forceWithLease: true, target });
+      if (choice === 'force' && canForce) {
+        return runPush(repoId, status, onstatus, { forceWithLease: true, target, skipPreflight: true });
+      }
       return false;
     }
     toasts.error('Couldn’t push', loadErrorText(e));

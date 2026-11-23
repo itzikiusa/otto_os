@@ -185,6 +185,7 @@
     data-guide={g.id}
     data-testid="guide-row"
     onclick={() => open(g.id)}
+    onkeydown={onRailKey}
   >
     <span class="row-title">{g.title}</span>
     {#if searching}
@@ -244,8 +245,7 @@
     <PageBody fill padded={false}>
       <div class="help-layout" class:phone={viewport.isPhone}>
         {#if showList}
-          <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-          <nav class="rail" aria-label="Guides" bind:this={railEl} onkeydown={onRailKey} style="--list-pane-w:{listW}px">
+          <nav class="rail" aria-label="Guides" bind:this={railEl} style="--list-pane-w:{listW}px">
             <div class="rail-search">
               <Icon name="search" size={13} />
               <input dir="ltr"
@@ -256,6 +256,7 @@
                 aria-label="Filter guides"
                 autocomplete="off"
                 spellcheck="false"
+                onkeydown={onRailKey}
                 data-testid="guide-search"
               />
             </div>

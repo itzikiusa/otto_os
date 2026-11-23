@@ -403,14 +403,17 @@ impl JiraClient {
         if !status.is_success() && status.as_u16() != 400 {
             return Err(self.t.fail(resp, "jira create_issue").await);
         }
-        let text = resp.text().await.unwrap_or_default();
-        let body: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
         if !status.is_success() {
+            let text =
+                crate::atlassian::read_text_capped(resp, crate::atlassian::ERROR_BODY_CAP).await;
+            let body: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
             return Err(Error::Upstream(format!(
                 "jira create_issue failed ({status}): {}",
                 jira_error_text(&body)
             )));
         }
+        let text = resp.text().await.unwrap_or_default();
+        let body: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
         let key = body["key"]
             .as_str()
             .filter(|k| !k.is_empty())

@@ -473,6 +473,15 @@ html.otto-vibrant .sidebar-material {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }
+/* Mobile & tablet browsers: opaque sidebar avoids Android Chromium's
+   backdrop-filter + nested scroll-layer tile ghosting on `.nav-scroll`. */
+@media (pointer: coarse) {
+  .sidebar-material {
+    background: var(--bg-sidebar);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
 
 /* A chrome strip (toolbar row, status bar): the ambient, fixed to the
    viewport so it lines up with what the sidebar shows, under the bar tint.
@@ -493,6 +502,14 @@ html.otto-vibrant .sidebar-material {
   -webkit-backdrop-filter: var(--glass-blur-raised);
   border: 1px solid var(--glass-border);
   box-shadow: var(--glass-shadow);
+}
+/* Touch: opaque like the sidebar above — a long menu scrolls the same way. */
+@media (pointer: coarse) {
+  .glass-raised {
+    background: var(--surface);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
 }
 
 /* ---------- Curated IDE Editor Color Schemes (JetBrains & VS Code) ---------- */

@@ -127,7 +127,7 @@
 </script>
 
 <div class="skills-lab">
-  <PageHeader title="Skills Lab" subtitle={tab === 'skills' ? 'Every skill your agents can load, in one place' : undefined} tabsPlacement={tab === 'evaluator' ? 'below' : 'inline'}>
+  <PageHeader title="Skills Lab" subtitle={tab === 'skills' ? 'Every skill your agents can load, in one place' : undefined} tabsPlacement="below">
     {#snippet leading()}
       {#if (tab === 'skills' || tab === 'review' || (tab === 'evaluator' && evalListable)) && !viewport.isPhone}
         {@const what = tab === 'skills' ? 'skills' : tab === 'review' ? 'reviews' : evalView === 'matrix' ? 'matrices' : 'evaluations'}
@@ -170,7 +170,7 @@
       {/if}
       {#if tab === 'skills'}
         {#if canCreate}
-          <button class="btn small primary" onclick={() => browser?.openNew()} data-testid="new-skill"><Icon name="plus" size={12} /> New skill</button>
+          <button class="btn small primary" onclick={() => browser?.openNew()} data-testid="new-skill"><Icon name="plus" size={12} /> New skill…</button>
         {/if}
       {/if}
     {/snippet}

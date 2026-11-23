@@ -1,69 +1,74 @@
 <script lang="ts">
   import { announceShown } from '../../../lib/announce.svelte';
-  import { rowMenu } from '../../../lib/rowMenu';
-  // 3D Studio 1.5 — the Design Hall layout for a `scene3d` artifact (mockup S4):
-  //
-  //   ┌ HIERARCHY ─────┬ toolbar: ✨ Generate ▾ · Turntable · Play · Export ▾ ───┬ Inspector · Otto · Versions · Links ┐
-  //   │ tree (+ add)   │ VIEWPORT (three.js)             view cube ⌝          │ transform · material presets  │
-  //   │ Environment    │   "Showing v8 draft by Otto · not approved"          │ brand swatches · sliders      │
-  //   │ Views          │ ⌞ States [Idle | Hover | Flipped]   12 objects · … ⌟  │ notes · Used in               │
-  //   └────────────────┴──────────────────────────────────────────────────────┴───────────────────────────────┘
-  // It edits the SAME working copy the artifact view owns (`source` → `onchange`):
-  // the view keeps versions, saving, conflicts and the header. Everything here is
-  // a pure `ops.ts` edit of the scene3d v2 doc, an agent turn through the design
-  // assist route (Blockout / Text→3D / Image→3D / Refine in Blender — each lands
-  // as a reviewable `agent` version), or a local export. Cloud 3D providers are
-  // opt-in; nothing is sent anywhere without an explicit click.
   import Tabs, { type TabItem } from '../../../lib/components/Tabs.svelte';
   import { toastError } from '../../../lib/toastError';
   import { copyWithToast } from '../../../lib/clipboard';
   import { untrack, type Snippet } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
-  import Modal from '../../../lib/components/Modal.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { confirmer } from '../../../lib/confirm.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { registry } from '../../../lib/commands.svelte';
+  import { auth } from '../../../lib/stores/auth.svelte';
   import { api, ApiError } from '../../../lib/api/client';
   import { downloadText } from '../../../lib/components/exporters';
   import * as dapi from '../../../lib/api/design';
+  import * as mapi from '../../../lib/api/media';
   import { listTurns, startAssist as startTurn } from '../assist/api';
   import { designAssistBus } from '../../../lib/events.svelte';
   import { loadErrorText as errText } from '../../../lib/loadError';
   import { blenderSourceOf, downloadBlenderScript } from '../exportMenu';
-  import type { DesignArtifact, DesignAssistTurn, DesignVersion } from '../../../lib/api/types';
+  import type {
+    CommentPin3d,
+    DesignArtifact,
+    DesignAssistTurn,
+    DesignVersion,
+    Media3dPipelineStage,
+    Media3dProvider,
+  } from '../../../lib/api/types';
   import {
-    ENV_PRESETS,
-    Hierarchy,
+    EMPTY_RIG_INFO,
     Inspector,
     Scene3DViewport,
     addCameraPreset,
     addGltfSrc,
-    budgetStatus,
     editTargetState,
+    emptyScene,
     exportObjectToGlb,
-    exportObjectToUsdz,
-    formatBytes,
     glbFileName,
     initialState,
+    mergeFaceIntoSelection,
     parseScene,
     resolveColor,
     removeCameraPreset,
     serializeScene,
     setBrand,
-    setEnvironment,
     updateCameraPreset,
     type BrandSwatch,
     type EnvPresetId,
+    type MeshTopologyStats,
+    type Pin3dAnchor,
+    type ProjectedPin3d,
+    type RigInfo,
     type Scene3dDoc,
+    type SelectionKind3d,
+    type ShadingMode,
+    type SubMeshInfo,
   } from '../../../lib/design/scene3d';
   import type { ColorResolver } from '../../../lib/design/scene3d/build';
   import { colorTokens, resolveToken, tokenRef } from '../brand/tokens';
-  import type { OptimizeResult } from '../../../lib/design/scene3d/optimize';
   import ArtifactStage from '../ArtifactStage.svelte';
+  import { isTypingTarget, pins3dFor } from '../comments/pins';
+  import type { CommentsStore } from '../comments/commentsStore.svelte';
+  import AnimationBar from './AnimationBar.svelte';
   import StatesBar from './StatesBar.svelte';
-  import GenerateModal from './GenerateModal.svelte';
+  import type { OptimizeState } from './OptimizeModal.svelte';
+  import Pin3DLayer from './Pin3DLayer.svelte';
+  import Studio3dLeftPanel from './Studio3dLeftPanel.svelte';
+  import Studio3dModals from './Studio3dModals.svelte';
+  import Studio3dToolbar from './Studio3dToolbar.svelte';
+  import { anchorEventNearLeftPanel, bytesToB64, exportViewportAs, listImportable3dModels, renderAndPutThumbnail, saveBlob, uploadGlbFileArtifact } from './studio3dExport';
   import { blenderRefinePrompt, blockoutPrompt, type Gen3dContext, type Gen3dKind } from './providers';
   import { loadBrandKit, modelScope, type BrandKit } from './sources';
   import { openArtifact } from '../nav';
@@ -73,50 +78,213 @@
 
   interface Props {
     artifact: DesignArtifact;
-    /** The working copy (scene3d JSON). */
     source: string | null;
+    /** Object URL when viewing a standalone `.glb`/`.gltf`/`.obj` model artifact. */
+    modelBlobUrl?: string | null;
     readonly: boolean;
     dirty: boolean;
     head: DesignVersion | null;
+    shownVersionId?: string | null;
     usedIn: LinkRow[];
     linkCount: number;
     seqOf: (versionId: string) => number | null;
     onchange: (source: string) => void;
-    /** The view's Otto / Versions / Links panels (it owns their data; Links
-     *  holds Find references); Otto gets the selected object to focus a turn. */
+    comments?: CommentsStore;
+    commentCount?: number | null;
+    commentsPanel?: Snippet<[{ onfocus3d: (pin: CommentPin3d) => void; onregenerate3d: (prompt: string) => void }]>;
     otto: Snippet<[AssistSelection | null]>;
     links: Snippet;
     versions: Snippet;
-    /** Open on the Otto tab (the lobby's Generate hand-off, `#/design/a/<id>/otto`). */
     openOtto?: boolean;
-    /** The view's toolbar notices (imported / read-only / newer version). */
     notices?: Snippet;
   }
-  let { artifact, source, readonly, dirty, head, usedIn, linkCount, seqOf, onchange, otto, links, versions, notices, openOtto = false }: Props = $props();
+  let {
+    artifact,
+    source,
+    modelBlobUrl = null,
+    readonly,
+    dirty,
+    head,
+    shownVersionId = null,
+    usedIn,
+    linkCount,
+    seqOf,
+    onchange,
+    comments,
+    commentCount = null,
+    commentsPanel,
+    otto,
+    links,
+    versions,
+    notices,
+    openOtto = false,
+  }: Props = $props();
 
-  // ── Document ──────────────────────────────────────────────────────────────
-  const parsed = $derived(source ? parseScene(source) : null);
-  const doc = $derived<Scene3dDoc | null>(parsed?.ok ? parsed.doc : null);
+  // ── Document (scene3d JSON or synthetic wrapper for standalone GLB/glTF/OBJ) ─
+  const isModelArtifact = $derived(artifact.format === 'glb' || artifact.format === 'gltf' || artifact.format === 'obj');
+  let modelEnvPreset = $state<EnvPresetId>('studio-soft');
+  const parsed = $derived(!isModelArtifact && source ? parseScene(source) : null);
+  const doc = $derived.by<Scene3dDoc | null>(() => {
+    if (isModelArtifact) {
+      const base = emptyScene();
+      return {
+        ...base,
+        environment: { preset: modelEnvPreset, background: true, intensity: 1 },
+        // No 20 m floor slab under a standalone model: the grid marks the ground and the slab
+        // hid whatever of the model (an animated character's legs) dipped below it.
+        objects: [
+          { id: 'model', name: artifact.title, type: 'gltf', attachment_id: artifact.id, position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+        ],
+      };
+    }
+    return parsed?.ok ? parsed.doc : null;
+  });
 
   let selectedId = $state<string | null>(null);
   let stateId = $state<string | null>(null);
   let play = $state(false);
-  /** Show the scene JSON beside a plain viewport (hand edits, agent diffs). */
   let showSource = $state(false);
   let showSceneTools = $state(false);
+  let showDetailsDrawer = $state(false);
   let turntable = $state(false);
-  type RightTab = 'inspector' | 'otto' | 'versions' | 'links';
+  // ── 3D Inspection & Polygon Commenting ────────────────────────────────────
+  let shading = $state<ShadingMode>('shaded');
+  let wireframeOverlay = $state(false);
+  let scaleRef = $state(false);
+  let pickMode = $state(false);
+  let pickKind = $state<SelectionKind3d>('polygon');
+  let hoveredAnchor = $state<Pin3dAnchor | null>(null);
+  let draftAnchor = $state<Pin3dAnchor | null>(null);
+  let projectedPins = $state<ProjectedPin3d[]>([]);
+  let subMeshes = $state<SubMeshInfo[]>([]);
+  let topologyStats = $state<MeshTopologyStats>({ triangles: 0, vertices: 0, subMeshes: 0, materials: 0, bounds: null });
+  let activeMeshUid = $state<string | null>(null);
+  let providersOpen = $state(false);
+  let exportWsOpen = $state(false);
+  let genInitialPrompt = $state('');
+  let genStage = $state<Media3dPipelineStage>('generate');
+  let rigInfo = $state<RigInfo>(EMPTY_RIG_INFO);
+  let showSkeleton = $state(false);
+  let animClipIndex = $state(0);
+  let animPlaying = $state(false);
+  let mediaProviders = $state<Media3dProvider[]>([]);
+  const stageProviders = $derived(
+    mediaProviders.filter(
+      (p) => p.enabled && p.ready && p.capabilities?.supported_stages?.some((s) => s !== 'generate'),
+    ),
+  );
+  $effect(() => {
+    if (!isModelArtifact) return;
+    untrack(() => {
+      void mapi.list3dProviders().then((ps) => { if (!destroyed) mediaProviders = ps; }, () => {});
+    });
+  });
+
+  const canComment = $derived(auth.can('design', 'edit'));
+  const canAdmin3d = $derived(auth.can('design', 'admin'));
+  const effectiveVersionId = $derived(shownVersionId ?? head?.id ?? null);
+
+  type RightTab = 'inspector' | 'comments' | 'otto' | 'versions' | 'links';
   const rightTabs = $derived<TabItem<RightTab>[]>([
-    { id: 'inspector', label: 'Inspector', testid: 's3d-tab-inspector' },
+    ...(!isModelArtifact ? [{ id: 'inspector' as const, label: 'Inspector', testid: 's3d-tab-inspector' }] : []),
+    ...(commentsPanel ? [{ id: 'comments' as const, label: 'Comments', count: commentCount ?? undefined, testid: 'design-tab-comments' }] : []),
     { id: 'otto', label: 'Otto', testid: 'design-tab-otto' },
     { id: 'versions', label: 'Versions', testid: 'design-tab-versions' },
     { id: 'links', label: 'Links', count: linkCount, testid: 'design-tab-links' },
   ]);
-  let rightTab = $state<RightTab>(untrack(() => (openOtto ? 'otto' : 'inspector')));
+  let rightTab = $state<RightTab>(untrack(() => (openOtto ? 'otto' : isModelArtifact && commentsPanel ? 'comments' : 'inspector')));
   $effect(() => {
-    if (openOtto) untrack(() => (rightTab = 'otto'));
+    if (openOtto) untrack(() => { rightTab = 'otto'; showDetailsDrawer = true; });
   });
   let vp = $state<ReturnType<typeof Scene3DViewport> | null>(null);
+  let vpKey = $state(0); // bumped by the viewport's Retry: a fresh renderer
+  let studioW = $state(0); // ≤ 980: one side pane at a time (with both the canvas would be a sliver)
+
+  const pin3dInputs = $derived.by(() => {
+    if (!comments) return [];
+    return pins3dFor(comments.threads, effectiveVersionId).map(({ thread, muted }) => ({
+      id: thread.root.id,
+      n: thread.n,
+      body: thread.root.body,
+      muted,
+      anchor: thread.root.pin_3d!,
+    }));
+  });
+  const activeAnchor = $derived.by<Pin3dAnchor | null>(() => {
+    if (draftAnchor) return draftAnchor;
+    if (!comments?.selectedId) return null;
+    const hit = comments.threads.find((t) => t.root.id === comments.selectedId);
+    return hit?.root.pin_3d ?? null;
+  });
+
+  function onPolygonPick(hit: Pin3dAnchor, additive: boolean): void {
+    draftAnchor = additive ? mergeFaceIntoSelection(draftAnchor, hit) : hit;
+  }
+  function onSelectPin3d(id: string): void {
+    if (!comments) return;
+    comments.selectedId = id;
+    rightTab = 'comments';
+    showDetailsDrawer = true;
+    const hit = comments.threads.find((t) => t.root.id === id);
+    if (hit?.root.pin_3d) vp?.focusAnchor(hit.root.pin_3d);
+  }
+  function onFocus3d(pin: CommentPin3d): void {
+    draftAnchor = null;
+    vp?.focusAnchor(pin);
+  }
+  function onRegenerate3d(feedbackPrompt: string): void {
+    genStage = 'generate';
+    genInitialPrompt = feedbackPrompt;
+    genKind = 'text';
+  }
+  function openStage(stage: Media3dPipelineStage): void {
+    genStage = stage;
+    genInitialPrompt = '';
+    genKind = 'text';
+  }
+  /** Pipeline stages for a model artifact (in the toolbar's ⋯), when a ready provider offers one. */
+  const pipelineItems = $derived.by<MenuItem[]>(() => {
+    if (!isModelArtifact || !stageProviders.length) return [];
+    const has = (s: Media3dPipelineStage) => stageProviders.some((p) => p.capabilities.supported_stages.includes(s));
+    const off = !auth.can('design', 'edit');
+    return [
+      { label: 'Make game-ready (retopo / bake)…', icon: 'zap', disabled: off || !has('gameready'), action: () => openStage('gameready') },
+      { label: 'Rig skeleton…', icon: 'layers', disabled: off || !has('rig'), action: () => openStage('rig') },
+      { label: 'Animate model…', icon: 'play', disabled: off || !has('animate'), action: () => openStage('animate') },
+    ];
+  });
+  function onCommentSubMesh(m: SubMeshInfo): void {
+    if (!canComment) return;
+    activeMeshUid = m.uid;
+    vp?.focusMesh(m.uid);
+    const a = vp?.anchorForMesh(m.uid);
+    if (a) {
+      pickMode = true;
+      draftAnchor = a;
+    }
+  }
+  // C toggles 3D Polygon Comment mode; Esc exits it.
+  $effect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || isTypingTarget(e.target)) return;
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      if ((e.key === 'c' || e.key === 'C') && canComment && !e.shiftKey) {
+        e.preventDefault();
+        pickMode = !pickMode;
+        if (!pickMode) draftAnchor = null;
+      } else if (e.key === 'Escape' && (pickMode || draftAnchor)) {
+        pickMode = false;
+        draftAnchor = null;
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+
+  function resolveModelRef(ref: string): Promise<string> {
+    if (isModelArtifact && ref === artifact.id && modelBlobUrl) return Promise.resolve(modelBlobUrl);
+    return models.resolve(ref);
+  }
 
   // Keep the state picker on a real state (the doc may gain/lose states).
   $effect(() => {
@@ -211,7 +379,7 @@
     try {
       track(await startTurn(artifact.id, { prompt, mode }), label);
     } catch (e) {
-      const msg = e instanceof ApiError && e.status === 409 ? 'Otto is already working on this design.' : e instanceof Error ? e.message : String(e);
+      const msg = e instanceof ApiError && e.status === 409 ? 'Otto is already working on this design.' : errText(e);
       toasts.error('Couldn’t start Otto', msg);
     }
   }
@@ -257,60 +425,42 @@
   }
 
   function generateMenu(e: MouseEvent): void {
+    const canGen = auth.can('design', 'edit');
     const items: MenuItem[] = [
-      { label: 'Text → 3D model…', icon: 'sparkle', disabled: readonly, action: () => (genKind = 'text') },
-      { label: 'Image → 3D model…', icon: 'image', disabled: readonly, action: () => (genKind = 'image') },
-      { label: 'Blockout from prompt (scene JSON)…', icon: 'box', disabled: readonly, action: () => void blockout() },
+      { label: 'Generate 3D asset…', title: 'Otto Forge on this Mac; other generators are under Advanced', icon: 'sparkle', disabled: !canGen, action: () => { genInitialPrompt = ''; genKind = 'text'; } },
+      { label: 'Image → 3D model…', icon: 'image', disabled: !canGen, action: () => { genInitialPrompt = ''; genKind = 'image'; } },
+      ...(!isModelArtifact ? [{ label: 'Blockout from prompt (scene JSON)…', icon: 'box' as const, disabled: readonly, action: () => void blockout() }] : []),
       { separator: true },
-      { label: 'Refine in Blender (MCP)…', icon: 'layers', disabled: readonly, action: () => void refineInBlender() },
+      { label: 'Manage 3D providers…', icon: 'gear', action: () => (providersOpen = true) },
+      ...(!isModelArtifact ? [{ label: 'Refine in Blender (MCP)…', icon: 'layers' as const, disabled: readonly, action: () => void refineInBlender() }] : []),
     ];
     ctxMenu.show(e, items);
   }
 
   // ── Export ────────────────────────────────────────────────────────────────
-  function saveBlob(blob: Blob, name: string): void {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = name;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 5000);
-  }
   async function exportAs(kind: 'glb' | 'usdz' | 'png' | 'sheet'): Promise<void> {
     if (!vp) return;
     try {
-      if (kind === 'png') {
-        const b = await vp.snapshotPng();
-        if (b) saveBlob(b, glbFileName(artifact.title, 'png'));
-      } else if (kind === 'sheet') {
-        const b = await vp.turntableSheet(8);
-        if (b) saveBlob(b, glbFileName(`${artifact.title}-turntable`, 'png'));
-      } else {
-        const root = vp.contentRoot();
-        if (!root) return;
-        const b = kind === 'glb' ? await exportObjectToGlb(root) : await exportObjectToUsdz(root);
-        saveBlob(b, glbFileName(artifact.title, kind));
-      }
+      await exportViewportAs(vp, artifact.title, kind);
     } catch (e) {
       toastError('Couldn’t export the model', e);
     }
   }
-  function exportMenu(e: MouseEvent): void {
-    const items: MenuItem[] = [
+  function exportItems(): MenuItem[] {
+    return [
+      ...(isModelArtifact ? [{ label: 'Export to Workspace…', icon: 'folder' as const, disabled: !auth.can('design', 'edit'), action: () => (exportWsOpen = true) }, { separator: true as const }] : []),
       { label: 'GLB (.glb)', icon: 'download', action: () => void exportAs('glb') },
       { label: 'USDZ (.usdz) — AR Quick Look', icon: 'download', action: () => void exportAs('usdz') },
       { label: 'PNG snapshot', icon: 'image', action: () => void exportAs('png') },
       { label: 'PNG turntable (8 frames)', icon: 'image', action: () => void exportAs('sheet') },
-      { label: 'Scene JSON', icon: 'file', disabled: !source, action: () => source && downloadText(source, `${glbFileName(artifact.title).replace(/\.glb$/, '')}.scene3d.json`, 'application/json') },
+      ...(!isModelArtifact ? [{ label: 'Scene JSON', icon: 'file' as const, disabled: !source, action: () => source && downloadText(source, `${glbFileName(artifact.title).replace(/\.glb$/, '')}.scene3d.json`, 'application/json') }] : []),
       { separator: true },
       { label: 'Optimize for web (meshopt)…', icon: 'zap', action: () => void optimize() },
-      ...(blenderSourceOf(artifact) ? [{ label: 'Blender script (.py)', icon: 'file', action: () => void downloadBlenderScript(artifact) }] : []),
+      ...(blenderSourceOf(artifact) ? [{ label: 'Blender script (.py)', icon: 'file' as const, action: () => void downloadBlenderScript(artifact) }] : []),
     ];
-    ctxMenu.show(e, items);
   }
 
-  // Optimize for web: GLB of the live scene → gltf-transform (lazy chunk) → budget readout.
-  let opt = $state<{ phase: 'running' | 'done' | 'error'; result?: OptimizeResult; error?: string } | null>(null);
+  let opt = $state<OptimizeState | null>(null);
   let savingGlb = $state(false);
   async function optimize(): Promise<void> {
     if (!vp) return;
@@ -323,13 +473,8 @@
       const result = await optimizeGlb(await glb.arrayBuffer());
       opt = { phase: 'done', result };
     } catch (e) {
-      opt = { phase: 'error', error: e instanceof Error ? e.message : String(e) };
+      opt = { phase: 'error', error: errText(e) };
     }
-  }
-  function b64(bytes: Uint8Array): string {
-    let s = '';
-    for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-    return btoa(s);
   }
   async function saveOptimized(): Promise<void> {
     const r = opt?.result;
@@ -342,7 +487,7 @@
         studio: '3d',
         format: 'glb',
         title: `${artifact.title} (web)`,
-        content_b64: b64(r.bytes),
+        content_b64: bytesToB64(r.bytes),
         derived_from: head ? { artifact_id: artifact.id, version_id: head.id } : { artifact_id: artifact.id },
         message: `Optimized for web from v${head?.seq ?? '?'} (${r.compression})`,
       });
@@ -359,17 +504,10 @@
   let glbInput = $state<HTMLInputElement | null>(null);
   async function importModel(): Promise<void> {
     if (!doc || readonly) return;
-    let models: DesignArtifact[] = [];
-    try {
-      const f = artifact.project_id ? { project_id: artifact.project_id } : { workspace_id: artifact.workspace_id };
-      const [glb, gltf] = await Promise.all([dapi.listArtifacts({ ...f, format: 'glb', limit: 50 }), dapi.listArtifacts({ ...f, format: 'gltf', limit: 50 })]);
-      models = [...glb, ...gltf];
-    } catch {
-      /* offer the upload only */
-    }
+    const list = await listImportable3dModels(artifact);
     const items: MenuItem[] = [{ label: 'Upload GLB / glTF…', icon: 'arrowUp', pinned: true, action: () => glbInput?.click() }];
-    if (models.length) items.push({ separator: true });
-    for (const m of models) {
+    if (list.length) items.push({ separator: true });
+    for (const m of list) {
       items.push({
         label: m.title,
         icon: 'box',
@@ -380,32 +518,16 @@
         },
       });
     }
-    const anchor = document.querySelector<HTMLElement>('[data-testid="s3d-left"]');
-    const rect = anchor?.getBoundingClientRect();
-    // Opened from the Hierarchy's Add menu (already closed): anchor near the panel.
-    // Logical: 40 px in from the panel's inline-start edge (its right edge in RTL).
-    const rtl = !!anchor && getComputedStyle(anchor).direction === 'rtl';
-    const at = { clientX: rect ? (rtl ? rect.right - 40 : rect.left + 40) : 240, clientY: (rect?.top ?? 120) + 40, preventDefault() {}, stopPropagation() {} };
-    ctxMenu.show(at as unknown as MouseEvent, items, { filter: models.length > 8, maxVisible: 12 });
+    ctxMenu.show(anchorEventNearLeftPanel(), items, { filter: list.length > 8, maxVisible: 12 });
   }
   async function uploadModel(e: Event): Promise<void> {
     const input = e.currentTarget as HTMLInputElement;
     const f = input.files?.[0];
     input.value = '';
     if (!f || !doc) return;
-    const ext = f.name.toLowerCase().endsWith('.gltf') ? 'gltf' : 'glb';
     try {
-      const bytes = new Uint8Array(await f.arrayBuffer());
-      const res = await dapi.createArtifact({
-        workspace_id: artifact.workspace_id,
-        project_id: artifact.project_id ?? undefined,
-        studio: '3d',
-        format: ext,
-        title: f.name.replace(/\.(glb|gltf)$/i, ''),
-        content_b64: b64(bytes),
-        message: `Imported for ${artifact.title}`,
-      });
-      const r = addGltfSrc(doc, `otto://design/${res.artifact.id}@latest`, { name: res.artifact.title, position: [1.4, 0, 0] });
+      const created = await uploadGlbFileArtifact(f, artifact);
+      const r = addGltfSrc(doc, `otto://design/${created.id}@latest`, { name: created.title, position: [1.4, 0, 0] });
       edit(r.doc);
       selectedId = r.id;
     } catch (err) {
@@ -476,28 +598,11 @@
     thumbFor = hid;
     if (!missing && !fresh) return;
     if (thumbTimer) clearTimeout(thumbTimer);
-    thumbTimer = setTimeout(() => void storeThumbnail(), 1200);
+    thumbTimer = setTimeout(() => { if (vp) void renderAndPutThumbnail(vp, artifact.id); }, 1200);
   });
   $effect(() => () => {
     if (thumbTimer) clearTimeout(thumbTimer);
   });
-  async function storeThumbnail(): Promise<void> {
-    const b = await vp?.snapshotPng();
-    if (!b) return;
-    try {
-      const img = await createImageBitmap(b);
-      const w = Math.min(640, img.width);
-      const h = Math.round((img.height / img.width) * w);
-      const c = document.createElement('canvas');
-      c.width = w;
-      c.height = h;
-      c.getContext('2d')?.drawImage(img, 0, 0, w, h);
-      const small = await new Promise<Blob | null>((res) => c.toBlob(res, 'image/png'));
-      if (small) await dapi.putThumbnail(artifact.id, small);
-    } catch {
-      /* a thumbnail is a cache — never interrupt editing over it */
-    }
-  }
 
   // ── Derived view bits ─────────────────────────────────────────────────────
   const agentDraft = $derived(!!head && head.author_kind === 'agent' && artifact.approved_version_id !== head.id);
@@ -510,7 +615,6 @@
     const n = doc.objects.find((o) => o.id === selectedId) ?? doc.groups.find((g) => g.id === selectedId) ?? doc.lights.find((l) => l.id === selectedId);
     return { node_id: selectedId, label: n?.name || selectedId };
   });
-  const env = $derived(doc?.environment);
 
   function onPlayHover(inside: boolean): void {
     if (!play || !doc || !hoverState) return;
@@ -551,87 +655,54 @@
     </div>
   </div>
 {:else}
-  <div class="studio3d" class:wide-right={rightTab === 'otto'} class:scene-open={showSceneTools} data-testid="studio3d">
-    <aside class="left" id="s3d-scene-tools" aria-label="Scene" data-testid="s3d-left">
-      <div class="hier">
-        <Hierarchy {doc} bind:selectedId onchange={edit} {readonly} onimportGlb={() => void importModel()} />
-      </div>
-      <section class="block" aria-label="Environment">
-        <div class="block-head">
-          <span class="k">Environment</span>
-        </div>
-        <div class="env-row">
-          <Icon name="globe" size={13} />
-          <select
-            class="env-select"
-            value={env?.preset ?? 'none'}
-            disabled={readonly}
-            aria-label="Environment preset"
-            data-testid="s3d-env"
-            onchange={(e) => edit(setEnvironment(doc!, { preset: (e.currentTarget as HTMLSelectElement).value as EnvPresetId }))}
-          >
-            {#each ENV_PRESETS as p (p.id)}<option value={p.id}>{p.label}</option>{/each}
-          </select>
-        </div>
-        {#if env && env.preset !== 'none'}
-          <label class="env-row check">
-            <input type="checkbox" checked={env.background !== false} disabled={readonly} onchange={(e) => edit(setEnvironment(doc!, { background: (e.currentTarget as HTMLInputElement).checked }))} />
-            <span>Show as backdrop</span>
-          </label>
-        {/if}
-      </section>
-      <section class="block" aria-label="Views">
-        <div class="block-head">
-          <span class="k">Views</span>
-          {#if !readonly}
-            <button class="icon-btn" aria-label="Save the current view" title="Save the current view" onclick={() => void saveView()}>
-              <Icon name="plus" size={13} />
-            </button>
-          {/if}
-        </div>
-        {#if doc.cameras?.length}
-          <ul class="views">
-            {#each doc.cameras as c (c.id)}
-              <li>
-                <button use:rowMenu class="view" onclick={() => vp?.goToView(c)} oncontextmenu={(e) => { e.preventDefault(); viewMenu(e, c.id); }} title="#view:{c.id}">
-                  <Icon name="eye" size={12} /> <span>{c.name ?? c.id}</span>
-                </button>
-                <button class="icon-btn" aria-label="View options" title="View options" onclick={(e) => viewMenu(e, c.id)}><Icon name="more" size={12} /></button>
-              </li>
-            {/each}
-          </ul>
-        {:else}
-          <p class="dim">Frame a shot, then + to save it (e.g. “Hero angle”) — site embeds can use it.</p>
-        {/if}
-      </section>
-      <section class="block card" aria-label="Scene">
-        <span class="k">Scene</span>
-        <p>
-          {doc.objects.length} objects · {doc.lights.length} lights{doc.states?.length ? ` · ${doc.states.length} states` : ''}.
-          {#if kit}Materials can use <strong>{kit.label}</strong>.{:else}No brand kit in this project yet — brand colors appear once one exists.{/if}
-        </p>
-      </section>
-    </aside>
+  <div class="studio3d" class:wide-right={rightTab === 'otto'} class:scene-open={showSceneTools} class:details-open={showDetailsDrawer} bind:clientWidth={studioW} data-testid="studio3d">
+    <Studio3dLeftPanel
+      {doc}
+      {isModelArtifact}
+      {readonly}
+      {canComment}
+      {selectedId}
+      {modelEnvPreset}
+      {subMeshes}
+      {topologyStats}
+      {activeMeshUid}
+      {kit}
+      onselectid={(id) => (selectedId = id)}
+      onedit={edit}
+      onmodelenv={(p) => (modelEnvPreset = p)}
+      onimportglb={() => void importModel()}
+      onfocusmesh={(uid) => { activeMeshUid = uid; vp?.focusMesh(uid); }}
+      ontogglevis={(uid) => vp?.toggleMeshVisible(uid)}
+      oncommentmesh={onCommentSubMesh}
+      onsaveview={() => void saveView()}
+      ongotoview={(c) => vp?.goToView(c)}
+      onviewmenu={viewMenu}
+    />
 
     <section class="center" aria-label="3D viewport">
-      <div class="toolbar">
-        <button class="btn small scene-toggle" aria-expanded={showSceneTools} aria-controls="s3d-scene-tools" onclick={() => (showSceneTools = !showSceneTools)}>Scene</button>
-        <button class="btn small" onclick={generateMenu} disabled={readonly} aria-haspopup="menu" data-testid="s3d-generate">
-          <Icon name="sparkle" size={12} /> Generate <Icon name="chevronDown" size={12} />
-        </button>
-        <button class="btn small" class:on={turntable} aria-pressed={turntable} onclick={() => (turntable = !turntable)} data-testid="s3d-turntable">
-          <Icon name="refresh" size={12} /> Turntable
-        </button>
-        <button class="btn small" class:on={play} aria-pressed={play} onclick={() => (play = !play)} data-testid="s3d-play">
-          <Icon name="play" size={12} /> Play
-        </button>
-        <button class="btn small" onclick={exportMenu} aria-haspopup="menu" data-testid="s3d-export">
-          <Icon name="download" size={12} /> Export <Icon name="chevronDown" size={12} />
-        </button>
-        <button class="btn small ghost" class:on={showSource} aria-pressed={showSource} onclick={() => (showSource = !showSource)} data-testid="design-source-toggle">
-          <Icon name="file" size={12} /> Source
-        </button>
-        <span class="grow"></span>
+      <Studio3dToolbar
+        {isModelArtifact}
+        canEdit={auth.can('design', 'edit')}
+        {canComment}
+        sceneOpen={showSceneTools}
+        detailsOpen={showDetailsDrawer}
+        onscene={() => { showSceneTools = !showSceneTools; if (studioW <= 980) showDetailsDrawer = false; }}
+        ondetails={() => { showDetailsDrawer = !showDetailsDrawer; if (studioW <= 980) showSceneTools = false; }}
+        ongenerate={generateMenu}
+        {exportItems}
+        {pipelineItems}
+        oncamera={readonly || isModelArtifact ? undefined : () => vp?.saveViewAsCamera()}
+        {pickMode}
+        onpickmode={(on) => { pickMode = on; if (!on) draftAnchor = null; }}
+        bind:shading
+        bind:wireframeOverlay
+        bind:scaleRef
+        bind:pickKind
+        bind:turntable
+        bind:play
+        bind:showSource
+      />
+      <div class="s3d-notices">
         {#if agent}
           <span class="agent" use:announceShown={`Otto · ${agent.label}…`} data-testid="s3d-agent"><span class="pulse" aria-hidden="true"></span> Otto · {agent.label}…</span>
           {#if agent.error}<LoadState what="Otto’s progress" errorTitle="Can’t read Otto’s progress" variant="compact" error={agent.error} empty onretry={() => void poll()} />{/if}
@@ -648,11 +719,15 @@
         </div>
       {:else}
       <div class="stage" role="presentation" onpointerenter={() => onPlayHover(true)} onpointerleave={() => onPlayHover(false)}>
+        {#key vpKey}
         <Scene3DViewport
           bind:this={vp}
           {doc}
+          cameraButton={false}
+          frameModel={isModelArtifact}
+          onretry={() => vpKey++}
           bind:selectedId
-          readonly={readonly}
+          readonly={readonly || isModelArtifact}
           {play}
           {turntable}
           stateId={stateId}
@@ -660,17 +735,59 @@
           viewCube
           compact
           {statusNote}
+          {shading}
+          {wireframeOverlay}
+          {scaleRef}
+          {showSkeleton}
+          {animClipIndex}
+          {animPlaying}
+          {pickMode}
+          {pickKind}
+          {pin3dInputs}
+          {activeAnchor}
+          onpolygonhover={(a) => (hoveredAnchor = a)}
+          onpolygonpick={onPolygonPick}
+          onprojectedpins={(p) => (projectedPins = p)}
+          ontopology={(ms, st) => { subMeshes = ms; topologyStats = st; }}
+          onriginfo={(r) => { rigInfo = r; if (animClipIndex >= r.clips.length) animClipIndex = 0; }}
           onchange={edit}
-          resolveAttachment={models.resolve}
+          resolveAttachment={resolveModelRef}
         />
-        <div class="states-host">
-          <StatesBar {doc} {stateId} {selectedId} {readonly} onpick={(id) => (stateId = id ?? initialState(doc!))} onchange={edit} />
-        </div>
+        {/key}
+        {#if comments}
+          <Pin3DLayer
+            store={comments}
+            pins={projectedPins}
+            hovered={hoveredAnchor}
+            {draftAnchor}
+            {pickMode}
+            versionId={effectiveVersionId}
+            onselectpin={onSelectPin3d}
+            oncleardraft={() => (draftAnchor = null)}
+          />
+        {/if}
+        {#if rigInfo.hasSkeleton || rigInfo.clips.length > 0}
+          <div class="states-host">
+            <AnimationBar
+              rig={rigInfo}
+              {showSkeleton}
+              clipIndex={animClipIndex}
+              playing={animPlaying}
+              onskeleton={(on) => (showSkeleton = on)}
+              onclip={(i) => (animClipIndex = i)}
+              onplay={(on) => (animPlaying = on)}
+            />
+          </div>
+        {:else if !isModelArtifact}
+          <div class="states-host">
+            <StatesBar {doc} {stateId} {selectedId} {readonly} onpick={(id) => (stateId = id ?? initialState(doc!))} onchange={edit} />
+          </div>
+        {/if}
       </div>
       {/if}
     </section>
 
-    <aside class="right" aria-label="Details">
+    <aside class="right" id="s3d-details-panel" aria-label="Details">
       <Tabs label="Details panel" idBase="s3d" tabs={rightTabs} value={rightTab} onchange={(id) => (rightTab = id)} />
       <div class="panel" role="tabpanel" id="s3d-panel-{rightTab}" aria-labelledby="s3d-tab-{rightTab}">
         {#if rightTab === 'inspector'}
@@ -693,6 +810,8 @@
               </ul>
             </section>
           {/if}
+        {:else if rightTab === 'comments' && commentsPanel}
+          {@render commentsPanel({ onfocus3d: onFocus3d, onregenerate3d: onRegenerate3d })}
         {:else if rightTab === 'otto'}
           {@render otto(assistSelection)}
         {:else if rightTab === 'versions'}
@@ -706,45 +825,29 @@
   <input class="hidden-file" type="file" accept=".glb,.gltf,model/gltf-binary,model/gltf+json" bind:this={glbInput} onchange={(e) => void uploadModel(e)} />
 {/if}
 
-{#if genKind}
-  <GenerateModal kind={genKind} {artifact} ctx={genCtx} onclose={() => (genKind = null)} onstarted={track} />
-{/if}
-
-{#if opt}
-  <Modal title="Optimize for web" width={500} onclose={() => (opt = null)}>
-    <div class="opt" data-testid="s3d-optimize">
-      {#if opt.phase === 'running'}
-        <p class="dim">Exporting the scene and compressing it with gltf-transform + meshopt…</p>
-      {:else if opt.phase === 'error'}
-        <p class="err" role="alert">Couldn’t optimize: {opt.error}</p>
-      {:else if opt.result}
-        {@const r = opt.result}
-        {@const b = budgetStatus(r.after)}
-        <div class="sizes">
-          <div><span class="k">Before</span><strong>{formatBytes(r.before)}</strong></div>
-          <Icon name="chevronRight" size={14} />
-          <div><span class="k">After</span><strong>{formatBytes(r.after)}</strong></div>
-          <div><span class="k">Saved</span><strong>{r.before > 0 ? Math.max(0, Math.round((1 - r.after / r.before) * 100)) : 0}%</strong></div>
-        </div>
-        <div class="budget {b.tone}" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.min(100, b.pct)} aria-label="Web budget used">
-          <span class="bar" style:width="{Math.min(100, b.pct)}%"></span>
-        </div>
-        <p class="dim">Web budget: {b.label}{b.tone === 'over' ? ' — simplify the scene or split it before embedding.' : '.'}</p>
-        <ul class="steps">
-          {#each r.steps as s (s)}<li><Icon name="check" size={12} /> {s}</li>{/each}
-        </ul>
-        <p class="dim">Draco isn’t offered: its encoder isn’t bundled and Otto stays offline. Every Otto viewer decodes meshopt.</p>
-      {/if}
-    </div>
-    {#snippet footer()}
-      <button class="btn" onclick={() => (opt = null)}>Close</button>
-      {#if opt?.phase === 'done' && opt.result}
-        <button class="btn" onclick={() => opt?.result && saveBlob(new Blob([opt.result.bytes], { type: 'model/gltf-binary' }), glbFileName(`${artifact.title}-web`))}>Download</button>
-        <button class="btn primary" disabled={readonly || savingGlb} onclick={() => void saveOptimized()}>{savingGlb ? 'Saving…' : 'Save as GLB design'}</button>
-      {/if}
-    {/snippet}
-  </Modal>
-{/if}
+<Studio3dModals
+  {artifact}
+  {genKind}
+  {genStage}
+  {genInitialPrompt}
+  {genCtx}
+  canEdit={auth.can('design', 'edit')}
+  {canAdmin3d}
+  {readonly}
+  {effectiveVersionId}
+  {providersOpen}
+  {exportWsOpen}
+  {opt}
+  {savingGlb}
+  onclosegen={() => { genKind = null; genStage = 'generate'; }}
+  onstarted={track}
+  oncloseproviders={() => (providersOpen = false)}
+  onproviderschanged={() => { void mapi.list3dProviders().then((ps) => { if (!destroyed) mediaProviders = ps; }, () => {}); }}
+  oncloseexportws={() => (exportWsOpen = false)}
+  oncloseopt={() => (opt = null)}
+  ondownloadopt={(bytes, name) => saveBlob(new Blob([bytes.slice()], { type: 'model/gltf-binary' }), name)}
+  onsaveopt={() => void saveOptimized()}
+/>
 
 <style>
   .studio3d {
@@ -758,48 +861,12 @@
   .studio3d.wide-right {
     grid-template-columns: 248px minmax(0, 1fr) 360px;
   }
-  .left,
   .right {
     min-height: 0;
     background: var(--surface);
     display: flex;
     flex-direction: column;
-  }
-  .left {
-    border-inline-end: 1px solid var(--border);
-    overflow-y: auto;
-  }
-  .right {
     border-inline-start: 1px solid var(--border);
-  }
-  .hier {
-    min-height: 200px;
-    flex: 1 1 auto;
-    display: flex;
-    flex-direction: column;
-  }
-  .hier > :global(*) {
-    flex: 1;
-  }
-  .block {
-    padding: 10px 12px;
-    border-block-start: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .block.card {
-    margin: 10px 12px 12px;
-    padding: 10px 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface-2);
-  }
-  .block.card p {
-    margin: 0;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    line-height: 1.45;
   }
   .block-head {
     display: flex;
@@ -814,94 +881,25 @@
     text-transform: uppercase;
     color: var(--text-dim);
   }
-  .env-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
-  .env-row.check {
-    cursor: pointer;
-  }
-  .env-row input {
-    accent-color: var(--accent);
-  }
-  .env-select {
-    flex: 1;
-    min-width: 0;
-    font: inherit;
-    font-size: var(--fs-s);
-    color: var(--text);
-    padding: 4px 6px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--bg);
-  }
-  .views {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .views li {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-  }
-  .view {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 6px;
-    border: 0;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-s);
-    cursor: pointer;
-    text-align: start;
-  }
-  .view:hover {
-    background: var(--hover);
-  }
-  .view span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .dim {
-    margin: 0;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
   .center {
     min-width: 0;
     min-height: 0;
     display: flex;
     flex-direction: column;
   }
-  .toolbar {
+  .s3d-notices {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
     gap: 6px;
-    min-height: 40px;
-    padding: 6px 12px;
+    padding-block: 4px;
+    padding-inline: 12px;
     border-block-end: 1px solid var(--border);
     background: var(--bg);
   }
-  .toolbar .on {
-    background: var(--accent-soft);
-    border-color: var(--accent-line);
-    color: var(--accent-text);
+  .s3d-notices:not(:has(*)) {
+    display: none;
   }
-  .grow { flex: 1; }
   .agent { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-s); color: var(--accent-text); }
   .pulse {
     width: 8px;
@@ -923,8 +921,21 @@
   /* A narrow viewport stacks the stats pill above the states bar. */
   @container s3dstage (max-width: 600px) {
     .stage :global(.s3d-status.compact) {
-      inset-block-end: 64px;
+      inset-block-end: 76px; /* the bar's 12 px inset + 54 px touch height + a clear 10 px gap */
     }
+  }
+  /* A phone on its side has ≈300 px of page: the toolbar floats over the top of the
+     canvas (same grid cell) instead of taking a row, so the model gets the screen. */
+  @media (max-height: 500px) {
+    .center { display: grid; grid-template-rows: auto minmax(0, 1fr); }
+    .center > :global(.toolbar), .stage { grid-row: 2; grid-column: 1; }
+    .center > :global(.toolbar) { align-self: start; z-index: 2; background: none; border-block-end: 0; pointer-events: none; }
+    .center > :global(.toolbar > *) { pointer-events: auto; }
+    .center > :global(.toolbar .grow) { display: none; }
+    .center > :global(.toolbar .more) { background: var(--surface); border: 1px solid var(--border); }
+    .center > :global(.toolbar .on) { background: linear-gradient(var(--accent-soft), var(--accent-soft)), var(--surface); }
+    .stage { --s3d-top-inset: 52px; }
+    .stage :global(.s3d-hud) { inset-block-start: 58px; }
   }
   .stage > :global(.s3d-viewport) {
     border-radius: 0;
@@ -949,6 +960,9 @@
     inset-block-end: 12px;
     inset-inline-start: 12px;
     max-width: calc(100% - 24px);
+  }
+  @media (pointer: coarse) {
+    .right :global(.otab) { min-block-size: 40px; }
   }
   .panel {
     flex: 1;
@@ -1035,85 +1049,66 @@
   .hidden-file {
     display: none;
   }
-  .opt {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-  .sizes {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-  }
-  .sizes div {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .sizes strong {
-    font-size: var(--fs-l);
-    font-variant-numeric: tabular-nums;
-  }
-  .budget {
-    height: 8px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    overflow: hidden;
-  }
-  .budget .bar {
-    display: block;
-    height: 100%;
-    background: var(--success);
-  }
-  .budget.warn .bar {
-    background: var(--warning);
-  }
-  .budget.over .bar {
-    background: var(--danger);
-  }
-  .steps {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    font-size: var(--fs-s);
-  }
-  .steps li {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .err {
-    margin: 0;
-    color: var(--danger);
-    font-size: var(--fs-s);
-  }
-  .scene-toggle { display: none; }
+  /* Narrow panes put the side panes behind the toolbar's Scene / Details toggles. */
   @container (max-width: 980px) {
-    .scene-toggle { display: inline-flex; }
-    .studio3d.scene-open .left { display: flex; grid-column: 1 / -1; max-block-size: 320px; border-block-end: 1px solid var(--border); }
-    .studio3d.scene-open { grid-template-rows: auto minmax(360px, 1fr); }
+    .studio3d :global(.scene-toggle) { display: inline-flex; }
     .studio3d,
     .studio3d.wide-right {
       grid-template-columns: minmax(0, 1fr) 300px;
     }
-    .left {
+    .studio3d > :global(.left) {
       display: none;
     }
+    .studio3d.scene-open :global(.left) { display: flex; grid-column: 1 / -1; max-block-size: 320px; border-block-end: 1px solid var(--border); }
+    .studio3d.scene-open { grid-template-rows: auto minmax(360px, 1fr); }
   }
-  @container (max-width: 720px) {
+  /* Tablets and phone landscape: the canvas comes first. Both panes collapse to
+     toggles and open as side columns, so the model never shrinks to a sliver
+     between two docked panes. */
+  @container (max-width: 1180px) {
+    @media (pointer: coarse), (max-height: 500px) {
+      .studio3d :global(.scene-toggle),
+      .studio3d :global(.details-toggle) { display: inline-flex; }
+      .studio3d,
+      .studio3d.wide-right,
+      .studio3d.scene-open { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+      .studio3d > :global(.left),
+      .right { display: none; }
+      .studio3d.scene-open :global(.left) { display: flex; grid-column: auto; max-block-size: none; border-block-end: 0; }
+      .studio3d.scene-open { grid-template-columns: 248px minmax(0, 1fr); }
+      .studio3d.details-open .right { display: flex; }
+      .studio3d.details-open { grid-template-columns: minmax(0, 1fr) 320px; }
+      .studio3d.scene-open.details-open { grid-template-columns: 248px minmax(0, 1fr) 320px; }
+    }
+  }
+  /* Phone and tablet portrait: one column. An open pane takes the lower half
+     under the canvas (one at a time), so the toolbar never moves and the model
+     stays in view while you edit it. */
+  @container (max-width: 768px) {
+    .studio3d :global(.details-toggle) { display: inline-flex; }
     .studio3d,
-    .studio3d.wide-right {
+    .studio3d.wide-right,
+    .studio3d.scene-open,
+    .studio3d.details-open,
+    .studio3d.scene-open.details-open {
       grid-template-columns: minmax(0, 1fr);
-      grid-template-rows: minmax(360px, 1fr) auto;
-      overflow-y: auto;
+      grid-template-rows: minmax(0, 1fr);
     }
-    .right {
-      border-inline-start: 0;
+    .right { display: none; }
+    .studio3d.scene-open,
+    .studio3d.details-open {
+      grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+    }
+    .studio3d.scene-open :global(.left),
+    .studio3d.details-open .right {
+      display: flex;
+      order: 2;
+      grid-column: auto;
+      max-block-size: none;
+      border-inline: 0;
       border-block-start: 1px solid var(--border);
-      max-height: 480px;
     }
+    /* A jump to a comment or Otto opens Details while Scene is open: Details wins. */
+    .studio3d.scene-open.details-open :global(.left) { display: none; }
   }
 </style>

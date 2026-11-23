@@ -399,3 +399,170 @@ async fn bodies_and_pins_are_validated_and_mirrors_take_comments() {
     assert_eq!(st, StatusCode::OK);
     assert_eq!(l.as_array().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn http_pin_3d_polygon_comments_and_mesh_filter() {
+    let ctx = ctx().await;
+    seed(&ctx, "GLB1", "w1", None).await;
+    let u1 = app_as(&ctx, "u1");
+
+    // Create 3D polygon comment.
+    let (st, created) = call(
+        &u1,
+        Method::POST,
+        "/design/artifacts/GLB1/comments",
+        Some(json!({
+            "body": "Fix normal seam on this polygon",
+            "pin_3d": {
+                "selection_kind": "polygon",
+                "mesh_name": "ChestPlate",
+                "face_index": 88,
+                "face_indices": [88],
+                "vertices": [1, 2, 3],
+                "position": [0.25, 1.1, 0.4],
+                "normal": [0.0, 0.0, 1.0],
+                "camera": { "pos": [0.0, 1.2, 2.5], "target": [0.25, 1.1, 0.4], "fov": 50.0 }
+            }
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{created}");
+    assert_eq!(created["pin_3d"]["mesh_name"], "ChestPlate");
+    assert_eq!(created["pin_3d"]["face_index"], 88);
+    let tid = created["id"].as_str().unwrap().to_string();
+
+    // Replies cannot attach pin_3d.
+    let (st, _) = call(
+        &u1,
+        Method::POST,
+        "/design/artifacts/GLB1/comments",
+        Some(json!({
+            "body": "Reply with pin_3d rejected",
+            "parent_id": tid,
+            "pin_3d": { "selection_kind": "point", "position": [0.0, 0.0, 0.0] }
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    // Filter by mesh_name.
+    let (st, list) = call(
+        &u1,
+        Method::GET,
+        "/design/artifacts/GLB1/comments?mesh_name=ChestPlate",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(list.as_array().unwrap().len(), 1);
+
+    let (st, empty) = call(
+        &u1,
+        Method::GET,
+        "/design/artifacts/GLB1/comments?mesh_name=OtherMesh",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(empty.as_array().unwrap().len(), 0);
+}
+
+/// Every MCP comment tool's self-call (`otto_mcp::outward::route_for`)
+/// against these routes: a 3D-pinned comment and a reply through
+/// `otto.design_comment`, the version and open-thread filters of
+/// `otto.design_comments`, and a resolve and reopen through
+/// `otto.design_resolve_comment`.
+#[tokio::test]
+async fn every_design_comment_mcp_tool_reaches_its_route() {
+    use otto_mcp::outward::{route_for, Method as M};
+    let ctx = ctx().await;
+    let (v1, v2) = seed(&ctx, "A", "w1", None).await;
+    let app = app_as(&ctx, "u1");
+    let tool = |name: &'static str, args: Value| {
+        let app = app.clone();
+        async move {
+            let c = route_for(name, &args).unwrap();
+            let method = match c.method {
+                M::Get => Method::GET,
+                M::Post => Method::POST,
+                M::Put => Method::PUT,
+                M::Patch => Method::PATCH,
+                M::Delete => Method::DELETE,
+            };
+            let path = c.path.strip_prefix("/api/v1").unwrap().to_string();
+            call(&app, method, &path, c.body).await
+        }
+    };
+
+    let pin =
+        json!({"selection_kind": "mesh", "mesh_name": "Helmet", "position": [0.5, 1.5, 0.25]});
+    let (st, c) = tool(
+        "design_comment",
+        json!({"artifact_id": "A", "body": "Dent here", "pin_3d": pin, "version_id": v1,
+                "workspace_id": "w1"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{c}");
+    assert_eq!(c["body"], "Dent here");
+    assert_eq!(c["version_id"], v1.as_str());
+    assert_eq!(c["pin_3d"]["mesh_name"], "Helmet");
+    assert_eq!(c["pin_3d"]["position"], json!([0.5, 1.5, 0.25]));
+    let cid = c["id"].as_str().unwrap().to_string();
+    let (st, reply) = tool(
+        "design_comment",
+        json!({"artifact_id": "A", "body": "Fixed", "parent_id": cid}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{reply}");
+    assert_eq!(reply["parent_id"], cid.as_str());
+    let (st, head) = tool(
+        "design_comment",
+        json!({"artifact_id": "A", "body": "Head note"}),
+    )
+    .await;
+    assert_eq!(
+        (st, head["version_id"].as_str()),
+        (StatusCode::CREATED, Some(v2.as_str()))
+    );
+
+    let (st, on1) = tool(
+        "design_comments",
+        json!({"artifact_id": "A", "version_id": v1}),
+    )
+    .await;
+    assert_eq!(
+        (st, on1.as_array().unwrap().len()),
+        (StatusCode::OK, 2),
+        "{on1}"
+    );
+    let (st, r) = tool(
+        "design_resolve_comment",
+        json!({"artifact_id": "A", "comment_id": cid}),
+    )
+    .await;
+    assert_eq!(
+        (st, r["resolved"].as_bool()),
+        (StatusCode::OK, Some(true)),
+        "{r}"
+    );
+    let (_, open) = tool(
+        "design_comments",
+        json!({"artifact_id": "A", "resolved": false}),
+    )
+    .await;
+    assert_eq!(
+        open.as_array().unwrap().len(),
+        1,
+        "only the head note: {open}"
+    );
+    let (st, r) = tool(
+        "design_resolve_comment",
+        json!({"artifact_id": "A", "comment_id": cid, "resolved": false}),
+    )
+    .await;
+    assert_eq!(
+        (st, r["resolved"].as_bool()),
+        (StatusCode::OK, Some(false)),
+        "{r}"
+    );
+}

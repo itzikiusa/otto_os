@@ -75,6 +75,8 @@ export function attachCollabEventStream(
       const ev = JSON.parse(raw) as Record<string, unknown>;
       if (ev.type === 'room_closed') {
         store.collabRoom = null;
+        store.peerCursors = [];
+        store.followingPeerId = null;
         store.collabError = 'The host ended this shared session.';
         ctl.abort();
         return;

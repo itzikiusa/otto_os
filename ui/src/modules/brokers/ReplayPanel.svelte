@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import { announce } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   // DLQ/Replay panel. Lets an operator re-publish selected messages from a
@@ -9,15 +10,18 @@
   import { toastError } from '../../lib/toastError';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmProd } from '../../lib/confirmProd';
-  import type { BrokerCluster } from '../../lib/api/types';
-  import type { ReplayResp, ReplaySelector } from './types';
+  import type { BrokerCluster, TopicSummary } from '../../lib/api/types';
+  import type { ReplayPrefill, ReplayResp, ReplaySelector } from './types';
+  import { buildReplayPrefill, replayPrefillKey, shouldApplyReplayPrefill } from './messagePrefill';
 
   interface Props {
     cluster: BrokerCluster;
+    prefill?: ReplayPrefill | null;
   }
-  let { cluster }: Props = $props();
+  let { cluster, prefill = null }: Props = $props();
 
   const guarded = $derived(cluster.read_only || cluster.environment === 'prod');
+  let topicNames = $state.raw<string[]>([]);
 
   let sourceTopic = $state('');
   let targetTopic = $state('');
@@ -35,12 +39,55 @@
 
   let running = $state(false);
   let result = $state<ReplayResp | null>(null);
+  let targetTopicEl = $state<HTMLInputElement>();
+  let loadedClusterId: string | null = null;
+  let lastAppliedPrefillKey: string | null = null;
+
+  // Reset form/result and refresh topic suggestions when switching clusters.
+  $effect(() => {
+    const cid = cluster.id;
+    let alive = true;
+    const switched = loadedClusterId !== null && loadedClusterId !== cid;
+    loadedClusterId = cid;
+    if (switched) {
+      sourceTopic = '';
+      targetTopic = '';
+      selectorType = 'latest';
+      result = null;
+      lastAppliedPrefillKey = null;
+    }
+    topicNames = [];
+    void api
+      .get<TopicSummary[]>(`/brokers/clusters/${cid}/topics`)
+      .then((list) => {
+        if (alive && cluster.id === cid) {
+          topicNames = list.filter((t) => !t.internal).map((t) => t.name).sort((a, b) => a.localeCompare(b));
+        }
+      })
+      .catch(() => {});
+    return () => { alive = false; };
+  });
+
+  // Apply an incoming "Replay to topic…" prefill once per distinct key so
+  // re-renders on the same cluster never overwrite the operator's edits.
+  $effect(() => {
+    if (!shouldApplyReplayPrefill(prefill, lastAppliedPrefillKey)) return;
+    const next = buildReplayPrefill(prefill!);
+    lastAppliedPrefillKey = replayPrefillKey(prefill);
+    sourceTopic = next.sourceTopic;
+    selectorType = next.selectorType;
+    partition = next.partition;
+    fromOffset = next.fromOffset;
+    toOffset = next.toOffset;
+    void tick().then(() => targetTopicEl?.focus());
+  });
 
   // Why Replay is disabled, in words (a disabled button must say why).
   function validInteger(value: number, min: number, max = Number.MAX_SAFE_INTEGER): boolean {
     return Number.isSafeInteger(value) && value >= min && value <= max;
   }
   const blockReason = $derived.by(() => {
+    if (cluster.read_only) return 'Read-only cluster — replaying messages is disabled';
     if (!sourceTopic.trim() || !targetTopic.trim()) return 'Enter a source and a target topic first';
     if (sourceTopic.trim() === targetTopic.trim()) return 'Source and target must be different topics';
     if (selectorType === 'latest' && !validInteger(count, 1, 5000)) return 'Count must be a whole number from 1 to 5000';
@@ -104,18 +151,20 @@
           : 'Produces the selected messages to the target topic.',
         danger: guarded || !!prior?.error,
       });
-      if (!ok) return;
+      if (!ok || cluster.id !== clusterId) return;
 
-      result = await api.post<ReplayResp>(`/brokers/clusters/${clusterId}/replay`, body);
-      if (result.error) {
-        toasts.warn('Replay stopped', result.error);
+      const resp = await api.post<ReplayResp>(`/brokers/clusters/${clusterId}/replay`, body);
+      if (cluster.id !== clusterId) return;
+      result = resp;
+      if (resp.error) {
+        toasts.warn('Replay stopped', resp.error);
       } else {
-        toasts.success('Replay complete', `${plural(result.count, 'message')} replayed to "${result.target_topic}"`);
+        toasts.success('Replay complete', `${plural(resp.count, 'message')} replayed to "${resp.target_topic}"`);
       }
     } catch (e) {
-      toastError('Couldn’t replay messages', e);
+      if (cluster.id === clusterId) toastError('Couldn’t replay messages', e);
     } finally {
-      running = false;
+      if (cluster.id === clusterId) running = false;
     }
   }
   // Spoken at the state edge through the shell's always-mounted announcer: a
@@ -130,14 +179,18 @@
     Select up to 5000 messages or offsets and 16 MiB per replay. An evidence record is saved for auditing.
   </p>
 
+  <datalist id="replay-topics-{cluster.id}">
+    {#each topicNames as t (t)}<option value={t}></option>{/each}
+  </datalist>
+
   <div class="form">
     <label>
       Source topic
-      <input dir="ltr" type="text" bind:value={sourceTopic} placeholder="e.g. orders-dlq" />
+      <input dir="ltr" type="text" list="replay-topics-{cluster.id}" bind:value={sourceTopic} placeholder="e.g. orders-dlq" />
     </label>
     <label>
       Target topic
-      <input dir="ltr" type="text" bind:value={targetTopic} placeholder="e.g. orders" />
+      <input dir="ltr" type="text" list="replay-topics-{cluster.id}" bind:this={targetTopicEl} bind:value={targetTopic} placeholder="e.g. orders" />
     </label>
 
     <label>

@@ -41,6 +41,7 @@ import {
   type Three,
 } from '../../../lib/design/scene3d/build';
 import { buildEnvironment, type BuiltEnvironment } from '../../../lib/design/scene3d/environment';
+import { SettingView } from '../../../lib/design/scene3d/settingView';
 import { parseScene } from '../../../lib/design/scene3d/validate';
 import { emptyScene, type Easing, type Scene3dDoc } from '../../../lib/design/scene3d/types';
 import { resolveColor } from '../../../lib/design/scene3d/tokens';
@@ -49,6 +50,7 @@ import { resolveMaterial, type ResolvedMaterial } from '../../../lib/design/scen
 import { findState, initialState, lerpPoses, stateTiming, statePoses, transitionProgress, type Pose } from '../../../lib/design/scene3d/states';
 import { loadBrandKit, modelScope, versionFor } from './sources';
 import { embedHasWork } from './loop';
+import { dropGameHelpers } from '../../../lib/design/scene3d/gameHelpers';
 
 export interface Scene3dEmbedOptions {
   /** `otto://design/<id>[@approved|@latest|@vN][#view:<camera>]`. */
@@ -209,6 +211,7 @@ function mountOnce(el: HTMLElement, opts: Scene3dEmbedOptions, lost: () => void)
   let camera: THREE_NS.PerspectiveCamera | null = null;
   let controls: { update(): boolean; dispose(): void; target: THREE_NS.Vector3; enabled: boolean } | null = null;
   let env: BuiltEnvironment | null = null;
+  let setting: SettingView | null = null;
   let content: THREE_NS.Group | null = null;
   let ro: ResizeObserver | null = null;
   let doc: Scene3dDoc | null = null;
@@ -367,6 +370,7 @@ function mountOnce(el: HTMLElement, opts: Scene3dEmbedOptions, lost: () => void)
               .then((url) => loader.loadAsync(url))
               .then((g) => {
                 if (destroyed) return;
+                dropGameHelpers(g.scene);
                 g.scene.traverse((n) => {
                   const m = n as THREE_NS.Mesh;
                   if (m.isMesh) m.castShadow = m.receiveShadow = true;
@@ -394,6 +398,8 @@ function mountOnce(el: HTMLElement, opts: Scene3dEmbedOptions, lost: () => void)
       scene.add(light);
       if (target) scene.add(target);
     }
+    setting = new SettingView(T, scene);
+    setting.apply(doc.environment, doc.lights, doc.camera);
 
     camera = new T.PerspectiveCamera(doc.camera.fov, 1, doc.camera.near ?? 0.1, doc.camera.far ?? 500);
     if (opts.drag !== false) {
@@ -494,6 +500,7 @@ function mountOnce(el: HTMLElement, opts: Scene3dEmbedOptions, lost: () => void)
         }
         tilting = Math.abs(tilt.tx - tilt.x) > 1e-4 || Math.abs(tilt.ty - tilt.y) > 1e-4;
       }
+      if (setting?.step(now)) needsFrame = true;
       // Damping keeps the orbit gliding after a drag; `update` says whether it moved.
       const damping = !!controls && !reduced && controls.update();
       if (needsFrame) {
@@ -504,7 +511,7 @@ function mountOnce(el: HTMLElement, opts: Scene3dEmbedOptions, lost: () => void)
           poster = null;
         }
       }
-      return embedHasWork({ needsFrame, tween: !!tween, autoRotate: !!opts.autoRotate, reduced, tilting, damping });
+      return embedHasWork({ needsFrame, tween: !!tween, autoRotate: !!opts.autoRotate, reduced, tilting, damping }) || !!setting?.animating;
     };
     loop = demandLoop(frame, { canRun: () => !destroyed && visible });
     kick();
@@ -520,6 +527,7 @@ function mountOnce(el: HTMLElement, opts: Scene3dEmbedOptions, lost: () => void)
     ro?.disconnect();
     controls?.dispose();
     env?.dispose();
+    setting?.dispose();
     if (content) disposeTree(content);
     if (renderer) releaseRenderer(renderer);
     poster?.remove();

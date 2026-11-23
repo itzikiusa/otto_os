@@ -18,8 +18,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use otto_state::{
-    DbPool, DiscoveredTool, McpAllowlistRepo, McpApprovalRepo, McpCallLogRepo, McpPolicyRepo,
-    McpRegistryRepo, McpServerDetail, McpTool, McpToolsRepo, NewCallLog, SettingsRepo,
+    DbPool, DiscoveredTool, McpAllowlistRepo, McpApprovalRepo, McpAutoApproveRepo, McpCallLogRepo,
+    McpPolicyRepo, McpRegistryRepo, McpServerDetail, McpTool, McpToolsRepo, NewCallLog,
+    SettingsRepo,
 };
 
 use crate::client::{CheckedCallError, McpClient, Transport};
@@ -30,8 +31,9 @@ mod preflight;
 pub mod run_mode;
 #[path = "service_stages.rs"]
 mod stages;
+use crate::auto_approve::{self, AutoApproveCall};
 use crate::governance;
-use crate::policy::{self, Effect, PolicyCtx};
+use crate::policy::{self, Effect, PolicyCtx, PolicyTraceStep};
 use crate::risk;
 
 const MAX_ROWS: usize = 500;
@@ -939,7 +941,8 @@ impl McpService {
     }
 
     /// Read-only preview of the decision the pipeline would make (no side effects,
-    /// no execution) — for the UI policy/evaluate view.
+    /// no execution) — for the UI policy/evaluate view. Returns the legacy fields
+    /// unchanged plus additive `final_decision` and the 5-stage `trace`.
     pub async fn evaluate_preview(
         &self,
         server_id: &str,
@@ -948,10 +951,71 @@ impl McpService {
     ) -> Result<Value> {
         let server = self.registry().get(&server_id.to_string()).await?;
         let tool = self.tools().get_by_name(&server.id, tool_name).await.ok();
-        let (risk_label, injection_risk, mutating) = match &tool {
-            Some(t) => (t.risk_label.clone(), t.injection_risk.clone(), t.mutating),
-            None => ("dangerous".into(), "high".into(), true),
+        let (risk_label, injection_risk, mutating, tool_enabled, tool_require_approval, changed) =
+            match &tool {
+                Some(t) => (
+                    t.risk_label.clone(),
+                    t.injection_risk.clone(),
+                    t.mutating,
+                    t.enabled,
+                    t.require_approval || t.changed_since_review,
+                    t.changed_since_review,
+                ),
+                None => ("dangerous".into(), "high".into(), true, false, true, false),
+            };
+
+        // Stage 1: allowlist (server enabled + workspace allowlist + tool registered/enabled)
+        let mut allowlist_deny_reason: Option<String> = None;
+        if !server.enabled {
+            allowlist_deny_reason = Some(format!("server '{}' is disabled", server.name));
+        } else if let Some(ws) = workspace_id {
+            match self
+                .allowlist()
+                .resolve(&ws.to_string(), &server.id, tool_name)
+                .await?
+            {
+                Some(mode) if mode == "deny" => {
+                    allowlist_deny_reason = Some("workspace allowlist denies this tool".into());
+                }
+                Some(_) => {}
+                None if server.default_tool_access == "deny" => {
+                    allowlist_deny_reason =
+                        Some("not in workspace allowlist (server default = deny)".into());
+                }
+                None => {}
+            }
+        }
+        if allowlist_deny_reason.is_none() {
+            if tool.is_none() {
+                allowlist_deny_reason = Some(format!(
+                    "tool '{tool_name}' is not registered on server '{}'",
+                    server.name
+                ));
+            } else if !tool_enabled {
+                allowlist_deny_reason = Some(format!(
+                    "tool '{tool_name}' is disabled (per-tool permission)"
+                ));
+            }
+        }
+        let allowlist_step = match &allowlist_deny_reason {
+            Some(reason) => PolicyTraceStep {
+                stage: "allowlist".into(),
+                outcome: "deny".into(),
+                detail: reason.clone(),
+                policy_id: None,
+            },
+            None => PolicyTraceStep {
+                stage: "allowlist".into(),
+                outcome: "pass".into(),
+                detail: format!(
+                    "server '{}' enabled; tool '{tool_name}' registered and allowed",
+                    server.name
+                ),
+                policy_id: None,
+            },
         };
+
+        // Stage 2: policy_rules (most-restrictive-wins)
         let rules = self
             .policies()
             .list_applicable(workspace_id.unwrap_or(""))
@@ -967,20 +1031,210 @@ impl McpService {
             caller_kind: "ui",
             workspace_id,
         };
-        let effect = policy::evaluate(&rules, &pctx);
-        let (decision, reason) = match effect {
-            Effect::Allow => ("allow", None),
-            Effect::Deny(r) => ("deny", Some(r)),
-            Effect::RequireApproval(r) => ("require_approval", Some(r)),
-            Effect::RequireDryRun(r) => ("require_dry_run", Some(r)),
+        let matched_rule = policy::matching_rule(&rules, &pctx);
+        let (effect, matched_policy_id) = match matched_rule {
+            Some(r) => (policy::effect_for_rule(r), Some(r.id.clone())),
+            None => (Effect::Allow, None),
         };
+        let (policy_decision, policy_reason) = match &effect {
+            Effect::Allow => ("allow", None),
+            Effect::Deny(r) => ("deny", Some(r.clone())),
+            Effect::RequireApproval(r) => ("require_approval", Some(r.clone())),
+            Effect::RequireDryRun(r) => ("require_dry_run", Some(r.clone())),
+        };
+        let policy_step = match matched_rule {
+            Some(r) => {
+                let (outcome, detail) = match &effect {
+                    Effect::Allow => (
+                        "pass",
+                        format!("matched allow policy '{}' ({})", r.name, r.id),
+                    ),
+                    Effect::Deny(reason) => (
+                        "deny",
+                        format!("matched policy '{}' (deny): {reason}", r.name),
+                    ),
+                    Effect::RequireApproval(reason) => (
+                        "require_approval",
+                        format!("matched policy '{}' (require_approval): {reason}", r.name),
+                    ),
+                    Effect::RequireDryRun(reason) => (
+                        "require_dry_run",
+                        format!("matched policy '{}' (require_dry_run): {reason}", r.name),
+                    ),
+                };
+                PolicyTraceStep {
+                    stage: "policy_rules".into(),
+                    outcome: outcome.into(),
+                    detail,
+                    policy_id: Some(r.id.clone()),
+                }
+            }
+            None => PolicyTraceStep {
+                stage: "policy_rules".into(),
+                outcome: "pass".into(),
+                detail: "no matching policy rule restricts this call".into(),
+                policy_id: None,
+            },
+        };
+
+        // Stage 3: tool_risk (risk label, injection risk, mutating, dangerous default, per-tool gate)
+        let require_approval_dangerous = self.require_approval_dangerous().await;
+        let dangerous_default = risk_label == "dangerous" && require_approval_dangerous;
+        let risk_requires_approval = tool_require_approval || dangerous_default;
+        let mut risk_notes: Vec<&str> = Vec::new();
+        if changed {
+            risk_notes.push("tool changed since last review");
+        } else if tool.as_ref().is_some_and(|t| t.require_approval) {
+            risk_notes.push("per-tool require_approval enabled");
+        }
+        if dangerous_default {
+            risk_notes.push("dangerous tool requires approval");
+        }
+        let risk_suffix = if risk_notes.is_empty() {
+            String::new()
+        } else {
+            format!("; {}", risk_notes.join(", "))
+        };
+        let risk_step = PolicyTraceStep {
+            stage: "tool_risk".into(),
+            outcome: if risk_requires_approval {
+                "require_approval"
+            } else {
+                "pass"
+            }
+            .into(),
+            detail: format!(
+                "risk={risk_label}, injection={injection_risk}, mutating={mutating}, \
+                 mcp_require_approval_dangerous={require_approval_dangerous}{risk_suffix}"
+            ),
+            policy_id: None,
+        };
+
+        // Stage 4: auto_approve (checked when not denied and approval would otherwise be required)
+        let denied_before_auto =
+            allowlist_deny_reason.is_some() || matches!(effect, Effect::Deny(_));
+        let policy_requires_approval = matches!(effect, Effect::RequireApproval(_));
+        let policy_requires_dry_run = matches!(effect, Effect::RequireDryRun(_));
+        let needs_approval = policy_requires_approval || risk_requires_approval;
+
+        let mut auto_approved_rule: Option<(String, String)> = None;
+        let auto_approve_step = if denied_before_auto {
+            PolicyTraceStep {
+                stage: "auto_approve".into(),
+                outcome: "skip".into(),
+                detail: "skipped: call already denied".into(),
+                policy_id: None,
+            }
+        } else if !needs_approval {
+            PolicyTraceStep {
+                stage: "auto_approve".into(),
+                outcome: "skip".into(),
+                detail: "skipped: approval not required".into(),
+                policy_id: None,
+            }
+        } else {
+            let aa_rules = McpAutoApproveRepo::new(self.pool.clone())
+                .list_applicable(workspace_id, None)
+                .await?;
+            let bare_tool = tool_name.strip_prefix("otto.").unwrap_or(tool_name);
+            let aa_call = AutoApproveCall {
+                tool: bare_tool,
+                category: crate::outward::tool_category(bare_tool),
+                irreversible: crate::outward::tool_is_irreversible(bare_tool),
+                workspace_id,
+                session_id: None,
+            };
+            match auto_approve::resolve(&aa_rules, &aa_call) {
+                Some(rule) => {
+                    auto_approved_rule = Some((rule.id.clone(), rule.name.clone()));
+                    PolicyTraceStep {
+                        stage: "auto_approve".into(),
+                        outcome: "allow".into(),
+                        detail: auto_approve::audit_reason(rule),
+                        policy_id: Some(rule.id.clone()),
+                    }
+                }
+                None => PolicyTraceStep {
+                    stage: "auto_approve".into(),
+                    outcome: "none".into(),
+                    detail: "no matching auto-approve rule; human approval required".into(),
+                    policy_id: None,
+                },
+            }
+        };
+
+        // Stage 5: final verdict
+        let (final_decision, final_detail, final_policy_id) =
+            if let Some(reason) = &allowlist_deny_reason {
+                ("deny", format!("denied at allowlist: {reason}"), None)
+            } else if let Effect::Deny(reason) = &effect {
+                (
+                    "deny",
+                    format!("denied by policy: {reason}"),
+                    matched_policy_id.clone(),
+                )
+            } else if policy_requires_dry_run {
+                let reason = policy_reason.as_deref().unwrap_or("policy require_dry_run");
+                (
+                    "require_dry_run",
+                    format!("dry-run preview required: {reason}"),
+                    matched_policy_id.clone(),
+                )
+            } else if needs_approval {
+                if let Some((aa_id, aa_name)) = &auto_approved_rule {
+                    (
+                        "allow",
+                        format!("allowed via auto-approve rule '{aa_name}'"),
+                        Some(aa_id.clone()),
+                    )
+                } else if policy_requires_approval {
+                    let reason = policy_reason
+                        .as_deref()
+                        .unwrap_or("policy require_approval");
+                    (
+                        "require_approval",
+                        format!("approval required by policy: {reason}"),
+                        matched_policy_id.clone(),
+                    )
+                } else {
+                    (
+                        "require_approval",
+                        format!("approval required by tool risk ({risk_label})"),
+                        None,
+                    )
+                }
+            } else {
+                (
+                    "allow",
+                    "allowed: passed all governance checks".to_string(),
+                    matched_policy_id.clone(),
+                )
+            };
+
+        let final_step = PolicyTraceStep {
+            stage: "final".into(),
+            outcome: final_decision.into(),
+            detail: final_detail,
+            policy_id: final_policy_id,
+        };
+
+        let trace = vec![
+            allowlist_step,
+            policy_step,
+            risk_step,
+            auto_approve_step,
+            final_step,
+        ];
+
         Ok(json!({
             "server": server.name,
             "tool": tool_name,
             "risk_label": risk_label,
             "injection_risk": injection_risk,
-            "policy_decision": decision,
-            "reason": reason,
+            "policy_decision": policy_decision,
+            "reason": policy_reason,
+            "final_decision": final_decision,
+            "trace": trace,
         }))
     }
 
@@ -1863,5 +2117,183 @@ done
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         assert_eq!(error.as_deref(), Some("call aborted before completion"));
+    }
+
+    #[tokio::test]
+    async fn evaluate_preview_emits_five_stage_trace_across_all_scenarios() {
+        let (svc, server, _) = setup(0).await;
+        svc.tools()
+            .upsert_discovered(
+                &server.id,
+                &[
+                    DiscoveredTool {
+                        name: "list_repos".into(),
+                        title: None,
+                        description: None,
+                        input_schema: json!({"type": "object"}),
+                        annotations: json!({}),
+                        risk_label: "read".into(),
+                        injection_risk: "low".into(),
+                        mutating: false,
+                        supports_dry_run: false,
+                    },
+                    DiscoveredTool {
+                        name: "delete_repo".into(),
+                        title: None,
+                        description: None,
+                        input_schema: json!({"type": "object"}),
+                        annotations: json!({}),
+                        risk_label: "dangerous".into(),
+                        injection_risk: "high".into(),
+                        mutating: true,
+                        supports_dry_run: false,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+
+        let parse_trace = |v: &Value| -> Vec<PolicyTraceStep> {
+            serde_json::from_value(v["trace"].clone()).expect("trace deserializes")
+        };
+
+        // 1. Clean allow (read tool, no policy, auto_approve skipped).
+        let allow_res = svc
+            .evaluate_preview(&server.id, "list_repos", Some("w"))
+            .await
+            .unwrap();
+        assert_eq!(allow_res["server"], "s");
+        assert_eq!(allow_res["tool"], "list_repos");
+        assert_eq!(allow_res["risk_label"], "read");
+        assert_eq!(allow_res["injection_risk"], "low");
+        assert_eq!(allow_res["policy_decision"], "allow");
+        assert!(allow_res["reason"].is_null());
+        assert_eq!(allow_res["final_decision"], "allow");
+        let trace = parse_trace(&allow_res);
+        assert_eq!(trace.len(), 5);
+        assert_eq!(trace[0].stage, "allowlist");
+        assert_eq!(trace[0].outcome, "pass");
+        assert_eq!(trace[1].stage, "policy_rules");
+        assert_eq!(trace[1].outcome, "pass");
+        assert_eq!(trace[1].policy_id, None);
+        assert_eq!(trace[2].stage, "tool_risk");
+        assert_eq!(trace[2].outcome, "pass");
+        assert_eq!(trace[3].stage, "auto_approve");
+        assert_eq!(trace[3].outcome, "skip");
+        assert_eq!(trace[4].stage, "final");
+        assert_eq!(trace[4].outcome, "allow");
+
+        // 2. Dangerous tool requires approval by default (`mcp_require_approval_dangerous` = true).
+        let danger_res = svc
+            .evaluate_preview(&server.id, "delete_repo", Some("w"))
+            .await
+            .unwrap();
+        assert_eq!(danger_res["risk_label"], "dangerous");
+        assert_eq!(danger_res["policy_decision"], "allow");
+        assert_eq!(danger_res["final_decision"], "require_approval");
+        let trace = parse_trace(&danger_res);
+        assert_eq!(trace.len(), 5);
+        assert_eq!(trace[0].outcome, "pass");
+        assert_eq!(trace[1].outcome, "pass");
+        assert_eq!(trace[2].stage, "tool_risk");
+        assert_eq!(trace[2].outcome, "require_approval");
+        assert!(trace[2].detail.contains("dangerous"));
+        assert_eq!(trace[3].stage, "auto_approve");
+        assert_eq!(trace[3].outcome, "none");
+        assert_eq!(trace[4].stage, "final");
+        assert_eq!(trace[4].outcome, "require_approval");
+
+        // 3. Auto-approve clears the dangerous tool's approval gate.
+        let aa_rule = McpAutoApproveRepo::new(svc.pool.clone())
+            .create(otto_state::NewAutoApproveRule {
+                name: "auto approve delete_repo in w".into(),
+                scope: "workspace".into(),
+                workspace_id: Some("w".into()),
+                session_id: None,
+                target_kind: "tool".into(),
+                target: "delete_repo".into(),
+                allow_irreversible: false,
+                enabled: true,
+                note: None,
+                created_by: "root".into(),
+            })
+            .await
+            .unwrap();
+        let aa_res = svc
+            .evaluate_preview(&server.id, "delete_repo", Some("w"))
+            .await
+            .unwrap();
+        assert_eq!(aa_res["final_decision"], "allow");
+        let trace = parse_trace(&aa_res);
+        assert_eq!(trace.len(), 5);
+        assert_eq!(trace[2].outcome, "require_approval");
+        assert_eq!(trace[3].stage, "auto_approve");
+        assert_eq!(trace[3].outcome, "allow");
+        assert_eq!(trace[3].policy_id.as_deref(), Some(aa_rule.id.as_str()));
+        assert_eq!(trace[4].stage, "final");
+        assert_eq!(trace[4].outcome, "allow");
+
+        // 4. Policy deny beats auto-approve and records `policy_id`.
+        let deny_policy = svc
+            .policies()
+            .create(otto_state::NewPolicy {
+                workspace_id: Some("w".into()),
+                name: "block deletes".into(),
+                enabled: true,
+                priority: 10,
+                match_json: json!({"tool_glob": "delete_*"}),
+                effect: "deny".into(),
+                reason: Some("deletes are prohibited".into()),
+                created_by: "root".into(),
+            })
+            .await
+            .unwrap();
+        let deny_res = svc
+            .evaluate_preview(&server.id, "delete_repo", Some("w"))
+            .await
+            .unwrap();
+        assert_eq!(deny_res["policy_decision"], "deny");
+        assert_eq!(deny_res["reason"], "deletes are prohibited");
+        assert_eq!(deny_res["final_decision"], "deny");
+        let trace = parse_trace(&deny_res);
+        assert_eq!(trace.len(), 5);
+        assert_eq!(trace[0].outcome, "pass");
+        assert_eq!(trace[1].stage, "policy_rules");
+        assert_eq!(trace[1].outcome, "deny");
+        assert_eq!(trace[1].policy_id.as_deref(), Some(deny_policy.id.as_str()));
+        assert!(trace[1].detail.contains("block deletes"));
+        assert_eq!(trace[3].stage, "auto_approve");
+        assert_eq!(trace[3].outcome, "skip");
+        assert_eq!(trace[4].stage, "final");
+        assert_eq!(trace[4].outcome, "deny");
+        assert_eq!(trace[4].policy_id.as_deref(), Some(deny_policy.id.as_str()));
+
+        // 5. Allowlist deny short-circuits auto-approve and sets final_decision = deny.
+        svc.allowlist()
+            .replace_for_ws(
+                &"w".into(),
+                &[otto_state::NewAllowlistEntry {
+                    server_id: server.id.clone(),
+                    tool_name: Some("list_repos".into()),
+                    mode: "deny".into(),
+                }],
+                &"root".into(),
+            )
+            .await
+            .unwrap();
+        let al_res = svc
+            .evaluate_preview(&server.id, "list_repos", Some("w"))
+            .await
+            .unwrap();
+        assert_eq!(al_res["policy_decision"], "allow");
+        assert_eq!(al_res["final_decision"], "deny");
+        let trace = parse_trace(&al_res);
+        assert_eq!(trace.len(), 5);
+        assert_eq!(trace[0].stage, "allowlist");
+        assert_eq!(trace[0].outcome, "deny");
+        assert_eq!(trace[3].stage, "auto_approve");
+        assert_eq!(trace[3].outcome, "skip");
+        assert_eq!(trace[4].stage, "final");
+        assert_eq!(trace[4].outcome, "deny");
     }
 }

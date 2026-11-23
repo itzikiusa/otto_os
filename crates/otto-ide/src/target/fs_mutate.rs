@@ -16,6 +16,7 @@ use super::fs_ops::{
 };
 use super::{
     map_io_err, remote_parent, resolve_local_prospective_in_roots, resolve_remote_in_roots,
+    ResolvedTarget, TargetManager,
 };
 
 /// Per-call Local History capture policy forwarded from IDE preferences.
@@ -345,7 +346,68 @@ async fn ensure_remote_path_absent(sftp: &SftpSession, remote_path: &str) -> Res
     Ok(())
 }
 
+trait RemoteMutateOps {
+    async fn confine_write(&self, matched_root: &str, remote_path: &str) -> Result<String>;
+    async fn ensure_absent(&self, remote_path: &str) -> Result<()>;
+    async fn mkdir(&self, remote_path: &str) -> Result<()>;
+    async fn create_empty_file(&self, remote_path: &str) -> Result<()>;
+    async fn rename(&self, src: &str, dst: &str) -> Result<()>;
+    async fn delete(&self, remote_path: &str) -> Result<()>;
+    async fn duplicate(&self, src: &str, dst: &str) -> Result<()>;
+}
+
+struct SshRemoteMutateOps<'a> {
+    mgr: &'a TargetManager,
+    target: &'a ResolvedTarget,
+    sftp: &'a SftpSession,
+}
+
+impl RemoteMutateOps for SshRemoteMutateOps<'_> {
+    async fn confine_write(&self, matched_root: &str, remote_path: &str) -> Result<String> {
+        self.mgr
+            .confine_remote_write(self.target, matched_root, remote_path)
+            .await
+    }
+
+    async fn ensure_absent(&self, remote_path: &str) -> Result<()> {
+        ensure_remote_path_absent(self.sftp, remote_path).await
+    }
+
+    async fn mkdir(&self, remote_path: &str) -> Result<()> {
+        self.sftp.mkdir(remote_path).await
+    }
+
+    async fn create_empty_file(&self, remote_path: &str) -> Result<()> {
+        let tmp = tempfile::NamedTempFile::new()
+            .map_err(|e| Error::Internal(format!("temp file: {e}")))?;
+        let tmp_str = tmp.path().to_string_lossy().into_owned();
+        self.sftp.upload(&tmp_str, remote_path).await
+    }
+
+    async fn rename(&self, src: &str, dst: &str) -> Result<()> {
+        self.sftp.rename(src, dst).await
+    }
+
+    async fn delete(&self, remote_path: &str) -> Result<()> {
+        if self.sftp.remove(remote_path).await.is_err() {
+            self.sftp.rmdir(remote_path).await?;
+        }
+        Ok(())
+    }
+
+    async fn duplicate(&self, src: &str, dst: &str) -> Result<()> {
+        let tmp = tempfile::NamedTempFile::new()
+            .map_err(|e| Error::Internal(format!("temp duplicate file: {e}")))?;
+        let tmp_str = tmp.path().to_string_lossy().into_owned();
+        self.sftp.download(src, &tmp_str).await?;
+        self.sftp.upload(&tmp_str, dst).await
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn mutate_remote_fs(
+    mgr: &TargetManager,
+    target: &ResolvedTarget,
     sftp: &SftpSession,
     root: &str,
     additional_roots: &[String],
@@ -353,21 +415,32 @@ pub(super) async fn mutate_remote_fs(
     path: &str,
     dest_path: Option<&str>,
 ) -> Result<IdeFsMutateResp> {
-    let (remote, _) = resolve_remote_in_roots(root, additional_roots, path)?;
+    let ops = SshRemoteMutateOps { mgr, target, sftp };
+    mutate_remote_fs_with(&ops, root, additional_roots, op, path, dest_path).await
+}
+
+async fn mutate_remote_fs_with<O: RemoteMutateOps>(
+    ops: &O,
+    root: &str,
+    additional_roots: &[String],
+    op: IdeFsMutateOp,
+    path: &str,
+    dest_path: Option<&str>,
+) -> Result<IdeFsMutateResp> {
+    let (remote, matched_root) = resolve_remote_in_roots(root, additional_roots, path)?;
     match op {
         IdeFsMutateOp::Mkdir => {
-            sftp.mkdir(&remote).await?;
+            ops.confine_write(&matched_root, &remote).await?;
+            ops.mkdir(&remote).await?;
             Ok(IdeFsMutateResp {
                 ok: true,
                 path: remote,
             })
         }
         IdeFsMutateOp::CreateFile => {
-            ensure_remote_path_absent(sftp, &remote).await?;
-            let tmp = tempfile::NamedTempFile::new()
-                .map_err(|e| Error::Internal(format!("temp file: {e}")))?;
-            let tmp_str = tmp.path().to_string_lossy().into_owned();
-            sftp.upload(&tmp_str, &remote).await?;
+            ops.confine_write(&matched_root, &remote).await?;
+            ops.ensure_absent(&remote).await?;
+            ops.create_empty_file(&remote).await?;
             Ok(IdeFsMutateResp {
                 ok: true,
                 path: remote,
@@ -380,11 +453,13 @@ pub(super) async fn mutate_remote_fs(
             let dst_raw = dest_path
                 .filter(|s| !s.trim().is_empty())
                 .ok_or_else(|| Error::Invalid("dest_path is required for rename".into()))?;
-            let (dst, _) = resolve_remote_in_roots(root, additional_roots, dst_raw)?;
+            let (dst, dst_root) = resolve_remote_in_roots(root, additional_roots, dst_raw)?;
+            ops.confine_write(&matched_root, &remote).await?;
+            ops.confine_write(&dst_root, &dst).await?;
             if dst != remote {
-                ensure_remote_path_absent(sftp, &dst).await?;
+                ops.ensure_absent(&dst).await?;
             }
-            sftp.rename(&remote, &dst).await?;
+            ops.rename(&remote, &dst).await?;
             Ok(IdeFsMutateResp {
                 ok: true,
                 path: dst,
@@ -394,9 +469,8 @@ pub(super) async fn mutate_remote_fs(
             if is_protected_remote_root(&remote, root, additional_roots) {
                 return Err(Error::Forbidden("cannot delete workspace root".into()));
             }
-            if sftp.remove(&remote).await.is_err() {
-                sftp.rmdir(&remote).await?;
-            }
+            ops.confine_write(&matched_root, &remote).await?;
+            ops.delete(&remote).await?;
             Ok(IdeFsMutateResp {
                 ok: true,
                 path: remote,
@@ -406,17 +480,253 @@ pub(super) async fn mutate_remote_fs(
             let dst_raw = dest_path
                 .filter(|s| !s.trim().is_empty())
                 .ok_or_else(|| Error::Invalid("dest_path is required for duplicate".into()))?;
-            let (dst, _) = resolve_remote_in_roots(root, additional_roots, dst_raw)?;
-            ensure_remote_path_absent(sftp, &dst).await?;
-            let tmp = tempfile::NamedTempFile::new()
-                .map_err(|e| Error::Internal(format!("temp duplicate file: {e}")))?;
-            let tmp_str = tmp.path().to_string_lossy().into_owned();
-            sftp.download(&remote, &tmp_str).await?;
-            sftp.upload(&tmp_str, &dst).await?;
+            let (dst, dst_root) = resolve_remote_in_roots(root, additional_roots, dst_raw)?;
+            ops.confine_write(&matched_root, &remote).await?;
+            ops.confine_write(&dst_root, &dst).await?;
+            ops.ensure_absent(&dst).await?;
+            ops.duplicate(&remote, &dst).await?;
             Ok(IdeFsMutateResp {
                 ok: true,
                 path: dst,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    struct FakeRemoteOps {
+        deny_paths: Vec<String>,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl FakeRemoteOps {
+        fn new(deny_paths: &[&str]) -> Self {
+            Self {
+                deny_paths: deny_paths.iter().map(|s| (*s).to_string()).collect(),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl RemoteMutateOps for FakeRemoteOps {
+        async fn confine_write(&self, matched_root: &str, remote_path: &str) -> Result<String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("confine:{matched_root}:{remote_path}"));
+            if self.deny_paths.iter().any(|p| p == remote_path) {
+                return Err(Error::Forbidden(format!(
+                    "'{remote_path}' escapes workspace root '{matched_root}'"
+                )));
+            }
+            Ok(remote_path.to_string())
+        }
+
+        async fn ensure_absent(&self, remote_path: &str) -> Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("absent:{remote_path}"));
+            Ok(())
+        }
+
+        async fn mkdir(&self, remote_path: &str) -> Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("mkdir:{remote_path}"));
+            Ok(())
+        }
+
+        async fn create_empty_file(&self, remote_path: &str) -> Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("create:{remote_path}"));
+            Ok(())
+        }
+
+        async fn rename(&self, src: &str, dst: &str) -> Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("rename:{src}->{dst}"));
+            Ok(())
+        }
+
+        async fn delete(&self, remote_path: &str) -> Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("delete:{remote_path}"));
+            Ok(())
+        }
+
+        async fn duplicate(&self, src: &str, dst: &str) -> Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("duplicate:{src}->{dst}"));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn mutate_remote_fs_enforces_confine_write_on_all_ops_before_sftp() {
+        let root = "/srv/repo";
+        let extra = vec!["/srv/extra".to_string()];
+
+        // 1. Mkdir denied when symlink escapes root
+        let ops = FakeRemoteOps::new(&["/srv/repo/escape/dir"]);
+        let err =
+            mutate_remote_fs_with(&ops, root, &extra, IdeFsMutateOp::Mkdir, "escape/dir", None)
+                .await
+                .unwrap_err();
+        assert!(matches!(err, Error::Forbidden(_)));
+        assert_eq!(ops.calls(), vec!["confine:/srv/repo:/srv/repo/escape/dir"]);
+
+        // 2. CreateFile denied before absent-check or upload
+        let ops = FakeRemoteOps::new(&["/srv/repo/escape/file.txt"]);
+        let err = mutate_remote_fs_with(
+            &ops,
+            root,
+            &extra,
+            IdeFsMutateOp::CreateFile,
+            "escape/file.txt",
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Forbidden(_)));
+        assert_eq!(
+            ops.calls(),
+            vec!["confine:/srv/repo:/srv/repo/escape/file.txt"]
+        );
+
+        // 3. Rename denied on source escape AND denied on destination escape
+        let ops = FakeRemoteOps::new(&["/srv/repo/escape/src.txt"]);
+        let err = mutate_remote_fs_with(
+            &ops,
+            root,
+            &extra,
+            IdeFsMutateOp::Rename,
+            "escape/src.txt",
+            Some("ok.txt"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Forbidden(_)));
+        assert_eq!(
+            ops.calls(),
+            vec!["confine:/srv/repo:/srv/repo/escape/src.txt"]
+        );
+
+        let ops = FakeRemoteOps::new(&["/srv/extra/escape/dst.txt"]);
+        let err = mutate_remote_fs_with(
+            &ops,
+            root,
+            &extra,
+            IdeFsMutateOp::Rename,
+            "ok.txt",
+            Some("/srv/extra/escape/dst.txt"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Forbidden(_)));
+        assert_eq!(
+            ops.calls(),
+            vec![
+                "confine:/srv/repo:/srv/repo/ok.txt",
+                "confine:/srv/extra:/srv/extra/escape/dst.txt",
+            ]
+        );
+
+        // 4. Delete denied before remove/rmdir
+        let ops = FakeRemoteOps::new(&["/srv/repo/escape/victim"]);
+        let err = mutate_remote_fs_with(
+            &ops,
+            root,
+            &extra,
+            IdeFsMutateOp::Delete,
+            "escape/victim",
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Forbidden(_)));
+        assert_eq!(
+            ops.calls(),
+            vec!["confine:/srv/repo:/srv/repo/escape/victim"]
+        );
+
+        // 5. Duplicate denied on source escape AND on destination escape
+        let ops = FakeRemoteOps::new(&["/srv/repo/escape/secret"]);
+        let err = mutate_remote_fs_with(
+            &ops,
+            root,
+            &extra,
+            IdeFsMutateOp::Duplicate,
+            "escape/secret",
+            Some("copy.txt"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Forbidden(_)));
+        assert_eq!(
+            ops.calls(),
+            vec!["confine:/srv/repo:/srv/repo/escape/secret"]
+        );
+
+        let ops = FakeRemoteOps::new(&["/srv/repo/escape/copy.txt"]);
+        let err = mutate_remote_fs_with(
+            &ops,
+            root,
+            &extra,
+            IdeFsMutateOp::Duplicate,
+            "good.txt",
+            Some("escape/copy.txt"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Forbidden(_)));
+        assert_eq!(
+            ops.calls(),
+            vec![
+                "confine:/srv/repo:/srv/repo/good.txt",
+                "confine:/srv/repo:/srv/repo/escape/copy.txt",
+            ]
+        );
+
+        // 6. Confined Rename succeeds in exact order: confine src -> confine dst -> absent -> rename
+        let ops = FakeRemoteOps::new(&[]);
+        let resp = mutate_remote_fs_with(
+            &ops,
+            root,
+            &extra,
+            IdeFsMutateOp::Rename,
+            "a.txt",
+            Some("/srv/extra/b.txt"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.path, "/srv/extra/b.txt");
+        assert_eq!(
+            ops.calls(),
+            vec![
+                "confine:/srv/repo:/srv/repo/a.txt",
+                "confine:/srv/extra:/srv/extra/b.txt",
+                "absent:/srv/extra/b.txt",
+                "rename:/srv/repo/a.txt->/srv/extra/b.txt",
+            ]
+        );
     }
 }

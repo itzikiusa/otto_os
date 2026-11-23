@@ -539,6 +539,47 @@ async fn restore_revision<C: VaultCtx>(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// True only for passive media types that browsers can render inline without
+/// active script execution (safe raster images, audio/video streams, PDF).
+/// Active or sniffable document/script formats (`text/html`, `image/svg+xml`,
+/// `application/xml`, `text/javascript`, etc.) return `false` so callers add a
+/// strict sandbox CSP and `Content-Disposition: attachment`.
+pub(crate) fn is_passive_mime(mime: &str) -> bool {
+    let essence = mime
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    match essence.as_str() {
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif" | "image/bmp"
+        | "image/x-icon" | "application/pdf" => true,
+        _ => {
+            (essence.starts_with("audio/") && essence.len() > "audio/".len())
+                || (essence.starts_with("video/") && essence.len() > "video/".len())
+        }
+    }
+}
+
+fn build_asset_response(mime_essence: &str, bytes: Vec<u8>) -> Response {
+    let mut builder = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, mime_essence)
+        .header(header::CACHE_CONTROL, "private, max-age=60")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+    if !is_passive_mime(mime_essence) {
+        builder = builder
+            .header(
+                header::CONTENT_SECURITY_POLICY,
+                "sandbox; default-src 'none'",
+            )
+            .header(header::CONTENT_DISPOSITION, "attachment");
+    }
+    builder
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
 /// Stream an attachment (image/pdf/…) with a best-effort content type.
 async fn asset<C: VaultCtx>(
     State(c): State<C>,
@@ -547,19 +588,9 @@ async fn asset<C: VaultCtx>(
     Query(q): Query<PathQ>,
 ) -> ApiResult<Response> {
     require(&c, &user, &ws, WorkspaceRole::Viewer).await?;
-    let abs = c.vault().asset_path(&ws, id, &q.path).await?;
-    let bytes = tokio::fs::read(&abs)
-        .await
-        .map_err(|_| ApiErr(Error::NotFound(format!("asset {}", q.path))))?;
+    let (abs, bytes) = c.vault().read_asset(&ws, id, &q.path).await?;
     let mime = mime_guess::from_path(&abs).first_or_octet_stream();
-    Ok((
-        [
-            (header::CONTENT_TYPE, mime.essence_str().to_string()),
-            (header::CACHE_CONTROL, "private, max-age=60".to_string()),
-        ],
-        Body::from(bytes),
-    )
-        .into_response())
+    Ok(build_asset_response(mime.essence_str(), bytes))
 }
 
 /// Build the vault router. Paths are relative to the `/api/v1` mount point.
@@ -649,4 +680,79 @@ pub fn router<C: VaultCtx>() -> Router<C> {
             post(okf_indexes::<C>),
         )
         .route("/workspaces/{ws}/vault/vaults/{id}/asset", get(asset::<C>))
+}
+
+#[cfg(test)]
+mod asset_header_tests {
+    use super::*;
+
+    #[test]
+    fn passive_mime_allowlist_blocks_active_formats() {
+        for ok in [
+            "image/png",
+            "image/jpeg",
+            "image/gif",
+            "image/webp",
+            "image/avif",
+            "image/bmp",
+            "image/x-icon",
+            "application/pdf",
+            "audio/mpeg",
+            "video/mp4",
+            "IMAGE/PNG; charset=binary",
+        ] {
+            assert!(is_passive_mime(ok), "expected passive: {ok}");
+        }
+        for active in [
+            "text/html",
+            "text/html; charset=utf-8",
+            "image/svg+xml",
+            "application/xml",
+            "text/xml",
+            "text/javascript",
+            "application/javascript",
+            "application/xhtml+xml",
+            "application/octet-stream",
+            "audio/",
+            "video/",
+            "",
+        ] {
+            assert!(!is_passive_mime(active), "expected non-passive: {active}");
+        }
+    }
+
+    #[test]
+    fn build_asset_response_sets_nosniff_and_sandboxes_non_passive() {
+        let png = build_asset_response("image/png", vec![1, 2, 3]);
+        assert_eq!(
+            png.headers().get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+            "nosniff"
+        );
+        assert!(png.headers().get(header::CONTENT_SECURITY_POLICY).is_none());
+        assert!(png.headers().get(header::CONTENT_DISPOSITION).is_none());
+
+        for mime in [
+            "text/html",
+            "image/svg+xml",
+            "application/xml",
+            "text/javascript",
+        ] {
+            let resp = build_asset_response(mime, b"<script>alert(1)</script>".to_vec());
+            assert_eq!(
+                resp.headers().get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+                "nosniff",
+                "{mime}"
+            );
+            assert_eq!(
+                resp.headers().get(header::CONTENT_SECURITY_POLICY).unwrap(),
+                "sandbox; default-src 'none'",
+                "{mime}"
+            );
+            assert_eq!(
+                resp.headers().get(header::CONTENT_DISPOSITION).unwrap(),
+                "attachment",
+                "{mime}"
+            );
+        }
+    }
 }

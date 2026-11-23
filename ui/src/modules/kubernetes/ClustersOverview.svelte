@@ -61,7 +61,7 @@
   async function remove(c: K8sCluster): Promise<void> {
     const ok = await confirmer.ask(
       `Remove cluster “${c.name}”? Otto only forgets the row${c.source === 'kubeconfig' ? ' (your kubeconfig file is untouched)' : ' and removes the kubeconfig Otto wrote for it'}; nothing in the cluster changes.`,
-      { title: 'Remove cluster', confirmLabel: 'Remove' },
+      { title: 'Remove cluster', confirmLabel: 'Remove', danger: true },
     );
     if (!ok) return;
     try {

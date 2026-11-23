@@ -16,19 +16,23 @@
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { confirmProd } from '../../lib/confirmProd';
+  import { TableWindow } from '../../lib/tableWindow.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
   import Tabs from '../../lib/components/Tabs.svelte';
   import JsonTree from '../../lib/components/JsonTree.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
   import MetricsPanel from './MetricsPanel.svelte';
   import RegionPicker from './RegionPicker.svelte';
   import { prettyJson, awsErrorText } from './util';
   import { awsLoadText } from './loadText';
+  import { buildSqsMessagePacket } from './agentContext';
   import type { AwsAccount, SqsMessage, SqsQueue } from '../../lib/api/types';
 
   interface Props {
@@ -170,6 +174,7 @@
   let peeking = $state(false);
   let peekVersion = 0;
   let openMsg = $state<string | null>(null);
+  let agentPacket = $state<unknown>(null);
 
   async function peek(): Promise<void> {
     if (!selectedUrl) return;
@@ -201,6 +206,7 @@
       verb: 'Delete message',
       where: queueWhere(queue.name),
       what: `Message ${m.message_id} — this cannot be undone.`,
+      danger: true,
     });
     if (!ok) return;
     try {
@@ -280,24 +286,18 @@
 
   // ── purge / redrive ──
   async function purge(q: SqsQueue): Promise<void> {
-    // Always typed (purge empties the whole queue), prod or not.
+    const accountId = account.id, region = rq;
     const ok = await confirmProd({
-      env: account.environment,
-      verb: 'Purge',
-      title: 'Purge queue',
-      where: queueWhere(q.name),
-      what: 'Deletes ALL messages in the queue. This cannot be undone.',
-      typed: q.name,
-      danger: true,
+      env: account.environment, verb: 'Purge', title: 'Purge queue',
+      where: queueWhere(q.name), what: 'Deletes ALL messages in the queue. This cannot be undone.',
+      typed: q.name, danger: true,
     });
     if (!ok) return;
     try {
-      await awsApi.sqsPurge(account.id, q.url, q.name, rq || undefined);
+      await awsApi.sqsPurge(accountId, q.url, q.name, region || undefined);
       toasts.success('Purge started', 'SQS empties the queue over the next ~60 s');
-      void aws.loadSqsAttrs(account.id, q.url, rq);
-    } catch (e) {
-      toastError('Couldn’t purge', e);
-    }
+      void aws.loadSqsAttrs(accountId, q.url, region);
+    } catch (e) { toastError('Couldn’t purge', e); }
   }
 
   let redriveDest = $state('');
@@ -305,22 +305,17 @@
   async function redrive(): Promise<void> {
     const src = attrs?.attributes.QueueArn;
     if (!src || !selected) return;
+    const accountId = account.id, region = rq, queue = selected, dest = redriveDest.trim();
     const ok = await confirmProd({
-      env: account.environment,
-      verb: 'Start redrive',
-      where: queueWhere(selected.name),
-      what: `Move every message back to ${redriveDest.trim() || 'its original source queue(s)'}.`,
+      env: account.environment, verb: 'Start redrive',
+      where: queueWhere(queue.name), what: `Move every message back to ${dest || 'its original source queue(s)'}.`,
     });
     if (!ok) return;
     redriving = true;
     try {
-      const r = await awsApi.sqsRedrive(account.id, { source_arn: src, destination_arn: redriveDest.trim() || undefined, confirm_name: src.split(':').pop() }, rq || undefined);
+      const r = await awsApi.sqsRedrive(accountId, { source_arn: src, destination_arn: dest || undefined, confirm_name: src.split(':').pop() }, region || undefined);
       toasts.success('Redrive started', r.task_handle);
-    } catch (e) {
-      toastError('Couldn’t redrive', e);
-    } finally {
-      redriving = false;
-    }
+    } catch (e) { toastError('Couldn’t redrive', e); } finally { redriving = false; }
   }
 
   async function copy(text: string, what: string): Promise<void> {
@@ -351,6 +346,11 @@
       .map(([url]) => queues?.find((q) => q.url === url)?.name ?? url);
   });
 
+  const tw = new TableWindow();
+  let listEl = $state<HTMLDivElement | null>(null);
+  const win = $derived(tw.range(shown.length)), rowsWindow = $derived(shown.slice(win.start, win.end));
+  $effect(() => { void rowsWindow; tw.measure(listEl); });
+  $effect(() => { void region; void filter; tw.reset(listEl); });
   const showList = $derived(!viewport.isMobile || !selected);
   const showDetail = $derived(!viewport.isMobile || !!selected);
   const loginNeeded = $derived(isLoginRequired(new Error(error)));
@@ -371,7 +371,7 @@
 
 <div class="split" class:mobile={viewport.isMobile}>
   {#if showList}
-    <div class="list">
+    <div class="list" class:windowed={tw.active(shown.length)} bind:this={listEl} bind:clientHeight={tw.viewH} onscroll={tw.onscroll}>
       {#if loading && !queues}
         <div class="pad"><Skeleton rows={8} label="queues" /></div>
       {:else if error}
@@ -382,7 +382,8 @@
         <table class="tbl">
           <thead><tr><th>Queue</th><th class="num" title="ApproximateNumberOfMessages">Avail</th><th class="num hide-sm" title="NotVisible">In-flight</th><th class="num hide-sm" title="Delayed">Delayed</th></tr></thead>
           <tbody>
-            {#each shown as q (q.url)}
+            {#if win.top}<tr class="tw-spacer" aria-hidden="true"><td colspan="4" style="height:{win.top}px"></td></tr>{/if}
+            {#each rowsWindow as q (q.url)}
               {@const a = aws.sqsAttrs[q.url]}
               <tr use:rowMenu
                 class="trow"
@@ -403,6 +404,7 @@
                 <td class="num mono hide-sm">{a ? a.approx_delayed : '…'}</td>
               </tr>
             {/each}
+            {#if win.bottom}<tr class="tw-spacer" aria-hidden="true"><td colspan="4" style="height:{win.bottom}px"></td></tr>{/if}
           </tbody>
         </table>
       {/if}
@@ -457,6 +459,9 @@
                       </button>
                       <span class="dim mono">{m.attributes.SentTimestamp ? new Date(Number(m.attributes.SentTimestamp)).toLocaleString() : ''}</span>
                       {#if m.attributes.ApproximateReceiveCount}<Badge title="Approximate receive count" label={`Received ${m.attributes.ApproximateReceiveCount}×`} />{/if}
+                      {#if ws.current}
+                        <button class="icon-btn" onclick={() => selected && (agentPacket = buildSqsMessagePacket({ account: account.name, environment: account.environment, region: rq || account.region, queueName: selected.name, queueUrl: selected.url, message: m }))} title="Send message to a running agent (scrubbed preview)" aria-label="Send message to agent"><Icon name="send" size={12} /></button>
+                      {/if}
                       <button class="icon-btn" onclick={() => void copy(m.body, 'body')} title="Copy body" aria-label="Copy body"><Icon name="copy" size={12} /></button>
                       {#if canDelete}
                         <button class="icon-btn msg-delete" onclick={() => void deleteMessage(m)} title="Delete message" aria-label="Delete message"><Icon name="trash" size={12} /></button>
@@ -539,6 +544,9 @@
     </div>
   {/if}
 </div>
+{#if agentPacket !== null && ws.current}
+  <ContextPacketDialog workspaceId={ws.current.id} sessionId={ws.targetAgentId} kind="broker" payload={agentPacket} onclose={() => (agentPacket = null)} />
+{/if}
 
 <style>
   .split {
@@ -750,9 +758,7 @@
     font-size: var(--fs-s);
     color: var(--text-dim);
   }
-  .field em {
-    font-style: normal;
-  }
+  .field em { font-style: normal; }
   .field input,
   .field textarea {
     border: 1px solid var(--border);
@@ -762,37 +768,13 @@
     font: inherit;
     font-size: var(--fs-m);
     padding: 6px 8px;
-  }
-  .field input,
-  .field textarea {
     min-width: 0;
   }
-  .field textarea {
-    font-family: var(--font-mono);
-    resize: vertical;
-  }
-  .row3 {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-    gap: 10px;
-  }
-  .kv {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
-    gap: 6px;
-  }
-  .self {
-    align-self: flex-start;
-  }
-  code {
-    font-family: var(--font-mono);
-  }
-  .msg-delete {
-    color: var(--danger);
-  }
-  @media (max-width: 640px) {
-    .hide-sm {
-      display: none;
-    }
-  }
+  .field textarea { font-family: var(--font-mono); resize: vertical; }
+  .row3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+  .kv { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 6px; }
+  .self { align-self: flex-start; }
+  code { font-family: var(--font-mono); }
+  .msg-delete { color: var(--danger); }
+  @media (max-width: 640px) { .hide-sm { display: none; } }
 </style>

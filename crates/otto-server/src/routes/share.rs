@@ -123,30 +123,23 @@ impl OtpMailer for GmailMailer {
     }
 }
 
-/// Derive the base origin (`scheme://host`) from the request's `Host` header so
-/// the returned `url` points back to the caller's actual domain. Falls back to
-/// an empty string (yielding a relative URL `/#/s/…`) when the header is absent
-/// or malformed — this is defensive and will be fixed automatically once the
-/// SPA constructs the link client-side.
-fn origin_from_headers(headers: &HeaderMap) -> String {
-    let host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default();
+/// Derive the base origin (`scheme://host`) from the request's `Host` header
+/// (or HTTP/2 `:authority`) so the returned `url` points back to the caller's
+/// actual domain. Falls back to an empty string (yielding a relative URL
+/// `/#/s/…`) when the host is absent or malformed.
+fn origin_from_request(headers: &HeaderMap, uri: &axum::http::Uri) -> String {
+    let host = match crate::host_guard::request_host_raw(headers, uri) {
+        Ok(Some(h)) if !h.is_empty() => h,
+        _ => return String::new(),
+    };
 
-    if host.is_empty() {
-        return String::new();
-    }
-
-    // If the host already looks like a full URL (e.g. a forwarded `X-Forwarded-Proto`
-    // is unavailable here) default to https as the safe assumption for a publicly-
-    // exposed tunnel. For loopback (local dev / testing) use http.
-    let scheme =
-        if host.starts_with("127.") || host.starts_with("localhost") || host.starts_with("[::1]") {
-            "http"
-        } else {
-            "https"
-        };
+    // Default to https as the safe assumption for a publicly-exposed tunnel;
+    // for loopback (local dev / testing) use http.
+    let scheme = if crate::host_guard::is_loopback_name(&crate::host_guard::host_of(host)) {
+        "http"
+    } else {
+        "https"
+    };
 
     format!("{scheme}://{host}")
 }
@@ -283,6 +276,7 @@ pub async fn mint_share(
     auth: CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     headers: HeaderMap,
+    uri: axum::http::Uri,
     Json(req): Json<CreateShareReq>,
 ) -> ApiResult<Json<CreateShareResp>> {
     // Guard 1: block impersonated requests (real != effective user).
@@ -343,7 +337,7 @@ pub async fn mint_share(
         .get("share_base_url")
         .await?
         .and_then(|v| v.as_str().map(str::to_string));
-    let host_origin = origin_from_headers(&headers);
+    let host_origin = origin_from_request(&headers, &uri);
     let lan_origin = match crate::transport::network_listener_port() {
         // The caller already reached us remotely — no need to probe.
         Some(_) if origin_is_remote(&host_origin) => None,

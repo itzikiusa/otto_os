@@ -9,8 +9,8 @@ use otto_state::SkillEvalsRepo;
 use super::BootPhases;
 use crate::state::ServerCtx;
 
-/// Restore sessions, fail orphaned reviews / skill evals, settle interrupted
-/// API runs and recover workflow runs. Marks the `restore` boot phase.
+/// Restore sessions, fail orphaned reviews / skill evals / 3D jobs, settle
+/// interrupted API runs and recover workflow runs. Marks the `restore` boot phase.
 pub async fn recover_before_serve(ctx: &ServerCtx, boot: &mut BootPhases) -> Result<(), String> {
     // Adopt detached runtime-holder processes before `restore_sessions` sweeps
     // per-session `OTTO_MCP_TOKEN` credentials so live runtime sessions keep
@@ -26,6 +26,10 @@ pub async fn recover_before_serve(ctx: &ServerCtx, boot: &mut BootPhases) -> Res
     boot.mark("restore");
     fail_orphaned_reviews(ctx).await;
     fail_orphaned_skill_evals(ctx).await;
+    warn_on_err(
+        "3D job and production recovery",
+        ctx.media.recover_interrupted().await,
+    );
     // Hand-offs to personal agents that restart interrupted (or whose
     // outcome never reached the main agent's chat) are reported there now —
     // delivery runs in the background, after this settles their rows' state.

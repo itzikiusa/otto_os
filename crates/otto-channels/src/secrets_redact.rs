@@ -84,10 +84,39 @@ struct ScanState {
     strong: bool,
     /// Previous word was a [`WEAK_TRIGGERS`] word.
     weak: bool,
+    /// Previous word was a JSON/YAML/header sensitive key ending with `:`
+    /// (e.g. `"password":`, `client_secret:`, `X-Api-Key:`).
+    sensitive_colon: bool,
     /// Previous word was `-u` / `--user` (next may be `user:pass`).
     user_flag: bool,
     /// A `mysql`-family command appeared earlier (enables `-p<pw>`).
     saw_mysql: bool,
+}
+
+fn is_sensitive_key(key_lower: &str) -> bool {
+    SENSITIVE_KEY_PARTS.iter().any(|p| key_lower.contains(p))
+}
+
+fn is_auth_scheme(val_lower: &str) -> bool {
+    matches!(val_lower, "bearer" | "basic")
+}
+
+fn is_literal_non_secret(val_lower: &str) -> bool {
+    matches!(val_lower, "null" | "true" | "false" | "none" | "~")
+}
+
+/// True for a compact header+scheme token like `Authorization:Bearer` (no space
+/// after `:`) whose FOLLOWING word is the credential.
+fn is_auth_header_scheme(w: &str) -> bool {
+    if w.contains("://") {
+        return false;
+    }
+    let Some(colon) = w.find(':') else {
+        return false;
+    };
+    let key = trim_wrap(&w[..colon]).to_ascii_lowercase();
+    let val = trim_wrap(&w[colon + 1..]).to_ascii_lowercase();
+    key == "authorization" && is_auth_scheme(&val)
 }
 
 /// Quotes/brackets/punctuation that commonly wrap a token.
@@ -138,9 +167,12 @@ fn flush_word(word: &mut String, out: &mut String, st: &mut ScanState, keep_emai
     let w = word.as_str();
     let core = trim_wrap(w);
     let lower = core.to_ascii_lowercase();
-    let (was_strong, was_weak, was_user) = (st.strong, st.weak, st.user_flag);
+    let ends_colon = w.ends_with(':');
+    let (was_strong, was_weak, was_sensitive_colon, was_user) =
+        (st.strong, st.weak, st.sensitive_colon, st.user_flag);
     st.strong = STRONG_FLAGS.contains(&lower.as_str());
-    st.weak = WEAK_TRIGGERS.contains(&lower.as_str());
+    st.weak = WEAK_TRIGGERS.contains(&lower.as_str()) || is_auth_header_scheme(w);
+    st.sensitive_colon = ends_colon && !core.contains("://") && is_sensitive_key(&lower);
     st.user_flag = lower == "-u" || lower == "--user";
     let base = lower.rsplit('/').next().unwrap_or(lower.as_str());
     if base.starts_with("mysql") || base.starts_with("mariadb") {
@@ -148,13 +180,19 @@ fn flush_word(word: &mut String, out: &mut String, st: &mut ScanState, keep_emai
     }
 
     // A scheme word right after a header name (`Authorization: Bearer …`) is
-    // itself a trigger, not the secret.
+    // itself a trigger, not the secret. Similarly, a nested YAML key
+    // (`credentials:\n  password: …`) ending in `:` is a key, not a value.
     let after_weak = was_weak && !st.weak;
+    let after_sensitive_colon = was_sensitive_colon
+        && !ends_colon
+        && !is_auth_scheme(&lower)
+        && !is_literal_non_secret(&lower);
     match redact_word(
         w,
         keep_emails,
         was_strong,
         after_weak,
+        after_sensitive_colon,
         was_user,
         st.saw_mysql,
     ) {
@@ -170,6 +208,7 @@ fn redact_word(
     keep_emails: bool,
     after_strong: bool,
     after_weak: bool,
+    after_sensitive_colon: bool,
     after_user: bool,
     saw_mysql: bool,
 ) -> Option<String> {
@@ -177,7 +216,7 @@ fn redact_word(
     if core.is_empty() {
         return None;
     }
-    if after_strong || (after_weak && token_like(core)) {
+    if after_strong || after_sensitive_colon || (after_weak && token_like(core)) {
         return Some(replace_inner(w, core));
     }
     if after_user && core.contains(':') && !core.contains("://") {
@@ -187,10 +226,17 @@ fn redact_word(
             return Some(replace_inner(w, pw));
         }
     }
+    // No-space `-uuser:pass` or `--user=user:pass` → keep the user, drop the password.
+    if let Some(pw) = compact_user_flag_password(core) {
+        return Some(replace_inner(w, pw));
+    }
+    if let Some(r) = redact_url(w) {
+        return Some(r);
+    }
     if let Some(r) = redact_key_value(w) {
         return Some(r);
     }
-    if let Some(r) = redact_url_userinfo(w) {
+    if let Some(r) = redact_colon_kv(w) {
         return Some(r);
     }
     // mysql/mariadb `-p<password>` (no space) — only once such a command was
@@ -207,20 +253,161 @@ fn redact_word(
     }
 }
 
-/// `KEY=value` / `--password=value` with a sensitive key → `KEY=[redacted]`.
+/// Extract the password slice from `-uuser:pass` or `--user=user:pass` (returns
+/// `None` for bare `-uroot` with no `:pass` or for URLs).
+fn compact_user_flag_password(core: &str) -> Option<&str> {
+    if core.contains("://") {
+        return None;
+    }
+    let rest = if let Some(r) = core.strip_prefix("--user=") {
+        r
+    } else if core.starts_with("-u") && !core.starts_with("--") && core.len() > 2 {
+        &core[2..]
+    } else {
+        return None;
+    };
+    let colon = rest.find(':')?;
+    let user = &rest[..colon];
+    let pw = &rest[colon + 1..];
+    if user.is_empty() || pw.is_empty() {
+        return None;
+    }
+    Some(pw)
+}
+
+/// `KEY=value` / `--password=value` / `&`-separated form pairs with sensitive
+/// keys → `KEY=[redacted]`.
 fn redact_key_value(w: &str) -> Option<String> {
-    let eq = w.find('=')?;
-    let key = w[..eq].trim_start_matches(['-', '"', '\'', '`']);
-    let value = &w[eq + 1..];
-    let value_core = value.trim_matches(|c: char| matches!(c, '"' | '\'' | ';' | ','));
+    if !w.contains('=') {
+        return None;
+    }
+    if w.contains('&') {
+        return redact_amp_pairs(w);
+    }
+    redact_single_eq_pair(w)
+}
+
+fn redact_single_eq_pair(seg: &str) -> Option<String> {
+    let eq = seg.find('=')?;
+    let key = seg[..eq].trim_start_matches(['-', '"', '\'', '`']);
+    let value = &seg[eq + 1..];
+    let value_core =
+        value.trim_matches(|c: char| matches!(c, '"' | '\'' | ';' | ',' | ')' | '>' | ']'));
     if key.is_empty() || value_core.is_empty() {
         return None;
     }
     let key_lower = key.to_ascii_lowercase();
-    if !SENSITIVE_KEY_PARTS.iter().any(|p| key_lower.contains(p)) {
+    if !is_sensitive_key(&key_lower) {
         return None;
     }
-    Some(format!("{}={}", &w[..eq], replace_inner(value, value_core)))
+    Some(format!(
+        "{}={}",
+        &seg[..eq],
+        replace_inner(value, value_core)
+    ))
+}
+
+fn redact_amp_pairs(s: &str) -> Option<String> {
+    let mut changed = false;
+    let parts: Vec<String> = s
+        .split('&')
+        .map(|seg| match redact_single_eq_pair(seg) {
+            Some(r) => {
+                changed = true;
+                r
+            }
+            None => seg.to_string(),
+        })
+        .collect();
+    changed.then(|| parts.join("&"))
+}
+
+/// Compact `KEY:value` (no space after `:`), e.g. `X-Api-Key:sk_...`,
+/// `password:hunter2`, or compact JSON `{"password":"hunter2","token":"abc"}`.
+fn redact_colon_kv(w: &str) -> Option<String> {
+    if !w.contains(':') || w.contains("://") {
+        return None;
+    }
+    let mut changed = false;
+    let parts: Vec<String> = w
+        .split(',')
+        .map(|seg| match redact_single_colon_pair(seg) {
+            Some(r) => {
+                changed = true;
+                r
+            }
+            None => seg.to_string(),
+        })
+        .collect();
+    changed.then(|| parts.join(","))
+}
+
+fn redact_single_colon_pair(seg: &str) -> Option<String> {
+    let colon = seg.find(':')?;
+    let raw_key = &seg[..colon];
+    let key = trim_wrap(raw_key);
+    let value = &seg[colon + 1..];
+    let value_core = trim_wrap(value);
+    if key.is_empty() || value_core.is_empty() {
+        return None;
+    }
+    let key_lower = key.to_ascii_lowercase();
+    if !is_sensitive_key(&key_lower) {
+        return None;
+    }
+    let val_lower = value_core.to_ascii_lowercase();
+    if is_literal_non_secret(&val_lower) {
+        return None;
+    }
+    // `Authorization:Bearer` (space before token) is handled by `st.weak` on
+    // the next word, not by redacting the scheme name itself.
+    if key_lower == "authorization" && is_auth_scheme(&val_lower) {
+        return None;
+    }
+    Some(format!("{raw_key}:{}", replace_inner(value, value_core)))
+}
+
+/// Redact URL userinfo AND every sensitive query/fragment parameter.
+fn redact_url(w: &str) -> Option<String> {
+    if !w.contains("://") && !w.contains('?') {
+        return None;
+    }
+    let mut cur = w.to_string();
+    let mut changed = false;
+    if let Some(r) = redact_url_userinfo(&cur) {
+        cur = r;
+        changed = true;
+    }
+    if let Some(r) = redact_url_query(&cur) {
+        cur = r;
+        changed = true;
+    }
+    changed.then_some(cur)
+}
+
+/// Redact all sensitive `k=v` parameters in a URL's `?query` (and `#fragment`
+/// when it carries `k=v` pairs, e.g. OAuth `#access_token=...`).
+fn redact_url_query(w: &str) -> Option<String> {
+    let q = w.find('?')?;
+    let prefix = &w[..q + 1];
+    let after_q = &w[q + 1..];
+    let (query, frag) = match after_q.find('#') {
+        Some(h) => (&after_q[..h], Some(&after_q[h + 1..])),
+        None => (after_q, None),
+    };
+    let q_redacted = redact_amp_pairs(query);
+    let f_redacted = frag.and_then(redact_amp_pairs);
+    if q_redacted.is_none() && f_redacted.is_none() {
+        return None;
+    }
+    let mut out = String::with_capacity(w.len());
+    out.push_str(prefix);
+    out.push_str(q_redacted.as_deref().unwrap_or(query));
+    if let Some(f) = frag {
+        out.push('#');
+        out.push_str(f_redacted.as_deref().unwrap_or(f));
+    }
+    Some(out)
 }
 
 /// `scheme://user:pass@host…` → `scheme://user:[redacted]@host…`.
@@ -244,7 +431,8 @@ fn redact_url_userinfo(w: &str) -> Option<String> {
     ))
 }
 
-/// Collapse `-----BEGIN …----- … -----END …-----` blocks (keys, certs).
+/// Collapse `-----BEGIN …----- … -----END …-----` blocks (keys, certs),
+/// including truncated blocks whose `-----END` line was cut off.
 fn collapse_pem(input: &str) -> String {
     let mut s = String::with_capacity(input.len());
     let mut rest = input;
@@ -262,7 +450,7 @@ fn collapse_pem(input: &str) -> String {
                 rest = &tail[close..];
             }
             None => {
-                s.push_str(tail);
+                s.push_str(PLACEHOLDER);
                 rest = "";
             }
         }
@@ -355,5 +543,79 @@ mod tests {
         let s = "ask jane.doe@example.com about it";
         assert_eq!(redact_secrets(s, true), s);
         assert!(!redact_secrets(s, false).contains("jane.doe@example.com"));
+    }
+
+    #[test]
+    fn truncated_pem_blocks_are_redacted() {
+        let out = cmd("key:\n-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7secretbody");
+        assert!(!out.contains("MIIEpAIBAAKCAQEA7secretbody"), "{out}");
+        assert!(out.contains("[redacted]"), "{out}");
+    }
+
+    #[test]
+    fn json_and_yaml_sensitive_key_values_are_redacted() {
+        // Pretty JSON (space after colon).
+        let out = cmd(
+            r#"{"password": "hunter2", "secret": "s3cret", "token": "tok_xyz", "name": "alice"}"#,
+        );
+        assert!(!out.contains("hunter2"), "{out}");
+        assert!(!out.contains("s3cret"), "{out}");
+        assert!(!out.contains("tok_xyz"), "{out}");
+        assert!(out.contains(r#""name": "alice""#), "{out}");
+
+        // Compact JSON (no space after colon).
+        let out = cmd(r#"{"password":"hunter2","secret":"s3cret","token":"tok_xyz","ok":true}"#);
+        assert!(!out.contains("hunter2"), "{out}");
+        assert!(!out.contains("s3cret"), "{out}");
+        assert!(!out.contains("tok_xyz"), "{out}");
+        assert!(out.contains(r#""ok":true"#), "{out}");
+
+        // YAML (both spaced and nested).
+        let out = cmd("credentials:\n  password: my-db-pass\n  client_secret: super-sec\n  api_token: t_999\n  enabled: true");
+        assert!(!out.contains("my-db-pass"), "{out}");
+        assert!(!out.contains("super-sec"), "{out}");
+        assert!(!out.contains("t_999"), "{out}");
+        assert!(out.contains("password: [redacted]"), "{out}");
+        assert!(out.contains("enabled: true"), "{out}");
+    }
+
+    #[test]
+    fn compact_headers_and_user_flags_are_redacted() {
+        let out = cmd("curl -H X-Api-Key:sk_live_12345678 https://api.x.io");
+        assert!(!out.contains("sk_live_12345678"), "{out}");
+        assert!(out.contains("X-Api-Key:[redacted]"), "{out}");
+
+        let out = cmd("curl -H 'Authorization:Bearer eyTok12345678' https://api.x.io");
+        assert!(!out.contains("eyTok12345678"), "{out}");
+
+        assert_eq!(
+            cmd("curl -uadmin:hunter2 https://h"),
+            "curl -uadmin:[redacted] https://h"
+        );
+        assert_eq!(
+            cmd("curl --user=admin:hunter2 https://h"),
+            "curl --user=admin:[redacted] https://h"
+        );
+    }
+
+    #[test]
+    fn all_sensitive_url_query_parameters_are_redacted() {
+        let out = cmd("curl 'https://api.x.io/v1/items?a=1&token=SECRET1&b=2&api_key=SECRET2'");
+        assert!(!out.contains("SECRET1"), "{out}");
+        assert!(!out.contains("SECRET2"), "{out}");
+        assert!(
+            out.contains("?a=1&token=[redacted]&b=2&api_key=[redacted]'"),
+            "{out}"
+        );
+
+        // Both userinfo and multiple query params in the same URL.
+        let out = cmd("https://bob:pass99@api.x.io/v1?x=1&access_token=TOK88&password=PW77");
+        assert!(!out.contains("pass99"), "{out}");
+        assert!(!out.contains("TOK88"), "{out}");
+        assert!(!out.contains("PW77"), "{out}");
+        assert_eq!(
+            out,
+            "https://bob:[redacted]@api.x.io/v1?x=1&access_token=[redacted]&password=[redacted]"
+        );
     }
 }

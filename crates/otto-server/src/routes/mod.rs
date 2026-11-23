@@ -48,6 +48,7 @@ pub mod search;
 pub mod session_files;
 pub mod settings;
 pub mod share;
+pub mod simulators_ws;
 pub mod slash_commands;
 pub mod snips;
 pub mod telemetry;

@@ -26,15 +26,21 @@ export function cappedPixelRatio(cap: number, ratio: number = typeof window === 
  * Calls `lost` when the browser reclaims the canvas's GPU context (too many
  * live 3D views, a GPU reset, a sleeping laptop). The default is prevented so
  * the context may be restored; the caller remounts (rebuilds its renderer)
- * rather than leaving a black canvas. Returns the unsubscribe.
+ * rather than leaving a black canvas — by itself, through `restored`, when
+ * the browser gives the context back. Returns the unsubscribe.
  */
-export function onContextLost(canvas: HTMLCanvasElement, lost: () => void): () => void {
+export function onContextLost(canvas: HTMLCanvasElement, lost: () => void, restored?: () => void): () => void {
   const handler = (e: Event): void => {
     e.preventDefault();
     lost();
   };
+  const back = (): void => restored?.();
   canvas.addEventListener('webglcontextlost', handler);
-  return () => canvas.removeEventListener('webglcontextlost', handler);
+  canvas.addEventListener('webglcontextrestored', back);
+  return () => {
+    canvas.removeEventListener('webglcontextlost', handler);
+    canvas.removeEventListener('webglcontextrestored', back);
+  };
 }
 
 /**

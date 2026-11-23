@@ -13,6 +13,20 @@ impl Drop for ProcessGroup {
 }
 
 pub async fn run(cwd: &str, command: &str, timeout_secs: u64, cancelled: &AtomicBool) -> CmdRun {
+    run_with_sandbox(cwd, command, timeout_secs, cancelled, None, None).await
+}
+
+/// Run a verification command in `cwd`, scrubbing inherited daemon environment
+/// variables and optionally confining the child with `sandbox` (matching
+/// scheduled `shell` tasks).
+pub async fn run_with_sandbox(
+    cwd: &str,
+    command: &str,
+    timeout_secs: u64,
+    cancelled: &AtomicBool,
+    sandbox: Option<&otto_sandbox::SandboxPolicy>,
+    cache_tag: Option<&str>,
+) -> CmdRun {
     let start = Instant::now();
     let failure = |message: String| CmdRun {
         success: false,
@@ -23,11 +37,37 @@ pub async fn run(cwd: &str, command: &str, timeout_secs: u64, cancelled: &Atomic
     if cancelled.load(Ordering::Relaxed) {
         return failure("verification cancelled".into());
     }
-    let mut command_spec = tokio::process::Command::new("sh");
+    let mut command_spec = match sandbox {
+        Some(policy) => {
+            let tag = cache_tag.filter(|t| !t.is_empty()).unwrap_or("verify");
+            let cache = std::env::temp_dir()
+                .join("otto-agent-cache")
+                .join(format!("goal-loop-{tag}"));
+            if let Some(home) = std::env::var_os("HOME") {
+                otto_sandbox::seed_agent_cache(&cache, std::path::Path::new(&home), |k| {
+                    std::env::var(k).ok()
+                });
+            }
+            let mut argv: Vec<String> = otto_sandbox::agent_cache_env(&cache)
+                .into_iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect();
+            argv.extend(["/bin/sh".to_string(), "-c".to_string(), command.to_string()]);
+            let (program, args) = policy.wrap("/usr/bin/env", &argv);
+            let mut c = tokio::process::Command::new(program);
+            c.args(args);
+            c
+        }
+        None => {
+            let mut c = tokio::process::Command::new("/bin/sh");
+            c.arg("-c").arg(command);
+            c
+        }
+    };
+    crate::scheduled_tasks_engine::scrub_shell_env(&mut command_spec);
     command_spec
-        .arg("-c")
-        .arg(command)
         .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
@@ -142,5 +182,60 @@ mod tests {
         assert!(start.elapsed() < Duration::from_millis(750));
         tokio::time::sleep(Duration::from_millis(1100)).await;
         assert!(!dir.path().join("should-not-exist").exists());
+    }
+
+    #[tokio::test]
+    async fn verification_command_scrubs_daemon_env() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("OTTO_SECRET_TEST", "top-secret-daemon-token");
+        let result = run(
+            dir.path().to_str().unwrap(),
+            "printf 'secret=%s;has_path=%s' \"$OTTO_SECRET_TEST\" \"${PATH:+yes}\"",
+            5,
+            &AtomicBool::new(false),
+        )
+        .await;
+        assert!(result.success, "{}", result.output);
+        assert_eq!(
+            result.output, "secret=;has_path=yes",
+            "daemon secret leaked into verification command: {}",
+            result.output
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn sandboxed_verification_command_is_confined_to_cwd() {
+        if !otto_sandbox::is_supported() {
+            return;
+        }
+        let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let root_path = std::fs::canonicalize(root.path()).unwrap();
+        let cwd = root_path.join("verify");
+        let outside = root_path.join("outside.txt");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let policy = otto_sandbox::SandboxPolicy::for_agent(
+            &cwd,
+            &root_path.join("home"),
+            &root_path.join("Otto"),
+            &[],
+            otto_sandbox::NetworkPolicy::None,
+        );
+        let cmd = format!("echo ok > inside.txt; echo nope > '{}'", outside.display());
+        let res = run_with_sandbox(
+            cwd.to_str().unwrap(),
+            &cmd,
+            20,
+            &AtomicBool::new(false),
+            Some(&policy),
+            Some("unit-test"),
+        )
+        .await;
+        assert!(cwd.join("inside.txt").exists(), "cwd must remain writable");
+        assert!(
+            !outside.exists(),
+            "sandboxed verify command wrote outside cwd"
+        );
+        assert!(!res.success, "denied write must fail the verify command");
     }
 }

@@ -120,10 +120,19 @@
     if (!s.disabled) threads.setInspectorTab(s.id);
   }
 
+  let inspectorEl = $state<HTMLElement | null>(null);
+  let addBtnEl = $state<HTMLButtonElement | null>(null);
+
   function closeActive(): void {
     if (!active) return;
     const next = threadsChrome.closeSurface(active);
     if (next) threads.setInspectorTab(next);
+    void tick().then(() => {
+      const target = next
+        ? inspectorEl?.querySelector<HTMLElement>(`[data-testid="threads-tab-${next}"]`)
+        : addBtnEl;
+      target?.focus({ preventScroll: true });
+    });
   }
 
   function openAddMenu(e: MouseEvent): void {
@@ -141,14 +150,15 @@
     ctxMenu.show(e, items);
   }
 
-  // Single-key surface shortcuts while focus is inside the panel.
+  // Single-key surface shortcuts only while the empty launcher is shown
+  // (never hijack bare letters while viewing Files, Changes, PR, Browser, etc.).
   function surfaceKeys(node: HTMLElement): { destroy(): void } {
     node.addEventListener('keydown', onKey);
     return { destroy: () => node.removeEventListener('keydown', onKey) };
   }
 
   function onKey(e: KeyboardEvent): void {
-    if (e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
+    if (active !== null || e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
     const t = e.target as HTMLElement | null;
     if (t?.closest('input, textarea, select, [contenteditable="true"], .xterm, .cm-editor')) return;
     const s = launcher.find((x) => x.key.toLowerCase() === e.key.toLowerCase());
@@ -159,7 +169,7 @@
   }
 </script>
 
-<aside class="ti" aria-label="Thread panel" data-testid="threads-inspector" use:surfaceKeys>
+<aside bind:this={inspectorEl} class="ti" aria-label="Thread panel" data-testid="threads-inspector" use:surfaceKeys>
   {#if showCard && contextCwd}
     <div class="ti-card"><ThreadProjectCard cwd={contextCwd} compact={threads.inspectorCompact} /></div>
   {/if}
@@ -186,6 +196,7 @@
       </button>
     {/if}
     <button
+      bind:this={addBtnEl}
       type="button"
       class="icon-btn"
       aria-haspopup="menu"

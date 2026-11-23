@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { announce } from '../../lib/announce.svelte';
+  import { announce, announceShown } from '../../lib/announce.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { toastError } from '../../lib/toastError';
   import { sectionLabel } from './sections';
@@ -197,7 +197,7 @@
 
     <h2 class="section-title">Report agent {#if savedIn === 'agent'}<span class="saved">Saved</span>{/if}</h2>
     {#if agentSaveError}
-      <p role="alert">{agentSaveError} <button class="btn small" disabled={saving || !!modelSaveTimer} onclick={retryAgent}>Retry saving report agent</button><!-- ui-guards: allow — retries a failed save action, not a load --></p>
+      <p use:announceShown={{ text: agentSaveError, assertive: true }}>{agentSaveError} <button class="btn small" disabled={saving || !!modelSaveTimer} onclick={retryAgent}>Retry saving report agent</button><!-- ui-guards: allow — retries a failed save action, not a load --></p>
     {/if}
     <div class="card agent-row">
       <div class="field agent-field">

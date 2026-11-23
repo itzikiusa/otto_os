@@ -326,7 +326,7 @@ async fn send_message_inner<C: ProductStudioHost>(
 
     // 5. Ensure the thread cwd exists (run_prompt canonicalizes it and degrades
     //    if it's missing). Best-effort — logged on error.
-    if let Err(e) = std::fs::create_dir_all(&thread.cwd) {
+    if let Err(e) = tokio::fs::create_dir_all(&thread.cwd).await {
         warn!("product_refine: create_dir_all({}) failed: {e}", thread.cwd);
     }
 

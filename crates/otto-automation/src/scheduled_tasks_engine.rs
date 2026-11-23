@@ -933,7 +933,7 @@ async fn execute_agent(
     if let Some(p) = out_path.parent() {
         let _ = tokio::fs::create_dir_all(p).await;
     }
-    let _ = std::fs::remove_file(&out_path);
+    let _ = tokio::fs::remove_file(&out_path).await;
     let augmented = augment_report_prompt(&prompt, &out_path.to_string_lossy());
 
     // Pre-trust so the session doesn't stall on the "trust this folder?" prompt.
@@ -972,7 +972,7 @@ async fn execute_agent(
     // The watcher already read the report into `outcome`; the scratch file
     // would otherwise pile up one per run (for a personal agent, inside the
     // folder its next runs work in — where they could read stale reports).
-    let _ = std::fs::remove_file(&out_path);
+    let _ = tokio::fs::remove_file(&out_path).await;
 
     let session_id = captured_sid
         .lock()
@@ -1218,11 +1218,22 @@ async fn run_shell_with_retry(
 /// A confined shell argv: `(program, args)` from `SandboxPolicy::wrap`.
 type ShellArgv = (String, Vec<String>);
 
-/// The environment a SANDBOXED shell task keeps — enough for a POSIX
-/// toolchain, nothing of the daemon's own.
-const SHELL_ENV_KEEP: [&str; 8] = [
+/// The environment a shell command keeps — enough for a POSIX toolchain,
+/// nothing of the daemon's own (tokens, Otto internals).
+pub(crate) const SHELL_ENV_KEEP: [&str; 8] = [
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "TERM",
 ];
+
+/// Scrub inherited daemon environment variables from a spawned shell command,
+/// keeping only the safe POSIX baseline in [`SHELL_ENV_KEEP`].
+pub(crate) fn scrub_shell_env(cmd: &mut tokio::process::Command) {
+    cmd.env_clear();
+    for key in SHELL_ENV_KEEP {
+        if let Some(v) = std::env::var_os(key) {
+            cmd.env(key, v);
+        }
+    }
+}
 
 /// Run `/bin/sh -c cmd` once in its OWN process group, bounded by `timeout`.
 /// On timeout the whole group is killed: the old `timeout(…, output())` only
@@ -1232,8 +1243,9 @@ const SHELL_ENV_KEEP: [&str; 8] = [
 /// released permit let the next scheduled occurrence stack more on top.
 ///
 /// `confine` (a sandbox-exec argv that already embeds `/bin/sh -c cmd`) runs
-/// it confined, with a scrubbed environment: the daemon's own variables
-/// (tokens, Otto internals) never reach a sandboxed command.
+/// it confined. Both confined and unconfined runs get a scrubbed environment:
+/// the daemon's own variables (tokens, Otto internals) never reach a shell
+/// command even when the process sandbox is disabled.
 async fn run_shell_once(
     cmd: &str,
     cwd: &str,
@@ -1243,12 +1255,7 @@ async fn run_shell_once(
     let mut spec = match confine {
         Some((program, args)) => {
             let mut c = tokio::process::Command::new(program);
-            c.args(args).env_clear();
-            for key in SHELL_ENV_KEEP {
-                if let Some(v) = std::env::var_os(key) {
-                    c.env(key, v);
-                }
-            }
+            c.args(args);
             c
         }
         None => {
@@ -1257,6 +1264,7 @@ async fn run_shell_once(
             c
         }
     };
+    scrub_shell_env(&mut spec);
     spec.current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1393,7 +1401,7 @@ async fn execute_workflow(
     // task's own in-flight claim — its next tick would only skip anyway while
     // the workflow runs — and a Stop still cancels both (see `stop_run`).
     // A daemon restart meanwhile re-attaches this wait (S3-303).
-    wait_workflow_outcome(&repo, &workflow.name, run_id).await
+    wait_workflow_outcome(&repo, ctx.events(), &workflow.name, run_id).await
 }
 
 /// Disable a task whose target workflow is gone and fail this occurrence once
@@ -1414,6 +1422,28 @@ async fn pause_for_deleted_workflow(
     ))
 }
 
+/// Synchronously claim the task's in-flight slot and register the run's cancel
+/// handle BEFORE spawning the re-attached workflow waiter. Doing this before
+/// `tokio::spawn` closes the boot race where `scheduled_tasks_scheduler::start`'s
+/// t=0 tick could otherwise claim the same task and stack a duplicate occurrence.
+fn claim_workflow_handoff(
+    flight: &InFlightSet,
+    cancels: &'static RunCancels,
+    run: &ScheduledTaskRun,
+) -> Option<(String, InFlightGuard, RunCancelGuard)> {
+    let wf_run_id = run.workflow_run_id.clone()?;
+    let Some(guard) = flight.claim(&run.task_id) else {
+        warn!(
+            task = %run.task_id,
+            run = %run.id,
+            "scheduled task: skipping workflow hand-off resume; task already in flight"
+        );
+        return None;
+    };
+    let cancel = cancels.register(&run.id);
+    Some((wf_run_id, guard, cancel))
+}
+
 /// Boot (S3-303): re-attach the waiter of a scheduled run that had handed off
 /// to a workflow when the previous daemon life ended. The wait lived only in
 /// memory, so reaping the row as "interrupted" recorded a false failure while
@@ -1421,11 +1451,13 @@ async fn pause_for_deleted_workflow(
 /// must not block); the run settles through the normal completion path —
 /// report, delivery, cursor — and a Stop still cancels the workflow.
 pub fn resume_workflow_handoff(ctx: &impl AutomationCtx, run: ScheduledTaskRun) {
-    let Some(wf_run_id) = run.workflow_run_id.clone() else {
+    let Some((wf_run_id, guard, cancel)) = claim_workflow_handoff(in_flight(), run_cancels(), &run)
+    else {
         return;
     };
     let ctx = ctx.clone();
     tokio::spawn(async move {
+        let _guard = guard;
         let repo = ctx.scheduled_tasks();
         let task = match repo.get_run_task_for_recovery(&run.id).await {
             Ok(t) => t,
@@ -1444,10 +1476,6 @@ pub fn resume_workflow_handoff(ctx: &impl AutomationCtx, run: ScheduledTaskRun) 
                 return;
             }
         };
-        // Nothing else runs this task yet (boot), but hold the claim so the
-        // first tick doesn't stack an occurrence on the re-attached wait.
-        let _guard = in_flight().claim(&task.id);
-        let cancel = run_cancels().register(&run.id);
         let wf_repo = otto_state::WorkflowsRepo::new(ctx.pool().clone());
         let name = match task.workflow_id.as_deref() {
             Some(id) => wf_repo
@@ -1458,20 +1486,43 @@ pub fn resume_workflow_handoff(ctx: &impl AutomationCtx, run: ScheduledTaskRun) 
             None => task.name.clone(),
         };
         info!(run = %run.id, workflow_run = %wf_run_id, "scheduled task: re-attached workflow hand-off after restart");
-        let wait = wait_workflow_outcome(&wf_repo, &name, wf_run_id);
+        let wait = wait_workflow_outcome(&wf_repo, ctx.events(), &name, wf_run_id);
         let _ = complete_run_with(&ctx, &task, &run.id, &run.trigger, cancel, wait).await;
     });
 }
 
-/// Poll a handed-off workflow run until it is terminal and map it to the
-/// task run's outcome (no deadline — see [`execute_workflow`]).
+/// Wait for a handed-off workflow run to reach a terminal status — driven by
+/// `Event::WorkflowRunUpdated` with a slow safety poll (`WORKFLOW_POLL`) — and
+/// map it to the task run's outcome (no deadline — see [`execute_workflow`]).
 async fn wait_workflow_outcome(
     repo: &otto_state::WorkflowsRepo,
+    events: &tokio::sync::broadcast::Sender<Event>,
     workflow_name: &str,
     run_id: String,
 ) -> ExecResult {
+    let mut rx = events.subscribe();
+    let mut first = true;
     loop {
-        tokio::time::sleep(WORKFLOW_POLL).await;
+        if first {
+            first = false;
+        } else {
+            let sleep = tokio::time::sleep(WORKFLOW_POLL);
+            tokio::pin!(sleep);
+            loop {
+                tokio::select! {
+                    _ = &mut sleep => break,
+                    ev = rx.recv() => match ev {
+                        Ok(Event::WorkflowRunUpdated { run_id: rid, .. }) if rid == run_id => break,
+                        Ok(_) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            sleep.await;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
         // Perf W2: poll the status only; the full row (50–200 KB of
         // `nodes_json`) is read ONCE, when the run has settled.
         let status = match repo.run_status(&run_id).await {
@@ -2456,7 +2507,8 @@ mod tests {
             assert_eq!(program, "/usr/bin/sandbox-exec");
             assert_eq!(&args[args.len() - 3..], ["/bin/sh", "-c", "echo hi"]);
         }
-        // The confined path never forwards the daemon's own env.
+        // Both the confined and unconfined paths scrub the daemon's own env so
+        // secrets never leak even when the process sandbox is disabled.
         std::env::set_var("OTTO_S304_PROBE", "leaked");
         let argv: ShellArgv = (
             "/bin/sh".into(),
@@ -2475,7 +2527,77 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(String::from_utf8_lossy(&out.stdout), "leaked");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "",
+            "unconfined shell runs must also scrub inherited daemon env"
+        );
+    }
+
+    #[test]
+    fn workflow_handoff_claims_in_flight_and_cancel_before_spawn() {
+        static TEST_CANCELS: OnceLock<RunCancels> = OnceLock::new();
+        let cancels = TEST_CANCELS.get_or_init(RunCancels::default);
+        let flight = InFlightSet::default();
+
+        let make_run = |id: &str, task_id: &str, wf_run_id: Option<&str>| ScheduledTaskRun {
+            id: id.into(),
+            task_id: task_id.into(),
+            workspace_id: "ws-1".into(),
+            status: "running".into(),
+            trigger: "schedule".into(),
+            started_at: "2026-01-01T00:00:00Z".into(),
+            finished_at: None,
+            summary: String::new(),
+            report_path: None,
+            report_rel: None,
+            delivered: false,
+            delivery_error: None,
+            error: None,
+            session_id: None,
+            report_hash: None,
+            attempts: 1,
+            skipped_delivery: false,
+            workflow_run_id: wf_run_id.map(str::to_string),
+            created_at: "2026-01-01T00:00:00Z".into(),
+        };
+
+        // Missing workflow_run_id: returns None and claims nothing.
+        let no_wf = make_run("run-no-wf", "task-1", None);
+        assert!(claim_workflow_handoff(&flight, cancels, &no_wf).is_none());
+        assert!(!cancels.cancel("run-no-wf"));
+
+        // Valid hand-off: synchronously claims in-flight AND registers cancel.
+        let run1 = make_run("run-1", "task-1", Some("wf-run-1"));
+        let (wf_id, guard, cancel) =
+            claim_workflow_handoff(&flight, cancels, &run1).expect("first handoff claims");
+        assert_eq!(wf_id, "wf-run-1");
+
+        // A concurrent scheduler t=0 tick or duplicate hand-off for the same
+        // task is rejected immediately before spawn.
+        assert!(
+            flight.claim("task-1").is_none(),
+            "scheduler tick must see task already in flight"
+        );
+        let dup = make_run("run-2", "task-1", Some("wf-run-2"));
+        assert!(
+            claim_workflow_handoff(&flight, cancels, &dup).is_none(),
+            "duplicate handoff for in-flight task must be skipped"
+        );
+        assert!(
+            !cancels.cancel("run-2"),
+            "rejected duplicate must not register a cancel handle"
+        );
+
+        // Stop cancels the registered handoff run immediately.
+        assert!(cancels.cancel("run-1"));
+        assert!(cancel.signal.is_cancelled());
+
+        // Dropping both guards releases the slot and cancel entry.
+        drop(cancel);
+        drop(guard);
+        assert!(!cancels.cancel("run-1"));
+        assert!(flight.claim("task-1").is_some());
     }
 
     fn otto_sandbox_supported() -> bool {

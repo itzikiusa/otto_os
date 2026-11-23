@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { announce } from '../../lib/announce.svelte';
+  import { announce, announceShown } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { toastError } from '../../lib/toastError';
@@ -191,7 +191,7 @@
     mcp: 'MCP Control Plane', scheduled_tasks: 'Scheduled Tasks',
     browser: 'Browser',
     aws: 'AWS — accounts', aws_s3: 'AWS — S3', aws_sqs: 'AWS — SQS', aws_ec2: 'AWS — EC2',
-    aws_athena: 'AWS — Athena', aws_eks: 'AWS — EKS', aws_rds: 'AWS — RDS', kubernetes: 'Kubernetes',
+    aws_athena: 'AWS — Athena', aws_eks: 'AWS — EKS', aws_rds: 'AWS — RDS', kubernetes: 'Kubernetes', containers: 'Containers',
   };
   // Derived, never hand-listed: the grants PUT is a full replace, so a
   // `Feature` missing from a hand-kept list was wiped on the next save. The
@@ -339,7 +339,7 @@
       toasts.success('User created', u.username);
     } catch (e) {
       // Inline, in the sheet — the fix (another username) happens there.
-      createError = e instanceof Error ? e.message : String(e);
+      createError = loadErrorText(e);
     } finally {
       busy = false;
     }
@@ -732,7 +732,7 @@
         <input id="nu-pass" class="input" type="password" bind:value={newPassword} autocomplete="new-password" aria-describedby="nu-pass-hint" />
         <span class="hint" id="nu-pass-hint" class:bad={newPassword.length > 0 && newPassword.length < MIN_PASSWORD}>At least {MIN_PASSWORD} characters{#if newPassword.length > 0 && newPassword.length < MIN_PASSWORD}{' '}({newPassword.length}/{MIN_PASSWORD}){/if}. Share it with them privately.</span>
       </div>
-      {#if createError}<p class="form-err" role="alert"><strong>Couldn’t create the user.</strong> {createError}</p>{/if}
+      {#if createError}<p class="form-err" use:announceShown={{ text: `Couldn’t create the user. ${createError}`, assertive: true }}><strong>Couldn’t create the user.</strong> {createError}</p>{/if}
     </form>
     {#snippet footer()}
       <button class="btn" onclick={() => (createOpen = false)}>Cancel</button>

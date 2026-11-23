@@ -2,33 +2,15 @@
   import { announceShown } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
-  // One design, open (canvas/studio archetype):
-  //
-  //   PageHeader: Design Hall › Project › Title · status ▾ · vN      Saved ✓  ⋯
-  //   [mirror banner: "This design mirrors a story attachment" · Edit here]
-  //   ┌ stage toolbar + ArtifactStage (+ review pins: PinHost) ───┬ Otto | Versions | Links | Comments ┐
-  //   │  existing viewers/editors per format                      │ (DetailsPanel)                     │
-  //   └───────────────────────────────────────────────────────────┴─────────────────────────┘
-  //   (a `scene3d` design opens the 3D Studio layout and an `otto-site` design
-  //    Site Studio's own three-column layout instead — each over the same
-  //    working copy, save path and Otto/Versions/Links panels)
-  //
-  // This view owns the working copy of the source, the base version it was
-  // loaded from, and every save: an autosave ~1.5 s after the last edit
-  // (`PUT …/content` with `base_version`; the daemon labels and squashes
-  // autosaves) and ⌘S / ⋯ for a named version. A head that moved (an agent,
-  // another window) comes back as 409 and the person chooses — never a silent
-  // overwrite. Versions are the undo model: restore saves old bytes as a NEW
-  // version. A mirror of a Product/Canvas source is read-only until "Edit
-  // here" adopts it. Live `design_*` events refresh what they touch; every
-  // loader is sequence-guarded against stale responses. The UI posts the
-  // decisions it makes (restore, keep/replace vs an agent version) as design
-  // signals; approve/status/edit-after-draft signals are recorded by the
-  // daemon itself.
+  // One design, open (canvas/studio archetype): owns working copy, base version,
+  // autosave (~1.5 s), ⌘S named versions, 409 conflict resolution, mirror adoption,
+  // live design_* updates, and signals. `scene3d` and 3D `model` (GLB/glTF/OBJ)
+  // open in Studio3D; `otto-site` opens in SiteStudio.
   import { tick, untrack, type Snippet } from 'svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { loadErrorText } from '../../lib/loadError';
@@ -44,11 +26,13 @@
   import { ApiError } from '../../lib/api/client';
   import * as api from '../../lib/api/design';
   import type {
-    DesignArtifact, DesignArtifactDetail, DesignArtifactFormat,
+    CommentPin3d, DesignArtifact, DesignArtifactDetail, DesignArtifactFormat,
     DesignLinksResp, DesignStatus, DesignVersion,
   } from '../../lib/api/types';
   import { DEVICES, type DeviceKind } from '../../lib/design/DeviceFrame.svelte';
-  import Studio3D from './studio3d/Studio3D.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  const Studio3D = lazyComponent(() => import('./studio3d/Studio3D.svelte'));
   import SiteStudio from './site/SiteStudio.svelte';
   import ArtifactStage, { d2Svg } from './ArtifactStage.svelte';
   import VersionsPanel from './VersionsPanel.svelte';
@@ -162,8 +146,8 @@
   }
 
   // ── Loading (sequence-guarded) ────────────────────────────────────────────
-  let loadSeq = 0;
-  let linksSeq = 0;
+  let loadSeq = 0, linksSeq = 0, alive = true;
+  $effect(() => () => { alive = false; });
 
   function setBlob(u: string | null): void {
     if (blobUrl && blobUrl !== u) URL.revokeObjectURL(blobUrl);
@@ -264,10 +248,11 @@
       if (untrack(() => ownSeq(link.pinned_version_id!) ?? pinnedSeqs[link.pinned_version_id!]) != null) continue;
       if (!triedTargets.has(link.dst_id)) targets.add(link.dst_id);
     }
+    const targetId = id;
     for (const t of [...targets].slice(0, 8)) {
       triedTargets.add(t);
       void api.listVersions(t).then(
-        (vs) => (pinnedSeqs = { ...pinnedSeqs, ...Object.fromEntries(vs.map((v) => [v.id, v.seq])) }),
+        (vs) => { if (alive && id === targetId) pinnedSeqs = { ...pinnedSeqs, ...Object.fromEntries(vs.map((v) => [v.id, v.seq])) }; },
         () => {},
       );
     }
@@ -373,22 +358,21 @@
   async function save(message?: string, named = false): Promise<void> {
     if (!artifact || readonly || saving || source === null) return;
     if (!dirty && !named) return;
+    const target = id;
     saving = true;
     const body = { content: source, base_version: baseVersionId ?? '', ...(message ? { message } : {}) };
     try {
-      const res = named ? await api.commitVersion(id, { ...body, message: message ?? '' }) : await api.putContent(id, body);
+      const res = named ? await api.commitVersion(target, { ...body, message: message ?? '' }) : await api.putContent(target, body);
+      if (!alive || id !== target) return;
       applySaved(res, body.content);
       if (named && !res.created) toasts.info('No changes to save', 'The content matches the current version.');
     } catch (e) {
-      if (isMirroredError(e)) {
-        mirrorRefused = true;
-        void refreshMeta();
-        throw e;
-      }
+      if (!alive || id !== target) return;
+      if (isMirroredError(e)) { mirrorRefused = true; void refreshMeta(); throw e; }
       if (e instanceof ApiError && e.status === 409) await resolveConflict(named ? message : undefined);
       else throw e;
     } finally {
-      saving = false;
+      if (alive && id === target) saving = false;
     }
   }
 
@@ -837,14 +821,7 @@
       <EmptyState variant="page" icon="designHall" title="This design isn’t available"
         body="It was deleted, or you don’t have access to its workspace." actionLabel="Back to Design Hall" onaction={() => router.go('design')} />
     {:else if phase === 'error' || !artifact}
-      <div class="pad err" role="alert">
-        <Icon name="warning" size={16} />
-        <div>
-          <strong>Couldn’t open this design.</strong>
-          <div class="dim">{loadError}</div>
-        </div>
-        <button class="btn small" onclick={() => void load(id)}>Retry</button>
-      </div>
+      <LoadState what="this design" errorTitle="Couldn’t open this design" variant="page" error={loadError ?? 'Couldn’t reach Otto.'} empty onretry={() => void load(id)} />
     {:else}
       <MirrorBanner {artifact} {versions} canEdit={auth.can('design', 'edit') && artifact.status !== 'archived'} refused={mirrorRefused} {adopting} onadopt={() => void adopt()} onview={(v) => void view(v)} />
       {#snippet notices()}
@@ -880,19 +857,25 @@
         <LinksTab bind:refs links={linksOnly} references={referencesPanel} />
       {/snippet}
       {#snippet ottoTab()}{@render ottoPanel(null)}{/snippet}
-      {#snippet commentsPanel()}<CommentsTab store={comments} {versions} shownVersionId={viewing?.v.id ?? head?.id ?? null} canComment={auth.can('design', 'edit')} {meId} canDeleteAny={auth.isRoot}
+      {#snippet commentsPanel()}<CommentsTab store={comments} {versions} shownVersionId={viewing?.v.id ?? head?.id ?? null} shownVersionSeq={viewing?.v.seq ?? head?.seq ?? null} {artifact} storyId={split.uses.find((r) => r.link.dst_kind === 'story')?.link.dst_id ?? fromStory} canComment={auth.can('design', 'edit')} {meId} canDeleteAny={auth.isRoot}
           onview={(v) => void view(v)} onpin={artifact.format === 'otto-site' ? undefined : () => void setDetails(false)} />{/snippet}
+      {#snippet commentsPanel3d(hooks: { onfocus3d: (pin: CommentPin3d) => void; onregenerate3d: (prompt: string) => void })}
+        <CommentsTab store={comments} {versions} shownVersionId={viewing?.v.id ?? head?.id ?? null} shownVersionSeq={viewing?.v.seq ?? head?.seq ?? null} {artifact} storyId={split.uses.find((r) => r.link.dst_kind === 'story')?.link.dst_id ?? fromStory} canComment={auth.can('design', 'edit')} {meId} canDeleteAny={auth.isRoot}
+          onview={(v) => void view(v)} onfocus3d={hooks.onfocus3d} onregenerate3d={hooks.onregenerate3d} />
+      {/snippet}
       {#snippet details(design: Snippet | undefined)}
         <DetailsPanel bind:tab={rightTab} bind:backButton={designButton} linkCount={split.uses.length + split.usedIn.length}
           versionCount={vlist.total ?? (versions.length || null)} otto={ottoTab} versions={versionsPanel} links={linksPanel} {design}
           comments={commentsPanel} commentCount={comments.loaded ? openCount(comments.threads) : null}
           onback={design ? undefined : () => void setDetails(false)} />
       {/snippet}
-      {#if kind === 'scene3d'}
-        {#key artifact.id}
-          <Studio3D {artifact} source={shownSource} readonly={stageReadonly} {dirty} {head} usedIn={split.usedIn}
-            linkCount={split.uses.length + split.usedIn.length} {seqOf} openOtto={ottoHandoff}
-            onchange={(s) => (source = s)} otto={ottoPanel} links={linksPanel} versions={versionsPanel} {notices} />
+      {#if kind === 'scene3d' || kind === 'model'}
+        {#key `${artifact.id}:${viewing?.v.id ?? head?.id ?? ''}`}
+          <LazyMount lazy={Studio3D} what="3D Studio" props={{ artifact, source: shownSource, modelBlobUrl: shownBlob,
+            readonly: stageReadonly, dirty, head, shownVersionId: viewing?.v.id ?? head?.id ?? null, usedIn: split.usedIn,
+            linkCount: split.uses.length + split.usedIn.length, seqOf, openOtto: ottoHandoff, comments,
+            commentCount: comments.loaded ? openCount(comments.threads) : null, commentsPanel: commentsPanel3d,
+            onchange: (s: string) => (source = s), otto: ottoPanel, links: linksPanel, versions: versionsPanel, notices }} />
         {/key}
       {:else if artifact.format === 'otto-site'}
         {#key artifact.id}
@@ -971,19 +954,6 @@
   }
   .pad {
     padding: 20px;
-  }
-  .err {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-  }
-  .err > :global(svg) {
-    color: var(--danger);
-    margin-block-start: 2px;
-  }
-  .dim {
-    color: var(--text-dim);
-    font-size: var(--fs-s);
   }
   .studio {
     flex: 1;

@@ -58,21 +58,7 @@ pub fn backup_routes() -> Router<ServerCtx> {
 
 /// Returns `true` when a top-level settings key should be withheld from exports.
 /// Import uses the same filter so a re-ingested file can never smuggle secrets in.
-pub fn is_secret_key(key: &str) -> bool {
-    let k = key.to_lowercase();
-    k.contains("password")
-        || k.contains("passwd")
-        || k.contains("secret")
-        || k.contains("token")
-        || k.contains("api_key")
-        || k.contains("apikey")
-        || k.contains("access_key")
-        || k.contains("private_key")
-        || k.contains("credential")
-        || k.contains("keychain")
-        || k.contains("keyref")
-        || k.contains("auth_token")
-}
+pub use otto_state::archive_schema::is_secret_key;
 
 /// Run a redaction pass on a raw settings map and return the scrubbed output
 /// plus the list of top-level keys that were excluded entirely.
@@ -162,6 +148,7 @@ pub async fn import_settings(
     crate::auth::require_human(&auth.0)?;
 
     let repo = SettingsRepo::new(ctx.pool.clone());
+    let mut filtered = Map::new();
     let mut accepted: Vec<String> = Vec::new();
     let mut rejected: Vec<String> = Vec::new();
 
@@ -170,29 +157,20 @@ pub async fn import_settings(
             rejected.push(key.clone());
             continue;
         }
-        repo.put(key, value).await?;
+        filtered.insert(key.clone(), value.clone());
         accepted.push(key.clone());
-
-        // Reload providers immediately — mirrors `PUT /settings`.
-        if key == "providers" {
-            ctx.manager.providers().reload(Some(value));
-        }
-        if key == "disabled_providers" {
-            let names: Vec<String> = serde_json::from_value(value.clone()).unwrap_or_default();
-            ctx.manager.providers().set_disabled(&names);
-        }
-        if key == otto_core::kubeconfig_policy::EXTRA_PLUGINS_SETTING {
-            let names: Vec<String> = serde_json::from_value(value.clone()).unwrap_or_default();
-            otto_core::kubeconfig_policy::set_extra_plugins(&names);
-        }
-        if key == "agent_skip_permissions" {
-            let skip = value.as_bool().unwrap_or(true);
-            let overrides = repo.get("providers").await.ok().flatten();
-            ctx.manager
-                .providers()
-                .set_skip_permissions(skip, overrides.as_ref());
-        }
     }
+
+    // Apply the exact same validation & atomic commit guarantees as `PUT /settings`.
+    let extra_plugins = crate::routes::settings::validate_settings_patch(&filtered)?;
+    repo.put_many(&filtered).await?;
+    crate::routes::settings::apply_setting_side_effects(
+        &ctx,
+        &repo,
+        &filtered,
+        extra_plugins.as_deref(),
+    )
+    .await;
 
     accepted.sort();
     rejected.sort();
@@ -353,6 +331,7 @@ pub async fn state_restore(
     }
 
     let repo = SettingsRepo::new(ctx.pool.clone());
+    let mut filtered = Map::new();
     let mut accepted: Vec<String> = Vec::new();
 
     for (key, value) in &req.backup.settings {
@@ -361,28 +340,19 @@ pub async fn state_restore(
             tracing::warn!(key = %key, "state.restore: rejected secret-keyed entry in backup");
             continue;
         }
-        repo.put(key, value).await?;
+        filtered.insert(key.clone(), value.clone());
         accepted.push(key.clone());
-
-        if key == "providers" {
-            ctx.manager.providers().reload(Some(value));
-        }
-        if key == "disabled_providers" {
-            let names: Vec<String> = serde_json::from_value(value.clone()).unwrap_or_default();
-            ctx.manager.providers().set_disabled(&names);
-        }
-        if key == otto_core::kubeconfig_policy::EXTRA_PLUGINS_SETTING {
-            let names: Vec<String> = serde_json::from_value(value.clone()).unwrap_or_default();
-            otto_core::kubeconfig_policy::set_extra_plugins(&names);
-        }
-        if key == "agent_skip_permissions" {
-            let skip = value.as_bool().unwrap_or(true);
-            let overrides = repo.get("providers").await.ok().flatten();
-            ctx.manager
-                .providers()
-                .set_skip_permissions(skip, overrides.as_ref());
-        }
     }
+
+    let extra_plugins = crate::routes::settings::validate_settings_patch(&filtered)?;
+    repo.put_many(&filtered).await?;
+    crate::routes::settings::apply_setting_side_effects(
+        &ctx,
+        &repo,
+        &filtered,
+        extra_plugins.as_deref(),
+    )
+    .await;
 
     accepted.sort();
 
@@ -476,6 +446,28 @@ mod tests {
         // Nested secret sub-key is redacted by the redact_json pass.
         let pr = scrubbed["pr_review"].as_object().unwrap();
         assert_eq!(pr["password"], json!("[redacted]"));
+    }
+
+    #[test]
+    fn validate_settings_patch_rejects_shells_in_kubeconfig_exec_plugins() {
+        let mut bad = Map::new();
+        bad.insert(
+            otto_core::kubeconfig_policy::EXTRA_PLUGINS_SETTING.into(),
+            json!(["sh"]),
+        );
+        let err = crate::routes::settings::validate_settings_patch(&bad)
+            .expect_err("shell exec plugin must be rejected");
+        assert!(matches!(err.0, otto_core::Error::Invalid(_)));
+
+        let mut good = Map::new();
+        good.insert(
+            otto_core::kubeconfig_policy::EXTRA_PLUGINS_SETTING.into(),
+            json!(["my-corp-kube-auth"]),
+        );
+        assert_eq!(
+            crate::routes::settings::validate_settings_patch(&good).unwrap(),
+            Some(vec!["my-corp-kube-auth".into()])
+        );
     }
 }
 

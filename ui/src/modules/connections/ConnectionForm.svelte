@@ -1,9 +1,15 @@
+<script lang="ts" module>
+  import type { ConnectionKind as _CK, Environment as _Env } from '../../lib/api/types';
+  export interface ConnectionPrefill { name?: string; kind?: _CK; host?: string; port?: number; user?: string; db?: string; environment?: _Env; tlsMode?: 'disabled' | 'preferred' | 'required'; source?: string; }
+</script>
+
 <script lang="ts">
   import { announce } from '../../lib/announce.svelte';
   import PemField from './PemField.svelte';
   import TunnelFields from './TunnelFields.svelte';
   import { argvWarningFor } from './connection-warnings';
   import { toastError } from '../../lib/toastError';
+  import { loadErrorText } from '../../lib/loadError';
   // New/Edit connection sheet — unified form with optional SSH tunnel toggle.
   // Field layout: name / kind / host / port / user / database / password /
   //   [SSH section: jump host + identity file] / first command.
@@ -20,6 +26,8 @@
 
   interface Props {
     existing: Connection | null;
+    /** Optional initial values when creating a new connection (e.g. from AWS RDS). */
+    prefill?: ConnectionPrefill | null;
     onclose: () => void;
     onsaved: (c: Connection) => void;
     /** Restrict the kind selector (e.g. DB-only in the Database module). */
@@ -27,12 +35,7 @@
     /** "Diagnose with an agent…" on a saved profile's failed Test (the host closes the form and asks consent). */
     ondiagnose?: (probe: { message: string; hint?: string | null; detail?: string | null }) => void;
   }
-  let {
-    existing,
-    onclose,
- onsaved, ondiagnose,
-    kinds = ['ssh', 'mysql', 'postgres', 'redis', 'mongodb', 'clickhouse', 'custom'],
-  }: Props = $props();
+  let { existing, prefill = null, onclose, onsaved, ondiagnose, kinds = ['ssh', 'mysql', 'postgres', 'redis', 'mongodb', 'clickhouse', 'custom'] }: Props = $props();
 
   // Display names for the kind chips / toasts (the raw enum is lowercase).
   const kindLabels: Record<ConnectionKind, string> = {
@@ -51,20 +54,20 @@
   const jumpKinds = new Set<ConnectionKind>(['mysql', 'postgres', 'redis', 'clickhouse']);
 
   // svelte-ignore state_referenced_locally
-  let name = $state(existing?.name ?? '');
+  let name = $state(existing?.name ?? prefill?.name ?? '');
   // svelte-ignore state_referenced_locally
-  let kind: ConnectionKind = $state(existing?.kind ?? kinds[0] ?? 'ssh');
+  let kind: ConnectionKind = $state(existing?.kind ?? (prefill?.kind && kinds.includes(prefill.kind) ? prefill.kind : undefined) ?? kinds[0] ?? 'ssh');
 
-  // Initialise individual fields from existing params so they survive kind switches.
+  // Initialise individual fields from existing params (or prefill) so they survive kind switches.
   // svelte-ignore state_referenced_locally
-  let fHost       = $state((existing?.params?.host        as string)  ?? '');
+  let fHost       = $state((existing?.params?.host        as string)  ?? prefill?.host ?? '');
   // svelte-ignore state_referenced_locally
   let fPort       = $state((existing?.params?.port        as string|number|undefined) != null
-    ? String(existing!.params!.port) : '');
+    ? String(existing!.params!.port) : (prefill?.port != null ? String(prefill.port) : ''));
   // svelte-ignore state_referenced_locally
-  let fUser       = $state((existing?.params?.user        as string)  ?? '');
+  let fUser       = $state((existing?.params?.user        as string)  ?? prefill?.user ?? '');
   // svelte-ignore state_referenced_locally
-  let fDb         = $state(((existing?.params?.db ?? existing?.params?.database) as string) ?? '');
+  let fDb         = $state(((existing?.params?.db ?? existing?.params?.database) as string) ?? prefill?.db ?? '');
   // svelte-ignore state_referenced_locally
   let fTimezone   = $state((existing?.params?.timezone    as string)  ?? 'UTC');
   // svelte-ignore state_referenced_locally
@@ -84,7 +87,7 @@
   // `prod` connections (and any read-only profile) refuse writes/DDL in the DB
   // Explorer unless the user types a confirmation — see the database module.
   // svelte-ignore state_referenced_locally
-  let environment = $state<Environment>(existing?.environment ?? 'dev');
+  let environment = $state<Environment>(existing?.environment ?? prefill?.environment ?? 'dev');
   // svelte-ignore state_referenced_locally
   let readOnly = $state(existing?.read_only ?? false);
 
@@ -101,7 +104,7 @@
   const existingSsh = (existing?.params?.ssh as Record<string, unknown> | undefined) ?? undefined;
 
   // svelte-ignore state_referenced_locally
-  let tlsMode = $state<TlsMode>(((existingTls?.mode as TlsMode) ?? (existing?.params?.secure === true ? 'required' : 'disabled')));
+  let tlsMode = $state<TlsMode>(((existingTls?.mode as TlsMode) ?? (existing?.params?.secure === true ? 'required' : (prefill?.tlsMode ?? 'disabled'))));
   // svelte-ignore state_referenced_locally
   let tlsVerify = $state(existingTls?.verify !== undefined ? !!existingTls.verify : true);
   // svelte-ignore state_referenced_locally
@@ -139,10 +142,12 @@
   $effect(() => {
     const wsId = ws.currentId;
     if (!wsId || isGlobal) return;
+    let current = true;
     void api
       .get<ConnectionSection[]>(`/workspaces/${wsId}/connection-sections`)
-      .then((s) => (sections = s.sort((a, b) => a.position - b.position)))
+      .then((s) => { if (current) sections = s.sort((a, b) => a.position - b.position); })
       .catch(() => {});
+    return () => { current = false; };
   });
 
   // Flatten the section tree into indented <option>s ("Platform / AWS").
@@ -424,53 +429,37 @@
     });
   });
 
+  let testSeq = 0;
+  $effect(() => () => { testSeq++; });
   async function testUnsaved(): Promise<void> {
     if (testing || !auth.isRoot) return;
-    testing = true;
-    testResult = null;
-    testedSig = formSig;
+    const seq = ++testSeq;
+    testing = true; testResult = null; testedSig = formSig;
     try {
       if (kind === 'ssh') {
-        // SSH profiles hold no secret — the probe uses this Mac's keys / agent.
         const req: TestUnsavedConnectionReq = { workspace_id: ws.currentId ?? '', kind: 'ssh', params: buildParams() };
         const res = await api.post<TestConnectionResp>('/connections/unsaved/test', req);
+        if (seq !== testSeq) return;
         testResult = {
-          ok: res.ok,
-          detail: res.ok
-            ? `Connected${res.latency_ms != null ? ` (${res.latency_ms}ms)` : ''}`
-            : res.message,
-          hint: res.hint ?? undefined,
-          warn: res.warn_key_perms ?? undefined, stderr: res.detail ?? undefined, argv: typeof res.warn_argv === 'boolean' ? res.warn_argv : undefined,
+          ok: res.ok, detail: res.ok ? `Connected${res.latency_ms != null ? ` (${res.latency_ms}ms)` : ''}` : res.message,
+          hint: res.hint ?? undefined, warn: res.warn_key_perms ?? undefined, stderr: res.detail ?? undefined, argv: typeof res.warn_argv === 'boolean' ? res.warn_argv : undefined,
         };
       } else {
-        const body: Record<string, unknown> = {
-          workspace_id: ws.currentId,
-          kind,
-          params: buildParams(),
-        };
-        // The server resolves the saved credential after checking root/configure
-        // authority; it never returns the credential to this form.
+        const body: Record<string, unknown> = { workspace_id: ws.currentId, kind, params: buildParams() };
         if (existing) body.connection_id = existing.id;
         if (auth.isRoot && secret !== '') body.secret = secret;
-        const res = await api.post<{ ok: boolean; latency_ms?: number; message: string; server_version?: string; warn_argv?: boolean }>(
-          '/connections/unsaved/db/test',
-          body,
-        );
-        const bits = [res.server_version, res.latency_ms != null ? `${res.latency_ms}ms` : null]
-          .filter(Boolean)
-          .join(' · ');
+        const res = await api.post<{ ok: boolean; latency_ms?: number; message: string; server_version?: string; warn_argv?: boolean }>('/connections/unsaved/db/test', body);
+        if (seq !== testSeq) return;
+        const bits = [res.server_version, res.latency_ms != null ? `${res.latency_ms}ms` : null].filter(Boolean).join(' · ');
         testResult = { ok: res.ok, detail: bits ? `${res.message} (${bits})` : res.message, argv: res.warn_argv };
       }
     } catch (e) {
-      testResult = { ok: false, detail: e instanceof Error ? e.message : String(e) };
+      if (seq !== testSeq) return;
+      testResult = { ok: false, detail: loadErrorText(e) };
     } finally {
-      testing = false;
+      if (seq === testSeq) testing = false;
     }
-    // A failure's explanation lives at the end of the (scrollable) form body —
-    // bring it into view so the user sees what to fix without hunting.
-    if (testResult && (!testResult.ok || testResult.warn)) {
-      queueMicrotask(() => testPanel?.scrollIntoView({ block: 'nearest' }));
-    }
+    if (seq === testSeq && testResult && (!testResult.ok || testResult.warn)) queueMicrotask(() => testPanel?.scrollIntoView({ block: 'nearest' }));
   }
 
   async function save(): Promise<void> {

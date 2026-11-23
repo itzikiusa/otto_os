@@ -34,7 +34,7 @@ for (const [file, idKey, load, get, send, stop] of [
         provider: 'claude',
         threadModel: null,
         chatModel: null,
-        newTurnId: () => `turn-${sentTurns.length + 1}`,
+        newId: () => `turn-${sentTurns.length + 1}`,
         product: {
           [get]: (id: string) =>
             id === 'A'

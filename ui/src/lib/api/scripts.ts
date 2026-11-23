@@ -5,6 +5,7 @@
 // sandbox.
 
 import type { ApiKeyVal } from './types';
+import { evalScript } from './scriptEval.ts';
 
 export interface PreRequestReq {
   method: string;
@@ -110,11 +111,9 @@ function run(code: string, pm: unknown): ScriptRun {
     charge(test.name + (test.error ?? '')); tests.push(test);
   };
   try {
-    // Executed in a dedicated Worker by interactive callers. This pure runtime
-    // also supports bounded unit fixtures; it is not a security sandbox.
-    // eslint-disable-next-line no-new-func
-    const fn = new Function('pm', 'console', code);
-    fn(pm, consoleProxy);
+    // Executed in a dedicated Worker by interactive callers via our CSP-safe
+    // AST evaluator (zero `eval` / `new Function`, allowing strict Tauri CSP).
+    evalScript(code, { pm, console: consoleProxy });
     return { logs, tests };
   } catch (e) {
     return { logs, tests, error: e instanceof Error ? `${e.name}: ${e.message}` : String(e) };

@@ -113,7 +113,7 @@
       oncreated(id);
     } catch (e) {
       error = createErrorText(e);
-      errorDetail = e instanceof Error ? e.message : String(e);
+      errorDetail = loadErrorText(e);
     } finally {
       busy = false;
     }

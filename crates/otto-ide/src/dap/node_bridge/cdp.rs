@@ -16,6 +16,11 @@ use crate::dap::wire;
 use crate::dap::{spawn_target_process, ssh_tunnel_config, BridgeGuard};
 use crate::types::{IdeSshSpec, IdeTargetKind, IdeTargetSpec};
 
+const CDP_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_HANDSHAKE_LINES: usize = 64;
+const MAX_HANDSHAKE_BYTES: usize = 64 * 1024;
+const MAX_DISCOVER_BYTES: u64 = 1024 * 1024;
+
 pub(super) struct InspectorWs {
     reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
     writer: tokio::net::tcp::OwnedWriteHalf,
@@ -27,57 +32,80 @@ pub(super) struct InspectorWs {
 
 impl InspectorWs {
     pub async fn connect(port: u16, ws_path: &str) -> Result<Self> {
-        let stream = TcpStream::connect(("127.0.0.1", port))
-            .await
-            .map_err(|e| Error::Upstream(format!("connect V8 inspector 127.0.0.1:{port}: {e}")))?;
-        let _ = stream.set_nodelay(true);
-        let (read_half, mut writer) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
-        let req = format!(
-            "GET {ws_path} HTTP/1.1\r\n\
-             Host: 127.0.0.1:{port}\r\n\
-             Upgrade: websocket\r\n\
-             Connection: Upgrade\r\n\
-             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
-             Sec-WebSocket-Version: 13\r\n\r\n"
-        );
-        writer
-            .write_all(req.as_bytes())
-            .await
-            .map_err(|e| Error::Upstream(format!("inspector handshake write: {e}")))?;
-        writer
-            .flush()
-            .await
-            .map_err(|e| Error::Upstream(format!("inspector handshake flush: {e}")))?;
+        Self::connect_with_timeout(port, ws_path, CDP_HANDSHAKE_TIMEOUT).await
+    }
 
-        let mut status_ok = false;
-        loop {
-            let mut line = String::new();
-            let n = reader
-                .read_line(&mut line)
+    pub(super) async fn connect_with_timeout(
+        port: u16,
+        ws_path: &str,
+        timeout: Duration,
+    ) -> Result<Self> {
+        let work = async {
+            let stream = TcpStream::connect(("127.0.0.1", port)).await.map_err(|e| {
+                Error::Upstream(format!("connect V8 inspector 127.0.0.1:{port}: {e}"))
+            })?;
+            let _ = stream.set_nodelay(true);
+            let (read_half, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let req = format!(
+                "GET {ws_path} HTTP/1.1\r\n\
+                 Host: 127.0.0.1:{port}\r\n\
+                 Upgrade: websocket\r\n\
+                 Connection: Upgrade\r\n\
+                 Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                 Sec-WebSocket-Version: 13\r\n\r\n"
+            );
+            writer
+                .write_all(req.as_bytes())
                 .await
-                .map_err(|e| Error::Upstream(format!("inspector handshake read: {e}")))?;
-            if n == 0 {
-                return Err(Error::Upstream("V8 inspector closed before upgrade".into()));
+                .map_err(|e| Error::Upstream(format!("inspector handshake write: {e}")))?;
+            writer
+                .flush()
+                .await
+                .map_err(|e| Error::Upstream(format!("inspector handshake flush: {e}")))?;
+
+            let mut status_ok = false;
+            let mut total_bytes = 0usize;
+            for _ in 0..MAX_HANDSHAKE_LINES {
+                let mut line = String::new();
+                let n = (&mut reader)
+                    .take((MAX_HANDSHAKE_BYTES.saturating_sub(total_bytes) + 1) as u64)
+                    .read_line(&mut line)
+                    .await
+                    .map_err(|e| Error::Upstream(format!("inspector handshake read: {e}")))?;
+                if n == 0 {
+                    return Err(Error::Upstream("V8 inspector closed before upgrade".into()));
+                }
+                total_bytes += n;
+                if total_bytes > MAX_HANDSHAKE_BYTES {
+                    return Err(Error::Upstream(
+                        "V8 inspector handshake response exceeded size cap".into(),
+                    ));
+                }
+                if line.starts_with("HTTP/1.1 101") || line.starts_with("HTTP/1.0 101") {
+                    status_ok = true;
+                }
+                if line == "\r\n" || line == "\n" {
+                    if !status_ok {
+                        return Err(Error::Upstream(
+                            "V8 inspector rejected WebSocket upgrade".into(),
+                        ));
+                    }
+                    return Ok(Self {
+                        reader,
+                        writer,
+                        rx: Vec::new(),
+                        message: Vec::new(),
+                    });
+                }
             }
-            if line.starts_with("HTTP/1.1 101") || line.starts_with("HTTP/1.0 101") {
-                status_ok = true;
-            }
-            if line == "\r\n" || line == "\n" {
-                break;
-            }
-        }
-        if !status_ok {
-            return Err(Error::Upstream(
-                "V8 inspector rejected WebSocket upgrade".into(),
-            ));
-        }
-        Ok(Self {
-            reader,
-            writer,
-            rx: Vec::new(),
-            message: Vec::new(),
-        })
+            Err(Error::Upstream(
+                "V8 inspector handshake exceeded header line limit".into(),
+            ))
+        };
+        tokio::time::timeout(timeout, work)
+            .await
+            .map_err(|_| Error::Upstream("V8 inspector handshake timed out".into()))?
     }
 
     pub async fn send_json(&mut self, val: &Value) -> io::Result<()> {
@@ -126,6 +154,15 @@ impl InspectorWs {
                     0x8 => return Ok(None),
                     0x9 => Self::write_masked_frame(&mut self.writer, 0x8a, &payload).await?,
                     0x0 | 0x1 => {
+                        if self.message.len().saturating_add(payload.len())
+                            > wire::MAX_MESSAGE_BYTES
+                        {
+                            self.message.clear();
+                            return Err(io::Error::new(
+                                ErrorKind::InvalidData,
+                                "V8 inspector fragmented message exceeds 16 MiB",
+                            ));
+                        }
                         self.message.extend_from_slice(&payload);
                         if fin {
                             let msg = std::mem::take(&mut self.message);
@@ -189,20 +226,39 @@ impl InspectorWs {
 }
 
 pub(super) async fn discover_attach_ws_path(port: u16) -> Result<String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", port))
-        .await
-        .map_err(|e| Error::Upstream(format!("connect Node inspector 127.0.0.1:{port}: {e}")))?;
-    let req =
-        format!("GET /json/list HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
-    stream
-        .write_all(req.as_bytes())
-        .await
-        .map_err(|e| Error::Upstream(format!("query /json/list: {e}")))?;
-    let mut raw = Vec::new();
-    stream
-        .read_to_end(&mut raw)
-        .await
-        .map_err(|e| Error::Upstream(format!("read /json/list: {e}")))?;
+    discover_attach_ws_path_with_timeout(port, CDP_HANDSHAKE_TIMEOUT).await
+}
+
+pub(super) async fn discover_attach_ws_path_with_timeout(
+    port: u16,
+    timeout: Duration,
+) -> Result<String> {
+    let raw = tokio::time::timeout(timeout, async {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).await.map_err(|e| {
+            Error::Upstream(format!("connect Node inspector 127.0.0.1:{port}: {e}"))
+        })?;
+        let req = format!(
+            "GET /json/list HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+        );
+        stream
+            .write_all(req.as_bytes())
+            .await
+            .map_err(|e| Error::Upstream(format!("query /json/list: {e}")))?;
+        let mut raw = Vec::new();
+        stream
+            .take(MAX_DISCOVER_BYTES + 1)
+            .read_to_end(&mut raw)
+            .await
+            .map_err(|e| Error::Upstream(format!("read /json/list: {e}")))?;
+        if raw.len() as u64 > MAX_DISCOVER_BYTES {
+            return Err(Error::Upstream(
+                "Node inspector /json/list response exceeded 1 MiB cap".into(),
+            ));
+        }
+        Ok(raw)
+    })
+    .await
+    .map_err(|_| Error::Upstream("Node inspector /json/list timed out".into()))??;
     let text = String::from_utf8_lossy(&raw);
     let body = text
         .split_once("\r\n\r\n")
@@ -377,6 +433,68 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(msg["method"], "Debugger.paused");
+        drop(server);
+    }
+
+    #[tokio::test]
+    async fn connect_and_discover_time_out_on_silent_peer() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let _hold = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+        let err = InspectorWs::connect_with_timeout(port, "/x", Duration::from_millis(120))
+            .await
+            .err()
+            .expect("silent handshake must time out");
+        assert!(err.to_string().contains("timed out"), "unexpected: {err}");
+
+        let err2 = discover_attach_ws_path_with_timeout(port, Duration::from_millis(120))
+            .await
+            .unwrap_err();
+        assert!(err2.to_string().contains("timed out"), "unexpected: {err2}");
+    }
+
+    #[tokio::test]
+    async fn next_json_rejects_accumulated_fragments_over_cap() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut req = BufReader::new(&mut sock);
+            let mut line = String::new();
+            while req.read_line(&mut line).await.unwrap() > 0 && line != "\r\n" {
+                line.clear();
+            }
+            sock.write_all(b"HTTP/1.1 101 Switching Protocols\r\n\r\n")
+                .await
+                .unwrap();
+            // Send three 6 MiB non-final fragments (each < 16 MiB, total 18 MiB > 16 MiB).
+            let chunk = vec![b'a'; 6 * 1024 * 1024];
+            for i in 0..3 {
+                let first = if i == 0 { 0x01u8 } else { 0x00u8 };
+                let mut hdr = vec![first, 127];
+                hdr.extend_from_slice(&(chunk.len() as u64).to_be_bytes());
+                if sock.write_all(&hdr).await.is_err() || sock.write_all(&chunk).await.is_err() {
+                    break;
+                }
+            }
+            sock
+        });
+
+        let mut ws = InspectorWs::connect(port, "/x").await.unwrap();
+        let err = tokio::time::timeout(Duration::from_secs(5), ws.next_json())
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("exceeds 16 MiB"),
+            "unexpected err: {err}"
+        );
         drop(server);
     }
 }

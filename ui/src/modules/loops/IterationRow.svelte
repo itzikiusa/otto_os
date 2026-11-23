@@ -81,11 +81,16 @@
     }
   }
 
+  let retryingIdx = $state<number | null>(null);
   async function retry(agentIndex: number): Promise<void> {
+    if (retryingIdx !== null) return;
+    retryingIdx = agentIndex;
     try {
       await loops.retryExecutor(loopId, iter.idx, agentIndex);
     } catch (e) {
       toastError('Couldn’t retry the agent', e);
+    } finally {
+      retryingIdx = null;
     }
   }
 
@@ -138,7 +143,9 @@
               <button class="btn ghost small" title="Open {a.name}’s session" onclick={() => onopensession(a.session_id ?? '')}>Open session</button>
             {/if}
             {#if i < executorCount && canRetry(a)}
-              <button class="btn small" onclick={() => retry(i)}>Retry</button>
+              <button class="btn small" disabled={retryingIdx !== null} onclick={() => void retry(i)}>
+                {retryingIdx === i ? 'Retrying…' : 'Retry'}
+              </button>
             {/if}
           </div>
         {/each}

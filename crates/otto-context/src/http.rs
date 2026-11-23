@@ -35,6 +35,11 @@ pub trait ContextCtx: Clone + Send + Sync + 'static {
     fn library(&self) -> &Library;
     fn workspaces(&self) -> &WorkspacesRepo;
     fn roles(&self) -> &Arc<dyn RoleChecker>;
+    /// Optional workspace memory repository for intent-aware context assembly.
+    /// Defaults to `None` so existing implementors remain source-compatible.
+    fn memories(&self) -> Option<otto_state::MemoriesRepo> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -163,7 +168,8 @@ async fn list_skills<C: ContextCtx>(
     State(s): State<C>,
     Extension(_user): Extension<AuthUser>,
 ) -> ApiResult<Json<Vec<LibrarySkill>>> {
-    Ok(Json(s.library().list_skills()))
+    let lib = s.library().clone();
+    Ok(Json(off_runtime(move || lib.list_skills()).await?))
 }
 
 async fn get_skill<C: ContextCtx>(
@@ -171,8 +177,10 @@ async fn get_skill<C: ContextCtx>(
     Extension(_user): Extension<AuthUser>,
     Path(name): Path<String>,
 ) -> ApiResult<Json<LibrarySkill>> {
-    s.library()
-        .get_skill(&name)
+    let lib = s.library().clone();
+    let key = name.clone();
+    off_runtime(move || lib.get_skill(&key))
+        .await?
         .map(Json)
         .ok_or_else(|| Error::NotFound(format!("skill '{name}'")).into())
 }
@@ -289,10 +297,15 @@ async fn list_skill_files<C: ContextCtx>(
     Extension(_user): Extension<AuthUser>,
     Path(name): Path<String>,
 ) -> ApiResult<Json<Vec<SkillFileEntry>>> {
-    if s.library().get_skill(&name).is_none() {
-        return Err(Error::NotFound(format!("skill '{name}'")).into());
-    }
-    Ok(Json(s.library().list_skill_files(&name)))
+    let lib = s.library().clone();
+    let key = name.clone();
+    let files = off_runtime(move || {
+        lib.get_skill(&key)
+            .map(|_| lib.list_skill_files(&key))
+            .ok_or_else(|| Error::NotFound(format!("skill '{key}'")))
+    })
+    .await??;
+    Ok(Json(files))
 }
 
 /// `GET /library/skills/{name}/file` — the file plus `hash`, the SHA-256 of
@@ -310,22 +323,24 @@ async fn get_skill_file<C: ContextCtx>(
     Path(name): Path<String>,
     Query(q): Query<FileQuery>,
 ) -> ApiResult<Json<SkillFileWithHash>> {
-    let (content, binary) = s
-        .library()
-        .read_skill_file(&name, &q.path)
-        .ok_or_else(|| Error::NotFound(format!("file '{}' in skill '{name}'", q.path)))?;
-    let hash = s
-        .library()
-        .skill_file_hash(&name, &q.path)
-        .unwrap_or_default();
-    Ok(Json(SkillFileWithHash {
-        file: SkillFileContentResp {
-            path: q.path,
-            content,
-            binary,
-        },
-        hash,
-    }))
+    let lib = s.library().clone();
+    let path = q.path;
+    let out = off_runtime(move || {
+        let (content, binary) = lib
+            .read_skill_file(&name, &path)
+            .ok_or_else(|| Error::NotFound(format!("file '{path}' in skill '{name}'")))?;
+        let hash = lib.skill_file_hash(&name, &path).unwrap_or_default();
+        Ok::<_, Error>(SkillFileWithHash {
+            file: SkillFileContentResp {
+                path,
+                content,
+                binary,
+            },
+            hash,
+        })
+    })
+    .await??;
+    Ok(Json(out))
 }
 
 /// `PUT /library/skills/{name}/file` body (`otto_core::api::WriteSkillFileReq`
@@ -442,18 +457,20 @@ async fn create_skill<C: ContextCtx>(
     Json(req): Json<CreateLibrarySkillReq>,
 ) -> ApiResult<Json<LibrarySkill>> {
     require_root(&user)?;
-    s.library()
-        .create_skill(
+    let lib = s.library().clone();
+    let skill = off_runtime(move || {
+        lib.create_skill(
             &req.name,
             &req.category,
             &req.description,
             req.body.as_deref(),
         )
         .map_err(|e| map_io("create skill", e))?;
-    s.library()
-        .get_skill(&req.name)
-        .map(Json)
-        .ok_or_else(|| Error::Internal("skill not found after create".into()).into())
+        lib.get_skill(&req.name)
+            .ok_or_else(|| Error::Internal("skill not found after create".into()))
+    })
+    .await??;
+    Ok(Json(skill))
 }
 
 /// Import a skill package from a raw zip request body. Optional `?name=` overrides
@@ -712,12 +729,41 @@ async fn materialize_ws<C: ContextCtx>(
         None => vec!["claude".to_string(), "codex".to_string(), "agy".to_string()],
     };
 
+    let memory_brief = if cfg.include_memory {
+        if let Some(repo) = s.memories() {
+            let filter = crate::memory_brief::MemoryBriefFilter {
+                query: crate::memory_brief::intent_query_for_cwd(&ws.root_path, &ws.name),
+                viewer: (!user.0.is_root).then(|| user.0.id.clone()),
+                ..Default::default()
+            };
+            crate::memory_brief::load_workspace_memory_brief(&repo, &ws.id, &filter).await
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
     let library = s.library().clone();
     let provider_results: Vec<MaterializeProviderResult> = off_runtime(move || {
         let ctx_root = materialize::default_context_root();
+        let opts = materialize::MaterializeOptions {
+            memory_brief_md: (!memory_brief.is_empty()).then_some(memory_brief.as_str()),
+            ..Default::default()
+        };
         providers
             .iter()
-            .map(|p| materialize::provision(&library, &cfg, &ws.root_path, p, &ctx_root).0)
+            .map(|p| {
+                materialize::provision_with_options(
+                    &library,
+                    &cfg,
+                    &ws.root_path,
+                    p,
+                    &ctx_root,
+                    &opts,
+                )
+                .0
+            })
             .collect()
     })
     .await?;
@@ -775,12 +821,31 @@ async fn preview_ws<C: ContextCtx>(
     // for a Viewer. Confine the override to the workspace root.
     let cwd = resolve_preview_cwd(&ws.root_path, req.cwd.as_deref())?;
 
+    let memory_brief = if cfg.include_memory {
+        if let Some(repo) = s.memories() {
+            let filter = crate::memory_brief::MemoryBriefFilter {
+                query: crate::memory_brief::intent_query_for_cwd(&cwd, &ws.name),
+                viewer: (!user.0.is_root).then(|| user.0.id.clone()),
+                ..Default::default()
+            };
+            crate::memory_brief::load_workspace_memory_brief(&repo, &ws.id, &filter).await
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
     let library = s.library().clone();
     let providers: Vec<ContextPreviewProvider> = off_runtime(move || {
         let ctx_root = materialize::default_context_root();
+        let opts = materialize::MaterializeOptions {
+            memory_brief_md: (!memory_brief.is_empty()).then_some(memory_brief.as_str()),
+            ..Default::default()
+        };
         providers
             .iter()
-            .map(|p| materialize::preview(&library, &cfg, &cwd, p, &ctx_root))
+            .map(|p| materialize::preview_with_options(&library, &cfg, &cwd, p, &ctx_root, &opts))
             .collect()
     })
     .await?;

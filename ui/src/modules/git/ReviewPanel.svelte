@@ -4,20 +4,19 @@
   // AI review panel: start review agents, refresh via WS reviewBus (no poll),
   // approve/decline individual draft comments. Supports live per-agent progress
   // cards, a configure-agents modal, and a merge-readiness panel.
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { summaryFallback, summaryFallbackTitle } from './reviewFallback';
   import { toastError } from '../../lib/toastError';
   import { api, ApiError, isAbortError } from '../../lib/api/client';
   import { prDiffFile, prDiffSummary } from '../../lib/diff/diff-load';
   import { alreadyOnPr } from './reviewPost';
   import type {
-    Review, ReviewComment, ReviewConfig, ReviewAgentCfg, ReviewConfigPreset, RepoReviewBinding,
+    Review, ReviewComment,
     RepoReviewConfigResp, StartReviewReq, FileDiff, DiffLine, MergeReadiness, ReviewTriage, EditReviewCommentReq, PrDetail,
   } from '../../lib/api/types';
-  import { advancedOf, mergeReviewConfig, syncProviders, type ReviewAdvanced } from './reviewConfigMerge';
   import { postAllPlan, triageIndex, type PostAllPlan } from './reviewTriage';
   import { askDismissal, fetchTriage } from './reviewTriageApi';
-  import ReviewConfigAdvanced from './ReviewConfigAdvanced.svelte';
+  import ReviewConfigModal from './ReviewConfigModal.svelte';
   import PostCommentsConfirm from './PostCommentsConfirm.svelte';
   import ReviewCommentTriage from './ReviewCommentTriage.svelte';
   import ReviewMergeGate from './ReviewMergeGate.svelte';
@@ -28,9 +27,9 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import Modal from '../../lib/components/Modal.svelte';
+  import AgentChip from '../../lib/components/AgentChip.svelte';
   import { rel } from '../../lib/stores/now.svelte';
   import JiraIssuePicker from '../agents/JiraIssuePicker.svelte';
-  import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { confirmOutward } from '../../lib/confirmOutward';
@@ -38,27 +37,16 @@
   import ReviewAgents from './ReviewAgents.svelte';
   import ReviewScope from './ReviewScope.svelte';
   import ReviewIncomplete from './ReviewIncomplete.svelte';
+  import ReviewPollStale from './ReviewPollStale.svelte';
   import FixReviewButton from './FixReviewButton.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus } from '../../lib/status';
   import FindingsBoard from './FindingsBoard.svelte';
-  // Subscribe to the WS review_changed bus (populated by events.svelte.ts) to
-  // re-fetch when the running review for this PR completes/errors, replacing the
-  // fixed-interval visibility-gated poll for the running state.
   import { reviewBus } from '../../lib/events.svelte';
   import { appLive } from '../../lib/live';
-  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
-
-  // --- Installed-skill metadata (library API; category + version are new) ----
-  // Defined locally so this panel can read the extended fields without touching
-  // the shared LibrarySkill type.
-  interface LibrarySkillMeta {
-    name: string;
-    description: string;
-    category?: string | null;
-    version?: number | null;
-    body?: string;
-  }
+  import { snippetLinesFor } from './reviewSnippetIndex';
+  import { repoReviewConfigBadge, shouldCollapseReviewInputs } from './gitUiHelpers';
+  import { renderPrMarkdown } from './prMarkdown';
 
   interface Props {
     repoId: string;
@@ -92,12 +80,27 @@
   // Reads started before a new run/cancel/retry must not restore old progress.
   let reviewGeneration = 0;
   let disposed = false;
-  onDestroy(() => { disposed = true; reviewGeneration++; });
+  function cancelPendingPostConfirm(): void {
+    if (!postConfirm) return;
+    const pending = postConfirm;
+    postConfirm = null;
+    pending.done(null);
+  }
+  onDestroy(() => {
+    disposed = true;
+    reviewGeneration++;
+    if (pollTimer !== null) {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+    }
+    cancelPendingPostConfirm();
+  });
   // Fallback poll (visibility-gated) used only while the review is running and
   // no WS event has arrived yet — keeps the panel alive if the WS drops.
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let pollCount = $state(0);
   let pollPaused = $state(false);
+  let pollStale = $state(false);
   // Merge-readiness data from the dedicated endpoint (fetched after a run completes).
   let mergeReadiness: MergeReadiness | null = $state(null);
   let mergeReadinessLoading = $state(false);
@@ -124,6 +127,7 @@
     review = r;
     history = history.length > 0 ? [r, ...history.slice(1)] : [r];
     pollCount = 0;
+    pollStale = false;
     schedulePoll();
   }
 
@@ -134,60 +138,16 @@
   let showJiraPicker = $state(false);
   // The currently attached issue (persists across re-runs within this component)
   let attachedIssue: { account_id: string; key: string; summary: string } | null = $state(null);
+  let attachStoryBtnEl = $state<HTMLButtonElement | null>(null);
 
   // Free-text guidance for the review agents (e.g. "what to focus on"). Optional;
   // persists across re-runs within this component.
   let reviewContext = $state('');
+  // On a completed review, collapse the Jira/focus inputs behind "Re-run review…".
+  let rerunOptionsOpen = $state(false);
 
   let showConfig = $state(false);
-  let configLoading = $state(false);
-  let configSaving = $state(false);
-  let crossProviderCheck = $state(false);
-  let editAgents: ReviewAgentCfg[] = $state([]);
-  let editSummarizer: ReviewAgentCfg = $state({
-    name: 'Summarizer',
-    provider: defaultAgentProvider(),
-    providers: [],
-    model: '',
-    prompt: '',
-  });
-  let editPresets: ReviewAgentCfg[] = $state([]);
-  let configScope: 'global' | 'repo' = $state('global');
-  let globalCfg: ReviewConfig | null = $state(null);
   let repoCfg: RepoReviewConfigResp | null = $state(null);
-  let namedPresets: ReviewConfigPreset[] = $state([]);
-  // '' = repo-only custom config (no preset backing it).
-  let selectedPresetId = $state('');
-  let presetSaveOpen = $state(false);
-  let presetNameDraft = $state('');
-  // The loaded config being edited: a save lays the edits over it, so fields
-  // the modal doesn't show (set via API / MCP / a preset) survive.
-  let editBase: ReviewConfig | null = null;
-  let editAdvanced: ReviewAdvanced = $state(advancedOf(null));
-
-  /** Ensure an agent always has a `providers` array (migration from old format). */
-  function normalizeAgent(a: ReviewAgentCfg): ReviewAgentCfg {
-    if (!a.providers || a.providers.length === 0) {
-      return { ...a, providers: [a.provider || defaultAgentProvider()] };
-    }
-    return a;
-  }
-
-  /** Toggle a provider in/out of the agent's providers list. Keeps at least one. */
-  function toggleProvider(agentIdx: number, p: string): void {
-    const current = editAgents[agentIdx].providers ?? [defaultAgentProvider()];
-    const has = current.includes(p);
-    let next: string[];
-    if (has) {
-      next = current.filter((x) => x !== p);
-      if (next.length === 0) next = [defaultAgentProvider()]; // never allow empty
-    } else {
-      next = [...current, p];
-    }
-    editAgents = editAgents.map((a, i) =>
-      i === agentIdx ? { ...a, providers: next } : a
-    );
-  }
 
   // Diff state for per-comment snippets: ONLY the files that carry a comment,
   // fetched per file through the PR diff cache shared with the Files tab
@@ -199,34 +159,10 @@
   // Per-comment collapse state: true = expanded (default for draft)
   let diffExpanded: Record<string, boolean> = $state({});
 
-  // The Run-on / summarizer provider choices come from the LIVE registry
-  // (built-ins + the user's custom providers, e.g. grok) — never a hardcoded
-  // subset. Shell can't review, so agent providers only.
-  const PROVIDER_OPTIONS = $derived(agentProviders());
   const MAX_POLLS = 600; // ~20 min at 2s — covers long multi-agent live reviews
 
-  // --- Data-driven review-skill presets ------------------------------------
-  // One-click lenses derived from the installed `review`-category skills. Each
-  // becomes a review agent that runs as a session with the skill materialized,
-  // so "Apply the `<skill>` skill" makes it follow the skill's full method.
-  let skillPresets: { name: string; focus: string }[] = $state([]);
-  /** Prettify a skill name for display: "security-review" -> "Security review". */
-  function prettifySkillName(name: string): string {
-    const spaced = name.replace(/[-_]+/g, ' ').trim();
-    if (spaced === '') return name;
-    return spaced.charAt(0).toUpperCase() + spaced.slice(1);
-  }
-
-  /** Build a preset whose lens applies the named skill (materialized in-session). */
-  function presetFromSkill(s: LibrarySkillMeta): { name: string; focus: string } {
-    const desc = (s.description ?? '').trim();
-    return {
-      name: prettifySkillName(s.name),
-      focus: `Apply the \`${s.name}\` skill (it is available to you): ${desc} ${JSON_INSTR}`,
-    };
-  }
-
   $effect(() => {
+    rerunOptionsOpen = false;
     void load(repoId, prNumber);
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
@@ -265,6 +201,7 @@
       const r = await api.get<Review>(`/repos/${repoId}/prs/${prNumber}/review`);
       if (disposed || generation !== reviewGeneration) return;
       adoptReview(r);
+      pollStale = false;
       // Kill the fallback poll if the review is now terminal.
       if (r.status !== 'running') {
         if (pollTimer !== null) { clearTimeout(pollTimer); pollTimer = null; }
@@ -309,26 +246,17 @@
     }
   }
 
-  // Optional preset suggestions; adaptive review needs no installed skill.
-  $effect(() => {
-    void loadReviewSkills();
-  });
-
-  async function loadReviewSkills(): Promise<void> {
-    try {
-      const skills = await api.get<LibrarySkillMeta[]>('/library/skills');
-      skillPresets = skills
-        .filter((s) => s.category === 'review')
-        .map((s) => presetFromSkill(s));
-    } catch {
-      // Library unreachable: keep skillPresets empty -> hardcoded fallback shows.
-    }
-  }
-
   async function load(rid: string, num: number): Promise<void> {
     const generation = ++reviewGeneration;
     loading = true;
     loadError = null;
+    pollCount = 0;
+    pollStale = false;
+    editingBody = {};
+    diffExpanded = {};
+    historyExpanded = {};
+    actionBusy = {};
+    cancelPendingPostConfirm();
     resetSnippets();
     mergeReadiness = null;
     readinessError = null;
@@ -423,16 +351,27 @@
       if (pollTimer !== null) { clearTimeout(pollTimer); pollTimer = null; }
     } else {
       pollPaused = false;
-      if (review?.status === 'running') schedulePoll(0);
+      if (!pollStale && review?.status === 'running') schedulePoll(0);
     }
+  }
+
+  function resumePolling(): void {
+    pollCount = 0;
+    pollStale = false;
+    void poll();
   }
 
   async function poll(): Promise<void> {
     const generation = reviewGeneration;
+    if (pollCount >= MAX_POLLS) {
+      pollStale = true;
+      return;
+    }
     pollCount++;
     try {
       const r = await api.get<Review>(`/repos/${repoId}/prs/${prNumber}/review`);
       if (disposed || generation !== reviewGeneration) return;
+      pollStale = false;
       // Update the latest run within history (skipped when nothing changed).
       adoptReview(r);
       // Keep polling while the review runs OR any agent is still in progress
@@ -441,16 +380,27 @@
         (a) => a.status === 'pending' || a.status === 'running' || a.status === 'waiting',
       );
       if (r.status === 'running' || anyActive) {
-        schedulePoll();
+        if (pollCount >= MAX_POLLS) {
+          pollStale = true;
+        } else {
+          schedulePoll();
+        }
       } else {
         pollCount = 0;
-        if (r.status === 'done' && r.comments.length > 0) {
-          void loadDiff(repoId, prNumber);
+        if (r.status === 'done') {
+          if (r.comments.length > 0) void loadDiff(repoId, prNumber);
+          void loadFindingsAndReadiness(r.id);
         }
       }
     } catch {
-      // silently retry
-      if (!disposed && generation === reviewGeneration) schedulePoll();
+      // silently retry until MAX_POLLS
+      if (!disposed && generation === reviewGeneration) {
+        if (pollCount >= MAX_POLLS) {
+          pollStale = true;
+        } else {
+          schedulePoll();
+        }
+      }
     }
   }
 
@@ -459,7 +409,9 @@
     const generation = ++reviewGeneration;
     if (pollTimer !== null) clearTimeout(pollTimer);
     starting = true;
+    rerunOptionsOpen = false;
     pollCount = 0;
+    pollStale = false;
     resetSnippets();
     mergeReadiness = null;
     readinessError = null;
@@ -520,6 +472,7 @@
 
   function removeAttachedIssue(): void {
     attachedIssue = null;
+    void tick().then(() => attachStoryBtnEl?.focus());
   }
 
   function patchCommentInReview(r: Review, updated: ReviewComment): Review {
@@ -529,7 +482,10 @@
   // "Approving" a draft comment POSTS it to the PR on the provider under the
   // user's git account — outward-facing, so it confirms where / what / who.
   // The bulk "Post N drafts" path confirms ONCE for the batch.
-  const repoLabel = $derived(git.repos.find((r) => r.id === repoId)?.name ?? 'this repository');
+  const currentRepo = $derived(
+    git.allRepos.find((r) => r.id === repoId) ?? git.repos.find((r) => r.id === repoId) ?? null,
+  );
+  const repoLabel = $derived(currentRepo?.name ?? 'this repository');
   const prWhere = $derived(`${repoLabel} · PR #${prNumber}`);
   const PR_WHO = "The PR author and reviewers see it, posted under your git account.";
 
@@ -628,7 +584,7 @@
   const postPlan = $derived.by(() => postAllPlan((review?.comments ?? []).filter(isPostable), triageIx));
   let postConfirm: { plan: PostAllPlan; done: (send: ReviewComment[] | null) => void } | null = $state(null);
   const FORGE: Record<string, string> = { github: 'GitHub', gitlab: 'GitLab', bitbucket: 'Bitbucket' };
-  const forgeName = $derived(FORGE[git.repos.find((r) => r.id === repoId)?.provider ?? ''] ?? '');
+  const forgeName = $derived(FORGE[currentRepo?.provider ?? ''] ?? '');
   async function postAllDrafts(): Promise<void> {
     if (editingAny) {
       toasts.warn('Save your edits first', 'Some comments have unsaved edits — Save or Cancel them before posting.');
@@ -643,6 +599,7 @@
     try {
       // Re-read each comment's CURRENT state: one declined mid-run is skipped.
       for (const d of drafts) {
+        if (typeof disposed !== 'undefined' && disposed) break;
         const c = review?.comments.find((x) => x.id === d.id);
         if (!c || !isPostable(c)) continue;
         if (await postComment(c, true, true)) posted++;
@@ -728,337 +685,28 @@
   // an active override next to the Configure buttons.
   $effect(() => {
     const rid = repoId;
+    let live = true;
+    repoCfg = null;
     void api
       .get<RepoReviewConfigResp>(`/repos/${rid}/review-config`)
-      .then((r) => (repoCfg = r))
+      .then((r) => { if (live && !disposed && rid === repoId) repoCfg = r; })
       .catch(() => {});
+    return () => { live = false; };
   });
 
   /** Short badge text for an active repo override ('' = none). */
-  const repoCfgBadge = $derived.by(() => {
-    const rc = repoCfg;
-    if (rc === null || rc.scope === 'global') return '';
-    return rc.scope === 'preset' ? (rc.preset_name ?? 'preset') : 'repo config';
-  });
+  const repoCfgBadge = $derived(repoReviewConfigBadge(repoCfg));
 
-  /** Seed the edit fields from a config (normalizing `providers` arrays). */
-  function seedEditFields(cfg: ReviewConfig): void {
-    editBase = cfg;
-    editAdvanced = advancedOf(cfg);
-    crossProviderCheck = cfg.cross_provider_check ?? false;
-    editAgents = cfg.agents.map((a) => normalizeAgent({ ...a }));
-    editSummarizer = { ...cfg.summarizer };
-  }
-
-  async function openConfig(): Promise<void> {
+  function openConfig(): void {
     showConfig = true;
-    configLoading = true;
-    try {
-      const [cfg, presets, binding] = await Promise.all([
-        api.get<ReviewConfig>('/settings/pr-review'),
-        api.get<ReviewConfigPreset[]>('/settings/pr-review/presets'),
-        api.get<RepoReviewConfigResp>(`/repos/${repoId}/review-config`),
-      ]);
-      globalCfg = cfg;
-      namedPresets = presets;
-      repoCfg = binding;
-      // Per-agent presets live on the GLOBAL config regardless of scope.
-      editPresets = (cfg.custom_presets ?? []).map((p) => normalizeAgent({ ...p }));
-      // Open on the scope the repo actually reviews with.
-      configScope = binding.scope === 'global' ? 'global' : 'repo';
-      selectedPresetId = binding.preset_id ?? '';
-      seedEditFields(configScope === 'global' ? cfg : binding.config);
-    } catch (e) {
-      toastError('Couldn’t load config', e);
-      showConfig = false;
-    } finally {
-      configLoading = false;
-    }
-  }
-
-  /** Switch the modal between the global config and this repo's config. */
-  function setConfigScope(scope: 'global' | 'repo'): void {
-    if (scope === configScope) return;
-    configScope = scope;
-    if (scope === 'global') {
-      if (globalCfg) seedEditFields(globalCfg);
-    } else if (repoCfg) {
-      selectedPresetId = repoCfg.preset_id ?? '';
-      seedEditFields(repoCfg.config);
-    }
-  }
-
-  /** Load a named preset's config into the edit fields. '' keeps the current
-   *  fields as a repo-only custom config. */
-  function pickNamedPreset(id: string): void {
-    selectedPresetId = id;
-    const p = namedPresets.find((x) => x.id === id);
-    if (p) seedEditFields(p.config);
-  }
-
-  /** The config currently in the edit fields, provider-synced. Repo-scoped
-   *  configs never carry the global per-agent presets. */
-  function currentEditConfig(includePresets: boolean): ReviewConfig {
-    const base = buildConfigFromEditState(includePresets ? editPresets : []);
-    return includePresets ? base : { ...base, custom_presets: [] };
-  }
-
-  /** Compare two configs ignoring per-agent presets (preset "drift" check). */
-  function sameConfig(a: ReviewConfig, b: ReviewConfig): boolean {
-    const strip = (c: ReviewConfig): unknown => ({
-      agents: c.agents.map((x) => ({ ...normalizeAgent(x), provider: undefined })),
-      summarizer: { ...c.summarizer }, ...advancedOf(c),
-    });
-    return JSON.stringify(strip(a)) === JSON.stringify(strip(b));
-  }
-
-  /** Revert this repo to the global config (drops its binding). */
-  async function useGlobalConfig(): Promise<void> {
-    configSaving = true;
-    try {
-      repoCfg = await api.del<RepoReviewConfigResp>(`/repos/${repoId}/review-config`);
-      configScope = 'global';
-      selectedPresetId = '';
-      if (globalCfg) seedEditFields(globalCfg);
-      toasts.success('Repo now uses the global review config');
-    } catch (e) {
-      toastError('Couldn’t revert to global', e);
-    } finally {
-      configSaving = false;
-    }
-  }
-
-  /** Save the current edit fields as a NEW named preset (or update the one
-   *  with the same name) and bind this repo to it. */
-  async function saveAsNamedPreset(): Promise<void> {
-    const name = presetNameDraft.trim();
-    if (name === '') return;
-    configSaving = true;
-    try {
-      const cfg = currentEditConfig(false);
-      const existing = namedPresets.find((p) => p.name === name);
-      const id = existing?.id ?? crypto.randomUUID();
-      const next = existing
-        ? namedPresets.map((p) => (p.id === id ? { ...p, config: cfg } : p))
-        : [...namedPresets, { id, name, config: cfg }];
-      namedPresets = await api.put<ReviewConfigPreset[]>('/settings/pr-review/presets', next);
-      const body: RepoReviewBinding = { preset_id: id };
-      repoCfg = await api.put<RepoReviewConfigResp>(`/repos/${repoId}/review-config`, body);
-      selectedPresetId = id;
-      presetSaveOpen = false;
-      presetNameDraft = '';
-      toasts.success(existing ? `Preset “${name}” updated` : `Preset “${name}” created`, 'This repo now uses it');
-    } catch (e) {
-      toastError('Couldn’t save preset', e);
-    } finally {
-      configSaving = false;
-    }
   }
 
   function closeConfig(): void {
     showConfig = false;
   }
 
-  function addAgent(): void {
-    editAgents = [
-      ...editAgents,
-      { name: 'New agent', provider: defaultAgentProvider(), providers: [defaultAgentProvider()], model: '', prompt: '' },
-    ];
-  }
-
-  function removeAgent(i: number): void {
-    editAgents = editAgents.filter((_, idx) => idx !== i);
-  }
-
-  /** The config to save: the loaded config with the modal's edits laid over it. */
-  function buildConfigFromEditState(presets: ReviewAgentCfg[]): ReviewConfig {
-    const sync = (a: ReviewAgentCfg): ReviewAgentCfg => syncProviders(a, defaultAgentProvider());
-    return mergeReviewConfig(editBase, {
-      cross_provider_check: crossProviderCheck,
-      agents: editAgents.map(sync),
-      summarizer: editSummarizer,
-      custom_presets: presets.map(sync),
-    }, editAdvanced);
-  }
-
-  /** Persist per-agent presets immediately without closing the modal. They
-   *  live on the GLOBAL config — when the modal is editing a repo-scoped
-   *  config, keep the stored global agents/summarizer instead of overwriting
-   *  them with this repo's edit fields. */
-  async function persistPresets(presets: ReviewAgentCfg[]): Promise<void> {
-    try {
-      const synced = presets.map((a) => syncProviders(a, defaultAgentProvider()));
-      const cfg: ReviewConfig =
-        configScope === 'repo' && globalCfg
-          ? { ...globalCfg, custom_presets: synced }
-          : buildConfigFromEditState(presets);
-      await api.put('/settings/pr-review', cfg);
-      globalCfg = cfg;
-    } catch (e) {
-      toastError('Couldn’t persist presets', e);
-    }
-  }
-
-  // Save the agent at index i as a custom preset (dedupe by name) and persist immediately
-  async function saveAsPreset(i: number): Promise<void> {
-    const agent = editAgents[i];
-    const effectiveProviders = (agent.providers && agent.providers.length > 0)
-      ? agent.providers
-      : [agent.provider || defaultAgentProvider()];
-    const copy: ReviewAgentCfg = {
-      name: agent.name,
-      provider: effectiveProviders[0],
-      providers: effectiveProviders,
-      model: agent.model,
-      prompt: agent.prompt,
-      // Keep the inlined Library skill (the default correctness/security agents carry one):
-      // dropping it would make the preset run the bare prompt without the skill's method.
-      ...(agent.skill ? { skill: agent.skill } : {}),
-    };
-    const existing = editPresets.findIndex((p) => p.name === copy.name);
-    let next: ReviewAgentCfg[];
-    if (existing >= 0) {
-      next = editPresets.map((p, idx) => (idx === existing ? copy : p));
-    } else {
-      next = [...editPresets, copy];
-    }
-    editPresets = next;
-    await persistPresets(next);
-    toasts.success('Saved to presets');
-  }
-
-  // Add a custom preset to editAgents
-  function addPresetToAgents(preset: ReviewAgentCfg): void {
-    editAgents = [...editAgents, { ...preset }];
-  }
-
-  // Remove a custom preset by index and persist immediately
-  async function removePreset(i: number): Promise<void> {
-    const next = editPresets.filter((_, idx) => idx !== i);
-    editPresets = next;
-    await persistPresets(next);
-  }
-
-  // Preset reviewers — curated lenses the user can one-click add alongside
-  // their own. Each produces a JSON-array of {path,line,severity,body}.
-  const JSON_INSTR =
-    'Output ONLY a JSON array (no prose, no markdown fence) of objects {"path":string,"line":number,"severity":"info"|"warn"|"bug","body":string} for issues you find in the diff. Empty array if none.';
-  const REVIEWER_PRESETS: { name: string; focus: string }[] = [
-    { name: 'Security & vulnerabilities', focus: 'Focus on security: injection, broken authn/authz, secret/credential handling, unsafe deserialization, SSRF, path traversal, and unvalidated input.' },
-    { name: 'Performance & efficiency', focus: 'Focus on performance: N+1 queries, unnecessary allocations, O(n^2) hot paths, blocking I/O, missing caching/indexes, and oversized payloads.' },
-    { name: 'Correctness & bugs', focus: 'Focus on correctness: logic errors, off-by-one, null/undefined handling, wrong edge cases, and broken invariants.' },
-    { name: 'Tests & coverage', focus: 'Focus on testing: missing tests for new/changed behavior, untested edge cases, brittle or flaky tests, and missing assertions.' },
-    { name: 'Error handling & resilience', focus: 'Focus on error handling: swallowed errors, missing propagation, unhandled failures, retries/timeouts, and resource cleanup.' },
-    { name: 'Concurrency & races', focus: 'Focus on concurrency: data races, deadlocks, unsynchronized shared state, and incorrect async/await or locking.' },
-    { name: 'API & interface design', focus: 'Focus on API design: breaking changes, inconsistent naming, unclear contracts, leaky abstractions, and backward compatibility.' },
-    { name: 'Readability & style', focus: 'Focus on readability: unclear naming, dead code, overly complex functions, and inconsistent style.' },
-    { name: 'Documentation', focus: 'Focus on documentation: missing or outdated doc comments, unclear public APIs, and undocumented behavior changes.' },
-    { name: 'Dependencies & licensing', focus: 'Focus on dependencies: risky new deps, loose version pinning, known-vulnerable packages, and license concerns.' },
-  ];
-
-  function addPreset(p: { name: string; focus: string }): void {
-    editAgents = [
-      ...editAgents,
-      { name: p.name, provider: defaultAgentProvider(), providers: [defaultAgentProvider()], model: '', prompt: `${p.focus} ${JSON_INSTR}` },
-    ];
-  }
-
-  function openPresetMenu(e: MouseEvent): void {
-    const taken = new Set(editAgents.map((a) => a.name));
-    // Primary lenses: installed `review`-category skills. Fall back to the
-    // hardcoded presets only when no review skills are installed, so the menu
-    // is never empty.
-    const lensPresets = skillPresets.length > 0 ? skillPresets : REVIEWER_PRESETS;
-    const builtinItems = lensPresets.map((p) => ({
-      label: p.name,
-      disabled: taken.has(p.name),
-      action: () => addPreset(p),
-    }));
-    const customItems = editPresets.map((p) => ({
-      label: p.name,
-      disabled: taken.has(p.name),
-      action: () => addPresetToAgents(p),
-    }));
-    const items =
-      customItems.length > 0
-        ? [...builtinItems, { label: '', separator: true, action: () => {} }, ...customItems]
-        : builtinItems;
-    ctxMenu.show(e, items, { filter: items.length > 12, maxVisible: 12 });
-  }
-
-  async function saveConfig(): Promise<void> {
-    configSaving = true;
-    try {
-      if (configScope === 'global') {
-        const cfg = currentEditConfig(true);
-        await api.put('/settings/pr-review', cfg);
-        globalCfg = cfg;
-        toasts.success('Review config saved', 'Applies to every repo without an override');
-      } else {
-        // Repo scope: an untouched preset saves as the preset reference (so the
-        // repo tracks later preset edits); any drift saves as a repo-only
-        // custom config instead of silently mutating the shared preset.
-        const cfg = currentEditConfig(false);
-        const chosen = namedPresets.find((p) => p.id === selectedPresetId);
-        const body: RepoReviewBinding =
-          chosen && sameConfig(cfg, chosen.config) ? { preset_id: chosen.id } : { config: cfg };
-        repoCfg = await api.put<RepoReviewConfigResp>(`/repos/${repoId}/review-config`, body);
-        selectedPresetId = repoCfg.preset_id ?? '';
-        toasts.success(
-          'Repo review config saved',
-          repoCfg.scope === 'preset'
-            ? `Uses preset “${repoCfg.preset_name}”`
-            : 'Custom config for this repo only',
-        );
-      }
-      showConfig = false;
-    } catch (e) {
-      toastError('Couldn’t save config', e);
-    } finally {
-      configSaving = false;
-    }
-  }
-
   // --- Diff snippet helpers ---
-
-  const CONTEXT_LINES = 3;
-
-  // Flattened lines + line-number indexes, built once per loaded file (the
-  // old code re-flattened the whole file and ran two linear scans for EVERY
-  // comment on every re-render, i.e. every 2 s poll while a review ran).
-  interface SnippetIndex {
-    lines: DiffLine[];
-    byNew: Map<number, number>;
-    byOld: Map<number, number>;
-  }
-  const snippetIndex = new WeakMap<FileDiff, SnippetIndex>();
-  function indexOf(f: FileDiff): SnippetIndex {
-    let ix = snippetIndex.get(f);
-    if (ix) return ix;
-    ix = { lines: [], byNew: new Map(), byOld: new Map() };
-    for (const hunk of f.hunks) {
-      for (const line of hunk.lines) {
-        const i = ix.lines.push(line) - 1;
-        if (line.new_line !== null && !ix.byNew.has(line.new_line)) ix.byNew.set(line.new_line, i);
-        if (line.old_line !== null && !ix.byOld.has(line.old_line)) ix.byOld.set(line.old_line, i);
-      }
-    }
-    snippetIndex.set(f, ix);
-    return ix;
-  }
-
-  function getSnippetLines(c: ReviewComment): DiffLine[] | null {
-    if (c.path === null || c.line === null) return null;
-    const fileDiff = snippetFiles.get(c.path);
-    if (!fileDiff) return null;
-    const ix = indexOf(fileDiff);
-    // Find the target line index — match new_line first, fallback old_line
-    const targetIdx = ix.byNew.get(c.line) ?? ix.byOld.get(c.line);
-    if (targetIdx === undefined) return null;
-    const start = Math.max(0, targetIdx - CONTEXT_LINES);
-    const end = Math.min(ix.lines.length - 1, targetIdx + CONTEXT_LINES);
-    return ix.lines.slice(start, end + 1);
-  }
+  const getSnippetLines = (c: ReviewComment): DiffLine[] | null => snippetLinesFor(c, snippetFiles);
 
   function isDiffExpandedDefault(c: ReviewComment): boolean {
     return c.state === 'draft';
@@ -1118,7 +766,7 @@
             <button class="rp-jira-remove" onclick={removeAttachedIssue} aria-label="Remove story {attachedIssue.key}" title="Remove story"><Icon name="x" size={12} /></button>
           </span>
         {:else}
-          <button class="btn small ghost" onclick={openJiraPicker}><Icon name="ticket" size={12} /> Attach story…</button>
+          <button class="btn small ghost" bind:this={attachStoryBtnEl} onclick={openJiraPicker}><Icon name="ticket" size={12} /> Attach story…</button>
         {/if}
       </div>
       <div class="rp-context-row">
@@ -1159,8 +807,13 @@
     </div>
   {:else if review.status === 'running'}
     <div class="rp-running-header">
-      <span class="spinner" style="--spinner-size: 18px" aria-hidden="true"></span>
-      <span class="rp-running-title">Reviewing…</span>
+      {#if pollStale}
+        <Icon name="warning" size={16} />
+        <span class="rp-running-title">Status updates paused</span>
+      {:else}
+        <span class="spinner" style="--spinner-size: 18px" aria-hidden="true"></span>
+        <span class="rp-running-title">Reviewing…</span>
+      {/if}
       <span class="grow"></span>
       <button
         class="btn small ghost rp-cancel-btn"
@@ -1172,6 +825,9 @@
       </button>
       <button class="btn small ghost" onclick={openConfig}><Icon name="gear" size={12} /> Configure…</button>
     </div>
+    {#if pollStale}
+      <ReviewPollStale message="Live status checks stopped after waiting a long time. The review may still be running." onretry={resumePolling} />
+    {/if}
     <!-- Live agent cards (shared with the local review) -->
     {#if review.agents && review.agents.length > 0}
       <ReviewScope {review} />
@@ -1228,11 +884,29 @@
         {/if}
       </button>
       <FixReviewButton {review} />
-      <button class="btn small ghost" disabled={starting} onclick={startReview}>
-        <Icon name="refresh" size={12} /> {starting ? 'Starting…' : 'Re-run review'}
+      <button
+        class="btn small ghost"
+        aria-expanded={rerunOptionsOpen}
+        disabled={starting}
+        onclick={() => (rerunOptionsOpen = !rerunOptionsOpen)}
+      >
+        <Icon name="refresh" size={12} /> Re-run review…
       </button>
     </div>
-    {@render reviewInputs()}
+    {#if pollStale}
+      <ReviewPollStale message="Live status checks stopped after waiting a long time. A retried agent may still be running." onretry={resumePolling} />
+    {/if}
+    {#if !shouldCollapseReviewInputs(review.status, rerunOptionsOpen)}
+      <div class="rp-rerun-panel card">
+        {@render reviewInputs()}
+        <div class="rp-rerun-actions">
+          <button class="btn small primary" disabled={starting} onclick={startReview}>
+            <Icon name="refresh" size={12} /> {starting ? 'Starting…' : 'Run review'}
+          </button>
+          <button class="btn small ghost" disabled={starting} onclick={() => (rerunOptionsOpen = false)}>Cancel</button>
+        </div>
+      </div>
+    {/if}
 
     <ReviewMergeGate {review} readiness={mergeReadiness} loading={mergeReadinessLoading} error={readinessError}
       onretry={() => review && void loadFindingsAndReadiness(review.id)} />
@@ -1275,6 +949,8 @@
           <div class="rp-comment card">
             <div class="rp-comment-head">
               <span class="severity-chip sev-{c.severity}">{c.severity}</span>
+              <AgentChip title={draftedBy ? `Drafted by ${draftedBy.provider}${draftedBy.model ? ` · ${draftedBy.model}` : ''}` : 'Drafted by review agent'} />
+              <span class="rp-comment-time dim" title={new Date(review.created_at).toLocaleString()}>{timeAgo(review.created_at)}</span>
               {#if c.path !== null}
                 <span class="mono rp-loc" dir="ltr" title={c.path}>{c.path}{c.line !== null ? `:${c.line}` : ''}</span>
               {/if}
@@ -1355,7 +1031,10 @@
                 </button>
               </div>
             {:else}
-              <p class="rp-comment-body">{c.body}</p>
+              <div class="rp-comment-body md-body">
+                <!-- renderPrMarkdown (lib/md renderMarkdownGfm) sanitizes output via allowlist -->
+                {@html renderPrMarkdown(c.body)}
+              </div>
             {/if}
 
             <!-- Diff snippet -->
@@ -1431,6 +1110,8 @@
                       <div class="rp-comment card rp-history-comment">
                         <div class="rp-comment-head">
                           <span class="severity-chip sev-{c.severity}">{c.severity}</span>
+                          <AgentChip title="Drafted by review agent" />
+                          <span class="rp-comment-time dim" title={new Date(run.created_at).toLocaleString()}>{timeAgo(run.created_at)}</span>
                           {#if c.path !== null}
                             <span class="mono rp-loc" dir="ltr" title={c.path}>{c.path}{c.line !== null ? `:${c.line}` : ''}</span>
                           {/if}
@@ -1445,7 +1126,10 @@
                             <span class="chip rp-badge dim">draft</span>
                           {/if}
                         </div>
-                        <p class="rp-comment-body">{c.body}</p>
+                        <div class="rp-comment-body md-body">
+                          <!-- renderPrMarkdown (lib/md renderMarkdownGfm) sanitizes output via allowlist -->
+                          {@html renderPrMarkdown(c.body)}
+                        </div>
                       </div>
                     {/each}
                   {/if}
@@ -1461,181 +1145,7 @@
 
 <!-- Configure agents modal -->
 {#if showConfig}
-  <Modal title="Configure review agents" width={580} onclose={closeConfig}>
-    {#snippet children()}
-      {#if configLoading}
-        <Skeleton rows={3} height={36} />
-      {:else}
-        <p class="dim cfg-note">
-          Otto assesses the change first, selects relevant lenses and assigns one enabled provider per lens. The final verifier checks claims against the code.
-        </p>
-
-        <label class="cfg-note"><input type="checkbox" bind:checked={crossProviderCheck} /> Cross-provider check — run selected lenses on every enabled provider</label>
-
-        <!-- Scope: the global default vs. a config bound to THIS repository. -->
-        <div class="segmented cfg-scope" role="group" aria-label="Review config scope">
-          <button class:active={configScope === 'global'} aria-pressed={configScope === 'global'} onclick={() => setConfigScope('global')}>
-            Global default
-          </button>
-          <button class:active={configScope === 'repo'} aria-pressed={configScope === 'repo'} onclick={() => setConfigScope('repo')}>
-            This repository
-          </button>
-        </div>
-        {#if configScope === 'global'}
-          {#if repoCfg && repoCfg.scope !== 'global'}
-            <p class="dim cfg-scope-note">
-              Heads-up: this repo has its own config
-              ({repoCfg.scope === 'preset' ? `preset “${repoCfg.preset_name ?? repoCfg.preset_id}”` : 'custom'})
-              — reviews here ignore the global agents until you revert it under “This repository”.
-            </p>
-          {/if}
-        {:else}
-          <div class="cfg-repo-row">
-            <select aria-label="Review preset"
-              class="cfg-select cfg-preset-select"
-              value={selectedPresetId}
-              onchange={(e) => pickNamedPreset((e.currentTarget as HTMLSelectElement).value)}
-            >
-              <option value="">Custom — this repo only</option>
-              {#each namedPresets as p (p.id)}
-                <option value={p.id}>{p.name}</option>
-              {/each}
-            </select>
-            <button class="btn small ghost" onclick={() => (presetSaveOpen = !presetSaveOpen)}>
-              Save as preset…
-            </button>
-            {#if repoCfg && repoCfg.scope !== 'global'}
-              <button class="btn small ghost" disabled={configSaving} onclick={useGlobalConfig}>
-                Use global
-              </button>
-            {/if}
-          </div>
-          {#if presetSaveOpen}
-            <div class="cfg-repo-row cfg-preset-save-row">
-              <input dir="auto" aria-label="Preset name"
-                class="cfg-input"
-                bind:value={presetNameDraft}
-                placeholder="Preset name (e.g. Backend services)"
-                onkeydown={(e) => { if (e.key === 'Enter') void saveAsNamedPreset(); }}
-              />
-              <button
-                class="btn small primary"
-                disabled={configSaving || presetNameDraft.trim() === ''}
-                onclick={saveAsNamedPreset}
-              >
-                Save & use
-              </button>
-            </div>
-          {/if}
-          <p class="dim cfg-scope-note">
-            {#if selectedPresetId === ''}
-              These agents apply only to this repository.
-            {:else}
-              Editing a preset here saves the changes as a repo-only custom config —
-              use “Save as preset…” with the same name to update the preset itself.
-            {/if}
-          </p>
-        {/if}
-
-        <h3 class="cfg-section-title">Review agents</h3>
-        {#each editAgents as agent, i (i)}
-          {@const agentProviders = agent.providers && agent.providers.length > 0 ? agent.providers : [agent.provider || defaultAgentProvider()]}
-          <div class="cfg-agent-row card">
-            <div class="cfg-agent-fields">
-              <div class="cfg-field">
-                <span class="cfg-label">Name</span>
-                <input dir="auto" aria-label="Reviewer name" class="cfg-input" bind:value={editAgents[i].name} />
-              </div>
-              <div class="cfg-field">
-                <span class="cfg-label">Run on (CLIs)</span>
-                <div class="cfg-provider-checks">
-                  {#each PROVIDER_OPTIONS as p}
-                    <label class="cfg-check-label">
-                      <input
-                        type="checkbox"
-                        checked={agentProviders.includes(p)}
-                        onchange={() => toggleProvider(i, p)}
-                      />
-                      {p}
-                    </label>
-                  {/each}
-                </div>
-              </div>
-              <div class="cfg-field">
-                <span class="cfg-label">Lens / instructions</span>
-                <textarea dir="auto" aria-label="Reviewer lens / instructions" class="cfg-textarea" rows={3} bind:value={editAgents[i].prompt}></textarea>
-              </div>
-            </div>
-            <div class="cfg-agent-actions">
-              <button
-                class="btn small ghost cfg-save-preset"
-                title="Save as preset"
-                onclick={() => saveAsPreset(i)}
-              ><Icon name="star" size={12} /> Save as preset</button>
-              <button class="icon-btn cfg-remove" onclick={() => removeAgent(i)} aria-label="Remove agent {editAgents[i].name || i + 1}" title="Remove agent"><Icon name="x" size={12} /></button>
-            </div>
-          </div>
-        {/each}
-        <div class="cfg-add-row">
-          <button class="btn small ghost" onclick={addAgent}><Icon name="plus" size={12} /> Add agent</button>
-          <button class="btn small ghost" onclick={openPresetMenu}><Icon name="plus" size={12} /> Add preset <Icon name="chevronDown" size={12} /></button>
-        </div>
-
-        <!-- Your presets section -->
-        {#if editPresets.length > 0}
-          <h3 class="cfg-section-title cfg-presets-title">Your presets</h3>
-          <div class="cfg-presets-list">
-            {#each editPresets as preset, i (i)}
-              <div class="cfg-preset-chip">
-                <span class="cfg-preset-name">{preset.name}</span>
-                <button
-                  class="cfg-preset-action"
-                  title="Add to agents"
-                  onclick={() => addPresetToAgents(preset)}
-                  aria-label="Add preset {preset.name} to agents"
-                ><Icon name="plus" size={12} /></button>
-                <button
-                  class="cfg-preset-action cfg-preset-del"
-                  title="Delete preset"
-                  onclick={() => removePreset(i)}
-                  aria-label="Delete preset {preset.name}"
-                ><Icon name="x" size={12} /></button>
-              </div>
-            {/each}
-          </div>
-        {/if}
-
-        <h3 class="cfg-section-title" style="margin-top:18px">Summarizer</h3>
-        <div class="cfg-agent-row card">
-          <div class="cfg-agent-fields">
-            <div class="cfg-field">
-              <span class="cfg-label">Name</span>
-              <input dir="auto" aria-label="Summarizer name" class="cfg-input" bind:value={editSummarizer.name} />
-            </div>
-            <div class="cfg-field">
-              <span class="cfg-label">Provider <span class="dim">(uses its default model)</span></span>
-              <select aria-label="Summarizer provider" class="cfg-select" bind:value={editSummarizer.provider}>
-                {#each PROVIDER_OPTIONS as p}
-                  <option value={p}>{p}</option>
-                {/each}
-              </select>
-            </div>
-            <div class="cfg-field">
-              <span class="cfg-label">Merge / dedupe instructions</span>
-              <textarea dir="auto" aria-label="Summarizer merge / dedupe instructions" class="cfg-textarea" rows={3} bind:value={editSummarizer.prompt}></textarea>
-            </div>
-          </div>
-        </div>
-        <ReviewConfigAdvanced bind:value={editAdvanced} />
-      {/if}
-    {/snippet}
-    {#snippet footer()}
-      <button class="btn ghost" onclick={closeConfig}>Cancel</button>
-      <button class="btn primary" disabled={configSaving || configLoading} onclick={saveConfig}>
-        {configSaving ? 'Saving…' : 'Save'}
-      </button>
-    {/snippet}
-  </Modal>
+  <ReviewConfigModal {repoId} onclose={closeConfig} onupdated={(rc) => (repoCfg = rc)} />
 {/if}
 
 {#if postConfirm}
@@ -1744,8 +1254,23 @@
     flex-direction: column;
     gap: 8px;
   }
+  .rp-rerun-panel {
+    padding: 8px 12px;
+    margin-block-end: 12px;
+  }
+  .rp-rerun-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-block-start: 8px;
+  }
   .rp-comment {
     padding: 10px 14px;
+    border-inline-start: 2px solid var(--border-strong);
+  }
+  .rp-comment-time {
+    font-size: var(--fs-xs);
+    white-space: nowrap;
   }
   .rp-comment-head {
     display: flex;
@@ -1771,8 +1296,17 @@
     margin: 0;
     font-size: var(--fs-s);
     line-height: 1.55;
-    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
+  .rp-comment-body :global(> :first-child) { margin-block-start: 0; }
+  .rp-comment-body :global(> :last-child) { margin-block-end: 0; }
+  .rp-comment-body :global(p) { margin-block: 4px; }
+  .rp-comment-body :global(pre) { margin-block: 6px; padding: 8px 10px; font-size: var(--fs-xs); }
+  .rp-comment-body :global(code) { font-size: var(--fs-xs); }
+  .rp-comment-body :global(pre code) { font-size: inherit; }
+  .rp-comment-body :global(ul),
+  .rp-comment-body :global(ol) { margin-block: 4px; padding-inline-start: 18px; }
+  .rp-comment-body :global(img) { max-width: 100%; height: auto; }
   .rp-loc {
     overflow-wrap: anywhere;
     font-size: var(--fs-xs);
@@ -1800,8 +1334,8 @@
     text-transform: uppercase;
   }
   .sev-info {
-    background: var(--accent-soft);
-    color: var(--accent-text);
+    background: var(--info-soft);
+    color: var(--info);
   }
   .sev-warn {
     background: var(--warning-soft);
@@ -1882,33 +1416,6 @@
     min-width: 0;
   }
 
-  /* Config modal */
-  .cfg-note {
-    font-size: var(--fs-s);
-    margin: 0 0 14px;
-  }
-  /* Scope switch (global vs. this repo) + preset row */
-  .cfg-scope {
-    margin-bottom: 10px;
-  }
-  .cfg-repo-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 8px;
-  }
-  .cfg-preset-select {
-    flex: 1;
-    min-width: 0;
-  }
-  .cfg-preset-save-row .cfg-input {
-    flex: 1;
-    min-width: 0;
-  }
-  .cfg-scope-note {
-    font-size: var(--fs-xs);
-    margin: 0 0 14px;
-  }
   /* Override badge on the Configure buttons */
   .rp-cfg-chip {
     margin-inline-start: 6px;
@@ -1917,147 +1424,8 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .cfg-add-row {
-    display: flex;
-    gap: 8px;
-  }
-  .cfg-section-title {
-    font-size: var(--fs-s);
-    font-weight: 600;
-    margin: 0 0 8px;
-  }
-  .cfg-agent-row {
-    padding: 10px 12px;
-    margin-bottom: 8px;
-    display: flex;
-    gap: 8px;
-    align-items: flex-start;
-  }
-  .cfg-agent-fields {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-  .cfg-agent-actions {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    flex-shrink: 0;
-    align-items: flex-end;
-  }
-  .cfg-save-preset {
-    font-size: var(--fs-xs);
-    padding: 2px 6px;
-    white-space: nowrap;
-  }
-  .cfg-field {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .cfg-label {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    font-weight: 500;
-  }
-  .cfg-input,
-  .cfg-select,
-  .cfg-textarea {
-    width: 100%;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    color: var(--text);
-    font-size: var(--fs-s);
-    padding: 4px 8px;
-    box-sizing: border-box;
-  }
-  .cfg-textarea {
-    resize: vertical;
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    line-height: 1.5;
-  }
-  .cfg-remove {
-    flex-shrink: 0;
-  }
-  .cfg-provider-checks {
-    display: flex;
-    gap: 12px;
-    flex-wrap: wrap;
-    padding: 4px 0;
-  }
-  .cfg-check-label {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: var(--fs-s);
-    cursor: pointer;
-    user-select: none;
-  }
   .grow {
     flex: 1;
-  }
-
-  /* Config modal on a phone: the agent row's side action column stacks below the
-     fields so nothing is squeezed, the provider checkboxes get tap room, and the
-     add/save controls grow to a comfortable touch height. The Modal shell caps
-     its own width to the viewport, so only the inner layout needs stacking. */
-  @media (max-width: 640px) {
-    .cfg-agent-row { flex-direction: column; }
-    .cfg-agent-actions {
-      flex-direction: row;
-      align-items: center;
-      align-self: stretch;
-    }
-    .cfg-add-row { flex-wrap: wrap; }
-    .cfg-add-row .btn { flex: 1 1 auto; }
-    .cfg-check-label { padding: 4px 0; }
-  }
-
-  /* Custom presets section */
-  .cfg-presets-title {
-    margin-top: 16px;
-  }
-  .cfg-presets-list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-bottom: 4px;
-  }
-  .cfg-preset-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding-block: 2px; padding-inline: 10px 8px;
-    font-size: var(--fs-xs);
-  }
-  .cfg-preset-name {
-    max-width: 180px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .cfg-preset-action {
-    background: none;
-    border: none;
-    cursor: pointer;
-    padding: 0 2px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    line-height: 1;
-    display: inline-flex;
-    align-items: center;
-  }
-  .cfg-preset-action:hover {
-    color: var(--text);
-  }
-  .cfg-preset-del:hover {
-    color: var(--danger);
   }
 
   /* Jira attachment row */
@@ -2142,8 +1510,7 @@
     /* Tiny ✕ icon buttons (dismiss / remove-Jira / preset add+delete) are ~12px
        on desktop — far below a tappable size; grow them to a real touch target
        without changing their glyph. */
-    .rp-jira-remove,
-    .cfg-preset-action {
+    .rp-jira-remove {
       min-width: var(--hit-min);
       min-height: var(--hit-min);
       display: inline-flex;

@@ -49,6 +49,9 @@ use crate::http::{ApiError, ApiResult, CurrentUser};
 pub const MAX_RAW_BYTES: usize = 25 * 1024 * 1024;
 /// Storage sub-path under `data_dir` for story attachments.
 pub const ATTACH_ROOT: &str = "product/attachments";
+/// Base64 payloads larger than this are decoded + sniffed/validated on the
+/// blocking pool so multi-megabyte uploads/edits never stall a tokio worker.
+const DECODE_OFF_RUNTIME_ABOVE: usize = 256 * 1024;
 
 // ---------------------------------------------------------------------------
 // Request / response bodies
@@ -209,7 +212,7 @@ const MAX_EVENT_CONTENT: usize = 4 * 1024 * 1024;
 /// `..`/`.` components lexically so the check still rejects traversal even when
 /// the candidate (or some leading component) does not yet exist. Returns false if
 /// `root` itself cannot be canonicalized.
-fn path_within(root: &Path, candidate: &Path) -> bool {
+pub(crate) fn path_within(root: &Path, candidate: &Path) -> bool {
     let root = match canonicalize_lexical(root) {
         Some(p) => p,
         None => return false,
@@ -279,32 +282,11 @@ pub async fn upload_attachment<C: ProductStudioHost>(
         .check(&user, &story.workspace_id, WorkspaceRole::Editor)
         .await?;
 
-    // Validate the declared MIME against the allow-list.
-    if !allowed_mime(&req.mime) {
-        return Err(ApiError(Error::Invalid(format!(
-            "disallowed content type: {}",
-            req.mime
-        ))));
-    }
-    // Decode the base64 payload.
-    let bytes = B64
-        .decode(req.data_b64.trim())
-        .map_err(|e| ApiError(Error::Invalid(format!("invalid base64: {e}"))))?;
-    if bytes.is_empty() {
-        return Err(ApiError(Error::Invalid("empty attachment".into())));
-    }
-    if bytes.len() > MAX_RAW_BYTES {
-        return Err(ApiError(Error::Invalid(format!(
-            "attachment exceeds {} MB cap",
-            MAX_RAW_BYTES / (1024 * 1024)
-        ))));
-    }
-    // Magic-byte sniff: declared MIME must match the decoded bytes.
-    if !sniff_ok(&req.mime, &bytes) {
-        return Err(ApiError(Error::Invalid(
-            "file contents do not match the declared type".into(),
-        )));
-    }
+    // Validate the declared MIME, decode base64, and magic-byte sniff (off the
+    // tokio runtime for large payloads).
+    let bytes = decode_upload_async(req.mime.clone(), req.data_b64)
+        .await
+        .map_err(ApiError)?;
 
     // Daemon-generated on-disk name (the attachment id); original name is metadata.
     let id = otto_core::new_id();
@@ -533,7 +515,9 @@ pub async fn put_attachment_content<C: ProductStudioHost>(
         .check(&user, &att.workspace_id, WorkspaceRole::Editor)
         .await?;
     check_base_updated_at(req.base_updated_at.as_deref(), &att.updated_at).map_err(ApiError)?;
-    let bytes = decode_content(&att.mime, &req.data_b64).map_err(ApiError)?;
+    let bytes = decode_content_async(att.mime.clone(), req.data_b64)
+        .await
+        .map_err(ApiError)?;
 
     let conditional = req
         .base_updated_at
@@ -563,8 +547,10 @@ pub async fn put_attachment_content<C: ProductStudioHost>(
 }
 
 /// Stage an immutable revision, then publish its path and metadata in one SQL
-/// CAS. Readers that already loaded the old path keep reading complete bytes.
-/// The prior revision remains under the story directory until story cleanup.
+/// CAS. Readers that already loaded the old path keep reading complete bytes
+/// (Unix unlink preserves open fds), while the superseded revision file is
+/// unlinked best-effort once the CAS commits so edits do not accumulate dead
+/// files on disk.
 pub async fn publish_content(
     repo: &otto_state::ProductAttachmentRepo,
     data_dir: &Path,
@@ -608,10 +594,107 @@ pub async fn publish_content(
             meta_json,
         )
         .await;
-    if result.is_err() {
-        let _ = tokio::fs::remove_file(&full).await;
+    match &result {
+        Ok(updated) => {
+            if previous.storage_path != updated.storage_path {
+                unlink_confined_attachment(data_dir, &previous.storage_path).await;
+            }
+        }
+        Err(_) => {
+            let _ = tokio::fs::remove_file(&full).await;
+        }
     }
     result
+}
+
+/// Best-effort remove one confined attachment file under `ATTACH_ROOT`.
+async fn unlink_confined_attachment(data_dir: &Path, storage_path: &str) {
+    let root = data_dir.join(ATTACH_ROOT);
+    if let Some(full) = otto_core::paths::confine_join(data_dir, storage_path) {
+        if path_within(&root, &full) {
+            let _ = tokio::fs::remove_file(&full).await;
+        }
+    }
+}
+
+/// Best-effort remove the attachment's current file plus any superseded
+/// immutable revisions (`<aid>-*` or `<aid>.*`) left under its story folder.
+async fn unlink_attachment_revisions(
+    data_dir: &Path,
+    story_id: &str,
+    attachment_id: &str,
+    current_storage_path: &str,
+) {
+    unlink_confined_attachment(data_dir, current_storage_path).await;
+    let attach_root = data_dir.join(ATTACH_ROOT);
+    let Some(story_dir) = otto_core::paths::confine_join(&attach_root, story_id) else {
+        return;
+    };
+    if !path_within(&attach_root, &story_dir) {
+        return;
+    }
+    let Ok(mut rd) = tokio::fs::read_dir(&story_dir).await else {
+        return;
+    };
+    let rev_prefix = format!("{attachment_id}-");
+    let base_prefix = format!("{attachment_id}.");
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with(&rev_prefix) && !name.starts_with(&base_prefix) {
+            continue;
+        }
+        let path = entry.path();
+        if let Ok(meta) = tokio::fs::symlink_metadata(&path).await {
+            if meta.is_file() && path_within(&attach_root, &path) {
+                let _ = tokio::fs::remove_file(&path).await;
+            }
+        }
+    }
+}
+
+fn decode_upload(mime: &str, data_b64: &str) -> Result<Vec<u8>, Error> {
+    if !allowed_mime(mime) {
+        return Err(Error::Invalid(format!("disallowed content type: {mime}")));
+    }
+    let bytes = B64
+        .decode(data_b64.trim())
+        .map_err(|e| Error::Invalid(format!("invalid base64: {e}")))?;
+    if bytes.is_empty() {
+        return Err(Error::Invalid("empty attachment".into()));
+    }
+    if bytes.len() > MAX_RAW_BYTES {
+        return Err(Error::Invalid(format!(
+            "attachment exceeds {} MB cap",
+            MAX_RAW_BYTES / (1024 * 1024)
+        )));
+    }
+    if !sniff_ok(mime, &bytes) {
+        return Err(Error::Invalid(
+            "file contents do not match the declared type".into(),
+        ));
+    }
+    Ok(bytes)
+}
+
+async fn decode_upload_async(mime: String, data_b64: String) -> Result<Vec<u8>, Error> {
+    if data_b64.len() > DECODE_OFF_RUNTIME_ABOVE {
+        tokio::task::spawn_blocking(move || decode_upload(&mime, &data_b64))
+            .await
+            .map_err(|e| Error::Internal(format!("attachment decode worker: {e}")))?
+    } else {
+        decode_upload(&mime, &data_b64)
+    }
+}
+
+async fn decode_content_async(mime: String, data_b64: String) -> Result<Vec<u8>, Error> {
+    if data_b64.len() > DECODE_OFF_RUNTIME_ABOVE {
+        tokio::task::spawn_blocking(move || decode_content(&mime, &data_b64))
+            .await
+            .map_err(|e| Error::Internal(format!("attachment decode worker: {e}")))?
+    } else {
+        decode_content(&mime, &data_b64)
+    }
 }
 
 /// Optimistic-concurrency check for the content PUT: an unparseable
@@ -683,15 +766,9 @@ pub async fn delete_attachment<C: ProductStudioHost>(
         .check(&user, &att.workspace_id, WorkspaceRole::Editor)
         .await?;
     ctx.attachments().delete(&aid).await.map_err(ApiError)?;
-    // Best-effort file removal (DB row is the source of truth).
-    // Path-sandbox: only unlink if the confined (rust/path-injection) resolved
-    // path is within the attachments root.
-    let root = ctx.data_dir().join(ATTACH_ROOT);
-    if let Some(full) = otto_core::paths::confine_join(ctx.data_dir(), &att.storage_path) {
-        if path_within(&root, &full) {
-            let _ = tokio::fs::remove_file(&full).await;
-        }
-    }
+    // Best-effort removal of current file + any superseded revision files
+    // under the attachments root (DB row is the source of truth).
+    unlink_attachment_revisions(ctx.data_dir(), &att.story_id, &att.id, &att.storage_path).await;
     design_source_changed(&ctx, &att.workspace_id, &aid);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -718,6 +795,32 @@ pub async fn list_annotations<C: ProductStudioHost>(
     Ok(Json(list))
 }
 
+/// Maximum bytes allowed for a single mockup annotation body (16 KiB).
+const MAX_ANNOTATION_BODY_BYTES: usize = 16 * 1024;
+
+fn validate_annotation_body(body: &str) -> Result<(), Error> {
+    if body.len() > MAX_ANNOTATION_BODY_BYTES {
+        return Err(Error::Invalid(format!(
+            "annotation body exceeds {MAX_ANNOTATION_BODY_BYTES} byte limit"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_annotation_coords(x_pct: f64, y_pct: f64) -> Result<(), Error> {
+    if !x_pct.is_finite() || !(0.0..=100.0).contains(&x_pct) {
+        return Err(Error::Invalid(
+            "annotation x_pct must be a finite number in 0..=100".into(),
+        ));
+    }
+    if !y_pct.is_finite() || !(0.0..=100.0).contains(&y_pct) {
+        return Err(Error::Invalid(
+            "annotation y_pct must be a finite number in 0..=100".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// `POST /product/attachments/{aid}/annotations` — Editor. Resolves the
 /// attachment → story/workspace for the new row.
 pub async fn create_annotation<C: ProductStudioHost>(
@@ -726,6 +829,8 @@ pub async fn create_annotation<C: ProductStudioHost>(
     CurrentUser(user): CurrentUser,
     Json(req): Json<AnnotationCreateReq>,
 ) -> ApiResult<Json<MockupAnnotation>> {
+    validate_annotation_coords(req.x_pct, req.y_pct).map_err(ApiError)?;
+    validate_annotation_body(&req.body).map_err(ApiError)?;
     let att = load_attachment(&ctx, &aid).await?;
     ctx.roles()
         .check(&user, &att.workspace_id, WorkspaceRole::Editor)
@@ -753,6 +858,9 @@ pub async fn patch_annotation<C: ProductStudioHost>(
     CurrentUser(user): CurrentUser,
     Json(req): Json<AnnotationPatchReq>,
 ) -> ApiResult<Json<MockupAnnotation>> {
+    if let Some(ref body) = req.body {
+        validate_annotation_body(body).map_err(ApiError)?;
+    }
     let ann = ctx.mockup_repo().get(&id).await.map_err(ApiError)?;
     let ann = ann.ok_or_else(|| ApiError(Error::NotFound(format!("annotation {id}"))))?;
     ctx.roles()
@@ -999,5 +1107,74 @@ mod tests {
         assert_eq!(sanitize_filename("C:\\Windows\\evil.exe"), "evil.exe");
         assert_eq!(sanitize_filename("  plain.png  "), "plain.png");
         assert_eq!(sanitize_filename(".."), "attachment");
+    }
+
+    #[tokio::test]
+    async fn unlink_attachment_revisions_removes_current_and_superseded_only() {
+        let td = tempfile::tempdir().unwrap();
+        let story_dir = td.path().join(ATTACH_ROOT).join("story-1");
+        tokio::fs::create_dir_all(&story_dir).await.unwrap();
+
+        let initial = story_dir.join("att-1.html");
+        let rev1 = story_dir.join("att-1-rev1.html");
+        let rev2 = story_dir.join("att-1-rev2.html");
+        let sibling = story_dir.join("att-2-rev1.html");
+        for p in [&initial, &rev1, &rev2, &sibling] {
+            tokio::fs::write(p, b"<p>x</p>").await.unwrap();
+        }
+
+        // Unlinking one superseded revision removes only that file.
+        unlink_confined_attachment(td.path(), &format!("{ATTACH_ROOT}/story-1/att-1-rev1.html"))
+            .await;
+        assert!(!rev1.exists());
+        assert!(initial.exists() && rev2.exists() && sibling.exists());
+
+        // Deleting the attachment removes current + all leftover revisions of att-1,
+        // without touching att-2.
+        unlink_attachment_revisions(
+            td.path(),
+            "story-1",
+            "att-1",
+            &format!("{ATTACH_ROOT}/story-1/att-1-rev2.html"),
+        )
+        .await;
+        assert!(!initial.exists());
+        assert!(!rev2.exists());
+        assert!(sibling.exists(), "sibling attachment must remain intact");
+    }
+
+    #[tokio::test]
+    async fn decode_content_async_offloads_large_payload() {
+        let large = vec![b'a'; DECODE_OFF_RUNTIME_ABOVE + 1024];
+        let b64_large = B64.encode(&large);
+        let decoded = decode_content_async("text/plain".into(), b64_large)
+            .await
+            .unwrap();
+        assert_eq!(decoded.len(), large.len());
+    }
+
+    #[test]
+    fn annotation_validation_rejects_out_of_range_non_finite_and_oversized_body() {
+        assert!(validate_annotation_coords(0.0, 100.0).is_ok());
+        assert!(validate_annotation_coords(50.5, 42.25).is_ok());
+        for (x, y) in [
+            (-0.1, 50.0),
+            (100.1, 50.0),
+            (50.0, -1.0),
+            (50.0, 101.0),
+            (f64::NAN, 50.0),
+            (50.0, f64::INFINITY),
+            (f64::NEG_INFINITY, 10.0),
+        ] {
+            assert!(
+                matches!(validate_annotation_coords(x, y), Err(Error::Invalid(_))),
+                "expected invalid for ({x}, {y})"
+            );
+        }
+        assert!(validate_annotation_body(&"a".repeat(MAX_ANNOTATION_BODY_BYTES)).is_ok());
+        assert!(matches!(
+            validate_annotation_body(&"a".repeat(MAX_ANNOTATION_BODY_BYTES + 1)),
+            Err(Error::Invalid(_))
+        ));
     }
 }

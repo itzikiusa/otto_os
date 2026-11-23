@@ -8,8 +8,10 @@
   // revoked on change and on destroy.
   import { awsApi, awsDownloadBlob } from '../../lib/api/aws';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import JsonTree from '../../lib/components/JsonTree.svelte';
   import { fmtBytes } from './util';
+  import { awsLoadText } from './loadText';
   import type { S3Object, S3PreviewResp } from '../../lib/api/types';
 
   interface Props {
@@ -125,7 +127,7 @@
       })
       .catch((e) => {
         if (e instanceof DOMException && e.name === 'AbortError') return;
-        mediaError = e instanceof Error ? e.message : String(e);
+        mediaError = awsLoadText(e);
       })
       .finally(() => {
         if (!ctrl.signal.aborted) mediaLoading = false;
@@ -145,7 +147,7 @@
 {#if loading}
   <Skeleton rows={6} />
 {:else if error}
-  <p class="pv-err">{error} <button class="btn small" onclick={onretry}>Retry preview</button></p>
+  <LoadState variant="compact" what="the preview" {error} empty onretry={onretry} />
 {:else if tooBig}
   <div class="pv-note">
     <p>Too large to preview ({fmtBytes(size)}) — in-app preview is capped at 25 MB.</p>
@@ -155,7 +157,7 @@
   {#if mediaLoading}
     <div><Skeleton rows={4} label="preview" /></div>
   {:else if mediaError}
-    <p class="pv-err">{mediaError} <button class="btn small" onclick={() => mediaTry++}>Retry preview</button></p>
+    <LoadState variant="compact" what="the preview" error={mediaError} empty onretry={() => mediaTry++} />
   {:else if mediaUrl && kind === 'image'}
     <div class="pv-media"><img src={mediaUrl} alt={`Preview of ${obj.key}`} /></div>
   {:else if mediaUrl}
@@ -201,10 +203,6 @@
     color: var(--text-dim);
     font-size: var(--fs-s);
     margin: 0;
-  }
-  .pv-err {
-    color: var(--danger);
-    font-size: var(--fs-m);
   }
   .pv-note {
     display: flex;

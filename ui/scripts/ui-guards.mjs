@@ -28,6 +28,10 @@
 //    detector is `detectIconButtonName` (p04 block, unit-tested); this is the
 //    `icon-button-name` check, so no separate ratchet exists for it.
 //
+// 5. `crypto.randomUUID` only in lib/id.ts. It does not exist on a plain-http
+//    page (a phone reaching Otto by its LAN or tailnet address), so a raw call
+//    throws there; use `newId()` from lib/id.ts.
+//
 // 4. lib/ never imports modules/ (`lib-imports-modules`). An import in
 //    src/lib/** that resolves into src/modules/** makes shared code depend on
 //    a feature. Move the shared piece into lib/, or bind it through a port the
@@ -369,6 +373,16 @@ for (const f of files) {
     problems.push(
       `${f.rel}:${lineOf(f.text, m.index)}  native ${m[1]}() — a silent no-op in the Tauri webview; use ${use} (lib/confirm.svelte.ts, lib/toast.svelte.ts)`,
     );
+  }
+}
+
+// ---------- rule 5: crypto.randomUUID only in lib/id.ts ----------
+for (const f of files) {
+  if (!/\.(svelte|ts|js)$/.test(f.path) || f.rel === 'src/lib/id.ts') continue;
+  const code = stripComments(f.text);
+  for (const m of code.matchAll(/\bcrypto\.randomUUID\b/g)) {
+    if (allowed(f.text, m.index)) continue;
+    problems.push(`${f.rel}:${lineOf(f.text, m.index)}  crypto.randomUUID — missing on a plain-http page (a phone); use newId() from lib/id.ts`);
   }
 }
 

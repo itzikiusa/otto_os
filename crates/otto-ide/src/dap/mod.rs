@@ -52,7 +52,7 @@ pub use adapters::{resolve_dap_adapter, DapAdapterTransport, ResolvedDapAdapter}
 pub use java_bridge::JavaJdwpBridgeSpec;
 pub type JavaJdbBridgeSpec = JavaJdwpBridgeSpec;
 pub use node_bridge::NodeInspectorBridgeSpec;
-pub use session::{DapManager, DapStartContext};
+pub use session::{DapManager, DapSessionResourceMetrics, DapStartContext};
 pub use shell_bridge::ShellBridgeSpec;
 pub use wire::{DapEvent, DapMessage, DapReader, DapRequest, DapResponse, DapWriter};
 

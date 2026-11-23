@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { announceShown } from '../../lib/announce.svelte';
   import { focusOnMount } from '../../lib/focusOnMount';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -12,6 +13,8 @@
   import { startSnip } from '../../lib/snip';
   import SectionIntro from './SectionIntro.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { loadErrorText } from '../../lib/loadError';
+  import { chordFromKey, prettyChord as pretty } from '../../lib/chords';
 
   const DEFAULT_ACCEL = 'Cmd+Ctrl+Shift+2';
 
@@ -54,7 +57,7 @@
       accel = next;
       toasts.success(next ? `Snip shortcut set to ${pretty(next)}` : 'Snip shortcut disabled');
     } catch (e) {
-      saveError = e instanceof Error ? e.message : String(e);
+      saveError = loadErrorText(e);
     } finally {
       saving = null;
     }
@@ -67,40 +70,11 @@
       recording = false;
       return;
     }
-    // Wait for a non-modifier key; require at least one modifier so a bare
-    // letter can't shadow normal typing system-wide.
-    if (['Meta', 'Control', 'Alt', 'Shift'].includes(e.key)) return;
-    const mods = [
-      e.metaKey ? 'Cmd' : null,
-      e.ctrlKey ? 'Ctrl' : null,
-      e.altKey ? 'Alt' : null,
-      e.shiftKey ? 'Shift' : null,
-    ].filter(Boolean) as string[];
-    if (!mods.length) return;
-    // The PHYSICAL key: with ⇧ or ⌥ held, `e.key` is the shifted/option
-    // character ("@", "™"), which the shell can't parse as a chord.
-    const c = e.code;
-    let key = /^Key[A-Z]$/.test(c)
-      ? c.slice(3)
-      : /^Digit[0-9]$/.test(c)
-        ? c.slice(5)
-        : /^F\d{1,2}$/.test(c)
-          ? c
-          : e.key.length === 1
-            ? e.key.toUpperCase()
-            : e.key;
-    if (key === ' ' || c === 'Space') key = 'Space';
+    // Wait for a non-modifier key with at least one modifier (lib/chords).
+    const chord = chordFromKey(e);
+    if (!chord) return;
     recording = false;
-    void save([...mods, key].join('+'));
-  }
-
-  /** "Cmd+Ctrl+Shift+2" → "⌘⌃⇧2" for display. */
-  function pretty(a: string): string {
-    if (!a) return '—';
-    return a
-      .split('+')
-      .map((part) => ({ Cmd: '⌘', Ctrl: '⌃', Alt: '⌥', Shift: '⇧' })[part] ?? part)
-      .join('');
+    void save(chord);
   }
 </script>
 
@@ -150,7 +124,8 @@
         </div>
       </div>
       {#if saveError}
-        <div class="error" role="alert">Couldn’t set the shortcut: {saveError}. It may already belong to another app — try a different chord.</div>
+        {@const saveErrText = `Couldn’t set the shortcut: ${saveError}. It may already belong to another app — try a different chord.`}
+        <div class="error" use:announceShown={{ text: saveErrText, assertive: true }}>{saveErrText}</div>
       {/if}
     </div>
   {:else}

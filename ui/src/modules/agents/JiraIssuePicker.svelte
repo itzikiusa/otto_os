@@ -1,7 +1,7 @@
 <script lang="ts">
   // Shared issue picker block (Jira or Linear, per account) — used by both ReviewPanel and AttachIssue.
   // Handles account selection, project selection, and debounced search.
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { listIssueProjects, searchIssues } from '../../lib/api/issues';
   import { issueAccounts } from '../../lib/stores/issueAccounts.svelte';
   import { loadErrorText, providerErrorText } from '../../lib/loadError';
@@ -58,6 +58,14 @@
         : plural(results.length, 'issue'),
   );
   let searchSeq = 0;
+  onDestroy(() => {
+    ++searchSeq;
+    ++projectsSeq;
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+  });
 
   // --- account loading ---
   // Once on mount: the loader's reads (the cache flags, the selection) must
@@ -255,10 +263,7 @@
     {#if searching}
       <Skeleton rows={3} height={44} />
     {:else if searchError && query.trim() !== ''}
-      <div class="no-results" role="alert">
-        <span class="err">Search failed: {searchError}</span>
-        <button class="btn small" onclick={() => void search(query.trim())}>Retry</button>
-      </div>
+      <LoadState what="issues" variant="compact" error={searchError} onretry={() => void search(query.trim())} />
     {:else if results.length === 0 && query.trim() !== ''}
       <div class="no-results dim">No issues found.</div>
     {:else}
@@ -382,10 +387,5 @@
     padding: 16px;
     text-align: center;
     font-size: var(--fs-s);
-  }
-  .no-results .err {
-    display: block;
-    margin-bottom: 8px;
-    color: var(--danger);
   }
 </style>

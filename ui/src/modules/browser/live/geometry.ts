@@ -133,3 +133,36 @@ export function viewportChanged(a: ViewportRequest | null, b: ViewportRequest): 
     a.device_scale_factor !== b.device_scale_factor
   );
 }
+
+export interface DprMediaQuery {
+  addEventListener(type: 'change', cb: () => void, opts?: { once?: boolean }): void;
+  removeEventListener(type: 'change', cb: () => void): void;
+}
+
+/** Watch `devicePixelRatio` continuously across display moves (e.g. Retina →
+ *  1x → Retina). A single `matchMedia('(resolution: 2dppx)')` only fires once
+ *  on the first move; re-subscribing after each change keeps tracking. */
+export function watchDevicePixelRatio(
+  onChange: () => void,
+  getDpr: () => number = () => (typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1),
+  mm: (q: string) => DprMediaQuery = (q) => matchMedia(q),
+): () => void {
+  let mq: DprMediaQuery | null = null;
+  let active = true;
+  const handle = () => {
+    if (!active) return;
+    onChange();
+    arm();
+  };
+  function arm(): void {
+    mq?.removeEventListener('change', handle);
+    mq = mm(`(resolution: ${getDpr()}dppx)`);
+    mq.addEventListener('change', handle, { once: true });
+  }
+  arm();
+  return () => {
+    active = false;
+    mq?.removeEventListener('change', handle);
+    mq = null;
+  };
+}

@@ -366,6 +366,7 @@ mod tests {
             created_at: None,
             version_kind: None,
             validate: true,
+            provenance: None,
         }
     }
 

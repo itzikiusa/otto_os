@@ -28,19 +28,17 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
+  import { ws } from '../../lib/stores/workspace.svelte';
   import ResultsGrid from '../database/ResultsGrid.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
   import { awsErrorText, fmtBytes, logsRoute } from './util';
   import { awsLoadText } from './loadText';
-  import type {
-    AwsAccount,
-    AwsLogEvent,
-    AwsLogGroup,
-    AwsLogStream,
-    AwsLogsInsightsResults,
-  } from '../../lib/api/types';
+  import { buildAwsInsightsPacket, buildAwsLogEventPacket } from './agentContext';
+  import { readSavedQueries, writeSavedQueries, type SavedInsightsQuery as SavedQuery } from './logsSaved';
+  import type { AwsAccount, AwsLogEvent, AwsLogGroup, AwsLogStream, AwsLogsInsightsResults } from '../../lib/api/types';
 
   interface Props {
     account: AwsAccount;
@@ -49,19 +47,13 @@
   let { account, onsignin }: Props = $props();
 
   const RING = 5000;
-  // Each tail tick / Insights status poll spawns an `aws` CLI process on the
-  // daemon: the tail runs at 2 s while events arrive and doubles to 10 s when
-  // idle; Insights uses the shared 1,1,2,2,3,5 s status backoff (lib/pollBackoff).
   const TAIL_MIN_MS = 2000;
   const TAIL_MAX_MS = 10_000;
   const RANGES: { id: string; label: string; ms: number }[] = [
-    { id: '5m', label: '5m', ms: 5 * 60_000 },
-    { id: '15m', label: '15m', ms: 15 * 60_000 },
-    { id: '1h', label: '1h', ms: 3600_000 },
-    { id: '3h', label: '3h', ms: 3 * 3600_000 },
-    { id: '24h', label: '24h', ms: 24 * 3600_000 },
-    { id: '7d', label: '7d', ms: 7 * 24 * 3600_000 },
+    { id: '5m', label: '5m', ms: 5 * 60_000 }, { id: '15m', label: '15m', ms: 15 * 60_000 }, { id: '1h', label: '1h', ms: 3600_000 },
+    { id: '3h', label: '3h', ms: 3 * 3600_000 }, { id: '24h', label: '24h', ms: 24 * 3600_000 }, { id: '7d', label: '7d', ms: 7 * 24 * 3600_000 },
   ];
+  let agentPacket = $state<unknown>(null);
 
   // Deep link (read once — the view is remounted per account+service).
   // svelte-ignore state_referenced_locally
@@ -356,27 +348,10 @@
   // svelte-ignore state_referenced_locally
   const SAVED_KEY = `otto.aws.logs.saved.${account.id}`;
   const DEFAULT_QUERY = 'fields @timestamp, @message, @logStream\n| sort @timestamp desc\n| limit 200';
-  interface SavedQuery {
-    name: string;
-    query: string;
-  }
-  function readSaved(): SavedQuery[] {
-    try {
-      const raw = localStorage.getItem(SAVED_KEY);
-      const v = raw ? JSON.parse(raw) : [];
-      return Array.isArray(v) ? v.filter((x) => x && typeof x.name === 'string' && typeof x.query === 'string') : [];
-    } catch {
-      return [];
-    }
-  }
-  let saved = $state<SavedQuery[]>(readSaved());
+  let saved = $state<SavedQuery[]>(readSavedQueries(SAVED_KEY));
   function writeSaved(list: SavedQuery[]): void {
     saved = list;
-    try {
-      localStorage.setItem(SAVED_KEY, JSON.stringify(list));
-    } catch {
-      // storage unavailable — the list still lives for this session
-    }
+    writeSavedQueries(SAVED_KEY, list);
   }
   let query = $state(DEFAULT_QUERY);
   let insightGroups = $state<string[]>([]);
@@ -404,6 +379,7 @@
   // Set on unmount: a poll already awaiting its result must not re-arm
   // (`stopPolling` only clears a timer that is pending, not one in flight).
   let disposed = false;
+  let insightsSeq = 0;
 
   /** Close the event detail from its ✕ and return focus to the selected
    *  row: the ✕ unmounts with the pane, which otherwise dropped keyboard
@@ -438,6 +414,8 @@
 
   async function runInsights(): Promise<void> {
     if (!insightGroups.length || !query.trim()) return;
+    const seq = ++insightsSeq;
+    const acctId = account.id;
     stopPolling();
     iError = '';
     iResult = null;
@@ -447,21 +425,28 @@
     const started = region;
     try {
       const r = await awsApi.logsInsightsStart(
-        account.id,
+        acctId,
         { groups: insightGroups, query, start: end - rangeMs(), end },
         started,
       );
+      if (disposed || seq !== insightsSeq) {
+        // Left the view or superseded while starting: cancel the billing query.
+        void awsApi.logsInsightsStop(acctId, r.query_id, started).catch(() => {});
+        return;
+      }
       iRegion = started;
       qid = r.query_id;
       iPollN = 0;
       void pollResults(r.query_id);
     } catch (e) {
+      if (disposed || seq !== insightsSeq) return;
       iRunning = false;
       iError = awsLoadText(e);
     }
   }
 
   async function stopInsights(): Promise<void> {
+    insightsSeq++;
     const id = qid;
     stopPolling();
     iRunning = false;
@@ -485,7 +470,7 @@
     toasts.success('Query saved', name.trim());
   }
   async function deleteSaved(s: SavedQuery): Promise<void> {
-    const ok = await confirmer.ask(`Delete the saved query “${s.name}”?`, { title: 'Delete saved query', confirmLabel: 'Delete' });
+    const ok = await confirmer.ask(`Delete the saved query “${s.name}”?`, { title: 'Delete saved query', confirmLabel: 'Delete', danger: true });
     if (ok) writeSaved(saved.filter((x) => x.name !== s.name));
   }
 
@@ -500,6 +485,7 @@
 
   onDestroy(() => {
     disposed = true;
+    insightsSeq++;
     // Leaving the view stops a still-running Insights query (it would keep
     // scanning — and billing — with nobody polling it).
     if (iRunning && qid) void awsApi.logsInsightsStop(account.id, qid, iRegion).catch(() => {});
@@ -651,6 +637,9 @@
                 <span class="mono dim">{fmtTs(detail.timestamp)}</span>
                 <span class="mono dim d-stream" title={detail.stream}>{detail.stream}</span>
                 <span class="spacer"></span>
+                {#if ws.current}
+                  <button class="icon-btn" onclick={() => detail && (agentPacket = buildAwsLogEventPacket({ account: account.name, environment: account.environment, region, group: selected, event: detail }))} aria-label="Send event to agent" title="Send event to a running agent (scrubbed preview)"><Icon name="send" size={13} /></button>
+                {/if}
                 <button class="icon-btn" onclick={() => void copy(detail?.message ?? '', 'message')} aria-label="Copy message" title="Copy message"><Icon name="copy" size={13} /></button>
                 <button class="icon-btn" onclick={(ev) => closeDetail(ev.currentTarget)} aria-label="Close event detail" title="Close"><Icon name="x" size={13} /></button>
               </div>
@@ -689,6 +678,9 @@
           {:else}
             <button class="btn small primary" onclick={() => void runInsights()} disabled={!insightGroups.length || !query.trim()} title={!insightGroups.length ? 'Tick at least one log group' : 'Run the query (billed per GB scanned)'}><Icon name="play" size={12} /> Run</button>
           {/if}
+          {#if ws.current}
+            <button class="icon-btn" onclick={() => iResult?.result.rows.length && (agentPacket = buildAwsInsightsPacket({ account: account.name, environment: account.environment, region: iRegion || region, groups: insightGroups, query: ranQuery || query, columns: iResult.result.columns, rows: iResult.result.rows }))} disabled={!iResult?.result.rows.length} aria-label="Send Insights results to agent" title="Send Insights results to a running agent (scrubbed & capped preview)"><Icon name="send" size={13} /></button>
+          {/if}
           <button class="icon-btn" onclick={exportInsights} disabled={!iResult?.result.rows.length} aria-label="Export results as CSV" title="Export results as CSV"><Icon name="download" size={13} /></button>
         </div>
         <textarea dir="ltr" class="mono q" bind:value={query} rows="4" spellcheck="false" aria-label="Logs Insights query"></textarea>
@@ -720,6 +712,9 @@
     {/if}
   </section>
 </div>
+{#if agentPacket !== null && ws.current}
+  <ContextPacketDialog workspaceId={ws.current.id} sessionId={ws.targetAgentId} kind="broker" payload={agentPacket} onclose={() => (agentPacket = null)} />
+{/if}
 
 <style>
   .pad {

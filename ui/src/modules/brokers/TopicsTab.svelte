@@ -3,13 +3,14 @@
   import { api } from '../../lib/api/client';
   import { toastError } from '../../lib/toastError';
   import { toasts } from '../../lib/toast.svelte';
-  import { confirmer } from '../../lib/confirm.svelte';
+  import { confirmProd } from '../../lib/confirmProd';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { pollWhileVisible } from '../../lib/poll';
   import TopicDetail from './TopicDetail.svelte';
+  import type { ReplayPrefill } from './types';
   import { brokersTopicsPort } from '../../lib/uiCommands/brokers';
   import type {
     BrokerCluster,
@@ -20,8 +21,9 @@
 
   interface Props {
     cluster: BrokerCluster;
+    onreplayfrom?: (prefill: ReplayPrefill) => void;
   }
-  let { cluster }: Props = $props();
+  let { cluster, onreplayfrom }: Props = $props();
 
   const PAGE_SIZE = 50;
   const STATS_CONCURRENCY = 4;
@@ -73,18 +75,28 @@
     )] as string[],
   );
 
+  let loadSeq = 0;
   function load() {
+    const seq = ++loadSeq;
+    const clusterId = cluster.id;
+    const current = () => seq === loadSeq && cluster.id === clusterId;
     loading = true;
     stats = {};
+    statsToken++;
     api
-      .get<TopicSummary[]>(`/brokers/clusters/${cluster.id}/topics`)
+      .get<TopicSummary[]>(`/brokers/clusters/${clusterId}/topics`)
       .then((t) => {
+        if (!current()) return;
         topics = t;
         loadError = null;
         if (selected && !t.some((x) => x.name === selected)) selected = null;
       })
-      .catch((e) => (loadError = loadErrorText(e)))
-      .finally(() => (loading = false));
+      .catch((e) => {
+        if (current()) loadError = loadErrorText(e);
+      })
+      .finally(() => {
+        if (current()) loading = false;
+      });
   }
 
   // Background-fill stats for the topics currently on screen via the batch
@@ -102,33 +114,36 @@
     });
     if (pending.length === 0) return;
     const token = ++statsToken;
+    const clusterId = cluster.id;
+    const current = () => token === statsToken && cluster.id === clusterId;
     // Mark as in-flight (null) so parallel calls don't duplicate fetches.
     stats = { ...stats, ...Object.fromEntries(pending.map((n) => [n, null as null])) };
     try {
       // Single batch call to replace per-topic N×1 round-trips.
       const result = await api.post<Record<string, TopicStats>>(
-        `/brokers/clusters/${cluster.id}/topics/stats`,
+        `/brokers/clusters/${clusterId}/topics/stats`,
         { names: pending },
       );
-      if (token !== statsToken) return;
+      if (!current()) return;
       const update: Record<string, TopicStats | 'err'> = {};
       for (const name of pending) {
         update[name] = result[name] ?? ('err' as const);
       }
       stats = { ...stats, ...update };
     } catch {
+      if (!current()) return;
       // Batch endpoint unavailable (older server); fall back to per-topic calls.
       const queue = [...pending];
       const worker = async () => {
-        while (queue.length) {
+        while (queue.length && current()) {
           const name = queue.shift()!;
           try {
             const s = await api.get<TopicStats>(
-              `/brokers/clusters/${cluster.id}/topics/${encodeURIComponent(name)}/stats`,
+              `/brokers/clusters/${clusterId}/topics/${encodeURIComponent(name)}/stats`,
             );
-            if (token === statsToken) stats = { ...stats, [name]: s };
+            if (current()) stats = { ...stats, [name]: s };
           } catch {
-            if (token === statsToken) stats = { ...stats, [name]: 'err' as const };
+            if (current()) stats = { ...stats, [name]: 'err' as const };
           }
         }
       };
@@ -146,8 +161,13 @@
     page = 1;
     // Another cluster's topics are not "stale data" for this one.
     topics = [];
+    stats = {};
     loadError = null;
     load();
+    return () => {
+      loadSeq++;
+      statsToken++;
+    };
   });
 
   // Lazily load stats for the visible page (and refetch as you paginate/filter).
@@ -221,15 +241,16 @@
   const hasStatErrors = $derived(visible.some((t) => stats[t.name] === 'err'));
 
   async function createTopic() {
-    if (!newName.trim()) return;
-    // Same guard rail as produce / config edits in TopicDetail: a write to a
-    // guarded (prod or read-only) cluster asks first instead of silently
-    // sending `confirm: true`.
+    if (cluster.read_only || !newName.trim()) return;
     if (guarded) {
-      const ok = await confirmer.ask(
-        `Create topic "${newName.trim()}" on guarded cluster "${cluster.name}"?`,
-        { title: 'Create topic on guarded cluster', confirmLabel: 'Create', danger: true },
-      );
+      const ok = await confirmProd({
+        env: cluster.environment,
+        verb: 'Create topic',
+        title: cluster.environment === 'prod' ? 'Create topic on production?' : 'Create topic on guarded cluster?',
+        where: `Cluster ${cluster.name}`,
+        what: `Topic “${newName.trim()}” (${Number(newParts)} partitions, RF ${Number(newRf)})`,
+        danger: true,
+      });
       if (!ok) return;
     }
     const req: CreateTopicReq = {
@@ -265,6 +286,7 @@
       <TopicDetail
         {cluster}
         topic={selected}
+        {onreplayfrom}
         ondeleted={() => {
           selected = null;
           load();
@@ -285,11 +307,6 @@
       {/if}
       <span class="spacer"></span>
       <span class="count">{plural(filtered.length, 'topic')}</span>
-      {#if hasStatErrors}
-        <button class="btn small" onclick={retryStats} title="Retry failed message-count fetches">
-          <Icon name="refresh" size={12} /> Retry counts
-        </button>
-      {/if}
       <button
         class="icon-btn"
         onclick={load}
@@ -299,12 +316,17 @@
       >
         <Icon name="refresh" size={13} />
       </button>
-      <button class="btn small" onclick={() => (creating = !creating)} title="New topic">
+      <button
+        class="btn small"
+        onclick={() => (creating = !creating)}
+        disabled={cluster.read_only}
+        title={cluster.read_only ? 'Read-only cluster — creating topics is disabled' : 'New topic'}
+      >
         <Icon name="plus" size={13} /> New
       </button>
     </div>
 
-    {#if creating}
+    {#if creating && !cluster.read_only}
       <div class="create">
         <input dir="ltr" bind:value={newName} placeholder="orders.events" aria-label="Topic name" />
         <label title="Partitions">Parts <input type="number" min="1" bind:value={newParts} /></label>
@@ -320,6 +342,16 @@
     {/if}
 
     <div class="grid-wrap">
+      {#if hasStatErrors}
+        <LoadState
+          variant="compact"
+          what="message counts"
+          errorTitle="Couldn’t load some message counts"
+          error="One or more topics didn’t return stats."
+          empty
+          onretry={retryStats}
+        />
+      {/if}
       <!-- First load: skeleton; failed load: inline error (or a stale bar over
            the last good list); a refresh keeps the rows on screen. -->
       <LoadState what="topics" {loading} error={loadError} empty={topics.length === 0} onretry={load} rows={6}>
@@ -365,7 +397,7 @@
                 <td
                   class="num"
                   class:err-cell={stats[t.name] === 'err'}
-                  title={stats[t.name] === 'err' ? 'Count unavailable — click "Retry counts" to try again' : undefined}
+                  title={stats[t.name] === 'err' ? 'Count unavailable — use Retry to try again' : undefined}
                 >{countText(t.name)}</td>
                 <td class="num" title="Production rate (msg/s) — high-watermark delta between polls">{rateText(t.name)}</td>
                 <td class="num muted" title="On-disk size isn’t exposed by this Kafka client">—</td>

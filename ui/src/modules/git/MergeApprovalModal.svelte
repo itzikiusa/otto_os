@@ -12,7 +12,8 @@
     MergeResult,
     RepoStatusResp,
   } from '../../lib/api/types';
-  import { api, ApiError } from '../../lib/api/client';
+  import { api } from '../../lib/api/client';
+  import { loadErrorText } from '../../lib/loadError';
   import { git } from '../../lib/stores/git.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import Modal from '../../lib/components/Modal.svelte';
@@ -119,7 +120,7 @@
       }
       onmerged(result);
     } catch (e) {
-      error = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
+      error = loadErrorText(e);
       // Turn the daemon's message into a next step where we recognize it,
       // instead of leaving the raw git line as a dead end.
       if (/already in progress/i.test(error)) {

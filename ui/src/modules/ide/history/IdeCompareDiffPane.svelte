@@ -2,6 +2,7 @@
   // Interactive Side-by-Side (and Unified) Comparison Pane with syntax coloring,
   // word-diff marks, `↑`/`↓` hunk navigation, clickable per-hunk `>>` (`Revert ⌃⌘→`)
   // buttons, live editable `Current` right pane, and `ℹ Contents are identical` banner.
+  import { onDestroy, untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { ensureHljs, escapeHtml, highlightLines, langFromPath } from '../../../lib/hl';
   import { scrollBehavior } from '../../../lib/motion';
@@ -10,6 +11,7 @@
   import { markWords } from '../../../lib/diff/diff-words';
   import {
     applyLeftHunkToRight,
+    CompareEditDebouncer,
     computeSideBySideComparison,
   } from './ideCompareEngine';
   import { buildLocalHistoryDiff } from './ideLocalHistoryDiff';
@@ -22,7 +24,7 @@
     rightText: string;
     rightExists?: boolean;
     canEditRight?: boolean;
-    onApplyRight?: (nextText: string, reason: string) => void | Promise<void>;
+    onApplyRight?: (nextText: string, reason: string, destPath: string) => void | Promise<void>;
     /** The stacked (phone) sheet: side by side cannot fit, so unified only, no layout toggle. */
     unifiedOnly?: boolean;
   }
@@ -50,12 +52,29 @@
   let dismissedIdentical = $state(false);
   let hlReady = $state(false);
   let scrollEl = $state<HTMLDivElement | undefined>(undefined);
-  let editSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  const editDebouncer = new CompareEditDebouncer((text, reason, destPath) => {
+    void onApplyRight?.(text, reason, destPath);
+  });
+  let lastFilePath = untrack(() => filePath);
 
   $effect(() => {
     void ensureHljs().then(() => {
       hlReady = true;
     });
+  });
+
+  // Reset inline edit mode and flush any pending debounced write to the previous file
+  // before adopting the new file's content.
+  $effect(() => {
+    const nextPath = filePath;
+    if (nextPath !== lastFilePath) {
+      untrack(() => {
+        editDebouncer.flush();
+        lastFilePath = nextPath;
+        editingRight = false;
+        editDraft = rightText;
+      });
+    }
   });
 
   // Reset identical-banner dismissal when inputs change.
@@ -68,6 +87,10 @@
   // Keep inline editor draft synced when external rightText changes while not typing.
   $effect(() => {
     if (!editingRight) editDraft = rightText;
+  });
+
+  onDestroy(() => {
+    editDebouncer.flush();
   });
 
   const effectiveRight = $derived(editingRight ? editDraft : rightText);
@@ -106,34 +129,31 @@
 
   function revertHunk(idx: number): void {
     if (!canEditRight || !onApplyRight) return;
+    editDebouncer.cancel();
     const next = applyLeftHunkToRight(leftText, effectiveRight, idx);
     if (editingRight) editDraft = next;
-    void onApplyRight(next, `Applied hunk ${idx + 1}`);
+    void onApplyRight(next, `Applied hunk ${idx + 1}`, filePath);
   }
 
   function revertAllHunks(): void {
     if (!canEditRight || !onApplyRight) return;
+    editDebouncer.cancel();
     const next = leftText.replace(/\r\n/g, '\n');
     if (editingRight) editDraft = next;
-    void onApplyRight(next, 'Applied all differences');
+    void onApplyRight(next, 'Applied all differences', filePath);
   }
 
   function onDraftInput(next: string): void {
+    const destPath = filePath;
     editDraft = next;
     if (!canEditRight || !onApplyRight) return;
-    if (editSaveTimer) clearTimeout(editSaveTimer);
-    editSaveTimer = setTimeout(() => {
-      editSaveTimer = null;
-      void onApplyRight(editDraft, 'Edited Current');
-    }, 320);
+    editDebouncer.schedule(destPath, next);
   }
 
   function toggleEditRight(): void {
-    if (editingRight && editSaveTimer && onApplyRight) {
-      clearTimeout(editSaveTimer);
-      editSaveTimer = null;
-      void onApplyRight(editDraft, 'Edited Current');
-    } else if (!editingRight) {
+    if (editingRight) {
+      editDebouncer.flush();
+    } else {
       editDraft = rightText;
     }
     editingRight = !editingRight;

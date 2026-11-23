@@ -76,7 +76,7 @@ pub fn build_remote_lsp_script(root: &str, launch: &SpawnLaunch) -> String {
         "*) export NODE_OPTIONS=\"$NODE_OPTIONS --max-old-space-size=384\" ;; esac"
     );
 
-    if let Some(fb) = &launch.fallback_cmd {
+    let inner = if let Some(fb) = &launch.fallback_cmd {
         let invoke_fb = std::iter::once(posix_quote(fb))
             .chain(launch.fallback_args.iter().map(|a| posix_quote(a)))
             .collect::<Vec<_>>()
@@ -91,7 +91,8 @@ pub fn build_remote_lsp_script(root: &str, launch: &SpawnLaunch) -> String {
         )
     } else {
         format!("cd {quoted_root} && {path_setup}; {mem_exports}; exec {invoke_primary}")
-    }
+    };
+    crate::target::ssh_exec::wrap_remote_stdio_with_eof_kill(&inner)
 }
 
 /// The newest `lombok-<v>.jar` in the local Maven repository, if any.
@@ -200,6 +201,20 @@ mod unix_sig {
 
 #[cfg(unix)]
 #[allow(unsafe_code)]
+pub(crate) fn term_process_group_sync(pgid: u32) {
+    if pgid <= 1 {
+        return;
+    }
+    if let Ok(p) = std::ffi::c_int::try_from(pgid) {
+        // SAFETY: Sending SIGTERM to a negative process group ID (-p < -1) is OS-safe.
+        unsafe {
+            let _ = unix_sig::kill(-p, unix_sig::SIGTERM);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
 pub(crate) fn kill_process_group_sync(pgid: u32) {
     if pgid <= 1 {
         return;
@@ -212,19 +227,11 @@ pub(crate) fn kill_process_group_sync(pgid: u32) {
     }
 }
 
+/// Immediate process-group force teardown (no redundant back-to-back SIGTERM
+/// immediately before SIGKILL).
 #[cfg(unix)]
-#[allow(unsafe_code)]
 pub(crate) fn terminate_process_group(pgid: u32) {
-    if pgid <= 1 {
-        return;
-    }
-    if let Ok(p) = std::ffi::c_int::try_from(pgid) {
-        // SAFETY: Sending SIGTERM/SIGKILL to a negative process group ID (-p < -1) is OS-safe.
-        unsafe {
-            let _ = unix_sig::kill(-p, unix_sig::SIGTERM);
-            let _ = unix_sig::kill(-p, unix_sig::SIGKILL);
-        }
-    }
+    kill_process_group_sync(pgid);
 }
 
 pub(crate) fn build_process_spawner(
@@ -446,4 +453,153 @@ pub(crate) fn sample_pids_rss_bytes(pids: &[u32]) -> HashMap<u32, u64> {
         });
     }
     by_pgid
+}
+
+#[derive(Clone)]
+struct FdCache {
+    sampled_at: Instant,
+    by_pid: HashMap<u32, u32>,
+}
+
+fn fd_cache() -> &'static Mutex<Option<FdCache>> {
+    static CACHE: OnceLock<Mutex<Option<FdCache>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn sample_single_pid_fd_count(pid: u32) -> Option<u32> {
+    const PROC_PIDLISTFDS: std::ffi::c_int = 1;
+    // sizeof(struct proc_fdinfo) on macOS is 8 bytes (i32 proc_fd + u32 proc_fdtype).
+    const PROC_FDINFO_SIZE: std::ffi::c_int = 8;
+    extern "C" {
+        fn proc_pidinfo(
+            pid: std::ffi::c_int,
+            flavor: std::ffi::c_int,
+            arg: u64,
+            buffer: *mut std::ffi::c_void,
+            buffersize: std::ffi::c_int,
+        ) -> std::ffi::c_int;
+    }
+    let pid_i32 = std::ffi::c_int::try_from(pid).ok()?;
+    if pid_i32 <= 0 {
+        return None;
+    }
+    // SAFETY: Passing null buffer with buffersize=0 queries the required byte
+    // size without writing to memory; returns <= 0 when the process exited or
+    // is inaccessible.
+    let bytes = unsafe { proc_pidinfo(pid_i32, PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+    if bytes <= 0 {
+        return None;
+    }
+    u32::try_from(bytes / PROC_FDINFO_SIZE).ok()
+}
+
+#[cfg(target_os = "linux")]
+#[allow(clippy::disallowed_methods)]
+fn sample_single_pid_fd_count(pid: u32) -> Option<u32> {
+    if pid == 0 {
+        return None;
+    }
+    let count = std::fs::read_dir(format!("/proc/{pid}/fd")).ok()?.count();
+    u32::try_from(count).ok()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn sample_single_pid_fd_count(_pid: u32) -> Option<u32> {
+    None
+}
+
+/// Sample open file-descriptor counts for `pids`, cached for 5 seconds and
+/// silently omitting exited or inaccessible processes.
+pub(crate) fn sample_pids_fd_counts(pids: &[u32]) -> HashMap<u32, u32> {
+    if pids.is_empty() {
+        return HashMap::new();
+    }
+    let now = Instant::now();
+    if let Ok(guard) = fd_cache().lock() {
+        if let Some(cached) = guard.as_ref() {
+            if now.duration_since(cached.sampled_at) < Duration::from_secs(5)
+                && pids.iter().all(|p| cached.by_pid.contains_key(p))
+            {
+                return pids
+                    .iter()
+                    .filter_map(|p| cached.by_pid.get(p).copied().map(|n| (*p, n)))
+                    .collect();
+            }
+        }
+    }
+    let mut by_pid = HashMap::with_capacity(pids.len());
+    for &pid in pids {
+        if let Some(n) = sample_single_pid_fd_count(pid) {
+            by_pid.insert(pid, n);
+        }
+    }
+    if let Ok(mut guard) = fd_cache().lock() {
+        *guard = Some(FdCache {
+            sampled_at: now,
+            by_pid: by_pid.clone(),
+        });
+    }
+    by_pid
+}
+
+/// Combined live RSS + FD sample for a single OS process (or process group).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ProcessResourceSample {
+    pub rss_bytes: Option<u64>,
+    pub fd_count: Option<u32>,
+}
+
+/// Sample RSS and open FD counts off the Tokio runtime via `spawn_blocking`.
+pub(crate) async fn sample_pids_metrics_async(
+    pids: Vec<u32>,
+) -> HashMap<u32, ProcessResourceSample> {
+    if pids.is_empty() {
+        return HashMap::new();
+    }
+    tokio::task::spawn_blocking(move || {
+        let rss = sample_pids_rss_bytes(&pids);
+        let fds = sample_pids_fd_counts(&pids);
+        pids.into_iter()
+            .map(|p| {
+                let rss_bytes = rss.get(&p).copied().filter(|&b| b > 0);
+                let fd_count = fds.get(&p).copied();
+                (
+                    p,
+                    ProcessResourceSample {
+                        rss_bytes,
+                        fd_count,
+                    },
+                )
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod resource_metric_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sample_pids_metrics_reports_current_process_and_ignores_exited_pid() {
+        let self_pid = std::process::id();
+        let bogus_pid = u32::MAX / 2;
+        let samples = sample_pids_metrics_async(vec![self_pid, bogus_pid]).await;
+        let mine = samples.get(&self_pid).copied().unwrap_or_default();
+        assert!(
+            mine.rss_bytes.unwrap_or(0) > 0,
+            "current process should have non-zero RSS: {mine:?}"
+        );
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        assert!(
+            mine.fd_count.unwrap_or(0) >= 3,
+            "current process should have >=3 open FDs: {mine:?}"
+        );
+        let missing = samples.get(&bogus_pid).copied().unwrap_or_default();
+        assert_eq!(missing.rss_bytes, None);
+        assert_eq!(missing.fd_count, None);
+    }
 }

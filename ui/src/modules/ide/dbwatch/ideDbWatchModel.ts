@@ -62,3 +62,14 @@ export function formatDbCellValue(val: unknown): string {
     return String(val);
   }
 }
+
+/** True when the DB Watch panel is currently shown in either desktop dock or phone stacked layout. */
+export function isDbWatchPanelVisible(opts: {
+  stack: boolean;
+  stackPane: string;
+  bottomDockOpen: boolean;
+  activeBottomTab: string;
+}): boolean {
+  if (opts.activeBottomTab !== 'dbwatch') return false;
+  return opts.stack ? opts.stackPane === 'tools' : opts.bottomDockOpen;
+}

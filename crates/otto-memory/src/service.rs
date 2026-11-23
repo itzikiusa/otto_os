@@ -91,6 +91,10 @@ impl MemoryService {
         &self.repo
     }
 
+    pub(crate) fn remote_client(&self) -> Option<&RemoteClient> {
+        self.remote.as_ref()
+    }
+
     /// Raw pool access — used by governance operations that need to run SQL
     /// statements not yet exposed on `MemoriesRepo` (e.g. updating
     /// `provenance_json` for in-flight imports).
@@ -354,6 +358,41 @@ impl MemoryService {
         self.entity_graph_visible(ws, id, None).await
     }
 
+    /// Visible memory graph (nodes + edges). Delegates to the remote host when
+    /// configured so the graph view never silently splits onto local SQLite.
+    pub async fn graph_visible(
+        &self,
+        ws: &str,
+        collection: Option<&str>,
+        viewer: Option<&str>,
+    ) -> Result<crate::http::GraphData> {
+        if let Some(r) = &self.remote {
+            return r.graph(ws, collection).await;
+        }
+        let nodes: Vec<crate::http::GraphNode> = self
+            .repo
+            .graph_nodes_visible(ws, collection, viewer)
+            .await?
+            .into_iter()
+            .map(|(id, label, kind, collection)| crate::http::GraphNode {
+                id,
+                label,
+                kind,
+                collection,
+            })
+            .collect();
+        let ids: std::collections::HashSet<&str> =
+            nodes.iter().map(|node| node.id.as_str()).collect();
+        let edges = self
+            .repo
+            .links_visible(ws, None, viewer)
+            .await?
+            .into_iter()
+            .filter(|edge| ids.contains(edge.src_id.as_str()) && ids.contains(edge.dst_id.as_str()))
+            .collect();
+        Ok(crate::http::GraphData { nodes, edges })
+    }
+
     pub async fn entity_graph_visible(
         &self,
         ws: &str,
@@ -364,8 +403,10 @@ impl MemoryService {
         let mut neighbors = Vec::new();
         for l in &links {
             let other = if l.src_id == id { &l.dst_id } else { &l.src_id };
-            if let Ok(m) = self.get_visible(ws, other, viewer).await {
-                neighbors.push(m);
+            match self.get_visible(ws, other, viewer).await {
+                Ok(m) => neighbors.push(m),
+                Err(otto_core::Error::NotFound(_)) => {}
+                Err(error) => return Err(error),
             }
         }
         Ok((links, neighbors))
@@ -383,11 +424,17 @@ impl MemoryService {
         let limit = q.k;
         let text = q.text.clone().unwrap_or_default();
 
+        let has_post_filters = q.scope.is_some() || !q.tags.is_empty() || !q.entities.is_empty();
+        let fetch_limit = if has_post_filters {
+            (limit * 8).max(200)
+        } else {
+            limit * 4
+        };
         let kf = SearchFilter {
             collection: q.collection.clone(),
             story_id: q.story_id.clone(),
             include_inactive: q.include_inactive,
-            limit: (limit * 4) as i64,
+            limit: fetch_limit as i64,
             kinds: q.kinds.clone(),
             viewer: q.viewer.clone(),
         };
@@ -432,10 +479,31 @@ impl MemoryService {
             if !q.kinds.is_empty() && !q.kinds.contains(&m.kind) {
                 continue;
             }
+            if let Some(scope) = q.scope {
+                if m.scope != scope {
+                    continue;
+                }
+            }
+            if !q.tags.is_empty()
+                && !q
+                    .tags
+                    .iter()
+                    .any(|tag| m.tags.iter().any(|mt| mt.eq_ignore_ascii_case(tag)))
+            {
+                continue;
+            }
+            if !q.entities.is_empty()
+                && !q
+                    .entities
+                    .iter()
+                    .any(|ent| m.entities.iter().any(|me| me.eq_ignore_ascii_case(ent)))
+            {
+                continue;
+            }
             let scope_match =
                 q.story_id.is_some() && q.story_id.as_deref() == m.story_id.as_deref();
             let sig = RerankSignals {
-                recency_days: 0.0,
+                recency_days: recency_days_now(&m.updated_at, &m.created_at),
                 access_count: m.access_count,
                 confidence: m.confidence,
                 salience: m.salience,
@@ -556,6 +624,22 @@ impl MemoryService {
             used,
         })
     }
+
+    /// Recall active, caller-visible workspace memories matching `query`
+    /// (recency-weighted, scope/tag-filtered via [`Self::search`]) and render a
+    /// compact, byte-budgeted (`<= 2 KiB` default) `## Relevant Workspace Memory`
+    /// markdown section with provenance citations. Returns an empty string when
+    /// no memories match (strict no-op).
+    pub async fn recall_context_brief(
+        &self,
+        ws: &str,
+        query: MemoryQuery,
+        max_bytes: Option<usize>,
+    ) -> Result<String> {
+        let hits = self.search(ws, query).await?;
+        let budget = max_bytes.unwrap_or(crate::retrieve::MAX_CONTEXT_BRIEF_BYTES);
+        Ok(crate::retrieve::format_hits_brief(&hits, budget))
+    }
 }
 
 fn est_tokens(s: &str) -> usize {
@@ -566,4 +650,319 @@ fn est_tokens(s: &str) -> usize {
 /// instructions when the brief is composed into a prompt.
 fn fence_inline(s: &str) -> String {
     s.replace('`', "ʼ").replace('\n', " ")
+}
+
+/// Non-negative elapsed days since `updated_at` (falling back to `created_at`).
+/// Returns `0.0` if neither timestamp parses or if the timestamp is in the future.
+fn recency_days_now(updated_at: &str, created_at: &str) -> f32 {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    recency_days_at(updated_at, created_at, now_secs)
+}
+
+fn recency_days_at(updated_at: &str, created_at: &str, now_secs: f64) -> f32 {
+    let Some(ts) =
+        parse_rfc3339_unix_secs(updated_at).or_else(|| parse_rfc3339_unix_secs(created_at))
+    else {
+        return 0.0;
+    };
+    let elapsed = (now_secs - ts).max(0.0);
+    (elapsed / 86_400.0) as f32
+}
+
+/// Minimal RFC3339 parser (`YYYY-MM-DD[T| ]HH:MM:SS[.frac](Z|+HH:MM|-HH:MM)`)
+/// returning Unix epoch seconds as `f64`. Avoids pulling `chrono` into
+/// non-dev dependencies.
+fn parse_rfc3339_unix_secs(raw: &str) -> Option<f64> {
+    let s = raw.trim();
+    let b = s.as_bytes();
+    if b.len() < 20 {
+        return None;
+    }
+    let year: i64 = s.get(0..4)?.parse().ok()?;
+    if *b.get(4)? != b'-' {
+        return None;
+    }
+    let month: u32 = s.get(5..7)?.parse().ok()?;
+    if *b.get(7)? != b'-' {
+        return None;
+    }
+    let day: u32 = s.get(8..10)?.parse().ok()?;
+    let sep = *b.get(10)?;
+    if !matches!(sep, b'T' | b't' | b' ') {
+        return None;
+    }
+    let hour: u32 = s.get(11..13)?.parse().ok()?;
+    if *b.get(13)? != b':' {
+        return None;
+    }
+    let minute: u32 = s.get(14..16)?.parse().ok()?;
+    if *b.get(16)? != b':' {
+        return None;
+    }
+    let second: u32 = s.get(17..19)?.parse().ok()?;
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return None;
+    }
+    let mut rest = s.get(19..)?;
+    let mut frac = 0.0f64;
+    if let Some(after_dot) = rest.strip_prefix('.') {
+        let digits_len = after_dot.bytes().take_while(|c| c.is_ascii_digit()).count();
+        if digits_len == 0 {
+            return None;
+        }
+        let frac_str = &after_dot[..digits_len.min(9)];
+        let val: f64 = frac_str.parse().ok()?;
+        frac = val / 10f64.powi(frac_str.len() as i32);
+        rest = &after_dot[digits_len..];
+    }
+    let tz_offset_secs: i64 = if matches!(rest, "Z" | "z") {
+        0
+    } else if rest.len() == 6 && (rest.starts_with('+') || rest.starts_with('-')) {
+        let sign = if rest.starts_with('+') { 1 } else { -1 };
+        if rest.as_bytes()[3] != b':' {
+            return None;
+        }
+        let oh: i64 = rest[1..3].parse().ok()?;
+        let om: i64 = rest[4..6].parse().ok()?;
+        if oh > 23 || om > 59 {
+            return None;
+        }
+        sign * (oh * 3600 + om * 60)
+    } else {
+        return None;
+    };
+    let days = days_from_civil(year, month, day);
+    let secs = days * 86_400 + i64::from(hour) * 3600 + i64::from(minute) * 60 + i64::from(second)
+        - tz_offset_secs;
+    Some(secs as f64 + frac)
+}
+
+/// Howard Hinnant's civil-to-days algorithm: days since 1970-01-01.
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400) as u64;
+    let m = u64::from(month);
+    let d = u64::from(day);
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe as i64 - 719_468
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recency_days_computes_real_elapsed_days_and_clamps_future() {
+        let t0 = parse_rfc3339_unix_secs("2026-06-15T12:00:00Z").unwrap();
+        // 10 days earlier
+        let d = recency_days_at("2026-06-05T12:00:00Z", "2026-06-01T00:00:00Z", t0);
+        assert!((d - 10.0).abs() < 0.01, "expected ~10 days, got {d}");
+        // Falls back to created_at if updated_at is blank/invalid
+        let d_fb = recency_days_at("", "2026-06-01T12:00:00Z", t0);
+        assert!((d_fb - 14.0).abs() < 0.01, "expected ~14 days, got {d_fb}");
+        // Timezone offset handled accurately
+        let d_tz = recency_days_at("2026-06-05T14:00:00+02:00", "", t0);
+        assert!((d_tz - 10.0).abs() < 0.01, "expected ~10 days, got {d_tz}");
+        // Future timestamp clamps to 0.0
+        assert_eq!(recency_days_at("2026-06-20T00:00:00Z", "", t0), 0.0);
+        // Unparseable timestamps fall back safely to 0.0
+        assert_eq!(recency_days_at("not-a-date", "also-bad", t0), 0.0);
+    }
+
+    #[tokio::test]
+    async fn search_honors_scope_tags_entities_and_recency_ranking() {
+        let (pool, ws, user) = crate::test_support::mem_pool().await;
+        let svc = MemoryService::with_defaults(pool.clone());
+
+        let mk = |title: &str, body: &str, scope: Scope, tags: Vec<&str>, entities: Vec<&str>| {
+            NewMemory {
+                collection: "product".into(),
+                record_type: "item".into(),
+                visibility: "shared".into(),
+                scope,
+                story_id: None,
+                kind: kind::FACT.into(),
+                title: title.into(),
+                body: body.into(),
+                entities: entities.into_iter().map(String::from).collect(),
+                tags: tags.into_iter().map(String::from).collect(),
+                source_kind: source::MANUAL.into(),
+                source_ref: None,
+                refs: vec![],
+                confidence: Some(0.9),
+                salience: Some(0.9),
+            }
+        };
+
+        let saved = svc
+            .save(
+                &ws,
+                &user,
+                vec![
+                    mk(
+                        "Old note",
+                        "settlement window runs nightly",
+                        Scope::Workspace,
+                        vec!["payments", "ops"],
+                        vec!["ledger-svc"],
+                    ),
+                    mk(
+                        "Story note",
+                        "settlement window story override",
+                        Scope::Story,
+                        vec!["billing"],
+                        vec!["invoice-svc"],
+                    ),
+                ],
+            )
+            .await
+            .unwrap();
+
+        // Filter by scope
+        let story_hits = svc
+            .search(
+                &ws,
+                MemoryQuery {
+                    text: Some("settlement".into()),
+                    scope: Some(Scope::Story),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(story_hits.len(), 1);
+        assert_eq!(story_hits[0].memory.id, saved[1].id);
+
+        // Filter by tags (case-insensitive)
+        let tag_hits = svc
+            .search(
+                &ws,
+                MemoryQuery {
+                    text: Some("settlement".into()),
+                    tags: vec!["PAYMENTS".into()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(tag_hits.len(), 1);
+        assert_eq!(tag_hits[0].memory.id, saved[0].id);
+
+        // Filter by entities
+        let ent_hits = svc
+            .search(
+                &ws,
+                MemoryQuery {
+                    text: Some("settlement".into()),
+                    entities: vec!["invoice-svc".into()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(ent_hits.len(), 1);
+        assert_eq!(ent_hits[0].memory.id, saved[1].id);
+
+        // Recency affects ranking: aging the same rank-0 memory lowers its score.
+        let fresh_score = svc
+            .search(
+                &ws,
+                MemoryQuery {
+                    text: Some("settlement".into()),
+                    tags: vec!["payments".into()],
+                    recency_half_life_days: Some(30.0),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()[0]
+            .score;
+        sqlx::query("UPDATE memories SET updated_at = '2020-01-01T00:00:00Z' WHERE id = ?")
+            .bind(&saved[0].id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let stale_score = svc
+            .search(
+                &ws,
+                MemoryQuery {
+                    text: Some("settlement".into()),
+                    tags: vec!["payments".into()],
+                    recency_half_life_days: Some(30.0),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()[0]
+            .score;
+        assert!(
+            fresh_score > stale_score,
+            "fresh memory ({fresh_score}) should score above stale memory ({stale_score})"
+        );
+    }
+
+    #[tokio::test]
+    async fn recall_context_brief_is_empty_noop_and_formats_provenance_within_budget() {
+        let (pool, ws, user) = crate::test_support::mem_pool().await;
+        let svc = MemoryService::with_defaults(pool);
+
+        // Empty workspace ⇒ strict no-op.
+        let empty = svc
+            .recall_context_brief(&ws, MemoryQuery::default(), None)
+            .await
+            .unwrap();
+        assert_eq!(empty, "");
+
+        svc.save(
+            &ws,
+            &user,
+            vec![NewMemory {
+                collection: "product".into(),
+                record_type: "item".into(),
+                visibility: "shared".into(),
+                scope: Scope::Workspace,
+                story_id: None,
+                kind: kind::DECISION.into(),
+                title: "Auth cookies".into(),
+                body: "Always set HttpOnly and SameSite=Lax".into(),
+                entities: vec![],
+                tags: vec!["security".into()],
+                source_kind: source::MANUAL.into(),
+                source_ref: Some("RFC-19".into()),
+                refs: vec![],
+                confidence: Some(0.95),
+                salience: Some(0.9),
+            }],
+        )
+        .await
+        .unwrap();
+
+        let md = svc
+            .recall_context_brief(
+                &ws,
+                MemoryQuery {
+                    tags: vec!["security".into()],
+                    scope: Some(Scope::Workspace),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(md.starts_with("## Relevant Workspace Memory\n\n"));
+        assert!(md.contains("[decision · workspace · "));
+        assert!(md.contains("**Auth cookies**"));
+        assert!(md.contains("(source: RFC-19)"));
+        assert!(md.len() <= crate::retrieve::MAX_CONTEXT_BRIEF_BYTES);
+    }
 }

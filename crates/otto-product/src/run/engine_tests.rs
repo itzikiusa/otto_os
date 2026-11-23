@@ -511,3 +511,94 @@ async fn no_plan_candidate_records_the_error_and_no_version() {
         .unwrap();
     assert!(events.iter().any(|e| e.kind == "plan_error"));
 }
+
+#[tokio::test]
+async fn analysis_writes_context_file_in_scratch_root_and_cleans_up() {
+    let f = fixture().await;
+    let analysis_id = f.analyze(&["lens-a"], "sum-ok").await;
+
+    let lens_call = f
+        .host
+        .calls()
+        .into_iter()
+        .find(|c| c.provider == "lens-a")
+        .expect("lens-a ran");
+    let expected =
+        super::scratch::scratch_root_dir().join(format!("otto-product-{analysis_id}-context.md"));
+    assert!(
+        lens_call
+            .prompt
+            .contains(expected.to_string_lossy().as_ref()),
+        "lens prompt should reference context file inside SCRATCH_ROOT: {}",
+        lens_call.prompt
+    );
+    assert!(
+        !expected.exists(),
+        "context file should be cleaned up after analysis completes: {}",
+        expected.display()
+    );
+}
+
+#[tokio::test]
+async fn reap_marks_orphaned_agent_error_when_workspace_is_missing() {
+    let f = fixture().await;
+    // Create a story pointing at a workspace id that does not exist in `workspaces`.
+    let orphan_story = f
+        .host
+        .repo
+        .create_story(NewStory {
+            workspace_id: "ws-does-not-exist".into(),
+            source_kind: "draft".into(),
+            account_id: String::new(),
+            source_key: String::new(),
+            title: "Orphan story".into(),
+            url: String::new(),
+            issue_type: None,
+            stage: "draft".into(),
+            cwd: None,
+            parent_id: None,
+            tree_kind: "story".into(),
+            folder: String::new(),
+            created_by: f.user.clone(),
+        })
+        .await
+        .unwrap();
+    let analysis = f
+        .host
+        .repo
+        .create_analysis(NewAnalysis {
+            story_id: orphan_story.id,
+            source_version_id: None,
+            status: "running".into(),
+            created_by: f.user.clone(),
+        })
+        .await
+        .unwrap();
+    let agent = f
+        .host
+        .repo
+        .add_analysis_agent(otto_state::NewAnalysisAgent {
+            analysis_id: analysis.id,
+            name: "L-orphan · claude".into(),
+            skill: "story-architecture-overview".into(),
+            provider: "claude".into(),
+            model: String::new(),
+            status: "running".into(),
+            session_id: None,
+        })
+        .await
+        .unwrap();
+
+    super::reap_orphaned_agents_on_startup(f.host.clone()).await;
+
+    let updated = f.host.repo.get_analysis_agent(&agent.id).await.unwrap();
+    assert_eq!(updated.status, "error");
+    assert!(
+        updated
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("workspace")),
+        "expected missing-workspace error message, got {:?}",
+        updated.error
+    );
+}

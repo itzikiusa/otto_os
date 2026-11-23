@@ -130,6 +130,24 @@ pub static REGISTRY: &[ServerDef] = &[
         extensions: &[".html", ".htm"],
         install_command: Some("npm install -g vscode-langservers-extracted"),
     },
+    ServerDef {
+        lang: "swift",
+        cmd: "sourcekit-lsp",
+        args: &[],
+        fallback_cmd: None,
+        fallback_args: &[],
+        extensions: &[".swift"],
+        install_command: Some("xcode-select --install"),
+    },
+    ServerDef {
+        lang: "dart",
+        cmd: "dart",
+        args: &["language-server", "--protocol=lsp"],
+        fallback_cmd: None,
+        fallback_args: &[],
+        extensions: &[".dart"],
+        install_command: Some("brew install --cask flutter"),
+    },
 ];
 
 /// Result of resolving one language server against toolchain dirs + PATH.

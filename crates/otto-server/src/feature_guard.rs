@@ -250,7 +250,12 @@ where
     // proxy route template is `/api/v1/plugins/{slug}/{*rest}`, so the literal slug
     // is read from the CONCRETE request path (which, inside the nest, may or may not
     // still carry the `/api/v1` prefix — handle both).
-    if template.starts_with("/api/v1/plugins/") {
+    if template.starts_with("/api/v1/plugins/")
+        && !matches!(
+            template.as_str(),
+            "/api/v1/plugins/{slug}/restart" | "/api/v1/plugins/{slug}/logs"
+        )
+    {
         let Some(AuthUser(user)) = req.extensions().get::<AuthUser>().cloned() else {
             return ApiError(Error::Unauthorized).into_response();
         };
@@ -407,6 +412,8 @@ pub enum RootRoute {
     ApiStream,
     /// `/ws/browser/{tab_id}/live` — drives a live browser tab.
     BrowserLive,
+    /// `/ws/simulators/{id}/stream|logs` — watches/drives a mobile simulator.
+    Simulators,
     /// `/browser/proxy` — fetches a page for the reader view (a read).
     BrowserProxy,
 }
@@ -445,7 +452,10 @@ pub fn root_route_decision(route: RootRoute, cred: RootCred) -> Result<(), &'sta
     }
     if cred.agent_session
         && cred.read_only
-        && matches!(route, RootRoute::ApiStream | RootRoute::BrowserLive)
+        && matches!(
+            route,
+            RootRoute::ApiStream | RootRoute::BrowserLive | RootRoute::Simulators
+        )
     {
         return Err("this agent session is read-only: it may read but not change anything");
     }
@@ -911,11 +921,12 @@ mod resource_route_tests {
 mod root_route_tests {
     use super::*;
 
-    const ALL: [RootRoute; 5] = [
+    const ALL: [RootRoute; 6] = [
         RootRoute::Events,
         RootRoute::Lsp,
         RootRoute::ApiStream,
         RootRoute::BrowserLive,
+        RootRoute::Simulators,
         RootRoute::BrowserProxy,
     ];
 
@@ -956,7 +967,11 @@ mod root_route_tests {
             ..agent
         };
         assert!(root_route_decision(RootRoute::Lsp, agent).is_err());
-        for route in [RootRoute::ApiStream, RootRoute::BrowserLive] {
+        for route in [
+            RootRoute::ApiStream,
+            RootRoute::BrowserLive,
+            RootRoute::Simulators,
+        ] {
             assert!(root_route_decision(route, agent).is_ok(), "{route:?}");
             assert!(root_route_decision(route, read_only).is_err(), "{route:?}");
         }
@@ -978,6 +993,7 @@ mod root_route_tests {
             RootRoute::Events,
             RootRoute::ApiStream,
             RootRoute::BrowserLive,
+            RootRoute::Simulators,
             RootRoute::BrowserProxy,
         ] {
             assert!(root_route_decision(route, ungranted).is_ok(), "{route:?}");
@@ -1031,6 +1047,16 @@ mod root_route_tests {
                 "/ws/browser/{tab_id}/live",
                 "otto-server/src/routes/browser_live.rs",
                 "RootRoute::BrowserLive",
+            ),
+            (
+                "/ws/simulators/{id}/stream",
+                "otto-server/src/routes/simulators_ws.rs",
+                "RootRoute::Simulators",
+            ),
+            (
+                "/ws/simulators/{id}/logs",
+                "otto-server/src/routes/simulators_ws.rs",
+                "RootRoute::Simulators",
             ),
             (
                 "/browser/proxy",

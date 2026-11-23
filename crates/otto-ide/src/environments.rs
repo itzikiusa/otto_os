@@ -8,6 +8,7 @@ mod crud_folders;
 mod db_store;
 pub mod discovery;
 mod discovery_jvm_py;
+mod discovery_mobile;
 mod env_layers;
 pub(crate) mod module_sdks;
 mod python_venv;

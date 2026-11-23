@@ -38,27 +38,30 @@ export function nextTabAccessStamp(): number {
   return lruAccessClock;
 }
 
-export function saveWorkspaceOpenTabs(root: string, paths: string[], activePath: string | null, splitPath: string | null): void {
+export function saveWorkspaceOpenTabs(root: string, tabs: readonly (string | Pick<IdeOpenTab, 'path' | 'projectScoped'>)[], activePath: string | null, splitPath: string | null): void {
   if (!root) return;
   try {
     if (typeof localStorage === 'undefined') return;
     const cap = Math.max(15, Math.min(40, readIdePreferences().maxOpenTabs || 20));
+    const open = tabs.slice(0, cap);
+    const paths = open.map((tab) => typeof tab === 'string' ? tab : tab.path);
+    const projectScoped = open.flatMap((tab) => typeof tab !== 'string' && tab.projectScoped ? [tab.path] : []);
     localStorage.setItem(
       `${OPEN_TABS_KEY_PREFIX}${root}`,
-      JSON.stringify({ paths: paths.slice(0, cap), activePath, splitPath }),
+      JSON.stringify({ paths, activePath, splitPath, projectScoped }),
     );
   } catch { /* ignore */ }
 }
 
-export function loadWorkspaceOpenTabs(root: string): { paths: string[]; activePath: string | null; splitPath: string | null } | null {
+export function loadWorkspaceOpenTabs(root: string): { paths: string[]; activePath: string | null; splitPath: string | null; projectScoped: string[] } | null {
   if (!root) return null;
   try {
     if (typeof localStorage === 'undefined') return null;
     const raw = localStorage.getItem(`${OPEN_TABS_KEY_PREFIX}${root}`);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as { paths?: string[]; activePath?: string | null; splitPath?: string | null };
+    const parsed = JSON.parse(raw) as { paths?: string[]; activePath?: string | null; splitPath?: string | null; projectScoped?: string[] };
     if (!Array.isArray(parsed.paths) || parsed.paths.length === 0) return null;
-    return { paths: parsed.paths, activePath: parsed.activePath ?? null, splitPath: parsed.splitPath ?? null };
+    return { paths: parsed.paths, activePath: parsed.activePath ?? null, splitPath: parsed.splitPath ?? null, projectScoped: Array.isArray(parsed.projectScoped) ? parsed.projectScoped : [] };
   } catch {
     return null;
   }
@@ -107,7 +110,7 @@ export interface IdeBufferHost {
   cursorInfo: { line: number; col: number; cursors: number; selections: { anchor: number; head: number }[] };
   resolvePath(p: string): string; targetQuery(extra?: Record<string, string | boolean | null | undefined>): string;
   replaceBufferContent?(path: string, nextContent: string, range?: { from: number; to: number }): boolean;
-  openFile(rawPath: string, opts?: { line?: number; col?: number; preview?: boolean; inSplit?: boolean; reload?: boolean; background?: boolean }): Promise<void>;
+  openFile(rawPath: string, opts?: { line?: number; col?: number; preview?: boolean; inSplit?: boolean; reload?: boolean; background?: boolean; projectScoped?: boolean }): Promise<void>;
   closeSplit(): void; saveFile(path?: string, forceOverwrite?: boolean, opts?: { silent?: boolean }): Promise<boolean>;
   updateBuffer(path: string, content: string): void; sendCollabEdit(path: string, content: string, save?: boolean): Promise<boolean>;
   loadGutter(path: string, content?: string): Promise<void>; loadSymbols(path: string, content?: string): Promise<void>;
@@ -116,13 +119,23 @@ export interface IdeBufferHost {
 export class IdeBufferPerfController {
   readonly liveBuffers = new Map<string, string>();
   readonly conflictedPaths = new Set<string>();
-  /** The save in flight per path: a second save waits for it, so it sends the
-   *  sha256 the first one got back instead of a stale one (a false 409). */
+  /** The save or buffer-format op in flight per path: a second save or format waits
+   *  for it, so saves send the fresh sha256 and formatting never races autosave. */
   readonly savesInFlight = new Map<string, Promise<boolean>>();
+  enqueuePathOp<T>(key: string, op: () => Promise<T>): Promise<T> {
+    const prior = this.savesInFlight.get(key) ?? Promise.resolve(false);
+    const run = prior.catch(() => false).then(() => op());
+    const settled = run.then(() => true, () => false);
+    this.savesInFlight.set(key, settled);
+    const done = (): void => { if (this.savesInFlight.get(key) === settled) this.savesInFlight.delete(key); };
+    settled.then(done, done);
+    return run;
+  }
   private syncTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private autoSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private draftTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private historyTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private collabEditTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private lastSnapshotted = new Map<string, string>();
   private gutterJobs = new Map<string, PendingJob>();
   private symbolJobs = new Map<string, PendingJob>();
@@ -132,6 +145,12 @@ export class IdeBufferPerfController {
   private clearAutoSaveTimer(p: string): void { const t = this.autoSaveTimers.get(p); if (t) { clearTimeout(t); this.autoSaveTimers.delete(p); } }
   private clearDraftTimer(p: string): void { const t = this.draftTimers.get(p); if (t) { clearTimeout(t); this.draftTimers.delete(p); } }
   private clearHistoryTimer(p: string): void { const t = this.historyTimers.get(p); if (t) { clearTimeout(t); this.historyTimers.delete(p); } }
+  clearCollabEditTimer(p: string): void { const t = this.collabEditTimers.get(p); if (t) { clearTimeout(t); this.collabEditTimers.delete(p); } }
+  clearAllCollabEditTimers(): void { for (const t of this.collabEditTimers.values()) clearTimeout(t); this.collabEditTimers.clear(); }
+  scheduleCollabEdit(fullPath: string, send: () => void, delayMs = 120): void {
+    this.clearCollabEditTimer(fullPath);
+    this.collabEditTimers.set(fullPath, setTimeout(() => { this.collabEditTimers.delete(fullPath); send(); }, delayMs));
+  }
   scheduleAutoSave(host: IdeBufferHost, fullPath: string): void {
     this.clearAutoSaveTimer(fullPath);
     if (!readIdePreferences().autoSave || this.conflictedPaths.has(fullPath) || !host.canEditCollab) return;
@@ -270,7 +289,7 @@ export class IdeBufferPerfController {
       writeIdeUndoDraftImmediate(t.path, t.savedContent, t.content);
     }
     if (host.target.root) {
-      saveWorkspaceOpenTabs(host.target.root, host.tabs.map((t) => t.path), host.activePath, host.splitPath);
+      saveWorkspaceOpenTabs(host.target.root, host.tabs, host.activePath, host.splitPath);
     }
   }
   private discardAllDrafts(host: IdeBufferHost): void {
@@ -279,7 +298,7 @@ export class IdeBufferPerfController {
     this.draftTimers.clear();
     for (let i = 0; i < host.tabs.length; i++) removeIdeUndoDraft(host.tabs[i].path);
     if (host.target.root) {
-      saveWorkspaceOpenTabs(host.target.root, host.tabs.map((t) => t.path), host.activePath, host.splitPath);
+      saveWorkspaceOpenTabs(host.target.root, host.tabs, host.activePath, host.splitPath);
     }
   }
   markClean(tab: IdeOpenTab, content: string, sha256?: string): void {
@@ -308,7 +327,7 @@ export class IdeBufferPerfController {
     const closed = new Set<string>(paths);
     if (closed.size === 0) return;
     for (const p of closed) {
-      this.clearSync(p); this.clearAutoSaveTimer(p); this.clearDraftTimer(p); this.clearHistoryTimer(p);
+      this.clearSync(p); this.clearAutoSaveTimer(p); this.clearDraftTimer(p); this.clearHistoryTimer(p); this.clearCollabEditTimer(p);
       this.liveBuffers.delete(p); this.lastSnapshotted.delete(p); this.conflictedPaths.delete(p);
       this.cancelJob(this.gutterJobs, p); this.cancelJob(this.symbolJobs, p);
       if (clearProblems) removeIdeUndoDraft(p);
@@ -329,7 +348,7 @@ export class IdeBufferPerfController {
     for (const t of this.autoSaveTimers.values()) clearTimeout(t);
     for (const t of this.draftTimers.values()) clearTimeout(t);
     for (const t of this.historyTimers.values()) clearTimeout(t);
-    this.syncTimers.clear(); this.autoSaveTimers.clear(); this.draftTimers.clear(); this.historyTimers.clear();
+    this.syncTimers.clear(); this.autoSaveTimers.clear(); this.draftTimers.clear(); this.historyTimers.clear(); this.clearAllCollabEditTimers();
     this.liveBuffers.clear(); this.lastSnapshotted.clear(); this.conflictedPaths.clear();
     for (const p of [...this.gutterJobs.keys()]) this.cancelJob(this.gutterJobs, p);
     for (const p of [...this.symbolJobs.keys()]) this.cancelJob(this.symbolJobs, p);
@@ -448,14 +467,16 @@ export async function performOpenFile(
   perf: IdeBufferPerfController,
   isNavigatingHistory: boolean,
   rawPath: string,
-  opts: { line?: number; col?: number; preview?: boolean; inSplit?: boolean; reload?: boolean; background?: boolean } = {},
+  opts: { line?: number; col?: number; preview?: boolean; inSplit?: boolean; reload?: boolean; background?: boolean; projectScoped?: boolean } = {},
 ): Promise<void> {
   const fullPath = host.resolvePath(rawPath);
   if (!opts.background && !isNavigatingHistory && host.activePath) host.pushNavLocation(host.activePath, host.cursorInfo.line, host.cursorInfo.col);
   host.recentPaths = [fullPath, ...host.recentPaths.filter((p) => p !== fullPath)].slice(0, 20);
   const isGuest = host.collabIsGuest;
   const external = isPathExternal(fullPath, host.projectRoots);
-  const sdkReadOnly = isReadOnlySdkOrCachePath(fullPath);
+  const existing = host.tabs.find((t) => t.path === fullPath);
+  const projectScoped = external && Boolean(existing?.projectScoped || (opts.projectScoped && !existing?.dirty));
+  const sdkReadOnly = projectScoped || isReadOnlySdkOrCachePath(fullPath);
   const parentDir = fullPath.lastIndexOf('/') > 0 ? fullPath.slice(0, fullPath.lastIndexOf('/')) : host.target.root;
   const containingRoot = host.target.kind === 'local' ? findContainingRoot(fullPath, host.projectRoots) : null;
   const readFileUrl = () => {
@@ -467,8 +488,11 @@ export async function performOpenFile(
     }
     return `/ide/fs/file?${host.targetQuery({ path: fullPath })}`;
   };
-  const existing = host.tabs.find((t) => t.path === fullPath);
   if (existing) {
+    if (projectScoped) {
+      existing.projectScoped = true;
+      existing.readOnly = true;
+    }
     existing.preview = false;
     existing.lastAccessedAt = nextTabAccessStamp();
     if (opts.inSplit) host.openInSplit(fullPath, host.splitDirection ?? 'right'); else if (!opts.background) host.activePath = fullPath;
@@ -497,7 +521,7 @@ export async function performOpenFile(
   const placeholder: IdeOpenTab = {
     path: fullPath, name: ideBasename(fullPath), content: buf, savedContent: buf, dirty: false, eol: sharedEol, sha256: '',
     language: detectIdeLanguage(fullPath), readOnly: sdkReadOnly, truncated: false, loading: !isGuest, error: null,
-    preview: false, pinned: false, external, lastAccessedAt: nextTabAccessStamp(),
+    preview: false, pinned: false, external, projectScoped, lastAccessedAt: nextTabAccessStamp(),
   };
   host.tabs = [...host.tabs, placeholder];
   if (opts.inSplit) host.openInSplit(fullPath, host.splitDirection ?? 'right'); else if (!opts.background) host.activePath = fullPath;
@@ -534,7 +558,7 @@ export async function performOpenFile(
       tab.binary = Boolean(res.binary);
       tab.readOnly = isReadOnly;
       tab.loading = false;
-      if (host.target.root) saveWorkspaceOpenTabs(host.target.root, host.tabs.map((t) => t.path), host.activePath, host.splitPath);
+      if (host.target.root) saveWorkspaceOpenTabs(host.target.root, host.tabs, host.activePath, host.splitPath);
     }
     if (!opts.background && opts.line) host.jumpTo(fullPath, opts.line, opts.col ?? 1);
     if (host.activePath === fullPath || host.splitPath === fullPath) {
@@ -555,12 +579,7 @@ export function performSaveFile(
   opts: { silent?: boolean } = {},
 ): Promise<boolean> {
   const key = (path ? host.resolvePath(path) : host.activePath) ?? '';
-  const prior = perf.savesInFlight.get(key) ?? Promise.resolve(false);
-  const run = prior.catch(() => false).then(() => saveFileNow(host, perf, key || undefined, forceOverwrite, opts));
-  perf.savesInFlight.set(key, run);
-  const done = (): void => { if (perf.savesInFlight.get(key) === run) perf.savesInFlight.delete(key); };
-  run.then(done, done);
-  return run;
+  return perf.enqueuePathOp(key, () => saveFileNow(host, perf, key || undefined, forceOverwrite, opts));
 }
 
 async function saveFileNow(
@@ -677,7 +696,7 @@ export async function reloadTabsFromDisk(host: IdeBufferHost, perf: IdeBufferPer
       const normContent = normalizeEditorLf(fresh.content);
       tab.eol = eol; tab.diskEols = diskEolsOf(fresh.content);
       tab.truncated = Boolean(fresh.truncated);
-      tab.readOnly = Boolean(fresh.read_only) || Boolean(fresh.truncated) || isReadOnlySdkOrCachePath(tab.path);
+      tab.readOnly = Boolean(fresh.read_only) || Boolean(fresh.truncated) || Boolean(tab.external && tab.projectScoped) || isReadOnlySdkOrCachePath(tab.path);
       tab.error = null;
       host.replaceBufferContent?.(tab.path, normContent);
       perf.markClean(tab, normContent, fresh.sha256);

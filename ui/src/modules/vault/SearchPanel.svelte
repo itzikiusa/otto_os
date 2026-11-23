@@ -7,6 +7,15 @@
   import { announceShown } from '../../lib/announce.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { searchIndexNotice } from './searchIndex';
+  import {
+    AUDIT_PREDICATES,
+    PREFIX_OPERATORS,
+    activePredicates,
+    clearPredicates,
+    hasPredicate,
+    insertOperatorPrefix,
+    togglePredicate,
+  } from './searchPredicates';
 
   let input = $state<HTMLInputElement | undefined>();
   // While the full-text index rebuilds, results come from the indexed part:
@@ -23,6 +32,25 @@
     if (vault.leftMode === 'search') input?.focus();
   });
 
+  const activeCount = $derived(activePredicates(vault.searchQuery).length);
+
+  function onTogglePredicate(token: string, exclusivePrefix?: string): void {
+    vault.searchQuery = togglePredicate(vault.searchQuery, token, exclusivePrefix);
+    void vault.runSearch();
+  }
+
+  function onInsertPrefix(prefix: string): void {
+    vault.searchQuery = insertOperatorPrefix(vault.searchQuery, prefix);
+    input?.focus();
+    const len = vault.searchQuery.length;
+    input?.setSelectionRange?.(len, len);
+  }
+
+  function onClearPredicates(): void {
+    vault.searchQuery = clearPredicates(vault.searchQuery);
+    void vault.runSearch();
+  }
+
   function renderSnippet(s: string): string {
     // Server marks matches with ‹ › — escape everything else. Only a
     // balanced ‹…› pair (no nested ‹) becomes a <mark>: a stray literal ‹ or
@@ -36,14 +64,44 @@
     bind:this={input}
     bind:value={vault.searchQuery}
     type="search"
-    placeholder="Search… (tag:x path:y type:z)"
+    placeholder="Search… (status: stale:true orphan:true tag:)"
     aria-label="Search this vault"
-    title="Full-text search. Narrow with tag:, path: or type:. Press Enter to search."
+    title="Full-text search. Operators: status:, type:, tag:, path:, stale:true, orphan:true, links-to:. Press Enter to search."
     oninput={() => {
       if (!vault.searchQuery.trim()) void vault.runSearch();
     }}
     onkeydown={(e) => e.key === 'Enter' && void vault.runSearch()}
   />
+  <div class="predicates" role="group" aria-label="Search filters" data-testid="vault-search-predicates">
+    {#each AUDIT_PREDICATES as p (p.id)}
+      {@const on = hasPredicate(vault.searchQuery, p.token)}
+      <button
+        type="button"
+        class="pred-chip"
+        class:on
+        aria-pressed={on}
+        title={p.title}
+        data-testid="vault-pred-{p.id}"
+        onclick={() => onTogglePredicate(p.token, p.exclusivePrefix)}
+      >{p.label}</button>
+    {/each}
+    {#each PREFIX_OPERATORS as op (op.id)}
+      <button
+        type="button"
+        class="pred-chip op"
+        title={op.title}
+        onclick={() => onInsertPrefix(op.prefix)}
+      >{op.label}</button>
+    {/each}
+    {#if activeCount > 0}
+      <button
+        type="button"
+        class="pred-chip clear"
+        title="Clear structured filters"
+        onclick={onClearPredicates}
+      >Clear</button>
+    {/if}
+  </div>
   {#if vault.searching}
     <div class="dim">Searching…</div>
   {:else if vault.searchError}
@@ -70,7 +128,7 @@
         </button>
       {/each}
       {#if vault.searchHits.length >= 50}
-        <div class="dim cap-note">Showing the first 50 matches. Narrow with tag:, path:, or type:.</div>
+        <div class="dim cap-note">Showing the first 50 matches. Narrow with status:, type:, tag:, path:, stale:true, orphan:true, or links-to:.</div>
       {/if}
     </div>
   {/if}
@@ -110,6 +168,38 @@
     font-size: var(--fs-s);
     padding: 6px 10px;
     width: 100%;
+  }
+  .predicates {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .pred-chip {
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface-2);
+    color: var(--text-dim);
+    font-size: var(--fs-xs);
+    padding: 2px 8px;
+    cursor: pointer;
+    line-height: 1.4;
+  }
+  .pred-chip:hover {
+    color: var(--text);
+    border-color: var(--border-strong);
+  }
+  .pred-chip.on {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+    color: var(--accent-text);
+    font-weight: 500;
+  }
+  .pred-chip.op {
+    font-family: var(--font-mono);
+  }
+  .pred-chip.clear {
+    background: transparent;
+    border-style: dashed;
   }
   .dim {
     color: var(--text-dim);

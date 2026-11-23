@@ -18,6 +18,7 @@
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import { ListWindow } from '../../lib/listWindow.svelte';
   import type { TaskStatus, TrailKind, TrailSource } from '../../lib/api/types';
 
   const session = $derived(ws.activeSession);
@@ -144,13 +145,12 @@
     other: 'dot',
   };
 
-  const TASK_GLYPH: Record<TaskStatus, string> = {
-    pending: '○',
-    in_progress: '◐',
-    completed: '●',
-    blocked: '▲',
-    cancelled: '✕',
-  };
+  const TASK_ICON: Record<TaskStatus, IconName> = { pending: 'clock', in_progress: 'play', completed: 'check', blocked: 'warning', cancelled: 'x' };
+  const TASK_LABEL: Record<TaskStatus, string> = { pending: 'Pending', in_progress: 'In progress', completed: 'Completed', blocked: 'Blocked', cancelled: 'Canceled' };
+  const trailWin = new ListWindow('li.trail-row', { selfScroll: true, min: 100, rowH: 40 });
+  const trailRange = $derived(trailWin.range(filtered.length));
+  let trailEl = $state<HTMLUListElement | null>(null);
+  $effect(() => trailWin.findRows(() => trailEl, () => filtered, (e) => e.summary));
 
   const SOURCE_TABS: { id: SourceFilter; label: string }[] = [
     { id: 'all', label: 'All' },
@@ -239,8 +239,8 @@
             aria-label="Task description"
           ></textarea>
           <div class="task-add-row">
-            <button type="button" class="tbtn" onclick={cancelAddTask}>Cancel</button>
-            <button type="submit" class="tbtn primary" disabled={taskTitle.trim() === '' || taskBusy}>
+            <button type="button" class="btn small" onclick={cancelAddTask}>Cancel</button>
+            <button type="submit" class="btn small primary" disabled={taskTitle.trim() === '' || taskBusy}>
               {taskBusy ? 'Adding…' : 'Add'}
             </button>
           </div>
@@ -269,7 +269,8 @@
               data-testid="task-row"
               data-source={t.source}
             >
-              <span class="task-glyph">{TASK_GLYPH[t.status]}</span>
+              <span class="task-glyph" aria-hidden="true"><Icon name={TASK_ICON[t.status]} size={12} /></span>
+              <span class="sr-only">{TASK_LABEL[t.status]}: </span>
               <span class="task-title">{t.title}</span>
               {#if t.source === 'user'}
                 <Badge tone="accent" label="From board" title="Added from the board / Activity panel" />
@@ -309,33 +310,36 @@
         <input dir="ltr" class="search" placeholder="Filter…" aria-label="Filter the trail" bind:value={query} spellcheck="false" />
       </div>
 
-      <div class="note-add">
-        <input dir="auto"
-          class="note-input"
-          placeholder="Waiting on the staging deploy"
-          aria-label="Note"
-          bind:value={note}
-          onkeydown={onNoteKeydown}
-          spellcheck="false"
-        />
-        <button
-          class="note-btn"
-          title={note.trim() === '' ? 'Type a note first' : 'Add note'}
-          aria-label="Add note"
-          disabled={note.trim() === '' || adding}
-          onclick={addNote}
-        >
-          <Icon name="plus" size={13} />
-        </button>
-      </div>
+      {#if canEdit}
+        <div class="note-add">
+          <input dir="auto"
+            class="note-input"
+            placeholder="Add a note…"
+            aria-label="Note"
+            bind:value={note}
+            onkeydown={onNoteKeydown}
+            spellcheck="false"
+          />
+          <button
+            class="note-btn"
+            title={note.trim() === '' ? 'Type a note first' : 'Add note'}
+            aria-label="Add note"
+            disabled={note.trim() === '' || adding}
+            onclick={addNote}
+          >
+            <Icon name="plus" size={13} />
+          </button>
+        </div>
+      {/if}
 
       {#if filtered.length === 0}
         <p class="empty-line dim">
           {trail.length === 0 ? 'No activity recorded yet.' : 'Nothing matches this filter.'}
         </p>
       {:else}
-        <ul class="trail">
-          {#each filtered as e (e.id)}
+        <ul class="trail" bind:this={trailEl} bind:clientHeight={trailWin.viewH} onscroll={trailWin.onscroll}>
+          {#if trailRange.top}<li style:height="{trailRange.top}px" aria-hidden="true"></li>{/if}
+          {#each filtered.slice(trailRange.start, trailRange.end) as e (e.id)}
             <li class="trail-row src-{e.source} kind-{e.kind} lvl-{e.level}">
               {#snippet rowMain()}
                 <span class="row-icon"><Icon name={KIND_ICON[e.kind] ?? 'dot'} size={12} /></span>
@@ -366,6 +370,7 @@
               {/if}
             </li>
           {/each}
+          {#if trailRange.bottom}<li style:height="{trailRange.bottom}px" aria-hidden="true"></li>{/if}
         </ul>
       {/if}
     </section>
@@ -476,26 +481,6 @@
     display: flex;
     justify-content: flex-end;
     gap: 6px;
-  }
-  .tbtn {
-    height: 22px;
-    padding: 0 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface-2);
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-xs);
-    cursor: pointer;
-  }
-  .tbtn.primary {
-    background: var(--accent-solid);
-    border-color: var(--accent-solid);
-    color: var(--accent-contrast);
-  }
-  .tbtn:disabled {
-    opacity: var(--disabled-opacity);
-    cursor: default;
   }
   .task.nudge-pending .task-glyph {
     animation: otto-pulse 1.4s ease-in-out infinite;

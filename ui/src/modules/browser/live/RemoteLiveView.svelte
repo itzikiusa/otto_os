@@ -1,46 +1,35 @@
 <script lang="ts">
   import { announce, focusAppContent } from '../../../lib/announce.svelte';
-  // Remote live browser: a tab's daemon-owned Chromium, streamed into this
-  // pane as screencast frames over `WS /ws/browser/{tab_id}/live` and driven
-  // back with input frames (docs/contracts/ws.md §1b). Unlike the desktop
-  // app's native child webview it works anywhere the Otto UI runs — a remote
-  // web session, the PWA, a phone — and it is the surface an agent drives
-  // *visibly*: Take over / Hand back, and approval cards for the outward
-  // requests the daemon holds while an agent drives.
-  //
-  // Pure logic lives next door and is unit-tested: geometry.ts (client ↔
-  // page coordinates through letterboxing + DPR), keys.ts (which keys stay
-  // with Otto), throttle.ts (move/wheel coalescing), connection.ts (reconnect
-  // reducer), protocol.ts (frame parsing + copy), approvalFacts.ts. This file
-  // is the DOM glue.
-  //
-  // Keyboard model: a visually-hidden <textarea> is the focus sink, so IME
-  // composition, soft keyboards and paste all work. Click (or Tab onto it)
-  // gives the page the keyboard; Esc hands it back (⇧Esc sends Esc to the
-  // page). Otto's own chords (⌘K, ⌘T, ⌘J…) never reach the page — lib/keys.ts
-  // handles them first on window capture.
+  // Remote live browser: daemon-owned Chromium streamed over WS /ws/browser/{tab_id}/live.
+  // Pure logic lives in geometry.ts, keys.ts, throttle.ts, connection.ts, protocol.ts, approvalFlow.ts, approvalFacts.ts.
+  // Keyboard model: a visually-hidden <textarea> is the focus sink so IME
+  // composition, soft keyboards, and paste work. Click/Tab gives the page
+  // keyboard focus; Esc hands it back (⇧Esc forwards Esc); Otto chords (⌘K…)
+  // stay with Otto via window-capture in lib/keys.ts.
   import AgentChip from '../../../lib/components/AgentChip.svelte';
   import { untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
-  import { confirmer } from '../../../lib/confirm.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { auth } from '../../../lib/stores/auth.svelte';
-  import { ApiError } from '../../../lib/api/client';
-  import { mcpCpApi } from '../../../lib/api/mcp';
   import * as liveApi from '../../../lib/api/browserLive';
   import { browserLive } from '../../../lib/stores/browserLive.svelte';
   import { formatBytes } from '../../../lib/metric-format';
-  import type { BrowserLiveSession, BrowserTab, McpApproval } from '../../../lib/api/types';
+  import type { BrowserConsoleEntry, BrowserDevtoolsSnapshot, BrowserInspectedElement,
+    BrowserLiveSession, BrowserNetworkEntry, BrowserTab, McpApproval } from '../../../lib/api/types';
   import ApprovalCard from './ApprovalCard.svelte';
   import type { ApprovalChoice } from './approvalFacts';
+  import { classifyConnectError, fetchPendingApproval, submitApprovalDecision } from './approvalFlow';
+  import { drawContainBitmap } from './canvasDraw';
   import PageDialogCard from './PageDialogCard.svelte';
-  import { clientToPage, viewportChanged, viewportFor, type ViewportRequest } from './geometry';
+  import { DEFAULT_EMULATION_STATE, emulatedViewport, toWireEmulation, type DeviceEmulationState } from './devicePresets';
+  import { clientToPage, viewportChanged, viewportFor, watchDevicePixelRatio, type ViewportRequest } from './geometry';
   import { keyPayload, routeKey } from './keys';
   import { coalesce, mergeWheel, wheelPixels, type Clock, type WheelDelta } from './throttle';
   import { EMPTY_METER, INITIAL, isStale, latencySample, meterFps,
     meterFrame, meterLatency, reduce, type ConnEvent, type ConnState } from './connection';
-  import { blockedCopy, buttonName, closedReason, driverFor, encode, parseBinaryFrame,
-    parseServer, safeCursor, type ClientMsg, type FrameHeader, type LiveViewState, type ServerMsg } from './protocol';
+  import { approvalWireMeta, blockedCopy, buttonName, closedReason, driverFor, encode, parseBinaryFrame,
+    parseServer, safeCursor, type ApprovalWireMeta, type ClientMsg, type FrameHeader, type LiveViewState, type ServerMsg } from './protocol';
+  import { makeSetGuardMsg } from './spaGuard';
 
   interface Props {
     tab: BrowserTab;
@@ -54,8 +43,19 @@
     onnewtab?: (url: string) => void;
     /** "Switch to Reader" from the ended state. */
     onreader?: () => void;
+    emulation?: DeviceEmulationState;
+    inspectorOpen?: boolean;
+    inspectPicking?: boolean;
+    onconsole?: (entry: BrowserConsoleEntry) => void;
+    onnetwork?: (entry: BrowserNetworkEntry) => void;
+    onsnapshot?: (snapshot: BrowserDevtoolsSnapshot) => void;
+    oninspected?: (el: BrowserInspectedElement | null) => void;
   }
-  let { tab, onnav, onstate, onfocusurl, onnewtab, onreader }: Props = $props();
+  let {
+    tab, onnav, onstate, onfocusurl, onnewtab, onreader,
+    emulation = DEFAULT_EMULATION_STATE, inspectorOpen = false, inspectPicking = false,
+    onconsole, onnetwork, onsnapshot, oninspected,
+  }: Props = $props();
 
   const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
   const MOVE_INTERVAL_MS = 33; // ≈30 moves/s — the daemon coalesces further (≥ 8 ms)
@@ -81,9 +81,11 @@
   let tookOverFromAgent = $state(false);
   let banner = $state<{ tone: 'warn' | 'info'; text: string; action?: { label: string; run: () => void } } | null>(null);
   let pageDialog = $state<Extract<ServerMsg, { type: 'dialog' }> | null>(null);
-  let approval = $state<{ id: string; title: string; detail: McpApproval | null } | null>(null);
+  let approval = $state<{ id: string; title: string; detail: McpApproval | null; resourceType: string | null; bodyPreview: string | null } | null>(null);
   let deciding = $state(false);
   let decideError = $state('');
+  let lastEmulationKey = '';
+  let lastDevtoolsSent: boolean | null = null;
   /** Why a (re)connect failed, shown in the reconnecting banner. */
   let errorNote = $state('');
   /** Box of the surface in client px (kept by the ResizeObserver). */
@@ -129,6 +131,8 @@
   // ── connection ─────────────────────────────────────────────────────────
 
   function currentViewport(): ViewportRequest {
+    const fixed = emulatedViewport(emulation);
+    if (fixed) return fixed;
     let size = box;
     // Before the ResizeObserver's first callback (the session is opened on
     // mount), measure directly so the first frames already fit the pane.
@@ -139,6 +143,18 @@
     return viewportFor(size.width > 0 ? size : { width: 1280, height: 800 }, window.devicePixelRatio || 1);
   }
 
+  function pushEmulation(force = false): void {
+    if (conn.status !== 'live') return;
+    const wire = toWireEmulation(emulation);
+    const vp = currentViewport();
+    const key = JSON.stringify({ vp, wire });
+    if (!force && key === lastEmulationKey) return;
+    lastEmulationKey = key;
+    lastViewport = vp;
+    send({ type: 'emulate', viewport: vp, emulation: wire });
+  }
+  export function clearDevtools(): void { send({ type: 'clear_devtools' }); }
+
   async function connect(t: BrowserTab): Promise<void> {
     const mine = ++gen;
     pendingFrame = null; // an old connection's queued frame is never drawn/acked here
@@ -146,9 +162,8 @@
     try {
       const vp = currentViewport();
       // Opens the session, or re-attaches to this user's existing one.
-      // The daemon uses the saved tab URL for a NEW session. Sending an
-      // explicit URL while re-attaching navigates the existing session and
-      // discards the page's form/scroll state after every socket reconnect.
+  // The daemon uses the saved tab URL for a NEW session; sending an explicit
+  // URL while re-attaching would discard form/scroll state on reconnect.
       const s = await liveApi.openLive(t.id, { viewport: vp });
       if (mine !== gen) return;
       lastViewport = vp;
@@ -156,21 +171,15 @@
       knownUrl = s.url || t.url;
     } catch (e) {
       if (mine !== gen) return;
-      const status = e instanceof ApiError ? e.status : 0;
-      const code = e instanceof ApiError ? e.code : '';
-      if (status === 409 && code === 'engine_not_installed') {
-        // The engine went away: back to the enable step.
+      const err = classifyConnectError(e);
+      if (err.kind === 'not_installed') {
         void browserLive.load();
-        dispatch({ type: 'ended', reason: 'The live browser engine is not installed.' });
-      } else if (status === 409) {
-        dispatch({ type: 'ended', reason: 'Someone else has this tab open live. Open the page in a new tab to browse it yourself.' });
-      } else if (status === 429) {
-        dispatch({ type: 'ended', reason: 'Too many live tabs are open on this Mac. Close one, then reconnect.' });
-      } else if (status === 400 || status === 403 || status === 404) {
-        dispatch({ type: 'ended', reason: e instanceof Error && e.message ? e.message : 'This page can’t be opened live.' });
+        dispatch({ type: 'ended', reason: err.reason });
+      } else if (err.kind === 'ended') {
+        dispatch({ type: 'ended', reason: err.reason });
       } else {
-        errorNote = e instanceof Error ? e.message : String(e);
-        dispatch({ type: 'close', code: 1006, reason: 'Couldn’t start the live browser.' });
+        errorNote = err.note;
+        dispatch({ type: 'close', code: 1006, reason: err.reason });
       }
       return;
     }
@@ -179,9 +188,19 @@
     s.onopen = () => {
       if (mine !== gen) return;
       errorNote = '';
+      lastEmulationKey = '';
+      lastDevtoolsSent = null;
       dispatch({ type: 'open' });
-      // The pane may have changed size while the session was opening.
-      sendResize(true);
+      // Apply active device emulation or sync panel viewport on open.
+      if (emulation.enabled) {
+        pushEmulation(true);
+      } else {
+        sendResize(true);
+      }
+      if (inspectorOpen) {
+        lastDevtoolsSent = true;
+        send({ type: 'devtools', enabled: true });
+      }
     };
     s.onmessage = (ev) => {
       if (mine !== gen) return;
@@ -233,6 +252,8 @@
       banner = null;
       watchOnly = false;
       tookOverFromAgent = false;
+      lastEmulationKey = '';
+      lastDevtoolsSent = null;
       imageSize = { width: 0, height: 0 };
       bitmap?.close();
       bitmap = null;
@@ -242,6 +263,8 @@
     return () => {
       void id;
       disconnect();
+      bitmap?.close();
+      bitmap = null;
     };
   });
 
@@ -318,8 +341,12 @@
         }
         break;
       case 'approval':
-        void onApproval(msg.approval_id, msg.status, msg.title);
+        void onApproval(msg.approval_id, msg.status, msg.title, approvalWireMeta(msg));
         break;
+      case 'console': onconsole?.(msg.entry); break;
+      case 'network': onnetwork?.(msg.entry); break;
+      case 'devtools_snapshot': onsnapshot?.(msg.snapshot); break;
+      case 'inspected': oninspected?.(msg.element); break;
       case 'error':
         if (msg.code === 'forbidden') {
           watchOnly = true;
@@ -364,58 +391,47 @@
     onstate?.({ status: connStatus, session });
   });
 
+  // Push device emulation overrides whenever emulation settings change while live.
+  $effect(() => {
+    void emulation;
+    if (connStatus !== 'live') return;
+    untrack(() => pushEmulation(false));
+  });
+
+  // Enable/disable opt-in DevTools Console + Network streaming when drawer toggles.
+  $effect(() => {
+    const want = inspectorOpen;
+    if (connStatus !== 'live') return;
+    if (lastDevtoolsSent === want) return;
+    lastDevtoolsSent = want;
+    untrack(() => send({ type: 'devtools', enabled: want }));
+  });
+
   // ── approvals ──────────────────────────────────────────────────────────
 
-  async function onApproval(id: string, status: 'pending' | 'approved' | 'denied', title: string): Promise<void> {
+  async function onApproval(id: string, status: 'pending' | 'approved' | 'denied', title: string, meta: ApprovalWireMeta): Promise<void> {
     if (status !== 'pending') {
-      if (approval?.id === id) {
-        approval = null;
-        deciding = false;
-      }
+      if (approval?.id === id) { approval = null; deciding = false; }
       return;
     }
-    approval = { id, title, detail: null };
+    approval = { id, title, detail: null, resourceType: meta.resourceType, bodyPreview: meta.bodyPreview };
     decideError = '';
-    try {
-      const rows = await mcpCpApi.cpApprovals('pending');
-      const row = rows.find((r) => r.id === id) ?? null;
-      if (approval?.id === id) approval = { id, title, detail: row };
-    } catch {
-      /* no mcp:view — the card still shows the title and the decisions */
-    }
+    const row = await fetchPendingApproval(id);
+    if (row && approval?.id === id) approval = { id, title, detail: row, resourceType: meta.resourceType, bodyPreview: meta.bodyPreview };
   }
 
   async function decide(choice: ApprovalChoice, reason?: string | null): Promise<void> {
     const a = approval;
     if (!a || deciding) return;
-    let note: string | undefined;
-    if (choice === 'deny' && reason !== undefined) {
-      // The card's DenySheet already collected the (optional) reason.
-      note = reason?.trim() || undefined;
-    } else if (choice === 'deny') {
-      const why = await confirmer.promptText("Tell the agent why (optional). It won’t send this request.", {
-        title: 'Deny the request',
-        confirmLabel: 'Deny',
-        placeholder: 'Wrong time slot',
-      });
-      if (why === null) return;
-      note = why.trim() || undefined;
-    } else if (choice === 'take_over') {
-      note = 'Taken over by the user — they will finish this step themselves.';
-    }
     deciding = true;
     decideError = '';
-    try {
-      await mcpCpApi.cpDecide(a.id, { approved: choice === 'approve', note });
+    const res = await submitApprovalDecision(a.id, choice, reason);
+    deciding = false;
+    if (res.status === 'done') {
       if (choice === 'take_over') takeOver();
       if (approval?.id === a.id) approval = null;
-    } catch (e) {
-      decideError =
-        e instanceof ApiError && e.status === 403
-          ? 'You can’t decide MCP approvals in this workspace. Ask an admin, or take over the page.'
-          : `Couldn’t record your decision: ${e instanceof Error ? e.message : String(e)}`;
-    } finally {
-      deciding = false;
+    } else if (res.status === 'error') {
+      decideError = res.error ?? '';
     }
   }
 
@@ -476,23 +492,7 @@
   }
 
   function draw(): void {
-    const c = canvasEl;
-    if (!c || !bitmap) return;
-    const dpr = window.devicePixelRatio || 1;
-    const w = Math.max(1, Math.round(box.width * dpr));
-    const h = Math.max(1, Math.round(box.height * dpr));
-    if (c.width !== w || c.height !== h) {
-      c.width = w;
-      c.height = h;
-    }
-    const ctx = c.getContext('2d');
-    if (!ctx) return;
-    ctx.clearRect(0, 0, w, h);
-    const scale = Math.min(w / bitmap.width, h / bitmap.height);
-    const dw = bitmap.width * scale;
-    const dh = bitmap.height * scale;
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(bitmap, (w - dw) / 2, (h - dh) / 2, dw, dh);
+    drawContainBitmap(canvasEl, bitmap, box);
   }
 
   // Keep the canvas matched to the pane and the remote viewport matched to
@@ -516,17 +516,13 @@
       resizeTimer = setTimeout(() => sendResize(), RESIZE_DEBOUNCE_MS);
     });
     ro.observe(el);
-    // A DPR change (window dragged to another display) doesn't resize the
-    // element — re-evaluate on the resolution media query too.
-    const mq = matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
-    const onDpr = () => {
+    const stopDpr = watchDevicePixelRatio(() => {
       draw();
       sendResize();
-    };
-    mq.addEventListener('change', onDpr);
+    });
     return () => {
       ro.disconnect();
-      mq.removeEventListener('change', onDpr);
+      stopDpr();
       if (resizeTimer) clearTimeout(resizeTimer);
     };
   });
@@ -584,6 +580,12 @@
   };
 
   function onPointerDown(e: PointerEvent): void {
+    if (inspectPicking && conn.status === 'live') {
+      e.preventDefault();
+      const p = toPage(e.clientX, e.clientY);
+      if (p) send({ type: 'inspect', x: p.x, y: p.y });
+      return;
+    }
     if (!inputLive) return;
     if (e.pointerType === 'touch') {
       touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -798,6 +800,11 @@
   export function stop(): void {
     send({ type: 'nav', action: 'stop' });
   }
+  export function setGuard(enabled: boolean): boolean {
+    if (!sock || sock.readyState !== WebSocket.OPEN) return false;
+    send(makeSetGuardMsg(enabled));
+    return true;
+  }
 
   function takeOver(): void {
     tookOverFromAgent = session?.controller === 'agent' || tookOverFromAgent;
@@ -870,7 +877,7 @@
     </div>
   {/if}
 
-  <div class="surface" class:stale class:kbd={kbdFocused} style:cursor={inputLive ? cursor : 'default'} bind:this={surfaceEl}>
+  <div class="surface" class:stale class:kbd={kbdFocused} style:cursor={inspectPicking ? 'crosshair' : inputLive ? cursor : 'default'} bind:this={surfaceEl}>
     <canvas bind:this={canvasEl} aria-hidden="true"></canvas>
 
     <textarea dir="auto"
@@ -896,8 +903,6 @@
     ></textarea>
   </div>
 
-  <!-- chrome over the frame: ONE quiet status chip in the bottom corner, so
-       the page's own header (logo, nav) is never covered -->
   <div class="live-status" class:warn={conn.status !== 'live'} data-testid="live-badge">
     <span class="dot" aria-hidden="true"></span>
     <span>{statusText}</span>
@@ -910,10 +915,10 @@
     {/if}
   </div>
 
-  {#if kbdFocused}
-    <div class="hint">
-      Typing goes to the page · <kbd>Esc</kbd> releases · <kbd>⇧Esc</kbd> sends Esc
-    </div>
+  {#if inspectPicking}
+    <div class="hint">Inspect mode · click any element in the page</div>
+  {:else if kbdFocused}
+    <div class="hint">Typing goes to the page · <kbd>Esc</kbd> releases · <kbd>⇧Esc</kbd> sends Esc</div>
   {/if}
 
   {#if isTouch && inputLive}
@@ -934,20 +939,14 @@
       <Icon name="warning" size={14} />
       <span class="text">{statusText}</span>
       {#if errorNote}<span class="dim" title={errorNote}>{errorNote}</span>{/if}
-      <button class="btn small" onclick={retryNow}>Retry now</button>
+      <button class="btn small" onclick={retryNow}>Reconnect now</button>
     </div>
   {:else if banner}
     <div class="banner" class:info={banner.tone === 'info'} data-testid="live-banner">
       <Icon name={banner.tone === 'info' ? 'info' : 'shield'} size={14} />
       <span class="text">{banner.text}</span>
       {#if banner.action}
-        <button
-          class="btn small"
-          onclick={() => {
-            banner?.action?.run();
-            banner = null; void focusAppContent();
-          }}>{banner.action.label}</button
-        >
+        <button class="btn small" onclick={() => { banner?.action?.run(); banner = null; void focusAppContent(); }}>{banner.action.label}</button>
       {/if}
       <button class="icon-btn" onclick={() => { banner = null; void focusAppContent(); }} aria-label="Dismiss" title="Dismiss">
         <Icon name="x" size={12} />
@@ -973,6 +972,8 @@
           id={approval.id}
           title={approval.title}
           detail={approval.detail}
+          resourceType={approval.resourceType}
+          bodyPreview={approval.bodyPreview}
           profile={session?.profile ?? null}
           busy={deciding}
           error={decideError}
@@ -1155,90 +1156,33 @@
     text-align: center;
     padding: 16px;
   }
-  .ended h2 {
-    margin: 0;
-    font-size: var(--fs-l);
-    font-weight: 600;
-  }
-  .ended p {
-    margin: 0;
-    color: var(--text-dim);
-    max-width: 44ch;
-  }
-  .ended .row {
-    display: flex;
-    gap: 6px;
-    margin-top: 4px;
-  }
+  .ended h2 { margin: 0; font-size: var(--fs-l); font-weight: 600; }
+  .ended p { margin: 0; color: var(--text-dim); max-width: 44ch; }
+  .ended .row { display: flex; gap: 6px; margin-top: 4px; }
   .banner {
-    position: absolute;
-    inset-inline: 12px;
-    top: 12px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
+    position: absolute; inset-inline: 12px; top: 12px;
+    display: flex; align-items: center; gap: 8px;
     padding-block: 6px; padding-inline: 10px 8px;
     border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
-    border-radius: var(--radius-m);
-    background: var(--surface);
-    color: var(--text);
-    font-size: var(--fs-s);
+    border-radius: var(--radius-m); background: var(--surface); color: var(--text); font-size: var(--fs-s);
   }
-  .banner.info {
-    border-color: color-mix(in srgb, var(--info) 35%, transparent);
-  }
-  .drive-bar ~ .banner {
-    top: 48px;
-  }
-  .banner > :global(svg) {
-    color: var(--warning);
-    flex: none;
-  }
-  .banner.info > :global(svg) {
-    color: var(--info);
-  }
-  .banner .text {
-    flex: 1;
-    min-width: 0;
-  }
-  .banner .dim {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
+  .banner.info { border-color: color-mix(in srgb, var(--info) 35%, transparent); }
+  .drive-bar ~ .banner { top: 48px; }
+  .banner > :global(svg) { color: var(--warning); flex: none; }
+  .banner.info > :global(svg) { color: var(--info); }
+  .banner .text { flex: 1; min-width: 0; }
+  .banner .dim { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .card-host {
-    position: absolute;
-    inset-inline-start: 16px;
-    top: 16px;
-    bottom: 44px;
-    max-width: calc(100% - 32px);
-    display: flex;
-    align-items: flex-start;
-    pointer-events: none;
+    position: absolute; inset-inline-start: 16px; top: 16px; bottom: 44px;
+    max-width: calc(100% - 32px); display: flex; align-items: flex-start; pointer-events: none;
   }
-  .drive-bar ~ .card-host {
-    top: 52px;
-  }
-  .card-host > :global(*) {
-    pointer-events: auto;
-  }
+  .drive-bar ~ .card-host { top: 52px; }
+  .card-host > :global(*) { pointer-events: auto; }
   @media (max-width: 640px) {
-    .card-host,
-    .drive-bar ~ .card-host {
-      inset-inline: 8px;
-      top: 8px;
-      bottom: 40px;
-      max-width: none;
-      align-items: flex-end;
+    .card-host, .drive-bar ~ .card-host {
+      inset-inline: 8px; top: 8px; bottom: 40px; max-width: none; align-items: flex-end;
     }
-    .drive-bar {
-      flex-wrap: wrap;
-    }
+    .drive-bar { flex-wrap: wrap; }
   }
-  @media (prefers-reduced-motion: reduce) {
-    canvas {
-      transition: none;
-    }
-  }
+  @media (prefers-reduced-motion: reduce) { canvas { transition: none; } }
 </style>

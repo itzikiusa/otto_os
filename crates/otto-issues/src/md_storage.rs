@@ -88,8 +88,10 @@ fn inline(spans: &[Inl], extra: &[Mark], out: &mut String) {
                 }
                 let mut close = Vec::new();
                 if let Some(Mark::Link(href)) = marks.iter().find(|m| matches!(m, Mark::Link(_))) {
-                    out.push_str(&format!("<a href=\"{}\">", esc_attr(href)));
-                    close.push("</a>");
+                    if crate::markdown::is_safe_link_href(href) {
+                        out.push_str(&format!("<a href=\"{}\">", esc_attr(href)));
+                        close.push("</a>");
+                    }
                 }
                 for (m, open, end) in [
                     (Mark::Strong, "<strong>", "</strong>"),
@@ -250,5 +252,32 @@ impl Emit {
             out.push_str("</li>");
         }
         out.push_str(if list.ordered { "</ol>" } else { "</ul>" });
+    }
+}
+
+#[cfg(test)]
+mod scheme_tests {
+    use super::*;
+
+    #[test]
+    fn storage_emitter_drops_disallowed_schemes_even_on_direct_marks() {
+        let mut out = String::new();
+        inline(
+            &[Inl::Text(
+                "evil".into(),
+                vec![Mark::Link("javascript:alert(1)".into())],
+            )],
+            &[],
+            &mut out,
+        );
+        assert_eq!(out, "evil");
+
+        let html =
+            markdown_to_storage("[x](javascript:alert(1)) and [ok](https://example.com)").unwrap();
+        assert!(!html.contains("javascript:"), "{html}");
+        assert!(
+            html.contains("<a href=\"https://example.com\">ok</a>"),
+            "{html}"
+        );
     }
 }

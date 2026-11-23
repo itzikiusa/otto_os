@@ -37,10 +37,10 @@ use tokio::sync::{broadcast, mpsc};
 use otto_browser::live::protocol::MAX_CLIENT_FRAME_BYTES;
 use otto_browser::live::session::validate_nav_url;
 use otto_browser::live::{
-    ClientMsg, ControlAction, ControllerKind, InstallJob, InstallState, LiveAudit, LiveError,
-    LiveHooks, LiveRuntime, LiveSession, LiveSessionInfo, LiveSettingsPatch, NavAction, OpenParams,
-    OutwardAction, ScreenshotRequest, ServerMsg, ViewerOut, Viewport, EPHEMERAL_PROFILE,
-    SETTINGS_KEY,
+    ClientMsg, ControlAction, ControllerKind, EmulationConfig, InstallJob, InstallState, LiveAudit,
+    LiveError, LiveHooks, LiveRuntime, LiveSession, LiveSessionInfo, LiveSettingsPatch, NavAction,
+    OpenParams, OutwardAction, ScreenshotRequest, ServerMsg, ViewerOut, Viewport,
+    EPHEMERAL_PROFILE, SETTINGS_KEY,
 };
 use otto_core::api::Problem;
 use otto_core::domain::{Capability, Feature, User, WorkspaceRole};
@@ -66,6 +66,7 @@ pub fn routes() -> Router<ServerCtx> {
         .route("/browser/tabs/{id}/live/nav", post(nav_live))
         .route("/browser/tabs/{id}/live/control", post(control_live))
         .route("/browser/tabs/{id}/live/screenshot", post(screenshot_live))
+        .route("/browser/tabs/{id}/live/emulate", post(emulate_live))
 }
 
 /// Root-mounted viewer WebSocket (self-authenticating).
@@ -590,6 +591,18 @@ async fn editable_session(
     Ok(s)
 }
 
+#[allow(clippy::result_large_err)]
+fn check_human_driver(controller: ControllerKind) -> Result<(), Response> {
+    if controller == ControllerKind::Agent {
+        return Err(problem(
+            StatusCode::CONFLICT,
+            "not_driver",
+            "the agent is driving this tab — take over first",
+        ));
+    }
+    Ok(())
+}
+
 /// `POST /browser/tabs/{id}/live/nav`
 async fn nav_live(
     Path(id): Path<Id>,
@@ -602,12 +615,8 @@ async fn nav_live(
         Err(r) => return r,
     };
     // A person's REST navigation follows the same lock as their WS input.
-    if s.controller() == ControllerKind::Agent {
-        return problem(
-            StatusCode::CONFLICT,
-            "not_driver",
-            "the agent is driving this tab — take over first",
-        );
+    if let Err(r) = check_human_driver(s.controller()) {
+        return r;
     }
     if let Err(e) = s.navigate(req.action, req.url).await {
         return live_err(e);
@@ -671,6 +680,34 @@ async fn screenshot_live(
             );
             resp
         }
+        Err(e) => live_err(e),
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct EmulateReq {
+    #[serde(default)]
+    viewport: Option<Viewport>,
+    #[serde(default)]
+    emulation: EmulationConfig,
+}
+
+/// `POST /browser/tabs/{id}/live/emulate` — apply device emulation & optional viewport.
+async fn emulate_live(
+    Path(id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<EmulateReq>,
+) -> Response {
+    let s = match editable_session(&ctx, &user, &id).await {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    if let Err(r) = check_human_driver(s.controller()) {
+        return r;
+    }
+    match s.apply_emulation(req.viewport, req.emulation).await {
+        Ok(info) => Json(info).into_response(),
         Err(e) => live_err(e),
     }
 }
@@ -943,5 +980,17 @@ mod tests {
         assert_eq!(s(LiveError::Engine("x".into())), StatusCode::BAD_GATEWAY);
         assert_eq!(s(LiveError::Unsupported), StatusCode::BAD_REQUEST);
         assert_eq!(s(LiveError::AgentPaused), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn human_driver_check_rejects_agent_controller_with_409_not_driver() {
+        use http_body_util::BodyExt;
+        assert!(check_human_driver(ControllerKind::None).is_ok());
+        assert!(check_human_driver(ControllerKind::Human).is_ok());
+        let resp = check_human_driver(ControllerKind::Agent).unwrap_err();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["code"], "not_driver");
     }
 }

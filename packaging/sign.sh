@@ -55,6 +55,20 @@ fi
 SIDECAR="$APP/Contents/MacOS/ottod"
 [[ -f "$SIDECAR" ]] && codesign --force --options runtime --timestamp=none -s "$CERT_NAME" "$SIDECAR"
 
-codesign --force --deep --options runtime --timestamp=none -s "$CERT_NAME" "$APP"
+# Optional embedded headless Kiri sidecar: `kiri` requires
+# `com.apple.security.virtualization` on its own binary (NOT on Otto.app/ottod).
+# `codesign --deep` strips nested entitlements, so when `kiri` is bundled we
+# sign the app bundle without `--deep` after signing nested sidecars explicitly.
+KIRI_SIDECAR="$APP/Contents/MacOS/kiri"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [[ -f "$KIRI_SIDECAR" ]]; then
+    codesign --force --options runtime --timestamp=none \
+        --entitlements "$SCRIPT_DIR/kiri.entitlements" \
+        -s "$CERT_NAME" "$KIRI_SIDECAR"
+    echo "signed: $KIRI_SIDECAR (with virtualization entitlement)"
+    codesign --force --options runtime --timestamp=none -s "$CERT_NAME" "$APP"
+else
+    codesign --force --deep --options runtime --timestamp=none -s "$CERT_NAME" "$APP"
+fi
 codesign -dv "$APP" 2>&1 | grep -E 'Identifier|Authority' || true
 echo "signed: $APP"

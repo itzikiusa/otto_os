@@ -90,7 +90,7 @@
   async function deleteAccount(a: AwsAccount): Promise<void> {
     const ok = await confirmer.ask(
       `Delete AWS account “${a.name}”? Its Keychain secret is removed too. Kubernetes clusters imported from it are kept.`,
-      { title: 'Delete account', confirmLabel: 'Delete' },
+      { title: 'Delete account', confirmLabel: 'Delete', danger: true },
     );
     if (!ok) return;
     try {

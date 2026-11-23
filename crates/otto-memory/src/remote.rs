@@ -13,6 +13,11 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::json;
 
+use crate::governance::{
+    ForgetResp, ImportReq, ImportResp, MergeReq, MergeResp, SetStateReq, SplitReq, SplitResp,
+    UndoForgetReq,
+};
+use crate::http::GraphData;
 use crate::types::*;
 
 /// Connecting to the shared host gives up after this long…
@@ -86,6 +91,17 @@ impl RemoteClient {
         decode(resp).await
     }
 
+    async fn post_empty_json<R: DeserializeOwned>(&self, url: String) -> Result<R> {
+        let resp = self
+            .http
+            .post(url)
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(send_error)?;
+        decode(resp).await
+    }
+
     pub async fn save(&self, ws: &str, items: Vec<NewMemory>) -> Result<Vec<Memory>> {
         let mut out = Vec::with_capacity(items.len());
         for it in items {
@@ -111,6 +127,12 @@ impl RemoteClient {
         }
         if let Some(s) = &f.story_id {
             q.push(("story_id".into(), s.clone()));
+        }
+        if let Some(t) = &f.tag {
+            q.push(("tag".into(), t.clone()));
+        }
+        if f.include_inactive {
+            q.push(("include_inactive".into(), "true".into()));
         }
         if f.limit > 0 {
             q.push(("limit".into(), f.limit.to_string()));
@@ -175,6 +197,66 @@ impl RemoteClient {
 
     pub async fn links(&self, ws: &str, id: &str) -> Result<Vec<MemoryLink>> {
         self.get_json(self.url(ws, &format!("memories/{id}/links")))
+            .await
+    }
+
+    pub async fn graph(&self, ws: &str, collection: Option<&str>) -> Result<GraphData> {
+        let mut req = self
+            .http
+            .get(self.url(ws, "memory/graph"))
+            .bearer_auth(&self.token);
+        if let Some(c) = collection {
+            req = req.query(&[("collection", c)]);
+        }
+        let resp = req.send().await.map_err(send_error)?;
+        decode(resp).await
+    }
+
+    pub async fn set_state(&self, ws: &str, id: &str, state: &str) -> Result<Memory> {
+        let body = SetStateReq {
+            state: state.to_string(),
+        };
+        self.body_json(
+            reqwest::Method::POST,
+            self.url(ws, &format!("memory/{id}/state")),
+            &body,
+        )
+        .await
+    }
+
+    pub async fn soft_forget(&self, ws: &str, id: &str) -> Result<ForgetResp> {
+        self.post_empty_json(self.url(ws, &format!("memory/{id}/forget")))
+            .await
+    }
+
+    pub async fn undo_forget_id(&self, ws: &str, id: &str, undo_token: &str) -> Result<Memory> {
+        let body = UndoForgetReq {
+            undo_token: undo_token.to_string(),
+        };
+        self.body_json(
+            reqwest::Method::POST,
+            self.url(ws, &format!("memory/{id}/forget/undo")),
+            &body,
+        )
+        .await
+    }
+
+    pub async fn merge(&self, ws: &str, req: &MergeReq) -> Result<MergeResp> {
+        self.body_json(reqwest::Method::POST, self.url(ws, "memory/merge"), req)
+            .await
+    }
+
+    pub async fn split(&self, ws: &str, id: &str, req: &SplitReq) -> Result<SplitResp> {
+        self.body_json(
+            reqwest::Method::POST,
+            self.url(ws, &format!("memory/{id}/split")),
+            req,
+        )
+        .await
+    }
+
+    pub async fn import_governed(&self, ws: &str, req: &ImportReq) -> Result<ImportResp> {
+        self.body_json(reqwest::Method::POST, self.url(ws, "memory/import"), req)
             .await
     }
 }

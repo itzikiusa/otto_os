@@ -34,7 +34,7 @@ export async function runPull(
     // post-mutation contract); `onstatus` lets the caller follow along.
     reportPull(await git.pull(repoId, opts?.autoStash ?? false, opts?.mode), onstatus);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = loadErrorText(e);
     // `ff_only` on a diverged branch is a 409 the user can act on — say which
     // actions actually resolve it.
     if (/not possible to fast-forward/i.test(msg)) {
@@ -54,6 +54,6 @@ export async function runPull(
       if (ok) await runPull(repoId, onstatus, { ...opts, autoStash: true });
       return;
     }
-    toasts.error('Couldn’t pull', loadErrorText(e));
+    toasts.error('Couldn’t pull', msg);
   }
 }

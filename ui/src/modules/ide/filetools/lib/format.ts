@@ -9,6 +9,7 @@
 // and formatting its own output again is a no-op (unit-tested).
 
 import { maskQueryPlaceholders, unmaskQueryPlaceholders } from '../../../../lib/database/sql-util.ts';
+import { loadErrorText } from '../../../../lib/loadError.ts';
 import { parseCsv, stringifyCsv } from './csv.ts';
 import { formatMarkup, MarkupError, validateMarkup } from './xml.ts';
 
@@ -171,7 +172,7 @@ function jsonIssue(text: string): ValidationIssue | null {
     JSON.parse(text);
     return null;
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = loadErrorText(e);
     const pos = jsonErrorPosition(msg, text);
     if (pos.line !== undefined) return { error: msg, ...pos };
     const off = jsonErrorOffset(text);
@@ -368,7 +369,7 @@ export async function formatContent(
     }
   } catch (e) {
     if (e instanceof MarkupError) return { ok: false, error: e.message, line: e.line, col: e.col };
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = loadErrorText(e);
     const lc = /line (\d+)(?:,? col(?:umn)? (\d+))?/i.exec(msg);
     return { ok: false, error: msg.split('\n')[0], line: lc ? Number(lc[1]) : undefined, col: lc?.[2] ? Number(lc[2]) : undefined };
   }

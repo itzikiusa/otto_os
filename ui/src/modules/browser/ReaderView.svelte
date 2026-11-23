@@ -29,6 +29,7 @@
   import { buildSelector } from './selector';
   import { readerLinkAction } from './readerLinks';
   import { announce } from '../../lib/announce.svelte';
+  import { scrollBehavior } from '../../lib/motion';
   import type { BrowserPage } from '../../lib/api/types';
 
   let {
@@ -61,11 +62,27 @@
 
   let markMode = $state(false);
   let articleEl: HTMLElement | null = $state(null);
+  let composerEl: HTMLTextAreaElement | null = $state(null);
   let pending: { selector: string; excerpt: string; text: string } | null = $state(null);
   let noteText = $state('');
   let saving = $state(false);
   let markButton: HTMLButtonElement | undefined = $state();
   let pendingTarget: HTMLElement | null = null;
+
+  /** Scroll the rendered page to a marked element by its selector. */
+  export function scrollToMark(selector: string): void {
+    const root = articleEl;
+    if (!root || !selector) return;
+    let el: Element | null = null;
+    try {
+      el = root.querySelector(selector);
+    } catch {
+      el = null;
+    }
+    if (el instanceof HTMLElement) {
+      el.scrollIntoView({ block: 'center', behavior: scrollBehavior() });
+    }
+  }
 
   function toggleMark(): void {
     markButton?.focus();
@@ -120,7 +137,7 @@
     pending = { selector, excerpt, text };
     noteText = '';
     await tick();
-    document.querySelector<HTMLTextAreaElement>('.mark-composer textarea')?.focus();
+    composerEl?.focus();
   }
 
   function onArticleClick(e: MouseEvent): void {
@@ -223,6 +240,18 @@
       }
     }
   });
+  /** Attach delegated click/key listeners via action so `<article>` needs no
+   *  `svelte-ignore a11y_no_noninteractive_element_interactions` suppression. */
+  function articleInteraction(node: HTMLElement) {
+    node.addEventListener('click', onArticleClick);
+    node.addEventListener('keydown', onArticleKey);
+    return {
+      destroy() {
+        node.removeEventListener('click', onArticleClick);
+        node.removeEventListener('keydown', onArticleKey);
+      },
+    };
+  }
 </script>
 
 <div class="reader">
@@ -263,16 +292,13 @@
 
     <!-- Delegated handlers: in mark mode each top-level block is a
          role="button" with tabindex (see the effect above) and the article
-         routes its clicks and Enter/Space/arrows to it. -->
-    <!-- eslint-disable-next-line svelte/no-static-element-interactions -->
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+         routes its clicks and Enter/Space/arrows to it via action. -->
     <article
       class="page md-body"
       class:mark-armed={markMode}
       class:long={longArticle}
       bind:this={articleEl}
-      onclick={onArticleClick}
-      onkeydown={onArticleKey}
+      use:articleInteraction
     >
       <h2 class="page-title">{page.title || page.url}</h2>
       <!-- eslint-disable-next-line svelte/no-at-html-tags -->
@@ -283,6 +309,7 @@
       <div class="mark-composer">
         <p class="composer-excerpt">{pending.text.slice(0, 140)}</p>
         <textarea dir="auto"
+          bind:this={composerEl}
           bind:value={noteText}
           placeholder="Check this price against last week’s"
           aria-label="Note for this mark"

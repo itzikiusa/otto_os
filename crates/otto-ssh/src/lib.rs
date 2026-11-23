@@ -116,16 +116,22 @@ pub fn jump_args(jump: &str, identity: Option<&str>) -> Vec<String> {
     vec!["-o".into(), format!("ProxyCommand={cmd}")]
 }
 
+/// An identity-file path safe to pass to `ssh -i` and `ProxyCommand`:
+/// non-empty and free of control characters (including newlines / NUL).
+pub fn valid_identity_file(path: &str) -> bool {
+    !path.is_empty() && !path.chars().any(char::is_control)
+}
+
 impl SshTunnelConfig {
     /// The ProxyJump chain, when one is set (blank counts as unset).
     fn jump(&self) -> Option<&str> {
         self.proxy_jump.as_deref().filter(|j| !j.trim().is_empty())
     }
 
-    /// Refuse a host / user / jump chain `ssh` could misread (see
-    /// [`valid_ssh_host`], [`valid_ssh_user`], [`valid_proxy_jump`]). Checked
-    /// before every tunnel is opened and when a profile carrying a tunnel is
-    /// saved.
+    /// Refuse a host / user / jump chain / identity path `ssh` could misread
+    /// (see [`valid_ssh_host`], [`valid_ssh_user`], [`valid_proxy_jump`],
+    /// [`valid_identity_file`]). Checked before every tunnel is opened and when
+    /// a profile carrying a tunnel is saved.
     pub fn validate(&self) -> Result<()> {
         if !valid_ssh_host(&self.host) {
             return Err(Error::Invalid(format!(
@@ -138,6 +144,13 @@ impl SshTunnelConfig {
                 "ssh tunnel user '{}' is not a valid user name",
                 self.user
             )));
+        }
+        if let Some(id) = self.identity_file.as_deref().filter(|s| !s.is_empty()) {
+            if !valid_identity_file(id) {
+                return Err(Error::Invalid(
+                    "ssh identity_file must not contain control characters or newlines".into(),
+                ));
+            }
         }
         if let Some(jump) = self.jump() {
             if !valid_proxy_jump(jump) {
@@ -206,6 +219,11 @@ impl SshTunnel {
         remote_port: u16,
     ) -> Result<SshTunnel> {
         cfg.validate()?;
+        if !valid_ssh_host(remote_host) {
+            return Err(Error::Invalid(format!(
+                "ssh tunnel remote host '{remote_host}' is not a valid hostname or IP address"
+            )));
+        }
         Self::launch_with_retry(|local_port| {
             local_forward_args(cfg, local_port, remote_host, remote_port)
         })
@@ -750,5 +768,23 @@ mod tests {
         let c: SshTunnelConfig = serde_json::from_str(r#"{"host":"h","user":"u"}"#).unwrap();
         assert_eq!(c.port, 22);
         assert!(c.identity_file.is_none());
+    }
+
+    #[test]
+    fn tunnel_rejects_control_chars_in_identity_file() {
+        let mut c = cfg();
+        c.identity_file = Some("/tmp/key\nProxyCommand=id".into());
+        assert!(c.validate().is_err());
+        c.identity_file = Some("/tmp/key\0bad".into());
+        assert!(c.validate().is_err());
+    }
+
+    #[tokio::test]
+    async fn tunnel_open_rejects_invalid_remote_host() {
+        let err = SshTunnel::open(&cfg(), "-oProxyCommand=evil", 5432)
+            .await
+            .err()
+            .expect("invalid remote_host must fail");
+        assert!(matches!(err, Error::Invalid(_)));
     }
 }

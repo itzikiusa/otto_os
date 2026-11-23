@@ -328,17 +328,22 @@ impl VaultEngine {
                     Self::vet_shared_root(&r)?;
                 }
                 let p = PathBuf::from(otto_core::paths::expand_tilde(r.trim()));
-                if p.is_file() {
-                    return Err(Error::Invalid(format!("not a directory: {}", p.display())));
-                }
-                if !p.is_dir() {
-                    // A path that doesn't exist yet is a request for a fresh
-                    // vault there (Obsidian's "create vault" behavior) — never
-                    // touches existing data.
-                    std::fs::create_dir_all(&p)
-                        .map_err(|e| Error::Invalid(format!("create {}: {e}", p.display())))?;
-                }
-                p
+                tokio::task::spawn_blocking(move || -> Result<PathBuf> {
+                    if p.is_file() {
+                        return Err(Error::Invalid(format!("not a directory: {}", p.display())));
+                    }
+                    if !p.is_dir() {
+                        // A path that doesn't exist yet is a request for a fresh
+                        // vault there (Obsidian's "create vault" behavior) — never
+                        // touches existing data.
+                        std::fs::create_dir_all(&p)
+                            .map_err(|e| Error::Invalid(format!("create {}: {e}", p.display())))?;
+                    }
+                    p.canonicalize()
+                        .map_err(|e| Error::Invalid(format!("vault root: {e}")))
+                })
+                .await
+                .map_err(|e| Error::Internal(format!("prepare vault root: {e}")))??
             }
             _ => {
                 let base = dirs::home_dir()
@@ -346,14 +351,17 @@ impl VaultEngine {
                     .join(".otto")
                     .join("vault")
                     .join(slug(name));
-                std::fs::create_dir_all(&base)
-                    .map_err(|e| Error::Internal(format!("create vault dir: {e}")))?;
-                base
+                tokio::task::spawn_blocking(move || -> Result<PathBuf> {
+                    std::fs::create_dir_all(&base)
+                        .map_err(|e| Error::Internal(format!("create vault dir: {e}")))?;
+                    base.canonicalize()
+                        .map_err(|e| Error::Invalid(format!("vault root: {e}")))
+                })
+                .await
+                .map_err(|e| Error::Internal(format!("prepare vault root: {e}")))??
             }
         };
-        let canon = root_path
-            .canonicalize()
-            .map_err(|e| Error::Invalid(format!("vault root: {e}")))?;
+        let canon = root_path;
         if !unrestricted {
             // Re-vet the resolved root: a symlink swapped in after the first
             // check must not land the vault on a protected tree.
@@ -1187,6 +1195,9 @@ impl VaultEngine {
         .map_err(|e| Error::Conflict(format!("open vault root: {e}")))?;
         let dir_mode = Mode::RWXU | Mode::RGRP | Mode::XGRP | Mode::ROTH | Mode::XOTH;
         while let Some(part) = parts.next() {
+            if part.is_empty() || part == "." || part == ".." || part.contains('\0') {
+                return Err(Error::Forbidden(format!("invalid path segment: {rel}")));
+            }
             if parts.peek().is_none() {
                 return Ok((parent, part.to_string()));
             }
@@ -1843,25 +1854,37 @@ impl VaultEngine {
         let root = v.root_path.clone();
         let from_abs = Self::abs_guarded(&root, &from_rel)?;
         let to_abs = Self::abs_guarded(&root, &to_rel)?;
-        if !from_abs.exists() {
-            return Err(Error::NotFound(from_rel));
-        }
-        let is_dir = from_abs.is_dir();
         let case_only = from_rel.to_lowercase() == to_rel.to_lowercase();
-        if to_abs.exists() {
-            let source = std::fs::metadata(&from_abs)
-                .map_err(|e| Error::Internal(format!("rename source identity: {e}")))?;
-            let target = std::fs::metadata(&to_abs)
-                .map_err(|e| Error::Internal(format!("rename target identity: {e}")))?;
-            // Equal spelling after lowercasing does not imply one entry on a
-            // case-sensitive volume. Canonical paths also distinguish hardlinks.
-            let same_entry = source.dev() == target.dev()
-                && source.ino() == target.ino()
-                && std::fs::canonicalize(&from_abs).ok() == std::fs::canonicalize(&to_abs).ok();
-            if !case_only || !same_entry {
-                return Err(Error::Conflict(format!("target exists: {to_rel}")));
-            }
-        }
+        let is_dir = {
+            let from_abs = from_abs.clone();
+            let to_abs = to_abs.clone();
+            let from_rel_err = from_rel.clone();
+            let to_rel_err = to_rel.clone();
+            tokio::task::spawn_blocking(move || -> Result<bool> {
+                if !from_abs.exists() {
+                    return Err(Error::NotFound(from_rel_err));
+                }
+                let is_dir = from_abs.is_dir();
+                if to_abs.exists() {
+                    let source = std::fs::metadata(&from_abs)
+                        .map_err(|e| Error::Internal(format!("rename source identity: {e}")))?;
+                    let target = std::fs::metadata(&to_abs)
+                        .map_err(|e| Error::Internal(format!("rename target identity: {e}")))?;
+                    // Equal spelling after lowercasing does not imply one entry on a
+                    // case-sensitive volume. Canonical paths also distinguish hardlinks.
+                    let same_entry = source.dev() == target.dev()
+                        && source.ino() == target.ino()
+                        && std::fs::canonicalize(&from_abs).ok()
+                            == std::fs::canonicalize(&to_abs).ok();
+                    if !case_only || !same_entry {
+                        return Err(Error::Conflict(format!("target exists: {to_rel_err}")));
+                    }
+                }
+                Ok(is_dir)
+            })
+            .await
+            .map_err(|e| Error::Internal(format!("rename precheck: {e}")))??
+        };
         // Everything fallible that only READS the index runs before the move:
         // once the file has moved, nothing below may return early (the
         // index would keep the old path while the disk has the new one).
@@ -2115,41 +2138,45 @@ impl VaultEngine {
         } else {
             req.limit
         } as i64;
-        // Operator syntax inside the query string: tag:x path:y type:z.
-        let mut tag = req.tag.clone();
-        let mut path_prefix = req.path_prefix.clone();
-        let mut okf_type = req.okf_type.clone();
-        let mut terms: Vec<String> = Vec::new();
-        for tok in req.query.split_whitespace() {
-            if let Some(v) = tok.strip_prefix("tag:") {
-                tag = Some(v.trim_start_matches('#').to_string());
-            } else if let Some(v) = tok.strip_prefix("path:") {
-                path_prefix = Some(v.to_string());
-            } else if let Some(v) = tok.strip_prefix("type:") {
-                okf_type = Some(v.to_string());
-            } else {
-                terms.push(tok.to_string());
-            }
-        }
-        let text = terms.join(" ");
+        // Operator syntax inside the query string:
+        // tag:x path:y type:z status:s stale:true|false orphan:true|false links-to:note
+        let parsed = parse_search_query(
+            &req.query,
+            req.tag.clone(),
+            req.path_prefix.clone(),
+            req.okf_type.clone(),
+        );
+        let text = parsed.text;
         // Filters run in SQL before the LIMIT (a tagged match ranked below
         // the first page is still found) — no whole-table reads per search.
-        let tag = tag.map(|t| t.trim_start_matches('#').to_string());
-        let path_prefix = path_prefix.map(|p| p.trim_start_matches('/').to_string());
+        let tag = parsed.tag.map(|t| t.trim_start_matches('#').to_string());
+        let path_prefix = parsed
+            .path_prefix
+            .map(|p| p.trim_start_matches('/').to_string());
+        let okf_type = parsed.okf_type;
+        let okf_status = parsed.okf_status;
+        let links_to = parsed.links_to;
         let filters = crate::store::SearchFilters {
             tag: tag.as_deref().filter(|t| !t.is_empty()),
             path_prefix: path_prefix.as_deref().filter(|p| !p.is_empty()),
             okf_type: okf_type.as_deref().filter(|t| !t.is_empty()),
+            okf_status: okf_status.as_deref().filter(|s| !s.is_empty()),
+            stale: parsed.stale,
+            orphan: parsed.orphan,
+            links_to: links_to.as_deref().filter(|l| !l.is_empty()),
         };
         use crate::store::SearchMode;
         let mut fts_page = None;
         let hits = if !text.trim().is_empty() && self.fts_ready().await {
             let expr = fts_expr(&text);
-            let got = self
-                .store
-                .search_filtered(id, SearchMode::Fts(&expr), &filters, limit)
-                .await
-                .unwrap_or_default();
+            let got = if expr.is_empty() {
+                Vec::new()
+            } else {
+                self.store
+                    .search_filtered(id, SearchMode::Fts(&expr), &filters, limit)
+                    .await
+                    .unwrap_or_default()
+            };
             if !got.is_empty() {
                 fts_page = Some(expr);
             }
@@ -2364,18 +2391,57 @@ impl VaultEngine {
         })
     }
 
+    /// Maximum asset size streamed by `/asset` (50 MiB).
+    pub const MAX_ASSET_BYTES: usize = 50 * 1024 * 1024;
+
     /// Absolute, guarded path of an attachment for streaming.
     pub async fn asset_path(&self, ws: &str, id: i64, path: &str) -> Result<PathBuf> {
         let v = self.get_scoped(ws, id).await?;
         let rel = Self::check_rel(path)?;
-        let abs = Self::abs_confined(&v.root_path, &rel).map_err(|e| match e {
-            Error::NotFound(_) => Error::NotFound(format!("asset {rel}")),
-            other => other,
-        })?;
-        if !abs.is_file() {
-            return Err(Error::NotFound(format!("asset {rel}")));
-        }
-        Ok(abs)
+        let root_path = v.root_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let abs = Self::abs_confined(&root_path, &rel).map_err(|e| match e {
+                Error::NotFound(_) => Error::NotFound(format!("asset {rel}")),
+                other => other,
+            })?;
+            if !abs.is_file() {
+                return Err(Error::NotFound(format!("asset {rel}")));
+            }
+            Ok(abs)
+        })
+        .await
+        .map_err(|e| Error::Internal(format!("asset task failed: {e}")))?
+    }
+
+    /// Resolve, confine, and safely read an attachment in one blocking hop:
+    /// opens with `O_NOFOLLOW | O_NONBLOCK`, verifies it is a regular file, and
+    /// caps the read at [`Self::MAX_ASSET_BYTES`] so a swapped symlink, FIFO,
+    /// or oversized file cannot escape or OOM the daemon.
+    pub async fn read_asset(&self, ws: &str, id: i64, path: &str) -> Result<(PathBuf, Vec<u8>)> {
+        self.read_asset_capped(ws, id, path, Self::MAX_ASSET_BYTES)
+            .await
+    }
+
+    pub(crate) async fn read_asset_capped(
+        &self,
+        ws: &str,
+        id: i64,
+        path: &str,
+        cap: usize,
+    ) -> Result<(PathBuf, Vec<u8>)> {
+        let v = self.get_scoped(ws, id).await?;
+        let rel = Self::check_rel(path)?;
+        let root_path = v.root_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let abs = Self::abs_confined(&root_path, &rel).map_err(|e| match e {
+                Error::NotFound(_) => Error::NotFound(format!("asset {rel}")),
+                other => other,
+            })?;
+            let bytes = read_regular_file_capped_sync(&abs, &rel, cap)?;
+            Ok((abs, bytes))
+        })
+        .await
+        .map_err(|e| Error::Internal(format!("asset read task failed: {e}")))?
     }
 
     // -- graph -----------------------------------------------------------------
@@ -3073,9 +3139,13 @@ fn fuzzy_score(query: &str, cand: &str) -> Option<f32> {
 }
 
 /// Build a safe FTS5 MATCH expression: bare terms, quoted, prefix-matched.
+/// Tokens that become empty after stripping quotes (e.g. a lone `"` or `""`)
+/// are dropped so they do not emit an invalid `""*` FTS5 token.
 pub(crate) fn fts_expr(text: &str) -> String {
     text.split_whitespace()
-        .map(|t| format!("\"{}\"*", t.replace('"', "")))
+        .map(|t| t.replace('"', ""))
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("\"{t}\"*"))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -3105,6 +3175,354 @@ fn slug(s: &str) -> String {
         out = out.replace("--", "-");
     }
     out.trim_matches('-').to_string()
+}
+
+/// Open `abs` without following a symlink or blocking on a FIFO, verify it is
+/// a regular file, and read at most `cap` bytes (reading `cap + 1` to detect
+/// truncation without loading an unbounded file into memory).
+fn read_regular_file_capped_sync(abs: &Path, rel: &str, cap: usize) -> Result<Vec<u8>> {
+    use std::io::Read;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(
+            (rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::NOFOLLOW).bits() as i32,
+        );
+    }
+
+    let file = options.open(abs).map_err(|e| {
+        #[cfg(unix)]
+        if e.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) {
+            return Error::Forbidden(format!("asset {rel}: symlink refused"));
+        }
+        match e.kind() {
+            std::io::ErrorKind::NotFound => Error::NotFound(format!("asset {rel}")),
+            std::io::ErrorKind::PermissionDenied => {
+                Error::Forbidden(format!("asset {rel}: permission denied"))
+            }
+            _ => Error::Internal(format!("open asset {rel}: {e}")),
+        }
+    })?;
+
+    let meta = file
+        .metadata()
+        .map_err(|e| Error::Internal(format!("stat asset {rel}: {e}")))?;
+    if !meta.is_file() {
+        return if meta.is_dir() {
+            Err(Error::NotFound(format!("asset {rel}")))
+        } else {
+            Err(Error::Forbidden(format!("asset {rel}: not a regular file")))
+        };
+    }
+
+    let mut bytes = Vec::with_capacity(cap.min(64 * 1024));
+    file.take(cap as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| Error::Internal(format!("read asset {rel}: {e}")))?;
+    if bytes.len() > cap {
+        return Err(Error::PayloadTooLarge(format!(
+            "asset {rel} exceeds {cap} byte limit"
+        )));
+    }
+    Ok(bytes)
+}
+
+#[cfg(test)]
+mod asset_read_tests {
+    use super::*;
+
+    #[test]
+    fn read_regular_file_capped_enforces_cap_and_regular_files() {
+        let td = tempfile::tempdir().unwrap();
+        let ok = td.path().join("ok.bin");
+        std::fs::write(&ok, b"12345").unwrap();
+        assert_eq!(
+            read_regular_file_capped_sync(&ok, "ok.bin", 5).unwrap(),
+            b"12345"
+        );
+
+        let big = td.path().join("big.bin");
+        std::fs::write(&big, b"123456").unwrap();
+        assert!(matches!(
+            read_regular_file_capped_sync(&big, "big.bin", 5),
+            Err(Error::PayloadTooLarge(_))
+        ));
+
+        let sub = td.path().join("subdir");
+        std::fs::create_dir(&sub).unwrap();
+        assert!(matches!(
+            read_regular_file_capped_sync(&sub, "subdir", 5),
+            Err(Error::NotFound(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_regular_file_capped_refuses_symlink_with_o_nofollow() {
+        let td = tempfile::tempdir().unwrap();
+        let target = td.path().join("real.txt");
+        std::fs::write(&target, b"secret").unwrap();
+        let link = td.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = read_regular_file_capped_sync(&link, "link.txt", 1024).unwrap_err();
+        assert!(
+            matches!(err, Error::Forbidden(_)),
+            "expected Forbidden on symlink open, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn fts_expr_filters_empty_quote_stripped_tokens() {
+        assert_eq!(fts_expr("\""), "");
+        assert_eq!(fts_expr("\"\" \"\"\""), "");
+        assert_eq!(fts_expr("alpha \" beta"), "\"alpha\"* \"beta\"*");
+        assert_eq!(fts_expr("\"hello\" \"world\""), "\"hello\"* \"world\"*");
+    }
+
+    #[test]
+    fn text_parent_rejects_traversal_and_invalid_segments() {
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path().to_string_lossy().to_string();
+        for bad in [
+            "../outside.md",
+            "a/../b.md",
+            "a/..",
+            "./note.md",
+            "a/./b.md",
+            "",
+            "/leading.md",
+            "a//b.md",
+            "a/trailing/",
+        ] {
+            let err = VaultEngine::text_parent(&root, bad).unwrap_err();
+            assert!(
+                matches!(err, Error::Forbidden(_)),
+                "expected Forbidden for {bad:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_search_query_extracts_okf_predicates_and_preserves_terms() {
+        let p = parse_search_query(
+            "status:stable TYPE:runbook stale:true orphan:false links-to:arch/api.md tag:#ops deploy",
+            None,
+            None,
+            None,
+        );
+        assert_eq!(p.okf_status.as_deref(), Some("stable"));
+        assert_eq!(p.okf_type.as_deref(), Some("runbook"));
+        assert_eq!(p.stale, Some(true));
+        assert_eq!(p.orphan, Some(false));
+        assert_eq!(p.links_to.as_deref(), Some("arch/api.md"));
+        assert_eq!(p.tag.as_deref(), Some("ops"));
+        assert_eq!(p.text, "deploy");
+    }
+
+    #[tokio::test]
+    async fn search_structured_okf_predicates_work_with_fts_and_links() {
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path();
+        std::fs::create_dir_all(root.join("ops")).unwrap();
+        std::fs::write(
+            root.join("ops/runbook.md"),
+            "---\ntype: runbook\nstatus: stable\nreview_at: 2099-01-01\ntags: [ops]\n---\n# Deploy Runbook\n\nSee [[target]] for architecture.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("ops/legacy.md"),
+            "---\ntype: runbook\nstatus: draft\nreview_at: 2020-01-01\ntags: [ops]\n---\n# Legacy Deploy\n\nOld deployment steps.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("ops/flagged-stale.md"),
+            "---\ntype: note\nstatus: stale\n---\n# Stale Note\n\nNeeds refresh.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("target.md"),
+            "---\ntype: reference\nstatus: stable\n---\n# Target Architecture\n\nReferenced by runbook.\n",
+        )
+        .unwrap();
+
+        let pool = otto_state::db::test_pool().await;
+        let eng = Arc::new(VaultEngine::new(pool));
+        let v = eng
+            .register(
+                "ws1",
+                "Vault",
+                Some(root.to_str().unwrap().to_string()),
+                false,
+            )
+            .await
+            .unwrap();
+        eng.scan(v.id).await.unwrap();
+        let paths = |hits: Vec<SearchHit>| -> Vec<String> {
+            let mut p: Vec<String> = hits.into_iter().map(|h| h.path).collect();
+            p.sort();
+            p
+        };
+
+        // status:stable + free-text term
+        let stable_deploy = eng
+            .search(
+                "ws1",
+                v.id,
+                &SearchReq {
+                    query: "status:stable deploy".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(paths(stable_deploy), vec!["ops/runbook.md"]);
+
+        // stale:true catches both past review_at and status:stale
+        let stale = eng
+            .search(
+                "ws1",
+                v.id,
+                &SearchReq {
+                    query: "stale:true".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(paths(stale), vec!["ops/flagged-stale.md", "ops/legacy.md"]);
+
+        // orphan:false returns only target.md (inbound link from ops/runbook.md)
+        let linked = eng
+            .search(
+                "ws1",
+                v.id,
+                &SearchReq {
+                    query: "orphan:false".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(paths(linked), vec!["target.md"]);
+
+        // orphan:true excludes target.md
+        let orphans = eng
+            .search(
+                "ws1",
+                v.id,
+                &SearchReq {
+                    query: "orphan:true".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            paths(orphans),
+            vec!["ops/flagged-stale.md", "ops/legacy.md", "ops/runbook.md"]
+        );
+
+        // links-to:target returns ops/runbook.md
+        let links_to = eng
+            .search(
+                "ws1",
+                v.id,
+                &SearchReq {
+                    query: "links-to:target".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(paths(links_to), vec!["ops/runbook.md"]);
+    }
+}
+
+#[derive(Debug, Default)]
+struct ParsedSearchQuery {
+    tag: Option<String>,
+    path_prefix: Option<String>,
+    okf_type: Option<String>,
+    okf_status: Option<String>,
+    stale: Option<bool>,
+    orphan: Option<bool>,
+    links_to: Option<String>,
+    text: String,
+}
+
+fn parse_bool_predicate(val: &str) -> Option<bool> {
+    match val.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" => Some(true),
+        "false" | "0" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_search_query(
+    query: &str,
+    mut tag: Option<String>,
+    mut path_prefix: Option<String>,
+    mut okf_type: Option<String>,
+) -> ParsedSearchQuery {
+    let mut okf_status = None;
+    let mut stale = None;
+    let mut orphan = None;
+    let mut links_to = None;
+    let mut terms: Vec<String> = Vec::new();
+    for tok in query.split_whitespace() {
+        if let Some((key, val)) = tok.split_once(':') {
+            match key.to_ascii_lowercase().as_str() {
+                "tag" if !val.is_empty() => {
+                    tag = Some(val.trim_start_matches('#').to_string());
+                    continue;
+                }
+                "path" if !val.is_empty() => {
+                    path_prefix = Some(val.to_string());
+                    continue;
+                }
+                "type" if !val.is_empty() => {
+                    okf_type = Some(val.to_string());
+                    continue;
+                }
+                "status" if !val.is_empty() => {
+                    okf_status = Some(val.to_string());
+                    continue;
+                }
+                "stale" => {
+                    if let Some(b) = parse_bool_predicate(val) {
+                        stale = Some(b);
+                        continue;
+                    }
+                }
+                "orphan" => {
+                    if let Some(b) = parse_bool_predicate(val) {
+                        orphan = Some(b);
+                        continue;
+                    }
+                }
+                "links-to" | "links_to" if !val.is_empty() => {
+                    links_to = Some(val.trim_matches('"').to_string());
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        terms.push(tok.to_string());
+    }
+    ParsedSearchQuery {
+        tag,
+        path_prefix,
+        okf_type,
+        okf_status,
+        stale,
+        orphan,
+        links_to,
+        text: terms.join(" "),
+    }
 }
 
 #[cfg(test)]

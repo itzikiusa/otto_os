@@ -267,6 +267,39 @@ class IdeAgentSharedState {
     });
   }
 
+  attachGitHunkSync(input: {
+    path: string;
+    startLine: number;
+    endLine: number;
+    anchorLine: number;
+    addedCount: number;
+    removedCount: number;
+    unifiedDiff: string;
+  }): IdeContextChip | null {
+    const rawPath = input.path.trim();
+    if (!rawPath) return null;
+    const fullPath = ide.resolvePath(rawPath);
+    const relPath = ide.relativePath(fullPath) || ideBasename(fullPath);
+    const rangeStart = Math.max(1, input.endLine >= input.startLine ? input.startLine : input.anchorLine);
+    const rangeEnd = Math.max(rangeStart, input.endLine);
+    const loc = rangeEnd > rangeStart ? `L${rangeStart}–L${rangeEnd}` : `L${rangeStart}`;
+    const chip = this.upsertContext({
+      key: `hunk:${fullPath}:${rangeStart}-${rangeEnd}`,
+      kind: 'selection',
+      label: `@${relPath}:${loc} (hunk)`,
+      sublabel: `+${input.addedCount} / -${input.removedCount}`,
+      path: fullPath,
+      startLine: rangeStart,
+      endLine: rangeEnd,
+      language: 'diff',
+      snippet: input.unifiedDiff,
+    });
+    if (!this.composerText.trim()) {
+      this.composerText = `Review this Git hunk in ${relPath} (${loc}) for bugs, edge cases, and regressions.`;
+    }
+    return chip;
+  }
+
   openInlinePromptSync(sel?: IdeShellSelectionInput, effectiveModelFallback?: string | null): boolean {
     const r = resolveSelectionLite(sel);
     if (!r) return false;

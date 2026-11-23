@@ -61,6 +61,7 @@ class IdeGitController {
   private probeQueue: Array<() => void> = [];
   private histModeSeq = 0;
   private manualRepoForActivePath: string | null = null;
+  private targetGen = 0;
 
   constructor() {
     onIdeTargetReset(() => this.reset());
@@ -90,12 +91,14 @@ class IdeGitController {
   }
 
   reset(): void {
+    this.targetGen += 1;
     this.repoByRoot = {};
     this.selectedRootPath = null;
     this.selectedRepoId = null;
     this.activeSubTab = 'changes';
     this.historyTabs = [];
     this.focusedChangePath = null;
+    this.inFlightRoots.clear();
     this.nonRepoRoots.clear();
     this.lastHandledLiveRev = {};
     this.manualRepoForActivePath = null;
@@ -441,6 +444,7 @@ class IdeGitController {
       return exactKnown;
     }
 
+    const gen = this.targetGen;
     let probePromise: Promise<Repo | null> | null = null;
     probePromise = (async (): Promise<Repo | null> => {
       this.detectingCount += 1;
@@ -448,6 +452,7 @@ class IdeGitController {
         let sawDefinitiveNonRepo = false;
         let hadWorkspaceForDetect = false;
         const detected = await this.enqueueProbe(async () => {
+          if (gen !== this.targetGen) return null;
           const wsId =
             ide.target.workspace_id ||
             ws.current?.id ||
@@ -466,10 +471,12 @@ class IdeGitController {
               }
             }
           }
+          if (gen !== this.targetGen) return null;
           try {
             const resolved = await api.bg.get<RepoResolveResp>(
               `/git/repos/resolve?ref=${encodeURIComponent(rootPath)}`,
             );
+            if (gen !== this.targetGen) return null;
             const r = resolved.repo;
             const rp = normSlash(r.path);
             if (resolved.matched_by !== 'path' || (rootPath !== rp && !rootPath.startsWith(`${rp}/`))) {
@@ -496,6 +503,8 @@ class IdeGitController {
             return null;
           }
         });
+
+        if (gen !== this.targetGen) return null;
 
         if (detected && !isBroadNonProjectRootClient(detected.path)) {
           this.nonRepoRoots.delete(rootPath);

@@ -24,6 +24,12 @@ mod tray {
     pub const POPOVER_LABEL: &str = "otto-tray";
     pub fn hide_popover(_: &tauri::AppHandle) {}
 }
+mod clipboard {
+    pub const LABEL: &str = "otto-clipboard";
+}
+mod lifecycle {
+    pub fn event(_: &str) {}
+}
 use tauri::{Emitter, Manager, Webview, WebviewUrl, WebviewWindowBuilder};
 #[tauri::command(rename = "windows_registry")]
 fn probe_windows_registry() -> Vec<String> {

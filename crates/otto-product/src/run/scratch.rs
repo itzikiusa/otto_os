@@ -62,6 +62,82 @@ pub fn trust_session_cwd(provider: &str, cwd: &str) {
 
 /// Stable parent of every product scratch cwd (under the temp dir).
 pub const SCRATCH_ROOT: &str = "otto-product-scratch";
+
+/// Full path of the shared product scratch root (`$TMPDIR/otto-product-scratch`).
+pub fn scratch_root_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join(SCRATCH_ROOT)
+}
+
+/// RAII handle for a context markdown file written inside [`SCRATCH_ROOT`].
+/// Call [`Self::cleanup`] on normal exit; dropping early (cancel/error/panic)
+/// still unlinks the file asynchronously off the worker thread so context
+/// files never accumulate in `$TMPDIR`.
+pub(crate) struct ContextFileGuard {
+    path: std::path::PathBuf,
+    cleaned: bool,
+}
+
+impl ContextFileGuard {
+    pub(crate) fn path_str(&self) -> String {
+        self.path.to_string_lossy().to_string()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    pub(crate) async fn cleanup(mut self) {
+        self.cleaned = true;
+        let _ = tokio::fs::remove_file(&self.path).await;
+    }
+}
+
+impl Drop for ContextFileGuard {
+    fn drop(&mut self) {
+        if self.cleaned {
+            return;
+        }
+        let path = self.path.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _ = tokio::fs::remove_file(path).await;
+            });
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Write a story context document under [`SCRATCH_ROOT`] using async I/O and
+/// return a [`ContextFileGuard`] that removes it when the run finishes.
+/// `filename` is confined under `SCRATCH_ROOT` so route-supplied ids cannot
+/// traverse out of the scratch directory.
+pub(crate) async fn write_context_file(
+    filename: &str,
+    content: &str,
+) -> otto_core::Result<ContextFileGuard> {
+    write_context_file_in(&scratch_root_dir(), filename, content).await
+}
+
+pub(crate) async fn write_context_file_in(
+    root: &std::path::Path,
+    filename: &str,
+    content: &str,
+) -> otto_core::Result<ContextFileGuard> {
+    let path = otto_core::paths::confine_join(root, filename)
+        .ok_or_else(|| otto_core::Error::Invalid(format!("unsafe context filename: {filename}")))?;
+    tokio::fs::create_dir_all(root)
+        .await
+        .map_err(|e| otto_core::Error::Internal(format!("create scratch root: {e}")))?;
+    tokio::fs::write(&path, content)
+        .await
+        .map_err(|e| otto_core::Error::Internal(format!("write context file: {e}")))?;
+    Ok(ContextFileGuard {
+        path,
+        cleaned: false,
+    })
+}
 /// Scratch dirs older than this — and used by no unarchived session — are
 /// removed by [`spawn_scratch_sweep`].
 pub const SCRATCH_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
@@ -136,7 +212,47 @@ pub fn sweep_stale_scratch(
             .and_then(|t| now.duration_since(t).ok())
             .is_some_and(|age| age > max_age);
         if stale {
-            let _ = std::fs::remove_dir_all(e.path());
+            let p = e.path();
+            if p.is_dir() {
+                let _ = std::fs::remove_dir_all(p);
+            } else {
+                let _ = std::fs::remove_file(p);
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod context_file_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn write_context_file_confines_and_cleans_up() {
+        let td = tempfile::tempdir().unwrap();
+        assert!(write_context_file_in(td.path(), "../escape.md", "bad")
+            .await
+            .is_err());
+
+        let guard = write_context_file_in(td.path(), "otto-product-1-context.md", "# Story")
+            .await
+            .unwrap();
+        let path = guard.path().to_path_buf();
+        assert!(path.exists());
+        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "# Story");
+        guard.cleanup().await;
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn sweep_stale_scratch_removes_stale_files_as_well_as_dirs() {
+        let td = tempfile::tempdir().unwrap();
+        let stale_file = td.path().join("otto-product-old-context.md");
+        std::fs::write(&stale_file, "old").unwrap();
+        sweep_stale_scratch(
+            td.path(),
+            std::time::Duration::ZERO,
+            &std::collections::HashSet::new(),
+        );
+        assert!(!stale_file.exists());
     }
 }

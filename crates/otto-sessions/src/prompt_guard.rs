@@ -146,6 +146,14 @@ const TAIL_CAP: usize = 1024;
 /// Don't re-approve the same session more than once per window (avoid spamming
 /// keys if the prompt redraws while the CLI processes the first acceptance).
 const DEBOUNCE: Duration = Duration::from_secs(5);
+/// Only auto-accept trust / first-run prompts during the session's initial
+/// startup window. Keeping the scanner armed for the entire session lifetime
+/// lets untrusted file contents, diffs, or logs printed later inject `1\r` /
+/// `y\r` / `\r` into a live TUI (which also matches Claude's tool-approval
+/// keystroke).
+const STARTUP_WINDOW: Duration = Duration::from_secs(45);
+/// Hard cap on synthetic startup approvals per session incarnation.
+const MAX_STARTUP_APPROVALS: u8 = 2;
 
 /// Runtime guard that auto-accepts known trust/approval prompts. Wire it into
 /// the `SessionManager` (see [`crate::CompositeScanner`]) and call
@@ -156,6 +164,10 @@ pub struct PromptGuard {
     manager: OnceLock<Weak<SessionManager>>,
     tails: Mutex<HashMap<Id, Vec<u8>>>,
     last_approved: Mutex<HashMap<Id, Instant>>,
+    /// First output timestamp per session (bounds [`STARTUP_WINDOW`]).
+    first_seen: Mutex<HashMap<Id, Instant>>,
+    /// Number of synthetic approvals already sent for this session.
+    approvals_sent: Mutex<HashMap<Id, u8>>,
 }
 
 impl PromptGuard {
@@ -164,6 +176,8 @@ impl PromptGuard {
             manager: OnceLock::new(),
             tails: Mutex::new(HashMap::new()),
             last_approved: Mutex::new(HashMap::new()),
+            first_seen: Mutex::new(HashMap::new()),
+            approvals_sent: Mutex::new(HashMap::new()),
         })
     }
 
@@ -179,8 +193,29 @@ impl PromptGuard {
         guard.get(id).is_some_and(|t| t.elapsed() < DEBOUNCE)
     }
 
+    /// True while `id` is still inside its startup approval window and under
+    /// [`MAX_STARTUP_APPROVALS`]. Once disarmed, drops any retained tail bytes.
+    fn within_startup_window(&self, id: &Id) -> bool {
+        let count = lock(&self.approvals_sent).get(id).copied().unwrap_or(0);
+        if count >= MAX_STARTUP_APPROVALS {
+            lock(&self.tails).remove(id);
+            return false;
+        }
+        let started = *lock(&self.first_seen)
+            .entry(id.clone())
+            .or_insert_with(Instant::now);
+        if started.elapsed() > STARTUP_WINDOW {
+            lock(&self.tails).remove(id);
+            return false;
+        }
+        true
+    }
+
     fn mark_approved(&self, id: &Id) {
         lock(&self.last_approved).insert(id.clone(), Instant::now());
+        let mut counts = lock(&self.approvals_sent);
+        let entry = counts.entry(id.clone()).or_insert(0);
+        *entry = entry.saturating_add(1);
     }
 }
 
@@ -188,6 +223,9 @@ impl OutputScanner for PromptGuard {
     fn on_output(&self, session_id: &Id, provider: &str, chunk: &[u8]) {
         // Cheap exit for providers we have no approvals for.
         if approvals_for(provider).is_empty() {
+            return;
+        }
+        if !self.within_startup_window(session_id) {
             return;
         }
         if self.recently_approved(session_id) {
@@ -219,6 +257,21 @@ impl OutputScanner for PromptGuard {
         let id = session_id.clone();
         let provider = provider.to_string();
         tokio::spawn(async move {
+            // Never preempt a shared room guest's terminal control from an
+            // automated output scanner.
+            if manager
+                .room_authority_snapshot(&id)
+                .await
+                .and_then(|snap| snap.driver)
+                .is_some()
+            {
+                tracing::debug!(
+                    session = %id,
+                    provider = %provider,
+                    "prompt-guard: skipped auto-approval while a room guest holds input control"
+                );
+                return;
+            }
             match manager.input(&id, keys).await {
                 Ok(()) => {
                     tracing::info!(
@@ -242,6 +295,8 @@ impl OutputScanner for PromptGuard {
     fn on_session_end(&self, session_id: &Id) {
         lock(&self.tails).remove(session_id);
         lock(&self.last_approved).remove(session_id);
+        lock(&self.first_seen).remove(session_id);
+        lock(&self.approvals_sent).remove(session_id);
     }
 }
 
@@ -432,5 +487,35 @@ mod tests {
         composite.on_session_end(&id);
         assert!(!lock(&guard.tails).contains_key(&id));
         assert!(!guard.recently_approved(&id));
+        assert!(!lock(&guard.first_seen).contains_key(&id));
+        assert!(!lock(&guard.approvals_sent).contains_key(&id));
+    }
+
+    #[test]
+    fn disarms_after_startup_window_and_approval_cap() {
+        let guard = PromptGuard::new();
+        let id = "s-expired".to_string();
+        lock(&guard.first_seen).insert(
+            id.clone(),
+            Instant::now() - STARTUP_WINDOW - Duration::from_secs(1),
+        );
+        guard.on_output(&id, "claude", b"Do you trust the files in this folder?");
+        assert!(
+            !guard.recently_approved(&id),
+            "trust phrases after startup window must never trigger synthetic keys"
+        );
+        assert!(!lock(&guard.tails).contains_key(&id));
+
+        let capped = "s-capped".to_string();
+        for _ in 0..MAX_STARTUP_APPROVALS {
+            guard.mark_approved(&capped);
+        }
+        // Expire debounce; cap must still prevent further triggers.
+        lock(&guard.last_approved).remove(&capped);
+        guard.on_output(&capped, "claude", b"Do you trust the files in this folder?");
+        assert!(
+            !guard.recently_approved(&capped),
+            "session past startup approval cap must stay disarmed"
+        );
     }
 }

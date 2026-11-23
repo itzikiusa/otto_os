@@ -1,0 +1,143 @@
+{
+  "fantasy-props-megakit/shield-wooden": {
+    "prop_class": "shield",
+    "anchor_space": "glTF scene metres, Y up",
+    "anchors": {
+      "strap_line": [
+        [
+          0.0,
+          -0.142225,
+          0.042082
+        ],
+        [
+          0.0,
+          0.142225,
+          0.042082
+        ]
+      ]
+    },
+    "intake": {
+      "passed": true,
+      "method": "two ends of the modelled rear strap, MI_Trim_Props"
+    }
+  },
+  "fantasy-props-megakit/sword-bronze": {
+    "prop_class": "sword",
+    "anchor_space": "glTF scene metres, Y up",
+    "anchors": {
+      "grip": [
+        0.000385,
+        -0.048866,
+        0.000567
+      ],
+      "tip": [
+        9.1e-05,
+        0.915249,
+        8.9e-05
+      ]
+    },
+    "intake": {
+      "passed": true,
+      "method": "forge-fit intake against Universal Female right hand at source scale",
+      "checks": []
+    }
+  },
+  "pirate-kit/weapon-cutlass": {
+    "prop_class": "sword",
+    "anchor_space": "glTF scene metres, Y up",
+    "anchors": {
+      "grip": [
+        -0.024982,
+        0.074746,
+        -8.8e-05
+      ],
+      "tip": [
+        0.187207,
+        1.085701,
+        -4e-06
+      ]
+    },
+    "intake": {
+      "passed": false,
+      "method": "forge-fit intake against Universal Female right hand at source scale",
+      "checks": [
+        "grip is 3.26 palm widths thick (23.7 cm); a hand closes on 0.15-0.6",
+        "no guard wider than twice the grip",
+        "blade is bent (5.0% of the length off straight)"
+      ]
+    }
+  },
+  "pirate-kit/weapon-dagger": {
+    "prop_class": "sword",
+    "anchor_space": "glTF scene metres, Y up",
+    "anchors": {
+      "grip": [
+        0.000417,
+        -0.013103,
+        -0.000367
+      ],
+      "tip": [
+        -0.000841,
+        1.027228,
+        -0.000185
+      ]
+    },
+    "intake": {
+      "passed": false,
+      "method": "forge-fit intake against Universal Female right hand at source scale",
+      "checks": [
+        "grip is 1.32 palm widths thick (9.6 cm); a hand closes on 0.15-0.6",
+        "the guard sits in the middle (38% of the length): a grip at both ends, no single handle",
+        "no guard wider than twice the grip"
+      ]
+    }
+  },
+  "pirate-kit/weapon-sword-1": {
+    "prop_class": "sword",
+    "anchor_space": "glTF scene metres, Y up",
+    "anchors": {
+      "grip": [
+        2.5e-05,
+        -0.031779,
+        2e-06
+      ],
+      "tip": [
+        -0.000292,
+        1.176466,
+        -6.4e-05
+      ]
+    },
+    "intake": {
+      "passed": false,
+      "method": "forge-fit intake against Universal Female right hand at source scale",
+      "checks": [
+        "grip is 1.21 palm widths thick (8.8 cm); a hand closes on 0.15-0.6",
+        "the guard sits in the middle (60% of the length): a grip at both ends, no single handle"
+      ]
+    }
+  },
+  "pirate-kit/weapon-sword-2": {
+    "prop_class": "sword",
+    "anchor_space": "glTF scene metres, Y up",
+    "anchors": {
+      "grip": [
+        -0.000295,
+        0.032909,
+        4.3e-05
+      ],
+      "tip": [
+        0.011099,
+        1.079494,
+        6.1e-05
+      ]
+    },
+    "intake": {
+      "passed": false,
+      "method": "forge-fit intake against Universal Female right hand at source scale",
+      "checks": [
+        "grip is 1.30 palm widths thick (9.4 cm); a hand closes on 0.15-0.6",
+        "blade is bent (3.8% of the length off straight)"
+      ]
+    }
+  }
+}

@@ -19,6 +19,8 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import EnvBadge from '../../lib/components/EnvBadge.svelte';
+  import { isProdApiEnv } from './prodGuard';
   import RequestBuilder from './RequestBuilder.svelte';
   import ResponseViewer from './ResponseViewer.svelte';
   import CollectionsTree from './CollectionsTree.svelte';
@@ -301,6 +303,7 @@
   });
 
   const activeEnvName = $derived(apiClient.activeEnv?.name ?? null);
+  const activeEnvProd = $derived(isProdApiEnv(activeEnvName));
   const automationName = $derived(view.kind === 'automation' ? (apiClient.automations.find((a) => a.id === (view as { id: Id }).id)?.name ?? 'Automation') : '');
   let responsePane = $state<HTMLElement | null>(null);
   let previousResultTab: string | undefined;
@@ -335,11 +338,12 @@
       {/if}
     {/snippet}
     {#snippet actions()}
-      <button class="btn small env-btn" data-keep onclick={envMenu} aria-haspopup="menu"
-        aria-label="Environment: {activeEnvName ?? 'none'}" title="Environment: where {'{{variables}}'} get their values">
+      <button class="btn small env-btn" class:prod-env={activeEnvProd} data-keep onclick={envMenu} aria-haspopup="menu"
+        aria-label="Environment: {activeEnvName ?? 'none'}{activeEnvProd ? ' (production)' : ''}" title="Environment: where {'{{variables}}'} get their values">
         <Icon name="globe" size={12} />
         {#if !viewport.isPhone}<span class="env-k">Environment</span>{/if}
         <span class="env-v" class:none={!activeEnvName}>{activeEnvName ?? 'None'}</span>
+        {#if activeEnvProd}<EnvBadge env="prod" />{/if}
         <Icon name="chevronDown" size={12} />
       </button>
       <button class="btn small" data-icon="download" data-overflow="0" onclick={() => (importOpen = true)}><Icon name="download" size={12} />Import…</button>
@@ -401,7 +405,7 @@
         {/if}
 
         {#if showMain}
-          <div class="api-main">
+          <div class="api-main" class:danger-rail={activeEnvProd}>
             <div class="req-tabs">
               <div class="req-tablist scroll-thin">
                 {#each apiClient.tabs as t, i (t.tabId ?? i)}
@@ -482,7 +486,9 @@
     height: 100%;
     display: flex;
     flex-direction: column;
+    min-width: 0;
     min-height: 0;
+    overflow: hidden;
   }
   .env-btn {
     gap: 6px;
@@ -577,6 +583,9 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
+  }
+  .api-main.danger-rail {
+    border-inline-start: 2px solid var(--danger);
   }
   .req-tabs {
     display: flex;
@@ -683,6 +692,11 @@
     background: var(--accent-line);
   }
 
+  @media (min-width: 641px) and (max-width: 1024px) {
+    .api-side {
+      max-width: min(35vw, 240px);
+    }
+  }
   @media (max-width: 640px) {
     .api-page {
       flex-direction: column;

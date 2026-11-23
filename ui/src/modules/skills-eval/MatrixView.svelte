@@ -17,8 +17,9 @@
   import { rel } from '../../lib/stores/now.svelte';
   import { pollWhileVisible } from '../../lib/poll';
   import { viewport } from '../../lib/stores/viewport.svelte';
-  import type { EvalMatrix, MatrixCell, MatrixPrompt, StartMatrixReq } from '../../lib/api/types';
+  import type { EvalMatrix, MatrixCell, MatrixPrompt, SkillSourceReq, StartMatrixReq } from '../../lib/api/types';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
+  import MatrixSkillPicker from './MatrixSkillPicker.svelte';
 
   let {
     listCollapsed = false,
@@ -63,7 +64,7 @@
   function toggleProvider(p: string): void {
     fProviders = fProviders.includes(p) ? fProviders.filter((x) => x !== p) : [...fProviders, p];
   }
-  let fSkills = $state(''); // comma-separated skill names
+  let fSkills = $state<SkillSourceReq[]>([]);
   let fTestCmd = $state('');
   let fPrompts: MatrixPrompt[] = $state([{ label: '', task: '' }]);
 
@@ -73,6 +74,7 @@
     // A workspace switch drops the previous workspace's open matrix.
     selected = null;
     selectedId = null;
+    fSkills = [];
     phoneListOpen = false;
     if (wsId) {
       void loadList(wsId);
@@ -190,17 +192,10 @@
     phoneListOpen = false;
   }
 
-  function parseList(s: string): string[] {
-    return s
-      .split(',')
-      .map((x) => x.trim())
-      .filter((x) => x.length > 0);
-  }
-
   const canCreate = $derived(
     !creating &&
       fProviders.length > 0 &&
-      parseList(fSkills).length > 0 &&
+      fSkills.length > 0 &&
       fPrompts.some((p) => p.task.trim().length > 0),
   );
 
@@ -208,7 +203,7 @@
   const createBlock = $derived.by(() => {
     if (creating) return 'Creating…';
     if (fProviders.length === 0) return 'Pick at least one agent';
-    if (parseList(fSkills).length === 0) return 'Add at least one skill';
+    if (fSkills.length === 0) return 'Pick at least one skill';
     if (!fPrompts.some((p) => p.task.trim())) return 'Add at least one prompt with a task';
     return '';
   });
@@ -217,7 +212,7 @@
     const wsId = ws.currentId;
     if (!wsId || creating) return;
     const providers = providerOpts.filter((p) => fProviders.includes(p));
-    const skillNames = parseList(fSkills);
+    const skills = fSkills;
     const prompts: MatrixPrompt[] = fPrompts
       .map((p) => ({
         label: p.label.trim() || p.task.trim().slice(0, 48),
@@ -226,13 +221,13 @@
       .filter((p) => p.task.length > 0);
 
     // Create stays disabled until these hold (see canCreate / createBlock).
-    if (providers.length === 0 || skillNames.length === 0 || prompts.length === 0) return;
+    if (providers.length === 0 || skills.length === 0 || prompts.length === 0) return;
 
     const body: StartMatrixReq = {
       name: fName.trim() || 'Untitled matrix',
       mode: 'score_only',
       providers,
-      skills: skillNames.map((reference) => ({ kind: 'library', reference })),
+      skills,
       prompts,
       target: { kind: 'working' },
       test_cmd: fTestCmd.trim() || null,
@@ -378,8 +373,8 @@
             </div>
           </div>
           <div class="field">
-            <label class="field-label" for="mx-skills">Skills <span class="hint-inline">library skill names, comma-separated</span></label>
-            <input dir="auto" id="mx-skills" class="input" data-testid="matrix-skills" placeholder="golang-testing, golang-code-review" bind:value={fSkills} />
+            <span class="field-label">Skills</span>
+            <MatrixSkillPicker wsId={ws.currentId} bind:selected={fSkills} />
           </div>
           <div class="field">
             <label class="field-label" for="mx-test">Test command <span class="hint-inline">optional</span></label>

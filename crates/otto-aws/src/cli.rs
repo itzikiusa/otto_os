@@ -334,6 +334,147 @@ pub fn error_for(out: &CliOutput) -> Error {
     }
 }
 
+/// True when `value` starts with a scheme AWS CLI v2's `cli_follow_urlparam`
+/// resolves as a local file or remote URL (`file://`, `fileb://`, `http://`,
+/// `https://`).
+pub fn has_url_param_scheme(value: &str) -> bool {
+    let trimmed = value.trim_start();
+    let lower: String = trimmed
+        .chars()
+        .take(8)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    lower.starts_with("file://")
+        || lower.starts_with("fileb://")
+        || lower.starts_with("http://")
+        || lower.starts_with("https://")
+}
+
+/// Reject a user-supplied AWS CLI parameter value that would trigger AWS CLI
+/// v2's `cli_follow_urlparam` local file read or SSRF fetch.
+pub fn reject_url_param_expansion(label: &str, value: &str) -> Result<()> {
+    if has_url_param_scheme(value) {
+        return Err(Error::Invalid(format!(
+            "{label} must not start with file://, fileb://, http://, or https://"
+        )));
+    }
+    Ok(())
+}
+
+/// Centralized defense-in-depth check on every `aws` CLI argv before spawning:
+/// block AWS CLI v2 `file://`/`fileb://`/`http://`/`https://` parameter
+/// expansion everywhere except the few internal allowlisted flags.
+pub fn validate_argv(args: &[String]) -> Result<()> {
+    let mut prev: Option<&str> = None;
+    for arg in args {
+        if let Some((flag, val)) = arg.split_once('=') {
+            if flag.starts_with("--") {
+                check_flag_value(Some(flag), val)?;
+                prev = None;
+                continue;
+            }
+        }
+        if has_url_param_scheme(arg) {
+            check_flag_value(prev, arg)?;
+        }
+        prev = if arg.starts_with("--") {
+            Some(arg.as_str())
+        } else {
+            None
+        };
+    }
+    Ok(())
+}
+
+fn check_flag_value(flag: Option<&str>, val: &str) -> Result<()> {
+    if !has_url_param_scheme(val) {
+        return Ok(());
+    }
+    let trimmed = val.trim_start();
+    let lower: String = trimmed
+        .chars()
+        .take(8)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let allowed = match flag {
+        Some("--message-body" | "--query-string") => trimmed == crate::accounts::STDIN_PARAM,
+        Some("--metric-data-queries") => lower.starts_with("file://"),
+        Some("--endpoint-url" | "--queue-url") => {
+            lower.starts_with("http://") || lower.starts_with("https://")
+        }
+        _ => false,
+    };
+    if !allowed {
+        return Err(Error::Invalid(
+            "AWS CLI argument may not start with file://, fileb://, http://, or https:// \
+             (URL parameter expansion is forbidden)"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Hard cap on stdout buffered from a single `aws` CLI invocation (32 MiB).
+const MAX_CLI_STDOUT_BYTES: usize = 32 * 1024 * 1024;
+/// Hard cap on stderr retained from a single `aws` CLI invocation (1 MiB).
+/// Any stderr beyond this cap is drained and discarded so the child never
+/// deadlocks on a full pipe.
+const MAX_CLI_STDERR_BYTES: usize = 1024 * 1024;
+
+/// Read a child's stdout/stderr concurrently with hard memory bounds. If stdout
+/// exceeds `stdout_cap`, the child is killed and an `Upstream` error is returned
+/// so a huge CLI payload cannot OOM the daemon.
+async fn read_child_bounded(
+    child: &mut tokio::process::Child,
+    stdout_cap: usize,
+    stderr_cap: usize,
+) -> Result<(i32, Vec<u8>, Vec<u8>)> {
+    use tokio::io::AsyncReadExt;
+    let (Some(mut out), Some(mut err)) = (child.stdout.take(), child.stderr.take()) else {
+        return Err(Error::Internal("aws: missing stdio pipes".into()));
+    };
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut obuf = vec![0u8; 64 * 1024];
+    let mut ebuf = vec![0u8; 8 * 1024];
+    let (mut out_done, mut err_done) = (false, false);
+    while !(out_done && err_done) {
+        tokio::select! {
+            r = out.read(&mut obuf), if !out_done => {
+                let n = r.map_err(|e| Error::Internal(format!("aws: {e}")))?;
+                if n == 0 {
+                    out_done = true;
+                } else if stdout.len().saturating_add(n) > stdout_cap {
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    return Err(Error::Upstream(format!(
+                        "aws output exceeded {} bytes limit",
+                        stdout_cap
+                    )));
+                } else {
+                    stdout.extend_from_slice(&obuf[..n]);
+                }
+            }
+            r = err.read(&mut ebuf), if !err_done => {
+                let n = r.map_err(|e| Error::Internal(format!("aws: {e}")))?;
+                if n == 0 {
+                    err_done = true;
+                } else {
+                    let take = n.min(stderr_cap.saturating_sub(stderr.len()));
+                    stderr.extend_from_slice(&ebuf[..take]);
+                }
+            }
+        }
+    }
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| Error::Internal(format!("aws: {e}")))?
+        .code()
+        .unwrap_or(-1);
+    Ok((status, stdout, stderr))
+}
+
 /// Run `program args…` with `env` added to the daemon environment. Returns the
 /// raw output (non-zero exit is NOT an error here — see [`run`]).
 pub async fn run_raw(
@@ -343,6 +484,7 @@ pub async fn run_raw(
     timeout: Duration,
     stdin: Option<&[u8]>,
 ) -> Result<CliOutput> {
+    validate_argv(args)?;
     // Wait for a daemon-wide slot BEFORE spawning; the permit lives until the
     // child is reaped (or this future is dropped, which kills the child). The
     // caller's budget covers the queue wait too (N1): a call stuck behind a
@@ -399,9 +541,13 @@ pub async fn run_raw(
             });
         }
     }
-    let out = match tokio::time::timeout_at(deadline, child.wait_with_output()).await {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => return Err(Error::Internal(format!("aws: {e}"))),
+    let (status, stdout, stderr) = match tokio::time::timeout_at(
+        deadline,
+        read_child_bounded(&mut child, MAX_CLI_STDOUT_BYTES, MAX_CLI_STDERR_BYTES),
+    )
+    .await
+    {
+        Ok(res) => res?,
         Err(_) => {
             let ms = started.elapsed().as_millis() as u64;
             record(wait_ms, ms);
@@ -413,9 +559,9 @@ pub async fn run_raw(
         }
     };
     let out = CliOutput {
-        status: out.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        status,
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
         duration_ms: started.elapsed().as_millis() as u64,
     };
     // Per-call timing (F14): `RUST_LOG=otto_aws::cli=debug` shows every spawn
@@ -745,5 +891,85 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(e, Error::Invalid(m) if m.contains("not installed")));
+    }
+
+    #[test]
+    fn validate_argv_blocks_url_param_expansion_except_allowlisted_flags() {
+        let s = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // Allowlisted internal uses pass.
+        assert!(validate_argv(&s(&[
+            "sqs",
+            "send-message",
+            "--queue-url",
+            "https://sqs.us-east-1.amazonaws.com/123/q",
+            "--message-body",
+            crate::accounts::STDIN_PARAM,
+        ]))
+        .is_ok());
+        assert!(validate_argv(&s(&[
+            "s3api",
+            "list-buckets",
+            "--endpoint-url",
+            "http://127.0.0.1:4566",
+        ]))
+        .is_ok());
+        assert!(validate_argv(&s(&[
+            "cloudwatch",
+            "get-metric-data",
+            "--metric-data-queries",
+            "file:///tmp/otto-q.json",
+        ]))
+        .is_ok());
+
+        // User-controlled params carrying file://, fileb://, http://, https:// are blocked
+        // in both `--flag value` and `--flag=value` forms.
+        for bad in [
+            s(&["s3api", "list-objects-v2", "--prefix", "file:///etc/passwd"]),
+            s(&["s3api", "list-objects-v2", "--prefix=FILE:///etc/passwd"]),
+            s(&["s3api", "list-objects-v2", "--prefix=fileb:///etc/passwd"]),
+            s(&[
+                "logs",
+                "filter-log-events",
+                "--filter-pattern",
+                "http://169.254.169.254/latest/meta-data/",
+            ]),
+            s(&[
+                "logs",
+                "filter-log-events",
+                "--filter-pattern=https://attacker.example/x",
+            ]),
+            s(&[
+                "sqs",
+                "send-message",
+                "--message-body",
+                "file:///etc/passwd",
+            ]),
+            s(&[
+                "sqs",
+                "send-message",
+                "--message-group-id",
+                "file:///etc/passwd",
+            ]),
+        ] {
+            assert!(
+                validate_argv(&bad).is_err(),
+                "expected URL param expansion to be rejected: {bad:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn read_child_bounded_kills_and_rejects_oversized_stdout() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "dd if=/dev/zero bs=1024 count=64 2>/dev/null"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let err = read_child_bounded(&mut child, 4096, 1024)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Upstream(ref m) if m.contains("exceeded 4096")));
     }
 }

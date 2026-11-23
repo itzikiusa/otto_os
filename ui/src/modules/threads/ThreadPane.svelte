@@ -229,10 +229,15 @@
             type="button"
             class="tp-title ellipsis"
             dir="auto"
-            title="{session?.title ?? 'Thread'}{branch ? ` · ${branch}` : ''} — click to rename"
+            title="{session?.title ?? 'Thread'}{branch ? ` · ${branch}` : ''} — double-click to rename"
             data-testid="pane-title-{paneId}"
-            onclick={() => focused && beginRename()}
             ondblclick={beginRename}
+            onkeydown={(e) => {
+              if (e.key === 'F2') {
+                e.preventDefault();
+                beginRename();
+              }
+            }}
           >
             {seat ?? session?.title ?? 'Loading thread…'}
           </button>

@@ -113,6 +113,112 @@ pub struct Environment {
     /// Y rotation of the environment, degrees.
     #[serde(default)]
     pub rotation: Option<f64>,
+    // ---- a Smart mode setting (all optional) ----
+    /// Sky colours: zenith, horizon, below (the backdrop and the light).
+    #[serde(default)]
+    pub sky: Option<[String; 3]>,
+    #[serde(default)]
+    pub fog: Option<Fog>,
+    #[serde(default)]
+    pub ground: Option<Ground>,
+    /// A low far shore (a box up to its `center` y) the backdrop stands on.
+    #[serde(default)]
+    pub shore: Option<Ground>,
+    /// Two walls behind the group (indoors).
+    #[serde(default)]
+    pub room: Option<Room>,
+    /// Falling rain or snow.
+    #[serde(default)]
+    pub weather: Option<Weather>,
+    /// Tone-mapping exposure (else the preset's).
+    #[serde(default)]
+    pub exposure: Option<f64>,
+    /// The Sun, Moon, Earth or a planet in the sky, each toward `direction`.
+    #[serde(default)]
+    pub sky_bodies: Vec<SkyBody>,
+    /// Effects attached to placed objects, in world coordinates.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_effects: Vec<LocalEffect>,
+    /// Stars on the sky.
+    #[serde(default)]
+    pub stars: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalEffect {
+    pub kind: LocalEffectKind,
+    pub position: [f64; 3],
+    pub size: [f64; 2],
+    pub rotation: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalEffectKind {
+    RainOnGlass,
+    Steam,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkyBody {
+    pub kind: SkyBodyKind,
+    pub direction: [f64; 3],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SkyBodyKind {
+    Sun,
+    Moon,
+    Earth,
+    Planet,
+}
+
+/// Exponential fog.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Fog {
+    pub color: String,
+    pub density: f64,
+}
+
+/// The ground the scene stands on: its kind, its centre (`y` = the
+/// surface; water's is above the base piece's feet) and its size (x, z).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Ground {
+    pub kind: GroundKind,
+    pub center: [f64; 3],
+    pub size: [f64; 2],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GroundKind {
+    Water,
+    Grass,
+    Meadow,
+    Sand,
+    Soil,
+    Stone,
+    Snow,
+    MoonDust,
+    SeaFloor,
+    WoodFloor,
+    Carpet,
+    Tiles,
+    Stage,
+    Road,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Room {
+    pub height: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Weather {
+    Rain,
+    Snow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,6 +321,9 @@ pub struct Light {
     pub color: Option<String>,
     #[serde(default)]
     pub shadow: Option<bool>,
+    /// A point light's halo radius, metres (a glowing lantern).
+    #[serde(default)]
+    pub glow: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -250,6 +359,9 @@ pub struct Object3d {
     pub text: Option<String>,
     #[serde(default)]
     pub visible: Option<bool>,
+    /// A background piece the camera fit leaves out (a far lighthouse).
+    #[serde(default)]
+    pub backdrop: Option<bool>,
     /// Free-form per-object notes (the 3D stand-in for pinned annotations).
     #[serde(default)]
     pub notes: Option<String>,
@@ -351,6 +463,11 @@ pub fn validate(doc: &Value) -> Result<Scene3d, Error> {
 
 /// Parse + validate from raw bytes (the PUT / assist / render paths).
 pub fn validate_bytes(bytes: &[u8]) -> Result<Scene3d, Error> {
+    if bytes.len() > crate::format::MAX_CONTENT_BYTES {
+        return Err(Error::PayloadTooLarge(
+            "scene3d exceeds the design content limit".into(),
+        ));
+    }
     let doc: Value =
         serde_json::from_slice(bytes).map_err(|e| Error::Invalid(format!("scene3d: {e}")))?;
     validate(&doc)
@@ -417,6 +534,9 @@ fn validate_scene(s: &Scene3d) -> Result<(), Error> {
         if let Some(c) = &l.color {
             check_color(&format!("{at}.color"), c)?;
         }
+        if let Some(g) = l.glow {
+            check_num(&format!("{at}.glow"), g, 0.0, 20.0)?;
+        }
     }
     for (i, o) in s.objects.iter().enumerate() {
         let at = format!("objects[{i}]");
@@ -435,17 +555,17 @@ fn validate_scene(s: &Scene3d) -> Result<(), Error> {
                 (Some(_), Some(_)) => {
                     return Err(bad(format!(
                         "{at}: gltf objects take attachment_id OR src, not both"
-                    )))
+                    )));
                 }
                 (Some(aid), None) if otto_core::paths::safe_component(aid).is_some() => {}
                 (Some(aid), None) => {
-                    return Err(bad(format!("{at}.attachment_id {aid:?} is not a safe id")))
+                    return Err(bad(format!("{at}.attachment_id {aid:?} is not a safe id")));
                 }
                 (None, Some(src)) => check_design_uri(&format!("{at}.src"), src)?,
                 (None, None) => {
                     return Err(bad(format!(
                         "{at}: gltf objects require attachment_id (or a v2 src)"
-                    )))
+                    )));
                 }
             },
             _ => {
@@ -510,6 +630,47 @@ fn validate_v2_scene(s: &Scene3d, object_ids: &HashSet<&str>, v2: bool) -> Resul
         }
         if let Some(r) = env.rotation {
             check_num("environment.rotation", r, -360.0, 360.0)?;
+        }
+        for (k, c) in env.sky.iter().flatten().enumerate() {
+            check_color(&format!("environment.sky[{k}]"), c)?;
+        }
+        if let Some(f) = &env.fog {
+            check_color("environment.fog.color", &f.color)?;
+            check_num("environment.fog.density", f.density, 0.0, 1.0)?;
+        }
+        for (at, g) in [("ground", &env.ground), ("shore", &env.shore)] {
+            let Some(g) = g else { continue };
+            check_vec3(&format!("environment.{at}.center"), &g.center)?;
+            for v in g.size {
+                check_num(&format!("environment.{at}.size"), v, 0.0, 10_000.0)?;
+            }
+        }
+        if let Some(r) = &env.room {
+            check_num("environment.room.height", r.height, 0.5, 100.0)?;
+        }
+        if let Some(e) = env.exposure {
+            check_num("environment.exposure", e, 0.05, 8.0)?;
+        }
+        if env.local_effects.len() > 32 {
+            return Err(bad("environment.local_effects: at most 32"));
+        }
+        for effect in &env.local_effects {
+            check_vec3("environment.local_effects.position", &effect.position)?;
+            for d in effect.size {
+                check_num("environment.local_effects.size", d, 0.0001, 10000.0)?;
+            }
+            check_num(
+                "environment.local_effects.rotation",
+                effect.rotation,
+                -3600.0,
+                3600.0,
+            )?;
+        }
+        if env.sky_bodies.len() > 8 {
+            return Err(bad("environment.sky_bodies: at most 8"));
+        }
+        for b in &env.sky_bodies {
+            check_vec3("environment.sky_bodies.direction", &b.direction)?;
         }
     }
     if let Some(t) = &s.turntable {
@@ -1091,6 +1252,15 @@ print("otto-scene3d: wrote", OUT)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_bytes_rejects_oversized_input_before_parsing() {
+        let bytes = vec![b' '; crate::format::MAX_CONTENT_BYTES + 1];
+        assert!(matches!(
+            validate_bytes(&bytes),
+            Err(Error::PayloadTooLarge(_))
+        ));
+    }
     use serde_json::json;
 
     fn sample() -> Value {
@@ -1269,6 +1439,27 @@ add_group(\"g\", \"g\", [\"b\", \"t\"])
         })
     }
 
+    /// A Smart mode setting: water at night in fog, a glowing lantern.
+    #[test]
+    fn a_setting_environment_validates() {
+        let mut d = sample_v2();
+        d["environment"] = json!({
+            "preset": "night", "intensity": 0.35, "background": true,
+            "sky": ["#04060e", "#1e2535", "#020308"], "exposure": 1.0,
+            "fog": { "color": "#1e2535", "density": 0.03 },
+            "ground": { "kind": "water", "center": [0, 0.6, 0], "size": [200, 200] },
+            "shore": { "kind": "grass", "center": [-20, 1.1, -90], "size": [12, 12] },
+            "room": { "height": 3 }, "weather": "rain", "stars": true,
+            "sky_bodies": [{ "kind": "earth", "direction": [0.2, 0.15, -0.95] }]
+        });
+        d["lights"][0] = json!({ "id": "glow-lantern", "type": "point", "position": [0, 1, 0], "intensity": 1.5, "glow": 0.3 });
+        let s = validate(&d).unwrap();
+        let env = s.environment.unwrap();
+        assert_eq!(env.ground.unwrap().kind, GroundKind::Water);
+        assert_eq!(env.weather, Some(Weather::Rain));
+        assert_eq!(s.lights[0].glow, Some(0.3));
+    }
+
     #[test]
     fn v2_documents_validate_and_v1_stays_readable() {
         let s = validate(&sample_v2()).unwrap();
@@ -1348,6 +1539,17 @@ add_group(\"g\", \"g\", [\"b\", \"t\"])
         rejects("environment intensity", |d| {
             d["environment"]["intensity"] = json!(-1)
         });
+        rejects("unknown ground", |d| {
+            d["environment"]["ground"] =
+                json!({ "kind": "lava", "center": [0, 0, 0], "size": [9, 9] })
+        });
+        rejects("fog density", |d| {
+            d["environment"]["fog"] = json!({ "color": "#223344", "density": 2 })
+        });
+        rejects("sky colour", |d| {
+            d["environment"]["sky"] = json!(["#000000", "blue", "#000000"])
+        });
+        rejects("glow", |d| d["lights"][0]["glow"] = json!(-1));
         rejects("duplicate camera id", |d| {
             d["cameras"] = json!([
                 { "id": "a", "position": [0, 0, 1] },

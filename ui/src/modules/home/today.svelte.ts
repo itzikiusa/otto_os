@@ -13,18 +13,25 @@
 
 import { api } from '../../lib/api/client';
 import { listArtifacts } from '../../lib/api/design';
+import { mcpCpApi } from '../../lib/api/mcp';
 import { scheduledTasksApi } from '../../lib/api/scheduledTasks';
 import type { IconName } from '../../lib/components/Icon.svelte';
 import type { DesignArtifact, McpApproval, Notice, ScheduledTask } from '../../lib/api/types';
 import { untrack } from 'svelte';
+import { loadErrorText } from '../../lib/loadError';
 import { router } from '../../lib/router.svelte';
 import { auth } from '../../lib/stores/auth.svelte';
 import { notifications } from '../../lib/stores/notifications.svelte';
+import { resourceAccess } from '../../lib/stores/resource-access.svelte';
 import { ws } from '../../lib/stores/workspace.svelte';
+import { toasts } from '../../lib/toast.svelte';
 import { plural } from '../../lib/plural';
 import { runtimeWaiting } from '../../lib/stores/runtimeAttention.svelte';
 import { threadRoute, threadSessions, unlistedWaiting } from './homeThreads';
 import { livePoll, type Poller } from './boxes/poll';
+
+const AGENT_REQUESTER_KINDS = ['mcp_server', 'gateway', 'agent'];
+const requesterMayDecide = (a: McpApproval): boolean => AGENT_REQUESTER_KINDS.includes(a.requested_by_kind ?? '');
 
 /** One glance row. `open` runs on click; `live` pulses its dot. */
 export interface TodayRow {
@@ -35,6 +42,8 @@ export interface TodayRow {
   tone: 'warning' | 'working' | 'idle' | 'accent';
   /** ISO time the row refers to (sorting + "2m ago"). */
   at?: string;
+  /** Present on pending MCP approval rows so Home can offer inline Approve / Deny. */
+  approval?: McpApproval;
   open: () => void;
 }
 
@@ -64,6 +73,10 @@ class TodayStore {
   /** The last fetch had a failing source — the cards say so (with Retry)
    *  instead of passing a broken backend off as "nothing here". */
   failed = $state(false);
+  /** Per-approval in-flight decision state for inline Approve / Deny on Home. */
+  deciding: Record<string, 'approve' | 'deny'> = $state({});
+  /** Per-approval inline failure copy when a decision POST fails. */
+  decideErrors: Record<string, string> = $state({});
 
   private users = 0;
   private poller: Poller | null = null;
@@ -77,8 +90,49 @@ class TodayStore {
     this.approvals = [];
     this.designs = [];
     this.scheduled = [];
+    this.deciding = {};
+    this.decideErrors = {};
     this.loaded = false;
     this.failed = false;
+  }
+
+  canDecideApproval(a: McpApproval): boolean {
+    const allowedRequester = a.requested_by !== auth.me?.id || requesterMayDecide(a);
+    const hasAccess = a.server_id
+      ? resourceAccess.can('mcp_server', a.server_id, 'approve', 'mcp', 'admin', a.tool ?? undefined)
+      : auth.can('mcp', 'admin');
+    return allowedRequester && hasAccess;
+  }
+
+  decideBlockedReason(a: McpApproval): string {
+    return a.requested_by === auth.me?.id && !requesterMayDecide(a)
+      ? 'You raised this request yourself — another admin has to decide it'
+      : 'You don’t have approve access to this server';
+  }
+
+  /** Inline Approve / Deny for a pending MCP approval right on Home. */
+  async decideApproval(approval: McpApproval, approved: boolean, note?: string | null): Promise<boolean> {
+    if (!this.canDecideApproval(approval) || this.deciding[approval.id]) return false;
+    this.deciding = { ...this.deciding, [approval.id]: approved ? 'approve' : 'deny' };
+    if (approval.id in this.decideErrors) {
+      const next = { ...this.decideErrors };
+      delete next[approval.id];
+      this.decideErrors = next;
+    }
+    try {
+      const trimmed = note?.trim();
+      await mcpCpApi.cpDecide(approval.id, { approved, ...(trimmed ? { note: trimmed } : {}) });
+      this.approvals = this.approvals.filter((x) => x.id !== approval.id);
+      toasts.success(approved ? 'Approved' : 'Denied', approval.title);
+      return true;
+    } catch (e) {
+      this.decideErrors = { ...this.decideErrors, [approval.id]: loadErrorText(e) };
+      return false;
+    } finally {
+      const next = { ...this.deciding };
+      delete next[approval.id];
+      this.deciding = next;
+    }
   }
 
   /** Sessions blocked on the operator (foreground only, like the sidebar). */
@@ -97,6 +151,7 @@ class TodayStore {
         icon: 'shield',
         tone: 'warning',
         at: a.created_at,
+        approval: a,
         open: () => router.go('mcp/activity'),
       });
     }
@@ -253,6 +308,9 @@ class TodayStore {
     ]);
     if (mine !== this.seq || ws.currentId !== wsId) return true;
     this.approvals = appr.v.filter((a) => !a.workspace_id || !wsId || a.workspace_id === wsId);
+    for (const a of this.approvals) {
+      if (a.server_id) void resourceAccess.load('mcp_server', a.server_id, a.tool ?? undefined);
+    }
     this.designs = designs.v;
     this.scheduled = sched.v;
     this.loaded = true;

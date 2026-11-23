@@ -4,12 +4,16 @@
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::line_reader::{LossyLines, MAX_OUTPUT_LINE_BYTES, MAX_PROTOCOL_LINE_BYTES};
+use crate::target::ssh_exec::ProcessGroupKillGuard;
 use tokio::net::unix::pipe::{Receiver as PipeReceiver, Sender as PipeSender};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+
+const SHELL_COND_TIMEOUT: Duration = Duration::from_secs(2);
 
 use super::shell_bridge::{PausedState, ShellBp, TrapMsg};
 
@@ -129,6 +133,14 @@ pub(super) fn interpolate_shell_log(tpl: &str, vars: &[(String, String)]) -> Str
 }
 
 pub(super) async fn check_shell_condition(cond: &str, vars: &[(String, String)]) -> bool {
+    check_shell_condition_with_timeout(cond, vars, SHELL_COND_TIMEOUT).await
+}
+
+pub(super) async fn check_shell_condition_with_timeout(
+    cond: &str,
+    vars: &[(String, String)],
+    timeout: Duration,
+) -> bool {
     let mut cmd = Command::new("/bin/bash");
     cmd.env_clear()
         .envs(crate::environments::shell_env::collect_safe_non_root_base_env());
@@ -145,8 +157,47 @@ pub(super) async fn check_shell_condition(cond: &str, vars: &[(String, String)])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    let Ok(mut child) = cmd.spawn() else {
+        return false;
+    };
+    let mut guard = ProcessGroupKillGuard::new(child.id());
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => {
+            guard.disarm();
+            status.success()
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn check_shell_condition_times_out_and_reaps_process_group() {
+        let start = tokio::time::Instant::now();
+        let ok = check_shell_condition_with_timeout(
+            "[ $(sleep 30; echo 1) = 1 ]",
+            &[],
+            Duration::from_millis(150),
+        )
+        .await;
+        assert!(!ok, "hanging shell condition must evaluate to false");
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "hanging shell condition exceeded timeout guard"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_shell_condition_evaluates_vars() {
+        let vars = vec![("COUNT".to_string(), "5".to_string())];
+        assert!(check_shell_condition("COUNT == 5", &vars).await);
+        assert!(!check_shell_condition("COUNT == 9", &vars).await);
+    }
 }

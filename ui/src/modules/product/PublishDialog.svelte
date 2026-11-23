@@ -16,7 +16,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import type { IssueAccount, IssueProject } from '../../lib/api/types';
   import { truncatedNote } from '../../lib/listingPage';
-  import { providerErrorText } from '../../lib/loadError';
+  import { loadErrorText, providerErrorText } from '../../lib/loadError';
   import ConfluencePagePicker from '../../lib/components/ConfluencePagePicker.svelte';
   import type { ConfluenceSpace, ProductStoryVersion, ProductStoryDetail, ReviewedContent } from './types';
 
@@ -71,7 +71,7 @@
   let formErrorDetail = $state('');
 
   function setError(what: string, e: unknown): void {
-    const raw = e instanceof Error ? e.message : String(e);
+    const raw = typeof loadErrorText === 'function' ? loadErrorText(e) : String(e);
     let why = '';
     if (e instanceof ApiError) {
       if (e.status === 401 || e.status === 403) why = ' The account was refused — check its token in Settings → Integrations → Jira & Linear accounts.';
@@ -146,31 +146,38 @@
       : '';
   });
 
-  // Load accounts + the preview on mount (and on a story switch). The loaders
-  // run untracked: `issueAccounts.load()` reads its cache gate synchronously,
-  // and tracking it re-ran both loads (preview flashed back to loading,
-  // projects fetched twice) once a cold cache filled.
+  // Pin the story that was open when Publish opened: if another story is
+  // selected underneath, the dialog MUST stay locked to this story so the
+  // STORY_CHANGED banner fires and Publish disables instead of silently
+  // retargeting the outward write.
+  const initialStoryId = untrack(() => product.selectedId);
+  let loadedInitial = false;
+  let accountsSequence = 0;
   $effect(() => {
-    const sid = product.selectedId;
+    if (loadedInitial) return;
+    loadedInitial = true;
     untrack(() => {
       void loadAccounts();
-      void loadPreview(sid);
+      void loadPreview(initialStoryId);
     });
   });
 
   async function loadAccounts(): Promise<void> {
+    const seq = ++accountsSequence;
+    const current = () => alive && seq === accountsSequence;
     accountsLoading = true;
     try {
       const all = await issueAccounts.load();
+      if (!current()) return;
       accounts = mode === 'story' ? all : all.filter((a) => a.provider === 'jira');
       if (accounts.length > 0) {
         accountId = accounts[0].id;
         await onAccountChange();
       }
     } catch (e) {
-      setError("Couldn’t load your issue-tracker accounts", e);
+      if (current()) setError("Couldn’t load your issue-tracker accounts", e);
     } finally {
-      accountsLoading = false;
+      if (current()) accountsLoading = false;
     }
   }
 
@@ -203,7 +210,7 @@
       }
     } catch (e) {
       if (!current()) return;
-      projectsError = `Couldn’t load Jira projects. ${providerErrorText(e)}`;
+      projectsError = `Couldn’t load ${tracker} ${container}s. ${providerErrorText(e)}`;
     } finally {
       if (current()) projectsLoading = false;
     }
@@ -262,7 +269,7 @@
     const current = () => alive && ownsSelection();
     try {
       if (mode === 'story') {
-        if (!projectKey) { formError = 'Select a project.'; submitting = false; return; }
+        if (!projectKey) { formError = `Select a ${container}.`; submitting = false; return; }
         const detail = await product.publishAsStory({
           reviewed_content: reviewedContent,
           account_id: accountId,
@@ -306,11 +313,14 @@
       <LoadState what="your publishing accounts" variant="compact" loading empty />
     {:else if accounts.length === 0 && formError}
       <!-- A failed accounts load is an error with Retry, not "no accounts yet". -->
-      <div class="field-error" use:announceShown={{ text: formError, assertive: true }}>
-        {formError}
-        {#if formErrorDetail}<div class="pd-error-detail">{formErrorDetail}</div>{/if}
-      </div>
-      <button class="btn small" onclick={() => { formError = ''; formErrorDetail = ''; void loadAccounts(); }}>Retry</button>
+      <LoadState
+        what="your publishing accounts"
+        errorTitle={formError}
+        variant="compact"
+        error={formErrorDetail || formError}
+        empty
+        onretry={() => { formError = ''; formErrorDetail = ''; void loadAccounts(); }}
+      />
     {:else if accounts.length === 0}
       <div class="no-accounts">{mode === 'story' ? 'No Jira or Linear account is connected yet — add one to publish.' : 'No Jira (Atlassian) account is connected yet — Confluence needs one to publish.'}</div>
       <button class="btn small" onclick={() => { onclose(); router.go('settings/jira'); }}>
@@ -340,8 +350,7 @@
           {#if projectsLoading}
             <Skeleton rows={1} height={27} label="projects" />
           {:else if projectsError}
-            <div class="field-error" use:announceShown={{ text: projectsError, assertive: true }}>{projectsError}</div>
-            <button class="btn small" onclick={loadProjects}>Retry projects</button>
+            <LoadState what="{container}s" variant="compact" error={projectsError} empty onretry={loadProjects} />
           {:else}
             <select
               id="pd-project"
@@ -351,7 +360,7 @@
               disabled={submitting || projects.length === 0}
             >
               {#if projects.length === 0}
-                <option value="">No projects found</option>
+                <option value="">No {container}s found</option>
               {:else}
                 {#each projects as p (p.key)}
                   <option value={p.key}>{p.name} ({p.key})</option>
@@ -394,8 +403,7 @@
           {#if spacesLoading}
             <Skeleton rows={1} height={27} label="spaces" />
           {:else if spacesError}
-            <div class="field-error" use:announceShown={{ text: spacesError, assertive: true }}>{spacesError}</div>
-            <button class="btn small" onclick={loadSpaces}>Retry spaces</button>
+            <LoadState what="spaces" variant="compact" error={spacesError} empty onretry={loadSpaces} />
           {:else}
             <select
               id="pd-space"
@@ -449,8 +457,7 @@
         <div class="label">What is published</div>
         <div class="pd-preview-title">{(mode === 'rfc' && rfcTitle.trim()) || storyTitle || 'Untitled'}</div>
         {#if previewError}
-          <div class="field-error" use:announceShown={{ text: previewError, assertive: true }}>{previewError}</div>
-          <button class="btn small" onclick={() => void loadPreview(product.selectedId)}>Retry preview</button>
+          <LoadState what="the preview" variant="compact" error={previewError} empty onretry={() => void loadPreview(initialStoryId)} />
         {:else if previewBody === null}
           <Skeleton rows={4} height={14} label="the content" />
         {:else if previewLines.head.length === 0}

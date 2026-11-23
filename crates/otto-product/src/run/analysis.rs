@@ -22,7 +22,7 @@ use super::prompts::{
     parse_summary_findings, SummaryFindings,
 };
 use super::reap::SUMMARIZER_NAME_PREFIX;
-use super::scratch::session_cwd;
+use super::scratch::{session_cwd, write_context_file};
 use super::{
     story_run_cancel_key, AgentSpec, Findings, SessionAppearance, MAX_AGENT_ATTEMPTS, SUPERSEDED,
 };
@@ -93,7 +93,6 @@ pub async fn run_analysis<C: ProductRunHost>(
             return;
         }
     };
-    let context_path = std::env::temp_dir().join(format!("otto-product-{analysis_id}-context.md"));
     let context_md = story_context_md(
         &ctx,
         &story_id,
@@ -102,10 +101,27 @@ pub async fn run_analysis<C: ProductRunHost>(
         "product_run",
     )
     .await;
-    if let Err(e) = std::fs::write(&context_path, &context_md) {
-        warn!("product_run: write context file: {e}");
-    }
-    let context_path = context_path.to_string_lossy().to_string();
+    let context_guard = match write_context_file(
+        &format!("otto-product-{analysis_id}-context.md"),
+        &context_md,
+    )
+    .await
+    {
+        Ok(g) => Some(g),
+        Err(e) => {
+            warn!("product_run: write context file: {e}");
+            None
+        }
+    };
+    let context_path = context_guard
+        .as_ref()
+        .map(|g| g.path_str())
+        .unwrap_or_else(|| {
+            super::scratch::scratch_root_dir()
+                .join(format!("otto-product-{analysis_id}-context.md"))
+                .to_string_lossy()
+                .to_string()
+        });
 
     // 2. Pre-trust every distinct provider on cwd.
     trust_providers(
@@ -180,6 +196,9 @@ pub async fn run_analysis<C: ProductRunHost>(
         outcome,
     )
     .await;
+    if let Some(guard) = context_guard {
+        guard.cleanup().await;
+    }
 }
 
 /// What every lens (and the summarizer) session of one analysis shares.

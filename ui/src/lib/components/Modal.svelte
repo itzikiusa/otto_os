@@ -107,7 +107,7 @@
       els.find((el) => el.hasAttribute('data-autofocus') || el.hasAttribute('autofocus')) ??
       els.find((el) => !el.closest('header') && !el.classList.contains('sheet-body')) ??
       els[0]
-    )?.focus();
+    )?.focus({ preventScroll: true });
     // Only hand focus back if it is still ours to give: in the sheet (now
     // detached) or dropped on <body>. A sheet whose action moved focus on
     // purpose — New Session's launched terminal takes the keyboard on mount —
@@ -147,11 +147,11 @@
       if (e.shiftKey) {
         if (idx <= 0) {
           e.preventDefault();
-          els[els.length - 1].focus();
+          els[els.length - 1].focus({ preventScroll: true });
         }
       } else if (idx === -1 || idx === els.length - 1) {
         e.preventDefault();
-        els[0].focus();
+        els[0].focus({ preventScroll: true });
       }
     }
   }
@@ -186,7 +186,7 @@
   >
     <header>
       <h2 id={titleId}>{title}</h2>
-      <button class="icon-btn" onclick={onclose} disabled={!dismissable} aria-label="Close" title="Close" aria-keyshortcuts="Escape">
+      <button class="icon-btn sheet-close" onclick={onclose} disabled={!dismissable} aria-label="Close" title="Close" aria-keyshortcuts="Escape">
         <Icon name="x" size={14} />
       </button>
     </header>
@@ -252,6 +252,12 @@
     overflow-y: auto;
     flex: 1 1 auto;
     min-height: 0;
+    /* Scrolling a field into view keeps its focus ring clear of the edges. */
+    scroll-padding-block: 8px;
+  }
+  /* Focus rings draw inside the control: the scrolling body would clip one drawn outside. */
+  .sheet-body :global(:focus-visible) {
+    outline-offset: -2px;
   }
   footer {
     display: flex;
@@ -261,5 +267,71 @@
     gap: 8px;
     padding: 12px 16px;
     border-top: 1px solid var(--separator);
+  }
+  /* Phone & short landscape: maximize usable form area while keeping a clear backdrop rim. */
+  @media (max-width: 640px), (max-height: 500px) {
+    .backdrop {
+      padding-block: var(--safe-top) var(--safe-bottom);
+      padding-inline: var(--safe-start) var(--safe-end);
+    }
+    .sheet {
+      max-width: calc(100% - 16px);
+      max-height: calc(100% - 16px);
+    }
+    header {
+      padding: 10px 14px;
+    }
+    .sheet-body {
+      padding: 4px 14px 14px;
+    }
+    footer {
+      padding: 10px 14px;
+    }
+  }
+  /* Keyboard up on a short screen (a phone on its side keeps ~70 px): the title row steps
+     aside, and on a wide screen the body and its actions sit side by side, so the field being
+     typed in and the primary action stay in view together (lib/viewportFit.ts sets
+     html[data-kb-short]). */
+  :global(html[data-kb-short]) .backdrop {
+    padding: 4px;
+  }
+  :global(html[data-kb-short]) .sheet {
+    max-block-size: 100%;
+    max-inline-size: 100%;
+  }
+  :global(html[data-kb-short]) header {
+    display: none;
+  }
+  :global(html[data-kb-short]) .sheet-body {
+    padding-block: 4px;
+  }
+  :global(html[data-kb-short]) footer {
+    padding-block: 4px;
+  }
+  @media (min-width: 641px) {
+    :global(html[data-kb-short]) .sheet {
+      flex-direction: row;
+    }
+    :global(html[data-kb-short]) footer {
+      flex-wrap: nowrap;
+      align-items: center;
+      border-block-start: 0;
+      border-inline-start: 1px solid var(--separator);
+    }
+  }
+  /* Touch: a dialog's actions are its primary controls, so they get a finger-sized
+     box you can see (the app-wide coarse rule only grows an invisible hit area). */
+  @media (pointer: coarse) {
+    .sheet :global(.btn) {
+      min-block-size: 40px;
+    }
+    .sheet-close {
+      inline-size: 40px;
+      block-size: 40px;
+      margin-inline-end: -8px;
+    }
+    .sheet .sheet-body :global(textarea) {
+      resize: none; /* a desktop drag grabber, useless under a finger */
+    }
   }
 </style>

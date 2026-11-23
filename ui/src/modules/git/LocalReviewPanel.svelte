@@ -4,13 +4,15 @@
   // Local working-tree review panel: diff against a chosen base branch, run
   // the configured review agents, show findings with checkboxes, and hand
   // selected findings off to a new agent session.
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { toastError } from '../../lib/toastError';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus } from '../../lib/status';
   import { api, ApiError } from '../../lib/api/client';
   import { git } from '../../lib/stores/git.svelte';
-  import type { Review, ReviewComment, RefsResp, Session } from '../../lib/api/types';
+  import type { Review, ReviewComment, RefsResp, RepoReviewConfigResp, Session } from '../../lib/api/types';
+  import ReviewConfigModal from './ReviewConfigModal.svelte';
+  import { repoReviewConfigBadge } from './gitUiHelpers';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -30,56 +32,39 @@
   import { appLive } from '../../lib/live';
   import { routeReviewId } from './deepLink';
   import { summaryFallback, summaryFallbackSentence, summaryFallbackTitle } from './reviewFallback';
+  import { buildBranchOptions, pickDefaultBase } from './localReviewRefs';
 
-  interface Props {
-    repoId: string;
-  }
+  interface Props { repoId: string; }
   let { repoId }: Props = $props();
 
-  // ---------------------------------------------------------------------------
-  // Branch/ref selector state
-  // ---------------------------------------------------------------------------
   let refs: RefsResp | null = $state(null);
   let refsLoading = $state(false);
   let selectedBase = $state('');
-
-  // ---------------------------------------------------------------------------
-  // Review state
-  // ---------------------------------------------------------------------------
   let review: Review | null = $state(null);
-  // Full history of all runs, newest first
   let history: Review[] = $state([]);
   let reviewLoading = $state(true);
   let starting = $state(false);
   let cancelling = $state(false);
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
-  /** False once the panel unmounts: a poll already in flight then must not
-   *  re-arm the timer (it kept polling — and could toast "taking too long" —
-   *  on another page for up to MAX_POLLS). */
   let alive = true;
-  let pollCount = $state(0);
-  /** Fallback polls before "taking too long": 3 min at 2 s with no event
-   *  socket; with one, `review_changed` drives the refresh and the 10 s
-   *  safety-net chain gives up after 15 min. */
-  const MAX_POLLS = 90;
-  // Which older run indices (history[1+]) are expanded
-  let historyExpanded: Record<number, boolean> = $state({});
-
-  // ---------------------------------------------------------------------------
-  // Per-comment checkbox state (comment id → checked)
-  // ---------------------------------------------------------------------------
-  let checked: Record<string, boolean> = $state({});
-
-  const checkedIds = $derived.by(() => {
-    return Object.entries(checked)
-      .filter(([, v]) => v)
-      .map(([k]) => k);
+  let disposed = false;
+  let refsGen = 0;
+  let reviewGen = 0;
+  onDestroy(() => {
+    disposed = true;
+    alive = false;
+    refsGen++;
+    reviewGen++;
+    if (pollTimer !== null) { clearTimeout(pollTimer); pollTimer = null; }
   });
-
-  // Runs shown under "Past reviews": everything that isn't the currently active
-  // run. Whenever a review is active it is always history[0] (mount adopts only
-  // history[0]; start/poll/retry all write history[0]), so drop it; on a clean
-  // slate (review === null) every stored run is "past".
+  let pollCount = $state(0);
+  const MAX_POLLS = 90;
+  let historyExpanded: Record<number, boolean> = $state({});
+  let checked: Record<string, boolean> = $state({});
+  let showConfig = $state(false);
+  let repoCfg: RepoReviewConfigResp | null = $state(null);
+  const repoCfgBadge = $derived(repoReviewConfigBadge(repoCfg));
+  const checkedIds = $derived(Object.entries(checked).filter(([, v]) => v).map(([k]) => k));
   const pastRuns = $derived(review ? history.slice(1) : history);
 
   // ---------------------------------------------------------------------------
@@ -122,13 +107,23 @@
   // Load refs once on mount, and try to load an existing local review
   // ---------------------------------------------------------------------------
   $effect(() => {
-    void loadRefs(repoId);
-    void loadExisting(repoId);
+    const rid = repoId;
     alive = true;
+    starting = false;
+    cancelling = false;
+    void loadRefs(rid);
+    void loadExisting(rid);
+    repoCfg = null;
+    void api.get<RepoReviewConfigResp>(`/repos/${rid}/review-config`).then((r) => { if (alive && !disposed && rid === repoId) repoCfg = r; }).catch(() => {});
     document.addEventListener('visibilitychange', onVisibility);
     return () => {
       alive = false;
-      if (pollTimer !== null) clearTimeout(pollTimer);
+      refsGen++;
+      reviewGen++;
+      if (pollTimer !== null) {
+        clearTimeout(pollTimer);
+        pollTimer = null;
+      }
       document.removeEventListener('visibilitychange', onVisibility);
     };
   });
@@ -160,31 +155,30 @@
   let historyError = $state<string | null>(null);
 
   async function loadRefs(rid: string): Promise<void> {
+    const gen = ++refsGen;
     refsLoading = true;
     refsError = null;
     try {
       const read = await git.refs(rid);
+      if (disposed || !alive || gen !== refsGen || rid !== repoId) return;
       if (read.error !== null) throw read.error;
       refs = read.refs;
-      // Pick a sensible default base.
-      const remotes = refs?.remote ?? [];
-      const locals = refs?.local ?? [];
-      const preferred = ['origin/develop', 'origin/main', 'origin/master', 'develop', 'main', 'master'];
-      const allNames = [...remotes.map((r) => r.name), ...locals.map((l) => l.name)];
-      const hit = preferred.find((p) => allNames.includes(p));
-      selectedBase = allBranches.find((b) => b.name === hit)?.value ?? allBranches[0]?.value ?? '';
+      selectedBase = pickDefaultBase(refs, allBranches);
     } catch (e) {
+      if (disposed || !alive || gen !== refsGen || rid !== repoId) return;
       refsError = loadErrorText(e);
     } finally {
-      refsLoading = false;
+      if (!disposed && alive && gen === refsGen && rid === repoId) refsLoading = false;
     }
   }
 
   async function loadExisting(rid: string): Promise<void> {
+    const gen = ++reviewGen;
     reviewLoading = true;
     historyError = null;
     try {
       const runs = await api.get<Review[]>(`/repos/${rid}/local-reviews`);
+      if (disposed || !alive || gen !== reviewGen || rid !== repoId) return;
       history = runs;
       // Clean slate by default: a finished run (done/error) is kept in history
       // only — never resurrected as the active panel, because its findings were
@@ -199,6 +193,7 @@
         review = null;
       }
     } catch (e) {
+      if (disposed || !alive || gen !== reviewGen || rid !== repoId) return;
       if (e instanceof ApiError && e.status === 404) {
         review = null;
         history = [];
@@ -206,7 +201,7 @@
         historyError = loadErrorText(e);
       }
     } finally {
-      reviewLoading = false;
+      if (!disposed && alive && gen === reviewGen && rid === repoId) reviewLoading = false;
     }
   }
 
@@ -220,7 +215,7 @@
   }
 
   function schedulePoll(): void {
-    if (!alive) return;
+    if (!alive || disposed) return;
     if (pollTimer !== null) clearTimeout(pollTimer);
     pollTimer = null;
     if (typeof document !== 'undefined' && document.hidden) return;
@@ -230,6 +225,8 @@
   // A child <ReviewAgents> retried one agent: adopt the refreshed review and
   // resume polling so we keep tracking the re-run.
   function onAgentRetried(r: Review): void {
+    if (disposed || !alive) return;
+    reviewGen++;
     review = r;
     history = history.length > 0 ? [r, ...history.slice(1)] : [r];
     pollCount = 0;
@@ -239,7 +236,14 @@
   /** Re-read the running review. `fromBus` (an event or a re-shown window)
    *  doesn't count toward the fallback budget. */
   async function poll(fromBus = false): Promise<void> {
-    if (!alive) return;
+    const rid = repoId;
+    const gen = typeof reviewGen === 'number' ? reviewGen : 0;
+    const stale = () =>
+      !alive ||
+      (typeof disposed !== 'undefined' && disposed) ||
+      rid !== repoId ||
+      (typeof reviewGen === 'number' && gen !== reviewGen);
+    if (stale()) return;
     // Only the TIMER safety net has a budget. A bus/visibility poll is proof
     // the review is alive: it always re-reads and resets the budget — gating
     // it too froze the panel (and re-toasted) on every event after 15 min.
@@ -253,8 +257,8 @@
       return;
     }
     try {
-      const r = await api.get<Review>(`/repos/${repoId}/local-review`);
-      if (!alive) return;
+      const r = await api.get<Review>(`/repos/${rid}/local-review`);
+      if (stale()) return;
       review = r;
       if (history.length > 0) {
         history = [r, ...history.slice(1)];
@@ -268,7 +272,7 @@
         if (r.status === 'done') initChecked(r.comments);
       }
     } catch {
-      schedulePoll();
+      if (!stale()) schedulePoll();
     }
   }
 
@@ -280,39 +284,45 @@
       toasts.warn('Select a base branch first');
       return;
     }
+    const rid = repoId;
+    const gen = ++reviewGen;
     if (pollTimer !== null) clearTimeout(pollTimer);
     starting = true;
     pollCount = 0;
     budgetWarned = false;
     checked = {};
     try {
-      const newRun = await api.post<Review>(`/repos/${repoId}/local-review`, { base: selectedBase });
+      const newRun = await api.post<Review>(`/repos/${rid}/local-review`, { base: selectedBase });
+      if (disposed || !alive || gen !== reviewGen || rid !== repoId) return;
       // Prepend new run; keep existing runs as history
       review = newRun;
       history = [newRun, ...history];
       if (review.status === 'running') schedulePoll();
       if (review.status === 'done') initChecked(review.comments);
     } catch (e) {
-      toastError('Couldn’t start review', e);
+      if (!disposed && alive && gen === reviewGen && rid === repoId) toastError('Couldn’t start review', e);
     } finally {
-      starting = false;
+      if (!disposed && gen === reviewGen) starting = false;
     }
   }
 
   async function cancelReview(): Promise<void> {
     if (cancelling || !review || review.status !== 'running') return;
+    const rid = repoId;
+    reviewGen++;
     if (pollTimer !== null) clearTimeout(pollTimer);
     cancelling = true;
     try {
       const updated = await api.post<Review>(`/reviews/${review.id}/cancel`, {});
-      if (!alive) return;
+      if (disposed || !alive || rid !== repoId) return;
+      reviewGen++;
       review = updated;
       history = history.map((r) => (r.id === updated.id ? updated : r));
       toasts.info('Review stopped');
     } catch (e) {
-      toastError('Couldn’t stop the review', e);
+      if (!disposed && alive && rid === repoId) toastError('Couldn’t stop the review', e);
     } finally {
-      if (alive) {
+      if (!disposed && alive && rid === repoId) {
         cancelling = false;
         if (review?.status === 'running') schedulePoll();
       }
@@ -397,32 +407,11 @@
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // History helpers
-  // ---------------------------------------------------------------------------
-
-  // The shared, self-ticking relative time (lib/stores/now) — no local formatter.
   const timeAgo = (iso: string): string => rel(iso);
-
   function toggleHistoryRun(idx: number): void {
     historyExpanded = { ...historyExpanded, [idx]: !historyExpanded[idx] };
   }
-
-  // ---------------------------------------------------------------------------
-  // Branch list for the <select>
-  // ---------------------------------------------------------------------------
-
-  const allBranches = $derived.by(() => {
-    if (!refs) return [];
-    const locals = new Set(refs.local.map((b) => b.name));
-    const remotes = new Set(refs.remote.map((b) => b.name));
-    // A local branch named origin/foo is distinct from the remote origin/foo.
-    // Keep both choices and pass Git an unambiguous revision in that case.
-    return [
-      ...refs.remote.map((b) => ({ name: b.name, value: locals.has(b.name) ? `refs/remotes/${b.name}` : b.name, label: locals.has(b.name) ? `${b.name} (remote)` : b.name })),
-      ...refs.local.map((b) => ({ name: b.name, value: remotes.has(b.name) ? `refs/heads/${b.name}` : b.name, label: remotes.has(b.name) ? `${b.name} (local)` : b.name })),
-    ];
-  });
+  const allBranches = $derived(buildBranchOptions(refs));
   $effect(() => registry.register(`local-review:${repoId}`, reviewLoading || focusId ? [] : [
     review?.status === 'running'
       ? { id: `local-review.stop.${repoId}`, title: 'Stop local review', group: 'Git', keywords: 'review findings changes', disabled: cancelling, run: cancelReview }
@@ -463,7 +452,7 @@
   <div class="lrp-toolbar">
     <label class="lrp-label" for="lrp-base">Compare to</label>
     {#if refsLoading}
-      <div class="lrp-select-skeleton"></div>
+      <div class="lrp-select-loading"><Skeleton rows={1} height={28} label="branches" /></div>
     {:else if refsError}
       <LoadState what="branches" error={refsError} empty variant="compact" onretry={() => void loadRefs(repoId)} />
     {:else}
@@ -490,9 +479,12 @@
         {review?.status === 'done' ? 'Review again' : 'Review changes'}
       {/if}
     </button>
-    <span class="lrp-cfg-note dim" title="Configure them from a pull request’s Review tab">
-      Uses the review agents configured for pull requests
-    </span>
+    <button class="btn small ghost lrp-cfg-btn" onclick={() => (showConfig = true)}>
+      <Icon name="gear" size={12} /> Configure agents…
+      {#if repoCfgBadge !== ''}
+        <span class="chip lrp-cfg-chip" title="This repository has its own review config">{repoCfgBadge}</span>
+      {/if}
+    </button>
   </div>
 
   <!-- Body -->
@@ -597,12 +589,12 @@
               onchange={(e) => { checked = { ...checked, [c.id]: (e.target as HTMLInputElement).checked }; }}
             />
             <div class="lrp-comment-body">
-              <div class="lrp-comment-head">
+              <label class="lrp-comment-head lrp-comment-head-toggle" for="lrp-chk-{c.id}">
                 <span class="severity-chip sev-{c.severity}">{c.severity}</span>
                 {#if c.path !== null}
                   <span class="mono lrp-loc">{c.path}{c.line !== null ? `:${c.line}` : ''}</span>
                 {/if}
-              </div>
+              </label>
               <p class="lrp-comment-text">{c.body}</p>
             </div>
           </div>
@@ -659,7 +651,7 @@
                     <p class="dim" style="font-size: var(--fs-xs);padding:4px 0">No findings for this run.</p>
                   {:else}
                     {#each run.comments as c (c.id)}
-                      <div class="lrp-comment card lrp-history-comment" style="cursor:default">
+                      <div class="lrp-comment card lrp-history-comment">
                         <div class="lrp-comment-body">
                           <div class="lrp-comment-head">
                             <span class="severity-chip sev-{c.severity}">{c.severity}</span>
@@ -682,6 +674,10 @@
   {/if}
   {/if}
 </div>
+
+{#if showConfig}
+  <ReviewConfigModal {repoId} onclose={() => (showConfig = false)} onupdated={(rc) => (repoCfg = rc)} />
+{/if}
 
 <style>
   .lrp-pinned { display: flex; flex-direction: column; gap: 8px; }
@@ -754,17 +750,12 @@
     min-width: 180px;
     max-width: 260px;
   }
-  .lrp-select-skeleton {
+  .lrp-select-loading {
     width: 200px;
-    height: 28px;
-    background: var(--surface-2);
-    border-radius: var(--radius-s);
-    animation: otto-pulse 1.4s ease-in-out infinite;
+    max-width: 100%;
   }
-  .lrp-cfg-note {
-    font-size: var(--fs-xs);
-    margin-inline-start: auto;
-  }
+  .lrp-cfg-btn { margin-inline-start: auto; }
+  .lrp-cfg-chip { margin-inline-start: 6px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* Running */
   .lrp-running-header {
@@ -776,35 +767,6 @@
   .lrp-running-title {
     font-size: var(--fs-m);
     font-weight: 600;
-  }
-
-  /* Agent cards */
-  .lrp-agents {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    margin-top: 4px;
-  }
-  .lrp-agent {
-    padding: 8px 12px;
-  }
-  .lrp-agent-top {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .lrp-agent-name {
-    font-size: var(--fs-s);
-    font-weight: 600;
-  }
-  .lrp-agent-chip {
-    font-size: var(--fs-xs);
-  }
-  .lrp-agent-note {
-    margin: 4px 0 0;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    line-height: 1.4;
   }
 
   /* Error */
@@ -848,14 +810,13 @@
     gap: 6px;
   }
 
-  /* Comment card with checkbox */
+  /* Comment card with checkbox: text stays selectable; toggle lives on the
+     checkbox and header label rather than locking the whole card. */
   .lrp-comment {
     display: flex;
     align-items: flex-start;
     gap: 10px;
     padding: 10px 14px;
-    cursor: pointer;
-    user-select: none;
   }
   .lrp-comment:hover {
     background: var(--hover);
@@ -875,6 +836,9 @@
     gap: 8px;
     margin-bottom: 4px;
     flex-wrap: wrap;
+  }
+  .lrp-comment-head-toggle {
+    cursor: pointer;
   }
   .lrp-comment-text {
     margin: 0;
@@ -922,8 +886,8 @@
     text-transform: uppercase;
   }
   .sev-info {
-    background: var(--accent-soft);
-    color: var(--accent-text);
+    background: var(--info-soft);
+    color: var(--info);
   }
   .sev-warn {
     background: var(--warning-soft);

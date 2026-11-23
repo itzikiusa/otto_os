@@ -31,6 +31,7 @@ dashmap = { workspace = true }
 dirs = { workspace = true }
 shell-words = { workspace = true }
 ignore = { workspace = true }
+notify = { version = "8.2.1", default-features = false, features = ["macos_fsevent"] }
 bytes = { workspace = true }
 ring = { workspace = true }
 tempfile = { workspace = true }

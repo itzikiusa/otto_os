@@ -93,6 +93,33 @@ pub enum WaitForRetry {
     WhileOpen(Arc<dyn Fn(Slot) -> bool + Send + Sync>),
 }
 
+/// Default initial backoff before the first automatic transient retry.
+const DEFAULT_AUTO_BACKOFF_BASE: Duration = Duration::from_millis(500);
+/// Hard cap on exponential backoff before jitter.
+const MAX_AUTO_BACKOFF_MS: u64 = 15_000;
+
+/// Compute bounded exponential backoff + deterministic/time-salted jitter for
+/// automatic transient retries so concurrent failing slots do not stampede.
+pub(crate) fn auto_backoff_delay(base: Duration, attempt: u32, key: usize) -> Duration {
+    if base.is_zero() {
+        return Duration::ZERO;
+    }
+    let exp = 1u64 << attempt.saturating_sub(1).min(5);
+    let raw_ms = base.as_millis().min(u64::MAX as u128) as u64;
+    let capped_ms = raw_ms.saturating_mul(exp).min(MAX_AUTO_BACKOFF_MS);
+    let jitter_span = (capped_ms / 4).max(1);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    let mix = nanos
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add((key as u64).wrapping_mul(1442695040888963407))
+        .wrapping_add(attempt as u64);
+    let jitter_ms = mix % jitter_span;
+    Duration::from_millis(capped_ms.saturating_add(jitter_ms))
+}
+
 /// How a slot's attempts are driven. Cheap to clone (every field is shared).
 #[derive(Clone)]
 pub struct SlotControl {
@@ -102,6 +129,8 @@ pub struct SlotControl {
     pub max_user_retries: u32,
     /// Automatic respawns after an error `transient` accepts.
     pub max_auto_retries: u32,
+    /// Base delay for exponential backoff on automatic transient retries.
+    pub auto_backoff_base: Duration,
     pub transient: fn(&str) -> bool,
     pub wait: WaitForRetry,
     /// How often a waiting slot polls the queue and the cancel flag.
@@ -126,6 +155,7 @@ impl SlotControl {
             cancelled,
             max_user_retries,
             max_auto_retries: 0,
+            auto_backoff_base: DEFAULT_AUTO_BACKOFF_BASE,
             transient: |_| false,
             wait: WaitForRetry::Never,
             poll: Duration::from_millis(250),
@@ -135,11 +165,17 @@ impl SlotControl {
     }
 
     fn take(&self, key: usize) -> bool {
-        self.retries.lock().unwrap().take(key)
+        self.retries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take(key)
     }
 
     fn close(&self, key: usize) {
-        self.retries.lock().unwrap().close(key);
+        self.retries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .close(key);
     }
 }
 
@@ -207,7 +243,12 @@ where
         }
         if auto < ctl.max_auto_retries && (ctl.transient)(&error) {
             auto += 1;
-            (ctl.on_state)(slot, SlotState::Retrying(Some(error)));
+            (ctl.on_state)(slot, SlotState::Retrying(Some(error.clone())));
+            let delay = auto_backoff_delay(ctl.auto_backoff_base, auto, key);
+            if !sleep_cancellable(delay, ctl).await {
+                (ctl.on_state)(slot, SlotState::Cancelled);
+                break Err(SlotFailure::cancelled(error));
+            }
             continue;
         }
         (ctl.on_state)(slot, SlotState::Failed(error.clone()));
@@ -236,6 +277,26 @@ enum Waited {
     Retry,
     Cancelled,
     GaveUp,
+}
+
+/// Sleep `delay` in `ctl.poll` slices, returning `false` as soon as
+/// `(ctl.cancelled)()` flips so a cancelled run never waits out backoff.
+async fn sleep_cancellable(delay: Duration, ctl: &SlotControl) -> bool {
+    if delay.is_zero() {
+        return !(ctl.cancelled)();
+    }
+    let slice = ctl.poll.max(Duration::from_millis(10));
+    let deadline = tokio::time::Instant::now() + delay;
+    loop {
+        if (ctl.cancelled)() {
+            return false;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return true;
+        }
+        tokio::time::sleep((deadline - now).min(slice)).await;
+    }
 }
 
 async fn wait_for_retry(slot: Slot, key: usize, ctl: &SlotControl, used: u32) -> Waited {

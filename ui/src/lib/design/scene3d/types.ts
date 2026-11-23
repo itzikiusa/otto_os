@@ -59,13 +59,44 @@ export interface Scene3dMaterial {
 export const ENV_PRESET_IDS = ['studio-soft', 'sunset', 'night', 'none'] as const;
 export type EnvPresetId = (typeof ENV_PRESET_IDS)[number];
 
+export interface LocalEffect {
+  kind: 'rain_on_glass' | 'steam';
+  position: Vec3;
+  size: [number, number];
+  rotation: number;
+}
+
 export interface Scene3dEnvironment {
+  local_effects?: LocalEffect[];
   preset: EnvPresetId;
   intensity?: number;   // 0..10 (default 1)
   /** Show the environment as the backdrop (default true); else `background`. */
   background?: boolean;
   rotation?: number;    // degrees, -360..360
+  // ── a Smart mode setting (all optional; drawn by `settingView.ts`) ──
+  /** Sky colours: zenith, horizon, below — the sky dome and the environment light. */
+  sky?: [string, string, string];
+  /** Exponential fog (its colour is the horizon's). */
+  fog?: { color: string; density: number };
+  /** The ground: its kind, its centre (`y` = the surface) and size (x, z). */
+  ground?: { kind: GroundKind; center: Vec3; size: [number, number]; axis?: 'x' | 'z' };
+  /** A low far shore the backdrop stands on (a box from below the water up to `center` y). */
+  shore?: { kind: GroundKind; center: Vec3; size: [number, number] };
+  /** Indoors: two walls behind the group, this high. */
+  room?: { height: number };
+  /** Falling rain or snow. */
+  weather?: 'rain' | 'snow';
+  /** Tone-mapping exposure (else the preset's). */
+  exposure?: number;
+  /** The Sun, Moon, Earth or a planet in the sky, each toward `direction` (unit, from the camera). */
+  sky_bodies?: { kind: (typeof SKY_BODY_KINDS)[number]; direction: Vec3 }[];
+  /** Stars on the sky. */
+  stars?: boolean;
 }
+
+export const GROUND_KINDS = ['water', 'grass', 'meadow', 'sand', 'soil', 'stone', 'snow', 'moon_dust', 'sea_floor', 'wood_floor', 'carpet', 'tiles', 'stage', 'road'] as const;
+export const SKY_BODY_KINDS = ['sun', 'moon', 'earth', 'planet'] as const;
+export type GroundKind = (typeof GROUND_KINDS)[number];
 
 /** v2 named camera ("Hero angle"); embeds ask for it as `#view:<id>`. */
 export interface Scene3dCameraPreset {
@@ -122,6 +153,10 @@ export interface Scene3dObject {
   /** `type:'text'` only — the string to extrude/draw. */
   text?: string;
   visible?: boolean;   // default true
+  /** A background piece (a lighthouse far behind the pier): seen, but never framed by the camera fit. */
+  backdrop?: boolean;
+  /** Framed as this world box [min, max] instead of its whole self (a giant: his head and the mouse on his palm). */
+  frame?: [Vec3, Vec3];
   /** Free-form designer/agent notes shown in the inspector (3D pin annotations are deferred). */
   notes?: string;
 }
@@ -137,7 +172,11 @@ export interface Scene3dLight {
   ground_color?: string; // hemisphere only
   distance?: number;   // point / spot
   angle?: number;      // spot, degrees
+  /** point only: a halo this many metres round (a glowing lantern). */
+  glow?: number;
   shadow?: boolean;
+  /** Shadow darkness from 0 to 1, full strength when omitted. */
+  shadow_intensity?: number;
   visible?: boolean;
   notes?: string;
 }

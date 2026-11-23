@@ -18,8 +18,12 @@
   import { collectRelated } from './relatedCollect';
   import { RELATED_KIND_LABEL, relatedStatus, type RelatedRow } from './relatedThreads';
   import { messageThread } from './relatedMessage';
-  import { broadcastTargets, relayTargets } from './threadRelay';
+  import { broadcastTargets, relayTargets, anyThread } from './threadRelay';
   import { threads } from './threadsStore.svelte';
+  import { transcript } from '../../lib/stores/transcript.svelte';
+  import { runtimeViews } from './runtime/runtimeView.svelte';
+  import { answerOf } from './runtime/childThreads';
+  import { buildRelayWithOutputDraft, latestTranscriptAnswer, summarizeRelayContext } from './relayContext';
 
   interface Props {
     threadId: string;
@@ -43,6 +47,21 @@
   const ids = $derived(new Set([threadId, ...rows.map((r) => r.id)]));
   const myRooms = $derived(rooms.filter((r) => r.session_id && ids.has(r.session_id)));
   const recent = $derived(threads.peerEvents.filter((e) => e.fromSessionId === threadId || e.toSessionId === threadId).slice(0, 3));
+  const relayCtx = $derived.by(() => {
+    const raw =
+      answerOf(runtimeViews.projections[threadId]) ||
+      latestTranscriptAnswer(transcript.peek(threadId)?.turns ?? []);
+    return summarizeRelayContext(raw);
+  });
+  let includeOutput = $state(false);
+
+  function relayTo(target: string): void {
+    const initial =
+      includeOutput && relayCtx
+        ? buildRelayWithOutputDraft(anyThread(threadId)?.title ?? 'This thread', relayCtx.snippet)
+        : '';
+    void messageThread(threadId, target, initial);
+  }
 
   function open(r: RelatedRow, beside: boolean): void {
     if (r.kind === 'side') threads.openSideChat(threadId);
@@ -59,10 +78,10 @@
         hint: String(broadcastTargets(threadId).length),
         disabled: broadcastTargets(threadId).length === 0,
         title: broadcastTargets(threadId).length ? undefined : 'No other open thread in this folder',
-        action: () => void messageThread(threadId, 'broadcast'),
+        action: () => relayTo('broadcast'),
       },
       { separator: true, pinned: true },
-      ...relayTargets(threadId).map((t) => ({ label: t.title, action: () => void messageThread(threadId, t.id) })),
+      ...relayTargets(threadId).map((t) => ({ label: t.title, action: () => relayTo(t.id) })),
     ];
     ctxMenu.show(e, items, { filter: true, filterPlaceholder: 'Find a thread…', maxVisible: 12 });
   }
@@ -100,7 +119,7 @@
             <button type="button" class="icon-btn" aria-label="Open {r.title} beside" title="Open beside" onclick={() => open(r, true)}>
               <Icon name="split" size={13} />
             </button>
-            <button type="button" class="icon-btn" aria-label="Message {r.title}" title="Message…" data-testid="related-message-{r.id}" onclick={() => void messageThread(threadId, r.id)}>
+            <button type="button" class="icon-btn" aria-label="Message {r.title}" title={includeOutput && relayCtx ? 'Relay with recent output…' : 'Message…'} data-testid="related-message-{r.id}" onclick={() => relayTo(r.id)}>
               <Icon name="send" size={13} />
             </button>
           {/if}
@@ -130,9 +149,18 @@
       {/each}
     </ul>
   {/if}
+  {#if relayCtx}
+    <label class="rl-ctx" data-testid="relay-context-preview" title={relayCtx.snippet}>
+      <input type="checkbox" bind:checked={includeOutput} />
+      <span class="rl-ctx-body">
+        <span class="rl-ctx-lbl">Relay with recent output</span>
+        <span class="rl-ctx-snip ellipsis" dir="auto">{relayCtx.preview}</span>
+      </span>
+    </label>
+  {/if}
   <div class="rl-foot">
     <button type="button" class="btn small" aria-haspopup="menu" data-testid="related-message-any" onclick={pickTarget}>
-      <Icon name="send" size={12} />Message a thread…
+      <Icon name="send" size={12} />{includeOutput && relayCtx ? 'Relay with output…' : 'Message a thread…'}
     </button>
     <button type="button" class="btn small" data-testid="related-start-room" onclick={() => { ondone?.(); onstartroom(threadId); }}>
       <Icon name="people" size={12} />Start a room…
@@ -230,6 +258,37 @@
   }
   .rl-sum {
     color: var(--text);
+  }
+  .rl-ctx {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin: 4px 6px 0;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+    font-size: var(--fs-xs);
+    cursor: pointer;
+    min-inline-size: 0;
+  }
+  .rl-ctx input {
+    margin-block-start: 2px;
+    flex: none;
+  }
+  .rl-ctx-body {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-inline-size: 0;
+    flex: 1;
+  }
+  .rl-ctx-lbl {
+    font-weight: 500;
+    color: var(--text);
+  }
+  .rl-ctx-snip {
+    color: var(--text-dim);
   }
   .rl-foot {
     display: flex;

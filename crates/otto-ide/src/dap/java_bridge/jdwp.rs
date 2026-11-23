@@ -282,6 +282,9 @@ impl<'a> JdwpCursor<'a> {
     }
 }
 
+const JDWP_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const JDWP_EVENT_CHANNEL_CAP: usize = 1024;
+
 type PendingReplyMap = Arc<Mutex<HashMap<u32, oneshot::Sender<(u16, Vec<u8>)>>>>;
 
 pub(super) struct JdwpClient {
@@ -292,27 +295,37 @@ pub(super) struct JdwpClient {
 }
 
 impl JdwpClient {
-    pub async fn connect(
+    pub async fn connect(port: u16) -> Result<(Arc<Self>, mpsc::Receiver<Option<Vec<u8>>>)> {
+        Self::connect_with_timeout(port, JDWP_HANDSHAKE_TIMEOUT).await
+    }
+
+    pub(super) async fn connect_with_timeout(
         port: u16,
-    ) -> Result<(Arc<Self>, mpsc::UnboundedReceiver<Option<Vec<u8>>>)> {
-        let mut tcp = TcpStream::connect(("127.0.0.1", port))
-            .await
-            .map_err(|e| Error::Upstream(format!("connect JDWP 127.0.0.1:{port}: {e}")))?;
-        let _ = tcp.set_nodelay(true);
-        tcp.write_all(b"JDWP-Handshake")
-            .await
-            .map_err(|e| Error::Upstream(format!("JDWP handshake write: {e}")))?;
-        let mut hs = [0u8; 14];
-        tcp.read_exact(&mut hs)
-            .await
-            .map_err(|e| Error::Upstream(format!("JDWP handshake read: {e}")))?;
-        if &hs != b"JDWP-Handshake" {
-            return Err(Error::Upstream("JVM rejected JDWP-Handshake".into()));
-        }
+        timeout: Duration,
+    ) -> Result<(Arc<Self>, mpsc::Receiver<Option<Vec<u8>>>)> {
+        let tcp = tokio::time::timeout(timeout, async {
+            let mut tcp = TcpStream::connect(("127.0.0.1", port))
+                .await
+                .map_err(|e| Error::Upstream(format!("connect JDWP 127.0.0.1:{port}: {e}")))?;
+            let _ = tcp.set_nodelay(true);
+            tcp.write_all(b"JDWP-Handshake")
+                .await
+                .map_err(|e| Error::Upstream(format!("JDWP handshake write: {e}")))?;
+            let mut hs = [0u8; 14];
+            tcp.read_exact(&mut hs)
+                .await
+                .map_err(|e| Error::Upstream(format!("JDWP handshake read: {e}")))?;
+            if &hs != b"JDWP-Handshake" {
+                return Err(Error::Upstream("JVM rejected JDWP-Handshake".into()));
+            }
+            Ok(tcp)
+        })
+        .await
+        .map_err(|_| Error::Upstream("JDWP handshake timed out".into()))??;
 
         let (mut r_half, w_half) = tcp.into_split();
         let pending: PendingReplyMap = Arc::new(Mutex::new(HashMap::new()));
-        let (ev_tx, ev_rx) = mpsc::unbounded_channel();
+        let (ev_tx, ev_rx) = mpsc::channel(JDWP_EVENT_CHANNEL_CAP);
         let pending_reader = Arc::clone(&pending);
 
         tokio::spawn(async move {
@@ -338,13 +351,15 @@ impl JdwpClient {
                         let _ = tx.send((err_code, body));
                     }
                 } else if hdr[9] == 64 && hdr[10] == 100 {
-                    let _ = ev_tx.send(Some(body));
+                    // Non-blocking try_send keeps the reader task pumping command
+                    // replies even if the consumer lags behind an event storm.
+                    let _ = ev_tx.try_send(Some(body));
                 }
             }
             if let Ok(mut m) = pending_reader.lock() {
                 m.clear();
             }
-            let _ = ev_tx.send(None);
+            let _ = ev_tx.try_send(None);
         });
 
         let mut client = Self {
@@ -642,5 +657,94 @@ impl JdwpClient {
             }
         }
         Ok((suspend_policy, events))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn jdwp_connect_times_out_on_silent_peer() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let _hold = tokio::spawn(async move {
+            let (_sock, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let err = JdwpClient::connect_with_timeout(port, Duration::from_millis(120))
+            .await
+            .err()
+            .expect("silent JDWP peer must time out");
+        assert!(err.to_string().contains("timed out"), "unexpected: {err}");
+    }
+
+    #[tokio::test]
+    async fn jdwp_bounded_event_channel_does_not_block_replies() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut hs = [0u8; 14];
+            sock.read_exact(&mut hs).await.unwrap();
+            sock.write_all(b"JDWP-Handshake").await.unwrap();
+
+            // Read IDSizes command (id=1, cmd_set=1, cmd=7).
+            let mut hdr = [0u8; 11];
+            sock.read_exact(&mut hdr).await.unwrap();
+            let req_id = u32::from_be_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
+            // Reply with 5 × i32(8).
+            let mut reply = Vec::with_capacity(31);
+            reply.extend_from_slice(&31u32.to_be_bytes());
+            reply.extend_from_slice(&req_id.to_be_bytes());
+            reply.push(0x80);
+            reply.extend_from_slice(&0u16.to_be_bytes());
+            for _ in 0..5 {
+                reply.extend_from_slice(&8i32.to_be_bytes());
+            }
+            sock.write_all(&reply).await.unwrap();
+
+            // Flood more composite events than JDWP_EVENT_CHANNEL_CAP without reading from ev_rx.
+            let mut ev = Vec::with_capacity(12);
+            ev.extend_from_slice(&12u32.to_be_bytes());
+            ev.extend_from_slice(&99u32.to_be_bytes());
+            ev.push(0x00);
+            ev.push(64);
+            ev.push(100);
+            ev.push(0);
+            for _ in 0..(JDWP_EVENT_CHANNEL_CAP + 128) {
+                sock.write_all(&ev).await.unwrap();
+            }
+
+            // Now answer a subsequent vm_resume command to prove reader is not blocked!
+            sock.read_exact(&mut hdr).await.unwrap();
+            let req2 = u32::from_be_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
+            let mut reply2 = Vec::with_capacity(11);
+            reply2.extend_from_slice(&11u32.to_be_bytes());
+            reply2.extend_from_slice(&req2.to_be_bytes());
+            reply2.push(0x80);
+            reply2.extend_from_slice(&0u16.to_be_bytes());
+            sock.write_all(&reply2).await.unwrap();
+            sock
+        });
+
+        let (client, mut ev_rx) = JdwpClient::connect(port).await.unwrap();
+        // Give the server a moment to flood the bounded channel before issuing a command.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        client
+            .vm_resume()
+            .await
+            .expect("reply must not deadlock behind full event channel");
+        // Bounded channel must hold at most JDWP_EVENT_CHANNEL_CAP items.
+        let mut drained = 0usize;
+        while ev_rx.try_recv().is_ok() {
+            drained += 1;
+        }
+        assert!(
+            drained <= JDWP_EVENT_CHANNEL_CAP,
+            "drained {drained} > {JDWP_EVENT_CHANNEL_CAP}"
+        );
+        drop(server);
     }
 }

@@ -28,7 +28,7 @@
   //
   // ≤ 640 px the three columns collapse to a segmented single pane (Assets ·
   // Canvas · Inspector), like the Database Explorer's phone layout.
-  import { onTabKey } from '../../../lib/tabKeys';
+  import Tabs, { type TabItem } from '../../../lib/components/Tabs.svelte';
   import { toastError } from '../../../lib/toastError';
   import { onDestroy, untrack } from 'svelte';
   import { product, toBase64 } from '../../../lib/stores/product.svelte';
@@ -185,11 +185,22 @@
   let annotate = $state(false);
   let codeView = $state(false);
   /** Left pane while a scene is open: asset list or the scene Hierarchy. */
-  let leftPane = $state<'assets' | 'hierarchy'>('assets');
+  type LeftPane = 'assets' | 'hierarchy';
+  type MobilePane = 'assets' | 'canvas' | 'inspector';
+  const MOBILE_TABS: readonly TabItem<MobilePane>[] = [
+    { id: 'assets', label: 'Assets' },
+    { id: 'canvas', label: 'Canvas' },
+    { id: 'inspector', label: 'Inspector' },
+  ];
+  const LEFT_TABS: readonly TabItem<LeftPane>[] = [
+    { id: 'assets', label: 'Assets' },
+    { id: 'hierarchy', label: 'Hierarchy' },
+  ];
+  let leftPane = $state<LeftPane>('assets');
   let scene3dSel = $state<string | null>(null);
   let play = $state(false);
   /** ≤ 640 px: which of the three panes is showing. */
-  let mobilePane = $state<'assets' | 'canvas' | 'inspector'>('assets');
+  let mobilePane = $state<MobilePane>('assets');
   let importing = $state(false);
   /** How the Assistant is shown: creating (full stage, own live preview) or
    *  refining the open artifact (docked in the inspector column). */
@@ -831,20 +842,15 @@
   class:m-inspector={mobilePane === 'inspector'}
 >
   <!-- Narrow available pane: preserve a useful stage with explicit pane navigation. -->
-  <div class="arena-seg" role="tablist" aria-label="Design panes">
-    <button class="seg" class:active={mobilePane === 'assets'} role="tab" aria-selected={mobilePane === 'assets'} tabindex={mobilePane === 'assets' ? 0 : -1} onkeydown={onTabKey} onclick={() => (mobilePane = 'assets')}>Assets</button>
-    <button class="seg" class:active={mobilePane === 'canvas'} role="tab" aria-selected={mobilePane === 'canvas'} tabindex={mobilePane === 'canvas' ? 0 : -1} onkeydown={onTabKey} onclick={() => (mobilePane = 'canvas')}>Canvas</button>
-    <button class="seg" class:active={mobilePane === 'inspector'} role="tab" aria-selected={mobilePane === 'inspector'} tabindex={mobilePane === 'inspector' ? 0 : -1} onkeydown={onTabKey} onclick={() => (mobilePane = 'inspector')}>Inspector</button>
+  <div class="arena-seg">
+    <Tabs size="s" label="Design panes" tabs={MOBILE_TABS} value={mobilePane} onchange={(v) => (mobilePane = v)} />
   </div>
 
   <!-- ── ASSETS / HIERARCHY ─────────────────────────────────────────────── -->
   <aside class="arena-assets list-pane">
     <div class="pane-head">
       {#if kind === 'scene3d' && sceneDoc}
-        <div class="pane-switch" role="tablist" aria-label="Left pane">
-          <button class="ss" class:active={leftPane === 'assets'} role="tab" aria-selected={leftPane === 'assets'} tabindex={leftPane === 'assets' ? 0 : -1} onkeydown={onTabKey} onclick={() => (leftPane = 'assets')}>Assets</button>
-          <button class="ss" class:active={leftPane === 'hierarchy'} role="tab" aria-selected={leftPane === 'hierarchy'} tabindex={leftPane === 'hierarchy' ? 0 : -1} onkeydown={onTabKey} onclick={() => (leftPane = 'hierarchy')}>Hierarchy</button>
-        </div>
+        <Tabs size="s" label="Left pane" tabs={LEFT_TABS} value={leftPane} onchange={(v) => (leftPane = v)} />
       {:else}
         <span class="pane-title">Assets</span>
       {/if}
@@ -1038,7 +1044,7 @@
           <button class="link" onclick={() => att && resolveConflict(att, source)}>Resolve…</button>
         {/if}
         {#if saveState === 'error'}
-          <button class="link" onclick={() => att && applyLocalEdit(source)}>Retry save</button>
+          <button class="link" onclick={() => att && applyLocalEdit(source)}>Retry save</button><!-- ui-guards: allow — retries a failed local edit save, not a list load -->
         {/if}
       </div>
     {:else if !loading}
@@ -1175,28 +1181,6 @@
     text-transform: uppercase;
     letter-spacing: .06em;
     color: var(--text-dim);
-  }
-  .pane-switch {
-    display: inline-flex;
-    gap: 2px;
-    padding: 2px;
-    border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
-  }
-  .ss {
-    height: 20px;
-    padding: 0 6px;
-    border: none;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .ss.active {
-    background: var(--surface);
-    color: var(--accent-text);
   }
   .list-actions {
     display: flex;
@@ -1650,16 +1634,10 @@
       flex-direction: column;
     }
     .arena-seg {
-      display: flex;
-      gap: 2px;
-      padding: 6px 8px;
+      display: block;
+      padding: 0 8px;
       border-bottom: 1px solid var(--border);
       flex-shrink: 0;
-    }
-    .arena-seg .seg {
-      flex: 1;
-      height: 32px;
-      font-size: var(--fs-m);
     }
     .arena-assets,
     .arena-stage,

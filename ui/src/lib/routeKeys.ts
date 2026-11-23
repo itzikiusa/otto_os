@@ -8,13 +8,13 @@
 export const PAGE_ROUTES: readonly string[] = [
   'agents', 'threads', 'home', 'ide', 'git', 'database', 'vault', 'workbench', 'api', 'rooms', 'workflows',
   'scheduled-tasks', 'personal-agents', 'loops', 'product', 'design', 'canvas', 'browser', 'mcp',
-  'brokers', 'kubernetes', 'aws', 'insights', 'usage', 'skills-eval', 'settings', 'walkthroughs',
+  'brokers', 'kubernetes', 'containers', 'aws', 'insights', 'usage', 'skills-eval', 'settings', 'walkthroughs',
   'plugin', 'snip',
 ];
 
 /** Routes handled outside the page map: the default route, the root App's
  *  own views (share, bar, tray, rooms, pairing), aliases and redirects. */
-const OTHER_ROUTES: readonly string[] = ['', 's', 'bar', 'tray', 'room', 'room-host', 'pair', 'connections', 'projects'];
+const OTHER_ROUTES: readonly string[] = ['', 's', 'bar', 'tray', 'clipboard', 'room', 'room-host', 'pair', 'connections', 'projects'];
 
 const KNOWN = new Set([...PAGE_ROUTES, ...OTHER_ROUTES]);
 

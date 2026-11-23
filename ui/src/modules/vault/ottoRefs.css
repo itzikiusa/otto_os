@@ -1,0 +1,164 @@
+/* Clickable otto://story/, otto://design/, and otto://canvas/ pills + inline transclusion cards in Vault reading view. */
+.md-body a.otto-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  line-height: 1.4;
+  text-decoration: none;
+  vertical-align: baseline;
+  cursor: pointer;
+}
+
+.md-body a.otto-ref:hover {
+  border-color: var(--accent);
+}
+
+.md-body a.otto-ref:focus-visible {
+  outline: 2px solid var(--accent-text);
+  outline-offset: 2px;
+}
+
+.md-body a.otto-ref-design {
+  background: var(--info-soft);
+  color: var(--info);
+}
+
+.md-body a.otto-ref-design:hover {
+  border-color: var(--info);
+}
+
+.md-body a.otto-ref-canvas {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.md-body a.otto-ref-canvas:hover {
+  border-color: var(--success);
+}
+
+.md-body a.otto-ref .otto-ref-kind {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  opacity: 0.8;
+}
+
+.md-body a.otto-ref .otto-ref-label {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
+/* Inline transclusion preview card for ![[otto://design/...]] and ![[otto://canvas/...]] */
+.md-body .otto-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-block: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-inline-start: 3px solid var(--info);
+  border-radius: var(--radius-m);
+  background: var(--surface-2);
+}
+
+.md-body .otto-card-canvas {
+  border-inline-start-color: var(--success);
+}
+
+.md-body .otto-card-thumb {
+  flex: none;
+  inline-size: 64px;
+  block-size: 48px;
+  border-radius: var(--radius-s);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.md-body .otto-card-thumb img {
+  inline-size: 100%;
+  block-size: 100%;
+  object-fit: cover;
+  border-radius: 0;
+}
+
+.md-body .otto-card-info {
+  flex: 1;
+  min-inline-size: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.md-body .otto-card-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.md-body .otto-card-kind {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: var(--radius-s);
+  background: var(--info-soft);
+  color: var(--info);
+}
+
+.md-body .otto-card-canvas .otto-card-kind {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.md-body .otto-card-title {
+  font-size: var(--fs-s);
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.md-body .otto-card-status {
+  font-size: var(--fs-xs);
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.md-body .otto-card-status.status-approved,
+.md-body .otto-card-status.status-shipped {
+  background: var(--success-soft);
+  color: var(--success);
+  border-color: transparent;
+}
+
+.md-body .otto-card-meta {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.md-body .otto-card-open {
+  flex: none;
+  border-radius: var(--radius-s);
+  background: var(--surface);
+  color: var(--text);
+}

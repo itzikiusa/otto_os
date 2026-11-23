@@ -49,13 +49,25 @@ export function createDirectLspExtension(
   if (!shouldAttachIdeLsp(opts.filePath, opts.languageId, rootPath)) return [];
 
   let socket: WebSocket | null = null;
+  let socketAbort: AbortController | null = null;
   let nextId = 1;
   let version = 1;
   let ready = false;
   let closed = false;
   let liveView: EditorView | null = null;
   let semLegend: { tokenTypes?: string[]; tokenModifiers?: string[] } | null = null;
-  const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  const pending = new Map<
+    number,
+    { resolve: (v: unknown) => void; reject: (e: Error) => void; timer?: ReturnType<typeof setTimeout> }
+  >();
+
+  const rejectAllPending = (reason: string) => {
+    for (const [, p] of pending) {
+      if (p.timer) clearTimeout(p.timer);
+      p.reject(new Error(reason));
+    }
+    pending.clear();
+  };
 
   const send = (p: Record<string, unknown>) => {
     if (!closed && socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(p));
@@ -64,11 +76,11 @@ export function createDirectLspExtension(
     new Promise<T>((resolve, reject) => {
       if (!ready || socket?.readyState !== WebSocket.OPEN) return reject(new Error('LSP unavailable'));
       const id = nextId++;
-      pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
-      send({ jsonrpc: '2.0', id, method, params });
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         if (pending.delete(id)) reject(new Error('LSP timeout'));
       }, 6000);
+      pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer });
+      send({ jsonrpc: '2.0', id, method, params });
     });
 
   const plugin = ViewPlugin.fromClass(class {
@@ -79,11 +91,21 @@ export function createDirectLspExtension(
       } catch {
         return;
       }
+      socketAbort = new AbortController();
+      const { signal } = socketAbort;
+      const onDisconnect = () => {
+        ready = false;
+        semLegend = null;
+        rejectAllPending('LSP disconnected');
+      };
+      socket.addEventListener('close', onDisconnect, { signal });
+      socket.addEventListener('error', onDisconnect, { signal });
       socket.addEventListener('open', () => {
         if (closed || !socket) return;
         const initId = nextId++;
         pending.set(initId, {
           resolve: (initRes) => {
+            if (closed) return;
             ready = true;
             const caps = (initRes as {
               capabilities?: { semanticTokensProvider?: { legend?: { tokenTypes?: string[]; tokenModifiers?: string[] } } };
@@ -134,7 +156,7 @@ export function createDirectLspExtension(
             },
           },
         });
-      });
+      }, { signal });
       socket.addEventListener('message', (ev) => {
         if (closed || typeof ev.data !== 'string') return;
         let msg: Record<string, unknown>;
@@ -147,6 +169,7 @@ export function createDirectLspExtension(
           const p = pending.get(msg.id);
           if (p) {
             pending.delete(msg.id);
+            if (p.timer) clearTimeout(p.timer);
             if (msg.error) p.reject(new Error('LSP error'));
             else p.resolve(msg.result);
           }
@@ -211,7 +234,7 @@ export function createDirectLspExtension(
             }),
           );
         }
-      });
+      }, { signal });
     }
     private changeTimer: ReturnType<typeof setTimeout> | null = null;
     update(u: ViewUpdate) {
@@ -235,24 +258,23 @@ export function createDirectLspExtension(
     }
     destroy() {
       closed = true;
+      ready = false;
+      semLegend = null;
       if (this.changeTimer) {
         clearTimeout(this.changeTimer);
         this.changeTimer = null;
       }
-      if (ready && socket?.readyState === WebSocket.OPEN) {
+      if (socket?.readyState === WebSocket.OPEN) {
         try {
           socket.send(JSON.stringify({ jsonrpc: '2.0', method: 'textDocument/didClose', params: { textDocument: { uri: opts.documentUri } } }));
         } catch {
           /* ignore */
         }
       }
-      for (const [, p] of pending) p.reject(new Error('LSP closed'));
-      pending.clear();
+      rejectAllPending('LSP closed');
+      socketAbort?.abort();
+      socketAbort = null;
       if (socket) {
-        socket.onopen = null;
-        socket.onclose = null;
-        socket.onerror = null;
-        socket.onmessage = null;
         try {
           socket.close(1000, 'idle');
         } catch {

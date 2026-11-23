@@ -31,5 +31,8 @@ test('Insights Retry reflects debounce and pending persistence after a failed mo
   releaseSecond();
   await expect(retry).toBeEnabled();
   await expect(model).toHaveValue('replacement-draft');
-  await expect(page.getByRole('alert').filter({ has: retry, hasText: 'Synthetic model save failed 2' })).toBeVisible();
+  const error = 'Synthetic model save failed 2';
+  await expect(page.locator('p').filter({ has: retry, hasText: error })).toBeVisible();
+  await page.clock.runFor(32);
+  await expect(page.getByTestId('announcer-assertive')).toContainText(error);
 });

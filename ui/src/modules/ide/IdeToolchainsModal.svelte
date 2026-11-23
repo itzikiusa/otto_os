@@ -24,6 +24,8 @@
     type IdeInstallJob,
     type IdeToolchainEcosystem,
   } from './ideStore.svelte';
+  import SimInstallStatusCard from '../../lib/simulators/SimInstallStatusCard.svelte';
+  import { simInstaller } from '../../lib/simulators/simInstaller.svelte';
 
   interface Props {
     open?: boolean;
@@ -38,6 +40,9 @@
     { id: 'rust', label: 'Rust' },
     { id: 'node', label: 'JavaScript / TypeScript (Node)' },
     { id: 'python', label: 'Python' },
+    { id: 'ios', label: 'iOS / Xcode' },
+    { id: 'android', label: 'Android SDK' },
+    { id: 'flutter', label: 'Flutter / Dart' },
   ];
 
   const isOpen = $derived(open === undefined ? ide.toolchainsOpen : open);
@@ -56,12 +61,17 @@
 
   function defaultEcoFromWorkspace(): string {
     const lang = ide.activeTab?.language;
+    if (lang === 'swift' || lang === 'objc') return 'ios';
+    if (lang === 'kotlin') return 'android';
+    if (lang === 'dart') return 'flutter';
     if (lang === 'java') return 'java';
     if (lang === 'rust') return 'rust';
     if (lang === 'python') return 'python';
     if (lang === 'typescript' || lang === 'javascript') return 'node';
     if (lang === 'go') return 'go';
     const names = new Set(ide.treeRootEntries.map((e) => e.name));
+    if (names.has('pubspec.yaml')) return 'flutter';
+    if (names.has('Package.swift') || [...names].some((n) => n.endsWith('.xcodeproj') || n.endsWith('.xcworkspace'))) return 'ios';
     if (names.has('go.mod')) return 'go';
     if (names.has('pom.xml') || names.has('build.gradle') || names.has('build.gradle.kts')) return 'java';
     if (names.has('Cargo.toml')) return 'rust';
@@ -85,6 +95,19 @@
       void ide.loadToolchains({ includeCatalog: true });
       if (!ide.projectEnv && !ide.envLoading) {
         void ide.loadEnvironments();
+      }
+      if (ide.target.kind !== 'ssh') {
+        void simInstaller.load();
+      }
+    });
+  });
+
+  // Reload local toolchains automatically when Otto’s built-in Android/iOS installer completes.
+  $effect(() => {
+    if (!isOpen || ide.target.kind === 'ssh') return;
+    return simInstaller.onComplete((st) => {
+      if (st.stage === 'done') {
+        void ide.loadToolchains({ includeCatalog: true });
       }
     });
   });
@@ -158,6 +181,9 @@
     if (ecosystem === 'rust') return env.rust_toolchain === sdk.version || env.rust_toolchain === sdk.path;
     if (ecosystem === 'node') return env.node_home === sdk.path;
     if (ecosystem === 'python') return env.python_interpreter === sdk.path;
+    if (ecosystem === 'ios') return env.xcode_developer_dir === sdk.path;
+    if (ecosystem === 'android') return env.android_home === sdk.path;
+    if (ecosystem === 'flutter') return env.flutter_root === sdk.path;
     return false;
   }
 
@@ -173,7 +199,13 @@
               ? { node_home: pathOrVersion }
               : ecosystem === 'python'
                 ? { python_interpreter: pathOrVersion }
-                : null;
+                : ecosystem === 'ios'
+                  ? { xcode_developer_dir: pathOrVersion }
+                  : ecosystem === 'android'
+                    ? { android_home: pathOrVersion }
+                    : ecosystem === 'flutter'
+                      ? { flutter_root: pathOrVersion }
+                      : null;
     if (patch) await ide.saveEnvironment(patch);
   }
 
@@ -436,9 +468,85 @@
                 </div>
 
                 {#if currentEco.downloadable.length === 0}
-                  <div class="tc-empty-note">
-                    {ide.toolchainsLoading ? 'Loading official release catalog…' : `No prebuilt SDK archives listed for ${ide.targetOs}/${ide.targetArch}.`}
-                  </div>
+                  {#if currentEco.ecosystem === 'android' && ide.target.kind !== 'ssh'}
+                    {@const simInstRunning = simInstaller.running || simInstaller.busy}
+                    <div class="tc-sim-setup">
+                      <p class="tc-empty-note">
+                        Install Google’s Android Command-Line Tools, <code>platform-tools</code>, <code>emulator</code>, an API 35 system image, and default Phone &amp; Tablet AVDs directly inside Otto — no Android Studio required.
+                      </p>
+                      <div class="tc-dl-btns">
+                        <button
+                          type="button"
+                          class="btn primary"
+                          disabled={simInstRunning}
+                          onclick={() => void simInstaller.start('android_emulator', { create_default_avds: true })}
+                          data-testid="ide-tc-install-android-emulator"
+                        >
+                          <Icon name="download" size={13} />
+                          {simInstaller.startingTarget === 'android_emulator' ? 'Starting…' : 'Install Android Emulator'}
+                        </button>
+                        <button
+                          type="button"
+                          class="btn ghost"
+                          disabled={simInstRunning}
+                          onclick={() => void simInstaller.start('android_platform_tools')}
+                          data-testid="ide-tc-install-android-platform-tools"
+                        >
+                          Platform Tools only (adb)
+                        </button>
+                      </div>
+                      {#if simInstaller.visible && (simInstaller.status?.target === 'android_emulator' || simInstaller.status?.target === 'android_platform_tools')}
+                        <SimInstallStatusCard
+                          status={simInstaller.status}
+                          busy={simInstaller.busy}
+                          oncancel={() => void simInstaller.cancel()}
+                          ondismiss={() => simInstaller.dismiss()}
+                          onrefresh={() => void ide.loadToolchains({ includeCatalog: true })}
+                          testid="ide-tc-sim-install-card"
+                        />
+                      {/if}
+                    </div>
+                  {:else if currentEco.ecosystem === 'ios' && ide.target.kind !== 'ssh'}
+                    {@const simInstRunning = simInstaller.running || simInstaller.busy}
+                    {@const hasReadyXcode = currentEco.installed.some((s) => s.source !== 'downloading' && s.version !== 'clt')}
+                    <div class="tc-sim-setup">
+                      <p class="tc-empty-note">
+                        {#if hasReadyXcode}
+                          Xcode is installed on this Mac; Otto can download the latest iOS Simulator runtime directly via <code>xcodebuild -downloadPlatform iOS</code>.
+                        {:else}
+                          Install Xcode from the Mac App Store first; once Xcode finishes installing, Otto can download iOS Simulator runtimes automatically.
+                        {/if}
+                      </p>
+                      {#if hasReadyXcode}
+                        <div class="tc-dl-btns">
+                          <button
+                            type="button"
+                            class="btn primary"
+                            disabled={simInstRunning}
+                            onclick={() => void simInstaller.start('ios_runtime')}
+                            data-testid="ide-tc-install-ios-runtime"
+                          >
+                            <Icon name="download" size={13} />
+                            {simInstaller.startingTarget === 'ios_runtime' ? 'Starting…' : 'Download iOS Runtime'}
+                          </button>
+                        </div>
+                      {/if}
+                      {#if simInstaller.visible && simInstaller.status?.target === 'ios_runtime'}
+                        <SimInstallStatusCard
+                          status={simInstaller.status}
+                          busy={simInstaller.busy}
+                          oncancel={() => void simInstaller.cancel()}
+                          ondismiss={() => simInstaller.dismiss()}
+                          onrefresh={() => void ide.loadToolchains({ includeCatalog: true })}
+                          testid="ide-tc-sim-install-card"
+                        />
+                      {/if}
+                    </div>
+                  {:else}
+                    <div class="tc-empty-note">
+                      {ide.toolchainsLoading ? 'Loading official release catalog…' : `No prebuilt SDK archives listed for ${ide.targetOs}/${ide.targetArch}.`}
+                    </div>
+                  {/if}
                 {:else}
                   <div class="tc-dl-bar">
                     <div class="tc-dl-picker">
@@ -600,7 +708,7 @@
   .tc-sec-title-group { display: flex; align-items: center; gap: 8px; }
   .tc-sec-title { margin: 0; font-size: var(--fs-s); font-weight: 600; color: var(--text); }
   .tc-sec-meta, .tc-dim { font-size: var(--fs-xs); color: var(--text-dim); }
-  .tc-empty-note { font-size: var(--fs-s); color: var(--text-dim); padding-block: 4px; }
+  .tc-empty-note { margin: 0; font-size: var(--fs-s); color: var(--text-dim); padding-block: 4px; }
   .tc-sdk-list { display: flex; flex-direction: column; gap: 6px; }
   .tc-sdk-item {
     display: flex; align-items: center; justify-content: space-between; gap: 10px;
@@ -622,6 +730,7 @@
   .tc-tool-actions { display: flex; align-items: center; gap: 6px; margin-block-start: auto; padding-block-start: 4px; }
 
   .tc-dl-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .tc-sim-setup { display: flex; flex-direction: column; gap: 10px; min-inline-size: 0; }
   .tc-dl-picker { flex: 1; min-inline-size: 220px; }
   .tc-dl-picker select { inline-size: 100%; }
   .tc-dl-btns { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }

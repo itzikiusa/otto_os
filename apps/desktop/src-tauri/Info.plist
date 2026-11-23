@@ -6,5 +6,18 @@
 	<string>Otto uses the microphone for assistant dictation when you use the talk control, and for room calls only when you choose Unmute. Muting or leaving a room call stops microphone capture.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Otto turns what you say to the assistant into text on this Mac.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>CFBundleURLName</key>
+			<string>com.otto.app</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>otto</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

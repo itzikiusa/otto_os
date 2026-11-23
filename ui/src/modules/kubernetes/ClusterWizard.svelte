@@ -76,7 +76,7 @@
       const r = await k8sApi.discover();
       contexts = r.contexts;
     } catch (e) {
-      discoverError = e instanceof Error ? e.message : String(e);
+      discoverError = loadErrorText(e);
     } finally {
       discovering = false;
     }
@@ -179,7 +179,7 @@
       for (const c of created) void testAndToast(c);
       if (created.length === 1) router.go(`kubernetes/${encodeURIComponent(created[0].id)}`);
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = loadErrorText(e);
     } finally {
       busy = false;
     }

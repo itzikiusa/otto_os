@@ -5,6 +5,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { handoverStateLabel } from '../../lib/labels';
+  import { announceShown } from '../../lib/announce.svelte';
 
   let { session, readonly = false }: { session: Session; readonly?: boolean } = $props();
   const delivery = $derived(session.meta?.handover as HandoverDelivery | undefined);
@@ -27,7 +28,7 @@
 {#if delivery}
   <details class="handover-delivery">
     <summary>Handover · {handoverStateLabel(delivery.state).toLowerCase()}</summary>
-    {#if delivery.error}<p role="alert">{delivery.error}</p>{/if}
+    {#if delivery.error}<p use:announceShown={{ text: delivery.error, assertive: true }}>{delivery.error}</p>{/if}
     {#if delivery.focus}<p><strong>Focus:</strong> {delivery.focus}</p>{/if}
     {#if delivery.brief}<pre>{delivery.brief}</pre>{:else}<p>Preparing the saved brief…</p>{/if}
     {#if delivery.state === 'sent'}

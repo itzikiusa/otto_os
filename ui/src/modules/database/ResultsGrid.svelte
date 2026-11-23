@@ -1413,7 +1413,7 @@
   <!-- Multi-statement batch: a segmented switcher over the result sets. Errored
        statements (execution stopped there) get a red dot; the tooltip previews
        the statement that produced each set. Sits above the active view. -->
-  <div class="rg-switch" role="tablist" aria-label="Result sets">
+  <div class="segmented rg-switch" role="tablist" aria-label="Result sets">
     {#each resultSets as rs, i (i)}
       <button
         class="rg-seg"

@@ -236,6 +236,8 @@ impl DbViewerService {
             &mut r.config,
         )
         .await?;
+        self.prepare_mongosh_access(user_id, &attempt.script, &mut r.config)
+            .await?;
         let token = CancelToken::new();
         let execution = r.with_lifecycle(r.driver.run_tracked(&r.config, &req, &token));
         tokio::pin!(execution);

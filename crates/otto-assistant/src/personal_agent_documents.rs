@@ -173,9 +173,10 @@ fn read_sync(root: &Path) -> Result<AgentDocument> {
 /// save from being replaced by the initial notes template.
 pub async fn seed_memory(root: &Path, seed: &str) -> Result<()> {
     let path = memory_path(root)?;
-    tokio::fs::create_dir_all(path.parent().unwrap())
-        .await
-        .map_err(io_error)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::Internal("agent memory path has no parent".into()))?;
+    tokio::fs::create_dir_all(parent).await.map_err(io_error)?;
     memory_path(root)?;
     match tokio::fs::OpenOptions::new()
         .write(true)
@@ -219,10 +220,12 @@ pub async fn save_memory(root: &Path, version: &str, content: &str) -> Result<Ag
             ));
         }
         let path = memory_path(&root)?;
-        std::fs::create_dir_all(path.parent().unwrap()).map_err(io_error)?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| Error::Internal("agent memory path has no parent".into()))?;
+        std::fs::create_dir_all(parent).map_err(io_error)?;
         memory_path(&root)?;
-        let mut staged =
-            tempfile::NamedTempFile::new_in(path.parent().unwrap()).map_err(io_error)?;
+        let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(io_error)?;
         staged.write_all(content.as_bytes()).map_err(io_error)?;
         staged.as_file().sync_all().map_err(io_error)?;
         if read_sync(&root)?.version != version {

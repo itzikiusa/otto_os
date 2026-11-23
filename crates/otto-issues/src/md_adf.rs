@@ -81,11 +81,21 @@ fn inline_nodes(spans: Vec<Inl>, extra: &[Mark]) -> Vec<Value> {
         .into_iter()
         .map(|s| match s {
             Inl::Break => json!({"type": "hardBreak"}),
-            Inl::Text(t, m) if m.is_empty() => json!({"type": "text", "text": t}),
-            Inl::Text(t, m) => json!({
-                "type": "text", "text": t,
-                "marks": m.iter().map(mark_json).collect::<Vec<_>>()
-            }),
+            Inl::Text(t, m) => {
+                let safe_marks: Vec<Value> = m
+                    .iter()
+                    .filter(|mk| !matches!(mk, Mark::Link(href) if !crate::markdown::is_safe_link_href(href)))
+                    .map(mark_json)
+                    .collect();
+                if safe_marks.is_empty() {
+                    json!({"type": "text", "text": t})
+                } else {
+                    json!({
+                        "type": "text", "text": t,
+                        "marks": safe_marks
+                    })
+                }
+            }
         })
         .collect()
 }
@@ -377,5 +387,29 @@ fn adf_panel(kind: &str) -> &'static str {
         "WARNING" => "warning",
         "CAUTION" | "DANGER" | "ERROR" => "error",
         _ => "info",
+    }
+}
+
+#[cfg(test)]
+mod scheme_tests {
+    use super::*;
+
+    #[test]
+    fn adf_emitter_drops_disallowed_schemes_even_on_direct_marks() {
+        let nodes = inline_nodes(
+            vec![Inl::Text(
+                "evil".into(),
+                vec![Mark::Link("javascript:alert(1)".into())],
+            )],
+            &[],
+        );
+        assert_eq!(nodes, vec![json!({"type": "text", "text": "evil"})]);
+
+        let doc = markdown_to_adf("[x](javascript:alert(1)) [d](data:text/html,1) [ok](tel:+1234)")
+            .unwrap();
+        let s = doc.to_string();
+        assert!(!s.contains("javascript:"), "{s}");
+        assert!(!s.contains("data:"), "{s}");
+        assert!(s.contains("tel:+1234"), "{s}");
     }
 }

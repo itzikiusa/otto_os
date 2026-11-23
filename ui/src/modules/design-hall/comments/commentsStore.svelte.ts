@@ -8,7 +8,7 @@
 
 import * as api from '../../../lib/api/design';
 import { loadErrorText } from '../../../lib/loadError';
-import type { DesignComment, DesignCommentPin, UpdateDesignCommentReq } from '../../../lib/api/types';
+import type { CommentPin3d, DesignComment, DesignCommentPin, UpdateDesignCommentReq } from '../../../lib/api/types';
 import { threadsOf, type Thread } from './pins';
 
 /** The slice of `designBus` the store reads (injected: no import cycle, testable). */
@@ -105,13 +105,17 @@ export class CommentsStore {
     this.items = i < 0 ? [...this.items, c] : this.items.map((x) => (x.id === c.id ? c : x));
   }
 
-  /** A new thread (with an optional pin) on `versionId`, or a reply. */
-  async create(body: string, opts: { pin?: DesignCommentPin | null; versionId?: string | null; parentId?: string } = {}): Promise<DesignComment> {
+  /** A new thread (with an optional 2D or 3D polygon pin) on `versionId`, or a reply. */
+  async create(
+    body: string,
+    opts: { pin?: DesignCommentPin | null; pin3d?: CommentPin3d | null; versionId?: string | null; parentId?: string } = {},
+  ): Promise<DesignComment> {
     const c = await api.createComment(this.artifactId, {
       body,
       ...(opts.parentId ? { parent_id: opts.parentId } : {}),
       ...(!opts.parentId && opts.versionId ? { version_id: opts.versionId } : {}),
       ...(!opts.parentId && opts.pin ? { pin: { x: opts.pin.x, y: opts.pin.y, ...(opts.pin.frame ? { frame: opts.pin.frame } : {}) } } : {}),
+      ...(!opts.parentId && opts.pin3d ? { pin_3d: opts.pin3d } : {}),
     });
     this.#upsert(c);
     return c;

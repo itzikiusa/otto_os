@@ -186,6 +186,11 @@ export interface BuiltLight {
   target?: THREE_NS.Object3D;
 }
 
+function applyShadow(light: THREE_NS.DirectionalLight | THREE_NS.PointLight | THREE_NS.SpotLight, spec: Scene3dLight): void {
+  light.castShadow = spec.shadow ?? false;
+  light.shadow.intensity = spec.shadow_intensity ?? 1;
+}
+
 export function buildLight(THREE: Three, l: Scene3dLight): BuiltLight {
   const color = l.color ?? '#ffffff';
   const intensity = l.intensity ?? 1;
@@ -200,13 +205,13 @@ export function buildLight(THREE: Three, l: Scene3dLight): BuiltLight {
       break;
     case 'point': {
       const p = new THREE.PointLight(color, intensity, l.distance ?? 0, 2);
-      p.castShadow = l.shadow ?? false;
+      applyShadow(p, l);
       light = p;
       break;
     }
     case 'spot': {
       const s = new THREE.SpotLight(color, intensity, l.distance ?? 0, (l.angle ?? 30) * DEG, 0.3, 2);
-      s.castShadow = l.shadow ?? false;
+      applyShadow(s, l);
       target = s.target;
       light = s;
       break;
@@ -214,7 +219,7 @@ export function buildLight(THREE: Three, l: Scene3dLight): BuiltLight {
     case 'directional':
     default: {
       const d = new THREE.DirectionalLight(color, intensity);
-      d.castShadow = l.shadow ?? false;
+      applyShadow(d, l);
       d.shadow.mapSize.set(2048, 2048);
       d.shadow.camera.near = 0.5;
       d.shadow.camera.far = 80;
@@ -245,7 +250,7 @@ export function updateLight(THREE: Three, built: THREE_NS.Light, target: THREE_N
   if (target && l.target) target.position.set(l.target[0], l.target[1], l.target[2]);
   const shadowable = built as THREE_NS.DirectionalLight | THREE_NS.PointLight | THREE_NS.SpotLight;
   if ('castShadow' in shadowable && l.type !== 'ambient' && l.type !== 'hemisphere') {
-    shadowable.castShadow = l.shadow ?? false;
+    applyShadow(shadowable, l);
   }
   if (l.type === 'spot') {
     const s = built as THREE_NS.SpotLight;

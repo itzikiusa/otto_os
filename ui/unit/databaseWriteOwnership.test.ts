@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import * as id from '../src/lib/id.ts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -69,6 +70,7 @@ function setup(options: { holdCancel?: boolean; holdReplacement?: boolean } = {}
         saveFlag() {},
       };
       if (path.endsWith('/lazyModule')) return { announceModule() {} };
+      if (path.endsWith('/id')) return id;
       if (path.endsWith('/db-result-budget')) return resultBudget;
       if (path.endsWith('/grid-tab-state')) return { parkedEditCount: () => 0 };
       // Reachable only from flows this file doesn't drive: any use throws.

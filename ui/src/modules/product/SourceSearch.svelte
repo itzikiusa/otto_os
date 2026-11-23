@@ -1,8 +1,8 @@
 <script lang="ts">
   // SourceSearch — unified tracker issue (Jira / Linear) / Confluence page picker.
   // Mirrors the structure and CSS of JiraIssuePicker.svelte.
-  import { announceShown } from '../../lib/announce.svelte';
   import { listConfluenceSpaces, listIssueProjects, searchConfluence, searchIssues } from '../../lib/api/issues';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import type { IssueProject, IssueProviderKind, IssueSummary } from '../../lib/api/types';
   import { truncatedNote } from '../../lib/listingPage';
   import type { ConfluenceSpace, ConfluencePageSummary } from './types';
@@ -383,8 +383,7 @@
 {/if}
 
 {#if filterError}
-  <div use:announceShown={{ text: `Couldn’t load the filters. ${filterError}`, assertive: true }}>Couldn’t load the filters. {filterError}</div>
-  <button class="btn small" onclick={() => sourceKind === 'jira' ? void loadProjects(accountId) : void loadSpaces(accountId)}>Retry filters</button>
+  <LoadState what="the filters" variant="compact" error={filterError} empty onretry={() => sourceKind === 'jira' ? void loadProjects(accountId) : void loadSpaces(accountId)} />
 {/if}
 
 <!-- Search input -->
@@ -450,8 +449,7 @@
 </div>
 
 {#if searchError}
-  <div use:announceShown={{ text: `Couldn’t search. ${searchError}`, assertive: true }}>Couldn’t search. {searchError}</div>
-  <button class="btn small" onclick={() => retrySearch?.()}>Retry search</button>
+  <LoadState what="results" errorTitle="Couldn’t search" variant="compact" error={searchError} empty onretry={() => retrySearch?.()} />
 {/if}
 
 <!-- Results -->

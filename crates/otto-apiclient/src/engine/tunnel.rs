@@ -66,25 +66,60 @@ pub(crate) fn ssh_config_from_conn(conn: &Connection) -> Result<SshTunnelConfig,
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
+    let proxy_jump = p
+        .get("jump")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     Ok(SshTunnelConfig {
         host: host.to_string(),
         port,
         user: user.to_string(),
         identity_file,
-        proxy_jump: None,
+        proxy_jump,
     })
 }
 
-/// Open (or reuse) a cached SOCKS5 tunnel for `cfg` and return its proxy URL
-/// (`socks5h://127.0.0.1:<port>`). Dead/idle entries are evicted on access.
-pub(crate) async fn socks_proxy_url(cfg: &SshTunnelConfig) -> Result<String, String> {
-    let key = format!(
-        "{}|{}|{}|{}",
+fn tunnel_cache_key(cfg: &SshTunnelConfig) -> String {
+    format!(
+        "{}|{}|{}|{}|{}",
         cfg.host,
         cfg.port,
         cfg.user,
-        cfg.identity_file.as_deref().unwrap_or("")
-    );
+        cfg.identity_file.as_deref().unwrap_or(""),
+        cfg.proxy_jump.as_deref().unwrap_or(""),
+    )
+}
+
+/// Sweep idle or dead SOCKS5 tunnels out of the cache so `ssh -D` children
+/// don't live forever after the last request.
+fn reap_idle_tunnels() {
+    let mut cache = tunnel_cache().lock().unwrap_or_else(|e| e.into_inner());
+    cache.retain(|_, c| c.last_used.elapsed() < TUNNEL_IDLE_TTL && c.tunnel.is_alive());
+}
+
+/// Ensure a single daemon-wide background reaper periodically sweeps idle
+/// `ssh -D` tunnels even when no new API requests arrive.
+fn ensure_tunnel_reaper() {
+    static STARTED: OnceLock<()> = OnceLock::new();
+    STARTED.get_or_init(|| {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async {
+                loop {
+                    tokio::time::sleep(TUNNEL_IDLE_TTL / 4).await;
+                    reap_idle_tunnels();
+                }
+            });
+        }
+    });
+}
+
+/// Open (or reuse) a cached SOCKS5 tunnel for `cfg` and return its proxy URL
+/// (`socks5h://127.0.0.1:<port>`). Dead/idle entries are evicted on access
+/// and periodically by the background reaper.
+pub(crate) async fn socks_proxy_url(cfg: &SshTunnelConfig) -> Result<String, String> {
+    ensure_tunnel_reaper();
+    let key = tunnel_cache_key(cfg);
     // Fast path: a live cached tunnel. Evict idle/dead entries while we hold the
     // lock. The lock is never held across an await.
     {
@@ -145,4 +180,50 @@ pub async fn resolve_socks_proxy<C: ApiClientCtx>(
     }
     let cfg = ssh_config_from_conn(&conn)?;
     Ok(Some(socks_proxy_url(&cfg).await?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use otto_core::domain::Environment;
+
+    fn ssh_conn(params: Value) -> Connection {
+        Connection {
+            id: "c1".into(),
+            workspace_id: None,
+            name: "bastion".into(),
+            kind: ConnectionKind::Ssh,
+            params,
+            secret_ref: None,
+            first_command: None,
+            section_id: None,
+            environment: Environment::Dev,
+            read_only: false,
+            pinned: false,
+            created_by: "u1".into(),
+            created_at: chrono::Utc::now(),
+            last_opened_at: None,
+        }
+    }
+
+    #[test]
+    fn ssh_config_preserves_jump_and_distinguishes_cache_key() {
+        let with_jump = ssh_conn(serde_json::json!({
+            "host": "internal.example",
+            "user": "ops",
+            "port": 2222,
+            "jump": "edge@jump.example:22"
+        }));
+        let without_jump = ssh_conn(serde_json::json!({
+            "host": "internal.example",
+            "user": "ops",
+            "port": 2222,
+            "jump": ""
+        }));
+        let cfg1 = ssh_config_from_conn(&with_jump).unwrap();
+        let cfg2 = ssh_config_from_conn(&without_jump).unwrap();
+        assert_eq!(cfg1.proxy_jump.as_deref(), Some("edge@jump.example:22"));
+        assert_eq!(cfg2.proxy_jump, None);
+        assert_ne!(tunnel_cache_key(&cfg1), tunnel_cache_key(&cfg2));
+    }
 }

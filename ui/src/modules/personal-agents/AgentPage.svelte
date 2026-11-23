@@ -4,7 +4,6 @@
   // (overview, runs, routines, …) land on the section holding them.
   import Tabs from '../../lib/components/Tabs.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
-  import { tabKeys } from '../../lib/tabKeys';
   import { tick, untrack } from 'svelte';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -262,6 +261,13 @@
   let soulDraft = $state('');
   let soulSave = $state<'' | 'saving' | 'saved'>('');
   let soulTimer: ReturnType<typeof setTimeout> | undefined;
+  let setupSave = $state<'' | 'saving' | 'saved'>('');
+  let setupTimer: ReturnType<typeof setTimeout> | undefined;
+  let makingMain = $state(false);
+  $effect(() => () => {
+    clearTimeout(soulTimer);
+    clearTimeout(setupTimer);
+  });
   // Follows the stored text — but never over what is being typed.
   $effect(() => {
     const stored = agent?.soul_md ?? '';
@@ -269,29 +275,36 @@
   });
   async function saveSoul(): Promise<void> {
     if (!agent || soulDraft === agent.soul_md) return;
+    const id = agent.id;
     soulSave = 'saving';
     clearTimeout(soulTimer);
     try {
-      await personalAgents.update(agent.id, { soul_md: soulDraft });
+      await personalAgents.update(id, { soul_md: soulDraft });
+      if (agentId !== id) return;
       soulSave = 'saved';
-      soulTimer = setTimeout(() => (soulSave = ''), 2500);
+      soulTimer = setTimeout(() => {
+        if (agentId === id) soulSave = '';
+      }, 2500);
     } catch (e) {
+      if (agentId !== id) return;
       soulSave = '';
       toasts.error('Couldn’t save what it does', loadErrorText(e));
     }
   }
-  /** The Setup card's calm save cue (the rules section's pattern). */
-  let setupSave = $state<'' | 'saving' | 'saved'>('');
-  let setupTimer: ReturnType<typeof setTimeout> | undefined;
   async function setModel(model: string): Promise<void> {
     if (!agent || model === '__other' || model === agent.model) return;
+    const id = agent.id;
     setupSave = 'saving';
     clearTimeout(setupTimer);
     try {
-      await personalAgents.update(agent.id, { model });
+      await personalAgents.update(id, { model });
+      if (agentId !== id) return;
       setupSave = 'saved';
-      setupTimer = setTimeout(() => (setupSave = ''), 2000);
+      setupTimer = setTimeout(() => {
+        if (agentId === id) setupSave = '';
+      }, 2000);
     } catch (e) {
+      if (agentId !== id) return;
       setupSave = '';
       toasts.error('Couldn’t change the model', loadErrorText(e));
     }
@@ -328,12 +341,18 @@
   }
 
   async function makeMain(): Promise<void> {
+    if (makingMain) return;
+    const id = agentId;
+    makingMain = true;
     try {
-      autonomy = await personalAgentsApi.saveAutonomy(agentId, { primary: true });
+      const next = await personalAgentsApi.saveAutonomy(id, { primary: true });
+      if (agentId === id) autonomy = next;
       await Promise.all(personalAgents.agents.map((a) => personalAgents.loadAutonomy(a.id)));
       toasts.success(`${agent?.name ?? 'It'} is your main agent`, 'It routes your work to the other agents.');
     } catch (e) {
       toasts.error('Couldn’t make it the main agent', loadErrorText(e));
+    } finally {
+      makingMain = false;
     }
   }
 </script>
@@ -373,18 +392,8 @@
         {#each TABS as t (t.id)}<option value={t.id}>{t.label}</option>{/each}
       </select>
     </label>
-    <div class="tabs" role="tablist" aria-label="Agent sections" tabindex="-1" onkeydown={tabKeys({ activate: 'click' })}>
-      {#each TABS as t (t.id)}
-        <button
-          class="tab"
-          class:active={tab === t.id}
-          role="tab"
-          data-tab={t.id}
-          aria-selected={tab === t.id}
-          tabindex={tab === t.id ? 0 : -1}
-          onclick={(event) => void goTab(t.id, event)}
-        >{t.label}</button>
-      {/each}
+    <div class="tabs">
+      <Tabs tabs={TABS} value={tab} activate="click" idBase={tabBase} onchange={(id) => void goTab(id as Tab)} label="Agent sections" />
     </div>
   {/snippet}
 </PageHeader>
@@ -454,7 +463,7 @@
             {#if autonomy?.primary}
               <span class="pa-accent-text"><Icon name="star" size={12} /> Yes — it routes your work to the others</span>
             {:else}
-              No{#if canEditDocuments}<button class="link" onclick={() => void makeMain()}>Make it the main agent</button>{/if}
+              No{#if canEditDocuments}<button class="link" disabled={makingMain} onclick={() => void makeMain()}>{makingMain ? 'Setting…' : 'Make it the main agent'}</button>{/if}
             {/if}
           </dd>
           <dt>Model</dt>
@@ -598,13 +607,6 @@
     .tab-picker-label { color: var(--text-dim); font-size: var(--fs-s); flex: none; }
     .tab-picker select { flex: 1; min-width: 0; }
   }
-  .tab {
-    background: none; border: none; border-bottom: 2px solid transparent; color: var(--text-dim);
-    padding: 8px 10px; font: inherit; font-size: var(--fs-m); cursor: pointer; white-space: nowrap;
-  }
-  .tab:hover { color: var(--text); }
-  .tab.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 500; }
-  .tab:focus-visible { outline: 2px solid var(--accent-text); outline-offset: -2px; border-radius: var(--radius-s); }
   .about { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start; }
   @media (max-width: 640px) { .about { grid-template-columns: minmax(0, 1fr); } }
   /* "Who it is" spans the row; Personality and Setup share the next one — no half-empty row. */

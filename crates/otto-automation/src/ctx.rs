@@ -50,6 +50,16 @@ pub trait AutomationCtx: Clone + Send + Sync + 'static {
     /// Live goal-loop controllers (owned by the daemon state, run by this crate).
     fn goal_loops(&self) -> &GoalLoopRegistry;
 
+    /// Live USD spend accumulated across sessions belonging to `loop_id`.
+    /// Defaults to `None` when usage telemetry is unavailable (graceful degradation).
+    fn goal_loop_spent_usd(
+        &self,
+        _ws_id: &Id,
+        _loop_id: &Id,
+    ) -> impl Future<Output = Option<f64>> + Send {
+        async { None }
+    }
+
     // ---- provider resolution ----------------------------------------------
 
     /// The provider for a workspace-scoped run: `requested`, else the

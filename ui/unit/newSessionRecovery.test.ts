@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 import ts from 'typescript';
+import {loadErrorText} from '../src/lib/loadError.ts';
 
 function setup(fail: (title: string, attempt: number) => boolean) {
   const text = readFileSync(new URL('../src/modules/agents/NewSession.svelte', import.meta.url), 'utf8');
@@ -24,7 +25,7 @@ function setup(fail: (title: string, attempt: number) => boolean) {
     checkingCwd: false, cwdError: '', checkFolder: async () => ({ok: true}), api: {get: async () => ({})}, browsePath: (p: string) => p,
     ws: {scratch: {root_path: '/home/owner'}, openSessionWithPrompt: launch, createSessionQuiet: launch,
       setViewMode: () => {}, openSession: (id: string) => opened.push(id), navigateToSession: (id: string) => opened.push(id)},
-    toasts: {error: (...args: unknown[]) => errors.push(args)}, toastError: (...args: unknown[]) => errors.push(args),
+    toasts: {error: (...args: unknown[]) => errors.push(args)}, toastError: (...args: unknown[]) => errors.push(args), loadErrorText,
     localStorage: {setItem: () => {}}, PREFS_KEY: 'fixture', onclose: () => {closes++;},
   };
   runInNewContext(ts.transpileModule(functions, {compilerOptions: {target: ts.ScriptTarget.ES2022}}).outputText, context);

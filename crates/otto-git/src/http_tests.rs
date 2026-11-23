@@ -1876,3 +1876,128 @@ async fn pr_detail_fresh_query_bypasses_provider_get_cache() {
     assert_eq!(approval_gets().await, 2);
     let _ = tokio::fs::remove_dir_all(&repo_dir).await;
 }
+
+#[test]
+fn clone_repo_name_validation_requires_single_safe_normal_segment() {
+    for good in ["otto", "my-repo_1.0", "repo name"] {
+        assert!(
+            validate_clone_repo_name(good).is_ok(),
+            "expected valid repo name: {good:?}"
+        );
+    }
+    for bad in [
+        "",
+        "   ",
+        ".",
+        "..",
+        "a/b",
+        "a\\b",
+        "/abs",
+        "-flag",
+        " -flag",
+        "--upload-pack=sh",
+        "bad\0name",
+        "bad\nname",
+        "bad\rname",
+        "bad\x1bname",
+    ] {
+        let err = validate_clone_repo_name(bad).unwrap_err();
+        assert!(
+            matches!(err, Error::Invalid(_)),
+            "expected Invalid for {bad:?}, got {err:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn clone_into_workspace_rejects_unsafe_names_and_broad_destinations_before_mkdir() {
+    let (_pool, ctx, user, ws) = fixture().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let uncreated_base = tmp.path().join("should-not-be-created");
+
+    // Explicit hostile req.name values must fail before creating `clone_dir`.
+    for bad_name in ["..", ".", "a/b", "a\\b", "-evil", "", "bad\nname"] {
+        let req = AddRepoReq {
+            path: None,
+            clone_url: Some("https://github.com/acme/good.git".into()),
+            name: Some(bad_name.into()),
+            git_account_id: None,
+            clone_dir: Some(uncreated_base.to_string_lossy().into_owned()),
+        };
+        let err = clone_into_workspace(
+            &ctx,
+            &auth(&user, false),
+            &ws,
+            "https://github.com/acme/good.git",
+            &req,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::Invalid(_)),
+            "name {bad_name:?}: expected Invalid, got {err:?}"
+        );
+        assert!(
+            !uncreated_base.exists(),
+            "name {bad_name:?} must not create clone_dir"
+        );
+    }
+
+    // Derived hostile names from the URL must also be rejected.
+    for bad_url in [
+        "https://github.com/acme/..",
+        "https://github.com/acme/..git",
+        "https://github.com/acme/-dash.git",
+    ] {
+        let req = AddRepoReq {
+            path: None,
+            clone_url: Some(bad_url.into()),
+            name: None,
+            git_account_id: None,
+            clone_dir: Some(uncreated_base.to_string_lossy().into_owned()),
+        };
+        let err = clone_into_workspace(&ctx, &auth(&user, false), &ws, bad_url, &req)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Invalid(_)),
+            "url {bad_url:?}: expected Invalid, got {err:?}"
+        );
+        assert!(
+            !uncreated_base.exists(),
+            "url {bad_url:?} must not create clone_dir"
+        );
+    }
+
+    // A broad non-project destination (e.g. `/` + `tmp` -> `/tmp`, or parent traversal to `/tmp`)
+    // must be refused before creating directories or cloning.
+    for (clone_dir, name) in [
+        ("/".to_string(), "tmp"),
+        ("/otto-uncreated-parent/..".to_string(), "tmp"),
+    ] {
+        let req = AddRepoReq {
+            path: None,
+            clone_url: Some("https://github.com/acme/repo.git".into()),
+            name: Some(name.into()),
+            git_account_id: None,
+            clone_dir: Some(clone_dir),
+        };
+        let err = clone_into_workspace(
+            &ctx,
+            &auth(&user, false),
+            &ws,
+            "https://github.com/acme/repo.git",
+            &req,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::Invalid(ref m) if m.contains("broad non-project")),
+            "expected broad non-project error, got {err:?}"
+        );
+    }
+    assert!(
+        !std::path::Path::new("/otto-uncreated-parent").exists(),
+        "broad destination check must run before create_dir_all"
+    );
+}

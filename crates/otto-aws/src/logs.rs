@@ -155,10 +155,12 @@ pub struct InsightsResultsResp {
 // Validation (pure)
 // ---------------------------------------------------------------------------
 
-/// Log group names: 1–512 chars of `[A-Za-z0-9._\-/#]`.
+/// Log group names: 1–512 chars of `[A-Za-z0-9._\-/#]`, never starting with `-`
+/// (prevents CLI flag injection in variadic `--log-group-names`).
 pub fn validate_group(g: &str) -> Result<()> {
     if g.is_empty()
         || g.len() > 512
+        || g.starts_with('-')
         || !g
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | '#'))
@@ -167,6 +169,7 @@ pub fn validate_group(g: &str) -> Result<()> {
             "invalid log group name '{g}' — pick one from the log group list"
         )));
     }
+    crate::cli::reject_url_param_expansion("log group name", g)?;
     Ok(())
 }
 
@@ -195,9 +198,15 @@ pub fn parse_streams(raw: Option<&str>) -> Result<Vec<String>> {
         ));
     }
     for s in &list {
-        if s.len() > 512 || s.contains(':') || s.contains('*') || s.chars().any(char::is_control) {
+        if s.len() > 512
+            || s.starts_with('-')
+            || s.contains(':')
+            || s.contains('*')
+            || s.chars().any(char::is_control)
+        {
             return Err(Error::Invalid(format!("invalid log stream name '{s}'")));
         }
+        crate::cli::reject_url_param_expansion("log stream name", s)?;
     }
     Ok(list)
 }
@@ -417,6 +426,7 @@ pub async fn list_groups(
     q: &GroupsQuery,
 ) -> Result<GroupsResp> {
     let max = page(q.max);
+    let token_arg;
     let mut args: Vec<&str> = vec!["logs", "describe-log-groups", "--max-items", &max];
     let prefix = q.prefix.as_deref().map(str::trim).unwrap_or("");
     if !prefix.is_empty() {
@@ -424,7 +434,9 @@ pub async fn list_groups(
         args.extend(["--log-group-name-prefix", prefix]);
     }
     if let Some(t) = q.token.as_deref().filter(|t| !t.is_empty()) {
-        args.extend(["--starting-token", t]);
+        crate::cli::reject_url_param_expansion("token", t)?;
+        token_arg = format!("--starting-token={t}");
+        args.push(token_arg.as_str());
     }
     let v = svc.run_json(a, q.region.as_deref(), &args).await?;
     Ok(normalize_groups(&v))
@@ -437,6 +449,8 @@ pub async fn list_streams(
 ) -> Result<StreamsResp> {
     validate_group(&q.group)?;
     let max = page(q.max);
+    let prefix_arg;
+    let token_arg;
     let mut args: Vec<&str> = vec![
         "logs",
         "describe-log-streams",
@@ -452,10 +466,14 @@ pub async fn list_streams(
     } else {
         // The API refuses a name prefix combined with LastEventTime ordering.
         no_control("stream prefix", prefix, 512)?;
-        args.extend(["--log-stream-name-prefix", prefix]);
+        crate::cli::reject_url_param_expansion("stream prefix", prefix)?;
+        prefix_arg = format!("--log-stream-name-prefix={prefix}");
+        args.push(prefix_arg.as_str());
     }
     if let Some(t) = q.token.as_deref().filter(|t| !t.is_empty()) {
-        args.extend(["--starting-token", t]);
+        crate::cli::reject_url_param_expansion("token", t)?;
+        token_arg = format!("--starting-token={t}");
+        args.push(token_arg.as_str());
     }
     let v = svc.run_json(a, q.region.as_deref(), &args).await?;
     Ok(normalize_streams(&v))
@@ -516,6 +534,8 @@ pub async fn filter_events(
     if token.is_some_and(|t| crate::native::native_token(t).is_some()) {
         return Err(crate::native::foreign_token_error());
     }
+    let pattern_arg;
+    let token_arg;
     let mut args: Vec<&str> = vec![
         "logs",
         "filter-log-events",
@@ -529,7 +549,10 @@ pub async fn filter_events(
         args.extend(streams.iter().map(String::as_str));
     }
     if !pattern.is_empty() {
-        args.extend(["--filter-pattern", pattern]);
+        crate::cli::reject_url_param_expansion("filter pattern", pattern)?;
+        // `--flag=value` keeps leading `-` (e.g. `-ERROR`) as a value, never an option.
+        pattern_arg = format!("--filter-pattern={pattern}");
+        args.push(pattern_arg.as_str());
     }
     if let Some(s) = start.as_deref() {
         args.extend(["--start-time", s]);
@@ -538,7 +561,9 @@ pub async fn filter_events(
         args.extend(["--end-time", e]);
     }
     if let Some(t) = token {
-        args.extend(["--starting-token", t]);
+        crate::cli::reject_url_param_expansion("token", t)?;
+        token_arg = format!("--starting-token={t}");
+        args.push(token_arg.as_str());
     }
     let v = svc.run_json(a, q.region.as_deref(), &args).await?;
     Ok(normalize_events(&v))
@@ -669,11 +694,15 @@ mod tests {
         assert!(validate_group("/aws/lambda/my-fn").is_ok());
         assert!(validate_group("bad group").is_err());
         assert!(validate_group("").is_err());
+        assert!(validate_group("--endpoint-url").is_err());
+        assert!(validate_group("-flag").is_err());
         assert_eq!(
             parse_streams(Some("a, b,,c")).unwrap(),
             vec!["a".to_string(), "b".into(), "c".into()]
         );
         assert!(parse_streams(Some("a:b")).is_err());
+        assert!(parse_streams(Some("ok,--endpoint-url")).is_err());
+        assert!(parse_streams(Some("-flag")).is_err());
         let many = (0..101)
             .map(|i| i.to_string())
             .collect::<Vec<_>>()

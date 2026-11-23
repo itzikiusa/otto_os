@@ -94,29 +94,32 @@ pub async fn spawn_background(ctx: &ServerCtx, root_user_id: Option<String>) -> 
     let mut bg = Background::default();
     crate::host_guard::warm_own_mdns_names();
 
-    // Idle-connection reapers + session sweeps.
-    spawn_brokers_reaper(ctx);
-    spawn_db_explorer_reaper(ctx);
-    spawn_channel_session_archiver(ctx);
-    spawn_archived_channel_session_purge(ctx);
-    spawn_orphan_session_files_sweep(ctx);
-    spawn_idle_session_suspender(ctx);
-    spawn_nested_agent_capture(ctx);
-    spawn_stale_session_archiver(ctx);
+    // Idle-connection reapers + session sweeps (all tracked in `bg` so teardown
+    // aborts every background SQLite writer before pool close / ClickHouse flush).
+    bg.keep(AbortOnDrop(spawn_brokers_reaper(ctx)));
+    bg.keep(AbortOnDrop(spawn_db_explorer_reaper(ctx)));
+    bg.keep(AbortOnDrop(spawn_channel_session_archiver(ctx)));
+    bg.keep(AbortOnDrop(spawn_archived_channel_session_purge(ctx)));
+    bg.keep(AbortOnDrop(spawn_orphan_session_files_sweep(ctx)));
+    bg.keep(AbortOnDrop(spawn_idle_session_suspender(ctx)));
+    bg.keep(AbortOnDrop(spawn_nested_agent_capture(ctx)));
+    bg.keep(AbortOnDrop(spawn_stale_session_archiver(ctx)));
     // Embedded threads (PR / connection pages) close after their idle hours.
     ctx.agent_runtime
         .spawn_embedded_auto_close(SettingsRepo::new(ctx.pool.clone()));
     // Hold off idle sleep while any agent turn runs.
     ctx.agent_runtime
         .spawn_keep_awake(otto_state::SessionsRepo::new(ctx.pool.clone()));
-    spawn_provider_title_namer(ctx);
-    spawn_dead_session_pruner(ctx);
-    spawn_activity_trail_pruner(ctx);
+    bg.keep(AbortOnDrop(spawn_provider_title_namer(ctx)));
+    bg.keep(AbortOnDrop(spawn_dead_session_pruner(ctx)));
+    bg.keep(AbortOnDrop(spawn_activity_trail_pruner(ctx)));
     // Retention.
-    spawn_data_retention(ctx);
-    spawn_workflow_run_retention(ctx);
-    spawn_memory_fts_warmup(ctx);
-    spawn_boot_warmups(ctx);
+    bg.keep(AbortOnDrop(spawn_data_retention(ctx)));
+    bg.keep(AbortOnDrop(spawn_workflow_run_retention(ctx)));
+    bg.keep(AbortOnDrop(spawn_memory_fts_warmup(ctx)));
+    for h in spawn_boot_warmups(ctx) {
+        bg.keep(AbortOnDrop(h));
+    }
 
     // Gated by OTTO_SELF_IMPROVE (enabled by default; 0/false/off disables it).
     // Computed here so the channel manager can decide whether to wire the
@@ -148,8 +151,8 @@ pub async fn spawn_background(ctx: &ServerCtx, root_user_id: Option<String>) -> 
     bg.keep(start_scheduled_tasks(ctx).await);
     bg.keep(start_personal_agents(ctx));
     start_model_catalog(ctx);
-    start_usage_tracking(ctx);
-    spawn_mcp_health_sweep(ctx);
+    bg.keep(AbortOnDrop(start_usage_tracking(ctx)));
+    bg.keep(AbortOnDrop(spawn_mcp_health_sweep(ctx)));
     spawn_ide_shutdown_watcher(ctx, &mut bg);
     bg
 }
@@ -162,7 +165,7 @@ fn spawn_ide_shutdown_watcher(ctx: &ServerCtx, bg: &mut Background) {
 /// lazily on the first memory call after boot (an O(n) body compare under
 /// `BEGIN IMMEDIATE`), so that call — often a session's recall brief — paid
 /// for it. Single-flight with the lazy path, so a racing request just waits.
-fn spawn_memory_fts_warmup(ctx: &ServerCtx) {
+fn spawn_memory_fts_warmup(ctx: &ServerCtx) -> tokio::task::JoinHandle<()> {
     let memory = ctx.memory.clone();
     tokio::spawn(async move {
         let t = std::time::Instant::now();
@@ -172,40 +175,36 @@ fn spawn_memory_fts_warmup(ctx: &ServerCtx) {
             ms = t.elapsed().as_millis() as u64,
             "memory: FTS warmed"
         );
-    });
+    })
 }
 
 /// Pre-hydrate recent structured runtime threads + cold CLI probes (`/meta`,
 /// `/usage/limits`) off the request path right after boot so the very first
 /// mobile/desktop navigation hits warm RAM instead of cold SQLite/CLI forks.
-fn spawn_boot_warmups(ctx: &ServerCtx) {
+fn spawn_boot_warmups(ctx: &ServerCtx) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut handles = Vec::with_capacity(2);
     let runtime = ctx.agent_runtime.clone();
-    tokio::spawn(async move {
+    handles.push(tokio::spawn(async move {
         let t = std::time::Instant::now();
         runtime.warm_recent(5).await;
         tracing::debug!(
             ms = t.elapsed().as_millis() as u64,
             "agent-runtime: recent threads pre-warmed"
         );
-    });
+    }));
 
     if std::env::var("OTTO_E2E_FAST_TIMERS").is_ok() {
-        return;
+        return handles;
     }
     let manager = Arc::clone(&ctx.manager);
-    tokio::spawn(async move {
+    handles.push(tokio::spawn(async move {
         let providers = manager.providers().names();
         let specs = otto_sessions::tool_probe::tool_specs(
             providers
                 .iter()
                 .map(|name| (name.as_str(), manager.providers().program_for(name))),
         );
-        let families = manager.providers().model_families();
-        let claude_dirs = manager
-            .providers()
-            .active_claude_config_dirs(&otto_transcript::roots::home_dir());
-        let probe = otto_sessions::provider_models::ModelProbe::from_tool_specs(families, &specs)
-            .with_claude_config_dirs(claude_dirs);
+        let probe = otto_sessions::provider_models::ModelProbe::for_registry(manager.providers());
         let _ = tokio::join!(
             otto_sessions::tool_probe::probe_tools_cached(specs),
             otto_sessions::provider_models::probe_provider_models_cached(&probe),
@@ -213,7 +212,8 @@ fn spawn_boot_warmups(ctx: &ServerCtx) {
                 .providers()
                 .resolved_family_program(p)),
         );
-    });
+    }));
+    handles
 }
 
 // -- Idle-connection reapers ----------------------------------------------
@@ -225,7 +225,7 @@ fn spawn_boot_warmups(ctx: &ServerCtx) {
 // edit/delete/restart. Sweep on a timer (every 5 min) and evict anything idle
 // past the conservative ~30 min window.
 
-fn spawn_brokers_reaper(ctx: &ServerCtx) {
+fn spawn_brokers_reaper(ctx: &ServerCtx) -> tokio::task::JoinHandle<()> {
     let brokers = Arc::clone(&ctx.brokers);
     let interval = Duration::from_secs(5 * 60); // every 5 min
     let idle = Duration::from_secs(30 * 60); // 30 min idle
@@ -237,10 +237,10 @@ fn spawn_brokers_reaper(ctx: &ServerCtx) {
                 tracing::info!("brokers: reaped {n} idle cluster connection(s)");
             }
         }
-    });
+    })
 }
 
-fn spawn_db_explorer_reaper(ctx: &ServerCtx) {
+fn spawn_db_explorer_reaper(ctx: &ServerCtx) -> tokio::task::JoinHandle<()> {
     let db = Arc::clone(&ctx.db_explorer);
     let interval = Duration::from_secs(5 * 60); // every 5 min
     supervise::spawn("db-reaper", db, move |db| async move {
@@ -255,7 +255,7 @@ fn spawn_db_explorer_reaper(ctx: &ServerCtx) {
                 tracing::info!("db explorer: dropped {n} idle client handle(s)");
             }
         }
-    });
+    })
 }
 
 // -- Session sweeps -------------------------------------------------------
@@ -264,7 +264,7 @@ fn spawn_db_explorer_reaper(ctx: &ServerCtx) {
 /// don't accumulate in the sidebar. A later message respawns a fresh one.
 /// At ticketing volume (100-200/day) a long window floods the sidebar, so
 /// we archive after 1h idle and sweep every 10 min.
-fn spawn_channel_session_archiver(ctx: &ServerCtx) {
+fn spawn_channel_session_archiver(ctx: &ServerCtx) -> tokio::task::JoinHandle<()> {
     let manager = Arc::clone(&ctx.manager);
     let interval = Duration::from_secs(10 * 60); // every 10 min
     let max_idle = Duration::from_secs(60 * 60); // 1h idle
@@ -276,13 +276,13 @@ fn spawn_channel_session_archiver(ctx: &ServerCtx) {
                 tracing::info!("auto-archived {n} idle channel session(s)");
             }
         }
-    });
+    })
 }
 
 /// Retention: permanently delete archived channel (ticket/chat) sessions
 /// whose last activity is older than 30 days, so the DB doesn't grow without
 /// bound at ticketing volume. Runs at startup, then daily.
-fn spawn_archived_channel_session_purge(ctx: &ServerCtx) {
+fn spawn_archived_channel_session_purge(ctx: &ServerCtx) -> tokio::task::JoinHandle<()> {
     let manager = Arc::clone(&ctx.manager);
     let interval = Duration::from_secs(24 * 60 * 60); // daily
     let max_age = Duration::from_secs(30 * 24 * 60 * 60); // 30 days
@@ -294,14 +294,14 @@ fn spawn_archived_channel_session_purge(ctx: &ServerCtx) {
             }
             tokio::time::sleep(interval).await;
         }
-    });
+    })
 }
 
 /// At boot and then daily: remove `<data>/sessions/<id>/` folders (pasted
 /// images) whose session row is gone — leaked before `remove` deleted them,
 /// or by a removal whose folder delete failed (data-integrity-4-03). The
 /// grace keeps a folder whose row is mid-create out of reach.
-fn spawn_orphan_session_files_sweep(ctx: &ServerCtx) {
+fn spawn_orphan_session_files_sweep(ctx: &ServerCtx) -> tokio::task::JoinHandle<()> {
     let manager = Arc::clone(&ctx.manager);
     let interval = Duration::from_secs(24 * 60 * 60); // daily
     let grace = Duration::from_secs(60 * 60);
@@ -313,14 +313,14 @@ fn spawn_orphan_session_files_sweep(ctx: &ServerCtx) {
             }
             tokio::time::sleep(interval).await;
         }
-    });
+    })
 }
 
 /// Idle+unattached suspend sweep: every ~60s, release the PTY of any LIVE
 /// resumable session that has been idle past the grace window and has no
 /// attached WS viewer. The session stays resumable (reopening auto-resumes
 /// via --resume), so this frees RAM without ever losing a conversation.
-fn spawn_idle_session_suspender(ctx: &ServerCtx) {
+fn spawn_idle_session_suspender(ctx: &ServerCtx) -> tokio::task::JoinHandle<()> {
     let manager = Arc::clone(&ctx.manager);
     let interval = Duration::from_secs(60);
     supervise::spawn("idle-suspender", manager, move |manager| async move {
@@ -331,7 +331,7 @@ fn spawn_idle_session_suspender(ctx: &ServerCtx) {
                 tracing::info!("suspended {n} idle, unattached session(s)");
             }
         }
-    });
+    })
 }
 
 /// Nested-agent capture: every ~30s, look inside every LIVE plain `shell`
@@ -340,7 +340,7 @@ fn spawn_idle_session_suspender(ctx: &ServerCtx) {
 /// running an agent is no longer stateless — reopening it after a daemon
 /// restart respawns the shell and types the provider's resume command, so
 /// the conversation comes back instead of dead-ending.
-fn spawn_nested_agent_capture(ctx: &ServerCtx) {
+fn spawn_nested_agent_capture(ctx: &ServerCtx) -> tokio::task::JoinHandle<()> {
     let manager = Arc::clone(&ctx.manager);
     let interval = Duration::from_secs(30);
     supervise::spawn("nested-agent-capture", manager, move |manager| async move {
@@ -351,13 +351,13 @@ fn spawn_nested_agent_capture(ctx: &ServerCtx) {
                 tracing::info!("captured {n} nested agent conversation(s) in shell session(s)");
             }
         }
-    });
+    })
 }
 
 /// Opt-in auto-archive: hourly, archive agent sessions idle beyond the
 /// `session_auto_archive_days` setting (0/absent = off). Archive keeps the
 /// row + history and stays reversible via unarchive.
-fn spawn_stale_session_archiver(ctx: &ServerCtx) {
+fn spawn_stale_session_archiver(ctx: &ServerCtx) -> tokio::task::JoinHandle<()> {
     let manager = Arc::clone(&ctx.manager);
     let interval = Duration::from_secs(60 * 60);
     supervise::spawn("stale-archiver", manager, move |manager| async move {
@@ -368,7 +368,7 @@ fn spawn_stale_session_archiver(ctx: &ServerCtx) {
                 tracing::info!("auto-archived {n} stale session(s)");
             }
         }
-    });
+    })
 }
 
 /// Provider-title auto-namer: every ~20s, rename any LIVE foreground agent
@@ -376,7 +376,7 @@ fn spawn_stale_session_archiver(ctx: &ServerCtx) {
 /// first user prompt in claude's transcript / codex's rollout). Skips
 /// user-named and already-adopted sessions with no disk work, so it stays
 /// cheap; each rename broadcasts `SessionRenamed` for a live UI refresh.
-fn spawn_provider_title_namer(ctx: &ServerCtx) {
+fn spawn_provider_title_namer(ctx: &ServerCtx) -> tokio::task::JoinHandle<()> {
     let manager = Arc::clone(&ctx.manager);
     let interval = Duration::from_secs(20);
     supervise::spawn("title-namer", manager, move |manager| async move {
@@ -393,14 +393,14 @@ fn spawn_provider_title_namer(ctx: &ServerCtx) {
                 tracing::info!("auto-named {n} session(s) from provider title");
             }
         }
-    });
+    })
 }
 
 /// Existence-check pruner: once at startup, then every ~6h. For non-live
 /// resumable agent sessions, delete the row only when the provider's local
 /// transcript is positively gone (un-resumable). Sessions whose transcript
 /// still exists — or whose resumability can't be verified — are kept.
-fn spawn_dead_session_pruner(ctx: &ServerCtx) {
+fn spawn_dead_session_pruner(ctx: &ServerCtx) -> tokio::task::JoinHandle<()> {
     let manager = Arc::clone(&ctx.manager);
     let interval = Duration::from_secs(6 * 60 * 60); // every 6h
     supervise::spawn("dead-pruner", manager, move |manager| async move {
@@ -411,12 +411,12 @@ fn spawn_dead_session_pruner(ctx: &ServerCtx) {
             }
             tokio::time::sleep(interval).await;
         }
-    });
+    })
 }
 
 /// Activity-trail retention: cap each session's trail at the newest N rows so
 /// long-lived sessions don't grow it unbounded. Runs at startup then hourly.
-fn spawn_activity_trail_pruner(ctx: &ServerCtx) {
+fn spawn_activity_trail_pruner(ctx: &ServerCtx) -> tokio::task::JoinHandle<()> {
     let manager = Arc::clone(&ctx.manager);
     const KEEP_PER_SESSION: i64 = 1_000;
     let interval = Duration::from_secs(60 * 60); // hourly
@@ -435,7 +435,7 @@ fn spawn_activity_trail_pruner(ctx: &ServerCtx) {
             since = started.checked_sub(Duration::from_secs(10 * 60));
             tokio::time::sleep(interval).await;
         }
-    });
+    })
 }
 
 // -- Retention ------------------------------------------------------------
@@ -446,7 +446,7 @@ fn spawn_activity_trail_pruner(ctx: &ServerCtx) {
 /// within the hour; windows are floored in otto-state (never deletes a row
 /// younger than its window). See docs/features/backup-restore.md. The same
 /// hourly pass purges expired credentials and runs SQLite housekeeping.
-fn spawn_data_retention(ctx: &ServerCtx) {
+fn spawn_data_retention(ctx: &ServerCtx) -> tokio::task::JoinHandle<()> {
     let interval = Duration::from_secs(60 * 60); // hourly
     supervise::spawn("retention", ctx.clone(), move |ctx| async move {
         let (pool, manager) = (ctx.pool.clone(), Arc::clone(&ctx.manager));
@@ -550,7 +550,7 @@ fn spawn_data_retention(ctx: &ServerCtx) {
             }
             tokio::time::sleep(interval).await;
         }
-    });
+    })
 }
 
 /// Workflow run-history retention (08-workflows R1): daily, first pass at
@@ -559,7 +559,7 @@ fn spawn_data_retention(ctx: &ServerCtx) {
 /// Proof Pack / scheduled-task run references (all enforced in
 /// `WorkflowsRepo::prune_runs`). Each pruned run's
 /// `workflow-context/<run_id>/` dir is removed, confined to that root.
-fn spawn_workflow_run_retention(ctx: &ServerCtx) {
+fn spawn_workflow_run_retention(ctx: &ServerCtx) -> tokio::task::JoinHandle<()> {
     let interval = Duration::from_secs(24 * 60 * 60);
     supervise::spawn("run-retention", ctx.clone(), move |ctx| async move {
         let ctx_root = ctx.data_dir.join("workflow-context");
@@ -594,7 +594,7 @@ fn spawn_workflow_run_retention(ctx: &ServerCtx) {
             }
             tokio::time::sleep(interval).await;
         }
-    });
+    })
 }
 
 // -- Channels, product, self-improvement ----------------------------------
@@ -815,7 +815,7 @@ fn start_model_catalog(ctx: &ServerCtx) {
 /// CPU/RAM; the budget sampler rides the metrics tick to check spend-vs-cap
 /// and emit BudgetExceeded events (with dedupe). All three are cheap no-ops
 /// until ClickHouse is available.
-fn start_usage_tracking(ctx: &ServerCtx) {
+fn start_usage_tracking(ctx: &ServerCtx) -> tokio::task::JoinHandle<()> {
     spawn_usage_recorder(ctx.clone());
     spawn_metrics_sampler(ctx.clone());
     spawn_budget_sampler(ctx.clone());
@@ -834,7 +834,7 @@ fn start_usage_tracking(ctx: &ServerCtx) {
                  not installed, disabled, or still starting)"
             );
         }
-    });
+    })
 }
 
 /// MCP Control Plane: periodic health sweep of managed servers
@@ -843,7 +843,8 @@ fn start_usage_tracking(ctx: &ServerCtx) {
 /// failures only update a server's health row. Lazy for stdio servers: only
 /// those used in the last 6 h are checked (see `McpService::health_sweep`),
 /// so an idle daemon spawns no MCP processes.
-fn spawn_mcp_health_sweep(ctx: &ServerCtx) {
+fn spawn_mcp_health_sweep(ctx: &ServerCtx) -> tokio::task::JoinHandle<()> {
+    tracing::info!("mcp control plane: health sweep started");
     supervise::spawn("mcp-health", ctx.clone(), |ctx| async move {
         let (mcp, settings) = (Arc::clone(&ctx.mcp), SettingsRepo::new(ctx.pool.clone()));
         loop {
@@ -861,8 +862,7 @@ fn spawn_mcp_health_sweep(ctx: &ServerCtx) {
             tokio::time::sleep(Duration::from_secs(secs)).await;
             mcp.health_sweep().await;
         }
-    });
-    tracing::info!("mcp control plane: health sweep started");
+    })
 }
 
 #[cfg(test)]

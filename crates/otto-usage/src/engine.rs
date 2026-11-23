@@ -189,6 +189,10 @@ pub struct UsageEngine {
     last_totals: std::sync::Mutex<TotalsMemo>,
     ingestion: tokio::sync::OnceCell<Arc<crate::ingestion::IngestionJournal>>,
     ingestion_delivery: tokio::sync::Mutex<()>,
+    /// When the oldest undelivered durable-journal batch began waiting (the
+    /// `MAX_DEFER` clock for background timer flushes while ClickHouse is
+    /// parked). Cleared once the journal drains to zero.
+    ingestion_pending_since: std::sync::Mutex<Option<std::time::Instant>>,
     /// Reported by the transcript tailer ([`Self::set_tailer_status`]) and
     /// surfaced on [`UsageStatus::tailer`].
     tailer_status: std::sync::Mutex<Option<crate::types::TailerStatus>>,
@@ -367,6 +371,7 @@ impl UsageEngine {
             last_totals: std::sync::Mutex::new(HashMap::new()),
             ingestion: tokio::sync::OnceCell::new(),
             ingestion_delivery: tokio::sync::Mutex::new(()),
+            ingestion_pending_since: std::sync::Mutex::new(None),
             tailer_status: std::sync::Mutex::new(None),
             sidebar_totals_cache: std::sync::Mutex::new(HashMap::new()),
             sidebar_totals_refreshing: std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -406,6 +411,9 @@ impl UsageEngine {
                 let Some(engine) = weak.upgrade() else { break };
                 // Usage events held while parked go in too.
                 engine.flush_sync.poke();
+                if let Err(e) = engine.flush_ingestion_with(false).await {
+                    tracing::debug!("usage: post-wake durable flush failed: {e}");
+                }
                 match engine.flush_metrics().await {
                     Ok(0) => {}
                     Ok(n) => tracing::debug!("usage: wrote {n} metrics held while idle-stopped"),
@@ -416,12 +424,13 @@ impl UsageEngine {
         let weak = Arc::downgrade(&engine);
         tokio::spawn(async move {
             // Every 90 s for the length of an outage: logged once, then at
-            // most every 15 minutes with a count.
+            // most every 15 minutes with a count. Respects MAX_DEFER so tiny
+            // durable batches never wake a parked ClickHouse every 90 s.
             let mut deferred = recovery::WarnGate::default();
             loop {
                 tokio::time::sleep(FLUSH_INTERVAL).await;
                 let Some(engine) = weak.upgrade() else { break };
-                match engine.flush_ingestion().await {
+                match engine.flush_ingestion_with(false).await {
                     Ok(()) => {
                         if deferred.clear() {
                             tracing::info!("usage: durable delivery resumed");
@@ -736,6 +745,13 @@ impl UsageEngine {
             .map_err(journal_error)
     }
 
+    pub(crate) fn mark_ingestion_pending(&self) {
+        self.ingestion_pending_since
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_or_insert_with(std::time::Instant::now);
+    }
+
     /// Atomically accept source progress and its owed events. IDs are generated
     /// in the journal transaction; neither source nor ClickHouse advances first.
     pub async fn commit_ingestion(
@@ -756,6 +772,9 @@ impl UsageEngine {
             .commit(checkpoint, &accepted)
             .await
             .map_err(journal_error)?;
+        if !accepted.is_empty() {
+            self.mark_ingestion_pending();
+        }
         if !events.is_empty() {
             self.last_record.store(unix_now(), Ordering::Relaxed);
             self.usage_gen.fetch_add(1, Ordering::SeqCst);
@@ -766,7 +785,16 @@ impl UsageEngine {
     /// Deliver bounded batches, retaining their original IDs until confirmed.
     /// INSERT success followed by an ack failure is safe: FINAL counts a replay
     /// once. No synchronous SQLite work runs on a Tokio runtime worker.
+    ///
+    /// Wakes a parked ClickHouse if needed (for foreground reads, budget checks,
+    /// shutdown, and explicit callers). The 90 s background timer calls
+    /// [`Self::flush_ingestion_with`] with `force_wake = false` so tiny batches
+    /// stay deferred until `MAX_DEFER` or the high-water mark.
     pub async fn flush_ingestion(&self) -> Result<()> {
+        self.flush_ingestion_with(true).await
+    }
+
+    async fn flush_ingestion_with(&self, force_wake: bool) -> Result<()> {
         if !self.config().enabled {
             return Ok(());
         }
@@ -774,12 +802,54 @@ impl UsageEngine {
         let journal = self.ingestion().await?;
         let mut remaining = journal.pending_count().await.map_err(journal_error)?;
         if remaining == 0 {
+            *self
+                .ingestion_pending_since
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = None;
             return Ok(());
         }
+        let pending_since = *self
+            .ingestion_pending_since
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_or_insert_with(std::time::Instant::now);
         let ch = self.ch().ok_or_else(|| {
             otto_core::Error::Upstream("usage engine unavailable; journal retained".into())
         })?;
-        let _lease = ch.wake_background().await?;
+        // Keep ClickHouse awake for delivery without resetting its idle clock;
+        // if it is parked, honor MAX_DEFER / high-water unless `force_wake`.
+        let _lease = if ch.is_parked() {
+            if ingestion_parked_action(remaining, Some(pending_since), force_wake, MAX_DEFER)
+                == ParkedAction::Defer
+            {
+                return Ok(());
+            }
+            match ch.wake_background().await {
+                Ok(lease) => lease,
+                Err(e) => {
+                    if !ch.server_alive() {
+                        self.heal.store(true, Ordering::SeqCst);
+                    }
+                    return Err(e);
+                }
+            }
+        } else if let Some(lease) = ch.try_keep_awake_background() {
+            lease
+        } else if ingestion_parked_action(remaining, Some(pending_since), force_wake, MAX_DEFER)
+            == ParkedAction::Defer
+        {
+            return Ok(());
+        } else {
+            match ch.wake_background().await {
+                Ok(lease) => lease,
+                Err(e) => {
+                    if !ch.server_alive() {
+                        self.heal.store(true, Ordering::SeqCst);
+                    }
+                    return Err(e);
+                }
+            }
+        };
         loop {
             if remaining == 0 {
                 break;
@@ -797,14 +867,31 @@ impl UsageEngine {
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(|e| otto_core::Error::Internal(format!("usage outbox encode: {e}")))?
                 .join("\n");
-            ch.insert_ndjson_background("usage_events_durable", &payload)
-                .await?
-                .then_some(())
-                .ok_or_else(|| otto_core::Error::Upstream("usage parked during delivery".into()))?;
+            match ch
+                .insert_ndjson_background("usage_events_durable", &payload)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(otto_core::Error::Upstream(
+                        "usage parked during delivery".into(),
+                    ));
+                }
+                Err(e) => {
+                    if !ch.server_alive() {
+                        self.heal.store(true, Ordering::SeqCst);
+                    }
+                    return Err(e);
+                }
+            }
             journal.ack(&rows).await.map_err(journal_error)?;
             remaining = remaining.saturating_sub(rows.len() as u64);
             self.usage_gen.fetch_add(1, Ordering::SeqCst);
         }
+        *self
+            .ingestion_pending_since
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
         Ok(())
     }
 
@@ -2535,6 +2622,28 @@ fn parked_action(w: &WriterBuf, final_flush: bool, max_defer: Duration) -> Parke
     }
 }
 
+/// Pending durable-journal row count at which a background timer flush wakes a
+/// parked ClickHouse early (mirrors `RETAIN_MAX` for the legacy writer while
+/// leaving ample headroom under `OUTBOX_MAX`).
+const INGESTION_WAKE_HIGH_WATER: u64 = RETAIN_MAX as u64;
+
+/// Whether a durable-ingestion flush should wake a parked ClickHouse or defer.
+fn ingestion_parked_action(
+    pending: u64,
+    pending_since: Option<std::time::Instant>,
+    force_wake: bool,
+    max_defer: Duration,
+) -> ParkedAction {
+    if force_wake
+        || pending >= INGESTION_WAKE_HIGH_WATER
+        || pending_since.is_some_and(|t| t.elapsed() >= max_defer)
+    {
+        ParkedAction::Wake
+    } else {
+        ParkedAction::Defer
+    }
+}
+
 /// Write the buffered events as ONE background insert (S9-02). A parked
 /// server is left parked unless [`parked_action`] says the events have waited
 /// long enough (or `wake`: the final flush, or a foreground read that wakes
@@ -3526,6 +3635,145 @@ mod writer_policy_tests {
         assert!(FLUSH_BATCH >= 1_000);
         assert!(MAX_DEFER.as_secs() <= 30 * 60);
     };
+
+    fn test_engine_with_ch(data_dir: PathBuf, ch: Arc<ClickHouse>) -> UsageEngine {
+        let config = UsageConfig {
+            enabled: true,
+            ..UsageConfig::default()
+        };
+        UsageEngine {
+            inner: RwLock::new(Inner {
+                ch: Some(ch),
+                ..Inner::default()
+            }),
+            config: RwLock::new(config),
+            data_dir,
+            reinit_lock: tokio::sync::Mutex::new(()),
+            heal: Arc::new(HealSignal::default()),
+            recovery: Arc::new(recovery::Recovery::default()),
+            disk_cache: std::sync::Mutex::new(None),
+            totals_cache: tokio::sync::Mutex::new(None),
+            metrics_buf: std::sync::Mutex::new(MetricsBuf::default()),
+            last_metrics_read: AtomicU64::new(0),
+            last_record: AtomicU64::new(0),
+            idle_stop_secs: Arc::new(AtomicU64::new(IDLE_STOP_AFTER.as_secs())),
+            idle_stop_changed: Arc::new(tokio::sync::Notify::new()),
+            ch_woke: Arc::new(tokio::sync::Notify::new()),
+            usage_gen: Arc::new(AtomicU64::new(0)),
+            pending_legacy: Arc::new(AtomicU64::new(0)),
+            flush_sync: Arc::new(FlushSync::default()),
+            last_totals: std::sync::Mutex::new(HashMap::new()),
+            ingestion: tokio::sync::OnceCell::new(),
+            ingestion_delivery: tokio::sync::Mutex::new(()),
+            ingestion_pending_since: std::sync::Mutex::new(None),
+            tailer_status: std::sync::Mutex::new(None),
+            sidebar_totals_cache: std::sync::Mutex::new(HashMap::new()),
+            sidebar_totals_refreshing: std::sync::Mutex::new(std::collections::HashSet::new()),
+        }
+    }
+
+    #[test]
+    fn durable_ingestion_parked_action_respects_max_defer_and_high_water() {
+        let now = std::time::Instant::now();
+        // Small fresh batch defers while parked.
+        assert_eq!(
+            ingestion_parked_action(1, Some(now), false, MAX_DEFER),
+            ParkedAction::Defer
+        );
+        // Explicit wake (foreground read / budget / shutdown) always wakes.
+        assert_eq!(
+            ingestion_parked_action(1, Some(now), true, MAX_DEFER),
+            ParkedAction::Wake
+        );
+        // Oldest pending batch past MAX_DEFER wakes even on background timer.
+        assert_eq!(
+            ingestion_parked_action(
+                1,
+                Some(now - Duration::from_millis(20)),
+                false,
+                Duration::from_millis(10)
+            ),
+            ParkedAction::Wake
+        );
+        // Reaching the high-water mark wakes regardless of age.
+        assert_eq!(
+            ingestion_parked_action(INGESTION_WAKE_HIGH_WATER, Some(now), false, MAX_DEFER),
+            ParkedAction::Wake
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_ingestion_background_defers_while_parked_until_max_defer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ch = Arc::new(ClickHouse::for_tests("http://127.0.0.1:9", true));
+        let engine = test_engine_with_ch(tmp.path().to_path_buf(), Arc::clone(&ch));
+
+        engine
+            .commit_ingestion(&serde_json::json!({"offset": 1}), &[UsageEvent::default()])
+            .await
+            .unwrap();
+
+        // Background timer tick (`force_wake = false`) must NOT wake a parked
+        // ClickHouse for a fresh small durable batch.
+        engine.flush_ingestion_with(false).await.unwrap();
+        assert!(
+            ch.is_parked(),
+            "small fresh batch must leave ClickHouse parked"
+        );
+        assert_eq!(
+            engine
+                .ingestion()
+                .await
+                .unwrap()
+                .pending_count()
+                .await
+                .unwrap(),
+            1
+        );
+
+        // Once the pending age exceeds MAX_DEFER, even the background tick
+        // attempts to wake ClickHouse (which fails against the dummy test
+        // binary path and raises heal since the failed wake leaves CH dead).
+        *engine.ingestion_pending_since.lock().unwrap() =
+            Some(std::time::Instant::now() - MAX_DEFER - Duration::from_secs(1));
+        assert!(engine.flush_ingestion_with(false).await.is_err());
+        assert!(!ch.is_parked());
+        assert!(engine.heal.flag.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn flush_ingestion_raises_heal_when_clickhouse_is_dead() {
+        let tmp = tempfile::tempdir().unwrap();
+        // `parked = false` + `child = None` simulates a dead ClickHouse child
+        // (`server_alive() == false`), with port 9 refusing HTTP inserts.
+        let ch = Arc::new(ClickHouse::for_tests("http://127.0.0.1:9", false));
+        assert!(!ch.server_alive());
+        let engine = test_engine_with_ch(tmp.path().to_path_buf(), ch);
+
+        engine
+            .commit_ingestion(&serde_json::json!({"offset": 2}), &[UsageEvent::default()])
+            .await
+            .unwrap();
+
+        assert!(!engine.heal.flag.load(Ordering::SeqCst));
+        let err = engine.flush_ingestion().await;
+        assert!(err.is_err());
+        assert!(
+            engine.heal.flag.load(Ordering::SeqCst),
+            "dead ClickHouse insert failure must raise the self-heal signal"
+        );
+        // Row stays retained in the durable journal for replay after restart.
+        assert_eq!(
+            engine
+                .ingestion()
+                .await
+                .unwrap()
+                .pending_count()
+                .await
+                .unwrap(),
+            1
+        );
+    }
 }
 
 fn journal_error(e: sqlx::Error) -> otto_core::Error {

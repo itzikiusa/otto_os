@@ -119,25 +119,106 @@ fn looks_like_email(w: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
 }
 
-/// Classify a single (already punctuation-trimmed) word. `after_bearer_kw` is
-/// true when the previous word was the literal `Bearer`/`bearer` keyword.
-fn classify_word(w: &str, after_bearer_kw: bool) -> Option<&'static str> {
+fn is_token_body(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+}
+
+fn is_basic_b64(w: &str) -> bool {
+    if w.len() < 8
+        || !w
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='))
+    {
+        return false;
+    }
+    let has_upper = w.bytes().any(|b| b.is_ascii_uppercase());
+    let has_lower = w.bytes().any(|b| b.is_ascii_lowercase());
+    let has_digit = w.bytes().any(|b| b.is_ascii_digit());
+    w.ends_with('=') || (has_upper && has_lower) || has_digit || w.contains('+') || w.contains('/')
+}
+
+/// Whether `tail` (starting at `-----BEGIN`) begins with a real PEM header line
+/// for a key/certificate/PGP block, even if the closing `-----END` was clipped
+/// by a read/log size cap.
+fn looks_like_pem_header(tail: &str) -> bool {
+    let first_line = tail.lines().next().unwrap_or(tail).trim_end_matches('\r');
+    let Some(rest) = first_line.strip_prefix("-----BEGIN ") else {
+        return false;
+    };
+    let Some(label) = rest.strip_suffix("-----") else {
+        return false;
+    };
+    !label.is_empty()
+        && label
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || matches!(b, b' ' | b'-'))
+        && (label.contains("KEY") || label.contains("CERTIFICATE") || label.contains("PGP"))
+}
+
+/// Classify a single (already punctuation-trimmed) word. `auth_scheme` is set
+/// when the previous word was a literal `Bearer`/`Basic` auth scheme keyword.
+fn classify_word(w: &str, auth_scheme: Option<&'static str>) -> Option<&'static str> {
     if w.starts_with("eyJ") && w.len() > 20 && is_b64url_dotted(w) {
         return Some("jwt");
     }
     if w.len() == 20
-        && w.starts_with("AKIA")
+        && (w.starts_with("AKIA") || w.starts_with("ASIA"))
         && w[4..]
             .chars()
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
     {
         return Some("aws_key");
     }
+    if (w.starts_with("ghp_")
+        || w.starts_with("gho_")
+        || w.starts_with("ghu_")
+        || w.starts_with("ghs_")
+        || w.starts_with("ghr_"))
+        && w.len() >= 20
+        && is_token_body(&w[4..])
+    {
+        return Some("github_token");
+    }
+    if let Some(rest) = w.strip_prefix("github_pat_") {
+        if rest.len() >= 20 && is_token_body(rest) {
+            return Some("github_token");
+        }
+    }
+    if let Some(rest) = w
+        .strip_prefix("sk-ant-")
+        .or_else(|| w.strip_prefix("sk-proj-"))
+    {
+        if rest.len() >= 16 && is_token_body(rest) {
+            return Some("api_key");
+        }
+    }
+    if let Some(rest) = w.strip_prefix("sk-") {
+        if rest.len() >= 24 && is_token_body(rest) && rest.bytes().any(|b| b.is_ascii_digit()) {
+            return Some("api_key");
+        }
+    }
+    if (w.starts_with("xoxb-")
+        || w.starts_with("xoxp-")
+        || w.starts_with("xoxo-")
+        || w.starts_with("xoxa-")
+        || w.starts_with("xoxr-"))
+        && w.len() >= 20
+        && is_token_body(&w[5..])
+    {
+        return Some("slack_token");
+    }
+    if w.len() == 39 && w.starts_with("AIza") && is_token_body(&w[4..]) {
+        return Some("api_key");
+    }
     if looks_like_email(w) {
         return Some("email");
     }
-    if after_bearer_kw && w.len() >= 8 && is_b64url_dotted(w) {
-        return Some("bearer");
+    match auth_scheme {
+        Some("bearer") if w.len() >= 8 && is_b64url_dotted(w) => return Some("bearer"),
+        Some("basic") if is_basic_b64(w) => return Some("basic"),
+        _ => {}
     }
     None
 }
@@ -170,10 +251,16 @@ fn redact_text_into(input: &str, tally: &mut Tally) -> String {
             s.push_str(PLACEHOLDER);
             tally.bump("private_key");
             rest = &tail[close..];
-        } else {
-            s.push_str(tail);
+        } else if looks_like_pem_header(tail) {
+            // Truncated PEM block (e.g. clipped at a read/log cap before
+            // `-----END`): fail closed and redact the remainder of the block.
+            s.push_str(PLACEHOLDER);
+            tally.bump("private_key");
             rest = "";
             break;
+        } else {
+            s.push_str("-----BEGIN");
+            rest = &tail["-----BEGIN".len()..];
         }
     }
     s.push_str(rest);
@@ -181,41 +268,66 @@ fn redact_text_into(input: &str, tally: &mut Tally) -> String {
     // 2. Word scan for the remaining single-token shapes.
     let mut out = String::with_capacity(s.len());
     let mut word = String::new();
-    let mut after_bearer = false;
-    let flush =
-        |word: &mut String, out: &mut String, after_bearer: &mut bool, tally: &mut Tally| {
-            if word.is_empty() {
-                return;
-            }
-            let trimmed = trim_punct(word);
-            let next_after_bearer = matches!(trimmed, "Bearer" | "bearer");
-            match classify_word(trimmed, *after_bearer) {
-                Some(kind) => {
-                    // Preserve any leading/trailing punctuation we trimmed.
-                    let lead = &word[..word.find(trimmed).unwrap_or(0)];
-                    let tail_start = word
-                        .find(trimmed)
-                        .map(|i| i + trimmed.len())
-                        .unwrap_or(word.len());
-                    out.push_str(lead);
-                    out.push_str(PLACEHOLDER);
-                    out.push_str(&word[tail_start..]);
-                    tally.bump(kind);
-                }
-                None => out.push_str(word),
-            }
-            *after_bearer = next_after_bearer;
-            word.clear();
+    let mut auth_scheme: Option<&'static str> = None;
+    let flush = |word: &mut String,
+                 out: &mut String,
+                 auth_scheme: &mut Option<&'static str>,
+                 tally: &mut Tally| {
+        if word.is_empty() {
+            return;
+        }
+        let trimmed = trim_punct(word);
+        let next_scheme = match trimmed {
+            "Bearer" | "bearer" => Some("bearer"),
+            "Basic" | "basic" => Some("basic"),
+            _ => None,
         };
+        match classify_word(trimmed, *auth_scheme) {
+            Some(kind) => {
+                // Preserve any leading/trailing punctuation we trimmed.
+                let lead = &word[..word.find(trimmed).unwrap_or(0)];
+                let tail_start = word
+                    .find(trimmed)
+                    .map(|i| i + trimmed.len())
+                    .unwrap_or(word.len());
+                out.push_str(lead);
+                out.push_str(PLACEHOLDER);
+                out.push_str(&word[tail_start..]);
+                tally.bump(kind);
+            }
+            None => {
+                // Also inspect the value half of `KEY=VALUE` pairs (`.env`,
+                // query strings, CLI flags like `--token=ghp_...`).
+                if let Some((lhs, rhs)) = trimmed.split_once('=') {
+                    let val = trim_punct(rhs);
+                    if let Some(kind) = classify_word(val, None) {
+                        let trimmed_start = word.find(trimmed).unwrap_or(0);
+                        let rhs_offset = trimmed_start + lhs.len() + 1;
+                        let val_offset = rhs_offset + rhs.find(val).unwrap_or(0);
+                        out.push_str(&word[..val_offset]);
+                        out.push_str(PLACEHOLDER);
+                        out.push_str(&word[val_offset + val.len()..]);
+                        tally.bump(kind);
+                    } else {
+                        out.push_str(word);
+                    }
+                } else {
+                    out.push_str(word);
+                }
+            }
+        }
+        *auth_scheme = next_scheme;
+        word.clear();
+    };
     for ch in s.chars() {
         if ch.is_whitespace() {
-            flush(&mut word, &mut out, &mut after_bearer, tally);
+            flush(&mut word, &mut out, &mut auth_scheme, tally);
             out.push(ch);
         } else {
             word.push(ch);
         }
     }
-    flush(&mut word, &mut out, &mut after_bearer, tally);
+    flush(&mut word, &mut out, &mut auth_scheme, tally);
     out
 }
 
@@ -306,5 +418,58 @@ mod tests {
         assert_eq!(r.value["items"][0]["Authorization"], json!(PLACEHOLDER));
         let total: usize = r.hits.iter().map(|h| h.count).sum();
         assert!(total >= 4);
+    }
+
+    #[test]
+    fn redacts_truncated_pem_private_key() {
+        for header in [
+            "-----BEGIN RSA PRIVATE KEY-----",
+            "-----BEGIN OPENSSH PRIVATE KEY-----",
+            "-----BEGIN EC PRIVATE KEY-----",
+            "-----BEGIN PRIVATE KEY-----",
+            "-----BEGIN PGP PRIVATE KEY BLOCK-----",
+        ] {
+            let input = format!("prefix\n{header}\nMIIEpAIBAAKCAQEAt0truncatedsecretbytes");
+            let r = redact_text(&input);
+            assert!(
+                !r.value.contains("MIIEpAIBAAKCAQEAt0truncatedsecretbytes"),
+                "key body leaked for {header}: {}",
+                r.value
+            );
+            assert!(r.value.starts_with("prefix\n"));
+            assert!(r.value.contains(PLACEHOLDER));
+            assert!(r.hits.iter().any(|h| h.kind == "private_key"));
+        }
+        // Prose mentioning `-----BEGIN` without a real PEM key header passes through.
+        let prose = redact_text("note: -----BEGIN is a marker in PEM files");
+        assert_eq!(prose.value, "note: -----BEGIN is a marker in PEM files");
+        assert!(prose.hits.is_empty());
+    }
+
+    #[test]
+    fn redacts_modern_token_prefixes_and_basic_auth() {
+        let gh = "ghp_1234567890abcdef1234567890abcdef1234";
+        let gh_pat = "github_pat_11AAAAAA0123456789_abcdef0123456789ABCDEF";
+        let anth = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz123456";
+        let oai = "sk-proj-abcdefghijklmnopqrstuvwxyz1234567890";
+        let slack = "xoxb-fake-token-for-redaction-test";
+        let sts = format!("ASIA{}", "X".repeat(16));
+        let goog = format!("AIza{}", "x".repeat(35));
+        let basic = "dXNlcjpwYXNz";
+        let input = format!(
+            "gh={gh} pat={gh_pat} anth={anth} oai={oai} slack={slack} sts={sts} goog={goog} Authorization: Basic {basic}"
+        );
+        let r = redact_text(&input);
+        for secret in [gh, gh_pat, anth, oai, slack, &sts, &goog, basic] {
+            assert!(
+                !r.value.contains(secret),
+                "secret leaked ({secret}): {}",
+                r.value
+            );
+        }
+        // Normal English after "Basic" must not false-positive.
+        let ok = redact_text("Basic configuration and sk-short are fine");
+        assert_eq!(ok.value, "Basic configuration and sk-short are fine");
+        assert!(ok.hits.is_empty());
     }
 }

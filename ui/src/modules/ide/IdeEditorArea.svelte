@@ -3,7 +3,7 @@
   import CodeEditor, { registerIdeEditorCore } from '../../lib/components/CodeEditor.svelte';
   import type * as CmIdeDepsMod from '../../lib/components/cm-ide-deps';
   import type * as CmIdeMod from '../../lib/components/cm-ide-extensions';
-  import { IDE_PREFS_EVENT, readIdePreferences } from '../../lib/components/cm-ide-prefs';
+  import { readIdePreferences } from '../../lib/components/cm-ide-prefs';
 
   let histReady = $state(false);
   void Promise.all([
@@ -19,11 +19,16 @@
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { isIdeManifestPath } from '../../lib/components/cm-ide-manifest';
+  import { startMouseDrag } from '../../lib/dragCursor';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
+  import { RESIZE_TITLE, RESIZE_TITLE_VERTICAL, splitter } from '../../lib/paneResizer';
+  import { lsGet, lsSet } from '../../lib/storage';
   import { toasts } from '../../lib/toast.svelte';
   import { ide, type IdeCodeAction, type IdeEditorHandle, type IdeOpenTab, type IdeSymbolNode } from './ideStore.svelte';
   import { ideAgent } from './store/ideAgentController.svelte';
   import { ideEditorDebugProps } from './editor/ideEditorDebugBridge';
+  import { computeSplitRatioFromKey } from './editor/ideEditorHelpers';
+  import { attachIdeEditorWindowEvents } from './editor/ideEditorWindowEvents';
   import { subscribeIdeBufferEvictions, subscribeIdeFileSaved } from './store/ideBufferPerf';
   import IdeTabBar from './editor/IdeTabBar.svelte';
   import IdePreviewPane from './editor/IdePreviewPane.svelte';
@@ -33,12 +38,12 @@
     areIdeBreakpointsMuted, classifyIdeFile, evictPersistedIdeGitBase, fetchIdeGitBlame,
     flushAutoLocalHistorySnapshot, getIdeProjectFolders, getPersistedIdeGitBaseDigest,
     getPersistedIdeGitBaseSnapshot, ideEditorPrefs, idePreviewMode, navigateIdeBack, navigateIdeForward,
-    performIdeDive, pushIdeNavLocation, putIdeLocalHistoryLabel, resolveIdeGitBaseContent,
+    performIdeDive, pushIdeNavLocation, resolveIdeGitBaseContent,
     setPersistedIdeGitBase,
   } from './editor/ideEditorStoreBridge.svelte';
   import type { ideGit as IdeGitSingleton } from './git/ideGitController.svelte';
+  import { extractGutterHunks, findGutterHunkAtLine, resolveClickedDiffGutterLine, revertHunkInText, type IdeGutterHunk } from './git/ideGutterHunks';
   import type { IdeOutlineNode } from './editor/ideLangAnalyzer';
-  import type { IdeDiagnostic } from '../../lib/api/types';
   let langAnalyzerMod = $state<typeof import('./editor/ideLangAnalyzer') | null>(null);
   let liveGit = $state<typeof IdeGitSingleton | null>(null);
   function fastDocKind(filePath: string, language?: string): string {
@@ -65,13 +70,16 @@
   const IdeIntentionPopoverLazy = lazyComponent(() => import('./editor/IdeIntentionPopover.svelte'));
   const IdeDependencyAnalyzerLazy = lazyComponent(() => import('./editor/IdeDependencyAnalyzer.svelte'));
   const IdeClipboardHistoryModalLazy = lazyComponent(() => import('./editor/IdeClipboardHistoryModal.svelte'));
+  const IdeGitHunkPopoverLazy = lazyComponent(() => import('./editor/IdeGitHunkPopover.svelte'));
 
   const SPLIT_RATIO_KEY = 'otto.ide.splitRatio.v1';
   function readSavedSplitRatio(): number {
-    try {
-      const v = Number(typeof localStorage !== 'undefined' ? localStorage.getItem(SPLIT_RATIO_KEY) : '');
-      return Number.isFinite(v) && v >= 0.2 && v <= 0.8 ? v : 0.5;
-    } catch { return 0.5; }
+    const v = Number(lsGet(SPLIT_RATIO_KEY) ?? '');
+    return Number.isFinite(v) && v >= 0.2 && v <= 0.8 ? v : 0.5;
+  }
+  function persistSplitRatio(next: number): void {
+    splitRatio = next;
+    lsSet(SPLIT_RATIO_KEY, next.toFixed(3));
   }
 
   type ExtendedEditorRef = IdeEditorHandle & {
@@ -97,6 +105,7 @@
   let structureOpen = $state(false);
   let clipboardModalOpen = $state(false);
   let bpEditor = $state<{ path: string; line: number; x: number; y: number } | null>(null);
+  let hunkPopover = $state<{ path: string; hunkIndex: number; x: number; y: number } | null>(null);
   let intentionState = $state<{
     path: string; line: number; col: number; x: number; y: number; symbol?: string;
     manifestDep: CmIdeDepsMod.IdeDepItem | null;
@@ -109,6 +118,7 @@
   let gitBaseByPath = $state<Record<string, string | null | undefined>>(getPersistedIdeGitBaseSnapshot());
   const gitBaseCtlByPath = new Map<string, AbortController>();
   let splitRatio = $state(readSavedSplitRatio());
+  let cancelSplitDrag: (() => void) | null = null;
   let prefs = $state(readIdePreferences());
   let stagedPrimaryTab = $state<IdeOpenTab | null>(null);
   let stagedSplitTab = $state<IdeOpenTab | null>(null);
@@ -175,101 +185,15 @@
     if (liveGit) liveGit.syncExternalRepoChanges();
   });
 
-  $effect(() => {
-    if (typeof window === 'undefined') return;
-    const onPrefs = () => { prefs = readIdePreferences(); };
-    const onPasteHist = () => { clipboardModalOpen = true; };
-    const onPutLabel = (e: Event) => {
-      const p = (e as CustomEvent<{ path?: string }>).detail?.path ?? ide.activePath;
-      const t = ide.tabs.find((x) => x.path === p);
-      if (t) void putIdeLocalHistoryLabel(t.path, t.content);
-    };
-    const onApplyFixes = (e: Event) => {
-      const det = (e as CustomEvent<{ path?: string; edits?: CmIdeMod.IdeConcreteTextEdit[] }>).detail;
-      if (!det?.edits?.length) return;
-      if (!det.path || det.path === stagedPrimaryTab?.path) primaryEditorRef?.applyQuickFixEdits?.(det.edits);
-      else if (det.path === stagedSplitTab?.path) splitEditorRef?.applyQuickFixEdits?.(det.edits);
-    };
-    const onEnableGoTag = (e: Event) => {
-      const det = (e as CustomEvent<{ tags?: string[]; filePath?: string }>).detail;
-      const tags = det?.tags ?? [];
-      if (tags.length === 0) return;
-      const targetFile = det?.filePath || ide.activePath || ide.target.root;
-      const merged = [...ide.getRepoGoBuildTags(targetFile), ...tags];
-      void ide.setRepoGoBuildTags(targetFile, merged);
-    };
-    const onReconnectLsp = (e: Event) => {
-      const rootPath = (e as CustomEvent<{ rootPath?: string }>).detail?.rootPath;
-      primaryEditorRef?.reconnectLspClients?.(rootPath);
-      splitEditorRef?.reconnectLspClients?.(rootPath);
-    };
-    const onLspDiags = (e: Event) => { const d = (e as CustomEvent<{ path: string; diagnostics: IdeDiagnostic[] }>).detail; ide.setDiagnostics(d.path, d.diagnostics); };
-    const onGitReloaded = (e: Event) => {
-      const reloadedPath = (e as CustomEvent<{ path?: string }>).detail?.path;
-      const tab = reloadedPath ? ide.tabs.find((t) => t.path === reloadedPath) : ide.activeTab;
-      if (tab) refreshGitBaseForTab(tab, true);
-    };
-    const onFindInFiles = (e: Event) => {
-      const scopePath = (e as CustomEvent<{ path?: string }>).detail?.path;
-      const dir = scopePath && scopePath.includes('/') ? scopePath.slice(0, scopePath.lastIndexOf('/')) : null;
-      ide.openFindInPath({ scopePath: dir });
-    };
-    const onRepoTestAction = (e: Event) => {
-      const det = (e as CustomEvent<{ path?: string; mode?: 'run' | 'coverage' | 'debug' }>).detail;
-      void ide.runRepoTests(det?.path ?? ide.activePath, det?.mode ?? 'run');
-    };
-    const onFileRefactor = (e: Event) => {
-      const det = (e as CustomEvent<{ op?: 'move' | 'copy' | 'safe-delete'; path?: string }>).detail;
-      const targetPath = det?.path || ide.activePath;
-      if (!targetPath || !det?.op) return;
-      void import('../../lib/confirm.svelte').then(async ({ confirmer }) => {
-        if (det.op === 'move' || det.op === 'copy') {
-          const isCopy = det.op === 'copy';
-          const initial = isCopy ? targetPath.replace(/(\.[^./]+)$/, '_copy$1') : targetPath;
-          const dest = await confirmer.promptText(
-            isCopy ? `Create a copy of ${ide.relativePath(targetPath)} at:` : `Move or rename ${ide.relativePath(targetPath)} to:`,
-            { title: isCopy ? 'Copy file' : 'Move file', confirmLabel: isCopy ? 'Copy' : 'Move', initial },
-          );
-          if (dest?.trim() && ide.resolvePath(dest.trim()) !== targetPath) await ide.mutateFs(isCopy ? 'duplicate' : 'rename', targetPath, dest.trim());
-        } else if (det.op === 'safe-delete') {
-          const baseSym = (targetPath.split('/').pop() ?? '').replace(/\.[^.]+$/, '');
-          if (baseSym && /^[A-Za-z_]\w*$/.test(baseSym)) {
-            await ide.findReferences(targetPath, 1, 1, baseSym);
-          }
-          const externalRefs = ide.usages.filter((u) => u.path !== targetPath).length;
-          const warn = externalRefs > 0
-            ? `Found ${externalRefs} workspace usage(s) referencing “${baseSym}”. Delete “${ide.relativePath(targetPath)}” anyway?`
-            : `No external symbol usages found. Delete “${ide.relativePath(targetPath)}”?`;
-          const ok = await confirmer.ask(warn, { title: 'Safe delete file', confirmLabel: 'Delete', danger: true });
-          if (ok) await ide.mutateFs('delete', targetPath);
-        }
-      });
-    };
-    window.addEventListener(IDE_PREFS_EVENT, onPrefs);
-    window.addEventListener('otto:ide-paste-history', onPasteHist);
-    window.addEventListener('otto:ide-put-history-label', onPutLabel);
-    window.addEventListener('otto:ide-apply-quickfix-edits', onApplyFixes);
-    window.addEventListener('otto:ide-enable-go-build-tag', onEnableGoTag);
-    window.addEventListener('otto:ide-reconnect-lsp', onReconnectLsp);
-    window.addEventListener('otto:ide-lsp-diagnostics', onLspDiags);
-    window.addEventListener('otto:ide-git-file-reloaded', onGitReloaded);
-    window.addEventListener('otto:ide-open-find-in-files', onFindInFiles);
-    window.addEventListener('otto:ide-repo-test-action', onRepoTestAction);
-    window.addEventListener('otto:ide-editor-file-refactor', onFileRefactor);
-    return () => {
-      window.removeEventListener(IDE_PREFS_EVENT, onPrefs);
-      window.removeEventListener('otto:ide-paste-history', onPasteHist);
-      window.removeEventListener('otto:ide-put-history-label', onPutLabel);
-      window.removeEventListener('otto:ide-apply-quickfix-edits', onApplyFixes);
-      window.removeEventListener('otto:ide-enable-go-build-tag', onEnableGoTag);
-      window.removeEventListener('otto:ide-reconnect-lsp', onReconnectLsp);
-      window.removeEventListener('otto:ide-lsp-diagnostics', onLspDiags);
-      window.removeEventListener('otto:ide-git-file-reloaded', onGitReloaded);
-      window.removeEventListener('otto:ide-open-find-in-files', onFindInFiles);
-      window.removeEventListener('otto:ide-repo-test-action', onRepoTestAction);
-      window.removeEventListener('otto:ide-editor-file-refactor', onFileRefactor);
-    };
-  });
+  $effect(() => attachIdeEditorWindowEvents({
+    onPrefsChanged: () => { prefs = readIdePreferences(); },
+    onOpenClipboardHistory: () => { clipboardModalOpen = true; },
+    getPrimaryPath: () => stagedPrimaryTab?.path ?? null,
+    getSplitPath: () => stagedSplitTab?.path ?? null,
+    applyQuickFixEdits: (pane, edits) => (pane === 'primary' ? primaryEditorRef : splitEditorRef)?.applyQuickFixEdits?.(edits),
+    reconnectLspClients: (rootPath) => { primaryEditorRef?.reconnectLspClients?.(rootPath); splitEditorRef?.reconnectLspClients?.(rootPath); },
+    refreshGitBase: (tab) => refreshGitBaseForTab(tab, true),
+  }));
 
   function disposeAllPooledLsp(): void {
     primaryEditorRef?.disposeLspClients?.();
@@ -295,7 +219,7 @@
       for (const ctl of gitBaseCtlByPath.values()) ctl.abort();
       gitBaseCtlByPath.clear(); evictPersistedIdeGitBase('all'); gitBaseByPath = {};
       blameEnabledByPath = {}; blameByPath = {}; manifestModeByPath = {}; manifestDepsByPath = {};
-      bpEditor = null; intentionState = null; disposeAllPooledLsp(); return;
+      bpEditor = null; intentionState = null; hunkPopover = null; disposeAllPooledLsp(); return;
     }
     evictPersistedIdeGitBase(pathList);
     const nextBlame = { ...blameByPath }, nextBlameOn = { ...blameEnabledByPath }, nextGitBase = { ...gitBaseByPath };
@@ -305,6 +229,7 @@
       delete nextBlame[p]; delete nextBlameOn[p]; delete nextManMode[p]; delete nextManDeps[p];
       if (bpEditor?.path === p) bpEditor = null;
       if (intentionState?.path === p) intentionState = null;
+      if (hunkPopover?.path === p) hunkPopover = null;
     }
     blameByPath = nextBlame; blameEnabledByPath = nextBlameOn; gitBaseByPath = nextGitBase;
     manifestModeByPath = nextManMode; manifestDepsByPath = nextManDeps;
@@ -320,6 +245,8 @@
   });
 
   onDestroy(() => {
+    cancelSplitDrag?.();
+    cancelSplitDrag = null;
     for (const ctl of gitBaseCtlByPath.values()) ctl.abort();
     gitBaseCtlByPath.clear();
     flushAutoLocalHistorySnapshot();
@@ -350,6 +277,25 @@
       : null,
   );
   const pathSegments = $derived(ide.activeTab ? ide.relativePath(ide.activeTab.path).split('/').filter(Boolean) : []);
+  const diffBaseFor = (t: IdeOpenTab): string | null => (gitBaseByPath[t.path] !== undefined ? (gitBaseByPath[t.path] ?? null) : t.savedContent);
+  const activeGitHunks = $derived(ide.activeTab ? extractGutterHunks(diffBaseFor(ide.activeTab), ide.activeTab.content, ide.relativePath(ide.activeTab.path)) : []);
+  const activeCursorHunk = $derived(findGutterHunkAtLine(activeGitHunks, ide.cursorInfo.line));
+
+  $effect(() => {
+    const el = panesEl;
+    if (!el) return;
+    const onDown = (e: MouseEvent): void => {
+      const ln = resolveClickedDiffGutterLine(e);
+      if (ln == null) return;
+      const tab = e.target instanceof Element && e.target.closest('.split-secondary') ? stagedSplitTab : stagedPrimaryTab;
+      const hit = tab ? findGutterHunkAtLine(extractGutterHunks(diffBaseFor(tab), tab.content, ide.relativePath(tab.path)), ln) : null;
+      if (!tab || !hit) return;
+      e.preventDefault(); e.stopPropagation();
+      hunkPopover = { path: tab.path, hunkIndex: hit.index, x: e.clientX, y: e.clientY };
+    };
+    el.addEventListener('mousedown', onDown, true);
+    return () => el.removeEventListener('mousedown', onDown, true);
+  });
 
   function toEditorHandle(ref: ExtendedEditorRef): IdeEditorHandle {
     const h: IdeEditorHandle & { applyQuickFixEdits?: (edits: CmIdeMod.IdeConcreteTextEdit[]) => boolean } = {
@@ -433,22 +379,32 @@
 
   function startSplitResize(e: MouseEvent): void {
     if (!panesEl) return;
-    e.preventDefault();
+    cancelSplitDrag?.();
     const down = ide.splitDirection === 'down', rect = panesEl.getBoundingClientRect();
     const rtl = getComputedStyle(panesEl).direction === 'rtl';
-    const onMove = (me: MouseEvent) => {
-      const raw = down
-        ? (me.clientY - rect.top) / Math.max(1, rect.height)
-        : (rtl ? rect.right - me.clientX : me.clientX - rect.left) / Math.max(1, rect.width);
-      splitRatio = Math.max(0.2, Math.min(0.8, raw));
-    };
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      try { localStorage.setItem(SPLIT_RATIO_KEY, splitRatio.toFixed(3)); } catch { /* ignore */ }
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+    cancelSplitDrag = startMouseDrag(e, {
+      cursor: down ? 'row-resize' : 'col-resize',
+      onMove: (me) => {
+        const raw = down
+          ? (me.clientY - rect.top) / Math.max(1, rect.height)
+          : (rtl ? rect.right - me.clientX : me.clientX - rect.left) / Math.max(1, rect.width);
+        splitRatio = Math.max(0.2, Math.min(0.8, raw));
+      },
+      onEnd: () => {
+        cancelSplitDrag = null;
+        lsSet(SPLIT_RATIO_KEY, splitRatio.toFixed(3));
+      },
+    });
+  }
+
+  function onSplitResizerKeydown(e: KeyboardEvent): void {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const down = ide.splitDirection === 'down';
+    const rtl = !down && Boolean(panesEl && getComputedStyle(panesEl).direction === 'rtl');
+    const next = computeSplitRatioFromKey(splitRatio, e.key, { down, rtl, shiftKey: e.shiftKey });
+    if (next === null) return;
+    e.preventDefault();
+    persistSplitRatio(next);
   }
 </script>
 
@@ -468,12 +424,16 @@
         {effectiveViewMode}
         {hasNonEmptySelection}
         blameActive={Boolean(blameEnabledByPath[activeTab.path])}
+        activeGitHunk={activeCursorHunk} gitHunkCount={activeGitHunks.length}
         onapplyjson={(txt) => { if (!primaryEditorRef?.applyAgentEdit?.(txt)) ide.updateBuffer(activeTab.path, txt); }}
-        onjumpsymbol={jumpAdjacentSymbol}
-        ongotoline={(ln, col) => primaryEditorRef?.goToLine(ln, col)}
-        onopenstructure={() => (structureOpen = true)}
-        ontoggleblame={() => toggleBlameFor(activeTab.path)}
+        onjumpsymbol={jumpAdjacentSymbol} ongotoline={(ln, col) => primaryEditorRef?.goToLine(ln, col)}
+        onopenstructure={() => (structureOpen = true)} ontoggleblame={() => toggleBlameFor(activeTab.path)}
         onopenquickfix={(e) => openIntentionPopoverAt(activeTab.path, ide.cursorInfo.line, ide.cursorInfo.col, { x: e.clientX - 200, y: e.clientY + 10 })}
+        onopengithunk={(e) => {
+          if (!activeCursorHunk) return;
+          const r = (e.currentTarget as HTMLElement | null)?.getBoundingClientRect();
+          hunkPopover = { path: activeTab.path, hunkIndex: activeCursorHunk.index, x: r ? r.left : e.clientX, y: r ? r.bottom + 4 : e.clientY + 6 };
+        }}
         onfocusagent={focusAgentComposer}
       />
     {:else if IdeEditorSubbarLazy.error}
@@ -580,25 +540,29 @@
 
       {#if ide.splitTab}
         {@const splitTab = ide.splitTab}
-        <button
-          type="button"
+        <div
           class="ide-split-resizer"
+          role="separator"
           aria-label="Resize split editor panes"
-          title="Drag to resize split panes (double-click to reset)"
-          onmousedown={startSplitResize}
-          ondblclick={() => { splitRatio = 0.5; try { localStorage.setItem(SPLIT_RATIO_KEY, '0.5'); } catch { /* ignore */ } }}
-          onkeydown={(e) => {
-            if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); splitRatio = Math.max(0.2, splitRatio - 0.05); }
-            else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); splitRatio = Math.min(0.8, splitRatio + 0.05); }
+          aria-orientation={ide.splitDirection === 'down' ? 'horizontal' : 'vertical'}
+          aria-valuemin={20}
+          aria-valuemax={80}
+          aria-valuenow={Math.round(splitRatio * 100)}
+          title={ide.splitDirection === 'down' ? RESIZE_TITLE_VERTICAL : RESIZE_TITLE}
+          use:splitter={{
+            onmousedown: startSplitResize,
+            ondblclick: () => persistSplitRatio(0.5),
+            onkeydown: onSplitResizerKeydown,
           }}
           data-testid="ide-editor-split-resizer"
-        ></button>
+        ></div>
 
         <div class="ide-pane split-secondary" data-testid="ide-split-pane">
           <div class="split-head" dir="ltr">
             <span class="split-title">{ide.relativePath(splitTab.path)}</span>
             <button type="button" class="icon-btn" aria-label="Close split pane" title="Close split pane" onclick={() => ide.closeSplit()}><Icon name="x" size={12} /></button>
           </div>
+          {#if splitTab.path !== activeTab.path}<IdeDiskChangedBanner tab={splitTab} watch={false} />{/if}
           <div class="split-body">
             {#if splitTab.error || !stagedSplitTab}
               <LoadState what={splitTab.name} variant="panel" loading={splitTab.loading} error={splitTab.error} empty={!stagedSplitTab} onretry={() => void ide.openFile(splitTab.path, { inSplit: true })} />
@@ -617,16 +581,21 @@
                 gutterItems={ide.gutterByPath[sTab.path] ?? []}
                 onGutterAction={(item, mode) => ide.runFromGutter(item, mode)}
                 {...ideEditorDebugProps(sTab.path)}
+                peerCursors={ide.peerCursors.filter((p) => p.path === sTab.path)}
                 keymapPreset={ide.keymapPreset}
                 fontLigatures={prefs.fontLigatures}
                 onchange={(val) => { ide.updateBuffer(sTab.path, val); }}
+                onCursorChange={(info) => ide.updateCursor(sTab.path, { line: info.line, col: info.column, cursors: info.cursorCount, selections: info.selections })}
                 onDefinitionJump={(t) => void performIdeDive('definition', sTab.path, t, sTab.content)}
                 onImplementationJump={(t) => void performIdeDive('implementation', sTab.path, t, sTab.content)}
                 onFindUsages={(ctx) => void ide.findReferences(sTab.path, ctx.line, ctx.column, ctx.symbol)}
                 onNavigateBack={() => void navigateIdeBack()}
                 onNavigateForward={() => void navigateIdeForward()}
+                onToggleBlame={() => toggleBlameFor(sTab.path)}
                 onQuickFix={(ctx) => openIntentionPopoverAt(sTab.path, ctx.line, ctx.column, { x: ctx.clientX, y: ctx.clientY, symbol: ctx.symbol })}
                 onRenameSymbol={(ctx) => void ide.openRenameModal(sTab.path, ctx.line, ctx.column, ctx.symbol, ctx.newName)}
+                onFormat={() => void ide.formatActiveFile(sTab.path)}
+                onDiagnostics={(diags) => ide.setDiagnostics(sTab.path, diags)}
                 onAgentAction={(mode, sel) => {
                   if (mode === 'inline') ideAgent.openInlineEdit({ path: sTab.path, ...sel });
                   else { ideAgent.markSelectionFromEditor({ openPanel: true, selection: { path: sTab.path, ...sel } }); focusAgentComposer(); }
@@ -671,8 +640,12 @@
       onapplyserveraction: (act: IdeCodeAction) => { if (intentionState) ide.applyCodeAction(intentionState.path, act); },
       onrename: () => { if (intentionState) void ide.openRenameModal(intentionState.path, intentionState.line, intentionState.col, intentionState.symbol); },
       onfindusages: () => { if (intentionState) void ide.findReferences(intentionState.path, intentionState.line, intentionState.col, intentionState.symbol); },
-      onformat: () => { void ide.formatActiveFile(); },
-      onaskagent: () => { ideAgent.openInlineEdit(); },
+      onformat: () => { void ide.formatActiveFile(intentionState?.path); },
+      onaskagent: () => {
+        const sel = iRef?.getSelectionRange?.();
+        if (intentionState && sel) ideAgent.openInlineEdit({ path: intentionState.path, ...sel });
+        else ideAgent.openInlineEdit();
+      },
       onclose: () => (intentionState = null),
     }}
   />
@@ -689,10 +662,33 @@
 {/if}
 
 {#if bpEditor}
-  <LazyMount
-    lazy={IdeBreakpointPopoverLazy} what="breakpoint editor" quiet onerror={() => (bpEditor = null)}
-    props={{ path: bpEditor.path, line: bpEditor.line, anchorX: bpEditor.x, anchorY: bpEditor.y, onclose: () => (bpEditor = null) }}
-  />
+  <LazyMount lazy={IdeBreakpointPopoverLazy} what="breakpoint editor" quiet onerror={() => (bpEditor = null)} props={{ path: bpEditor.path, line: bpEditor.line, anchorX: bpEditor.x, anchorY: bpEditor.y, onclose: () => (bpEditor = null) }} />
+{/if}
+
+{#if hunkPopover}
+  {@const hTab = ide.tabs.find((t) => t.path === hunkPopover?.path)}
+  {@const hBase = hTab ? diffBaseFor(hTab) : null}
+  {@const hList = hTab && hBase != null ? extractGutterHunks(hBase, hTab.content, ide.relativePath(hTab.path)) : []}
+  {@const hRef = hunkPopover.path !== stagedPrimaryTab?.path && hunkPopover.path === stagedSplitTab?.path ? splitEditorRef : primaryEditorRef}
+  {#if hTab && hBase != null && hList.length > 0}
+    <LazyMount lazy={IdeGitHunkPopoverLazy} what="git hunk details" quiet onerror={() => (hunkPopover = null)} props={{
+      path: hTab.path, hunks: hList, hunkIndex: hunkPopover.hunkIndex, anchorX: hunkPopover.x, anchorY: hunkPopover.y, readOnly: Boolean(hTab.readOnly || !ide.canEditCollab),
+      onselecthunk: (nextIdx: number) => {
+        if (hunkPopover) hunkPopover = { ...hunkPopover, hunkIndex: nextIdx };
+        const nextH = hList[nextIdx];
+        if (nextH) hRef?.goToLine(nextH.anchorLine, 1);
+      },
+      onrevert: (h: IdeGutterHunk) => {
+        const nextText = revertHunkInText(hBase, hTab.content, h.index);
+        if (nextText !== hTab.content && !hRef?.replaceBufferContent?.(nextText)) ide.updateBuffer(hTab.path, nextText);
+      },
+      onaskagent: (h: IdeGutterHunk) => {
+        ideAgent.attachGitHunk({ path: hTab.path, startLine: h.startLine, endLine: h.endLine, anchorLine: h.anchorLine, addedCount: h.addedLines.length, removedCount: h.removedLines.length, unifiedDiff: h.unifiedDiff }, { openPanel: true });
+        focusAgentComposer();
+      },
+      onclose: () => (hunkPopover = null),
+    }} />
+  {/if}
 {/if}
 
 {#if structureOpen}

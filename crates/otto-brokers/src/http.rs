@@ -308,12 +308,26 @@ fn refuse_agent_unguard(row: &BrokerClusterRow, req: &UpsertClusterReq) -> Resul
     Ok(())
 }
 
+/// An agent credential cannot delete a guarded (`read_only` or `prod`) broker
+/// cluster — mirrors [`refuse_agent_unguard`].
+fn refuse_agent_delete_guarded(row: &BrokerClusterRow) -> Result<(), Error> {
+    if (row.read_only || row.environment == "prod") && otto_core::auth::request_is_agent() {
+        return Err(Error::Forbidden(format!(
+            "an agent session's credential cannot delete guarded cluster '{}' (Read-only or \
+             Production) — a person must delete it in Message Brokers",
+            row.name
+        )));
+    }
+    Ok(())
+}
+
 async fn delete_cluster<S: BrokersCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
 ) -> ApiResult<Response> {
-    authorize(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let row = authorize(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    refuse_agent_delete_guarded(&row)?;
     ctx.brokers().delete_cluster(&id).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -1071,6 +1085,36 @@ mod lag_alert_route_tests {
             .unwrap();
         let (status, text) = call(&app, "DELETE", &uri, None).await;
         assert_ne!(status, StatusCode::FORBIDDEN, "{text}");
+        assert!(status.is_success(), "{status}: {text}");
+    }
+
+    #[tokio::test]
+    async fn agent_cannot_delete_guarded_broker_cluster() {
+        let (_dir, pool, user) = fixture(true).await;
+        let svc = BrokersService::new(
+            BrokerClustersRepo::new(pool.clone()),
+            Arc::new(NoSecrets),
+            None,
+        );
+        let prod_id = cluster(&svc, &user, serde_json::json!({"environment": "prod"})).await;
+        let ro_id = cluster(&svc, &user, serde_json::json!({"read_only": true})).await;
+        let dev_id = cluster(&svc, &user, serde_json::json!({})).await;
+        let app = app_for(svc, user, Some(pool));
+        let agent = otto_core::auth::RequestCredential {
+            agent: true,
+            root_withheld: false,
+        };
+        for guarded in [&prod_id, &ro_id] {
+            let uri = format!("/brokers/clusters/{guarded}");
+            let (status, text) =
+                otto_core::auth::with_request_credential(agent, call(&app, "DELETE", &uri, None))
+                    .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{text}");
+        }
+        let dev_uri = format!("/brokers/clusters/{dev_id}");
+        let (status, text) =
+            otto_core::auth::with_request_credential(agent, call(&app, "DELETE", &dev_uri, None))
+                .await;
         assert!(status.is_success(), "{status}: {text}");
     }
 }

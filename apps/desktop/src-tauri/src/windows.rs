@@ -144,12 +144,14 @@ pub fn is_quitting() -> bool {
 ///   * `main` / `w<N>` — full app windows, persisted in this registry;
 ///   * `popout-<N>` — native pop-outs of one route (popout.rs; frames are kept
 ///     per route in `popouts.json`, not here, and they aren't restored);
-///   * `otto-bar` / `otto-tray` — the assistant bar + tray popover panels:
-///     always-alive hidden chrome, never a menu/snip target, never counted
-///     as "the last window";
+///   * `otto-bar` / `otto-tray` / `otto-clipboard` — the assistant bar, tray
+///     popover and clipboard-history panels: hidden chrome, never a menu/snip
+///     target, never counted as "the last window";
 ///   * `otto-browser-*` — browser-tab child webviews (browser.rs).
 pub fn is_aux(label: &str) -> bool {
-    label == crate::bar::LABEL || label == crate::tray::POPOVER_LABEL
+    label == crate::bar::LABEL
+        || label == crate::tray::POPOVER_LABEL
+        || label == crate::clipboard::LABEL
 }
 
 pub fn is_popout(label: &str) -> bool {
@@ -475,6 +477,7 @@ mod tests {
             "otto-browser-1",
             "otto-bar",
             "otto-tray",
+            "otto-clipboard",
             "popout-1",
         ] {
             assert!(

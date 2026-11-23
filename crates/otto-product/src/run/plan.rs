@@ -18,7 +18,7 @@ use super::prompts::{
     augment_with_out_path, build_plan_prompt, build_plan_summarizer_prompt, extract_json_as,
     PLAN_AUTONOMY_DIRECTIVE,
 };
-use super::scratch::session_cwd;
+use super::scratch::{scratch_root_dir, session_cwd, write_context_file};
 use super::{story_run_cancel_key, SessionAppearance};
 use crate::host::ProductRunHost;
 
@@ -94,8 +94,8 @@ pub async fn run_generate_plan<C: ProductRunHost>(
     //    Q&A + analysis summary + approved test cases + learnings).
     let skill_body = skill_body(&ctx, "story-task-breakdown");
     let plan_id = otto_core::new_id();
-    let context_path = std::env::temp_dir().join(format!("otto-product-plan-{plan_id}-context.md"));
-    {
+    let context_name = format!("otto-product-plan-{plan_id}-context.md");
+    let context_guard = {
         let mut context_md = story_context_md(
             &ctx,
             &story_id,
@@ -106,11 +106,23 @@ pub async fn run_generate_plan<C: ProductRunHost>(
         .await;
         append_answers_and_summary(&ctx, &story_id, &mut context_md).await;
         append_approved_tests(&ctx, &story_id, &mut context_md).await;
-        if let Err(e) = std::fs::write(&context_path, &context_md) {
-            warn!("product_run(plan): write context file: {e}");
+        match write_context_file(&context_name, &context_md).await {
+            Ok(g) => Some(g),
+            Err(e) => {
+                warn!("product_run(plan): write context file: {e}");
+                None
+            }
         }
-    }
-    let context_path = context_path.to_string_lossy().to_string();
+    };
+    let context_path = context_guard
+        .as_ref()
+        .map(|g| g.path_str())
+        .unwrap_or_else(|| {
+            scratch_root_dir()
+                .join(&context_name)
+                .to_string_lossy()
+                .to_string()
+        });
 
     // 3. Pre-trust every distinct provider on the base cwd (mirror analysis).
     trust_providers(
@@ -208,6 +220,9 @@ pub async fn run_generate_plan<C: ProductRunHost>(
         warn!("product_run(plan): {e}; keeping the first candidate plan");
     }
     persist_plan(&turn.ctx, &turn.ws.id, &story, outcome.summary.value).await;
+    if let Some(guard) = context_guard {
+        guard.cleanup().await;
+    }
 }
 
 /// The live session ids of one plan run. Each planner (and the summarizer)

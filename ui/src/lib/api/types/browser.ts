@@ -338,6 +338,69 @@ export interface BrowserViewport {
   device_scale_factor?: number;
 }
 
+export type BrowserColorScheme = 'light' | 'dark';
+export type BrowserOrientation = 'portrait' | 'landscape';
+
+/** Device emulation profile applied to a remote live Chromium session. */
+export interface BrowserLiveEmulation {
+  preset_id?: string | null;
+  mobile: boolean;
+  has_touch: boolean;
+  user_agent?: string | null;
+  color_scheme?: BrowserColorScheme | null;
+  orientation?: BrowserOrientation | null;
+}
+
+/** `POST /browser/tabs/{id}/live/emulate` body. */
+export interface BrowserLiveEmulateReq {
+  viewport?: BrowserViewport;
+  emulation: BrowserLiveEmulation;
+}
+
+export interface BrowserConsoleEntry {
+  seq: number;
+  level: string;
+  text: string;
+  timestamp: number;
+  source?: string | null;
+}
+
+export interface BrowserNetworkEntry {
+  request_id: string;
+  method: string;
+  url: string;
+  resource_type: string;
+  status?: number | null;
+  status_text?: string | null;
+  failed: boolean;
+  error_text?: string | null;
+  duration_ms?: number | null;
+  timestamp: number;
+}
+
+export interface BrowserInspectedElement {
+  tag: string;
+  id?: string | null;
+  classes: string[];
+  selector: string;
+  text: string;
+  outer_html: string;
+  rect: { x: number; y: number; width: number; height: number };
+  styles: {
+    display: string;
+    position: string;
+    color: string;
+    background: string;
+    font: string;
+  };
+}
+
+export interface BrowserDevtoolsSnapshot {
+  enabled: boolean;
+  console: BrowserConsoleEntry[];
+  network: BrowserNetworkEntry[];
+}
+
 /** A tab's remote live session. Private to `owner_id` (plus ws Admin/root). */
 export interface BrowserLiveSession {
   tab_id: Id;
@@ -357,6 +420,8 @@ export interface BrowserLiveSession {
   can_go_back: boolean;
   can_go_forward: boolean;
   viewport: Required<BrowserViewport>;
+  emulation?: BrowserLiveEmulation;
+  devtools_enabled?: boolean;
   controller: BrowserLiveController;
   controller_user_id: Id | null;
   /** Attached WS viewers. */
@@ -452,7 +517,11 @@ export type BrowserLiveClientMsg =
   | { type: 'nav'; action: BrowserLiveNavAction; url?: string }
   | { type: 'resize'; width: number; height: number; device_scale_factor?: number }
   | { type: 'control'; action: 'take_over' | 'hand_back' }
-  | { type: 'dialog'; accept: boolean; prompt_text?: string };
+  | { type: 'dialog'; accept: boolean; prompt_text?: string }
+  | { type: 'emulate'; viewport?: BrowserViewport; emulation: BrowserLiveEmulation }
+  | { type: 'devtools'; enabled: boolean }
+  | { type: 'clear_devtools' }
+  | { type: 'inspect'; x: number; y: number };
 
 /** Daemon → client JSON frames on `WS /ws/browser/{tab_id}/live` (binary
  *  frames are screencast images — see `BrowserLiveFrameHeader`). */
@@ -470,6 +539,10 @@ export type BrowserLiveServerMsg =
   | { type: 'popup'; url: string }
   | { type: 'download'; status: 'blocked' | 'quarantined'; filename: string; bytes: number | null }
   | { type: 'approval'; approval_id: Id; status: 'pending' | 'approved' | 'denied'; title: string }
+  | { type: 'console'; entry: BrowserConsoleEntry }
+  | { type: 'network'; entry: BrowserNetworkEntry }
+  | { type: 'devtools_snapshot'; snapshot: BrowserDevtoolsSnapshot }
+  | { type: 'inspected'; element: BrowserInspectedElement | null }
   | {
       type: 'error';
       code:

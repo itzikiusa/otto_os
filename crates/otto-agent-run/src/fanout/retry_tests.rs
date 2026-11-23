@@ -19,6 +19,7 @@ fn control(retries: &Retries, cancel: &Arc<AtomicBool>, log: &Log) -> SlotContro
         Arc::new(move |slot: Slot, state: SlotState| log.lock().unwrap().push((slot, state))),
     );
     ctl.poll = Duration::from_millis(5);
+    ctl.auto_backoff_base = Duration::from_millis(5);
     ctl
 }
 
@@ -244,4 +245,50 @@ async fn user_retries_are_capped_and_a_cancel_ends_a_waiting_slot() {
         states(&log, Slot::Reviewer(7)),
         vec![SlotState::Failed("boom".into()), SlotState::Cancelled]
     );
+}
+
+#[test]
+fn auto_backoff_scales_exponentially_with_bounded_cap() {
+    let base = Duration::from_millis(500);
+    let d1 = auto_backoff_delay(base, 1, 0);
+    let d2 = auto_backoff_delay(base, 2, 0);
+    let d10 = auto_backoff_delay(base, 10, 0);
+    assert!(d1 >= Duration::from_millis(500) && d1 < Duration::from_millis(625));
+    assert!(d2 >= Duration::from_millis(1000) && d2 < Duration::from_millis(1250));
+    assert!(d10 >= Duration::from_millis(15_000) && d10 < Duration::from_millis(18_750));
+    assert_eq!(auto_backoff_delay(Duration::ZERO, 3, 1), Duration::ZERO);
+}
+
+#[tokio::test]
+async fn cancel_interrupts_transient_backoff_and_poisoned_retries_recover() {
+    let retries: Retries = Default::default();
+    // Poison the retries mutex deliberately to verify unpoisoned recovery.
+    let poisoned = Arc::clone(&retries);
+    let _ = std::thread::spawn(move || {
+        let _g = poisoned.lock().unwrap();
+        panic!("deliberate poison");
+    })
+    .join();
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let log: Log = Default::default();
+    let mut ctl = control(&retries, &cancel, &log);
+    ctl.max_auto_retries = 3;
+    ctl.auto_backoff_base = Duration::from_secs(10);
+    ctl.transient = |_| true;
+
+    let cancel_in = Arc::clone(&cancel);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        cancel_in.store(true, Ordering::SeqCst);
+    });
+    let out = tokio::time::timeout(
+        Duration::from_secs(2),
+        attempts(Slot::Reviewer(0), &ctl, || {
+            std::future::ready(Err::<u32, _>("transient".to_string()))
+        }),
+    )
+    .await
+    .expect("cancel must interrupt backoff sleep promptly");
+    assert!(out.unwrap_err().cancelled);
 }

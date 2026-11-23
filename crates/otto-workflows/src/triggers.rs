@@ -6,7 +6,7 @@
 //! (`workflow_trigger_scheduler`) and the webhook route, both driving these
 //! through its [`WorkflowCtx`] impl.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use otto_core::event::Event;
@@ -303,26 +303,40 @@ fn filter_matches(filter: Option<&Value>, event_payload: &Value) -> bool {
 /// Start the event-trigger listener task. Returns a cancel flag; set to `true`
 /// to stop the loop (it parks on the event bus, so it costs no idle wakeups).
 pub fn spawn_event_trigger_listener<C: WorkflowCtx>(ctx: C) -> Arc<AtomicBool> {
-    let cancel = Arc::new(AtomicBool::new(false));
-    let cancel2 = Arc::clone(&cancel);
+    let signal = otto_core::cancel_signal::CancelSignal::new();
+    let flag = signal.share_flag();
+    spawn_event_trigger_listener_with_signal(ctx, signal);
+    flag
+}
+
+/// [`spawn_event_trigger_listener`] with a wakeable [`CancelSignal`](otto_core::cancel_signal::CancelSignal) (`Notify`)
+/// so shutdown wakes the listener immediately without waiting for the next event.
+pub fn spawn_event_trigger_listener_with_signal<C: WorkflowCtx>(
+    ctx: C,
+    cancel: otto_core::cancel_signal::CancelSignal,
+) {
     let mut rx = ctx.events().subscribe();
     tokio::spawn(async move {
         loop {
-            if cancel2.load(Ordering::Relaxed) {
+            if cancel.is_cancelled() {
                 return;
             }
-            let event = match rx.recv().await {
-                Ok(e) => e,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    warn!("workflow event-trigger listener: lagged by {n} events; continuing");
-                    continue;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    info!("workflow event-trigger listener: event bus closed; stopping");
-                    return;
+            let event = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                ev = rx.recv() => match ev {
+                    Ok(e) => e,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("workflow event-trigger listener: lagged by {n} events; continuing");
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        info!("workflow event-trigger listener: event bus closed; stopping");
+                        return;
+                    }
                 }
             };
-            if cancel2.load(Ordering::SeqCst) {
+            if cancel.is_cancelled() {
                 return;
             }
 
@@ -354,15 +368,30 @@ pub fn spawn_event_trigger_listener<C: WorkflowCtx>(ctx: C) -> Arc<AtomicBool> {
                 continue;
             }
 
+            // Cache workflow & workspace lookups per event dispatch to avoid
+            // repeated N+1 DB reads when multiple triggers share a workflow/workspace.
             let workflows_repo = WorkflowsRepo::new(ctx.pool().clone());
+            let mut wf_cache: std::collections::HashMap<
+                otto_core::Id,
+                Option<otto_core::workflows::Workflow>,
+            > = std::collections::HashMap::new();
+            let mut ws_cache: std::collections::HashMap<
+                otto_core::Id,
+                Option<otto_core::domain::Workspace>,
+            > = std::collections::HashMap::new();
             for trigger in matching {
-                if cancel2.load(Ordering::SeqCst) {
+                if cancel.is_cancelled() {
                     return;
                 }
-                // Resolve the workflow; skip silently when it was deleted.
-                let wf = match workflows_repo.get(&trigger.workflow_id).await {
-                    Ok(w) => w,
-                    Err(_) => continue,
+                let wf = if let Some(cached) = wf_cache.get(&trigger.workflow_id) {
+                    cached.clone()
+                } else {
+                    let loaded = workflows_repo.get(&trigger.workflow_id).await.ok();
+                    wf_cache.insert(trigger.workflow_id.clone(), loaded.clone());
+                    loaded
+                };
+                let Some(wf) = wf else {
+                    continue;
                 };
                 // Workspace scoping: the event must belong to THIS workflow's
                 // workspace (a review in workspace A must not fire workspace
@@ -387,9 +416,15 @@ pub fn spawn_event_trigger_listener<C: WorkflowCtx>(ctx: C) -> Arc<AtomicBool> {
                         continue;
                     }
                 }
-                let ws = match ctx.workspaces().get(&wf.workspace_id).await {
-                    Ok(w) => w,
-                    Err(_) => continue,
+                let ws = if let Some(cached) = ws_cache.get(&wf.workspace_id) {
+                    cached.clone()
+                } else {
+                    let loaded = ctx.workspaces().get(&wf.workspace_id).await.ok();
+                    ws_cache.insert(wf.workspace_id.clone(), loaded.clone());
+                    loaded
+                };
+                let Some(ws) = ws else {
+                    continue;
                 };
 
                 // Build the run input: include the trigger kind so the workflow
@@ -412,7 +447,7 @@ pub fn spawn_event_trigger_listener<C: WorkflowCtx>(ctx: C) -> Arc<AtomicBool> {
                 // Re-checked atomically with the insert: the early check above
                 // only spares the input build; a scheduled task or schedule
                 // trigger may admit a run in between.
-                if cancel2.load(Ordering::SeqCst) {
+                if cancel.is_cancelled() {
                     return;
                 }
                 let run = match workflows_repo
@@ -442,7 +477,7 @@ pub fn spawn_event_trigger_listener<C: WorkflowCtx>(ctx: C) -> Arc<AtomicBool> {
                 // A commit racing shutdown stays pending for startup recovery.
                 // Do not launch side effects after the admission await when
                 // the owning daemon has begun tearing dependencies down.
-                if cancel2.load(Ordering::SeqCst) {
+                if cancel.is_cancelled() {
                     return;
                 }
 
@@ -463,7 +498,6 @@ pub fn spawn_event_trigger_listener<C: WorkflowCtx>(ctx: C) -> Arc<AtomicBool> {
             }
         }
     });
-    cancel
 }
 
 #[cfg(test)]

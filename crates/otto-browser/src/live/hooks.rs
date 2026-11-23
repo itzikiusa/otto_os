@@ -27,10 +27,22 @@ pub struct OutwardAction {
     pub target_host: String,
     /// The pre-action screenshot (JPEG), when it could be captured.
     pub screenshot_path: Option<String>,
+    /// CDP resource type (`Document`, `Fetch`, `XHR`, …) when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_type: Option<String>,
+    /// Redacted, truncated request body preview for SPA `Fetch`/`XHR` mutations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_preview: Option<String>,
 }
 
 impl OutwardAction {
     pub fn title(&self) -> String {
+        if matches!(self.resource_type.as_deref(), Some("Fetch" | "XHR")) {
+            return format!(
+                "Browser: send API {} to {} from {}",
+                self.method, self.target_host, self.page_origin
+            );
+        }
         format!(
             "Browser: {} to {} from {}",
             describe_method(&self.method),
@@ -104,6 +116,8 @@ mod tests {
             method: "POST".into(),
             target_host: "pay.example".into(),
             screenshot_path: None,
+            resource_type: None,
+            body_preview: None,
         };
         assert_eq!(
             a.title(),

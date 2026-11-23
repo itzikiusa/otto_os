@@ -178,7 +178,7 @@ async fn graphql_and_http_failures_surface_as_typed_errors() {
     ));
     assert!(matches!(c.get_issue("NULL-1").await, Err(Error::NotFound(m)) if m.contains("NULL-1")));
     assert!(
-        matches!(c.get_issue("AUTH-1").await, Err(Error::Upstream(m)) if m.contains("API key")),
+        matches!(c.get_issue("AUTH-1").await, Err(Error::Forbidden(m)) if m.contains("API key")),
         "a 401 tells the user to check the key"
     );
     assert!(matches!(c.get_issue("BAD-1").await, Err(Error::Invalid(_))));
@@ -395,7 +395,7 @@ async fn a_lookup_failure_other_than_not_found_is_not_masked_by_full_text() {
     let c = LinearClient::with_endpoint(&s.url, "lin_api_authfail");
     assert!(matches!(
         c.search("ENG-1", None, 0, 25).await,
-        Err(Error::Upstream(m)) if m.contains("authentication")
+        Err(Error::Forbidden(m)) if m.contains("authentication")
     ));
 }
 

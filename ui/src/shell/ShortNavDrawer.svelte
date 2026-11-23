@@ -7,6 +7,7 @@
   // module) is already in the Navigator itself.
   import Icon from '../lib/components/Icon.svelte';
   import { ui } from '../lib/stores/ui.svelte';
+  import { lightMode } from '../lib/lightMode.svelte';
   import MachineChip from './MachineChip.svelte';
   import Navigator from './Navigator.svelte';
 </script>
@@ -16,6 +17,20 @@
 <div class="sne-drawer">
   <div class="sne-nav"><Navigator /></div>
   <div class="sne" data-testid="short-nav-extras">
+    {#if lightMode.available}
+      <button
+        type="button"
+        class="sne-row"
+        data-testid="light-toggle"
+        onclick={() => {
+          ui.navDrawerOpen = false;
+          void lightMode.set(!lightMode.active);
+        }}
+      >
+        <Icon name={lightMode.active ? 'maximize' : 'minimize'} size={16} />
+        <span>{lightMode.active ? 'Full app' : 'Light version'}</span>
+      </button>
+    {/if}
     <button
       type="button"
       class="sne-row"

@@ -41,8 +41,12 @@ const MAX_REMEMBERED: usize = 200;
 
 /// label → route of every open pop-out.
 static OPEN: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+/// Serializes read-modify-write persistence on `popouts.json` across debounced
+/// async `schedule_save` tasks and main-thread `on_close_requested` calls.
+static STORE_LOCK: Mutex<()> = Mutex::new(());
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 static SAVE_GEN: AtomicU64 = AtomicU64::new(0);
+static STORE_TMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
 fn with_open<R>(f: impl FnOnce(&mut HashMap<String, String>) -> R) -> R {
     let mut g = OPEN.lock().unwrap_or_else(|p| p.into_inner());
@@ -111,26 +115,33 @@ fn store_path() -> PathBuf {
         .join("Library/Application Support/Otto/popouts.json")
 }
 
-fn load_store() -> Store {
-    fs::read(store_path())
+fn load_store_at(path: &std::path::Path) -> Store {
+    fs::read(path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default()
 }
 
-fn save_store(s: &Store) {
-    let path = store_path();
+fn unique_store_tmp(path: &std::path::Path) -> PathBuf {
+    let seq = STORE_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    path.with_extension(format!("json.tmp.{}.{seq}", std::process::id()))
+}
+
+fn save_store_at(path: &std::path::Path, s: &Store) {
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
     }
-    let tmp = path.with_extension("json.tmp");
-    if fs::write(&tmp, serde_json::to_vec_pretty(s).unwrap_or_default()).is_ok() {
-        let _ = fs::rename(&tmp, &path);
+    let tmp = unique_store_tmp(path);
+    if fs::write(&tmp, serde_json::to_vec_pretty(s).unwrap_or_default()).is_ok()
+        && fs::rename(&tmp, path).is_err()
+    {
+        let _ = fs::remove_file(&tmp);
     }
 }
 
-fn remember(route: &str, frame: WinFrame) {
-    let mut s = load_store();
+fn remember_at(path: &std::path::Path, route: &str, frame: WinFrame) {
+    let _guard = STORE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let mut s = load_store_at(path);
     s.frames.insert(route.to_string(), frame);
     s.order.retain(|r| r != route);
     s.order.push(route.to_string());
@@ -138,11 +149,16 @@ fn remember(route: &str, frame: WinFrame) {
         let old = s.order.remove(0);
         s.frames.remove(&old);
     }
-    save_store(&s);
+    save_store_at(path, &s);
+}
+
+fn remember(route: &str, frame: WinFrame) {
+    remember_at(&store_path(), route, frame);
 }
 
 fn remembered(route: &str) -> Option<WinFrame> {
-    load_store().frames.get(route).cloned()
+    let _guard = STORE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    load_store_at(&store_path()).frames.get(route).cloned()
 }
 
 /// Persist a pop-out's current frame under its route.
@@ -325,6 +341,194 @@ pub fn open_in_otto(app: AppHandle, route: Option<String>) -> Result<(), String>
     Ok(())
 }
 
+/// Top-level Otto app routes admissible via external `otto://` deep links.
+const DEEP_LINK_MODULES: &[&str] = &[
+    "home",
+    "agents",
+    "threads",
+    "rooms",
+    "loops",
+    "workflows",
+    "scheduled-tasks",
+    "personal-agents",
+    "ide",
+    "git",
+    "product",
+    "design",
+    "canvas",
+    "vault",
+    "skills-eval",
+    "skills-lab",
+    "connections",
+    "database",
+    "brokers",
+    "aws",
+    "kubernetes",
+    "containers",
+    "api",
+    "browser",
+    "mcp",
+    "insights",
+    "usage",
+    "settings",
+    "plugins",
+    "help",
+    "walkthroughs",
+    "snip",
+];
+
+/// Reserved sub-route prefixes under `design/` that must not be rewritten to
+/// `design/a/<id>`.
+const DESIGN_SUBROUTES: &[&str] = &[
+    "a", "artifact", "p", "studio", "story", "brand", "learned", "spatial",
+];
+
+/// Read-only query keys permitted on external `otto://` deep links.
+/// All mutating or action-triggering query params (e.g. `ide?collab=`,
+/// `ide?root=`, `ide?scratches=`, `browser?url=`, `browser?device=`) are
+/// rejected because external links arrive without user confirmation.
+fn deep_link_query_allowed(module: &str, key: &str) -> bool {
+    matches!((module, key), ("design", "version" | "from" | "tab"))
+}
+
+fn contains_blocked_percent_encoding(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    lower.contains("%2e") || lower.contains("%2f") || lower.contains("%5c") || lower.contains("%25")
+}
+
+/// Normalize canonical `otto://story/<id>` and `otto://design/<id>[@sel]`
+/// reference paths into Otto's internal UI hash routes.
+fn canonicalize_deep_link_path(path: &str) -> Result<String, &'static str> {
+    if let Some(rest) = path.strip_prefix("story/") {
+        if rest.is_empty() || rest.contains('/') || rest.contains("..") {
+            return Err("invalid story deep link");
+        }
+        return Ok(format!("product/{rest}"));
+    }
+    if path == "story" {
+        return Err("story deep link requires an id");
+    }
+    if let Some(rest) = path.strip_prefix("design/") {
+        if !rest.is_empty() && !rest.contains('/') && !DESIGN_SUBROUTES.contains(&rest) {
+            let id = rest.split('@').next().unwrap_or("");
+            if id.is_empty() || id.contains("..") {
+                return Err("invalid design deep link");
+            }
+            return Ok(format!("design/a/{id}"));
+        }
+    }
+    Ok(path.to_string())
+}
+
+/// Parse and strictly validate a macOS `otto://` deep-link URL into an
+/// internal hash route (or `None` to simply bring Otto's window forward).
+///
+/// Admitted forms:
+///   * `otto://open/<route>[?<read-only-query>]` → `Some("<route>[?<query>]")`
+///   * `otto://<module>[/<rest>][?<read-only-query>]` → `Some("<module>[/<rest>][?<query>]")`
+///   * `otto://story/<id>` → `Some("product/<id>")`
+///   * `otto://design/<id>[@<selector>]` → `Some("design/a/<id>")`
+///   * `otto://open`, `otto://open/`, `otto://` → `None` (focus only)
+///
+/// Every non-empty route is gated by `DEEP_LINK_MODULES`, a strict read-only
+/// query allowlist, and `route_ok`: foreign schemes, unknown modules,
+/// credentials, ports, fragments, traversal (`..` or encoded `%2e`/`%2f`/`%5c`/`%25`),
+/// mutating query params, control characters, quotes/backslashes, share views
+/// (`s/...`), and panel routes (`bar`/`tray`) are all rejected.
+pub fn parse_deep_link_url(url: &tauri::Url) -> Result<Option<String>, &'static str> {
+    if !url.scheme().eq_ignore_ascii_case("otto") {
+        return Err("unsupported scheme");
+    }
+    if url.as_str().chars().any(|c| c.is_control()) {
+        return Err("control character in url");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("credentials not permitted");
+    }
+    if url.port().is_some() {
+        return Err("port not permitted");
+    }
+    if url.fragment().is_some() {
+        return Err("fragment not permitted");
+    }
+
+    let path = url.path().trim_start_matches('/');
+    let raw_path = match url.host_str() {
+        Some(host) if host.eq_ignore_ascii_case("open") => path.to_string(),
+        Some(host) if !host.is_empty() => {
+            if path.is_empty() {
+                host.to_string()
+            } else {
+                format!("{host}/{path}")
+            }
+        }
+        _ => path.to_string(),
+    };
+
+    if raw_path.is_empty() {
+        if url.query().is_some() {
+            return Err("query without route");
+        }
+        return Ok(None);
+    }
+
+    if contains_blocked_percent_encoding(&raw_path) {
+        return Err("encoded traversal or separator rejected");
+    }
+
+    let normalized_path = normalize_route(&raw_path);
+    let mut route = canonicalize_deep_link_path(&normalized_path)?;
+    let raw_head = route.split('/').next().unwrap_or("");
+    let head = *DEEP_LINK_MODULES
+        .iter()
+        .find(|&&m| m == raw_head)
+        .ok_or("unknown module route")?;
+
+    if let Some(q) = url.query() {
+        if !q.is_empty() {
+            if contains_blocked_percent_encoding(q) {
+                return Err("encoded traversal or separator rejected");
+            }
+            for pair in q.split('&') {
+                let (key, val) = pair
+                    .split_once('=')
+                    .ok_or("query parameter not permitted")?;
+                if key.is_empty() || val.is_empty() || !deep_link_query_allowed(head, key) {
+                    return Err("query parameter not permitted");
+                }
+            }
+            route.push('?');
+            route.push_str(q);
+        }
+    }
+
+    if !route_ok(&route) {
+        return Err("route rejected by validator");
+    }
+    Ok(Some(route))
+}
+
+/// Handle macOS `RunEvent::Opened` URLs routed to Otto via `CFBundleURLTypes`.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub fn handle_open_urls(app: &AppHandle, urls: &[tauri::Url]) {
+    for url in urls {
+        match parse_deep_link_url(url) {
+            Ok(route) => {
+                if let Err(e) = open_in_otto(app.clone(), route) {
+                    crate::lifecycle::event(&format!("deep link failed: {e}"));
+                }
+                break;
+            }
+            Err(why) => {
+                crate::lifecycle::event(&format!(
+                    "deep link rejected (scheme={}): {why}",
+                    url.scheme()
+                ));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,5 +592,133 @@ mod tests {
         // literal with inner quotes escaped.
         let js = serde_json::to_string("a'b\"c").unwrap();
         assert_eq!(js, r#""a'b\"c""#);
+    }
+
+    #[test]
+    fn concurrent_remember_writes_do_not_lose_routes_or_leave_temp_files() {
+        let dir = std::env::temp_dir().join(format!("otto-popout-store-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("popouts.json");
+
+        assert_ne!(unique_store_tmp(&path), unique_store_tmp(&path));
+
+        std::thread::scope(|s| {
+            for i in 0..8_u32 {
+                let p = path.clone();
+                s.spawn(move || {
+                    remember_at(
+                        &p,
+                        &format!("git/{i}"),
+                        WinFrame {
+                            label: format!("popout-{i}"),
+                            x: i as i32 * 10,
+                            y: 20,
+                            w: 900,
+                            h: 700,
+                            fullscreen: false,
+                        },
+                    );
+                });
+            }
+        });
+
+        let loaded = load_store_at(&path);
+        assert_eq!(loaded.frames.len(), 8);
+        for i in 0..8_u32 {
+            assert!(loaded.frames.contains_key(&format!("git/{i}")));
+        }
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deep_link_accepts_otto_open_and_module_urls() {
+        let cases = [
+            ("otto://open/git/01H/pr/42", Some("git/01H/pr/42")),
+            ("otto://git/01H/pr/42", Some("git/01H/pr/42")),
+            (
+                "otto://open/design/artifact/01J?version=3",
+                Some("design/artifact/01J?version=3"),
+            ),
+            ("otto://story/STORY-42", Some("product/STORY-42")),
+            ("otto://open/story/STORY-42", Some("product/STORY-42")),
+            ("otto://design/01J", Some("design/a/01J")),
+            ("otto://design/01J@v3", Some("design/a/01J")),
+            ("otto://design/01J@approved", Some("design/a/01J")),
+            (
+                "otto://open/design/01J?version=3",
+                Some("design/a/01J?version=3"),
+            ),
+            ("otto://design", Some("design")),
+            ("otto://design/brand", Some("design/brand")),
+            ("otto://design/learned", Some("design/learned")),
+            ("otto://design/a/01J", Some("design/a/01J")),
+            ("otto://mcp/activity", Some("mcp/activity")),
+            ("otto://settings/appearance", Some("settings/appearance")),
+            ("otto://home", Some("home")),
+            ("otto://open", None),
+            ("otto://open/", None),
+            ("otto://", None),
+        ];
+        for (raw, expected) in cases {
+            let u = tauri::Url::parse(raw).expect("valid url");
+            assert_eq!(
+                parse_deep_link_url(&u),
+                Ok(expected.map(str::to_string)),
+                "url {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn deep_link_rejects_unsafe_schemes_traversal_injection_and_special_routes() {
+        for raw in [
+            "https://evil.example/git/1",
+            "http://127.0.0.1:7700/home",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "otto://open/../etc/passwd",
+            "otto://open/git/..%2fsecret",
+            "otto://open/git/.%2e/secret",
+            "otto://open/git/%2e./secret",
+            "otto://open/git/%252e%252e/secret",
+            "otto://open/git/a%2fb",
+            "otto://open/git/a%5cb",
+            "otto://open/design/artifact/01J?version=%252e",
+            "otto://ide?collab=room1&token=abc",
+            "otto://ide?root=/Users/victim/.ssh&file=id_rsa",
+            "otto://ide?scratches=new",
+            "otto://browser?url=https://evil.example&mode=live&device=simulator:ios:1",
+            "otto://open/browser?url=http://localhost:3000",
+            "otto://open/design/artifact/01J?evil=1",
+            "otto://story",
+            "otto://design/@bad",
+            "otto://open/bar",
+            "otto://open/tray",
+            "otto://bar",
+            "otto://tray/status",
+            "otto://open/s/guest-token",
+            "otto://s/guest-token",
+            "otto://user:pass@open/home",
+            "otto://open:8080/home",
+            "otto://open/git/x';alert(1)//",
+            "otto://open/home#smuggled",
+            "otto://open?only=query",
+        ] {
+            let u = tauri::Url::parse(raw).expect("parseable url");
+            assert!(
+                parse_deep_link_url(&u).is_err(),
+                "expected {raw:?} to be rejected"
+            );
+        }
     }
 }

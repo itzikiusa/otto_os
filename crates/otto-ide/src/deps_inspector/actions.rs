@@ -356,7 +356,12 @@ async fn exec_cmd(
         .envs(crate::environments::shell_env::collect_safe_non_root_base_env())
         .envs(env_map)
         .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
     for go_key in [
         "GOPRIVATE",
         "GONOSUMDB",
@@ -380,17 +385,28 @@ async fn exec_cmd(
         }
     }
     // A missing or slow tool is the command failing, like a non-zero exit.
-    let out = match tokio::time::timeout(Duration::from_secs(30), cmd.output()).await {
-        Err(_) => return Ok((false, format!("'{bin}' timed out after 30s"))),
-        Ok(Err(e)) => return Ok((false, format!("failed to run '{bin}': {e}"))),
-        Ok(Ok(out)) => out,
+    // Cap stdout/stderr and reap the entire process group on timeout.
+    const MAX_DEP_ACTION_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
+    let out = match crate::target::ssh_exec::run_command_bounded_with_caps(
+        cmd,
+        None,
+        Duration::from_secs(30),
+        MAX_DEP_ACTION_OUTPUT_BYTES,
+        MAX_DEP_ACTION_OUTPUT_BYTES,
+    )
+    .await
+    {
+        Ok(out) => out,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("timed out") {
+                return Ok((false, format!("'{bin}' timed out after 30s")));
+            }
+            return Ok((false, format!("failed to run '{bin}': {msg}")));
+        }
     };
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    Ok((out.status.success(), combined.trim().to_string()))
+    let combined = format!("{}{}", out.stdout, out.stderr);
+    Ok((out.exit_code == 0, combined.trim().to_string()))
 }
 
 pub fn bump_go_mod_in_place(content: &str, module: &str, new_ver: &str) -> Option<String> {
@@ -456,8 +472,10 @@ pub fn bump_manifest_version_in_place_scoped(
                 .ok()?;
                 if re.is_match(content) {
                     return Some(
-                        re.replace(content, format!("${{1}}{new_ver}${{2}}"))
-                            .into_owned(),
+                        re.replace(content, |caps: &regex::Captures<'_>| {
+                            format!("{}{}{}", &caps[1], new_ver, &caps[2])
+                        })
+                        .into_owned(),
                     );
                 }
             }

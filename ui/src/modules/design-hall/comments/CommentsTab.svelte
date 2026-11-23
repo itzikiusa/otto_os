@@ -4,18 +4,24 @@
   // threads — open first, resolved collapsed below. Each shows the version it
   // was made on; its chip opens that version. On a phone the details panel is
   // the full-screen sheet this tab lives in (the view's Details button).
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
+  import { api as http } from '../../../lib/api/client';
+  import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
+  import { copyWithToast } from '../../../lib/clipboard';
+  import { plural } from '../../../lib/plural';
+  import { ws } from '../../../lib/stores/workspace.svelte';
   import { designBus } from '../../../lib/events.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { toastError } from '../../../lib/toastError';
   import * as api from '../../../lib/api/design';
-  import type { DesignVersion } from '../../../lib/api/types';
+  import type { CommentPin3d, DesignVersion } from '../../../lib/api/types';
   import CommentThread from './CommentThread.svelte';
   import type { CommentsStore } from './commentsStore.svelte';
   import { splitThreads } from './pins';
+  import { formatPinsMarkdown, formatRegenerateFeedbackPrompt, pickTargetAgentSession } from './pinsDispatch';
 
   interface Props {
     store: CommentsStore;
@@ -23,6 +29,9 @@
     versions: DesignVersion[];
     /** The version the stage shows (new comments are made on it). */
     shownVersionId: string | null;
+    shownVersionSeq?: number | null;
+    artifact?: { id: string; title: string } | null;
+    storyId?: string | null;
     canComment: boolean;
     meId: string | null;
     canDeleteAny?: boolean;
@@ -30,8 +39,26 @@
     onview: (v: DesignVersion) => void;
     /** Go to the stage in Comment mode (absent where the stage has no pins). */
     onpin?: () => void;
+    /** 3D Studio: fly camera to a polygon/mesh comment and highlight it. */
+    onfocus3d?: (pin: CommentPin3d) => void;
+    /** 3D Studio: open 3D generator pre-filled with open polygon feedback. */
+    onregenerate3d?: (prompt: string) => void;
   }
-  let { store, versions, shownVersionId, canComment, meId, canDeleteAny = false, onview, onpin }: Props = $props();
+  let {
+    store,
+    versions,
+    shownVersionId,
+    shownVersionSeq = null,
+    artifact = null,
+    storyId = null,
+    canComment,
+    meId,
+    canDeleteAny = false,
+    onview,
+    onpin,
+    onfocus3d,
+    onregenerate3d,
+  }: Props = $props();
 
   $effect(() => {
     const s = store;
@@ -47,6 +74,106 @@
   let showResolved = $state(false);
   let text = $state('');
   let posting = $state(false);
+  let sending = $state(false);
+  let alive = true;
+  onDestroy(() => {
+    alive = false;
+  });
+
+  function buildChecklist(): string {
+    return formatPinsMarkdown({
+      artifactId: artifact?.id ?? store.artifactId,
+      artifactTitle: artifact?.title ?? 'Design',
+      versionSeq: shownVersionSeq,
+      threads: store.threads,
+    });
+  }
+
+  async function sendToAgent(sessionId: string, sessionName: string): Promise<void> {
+    if (sending) return;
+    sending = true;
+    try {
+      await http.post(`/sessions/${encodeURIComponent(sessionId)}/input`, {
+        text: `${buildChecklist()}\n`,
+        submit: false,
+      });
+      if (!alive) return;
+      toasts.success(
+        'Open pins drafted in agent session',
+        `Loaded ${plural(groups.open.length, 'item')} into “${sessionName}”.`,
+      );
+      ws.navigateToSession(sessionId);
+    } catch (e) {
+      if (!alive) return;
+      toastError('Couldn’t send pins to agent session', e);
+    } finally {
+      if (alive) sending = false;
+    }
+  }
+
+  async function sendToStory(targetStoryId: string): Promise<void> {
+    if (sending) return;
+    sending = true;
+    try {
+      await http.post(`/product/stories/${encodeURIComponent(targetStoryId)}/notes`, {
+        body: buildChecklist(),
+        section: 'Design review',
+      });
+      if (!alive) return;
+      toasts.success(
+        'Open pins added to story notes',
+        `Saved ${plural(groups.open.length, 'item')} to the linked story.`,
+      );
+    } catch (e) {
+      if (!alive) return;
+      toastError('Couldn’t add pins to the story', e);
+    } finally {
+      if (alive) sending = false;
+    }
+  }
+
+  function openSendMenu(e: MouseEvent): void {
+    const targetSession = pickTargetAgentSession(ws.plainAgentSessions, ws.activeSessionId);
+    const items: MenuItem[] = [
+      targetSession
+        ? {
+            label: `Send to agent (${targetSession.title || 'Active session'})`,
+            icon: 'terminal',
+            action: () => void sendToAgent(targetSession.id, targetSession.title || 'Active session'),
+          }
+        : {
+            label: 'No open agent session',
+            icon: 'terminal',
+            disabled: true,
+            action: () => {},
+          },
+      ...(storyId
+        ? [
+            {
+              label: 'Append checklist to linked story notes',
+              icon: 'note' as const,
+              action: () => void sendToStory(storyId),
+            },
+          ]
+        : []),
+      ...(onregenerate3d
+        ? [
+            {
+              label: 'Regenerate 3D with polygon feedback…',
+              icon: 'sparkle' as const,
+              action: () => onregenerate3d(formatRegenerateFeedbackPrompt(artifact?.title ?? '3D model', store.threads)),
+            },
+          ]
+        : []),
+      { separator: true },
+      {
+        label: 'Copy checklist as Markdown',
+        icon: 'copy',
+        action: () => void copyWithToast(buildChecklist(), 'Copied open pins checklist'),
+      },
+    ];
+    ctxMenu.showAt(e.currentTarget as HTMLElement, items, { align: 'end' });
+  }
 
   async function post(): Promise<void> {
     const body = text.trim();
@@ -110,9 +237,24 @@
         body={onpin ? 'Press C or use Comment to pin one on the design.' : 'Write one above about the whole design.'} />
     {/snippet}
     {#if groups.open.length}
+      <div class="ct-dispatch">
+        <span class="ct-open-count">{groups.open.length} open</span>
+        <span class="grow"></span>
+        <button
+          type="button"
+          class="btn small ghost"
+          onclick={openSendMenu}
+          disabled={sending}
+          aria-haspopup="menu"
+          title="Send unresolved review pins to an active agent session or linked story"
+          data-testid="design-send-pins"
+        >
+          <Icon name="send" size={12} /> {sending ? 'Sending…' : 'Send to Agent / Plan…'}
+        </button>
+      </div>
       <ul class="list" aria-label="Open comments">
         {#each groups.open as t (t.root.id)}
-          <CommentThread thread={t} {store} {shownVersionId} {meId} {canComment} {canDeleteAny} onjump={(id, seq) => void jump(id, seq)} />
+          <CommentThread thread={t} {store} {shownVersionId} {meId} {canComment} {canDeleteAny} onjump={(id, seq) => void jump(id, seq)} {onfocus3d} />
         {/each}
       </ul>
     {:else}
@@ -125,7 +267,7 @@
       {#if showResolved}
         <ul class="list" aria-label="Resolved comments">
           {#each groups.resolved as t (t.root.id)}
-            <CommentThread thread={t} {store} {shownVersionId} {meId} {canComment} {canDeleteAny} onjump={(id, seq) => void jump(id, seq)} />
+            <CommentThread thread={t} {store} {shownVersionId} {meId} {canComment} {canDeleteAny} onjump={(id, seq) => void jump(id, seq)} {onfocus3d} />
           {/each}
         </ul>
       {/if}
@@ -158,6 +300,17 @@
   }
   .grow {
     flex: 1;
+  }
+  .ct-dispatch {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-block-end: 4px;
+    border-block-end: 1px solid var(--border);
+  }
+  .ct-open-count {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
   }
   .list {
     margin: 0;

@@ -1,6 +1,7 @@
 //! Global-shortcut registry — the ONE owner of every system-wide chord.
 //!
-//! Each shortcut has a stable id (`snip`, `assistant`, `assistant.voice`), a
+//! Each shortcut has a stable id (`snip`, `assistant`, `clipboard`,
+//! `keep-awake`, `assistant.voice`), a
 //! default accelerator, and a user override persisted in
 //! `<app-config>/shortcuts.json` (`{"shortcuts": {"<id>": "<accel>"}}`; an
 //! empty string = disabled). Registering one id never touches another's chord —
@@ -46,6 +47,16 @@ pub const SPECS: &[Spec] = &[
         id: "assistant",
         label: "Show or hide the assistant bar",
         default: "Alt+Space",
+    },
+    Spec {
+        id: "clipboard",
+        label: "Show clipboard history",
+        default: crate::clipboard::DEFAULT_SHORTCUT,
+    },
+    Spec {
+        id: "keep-awake",
+        label: "Turn keep awake on or off",
+        default: crate::keep_awake::DEFAULT_SHORTCUT,
     },
     Spec {
         id: "assistant.voice",
@@ -140,6 +151,8 @@ fn dispatch(app: &AppHandle, id: &'static str, state: ShortcutState) {
     match (id, state) {
         ("snip", ShortcutState::Pressed) => crate::snip::emit_snip(app),
         ("assistant", ShortcutState::Pressed) => crate::bar::toggle(app),
+        ("clipboard", ShortcutState::Pressed) => crate::clipboard::toggle(app),
+        ("keep-awake", ShortcutState::Pressed) => crate::keep_awake::toggle(app),
         ("assistant.voice", ShortcutState::Pressed) => crate::bar::voice(app, true),
         ("assistant.voice", ShortcutState::Released) => crate::bar::voice(app, false),
         _ => {}

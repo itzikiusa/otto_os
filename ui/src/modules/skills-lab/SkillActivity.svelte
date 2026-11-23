@@ -8,6 +8,7 @@
   //           loads it (by category), and Otto's own activity on it in this
   //           workspace (reviews, evaluations, golden tasks). Otto doesn't
   //           record when an agent invokes a skill mid-session, and says so.
+  import { onDestroy } from 'svelte';
   import type { GoldenTask, SkillEvalSummary, SkillReview } from '../../lib/api/types';
   import { loadErrorText } from '../../lib/loadError';
   import { skillsEvalApi } from '../../lib/api/skillsEval';
@@ -66,15 +67,20 @@
   let reviews = $state<SkillReview[] | null>(null);
   let golden = $state<GoldenTask[] | null>(null);
   let loadedFor = '';
+  let loadSeq = 0;
+  let disposed = false;
+  onDestroy(() => { disposed = true; ++evalsSeq; ++loadSeq; });
 
   let wsError = $state<string | null>(null);
   async function load(ws: string): Promise<void> {
+    const seq = ++loadSeq;
     wsError = null;
     reviews = golden = null;
     const [r, g] = await Promise.allSettled([
       skillReviewApi.list(ws),
       skillsEvalApi.listGolden(ws),
     ]);
+    if (disposed || seq !== loadSeq) return;
     reviews = r.status === 'fulfilled' ? r.value : [];
     golden = g.status === 'fulfilled' ? g.value : [];
     // Any failed source is an error, not a zero: "Not evaluated yet" over a
@@ -158,7 +164,7 @@
   <LoadState what="activity for this skill" {error} empty onretry={() => { void load(wsId); void loadEvals(wsId, group.name); }} />
 {:else if !wsId}
   <EmptyState title="No workspace selected" body="Evaluations and reviews belong to a workspace. Pick one in the sidebar to see this skill’s activity." icon="folder" />
-{:else if evals == null}
+{:else if evals == null || (view === 'usage' && (reviews == null || golden == null))}
   <LoadState what="activity for {group.name}" loading empty rows={3} />
 {:else if view === 'evals'}
   {#if myEvals.length === 0}

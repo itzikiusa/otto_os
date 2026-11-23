@@ -106,6 +106,8 @@
     cloud: 'M5 12.5h6.5a2.5 2.5 0 0 0 .3-5 3.5 3.5 0 0 0-6.7-.8A3 3 0 0 0 5 12.5Z',
     // ship's wheel (Kubernetes console)
     helm: 'M8 5a3 3 0 1 1 0 6 3 3 0 0 1 0-6Zm0-3v3m0 6v3M2 8h3m6 0h3M3.8 3.8l2.1 2.1m4.2 4.2 2.1 2.1m0-8.4-2.1 2.1m-4.2 4.2-2.1 2.1',
+    // shipping container (Containers console)
+    containers: 'M2 4.5a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-7Zm3.3-1v9m2.7-9v9m2.7-9v9',
     clock: 'M8 2.5a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11ZM8 5v3.2l2.2 1.3',
     // ⌘ — four corner loops around a centre square
     command:
@@ -175,6 +177,8 @@
     editorLines: 'M2.5 3.5h11M2.5 6.5h11M2.5 9.5h11M2.5 12.5h7',
     editorSplit: 'M1.5 3.5h5M1.5 6.5h5M1.5 9.5h5M1.5 12.5h3.5M9.5 2.5h4a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Z',
     step: 'M8 2.5a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11ZM7 6.3 8.4 5.3v5.4',
+    // Speaker with sound waves — TTS / Voice Studio & audio playback.
+    volume: 'M2.5 6h2.6L8.5 3.2v9.6L5.1 10H2.5V6Zm8.2-.4a3.5 3.5 0 0 1 0 4.8m2-6.8a6 6 0 0 1 0 8.8',
   } satisfies Record<string, string>;
 
   export type IconName = keyof typeof paths;

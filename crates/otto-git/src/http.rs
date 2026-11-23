@@ -197,6 +197,7 @@ pub fn router<S: GitCtx>() -> Router<S> {
         .route("/repos/{id}/discard", post(repo_discard::<S>))
         .route("/repos/{id}/commit", post(repo_commit::<S>))
         .route("/repos/{id}/push", post(repo_push::<S>))
+        .route("/repos/{id}/push/preflight", post(repo_push_preflight::<S>))
         .route("/repos/{id}/push-target", get(repo_push_target::<S>))
         .route("/repos/{id}/pull", post(repo_pull::<S>))
         .route("/repos/{id}/checkout", post(repo_checkout::<S>))
@@ -1306,6 +1307,7 @@ async fn clone_into_workspace<S: GitCtx>(
         .clone()
         .or_else(|| derive_repo_name(url))
         .ok_or_else(|| Error::Invalid("cannot derive repo name from clone url".into()))?;
+    validate_clone_repo_name(&name)?;
     // Clone INTO a user-chosen parent dir when provided (`~` expanded), else the
     // workspace root. The repo lands at `<base>/<name>`.
     let base = match req
@@ -1322,6 +1324,14 @@ async fn clone_into_workspace<S: GitCtx>(
         None => ws.root_path.clone(),
     };
     let dest = FsPath::new(&base).join(&name);
+    if otto_core::paths::is_broad_non_project_root(&dest)
+        || otto_core::paths::is_broad_non_project_root(&lexical_clean_path(&dest))
+    {
+        return Err(Error::Invalid(
+            "refusing broad non-project directory (e.g. $HOME or system root) as a Git repository"
+                .into(),
+        ));
+    }
     // The chosen parent must exist for `git clone <url> <dest>` to succeed.
     let _ = tokio::fs::create_dir_all(&base).await;
     if tokio::fs::metadata(&dest).await.is_ok() {
@@ -1493,6 +1503,50 @@ fn pick_account(
     owning
         .all(|a| a.username.eq_ignore_ascii_case(&first.username))
         .then_some(first)
+}
+
+fn validate_clone_repo_name(name: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        return Err(Error::Invalid("repo name must not be empty".into()));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(Error::Invalid(
+            "repo name must not contain control characters".into(),
+        ));
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err(Error::Invalid(
+            "repo name must be a single path segment".into(),
+        ));
+    }
+    if name.starts_with('-') || name.trim_start().starts_with('-') {
+        return Err(Error::Invalid(format!(
+            "refusing option-like repo name '{name}'"
+        )));
+    }
+    let mut comps = FsPath::new(name).components();
+    match (comps.next(), comps.next()) {
+        (Some(std::path::Component::Normal(seg)), None) if seg.to_str() == Some(name) => Ok(()),
+        _ => Err(Error::Invalid(format!(
+            "repo name '{name}' must be a single normal path segment"
+        ))),
+    }
+}
+
+fn lexical_clean_path(path: &FsPath) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::Prefix(p) => out.push(p.as_os_str()),
+            std::path::Component::RootDir => out.push(comp.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::Normal(seg) => out.push(seg),
+        }
+    }
+    out
 }
 
 fn derive_repo_name(url: &str) -> Option<String> {
@@ -2054,6 +2108,17 @@ async fn repo_push_target<S: GitCtx>(
 ) -> ApiResult<Json<crate::push::PushTarget>> {
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     Ok(Json(git.push_target().await?))
+}
+
+async fn repo_push_preflight<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    body: Option<Json<crate::preflight::PushPreflightReq>>,
+) -> ApiResult<Json<crate::preflight::PushPreflightResp>> {
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let req = body.map(|b| b.0).unwrap_or_default();
+    Ok(Json(git.push_preflight(&req).await?))
 }
 
 async fn repo_push<S: GitCtx>(

@@ -1,7 +1,6 @@
 <script lang="ts">
   import { announce } from '../../lib/announce.svelte';
   import { rowMenu } from '../../lib/rowMenu';
-  import { focusOnMount } from '../../lib/focusOnMount';
   import { NO_WORKSPACE } from '../../lib/labels';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
@@ -9,7 +8,7 @@
   // SchemaTree + a Saved/History switch; main = a tab strip (Query / Builder /
   // Structure / Dashboards) over the active view.
   import { tick } from 'svelte';
-  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { paneResizer, loadPaneWidth, LIST_PANE } from '../../lib/paneResizer';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
@@ -26,7 +25,7 @@
   import ResourceAccess from '../../lib/components/ResourceAccess.svelte';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
-  import ConnectionForm from '../connections/ConnectionForm.svelte';
+  import ConnectionForm, { type ConnectionPrefill } from '../connections/ConnectionForm.svelte';
   import ConnectionImportDialog from '../connections/ConnectionImportDialog.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent, whenIdle } from '../../lib/lazy-component.svelte';
@@ -38,11 +37,13 @@
   import ImportDialog from './ImportDialog.svelte';
   import ExportDialog from './ExportDialog.svelte';
   import ProcessList from './ProcessList.svelte';
-  import HistoryAll from './HistoryAll.svelte';
+  import DbSavedHistorySidebar from './DbSavedHistorySidebar.svelte';
+  import DbMainToolbar from './DbMainToolbar.svelte';
+  import { buildDbCliSnippet, cliLabelForKind } from './cliSnippet';
   import { processEngine } from './process-list';
-  import { stmtPreview } from '../../lib/database/sql-util';
+  import { copyWithToast } from '../../lib/clipboard';
   import { databaseAccessChild } from '../../lib/access-options';
-  import { database, engineGlyph, type DbMainTab, type DbSideTab } from '../../lib/stores/database.svelte';
+  import { database, engineGlyph, type DbSideTab } from '../../lib/stores/database.svelte';
   import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
   import { brokers } from '../../lib/stores/brokers.svelte';
   import { ws, DB_PANE_ID } from '../../lib/stores/workspace.svelte';
@@ -56,14 +57,11 @@
   import { router } from '../../lib/router.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { lsGet, lsSet } from '../../lib/storage';
-  import { rel } from '../../lib/stores/now.svelte';
-  import { dbSidebarState } from './dbSidebarState.svelte';
   import type {
     BrokerCluster,
     Connection,
     ConnectionKind,
     ConnectionSection,
-    DbSavedQuery,
   } from '../../lib/api/types';
 
   // Secondary views and the SSH/Kafka/SFTP panes load on first open, not with
@@ -92,17 +90,24 @@
   // The unified Connections hub: EVERY profile kind is created/managed in this
   // tree — DB engines open the workbench, ssh/custom open a terminal session,
   // Kafka clusters open Message Brokers.
-  const ALL_KINDS: ConnectionKind[] = [
-    'ssh',
-    'mysql',
-    'postgres',
-    'redis',
-    'mongodb',
-    'clickhouse',
-    'custom',
-  ];
+  const ALL_KINDS: ConnectionKind[] = ['ssh', 'mysql', 'postgres', 'redis', 'mongodb', 'clickhouse', 'custom'];
   let connFormOpen = $state(false);
   let editingConn = $state<Connection | null>(null);
+  let prefillConn = $state<ConnectionPrefill | null>(null);
+  // Consume one-shot connection prefill (e.g. from AWS RDS "Open in Connections…").
+  $effect(() => {
+    if (!ws.currentId) return;
+    let raw: string | null = null;
+    try { raw = sessionStorage.getItem('otto.conn_prefill'); if (raw) sessionStorage.removeItem('otto.conn_prefill'); } catch { return; }
+    if (!raw) return;
+    if (!auth.isRoot) { toasts.info('Connection creation needs admin access', 'Copy the endpoint from AWS Console instead.'); return; }
+    try {
+      const p = JSON.parse(raw) as ConnectionPrefill;
+      if (p && typeof p === 'object' && typeof p.host === 'string' && p.host.trim()) {
+        editingConn = null; prefillConn = p; showConnections(); connFormOpen = true;
+      }
+    } catch { /* ignore malformed prefill */ }
+  });
   // Import connection profiles from other DB tools (MySQL Workbench / DBeaver /
   // DataGrip / NoSQLBooster) — the daemon reads each tool's config from disk.
   let connImportOpen = $state(false);
@@ -117,15 +122,8 @@
   // ── Type-filter chips (single-select; 'kafka' matches broker clusters) ─────
   const FILTER_KEY = 'otto_connhub_filter';
   const FILTER_CHIPS: { id: string; label: string }[] = [
-    { id: 'all', label: 'All' },
-    { id: 'ssh', label: 'SSH' },
-    { id: 'mysql', label: 'MySQL' },
-    { id: 'postgres', label: 'PostgreSQL' },
-    { id: 'redis', label: 'Redis' },
-    { id: 'mongodb', label: 'MongoDB' },
-    { id: 'clickhouse', label: 'ClickHouse' },
-    { id: 'kafka', label: 'Kafka' },
-    { id: 'custom', label: 'Custom' },
+    { id: 'all', label: 'All' }, { id: 'ssh', label: 'SSH' }, { id: 'mysql', label: 'MySQL' }, { id: 'postgres', label: 'PostgreSQL' },
+    { id: 'redis', label: 'Redis' }, { id: 'mongodb', label: 'MongoDB' }, { id: 'clickhouse', label: 'ClickHouse' }, { id: 'kafka', label: 'Kafka' }, { id: 'custom', label: 'Custom' },
   ];
   // Guarded storage: this runs at mount, so a throwing accessor (blocked
   // storage) must not take the whole Database page down.
@@ -148,47 +146,6 @@
   const filtering = $derived(filterKind !== 'all');
   const connMatchesKind = (c: Connection): boolean => !filtering || c.kind === filterKind;
   const clusterMatchesKind = (): boolean => !filtering || filterKind === 'kafka';
-
-  // ── Saved / History sidebar (search + inline rename) ──────────────────────
-  let renamingId = $state<string | null>(null);
-  let renameDraft = $state('');
-  // Lower-cased search text per row, memoized on the row's text — not
-  // re-lowercasing every full statement (which can be a whole pasted script)
-  // on each search keystroke.
-  const searchText = new WeakMap<object, { src: string; lower: string }>();
-  function lowered(row: object, text: string): string {
-    const hit = searchText.get(row);
-    if (hit && hit.src === text) return hit.lower;
-    const lower = text.toLowerCase();
-    searchText.set(row, { src: text, lower });
-    return lower;
-  }
-  const filteredSaved = $derived.by(() => {
-    const s = dbSidebarState.savedSearch.trim().toLowerCase();
-    if (!s) return database.savedQueries;
-    return database.savedQueries.filter(
-      (q) => q.name.toLowerCase().includes(s) || lowered(q, q.statement).includes(s),
-    );
-  });
-  const filteredHistory = $derived.by(() => {
-    const s = dbSidebarState.historySearch.trim().toLowerCase();
-    if (!s) return database.history;
-    return database.history.filter((h) =>
-      lowered(h, h.error ? `${h.statement}\n${h.error}` : h.statement).includes(s),
-    );
-  });
-  function startRename(q: DbSavedQuery): void {
-    renamingId = q.id;
-    renameDraft = q.name;
-  }
-  async function commitRename(): Promise<void> {
-    const id = renamingId;
-    if (id && renameDraft.trim()) await database.renameSavedQuery(id, renameDraft);
-    renamingId = null;
-  }
-  function cancelRename(): void {
-    renamingId = null;
-  }
 
   // ── Phone accordion ────────────────────────────────────────────────────────
   // On a phone the whole page scrolls and each major section (Connections /
@@ -241,6 +198,8 @@
   );
   function connMenu(e: MouseEvent, c: Connection): void {
     const isDb = database.connections.some((x) => x.id === c.id);
+    const cliCmd = buildDbCliSnippet(c, { activeDb: database.selectedConnId === c.id ? database.activeDb : null });
+    const cliName = cliLabelForKind(c.kind);
     ctxMenu.show(e, [
       // Per-kind primary/secondary opens: DB kinds live in the workbench but
       // keep their CLI client; ssh adds the SFTP file browser.
@@ -250,6 +209,7 @@
             ...(connectionAccess(c,'shell') ? [{ label: 'Open terminal client', icon: 'terminal', action: () => void openTerminal(c) }] : []),
           ]
         : connectionAccess(c,'shell') ? [{ label: 'Open terminal session', icon: 'terminal', action: () => void openTerminal(c) }] : []),
+      ...(cliCmd && cliName ? [{ label: `Copy as ${cliName}`, icon: 'copy', action: () => void copyWithToast(cliCmd, `${cliName} command`) }] : []),
       ...(c.kind === 'ssh' && connectionAccess(c,'sftp_read','view')
         ? [{ label: 'Browse files (SFTP)', icon: 'folder', action: () => (sftpFor = c) }]
         : []),
@@ -592,6 +552,7 @@
   function newConnection(): void {
     if(!auth.isRoot)return;
     editingConn = null;
+    prefillConn = null;
     connFormOpen = true;
   }
   async function showSchemaSidebar(): Promise<void> {
@@ -618,8 +579,7 @@
     newConnection();
   }
   function editConnection(c: Connection): void {
-    editingConn = c;
-    connFormOpen = true;
+    editingConn = c; prefillConn = null; connFormOpen = true;
   }
 
   // ⌘K: the Connections hub's verbs.
@@ -632,7 +592,7 @@
     ]),
   );
   async function onConnSaved(c: Connection): Promise<void> {
-    connFormOpen = false;
+    connFormOpen = false; prefillConn = null;
     await database.loadConnections();
     // DB kinds open straight into the workbench; ssh/custom just appear in the
     // tree (opening them spawns a terminal, which the user does deliberately).
@@ -771,36 +731,6 @@
       { label: 'Import connections…', icon: 'arrowDown', disabled: !auth.isRoot, title: owner ?? 'From MySQL Workbench, DBeaver, DataGrip or NoSQLBooster', action: () => (connImportOpen = true) },
     ]);
   }
-  function savedMenu(e: MouseEvent, q: DbSavedQuery): void {
-    ctxMenu.show(e, [
-      { label: 'Open', icon: 'file', action: () => database.openSavedQuery(q) },
-      { label: 'Rename', icon: 'edit', action: () => startRename(q) },
-      { separator: true },
-      { label: 'Delete…', icon: 'trash', danger: true, action: () => void deleteSaved(q) },
-    ]);
-  }
-  async function deleteSaved(q: DbSavedQuery): Promise<void> {
-    const ok = await confirmer.ask(`Delete saved query “${q.name}”? Open tabs keep their text but are no longer linked to it.`, {
-      title: 'Delete saved query',
-      confirmLabel: 'Delete query',
-      danger: true,
-    });
-    if (ok) void database.deleteSavedQuery(q.id);
-  }
-  const hasSchemaChanges = $derived(['mysql', 'postgres'].includes(database.connections.find((c) => c.id === database.selectedConnId)?.kind ?? ''));
-  function connActionsMenu(e: MouseEvent): void {
-    ctxMenu.show(e, [
-      { label: database.testing ? 'Testing connection…' : 'Test connection', icon: 'plug', disabled: database.testing, action: () => void database.testConnection() },
-      ...(hasSchemaChanges ? [{ label: 'Database changes', icon: 'branch', title: 'Reviewed database changes for this connection', action: () => (changesOpen = true) }] : []),
-    ]);
-  }
-  function healthTitle(st: { serverVersion?: string; latencyMs?: number }): string {
-    const parts = ['Connected'];
-    if (st.serverVersion) parts.push(st.serverVersion);
-    if (st.latencyMs != null) parts.push(`${st.latencyMs} ms`);
-    return parts.join(' · ');
-  }
-
   // Sidebar views. On a phone the connection list is its own accordion, so
   // the strip there starts at Schema ("connections" shows as Schema).
   const SIDE_TABS: TabItem<DbSideTab>[] = [
@@ -810,15 +740,6 @@
     { id: 'history', label: 'History' },
   ];
   const MOBILE_SIDE_TABS = SIDE_TABS.slice(1);
-  const mainTabs: { id: DbMainTab; label: string; icon: IconName; show: () => boolean }[] = [
-    { id: 'query', label: 'Query', icon: 'terminal', show: () => true },
-    { id: 'builder', label: 'Builder', icon: 'layers', show: () => database.supportsBuilder },
-    { id: 'structure', label: 'Structure', icon: 'columns', show: () => true },
-    // ERD is table/collection-oriented; Redis (keys, no table model) is excluded.
-    { id: 'diagram', label: 'Diagram', icon: 'shapes', show: () => database.capabilities?.engine !== 'redis' },
-    { id: 'dashboards', label: 'Dashboards', icon: 'chart', show: () => true },
-  ];
-  const visibleTabs = $derived(mainTabs.filter((t) => t.show()));
   // ── DB Assistant split (resizable, persisted) ────────────────────────────────
   // When open, the DB Assistant panel sits BESIDE the editor/results, separated by
   // a draggable divider so the user can enlarge the agent's shell. Mirrors the
@@ -837,26 +758,19 @@
     assistW = w;
     persistAssistW();
   }
+  let stopAssistResize: (() => void) | null = null;
+  $effect(() => () => stopAssistResize?.());
   function startAssistResize(e: PointerEvent): void {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = assistW;
-    const maxW = assistMaxW();
-    const onMove = (ev: PointerEvent): void => {
-      // The panel is pinned to the right edge, so dragging LEFT widens it.
-      assistW = Math.max(300, Math.min(maxW, startW + (startX - ev.clientX)));
-    };
+    e.preventDefault(); stopAssistResize?.();
+    const startX = e.clientX, startW = assistW, maxW = assistMaxW();
+    const onMove = (ev: PointerEvent): void => { assistW = Math.max(300, Math.min(maxW, startW + (startX - ev.clientX))); };
     const onUp = (): void => {
       persistAssistW();
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      window.removeEventListener('pointercancel', onUp);
+      window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp); window.removeEventListener('pointercancel', onUp);
+      if (stopAssistResize === onUp) stopAssistResize = null;
     };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-    // A cancelled gesture (system gesture, focus loss) ends the drag too —
-    // else pointermove stays attached and the pane follows the cursor.
-    window.addEventListener('pointercancel', onUp);
+    stopAssistResize = onUp;
+    window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', onUp); window.addEventListener('pointercancel', onUp);
   }
 
   // ── Connection sidebar width (resizable, persisted) ───────────────────────────
@@ -1231,59 +1145,7 @@
           <EmptyState icon="terminal" title="Session closed" body="This terminal tab is no longer open." />
         {/if}
       {:else if database.selectedConnId}
-      <div class="main-tabs" class:many={visibleTabs.length > 3}>
-        <!-- The workbench views: a segmented control (selection = surface
-             lift), ←/→ move between them like any tablist. -->
-        <div class="segmented view-switch" role="tablist" aria-label="Workbench view" tabindex="-1" onkeydown={onTabKey}>
-          {#each visibleTabs as t (t.id)}
-            <button
-              class="mt"
-              class:active={database.mainTab === t.id}
-              role="tab"
-              aria-selected={database.mainTab === t.id}
-              tabindex={database.mainTab === t.id ? 0 : -1}
-              title={t.label}
-              onclick={() => database.setMainTab(t.id)}
-            >
-              <Icon name={t.icon} size={12} />{t.label}
-            </button>
-          {/each}
-        </div>
-        <span class="grow"></span>
-        <!-- Status is one quiet line (dot + engine; version and latency in its
-             tooltip); Test and Database changes live in the one ⋯ menu. -->
-        <div class="conn-status">
-          {#if database.isGuarded}
-            <!-- The guard as one chip in this row (the full rule in its tooltip
-                 and for AT) — the red rail + the tab's env badge carry it too. -->
-            {@const guardText = database.isProd
-              ? 'Production connection — schema changes require an approved change. Other writes require permission and confirmation.'
-              : 'Read-only connection — native privileges and access rules limit execution.'}
-            <span class="guard-chip" class:prod={database.isProd} title={guardText} data-testid="db-guard-chip">
-              <Icon name={database.isProd ? 'zap' : 'key'} size={12} />
-              <span aria-hidden="true">{database.isProd ? 'Production' : 'Read-only'}</span>
-              <span class="sr-only">{guardText}</span>
-            </span>
-          {/if}
-          {#if database.activeConnStatus?.phase === 'connecting'}
-            <span class="conn-state" title="Connecting…"><span class="conn-tab-spin spinner" style="--spinner-size: 12px" aria-hidden="true"></span><span class="lbl">Connecting…</span></span>
-          {:else if database.activeConnStatus?.phase === 'error'}
-            <span class="conn-state err" title={database.activeConnStatus.error}>Disconnected</span>
-          {/if}
-          {#if database.capabilities}
-            <span class="conn-state" class:ok={database.activeConnStatus?.phase === 'ready'} title={database.activeConnStatus?.phase === 'ready' ? healthTitle(database.activeConnStatus) : 'Engine'}>
-              {#if database.activeConnStatus?.phase === 'ready'}<span class="health-dot" aria-hidden="true"></span>{/if}
-              <span class="cap-chip mono">{database.capabilities.engine}</span>
-            </span>
-          {/if}
-          {#if database.testResult}
-            <span class="test-dot" class:ok={database.testResult.ok} title={database.testResult.message}></span>
-          {/if}
-          <button class="icon-btn" onclick={connActionsMenu} aria-haspopup="menu" aria-label="Connection actions" title="Connection actions — test the connection{hasSchemaChanges ? ', schema changes' : ''}" data-testid="db-conn-actions">
-            <Icon name="more" size={14} />
-          </button>
-        </div>
-      </div>
+      <DbMainToolbar onopenchanges={() => (changesOpen = true)} />
 
       <!-- The active view (editor/results/…) and, when open, the DB Assistant
            agent panel side-by-side, separated by a draggable, persisted divider. -->
@@ -1589,81 +1451,8 @@
 {/snippet}
 
 {#snippet schemaSideBody()}
-  {#if database.sideTab === 'saved'}
-    <div class="list-search">
-      <Icon name="search" size={12} />
-      <input dir="ltr"
-        class="list-search-input"
-        placeholder="Filter saved queries…"
-        bind:value={dbSidebarState.savedSearch}
-        aria-label="Filter saved queries"
-      />
-      {#if dbSidebarState.savedSearch}
-        <button class="icon-btn" onclick={() => (dbSidebarState.savedSearch = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={12} /></button>
-      {/if}
-    </div>
-    <LoadState what="saved queries" variant="compact" loading={database.savedQueriesLoading} error={database.savedQueriesError} empty={database.savedQueries.length === 0} onretry={() => database.loadSavedQueries()} />
-    {#if database.savedQueries.length === 0 && (database.savedQueriesLoading || database.savedQueriesError)}
-      <!-- Loading and failed loads are rendered above, never as an empty list. -->
-    {:else if database.savedQueries.length === 0}
-      <EmptyState icon="file" title="No saved queries" body="Save one from the Query tab." />
-    {:else if filteredSaved.length === 0}
-      <EmptyState icon="search" title="No matches" body={`No saved queries match “${dbSidebarState.savedSearch}”.`} actionLabel="Clear filter" actionKind="secondary" onaction={() => (dbSidebarState.savedSearch = '')} />
-    {:else}
-      {#each filteredSaved as q (q.id)}
-        <div class="saved-row" role="presentation" oncontextmenu={(e) => { e.preventDefault(); savedMenu(e, q); }}>
-          {#if renamingId === q.id}
-            <input dir="auto"
-              class="rename-input"
-              bind:value={renameDraft}
-              use:focusOnMount
-              onkeydown={(e) => {
-                if (e.key === 'Enter') void commitRename();
-                else if (e.key === 'Escape') cancelRename();
-              }}
-              onblur={() => void commitRename()}
-              aria-label="Rename saved query"
-            />
-          {:else}
-            <button class="saved-open" onclick={() => database.openSavedQuery(q)} title={stmtPreview(q.statement, 1000)}>
-              <Icon name="file" size={12} />
-              <span class="ellipsis">{q.name}</span>
-            </button>
-            <button class="icon-btn row-del" onclick={(e) => savedMenu(e, q)} aria-haspopup="menu" aria-label="Actions for saved query {q.name}" title="Rename or delete"><Icon name="more" size={12} /></button>
-          {/if}
-        </div>
-      {/each}
-    {/if}
-  {:else if database.sideTab === 'history'}
-    <div class="list-search">
-      <Icon name="search" size={12} />
-      <input dir="ltr" class="list-search-input" placeholder="Filter history…" bind:value={dbSidebarState.historySearch} aria-label="Filter query history" />
-      {#if dbSidebarState.historySearch}<button class="icon-btn" onclick={() => (dbSidebarState.historySearch = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={12} /></button>{/if}
-      <select class="hist-scope" bind:value={dbSidebarState.historyAll} aria-label="Whose history" title="This connection’s history, or every connection’s"><option value={false}>This connection</option><option value={true}>All connections</option></select>
-    </div>
-    {#if dbSidebarState.historyAll}<HistoryAll search={dbSidebarState.historySearch} />{:else}
-    <LoadState what="query history" variant="compact" loading={database.historyLoading} error={database.historyError} empty={database.history.length === 0} onretry={() => database.loadHistory()} />
-    {#if database.history.length === 0 && (database.historyLoading || database.historyError)}
-      <!-- Loading and failed loads are rendered above, never as an empty list. -->
-    {:else if database.history.length === 0}
-      <EmptyState icon="clock" title="No query history yet" body="Queries you run show up here." />
-    {:else if filteredHistory.length === 0}
-      <EmptyState icon="search" title="No matches" body={`No history matches “${dbSidebarState.historySearch}”.`} actionLabel="Clear filter" actionKind="secondary" onaction={() => (dbSidebarState.historySearch = '')} />
-    {:else}
-      {#each filteredHistory as h (h.id)}
-        <!-- Bounded previews: a history row can hold a whole pasted script. -->
-        <button class="hist-row" class:bad={!h.ok} onclick={() => void database.openHistory(h)} title={h.error ? stmtPreview(h.error, 1000) : stmtPreview(h.statement, 1000)}>
-          <span class="hist-dot" class:ok={h.ok}></span>
-          <span class="hist-stmt ellipsis mono">{stmtPreview(h.statement)}</span>
-          <span class="hist-meta">{h.ok ? `${h.row_count}r` : 'err'} · {rel(h.created_at, { compact: true })}</span>
-        </button>
-      {/each}
-      {#if database.canLoadMoreHistory}
-        <button class="load-more" onclick={() => database.loadMoreHistory()} disabled={database.historyLoadingMore}>
-          {database.historyLoadingMore ? 'Loading more history…' : 'Load more'}
-        </button>
-      {/if}
-    {/if}{/if}
+  {#if database.sideTab === 'saved' || database.sideTab === 'history'}
+    <DbSavedHistorySidebar mode={database.sideTab} />
   {:else}
     {@const sc = database.connections.find((c) => c.id === database.selectedConnId)}
     {#if sc}
@@ -1683,8 +1472,10 @@
 {#if accessFor}<Modal title={`Access · ${accessFor.name}`} width={820} onclose={() => accessFor=null}><ResourceAccess kind="connection" resourceId={accessFor.id} /></Modal>{/if}{#if processesFor}<ProcessList conn={processesFor} onclose={() => (processesFor = null)} />{/if}
 
 {#if connFormOpen}
-  <ConnectionForm existing={editingConn} kinds={ALL_KINDS} onclose={() => (connFormOpen = false)} onsaved={onConnSaved}
-    ondiagnose={(p) => { const c = editingConn; connFormOpen = false; if (c) connDiagnose.request(c, p); }} />
+  {#key editingConn?.id ?? (prefillConn ? `prefill:${prefillConn.host}:${prefillConn.port ?? ''}` : 'new')}
+    <ConnectionForm existing={editingConn} prefill={prefillConn} kinds={ALL_KINDS} onclose={() => { connFormOpen = false; prefillConn = null; }} onsaved={onConnSaved}
+      ondiagnose={(p) => { const c = editingConn; connFormOpen = false; prefillConn = null; if (c) connDiagnose.request(c, p); }} />
+  {/key}
 {/if}
 
 {#if clusterFormOpen}
@@ -1841,62 +1632,6 @@
     gap: 6px;
     padding: 0 6px;
     flex-wrap: wrap;
-  }
-  .list-search {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 6px 6px;
-    color: var(--text-dim);
-  }
-  .list-search-input {
-    flex: 1;
-    min-width: 0;
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text);
-    border-radius: var(--radius-s);
-    padding: 4px 6px;
-    font-size: var(--fs-s);
-  }
-  .hist-scope {
-    max-width: 45%;
-    font-size: var(--fs-xs);
-  }
-  .list-search-input:focus {
-    outline: none;
-    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
-  }
-  .rename-input {
-    flex: 1;
-    min-width: 0;
-    border: 1px solid var(--accent);
-    background: var(--surface-2);
-    color: var(--text);
-    border-radius: var(--radius-s);
-    padding: 4px 6px;
-    margin: 0 2px;
-    font-size: var(--fs-s);
-  }
-  .rename-input:focus {
-    outline: none;
-  }
-  .load-more {
-    width: 100%;
-    border: none;
-    background: transparent;
-    color: var(--accent-text);
-    cursor: pointer;
-    font-size: var(--fs-s);
-    padding: 8px 6px;
-    text-align: center;
-  }
-  .load-more:hover:not(:disabled) {
-    text-decoration: underline;
-  }
-  .load-more:disabled {
-    color: var(--text-dim);
-    cursor: default;
   }
   .link {
     border: none;
@@ -2106,73 +1841,6 @@
     padding: 8px;
     min-height: 0;
   }
-  .saved-row,
-  .hist-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    border: none;
-    background: transparent;
-    border-radius: var(--radius-s);
-    cursor: pointer;
-    color: var(--text);
-    text-align: start;
-    padding: 0 6px;
-  }
-  .saved-row {
-    padding: 0;
-  }
-  .saved-open {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-    border: none;
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
-    height: 28px;
-    padding: 0 6px;
-    border-radius: var(--radius-s);
-    font-size: var(--fs-s);
-  }
-  .saved-row:hover,
-  .hist-row:hover {
-    background: var(--hover);
-  }
-  .row-del {
-    opacity: 0;
-  }
-  .saved-row:hover .row-del,
-  .saved-row:focus-within .row-del {
-    opacity: 1;
-  }
-  .hist-row {
-    height: 32px;
-  }
-  .hist-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--status-exited);
-    flex-shrink: 0;
-  }
-  .hist-dot.ok {
-    background: var(--status-working);
-  }
-  .hist-stmt {
-    flex: 1;
-    min-width: 0;
-    font-size: var(--fs-xs);
-  }
-  .hist-meta {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    flex-shrink: 0;
-    font-variant-numeric: tabular-nums;
-  }
   .db-main {
     flex: 1;
     min-width: 0;
@@ -2188,23 +1856,6 @@
   /* Read-only (non-prod) connection → a softer amber rail. */
   .db-main.guard-rail {
     border-inline-start: 3px solid var(--status-working);
-  }
-  /* Guardrail banner above the main tabs. */
-  .guard-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 2px 8px;
-    border-radius: var(--radius-s);
-    font-size: var(--fs-xs);
-    color: var(--success);
-    background: var(--success-soft);
-    white-space: nowrap;
-  }
-  .guard-chip.prod {
-    color: var(--danger);
-    background: var(--danger-soft);
-    font-weight: 600;
   }
   /* Per-row connection-type tag (mysql / ssh / kafka / …) — neutral, so the
      env badge keeps the color signal. */
@@ -2373,78 +2024,6 @@
     background: var(--hover);
     color: var(--text);
   }
-  /* Workbench toolbar: the view switch (segmented) + connection status/actions. */
-  .main-tabs {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    height: 44px;
-    box-sizing: border-box;
-    padding: 0 16px;
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-  }
-  .view-switch {
-    flex-shrink: 0;
-  }
-  .view-switch .mt {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: 24px;
-    padding: 0 10px;
-  }
-  .view-switch .mt :global(svg) {
-    opacity: 0.75;
-  }
-  .view-switch .mt.active :global(svg) {
-    opacity: 1;
-  }
-  .view-switch .mt:focus-visible {
-    outline: 1.5px solid var(--accent-text);
-    outline-offset: 1px;
-  }
-  .conn-status {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-  }
-  /* A narrower workbench first sheds the engine word (the connection tab's
-     glyph shows it too); only a phone-narrow one drops the view words. */
-  @container dbmain (max-width: 900px) {
-    .cap-chip {
-      display: none;
-    }
-    .main-tabs.many .conn-status .lbl {
-      display: none;
-    }
-  }
-  @container dbmain (max-width: 700px) {
-    .conn-status .lbl {
-      display: none;
-    }
-  }
-  @container dbmain (max-width: 640px) {
-    .view-switch .mt {
-      font-size: 0;
-      gap: 0;
-      padding: 0 8px;
-    }
-  }
-  .cap-chip {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .test-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--status-exited);
-  }
-  .test-dot.ok {
-    background: var(--status-working);
-  }
   .conn-tab-spin {
     color: var(--text-dim);
     margin-inline-start: 4px;
@@ -2467,29 +2046,7 @@
     margin-inline-start: 4px;
     flex-shrink: 0;
   }
-  .conn-state {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .conn-state.err {
-    color: var(--danger);
-    font-weight: 500;
-  }
-  .conn-state.ok {
-    color: var(--text-dim);
-    max-width: 220px;
-  }
-  .health-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--status-working);
-    flex-shrink: 0;
-  }
-  
+
   /* Horizontal split holding the active view + (optionally) the DB Assistant. */
   .main-split {
     flex: 1;
@@ -2647,19 +2204,8 @@
     .list-empty {
       font-size: var(--fs-m);
     }
-    .hist-stmt {
-      font-size: var(--fs-m);
-    }
-    .hist-meta,
     .count {
       font-size: var(--fs-s);
-    }
-    .saved-open {
-      font-size: var(--fs-l);
-      height: 36px;
-    }
-    .hist-row {
-      height: 40px;
     }
     /* Main area: let it grow to its natural height so it stacks under the
        sidebar and the page scrolls — instead of being a clipped flex:1 box. */
@@ -2687,61 +2233,18 @@
       border-top: 1px solid var(--border);
     }
     /* Bigger tap targets + readable text for the tab strips. */
-    .conn-tabs {
-      height: 40px;
-    }
-    /* Let the tab row wrap so the engine chip + Test button drop to their own
-       line on the narrowest phones instead of jutting past the edge. */
-    .main-tabs {
-      height: auto;
-      min-height: 44px;
-      padding: 6px 12px;
-      flex-wrap: wrap;
-      row-gap: 4px;
-    }
-    .view-switch {
-      max-width: 100%;
-      overflow-x: auto;
-    }
-    /* The flexible spacer would push conn-status onto an overflowing line —
-       make it a full-width break so the status wraps cleanly below the tabs. */
-    .main-tabs .grow {
-      flex-basis: 100%;
-      height: 0;
-    }
-    .view-switch .mt {
-      height: 30px;
-      font-size: var(--fs-m);
-      padding: 0 10px;
-    }
-    .conn-name {
-      font-size: var(--fs-l);
-    }
-    /* The status row (engine chip + Test) can wrap rather than overflow. */
-    .conn-status {
-      flex-wrap: wrap;
-    }
+    .conn-tabs { height: 40px; }
+    .conn-name { font-size: var(--fs-l); }
   }
-
-  /* Tablet keeps two columns. Cap the restored sidebar width and wrap the
-     status row so neither can push the workbench outside the viewport. */
+  /* Tablet keeps two columns; cap restored sidebar width within viewport. */
   @media (min-width: 641px) and (max-width: 1024px) {
-    .db-side {
-      max-width: 45vw;
-    }
-    .main-tabs {
-      height: auto;
-      min-height: 44px;
-      padding: 6px 12px;
-      flex-wrap: wrap;
-      row-gap: 4px;
-    }
-    .main-tabs .grow {
-      flex-basis: 100%;
-      height: 0;
-    }
-    .conn-status {
-      flex-wrap: wrap;
-    }
+    .db-side { max-width: 45vw; }
+    .main-tabs { height: auto; min-height: 44px; padding: 6px 12px; flex-wrap: wrap; row-gap: 4px; }
+    .main-tabs .grow { flex-basis: 100%; height: 0; }
+    .conn-status { flex-wrap: wrap; }
+  }
+  @media (max-height: 500px) and (pointer: coarse) {
+    .db-side { max-width: min(32vw, 220px); }
+    .main-tabs { min-height: 36px; padding: 4px 10px; }
   }
 </style>

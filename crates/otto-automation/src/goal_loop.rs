@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use otto_core::api::CreateSessionReq;
 use otto_core::domain::{
-    GoalLoop, GoalLoopAgentCfg, GoalLoopEvaluation, GoalLoopPhase, GoalLoopRoleCfg, GoalLoopStatus,
-    LoopAgentState, SessionKind,
+    GoalLoop, GoalLoopAgentCfg, GoalLoopEvaluation, GoalLoopIteration, GoalLoopPhase,
+    GoalLoopRoleCfg, GoalLoopStatus, LoopAgentState, SessionKind,
 };
 use otto_core::event::Event;
 use otto_core::{Error, Id, Result};
@@ -248,12 +248,26 @@ fn remaining_runtime(loop_: &GoalLoop) -> Duration {
 
 // --- Lifecycle -------------------------------------------------------------
 
+/// Validate loop limits up front before provisioning worktrees or spawning a
+/// controller. Rejects non-finite or non-positive `max_cost_usd`.
+pub fn validate_limits(limits: &otto_core::domain::GoalLoopLimits) -> Result<()> {
+    if let Some(cost) = limits.max_cost_usd {
+        if !cost.is_finite() || cost <= 0.0 {
+            return Err(Error::Invalid(
+                "max_cost_usd must be a finite positive number".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Start (or resume) a loop: provision its worktree, mark it Running, register
 /// the control handle (cancelling any prior controller), and spawn the
 /// controller task. Errors (e.g. bad repo) surface to the caller.
 pub async fn start_loop(ctx: &impl AutomationCtx, loop_id: &Id) -> Result<()> {
     ctx.goal_loops().require_idle(loop_id)?;
     let loop_ = ctx.goal_loops_repo().get(loop_id).await?;
+    validate_limits(&loop_.limits)?;
     crate::goal_loop_graph::validate(&loop_.config, &loop_.definition)?;
     // An Exhausted loop resumes only once a raised limit (or a new run
     // window) gives it room; otherwise say which limit to raise.
@@ -523,6 +537,7 @@ pub async fn retry_executor(
                 .await;
             } else if handle.paused.load(Ordering::Relaxed) {
                 cleanup_executor_sessions(&ctx2, &loop_.workspace_id, &loop_.id).await;
+                close_open_iterations(&ctx2, &loop_.id).await;
             } else if expired {
                 let _ = finalize(
                     &ctx2,
@@ -565,27 +580,181 @@ async fn controller(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHandle) {
     )
     .await
     .is_err();
-    if expired && is_current(&ctx, &loop_id, &handle) {
-        if handle.cancel.load(Ordering::Relaxed) {
+    if expired {
+        settle_expired_controller(&ctx, &loop_id, &handle, cap_reason).await;
+    }
+}
+
+/// How an expired `within_budget` controller settles, decided purely from
+/// ownership and the control flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpiredSettlement {
+    /// Superseded by a newer start_loop; leave the new controller untouched.
+    Superseded,
+    /// User stopped the loop: finalize as `Stopped`.
+    Stop,
+    /// User paused the loop: preserve `Paused`, still clean up any live
+    /// executor/verifier sessions, close open iterations, and honour any Stop
+    /// that landed before deregistering.
+    PauseCleanup,
+    /// Runtime budget exhausted without cancel or pause: finalize `Exhausted`.
+    Exhaust,
+}
+
+fn expired_settlement(is_current: bool, handle: &LoopHandle) -> ExpiredSettlement {
+    if !is_current {
+        ExpiredSettlement::Superseded
+    } else if handle.cancel.load(Ordering::Relaxed) {
+        ExpiredSettlement::Stop
+    } else if handle.paused.load(Ordering::Relaxed) {
+        ExpiredSettlement::PauseCleanup
+    } else {
+        ExpiredSettlement::Exhaust
+    }
+}
+
+async fn settle_expired_controller(
+    ctx: &impl AutomationCtx,
+    loop_id: &Id,
+    handle: &LoopHandle,
+    cap_reason: &str,
+) {
+    match expired_settlement(is_current(ctx, loop_id, handle), handle) {
+        ExpiredSettlement::Superseded => {}
+        ExpiredSettlement::Stop => {
             let _ = finalize(
-                &ctx,
-                &loop_id,
+                ctx,
+                loop_id,
                 GoalLoopStatus::Stopped,
                 Some("stopped by user"),
                 None,
             )
             .await;
-        } else if !handle.paused.load(Ordering::Relaxed) {
+            deregister(ctx, loop_id, handle);
+        }
+        ExpiredSettlement::PauseCleanup => {
+            let stop_landed = settle_paused_expiry(
+                ctx.goal_loops_repo(),
+                ctx.goal_loops(),
+                loop_id,
+                handle,
+                |ws_id| async move {
+                    cleanup_executor_sessions(ctx, &ws_id, loop_id).await;
+                },
+            )
+            .await;
+            if stop_landed {
+                let _ = finalize(
+                    ctx,
+                    loop_id,
+                    GoalLoopStatus::Stopped,
+                    Some("stopped by user"),
+                    None,
+                )
+                .await;
+            }
+        }
+        ExpiredSettlement::Exhaust => {
             let _ = finalize(
-                &ctx,
-                &loop_id,
+                ctx,
+                loop_id,
                 GoalLoopStatus::Exhausted,
                 Some(cap_reason),
                 None,
             )
             .await;
+            deregister(ctx, loop_id, handle);
         }
-        deregister(&ctx, &loop_id, &handle);
+    }
+}
+
+/// Clean up a paused loop whose budget expired: tear down active sessions,
+/// deregister under the operation lock, and close any open iteration without
+/// overriding `Paused`. Returns `true` if a Stop landed while we were still
+/// registered (caller should finalize `Stopped`).
+async fn settle_paused_expiry<F, Fut>(
+    repo: &otto_state::GoalLoopsRepo,
+    registry: &GoalLoopRegistry,
+    loop_id: &Id,
+    handle: &LoopHandle,
+    cleanup_sessions: F,
+) -> bool
+where
+    F: FnOnce(Id) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    if let Ok(loop_) = repo.get(loop_id).await {
+        cleanup_sessions(loop_.workspace_id).await;
+    }
+    let operation = registry.operation(loop_id);
+    let _guard = operation.lock().await;
+    let was_current = deregister_in(registry, loop_id, handle);
+    if handle.paused.load(Ordering::Relaxed) {
+        let closed = repo.stop_open_iterations(loop_id).await;
+        warn_on_err(loop_id, "stop_open_iterations", closed);
+    }
+    stop_landed_while_registered(was_current, handle)
+}
+
+/// Enforce live `max_cost_usd` spend cap. Returns `true` when tripped (after
+/// finalizing `Exhausted` and deregistering the controller).
+async fn enforce_cost_cap(
+    ctx: &impl AutomationCtx,
+    ws: &Id,
+    loop_id: &Id,
+    limits: &otto_core::domain::GoalLoopLimits,
+    handle: &LoopHandle,
+) -> bool {
+    if limits.max_cost_usd.is_none() {
+        return false;
+    }
+    let spent = ctx.goal_loop_spent_usd(ws, loop_id).await;
+    let Some(reason) = crate::goal_loop_steering::check_cost_cap(spent, limits.max_cost_usd) else {
+        return false;
+    };
+    let _ = finalize(ctx, loop_id, GoalLoopStatus::Exhausted, Some(&reason), None).await;
+    deregister(ctx, loop_id, handle);
+    true
+}
+
+/// Run the planner phase (if `execute` is true) with any consumed steering notes.
+#[allow(clippy::too_many_arguments)]
+async fn run_plan_phase(
+    ctx: &impl AutomationCtx,
+    loop_: &GoalLoop,
+    iter: &GoalLoopIteration,
+    scoped: &GoalLoop,
+    context_in: &str,
+    prior_eval: Option<&GoalLoopEvaluation>,
+    steering: &str,
+    wt: &str,
+    timeout_secs: u64,
+    execute: bool,
+) -> String {
+    if !execute {
+        return iter.plan.clone();
+    }
+    let prompt = crate::goal_loop_steering::with_steering(
+        planner_prompt(scoped, context_in, prior_eval, iter.idx),
+        steering,
+    );
+    match run_role(
+        ctx,
+        loop_,
+        &iter.id,
+        "Planner",
+        &loop_.config.planner,
+        prompt,
+        wt,
+        timeout_secs,
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(loop = %loop_.id, "goal-loop: planner failed: {e}");
+            String::from("(planner unavailable — executors should work directly toward the acceptance criteria)")
+        }
     }
 }
 
@@ -684,9 +853,7 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
             deregister(&ctx, &loop_id, &handle);
             return;
         }
-        if limits.max_cost_usd.is_some() {
-            let _ = block(&ctx, &loop_id, "Per-loop cost accounting is unavailable. Remove the cost limit and use iteration/runtime limits to resume.").await; // logged + noticed inside
-            release_honouring_stop(&ctx, &loop_id, &handle).await;
+        if enforce_cost_cap(&ctx, &ws, &loop_id, &limits, &handle).await {
             return;
         }
 
@@ -765,30 +932,22 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
             }
         };
 
-        // ---- PLAN ----
+        let steering =
+            crate::goal_loop_steering::take_steering_section(ctx.data_dir(), &loop_id).await;
         set_phase(&ctx, &ws, &loop_, GoalLoopPhase::Planning, idx).await;
-        let plan = if !task.execute {
-            iter.plan.clone()
-        } else {
-            match run_role(
-                &ctx,
-                &loop_,
-                &iter.id,
-                "Planner",
-                &loop_.config.planner,
-                planner_prompt(&task.scoped, &context_in, prior_eval.as_ref(), idx),
-                &wt,
-                limits.per_phase_timeout_secs,
-            )
-            .await
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    tracing::warn!(loop = %loop_id, "goal-loop: planner failed: {e}");
-                    String::from("(planner unavailable — executors should work directly toward the acceptance criteria)")
-                }
-            }
-        };
+        let plan = run_plan_phase(
+            &ctx,
+            &loop_,
+            &iter,
+            &task.scoped,
+            &context_in,
+            prior_eval.as_ref(),
+            &steering,
+            &wt,
+            limits.per_phase_timeout_secs,
+            task.execute,
+        )
+        .await;
         warn_on_err(
             &loop_id,
             "set_iter_plan",
@@ -827,12 +986,15 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
             }
             let out_path = executor_out_path(&loop_id, idx, i);
             let _ = std::fs::remove_file(&out_path);
-            let prompt = executor_prompt(
-                &task.scoped,
-                exec,
-                &plan,
-                &context_in,
-                &out_path.to_string_lossy(),
+            let prompt = crate::goal_loop_steering::with_steering(
+                executor_prompt(
+                    &task.scoped,
+                    exec,
+                    &plan,
+                    &context_in,
+                    &out_path.to_string_lossy(),
+                ),
+                &steering,
             );
             let _ = write_owned_file(&prompt_path(&loop_id, idx, i), prompt.as_bytes());
             let summary = run_executor(
@@ -1088,7 +1250,11 @@ fn is_current(ctx: &impl AutomationCtx, loop_id: &Id, handle: &LoopHandle) -> bo
 /// Remove our registry entry; `true` when it was still ours (a newer
 /// start_loop may have replaced it).
 fn deregister(ctx: &impl AutomationCtx, loop_id: &Id, handle: &LoopHandle) -> bool {
-    let mut reg = ctx.goal_loops().lock().unwrap();
+    deregister_in(ctx.goal_loops(), loop_id, handle)
+}
+
+fn deregister_in(registry: &GoalLoopRegistry, loop_id: &Id, handle: &LoopHandle) -> bool {
+    let mut reg = registry.lock().unwrap();
     match reg.get(&loop_id.to_string()) {
         Some(h) if Arc::ptr_eq(&h.cancel, &handle.cancel) => {
             reg.remove(&loop_id.to_string());
@@ -1555,7 +1721,20 @@ async fn evaluate(
         Err(e) => fallback_eval(&format!("evaluator turn failed: {e}")),
     };
 
-    // Ground-truth command criteria by exit code.
+    // Ground-truth command criteria by exit code, confined under the same
+    // `process_sandbox` policy as scheduled `shell` tasks.
+    let has_cmd_criteria = loop_
+        .definition
+        .acceptance_criteria
+        .iter()
+        .any(|c| c.verify_kind == "command");
+    let sandbox = if has_cmd_criteria {
+        ctx.manager()
+            .process_sandbox_policy("shell", std::path::Path::new(wt))
+            .await
+    } else {
+        None
+    };
     for crit in &loop_.definition.acceptance_criteria {
         if stop_requested(handle) {
             break;
@@ -1563,11 +1742,13 @@ async fn evaluate(
         if crit.verify_kind == "command" {
             match verify_command(crit.verify_cmd.as_deref()) {
                 Some(cmd) => {
-                    let run = crate::goal_loop_commands::run(
+                    let run = crate::goal_loop_commands::run_with_sandbox(
                         wt,
                         cmd,
                         per_phase_secs,
                         &handle.interrupted,
+                        sandbox.as_ref(),
+                        Some(loop_.id.as_str()),
                     )
                     .await;
                     set_criterion(&mut eval, &crit.id, run.success, &verify_evidence(&run));
@@ -2522,5 +2703,138 @@ mod goal_loop_tests {
         );
         assert!(prompt.contains("Local commits are allowed"));
         assert!(!prompt.contains("git add -A"));
+    }
+
+    #[test]
+    fn expired_settlement_distinguishes_superseded_stop_pause_and_exhaust() {
+        let h = LoopHandle::new();
+        assert_eq!(expired_settlement(false, &h), ExpiredSettlement::Superseded);
+        assert_eq!(expired_settlement(true, &h), ExpiredSettlement::Exhaust);
+
+        h.paused.store(true, Ordering::Relaxed);
+        assert_eq!(
+            expired_settlement(true, &h),
+            ExpiredSettlement::PauseCleanup
+        );
+
+        h.cancel.store(true, Ordering::Relaxed);
+        assert_eq!(expired_settlement(true, &h), ExpiredSettlement::Stop);
+        assert_eq!(expired_settlement(false, &h), ExpiredSettlement::Superseded);
+    }
+
+    #[tokio::test]
+    async fn paused_expiry_cleans_up_sessions_and_closes_open_iterations() {
+        let pool = otto_state::db::test_pool().await;
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, created_at) \
+             VALUES ('gl-ws', 'ws', '/tmp/ws', '2026-10-16T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let repo = otto_state::GoalLoopsRepo::new(pool);
+        let loop_ = repo
+            .create(otto_state::NewGoalLoop {
+                workspace_id: "gl-ws".into(),
+                name: "Paused expiry test".into(),
+                repo_path: "/tmp/ws".into(),
+                definition: serde_json::from_value(
+                    serde_json::json!({"title": "Goal", "acceptance_criteria": []}),
+                )
+                .unwrap(),
+                limits: otto_core::domain::GoalLoopLimits::default(),
+                config: otto_core::domain::GoalLoopConfig::default(),
+                created_by: "u1".into(),
+            })
+            .await
+            .unwrap();
+        assert!(repo.mark_running(&loop_.id, Utc::now()).await.unwrap());
+        let iter = repo
+            .add_iteration(&loop_.id, &loop_.workspace_id, 1, "", &[])
+            .await
+            .unwrap();
+        repo.update_iteration_status(&iter.id, "executing", false)
+            .await
+            .unwrap();
+        assert!(repo.pause_running(&loop_.id).await.unwrap());
+
+        let registry = new_registry();
+        let handle = LoopHandle::new();
+        handle.paused.store(true, Ordering::Relaxed);
+        handle.interrupted.store(true, Ordering::Relaxed);
+        registry
+            .lock()
+            .unwrap()
+            .insert(loop_.id.clone(), handle.clone());
+
+        // Simulate `within_budget` expiring while paused.
+        let expired = within_budget(
+            std::future::pending::<()>(),
+            Duration::from_millis(5),
+            &handle.interrupted,
+            Duration::from_millis(5),
+        )
+        .await
+        .is_err();
+        assert!(expired);
+        assert_eq!(
+            expired_settlement(true, &handle),
+            ExpiredSettlement::PauseCleanup
+        );
+
+        let cleaned_ws = Arc::new(Mutex::new(None::<Id>));
+        let cleaned_ws2 = cleaned_ws.clone();
+        let stop_landed = settle_paused_expiry(
+            &repo,
+            &registry,
+            &loop_.id,
+            &handle,
+            move |ws_id| async move {
+                *cleaned_ws2.lock().unwrap() = Some(ws_id);
+            },
+        )
+        .await;
+        assert!(!stop_landed);
+        assert_eq!(cleaned_ws.lock().unwrap().as_deref(), Some("gl-ws"));
+        assert!(registry.require_idle(&loop_.id).is_ok());
+
+        // Status stays `Paused` (never falsely flipped to Exhausted), and the
+        // in-progress iteration is settled to `stopped`.
+        let after = repo.get(&loop_.id).await.unwrap();
+        assert_eq!(after.status, GoalLoopStatus::Paused);
+        let after_iter = repo.get_iteration(&loop_.id, 1).await.unwrap();
+        assert_eq!(after_iter.status, "stopped");
+
+        // If a Stop lands during cleanup while still registered, report it so
+        // the caller finalizes `Stopped`.
+        let handle2 = LoopHandle::new();
+        handle2.paused.store(true, Ordering::Relaxed);
+        registry
+            .lock()
+            .unwrap()
+            .insert(loop_.id.clone(), handle2.clone());
+        let h_stop = handle2.clone();
+        let stop_landed =
+            settle_paused_expiry(&repo, &registry, &loop_.id, &handle2, |_| async move {
+                h_stop.cancel.store(true, Ordering::Relaxed);
+            })
+            .await;
+        assert!(stop_landed);
+        assert!(registry.require_idle(&loop_.id).is_ok());
+    }
+
+    #[test]
+    fn validate_limits_accepts_positive_and_rejects_invalid_max_cost_usd() {
+        let mut limits = otto_core::domain::GoalLoopLimits::default();
+        assert!(validate_limits(&limits).is_ok());
+        limits.max_cost_usd = Some(5.0);
+        assert!(validate_limits(&limits).is_ok());
+        for bad in [-1.0, 0.0, f64::NAN, f64::INFINITY] {
+            limits.max_cost_usd = Some(bad);
+            assert!(
+                matches!(validate_limits(&limits), Err(Error::Invalid(_))),
+                "expected Invalid for max_cost_usd={bad:?}"
+            );
+        }
     }
 }

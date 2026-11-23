@@ -1205,7 +1205,7 @@
               <p class="sec-hint">No grouping. Adding an aggregate groups by the other selected columns.</p>
             {:else}
               <div class="chips">
-                {#each clauses.groupBy as r, i (i)}
+                {#each clauses.groupBy as r, i (refKey(r))}
                   <span class="chip mono">{refKey(r)}<button class="chip-x" onclick={() => removeGroupBy(i)} aria-label="Remove {refKey(r)} from GROUP BY" title="Remove"><Icon name="x" size={12} /></button></span>
                 {/each}
               </div>

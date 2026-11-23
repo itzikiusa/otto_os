@@ -257,7 +257,7 @@
        aria-required-children), and it is the only part that scrolls: the
        auto-fetch toggle and + stay pinned after it, fully visible however
        many repos are open. -->
-  <div class="git-tablist" role="tablist" aria-label="Open repositories" bind:this={listEl}>
+  <div class="git-tablist" role="tablist" aria-label="Open repositories" bind:this={listEl}><!-- ui-guards: allow — closable/draggable repo tabs (dirty dot, branch chip, close ×, drag reorder); keyboard model uses onTabKey -->
   {#each openRepos as r (r.id)}
     {@const branch = branchOf(r.id)}
     {@const label = repoTabLabel(r.name, branch)}

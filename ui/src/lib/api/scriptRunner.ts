@@ -32,7 +32,7 @@ export function runScript(input: ScriptInput, signal?: AbortSignal, deadlineMs =
       } catch (e) { finish(e); }
     };
     worker.onerror = (event) => { event.preventDefault(); finish(new Error(event.message || 'Script worker failed.')); };
-    worker.onmessageerror = () => finish(new Error('Could not decode script worker message.'));
+    worker.onmessageerror = () => finish(new Error('Couldn’t decode the script worker message.'));
     signal?.addEventListener('abort', abort, { once: true });
     timer = setTimeout(() => finish(new Error('Script timed out after 5 seconds.')), deadlineMs);
     if (signal?.aborted) { abort(); return; }

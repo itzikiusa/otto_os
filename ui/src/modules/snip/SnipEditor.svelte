@@ -34,7 +34,7 @@
     annosHash,
     uploadNeeded,
   } from './annotations';
-  import LoadState from '../../lib/components/LoadState.svelte'; import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte'; import Skeleton from '../../lib/components/Skeleton.svelte'; import { announceShown } from '../../lib/announce.svelte';
 
   // The shell keys this editor by id; cleanup saves belong to that mounted image.
   const snipId = router.parts[1] ?? '';
@@ -806,19 +806,18 @@
     {:else if loadError}
       <LoadState variant="compact" what="the snip" error={loadError} empty onretry={() => void loadImage()} />
     {:else if missing}
-      <div class="snip-empty snip-missing" role="alert">
+      <div class="snip-empty snip-missing" use:announceShown={{ text: 'This snip no longer exists. It was deleted, or its image file is gone.', assertive: true }}>
         <Icon name="image" size={26} />
         <p class="snip-missing-title">This snip no longer exists</p>
         <p>It was deleted, or its image file is gone. Take a new one with ⌘⇧S.</p>
         <button class="btn" data-act="close" onclick={() => void close()}>Close</button>
       </div>
     {:else}
-      <!-- svelte-ignore a11y_no_interactive_element_to_noninteractive_role (this canvas is a keyboard-operated drawing application; onKeydown handles placement, selection, movement and deletion) -->
       <canvas
         class="snip-canvas"
         bind:this={canvasEl}
         tabindex="0"
-        role="application"
+        aria-roledescription="annotation canvas"
         aria-label="Snip annotation canvas"
         aria-describedby="snip-keyboard-help"
         onpointerdown={onPointerDown}

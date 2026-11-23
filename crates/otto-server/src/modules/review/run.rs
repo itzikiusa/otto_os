@@ -134,11 +134,11 @@ pub(crate) async fn run_review(
         mode_override,
     )
     .await;
+    // The run is over (done, error, or cancelled): its temp artifacts are spent.
+    remove_review_temp_files(&review_id).await;
     if attempt.is_cancelled() || review_is_cancelled(&ctx, &review_id).await {
         return;
     }
-    // The run is over (done or error): its temp artifacts are spent.
-    remove_review_temp_files(&review_id).await;
     match result {
         Ok(()) => {
             tracing::info!(review = %review_id, "review complete");
@@ -292,7 +292,7 @@ pub(crate) async fn run_review_core(
     } else {
         None
     };
-    let (prior_context, prior_ids) = otto_review::history::prior_review_context(
+    let (prior_context, prior_ids) = otto_review::delta::prior_review_context_with_delta(
         &ctx.reviews_store,
         &ctx.findings_store,
         repo_id,
@@ -300,6 +300,7 @@ pub(crate) async fn run_review_core(
         review_id,
         branches,
         cfg.previous_review_id.as_ref(),
+        std::path::Path::new(repo_path),
     )
     .await?;
     user_ctx.push_str(&prior_context);
@@ -344,10 +345,8 @@ pub(crate) async fn run_review_core(
     ));
     // Execution mode: the caller's override (the run input, then the
     // `review_run` node) wins over the stored config, which wins over fan-out.
-    let _requested_mode = mode_override.or(cfg.mode).unwrap_or_default();
-    // Adaptive sessions always use managed slots, including cross-provider checks.
-    // Provider-internal delegation cannot enforce the machine-wide concurrency bound.
-    let mode = otto_core::domain::ReviewMode::FanOut;
+    // Every mode still runs through `reviewer_slots()` managed concurrency.
+    let mode = mode_override.or(cfg.mode).unwrap_or_default();
     tracing::info!(review = %review_id, mode = mode.as_str(), "review mode");
 
     // 2. Expand agent×provider pairs (fan-out) or one orchestrator per provider.
@@ -478,11 +477,10 @@ pub(crate) async fn run_review_core(
 
     let mut set = tokio::task::JoinSet::new();
     for (i, run) in agent_runs.into_iter().enumerate() {
-        // Space the cold starts out (R3) — no cap, no semaphore: the JoinSet
-        // still runs every reviewer at once, they just don't all boot in the
-        // same second.
-        if i > 0 {
-            tokio::time::sleep(REVIEW_SPAWN_STAGGER).await;
+        // Space the cold starts out (R3), waking immediately on cancel.
+        let delay = REVIEW_SPAWN_STAGGER * u32::from(i > 0);
+        if !otto_review::scope::stagger_wait(delay, cancel_flag.as_deref()).await {
+            break;
         }
         let manager = Arc::clone(&ctx.manager);
         let agent_cancel = Arc::clone(agent_cancels[i].flag());
@@ -518,7 +516,7 @@ pub(crate) async fn run_review_core(
         // Persist the prompt so a per-agent Retry can re-run exactly this agent:
         // temp file for the in-flight injection path, DB row (0100) so retry
         // survives reboots / temp sweeps / daemon redeploys.
-        let _ = std::fs::write(otto_review::session::prompt_path(review_id, i), &prompt);
+        let _ = tokio::fs::write(otto_review::session::prompt_path(review_id, i), &prompt).await;
         if let Err(e) = ctx
             .reviews_store
             .set_agent_prompt(review_id, i, &prompt)

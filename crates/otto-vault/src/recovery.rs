@@ -45,6 +45,19 @@ fn valid_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Content-addressed blob names must be 64 lowercase ASCII hex digits (SHA-256).
+fn valid_sha256(sha: &str) -> Result<()> {
+    if sha.len() != 64 || !sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return Err(Error::Invalid("invalid revision blob hash".into()));
+    }
+    Ok(())
+}
+
+/// Hard upper bound on a single recovery file read (`recovery_read_sync` /
+/// `recovery_read`). Plenty for a 200k-entry `.path-index.jsonl` or a large
+/// note revision while bounding RAM on corrupt/hostile files.
+const MAX_RECOVERY_READ_BYTES: u64 = 32 * 1024 * 1024;
+
 const PATH_INDEX: &str = ".path-index.jsonl";
 /// Content-addressed revision bodies (F1). Hidden + not a valid revision id,
 /// so neither the index nor the revision listing ever sees it.
@@ -270,8 +283,18 @@ impl VaultEngine {
     /// task hop once the dir is known ignored.
     async fn ignore_recovery_dir_async(root: &str, dir: &'static str) {
         let key = (root.to_string(), dir);
-        if known_ignored(&key) {
-            return;
+        let cached = ignored_dirs().lock().is_ok_and(|d| d.contains(&key));
+        if cached {
+            let path = std::path::Path::new(&key.0).join(key.1).join(".gitignore");
+            if tokio::fs::symlink_metadata(&path)
+                .await
+                .is_ok_and(|m| m.is_file())
+            {
+                return;
+            }
+            if let Ok(mut d) = ignored_dirs().lock() {
+                d.remove(&key);
+            }
         }
         let _ = blocking(move || {
             Self::ignore_recovery_dir(&key.0, dir);
@@ -281,8 +304,13 @@ impl VaultEngine {
     }
 
     /// Blocking read of one hidden recovery file through the symlink-refusing
-    /// directory capability (for the index builder on the blocking pool).
+    /// directory capability (for the index builder on the blocking pool),
+    /// bounded to [`MAX_RECOVERY_READ_BYTES`].
     fn recovery_read_sync(root: &str, rel: &str) -> Result<Option<Vec<u8>>> {
+        Self::recovery_read_sync_capped(root, rel, MAX_RECOVERY_READ_BYTES)
+    }
+
+    fn recovery_read_sync_capped(root: &str, rel: &str, cap: u64) -> Result<Option<Vec<u8>>> {
         let (parent, name) = Self::text_parent(root, rel)?;
         let fd = match rustix::fs::openat(
             &parent,
@@ -292,12 +320,23 @@ impl VaultEngine {
         ) {
             Ok(fd) => fd,
             Err(rustix::io::Errno::NOENT) => return Ok(None),
+            Err(rustix::io::Errno::LOOP) => {
+                return Err(Error::Forbidden(
+                    "recovery record must not be a symlink".into(),
+                ))
+            }
             Err(e) => return Err(Error::Internal(format!("open recovery record: {e}"))),
         };
         let mut bytes = Vec::new();
         std::fs::File::from(fd)
+            .take(cap.saturating_add(1))
             .read_to_end(&mut bytes)
             .map_err(|e| Error::Internal(format!("read recovery record: {e}")))?;
+        if bytes.len() as u64 > cap {
+            return Err(Error::PayloadTooLarge(format!(
+                "recovery record exceeds {cap} byte cap"
+            )));
+        }
         Ok(Some(bytes))
     }
 
@@ -428,17 +467,22 @@ impl VaultEngine {
     }
 
     async fn recovery_write(root: &str, path: &str, bytes: &[u8]) -> Result<()> {
-        let (parent, name) = Self::text_parent(root, path)?;
-        // Recovery copies can contain private notes; only the owner may enter
-        // per-revision directories and the trash manifest directory.
-        rustix::fs::fchmod(&parent, rustix::fs::Mode::RWXU)
-            .map_err(|e| Error::Internal(format!("protect recovery directory: {e}")))?;
+        let (root_s, path_s) = (root.to_string(), path.to_string());
+        let (parent, name) = blocking(move || {
+            let (parent, name) = Self::text_parent(&root_s, &path_s)?;
+            // Recovery copies can contain private notes; only the owner may enter
+            // per-revision directories and the trash manifest directory.
+            rustix::fs::fchmod(&parent, rustix::fs::Mode::RWXU)
+                .map_err(|e| Error::Internal(format!("protect recovery directory: {e}")))?;
+            Ok((parent, name))
+        })
+        .await?;
         Self::atomic_replace_at(&parent, &name, bytes).await
     }
 
     async fn recovery_read(root: &str, path: &str) -> Result<Vec<u8>> {
-        let (parent, name) = Self::text_parent(root, path)?;
-        Self::text_file_bytes(&parent, &name)
+        let (root_s, path_s) = (root.to_string(), path.to_string());
+        blocking(move || Self::recovery_read_sync(&root_s, &path_s))
             .await?
             .ok_or_else(|| Error::NotFound("recovery entry no longer exists".into()))
     }
@@ -649,6 +693,7 @@ impl VaultEngine {
     /// Content-addressed blob: no-op when present, else a hard link from
     /// `link_from` (same content, verified by its name) or a fresh write.
     fn write_blob(root: &str, sha: &str, bytes: &[u8], link_from: Option<&str>) -> Result<()> {
+        valid_sha256(sha)?;
         let rel = format!("{BLOBS}/{sha}");
         let (parent, name) = Self::text_parent(root, &rel)?;
         if rustix::fs::statat(&parent, name.as_str(), AtFlags::SYMLINK_NOFOLLOW).is_ok() {
@@ -674,6 +719,7 @@ impl VaultEngine {
 
     /// One revision body: legacy in-dir copy first, then the F1 layout.
     async fn revision_body(root: &str, dir: &str, legacy: &str, sha: &str) -> Result<Vec<u8>> {
+        valid_sha256(sha)?;
         for rel in [
             format!("{dir}/{legacy}"),
             format!("{dir}/a-{sha}"),
@@ -1064,5 +1110,55 @@ mod legacy_trash_tests {
         assert_eq!(out.len(), 20_000);
         let took = started.elapsed();
         assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+    }
+}
+
+#[cfg(test)]
+mod recovery_hardening_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn revision_body_rejects_non_64_hex_blob_hashes() {
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path().to_string_lossy().to_string();
+        for bad in [
+            "",
+            "abc123",
+            "../../etc/passwd",
+            &"A".repeat(64), // uppercase not allowed
+            &"g".repeat(64), // non-hex
+            &"a".repeat(63),
+            &"a".repeat(65),
+        ] {
+            let err = VaultEngine::revision_body(&root, ".otto-history/rev1", "before", bad)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, Error::Invalid(_)),
+                "expected Invalid for hash {bad:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_read_sync_capped_enforces_byte_limit() {
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path().to_string_lossy().to_string();
+        let dir = td.path().join(".otto-history");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("small.json"), b"12345").unwrap();
+        std::fs::write(dir.join("large.json"), b"123456").unwrap();
+
+        let ok = VaultEngine::recovery_read_sync_capped(&root, ".otto-history/small.json", 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ok, b"12345");
+
+        let err = VaultEngine::recovery_read_sync_capped(&root, ".otto-history/large.json", 5)
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::PayloadTooLarge(_)),
+            "expected PayloadTooLarge, got {err:?}"
+        );
     }
 }

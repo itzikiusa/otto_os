@@ -29,16 +29,22 @@ import re
 import sys
 
 # Paths that can never change what the Rust jobs build or test.
+# Note: ui/src/lib/{sidebar.ts,sidePane.ts,uiCommands*} are mirrored by
+# otto-mcp guard tests (mirroring GUARD_INPUTS in scripts/check.sh), so edits
+# there MUST still run the Rust jobs on PRs.
 NOT_RUST = re.compile(
     r"^(?:"
-    r"ui/|examples/|marketing/|apps/desktop/|dev/|packaging/"
+    r"ui/(?!src/lib/(?:sidebar\.ts|sidePane\.ts|uiCommands(?:/|\.|$)))"
+    r"|examples/|marketing/|apps/desktop/|dev/|packaging/|forge/"
     r"|docs/(?!contracts/)"  # docs/contracts/ui-commands.json is include_str!'d
     r"|\.github/(?!workflows/ci\.yml$)"
     r"|[^/]+\.md$"
     r")"
 )
-# Pure documentation / assets: nothing in the build or the tests reads them.
-DOCS_ONLY = re.compile(r"^(?:marketing/|docs/(?!contracts/)|[^/]+\.md$|LICENSE)")
+# Pure documentation / assets, and forge/ (the standalone Python/shell asset
+# pipeline Otto launches as an external CLI): nothing in the build or the
+# tests reads them.
+DOCS_ONLY = re.compile(r"^(?:marketing/|forge/|docs/(?!contracts/)|[^/]+\.md$|LICENSE)")
 PLUGIN = re.compile(
     r"^(?:examples/plugins/team-performance/|ui/src/lib/tokens\.css$"
     r"|ui/package(?:-lock)?\.json$|\.github/workflows/ci\.yml$)"

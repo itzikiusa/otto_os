@@ -206,7 +206,7 @@
   <div class="save-error" role="alert">
     <span>Couldn’t save {canvas.scenes.find(scene => scene.id === id)?.title ?? 'scene'}. Your draft is kept in this app. {error}</span>
     <button class="btn small" onclick={() => void canvas.open(id).catch(() => {})}>Open draft</button>
-    <button class="btn small" onclick={() => void canvas.retryDoc(id).catch(() => {})}>Retry save</button>
+    <button class="btn small" onclick={() => void canvas.retryDoc(id).catch(() => {})}>Retry save</button><!-- ui-guards: allow — retries a failed draft save, not a list load -->
   </div>
 {/each}
 {#if canvas.conflict}

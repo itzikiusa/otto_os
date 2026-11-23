@@ -1257,13 +1257,18 @@ async fn ref_excerpt(svc: &DesignService, a: &DesignArtifact, v: &DesignVersion)
 
 /// The artifact's thumbnail blob, when it is a PNG: agents get it as
 /// `render/current.png` / `refs/R<n>.png`, so a WebP one (`PUT …/thumbnail`
-/// accepts both) is not offered rather than mislabelled.
-fn thumb_path(svc: &DesignService, a: &DesignArtifact) -> Option<PathBuf> {
-    a.thumb_blob
+/// accepts both) is not offered rather than mislabelled. Runs the file open /
+/// magic-byte probe on the blocking pool so async callers never stall a worker.
+async fn thumb_path(svc: &DesignService, a: &DesignArtifact) -> Option<PathBuf> {
+    let candidate = a
+        .thumb_blob
         .as_deref()
         .filter(|s| otto_design::blobs::is_sha(s))
-        .map(|s| svc.blobs().root().join(s))
-        .filter(|p| is_png_file(p))
+        .map(|s| svc.blobs().root().join(s))?;
+    tokio::task::spawn_blocking(move || is_png_file(&candidate).then_some(candidate))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Does `p` exist as a regular file starting with the PNG signature?
@@ -1449,7 +1454,7 @@ async fn assemble<C: DesignAssistCtx>(
             "tags": t.tags,
             "excerpt": excerpt,
         });
-        let thumb = thumb_path(svc, &t);
+        let thumb = thumb_path(svc, &t).await;
         brief_refs.push((o.clone(), thumb.is_some()));
         ref_files.push((
             label,
@@ -1560,7 +1565,7 @@ async fn assemble<C: DesignAssistCtx>(
         }
     }
 
-    let render_src = thumb_path(svc, a);
+    let render_src = thumb_path(svc, a).await;
     let brief = BriefInput {
         artifact_id: a.id.clone(),
         title: a.title.clone(),
@@ -1601,9 +1606,12 @@ async fn write_context(dir: &FsPath, ctxin: &Assembled) -> Result<(), Error> {
     for sub in ["refs", "render"] {
         let _ = tokio::fs::remove_dir_all(dir.join(sub)).await;
     }
-    tokio::fs::write(dir.join("CONTEXT.md"), render_brief(&ctxin.brief))
-        .await
-        .map_err(io)?;
+    write_file_atomic(
+        &dir.join("CONTEXT.md"),
+        render_brief(&ctxin.brief).into_bytes(),
+    )
+    .await
+    .map_err(io)?;
     if !ctxin.ref_files.is_empty() {
         let refs = dir.join("refs");
         tokio::fs::create_dir_all(&refs).await.map_err(io)?;
@@ -1624,17 +1632,133 @@ async fn write_context(dir: &FsPath, ctxin: &Assembled) -> Result<(), Error> {
     Ok(())
 }
 
-/// Read a file the agent may have written, capped at the content limit.
+/// Write `bytes` to `path` via an exclusive temp file in `path`'s parent dir
+/// followed by atomic `rename`, refusing any pre-existing symlink or
+/// non-regular target so a planted symlink in an agent-accessible directory
+/// cannot redirect writes outside the scratch dir.
+pub(crate) async fn write_file_atomic(path: &FsPath, bytes: Vec<u8>) -> std::io::Result<()> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || write_file_atomic_sync(&path, &bytes))
+        .await
+        .map_err(|e| std::io::Error::other(format!("atomic write task failed: {e}")))?
+}
+
+fn write_file_atomic_sync(path: &FsPath, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("refusing to write through symlink {}", path.display()),
+                ));
+            }
+            if !meta.is_file() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("refusing to overwrite non-regular file {}", path.display()),
+                ));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent dir")
+    })?;
+    let pid = std::process::id();
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = parent.join(format!(".otto-tmp-{pid}-{seq}"));
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+        options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+    }
+
+    let mut file = options.open(&tmp)?;
+    if let Err(e) = file.write_all(bytes).and_then(|()| file.flush()) {
+        drop(file);
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    drop(file);
+
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("refusing to write through symlink {}", path.display()),
+            ));
+        }
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Read a file the agent may have written, opening with `O_NOFOLLOW | O_NONBLOCK`,
+/// verifying it is a regular file, and capping the read at `cap` bytes via
+/// `.take(cap + 1)` so symlinks, FIFOs, and oversized files are safely rejected.
 async fn read_capped(path: &FsPath, cap: usize) -> Option<Vec<u8>> {
-    let len = tokio::fs::metadata(path).await.ok()?.len();
-    if len > cap as u64 {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || read_capped_sync(&path, cap))
+        .await
+        .ok()
+        .flatten()
+}
+
+fn read_capped_sync(path: &FsPath, cap: usize) -> Option<Vec<u8>> {
+    use std::io::Read;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(
+            (rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::NOFOLLOW).bits() as i32,
+        );
+    }
+
+    let file = match options.open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            #[cfg(unix)]
+            if e.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) {
+                tracing::warn!("design assist: refusing to read symlink {}", path.display());
+            }
+            return None;
+        }
+    };
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() {
+        tracing::warn!(
+            "design assist: refusing non-regular file {}",
+            path.display()
+        );
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(cap.min(64 * 1024));
+    file.take(cap as u64 + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() > cap {
         tracing::warn!(
             "design assist: {} exceeds {cap} bytes; ignored",
             path.display()
         );
         return None;
     }
-    tokio::fs::read(path).await.ok()
+    Some(bytes)
 }
 
 /// Put the base document on disk for a turn in `dir`: the working copy (main
@@ -1650,7 +1774,15 @@ async fn materialize(
     let io = |e: std::io::Error| Error::Internal(format!("design assist working copy: {e}"));
     tokio::fs::create_dir_all(dir).await.map_err(io)?;
     if let Some(wf) = work_file {
-        if let Ok(existing) = tokio::fs::read(wf).await {
+        if let Ok(meta) = tokio::fs::symlink_metadata(wf).await {
+            if meta.file_type().is_symlink() {
+                return Err(Error::Internal(format!(
+                    "design assist working copy: refusing symlink {}",
+                    wf.display()
+                )));
+            }
+        }
+        if let Some(existing) = read_capped(wf, dformat::MAX_CONTENT_BYTES).await {
             if existing != base_doc {
                 let short: String = turn_id.chars().take(8).collect();
                 let name = wf
@@ -1661,11 +1793,11 @@ async fn materialize(
                     tokio::fs::rename(wf, dir.join(format!("{name}.pre-assist-{short}.bak"))).await;
             }
         }
-        tokio::fs::write(wf, base_doc).await.map_err(io)?;
+        write_file_atomic(wf, base_doc.to_vec()).await.map_err(io)?;
     }
     let agent_path = dir.join(adapter.agent_file);
     if adapter.canvas_inner.is_some() || work_file.is_none() {
-        tokio::fs::write(&agent_path, adapter.agent_source(base_doc))
+        write_file_atomic(&agent_path, adapter.agent_source(base_doc).into_bytes())
             .await
             .map_err(io)?;
     }
@@ -2379,6 +2511,7 @@ mod tests {
                 created_at: None,
                 version_kind: None,
                 validate: true,
+                provenance: None,
             })
             .await
             .unwrap()
@@ -2786,5 +2919,56 @@ mod retention_regressions {
         assert!(runs.contains_key("active"));
         assert!(runs.contains_key("artifact-1023"));
         assert!(!runs.contains_key("artifact-0"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scratch_io_refuses_symlink_escape_on_read_and_write() {
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, b"TOP_SECRET").unwrap();
+
+        let scratch = tempfile::tempdir().unwrap();
+        let read_link = scratch.path().join("findings.json");
+        std::os::unix::fs::symlink(&secret, &read_link).unwrap();
+
+        // read_capped refuses symlink via O_NOFOLLOW.
+        assert!(
+            read_capped(&read_link, 1024).await.is_none(),
+            "read_capped must refuse symlink"
+        );
+
+        // read_capped enforces byte cap on regular files.
+        let regular = scratch.path().join("ok.txt");
+        std::fs::write(&regular, b"12345").unwrap();
+        assert_eq!(
+            read_capped(&regular, 5).await.as_deref(),
+            Some(&b"12345"[..])
+        );
+        assert!(read_capped(&regular, 4).await.is_none());
+
+        // write_file_atomic refuses symlink target and leaves outside target untouched.
+        let write_link = scratch.path().join("agent.md");
+        std::os::unix::fs::symlink(&secret, &write_link).unwrap();
+        let err = write_file_atomic(&write_link, b"OVERWRITTEN".to_vec())
+            .await
+            .expect_err("write_file_atomic must refuse symlink target");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            std::fs::read(&secret).unwrap(),
+            b"TOP_SECRET",
+            "outside symlink target must remain untouched"
+        );
+
+        // materialize refuses symlink work_file without touching outside file.
+        let adapter = adapter_for("html", b"new").unwrap();
+        let work_link = scratch.path().join("work.md");
+        std::os::unix::fs::symlink(&secret, &work_link).unwrap();
+        assert!(
+            materialize(scratch.path(), &adapter, Some(&work_link), b"new", "turn1")
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&secret).unwrap(), b"TOP_SECRET");
     }
 }

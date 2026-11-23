@@ -37,6 +37,7 @@ export class PointerZoom {
   get active(): boolean { return this.points.size > 0; }
   down(id: number, x: number, y: number): void { this.points.set(id, { x, y }); }
   up(id: number): void { this.points.delete(id); }
+  clear(): void { this.points.clear(); }
 
   move(id: number, x: number, y: number, current: Transform): Transform {
     const previous = this.points.get(id);
@@ -164,6 +165,34 @@ export class PanZoom {
     this.setDragging(this.pointers.active);
     const target = e.currentTarget as HTMLElement | null;
     if (target?.hasPointerCapture?.(e.pointerId)) target.releasePointerCapture(e.pointerId);
+  }
+
+  /** Attach focus, keyboard pan, wheel/pinch zoom and pointer drag listeners
+   *  to the surface element, returning a cleanup that tears them down and
+   *  releases any in-flight drag state if unmounted mid-gesture. */
+  attach(el: HTMLElement): () => void {
+    el.tabIndex = 0;
+    const onKey = (e: KeyboardEvent) => this.key(e);
+    const onWheel = (e: WheelEvent) => this.wheel(e);
+    const onDown = (e: PointerEvent) => this.pointerDown(e);
+    const onMove = (e: PointerEvent) => this.pointerMove(e);
+    const onUp = (e: PointerEvent) => this.pointerUp(e);
+    el.addEventListener('keydown', onKey);
+    el.addEventListener('wheel', onWheel, { passive: false });
+    el.addEventListener('pointerdown', onDown);
+    el.addEventListener('pointermove', onMove);
+    el.addEventListener('pointerup', onUp);
+    el.addEventListener('pointercancel', onUp);
+    return () => {
+      el.removeEventListener('keydown', onKey);
+      el.removeEventListener('wheel', onWheel);
+      el.removeEventListener('pointerdown', onDown);
+      el.removeEventListener('pointermove', onMove);
+      el.removeEventListener('pointerup', onUp);
+      el.removeEventListener('pointercancel', onUp);
+      this.pointers.clear();
+      this.setDragging(false);
+    };
   }
 
   private setDragging(on: boolean): void {

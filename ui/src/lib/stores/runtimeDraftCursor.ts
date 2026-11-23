@@ -3,6 +3,8 @@
 // <-> `#/threads` navigation. Stored in bounded in-memory maps cleared on auth
 // identity transitions (`otto:ide-storage-cleared`).
 
+import { trace } from '../composerTrace.ts';
+
 export interface ComposerCursorState {
   selectionStart: number;
   selectionEnd: number;
@@ -161,24 +163,27 @@ export function composerViewState(
     captureRaf = 0;
   };
 
-  const applyRestore = (targetKey: string): void => {
+  // `why` tags each programmatic caret move for the composer trace (lib/composerTrace.ts).
+  const applyRestore = (targetKey: string, why: string): void => {
     if (!targetKey || targetKey !== currentKey || interacted) return;
     if (!getComposerCursorState(targetKey)) return;
     if (node.value.length === 0) return;
     restoring = true;
     try {
+      const from = [node.selectionStart, node.selectionEnd];
       restoreComposerCursorOnElement(node, targetKey);
+      trace('caret-restore', { why, from: from.join(','), to: `${node.selectionStart},${node.selectionEnd}`, vlen: node.value.length });
     } finally {
       restoring = false;
     }
   };
 
-  const scheduleRestore = (targetKey: string): void => {
+  const scheduleRestore = (targetKey: string, why: string): void => {
     if (!targetKey) return;
-    applyRestore(targetKey);
-    queueMicrotask(() => applyRestore(targetKey));
+    applyRestore(targetKey, why);
+    queueMicrotask(() => applyRestore(targetKey, `${why}+microtask`));
     if (typeof requestAnimationFrame === 'function') {
-      requestAnimationFrame(() => applyRestore(targetKey));
+      requestAnimationFrame(() => applyRestore(targetKey, `${why}+frame`));
     }
   };
 
@@ -210,6 +215,15 @@ export function composerViewState(
     });
   };
 
+  // Typing counts as touching the composer BEFORE its text changes. The
+  // textarea's `bind:value` listener runs ahead of this action's `input`
+  // listener, and the microtask checkpoint between them runs `update()`: a
+  // composer that got its focus from the page (a thread just opened, no tap
+  // yet) saw its first letter as "a draft arrived" and put the caret back at
+  // the empty composer's saved {0,0} — "i also saw" went out as "also sawi".
+  const onBeforeInput = (): void => {
+    interacted = true;
+  };
   const onInput = (): void => scheduleSelectionCapture(true);
   const onKeyUp = (e: KeyboardEvent): void => {
     // Printable edits already fire `input`; only navigation keys move caret without `input`.
@@ -224,7 +238,7 @@ export function composerViewState(
   };
   const onFocus = (): void => {
     if (!interacted && currentKey) {
-      applyRestore(currentKey);
+      applyRestore(currentKey, 'focus');
     }
   };
   const onBlur = (): void => {
@@ -236,6 +250,7 @@ export function composerViewState(
     saveComposerCursorState(currentKey, { scrollTop: node.scrollTop });
   };
 
+  node.addEventListener('beforeinput', onBeforeInput);
   node.addEventListener('input', onInput);
   node.addEventListener('keyup', onKeyUp);
   node.addEventListener('pointerup', onPointerUp);
@@ -245,7 +260,8 @@ export function composerViewState(
   node.addEventListener('blur', onBlur);
   node.addEventListener('scroll', onScroll, { passive: true });
 
-  scheduleRestore(currentKey);
+  trace('caret-mount', { vlen: node.value.length, saved: !!getComposerCursorState(currentKey) });
+  scheduleRestore(currentKey, 'mount');
 
   return {
     update(next: ComposerViewStateArg): void {
@@ -257,25 +273,29 @@ export function composerViewState(
         currentKey = nextParsed.key;
         interacted = false;
         lastHadText = nextHasText;
-        scheduleRestore(currentKey);
+        trace('caret-key', { vlen: node.value.length });
+        scheduleRestore(currentKey, 'key');
         return;
       }
       if (!interacted && !lastHadText && nextHasText) {
         lastHadText = true;
-        scheduleRestore(currentKey);
+        scheduleRestore(currentKey, 'draft');
         return;
       }
       if (interacted && !nextHasText && lastHadText) {
+        trace('caret-empty');
         cancelCaptureRaf();
         saveComposerCursorState(currentKey, { selectionStart: 0, selectionEnd: 0, scrollTop: 0 });
       }
       lastHadText = nextHasText;
     },
     destroy(): void {
+      trace('caret-destroy', { interacted, vlen: node.value.length });
       cancelCaptureRaf();
       if (!restoring && currentKey && (interacted || (node.value.length > 0 && !getComposerCursorState(currentKey)))) {
         writeSelection(true);
       }
+      node.removeEventListener('beforeinput', onBeforeInput);
       node.removeEventListener('input', onInput);
       node.removeEventListener('keyup', onKeyUp);
       node.removeEventListener('pointerup', onPointerUp);

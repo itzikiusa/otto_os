@@ -839,17 +839,8 @@
 </div>
 
 <style>
-  .fleet-page {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    min-height: 0;
-  }
-  .fleet {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
+  .fleet-page { display: flex; flex-direction: column; height: 100%; min-width: 0; min-height: 0; }
+  .fleet { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
   .card {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -949,7 +940,7 @@
   }
   .charts {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr));
     gap: 10px;
   }
   .chart {

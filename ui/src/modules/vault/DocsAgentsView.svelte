@@ -2,6 +2,7 @@
   import { plural } from '../../lib/plural';
   import PathField from '../../lib/components/PathField.svelte';
   import { toastError } from '../../lib/toastError';
+  import { announceShown } from '../../lib/announce.svelte';
   import { loadErrorText } from '../../lib/loadError';
   // Docs agents — fan 1-4 writer agents out over a prompt to author notes into
   // the vault (a summarizer consolidates drafts when >1 writer), plus the
@@ -505,7 +506,7 @@
   <div class="inner">
     <h2><Icon name="zap" size={14} /> Docs agent</h2>
     {#if pollError}
-      <div class="poll-err" role="alert">
+      <div class="poll-err" use:announceShown={{ text: `Couldn’t refresh the docs agent’s status. ${pollError}`, assertive: true }}>
         <Icon name="warning" size={13} />
         <span>Couldn’t refresh the docs agent’s status — it may still be running. {pollError}</span>
         <button class="btn small" onclick={() => void poll()}>Retry</button> <!-- ui-guards: allow — re-polls a live agent; the view keeps its data -->
@@ -741,9 +742,7 @@
         <button class="ghost" onclick={newRun}>New run</button>
       </div>
 
-      {#if run.error}
-        <div class="err" role="alert">{run.error}</div>
-      {/if}
+      {#if run.error}<div class="err" use:announceShown={{ text: run.error, assertive: true }}>{run.error}</div>{/if}
 
       <div class="rows">
         {#each run.agents as agent (agent.index)}
@@ -768,9 +767,7 @@
                     : "Kill this writer’s session and restart its turn fresh"}
                   disabled={retrying[String(agent.index)]}
                   onclick={() => void retry(agent.index)}
-                >
-                  {retrying[String(agent.index)] ? 'Retrying…' : 'Retry'}
-                </button>
+                >{retrying[String(agent.index)] ? 'Retrying…' : 'Retry'}</button><!-- ui-guards: allow — re-runs a single docs agent, not a list load -->
               {/if}
               <Badge tone={stTone(agent.state)}>
                 {#if agent.state === 'running'}<span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span>{/if}
@@ -820,9 +817,7 @@
                 title="Kill the summarizer’s session and restart the consolidation fresh"
                 disabled={retrying['sum']}
                 onclick={() => void retry('sum')}
-              >
-                {retrying['sum'] ? 'Retrying…' : 'Retry'}
-              </button>
+              >{retrying['sum'] ? 'Retrying…' : 'Retry'}</button><!-- ui-guards: allow — re-runs the summarizer job, not a list load -->
             {/if}
             <Badge tone={stTone(run.summarizer.state)}>
               {#if run.summarizer.state === 'running'}<span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span>{/if}
@@ -911,11 +906,7 @@
                             class="ghost small"
                             disabled={retrying[`reviewer-${round.iteration}-${reviewer.index}`]}
                             onclick={() => void retryReviewer(round.iteration, reviewer.index)}
-                          >
-                            {retrying[`reviewer-${round.iteration}-${reviewer.index}`]
-                              ? 'Retrying…'
-                              : 'Retry reviewer'}
-                          </button>
+                          >{retrying[`reviewer-${round.iteration}-${reviewer.index}`] ? 'Retrying…' : 'Retry reviewer'}</button><!-- ui-guards: allow — re-runs a reviewer job, not a list load -->
                         {/if}
                         <Badge tone={stTone(reviewer.state)}>
                           {#if reviewer.state === 'running'}<span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span>{/if}
@@ -985,9 +976,7 @@
                           class="ghost small"
                           disabled={retrying[`revision-${round.iteration}`]}
                           onclick={() => void retryRevision(round.iteration)}
-                        >
-                          {retrying[`revision-${round.iteration}`] ? 'Retrying…' : 'Retry revision'}
-                        </button>
+                        >{retrying[`revision-${round.iteration}`] ? 'Retrying…' : 'Retry revision'}</button><!-- ui-guards: allow — re-runs a revision job, not a list load -->
                       {/if}
                       <Badge tone={stTone(round.revision.state)}>
                         {#if round.revision.state === 'running'}<span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span>{/if}

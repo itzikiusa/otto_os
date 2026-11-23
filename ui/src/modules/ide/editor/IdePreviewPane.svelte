@@ -25,6 +25,7 @@
   import { formatBytes } from '../../../lib/metric-format';
   import { loadPaneWidth } from '../../../lib/paneResizer';
   import { ide, type IdeOpenTab } from '../ideStore.svelte';
+  import { findContainingRoot } from '../shell/ideProjectHelpers';
   import { idePreviewMode } from './idePreviewMode.svelte';
 
   const FilePreviewLazy = lazyComponent(() => import('../../../lib/components/FilePreview.svelte'));
@@ -93,6 +94,7 @@
   const mediaUrl = $derived(
     ide.target.kind === 'local' ? (p: string) => authedBlobUrl(`/fs/raw?path=${encodeURIComponent(p)}`) : null,
   );
+  const previewRoot = $derived(findContainingRoot(tab.path, ide.projectRoots)?.path ?? ide.target.root);
 </script>
 
 {#if shown}
@@ -130,7 +132,7 @@
           path: tab.path,
           kind,
           text: previewText,
-          root: ide.target.root,
+          root: previewRoot,
           mediaUrl,
           mediaUnavailable: 'Images and PDFs preview in local projects only; this project is on a remote SSH host.',
           onOpenLink: (p: string) => void ide.openFile(p, { preview: false }),

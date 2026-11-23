@@ -20,6 +20,7 @@
   //            library": sections of other sites, with provenance. Click a tile
   //            to insert after the selection, or drag it onto the canvas.
   import Icon from '../../../lib/components/Icon.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
   import { onTabKey } from '../../../lib/tabKeys';
   import type { IconName } from '../../../lib/components/Icon.svelte';
   import { FAMILIES, itemDef, searchBlocks, sectionLabel, type SectionDef } from './engine/catalog';
@@ -277,13 +278,17 @@
       {/each}
       <section class="group" aria-label="From your library">
         <h3 class="section-title">From your library {#if libFound.length}<span class="count">{libFound.length}</span>{/if}</h3>
-        {#if libraryState === 'loading'}
-          <p class="dim hint">Looking through your other sites…</p>
-        {:else if libraryState === 'error'}
-          <p class="dim hint">Couldn’t load your other sites. <button class="linkbtn" onclick={onloadlibrary}>Retry</button></p>
-        {:else if !libFound.length}
-          <p class="dim hint">Sections from your other sites show up here, with where they came from.</p>
-        {:else}
+        <LoadState
+          what="your other sites"
+          variant="compact"
+          loading={libraryState === 'loading'}
+          error={libraryState === 'error' ? 'Check the connection and try again.' : null}
+          empty={!libFound.length}
+          onretry={onloadlibrary}
+        >
+          {#snippet emptyView()}
+            <p class="dim hint">Sections from your other sites show up here, with where they came from.</p>
+          {/snippet}
           <div class="tiles">
             {#each libFound.slice(0, 24) as l (l.key)}
               <button
@@ -303,7 +308,7 @@
               </button>
             {/each}
           </div>
-        {/if}
+        </LoadState>
       </section>
     {/if}
   </div>

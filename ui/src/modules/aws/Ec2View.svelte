@@ -31,6 +31,7 @@
   import { ALL_REGIONS } from '../../lib/api/aws';
   import { fmtAgo, fmtDate, awsErrorText } from './util';
   import { awsLoadText } from './loadText';
+  import { TableWindow } from '../../lib/tableWindow.svelte';
   import type { AwsAccount, Ec2Action, Ec2Instance, Ec2InstanceDetail } from '../../lib/api/types';
 
   interface Props {
@@ -212,6 +213,13 @@
   });
   // Spoken at the state edge through the shell's always-mounted announcer: a
   // live region inserted together with its text is not read (WebKit/VoiceOver).
+  // Window large multi-region instance tables.
+  const tw = new TableWindow();
+  let wrapEl = $state<HTMLDivElement | null>(null);
+  const win = $derived(tw.range(shown.length));
+  const rowsWindow = $derived(shown.slice(win.start, win.end));
+  $effect(() => { void rowsWindow; tw.measure(wrapEl); });
+  $effect(() => { void region; void filter; void stateFilter; tw.reset(wrapEl); });
   const detailError = $derived(detail?.error ?? '');
   $effect(() => { if (detailError) announce(`Couldn’t load the instance details. ${awsErrorText(detailError)}`, { assertive: true }); });
 </script>
@@ -237,7 +245,7 @@
 </ViewToolbar>
 
 <div class="body">
-<div class="tbl-wrap">
+<div class="tbl-wrap" class:windowed={tw.active(shown.length)} bind:this={wrapEl} bind:clientHeight={tw.viewH} onscroll={tw.onscroll}>
   <RegionErrors errors={regionErrors} />
   {#if loading && !instances}
     <div class="pad"><Skeleton rows={8} label="EC2 instances" /></div>
@@ -254,7 +262,8 @@
         </tr>
       </thead>
       <tbody>
-        {#each shown as i (`${i.region ?? ''}/${i.instance_id}`)}
+        {#if win.top}<tr class="tw-spacer" aria-hidden="true"><td colspan={allRegions ? 10 : 9} style="height:{win.top}px"></td></tr>{/if}
+        {#each rowsWindow as i (`${i.region ?? ''}/${i.instance_id}`)}
           <tr use:rowMenu
             class="trow"
             class:sel={detail?.inst.instance_id === i.instance_id}
@@ -277,6 +286,7 @@
             </td>
           </tr>
         {/each}
+        {#if win.bottom}<tr class="tw-spacer" aria-hidden="true"><td colspan={allRegions ? 10 : 9} style="height:{win.bottom}px"></td></tr>{/if}
       </tbody>
     </table>
   {/if}

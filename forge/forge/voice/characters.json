@@ -1,0 +1,6 @@
+{
+  "keeper": {"engine":"kokoro", "voice":"am_onyx,am_michael", "speed":0.92, "gender":"male", "description":"An older man with a deep, low and slightly tired voice. He speaks slowly and calmly, with gentle pauses between sentences."},
+  "scout": {"engine":"kokoro", "voice":"af_heart", "speed":1.06, "gender":"female", "description":"A young woman with a quick, bright and playful voice, cheeky and warm, as if hiding a smile."},
+  "ember": {"engine":"qwen", "voice":"designed", "speed":1.0, "gender":"female", "description":"A mature woman with a low, husky speaking voice. Her delivery is calm, intimate and quietly urgent."},
+  "flint": {"engine":"qwen", "voice":"designed", "speed":0.94, "gender":"male", "description":"A weathered male storyteller with a gravelly lower register. He speaks gently, with warmth and clear diction."}
+}

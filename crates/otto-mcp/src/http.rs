@@ -51,11 +51,14 @@ impl IntoResponse for ApiErr {
             Error::Upstream(_) => StatusCode::BAD_GATEWAY,
             Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
+        if status == StatusCode::INTERNAL_SERVER_ERROR {
+            tracing::error!("mcp internal error: {}", self.0);
+        }
         (
             status,
             Json(Problem {
                 code: self.0.code().to_string(),
-                message: self.0.to_string(),
+                message: self.0.public_message(),
             }),
         )
             .into_response()
@@ -845,17 +848,90 @@ struct PolicyListQuery {
     workspace_id: Option<String>,
 }
 
+/// Verify the caller is authorized to manage or view policies in `workspace_id`.
+/// Global policies (`workspace_id == None`) require root for mutations.
+async fn require_policy_scope<S: McpCtx>(
+    ctx: &S,
+    user: &User,
+    workspace_id: Option<&Id>,
+    min: WorkspaceRole,
+) -> Result<(), ApiErr> {
+    match workspace_id {
+        Some(ws) => require_ws(ctx, user, ws, min).await,
+        None if user.is_root => Ok(()),
+        None => Err(ApiErr(Error::Forbidden(
+            "global MCP policies require root".into(),
+        ))),
+    }
+}
+
+async fn audit_policy<S: McpCtx>(
+    ctx: &S,
+    user_id: &str,
+    action: &str,
+    target: Option<String>,
+    detail: Option<Value>,
+) {
+    let _ = otto_state::AuditRepo::new(ctx.mcp_pool().clone())
+        .insert(otto_state::NewAuditEntry {
+            user_id: Some(user_id.to_string()),
+            action: action.to_string(),
+            target,
+            detail,
+            ip: None,
+        })
+        .await;
+}
+
+async fn filter_visible_policies<S: McpCtx>(
+    ctx: &S,
+    user: &User,
+    policies: Vec<otto_state::McpPolicy>,
+) -> Vec<otto_state::McpPolicy> {
+    if user.is_root {
+        return policies;
+    }
+    let mut allowed_ws = std::collections::HashMap::<String, bool>::new();
+    let mut out = Vec::with_capacity(policies.len());
+    for p in policies {
+        let ok = match p.workspace_id.as_ref() {
+            None => true,
+            Some(ws) => {
+                if let Some(&cached) = allowed_ws.get(ws) {
+                    cached
+                } else {
+                    let v = ctx
+                        .roles()
+                        .check(user, ws, WorkspaceRole::Viewer)
+                        .await
+                        .is_ok();
+                    allowed_ws.insert(ws.clone(), v);
+                    v
+                }
+            }
+        };
+        if ok {
+            out.push(p);
+        }
+    }
+    out
+}
+
 async fn list_policies<S: McpCtx>(
     State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Query(q): Query<PolicyListQuery>,
 ) -> ApiResult<Json<Vec<otto_state::McpPolicy>>> {
-    ctx.mcp()
+    if let Some(ws) = q.workspace_id.as_ref() {
+        require_ws(&ctx, &user, ws, WorkspaceRole::Viewer).await?;
+    }
+    let rows = ctx
+        .mcp()
         .policies()
         .list(q.workspace_id.as_ref())
         .await
-        .map(Json)
-        .map_err(ApiErr)
+        .map_err(ApiErr)?;
+    Ok(Json(filter_visible_policies(&ctx, &user, rows).await))
 }
 
 async fn create_policy<S: McpCtx>(
@@ -863,9 +939,11 @@ async fn create_policy<S: McpCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<CreatePolicyReq>,
 ) -> ApiResult<Json<otto_state::McpPolicy>> {
+    require_policy_scope(&ctx, &user, req.workspace_id.as_ref(), WorkspaceRole::Admin).await?;
     validate_effect(&req.effect)?;
     let match_json = checked_match(req.match_json)?;
-    ctx.mcp()
+    let created = ctx
+        .mcp()
         .policies()
         .create(NewPolicy {
             workspace_id: req.workspace_id,
@@ -875,24 +953,45 @@ async fn create_policy<S: McpCtx>(
             match_json,
             effect: req.effect,
             reason: req.reason,
-            created_by: user.id,
+            created_by: user.id.clone(),
         })
         .await
-        .map(Json)
-        .map_err(ApiErr)
+        .map_err(ApiErr)?;
+    audit_policy(
+        &ctx,
+        &user.id,
+        "mcp.policy.create",
+        Some(created.id.clone()),
+        Some(json!({
+            "name": created.name,
+            "workspace_id": created.workspace_id,
+            "effect": created.effect,
+        })),
+    )
+    .await;
+    Ok(Json(created))
 }
 
 async fn update_policy<S: McpCtx>(
     Path(id): Path<Id>,
     State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<UpdatePolicyReq>,
 ) -> ApiResult<Json<otto_state::McpPolicy>> {
+    let existing = ctx.mcp().policies().get(&id).await.map_err(ApiErr)?;
+    require_policy_scope(
+        &ctx,
+        &user,
+        existing.workspace_id.as_ref(),
+        WorkspaceRole::Admin,
+    )
+    .await?;
     if let Some(e) = &req.effect {
         validate_effect(e)?;
     }
     let match_json = req.match_json.map(checked_match).transpose()?;
-    ctx.mcp()
+    let updated = ctx
+        .mcp()
         .policies()
         .update(
             &id,
@@ -904,25 +1003,58 @@ async fn update_policy<S: McpCtx>(
             req.reason.as_deref(),
         )
         .await
-        .map(Json)
-        .map_err(ApiErr)
+        .map_err(ApiErr)?;
+    audit_policy(
+        &ctx,
+        &user.id,
+        "mcp.policy.update",
+        Some(updated.id.clone()),
+        Some(json!({
+            "name": updated.name,
+            "workspace_id": updated.workspace_id,
+            "effect": updated.effect,
+            "enabled": updated.enabled,
+        })),
+    )
+    .await;
+    Ok(Json(updated))
 }
 
 async fn delete_policy<S: McpCtx>(
     Path(id): Path<Id>,
     State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
 ) -> ApiResult<StatusCode> {
+    let existing = ctx.mcp().policies().get(&id).await.map_err(ApiErr)?;
+    require_policy_scope(
+        &ctx,
+        &user,
+        existing.workspace_id.as_ref(),
+        WorkspaceRole::Admin,
+    )
+    .await?;
     ctx.mcp().policies().delete(&id).await.map_err(ApiErr)?;
+    audit_policy(
+        &ctx,
+        &user.id,
+        "mcp.policy.delete",
+        Some(id),
+        Some(json!({
+            "name": existing.name,
+            "workspace_id": existing.workspace_id,
+        })),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn export_policies<S: McpCtx>(
     State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
 ) -> ApiResult<Json<Value>> {
     let all = ctx.mcp().policies().list(None).await.map_err(ApiErr)?;
-    Ok(Json(json!({ "version": 1, "policies": all })))
+    let visible = filter_visible_policies(&ctx, &user, all).await;
+    Ok(Json(json!({ "version": 1, "policies": visible })))
 }
 
 async fn import_policies<S: McpCtx>(
@@ -930,12 +1062,12 @@ async fn import_policies<S: McpCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<ImportPoliciesReq>,
 ) -> ApiResult<Json<Value>> {
-    // Validate EVERY rule before touching the table, then replace (only the
-    // scopes the import names) and insert in one transaction: a bad row used
-    // to stop the import after every existing rule was already deleted.
-    // (Admin-gated route.)
+    // Validate EVERY rule and workspace permission before touching the table,
+    // then replace (only the scopes the import names) and insert in one
+    // transaction: a bad or unauthorized row never leaves partial state.
     let mut rules = Vec::with_capacity(req.policies.len());
     for (i, p) in req.policies.into_iter().enumerate() {
+        require_policy_scope(&ctx, &user, p.workspace_id.as_ref(), WorkspaceRole::Admin).await?;
         let bad = |msg: String| ApiErr(Error::Invalid(format!("policy #{}: {msg}", i + 1)));
         if validate_effect(&p.effect).is_err() {
             return Err(bad(format!("unknown effect {:?}", p.effect)));
@@ -958,6 +1090,14 @@ async fn import_policies<S: McpCtx>(
         .import(&rules, req.replace)
         .await
         .map_err(ApiErr)?;
+    audit_policy(
+        &ctx,
+        &user.id,
+        "mcp.policy.import",
+        None,
+        Some(json!({ "imported": created, "replaced": req.replace })),
+    )
+    .await;
     Ok(Json(
         json!({ "imported": created, "replaced": req.replace }),
     ))
@@ -1251,5 +1391,19 @@ mod policy_input_tests {
         assert!(match_value(json!({"tool_nam": "delete_repo"})).is_err());
         let err = checked_match(json!({"mutating": "yes"})).expect_err("400");
         assert!(matches!(err.0, Error::Invalid(_)));
+    }
+
+    #[tokio::test]
+    async fn internal_errors_are_sanitized_in_http_500_responses() {
+        let resp = ApiErr(Error::Internal(
+            "sqlite path /Users/alice/otto.db locked".into(),
+        ))
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], "internal");
+        assert_eq!(body["message"], "internal server error");
+        assert!(!body.to_string().contains("/Users/alice"));
     }
 }

@@ -60,8 +60,9 @@ impl SchemaRegistry {
         // user-supplied registry URL can't 30x-bounce into the internal net.
         // Direct (untunnelled) clients also get the guarded resolver, so the
         // address dialled is the one vetted — no DNS rebinding after `guard`.
+        // Tunnelled clients still refuse cloud-metadata redirects.
         let base_builder = if socks_proxy.is_some() {
-            reqwest::Client::builder().redirect(otto_netguard::redirect_policy())
+            reqwest::Client::builder().redirect(otto_netguard::tunnelled_redirect_policy())
         } else {
             otto_netguard::guarded_client_builder()
         };
@@ -116,10 +117,10 @@ impl SchemaRegistry {
     /// redirect hops are re-validated by the client's redirect policy.
     async fn guard(&self, url: &str) -> Result<()> {
         if self.via_tunnel {
-            // Reached through the user's SSH bastion; the private endpoint is the
-            // intent and the tunnel handles routing, so the loopback SSRF guard
-            // would only false-positive here.
-            return Ok(());
+            // Reached through the user's SSH bastion; private endpoints are
+            // intentional, but cloud metadata endpoints are still refused.
+            return otto_netguard::precheck_url_tunnelled(url)
+                .map_err(|m| Error::Forbidden(format!("schema registry blocked: {m}")));
         }
         otto_netguard::check_url(url)
             .await
@@ -666,5 +667,16 @@ mod tests {
             t.elapsed()
         );
         assert_eq!(reg.negative.lock().unwrap().len(), 8);
+    }
+
+    #[tokio::test]
+    async fn tunnelled_registry_blocks_cloud_metadata_and_allows_private() {
+        let meta = registry("http://169.254.169.254/latest/meta-data");
+        assert!(matches!(
+            meta.guard(&meta.base).await,
+            Err(Error::Forbidden(_))
+        ));
+        let private = registry("http://10.0.0.15:8081");
+        assert!(private.guard(&private.base).await.is_ok());
     }
 }

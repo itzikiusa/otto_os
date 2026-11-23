@@ -4,8 +4,13 @@
 // Vault page to bind its store (`vaultPort`, the same port the
 // `otto.ui_vault_open_note` handler drives) and selects the vault + note.
 
+import { api } from './api/client';
+import type { WorkflowRun } from './api/types';
+import { confirmer } from './confirm.svelte';
 import { router } from './router.svelte';
 import { hitRoute, hitVaultNote } from './floatingBar';
+import { apiClient } from './stores/apiClient.svelte';
+import { toasts } from './toast.svelte';
 import { vaultPort } from './uiCommands/vaultPort';
 import { waitFor } from './uiCommands/pagePort';
 import { toastError } from './toastError';
@@ -14,6 +19,58 @@ export function openHitInApp(hit: { kind: string; id: string; title?: string }):
   router.go(hitRoute(hit));
   const note = hitVaultNote(hit);
   if (note) void openVaultNote(note.vault, note.path, hit.title ?? note.path);
+}
+
+/** Run a server-advertised secondary power verb on a cross-module search hit.
+ *  Outward verbs (`rerun` workflow or saved API request) confirm first. */
+export async function runHitPowerAction(
+  hit: { kind: string; id: string; title: string; subtitle?: string | null },
+  action: 'rerun' | 'review',
+): Promise<void> {
+  if (action === 'review' && hit.kind === 'repo') {
+    router.go(`git/${encodeURIComponent(hit.id)}/review`);
+    return;
+  }
+  if (action === 'rerun' && hit.kind === 'workflow') {
+    const ok = await confirmer.ask(
+      `Run workflow “${hit.title}” now? Its steps may touch repositories or external services.`,
+      { title: 'Run workflow', confirmLabel: 'Run workflow' },
+    );
+    if (!ok) return;
+    try {
+      const run = await api.post<WorkflowRun>(`/workflows/${encodeURIComponent(hit.id)}/run`, {});
+      router.go(
+        run?.id
+          ? `workflows/${encodeURIComponent(hit.id)}/runs/${encodeURIComponent(run.id)}`
+          : `workflows/${encodeURIComponent(hit.id)}`,
+      );
+      toasts.success('Workflow started', hit.title);
+    } catch (e) {
+      toastError(`Couldn’t run “${hit.title}”`, e);
+    }
+    return;
+  }
+  if (action === 'rerun' && hit.kind === 'api_request') {
+    router.go(`api/${encodeURIComponent(hit.id)}`);
+    try {
+      await apiClient.ensureLoaded();
+      const opened = await apiClient.openRequest(hit.id);
+      if (!opened) {
+        toasts.warn('Request not found', `“${hit.title}” is no longer in this workspace.`);
+        return;
+      }
+      const target = hit.subtitle ? ` (${hit.subtitle})` : '';
+      const ok = await confirmer.ask(`Send saved request “${hit.title}”${target} now?`, {
+        title: 'Send request',
+        confirmLabel: 'Send',
+      });
+      if (!ok) return;
+      if (apiClient.draft.kind === 'grpc') await apiClient.executeGrpc();
+      else await apiClient.execute();
+    } catch (e) {
+      toastError(`Couldn’t send “${hit.title}”`, e);
+    }
+  }
 }
 
 async function openVaultNote(vaultId: string, path: string, title: string): Promise<void> {

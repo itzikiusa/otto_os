@@ -973,6 +973,7 @@ async fn live_routes_check_the_role_on_the_tabs_workspace() {
         (Method::POST, "/nav"),
         (Method::POST, "/control"),
         (Method::POST, "/screenshot"),
+        (Method::POST, "/emulate"),
     ] {
         let body = match (m.clone(), suffix) {
             (Method::POST, "/nav") => Some(serde_json::json!({"action": "reload"})),
@@ -1020,6 +1021,64 @@ async fn live_routes_check_the_role_on_the_tabs_workspace() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn emulate_live_enforces_auth_roles_and_missing_session() {
+    let tmp = TempDir::new().expect("tempdir");
+    let pool = mem_pool().await;
+    let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+    let app = live_router(ctx);
+    seed_user(&pool, "viewer1").await;
+    seed_user(&pool, "editor1").await;
+    seed_workspace(&pool, "ws2").await;
+    set_member(&pool, "ws2", "viewer1", "viewer").await;
+    set_member(&pool, "ws2", "editor1", "editor").await;
+
+    let (status, body) = post_json(
+        &app,
+        "/workspaces/ws2/browser/tabs",
+        serde_json::json!({"url": "https://b.io"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let tab_id = json(&body)["id"].as_str().unwrap().to_string();
+    let uri = format!("/browser/tabs/{tab_id}/live/emulate");
+    let payload = serde_json::json!({
+        "viewport": {"width": 393, "height": 852, "device_scale_factor": 3.0},
+        "emulation": {"preset_id": "iphone-16-pro", "mobile": true, "has_touch": true}
+    });
+
+    // Unauthenticated request → 401 Unauthorized.
+    let unauth_req = Request::builder()
+        .method(Method::POST)
+        .uri(&uri)
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+        .unwrap();
+    let unauth_resp = app.clone().oneshot(unauth_req).await.unwrap();
+    assert_eq!(unauth_resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Viewer cannot mutate emulation → 403 Forbidden.
+    let viewer = non_root_user("viewer1");
+    let (status, _) = send_as(&app, Method::POST, &uri, Some(payload.clone()), &viewer).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Editor on missing tab → 404 Not Found.
+    let editor = non_root_user("editor1");
+    let (status, _) = send_as(
+        &app,
+        Method::POST,
+        "/browser/tabs/missing-tab/live/emulate",
+        Some(payload.clone()),
+        &editor,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Editor on real tab with no live session open → 404 Not Found.
+    let (status, _) = send_as(&app, Method::POST, &uri, Some(payload), &editor).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 // -----------------------------------------------------------------

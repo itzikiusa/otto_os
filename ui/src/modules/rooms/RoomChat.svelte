@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { newId } from '../../lib/id';
   import { tick, untrack } from 'svelte';
   import type { RoomMessage, RoomAction } from '../../lib/api/room-types';
   import Icon from '../../lib/components/Icon.svelte';
@@ -19,7 +20,7 @@
     // message (same nonce, so the room dedupes), otherwise it sends the draft.
     if (pending) { send({type: 'chat', ...pending}); return; }
     if (!draft.trim() || bytes > 4096) return;
-    pending = {text: draft, nonce: crypto.randomUUID()};
+    pending = {text: draft, nonce: newId()};
     send({type: 'chat', ...pending});
   }
   function onDraftKey(event: KeyboardEvent): void {

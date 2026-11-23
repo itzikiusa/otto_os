@@ -22,7 +22,10 @@ use otto_core::event::Event;
 use otto_core::{Error, Id};
 use serde::Deserialize;
 
-use super::{clean_body, clean_pin, CommentFilter, CommentPin, DesignComment, NewComment};
+use super::{
+    clean_body, clean_pin, clean_pin_3d, CommentFilter, CommentPin, CommentPin3d, DesignComment,
+    NewComment,
+};
 use crate::http::DesignCtx;
 use crate::service::DesignService;
 use crate::types::DesignArtifact;
@@ -73,6 +76,9 @@ struct ListQuery {
     /// `true` = resolved threads only, `false` = open ones only.
     #[serde(default)]
     resolved: Option<bool>,
+    /// Only 3D threads anchored to this sub-mesh name (plus their replies).
+    #[serde(default)]
+    mesh_name: Option<String>,
     #[serde(default)]
     limit: Option<i64>,
 }
@@ -88,6 +94,8 @@ struct CreateReq {
     parent_id: Option<Id>,
     #[serde(default)]
     pin: Option<CommentPin>,
+    #[serde(default)]
+    pin_3d: Option<CommentPin3d>,
 }
 
 #[derive(Deserialize)]
@@ -175,6 +183,7 @@ async fn list<S: DesignCtx>(
     let f = CommentFilter {
         version_id: q.version.filter(|v| !v.trim().is_empty()),
         resolved: q.resolved,
+        mesh_name: q.mesh_name.filter(|m| !m.trim().is_empty()),
         limit: q.limit,
     };
     Ok(Json(svc.store().list_comments(&a.id, &f).await?).into_response())
@@ -193,9 +202,10 @@ async fn create<S: DesignCtx>(
         version_id,
         parent_id,
         pin,
+        pin_3d,
     } = req;
     let body = clean_body(&body)?;
-    let (version_id, version_seq, pin) = match &parent_id {
+    let (version_id, version_seq, pin, pin_3d) = match &parent_id {
         Some(pid) => {
             let parent = load_comment(&svc, &a, pid).await?;
             if parent.parent_id.is_some() {
@@ -203,15 +213,16 @@ async fn create<S: DesignCtx>(
                     "replies are one level deep — reply to the thread instead".into(),
                 )));
             }
-            if pin.is_some() {
+            if pin.is_some() || pin_3d.is_some() {
                 return Err(CommentErr(Error::Invalid(
                     "a reply has no pin; the thread's pin marks the spot".into(),
                 )));
             }
-            (parent.version_id, parent.version_seq, None)
+            (parent.version_id, parent.version_seq, None, None)
         }
         None => {
             let pin = clean_pin(pin)?;
+            let pin_3d = clean_pin_3d(pin_3d)?;
             let wanted = version_id
                 .filter(|v| !v.trim().is_empty())
                 .or_else(|| a.head_version_id.clone());
@@ -231,6 +242,7 @@ async fn create<S: DesignCtx>(
                 v.as_ref().map(|v| v.id.clone()),
                 v.as_ref().map(|v| v.seq),
                 pin,
+                pin_3d,
             )
         }
     };
@@ -248,6 +260,7 @@ async fn create<S: DesignCtx>(
             session_id: None,
             body,
             pin,
+            pin_3d,
         })
         .await?;
     notify(&svc, &a);

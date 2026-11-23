@@ -11,6 +11,7 @@
 // below into one readable line. Dark themes start at 200 ("Dark Mauve").
 
 import { createRenderQueue, isStaleResult, type Stale } from '../../lib/render/renderQueue';
+import { loadErrorText } from '../../lib/loadError';
 import { sanitizeD2Svg } from './svgSanitize';
 
 type D2CompileOptions = { sketch?: boolean; themeID?: number };
@@ -128,8 +129,7 @@ export async function renderD2(
     if (!clean) return { error: 'D2 returned an unexpected render payload' };
     return { svg: clean };
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return { error: friendlyError(msg) };
+    return { error: friendlyError(loadErrorText(e)) };
   }
 }
 

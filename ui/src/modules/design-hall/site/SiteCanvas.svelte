@@ -21,6 +21,7 @@
   import { themeStyle, type Theme } from './engine/theme';
   import { sectionLabel } from './engine/catalog';
   import type { SiteDoc, SitePage } from './engine/types';
+  import { MULTILINE_KEYS as MULTILINE, readAuthoredText as readText } from './inlineEdit';
 
   interface Props {
     doc: SiteDoc;
@@ -132,33 +133,10 @@
     frozen: string;
   }
 
-  /**
-   * The text of an edited element as authored — NOT `innerText`, which
-   * applies CSS (`text-transform: uppercase` on eyebrows would save capitals).
-   * `<br>` is a line break, a paragraph a blank line.
-   */
-  function readText(el: HTMLElement): string {
-    let out = '';
-    const walk = (n: Node) => {
-      for (const c of Array.from(n.childNodes)) {
-        if (c.nodeType === Node.TEXT_NODE) out += c.textContent ?? '';
-        else if (c.nodeName === 'BR') out += '\n';
-        else {
-          if (c.nodeName === 'P' && out.trim()) out = out.replace(/\n*$/, '') + '\n\n';
-          else if (c.nodeName === 'DIV' && out && !out.endsWith('\n')) out += '\n';
-          walk(c);
-        }
-      }
-    };
-    walk(el);
-    return out;
-  }
   let editing = $state<Editing | null>(null);
   function shown(id: string): string {
     return editing?.sectionId === id ? editing.frozen : (html.get(id) ?? '');
   }
-
-  const MULTILINE = new Set(['headline', 'subhead', 'heading', 'subheading', 'body', 'quote', 'answer', 'blurb', 'tagline']);
 
   function startEdit(el: HTMLElement, sectionId: string, blockId: string | null, key: string): void {
     if (readonly || editing) return;
@@ -210,9 +188,14 @@
       finishEdit(true);
     }
   }
-  function onEditBlur(): void {
-    finishEdit(true);
-  }
+  function onEditBlur(): void { finishEdit(true); }
+  // Finish inline edit on page switch, readonly toggle, or unmount so `editing` never wedges.
+  $effect(() => {
+    void page.id;
+    const ro = readonly;
+    untrack(() => { if (editing) finishEdit(!ro); });
+  });
+  $effect(() => () => { if (editing) finishEdit(false); });
 
   // ── Delegated pointer handling ─────────────────────────────────────────────
   let hover = $state<{ section: string; block: string | null } | null>(null);
@@ -343,8 +326,15 @@
   let frameEl = $state<HTMLDivElement | null>(null);
   let liveLayer = $state<HTMLDivElement | null>(null);
 
+  function destroyAllLives(): void {
+    if (!lives.size) return;
+    for (const l of lives.values()) { l.handle?.destroy(); l.host.remove(); }
+    lives.clear();
+    refreshLiveSrcs();
+  }
   function syncLive(): void {
-    if (!live3d || !siteEl || !frameEl || !liveLayer) return;
+    if (!live3d) { destroyAllLives(); return; }
+    if (!siteEl || !frameEl || !liveLayer) return;
     const frame = frameEl.getBoundingClientRect();
     const seen = new Set<string>();
     for (const fig of Array.from(siteEl.querySelectorAll<HTMLElement>('figure.os-embed-3d[data-os-block]'))) {
@@ -410,8 +400,9 @@
     lives.clear();
   });
   $effect(() => {
-    // Re-measure on anything that moves the page.
+    // Re-measure on anything that moves the page (or toggles live 3D).
     void html;
+    void live3d;
     void selectedSection;
     void selectedBlock;
     void hover;

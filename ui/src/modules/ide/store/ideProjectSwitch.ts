@@ -4,15 +4,12 @@
 // the tree, let participants restore, re-adopt a parked run). See
 // `ideProjectMemory.ts`, `ideParkedRuns.ts` and `../shell/ideProjectRecents.svelte.ts`.
 
-import { ideProjectRecents, sameRootKey, setRecentsExclusion } from '../shell/ideProjectRecents.svelte';
+import { ideProjectRecents, sameRootKey } from '../shell/ideProjectRecents.svelte';
 import { ideProjectHealth } from './ideProjectHealth.svelte';
 import { ideWindowTitle } from './ideWindowTitle.svelte';
-import { adoptParkedRun, parkRun, resumeParkedRunWatch, setParkedRunCurrentKey, setParkedRunReopener, type RunHost } from './ideParkedRuns';
+import { adoptParkedRun, parkRun, resumeParkedRunWatch, setParkedRunCurrentKey, type RunHost } from './ideParkedRuns';
 import { enterProject, expandedToRemember, leaveProject, recallDurable, rememberDurable } from './ideProjectMemory';
 import { ideBasename, ideTargetKey, type IdeNamedProject } from './ideTypes';
-
-/** How many remembered folders are re-listed on return (each is one tree request). */
-const MAX_RESTORED_DIRS = 40;
 
 export interface ProjectSwitchHost extends RunHost {
   readonly projectRoots: readonly { path: string }[];
@@ -75,29 +72,18 @@ export function enterIdeTarget(host: ProjectSwitchHost): void {
   ideProjectRecents.record(t);
   const roots = host.projectRoots.map((r) => r.path);
   const saved = recallDurable(key)?.expanded ?? [];
-  const restore = reachableExpanded(saved, roots).slice(0, MAX_RESTORED_DIRS);
+  // Opened only: the tree lists each one as it comes on screen (IdeProjectTree).
+  const restore = reachableExpanded(saved, roots);
   if (restore.length > 0) {
     const next = { ...host.expandedDirs };
     for (const p of restore) next[p] = true;
     host.expandedDirs = next;
-    for (const p of restore) void host.loadTree(p);
   }
   enterProject(key);
   void adoptParkedRun(host, key).finally(() => resumeParkedRunWatch());
 }
 
-// Scratches has its own switcher row: never listed as a recent folder (lazy: no import cycle).
-void import('../shell/ideScratches.svelte').then(({ scratches }) => {
-  setRecentsExclusion((root) => Boolean(scratches.root) && sameRootKey(root) === sameRootKey(scratches.root));
-}).catch(() => {});
 setParkedRunCurrentKey(() => (lastHost?.target.root ? ideTargetKey(lastHost.target) : ''));
-setParkedRunReopener((t) => {
-  void import('../ideStore.svelte').then(async ({ ide }): Promise<void> => {
-    if (t.project_id && ide.namedProjects.some((p) => p.id === t.project_id)) await ide.activateProject(t.project_id);
-    else if (t.kind === 'ssh' && t.connection_id) await ide.setSshTarget(t.connection_id, t.root, t.connection_name ?? null);
-    else await ide.setLocalTarget(t.root, t.workspace_id ?? null);
-  });
-});
 
 // A reload keeps the tree and a live run of the project on screen (sessionStorage).
 if (typeof window !== 'undefined') {

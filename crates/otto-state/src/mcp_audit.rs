@@ -35,6 +35,8 @@ pub const ARG_STRING_EDGE: usize = 512;
 /// Hard cap on the stored `args_json` (bytes) after per-string shaping —
 /// 10k short strings would otherwise still store megabytes.
 pub const ARGS_JSON_MAX_BYTES: usize = 16 * 1024;
+/// Larger redacted inputs keep a bounded preview and a digest without building a JSON tree.
+const AUDIT_PARSE_MAX_BYTES: usize = 1024 * 1024;
 /// Bytes of the shaped document kept at the head / tail (on char
 /// boundaries) when the whole document is over [`ARGS_JSON_MAX_BYTES`]. The
 /// stored marker is ≈ these + JSON escaping of the kept text.
@@ -63,6 +65,9 @@ pub fn cap_args_json(args_json: &str) -> String {
     if args_json.len() <= ARG_STRING_CAP {
         return args_json.to_string();
     }
+    if args_json.len() > AUDIT_PARSE_MAX_BYTES {
+        return truncated_doc(args_json, args_json);
+    }
     let shaped = match serde_json::from_str::<serde_json::Value>(args_json) {
         Ok(mut v) => {
             if shape(&mut v) {
@@ -76,16 +81,17 @@ pub fn cap_args_json(args_json: &str) -> String {
             serde_json::Value::String(t).to_string()
         }
     };
-    cap_doc(shaped, args_json)
+    if shaped.len() <= ARGS_JSON_MAX_BYTES {
+        shaped
+    } else {
+        truncated_doc(&shaped, args_json)
+    }
 }
 
 /// Whole-document bound: over [`ARGS_JSON_MAX_BYTES`] → a marker object with
 /// the byte length and sha256 of the ORIGINAL input plus head/tail of the
 /// shaped text (so both ends of a huge argument list stay readable).
-fn cap_doc(shaped: String, original: &str) -> String {
-    if shaped.len() <= ARGS_JSON_MAX_BYTES {
-        return shaped;
-    }
+fn truncated_doc(shaped: &str, original: &str) -> String {
     let mut h = DOC_HEAD_BYTES.min(shaped.len());
     while !shaped.is_char_boundary(h) {
         h -= 1;

@@ -196,6 +196,7 @@ async fn find_staged_rename_orig(repo_dir: &FsPath, rel_path: &str) -> Option<St
             "--cached",
             "--name-status",
             "-M",
+            "-l1000",
             "-z",
             "--diff-filter=R",
         ])

@@ -367,7 +367,7 @@
         placeholder={isEdit ? '•••••• (leave blank to keep)' : ''}
       />
       {#if isEdit && hostChanged}
-        <span class="hint warn-hint" role="alert">The site changed — paste a token for the new site. The stored token is never sent to a different host.</span>
+        <span class="hint warn-hint" use:announceShown={{ text: 'The site changed — paste a token for the new site. The stored token is never sent to a different host.', assertive: true }}>The site changed — paste a token for the new site. The stored token is never sent to a different host.</span>
       {:else if isEdit}
         <span class="hint">Leave blank to keep the existing token.</span>
       {:else if isLinear}

@@ -18,6 +18,7 @@ pub mod catalog;
 pub mod exec;
 pub mod jsonrpc;
 pub mod refs;
+pub mod simulators;
 pub mod ui_commands;
 
 pub use catalog::*;

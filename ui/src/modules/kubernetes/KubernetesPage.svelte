@@ -183,6 +183,7 @@
 <style>
   .k8s-page {
     height: 100%;
+    min-width: 0;
     min-height: 0;
     display: flex;
     flex-direction: column;

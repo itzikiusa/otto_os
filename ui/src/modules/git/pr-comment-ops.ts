@@ -23,6 +23,8 @@ export interface CommentOpsDeps {
   reload: () => Promise<void>;
   /** "repo · PR #n “title”" for the delete confirm. */
   where: () => string;
+  /** Short outward target ("PR #42 on my-repo") for composer hints. */
+  postTarget?: () => string;
   /** False once the view is gone (or moved to another PR). */
   alive: (repoId: string, num: number) => boolean;
 }
@@ -103,5 +105,6 @@ export function createCommentOps(d: CommentOpsDeps): PrCommentActions {
     },
 
     reactionsSupported: () => d.get()?.reactions_supported === true,
+    postTarget: d.postTarget,
   };
 }

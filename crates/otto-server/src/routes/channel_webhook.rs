@@ -11,16 +11,20 @@
 //! prompt `202 Accepted` and never blocks on agent startup.
 
 use std::sync::Arc;
+use std::time::Instant;
 
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use otto_channels::webhook::{auth_rate_limiter, resolve_callback_url};
 use otto_channels::{Adapter, Inbound, WebhookAdapter};
 use otto_core::api::Problem;
 use otto_core::domain::Channel;
 use otto_core::Id;
+use otto_sessions::share_throttle::ClientIp;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::state::ServerCtx;
 
@@ -40,8 +44,9 @@ pub struct InboundReq {
     /// Caller identity, matched against the integration's `allowed_users` filter.
     #[serde(default)]
     pub user: Option<String>,
-    /// Where to POST the agent's reply. Overrides the integration's configured
-    /// default callback URL (`channel_id`). Omit for fire-and-forget.
+    /// Where to POST the agent's reply when the integration has no admin-configured
+    /// callback URL (`channel_id`). Ignored if the integration configures a default
+    /// callback URL (locked to the admin-configured destination). Omit for fire-and-forget.
     #[serde(default)]
     pub callback_url: Option<String>,
 }
@@ -105,16 +110,26 @@ fn extract_key(headers: &HeaderMap) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Constant-time byte equality so key validation doesn't leak via timing.
+/// Constant-time byte equality that does not early-return on length mismatch:
+/// hashes both inputs with SHA-256 and compares all 32 digest bytes in a
+/// fixed-length loop so key validation does not leak key length via timing.
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
+    let da = Sha256::digest(a);
+    let db = Sha256::digest(b);
     let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
+    for (x, y) in da.iter().zip(db.iter()) {
         diff |= x ^ y;
     }
-    diff == 0
+    (diff == 0) & (a.len() == b.len())
+}
+
+/// Resolve the rate-limit client key from the host guard's verified
+/// [`ClientIp`] extension (never raw `X-Forwarded-For` / `X-Real-Ip` headers,
+/// which an unauthenticated caller can spoof to evade or flood throttles).
+fn client_ip_key(client: Option<&ClientIp>) -> String {
+    client
+        .map(|c| c.ip.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// The ONE credential gate of `POST /webhooks/{ws}`:
@@ -124,6 +139,8 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 /// - the workspace's webhook integration must exist AND be enabled (404
 ///   otherwise — disabling it stops the key working even when the Keychain
 ///   entry is left in place);
+/// - repeated failed attempts for a `(workspace, ip)` or `workspace` are
+///   throttled with 429;
 /// - a key must be configured (`chan-bot-{ws}-webhook`) and the presented one
 ///   (`X-Otto-Webhook-Key`, else `Authorization: Bearer`) must match it in
 ///   constant time (401 otherwise).
@@ -134,7 +151,17 @@ pub(crate) async fn webhook_key_guard(
     ctx: &ServerCtx,
     ws_id: &Id,
     headers: &HeaderMap,
+    client: Option<&ClientIp>,
 ) -> Result<otto_core::domain::Integration, Box<Response>> {
+    let ip = client_ip_key(client);
+    let now = Instant::now();
+    if auth_rate_limiter().is_limited_at(ws_id, &ip, now) {
+        return Err(Box::new(problem(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "too many failed webhook authentication attempts; retry later",
+        )));
+    }
     let integ = match ctx.integrations_store.get(ws_id, Channel::Webhook).await {
         Ok(Some(i)) if i.enabled => i,
         Ok(_) => {
@@ -161,6 +188,7 @@ pub(crate) async fn webhook_key_guard(
             .flatten()
             .filter(|k| !k.is_empty());
     let Some(expected) = expected else {
+        auth_rate_limiter().record_failure_at(ws_id, &ip, now);
         return Err(Box::new(problem(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
@@ -168,12 +196,18 @@ pub(crate) async fn webhook_key_guard(
         )));
     };
     match extract_key(headers) {
-        Some(p) if ct_eq(p.as_bytes(), expected.as_bytes()) => Ok(integ),
-        _ => Err(Box::new(problem(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "invalid or missing webhook key",
-        ))),
+        Some(p) if ct_eq(p.as_bytes(), expected.as_bytes()) => {
+            auth_rate_limiter().clear_ip(ws_id, &ip);
+            Ok(integ)
+        }
+        _ => {
+            auth_rate_limiter().record_failure_at(ws_id, &ip, now);
+            Err(Box::new(problem(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "invalid or missing webhook key",
+            )))
+        }
     }
 }
 
@@ -181,11 +215,13 @@ pub(crate) async fn webhook_key_guard(
 pub async fn inbound(
     Path(ws_id): Path<Id>,
     State(ctx): State<ServerCtx>,
+    client: Option<Extension<ClientIp>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     // 1–2. Enabled webhook integration + a matching key (the shared guard).
-    let integ = match webhook_key_guard(&ctx, &ws_id, &headers).await {
+    let integ = match webhook_key_guard(&ctx, &ws_id, &headers, client.as_ref().map(|c| &c.0)).await
+    {
         Ok(i) => i,
         Err(response) => return *response,
     };
@@ -235,13 +271,7 @@ pub async fn inbound(
         .filter(|c| !c.trim().is_empty())
         .or_else(|| user.clone())
         .unwrap_or_else(|| format!("wh-{}", uuid::Uuid::new_v4()));
-    let callback = req
-        .callback_url
-        .filter(|u| !u.trim().is_empty())
-        .or_else(|| {
-            let c = integ.channel_id.trim();
-            (!c.is_empty()).then(|| c.to_string())
-        });
+    let callback = resolve_callback_url(&integ.channel_id, req.callback_url.as_deref());
     let msg = Inbound {
         workspace_id: ws_id.clone(),
         chat: conversation.clone(),
@@ -292,8 +322,11 @@ mod tests {
     #[test]
     fn ct_eq_matches_only_identical_keys() {
         assert!(ct_eq(b"s3cret-key", b"s3cret-key"));
+        assert!(ct_eq(b"", b""));
         assert!(!ct_eq(b"s3cret-key", b"s3cret-keX"));
         assert!(!ct_eq(b"short", b"longer-key"));
+        assert!(!ct_eq(b"longer-key", b"short"));
+        assert!(!ct_eq(b"", b"nonempty"));
     }
 
     #[test]
@@ -310,5 +343,15 @@ mod tests {
         assert_eq!(extract_key(&h).as_deref(), Some("tok-987"));
 
         assert_eq!(extract_key(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn client_ip_key_uses_verified_extension_and_ignores_spoofed_headers() {
+        let verified = ClientIp {
+            ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 9)),
+            local: false,
+        };
+        assert_eq!(client_ip_key(Some(&verified)), "203.0.113.9");
+        assert_eq!(client_ip_key(None), "unknown");
     }
 }

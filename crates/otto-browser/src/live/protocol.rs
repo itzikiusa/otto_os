@@ -4,7 +4,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::types::LiveSessionInfo;
+use super::devtools::{ConsoleEntry, DevtoolsSnapshot, InspectedElement, NetworkEntry};
+use super::emulation::EmulationConfig;
+use super::types::{LiveSessionInfo, Viewport};
 
 /// Largest client → daemon text frame accepted.
 pub const MAX_CLIENT_FRAME_BYTES: usize = 256 * 1024;
@@ -145,6 +147,23 @@ pub enum ClientMsg {
         #[serde(default)]
         prompt_text: Option<String>,
     },
+    Emulate {
+        #[serde(default)]
+        viewport: Option<Viewport>,
+        #[serde(default)]
+        emulation: EmulationConfig,
+    },
+    Devtools {
+        enabled: bool,
+    },
+    ClearDevtools,
+    Inspect {
+        x: f64,
+        y: f64,
+    },
+    SetGuard {
+        guard_spa_mutations: bool,
+    },
 }
 
 impl ClientMsg {
@@ -194,6 +213,22 @@ pub enum ServerMsg {
         approval_id: String,
         status: &'static str,
         title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resource_type: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body_preview: Option<String>,
+    },
+    Console {
+        entry: ConsoleEntry,
+    },
+    Network {
+        entry: NetworkEntry,
+    },
+    DevtoolsSnapshot {
+        snapshot: DevtoolsSnapshot,
+    },
+    Inspected {
+        element: Option<InspectedElement>,
     },
     Error {
         code: &'static str,
@@ -312,6 +347,10 @@ mod tests {
             r#"{"type":"resize","width":800,"height":600,"device_scale_factor":2}"#,
             r#"{"type":"control","action":"take_over"}"#,
             r#"{"type":"dialog","accept":true,"prompt_text":"ok"}"#,
+            r#"{"type":"emulate","viewport":{"width":393,"height":852,"device_scale_factor":3},"emulation":{"preset_id":"iphone-16-pro","mobile":true,"has_touch":true,"color_scheme":"dark"}}"#,
+            r#"{"type":"devtools","enabled":true}"#,
+            r#"{"type":"clear_devtools"}"#,
+            r#"{"type":"inspect","x":120.5,"y":240.0}"#,
         ];
         for c in cases {
             let m = ClientMsg::parse(c).unwrap_or_else(|e| panic!("{c}: {e}"));

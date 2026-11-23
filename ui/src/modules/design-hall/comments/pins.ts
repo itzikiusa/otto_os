@@ -78,6 +78,13 @@ export function pinsFor(threads: readonly Thread[], versionId: string | null): {
     .map((thread) => ({ thread, muted: (thread.root.version_id ?? null) !== versionId }));
 }
 
+/** Open 3D-anchored comment threads for projection onto the 3D Studio viewport. */
+export function pins3dFor(threads: readonly Thread[], versionId: string | null): { thread: Thread; muted: boolean }[] {
+  return threads
+    .filter((t) => t.root.pin_3d && !t.root.resolved)
+    .map((thread) => ({ thread, muted: (thread.root.version_id ?? null) !== versionId }));
+}
+
 /** "made on v3" chip text, null when the thread is on the shown version. */
 export function versionChip(c: Pick<DesignComment, 'version_id' | 'version_seq'>, shownVersionId: string | null): string | null {
   if (c.version_id === shownVersionId || c.version_seq == null) return null;

@@ -8,6 +8,7 @@
   import { git } from '../../lib/stores/git.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { gitBridge, type RecoveryMode } from '../../lib/diff/gitBridge.svelte';
@@ -45,7 +46,7 @@
     if (busy) return;
     busy = true; error = '';
     try { await action(); }
-    catch (e) { if (alive) error = e instanceof Error ? e.message : String(e); }
+    catch (e) { if (alive) error = loadErrorText(e); }
     finally { if (alive) busy = false; }
   }
   async function loadHistory(reset = false): Promise<void> {
@@ -124,7 +125,7 @@
   }
 </script>
 
-<Modal title="Git recovery tools" width={820} {onclose}>
+<Modal title="Git recovery tools" width={820} dismissable={!busy} {onclose}>
   <div class="tools">
     <nav aria-label="Recovery tools">
       <!-- Mode switch is a segmented control, not three buttons with the active
@@ -192,7 +193,7 @@
         <div class="actions">
           {#if !bisect.finished}
             <button class="btn primary" disabled={busy} onclick={() => bisectAction('good')}>Works (good)</button>
-            <button class="btn danger" disabled={busy} onclick={() => bisectAction('bad')}>Broken (bad)</button>
+            <button class="btn" disabled={busy} onclick={() => bisectAction('bad')}>Broken (bad)</button>
             <button class="btn" disabled={busy} onclick={() => bisectAction('skip')}>Can’t test (skip)</button>
           {/if}
           <button class="btn" disabled={busy} onclick={() => bisectAction('reset')}>End bisect / return to branch</button>

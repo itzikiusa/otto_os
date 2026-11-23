@@ -237,15 +237,15 @@
   </div>
 
   <div class="run-footer">
-    <button type="button" class="run-foot-btn" onclick={() => { onclose(); ide.openEnvironmentsModal('configs'); }}>
+    <button type="button" class="btn small" onclick={() => { onclose(); ide.openEnvironmentsModal('configs'); }}>
       <Icon name="gear" size={12} />
       <span>Edit configurations…</span>
     </button>
-    <button type="button" class="run-foot-btn" onclick={() => { onclose(); ide.openSettings('build.env'); }}>
+    <button type="button" class="btn small" onclick={() => { onclose(); ide.openSettings('build.env'); }}>
       <Icon name="terminal" size={12} />
       <span>Shell env &amp; vars…</span>
     </button>
-    <button type="button" class="run-foot-btn" onclick={() => { onclose(); ide.openSettings('project.sdks'); }}>
+    <button type="button" class="btn small" onclick={() => { onclose(); ide.openSettings('project.sdks'); }}>
       <Icon name="box" size={12} />
       <span>SDKs…</span>
     </button>
@@ -256,7 +256,7 @@
   .run-backdrop { position: fixed; inset: 0; z-index: var(--z-popover-backdrop); }
   .run-popover {
     position: fixed; z-index: var(--z-popover); display: flex; flex-direction: column;
-    background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-m); box-shadow: var(--shadow-card); overflow: hidden;
+    background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-m); box-shadow: var(--glass-shadow); overflow: hidden;
   }
   .run-filter-row { display: flex; align-items: center; gap: 6px; padding-block: 6px; padding-inline: 10px; border-block-end: 1px solid var(--border); background: var(--surface-2); color: var(--text-dim); }
   .run-filter-row:focus-within { border-color: var(--accent); box-shadow: inset 0 -1px 0 var(--accent); }
@@ -283,10 +283,5 @@
   }
   .run-repo-row:hover { background: var(--hover); }
   .run-repo-actions { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; }
-  .run-footer { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px; border-block-start: 1px solid var(--border); background: var(--surface-2); }
-  .run-foot-btn {
-    display: inline-flex; align-items: center; gap: 4px; padding-block: 4px; padding-inline: 8px;
-    border: 1px solid var(--border); border-radius: var(--radius-s); background: var(--surface); color: var(--text); font-size: var(--fs-xs); cursor: pointer;
-  }
-  .run-foot-btn:hover { background: var(--hover); }
+  .run-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px; border-block-start: 1px solid var(--border); background: var(--surface-2); }
 </style>

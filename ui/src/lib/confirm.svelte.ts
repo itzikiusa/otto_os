@@ -44,6 +44,8 @@ class ConfirmStore {
   inputError = $state('');
   /** Prompt-mode: OK stays disabled until the input equals this (type-to-confirm). */
   mustMatch = $state('');
+  /** Prompt-mode: when true, submitting an empty string resolves `""` (Cancel still resolves `null`). */
+  private allowEmpty = false;
   // Choice mode: N labeled buttons + an optional "remember" checkbox.
   choices: ChoiceOption[] | null = $state(null);
   checkboxLabel = $state('');
@@ -71,11 +73,13 @@ class ConfirmStore {
 
   /**
    * Prompt for a single line of text. Resolves the trimmed value, or `null` if
-   * the user cancels or leaves it empty. `danger` paints the confirm button
-   * red — for typed-name confirms of destructive actions (delete a topic,
-   * purge a queue, a prod write), which are the most dangerous dialogs of all.
-   * `validate` checks the trimmed value on OK: a returned message is shown
-   * INLINE under the field and the dialog stays open (never a toast).
+   * the user cancels or leaves it empty (unless `allowEmpty: true`, in which
+   * case submitting an empty value resolves `""` while Cancel / Escape still
+   * resolves `null`). `danger` paints the confirm button red — for typed-name
+   * confirms of destructive actions (delete a topic, purge a queue, a prod
+   * write), which are the most dangerous dialogs of all. `validate` checks the
+   * trimmed value on OK: a returned message is shown INLINE under the field
+   * and the dialog stays open (never a toast).
    */
   promptText(
     message: string,
@@ -88,6 +92,7 @@ class ConfirmStore {
       danger?: boolean;
       validate?: (v: string) => string | null;
       mustMatch?: string;
+      allowEmpty?: boolean;
     },
   ): Promise<string | null> {
     this.supersede();
@@ -103,6 +108,7 @@ class ConfirmStore {
     this.browseFolder = opts?.browseFolder ?? false;
     this.validate = opts?.validate ?? null;
     this.mustMatch = opts?.mustMatch ?? '';
+    this.allowEmpty = opts?.allowEmpty ?? false;
     this.inputError = '';
     this.open = true;
     return new Promise<string | null>((resolve) => {
@@ -151,23 +157,25 @@ class ConfirmStore {
     r?.(value);
   }
 
-  /** Prompt-mode OK — resolve the trimmed input (null when empty). */
+  /** Prompt-mode OK — resolve the trimmed input (null when empty, or `""` when `allowEmpty` is set). */
   submit(): void {
     const v = this.inputValue.trim();
     if (this.mustMatch && v !== this.mustMatch) return;
-    if (v && this.validate) {
+    if ((v || this.allowEmpty) && this.validate) {
       const err = this.validate(v);
       if (err) {
         this.inputError = err;
         return;
       }
     }
+    const allowEmpty = this.allowEmpty;
+    this.allowEmpty = false;
     this.inputError = '';
     this.validate = null;
     this.open = false;
     const r = this.resolver;
     this.resolver = null;
-    r?.(v ? v : null);
+    r?.(v ? v : allowEmpty ? '' : null);
   }
 
   /** Backdrop / X / Cancel — false for a confirm, null for a prompt/choice. */
@@ -188,6 +196,7 @@ class ConfirmStore {
       return;
     }
     const wasPrompt = this.isPrompt;
+    this.allowEmpty = false;
     this.inputError = '';
     this.validate = null;
     this.open = false;

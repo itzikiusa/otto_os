@@ -150,6 +150,7 @@ impl UsageEngine {
             .await
             .map_err(journal_error)?;
         if added {
+            self.mark_ingestion_pending();
             self.last_record.store(unix_now(), Ordering::Relaxed);
             self.usage_gen.fetch_add(1, Ordering::SeqCst);
         }

@@ -121,12 +121,11 @@
     );
   }
 
-  async function applyPreferredQuickFix(e: MouseEvent, d: IdeDiagnostic, key: string): Promise<void> {
+  async function applyPreferredQuickFix(anchor: HTMLElement | null, d: IdeDiagnostic, key: string): Promise<void> {
     if (d.quick_fixes && d.quick_fixes.length > 0 && hasConcreteEdit(d.quick_fixes[0])) {
       await ide.applyCodeAction(d.path, d.quick_fixes[0]);
       return;
     }
-    const anchor = e.currentTarget as HTMLElement | null;
     fixingKey = key;
     try {
       const actions = await ide.fetchCodeActions(d.path, d.line, d.column ?? 1);
@@ -137,6 +136,7 @@
         return;
       }
       if (concrete.length > 1) {
+        if (!anchor?.isConnected) return;
         ctxMenu.showAt(
           anchor,
           concrete.map((act) => ({
@@ -155,11 +155,22 @@
     }
   }
 
-  async function openQuickFixes(e: MouseEvent, d: IdeDiagnostic, key: string): Promise<void> {
-    const anchor = e.currentTarget as HTMLElement | null;
+  function onProblemKeydown(e: KeyboardEvent, d: IdeDiagnostic, key: string): void {
+    if (e.altKey && e.key === 'Enter' && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (fixingKey === key) return;
+      const cur = e.currentTarget as HTMLElement | null;
+      const anchor = cur?.closest('.prob-row')?.querySelector<HTMLElement>('[data-testid="ide-problem-apply-quickfix"]') ?? cur;
+      void applyPreferredQuickFix(anchor, d, key);
+    }
+  }
+
+  async function openQuickFixes(anchor: HTMLElement | null, d: IdeDiagnostic, key: string): Promise<void> {
     fixingKey = key;
     try {
       const fetched = await ide.fetchCodeActions(d.path, d.line, d.column ?? 1);
+      if (!anchor?.isConnected) return;
       const actions = fetched.length > 0 ? fetched : (d.quick_fixes ?? []);
       const items: MenuItem[] =
         actions.length > 0
@@ -332,7 +343,7 @@
             {#each groupItems as d, idx (diagKey(d, idx))}
               {@const k = diagKey(d, idx)}
               <div class="prob-row reveal-host">
-                <button type="button" class="prob-jump" onclick={() => jumpToProblem(d)}>
+                <button type="button" class="prob-jump" onclick={() => jumpToProblem(d)} onkeydown={(e) => onProblemKeydown(e, d, k)}>
                   {#if d.severity === 'error'}
                     <span class="prob-sev is-err" aria-hidden="true"><Icon name="x" size={12} /></span>
                     <span class="sr-only">Error:</span>
@@ -369,7 +380,8 @@
                   aria-keyshortcuts="Alt+Enter"
                   disabled={fixingKey === k}
                   title={d.quick_fixes?.[0]?.title ? `Apply Quick Fix: ${d.quick_fixes[0].title} (⌥⏎)` : 'Apply automatic Quick Fix (⌥⏎)'}
-                  onclick={(e) => void applyPreferredQuickFix(e, d, k)}
+                  onclick={(e) => void applyPreferredQuickFix(e.currentTarget as HTMLElement | null, d, k)}
+                  onkeydown={(e) => onProblemKeydown(e, d, k)}
                   data-testid="ide-problem-apply-quickfix"
                 >
                   <Icon name="bulb" size={12} />
@@ -381,7 +393,7 @@
                   aria-label="More quick fix options"
                   title="More quick fix options…"
                   disabled={fixingKey === k}
-                  onclick={(e) => void openQuickFixes(e, d, k)}
+                  onclick={(e) => void openQuickFixes(e.currentTarget as HTMLElement | null, d, k)}
                 >
                   <Icon name="more" size={12} />
                 </button>

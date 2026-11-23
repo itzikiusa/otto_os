@@ -151,7 +151,7 @@ fn remote_budget_secs() -> u64 {
     *V.get_or_init(|| env_secs("OTTO_GIT_REMOTE_TIMEOUT_SECS", 180))
 }
 
-fn env_secs(key: &str, default: u64) -> u64 {
+pub(crate) fn env_secs(key: &str, default: u64) -> u64 {
     std::env::var(key)
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
@@ -231,7 +231,7 @@ fn commit_graph_enabled() -> bool {
 /// `.git/config` instead.
 pub(crate) use otto_git_cmd::HARDENED_GIT_CONFIG;
 /// [`HARDENED_GIT_CONFIG`] for a [`HOOK_VERBS`] spawn: the repo's hooks run.
-pub(crate) const HOOKED_GIT_CONFIG: &str = "'core.fsmonitor=false'";
+pub(crate) const HOOKED_GIT_CONFIG: &str = "'core.fsmonitor=false' 'protocol.ext.allow=never'";
 
 /// Verbs a person runs deliberately (commit / merge / push / branch switch…)
 /// whose hooks (pre-commit, commit-msg, pre-push, LFS post-checkout) they
@@ -386,7 +386,7 @@ pub const UNTRACKED_OMITTED_MARKER: &str = "(diff omitted: ";
 pub(crate) const GIT_STDOUT_CAP: usize = 128 * 1024 * 1024;
 
 /// stderr retained for error text; anything past it is drained and dropped.
-const GIT_STDERR_CAP: usize = 1024 * 1024;
+pub(crate) const GIT_STDERR_CAP: usize = 1024 * 1024;
 
 /// What a spawn does when stdout crosses its limit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -511,7 +511,7 @@ enum SpawnErr {
     Io(std::io::Error),
 }
 
-async fn kill_group(pid: libc::pid_t) {
+pub(crate) async fn kill_group(pid: libc::pid_t) {
     // SAFETY: signalling a process group we created ourselves with
     // `process_group(0)`; ESRCH (already gone and reaped) is ignored.
     unsafe {
@@ -1582,7 +1582,17 @@ impl LocalGit {
             Err(_) => {
                 let pid = pid_seen.load(std::sync::atomic::Ordering::SeqCst);
                 if pid > 0 {
-                    kill_group(pid).await;
+                    // For LocalRead, dropping `collect` already SIGKILLed the
+                    // child via `kill_on_drop(true)` — immediately SIGKILL any
+                    // remaining process-group descendants instead of sleeping 2s.
+                    if matches!(class, SpawnClass::LocalRead) {
+                        // SAFETY: signalling a process group created by `process_group(0)`.
+                        unsafe {
+                            libc::kill(-pid, libc::SIGKILL);
+                        }
+                    } else {
+                        kill_group(pid).await;
+                    }
                 }
                 Err(Error::Upstream(format!(
                     "git {verb} timed out after {secs}s — if it was writing, \
@@ -2137,6 +2147,7 @@ impl LocalGit {
     pub async fn submodule_update(&self, path: Option<&str>) -> Result<String> {
         let mut args = vec!["submodule", "update", "--init", "--recursive"];
         if let Some(p) = path {
+            Self::guard_path(p)?;
             args.push("--");
             args.push(p);
         }
@@ -5090,109 +5101,7 @@ impl AskPass {
 // Clone
 // ---------------------------------------------------------------------------
 
-/// Clone `url` into `dest`, streaming progress lines (from git's stderr) into
-/// `progress`. Token is used via askpass for https remotes.
-pub async fn clone_repo(
-    url: &str,
-    dest: &Path,
-    token: Option<&TransportCredential>,
-    mut progress: impl FnMut(String) + Send,
-) -> Result<()> {
-    validate_remote_url(url)?;
-    let askpass = match token {
-        Some(t) => Some(AskPass::new(t)?),
-        None => None,
-    };
-    let mut cmd = Command::new("git");
-    cmd.arg("clone")
-        .arg("--progress")
-        // `--` so a URL can never be read as an option, and `LC_ALL=C` so the
-        // progress/error lines parsed below stay English.
-        .arg("--")
-        .arg(url)
-        .arg(dest)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        // Own process group (git + its `git-remote-https`/`ssh` helpers) so a
-        // stall can be killed as a whole; never outlive the caller either.
-        .process_group(0)
-        .kill_on_drop(true);
-    if let Some(a) = &askpass {
-        for (k, v) in a.envs() {
-            cmd.env(k, v);
-        }
-    }
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| Error::Internal(format!("spawn git clone: {e}")))?;
-
-    let mut stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| Error::Internal("clone stderr unavailable".into()))?;
-
-    // git progress lines are \r-terminated; split on both \r and \n.
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 4096];
-    let mut last_line = String::new();
-    // A clone may legitimately take long, but not SILENTLY: `--progress`
-    // reports every second or so. No output for this long (a dead VPN, a
-    // server that stopped sending) ends the clone instead of hanging the
-    // clone task forever — the one git spawn here that had no bound.
-    let idle = std::time::Duration::from_secs(env_secs("OTTO_GIT_CLONE_IDLE_SECS", 300));
-    loop {
-        let n = match tokio::time::timeout(idle, stderr.read(&mut chunk)).await {
-            Ok(read) => read.map_err(|e| Error::Internal(format!("clone read: {e}")))?,
-            Err(_) => {
-                if let Some(pid) = child.id() {
-                    kill_group(pid as libc::pid_t).await;
-                }
-                let _ = child.wait().await;
-                return Err(Error::Upstream(format!(
-                    "git clone stalled: no progress for {}s (last: {last_line})",
-                    idle.as_secs()
-                )));
-            }
-        };
-        if n == 0 {
-            break;
-        }
-        buf.extend_from_slice(&chunk[..n]);
-        while let Some(pos) = buf.iter().position(|&b| b == b'\n' || b == b'\r') {
-            let line: Vec<u8> = buf.drain(..=pos).collect();
-            let text = String::from_utf8_lossy(&line[..line.len() - 1])
-                .trim()
-                .to_string();
-            if !text.is_empty() {
-                last_line = text.clone();
-                progress(text);
-            }
-        }
-    }
-    if !buf.is_empty() {
-        let text = String::from_utf8_lossy(&buf).trim().to_string();
-        if !text.is_empty() {
-            last_line = text.clone();
-            progress(text);
-        }
-    }
-
-    let status = child
-        .wait()
-        .await
-        .map_err(|e| Error::Internal(format!("clone wait: {e}")))?;
-    if !status.success() {
-        return Err(Error::Upstream(format!(
-            "git clone exited {}: {}",
-            status.code().map_or_else(|| "?".into(), |c| c.to_string()),
-            last_line
-        )));
-    }
-    Ok(())
-}
+pub use crate::clone::clone_repo;
 
 /// Cap on [`LocalGit::head_remote_refs`] — the UI only names a few.
 pub const HEAD_REMOTES_CAP: usize = 20;

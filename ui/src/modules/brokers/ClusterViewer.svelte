@@ -1,6 +1,6 @@
 <script lang="ts">
   import Badge from '../../lib/components/Badge.svelte';
-  import { CLUSTER_VIEWS, type ClusterView } from './types';
+  import { CLUSTER_VIEWS, type ClusterView, type ReplayPrefill } from './types';
   import Tabs from '../../lib/components/Tabs.svelte';
   import { toastError } from '../../lib/toastError';
   // Embeddable Kafka cluster viewer: the header + per-cluster tab strip
@@ -31,11 +31,19 @@
   type Tab = ClusterView;
   let tab = $state<Tab>('overview');
   let testing = $state(false);
+  let replayPrefill = $state<ReplayPrefill | null>(null);
+  let replayPrefillSeq = 0;
+
+  function openReplayFrom(prefill: ReplayPrefill) {
+    replayPrefill = { ...prefill, seq: ++replayPrefillSeq };
+    tab = 'replay';
+  }
 
   // Reset to Overview whenever the shown cluster changes (tab switch in the host).
   $effect(() => {
     void cluster.id;
     tab = 'overview';
+    replayPrefill = null;
   });
 
   // Warm the SSH tunnel (if any) in the background so the pill flips to "Tunnel"
@@ -100,13 +108,13 @@
       {#if tab === 'overview'}
         <OverviewTab clusterId={cluster.id} />
       {:else if tab === 'topics'}
-        <TopicsTab {cluster} />
+        <TopicsTab {cluster} onreplayfrom={openReplayFrom} />
       {:else if tab === 'groups'}
         <GroupsTab {cluster} />
       {:else if tab === 'schema'}
         <SchemaTab {cluster} />
       {:else if tab === 'replay'}
-        <ReplayPanel {cluster} />
+        <ReplayPanel {cluster} prefill={replayPrefill} />
       {:else if tab === 'alerts'}
         <LagAlertsPanel {cluster} />
       {/if}

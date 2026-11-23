@@ -31,6 +31,9 @@
   import { acceptFinding, falsePositiveFinding } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toastError } from '../../lib/toastError';
+  import { git } from '../../lib/stores/git.svelte';
+  import { router } from '../../lib/router.svelte';
+  import { buildIdeRoute } from './gitQuickJump';
 
   interface Props {
     reviewId: string;
@@ -62,6 +65,7 @@
   // Initial + reviewId-change load.
   $effect(() => {
     void load(reviewId);
+    return () => { gen++; };
   });
 
   // WS bus: refetch when a finding under THIS review changed / an action started.
@@ -77,10 +81,14 @@
   // Generation guard: switching reviews quickly must never let the previous
   // review's (slower) answer land on this board.
   let gen = 0;
+  const detailGen = new Map<string, number>();
   async function load(rid: string): Promise<void> {
     const mine = ++gen;
     loading = true;
     selected = {};
+    detailLoading = {};
+    detailError = {};
+    detailGen.clear();
     try {
       const next = await listFindings(rid);
       if (mine !== gen) return;
@@ -123,18 +131,23 @@
   }
 
   async function loadDetail(id: string, silent = false): Promise<void> {
+    const boardMine = gen;
+    const req = (detailGen.get(id) ?? 0) + 1;
+    detailGen.set(id, req);
+    const current = () => boardMine === gen && detailGen.get(id) === req;
     if (!silent) detailLoading = { ...detailLoading, [id]: true };
     try {
       const d = await getFinding(id);
+      if (!current()) return;
       details = { ...details, [id]: d };
       patchFinding(d.finding);
       if (detailError[id]) detailError = { ...detailError, [id]: false };
     } catch {
       // Non-blocking — the card still shows the summary fields it already has;
       // a silent (WS-driven) refresh failure keeps the last good timeline.
-      if (!silent) detailError = { ...detailError, [id]: true };
+      if (!silent && current()) detailError = { ...detailError, [id]: true };
     } finally {
-      if (!silent) detailLoading = { ...detailLoading, [id]: false };
+      if (!silent && current()) detailLoading = { ...detailLoading, [id]: false };
     }
   }
 
@@ -335,6 +348,20 @@
           <div class="fb-meta">
             {#if f.category}<span class="fb-cat">{f.category}</span>{/if}
             {#if loc(f)}<span class="mono fb-loc">{loc(f)}</span>{/if}
+            {#if f.path}
+              {@const fRepoPath = git.allRepos.find((r) => r.id === f.repo_id)?.path ?? git.repos.find((r) => r.id === f.repo_id)?.path}
+              {@const fIdeRoute = buildIdeRoute(fRepoPath, f.path, f.line)}
+              {#if fIdeRoute}
+                <button
+                  type="button"
+                  class="btn small ghost fb-ide-btn"
+                  title="Open {f.path}{f.line ? `:${f.line}` : ''} in IDE"
+                  onclick={() => router.go(fIdeRoute)}
+                >
+                  <Icon name="ide" size={12} /> Open in IDE
+                </button>
+              {/if}
+            {/if}
             {#if f.reviewer}<span class="dim fb-reviewer">· {f.reviewer}</span>{/if}
             {#if f.occurrence_count > 1}<span class="dim">· seen {f.occurrence_count} times</span>{/if}
             <span class="grow"></span>
@@ -390,10 +417,7 @@
                 {:else if detail}
                   <p class="dim" style="font-size: var(--fs-xs)">No events yet.</p>
                 {:else if detailError[f.id]}
-                  <p class="fb-tl-error" role="alert">
-                    Couldn’t load the timeline ·
-                    <button class="btn small ghost" onclick={() => void loadDetail(f.id)}>Retry</button>
-                  </p>
+                  <LoadState variant="compact" what="the timeline" error="Try again." empty onretry={() => void loadDetail(f.id)} />
                 {/if}
               </div>
 
@@ -503,10 +527,10 @@
     font-size: var(--fs-xs);
   }
   .fb-cat {
-    background: var(--accent-soft);
-    color: var(--accent-text);
+    background: var(--surface-2);
+    color: var(--text-dim);
     border-radius: var(--radius-s);
-    padding: 1px 6px;
+    padding: 2px 6px;
     text-transform: capitalize;
   }
   .fb-loc {
@@ -556,7 +580,6 @@
     overflow-x: auto;
     max-height: 200px;
   }
-  .fb-tl-error { margin: 0; font-size: var(--fs-xs); color: var(--danger); display: flex; align-items: center; gap: 6px; }
   .fb-timeline { list-style: none; margin: 0; padding: 0; }
   .fb-event { font-size: var(--fs-xs); line-height: 1.55; display: flex; gap: 6px; flex-wrap: wrap; }
   .fb-event-kind { font-weight: 600; text-transform: capitalize; }

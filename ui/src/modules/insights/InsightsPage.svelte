@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { announce } from '../../lib/announce.svelte';
+  import { announce, focusAppContent } from '../../lib/announce.svelte';
   import { untrack } from 'svelte';
   import { plural } from '../../lib/plural';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -321,7 +321,7 @@
         `<iframe sandbox="allow-scripts allow-popups" srcdoc="${attr}"></iframe>`;
       const url = URL.createObjectURL(new Blob([wrapper], { type: 'text/html' }));
       window.open(url, '_blank', 'noopener');
-      // Not revoked: the new tab needs the URL; it's released when the tab closes.
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
     } catch (e) {
       toastError('Couldn’t open the report window', e);
     }
@@ -476,7 +476,7 @@
               {:else}
                 <button class="btn small" onclick={() => router.go('skills-eval/bundled')}>Open Skills Lab → Bundled</button>
               {/if}
-              <button class="icon-btn" onclick={() => { s.runFailReason = null; s.runFailKind = null; s.endedRunId = null; }} aria-label="Dismiss" title="Dismiss"><Icon name="x" size={14} /></button>
+              <button class="icon-btn" onclick={() => { s.runFailReason = null; s.runFailKind = null; s.endedRunId = null; void focusAppContent(); }} aria-label="Dismiss" title="Dismiss"><Icon name="x" size={14} /></button>
             </div>
           {/if}
           {#if s.pollRunId}
@@ -512,9 +512,9 @@
           icon="gauge"
           title="No insight reports yet"
           body={`An agent reads your recent sessions and writes an action-first report: what’s working, what’s slowing you down, and five things to change. ${emptySchedule.text}`.trim()}
-          actionLabel={canRun ? (s.running ? 'Starting…' : "Run yesterday’s report") : undefined}
+          actionLabel={canRun && !s.pollRunId ? (s.running ? 'Starting…' : "Run yesterday’s report") : undefined}
           actionIcon="play"
-          onaction={canRun ? () => void runNow('day:1') : undefined}
+          onaction={canRun && !s.pollRunId ? () => void runNow('day:1') : undefined}
         >
           <button class="btn ghost" onclick={() => router.go('settings/insights')}>{emptySchedule.offerTurnOn ? 'Turn on scheduled reports' : 'Schedule settings'}</button>
         </EmptyState>

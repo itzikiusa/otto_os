@@ -229,6 +229,16 @@ pub async fn best_effort_shutdown_socket(socket_path: &Path) {
         }
         _ => None,
     };
+    // Snapshot `(pid, lstart)` BEFORE requesting shutdown so a fallback kill
+    // after the grace window can never target a recycled PID.
+    let before_cpid_lstart = match pids.and_then(|(_, c)| c) {
+        Some(p) if p > 1 && p != std::process::id() => process_lstart(p).await.map(|s| (p, s)),
+        _ => None,
+    };
+    let before_hpid_lstart = match pids.and_then(|(h, _)| h) {
+        Some(p) if p > 1 && p != std::process::id() => process_lstart(p).await.map(|s| (p, s)),
+        _ => None,
+    };
     const SHUTDOWN_GRACE_MS: u64 = 500;
     let _ = write_frame(
         &mut write_half,
@@ -238,23 +248,21 @@ pub async fn best_effort_shutdown_socket(socket_path: &Path) {
     )
     .await;
     let _ = write_half.shutdown().await;
-    if let Some((hpid, cpid)) = pids {
+    if before_cpid_lstart.is_some() || before_hpid_lstart.is_some() {
         tokio::time::sleep(Duration::from_millis(SHUTDOWN_GRACE_MS + 150)).await;
-        if let Some(cpid) = cpid.filter(|&p| p > 1 && p != std::process::id()) {
-            // SAFETY: `kill(pid, 0)` only probes process existence.
-            if unsafe { libc::kill(cpid as libc::pid_t, 0) == 0 } {
+        if let Some((cpid, expected)) = before_cpid_lstart {
+            if process_lstart(cpid).await.as_deref() == Some(expected.as_str()) {
                 crate::process::signal_group(cpid, libc::SIGKILL);
             }
         }
-        if let Some(hpid) = hpid.filter(|&p| p > 1 && p != std::process::id()) {
-            // SAFETY: `kill(pid, 0)` only probes process existence.
-            if unsafe { libc::kill(hpid as libc::pid_t, 0) == 0 } {
-                // SAFETY: `hpid` came directly from the connected live holder's HELLO frame.
+        if let Some((hpid, expected)) = before_hpid_lstart {
+            if process_lstart(hpid).await.as_deref() == Some(expected.as_str()) {
+                // SAFETY: verified identical `(pid, lstart)` to the connected holder.
                 unsafe {
                     let _ = libc::kill(hpid as libc::pid_t, libc::SIGTERM);
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
-                if unsafe { libc::kill(hpid as libc::pid_t, 0) == 0 } {
+                if process_lstart(hpid).await.as_deref() == Some(expected.as_str()) {
                     unsafe {
                         let _ = libc::kill(hpid as libc::pid_t, libc::SIGKILL);
                     }
@@ -262,6 +270,22 @@ pub async fn best_effort_shutdown_socket(socket_path: &Path) {
             }
         }
     }
+}
+
+/// Query a process's `lstart` via `ps` so PID-reuse checks match `descendants.rs`.
+async fn process_lstart(pid: u32) -> Option<String> {
+    let mut cmd = tokio::process::Command::new("ps");
+    cmd.args(["-o", "lstart=", "-p", &pid.to_string()])
+        .kill_on_drop(true);
+    let out = tokio::time::timeout(Duration::from_secs(2), cmd.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!s.is_empty()).then_some(s)
 }
 
 /// Attach to an existing `runtime-holder` socket during daemon boot recovery.

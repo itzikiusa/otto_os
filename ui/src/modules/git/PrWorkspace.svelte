@@ -24,6 +24,7 @@
   import DockedDrawer from '../../lib/components/DockedDrawer.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { RESIZE_TITLE_VERTICAL } from '../../lib/paneResizer';
+  import { nextTabAfterClose } from './gitUiHelpers';
 
   interface Props {
     repoId: string;
@@ -164,11 +165,29 @@
     mobileList = false;
   }
 
+  let prwEl = $state<HTMLDivElement | null>(null);
+  let tablistEl = $state<HTMLElement | null>(null);
+  let findPrBtnEl = $state<HTMLButtonElement | null>(null);
+
+  function closeTab(n: number): void {
+    const nextFocus = nextTabAfterClose(tabs.open, n);
+    prWorkspace.close(repoId, n);
+    requestAnimationFrame(() => {
+      if (nextFocus !== null) {
+        tablistEl?.querySelector<HTMLElement>(`[data-pr-tab="${nextFocus}"]`)?.focus();
+      } else if (findPrBtnEl?.isConnected) {
+        findPrBtnEl.focus();
+      } else {
+        prwEl?.querySelector<HTMLInputElement>('.pr-search')?.focus();
+      }
+    });
+  }
+
   function tabMenu(e: MouseEvent, n: number): void {
     ctxMenu.show(e, [
-      { label: 'Close', icon: 'x', action: () => prWorkspace.close(repoId, n) },
+      { label: 'Close', icon: 'x', action: () => closeTab(n) },
       { label: 'Close others', disabled: tabs.open.length < 2, action: () => prWorkspace.closeOthers(repoId, n) },
-      { label: 'Close all', action: () => prWorkspace.closeAll(repoId) },
+      { label: 'Close all', action: () => { prWorkspace.closeAll(repoId); requestAnimationFrame(() => findPrBtnEl?.focus()); } },
     ]);
   }
   function onTabKeydown(e: KeyboardEvent, n: number): void {
@@ -178,20 +197,20 @@
       const d = (e.key === 'ArrowRight') !== (getComputedStyle(e.currentTarget as Element).direction === 'rtl') ? 1 : -1;
       const next = tabs.open[(i + d + tabs.open.length) % tabs.open.length];
       prWorkspace.activate(repoId, next);
-      requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-pr-tab="${next}"]`)?.focus());
+      requestAnimationFrame(() => tablistEl?.querySelector<HTMLElement>(`[data-pr-tab="${next}"]`)?.focus());
     } else if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
-      prWorkspace.close(repoId, n);
+      closeTab(n);
     }
   }
   /** "+": bring the list back and put the cursor in its search box. */
   function focusSearch(): void {
     if (listHidden) toggleList();
-    requestAnimationFrame(() => document.querySelector<HTMLInputElement>('.prw .pr-search')?.focus());
+    requestAnimationFrame(() => prwEl?.querySelector<HTMLInputElement>('.pr-search')?.focus());
   }
 </script>
 
-<div class="prw" class:m-list={mobileList || tabs.active === null} class:agent-max={agentMaxOn}
+<div class="prw" bind:this={prwEl} class:m-list={mobileList || tabs.active === null} class:agent-max={agentMaxOn}
   class:list-hidden={!agentMaxOn && (listHidden || (tabs.active !== null && maximized))} style="--listw:{listW}px">
   {#if agentMaxOn || !(listHidden || (tabs.active !== null && maximized))}
     <section class="prw-list" aria-label="Pull requests">
@@ -250,7 +269,7 @@
   <section class="prw-detail" aria-label="Open pull requests">
     <div class="prw-tabs">
       <button class="prw-icon prw-back" aria-label="Back to the list" title="Back to the list" onclick={() => (mobileList = true)}><Icon name="chevronLeft" size={14} /></button>
-      <nav class="prw-tablist" aria-label="Open pull requests">
+      <nav class="prw-tablist" aria-label="Open pull requests" bind:this={tablistEl}>
         {#each tabs.open as n (n)}
           {@const title = titleOf(n)}
           <div class="prw-tab" class:active={tabs.active === n}>
@@ -260,7 +279,7 @@
               aria-current={tabs.active === n ? 'page' : undefined}
               title={title ? `#${n} ${title}` : `#${n}`}
               onclick={() => prWorkspace.activate(repoId, n)}
-              onauxclick={(e) => { if (e.button === 1) prWorkspace.close(repoId, n); }}
+              onauxclick={(e) => { if (e.button === 1) closeTab(n); }}
               oncontextmenu={(e) => tabMenu(e, n)}
               onkeydown={(e) => onTabKeydown(e, n)}
             >
@@ -268,13 +287,13 @@
               <span class="prw-tab-num">#{n}</span>
               {#if title}<span class="prw-tab-title">{title}</span>{/if}
             </button>
-            <button class="prw-tab-x" aria-label="Close #{n}" title="Close #{n}" onclick={() => prWorkspace.close(repoId, n)}>
+            <button class="prw-tab-x" aria-label="Close #{n}" title="Close #{n}" onclick={() => closeTab(n)}>
               <Icon name="x" size={12} />
             </button>
           </div>
         {/each}
       </nav>
-      <button class="prw-icon" aria-label="Find a pull request" title="Find a pull request" onclick={focusSearch}><Icon name="plus" size={13} /></button>
+      <button class="prw-icon" bind:this={findPrBtnEl} aria-label="Find a pull request" title="Find a pull request" onclick={focusSearch}><Icon name="plus" size={13} /></button>
       {#if narrow && tabs.active !== null}
         <button class="prw-icon prw-agent-open" aria-label={agentLabel} title={agentLabel} onclick={() => (agentSheet = true)}
           data-testid="pr-agent-open" data-status={agentLive ?? 'idle'}>

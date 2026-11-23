@@ -5,6 +5,7 @@
 // show parse errors inline without crashing the canvas.
 
 import { createRenderQueue, isStaleResult } from './renderQueue';
+import { MERMAID_SECURE_KEYS, sanitizeMermaidSvg } from './mermaidSanitize';
 
 type MermaidApi = {
   initialize: (cfg: Record<string, unknown>) => void;
@@ -38,6 +39,9 @@ function config(dark: boolean): Record<string, unknown> {
     startOnLoad: false,
     theme: dark ? 'dark' : 'neutral',
     securityLevel: 'strict',
+    // Lock `themeCSS` / font / themeVariables against diagram `%%{init:…}%%`
+    // directives so untrusted diagrams cannot inject global CSS into the app.
+    secure: [...MERMAID_SECURE_KEYS],
     fontFamily: 'ui-sans-serif, -apple-system, system-ui, sans-serif',
     flowchart: { useMaxWidth: true, htmlLabels: true, curve: 'basis', padding: 16 },
     sequence: {
@@ -58,7 +62,12 @@ function config(dark: boolean): Record<string, unknown> {
 
 /** Resolve the mermaid module (lazy + memoized) initialized for `dark`. */
 async function load(dark: boolean): Promise<MermaidApi> {
-  _loading ??= import('mermaid').then((m) => (_mermaid = m.default as unknown as MermaidApi));
+  _loading ??= import('mermaid')
+    .then((m) => (_mermaid = m.default as unknown as MermaidApi))
+    .catch((e: unknown) => {
+      _loading = null;
+      throw e;
+    });
   const api = _mermaid ?? (await _loading);
   if (_dark !== dark) {
     api.initialize(config(dark));
@@ -95,7 +104,12 @@ async function renderNow(id: string, src: string, dark: boolean): Promise<{ svg?
     // half-rendered "Syntax error in graph" SVG.
     await api.parse(text);
     const { svg } = await api.render(id, text);
-    return { svg };
+    // Belt-and-braces: every caller injects this via {@html} into the main app
+    // document, so purify SVG markup and CSSOM-scope `<style>` centrally.
+    const purify = (await import('dompurify')).default;
+    const clean = sanitizeMermaidSvg(svg, purify);
+    if (!clean) return { error: 'Mermaid returned an unexpected render payload' };
+    return { svg: clean };
   } catch (e) {
     // Mermaid throws strings or Error objects depending on the failure path.
     const msg = e instanceof Error ? e.message : String(e);

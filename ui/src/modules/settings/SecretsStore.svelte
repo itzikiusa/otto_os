@@ -24,7 +24,7 @@
   let securing = $state(false);
   let resetting = $state(false);
   let actionError = $state('');
-  const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+  const msg = (e: unknown): string => loadErrorText(e);
 
   async function load() {
     loading = true;
@@ -166,7 +166,7 @@
       </div>
     {/if}
     {#if actionError}
-      <p class="error" role="alert">{actionError}</p>
+      <p class="error" use:announceShown={{ text: actionError, assertive: true }}>{actionError}</p>
     {/if}
   {/if}
 </section>

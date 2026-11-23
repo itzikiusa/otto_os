@@ -191,3 +191,57 @@ export function applyLeftHunkToRight(
   const keepTrailing = rightText ? rightParsed.trailingNewline : leftParsed.trailingNewline;
   return keepTrailing ? `${nextLines.join('\n')}\n` : nextLines.join('\n');
 }
+
+/** Debounces inline edits in `IdeCompareDiffPane`, binding each scheduled write to the
+ *  exact `destPath` that was being edited so switching files or closing the modal can
+ *  never overwrite another file or leak a dangling timer. */
+export class CompareEditDebouncer {
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private pending: { destPath: string; text: string } | null = null;
+  private readonly onApply: (text: string, reason: string, destPath: string) => void | Promise<void>;
+  private readonly delayMs: number;
+
+  constructor(
+    onApply: (text: string, reason: string, destPath: string) => void | Promise<void>,
+    delayMs = 320,
+  ) {
+    this.onApply = onApply;
+    this.delayMs = delayMs;
+  }
+
+  schedule(destPath: string, text: string): void {
+    if (this.pending && this.pending.destPath !== destPath) {
+      this.flush();
+    }
+    if (this.timer) clearTimeout(this.timer);
+    this.pending = { destPath, text };
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      const item = this.pending;
+      this.pending = null;
+      if (item) void this.onApply(item.text, 'Edited Current', item.destPath);
+    }, this.delayMs);
+  }
+
+  flush(): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    const item = this.pending;
+    this.pending = null;
+    if (item) void this.onApply(item.text, 'Edited Current', item.destPath);
+  }
+
+  cancel(): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    this.pending = null;
+  }
+
+  hasPending(): boolean {
+    return this.pending !== null;
+  }
+}

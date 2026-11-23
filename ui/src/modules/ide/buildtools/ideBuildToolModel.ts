@@ -1,6 +1,8 @@
 // Maven & Gradle multi-module model loader, fallback manifest parser, and goal runner.
 import { api, ApiError } from '../../../lib/api/client';
+import type { IdeMobileProject } from '../../../lib/api/types';
 import { shortenHomePath } from '../../../lib/homePath';
+import { ideDevices } from '../devices/ideDevicesState.svelte';
 import { normalizeRootPath } from '../shell/ideProjectHelpers';
 import {
   ide,
@@ -16,6 +18,7 @@ export interface LoadedBuildToolWorkspace {
   profiles: IdeBuildToolProfile[];
   springProfiles: string[];
   modules: IdeBuildToolModule[];
+  mobileProjects: IdeMobileProject[];
 }
 
 export const MAVEN_LIFECYCLE = ['clean', 'validate', 'compile', 'test', 'package', 'verify', 'install', 'site', 'deploy'];
@@ -345,9 +348,12 @@ export async function loadBuildToolWorkspaceModel(): Promise<LoadedBuildToolWork
       spring_profiles?: string[];
       projects?: RawBuildToolProject[];
       modules?: RawBuildToolProject[];
+      mobile_projects?: IdeMobileProject[];
     }>('/ide/build-tools/model', { target: ide.targetPayload, roots });
+    const mobileProjects = resp.mobile_projects ?? [];
+    ideDevices.setMobileProjects(mobileProjects);
     const rawList = resp.projects ?? resp.modules ?? [];
-    if (rawList.length > 0 || resp.has_maven || resp.has_gradle) {
+    if (rawList.length > 0 || resp.has_maven || resp.has_gradle || mobileProjects.length > 0) {
       const fallbackTool: 'maven' | 'gradle' = resp.has_maven ? 'maven' : resp.has_gradle ? 'gradle' : (resp.tool ?? 'maven');
       const modules = rawList.map((p) => normalizeRawProject(p, fallbackTool));
       const tool: 'maven' | 'gradle' = resp.has_maven ? 'maven' : resp.has_gradle ? 'gradle' : (modules[0]?.tool ?? fallbackTool);
@@ -367,9 +373,11 @@ export async function loadBuildToolWorkspaceModel(): Promise<LoadedBuildToolWork
           });
         }
       }
-      if (modules.length > 0 || resp.has_maven || resp.has_gradle) {
-        ide.detectedBuildToolOverride = tool;
-        return { tool, profiles: buildProfiles, springProfiles: [...springSet], modules };
+      if (modules.length > 0 || resp.has_maven || resp.has_gradle || mobileProjects.length > 0) {
+        if (modules.length > 0 || resp.has_maven || resp.has_gradle) {
+          ide.detectedBuildToolOverride = tool;
+        }
+        return { tool, profiles: buildProfiles, springProfiles: [...springSet], modules, mobileProjects };
       }
     }
   } catch (e) {
@@ -392,7 +400,78 @@ export async function loadBuildToolWorkspaceModel(): Promise<LoadedBuildToolWork
     profiles: [...profilesMap.values()],
     springProfiles: [...springSet],
     modules,
+    mobileProjects: [],
   };
+}
+
+export function executeMobileProjectTask(proj: IdeMobileProject, task: string): void {
+  const parts = task.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return;
+  if (proj.framework === 'flutter') {
+    void ide.startRun({
+      adhoc: {
+        name: `${proj.name} [flutter ${task}]`,
+        runner: 'flutter',
+        command: 'flutter',
+        cwd: proj.root_dir,
+        args: parts,
+        env_overrides: {},
+      },
+    });
+    return;
+  }
+  if (proj.framework === 'android') {
+    void ide.startRun({
+      adhoc: {
+        name: `${proj.name} [${task}]`,
+        runner: 'gradle',
+        cwd: proj.root_dir,
+        args: parts,
+        env_overrides: {},
+      },
+    });
+    return;
+  }
+  if (proj.framework === 'xcode') {
+    const scheme = proj.targets[0] ?? proj.name;
+    const isWs = proj.manifest_path.endsWith('.xcworkspace');
+    const bundle = ideBasename(proj.manifest_path);
+    void ide.startRun({
+      adhoc: {
+        name: `${proj.name} [xcodebuild ${task}]`,
+        runner: 'xcode',
+        command: 'xcodebuild',
+        cwd: proj.root_dir,
+        args: [isWs ? '-workspace' : '-project', bundle, '-scheme', scheme, '-sdk', 'iphonesimulator', ...parts],
+        env_overrides: {},
+      },
+    });
+    return;
+  }
+  if (proj.framework === 'swiftpm') {
+    void ide.startRun({
+      adhoc: {
+        name: `${proj.name} [swift ${task}]`,
+        runner: 'xcode',
+        command: 'swift',
+        cwd: proj.root_dir,
+        args: parts,
+        env_overrides: {},
+      },
+    });
+    return;
+  }
+  const toolPrefix = proj.framework === 'expo' ? ['expo'] : proj.framework === 'capacitor' ? ['cap'] : ['react-native'];
+  void ide.startRun({
+    adhoc: {
+      name: `${proj.name} [${task}]`,
+      runner: 'react_native',
+      command: 'npx',
+      cwd: proj.root_dir,
+      args: [...toolPrefix, ...parts],
+      env_overrides: {},
+    },
+  });
 }
 
 

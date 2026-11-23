@@ -61,6 +61,7 @@ fn new(aid: &str, body: &str, v: Option<&crate::types::DesignVersion>) -> NewCom
         session_id: None,
         body: body.into(),
         pin: None,
+        pin_3d: None,
     }
 }
 
@@ -288,5 +289,121 @@ async fn brief_lines_label_open_threads_with_version_and_pin() {
     assert_eq!(
         lines[1],
         "[C2] on the draft · no pin (the whole design) · Ana: Whole page feels busy"
+    );
+}
+
+#[tokio::test]
+async fn pin_3d_polygon_validation_roundtrip_filter_and_brief() {
+    // Reject invalid selection kinds, non-finite coords, missing polygon face, and over-cap faces.
+    let bad_kind = CommentPin3d {
+        selection_kind: "voxel".into(),
+        mesh_name: None,
+        object_id: None,
+        face_index: Some(1),
+        face_indices: vec![],
+        vertices: None,
+        position: [0.0, 0.0, 0.0],
+        normal: None,
+        camera: None,
+    };
+    assert!(clean_pin_3d(Some(bad_kind)).is_err());
+
+    let bad_nan = CommentPin3d {
+        selection_kind: "point".into(),
+        mesh_name: None,
+        object_id: None,
+        face_index: None,
+        face_indices: vec![],
+        vertices: None,
+        position: [f32::NAN, 0.0, 0.0],
+        normal: None,
+        camera: None,
+    };
+    assert!(clean_pin_3d(Some(bad_nan)).is_err());
+
+    let bad_poly = CommentPin3d {
+        selection_kind: "polygon".into(),
+        mesh_name: Some("Helmet".into()),
+        object_id: None,
+        face_index: None,
+        face_indices: vec![],
+        vertices: None,
+        position: [0.0, 1.0, 0.0],
+        normal: None,
+        camera: None,
+    };
+    assert!(clean_pin_3d(Some(bad_poly)).is_err());
+
+    // Valid polygon cluster with deduplication + camera bookmark.
+    let valid = clean_pin_3d(Some(CommentPin3d {
+        selection_kind: "REGION".into(),
+        mesh_name: Some("  HeroHelmet  ".into()),
+        object_id: Some("mesh_0".into()),
+        face_index: Some(412),
+        face_indices: vec![412, 413, 412, 414],
+        vertices: Some([10, 11, 12]),
+        position: [0.12, 1.45, -0.08],
+        normal: Some([0.0, 0.71, 0.71]),
+        camera: Some(CameraBookmark3d {
+            pos: [1.8, 1.9, 2.2],
+            target: [0.12, 1.45, -0.08],
+            fov: Some(45.0),
+        }),
+    }))
+    .unwrap()
+    .unwrap();
+    assert_eq!(valid.selection_kind, "region");
+    assert_eq!(valid.mesh_name.as_deref(), Some("HeroHelmet"));
+    assert_eq!(valid.face_indices, vec![412, 413, 414]);
+
+    let s = store().await;
+    artifact(&s, "M3D").await;
+    let v1 = version(&s, "M3D", "glb1").await;
+    let mut c1 = new("M3D", "Smooth out the visor bevel", Some(&v1));
+    c1.pin_3d = Some(valid.clone());
+    let thread = s.insert_comment(c1).await.unwrap();
+    assert_eq!(thread.pin_3d, Some(valid));
+
+    let mut reply = new("M3D", "Will subdivide these 3 faces", Some(&v1));
+    reply.parent_id = Some(thread.id.clone());
+    s.insert_comment(reply).await.unwrap();
+
+    let mut other = new("M3D", "Scale the hilt down", Some(&v1));
+    other.pin_3d = Some(CommentPin3d {
+        selection_kind: "mesh".into(),
+        mesh_name: Some("SwordHilt".into()),
+        object_id: None,
+        face_index: None,
+        face_indices: vec![],
+        vertices: None,
+        position: [0.0, 0.5, 0.0],
+        normal: None,
+        camera: None,
+    });
+    s.insert_comment(other).await.unwrap();
+
+    // Filter by mesh_name brings the matching thread AND its reply, excluding other meshes.
+    let filtered = s
+        .list_comments(
+            "M3D",
+            &CommentFilter {
+                mesh_name: Some("HeroHelmet".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(filtered.len(), 2);
+    assert_eq!(filtered[0].body, "Smooth out the visor bevel");
+    assert_eq!(filtered[1].body, "Will subdivide these 3 faces");
+
+    // Brief lines include the 3D polygon metadata for Design Assist.
+    let lines = brief_for(&s, "M3D").await;
+    assert_eq!(lines.len(), 2);
+    assert!(
+        lines[0].contains(
+            "3D region on mesh \"HeroHelmet\" face #412 (+2 faces) at (0.12, 1.45, -0.08)"
+        ),
+        "{lines:?}"
     );
 }

@@ -17,8 +17,8 @@ use otto_state::WorkspacesRepo;
 
 pub use cache::{AuthCache, NoopGrantsInvalidator};
 pub use passwords::{
-    hash_password, validate_password, verify_password, verify_password_bounded, VerifySaturated,
-    MIN_PASSWORD_LEN,
+    hash_password, hash_password_bounded, validate_password, verify_password,
+    verify_password_bounded, VerifySaturated, MIN_PASSWORD_LEN,
 };
 pub use resource_access::ResourceAccess;
 pub use tokens::{AuthRepo, IMPERSONATION_TOKEN_TTL_MINS};

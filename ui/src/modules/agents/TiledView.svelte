@@ -13,6 +13,7 @@
   // attached. Off-screen / over-budget tiles render a lightweight placeholder
   // ("click to attach") and open no socket. Demoting a tile unmounts its
   // SessionView → Terminal's cleanup closes the WS → memory is reclaimed.
+  import { onDestroy } from 'svelte';
   import SessionView from './SessionView.svelte';
   import { EMBED_SCROLLBACK } from '../../lib/components/termFlow';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -160,12 +161,18 @@
     const clamped = Math.min(p.span - lo, Math.max(lo, pos));
     return (clamped / p.span) * p.total;
   }
+  let stopActiveDrag: (() => void) | null = null;
+  onDestroy(() => {
+    stopActiveDrag?.();
+    stopActiveDrag = null;
+  });
   /** Drag `col` (the divider after column k-1 in row r) and/or `row` (the
    *  divider after row k-1) — both at once from a tile's corner grip. */
   function startDrag(e: PointerEvent, col: PairDrag | null, row: PairDrag | null): void {
     if (e.button !== 0 || (!col && !row)) return;
     e.preventDefault();
     e.stopPropagation();
+    stopActiveDrag?.();
     const shape = shapeKey;
     resizing = true;
     const move = (ev: PointerEvent): void => {
@@ -175,13 +182,17 @@
       if (row) row.apply(t, splitOf(row, ev.clientY - row.start));
       tracks = { ...tracks, [shape]: t };
     };
-    const up = (): void => {
+    const cleanup = (persist: boolean): void => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
       window.removeEventListener('pointercancel', up);
+      if (stopActiveDrag === cancel) stopActiveDrag = null;
       resizing = false;
-      saveTracks();
+      if (persist) saveTracks();
     };
+    const up = (): void => cleanup(true);
+    const cancel = (): void => cleanup(false);
+    stopActiveDrag = cancel;
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
     window.addEventListener('pointercancel', up);

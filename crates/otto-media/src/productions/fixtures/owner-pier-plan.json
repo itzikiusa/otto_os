@@ -1,0 +1,209 @@
+{
+ "title": "Stay Close to the Light",
+ "items": [
+  {
+   "id": "keeper",
+   "kind": "character",
+   "name": "Robot lighthouse keeper",
+   "description": "The tall robot has rusty shoulders and kind, tired eyes.",
+   "enabled": true,
+   "details": {
+    "prompt": "A tall, broad robot with faded blue iron plates, salt-white streaks and orange rust around the rivets, long arms, rounded fingers, heavy feet and two kind amber eyes under a low brow.",
+    "voice": "He speaks slowly in a deep, tired voice, with a gentle pause between sentences.",
+    "size_m": 2.0,
+    "moves": [
+     "idle"
+    ],
+    "holds": [
+     {
+      "item": "lantern",
+      "socket": "right_hand"
+     }
+    ]
+   },
+   "status": "done",
+   "progress_pct": 100,
+   "result": {
+    "artifact_id": "01M7X6B2AHPH3F3M4ZDGRZ806P",
+    "version_id": "01M7X6CVZPRX1GHK60BTYK6S12"
+   }
+  },
+  {
+   "id": "fox",
+   "kind": "character",
+   "name": "Little red fox",
+   "description": "The little red fox has black paws and a fluffy tail with a white tip.",
+   "enabled": true,
+   "details": {
+    "prompt": "A small red fox with russet fur, black paws, a white chin, pointed ears, bright brown eyes and a thick white-tipped tail.",
+    "voice": "Quick, bright and cheeky, like a friend trying to hide a smile.",
+    "size_m": 0.38,
+    "moves": [
+     "idle"
+    ]
+   },
+   "status": "failed",
+   "progress_pct": 40,
+   "message": "The Little red fox could not be given a skeleton: bone_names failed (exit 1): rigged.glb: no humanoid body found in the skeleton (legs too short to find the feet: [['bone_22', 'bone_23', 'bone_24', 'bone_25'], ['bone_21']])",
+   "result": {
+    "artifact_id": "01M7X733V41DKA4299DBFSS80B",
+    "version_id": "01M7X733W44YDBH6B1HS5ZZD2P"
+   }
+  },
+  {
+   "id": "pier",
+   "kind": "object",
+   "name": "Wooden pier",
+   "description": "Wet boards shine in the dark above thick wooden posts.",
+   "enabled": true,
+   "details": {
+    "prompt": "A wooden pier eight metres long and four metres wide, with a flat deck of wet planks on stout round posts. Deep blue-grey wood at the edges fades to pale fog-grey at the far end.",
+    "size_m": 8.0
+   },
+   "status": "done",
+   "progress_pct": 100,
+   "result": {
+    "artifact_id": "01M7X7FTVH0K0529P70AGW2W7F",
+    "version_id": "01M7X7FTWHFM8SVWN3JPBV9DRX"
+   }
+  },
+  {
+   "id": "lantern",
+   "kind": "object",
+   "name": "Glowing lantern",
+   "description": "Warm yellow light shines through the glass of a little metal lantern.",
+   "enabled": true,
+   "details": {
+    "prompt": "An old iron lantern with a curved carry handle, clear glass panes and a bright golden flame behind the glass, with a warm glow along the metal frame.",
+    "size_m": 0.34
+   },
+   "status": "done",
+   "progress_pct": 100,
+   "message": "Taken from the Otto Forge library.",
+   "result": {
+    "artifact_id": "01M7X7FVBPHA6M3YPXER0RWJFK",
+    "version_id": "01M7X7FVC9K7RMG1CYY3YR3KTC"
+   }
+  },
+  {
+   "id": "crate",
+   "kind": "object",
+   "name": "Wooden crate",
+   "description": "This low wooden box has a wide, flat lid for the fox.",
+   "enabled": true,
+   "details": {
+    "prompt": "A closed wooden shipping crate, one metre long, with a broad flat plank lid, worn corners and dark nail heads.",
+    "size_m": 1.0
+   },
+   "status": "done",
+   "progress_pct": 100,
+   "message": "Taken from the Otto Forge library.",
+   "result": {
+    "artifact_id": "01M7X7FVJWABYD8H5JR6B04TN4",
+    "version_id": "01M7X7FVKJY2KS2S4QH00JGX7R"
+   }
+  },
+  {
+   "id": "telescope",
+   "kind": "object",
+   "name": "Brass telescope",
+   "description": "A long brass telescope rests on three wooden legs.",
+   "enabled": true,
+   "details": {
+    "prompt": "An old brass telescope mounted on a sturdy three-legged wooden tripod, with a round glass lens, a narrow eyepiece and a brass hinge joining the tube to the stand.",
+    "size_m": 1.5
+   },
+   "status": "done",
+   "progress_pct": 100,
+   "result": {
+    "artifact_id": "01M7X7R163HGGK4XTXRPQHFWBV",
+    "version_id": "01M7X7R16REJEEPAMFA3XZCJJ3"
+   }
+  },
+  {
+   "id": "rope",
+   "kind": "object",
+   "name": "Coil of rope",
+   "description": "A thick rope lies in a big coil on the boards.",
+   "enabled": true,
+   "details": {
+    "prompt": "One big flat coil of thick tan dock rope, with rough twisted strands, damp patches and a short loose end.",
+    "size_m": 1.1
+   },
+   "status": "done",
+   "progress_pct": 100,
+   "message": "Taken from the Otto Forge library.",
+   "result": {
+    "artifact_id": "01M7X7R1NXB63SV9QW3YYEMAFB",
+    "version_id": "01M7X7R1PCG582HG5G2KF7VBWJ"
+   }
+  }
+ ],
+ "layout": [
+  {
+   "item": "pier",
+   "place": "center"
+  },
+  {
+   "item": "keeper",
+   "place": "center",
+   "facing": "fox",
+   "attach_to": {
+    "item": "pier",
+    "where": "middle of the deck"
+   }
+  },
+  {
+   "item": "lantern",
+   "place": "center",
+   "attach_to": {
+    "item": "keeper",
+    "where": "right_hand"
+   }
+  },
+  {
+   "item": "crate",
+   "place": "left",
+   "attach_to": {
+    "item": "pier",
+    "where": "on the deck beside the keeper"
+   }
+  },
+  {
+   "item": "fox",
+   "place": "left",
+   "facing": "keeper",
+   "attach_to": {
+    "item": "crate",
+    "where": "top"
+   }
+  },
+  {
+   "item": "telescope",
+   "place": "back-right",
+   "attach_to": {
+    "item": "pier",
+    "where": "back right of the deck"
+   }
+  },
+  {
+   "item": "rope",
+   "place": "front-right",
+   "attach_to": {
+    "item": "pier",
+    "where": "front right of the deck"
+   }
+  }
+ ],
+ "notes": [
+  "The fox stands still on the crate facing the taller keeper because Otto cannot make it sit or tip its head up.",
+  "The pier has dark blue boards and a pale grey far end to suggest a foggy night because Otto has no fog or night setting in this plan.",
+  "The keeper's warning, the fox's reply and its yip are listed in speaking order because the plan has no way to time them.",
+  "The Robot lighthouse keeper does not hold the Glowing lantern yet; they stand next to it for now.",
+  "I put the Robot lighthouse keeper on top of the Wooden pier because I can't find its middle of the deck yet.",
+  "I put the Glowing lantern on top of the Robot lighthouse keeper because I can't find its right_hand yet.",
+  "I put the Wooden crate on top of the Wooden pier because I can't find its on the deck beside the keeper yet.",
+  "I put the Brass telescope on top of the Wooden pier because I can't find its back right of the deck yet.",
+  "I put the Coil of rope on top of the Wooden pier because I can't find its front right of the deck yet."
+ ]
+}

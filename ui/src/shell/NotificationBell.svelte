@@ -355,13 +355,13 @@
 
           <div class="panel-list">
             {#if notifications.error && notifications.notices.length === 0}
-              <div class="panel-empty nb-error" role="alert">
-                <Icon name="warning" size={24} />
-                <p>Couldn’t load notifications</p>
-                <button class="btn small" onclick={() => notifications.load()} disabled={notifications.loading}>
-                  <Icon name="refresh" size={12} /> Retry
-                </button>
-              </div>
+              <LoadState
+                what="notifications"
+                variant="compact"
+                error={notifications.error}
+                empty
+                onretry={() => void notifications.load()}
+              />
             {:else if !notifications.settled}
               <div class="panel-empty">
                 <span class="spinner" style="--spinner-size: 18px" aria-hidden="true"></span>
@@ -608,12 +608,6 @@
   .panel-empty p {
     margin: 0;
     font-size: var(--fs-m);
-  }
-  .nb-error {
-    color: var(--danger);
-  }
-  .nb-error p {
-    color: var(--text);
   }
 
   .nb-section {

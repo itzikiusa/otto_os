@@ -54,3 +54,50 @@ export function edgeMid(s: WorkflowNode, t: WorkflowNode): { x: number; y: numbe
 export function condLabel(c: string): string {
   return c.length > 18 ? `${c.slice(0, 17)}…` : c;
 }
+
+/** Generate an edge id that cannot collide with any existing edge after deletions. */
+export function nextEdgeId(
+  edges: readonly { id: string }[],
+  source: string,
+  target: string,
+): string {
+  const used = new Set(edges.map((e) => e.id));
+  let n = edges.length;
+  let candidate = `e-${source}-${target}-${n}`;
+  while (used.has(candidate)) {
+    n += 1;
+    candidate = `e-${source}-${target}-${n}`;
+  }
+  return candidate;
+}
+
+/** Compute pan/zoom transform fitting every node's bounding box inside the canvas viewport. */
+export function computeFitTransform(
+  nodes: readonly WorkflowNode[],
+  viewW: number,
+  viewH: number,
+  pad = 40,
+): { scale: number; tx: number; ty: number } {
+  if (nodes.length === 0 || viewW <= 0 || viewH <= 0) {
+    return { scale: 1, tx: 40, ty: 20 };
+  }
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const n of nodes) {
+    const h = nodeHeight(n);
+    if (n.x < minX) minX = n.x;
+    if (n.y < minY) minY = n.y;
+    if (n.x + NODE_W > maxX) maxX = n.x + NODE_W;
+    if (n.y + h > maxY) maxY = n.y + h;
+  }
+  const graphW = Math.max(1, maxX - minX);
+  const graphH = Math.max(1, maxY - minY);
+  const availW = Math.max(80, viewW - pad * 2);
+  const availH = Math.max(80, viewH - pad * 2);
+  const scale = Math.min(1, Math.max(0.35, Math.min(availW / graphW, availH / graphH)));
+  const tx = Math.round((viewW - graphW * scale) / 2 - minX * scale);
+  const ty = Math.round((viewH - graphH * scale) / 2 - minY * scale);
+  return { scale, tx, ty };
+}

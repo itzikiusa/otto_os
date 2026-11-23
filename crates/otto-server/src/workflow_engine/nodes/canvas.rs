@@ -61,9 +61,9 @@ pub(in crate::workflow_engine) async fn execute(
     let rel = canvas_rel(run_id, &node.id, ext);
     let path = ctx.data_dir.join(&rel);
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = tokio::fs::create_dir_all(parent).await;
     }
-    let written = std::fs::write(&path, &diagram).is_ok();
+    let written = tokio::fs::write(&path, &diagram).await.is_ok();
     Ok((
         json!({ "scene_id": rel, "path": path.to_string_lossy(), "mode": mode,
                         "diagram": diagram, "written": written, "session_id": sid }),

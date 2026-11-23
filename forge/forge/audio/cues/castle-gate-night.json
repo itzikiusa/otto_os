@@ -1,0 +1,53 @@
+{
+  "scene": "A ruined castle gate at night: broken portcullis, wind through the stones, torches guttering, distant wolves.",
+  "seed": 101,
+  "ambience": [
+    {
+      "id": "gate-wind",
+      "prompt": "night wind howling through a ruined stone wall and broken battlements, low gusts",
+      "seconds": 20,
+      "loop": true
+    },
+    {
+      "id": "gate-night-life",
+      "prompt": "quiet night ambience, crickets and a distant owl, open countryside",
+      "seconds": 16,
+      "loop": true
+    }
+  ],
+  "spots": [
+    {
+      "id": "torch-flare",
+      "prompt": "a wall torch flame flaring and crackling in the wind",
+      "seconds": 3,
+      "variations": 2
+    },
+    {
+      "id": "portcullis-creak",
+      "prompt": "rusted iron portcullis chains creaking and groaning",
+      "seconds": 4,
+      "variations": 1
+    },
+    {
+      "id": "wolf-howl",
+      "prompt": "a single wolf howling in the distance at night",
+      "seconds": 5,
+      "variations": 1
+    },
+    {
+      "id": "gravel-steps",
+      "prompt": "boots walking on loose gravel and stone, four slow steps",
+      "seconds": 3,
+      "variations": 3
+    }
+  ],
+  "music": [
+    {
+      "id": "gate-theme",
+      "prompt": "dark fantasy ambient underscore, low cello drone, sparse harp, ominous and slow",
+      "seconds": 32,
+      "loop": true,
+      "bpm": 60
+    }
+  ]
+}

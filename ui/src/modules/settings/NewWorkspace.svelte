@@ -98,7 +98,7 @@
     gap: 8px;
     align-items: center;
   }
-  .path-row .input {
+  .path-row input {
     flex: 1;
   }
   .hint code {

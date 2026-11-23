@@ -43,7 +43,8 @@
   import StageAttach from './runtime/StageAttach.svelte';
   import { StageAttachments } from './runtime/stageAttachments.svelte';
   import { capsOf } from './runtime/attachmentSupport';
-  import { initialProvider, readStartPick, startHarnesses, writeStartPick, type StartLaunch, type StartMeta } from './startComposer';
+  import { readStartPick, writeStartPick } from '../../lib/startPick';
+  import { initialProvider, startHarnesses, type StartLaunch, type StartMeta } from './startComposer';
   import { MentionMenuView, StageSlashView } from './threadLazy.svelte';
   import { buildModeMenu } from './threadPickerMenus';
   import { harnessLabel } from './threadsHelpers';

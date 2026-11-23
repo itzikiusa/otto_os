@@ -186,6 +186,48 @@ impl AuthorityState {
     }
 }
 
+/// Constant-time string equality (does not short-circuit on first differing
+/// byte) for per-session ingest tokens.
+pub(crate) fn ct_eq_str(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let max_len = a.len().max(b.len());
+    let mut diff: u8 = if a.len() == b.len() { 0 } else { 1 };
+    for i in 0..max_len {
+        let xa = a.get(i).copied().unwrap_or(0);
+        let xb = b.get(i).copied().unwrap_or(0);
+        diff |= std::hint::black_box(xa ^ xb);
+    }
+    diff == 0
+}
+
+impl crate::SessionManager {
+    /// Verify an agent hook's ingest token for `session_id` in constant time.
+    pub fn verify_ingest_token(&self, session_id: &Id, token: &str) -> bool {
+        !token.is_empty()
+            && self
+                .ingest_tokens
+                .get(session_id)
+                .is_some_and(|t| ct_eq_str(t.as_str(), token))
+    }
+
+    /// Verify that `(room, member, epoch)` currently holds live terminal driver
+    /// authority for `id` without writing anything (used before persisting
+    /// room-paste snips to host disk).
+    pub async fn check_room_driver(
+        &self,
+        id: &Id,
+        room: &str,
+        member: &str,
+        epoch: u64,
+    ) -> Result<()> {
+        let permit = self.room_authority.entry(id).lock_owned().await;
+        let handle = self
+            .live_handle(id)
+            .ok_or_else(|| Error::Conflict("session is not live".into()))?;
+        permit.check_room(room, member, epoch, handle.spawn_seq())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,5 +364,23 @@ mod tests {
         );
         drop(held);
         assert!(task.await.unwrap().unwrap() > epoch);
+    }
+
+    #[test]
+    fn ct_eq_str_and_keyed_submit_locks_behave_safely() {
+        assert!(ct_eq_str("abc123", "abc123"));
+        assert!(!ct_eq_str("abc123", "abc124"));
+        assert!(!ct_eq_str("abc123", "abc12"));
+        assert!(!ct_eq_str("", "a"));
+
+        // Verify `KeyedLocks` shares the active mutex and drops idle handles.
+        let locks: otto_core::keyed_lock::KeyedLocks<Id> = Default::default();
+        let id: Id = "s-1".into();
+        let a = locks.handle(&id);
+        let b = locks.handle(&id);
+        assert!(Arc::ptr_eq(&a, &b));
+        let weak = Arc::downgrade(&a);
+        drop((a, b));
+        assert!(weak.upgrade().is_none());
     }
 }

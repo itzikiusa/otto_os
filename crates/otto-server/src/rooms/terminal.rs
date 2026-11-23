@@ -16,8 +16,8 @@ use otto_rooms::{
     auth::socket_token,
     capability::TokenBucket,
     terminal::{
-        decode_input, flow_deadline, search_result_frame, FlowGate, Frame, ResyncQueue, ACK_BURST,
-        ACK_RATE, MAX_SEARCH_QUERY, MAX_SEARCH_RESULTS,
+        decode_input, flow_deadline, room_snapshot_lines, search_result_frame, FlowGate, Frame,
+        ResyncQueue, ACK_BURST, ACK_RATE, MAX_SEARCH_QUERY, MAX_SEARCH_RESULTS,
     },
     SharedRoom, RATE_LIMITED,
 };
@@ -71,11 +71,12 @@ async fn snapshot(
     socket: &mut WebSocket,
     handle: &Arc<otto_pty::PtyHandle>,
     lines: usize,
+    is_guest: bool,
     output: &mut tokio::sync::broadcast::Receiver<axum::body::Bytes>,
     credit: &mut Option<CreditGate>,
 ) -> Result<()> {
     let h = Arc::clone(handle);
-    let lines = lines.min(10_000);
+    let lines = room_snapshot_lines(lines, is_guest);
     let (text, fresh) = tokio::task::spawn_blocking(move || {
         let replay = h.snapshot_and_subscribe(lines);
         let value = serde_json::json!({"type":"scrollback","data":STANDARD.encode(&replay.data),"cols":replay.cols,"rows":replay.rows,"epoch":h.spawn_seq()});
@@ -95,13 +96,14 @@ async fn apply_credit(
     step: CreditStep,
     socket: &mut WebSocket,
     handle: &Arc<otto_pty::PtyHandle>,
+    is_guest: bool,
     output: &mut tokio::sync::broadcast::Receiver<axum::body::Bytes>,
     credit: &mut Option<CreditGate>,
 ) -> Result<()> {
     match step {
         CreditStep::Idle => Ok(()),
         CreditStep::Send(bytes) => send_frame(socket, Message::Binary(bytes)).await,
-        CreditStep::Resync => snapshot(socket, handle, 10_000, output, credit).await,
+        CreditStep::Resync => snapshot(socket, handle, 10_000, is_guest, output, credit).await,
     }
 }
 async fn valid(shared: &SharedRoom, member: &str, generation: u64) -> bool {
@@ -156,9 +158,25 @@ async fn serve(
     }
     // Keep the existing session alive while a room viewer watches it. This
     // guard does not start a process and does not claim ordinary input.
-    let session = shared.lock().await.session.clone();
+    let (session, is_guest) = {
+        let room = shared.lock().await;
+        (room.session.clone(), member != room.host)
+    };
     let _attach = ctx.manager.attach(&session);
     let mut output = handle.subscribe();
+    // Guest-scoped search ring: captures only output emitted AFTER this guest
+    // connected (plus the live viewport rows), so `Frame::Search` never scans
+    // pre-room scrollback from `handle.search_lines()`.
+    let mut guest_ring = if is_guest {
+        let mut ring = otto_pty::ring::RingBuffer::default();
+        for row in handle.screen_rows() {
+            ring.push(row.as_bytes());
+            ring.push(b"\n");
+        }
+        Some(ring)
+    } else {
+        None
+    };
     // Credit flow control, once this viewer offers it (else pause/resume).
     let mut credit: Option<CreditGate> = None;
     let mut notices = shared.lock().await.signal.subscribe();
@@ -175,9 +193,16 @@ async fn serve(
     .is_err()
         || !valid(&shared, &member, generation).await
         || handle.has_exited()
-        || snapshot(&mut socket, &handle, 10_000, &mut output, &mut credit)
-            .await
-            .is_err()
+        || snapshot(
+            &mut socket,
+            &handle,
+            10_000,
+            is_guest,
+            &mut output,
+            &mut credit,
+        )
+        .await
+        .is_err()
     {
         return;
     }
@@ -195,12 +220,12 @@ async fn serve(
             _=flow_deadline(recovery.deadline()), if recovery.pending.is_some()=>{
                 if !valid(&shared,&member,generation).await{break;}
                 if let Some(lines)=recovery.take_ready(tokio::time::Instant::now()) {
-                    if snapshot(&mut socket,&handle,lines,&mut output,&mut credit).await.is_err(){break;}
+                    if snapshot(&mut socket,&handle,lines,is_guest,&mut output,&mut credit).await.is_err(){break;}
                 }
             }
             _=flow_deadline(flow.paused_until), if flow.paused_until.is_some() && recovery.pending.is_none()=>{
                 if !valid(&shared,&member,generation).await{break;}
-                if flow.resume(&mut output) && snapshot(&mut socket,&handle,10_000,&mut output,&mut credit).await.is_err(){break;}
+                if flow.resume(&mut output) && snapshot(&mut socket,&handle,10_000,is_guest,&mut output,&mut credit).await.is_err(){break;}
             }
             // Credit: no ack progress for 2 s while output waits (see
             // CreditGate::forgive — the window stays bounded, one snapshot is
@@ -213,10 +238,13 @@ async fn serve(
             chunk=output.recv(), if flow.paused_until.is_none() && recovery.pending.is_none()=>{
                 match chunk {
                     Ok(chunk)=>{
+                        if let Some(ring) = guest_ring.as_mut() {
+                            ring.push(&chunk);
+                        }
                         let step=match credit.as_mut(){Some(c)=>c.push(chunk.to_vec(),tokio::time::Instant::now()),None=>CreditStep::Send(chunk)};
-                        if apply_credit(step,&mut socket,&handle,&mut output,&mut credit).await.is_err(){break;}
+                        if apply_credit(step,&mut socket,&handle,is_guest,&mut output,&mut credit).await.is_err(){break;}
                     },
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>{if snapshot(&mut socket,&handle,10_000,&mut output,&mut credit).await.is_err(){break;}},
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>{if snapshot(&mut socket,&handle,10_000,is_guest,&mut output,&mut credit).await.is_err(){break;}},
                     Err(_)=>break,
                 }
             }
@@ -227,7 +255,7 @@ async fn serve(
                     if ack_rate.take(ACK_RATE,ACK_BURST,RATE_LIMITED).is_err(){break;}
                     if let Some(c)=credit.as_mut(){
                         let step=c.ack(bytes,tokio::time::Instant::now());
-                        if apply_credit(step,&mut socket,&handle,&mut output,&mut credit).await.is_err(){break;}
+                        if apply_credit(step,&mut socket,&handle,is_guest,&mut output,&mut credit).await.is_err(){break;}
                     }
                     continue;
                 }
@@ -255,16 +283,16 @@ async fn serve(
                         ctx.manager.room_input(&session,&room_id,&member,grant_epoch,&data).await
                     },Err(error)=>Err(error)},
                     Frame::Resize{cols,rows,grant_epoch}=>ctx.manager.room_resize(&session,&room_id,&member,grant_epoch,cols,rows).await,
-                    Frame::Scrollback{lines}=>match history_rate.take(1.0,2.0,RATE_LIMITED){Ok(())=>snapshot(&mut socket,&handle,lines.unwrap_or(10_000),&mut output,&mut credit).await,Err(e)=>Err(e)},
-                    Frame::Snapshot=>match history_rate.take(1.0,2.0,RATE_LIMITED){Ok(())=>snapshot(&mut socket,&handle,0,&mut output,&mut credit).await,Err(e)=>Err(e)},
+                    Frame::Scrollback{lines}=>match history_rate.take(1.0,2.0,RATE_LIMITED){Ok(())=>snapshot(&mut socket,&handle,lines.unwrap_or(10_000),is_guest,&mut output,&mut credit).await,Err(e)=>Err(e)},
+                    Frame::Snapshot=>match history_rate.take(1.0,2.0,RATE_LIMITED){Ok(())=>snapshot(&mut socket,&handle,0,is_guest,&mut output,&mut credit).await,Err(e)=>Err(e)},
                     Frame::Resync{lines}=>{
                         flow.paused_until=None;
                         let now=tokio::time::Instant::now();
                         recovery.request(lines.unwrap_or(10_000),now);
-                        if let Some(lines)=recovery.take_ready(now){snapshot(&mut socket,&handle,lines,&mut output,&mut credit).await}else{Ok(())}
+                        if let Some(lines)=recovery.take_ready(now){snapshot(&mut socket,&handle,lines,is_guest,&mut output,&mut credit).await}else{Ok(())}
                     },
                     Frame::Pause=>{flow.pause();Ok(())},
-                    Frame::Resume=>{if flow.resume(&mut output) && recovery.pending.is_none(){snapshot(&mut socket,&handle,10_000,&mut output,&mut credit).await}else{Ok(())}},
+                    Frame::Resume=>{if flow.resume(&mut output) && recovery.pending.is_none(){snapshot(&mut socket,&handle,10_000,is_guest,&mut output,&mut credit).await}else{Ok(())}},
                     Frame::Credit{window}=>{
                         let gate=CreditGate::new(window);
                         let sent=send_frame(&mut socket,Message::Text(gate.grant_frame().into())).await;
@@ -280,7 +308,10 @@ async fn serve(
                             // local buffer matches) instead of an error painted into
                             // the terminal and a spinner that never stops.
                             let matches=if search_rate.take(4.0,8.0,RATE_LIMITED).is_ok(){
-                                let lines=handle.search_lines();
+                                let lines=match guest_ring.as_ref(){
+                                    Some(ring)=>ring.lines(),
+                                    None=>handle.search_lines(),
+                                };
                                 let q=query.clone();
                                 tokio::task::spawn_blocking(move||otto_pty::ring::search_lines(&lines,&q,MAX_SEARCH_RESULTS)).await.unwrap_or_default()
                             }else{Vec::new()};

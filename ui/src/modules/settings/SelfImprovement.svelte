@@ -424,7 +424,7 @@
       <LoadState what="self-improvement" error={loadError} onretry={() => wsId && void load(wsId)} />
     {/if}
     {#if formError}
-      <p class="form-note error" role="alert">{formError}</p>
+      <p class="form-note error" use:announceShown={{ text: formError, assertive: true }}>{formError}</p>
     {:else if dirty}
       <p class="form-note unsaved">Unsaved changes — Save to apply them.</p>
     {/if}
@@ -678,7 +678,7 @@
     align-items: center;
     gap: 8px;
   }
-  .chip.structural {
+  .structural {
     color: var(--danger);
     border-color: color-mix(in srgb, var(--danger) 35%, transparent);
   }

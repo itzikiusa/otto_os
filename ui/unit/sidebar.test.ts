@@ -219,17 +219,17 @@ test('resolveOrder: an id missing from the saved order lands after its section p
   const saved = ids(all()).filter((id) => id !== 'kubernetes');
   const swapped = saved.map((id) => (id === 'aws' ? 'api' : id === 'api' ? 'aws' : id));
   const infra = ids(resolveOrder(all(), swapped).filter((m) => m.group === 'infra'));
-  // Registry: connections, aws, kubernetes, api … — Kubernetes follows AWS
+  // Registry: connections, aws, kubernetes, containers, api … — Kubernetes follows AWS
   // wherever the user put AWS.
-  assert.deepEqual(infra, ['connections', 'api', 'aws', 'kubernetes', 'browser', 'mcp']);
+  assert.deepEqual(infra, ['connections', 'api', 'containers', 'aws', 'kubernetes', 'browser', 'mcp']);
 });
 
 test('resolveOrder: the first module of a section anchors before its successor', () => {
   const reversed = ids(all()).filter((id) => id !== 'connections').reverse();
   const infra = ids(resolveOrder(all(), reversed).filter((m) => m.group === 'infra'));
-  // Saved reversed: mcp, browser, api, kubernetes, aws — connections goes
+  // Saved reversed: mcp, browser, api, containers, kubernetes, aws — connections goes
   // before its nearest placed successor (aws).
-  assert.deepEqual(infra, ['mcp', 'browser', 'api', 'kubernetes', 'connections', 'aws']);
+  assert.deepEqual(infra, ['mcp', 'browser', 'api', 'containers', 'kubernetes', 'connections', 'aws']);
 });
 
 test('resolveOrder: a new plugin anchors after the plugin before it; empty saved order = registry order', () => {
@@ -259,12 +259,12 @@ test('mergeSavedOrder: ids not on screen keep their saved slot; retired ids are 
 test('saving while a module is gated off, then granting it, puts it back where it was', () => {
   const withoutK8s = only((id) => id !== 'kubernetes');
   // The saved order had Kubernetes right after Connections.
-  const saved = ['connections', 'kubernetes', 'aws', 'api', 'browser', 'mcp'];
+  const saved = ['connections', 'kubernetes', 'aws', 'containers', 'api', 'browser', 'mcp'];
   const before = resolveOrder(withoutK8s, saved);
   const moved = moveAmong(ids(before), 'mcp', -1)!;
   const stored = mergeSavedOrder(moved, saved);
   const infra = ids(resolveOrder(all(), stored).filter((m) => m.group === 'infra'));
-  assert.deepEqual(infra, ['connections', 'kubernetes', 'aws', 'api', 'mcp', 'browser']);
+  assert.deepEqual(infra, ['connections', 'kubernetes', 'aws', 'containers', 'api', 'mcp', 'browser']);
 });
 
 test('reconcileNewSidebarModules: a module is known only once it has been available', () => {

@@ -13,13 +13,15 @@
   import { runStatus } from '../../lib/status';
   import { tick } from 'svelte';
   import { neighbourAfterDelete } from './canvasFocus';
-  import { NODE_W, nodeHeight, loopStepLabels, loopUntil, loopMax, edgePath, edgeMid, condLabel } from './canvasGeometry';
-  import type { WorkflowGraph, WorkflowNode, NodeTypeSpec, NodeRunState } from '../../lib/api/types';
+  import { NODE_W, nodeHeight, loopStepLabels, loopUntil, loopMax, edgePath, edgeMid, condLabel, nextEdgeId, computeFitTransform } from './canvasGeometry';
+  import { nodeSideEffect } from './sideEffects';
+  import type { Connection, WorkflowGraph, WorkflowNode, NodeTypeSpec, NodeRunState } from '../../lib/api/types';
 
   interface Props {
     graph: WorkflowGraph;
     types: NodeTypeSpec[];
     runStates?: Record<string, NodeRunState>;
+    dbConnections?: readonly Connection[];
     editable?: boolean;
     selectedId?: string | null;
     selectedEdgeId?: string | null;
@@ -33,6 +35,7 @@
     graph = $bindable(),
     types,
     runStates = {},
+    dbConnections = [],
     editable = true,
     selectedId = null,
     selectedEdgeId = null,
@@ -267,7 +270,7 @@
     if (graph.edges.some((e) => e.source === source && e.target === target)) return;
     graph.edges = [
       ...graph.edges,
-      { id: `e-${source}-${target}-${graph.edges.length}`, source, target },
+      { id: nextEdgeId(graph.edges, source, target), source, target },
     ];
     onchange?.(graph);
   }
@@ -297,9 +300,10 @@
   }
 
   function fit(): void {
-    scale = 1;
-    tx = 40;
-    ty = 20;
+    const t = computeFitTransform(graph.nodes, surface?.clientWidth ?? 0, surface?.clientHeight ?? 0);
+    scale = t.scale;
+    tx = t.tx;
+    ty = t.ty;
   }
 </script>
 
@@ -359,6 +363,7 @@
 
     {#each graph.nodes as n (n.id)}
       {@const st = statusOf(n.id)}
+      {@const se = nodeSideEffect(n, dbConnections)}
       <!-- The card is a plain box: the node itself is the button inside it
            (select / move / delete), the output port a sibling button — never
            one control nested in another. -->
@@ -388,7 +393,7 @@
             <span class="ic"><Icon name={asIcon(spec(n.kind)?.icon, 'box')} size={14} /></span>
             <span class="body" dir="auto">
               <span class="title" title={nodeLabel(n)}>{nodeLabel(n)}</span>
-              <span class="kind">{spec(n.kind)?.label ?? n.kind}</span>
+              <span class="kind">{spec(n.kind)?.label ?? n.kind}{#if se}<span class="se-badge" class:danger={se.danger} title={se.summary}>{se.badge}</span>{/if}</span>
             </span>
             {#if st}<span class="dot {st}" role="img" title={runStatus(st).label} aria-label={runStatus(st).label}></span>{/if}
           </span>
@@ -737,62 +742,26 @@
     cursor: crosshair;
   }
   /* The visible port is 12 px; the press target around it is 28 px. */
-  button.port.out::after {
-    content: '';
-    position: absolute;
-    inset: -8px;
-    border-radius: 50%;
+  button.port.out::after { content: ''; position: absolute; inset: -8px; border-radius: 50%; }
+  .port.out:hover { background: var(--accent); }
+  button.port.out:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; background: var(--accent); }
+  .se-badge {
+    margin-inline-start: 6px; padding: 0 4px; border-radius: var(--radius-s);
+    background: var(--warning-soft); color: var(--warning); font-weight: 600;
   }
-  .port.out:hover {
-    background: var(--accent);
-  }
-  button.port.out:focus-visible {
-    outline: 2px solid var(--accent-text);
-    outline-offset: 2px;
-    background: var(--accent);
-  }
+  .se-badge.danger { background: var(--danger-soft); color: var(--danger); }
   .hud {
-    position: absolute;
-    inset-inline-end: 12px;
-    bottom: 12px;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 4px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    box-shadow: var(--glass-shadow);
+    position: absolute; inset-inline-end: 12px; bottom: 12px; display: flex; align-items: center; gap: 4px;
+    padding: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-m); box-shadow: var(--glass-shadow);
   }
   .zbtn {
-    display: grid;
-    place-items: center;
-    width: 26px;
-    height: 24px;
-    border: none;
-    background: transparent;
-    color: var(--text);
-    font-size: var(--fs-l);
-    border-radius: var(--radius-s);
-    cursor: pointer;
+    display: grid; place-items: center; width: 26px; height: 24px; border: none; background: transparent;
+    color: var(--text); font-size: var(--fs-l); border-radius: var(--radius-s); cursor: pointer;
   }
-  .zbtn:hover {
-    background: var(--accent-soft);
-  }
+  .zbtn:hover { background: var(--accent-soft); }
   @media (pointer: coarse) {
-    .zbtn {
-      width: 44px;
-      height: 44px;
-    }
-    button.port.out::after {
-      inset: -16px;
-    }
+    .zbtn { width: 44px; height: 44px; }
+    button.port.out::after { inset: -16px; }
   }
-  .zpct {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    padding: 0 4px;
-    min-width: 34px;
-    text-align: center;
-  }
+  .zpct { font-size: var(--fs-xs); color: var(--text-dim); padding: 0 4px; min-width: 34px; text-align: center; }
 </style>

@@ -12,6 +12,7 @@ function menu(closedTab: boolean) {
     './stores/workspace.svelte': { ws: { closeActiveTab: () => { calls.push('tab'); return closedTab; } } },
     './router.svelte': { router: { go() {} } },
     './snip': { startSnip() {} },
+    './keepAwake.svelte': { keepAwake: { promptCustom() {} } },
     './selectall': { selectAllInFocus() {} },
     './undoredo': { undoRedoInFocus() {}, installUndoKeyGuard: () => () => {} },
     './stores/sidePane.svelte': { sidePane: { handleMenu: () => false, nativeState: null, focused: false } },

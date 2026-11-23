@@ -5,6 +5,7 @@ import { ui } from './stores/ui.svelte';
 import { ws } from './stores/workspace.svelte';
 import { router } from './router.svelte';
 import { startSnip } from './snip';
+import { keepAwake } from './keepAwake.svelte';
 import { selectAllInFocus } from './selectall';
 import { installUndoKeyGuard, undoRedoInFocus } from './undoredo';
 import { sidePane } from './stores/sidePane.svelte';
@@ -40,6 +41,10 @@ export function handleMenu(id: string): void {
       // File → Take Snip, and the global shortcut (the Rust handler emits the
       // same menu id to exactly one window — focused, else main).
       void startSnip();
+      break;
+    case 'keep-awake-custom':
+      // The tray's Keep Awake ▸ For a Custom Time… (the shell opened Otto).
+      void keepAwake.promptCustom();
       break;
     case 'select-all':
       // Edit ▸ Select All (⌘A). Deliberately NOT a PredefinedMenuItem: the

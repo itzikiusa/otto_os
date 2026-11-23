@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "clipboard",
+  "description": "The clipboard-history panel `otto-clipboard` (clipboard/mod.rs): it only listens for the shell's `otto://clipboard-shown` / `otto://clipboard-changed` events. Its own app commands need no grant (Tauri lets local windows invoke app commands); the content commands check the caller is this window. Deliberately NOT in default.json: the panel gets no window, webview, opener or notification permissions.",
+  "windows": [
+    "otto-clipboard"
+  ],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
+}

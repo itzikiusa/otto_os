@@ -212,6 +212,29 @@ impl ChromeProcess {
         Ok(proc)
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_test_with_conn(conn: Arc<CdpConn>) -> Arc<Self> {
+        Arc::new(Self {
+            key: ProcessKey::Ephemeral,
+            build: ChromeBuild::Chrome,
+            version: "fixture".into(),
+            headed: false,
+            conn,
+            download_policy: DownloadPolicy::Block,
+            downloads_dir: PathBuf::new(),
+            browser_fetch: true,
+            child: AsyncMutex::new(None),
+            targets: StdMutex::new(HashMap::new()),
+            popups: StdMutex::new(HashMap::new()),
+            downloads: StdMutex::new(HashMap::new()),
+            verdicts: StdMutex::new(VerdictCache::default()),
+            guard_slots: Arc::new(Semaphore::new(GUARD_SLOTS)),
+            empty_since: StdMutex::new(None),
+            dead: AtomicBool::new(false),
+            loop_task: StdMutex::new(None),
+        })
+    }
+
     async fn setup(
         conn: &Arc<CdpConn>,
         policy: DownloadPolicy,
@@ -378,7 +401,14 @@ impl ChromeProcess {
         .unwrap_or(false);
         let session = req.frame_id.as_deref().and_then(|f| self.session(f));
         let agent_drives = session.as_ref().is_some_and(|s| s.agent_drives());
-        match guard::decide(allowed, &req, session.is_some(), agent_drives) {
+        let guard_spa = session.as_ref().is_some_and(|s| s.guard_spa_mutations());
+        match guard::decide_with_spa_guard(
+            allowed,
+            &req,
+            session.is_some(),
+            agent_drives,
+            guard_spa,
+        ) {
             Decision::Continue => {
                 self.conn.send(
                     "Fetch.continueRequest",
@@ -714,6 +744,17 @@ async fn quarantine(path: &std::path::Path) {
         .arg(path)
         .output()
         .await;
+}
+
+#[cfg(test)]
+impl ChromeProcess {
+    /// Lightweight fixture process backed by a duplex CDP pipe (no Chromium).
+    pub(crate) fn for_test() -> (Arc<Self>, tokio::io::DuplexStream) {
+        let (ours, browser) = tokio::io::duplex(64 * 1024);
+        let (read, write) = tokio::io::split(ours);
+        let (conn, _events) = CdpConn::start(read, write);
+        (Self::for_test_with_conn(conn), browser)
+    }
 }
 
 #[cfg(test)]

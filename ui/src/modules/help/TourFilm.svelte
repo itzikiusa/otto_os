@@ -25,10 +25,10 @@
   // "Loading…") · unavailable (inline message + Retry, never a raw error) ·
   // playing.
   import { onDestroy } from 'svelte';
-  import { announceShown } from '../../lib/announce.svelte';
   import { api } from '../../lib/api/client';
   import type { ResolveWalkthroughResp } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { chapterAt, timeLabel, type FilmManifest } from './guide';
   import { BUNDLED_CAPTIONS } from './sections';
 
@@ -184,23 +184,27 @@
     </div>
   {:else}
     {#if status === 'failed'}
-      <div class="film-frame fallback" data-testid="tour-film-unavailable" use:announceShown={{ text: 'The tour film can’t load right now. Check your connection, then retry.', assertive: true }}>
-        <span class="fallback-icon" aria-hidden="true"><Icon name="play" size={16} /></span>
-        <p class="fallback-title">The tour film can’t load right now</p>
-        <p class="fallback-sub">It streams from the internet. Check your connection, then try again. The guides work offline.</p>
-        <div class="fallback-actions">
-          <button class="btn small" onclick={retry}><Icon name="refresh" size={12} /> Retry</button>
-          <a class="btn small ghost" href={assetUrl(film.file)} target="_blank" rel="noopener noreferrer">
-            Open in browser <Icon name="external" size={12} />
-          </a>
-        </div>
+      <div class="film-frame fallback" data-testid="tour-film-unavailable">
+        <LoadState
+          what="the tour film"
+          errorTitle="The tour film can’t load right now"
+          error="It streams from the internet. Check your connection, then try again. The guides work offline."
+          empty
+          variant="panel"
+          onretry={retry}
+        >
+          {#snippet errorActions()}
+            <a class="btn small ghost" href={assetUrl(film.file)} target="_blank" rel="noopener noreferrer">
+              Open in browser <Icon name="external" size={12} />
+            </a>
+          {/snippet}
+        </LoadState>
       </div>
     {:else}
       <div class="film-frame" class:loading={status === 'loading'}>
         <!-- preload="metadata": only the moov atom + first frame are fetched
              until the viewer presses play. The soundtrack never autoplays.
-             The captions <track> is conditional (see CAPTIONS above). -->
-        <!-- svelte-ignore a11y_media_has_caption -->
+             The captions <track> stays mounted (without src when unavailable). -->
         <video
           bind:this={videoEl}
           class="film-video"
@@ -216,9 +220,7 @@
           onerror={() => (status = 'failed')}
           data-testid="tour-film-video"
         >
-          {#if captionsSrc}
-            <track kind="captions" srclang="en" label="English" src={captionsSrc} default />
-          {/if}
+          <track kind="captions" srclang="en" label="English" src={captionsSrc ?? undefined} default={!!captionsSrc} />
         </video>
         {#if status === 'loading'}
           <div class="film-loading" role="img" aria-label="Loading the tour"><span class="spinner" style:--spinner-size="24px" aria-hidden="true"></span></div>
@@ -325,38 +327,9 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 6px;
-    padding: 24px;
-    text-align: center;
     background: var(--surface-2);
     border-style: dashed;
     color: var(--text);
-  }
-  .fallback-icon {
-    width: 40px;
-    height: 40px;
-    border-radius: 50%;
-    display: grid;
-    place-items: center;
-    color: var(--text-dim);
-    background: var(--hover);
-    margin-bottom: 4px;
-  }
-  .fallback-title {
-    margin: 0;
-    font-size: var(--fs-m);
-    font-weight: 600;
-  }
-  .fallback-sub {
-    margin: 0;
-    max-width: 420px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
-  .fallback-actions {
-    display: flex;
-    gap: 8px;
-    margin-top: 8px;
   }
   .film-missing {
     display: flex;
@@ -485,8 +458,6 @@
     color: var(--text-dim);
   }
   @media (max-width: 640px) {
-    .fallback-actions button,
-    .fallback-actions a,
     .chapter-play,
     .chapter-guide,
     .cc {

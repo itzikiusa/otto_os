@@ -844,6 +844,7 @@ async fn s3_download_to<S: AwsCtx>(
     Path((id, bucket)): Path<(Id, String)>,
     Json(req): Json<crate::s3_download::DownloadToReq>,
 ) -> ApiResult<Json<crate::s3_download::DownloadJob>> {
+    crate::access::require_host_download_root(&ctx.pool(), &user).await?;
     crate::access::check(&ctx.pool(), &user, &id, "s3_read", Some(&bucket)).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;

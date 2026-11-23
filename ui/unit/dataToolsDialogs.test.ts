@@ -1,4 +1,5 @@
 import { plural, pluralNoun } from '../src/lib/plural.ts';
+import { loadErrorText } from '../src/lib/loadError.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -79,6 +80,7 @@ function recovery() {
   let history = [{ selector: 'HEAD@{0}', sha: 'a'.repeat(40), subject: 'Recovered change' }];
   const context = component('../src/modules/git/RecoveryTools.svelte', {
     id: 'repo', alive: true, mode: 'history', busy: false, error: '', entries: [], more: true, bisect: null,
+    loadErrorText,
     git: { refreshStatus: async () => {} },
     api: { get: async (url: string) => {
       requests.push(url);

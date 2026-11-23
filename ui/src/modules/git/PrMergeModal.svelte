@@ -11,8 +11,10 @@
   import type { MergeStrategy, PrChecksResp, PrCommit, PrDetail, PrReadiness } from '../../lib/api/types';
   import { router } from '../../lib/router.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { openExternal } from '../../lib/external';
   import Modal from '../../lib/components/Modal.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { pinnedHead } from './pr-cache';
   import { unseenHead, type UnseenHead } from './pr-merge-gate';
@@ -73,14 +75,16 @@
     const id = repoId;
     const n = number;
     void probeTick;
+    let live = true;
     headLoading = true;
     void api
       .get<PrDetail>(`/repos/${id}/prs/${n}`)
-      .then((r) => (liveHead = r.head_sha ?? null))
+      .then((r) => { if (live && !disposed) liveHead = r.head_sha ?? null; })
       // Unreadable: fall back to the parent's head — the daemon still refuses
       // a merge whose head moved, so this can only fail closed.
-      .catch(() => (liveHead = null))
-      .finally(() => (headLoading = false));
+      .catch(() => { if (live && !disposed) liveHead = null; })
+      .finally(() => { if (live && !disposed) headLoading = false; });
+    return () => { live = false; };
   });
   const pinSha = $derived(pinnedHead(liveHead, pr.head_sha ?? null));
 
@@ -97,39 +101,47 @@
     if (!unseen.moved || unseenCommits) return;
     const id = repoId;
     const n = number;
-    void api.get<PrCommit[]>(`/repos/${id}/prs/${n}/commits`).then((c) => { if (!disposed) unseenCommits = c; }).catch(() => {});
+    let live = true;
+    void api.get<PrCommit[]>(`/repos/${id}/prs/${n}/commits`).then((c) => { if (live && !disposed) unseenCommits = c; }).catch(() => {});
+    return () => { live = false; };
   });
 
   $effect(() => {
     const id = repoId;
     const n = number;
     void probeTick;
+    let live = true;
     checksLoading = true;
     checksError = false;
     void api
       .get<PrChecksResp>(`/repos/${id}/prs/${n}/checks`)
-      .then((r) => (checks = r))
+      .then((r) => { if (live && !disposed) checks = r; })
       .catch(() => {
+        if (!live || disposed) return;
         checks = null;
         checksError = true;
       })
-      .finally(() => (checksLoading = false));
+      .finally(() => { if (live && !disposed) checksLoading = false; });
+    return () => { live = false; };
   });
 
   $effect(() => {
     const id = repoId;
     const n = number;
     void probeTick;
+    let live = true;
     readinessLoading = true;
     readinessError = false;
     void api
       .get<PrReadiness>(`/repos/${id}/prs/${n}/readiness`)
-      .then((r) => (readiness = r))
+      .then((r) => { if (live && !disposed) readiness = r; })
       .catch(() => {
+        if (!live || disposed) return;
         readiness = null;
         readinessError = true;
       })
-      .finally(() => (readinessLoading = false));
+      .finally(() => { if (live && !disposed) readinessLoading = false; });
+    return () => { live = false; };
   });
 
   const blockers = $derived(readiness?.review?.unresolved_blocker_count ?? 0);
@@ -196,9 +208,7 @@
       const moved = e instanceof ApiError && e.status === 409 && /head|changed|sha/i.test(e.message);
       const detail = moved
         ? 'The pull request changed since these checks ran (new commits were pushed). The checks below were re-read for the new head — review them, then merge again.'
-        : e instanceof ApiError || e instanceof Error
-          ? e.message
-          : String(e);
+        : loadErrorText(e);
       if (disposed) toasts.error(`Couldn’t merge PR #${mergedNumber}`, detail);
       else error = detail;
       // Recover instead of dead-ending: re-read the head + probes here, and let
@@ -216,7 +226,7 @@
   }
 </script>
 
-<Modal title="Merge pull request" width={520} {onclose}>
+<Modal title="Merge pull request" width={520} dismissable={!merging} {onclose}>
   <div class="body">
     <div class="prline">
       <span class="dim">#{number}</span>
@@ -239,8 +249,7 @@
           {#if checksLoading}
             <span class="spinner" role="img" aria-label="Loading checks" title="Loading checks"></span>
           {:else if checksError || checks === null}
-            <span class="warn">Unavailable</span>
-            <button class="btn small" onclick={() => probeTick++}>Retry</button>
+            <LoadState variant="compact" what="CI checks" errorTitle="Unavailable" error="Couldn’t load CI checks." empty onretry={() => probeTick++} />
           {:else if checks.checks.length === 0}
             <span class="dim">No checks reported</span>
           {:else}
@@ -271,8 +280,7 @@
         <span class="rvalue">
           {#if readinessLoading}<span class="spinner" role="img" aria-label="Loading approvals" title="Loading approvals"></span>
           {:else if readinessError || readiness === null}
-            <span class="warn">Unavailable</span>
-            <button class="btn small" onclick={() => probeTick++}>Retry</button>
+            <LoadState variant="compact" what="approvals" errorTitle="Unavailable" error="Couldn’t load approvals." empty onretry={() => probeTick++} />
           {:else}{readiness.approvals}{/if}
         </span>
       </div>

@@ -9,6 +9,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { api } from '../../lib/api/client';
   import { k8sApi } from '../../lib/api/k8s';
+  import { loadErrorText } from '../../lib/loadError';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { k8s } from '../../lib/stores/k8s.svelte';
@@ -83,7 +84,7 @@
       }
       sessionId = s.id;
     } catch (e) {
-      if (alive) error = e instanceof Error ? e.message : String(e);
+      if (alive) error = loadErrorText(e);
     } finally {
       opening = false;
     }

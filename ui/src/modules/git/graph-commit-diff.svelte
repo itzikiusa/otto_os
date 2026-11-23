@@ -479,8 +479,7 @@
         </div>
       {:else if body?.kind === 'error'}
         <div class="df-note df-more">
-          <span class="dd-err">Couldn’t load this file’s changes: {body.message}</span>
-          <button class="btn small" onclick={() => retryFile(file)}>Retry</button>
+          <LoadState variant="compact" what="this file’s changes" error={body.message} empty onretry={() => retryFile(file)} />
         </div>
       {:else}
         <div class="df-pending" style:min-height="{placeholderPx(file)}px">
@@ -662,9 +661,6 @@
   }
   .dd-files-more {
     border-top: none;
-  }
-  .dd-err {
-    color: var(--danger);
   }
   .df-pending {
     padding: 8px 12px;

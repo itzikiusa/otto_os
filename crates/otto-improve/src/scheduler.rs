@@ -5,16 +5,16 @@
 //! for any that are due and not already running. An in-memory in-flight set
 //! plus a DB `has_running` check guarantee one run per workspace at a time.
 
-use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use otto_core::cancel_signal::InFlightSet;
 use otto_core::domain::ImprovementTrigger;
 use otto_state::improvements::{RUNS_KEPT_PER_WORKSPACE, RUN_RETENTION_DAYS};
 use otto_state::WorkspacesRepo;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
@@ -67,7 +67,7 @@ impl Scheduler {
     }
 
     async fn supervise(self, cancel: Arc<AtomicBool>, wake: Arc<Notify>) {
-        let in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let in_flight = InFlightSet::default();
         let mut last_prune = std::time::Instant::now();
         loop {
             if cancel.load(Ordering::Relaxed) {
@@ -86,13 +86,12 @@ impl Scheduler {
                         if !is_due(&cfg, now) {
                             continue;
                         }
-                        // Skip if already running (in-memory or DB).
-                        {
-                            let guard = in_flight.lock().await;
-                            if guard.contains(&ws.id) {
-                                continue;
-                            }
-                        }
+                        // Claim the per-workspace RAII in-flight guard first so a
+                        // panic or early return in the spawned task never wedges
+                        // scheduling for this workspace.
+                        let Some(guard) = in_flight.claim(&ws.id) else {
+                            continue;
+                        };
                         if self
                             .engine
                             .improvements
@@ -100,21 +99,21 @@ impl Scheduler {
                             .await
                             .unwrap_or(false)
                         {
+                            drop(guard);
                             continue;
                         }
-                        in_flight.lock().await.insert(ws.id.clone());
                         let engine = Arc::clone(&self.engine);
-                        let flight = Arc::clone(&in_flight);
                         let ws_id = ws.id.clone();
                         info!(workspace = %ws_id, "self-improvement: starting scheduled run");
                         tokio::spawn(async move {
+                            // The guard clears the in-flight entry on drop — including on panic.
+                            let _guard = guard;
                             if let Err(e) = engine
                                 .run_for_workspace(&ws_id, ImprovementTrigger::Scheduled)
                                 .await
                             {
                                 warn!(workspace = %ws_id, "self-improvement run failed: {e}");
                             }
-                            flight.lock().await.remove(&ws_id);
                         });
                     }
                 }
@@ -149,5 +148,35 @@ impl Scheduler {
             Ok(n) => info!("self-improvement: pruned {n} finished run(s) past retention"),
             Err(e) => warn!("self-improvement: run retention failed: {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn in_flight_guard_releases_workspace_on_panic_and_drop() {
+        let in_flight = InFlightSet::default();
+        let guard = in_flight.claim("ws-1").expect("initial claim succeeds");
+        assert!(
+            in_flight.claim("ws-1").is_none(),
+            "duplicate claim must be rejected while held"
+        );
+        // Independent workspace can still be claimed.
+        let other = in_flight.claim("ws-2").expect("other workspace succeeds");
+        drop(other);
+        assert!(in_flight.claim("ws-2").is_some(), "released on normal drop");
+
+        // A panic inside the spawned task drops the RAII guard and unblocks ws-1.
+        let handle = tokio::spawn(async move {
+            let _guard = guard;
+            panic!("simulated scheduled improvement panic");
+        });
+        assert!(handle.await.is_err());
+        assert!(
+            in_flight.claim("ws-1").is_some(),
+            "in_flight must be released when spawned task panics"
+        );
     }
 }

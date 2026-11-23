@@ -113,10 +113,14 @@
     <div class="connecting">
       <p class="muted">Connecting to the cluster…</p>
       {#if slow}
-        <p class="muted slow-note">
-          Still waiting on the brokers. Check the bootstrap servers and your network, or
-          <button class="btn small" onclick={() => attempt++}>Try again</button>
-        </p>
+        <LoadState
+          variant="compact"
+          what="the cluster overview"
+          errorTitle="Still waiting on the brokers"
+          error="Check the bootstrap servers and your network."
+          empty
+          onretry={() => attempt++}
+        />
       {/if}
       <Skeleton rows={2} height={64} />
     </div>
@@ -253,13 +257,6 @@
   }
   .connecting p {
     margin: 0;
-  }
-  .slow-note {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 8px;
-    font-size: var(--fs-s);
   }
   .overview {
     padding: 16px;

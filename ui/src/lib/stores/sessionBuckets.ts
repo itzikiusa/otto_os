@@ -42,6 +42,7 @@ export const BACKGROUND_SOURCES = new Set([
   'assistant',
   'design_assist',
   'browser_summarize',
+  'production_plan',
 ]);
 
 /** A user-facing foreground session (sidebar-listable). */

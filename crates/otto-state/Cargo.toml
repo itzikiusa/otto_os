@@ -19,6 +19,10 @@ tracing.workspace = true
 tokio.workspace = true
 # DbPool's Executor impl returns sqlx's boxed stream/future types.
 futures-util.workspace = true
+base64.workspace = true
+regex = "1.13"
+serde_yaml.workspace = true
+url = "2.5"
 
 [dev-dependencies]
 tempfile = { workspace = true }

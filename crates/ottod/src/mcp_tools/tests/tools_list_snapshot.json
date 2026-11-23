@@ -49,6 +49,9 @@
     "otto_approve_improvement_edit",
     "otto_ask_human_approval",
     "otto_broadcast_message",
+    "otto_cancel_3d_job",
+    "otto_cancel_audio_job",
+    "otto_cancel_production",
     "otto_cancel_workflow_run",
     "otto_comment_confluence_page",
     "otto_comment_issue",
@@ -58,6 +61,7 @@
     "otto_create_issue",
     "otto_create_personal_agent",
     "otto_create_pr",
+    "otto_create_production",
     "otto_create_scheduled_task",
     "otto_db_children",
     "otto_db_object",
@@ -65,8 +69,15 @@
     "otto_db_schema",
     "otto_delete_personal_agent",
     "otto_delete_scheduled_task",
+    "otto_delete_voice_clip",
     "otto_design_assist",
+    "otto_design_comment",
+    "otto_design_comments",
     "otto_design_link",
+    "otto_design_resolve_comment",
+    "otto_export_3d_artifact",
+    "otto_get_3d_job",
+    "otto_get_audio_job",
     "otto_get_broker_topic",
     "otto_get_confluence_page",
     "otto_get_context_packet",
@@ -78,6 +89,7 @@
     "otto_get_pr",
     "otto_get_pr_checks",
     "otto_get_pr_diff",
+    "otto_get_production",
     "otto_get_scheduled_task",
     "otto_get_scheduled_task_report",
     "otto_get_self_improvement_config",
@@ -87,7 +99,10 @@
     "otto_git_pr_review",
     "otto_git_status",
     "otto_instructions_propose",
+    "otto_list_3d_jobs",
+    "otto_list_3d_providers",
     "otto_list_agent_rooms",
+    "otto_list_audio_jobs",
     "otto_list_broker_clusters",
     "otto_list_broker_topics",
     "otto_list_bundled_skills",
@@ -108,11 +123,15 @@
     "otto_list_personal_agent_templates",
     "otto_list_personal_agents",
     "otto_list_product_stories",
+    "otto_list_productions",
     "otto_list_prs",
     "otto_list_repos",
     "otto_list_scheduled_task_runs",
     "otto_list_scheduled_tasks",
     "otto_list_sessions",
+    "otto_list_tts_providers",
+    "otto_list_tts_voices",
+    "otto_list_voice_clips",
     "otto_list_workflow_runs",
     "otto_list_workflows",
     "otto_list_workspaces",
@@ -126,9 +145,12 @@
     "otto_produce_broker_message",
     "otto_product_story",
     "otto_query_db",
+    "otto_rebuild_production_scene",
+    "otto_redraw_production_item",
     "otto_reject_improvement_edit",
     "otto_remove_personal_agent_schedule",
     "otto_request_secret",
+    "otto_revert_production",
     "otto_rollback_improvement_edit",
     "otto_room_post",
     "otto_room_read",
@@ -149,6 +171,10 @@
     "otto_set_personal_agent_autonomy",
     "otto_set_personal_agent_slack_as_me",
     "otto_set_scheduled_task_enabled",
+    "otto_sim_action",
+    "otto_sim_input",
+    "otto_sim_list",
+    "otto_sim_logs",
     "otto_slack_find_user",
     "otto_slack_list_conversations",
     "otto_slack_mark_unread",
@@ -158,7 +184,13 @@
     "otto_slack_react",
     "otto_slack_read_messages",
     "otto_slack_search",
+    "otto_start_3d_job",
+    "otto_start_music",
     "otto_start_pr_review",
+    "otto_start_production",
+    "otto_start_sound",
+    "otto_steer_production",
+    "otto_synthesize_voice",
     "otto_test_integration",
     "otto_thread_close",
     "otto_thread_list",
@@ -358,6 +390,9 @@
     "otto_approve_improvement_edit",
     "otto_ask_human_approval",
     "otto_broadcast_message",
+    "otto_cancel_3d_job",
+    "otto_cancel_audio_job",
+    "otto_cancel_production",
     "otto_cancel_workflow_run",
     "otto_comment_confluence_page",
     "otto_comment_issue",
@@ -367,6 +402,7 @@
     "otto_create_issue",
     "otto_create_personal_agent",
     "otto_create_pr",
+    "otto_create_production",
     "otto_create_scheduled_task",
     "otto_db_children",
     "otto_db_object",
@@ -374,8 +410,15 @@
     "otto_db_schema",
     "otto_delete_personal_agent",
     "otto_delete_scheduled_task",
+    "otto_delete_voice_clip",
     "otto_design_assist",
+    "otto_design_comment",
+    "otto_design_comments",
     "otto_design_link",
+    "otto_design_resolve_comment",
+    "otto_export_3d_artifact",
+    "otto_get_3d_job",
+    "otto_get_audio_job",
     "otto_get_broker_topic",
     "otto_get_confluence_page",
     "otto_get_context_packet",
@@ -387,6 +430,7 @@
     "otto_get_pr",
     "otto_get_pr_checks",
     "otto_get_pr_diff",
+    "otto_get_production",
     "otto_get_scheduled_task",
     "otto_get_scheduled_task_report",
     "otto_get_self_improvement_config",
@@ -396,7 +440,10 @@
     "otto_git_pr_review",
     "otto_git_status",
     "otto_instructions_propose",
+    "otto_list_3d_jobs",
+    "otto_list_3d_providers",
     "otto_list_agent_rooms",
+    "otto_list_audio_jobs",
     "otto_list_broker_clusters",
     "otto_list_broker_topics",
     "otto_list_bundled_skills",
@@ -417,11 +464,15 @@
     "otto_list_personal_agent_templates",
     "otto_list_personal_agents",
     "otto_list_product_stories",
+    "otto_list_productions",
     "otto_list_prs",
     "otto_list_repos",
     "otto_list_scheduled_task_runs",
     "otto_list_scheduled_tasks",
     "otto_list_sessions",
+    "otto_list_tts_providers",
+    "otto_list_tts_voices",
+    "otto_list_voice_clips",
     "otto_list_workflow_runs",
     "otto_list_workflows",
     "otto_list_workspaces",
@@ -435,9 +486,12 @@
     "otto_produce_broker_message",
     "otto_product_story",
     "otto_query_db",
+    "otto_rebuild_production_scene",
+    "otto_redraw_production_item",
     "otto_reject_improvement_edit",
     "otto_remove_personal_agent_schedule",
     "otto_request_secret",
+    "otto_revert_production",
     "otto_rollback_improvement_edit",
     "otto_room_post",
     "otto_room_read",
@@ -458,6 +512,10 @@
     "otto_set_personal_agent_autonomy",
     "otto_set_personal_agent_slack_as_me",
     "otto_set_scheduled_task_enabled",
+    "otto_sim_action",
+    "otto_sim_input",
+    "otto_sim_list",
+    "otto_sim_logs",
     "otto_slack_find_user",
     "otto_slack_list_conversations",
     "otto_slack_mark_unread",
@@ -467,7 +525,13 @@
     "otto_slack_react",
     "otto_slack_read_messages",
     "otto_slack_search",
+    "otto_start_3d_job",
+    "otto_start_music",
     "otto_start_pr_review",
+    "otto_start_production",
+    "otto_start_sound",
+    "otto_steer_production",
+    "otto_synthesize_voice",
     "otto_test_integration",
     "otto_thread_close",
     "otto_thread_list",
@@ -504,6 +568,9 @@
     "otto_approve_improvement_edit",
     "otto_ask_human_approval",
     "otto_broadcast_message",
+    "otto_cancel_3d_job",
+    "otto_cancel_audio_job",
+    "otto_cancel_production",
     "otto_cancel_workflow_run",
     "otto_comment_confluence_page",
     "otto_comment_issue",
@@ -512,11 +579,19 @@
     "otto_create_issue",
     "otto_create_personal_agent",
     "otto_create_pr",
+    "otto_create_production",
     "otto_create_scheduled_task",
     "otto_delete_personal_agent",
     "otto_delete_scheduled_task",
+    "otto_delete_voice_clip",
     "otto_design_assist",
+    "otto_design_comment",
+    "otto_design_comments",
     "otto_design_link",
+    "otto_design_resolve_comment",
+    "otto_export_3d_artifact",
+    "otto_get_3d_job",
+    "otto_get_audio_job",
     "otto_get_broker_topic",
     "otto_get_confluence_page",
     "otto_get_context_packet",
@@ -527,11 +602,15 @@
     "otto_get_personal_agent_report",
     "otto_get_pr_checks",
     "otto_get_pr_diff",
+    "otto_get_production",
     "otto_get_scheduled_task",
     "otto_get_scheduled_task_report",
     "otto_get_self_improvement_config",
     "otto_get_workflow",
     "otto_git_status",
+    "otto_list_3d_jobs",
+    "otto_list_3d_providers",
+    "otto_list_audio_jobs",
     "otto_list_bundled_skills",
     "otto_list_confluence_page_comments",
     "otto_list_consumer_groups",
@@ -542,15 +621,22 @@
     "otto_list_personal_agent_runs",
     "otto_list_personal_agent_templates",
     "otto_list_personal_agents",
+    "otto_list_productions",
     "otto_list_scheduled_task_runs",
     "otto_list_scheduled_tasks",
+    "otto_list_tts_providers",
+    "otto_list_tts_voices",
+    "otto_list_voice_clips",
     "otto_merge_pr",
     "otto_open_pr_draft",
     "otto_produce_broker_message",
     "otto_query_db",
+    "otto_rebuild_production_scene",
+    "otto_redraw_production_item",
     "otto_reject_improvement_edit",
     "otto_remove_personal_agent_schedule",
     "otto_request_secret",
+    "otto_revert_production",
     "otto_rollback_improvement_edit",
     "otto_run_goal_loop",
     "otto_run_personal_agent",
@@ -562,6 +648,10 @@
     "otto_set_personal_agent_autonomy",
     "otto_set_personal_agent_slack_as_me",
     "otto_set_scheduled_task_enabled",
+    "otto_sim_action",
+    "otto_sim_input",
+    "otto_sim_list",
+    "otto_sim_logs",
     "otto_slack_find_user",
     "otto_slack_list_conversations",
     "otto_slack_mark_unread",
@@ -571,7 +661,13 @@
     "otto_slack_react",
     "otto_slack_read_messages",
     "otto_slack_search",
+    "otto_start_3d_job",
+    "otto_start_music",
     "otto_start_pr_review",
+    "otto_start_production",
+    "otto_start_sound",
+    "otto_steer_production",
+    "otto_synthesize_voice",
     "otto_test_integration",
     "otto_transition_issue",
     "otto_ui_request_control",
@@ -3114,6 +3210,526 @@
         }
       }
     },
+    "otto_design_comments": {
+      "type": "object",
+      "required": [
+        "artifact_id"
+      ],
+      "properties": {
+        "artifact_id": {
+          "type": "string",
+          "description": "Design artifact id or exact title."
+        },
+        "version_id": {
+          "type": "string"
+        },
+        "resolved": {
+          "type": "boolean"
+        }
+      }
+    },
+    "otto_design_comment": {
+      "type": "object",
+      "required": [
+        "artifact_id",
+        "body"
+      ],
+      "properties": {
+        "artifact_id": {
+          "type": "string",
+          "description": "Design artifact id or exact title."
+        },
+        "body": {
+          "type": "string"
+        },
+        "version_id": {
+          "type": "string"
+        },
+        "parent_id": {
+          "type": "string"
+        },
+        "pin_3d": {
+          "type": "object"
+        }
+      }
+    },
+    "otto_design_resolve_comment": {
+      "type": "object",
+      "required": [
+        "artifact_id",
+        "comment_id"
+      ],
+      "properties": {
+        "artifact_id": {
+          "type": "string",
+          "description": "Design artifact id or exact title."
+        },
+        "comment_id": {
+          "type": "string"
+        },
+        "resolved": {
+          "type": "boolean"
+        }
+      }
+    },
+    "otto_list_3d_providers": {
+      "type": "object",
+      "properties": {}
+    },
+    "otto_start_3d_job": {
+      "type": "object",
+      "required": [
+        "workspace_id"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "provider_id": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "image_artifact_id": {
+          "type": "string"
+        },
+        "source_artifact_id": {
+          "type": "string"
+        },
+        "source_version_id": {
+          "type": "string"
+        },
+        "preset": {
+          "type": "string"
+        },
+        "poly_budget": {
+          "type": "integer"
+        },
+        "title": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_get_3d_job": {
+      "type": "object",
+      "required": [
+        "job_id"
+      ],
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "description": "3D job id (otto.list_3d_jobs)."
+        }
+      }
+    },
+    "otto_list_3d_jobs": {
+      "type": "object",
+      "required": [
+        "workspace_id"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "artifact_id": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        }
+      }
+    },
+    "otto_cancel_3d_job": {
+      "type": "object",
+      "required": [
+        "job_id"
+      ],
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "description": "3D job id (otto.list_3d_jobs)."
+        }
+      }
+    },
+    "otto_export_3d_artifact": {
+      "type": "object",
+      "required": [
+        "artifact_id",
+        "relative_path"
+      ],
+      "properties": {
+        "artifact_id": {
+          "type": "string",
+          "description": "Design artifact id or exact title."
+        },
+        "relative_path": {
+          "type": "string"
+        },
+        "version_id": {
+          "type": "string"
+        },
+        "overwrite": {
+          "type": "boolean"
+        }
+      }
+    },
+    "otto_list_tts_providers": {
+      "type": "object",
+      "properties": {}
+    },
+    "otto_list_tts_voices": {
+      "type": "object",
+      "required": [
+        "provider_id"
+      ],
+      "properties": {
+        "provider_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_synthesize_voice": {
+      "type": "object",
+      "required": [
+        "workspace_id",
+        "voice_id",
+        "text"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "voice_id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "provider_id": {
+          "type": "string"
+        },
+        "character_name": {
+          "type": "string"
+        },
+        "story_id": {
+          "type": "string"
+        },
+        "artifact_id": {
+          "type": "string"
+        },
+        "format": {
+          "type": "string"
+        },
+        "speed": {
+          "type": "number"
+        },
+        "title": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_list_voice_clips": {
+      "type": "object",
+      "required": [
+        "workspace_id"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "story_id": {
+          "type": "string"
+        },
+        "artifact_id": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        }
+      }
+    },
+    "otto_delete_voice_clip": {
+      "type": "object",
+      "required": [
+        "clip_id"
+      ],
+      "properties": {
+        "clip_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_create_production": {
+      "type": "object",
+      "required": [
+        "workspace_id",
+        "description"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "use": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string",
+          "description": "Any creation of a project (otto.get_production's project_id): the new scene is in that project and reuses its made characters and objects. Omitted: a new project."
+        }
+      }
+    },
+    "otto_get_production": {
+      "type": "object",
+      "required": [
+        "production_id"
+      ],
+      "properties": {
+        "production_id": {
+          "type": "string",
+          "description": "Production id (otto.list_productions)."
+        }
+      }
+    },
+    "otto_list_productions": {
+      "type": "object",
+      "required": [
+        "workspace_id"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_start_production": {
+      "type": "object",
+      "required": [
+        "production_id"
+      ],
+      "properties": {
+        "production_id": {
+          "type": "string",
+          "description": "Production id (otto.list_productions)."
+        }
+      }
+    },
+    "otto_cancel_production": {
+      "type": "object",
+      "required": [
+        "production_id"
+      ],
+      "properties": {
+        "production_id": {
+          "type": "string",
+          "description": "Production id (otto.list_productions)."
+        }
+      }
+    },
+    "otto_steer_production": {
+      "type": "object",
+      "required": [
+        "production_id",
+        "comment"
+      ],
+      "properties": {
+        "production_id": {
+          "type": "string",
+          "description": "Production id (otto.list_productions)."
+        },
+        "comment": {
+          "type": "string"
+        },
+        "pins": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "note"
+            ],
+            "properties": {
+              "note": {
+                "type": "string"
+              },
+              "item_id": {
+                "type": "string"
+              },
+              "artifact_id": {
+                "type": "string"
+              },
+              "point": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "otto_redraw_production_item": {
+      "type": "object",
+      "required": [
+        "production_id",
+        "item_id"
+      ],
+      "properties": {
+        "production_id": {
+          "type": "string",
+          "description": "Production id (otto.list_productions)."
+        },
+        "item_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_revert_production": {
+      "type": "object",
+      "required": [
+        "production_id",
+        "revision_id"
+      ],
+      "properties": {
+        "production_id": {
+          "type": "string",
+          "description": "Production id (otto.list_productions)."
+        },
+        "revision_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_rebuild_production_scene": {
+      "type": "object",
+      "required": [
+        "production_id"
+      ],
+      "properties": {
+        "production_id": {
+          "type": "string",
+          "description": "Production id (otto.list_productions)."
+        }
+      }
+    },
+    "otto_start_sound": {
+      "type": "object",
+      "required": [
+        "workspace_id",
+        "prompt",
+        "seconds"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "seconds": {
+          "type": "number"
+        },
+        "loop": {
+          "type": "boolean"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "title": {
+          "type": "string"
+        },
+        "story_id": {
+          "type": "string"
+        },
+        "artifact_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_start_music": {
+      "type": "object",
+      "required": [
+        "workspace_id",
+        "prompt",
+        "seconds"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "seconds": {
+          "type": "number"
+        },
+        "loop": {
+          "type": "boolean"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "title": {
+          "type": "string"
+        },
+        "story_id": {
+          "type": "string"
+        },
+        "artifact_id": {
+          "type": "string"
+        },
+        "bpm": {
+          "type": "integer"
+        }
+      }
+    },
+    "otto_get_audio_job": {
+      "type": "object",
+      "required": [
+        "job_id"
+      ],
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "description": "Audio job id (otto.list_audio_jobs)."
+        }
+      }
+    },
+    "otto_list_audio_jobs": {
+      "type": "object",
+      "required": [
+        "workspace_id"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        }
+      }
+    },
+    "otto_cancel_audio_job": {
+      "type": "object",
+      "required": [
+        "job_id"
+      ],
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "description": "Audio job id (otto.list_audio_jobs)."
+        }
+      }
+    },
     "otto_slack_my_workspaces": {
       "type": "object",
       "required": [
@@ -4407,6 +5023,170 @@
           "description": "Personal agent id or name (otto.list_personal_agents)."
         },
         "schedule_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_sim_list": {
+      "type": "object",
+      "properties": {
+        "platform": {
+          "type": "string",
+          "enum": [
+            "ios",
+            "android"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "booted",
+            "booting",
+            "shutdown",
+            "offline"
+          ]
+        },
+        "refresh": {
+          "type": "boolean"
+        }
+      }
+    },
+    "otto_sim_logs": {
+      "type": "object",
+      "required": [
+        "device_id"
+      ],
+      "properties": {
+        "device_id": {
+          "type": "string"
+        },
+        "lines": {
+          "type": "integer"
+        },
+        "level": {
+          "type": "string",
+          "enum": [
+            "verbose",
+            "debug",
+            "info",
+            "warn",
+            "error",
+            "fatal"
+          ]
+        },
+        "filter": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_sim_action": {
+      "type": "object",
+      "required": [
+        "device_id",
+        "action"
+      ],
+      "properties": {
+        "device_id": {
+          "type": "string"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "boot",
+            "shutdown",
+            "open_url",
+            "orientation",
+            "appearance",
+            "launch_app",
+            "terminate_app"
+          ]
+        },
+        "url": {
+          "type": "string"
+        },
+        "auto_forward_localhost": {
+          "type": "boolean"
+        },
+        "orientation": {
+          "type": "string",
+          "enum": [
+            "portrait",
+            "landscape",
+            "portrait_upside_down",
+            "landscape_right"
+          ]
+        },
+        "appearance": {
+          "type": "string",
+          "enum": [
+            "light",
+            "dark"
+          ]
+        },
+        "app_id": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "wait": {
+          "type": "boolean"
+        },
+        "open_gui": {
+          "type": "boolean"
+        }
+      }
+    },
+    "otto_sim_input": {
+      "type": "object",
+      "required": [
+        "device_id",
+        "type"
+      ],
+      "properties": {
+        "device_id": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "tap",
+            "swipe",
+            "text",
+            "key_event"
+          ]
+        },
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "x1": {
+          "type": "number"
+        },
+        "y1": {
+          "type": "number"
+        },
+        "x2": {
+          "type": "number"
+        },
+        "y2": {
+          "type": "number"
+        },
+        "duration_ms": {
+          "type": "integer"
+        },
+        "normalized": {
+          "type": "boolean"
+        },
+        "text": {
+          "type": "string"
+        },
+        "key": {
           "type": "string"
         }
       }

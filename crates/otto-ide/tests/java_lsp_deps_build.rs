@@ -426,6 +426,8 @@ async fn multi_repo_java_prefers_attached_local_module_over_m2_jar_and_falls_bac
     )
     .unwrap();
     let st_javac = Command::new("javac")
+        // The system javac and Maven may use different installed JDKs.
+        .args(["--release", "8"])
         .arg("-g")
         .arg("-d")
         .arg(&v1_cls_dir)
@@ -470,6 +472,10 @@ async fn multi_repo_java_prefers_attached_local_module_over_m2_jar_and_falls_bac
   <groupId>com.acme</groupId>
   <artifactId>service-app</artifactId>
   <version>1.0.0</version>
+  <properties>
+    <maven.compiler.source>8</maven.compiler.source>
+    <maven.compiler.target>8</maven.compiler.target>
+  </properties>
   <dependencies>
     <dependency>
       <groupId>com.acme</groupId>

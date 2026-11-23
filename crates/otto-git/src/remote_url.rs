@@ -25,14 +25,30 @@ pub fn validate_remote_url(url: &str) -> Result<()> {
         if !matches!(scheme, "http" | "https" | "ssh" | "git") {
             return bad("scheme must be http, https, ssh or git");
         }
-        let (host, path) = match rest.split_once('/') {
+        let (authority, path) = match rest.split_once('/') {
             Some(p) => p,
             None => return bad("missing path"),
         };
-        // `user[:pass]@host[:port]` — only the host half has to be non-empty.
-        let host = host.rsplit_once('@').map(|(_, h)| h).unwrap_or(host);
+        // `user[:pass]@host[:port]` — reject leading `-` in host (for all
+        // schemes) and in userinfo (for `ssh://`) so OpenSSH cannot parse
+        // user/host as CLI flags like `-oProxyCommand=...`.
+        let (userinfo, host) = match authority.rsplit_once('@') {
+            Some((u, h)) => (Some(u), h),
+            None => (None, authority),
+        };
+        if scheme == "ssh" {
+            if let Some(ui) = userinfo {
+                let user = ui.split_once(':').map(|(u, _)| u).unwrap_or(ui);
+                if user.starts_with('-') {
+                    return bad("ssh user must not start with '-'");
+                }
+            }
+        }
         if host.is_empty() {
             return bad("missing host");
+        }
+        if host.starts_with('-') {
+            return bad("host must not start with '-'");
         }
         if path.is_empty() {
             return bad("missing path");
@@ -42,6 +58,7 @@ pub fn validate_remote_url(url: &str) -> Result<()> {
     // scp-like `user@host:path`.
     let ok_ident = |v: &str| {
         !v.is_empty()
+            && !v.starts_with('-')
             && v.chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
     };
@@ -80,5 +97,41 @@ pub fn strip_url_userinfo(url: &str) -> String {
             &rest[path_start..]
         ),
         None => url.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_remote_url;
+
+    #[test]
+    fn rejects_leading_dash_in_ssh_and_scp_user_or_host() {
+        for bad in [
+            "ssh://-oProxyCommand=id@example.com/org/repo.git",
+            "ssh://-user:pass@example.com/org/repo.git",
+            "ssh://git@-oProxyCommand=id/org/repo.git",
+            "ssh://-host.example/org/repo.git",
+            "https://-host.example/org/repo.git",
+            "git@-oProxyCommand=id:org/repo.git",
+            "-oProxyCommand=id@example.com:org/repo.git",
+        ] {
+            assert!(
+                validate_remote_url(bad).is_err(),
+                "must reject leading-dash remote url: {bad}"
+            );
+        }
+
+        for good in [
+            "ssh://git@my-host.example:2222/org/repo.git",
+            "ssh://deploy-user@my-host.example/org/repo.git",
+            "git@my-host.example:org/repo.git",
+            "deploy-user@my-host.example:org/repo.git",
+            "https://my-host.example/org/repo.git",
+        ] {
+            assert!(
+                validate_remote_url(good).is_ok(),
+                "must accept valid remote url: {good}"
+            );
+        }
     }
 }

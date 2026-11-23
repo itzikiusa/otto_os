@@ -87,8 +87,13 @@ pub fn classify_peer(
             kind: PeerKind::Other,
         };
     }
-    let host = host.unwrap_or("");
-    if host.is_empty() || is_loopback_host(host) {
+    let Some(host) = host.filter(|h| !h.is_empty()) else {
+        return RequestPeer {
+            ip: peer,
+            kind: PeerKind::Other,
+        };
+    };
+    if is_loopback_host(host) {
         return RequestPeer {
             ip: peer,
             kind: PeerKind::Local,
@@ -197,10 +202,16 @@ mod tests {
 
     #[test]
     fn loopback_names_and_direct_tailnet_peers() {
-        for h in [None, Some("localhost"), Some("127.0.0.1"), Some("[::1]")] {
+        for h in [Some("localhost"), Some("127.0.0.1"), Some("[::1]")] {
             let p = classify_peer(ip("127.0.0.1"), h, None, false);
             assert_eq!(p.kind, PeerKind::Local, "{h:?}");
             assert!(p.trusted_for_devices());
+        }
+        // Absent or empty Host / :authority on loopback MUST fail closed.
+        for h in [None, Some("")] {
+            let p = classify_peer(ip("127.0.0.1"), h, None, false);
+            assert_eq!(p.kind, PeerKind::Other, "{h:?}");
+            assert!(!p.trusted_for_devices());
         }
         let direct = classify_peer(ip("100.100.3.4"), Some("100.120.1.1"), None, false);
         assert_eq!(direct.kind, PeerKind::Tailnet);

@@ -355,3 +355,72 @@ async fn asset_route_refuses_key_like_files() {
         assert_eq!(status, want, "{path}: {body}");
     }
 }
+
+#[tokio::test]
+async fn asset_route_hardens_active_content_headers() {
+    use axum::http::header;
+    use tower::ServiceExt;
+
+    let (app, td, id) = fixture(WorkspaceRole::Viewer).await;
+    std::fs::write(td.path().join("ok.png"), b"\x89PNG").unwrap();
+    std::fs::write(td.path().join("doc.pdf"), b"%PDF-1.4").unwrap();
+    std::fs::write(td.path().join("evil.html"), b"<script>alert(1)</script>").unwrap();
+    std::fs::write(
+        td.path().join("evil.svg"),
+        b"<svg onload=alert(1) xmlns=\"http://www.w3.org/2000/svg\"/>",
+    )
+    .unwrap();
+    std::fs::write(td.path().join("evil.js"), b"alert(1)").unwrap();
+
+    for (path, expect_sandbox) in [
+        ("ok.png", false),
+        ("doc.pdf", false),
+        ("evil.html", true),
+        ("evil.svg", true),
+        ("evil.js", true),
+    ] {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "/workspaces/{WS}/vault/vaults/{id}/asset?path={path}"
+            ))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{path}");
+        assert_eq!(
+            resp.headers()
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .and_then(|v| v.to_str().ok()),
+            Some("nosniff"),
+            "{path}"
+        );
+        if expect_sandbox {
+            assert_eq!(
+                resp.headers()
+                    .get(header::CONTENT_SECURITY_POLICY)
+                    .and_then(|v| v.to_str().ok()),
+                Some("sandbox; default-src 'none'"),
+                "{path}"
+            );
+            assert_eq!(
+                resp.headers()
+                    .get(header::CONTENT_DISPOSITION)
+                    .and_then(|v| v.to_str().ok()),
+                Some("attachment"),
+                "{path}"
+            );
+        } else {
+            assert!(
+                resp.headers()
+                    .get(header::CONTENT_SECURITY_POLICY)
+                    .is_none(),
+                "{path}"
+            );
+            assert!(
+                resp.headers().get(header::CONTENT_DISPOSITION).is_none(),
+                "{path}"
+            );
+        }
+    }
+}

@@ -217,6 +217,10 @@ fn remote_script_escapes_paths_and_applies_memory_budgets() {
     assert!(script.contains("GOMEMLIMIT=\"${GOMEMLIMIT:-512MiB}\""));
     assert!(script.contains("--max-old-space-size=384"));
     assert!(script.contains("exec 'pyright-langserver' '--stdio'"));
+    assert!(
+        script.contains("mkfifo -m 600") && script.contains("kill -TERM \"$pid\""),
+        "remote LSP script must wrap stdio with EOF-kill watcher: {script}"
+    );
 }
 
 #[tokio::test]

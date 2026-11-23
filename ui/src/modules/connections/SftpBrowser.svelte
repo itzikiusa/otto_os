@@ -228,6 +228,15 @@
       confirmLabel: 'Create',
     });
     if (!name) return;
+    if (isProd) {
+      const ok = await confirmProd({
+        env: conn.environment,
+        verb: 'Create folder',
+        where: `SFTP ${hostLabel()}`,
+        what: `Create folder “${name}” in ${view.cwd || '/'}`,
+      });
+      if (!ok) return;
+    }
     try {
       await sftp.mkdir(conn.id, name);
       await sftp.refresh(conn.id);
@@ -298,7 +307,7 @@
     {#if isProd}
       <div class="prod-banner" role="note">
         <EnvBadge env={conn.environment} />
-        <span>Production host — uploads, renames and deletes ask you to confirm first.</span>
+        <span>Production host — uploads, new folders, renames and deletes ask you to confirm first.</span>
       </div>
     {/if}
     <!-- Toolbar: up / refresh / new folder / upload -->

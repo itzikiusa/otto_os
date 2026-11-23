@@ -162,9 +162,21 @@ pub async fn run_agent_turn(
     t: AgentTurn<'_>,
     on_ready: impl FnOnce(&Id),
 ) -> otto_core::Result<(String, Id)> {
+    run_agent_turn_cancellable(manager, t, None, on_ready).await
+}
+
+/// [`run_agent_turn`] with an owner cancellation flag (`CancelSignal::share_flag`).
+/// Used by [`crate::assist::run_assist_job`] so clicking Stop interrupts the
+/// running turn promptly instead of holding the document's claim until `turn_cap`.
+pub async fn run_agent_turn_cancellable(
+    manager: &Arc<SessionManager>,
+    t: AgentTurn<'_>,
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    on_ready: impl FnOnce(&Id),
+) -> otto_core::Result<(String, Id)> {
     require_owned_resume(manager.as_ref(), &t.ws.id, &t.user.id, t.existing).await?;
     let Some(done_file) = t.done_file else {
-        return run_session_turn(
+        return run_session_turn_cancellable(
             manager,
             t.ws,
             t.user,
@@ -175,11 +187,13 @@ pub async fn run_agent_turn(
             t.meta,
             t.prompt,
             t.stuck_after,
+            cancel,
             on_ready,
         )
         .await;
     };
     let opts = TurnOpts {
+        cancel,
         done_file: Some(done_file),
         done_file_validator: Some((|text: &str| !text.trim().is_empty()) as fn(&str) -> bool),
         kill_on_stall: true,
@@ -572,6 +586,14 @@ async fn run_session_turn_inner(
                 }
                 None => return Err(Error::Upstream("agent session vanished".into())),
                 _ => {}
+            }
+            // A done file the agent already wrote proves it took the prompt
+            // (and must not get the prompt pasted again on top of its work).
+            if let Some(df) = &opts.done_file {
+                if tokio::fs::metadata(df).await.is_ok_and(|m| m.len() > 0) {
+                    entered = true;
+                    break;
+                }
             }
             if Instant::now() >= confirm_deadline {
                 break;

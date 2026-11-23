@@ -15,13 +15,16 @@
   import { loadErrorText } from '../../lib/loadError';
   import { toastError } from '../../lib/toastError';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
+  import ApprovalActions from '../../lib/components/ApprovalActions.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus, sessionState } from '../../lib/status';
   import { approvalConcernsFeed, mergeActivity } from './activityFeed';
   import type {
+    McpApproval,
     PersonalAgentActivity,
     PersonalAgentActivityApproval,
     PersonalAgentActivityItem,
@@ -104,6 +107,44 @@
     return out.sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, 120);
   });
   const waiting = $derived((data?.approvals ?? []).filter((a) => a.status === 'pending'));
+  let approvalDetails = $state<Record<string, McpApproval>>({});
+  let detailsLoading = $state(false);
+  let detailsError = $state<string | null>(null);
+  let detailsSeq = 0;
+
+  async function loadApprovalDetails(): Promise<void> {
+    const seq = ++detailsSeq;
+    detailsLoading = true;
+    detailsError = null;
+    try {
+      const list = await mcpCpApi.cpApprovals('pending');
+      if (seq !== detailsSeq) return;
+      approvalDetails = Object.fromEntries(list.map((x) => [x.id, x]));
+    } catch (e) {
+      if (seq === detailsSeq) detailsError = loadErrorText(e);
+    } finally {
+      if (seq === detailsSeq) detailsLoading = false;
+    }
+  }
+
+  const waitingKey = $derived(waiting.map((a) => a.approval_id).join(','));
+  $effect(() => {
+    const key = waitingKey;
+    if (!key) {
+      approvalDetails = {};
+      detailsError = null;
+      return;
+    }
+    untrack(() => void loadApprovalDetails());
+  });
+
+  function prettyArgs(json: string): string {
+    try {
+      return JSON.stringify(JSON.parse(json), null, 2);
+    } catch {
+      return json;
+    }
+  }
 
   const ITEM_ICON: Record<PersonalAgentActivityItem['kind'], IconName> = {
     tool_call: 'zap',
@@ -159,19 +200,11 @@
     }
   }
 
-  async function decide(a: PersonalAgentActivityApproval, approved: boolean): Promise<void> {
-    const what = approvalWhat(a);
-    if (!approved) {
-      const ok = await confirmer.ask(
-        `Deny “${what}” from ${agentName}? The tool will not run.`,
-        { title: 'Deny this?', confirmLabel: 'Deny', danger: true },
-      );
-      if (!ok) return;
-    }
+  async function decide(a: PersonalAgentActivityApproval, approved: boolean, reason?: string | null): Promise<void> {
     deciding = a.approval_id;
     decidingAs = approved ? 'approve' : 'deny';
     try {
-      await mcpCpApi.cpDecide(a.approval_id, { approved });
+      await mcpCpApi.cpDecide(a.approval_id, { approved, note: reason?.trim() || null });
       await load();
     } catch (e) {
       toastError(approved ? 'Couldn’t approve' : 'Couldn’t deny', e);
@@ -208,6 +241,7 @@
         <h3>Waiting for you</h3>
         <ul class="list">
           {#each waiting as a (a.approval_id)}
+            {@const full = approvalDetails[a.approval_id]}
             <li class="wait">
               <Icon name="hand" size={14} />
               <div class="grow">
@@ -215,12 +249,26 @@
                 <p class="detail">{agentName} is waiting for you to allow otto.{a.tool}.</p>
                 {#if a.detail}<p class="detail">{a.detail}</p>{/if}
                 {#if a.risk_label === 'sensitive'}<span class="chip pa-ichip pa-warn">Sensitive</span>{:else if a.risk_label === 'agent_rule'}<span class="chip">Agent rule</span>{/if}
+                {#if full?.args_redacted_json && full.args_redacted_json !== '{}'}
+                  <pre class="args" dir="ltr">{prettyArgs(full.args_redacted_json)}</pre>
+                {:else if detailsLoading && !full}
+                  <Skeleton rows={1} height={18} label="request arguments" />
+                {:else if !full}
+                  <p class="detail">Open the approval queue to inspect full arguments before approving.{detailsError ? ` (${detailsError})` : ''}</p>
+                {/if}
                 <div class="wait-actions">
-                  <button class="btn small" disabled={deciding === a.approval_id} aria-label="Deny {approvalWhat(a)}" onclick={() => void decide(a, false)}>{deciding === a.approval_id && decidingAs === 'deny' ? 'Denying…' : 'Deny'}</button>
-                  <button class="btn small primary" disabled={deciding === a.approval_id} aria-label="Approve {approvalWhat(a)}" onclick={() => void decide(a, true)}>
-                    {deciding === a.approval_id && decidingAs === 'approve' ? 'Approving…' : 'Approve'}
-                  </button>
-                  <button class="link" onclick={() => router.go('mcp/activity')}>Open approval</button>
+                  <ApprovalActions
+                    busy={deciding === a.approval_id ? decidingAs : null}
+                    disabled={!full}
+                    disabledReason={detailsLoading ? 'Loading request arguments for review…' : 'Open the approval queue to inspect arguments before deciding.'}
+                    denyTarget={`“${approvalWhat(a)}” from ${agentName}`}
+                    onapprove={() => void decide(a, true)}
+                    ondeny={(reason) => void decide(a, false, reason)}
+                  >
+                    {#snippet extra()}
+                      <button class="link" onclick={() => router.go('mcp/activity')}>Open approval</button>
+                    {/snippet}
+                  </ApprovalActions>
                 </div>
               </div>
               <span class="meta"><RelTime iso={a.at} /></span>
@@ -285,6 +333,7 @@
   .meta { color: var(--text-dim); font-size: var(--fs-s); white-space: nowrap; }
   .pa-ichip { display: inline-flex; align-items: center; gap: 4px; }
   .pa-warn { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 35%, transparent); }
+  .args { margin: 6px 0 0; font-family: var(--font-mono); font-size: var(--fs-s); background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-s); padding: 8px; max-height: 180px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
   .wait-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
   .wait-actions .link { margin-top: 0; }
   .link { border: 0; background: none; padding: 0; margin-top: 6px; font: inherit; font-size: var(--fs-s); color: var(--accent-text); cursor: pointer; }

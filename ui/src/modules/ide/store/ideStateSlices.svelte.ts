@@ -235,6 +235,7 @@ import {
   ideTargetKey,
   type IdeCodeAction,
   type IdeDiagnostic,
+  type IdeFsEntry,
   type IdeFsTreeResp,
   type IdeGutterItem,
   type IdeNavLocation,
@@ -383,13 +384,20 @@ export function syncAdditionalRootsFromEnvState(
   onChanged();
 }
 
+/** Same entries in the same order: a live re-read that found nothing new changes nothing. */
+function sameListing(a: readonly IdeFsEntry[] | undefined, b: readonly IdeFsEntry[]): boolean {
+  return a !== undefined && a.length === b.length && JSON.stringify(a) === JSON.stringify(b);
+}
+
 export async function fetchIdeWorkspaceTree(
   host: IdeTreeTabsHost,
   dirPath: string | undefined,
   onProbeBuildTool: () => void,
-  opts: { deferTabRestore?: boolean } = {},
+  // `listingOnly`: a live refresh (ideTreeLive) — re-read this one listing in place, nothing else.
+  opts: { deferTabRestore?: boolean; listingOnly?: boolean } = {},
 ): Promise<void> {
   if (!host.target.root || host.collabIsGuest) return;
+  const live = opts.listingOnly === true;
   const primary = normalizeRootPath(host.target.root);
   const normDir = dirPath ? normalizeRootPath(dirPath) : '';
   const isRoot = !normDir || normDir === primary;
@@ -402,7 +410,7 @@ export async function fetchIdeWorkspaceTree(
   // the target changed belongs to the old project and must not replace the new one.
   const key = ideTargetKey(host.target);
   const stale = (): boolean => ideTargetKey(host.target) !== key;
-  if (isRoot) {
+  if (isRoot && !live) {
     host.treeLoading = true;
     host.treeError = null;
     ideTreeDirErrors.reset();
@@ -425,11 +433,18 @@ export async function fetchIdeWorkspaceTree(
       const entries = host.target.kind === 'local'
         ? rawEntries.map((e) => ({ ...e, path: canonicalizeLocalProjectPath(e.path, host.projectRoots) }))
         : rawEntries;
+      const rootKey = normalizeRootPath(host.target.root);
+      if (live) {
+        if (!sameListing(host.treeRootEntries, entries)) {
+          host.treeRootEntries = entries;
+          host.childrenByDir = { ...host.childrenByDir, [rootKey]: entries };
+        }
+        return;
+      }
       host.treeRootEntries = entries;
       ideProjectHealth.clear();
       // A root load is a refresh: expanded folders refetch, and collapsed ones drop their
       // cached listing so the next expand reads the disk instead of a stale snapshot.
-      const rootKey = normalizeRootPath(host.target.root);
       const kept: typeof host.childrenByDir = { [rootKey]: entries };
       for (const [dir, children] of Object.entries(host.childrenByDir)) {
         if (dir === rootKey || !host.expandedDirs[dir]) continue;
@@ -454,18 +469,42 @@ export async function fetchIdeWorkspaceTree(
       const entries = host.target.kind === 'local'
         ? rawEntries.map((e) => ({ ...e, path: canonicalizeLocalProjectPath(e.path, host.projectRoots) }))
         : rawEntries;
+      if (live && sameListing(host.childrenByDir[normDir], entries)) return;
       host.childrenByDir = { ...host.childrenByDir, [normDir]: entries };
       ideTreeDirErrors.clear(normDir);
     }
   } catch (e) {
-    if (stale()) return;
+    // A live re-read that fails (folder just deleted, daemon restarting) keeps what is shown.
+    if (stale() || live) return;
     if (isRoot) {
       host.treeError = loadErrorText(e);
       ideProjectHealth.noteRootError(host.target, e, host.treeError); // a deleted folder / host down (I3-12)
     } else if (normDir) ideTreeDirErrors.set(normDir, loadErrorText(e));
   } finally {
-    if (isRoot && !stale()) host.treeLoading = false;
+    if (isRoot && !live && !stale()) host.treeLoading = false;
   }
+}
+
+const dirLoads = new Map<string, Promise<void>>();
+
+/** `fetchIdeWorkspaceTree` with one listing of a folder at a time: an expand, a reveal and the
+ *  tree's lazy load of a folder on screen share it. */
+export function loadIdeWorkspaceTree(host: IdeTreeTabsHost, dirPath: string | undefined, onProbeBuildTool: () => void): Promise<void> {
+  if (!dirPath) return fetchIdeWorkspaceTree(host, undefined, onProbeBuildTool);
+  const key = `${ideTargetKey(host.target)}\u0000${normalizeRootPath(dirPath)}`;
+  const cur = dirLoads.get(key);
+  if (cur) return cur;
+  const p = fetchIdeWorkspaceTree(host, dirPath, onProbeBuildTool).finally(() => dirLoads.delete(key));
+  dirLoads.set(key, p);
+  return p;
+}
+
+/** The open folders after `dir` is toggled to `open`: collapsing folds everything under it,
+ *  so opening it again shows its direct children only. */
+export function toggledExpansion(expanded: Record<string, boolean>, dir: string, open: boolean): Record<string, boolean> {
+  const next = { ...expanded, [dir]: open };
+  if (!open) for (const d of Object.keys(next)) if (d.startsWith(`${dir}/`)) delete next[d];
+  return next;
 }
 
 export function performCloseTabBatch(
@@ -490,7 +529,7 @@ export function performCloseTabBatch(
   } else if (!host.tabs.some((t) => t.path === host.activePath)) {
     host.activePath = host.tabs[0].path;
   }
-  saveWorkspaceOpenTabs(host.target.root, host.tabs.map((t) => t.path), host.activePath, host.splitPath);
+  saveWorkspaceOpenTabs(host.target.root, host.tabs, host.activePath, host.splitPath);
   host.syncWorkspacePort();
 }
 

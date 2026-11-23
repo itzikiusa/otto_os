@@ -941,6 +941,49 @@ fn first_doc_columns(doc: &Document) -> Vec<String> {
 
 // --- statement execution -----------------------------------------------------
 
+/// Whether executing `statement` on MongoDB would spawn the local `mongosh`
+/// CLI (full Node.js runtime on the Otto daemon host): either a detected
+/// mongosh script or any split statement that the native parser/SQL translator
+/// does not handle directly.
+pub fn requires_mongosh(statement: &str) -> bool {
+    let effective = shell_helper(statement).unwrap_or(statement);
+    if crate::types::looks_like_mongosh_script(effective) {
+        return true;
+    }
+    split_statements(effective).into_iter().any(|stmt| {
+        if stmt.trim_start().starts_with('{') || mongo_sql::looks_like_sql(&stmt) {
+            return false;
+        }
+        parse_command(&stmt).is_err()
+    })
+}
+
+fn mongosh_is_authorized(cfg: &ResolvedConfig) -> Result<()> {
+    if cfg
+        .params
+        .get("__read_only_execution")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return Err(otto_core::Error::Forbidden(
+            "mongosh scripts cannot execute on a read-only connection or query".into(),
+        ));
+    }
+    if cfg
+        .params
+        .get("__mongosh_authorized")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Err(otto_core::Error::Forbidden(
+            "mongosh script execution runs local JavaScript on the Otto daemon host and \
+             requires the root account"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 impl MongoDriver {
     /// Run every statement from a multi-statement paste in order and fold the
     /// results into the shared batch shape: the **FIRST** statement's result is
@@ -1004,7 +1047,15 @@ impl MongoDriver {
             // Classification uses this same strict parser: unrecognized shell
             // expressions have already passed the service's write-policy gate.
             // Never retry a failed native operation: it may have side effects.
-            Err(_) => return self.run_script(cfg, req, true).await,
+            // Non-root callers cannot fall back to unsandboxed local `mongosh`.
+            Err(error) => {
+                if let Err(forbidden) = mongosh_is_authorized(cfg) {
+                    return Err(otto_core::Error::Forbidden(format!(
+                        "{forbidden} (native parse error: {error})"
+                    )));
+                }
+                return self.run_script(cfg, req, true).await;
+            }
         };
         // The active database arrives in `req.node` as a plain name (the UI's
         // active-DB selector, e.g. "promotions"), matching how SQL engines treat
@@ -1751,6 +1802,7 @@ impl MongoDriver {
         req: &QueryRequest,
         expression: bool,
     ) -> Result<QueryResult> {
+        mongosh_is_authorized(cfg)?;
         /// A bootstrap script legitimately builds indexes; an interactive query
         /// console still needs SOME bound. Generous on purpose.
         const SCRIPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
@@ -2836,11 +2888,14 @@ fn is_unauthorized(e: &impl std::fmt::Display) -> bool {
     msg.contains("Unauthorized") || msg.contains("not authorized")
 }
 
-// --- submodules: keyset pagination, shorthand, TLS, the Processes panel -----
+// --- submodules: completion catalog, keyset pagination, shorthand, TLS, the Processes panel
+mod catalog;
 mod keyset;
 mod processes;
 mod shorthand;
 mod tls_opts;
+pub(crate) use catalog::resolve_sql_collection;
+use catalog::{MONGO_METHODS, MONGO_OPERATORS, MONGO_SQL_FUNCTIONS, MONGO_SQL_KEYWORDS};
 #[cfg(test)]
 use keyset::id_after;
 use keyset::{keyset_filter, last_row_id};
@@ -3864,119 +3919,6 @@ fn docs_to_result(docs: Vec<Document>, truncated: bool, started: Instant) -> Que
     }
 }
 
-// --- aggregation operator/stage catalog for completion ----------------------
-
-/// Resolve which collection a SQL column slot refers to, for field completion.
-/// Resolution order, mirroring how `mongo_sql` resolves field paths:
-///   1. an explicit `qualifier.` that names a FROM table or alias → that collection;
-///   2. otherwise the base (first) FROM collection — this also handles an embedded
-///      dotted path like `WHERE address.city`, where `address` is NOT a table but
-///      a field path on the base collection (the field list already carries the
-///      dotted paths, which the editor filters against the typed prefix);
-///   3. failing any FROM table, the collection selected in the schema tree.
-pub(crate) fn resolve_sql_collection(
-    sctx: &crate::complete::sql::SqlCtx,
-    node_coll: Option<&str>,
-) -> Option<String> {
-    use crate::complete::sql::SqlExpect;
-    if let SqlExpect::Column { qualifier: Some(q) } = &sctx.expect {
-        if let Some(t) = sctx.tables.iter().find(|t| {
-            t.alias
-                .as_deref()
-                .is_some_and(|a| a.eq_ignore_ascii_case(q))
-                || t.name.eq_ignore_ascii_case(q)
-        }) {
-            return Some(t.name.clone());
-        }
-        // Unknown qualifier → fall through to the base collection (embedded path).
-    }
-    sctx.tables
-        .first()
-        .map(|t| t.name.clone())
-        .or_else(|| node_coll.map(str::to_string))
-}
-
-/// SQL keywords offered when completing the SQL dialect Mongo accepts — kept to
-/// the subset `mongo_sql` actually translates (single-word tokens so they match
-/// the editor's `[\w$.]` completion boundary).
-const MONGO_SQL_KEYWORDS: &[&str] = &[
-    "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "IN", "IS", "NULL", "LIKE", "BETWEEN", "GROUP",
-    "ORDER", "BY", "LIMIT", "ASC", "DESC", "AS", "JOIN", "INNER", "LEFT", "ON", "COUNT",
-    "DISTINCT",
-];
-
-/// SQL aggregate functions `mongo_sql` maps to `$group` accumulators / countDocuments.
-const MONGO_SQL_FUNCTIONS: &[(&str, &str)] = &[
-    ("COUNT", "COUNT(*) — count documents"),
-    ("SUM", "SUM(field) — sum a numeric field"),
-    ("AVG", "AVG(field) — average a numeric field"),
-    ("MIN", "MIN(field) — minimum of a field"),
-    ("MAX", "MAX(field) — maximum of a field"),
-];
-
-/// Collection operations supported by the runner's `db.<coll>.<op>(…)` shorthand.
-const MONGO_METHODS: &[(&str, &str)] = &[
-    ("find", "read documents matching a filter"),
-    ("aggregate", "run an aggregation pipeline"),
-    ("countDocuments", "count documents matching a filter"),
-    (
-        "distinct",
-        "unique field values, optionally matching a filter",
-    ),
-];
-
-const MONGO_OPERATORS: &[(&str, &str)] = &[
-    // pipeline stages
-    ("$match", "stage: filter documents"),
-    ("$group", "stage: group by _id and accumulate"),
-    ("$project", "stage: reshape documents"),
-    ("$sort", "stage: order documents"),
-    ("$limit", "stage: cap document count"),
-    ("$skip", "stage: skip N documents"),
-    ("$lookup", "stage: left outer join another collection"),
-    ("$unwind", "stage: deconstruct an array field"),
-    ("$count", "stage: count documents into a field"),
-    ("$addFields", "stage: add computed fields"),
-    ("$set", "stage: add/replace fields"),
-    ("$unset", "stage: remove fields"),
-    ("$replaceRoot", "stage: promote a document to root"),
-    ("$facet", "stage: multiple sub-pipelines"),
-    ("$bucket", "stage: group into buckets"),
-    ("$sample", "stage: random sample of documents"),
-    ("$out", "stage: write results to a collection"),
-    ("$merge", "stage: merge results into a collection"),
-    // query / comparison operators
-    ("$eq", "match values equal to"),
-    ("$ne", "match values not equal to"),
-    ("$gt", "match values greater than"),
-    ("$gte", "match values greater than or equal"),
-    ("$lt", "match values less than"),
-    ("$lte", "match values less than or equal"),
-    ("$in", "match any value in an array"),
-    ("$nin", "match no value in an array"),
-    ("$exists", "match documents with the field"),
-    ("$type", "match by BSON type"),
-    ("$regex", "match by regular expression"),
-    // logical
-    ("$and", "logical AND"),
-    ("$or", "logical OR"),
-    ("$not", "logical NOT"),
-    ("$nor", "logical NOR"),
-    // accumulators / expressions
-    ("$sum", "accumulate a sum"),
-    ("$avg", "accumulate an average"),
-    ("$min", "accumulate the minimum"),
-    ("$max", "accumulate the maximum"),
-    ("$first", "first value in a group"),
-    ("$last", "last value in a group"),
-    ("$push", "append values to an array"),
-    ("$addToSet", "append unique values to an array"),
-    ("$concat", "concatenate strings"),
-    ("$cond", "conditional expression"),
-    ("$ifNull", "fallback when null"),
-    ("$size", "array length"),
-];
-
 #[cfg(test)]
 #[path = "../../tests/unit/mongodb.rs"]
 mod tests;
@@ -4734,5 +4676,45 @@ mod perf_bench {
             t.elapsed(),
             r.rows.len()
         );
+    }
+
+    #[tokio::test]
+    async fn mongosh_execution_requires_root_flag_and_rejects_read_only() {
+        assert!(requires_mongosh("const x = 1; print(x);"));
+        assert!(requires_mongosh("require('child_process').execSync('id')"));
+        assert!(!requires_mongosh(
+            "db.users.find({ active: true }).limit(10)"
+        ));
+        assert!(!requires_mongosh("SELECT * FROM users LIMIT 5"));
+
+        let d = MongoDriver::default();
+        let req = QueryRequest {
+            statement: "const x = 1; print(x);".into(),
+            ..Default::default()
+        };
+        let mut cfg = ResolvedConfig {
+            lifecycle: None,
+            engine: Engine::Mongodb,
+            host: "127.0.0.1".into(),
+            port: 27017,
+            user: None,
+            password: None,
+            database: Some("app".into()),
+            tls: Default::default(),
+            params: serde_json::json!({}),
+        };
+        assert!(matches!(
+            d.run_script(&cfg, &req, false).await,
+            Err(otto_core::Error::Forbidden(_))
+        ));
+        // Read-only execution blocks mongosh even if the root flag were set.
+        cfg.params = serde_json::json!({
+            "__mongosh_authorized": true,
+            "__read_only_execution": true,
+        });
+        assert!(matches!(
+            d.run_script(&cfg, &req, false).await,
+            Err(otto_core::Error::Forbidden(_))
+        ));
     }
 }

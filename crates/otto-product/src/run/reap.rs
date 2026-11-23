@@ -135,6 +135,16 @@ pub async fn reap_orphaned_agents_on_startup<C: ProductRunHost>(ctx: C) {
                     "orphan reaper: workspace {} load failed: {e}",
                     story.workspace_id
                 );
+                let _ = ctx
+                    .product_repo()
+                    .set_agent_status(
+                        &agent.id,
+                        "error",
+                        None,
+                        Some("interrupted (restart); workspace gone"),
+                        true,
+                    )
+                    .await;
                 continue;
             }
         };

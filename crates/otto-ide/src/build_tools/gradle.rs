@@ -163,6 +163,22 @@ pub(super) fn scan_gradle_tree(
         format!("{group_id}:{artifact_id}")
     };
 
+    let lifecycle = if super::mobile::is_android_gradle_content(&raw)
+        || dir.join("src/main/AndroidManifest.xml").is_file()
+    {
+        vec![
+            "clean".into(),
+            "assembleDebug".into(),
+            "installDebug".into(),
+            "testDebugUnitTest".into(),
+            "connectedDebugAndroidTest".into(),
+            "lintDebug".into(),
+            "assembleRelease".into(),
+        ]
+    } else {
+        GRADLE_LIFECYCLE.iter().map(|s| (*s).to_string()).collect()
+    };
+
     Some(IdeBuildToolProject {
         name: artifact_id.clone(),
         group_id,
@@ -173,7 +189,7 @@ pub(super) fn scan_gradle_tree(
         root_dir: dir.to_string_lossy().into_owned(),
         location_display: shorten_home_path(dir, st.home),
         manifest_path: manifest.to_string_lossy().into_owned(),
-        lifecycle: GRADLE_LIFECYCLE.iter().map(|s| (*s).to_string()).collect(),
+        lifecycle,
         plugins,
         dependencies,
         repositories,

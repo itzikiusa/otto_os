@@ -6,13 +6,20 @@
   // pod can't grow the DOM or memory without bound.
   import { untrack, tick } from 'svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { copyWithToast } from '../../lib/clipboard';
   import { providerErrorText } from '../../lib/loadError';
   import { appendCapped, appendFiltered, pushPendingCapped } from './logRing';
   import Icon from '../../lib/components/Icon.svelte';
+  import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
   import { downloadText } from '../../lib/components/exporters';
   import { followLogs } from '../../lib/api/k8s';
+  import { k8s } from '../../lib/stores/k8s.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
   import type { K8sContainer } from '../../lib/api/types';
-  import { safeName } from './k8s-util';
+  import { clusterLabel, safeName } from './k8s-util';
+  import { buildK8sLogsPacket } from './podHttp';
+  import { clusterContext, kubectlLogsCmd } from './cliSnippet';
 
   interface Props {
     clusterId: string;
@@ -69,6 +76,7 @@
   let previous = $state(false);
   let follow = $state(false);
   let timestamps = $state(false);
+  let wrapLines = $state(false);
   let search = $state('');
   // Raw ring buffers: a deep proxy over 20k lines made every per-frame flush
   // copy the buffer through the proxy. perf K8s R5: flushes append IN PLACE
@@ -285,6 +293,39 @@
     downloadText(shown.join('\n') + '\n', `${safeName(base)}${podFilter ? '-' + safeName(podFilter) : ''}${container ? '-' + safeName(container) : ''}.log`);
   }
 
+  let agentPacket = $state<unknown>(null);
+  const cluster = $derived(k8s.clusters.find((c) => c.id === clusterId) ?? null);
+  function copyKubectlLogs(): void {
+    const targetPod = pod || (multi && podFilter ? podFilter : undefined);
+    const cmd = kubectlLogsCmd({
+      pod: targetPod,
+      selector: targetPod ? undefined : selector || undefined,
+      ns,
+      container: container || undefined,
+      tail,
+      since: since || undefined,
+      previous,
+      follow,
+      timestamps,
+      context: clusterContext(cluster),
+    });
+    void copyWithToast(cmd, 'kubectl logs command');
+  }
+  function sendLogsToAgent(): void {
+    void ver;
+    if (!shown.length) return;
+    agentPacket = buildK8sLogsPacket({
+      clusterName: clusterLabel(cluster),
+      clusterEnv: cluster?.environment ?? null,
+      ns,
+      pod: pod || podFilter || undefined,
+      selector: multi ? selector : undefined,
+      container: container || undefined,
+      search,
+      lines: shown,
+    });
+  }
+
   export function focusSearch(): void {
     searchEl?.focus();
   }
@@ -322,18 +363,26 @@
     <button class="pill-toggle" class:on={previous} onclick={() => (previous = !previous)} aria-pressed={previous} title="Logs of the previous (crashed) container instance">
       Previous
     </button>
+    <button class="pill-toggle" class:on={wrapLines} onclick={() => (wrapLines = !wrapLines)} aria-pressed={wrapLines} title="Wrap long log lines">
+      Wrap
+    </button>
     <span class="spacer"></span>
     <div class="search">
       <Icon name="search" size={12} />
       <input dir="auto" bind:this={searchEl} class="search-in" placeholder="Search…" bind:value={search} aria-label="Search logs" />
       {#if q}<span class="count mono">{matchCount}</span>{/if}
     </div>
+    {#if ws.current}
+      <button class="icon-btn" onclick={sendLogsToAgent} title="Send visible logs to a running agent (scrubbed & capped preview)" aria-label="Send logs to agent" disabled={!shown.length}><Icon name="send" size={13} /></button>
+    {/if}
+    <button class="icon-btn" onclick={copyKubectlLogs} title="Copy as kubectl logs" aria-label="Copy as kubectl logs" data-testid="k8s-logs-copy-kubectl"><Icon name="terminal" size={13} /></button>
+    <button class="icon-btn" onclick={() => void copyWithToast(shown.join('\n'), 'logs')} title="Copy logs" aria-label="Copy logs" disabled={!shown.length}><Icon name="copy" size={13} /></button>
     <button class="icon-btn" onclick={() => void start()} title="Refresh logs" aria-label="Refresh logs"><Icon name="refresh" size={13} /></button>
     <button class="icon-btn" onclick={download} title="Download" aria-label="Download logs" disabled={!lineCount}><Icon name="arrowDown" size={13} /></button>
   </div>
 
   {#if error}
-    <div class="err">{error} <button class="btn small" onclick={() => void start()}>Retry</button></div>
+    <div class="err-wrap"><LoadState variant="compact" what="logs" {error} empty={false} onretry={() => void start()} /></div>
   {/if}
 
   <div class="logs-body" dir="ltr" bind:this={wrapEl} onscrollcapture={onScroll}>
@@ -343,7 +392,7 @@
       <VirtualList items={shown} version={ver} estimateHeight={LINE_H} class="logs-vlist" findText={(line) => parse(line).text}>
         {#snippet row(line, i)}
           {@const pl = parse(line)}
-          <div class="ln" style="height:{LINE_H}px" data-i={i}>{#if pl.pod}<button class="podtag" data-find-skip style="--h:{hue(pl.pod)}" title={`${pl.pod} · ${pl.ctr}\nClick: only this pod · ⌥-click: open pod`} onclick={(e) => { if (e.altKey) onopenpod?.(pl.pod); else podFilter = podFilter === pl.pod ? '' : pl.pod; }}>{pl.pod.length > 22 ? '…' + pl.pod.slice(-21) : pl.pod}{#if !container}<span class="ctr">/{pl.ctr}</span>{/if}</button>{/if}{#each segments(pl.text) as s, k (k)}{#if s.m}<mark>{s.t}</mark>{:else}{s.t}{/if}{/each}</div>
+          <div class="ln" class:wrap={wrapLines} style={wrapLines ? undefined : `height:${LINE_H}px`} data-i={i}>{#if pl.pod}<button class="podtag" data-find-skip style="--h:{hue(pl.pod)}" title={`${pl.pod} · ${pl.ctr}\nClick: only this pod · ⌥-click: open pod`} onclick={(e) => { if (e.altKey) onopenpod?.(pl.pod); else podFilter = podFilter === pl.pod ? '' : pl.pod; }}>{pl.pod.length > 22 ? '…' + pl.pod.slice(-21) : pl.pod}{#if !container}<span class="ctr">/{pl.ctr}</span>{/if}</button>{/if}{#each segments(pl.text) as s, k (k)}{#if s.m}<mark>{s.t}</mark>{:else}{s.t}{/if}{/each}</div>
         {/snippet}
       </VirtualList>
     {/if}
@@ -357,6 +406,16 @@
     {/if}
   </div>
 </div>
+
+{#if agentPacket !== null && ws.current}
+  <ContextPacketDialog
+    workspaceId={ws.current.id}
+    sessionId={ws.targetAgentId}
+    kind="broker"
+    payload={agentPacket}
+    onclose={() => (agentPacket = null)}
+  />
+{/if}
 
 <style>
   .logs {
@@ -423,6 +482,11 @@
     padding: 0 10px;
     color: var(--text);
   }
+  .ln.wrap {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    min-height: 18px;
+  }
   .podtag {
     display: inline-block;
     margin-inline-end: 8px;
@@ -470,11 +534,11 @@
     background: var(--status-working);
     animation: otto-pulse 1s ease-in-out infinite;
   }
-  .err {
-    padding: 8px 10px;
-    color: var(--danger);
-    font-size: var(--fs-s);
-    white-space: pre-wrap;
+  @media (prefers-reduced-motion: reduce) {
+    .live-dot { animation: none; }
+  }
+  .err-wrap {
+    padding: 6px 10px;
   }
   .dim {
     color: var(--text-dim);

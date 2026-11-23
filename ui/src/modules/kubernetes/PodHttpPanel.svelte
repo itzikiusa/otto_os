@@ -21,10 +21,12 @@
   import { ApiError } from '../../lib/api/client';
   import { k8sApi } from '../../lib/api/k8s';
   import { k8s } from '../../lib/stores/k8s.svelte';
+  import { apiClient } from '../../lib/stores/apiClient.svelte';
+  import { router } from '../../lib/router.svelte';
   import type { K8sPodAction, K8sPodHttpMethod, K8sPodHttpReq, K8sPodHttpResult } from '../../lib/api/types';
   import { confirmProd, isProdEnv } from '../../lib/confirmProd';
   import { clusterLabel } from './k8s-util';
-  import { ACTUATOR_PRESETS, LOG_LEVELS, defaultPort, fillTemplate, pathProblem, prettyBody, templateVars } from './podHttp';
+  import { ACTUATOR_PRESETS, LOG_LEVELS, defaultPort, fillTemplate, pathProblem, podHttpToApiDraft, prettyBody, templateVars } from './podHttp';
 
   interface Props {
     clusterId: string;
@@ -58,6 +60,9 @@
   let runError = $state('');
   let results = $state<K8sPodHttpResult[] | null>(null);
   let openRow = $state<string | null>(null);
+  // Latest-wins: switching pod / workload / namespace / cluster or unmounting
+  // while a pod-HTTP call is in flight must not write stale responses.
+  let runSeq = 0;
 
   // --- saved actions ---------------------------------------------------------
   let saved = $state<K8sPodAction[]>([]);
@@ -90,8 +95,20 @@
   $effect(() => {
     void clusterId;
     void ns;
+    void pod;
     void workload?.name;
-    untrack(() => void loadSaved());
+    untrack(() => {
+      runSeq++;
+      running = false;
+      results = null;
+      runError = '';
+      openRow = null;
+      void loadSaved();
+    });
+    return () => {
+      savedSeq++;
+      runSeq++;
+    };
   });
 
   const varNames = $derived(templateVars(path, method === 'GET' ? '' : body));
@@ -128,6 +145,8 @@
 
   async function run(): Promise<void> {
     if (problem || running || blockedByRole) return;
+    const seq = ++runSeq;
+    const cid = clusterId;
     const req: K8sPodHttpReq = {
       namespace: ns,
       port: Number(port),
@@ -151,13 +170,14 @@
         title: `${method} to pods?`,
         danger: true,
       });
-      if (!ok) return;
+      if (!ok || seq !== runSeq) return;
       req.confirm_name = targetName;
     }
     running = true;
     runError = '';
     try {
-      const r = await k8sApi.podHttp(clusterId, req);
+      const r = await k8sApi.podHttp(cid, req);
+      if (seq !== runSeq) return;
       results = r.results;
       openRow = r.results.length === 1 ? r.results[0].pod : null;
       const failed = r.results.filter((x) => x.error || (x.status ?? 0) >= 400).length;
@@ -166,9 +186,10 @@
         else toasts.success(`${method} ${req.path}`, `${plural(r.results.length, 'pod')} answered`);
       }
     } catch (e) {
-      runError = e instanceof ApiError && e.status === 409 ? `The daemon wants the target name confirmed: ${e.message}` : e instanceof Error ? e.message : String(e);
+      if (seq !== runSeq) return;
+      runError = e instanceof ApiError && e.status === 409 ? `The daemon wants the target name confirmed: ${e.message}` : loadErrorText(e);
     } finally {
-      running = false;
+      if (seq === runSeq) running = false;
     }
   }
 
@@ -204,7 +225,7 @@
   }
 
   async function deleteAction(a: K8sPodAction): Promise<void> {
-    const ok = await confirmer.ask(`Delete the saved action “${a.name}” for ${a.workload}?`, { title: 'Delete action', confirmLabel: 'Delete' });
+    const ok = await confirmer.ask(`Delete the saved action “${a.name}” for ${a.workload}?`, { title: 'Delete action', confirmLabel: 'Delete', danger: true });
     if (!ok) return;
     try {
       await k8sApi.deletePodAction(clusterId, a.id);
@@ -213,6 +234,28 @@
     } catch (e) {
       toastError("Couldn’t delete the action", e);
     }
+  }
+
+  async function openInApiClient(): Promise<void> {
+    if (problem) return;
+    await apiClient.ensureLoaded();
+    const draft = podHttpToApiDraft({
+      clusterName: clusterLabel(cluster),
+      ns,
+      pod,
+      workload,
+      target,
+      method,
+      port: Number(port),
+      path,
+      headersText,
+      body,
+      vars,
+    });
+    apiClient.openTab(draft);
+    apiClient.showRequestView();
+    router.go('api');
+    toasts.info('Opened in API Client', `Check Request Docs for the kubectl port-forward command to 127.0.0.1:${port}.`);
   }
 
   function statusTone(r: K8sPodHttpResult): string {
@@ -298,6 +341,7 @@
         <span class="dim small">{pod ? `Pod ${pod}` : workload ? `Every pod of ${workload.name}` : ''}</span>
       {/if}
       <span class="spacer"></span>
+      <button class="btn small" onclick={() => void openInApiClient()} disabled={!!problem} title={problem ?? 'Promote this request to a new API Client tab (uses localhost port-forward)'}><Icon name="external" size={12} /> Open in API Client</button>
       {#if workload && canMutate}<button class="btn small" onclick={() => void saveAction()}>Save…</button>{/if}
       <button class="btn small primary" class:danger={mutating && guarded} onclick={() => void run()} disabled={!!problem || running || blockedByRole} title={blockedByRole ? 'Sending a mutating request needs Edit on this cluster' : (problem ?? 'Send (Enter in the path)')} data-testid="k8s-pod-http-run">
         <Icon name="send" size={12} /> {running ? 'Sending…' : 'Send'}

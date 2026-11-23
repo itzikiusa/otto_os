@@ -1248,13 +1248,30 @@ impl JiraClient {
         Ok(())
     }
 
+    /// Hard byte cap for proxied Jira attachments (50 MiB).
+    pub const MAX_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
+
     /// Fetch the raw bytes of an attachment, returning `(content_type, bytes)`.
     ///
     /// Uses `GET /rest/api/3/attachment/content/{attachment_id}`.
-    /// The Jira Cloud REST v3 endpoint redirects to the CDN; reqwest follows redirects
-    /// automatically but the Authorization header must be sent on the initial request.
-    /// We include it on all hops via `connection()`'s default redirect policy.
+    /// The Jira Cloud REST v3 endpoint redirects to a signed CDN URL on another
+    /// host; our authenticated client stops on cross-origin redirects so the
+    /// Basic `Authorization` header is NEVER sent to another host. Any 3xx
+    /// redirect is followed manually without `Authorization` after verifying no
+    /// HTTPS→HTTP downgrade and passing `otto_netguard` SSRF checks. The body
+    /// is streamed with a hard [`Self::MAX_ATTACHMENT_BYTES`] cap.
     pub async fn attachment_bytes(&self, attachment_id: &str) -> Result<(String, Vec<u8>)> {
+        self.attachment_bytes_capped(attachment_id, Self::MAX_ATTACHMENT_BYTES)
+            .await
+    }
+
+    pub(crate) async fn attachment_bytes_capped(
+        &self,
+        attachment_id: &str,
+        cap: usize,
+    ) -> Result<(String, Vec<u8>)> {
+        const MAX_CDN_HOPS: usize = 5;
+        let what = format!("jira attachment {attachment_id}");
         let url = format!(
             "{}/rest/api/3/attachment/content/{}",
             self.t.base,
@@ -1265,11 +1282,68 @@ impl JiraClient {
             .http()?
             .get(&url)
             .header("Authorization", &self.t.auth_header);
-        let resp = self
-            .t
-            .send(req, &format!("jira attachment {attachment_id}"))
-            .await?;
+        let mut resp = self.t.send_raw(req, &what).await?;
+        let mut current_url = resp.url().clone();
+        let mut saw_https = current_url.scheme() == "https";
 
+        for _ in 0..MAX_CDN_HOPS {
+            if !resp.status().is_redirection() {
+                break;
+            }
+            let Some(loc) = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+            else {
+                break;
+            };
+            let next = current_url
+                .join(loc)
+                .map_err(|e| Error::Upstream(format!("{what} redirect url: {e}")))?;
+            if !matches!(next.scheme(), "http" | "https") {
+                return Err(Error::Invalid(format!(
+                    "{what}: blocked redirect scheme {}",
+                    next.scheme()
+                )));
+            }
+            if saw_https && next.scheme() != "https" {
+                return Err(Error::Invalid(format!(
+                    "{what}: blocked HTTPS to HTTP redirect downgrade"
+                )));
+            }
+            if let Some(host) = next.host_str() {
+                let bare = host
+                    .strip_prefix('[')
+                    .and_then(|h| h.strip_suffix(']'))
+                    .unwrap_or(host);
+                if otto_netguard::is_metadata_hostname(bare) {
+                    return Err(Error::Invalid(format!(
+                        "{what}: blocked redirect target (SSRF guard)"
+                    )));
+                }
+            }
+            if self.t.allow_loopback {
+                otto_netguard::precheck_url_allow_local(next.as_str())
+                    .map_err(|e| Error::Invalid(format!("{what} redirect: {e}")))?;
+            } else {
+                otto_netguard::check_url(next.as_str())
+                    .await
+                    .map_err(|e| Error::Invalid(format!("{what} redirect: {e}")))?;
+            }
+            let hop_client =
+                crate::atlassian::build_attachment_hop_client(saw_https, self.t.allow_loopback);
+            // Cross-origin redirect (same-origin redirects were already followed
+            // by the initial client): NEVER forward `Authorization`.
+            let next_req = hop_client.get(next.clone());
+            resp = next_req
+                .send()
+                .await
+                .map_err(|e| Error::Upstream(format!("{what} redirect request: {e}")))?;
+            saw_https |= next.scheme() == "https";
+            current_url = next;
+        }
+
+        let mut resp = self.t.check(resp, &what).await?;
         let mime = resp
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
@@ -1277,12 +1351,32 @@ impl JiraClient {
             .unwrap_or("application/octet-stream")
             .to_string();
 
-        let bytes = resp
-            .bytes()
+        if let Some(cl) = resp.content_length() {
+            if cl > cap as u64 {
+                return Err(Error::PayloadTooLarge(format!(
+                    "{what} exceeds {cap} byte limit"
+                )));
+            }
+        }
+        let mut bytes = Vec::with_capacity(
+            resp.content_length()
+                .map(|n| (n as usize).min(cap).min(64 * 1024))
+                .unwrap_or(0),
+        );
+        while let Some(chunk) = resp
+            .chunk()
             .await
-            .map_err(|e| Error::Upstream(format!("jira attachment read: {e}")))?;
+            .map_err(|e| Error::Upstream(format!("{what} read: {e}")))?
+        {
+            if bytes.len().saturating_add(chunk.len()) > cap {
+                return Err(Error::PayloadTooLarge(format!(
+                    "{what} exceeds {cap} byte limit"
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
 
-        Ok((mime, bytes.to_vec()))
+        Ok((mime, bytes))
     }
 
     /// Update the description of an issue. The `body_md` Markdown is converted to ADF.
@@ -3520,5 +3614,95 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("result window expired"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn attachment_bytes_capped_enforces_limit_on_chunked_and_sized_bodies() {
+        use axum::http::header;
+        use axum::response::IntoResponse;
+
+        let router = axum::Router::new()
+            .route(
+                "/rest/api/3/attachment/content/small",
+                axum::routing::get(|| async {
+                    ([(header::CONTENT_TYPE, "image/png")], b"12345".to_vec()).into_response()
+                }),
+            )
+            .route(
+                "/rest/api/3/attachment/content/big",
+                axum::routing::get(|| async {
+                    ([(header::CONTENT_TYPE, "image/png")], vec![b'x'; 64]).into_response()
+                }),
+            )
+            .route(
+                "/rest/api/3/attachment/content/streamed",
+                axum::routing::get(|| async {
+                    let stream = futures_util::stream::iter(vec![
+                        Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"aaaa")),
+                        Ok(axum::body::Bytes::from_static(b"bbbb")),
+                        Ok(axum::body::Bytes::from_static(b"cccc")),
+                    ]);
+                    axum::response::Response::builder()
+                        .header(header::CONTENT_TYPE, "application/octet-stream")
+                        .body(axum::body::Body::from_stream(stream))
+                        .unwrap()
+                }),
+            );
+        let base = fixture(router).await;
+        let c = JiraClient::new(&base, "e", "t");
+
+        let (mime, bytes) = c.attachment_bytes_capped("small", 5).await.unwrap();
+        assert_eq!(mime, "image/png");
+        assert_eq!(bytes, b"12345");
+
+        let err = c.attachment_bytes_capped("big", 10).await.unwrap_err();
+        assert!(matches!(err, Error::PayloadTooLarge(_)), "{err:?}");
+
+        let err = c.attachment_bytes_capped("streamed", 10).await.unwrap_err();
+        assert!(matches!(err, Error::PayloadTooLarge(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn attachment_cdn_redirect_strips_authorization_header() {
+        use axum::http::{header, HeaderMap, StatusCode};
+        use axum::response::IntoResponse;
+        use std::sync::{Arc, Mutex};
+
+        let seen_auth: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let seen_clone = Arc::clone(&seen_auth);
+        let cdn_router = axum::Router::new().route(
+            "/cdn/file.png",
+            axum::routing::get(move |headers: HeaderMap| {
+                let seen = Arc::clone(&seen_clone);
+                async move {
+                    *seen.lock().unwrap() = headers
+                        .get(header::AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string);
+                    ([(header::CONTENT_TYPE, "image/png")], b"pngdata".to_vec()).into_response()
+                }
+            }),
+        );
+        let cdn_base = fixture(cdn_router).await;
+        let redirect_to = format!("{cdn_base}/cdn/file.png");
+
+        let jira_router = axum::Router::new().route(
+            "/rest/api/3/attachment/content/42",
+            axum::routing::get(move || {
+                let loc = redirect_to.clone();
+                async move { (StatusCode::SEE_OTHER, [(header::LOCATION, loc)]).into_response() }
+            }),
+        );
+        let jira_base = fixture(jira_router).await;
+
+        let c = JiraClient::new(&jira_base, "alice@example.com", "secret-token");
+        let (mime, bytes) = c.attachment_bytes_capped("42", 1024).await.unwrap();
+        assert_eq!(mime, "image/png");
+        assert_eq!(bytes, b"pngdata");
+        assert_eq!(
+            *seen_auth.lock().unwrap(),
+            None,
+            "Authorization header must not be sent to cross-host CDN"
+        );
     }
 }

@@ -7,7 +7,9 @@
   import LazyMount from '../../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   import { GUTTER_TARGET_ID, ide, type IdeRunConfig } from '../ideStore.svelte';
+  import { ideDevices } from '../devices/ideDevicesState.svelte';
   import { launchSelectorLabel } from '../store/ideLaunchTarget';
+  import { ideLayout } from './ideLayout.svelte';
   import { bridgeEnvCache } from './networkBridgeGuard.svelte';
   import { formatBridgeToolbarLabel } from './networkBridgeModel';
 
@@ -35,6 +37,11 @@
   const isProdBridge = $derived(
     ide.target.kind === 'local' && bridgeEnvCache.isProdBridge(ide.projectEnv?.network_bridge),
   );
+  // Narrow tablets (iPad portrait 834 px, Android tablet 712 px) stay in workbench mode
+  // but tuck secondary launch chrome (`⚙`) into the popover so PageHeader stays uncluttered.
+  const narrowWorkbench = $derived(ideLayout.width > 0 && ideLayout.width < 960);
+  const mobileTarget = $derived(ideDevices.selectedDevice);
+  const showDevicePill = $derived(!narrowWorkbench && ideDevices.hasMobileContext);
 
   $effect(() => {
     if (ide.target.kind === 'local' && ide.projectEnv?.network_bridge?.enabled) {
@@ -44,7 +51,22 @@
 </script>
 
 {#if !compact}
-  <div class="run-cluster" data-keep role="group" aria-label="Launch controls">
+  <div class="run-cluster" class:is-narrow={narrowWorkbench} data-keep role="group" aria-label="Launch controls">
+    {#if showDevicePill}
+      <button
+        type="button"
+        class="run-device-btn"
+        class:is-booted={mobileTarget?.state === 'booted'}
+        title={mobileTarget
+          ? `Mobile target: ${mobileTarget.name} (${mobileTarget.state}) — click to manage devices`
+          : 'Manage mobile simulators & emulators'}
+        onclick={() => ide.openBottomTab('devices')}
+        data-testid="ide-run-device-pill"
+      >
+        <Icon name="phone" size={12} />
+        <span class="run-cfg-label" dir="ltr">{mobileTarget ? mobileTarget.name : 'Devices'}</span>
+      </button>
+    {/if}
     {#if bridgeLabel}
       <button
         type="button"
@@ -116,16 +138,18 @@
       <Icon name="stop" size={14} />
     </button>
 
-    <button
-      type="button"
-      class="icon-btn"
-      aria-label="Launch settings…"
-      title="Launch settings…"
-      onclick={() => ide.openEnvironmentsModal('configs')}
-      data-testid="ide-edit-configs-btn"
-    >
-      <Icon name="gear" size={14} />
-    </button>
+    {#if !narrowWorkbench}
+      <button
+        type="button"
+        class="icon-btn"
+        aria-label="Launch settings…"
+        title="Launch settings…"
+        onclick={() => ide.openEnvironmentsModal('configs')}
+        data-testid="ide-edit-configs-btn"
+      >
+        <Icon name="gear" size={14} />
+      </button>
+    {/if}
 
     <!-- Inside the cluster, not beside it: a direct child of the page header's
          actions row is an "action" its overflow fitter can collapse (it hid
@@ -208,6 +232,15 @@
   .run-bridge-btn.is-compact { padding-inline: 6px; flex-shrink: 0; }
   .run-bridge-prod { font-weight: 600; letter-spacing: 0.06em; flex-shrink: 0; }
   .run-cfg-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
+  .run-device-btn {
+    display: inline-flex; align-items: center; gap: 4px; max-inline-size: 148px;
+    min-inline-size: 0; block-size: 26px; padding-inline: 8px; background: var(--surface-2);
+    color: var(--text-dim); border: 1px solid var(--border); border-radius: var(--radius-s);
+    font-size: var(--fs-xs); font-weight: 500; cursor: pointer;
+  }
+  .run-device-btn:hover { border-color: var(--border-strong); color: var(--text); background: var(--hover); }
+  .run-device-btn.is-booted { color: var(--success); border-color: color-mix(in srgb, var(--success) 35%, transparent); background: var(--success-soft); }
+  .run-cluster.is-narrow .run-cfg-btn { max-inline-size: 124px; }
   @media (max-width: 1024px) {
     .run-cfg-btn { max-inline-size: 150px; }
     .run-bridge-btn { max-inline-size: 136px; }

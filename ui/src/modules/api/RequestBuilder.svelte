@@ -5,9 +5,10 @@
   // and what they resolve to · Params / Headers / Body / Auth / Scripts / Docs
   // / Settings, each with a one-line explanation.
   import { announceShown } from '../../lib/announce.svelte';
-  import { openExternal } from '../../lib/external';
   import { toastError } from '../../lib/toastError';
-  import { onTabKey } from '../../lib/tabKeys';
+  import { loadErrorText } from '../../lib/loadError';
+  import { runOAuthTokenFlow } from './oauthFlow';
+  import Tabs from '../../lib/components/Tabs.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { focusAfterRowRemoval, rowListOf } from '../../lib/rowFocus';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -18,7 +19,9 @@
   import ImportDialog from './ImportDialog.svelte';
   import { apiClient, HTTP_METHODS, defaultSettings, confirmNewHost, draftSecrets, type ApiDraft, type ApiRequestKind, type ApiSettings } from '../../lib/stores/apiClient.svelte';
   import { apiStream } from '../../lib/stores/apiStream.svelte';
-  import { api, baseUrl, newHostConfirmHost } from '../../lib/api/client';
+  import { api, baseUrl, isAbortError, newHostConfirmHost } from '../../lib/api/client';
+  import { confirmProd } from '../../lib/confirmProd';
+  import { isMutatingApiCall, isProdApiEnv } from './prodGuard';
   import { generateCode, CODE_LANGS, type CodeLang } from '../../lib/api/codegen';
   import { collectionPaths, fullRequestUrl, requestVarNames, resolveVar, splitVars, varNames } from '../../lib/api/apiVars';
   import { renderMarkdownGfm } from '../../lib/md';
@@ -381,62 +384,39 @@
     return isSecretRef(v) ? '•••••• stored in Keychain — type to replace' : fallback;
   }
   let fetchingToken = $state(false);
+  let oauthAbort: AbortController | null = null;
   /** Inline field error under Token URL (never a toast for a field error). */
   let tokenUrlError = $state('');
+  const cancelOAuthToken = (): void => { oauthAbort?.abort(); oauthAbort = null; };
+  // Cancel any in-flight OAuth poll on unmount, workspace switch, or tab switch.
+  $effect(() => { void ws.currentId; void draft.tabId; return cancelOAuthToken; });
+
   async function fetchOAuthToken(): Promise<void> {
-    if (draft.auth.type !== 'oauth2') return;
+    if (fetchingToken || draft.auth.type !== 'oauth2') return;
     const wid = ws.currentId;
     if (!wid) return;
-    const a = draft.auth;
     const tabId = draft.tabId;
-    if (!a.token_url.trim()) { tokenUrlError = 'Enter the OAuth token endpoint first.'; return; }
+    if (!draft.auth.token_url.trim()) { tokenUrlError = 'Enter the OAuth token endpoint first.'; return; }
     tokenUrlError = '';
+    cancelOAuthToken();
+    const ac = new AbortController();
+    oauthAbort = ac;
     fetchingToken = true;
     try {
-      if (a.grant === 'authorization_code') {
-        // Save first so the daemon owns the resulting token under this request's Keychain reference.
-        const saved = await apiClient.saveDraft(draft.name || 'OAuth request', apiClient.requests.find((r) => r.id === draft.requestId)?.collection_id ?? null);
-        if (!saved || ws.currentId !== wid || apiClient.draft.tabId !== tabId) return;
-        const flow = await api.post<{ flow_id: string; authorization_url: string; redirect_uri: string }>(`/workspaces/${wid}/api-client/oauth2/authorize`, { request_id: saved.id });
-        await openExternal(flow.authorization_url);
-        const deadline = Date.now() + 600_000;
-        while (Date.now() < deadline) {
-          await new Promise((resolve) => setTimeout(resolve, 1000));
-          const result = await api.get<{ status: string; error?: string }>(`/workspaces/${wid}/api-client/oauth2/flows/${flow.flow_id}`);
-          if (result.status === 'failed') throw new Error(result.error || 'Authorization failed');
-          if (result.status === 'completed') {
-            const request = await api
-              .get<import('../../lib/api/types').ApiRequest>(`/workspaces/${wid}/api-client/requests/${encodeURIComponent(saved.id)}`)
-              .catch(() => null);
-            if (request) {
-              apiClient.applySavedAuth(wid, request, saved.auth);
-              toasts.success('Signed in', 'The access token is stored in the Keychain.');
-            }
-            return;
-          }
-        }
-        return;
+      const outcome = await runOAuthTokenFlow({
+        wid, draft, signal: ac.signal,
+        isCurrent: () => ws.currentId === wid && apiClient.draft.tabId === tabId,
+      });
+      if (outcome.kind === 'signed_in') {
+        toasts.success('Signed in', 'The access token is stored in the Keychain.');
+      } else if (outcome.kind === 'token') {
+        setAuth({ access_token: outcome.access_token, token_type: outcome.token_type, refresh_token: outcome.refresh_token });
+        toasts.success('Access token received', `${outcome.token_type} · expires in ${outcome.expires_in ?? '?'} s`);
       }
-      type TokenResp = { access_token: string; token_type?: string; refresh_token?: string; expires_in?: number };
-      const tokenReq = { grant: a.grant, token_url: a.token_url, client_id: a.client_id, client_secret: a.client_secret, scope: a.scope, username: a.username, password: a.password, refresh_token: a.refresh_token };
-      let res: TokenResp;
-      try {
-        res = await api.post<TokenResp>(`/workspaces/${wid}/api-client/oauth2/token`, tokenReq);
-      } catch (e) {
-        // A stored secret would go to a token endpoint other than the saved
-        // one — the daemon waits for a person's confirmation.
-        const host = newHostConfirmHost(e);
-        if (host === null || !(await confirmNewHost(host, { method: 'POST', url: a.token_url, secrets: ['the saved OAuth client secret / credentials (Keychain)'] }))) throw e;
-        if (ws.currentId !== wid || apiClient.draft.tabId !== tabId) return;
-        res = await api.post<TokenResp>(`/workspaces/${wid}/api-client/oauth2/token`, { ...tokenReq, confirm_new_host: true });
-      }
-      if (ws.currentId !== wid || apiClient.draft.tabId !== tabId) return;
-      setAuth({ access_token: res.access_token, token_type: res.token_type || 'Bearer', refresh_token: res.refresh_token || a.refresh_token });
-      toasts.success('Access token received', `${res.token_type || 'Bearer'} · expires in ${res.expires_in ?? '?'} s`);
     } catch (e) {
-      toastError('Couldn’t get a token', e);
+      if (!ac.signal.aborted && !isAbortError(e)) toastError('Couldn’t get a token', e);
     } finally {
-      fetchingToken = false;
+      if (oauthAbort === ac) { oauthAbort = null; fetchingToken = false; }
     }
   }
 
@@ -569,14 +549,26 @@
   });
 
   // ── actions ────────────────────────────────────────────────────────────────
-  function send(): void {
+  async function send(): Promise<void> {
+    if (isStreaming && apiStream.active) { apiStream.disconnect(); return; }
+    const envName = apiClient.activeEnv?.name;
+    if (isProdApiEnv(envName) && isMutatingApiCall(draft)) {
+      const tabId = draft.tabId, wid = ws.currentId, targetUrl = draft.url.trim() || '(no URL)';
+      const isGrpc = draft.kind === 'grpc';
+      const ok = await confirmProd({
+        env: 'prod', verb: isGrpc ? 'Invoke' : 'Send', danger: true,
+        title: isGrpc ? 'Invoke gRPC on production?' : 'Send request to production?',
+        where: `Environment “${envName}” · ${targetUrl}`,
+        what: isGrpc ? `gRPC ${draft.grpc_method || '(no method)'}` : `${draft.method.toUpperCase()} ${targetUrl}`,
+      });
+      if (!ok || ws.currentId !== wid || apiClient.draft.tabId !== tabId) return;
+    }
     switch (draft.kind) {
       case 'http': void apiClient.execute(); break;
       case 'grpc': void apiClient.executeGrpc(); break;
       case 'sse':
       case 'websocket':
-        if (apiStream.active) apiStream.disconnect();
-        else if (ws.currentId) apiStream.connect(ws.currentId, draft.kind, {
+        if (ws.currentId) apiStream.connect(ws.currentId, draft.kind, {
           method: draft.method, url: draft.url, headers: draft.headers, query: draft.query,
           body: draft.body, body_mode: draft.body_mode, auth: draft.auth,
           environment_id: apiClient.activeEnv?.id ?? null, vars: { ...apiClient.runtimeVars },
@@ -665,7 +657,7 @@
       await apiClient.setAllowLocal(on);
     } catch (e) {
       input.checked = !on;
-      toasts.error('Couldn’t change the setting', e instanceof Error && e.message ? e.message : 'Only a workspace admin can change it.');
+      toasts.error('Couldn’t change the setting', loadErrorText(e) || 'Only a workspace admin can change it.');
     }
   }
   async function clearCookies(): Promise<void> {
@@ -857,15 +849,7 @@
   {#if draft.kind === 'websocket'}<p class="tab-help">WebSocket connections support query parameters, headers, auth and a connection timeout. They can’t send a body, use an SSH tunnel, follow redirects or skip TLS verification.</p>{/if}
   {#if isStreaming && scriptCount}<p class="tab-help">Scripts only run for HTTP requests; this streaming connection ignores them.</p>{/if}
 
-  <div class="tabstrip" role="tablist" aria-label="Request parts">
-    {#each tabs as t (t.id)}
-      <button class="tab" class:active={tab === t.id} role="tab" aria-selected={tab === t.id} tabindex={tab === t.id ? 0 : -1}
-        id="api-req-tab-{t.id}" aria-controls="api-req-panel-{t.id}"
-        onclick={() => (tab = t.id)} onkeydown={onTabKey}>
-        {t.label}{#if t.count}<span class="count" aria-hidden="true">{t.count}</span>{/if}
-      </button>
-    {/each}
-  </div>
+  <Tabs label="Request parts" {tabs} value={tab} onchange={(id) => (tab = id)} idBase="api-req" />
 
   <div class="tabbody" role="tabpanel" id="api-req-panel-{tab}" aria-labelledby="api-req-tab-{tab}">
     {#if tab === 'params'}
@@ -1078,6 +1062,11 @@
             <button class="btn small" onclick={fetchOAuthToken} disabled={fetchingToken}>
               <Icon name="key" size={12} />{fetchingToken ? 'Getting token…' : 'Get token'}
             </button>
+            {#if fetchingToken}
+              <button class="btn small" onclick={cancelOAuthToken}>
+                <Icon name="stop" size={12} />Cancel
+              </button>
+            {/if}
             {#if isSecretRef(draft.auth.access_token) || draft.auth.access_token}
               <span class="chip ok">{isSecretRef(draft.auth.access_token) ? 'Access token stored in Keychain' : 'Access token received'}</span>
             {/if}
@@ -1567,41 +1556,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .tabstrip {
-    display: flex;
-    gap: 2px;
-    border-bottom: 1px solid var(--border);
-    overflow-x: auto;
-    scrollbar-width: none;
-    flex-shrink: 0;
-  }
-  .tab {
-    position: relative;
-    height: 30px;
-    padding: 0 10px;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    font-size: var(--fs-m);
-    font-weight: 500;
-    cursor: pointer;
-    border-bottom: 2px solid transparent;
-    margin-bottom: -1px;
-    white-space: nowrap;
-  }
-  .tab:hover {
-    color: var(--text);
-  }
-  .tab.active {
-    color: var(--text);
-    border-bottom-color: var(--accent);
-  }
-  .count {
-    margin-inline-start: 6px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    font-weight: 500;
-  }
   .tabbody {
     min-height: 0;
     display: flex;
@@ -1953,13 +1907,6 @@
     }
   }
   @container (max-width: 360px) {
-    /* Wrap instead of a hidden-scrollbar strip that clips the last tabs. */
-    .tabstrip {
-      flex-wrap: wrap;
-    }
-    .tab {
-      padding: 0 6px;
-    }
     .send {
       padding: 0 12px;
     }

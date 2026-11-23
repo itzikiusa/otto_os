@@ -7,6 +7,8 @@
 // Window routes the shell loads (all chromeless):
 //   #/bar            — the assistant bar panel (`otto-bar`)
 //   #/tray           — the menu-bar popover (`otto-tray`)
+//   #/clipboard      — the clipboard-history panel (`otto-clipboard`; its
+//                      bridge is modules/clipboard/native.ts)
 //   ?popout=1#/<r>   — a pop-out window of route <r> (`popout-<N>`)
 //   ?embed=1#/<r>    — the side pane (a movable native view, or a browser iframe)
 
@@ -138,7 +140,7 @@ export const tray = {
 /** One system-wide chord (the Settings UI lists these). `accel` uses the
  *  global-hotkey syntax, e.g. `Alt+Space`, `Cmd+Ctrl+Shift+2`; `''` = off. */
 export interface ShortcutBinding {
-  id: 'snip' | 'assistant' | 'assistant.voice';
+  id: 'snip' | 'assistant' | 'clipboard' | 'keep-awake' | 'assistant.voice';
   label: string;
   accel: string;
   default: string;
@@ -164,7 +166,9 @@ export type DesktopEvent =
   | 'otto://bar-shown'
   | 'otto://bar-hidden'
   | 'otto://assistant-voice'
-  | 'otto://tray-shown';
+  | 'otto://tray-shown'
+  | 'otto://clipboard-shown'
+  | 'otto://clipboard-changed';
 
 /** Listen for a desktop event on THIS window (the shell targets each event at
  *  one window label). Resolves a no-op unlisten outside Tauri. */

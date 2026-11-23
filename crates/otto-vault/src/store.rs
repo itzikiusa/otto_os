@@ -1136,6 +1136,53 @@ impl Store {
                  AND t.path = n.path AND (t.tag = ? OR substr(t.tag, 1, length(?) + 1) = ? || '/'))",
             );
         }
+        if f.okf_status.is_some() {
+            filter_sql.push_str(
+                " AND lower(COALESCE(json_extract(n.frontmatter_json, '$.status'), '')) = lower(?)",
+            );
+        }
+        if let Some(stale) = f.stale {
+            const STALE_EXPR: &str = "(\
+                lower(COALESCE(json_extract(n.frontmatter_json, '$.status'), '')) = 'stale' \
+                OR lower(CAST(COALESCE(json_extract(n.frontmatter_json, '$.stale'), '') AS TEXT)) IN ('1', 'true') \
+                OR (json_extract(n.frontmatter_json, '$.review_at') IS NOT NULL \
+                    AND trim(CAST(json_extract(n.frontmatter_json, '$.review_at') AS TEXT)) != '' \
+                    AND CAST(json_extract(n.frontmatter_json, '$.review_at') AS TEXT) < date('now'))\
+            )";
+            if stale {
+                filter_sql.push_str(" AND ");
+                filter_sql.push_str(STALE_EXPR);
+            } else {
+                filter_sql.push_str(" AND NOT ");
+                filter_sql.push_str(STALE_EXPR);
+            }
+        }
+        if let Some(orphan) = f.orphan {
+            if orphan {
+                filter_sql.push_str(
+                    " AND NOT EXISTS (SELECT 1 FROM vault_links l WHERE l.vault_id = n.vault_id \
+                     AND l.dst_path = n.path AND l.src_path != n.path)",
+                );
+            } else {
+                filter_sql.push_str(
+                    " AND EXISTS (SELECT 1 FROM vault_links l WHERE l.vault_id = n.vault_id \
+                     AND l.dst_path = n.path AND l.src_path != n.path)",
+                );
+            }
+        }
+        if f.links_to.is_some() {
+            filter_sql.push_str(
+                " AND EXISTS (SELECT 1 FROM vault_links l WHERE l.vault_id = n.vault_id \
+                 AND l.src_path = n.path AND (\
+                    lower(COALESCE(l.dst_path, '')) = lower(?) \
+                    OR lower(COALESCE(l.dst_path, '')) = lower(?) || '.md' \
+                    OR lower(l.raw_target) = lower(?) \
+                    OR lower(l.raw_target) = lower(?) \
+                    OR lower(COALESCE(l.dst_path, '')) LIKE '%/' || lower(?) ESCAPE '\\' \
+                    OR lower(COALESCE(l.dst_path, '')) LIKE '%/' || lower(?) || '.md' ESCAPE '\\'\
+                 ))",
+            );
+        }
         let sql = match mode {
             // Contentless index: no stored body, so the snippet is computed
             // afterwards for this page only (`search_index::fill_snippets`).
@@ -1181,6 +1228,22 @@ impl Store {
                 .bind(t.to_string())
                 .bind(t.to_string())
                 .bind(t.to_string());
+        }
+        if let Some(status) = f.okf_status {
+            q = q.bind(status.to_string());
+        }
+        if let Some(lt) = f.links_to {
+            let target = lt.trim_start_matches('/');
+            let stem = target.strip_suffix(".md").unwrap_or(target);
+            let esc_target = like_escape(target);
+            let esc_stem = like_escape(stem);
+            q = q
+                .bind(target.to_string())
+                .bind(stem.to_string())
+                .bind(target.to_string())
+                .bind(stem.to_string())
+                .bind(esc_target)
+                .bind(esc_stem);
         }
         let rows = q
             .bind(limit)
@@ -1473,12 +1536,17 @@ pub(crate) enum SearchMode<'a> {
     FilterOnly,
 }
 
-/// `tag:` / `path:` / `type:` operators for [`Store::search_filtered`].
+/// Structured operators (`tag:`, `path:`, `type:`, `status:`, `stale:`,
+/// `orphan:`, `links-to:`) for [`Store::search_filtered`].
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct SearchFilters<'a> {
     pub tag: Option<&'a str>,
     pub path_prefix: Option<&'a str>,
     pub okf_type: Option<&'a str>,
+    pub okf_status: Option<&'a str>,
+    pub stale: Option<bool>,
+    pub orphan: Option<bool>,
+    pub links_to: Option<&'a str>,
 }
 
 #[cfg(test)]

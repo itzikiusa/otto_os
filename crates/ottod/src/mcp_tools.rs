@@ -594,9 +594,9 @@ impl Ctx {
                 filter: profile::parse(&v),
             }),
             // A daemon older than this bridge has no light route: fall back to
-            // the full status (no grant field there — UI tools stay hidden
-            // behind the request stub, which still works).
-            Err(e) if e.contains("404") => {
+            // the full status only when no profile restriction was requested
+            // (a profile-scoped session must fail closed, never widen).
+            Err(e) if e.contains("404") && self.profiles.is_none() => {
                 let v = self.get_json("/mcp/otto-server").await?;
                 Ok(EnabledInfo {
                     names: v["tools"]
@@ -1297,11 +1297,16 @@ async fn governed_call(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, bo
              MCP → Otto server in Otto, then call it again"
         ));
     }
-    let body = json!({
+    let mut body = json!({
         "tool": full,
         "arguments": governed_invoke_args(ctx, &spec, args),
         "wait_seconds": GOVERNED_WAIT_SECS,
     });
+    if !is_vault_docs_reviewer(ctx.source.as_deref()) {
+        if let Some(p) = &ctx.profiles {
+            body["profile"] = json!(p);
+        }
+    }
     // The daemon first waits up to GOVERNED_WAIT_SECS on a human decision,
     // then runs the tool with its own per-tool self-call budget (≤ 180 s).
     let v = ctx
@@ -1351,11 +1356,16 @@ async fn invoke_governed_native_envelope(
     args: &Value,
     run_budget: Duration,
 ) -> Result<Value, String> {
-    let body = json!({
+    let mut body = json!({
         "tool": format!("otto.{tool}"),
         "arguments": args,
         "wait_seconds": GOVERNED_WAIT_SECS,
     });
+    if !is_vault_docs_reviewer(ctx.source.as_deref()) {
+        if let Some(p) = &ctx.profiles {
+            body["profile"] = json!(p);
+        }
+    }
     ctx.post_json_within(
         "/mcp/otto-tools/invoke",
         &body,
@@ -1522,7 +1532,12 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
                         enabled_names.as_deref(),
                     )
                 });
-                if let Some(f) = &filter {
+                if ctx.profiles.is_some() && !reviewer {
+                    match &filter {
+                        Some(f) => f.retain_listed(arr),
+                        None => arr.clear(),
+                    }
+                } else if let Some(f) = &filter {
                     f.retain_listed(arr);
                 }
             }
@@ -1645,6 +1660,8 @@ pub async fn run() -> Result<(), String> {
     // so a long-poll or an agent-turn route is not cut off at CALL_TIMEOUT
     // underneath its per-route budget (integrations-3-01).
     let http = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| format!("build http client: {e}"))?;
 
@@ -1694,11 +1711,11 @@ fn answered_inline(msg: &Value) -> bool {
 /// The longest request line the bridge buffers (8 MiB). A huge or newline-
 /// free input used to grow `read_line`'s buffer without limit; an over-long
 /// line is discarded up to its newline and answered with -32700.
-const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 
 /// What [`read_bounded_line`] read.
 #[derive(Debug, PartialEq)]
-enum BoundedLine {
+pub(crate) enum BoundedLine {
     /// A whole line (newline included) is in the buffer.
     Line,
     /// The line was over the cap — consumed and dropped; the buffer is empty.
@@ -1710,7 +1727,7 @@ enum BoundedLine {
 /// `read_line` with a cap: buffers at most `max` bytes of one line, and
 /// past that keeps CONSUMING (without storing) up to the newline, so memory
 /// stays bounded whatever the peer sends.
-async fn read_bounded_line<R: AsyncBufRead + Unpin>(
+pub(crate) async fn read_bounded_line<R: AsyncBufRead + Unpin>(
     reader: &mut R,
     buf: &mut Vec<u8>,
     max: usize,
@@ -2473,7 +2490,12 @@ mod tests {
         // tool would bypass the approval gate). The native design tools stay
         // the four reads.
         let native = native_tool_names();
-        for w in ["design_assist", "design_link"] {
+        for w in [
+            "design_assist",
+            "design_link",
+            "design_comment",
+            "design_resolve_comment",
+        ] {
             assert!(!native.iter().any(|n| n == w), "{w} must not be native");
             assert!(!FEATURE_READ_TOOLS.contains(&w), "{w} is a write");
             let stdio = format!("otto_{w}");
@@ -4215,8 +4237,20 @@ mod tests {
     /// and otto_get_scheduled_task_report; 95_662 with a personal agent's six
     /// own-scope tools (otto_routine_* ×4, otto_personality_set,
     /// otto_instructions_propose: routines set up from chat with no approval;
-    /// hidden from narrow sessions).
-    const TOOLS_LIST_BYTE_BUDGET: usize = 96_500;
+    /// hidden from narrow sessions); 101_463 with the sixteen 3D / voice /
+    /// Smart-mode tools (otto_*_3d_*, otto_*_tts_*, otto_*voice*,
+    /// otto_*production*; hidden from narrow sessions); 103_647 with the five
+    /// sound and music tools (otto_start_sound, otto_start_music,
+    /// otto_get_audio_job, otto_list_audio_jobs, otto_cancel_audio_job; hidden
+    /// from narrow sessions); 105_718 with the four embedded simulator tools
+    /// (otto_sim_list, otto_sim_logs, otto_sim_action, otto_sim_input; hidden
+    /// from narrow sessions); 107_177 with the three Design Hall comment tools
+    /// (otto_design_comments, otto_design_comment, otto_design_resolve_comment;
+    /// hidden from narrow sessions); 109_584 with the four production-change
+    /// tools (otto_steer_production, otto_redraw_production_item,
+    /// otto_revert_production, otto_rebuild_production_scene) and project_id on
+    /// otto_create_production (hidden from narrow sessions).
+    const TOOLS_LIST_BYTE_BUDGET: usize = 110_500;
     /// A review-type session (R2 per-source scoping): 52_595 after slim-app cleanup.
     /// 56_895 with otto_request_secret (a thread's private secret card).
     const NARROW_TOOLS_LIST_BYTE_BUDGET: usize = 57_000; // +otto_thread_*, +otto_personal_agent_*, +otto_request_secret

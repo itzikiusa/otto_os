@@ -54,10 +54,14 @@ const LABELS: [&str; 2] = [LABEL_EXEC, LABEL_REFS];
 
 /// The shared self-call HTTP client. No client-wide timeout: each caller
 /// bounds its own call (`RequestBuilder::timeout` or `tokio::time::timeout`).
+/// Loopback-only: never routes through ambient HTTP_PROXY/ALL_PROXY and never
+/// follows redirects with live bearer credentials.
 pub(crate) fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
             .pool_idle_timeout(Duration::from_secs(60))
             .build()
             .expect("build self-call http client")

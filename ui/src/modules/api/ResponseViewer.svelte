@@ -1,11 +1,13 @@
+<script lang="ts" module>
+  import { ResponseDiffHistory } from './responseDiff';
+  const diffHistory = new ResponseDiffHistory();
+  const lastRespByTab = new Map<string, object>();
+</script>
+
 <script lang="ts">
   import { announceShown } from '../../lib/announce.svelte';
   import { toastError } from '../../lib/toastError';
   import { plural } from '../../lib/plural';
-  // Response viewer shared by the page and the compact panel: status / time /
-  // size chips, then Body (Pretty · Raw · Tree · Preview) · Headers · Cookies ·
-  // Timeline · Tests. A failed send shows inline with the reason and what to
-  // do; SSE / WebSocket requests get a live message console instead.
   import Icon from '../../lib/components/Icon.svelte';
   import Tabs from '../../lib/components/Tabs.svelte';
   import LazyCodeEditor from '../../lib/components/LazyCodeEditor.svelte';
@@ -13,6 +15,8 @@
   import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
   import StatusChip from './StatusChip.svelte';
   import JsonTree from './JsonTree.svelte';
+  import ResponseDiffView from './ResponseDiffView.svelte';
+  import { snapshotFromResponse } from './responseDiff';
   import { looksBinary, mimeOf } from './responseKind';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { apiStream } from '../../lib/stores/apiStream.svelte';
@@ -109,14 +113,11 @@
     if (isImage && bodyView !== 'preview') bodyView = 'preview';
   });
 
-  // Filter (JSONPath in Pretty) / search (Tree) — debounced.
-  let filter = $state('');
-  let filterDebounced = $state('');
-  let _filterTimer: ReturnType<typeof setTimeout> | undefined;
+  let filter = $state(''), filterDebounced = $state(''), _filterTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
-    const v = filter;
-    clearTimeout(_filterTimer);
+    const v = filter; clearTimeout(_filterTimer);
     _filterTimer = setTimeout(() => { filterDebounced = v; }, 150);
+    return () => clearTimeout(_filterTimer);
   });
 
   const prettyBody = $derived.by(() => {
@@ -171,9 +172,32 @@
   }
   const STREAM_STATUS: Record<string, string> = { idle: 'Not connected', connecting: 'Connecting…', open: 'Connected', closed: 'Disconnected', error: 'Connection error' };
 
-  // ── Tabs ────────────────────────────────────────────────────────────────────
-  type Tab = 'body' | 'headers' | 'cookies' | 'trace' | 'tests';
+  // ── Tabs + Response Diffing ─────────────────────────────────────────────────
+  type Tab = 'body' | 'headers' | 'cookies' | 'trace' | 'tests' | 'diff';
   let tab: Tab = $state('body');
+  let diffTick = $state(0);
+  const diffTabKey = $derived(apiClient.draft.tabId ?? apiClient.draft.requestId ?? 'default');
+  $effect(() => {
+    const k = diffTabKey;
+    const r = resp;
+    if (!r || lastRespByTab.get(k) === r) return;
+    lastRespByTab.set(k, r);
+    diffHistory.observe(k, snapshotFromResponse(r, 'Current'));
+    diffTick++;
+  });
+  const diffState = $derived((void diffTick, diffHistory.get(diffTabKey)));
+  const currentSnap = $derived(resp ? (diffState.latest ?? snapshotFromResponse(resp, 'Current')) : null);
+  const hasDiff = $derived(!!(diffState.pinned || diffState.previous));
+  function pinBaseline(): void {
+    if (!resp) return;
+    diffHistory.pin(diffTabKey, snapshotFromResponse(resp, 'Pinned baseline'));
+    diffTick++;
+    toasts.success('Pinned as baseline', 'Send again to diff against this response.');
+  }
+  function unpinBaseline(): void {
+    diffHistory.unpin(diffTabKey);
+    diffTick++;
+  }
   const tests = $derived(apiClient.testResults);
   const scriptLogs = $derived(apiClient.scriptLogs);
   const hasTests = $derived(tests.length > 0 || scriptLogs.length > 0);
@@ -186,6 +210,7 @@
     if (cookies.length) out.push({ id: 'cookies', label: 'Cookies', count: String(cookies.length) });
     if (resp.trace?.length) out.push({ id: 'trace', label: 'Timeline' });
     if (hasTests) out.push({ id: 'tests', label: 'Tests', count: tests.length ? `${testsPassed}/${tests.length}` : undefined });
+    if (hasDiff) out.push({ id: 'diff', label: 'Diff', count: diffState.pinned ? 'Pinned' : 'Prev' });
     return out;
   });
   $effect(() => {
@@ -272,6 +297,10 @@
 
   function moreMenu(e: MouseEvent): void {
     const items: MenuItem[] = [
+      { label: diffState.pinned ? 'Replace pinned baseline' : 'Pin as baseline', icon: 'pin', action: pinBaseline, disabled: !resp || resp.too_large || isImage },
+      ...(hasDiff ? [{ label: 'Diff vs baseline / previous', icon: 'columns' as const, action: () => (tab = 'diff') }] : []),
+      ...(diffState.pinned ? [{ label: 'Clear pinned baseline', icon: 'x' as const, action: unpinBaseline }] : []),
+      { separator: true },
       { label: 'Add to Docs as example', icon: 'note', action: addAsExample, disabled: !resp || resp.too_large || isImage },
       { label: 'Download response…', icon: 'download', action: () => void saveToDisk(), disabled: !canDownload },
     ];
@@ -389,6 +418,9 @@
       {#if resp.content_type}<span class="meta mono ct" title={resp.content_type}>{resp.content_type}</span>{/if}
       {#if apiClient.sending}<span class="meta">Sending again…</span>{/if}
       <span class="grow"></span>
+      <button class="btn small ghost" onclick={hasDiff && tab !== 'diff' ? () => (tab = 'diff') : pinBaseline} disabled={resp.too_large || isImage} title={hasDiff && tab !== 'diff' ? 'Open response diff vs baseline / previous' : 'Pin this response as a diff baseline'}>
+        <Icon name={hasDiff && tab !== 'diff' ? 'columns' : 'pin'} size={12} />{hasDiff && tab !== 'diff' ? 'Diff' : 'Pin'}
+      </button>
       <button class="btn small ghost" onclick={copyBody} disabled={resp.too_large || isImage} title={resp.too_large ? 'Too large to copy — download it from More response actions' : isImage ? 'Images can’t be copied as text — download it from More response actions' : 'Copy the body as shown'}>
         <Icon name="copy" size={12} />Copy
       </button>
@@ -502,6 +534,8 @@
             </li>
           {/each}
         </ol>
+      {:else if tab === 'diff' && currentSnap}
+        <ResponseDiffView current={currentSnap} pinned={diffState.pinned} previous={diffState.previous} onpin={pinBaseline} onunpin={unpinBaseline} />
       {:else}
         <div class="tests-pane">
           {#if tests.length === 0}
@@ -843,113 +877,31 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .trace-ms {
-    font-variant-numeric: tabular-nums;
-    color: var(--text);
-    font-weight: 600;
-    font-size: var(--fs-xs);
-  }
-  .tests-pane {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-  .tests-pane .section-title {
-    margin: 4px 0 0;
-  }
-  .test-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .test-item {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-    padding: 4px 8px;
-    border-radius: var(--radius-s);
-    font-size: var(--fs-s);
-  }
+  .trace-ms { font-variant-numeric: tabular-nums; color: var(--text); font-weight: 600; font-size: var(--fs-xs); }
+  .tests-pane { display: flex; flex-direction: column; gap: 8px; }
+  .tests-pane .section-title { margin: 4px 0 0; }
+  .test-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+  .test-item { display: flex; align-items: baseline; gap: 8px; padding: 4px 8px; border-radius: var(--radius-s); font-size: var(--fs-s); }
   .test-item.pass { background: var(--success-soft); }
   .test-item.fail { background: var(--danger-soft); }
   .test-word { font-weight: 600; }
   .test-item.pass .test-word { color: var(--success); }
   .test-item.fail .test-word { color: var(--danger); }
   .test-err { color: var(--danger); }
-  .console-log {
-    margin: 0;
-    background: var(--surface-2);
-    border-radius: var(--radius-s);
-    padding: 8px;
-    max-height: 160px;
-    overflow: auto;
-    white-space: pre-wrap;
-    user-select: text;
-  }
-  code {
-    font-family: var(--font-mono);
-  }
-  .stream-console {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    min-height: 0;
-  }
-  .stream-log {
-    flex: 1;
-    min-height: 0;
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    padding: 4px 0;
-  }
-  :global(.stream-vlist) {
-    flex: 1;
-    min-height: 0;
-    height: 100%;
-  }
-  .ring-note {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    padding: 2px 8px 4px;
-    flex-shrink: 0;
-  }
-  .stream-item {
-    display: flex;
-    gap: 8px;
-    padding: 4px 8px;
-    border-radius: var(--radius-s);
-    align-items: baseline;
-  }
+  .console-log { margin: 0; background: var(--surface-2); border-radius: var(--radius-s); padding: 8px; max-height: 160px; overflow: auto; white-space: pre-wrap; user-select: text; }
+  code { font-family: var(--font-mono); }
+  .stream-console { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+  .stream-log { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 2px; padding: 4px 0; }
+  :global(.stream-vlist) { flex: 1; min-height: 0; height: 100%; }
+  .ring-note { font-size: var(--fs-xs); color: var(--text-dim); padding: 2px 8px 4px; flex-shrink: 0; }
+  .stream-item { display: flex; gap: 8px; padding: 4px 8px; border-radius: var(--radius-s); align-items: baseline; }
   .stream-item.event { background: var(--surface-2); }
   .stream-item.message.out { background: var(--accent-soft); }
   .stream-item.message.in { background: var(--surface-2); }
   .stream-item.error { background: var(--danger-soft); }
-  .stream-item.open,
-  .stream-item.closed { color: var(--text-dim); font-style: italic; }
-  .si-tag {
-    flex: 0 0 auto;
-    min-width: 64px;
-    font-weight: 600;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
+  .stream-item.open, .stream-item.closed { color: var(--text-dim); font-style: italic; }
+  .si-tag { flex: 0 0 auto; min-width: 64px; font-weight: 600; font-size: var(--fs-xs); color: var(--text-dim); }
   .stream-item.error .si-tag { color: var(--danger); }
-  .si-data {
-    flex: 1;
-    white-space: pre-wrap;
-    word-break: break-word;
-    user-select: text;
-    color: var(--text);
-  }
-  .ws-send {
-    display: flex;
-    gap: 6px;
-    padding-top: 8px;
-    border-top: 1px solid var(--border);
-  }
+  .si-data { flex: 1; white-space: pre-wrap; word-break: break-word; user-select: text; color: var(--text); }
+  .ws-send { display: flex; gap: 6px; padding-top: 8px; border-top: 1px solid var(--border); }
 </style>

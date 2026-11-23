@@ -132,16 +132,46 @@ pub fn content(provider: &str, name: &str) -> Option<ProviderSkillContent> {
     })
 }
 
-/// Read one file inside a provider skill (path-safe, size-capped).
+/// Read one file inside a provider skill (path-safe, symlink-safe, size-capped).
 pub fn read_file(provider: &str, name: &str, rel: &str) -> Option<SkillFileContentResp> {
     let dir = skill_dir(provider, name)?;
-    let target = dir.join(safe_rel(rel)?);
-    let bytes = std::fs::read(&target).ok()?;
-    let bytes = &bytes[..bytes.len().min(MAX_FILE_BYTES)];
+    read_file_in(&dir, rel)
+}
+
+/// Inner bounded, symlink-rejecting file reader rooted at `dir`.
+fn read_file_in(dir: &std::path::Path, rel: &str) -> Option<SkillFileContentResp> {
+    use std::io::Read as _;
+
+    let rel_path = safe_rel(rel)?;
+    // Reject any symlink component along `rel` inside `dir` before opening.
+    let mut cur = dir.to_path_buf();
+    for comp in rel_path.components() {
+        cur.push(comp);
+        let meta = std::fs::symlink_metadata(&cur).ok()?;
+        if meta.file_type().is_symlink() {
+            return None;
+        }
+    }
+    // Verify canonical confinement under canonical `dir` as belt-and-braces.
+    let canon_dir = dir.canonicalize().ok()?;
+    let target = otto_core::paths::confine_join(&canon_dir, rel)?;
+    let canon_target = target.canonicalize().ok()?;
+    if !canon_target.starts_with(&canon_dir) {
+        return None;
+    }
+    let file = std::fs::File::open(&canon_target).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut buf = Vec::new();
+    file.take((MAX_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut buf)
+        .ok()?;
+    buf.truncate(MAX_FILE_BYTES);
     Some(SkillFileContentResp {
         path: rel.to_string(),
-        content: String::from_utf8_lossy(bytes).into_owned(),
-        binary: is_binary(bytes),
+        content: String::from_utf8_lossy(&buf).into_owned(),
+        binary: is_binary(&buf),
     })
 }
 
@@ -180,5 +210,48 @@ mod tests {
         if let Some(dir) = skill_dir("claude", "my-skill") {
             assert!(dir.ends_with(".claude/skills/my-skill"));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_file_rejects_symlink_escape() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let skill = tmp.path().join("my-skill");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(skill.join("nested")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let secret = outside.join("secret.txt");
+        std::fs::write(&secret, "top-secret").unwrap();
+        std::fs::write(skill.join("SKILL.md"), "# ok").unwrap();
+
+        // Direct file symlink escaping the skill dir.
+        std::os::unix::fs::symlink(&secret, skill.join("escape.txt")).unwrap();
+        // Directory symlink escaping the skill dir.
+        std::os::unix::fs::symlink(&outside, skill.join("linked_dir")).unwrap();
+        // Even an intra-skill symlink is rejected.
+        std::os::unix::fs::symlink(skill.join("SKILL.md"), skill.join("alias.md")).unwrap();
+
+        assert_eq!(read_file_in(&skill, "SKILL.md").unwrap().content, "# ok");
+        assert!(read_file_in(&skill, "escape.txt").is_none());
+        assert!(read_file_in(&skill, "linked_dir/secret.txt").is_none());
+        assert!(read_file_in(&skill, "alias.md").is_none());
+        assert!(read_file_in(&skill, "../outside/secret.txt").is_none());
+    }
+
+    #[test]
+    fn read_file_bounds_read_to_max_file_bytes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let skill = tmp.path().join("big-skill");
+        std::fs::create_dir_all(&skill).unwrap();
+
+        // Write more than MAX_FILE_BYTES and verify read_file_in caps at MAX_FILE_BYTES.
+        let oversized = vec![b'a'; MAX_FILE_BYTES + 4096];
+        std::fs::write(skill.join("big.txt"), &oversized).unwrap();
+
+        let resp = read_file_in(&skill, "big.txt").expect("bounded read succeeds");
+        assert_eq!(resp.path, "big.txt");
+        assert_eq!(resp.content.len(), MAX_FILE_BYTES);
+        assert!(!resp.binary);
     }
 }

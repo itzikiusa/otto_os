@@ -29,7 +29,7 @@ export function guardUnsaved(isDirty: () => boolean, opts: GuardUnsavedOpts = {}
       opts.what
         ? `You have unsaved changes to ${opts.what}. Leaving now discards them.`
         : 'You have unsaved changes. Leaving now discards them.',
-      { title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing' },
+      { title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing', danger: true },
     );
   });
 }

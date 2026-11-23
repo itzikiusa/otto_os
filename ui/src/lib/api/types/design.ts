@@ -38,7 +38,8 @@ export type DesignArtifactFormat =
   | 'webp'
   | 'pdf'
   | 'glb'
-  | 'gltf';
+  | 'gltf'
+  | 'obj';
 
 export type DesignStatus = 'draft' | 'review' | 'approved' | 'shipped' | 'archived';
 export type DesignAuthorKind = 'user' | 'agent' | 'system';
@@ -493,6 +494,37 @@ export interface DesignCommentPin {
   frame?: string | null;
 }
 
+/** Selection granularity for a 3D surface / polygon comment anchor. */
+export type CommentPin3dSelectionKind = 'point' | 'polygon' | 'region' | 'mesh';
+
+/** Camera viewpoint to fly to when focusing a 3D comment. */
+export interface CommentPin3dCamera {
+  pos: [number, number, number];
+  target: [number, number, number];
+  fov?: number | null;
+}
+
+/** 3D surface / polygon / region / sub-mesh anchor on a 3D Design Hall artifact. */
+export interface CommentPin3d {
+  selection_kind: CommentPin3dSelectionKind;
+  /** Sub-mesh name (e.g. "HeroHelmet") when available. */
+  mesh_name?: string | null;
+  /** Optional scene3d object id or GLB node uuid/name. */
+  object_id?: string | null;
+  /** Primary hit triangle/polygon face index (0-based). */
+  face_index?: number | null;
+  /** Selected polygon face indices (deduped, capped at 2,048). */
+  face_indices?: number[];
+  /** Vertex indices [a, b, c] of the primary hit triangle, when known. */
+  vertices?: [number, number, number] | null;
+  /** World-space anchor point / polygon centroid [x, y, z]. */
+  position: [number, number, number];
+  /** Surface normal [nx, ny, nz] at the anchor. */
+  normal?: [number, number, number] | null;
+  /** Optional camera bookmark for fly-to focus. */
+  camera?: CommentPin3dCamera | null;
+}
+
 export interface DesignComment {
   id: Id;
   artifact_id: Id;
@@ -508,8 +540,10 @@ export interface DesignComment {
   session_id: Id | null;
   /** Plain text (≤ 4,000 characters). */
   body: string;
-  /** Top-level comments only. */
+  /** Top-level 2D stage pin. */
   pin: DesignCommentPin | null;
+  /** Top-level 3D polygon / mesh anchor (null for 2D artifacts or unpinned comments). */
+  pin_3d?: CommentPin3d | null;
   resolved: boolean;
   resolved_by: Id | null;
   resolved_by_name: string | null;
@@ -525,6 +559,7 @@ export interface CreateDesignCommentReq {
   version_id?: Id;
   parent_id?: Id;
   pin?: DesignCommentPin;
+  pin_3d?: CommentPin3d;
 }
 
 export interface UpdateDesignCommentReq {

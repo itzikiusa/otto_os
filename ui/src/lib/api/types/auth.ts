@@ -42,7 +42,8 @@ export type Feature =
   | 'aws_athena'
   | 'aws_eks'
   | 'aws_rds'
-  | 'kubernetes';
+  | 'kubernetes'
+  | 'containers';
 
 /** Capability ladder (None < View < Edit < Admin). */
 export type Capability = 'none' | 'view' | 'edit' | 'admin';
@@ -286,6 +287,22 @@ export interface AuditLogResp {
   total: number;
 }
 
+/** Overall security posture verdict returned by `GET /api/v1/security-posture`. */
+export type SecurityPostureOverall = 'healthy' | 'warn' | 'critical';
+
+/** Status of an individual check inside `GET /api/v1/security-posture`. */
+export type SecurityPostureCheckStatus = 'pass' | 'warn' | 'fail';
+
+/** One diagnostic check returned by `GET /api/v1/security-posture`. */
+export interface SecurityPostureCheck {
+  id: string;
+  category: string;
+  title: string;
+  status: SecurityPostureCheckStatus;
+  detail: string;
+  remediation?: string | null;
+}
+
 /** GET /api/v1/security-posture (root only) — a derived security snapshot. */
 export interface SecurityPostureResp {
   network_listener: boolean;
@@ -293,6 +310,9 @@ export interface SecurityPostureResp {
   loopback_only: boolean;
   network_listener_restart_required: boolean;
   active_api_tokens: number;
+  overall?: SecurityPostureOverall;
+  checked_at?: string;
+  checks?: SecurityPostureCheck[];
 }
 
 // ---------------------------------------------------------------------------

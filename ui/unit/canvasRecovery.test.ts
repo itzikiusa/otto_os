@@ -137,10 +137,10 @@ test('Excalidraw restore applies persisted background and grid before the next s
     scrollToContent() {}, getAppState: () => appState, getSceneElements: () => elements, getFiles: () => ({}),
   };
   const editor = componentFunctions(editorPath('Excalidraw'), ['loadScene', 'snapshotDoc', 'persistedAppState'], {
-    liveApi: api, excaliApi: api, suppressSave: false, lastApplied: '',
+    liveApi: api, excaliApi: api, suppressSave: false, suppressTimer: null, lastApplied: '',
     normalizeScene: (raw: { elements: unknown[] } | null) => raw?.elements ?? [],
     knownFiles: new Map(), inlineOf: new WeakMap(), filesForSave: () => ({ files: {}, inline: [] }),
-    setTimeout() {},
+    setTimeout() { return 1; }, clearTimeout() {},
   });
   editor.loadScene(JSON.stringify({ elements: [{ id: 'restored' }], appState: { viewBackgroundColor: '#123456', gridSize: 40, gridModeEnabled: true, scrollX: 1000 } }));
   const saved = JSON.parse(editor.snapshotDoc().source);

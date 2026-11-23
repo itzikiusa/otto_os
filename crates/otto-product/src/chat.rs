@@ -234,23 +234,20 @@ pub(crate) async fn assemble_context<C: ProductStudioHost>(ctx: &C, story_id: &I
     if body.trim().is_empty() {
         body = story.title.clone();
     }
+    if story.source_kind != "manual" {
+        body = otto_orchestrator::fence_untrusted("the external story body", &body);
+    }
 
-    // Attachments — inline text mockups; list raster images by absolute path.
+    // Attachments — inline text mockups (strictly confined under ATTACH_ROOT
+    // and byte-capped before loading into RAM); list raster images by path.
     let mut attachments: Vec<(String, String, String, Option<String>)> = Vec::new();
     if let Ok(atts) = ctx.attachments().list_for_story(story_id).await {
         for a in atts {
-            // Confine the stored path's join under the data dir — a traversing
-            // storage_path drops the attachment instead of reading outside it
-            // (rust/path-injection).
-            let Some(path) = otto_core::paths::confine_join(ctx.data_dir(), &a.storage_path) else {
+            let Some(path) = confine_attachment_path(ctx.data_dir(), &a.storage_path) else {
                 continue;
             };
             let inlined = if is_text_mockup(&a.mime, &a.filename) {
-                // Async read — don't block the tokio worker on disk I/O.
-                tokio::fs::read_to_string(&path)
-                    .await
-                    .ok()
-                    .map(|t| truncate(&t, ATTACH_INLINE_CAP))
+                read_inline_mockup_capped(&path, ATTACH_INLINE_CAP).await
             } else {
                 None
             };
@@ -283,6 +280,48 @@ pub(crate) async fn assemble_context<C: ProductStudioHost>(ctx: &C, story_id: &I
 // ---------------------------------------------------------------------------
 // Pure helpers (unit-tested)
 // ---------------------------------------------------------------------------
+
+/// Confine an attachment's `storage_path` strictly inside `data_dir/product/attachments`
+/// (rejecting both traversal outside `data_dir` and paths into sibling daemon files
+/// like `otto.db` or `secrets.enc`).
+fn confine_attachment_path(
+    data_dir: &std::path::Path,
+    storage_path: &str,
+) -> Option<std::path::PathBuf> {
+    let full = otto_core::paths::confine_join(data_dir, storage_path)?;
+    let attach_root = data_dir.join(crate::media::ATTACH_ROOT);
+    if !crate::media::path_within(&attach_root, &full) {
+        return None;
+    }
+    Some(full)
+}
+
+/// Async, symlink-refusing, byte-capped read of a text mockup for inlining into
+/// discovery/refinement context. Caps raw bytes to at most `max_chars * 4 + 4`
+/// (bounded to 64 KiB) so multi-megabyte attachments never load into RAM.
+async fn read_inline_mockup_capped(path: &std::path::Path, max_chars: usize) -> Option<String> {
+    use tokio::io::AsyncReadExt;
+
+    let meta = tokio::fs::symlink_metadata(path).await.ok()?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return None;
+    }
+    let file = tokio::fs::File::open(path).await.ok()?;
+    let opened_meta = file.metadata().await.ok()?;
+    if !opened_meta.is_file() {
+        return None;
+    }
+    let byte_cap = max_chars.saturating_mul(4).saturating_add(4).min(64 * 1024) as u64;
+    let mut buf = Vec::with_capacity((byte_cap as usize).min(16 * 1024));
+    file.take(byte_cap).read_to_end(&mut buf).await.ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    let trimmed = truncate(&text, max_chars);
+    if opened_meta.len() > byte_cap && !trimmed.contains("[truncated]") {
+        Some(format!("{trimmed}\n...[truncated]"))
+    } else {
+        Some(trimmed)
+    }
+}
 
 fn is_text_mockup(mime: &str, filename: &str) -> bool {
     let m = mime.to_lowercase();
@@ -580,5 +619,41 @@ mod tests {
         let (md, actions) = split_actions(raw);
         assert_eq!(md, raw);
         assert!(actions.is_none());
+    }
+
+    #[tokio::test]
+    async fn inline_mockup_read_confines_to_attach_root_and_caps_bytes() {
+        let td = tempfile::tempdir().unwrap();
+        let data_dir = td.path();
+        let attach_dir = data_dir.join(crate::media::ATTACH_ROOT).join("s1");
+        tokio::fs::create_dir_all(&attach_dir).await.unwrap();
+
+        // Sibling daemon file inside data_dir but outside ATTACH_ROOT is rejected.
+        let secret = data_dir.join("secrets.enc");
+        tokio::fs::write(&secret, b"top-secret").await.unwrap();
+        assert!(confine_attachment_path(data_dir, "secrets.enc").is_none());
+        assert!(confine_attachment_path(data_dir, "../etc/passwd").is_none());
+
+        // Large text mockup inside ATTACH_ROOT is read with a strict byte cap.
+        let big = attach_dir.join("big.md");
+        tokio::fs::write(&big, "x".repeat(200_000)).await.unwrap();
+        let confined = confine_attachment_path(
+            data_dir,
+            &format!("{}/s1/big.md", crate::media::ATTACH_ROOT),
+        )
+        .expect("inside attach root");
+        let inlined = read_inline_mockup_capped(&confined, 120)
+            .await
+            .expect("readable");
+        assert!(inlined.contains("[truncated]"));
+        assert!(inlined.len() < 256);
+
+        // Symlinks inside ATTACH_ROOT are refused.
+        #[cfg(unix)]
+        {
+            let link = attach_dir.join("link.md");
+            std::os::unix::fs::symlink(&secret, &link).unwrap();
+            assert!(read_inline_mockup_capped(&link, 120).await.is_none());
+        }
     }
 }

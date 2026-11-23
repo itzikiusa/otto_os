@@ -58,7 +58,9 @@ fn hooks_are_kept_only_for_deliberate_verbs() {
     // fsmonitor is off on every path, hooks only on the hooked one.
     assert!(HARDENED_GIT_CONFIG.contains("'core.fsmonitor=false'"));
     assert!(HARDENED_GIT_CONFIG.contains("'core.hooksPath=/dev/null'"));
+    assert!(HARDENED_GIT_CONFIG.contains("'protocol.ext.allow=never'"));
     assert!(HOOKED_GIT_CONFIG.contains("'core.fsmonitor=false'"));
+    assert!(HOOKED_GIT_CONFIG.contains("'protocol.ext.allow=never'"));
     assert!(!HOOKED_GIT_CONFIG.contains("hooksPath"));
 }
 

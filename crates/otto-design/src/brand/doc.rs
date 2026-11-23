@@ -104,7 +104,7 @@ pub fn issues(v: &Value) -> Vec<String> {
     }
     if let Some(f) = root.get("font") {
         tokens(f, "font", &mut out, |path, tok, out| {
-            let role = path.trim_start_matches("font.");
+            let role = path.strip_prefix("font.").unwrap_or(path);
             if !FONT_ROLES.contains(&role) {
                 out.push(format!("{path}: font roles are {}", FONT_ROLES.join(" | ")));
             }
@@ -845,5 +845,19 @@ mod tests {
         assert_eq!(font_role_for_style("codeBlock"), "mono");
         assert_eq!(font_role_for_style("body"), "body");
         assert_eq!(font_role_for_style("h10"), "body");
+    }
+
+    #[test]
+    fn repeated_font_prefix_in_key_is_rejected_by_role_check() {
+        let mut doc = acme();
+        doc["font"] = json!({
+            "font.body": { "$value": "Inter" }
+        });
+        let errs = issues(&doc);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("font.font.body") && e.contains("font roles are")),
+            "expected font.font.body to fail role validation, got {errs:?}"
+        );
     }
 }

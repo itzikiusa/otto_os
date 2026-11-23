@@ -35,6 +35,8 @@ pub fn routes() -> Router<ServerCtx> {
         .route("/goal-loops/{id}/pause", post(pause))
         .route("/goal-loops/{id}/resume", post(resume))
         .route("/goal-loops/{id}/stop", post(stop))
+        .route("/goal-loops/{id}/steer", post(steer))
+        .route("/goal-loops/{id}/diff", get(diff))
         .route(
             "/goal-loops/{id}/criteria/{criterion}/verify",
             post(verify_criterion),
@@ -254,12 +256,20 @@ struct DetailQuery {
     summary: bool,
 }
 
+#[derive(serde::Serialize)]
+struct GoalLoopDetailResp {
+    #[serde(flatten)]
+    detail: GoalLoopDetail,
+    spent_usd: Option<f64>,
+    steering_notes: Vec<String>,
+}
+
 async fn detail(
     State(ctx): State<ServerCtx>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<DetailQuery>,
-) -> ApiResult<Json<GoalLoopDetail>> {
+) -> ApiResult<Json<GoalLoopDetailResp>> {
     let loop_ = loop_for(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
     let repo = &ctx.goal_loops_repo;
     let detail = if q.summary {
@@ -268,7 +278,59 @@ async fn detail(
         repo.get_detail(&loop_.id).await
     }
     .map_err(ApiError)?;
-    Ok(Json(detail))
+    let spent_usd =
+        otto_automation::AutomationCtx::goal_loop_spent_usd(&ctx, &loop_.workspace_id, &loop_.id)
+            .await;
+    let steering_notes =
+        otto_automation::goal_loop_steering::peek_notes(&ctx.data_dir, &loop_.id).await;
+    Ok(Json(GoalLoopDetailResp {
+        detail,
+        spent_usd,
+        steering_notes,
+    }))
+}
+
+async fn steer(
+    State(ctx): State<ServerCtx>,
+    Extension(user): Extension<AuthUser>,
+    CurrentAuthContext(auth): CurrentAuthContext,
+    Path(id): Path<Id>,
+    Json(req): Json<otto_automation::goal_loop_steering::SteerGoalLoopReq>,
+) -> ApiResult<Json<otto_automation::goal_loop_steering::SteerGoalLoopResp>> {
+    require_human_credential(auth.managed_session_id.as_deref(), auth.mcp_only)?;
+    let loop_ = loop_for(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    if loop_.status.is_terminal() {
+        return Err(ApiError(Error::Conflict(
+            "cannot steer a finished goal loop".into(),
+        )));
+    }
+    let note = otto_automation::goal_loop_steering::validate_note(&req.note).map_err(ApiError)?;
+    let queued_notes =
+        otto_automation::goal_loop_steering::queue_note(&ctx.data_dir, &loop_.id, &note)
+            .await
+            .map_err(ApiError)?;
+    Ok(Json(
+        otto_automation::goal_loop_steering::SteerGoalLoopResp {
+            loop_id: loop_.id,
+            note,
+            queued_notes,
+        },
+    ))
+}
+
+async fn diff(
+    State(ctx): State<ServerCtx>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<otto_automation::goal_loop_steering::GoalLoopDiff>> {
+    let loop_ = loop_for(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
+    let d = otto_automation::goal_loop_workspace::worktree_diff(
+        &loop_,
+        otto_automation::goal_loop_steering::DEFAULT_DIFF_PATCH_CAP,
+    )
+    .await
+    .map_err(ApiError)?;
+    Ok(Json(d))
 }
 
 /// One iteration in full (the summary detail omits older bodies).
@@ -522,10 +584,12 @@ fn validate_settings(config: &GoalLoopConfig, limits: &GoalLoopLimits) -> ApiRes
             "mode must be build or research".into(),
         )));
     }
-    if limits.max_cost_usd.is_some() {
-        return Err(ApiError(Error::Invalid(
-            "per-loop cost accounting is unavailable; use iteration and runtime limits".into(),
-        )));
+    if let Some(cost) = limits.max_cost_usd {
+        if !cost.is_finite() || cost <= 0.0 {
+            return Err(ApiError(Error::Invalid(
+                "max_cost_usd must be a finite positive number".into(),
+            )));
+        }
     }
     if limits.max_iterations == 0
         || limits.max_runtime_secs == 0

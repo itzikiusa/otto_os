@@ -31,7 +31,7 @@ export function lineTapRow(e: Event): Element | null {
   const sel = window.getSelection();
   if (sel && !sel.isCollapsed) return null;
   const t = e.target instanceof Element ? e.target : null;
-  if (!t || t.closest('button, a, input, textarea, select, label')) return null;
+  if (!t || t.closest('button, a, input, textarea, select, label, .ai-overlay-slot')) return null;
   return t.closest('.vrow.dline');
 }
 

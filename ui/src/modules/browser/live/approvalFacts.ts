@@ -8,6 +8,7 @@
 // left out rather than guessed.
 
 import type { McpApproval } from '../../../lib/api/types';
+import type { ApprovalWireMeta } from './protocol';
 
 export type ApprovalChoice = 'approve' | 'deny' | 'take_over';
 
@@ -22,10 +23,36 @@ export interface ApprovalFacts {
   rows: FactRow[];
   /** The agent's stated reason, if any. */
   why: string | null;
+  /** Redacted & truncated JSON/text body preview for held SPA Fetch/XHR mutations. */
+  bodyPreview: string | null;
   /** A pre-action screenshot was captured. */
   screenshot: boolean;
   /** "An agent" or its identity. */
   requester: string;
+}
+
+const BODY_PREVIEW_MAX = 600;
+
+function formatBodyPreview(raw: unknown): string | null {
+  let text = '';
+  if (typeof raw === 'string') text = raw.trim();
+  else if (raw && typeof raw === 'object') {
+    try {
+      text = JSON.stringify(raw, null, 2);
+    } catch {
+      return null;
+    }
+  }
+  if (!text) return null;
+  // Pretty-print compact JSON payloads so reviewers can scan keys quickly.
+  if (text.startsWith('{') || text.startsWith('[')) {
+    try {
+      text = JSON.stringify(JSON.parse(text), null, 2);
+    } catch {
+      /* truncated or non-JSON text: display as-is */
+    }
+  }
+  return text.length > BODY_PREVIEW_MAX ? `${text.slice(0, BODY_PREVIEW_MAX)}…` : text;
 }
 
 function pick(o: Record<string, unknown>, keys: string[]): string | null {
@@ -45,7 +72,11 @@ function hostOf(u: string | null): string | null {
   }
 }
 
-export function approvalFacts(a: McpApproval | null, profile: string | null): ApprovalFacts {
+export function approvalFacts(
+  a: McpApproval | null,
+  profile: string | null,
+  wire?: ApprovalWireMeta | null,
+): ApprovalFacts {
   let args: Record<string, unknown> = {};
   if (a?.args_redacted_json) {
     try {
@@ -57,16 +88,23 @@ export function approvalFacts(a: McpApproval | null, profile: string | null): Ap
   }
   const origin = pick(args, ['origin', 'page_origin', 'from']);
   const method = pick(args, ['method', 'http_method']);
+  const resourceType = pick(args, ['resource_type', 'kind', 'transport']) ?? wire?.resourceType ?? null;
   const target = pick(args, ['target_host', 'host', 'target']) ?? hostOf(pick(args, ['url', 'target_url']));
   const screenshot = !!pick(args, ['screenshot', 'screenshot_path', 'screenshot_url']);
+  const bodyPreview =
+    formatBodyPreview(args.body_preview ?? args.payload_preview ?? args.request_body ?? args.body ?? wire?.bodyPreview ?? null);
 
   const rows: FactRow[] = [];
   if (origin) rows.push({ label: 'Where', value: origin, ltr: true });
+  const isSpaRt = !!resourceType && /^(fetch|xhr)$/i.test(resourceType);
   if (method || target) {
+    const rt = isSpaRt ? ` (${resourceType.toUpperCase()})` : '';
     rows.push({
       label: 'What',
-      value: `${method ? method.toUpperCase() : 'A'} request${target ? ` to ${target}` : ''}`,
+      value: `${method ? method.toUpperCase() : 'A'}${rt} request${target ? ` to ${target}` : ''}`,
     });
+  } else if (isSpaRt) {
+    rows.push({ label: 'What', value: `${resourceType.toUpperCase()} write request` });
   }
   if (target) {
     rows.push({ label: 'Who sees it', value: `Whoever runs ${target}. The request leaves this Mac.` });
@@ -82,5 +120,5 @@ export function approvalFacts(a: McpApproval | null, profile: string | null): Ap
   }
   const requester =
     a?.requested_by_kind === 'agent' || !a?.requested_by_kind ? 'An agent asked' : `${a.requested_by_kind} asked`;
-  return { rows, why: a?.detail?.trim() || null, screenshot, requester };
+  return { rows, why: a?.detail?.trim() || null, bodyPreview, screenshot, requester };
 }

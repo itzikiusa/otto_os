@@ -679,9 +679,22 @@ impl Library {
 
     /// Import a skill package from an in-memory zip. The archive must contain a
     /// `SKILL.md`; the skill name is `name_override` or the wrapping directory
-    /// name. Zip-slip and size limits are enforced. Returns the skill name.
+    /// name. Zip-slip, actual decompressed size limits, and atomic directory
+    /// replacement are enforced. Returns the skill name.
     pub fn import_zip(&self, bytes: &[u8], name_override: Option<&str>) -> io::Result<String> {
-        use std::io::Cursor;
+        use std::io::{Cursor, Read as _};
+
+        static IMPORT_SEQ: AtomicU64 = AtomicU64::new(0);
+
+        struct DirGuard(Option<PathBuf>);
+        impl Drop for DirGuard {
+            fn drop(&mut self) {
+                if let Some(p) = self.0.take() {
+                    let _ = fs::remove_dir_all(p);
+                }
+            }
+        }
+
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes))
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("bad zip: {e}")))?;
 
@@ -718,6 +731,18 @@ impl Library {
         let dest_root = self
             .skill_dir(&name)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe skill name"))?;
+        let skills_dir = self.skills_dir();
+        fs::create_dir_all(&skills_dir)?;
+
+        // Stage extraction in a sibling hidden directory (`is_safe_segment`
+        // ignores dot-prefixed entries) so any failure leaves `dest_root`
+        // completely untouched and cleans up automatically on drop.
+        let seq = IMPORT_SEQ.fetch_add(1, Ordering::Relaxed);
+        let stage_dir =
+            skills_dir.join(format!(".{name}.otto-import-{}-{seq}", std::process::id()));
+        fs::create_dir(&stage_dir)?;
+        let mut stage_guard = DirGuard(Some(stage_dir.clone()));
+
         // Strip the wrapping prefix so entries land at the skill root.
         let strip = if prefix.is_empty() {
             String::new()
@@ -733,6 +758,12 @@ impl Library {
             if f.is_dir() {
                 continue;
             }
+            if f.is_symlink() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unsafe zip symlink entry",
+                ));
+            }
             let Some(entry) = f.enclosed_name() else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -743,27 +774,53 @@ impl Library {
             let Some(rel) = entry.strip_prefix(&strip) else {
                 continue; // outside the package root
             };
-            let Some(out) = confined(&dest_root, rel) else {
+            let Some(out) = confined(&stage_dir, rel) else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "unsafe zip entry",
                 ));
             };
-            total += f.size();
-            if total > MAX_SKILL_IMPORT_BYTES {
+            // Enforce MAX_SKILL_IMPORT_BYTES against ACTUAL decompressed bytes
+            // read (never trust the archive header's `f.size()`).
+            let remaining = MAX_SKILL_IMPORT_BYTES.saturating_sub(total);
+            let mut buf = Vec::new();
+            f.by_ref()
+                .take(remaining.saturating_add(1))
+                .read_to_end(&mut buf)?;
+            if buf.len() as u64 > remaining {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "zip too large"));
             }
+            total = total.saturating_add(buf.len() as u64);
             if let Some(parent) = out.parent() {
                 fs::create_dir_all(parent)?;
             }
-            let mut buf = Vec::new();
-            std::io::Read::read_to_end(&mut f, &mut buf)?;
             fs::write(&out, &buf)?;
             #[cfg(unix)]
             if out.extension().and_then(|e| e.to_str()) == Some("sh") {
                 use std::os::unix::fs::PermissionsExt;
                 let _ = fs::set_permissions(&out, fs::Permissions::from_mode(0o755));
             }
+        }
+
+        // Atomically swap `stage_dir` into `dest_root`. If `dest_root` already
+        // exists, park it beside `dest_root` first and restore on swap failure.
+        let _write = skill_write_guard();
+        if dest_root.exists() {
+            let old_dir = skills_dir.join(format!(
+                ".{name}.otto-old-{}-{}",
+                std::process::id(),
+                IMPORT_SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::rename(&dest_root, &old_dir)?;
+            if let Err(e) = fs::rename(&stage_dir, &dest_root) {
+                let _ = fs::rename(&old_dir, &dest_root);
+                return Err(e);
+            }
+            stage_guard.0 = None;
+            let _ = fs::remove_dir_all(&old_dir);
+        } else {
+            fs::rename(&stage_dir, &dest_root)?;
+            stage_guard.0 = None;
         }
         self.evict(&name);
         Ok(name)
@@ -1295,5 +1352,96 @@ mod tests {
             zw.finish().unwrap();
         }
         assert!(lib.import_zip(&buf, None).is_err());
+    }
+
+    #[test]
+    fn import_zip_rejects_zip_bomb_and_leaves_no_temp() {
+        use std::io::Write;
+        let (d, lib) = lib();
+        // Deflate compresses 17 MiB of zeroes to a tiny archive (~17 KiB),
+        // exercising the actual decompressed byte limit rather than raw zip size.
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zw.start_file("bomb/SKILL.md", opts).unwrap();
+            zw.write_all(b"# bomb").unwrap();
+            zw.start_file("bomb/huge.bin", opts).unwrap();
+            let chunk = vec![0u8; 1024 * 1024];
+            for _ in 0..17 {
+                zw.write_all(&chunk).unwrap();
+            }
+            zw.finish().unwrap();
+        }
+        assert!(buf.len() < 100_000, "archive should be small compressed");
+        let err = lib.import_zip(&buf, None).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(lib.get_skill("bomb").is_none());
+        // No staging dir left behind.
+        let entries: Vec<_> = fs::read_dir(d.path().join("skills"))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert!(entries.is_empty(), "leftover entries: {entries:?}");
+    }
+
+    #[test]
+    fn import_zip_is_atomic_on_error_and_replaces_cleanly_on_success() {
+        use std::io::Write;
+        let (d, lib) = lib();
+        lib.put_skill("existing", "---\ndescription: Original\n---\n# keep me")
+            .unwrap();
+        lib.write_skill_file("existing", "references/old.md", "original ref")
+            .unwrap();
+
+        // First entry overwrites SKILL.md, second entry is an unsafe path (`../escape`).
+        let mut bad_zip = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut bad_zip));
+            let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zw.start_file("existing/SKILL.md", opts).unwrap();
+            zw.write_all(b"---\ndescription: Corrupted\n---\n# corrupted")
+                .unwrap();
+            zw.start_file("existing/../../escape.txt", opts).unwrap();
+            zw.write_all(b"pwned").unwrap();
+            zw.finish().unwrap();
+        }
+        assert!(lib.import_zip(&bad_zip, None).is_err());
+
+        // Existing skill must remain completely untouched.
+        let got = lib.get_skill("existing").unwrap();
+        assert_eq!(got.description, "Original");
+        assert_eq!(
+            lib.read_skill_file("existing", "references/old.md")
+                .unwrap()
+                .0,
+            "original ref"
+        );
+        // No staging dirs left beside `existing`.
+        let names: Vec<String> = fs::read_dir(d.path().join("skills"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["existing".to_string()]);
+
+        // A valid replacement swaps cleanly and removes stale files from old tree.
+        let mut good_zip = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut good_zip));
+            let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zw.start_file("existing/SKILL.md", opts).unwrap();
+            zw.write_all(b"---\ndescription: Updated\n---\n# new body")
+                .unwrap();
+            zw.finish().unwrap();
+        }
+        assert_eq!(lib.import_zip(&good_zip, None).unwrap(), "existing");
+        assert_eq!(lib.get_skill("existing").unwrap().description, "Updated");
+        assert!(lib
+            .read_skill_file("existing", "references/old.md")
+            .is_none());
     }
 }

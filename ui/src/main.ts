@@ -13,9 +13,23 @@ import { setToken, getToken, baseUrl } from './lib/api/client';
 import { isEmbedded } from './lib/desktop';
 import { installMacFunctionKeyGuard } from './lib/macFunctionKeyGuard';
 import { fitToVisualViewport } from './lib/viewportFit';
+import { holdTouchScroll } from './lib/holdTouchScroll';
+import { composerTraceOn } from './lib/composerTrace';
 
 installMacFunctionKeyGuard(document);
-if (window.matchMedia('(pointer: coarse)').matches) fitToVisualViewport(window, document.documentElement);
+// The composer trace, when this device switched it on (lib/composerTrace.ts).
+if (composerTraceOn()) void import('./lib/composerTraceRecorder').then((m) => m.startComposerTrace());
+// Touch devices (phones, tablets, and hybrid tablets with an attached keyboard):
+// keep `#app` pinned to the visible viewport and undo any horizontal/vertical pan,
+// and keep a drag under the keyboard from panning it in the first place.
+if (
+  window.matchMedia('(pointer: coarse)').matches ||
+  window.matchMedia('(any-pointer: coarse)').matches ||
+  navigator.maxTouchPoints > 0
+) {
+  fitToVisualViewport(window, document.documentElement);
+  holdTouchScroll(document);
+}
 
 if (mockEnabled()) {
   // The fixtures load only in mock mode — and before `mount`, below.

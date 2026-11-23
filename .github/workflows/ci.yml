@@ -125,6 +125,9 @@ jobs:
       - name: Rust LOC ratchet
         run: python3 scripts/loc-ratchet.py
 
+      - name: Repo static guards (Rust + control bytes)
+        run: python3 scripts/repo-guards.py --rust
+
       - name: Enable fast lld linker
         run: |
           if command -v ld.lld >/dev/null 2>&1; then
@@ -159,7 +162,7 @@ jobs:
 
       - name: Install librdkafka build deps
         run: |
-          if ! compgen -G "target/debug/build/rdkafka-sys-*/out/lib/librdkafka.a" >/dev/null && ! dpkg -s cmake libcurl4-openssl-dev pkg-config libssl-dev >/dev/null 2>&1; then
+          if ! dpkg -s cmake libcurl4-openssl-dev pkg-config libssl-dev >/dev/null 2>&1 || ! cc -E -x c -include curl/curl.h /dev/null >/dev/null 2>&1; then
             sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
             sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev pkg-config libssl-dev
           fi
@@ -279,7 +282,7 @@ jobs:
 
       - name: Install librdkafka build deps
         run: |
-          if ! compgen -G "target/debug/build/rdkafka-sys-*/out/lib/librdkafka.a" >/dev/null && ! dpkg -s cmake libcurl4-openssl-dev pkg-config libssl-dev >/dev/null 2>&1; then
+          if ! dpkg -s cmake libcurl4-openssl-dev pkg-config libssl-dev >/dev/null 2>&1 || ! cc -E -x c -include curl/curl.h /dev/null >/dev/null 2>&1; then
             sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
             sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev pkg-config libssl-dev
           fi
@@ -447,6 +450,11 @@ jobs:
           python3 -B -m unittest discover -s scripts -p 'test_ci_apt_install.py'
           python3 -B -m unittest discover -s scripts -p 'test_ci_cargo_cache.py'
           python3 -B -m unittest discover -s scripts -p 'test_ci_route.py'
+          python3 -B -m unittest discover -s scripts -p 'test_repo_guards.py'
+
+      - name: Repo static guards (UI + control bytes)
+        working-directory: .
+        run: python3 scripts/repo-guards.py --ui
 
       - name: Install Node
         uses: actions/setup-node@v7.1.0

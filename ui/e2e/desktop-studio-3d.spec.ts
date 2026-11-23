@@ -110,6 +110,17 @@ test('the studio layout renders every region and has no horizontal overflow', as
   await expectNoHorizontalOverflow(page);
 });
 
+test('a Hierarchy row selects the object: the Inspector and the gizmo follow', async ({ page }) => {
+  await openScene(page);
+  await selectRow(page, 'Plinth').click();
+  await expect(selectRow(page, 'Plinth')).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('.s3d-head-name-input')).toHaveValue('Plinth');
+  await expect(page.locator('[data-testid="s3d-hud"] [role="radio"]')).toHaveCount(3);
+  // A light row too (the Lights section of the same tree).
+  await selectRow(page, 'Key light').click();
+  await expect(page.locator('.s3d-head-name-input')).toHaveValue('Key light');
+});
+
 test('a preset and a brand swatch edit the document; Save links the kit', async ({ page }) => {
   await openScene(page);
   await selectRow(page, 'Card').click();
@@ -141,29 +152,87 @@ test('a non-default state records transform edits as overrides', async ({ page }
   await expect(page.getByTestId('s3d-state-edit')).toHaveCount(0);
 });
 
-test('Generate, Export and the provider picker stay in the viewport; cloud is opt-in', async ({ page }) => {
-  await openScene(page);
+/** Serve the real provider list with the built-in Otto Forge installed or not
+ *  (the daemon's answer depends on this Mac). */
+async function forgeInstalled(page: Page, ready: boolean): Promise<void> {
+  await page.unroute(/\/api\/v1\/design\/3d\/providers(\?.*)?$/);
+  await page.route(/\/api\/v1\/design\/3d\/providers(\?.*)?$/, async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    const res = await route.fetch();
+    const list = (await res.json()) as { id: string; ready: boolean; status_detail: string }[];
+    for (const p of list.filter((x) => x.id === 'otto-forge')) {
+      p.ready = ready;
+      p.status_detail = ready ? 'Local CLI ready (/Users/me/otto-forge/bin/forge)' : 'Not installed — install Otto Forge (`forge` on PATH or ~/otto-forge) or set cli_binary';
+    }
+    await route.fulfill({ response: res, json: list });
+  });
+}
+
+async function openGenerate(page: Page) {
   await page.getByTestId('s3d-generate').click();
   const menu = page.locator('.ctx-menu');
-  await page.waitForTimeout(100);
   await expectFullyInViewport(page, menu, 'Generate menu');
-  await expect(menu.getByRole('menuitem', { name: 'Blockout from prompt (scene JSON)…' })).toBeVisible();
-  await menu.getByRole('menuitem', { name: 'Text → 3D model…' }).click();
-
+  await menu.getByRole('menuitem', { name: /Generate 3D asset/ }).click();
   const modal = page.getByTestId('gen3d-modal');
   await expect(modal).toBeVisible();
-  await expect(modal.getByRole('radio', { name: /Cloud: Tripo/ })).toBeDisabled();
-  await expect(modal.getByRole('radio', { name: /Cloud: Meshy/ })).toBeDisabled();
-  await expect(modal).toContainText('sends your prompt');
-  await expect(modal.getByRole('radio', { name: /Local: Otto \+ Blender MCP/ })).toBeChecked();
+  return modal;
+}
+
+test('Generate: Otto Forge alone, one install step without it, the other generators under Advanced', async ({ page }) => {
+  const shots = process.env.OTTO_E2E_SHOTS;
+  const snap = async (name: string) => {
+    if (!shots) return;
+    // Let the dialog finish its entry animation first.
+    await page.evaluate(() => Promise.all(document.getAnimations().filter((a) => a.effect?.getComputedTiming().endTime !== Infinity).map((a) => a.finished.catch(() => undefined))));
+    await page.screenshot({ path: `${shots}/${name}.png` });
+  };
+  await forgeInstalled(page, true);
+  await openScene(page);
+  let modal = await openGenerate(page);
+  // Forge is the one generator: no picker, Advanced closed, the others out of sight.
+  await expect(modal).toContainText('Runs on this Mac with Otto Forge');
+  await expect(modal.getByRole('radio')).toHaveCount(0);
+  await expect(modal.getByTestId('gen3d-advanced')).not.toHaveAttribute('open', '');
+  await expect(modal.getByText('TRELLIS.2')).toBeHidden();
+  await expect(page.getByTestId('gen3d-go')).toBeVisible();
+  await snap('forge-installed');
   await page.keyboard.press('Escape');
 
-  await page.getByTestId('s3d-export').click();
-  await page.waitForTimeout(100);
-  await expectFullyInViewport(page, page.locator('.ctx-menu'), 'Export menu');
-  await expect(page.locator('.ctx-menu').getByRole('menuitem', { name: /USDZ/ })).toBeVisible();
-  await page.keyboard.press('Escape');
+  await forgeInstalled(page, false);
+  modal = await openGenerate(page);
+  const missing = modal.getByTestId('gen3d-forge-missing');
+  await expect(missing).toContainText('Otto Forge isn’t installed');
+  await expect(missing).toContainText('./install.sh --with-models');
+  await expect(modal.getByRole('radio')).toHaveCount(0);
+  await expect(page.getByTestId('gen3d-go')).toHaveCount(0);
+  await snap('forge-missing');
+
+  // Advanced: Forge first (no picker above), then TRELLIS.2, Hunyuan3D-Omni and Otto + Blender.
+  await modal.getByText('Advanced', { exact: true }).click();
+  await expect(modal.locator('input[type="radio"][value="otto-forge"]')).toBeVisible();
+  await expect(modal.locator('input[type="radio"][value="trellis-2"]')).toBeVisible();
+  await modal.locator('input[type="radio"][value="hunyuan3d-omni"]').check();
+  await expect(modal.getByTestId('gen3d-license-notice')).toContainText(/EU|UK|South Korea/);
+  await expect(missing).toHaveCount(0);
+  await snap('advanced-open');
+
+  // The provider manager: Forge's card, the rest (and Add provider) under its own closed Advanced.
+  await modal.getByTestId('gen3d-manage-providers').click();
+  const pm = page.getByRole('dialog', { name: '3D generation providers' });
+  await expect(pm.locator('.pm-card', { hasText: 'Otto Forge (local)' })).toBeVisible();
+  await expect(pm.locator('.pm-card', { hasText: 'TRELLIS.2' })).toBeHidden();
+  await expect(pm.getByTestId('gen3d-add-provider')).toBeHidden();
+  await pm.getByText('Advanced', { exact: true }).click();
+  await expect(pm.locator('.pm-card', { hasText: 'Hunyuan3D-Omni' }).getByTestId('gen3d-license-warning')).toBeVisible();
+  await snap('manager-advanced-open');
 });
+
+/** Export ▾ sits in the toolbar while the canvas is wide (≥ 760 px), else under ⋯ › Export. */
+async function openExport(page: Page): Promise<void> {
+  if (await page.getByTestId('s3d-export').isVisible()) return page.getByTestId('s3d-export').click();
+  await page.getByTestId('s3d-more').click();
+  await page.getByRole('menuitem', { name: /^Export/ }).click();
+}
 
 test('Save view adds a named camera; Optimize for web reports the budget', async ({ page }) => {
   await openScene(page);
@@ -176,8 +245,9 @@ test('Save view adds a named camera; Optimize for web reports the budget', async
   await expect(page.getByTestId('design-dirty')).toHaveCount(0);
   expect((await content()).cameras?.[0]?.id).toBe('hero-angle');
 
-  await page.getByTestId('s3d-export').click();
-  await page.locator('.ctx-menu').getByRole('menuitem', { name: /Optimize for web/ }).click();
+  await openExport(page);
+  await expect(page.getByRole('menuitem', { name: /USDZ/ })).toBeVisible();
+  await page.getByRole('menuitem', { name: /Optimize for web/ }).click();
   await expect(page.getByTestId('s3d-optimize')).toContainText('Web budget', { timeout: 60_000 });
 });
 

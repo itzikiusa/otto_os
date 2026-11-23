@@ -94,6 +94,8 @@ mod share_api;
 mod share_otp;
 #[path = "share_scope_guard.rs"]
 mod share_scope_guard;
+#[path = "simulators_api.rs"]
+mod simulators_api;
 #[path = "slack_as_me.rs"]
 mod slack_as_me;
 #[path = "ui_control.rs"]

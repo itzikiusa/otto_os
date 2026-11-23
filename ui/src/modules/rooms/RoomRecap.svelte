@@ -40,23 +40,34 @@
     void recapRequest<RecapDetail>(`/room-recaps/${id}?limit=1`).then(detail => { if (live) speechAvailable = detail.metadata.speech_available; }).catch(() => { if (live) speechAvailable = false; });
     return () => { live = false; };
   });
-  onDestroy(() => capture?.dispose());
+  onDestroy(() => { prepareSeq++; capture?.dispose(); });
   export async function finishCapture() { await capture?.finish(); }
   function start() { capture?.prepareAudio(); send({type: 'recap_start', epoch: room.recap!.epoch}); }
+  let prepareSeq = 0;
+  function closePrepare() { prepareSeq++; prepare = false; busy = false; }
   /** `retry` keeps the failed check (and its focused Retry) on screen until the new answer. */
   async function openPrepare(retry = false) {
+    const hasSeq = typeof prepareSeq === 'number';
+    const seq = hasSeq ? ++prepareSeq : 0;
     partial = false; prepare = true; busy = true; capability = null;
     if (!retry) error = null;
     try {
-      capability = await recapRequest<RecapCapabilities>('/room-recap-capabilities');
+      const cap = await recapRequest<RecapCapabilities>('/room-recap-capabilities');
+      if (!prepare || (hasSeq && seq !== prepareSeq)) return;
+      capability = cap;
       error = null;
       if (!capability.speech_ready) announce('Speech recognition is not ready. You can continue without a spoken transcript.');
-    } catch (e) { fail('Couldn’t check the local recap engines.', e, true); } finally { busy = false; }
+    } catch (e) { if (prepare && (!hasSeq || seq === prepareSeq)) fail('Couldn’t check the local recap engines.', e, true); } finally { if (!hasSeq || seq === prepareSeq) busy = false; }
   }
   async function create() { busy = true; error = null; try { await recapRequest(`/rooms/${room.room_id}/recaps`, {allow_unavailable_speech: partial}); prepare = false; } catch (e) { fail('Couldn’t prepare the recap.', e, false); } finally { busy = false; } }
   // Speech-capture trouble is announced at its edge; the visible line is not a live region.
   $effect(() => { const issue = captureStatus.speechIssue; if (issue) announce(`Speech capture is paused: ${issue}`); });
   async function withdraw(): Promise<void> {
+    if (!room.recap) return;
+    if (!consented && !capturing) {
+      send({type: 'recap_consent', epoch: room.recap.epoch, allow: false});
+      return;
+    }
     const ok = await confirmer.ask('The host stops capturing speech, chat and screens until everyone consents again.', {
       title: 'Pause capture for everyone?',
       confirmLabel: 'Pause capture',
@@ -64,7 +75,7 @@
     });
     if (!ok) return;
     capture?.cancelCapture();
-    send({type: 'recap_consent', epoch: room.recap!.epoch, allow: false});
+    send({type: 'recap_consent', epoch: room.recap.epoch, allow: false});
   }
   /** One always-mounted consent button: the server echo swaps its label and action
    *  instead of unmounting the focused control. */
@@ -105,7 +116,7 @@
   {:else if host}<button class="btn small" onclick={() => openPrepare()}>Prepare a full recap…</button><span class="hint">Capture starts only after everyone consents.</span>{/if}
   {#if error && !prepare}<p class="error"><strong>{error.what}</strong> <span>{error.detail}</span></p>{/if}
 </section>
-{#if prepare}<Modal title="Prepare a room recap" width={600} onclose={() => prepare = false}>
+{#if prepare}<Modal title="Prepare a room recap" width={600} onclose={closePrepare}>
   <p>Ask everyone to consent to a local archive of speech, chat, terminal output, shared-source changes, sampled screen images and annotations. The host keeps the archive after the room ends.</p>
   <p>Only content shared after capture starts is included. Images are sampled up to every 15 seconds, not recorded as video. Consent withdrawal or connection loss pauses capture.</p>
   <LoadState what="the local recap engines" variant="compact" rows={1} loading={busy && !capability} error={error?.check ? error.detail : null} empty={!capability} onretry={() => openPrepare(true)}>
@@ -113,10 +124,10 @@
   </LoadState>
   {#if error && !error.check}<p class="error"><strong>{error.what}</strong> <span>{error.detail}</span></p>{/if}
   {#if auth.isRoot}<button class="btn" onclick={() => settings = true}>Configure local engines…</button>{/if}
-  {#snippet footer()}<button class="btn" onclick={() => prepare = false}>Cancel</button><button class="btn primary" disabled={busy || !capability || (!capability.speech_ready && !partial)} onclick={create}>Ask everyone to consent</button>{/snippet}
+  {#snippet footer()}<button class="btn" onclick={closePrepare}>Cancel</button><button class="btn primary" disabled={busy || !capability || (!capability.speech_ready && !partial)} onclick={create}>Ask everyone to consent</button>{/snippet}
 </Modal>{/if}
 {#if settings}<RecapSettingsModal onclose={() => { settings = false; void openPrepare(); }} />{/if}
-{#if panel && room.recap}<Modal title="Room recap" width={960} onclose={() => panel = false}>{#key room.recap.id}<RecapPanel recapId={room.recap.id} />{/key}</Modal>{/if}
+{#if panel && room.recap}<Modal title="Room recap" width={960} onclose={() => panel = false}>{#key room.recap.id}<RecapPanel recapId={room.recap.id} onstartthread={() => panel = false} />{/key}</Modal>{/if}
 <style>
   .recap-banner { padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--surface); max-height: 35%; overflow: auto; }
   .recap-banner:empty { display: none; } .status, .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; } .status span, .hint { font-size: var(--fs-s); color: var(--text-dim); } p, li { line-height: 1.5; overflow-wrap: anywhere; } .recap-banner p { margin-block: 8px; font-size: var(--fs-s); } .error { color: var(--danger); } .error span { color: var(--text-dim); } .speech-issue { color: var(--warning); } .check { display: flex; gap: 8px; align-items: start; margin-block: 16px; } details { margin-block-start: 8px; font-size: var(--fs-s); }

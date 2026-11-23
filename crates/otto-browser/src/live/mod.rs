@@ -29,6 +29,8 @@
 pub mod chrome;
 pub mod conn;
 pub mod control;
+pub mod devtools;
+pub mod emulation;
 pub mod flow;
 pub mod guard;
 pub mod hooks;
@@ -41,6 +43,10 @@ pub mod runtime;
 pub mod session;
 pub mod types;
 
+pub use devtools::{
+    ConsoleEntry, DevtoolsSnapshot, ElementRect, ElementStyles, InspectedElement, NetworkEntry,
+};
+pub use emulation::{ColorScheme, EmulationConfig, Orientation};
 pub use hooks::{LiveAudit, LiveHooks, NoopHooks, OutwardAction};
 pub use install::{InstallJob, InstallState};
 pub use protocol::{ClientMsg, ControlAction, NavAction, ServerMsg};

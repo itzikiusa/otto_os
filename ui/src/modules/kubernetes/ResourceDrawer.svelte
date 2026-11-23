@@ -23,14 +23,16 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
-  import { copyText } from '../../lib/clipboard';
+  import { copyText, copyWithToast } from '../../lib/clipboard';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { isAbortError } from '../../lib/api/client';
   import { k8sApi } from '../../lib/api/k8s';
-  import type { K8sDrawerTab } from '../../lib/stores/k8s.svelte';
+  import { k8s, type K8sDrawerTab } from '../../lib/stores/k8s.svelte';
   import type { K8sContainer, K8sResourceDetail, K8sResourceKind, K8sRow } from '../../lib/api/types';
   import type { ActionDef } from './actions';
   import { actionsFor } from './actions';
+  import { clusterContext, kubectlDescribeCmd, kubectlExecCmd, kubectlGetCmd, kubectlLogsCmd } from './cliSnippet';
   import { clipLongScalars, formatAge, formatBytes, formatMillicores, healthTone, kindDef, podContainers, rowAge } from './k8s-util';
   import LogsView from './LogsView.svelte';
   import ExecView from './ExecView.svelte';
@@ -247,6 +249,56 @@
     else toasts.error('Couldn’t copy', 'The clipboard isn’t available here. Select the text and copy it manually.');
   }
 
+  const cluster = $derived(k8s.clusters.find((c) => c.id === clusterId) ?? null);
+  const context = $derived(clusterContext(cluster));
+  const defaultContainer = $derived(containers.find((c) => !c.init)?.name ?? containers[0]?.name ?? '');
+
+  function copyKubectlMenu(e: MouseEvent): void {
+    const getYaml = kubectlGetCmd({ kind, name, ns, context, output: 'yaml' });
+    const describe = kubectlDescribeCmd({ kind, name, ns, context });
+    const items: MenuItem[] = [
+      {
+        label: 'kubectl get -o yaml',
+        icon: 'copy',
+        action: () => void copyWithToast(getYaml, 'kubectl get command'),
+      },
+      {
+        label: 'kubectl describe',
+        icon: 'copy',
+        action: () => void copyWithToast(describe, 'kubectl describe command'),
+      },
+    ];
+    if (isPod) {
+      const ctr = containers.length > 1 ? defaultContainer : undefined;
+      const logsCmd = kubectlLogsCmd({ pod: name, ns, container: ctr, tail: 500, context });
+      const execCmd = kubectlExecCmd({ pod: name, ns, container: ctr, context });
+      items.push(
+        { separator: true },
+        {
+          label: 'kubectl logs',
+          icon: 'file',
+          action: () => void copyWithToast(logsCmd, 'kubectl logs command'),
+        },
+        {
+          label: 'kubectl exec',
+          icon: 'terminal',
+          action: () => void copyWithToast(execCmd, 'kubectl exec command'),
+        },
+      );
+    } else if (selector) {
+      const logsCmd = kubectlLogsCmd({ selector, ns, tail: 500, context });
+      items.push(
+        { separator: true },
+        {
+          label: 'kubectl logs (workload)',
+          icon: 'file',
+          action: () => void copyWithToast(logsCmd, 'kubectl logs command'),
+        },
+      );
+    }
+    ctxMenu.showAt(e.currentTarget as HTMLElement, items, { align: 'end' });
+  }
+
   const actions = $derived(row ? actionsFor(kind, row).filter(a => a.id.startsWith('argocd_') ? resourceAccess.can('k8s_cluster', clusterId, actionOperation(a.id), 'kubernetes', 'edit') : canOperation(actionOperation(a.id))) : []);
 
   /** Overview facts: normalized row fields first, then kind-specific extras. */
@@ -282,6 +334,7 @@
         {#if ns}<span class="dr-ns mono">{ns}</span>{/if}
         {#if row}<Badge tone={statusTone} label={row.status} dot live={statusTone === 'info'} />{/if}
       </div>
+      <button class="icon-btn" onclick={copyKubectlMenu} aria-label="Copy as kubectl" title="Copy as kubectl" aria-haspopup="menu" data-testid="k8s-drawer-copy-kubectl"><Icon name="terminal" size={14} /></button>
       <button class="icon-btn" onclick={() => void refresh()} disabled={refreshing} aria-label="Refresh details" title="Refresh details" data-testid="k8s-drawer-refresh"><Icon name="refresh" size={14} /></button>
     </div>
   {/snippet}

@@ -19,6 +19,7 @@
 </script>
 
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { rowMenu } from '../../lib/rowMenu';
   // One node of the split TREE (C2). A `split` lays its two children out with an
   // 8px draggable gutter between them; a `leaf` renders the pane itself plus the
@@ -95,13 +96,25 @@
       }
       layout.setFrac(key, frac);
     };
+    let stopDrag: (() => void) | null = null;
     const up = (): void => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      if (stopSplitDrag === stopDrag) stopSplitDrag = null;
     };
+    stopDrag = up;
+    stopSplitDrag?.();
+    stopSplitDrag = up;
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
   }
+  let stopSplitDrag: (() => void) | null = null;
+  onDestroy(() => {
+    stopSplitDrag?.();
+    stopSplitDrag = null;
+  });
 
   /** Keyboard resize (a11y — pointer-only otherwise): arrows nudge 2 %, Home/End
    *  jump to the 10/90 bounds clampFrac allows. */

@@ -55,10 +55,21 @@
     }
   }
 
-  // Load whenever the focused session changes.
+  // Load whenever the focused session changes; drop the prior session's preview state.
   $effect(() => {
     const sid = sessionId;
+    expanded = {};
+    previews = {};
+    attachOpen = false;
+    attachQuery = '';
     if (sid) void load();
+    else {
+      loadSeq++;
+      refs = [];
+      refsFor = null;
+      loading = false;
+      loadError = null;
+    }
   });
 
   // Reload on attach/detach for THIS session (from anywhere: this panel, the
@@ -79,10 +90,11 @@
   }
   let previews = $state<Record<string, Preview>>({});
 
-  async function renderFromDoc(sceneId: string, doc: CanvasDoc, key: string): Promise<void> {
+  async function renderFromDoc(sceneId: string, doc: CanvasDoc, key: string, ownerSid: string | null = sessionId): Promise<void> {
     const format: CanvasFormat = doc.format ?? 'mermaid';
     if (format === 'excalidraw') return; // static card — nothing to render
     previews = { ...previews, [sceneId]: { key, loading: true } };
+    const isStale = (): boolean => sessionId !== ownerSid || previews[sceneId]?.key !== key;
     const renderId = `canvas-panel-${sceneId}`;
     const source = doc.source ?? '';
     // Both renderers theme by scheme — a light Mermaid figure on the dark
@@ -93,10 +105,12 @@
     try {
       const out =
         format === 'd2'
-          ? await (await import('../canvas/d2')).renderD2(renderId, source, { sketch: doc.sketch, dark })
-          : await (await import('../../lib/render/mermaid')).renderMermaid(renderId, source, { dark });
+          ? await (await import('../canvas/d2')).renderD2(renderId, source, { sketch: doc.sketch, dark, isStale })
+          : await (await import('../../lib/render/mermaid')).renderMermaid(renderId, source, { dark, isStale });
+      if (isStale() || out.stale) return;
       previews = { ...previews, [sceneId]: { key, svg: out.svg, error: out.error } };
     } catch (e) {
+      if (isStale()) return;
       previews = { ...previews, [sceneId]: { key, error: loadErrorText(e) } };
     }
   }
@@ -106,12 +120,15 @@
     expanded = { ...expanded, [ref.id]: open };
     if (!open || ref.format === 'excalidraw') return;
 
+    const ownerSid = sessionId;
     const key = `${ref.id}:${ref.updated_at}:${ui.resolvedScheme}`;
     if (previews[ref.id]?.key === key) return; // cached — same scene revision
 
     previews = { ...previews, [ref.id]: { key, loading: true } };
+    const isStale = (): boolean => sessionId !== ownerSid || previews[ref.id]?.key !== key;
     try {
       const scene = await api.get<CanvasScene>(`/canvas/scenes/${ref.id}`);
+      if (isStale()) return;
       let doc: CanvasDoc | null = null;
       try {
         doc = JSON.parse(scene.doc_json) as CanvasDoc;
@@ -122,8 +139,9 @@
         previews = { ...previews, [ref.id]: { key, error: 'No renderable source' } };
         return;
       }
-      await renderFromDoc(ref.id, doc, key);
+      await renderFromDoc(ref.id, doc, key, ownerSid);
     } catch (e) {
+      if (isStale()) return;
       previews = { ...previews, [ref.id]: { key, error: loadErrorText(e) } };
     }
   }
@@ -361,10 +379,10 @@
         </div>
       {/if}
       <div class="cp-footer-actions">
-        <button class="footer-btn" class:on={attachOpen} aria-expanded={attachOpen} onclick={toggleAttachPicker}>
+        <button class="btn small" class:cp-attach-on={attachOpen} aria-expanded={attachOpen} onclick={toggleAttachPicker}>
           <Icon name="plug" size={12} /> Attach scene…
         </button>
-        <button class="footer-btn" disabled={creating} onclick={createNewScene}>
+        <button class="btn small" disabled={creating} onclick={createNewScene}>
           <Icon name="plus" size={12} /> New scene
         </button>
       </div>
@@ -491,30 +509,9 @@
     display: flex;
     gap: 6px;
   }
-  .footer-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    height: 24px;
-    padding: 0 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface-2);
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-    cursor: pointer;
-  }
-  .footer-btn:hover:not(:disabled) {
-    color: var(--text);
-    border-color: var(--accent);
-  }
-  .footer-btn.on {
+  .cp-attach-on {
     color: var(--accent-text);
     border-color: var(--accent);
-  }
-  .footer-btn:disabled {
-    opacity: var(--disabled-opacity);
-    cursor: default;
   }
 
   .attach-picker {

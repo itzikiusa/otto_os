@@ -3,6 +3,7 @@
   import { ShareModalChunk } from './overlays.svelte';
   import { rowMenu } from '../lib/rowMenu';
   import Skeleton from '../lib/components/Skeleton.svelte';
+  import LoadState from '../lib/components/LoadState.svelte';
   import { focusOnMount } from '../lib/focusOnMount';
   import { toastError } from '../lib/toastError';
   import { loadErrorText } from '../lib/loadError';
@@ -38,6 +39,7 @@
   import { pollWhileVisible } from '../lib/poll';
   import { sessionUsageLabel } from '../lib/sessionUsage';
   import { viewport } from '../lib/stores/viewport.svelte';
+  import NavLightToggle from './NavLightToggle.svelte';
   import { confirmer } from '../lib/confirm.svelte';
   import { toasts } from '../lib/toast.svelte';
   import { copyText } from '../lib/clipboard';
@@ -723,8 +725,9 @@
   }
 </script>
 
-<nav class="navigator sidebar-material" class:resizing aria-label="Navigator" style="width:{ui.railWidth}px">
-  <!-- The window splitter (paneResizer: focus, ←/→, Home/End, Enter, drag, double-click reset). -->
+<nav class="navigator sidebar-material" class:resizing aria-label="Navigator" style:width={viewport.isDesktop ? `${ui.railWidth}px` : undefined}>
+  <!-- The window splitter (paneResizer: focus, ←/→, Home/End, Enter, drag, double-click reset). Desktop only: tablet & mobile drawers own their own width. -->
+  {#if viewport.isDesktop}
   <div
     class="rail-resize"
     role="separator"
@@ -732,6 +735,7 @@
     title={RESIZE_TITLE}
     use:paneResizer={{ value: ui.railWidth, min: RAIL_MIN, max: RAIL_MAX, onChange: (w) => ui.setRailWidth(w), onReset: () => ui.setRailWidth(240), onDragStart: startResize, text: pxWide }}
   ></div>
+  {/if}
   <div class="nav-head" class:tauri-pad={false}>
     <img class="nav-logo" src="/otto-mark-64.png" alt="" width="20" height="20" />
     <span class="nav-title">Otto</span>
@@ -765,21 +769,16 @@
          header's inline-end, next to the sidebar edge its panel opens beside,
          so the panel's caret points straight back at it. -->
     <NotificationBell />
-    <!-- On phone the Navigator is the off-canvas drawer: this closes it (the
-         desktop collapse-to-Rail preference means nothing there). -->
-    <!-- Tablet: the Navigator is a fixed column (no Rail to collapse to), so
-         the button would do nothing there. -->
-    {#if !viewport.isTablet}
+    <!-- Phone / short landscape closes drawer; tablet folds to Rail; desktop collapses sidebar. -->
     <button
       class="icon-btn"
-      onclick={() => (viewport.isPhone ? (ui.navDrawerOpen = false) : ui.toggleRail())}
-      title={viewport.isPhone ? 'Close sidebar' : 'Collapse sidebar'}
-      aria-label={viewport.isPhone ? 'Close sidebar' : 'Collapse sidebar'}
-      aria-keyshortcuts={viewport.isPhone ? undefined : 'Meta+1'}
+      onclick={() => (viewport.navDrawer ? (ui.navDrawerOpen = false) : viewport.isTablet ? viewport.toggleTabletRail(false) : ui.toggleRail())}
+      title={viewport.navDrawer ? 'Close sidebar' : 'Collapse sidebar'}
+      aria-label={viewport.navDrawer ? 'Close sidebar' : 'Collapse sidebar'}
+      aria-keyshortcuts={viewport.navDrawer ? undefined : 'Meta+1'}
     >
       <Icon name="sidebar" size={14} />
     </button>
-    {/if}
   </div>
 
   <div class="nav-scroll" bind:this={scrollEl}>
@@ -1017,6 +1016,7 @@
       <Icon name="info" size={14} />
       <span class="grow">Help</span>
     </button>
+    <NavLightToggle />
     <button
       class="nav-item"
       class:active={router.module === 'settings'}
@@ -1468,10 +1468,7 @@
             </div>
           {/each}
           {#if archivedError}
-            <div class="arch-state" role="alert">
-              <span class="grow">Couldn’t load archived sessions.</span>
-              <button class="show-more" onclick={() => void loadArchivedPage(ws.archivedLoaded)}>Retry</button>
-            </div>
+            <LoadState what="archived sessions" variant="compact" error="Couldn’t load archived sessions." empty onretry={() => void loadArchivedPage(ws.archivedLoaded)} />
           {:else if ws.archivedLoading}
             <div class="arch-state"><Skeleton rows={2} height={22} label="archived sessions" /></div>
           {:else if ws.archivedLoaded && ws.archivedAgentSessions.length === 0}
@@ -1608,14 +1605,7 @@
   .nested-row[draggable='true'] .nested-item {
     cursor: grab;
   }
-  .navigator {
-    /* width is set inline from ui.railWidth (drag-resizable) */
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-    border-inline-end: 1px solid var(--separator);
-    position: relative;
-  }
+  .navigator { width: 100%; max-width: 100%; min-width: 0; height: 100%; display: flex; flex-direction: column; border-inline-end: 1px solid var(--separator); position: relative; }
   .rail-resize {
     position: absolute;
     inset-inline-end: -3px;
@@ -1661,9 +1651,13 @@
   }
   .nav-scroll {
     flex: 1;
+    min-height: 0;
     overflow-y: auto;
+    contain: paint;
     padding: 4px 8px;
   }
+  /* Touch (see tokens.css): scrolled rows paint on an opaque layer, never see-through tiles. */
+  @media (pointer: coarse) { .nav-scroll { background: var(--bg-sidebar); } }
   .nav-section {
     margin-bottom: 14px;
   }

@@ -1,13 +1,13 @@
 //! Complete saved-state archives and additive, previewed restore. Database rows
 //! remain in one transaction; filesystem publication exclusively creates files.
 mod files;
-mod schema;
 use crate::{
     error::{ApiError, ApiResult},
     state::ServerCtx,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use otto_core::Error;
+use otto_state::archive_schema as schema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -17,9 +17,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const MAX_ARCHIVE_BYTES: usize = 256 * 1024 * 1024;
+pub use otto_state::archive_schema::{ArchiveRow, MAX_ARCHIVE_BYTES};
 pub const MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
-pub type ArchiveRow = BTreeMap<String, Value>;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SnapshotOptions {
     #[serde(default)]
@@ -186,7 +185,13 @@ pub(crate) async fn build_snapshot_parts(
             });
         }
         for row in &mut rows {
-            schema::sanitize(name, spec, row, &mut reconnect);
+            schema::sanitize_with(
+                name,
+                spec,
+                row,
+                &mut reconnect,
+                otto_agent_protocol::settle_archived_entity_json,
+            );
         }
         total += json_len(&rows)?;
         if total > MAX_ARCHIVE_BYTES {
@@ -471,7 +476,13 @@ async fn apply_rows(
                 }
             }
             let mut reconnect = BTreeSet::new();
-            schema::sanitize(table, spec, &mut row, &mut reconnect);
+            schema::sanitize_with(
+                table,
+                spec,
+                &mut row,
+                &mut reconnect,
+                otto_agent_protocol::settle_archived_entity_json,
+            );
             for (column, value) in &mut row {
                 if spec.user_columns.contains(column)
                     || matches!(

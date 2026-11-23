@@ -16,6 +16,7 @@
   import { renderMermaid } from '../../lib/render/mermaid';
   import { authedBlobUrl, authedText } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import Icon from '../../lib/components/Icon.svelte';
   import MockupAnnotations from './MockupAnnotations.svelte';
   import type { ProductAttachment } from './types';
@@ -152,9 +153,12 @@
         createdUrls.push(url);
         imgUrl = url;
       } else if (k === 'html') {
-        htmlContent = src ?? (await fetchText(a.id));
+        const text = src ?? (await fetchText(a.id));
+        if (myGen !== gen) return;
+        htmlContent = text;
       } else if (k === 'mermaid') {
         const text = src ?? (await fetchText(a.id));
+        if (myGen !== gen) return;
         if (!text.trim()) {
           mermaidSvg = '';
         } else {
@@ -170,7 +174,7 @@
       }
     } catch (e) {
       if (myGen !== gen) return; // a newer render owns the box
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = loadErrorText(e);
       // A source override means the user is TYPING (code view) — a transient
       // Mermaid parse error is expected mid-edit; show it inline, don't toast.
       // Mid-edit, the last good diagram (and its pins) stays above the error.

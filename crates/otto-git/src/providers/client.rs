@@ -87,6 +87,68 @@ struct CachedGet {
 /// ([`invalidate_scope`]).
 const SHORT_TTL: Duration = Duration::from_secs(15);
 
+/// Maximum HTTP response body accepted from a forge provider (16 MiB).
+pub(crate) const MAX_PROVIDER_BODY_BYTES: usize = 16 << 20;
+/// Maximum HTTP error response body retained for diagnostics (64 KiB).
+pub(crate) const MAX_PROVIDER_ERR_BODY_BYTES: usize = 64 << 10;
+
+/// Stream a provider response body up to `max_bytes`.
+///
+/// When `truncate_on_overflow` is true (used for error bodies), surplus bytes
+/// are discarded and the capped prefix is returned. Otherwise crossing
+/// `max_bytes` fails immediately with `Error::Upstream` without buffering the
+/// remainder into daemon RAM.
+pub(crate) async fn read_response_text_capped(
+    provider: &str,
+    mut resp: reqwest::Response,
+    max_bytes: usize,
+    truncate_on_overflow: bool,
+) -> Result<String> {
+    if !truncate_on_overflow {
+        if let Some(len) = resp.content_length() {
+            if len > max_bytes as u64 {
+                return Err(Error::Upstream(format!(
+                    "{provider}: response body ({len} bytes) exceeded {max_bytes} byte cap"
+                )));
+            }
+        }
+    }
+    let initial = resp
+        .content_length()
+        .and_then(|l| usize::try_from(l).ok())
+        .map(|l| l.min(max_bytes).min(64 * 1024))
+        .unwrap_or(0);
+    let mut buf = Vec::with_capacity(initial);
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| Error::Upstream(format!("{provider}: body read: {e}")))?
+    {
+        let room = max_bytes.saturating_sub(buf.len());
+        if chunk.len() > room {
+            if truncate_on_overflow {
+                buf.extend_from_slice(&chunk[..room]);
+                break;
+            }
+            return Err(Error::Upstream(format!(
+                "{provider}: response body exceeded {max_bytes} byte cap"
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8(buf)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
+}
+
+/// Stream and parse a provider JSON body with [`MAX_PROVIDER_BODY_BYTES`].
+pub(crate) async fn read_response_json_capped(
+    provider: &str,
+    resp: reqwest::Response,
+) -> Result<Value> {
+    let body = read_response_text_capped(provider, resp, MAX_PROVIDER_BODY_BYTES, false).await?;
+    serde_json::from_str(&body).map_err(|e| Error::Upstream(format!("{provider}: bad json: {e}")))
+}
+
 /// Byte budget across all cached bodies, and the largest body worth keeping
 /// (a 20-page comment list is ~1 MB; a bigger one is simply re-fetched).
 const CACHE_MAX_BYTES: usize = 32 << 20;
@@ -655,24 +717,23 @@ impl Http {
             return Ok(resp);
         }
         let headers = resp.headers().clone();
-        let body = resp.text().await.unwrap_or_default();
+        let body =
+            read_response_text_capped(self.provider, resp, MAX_PROVIDER_ERR_BODY_BYTES, true)
+                .await
+                .unwrap_or_default();
         Err(provider_status_err(self.provider, status, &headers, &body))
     }
 
     /// Send and parse a JSON body.
     pub async fn json(&self, rb: reqwest::RequestBuilder) -> Result<Value> {
         let resp = self.send(rb).await?;
-        resp.json::<Value>()
-            .await
-            .map_err(|e| Error::Upstream(format!("{}: bad json: {e}", self.provider)))
+        read_response_json_capped(self.provider, resp).await
     }
 
     /// Send and return the raw text body.
     pub async fn text(&self, rb: reqwest::RequestBuilder) -> Result<String> {
         let resp = self.send(rb).await?;
-        resp.text()
-            .await
-            .map_err(|e| Error::Upstream(format!("{}: body read: {e}", self.provider)))
+        read_response_text_capped(self.provider, resp, MAX_PROVIDER_BODY_BYTES, false).await
     }
 
     /// Send and discard the body.
@@ -725,10 +786,9 @@ impl Http {
             let resp = self.send(rb_from(&self.client, &req)).await?;
             let next =
                 parse_next_link(resp.headers()).or_else(|| x_next_page_url(&url, resp.headers()));
-            let body = resp
-                .text()
-                .await
-                .map_err(|e| Error::Upstream(format!("{}: body read: {e}", self.provider)))?;
+            let body =
+                read_response_text_capped(self.provider, resp, MAX_PROVIDER_BODY_BYTES, false)
+                    .await?;
             return Ok((body, next));
         }
         // -- Read the cache (lock scope: just the lookup) -------------------
@@ -812,10 +872,8 @@ impl Http {
             .map(str::to_string);
         let next =
             parse_next_link(resp.headers()).or_else(|| x_next_page_url(&url, resp.headers()));
-        let new_body = resp
-            .text()
-            .await
-            .map_err(|e| Error::Upstream(format!("{}: body read: {e}", self.provider)))?;
+        let new_body =
+            read_response_text_capped(self.provider, resp, MAX_PROVIDER_BODY_BYTES, false).await?;
         insert_cached(
             key,
             CachedGet {
@@ -899,10 +957,9 @@ impl Http {
             } else {
                 let resp = self.send(b).await?;
                 let next = parse_next_link(resp.headers());
-                let body = resp
-                    .text()
-                    .await
-                    .map_err(|e| Error::Upstream(format!("{}: body read: {e}", self.provider)))?;
+                let body =
+                    read_response_text_capped(self.provider, resp, MAX_PROVIDER_BODY_BYTES, false)
+                        .await?;
                 (body, next)
             };
             pages.push(
@@ -1005,7 +1062,10 @@ impl Http {
             return Ok(resp);
         }
         let headers = resp.headers().clone();
-        let body = resp.text().await.unwrap_or_default();
+        let body =
+            read_response_text_capped(self.provider, resp, MAX_PROVIDER_ERR_BODY_BYTES, true)
+                .await
+                .unwrap_or_default();
         Err(provider_status_err(self.provider, status, &headers, &body))
     }
 }
@@ -1538,5 +1598,45 @@ mod tests {
             "[{\"id\":1}]",
             "the read after a failed write goes to the forge, not the cache"
         );
+    }
+
+    #[tokio::test]
+    async fn read_response_text_capped_rejects_oversized_body_and_truncates_errors() {
+        use super::read_response_text_capped;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/big"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("x".repeat(4096)))
+            .mount(&server)
+            .await;
+
+        let http = Http::new("github");
+        let resp = http
+            .client()
+            .get(format!("{}/big", server.uri()))
+            .send()
+            .await
+            .unwrap();
+        let err = read_response_text_capped("github", resp, 1024, false)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("exceeded 1024 byte cap"),
+            "unexpected err: {err}"
+        );
+
+        let resp2 = http
+            .client()
+            .get(format!("{}/big", server.uri()))
+            .send()
+            .await
+            .unwrap();
+        let truncated = read_response_text_capped("github", resp2, 1024, true)
+            .await
+            .unwrap();
+        assert_eq!(truncated.len(), 1024);
     }
 }

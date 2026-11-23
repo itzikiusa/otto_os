@@ -6,7 +6,7 @@ export const TELEMETRY_COMPONENTS = [
   'agents', 'threads', 'ide', 'workbench', 'connections', 'home', 'git', 'database', 'api', 'vault',
   'rooms', 'workflows', 'scheduled-tasks', 'personal-agents',
   'loops', 'product', 'design', 'canvas', 'browser',
-  'mcp', 'brokers', 'kubernetes', 'aws', 'insights', 'usage', 'skills-eval',
+  'mcp', 'brokers', 'kubernetes', 'containers', 'aws', 'insights', 'usage', 'skills-eval',
   'settings', 'walkthroughs', 'plugin', 'snip', 'shell', 'other',
 ] as const;
 const components = new Set<string>(TELEMETRY_COMPONENTS);

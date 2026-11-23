@@ -17,7 +17,7 @@
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 
 use otto_server::mcp_profiles::ToolFilter;
 
@@ -78,14 +78,16 @@ impl Ctx {
     }
 
     /// The MCP `tools/list`: the otto.* specs filtered to the enabled set.
+    /// When a connection `--profile` is set, fails CLOSED (lists no tools) if
+    /// the daemon cannot resolve the profile filter.
     async fn tools_list(&self) -> Value {
-        // The set of currently-enabled tools (best-effort; on error list all),
-        // from the light names-only read; a daemon older than this binary
-        // lacks it, so fall back to the full status.
         let mut filter = None;
         let enabled: Option<Vec<String>> = match self.get_json(&self.enabled_path()).await {
             Ok(v) => {
                 filter = self.filter_in(&v);
+                if self.profiles.is_some() && filter.is_none() {
+                    return json!({ "tools": [] });
+                }
                 v.get("enabled").and_then(Value::as_array).map(|names| {
                     names
                         .iter()
@@ -93,15 +95,22 @@ impl Ctx {
                         .collect()
                 })
             }
-            Err(_) => self.get_json("/mcp/otto-server").await.ok().and_then(|v| {
-                v.get("tools").and_then(Value::as_array).map(|tools| {
-                    tools
-                        .iter()
-                        .filter(|t| t.get("enabled").and_then(Value::as_bool).unwrap_or(false))
-                        .filter_map(|t| t.get("name").and_then(Value::as_str).map(str::to_string))
-                        .collect()
+            Err(_) => {
+                if self.profiles.is_some() {
+                    return json!({ "tools": [] });
+                }
+                self.get_json("/mcp/otto-server").await.ok().and_then(|v| {
+                    v.get("tools").and_then(Value::as_array).map(|tools| {
+                        tools
+                            .iter()
+                            .filter(|t| t.get("enabled").and_then(Value::as_bool).unwrap_or(false))
+                            .filter_map(|t| {
+                                t.get("name").and_then(Value::as_str).map(str::to_string)
+                            })
+                            .collect()
+                    })
                 })
-            }),
+            }
         };
         let tools: Vec<Value> = otto_server::mcp_outward::otto_tool_specs_cached()
             .iter()
@@ -140,19 +149,37 @@ impl Ctx {
     }
 
     /// The MCP `tools/call`: forward to the governed choke point — unless the
-    /// connection's profile leaves the tool out.
+    /// connection's profile leaves the tool out. Fails CLOSED when a profile is
+    /// configured and cannot be resolved from the daemon.
     async fn tools_call(&self, name: &str, args: &Value) -> Value {
         if self.profiles.is_some() {
-            if let Ok(v) = self.get_json(&self.enabled_path()).await {
-                if let Some(f) = self.filter_in(&v).filter(|f| !f.allows(name)) {
-                    return tool_result(&json!({ "error": f.denial(name) }), true);
+            let v = match self.get_json(&self.enabled_path()).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return tool_result(
+                        &json!({ "error": format!("cannot verify MCP profile restriction: {e}") }),
+                        true,
+                    );
                 }
+            };
+            let Some(f) = self.filter_in(&v) else {
+                return tool_result(
+                    &json!({ "error": "daemon did not resolve the configured MCP profile" }),
+                    true,
+                );
+            };
+            if !f.allows(name) {
+                return tool_result(&json!({ "error": f.denial(name) }), true);
             }
+        }
+        let mut payload = json!({ "tool": name, "arguments": args });
+        if let Some(p) = &self.profiles {
+            payload["profile"] = json!(p);
         }
         let res = self
             .post_json(
                 "/mcp/otto-tools/invoke",
-                &json!({ "tool": name, "arguments": args }),
+                &payload,
                 invoke_timeout(name, args),
             )
             .await;
@@ -243,6 +270,8 @@ pub async fn run() -> Result<(), String> {
         .unwrap_or_else(|| format!("http://127.0.0.1:{}", Config::load().port));
 
     let http = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(CALL_TIMEOUT)
         .build()
         .map_err(|e| format!("build http client: {e}"))?;
@@ -260,16 +289,45 @@ pub async fn run() -> Result<(), String> {
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin);
     let mut stdout = tokio::io::stdout();
-    let mut line = String::new();
+    let mut buf = Vec::new();
     loop {
-        line.clear();
-        let n = reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| format!("read stdin: {e}"))?;
-        if n == 0 {
-            break;
+        match crate::mcp_tools::read_bounded_line(
+            &mut reader,
+            &mut buf,
+            crate::mcp_tools::MAX_LINE_BYTES,
+        )
+        .await
+        .map_err(|e| format!("read stdin: {e}"))?
+        {
+            crate::mcp_tools::BoundedLine::Eof => break,
+            crate::mcp_tools::BoundedLine::TooLong => {
+                write_line(
+                    &mut stdout,
+                    &rpc_err(
+                        Value::Null,
+                        -32700,
+                        format!(
+                            "request exceeds {} byte limit",
+                            crate::mcp_tools::MAX_LINE_BYTES
+                        ),
+                    ),
+                )
+                .await?;
+                continue;
+            }
+            crate::mcp_tools::BoundedLine::Line => {}
         }
+        let line = match std::str::from_utf8(&buf) {
+            Ok(s) => s,
+            Err(e) => {
+                write_line(
+                    &mut stdout,
+                    &rpc_err(Value::Null, -32700, format!("parse error: {e}")),
+                )
+                .await?;
+                continue;
+            }
+        };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -413,5 +471,80 @@ mod tests {
         assert!(invoke_timeout("otto.api_run_automation", &args) > Duration::from_secs(180));
         assert!(invoke_timeout("api_run_automation", &args) > Duration::from_secs(180));
         assert!(invoke_timeout("otto.list_repos", &args) >= Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn profile_enforcement_fails_closed_on_error_or_missing_profile() {
+        // 1. Daemon unreachable: tools/list is empty and tools/call refuses.
+        let mut unreachable = ctx();
+        unreachable.profiles = Some("database".into());
+        assert_eq!(unreachable.tools_list().await["tools"], json!([]));
+        let call_err = unreachable.tools_call("otto.list_repos", &json!({})).await;
+        assert_eq!(call_err["isError"], true);
+
+        // 2. Daemon returns 200 without a `profile` object (unknown/dropped profile):
+        //    must fail closed and NEVER reach `/mcp/otto-tools/invoke`.
+        use std::sync::{Arc, Mutex};
+        let invokes: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let invokes_bg = Arc::clone(&invokes);
+        let app = axum::Router::new().fallback(
+            move |axum::extract::OriginalUri(uri): axum::extract::OriginalUri| {
+                let invokes = Arc::clone(&invokes_bg);
+                async move {
+                    let path = uri.path().to_string();
+                    if path.ends_with("/mcp/otto-server/enabled") {
+                        axum::Json(json!({
+                            "enabled": ["otto.list_repos"],
+                            "profile": null
+                        }))
+                    } else {
+                        invokes.lock().unwrap().push(path);
+                        axum::Json(json!({"decision": "allowed", "executed": true}))
+                    }
+                }
+            },
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let c = Ctx {
+            http: reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap(),
+            base: format!("http://{addr}"),
+            token: "t".into(),
+            profiles: Some("missing-profile".into()),
+        };
+        assert_eq!(c.tools_list().await["tools"], json!([]));
+        let res = c.tools_call("otto.list_repos", &json!({})).await;
+        assert_eq!(res["isError"], true);
+        assert!(
+            invokes.lock().unwrap().is_empty(),
+            "invoke endpoint must never be called when profile fails to resolve"
+        );
+        srv.abort();
+    }
+
+    #[tokio::test]
+    async fn mcp_server_bounded_line_rejects_oversized_input() {
+        let mut reader = BufReader::new(std::io::Cursor::new(b"abcdefghij\n{\"ok\":1}\n"));
+        let mut buf = Vec::new();
+        assert_eq!(
+            crate::mcp_tools::read_bounded_line(&mut reader, &mut buf, 5)
+                .await
+                .unwrap(),
+            crate::mcp_tools::BoundedLine::TooLong
+        );
+        assert!(buf.is_empty());
+        assert_eq!(
+            crate::mcp_tools::read_bounded_line(&mut reader, &mut buf, 32)
+                .await
+                .unwrap(),
+            crate::mcp_tools::BoundedLine::Line
+        );
+        assert_eq!(std::str::from_utf8(&buf).unwrap().trim(), "{\"ok\":1}");
     }
 }

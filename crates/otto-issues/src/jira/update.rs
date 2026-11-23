@@ -201,7 +201,9 @@ impl JiraClient {
             let resp = self.t.send_raw(put, &what).await?;
             let status = resp.status();
             if status.as_u16() == 400 {
-                let text = resp.text().await.unwrap_or_default();
+                let text =
+                    crate::atlassian::read_text_capped(resp, crate::atlassian::ERROR_BODY_CAP)
+                        .await;
                 let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
                 return Err(Error::Invalid(format!(
                     "Jira refused the update of {key}: {}",

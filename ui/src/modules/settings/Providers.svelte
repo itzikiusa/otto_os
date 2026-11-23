@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { serialLatest } from '../../lib/latest';
+  import { serialLatest } from '../../lib/latest'; import { announceShown } from '../../lib/announce.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { NO_WORKSPACE } from '../../lib/labels';
   import { sectionLabel } from './sections';
@@ -525,7 +525,7 @@
               <option value={false}>Local time</option>
             </select>
           </div>
-          {#if timeError}<p class="field-err indent" id="prov-time-err" role="alert">{timeError}</p>{/if}
+          {#if timeError}<p class="field-err indent" id="prov-time-err" use:announceShown={{ text: timeError, assertive: true }}>{timeError}</p>{/if}
           <div class="indent">
             <SettingToggle
               label="Reload open sessions onto the new version"

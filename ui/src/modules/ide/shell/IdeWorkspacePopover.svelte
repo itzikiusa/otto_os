@@ -148,7 +148,7 @@
             class="ws-proj-select"
             title={SCRATCHES_LOCKED}
             onclick={() => { closePopover(true); void openScratches(); }}
-            oncontextmenu={(e) => { e.preventDefault(); ctxMenu.show(e, scratchesMenuItems()); }}
+            oncontextmenu={(e) => { e.preventDefault(); onclose(); ctxMenu.show(e, scratchesMenuItems()); }}
             use:rowMenu
             data-testid="ide-scratches-option"
           >
@@ -243,7 +243,7 @@
     {#if ide.hasTarget && ide.target.kind === 'local'}
       <button
         type="button"
-        class="ws-action-btn"
+        class="btn small"
         onclick={() => { onclose(); ide.bulkRepoPickerMode = 'attach'; }}
         data-testid="ide-switcher-bulk-attach"
       >
@@ -251,17 +251,17 @@
         <span>Add repos…</span>
       </button>
     {/if}
-    <button type="button" class="ws-action-btn" onclick={() => onpickfolder('open')} data-testid="ide-open-local-folder-btn">
+    <button type="button" class="btn small" onclick={() => onpickfolder('open')} data-testid="ide-open-local-folder-btn">
       <Icon name="folder" size={13} />
       <span>Open local folder…</span>
     </button>
     {#if ide.hasTarget && ide.target.kind === 'local'}
-      <button type="button" class="ws-action-btn" onclick={() => onpickfolder('attach')} data-testid="ide-switcher-add-folder">
+      <button type="button" class="btn small" onclick={() => onpickfolder('attach')} data-testid="ide-switcher-add-folder">
         <Icon name="plus" size={13} />
         <span>Add folder…</span>
       </button>
     {/if}
-    <button type="button" class="ws-action-btn" onclick={() => { onclose(); ide.openSettings('build.ssh'); }} data-testid="ide-switcher-ssh">
+    <button type="button" class="btn small" onclick={() => { onclose(); ide.openSettings('build.ssh'); }} data-testid="ide-switcher-ssh">
       <Icon name="server" size={13} />
       <span>Remote SSH…</span>
     </button>
@@ -295,9 +295,4 @@
   .ws-item-sub { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ws-item-desc { font-size: var(--fs-xs); color: var(--text-dim); }
   .ws-actions-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px; border-block-start: 1px solid var(--border); background: var(--surface-2); flex-shrink: 0; }
-  .ws-action-btn {
-    display: inline-flex; align-items: center; gap: 6px; padding-block: 6px; padding-inline: 10px;
-    border: 1px solid var(--border); border-radius: var(--radius-s); background: var(--surface); color: var(--text); font-size: var(--fs-xs); font-weight: 500; cursor: pointer;
-  }
-  .ws-action-btn:hover { background: var(--hover); border-color: var(--border-strong); }
 </style>

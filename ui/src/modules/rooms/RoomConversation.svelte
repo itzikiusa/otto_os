@@ -6,7 +6,7 @@
   // The transcript is polled — rooms have no owner event stream — backing off
   // while nothing changes (chatCadence.ts), and only while the chat is on
   // screen: a hidden window or a pane hidden by layout stops the poll.
-  import { setContext, tick, untrack } from 'svelte';
+  import { onDestroy, setContext, tick, untrack } from 'svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { TurnItem, CONV_CTX, groupTurns, type ConvContext, type RenderItem } from '../agents/conversation';
@@ -42,20 +42,21 @@
   let unavailable = $state('');
   let draft = $state('');
   let sending = $state(false);
+  let stopping = $state(false);
   let sendError = $state('');
   let scroller: HTMLElement | undefined = $state();
   let lastKey = '';
 
-  const ctx: ConvContext = {
+  const ctx: ConvContext = $state({
     conv,
     sessionId: sid,
     readonly: true,
     provider: 'claude' as TranscriptProvider,
     queuedLive: [],
-    openUrl: (url) => void openExternal(url),
-    imageUrl: (id) => roomImageUrl(origin, credential, id),
+    openUrl: (url: string) => void openExternal(url),
+    imageUrl: (id: string) => roomImageUrl(origin, credential, id),
     reusePrompt: null,
-  };
+  });
   setContext(CONV_CTX, ctx);
 
   function nearBottom(): boolean {
@@ -106,23 +107,31 @@
     poller = p;
     return () => { p.stop(); if (poller === p) poller = null; };
   });
+  let wakeTimer: ReturnType<typeof setTimeout> | null = null;
+  onDestroy(() => { if (wakeTimer) { clearTimeout(wakeTimer); wakeTimer = null; } });
   /** Activity: back to the fast cadence and poll now (one chain, lib/poll.ts). */
   function wake(): void {
     cadence.active();
     poller?.now({ background: true });
   }
+  function scheduleWake(): void {
+    if (wakeTimer) clearTimeout(wakeTimer);
+    wakeTimer = setTimeout(() => { wakeTimer = null; wake(); }, 800);
+  }
 
   async function submit(): Promise<void> {
     const text = draft.trim();
-    if (!text || grantEpoch === null) return;
+    if (!text || grantEpoch === null || sending) return;
     sending = true; sendError = '';
-    try { await roomPrompt(origin, credential, grantEpoch, text, true); draft = ''; cadence.active(); setTimeout(wake, 800); }
+    try { await roomPrompt(origin, credential, grantEpoch, text, true); draft = ''; cadence.active(); if (typeof scheduleWake === 'function') scheduleWake(); else setTimeout(wake, 800); }
     catch (e) { sendError = loadErrorText(e); }
     finally { sending = false; }
   }
   async function interrupt(): Promise<void> {
-    if (grantEpoch === null) return;
+    if (grantEpoch === null || stopping) return;
+    stopping = true;
     try { await roomPrompt(origin, credential, grantEpoch, '\u001b', false); wake(); } catch (e) { sendError = loadErrorText(e); }
+    finally { stopping = false; }
   }
   function onKey(e: KeyboardEvent) {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); void submit(); }
@@ -148,7 +157,7 @@
     <form class="composer" onsubmit={(e) => { e.preventDefault(); void submit(); }}>
       <textarea dir={detectBlockDirection(draft)} rows="2" bind:value={draft} onkeydown={onKey} placeholder="Message the agent (Enter to send, Shift+Enter for a new line)" aria-label="Message the agent" disabled={sending}></textarea>
       <div class="actions">
-        <button type="button" class="btn small" onclick={interrupt} title="Interrupt the agent (Esc)">Stop</button>
+        <button type="button" class="btn small" disabled={stopping} onclick={interrupt} title="Interrupt the agent (Esc)">{stopping ? 'Stopping…' : 'Stop'}</button>
         <button class="btn small primary" disabled={sending || !draft.trim()}>{sending ? 'Sending…' : 'Send'}</button>
       </div>
       {#if sendError}<p class="error" use:announceShown={{ text: sendError, assertive: true }}>{sendError}</p>{/if}

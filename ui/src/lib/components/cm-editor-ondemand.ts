@@ -52,7 +52,7 @@ let capabilitiesCache: LspCapabilities | null = null;
 let capabilitiesFetching: Promise<LspCapabilities | null> | null = null;
 let capabilitiesFetchedAt = 0;
 
-async function getLspCapabilities(force = false): Promise<LspCapabilities | null> {
+export async function getLspCapabilities(force = false): Promise<LspCapabilities | null> {
   if (force && Date.now() - capabilitiesFetchedAt > 15_000) {
     capabilitiesCache = null;
     capabilitiesFetching = null;

@@ -22,6 +22,7 @@ import { defaultVarSpec, type VarSpec } from '../../database/sql-util';
 import { forgetEditorState } from '../../editor-history';
 import { dropGridState } from '../../database/grid-tab-state';
 import { resultBudget } from '../db-result-budget';
+import { newId } from '../../id';
 
 /** Connection kinds the explorer can browse (the DB engines). */
 export const DB_KINDS = ['mysql', 'postgres', 'redis', 'mongodb', 'clickhouse'] as const;
@@ -70,16 +71,9 @@ export const KEEP_ALIVE_MS = 4 * 60_000;
 
 /**
  * A fresh per-run id sent with a query so the server can register it and a later
- * `db/cancel` (same id) can issue engine-native cancellation. Uses
- * `crypto.randomUUID` where available, with a non-cryptographic fallback (the id
- * only needs to be unique among this client's in-flight queries).
+ * `db/cancel` (same id) can issue engine-native cancellation.
  */
-export function newQueryId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  return `q-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-}
+export const newQueryId = newId;
 
 
 /** Glyph (Icon name) for a connection engine. */
@@ -373,18 +367,7 @@ export function forgetTabHistory(t: QueryTab): void {
 
 let nextTabId = 1;
 /** A fresh stable tab uid (see {@link QueryTab.uid}). */
-export function newTabUid(): string {
-  try {
-    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-      return crypto.randomUUID();
-    }
-  } catch {
-    /* insecure context — fall through */
-  }
-  // getRandomValues works in insecure contexts too (randomUUID doesn't).
-  const bytes = crypto.getRandomValues(new Uint8Array(8));
-  return `t${Date.now().toString(36)}${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`;
-}
+export const newTabUid = newId;
 export function blankTab(statement = ''): QueryTab {
   return {
     id: nextTabId++,

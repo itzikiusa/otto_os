@@ -324,7 +324,9 @@ pub async fn send(
         ));
     }
     let delay;
-    let attrs;
+    let group_arg;
+    let dedup_arg;
+    let attrs_arg;
     let mut args: Vec<&str> = vec![
         "sqs",
         "send-message",
@@ -338,15 +340,21 @@ pub async fn send(
         args.extend(["--delay-seconds", delay.as_str()]);
     }
     if let Some(g) = req.group_id.as_deref().filter(|s| !s.is_empty()) {
-        args.extend(["--message-group-id", g]);
+        crate::cli::reject_url_param_expansion("message group id", g)?;
+        group_arg = format!("--message-group-id={g}");
+        args.push(group_arg.as_str());
     }
     if let Some(d) = req.dedup_id.as_deref().filter(|s| !s.is_empty()) {
-        args.extend(["--message-deduplication-id", d]);
+        crate::cli::reject_url_param_expansion("message deduplication id", d)?;
+        dedup_arg = format!("--message-deduplication-id={d}");
+        args.push(dedup_arg.as_str());
     }
     if let Some(ma) = &req.message_attributes {
         if ma.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
-            attrs = ma.to_string();
-            args.extend(["--message-attributes", attrs.as_str()]);
+            let attrs = ma.to_string();
+            crate::cli::reject_url_param_expansion("message attributes", &attrs)?;
+            attrs_arg = format!("--message-attributes={attrs}");
+            args.push(attrs_arg.as_str());
         }
     }
     // The body goes through stdin, never argv (`ps` shows argv).

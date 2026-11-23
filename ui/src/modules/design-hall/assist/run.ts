@@ -3,6 +3,7 @@
 // as a conversation. Shared by the Otto panel and the lobby hand-off.
 
 import { ApiError } from '../../../lib/api/client';
+import { loadErrorText } from '../../../lib/loadError';
 import type { DesignAssistTurn, DesignVariantRun } from '../../../lib/api/types';
 import { asks } from './asks.svelte';
 import { startAssist, startVariants } from './api';
@@ -27,5 +28,5 @@ export function askError(e: unknown): string {
   if (e instanceof ApiError && e.status === 409) return 'Otto is already working on this design. Wait for that turn to finish.';
   if (e instanceof ApiError && e.status === 400) return e.message || 'This design can’t be edited by an agent (binary formats aren’t supported).';
   if (e instanceof ApiError && e.status === 403) return 'You need edit access to this design’s workspace to ask Otto.';
-  return e instanceof Error ? e.message : String(e);
+  return loadErrorText(e);
 }

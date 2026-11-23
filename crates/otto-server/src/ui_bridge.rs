@@ -454,7 +454,7 @@ impl UiBridge {
     pub fn register(&self, user_id: &Id) -> (String, mpsc::Receiver<String>) {
         let conn_id = otto_core::new_id();
         let (tx, rx) = mpsc::channel(CONN_QUEUE);
-        self.docs.lock().unwrap().insert(
+        self.docs.lock().unwrap_or_else(|e| e.into_inner()).insert(
             conn_id.clone(),
             DocEntry {
                 user_id: user_id.clone(),
@@ -467,9 +467,12 @@ impl UiBridge {
 
     /// Drop a closed connection; its in-flight commands fail with `no_ui_client`.
     pub fn unregister(&self, conn_id: &str) {
-        self.docs.lock().unwrap().remove(conn_id);
+        self.docs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(conn_id);
         let gone: Vec<Pending> = {
-            let mut p = self.pending.lock().unwrap();
+            let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             let ids: Vec<Id> = p
                 .iter()
                 .filter(|(_, v)| v.conn_id == conn_id)
@@ -495,7 +498,7 @@ impl UiBridge {
             return;
         };
         let activity = self.next_seq();
-        let mut docs = self.docs.lock().unwrap();
+        let mut docs = self.docs.lock().unwrap_or_else(|e| e.into_inner());
         let Some(entry) = docs.get_mut(conn_id) else {
             return;
         };
@@ -582,18 +585,21 @@ impl UiBridge {
         let id = otto_core::new_id();
         let (tx, rx) = oneshot::channel();
         let now = Instant::now();
-        self.pending.lock().unwrap().insert(
-            id.clone(),
-            Pending {
-                session_id: session.id.clone(),
-                user_id: session.created_by.clone(),
-                conn_id: conn_id.to_string(),
-                dispatched: now,
-                deadline: now + budget,
-                note: None,
-                tx: Some(tx),
-            },
-        );
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                id.clone(),
+                Pending {
+                    session_id: session.id.clone(),
+                    user_id: session.created_by.clone(),
+                    conn_id: conn_id.to_string(),
+                    dispatched: now,
+                    deadline: now + budget,
+                    note: None,
+                    tx: Some(tx),
+                },
+            );
         let frame = json!({
             "type": "ui_command",
             "id": id,
@@ -609,7 +615,10 @@ impl UiBridge {
         })
         .to_string();
         if !self.send_to(conn_id, frame) {
-            self.pending.lock().unwrap().remove(&id);
+            self.pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&id);
             return Err(UiError::new(
                 "no_ui_client",
                 "the Otto window could not be reached (it closed or is not responding)",
@@ -620,7 +629,12 @@ impl UiBridge {
 
     /// Cancel one pending command: tell its document, fail its waiter.
     fn cancel(&self, id: &str, reason: &str, err: Option<UiError>) {
-        let Some(mut p) = self.pending.lock().unwrap().remove(id) else {
+        let Some(mut p) = self
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id)
+        else {
             return;
         };
         self.send_to(
@@ -672,7 +686,12 @@ impl UiBridge {
             armed: true,
         };
         loop {
-            let deadline = match self.pending.lock().unwrap().get(id) {
+            let deadline = match self
+                .pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(id)
+            {
                 Some(p) => p.deadline,
                 // Already resolved/cancelled — the outcome is in the channel.
                 None => Instant::now() + Duration::from_secs(1),
@@ -738,7 +757,7 @@ impl UiBridge {
 
     /// Check the caller of the result/progress routes against a pending command.
     fn authorize_reply(&self, id: &str, user_id: &str, conn_id: Option<&str>) -> Result<(), Error> {
-        let p = self.pending.lock().unwrap();
+        let p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         let Some(p) = p.get(id) else {
             return Err(Error::NotFound(
                 "ui command (finished, cancelled or unknown)".into(),
@@ -766,7 +785,12 @@ impl UiBridge {
         reply: UiReply,
     ) -> Result<(), Error> {
         self.authorize_reply(id, user_id, conn_id)?;
-        let Some(mut p) = self.pending.lock().unwrap().remove(id) else {
+        let Some(mut p) = self
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id)
+        else {
             return Err(Error::NotFound("ui command".into()));
         };
         let outcome = match reply {
@@ -802,7 +826,7 @@ impl UiBridge {
         awaiting_human: bool,
     ) -> Result<(), Error> {
         self.authorize_reply(id, user_id, conn_id)?;
-        let mut all = self.pending.lock().unwrap();
+        let mut all = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         let Some(p) = all.get_mut(id) else {
             return Err(Error::NotFound("ui command".into()));
         };
@@ -823,7 +847,7 @@ impl UiBridge {
 
     /// Rate-limit `ui_control_requested`: `true` when it may be raised now.
     fn should_request(&self, session_id: &str) -> bool {
-        let mut m = self.last_request.lock().unwrap();
+        let mut m = self.last_request.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         match m.get(session_id) {
             Some(t) if now.duration_since(*t) < REQUEST_EVERY => false,
@@ -1288,8 +1312,8 @@ async fn self_post(
             .await
             .map_err(|e| Error::Upstream(format!("self-call: {e}")))?;
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
+            let text = crate::mcp_outward::read_self_error_body(resp).await;
             let msg = crate::mcp_outward::self_call_error(status, &text);
             return Err(match status.as_u16() {
                 400 | 422 => Error::Invalid(msg),
@@ -1299,6 +1323,7 @@ async fn self_post(
                 _ => Error::Upstream(msg),
             });
         }
+        let text = resp.text().await.unwrap_or_default();
         Ok(crate::mcp_outward::parse_self_ok(&text))
     }
     .await;

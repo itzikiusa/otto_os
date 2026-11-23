@@ -1,0 +1,9 @@
+#!/bin/sh
+# forge: the Otto Forge stage CLI (forge/cli.py), on AssetFurnace's Python environment.
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+python="$ROOT/engines/assetfurnace/.venv/bin/python"
+if [ ! -x "$python" ]; then
+    printf '%s\n' '{"error":"Forge engine Python is missing. Run install.sh for the engine stage."}' >&2
+    exit 1
+fi
+PYTHONPATH="$ROOT" exec "$python" -m forge.cli "$@"

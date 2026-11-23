@@ -77,6 +77,18 @@ impl ModelProbe {
         self.claude_config_dirs = dirs;
         self
     }
+
+    /// The probe `/meta` lists `reg`'s enabled providers with. Every reader
+    /// of the catalog builds it here, so they share ONE cache entry (any other
+    /// probe would replace `/meta`'s).
+    pub fn for_registry(reg: &crate::ProviderRegistry) -> Self {
+        let names = reg.names();
+        let specs =
+            crate::tool_probe::tool_specs(names.iter().map(|n| (n.as_str(), reg.program_for(n))));
+        Self::from_tool_specs(reg.model_families(), &specs).with_claude_config_dirs(
+            reg.active_claude_config_dirs(&otto_transcript::roots::home_dir()),
+        )
+    }
 }
 
 type ModelsCache = Option<(

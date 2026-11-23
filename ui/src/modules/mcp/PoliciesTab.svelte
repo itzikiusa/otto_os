@@ -13,14 +13,15 @@
   import { mcpCpApi } from '../../lib/api/mcp';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { downloadJson } from '../../lib/components/exporters';
   import type {
     CreateMcpPolicyReq,
-    McpEvaluatePreview,
     McpPolicy,
     McpServerDetail,
   } from '../../lib/api/types';
   import McpPill from './McpPill.svelte';
   import PolicyForm from './PolicyForm.svelte';
+  import { normalizePolicyTrace, traceOutcomeTone, type McpEvaluateWithTrace } from './policyTrace';
 
   interface Props {
     wsId: string;
@@ -84,13 +85,9 @@
   async function exportJson(): Promise<void> {
     try {
       const doc = await mcpCpApi.cpExportPolicies();
-      const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `mcp-policies-${new Date().toISOString().slice(0, 10)}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
+      const filename = `mcp-policies-${new Date().toISOString().slice(0, 10)}.json`;
+      downloadJson(doc, filename);
+      toasts.success('Exported policies', filename);
     } catch (e) {
       toastError('Couldn’t export', e);
     }
@@ -153,11 +150,15 @@
   // ---- evaluate preview ----
   let evalServerId = $state('');
   let evalTool = $state('');
-  let evalResult = $state<McpEvaluatePreview | null>(null);
+  let evalResult = $state<McpEvaluateWithTrace | null>(null);
   let evaluating = $state(false);
+  const evalTrace = $derived(evalResult ? normalizePolicyTrace(evalResult) : []);
 
   $effect(() => {
-    if (!evalServerId && servers.length) evalServerId = servers[0].id;
+    if (!servers.some((s) => s.id === evalServerId)) {
+      evalServerId = servers[0]?.id ?? '';
+      evalResult = null;
+    }
   });
 
   async function evaluate(): Promise<void> {
@@ -244,6 +245,20 @@
         {#if evalResult.reason}<span class="reason">{evalResult.reason}</span>{/if}
       {/if}
     </div>
+    {#if evalTrace.length > 0}
+      <ol class="trace" aria-label="Governance pipeline trace" data-testid="mcp-policy-trace">
+        {#each evalTrace as step, i (`${step.stage}:${i}`)}
+          <li class="trace-step tone-{traceOutcomeTone(step.outcome)}" title={step.detail}>
+            <span class="trace-stage">{step.stage}</span>
+            <span class="trace-outcome">{step.outcome}</span>
+            {#if step.detail}<span class="trace-detail">{step.detail}</span>{/if}
+          </li>
+          {#if i < evalTrace.length - 1}
+            <li class="trace-sep" aria-hidden="true">→</li>
+          {/if}
+        {/each}
+      </ol>
+    {/if}
   </div>
 
   <LoadState what="policies" {loading} error={loadError} empty={policies.length === 0} onretry={() => void load()}>
@@ -346,6 +361,36 @@
     font-size: var(--fs-s);
     color: var(--text-dim);
   }
+  .trace {
+    list-style: none;
+    margin: 8px 0 0;
+    padding: 0;
+    display: flex;
+    align-items: stretch;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .trace-step {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--bg);
+    min-width: 110px;
+    max-width: 240px;
+  }
+  .trace-step.tone-ok { border-color: color-mix(in srgb, var(--success) 40%, transparent); }
+  .trace-step.tone-warn { border-color: color-mix(in srgb, var(--warning) 45%, transparent); }
+  .trace-step.tone-bad { border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
+  .trace-stage { font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .06em; color: var(--text-dim); }
+  .trace-outcome { font-size: var(--fs-s); font-weight: 600; color: var(--text); }
+  .trace-step.tone-ok .trace-outcome { color: var(--success); }
+  .trace-step.tone-warn .trace-outcome { color: var(--warning); }
+  .trace-step.tone-bad .trace-outcome { color: var(--danger); }
+  .trace-detail { font-size: var(--fs-xs); color: var(--text-dim); overflow-wrap: anywhere; }
+  .trace-sep { display: flex; align-items: center; color: var(--text-dim); font-size: var(--fs-s); }
   .grid {
     overflow: auto;
   }

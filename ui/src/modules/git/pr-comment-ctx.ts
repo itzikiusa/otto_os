@@ -16,6 +16,8 @@ export interface PrCommentActions {
   react(c: PrComment, key: ReactionKey): Promise<void>;
   /** The forge has a reactions API (false on Bitbucket Cloud). */
   reactionsSupported(): boolean;
+  /** Short outward destination label ("PR #42 on my-repo") for composer hints. */
+  postTarget?: () => string;
 }
 
 const KEY = Symbol('pr-comment-actions');

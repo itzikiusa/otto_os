@@ -219,8 +219,13 @@ fn check_marks(marks: &Value, p: &str) -> Result<(), String> {
         if seen.contains(&ty) {
             return Err(format!("{p}: duplicate {ty} mark"));
         }
-        if ty == "link" && attr_str(m, "href").is_none() {
-            return Err(format!("{p}: link mark needs attrs.href"));
+        if ty == "link" {
+            let Some(href) = attr_str(m, "href") else {
+                return Err(format!("{p}: link mark needs attrs.href"));
+            };
+            if !crate::markdown::is_safe_link_href(href) {
+                return Err(format!("{p}: link mark has disallowed href scheme"));
+            }
         }
         seen.push(ty);
     }
@@ -425,6 +430,24 @@ mod tests {
             (
                 json!({"type": "doc", "version": 2, "content": []}),
                 "version",
+            ),
+            (
+                doc(
+                    json!([{"type": "paragraph", "content": [{"type": "text", "text": "x", "marks": [{"type": "link", "attrs": {"href": "javascript:alert(1)"}}]}]}]),
+                ),
+                "disallowed href scheme",
+            ),
+            (
+                doc(
+                    json!([{"type": "paragraph", "content": [{"type": "text", "text": "x", "marks": [{"type": "link", "attrs": {"href": "data:text/html,hi"}}]}]}]),
+                ),
+                "disallowed href scheme",
+            ),
+            (
+                doc(
+                    json!([{"type": "paragraph", "content": [{"type": "text", "text": "x", "marks": [{"type": "link", "attrs": {"href": "vbscript:msgbox(1)"}}]}]}]),
+                ),
+                "disallowed href scheme",
             ),
         ];
         for (d, needle) in cases {

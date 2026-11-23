@@ -28,6 +28,14 @@ pub(in crate::workflow_engine) async fn execute(
         .and_then(Value::as_str)
         .or_else(|| input.get("story_id").and_then(Value::as_str))
         .map(str::to_string);
+    if let Some(sid) = story_id.as_ref() {
+        let story = ctx.product_repo.get_story(sid).await?;
+        if story.workspace_id != ws.id {
+            return Err(otto_core::Error::Forbidden(format!(
+                "{kind}: story belongs to another workspace"
+            )));
+        }
+    }
     let (skill_name, instruction, persist_kind) = match kind.as_str() {
                 "product_analyze" => (
                     "grill",

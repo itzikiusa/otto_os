@@ -16,7 +16,7 @@
   import { tick } from 'svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
-  import { onTabKey } from '../../lib/tabKeys';
+  import { nextTabIndex } from '../../lib/tabKeys';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { openExternal as openExternalUrl } from '../../lib/external';
   import { nativeBrowser, nativeBrowserAvailable } from '../../lib/nativeBrowser';
@@ -292,12 +292,12 @@
       });
   });
   const frameSrc = $derived(current ? (takeover ? proxySrc : current) : '');
-
-  // ── Helpers ────────────────────────────────────────────────────────────────
+  // Only http(s) URLs may load in the browser or open externally (blocks javascript:/file:/data:).
   function normalize(u: string): string {
     const t = u.trim();
     if (!t) return '';
-    return /^[a-z]+:\/\//i.test(t) ? t : `https://${t}`;
+    if (/^[a-z][a-z0-9+.-]*:/i.test(t) && !/^https?:\/\//i.test(t)) return '';
+    return /^https?:\/\//i.test(t) ? t : `https://${t}`;
   }
 
   // Load a URL into the ACTIVE tab.
@@ -471,46 +471,43 @@
   }
 
   // ── Send to agent ─────────────────────────────────────────────────────────
+  let sending = $state(false);
   async function sendToAgent(): Promise<void> {
+    if (sending) return;
     if (!ws.activeSessionId || ws.activeSession?.kind !== 'agent') {
       toasts.error('Can’t send yet', 'Open an agent session to receive the feedback.');
       return;
     }
-
     const n = annotations.length;
     const urlRef = annotations[0]?.url ?? current;
-    const lines = annotations
-      .map((a, i) => `${i + 1}. ${a.desc} — ${a.comment}`)
-      .join('\n');
-
-    const text =
-      `User left ${n} comment(s) while reviewing ${urlRef}:\n\n` +
-      `${lines}\n\n` +
-      `Please inspect each and propose fixes.`;
-
+    const lines = annotations.map((a, i) => `${i + 1}. ${a.desc} — ${a.comment}`).join('\n');
+    const text = `User left ${n} comment(s) while reviewing ${urlRef}:\n\n${lines}\n\nPlease inspect each and propose fixes.`;
+    sending = true;
     try {
       await api.post(`/sessions/${ws.activeSessionId}/input`, { text, submit: true });
       annotations = [];
       toasts.success('Sent to agent', plural(n, 'comment'));
     } catch (e) {
       toastError('Couldn’t send the comments to the agent', e);
+    } finally {
+      sending = false;
     }
+  }
+  function onBrowserTabKey(e: KeyboardEvent): void {
+    const el = e.currentTarget as HTMLElement, all = Array.from(el.closest('.tabstrip')?.querySelectorAll<HTMLElement>('.btab-main') ?? []);
+    const next = nextTabIndex(e.key, all.indexOf(el), all.length, { rtl: getComputedStyle(el).direction === 'rtl' });
+    if (next >= 0) { e.preventDefault(); all[next]?.focus(); all[next]?.click(); }
   }
 </script>
 
 <div class="browser" bind:this={browserEl}>
-  <!-- ── Tab strip ─────────────────────────────────────────────────────────── -->
-  <!-- The "+" sits OUTSIDE the scrolling tab list so it can never be scrolled
-       or clipped out of reach when there are many tabs. -->
   <div class="tabstrip-row">
-    <div class="tabstrip" role="tablist" aria-label="Browser tabs" bind:this={stripEl}>
+    <div class="tabstrip" role="toolbar" aria-label="Browser tabs" bind:this={stripEl}>
       {#each tabs as t (t.id)}
-        <!-- The tab and its close are TWO real buttons (no control nested in a
-             role=tab); ←/→/Home/End move between tabs (roving tabindex). -->
+        <!-- The tab and its close are TWO real buttons; ←/→/Home/End move between tabs (roving tabindex). -->
         <div
           class="btab"
           class:active={t.id === activeId}
-          role="presentation"
           data-tab-id={t.id}
           onauxclick={(e) => {
             if (e.button === 1) {
@@ -521,12 +518,11 @@
         >
           <button
             class="btab-main"
-            role="tab"
-            aria-selected={t.id === activeId}
+            aria-pressed={t.id === activeId}
             tabindex={t.id === activeId ? 0 : -1}
             title={t.url || 'New tab'}
             onclick={() => setActiveTab(t.id)}
-            onkeydown={onTabKey}
+            onkeydown={onBrowserTabKey}
           >
             <span class="btab-title">{t.title}</span>
           </button>
@@ -670,10 +666,10 @@
         <button
           class="btn primary small send-target"
           onclick={sendToAgent}
-          disabled={!sendTarget}
+          disabled={!sendTarget || sending}
           title={sendTarget ? `Send the marks to ${sendTarget.title || 'the active agent'} and start its next turn` : 'Open an agent session to send marks'}
         >
-          Send {annotations.length} to {sendTarget?.title || 'agent'}
+          {sending ? 'Sending…' : `Send ${annotations.length} to ${sendTarget?.title || 'agent'}`}
         </button>
         <button
           class="btn small"
@@ -709,7 +705,7 @@
       {#if attachedIssue}
         <section class="section">
           <div class="section-title">Attached issue</div>
-          <button class="quick-link" onclick={() => openExternal(attachedIssue.url)}>
+          <button class="quick-link" disabled={!attachedIssue.url} title={attachedIssue.url || 'No link available for this issue'} onclick={() => attachedIssue.url && openExternal(attachedIssue.url)}>
             <Icon name="ticket" size={13} />
             <div class="ql-text">
               <span class="ql-key">{attachedIssue.key}</span>

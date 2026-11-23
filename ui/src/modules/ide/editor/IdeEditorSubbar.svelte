@@ -12,6 +12,7 @@
   import LoadState from '../../../lib/components/LoadState.svelte';
   import { confirmer } from '../../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
+  import { focusOnMount } from '../../../lib/focusOnMount';
   import { extractGoBuildTagsFromSource } from '../../../lib/goBuildTags';
   import type { Session } from '../../../lib/api/types';
   import { ws as wsStore } from '../../../lib/stores/workspace.svelte';
@@ -27,6 +28,7 @@
   import { openIdeEditorMoreMenu } from './ideEditorMoreMenu';
   import { isMultiLine } from '../filetools/send/pasteSafety';
   import SessionPickerModal from '../filetools/send/SessionPickerModal.svelte';
+  import type { IdeGutterHunk } from '../git/ideGutterHunks';
 
   interface Props {
     activeTab: IdeOpenTab;
@@ -38,20 +40,24 @@
     effectiveViewMode: 'table' | 'text';
     hasNonEmptySelection: boolean;
     blameActive: boolean;
+    activeGitHunk?: IdeGutterHunk | null;
+    gitHunkCount?: number;
     onapplyjson: (nextText: string) => void;
     onjumpsymbol: (delta: -1 | 1) => void;
     ongotoline: (line: number, col: number) => void;
     onopenstructure: () => void;
     ontoggleblame: () => void;
     onopenquickfix: (e: MouseEvent) => void;
+    onopengithunk?: (e: MouseEvent) => void;
     onfocusagent: () => void;
   }
 
   let {
     activeTab, pathSegments, effectiveSymbols, activeJsonPath, sdkLabel,
     activeDocKind, effectiveViewMode, hasNonEmptySelection, blameActive,
+    activeGitHunk = null, gitHunkCount = 0,
     onapplyjson, onjumpsymbol, ongotoline, onopenstructure, ontoggleblame,
-    onopenquickfix, onfocusagent,
+    onopenquickfix, onopengithunk, onfocusagent,
   }: Props = $props();
 
   // Touch devices have no keyboard shortcuts to show: no "(⌘…)" hints there.
@@ -212,8 +218,15 @@
   }
 
   function applyLineWrap(): void {
-    if (!linePrefix && !lineSuffix) return;
+    if ((!linePrefix && !lineSuffix) || activeTab.readOnly || !ide.canEditCollab) return;
     ide.applyPrefixSuffix(linePrefix, lineSuffix);
+  }
+
+  function closePrefixSuffix(restoreEditor = true): void {
+    ide.prefixSuffixOpen = false;
+    if (restoreEditor) {
+      queueMicrotask(() => ide.editorHandleForPath(activeTab.path)?.focus());
+    }
   }
 </script>
 
@@ -225,7 +238,14 @@
         {#if c.kind === 'more'}
           <button type="button" class="crumb-btn crumb-more" aria-label={`${c.hidden.length} more folders`} title={c.hidden.map((h) => h.label).join(' / ')} onclick={(e) => openHiddenFoldersMenu(e, c.hidden)} data-testid="ide-crumb-more">…</button>
         {:else}
-          <button type="button" class="crumb-btn" class:last={c.last} onclick={() => void revealInIdeProjectTree(activeTab.path)} title="Reveal in project tree" data-testid={c.last ? 'ide-crumb-file' : undefined}>{c.label}</button>
+          <button
+            type="button"
+            class="crumb-btn"
+            class:last={c.last}
+            onclick={() => void revealInIdeProjectTree(c.last ? activeTab.path : ideCrumbAbsPath(activeTab.path, pathSegments.length, c.index))}
+            title={c.last ? 'Reveal file in project tree' : 'Reveal folder in project tree'}
+            data-testid={c.last ? 'ide-crumb-file' : undefined}
+          >{c.label}</button>
         {/if}
       {/each}
       {#each symbolChain as sym, idx (`${sym.name}:${sym.line}`)}
@@ -243,14 +263,6 @@
     {#if activeTab.binary}<Badge variant="outline" tone="warn" label="Binary or not UTF-8 text" title="Otto shows UTF-8 text only. This file has bytes that aren’t UTF-8 text, so it is read-only and may look blank or garbled." testid="ide-binary-badge" />
     {:else if activeTab.truncated}<Badge variant="outline" tone="warn" label="Truncated · first 4 MB" title="Only the first 4 MB of this file is shown, read-only. Open it in another editor to see or edit the rest." testid="ide-truncated-badge" />
     {:else if activeTab.readOnly}<Badge variant="outline" tone="neutral" label="Read-only" />{/if}
-    {#if lspLinkHere?.state === 'reconnecting' || lspLinkHere?.state === 'waiting'}<Badge variant="outline" tone="neutral" label="Language features restarting…" title={lspLinkHere.state === 'waiting' ? 'Otto is restarting; the language server reconnects when it is back.' : 'The language server connection dropped; reconnecting.'} testid="ide-lsp-reconnecting" />{/if}
-    {#if lspLinkHere?.state === 'lost'}
-      <LoadState what="language features" variant="compact" error="The language server connection dropped." onretry={() => { if (lspLinkHere) retryLspNow(lspLinkHere.rootPath); }} />
-    {/if}
-    {#if ide.collabIsGuest && ideCollabNotices.roomSync === 'reconnecting'}<Badge variant="outline" tone="neutral" label="Reconnecting to the room…" title="The room fell behind on edits. Your text is kept and will be sent again." testid="ide-collab-reconnecting" />{/if}
-    {#if ide.collabIsGuest && ideCollabNotices.roomSync === 'failed'}<Badge variant="outline" tone="warn" label="Not synced with the room" title="Your text is still here. Keep typing or save (⌘S) to send it again." testid="ide-collab-sync-failed" />{/if}
-    {#if ide.collabIsGuest && ideCollabNotices.saveRefusedByPath[activeTab.path]}<Badge variant="outline" tone="warn" label="Not saved: {ideCollabNotices.saveRefusedByPath[activeTab.path]}" title="The host doesn’t let guests save this file: {ideCollabNotices.saveRefusedByPath[activeTab.path]}" testid="ide-collab-save-refused" />{/if}
-    {#if noDraftKept}<Badge variant="outline" tone="warn" label="Unsaved edits not kept on reload" title="This file is too large for a recovery draft. Save (⌘S) or turn on autosave so a reload or crash doesn’t lose your edits." testid="ide-no-draft-badge" />{/if}
   </div>
 
   <div class="ide-subbar-tools">
@@ -285,6 +297,19 @@
       <button type="button" class="btn small ghost" aria-label="Sort keys" onclick={() => applyJsonTransform('sort')} title="Sort JSON keys alphabetically">Sort</button>
     {/if}
 
+    {#if activeGitHunk && onopengithunk && effectiveViewMode === 'text'}
+      <button
+        type="button"
+        class="btn small ghost ide-git-hunk-btn"
+        onclick={onopengithunk}
+        title="Inspect Git hunk (copy diff, revert, or ask Agent)"
+        data-testid="ide-subbar-git-hunk-btn"
+      >
+        <Icon name="unified" size={12} />
+        <span>Git hunk{gitHunkCount > 1 ? ` ${activeGitHunk.index + 1}/${gitHunkCount}` : ''}</span>
+      </button>
+    {/if}
+
     {#if hasNonEmptySelection && effectiveViewMode === 'text'}
       <div class="ide-sel-bar" role="group" aria-label="Selection actions" data-testid="ide-selection-agent-bar">
         <button type="button" class="btn small ghost ide-sel-accent" title={`Add selection to AI Agent context${kh('⌘L')}`} onclick={() => { ideAgent.markSelectionFromEditor({ openPanel: true }); onfocusagent(); }} data-testid="ide-selection-add-agent">
@@ -293,7 +318,7 @@
         <button type="button" class="btn small ghost" disabled={activeTab.readOnly || !ide.canEditCollab} title={`Inline AI edit on selection${kh('⌘I')}`} onclick={() => ideAgent.openInlineEdit()} data-testid="ide-selection-inline-edit">
           <Icon name="sparkle" size={12} />Edit
         </button>
-        <button type="button" class="btn small ghost" aria-pressed={ide.prefixSuffixOpen} title="Add prefix or suffix to every selected line" onclick={() => (ide.prefixSuffixOpen = true)} data-testid="ide-prefix-suffix-toggle">
+        <button type="button" class="btn small ghost" disabled={activeTab.readOnly || !ide.canEditCollab} aria-pressed={ide.prefixSuffixOpen} title="Add prefix or suffix to every selected line" onclick={() => (ide.prefixSuffixOpen = true)} data-testid="ide-prefix-suffix-toggle">
           Wrap
         </button>
       </div>
@@ -305,17 +330,30 @@
   </div>
 </div>
 
+{#if hasNotice}
+  <div class="ide-notice-strip" role="region" aria-label="Editor notices" data-testid="ide-editor-notices">
+    {#if lspLinkHere?.state === 'reconnecting' || lspLinkHere?.state === 'waiting'}<Badge variant="outline" tone="neutral" label="Language features restarting…" title={lspLinkHere.state === 'waiting' ? 'Otto is restarting; the language server reconnects when it is back.' : 'The language server connection dropped; reconnecting.'} testid="ide-lsp-reconnecting" />{/if}
+    {#if lspLinkHere?.state === 'lost'}
+      <LoadState what="language features" variant="compact" error="The language server connection dropped." onretry={() => { if (lspLinkHere) retryLspNow(lspLinkHere.rootPath); }} />
+    {/if}
+    {#if ide.collabIsGuest && ideCollabNotices.roomSync === 'reconnecting'}<Badge variant="outline" tone="neutral" label="Reconnecting to the room…" title="The room fell behind on edits. Your text is kept and will be sent again." testid="ide-collab-reconnecting" />{/if}
+    {#if ide.collabIsGuest && ideCollabNotices.roomSync === 'failed'}<Badge variant="outline" tone="warn" label="Not synced with the room" title="Your text is still here. Keep typing or save (⌘S) to send it again." testid="ide-collab-sync-failed" />{/if}
+    {#if ide.collabIsGuest && ideCollabNotices.saveRefusedByPath[activeTab.path]}<Badge variant="outline" tone="warn" label="Not saved: {ideCollabNotices.saveRefusedByPath[activeTab.path]}" title="The host doesn’t let guests save this file: {ideCollabNotices.saveRefusedByPath[activeTab.path]}" testid="ide-collab-save-refused" />{/if}
+    {#if noDraftKept}<Badge variant="outline" tone="warn" label="Unsaved edits not kept on reload" title="This file is too large for a recovery draft. Save (⌘S) or turn on autosave so a reload or crash doesn’t lose your edits." testid="ide-no-draft-badge" />{/if}
+  </div>
+{/if}
+
 {#if sendPicking}
   <SessionPickerModal ws={wsStore.currentId ?? ''} multiLine={isMultiLine(activeTab.content)} onpick={(s) => void pasteToSession(s)} onclose={() => (sendPicking = false)} />
 {/if}
 
-{#if ide.prefixSuffixOpen}
+{#if ide.prefixSuffixOpen && ide.canEditCollab && !activeTab.readOnly}
   <div class="ide-ps-bar" role="region" aria-label="Multi-line prefix and suffix editor">
-    <input class="ide-ps-input" type="text" dir="ltr" aria-label="Before each line" placeholder="Before each line…" bind:value={linePrefix} onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); applyLineWrap(); } else if (e.key === 'Escape') { e.preventDefault(); ide.prefixSuffixOpen = false; } }} data-testid="ide-prefix-input" />
-    <input class="ide-ps-input" type="text" dir="ltr" aria-label="After each line" placeholder="After each line…" bind:value={lineSuffix} onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); applyLineWrap(); } else if (e.key === 'Escape') { e.preventDefault(); ide.prefixSuffixOpen = false; } }} data-testid="ide-suffix-input" />
-    <button type="button" class="btn small" disabled={(!linePrefix && !lineSuffix) || activeTab.readOnly} onclick={applyLineWrap} data-testid="ide-apply-prefix-suffix">Apply to lines</button>
+    <input use:focusOnMount class="ide-ps-input" type="text" dir="ltr" aria-label="Before each line" placeholder="Before each line…" bind:value={linePrefix} onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); applyLineWrap(); } else if (e.key === 'Escape') { e.preventDefault(); closePrefixSuffix(true); } }} data-testid="ide-prefix-input" />
+    <input class="ide-ps-input" type="text" dir="ltr" aria-label="After each line" placeholder="After each line…" bind:value={lineSuffix} onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); applyLineWrap(); } else if (e.key === 'Escape') { e.preventDefault(); closePrefixSuffix(true); } }} data-testid="ide-suffix-input" />
+    <button type="button" class="btn small" disabled={(!linePrefix && !lineSuffix) || activeTab.readOnly || !ide.canEditCollab} onclick={applyLineWrap} data-testid="ide-apply-prefix-suffix">Apply to lines</button>
     <span class="ide-ps-tip">Tip: Hold ⌥ and drag vertically for column selection</span>
-    <button type="button" class="icon-btn" aria-label="Close prefix and suffix bar" title="Close prefix and suffix bar" onclick={() => (ide.prefixSuffixOpen = false)}><Icon name="x" size={12} /></button>
+    <button type="button" class="icon-btn" aria-label="Close prefix and suffix bar" title="Close prefix and suffix bar" onclick={() => closePrefixSuffix(true)}><Icon name="x" size={12} /></button>
   </div>
 {/if}
 
@@ -352,6 +390,7 @@
     block-size: 24px; background: var(--surface-2); border: 1px solid var(--accent-line); border-radius: var(--radius-s);
   }
   .ide-sel-accent { color: var(--accent-text); }
+  .ide-git-hunk-btn { color: var(--accent-text); }
   .ide-go-tag-enable {
     border-color: var(--warning);
     background: var(--warning-soft);
@@ -362,6 +401,11 @@
     border-color: var(--accent-line);
     background: var(--accent-soft);
     color: var(--accent-text);
+  }
+  .ide-notice-strip {
+    display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-2); flex-shrink: 0;
+    padding: var(--sp-1) 10px; background: var(--surface-2); border-block-end: 1px solid var(--border);
+    font-size: var(--fs-xs); min-inline-size: 0;
   }
   .ide-ps-bar {
     display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-2) 10px;

@@ -5,6 +5,7 @@
   import { vault } from './vault.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { announce } from '../../lib/announce.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Modal from '../../lib/components/Modal.svelte';
 
   let query = $state('');
@@ -61,21 +62,24 @@
   }
 
   function onKey(e: KeyboardEvent): void {
+    const visibleCount = Math.min(hits.length, 30);
     if (e.key === 'Escape') {
       e.preventDefault();
       close();
     } else if (e.key === 'ArrowDown') {
       e.preventDefault();
-      sel = Math.max(0, Math.min(sel + 1, hits.length - 1));
+      sel = Math.max(0, Math.min(sel + 1, visibleCount - 1));
+      if (typeof document !== 'undefined') document.getElementById(`vs-opt-${sel}`)?.scrollIntoView({ block: 'nearest' });
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       sel = Math.max(sel - 1, 0);
+      if (typeof document !== 'undefined') document.getElementById(`vs-opt-${sel}`)?.scrollIntoView({ block: 'nearest' });
     } else if (e.key === 'Enter') {
       e.preventDefault();
       if (e.shiftKey) createFromQuery(true);
       else if (loading || lookupError || resolvedQuery !== query) return;
-      else if (hits.length === 0) createFromQuery();
-      else pick(hits[sel]);
+      else if (visibleCount === 0) createFromQuery();
+      else pick(hits[Math.min(sel, visibleCount - 1)]);
     }
   }
 </script>
@@ -100,8 +104,7 @@
       {#if loading}
         <div>Searching notes…</div>
       {:else if lookupError}
-        <div class="lookup-error">Couldn’t search notes. {lookupError}</div>
-        <button class="btn small" onclick={() => void refresh(query)}>Retry</button>
+        <LoadState what="notes" errorTitle="Couldn’t search notes" variant="compact" error={lookupError} empty onretry={() => void refresh(query)} />
       {/if}
       <!-- Combobox + listbox: focus stays in the input, ↑/↓ move the active
            option (aria-activedescendant); options are clickable too. -->

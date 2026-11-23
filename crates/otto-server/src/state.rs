@@ -126,6 +126,8 @@ pub struct ServerCtx {
     /// Design arena: in-memory Blender render jobs (`design_blender.rs`). Not
     /// persisted — poll-only, like `vault_docs_runs`.
     pub design_jobs: crate::design_blender::JobRegistry,
+    /// Native 3D asset generation providers/jobs + built-in/extensible TTS (`otto-media`).
+    pub media: Arc<otto_media::MediaService>,
     /// Memory layer — workspace-scoped keyword (FTS) knowledge store.
     pub memory: std::sync::Arc<otto_memory::MemoryService>,
     /// Vault v3 — the file-backed docs home (markdown vaults, OKF).
@@ -166,6 +168,10 @@ pub struct ServerCtx {
     pub agent_runtime: otto_agent_protocol::AgentRuntime,
     /// Full multi-language IDE engine (`/ide/*`, `otto-ide`).
     pub ide: Arc<otto_ide::IdeEngine>,
+    /// Mobile Simulators & Emulators service (`/simulators/*`, `otto-simulators`).
+    pub simulators: Arc<otto_simulators::SimulatorsService>,
+    /// Local Containers service (`/containers/*`, `otto-containers`).
+    pub containers: Arc<otto_containers::ContainersService>,
     /// Parent of every user's Scratches folder (`<home>/<user id>`, see
     /// `routes::scratches`): `$OTTO_SCRATCHES_HOME`, else `~/Otto/Scratches`.
     pub scratches_home: std::path::PathBuf,

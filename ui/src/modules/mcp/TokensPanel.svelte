@@ -227,10 +227,9 @@
             {/each}
           </select>
           {#if usersError}
-            <span class="hint tok-note" id="mcp-token-owner-err">
-              Couldn’t load other users — the token can only be yours.
-              <button type="button" class="btn small ghost" onclick={() => void loadUsers()}>Retry</button>
-            </span>
+            <div id="mcp-token-owner-err">
+              <LoadState what="other users" variant="compact" error="Couldn’t load other users — the token can only be yours." empty onretry={() => void loadUsers()} />
+            </div>
           {/if}
         </div>
         <div class="field tok-field">
@@ -359,13 +358,6 @@
   .tok-field {
     flex: 1 1 160px;
     margin-block-end: 0;
-  }
-  .hint.tok-note {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 4px 8px;
-    color: var(--warning);
   }
   .chk {
     display: flex;

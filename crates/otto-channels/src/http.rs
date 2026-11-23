@@ -385,6 +385,7 @@ async fn delete_integration<S: ChannelsCtx>(
     s.roles()
         .check(&user.0, &ws_id, WorkspaceRole::Editor)
         .await?;
+    require_owner_for_bridge(&user.0)?;
     let channel = Channel::parse(&channel_str)
         .ok_or_else(|| Error::Invalid(format!("unknown channel '{channel_str}'")))?;
 
@@ -598,5 +599,141 @@ mod tests {
             workspace_listening_with(&enabled, "ws_c", Channel::Slack, "123:tg", secret),
             None
         );
+    }
+
+    #[derive(Clone)]
+    struct TestCtx {
+        integrations: IntegrationsRepo,
+        workspaces: WorkspacesRepo,
+        secrets: Arc<dyn SecretStore>,
+        roles: Arc<dyn RoleChecker>,
+    }
+
+    impl ChannelsCtx for TestCtx {
+        fn integrations(&self) -> &IntegrationsRepo {
+            &self.integrations
+        }
+        fn secrets(&self) -> &Arc<dyn SecretStore> {
+            &self.secrets
+        }
+        fn roles(&self) -> &Arc<dyn RoleChecker> {
+            &self.roles
+        }
+        fn workspaces(&self) -> &WorkspacesRepo {
+            &self.workspaces
+        }
+    }
+
+    struct AllowEditor;
+    impl RoleChecker for AllowEditor {
+        fn check<'a>(
+            &'a self,
+            _user: &'a otto_core::domain::User,
+            _workspace_id: &'a Id,
+            _min: WorkspaceRole,
+        ) -> otto_core::auth::BoxFuture<'a, otto_core::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[derive(Default)]
+    struct MemSecrets(std::sync::Mutex<HashMap<String, String>>);
+    impl SecretStore for MemSecrets {
+        fn put(&self, key: &str, value: &str) -> otto_core::Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), value.to_string());
+            Ok(())
+        }
+        fn get(&self, key: &str) -> otto_core::Result<Option<String>> {
+            Ok(self.0.lock().unwrap().get(key).cloned())
+        }
+        fn delete(&self, key: &str) -> otto_core::Result<()> {
+            self.0.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_integration_rejects_non_owner_editor_with_forbidden() {
+        let dir =
+            std::env::temp_dir().join(format!("otto-chan-http-delete-{}", otto_core::new_id()));
+        let pool = otto_state::open(&dir.join("state.db")).await.unwrap();
+        let users = otto_state::UsersRepo::new(pool.clone());
+        let owner = users.create("owner", "hash", "Owner", true).await.unwrap();
+        let editor = users
+            .create("editor", "hash", "Editor", false)
+            .await
+            .unwrap();
+        let workspaces = WorkspacesRepo::new(pool.clone());
+        let ws = workspaces
+            .create("ws", dir.to_str().unwrap(), &owner.id)
+            .await
+            .unwrap();
+        let integrations = IntegrationsRepo::new(pool.clone());
+        let mem = Arc::new(MemSecrets::default());
+        let bot_ref = format!("chan-bot-{}-slack", ws.id);
+        mem.put(&bot_ref, "xoxb-secret").unwrap();
+        integrations
+            .upsert(
+                &ws.id,
+                Channel::Slack,
+                true,
+                Some(bot_ref.clone()),
+                None,
+                "",
+                false,
+                "",
+                "C123",
+                "",
+            )
+            .await
+            .unwrap();
+
+        let ctx = TestCtx {
+            integrations: integrations.clone(),
+            workspaces,
+            secrets: mem.clone(),
+            roles: Arc::new(AllowEditor),
+        };
+
+        // Non-owner Editor must be rejected with Forbidden, leaving row + secret intact.
+        let res = delete_integration(
+            State(ctx.clone()),
+            Extension(AuthUser(editor)),
+            Path((ws.id.clone(), "slack".to_string())),
+        )
+        .await;
+        match res {
+            Err(ApiErr(Error::Forbidden(_))) => {}
+            Ok(code) => panic!("expected Forbidden, got {code}"),
+            Err(ApiErr(other)) => panic!("expected Forbidden, got {other:?}"),
+        }
+        assert!(integrations
+            .get(&ws.id, Channel::Slack)
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(mem.get(&bot_ref).unwrap().as_deref(), Some("xoxb-secret"));
+
+        // Owner is allowed and removes both the row and keychain secret.
+        let status = delete_integration(
+            State(ctx),
+            Extension(AuthUser(owner)),
+            Path((ws.id.clone(), "slack".to_string())),
+        )
+        .await
+        .map_err(|e| e.0)
+        .unwrap();
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(integrations
+            .get(&ws.id, Channel::Slack)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(mem.get(&bot_ref).unwrap(), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

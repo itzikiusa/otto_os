@@ -33,6 +33,12 @@ use crate::session_turn::SessionManager;
 
 /// Live-preview poll cadence while the agent edits.
 pub const LIVE_POLL: Duration = Duration::from_millis(900);
+/// Bounded grace window given to a running turn to observe `cancel` and unwind
+/// cleanly after Stop is requested, before force-killing its session.
+#[cfg(not(test))]
+const STOP_GRACE: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const STOP_GRACE: Duration = Duration::from_millis(150);
 
 /// Runs one agent turn for a job. The production runner is the host's
 /// [`SessionManager`] (via [`crate::session_turn::run_agent_turn`], which
@@ -45,7 +51,18 @@ pub trait TurnRunner: Send + Sync {
         turn: AgentTurn<'_>,
         on_ready: F,
     ) -> impl Future<Output = Result<(String, Id)>> + Send;
-    /// Kill a session whose turn overran [`AssistTarget::turn_cap`].
+    /// Run `turn` with an owner cancellation flag (`CancelSignal::share_flag`).
+    /// Defaults to [`Self::run_turn`] for test fakes that do not inspect it.
+    fn run_turn_cancellable<F: FnOnce(&Id) + Send>(
+        &self,
+        turn: AgentTurn<'_>,
+        _cancel: Arc<std::sync::atomic::AtomicBool>,
+        on_ready: F,
+    ) -> impl Future<Output = Result<(String, Id)>> + Send {
+        self.run_turn(turn, on_ready)
+    }
+    /// Kill a session whose turn overran [`AssistTarget::turn_cap`] or failed
+    /// to unwind promptly after Stop.
     fn kill_session(&self, sid: &Id) -> impl Future<Output = ()> + Send;
 }
 
@@ -56,6 +73,15 @@ impl TurnRunner for Arc<SessionManager> {
         on_ready: F,
     ) -> impl Future<Output = Result<(String, Id)>> + Send {
         crate::session_turn::run_agent_turn(self, turn, on_ready)
+    }
+
+    fn run_turn_cancellable<F: FnOnce(&Id) + Send>(
+        &self,
+        turn: AgentTurn<'_>,
+        cancel: Arc<std::sync::atomic::AtomicBool>,
+        on_ready: F,
+    ) -> impl Future<Output = Result<(String, Id)>> + Send {
+        crate::session_turn::run_agent_turn_cancellable(self, turn, Some(cancel), on_ready)
     }
 
     async fn kill_session(&self, sid: &Id) {
@@ -242,7 +268,8 @@ pub async fn run_assist_job<R: TurnRunner, T: AssistTarget>(
         *started.lock().unwrap_or_else(|e| e.into_inner()) = Some(sid.clone());
         target.report(AssistState::Running { session: sid });
     };
-    let turn = runner.run_turn(target.turn(&prompt), on_ready);
+    let turn =
+        runner.run_turn_cancellable(target.turn(&prompt), claim.signal().share_flag(), on_ready);
     let cap = target.turn_cap();
     let capped = async {
         match cap {
@@ -253,12 +280,34 @@ pub async fn run_assist_job<R: TurnRunner, T: AssistTarget>(
     tokio::pin!(capped);
     // The poll lives inside this future: it ends when the turn settles (or the
     // whole job is dropped), and stops early when the owner stops the job.
+    // On stop, give the turn a short bounded grace to observe `cancel` and exit
+    // cleanly; if it is still stuck, drop the turn and kill its session so the
+    // document's `AssistClaim` is never locked up to `turn_cap`.
+    let mut stop_killed = false;
     let result = tokio::select! {
-        r = &mut capped => r,
-        () = live_poll(target, claim.signal()) => capped.await,
+        r = &mut capped => Some(r),
+        () = live_poll(target, claim.signal()) => {
+            match tokio::time::timeout(STOP_GRACE, &mut capped).await {
+                Ok(r) => Some(r),
+                Err(_) => {
+                    stop_killed = true;
+                    None
+                }
+            }
+        }
     };
     let known = started.lock().unwrap_or_else(|e| e.into_inner()).take();
-    let result = match result {
+    if stop_killed {
+        if let Some(sid) = &known {
+            runner.kill_session(sid).await;
+        }
+        if let Some(sid) = &known {
+            target.remember(sid, false).await;
+        }
+        target.report(AssistState::Stopped);
+        return AssistOutcome::Stopped { session: known };
+    }
+    let result = match result.expect("non-stopped path always has a turn result") {
         Ok(turn) => turn.map_err(|e| (Stage::Turn, e)),
         Err(cap) => {
             if let Some(sid) = &known {

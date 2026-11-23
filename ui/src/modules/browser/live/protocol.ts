@@ -5,6 +5,7 @@
 // frames, cursor sanitising, driver/closed copy) so they can be unit-tested
 // in node — type-only imports keep it import-free at runtime.
 
+import { BINARY_FRAME_VERSION, decodeBinaryFrame } from '../../../lib/api/binaryFrame.ts';
 import type {
   BrowserLiveClientMsg,
   BrowserLiveController,
@@ -13,13 +14,31 @@ import type {
   BrowserLiveSession,
 } from '../../../lib/api/types';
 
-export type ClientMsg = BrowserLiveClientMsg;
+export type SetGuardClientMsg = { type: 'set_guard'; guard_spa_mutations: boolean };
+export type ClientMsg = BrowserLiveClientMsg | SetGuardClientMsg;
 export type ServerMsg = BrowserLiveServerMsg;
 export type FrameHeader = BrowserLiveFrameHeader;
 export type PointerButton = 'left' | 'middle' | 'right' | 'back' | 'forward' | 'none';
 
+export interface ApprovalWireMeta {
+  resourceType: string | null;
+  bodyPreview: string | null;
+}
+
+/** Extract optional SPA mutation metadata (`resource_type`, `body_preview`) from an `approval` WS frame. */
+export function approvalWireMeta(msg: Extract<ServerMsg, { type: 'approval' }>): ApprovalWireMeta {
+  const ext = msg as Extract<ServerMsg, { type: 'approval' }> & {
+    resource_type?: unknown;
+    body_preview?: unknown;
+  };
+  return {
+    resourceType: typeof ext.resource_type === 'string' && ext.resource_type.trim() ? ext.resource_type.trim() : null,
+    bodyPreview: typeof ext.body_preview === 'string' && ext.body_preview.trim() ? ext.body_preview.trim() : null,
+  };
+}
+
 /** Binary frame format version this client understands. */
-export const FRAME_VERSION = 1;
+export const FRAME_VERSION = BINARY_FRAME_VERSION;
 
 /** What the live view reports up to the Browser page's toolbar. */
 export interface LiveViewState {
@@ -52,18 +71,10 @@ export function parseServer(raw: string): ServerMsg | null {
  * A frame with an unknown version or a malformed header is dropped.
  */
 export function parseBinaryFrame(buf: ArrayBuffer): { header: FrameHeader; bytes: Uint8Array } | null {
-  if (buf.byteLength < 5) return null;
-  const view = new DataView(buf);
-  if (view.getUint8(0) !== FRAME_VERSION) return null;
-  const len = view.getUint32(1);
-  if (len <= 0 || 5 + len > buf.byteLength) return null;
-  try {
-    const header = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 5, len))) as FrameHeader;
-    if (typeof header.seq !== 'number' || !(header.device_width > 0) || !(header.device_height > 0)) return null;
-    return { header, bytes: new Uint8Array(buf, 5 + len) };
-  } catch {
-    return null;
-  }
+  return decodeBinaryFrame<FrameHeader>(
+    buf,
+    (h) => typeof h.seq === 'number' && h.device_width > 0 && h.device_height > 0,
+  );
 }
 
 /** DOM `MouseEvent.button` → wire button. */

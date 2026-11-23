@@ -35,7 +35,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
-  import { draftInFlight, readComposer, startDraft, takePendingDraft, watchComposer, writeComposer } from './commitComposer';
+  import { cancelDraft, draftInFlight, readComposer, startDraft, takePendingDraft, watchComposer, writeComposer } from './commitComposer';
 
   interface Props {
     repoId: string;
@@ -85,7 +85,7 @@
   async function takeSide(path: string, side: 'ours' | 'theirs'): Promise<void> {
     const ok = await confirmer.ask(
       `Resolve ${path} by keeping ${side === 'ours' ? 'YOUR version (ours)' : 'THEIR version (theirs)'}? If that side deleted the file, it will be deleted. The other side's changes are discarded.`,
-      { title: `Take ${side}`, confirmLabel: `Take ${side}` },
+      { title: `Take ${side}`, confirmLabel: `Take ${side}`, danger: true },
     );
     if (!ok) return;
     try {
@@ -140,7 +140,8 @@
    *  confirmer (its ask() supersedes — cancels — whatever dialog is open) or
    *  toast; the commitComposer parking slot delivers it to the next panel. */
   let alive = true;
-  onDestroy(() => (alive = false));
+  let draftTick: ReturnType<typeof setInterval> | null = null;
+  onDestroy(() => { alive = false; if (draftTick !== null) { clearInterval(draftTick); draftTick = null; } });
   $effect(() => {
     const repo = repoId;
     const unwatch = untrack(() => {
@@ -728,33 +729,40 @@
     if (canCommit) void commit();
   }
 
+  let draftGen = 0;
   async function draftMessage(): Promise<void> {
     if (drafting || committing) return;
     const repo = repoId;
-    const p = startDraft(repo, () =>
-      api.post<DraftCommitMessageResp>(`/repos/${repo}/draft-commit-message`, {}),
-    );
+    const p = startDraft(repo, (signal) => api.post<DraftCommitMessageResp>(`/repos/${repo}/draft-commit-message`, {}, signal));
     await followDraft(p, repo);
   }
-
-  /** Watch a draft request (started here, or before a remount) to the end. */
+  function stopDraft(): void {
+    const sid = liveDraftId;
+    draftGen++;
+    cancelDraft(repoId);
+    if (draftTick !== null) { clearInterval(draftTick); draftTick = null; }
+    drafting = false; showDraftTerm = false;
+    if (sid) void api.post(`/sessions/${sid}/kill`, {}).catch(() => {});
+    toasts.info('Draft stopped');
+  }
   async function followDraft(p: Promise<DraftCommitMessageResp>, repo: string): Promise<void> {
-    drafting = true;
-    draftSessionId = null;
-    draftElapsed = 0;
-    // Slight backdate so a session created in the same second still matches.
+    const gen = typeof draftGen === 'number' ? ++draftGen : 0;
+    const current = () => typeof draftGen !== 'number' || gen === draftGen;
+    drafting = true; draftSessionId = null; draftElapsed = 0;
     draftStartedAt = new Date(Date.now() - 2000).toISOString();
     const tick = setInterval(() => (draftElapsed += 1), 1000);
+    if (typeof draftTick !== 'undefined') { if (draftTick !== null) clearInterval(draftTick); draftTick = tick; }
     try {
       const d = await p;
-      // Unmounted, or switched repos meanwhile: the reply was parked.
-      if (!alive || repo !== repoId) return;
+      if (!alive || repo !== repoId || !current()) return;
       await applyDraft(d);
     } catch (e) {
-      if (alive && repo === repoId) toastError('Couldn’t draft the message', e);
+      const aborted = typeof isAbortError === 'function' && isAbortError(e);
+      if (alive && repo === repoId && current() && !aborted) toastError('Couldn’t draft the message', e);
     } finally {
       clearInterval(tick);
-      drafting = false;
+      if (typeof draftTick !== 'undefined' && draftTick === tick) draftTick = null;
+      if (current()) drafting = false;
     }
   }
 
@@ -845,10 +853,7 @@
 
 {#snippet signError()}
   {#if signCfgError}
-    <span class="sign-err">
-      Couldn’t read signing settings ·
-      <button class="btn small ghost" onclick={() => loadSignCfg(repoId)} disabled={signCfgLoading}>{signCfgLoading ? 'Retrying…' : 'Retry'}</button>
-    </span>
+    <LoadState variant="compact" what="signing settings" errorTitle="Couldn’t read signing settings" error="Check the repository’s git config." loading={signCfgLoading} empty onretry={() => loadSignCfg(repoId)} />
   {/if}
 {/snippet}
 
@@ -974,7 +979,7 @@
         bind:subject bind:body bind:amend bind:signOn bind:showDraftTerm
         {amendSubject} {amendPublished} {drafting} {draftElapsed} {draftable} {draftedAt} {liveDraftId}
         {committing} {canCommit} {commitHint} stagedCount={staged.length} {signCfg} {signError}
-        onkey={commitKey} ondraft={draftMessage} oncommit={commit}
+        onkey={commitKey} ondraft={draftMessage} onstopdraft={stopDraft} oncommit={commit}
       />
     </div>
   </div>
@@ -1210,37 +1215,11 @@
     font-size: var(--fs-m);
     unicode-bidi: isolate;
   }
-  .wp-diff-path > strong {
-    font-weight: 600;
-    flex-shrink: 0;
-  }
-  .wp-diff-dir {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
-  .wp-diff-body {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-  }
+  .wp-diff-path > strong { font-weight: 600; flex-shrink: 0; }
+  .wp-diff-dir { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-s); color: var(--text-dim); }
+  .wp-diff-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
   .wp-diff-skel { padding: 10px; }
-  .wp-target > button {
-    height: 20px;
-    padding: 0 6px;
-    font-size: var(--fs-xs);
-  }
-
-  .sign-err {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
+  .wp-target > button { height: 20px; padding: 0 6px; font-size: var(--fs-xs); }
   .wp-untracked-cap {
     display: flex;
     align-items: flex-start;

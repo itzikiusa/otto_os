@@ -74,7 +74,6 @@
   }
 
   const subtitlePath = $derived(ide.hasTarget ? shortenHomePath(ide.target.root) : '');
-  const extraRootCount = $derived(Math.max(0, ide.projectRoots.length - 1));
 
   function openProjectContextMenu(e: MouseEvent, proj: IdeNamedProject): void {
     e.preventDefault();
@@ -109,6 +108,7 @@
         action: () =>
           void (async () => {
             await ide.activateProject(proj.id);
+            if (ide.activeProjectId !== proj.id) return;
             ide.bulkRepoPickerMode = 'attach';
           })(),
       },
@@ -118,6 +118,7 @@
         action: () =>
           void (async () => {
             await ide.activateProject(proj.id);
+            if (ide.activeProjectId !== proj.id) return;
             ide.openSettings('project.modules');
           })(),
       },
@@ -209,8 +210,6 @@
       <span class="ws-name" dir="ltr">{primaryLabel}</span>
       {#if ide.projectRoots.length > 1}
         <Badge tone="accent" variant="outline" label={`${ide.projectRoots.length} repos`} />
-      {:else if extraRootCount > 0}
-        <Badge tone="accent" variant="outline" label={`+${extraRootCount}`} />
       {:else if subtitlePath}
         <span class="ws-path" dir="ltr">{subtitlePath}</span>
       {/if}

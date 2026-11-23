@@ -138,13 +138,21 @@ fn seatbelt_agent_profile_confines_otto_data_dir() {
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let data = root.join("Otto Data");
     let cwd = root.join("project");
-    for d in [data.join("bin"), data.join("workflow-context"), cwd.clone()] {
+    for d in [
+        data.join("bin"),
+        data.join("backups"),
+        data.join("workflow-context"),
+        cwd.clone(),
+    ] {
         std::fs::create_dir_all(d).unwrap();
     }
     std::fs::write(data.join("bin").join("ottod"), "bin").unwrap();
     std::fs::write(data.join("otto.db"), "db").unwrap();
     std::fs::write(data.join("otto.db.before-x.bak"), "bak").unwrap();
+    std::fs::write(data.join("backups").join("otto.db.pre-220"), "pre-mig-db").unwrap();
     std::fs::write(data.join("secrets.json"), "s").unwrap();
+    std::fs::write(data.join("secrets.enc"), "enc").unwrap();
+    std::fs::write(data.join(".secrets.enc.tmp.123"), "tmp-enc").unwrap();
     let home = std::env::var("HOME").unwrap_or_default();
     let pol = for_agent(&cwd, Path::new(&home), &data, &[], NetworkPolicy::Full);
 
@@ -165,9 +173,27 @@ fn seatbelt_agent_profile_confines_otto_data_dir() {
     assert!(!ok, "agent read secrets.json");
     let (ok, _) = run_sandboxed(
         &pol,
+        &format!("cat {}", shell_quote(&data.join("secrets.enc"))),
+    );
+    assert!(!ok, "agent read secrets.enc");
+    let (ok, _) = run_sandboxed(
+        &pol,
+        &format!("cat {}", shell_quote(&data.join(".secrets.enc.tmp.123"))),
+    );
+    assert!(!ok, "agent read .secrets.enc.tmp");
+    let (ok, _) = run_sandboxed(
+        &pol,
         &format!("cat {}", shell_quote(&data.join("otto.db.before-x.bak"))),
     );
     assert!(!ok, "agent read a state DB backup");
+    let (ok, _) = run_sandboxed(
+        &pol,
+        &format!(
+            "cat {}",
+            shell_quote(&data.join("backups").join("otto.db.pre-220"))
+        ),
+    );
+    assert!(!ok, "agent read a pre-migration backup in backups/");
     let (ok, err) = run_sandboxed(
         &pol,
         &format!(

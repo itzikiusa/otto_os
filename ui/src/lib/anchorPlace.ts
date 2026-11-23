@@ -26,7 +26,7 @@ export function placeAnchored(
   const above = preferAbove
     ? roomAbove >= Math.min(h, 360) || roomAbove > roomBelow
     : !(roomBelow >= Math.min(h, 360) || roomBelow >= roomAbove);
-  const maxH = Math.max(160, above ? roomAbove : roomBelow);
+  const maxH = Math.min(Math.max(160, above ? roomAbove : roomBelow), Math.max(80, vh - 2 * margin));
   const height = Math.min(h, maxH);
   let top = above ? a.top - gap - height : a.bottom + gap;
   top = Math.max(margin, Math.min(top, vh - margin - height));

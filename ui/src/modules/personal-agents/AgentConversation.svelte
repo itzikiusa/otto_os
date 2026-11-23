@@ -11,6 +11,7 @@
   import RelTime from '../../lib/components/RelTime.svelte';
   import { leadLine } from '../../lib/plainText';
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import AutomateTasksTabs from '../../lib/components/AutomateTasksTabs.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { api } from '../../lib/api/client';
   import { personalAgentsApi } from '../../lib/api/personalAgents';
@@ -22,6 +23,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import type { PersonalAgent, PersonalAgentRun } from '../../lib/api/types';
   import AgentAvatar from './AgentAvatar.svelte';
+  import AgentCapabilityStrip from './AgentCapabilityStrip.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { now } from '../../lib/stores/now.svelte';
@@ -181,6 +183,9 @@
         <span class="ellipsis" dir="auto">{agent.name}</span><Icon name="chevronDown" size={12} />
       </button>
     {/snippet}
+    {#snippet tabs()}
+      <AutomateTasksTabs active="agents" />
+    {/snippet}
     {#snippet actions()}
       <button type="button" class="btn small ghost" data-keep data-testid="pa-panel-toggle" onclick={() => router.go(`personal-agents/${agent.id}/routines`)}>Routines</button>
       <button type="button" class="btn small ghost" data-keep onclick={() => router.go(`personal-agents/${agent.id}/history`)}>History</button>
@@ -188,6 +193,8 @@
       <button type="button" class="icon-btn" data-keep aria-label="More for {agent.name}" title="More" onclick={more}><Icon name="more" size={14} /></button>
     {/snippet}
   </PageHeader>
+
+  <AgentCapabilityStrip {agent} autonomy={personalAgents.autonomyById[agent.id]} schedules={personalAgents.schedulesByAgent[agent.id] ?? []} />
 
   {#if !agent.enabled}
     <p class="pa-paused" role="note" data-testid="pa-paused-banner">

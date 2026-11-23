@@ -198,8 +198,20 @@
     color: var(--text);
   }
   .assistant.open {
-    /* height is set inline from ui.browserAgentH (drag-resizable) */
-    min-height: 160px;
+    /* height is set inline from ui.browserAgentH (drag-resizable), capped so
+       short landscape / mobile viewports never let the dock swallow the page. */
+    min-height: 140px;
+    max-height: 48vh;
+  }
+  @media (max-height: 500px) {
+    .assistant.open {
+      max-height: 40vh;
+      min-height: 110px;
+    }
+    .head {
+      min-height: 32px;
+      padding: 4px 10px;
+    }
   }
   .resize-handle {
     position: absolute;

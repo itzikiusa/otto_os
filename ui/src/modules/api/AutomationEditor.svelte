@@ -6,6 +6,7 @@
   // working copy until Save; Run saves first, then runs in the daemon and
   // polls the saved report.
   import { toastError } from '../../lib/toastError';
+  import { loadErrorText } from '../../lib/loadError';
   import { router } from '../../lib/router.svelte';
   import { editableAssertion, editableExtract, editableSteps, movedArrow, rowKey, savedSteps, type EditableStep } from './automationInput';
   import { KIND_LABEL, NO_VALUE_OPS, OP_LABEL, RUN_STATUS } from './automationLabels';
@@ -20,6 +21,8 @@
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { confirmProd } from '../../lib/confirmProd';
+  import { isProdApiEnv } from './prodGuard';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { rel } from '../../lib/stores/now.svelte';
@@ -188,8 +191,22 @@
       if (datasetText.trim()) dataset = JSON.parse(datasetText);
       if (!Array.isArray(dataset) || dataset.some((r) => !r || Array.isArray(r) || typeof r !== 'object')) throw new Error('Use a JSON array of objects.');
     } catch (e) {
-      datasetError = `Dataset rows aren’t valid: ${e instanceof Error ? e.message : String(e)}`;
+      datasetError = `Dataset rows aren’t valid: ${loadErrorText(e)}`;
       return;
+    }
+    const targetEnv = environmentId
+      ? (apiClient.environments.find((e) => e.id === environmentId) ?? null)
+      : apiClient.activeEnv;
+    if (isProdApiEnv(targetEnv?.name)) {
+      const ok = await confirmProd({
+        env: 'prod',
+        verb: 'Run automation',
+        title: 'Run automation on production?',
+        where: `Environment “${targetEnv!.name}”`,
+        what: `Automation “${automation.name}” (${plural(steps.length, 'step')}${dataset.length ? ` × ${plural(dataset.length, 'dataset row')}` : ''})`,
+        danger: true,
+      });
+      if (!ok || automation.id !== automationId) return;
     }
     historyRun = null;
     await apiClient.runAutomation(automation.id, { environment_id: environmentId || null, stop_on_failure: stopOnFailure, dataset });

@@ -12,6 +12,7 @@
 
 import { itemDef, sectionDef } from './catalog';
 import { validateSite } from './validate';
+import { loadErrorText } from '../../../../lib/loadError.ts';
 import type { SiteBlock, SiteDoc, SitePage, SiteProps, SiteResponsive, SiteSection, SiteStyle, SiteIssue } from './types';
 
 export function clone<T>(v: T): T {
@@ -34,7 +35,7 @@ export function parseSite(source: string | null): ParsedSite {
   try {
     raw = JSON.parse(source);
   } catch (e) {
-    return { doc: null, issues: [{ path: '', message: `not valid JSON: ${e instanceof Error ? e.message : String(e)}` }] };
+    return { doc: null, issues: [{ path: '', message: `not valid JSON: ${loadErrorText(e)}` }] };
   }
   const issues = validateSite(raw);
   if (issues.length) return { doc: null, issues };

@@ -59,6 +59,28 @@ impl AutomationCtx for ServerCtx {
         &self.goal_loops
     }
 
+    async fn goal_loop_spent_usd(&self, ws_id: &Id, loop_id: &Id) -> Option<f64> {
+        let scope = otto_state::SessionScope {
+            workspace_id: ws_id.clone(),
+            owner: None,
+        };
+        let filter = otto_state::SessionListFilter {
+            source: Some("goal_loop".into()),
+            ..Default::default()
+        };
+        let sessions = self.manager.list_filtered(&[scope], &filter).await.ok()?;
+        let ids: Vec<String> = sessions
+            .into_iter()
+            .filter(|s| s.meta.get("loop_id").and_then(|v| v.as_str()) == Some(loop_id.as_str()))
+            .map(|s| s.id)
+            .collect();
+        if ids.is_empty() {
+            return Some(0.0);
+        }
+        let totals = self.usage.session_totals_for_ids(&ids).await?;
+        Some(totals.into_iter().map(|t| t.cost_usd).sum())
+    }
+
     async fn resolve_provider(
         &self,
         ws: Option<&Workspace>,

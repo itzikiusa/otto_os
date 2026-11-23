@@ -369,6 +369,9 @@ impl ClusterMetricState {
     }
 }
 
+/// Maximum Prometheus exposition payload buffered in daemon RAM (8 MiB).
+const MAX_METRICS_BODY_BYTES: usize = 8 * 1024 * 1024;
+
 /// Scrape a Prometheus exposition endpoint, returning the raw text. When
 /// `socks_proxy` is set the request rides an SSH SOCKS tunnel (the metrics
 /// endpoint is private, behind the user's bastion).
@@ -376,10 +379,14 @@ pub async fn scrape(url: &str, skip_tls_verify: bool, socks_proxy: Option<&str>)
     // SSRF guard (audit S1): the metrics URL is a user-supplied cluster-profile
     // field. Resolve + classify the host before connecting, and re-validate every
     // redirect hop, so it can't reach loopback / RFC1918 / link-local
-    // (169.254.169.254 cloud-metadata) / CGNAT addresses the loopback-bound
-    // daemon could otherwise be steered into. Skipped when tunnelled: the
-    // private target is the intent and the bastion creds are the authority.
-    if socks_proxy.is_none() {
+    // (169.254.169.254 cloud-metadata) / CGNAT addresses. When tunnelled,
+    // private targets behind the bastion are intentional, but cloud metadata
+    // endpoints (169.254.169.254 / fd00:ec2::254) are still refused up front
+    // and on redirect hops.
+    if socks_proxy.is_some() {
+        otto_netguard::precheck_url_tunnelled(url)
+            .map_err(|m| Error::Forbidden(format!("metrics endpoint blocked: {m}")))?;
+    } else {
         otto_netguard::check_url(url)
             .await
             .map_err(|m| Error::Forbidden(format!("metrics endpoint blocked: {m}")))?;
@@ -396,9 +403,31 @@ pub async fn scrape(url: &str, skip_tls_verify: bool, socks_proxy: Option<&str>)
             resp.status()
         )));
     }
-    resp.text()
+    read_capped_body(resp, MAX_METRICS_BODY_BYTES).await
+}
+
+async fn read_capped_body(mut resp: reqwest::Response, max_bytes: usize) -> Result<String> {
+    if let Some(len) = resp.content_length() {
+        if len as usize > max_bytes {
+            return Err(Error::Upstream(format!(
+                "metrics endpoint response exceeded {max_bytes} bytes"
+            )));
+        }
+    }
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
         .await
-        .map_err(|e| Error::Upstream(format!("metrics endpoint: {e}")))
+        .map_err(|e| Error::Upstream(format!("metrics endpoint: {e}")))?
+    {
+        if buf.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(Error::Upstream(format!(
+                "metrics endpoint response exceeded {max_bytes} bytes"
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// Built scrape clients keyed by `(skip_tls_verify, socks_proxy)`. The Overview
@@ -429,9 +458,9 @@ fn scrape_client(skip_tls_verify: bool, socks_proxy: Option<&str>) -> Result<req
     }
     // Direct scrapes also get the guarded resolver (the address dialled is the
     // one vetted above — no DNS rebinding); tunnelled ones resolve at the far
-    // end and keep the plain re-validating redirect policy.
+    // end and refuse cloud-metadata redirects via `tunnelled_redirect_policy`.
     let base_builder = if socks_proxy.is_some() {
-        reqwest::Client::builder().redirect(otto_netguard::redirect_policy())
+        reqwest::Client::builder().redirect(otto_netguard::tunnelled_redirect_policy())
     } else {
         otto_netguard::guarded_client_builder()
     };
@@ -563,5 +592,43 @@ mod tests {
         assert!(!m.prometheus_available);
         let rate = m.messages_per_sec.unwrap();
         assert!(rate > 99.0 && rate < 101.0);
+    }
+
+    #[tokio::test]
+    async fn tunnelled_scrape_blocks_cloud_metadata() {
+        let err = scrape(
+            "http://169.254.169.254/latest/meta-data/",
+            false,
+            Some("socks5h://127.0.0.1:1080"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Forbidden(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn read_capped_body_rejects_oversized_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await;
+            let body = "a".repeat(256);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        });
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/metrics"))
+            .send()
+            .await
+            .unwrap();
+        let err = read_capped_body(resp, 64).await.unwrap_err();
+        assert!(matches!(err, Error::Upstream(ref m) if m.contains("exceeded 64 bytes")));
     }
 }

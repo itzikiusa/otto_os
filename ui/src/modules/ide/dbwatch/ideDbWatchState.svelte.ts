@@ -1,6 +1,8 @@
 // Reactive state controller for the IDE Live DB Watch & Component-Test Watcher panel.
 
 import { api } from '../../../lib/api/client';
+import { loadErrorText } from '../../../lib/loadError';
+import { onIdeTargetReset } from '../store/ideStateSlices.svelte';
 import type {
   IdeDbEngine,
   IdeDbWatchDetectReq,
@@ -45,8 +47,32 @@ class IdeDbWatchController {
   liveWatch = $state(false);
   viewMode = $state<'changes' | 'rows'>('changes');
 
+  private gen = 0;
   private detectSeq = 0;
   private snapshotSeq = 0;
+
+  constructor() {
+    onIdeTargetReset(() => this.reset());
+  }
+
+  reset(): void {
+    this.gen += 1;
+    this.detectSeq += 1;
+    this.snapshotSeq += 1;
+    this.detectedObjects = [];
+    this.ephemeralTargets = [];
+    this.detectLoading = false;
+    this.detectError = null;
+    this.selectedTargetKey = '';
+    this.selectedDatabase = '';
+    this.selectedObjectName = '';
+    this.customQuery = '';
+    this.baselineSnapshot = null;
+    this.latestResp = null;
+    this.snapshotLoading = false;
+    this.snapshotError = null;
+    this.liveWatch = false;
+  }
 
   get allTargets(): IdeDbWatchTarget[] {
     return [...this.ephemeralTargets, ...this.savedConnections];
@@ -118,6 +144,7 @@ class IdeDbWatchController {
     additionalRoots?: string[];
   }): Promise<void> {
     if (!opts.root) return;
+    const gen = this.gen;
     const seq = ++this.detectSeq;
     this.detectLoading = true;
     this.detectError = null;
@@ -129,7 +156,7 @@ class IdeDbWatchController {
         additional_roots: opts.additionalRoots ?? [],
       };
       const resp = await api.post<IdeDbWatchDetectResp>('/ide/db-watch/detect', req);
-      if (seq !== this.detectSeq) return;
+      if (gen !== this.gen || seq !== this.detectSeq) return;
       this.detectedObjects = resp.detected_objects ?? [];
       this.savedConnections = resp.saved_connections ?? [];
       this.ephemeralTargets = resp.ephemeral_targets ?? [];
@@ -153,10 +180,10 @@ class IdeDbWatchController {
         }
       }
     } catch (e) {
-      if (seq !== this.detectSeq) return;
-      this.detectError = e instanceof Error ? e.message : 'Couldn’t scan database targets.';
+      if (gen !== this.gen || seq !== this.detectSeq) return;
+      this.detectError = loadErrorText(e);
     } finally {
-      if (seq === this.detectSeq) this.detectLoading = false;
+      if (gen === this.gen && seq === this.detectSeq) this.detectLoading = false;
     }
   }
 
@@ -166,6 +193,7 @@ class IdeDbWatchController {
     const custom = this.customQuery.trim();
     if (!root || !target || (!objectName && !custom)) return false;
 
+    const gen = this.gen;
     const seq = ++this.snapshotSeq;
     this.snapshotLoading = true;
     this.snapshotError = null;
@@ -183,18 +211,18 @@ class IdeDbWatchController {
         previous: mode === 'diff' ? this.baselineSnapshot : null,
       };
       const resp = await api.post<IdeDbWatchSnapshotResp>('/ide/db-watch/snapshot', req);
-      if (seq !== this.snapshotSeq) return false;
+      if (gen !== this.gen || seq !== this.snapshotSeq) return false;
       this.latestResp = resp;
       if (mode === 'baseline' || !this.baselineSnapshot) {
         this.baselineSnapshot = resp.snapshot;
       }
       return true;
     } catch (e) {
-      if (seq !== this.snapshotSeq) return false;
-      this.snapshotError = e instanceof Error ? e.message : 'Couldn’t query database target.';
+      if (gen !== this.gen || seq !== this.snapshotSeq) return false;
+      this.snapshotError = loadErrorText(e);
       return false;
     } finally {
-      if (seq === this.snapshotSeq) this.snapshotLoading = false;
+      if (gen === this.gen && seq === this.snapshotSeq) this.snapshotLoading = false;
     }
   }
 

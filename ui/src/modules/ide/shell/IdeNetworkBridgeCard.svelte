@@ -152,11 +152,9 @@
             ide.target.workspace_id,
             ws.currentId,
             ...ws.workspaces.map((w) => w.id),
-            ws.scratch?.id ?? SCRATCH_WORKSPACE_ID,
-          ].filter((id): id is string => Boolean(id)),
+          ].filter((id): id is string => Boolean(id) && id !== SCRATCH_WORKSPACE_ID),
         ),
       );
-      if (scopes.length === 0) scopes.push(SCRATCH_WORKSPACE_ID);
       const results = await Promise.allSettled(
         scopes.map((id) => api.get<Connection[]>(`/workspaces/${encodeURIComponent(id)}/connections`)),
       );

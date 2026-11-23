@@ -163,6 +163,7 @@ export function renderKind(format: string): RenderKind {
       return 'canvas';
     case 'glb':
     case 'gltf':
+    case 'obj':
       return 'model';
     case 'otto-brand':
       return 'brand';
@@ -196,6 +197,7 @@ export function formatLabel(format: string): string {
     pdf: 'PDF',
     glb: 'GLB model',
     gltf: 'glTF model',
+    obj: 'OBJ model',
   };
   return labels[format] ?? format;
 }
@@ -215,6 +217,7 @@ export function formatForFile(name: string, mime = ''): string | null {
     pdf: 'pdf',
     glb: 'glb',
     gltf: 'gltf',
+    obj: 'obj',
     mmd: 'mermaid',
     mermaid: 'mermaid',
     d2: 'd2',
@@ -693,20 +696,13 @@ export type DesignRoute =
   | { view: 'studio'; id: DesignStudio }
   | { view: 'story'; id: string }
   | { view: 'brand' }
+  | { view: 'tts' }
   | { view: 'learned'; tab: LearnedTab };
 
-/** "Team design rules": Proposed (`pending`) and Active (`rules`) are its two
- *  tabs; Memory, Signals and Settings open from its ⋯ menu. */
 export type LearnedTab = 'pending' | 'rules' | 'memory' | 'signals' | 'settings';
 const LEARNED_TABS: LearnedTab[] = ['pending', 'rules', 'memory', 'signals', 'settings'];
-/** The tab names the page shows, accepted in a URL too. */
 const LEARNED_ALIASES: Record<string, LearnedTab> = { proposed: 'pending', active: 'rules' };
 
-/** `router.parts` (with parts[0] === 'design') → the Design Hall view. The
- *  retired Spatial view (`#/design/spatial`, `#/design/studio/spatial`) lands
- *  on the lobby. A `?…` query (`#/design/a/<id>?from=story/<sid>` — the router
- *  splits it on its `/`s too) is cut off the path and handed back on an
- *  artifact route as `query` (`from=story/<sid>`). */
 export function parseDesignRoute(parts: string[]): DesignRoute {
   const q = parts.findIndex((p) => p.includes('?'));
   const path = q < 0 ? parts : [...parts.slice(0, q), parts[q].slice(0, parts[q].indexOf('?'))];
@@ -726,6 +722,8 @@ export function parseDesignRoute(parts: string[]): DesignRoute {
     }
     case 'brand':
       return { view: 'brand' };
+    case 'tts':
+      return { view: 'tts' };
     case 'learned': {
       const t = LEARNED_ALIASES[b] ?? b;
       return { view: 'learned', tab: LEARNED_TABS.includes(t as LearnedTab) ? (t as LearnedTab) : 'pending' };
