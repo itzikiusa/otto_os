@@ -79,3 +79,12 @@ export function mcpSummary(rows: readonly McpServerRow[]): string {
   const n = `${rows.length} MCP ${rows.length === 1 ? 'server' : 'servers'}`;
   return off > 0 ? `${n} · ${off} ${off === 1 ? 'needs' : 'need'} attention` : n;
 }
+
+/** The workspace's enabled servers Otto hands the CLI differ from what this
+ *  thread's agent was started with: a server turned on or off since. (Otto's
+ *  own tools and governed servers update in place where the CLI re-lists.) */
+export function mcpChanged(spawn: readonly McpServerStatus[], enabledNative: readonly string[]): boolean {
+  if (spawn.length === 0) return false;
+  const had = new Set(spawn.filter((s) => s.source === 'workspace' && s.name !== 'Workspace servers').map((s) => s.name));
+  return had.size !== enabledNative.length || enabledNative.some((n) => !had.has(n));
+}

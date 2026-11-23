@@ -178,6 +178,10 @@ struct Ctx {
     /// session held the UI grant). When the grant flips, the bridge emits
     /// `notifications/tools/list_changed` so the client re-lists.
     advertised_ui: std::sync::atomic::AtomicBool,
+    /// [`listing_fingerprint`] of the enabled governed and gateway tools the
+    /// last `tools/list` advertised; a later difference (a tool or server
+    /// turned on or off in the control plane) sends `list_changed`.
+    advertised_listing: std::sync::Mutex<Option<u64>>,
     /// The single stdout writer's channel, for server-initiated
     /// notifications. Taken (dropped) at shutdown so the writer can finish.
     notify: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<Value>>>,
@@ -627,6 +631,34 @@ impl Ctx {
             .as_ref()
         {
             let _ = tx.send(msg);
+        }
+    }
+
+    /// After a call: when what `tools/list` would now advertise (read from the
+    /// enable and gateway caches, so at most one daemon read per TTL) differs
+    /// from what the client last listed, tell it to re-list. Clients that
+    /// honour `list_changed` see a tool enabled mid-thread without a restart.
+    async fn recheck_listing(&self) {
+        if self
+            .advertised_listing
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_none()
+        {
+            return;
+        }
+        let (gw, enabled) = tokio::join!(self.gateway_tools(false), self.enabled_info(false));
+        let now = listing_fingerprint(enabled.as_ref(), &gw);
+        let mut last = self
+            .advertised_listing
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if *last != Some(now) {
+            *last = Some(now);
+            drop(last);
+            self.send_notification(
+                json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" }),
+            );
         }
     }
 
@@ -1456,6 +1488,19 @@ fn rpc_err(id: Value, code: i64, message: impl Into<String>) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message.into() } })
 }
 
+/// The enabled governed names and gateway tool names, order-free.
+fn listing_fingerprint(enabled: Option<&EnabledInfo>, gateway: &[Value]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut names: Vec<&str> = enabled
+        .map(|i| i.names.iter().map(String::as_str).collect())
+        .unwrap_or_default();
+    names.extend(gateway.iter().filter_map(|t| t["name"].as_str()));
+    names.sort_unstable();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    names.hash(&mut h);
+    h.finish()
+}
+
 /// A governed call's result: an executed downstream call's own MCP content
 /// blocks as they are (its images, links and resources reach the agent as
 /// such), anything else — a denial, a pending approval, an `otto.*` REST
@@ -1525,6 +1570,10 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
             // …plus the control-plane-enabled otto.* tools this surface doesn't
             // serve natively (what the operator ticked under MCP → Otto server),
             // UI-control tools only once this session holds the UI grant.
+            *ctx.advertised_listing
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) =
+                Some(listing_fingerprint(enabled.as_ref(), &gw));
             let filter = enabled.as_ref().and_then(|i| i.filter.clone());
             // The opt-in console content reads are listed only while their
             // control-plane twin is on (the call is refused otherwise).
@@ -1715,6 +1764,7 @@ impl Ctx {
             enabled_cache: Default::default(),
             gateway_cache: Default::default(),
             advertised_ui: Default::default(),
+            advertised_listing: Default::default(),
             notify: Default::default(),
         }
     }
@@ -1861,8 +1911,12 @@ where
         };
         let (ctx, tx) = (ctx.clone(), tx.clone());
         inflight.spawn(async move {
+            let call = msg.get("method").and_then(Value::as_str) == Some("tools/call");
             if let Some(resp) = handle(&ctx, msg).await {
                 let _ = tx.send(resp);
+            }
+            if call {
+                ctx.recheck_listing().await;
             }
             drop(permit);
         });
@@ -1942,6 +1996,28 @@ mod tests {
     /// S5-07: a native irreversible writer's governed envelope maps back to
     /// the native result — executed → the tool's content; pending → the
     /// envelope (no error, the agent resubmits); denied / failed → an error.
+    #[test]
+    fn the_listing_fingerprint_changes_with_a_tool_turned_on_not_with_order() {
+        let info = |names: &[&str]| EnabledInfo {
+            names: names.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        let gw = [json!({"name":"mcp__jira__search"})];
+        let a = listing_fingerprint(Some(&info(&["otto.a", "otto.b"])), &gw);
+        assert_eq!(
+            a,
+            listing_fingerprint(Some(&info(&["otto.b", "otto.a"])), &gw)
+        );
+        assert_ne!(
+            a,
+            listing_fingerprint(Some(&info(&["otto.a", "otto.b", "otto.c"])), &gw)
+        );
+        assert_ne!(
+            a,
+            listing_fingerprint(Some(&info(&["otto.a", "otto.b"])), &[])
+        );
+    }
+
     #[test]
     fn a_governed_servers_content_blocks_reach_the_agent_as_blocks() {
         let png = json!({"type":"image","mimeType":"image/png","data":"iVBORw0KGgo="});

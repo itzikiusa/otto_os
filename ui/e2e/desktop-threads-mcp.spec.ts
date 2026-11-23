@@ -61,3 +61,23 @@ test('an MCP tool card reads "<server> · <tool>" with its arguments and a link 
   await expect(row).toContainText('Link: report.pdf — https://example.com/report.pdf (The probe report)');
   await expect(row).not.toContainText('"type":"resource_link"');
 });
+
+test('a server enabled mid-thread says "MCP servers changed", and Restart agent applies it', async ({ page }) => {
+  const { ctx, base, wsId } = t.state;
+  const { thread } = await t.send(page, 'MCP changed', 'hello');
+  await expect(thread.getByText('echo: hello')).toBeVisible({ timeout: 30_000 });
+  await expect(thread.getByTestId('runtime-mcp-changed')).toHaveCount(0);
+  const made = await ctx.post(`${base}/api/v1/workspaces/${wsId}/mcp-servers`, {
+    data: { name: 'late-probe', command: process.execPath, args: [PROBE], enabled: true },
+  });
+  expect(made.ok(), await made.text()).toBeTruthy();
+  await page.reload();
+  const line = thread.getByTestId('runtime-mcp-changed');
+  await expect(line).toContainText('MCP servers changed', { timeout: 30_000 });
+  await line.getByRole('button', { name: 'Restart agent to apply' }).click();
+  await expect(line).toHaveCount(0, { timeout: 30_000 });
+  // The restarted agent has it, and the conversation goes on.
+  await page.getByRole('button', { name: 'Thread and view actions' }).click();
+  await page.getByRole('menuitem', { name: 'MCP servers' }).click();
+  await expect(page.locator('[data-testid="runtime-mcp-server"][data-name="late-probe"]')).toContainText('Connected');
+});

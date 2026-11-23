@@ -11,6 +11,8 @@ import { auth } from '../../../lib/stores/auth.svelte';
 import { resourceAccess } from '../../../lib/stores/resource-access.svelte';
 import { canDecideTriageApproval } from '../../../shell/triageModel';
 import { askAsPending, askDecision, canAlways, isMcpAsk, MCP_ASK, threadAsks } from './mcpAsks';
+
+export { isMcpAsk };
 import type { PendingApproval } from './timeline';
 
 class McpAsks {

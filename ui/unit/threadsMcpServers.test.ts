@@ -2,7 +2,8 @@
 // when it is not connected, why — nothing missing silently.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mcpServerRows, mcpSummary } from '../src/modules/threads/runtime/mcpServers.ts';
+import { mcpChanged, mcpServerRows, mcpSummary } from '../src/modules/threads/runtime/mcpServers.ts';
+import { nativeServerNames } from '../src/modules/threads/runtime/nativeServers.ts';
 
 const s = (name: string, source: string, state: string, reason?: string) => ({ name, source, state, reason }) as never;
 
@@ -40,4 +41,22 @@ test('a governed server says so when the thread has no Otto tools', () => {
   assert.equal(linear.status, 'Not available');
   assert.match(linear.reason!, /through Otto’s tools/);
   assert.equal(mcpSummary([]), 'No MCP servers');
+});
+
+test('"MCP servers changed" only when an enabled server was added or removed since the start', () => {
+  const spawn = [s('otto', 'otto', 'connected'), s('jira', 'workspace', 'added'), s('own', 'cli', 'connected')];
+  assert.equal(mcpChanged(spawn, ['jira']), false);
+  assert.equal(mcpChanged(spawn, ['jira', 'linear']), true);
+  assert.equal(mcpChanged(spawn, []), true);
+  assert.equal(mcpChanged([], ['jira']), false, 'nothing to compare before the first start');
+});
+
+test('the workspace list is read once for every open thread within 15 s', async () => {
+  let reads = 0;
+  const get = async () => { reads += 1; return [{ name: 'a', enabled: true }, { name: 'b', enabled: false }]; };
+  assert.deepEqual(await nativeServerNames('ws-cache', get, 1_000), ['a']);
+  assert.deepEqual(await nativeServerNames('ws-cache', get, 2_000), ['a']);
+  assert.equal(reads, 1);
+  await nativeServerNames('ws-cache', get, 20_000);
+  assert.equal(reads, 2);
 });

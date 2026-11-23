@@ -35,8 +35,8 @@
   import RuntimeAskAgent from './RuntimeAskAgent.svelte';
   import { attentionItems, attentionPillText } from './attentionDock';
   import RuntimeAttentionDock from './RuntimeAttentionDock.svelte';
-  import { isMcpAsk } from './mcpAsks';
-  import { mcpAsks } from './mcpAsks.svelte';
+  import RuntimeMcpChanged from './RuntimeMcpChanged.svelte';
+  import { isMcpAsk, mcpAsks } from './mcpAsks.svelte';
   import RuntimeComposerActions from './RuntimeComposerActions.svelte';
   import RuntimeModelChip from './RuntimeModelChip.svelte';
   import RuntimeBannerStack from './RuntimeBannerStack.svelte';
@@ -133,8 +133,7 @@
   const visibleRows = $derived(renderWindow(rows, rowCap, holdFrom, timelineRowKey));
   let prevMsgIds: string[] = [];
   const messageIds = $derived.by(() => (prevMsgIds = collectMessageIds(rows, prevMsgIds)));
-  // The agent's approval-gated MCP calls (mcp_approvals cards) wait in the same dock.
-  $effect(() => mcpAsks.hold());
+  $effect(() => mcpAsks.hold()); // approval-gated MCP calls wait in the same dock
   const mcpPending = $derived(mcpAsks.pending(sessionId));
   const approvals = $derived(new Map([...(p ? pendingApprovals(p) : []), ...mcpPending.map((a) => mcpAsks.asRow(a))].map((a) => [a.requestId, a] as const)));
   const turn = $derived(p ? latestTurn(p) : null);
@@ -541,6 +540,7 @@
         onjump={jumpTo}
       />
     {/if}
+    {#if p && session && !closed}<RuntimeMcpChanged {sessionId} workspaceId={session.workspace_id} servers={p.mcpServers} idle={!running} />{/if}
     {#if composerTopSlot}{@render composerTopSlot({ focusComposer })}{/if}
 
     <div class="rt-composer" style:border-color={planOn ? 'color-mix(in srgb, var(--warning) 42%, var(--border))' : undefined} bind:this={composerBoxEl}>
