@@ -135,6 +135,7 @@ pub const GROUPS: &[ToolGroup] = &[
             "broadcast_message",
             "wait_session",
             "thread_open",
+            "thread_capabilities",
             "thread_list",
             "thread_message",
             "thread_read",

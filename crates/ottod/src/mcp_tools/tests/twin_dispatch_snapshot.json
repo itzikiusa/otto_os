@@ -1052,6 +1052,24 @@
       "rows": 0
     }
   },
+  "otto_thread_capabilities {}": {
+    "args": {},
+    "requests": [
+      [
+        "GET",
+        "/runtime-sessions/sess-test/subagent-targets",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "providers": {
+          "ok": true
+        }
+      },
+      "rows": 0
+    }
+  },
   "otto_thread_message {\"to_session_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"text\":\"hi\"}": {
     "args": {
       "to_session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",

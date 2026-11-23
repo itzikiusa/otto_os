@@ -191,6 +191,11 @@ fn main() {
                     .find_map(|i| i["text"].as_str())
                     .unwrap_or_default()
                     .to_string();
+                // Otto's delegation rules ride a thread's first prompt (runtime::delegation).
+                let text = match text.split_once("</otto_instructions>\n\n") {
+                    Some((_, t)) => t.to_string(),
+                    None => text,
+                };
                 let extras = echo_extras(&params, &input);
                 match text.as_str() {
                     // `stream:<n>:<ms>`: `c0 `…`c<n-1> `, one delta per <ms>.

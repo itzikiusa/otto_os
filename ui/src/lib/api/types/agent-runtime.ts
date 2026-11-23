@@ -575,6 +575,15 @@ export interface PeerInfo {
   is_self: boolean;
 }
 
+/** `GET /runtime-sessions/{id}/subagent-targets`: a provider the thread's
+ *  agent may delegate to (`otto.thread_capabilities`). */
+export interface SubagentTarget {
+  provider: string;
+  /** Up to 12 model ids its CLI lists; empty = its default. */
+  models: string[];
+  efforts: string[];
+}
+
 /** `GET /runtime-sessions/{id}/peers/{peer}/reply?wait_secs=`. */
 export interface PeerReply {
   peer: PeerInfo;

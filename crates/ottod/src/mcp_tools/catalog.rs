@@ -135,6 +135,7 @@ pub(super) const NATIVE_TWINS: &[NativeTwin] = &[
     twin("room_post"),
     twin("room_read"),
     twin("thread_open"),
+    twin("thread_capabilities"),
     twin("thread_list"),
     twin("thread_message"),
     twin("thread_read"),

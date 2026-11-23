@@ -748,6 +748,13 @@ fn thread_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
                 let id = arg_str(args, "session_id")?;
                 SelfCall::get(format!("/api/v1/runtime-sessions/{}/peers", seg(&id)))
             }
+            "thread_capabilities" => {
+                let id = arg_str(args, "session_id")?;
+                SelfCall::get(format!(
+                    "/api/v1/runtime-sessions/{}/subagent-targets",
+                    seg(&id)
+                ))
+            }
             "thread_message" => {
                 let id = arg_str(args, "session_id")?;
                 let to = arg_str(args, "to_session_id")?;

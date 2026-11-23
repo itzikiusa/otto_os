@@ -1631,7 +1631,11 @@ async fn linked_threads_open_message_and_read_within_their_group() {
     // The opening prompt ran, framed with the opener.
     let first = rt.peer_reply(&lead.id, &worker.id, WAIT).await.unwrap();
     assert!(!first.busy);
-    assert!(first.text.contains("Opened by thread"), "{}", first.text);
+    assert!(
+        first.text.contains("Subagent task from thread"),
+        "{}",
+        first.text
+    );
     assert!(first.text.contains("you are my worker"), "{}", first.text);
 
     let ids = |v: Vec<otto_core::agent_runtime::PeerInfo>| {
@@ -1655,7 +1659,7 @@ async fn linked_threads_open_message_and_read_within_their_group() {
         e.session_id == lead.id
             && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
                 if matches!(&turn_item.kind, TurnItemKind::UserMessage { text, .. }
-                    if text.starts_with("[Reply from thread \"worker\"")))
+                    if text.starts_with("[Reply from subagent \"worker\"")))
     })
     .await;
     let woke = rt.latest_reply(&lead.id, WAIT).await.unwrap();
@@ -1795,7 +1799,7 @@ async fn a_person_asks_other_agents_from_a_thread() {
     // No wake for the lead's agent.
     assert!(user_texts(&host)
         .iter()
-        .all(|t| !t.starts_with("[Reply from thread")));
+        .all(|t| !t.starts_with("[Reply from subagent")));
 
     // Nothing to ask, or too many at once, is refused before anything starts.
     let none = rt
@@ -2142,7 +2146,7 @@ async fn lead_with_queued_replies(
     let q = queue_texts(&host, &lead.id).unwrap();
     for (title, text) in workers.iter().zip(&q) {
         assert!(
-            text.starts_with(&format!("[Reply from thread \"{title}\"")),
+            text.starts_with(&format!("[Reply from subagent \"{title}\"")),
             "{q:?}"
         );
     }
@@ -2179,7 +2183,7 @@ async fn restart_does_not_respawn_a_parent_for_a_queued_child_reply() {
     assert_eq!(snapshot.queued_prompts.len(), 1, "the reply still waits");
     assert!(snapshot.queued_prompts[0]
         .text
-        .starts_with("[Reply from thread \"worker\""));
+        .starts_with("[Reply from subagent \"worker\""));
     assert!(user_texts(&host2).is_empty(), "nothing was sent");
 }
 
@@ -2199,7 +2203,7 @@ async fn a_person_queued_message_still_resumes_after_restart() {
     let sent = user_texts(&host2);
     assert_eq!(sent.len(), 2, "{sent:?}");
     assert!(
-        sent[0].starts_with("[Reply from thread \"worker\""),
+        sent[0].starts_with("[Reply from subagent \"worker\""),
         "{sent:?}"
     );
     assert_eq!(sent[1], "later");
@@ -2234,11 +2238,11 @@ async fn queued_child_replies_are_delivered_when_the_parent_is_revived() {
     let sent = user_texts(&host2);
     assert_eq!(sent.len(), 2, "{sent:?}");
     assert!(
-        sent[0].starts_with("[Reply from thread \"worker 1\""),
+        sent[0].starts_with("[Reply from subagent \"worker 1\""),
         "{sent:?}"
     );
     assert!(
-        sent[1].starts_with("[Reply from thread \"worker 2\""),
+        sent[1].starts_with("[Reply from subagent \"worker 2\""),
         "{sent:?}"
     );
     host2
@@ -2376,7 +2380,7 @@ async fn a_child_interrupted_by_restart_reports_to_its_parent() {
     );
     let q = queue_texts(&host2, &lead.id).expect("a reply was queued");
     assert_eq!(q.len(), 1, "{q:?}");
-    assert!(q[0].starts_with("[Reply from thread \"worker\""), "{q:?}");
+    assert!(q[0].starts_with("[Reply from subagent \"worker\""), "{q:?}");
     assert!(
         q[0].contains("was interrupted when Otto restarted"),
         "{q:?}"
@@ -3566,7 +3570,7 @@ async fn council_seats_form_one_read_only_group_and_the_judge_reads_every_answer
     assert_eq!(judge.title, "which cache? · synthesis");
     let verdict = rt.latest_reply(&judge.id, WAIT).await.unwrap();
     assert!(
-        !verdict.text.contains("Opened by thread"),
+        !verdict.text.contains("Subagent task from thread"),
         "{}",
         verdict.text
     );

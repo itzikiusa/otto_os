@@ -80,6 +80,38 @@ pub(super) fn child_meta_with_slug(
     serde_json::Value::Object(m)
 }
 
+/// The opener's tool set a subagent keeps (`open_linked`): its MCP profiles,
+/// browser opt-in and network profile — and its named account when the
+/// subagent runs on the same provider (an account belongs to one CLI). What
+/// the opener's request already set wins.
+pub(super) fn inherit_tools(
+    opener: &RuntimeSession,
+    provider: RuntimeProvider,
+    meta: &mut Option<serde_json::Value>,
+) {
+    let Some(from) = opener.meta.as_ref().and_then(|m| m.as_object()) else {
+        return;
+    };
+    let same = opener.provider == provider;
+    let m = meta.get_or_insert_with(|| serde_json::json!({}));
+    let Some(dst) = m.as_object_mut() else {
+        return;
+    };
+    for k in [
+        "mcp_profiles",
+        "browser",
+        "network_profile_id",
+        "account_id",
+    ] {
+        if k == "account_id" && !same {
+            continue;
+        }
+        if let Some(v) = from.get(k).filter(|v| !v.is_null()) {
+            dst.entry(k).or_insert_with(|| v.clone());
+        }
+    }
+}
+
 /// Narrow → wide.
 fn access_rank(m: RuntimeAccessMode) -> u8 {
     match m {
@@ -205,11 +237,10 @@ fn wake_text_how(child: &RuntimeSession, how: &str, answer: &str) -> String {
         answer.to_string()
     };
     format!(
-        "[Reply from thread \"{}\" ({}, id {}): its turn {how}. Answer it with the \
-         otto_thread_message tool (session_id {}); read it again with otto_thread_read.]\n\n{body}",
+        "[Reply from subagent \"{}\" ({}, id {}): its turn {how}. Use it and carry on; send it \
+         follow-up work with otto_thread_message only if more is needed.]\n\n{body}",
         child.title,
         child.provider_slug(),
-        child.id,
         child.id
     )
 }
@@ -218,7 +249,9 @@ fn wake_text_how(child: &RuntimeSession, how: &str, answer: &str) -> String {
 /// opening prompt or a `thread_message` from that thread ([`AgentRuntime::peer_header`]).
 pub(super) fn asked_by(prompt: &str, parent: &Id) -> bool {
     let first = prompt.lines().next().unwrap_or("");
-    (first.starts_with("[Opened by thread ") || first.starts_with("[Message from thread "))
+    (first.starts_with("[Subagent task from thread ")
+        || first.starts_with("[Opened by thread ")
+        || first.starts_with("[Message from thread "))
         && first.contains(&format!(", id {parent}). "))
 }
 
@@ -251,6 +284,7 @@ fn turn_reply<'a>(
 ) -> (String, bool) {
     let mut said: Vec<(u32, &str)> = Vec::new();
     let mut asked = false;
+    let mut error = None;
     for i in items.filter(|i| i.turn_id.as_ref() == Some(turn_id) && i.parent_item_id.is_none()) {
         match &i.kind {
             TurnItemKind::AssistantMessage { text, .. } if !text.trim().is_empty() => {
@@ -259,15 +293,23 @@ fn turn_reply<'a>(
             TurnItemKind::UserMessage { text, .. } if i.id == format!("{turn_id}:user") => {
                 asked = asked_by(text, parent);
             }
+            // Why it failed, so the asker can say so instead of retrying blind.
+            TurnItemKind::Error { failure } => error = Some(failure.message.as_str()),
             _ => {}
         }
     }
     said.sort_by_key(|(o, _)| *o);
-    let answer = said
+    let mut answer = said
         .iter()
         .map(|(_, t)| *t)
         .collect::<Vec<_>>()
         .join("\n\n");
+    if let Some(e) = error {
+        if !answer.is_empty() {
+            answer.push_str("\n\n");
+        }
+        answer.push_str(&format!("Error: {e}"));
+    }
     (answer, asked)
 }
 
@@ -687,11 +729,31 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_turns_reply_carries_its_error() {
+        let mut e = item(
+            "t1:error".into(),
+            TurnItemStatus::Failed,
+            None,
+            TurnItemKind::Error {
+                failure: otto_core::agent_runtime::ProviderFailure {
+                    class: "auth_required".into(),
+                    message: "log in to Gemini first".into(),
+                    code: None,
+                    retryable: None,
+                },
+            },
+        );
+        e.turn_id = Some("t1".into());
+        let (answer, _) = turn_reply([e].iter(), &"t1".into(), &"kid".into());
+        assert_eq!(answer, "Error: log in to Gemini first");
+    }
+
+    #[test]
     fn the_wake_names_the_child_and_cuts_a_long_answer() {
         let s = session(RuntimeProvider::Codex);
         let t = wake_text(&s, TurnTerminalStatus::Completed, "All green.");
         assert!(t.starts_with(
-            "[Reply from thread \"Check the tests\" (codex, id kid): its turn finished."
+            "[Reply from subagent \"Check the tests\" (codex, id kid): its turn finished."
         ));
         assert!(t.ends_with("All green."));
         let long = wake_text(
@@ -702,6 +764,34 @@ mod tests {
         assert!(long.contains("its turn failed"));
         assert!(long.contains("cut here"));
         assert!(wake_text(&s, TurnTerminalStatus::Completed, " ").ends_with("(no answer text)"));
+    }
+
+    #[test]
+    fn a_subagent_keeps_the_openers_tools_and_its_account_only_on_the_same_cli() {
+        let mut lead = session(RuntimeProvider::Claude);
+        lead.meta = Some(serde_json::json!({
+            "mcp_profiles": ["db"], "browser": true, "network_profile_id": "vpn",
+            "account_id": "work", "personal_agent": "ops",
+        }));
+        let mut meta = Some(child_meta(&lead.id, ChildOpener::Agent));
+        inherit_tools(&lead, RuntimeProvider::Codex, &mut meta);
+        let m = meta.unwrap();
+        assert_eq!(m["mcp_profiles"], serde_json::json!(["db"]));
+        assert_eq!(m["browser"], true);
+        assert_eq!(m["network_profile_id"], "vpn");
+        assert!(m.get("account_id").is_none(), "another CLI's account");
+        assert!(m.get("personal_agent").is_none());
+        assert_eq!(m["child_of"]["id"], "kid");
+        let mut same = Some(serde_json::json!({"account_id": "mine"}));
+        inherit_tools(&lead, RuntimeProvider::Claude, &mut same);
+        assert_eq!(
+            same.unwrap()["account_id"],
+            "mine",
+            "the request's own pick wins"
+        );
+        let mut same = None;
+        inherit_tools(&lead, RuntimeProvider::Claude, &mut same);
+        assert_eq!(same.unwrap()["account_id"], "work");
     }
 
     #[test]

@@ -31,6 +31,7 @@ pub const DEFAULT_ENABLED: &[&str] = &[
     // workspace, never a wider access mode than its own), and every message
     // lands as a visible turn in the receiving thread.
     "thread_open",
+    "thread_capabilities",
     "thread_list",
     "thread_message",
     "thread_read",
@@ -1660,16 +1661,19 @@ fn body_preview(args: &Value) -> String {
 /// function under the size ratchet): an agent in a Threads (structured)
 /// session opening, listing, messaging and reading its linked threads — then
 /// the main personal agent's team tools ([`team_tool_specs`]).
-fn thread_tool_specs() -> [Value; 8] {
+fn thread_tool_specs() -> [Value; 9] {
     let [team_list, team_create, team_delegate] = team_tool_specs();
     [
         json!({"name":"otto.thread_open","mutating":false,"category":"Sessions",
-            "description":"Open a linked agent thread from this Threads thread (same workspace, folder, access mode); shown beside yours. `prompt` = its first message (your role + task). Model/effort default when omitted. Returns its `id`.",
+            "description":"Delegate to a subagent (same folder, access mode). `prompt` = the whole task. Completion wakes you; don't poll. Returns its `id`.",
             "inputSchema":{"type":"object","required":["provider"],"properties":{
                 "provider":{"type":"string","description":"claude|codex|gemini|grok|opencode|pi|muse"},
                 "prompt":{"type":"string"},"title":{"type":"string"},"model":{"type":"string"},
                 "effort":{"type":"string","description":"low|medium|high|xhigh|max"},
                 "session_id":{"type":"string","description":"caller (auto)"}}}}),
+        json!({"name":"otto.thread_capabilities","mutating":false,"category":"Sessions",
+            "description":"Providers/models/efforts for otto.thread_open.",
+            "inputSchema":{"type":"object","properties":{"session_id":{"type":"string","description":"caller (auto)"}}}}),
         json!({"name":"otto.thread_list","mutating":false,"category":"Sessions",
             "description":"This thread's linked group: id, provider, title, status, is_self.",
             "inputSchema":{"type":"object","properties":{"session_id":{"type":"string","description":"caller (auto)"}}}}),
@@ -1678,7 +1682,7 @@ fn thread_tool_specs() -> [Value; 8] {
             "inputSchema":{"type":"object","required":["to_session_id","text"],"properties":{
                 "to_session_id":{"type":"string"},"text":{"type":"string"},"session_id":{"type":"string","description":"caller (auto)"}}}}),
         json!({"name":"otto.thread_read","mutating":false,"category":"Sessions",
-            "description":"A linked thread's latest reply, waiting up to wait_secs (≤25, default 20) for its turn: {peer, busy, turn_status, text}.",
+            "description":"A linked thread's latest reply, waiting up to wait_secs (≤25, default 20): {peer, busy, turn_status, text}. Don't poll a working subagent.",
             "inputSchema":{"type":"object","required":["peer_session_id"],"properties":{
                 "peer_session_id":{"type":"string"},"wait_secs":{"type":"integer"},"session_id":{"type":"string","description":"caller (auto)"}}}}),
         json!({"name":"otto.thread_close","mutating":false,"category":"Sessions",

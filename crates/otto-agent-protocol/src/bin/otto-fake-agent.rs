@@ -153,6 +153,11 @@ fn main() {
                     .and_then(|b| b.iter().find_map(|b| b["text"].as_str()))
                     .unwrap_or_default()
                     .to_string();
+                // Otto's delegation rules ride a thread's first prompt (runtime::delegation).
+                let text = match text.split_once("</otto_instructions>\n\n") {
+                    Some((_, t)) => t.to_string(),
+                    None => text,
+                };
                 let done = |stop: &str| reply(&id, json!({"stopReason":stop}));
                 match text.as_str() {
                     "crash" => {

@@ -25,6 +25,12 @@ progress for the stall watchdog), #37335 (Grok steering through
 the composer), #10439 (find in a thread), #15907 and #30257 (a private secret request card).
 Ported from T3 Code main on 2026-11-19 (behaviour only): #39049 (an idle-released
 thread keeps nothing loaded once its agent process is gone).
+Ported from T3 Code f58085a1 on 2026-11-23 (behaviour only): the delegation
+rules a thread's first prompt carries (`src/runtime/delegation.rs`, after
+`packages/provider-core/src/server/orchestrationInstructions.ts`), the
+"Completion wakes this thread" hint an opened subagent returns and the
+capabilities tool (`delegate_task` `next`, `orchestrator_capabilities`,
+`packages/contracts/src/orchestratorMcp.ts`).
 Threads
 inside a thread (`src/runtime/children.rs` and Otto's Threads UI) follow
 `apps/web/src/components/chat/V2LifecycleRow.tsx` (`SubagentTimelineLink`,

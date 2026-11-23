@@ -19,6 +19,7 @@ mod attention;
 mod auto_close;
 mod children;
 pub mod council;
+mod delegation;
 pub use secret_request::{answer_secret_request, pending_secret_requests};
 mod descendants;
 mod fresh;
@@ -1399,6 +1400,7 @@ impl AgentRuntime {
         let mut st = live.lock();
         check_can_prompt(&st)?;
         let turn_id = new_id();
+        let sent = delegation::for_driver(&self.inner, &st, req);
         let Some(proc) = st.proc.as_mut() else {
             // It died in its handshake (signed out, bad argv) before this
             // prompt reached it; the next prompt respawns.
@@ -1410,7 +1412,7 @@ impl AgentRuntime {
         };
         let step = proc
             .driver
-            .prompt(&turn_id, req)
+            .prompt(&turn_id, &sent)
             .map_err(|e| Error::Invalid(e.0))?;
         if req.fresh_context {
             self.commit_fresh(live, &mut st, &turn_id);

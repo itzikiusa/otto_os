@@ -156,6 +156,15 @@ test('a child’s reply woken into its parent reads "Reply from <thread>" (the d
     { from: 'Plan', body: 'Go' },
   );
   assert.equal(messageAttribution('[Reply from thread "x"] not a header'), null);
+  // Today's daemon text (runtime/children.rs `wake_text_how`, runtime/delegation.rs `task_header`).
+  assert.deepEqual(
+    messageAttribution('[Reply from subagent "Fix the build" (codex, id 01X): its turn finished. Use it and carry on; send it follow-up work with otto_thread_message only if more is needed.]\n\nAll green.'),
+    { from: 'Fix the build', body: 'All green.', reply: true },
+  );
+  assert.deepEqual(
+    messageAttribution('[Subagent task from thread "Plan" (claude, id 01X). Do the work yourself; start no subagents unless this task says to. When your turn ends your reply goes back to that thread on its own — do not message it.]\n\nGo'),
+    { from: 'Plan', body: 'Go' },
+  );
   // The queue bar reads the same way.
   assert.equal(queuedLabel(wake), 'Queued reply from Fix the build: All green [3 tests].');
   assert.equal(queuedLabel('plain words'), 'Queued: plain words');
