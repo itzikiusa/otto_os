@@ -36,14 +36,6 @@ export function diffCounts(item: { diff_str?: string; old_str?: string; new_str?
   return { added: b.length - head - tail, removed: a.length - head - tail };
 }
 
-/** `diffCounts` per item object: the projection keeps an unchanged item's
- *  object across event batches, so a streaming thread re-reads no diff text. */
-const counted = new WeakMap<object, { added: number; removed: number } | null>();
-function countsOf(it: TurnItem & { diff_str?: string; old_str?: string; new_str?: string }): { added: number; removed: number } | null {
-  if (!counted.has(it)) counted.set(it, diffCounts(it));
-  return counted.get(it) ?? null;
-}
-
 /** The files turn `turnId` changed (completed, top-level file changes), in
  *  first-touched order, paths relative to the thread's folder. */
 export function turnChanges(items: readonly TurnItem[], turnId: string, cwd: string | null | undefined): FileDelta[] {
@@ -51,7 +43,7 @@ export function turnChanges(items: readonly TurnItem[], turnId: string, cwd: str
   for (const it of items) {
     if (it.type !== 'file_change' || it.turn_id !== turnId || it.parent_item_id || it.status !== 'completed' || it.error) continue;
     const path = relativeToCwd(it.file_name, cwd);
-    const c = countsOf(it);
+    const c = diffCounts(it);
     const d = byPath.get(path) ?? { path, added: null, removed: null };
     if (c) {
       d.added = (d.added ?? 0) + c.added;
