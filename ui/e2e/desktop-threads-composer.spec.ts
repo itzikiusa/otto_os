@@ -13,6 +13,7 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 //   • ONE primary button that says what it will do: Send idle, Stop while the
 //     agent works with nothing typed, Queue (default) / Steer with a draft;
 //     ⌘↵ the other one; the choice in the toolbar ⋯ › View (composerSend.ts).
+//   • The / popup lists the agent's own commands (hostCommands.ts).
 // ─────────────────────────────────────────────────────────────────────────────
 
 test.use({ serviceWorkers: 'block' });
@@ -130,3 +131,33 @@ for (const provider of ['codex', 'claude'] as const) {
     await expectNoHorizontalOverflow(page);
   });
 }
+
+test('claude: the / popup lists the agent’s own commands under its heading; choosing one types it for the agent', async ({ page }) => {
+  test.setTimeout(90_000);
+  const { thread } = await open(page, 'claude', 'Slash claude');
+  await send(thread, 'hello'); // the agent is up and has published its commands
+  const composer = thread.getByTestId('runtime-composer');
+  await composer.fill('/');
+  const pop = thread.locator('[data-slash-pop]');
+  await expect(pop.getByTestId('slash-group')).toHaveText(['Otto', 'Claude commands']);
+  await expect(pop.locator('[data-source="agent"]')).toHaveText([/\/compact/]); // /review is Otto's here, so the agent's is left out
+  await expect(pop.getByRole('option', { name: /\/review/ })).toHaveCount(1);
+  await expectFullyInViewport(page, pop, 'slash popup');
+  await composer.pressSequentially('comp');
+  await expect(pop.getByTestId('slash-group')).toHaveText(['Claude commands']);
+  await composer.press('Enter');
+  await expect(composer).toHaveValue('/compact ');
+  await composer.press('Enter');
+  await expect(thread.getByText('echo: /compact').last()).toBeVisible({ timeout: 20_000 });
+});
+
+test('codex: its skills are its commands; one Otto takes itself is not offered twice', async ({ page }) => {
+  test.setTimeout(90_000);
+  const { thread } = await open(page, 'codex', 'Slash codex');
+  await send(thread, 'hello');
+  const composer = thread.getByTestId('runtime-composer');
+  await composer.fill('/re');
+  const pop = thread.locator('[data-slash-pop]');
+  await expect(pop.getByRole('option', { name: /\/review/ })).toHaveCount(1);
+  await expect(pop.getByTestId('slash-group')).toHaveCount(0);
+});

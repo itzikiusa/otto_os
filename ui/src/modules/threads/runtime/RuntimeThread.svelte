@@ -32,7 +32,7 @@
   import { askFromComposer, askTargets } from './askTargets.svelte';
   import { attachmentSupport, capsOf, takesFile } from './attachmentSupport';
   import { addComposerContext, assembleComposerMessage } from './composerContext';
-  import { availableSlash } from './hostCommands';
+  import { availableSlash, slashSuggestions } from './hostCommands';
   import RuntimeAccessChip from './RuntimeAccessChip.svelte';
   import RuntimeAskAgent from './RuntimeAskAgent.svelte';
   import { attentionItems, attentionPillText } from './attentionDock';
@@ -340,11 +340,8 @@
     hasDraftText || draft.images.length > 0 || draft.context.length > 0 || hasExternalContext,
   );
   const composerStateArg = $derived({ key: `rt:${ownerId}`, hasText: draft.text.length > 0 });
-  const suggestions = $derived.by(() => {
-    if (cmdDismissed || !draft.text.startsWith('/')) return [];
-    const prefix = /^\/([\w:-]*)$/.exec(draft.text)?.[1].toLowerCase();
-    return prefix === undefined ? [] : SLASH.filter((c) => c.name.includes(prefix));
-  });
+  // Otto's view commands, then the agent's own (`commands.updated`, hostCommands.ts).
+  const suggestions = $derived(cmdDismissed ? [] : slashSuggestions(draft.text, SLASH, p?.commands ?? [], agentName, hostCommands));
   $effect(() => {
     void suggestions.length;
     if (untrack(() => cmdIdx) !== 0) cmdIdx = 0;
@@ -355,7 +352,7 @@
   });
 
   function acceptCmd(c: ComposerSlashCommand): void {
-    if (isImmediateSlashCommand(c.name)) {
+    if (c.source !== 'agent' && isImmediateSlashCommand(c.name)) {
       draft.text = `/${c.name}`;
       submit();
     } else {
