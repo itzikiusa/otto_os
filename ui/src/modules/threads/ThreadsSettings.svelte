@@ -11,6 +11,7 @@
   import type { ToolVisibility } from './runtime/workLog';
   import { threads } from './threadsStore.svelte';
   import { threadsChrome } from './threadsChrome.svelte';
+  import { sectionLabel } from '../settings/sections'; // ui-guards: allow — the Settings registry names this page
 
   const MID: { id: MidTurn; label: string; hint: string }[] = [
     { id: 'queue', label: 'Queue', hint: 'A message sent while the agent works waits until its turn ends. ⌘↵ steers instead.' },
@@ -38,7 +39,7 @@
 </script>
 
 <div class="settings-section" data-testid="settings-threads">
-  <PageHeader title="Threads" subtitle="How Threads behaves on this device" />
+  <PageHeader title={sectionLabel('threads')} subtitle="How Threads behaves on this device" />
   <PageBody width="readable">
     <p class="intro">Saved on this device. The toolbar ⋯ › View in Threads has the same switches.</p>
 
