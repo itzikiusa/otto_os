@@ -109,15 +109,24 @@ export function undoRedoInFocus(
   el: Element | null = typeof document === 'undefined' ? null : document.activeElement,
   deps: UndoDeps = liveDeps,
   now = Date.now(),
-): UndoRoute | 'handled' {
+): UndoRoute | 'handled' | 'app' {
   const key = lastKey;
   lastKey = null;
   if (key && key.action === action && now - key.at < SAME_PRESS_MS && key.e.defaultPrevented) return 'handled';
   lastMenu = { action, at: now };
   const route = undoRoute(el);
+  if (action === 'undo' && route === 'native' && appUndo?.(el)) return 'app';
   if (route === 'editor') deps.editor(el!.closest('.cm-editor') as HTMLElement, action);
   else if (route === 'native') deps.exec(action);
   return route;
+}
+
+/** An app-level undo the menu route tries first (Threads' "· Undo" notice,
+ *  registered by modules/threads/threadUndo.ts — lib never imports modules):
+ *  true when it took the press. Undo only; never for an editor or terminal. */
+let appUndo: ((focused: Element | null) => boolean) | null = null;
+export function setAppUndo(fn: ((focused: Element | null) => boolean) | null): void {
+  appUndo = fn;
 }
 
 /** Test hook: forget the keypress bookkeeping. */

@@ -4,6 +4,7 @@
 // replaces it. ⌘Z / Ctrl+Z runs the same Undo while focus is not in a text
 // field, an editor or a terminal (they keep their own undo).
 import { router } from '../../lib/router.svelte';
+import { setAppUndo } from '../../lib/undoredo';
 import { toasts } from '../../lib/toast.svelte';
 
 const UNDO_MS = 5000;
@@ -41,3 +42,6 @@ export function onUndoKey(e: Pick<KeyboardEvent, 'key' | 'metaKey' | 'ctrlKey' |
 }
 
 if (typeof window !== 'undefined') window.addEventListener('keydown', (e) => void onUndoKey(e, document.activeElement));
+// The desktop app's Edit ▸ Undo may fire before (and then swallow) the
+// keydown: its route tries the notice's Undo first, under the same rule.
+setAppUndo((focused) => router.module === 'threads' && !isTypingTarget(focused) && undoLast());

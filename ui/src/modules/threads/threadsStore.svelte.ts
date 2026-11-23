@@ -390,10 +390,10 @@ class ThreadsStore {
 
   /** Once: this browser's old local pins / History onto the threads. */
   async migrateLocal(): Promise<void> {
-    if (!(await threadMeta.migrate(this.legacyPins, this.legacyHistory))) return;
-    if (!this.legacyPins.length && !this.legacyHistory.length) return;
-    this.legacyPins = [];
-    this.legacyHistory = [];
+    const left = await threadMeta.migrate(this.legacyPins, this.legacyHistory);
+    if (!left || (left.pins.length === this.legacyPins.length && left.history.length === this.legacyHistory.length)) return;
+    this.legacyPins = left.pins;
+    this.legacyHistory = left.history;
     this.save();
   }
 

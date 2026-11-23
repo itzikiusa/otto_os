@@ -101,6 +101,27 @@ test('a server enabled mid-thread says "MCP servers changed", and Restart agent 
   await expect(page.locator('[data-testid="runtime-mcp-server"][data-name="late-probe"]')).toContainText('Connected');
 });
 
+test('a subagent\'s MCP approval shows in its parent, and Allow once runs it', async ({ page }) => {
+  const { ctx, base } = t.state;
+  const { id, thread } = await t.send(page, 'MCP parent', 'hello');
+  await expect(thread.getByText('echo: hello')).toBeVisible({ timeout: 30_000 });
+  const kids = await ctx.post(`${base}/api/v1/runtime-sessions/${id}/children`, { data: { prompt: 'hi', targets: [{ provider: 'claude' }], title: 'MCP subagent' } });
+  expect(kids.ok(), await kids.text()).toBeTruthy();
+  const kid = ((await kids.json()) as { children: { id: string }[] }).children[0].id;
+  await expect
+    .poll(async () => ((await (await ctx.get(`${base}/api/v1/runtime-sessions/${kid}`)).json()) as { last_turn_status?: string }).last_turn_status ?? '', { timeout: 30_000 })
+    .toBe('completed');
+  // The subagent calls an approval-gated tool: the call is held for the person
+  // (its row never says awaiting_permission), and the parent shows the card.
+  const line = `mcp otto otto_broadcast_message ${JSON.stringify({ workspace_id: t.state.wsId, text: 'from the subagent' })}`;
+  expect((await ctx.post(`${base}/api/v1/runtime-sessions/${kid}/prompt`, { data: { text: line } })).ok()).toBeTruthy();
+  const card = thread.getByTestId('runtime-child-approval');
+  await expect(card).toBeVisible({ timeout: 30_000 });
+  await expect(card).toContainText('Approval needed from MCP subagent');
+  await card.getByRole('button', { name: 'Allow once', exact: true }).click();
+  await expect(card).toBeHidden({ timeout: 15_000 });
+});
+
 test('a fresh context (/clear) and a revive keep the thread\'s MCP tools', async ({ page }) => {
   const { ctx, base, wsId } = t.state;
   const made = await ctx.post(`${base}/api/v1/workspaces/${wsId}/mcp-servers`, {

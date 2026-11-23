@@ -5,6 +5,7 @@
 //! sandbox wrapper. Terminal output is kept up to its byte limit and also
 //! streamed into the tool row as it arrives.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -17,8 +18,10 @@ use super::{apply_step, Inner, Live, State};
 use crate::driver::ClientOp;
 use otto_core::Id;
 
-/// Open client terminals per session; at most [`MAX_TERMINALS`] each.
-static TERMINALS: LazyLock<DashMap<(Id, String), Arc<Terminal>>> = LazyLock::new(DashMap::new);
+/// Open client terminals, per session (at most [`MAX_TERMINALS`] each): a
+/// session's lookups and its limit never walk another session's terminals.
+static TERMINALS: LazyLock<DashMap<Id, HashMap<String, Arc<Terminal>>>> =
+    LazyLock::new(DashMap::new);
 const MAX_TERMINALS: usize = 16;
 const DEFAULT_BYTE_LIMIT: usize = 1 << 20;
 const MAX_FILE_BYTES: u64 = 8 << 20;
@@ -50,18 +53,15 @@ pub(super) fn start(inner: &Inner, st: &State, id: String, op: ClientOp) {
 /// The session's terminals end with it, or with its agent process (close,
 /// exit, a replaced process, idle release): their commands are killed.
 pub(super) fn drop_session(sid: &Id) {
-    TERMINALS.retain(|(s, _), t| {
-        if s == sid {
-            kill(t);
-        }
-        s != sid
-    });
+    if let Some((_, terms)) = TERMINALS.remove(sid) {
+        terms.values().for_each(|t| kill(t));
+    }
 }
 
 /// Every terminal (the daemon is stopping: nothing could reach them after).
 pub(super) fn drop_all() {
-    TERMINALS.retain(|_, t| {
-        kill(t);
+    TERMINALS.retain(|_, terms| {
+        terms.values().for_each(|t| kill(t));
         false
     });
 }
@@ -125,7 +125,10 @@ async fn write_no_follow(path: &Path, content: &str) -> std::io::Result<()> {
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)
         .await?;
-    f.write_all(content.as_bytes()).await
+    f.write_all(content.as_bytes()).await?;
+    // tokio's File hands the write to a blocking task: without a flush the
+    // answer (and the file's next reader) can come before the bytes land.
+    f.flush().await
 }
 
 async fn run(
@@ -137,8 +140,8 @@ async fn run(
 ) -> Result<Value, String> {
     let term = |tid: &str| {
         TERMINALS
-            .get(&(sid.clone(), tid.to_string()))
-            .map(|t| Arc::clone(&t))
+            .get(sid)
+            .and_then(|terms| terms.get(tid).cloned())
             .ok_or_else(|| format!("no terminal {tid}"))
     };
     match op {
@@ -189,7 +192,10 @@ async fn run(
             cwd,
             byte_limit,
         } => {
-            if TERMINALS.iter().filter(|e| &e.key().0 == sid).count() >= MAX_TERMINALS {
+            if TERMINALS
+                .get(sid)
+                .is_some_and(|terms| terms.len() >= MAX_TERMINALS)
+            {
                 return Err(format!("at most {MAX_TERMINALS} terminals at once"));
             }
             let mut cmd = tokio::process::Command::new(&program);
@@ -221,7 +227,10 @@ async fn run(
                     .take()
                     .map(|p| Box::new(p) as Box<dyn tokio::io::AsyncRead + Send + Unpin>),
             ];
-            TERMINALS.insert((sid.clone(), terminal_id.clone()), Arc::clone(&t));
+            TERMINALS
+                .entry(sid.clone())
+                .or_default()
+                .insert(terminal_id.clone(), Arc::clone(&t));
             let mut readers = Vec::new();
             for mut pipe in pipes.into_iter().flatten() {
                 let (t, inner, live, tid) = (
@@ -296,7 +305,10 @@ async fn run(
             Ok(json!({}))
         }
         ClientOp::TerminalRelease { terminal_id } => {
-            if let Some((_, t)) = TERMINALS.remove(&(sid.clone(), terminal_id)) {
+            let released = TERMINALS
+                .get_mut(sid)
+                .and_then(|mut terms| terms.remove(&terminal_id));
+            if let Some(t) = released {
                 kill(&t);
             }
             Ok(json!({}))
@@ -356,6 +368,14 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(root.path().join("b.txt")).unwrap(),
             "hi"
+        );
+        // The bytes are on disk when the write answers (tokio's File writes in
+        // a blocking task; without a flush this read raced it: 1 run in ~25).
+        let big = "y".repeat(4 << 20);
+        write_no_follow(&ok, &big).await.unwrap();
+        assert_eq!(
+            std::fs::metadata(root.path().join("b.txt")).unwrap().len(),
+            big.len() as u64
         );
     }
 }

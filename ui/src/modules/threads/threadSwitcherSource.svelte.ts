@@ -16,13 +16,15 @@ import { threadOrigin } from './threadOrigins';
 import { threadNav, threadRowState } from './threadNav.svelte';
 import { switcherOrder, wordTone } from './threadSwitcher';
 import { isThreadSession, projectName } from './threadsHelpers';
+import { threadMeta } from './threadMeta.svelte';
 import { threads } from './threadsStore.svelte';
 
-/** The class the sidebar gives a row (ThreadSidebar's `classOf`). */
+/** The class the sidebar gives a row (ThreadSidebar's `classOf`, one
+ *  source for "Done": `thread_seen_at` via threadMeta). */
 function classOf(s: Session): InboxClass {
   const st = threadRowState(s);
   const focused = threads.focusedSessionId === s.id && !threads.newDraftMode;
-  const unread = !focused && st.key !== 'needs-you' && (ws.unread[s.id] === true || runtimeThreads.unread[s.id] === true);
+  const unread = !focused && st.key !== 'needs-you' && threadMeta.unread(s.id, ws.unread[s.id] === true || runtimeThreads.unread[s.id] === true);
   return inboxClass(st.key, unread);
 }
 

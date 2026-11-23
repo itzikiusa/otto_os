@@ -15,6 +15,7 @@
   import type { ApprovalDecision } from '../../../lib/api/types';
   import { toastError } from '../../../lib/toastError';
   import { childrenOf } from './childThreads';
+  import { mcpAsks } from './mcpAsks.svelte';
   import RuntimeApprovalRow from './RuntimeApprovalRow.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
   import { runtimeViews } from './runtimeView.svelte';
@@ -27,7 +28,8 @@
   // leaves it equal, so nothing below re-runs (performance).
   const waitingIds = $derived(
     childrenOf(Object.values(runtimeThreads.byId), sessionId)
-      .filter((k) => k.status === 'awaiting_permission')
+      // A held MCP call does not move the subagent to awaiting_permission.
+      .filter((k) => k.status === 'awaiting_permission' || mcpAsks.waiting(k.id))
       .map((k) => k.id)
       .join(','),
   );
@@ -42,8 +44,9 @@
   const escalated = $derived(runtimeThreads.get(sessionId)?.status !== 'working');
   const items = $derived(
     waiting.flatMap((k) => {
+      const mcp = mcpAsks.rows(k.id).map((approval) => ({ kid: k, approval, question: null }));
       const p = runtimeViews.projections[k.id];
-      if (!p) return [];
+      if (!p) return mcp;
       const approvals = pendingApprovals(p)
         .filter((a) => a.kind !== 'question')
         .map((approval) => ({ kid: k, approval, question: null }));
@@ -51,7 +54,7 @@
       const questions = p.requests
         .filter((r) => r.status === 'pending' && r.kind === 'question' && r.response_capability.type === 'live' && (escalated || r.for_person))
         .map((question) => ({ kid: k, approval: null, question }));
-      return [...approvals, ...questions];
+      return [...mcp, ...approvals, ...questions];
     }),
   );
   let at = $state(0);
@@ -62,7 +65,8 @@
   async function answer(requestId: string, decision: ApprovalDecision): Promise<void> {
     if (!cur) return;
     try {
-      await runtimeThreads.respond(cur.kid.id, requestId, decision);
+      const kid = cur.kid.id;
+      await mcpAsks.respond(requestId, decision, () => runtimeThreads.respond(kid, requestId, decision));
     } catch (e) {
       toastError('Couldn’t answer the approval', e);
     }
