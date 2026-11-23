@@ -562,3 +562,76 @@ async fn fresh_context_can_stop_leftover_background_work() {
         .values()
         .any(|i| matches!(i.kind, TurnItemKind::SessionBoundary { .. })));
 }
+
+/// Review 1: a switch whose request is dropped mid-handshake (a page reload)
+/// still ends: the agent never comes up, so the thread is exactly as before.
+#[tokio::test]
+async fn a_switch_whose_request_is_dropped_still_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_str().unwrap().to_string();
+    let rec = Arc::new(StdMutex::new(Rec::default()));
+    let r = Arc::clone(&rec);
+    // Codex never answers its handshake.
+    let drivers: Arc<dyn DriverFactory> = Arc::new(move |p| -> Option<Box<dyn StructuredDriver>> {
+        Some(Box::new(ScriptDriver {
+            rec: Arc::clone(&r),
+            live_model: false,
+            silent: p == RuntimeProvider::Codex,
+        }))
+    });
+    let rt = AgentRuntime::new(
+        AgentRuntimeRepo::new(pool().await),
+        Arc::new(Host { root: root.clone() }) as Arc<dyn RuntimeHost>,
+        drivers,
+        RuntimeConfig {
+            attachments_dir: dir.path().join("att"),
+            start_wait: Duration::from_millis(600),
+            ..RuntimeConfig::default()
+        },
+    );
+    let s = rt
+        .create(
+            &"u1".into(),
+            &"w1".into(),
+            CreateRuntimeSessionReq {
+                provider: Some(RuntimeProvider::Claude),
+                cwd: Some(root),
+                ..CreateRuntimeSessionReq::default()
+            },
+        )
+        .await
+        .unwrap();
+    let f = Fixture { rt, rec, _dir: dir };
+    f.send(&s.id, RuntimePromptReq::of("hi")).await;
+    let switch = RuntimePromptReq {
+        provider: Some("codex".into()),
+        ..RuntimePromptReq::of("go")
+    };
+    let dropped = tokio::time::timeout(
+        Duration::from_millis(150),
+        f.rt.prompt_to_end(&s.id, &switch),
+    );
+    assert!(
+        dropped.await.is_err(),
+        "the request is dropped mid-handshake"
+    );
+    let live = f
+        .until(&s.id, "the switch to end", |st| {
+            !st.fresh_starting && st.starting == 0
+        })
+        .await;
+    {
+        let st = live.lock();
+        assert_eq!(st.session.provider, RuntimeProvider::Claude);
+        assert_eq!(st.session.native_thread_id.as_deref(), Some("native-1"));
+        assert!(st.handoff.is_none());
+        assert!(!st
+            .proj
+            .items
+            .values()
+            .any(|i| matches!(i.kind, TurnItemKind::SessionBoundary { .. })));
+    }
+    f.rt.flush(&s.id).await;
+    let stored = f.rt.repo().get(&s.id).await.unwrap().session;
+    assert_eq!(stored.provider, RuntimeProvider::Claude);
+}

@@ -368,3 +368,20 @@ pub(super) fn not_started(st: &State) -> Error {
         },
     )
 }
+
+impl AgentRuntime {
+    /// [`Self::prompt_with`] run to its end even when the caller goes away
+    /// (a page reload drops the HTTP request): a provider switch or fresh
+    /// start is otherwise left half-done in memory, neither committed nor
+    /// restored.
+    pub async fn prompt_to_end(
+        &self,
+        id: &Id,
+        req: &RuntimePromptReq,
+    ) -> Result<RuntimePromptResp> {
+        let (rt, id, req) = (self.clone(), id.clone(), req.clone());
+        tokio::spawn(async move { rt.prompt_with(&id, &req).await })
+            .await
+            .map_err(|e| Error::Internal(format!("the prompt task failed: {e}")))?
+    }
+}
