@@ -5,15 +5,12 @@
   // a login Otto has nothing for says so, with why. A percent is never shown
   // without its age once it is old (limitsText.ts keeps that rule).
   import { onMount } from 'svelte';
-  import { api } from '../../lib/api/client';
-  import { pollWhileVisible } from '../../lib/poll';
-  import { loadErrorText } from '../../lib/loadError';
+  import { limits } from '../../lib/stores/usageLimits.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import ClaudeCheckControls from './ClaudeCheckControls.svelte';
-  import type { LimitsResp } from '../../lib/api/types/usage-limits';
   import {
     ageText,
     barTone,
@@ -27,38 +24,16 @@
     windowText,
   } from './limitsText';
 
-  let data = $state<LimitsResp | null>(null);
-  let error = $state<string | null>(null);
-  let loading = $state(true);
-  /** The clock "resets in" and the stale verdict are read against; moves
-   *  with every poll (once a minute while the page is visible). */
-  let now = $state(Date.now());
-  let poller: { now(): void; stop(): void } | null = null;
-
-  onMount(() => {
-    poller = pollWhileVisible(
-      async (signal) => {
-        try {
-          data = await api.get<LimitsResp>('/usage/limits', signal);
-          error = null;
-        } catch (e) {
-          if (signal.aborted) return;
-          error = loadErrorText(e);
-          return false;
-        } finally {
-          loading = false;
-          now = Date.now();
-        }
-      },
-      { ms: 60_000 },
-    );
-    return () => poller?.stop();
-  });
+  // One shared poller (lib/stores/usageLimits.svelte.ts) — the Threads sidebar's meter reads it too.
+  onMount(() => limits.mount());
+  const data = $derived(limits.data);
+  const error = $derived(limits.error);
+  const loading = $derived(limits.loading);
+  const now = $derived(limits.now);
 
   const staleAfter = $derived.by(() => data?.stale_after_secs ?? 1800);
   function retry(): void {
-    loading = true;
-    poller?.now();
+    limits.refresh();
   }
 </script>
 
@@ -140,7 +115,7 @@
               {/if}
             {/if}
             {#if a.provider === 'claude' && a.check}
-              <ClaudeCheckControls row={a} check={a.check} {now} onresp={(r) => { data = r; error = null; now = Date.now(); }} />
+              <ClaudeCheckControls row={a} check={a.check} {now} onresp={(r) => limits.set(r)} />
             {/if}
           </li>
         {/each}

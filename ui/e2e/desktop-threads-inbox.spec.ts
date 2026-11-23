@@ -105,6 +105,7 @@ async function open(page: Page, focus: string, phone = false): Promise<void> {
   await expect(page.getByTestId(`runtime-thread-${focus}`)).toBeVisible({ timeout: 30_000 });
 }
 
+const SHOTS = process.env.OTTO_SHOTS_DIR ?? '';
 const row = (page: Page, key: string) => page.getByTestId(`thread-row-${ids[key]}`);
 const word = (page: Page, key: string) => page.getByTestId(`thread-status-${ids[key]}`);
 
@@ -225,7 +226,58 @@ test('pin and Move to History act at once with one Undo notice; ⌘Z undoes outs
   await expect(sideChat.getByTestId('side-chat-dismiss')).toBeVisible({ timeout: 15_000 });
 });
 
-const SHOTS = process.env.OTTO_SHOTS_DIR ?? '';
+test('the footer meter shows the focused agent’s tightest plan window and opens Usage', async ({ page }) => {
+  // The isolated daemon has no CLI login files, so its answer is stubbed with
+  // the daemon's own shape (GET /usage/limits, lib/api/types/usage-limits.ts).
+  let used = 62;
+  await page.route('**/api/v1/usage/limits', (route) => {
+    const now = Date.now();
+    const iso = (t: number) => new Date(t).toISOString();
+    void route.fulfill({
+      json: {
+        generated_at: iso(now),
+        stale_after_secs: 1800,
+        accounts: [
+          {
+            key: 'codex:default', provider: 'codex', account_id: null, label: 'Default Codex login', source: 'default', status: 'ok', reason: null, plan: 'pro',
+            taken_at: iso(now - 60_000), credits: null, limit_reached: null,
+            windows: [
+              { id: 'primary', name: '5-hour', window_minutes: 300, used_percent: used, left_percent: 100 - used, resets_at: iso(now + 7_200_000), reset_since_snapshot: false },
+              { id: 'secondary', name: 'Weekly', window_minutes: 10080, used_percent: 20, left_percent: 80, resets_at: iso(now + 86_400_000), reset_since_snapshot: false },
+            ],
+          },
+        ],
+      },
+    });
+  });
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await open(page, ids.idle);
+  const btn = page.getByTestId('threads-open-usage');
+  await expect(page.getByTestId('threads-usage-meter')).toHaveText('62%');
+  await expect(btn).toContainText('5h');
+  await expect(btn).toHaveAttribute('title', /5-hour: 38% left · resets in /);
+  await expect(btn).toHaveAttribute('title', /Weekly: 80% left/);
+  await expect(btn).not.toHaveClass(/warning|danger/);
+  if (SHOTS) for (const scheme of ['dark', 'light'] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await page.getByTestId('threads-sidebar').screenshot({ path: join(SHOTS, `after-meter-${scheme}.png`) });
+  }
+
+  // A Claude thread: no Claude numbers here, so the plain Usage icon.
+  await row(page, 'done').locator('.tr-main').click();
+  await expect(page.getByTestId('threads-usage-meter')).toHaveCount(0);
+  await expect(btn).toHaveAttribute('aria-label', 'Usage statistics');
+
+  // ≥ 80 % used is a warning (the next poll / a reload brings it).
+  used = 85;
+  await row(page, 'idle').locator('.tr-main').click();
+  await page.reload();
+  await expect(page.getByTestId('threads-usage-meter')).toHaveText('85%', { timeout: 30_000 });
+  await expect(btn).toHaveClass(/warning/);
+  await btn.click();
+  await expect(page.getByTestId('usage-remaining')).toBeVisible({ timeout: 30_000 });
+});
+
 
 test('screenshots: the sidebar, light and dark, desktop and phone', async ({ page, browser }, info) => {
   test.skip(!SHOTS, 'set OTTO_SHOTS_DIR to take screenshots');
