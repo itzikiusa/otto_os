@@ -45,8 +45,14 @@
 
   function measure(): void {
     if (!scroller) return;
-    const top = scroller.getBoundingClientRect().top;
     const atEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 4;
+    // Following the bottom (a streaming answer scrolls every frame): the last
+    // tick, without querying and measuring every message.
+    if (atEnd) {
+      cur = Math.max(0, ticks.length - 1);
+      return;
+    }
+    const top = scroller.getBoundingClientRect().top;
     cur = currentTick(ticks.map((t) => (el(t.id)?.getBoundingClientRect().top ?? NaN) - top), scroller.clientHeight, atEnd);
   }
 

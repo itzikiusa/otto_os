@@ -27,7 +27,7 @@
   import { toastError } from '../../../lib/toastError';
   import StageSlashPopup from '../StageSlashPopup.svelte';
   import { EmojiAssistView } from '../../../lib/components/emojiAssistLazy.svelte';
-  import { agentTasks } from './agentTasks';
+  import { sharedAgentTasks } from './agentTasks';
   import { askFromComposer, askTargets } from './askTargets.svelte';
   import { attachmentSupport, capsOf, takesFile } from './attachmentSupport';
   import { addComposerContext, assembleComposerMessage } from './composerContext';
@@ -147,12 +147,9 @@
   const dormant = $derived(session?.status === 'dormant');
   const needsRevive = $derived(closed || dormant);
   const childThreads = $derived(mapChildThreadSummaries(linkedChildren(Object.values(runtimeThreads.byId), sessionId)));
+  // Shared with the details card (sharedAgentTasks): computed once per change.
   const tasks = $derived(
-    agentTasks(
-      p?.items ?? [],
-      p?.session?.background_tasks ?? session?.background_tasks ?? [],
-      { output: p?.output ?? {}, childThreads },
-    ),
+    sharedAgentTasks(sessionId, p?.items ?? [], p?.session?.background_tasks ?? session?.background_tasks ?? [], { output: p?.output, childThreads }),
   );
   const background = $derived(tasks.running.filter((t) => t.background));
   const sessionError = $derived(deriveSessionError(draft.startError, p));

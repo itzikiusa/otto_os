@@ -92,6 +92,7 @@ fn release_locked(inner: &Arc<Inner>, live: &Live, st: &mut State) {
         return;
     };
     live.proc_ended.notify_waiters();
+    super::client_calls::drop_session(&st.session.id);
     stop_child(p, inner.config.close_grace);
     st.released = true;
     retire(inner, &st.session);

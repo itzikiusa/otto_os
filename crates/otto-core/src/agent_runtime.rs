@@ -347,9 +347,61 @@ pub enum ApprovalDecision {
 
 /// `ProviderApprovalOption`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ApprovalOptionWire", into = "ApprovalOptionWire")]
 pub struct ApprovalOption {
     pub decision: ApprovalDecision,
     pub label: String,
+}
+
+/// An option as stored and sent: `DeclineAlways` is written `decline` +
+/// `always: true`, so the build before it (no such decision; it ignores
+/// `always`) still reads the row on a rollback.
+#[derive(Serialize, Deserialize)]
+struct ApprovalOptionWire {
+    decision: ApprovalDecision,
+    label: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    always: bool,
+}
+
+impl From<ApprovalOptionWire> for ApprovalOption {
+    fn from(w: ApprovalOptionWire) -> Self {
+        let decision = match w.decision {
+            ApprovalDecision::Decline if w.always => ApprovalDecision::DeclineAlways,
+            d => d,
+        };
+        Self {
+            decision,
+            label: w.label,
+        }
+    }
+}
+
+impl From<ApprovalOption> for ApprovalOptionWire {
+    fn from(o: ApprovalOption) -> Self {
+        let always = o.decision == ApprovalDecision::DeclineAlways;
+        Self {
+            decision: if always {
+                ApprovalDecision::Decline
+            } else {
+                o.decision
+            },
+            label: o.label,
+            always,
+        }
+    }
+}
+
+/// A recorded decision as the build before reads it (`decline_always` →
+/// `decline`; the card says "Declined" either way).
+fn stored_decision<S: serde::Serializer>(
+    d: &Option<ApprovalDecision>,
+    s: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    match d {
+        Some(ApprovalDecision::DeclineAlways) => Some(ApprovalDecision::Decline).serialize(s),
+        d => d.serialize(s),
+    }
 }
 
 /// `OrchestrationV2ProviderFailure`.
@@ -756,7 +808,11 @@ pub struct RuntimeRequest {
     pub response_capability: ResponseCapability,
     pub created_at: DateTime<Utc>,
     pub resolved_at: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "stored_decision"
+    )]
     pub decision: Option<ApprovalDecision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancel_reason: Option<CancelReason>,
@@ -767,6 +823,11 @@ pub struct RuntimeRequest {
     pub question_title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answers: Option<Vec<QuestionAnswer>>,
+    /// A question only the person answers: an MCP server's (or an ACP
+    /// agent's) elicitation. Never passed to the agent that delegated a
+    /// subagent; `otto.thread_answer` refuses it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub for_person: bool,
 }
 
 /// Why a request was cancelled: the provider withdrew it (`agent` — Claude
@@ -2382,6 +2443,7 @@ mod tests {
                     questions: vec![],
                     question_title: None,
                     answers: None,
+                    for_person: false,
                 },
             },
             RuntimeEventBody::PlanUpdated {
@@ -2746,5 +2808,66 @@ mod tests {
         assert!(
             matches!(full, TurnItemKind::SessionBoundary { handoff: Some(h) } if h.turns == 1 && h.omitted_turns == 0)
         );
+    }
+
+    /// A rollback reads an ACP "Never" option and a request answered with it:
+    /// the build before had no `decline_always`, so it is stored as `decline`
+    /// with `always: true` (ignored there) and read back as `DeclineAlways`.
+    #[test]
+    fn a_decline_always_option_reads_on_the_previous_build() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        #[serde(rename_all = "snake_case")]
+        enum OldDecision {
+            Accept,
+            AcceptForSession,
+            AcceptAlways,
+            Decline,
+            Cancel,
+        }
+        #[derive(Debug, Deserialize)]
+        struct OldOption {
+            decision: OldDecision,
+            #[allow(dead_code)]
+            label: String,
+        }
+        #[derive(Debug, Deserialize)]
+        struct OldRequest {
+            decision: Option<OldDecision>,
+        }
+        let never = ApprovalOption {
+            decision: ApprovalDecision::DeclineAlways,
+            label: "Never".into(),
+        };
+        let stored = serde_json::to_value(&never).unwrap();
+        let old: OldOption = serde_json::from_value(stored.clone()).unwrap();
+        assert_eq!(old.decision, OldDecision::Decline);
+        assert_eq!(
+            serde_json::from_value::<ApprovalOption>(stored).unwrap(),
+            never
+        );
+        let plain = ApprovalOption {
+            decision: ApprovalDecision::Decline,
+            label: "No".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap(),
+            json!({"decision": "decline", "label": "No"})
+        );
+        let req = RuntimeRequest {
+            id: "r".into(),
+            turn_id: None,
+            kind: RequestKind::Permission,
+            status: RuntimeRequestStatus::Resolved,
+            response_capability: ResponseCapability::Live,
+            created_at: ts(),
+            resolved_at: None,
+            decision: Some(ApprovalDecision::DeclineAlways),
+            cancel_reason: None,
+            questions: Vec::new(),
+            question_title: None,
+            answers: None,
+        };
+        let old: OldRequest = serde_json::from_value(serde_json::to_value(&req).unwrap()).unwrap();
+        assert_eq!(old.decision, Some(OldDecision::Decline));
     }
 }

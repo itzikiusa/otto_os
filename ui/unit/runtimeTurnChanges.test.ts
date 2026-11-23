@@ -9,7 +9,7 @@ const hook =
   '  return n(s, c);' +
   '}';
 register('data:text/javascript,' + encodeURIComponent(hook));
-const { changeTotals, diffCounts, turnChanges } = await import('../src/modules/threads/runtime/turnChanges.ts');
+const { changeTotals, diffCounts, turnChanges, turnChangesByTurn } = await import('../src/modules/threads/runtime/turnChanges.ts');
 
 const fc = (id: string, file_name: string, extra: Record<string, unknown> = {}) =>
   ({ id, turn_id: 't1', ordinal: 0, status: 'completed', title: null, started_at: null, completed_at: null, updated_at: '', type: 'file_change', file_name, ...extra }) as never;
@@ -34,6 +34,11 @@ test('a turn’s files: one row per file, relative paths, failed and other turns
     fc('6', '/repo/sub.ts', { parent_item_id: 'sa', diff_str: '+1' }),
   ];
   const files = turnChanges(items, 't1', '/repo');
+  // The one-pass form (the timeline's cards) agrees for every turn.
+  const all = turnChangesByTurn(items, '/repo');
+  assert.deepEqual(all.get('t1'), files);
+  assert.deepEqual(all.get('t2'), turnChanges(items, 't2', '/repo'));
+  assert.deepEqual([...all.keys()].sort(), ['t1', 't2']);
   assert.deepEqual(files, [
     { path: 'src/a.ts', added: 3, removed: 2 },
     { path: 'README.md', added: null, removed: null },

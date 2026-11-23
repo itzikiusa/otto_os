@@ -15,7 +15,7 @@ import { inboxLive } from './threadInbox.svelte';
 import { threadOrigin } from './threadOrigins';
 import { threadNav, threadRowState } from './threadNav.svelte';
 import { switcherOrder, wordTone } from './threadSwitcher';
-import { isThreadSession, projectNameFromCwd } from './threadsHelpers';
+import { isThreadSession, projectName } from './threadsHelpers';
 import { threadMeta } from './threadMeta.svelte';
 import { threads } from './threadsStore.svelte';
 
@@ -43,7 +43,7 @@ export const threadSwitcherSource: PaletteThreadSource = {
           workingSince: cls === 'working' ? (inboxLive.since[s.id] ?? null) : null,
           now: cls === 'working' ? now() : 0,
         }) ?? rel(s.last_active_at);
-      return { id: s.id, title: s.title, project: s.cwd ? projectNameFromCwd(s.cwd, '') : '', word, tone: wordTone(word) };
+      return { id: s.id, title: s.title, project: s.cwd ? projectName(s.cwd, '') : '', word, tone: wordTone(word) };
     });
   },
   open(id, beside) {
@@ -54,7 +54,7 @@ export const threadSwitcherSource: PaletteThreadSource = {
     threads.startNewThread({ workspaceId: ws.currentId, draft });
   },
   warm() {
-    for (const { s, cls } of live()) if (isRuntimeThread(s) && (cls === 'needs' || cls === 'working')) inboxLive.ensure(s.id);
+    for (const { s, cls } of live()) if (isRuntimeThread(s) && cls === 'needs') inboxLive.ensure(s.id);
   },
 };
 

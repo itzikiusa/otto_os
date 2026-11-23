@@ -554,6 +554,7 @@ impl CodexDriver {
                             .get("itemId")
                             .and_then(Value::as_str)
                             .map(|i| self.item_id_for_thread(req_tid, i)),
+                        for_person: false,
                     });
                 }
                 Err(message) => step.write(
@@ -655,6 +656,8 @@ impl CodexDriver {
                         title,
                         questions,
                         tool_item_id: None,
+                        // An MCP server's elicitation.
+                        for_person: true,
                     });
                 }
                 Err(why) => step.write(

@@ -50,9 +50,10 @@
       const approvals = pendingApprovals(p)
         .filter((a) => a.kind !== 'question')
         .map((approval) => ({ kid: k, approval, question: null }));
-      const questions = escalated
-        ? p.requests.filter((r) => r.status === 'pending' && r.kind === 'question' && r.response_capability.type === 'live').map((question) => ({ kid: k, approval: null, question }))
-        : [];
+      // An elicitation (`for_person`) never goes to this thread's agent: the person's at once.
+      const questions = p.requests
+        .filter((r) => r.status === 'pending' && r.kind === 'question' && r.response_capability.type === 'live' && (escalated || r.for_person))
+        .map((question) => ({ kid: k, approval: null, question }));
       return [...mcp, ...approvals, ...questions];
     }),
   );

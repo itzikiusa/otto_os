@@ -77,7 +77,7 @@ async function idle(thread: Locator): Promise<void> {
   await expect(thread.getByTestId('runtime-send')).toHaveAttribute('data-delivery', 'send', { timeout: 30_000 });
 }
 
-test('the agent switching its own mode moves the access chip', async ({ page }, info) => {
+test('the agent widening its own mode never widens the thread', async ({ page }, info) => {
   test.skip(!desktop(info.project.name), 'desktop-browser project only');
   test.setTimeout(90_000);
   const thread = await open(page, 'agy', 'ACP mode');
@@ -90,9 +90,11 @@ test('the agent switching its own mode moves the access chip', async ({ page }, 
   };
   await checked('Supervised');
   await say(thread, 'agent-mode accept-edits');
+  // Wider than the thread's access: never silently — Otto keeps the thread on
+  // Supervised and says so in one line.
   await idle(thread);
-  await expect(thread.getByText(/Access:.*auto-accept-edits/i).last()).toBeVisible({ timeout: 20_000 });
-  await checked('Auto-accept edits');
+  await expect(thread.getByText(/switched itself to accept-edits · Otto kept this thread on approval-required/)).toBeVisible({ timeout: 20_000 });
+  await checked('Supervised');
 });
 
 test('url elicitation names the URL and opens it once chosen', async ({ page }, info) => {

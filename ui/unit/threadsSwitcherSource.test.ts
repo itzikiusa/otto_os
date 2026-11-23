@@ -27,7 +27,7 @@ function rows(unreadById: Record<string, boolean>) {
     './threadOrigins': { threadOrigin: () => 'main' },
     './threadNav.svelte': { threadNav: { order: ['a'] }, threadRowState: () => ({ key: 'idle', label: 'Idle' }) },
     './threadSwitcher': switcher,
-    './threadsHelpers': { isThreadSession: () => true, projectNameFromCwd: () => 'p' },
+    './threadsHelpers': { isThreadSession: () => true, projectName: () => 'p' },
     './threadMeta.svelte': { threadMeta: { unread: (id: string) => unreadById[id] === true } },
     './threadsStore.svelte': { threads: { focusedSessionId: null, newDraftMode: false } },
   }) as { threadSwitcherSource: { rows: () => { id: string; word: string }[] } };
