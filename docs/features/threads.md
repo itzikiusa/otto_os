@@ -31,12 +31,51 @@ carry into another conversation.
 
 ## Layout & Workflows
 
-0. **Top bar:** four controls — sidebar toggle, a `project / thread`
-   breadcrumb (with the **Related threads** chip while the thread has any),
-   the **right panel**, and ⋯. The ⋯ holds the thread's actions (rename, pin,
-   search, system notes, Related threads…, Continue on phone, Move to History,
-   close), then New thread, Terminal drawer and **View ▸** (single · split ·
-   grid, Project card; a phone gets no View). Back / Forward are ⌘⇧← / ⌘⇧→.
+0. **Top bar:** four controls — sidebar toggle, the project's two-letter
+   badge and a `project / thread` breadcrumb in reading size (the title
+   bold; double-click or F2 renames), the **right panel**, and ⋯. The ⋯ holds
+   the thread's actions (rename, pin, search, system notes, **Send to another
+   thread…**, Continue on phone, Move to History, close), then New thread,
+   Terminal drawer and **View ▸** (single · split · grid, **Thread details**
+   while the card can float; a phone gets no View). Back / Forward are ⌘⇧← /
+   ⌘⇧→.
+   - **Thread details** (`ThreadDetailsCard`): one card for the thread's
+     facts — the folder with **Open in ▾** (Files, Git, a terminal thread, copy
+     path, and the folder's **project scripts**: run one, add one, remove
+     one), the branch ▾, **one git action** for the checkout's state
+     (**Commit** → **Push** / **Publish branch** → **Create PR** → **PR #N**;
+     the chevron beside it holds all three; push asks where it goes first and
+     Create PR uses the Git sheet that names the destination; the row hides
+     when there is nothing to do), **Changes +N −M** ("No changes" at zero;
+     opens Changes), then **Subagents · N running**: the thread it works under
+     first ("↑ parent") when it is itself a subagent, each running subagent
+     with its agent's glyph, status word (Working · Needs you · Done · Failed ·
+     Stopped), elapsed time and **Stop**, and the rest under **Previous**. A
+     row with its own thread opens it (on a phone the drawer gives way);
+     a turn's own subagent opens Agents & tasks. Background commands and
+     timers stay in Agents & tasks. It works the same for terminal threads
+     (folder, git, their delegated threads).
+   - It **floats top-right** of the conversation while the right panel is
+     closed and one conversation (or the New thread stage) has a whole
+     reading column left beside it; the conversation moves over
+     (`--thread-card-reserve` on the stage), so the card never covers a
+     message. Anywhere else (a split, a narrower window, the right panel open,
+     a phone or tablet) the same card heads the right panel / details drawer.
+     Its **×** hides the floating card on this device; ⋯ › View › **Thread
+     details** brings it back.
+   - **⌘K opens on your threads** (`lib/paletteThreads.svelte.ts`,
+     `threadSwitcher.ts`, `threadSwitcherSource.svelte.ts`): in Threads the
+     first group of the ⌘K bar (and of the phone's command sheet, More ›
+     Commands) is **Threads**, ordered and worded by the sidebar's inbox
+     (`threadInbox.ts`): what needs you (**Approval** / **Question**, read
+     once per waiting thread when the bar opens), **Failed**, finished unread
+     (**Done**), then **Working**, then the rest, in the sidebar's order inside
+     each, with the project per row and the order held while it is open.
+     Typing filters threads by title and project with the commands; the last
+     command row is **New thread: <query>** (the New thread stage with the
+     query as the draft). Enter opens in the focused pane, ⌘↵ beside it when
+     a split is open. Outside Threads the bar gains **Threads needing you**
+     only while one waits (there the word is "Needs you").
    Single view has no
    separate pane header. See
    [Threads layout](./threads-structured-runtime.md#threads-layout).
@@ -101,18 +140,26 @@ carry into another conversation.
      or workspace) and a single composer: attach a file (`@path`), one agent
      chip holding the harness, model and reasoning effort (plus "Start without
      a prompt" and "Open beside current thread"), and a round send button.
-   - Under it: **Current checkout** (or another git worktree of the repo), the
-     branch (switch or create), the interaction mode (Full access ·
+   - Under it: **Current checkout** (or another git worktree of the repo, or
+     **New worktree** — see below), the branch (switch or create), the interaction mode (Full access ·
      Auto-accept edits · Plan, `⇧⇥`) and the access chip (below). A
      structured thread started in **Plan** stays in Plan: every follow-up asks
      for a plan until you turn **Plan** off in the thread's composer (or press
      `⇧⇥` there). The mode is kept in this window.
-   - On wide windows a **project card** floats top-right; it also heads the
-     right panel: folder, **Open in…** (Files, Git, a terminal thread, copy
-     path), **project scripts** (saved per folder in this browser; running one
-     opens a shell thread), branch, **Create PR** (the Git Create-PR sheet,
-     which names the GitHub/Bitbucket destination before sending) and
-     **Changes +N −M** (opens the Changes tab).
+   - **New worktree** (the checkout chip's menu, or **Use a new worktree** on
+     the "another thread is working in this checkout" line) records the
+     intent only: the chip reads **New worktree from <base>** and nothing is
+     asked. Sending the first message names the branch from it — a short
+     kebab slug of its first words, under the repo's own prefix when most of
+     its branches use one (`feat/…`), `-2`, `-3` on a collision, a dated
+     `thread-YYYY-MM-DD-HHMM` when started without a prompt
+     (`worktreeBranch.ts`) — creates it (`POST /repos/{id}/worktrees`) and
+     then starts the thread there, whichever agent it is. **Name the branch…**
+     in the same menu sets the name (prefilled with the generated one).
+     Progress shows under the composer; a failure keeps the draft and its
+     attachments and shows the error with **Retry**.
+   - The thread details card (above) floats top-right where there is room
+     and heads the right panel otherwise.
 3. **Multi-Session Split & Grid Canvas (`ThreadCanvas` / `ThreadPane`):**
    - Switch between **single**, **Split** (2-up side-by-side), and **Grid**
      (2×2 up to 4 live threads) from the top-bar ⋯ or `⌘K`.
@@ -156,9 +203,10 @@ carry into another conversation.
      Workspace DB/SSH connections, live `db_mcp_activity` stream whenever an
      agent executes `otto_db_query`, and **Open side-by-side** to launch
      Database Explorer in Otto's split pane.
-   - Session-to-session messages, broadcasts and **Start a room** live in the
-     header's **Related threads** popover (`POST /sessions/{id}/message` with
-     `from_session_id` for a terminal thread).
+   - Session-to-session messages, broadcasts, opening a related thread beside
+     and **Start a room** live in ⋯ › **Send to another thread…**
+     (`POST /sessions/{id}/message` with `from_session_id` for a terminal
+     thread); the thread's subagents are listed in the details card.
 
 ## Recoverable runtime drafts
 

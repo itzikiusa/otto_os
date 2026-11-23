@@ -123,8 +123,14 @@ test('a council is a group of threads: nested rows, side by side, synthesize and
   await expect(sidebar.getByTestId('thread-row-rt_s2')).toHaveText(/codex/);
   await expect(sidebar.getByTestId('thread-row-rt_s2')).not.toHaveText(/Cache plan/);
 
-  // The Related chip lists the other seats (one tap switches seats on a phone).
-  await expect(page.getByTestId('threads-related-chip')).toHaveText(/2/);
+  // The details card lists the other seats as subagents (one tap opens one).
+  await page.getByTestId('threads-toggle-inspector').click();
+  const seats = page.getByTestId('threads-inspector').getByTestId('details-subagents');
+  await expect(seats).toBeVisible();
+  // Seats that already answered sit under Previous.
+  if (await seats.getByTestId('details-previous').count()) await seats.getByTestId('details-previous').click();
+  await expect(seats.getByTestId('details-subagent')).toHaveCount(2);
+  await page.getByTestId('threads-toggle-inspector').click();
 
   // ⋯ › Open council side by side: three seats in the Grid.
   await (await threadMenu(page, 'Open council side by side')).click();

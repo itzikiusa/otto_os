@@ -33,6 +33,8 @@
   import { COPY_FAILED_BODY, copyText } from '../lib/clipboard';
   import { openHitInApp, runHitPowerAction } from '../lib/searchHitOpen';
   import { hitActions, hitContext, resolveHitKeyAction, type HitAction } from '../lib/floatingBar';
+  import { hitIcon } from '../lib/components/floatingBarRowIcon';
+  import { threadCommands } from '../lib/paletteThreads.svelte';
 
   const HIT_ACTION_LABEL: Record<HitAction, string> = {
     open: 'Open', rerun: 'Run again', review: 'Review', 'copy-context': 'Copy context', 'send-to-agent': 'Send to agent',
@@ -115,19 +117,6 @@
     }
   }
 
-  /** Icon name for a search hit kind. */
-  function hitIcon(kind: string): IconName {
-    switch (kind) {
-      case 'story': return 'ticket';
-      case 'workflow': return 'merge';
-      case 'api_request': return 'zap';
-      case 'memory': return 'db';
-      case 'repo': return 'branch';
-      case 'broker_cluster': return 'box';
-      default: return 'file';
-    }
-  }
-
   /** Run a search hit's action. `open` navigates the way the floating bar
    *  does (`openHitInApp`); copy-context copies the hit's description; send-to-
    *  agent hands it to the plain-English box as a draft. */
@@ -153,8 +142,10 @@
 
   // Frecency-boosted fuzzy ranking, shared with the floating bar
   // (lib/commandSearch.ts).
+  // Threads first (lib/paletteThreads.svelte.ts): what needs you, frozen while open; "New thread: …" last.
+  const threadPick = threadCommands(() => (ui.paletteOpen && mode === 'commands' ? query : null), () => close());
   const filtered: { cmd: Command; score: number }[] = $derived(
-    rankCommands(registry.all, query, loadFrecency()),
+    [...threadPick.commands, ...rankCommands(registry.all, query, loadFrecency()).map((r) => r.cmd), ...threadPick.tail].map((cmd) => ({ cmd, score: 0 })),
   );
 
   // Fire a debounced cross-module search whenever the query changes in commands
@@ -184,6 +175,7 @@
         // Hand focus back to whatever had it (a terminal, a list row) on close.
         returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         mode = ui.paletteMode;
+        threadPick.freeze();
         query = '';
         selected = 0;
         plan = null;
@@ -315,6 +307,7 @@
     } else if (e.key === 'Enter') {
       e.preventDefault();
       const item = filtered[selected];
+      if (item && (e.metaKey || e.ctrlKey) && threadPick.openBeside(item.cmd.id)) return;
       if (item) void run(item.cmd);
       else if (askRow && selected === filtered.length) askOtto();
       else if (searchHits[selected - hitBase]) hitDefault(searchHits[selected - hitBase], e);
@@ -501,6 +494,7 @@
         <div class="pal-status" id="pal-status" role="status" class:pal-error={!!searchError}>{#if searchError}{statusText} <button class="btn small" onclick={() => scheduleSearch(query)}>Retry</button>{:else if searchHits.length > 0 && !searchBusy}<span class="sr-only">{statusText}</span>{:else}{statusText}{/if}</div>
         <div class="pal-list" role="listbox" id="pal-listbox" aria-label="Commands" bind:this={listEl}>
           {#each filtered as item, i (item.cmd.id)}
+            {#if i === 0 && item.cmd.id.startsWith('thread:') && item.cmd.id !== 'thread:new'}<div class="pal-section-header pal-first" aria-hidden="true">{threadPick.label}</div>{/if}
             <button
               id="pal-opt-{i}"
               tabindex="-1"
@@ -508,13 +502,14 @@
               class:selected={i === selected}
               role="option"
               aria-selected={i === selected}
+              data-cmd={item.cmd.id}
               onmouseenter={() => (selected = i)}
               onclick={() => run(item.cmd)}
             >
               <span class="pal-item-title" title={item.cmd.title.length > 48 ? item.cmd.title : undefined}>{item.cmd.title}</span>
               {#if item.cmd.detail}<span class="pal-detail">{item.cmd.detail}</span>{/if}
               <span class="grow"></span>
-              {#if item.cmd.group}<span class="pal-group">{item.cmd.group}</span>{/if}
+              {#if item.cmd.group}<span class="pal-group" data-tone={threadPick.tone(item.cmd.id)}>{item.cmd.group}</span>{/if}
               {#if item.cmd.shortcut}<kbd>{item.cmd.shortcut}</kbd>{/if}
             </button>
           {/each}
@@ -743,6 +738,11 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
+  .pal-group[data-tone='warning'] { color: var(--warning); font-weight: 600; }
+  .pal-group[data-tone='danger'] { color: var(--danger); font-weight: 600; }
+  .pal-group[data-tone='success'] { color: var(--success); }
+  .pal-section-header.pal-first { border-top: 0; margin-top: 0; }
+  @media (pointer: coarse) { .pal-item { height: auto; min-height: 44px; } } /* finger-sized rows */
   .pal-detail {
     font-size: var(--fs-s);
     color: var(--text-dim);

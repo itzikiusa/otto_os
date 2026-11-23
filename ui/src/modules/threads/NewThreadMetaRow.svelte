@@ -25,6 +25,10 @@
     planSupported?: boolean;
     interactionMode: InteractionMode;
     onPickWorktree: (path: string, branch: string | null, repo: Repo) => void;
+    /** "New worktree" chosen: made when the first message is sent (its base branch, and the name given, if any). */
+    newWorktree?: { base: string | null; branch: string | null } | null;
+    onNewWorktree?: (base: string | null) => void;
+    onNameBranch?: () => void;
     onOpenProjectMenu: (anchor: HTMLElement) => void;
     onToggleBeside: () => void;
     onOpenModeMenu: (anchor: HTMLButtonElement) => void;
@@ -44,6 +48,9 @@
     planSupported = false,
     interactionMode,
     onPickWorktree,
+    newWorktree = null,
+    onNewWorktree,
+    onNameBranch,
     onOpenProjectMenu,
     onToggleBeside,
     onOpenModeMenu,
@@ -57,13 +64,23 @@
       type="button"
       class="nt-meta-btn"
       aria-haspopup="menu"
-      title="Run in the current checkout or another worktree"
+      title={newWorktree ? 'A new worktree and branch, made when you send' : 'Run in the current checkout or another worktree'}
       data-testid="new-thread-checkout"
       onclick={(e) =>
-        void openCheckoutMenu(e.currentTarget, repo, cleanCwd, (path, br) => onPickWorktree(path, br, repo), threadsHere)}
+        void openCheckoutMenu(e.currentTarget, repo, cleanCwd, (path, br) => onPickWorktree(path, br, repo), threadsHere, {
+          pending: !!newWorktree,
+          onNew: (base) => onNewWorktree?.(base),
+          onName: () => onNameBranch?.(),
+        })}
     >
-      <Icon name={onWorktree && !cleanCwd.startsWith(repo.path) ? 'worktree' : 'folder'} size={13} />
-      <span class="ellipsis">{onWorktree && !cleanCwd.startsWith(repo.path) ? projectNameFromCwd(cleanCwd) : 'Current checkout'}</span>
+      {#if newWorktree}
+        <Icon name="worktree" size={13} />
+        <span class="ellipsis">New worktree</span>
+        <span class="nt-meta-hint mono ellipsis" dir="ltr">{newWorktree.branch ?? (newWorktree.base ? `from ${newWorktree.base}` : '')}</span>
+      {:else}
+        <Icon name={onWorktree && !cleanCwd.startsWith(repo.path) ? 'worktree' : 'folder'} size={13} />
+        <span class="ellipsis">{onWorktree && !cleanCwd.startsWith(repo.path) ? projectNameFromCwd(cleanCwd) : 'Current checkout'}</span>
+      {/if}
     </button>
   {:else}
     <button
@@ -95,7 +112,7 @@
     </button>
   {/if}
 
-  {#if repo && branch}
+  {#if repo && branch && !newWorktree}
     <button
       type="button"
       class="nt-meta-btn mono"
@@ -171,12 +188,21 @@
     font-size: var(--fs-s);
     cursor: pointer;
   }
+  @media (pointer: coarse) {
+    .nt-meta-btn {
+      block-size: 44px;
+    }
+  }
   .nt-meta-btn:hover:not(:disabled) {
     background: var(--hover);
     color: var(--text);
   }
   .nt-meta-btn:disabled {
     cursor: default;
+  }
+  .nt-meta-hint {
+    color: var(--text-dim);
+    opacity: 0.8;
   }
   .nt-meta-btn.on {
     color: var(--accent-text);

@@ -793,5 +793,4 @@ class ThreadsStore {
     this.peerEvents = [item, ...this.peerEvents].slice(0, MAX_PEER_EVENTS);
   }
 }
-
 export const threads = new ThreadsStore();
