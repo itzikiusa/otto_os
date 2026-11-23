@@ -91,13 +91,20 @@ fn council_title(title: Option<&str>, prompt: &str) -> String {
     }
 }
 
-/// The council's own title from seat 1's: "<title> · Seat 1 · <who>"
-/// (before the seat numbers, "<title> · <who>").
+/// The compared threads' own title from the first one's: "<title> · 1 ·
+/// <who>" — and, for rows made before, "<title> · Seat 1 · <who>" or
+/// (before numbers) "<title> · <who>".
 fn council_base(seat_title: &str) -> &str {
-    seat_title
-        .rsplit_once(" · Seat ")
-        .or_else(|| seat_title.rsplit_once(" · "))
-        .map_or(seat_title, |(b, _)| b)
+    if let Some((b, _)) = seat_title.rsplit_once(" · Seat ") {
+        return b;
+    }
+    let Some((head, _who)) = seat_title.rsplit_once(" · ") else {
+        return seat_title;
+    };
+    match head.rsplit_once(" · ") {
+        Some((b, n)) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => b,
+        _ => head,
+    }
 }
 
 /// What a council thread was started on (its `meta.council` and title).
@@ -245,7 +252,7 @@ fn synthesis_prompt(answers: &[SeatAnswer]) -> String {
             Some(m) => format!("{} ({m})", a.provider),
             None => a.provider.to_string(),
         };
-        p.push_str(&format!("\n## Seat {} — {who}\n\n", a.seat));
+        p.push_str(&format!("\n## Answer {} — {who}\n\n", a.seat));
         if !same {
             p.push_str(&format!("Asked: {}\n\n", a.question.trim()));
         }
@@ -354,7 +361,7 @@ impl AgentRuntime {
                 title_auto: false,
                 provider: Some(*provider),
                 cwd: req.cwd.clone(),
-                title: Some(format!("{base} · Seat {n} · {}", pick.title())),
+                title: Some(format!("{base} · {n} · {}", pick.title())),
                 model: seat.model.clone(),
                 access_mode: Some(RuntimeAccessMode::ApprovalRequired),
                 meta: Some(council_meta(&council, n as u32, CouncilRole::Seat, pick)),
@@ -559,7 +566,7 @@ impl AgentRuntime {
                 "no seat has answered yet — nothing to synthesize".into(),
             ));
         }
-        let title = format!("{} · synthesis", council_base(&c.root.title));
+        let title = format!("{} · compared", council_base(&c.root.title));
         let effort = req.effort.filter(|e| !e.trim().is_empty());
         let pick = SeatPick::new(
             judge_provider,
@@ -588,6 +595,18 @@ impl AgentRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_base_title_reads_new_and_old_rows() {
+        assert_eq!(council_base("Cache choice · 2 · Codex"), "Cache choice");
+        assert_eq!(
+            council_base("Cache choice · Seat 3 · Claude High"),
+            "Cache choice"
+        );
+        assert_eq!(council_base("Cache choice · claude"), "Cache choice");
+        assert_eq!(council_base("v1 · 2 · beta · 1 · Codex"), "v1 · 2 · beta");
+        assert_eq!(council_base("Plain"), "Plain");
+    }
 
     #[test]
     fn titles_labels_and_errors_name_the_seat() {
@@ -634,8 +653,8 @@ mod tests {
         ]);
         assert!(p.contains("2 agents were asked the same question"));
         assert!(p.contains("## The question\n\nWhich cache?"));
-        assert!(p.contains("## Seat 1 — claude (opus)\n\nRedis"));
-        assert!(p.contains("## Seat 2 — codex\n\n(no answer: its turn ended failed)"));
+        assert!(p.contains("## Answer 1 — claude (opus)\n\nRedis"));
+        assert!(p.contains("## Answer 2 — codex\n\n(no answer: its turn ended failed)"));
         assert!(!p.contains("Asked:"), "one shared question is not repeated");
         assert!(
             !p.contains("may be incomplete"),
@@ -696,7 +715,7 @@ mod tests {
             answer(2, "Why not Memcached?", "Fewer types", "completed"),
         ]);
         assert!(!p.contains("## The question\n"), "{p}");
-        assert!(p.contains("## Seat 1 — claude (opus)\n\nAsked: Which cache?\n\nRedis"));
-        assert!(p.contains("## Seat 2 — codex\n\nAsked: Why not Memcached?\n\nFewer types"));
+        assert!(p.contains("## Answer 1 — claude (opus)\n\nAsked: Which cache?\n\nRedis"));
+        assert!(p.contains("## Answer 2 — codex\n\nAsked: Why not Memcached?\n\nFewer types"));
     }
 }

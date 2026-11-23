@@ -2,7 +2,7 @@
 // each row's answer for this tab: Agents & tasks, the queue bar's "Stop all"
 // and a child-thread card read it. The words live in taskStop.ts.
 import { api } from '../../../lib/api/client';
-import type { RuntimeInterruptResp, RuntimeTaskStopResp, RuntimeTasksStopResp } from '../../../lib/api/types';
+import type { FamilyStopResp, RuntimeInterruptResp, RuntimeTaskStopResp, RuntimeTasksStopResp } from '../../../lib/api/types';
 import { toasts } from '../../../lib/toast.svelte';
 import { stopFailure, stopStateOf, stopSummary, type StopState } from './taskStop';
 
@@ -108,12 +108,14 @@ export async function stopThreadWork(id: string, work: { turnRunning: boolean; t
   else toasts.error(s.title, s.body);
 }
 
-/** The composer's Stop: interrupt the turn; an answer that nothing ran
- *  (only background work is left) is said, not swallowed. */
-export async function interruptTurn(id: string): Promise<void> {
-  const r = await api.post<RuntimeInterruptResp | undefined>(`/runtime-sessions/${encodeURIComponent(id)}/interrupt`);
-  if (r && r.interrupted === false) {
-    const n = r.background_tasks ?? 0;
-    toasts.info('No turn was running', n > 0 ? 'Background work keeps running — stop it from the bar above the composer or in Agents & tasks.' : undefined);
-  }
+/** One Stop for a thread and its subagents (`POST …/stop-family`): its
+ *  turn and every open subagent's turn and background work; `background`
+ *  (the waiting line's Stop) also its own background work. The composer's
+ *  Stop uses it; a Stop that found nothing running says so. */
+export async function stopFamily(id: string, background = false): Promise<void> {
+  const r = await api.post<FamilyStopResp | undefined>(`/runtime-sessions/${encodeURIComponent(id)}/stop-family`, { background });
+  if (r && r.turns === 0 && r.tasks === 0) toasts.info('Nothing was running');
 }
+
+/** The composer's Stop. */
+export const interruptTurn = (id: string): Promise<void> => stopFamily(id);

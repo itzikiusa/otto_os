@@ -4250,10 +4250,10 @@ mod tests {
     /// tools (otto_steer_production, otto_redraw_production_item,
     /// otto_revert_production, otto_rebuild_production_scene) and project_id on
     /// otto_create_production (hidden from narrow sessions).
-    const TOOLS_LIST_BYTE_BUDGET: usize = 110_500;
+    const TOOLS_LIST_BYTE_BUDGET: usize = 110_900; // +otto_thread_answer
     /// A review-type session (R2 per-source scoping): 52_595 after slim-app cleanup.
     /// 56_895 with otto_request_secret (a thread's private secret card).
-    const NARROW_TOOLS_LIST_BYTE_BUDGET: usize = 57_000; // +otto_thread_*, +otto_personal_agent_*, +otto_request_secret
+    const NARROW_TOOLS_LIST_BYTE_BUDGET: usize = 57_400; // +otto_thread_* (incl. thread_answer), +otto_personal_agent_*, +otto_request_secret
 
     /// A Ctx pointing at an unreachable base; used by the no-upstream tests above
     /// (which never actually call out). Audit disabled.

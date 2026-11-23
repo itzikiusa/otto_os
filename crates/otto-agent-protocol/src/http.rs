@@ -11,9 +11,10 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use otto_core::agent_runtime::{
     validate_thread_meta, AskChildReq, AskChildResp, CouncilResp, CreateCouncilReq,
-    CreateRuntimeSessionBody, OpenPeerReq, PeerInfo, PeerMessageReq, PeerReply, QueuedDeliverReq,
-    RuntimePromptReq, RuntimePromptResp, RuntimeReplay, RuntimeRequestRespondReq, RuntimeSession,
-    SynthesizeCouncilReq, TurnItem, UnqueuePromptResp, UpdateRuntimeSessionReq,
+    CreateRuntimeSessionBody, FamilyStopReq, FamilyStopResp, OpenPeerReq, PeerInfo, PeerMessageReq,
+    PeerReply, QueuedDeliverReq, RuntimePromptReq, RuntimePromptResp, RuntimeReplay,
+    RuntimeRequestRespondReq, RuntimeSession, SubagentTarget, SynthesizeCouncilReq, TurnItem,
+    UnqueuePromptResp, UpdateRuntimeSessionReq,
 };
 use otto_core::api::Problem;
 use otto_core::auth::{AuthContext, AuthUser};
@@ -138,9 +139,18 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
             "/runtime-sessions/{id}/peers",
             get(peers::<S>).post(open_peer::<S>),
         )
+        .route("/runtime-sessions/{id}/stop-family", post(stop_family::<S>))
+        .route(
+            "/runtime-sessions/{id}/subagent-targets",
+            get(subagent_targets::<S>),
+        )
         .route(
             "/runtime-sessions/{id}/peers/{peer}/message",
             post(message_peer::<S>),
+        )
+        .route(
+            "/runtime-sessions/{id}/peers/{peer}/answer",
+            post(answer_peer::<S>),
         )
         .route(
             "/runtime-sessions/{id}/peers/{peer}/reply",
@@ -207,6 +217,33 @@ async fn peers<S: RuntimeCtx>(
     Ok(Json(ctx.agent_runtime().peers(&id).await?))
 }
 
+/// POST /runtime-sessions/{id}/stop-family — one Stop for it and its subagents.
+async fn stop_family<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Id>,
+    body: Option<Json<FamilyStopReq>>,
+) -> ApiResult<Json<FamilyStopResp>> {
+    require_human(&ctx, &auth)?;
+    authorized(&ctx, &user, &id).await?;
+    let background = body.is_some_and(|b| b.background);
+    Ok(Json(
+        ctx.agent_runtime().stop_family(&id, background).await?,
+    ))
+}
+
+/// GET /runtime-sessions/{id}/subagent-targets — who it may delegate to.
+async fn subagent_targets<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<Vec<SubagentTarget>>> {
+    as_thread(&ctx, &user, &auth, &id).await?;
+    Ok(Json(ctx.agent_runtime().subagent_targets(&id).await?))
+}
+
 /// POST /runtime-sessions/{id}/peers — open a linked thread.
 async fn open_peer<S: RuntimeCtx>(
     State(ctx): State<S>,
@@ -214,17 +251,36 @@ async fn open_peer<S: RuntimeCtx>(
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<Id>,
     Json(req): Json<OpenPeerReq>,
-) -> ApiResult<(StatusCode, Json<RuntimeSession>)> {
+) -> ApiResult<(StatusCode, Json<OpenPeerResp>)> {
     as_thread(&ctx, &user, &auth, &id).await?;
     let by_person = ctx.is_human(&auth);
-    let s = ctx
+    let session = ctx
         .agent_runtime()
         .open_peer_by(&id, req, by_person)
         .await?;
     if by_person {
         ctx.agent_runtime().person_prompted(&id).await;
     }
-    Ok((StatusCode::CREATED, Json(s)))
+    Ok((
+        StatusCode::CREATED,
+        Json(OpenPeerResp {
+            session,
+            next: OPEN_PEER_NEXT,
+        }),
+    ))
+}
+
+/// What the opening agent does next (after T3 Code's `delegate_task` `next`).
+const OPEN_PEER_NEXT: &str =
+    "Completion wakes this thread: its reply arrives here when it finishes. Do not poll it \
+     (otto_thread_read, sleep); do your own work, then end your turn.";
+
+/// The opened thread, plus [`OPEN_PEER_NEXT`].
+#[derive(serde::Serialize)]
+struct OpenPeerResp {
+    #[serde(flatten)]
+    session: RuntimeSession,
+    next: &'static str,
 }
 
 /// POST /runtime-sessions/{id}/peers/{peer}/message — the peer's next turn.
@@ -241,6 +297,29 @@ async fn message_peer<S: RuntimeCtx>(
         .message_peer_by(&id, &peer, &req.text, ctx.is_human(&auth))
         .await?;
     Ok((StatusCode::ACCEPTED, Json(r)))
+}
+
+/// `POST …/peers/{peer}/answer`: the question its subagent asks.
+#[derive(Deserialize)]
+struct PeerAnswerReq {
+    request_id: String,
+    answers: Vec<otto_core::agent_runtime::QuestionAnswer>,
+}
+
+/// POST /runtime-sessions/{id}/peers/{peer}/answer — `{id}` (its person or
+/// its own agent) answers a question its subagent `{peer}` asks.
+async fn answer_peer<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path((id, peer)): Path<(Id, Id)>,
+    Json(req): Json<PeerAnswerReq>,
+) -> ApiResult<StatusCode> {
+    as_thread(&ctx, &user, &auth, &id).await?;
+    ctx.agent_runtime()
+        .answer_child(&id, &peer, &req.request_id, req.answers)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// POST /runtime-sessions/{id}/peers/{peer}/close — close a linked thread.

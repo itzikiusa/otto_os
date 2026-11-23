@@ -15,6 +15,7 @@
   import { toasts } from '../../../lib/toast.svelte';
   import type { PromptDelivery, QueuedPrompt } from '../../../lib/api/types';
   import { backgroundStripText, type AgentTask } from './agentTasks';
+  import { isSubagentTask } from './liveStatus';
   import { toastError } from '../../../lib/toastError';
   import { runtimeThreads } from './runtimeThreads.svelte';
 
@@ -36,7 +37,9 @@
     /** Put a queued message (and any attached screenshots/files) back in the composer. */
     onedit: (text: string, attachments: ComposerFile[], targetSessionId: string) => void;
   }
-  let { sessionId, background, onshowtasks, queued, running, canSteer, closed, dormant, reopening, onreopen, onedit }: Props = $props();
+  let { sessionId, background: all, onshowtasks, queued, running, canSteer, closed, dormant, reopening, onreopen, onedit }: Props = $props();
+  /** Commands and timers only: subagents are on the waiting line under the timeline. */
+  const background = $derived(all.filter((b) => !isSubagentTask(b)));
   const bgText = $derived(backgroundStripText(background));
   const bgTitle = $derived(background.map((b) => b.label).join('\n'));
   /** The tasks the daemon can stop one by one (not a swarm member or a turn's own subagent). */

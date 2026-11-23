@@ -55,7 +55,7 @@ class ThreadMeta {
 
   /** When its last turn ended: a structured thread's `meta.last_turn_ended_at`
    *  (or a later end seen live); a terminal thread's last activity. */
-  private endedAt(id: string): string | null {
+  endedAt(id: string): string | null {
     const rt = runtimeThreads.get(id);
     if (!rt) return this.session(id)?.last_active_at ?? null;
     const row = (rt.meta as Record<string, unknown> | null | undefined)?.last_turn_ended_at;

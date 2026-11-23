@@ -108,13 +108,13 @@ test('the details card floats beside a Claude thread, heads the right panel, and
   for (const name of ['Files', 'Git', 'Terminal', 'Copy path', 'Add project script…']) await expect(menu.getByRole('menuitem', { name })).toBeVisible();
   await page.keyboard.press('Escape');
 
-  // A running background subagent shows under "Subagents · 1 running" with its time.
+  // A running background subagent shows under "Subagents · 1 working" with its time.
   const composer = conv.getByTestId('runtime-composer');
   await composer.fill('agent 120');
   await composer.press('Enter');
   await expect(conv.getByText("I'm waiting for the PR sweep to come back.")).toBeVisible({ timeout: 20_000 });
   const subs = card.getByTestId('details-subagents');
-  await expect(subs).toContainText('Subagents · 1 running');
+  await expect(subs).toContainText('Subagents · 1 working');
   const sub = subs.getByTestId('details-subagent');
   await expect(sub).toHaveAttribute('data-word', 'Working');
   await expect(sub).toContainText(/PR sweep\s*Working\s*\d+s/);
@@ -126,12 +126,11 @@ test('the details card floats beside a Claude thread, heads the right panel, and
   }
   await shots(page, 'details-desktop');
 
-  // A turn's own subagent has no thread of its own: its row opens Agents &
-  // tasks; the card now heads the right panel (flat).
+  // A turn's own subagent has no thread of its own (its row is in the
+  // timeline): its card row opens the right panel the card now heads (flat).
   await expect(sub.getByTestId('agents-tasks-stop')).toBeVisible();
   await sub.getByRole('button', { name: /^PR sweep Working/ }).click();
   const panel = page.getByTestId('threads-inspector');
-  await expect(panel.getByTestId('thread-agents-tasks')).toBeVisible();
   await expect(page.getByTestId('thread-details-card')).toHaveCount(1);
   await expect(panel.getByTestId('thread-details-card')).toBeVisible();
   await expect(panel.getByTestId('details-subagent')).toContainText('PR sweep');

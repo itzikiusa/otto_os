@@ -15,7 +15,10 @@ export type LiveFooterState =
     }
   | {
       mode: 'waiting_bg';
+      /** "Waiting on 2 subagents and 1 command". */
       text: string;
+      /** Their titles: "Share link API, Share link docs +1". */
+      detail: string;
     };
 
 /** Format elapsed seconds as `0s`, `14s`, `2m 08s`, or `1h 04m`. */
@@ -81,7 +84,7 @@ export function deriveLiveFooter(
   p: RuntimeProjection | null,
   workingFor: string | null,
   ownTurn: boolean,
-  background: readonly Pick<AgentTask, 'label'>[],
+  background: readonly Pick<AgentTask, 'label' | 'kind' | 'childSessionId'>[],
 ): LiveFooterState | null {
   if (workingFor) {
     return {
@@ -93,18 +96,28 @@ export function deriveLiveFooter(
   }
   if (background.length > 0) {
     const names = background
-      .slice(0, 2)
+      .slice(0, 3)
       .map((b) => b.label.trim())
       .filter(Boolean)
       .join(', ');
-    const more = background.length > 2 ? ` +${background.length - 2} more` : '';
-    const countLabel =
-      background.length === 1 ? '1 background task' : `${background.length} background tasks`;
-    const detail = names ? `: ${names}${more}` : '';
-    return {
-      mode: 'waiting_bg',
-      text: `Waiting on ${countLabel}${detail} — new messages will appear automatically`,
-    };
+    const more = background.length > 3 ? ` +${background.length - 3}` : '';
+    return { mode: 'waiting_bg', text: `Waiting on ${waitingGroups(background)}`, detail: names ? `${names}${more}` : '' };
   }
   return null;
+}
+
+/** A subagent (a thread delegated to, the provider's own subagent, a swarm
+ *  member), as opposed to a command or a timer. */
+export const isSubagentTask = (t: Pick<AgentTask, 'kind' | 'childSessionId'>): boolean => t.kind === 'agent' || !!t.childSessionId;
+
+/** "2 subagents and 1 command" (T3 Code's `backgroundWorkNowItem` groups). */
+export function waitingGroups(tasks: readonly Pick<AgentTask, 'kind' | 'childSessionId'>[]): string {
+  const n = (f: (t: Pick<AgentTask, 'kind' | 'childSessionId'>) => boolean): number => tasks.filter(f).length;
+  const groups: [number, string, string][] = [
+    [n(isSubagentTask), 'subagent', 'subagents'],
+    [n((t) => !isSubagentTask(t) && t.kind !== 'timer'), 'command', 'commands'],
+    [n((t) => !isSubagentTask(t) && t.kind === 'timer'), 'timer', 'timers'],
+  ];
+  const parts = groups.filter(([c]) => c > 0).map(([c, one, many]) => `${c} ${c === 1 ? one : many}`);
+  return parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}` : (parts[0] ?? '');
 }

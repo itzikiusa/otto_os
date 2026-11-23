@@ -1576,6 +1576,41 @@ pub struct PeerInfo {
     pub is_self: bool,
 }
 
+/// `POST /runtime-sessions/{id}/stop-family` — what one Stop for a thread and
+/// its subagents did.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FamilyStopReq {
+    /// Also stop the thread's own background work (the waiting line's Stop).
+    #[serde(default)]
+    pub background: bool,
+}
+
+/// The answer to [`FamilyStopReq`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FamilyStopResp {
+    /// Open subagents in the family (the thread itself not counted).
+    pub subagents: u32,
+    /// Turns that were running and got stopped.
+    pub turns: u32,
+    /// Background tasks asked to stop.
+    pub tasks: u32,
+}
+
+/// `GET /runtime-sessions/{id}/subagent-targets` — a provider a thread's agent
+/// may delegate to (`otto.thread_capabilities`): enabled here, driven over a
+/// structured protocol.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubagentTarget {
+    /// `otto.thread_open`'s `provider` (a built-in or custom slug).
+    pub provider: String,
+    /// Model ids its CLI lists (at most 12); empty = its default only.
+    #[serde(default)]
+    pub models: Vec<String>,
+    /// Effort levels a turn may ask for; empty = none.
+    #[serde(default)]
+    pub efforts: Vec<String>,
+}
+
 /// `GET /runtime-sessions/{id}/peers/{peer}/reply` — the peer's latest
 /// assistant text (its last turn), after an optional wait for it to settle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1703,6 +1738,10 @@ pub struct AskChildReq {
     pub access_mode: Option<RuntimeAccessMode>,
     #[serde(default)]
     pub images: Vec<PromptImage>,
+    /// The answer goes back to the thread's agent (default), like a subagent
+    /// the agent opened; `true` = "answer to me only" (it stays with the person).
+    #[serde(default)]
+    pub to_me_only: bool,
 }
 
 /// The children `POST /runtime-sessions/{id}/children` opened, in target order.

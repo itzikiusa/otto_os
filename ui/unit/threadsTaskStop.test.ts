@@ -90,7 +90,7 @@ test('a child busy only on background work says so (its Stop stops that work)', 
   const row = { id: 'k', status: 'idle', background_tasks: [{ id: 'b', kind: 'command', label: 'x', started_at: 'x' }] } as never;
   const st = ct.childState(row, null);
   assert.equal(st.tone, 'background');
-  assert.equal(st.label, 'Background task running');
+  assert.equal(st.label, 'Working', 'one vocabulary for subagents');
   assert.equal(ct.rowTone('background'), 'live');
   assert.equal(ct.childState({ id: 'k', status: 'working', background_tasks: [] } as never, null).tone, 'working');
 });

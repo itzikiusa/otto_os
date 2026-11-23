@@ -89,7 +89,7 @@ test('subagents sit in the details card; ⋯ › Send to another thread… holds
 
   // The details card lists the subagent with its status word.
   const subs = page.getByTestId('thread-details-card').getByTestId('details-subagents');
-  await expect(subs).toContainText('Subagents · 1 running');
+  await expect(subs).toContainText('Subagents · 1 working');
   const sub = subs.getByTestId('details-subagent');
   await expect(sub).toContainText('Codex worker');
   await expect(sub).toHaveAttribute('data-word', 'Working');

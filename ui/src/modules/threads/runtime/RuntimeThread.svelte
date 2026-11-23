@@ -36,6 +36,7 @@
   import RuntimeAskAgent from './RuntimeAskAgent.svelte';
   import { attentionItems, attentionPillText } from './attentionDock';
   import RuntimeAttentionDock from './RuntimeAttentionDock.svelte';
+  import RuntimeChildApprovals from './RuntimeChildApprovals.svelte';
   import RuntimeComposerActions from './RuntimeComposerActions.svelte';
   import RuntimeComposerPlus from './RuntimeComposerPlus.svelte';
   import RuntimeMinimap from './RuntimeMinimap.svelte';
@@ -487,6 +488,7 @@
             {workingFor}
             {ownTurn}
             background={closed ? [] : background}
+            {sessionId}
             {outcome}
             {failure}
             {agentName}
@@ -564,6 +566,7 @@
         onjump={jumpTo}
       />
     {/if}
+    <RuntimeChildApprovals {sessionId} />
     {#if composerTopSlot}{@render composerTopSlot({ focusComposer })}{/if}
 
     <div class="rt-composer" style:border-color={planOn ? 'color-mix(in srgb, var(--warning) 42%, var(--border))' : undefined} bind:this={composerBoxEl}>

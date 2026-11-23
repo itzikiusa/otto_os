@@ -191,6 +191,25 @@ fn main() {
                     .find_map(|i| i["text"].as_str())
                     .unwrap_or_default()
                     .to_string();
+                // Otto's delegation rules ride a thread's first prompt (runtime::delegation).
+                let had_rules = text.contains("</otto_instructions>\n\n");
+                let text = match text.split_once("</otto_instructions>\n\n") {
+                    Some((_, t)) => t.to_string(),
+                    None => text,
+                };
+                // `rules?`: whether this prompt carried them (after a handoff too).
+                let text = match text.rsplit_once("\n\n").map_or(text.as_str(), |(_, t)| t) {
+                    "rules?" => format!("rules: {}", if had_rules { "yes" } else { "no" }),
+                    _ if text == "rules?" => {
+                        format!("rules: {}", if had_rules { "yes" } else { "no" })
+                    }
+                    _ => text,
+                };
+                // A subagent's task header (runtime::delegation): act on the task.
+                let text = match text.split_once("]\n\n") {
+                    Some((h, t)) if h.starts_with("[Subagent task from thread ") => t.to_string(),
+                    _ => text,
+                };
                 let extras = echo_extras(&params, &input);
                 match text.as_str() {
                     // `stream:<n>:<ms>`: `c0 `…`c<n-1> `, one delta per <ms>.

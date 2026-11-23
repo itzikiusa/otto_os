@@ -85,30 +85,6 @@ export function subagentWord(key: string | null | undefined): 'Working' | 'Needs
   return 'Done';
 }
 
-/** A thread's subagents, rolled up for its row. The one place the roll-up is
- *  computed, so a daemon-side roll-up on the row can replace it. */
-export interface SubagentRollup {
-  total: number;
-  working: number;
-  needsYou: number;
-  failed: number;
-  /** The title of the first subagent that needs the person, if any. */
-  needing: string | null;
-}
-
-export function subagentRollup(subs: readonly { title: string; key: string | null | undefined }[]): SubagentRollup {
-  const r: SubagentRollup = { total: subs.length, working: 0, needsYou: 0, failed: 0, needing: null };
-  for (const s of subs) {
-    const w = subagentWord(s.key);
-    if (w === 'Needs you') {
-      r.needsYou++;
-      r.needing ??= s.title;
-    } else if (w === 'Working') r.working++;
-    else if (w === 'Failed') r.failed++;
-  }
-  return r;
-}
-
 /** Finished unread ("Done") across reloads and devices: the last turn ended
  *  after the person last had the thread in front of them (`meta.thread_seen_at`).
  *  A thread never seen on any device counts as read (no flood of "Done"). */
