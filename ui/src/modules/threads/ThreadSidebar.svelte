@@ -709,35 +709,12 @@
     color: var(--text-dim);
     flex-shrink: 0;
   }
-  .th-body {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-  }
+  .th-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   /* At most ~40 % of the sidebar; an open fold scrolls inside, its header stays. */
-  .th-folds {
-    flex-shrink: 0;
-    max-block-size: 40%;
-    display: flex;
-    flex-direction: column;
-    padding: var(--sp-2) var(--sp-4);
-    border-block-start: 1px solid var(--separator);
-  }
-  .th-folds:empty {
-    display: none;
-  }
-  .th-folds .th-group {
-    flex: 0 1 auto;
-    min-height: 0;
-  }
-  .th-folds .th-fold {
-    flex-shrink: 0;
-  }
-  .th-folds .th-list {
-    min-height: 0;
-    overflow-y: auto;
-  }
+  .th-folds { flex-shrink: 0; max-block-size: 40%; display: flex; flex-direction: column; padding: var(--sp-2) var(--sp-4); border-block-start: 1px solid var(--separator); }
+  .th-folds .th-group { flex: 0 1 auto; min-height: 0; }
+  .th-folds .th-fold { flex-shrink: 0; }
+  .th-folds .th-list { min-height: 0; overflow-y: auto; }
   .th-scroll {
     flex: 1;
     min-height: 0;

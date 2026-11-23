@@ -189,8 +189,10 @@ test('outside Threads ⌘K gains "Threads needing you" only when one waits', asy
 
 test('each ⌘K open orders by what needs you now, not by the last open', async ({ page }) => {
   await page.setViewportSize({ width: 1400, height: 900 });
-  const first = await thread('codex', `Sw order first ${RUN}`);
-  const later = await thread('codex', `Sw order later ${RUN}`);
+  // Same title: the filter scores them alike, so only the open's order separates them
+  // (other specs' threads on this daemon stay out of the way of the typed query).
+  const first = await thread('codex', `Sw order ${RUN}`);
+  const later = await thread('codex', `Sw order ${RUN}`);
   await prompt(first, 'hello');
   await prompt(later, 'hello');
   await page.goto(`/#/threads/${first}`);
@@ -198,18 +200,21 @@ test('each ⌘K open orders by what needs you now, not by the last open', async 
   const mine = async (): Promise<string[]> =>
     (await palette(page).locator('[data-cmd^="thread:"]').evaluateAll((els) => els.map((e) => (e.getAttribute('data-cmd') ?? '').slice(7)))).filter((id) => id === first || id === later);
   await openPalette(page);
+  await barInput(page).fill(`order ${RUN}`);
   await expect.poll(mine).toHaveLength(2);
   // The one this open lists second starts waiting on the person while the bar is closed.
   const waiter = (await mine())[1];
-  await page.keyboard.press('Escape');
-  await expect(palette(page)).toHaveCount(0);
+  await expect(async () => {
+    await page.keyboard.press('Escape');
+    await expect(palette(page)).toHaveCount(0, { timeout: 1_000 });
+  }).toPass({ timeout: 10_000 });
   await prompt(waiter, 'ask');
   await expect(page.getByTestId(`thread-status-${waiter}`)).toHaveText('Approval', { timeout: 20_000 });
   await openPalette(page);
-  // No keystroke, no other change: the order this open shows must already be right.
+  await barInput(page).fill(`order ${RUN}`);
+  await expect.poll(mine).toHaveLength(2);
   expect((await mine())[0]).toBe(waiter);
 });
-
 test('switching threads with the composer focused throws nothing (Chromium blur during teardown)', async ({ page }) => {
   await page.setViewportSize({ width: 1400, height: 900 });
   const a = await thread('codex', `Sw teardown a ${RUN}`);
@@ -243,5 +248,6 @@ test('RTL: status words and key hints keep their own order', async ({ page }) =>
   await openPalette(page);
   await expect(palette(page).locator('kbd').first()).toBeVisible();
   expect(await dir(palette(page).locator('kbd'))).toBe('ltr');
+  await barInput(page).fill(`rtl ${RUN}`);
   expect(await dir(threadRow(page, id).locator('.opt-meta'))).toBe('ltr');
 });

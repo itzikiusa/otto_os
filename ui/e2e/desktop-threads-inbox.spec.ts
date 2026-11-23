@@ -144,7 +144,9 @@ test('the sidebar is an inbox: status words, needs you first, Working and Histor
   const working = side.getByTestId('threads-working-list');
   await expect(main.getByTestId(`thread-row-${ids.working}`)).toHaveCount(0);
   await expect(working.getByTestId(`thread-row-${ids.working}`)).toBeVisible();
-  await expect(word(page, 'working')).toHaveText(/^Working \d+[smh]/, { timeout: 15_000 });
+  // The elapsed time shows once this window has seen the turn start (the inbox
+  // reads only waiting threads after a reload — perf pass, threadInbox.svelte.ts).
+  await expect(word(page, 'working')).toHaveText(/^Working( \d+[smh])?/, { timeout: 15_000 });
   await side.getByTestId('threads-working-toggle').click();
   await expect(working.getByTestId(`thread-row-${ids.working}`)).toHaveCount(0);
   await side.getByTestId('threads-working-toggle').click();
