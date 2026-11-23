@@ -211,8 +211,8 @@ carry into another conversation.
 ## Recoverable runtime drafts
 
 The composer saves unsent text, attachments, selected review/diff context,
-model, reasoning effort, access mode and the **Next message starts fresh**
-choice to the daemon's SQLite state, scoped to your user, workspace and
+model, reasoning effort, access mode, the **Next message starts fresh**
+choice and an armed provider switch to the daemon's SQLite state, scoped to your user, workspace and
 thread. It does not store them in browser local storage. The composer
 says nothing while saving works and shows **Draft not saved · Retry** when it
 fails; recovery never sends a
@@ -287,6 +287,35 @@ requests. Finish or stop that work, answer or skip requests, and send or remove
 queued messages before retrying. A closed idle thread can start fresh directly.
 If initialization or local prompt validation fails, no divider is added, the
 previous provider identity is restored for resume, and the draft stays armed.
+
+## Continue with another provider
+
+The model chip lists the thread's own provider and, below a divider, every
+other provider that is enabled and installed (named accounts too). Browsing
+one changes nothing; picking one of its models (or **Default model**) arms the
+switch: **Next message continues on Codex · Cancel** sits above the composer.
+Nothing is sent or stopped by arming it.
+
+Your next accepted message continues the same thread (id, sidebar row,
+folder, worktree, files, draft) on the new provider. The timeline shows a
+**Context handoff · Claude Code → Codex** divider; open it to read what was
+handed over and how much was left out. The new provider's first prompt is
+that block followed by your message, whole. The block holds whole turns,
+newest first, within about 16,000 tokens (never cut mid-message): your
+messages, the agent's final answers, the files each turn changed, a count of
+its tool calls (tool output is not replayed) and an open plan. Earlier images
+are not handed over, and the divider says how many were left. History before a
+plain **/clear** is not handed over.
+
+The rules are the fresh-start rules: no active turn, background work, queued
+messages or pending requests (the refusal names which one and how to clear
+it). If the new provider fails to start or refuses the message, no divider is
+added, the thread stays on the provider it ran (its conversation resumes), the
+draft stays armed and the reason shows above the composer. MCP servers,
+access mode, model defaults, sandbox and usage are set up for the new provider
+as for a new thread. The chip, the title glyph and the details card show the
+provider the thread runs on now. Switching back is another handoff: a fresh
+conversation on that provider, never a resume of the old one.
 
 ## Add context and inspect tool images
 

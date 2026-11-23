@@ -74,7 +74,8 @@ impl AgentRuntimeRepo {
         let has_preferences = draft.model.is_some()
             || draft.model_default
             || draft.effort.is_some()
-            || draft.access_mode.is_some();
+            || draft.access_mode.is_some()
+            || draft.provider.is_some();
         let payload = (has_content || has_preferences).then_some(json.as_str());
         let mut tx = self
             .pool

@@ -34,6 +34,9 @@ pub struct RuntimeDraftContent {
     pub effort: Option<String>,
     pub access_mode: Option<RuntimeAccessMode>,
     pub fresh_context: bool,
+    /// An armed provider switch: the next send continues on this provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     pub context: Vec<ComposerContext>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
