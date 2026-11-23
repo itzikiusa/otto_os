@@ -51,7 +51,9 @@ test('the details card never covers the reading column, at any width, list open 
       if ((await toggle.getAttribute('aria-pressed')) !== String(listOpen)) await toggle.click();
       await expect(toggle).toHaveAttribute('aria-pressed', String(listOpen));
       const centre = (await page.locator('.th-center-col').boundingBox())!;
-      const shouldFloat = centre.width >= 760 + 48 + 328;
+      const shouldFloat = centre.width >= 760 + 48 + 296;
+      // The commonest laptop width floats it, list open or not.
+      if (width >= 1440) expect(shouldFloat, `${width} list ${listOpen ? 'open' : 'closed'}: room to float`).toBe(true);
       const card = page.getByTestId('thread-details-card');
       await expect(card, `${width} list ${listOpen ? 'open' : 'closed'}: floats`).toHaveCount(shouldFloat ? 1 : 0);
       if (!shouldFloat) continue;
