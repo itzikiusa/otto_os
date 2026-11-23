@@ -209,3 +209,22 @@ test('each ⌘K open orders by what needs you now, not by the last open', async 
   // No keystroke, no other change: the order this open shows must already be right.
   expect((await mine())[0]).toBe(waiter);
 });
+
+test('switching threads with the composer focused throws nothing (Chromium blur during teardown)', async ({ page }) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  const a = await thread('codex', `Sw teardown a ${RUN}`);
+  const b = await thread('codex', `Sw teardown b ${RUN}`);
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+  await page.goto(`/#/threads/${a}`);
+  const composer = page.getByTestId(`runtime-thread-${a}`).getByTestId('runtime-composer');
+  await expect(composer).toBeVisible({ timeout: 30_000 });
+  for (const [from, to] of [[a, b], [b, a]]) {
+    await page.getByTestId(`runtime-thread-${from}`).getByTestId('runtime-composer').focus();
+    // Switch without moving the focus first (a route change, ⌥⌘↓, a notification).
+    await page.evaluate((h) => { location.hash = h; }, `#/threads/${to}`);
+    await expect(page.getByTestId(`runtime-thread-${to}`)).toBeVisible({ timeout: 30_000 });
+  }
+  expect(errors.filter((e) => /state_unsafe_mutation/.test(e))).toEqual([]);
+});
