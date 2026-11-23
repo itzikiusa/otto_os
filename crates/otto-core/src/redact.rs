@@ -453,14 +453,14 @@ mod tests {
         let anth = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz123456";
         let oai = "sk-proj-abcdefghijklmnopqrstuvwxyz1234567890";
         let slack = "xoxb-fake-token-for-redaction-test";
-        let sts = "ASIAIOSFODNN7EXAMPLE";
-        let goog = "AIzaSyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe";
+        let sts = format!("ASIA{}", "X".repeat(16));
+        let goog = format!("AIza{}", "x".repeat(35));
         let basic = "dXNlcjpwYXNz";
         let input = format!(
             "gh={gh} pat={gh_pat} anth={anth} oai={oai} slack={slack} sts={sts} goog={goog} Authorization: Basic {basic}"
         );
         let r = redact_text(&input);
-        for secret in [gh, gh_pat, anth, oai, slack, sts, goog, basic] {
+        for secret in [gh, gh_pat, anth, oai, slack, &sts, &goog, basic] {
             assert!(
                 !r.value.contains(secret),
                 "secret leaked ({secret}): {}",
