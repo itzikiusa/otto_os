@@ -1117,8 +1117,9 @@ migration 0146 and no longer read; auto-approve lives in the
 - Otto sits **in the call path**: every governed MCP call is allowlisted, policed
   (policy-as-code), risk-gated, optionally dry-run, executed, and **audited** with
   derived per-tool stats.
-- Two transports — local `stdio` (spawn-per-op) and remote `http`
-  (Streamable-HTTP with SSE), the latter SSRF-pinned.
+- Three transports — local `stdio`, remote `http` (Streamable HTTP) and the
+  legacy `sse` (HTTP + event stream, protocol 2024-11-05; its message endpoint
+  must stay on the stream's origin) — the remote two SSRF-guarded.
 - Automatic risk + injection labeling (with human override that survives
   rediscovery), background health sweeps, and a single-use, hash-bound, approver≠requester
   approval queue.
@@ -1139,9 +1140,7 @@ migration 0146 and no longer read; auto-approve lives in the
   design.
 - **Per-tool cost in USD is partial** — latency / bytes / errors are metered; true
   per-vendor cost is not (`cost_usd` is nullable/estimated).
-- **No OAuth flows** for remote servers — header/token auth only — and no legacy
-  HTTP+SSE transport (servers that only speak the 2024-11-05 SSE transport
-  can't be registered).
+- **No OAuth flows** for remote servers — header/token auth only.
 - **Dry-run is a pure simulation** — it never calls the downstream tool, so it cannot
   reflect a tool's own validation.
 - **No `mcp_gateway_enabled` toggle** in the shipped code — the gateway surfaces

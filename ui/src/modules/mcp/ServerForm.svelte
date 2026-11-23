@@ -127,7 +127,7 @@
     if (runs === 'native') transport = 'stdio'; // a template may have picked http
     nameError = name.trim() ? null : 'Give the server a name.';
     commandError = transport === 'stdio' && !command.trim() ? 'A stdio server needs a command.' : null;
-    urlError = transport === 'http' && !url.trim() ? 'An HTTP server needs a URL.' : null;
+    urlError = transport !== 'stdio' && !url.trim() ? 'A remote server needs a URL.' : null;
     const bad = transport === 'stdio' ? badEnvKey(parseKv(envText), parseKv(secretEnvText)) : null;
     envError =
       bad == null
@@ -219,6 +219,7 @@
       <select bind:value={transport}>
         <option value="stdio">stdio (spawn a local command)</option>
         <option value="http">http (Streamable HTTP / JSON-RPC)</option>
+        <option value="sse">sse (older HTTP + event stream servers)</option>
       </select>
     </label>
     {/if}
