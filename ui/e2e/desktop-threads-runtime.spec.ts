@@ -190,7 +190,7 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Close thread…' }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Close thread', exact: true }).click();
   const sidebar = page.getByTestId('threads-sidebar');
-  await sidebar.locator('.th-history').click();
+  await sidebar.getByTestId('threads-history-toggle').click();
   await sidebar.locator('[data-testid^="thread-history-"]', { hasText: 'Renamed runtime' }).getByRole('button').first().click();
   await expect(thread.getByTestId('runtime-closed')).toBeVisible();
   await thread.getByTestId('runtime-reopen').click();
@@ -423,7 +423,8 @@ test('runtime polish: RTL, details card, grouped tools, folded approvals, access
   await rowTitle.hover();
   const actions = rowTitle.locator('xpath=ancestor::*[contains(@class,"tr-row")][1]//*[contains(@class,"tr-actions")]');
   const [tb, ab] = [(await rowTitle.boundingBox())!, (await actions.boundingBox())!];
-  expect(tb.x + tb.width <= ab.x || ab.x + ab.width <= tb.x, 'row actions overlap the title').toBeTruthy();
+  const apart = tb.x + tb.width <= ab.x || ab.x + ab.width <= tb.x || tb.y + tb.height <= ab.y || ab.y + ab.height <= tb.y;
+  expect(apart, 'row actions overlap the title').toBeTruthy();
 
   // RTL: the bubble and the answer resolve right-to-left; code / #130 stay isolated LTR.
   const bubble = thread.locator('.rt-bubble');
@@ -523,13 +524,14 @@ test('runtime polish: RTL, details card, grouped tools, folded approvals, access
   await page.screenshot({ path: info.outputPath('runtime-polish-work-dark.png'), animations: 'disabled' });
   await page.emulateMedia({ colorScheme: 'light' });
 
-  // Access chip: Full access asks once, warns, and rides the next prompt.
+  // Access: Full access asks once and rides the next prompt. The chip shows
+  // only off the person's default (Full access when agent_skip_permissions is
+  // on, the default), so Supervised shows it and Full access hides it; "+"
+  // always offers the choice.
   const chip = thread.getByTestId('runtime-access');
-  // New threads start in Full access when agent_skip_permissions is on (the
-  // default), so step down to Supervised first — that direction never asks.
-  if (/Full access/.test((await chip.textContent()) ?? '')) {
-    await chip.click();
-    await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Supervised' }).click();
+  if ((await chip.count()) === 0) {
+    await thread.getByTestId('runtime-plus').click();
+    await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Access: Supervised' }).click();
   }
   await expect(chip).toContainText('Supervised');
   await chip.click();
@@ -537,8 +539,7 @@ test('runtime polish: RTL, details card, grouped tools, folded approvals, access
   const dlg = page.getByRole('dialog');
   await expect(dlg).toContainText('without asking');
   await dlg.getByRole('button', { name: 'Allow full access' }).click();
-  await expect(chip).toContainText('Full access');
-  await expect(chip).toHaveClass(/full/);
+  await expect(chip).toHaveCount(0);
   const sent = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith(`/runtime-sessions/${id}/prompt`));
   await page.route(`**/api/v1/runtime-sessions/${id}/prompt`, (r) => r.fulfill({ json: { turn_id: 't2', sequence: 1 } }));
   const composer = thread.getByTestId('runtime-composer');
@@ -546,8 +547,8 @@ test('runtime polish: RTL, details card, grouped tools, folded approvals, access
   await composer.press('Enter');
   expect(((await sent).postDataJSON() as { access_mode?: string }).access_mode).toBe('full-access');
   // The next switch back needs no confirm.
-  await chip.click();
-  await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Supervised' }).click();
+  await thread.getByTestId('runtime-plus').click();
+  await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Access: Supervised' }).click();
   await expect(chip).toContainText('Supervised');
   await expectNoHorizontalOverflow(page);
 });

@@ -32,6 +32,8 @@ export interface PaletteThreadSource {
   open(id: string, beside: boolean): void;
   /** "New thread: <query>" (Threads only). */
   newThread?(draft: string): void;
+  /** The bar opened: fetch what the words need (never from a derive). */
+  warm?(): void;
 }
 
 class PaletteThreads {
@@ -103,6 +105,7 @@ export function threadCommands(query: () => string | null, close: () => void) {
       return rows.find((r) => `thread:${r.id}` === id)?.tone ?? null;
     },
     freeze(): void {
+      source.warm?.();
       frozen = source.rows().map((r) => r.id);
     },
     /** ⌘↵ on a thread row: beside the focused one (when a split is open); false for any other row. */

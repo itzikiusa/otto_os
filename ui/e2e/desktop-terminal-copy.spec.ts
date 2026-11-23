@@ -38,8 +38,9 @@ test.beforeAll(async () => {
   await ctx.dispose();
 });
 
-test.beforeEach(async ({ page, context }) => {
-  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+test.beforeEach(async ({ page, context, browserName }) => {
+  // WebKit has no clipboard permissions to grant (Playwright rejects them).
+  if (browserName === 'chromium') await context.grantPermissions(['clipboard-read', 'clipboard-write']);
   await page.addInitScript((wsId) => {
     localStorage.setItem('otto_workspace', wsId as string);
   }, workspaceId);
@@ -255,6 +256,8 @@ test.describe('desktop terminal copy', () => {
       );
     });
     const plain = await drag(false);
+    // Nothing selected, so say once how to select anyway.
+    await expect(page.getByText(`Hold ${IS_MAC ? '⌥' : 'Shift'} to select text`)).toBeVisible();
     // ⌥-drag must select regardless. This is the assertion that fails without
     // `macOptionClickForcesSelection`.
     const withAlt = await drag(true);
@@ -299,4 +302,80 @@ test.describe('desktop terminal copy', () => {
     console.log('[alt-drag-copy]', JSON.stringify(copied.slice(0, 60)));
     expect(copied.split('\n').length, '⌘C copies every selected row').toBeGreaterThan(1);
   });
+
+  // The web Claude report: "the marking of the text just disappears", copy
+  // takes several attempts. Claude's TUI turns on FULL mouse tracking
+  // (1000+1002+1003+1006, its "full" mode) and repaints constantly. In 1003
+  // (any-motion) xterm reports every mouse MOVE to the app as user input, and
+  // xterm clears the selection on any user input — so the first wiggle after
+  // an ⌥-drag erased it. A user who still held ⌥ at ⌘C got no copy at all.
+  // Both chords must copy the exact selection on the first try, after the
+  // pointer moved and the TUI kept repainting.
+  for (const renderer of ['dom', 'webgl'] as const) for (const holdAlt of [false, true]) {
+    test(`⌥-drag survives pointer moves and repaints; ${holdAlt ? '⌥⌘C' : '⌘C'} copies it first time (${renderer})`, async ({ page }) => {
+      test.skip(!IS_MAC, 'macOS chords (⌥-drag, ⌘C)');
+      // The functional suite pins DOM (global-setup); the app draws on WebGL.
+      await page.addInitScript((dom) => {
+        (window as unknown as { __ottoTermProbe: unknown[] }).__ottoTermProbe = [];
+        if (!dom) localStorage.removeItem('otto.term.renderer');
+      }, renderer === 'dom');
+      const { ctx, base } = await apiCtx();
+      const live = await seedShellSession(ctx, base, workspaceId);
+      // A tiny TUI: Claude's mouse modes, then a spinner that repaints its
+      // row every 50 ms and a streamed line every second, for ~20 s.
+      await ctx.post(`${base}/api/v1/sessions/${live}/input`, {
+        data: {
+          text: "printf '\\033[?1000h\\033[?1002h\\033[?1003h\\033[?1006h'; for i in $(seq 1 12); do echo \"OTTOLIVE-$i\"; done; n=0; while [ $n -lt 400 ]; do printf '\\r\\033[2K%s working' \"$n\"; [ $((n % 20)) -eq 0 ] && printf '\\r\\033[2Kstream %s\\n' \"$n\"; n=$((n+1)); sleep 0.05; done",
+          submit: true,
+        },
+      });
+      await ctx.dispose();
+      await page.goto(`/#/agents/${live}`);
+      type Probe = { disposed: boolean; sessionId(): string; text(): string; renderer(): string };
+      const screenRows = () => page.evaluate((id) => (window as unknown as { __ottoTermProbe: Probe[] }).__ottoTermProbe
+        .find(p => !p.disposed && p.sessionId() === id)?.text().split('\n') ?? [], live);
+      await expect.poll(async () => (await screenRows()).join('\n'), { timeout: 20_000 }).toMatch(/OTTOLIVE-6[\s\S]*working/);
+      await expect(page.locator('.xterm')).toHaveClass(/enable-mouse-events/);
+      const active = await page.evaluate((id) => (window as unknown as { __ottoTermProbe: Probe[] }).__ottoTermProbe
+        .find(p => !p.disposed && p.sessionId() === id)!.renderer(), live);
+      expect(active, 'renderer under test').toBe(renderer);
+
+      const mirror = () => page.evaluate(() => (document.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement)?.value ?? '');
+      // Renderer-agnostic: rows come from the parsed buffer, geometry from
+      // the screen box (WebGL has no row DOM). The streamed lines scroll the
+      // screen, so locate the rows right before the drag.
+      const screen = (await page.locator('.xterm-screen').boundingBox())!;
+      const rows = await screenRows();
+      const rowBox = (text: string) => {
+        const h = screen.height / rows.length, i = rows.findIndex(r => r.trimEnd() === text);
+        expect(i, `${text} on screen`).toBeGreaterThanOrEqual(0);
+        return { x: screen.x, y: screen.y + i * h, height: h };
+      };
+      const from = rowBox('OTTOLIVE-3'), to = rowBox('OTTOLIVE-5');
+      await page.keyboard.down('Alt');
+      await page.mouse.move(from.x + 2, from.y + from.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(to.x + 200, to.y + to.height / 2, { steps: 15 });
+      await page.mouse.up();
+      if (!holdAlt) await page.keyboard.up('Alt');
+      const selected = await mirror();
+      expect(selected, 'the ⌥-drag selected the three rows').toMatch(/^OTTOLIVE-3\s*\nOTTOLIVE-4\s*\nOTTOLIVE-5/);
+
+      // The user moves the pointer off the text (toward the menu, a button…)
+      // while the TUI keeps repainting and streaming.
+      for (let i = 0; i < 6; i++) await page.mouse.move(to.x + 220 + i * 25, to.y + 40 + i * 10, { steps: 3 });
+      await page.waitForTimeout(3000); // ui-guards: allow — proves the selection is NOT cleared over time
+      expect(await mirror(), 'selection survived pointer moves + 3 s of repaints').toBe(selected);
+
+      await page.evaluate(() => {
+        (window as unknown as Record<string, unknown>).__ottoCopied = '';
+        document.addEventListener('copy', (e: ClipboardEvent) => {
+          (window as unknown as Record<string, unknown>).__ottoCopied = e.clipboardData?.getData('text/plain') ?? '';
+        });
+      });
+      await page.keyboard.press('Meta+c'); // with ⌥ still down when holdAlt: ⌥⌘C
+      if (holdAlt) await page.keyboard.up('Alt');
+      await expect.poll(() => page.evaluate(() => (window as unknown as Record<string, string>).__ottoCopied), { timeout: 5_000 }).toBe(selected);
+    });
+  }
 });

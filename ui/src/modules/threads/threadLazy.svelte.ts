@@ -20,3 +20,5 @@ export const RelatedListView = lazyComponent(() => import('./RelatedThreadsList.
 export const ThreadSheetsView = lazyComponent(() => import('./ThreadSheets.svelte'));
 export const IdeProjectsSectionView = lazyComponent(() => import('./ThreadIdeProjectsSection.svelte'));
 export const OriginGroupsView = lazyComponent(() => import('./ThreadOriginGroups.svelte'));
+export const UsageMeterView = lazyComponent(() => import('./ThreadUsageMeter.svelte'));
+export const ProjectGroupsView = lazyComponent(() => import('./ThreadProjectGroups.svelte'));

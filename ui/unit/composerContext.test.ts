@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { addComposerContext, assembleComposerMessage, reviewCommentContext, diffContext } from '../src/modules/threads/runtime/composerContext.ts';
+import { addComposerContext, assembleComposerMessage, reviewCommentContext, diffContext, terminalContext } from '../src/modules/threads/runtime/composerContext.ts';
 import type { PrComment, FileDiff } from '../src/lib/api/types';
 
 const comment: PrComment = { id: '42', author: 'Alice', body: 'Check null input', path: 'src/a.ts', line: 9, created_at: '', resolved: false, replies: [{ id: '43', author: 'Bob', body: 'Agreed', path: null, line: null, created_at: '', resolved: false, replies: [] }] };
@@ -62,4 +62,14 @@ test('inspector preserves the owning draft and rejects a selection from a previo
   assert.equal(drafts.B.context.length, 0);
   assert.equal(drafts.B.text, 'Other draft');
   await Promise.resolve();
+});
+
+test('a terminal selection is one chip per selection, labelled by its lines, framed as terminal output', () => {
+  const c = terminalContext('$ npm test\nok 3 passed\n\n');
+  assert.equal(c.label, 'Terminal · 2 lines');
+  assert.equal(c.kind, 'diff');
+  assert.ok(c.id.startsWith('terminal:'));
+  assert.equal(terminalContext('$ npm test\nok 3 passed').id, c.id);
+  assert.equal(terminalContext('one').label, 'Terminal · 1 line');
+  assert.equal(assembleComposerMessage('why?', [c]), 'why?\n\n--- Terminal output: Terminal · 2 lines ---\n$ npm test\nok 3 passed');
 });

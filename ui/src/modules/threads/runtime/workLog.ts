@@ -7,7 +7,7 @@
 // Pure (unit/runtimeWorkLog.test.ts).
 import type { ProviderTurn, TurnItem } from '../../../lib/api/types';
 import { threadCall } from './agentRows';
-import { formatDuration, workLabel, type WorkEntry } from './timeline';
+import { formatDuration, groupSummary, toolError, workLabel, type TimelineRow, type WorkEntry, type WorkPart } from './timeline';
 
 export { formatDuration };
 
@@ -111,6 +111,72 @@ export function shouldFold(
     stretchDone(entries, turns, turnById) &&
     !needsEyes(entries, pendingRequestIds)
   );
+}
+
+/** A folded stretch's line: how long, then what it did in words (T3's
+ *  summarizeToolGroup) — "Worked for 2m 14s · ran 2 commands and edited 3
+ *  files"; thinking alone adds nothing. */
+export function foldLine(entries: readonly WorkEntry[]): string {
+  const tools = entries.filter((e) => e.item.type !== 'reasoning');
+  const did = tools.length ? groupSummary(tools) : '';
+  return did ? `${workedFor(entries)} · ${did.charAt(0).toLowerCase()}${did.slice(1)}` : workedFor(entries);
+}
+
+/** How much tool-call noise the timeline shows (threadPrefs, ⋯ › View),
+ *  after T3 Code's toolCallVisibility (packages/contracts/src/settings.ts). */
+export type ToolVisibility = 'all' | 'hide-ok' | 'none';
+
+const HIDEABLE: ReadonlySet<TurnItem['type']> = new Set(['command_execution', 'file_change', 'web_search', 'dynamic_tool']);
+
+/** A tool call this choice hides. A failure, a gated call (its approval and
+ *  outcome), a thread the agent opened, and everything that is not a tool
+ *  call — messages, questions, approvals, notices — always show. */
+export function hiddenTool({ item, approval }: WorkEntry, v: ToolVisibility): boolean {
+  if (v === 'all' || !HIDEABLE.has(item.type) || approval || item.status === 'failed' || toolError(item)) return false;
+  if (item.type === 'dynamic_tool' && threadCall(item)) return false;
+  return v === 'none' || item.status === 'completed';
+}
+
+/** The rows with the hidden tool calls left out (a stretch left empty goes too). */
+export function visibleTools(rows: readonly TimelineRow[], v: ToolVisibility): TimelineRow[] {
+  if (v === 'all') return rows as TimelineRow[];
+  const out: TimelineRow[] = [];
+  for (const r of rows) {
+    if (r.kind !== 'work') {
+      out.push(r);
+      continue;
+    }
+    const parts: WorkPart[] = [];
+    for (const p of r.parts) {
+      if (p.kind === 'item') {
+        if (!hiddenTool(p.entry, v)) parts.push(p);
+        continue;
+      }
+      const kept = p.entries.filter((e) => !hiddenTool(e, v));
+      if (kept.length === p.entries.length) parts.push(p);
+      else if (kept.length === 1) parts.push({ kind: 'item', entry: kept[0] });
+      else if (kept.length > 1) parts.push({ ...p, entries: kept });
+    }
+    if (parts.length === r.parts.length && parts.every((p, i) => p === r.parts[i])) out.push(r);
+    else if (parts.length) out.push({ ...r, parts });
+  }
+  return out;
+}
+
+/** While a stretch runs, how many of its leading steps fold into "N
+ *  earlier steps" (T3's live work log): the finished ones before the live
+ *  step, up to the first that needs a person (a failure, an approval) —
+ *  that one and everything after it stays in sight. Fewer than two: none. */
+export function earlierSteps(parts: readonly WorkPart[], pendingRequestIds: ReadonlySet<string>): number {
+  const entriesOf = (p: WorkPart): WorkEntry[] => (p.kind === 'item' ? [p.entry] : p.entries);
+  if (!parts.some((p) => entriesOf(p).some((e) => isLive(e.item)))) return 0;
+  let n = 0;
+  while (n < parts.length - 1) {
+    const es = entriesOf(parts[n]);
+    if (es.some((e) => isLive(e.item)) || needsEyes(es, pendingRequestIds) || !es.every((e) => FOLDABLE.has(e.item.type))) break;
+    n++;
+  }
+  return n >= 2 ? n : 0;
 }
 
 /** A running group's line: its live call by name, then "+N more". Null

@@ -5,9 +5,9 @@ import { join } from 'node:path';
 import { apiCtx } from './seed';
 import { expectFullyInViewport } from './helpers';
 
-// ⌘K opens on what needs you (Palette.svelte + threadSwitcherSource): in
-// Threads the first group is "Threads" — needs you (Approval / Question /
-// Failed) first, then finished-unread (Done), then working, then recent —
+// ⌘K opens on what needs you (the bar + threadSwitcherSource): in Threads the
+// first group is "Threads", in the sidebar's inbox order and words — needs you
+// (Approval / Question), Failed, Done, then the rest and the Working fold —
 // one status word + project per row, the order frozen while open. Typing
 // filters threads by title and project with the commands; "New thread:
 // <query>" starts the stage with the query as the draft; ⌘↵ opens beside in
@@ -19,6 +19,8 @@ let ctx: APIRequestContext;
 let base = '';
 let wsId = '';
 let dir = '';
+/** Unique per run: repeated runs share one daemon. */
+const RUN = Math.random().toString(36).slice(2, 6);
 
 test.beforeAll(async () => {
   const c = await apiCtx();
@@ -63,7 +65,7 @@ async function prompt(id: string, text: string): Promise<void> {
 
 /** Arrow the bar's selection onto a thread row. */
 async function select(page: Page, id: string): Promise<void> {
-  await expect(threadRow(page, id)).toBeVisible();
+  await expect(threadRow(page, id)).toBeVisible({ timeout: 3_000 });
   for (let i = 0; i < 20 && (await threadRow(page, id).getAttribute('aria-selected')) !== 'true'; i++) await barInput(page).press('ArrowDown');
   await expect(threadRow(page, id)).toHaveAttribute('aria-selected', 'true');
 }
@@ -84,17 +86,17 @@ const threadRow = (page: Page, id: string) => palette(page).locator(`[data-cmd="
 test('⌘K in Threads opens on what needs you; typing filters; New thread and beside', async ({ page }) => {
   test.setTimeout(120_000);
   await page.setViewportSize({ width: 1600, height: 1000 });
-  const recent = await thread('claude', 'Sw recent idea');
-  const working = await thread('codex', 'Sw working build');
-  const done = await thread('claude', 'Sw zsh startup');
-  const asks = await thread('codex', 'Sw approval needed');
+  const recent = await thread('claude', `Sw recent idea ${RUN}`);
+  const working = await thread('codex', `Sw working build ${RUN}`);
+  const done = await thread('claude', `Sw zsh startup ${RUN}`);
+  const asks = await thread('codex', `Sw approval needed ${RUN}`);
   await page.goto(`/#/threads/${recent}`);
   await expect(page.getByTestId(`runtime-thread-${recent}`)).toBeVisible({ timeout: 30_000 });
   // Off screen: one keeps working, one asks for approval, one finishes unread.
   await prompt(working, 'hang');
   await prompt(asks, 'ask');
   await prompt(done, 'hello');
-  await expect(page.getByTestId(`thread-unread-${done}`)).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId(`thread-status-${done}`)).toHaveText('Done', { timeout: 20_000 });
 
   await openPalette(page);
   const pal = palette(page);
@@ -104,14 +106,14 @@ test('⌘K in Threads opens on what needs you; typing filters; New thread and be
   expect(await pal.locator('[role="option"]').first().getAttribute('data-cmd')).toMatch(/^thread:/);
   const order = async (): Promise<string[]> =>
     (await pal.locator('[data-cmd^="thread:"]').evaluateAll((els) => els.map((e) => (e.getAttribute('data-cmd') ?? '').slice(7)))).filter((id) => [asks, done, working, recent].includes(id));
-  await expect.poll(order).toEqual([asks, done, working, recent]);
+  // The sidebar's inbox rank (needs you, Done), then Working, then the rest
+  // (the recent one may sit past the list's 8 rows in a busy daemon).
+  await expect.poll(async () => (await order()).slice(0, 3)).toEqual([asks, done, working]);
   const row = (id: string) => threadRow(page, id);
-  // "Approval" / "Question" need the thread's requests, which only an open
-  // pane has loaded; the row list alone says "Needs you" (no request kind on
-  // the session row yet).
-  await expect(row(asks).locator('.opt-meta')).toHaveText(/^(Approval|Needs you)$/);
+  // The sidebar's words: Approval / Question from one compact request read.
+  await expect(row(asks).locator('.opt-meta')).toHaveText('Approval');
   await expect(row(done).locator('.opt-meta')).toHaveText('Done');
-  await expect(row(working).locator('.opt-meta')).toHaveText('Working');
+  await expect(row(working).locator('.opt-meta')).toHaveText(/^Working/);
   await expect(row(asks)).toContainText(dir.split('/').pop()!);
   await expectFullyInViewport(page, pal, 'palette');
   for (const scheme of ['light', 'dark'] as const) {
@@ -123,10 +125,10 @@ test('⌘K in Threads opens on what needs you; typing filters; New thread and be
   // Typing filters threads by title and project with the commands; the last
   // row starts a new thread with the query as its draft.
   const input = barInput(page);
-  await input.fill('zsh startup');
+  await input.fill(`zsh startup ${RUN}`);
   await expect(pal.locator('[data-cmd^="thread:"]:not([data-cmd="thread:new"])')).toHaveCount(1);
   await expect(row(done)).toBeVisible();
-  await expect(pal.locator('[data-cmd="thread:new"]')).toContainText('New thread: zsh startup');
+  await expect(pal.locator('[data-cmd="thread:new"]')).toContainText(`New thread: zsh startup ${RUN}`);
   // Enter on the thread opens it in the focused pane.
   await select(page, done);
   await input.press('Enter');
@@ -146,10 +148,13 @@ test('⌘K in Threads opens on what needs you; typing filters; New thread and be
   await page.locator('.ctx-menu').getByRole('menuitem', { name: 'View' }).click();
   await page.locator('.ctx-submenu').getByRole('menuitemcheckbox', { name: 'Split' }).click();
   await expect(page.getByTestId('threads-canvas')).toHaveAttribute('data-layout', 'split');
-  await openPalette(page);
-  await barInput(page).fill('Sw working');
-  await expect(threadRow(page, working)).toBeVisible();
-  await select(page, working);
+  // A freshly mounted pane may take the focus back once (its composer):
+  // re-open the bar until the selection holds.
+  await expect(async () => {
+    await openPalette(page);
+    await barInput(page).fill(`working build ${RUN}`, { timeout: 2_000 });
+    await select(page, working);
+  }).toPass({ timeout: 30_000 });
   await barInput(page).press('Meta+Enter');
   await expect(page.getByTestId(`thread-pane-${working}`)).toBeVisible();
   await expect(page.getByTestId(`thread-pane-${recent}`)).toBeVisible();

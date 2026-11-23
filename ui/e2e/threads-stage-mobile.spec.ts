@@ -65,7 +65,8 @@ test('phone: ⋯ has no layouts or hand-off; the details drawer is compact', asy
   const menu = page.locator('.ctx-menu').first();
   await expectFullyInViewport(page, menu, 'toolbar ⋯ (phone)');
   const names = await menu.locator('[role^="menuitem"]').allInnerTexts();
-  for (const gone of [/^View/, /^Split/, /^Grid/, /^Single thread/, /^Continue on phone/, /^Open beside/]) {
+  // A phone's View holds only the thread prefs (no layouts).
+  for (const gone of [/^Split/, /^Grid/, /^Single thread/, /^Continue on phone/, /^Open beside/]) {
     expect(names.some((n) => gone.test(n)), String(gone)).toBe(false);
   }
   expect(names.filter((n) => /terminal/i.test(n))).toHaveLength(1);

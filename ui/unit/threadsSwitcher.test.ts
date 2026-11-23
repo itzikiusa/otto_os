@@ -1,34 +1,43 @@
-// The ⌘K switcher's thread rows (threadSwitcher.ts): what needs you first,
-// then finished-unread, then working, then recent; the sidebar's order inside
-// each; one status word; the order frozen while the palette is open.
+// The ⌘K switcher's thread rows: the sidebar's inbox rank (threadInbox.ts)
+// over the sidebar's own order, its words' tones, typing filters, and the
+// order frozen while the bar is open.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { shortAgo, switcherRows, type SwitcherThread } from '../src/modules/threads/threadSwitcher.ts';
+import { register } from 'node:module';
 import { filterThreadRows, frozenOrder } from '../src/lib/threadSwitch.ts';
+import type { InboxClass } from '../src/modules/threads/threadInbox.ts';
 
-const NOW = Date.parse('2026-11-23T12:00:00Z');
-const t = (id: string, key: string, more: Partial<SwitcherThread> = {}): SwitcherThread => ({
-  id, title: `T ${id}`, project: 'harbor', state: { key, label: key }, unread: false, asks: null, lastActive: '2026-11-23T11:00:00Z', ...more,
+// threadInbox.ts imports its siblings without an extension (as the app does).
+const hook =
+  'export async function resolve(s, c, n) {' +
+  "  if (/^\\.{1,2}\\//.test(s) && !/\\.[a-z]+$/i.test(s)) { try { return await n(s + '.ts', c); } catch {} }" +
+  '  return n(s, c);' +
+  '}';
+register('data:text/javascript,' + encodeURIComponent(hook));
+const { switcherOrder, wordTone } = await import('../src/modules/threads/threadSwitcher.ts');
+
+const t = (id: string, cls: InboxClass, lastActive = '2026-11-23T11:00:00Z') => ({ id, cls, lastActive });
+
+test('inbox rank first (needs, failed, done), then working, then the rest; the sidebar order inside a rank', () => {
+  const rows = switcherOrder([t('old', 'rest'), t('work', 'working'), t('done', 'done'), t('fail', 'failed'), t('b', 'needs'), t('a', 'needs')], ['a', 'old', 'work', 'done', 'fail', 'b']);
+  assert.deepEqual(rows.map((r) => r.id), ['a', 'b', 'fail', 'done', 'work', 'old']);
 });
 
-test('needs you and failed lead, then Done (unread), Working, then recent', () => {
-  const rows = switcherRows(
-    [t('old', 'idle'), t('work', 'working'), t('done', 'idle', { unread: true }), t('fail', 'failed'), t('ask', 'needs-you', { asks: 'question' }), t('ok', 'needs-you', { asks: 'approval' })],
-    ['old', 'work', 'done', 'fail', 'ok', 'ask'],
-    NOW,
-  );
-  assert.deepEqual(rows.map((r) => [r.id, r.word]), [['fail', 'Failed'], ['ok', 'Approval'], ['ask', 'Question'], ['done', 'Done'], ['work', 'Working'], ['old', '1h']]);
-  assert.equal(rows[0].tone, 'danger');
-  assert.equal(rows[1].tone, 'warning');
-  assert.equal(rows[3].tone, 'success');
+test('threads the sidebar does not show follow, newest first', () => {
+  const rows = switcherOrder([t('x', 'rest', '2026-11-20T00:00:00Z'), t('y', 'rest', '2026-11-22T00:00:00Z'), t('z', 'rest')], ['z']);
+  assert.deepEqual(rows.map((r) => r.id), ['z', 'y', 'x']);
 });
 
-test('a waiting thread whose request is not loaded says "Needs you"; unknown order falls back to recency', () => {
-  const rows = switcherRows([t('a', 'needs-you'), t('b', 'idle', { lastActive: '2026-11-23T11:59:30Z' }), t('c', 'idle', { lastActive: '2026-11-21T12:00:00Z' })], [], NOW);
-  assert.deepEqual(rows.map((r) => [r.id, r.word]), [['a', 'Needs you'], ['b', 'now'], ['c', '2d']]);
+test('the words keep the sidebar tones', () => {
+  assert.equal(wordTone('Approval'), 'warning');
+  assert.equal(wordTone('Question'), 'warning');
+  assert.equal(wordTone('Failed'), 'danger');
+  assert.equal(wordTone('Done'), 'success');
+  assert.equal(wordTone('Working 18s'), null);
+  assert.equal(wordTone('5m'), null);
 });
 
-test('the order the palette opened with holds while it is open', () => {
+test('the order the bar opened with holds while it is open', () => {
   const rows = [{ id: 'b' }, { id: 'new' }, { id: 'a' }];
   assert.deepEqual(frozenOrder(rows, ['a', 'gone', 'b']).map((r) => r.id), ['a', 'b', 'new']);
 });
@@ -42,5 +51,4 @@ test('typing matches title and project together', () => {
   assert.deepEqual(filterThreadRows(rows, 'flaky').map((r) => r.id), ['1']);
   assert.deepEqual(filterThreadRows(rows, 'harbor flaky').map((r) => r.id), []);
   assert.equal(filterThreadRows(rows, '').length, 2);
-  assert.equal(shortAgo('2026-11-23T11:55:00Z', NOW), '5m');
 });

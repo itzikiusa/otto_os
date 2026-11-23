@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
 
-function loadExternal(opts: { isEmbedded?: boolean; tauri?: boolean; windowOpen?: (...args: unknown[]) => void; postToHost?: (m: unknown) => void; invoke?: (cmd: string, args: unknown) => Promise<unknown> } = {}) {
+function loadExternal(opts: { isEmbedded?: boolean; tauri?: boolean; windowOpen?: (...args: unknown[]) => void; postToHost?: (m: unknown) => void; invoke?: (cmd: string, args: unknown) => Promise<unknown>; toastError?: (title: string, e: unknown) => void } = {}) {
   const win: Record<string, unknown> = {
     open: opts.windowOpen ?? (() => {}),
   };
@@ -13,6 +13,7 @@ function loadExternal(opts: { isEmbedded?: boolean; tauri?: boolean; windowOpen?
       './desktop': { isEmbedded: !!opts.isEmbedded },
       './embedGuest': { postToHost: opts.postToHost ?? (() => {}) },
       '@tauri-apps/api/core': { invoke: opts.invoke ?? (async () => {}) },
+      './toastError': { toastError: opts.toastError ?? (() => {}) },
     },
     { window: win },
   );
@@ -79,4 +80,30 @@ test('openExternal blocks unsafe schemes and never invokes plugin:shell|open', a
 
   await openExternal('https://example.com/docs');
   assert.deepEqual(opened, [['https://example.com/docs', '_blank', 'noopener,noreferrer']]);
+});
+
+test('desktop: opens through the opener plugin and toasts a refusal instead of a dead window.open', async () => {
+  const opened: unknown[][] = [];
+  const invoked: [string, unknown][] = [];
+  const toasted: [string, unknown][] = [];
+  let refuse = false;
+  const { openExternal } = loadExternal({
+    tauri: true,
+    windowOpen: (...args) => opened.push(args),
+    invoke: async (cmd, args) => {
+      invoked.push([cmd, args]);
+      if (refuse) throw 'Not allowed to open url https://example.com/docs';
+    },
+    toastError: (title, e) => toasted.push([title, e]),
+  });
+
+  await openExternal('https://example.com/docs');
+  assert.equal(JSON.stringify(invoked), JSON.stringify([['plugin:opener|open_url', { url: 'https://example.com/docs' }]]));
+  assert.deepEqual(toasted, []);
+
+  refuse = true;
+  await openExternal('https://example.com/docs');
+  assert.deepEqual(toasted, [['Couldn’t open the link', 'Not allowed to open url https://example.com/docs']]);
+  // The WKWebView has no new-window handler: window.open would silently do nothing.
+  assert.equal(opened.length, 0);
 });

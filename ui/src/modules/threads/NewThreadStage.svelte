@@ -388,7 +388,7 @@
   }
   .nt-inner {
     inline-size: 100%;
-    max-inline-size: 720px;
+    max-inline-size: 760px;
     display: flex;
     flex-direction: column;
     gap: 14px;

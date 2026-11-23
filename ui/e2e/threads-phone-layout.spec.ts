@@ -153,8 +153,11 @@ test('phone: with the keyboard up the composer is on screen and the conversation
   await expect(page.locator('[data-testid="threads-page"] > .page-header-bar')).toHaveCount(1);
   await expect(page.getByTestId('threads-toggle-inspector')).toHaveCount(1);
   await expect(page.getByTestId('threads-toggle-sidebar')).toHaveCount(1);
-  await expect(page.locator('[aria-label="Open navigator"]')).toHaveCount(landscape ? 1 : 0);
-  if (landscape) await expectFullyInViewport(page, page.getByTestId('threads-open-navigator'), 'navigator button');
+  // One Navigator button, in Threads' own header row: landscape always, and
+  // portrait in Full mode (the e2e default; Light mode's shell bar has its
+  // own), since the shell's top bar steps aside here (ThreadsPage.svelte).
+  await expect(page.locator('[aria-label="Open navigator"]')).toHaveCount(1);
+  await expectFullyInViewport(page, page.getByTestId('threads-open-navigator'), 'navigator button');
   const closed = await timelineLines(thread);
   console.log(`[T-PHONE] ${info.project.name} keyboard closed: timeline ${Math.round(closed.height)} px`);
   await expectNoHorizontalOverflow(page);

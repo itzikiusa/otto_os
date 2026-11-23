@@ -8,7 +8,10 @@ import { threads } from '../threadsStore.svelte';
 import { runtimeThreads } from './runtimeThreads.svelte';
 
 export const threadsHostCommands: RuntimeHostCommands = {
-  openDiff: () => threads.setInspectorTab('changes'),
+  openDiff: (_id, path) => {
+    threads.changesFocus = path ?? null;
+    threads.setInspectorTab('changes');
+  },
   openFiles: () => threads.setInspectorTab('files'),
   openTerminal: (id) => threads.toggleTerminal(id),
   newThread: (id, beside) => void newThread(id, beside),

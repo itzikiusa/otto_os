@@ -1,8 +1,26 @@
-import { test, expect, type Route } from '@playwright/test';
+import { test, expect, type Locator, type Page, type Route } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 
 test.use({ serviceWorkers: 'block' });
+
+/** Other specs' threads (the e2e daemon is shared) reach this page through
+ *  the live event stream: Threads fetches a thread it does not hold yet
+ *  (runtimeThreads.adopt) and opens on the newest. Answer those row reads
+ *  404 so the page keeps to the threads this spec mocks. */
+async function keepOthersOut(page: Page, ours?: RegExp): Promise<void> {
+  await page.route(/\/api\/v1\/runtime-sessions\/[^/?]+$/, (route) => {
+    const id = new URL(route.request().url()).pathname.split('/').at(-1)!;
+    return ours?.test(id) ? route.fallback() : route.fulfill({ status: 404, json: { code: 'not_found', message: 'not in this spec' } });
+  });
+}
+
+/** The thread's access as the composer's "+" menu checks it (the chip shows only off the default). */
+async function expectAccess(page: Page, thread: Locator, label: string): Promise<void> {
+  await thread.getByTestId('runtime-plus').click();
+  await expect(page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: `Access: ${label}`, exact: true })).toHaveAttribute('aria-checked', 'true');
+  await page.keyboard.press('Escape');
+}
 
 test('thread drafts, attachments and permissions stay with their owner; mobile commands open accessible drawers', async ({ page }, info) => {
   const { ctx, base } = await apiCtx();
@@ -22,6 +40,7 @@ test('thread drafts, attachments and permissions stay with their owner; mobile c
   await page.route(`**/api/v1/workspaces/${workspaceId}/runtime-sessions`, (route) => route.fulfill({ json: sessions }));
   // Threads lists every workspace's threads; keep this page to the seeded two.
   await page.route('**/api/v1/runtime-sessions', (route) => route.fulfill({ json: sessions }));
+  await keepOthersOut(page, /^focus-thread-/);
   await page.route('**/api/v1/runtime-sessions/focus-thread-*/events**', (route) => route.fulfill({ json: {
     kind: 'snapshot', snapshot_sequence: 1, snapshot: {
       provider_session: { status: 'ready', cwd: '/tmp', model: null, updated_at: ts, last_error: null },
@@ -51,10 +70,12 @@ test('thread drafts, attachments and permissions stay with their owner; mobile c
   await alpha.getByTestId('runtime-composer').fill('Alpha private draft');
   await alpha.locator('input[type=file]').setInputFiles({ name: 'alpha.png', mimeType: 'image/png', buffer: Buffer.from('image fixture') });
   await expect(alpha.getByTestId('runtime-images').getByRole('img', { name: 'alpha.png' })).toBeVisible();
-  await alpha.getByTestId('runtime-access').click();
-  await page.getByRole('menuitemcheckbox', { name: 'Full access', exact: true }).click();
+  // The access chip shows only off the default (Full access here), so pick it from "+".
+  await alpha.getByTestId('runtime-plus').click();
+  await page.getByRole('menuitemcheckbox', { name: 'Access: Full access', exact: true }).click();
   await page.getByRole('button', { name: 'Allow full access', exact: true }).click();
-  await expect(alpha.getByTestId('runtime-access')).toContainText('Full access');
+  await expect(alpha.getByTestId('runtime-access')).toHaveCount(0);
+  await expectAccess(page, alpha, 'Full access');
 
   await page.getByTestId('threads-sidebar').getByText('Beta thread', { exact: true }).click();
   await expect(beta).toBeVisible();
@@ -72,7 +93,7 @@ test('thread drafts, attachments and permissions stay with their owner; mobile c
   await expect(alpha).toBeVisible();
   await expect(alpha.getByTestId('runtime-composer')).toHaveValue('Alpha private draft');
   await expect(alpha.getByTestId('runtime-images').getByRole('img', { name: 'alpha.png' })).toBeVisible();
-  await expect(alpha.getByTestId('runtime-access')).toContainText('Full access');
+  await expectAccess(page, alpha, 'Full access');
   // A→B→A must restore the same draft, not clear it to fix the leak.
   await alpha.getByTestId('runtime-images').getByRole('button', { name: 'Remove alpha.png' }).click();
   await alpha.getByTestId('runtime-composer').fill('');
@@ -135,6 +156,7 @@ test('a failed initial thread list shows Retry instead of an empty composer', as
   // Both lists: this workspace's and every workspace's (Threads loads both).
   await page.route(`**/api/v1/workspaces/${workspaceId}/runtime-sessions`, list);
   await page.route('**/api/v1/runtime-sessions', list);
+  await keepOthersOut(page);
   await page.goto('/#/threads');
   const error = page.getByTestId('load-error').filter({ hasText: 'Couldn’t load threads' });
   await expect(error).toBeVisible();

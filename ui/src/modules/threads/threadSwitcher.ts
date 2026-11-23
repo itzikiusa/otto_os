@@ -1,58 +1,31 @@
-// The ⌘K switcher's thread rows (Orca's ⌘J jump palette, in Otto's one ⌘K):
-// what needs you first (Approval, Question, Failed), then what finished while
-// you looked elsewhere (Done), then what is working, then the rest by recency
-// — inside each, the order the sidebar shows them (threadNav.order), so the
-// two lists never disagree. One status word per row. Pure, import-free
-// (types only): unit/threadsSwitcher.test.ts.
-import type { PaletteThreadRow, PaletteThreadTone } from '../../lib/paletteThreads.svelte';
-import type { StateLike } from './threadAttention';
+// The ⌘K switcher's thread order (Orca's ⌘J jump palette, in Otto's one ⌘K),
+// from the sidebar's own inbox logic (threadInbox.ts): its class rank —
+// needs you, Failed, Done (finished unread) — then what is working (the
+// sidebar's Working section, here ahead of the rest so a capped list never
+// drops it), then the rest; inside a rank, the order the sidebar shows them
+// (threadNav.order). The words are the
+// sidebar's (threadInbox `statusWord`). Pure: unit/threadsSwitcher.test.ts.
+import type { PaletteThreadTone } from '../../lib/paletteThreads.svelte';
+import { inboxScore, type InboxClass } from './threadInbox.ts';
 
-export interface SwitcherThread {
-  id: string;
-  title: string;
-  project: string;
-  /** lib/status.ts `sessionState` (threadNav `threadRowState`). */
-  state: StateLike;
-  /** Finished a turn you have not looked at. */
-  unread: boolean;
-  /** What a waiting runtime thread asks for, when its requests are loaded. */
-  asks: 'approval' | 'question' | null;
-  lastActive: string;
-}
+const rank = (c: InboxClass): number => (c === 'working' ? inboxScore('done') + 0.5 : inboxScore(c));
 
-function bucket(t: SwitcherThread): number {
-  if (t.state.key === 'needs-you' || t.state.key === 'failed') return 0;
-  if (t.unread) return 1;
-  if (t.state.key === 'working' || t.state.key === 'running') return 2;
-  return 3;
-}
-
-/** "now", "5m", "3h", "2d" — the quiet word for a thread that needs nothing. */
-export function shortAgo(iso: string, nowMs: number): string {
-  const s = Math.max(0, Math.floor((nowMs - Date.parse(iso)) / 1000));
-  if (!Number.isFinite(s) || s < 60) return 'now';
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  if (s < 86_400) return `${Math.floor(s / 3600)}h`;
-  return `${Math.floor(s / 86_400)}d`;
-}
-
-function word(t: SwitcherThread, nowMs: number): { word: string; tone: PaletteThreadTone } {
-  if (t.state.key === 'needs-you') return { word: t.asks === 'question' ? 'Question' : t.asks === 'approval' ? 'Approval' : 'Needs you', tone: 'warning' };
-  if (t.state.key === 'failed') return { word: 'Failed', tone: 'danger' };
-  if (t.unread) return { word: 'Done', tone: 'success' };
-  if (t.state.key === 'working' || t.state.key === 'running') return { word: 'Working', tone: null };
-  return { word: shortAgo(t.lastActive, nowMs), tone: null };
-}
-
-/** The switcher's rows: `sidebarOrder` is the sidebar's order (threads it
- *  does not show follow, newest first). */
-export function switcherRows(threads: readonly SwitcherThread[], sidebarOrder: readonly string[], nowMs: number): PaletteThreadRow[] {
+/** `items` in switcher order: inbox rank first, then the sidebar's order
+ *  (threads it does not show follow, newest first). */
+export function switcherOrder<T extends { id: string; cls: InboxClass; lastActive: string }>(items: readonly T[], sidebarOrder: readonly string[]): T[] {
   const at = new Map(sidebarOrder.map((id, i) => [id, i] as const));
-  const sorted = [...threads].sort(
+  return [...items].sort(
     (a, b) =>
-      bucket(a) - bucket(b) ||
+      rank(a.cls) - rank(b.cls) ||
       (at.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (at.get(b.id) ?? Number.MAX_SAFE_INTEGER) ||
       b.lastActive.localeCompare(a.lastActive),
   );
-  return sorted.map((t) => ({ id: t.id, title: t.title, project: t.project, ...word(t, nowMs) }));
+}
+
+/** The tone of a status word (the sidebar row colours them the same way). */
+export function wordTone(word: string): PaletteThreadTone {
+  if (word === 'Approval' || word === 'Question' || word === 'Needs you') return 'warning';
+  if (word === 'Failed') return 'danger';
+  if (word === 'Done') return 'success';
+  return null;
 }

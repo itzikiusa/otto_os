@@ -19,6 +19,7 @@ import { runtimeViews } from './runtime/runtimeView.svelte';
 import { threadRepos } from './threadRepos.svelte';
 import { harnessLabel, isPlainShellSession, sideChatOf } from './threadsHelpers';
 import { threads } from './threadsStore.svelte';
+import { offerUndo } from './threadUndo';
 
 /** The live side chat of `mainId`, newest first. */
 export function sideChatFor(mainId: string | null): Session | null {
@@ -100,7 +101,11 @@ export async function promoteSideChat(side: Session): Promise<void> {
   }
 }
 
-/** Archive the side chat (asks first while it is working). */
+/** Archive the side chat (asks first while it is working), with an Undo
+ *  notice that brings it back. */
 export async function dismissSideChat(side: Session): Promise<void> {
-  await ws.requestArchive(side.id);
+  if (!(await ws.requestArchive(side.id))) return;
+  offerUndo('Side chat dismissed', async () => {
+    await ws.unarchiveSession(side.id);
+  });
 }
