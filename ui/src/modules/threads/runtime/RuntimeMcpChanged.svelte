@@ -12,15 +12,20 @@
   import { nativeServerNames } from './nativeServers';
   import { mcpAsks } from './mcpAsksStore.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
+  import { runtimeViews } from './runtimeView.svelte';
+
+  const NONE: McpServerStatus[] = [];
 
   interface Props {
     sessionId: string;
     workspaceId: string | undefined;
-    servers: McpServerStatus[];
     /** No turn running: a restart would not cut one off. */
     idle: boolean;
   }
-  let { sessionId, workspaceId, servers, idle }: Props = $props();
+  let { sessionId, workspaceId, idle }: Props = $props();
+  /** The agent's own list: a derived value, so the effect below re-runs when
+   *  the agent reports its servers again, never per stream batch. */
+  const servers = $derived(runtimeViews.projections[sessionId]?.mcpServers ?? NONE);
   let enabled = $state<string[] | null>(null);
   // Keeps the thread's MCP approval cards live (its dock shows them).
   $effect(() => mcpAsks.hold());
