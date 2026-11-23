@@ -46,7 +46,7 @@
     }
   });
   const statusText = $derived(
-    running ? 'Running' : item.status === 'completed' ? 'Done' : item.status === 'failed' ? 'Failed' : 'Stopped',
+    running ? 'Working' : item.status === 'completed' ? 'Done' : item.status === 'failed' ? 'Failed' : 'Stopped',
   );
   const name = $derived(item.description ?? item.title ?? item.subagent_type ?? 'Subagent');
   const elapsed = $derived.by(() => {
@@ -64,7 +64,7 @@
   const detailLoading = $derived(Boolean(sessionId && runtimeViews.loadingItem[`${sessionId}:${item.id}`]));
   const itemDetailError = $derived(sessionId ? (runtimeViews.itemError[`${sessionId}:${item.id}`] ?? null) : null);
   const tone = $derived<'live' | 'done' | 'failed' | 'off'>(running ? 'live' : item.status === 'completed' ? 'done' : item.status === 'failed' ? 'failed' : 'off');
-  const sub = $derived([item.subagent_type && item.subagent_type !== name ? item.subagent_type : null, item.background ? 'Background' : null].filter(Boolean).join(' · ') || null);
+  const sub = $derived(item.subagent_type && item.subagent_type !== name ? item.subagent_type : null);
   /** One line: the live step, else the error or the answer's first line. */
   const result = $derived(
     running

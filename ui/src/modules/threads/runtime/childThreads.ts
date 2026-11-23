@@ -7,6 +7,7 @@
 // progress while running, the result once settled). Pure
 // (unit/threadsChildren.test.ts).
 import type { ChildOf, RuntimeSession, TurnItem } from '../../../lib/api/types';
+import { threadCall } from './agentRows';
 import type { RuntimeProjection } from './projection';
 import { latestTurn, workLabel } from './timeline';
 
@@ -43,10 +44,11 @@ export interface ChildState {
   label: string;
 }
 
+/** One vocabulary for every subagent: Working · Needs you · Done · Failed · Stopped. */
 const LABEL: Record<ChildTone, string> = {
-  starting: 'Starting',
+  starting: 'Working',
   working: 'Working',
-  background: 'Background task running',
+  background: 'Working',
   'needs-you': 'Needs you',
   done: 'Done',
   failed: 'Failed',
@@ -144,4 +146,76 @@ export function elapsedMs(p: RuntimeProjection | null | undefined, nowMs: number
 /** Threads opened FROM `parentId` (by a person or its agent), oldest first. */
 export function childrenOf(rows: readonly RuntimeSession[], parentId: string): RuntimeSession[] {
   return rows.filter((r) => childOf(r)?.id === parentId).sort((a, b) => a.created_at.localeCompare(b.created_at));
+}
+
+type SubagentItem = Extract<TurnItem, { type: 'subagent' }>;
+type Hint = { provider?: string | null; title?: string | null; model?: string | null; effort?: string | null };
+
+/** One subagent under a turn: a thread opened from this one (by its agent or
+ *  a person), or the provider's own subagent (Claude's Task, …). */
+export type Kid = { kind: 'thread'; id: string; hint?: Hint } | { kind: 'native'; item: SubagentItem };
+
+export const kidKey = (k: Kid): string => (k.kind === 'thread' ? k.id : k.item.id);
+
+/** Every turn's subagents as ONE timeline row (T3 Code's V2SubagentGroup):
+ *  `groups` = the row at the turn's first subagent item, `skip` = that
+ *  turn's other subagent items (drawn inside the row). Sources: the agent's
+ *  settled `otto.thread_open` calls, a person's "Delegate" notice and the
+ *  provider's own `subagent` cards. */
+export function turnSubagents(items: readonly TurnItem[]): { groups: Map<string, Kid[]>; skip: Set<string> } {
+  const groups = new Map<string, Kid[]>();
+  const skip = new Set<string>();
+  const anchorOf = new Map<string, string>();
+  const seen = new Set<string>();
+  for (const i of items) {
+    if (i.parent_item_id) continue;
+    let kids: Kid[] = [];
+    if (i.type === 'subagent') kids = [{ kind: 'native', item: i }];
+    else if (i.type === 'system_notice') {
+      const n = threadNoticeOf(i.message);
+      // A start, or an end whose start is not in this timeline (paged out).
+      if (n) kids = n.ids.map((id) => ({ kind: 'thread', id }));
+    } else if (i.type === 'dynamic_tool' && !i.error && i.status !== 'running' && i.status !== 'pending') {
+      const c = threadCall(i);
+      if (c?.verb === 'Opened' && c.targetId) kids = [{ kind: 'thread', id: c.targetId, hint: { provider: c.provider, title: c.title, model: c.model, effort: c.effort } }];
+    }
+    kids = kids.filter((k) => !seen.has(kidKey(k)));
+    if (kids.length === 0) continue;
+    for (const k of kids) seen.add(kidKey(k));
+    const turn = i.turn_id ?? `item:${i.id}`;
+    const anchor = anchorOf.get(turn);
+    if (anchor) {
+      groups.get(anchor)!.push(...kids);
+      skip.add(i.id);
+    } else {
+      anchorOf.set(turn, i.id);
+      groups.set(i.id, kids);
+    }
+  }
+  return { groups, skip };
+}
+
+/** A provider subagent's state in the same words as a thread's. */
+export function nativeTone(item: SubagentItem): ChildTone {
+  if (item.status === 'running' || item.status === 'pending' || item.status === 'waiting') return 'working';
+  if (item.status === 'completed') return 'done';
+  return item.status === 'failed' ? 'failed' : 'stopped';
+}
+
+/** "2 working · 1 done": the non-zero states, most urgent first. */
+export function subagentTally(tones: readonly ChildTone[]): { text: string; tone: 'live' | 'ask' | 'failed' | 'done' } {
+  const n = (t: ChildTone[]): number => tones.filter((x) => t.includes(x)).length;
+  const parts: [number, string][] = [
+    [n(['needs-you']), 'need you'],
+    [n(['working', 'starting', 'background']), 'working'],
+    [n(['done']), 'done'],
+    [n(['failed']), 'failed'],
+    [n(['stopped']), 'stopped'],
+  ];
+  const text = parts
+    .filter(([c]) => c > 0)
+    .map(([c, w]) => `${c} ${w === 'need you' && c === 1 ? 'needs you' : w}`)
+    .join(' · ');
+  const tone = parts[0][0] > 0 ? 'ask' : parts[1][0] > 0 ? 'live' : parts[3][0] > 0 ? 'failed' : 'done';
+  return { text, tone };
 }

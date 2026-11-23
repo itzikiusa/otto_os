@@ -211,6 +211,25 @@ const childRoutes: MockRoute[] = [
 ];
 
 Object.assign(log(), {
+  /** `parent`'s agent delegated to subagents (`otto.thread_open`), one turn:
+   *  each kid a child thread (ULID id) with its state, plus the call in the
+   *  parent's timeline. `working` kids count on the waiting line. */
+  delegate: (parent: string, kids: { id: string; provider: string; title: string; working?: boolean; answer?: string }[]): void => {
+    for (const k of kids) {
+      threads.push({
+        id: k.id, workspace_id: 'wsp_otto', provider: k.provider, title: k.title, cwd: '/Users/dev/otto', status: k.working ? 'working' : 'idle',
+        access_mode: 'approval-required', created_by: 'usr_root', created_at: now(), last_active_at: now(), last_sequence: 0,
+        parent_id: parent, meta: { child_of: { id: parent, by: 'agent' } }, last_turn_status: k.working ? null : 'completed',
+      } as RuntimeSession);
+      item(k.id, { type: 'user_message', text: `[Subagent task from thread "lead" (claude, id ${parent}). Do the work yourself.]\n\n${k.title}` });
+      if (k.answer) item(k.id, { type: 'assistant_message', message_id: `msg_${k.id}`, text: k.answer, streaming: false });
+      const it = item(parent, {
+        type: 'dynamic_tool', tool_name: 'mcp__otto__otto_thread_open', input: { provider: k.provider, title: k.title, prompt: k.title },
+        output: JSON.stringify({ id: k.id, access_mode: 'approval-required', next: 'Completion wakes this thread.' }), error: null,
+      });
+      appLive.dispatch({ type: 'agent_runtime_event', event: { session_id: parent, sequence: seqs.get(parent) ?? 0, ts: now(), type: 'turn_item.updated', turn_item: it } });
+    }
+  },
   /** Child `sid`'s turn ended: the thread it was asked from hears it. */
   childDone: (sid: string, line: string): void => {
     const kid = find(sid);

@@ -465,6 +465,7 @@
             {workingFor}
             {ownTurn}
             background={closed ? [] : background}
+            {sessionId}
             {outcome}
             {failure}
             {agentName}

@@ -14,6 +14,8 @@
   import { parseUserMessageItemWithBadges, type ParsedContextBadge } from './mentionMatcher';
   import type { RuntimeProjection } from './projection';
   import RuntimeApprovalRow from './RuntimeApprovalRow.svelte';
+  import RuntimeChildGroup from './RuntimeChildGroup.svelte';
+  import { turnSubagents } from './childThreads';
   import RuntimeAttachments from './RuntimeAttachments.svelte';
   import RuntimeSubagentCard from './RuntimeSubagentCard.svelte';
   import RuntimeThreadCallRow from './RuntimeThreadCallRow.svelte';
@@ -132,6 +134,8 @@
   const pendingIds = $derived(approvals.size === 0 ? EMPTY_PENDING_IDS : new Set(approvals.keys()));
   const requests = $derived(rawRequests.length === 0 ? EMPTY_REQUESTS : new Map(rawRequests.map((r) => [r.id, r] as const)));
   const children = $derived(subagentChildren(projection.items));
+  /** Each turn's subagents as one row, at its first one (childThreads.ts). */
+  const subagents = $derived(turnSubagents(projection.items));
 
   function handleBadgeClick(b: ParsedContextBadge): void {
     if (!b.path) return;
@@ -148,6 +152,10 @@
   {@const call = item.type === 'dynamic_tool' && !item.error && !approval ? threadCall(item) : null}
   {#if item.id === hideItemId}
     <!-- Said once, by the failed turn's block under the timeline. -->
+  {:else if subagents.groups.has(item.id)}
+    <RuntimeChildGroup kids={subagents.groups.get(item.id) ?? []} {sessionId} activity={children} output={outputMap} />
+  {:else if subagents.skip.has(item.id)}
+    <!-- Drawn inside its turn's subagent row. -->
   {:else if item.type === 'subagent'}
     <RuntimeSubagentCard {sessionId} {item} activity={children.get(item.id) ?? EMPTY_ACTIVITY} output={outputMap} />
   {:else if call}

@@ -53,7 +53,7 @@ async function claudeThread(title: string): Promise<string> {
   return (await created.json()).id as string;
 }
 
-test('Agents & tasks rows open the subagent and the background command, desktop and phone', async ({ page }, info) => {
+test('Agents & tasks opens the background command; the provider’s subagent is a subagent row, desktop and phone', async ({ page }, info) => {
   const id = await claudeThread('Agents and tasks');
   await page.goto(`/#/threads/${id}`);
   const thread = page.getByTestId(`runtime-thread-${id}`);
@@ -83,44 +83,38 @@ test('Agents & tasks rows open the subagent and the background command, desktop 
   await expect(panel.getByTestId('agents-tasks-detail')).toHaveCount(0);
   await expect(thread.getByText('Background done: ok')).toBeVisible({ timeout: 20_000 });
 
-  // A background subagent: the same card as the timeline, opened in place.
-  // Long enough to still be running while its row is read and opened.
+  // The provider's own subagent is a subagent like any other: its row in the
+  // timeline and the waiting line under it — never the background strip.
   await composer.fill('agent 8');
   await composer.press('Enter');
   await expect(thread.getByText("I'm waiting for the PR sweep to come back.")).toBeVisible({ timeout: 15_000 });
-  const agentRow = panel.getByTestId('agents-tasks-row').filter({ hasText: 'PR sweep' });
-  await expect(agentRow).toContainText('Background');
-  await expect(agentRow).toContainText('Running');
-  await agentRow.getByRole('button', { name: /PR sweep/ }).click();
-  await expect(detail).toContainText('Sweep the open PRs');
-  await expect(detail).toContainText('Looking at PRs');
+  const sub = thread.locator('[data-testid^="runtime-subagent-"]').filter({ hasText: 'PR sweep' });
+  await expect(sub).toContainText('Working');
+  await expect(sub).not.toContainText('Background');
+  await expect(thread.getByTestId('runtime-bg-waiting')).toContainText('Waiting on 1 subagent');
+  await expect(thread.getByTestId('runtime-bg-waiting')).toContainText('PR sweep');
+  await expect(thread.getByTestId('runtime-background')).toHaveCount(0);
+  await sub.locator('button[aria-expanded]').click();
+  await expect(sub).toContainText('Sweep the open PRs');
   for (const scheme of ['light', 'dark'] as const) {
     await page.emulateMedia({ colorScheme: scheme });
-    await page.screenshot({ path: info.outputPath(`agents-tasks-agent-${scheme}.png`), animations: 'disabled' });
+    await page.screenshot({ path: info.outputPath(`subagent-native-${scheme}.png`), animations: 'disabled' });
   }
   await page.emulateMedia({ colorScheme: 'light' });
-  await expect(detail).toContainText('Found 2 open PRs', { timeout: 20_000 });
-  await agentRow.getByRole('button', { name: /PR sweep/ }).click();
+  await expect(sub).toContainText('Found 2 open PRs', { timeout: 20_000 });
+  await expect(sub).toContainText('Done');
 
-  // Phone width: the strip opens the drawer, its row a sheet that fits.
+  // Phone width: the row and the waiting line fit.
   await page.setViewportSize({ width: 390, height: 844 });
   await composer.fill('agent 4');
   await composer.press('Enter');
-  await thread.getByTestId('runtime-background').click({ timeout: 15_000 });
-  const phonePanel = page.getByTestId('thread-agents-tasks');
-  await expect(phonePanel).toBeVisible();
-  await phonePanel.getByTestId('agents-tasks-row').filter({ hasText: 'Running' }).getByRole('button', { name: /PR sweep/ }).click();
-  const sheet = page.getByRole('dialog', { name: 'PR sweep', exact: true });
-  await expect(sheet).toContainText('Sweep the open PRs');
-  await expectFullyInViewport(page, sheet);
+  await expect(thread.getByTestId('runtime-bg-waiting')).toContainText('Waiting on 1 subagent', { timeout: 15_000 });
   await expectNoHorizontalOverflow(page);
   for (const scheme of ['light', 'dark'] as const) {
     await page.emulateMedia({ colorScheme: scheme });
-    await page.screenshot({ path: info.outputPath(`agents-tasks-phone-${scheme}.png`), animations: 'disabled' });
+    await page.screenshot({ path: info.outputPath(`subagent-native-phone-${scheme}.png`), animations: 'disabled' });
   }
   await page.emulateMedia({ colorScheme: 'light' });
-  await page.keyboard.press('Escape');
-  await expect(sheet).toHaveCount(0);
 });
 
 test('image previews are readable and open full size', async ({ page }, info) => {

@@ -34,25 +34,26 @@ async function seed(page: Page): Promise<void> {
   });
 }
 
-test('a child thread on a phone: its result line in the parent, Open, and back', async ({ page }) => {
+test('a child thread on a phone: its row in the parent, Open, and back', async ({ page }) => {
   await seed(page);
   const lead = page.getByTestId('runtime-thread-rt_ph_lead');
   await expect(lead).toBeVisible({ timeout: 15_000 });
   await expectFullyInViewport(page, lead.getByTestId('runtime-ask-agent'));
 
   await page.evaluate(() => (window as unknown as { __mockRuntime: Hooks }).__mockRuntime.childDone('rt_ph_kid', 'The changelog misses two fixes.'));
-  const notice = lead.getByTestId('runtime-child-notice-rt_ph_kid');
-  await expect(notice).toContainText('finished: The changelog misses two fixes.');
+  // Its start is not in this timeline: the finished notice draws its row.
+  const row = lead.getByTestId('runtime-child-row-rt_ph_kid');
+  await expect(row).toContainText('The changelog misses two fixes.');
   await expectNoHorizontalOverflow(page);
 
-  await notice.getByRole('button', { name: 'Open' }).click();
+  await row.getByTestId('runtime-item-open').tap();
   await expect(page.getByTestId('runtime-thread-rt_ph_kid')).toBeVisible();
   const back = page.getByTestId('threads-back-to-parent');
   await expect(back).toContainText('Plan the release');
   await expectFullyInViewport(page, back);
   await expectNoHorizontalOverflow(page);
 
-  await back.click();
+  await back.tap();
   await expect(page.getByTestId('runtime-thread-rt_ph_lead')).toBeVisible();
 });
 

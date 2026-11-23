@@ -90,9 +90,10 @@ test('Ask another agent opens a linked child shown live in the parent and nested
   await expect(page.getByTestId(`runtime-thread-${childId}`)).toBeVisible();
   await expect(page.getByTestId('runtime-thread-rt_lead')).toBeVisible();
 
-  // Its finished turn comes back to the parent as one line with Open.
+  // Its finished turn adds no second mention: its one row already says Done.
   await page.evaluate((id) => (window as unknown as { __mockRuntime: Hooks }).__mockRuntime.childDone(id, 'The linker needs -lm.'), childId);
-  await expect(thread.getByTestId(`runtime-child-notice-${childId}`)).toContainText('finished: The linker needs -lm.');
+  await expect(thread.locator('[data-testid^="runtime-child-row-"]')).toHaveCount(1);
+  await expect(thread.getByTestId(`runtime-child-notice-${childId}`)).toHaveCount(0);
 });
 
 test('typing @cod offers Codex as a chip', async ({ page }) => {

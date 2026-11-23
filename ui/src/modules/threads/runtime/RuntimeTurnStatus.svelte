@@ -2,7 +2,8 @@
   // The status line under a runtime thread's latest turn: live activity +
   // elapsed timer while running ("Working · Running npm test · 14s" or
   // "Background wakeup · Thinking… · 4s"), a calm waiting line when idle with
-  // scheduled/background tasks ("Waiting on 1 background task: …"), or outcome
+  // subagents or background work ("Waiting on 2 subagents and 1 command ·
+  // <titles> · Stop" — the one live mention of subagents near the composer), or outcome
   // ("Stopped", "Stopped · no progress", "Partly done"). Each names the model
   // (and effort) the turn actually ran on when the daemon says, and a
   // finished turn the tokens it used. A failed turn is ONE calm block: the
@@ -14,6 +15,8 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import type { AgentTask } from './agentTasks';
   import { deriveLiveFooter } from './liveStatus';
+  import { toastError } from '../../../lib/toastError';
+  import { stopThreadWork, taskStops } from './taskStops.svelte';
   import type { RuntimeProjection } from './projection';
   import { formatEffortShort } from '../../../lib/providerModels';
   import { latestTurn, workLabel, type TurnOutcome } from './timeline';
@@ -27,6 +30,8 @@
     /** The running turn is the agent's own (`origin === 'agent'`). */
     ownTurn: boolean;
     background?: readonly AgentTask[];
+    /** The thread: the waiting line's Stop stops its background work. */
+    sessionId?: string;
     outcome: TurnOutcome | null;
     /** The failed turn's cause in words (outcome `failed`). */
     failure?: FailureView | null;
@@ -43,6 +48,7 @@
     workingFor,
     ownTurn,
     background = [],
+    sessionId = '',
     outcome,
     failure = null,
     agentName = 'The agent',
@@ -57,6 +63,20 @@
   /** "claude-sonnet-4-5 · High": what the latest turn really ran on (absent on older daemons). */
   const ranOn = $derived([turn?.model, turn?.effort ? formatEffortShort(turn.effort) : null].filter(Boolean).join(' · '));
   const live = $derived(deriveLiveFooter(projection, workingFor, ownTurn, background));
+  let stoppingAll = $state(false);
+  /** Stop everything the line waits on: each subagent thread, the rest by task id. */
+  async function stopWaiting(): Promise<void> {
+    if (stoppingAll) return;
+    stoppingAll = true;
+    const ids = background.filter((b) => !b.childSessionId && b.stopId).map((b) => b.stopId!);
+    const results = await Promise.allSettled([
+      ...background.filter((b) => b.childSessionId).map((b) => stopThreadWork(b.childSessionId!, { turnRunning: true, taskIds: [] })),
+      ...(ids.length && sessionId ? [taskStops.stopAll(sessionId, ids)] : []),
+    ]);
+    stoppingAll = false;
+    const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+    if (failed) toastError('Couldn’t stop everything', failed.reason);
+  }
   const retryText = $derived(outcome?.retryText ?? '');
   const retryAttachments = $derived(outcome?.retryAttachments);
   const canRetry = $derived(Boolean(retryText || (retryAttachments && retryAttachments.length > 0)));
@@ -113,10 +133,11 @@
     <span>{live.prefix} · {live.activity} · {live.elapsed}{ranOn ? ` · ${ranOn}` : ''}</span>
   </p>
 {:else if live?.mode === 'waiting_bg'}
-  <p class="ts ts-bg" data-testid="runtime-bg-waiting">
+  <div class="ts ts-bg" data-testid="runtime-bg-waiting">
     <span class="pulse-dot" aria-hidden="true"></span>
-    <span>{live.text}</span>
-  </p>
+    <span class="ts-wait"><span class="ts-wait-h">{live.text}</span>{#if live.detail}<span class="ts-wait-d ellipsis" dir="auto" title={live.detail}>{live.detail}</span>{/if}</span>
+    <button type="button" class="btn small ghost ts-btn" disabled={stoppingAll} data-testid="runtime-bg-stop" onclick={() => void stopWaiting()}>{stoppingAll ? 'Stopping…' : 'Stop'}</button>
+  </div>
 {:else if outcome?.kind === 'stopped'}
   <div class="ts" data-testid="runtime-stopped">
     <span>Stopped{ranOn ? ` · ${ranOn}` : ''}</span>
@@ -177,8 +198,18 @@
     flex-wrap: nowrap;
     padding-block: 4px;
   }
-  .ts-bg > span:last-child {
+  .ts-wait {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
     flex: 1;
+    min-inline-size: 0;
+  }
+  .ts-wait-h {
+    flex: none;
+    color: var(--text);
+  }
+  .ts-wait-d {
     min-inline-size: 0;
   }
   .pulse-dot {
