@@ -682,3 +682,12 @@ export interface McpSessionAttach {
 export interface UpdateMcpSessionAttachReq {
   enabled: boolean;
 }
+
+/** `GET /mcp/servers/{id}/oauth`: a remote server's sign-in. */
+export interface McpOAuthStatus {
+  signed_in: boolean;
+  /** A sign-in is waiting for the browser. */
+  pending: boolean;
+  error?: string;
+  auth_host?: string;
+}

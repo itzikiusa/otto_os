@@ -14,7 +14,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { mcpApi, mcpCpApi } from '../../lib/api/mcp';
   import NativeServerForm from './NativeServerForm.svelte';
-  import { NOT_GOVERNED_NOTE, RUNS_LABEL, serverRuns, switchBlocked, switchConfirm, type McpRunMode } from './runMode';
+  import { isRemote, needsSignIn, NOT_GOVERNED_NOTE, RUNS_LABEL, serverRuns, switchBlocked, switchConfirm, type McpRunMode } from './runMode';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
@@ -26,6 +26,7 @@
   import RulesDrawer from './RulesDrawer.svelte';
   import ServerForm from './ServerForm.svelte';
   import ToolsTab from './ToolsTab.svelte';
+  import { signIn, signOut } from './mcpOAuth';
 
   interface Props {
     wsId: string;
@@ -172,6 +173,9 @@
           { label: busy[s.id] === 'health' ? 'Checking health…' : 'Check health', icon: 'radar', disabled: !configure, action: () => void health(s) },
           { label: expandedId === s.id ? 'Hide tools' : 'View tools', icon: 'eye', action: () => toggleExpanded(s.id) },
         ];
+    if (serverRuns(s) !== 'native' && isRemote(s)) {
+      items.push({ label: 'Sign in…', icon: 'key', disabled: !configure, action: () => void oauth(s, signIn) }, { label: 'Sign out…', icon: 'key', disabled: !configure, action: () => void oauth(s, signOut) });
+    }
     items.push({
       label: to === 'governed' ? 'Run through Otto’s gateway…' : 'Run natively…',
       icon: 'server',
@@ -182,6 +186,15 @@
     if (auth.isRoot || can(s.id, 'manage_access')) items.push({ label: 'Manage access…', icon: 'key', action: () => (accessId = s.id) });
     items.push({ separator: true }, { label: 'Delete…', icon: 'trash', danger: true, disabled: !configure, action: () => void remove(s) });
     ctxMenu.show(e, items);
+  }
+
+  async function oauth(s: McpServerDetail, run: (s: McpServerDetail) => Promise<boolean>): Promise<void> {
+    setBusy(s.id, 'oauth');
+    try {
+      if (await run(s)) await onReload();
+    } finally {
+      setBusy(s.id, null);
+    }
   }
 
   function toggleExpanded(id: string): void {
@@ -283,7 +296,12 @@
             <span class="cell dim" data-label="Injection">—</span>
           {:else}
           <span class="cell" data-label="Health">
+            {#if needsSignIn(s)}
+              <span class="needs">Needs sign-in</span>
+              <button class="btn small" data-testid="mcp-server-sign-in" disabled={!!busy[s.id] || !can(s.id, 'configure')} title={can(s.id, 'configure') ? `Sign in to ${s.name}` : NO_CONFIGURE} onclick={() => void oauth(s, signIn)}>{busy[s.id] === 'oauth' ? 'Signing in…' : 'Sign in'}</button>
+            {:else}
             <McpPill kind="health" value={s.health_status} small />
+            {/if}
             {#if s.health_latency_ms != null && s.health_status === 'healthy'}<span class="lat">{s.health_latency_ms}ms</span>{/if}
           </span>
           <span class="cell num" data-label="Tools">{s.tools_count}</span>
@@ -533,4 +551,5 @@
       text-align: start;
     }
   }
+  .needs { font-size: var(--fs-xs); color: var(--warning); margin-inline-end: 6px; }
 </style>

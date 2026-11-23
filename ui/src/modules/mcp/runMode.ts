@@ -92,3 +92,10 @@ export function secretEnvBody(text: string, storedKeys: readonly string[], editi
   }
   return out;
 }
+
+/** The health error a server needing an OAuth sign-in records (daemon `NEEDS_SIGN_IN`). */
+export const needsSignIn = (s: { health_error: string | null }): boolean =>
+  s.health_error?.startsWith('Needs sign-in') ?? false;
+
+/** A remote (http / sse) server: the only kind that signs in. */
+export const isRemote = (s: { transport: string }): boolean => s.transport === 'http' || s.transport === 'sse';
