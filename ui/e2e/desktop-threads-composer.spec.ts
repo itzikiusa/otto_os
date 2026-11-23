@@ -14,6 +14,7 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 //     agent works with nothing typed, Queue (default) / Steer with a draft;
 //     ⌘↵ the other one; the choice in the toolbar ⋯ › View (composerSend.ts).
 //   • The / popup lists the agent's own commands (hostCommands.ts).
+//   • ↑ / ↓ recall sent prompts (promptHistory.ts).
 // ─────────────────────────────────────────────────────────────────────────────
 
 test.use({ serviceWorkers: 'block' });
@@ -160,4 +161,38 @@ test('codex: its skills are its commands; one Otto takes itself is not offered t
   const pop = thread.locator('[data-slash-pop]');
   await expect(pop.getByRole('option', { name: /\/review/ })).toHaveCount(1);
   await expect(pop.getByTestId('slash-group')).toHaveCount(0);
+});
+
+test('↑ in an empty composer recalls sent prompts, ↓ goes back to the empty draft; an edit leaves history', async ({ page }) => {
+  test.setTimeout(90_000);
+  for (const provider of ['codex', 'claude'] as const) {
+    const { thread } = await open(page, provider, `History ${provider}`);
+    await send(thread, 'first prompt');
+    await send(thread, 'second prompt');
+    const composer = thread.getByTestId('runtime-composer');
+    await composer.focus();
+    await composer.press('ArrowUp');
+    await expect(composer).toHaveValue('second prompt');
+    await composer.press('ArrowUp');
+    await expect(composer).toHaveValue('first prompt');
+    await composer.press('ArrowDown');
+    await expect(composer).toHaveValue('second prompt');
+    await composer.press('ArrowDown');
+    await expect(composer).toHaveValue('');
+    // A draft of one's own keeps ↑ for the caret.
+    await composer.fill('my draft');
+    await composer.press('ArrowUp');
+    await expect(composer).toHaveValue('my draft');
+    // Recalled, then edited: ↑ is the caret's again.
+    await composer.fill('');
+    await composer.press('ArrowUp');
+    await composer.press('End');
+    await composer.pressSequentially('!');
+    await composer.press('ArrowUp');
+    await expect(composer).toHaveValue('second prompt!');
+    // The / popup keeps its own ↑.
+    await composer.fill('/');
+    await composer.press('ArrowUp');
+    await expect(composer).toHaveValue('/');
+  }
 });

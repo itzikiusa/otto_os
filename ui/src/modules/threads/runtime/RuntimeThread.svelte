@@ -1,6 +1,6 @@
 <script lang="ts">
   // Structured agent runtime thread view shared between Threads and IDE Agent dock.
-  import { setContext, untrack, type Snippet } from 'svelte';
+  import { setContext, tick, untrack, type Snippet } from 'svelte';
   import { announceShown } from '../../../lib/announce.svelte';
   import { ApiError } from '../../../lib/api/client';
   import type { ApprovalDecision, PromptDelivery, RuntimeAccessMode, RuntimeDraftContent, TurnItem } from '../../../lib/api/types';
@@ -41,6 +41,7 @@
   import RuntimeComposerAttach from './RuntimeComposerAttach.svelte';
   import { isAltSend, midTurnDelivery, primaryAction } from './composerSend';
   import { threadPrefs } from './threadPrefs.svelte';
+  import { recallPrompt, sentPrompts, type HistoryState } from './promptHistory';
   import RuntimeModelChip from './RuntimeModelChip.svelte';
   import RuntimeBannerStack from './RuntimeBannerStack.svelte';
   import {
@@ -389,6 +390,7 @@
   let emojiEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
   let dockEl = $state<{ onKey: (e: KeyboardEvent, composerEmpty: boolean) => boolean } | null>(null);
   const escState = { lastEscAt: -Infinity };
+  const history: HistoryState = { at: null, shown: '' }; // ↑ / ↓ sent prompts (promptHistory.ts)
   function onKeydown(e: KeyboardEvent): void {
     if (e.isComposing || askEl?.onKey(e) || emojiEl?.onKey(e)) return;
     if (caps.plan && !suggestions.length && isPlanToggleKey(e)) return void (e.preventDefault(), (runtimeThreads.planIds[ownerId] = !planOn));
@@ -398,6 +400,12 @@
       e.preventDefault();
       e.stopPropagation();
       return void stop();
+    }
+    const recalled = e.key.startsWith('Arrow') ? recallPrompt(e, e.currentTarget as HTMLTextAreaElement, sentPrompts(p?.items ?? []), history) : null;
+    if (recalled !== null) {
+      e.preventDefault();
+      draft.text = recalled;
+      return void tick().then(() => composerEl?.setSelectionRange(recalled.length, recalled.length));
     }
     if (enterSends(e)) {
       e.preventDefault();
