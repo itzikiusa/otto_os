@@ -1071,9 +1071,9 @@
     --chat-measure: 1440px;
     --prose-measure: 104ch;
   }
-  /* Threads uses the available pane width; messages and composer stay aligned. */
+  /* Threads: one centred 760 px column (messages and composer; type in ThreadPane.svelte). */
   .conv[data-surface='threads'] {
-    --chat-measure: none;
+    --chat-measure: calc(760px + 2 * var(--sp-6));
     --prose-measure: none;
     /* Two speakers: you = blue (accent), the agent = NEUTRAL (patterns §2:
        agent identity is never a status colour — running is not success green).
@@ -1185,8 +1185,7 @@
     .conv-col {
       padding-block: 6px 16px;
     }
-  }
-  /* Day dividers ("Today", "Yesterday", "Mon, Sep 28"). */
+  }  /* Day dividers ("Today", "Yesterday", "Mon, Sep 28"). */
   .day {
     display: flex;
     align-items: center;

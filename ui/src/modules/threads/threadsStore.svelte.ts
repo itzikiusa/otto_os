@@ -7,6 +7,8 @@ import { toasts } from '../../lib/toast.svelte';
 import { toastError } from '../../lib/toastError';
 import type { TrailEvent } from '../../lib/api/types';
 import { threadsChrome } from './threadsChrome.svelte';
+import { offerUndo } from './threadUndo';
+import { threadMeta } from './threadMeta.svelte';
 
 export type ThreadsLayoutMode = 'single' | 'split' | 'grid';
 export type ThreadsInspectorTab = 'files' | 'changes' | 'pr' | 'side' | 'connections' | 'browser';
@@ -58,6 +60,7 @@ export interface McpDbActivity {
 }
 
 interface PersistedThreadsPrefs {
+  /** Legacy: this browser's pins / History before they moved onto the threads (`threadMeta`). */
   pinnedIds?: string[];
   settledIds?: string[];
   paneIds?: string[];
@@ -76,6 +79,8 @@ interface PersistedThreadsPrefs {
   pinnedProjects?: string[];
   lastProject?: string | null;
   scriptsByProject?: Record<string, ProjectScript[]>;
+  /** The sidebar shows per-project folders instead of one inbox list. */
+  groupByProject?: boolean;
 }
 
 const STORAGE_KEY = 'otto_threads_v1';
@@ -96,8 +101,9 @@ function readPrefs(): PersistedThreadsPrefs {
 }
 
 class ThreadsStore {
-  pinnedIds = $state<string[]>([]);
-  settledIds = $state<string[]>([]);
+  /** This browser's old local pins / History, kept only until `migrateLocal` moves them. */
+  private legacyPins: string[] = [];
+  private legacyHistory: string[] = [];
   paneIds = $state<string[]>([]);
   focusedSessionId = $state<string | null>(null);
   layoutMode = $state<ThreadsLayoutMode>('single');
@@ -125,6 +131,8 @@ class ThreadsStore {
   }
 
   inspectorTab = $state<ThreadsInspectorTab>('changes');
+  /** A file the Changes surface should show first (a turn's changes card); it clears once shown. */
+  changesFocus = $state<string | null>(null);
   /** Bumped to bring Thread details' "Agents & tasks" into view. */
   agentsTasksReveal = $state(0);
   showAgentsTasks(): void {
@@ -138,6 +146,8 @@ class ThreadsStore {
   /** Project folders added from the sidebar's "Add project" before they have a thread. */
   extraProjects = $state<string[]>([]);
   scriptsByProject = $state<Record<string, ProjectScript[]>>({});
+  /** The sidebar's "Group by project" (filter menu): folders per project instead of one inbox. */
+  groupByProject = $state(false);
   /** Projects pinned to the top of the sidebar (T3 0.1.6 "pin favorite projects"). */
   pinnedProjects = $state<string[]>([]);
   /** Folder of the last thread started here — the next draft opens on it. */
@@ -160,8 +170,8 @@ class ThreadsStore {
 
   constructor() {
     const p = readPrefs();
-    if (Array.isArray(p.pinnedIds)) this.pinnedIds = p.pinnedIds.filter((x): x is string => typeof x === 'string');
-    if (Array.isArray(p.settledIds)) this.settledIds = p.settledIds.filter((x): x is string => typeof x === 'string');
+    if (Array.isArray(p.pinnedIds)) this.legacyPins = p.pinnedIds.filter((x): x is string => typeof x === 'string');
+    if (Array.isArray(p.settledIds)) this.legacyHistory = p.settledIds.filter((x): x is string => typeof x === 'string');
     if (Array.isArray(p.paneIds)) {
       this.paneIds = p.paneIds.filter((x): x is string => typeof x === 'string').slice(0, MAX_PANES);
     }
@@ -191,6 +201,7 @@ class ThreadsStore {
       this.pinnedProjects = p.pinnedProjects.filter((x): x is string => typeof x === 'string');
     }
     if (typeof p.lastProject === 'string') this.lastProject = p.lastProject;
+    if (typeof p.groupByProject === 'boolean') this.groupByProject = p.groupByProject;
     if (p.scriptsByProject && typeof p.scriptsByProject === 'object') {
       this.scriptsByProject = p.scriptsByProject;
     }
@@ -202,8 +213,7 @@ class ThreadsStore {
     if (typeof localStorage === 'undefined') return;
     try {
       const payload: PersistedThreadsPrefs = {
-        pinnedIds: this.pinnedIds,
-        settledIds: this.settledIds,
+        ...(this.legacyPins.length || this.legacyHistory.length ? { pinnedIds: this.legacyPins, settledIds: this.legacyHistory } : {}),
         paneIds: this.paneIds,
         focusedSessionId: this.focusedSessionId,
         layoutMode: this.layoutMode,
@@ -216,6 +226,7 @@ class ThreadsStore {
         scriptsByProject: this.scriptsByProject,
         pinnedProjects: this.pinnedProjects,
         lastProject: this.lastProject,
+        groupByProject: this.groupByProject,
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
     } catch {
@@ -351,35 +362,38 @@ class ThreadsStore {
     }
   }
 
+  // Pins and History live on the thread (`threadMeta`: every device agrees).
   isPinned(id: string): boolean {
-    return this.pinnedIds.includes(id);
+    return threadMeta.pinned(id);
   }
 
+  /** Pin / unpin at once, with an Undo notice (threadUndo.ts); a failed write
+   *  rolls back with the error toast and offers no Undo. */
   togglePin(id: string): void {
-    if (this.pinnedIds.includes(id)) {
-      this.pinnedIds = this.pinnedIds.filter((x) => x !== id);
-    } else {
-      this.pinnedIds = [id, ...this.pinnedIds];
-    }
-    this.save();
+    const was = this.isPinned(id);
+    void threadMeta.write(id, { thread_pinned: was ? null : true }).then((ok) => {
+      if (ok) offerUndo(was ? 'Unpinned' : 'Pinned', () => void threadMeta.write(id, { thread_pinned: was ? true : null }));
+    });
   }
 
-  isSettled(id: string): boolean {
-    return this.settledIds.includes(id);
-  }
+  isSettled(id: string): boolean { return threadMeta.history(id); }
 
+  /** Move to History / back at once, with an Undo notice (threadUndo.ts). */
   toggleSettle(id: string): void {
-    if (this.settledIds.includes(id)) {
-      this.settledIds = this.settledIds.filter((x) => x !== id);
-    } else {
-      this.settledIds = [id, ...this.settledIds];
-    }
-    this.save();
+    const was = this.isSettled(id);
+    void threadMeta.write(id, { thread_history: was ? null : true }).then((ok) => {
+      if (ok) offerUndo(was ? 'Moved back to Active' : 'Moved to History', () => void threadMeta.write(id, { thread_history: was ? true : null }));
+    });
   }
 
-  unsettle(id: string): void {
-    if (!this.settledIds.includes(id)) return;
-    this.settledIds = this.settledIds.filter((x) => x !== id);
+  unsettle(id: string): void { if (this.isSettled(id)) void threadMeta.write(id, { thread_history: null }); }
+
+  /** Once: this browser's old local pins / History onto the threads. */
+  async migrateLocal(): Promise<void> {
+    if (!(await threadMeta.migrate(this.legacyPins, this.legacyHistory))) return;
+    if (!this.legacyPins.length && !this.legacyHistory.length) return;
+    this.legacyPins = [];
+    this.legacyHistory = [];
     this.save();
   }
 
@@ -388,6 +402,7 @@ class ThreadsStore {
     this.focusedSessionId = id;
     this.newDraftMode = false;
     ws.activeThreadId = id;
+    threadMeta.markSeen(id);
     ws.clearNeedsYou(id);
     if (ws.unread[id]) {
       const next = { ...ws.unread };
@@ -553,6 +568,11 @@ class ThreadsStore {
     if (this.projectFilters.length === 0) return true;
     const c = (cwd ?? '').replace(/\/+$/, '');
     return this.projectFilters.some((k) => c === k || c.startsWith(`${k}/`));
+  }
+
+  setGroupByProject(on: boolean): void {
+    this.groupByProject = on;
+    this.save();
   }
 
   isProjectPinned(path: string): boolean {
@@ -773,5 +793,4 @@ class ThreadsStore {
     this.peerEvents = [item, ...this.peerEvents].slice(0, MAX_PEER_EVENTS);
   }
 }
-
 export const threads = new ThreadsStore();

@@ -377,6 +377,18 @@ impl AgentRuntimeRepo {
         Ok(())
     }
 
+    /// Merge `patch` into the session's `meta` (RFC 7396: a `null` value
+    /// removes its key). Callers pass only the client-owned thread keys.
+    pub async fn patch_meta(&self, id: &Id, patch: &serde_json::Value) -> Result<()> {
+        sqlx::query("UPDATE agent_runtime_sessions SET meta = json_patch(COALESCE(meta, '{}'), ?) WHERE id = ?")
+            .bind(patch.to_string())
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("patch runtime session meta"))?;
+        Ok(())
+    }
+
     pub async fn set_model(&self, id: &Id, model: &str) -> Result<()> {
         sqlx::query("UPDATE agent_runtime_sessions SET model = ? WHERE id = ?")
             .bind(model)

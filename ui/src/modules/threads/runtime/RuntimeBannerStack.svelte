@@ -1,13 +1,16 @@
 <script lang="ts">
   // The notices above the composer, in one stack with one order (error > UI
-  // control > plan > queue > notices): at most two show in full, the rest
-  // fold into "2 more: plan, queued message · Show". What the agent waits on
+  // control > plan > queue > notices): one quiet notice shows in full (an
+  // urgent one always does), the rest fold into "2 more: plan, queued message";
+  // on a short screen or with the keyboard up all quiet ones fold. What the agent waits on
   // the person for (approval, question, secret) is the attention dock below
   // this stack, never folded.
   // T3 Code's ComposerBannerStack (docs/internals/web-ui.md).
   import type { Snippet } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { splitBanners, type BannerBlock } from './banners';
+  import { keyboard } from '../../../lib/stores/keyboard.svelte';
+  import { viewport } from '../../../lib/stores/viewport.svelte';
 
   interface Props {
     /** In priority order, highest first. */
@@ -16,7 +19,9 @@
   }
   let { blocks, block }: Props = $props();
   let expanded = $state(false);
-  const split = $derived(splitBanners(blocks));
+  // A phone on its side, or the on-screen keyboard up, leaves a few lines
+  // of conversation: every quiet notice folds into the one "N more" line.
+  const split = $derived(splitBanners(blocks, viewport.isShort || keyboard.open ? 0 : undefined));
   const shown = $derived(expanded ? blocks : split.shown);
   // A new set of notices starts folded again.
   $effect(() => {

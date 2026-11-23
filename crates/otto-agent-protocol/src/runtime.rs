@@ -1023,6 +1023,36 @@ impl AgentRuntime {
         Ok(st.session.clone())
     }
 
+    /// Merge a client-owned thread-meta patch (`otto_core::agent_runtime::
+    /// THREAD_META_KEYS`, already validated) into the session's `meta` and
+    /// tell every client through `provider_session.updated` (its `thread`).
+    /// Allowed on a `closed` session too (History, pins).
+    pub async fn update_thread_meta(
+        &self,
+        id: &Id,
+        patch: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<RuntimeSession> {
+        let live = self.live(id).await?;
+        let patch = serde_json::Value::Object(patch);
+        self.inner.repo.patch_meta(id, &patch).await?;
+        let mut st = live.lock();
+        let mut meta = match st.session.meta.take() {
+            Some(serde_json::Value::Object(m)) => m,
+            _ => serde_json::Map::new(),
+        };
+        for (k, v) in patch.as_object().into_iter().flatten() {
+            if v.is_null() {
+                meta.remove(k);
+            } else {
+                meta.insert(k.clone(), v.clone());
+            }
+        }
+        st.session.meta = (!meta.is_empty()).then_some(serde_json::Value::Object(meta));
+        let (status, last_error) = current_status(&st);
+        set_session_status(&self.inner, &live, &mut st, status, last_error);
+        Ok(st.session.clone())
+    }
+
     /// The session's live entry, loaded from the DB on first use in this
     /// daemon life (its sequence resumes above the persisted floor).
     async fn live(&self, id: &Id) -> Result<Arc<Live>> {
@@ -2902,6 +2932,7 @@ fn set_session_status(
     let background_tasks = st.session.background_tasks.clone();
     let capabilities = Some(st.session.capabilities.clone());
     let title = Some(st.session.title.clone());
+    let thread = otto_core::agent_runtime::thread_meta_of(st.session.meta.as_ref());
     let prev = st.proj.session.as_ref();
     if prev.is_some_and(|p| {
         p.status == status
@@ -2909,6 +2940,7 @@ fn set_session_status(
             && p.background_tasks == background_tasks
             && p.capabilities == capabilities
             && p.title == title
+            && p.thread == thread
     }) {
         return;
     }
@@ -2922,6 +2954,7 @@ fn set_session_status(
         background_tasks,
         capabilities,
         title,
+        thread,
     };
     emit(
         inner,

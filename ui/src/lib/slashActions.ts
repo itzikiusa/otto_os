@@ -13,7 +13,11 @@ import {
 export interface ComposerSlashCommand {
   name: string;
   description: string;
-  source: SlashCommand['source'] | 'interactive';
+  source: SlashCommand['source'] | 'interactive' | 'agent';
+  /** What to type after it (`[focus]`), when it takes input. */
+  hint?: string;
+  /** The popup's group heading, when it shows more than one group. */
+  group?: string;
 }
 
 export type ParsedSlashIntent =

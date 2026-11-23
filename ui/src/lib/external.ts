@@ -7,6 +7,7 @@
 
 import { isEmbedded } from './desktop';
 import { postToHost } from './embedGuest';
+import { toastError } from './toastError';
 
 // eslint-disable-next-line no-control-regex
 const CTRL_RE = /[\u0000-\u001f\u007f]/;
@@ -33,7 +34,9 @@ export function isExternalUrl(href: string | null | undefined): boolean {
 }
 
 /** Open `url` in the system browser (Tauri: opener `open_url`; web: window.open).
- *  Refuses any URL outside the `http(s):` / `mailto:` allowlist. */
+ *  Refuses any URL outside the `http(s):` / `mailto:` allowlist. A desktop
+ *  refusal is toasted: window.open can't open anything in the webview (no
+ *  new-window handler), so falling back to it only hid the failure. */
 export async function openExternal(url: string | null | undefined): Promise<void> {
   const href = safeExternalUrl(url);
   if (!href) return;
@@ -49,10 +52,10 @@ export async function openExternal(url: string | null | undefined): Promise<void
     const { invoke } = await import('@tauri-apps/api/core');
     try {
       await invoke('plugin:opener|open_url', { url: href });
-      return;
-    } catch {
-      /* fall through to window.open */
+    } catch (e) {
+      toastError('Couldn’t open the link', e);
     }
+    return;
   }
 
   // Not a synthetic `<a target=_blank>` click: App.svelte's capture-phase

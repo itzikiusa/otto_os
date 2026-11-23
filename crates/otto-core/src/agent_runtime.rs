@@ -127,6 +127,10 @@ pub struct ProviderSession {
     /// name for the conversation as it lands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// The client-owned thread meta (`THREAD_META_KEYS`: pinned, History,
+    /// seen at), so a pin on the Mac shows on the phone as it lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<serde_json::Value>,
 }
 
 /// One piece of background work an agent started (Claude Code's
@@ -1859,10 +1863,64 @@ impl RuntimeAccessMode {
     }
 }
 
-/// `PATCH /runtime-sessions/{id}` (rename; T3 Code `thread.metadata-updated`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `PATCH /runtime-sessions/{id}` (rename and/or the client-owned thread
+/// meta; T3 Code `thread.metadata-updated`). At least one of the two.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateRuntimeSessionReq {
-    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// A merge patch of [`THREAD_META_KEYS`] only (`null` clears a key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// The thread meta a person's client owns on a session — the same keys on a
+/// terminal session (`PATCH /sessions/{id}` meta) and a structured one:
+/// pinned, moved to History, and when the person last had it in front of them.
+pub const THREAD_META_KEYS: &[&str] = &["thread_pinned", "thread_history", "thread_seen_at"];
+
+/// Checks a thread-meta patch: only [`THREAD_META_KEYS`]; `thread_pinned` /
+/// `thread_history` a bool, `thread_seen_at` an RFC 3339 time; `null` clears.
+pub fn validate_thread_meta(
+    patch: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    if patch.is_empty() {
+        return Err("meta is empty".into());
+    }
+    for (k, v) in patch {
+        let ok = match k.as_str() {
+            "thread_pinned" | "thread_history" => v.is_boolean() || v.is_null(),
+            "thread_seen_at" => {
+                v.is_null()
+                    || v.as_str()
+                        .is_some_and(|s| DateTime::parse_from_rfc3339(s).is_ok())
+            }
+            _ => {
+                return Err(format!(
+                    "meta.{k} is not a client-owned thread key ({})",
+                    THREAD_META_KEYS.join(", ")
+                ))
+            }
+        };
+        if !ok {
+            return Err(format!("meta.{k} has the wrong type"));
+        }
+    }
+    Ok(())
+}
+
+/// The client-owned thread keys set in `meta` (`None` when none is).
+pub fn thread_meta_of(meta: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    let m = meta?.as_object()?;
+    let out: serde_json::Map<_, _> = THREAD_META_KEYS
+        .iter()
+        .filter_map(|k| {
+            m.get(*k)
+                .filter(|v| !v.is_null())
+                .map(|v| ((*k).to_string(), v.clone()))
+        })
+        .collect();
+    (!out.is_empty()).then_some(serde_json::Value::Object(out))
 }
 
 /// `POST /runtime-sessions/{id}/prompt`. `model` / `effort` select this
@@ -2092,6 +2150,31 @@ mod tests {
     }
 
     #[test]
+    fn thread_meta_patch_takes_only_client_owned_keys() {
+        let m = |v: serde_json::Value| v.as_object().unwrap().clone();
+        assert!(validate_thread_meta(&m(serde_json::json!({"thread_pinned": true, "thread_history": null, "thread_seen_at": "2026-11-23T10:00:00Z"}))).is_ok());
+        assert!(validate_thread_meta(&m(serde_json::json!({}))).is_err());
+        assert!(
+            validate_thread_meta(&m(serde_json::json!({"source": "pr-agent"})))
+                .unwrap_err()
+                .contains("not a client-owned")
+        );
+        assert!(validate_thread_meta(&m(serde_json::json!({"thread_pinned": "yes"}))).is_err());
+        assert!(
+            validate_thread_meta(&m(serde_json::json!({"thread_seen_at": "yesterday"}))).is_err()
+        );
+        let meta = serde_json::json!({"source": "pr-agent", "thread_pinned": true, "thread_history": null});
+        assert_eq!(
+            thread_meta_of(Some(&meta)),
+            Some(serde_json::json!({"thread_pinned": true}))
+        );
+        assert_eq!(
+            thread_meta_of(Some(&serde_json::json!({"source": "pr-agent"}))),
+            None
+        );
+    }
+
+    #[test]
     fn every_event_round_trips_and_matches_type_name() {
         let bodies = vec![
             RuntimeEventBody::ProviderSessionUpdated {
@@ -2113,6 +2196,7 @@ mod tests {
                     }],
                     capabilities: None,
                     title: None,
+                    thread: Some(serde_json::json!({"thread_pinned": true})),
                 },
             },
             RuntimeEventBody::ProviderThreadUpdated {

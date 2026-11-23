@@ -110,7 +110,8 @@ export interface RuntimeComposerTestIds {
 /** The view-level commands a host may implement (all optional). */
 export interface RuntimeHostCommands {
   /** `/diff` — show the thread's changes. */
-  openDiff?: (sessionId: string) => void;
+  /** `path`: a file to show first (the turn changes card). */
+  openDiff?: (sessionId: string, path?: string) => void;
   /** `/files` — browse the thread's folder. */
   openFiles?: (sessionId: string) => void;
   /** `/terminal` — open (or toggle) a terminal in the thread's folder. */

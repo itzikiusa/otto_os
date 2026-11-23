@@ -33,6 +33,8 @@ export interface ProviderSession {
   capabilities?: RuntimeCapabilities;
   /** The thread's title: a rename, or the agent's own name for it. */
   title?: string;
+  /** The client-owned thread meta (`ThreadMetaPatch` keys); absent = none set. */
+  thread?: ThreadMetaPatch;
 }
 
 /** What a thread's agent takes besides plain text — the provider baseline
@@ -634,8 +636,21 @@ export interface ListRuntimeSessionsQuery {
 
 /** Body of POST /runtime-sessions/{id}/prompt. */
 /** `PATCH /runtime-sessions/{id}` — rename. */
+/** `PATCH /runtime-sessions/{id}`: a rename and/or the client-owned thread meta. */
 export interface UpdateRuntimeSessionReq {
-  title: string;
+  title?: string;
+  /** A merge patch of the thread keys only (`null` clears one). */
+  meta?: ThreadMetaPatch;
+}
+
+/** The client-owned Threads keys on a session's `meta` — a structured one
+ *  (`PATCH /runtime-sessions/{id}`) and a terminal one (`PATCH /sessions/{id}`) alike. */
+export interface ThreadMetaPatch {
+  thread_pinned?: boolean | null;
+  /** Moved to History. */
+  thread_history?: boolean | null;
+  /** RFC 3339: when the person last had the thread in front of them. */
+  thread_seen_at?: string | null;
 }
 
 /** `text` may be empty when `images` is not. `model` / `effort` apply to this
