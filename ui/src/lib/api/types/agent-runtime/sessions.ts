@@ -133,7 +133,7 @@ export interface AskChildTarget {
   effort?: string;
 }
 
-/** Body of `POST /runtime-sessions/{id}/children` ("Ask another agent"; 1–4
+/** Body of `POST /runtime-sessions/{id}/children` ("Delegate to…"; 1–4
  *  targets, all or none). Access: omitted = the parent's; wider is a 400. */
 export interface AskChildReq {
   prompt: string;

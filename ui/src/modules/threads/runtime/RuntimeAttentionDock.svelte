@@ -58,6 +58,37 @@
     return () => mq.removeEventListener('change', on);
   });
 
+  // A new request takes focus — its primary action, or a question's first
+  // field — unless the person is typing in the composer or works elsewhere
+  // (another pane, the sidebar): focus never jumps out from under them.
+  /** The dock's primary action, else a question's first field (in that order, not document order). */
+  function primaryControl(): HTMLElement | null {
+    for (const sel of ['[data-testid="runtime-dock-accept"]', '.ad-body button.primary:not([disabled])', '.ad-body input', '.ad-body textarea', '.ad-body button:not([disabled])']) {
+      const el = root?.querySelector<HTMLElement>(sel);
+      if (el) return el;
+    }
+    return null;
+  }
+
+  let focusedFor: string | null = null;
+  $effect(() => {
+    // Once its controls are drawn (the approval / question may land a tick after the item).
+    const id = cur && (approval || question || cur.kind === 'secret') ? cur.id : null;
+    if (!id || id === focusedFor || !root) return;
+    focusedFor = id;
+    // A few frames: the send that started the turn clears and refocuses the
+    // composer first; a person still typing there keeps their focus.
+    let tries = 12;
+    const take = (): void => {
+      const active = document.activeElement as HTMLTextAreaElement | null;
+      if (active && active !== document.body && !root?.closest('.rt')?.contains(active)) return;
+      const typing = active?.tagName === 'TEXTAREA' && !root?.contains(active) && !!active.value.trim();
+      if (typing && --tries > 0) return void requestAnimationFrame(take);
+      if (!typing) primaryControl()?.focus({ preventScroll: true });
+    };
+    requestAnimationFrame(take);
+  });
+
   // Screen readers hear a new request once, assertively (it blocks the agent).
   const say = announceEdge();
   $effect(() => {
@@ -77,7 +108,10 @@
     if (!el || !pane) return;
     const composer = pane.querySelector<HTMLElement>('.rt-composer');
     const measure = (): void => {
-      const share = matchMedia?.('(pointer: coarse)').matches ? 0.6 : 0.45;
+      // A question form gets all the room above the (one-row) composer on a
+      // phone, so it scrolls with the page instead of inside a box.
+      const coarse = !!matchMedia?.('(pointer: coarse)').matches;
+      const share = coarse ? (cur?.kind === 'question' ? 1 : 0.6) : 0.45;
       const h = pane.clientHeight;
       const room = h - (composer?.offsetHeight ?? 0) - 48;
       maxH = Math.max(120, Math.round(Math.min(h * share, room)));
@@ -95,7 +129,10 @@
     // The timeline's "Answer" (RuntimeApprovalRow) picks a request here.
     const onPick = (e: Event): void => {
       picked = (e as CustomEvent<string>).detail;
-      void Promise.resolve().then(() => root?.querySelector<HTMLElement>('button:not([disabled]), input, textarea')?.focus());
+      void Promise.resolve().then(() => {
+        root?.scrollIntoView({ block: 'nearest' });
+        primaryControl()?.focus();
+      });
     };
     pane.addEventListener('rt-attention-pick', onPick);
     // Keys answer from the dock's own buttons (a listener, not a handler on

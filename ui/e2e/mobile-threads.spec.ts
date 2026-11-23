@@ -198,9 +198,9 @@ test('a thread deep link from another workspace opens the thread at phone width'
   await sendBtn.click();
   const approval = thread.getByTestId('runtime-attention');
   await expect(approval).toBeVisible({ timeout: 20_000 });
-  await expect(thread.getByRole('button', { name: 'Approve', exact: true })).toHaveCount(1);
-  await expectFullyInViewport(page, approval.getByRole('button', { name: 'Approve', exact: true }), 'Approve in the dock');
-  for (const name of ['Approve', 'Decline']) {
+  await expect(thread.getByRole('button', { name: 'Allow once', exact: true })).toHaveCount(1);
+  await expectFullyInViewport(page, approval.getByRole('button', { name: 'Allow once', exact: true }), 'Allow once in the dock');
+  for (const name of ['Allow once', 'Deny']) {
     const btn = approval.getByRole('button', { name, exact: true });
     const box = await btn.boundingBox();
     expect(box, `${name} button`).not.toBeNull();
@@ -208,7 +208,7 @@ test('a thread deep link from another workspace opens the thread at phone width'
   }
   await expectNoHorizontalOverflow(page);
   await page.screenshot({ path: info.outputPath('phone-thread-approval.png'), animations: 'disabled' });
-  await approval.getByRole('button', { name: 'Approve', exact: true }).click();
+  await approval.getByRole('button', { name: 'Allow once', exact: true }).click();
   await expect(approval).toHaveCount(0, { timeout: 20_000 });
 });
 

@@ -34,7 +34,7 @@ Threads (Experimental) is a conversation-first workspace for coding agents. It k
 
 **Rich conversation & composer**
 - Full GitHub-flavored Markdown, syntax-highlighted code blocks, inline workspace/local image thumbnails with zoomable lightbox, and expandable **Thinking** blocks (including full reasoning prose on Antigravity sessions).
-- **Inline approval dock** right above the composer when an agent pauses on a tool permission (`Approve`, `Always allow`, `Deny`, or custom reply).
+- **Inline approval dock** right above the composer when an agent pauses on a tool permission (**Allow once**, **Always allow** where the agent offers it, **Deny**; the same buttons for a subagent's and an app's request).
 - The conversation reads as one centred column in reading-size type: your message on the right, the agent's answer as plain prose. A finished turn's steps fold into one dim line ("Worked for 2m 13s · ran 4 commands and edited 3 files"); while a turn runs, its earlier steps fold to "N earlier steps" and the live one stays in view. Failures, approvals and questions never fold. A message's time and **Copy** show when you point at it.
 - A turn that changed files ends with a card: "3 changed files +6 −2". Open it for the file list with each file's +/−; **Open diff** (or a file) opens the **Changes** panel on that file.
 - **The composer**: one card with **+** (attach an image or PDF, mention a file or agent, **Plan mode**, the thread's access), then only what differs from the default (the Plan chip while Plan is on, the access chip when the thread is not on your default access), the model chip and one button that says what it will do: **Send**; **Stop** while the agent works and nothing is typed; **Queue** (sends when the turn ends) or **Steer** (the agent reads it at its next step) when you type while it works. **↵** does the default and **⌘↵** the other; the default is in the toolbar ⋯ › **View** › *While working, messages queue / steer*. An agent that cannot take a message mid-turn only queues, and the button says so.
@@ -70,7 +70,7 @@ Threads (Experimental) is a conversation-first workspace for coding agents. It k
 **Compare models: one prompt, several models**
 - In the new-thread stage, turn on **Compare models** beside the agent chip, then pick 2–4 models; the send button reads e.g. **Ask 3**.
 - They open side by side (Split for 2, Grid for 3–4). Each is a normal, read-only thread with its own composer. ⌘↵ starts them in the background.
-- The thread's **⋯** menu holds the rest: **Open side by side**, **Ask every model…** and **Compare answers with ▸** a judge, which compares each model's latest answer.
+- The thread's **⋯** menu holds the rest: **Open side by side**, **Ask every model…** and **Compare answers with ▸** one more model, which compares each model's latest answer.
 
 **Workspace inspector** (the right panel: Browser, Files, Diff, Pull request, Side chat)
 - **Files**: browse the working tree and open multiple file tabs (`Preview` for Markdown, JSON, CSV/TSV and images, or `Source` with syntax highlighting).
