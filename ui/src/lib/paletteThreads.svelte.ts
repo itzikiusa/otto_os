@@ -77,7 +77,9 @@ export function threadCommands(query: () => string | null, close: () => void) {
   // Threads' page stays mounted while hidden: its source counts only while it shows.
   const inThreads = $derived(router.module === 'threads' ? paletteThreads.source : null);
   const source = $derived(inThreads ?? needsYouSource);
-  let frozen: string[] = [];
+  // Reactive: `freeze` runs from an effect after this open's rows were first
+  // derived — a plain variable left every open in the previous open's order.
+  let frozen = $state.raw<string[]>([]);
   const rows = $derived.by(() => {
     const q = query();
     return q === null ? [] : filterThreadRows(frozenOrder(source.rows(), frozen), q).slice(0, q.trim() ? 5 : 8);

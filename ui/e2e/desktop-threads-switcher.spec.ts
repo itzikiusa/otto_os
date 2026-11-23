@@ -186,3 +186,26 @@ test('outside Threads ⌘K gains "Threads needing you" only when one waits', asy
   await w.click();
   await expect(page.getByTestId(`runtime-thread-${waits}`)).toBeVisible({ timeout: 30_000 });
 });
+
+test('each ⌘K open orders by what needs you now, not by the last open', async ({ page }) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  const first = await thread('codex', `Sw order first ${RUN}`);
+  const later = await thread('codex', `Sw order later ${RUN}`);
+  await prompt(first, 'hello');
+  await prompt(later, 'hello');
+  await page.goto(`/#/threads/${first}`);
+  await expect(page.getByTestId(`runtime-thread-${first}`)).toBeVisible({ timeout: 30_000 });
+  const mine = async (): Promise<string[]> =>
+    (await palette(page).locator('[data-cmd^="thread:"]').evaluateAll((els) => els.map((e) => (e.getAttribute('data-cmd') ?? '').slice(7)))).filter((id) => id === first || id === later);
+  await openPalette(page);
+  await expect.poll(mine).toHaveLength(2);
+  // The one this open lists second starts waiting on the person while the bar is closed.
+  const waiter = (await mine())[1];
+  await page.keyboard.press('Escape');
+  await expect(palette(page)).toHaveCount(0);
+  await prompt(waiter, 'ask');
+  await expect(page.getByTestId(`thread-status-${waiter}`)).toHaveText('Approval', { timeout: 20_000 });
+  await openPalette(page);
+  // No keystroke, no other change: the order this open shows must already be right.
+  expect((await mine())[0]).toBe(waiter);
+});
