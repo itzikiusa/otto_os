@@ -125,7 +125,7 @@ test('the sidebar is an inbox: status words, needs you first, Working and Histor
   // One word per row, the same vocabulary everywhere.
   await expect(word(page, 'approval')).toHaveText('Approval');
   await expect(word(page, 'question')).toHaveText('Question');
-  await expect(word(page, 'failed')).toHaveText('Failed');
+  await expect(word(page, 'failed')).toHaveText('Limited'); // its `limit` turn hit the usage limit
   await expect(word(page, 'idle')).toHaveText(/^(now|\d+[smhd])$/);
 
   // Needs you, then failed, then finished unread, then the rest — flat across projects.
