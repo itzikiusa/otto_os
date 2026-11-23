@@ -106,6 +106,13 @@ impl SessionManager {
                     Vec::new()
                 })
             });
+            // Gemini reads no `.mcp.json` either: its project settings.
+            let gemini_names = (provider == "gemini").then(|| {
+                crate::mcp::reconcile_managed_servers_gemini(&cwd, &cfg).unwrap_or_else(|e| {
+                    tracing::warn!(session = %sid, cwd = %cwd, "reconcile gemini MCP config: {e}");
+                    Vec::new()
+                })
+            });
             // Terminal Muse reads the workspace `.mcp.json` above (its `otto`
             // entry forwards the bridge env by name, which Muse requires);
             // opencode is unverified. Their Threads sessions get the full set
@@ -114,17 +121,18 @@ impl SessionManager {
                 ("grok", Some(users)) => Some(crate::mcp::reconcile_user_servers_grok(&cwd, users)),
                 _ => None,
             };
-            (mcp_json_names, agy_names, grok)
+            (mcp_json_names, agy_names.or(gemini_names), grok)
         })
         .await;
-        let (mcp_json_names, agy_names, grok_result) = reconciled.unwrap_or_else(|e| {
+        // `own_names`: agy's or Gemini's own file (each reads no `.mcp.json`).
+        let (mcp_json_names, own_names, grok_result) = reconciled.unwrap_or_else(|e| {
             tracing::warn!(session = %session.id, "MCP launcher reconcile task failed: {e}");
             (Vec::new(), None, None)
         });
         let mut launch_args = Vec::new();
         let delivered: Vec<String> = match cli_family.as_str() {
-            // agy never reads `.mcp.json` — same managed set, its own file.
-            "agy" => agy_names.unwrap_or_default(),
+            // agy and Gemini never read `.mcp.json` — same set, their own file.
+            "agy" | "gemini" => own_names.unwrap_or_default(),
             // grok: `otto` via `enable_otto_tools_grok` (at token mint), user
             // tables here; no browser entry. Unknown user set → leave its
             // tables alone (preserved, but not claimed in the snapshot).
@@ -180,6 +188,11 @@ impl SessionManager {
             // extension registers this spawn's set (the browser per this
             // session's own opt-in, like codex). Unknown user set → otto and
             // the browser only.
+            // pi 0.x has no `registerMcpServer`: give it nothing and say so.
+            "pi" if self.pi_major().await == Some(0) => {
+                let _ = std::fs::remove_file(pi_mcp_extension_path(&session.id));
+                Vec::new()
+            }
             "pi" => {
                 let (doc, names) = crate::mcp::pi_mcp_extension(
                     pi_otto.as_ref(),
@@ -222,6 +235,11 @@ impl SessionManager {
         let structured = session.meta.get("runtime").and_then(|v| v.as_str()) == Some("structured");
         if structured {
             let otto_on = self.otto_mcp_enabled(&session.workspace_id).await;
+            if cli_family == "pi" && delivered.is_empty() && self.pi_major().await == Some(0) {
+                self.runtime_mcp
+                    .insert(session.id.clone(), pi_too_old(user_servers.as_deref()));
+                return launch_args;
+            }
             let status = spawn_mcp_status(
                 &cli_family,
                 otto_on,
@@ -399,5 +417,67 @@ mod spawn_status_tests {
         assert_eq!(s[0].state, St::Disabled);
         assert_eq!(s[1].state, St::Failed);
         assert!(s[1].reason.as_deref().unwrap().contains("db locked"));
+    }
+}
+
+/// pi 0.x takes no MCP servers: Otto's and every enabled one, each with why.
+fn pi_too_old(
+    users: Option<&[crate::mcp::UserMcpServer]>,
+) -> Vec<otto_core::agent_runtime::McpServerStatus> {
+    use otto_core::agent_runtime::{McpServerSource as Src, McpServerState as St, McpServerStatus};
+    let why =
+        "This pi (0.x) can’t load MCP servers; pi 1.x can (update pi in Settings › Providers)";
+    std::iter::once(
+        McpServerStatus::new(crate::mcp::OTTO_TOOLS_KEY, Src::Otto, St::Unsupported).because(why),
+    )
+    .chain(
+        users
+            .into_iter()
+            .flatten()
+            .filter(|s| s.name != crate::mcp::OTTO_TOOLS_KEY && s.name != crate::mcp::SERVER_KEY)
+            .map(|s| {
+                McpServerStatus::new(s.name.clone(), Src::Workspace, St::Unsupported).because(why)
+            }),
+    )
+    .collect()
+}
+
+impl SessionManager {
+    /// The installed pi's major version (`pi --version`, read once per daemon
+    /// run — an update shows after a restart), `None` when unknown.
+    pub(super) async fn pi_major(&self) -> Option<u64> {
+        static PI_MAJOR: tokio::sync::OnceCell<u64> = tokio::sync::OnceCell::const_new();
+        let program = self
+            .providers
+            .program_for("pi")
+            .unwrap_or_else(|| "pi".into());
+        // Only a version read is kept: a failed read tries again next spawn.
+        let read = PI_MAJOR.get_or_try_init(|| async move {
+            let mut cmd = tokio::process::Command::new(&program);
+            let out = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                cmd.arg("--version").kill_on_drop(true).output(),
+            )
+            .await
+            .map_err(|_| format!("{program} --version timed out"))?
+            .map_err(|e| format!("{program} --version: {e}"))?;
+            // pi 0.x prints it on stderr.
+            let mut v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if v.is_empty() {
+                v = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            }
+            v.trim_start_matches(|c: char| !c.is_ascii_digit())
+                .split('.')
+                .next()
+                .and_then(|m| m.parse::<u64>().ok())
+                .ok_or_else(|| format!("{program} --version said {v:?}"))
+        });
+        match read.await {
+            Ok(m) => Some(*m),
+            Err(e) => {
+                tracing::info!("pi version unknown: {e}");
+                None
+            }
+        }
     }
 }

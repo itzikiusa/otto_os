@@ -128,6 +128,72 @@ fn mcp_path(workspace_root: &str) -> PathBuf {
 /// discovers `.agents/` walking up from its cwd to the repo root and loads that
 /// `mcp_config.json` — same `mcpServers` shape, unknown top-level keys (our
 /// marker) tolerated, and the agy process env is inherited by stdio children.
+/// Gemini CLI's project settings (it reads no `.mcp.json`): its `mcpServers`
+/// map takes the same entries, and `env` values expand `${NAME:-}` from
+/// Gemini's own env (its stdio children get a sanitized env otherwise).
+fn gemini_settings_path(workspace_root: &str) -> PathBuf {
+    Path::new(workspace_root)
+        .join(".gemini")
+        .join("settings.json")
+}
+
+/// The managed set reconciled into Gemini's `.gemini/settings.json` (terminal
+/// Gemini). Its `otto` entry forwards the bridge env by name, as `.mcp.json`'s.
+pub fn reconcile_managed_servers_gemini(
+    workspace_root: &str,
+    cfg: &ManagedMcpConfig,
+) -> Result<Vec<String>, String> {
+    reconcile_json_launcher(
+        workspace_root,
+        &gemini_settings_path(workspace_root),
+        cfg,
+        true,
+    )
+}
+
+/// Otto's entries out of a terminal session's project MCP file for `family`,
+/// leaving what the person added there. A Threads session of that CLI gets
+/// Otto's servers over ACP with their credential; the file's copy would start
+/// a second, tokenless `otto` (agy, gemini, grok: Otto's own entries go) or
+/// make the CLI refuse the session over the clashing names (Muse and opencode
+/// read the shared `.mcp.json`: every managed entry goes; the next terminal
+/// spawn there reconciles them back).
+pub fn strip_otto_entries(family: &str, workspace_root: &str) -> Result<(), String> {
+    let mut cfg = ManagedMcpConfig {
+        browser: false,
+        user_servers: None,
+        otto_tools: None,
+    };
+    let json_file = match family {
+        "muse" | "opencode" => {
+            cfg.user_servers = Some(Vec::new());
+            mcp_path(workspace_root)
+        }
+        "agy" => agy_mcp_path(workspace_root),
+        "gemini" => gemini_settings_path(workspace_root),
+        "grok" => {
+            let lock = cwd_lock(workspace_root);
+            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let (dir, path, mut doc) = read_grok_doc(workspace_root)?;
+            let ours = doc
+                .get("mcp_servers")
+                .and_then(|s| s.get(OTTO_TOOLS_KEY))
+                .and_then(|o| o.get("args"))
+                .and_then(|a| a.as_array())
+                .is_some_and(|a| a.iter().any(|v| v.as_str() == Some("mcp-tools")));
+            if !ours {
+                return Ok(());
+            }
+            if let Some(t) = doc.get_mut("mcp_servers").and_then(|s| s.as_table_mut()) {
+                t.remove(OTTO_TOOLS_KEY);
+            }
+            return write_grok_doc(&dir, &path, &doc);
+        }
+        _ => return Ok(()),
+    };
+    reconcile_json_launcher(workspace_root, &json_file, &cfg, false).map(drop)
+}
+
 fn agy_mcp_path(workspace_root: &str) -> PathBuf {
     Path::new(workspace_root)
         .join(".agents")
@@ -1693,6 +1759,77 @@ mod tests {
             !read_servers(root).contains_key("otto"),
             "a user server named 'otto' must be dropped by reconcile"
         );
+    }
+
+    /// Gemini reads its project `.gemini/settings.json`: the managed set lands
+    /// there with the bridge env forwarded by name (Gemini sanitizes its
+    /// children's env), the person's other settings and servers stay, and a
+    /// Threads spawn strips Otto's own entries again (no tokenless `otto`).
+    #[test]
+    fn gemini_settings_get_the_managed_set_and_a_thread_strips_ottos_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let path = gemini_settings_path(root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"theme":"Dracula","mcpServers":{"mine":{"command":"x"}}}"#,
+        )
+        .unwrap();
+        let cfg = ManagedMcpConfig {
+            browser: false,
+            user_servers: Some(vec![user("jira")]),
+            otto_tools: Some(otto_tools()),
+        };
+        assert_eq!(
+            reconcile_managed_servers_gemini(root, &cfg).unwrap(),
+            vec!["otto", "jira"]
+        );
+        assert!(!mcp_path(root).exists(), "gemini reconcile wrote .mcp.json");
+        let doc = read_doc(&path).unwrap();
+        assert_eq!(doc["theme"], json!("Dracula"));
+        let otto = &doc["mcpServers"]["otto"];
+        assert_eq!(otto["env"]["OTTO_MCP_TOKEN"], json!("${OTTO_MCP_TOKEN:-}"));
+
+        strip_otto_entries("gemini", root).unwrap();
+        let doc = read_doc(&path).unwrap();
+        let servers = doc["mcpServers"].as_object().unwrap();
+        assert!(!servers.contains_key("otto"));
+        assert!(servers.contains_key("jira") && servers.contains_key("mine"));
+        // Muse / opencode: every managed .mcp.json entry goes, hand-added stay.
+        std::fs::write(
+            mcp_path(root),
+            r#"{"mcpServers":{"otto":{"command":"o"},"jira":{"command":"j"},"own":{"command":"x"}},"ottoManagedServers":["otto","jira"]}"#,
+        )
+        .unwrap();
+        strip_otto_entries("muse", root).unwrap();
+        let doc = read_doc(&mcp_path(root)).unwrap();
+        let servers = doc["mcpServers"].as_object().unwrap();
+        assert_eq!(servers.keys().collect::<Vec<_>>(), vec!["own"]);
+        // Nothing of Otto's in agy's / grok's files: nothing is written.
+        strip_otto_entries("agy", root).unwrap();
+        strip_otto_entries("grok", root).unwrap();
+        assert!(!agy_mcp_path(root).exists());
+    }
+
+    /// grok: only an Otto-written `[mcp_servers.otto]` (it runs `mcp-tools`) goes.
+    #[test]
+    fn a_thread_strips_ottos_grok_entry_but_not_a_hand_written_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        enable_otto_tools_grok(root, &otto_tools()).unwrap();
+        strip_otto_entries("grok", root).unwrap();
+        let (_, path, _) = read_grok_doc(root).unwrap();
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("mcp-tools"));
+        std::fs::write(
+            &path,
+            "[mcp_servers.otto]\ncommand = \"my-otto\"\nargs = [\"serve\"]\n",
+        )
+        .unwrap();
+        strip_otto_entries("grok", root).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("my-otto"));
     }
 
     /// agy ignores `.mcp.json`: its reconcile lands the same managed set (and

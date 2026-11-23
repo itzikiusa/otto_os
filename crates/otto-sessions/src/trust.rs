@@ -217,6 +217,7 @@ pub fn ensure_trusted_with_claude_dir(provider: &str, cwd: &str, claude_config_d
         "claude" => trust_claude(cwd, claude_config_dir),
         "codex" => trust_codex(cwd),
         "grok" => trust_grok(cwd),
+        "gemini" => trust_gemini(cwd),
         _ => Ok(()),
     };
     if let Err(e) = result {
@@ -440,6 +441,41 @@ fn codex_with_trust(current: &str, variants: &[String]) -> Option<String> {
     changed.then_some(next)
 }
 
+/// Pre-trust `cwd` for Gemini CLI (`~/.gemini/trustedFolders.json`,
+/// `{"<path>": "TRUST_FOLDER"}`): in an untrusted folder Gemini disables every
+/// stdio MCP server — Otto's tools included.
+fn trust_gemini(cwd: &str) -> Result<(), String> {
+    let path = home()?.join(".gemini").join("trustedFolders.json");
+    let variants = path_variants(cwd);
+    if update_config(&path, cwd, |current| {
+        Ok(gemini_with_trust(current, &variants))
+    })? {
+        tracing::info!(cwd, "pre-trusted folder for gemini");
+    }
+    Ok(())
+}
+
+/// Gemini's trust map with every variant trusted, `None` when nothing
+/// changes or the file isn't a JSON object (left alone).
+fn gemini_with_trust(current: &str, variants: &[String]) -> Option<String> {
+    let mut doc: serde_json::Map<String, serde_json::Value> = if current.trim().is_empty() {
+        serde_json::Map::new()
+    } else {
+        serde_json::from_str(current).ok()?
+    };
+    let mut changed = false;
+    for v in variants
+        .iter()
+        .filter(|v| !v.is_empty() && v.as_str() != "/")
+    {
+        if !doc.contains_key(v) {
+            doc.insert(v.clone(), serde_json::json!("TRUST_FOLDER"));
+            changed = true;
+        }
+    }
+    changed.then(|| serde_json::to_string_pretty(&doc).unwrap_or_default() + "\n")
+}
+
 /// Pre-trust `cwd` in Grok's unified folder-trust store so sessions don't stall
 /// on "Trust the authors of this folder…?" when the workspace has repo-local
 /// `.mcp.json` / hooks / LSP config (Otto often writes `.mcp.json` itself).
@@ -515,6 +551,23 @@ fn grok_with_trust(current: &str, variants: &[String], home_str: &str, now: i64)
         changed = true;
     }
     changed.then_some(next)
+}
+
+#[cfg(test)]
+mod gemini_trust_tests {
+    use super::*;
+
+    #[test]
+    fn gemini_trust_adds_each_variant_once_and_keeps_the_rest() {
+        let v = vec!["/w/a".to_string(), "/private/w/a".to_string()];
+        let next = gemini_with_trust(r#"{"/x": "TRUST_PARENT"}"#, &v).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&next).unwrap();
+        assert_eq!(doc["/x"], "TRUST_PARENT");
+        assert_eq!(doc["/w/a"], "TRUST_FOLDER");
+        assert_eq!(doc["/private/w/a"], "TRUST_FOLDER");
+        assert_eq!(gemini_with_trust(&next, &v), None);
+        assert_eq!(gemini_with_trust("not json", &v), None);
+    }
 }
 
 #[cfg(test)]
