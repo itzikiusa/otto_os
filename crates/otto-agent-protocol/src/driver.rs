@@ -71,10 +71,6 @@ pub enum ChildSignal {
     Interrupt,
 }
 
-/// What a driver reports. `turn_item` / `plan` / `command_output` /
-/// `request` map 1:1 onto `turn_item.updated`, `plan.updated`,
-/// `command_output.delta` and `runtime_request.updated`.
-
 /// What a [`DriverEvent::ClientCall`] asks the runtime to do. Paths are
 /// absolute; `root` is the folder a file must stay inside. A terminal's
 /// `program` / `args` already carry the session's sandbox wrapper.
@@ -113,6 +109,9 @@ pub enum ClientOp {
     },
 }
 
+/// What a driver reports. `turn_item` / `plan` / `command_output` /
+/// `request` map 1:1 onto `turn_item.updated`, `plan.updated`,
+/// `command_output.delta` and `runtime_request.updated`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DriverEvent {
     /// The protocol session is ready (`provider_session` → ready). `native_thread_id`

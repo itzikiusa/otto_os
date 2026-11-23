@@ -75,17 +75,18 @@ impl AcpDriver {
         if !self.flavor.client_terminal {
             return;
         }
-        self.state.confine = (spec.program.ends_with("sandbox-exec")
+        let wrapped = spec.program.ends_with("sandbox-exec")
             && spec.args.first().map(String::as_str) == Some("-p")
-            && spec.args.len() >= 2)
-            .then(|| {
-                vec![
-                    spec.program.clone(),
-                    spec.args[0].clone(),
-                    spec.args[1].clone(),
-                ]
-            })
-            .unwrap_or_default();
+            && spec.args.len() >= 2;
+        self.state.confine = if wrapped {
+            vec![
+                spec.program.clone(),
+                spec.args[0].clone(),
+                spec.args[1].clone(),
+            ]
+        } else {
+            Vec::new()
+        };
         self.state.child_env = spec.env.clone();
     }
 
