@@ -42,6 +42,7 @@ const GUEST_ASSET_NAMES: &[&str] = &[
     "data.img",
 ];
 
+#[cfg(target_os = "macos")]
 const KIRI_ENTITLEMENTS_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -513,6 +514,7 @@ pub(crate) async fn ensure_macos_virtualization_signature(bin_path: &Path) -> Re
 }
 
 /// Keep a signature only when it carries the entitlement AND verifies.
+#[cfg(any(target_os = "macos", test))]
 fn keep_signature(entitled: bool, verifies: bool) -> bool {
     entitled && verifies
 }
