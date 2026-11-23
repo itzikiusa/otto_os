@@ -3830,6 +3830,36 @@ mod tests {
                 if file_name == "/w/old.rs, /w/new.rs")));
     }
 
+    /// Review note: under Auto-accept edits a served command still asks
+    /// (edits only are auto-accepted); a write does not.
+    #[test]
+    fn auto_accept_edits_still_asks_before_a_client_command() {
+        let mut d = AcpDriver::grok();
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"g"}}"#);
+        d.state.access = RuntimeAccessMode::AutoAcceptEdits;
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":"c1","method":"terminal/create","params":{"sessionId":"g","command":"rm -rf build"}}"#);
+        assert!(s.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::Request {
+                kind: RequestKind::Command,
+                ..
+            }
+        )));
+        assert!(!s
+            .events
+            .iter()
+            .any(|e| matches!(e, DriverEvent::ClientCall { .. })));
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":"w1","method":"fs/write_text_file","params":{"sessionId":"g","path":"/tmp/x/a.txt","content":"hi"}}"#);
+        assert!(
+            s.events
+                .iter()
+                .any(|e| matches!(e, DriverEvent::ClientCall { .. })),
+            "an edit goes ahead"
+        );
+    }
+
     /// Review R5: a client call in flight at a daemon restart is answered
     /// with an error once the restored driver sees the agent's next line.
     #[test]

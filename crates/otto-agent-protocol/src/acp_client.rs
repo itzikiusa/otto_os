@@ -214,7 +214,9 @@ impl AcpDriver {
                     cwd: s("cwd").unwrap_or(root),
                     byte_limit: params.get("outputByteLimit").and_then(Value::as_u64),
                 };
-                if supervised {
+                // Auto-accept edits covers edits only: a command asks unless
+                // the thread is on Full access.
+                if self.state.access != RuntimeAccessMode::FullAccess {
                     self.hold(step, rpc_id, op, RequestKind::Command, line);
                 } else {
                     self.run_held(step, rpc_id, op);
