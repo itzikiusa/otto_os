@@ -1312,8 +1312,8 @@ async fn self_post(
             .await
             .map_err(|e| Error::Upstream(format!("self-call: {e}")))?;
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
+            let text = crate::mcp_outward::read_self_error_body(resp).await;
             let msg = crate::mcp_outward::self_call_error(status, &text);
             return Err(match status.as_u16() {
                 400 | 422 => Error::Invalid(msg),
@@ -1323,6 +1323,7 @@ async fn self_post(
                 _ => Error::Upstream(msg),
             });
         }
+        let text = resp.text().await.unwrap_or_default();
         Ok(crate::mcp_outward::parse_self_ok(&text))
     }
     .await;

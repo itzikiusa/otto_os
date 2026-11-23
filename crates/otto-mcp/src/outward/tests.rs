@@ -14,6 +14,13 @@ fn spec_names() -> Vec<String> {
         .collect()
 }
 
+#[tokio::test]
+async fn self_call_error_body_caps_the_received_preview() {
+    let response = axum::http::Response::new(vec![b'x'; exec::MAX_ERROR_BODY_BYTES + 100]);
+    let preview = read_self_error_body(response.into()).await;
+    assert_eq!(preview.len(), exec::MAX_ERROR_BODY_BYTES);
+}
+
 #[test]
 fn self_call_errors_keep_the_whole_actionable_message() {
     let status = reqwest::StatusCode::NOT_FOUND;

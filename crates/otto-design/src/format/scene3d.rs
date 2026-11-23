@@ -463,6 +463,11 @@ pub fn validate(doc: &Value) -> Result<Scene3d, Error> {
 
 /// Parse + validate from raw bytes (the PUT / assist / render paths).
 pub fn validate_bytes(bytes: &[u8]) -> Result<Scene3d, Error> {
+    if bytes.len() > crate::format::MAX_CONTENT_BYTES {
+        return Err(Error::PayloadTooLarge(
+            "scene3d exceeds the design content limit".into(),
+        ));
+    }
     let doc: Value =
         serde_json::from_slice(bytes).map_err(|e| Error::Invalid(format!("scene3d: {e}")))?;
     validate(&doc)
@@ -1247,6 +1252,15 @@ print("otto-scene3d: wrote", OUT)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_bytes_rejects_oversized_input_before_parsing() {
+        let bytes = vec![b' '; crate::format::MAX_CONTENT_BYTES + 1];
+        assert!(matches!(
+            validate_bytes(&bytes),
+            Err(Error::PayloadTooLarge(_))
+        ));
+    }
     use serde_json::json;
 
     fn sample() -> Value {

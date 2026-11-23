@@ -2701,7 +2701,7 @@ pub async fn self_delete(client: &reqwest::Client, token: &str, url: &str) -> Re
 pub async fn parse_self(resp: reqwest::Response) -> Result<Value, Error> {
     let status = resp.status();
     if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
+        let text = read_self_error_body(resp).await;
         return Err(Error::Upstream(self_call_error(status, &text)));
     }
     // A body that broke off mid-read is NOT success: an empty 2xx reads as
@@ -2719,12 +2719,29 @@ pub async fn parse_self(resp: reqwest::Response) -> Result<Value, Error> {
 /// candidates, a validation error names the bad field), so it is kept whole up
 /// to this bound — the old 400-char raw snippet cut candidate lists mid-row.
 pub const MAX_ERROR_MESSAGE_CHARS: usize = 4000;
+pub(super) const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+
+/// Read only the error preview even when the server streams a larger response.
+pub async fn read_self_error_body(mut response: reqwest::Response) -> String {
+    let mut bytes = Vec::new();
+    while bytes.len() < MAX_ERROR_BODY_BYTES {
+        let Ok(Some(chunk)) = response.chunk().await else {
+            break;
+        };
+        let n = chunk.len().min(MAX_ERROR_BODY_BYTES - bytes.len());
+        bytes.extend_from_slice(&chunk[..n]);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
 
 /// The agent-facing text of a non-2xx self-call: `"<status>: <message>"`, the
 /// `message` (or a module's `error`) of a JSON problem body when there is one
 /// (≤ [`MAX_ERROR_MESSAGE_CHARS`]), else a short raw snippet so an HTML/huge
 /// body never floods the transcript. Pure, so it is unit-tested.
 pub fn self_call_error(status: reqwest::StatusCode, body: &str) -> String {
+    if body.len() > MAX_ERROR_BODY_BYTES {
+        return format!("{status}: {}", body.chars().take(400).collect::<String>());
+    }
     let message = serde_json::from_str::<Value>(body).ok().and_then(|v| {
         v.get("message")
             .or_else(|| v.get("error"))
@@ -2766,7 +2783,7 @@ pub async fn self_get_text(
         .map_err(|e| Error::Upstream(format!("self-call: {e}")))?;
     let status = resp.status();
     if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
+        let text = read_self_error_body(resp).await;
         return Err(Error::Upstream(self_call_error(status, &text)));
     }
     // As in `parse_self`: a 2xx whose body broke off mid-read is NOT "the pod

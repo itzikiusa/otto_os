@@ -195,6 +195,9 @@ async fn kubectl_fresh<S: K8sCtx>(ctx: &S, cluster: &K8sCluster) -> Result<Kubec
 /// ([`otto_core::kubeconfig_policy`]) over kubeconfig YAML. With `context`,
 /// only that context's user is checked (every user if it is missing).
 pub fn check_kubeconfig_yaml(yaml: &str, context: Option<&str>) -> Result<()> {
+    if yaml.len() as u64 > KUBECONFIG_MAX_BYTES {
+        return Err(Error::Invalid("kubeconfig exceeds the size limit".into()));
+    }
     let cfg: Value = serde_yaml::from_str(yaml)
         .map_err(|e| Error::Invalid(format!("kubeconfig is not valid YAML: {e}")))?;
     otto_core::kubeconfig_policy::check_kubeconfig(&cfg, context).map_err(Error::Invalid)
@@ -260,7 +263,13 @@ pub fn validated_kubeconfig_path(raw: &str, data_dir: &Path) -> Result<PathBuf> 
 /// user path, or a stored one Otto wrote itself).
 pub fn check_kubeconfig_file(path: &Path, context: Option<&str>) -> Result<()> {
     let canonical = readable_kubeconfig(path)?;
-    let text = std::fs::read_to_string(&canonical)
+    use std::io::Read;
+    let mut text = String::new();
+    std::fs::File::open(&canonical)
+        .and_then(|file| {
+            file.take(KUBECONFIG_MAX_BYTES + 1)
+                .read_to_string(&mut text)
+        })
         .map_err(|e| Error::Invalid(format!("kubeconfig {}: {e}", path.display())))?;
     check_kubeconfig_yaml(&text, context)
 }
@@ -1069,6 +1078,15 @@ mod tests {
     }
 
     /// CodeQL 457-460: the one gate for a typed kubeconfig path.
+    #[test]
+    fn kubeconfig_byte_limit_also_applies_at_the_parser() {
+        let yaml = " ".repeat(KUBECONFIG_MAX_BYTES as usize + 1);
+        assert!(check_kubeconfig_yaml(&yaml, None)
+            .unwrap_err()
+            .to_string()
+            .contains("size limit"));
+    }
+
     #[test]
     fn validated_kubeconfig_path_rules() {
         let tmp = tempfile::tempdir().unwrap();

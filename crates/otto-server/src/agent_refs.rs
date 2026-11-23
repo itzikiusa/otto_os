@@ -702,10 +702,11 @@ impl SelfCaller {
             .await
             .map_err(|e| Error::Upstream(format!("self-call: {e}")))?;
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
+            let text = crate::mcp_outward::read_self_error_body(resp).await;
             return Err(status_error(status, &text));
         }
+        let text = resp.text().await.unwrap_or_default();
         Ok(crate::mcp_outward::parse_self_ok(&text))
     }
 
