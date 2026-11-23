@@ -221,6 +221,9 @@ export type ApprovalDecision = 'accept' | 'accept_for_session' | 'accept_always'
 export interface ApprovalOption {
   decision: ApprovalDecision;
   label: string;
+  /** With `decision: "decline"`: it is `decline_always` (sent so for a
+   *  rollback-safe store; answer with `decline_always`). */
+  always?: boolean;
 }
 
 export interface ProviderFailure {

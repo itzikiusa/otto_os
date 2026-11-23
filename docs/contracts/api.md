@@ -6884,7 +6884,7 @@ questions are explicitly unsupported; the provider receives an error/denial,
 never a fabricated answer. ACP support follows the upstream draft and does not
 imply every ACP provider emits these requests.
 
-An approval's `decision` is one of `accept`, `accept_for_session`, `accept_always`, `decline`, `decline_always` (offered only where the agent offers it — ACP `reject_always`; Claude and Codex treat it as `decline`) or `cancel`, and must be one of the request's `options` or `cancel`.
+An approval's `decision` is one of `accept`, `accept_for_session`, `accept_always`, `decline`, `decline_always` (offered only where the agent offers it — ACP `reject_always`; Claude and Codex treat it as `decline`) or `cancel`, and must be one of the request's `options` or `cancel`. In `approval_request.options` that option is sent and stored as `{decision: "decline", always: true, label}` (and a recorded `runtime_request.decision` as `decline`), so a rollback to a build without `decline_always` still reads those rows; answer it with `decline_always`.
 
 A question can also be dismissed without answering via `question_action` (`decline` or `cancel`). ACP preserves that native action; Claude denies only the question tool, and Codex returns an empty native answer map. The request becomes `cancelled`, without granting any permission.
 

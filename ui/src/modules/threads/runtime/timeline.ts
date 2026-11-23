@@ -42,7 +42,8 @@ export function pendingApprovals(p: RuntimeProjection): PendingApproval[] {
       kind: r.kind,
       prompt: approval?.prompt ?? null,
       reason: approval?.reason ?? null,
-      options: approval?.options ?? [],
+      // "Never" arrives as decline + always (rollback-safe); it answers decline_always.
+      options: (approval?.options ?? []).map((o) => (o.always ? { ...o, decision: 'decline_always' as const } : o)),
       canRespond: r.response_capability.type === 'live',
     });
   }
