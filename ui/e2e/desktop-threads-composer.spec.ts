@@ -56,7 +56,7 @@ test.beforeEach(async ({ page }, info) => {
   await page.setViewportSize({ width: 1440, height: 900 });
 });
 
-async function open(page: Page, provider: 'codex' | 'claude', title: string): Promise<{ id: string; thread: Locator }> {
+async function open(page: Page, provider: 'codex' | 'claude' | 'gemini', title: string): Promise<{ id: string; thread: Locator }> {
   const r = await ctx.post(`${base}/api/v1/workspaces/${wsId}/runtime-sessions`, { data: { provider, cwd: fixtureDir, title } });
   expect(r.ok(), await r.text()).toBeTruthy();
   const id = (await r.json()).id as string;
@@ -287,4 +287,60 @@ test('codex: View › Tool calls hides successful (or all) calls; failures and r
   expect(await page.evaluate(() => localStorage.getItem('otto_threads_prefs_v1'))).toContain('"tools":"none"');
   await pickView(page, 'Tool calls: show all');
   await expect(okTool).toHaveCount(1);
+});
+
+test('gemini (ACP, otto-fake-agent): Queue only — the button and ⌘↵ say it cannot steer; its commands; a reply', async ({ page }) => {
+  test.setTimeout(120_000);
+  const { thread } = await open(page, 'gemini', 'ACP composer');
+  await send(thread, 'hello');
+  const composer = thread.getByTestId('runtime-composer');
+  // Its own slash commands under its heading (/review is Otto's here).
+  await composer.fill('/');
+  const pop = thread.locator('[data-slash-pop]');
+  await expect(pop.getByTestId('slash-group')).toHaveText(['Otto', /commands$/]);
+  await expect(pop.locator('[data-source="agent"]')).toHaveText([/\/compact/]);
+  await composer.fill('');
+  // Working: Queue is the only mid-turn delivery, and the button says why.
+  await composer.fill('hang');
+  await composer.press('Enter');
+  const primary = thread.getByTestId('runtime-send');
+  const stop = thread.getByTestId('runtime-stop');
+  await expect(stop).toBeVisible({ timeout: 20_000 });
+  await composer.fill('after the hang');
+  await expect(primary).toHaveAttribute('data-delivery', 'queue');
+  await expect(primary).toHaveAttribute('title', /can’t take a message mid-turn/);
+  await composer.press('Meta+Enter');
+  await expect(page.getByText(/can’t take a message mid-turn/).first()).toBeVisible();
+  await expect(thread.getByTestId('runtime-queued')).toHaveCount(1);
+  // The View choice "steer" still queues here.
+  await pickView(page, 'While working, messages steer');
+  await composer.fill('second');
+  await expect(primary).toHaveAttribute('data-delivery', 'queue');
+  await stop.click();
+  await expect(thread.getByText('echo: after the hang').last()).toBeVisible({ timeout: 30_000 });
+});
+
+test('gemini (ACP): gated tool calls never fold or hide; ↑ recalls the prompt', async ({ page }) => {
+  test.setTimeout(90_000);
+  const { thread } = await open(page, 'gemini', 'ACP gated tools');
+  const composer = thread.getByTestId('runtime-composer');
+  await composer.fill('ask2');
+  await composer.press('Enter');
+  const dock = thread.getByTestId('runtime-attention');
+  for (let i = 0; i < 2; i++) {
+    await expect(dock).toBeVisible({ timeout: 20_000 });
+    await dock.getByRole('button', { name: 'Allow', exact: true }).click();
+  }
+  await expect(dock).toHaveCount(0, { timeout: 20_000 });
+  await expect(thread.getByTestId('runtime-send')).toHaveAttribute('data-delivery', 'send', { timeout: 20_000 });
+  // Answered approvals keep their calls in sight (one group line that opens),
+  // never in a fold, and "hide all" keeps them.
+  const group = thread.getByText('Used 2 tools');
+  await expect(group).toBeVisible();
+  await expect(thread.locator('[data-testid^="runtime-fold-"]')).toHaveCount(0);
+  await pickView(page, 'Tool calls: hide all');
+  await expect(group).toBeVisible();
+  await composer.focus();
+  await composer.press('ArrowUp');
+  await expect(composer).toHaveValue('ask2');
 });

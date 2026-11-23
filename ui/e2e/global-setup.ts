@@ -63,14 +63,22 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
   // and the agent's own follow-up turn), `agent <s>` (a background subagent),
   // `slow <s>` and `silent`.
   const fakeClaude = join(dirname(OTTOD), 'otto-fake-claude');
-  for (const cli of ['claude', 'codex', 'agy', 'gemini', 'grok']) {
+  // The ACP agents with a stand-in here (`gemini --acp`, `agy acp`, `grok …
+  // agent stdio`) get `otto-fake-agent`: echo, `ask` (a
+  // permission request), `hang` (Stop), `plan`, and two slash commands. It
+  // has no steer, like every ACP agent but Grok's interject.
+  const fakeAcp = join(dirname(OTTOD), 'otto-fake-agent');
+  const ACP = ['agy', 'gemini', 'grok'];
+  for (const cli of ['claude', 'codex', ...ACP]) {
     const shim = join(fakeBin, cli);
     const runtime =
       cli === 'codex' && existsSync(fakeCodex)
         ? `for a in "$@"; do [ "$a" = app-server ] && exec '${fakeCodex}' "$@"; done\n`
         : cli === 'claude' && existsSync(fakeClaude)
           ? `for a in "$@"; do [ "$a" = stream-json ] && exec '${fakeClaude}' "$@"; done\n`
-          : '';
+          : ACP.includes(cli) && existsSync(fakeAcp)
+            ? `for a in "$@"; do case "$a" in --acp|acp|stdio) exec '${fakeAcp}' "$@";; esac; done\n`
+            : '';
     writeFileSync(
       shim,
       `#!/bin/sh\n${runtime}echo "otto e2e: the real ${cli} CLI is disabled in tests"\nexec cat\n`,
