@@ -18,8 +18,9 @@ const root = new URL('../../', import.meta.url);
 const rust = readFileSync(new URL('crates/otto-core/src/event.rs', root), 'utf8');
 // Comments removed up front: their prose (parentheses, `;`, `|`) would
 // otherwise unbalance the scanners below.
-// lib/api/types.ts is an export-* barrel over lib/api/types/<area>.ts; read them all.
-const tsSrc = ['types.ts', ...readdirSync(new URL('ui/src/lib/api/types/', root)).sort().map((f) => `types/${f}`)]
+// lib/api/types.ts is an export-* barrel over lib/api/types/<area>.ts (an area
+// may be split into lib/api/types/<area>/*.ts); read them all.
+const tsSrc = ['types.ts', ...readdirSync(new URL('ui/src/lib/api/types/', root), { recursive: true }).map(String).filter((f) => f.endsWith('.ts')).sort().map((f) => `types/${f}`)]
   .map((p) => readFileSync(new URL(`ui/src/lib/api/${p}`, root), 'utf8'))
   .join('\n')
   .replace(/\/\*[\s\S]*?\*\//g, '')
