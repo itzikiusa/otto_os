@@ -27,16 +27,13 @@
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   const ThreadInspector = lazyComponent(() => import('./ThreadInspector.svelte'));
   import LazyMount from '../../lib/components/LazyMount.svelte';
-  import { DetailsCardView, PullRequestsView, StartRoomView, TerminalDock, ThreadSheetsView } from './threadLazy.svelte';
+  import { DetailsCardView, RelatedListView, PullRequestsView, StartRoomView, TerminalDock, ThreadSheetsView } from './threadLazy.svelte';
   import { threadRepos } from './threadRepos.svelte';
   import { threadsChrome } from './threadsChrome.svelte';
   import ThreadSidebar from './ThreadSidebar.svelte';
   import { buildThreadMenu } from './threadMenu';
   import ThreadParentChip from './runtime/ThreadParentChip.svelte';
   import ProjectBadge from './ProjectBadge.svelte';
-  import { paletteThreads } from '../../lib/paletteThreads.svelte';
-  import { threadSwitcherSource } from './threadSwitcherSource.svelte';
-  import RelatedThreadsList from './RelatedThreadsList.svelte';
   import ThreadPopover from './ThreadPopover.svelte';
   import { CARD_RESERVE, cardFloats } from './threadDetails';
   import { relatedPopover } from './relatedPopover.svelte';
@@ -110,8 +107,17 @@
     if (id) untrack(() => runtimeThreads.markRead(id));
   });
 
-  // ⌘K opens on these threads, what needs you first (threadSwitcherSource).
-  onMount(() => paletteThreads.install(threadSwitcherSource));
+  // ⌘K opens on these threads, what needs you first (threadSwitcherSource;
+  // its own chunk, so the page does not carry it).
+  onMount(() => {
+    let off: (() => void) | null = null;
+    let gone = false;
+    void import('./threadSwitcherSource.svelte').then((m) => (gone ? undefined : (off = m.installThreadSwitcher())));
+    return () => {
+      gone = true;
+      off?.();
+    };
+  });
   // Subscribe to live cross-session messages + MCP DB activity while mounted.
   onMount(() => threads.mountLive());
   // The header's phone button used to learn this at mount; with the handoff
@@ -503,7 +509,7 @@
         data-icon="more"
         data-testid="threads-thread-menu"
         bind:this={menuBtn}
-        onpointerenter={() => TerminalDock.prefetch()}
+        onpointerenter={() => { TerminalDock.prefetch(); RelatedListView.prefetch(); }}
         onclick={openThreadMenu}
       >
         <Icon name="more" size={14} />
@@ -590,10 +596,10 @@
 
 <!-- ⋯ › Send to another thread…: message a thread, open one beside, start a
      room — under the toolbar's ⋯ (the details card lists the subagents). -->
-{#if relatedPopover.openFor && menuBtn}
+{#if relatedPopover.openFor && menuBtn && RelatedListView.component}
   {@const relatedId = relatedPopover.openFor}
   <ThreadPopover anchor={menuBtn} label="Send to another thread" testid="threads-related-popover" onclose={() => relatedPopover.close()}>
-    <RelatedThreadsList threadId={relatedId} onstartroom={(sid) => (roomSessionId = sid)} ondone={() => relatedPopover.close()} />
+    <RelatedListView.component threadId={relatedId} onstartroom={(sid: string) => (roomSessionId = sid)} ondone={() => relatedPopover.close()} />
   </ThreadPopover>
 {/if}
 

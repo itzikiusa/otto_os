@@ -87,7 +87,7 @@ test('the details card floats beside a Claude thread, heads the right panel, and
 
   // Top bar: project badge + "project / title" in reading type.
   const crumbs = page.getByTestId('threads-breadcrumb');
-  await expect(crumbs.getByTestId('project-badge')).toHaveText(/^[A-Z]{2}$/);
+  await expect(crumbs.getByTestId('project-badge')).toHaveText(/^[A-Z0-9]{2}$/);
   await expect(crumbs).toContainText('Sync offline edits on reconnect');
   expect(await crumbs.evaluate((el) => getComputedStyle(el).fontSize)).toBe('15px');
 

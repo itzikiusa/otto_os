@@ -2,8 +2,9 @@
 // every live main thread with the sidebar's state, unread mark and project,
 // ordered by threadSwitcher.ts; Enter opens in the focused pane, ⌘↵ beside it
 // when a split is open, and "New thread: <query>" starts the New thread stage
-// with the query as its draft. Installed by ThreadsPage while it is mounted.
-import type { PaletteThreadSource } from '../../lib/paletteThreads.svelte';
+// with the query as its draft. Installed by ThreadsPage while it is mounted
+// (loaded on demand, so the page itself does not carry it).
+import { paletteThreads, type PaletteThreadSource } from '../../lib/paletteThreads.svelte';
 import { ws } from '../../lib/stores/workspace.svelte';
 import { runtimeThreads } from './runtime/runtimeThreads.svelte';
 import { runtimeViews } from './runtime/runtimeView.svelte';
@@ -44,3 +45,8 @@ export const threadSwitcherSource: PaletteThreadSource = {
     threads.startNewThread({ workspaceId: ws.currentId, draft });
   },
 };
+
+/** Install the source; returns the uninstall. */
+export function installThreadSwitcher(): () => void {
+  return paletteThreads.install(threadSwitcherSource);
+}

@@ -1059,8 +1059,11 @@ secret question forms are refused instead of being collected into history.
 | `ui/src/modules/threads/runtime/{RuntimeBannerStack.svelte,banners.ts}` | everything above the composer in one priority order (error > question / approval > plan > queue > notices), at most two in full |
 | `ui/src/modules/threads/runtime/Runtime{SubagentCard,AgentRow,ThreadCallRow}.svelte`, `agentRows.ts` | one compact row for another agent: a subagent, or the agent's `thread_open` / `thread_message` call |
 | `ui/src/modules/threads/runtime/Runtime{QueueBar,TurnStatus}.svelte` | background work, the queue (Steer / Send now / Edit / Remove) and Closed · Reopen; the turn's status line (working, own turn, stopped, stalled, partly done) |
-| `ui/src/modules/threads/{RelatedThreadsChip,RelatedThreadsList,ThreadPopover}.svelte`, `relatedThreads.ts`, `relatedCollect.ts`, `relatedMessage.ts` | the header's one Related threads control (linked threads, workers, side chat, rooms; open, open beside, message, start a room) |
-| `ui/src/modules/threads/threadsPageMenu.ts` | the toolbar ⋯: the thread's actions, then New thread, Related threads…, Project card, Terminal drawer and the layout |
+| `ui/src/modules/threads/{RelatedThreadsList,ThreadPopover}.svelte`, `relatedThreads.ts`, `relatedCollect.ts`, `relatedMessage.ts` | ⋯ › Send to another thread… (connected threads, rooms; open, open beside, message, start a room) |
+| `ui/src/modules/threads/{ThreadDetailsCard,ProjectBadge}.svelte`, `threadDetails.ts`, `threadSubagents.ts` | the thread details card (folder, branch, the one git action, Changes, Subagents) and the project badge |
+| `ui/src/lib/paletteThreads.svelte.ts`, `ui/src/lib/threadSwitch.ts`, `ui/src/modules/threads/{threadSwitcher.ts,threadSwitcherSource.svelte.ts}` | ⌘K's Threads group (needs you first, frozen while open, New thread: <query>) |
+| `ui/src/modules/threads/worktreeBranch.ts` | a new thread's worktree branch name (prompt slug, repo prefix, collision suffix, dated) |
+| `ui/src/modules/threads/threadsPageMenu.ts` | the toolbar ⋯: the thread's actions, then New thread, Send to another thread…, Thread details, Terminal drawer and the layout |
 | `ui/src/lib/stores/runtimeDraftPersistence.ts`, `runtimeDraftRecovery.svelte.ts`, `runtimeDrafts.svelte.ts` | draft snapshot acknowledgement, serialized persistence and recovery |
 | `ui/src/modules/threads/runtime/Runtime{Questions,QuestionCard,ToolImages,ContextChips,DraftStatus}.svelte` | typed questions, image enlargement, context preview/removal and save status |
 | `ui/src/modules/threads/runtime/composerContext.ts` | attributed review conversations and file/hunk/line excerpts assembled on send |
@@ -1316,7 +1319,7 @@ thing on screen:
   right panel, ⋯. The ⋯ holds the thread's own actions, then **New thread**
   (also the sidebar's New button and ⌘K "New thread"), **Related threads…**,
   **Terminal drawer** (also `/terminal` and ⌘K) and **View ▸** — the layout
-  (Single / Split / Grid, also in ⌘K) and the Project card; a phone gets no
+  (Single / Split / Grid, also in ⌘K) and Thread details; a phone gets no
   View. Back and Forward are the
   shell's own (⌘⇧← / ⌘⇧→, ⌘K "Go back" / "Go forward"). Continue on phone is
   a ⋯ item, in the toolbar and in a split pane's header alike.

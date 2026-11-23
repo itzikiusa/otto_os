@@ -16,6 +16,7 @@ export const StartRoomView = lazyComponent(() => import('../rooms/StartRoomModal
 export const TerminalDrawerView = lazyComponent(() => import('./ThreadTerminalDrawer.svelte'));
 export const StageSlashView = lazyComponent(() => import('./StageSlashPopup.svelte'));
 export const DetailsCardView = lazyComponent(() => import('./ThreadDetailsCard.svelte'));
+export const RelatedListView = lazyComponent(() => import('./RelatedThreadsList.svelte'));
 export const ThreadSheetsView = lazyComponent(() => import('./ThreadSheets.svelte'));
 export const IdeProjectsSectionView = lazyComponent(() => import('./ThreadIdeProjectsSection.svelte'));
 export const OriginGroupsView = lazyComponent(() => import('./ThreadOriginGroups.svelte'));
