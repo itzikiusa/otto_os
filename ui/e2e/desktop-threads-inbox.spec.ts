@@ -156,10 +156,20 @@ test('the sidebar is an inbox: status words, needs you first, Working and Histor
   await row(page, 'done').locator('.tr-main').click();
   await expect(word(page, 'done')).toHaveText(/^(now|\d+[smhd])$/);
 
-  // ↑/↓ move between the rows.
-  await row(page, 'done').locator('.tr-main').focus();
+  // ↑/↓ move between the rows (other specs' threads share the daemon: the
+  // row above is whichever the list shows there, not necessarily ours).
+  const doneMain = row(page, 'done').locator('.tr-main');
+  await doneMain.focus();
+  const above = await main.evaluate((list, id) => {
+    const rows = [...list.querySelectorAll<HTMLElement>('.tr-main')];
+    const at = rows.findIndex((r) => r.closest(`[data-testid="thread-row-${id}"]`));
+    return rows[at - 1]?.closest('[data-testid]')?.getAttribute('data-testid') ?? null;
+  }, ids.done);
+  expect(above).not.toBeNull();
   await page.keyboard.press('ArrowUp');
-  await expect(row(page, 'failed').locator('.tr-main')).toBeFocused();
+  await expect(page.getByTestId(above!).locator('.tr-main')).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(doneMain).toBeFocused();
 });
 
 test('Group by project brings back the folders and is remembered', async ({ page }) => {
