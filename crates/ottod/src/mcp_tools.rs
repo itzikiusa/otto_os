@@ -1456,6 +1456,25 @@ fn rpc_err(id: Value, code: i64, message: impl Into<String>) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message.into() } })
 }
 
+/// A governed call's result: an executed downstream call's own MCP content
+/// blocks as they are (its images, links and resources reach the agent as
+/// such), anything else — a denial, a pending approval, an `otto.*` REST
+/// value — as [`tool_result`]'s JSON text.
+fn governed_result(v: &Value, is_error: bool) -> Value {
+    match v.get("content").and_then(Value::as_array) {
+        Some(blocks)
+            if v.get("executed").and_then(Value::as_bool) == Some(true)
+                && !blocks.is_empty()
+                && blocks
+                    .iter()
+                    .all(|b| b.get("type").and_then(Value::as_str).is_some()) =>
+        {
+            json!({ "content": blocks, "isError": is_error })
+        }
+        _ => tool_result(v, is_error),
+    }
+}
+
 /// Wrap a tool result `Value` as MCP `tools/call` content (a single JSON text
 /// block, pretty-printed). `is_error` flags a tool-level failure to the client.
 fn tool_result(value: &Value, is_error: bool) -> Value {
@@ -1590,7 +1609,7 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
             // route it through the control-plane gateway (which audits it itself).
             if name.starts_with("mcp__") {
                 return Some(match gateway_call(ctx, &name, &args).await {
-                    Ok((v, is_error)) => rpc_ok(id, tool_result(&v, is_error)),
+                    Ok((v, is_error)) => rpc_ok(id, governed_result(&v, is_error)),
                     Err(e) => rpc_ok(id, tool_result(&json!({ "error": e }), true)),
                 });
             }
@@ -1923,6 +1942,24 @@ mod tests {
     /// S5-07: a native irreversible writer's governed envelope maps back to
     /// the native result — executed → the tool's content; pending → the
     /// envelope (no error, the agent resubmits); denied / failed → an error.
+    #[test]
+    fn a_governed_servers_content_blocks_reach_the_agent_as_blocks() {
+        let png = json!({"type":"image","mimeType":"image/png","data":"iVBORw0KGgo="});
+        let executed = json!({"decision":"allowed","executed":true,"content":[{"type":"text","text":"red"}, png]});
+        assert_eq!(
+            governed_result(&executed, false),
+            json!({"content":[{"type":"text","text":"red"}, png],"isError":false})
+        );
+        // A pending approval (or a REST value) stays the JSON envelope.
+        let pending = json!({"decision":"pending_approval","executed":false,"approval_id":"a1"});
+        assert_eq!(
+            governed_result(&pending, false),
+            tool_result(&pending, false)
+        );
+        let rest = json!({"executed":true,"content":{"session_ids":[]}});
+        assert_eq!(governed_result(&rest, false), tool_result(&rest, false));
+    }
+
     #[test]
     fn governed_native_results_map_back() {
         let ok = governed_native_result(

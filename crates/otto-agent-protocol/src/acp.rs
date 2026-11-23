@@ -1146,6 +1146,9 @@ impl AcpDriver {
                         t.output.push_str(&tx.text);
                     } else if let ContentBlock::Image(image) = &c.content {
                         media.image(&image.mime_type, &image.data);
+                    } else if let Ok(v) = serde_json::to_value(&c.content) {
+                        // Resource links, embedded resources, audio.
+                        media.block(&v);
                     }
                 }
                 ToolCallContent::Diff(d) => {
@@ -2042,12 +2045,18 @@ fn raw_output_text(raw: Option<&Value>) -> Option<String> {
     if let Some(s) = raw.as_str() {
         return (!s.is_empty()).then(|| s.to_string());
     }
-    raw.get("output")
+    if let Some(s) = raw
+        .get("output")
         .or_else(|| raw.get("stdout"))
         .or_else(|| raw.get("error"))
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
-        .map(str::to_string)
+    {
+        return Some(s.to_string());
+    }
+    // An MCP tool's own result (`{content: [...], isError}`) as its rawOutput.
+    let text = crate::tool_images::extract(raw.get("content").map(|_| raw)).text;
+    (!text.is_empty()).then_some(text)
 }
 
 impl StructuredDriver for AcpDriver {

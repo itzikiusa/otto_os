@@ -225,19 +225,35 @@ const OTTO_TOOL_WORDS: Record<string, string> = {
   send_message: 'Sent a message',
 };
 
+/** An MCP tool call's server and tool from each provider's spelling:
+ *  Claude / Muse `mcp__github__list_pulls`, Codex `github.list_pulls`, grok
+ *  `github__list_pulls`, Antigravity `Run mcp_github_list_pulls` (its server
+ *  ends at the first `_`). `null` for any other tool. */
+export function mcpToolName(name: string): { server: string; tool: string } | null {
+  const m =
+    /^mcp__([^_]+(?:_[^_]+)*?)__(.+)$/.exec(name) ??
+    /^([A-Za-z0-9-]+)__([A-Za-z0-9_-]+)$/.exec(name) ??
+    // Not a file name (`README.md` is an ACP tool title, not a server).
+    (/\.(?:md|txt|json|[cm]?[jt]sx?|rs|py|go|toml|ya?ml|lock|html?|css|sh|svelte|java|rb|sql|csv|log|png|jpe?g|pdf)$/i.test(name)
+      ? null
+      : /^([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/.exec(name)) ??
+    /^(?:Run )?mcp_([A-Za-z0-9-]+)_([A-Za-z0-9_-]+)$/.exec(name);
+  return m ? { server: m[1], tool: m[2] } : null;
+}
+
 /** A tool's name as people say it: `mcp__otto__otto_routine_create` →
- *  "Created a routine", `mcp__github__list_pulls` → "List pulls (github)". */
+ *  "Created a routine", `mcp__github__list_pulls` → "github · list_pulls"
+ *  (every provider's MCP spelling, `mcpToolName`). */
 export function toolWords(name: string): string {
-  const m = /^mcp__([^_]+(?:_[^_]+)*?)__(.+)$/.exec(name);
+  const m = mcpToolName(name);
   if (!m) return name;
-  const [, server, tool] = m;
+  const { server, tool } = m;
   if (server === 'otto') {
     const bare = tool.replace(/^otto_/, '');
     const words = OTTO_TOOL_WORDS[bare] ?? bare.replaceAll('_', ' ');
     return words.charAt(0).toUpperCase() + words.slice(1);
   }
-  const words = tool.replaceAll('_', ' ');
-  return `${words.charAt(0).toUpperCase()}${words.slice(1)} (${server})`;
+  return `${server} · ${tool}`;
 }
 
 type MessageTurnItem = Extract<TurnItem, { type: 'user_message' | 'assistant_message' }>;
