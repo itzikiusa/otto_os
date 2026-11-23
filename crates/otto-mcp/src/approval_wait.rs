@@ -10,6 +10,38 @@ use otto_core::event::Event;
 use otto_state::McpApprovalRepo;
 use tokio::sync::broadcast;
 
+/// The hold of a caller nobody can answer in time: a headless session (a
+/// routine run, a workflow step, a background review) keeps the short wait and
+/// gets `pending_approval` back.
+pub const HEADLESS_WAIT_SECS: u64 = 15;
+
+/// The hold for an agent CLI whose own per-call MCP timeout is not known: its
+/// MCP client may give up at the MCP SDK's 60 s default, so the card must be
+/// answered (and the call run) before that.
+pub const UNKNOWN_CLIENT_WAIT_SECS: u64 = 45;
+const _: () = assert!(
+    UNKNOWN_CLIENT_WAIT_SECS < 60,
+    "under the MCP SDK's 60 s default"
+);
+
+/// How long a governed call from a session may hold for a person. Only an
+/// interactive session (a thread or terminal session its person works in)
+/// holds long, and never past its CLI's own per-call MCP timeout:
+/// - claude: `MCP_TOOL_TIMEOUT` default far above it (Otto sets none);
+/// - codex: Otto passes `tool_timeout_sec` = `CLIENT_TOOL_TIMEOUT_SECS`;
+/// - gemini: 10 min default (`DEFAULT_MCP_TIMEOUT_MSEC`);
+/// - grok 1.0.92: `tool_timeout_sec` default 6000 s (its own config docs);
+/// - agy, opencode, muse, pi: not established → [`UNKNOWN_CLIENT_WAIT_SECS`].
+pub fn hold_secs(cli_family: &str, interactive: bool) -> u64 {
+    if !interactive {
+        return HEADLESS_WAIT_SECS;
+    }
+    match cli_family {
+        "claude" | "codex" | "gemini" | "grok" => otto_core::mcp_budgets::GOVERNED_WAIT_SECS,
+        _ => UNKNOWN_CLIENT_WAIT_SECS,
+    }
+}
+
 /// `Some(true)` = approved, `Some(false)` = denied / expired / cancelled,
 /// `None` = still pending after `budget` (the caller resubmits later).
 ///
@@ -72,6 +104,18 @@ pub async fn wait_for_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_person_s_session_holds_long_and_never_past_its_cli_timeout() {
+        let long = otto_core::mcp_budgets::GOVERNED_WAIT_SECS;
+        for f in ["claude", "codex", "gemini", "grok"] {
+            assert_eq!(hold_secs(f, true), long, "{f}");
+            assert_eq!(hold_secs(f, false), HEADLESS_WAIT_SECS, "{f} headless");
+        }
+        for f in ["agy", "opencode", "muse", "pi", "custom"] {
+            assert_eq!(hold_secs(f, true), UNKNOWN_CLIENT_WAIT_SECS, "{f}");
+        }
+    }
     use otto_state::NewApproval;
 
     async fn pending(repo: &McpApprovalRepo) -> String {
