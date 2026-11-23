@@ -165,6 +165,7 @@ export const kidKey = (k: Kid): string => (k.kind === 'thread' ? k.id : k.item.i
  *  settled `otto.thread_open` calls, a person's "Delegate" notice and the
  *  provider's own `subagent` cards. */
 export function turnSubagents(items: readonly TurnItem[]): { groups: Map<string, Kid[]>; skip: Set<string> } {
+  perfCount('turnSubagents');
   const groups = new Map<string, Kid[]>();
   const skip = new Set<string>();
   const anchorOf = new Map<string, string>();

@@ -123,8 +123,17 @@ function groupParallel(entries: WorkEntry[]): WorkPart[] {
 
 const EMPTY_SUBAGENT_CHILDREN: ReadonlyMap<string, TurnItem[]> = new Map();
 
-/** A subagent's own activity (items with `parent_item_id`), by card id. */
+const childrenMemo = new WeakMap<readonly TurnItem[], Map<string, TurnItem[]>>();
+
+/** A subagent's own activity (items with `parent_item_id`), by card id —
+ *  once per items array, shared by the conversation and the tasks list. */
 export function subagentChildren(items: readonly TurnItem[]): Map<string, TurnItem[]> {
+  let hit = childrenMemo.get(items);
+  if (!hit) childrenMemo.set(items, (hit = groupSubagentChildren(items)));
+  return hit;
+}
+
+function groupSubagentChildren(items: readonly TurnItem[]): Map<string, TurnItem[]> {
   perfCount('subagentChildren');
   let hasParent = false;
   for (let idx = 0; idx < items.length; idx++) {

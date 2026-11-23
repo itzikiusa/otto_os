@@ -22,7 +22,7 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
-  import { agentTasks, taskElapsed } from './runtime/agentTasks';
+  import { sharedAgentTasks, taskElapsed } from './runtime/agentTasks';
   import { openChildThread } from './runtime/childNav';
   import { councilOf, linkedChildren } from './runtime/council';
   import { mapChildThreadSummaries } from './runtime/runtimeComposer';
@@ -123,6 +123,7 @@
   // delegated threads, and the thread it works under itself.
   // The thread's relatives depend on the thread lists, not on its stream:
   // derived apart, so a streamed delta does not rescan every thread.
+  const NO_TASKS = { running: [], finished: [] };
   const relatives = $derived.by(() => {
     if (!threadId) return null;
     const rt = runtimeThreads.get(threadId);
@@ -140,14 +141,17 @@
       ].map((x) => ({ id: x.id, title: x.title, provider: x.provider, status: ws.statusMap[x.id] ?? x.status })),
     };
   });
+  // The same object the conversation reads (sharedAgentTasks), kept while a
+  // streamed chunk changes no task: the section below then does not rerun.
+  const tasks = $derived.by(() => {
+    const rt = threadId ? runtimeThreads.get(threadId) : undefined;
+    if (!rt || !relatives) return NO_TASKS;
+    const p = runtimeViews.projections[rt.id] ?? null;
+    return sharedAgentTasks(rt.id, p?.items ?? [], p?.session?.background_tasks ?? rt.background_tasks ?? [], { output: p?.output, childThreads: relatives.children });
+  });
   const subagents = $derived.by(() => {
     const rel = relatives;
-    if (!threadId || !rel) return null;
-    const rt = runtimeThreads.get(threadId);
-    const p = rt ? (runtimeViews.projections[threadId] ?? null) : null;
-    const tasks = rt
-      ? agentTasks(p?.items ?? [], p?.session?.background_tasks ?? rt.background_tasks ?? [], { childThreads: rel.children })
-      : { running: [], finished: [] };
+    if (!rel) return null;
     const s = subagentSection(tasks, {
       parent: rel.parent,
       delegated: rel.delegated,

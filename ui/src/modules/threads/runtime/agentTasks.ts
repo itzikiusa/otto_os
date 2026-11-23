@@ -540,6 +540,31 @@ export function agentTasks(
   };
 }
 
+/** `agentTasks` computed once per change for one thread, however many
+ *  surfaces read it (the conversation and the details card): the last result
+ *  per `key` is reused while the items, background list and output buffers are
+ *  the same objects and the linked children say the same. A few threads are
+ *  kept (the ones on screen). */
+const shared = new Map<string, { items: readonly TurnItem[]; background: readonly BackgroundTask[]; output: unknown; kids: string; json: string; value: AgentTasks }>();
+const SHARED_MAX = 16;
+
+export function sharedAgentTasks(key: string, items: readonly TurnItem[], background: readonly BackgroundTask[], opts: AgentTasksOptions = {}): AgentTasks {
+  const kids = (opts.childThreads ?? []).map((c) => `${c.id}\u0001${c.status}\u0001${c.lastTurnStatus ?? ''}\u0001${c.title}\u0001${c.stepSummary ?? ''}`).join('\u0002');
+  const output = opts.output ?? null;
+  const hit = shared.get(key);
+  if (hit && hit.items === items && hit.background === background && hit.output === output && hit.kids === kids) return hit.value;
+  // A streamed chunk of the answer is a new items array but rarely a new
+  // task: an equal result keeps the old object, so what reads it stays put.
+  const fresh = agentTasks(items, background, opts);
+  const json = JSON.stringify(fresh);
+  const value = hit?.json === json ? hit.value : fresh;
+  if (value === fresh) perfCount('agentTasksChanged');
+  shared.delete(key);
+  shared.set(key, { items, background, output, kids, json, value });
+  if (shared.size > SHARED_MAX) shared.delete(shared.keys().next().value!);
+  return value;
+}
+
 /** The strip's words for background work that is not a subagent (commands,
  *  timers — subagents are on the waiting line): the one task named, several
  *  counted (the list is a tap away). */
