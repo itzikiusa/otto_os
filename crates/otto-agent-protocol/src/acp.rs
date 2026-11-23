@@ -2358,25 +2358,7 @@ impl StructuredDriver for AcpDriver {
             .ok_or_else(|| DriverError("no such pending question".into()))?;
         otto_core::agent_runtime::validate_question_answers(questions, answers)
             .map_err(DriverError)?;
-        use otto_core::agent_runtime::{QuestionAnswer, QuestionKind};
-        let content: serde_json::Map<String, Value> = answers
-            .iter()
-            .map(|a| {
-                let id = a.question_id();
-                let single = questions
-                    .iter()
-                    .any(|q| q.id == id && q.kind == QuestionKind::Single);
-                match a {
-                    QuestionAnswer::Multi { values, .. } => (id.to_string(), json!(values)),
-                    // Typed text for a single choice is its folded
-                    // `<id>__other` field's answer (`questions::acp_form`).
-                    QuestionAnswer::Text { text, .. } if single => {
-                        (crate::questions::other_field(id), json!(text))
-                    }
-                    _ => (id.to_string(), json!(a.values()[0])),
-                }
-            })
-            .collect();
+        let content = crate::questions::form_content(questions, answers);
         let mut step = DriverStep::default();
         step.write(
             json!({"jsonrpc":"2.0","id":rpc_id,"result":{"action":"accept","content":content}})
