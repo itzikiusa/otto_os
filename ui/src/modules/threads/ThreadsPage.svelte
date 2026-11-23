@@ -43,6 +43,7 @@
   import { prepareDeepLink } from '../../lib/deepLinkOpen';
   import { runtimeThreadMenu } from './runtime/runtimeMenu';
   import { asThreadSession, isRuntimeThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
+  import { mcpServersSheet } from './runtime/mcpServersSheet.svelte';
   import { isThreadSession, projectName } from './threadsHelpers';
   import { threadOrigin } from './threadOrigins';
   import { personalAgentName } from '../../lib/personalAgentBadges';
@@ -299,6 +300,10 @@
         keywords: 'start create thread claude codex antigravity',
         run: () => threads.startNewThread({ workspaceId: ws.currentId }),
       },
+      // Off the toolbar ⋯ (≤ 9 entries): the card's "MCP · N servers" row and here.
+      ...(focused && runtimeThreads.get(focused.id)
+        ? [{ id: 'threads.mcp-servers', title: 'MCP servers for this thread', group: 'Threads', keywords: 'mcp tools servers missing', run: () => mcpServersSheet.open(focused!.id) }]
+        : []),
       {
         id: 'threads.layout.single',
         title: 'Threads layout: 1-up single view',
