@@ -657,6 +657,8 @@
     flex: 1;
     min-block-size: 0;
     overflow-y: auto;
+    /* A classic scrollbar must not shift the column off the composer's centre. */
+    scrollbar-gutter: stable both-edges;
     overflow-x: hidden;
     overflow-anchor: none;
   }

@@ -412,7 +412,10 @@ export function buildRuntimeBanners(opts: {
     ...(opts.sessionError ? [{ key: 'error', label: 'error', urgent: true }] : []),
     ...(opts.uiAsk ? [{ key: 'ui', label: 'UI control request', urgent: true }] : []),
     ...(opts.hasPlan ? [{ key: 'plan', label: 'plan' }] : []),
-    ...(opts.queueShown ? [{ key: 'queue', label: opts.needsRevive ? 'revive' : 'queue' }] : []),
+    // Revive / Reopen is the thread's next action, not a quiet notice: it
+    // always shows with its button, never behind "N more" (an error, which
+    // carries sign-in / restart advice, and a UI-control ask are urgent too).
+    ...(opts.queueShown ? [{ key: 'queue', label: opts.needsRevive ? 'revive' : 'queue', ...(opts.needsRevive ? { urgent: true } : {}) }] : []),
     ...(opts.freshContext ? [{ key: 'fresh', label: 'fresh context' }] : []),
     // The record of settled questions is the least pressing notice.
     ...(opts.hasQuestions ? [{ key: 'questions', label: 'previous questions' }] : []),

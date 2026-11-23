@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
+import { loadSource } from './sourceHarness.ts';
 import type { ProviderTurn, TurnItem } from '../src/lib/api/types';
 
 const hook =
@@ -149,4 +150,23 @@ test('a short screen (or the keyboard up) folds every quiet notice; urgent ones 
   const names = (s: ReturnType<typeof splitBanners>) => [s.shown.map((x) => x.key), s.folded.map((x) => x.key)];
   assert.deepEqual(names(splitBanners([b('plan'), b('queue')], 0)), [[], ['plan', 'queue']]);
   assert.deepEqual(names(splitBanners([b('error', true), b('queue')], 0)), [['error'], ['queue']]);
+});
+
+test('the thread’s next action (Revive / Reopen) is never folded behind "N more"; quiet notices are', () => {
+  const base = { sessionError: null, uiAsk: false, hasQuestions: false, hasPlan: true, queueShown: true, needsRevive: false, freshContext: true };
+  const keys = (s: ReturnType<typeof splitBanners>) => [s.shown.map((x) => x.key), s.folded.map((x) => x.key)];
+  // A stopped thread whose revive just failed: the error AND the Revive line show.
+  const { buildRuntimeBanners } = loadSource(new URL('../src/modules/threads/runtime/runtimeComposer.ts', import.meta.url), {
+    '../../../lib/toastError': { toastError: () => {} },
+    '../../../lib/telemetry': { startMeasurement: () => null },
+    './hostCommands': { runHostSlash: () => false },
+    './timeline': { errorText: (s: string) => s },
+    '../../../lib/stores/runtimeDrafts.svelte': { runtimeDrafts: {} },
+    '../../../lib/providerRegistry': { sessionProviderSlug: () => '' },
+  }) as typeof import('../src/modules/threads/runtime/runtimeComposer.ts');
+  const revive = buildRuntimeBanners({ ...base, sessionError: 'Agent executable unavailable.', needsRevive: true });
+  assert.deepEqual(keys(splitBanners(revive)), [['error', 'queue'], ['plan', 'fresh']]);
+  assert.deepEqual(keys(splitBanners(revive, 0)), [['error', 'queue'], ['plan', 'fresh']], 'not even with the keyboard up');
+  // A live queue is a quiet notice.
+  assert.deepEqual(keys(splitBanners(buildRuntimeBanners(base))), [['plan'], ['queue', 'fresh']]);
 });
