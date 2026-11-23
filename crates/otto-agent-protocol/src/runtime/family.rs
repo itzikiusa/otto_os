@@ -61,7 +61,9 @@ impl AgentRuntime {
         let me = self.get(id).await?;
         let rows = self.list(&me.workspace_id, Some(&me.created_by)).await?;
         let ids = family_ids(id, &rows);
-        mark_stopped(&ids);
+        // Only what it delegated to is quiet: the thread Stop was pressed on,
+        // when itself a subagent, still tells its lead it was stopped.
+        mark_stopped(&ids[1..]);
         let mut out = FamilyStopResp {
             subagents: ids.len().saturating_sub(1) as u32,
             ..FamilyStopResp::default()

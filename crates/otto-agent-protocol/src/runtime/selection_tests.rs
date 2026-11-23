@@ -635,3 +635,40 @@ async fn a_switch_whose_request_is_dropped_still_ends() {
     let stored = f.rt.repo().get(&s.id).await.unwrap().session;
     assert_eq!(stored.provider, RuntimeProvider::Claude);
 }
+
+/// A subagent of `of`, opened by its agent.
+async fn subagent(f: &Fixture, of: &Id) -> Id {
+    let cwd = f.rt.get(of).await.unwrap().cwd;
+    f.rt.create(
+        &"u1".into(),
+        &"w1".into(),
+        CreateRuntimeSessionReq {
+            provider: Some(RuntimeProvider::Claude),
+            cwd: Some(cwd),
+            meta: Some(children::child_meta(
+                of,
+                otto_core::agent_runtime::ChildOpener::Agent,
+            )),
+            ..CreateRuntimeSessionReq::default()
+        },
+    )
+    .await
+    .unwrap()
+    .id
+}
+
+/// Review 2: Stop pressed in a subagent's own thread quiets only what it
+/// delegated to; its own "was stopped" reply still wakes its lead.
+#[tokio::test]
+async fn stop_on_a_subagent_still_tells_its_lead() {
+    let (f, lead) = fixture(false, false, RuntimeConfig::default()).await;
+    let sub = subagent(&f, &lead).await;
+    let grand = subagent(&f, &sub).await;
+    f.rt.stop_family(&sub, false).await.unwrap();
+    assert!(
+        !family::recently_stopped(&sub),
+        "its reply to the lead is kept"
+    );
+    assert!(family::recently_stopped(&grand));
+    assert!(!family::recently_stopped(&lead));
+}
