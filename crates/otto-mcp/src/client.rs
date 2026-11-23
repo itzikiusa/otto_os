@@ -105,6 +105,11 @@ pub enum Transport {
         url: String,
         headers: BTreeMap<String, String>,
     },
+    /// The legacy HTTP+SSE transport (`crate::sse_transport`).
+    Sse {
+        url: String,
+        headers: BTreeMap<String, String>,
+    },
 }
 
 /// A spawned stdio server's handles (boxed: far bigger than the HTTP arm).
@@ -198,6 +203,11 @@ enum Live {
         session_id: Option<String>,
         /// The negotiated protocol version, sent as `MCP-Protocol-Version`.
         version: String,
+        next_id: i64,
+        _permit: tokio::sync::OwnedSemaphorePermit,
+    },
+    Sse {
+        session: Box<crate::sse_transport::SseSession>,
         next_id: i64,
         _permit: tokio::sync::OwnedSemaphorePermit,
     },
@@ -463,8 +473,41 @@ impl McpClient {
                     .await
                     .map_err(|_| timeout_msg())?
             }
+            Transport::Sse { url, headers } => {
+                tokio::time::timeout(OP_TIMEOUT, open_sse(url, headers))
+                    .await
+                    .map_err(|_| timeout_msg())?
+            }
         }
     }
+}
+
+/// SSRF-validate the URL, open the event stream and initialize over it.
+async fn open_sse(url: &str, headers: &BTreeMap<String, String>) -> Result<Live, String> {
+    use crate::sse_transport::{SseError, SseSession};
+    let permit = transport_permit().await?;
+    let client = http_client_for(url).await?;
+    let session = SseSession::open(client, url, headers).await?;
+    let message = session
+        .request(with_id(&init_request(), 1), 1)
+        .await
+        .map_err(|(SseError::NotDelivered(e) | SseError::Failed(e))| format!("initialize: {e}"))?;
+    if let Some(error) = message.get("error") {
+        return Err(format!("initialize: server error: {error}"));
+    }
+    validate_initialize_result(
+        message
+            .get("result")
+            .ok_or("initialize response missing result")?,
+    )?;
+    session
+        .notify(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+        .await;
+    Ok(Live::Sse {
+        session: Box::new(session),
+        next_id: 2,
+        _permit: permit,
+    })
 }
 
 fn timeout_msg() -> String {
@@ -782,6 +825,25 @@ fn with_id(request: &Value, id: i64) -> Value {
 /// One request on a live session, with a fresh JSON-RPC id.
 async fn run_on(live: &mut Live, transport: &Transport, request: Value) -> Result<Value, OpError> {
     match live {
+        Live::Sse {
+            session, next_id, ..
+        } => {
+            use crate::sse_transport::SseError;
+            let id = *next_id;
+            *next_id += 1;
+            let msg = match session.request(with_id(&request, id), id).await {
+                Ok(m) => m,
+                Err(SseError::NotDelivered(e)) => return Err(OpError::NotDelivered(e)),
+                Err(SseError::Failed(e)) => return Err(OpError::Failed(e)),
+            };
+            msg.get("result").cloned().ok_or_else(|| {
+                OpError::Failed(
+                    msg.get("error")
+                        .map(|e| format!("server error: {e}"))
+                        .unwrap_or_else(|| "no result in response".into()),
+                )
+            })
+        }
         Live::Stdio { io, next_id, .. } => {
             let StdioIo {
                 child,
@@ -986,7 +1048,7 @@ fn pick_sse_response(text: &str, want_id: i64) -> Result<Value, String> {
 /// those capabilities. `None` for a notification or a response. A server
 /// that blocks on the answer must get one — else the call hangs to the
 /// timeout and the session is dropped.
-fn server_request_answer(msg: &Value) -> Option<Value> {
+pub(crate) fn server_request_answer(msg: &Value) -> Option<Value> {
     let method = msg.get("method").and_then(Value::as_str)?;
     let id = msg.get("id")?;
     Some(if method == "ping" {
@@ -1058,7 +1120,7 @@ impl SseParser {
 }
 
 /// Is `msg` a JSON-RPC *response* (not a notification / server request)?
-fn is_response(msg: &Value) -> bool {
+pub(crate) fn is_response(msg: &Value) -> bool {
     msg.get("method").is_none() && (msg.get("result").is_some() || msg.get("error").is_some())
 }
 
@@ -1555,6 +1617,131 @@ mod tests {
             }
         });
         (address, server)
+    }
+
+    /// A legacy HTTP+SSE server: `GET /sse` streams an `endpoint` event, then
+    /// every response; `POST` bodies are answered 202 and their responses pushed
+    /// onto the stream (a server `ping` first, for a call). `endpoint`: what the
+    /// stream names.
+    async fn local_sse_mcp_server(
+        endpoint: &'static str,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<()>,
+        std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let rx = std::sync::Arc::new(tokio::sync::Mutex::new(rx));
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                let (tx, rx, seen) = (tx.clone(), rx.clone(), seen2.clone());
+                tokio::spawn(async move {
+                    let mut req = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    let (head, body) = loop {
+                        let n = s.read(&mut buf).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        req.extend_from_slice(&buf[..n]);
+                        let text = String::from_utf8_lossy(&req).to_string();
+                        if let Some(end) = text.find("\r\n\r\n") {
+                            let len = text[..end]
+                                .lines()
+                                .find_map(|l| {
+                                    l.to_ascii_lowercase()
+                                        .strip_prefix("content-length:")
+                                        .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                                })
+                                .unwrap_or(0);
+                            if req.len() >= end + 4 + len {
+                                break (text[..end].to_string(), text[end + 4..].to_string());
+                            }
+                        }
+                    };
+                    if head.starts_with("GET") {
+                        let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\r\n").await;
+                        let _ = s
+                            .write_all(format!("event: endpoint\ndata: {endpoint}\n\n").as_bytes())
+                            .await;
+                        let mut rx = rx.lock().await;
+                        while let Some(ev) = rx.recv().await {
+                            if s.write_all(ev.as_bytes()).await.is_err() {
+                                break;
+                            }
+                        }
+                        return;
+                    }
+                    let msg: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                    seen.lock().unwrap().push(msg.clone());
+                    let _ = s.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                    let Some(id) = msg.get("id").filter(|_| msg.get("method").is_some()) else {
+                        return;
+                    };
+                    let reply = match msg["method"].as_str() {
+                        Some("initialize") => handshake(&json!({"id": id})),
+                        Some("tools/call") => {
+                            let ping = json!({"jsonrpc":"2.0","id":"srv-1","method":"ping"});
+                            let _ = tx.send(format!("event: message\ndata: {ping}\n\n"));
+                            json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":"over sse"}]}})
+                        }
+                        _ => json!({"jsonrpc":"2.0","id":id,"result":{"tools":[{"name":"t"}]}}),
+                    };
+                    let _ = tx.send(format!("event: message\ndata: {reply}\n\n"));
+                });
+            }
+        });
+        (address, server, seen)
+    }
+
+    /// The legacy HTTP+SSE transport: initialize, list and call over the
+    /// stream; the server's ping is answered on the endpoint.
+    #[tokio::test]
+    async fn an_sse_server_initializes_lists_and_calls_over_its_stream() {
+        let (address, server, seen) = local_sse_mcp_server("/messages?session=s1").await;
+        let client = McpClient::new(Transport::Sse {
+            url: format!("http://{address}/sse"),
+            headers: BTreeMap::new(),
+        });
+        let tools = client.list_tools().await.expect("sse list");
+        assert_eq!(tools[0]["name"], json!("t"));
+        let call = client.call_tool("t", &json!({})).await.expect("sse call");
+        assert_eq!(call.content["content"][0]["text"], json!("over sse"));
+        // The server's ping got its answer.
+        let mut answered = false;
+        for _ in 0..50 {
+            answered = seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m["id"] == json!("srv-1") && m.get("result").is_some());
+            if answered {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(answered, "ping unanswered: {:?}", seen.lock().unwrap());
+        server.abort();
+    }
+
+    /// An endpoint on another origin is refused: the POSTs carry the headers.
+    #[tokio::test]
+    async fn an_sse_endpoint_on_another_origin_is_refused() {
+        let (address, server, _) = local_sse_mcp_server("http://169.254.169.254/steal").await;
+        let err = McpClient::new(Transport::Sse {
+            url: format!("http://{address}/sse"),
+            headers: BTreeMap::new(),
+        })
+        .list_tools()
+        .await
+        .unwrap_err();
+        assert!(err.contains("another origin"), "{err}");
+        server.abort();
     }
 
     /// The owner registered `http://127.0.0.1:<port>/mcp` (a desktop app's or

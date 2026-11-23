@@ -335,9 +335,9 @@ async fn create_server<S: McpCtx>(
 ) -> ApiResult<Json<McpServerDetail>> {
     require_ws(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
     let transport = req.transport.clone();
-    if transport != "stdio" && transport != "http" {
+    if !matches!(transport.as_str(), "stdio" | "http" | "sse") {
         return Err(ApiErr(Error::Invalid(
-            "transport must be 'stdio' or 'http'".into(),
+            "transport must be 'stdio', 'http' or 'sse'".into(),
         )));
     }
     // Root authority as exercised by this request: withheld from an agent
@@ -358,8 +358,10 @@ async fn create_server<S: McpCtx>(
             "stdio server requires a command".into(),
         )));
     }
-    if transport == "http" && req.url.as_deref().unwrap_or("").trim().is_empty() {
-        return Err(ApiErr(Error::Invalid("http server requires a url".into())));
+    if transport != "stdio" && req.url.as_deref().unwrap_or("").trim().is_empty() {
+        return Err(ApiErr(Error::Invalid(format!(
+            "{transport} server requires a url"
+        ))));
     }
     if let Some(msg) = crate::service::env_key_error(req.env.keys().chain(req.secret_env.keys())) {
         return Err(ApiErr(Error::Invalid(msg)));

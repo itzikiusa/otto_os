@@ -44,7 +44,6 @@ export function runtimeThreadMenu(id: string): MenuItem[] {
       title: 'A shell in this thread’s folder, under the conversation',
       action: () => threads.toggleTerminal(id),
     },
-    { label: 'MCP servers', icon: 'plug', title: 'What this thread’s agent can use over MCP, and why a server is missing', action: () => mcpServersSheet.open(id) },
     ...uiControlItem(id),
     ...councilMenuItems(id),
     ...phoneHandoff.menuItem(`threads/${id}`, 'this thread'),

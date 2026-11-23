@@ -8,6 +8,7 @@
 import type { ProviderTurn, TurnItem } from '../../../lib/api/types';
 import { threadCall } from './agentRows';
 import { formatDuration, groupSummary, toolError, workLabel, type TimelineRow, type WorkEntry, type WorkPart } from './timeline';
+import { perfCount } from '../../../lib/perfCount.ts';
 
 export { formatDuration };
 
@@ -117,6 +118,7 @@ export function shouldFold(
  *  summarizeToolGroup) — "Worked for 2m 14s · ran 2 commands and edited 3
  *  files"; thinking alone adds nothing. */
 export function foldLine(entries: readonly WorkEntry[]): string {
+  perfCount('foldLine');
   const tools = entries.filter((e) => e.item.type !== 'reasoning');
   const did = tools.length ? groupSummary(tools) : '';
   return did ? `${workedFor(entries)} · ${did.charAt(0).toLowerCase()}${did.slice(1)}` : workedFor(entries);

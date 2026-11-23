@@ -20,6 +20,15 @@ use super::{Inner, State};
 pub const RULES_OPEN: &str = "<otto_instructions>";
 pub const RULES_CLOSE: &str = "</otto_instructions>";
 
+/// Text Otto puts ahead of the person's words (the rules, a switch's
+/// handoff, a subagent's task header): never a thread's title.
+pub(super) fn is_preamble(text: &str) -> bool {
+    let t = text.trim_start();
+    [RULES_OPEN, "[Context handoff from", "[Subagent task from"]
+        .iter()
+        .any(|p| t.starts_with(p))
+}
+
 /// The rules a thread's agent gets once per conversation.
 pub const RULES: &str = "## Otto subagents
 Ordinary tasks need none of this. When the user asks for a subagent, another provider or model (Codex, Gemini, Claude, …), or parallel parts:

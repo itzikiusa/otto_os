@@ -538,12 +538,14 @@ impl McpService {
         secret_headers: BTreeMap<String, String>,
     ) -> McpClient {
         match server.transport.as_str() {
-            "http" => {
+            "http" | "sse" => {
                 let mut headers = server.headers.clone();
                 headers.extend(secret_headers);
-                McpClient::new(Transport::Http {
-                    url: server.url.clone().unwrap_or_default(),
-                    headers,
+                let url = server.url.clone().unwrap_or_default();
+                McpClient::new(if server.transport == "sse" {
+                    Transport::Sse { url, headers }
+                } else {
+                    Transport::Http { url, headers }
                 })
             }
             _ => {

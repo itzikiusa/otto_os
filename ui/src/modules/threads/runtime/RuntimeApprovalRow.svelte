@@ -183,7 +183,8 @@
   }
   .ra-docked .ra-detail {
     flex: none;
-    max-block-size: calc(1.5em * 3);
+    /* The full arguments / preview, scrolling inside a capped block. */
+    max-block-size: calc(1.5em * 8);
   }
   /* Phone: approving is the thread's main action — full 44 px tap targets. */
   @media (pointer: coarse) {
