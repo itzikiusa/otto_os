@@ -169,7 +169,8 @@
 <aside bind:this={inspectorEl} class="ti" aria-label="Thread panel" data-testid="threads-inspector" use:surfaceKeys>
   <!-- Thread details head the panel (they float beside the conversation
        only while this panel is closed). -->
-  {#if contextCwd && !threadsChrome.maximized}
+  <!-- On a phone a subagent's tab is a full-height sheet: the card gives way. -->
+  {#if contextCwd && !threadsChrome.maximized && !(threads.inspectorCompact && active === 'subagent')}
     <div class="ti-card"><ThreadDetailsCard cwd={contextCwd} threadId={focusedSession?.id ?? null} /></div>
   {/if}
   {#if contextThreadId}<ThreadAgentsTasks sessionId={contextThreadId} />{/if}

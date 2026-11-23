@@ -222,6 +222,11 @@ pub(super) const ROUTED_TWINS: &[(&str, TwinScope, TwinReply)] = &[
         TwinReply::Raw,
     ),
     (
+        "otto_thread_answer",
+        TwinScope::CallingSession,
+        TwinReply::Raw,
+    ),
+    (
         "otto_thread_capabilities",
         TwinScope::CallingSession,
         TwinReply::Wrap("providers"),

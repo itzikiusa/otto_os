@@ -30,7 +30,7 @@
   import { runtimeViews } from './runtime/runtimeView.svelte';
   import { gitAction } from './threadDetails';
   import { anyThread } from './threadRelay';
-  import { subagentSection, type SubagentRow } from './threadSubagents';
+  import { subagentSection, type SubagentRow } from './runtime/childThreads';
   import { delegatedParentId } from './threadsHelpers';
   import { openBranchMenu, openOpenInMenu } from './threadGitMenus';
   import { threadPrs } from './threadPrs.svelte';
@@ -111,7 +111,7 @@
     return () => ctl.abort();
   });
 
-  // Everything working under this thread (threadSubagents.ts): a runtime
+  // Everything working under this thread (runtime/childThreads.ts): a runtime
   // thread's subagents and the threads opened from it, a terminal thread's
   // delegated threads, and the thread it works under itself.
   const subagents = $derived.by(() => {
@@ -138,7 +138,6 @@
   });
   let previousOpen = $state(false);
   const nowMs = $derived(subagents?.running.length ? now() : Date.now());
-  const PREVIOUS_ROWS = 5;
 
   /** Opens a thread from the card; on a phone the details drawer gives way to it. */
   function openThread(id: string): void {
@@ -146,9 +145,12 @@
     openChildThread(id);
   }
 
+  /** A subagent with its own thread opens it; a provider's own subagent
+   *  lives in its turn's row in the timeline, so the card just opens the
+   *  right panel it heads. */
   function openSubagent(r: SubagentRow): void {
     if (r.threadId) openThread(r.threadId);
-    else threads.showAgentsTasks();
+    else threads.setInspectorOpen(true);
   }
 
   // Compact past 10k (T3: "1m", not "1000k") so huge diffs keep the row calm.
@@ -296,7 +298,7 @@
         </button>
       {/if}
       {#if s.running.length || s.previous.length}
-        <p class="dc-cap">Subagents{s.running.length ? ` · ${s.running.length} running` : ''}</p>
+        <p class="dc-cap">Subagents{s.running.length ? ` · ${s.running.length} working` : ''}</p>
       {/if}
       {#each s.running as r (r.id)}
         {@render subagent(r)}
@@ -307,14 +309,9 @@
           <span class="dc-label">Previous · {s.previous.length}</span>
         </button>
         {#if previousOpen}
-          {#each s.previous.slice(0, PREVIOUS_ROWS) as r (r.id)}
+          {#each s.previous as r (r.id)}
             {@render subagent(r)}
           {/each}
-          {#if s.previous.length > PREVIOUS_ROWS}
-            <button type="button" class="dc-row dc-dim" onclick={() => threads.showAgentsTasks()}>
-              <span class="dc-label">All in Agents & tasks…</span>
-            </button>
-          {/if}
         {/if}
       {/if}
     </div>
@@ -323,7 +320,7 @@
 
 {#snippet subagent(r: SubagentRow)}
   <div class="dc-line" data-testid="details-subagent" data-word={r.word}>
-    <button type="button" class="dc-row dc-grow" title={r.threadId ? `Open ${r.title}` : `${r.title}: Agents & tasks`} onclick={() => openSubagent(r)}>
+    <button type="button" class="dc-row dc-grow" title={r.threadId ? `Open ${r.title}` : r.title} onclick={() => openSubagent(r)}>
       {#if r.provider && hasProviderIcon(r.provider)}
         <ProviderIcon provider={r.provider} size={14} />
       {:else}

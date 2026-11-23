@@ -47,18 +47,18 @@ test('a council on a phone: the details drawer switches seats, the parent chip g
   // One tap: seat 2 as a full thread; its parent chip leads back to seat 1.
   await subs.getByTestId('details-subagent').getByRole('button', { name: /Cache plan · codex/ }).tap();
   await expect(page.getByTestId('runtime-thread-rt_p2')).toContainText('Seat two says Memcached.');
-  const back = page.getByTestId('threads-back-to-parent');
-  await expect(back).toContainText('Cache plan · claude');
+  // It opens as a sheet over seat 1 with a fixed line naming seat 1, and Back.
+  await expect(page.getByTestId('runtime-subagent-of').first()).toContainText('Compared with Cache plan · claude');
+  const back = page.getByTestId('threads-back-to-parent').first();
+  await back.tap();
+  await expect(page.getByTestId('runtime-thread-rt_p1')).toBeVisible();
 
-  // The ⋯ council items are reachable on the phone too.
+  // The ⋯ compare items are reachable on the phone too.
   await page.getByTestId('threads-thread-menu').click();
   const menu = page.locator('.ctx-menu').first();
   await expect(menu.getByRole('menuitem', { name: 'Ask every model…' })).toBeVisible();
   await expectFullyInViewport(page, menu, 'thread ⋯ menu (phone)');
   await page.keyboard.press('Escape');
-
-  await back.click();
-  await expect(page.getByTestId('runtime-thread-rt_p1')).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });
 

@@ -3,7 +3,10 @@
   ChildThreadApprovals.tsx, MIT, Copyright (c) 2026 T3 Tools Inc.):
   "Approval needed from <title>" above the composer with the same Approve /
   Decline as the thread's own, sent through the subagent's own request route.
-  Only subagents whose row says they wait on the person are loaded.
+  A subagent's QUESTION goes to this thread's agent first
+  (runtime/child_question.rs); once that agent's turn ended without
+  answering it, it shows here as "Question from <title>". Only subagents
+  whose row says they wait on someone are loaded.
 -->
 <script lang="ts">
   import { untrack } from 'svelte';
@@ -16,25 +19,44 @@
   import { runtimeThreads } from './runtimeThreads.svelte';
   import { runtimeViews } from './runtimeView.svelte';
   import { pendingApprovals } from './timeline';
+  import RuntimeQuestionCard from './RuntimeQuestionCard.svelte';
 
   let { sessionId }: { sessionId: string } = $props();
 
-  const waiting = $derived(childrenOf(Object.values(runtimeThreads.byId), sessionId).filter((k) => k.status === 'awaiting_permission'));
-  const waitingIds = $derived(waiting.map((k) => k.id).join(','));
+  // Only this family's waiting subagents, as a key: any other row's update
+  // leaves it equal, so nothing below re-runs (performance).
+  const waitingIds = $derived(
+    childrenOf(Object.values(runtimeThreads.byId), sessionId)
+      .filter((k) => k.status === 'awaiting_permission')
+      .map((k) => k.id)
+      .join(','),
+  );
+  const waiting = $derived(waitingIds ? waitingIds.split(',').flatMap((id) => runtimeThreads.get(id) ?? []) : []);
   // Load (and follow) only the subagents that wait on the person.
   $effect(() => {
     const ids = waitingIds ? waitingIds.split(',') : [];
     const closers = untrack(() => ids.map((id) => runtimeViews.open(id)));
     return () => closers.forEach((c) => c?.());
   });
+  /** This thread's agent is done with its turn: a question it did not answer is the person's now. */
+  const escalated = $derived(runtimeThreads.get(sessionId)?.status !== 'working');
   const items = $derived(
     waiting.flatMap((k) => {
       const p = runtimeViews.projections[k.id];
-      return p ? pendingApprovals(p).filter((a) => a.kind !== 'question').map((approval) => ({ kid: k, approval })) : [];
+      if (!p) return [];
+      const approvals = pendingApprovals(p)
+        .filter((a) => a.kind !== 'question')
+        .map((approval) => ({ kid: k, approval, question: null }));
+      const questions = escalated
+        ? p.requests.filter((r) => r.status === 'pending' && r.kind === 'question' && r.response_capability.type === 'live').map((question) => ({ kid: k, approval: null, question }))
+        : [];
+      return [...approvals, ...questions];
     }),
   );
   let at = $state(0);
   const cur = $derived(items.length ? items[Math.min(at, items.length - 1)] : null);
+
+  const curId = $derived(cur ? (cur.approval?.requestId ?? cur.question?.id ?? '') : '');
 
   async function answer(requestId: string, decision: ApprovalDecision): Promise<void> {
     if (!cur) return;
@@ -47,16 +69,21 @@
 </script>
 
 {#if cur}
-  <div class="ca" role="region" aria-label="Approval needed from {cur.kid.title}" data-testid="runtime-child-approval" data-child={cur.kid.id}>
+  {@const what = cur.question ? 'Question from' : 'Approval needed from'}
+  <div class="ca" role="region" aria-label="{what} {cur.kid.title}" data-testid={cur.question ? 'runtime-child-question' : 'runtime-child-approval'} data-child={cur.kid.id}>
     <div class="ca-head">
       {#if hasProviderIcon(cur.kid.provider)}<ProviderIcon provider={cur.kid.provider} size={13} />{:else}<Icon name="shield" size={13} />{/if}
-      <span class="ca-title ellipsis" dir="auto"><strong>Approval needed from {cur.kid.title}</strong></span>
+      <span class="ca-title ellipsis" dir="auto"><strong>{what} {cur.kid.title}</strong></span>
       {#if items.length > 1}
         <button type="button" class="btn small ghost" data-testid="runtime-child-approval-next" onclick={() => (at = (at + 1) % items.length)}>{Math.min(at, items.length - 1) + 1} of {items.length}</button>
       {/if}
     </div>
-    {#key cur.approval.requestId}
-      <RuntimeApprovalRow approval={cur.approval} onrespond={answer} docked />
+    {#key curId}
+      {#if cur.approval}
+        <RuntimeApprovalRow approval={cur.approval} onrespond={answer} docked />
+      {:else if cur.question}
+        <RuntimeQuestionCard request={cur.question} sessionId={cur.kid.id} agent={cur.kid.title} onanswered={() => {}} docked />
+      {/if}
     {/key}
   </div>
 {/if}

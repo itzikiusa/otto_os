@@ -1310,8 +1310,10 @@ Done · Failed · Stopped**. A subagent shows in four places only.
   "Previous".
 - **Opening one** — a click (its row's Open, Answer) opens it as a tab in the
   right panel while the parent stays put (`RuntimeSubagentPane.svelte`);
-  ⌘/Ctrl-click opens it in the main view, and one per-device setting in that
-  tab ("Open subagents in the main view") flips the default. On a phone the
+  ⌘/Ctrl-click opens it in the main view, and one per-device setting
+  (Settings ▸ Threads, `threadsChrome.subagentsIn`) flips the default. Its first
+  message reads "Task from <parent>". Having it open counts as looking at it
+  (`thread_seen_at`), as does opening its answer inline. On a phone the
   panel is a full-height sheet. Inside a subagent a fixed line reads
   "Subagent of <parent> · <task> · **Open parent**".
 - **One Stop** — the composer's Stop and the waiting line's Stop call
@@ -1330,9 +1332,17 @@ Done · Failed · Stopped**. A subagent shows in four places only.
   several" / Council) sends one prompt to 2–4 read-only threads;
   **Compare answers** (was Synthesize) adds the judge.
 
-Not yet: a subagent's question is not routed to the parent's agent first (it
-shows as Needs you on its row); provider switch inside a thread, a worktree
-per subagent, fork / merge and `@thread` mentions.
+- **Questions go to the agent first** — a subagent's QUESTION wakes the
+  thread's agent with it (`runtime/child_question.rs`), which answers with
+  `otto.thread_answer` (`POST …/peers/{peer}/answer`) when the task or the
+  person's instructions settle it; otherwise it asks the person and the
+  question shows in the parent's dock as "Question from <title>". An
+  APPROVAL always goes to the person.
+- **Provider switch** — after a switch the thread's subagents stay linked
+  (same thread id), and the new provider's first turn carries the delegation
+  rules again.
+
+Not yet: a worktree per subagent, fork / merge and `@thread` mentions.
 
 Meta and markers: a child carries `meta.child_of {id, by: "person" |
 "agent"}` (the opener; `parent_id` stays the group's root). The parent's

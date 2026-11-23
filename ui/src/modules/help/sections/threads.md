@@ -54,8 +54,8 @@ Threads (Experimental) is a conversation-first workspace for coding agents. It k
 - Or delegate yourself: **Delegate to…** (the people icon beside Attach, or type `@cod`, `@opus`) adds provider chips; Send opens one subagent each. They get your message and the conversation so far, and their answers go to the thread's agent — tick **Answer to me only** to keep them with you.
 - A turn's subagents are one row in the timeline: provider icons, "3 subagents · 2 working", elapsed. Open it for one row each; a row opens its full answer.
 - Under the timeline: "Waiting on 2 subagents · <titles> · **Stop**". **Stop** (here or the composer's) stops the thread and all its subagents.
-- A subagent's approval shows above your composer as "Approval needed from <title>" — answer it right there.
-- **Open** puts a subagent in a tab on the right while the thread stays put; ⌘-click opens it in the main view. A checkbox in that tab makes the main view the default on this device. Inside a subagent, the first line says whose subagent it is, with **Open parent**.
+- A subagent's approval shows above your composer as "Approval needed from <title>" — answer it right there. A subagent's question goes to the thread's agent first; if it can't answer, it shows as "Question from <title>".
+- **Open** puts a subagent in a tab on the right while the thread stays put; ⌘-click opens it in the main view. Settings ▸ Threads makes the main view the default on this device. Inside a subagent, the first line says whose subagent it is, with **Open parent**.
 - Statuses are always Working, Needs you, Done, Failed or Stopped.
 
 **Compare models: one prompt, several models**

@@ -292,6 +292,11 @@ fn main() {
                     Some((_, t)) => t.to_string(),
                     None => text,
                 };
+                // A subagent's task header (runtime::delegation): act on the task.
+                let text = match text.split_once("]\n\n") {
+                    Some((h, t)) if h.starts_with("[Subagent task from thread ") => t.to_string(),
+                    _ => text,
+                };
                 n += 1;
                 let mid = format!("m{n}");
                 if let Some((_, steerable)) = waiting {

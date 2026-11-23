@@ -76,6 +76,11 @@ test('a subagent’s approval is answered in the parent, and one Stop stops the 
   const card = thread.getByTestId('runtime-child-approval');
   await expect(card).toContainText('Approval needed from Run the migration');
   await expect(card).toContainText('npm run migrate');
+  for (const scheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await page.screenshot({ path: test.info().outputPath(`subagent-approval-phone-${scheme}.png`), animations: 'disabled' });
+  }
+  await page.emulateMedia({ colorScheme: 'light' });
   await card.getByRole('button', { name: /^Approve/ }).first().tap();
   const answers = () => page.evaluate(() => ((window as unknown as { __mockRuntime: { answers?: { id: string; decision: string }[] } }).__mockRuntime.answers ?? []));
   await expect.poll(answers).toEqual([expect.objectContaining({ id: '01M84S0000000000000000000A', decision: 'accept' })]);

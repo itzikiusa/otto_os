@@ -7,15 +7,30 @@
 <script lang="ts">
   import Icon from '../../../lib/components/Icon.svelte';
   import { threads } from '../threadsStore.svelte';
+  import { threadsChrome } from '../threadsChrome.svelte';
   import { childOf, firstLine } from './childThreads';
+  import { councilOf } from './council';
   import { runtimeThreads } from './runtimeThreads.svelte';
   import { runtimeViews } from './runtimeView.svelte';
   import { messageAttribution } from './timeline';
 
   let { threadId }: { threadId: string } = $props();
 
-  const of = $derived(childOf(runtimeThreads.get(threadId)));
+  const me = $derived(runtimeThreads.get(threadId));
+  /** A compared thread counts as a subagent of the first one. */
+  const compared = $derived(!childOf(me) && !!councilOf(me) && !!me?.parent_id);
+  const of = $derived(childOf(me) ?? (compared && me?.parent_id ? { id: me.parent_id } : null));
   const parent = $derived(of ? runtimeThreads.get(of.id) : null);
+  /** Back to the parent: shown in a tab or sheet, that closes first. */
+  function openParent(pid: string): void {
+    if (threadsChrome.subagentId === threadId) {
+      threadsChrome.closeSurface('subagent');
+      threadsChrome.subagentId = null;
+      if (threads.inspectorCompact) threads.setInspectorOpen(false);
+    }
+    threads.selectThread(pid);
+  }
+
   /** Its task: the first message, without the delegation header. */
   const task = $derived.by(() => {
     const first = runtimeViews.projections[threadId]?.items.find((i) => i.type === 'user_message');
@@ -28,11 +43,11 @@
   <div class="so" data-testid="runtime-subagent-of">
     <Icon name="people" size={13} />
     <span class="so-text ellipsis" dir="auto">
-      Subagent of <strong>{parent?.title ?? 'a closed thread'}</strong>{#if task}<span class="so-task"> · {task}</span>{/if}
+      {compared ? 'Compared with' : 'Subagent of'} <strong>{parent?.title ?? 'a closed thread'}</strong>{#if task}&nbsp;·&nbsp;<span class="so-task">{task}</span>{/if}
     </span>
     {#if parent}
       {@const pid = parent.id}
-      <button type="button" class="btn small ghost so-open" data-testid="threads-back-to-parent" onclick={() => threads.selectThread(pid)}>Open parent</button>
+      <button type="button" class="btn small ghost so-open" data-testid="threads-back-to-parent" onclick={() => openParent(pid)}>Open parent</button>
     {/if}
   </div>
 {/if}

@@ -45,10 +45,16 @@ struct TestHost {
     prepared: Mutex<Vec<LaunchSpec>>,
     events: Mutex<Vec<Arc<RuntimeEvent>>>,
     notify: tokio::sync::Notify,
+    /// Teach delegation (the daemon host does; most tests keep prompts plain).
+    teaches: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait::async_trait]
 impl RuntimeHost for TestHost {
+    fn teaches_delegation(&self) -> bool {
+        self.teaches.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     async fn workspace(&self, id: &Id) -> Result<Workspace> {
         Ok(Workspace {
             id: id.clone(),
@@ -101,6 +107,7 @@ impl TestHost {
             prepared: Mutex::default(),
             events: Mutex::default(),
             notify: tokio::sync::Notify::new(),
+            teaches: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -1759,6 +1766,87 @@ async fn linked_threads_open_message_and_read_within_their_group() {
 /// get the message as typed (no "Opened by" frame), the parent's timeline
 /// names them and notes each finished turn — and with "answer to me only"
 /// the parent's AGENT is not woken (a person asked, a person reads).
+/// A subagent's QUESTION wakes the agent that delegated it, which answers it
+/// with `otto.thread_answer`; its APPROVAL never wakes that agent (the person
+/// answers it in the parent's dock).
+#[tokio::test]
+async fn a_subagents_question_goes_to_the_parent_agent_and_its_approval_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let lead = create(&rt, cwd).await;
+    let mut asks = worker_req("asks", Some("question form"));
+    asks.provider = RuntimeProvider::Codex;
+    let kid = rt.open_peer(&lead.id, asks).await.unwrap();
+    let woke = host
+        .wait(|e| {
+            e.session_id == lead.id
+                && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+                    if matches!(&turn_item.kind, TurnItemKind::UserMessage { text, .. }
+                        if text.starts_with("[Question from subagent \"asks\"")))
+        })
+        .await;
+    let RuntimeEventBody::TurnItemUpdated { turn_item } = &woke.body else {
+        unreachable!()
+    };
+    let TurnItemKind::UserMessage { text, .. } = &turn_item.kind else {
+        unreachable!()
+    };
+    assert!(text.contains("Which approach should I use?"), "{text}");
+    let request = text
+        .split("request_id ")
+        .nth(1)
+        .and_then(|s| s.split(')').next())
+        .unwrap()
+        .to_string();
+    // Only the thread that delegated it answers.
+    let other = create(&rt, cwd).await;
+    assert!(rt
+        .answer_child(&other.id, &kid.id, &request, Vec::new())
+        .await
+        .is_err());
+    use otto_core::agent_runtime::QuestionAnswer;
+    rt.answer_child(
+        &lead.id,
+        &kid.id,
+        &request,
+        vec![
+            QuestionAnswer::Single {
+                question_id: "strategy_native".into(),
+                value: "Careful".into(),
+            },
+            QuestionAnswer::Text {
+                question_id: "note_native".into(),
+                text: "keep it small".into(),
+            },
+        ],
+    )
+    .await
+    .unwrap();
+    let answered = rt.latest_reply(&kid.id, WAIT).await.unwrap();
+    assert!(
+        answered.text.contains("question answers"),
+        "{}",
+        answered.text
+    );
+
+    // An approval is the person's: the lead's agent hears nothing of it.
+    let mut needs = worker_req("needs approval", Some("ask"));
+    needs.provider = RuntimeProvider::Gemini;
+    let gated = rt.open_peer(&lead.id, needs).await.unwrap();
+    host.wait(|e| {
+        e.session_id == gated.id
+            && matches!(&e.body, RuntimeEventBody::RuntimeRequestUpdated { .. })
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(user_texts(&host)
+        .iter()
+        .all(|t| !t.starts_with("[Question from subagent \"needs approval\"")));
+}
+
 /// "Delegate to…" by default: the subagent gets the task under its header
 /// with the conversation so far, and its answer wakes the thread's agent.
 #[tokio::test]
@@ -3631,8 +3719,8 @@ async fn council_seats_form_one_read_only_group_and_the_judge_reads_every_answer
         }
     }
     // Two seats of one provider differ by number; model / effort when picked.
-    assert_eq!(seats[1].title, "which cache? · Seat 2 · Gemini");
-    assert_eq!(seats[2].title, "which cache? · Seat 3 · Codex Low");
+    assert_eq!(seats[1].title, "which cache? · 2 · Gemini");
+    assert_eq!(seats[2].title, "which cache? · 3 · Codex Low");
     let c3 = seats[2].council().unwrap();
     assert_eq!(
         (c3.provider.as_deref(), c3.model, c3.effort.as_deref()),
@@ -3661,7 +3749,7 @@ async fn council_seats_form_one_read_only_group_and_the_judge_reads_every_answer
         (council.id.clone(), 0, CouncilRole::Synthesis)
     );
     assert!(judge.meta_flag("read_only"));
-    assert_eq!(judge.title, "which cache? · synthesis");
+    assert_eq!(judge.title, "which cache? · compared");
     let verdict = rt.latest_reply(&judge.id, WAIT).await.unwrap();
     assert!(
         !verdict.text.contains("Subagent task from thread"),
@@ -3671,8 +3759,8 @@ async fn council_seats_form_one_read_only_group_and_the_judge_reads_every_answer
     for want in [
         "## The question",
         "which cache?",
-        "## Seat 1 — gemini",
-        "## Seat 3 — codex",
+        "## Answer 1 — gemini",
+        "## Answer 3 — codex",
         "disagree",
     ] {
         assert!(verdict.text.contains(want), "{want}: {}", verdict.text);
@@ -3845,11 +3933,11 @@ async fn the_judge_reads_each_seat_s_latest_exchange() {
         .synthesize_council(&seats[0].id, gemini_judge())
         .await
         .unwrap();
-    assert_eq!(judge.title, "which cache? · synthesis");
+    assert_eq!(judge.title, "which cache? · compared");
     let verdict = rt.latest_reply(&judge.id, WAIT).await.unwrap();
     for want in [
-        "## Seat 1 — gemini\n\nAsked: which cache?",
-        "## Seat 2 — gemini\n\nAsked: only you",
+        "## Answer 1 — gemini\n\nAsked: which cache?",
+        "## Answer 2 — gemini\n\nAsked: only you",
     ] {
         assert!(verdict.text.contains(want), "{want}: {}", verdict.text);
     }
@@ -4998,6 +5086,52 @@ fn handoffs(host: &TestHost) -> Vec<otto_core::agent_runtime::ContextHandoff> {
             _ => None,
         })
         .collect()
+}
+
+/// A provider switch keeps the thread's subagents linked, and the new
+/// provider's first turn carries the delegation rules again.
+#[tokio::test]
+async fn after_a_provider_switch_subagents_stay_linked_and_the_rules_are_sent_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    host.teaches
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Gemini).await;
+    let kid = rt
+        .open_peer(&s.id, worker_req("worker", Some("look")))
+        .await
+        .unwrap();
+    rt.latest_reply(&kid.id, WAIT).await.unwrap();
+    // The subagent's reply wakes this thread: let that turn end.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    rt.latest_reply(&s.id, WAIT).await.unwrap();
+    // Gemini → Codex: the first Codex turn carries the rules…
+    let t = rt
+        .prompt_with(&s.id, &switch_to("rules?", "codex"))
+        .await
+        .unwrap();
+    host.wait(|e| e.session_id == s.id && terminal(e).is_some() && matches!(&e.body, RuntimeEventBody::TurnTerminal { turn_id, .. } if turn_id == &t.turn_id)).await;
+    assert!(
+        answer_of(&host, &t.turn_id).contains("rules: yes"),
+        "{}",
+        answer_of(&host, &t.turn_id)
+    );
+    // …a later one does not.
+    let t2 = rt.prompt(&s.id, "rules?").await.unwrap();
+    host.wait(|e| matches!(&e.body, RuntimeEventBody::TurnTerminal { turn_id, .. } if turn_id == &t2.turn_id)).await;
+    assert!(answer_of(&host, &t2.turn_id).contains("rules: no"));
+    // The subagent is still this thread's.
+    let after = rt.get(&kid.id).await.unwrap();
+    assert_eq!(after.child_of().map(|o| o.id), Some(s.id.clone()));
+    assert!(rt
+        .peers(&s.id)
+        .await
+        .unwrap()
+        .iter()
+        .any(|p| p.id == kid.id));
 }
 
 #[tokio::test]

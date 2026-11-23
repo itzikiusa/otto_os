@@ -2,16 +2,22 @@
   A subagent opened as a tab in the right panel while its parent stays put
   (T3 Code's SideThreadPane, MIT, Copyright (c) 2026 T3 Tools Inc.): the
   "Subagent of …" line, its whole thread (steerable — it has a composer),
-  "Open in main view", and the one per-device setting that flips where a
-  click opens subagents.
+  and "Open in main view". Where a click opens a subagent is the per-device
+  pref Settings ▸ Threads writes (threadsChrome.subagentsIn). Having it here
+  counts as looking at it (thread_seen_at, as the sidebar reads it).
 -->
 <script lang="ts">
   import { threads } from '../threadsStore.svelte';
-  import { threadsChrome } from '../threadsChrome.svelte';
+  import { threadMeta } from '../threadMeta.svelte';
   import RuntimeSubagentOf from './RuntimeSubagentOf.svelte';
   import RuntimeThread from './RuntimeThread.svelte';
 
   let { id }: { id: string } = $props();
+  // In front of the person: seen now, and again when a turn ends in view.
+  $effect(() => {
+    void threadMeta.endedAt(id);
+    threadMeta.markSeen(id);
+  });
 </script>
 
 <div class="sp" data-testid="runtime-subagent-pane" data-thread={id}>
@@ -20,15 +26,6 @@
     {#key id}<RuntimeThread sessionId={id} focused={false} compact />{/key}
   </div>
   <div class="sp-foot">
-    <label class="sp-pref">
-      <input
-        type="checkbox"
-        checked={threadsChrome.subagentsIn === 'main'}
-        data-testid="runtime-subagents-in-main"
-        onchange={(e) => threadsChrome.setSubagentsIn(e.currentTarget.checked ? 'main' : 'panel')}
-      />
-      Open subagents in the main view
-    </label>
     <button type="button" class="btn small ghost" data-testid="runtime-subagent-main" onclick={() => threads.selectThread(id)}>Open in main view</button>
   </div>
 </div>
@@ -49,18 +46,12 @@
   .sp-foot {
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     gap: 8px;
     padding: 4px 12px;
     border-block-start: 1px solid var(--border);
     color: var(--text-dim);
     font-size: var(--fs-s);
-  }
-  .sp-pref {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    flex: 1;
-    min-inline-size: 0;
   }
   @media (pointer: coarse) {
     .sp-foot {

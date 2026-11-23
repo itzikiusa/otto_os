@@ -81,7 +81,11 @@ export function councilTitle(seat1Title: string): string {
   const at = seat1Title.lastIndexOf(' · Seat ');
   if (at > 0) return seat1Title.slice(0, at);
   const dot = seat1Title.lastIndexOf(' · ');
-  return dot > 0 ? seat1Title.slice(0, dot) : seat1Title;
+  if (dot <= 0) return seat1Title;
+  // "<title> · 1 · <who>" (today's), "<title> · <who>" (before numbers).
+  const head = seat1Title.slice(0, dot);
+  const m = / · (\d+)$/.exec(head);
+  return m ? head.slice(0, m.index) : head;
 }
 
 /** The council every one of `paneIds` belongs to (null when any pane is
@@ -245,7 +249,7 @@ export function councilErrorText(e: unknown): string {
   if (seat) return `Model ${seat[1]} (${seat[2]}): ${sentence(seat[3])}`;
   if (/^no seat has answered/i.test(raw)) return 'No model has answered yet, so there is nothing to compare.';
   const working = /^(seat \d+|the last synthesis) is still working/i.exec(raw);
-  if (working) return `${cap(working[1])} is still working. Wait for it or stop it, then synthesize.`;
+  if (working) return `${/^seat/i.test(working[1]) ? `Model ${working[1].slice(5)}` : 'The last comparison'} is still working. Wait for it or stop it, then compare.`;
   if (/^seat 1 is closed/i.test(raw)) return 'The first compared thread is closed. Reopen it, then compare.';
   return sentence(raw);
 }

@@ -138,7 +138,7 @@ test('the add-a-thread slot: needs you, then working, then recent; never shown o
 test('council route errors read as sentences, never "conflict:"', () => {
   const err = (message: string) => ({ status: 409, message });
   assert.equal(ps.councilErrorText(err('conflict: no seat has answered yet — nothing to synthesize')), 'No model has answered yet, so there is nothing to compare.');
-  assert.equal(ps.councilErrorText(err('conflict: seat 2 is still working — wait for it or stop it, then synthesize')), 'Seat 2 is still working. Wait for it or stop it, then synthesize.');
+  assert.equal(ps.councilErrorText(err('conflict: seat 2 is still working — wait for it or stop it, then synthesize')), 'Model 2 is still working. Wait for it or stop it, then compare.');
   assert.equal(ps.councilErrorText(err('conflict: seat 1 is closed — reopen it, then synthesize')), 'The first compared thread is closed. Reopen it, then compare.');
   assert.equal(ps.councilErrorText(err('conflict: seat 2 (codex): busy')), 'Model 2 (codex): Busy.');
   assert.ok(!/conflict/i.test(ps.councilErrorText(err('conflict: the group is full'))));

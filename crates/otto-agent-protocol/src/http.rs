@@ -149,6 +149,10 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
             post(message_peer::<S>),
         )
         .route(
+            "/runtime-sessions/{id}/peers/{peer}/answer",
+            post(answer_peer::<S>),
+        )
+        .route(
             "/runtime-sessions/{id}/peers/{peer}/reply",
             get(peer_reply::<S>),
         )
@@ -293,6 +297,29 @@ async fn message_peer<S: RuntimeCtx>(
         .message_peer_by(&id, &peer, &req.text, ctx.is_human(&auth))
         .await?;
     Ok((StatusCode::ACCEPTED, Json(r)))
+}
+
+/// `POST …/peers/{peer}/answer`: the question its subagent asks.
+#[derive(Deserialize)]
+struct PeerAnswerReq {
+    request_id: String,
+    answers: Vec<otto_core::agent_runtime::QuestionAnswer>,
+}
+
+/// POST /runtime-sessions/{id}/peers/{peer}/answer — `{id}` (its person or
+/// its own agent) answers a question its subagent `{peer}` asks.
+async fn answer_peer<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path((id, peer)): Path<(Id, Id)>,
+    Json(req): Json<PeerAnswerReq>,
+) -> ApiResult<StatusCode> {
+    as_thread(&ctx, &user, &auth, &id).await?;
+    ctx.agent_runtime()
+        .answer_child(&id, &peer, &req.request_id, req.answers)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// POST /runtime-sessions/{id}/peers/{peer}/close — close a linked thread.

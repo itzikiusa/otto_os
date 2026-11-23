@@ -153,7 +153,7 @@ test('a child’s reply woken into its parent reads "Reply from <thread>" (the d
   // Unchanged shapes keep their exact result (no `reply` key).
   assert.deepEqual(
     messageAttribution('[Opened by thread "Plan" (claude, id 01X). Answer it with the otto_thread_message tool (session_id 01X); see every linked thread with otto_thread_list.]\n\nGo'),
-    { from: 'Plan', body: 'Go' },
+    { from: 'Plan', body: 'Go', task: true },
   );
   assert.equal(messageAttribution('[Reply from thread "x"] not a header'), null);
   // Today's daemon text (runtime/children.rs `wake_text_how`, runtime/delegation.rs `task_header`).
@@ -163,7 +163,7 @@ test('a child’s reply woken into its parent reads "Reply from <thread>" (the d
   );
   assert.deepEqual(
     messageAttribution('[Subagent task from thread "Plan" (claude, id 01X). Do the work yourself; start no subagents unless this task says to. When your turn ends your reply goes back to that thread on its own — do not message it.]\n\nGo'),
-    { from: 'Plan', body: 'Go' },
+    { from: 'Plan', body: 'Go', task: true },
   );
   // The queue bar reads the same way.
   assert.equal(queuedLabel(wake), 'Queued reply from Fix the build: All green [3 tests].');

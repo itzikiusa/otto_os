@@ -29,6 +29,7 @@
   import RuntimeAgentRow from './RuntimeAgentRow.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
   import { runtimeViews } from './runtimeView.svelte';
+  import { threadMeta } from '../threadMeta.svelte';
 
   interface Props {
     id: string;
@@ -62,8 +63,6 @@
   const sub = $derived([model, hint.effort ? formatEffortShort(hint.effort) : null].filter(Boolean).join(' · ') || null);
   const name = $derived(s?.title ?? hint.title ?? (provider ? harnessLabel(provider) : 'Thread'));
   const answer = $derived(answerOf(p));
-  /** Waiting on a person: its primary action reads "Answer" (it opens like any other). */
-  const asks = $derived(st.tone === 'needs-you' && !gone);
   const live = $derived(st.tone === 'working' || st.tone === 'starting' || st.tone === 'background' || st.tone === 'needs-you');
   /** Asked by a person: its answer is the person's to pass on (the agent path wakes the parent itself). */
   const parent = $derived(childOf(s));
@@ -115,10 +114,9 @@
     {elapsed}
     result={line}
     expanded={open}
-    ontoggle={answer ? () => (open = !open) : undefined}
+    ontoggle={answer ? () => { open = !open; if (open) threadMeta.markSeen(id); } : undefined}
     onstop={live && !gone && s?.status !== 'closed' && !stopping ? () => void stop() : undefined}
-    onopen={gone ? undefined : (e) => openChildThread(id, mainViewKey(e))}
-    openLabel={asks ? 'Answer' : 'Open'}
+    onrow={gone ? undefined : (e) => openChildThread(id, mainViewKey(e))}
     testid="runtime-child-row-{id}"
   />
   {#if parentRow && parentRow.status !== 'closed' && answer && !live && !gone}
@@ -150,15 +148,11 @@
   .rc-hand {
     align-self: flex-start;
   }
+  /* The settled answer reads as prose under its row, not as a second box. */
   .rc-answer {
-    max-block-size: 320px;
-    overflow-y: auto;
-    padding: 8px 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface-2);
+    padding-block: 2px 10px;
+    padding-inline: 36px 8px;
     color: var(--text);
-    font-size: var(--fs-s);
     overflow-wrap: anywhere;
   }
 </style>

@@ -168,10 +168,13 @@
   .sg-list {
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    padding: 6px 8px;
+    padding-inline: 4px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-m);
+    border-radius: var(--radius-l);
+  }
+  /* Rows separated by hairlines inside the one container. */
+  .sg-list > :global(* + *) {
+    border-block-start: 1px solid var(--border);
   }
   @media (pointer: coarse) {
     .sg-head {

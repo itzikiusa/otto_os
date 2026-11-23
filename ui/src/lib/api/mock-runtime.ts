@@ -126,7 +126,7 @@ function judgePrompt(seats: RuntimeSession[]): string {
     const hit = (items.get(sid) ?? []).filter((i) => i.type === type).pop() as { text?: string } | undefined;
     return hit?.text ?? '';
   };
-  const parts = seats.map((t) => `## Seat ${councilOf(t)?.seat} — ${t.provider}\n\nAsked: ${last(t.id, 'user_message')}\n\n${last(t.id, 'assistant_message') || '(no answer)'}`);
+  const parts = seats.map((t) => `## Answer ${councilOf(t)?.seat} — ${t.provider}\n\nAsked: ${last(t.id, 'user_message')}\n\n${last(t.id, 'assistant_message') || '(no answer)'}`);
   return `You are the judge of a council: ${seats.length} agents were asked the same question, and their latest answers are below.\n\n${parts.join('\n\n')}\n`;
 }
 
@@ -146,11 +146,11 @@ const councilRoutes: MockRoute[] = [
       const id = `cnc_mock${n + 1}`;
       const out: RuntimeSession[] = [];
       seats.forEach((x, i) => {
-        // council.rs `SeatPick::title`: "<title> · Seat N · Claude [model] [Effort]".
+        // council.rs `SeatPick::title`: "<title> · N · Claude [model] [Effort]".
         const who = [String(x.provider).charAt(0).toUpperCase() + String(x.provider).slice(1), x.model,
           x.effort ? String(x.effort).charAt(0).toUpperCase() + String(x.effort).slice(1) : null].filter(Boolean).join(' ');
         out.push(addThread(m[1], {
-          provider: x.provider, model: x.model, title: `${b?.title ?? 'Council'} · Seat ${i + 1} · ${who}`, cwd: b?.cwd ?? '/Users/dev/otto',
+          provider: x.provider, model: x.model, title: `${b?.title ?? 'Council'} · ${i + 1} · ${who}`, cwd: b?.cwd ?? '/Users/dev/otto',
           parent_id: out[0]?.id ?? null,
           meta: { council: { id, seat: i + 1, role: 'seat', provider: x.provider, ...(x.model ? { model: x.model } : {}), ...(x.effort ? { effort: x.effort } : {}) }, read_only: true },
         }, String(b?.prompt ?? ''), `Mock ${x.provider} (seat ${i + 1}): my answer.`));
@@ -169,9 +169,9 @@ const councilRoutes: MockRoute[] = [
       const busy = members.find((t) => t.status === 'working');
       if (busy) return { status: 409, json: { code: 'conflict', message: `conflict: seat ${councilOf(busy)?.seat} is still working` } };
       const t1 = find(root)?.title ?? 'Council';
-      const base = / · Seat \d+ · /.test(t1) ? t1.replace(/ · Seat \d+ · .*$/, '') : t1.replace(/ · [^·]*$/, '');
+      const base = / · (Seat )?\d+ · /.test(t1) ? t1.replace(/ · (Seat )?\d+ · .*$/, '') : t1.replace(/ · [^·]*$/, '');
       const judge = addThread(me.workspace_id, {
-        provider: b?.provider ?? 'claude', title: `${base} · synthesis`, parent_id: root,
+        provider: b?.provider ?? 'claude', title: `${base} · compared`, parent_id: root,
         meta: { council: { id: c.id, seat: 0, role: 'synthesis', provider: b?.provider ?? 'claude' }, read_only: true },
       }, judgePrompt(councilSeats(me.id)), 'Mock synthesis: they agree on the approach.');
       return { status: 201, json: judge };
@@ -222,7 +222,7 @@ Object.assign(log(), {
         access_mode: 'approval-required', created_by: 'usr_root', created_at: now(), last_active_at: now(), last_sequence: 0,
         parent_id: parent, meta: { child_of: { id: parent, by: 'agent' } }, last_turn_status: k.working ? null : 'completed',
       } as unknown as RuntimeSession);
-      item(k.id, { type: 'user_message', text: `[Subagent task from thread "lead" (claude, id ${parent}). Do the work yourself.]\n\n${k.title}` });
+      item(k.id, { type: 'user_message', text: `[Subagent task from thread "${find(parent)?.title ?? 'Thread'}" (claude, id ${parent}). Do the work yourself.]\n\n${k.title}` });
       if (k.answer) item(k.id, { type: 'assistant_message', message_id: `msg_${k.id}`, text: k.answer, streaming: false });
       const it = item(parent, {
         type: 'dynamic_tool', tool_name: 'mcp__otto__otto_thread_open', input: { provider: k.provider, title: k.title, prompt: k.title },
@@ -230,6 +230,13 @@ Object.assign(log(), {
       });
       appLive.dispatch({ type: 'agent_runtime_event', event: { session_id: parent, sequence: seqs.get(parent) ?? 0, ts: now(), type: 'turn_item.updated', turn_item: it } });
     }
+  },
+  /** Subagent `sid` asks a question its parent's agent did not answer. */
+  question: (sid: string, prompt: string): void => {
+    const t = find(sid);
+    if (t) t.status = 'awaiting_permission';
+    requests.set(sid, [{ id: `req_q_${sid}`, turn_id: `trn_${sid}`, kind: 'question', status: 'pending', response_capability: { type: 'live' }, created_at: now(), resolved_at: null,
+      questions: [{ id: 'db', header: 'Database', prompt, kind: 'single', required: true, allow_free_text: false, options: [{ value: 'pg', label: 'Postgres' }, { value: 'my', label: 'MySQL' }] }] } as unknown as RuntimeRequest]);
   },
   /** Subagent `sid` asks the person to approve running `command`. */
   approval: (sid: string, command: string): void => {

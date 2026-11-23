@@ -50,7 +50,9 @@ test('needs you, then failed, then done, then most recent; working folds away', 
 });
 
 test('subagents: their own words and the roll-up the parent shows', async () => {
-  const { subagentWord, subagentRollup } = await import('../src/modules/threads/threadInbox.ts');
+  const { subagentWord } = await import('../src/modules/threads/threadInbox.ts');
+  const { childRollup } = await import('../src/modules/threads/runtime/childThreads.ts');
+  const subagentRollup = (subs: { title: string; key: string }[]) => childRollup(subs.map((s) => ({ title: s.title, word: subagentWord(s.key) })));
   assert.deepEqual(['needs-you', 'working', 'running', 'failed', 'stopped', 'idle'].map(subagentWord), ['Needs you', 'Working', 'Working', 'Failed', 'Stopped', 'Done']);
   assert.deepEqual(
     subagentRollup([{ title: 'tests', key: 'working' }, { title: 'api', key: 'needs-you' }, { title: 'docs', key: 'failed' }, { title: 'lint', key: 'idle' }]),

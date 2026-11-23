@@ -748,6 +748,21 @@ fn thread_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
                 let id = arg_str(args, "session_id")?;
                 SelfCall::get(format!("/api/v1/runtime-sessions/{}/peers", seg(&id)))
             }
+            "thread_answer" => {
+                let id = arg_str(args, "session_id")?;
+                let peer = arg_str(args, "peer_session_id")?;
+                SelfCall::post(
+                    format!(
+                        "/api/v1/runtime-sessions/{}/peers/{}/answer",
+                        seg(&id),
+                        seg(&peer)
+                    ),
+                    json!({
+                        "request_id": arg_str(args, "request_id")?,
+                        "answers": args.get("answers").cloned().unwrap_or_else(|| json!([])),
+                    }),
+                )
+            }
             "thread_capabilities" => {
                 let id = arg_str(args, "session_id")?;
                 SelfCall::get(format!(

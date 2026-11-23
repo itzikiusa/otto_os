@@ -15,7 +15,7 @@
   import type { RuntimeProjection } from './projection';
   import RuntimeApprovalRow from './RuntimeApprovalRow.svelte';
   import RuntimeChildGroup from './RuntimeChildGroup.svelte';
-  import { turnSubagents } from './childThreads';
+  import { memoTurnSubagents } from './childThreads';
   import RuntimeAttachments from './RuntimeAttachments.svelte';
   import RuntimeSubagentCard from './RuntimeSubagentCard.svelte';
   import RuntimeThreadCallRow from './RuntimeThreadCallRow.svelte';
@@ -160,8 +160,10 @@
   const pendingIds = $derived(approvals.size === 0 ? EMPTY_PENDING_IDS : new Set(approvals.keys()));
   const requests = $derived(rawRequests.length === 0 ? EMPTY_REQUESTS : new Map(rawRequests.map((r) => [r.id, r] as const)));
   const children = $derived(subagentChildren(projection.items));
-  /** Each turn's subagents as one row, at its first one (childThreads.ts). */
-  const subagents = $derived(turnSubagents(projection.items));
+  /** Each turn's subagents as one row, at its first one (childThreads.ts);
+   *  recomputed only when a subagent item changed, not per stream event. */
+  const subagentsMemo = memoTurnSubagents();
+  const subagents = $derived(subagentsMemo.get(projection.items));
 
   function handleBadgeClick(b: ParsedContextBadge): void {
     if (!b.path) return;
@@ -243,7 +245,7 @@
     {@const folded = foldable && !openedFrom.has(row.item.id)}
     <div class="rt-from" class:reply={a.reply} data-testid="rt-from" data-reply={a.reply ? 'true' : undefined} data-rt-msg={row.item.id}>
       <span class="rt-from-h">
-        <Icon name="send" size={12} /> {a.reply ? 'Reply from' : 'From'} {a.from}
+        <Icon name="send" size={12} /> {a.reply ? 'Reply from' : a.task ? 'Task from' : 'From'} {a.from}
         {#if peerClock && peerIso}
           <time class="rt-msg-time" datetime={peerIso} title={formatMessageTooltip(peerIso)}>{peerClock}</time>
         {/if}

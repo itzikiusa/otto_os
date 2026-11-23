@@ -444,9 +444,12 @@ function withDays(rows: TimelineRow[], _items: readonly TurnItem[], now: Date = 
  *  subagent's task (`[Subagent task from thread "Fix CI" (…). …]`). The header is the whole
  *  first line, so a `]` in a title does not end it early. Null for a message
  *  the user typed. */
-export function messageAttribution(text: string): { from: string; body: string; reply?: true } | null {
+export function messageAttribution(text: string): { from: string; body: string; reply?: true; task?: true } | null {
   const thread = /^\[(Message from thread|Opened by thread|Subagent task from thread|Reply from thread|Reply from subagent) "(.*?)" \([^\n]*\]\s*\n\n?([\s\S]*)$/.exec(text);
-  if (thread) return { from: thread[2] || 'a linked thread', body: thread[3], ...(thread[1].startsWith('Reply from') ? { reply: true as const } : {}) };
+  if (thread) {
+    const kind = thread[1].startsWith('Reply from') ? { reply: true as const } : thread[1] === 'Message from thread' ? {} : { task: true as const };
+    return { from: thread[2] || 'the parent thread', body: thread[3], ...kind };
+  }
   const feed = /^\[Message from ([^\]]+?)(?: \([^()\]]*\))?\]: ([\s\S]*)$/.exec(text);
   return feed ? { from: feed[1], body: feed[2] } : null;
 }

@@ -8,6 +8,7 @@
 // (unit/threadsChildren.test.ts).
 import type { ChildOf, RuntimeSession, TurnItem } from '../../../lib/api/types';
 import { threadCall } from './agentRows';
+import type { AgentTask, AgentTaskStatus } from './agentTasks';
 import type { RuntimeProjection } from './projection';
 import { latestTurn, workLabel } from './timeline';
 
@@ -195,6 +196,36 @@ export function turnSubagents(items: readonly TurnItem[]): { groups: Map<string,
   return { groups, skip };
 }
 
+/** An item `turnSubagents` reads: a subagent card, a subagent notice, an
+ *  agent's thread_open call. Anything else (a streaming reply, a command)
+ *  never changes the subagent rows. */
+export function isSubagentItem(i: TurnItem): boolean {
+  if (i.parent_item_id) return false;
+  if (i.type === 'subagent') return true;
+  if (i.type === 'system_notice') return threadNoticeOf(i.message) !== null;
+  return i.type === 'dynamic_tool' && /otto[._]thread_open$/.test(i.tool_name);
+}
+
+/** [`turnSubagents`] that runs again only when a subagent item changed (the
+ *  same item objects in, the same result out): a long answer streaming in
+ *  the timeline re-renders no subagent row. `runs` counts the real runs. */
+export function memoTurnSubagents(): { get: (items: readonly TurnItem[]) => ReturnType<typeof turnSubagents>; runs: () => number } {
+  let last: TurnItem[] = [];
+  let result = turnSubagents([]);
+  let runs = 0;
+  return {
+    get(items) {
+      const rel = items.filter(isSubagentItem);
+      if (rel.length === last.length && rel.every((x, k) => x === last[k])) return result;
+      last = rel;
+      runs += 1;
+      result = turnSubagents(rel);
+      return result;
+    },
+    runs: () => runs,
+  };
+}
+
 /** A provider subagent's state in the same words as a thread's. */
 export function nativeTone(item: SubagentItem): ChildTone {
   if (item.status === 'running' || item.status === 'pending' || item.status === 'waiting') return 'working';
@@ -220,48 +251,126 @@ export function subagentTally(tones: readonly ChildTone[]): { text: string; tone
   return { text, tone };
 }
 
-/** The roll-up a parent's row shows for its subagents (the sidebar, a
- *  phone, the dock): how many work, need the person, failed — from the rows
- *  alone (`status` is live on every row update; no child projection). */
-export function childRollup(rows: readonly RuntimeSession[], parentId: string): { working: number; needs_you: number; failed: number } {
-  const out = { working: 0, needs_you: 0, failed: 0 };
-  for (const r of rows) {
-    if (childOf(r)?.id !== parentId || r.status === 'closed') continue;
-    if (r.status === 'awaiting_permission') out.needs_you += 1;
-    else if (r.status === 'working' || r.status === 'starting') out.working += 1;
-    else if (r.last_turn_status === 'failed') out.failed += 1;
-  }
-  return out;
-}
+// ---- Thread details' "Subagents" section and the sidebar's roll-up ----
+// Everything working under a thread — its subagents (a turn's own, threads
+// opened from it) and the terminal threads it delegated to — in ONE set of
+// status words, plus the thread it works under when it is itself a subagent.
+// Commands and timers are not subagents (Background tasks). The one source
+// the details card and the sidebar read (unit/threadsSubagents.test.ts).
 
-/** One row of thread details' "Subagents" section. */
+export type SubagentWord = 'Working' | 'Needs you' | 'Done' | 'Failed' | 'Stopped';
+
 export interface SubagentRow {
   id: string;
   title: string;
-  provider: string;
-  /** Working · Needs you · Done · Failed · Stopped (the parent's row: null). */
-  status: string | null;
-  tone: 'live' | 'ask' | 'done' | 'failed' | 'off';
-  /** "↑ parent" row: this thread was opened from it. */
-  parent?: true;
+  /** Provider slug for the glyph (null for a turn's own subagent). */
+  provider: string | null;
+  word: SubagentWord;
+  startedAt: string | null;
+  endedAt: string | null;
+  /** The subagent's own thread, when it has one (opens it). */
+  threadId: string | null;
+  /** Its task row (per-row Stop), when it has one. */
+  task: AgentTask | null;
 }
 
-/** The "Subagents" section of `threadId`'s details (T3 Code's Lineage,
- *  ThreadRelationshipsControl.tsx): its parent first, then its subagents
- *  still at work (oldest first), then the "Previous" ones (newest first).
- *  From the rows alone — no projection per subagent. */
-export function subagentSection(rows: readonly RuntimeSession[], threadId: string): { parent: SubagentRow | null; running: SubagentRow[]; previous: SubagentRow[] } {
-  const me = rows.find((r) => r.id === threadId);
-  const ofId = childOf(me)?.id;
-  const p = ofId ? rows.find((r) => r.id === ofId) : undefined;
-  const parent: SubagentRow | null = p ? { id: p.id, title: p.title, provider: p.provider, status: null, tone: 'off', parent: true } : null;
+export interface SubagentSection {
+  /** The thread this one works under. */
+  parent: { id: string; title: string } | null;
+  running: SubagentRow[];
+  /** Finished, newest first (folded under "Previous"). */
+  previous: SubagentRow[];
+}
+
+/** A delegated terminal thread (or any thread known only by its status). */
+export interface SubagentThread {
+  id: string;
+  title: string;
+  provider: string;
+  status: string;
+}
+
+const WORD: Record<AgentTaskStatus, SubagentWord> = {
+  running: 'Working',
+  'needs-you': 'Needs you',
+  done: 'Done',
+  failed: 'Failed',
+  stopped: 'Stopped',
+};
+
+/** A thread's raw status (runtime or terminal) in the subagent words. */
+export function subagentWord(status: string): SubagentWord {
+  switch (status) {
+    case 'working':
+    case 'starting':
+    case 'running':
+      return 'Working';
+    case 'awaiting_permission':
+    case 'needs_input':
+      return 'Needs you';
+    case 'failed':
+      return 'Failed';
+    case 'closed':
+    case 'exited':
+      return 'Stopped';
+    default:
+      return 'Done';
+  }
+}
+
+const isSubagent = (t: AgentTask): boolean => t.kind === 'agent' || t.childSessionId !== null;
+const live = (w: SubagentWord): boolean => w === 'Working' || w === 'Needs you';
+
+export function subagentSection(
+  tasks: { running: readonly AgentTask[]; finished: readonly AgentTask[] },
+  more: { parent?: { id: string; title: string } | null; delegated?: readonly SubagentThread[]; providerOf?: (threadId: string) => string | null },
+): SubagentSection {
+  const row = (t: AgentTask): SubagentRow => ({
+    id: t.id,
+    title: t.label,
+    provider: t.childSessionId ? (more.providerOf?.(t.childSessionId) ?? null) : null,
+    word: WORD[t.status],
+    startedAt: t.startedAt,
+    endedAt: t.endedAt,
+    threadId: t.childSessionId,
+    task: t,
+  });
+  const seen = new Set<string>();
   const running: SubagentRow[] = [];
   const previous: SubagentRow[] = [];
-  for (const k of childrenOf(rows, threadId)) {
-    const st = childState(k, null);
-    const row: SubagentRow = { id: k.id, title: k.title, provider: k.provider, status: st.label, tone: rowTone(st.tone) };
-    (row.tone === 'live' || row.tone === 'ask' ? running : previous).push(row);
+  const add = (r: SubagentRow): void => {
+    const key = r.threadId ?? r.id;
+    if (seen.has(key)) return;
+    seen.add(key);
+    (live(r.word) ? running : previous).push(r);
+  };
+  for (const t of tasks.running) if (isSubagent(t)) add(row(t));
+  for (const t of tasks.finished) if (isSubagent(t)) add(row(t));
+  for (const d of more.delegated ?? []) {
+    add({ id: d.id, title: d.title, provider: d.provider, word: subagentWord(d.status), startedAt: null, endedAt: null, threadId: d.id, task: null });
   }
-  previous.reverse();
-  return { parent, running, previous };
+  return { parent: more.parent ?? null, running, previous };
+}
+
+/** A parent's subagents rolled up for its sidebar row (and a phone): how
+ *  many, how many work / need the person / failed, and the first one that
+ *  needs the person (its title names it). */
+export interface SubagentRollup {
+  total: number;
+  working: number;
+  needsYou: number;
+  failed: number;
+  needing: string | null;
+}
+
+export function childRollup(subs: readonly { title: string; word: SubagentWord }[]): SubagentRollup {
+  const r: SubagentRollup = { total: subs.length, working: 0, needsYou: 0, failed: 0, needing: null };
+  for (const s of subs) {
+    if (s.word === 'Needs you') {
+      r.needsYou++;
+      r.needing ??= s.title;
+    } else if (s.word === 'Working') r.working++;
+    else if (s.word === 'Failed') r.failed++;
+  }
+  return r;
 }

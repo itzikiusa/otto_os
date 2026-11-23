@@ -68,21 +68,21 @@ test('the waiting line counts subagents apart from commands', () => {
   assert.equal(live.isSubagentTask({ kind: 'command', childSessionId: null }), false);
 });
 
-test('the parent’s roll-up reads its subagents’ rows alone', () => {
-  const row = (id: string, status: string, of: string | null, last: string | null = null) =>
-    ({ id, status, last_turn_status: last, meta: of ? { child_of: { id: of, by: 'agent' } } : null }) as never;
-  const rows = [row('p', 'idle', null), row('a', 'working', 'p'), row('b', 'awaiting_permission', 'p'), row('c', 'idle', 'p', 'failed'), row('d', 'closed', 'p', 'failed'), row('e', 'working', 'x')];
-  assert.deepEqual(ct.childRollup(rows, 'p'), { working: 1, needs_you: 1, failed: 1 });
+test('a 2,000-token answer streaming in recomputes the subagent rows once, not per event', () => {
+  const items: TurnItem[] = [open('a', 't1', K1, 'codex'), notice('n', 't1', [K2])];
+  let before = 0;
+  const memo = ct.memoTurnSubagents();
+  let msg = { ...base, id: 'm', turn_id: 't1', status: 'running', type: 'assistant_message', message_id: 'm', text: '', streaming: true } as unknown as TurnItem;
+  for (let k = 0; k < 2000; k += 1) {
+    // One stream event: the reply's item is replaced with one more token.
+    msg = { ...(msg as object), text: `${(msg as { text: string }).text} tok` } as unknown as TurnItem;
+    const list = [...items, msg];
+    ct.turnSubagents(list);
+    before += 1;
+    memo.get(list);
+  }
+  assert.equal(before, 2000);
+  assert.equal(memo.runs(), 1, 'the subagent rows are built once while the answer streams');
+  memo.get([...items, open('b', 't1', K3, 'gemini')]);
+  assert.equal(memo.runs(), 2, 'a new subagent rebuilds them');
 });
-
-test('the details’ Subagents section: parent, working ones, then Previous', () => {
-  const at = (s: number) => new Date(Date.parse('2026-11-23T10:00:00Z') + s * 1000).toISOString();
-  const row = (id: string, status: string, of: string | null, created: number, last: string | null = null) =>
-    ({ id, title: id.toUpperCase(), provider: 'codex', status, created_at: at(created), last_turn_status: last, meta: of ? { child_of: { id: of, by: 'agent' } } : null }) as never;
-  const rows = [row('root', 'idle', null, 0), row('me', 'idle', 'root', 1), row('a', 'working', 'me', 2), row('b', 'idle', 'me', 3, 'completed'), row('c', 'awaiting_permission', 'me', 4), row('d', 'idle', 'me', 5, 'failed')];
-  const s = ct.subagentSection(rows, 'me');
-  assert.deepEqual(s.parent, { id: 'root', title: 'ROOT', provider: 'codex', status: null, tone: 'off', parent: true });
-  assert.deepEqual(s.running.map((r) => [r.id, r.status]), [['a', 'Working'], ['c', 'Needs you']]);
-  assert.deepEqual(s.previous.map((r) => [r.id, r.status]), [['d', 'Failed'], ['b', 'Done']]);
-});
-

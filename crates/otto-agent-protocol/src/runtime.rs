@@ -17,6 +17,7 @@
 mod admission;
 mod attention;
 mod auto_close;
+mod child_question;
 mod children;
 pub mod council;
 mod delegation;

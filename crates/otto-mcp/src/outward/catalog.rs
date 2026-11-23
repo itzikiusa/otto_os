@@ -32,6 +32,7 @@ pub const DEFAULT_ENABLED: &[&str] = &[
     // lands as a visible turn in the receiving thread.
     "thread_open",
     "thread_capabilities",
+    "thread_answer",
     "thread_list",
     "thread_message",
     "thread_read",
@@ -1661,7 +1662,7 @@ fn body_preview(args: &Value) -> String {
 /// function under the size ratchet): an agent in a Threads (structured)
 /// session opening, listing, messaging and reading its linked threads — then
 /// the main personal agent's team tools ([`team_tool_specs`]).
-fn thread_tool_specs() -> [Value; 9] {
+fn thread_tool_specs() -> [Value; 10] {
     let [team_list, team_create, team_delegate] = team_tool_specs();
     [
         json!({"name":"otto.thread_open","mutating":false,"category":"Sessions",
@@ -1674,6 +1675,11 @@ fn thread_tool_specs() -> [Value; 9] {
         json!({"name":"otto.thread_capabilities","mutating":false,"category":"Sessions",
             "description":"Providers/models/efforts for otto.thread_open.",
             "inputSchema":{"type":"object","properties":{"session_id":{"type":"string","description":"caller (auto)"}}}}),
+        json!({"name":"otto.thread_answer","mutating":false,"category":"Sessions",
+            "description":"Answer your subagent's question: answers [{type:single|multi|text, question_id, value|values|text}].",
+            "inputSchema":{"type":"object","required":["peer_session_id","request_id","answers"],"properties":{
+                "peer_session_id":{"type":"string"},"request_id":{"type":"string"},"answers":{"type":"array","items":{"type":"object"}},
+                "session_id":{"type":"string","description":"caller (auto)"}}}}),
         json!({"name":"otto.thread_list","mutating":false,"category":"Sessions",
             "description":"This thread's linked group: id, provider, title, status, is_self.",
             "inputSchema":{"type":"object","properties":{"session_id":{"type":"string","description":"caller (auto)"}}}}),

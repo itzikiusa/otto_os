@@ -27,9 +27,20 @@
     onbeside?: () => void;
     /** Given: a Stop icon button while it works. */
     onstop?: () => void;
+    /** Given: the whole row is the Open button (Enter; ⌘/Ctrl: the main
+     *  view — the event carries the modifier); `ontoggle` becomes a small
+     *  chevron at its end. */
+    onrow?: (e: MouseEvent | KeyboardEvent) => void;
     testid?: string;
   }
-  let { provider = null, name, sub = null, tone, status, elapsed = null, result = null, expanded = false, ontoggle, onopen, openLabel = 'Open', onbeside, onstop, testid }: Props = $props();
+  let { provider = null, name, sub = null, tone, status, elapsed = null, result = null, expanded = false, ontoggle, onopen, openLabel = 'Open', onbeside, onstop, onrow, testid }: Props = $props();
+
+  function rowKey(e: KeyboardEvent): void {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && onrow) {
+      e.preventDefault();
+      onrow(e);
+    }
+  }
 </script>
 
 {#snippet inner()}
@@ -44,7 +55,16 @@
 {/snippet}
 
 <div class="ar" data-tone={tone} data-testid={testid}>
-  {#if ontoggle}
+  {#if onrow}
+    <button type="button" class="ar-main" title="Open {name} (⌘-click: main view)" data-testid="runtime-item-open" onclick={onrow} onkeydown={rowKey}>
+      {@render inner()}
+    </button>
+    {#if ontoggle}
+      <button type="button" class="icon-btn ar-mini" aria-expanded={expanded} aria-label={expanded ? 'Hide the answer' : 'Show the answer'} title={expanded ? 'Hide the answer' : 'Show the answer'} data-testid="runtime-item-answer" onclick={ontoggle}>
+        <Icon name={expanded ? 'chevronDown' : 'chevronRight'} size={12} />
+      </button>
+    {/if}
+  {:else if ontoggle}
     <button type="button" class="ar-main" aria-expanded={expanded} onclick={ontoggle}>
       {@render inner()}
       <Icon name={expanded ? 'chevronDown' : 'chevronRight'} size={12} />
@@ -70,7 +90,7 @@
     gap: 4px;
     min-inline-size: 0;
     color: var(--text-dim);
-    font-size: var(--fs-s);
+    font-size: var(--fs-m);
   }
   .ar-main {
     flex: 1;
@@ -78,11 +98,11 @@
     align-items: center;
     gap: 8px;
     min-inline-size: 0;
-    min-block-size: 30px;
-    padding: 2px 6px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface);
+    min-block-size: 36px;
+    padding: 4px 6px;
+    border: 0;
+    border-radius: var(--radius-s);
+    background: transparent;
     color: inherit;
     font: inherit;
     text-align: start;
@@ -113,7 +133,7 @@
     align-items: center;
     gap: 4px;
     flex: none;
-    font-size: var(--fs-xs);
+    font-size: var(--fs-s);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
@@ -135,10 +155,23 @@
   .ar-result {
     flex: 1 1 0;
     min-inline-size: 0;
-    font-size: var(--fs-xs);
+    font-size: var(--fs-s);
   }
   .ar-open {
     flex: none;
+  }
+  .ar-mini {
+    flex: none;
+    opacity: 0.8;
+  }
+  @media (pointer: coarse) {
+    .ar-main {
+      min-block-size: 44px;
+    }
+    .ar :global(.icon-btn) {
+      min-inline-size: 44px;
+      min-block-size: 44px;
+    }
   }
   /* A narrow column: the result drops first, then the model. */
   @container (max-width: 420px) {

@@ -33,6 +33,9 @@ pub(super) fn on_status(inner: &Inner, st: &State, next: ProviderSessionStatus) 
     if was != now {
         let what = now.then(|| describe(st));
         signal(inner, &st.session, what.as_deref());
+        if now {
+            super::child_question::on_waiting(inner, st);
+        }
     }
 }
 

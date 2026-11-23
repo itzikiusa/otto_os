@@ -15,7 +15,6 @@
   import { sessionState } from '../../../lib/status';
   import { ws } from '../../../lib/stores/workspace.svelte';
   import type { RuntimeProviderOrSlug } from '../../../lib/api/types';
-  import { messagePanes } from '../threadRelay';
   import { threads } from '../threadsStore.svelte';
   import { answerItems, askEverySeat, continueWithAnswer, judgeChoices, seatNamer, stopSeats, synthesizeWith } from './councilStore.svelte';
   import { PANE_STATE_LABEL, stoppable, stripModel, synthGate, type StripChip } from './paneStrip';
@@ -150,11 +149,7 @@
         <button type="button" class="btn small" aria-haspopup="menu" data-testid="pane-strip-council-menu" onclick={councilMenu}>
           Compare <Icon name="chevronDown" size={12} />
         </button>
-      {:else if !council}
-        <button type="button" class="btn small ghost" data-testid="pane-strip-message" onclick={() => void messagePanes(paneIds)}>
-          <Icon name="send" size={12} />Message every pane…
-        </button>
-      {:else}
+      {:else if council}
         <button type="button" class="btn small ghost" data-testid="pane-strip-ask" onclick={() => anchorId && void askEverySeat(anchorId)}>
           <Icon name="send" size={12} />Ask every model…
         </button>
