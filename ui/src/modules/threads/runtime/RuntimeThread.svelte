@@ -35,6 +35,7 @@
   import RuntimeAskAgent from './RuntimeAskAgent.svelte';
   import { attentionItems, attentionPillText } from './attentionDock';
   import RuntimeAttentionDock from './RuntimeAttentionDock.svelte';
+  import RuntimeChildApprovals from './RuntimeChildApprovals.svelte';
   import RuntimeComposerActions from './RuntimeComposerActions.svelte';
   import RuntimeModelChip from './RuntimeModelChip.svelte';
   import RuntimeBannerStack from './RuntimeBannerStack.svelte';
@@ -537,6 +538,7 @@
         onjump={jumpTo}
       />
     {/if}
+    <RuntimeChildApprovals {sessionId} />
     {#if composerTopSlot}{@render composerTopSlot({ focusComposer })}{/if}
 
     <div class="rt-composer" style:border-color={planOn ? 'color-mix(in srgb, var(--warning) 42%, var(--border))' : undefined} bind:this={composerBoxEl}>

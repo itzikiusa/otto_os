@@ -67,3 +67,10 @@ test('the waiting line counts subagents apart from commands', () => {
   assert.deepEqual(f, { mode: 'waiting_bg', text: 'Waiting on 2 subagents', detail: 'Share link API, Share link docs' });
   assert.equal(live.isSubagentTask({ kind: 'command', childSessionId: null }), false);
 });
+
+test('the parent’s roll-up reads its subagents’ rows alone', () => {
+  const row = (id: string, status: string, of: string | null, last: string | null = null) =>
+    ({ id, status, last_turn_status: last, meta: of ? { child_of: { id: of, by: 'agent' } } : null }) as never;
+  const rows = [row('p', 'idle', null), row('a', 'working', 'p'), row('b', 'awaiting_permission', 'p'), row('c', 'idle', 'p', 'failed'), row('d', 'closed', 'p', 'failed'), row('e', 'working', 'x')];
+  assert.deepEqual(ct.childRollup(rows, 'p'), { working: 1, needs_you: 1, failed: 1 });
+});

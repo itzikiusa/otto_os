@@ -219,3 +219,17 @@ export function subagentTally(tones: readonly ChildTone[]): { text: string; tone
   const tone = parts[0][0] > 0 ? 'ask' : parts[1][0] > 0 ? 'live' : parts[3][0] > 0 ? 'failed' : 'done';
   return { text, tone };
 }
+
+/** The roll-up a parent's row shows for its subagents (the sidebar, a
+ *  phone, the dock): how many work, need the person, failed — from the rows
+ *  alone (`status` is live on every row update; no child projection). */
+export function childRollup(rows: readonly RuntimeSession[], parentId: string): { working: number; needs_you: number; failed: number } {
+  const out = { working: 0, needs_you: 0, failed: 0 };
+  for (const r of rows) {
+    if (childOf(r)?.id !== parentId || r.status === 'closed') continue;
+    if (r.status === 'awaiting_permission') out.needs_you += 1;
+    else if (r.status === 'working' || r.status === 'starting') out.working += 1;
+    else if (r.last_turn_status === 'failed') out.failed += 1;
+  }
+  return out;
+}

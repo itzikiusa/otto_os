@@ -20,6 +20,7 @@ mod auto_close;
 mod children;
 pub mod council;
 mod delegation;
+mod family;
 pub use secret_request::{answer_secret_request, pending_secret_requests};
 mod descendants;
 mod fresh;

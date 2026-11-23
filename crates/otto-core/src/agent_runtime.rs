@@ -1535,6 +1535,26 @@ pub struct PeerInfo {
     pub is_self: bool,
 }
 
+/// `POST /runtime-sessions/{id}/stop-family` — what one Stop for a thread and
+/// its subagents did.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FamilyStopReq {
+    /// Also stop the thread's own background work (the waiting line's Stop).
+    #[serde(default)]
+    pub background: bool,
+}
+
+/// The answer to [`FamilyStopReq`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FamilyStopResp {
+    /// Open subagents in the family (the thread itself not counted).
+    pub subagents: u32,
+    /// Turns that were running and got stopped.
+    pub turns: u32,
+    /// Background tasks asked to stop.
+    pub tasks: u32,
+}
+
 /// `GET /runtime-sessions/{id}/subagent-targets` — a provider a thread's agent
 /// may delegate to (`otto.thread_capabilities`): enabled here, driven over a
 /// structured protocol.

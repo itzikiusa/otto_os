@@ -477,7 +477,11 @@ impl AgentRuntime {
         if let Err(e) = self.notice(&of.id, &notice).await {
             tracing::debug!(session = %of.id, "child notice skipped: {e}");
         }
-        if of.by == ChildOpener::Agent && asked {
+        let quiet = !matches!(
+            status,
+            TurnTerminalStatus::Completed | TurnTerminalStatus::Failed
+        ) && family::recently_stopped(&child.id);
+        if of.by == ChildOpener::Agent && asked && !quiet {
             let text = if restarted {
                 wake_text_how(&child, "was interrupted when Otto restarted", &answer)
             } else {

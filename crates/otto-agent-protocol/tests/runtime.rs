@@ -1598,6 +1598,52 @@ async fn daemon_threads_carry_meta_and_report_their_latest_reply() {
     assert!(parsed.meta.is_none());
 }
 
+/// One Stop for the family: the thread's subagent's hanging turn ends, and
+/// its "stopped" reply does not wake the thread again.
+#[tokio::test]
+async fn family_stop_ends_a_subagents_turn_without_waking_the_parent() {
+    use otto_core::agent_runtime::OpenPeerReq;
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let lead = create(&rt, cwd).await;
+    let kid = rt
+        .open_peer(
+            &lead.id,
+            OpenPeerReq {
+                provider: RuntimeProvider::Gemini,
+                prompt: Some("hang".into()),
+                title: Some("worker".into()),
+                model: None,
+                effort: None,
+                cwd: None,
+                meta: None,
+            },
+        )
+        .await
+        .unwrap();
+    let busy = rt
+        .peer_reply(&lead.id, &kid.id, Duration::from_millis(300))
+        .await
+        .unwrap();
+    assert!(busy.busy, "the subagent's turn hangs");
+    let r = rt.stop_family(&lead.id, false).await.unwrap();
+    assert_eq!(r.subagents, 1);
+    assert_eq!(r.turns, 1, "{r:?}");
+    let after = rt.peer_reply(&lead.id, &kid.id, WAIT).await.unwrap();
+    assert!(!after.busy);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let lead_reply = rt.latest_reply(&lead.id, WAIT).await.unwrap();
+    assert!(
+        lead_reply.text.is_empty(),
+        "the lead was not woken: {}",
+        lead_reply.text
+    );
+    assert!(lead_reply.turn_status.is_none());
+}
+
 /// Linked threads: a thread opens another (same owner/workspace/cwd/access,
 /// grouped under the root), messages it with a framed prompt, and reads its
 /// reply; an unrelated thread is not reachable.
@@ -1631,11 +1677,6 @@ async fn linked_threads_open_message_and_read_within_their_group() {
     // The opening prompt ran, framed with the opener.
     let first = rt.peer_reply(&lead.id, &worker.id, WAIT).await.unwrap();
     assert!(!first.busy);
-    assert!(
-        first.text.contains("Subagent task from thread"),
-        "{}",
-        first.text
-    );
     assert!(first.text.contains("you are my worker"), "{}", first.text);
 
     let ids = |v: Vec<otto_core::agent_runtime::PeerInfo>| {

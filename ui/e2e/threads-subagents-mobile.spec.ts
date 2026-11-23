@@ -57,3 +57,31 @@ test('the subagent row and the waiting line on a phone, by touch', async ({ page
     await page.screenshot({ path: info.outputPath(`subagents-row-phone-${scheme}.png`), animations: 'disabled' });
   }
 });
+
+test('a subagent’s approval is answered in the parent, and one Stop stops the family', async ({ page }) => {
+  await page.goto('/');
+  await page.waitForFunction(() => typeof (window as unknown as { __mockRuntime?: Hooks }).__mockRuntime?.delegate === 'function');
+  await page.evaluate(() => {
+    const m = (window as unknown as { __mockRuntime: Hooks & { approval: (sid: string, cmd: string) => void } }).__mockRuntime;
+    m.seed({ id: 'rt_ap_lead', title: 'Ship it', provider: 'claude', last_active_at: '2026-11-23T10:09:00Z' });
+    m.delegate('rt_ap_lead', [
+      { id: '01M84S0000000000000000000A', provider: 'codex', title: 'Run the migration', working: true },
+      { id: '01M84S0000000000000000000B', provider: 'gemini', title: 'Write the notes', working: true },
+    ]);
+    m.approval('01M84S0000000000000000000A', 'npm run migrate');
+    location.hash = '#/threads/rt_ap_lead';
+  });
+  const thread = page.getByTestId('runtime-thread-rt_ap_lead');
+  await expect(thread).toBeVisible({ timeout: 15_000 });
+  const card = thread.getByTestId('runtime-child-approval');
+  await expect(card).toContainText('Approval needed from Run the migration');
+  await expect(card).toContainText('npm run migrate');
+  await card.getByRole('button', { name: /^Approve/ }).first().tap();
+  const answers = () => page.evaluate(() => ((window as unknown as { __mockRuntime: { answers?: { id: string; decision: string }[] } }).__mockRuntime.answers ?? []));
+  await expect.poll(answers).toEqual([expect.objectContaining({ id: '01M84S0000000000000000000A', decision: 'accept' })]);
+  await expect(card).toHaveCount(0);
+
+  await thread.getByTestId('runtime-bg-stop').tap();
+  const stops = () => page.evaluate(() => ((window as unknown as { __mockRuntime: { familyStops?: unknown[] } }).__mockRuntime.familyStops ?? []));
+  await expect.poll(stops).toEqual([{ id: 'rt_ap_lead', background: true }]);
+});

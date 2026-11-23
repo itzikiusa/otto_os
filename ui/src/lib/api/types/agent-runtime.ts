@@ -575,6 +575,14 @@ export interface PeerInfo {
   is_self: boolean;
 }
 
+/** `POST /runtime-sessions/{id}/stop-family` (body `{background}`): one Stop
+ *  for the thread and its open subagents. */
+export interface FamilyStopResp {
+  subagents: number;
+  turns: number;
+  tasks: number;
+}
+
 /** `GET /runtime-sessions/{id}/subagent-targets`: a provider the thread's
  *  agent may delegate to (`otto.thread_capabilities`). */
 export interface SubagentTarget {

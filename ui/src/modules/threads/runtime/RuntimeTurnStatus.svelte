@@ -16,7 +16,7 @@
   import type { AgentTask } from './agentTasks';
   import { deriveLiveFooter } from './liveStatus';
   import { toastError } from '../../../lib/toastError';
-  import { stopThreadWork, taskStops } from './taskStops.svelte';
+  import { stopFamily } from './taskStops.svelte';
   import type { RuntimeProjection } from './projection';
   import { formatEffortShort } from '../../../lib/providerModels';
   import { latestTurn, workLabel, type TurnOutcome } from './timeline';
@@ -64,18 +64,17 @@
   const ranOn = $derived([turn?.model, turn?.effort ? formatEffortShort(turn.effort) : null].filter(Boolean).join(' · '));
   const live = $derived(deriveLiveFooter(projection, workingFor, ownTurn, background));
   let stoppingAll = $state(false);
-  /** Stop everything the line waits on: each subagent thread, the rest by task id. */
+  /** Stop everything the line waits on: one family stop with the thread's own background work. */
   async function stopWaiting(): Promise<void> {
-    if (stoppingAll) return;
+    if (stoppingAll || !sessionId) return;
     stoppingAll = true;
-    const ids = background.filter((b) => !b.childSessionId && b.stopId).map((b) => b.stopId!);
-    const results = await Promise.allSettled([
-      ...background.filter((b) => b.childSessionId).map((b) => stopThreadWork(b.childSessionId!, { turnRunning: true, taskIds: [] })),
-      ...(ids.length && sessionId ? [taskStops.stopAll(sessionId, ids)] : []),
-    ]);
-    stoppingAll = false;
-    const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
-    if (failed) toastError('Couldn’t stop everything', failed.reason);
+    try {
+      await stopFamily(sessionId, true);
+    } catch (e) {
+      toastError('Couldn’t stop everything', e);
+    } finally {
+      stoppingAll = false;
+    }
   }
   const retryText = $derived(outcome?.retryText ?? '');
   const retryAttachments = $derived(outcome?.retryAttachments);

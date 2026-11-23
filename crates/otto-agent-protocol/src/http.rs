@@ -11,9 +11,10 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use otto_core::agent_runtime::{
     AskChildReq, AskChildResp, CouncilResp, CreateCouncilReq, CreateRuntimeSessionBody,
-    OpenPeerReq, PeerInfo, PeerMessageReq, PeerReply, QueuedDeliverReq, RuntimePromptReq,
-    RuntimePromptResp, RuntimeReplay, RuntimeRequestRespondReq, RuntimeSession, SubagentTarget,
-    SynthesizeCouncilReq, TurnItem, UnqueuePromptResp, UpdateRuntimeSessionReq,
+    FamilyStopReq, FamilyStopResp, OpenPeerReq, PeerInfo, PeerMessageReq, PeerReply,
+    QueuedDeliverReq, RuntimePromptReq, RuntimePromptResp, RuntimeReplay, RuntimeRequestRespondReq,
+    RuntimeSession, SubagentTarget, SynthesizeCouncilReq, TurnItem, UnqueuePromptResp,
+    UpdateRuntimeSessionReq,
 };
 use otto_core::api::Problem;
 use otto_core::auth::{AuthContext, AuthUser};
@@ -138,6 +139,7 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
             "/runtime-sessions/{id}/peers",
             get(peers::<S>).post(open_peer::<S>),
         )
+        .route("/runtime-sessions/{id}/stop-family", post(stop_family::<S>))
         .route(
             "/runtime-sessions/{id}/subagent-targets",
             get(subagent_targets::<S>),
@@ -209,6 +211,22 @@ async fn peers<S: RuntimeCtx>(
 ) -> ApiResult<Json<Vec<PeerInfo>>> {
     as_thread(&ctx, &user, &auth, &id).await?;
     Ok(Json(ctx.agent_runtime().peers(&id).await?))
+}
+
+/// POST /runtime-sessions/{id}/stop-family — one Stop for it and its subagents.
+async fn stop_family<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Id>,
+    body: Option<Json<FamilyStopReq>>,
+) -> ApiResult<Json<FamilyStopResp>> {
+    require_human(&ctx, &auth)?;
+    authorized(&ctx, &user, &id).await?;
+    let background = body.is_some_and(|b| b.background);
+    Ok(Json(
+        ctx.agent_runtime().stop_family(&id, background).await?,
+    ))
 }
 
 /// GET /runtime-sessions/{id}/subagent-targets — who it may delegate to.

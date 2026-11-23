@@ -8,7 +8,7 @@
 // `finish`, `queue`) for the Threads specs (e2e/*threads-groups*.spec.ts).
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { appLive } from '../live';
-import type { QueuedPrompt, RuntimeSession, RuntimeSnapshot, TurnItem } from './types';
+import type { QueuedPrompt, RuntimeRequest, RuntimeSession, RuntimeSnapshot, TurnItem } from './types';
 
 type Out = { status?: number; json?: unknown } | undefined;
 type MockRoute = { method: string; re: RegExp; handle: (m: RegExpMatchArray, body: any, q: URLSearchParams) => Out };
@@ -16,6 +16,7 @@ type MockRoute = { method: string; re: RegExp; handle: (m: RegExpMatchArray, bod
 const threads: RuntimeSession[] = [];
 const items = new Map<string, TurnItem[]>();
 const queued = new Map<string, QueuedPrompt[]>();
+const requests = new Map<string, RuntimeRequest[]>();
 /** Per thread: the last event sequence (items, queue changes). */
 const seqs = new Map<string, number>();
 const bump = (sid: string): number => {
@@ -46,7 +47,7 @@ function snapshot(sid: string): RuntimeSnapshot {
     provider_thread: null,
     turns: [],
     turn_items: items.get(sid) ?? [],
-    runtime_requests: [],
+    runtime_requests: requests.get(sid) ?? [],
     plans: [],
     queued_prompts: queued.get(sid) ?? [],
   };
@@ -220,7 +221,7 @@ Object.assign(log(), {
         id: k.id, workspace_id: 'wsp_otto', provider: k.provider, title: k.title, cwd: '/Users/dev/otto', status: k.working ? 'working' : 'idle',
         access_mode: 'approval-required', created_by: 'usr_root', created_at: now(), last_active_at: now(), last_sequence: 0,
         parent_id: parent, meta: { child_of: { id: parent, by: 'agent' } }, last_turn_status: k.working ? null : 'completed',
-      } as RuntimeSession);
+      } as unknown as RuntimeSession);
       item(k.id, { type: 'user_message', text: `[Subagent task from thread "lead" (claude, id ${parent}). Do the work yourself.]\n\n${k.title}` });
       if (k.answer) item(k.id, { type: 'assistant_message', message_id: `msg_${k.id}`, text: k.answer, streaming: false });
       const it = item(parent, {
@@ -229,6 +230,14 @@ Object.assign(log(), {
       });
       appLive.dispatch({ type: 'agent_runtime_event', event: { session_id: parent, sequence: seqs.get(parent) ?? 0, ts: now(), type: 'turn_item.updated', turn_item: it } });
     }
+  },
+  /** Subagent `sid` asks the person to approve running `command`. */
+  approval: (sid: string, command: string): void => {
+    const t = find(sid);
+    if (t) t.status = 'awaiting_permission';
+    const id = `req_${sid}`;
+    requests.set(sid, [{ id, turn_id: `trn_${sid}`, kind: 'command', status: 'pending', response_capability: { type: 'live' }, created_at: now(), resolved_at: null } as RuntimeRequest]);
+    item(sid, { type: 'approval_request', request_id: id, request_kind: 'command', prompt: command, options: [] });
   },
   /** Child `sid`'s turn ended: the thread it was asked from hears it. */
   childDone: (sid: string, line: string): void => {
@@ -239,6 +248,30 @@ Object.assign(log(), {
 });
 
 export const runtimeMockRoutes: MockRoute[] = [
+  {
+    method: 'POST', re: /^\/runtime-sessions\/([^/]+)\/stop-family$/,
+    handle: (m, b) => {
+      const l = log() as any;
+      (l.familyStops ??= []).push({ id: m[1], ...b });
+      const kids = threads.filter((t) => (t.meta?.child_of as { id?: string } | undefined)?.id === m[1] && t.status !== 'closed');
+      const turns = kids.filter((t) => t.status === 'working').length;
+      for (const k of kids) if (k.status === 'working') k.status = 'idle';
+      return { json: { subagents: kids.length, turns, tasks: 0 } };
+    },
+  },
+  {
+    method: 'POST', re: /^\/runtime-sessions\/([^/]+)\/requests\/([^/]+)$/,
+    handle: (m, b) => {
+      const l = log() as any;
+      (l.answers ??= []).push({ id: m[1], request: m[2], ...b });
+      requests.set(m[1], (requests.get(m[1]) ?? []).map((r) => (r.id === m[2] ? { ...r, status: 'resolved', decision: b?.decision } : r)));
+      const t = find(m[1]);
+      if (t) t.status = 'working';
+      for (const r of requests.get(m[1]) ?? []) emit(m[1], { type: 'runtime_request.updated', runtime_request: r });
+      emit(m[1], { type: 'provider_session.updated', provider_session: { status: 'running', cwd: t?.cwd ?? '/', model: null, updated_at: now(), last_error: null } });
+      return { status: 204 };
+    },
+  },
   ...councilRoutes,
   ...childRoutes,
   // The new-thread stage checks its folder before it sends (lib/folderCheck).
