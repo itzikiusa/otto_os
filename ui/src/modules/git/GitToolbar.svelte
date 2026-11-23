@@ -52,12 +52,20 @@
   // destination" / "no tracking information"). Re-read when refs move (a
   // remote added in Remotes… bumps them). Unknown (null) keeps both enabled.
   let remoteCount = $state<number | null>(null);
+  let remoteCountRepo = '';
   $effect(() => {
-    void git.refsRev[repoId];
+    const id = repoId;
+    void git.refsRev[id];
+    if (remoteCountRepo !== id) {
+      remoteCountRepo = id;
+      remoteCount = null;
+    }
     const ctl = new AbortController();
     api
-      .get<RemoteInfo[]>(`/repos/${repoId}/remotes`, ctl.signal)
-      .then((r) => (remoteCount = r.length))
+      .get<RemoteInfo[]>(`/repos/${id}/remotes`, ctl.signal)
+      .then((r) => {
+        if (!ctl.signal.aborted && id === repoId) remoteCount = r.length;
+      })
       .catch(() => {});
     return () => ctl.abort();
   });
@@ -137,16 +145,17 @@
   }
 
   function pullMenu(e: MouseEvent): void {
+    if (noRemote) return;
     ctxMenu.show(e, [
       ...(inHeader
         ? [
-            { label: busy === 'fetch' ? 'Fetching…' : 'Fetch', icon: 'fetch' as const, title: 'Fetch from remote', action: () => void doFetch() },
+            { label: busy === 'fetch' ? 'Fetching…' : 'Fetch', icon: 'fetch' as const, disabled: noRemote, title: noRemote ? NO_REMOTE : 'Fetch from remote', action: () => void doFetch() },
             { separator: true as const },
           ]
         : []),
-      { label: 'Pull (merge)', icon: 'arrowDown', disabled: detached, action: () => void doPull('merge') },
-      { label: 'Pull (rebase)', icon: 'arrowDown', disabled: detached, action: () => void doPull('rebase') },
-      { label: 'Pull (fast-forward only)', icon: 'arrowDown', disabled: detached, action: () => void doPull('ff_only') },
+      { label: 'Pull (merge)', icon: 'arrowDown', disabled: detached || noRemote, title: noRemote ? NO_REMOTE : undefined, action: () => void doPull('merge') },
+      { label: 'Pull (rebase)', icon: 'arrowDown', disabled: detached || noRemote, title: noRemote ? NO_REMOTE : undefined, action: () => void doPull('rebase') },
+      { label: 'Pull (fast-forward only)', icon: 'arrowDown', disabled: detached || noRemote, title: noRemote ? NO_REMOTE : undefined, action: () => void doPull('ff_only') },
     ]);
   }
 
@@ -157,14 +166,15 @@
     const branch = status.branch;
     const upstream = status.upstream;
     const isDetached = detached;
+    const hasNoRemote = noRemote;
     const canPush = !nothingToPush && !isDetached;
     return registry.register('git-repo', [
-      { id: 'git.fetch', title: 'Fetch', group: 'Git', keywords: 'remote refresh update', run: () => void doFetch() },
+      { id: 'git.fetch', title: 'Fetch', group: 'Git', keywords: 'remote refresh update', disabled: hasNoRemote, detail: hasNoRemote ? NO_REMOTE : undefined, run: () => { if (!hasNoRemote) void doFetch(); } },
       ...(isDetached
         ? []
-        : [{ id: 'git.pull', title: pullLabel, group: 'Git', keywords: 'upstream merge rebase', run: () => void doPull() }]),
+        : [{ id: 'git.pull', title: pullLabel, group: 'Git', keywords: 'upstream merge rebase', disabled: hasNoRemote, detail: hasNoRemote ? NO_REMOTE : undefined, run: () => { if (!hasNoRemote) void doPull(); } }]),
       ...(canPush
-        ? [{ id: 'git.push', title: upstream ? 'Push' : 'Publish branch', group: 'Git', keywords: `upload ${branch}`, run: () => void doPush() }]
+        ? [{ id: 'git.push', title: upstream ? 'Push' : 'Publish branch', group: 'Git', keywords: `upload ${branch}`, disabled: hasNoRemote, detail: hasNoRemote ? NO_REMOTE : undefined, run: () => { if (!hasNoRemote) void doPush(); } }]
         : []),
       { id: 'git.branch', title: 'New branch…', group: 'Git', keywords: `create checkout from ${branch}`, run: () => void doCreateBranch() },
     ]);
@@ -300,7 +310,7 @@
 
 <!-- Fetch (the header folds it into the Pull ▾ menu) -->
 {#if !inHeader}
-<button class="btn small ghost tbtn" data-overflow="3" data-icon="fetch" data-label="Fetch" disabled={busy !== ''} onclick={doFetch} title="Fetch from remote">
+<button class="btn small ghost tbtn" data-overflow="3" data-icon="fetch" data-label="Fetch" disabled={busy !== '' || noRemote} onclick={doFetch} title={noRemote ? NO_REMOTE : 'Fetch from remote'}>
   <Icon name="fetch" size={12} />
   {busy === 'fetch' ? 'Fetching…' : 'Fetch'}
 </button>
@@ -327,10 +337,10 @@
     class="btn small ghost tbtn caret"
     data-icon="chevronDown"
     data-label={inHeader ? 'Fetch and pull options…' : 'Pull options…'}
-    disabled={busy !== '' || (detached && !inHeader)}
+    disabled={busy !== '' || noRemote || (detached && !inHeader)}
     aria-haspopup="menu"
     onclick={pullMenu}
-    title={inHeader ? 'Fetch, or pull with a different mode' : 'Pull with a different mode'}
+    title={noRemote ? NO_REMOTE : inHeader ? 'Fetch, or pull with a different mode' : 'Pull with a different mode'}
     aria-label={inHeader ? 'Fetch and pull options' : 'Pull options'}
   ><Icon name="chevronDown" size={12} /></button>
 </span>

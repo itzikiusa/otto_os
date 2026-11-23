@@ -24,6 +24,12 @@ pub enum IdeEcosystemKind {
     #[serde(alias = "bash", alias = "sh", alias = "zsh")]
     Shell,
     Json,
+    #[serde(alias = "xcode", alias = "swift")]
+    Ios,
+    #[serde(alias = "android_sdk")]
+    Android,
+    #[serde(alias = "dart")]
+    Flutter,
 }
 
 impl IdeEcosystemKind {
@@ -36,6 +42,9 @@ impl IdeEcosystemKind {
             Self::Python => "python",
             Self::Shell => "shell",
             Self::Json => "json",
+            Self::Ios => "ios",
+            Self::Android => "android",
+            Self::Flutter => "flutter",
         }
     }
 
@@ -48,6 +57,9 @@ impl IdeEcosystemKind {
             Self::Python => "Python (uv)",
             Self::Shell => "Shell (Bash / Zsh)",
             Self::Json => "JSON / Schema",
+            Self::Ios => "iOS / Xcode",
+            Self::Android => "Android SDK",
+            Self::Flutter => "Flutter / Dart",
         }
     }
 }
@@ -352,6 +364,12 @@ pub struct IdeProjectEnvironment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub python_interpreter: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub android_home: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flutter_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xcode_developer_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dotenv_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_path: Option<String>,
@@ -379,6 +397,9 @@ impl Default for IdeProjectEnvironment {
             rust_toolchain: None,
             node_home: None,
             python_interpreter: None,
+            android_home: None,
+            flutter_root: None,
+            xcode_developer_dir: None,
             dotenv_path: None,
             extra_path: None,
             inherit_shell_env: true,
@@ -405,6 +426,12 @@ pub struct IdeUpdateEnvironmentReq {
     pub node_home: Option<String>,
     #[serde(default)]
     pub python_interpreter: Option<String>,
+    #[serde(default)]
+    pub android_home: Option<String>,
+    #[serde(default)]
+    pub flutter_root: Option<String>,
+    #[serde(default)]
+    pub xcode_developer_dir: Option<String>,
     #[serde(default, alias = "env_file")]
     pub dotenv_path: Option<String>,
     #[serde(default)]
@@ -691,6 +718,13 @@ pub struct IdeStartRunReq {
     pub coverage: bool,
     #[serde(default, alias = "confirmProdTargets")]
     pub confirm_prod_targets: bool,
+    /// Optional simulator/emulator target ID (iOS UDID or Android serial/AVD) injected
+    /// into mobile runs as `OTTO_SIMULATOR_UDID` / `ANDROID_SERIAL`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    /// Optional simulator/emulator platform (`"ios"` | `"android"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_platform: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

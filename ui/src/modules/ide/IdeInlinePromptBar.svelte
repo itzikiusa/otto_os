@@ -24,7 +24,11 @@
     if (ideAgent.inlinePrompt?.open) MentionMenu.prefetch();
   });
 
-  const readOnly = $derived(!ide.canEditCollab || Boolean(ide.activeTab?.readOnly));
+  const targetTab = $derived.by(() => {
+    const p = ideAgent.inlinePrompt?.path;
+    return p ? (ide.tabs.find((t) => t.path === p) ?? ide.activeTab) : ide.activeTab;
+  });
+  const readOnly = $derived(!ide.canEditCollab || Boolean(targetTab?.readOnly));
   let pickerOpen = $state(false);
   let providerBtnEl = $state<HTMLButtonElement | null>(null);
   let inlineAnchorEl = $state<HTMLDivElement | null>(null);
@@ -39,21 +43,28 @@
     return supportsEffortSelection(st.provider) && eff ? `${base} · ${formatEffortShort(eff)}` : base;
   });
 
-  function restoreEditorFocus(): void {
+  function restoreEditorFocus(targetPath: string | null): void {
     requestAnimationFrame(() => {
+      const handle = targetPath ? ide.editorHandleForPath(ide.resolvePath(targetPath)) : null;
+      if (handle) {
+        handle.focus();
+        return;
+      }
       document.querySelector<HTMLElement>('.ide-editor-area .cm-content')?.focus();
     });
   }
 
   function closeInlineBar(): void {
+    const targetPath = ideAgent.inlinePrompt?.path ?? null;
     pickerOpen = false;
     ideAgent.closeInlineEdit();
-    restoreEditorFocus();
+    restoreEditorFocus(targetPath);
   }
 
   async function acceptInlineChange(): Promise<void> {
+    const targetPath = ideAgent.inlinePrompt?.path ?? null;
     const applied = await ideAgent.acceptInlineProposal();
-    if (applied) restoreEditorFocus();
+    if (applied) restoreEditorFocus(targetPath);
   }
 
   function onInputKeydown(e: KeyboardEvent): void {

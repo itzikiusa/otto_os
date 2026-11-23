@@ -154,12 +154,46 @@ pub struct OttoInvokeReq {
     pub dry_run: bool,
     #[serde(default)]
     pub wait_seconds: Option<u64>,
+    #[serde(default)]
+    pub profile: Option<String>,
+}
+
+async fn enforce_invoke_profile(
+    pool: &otto_state::DbPool,
+    q: &std::collections::HashMap<String, String>,
+    body_profile: Option<&str>,
+    tool: &str,
+) -> ApiResult<()> {
+    let q_profile = q
+        .get("profile")
+        .or_else(|| q.get("profiles"))
+        .map(String::as_str);
+    let raw = match (q_profile, body_profile) {
+        (Some(a), Some(b)) if a.trim() != b.trim() => {
+            return Err(ApiError(Error::Invalid(
+                "conflicting profile parameters".into(),
+            )));
+        }
+        (Some(a), _) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+    if let Some(filter) = otto_mcp::profiles::resolve_param_strict(pool, raw)
+        .await
+        .map_err(ApiError)?
+    {
+        if !filter.allows(tool) {
+            return Err(ApiError(Error::Forbidden(filter.denial(tool))));
+        }
+    }
+    Ok(())
 }
 
 pub async fn otto_tools_invoke(
     State(ctx): State<ServerCtx>,
     CurrentAuthContext(auth): CurrentAuthContext,
     untimed: Option<axum::Extension<crate::telemetry::UntimedMark>>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
     Json(req): Json<OttoInvokeReq>,
 ) -> ApiResult<Json<Value>> {
     // `wait_session` parks up to ~14 min: not an operation latency (S9-304).
@@ -168,6 +202,7 @@ pub async fn otto_tools_invoke(
             mark.mark();
         }
     }
+    enforce_invoke_profile(&ctx.pool, &q, req.profile.as_deref(), &req.tool).await?;
     let mut env = governed_invoke(
         &ctx,
         &auth,
@@ -2320,5 +2355,53 @@ mod tests {
         ] {
             assert!(!workspace_rules_never_apply(t), "{t}");
         }
+    }
+
+    #[tokio::test]
+    async fn otto_tools_invoke_enforces_profile_server_side_and_fails_closed() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&pool)
+            .await
+            .unwrap();
+        let db: otto_state::DbPool = pool.into();
+        let empty_q = std::collections::HashMap::new();
+
+        // No profile: untouched.
+        assert!(
+            enforce_invoke_profile(&db, &empty_q, None, "otto.run_workflow")
+                .await
+                .is_ok()
+        );
+
+        // Built-in `git` profile allows git tools and forbids workflows.
+        assert!(
+            enforce_invoke_profile(&db, &empty_q, Some("git"), "otto.list_repos")
+                .await
+                .is_ok()
+        );
+        let denied = enforce_invoke_profile(&db, &empty_q, Some("git"), "otto.run_workflow")
+            .await
+            .expect_err("workflow must be denied under git profile");
+        assert!(matches!(denied.0, Error::Forbidden(_)));
+
+        // Query `?profile=` also enforced; unknown profile fails closed.
+        let mut q = std::collections::HashMap::new();
+        q.insert("profile".into(), "nonexistent-profile".into());
+        let missing = enforce_invoke_profile(&db, &q, None, "otto.list_repos")
+            .await
+            .expect_err("unknown profile must fail closed");
+        assert!(matches!(missing.0, Error::Invalid(_) | Error::NotFound(_)));
+
+        // Conflicting query + body profiles fail closed with Invalid (400).
+        q.insert("profile".into(), "git".into());
+        let conflict = enforce_invoke_profile(&db, &q, Some("database"), "otto.list_repos")
+            .await
+            .expect_err("conflicting profile params must fail closed");
+        assert!(matches!(conflict.0, Error::Invalid(_)));
     }
 }

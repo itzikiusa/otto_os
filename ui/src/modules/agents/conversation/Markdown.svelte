@@ -107,22 +107,31 @@
   $effect(() => {
     const h = html;
     const host = rootEl;
+    const scheme = ui.resolvedScheme;
     if (!host || !h.includes('diagram-block')) return;
-    for (const el of Array.from(host.querySelectorAll<HTMLElement>('div.diagram-block:not([data-rendered])'))) {
-      el.setAttribute('data-rendered', '1');
+    const dark = scheme === 'dark';
+    for (const el of Array.from(host.querySelectorAll<HTMLElement>('div.diagram-block'))) {
+      if (el.dataset.renderedScheme === scheme) continue;
+      if (el.dataset.diagramSrc === undefined) {
+        el.dataset.diagramSrc = el.querySelector('pre.diagram-src')?.textContent ?? '';
+      }
+      const src = el.dataset.diagramSrc;
       const kind = el.dataset.diagram;
-      const src = el.querySelector('pre.diagram-src')?.textContent ?? '';
-      const id = `chat-diag-${++diagramSeq}`;
-      const dark = ui.resolvedScheme === 'dark';
+      const gen = String(++diagramSeq);
+      el.dataset.renderedScheme = scheme;
+      el.dataset.renderGen = gen;
+      const id = `chat-diag-${gen}`;
+      const isStale = () => !el.isConnected || el.dataset.renderGen !== gen;
       void (kind === 'd2'
-        ? import('../../canvas/d2').then((m) => m.renderD2(id, src, { dark, isStale: () => !el.isConnected }))
-        : import('../../../lib/render/mermaid').then((m) => m.renderMermaid(id, src, { dark, isStale: () => !el.isConnected }))
+        ? import('../../canvas/d2').then((m) => m.renderD2(id, src, { dark, isStale }))
+        : import('../../../lib/render/mermaid').then((m) => m.renderMermaid(id, src, { dark, isStale }))
       ).then(({ svg, error, stale }: { svg?: string; error?: string; stale?: boolean }) => {
-        if (!el.isConnected || stale) return;
+        if (isStale() || stale) return;
         if (svg) {
           el.innerHTML = svg;
           el.classList.add('diagram-ok');
         } else {
+          el.querySelector('.diagram-error')?.remove();
           const err = document.createElement('div');
           err.className = 'diagram-error';
           err.textContent = `Diagram error: ${error ?? 'unknown'}`;
@@ -245,13 +254,24 @@
       { label: 'Copy link', icon: 'link', action: () => copy(href, href) },
     ]);
   }
+  function bindMdSurface(node: HTMLElement): { destroy(): void } {
+    node.addEventListener('click', onClick);
+    node.addEventListener('keydown', onKey);
+    node.addEventListener('contextmenu', onContext);
+    return {
+      destroy: () => {
+        node.removeEventListener('click', onClick);
+        node.removeEventListener('keydown', onKey);
+        node.removeEventListener('contextmenu', onContext);
+      },
+    };
+  }
 </script>
 
 <!-- Code-block buttons are real <button>s inside the html; one delegated
      handler drives them (keyboard activation bubbles as a click too). File
      references / issue chips are `a[tabindex][role=link]` (⏎ opens them). -->
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="md md-body" class:small bind:this={rootEl} onclick={onClick} onkeydown={onKey} oncontextmenu={onContext}>{@html html}</div>
+<div class="md md-body" class:small bind:this={rootEl} use:bindMdSurface>{@html html}</div>
 {#if lightboxImg}
   <Lightbox src={lightboxImg.src} alt={lightboxImg.alt} path={lightboxImg.path} onclose={() => (lightboxImg = null)} />
 {/if}

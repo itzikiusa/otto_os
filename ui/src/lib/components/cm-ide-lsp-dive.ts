@@ -2,7 +2,7 @@
 // Dive-In (Definition, TypeDefinition, Implementation) for CodeMirror 6.
 
 import { EditorState, Prec, StateEffect, StateField, type Extension } from '@codemirror/state';
-import { Decoration, EditorView, type DecorationSet } from '@codemirror/view';
+import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import { ctxMenu } from '../contextmenu.svelte';
 import { fileUriToPath } from '../fileUri.ts';
 import { posToLsp, type LspRange } from './cm-ide-lsp-completion.ts';
@@ -14,6 +14,7 @@ export interface IdeLspJumpTarget {
   symbol?: string;
   originLine?: number;
   originColumn?: number;
+  languageServerState?: 'unavailable';
 }
 
 export interface IdeDiveCallbacks {
@@ -110,9 +111,18 @@ export type DiveLocationLookup = (
   view: EditorView,
   pos: number,
   mode: 'definition' | 'implementation',
-) => Promise<Array<{ path: string; line: number; column: number }>>;
+  isCurrent: () => boolean,
+  signal: AbortSignal,
+) => Promise<Array<{ path: string; line: number; column: number }> | 'unavailable'>;
 
 let diveLookupProvider: DiveLocationLookup | null = null;
+const latestDive = new WeakMap<EditorView, AbortController>();
+const cancelStaleDives = ViewPlugin.define((view) => ({
+  update(update: ViewUpdate) {
+    if (update.docChanged || update.selectionSet) latestDive.get(view)?.abort();
+  },
+  destroy() { latestDive.get(view)?.abort(); },
+}));
 
 export function registerDiveLocationLookup(fn: DiveLocationLookup): void {
   diveLookupProvider = fn;
@@ -131,7 +141,15 @@ export async function requestIdeDiveAtPos(
   const ln = view.state.doc.lineAt(Math.max(0, Math.min(view.state.doc.length, pos)));
   const column = pos - ln.from + 1;
   const span = tokenSpanAtPos(view.state, pos);
-  const locs = diveLookupProvider ? await diveLookupProvider(view, pos, mode) : [];
+  latestDive.get(view)?.abort();
+  const lookup = new AbortController();
+  latestDive.set(view, lookup);
+  const doc = view.state.doc, head = view.state.selection.main.head;
+  const isCurrent = () => !lookup.signal.aborted && view.dom.isConnected
+    && view.state.doc === doc && view.state.selection.main.head === head && view.dom.getClientRects().length > 0;
+  const result = diveLookupProvider ? await diveLookupProvider(view, pos, mode, isCurrent, lookup.signal) : [];
+  if (!isCurrent()) return;
+  const locs = Array.isArray(result) ? result : [];
 
   if (locs.length === 1) {
     cb({ path: locs[0].path, line: locs[0].line, column: locs[0].column, symbol: span?.word, originLine: ln.number, originColumn: column });
@@ -156,7 +174,7 @@ export async function requestIdeDiveAtPos(
     }
     return;
   }
-  cb({ line: ln.number, column, symbol: span?.word, originLine: ln.number, originColumn: column });
+  cb({ line: ln.number, column, symbol: span?.word, originLine: ln.number, originColumn: column, languageServerState: Array.isArray(result) ? undefined : result });
 }
 
 const setCmdHoverRange = StateEffect.define<{ from: number; to: number } | null>();
@@ -256,7 +274,7 @@ export function createCmdHoverDiveExtension(getCallbacks: () => IdeDiveCallbacks
     },
   }));
 
-  return [lspTooltipTheme, hoverField, handlers];
+  return [lspTooltipTheme, hoverField, handlers, cancelStaleDives];
 }
 
 // suppress unused EditorState import warning when only used via tokenSpanAtPos signature

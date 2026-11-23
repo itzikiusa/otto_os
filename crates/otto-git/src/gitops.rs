@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use otto_core::api::{StashDetail, StashFile, StashInfo, WorktreeInfo};
 use otto_core::{Error, Result};
 
-use crate::local::{worktree_round_trips, LocalGit, SpawnClass};
+use crate::local::{worktree_round_trips, GitCmd, LocalGit, SpawnClass, STATUS_IGNORE_SUBMODULES};
 
 /// Cap on a stash patch returned to the UI.
 const STASH_PATCH_CAP: usize = 400 * 1024;
@@ -304,10 +304,12 @@ impl LocalGit {
     }
 
     /// One worktree, freshly inspected for a removal decision: a status run
-    /// with a generous budget (submodules included, as `git worktree remove`
-    /// checks) plus the branch/commit details. The second value is the
-    /// worktree's admin dir — `None` when its `.git` pointer doesn't round-trip
-    /// to this repo (never touched then).
+    /// with a generous budget (skipping submodule work-tree dirt via
+    /// [`STATUS_IGNORE_SUBMODULES`] so embedded `.git/config` filters never run
+    /// unconfined; initialized submodules are still flagged below via the
+    /// worktree's `modules/` dir) plus the branch/commit details. The second
+    /// value is the worktree's admin dir — `None` when its `.git` pointer
+    /// doesn't round-trip to this repo (never touched then).
     pub async fn worktree_inspect(&self, path: &str) -> Result<(WorktreeInfo, Option<PathBuf>)> {
         let out = self.run_read(&["worktree", "list", "--porcelain"]).await?;
         let mut rows = crate::parse::parse_worktree_list(&out);
@@ -334,7 +336,7 @@ impl LocalGit {
                     "status",
                     "--porcelain",
                     "--untracked-files=normal",
-                    "--ignore-submodules=none",
+                    STATUS_IGNORE_SUBMODULES,
                 ];
                 if let Ok((true, stdout, _, _)) =
                     child.run_raw_class(&args, &[], SpawnClass::LocalRead).await
@@ -533,27 +535,36 @@ impl LocalGit {
                 deletions,
             });
         }
-        let mut patch = self.run_read(&diff("")).await?;
+        let (tracked_bytes, tracked_cut) = self
+            .exec_truncated(
+                &GitCmd::read(&diff("")).truncate_stdout(STASH_PATCH_CAP),
+                None,
+            )
+            .await?;
+        let mut patch = String::from_utf8_lossy(&tracked_bytes).into_owned();
+        let mut truncated = tracked_cut;
         if entry.parents.len() >= 3 {
             let untracked = format!("{sha}^3");
-            let show = |extra: &'static str| {
-                let u = untracked.clone();
-                async move {
-                    self.run_read(&[
-                        "-c",
-                        "core.quotePath=false",
-                        "show",
-                        "--format=",
-                        extra,
-                        "--no-ext-diff",
-                        "--no-textconv",
-                        "--no-color",
-                        &u,
-                    ])
-                    .await
-                }
+            let show_args = |extra: &'static str| {
+                [
+                    "-c",
+                    "core.quotePath=false",
+                    "show",
+                    "--format=",
+                    extra,
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--no-color",
+                    untracked.as_str(),
+                ]
             };
-            let counts = parse_numstat(&show("--numstat").await.unwrap_or_default());
+            let counts = parse_numstat(
+                &self
+                    .run_read(&show_args("--numstat"))
+                    .await
+                    .unwrap_or_default(),
+            );
+            let has_untracked = !counts.is_empty();
             for (path, (additions, deletions)) in counts {
                 files.push(StashFile {
                     path,
@@ -562,15 +573,30 @@ impl LocalGit {
                     deletions,
                 });
             }
-            if let Ok(p) = show("--patch").await {
-                if !patch.is_empty() && !patch.ends_with('\n') {
-                    patch.push('\n');
+            if !truncated {
+                let sep = usize::from(!patch.is_empty() && !patch.ends_with('\n'));
+                let rem = STASH_PATCH_CAP.saturating_sub(patch.len() + sep);
+                if rem > 0 {
+                    if let Ok((p_bytes, p_cut)) = self
+                        .exec_truncated(
+                            &GitCmd::read(&show_args("--patch")).truncate_stdout(rem),
+                            None,
+                        )
+                        .await
+                    {
+                        if !p_bytes.is_empty() && sep == 1 {
+                            patch.push('\n');
+                        }
+                        patch.push_str(&String::from_utf8_lossy(&p_bytes));
+                        truncated |= p_cut;
+                    }
+                } else if has_untracked {
+                    truncated = true;
                 }
-                patch.push_str(&p);
             }
         }
-        let truncated = patch.len() > STASH_PATCH_CAP;
-        if truncated {
+        if patch.len() > STASH_PATCH_CAP {
+            truncated = true;
             let mut cut = STASH_PATCH_CAP;
             while !patch.is_char_boundary(cut) {
                 cut -= 1;

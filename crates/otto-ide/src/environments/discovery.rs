@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use crate::types::{IdeRunConfig, IdeRunnerKind, IdeTargetKind, IdeTargetSpec};
 
 use super::discovery_jvm_py::{discover_java, discover_python, discover_shell};
+use super::discovery_mobile::discover_mobile;
 
 const MAX_DISCOVERED_CONFIGS: usize = 48;
 const MAX_MANIFEST_READ_BYTES: usize = 32 * 1024;
@@ -101,6 +102,7 @@ pub fn discover_run_configs(
     out
 }
 
+#[allow(clippy::disallowed_methods)] // bounded <=128-entry scan executed inside spawn_blocking
 fn has_project_manifest(dir: &Path) -> bool {
     const MANIFESTS: &[&str] = &[
         "go.mod",
@@ -112,9 +114,20 @@ fn has_project_manifest(dir: &Path) -> bool {
         "pom.xml",
         "build.gradle",
         "build.gradle.kts",
+        "pubspec.yaml",
+        "Package.swift",
     ];
     if MANIFESTS.iter().any(|m| dir.join(m).is_file()) {
         return true;
+    }
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten().take(MAX_DIR_ENTRIES) {
+            if let Some(name) = e.file_name().to_str() {
+                if name.ends_with(".xcodeproj") || name.ends_with(".xcworkspace") {
+                    return true;
+                }
+            }
+        }
     }
     !list_files_with_suffix(dir, ".go").is_empty()
         || !list_files_with_suffix(dir, ".py").is_empty()
@@ -125,6 +138,10 @@ fn scan_project_folder(root: &Path, root_badge: Option<&str>, out: &mut Vec<IdeR
     let cwd_override = Some(root.to_string_lossy().into_owned());
     let proj_name = folder_name(root);
 
+    discover_mobile(root, &proj_name, root_badge, &cwd_override, out);
+    if out.len() >= MAX_DISCOVERED_CONFIGS {
+        return;
+    }
     discover_go(root, &proj_name, root_badge, &cwd_override, out);
     if out.len() >= MAX_DISCOVERED_CONFIGS {
         return;

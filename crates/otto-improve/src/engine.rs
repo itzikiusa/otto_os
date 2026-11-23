@@ -623,16 +623,19 @@ impl ImprovementEngine {
             &edit.target_ref,
             Some(self.library_root.as_path()),
         )?;
+        let allowed_root =
+            allowed_root_for_target(root, &self.library_root, edit.target_type, &path);
+        let validated = validate_edit_target(root, &self.library_root, edit.target_type, &path)?;
         let path_str = path.to_string_lossy().to_string();
         // Snapshot the on-disk content this decision is based on. The auto-apply
         // write below re-reads just before clobbering and bails to the queue if
         // the file changed in between (concurrent-edit / conflict guard).
-        let current = tokio::fs::read_to_string(&path).await.ok();
+        let current = tokio::fs::read_to_string(&validated).await.ok();
         let disposition = decide(edit, allowlist, autonomy);
 
         let status = match disposition {
             Disposition::Apply => {
-                if let Some(parent) = path.parent() {
+                if let Some(parent) = validated.parent() {
                     tokio::fs::create_dir_all(parent).await.map_err(|e| {
                         Error::Internal(format!("create dir {}: {e}", parent.display()))
                     })?;
@@ -644,9 +647,13 @@ impl ImprovementEngine {
                 // queued for manual review instead.
                 // A Library skill goes through the Library (the editor's lock
                 // and hash check) and refreshes the Otto-owned CLI copies.
-                let outcome = match library_write::skill_target(&self.library_root, &path) {
+                let is_lib = is_lexically_under_library_skills(&self.library_root, &path);
+                let outcome = match is_lib
+                    .then(|| library_write::skill_target(&self.library_root, &validated))
+                    .flatten()
+                {
                     Some(t) => {
-                        canonicalize_within(&path, allowed_root_for(&path))?;
+                        canonicalize_within(&validated, &allowed_root)?;
                         let after = (edit.kind != ImprovementEditKind::Remove)
                             .then(|| edit.patch.after.clone());
                         match library_write::apply(t, current.clone(), after).await? {
@@ -654,7 +661,9 @@ impl ImprovementEngine {
                             false => ApplyOutcome::Conflict,
                         }
                     }
-                    None => safe_auto_apply(&path, edit, current.as_deref()).await?,
+                    None => {
+                        safe_auto_apply(&validated, &allowed_root, edit, current.as_deref()).await?
+                    }
                 };
                 match outcome {
                     ApplyOutcome::Applied => ImprovementEditStatus::Applied,
@@ -696,8 +705,12 @@ impl ImprovementEngine {
         if edit.status != ImprovementEditStatus::Pending {
             return Err(Error::Invalid("edit is not pending".into()));
         }
+        let ws = self.workspaces.get(&edit.workspace_id).await?;
+        let raw_target = Path::new(&edit.target_path);
+        let target =
+            validate_edit_target(&ws.root_path, &self.library_root, edit.target, raw_target)?;
         // Conflict: the file changed since we snapshotted `before_content`.
-        let current = read_edit_target(Path::new(&edit.target_path)).await?;
+        let current = read_edit_target(&target).await?;
         if current != edit.before_content {
             return self
                 .decide(
@@ -719,11 +732,13 @@ impl ImprovementEngine {
                 actor,
             )
             .await?;
-        if let Some(parent) = std::path::Path::new(&edit.target_path).parent() {
+        if let Some(parent) = target.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
-        let library_skill =
-            library_write::skill_target(&self.library_root, Path::new(&edit.target_path));
+        let is_lib = is_lexically_under_library_skills(&self.library_root, raw_target);
+        let library_skill = is_lib
+            .then(|| library_write::skill_target(&self.library_root, &target))
+            .flatten();
         let written = if let Some(t) = library_skill {
             let after =
                 (edit.kind != ImprovementEditKind::Remove).then(|| edit.after_content.clone());
@@ -736,17 +751,12 @@ impl ImprovementEngine {
                 Err(e) => Err(e),
             }
         } else if edit.kind == ImprovementEditKind::Remove {
-            remove_edit_target(Path::new(&edit.target_path)).await
+            remove_edit_target(&target).await
         } else {
             // Backup + temp + rename, like auto-apply: an in-place write
             // interrupted by a crash or a full disk truncated the user's file
             // after the row already said `Applied`.
-            backup_and_replace(
-                Path::new(&edit.target_path),
-                current.as_deref(),
-                &edit.after_content,
-            )
-            .await
+            backup_and_replace(&target, current.as_deref(), &edit.after_content).await
         };
         if let Err(e) = written {
             let _ = self
@@ -802,6 +812,10 @@ impl ImprovementEngine {
                 "only applied edits can be rolled back".into(),
             ));
         }
+        let ws = self.workspaces.get(&edit.workspace_id).await?;
+        let raw_target = Path::new(&edit.target_path);
+        let target =
+            validate_edit_target(&ws.root_path, &self.library_root, edit.target, raw_target)?;
         // Claim the decision BEFORE touching the file (as `approve_edit`
         // does): of two concurrent rollbacks (UI double click, UI + the MCP
         // tool) one wins and the other gets "no longer applied" — it never
@@ -814,7 +828,7 @@ impl ImprovementEngine {
                 actor,
             )
             .await?;
-        match self.restore_for_rollback(&edit).await {
+        match self.restore_for_rollback(&edit, &target).await {
             Ok(true) => Ok(claimed),
             // The file changed since we wrote it: nothing was clobbered.
             // Only our own claim is turned into the conflict.
@@ -847,8 +861,8 @@ impl ImprovementEngine {
     /// The file half of [`Self::rollback_edit`], run under its claim.
     /// `Ok(false)` = conflict (the file is not what the edit wrote, or a
     /// removed file was recreated) and nothing was written.
-    async fn restore_for_rollback(&self, edit: &ImprovementEdit) -> Result<bool> {
-        let current = read_edit_target(Path::new(&edit.target_path)).await?;
+    async fn restore_for_rollback(&self, edit: &ImprovementEdit, target: &Path) -> Result<bool> {
+        let current = read_edit_target(target).await?;
         // If the file changed since we wrote it, don't clobber — flag conflict.
         let expected = if edit.kind == ImprovementEditKind::Remove {
             None
@@ -860,8 +874,11 @@ impl ImprovementEngine {
         }
         // A Library skill: restore through the Library (lock + hash check)
         // and refresh the Otto-owned CLI copies.
-        if let Some(t) =
-            library_write::skill_target(&self.library_root, Path::new(&edit.target_path))
+        let is_lib =
+            is_lexically_under_library_skills(&self.library_root, Path::new(&edit.target_path));
+        if let Some(t) = is_lib
+            .then(|| library_write::skill_target(&self.library_root, target))
+            .flatten()
         {
             return library_write::apply(t, current, edit.before_content.clone()).await;
         }
@@ -873,7 +890,7 @@ impl ImprovementEngine {
                 match tokio::fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
-                    .open(&edit.target_path)
+                    .open(target)
                     .await
                 {
                     Ok(mut file) => {
@@ -899,12 +916,11 @@ impl ImprovementEngine {
                 }
             }
             Some(before) => {
-                backup_and_replace(Path::new(&edit.target_path), current.as_deref(), before)
-                    .await?;
+                backup_and_replace(target, current.as_deref(), before).await?;
             }
             None => {
                 // File was created by the edit → rollback deletes it.
-                remove_edit_target(Path::new(&edit.target_path)).await?;
+                remove_edit_target(target).await?;
             }
         }
         Ok(true)
@@ -1224,14 +1240,7 @@ fn blocking_read_candidate_skills(
 fn read_skill(root: &str, library_root: &Path, name: &str, cap: u64) -> Option<String> {
     use std::io::Read;
     let path = resolve_target(root, ImprovementTarget::Skill, name, Some(library_root)).ok()?;
-    let library_skills = library_root.join("skills");
-    let workspace_skills = Path::new(root).join(".claude/skills");
-    let allowed = if path.starts_with(&library_skills) {
-        &library_skills
-    } else {
-        &workspace_skills
-    };
-    let path = canonicalize_within(&path, allowed).ok()?;
+    let path = validate_edit_target(root, library_root, ImprovementTarget::Skill, &path).ok()?;
     let file = std::fs::File::open(path).ok()?;
     if !file.metadata().ok()?.is_file() {
         return None;
@@ -1331,6 +1340,14 @@ async fn read_edit_target(path: &Path) -> Result<Option<String>> {
 }
 
 async fn remove_edit_target(path: &Path) -> Result<()> {
+    if let Ok(meta) = tokio::fs::symlink_metadata(path).await {
+        if meta.file_type().is_symlink() {
+            return Err(Error::Invalid(format!(
+                "refusing to remove symlink {}",
+                path.display()
+            )));
+        }
+    }
     match tokio::fs::remove_file(path).await {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1346,34 +1363,100 @@ enum ApplyOutcome {
     Conflict,
 }
 
-/// Canonicalize `path` for symlink defense-in-depth, then verify the resolved
-/// location is still inside the allowed root the proposal targeted. For a file
-/// that doesn't exist yet (a fresh memory/skill file), canonicalize its existing
-/// parent directory instead and re-attach the final segment. Rejects any path
-/// whose canonical form escapes `allowed_root`.
-fn canonicalize_within(path: &Path, allowed_root: &Path) -> Result<PathBuf> {
-    // The allowed root may itself be a symlinked dir (e.g. /var -> /private/var
-    // on macOS), so canonicalize it too before comparing. If it doesn't exist
-    // yet, fall back to the literal root (nothing has been written under it).
-    let root = std::fs::canonicalize(allowed_root).unwrap_or_else(|_| allowed_root.to_path_buf());
-
-    let resolved = match std::fs::canonicalize(path) {
-        Ok(p) => p,
-        Err(_) => {
-            // Target file (or some ancestor) doesn't exist yet — canonicalize the
-            // nearest existing ancestor and re-attach the remaining tail, so a
-            // symlinked *parent* still can't redirect us outside the root.
-            let parent = path
-                .parent()
-                .ok_or_else(|| Error::Internal(format!("no parent for {}", path.display())))?;
-            let file_name = path
-                .file_name()
-                .ok_or_else(|| Error::Internal(format!("no file name for {}", path.display())))?;
-            let canon_parent =
-                std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
-            canon_parent.join(file_name)
+/// Reject `path` if the leaf itself or any component strictly under `anchor`
+/// is a symlink (catching both live and dangling symlinks via `symlink_metadata`).
+fn reject_symlinks_from(anchor: &Path, path: &Path) -> Result<()> {
+    if let Ok(rel) = path.strip_prefix(anchor) {
+        let mut cur = anchor.to_path_buf();
+        for comp in rel.components() {
+            match comp {
+                std::path::Component::Normal(seg) => {
+                    cur.push(seg);
+                    if let Ok(meta) = std::fs::symlink_metadata(&cur) {
+                        if meta.file_type().is_symlink() {
+                            return Err(Error::Invalid(format!(
+                                "refusing to traverse symlink {}",
+                                cur.display()
+                            )));
+                        }
+                    }
+                }
+                std::path::Component::CurDir => {}
+                _ => {
+                    return Err(Error::Invalid(format!(
+                        "unsafe path component in {}",
+                        path.display()
+                    )));
+                }
+            }
         }
-    };
+    }
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            return Err(Error::Invalid(format!(
+                "refusing to touch symlink {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Canonicalize the nearest existing ancestor of `path` and re-attach any
+/// non-existent tail segments so symlinked ancestors cannot hide behind a
+/// not-yet-created subdirectory.
+fn canonicalize_nearest(path: &Path) -> Result<PathBuf> {
+    let mut cur = path.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        match std::fs::canonicalize(&cur) {
+            Ok(mut canon) => {
+                for seg in tail.into_iter().rev() {
+                    canon.push(seg);
+                }
+                return Ok(canon);
+            }
+            Err(_) => {
+                let name = cur.file_name().ok_or_else(|| {
+                    Error::Internal(format!("cannot resolve ancestor of {}", path.display()))
+                })?;
+                tail.push(name.to_os_string());
+                if !cur.pop() {
+                    return Err(Error::Internal(format!(
+                        "cannot resolve ancestor of {}",
+                        path.display()
+                    )));
+                }
+            }
+        }
+    }
+}
+
+/// Canonicalize `path` for symlink defense-in-depth, reject any symlinked root,
+/// intermediate directory, or leaf (including dangling symlinks), and verify the
+/// resolved location stays inside the pinned `allowed_root`.
+fn canonicalize_within(path: &Path, allowed_root: &Path) -> Result<PathBuf> {
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(Error::Invalid(format!(
+            "path traversal rejected: {}",
+            path.display()
+        )));
+    }
+    if let Ok(meta) = std::fs::symlink_metadata(allowed_root) {
+        if meta.file_type().is_symlink() {
+            return Err(Error::Invalid(format!(
+                "allowed root {} is a symlink",
+                allowed_root.display()
+            )));
+        }
+    }
+    reject_symlinks_from(allowed_root, path)?;
+
+    let root = canonicalize_nearest(allowed_root)?;
+    let resolved = canonicalize_nearest(path)?;
 
     if !resolved.starts_with(&root) {
         return Err(Error::Invalid(format!(
@@ -1382,21 +1465,79 @@ fn canonicalize_within(path: &Path, allowed_root: &Path) -> Result<PathBuf> {
             root.display()
         )));
     }
+    // Defense in depth: also walk under the canonical root in case `path` and
+    // `allowed_root` differed in lexical prefix (e.g. /var vs /private/var).
+    reject_symlinks_from(&root, &resolved)?;
     Ok(resolved)
 }
 
-/// Best-effort allowed-root for a resolved target path: its parent directory.
-/// `resolve_target` already guarantees the path sits directly under a guarded
-/// skill/memory dir, so the parent is the tightest root we can pin without
-/// re-deriving the workspace layout here. The canonicalize check then rejects a
-/// symlinked leaf that would redirect the write outside that parent.
-fn allowed_root_for(path: &Path) -> &Path {
-    path.parent().unwrap_or(path)
+/// Lexical check for whether `path` targets the Otto Library skills root
+/// (never canonicalizes `path`, so a symlink under a workspace's `.claude/skills`
+/// cannot masquerade as a Library skill).
+fn is_lexically_under_library_skills(library_root: &Path, path: &Path) -> bool {
+    let lib_skills = library_root.join("skills");
+    if path.starts_with(&lib_skills) {
+        return true;
+    }
+    std::fs::canonicalize(&lib_skills)
+        .map(|canon| path.starts_with(&canon))
+        .unwrap_or(false)
+}
+
+/// Pin the allowed root directory for an edit target to the actual guarded
+/// root (`<library>/skills`, `<workspace>/.claude/skills`, or
+/// `<project_dir>/memory`) — never `path.parent()`.
+fn allowed_root_for_target(
+    workspace_root: &str,
+    library_root: &Path,
+    target: ImprovementTarget,
+    target_path: &Path,
+) -> PathBuf {
+    match target {
+        ImprovementTarget::Skill => {
+            if is_lexically_under_library_skills(library_root, target_path) {
+                library_root.join("skills")
+            } else {
+                Path::new(workspace_root).join(".claude").join("skills")
+            }
+        }
+        ImprovementTarget::Memory => crate::pathsafe::project_dir(workspace_root).join("memory"),
+    }
+}
+
+/// Validate `path` against its pinned workspace/library/memory root, rejecting
+/// any symlink along the anchor → root → target chain (e.g. a symlinked
+/// `.claude`, `.claude/skills`, skill dir, `memory`, or leaf file).
+fn validate_edit_target(
+    workspace_root: &str,
+    library_root: &Path,
+    target: ImprovementTarget,
+    path: &Path,
+) -> Result<PathBuf> {
+    let (anchor, allowed_root) = match target {
+        ImprovementTarget::Skill => {
+            if is_lexically_under_library_skills(library_root, path) {
+                (library_root.to_path_buf(), library_root.join("skills"))
+            } else {
+                let ws = PathBuf::from(workspace_root);
+                let skills = ws.join(".claude").join("skills");
+                (ws, skills)
+            }
+        }
+        ImprovementTarget::Memory => {
+            let proj = crate::pathsafe::project_dir(workspace_root);
+            let mem = proj.join("memory");
+            (proj, mem)
+        }
+    };
+    reject_symlinks_from(&anchor, path)?;
+    canonicalize_within(path, &allowed_root)
 }
 
 /// Atomically apply `edit` to `path`, backing up any prior content first.
 ///
-/// 1. Canonicalize `path` (symlink defense) and confirm it stays in its dir.
+/// 1. Canonicalize `path` (symlink defense) and confirm it stays inside the
+///    pinned `allowed_root` without traversing any symlink.
 /// 2. Conflict-check: re-read the current on-disk content and compare to the
 ///    `expected` snapshot the decision was based on. If they differ, return
 ///    [`ApplyOutcome::Conflict`] WITHOUT touching the file (caller queues it).
@@ -1406,10 +1547,11 @@ fn allowed_root_for(path: &Path) -> &Path {
 ///    canonical target.
 async fn safe_auto_apply(
     path: &Path,
+    allowed_root: &Path,
     edit: &ProposedEdit,
     expected: Option<&str>,
 ) -> Result<ApplyOutcome> {
-    let target = canonicalize_within(path, allowed_root_for(path))?;
+    let target = canonicalize_within(path, allowed_root)?;
 
     // (2) Conflict check against the snapshot the decision was based on. Reading
     // here catches changes since the proposal was evaluated. External writers
@@ -1438,15 +1580,20 @@ async fn safe_auto_apply(
 /// timestamped sibling `.bak`, write `content` to a temp file in the same
 /// directory, then `rename` it over the target (atomic on one filesystem). A
 /// crash or a full disk leaves the old file or the new one, never a
-/// truncated mix. A symlinked target (e.g. a dotfiles-managed CLAUDE.md) is
-/// resolved first, so the rename replaces the real file, not the link.
+/// truncated mix. Refuses symlinks so writes can never follow a link outside
+/// the guarded root.
 async fn backup_and_replace(target: &Path, prev: Option<&str>, content: &str) -> Result<()> {
-    let target = tokio::fs::canonicalize(target)
-        .await
-        .unwrap_or_else(|_| target.to_path_buf());
+    if let Ok(meta) = tokio::fs::symlink_metadata(target).await {
+        if meta.file_type().is_symlink() {
+            return Err(Error::Invalid(format!(
+                "refusing to write through symlink {}",
+                target.display()
+            )));
+        }
+    }
     let target_str = target.to_string_lossy().to_string();
     if let Some(prev) = prev {
-        write_backup(&target, prev).await?;
+        write_backup(target, prev).await?;
     }
     let parent = target
         .parent()
@@ -1462,7 +1609,7 @@ async fn backup_and_replace(target: &Path, prev: Option<&str>, content: &str) ->
     tokio::fs::write(&tmp, content)
         .await
         .map_err(|e| Error::Internal(format!("write temp {}: {e}", tmp.display())))?;
-    if let Err(e) = tokio::fs::rename(&tmp, &target).await {
+    if let Err(e) = tokio::fs::rename(&tmp, target).await {
         // Clean up the temp file so a failed rename doesn't litter the dir.
         let _ = tokio::fs::remove_file(&tmp).await;
         return Err(Error::Internal(format!("rename into {target_str}: {e}")));
@@ -1470,9 +1617,13 @@ async fn backup_and_replace(target: &Path, prev: Option<&str>, content: &str) ->
     Ok(())
 }
 
+/// Maximum `.bak-*` files kept per edited target (matches `library_write::BAKS_KEPT`).
+const MAX_BACKUPS_PER_TARGET: usize = 5;
+
 /// Write a timestamped backup of `prev` content next to `target`, consistent
 /// with the rollback trail (an auto-applied edit can be recovered from disk even
-/// before the version-log row exists).
+/// before the version-log row exists), then prune older backups for that target
+/// so repeated edits never accumulate unbounded files on disk.
 async fn write_backup(target: &Path, prev: &str) -> Result<()> {
     let parent = target
         .parent()
@@ -1489,7 +1640,45 @@ async fn write_backup(target: &Path, prev: &str) -> Result<()> {
     tokio::fs::write(&backup, prev)
         .await
         .map_err(|e| Error::Internal(format!("write backup {}: {e}", backup.display())))?;
+    prune_old_backups(parent, stem, MAX_BACKUPS_PER_TARGET).await;
     Ok(())
+}
+
+/// Remove all but the newest `keep` `.<stem>.bak-<YYYYMMDDTHHMMSS.ffffff>`
+/// siblings (best effort). Only exact Otto timestamp shapes match so user-named
+/// `.bak-*` files and sibling targets' backups are untouched.
+async fn prune_old_backups(parent: &Path, stem: &str, keep: usize) {
+    let Ok(mut rd) = tokio::fs::read_dir(parent).await else {
+        return;
+    };
+    let prefix = format!(".{stem}.bak-");
+    let mut baks: Vec<(String, PathBuf)> = Vec::new();
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let Some(stamp) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        let shaped = stamp.len() == 22
+            && stamp.char_indices().all(|(i, c)| match i {
+                8 => c == 'T',
+                15 => c == '.',
+                _ => c.is_ascii_digit(),
+            });
+        if shaped && entry.file_type().await.is_ok_and(|ft| ft.is_file()) {
+            baks.push((stamp.to_string(), entry.path()));
+        }
+    }
+    if baks.len() <= keep {
+        return;
+    }
+    baks.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in baks.into_iter().skip(keep) {
+        if let Err(e) = tokio::fs::remove_file(&path).await {
+            tracing::warn!(path = %path.display(), "self-improvement: prune backup: {e}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2043,16 +2232,21 @@ mod tests {
             .unwrap()
     }
 
+    fn ws_memory_file(ws_dir: &Path, name: &str) -> PathBuf {
+        let mem = crate::pathsafe::project_dir(ws_dir.to_str().unwrap()).join("memory");
+        std::fs::create_dir_all(&mem).unwrap();
+        mem.join(name)
+    }
+
     /// Manual approve and rollback replace the file the way auto-apply does:
-    /// a `.bak` of the replaced content, an atomic rename (no in-place
-    /// truncation), and a symlinked target keeps its link.
+    /// a `.bak` of the replaced content and an atomic rename (no in-place
+    /// truncation).
     #[tokio::test]
     async fn approve_and_rollback_back_up_and_replace_atomically() {
         let (engine, ws, _, dir) = harness().await;
-        let real = dir.path().join("real.md");
-        let link = dir.path().join("MEMORY.md");
-        tokio::fs::write(&real, "original").await.unwrap();
-        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let path = ws_memory_file(dir.path(), "MEMORY.md");
+        let mem_dir = path.parent().unwrap().to_path_buf();
+        tokio::fs::write(&path, "original").await.unwrap();
         let run = engine
             .improvements
             .create_run(&ws, ImprovementTrigger::Manual)
@@ -2065,7 +2259,7 @@ mod tests {
                 workspace_id: ws.clone(),
                 target: ImprovementTarget::Memory,
                 target_ref: "MEMORY.md".into(),
-                target_path: link.to_string_lossy().into_owned(),
+                target_path: path.to_string_lossy().into_owned(),
                 kind: ImprovementEditKind::Modify,
                 risk: ImprovementRisk::Low,
                 status: ImprovementEditStatus::Pending,
@@ -2078,7 +2272,7 @@ mod tests {
             .await
             .unwrap();
         let backups = |content: &str| {
-            std::fs::read_dir(dir.path())
+            std::fs::read_dir(&mem_dir)
                 .unwrap()
                 .flatten()
                 .filter(|e| e.file_name().to_string_lossy().contains(".bak-"))
@@ -2088,16 +2282,14 @@ mod tests {
 
         let applied = engine.approve_edit(&edit.id, "fixture").await.unwrap();
         assert_eq!(applied.status, ImprovementEditStatus::Applied);
-        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
-        assert_eq!(std::fs::read_to_string(&real).unwrap(), "improved");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "improved");
         assert_eq!(backups("original"), 1, "approve backed up the original");
 
         let rolled = engine.rollback_edit(&edit.id, "fixture").await.unwrap();
         assert_eq!(rolled.status, ImprovementEditStatus::RolledBack);
-        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
-        assert_eq!(std::fs::read_to_string(&real).unwrap(), "original");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
         assert_eq!(backups("improved"), 1, "rollback backed up the edit");
-        let stray_temps = std::fs::read_dir(dir.path())
+        let stray_temps = std::fs::read_dir(&mem_dir)
             .unwrap()
             .flatten()
             .filter(|e| e.file_name().to_string_lossy().contains(".otto-tmp-"))
@@ -2108,7 +2300,7 @@ mod tests {
     #[tokio::test]
     async fn rollback_removal_preserves_recreated_file() {
         let (engine, ws, _, dir) = harness().await;
-        let path = dir.path().join("MEMORY.md");
+        let path = ws_memory_file(dir.path(), "MEMORY.md");
         let edit = removal_edit(
             &engine,
             &ws,
@@ -2133,7 +2325,7 @@ mod tests {
     async fn concurrent_rollbacks_have_one_winner_and_no_conflict() {
         for _ in 0..5 {
             let (engine, ws, _, dir) = harness().await;
-            let path = dir.path().join("MEMORY.md");
+            let path = ws_memory_file(dir.path(), "MEMORY.md");
             let edit = removal_edit(
                 &engine,
                 &ws,
@@ -2170,7 +2362,7 @@ mod tests {
     async fn concurrent_approve_and_reject_have_one_winner() {
         for _ in 0..5 {
             let (engine, ws, _, dir) = harness().await;
-            let path = dir.path().join("MEMORY.md");
+            let path = ws_memory_file(dir.path(), "MEMORY.md");
             tokio::fs::write(&path, "original").await.unwrap();
             let edit = removal_edit(
                 &engine,
@@ -2197,7 +2389,7 @@ mod tests {
     #[tokio::test]
     async fn approve_removal_does_not_report_success_for_unreadable_target() {
         let (engine, ws, _, dir) = harness().await;
-        let path = dir.path().join("MEMORY.md");
+        let path = ws_memory_file(dir.path(), "MEMORY.md");
         tokio::fs::create_dir(&path).await.unwrap();
         let edit = removal_edit(&engine, &ws, &path, None, ImprovementEditStatus::Pending).await;
         assert!(engine.approve_edit(&edit.id, "fixture").await.is_err());
@@ -2610,7 +2802,7 @@ mod tests {
 
         let edit = write_edit("NEW CONTENT\n", ImprovementEditKind::Add);
         // The expected snapshot matches what's on disk → clean apply.
-        let outcome = safe_auto_apply(&target, &edit, Some("OLD CONTENT\n"))
+        let outcome = safe_auto_apply(&target, dir.path(), &edit, Some("OLD CONTENT\n"))
             .await
             .unwrap();
         assert!(matches!(outcome, ApplyOutcome::Applied));
@@ -2653,7 +2845,7 @@ mod tests {
         std::fs::write(&target, "CHANGED BY SOMEONE ELSE\n").unwrap();
 
         let edit = write_edit("PROPOSED CONTENT\n", ImprovementEditKind::Add);
-        let outcome = safe_auto_apply(&target, &edit, Some("ORIGINAL SNAPSHOT\n"))
+        let outcome = safe_auto_apply(&target, dir.path(), &edit, Some("ORIGINAL SNAPSHOT\n"))
             .await
             .unwrap();
         assert!(matches!(outcome, ApplyOutcome::Conflict));
@@ -2672,7 +2864,9 @@ mod tests {
         let target = dir.path().join("MEMORY.md");
         // No file on disk and the snapshot was None → a clean create, no backup.
         let edit = write_edit("FRESH\n", ImprovementEditKind::Add);
-        let outcome = safe_auto_apply(&target, &edit, None).await.unwrap();
+        let outcome = safe_auto_apply(&target, dir.path(), &edit, None)
+            .await
+            .unwrap();
         assert!(matches!(outcome, ApplyOutcome::Applied));
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "FRESH\n");
         assert_eq!(backup_count(dir.path(), "MEMORY.md"), 0);
@@ -2685,12 +2879,187 @@ mod tests {
         std::fs::write(&target, "TO BE REMOVED\n").unwrap();
 
         let edit = write_edit("", ImprovementEditKind::Remove);
-        let outcome = safe_auto_apply(&target, &edit, Some("TO BE REMOVED\n"))
+        let outcome = safe_auto_apply(&target, dir.path(), &edit, Some("TO BE REMOVED\n"))
             .await
             .unwrap();
         assert!(matches!(outcome, ApplyOutcome::Applied));
         assert!(!target.exists());
         // The removed content is recoverable from the backup.
         assert_eq!(backup_count(dir.path(), "MEMORY.md"), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinked_parent_dir_and_leaf_are_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        let outside = tmp.path().join("outside");
+        let skills_root = ws.join(".claude").join("skills");
+        std::fs::create_dir_all(&skills_root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        // 1. Symlinked parent dir: `<ws>/.claude/skills/escape -> outside`
+        let linked_skill_dir = skills_root.join("escape");
+        std::os::unix::fs::symlink(&outside, &linked_skill_dir).unwrap();
+        let outside_skill = outside.join("SKILL.md");
+        std::fs::write(&outside_skill, "UNTOUCHED\n").unwrap();
+        let via_parent_link = linked_skill_dir.join("SKILL.md");
+
+        assert!(
+            canonicalize_within(&via_parent_link, &skills_root).is_err(),
+            "symlinked parent dir escaping allowed_root must be rejected"
+        );
+        let edit = write_edit("PWNED\n", ImprovementEditKind::Modify);
+        assert!(
+            safe_auto_apply(&via_parent_link, &skills_root, &edit, Some("UNTOUCHED\n"))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&outside_skill).unwrap(),
+            "UNTOUCHED\n"
+        );
+
+        // 2. Symlinked leaf file pointing outside allowed_root
+        let real_skill_dir = skills_root.join("legit");
+        std::fs::create_dir_all(&real_skill_dir).unwrap();
+        let outside_leaf = outside.join("secret.md");
+        std::fs::write(&outside_leaf, "SECRET\n").unwrap();
+        let leaf_link = real_skill_dir.join("SKILL.md");
+        std::os::unix::fs::symlink(&outside_leaf, &leaf_link).unwrap();
+
+        assert!(canonicalize_within(&leaf_link, &skills_root).is_err());
+        assert!(
+            safe_auto_apply(&leaf_link, &skills_root, &edit, Some("SECRET\n"))
+                .await
+                .is_err()
+        );
+        assert!(backup_and_replace(&leaf_link, Some("SECRET\n"), "PWNED\n")
+            .await
+            .is_err());
+        assert!(remove_edit_target(&leaf_link).await.is_err());
+        assert_eq!(std::fs::read_to_string(&outside_leaf).unwrap(), "SECRET\n");
+
+        // 3. Symlinked `.claude` directory inside workspace
+        let ws2 = tmp.path().join("ws2");
+        std::fs::create_dir_all(&ws2).unwrap();
+        std::os::unix::fs::symlink(&outside, ws2.join(".claude")).unwrap();
+        let lib = tmp.path().join("library");
+        std::fs::create_dir_all(&lib).unwrap();
+        let escaped = ws2
+            .join(".claude")
+            .join("skills")
+            .join("foo")
+            .join("SKILL.md");
+        assert!(validate_edit_target(
+            ws2.to_str().unwrap(),
+            &lib,
+            ImprovementTarget::Skill,
+            &escaped,
+        )
+        .is_err());
+
+        // 4. `approve_edit` and `rollback_edit` reject a symlinked target file
+        let (engine, ws_id, _, dir) = harness().await;
+        let mem_link = ws_memory_file(dir.path(), "LINK.md");
+        std::os::unix::fs::symlink(&outside_leaf, &mem_link).unwrap();
+        let run = engine
+            .improvements
+            .create_run(&ws_id, ImprovementTrigger::Manual)
+            .await
+            .unwrap();
+        let pending = engine
+            .improvements
+            .create_edit(NewEdit {
+                run_id: run.id.clone(),
+                workspace_id: ws_id.clone(),
+                target: ImprovementTarget::Memory,
+                target_ref: "LINK.md".into(),
+                target_path: mem_link.to_string_lossy().into_owned(),
+                kind: ImprovementEditKind::Modify,
+                risk: ImprovementRisk::Low,
+                status: ImprovementEditStatus::Pending,
+                rationale: "escape".into(),
+                evidence: vec![],
+                before_content: Some("SECRET\n".into()),
+                after_content: "PWNED\n".into(),
+                actor: None,
+            })
+            .await
+            .unwrap();
+        assert!(engine.approve_edit(&pending.id, "u").await.is_err());
+        let applied = engine
+            .improvements
+            .create_edit(NewEdit {
+                run_id: run.id,
+                workspace_id: ws_id,
+                target: ImprovementTarget::Memory,
+                target_ref: "LINK.md".into(),
+                target_path: mem_link.to_string_lossy().into_owned(),
+                kind: ImprovementEditKind::Modify,
+                risk: ImprovementRisk::Low,
+                status: ImprovementEditStatus::Applied,
+                rationale: "escape".into(),
+                evidence: vec![],
+                before_content: Some("BEFORE\n".into()),
+                after_content: "SECRET\n".into(),
+                actor: None,
+            })
+            .await
+            .unwrap();
+        assert!(engine.rollback_edit(&applied.id, "u").await.is_err());
+        assert_eq!(std::fs::read_to_string(&outside_leaf).unwrap(), "SECRET\n");
+    }
+
+    #[tokio::test]
+    async fn backup_and_replace_prunes_old_backups_keeping_newest_five() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("SKILL.md");
+        std::fs::write(&target, "v0").unwrap();
+        // Pre-seed a user-named backup and a sibling target's backup that must
+        // never be pruned.
+        let user_bak = dir.path().join(".SKILL.md.bak-mine");
+        let sibling_bak = dir.path().join(".OTHER.md.bak-20200101T000000.000000");
+        std::fs::write(&user_bak, "keep-user").unwrap();
+        std::fs::write(&sibling_bak, "keep-sibling").unwrap();
+
+        let mut prev = "v0".to_string();
+        for i in 1..=8 {
+            let next = format!("v{i}");
+            backup_and_replace(&target, Some(&prev), &next)
+                .await
+                .unwrap();
+            prev = next;
+            // Ensure distinct microsecond timestamps on fast CPUs.
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "v8");
+        assert!(user_bak.is_file(), "user-named backup must not be pruned");
+        assert!(
+            sibling_bak.is_file(),
+            "sibling target backup must not be pruned"
+        );
+
+        let mut kept_contents: Vec<(String, String)> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().into_string().ok()?;
+                let stamp = name.strip_prefix(".SKILL.md.bak-")?;
+                if stamp == "mine" {
+                    return None;
+                }
+                let content = std::fs::read_to_string(e.path()).ok()?;
+                Some((name, content))
+            })
+            .collect();
+        kept_contents.sort_by(|a, b| a.0.cmp(&b.0));
+        let values: Vec<&str> = kept_contents.iter().map(|(_, c)| c.as_str()).collect();
+        assert_eq!(
+            values,
+            vec!["v3", "v4", "v5", "v6", "v7"],
+            "expected newest 5 backups to remain"
+        );
     }
 }

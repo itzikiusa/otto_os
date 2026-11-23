@@ -132,6 +132,17 @@ impl DapStartContext {
     }
 }
 
+/// Live OS resource telemetry for one active debug session.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DapSessionResourceMetrics {
+    pub session_id: String,
+    pub pids: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rss_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fd_count: Option<u32>,
+}
+
 /// Multi-session Debug Adapter Protocol engine mounted on `IdeEngine`.
 pub struct DapManager {
     pub(super) data_dir: PathBuf,
@@ -159,6 +170,53 @@ impl DapManager {
             sessions: Arc::new(DashMap::new()),
             seq_counter: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Sample live RSS and open file-descriptor counts for all active debug
+    /// sessions off the async runtime (`spawn_blocking`).
+    pub async fn resource_metrics(&self) -> Vec<DapSessionResourceMetrics> {
+        let mut per_session: Vec<(String, Vec<u32>)> = Vec::new();
+        let mut all_pids: Vec<u32> = Vec::new();
+        for entry in self.sessions.iter() {
+            let sid = entry.key().clone();
+            let pids = entry
+                .value()
+                .conn
+                .read()
+                .ok()
+                .and_then(|c| c.as_ref().map(|ac| ac.guard.pids()))
+                .unwrap_or_default();
+            all_pids.extend(pids.iter().copied());
+            per_session.push((sid, pids));
+        }
+        let samples = crate::lsp_host::pool_spawn::sample_pids_metrics_async(all_pids).await;
+        per_session
+            .into_iter()
+            .map(|(session_id, pids)| {
+                let mut rss_sum = 0u64;
+                let mut any_rss = false;
+                let mut fd_sum = 0u32;
+                let mut any_fd = false;
+                for pid in &pids {
+                    if let Some(s) = samples.get(pid) {
+                        if let Some(r) = s.rss_bytes {
+                            rss_sum = rss_sum.saturating_add(r);
+                            any_rss = true;
+                        }
+                        if let Some(f) = s.fd_count {
+                            fd_sum = fd_sum.saturating_add(f);
+                            any_fd = true;
+                        }
+                    }
+                }
+                DapSessionResourceMetrics {
+                    session_id,
+                    pids,
+                    rss_bytes: any_rss.then_some(rss_sum),
+                    fd_count: any_fd.then_some(fd_sum),
+                }
+            })
+            .collect()
     }
 
     /// List snapshots of all debug sessions, newest first.

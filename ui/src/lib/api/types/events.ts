@@ -630,6 +630,15 @@ export type OttoEvent =
       user_id: Id;
     }
   | {
+      /** Entries were created, removed or renamed inside folders the IDE tree
+       *  `client_id` shows (`POST /ide/fs/watch`) — owner-only; that tree
+       *  re-lists `dirs` (absolute, spelled as it registered them). */
+      type: 'ide_fs_changed';
+      user_id: Id;
+      client_id: string;
+      dirs: string[];
+    }
+  | {
       type: 'db_mcp_activity';
       workspace_id: Id;
       connection_id: Id;

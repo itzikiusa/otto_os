@@ -273,19 +273,19 @@
     }
   }
 
+  let gatewaySeq = 0;
   async function loadGatewayTools(id: string): Promise<void> {
+    const seq = typeof gatewaySeq === 'undefined' ? 0 : ++gatewaySeq;
+    const ok = () => wsId === id && (typeof gatewaySeq === 'undefined' || seq === gatewaySeq);
     gatewayLoading = true;
     gatewayError = null;
     try {
       const result = await mcpCpExtraApi.gatewayTools(id);
-      if (wsId === id) gatewayTools = result.tools;
+      if (ok()) gatewayTools = result.tools;
     } catch (e) {
-      if (wsId === id) {
-        gatewayTools = [];
-        gatewayError = loadErrorText(e);
-      }
+      if (ok()) { gatewayTools = []; gatewayError = loadErrorText(e); }
     } finally {
-      if (wsId === id) gatewayLoading = false;
+      if (ok()) gatewayLoading = false;
     }
   }
 
@@ -299,7 +299,7 @@
 
   $effect(() => {
     const id = wsId;
-    attachGeneration++;
+    attachGeneration++; gatewaySeq++;
     attachBusy = false;
     attach = null;
     attachError = null;
@@ -356,7 +356,7 @@
       <input
         type="checkbox"
         data-testid="mcp-outward-enabled"
-        checked={status?.enabled ?? false}
+        checked={Boolean(status?.enabled)}
         disabled={saving || !status || !isMcpAdmin}
         onchange={(event) => void toggleEnabled(event.currentTarget)}
       />
@@ -467,7 +467,7 @@
                     type="checkbox"
                     data-testid={`mcp-auto-${tool.name}`}
                     checked={!!own}
-                    disabled={saving || !status || !isMcpAdmin}
+                    disabled={saving || !status || !isMcpAdmin || !approvalsOn}
                     onchange={(event) => void setAuto(tool, event.currentTarget.checked, event.currentTarget)}
                   />
                   <span>Auto-approve everywhere</span>

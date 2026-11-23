@@ -8,8 +8,10 @@
 //!
 //! The filter only narrows: every call it lets through runs exactly the
 //! path it ran before (native RBAC, the governed enable list / approvals).
-//! An unresolvable profile (daemon unreachable) hides nothing — the same
-//! fail-open the enable list itself has.
+//! When a session is configured with `OTTO_MCP_PROFILES`, profile resolution
+//! fails CLOSED — if the daemon is unreachable or fails to return the resolved
+//! profile filter, calls are refused and `tools/list` exposes no tools rather
+//! than widening the session to the full catalog.
 
 use otto_server::mcp_profiles::ToolFilter;
 use serde_json::{json, Value};
@@ -41,13 +43,20 @@ pub(super) fn parse(v: &Value) -> Option<ToolFilter> {
 }
 
 /// `tools/call` hook: `Some(result)` refuses a tool outside the session's
-/// profile (audited as a failed call), naming the profile; `None` lets the
-/// call run its normal path.
+/// profile (audited as a failed call), naming the profile — or fails closed if
+/// the configured profile cannot be resolved; `None` lets the call run its
+/// normal path.
 pub(super) async fn refuse(ctx: &Ctx, name: &str, args: &Value) -> Option<Value> {
     if ctx.profiles.is_none() || is_vault_docs_reviewer(ctx.source.as_deref()) {
         return None;
     }
-    let filter = ctx.enabled_info(false).await?.filter?;
+    let Some(filter) = ctx.enabled_info(false).await.and_then(|info| info.filter) else {
+        ctx.audit(name, args, false, None).await;
+        return Some(tool_result(
+            &json!({ "error": "cannot verify MCP profile restriction for this session" }),
+            true,
+        ));
+    };
     if filter.allows(name) {
         return None;
     }

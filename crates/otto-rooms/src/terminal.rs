@@ -1,10 +1,14 @@
 //! Room terminal flow state: each viewer's resync queue, pause gate and
 //! wire frames. The socket that applies them (and the credit gate shared with
 //! `/ws/term`) lives in otto-server's `rooms/terminal.rs`.
+use crate::capability::TokenBucket;
+use crate::RATE_LIMITED;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use bytes::Bytes;
 use otto_core::{Error, Result};
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::broadcast;
 
@@ -117,6 +121,57 @@ pub fn search_result_frame(query: &str, matches: Vec<(usize, String)>) -> String
         .collect();
     serde_json::json!({ "type": "search_result", "query": query, "matches": matches }).to_string()
 }
+/// Cap snapshot scrollback depth for room viewers: guests (`is_guest`) only
+/// ever receive the live viewport (`0` history rows) so pre-room scrollback is
+/// never leaked; the room host keeps up to 10,000 rows.
+pub fn room_snapshot_lines(requested: usize, is_guest: bool) -> usize {
+    if is_guest {
+        0
+    } else {
+        requested.min(10_000)
+    }
+}
+
+/// Cap on tracked `(room, member)` rate-limit buckets to prevent unbounded growth.
+const GUEST_RATE_MAP_CAP: usize = 1024;
+
+/// Bounded per-`(room, member)` token-bucket table for guest capability routes
+/// (paste / prompt).
+#[derive(Default)]
+pub struct GuestRateTable {
+    buckets: OnceLock<Mutex<HashMap<(String, String), TokenBucket>>>,
+}
+
+impl GuestRateTable {
+    pub const fn new() -> Self {
+        Self {
+            buckets: OnceLock::new(),
+        }
+    }
+
+    pub fn take(&self, room: &str, member: &str, per_sec: f64, burst: f64) -> Result<()> {
+        take_guest_rate(&self.buckets, room, member, per_sec, burst)
+    }
+}
+
+pub fn take_guest_rate(
+    table: &OnceLock<Mutex<HashMap<(String, String), TokenBucket>>>,
+    room: &str,
+    member: &str,
+    per_sec: f64,
+    burst: f64,
+) -> Result<()> {
+    let map = table.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.len() >= GUEST_RATE_MAP_CAP {
+        guard.clear();
+    }
+    let bucket = guard
+        .entry((room.to_string(), member.to_string()))
+        .or_insert_with(|| TokenBucket::new(burst));
+    bucket.take(per_sec, burst, RATE_LIMITED)
+}
+
 /// A driver's `input` frame: base64, at most 32 KiB decoded.
 pub fn decode_input(data: &str) -> Result<Vec<u8>> {
     let bytes = STANDARD
@@ -261,5 +316,22 @@ mod tests {
             .unwrap();
         assert!(flow.resume(&mut output));
         assert!(flow.paused_until.is_none());
+    }
+
+    #[test]
+    fn guest_scrollback_is_floored_to_live_viewport_only() {
+        assert_eq!(room_snapshot_lines(10_000, true), 0);
+        assert_eq!(room_snapshot_lines(500, true), 0);
+        assert_eq!(room_snapshot_lines(10_000, false), 10_000);
+        assert_eq!(room_snapshot_lines(50_000, false), 10_000);
+    }
+
+    #[test]
+    fn guest_paste_rate_limiter_enforces_burst() {
+        let table = GuestRateTable::new();
+        for _ in 0..4 {
+            assert!(table.take("r1", "m1", 0.1, 4.0).is_ok());
+        }
+        assert!(table.take("r1", "m1", 0.1, 4.0).is_err());
     }
 }

@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { announce, focusAppContent } from '../../lib/announce.svelte';
+  import { announce, announceShown, focusAppContent } from '../../lib/announce.svelte';
   import { onMount, onDestroy } from 'svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { api } from '../../lib/api/client';
   import type { ConnectionExportFormat, ConnectionExportResult } from '../../lib/api/types';
   import { downloadText } from '../../lib/components/exporters';
+  import { loadErrorText } from '../../lib/loadError';
 
   let formats: ConnectionExportFormat[] = $state([]);
   let workspaces: { id: string; name: string }[] = $state([]);
@@ -35,7 +36,7 @@
       if (seq !== generation) return;
       formats = available.formats; workspaces = spaces;
       if (!formats.some(item => item.id === format)) format = formats[0]?.id ?? '';
-    } catch (e) { if (seq === generation) error = e instanceof Error ? e.message : String(e); }
+    } catch (e) { if (seq === generation) error = loadErrorText(e); }
     finally { if (seq === generation) loading = false; }
   }
   function clearResult() { result = null; error = ''; }
@@ -49,7 +50,7 @@
         include_passwords: includePasswords,
       });
       if (seq === generation) result = exported;
-    } catch (e) { if (seq === generation) error = e instanceof Error ? e.message : String(e); }
+    } catch (e) { if (seq === generation) error = loadErrorText(e); }
     finally { if (seq === generation) busy = false; }
   }
 
@@ -94,7 +95,7 @@
   {#if error && !formats.length}
     <LoadState variant="compact" what="export formats" {error} empty onretry={load} />
   {:else if error}
-    <p class="error" role="alert"><strong>Couldn’t prepare the export.</strong> {error}</p>
+    <p class="error" use:announceShown={{ text: `Couldn’t prepare the export. ${error}`, assertive: true }}><strong>Couldn’t prepare the export.</strong> {error}</p>
   {/if}
 </section>
 

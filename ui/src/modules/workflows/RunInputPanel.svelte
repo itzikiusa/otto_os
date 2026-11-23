@@ -5,15 +5,26 @@
   // the page starts the run.
   import { announceShown } from '../../lib/announce.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import type { WorkflowGraph } from '../../lib/api/types';
+  import type { InspectorOptions } from './inspector/options.svelte';
   import type { RunInputForm } from './runInputForm.svelte';
+  import { graphHasDbQuery, graphSideEffects } from './sideEffects';
 
   interface Props {
     form: RunInputForm;
+    graph?: WorkflowGraph;
+    wsId?: string;
+    pickers?: InspectorOptions;
     /** The run POST is in flight. */
     running: boolean;
     onrun: () => void;
   }
-  let { form, running, onrun }: Props = $props();
+  let { form, graph, wsId = '', pickers, running, onrun }: Props = $props();
+
+  $effect(() => {
+    if (wsId && pickers && graphHasDbQuery(graph)) pickers.dbConnections.ensure(wsId);
+  });
+  const touches = $derived(graph ? graphSideEffects(graph, pickers?.dbConnections.rows(wsId) ?? []) : []);
 </script>
 
 <div class="run-input">
@@ -64,6 +75,24 @@
       <Icon name="send" size={12} /> Results will be posted to {form.destinations.join(' and ')}.
     </p>
   {/if}
+  {#if touches.length > 0}
+    <div class="ri-touches" data-testid="run-preflight-touches">
+      <div class="ri-touches-head">
+        <Icon name="shield" size={12} />
+        <strong>What this run will touch</strong>
+        <span class="ri-hint">{touches.length} outward or mutating {touches.length === 1 ? 'step' : 'steps'}</span>
+      </div>
+      <ul class="ri-touch-list">
+        {#each touches as item, i (`${item.nodeId}:${item.kind}:${i}`)}
+          <li class="ri-touch-item">
+            <span class="ri-se-pill" class:danger={item.danger}>{item.badge}</span>
+            <span class="ri-se-name">{item.nodeName}</span>
+            <span class="ri-se-desc">{item.summary}</span>
+          </li>
+        {/each}
+      </ul>
+    </div>
+  {/if}
   <div class="ri-actions">
     <button class="btn small" onclick={() => (form.open = false)}>Cancel</button>
     <button class="btn primary small" disabled={running} onclick={onrun}>
@@ -80,6 +109,55 @@
     margin: 0;
     font-size: var(--fs-s);
     color: var(--warning);
+  }
+  .ri-touches {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--bg);
+  }
+  .ri-touches-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--fs-s);
+    color: var(--text);
+  }
+  .ri-touch-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .ri-touch-item {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-size: var(--fs-xs);
+  }
+  .ri-se-pill {
+    padding: 1px 6px;
+    border-radius: var(--radius-s);
+    background: var(--warning-soft);
+    color: var(--warning);
+    font-weight: 600;
+  }
+  .ri-se-pill.danger {
+    background: var(--danger-soft);
+    color: var(--danger);
+  }
+  .ri-se-name {
+    font-weight: 600;
+    color: var(--text);
+  }
+  .ri-se-desc {
+    color: var(--text-dim);
   }
   .ri-err {
     margin: 0;

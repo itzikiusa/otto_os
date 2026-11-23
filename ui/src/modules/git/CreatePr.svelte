@@ -18,6 +18,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { router } from '../../lib/router.svelte';
+  import { lsGet, lsRemove, lsSet } from '../../lib/storage';
   import { onDestroy } from 'svelte';
 
   interface Props {
@@ -33,9 +34,17 @@
   /** False once the sheet unmounts: an in-flight draft or lookup must not
    *  touch global UI (a ghost confirm supersedes whatever dialog is open). */
   let alive = true;
+  let draftTick: ReturnType<typeof setInterval> | null = null;
+  function clearDraftTick(): void {
+    if (draftTick !== null) {
+      clearInterval(draftTick);
+      draftTick = null;
+    }
+  }
   onDestroy(() => {
     alive = false;
     clearTimeout(revTimer);
+    clearDraftTick();
   });
 
   let branches: BranchInfo[] = $state([]);
@@ -93,12 +102,12 @@
   const draftKey = $derived(`otto_pr_draft:${repoId}`);
   let openAsDraft = $state(false);
   $effect(() => {
-    openAsDraft = localStorage.getItem(draftKey) === '1';
+    openAsDraft = lsGet(draftKey) === '1';
   });
   function toggleDraft(): void {
     openAsDraft = !openAsDraft;
-    if (openAsDraft) localStorage.setItem(draftKey, '1');
-    else localStorage.removeItem(draftKey);
+    if (openAsDraft) lsSet(draftKey, '1');
+    else lsRemove(draftKey);
   }
 
   // Reviewers (optional): chips + provider-backed typeahead. When the
@@ -204,6 +213,10 @@
     // Slight backdate so a session created in the same second still matches.
     draftStartedAt = new Date(Date.now() - 2000).toISOString();
     const tick = setInterval(() => (draftElapsed += 1), 1000);
+    if (typeof draftTick !== 'undefined') {
+      if (draftTick !== null) clearInterval(draftTick);
+      draftTick = tick;
+    }
     try {
       const d = await api.post<DraftPrResp>(`/repos/${repoId}/pr/draft`, { base: target, head: head || undefined });
       if (!alive) return;
@@ -238,6 +251,7 @@
       if (alive) toastError('Couldn’t draft the description', e);
     } finally {
       clearInterval(tick);
+      if (typeof draftTick !== 'undefined' && draftTick === tick) draftTick = null;
       drafting = false;
     }
   }

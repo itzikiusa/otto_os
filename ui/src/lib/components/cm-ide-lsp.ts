@@ -6,6 +6,7 @@ import { EditorView, ViewPlugin, type ViewUpdate } from '@codemirror/view';
 import type { Extension } from '@codemirror/state';
 import type { IdeDiagnostic } from '../api/types';
 import { pathToFileUri } from '../fileUri.ts';
+import { getPooledRpc, indexProgress, LspIndexProgress, lookupNavigation, queryPluginLocations } from './cm-ide-lsp-navigation.ts';
 import {
   clearLiveLspDiagnostics,
   hasLiveLspDiagnosticsForFile,
@@ -51,7 +52,6 @@ import {
   createCmdHoverDiveExtension,
   lspTooltipTheme,
   lspUriToPath,
-  normalizeLocations,
   pathBasename,
   registerDiveLocationLookup,
   requestIdeDiveAtPos,
@@ -209,6 +209,7 @@ function closeTransportSilently(transport: InstanceType<MarimoMod['WebSocketTran
 function disposePooledEntry(entry: PooledClientEntry): void {
   if (entry.disposed) return;
   entry.disposed = true;
+  indexProgress.get(entry.client)?.close();
   if (entry.closeTimer !== null) {
     clearTimeout(entry.closeTimer);
     entry.closeTimer = null;
@@ -410,6 +411,7 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
     initializationOptions: buildLspInitializationOptions(serverLang),
     capabilities: (defaults) => ({
       ...defaults,
+      window: { ...defaults?.window, workDoneProgress: true },
       textDocument: {
         ...defaults?.textDocument,
         synchronization: {
@@ -418,9 +420,11 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
           willSaveWaitUntil: false,
           didSave: true,
         },
-        definition: { dynamicRegistration: true, linkSupport: true },
-        typeDefinition: { dynamicRegistration: true, linkSupport: true },
-        implementation: { dynamicRegistration: true, linkSupport: true },
+        // The daemon handles dynamic registrations inside the shared server pool.
+        // Ask for navigation capabilities in the initialize response each editor receives.
+        definition: { dynamicRegistration: false, linkSupport: true },
+        typeDefinition: { dynamicRegistration: false, linkSupport: true },
+        implementation: { dynamicRegistration: false, linkSupport: true },
         semanticTokens: {
           dynamicRegistration: false,
           requests: { full: true, range: false },
@@ -478,9 +482,12 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
   onHandshakeAborted = () => onSocketGone(true);
   entry.offTransportClose = transport.onClose?.(() => onSocketGone(false)) ?? null;
 
+  const indexing = new LspIndexProgress();
+  indexProgress.set(client, indexing);
   client.onNotification((n) => {
     if (entry.disposed) return;
     const rawNotif = n as unknown as { method?: string; params?: Record<string, unknown> };
+    indexing.update(rawNotif.method, rawNotif.params);
     // `otto/lspEvicted {reason, lang, root}` (docs/contracts/ws.md): the daemon is stopping
     // this server and closes the socket next. Treat it as that close so editors reattach
     // (`server_cap`, `build_tags_changed`, any future reason) — except `shutdown`, which
@@ -538,12 +545,6 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
   scheduleIdleDispose(entry, IDLE_CLOSE_MS);
   noteLspStatus(resolvedRoot, 'starting', serverLang);
   return entry;
-}
-
-type RpcRequester = { request: (method: string, params: unknown) => Promise<unknown> };
-
-function getPooledRpc(client: PooledClientEntry['client']): RpcRequester | null {
-  return (client as unknown as { client?: RpcRequester }).client ?? null;
 }
 
 export async function buildPooledLspExtensions(opts: AttachPooledLspOptions): Promise<Extension[]> {
@@ -724,7 +725,7 @@ export async function queryPooledLspHover(view: EditorView, pos: number): Promis
           position: posToLsp(view.state.doc, pos),
         }).catch(() => null)
       : Promise.resolve(null);
-    const defPromise = queryPluginLocations(view, pos, 'definition').catch(() => []);
+    const defPromise = queryPluginLocations(plugin, view, pos, 'definition').catch(() => []);
     const [res, locs] = await Promise.all([hoverPromise, defPromise]);
     const definedIn = locs.length > 0 ? { path: locs[0].path, line: locs[0].line, column: locs[0].column } : null;
     if (!res?.contents) {
@@ -756,41 +757,8 @@ export function notifyLspDidSave(view: EditorView | null): void {
   if (plugin) void plugin.documentDidSave().catch(() => {});
 }
 
-async function queryPluginLocations(
-  view: EditorView,
-  pos: number,
-  mode: 'definition' | 'implementation',
-): Promise<Array<{ path: string; line: number; column: number }>> {
-  if (!marimoCache) return [];
-  const plugin = marimoCache.getLanguageServerPlugin(view);
-  if (!plugin || !plugin.client.ready) return [];
-  const position = posToLsp(view.state.doc, pos);
-  const params = { textDocument: { uri: plugin.documentUri }, position };
-  const rpc = getPooledRpc(plugin.client);
-
-  try {
-    if (mode === 'implementation') {
-      if (rpc && plugin.client.hasCapability('textDocument/implementation')) {
-        const locs = normalizeLocations(await rpc.request('textDocument/implementation', params));
-        if (locs.length > 0) return locs;
-      }
-    } else {
-      if (plugin.client.hasCapability('textDocument/definition')) {
-        const locs = normalizeLocations(await plugin.client.textDocumentDefinition(params));
-        if (locs.length > 0) return locs;
-      }
-      if (rpc && plugin.client.hasCapability('textDocument/typeDefinition')) {
-        const locs = normalizeLocations(await rpc.request('textDocument/typeDefinition', params));
-        if (locs.length > 0) return locs;
-      }
-    }
-  } catch {
-    /* Fall through to backend HTTP / lexical dive-in */
-  }
-  return [];
-}
-
-registerDiveLocationLookup(queryPluginLocations);
+registerDiveLocationLookup((view, pos, mode, isCurrent, signal) =>
+  lookupNavigation(marimoCache?.getLanguageServerPlugin(view), view, pos, mode, isCurrent, signal));
 
 export type { DirectLspOptions };
 

@@ -217,61 +217,301 @@ pub async fn summary<C: RoomsCtx>(ctx: &C, owner: &str, id: String) -> Result<Re
     .await
     .map_err(|e| Error::Internal(e.to_string()))??;
     let through = events.last().and_then(|e| e["seq"].as_u64()).unwrap_or(0);
-    let generation = {
+    let (generation, snapshot) = {
         let mut s = archive.state.lock().unwrap();
         s.summary_generation += 1;
         s.metadata.summary_status = RecapSummaryStatus::Running;
         s.metadata.summary_error = None;
-        archive.save(&s)?;
-        s.summary_generation
+        (s.summary_generation, s.metadata.clone())
     };
+    persist_metadata_snapshot(archive.clone(), generation, snapshot).await?;
     let task_archive = archive.clone();
     let task = tokio::spawn(async move {
         let archive = task_archive;
         let _permit = permit;
         let result = recap_engines::summarize(&events, &images).await;
+        let write_archive = archive.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            persist_summary_outcome(&write_archive, generation, through, result)
+        })
+        .await;
+    });
+    {
         let mut s = archive.state.lock().unwrap();
-        if s.summary_generation != generation {
-            return;
+        if s.summary_generation == generation {
+            s.summary_task = Some(task.abort_handle());
+        } else {
+            task.abort();
         }
-        match result {
-            Ok(d) => {
-                let draft = RecapDraft {
-                    overview: d.overview,
-                    decisions: d.decisions,
-                    actions: d.actions,
-                    open_questions: d.open_questions,
-                    coverage: d.coverage,
-                    source_event_ids: d.source_event_ids,
-                };
-                match archive.draft(&draft, &mut s) {
-                    Ok(()) => {
-                        s.metadata.summary_status = RecapSummaryStatus::Ready;
-                        s.metadata.summary_through_seq = Some(through);
+    }
+    Ok(RecapQueued { queued: true })
+}
+pub async fn cancel_summary<C: RoomsCtx>(ctx: &C, owner: &str, id: &str) -> Result<()> {
+    let a = super::get_archive(ctx, id, owner).await?;
+    let (generation, snapshot) = {
+        let mut s = a.state.lock().unwrap();
+        s.summary_generation += 1;
+        if let Some(task) = s.summary_task.take() {
+            task.abort();
+        }
+        s.metadata.summary_status = RecapSummaryStatus::Cancelled;
+        (s.summary_generation, s.metadata.clone())
+    };
+    persist_metadata_snapshot(a, generation, snapshot).await
+}
+
+/// Atomically persist a cloned `RecapMetadata` snapshot on the blocking pool
+/// without holding `archive.state` across disk I/O / `fsync`. If a newer
+/// generation superseded `generation` before or during the write, the latest
+/// metadata snapshot wins on disk so stale writes never clobber a cancel.
+async fn persist_metadata_snapshot(
+    archive: std::sync::Arc<archive::Archive>,
+    generation: u64,
+    snapshot: RecapMetadata,
+) -> Result<()> {
+    tokio::task::spawn_blocking(move || persist_metadata_checked(&archive, generation, snapshot))
+        .await
+        .map_err(|e| Error::Internal(format!("Recap archive: {e}")))?
+}
+
+fn persist_metadata_checked(
+    archive: &archive::Archive,
+    generation: u64,
+    snapshot: RecapMetadata,
+) -> Result<()> {
+    // Skip stale writes if a newer generation already took over before disk I/O.
+    if archive.state.lock().unwrap().summary_generation != generation {
+        return Ok(());
+    }
+    write_metadata_atomic(&archive.path, &snapshot)?;
+    // If a newer generation raced with our rename, re-persist the newest
+    // metadata so on-disk state always reflects the winning generation.
+    let newer = {
+        let s = archive.state.lock().unwrap();
+        (s.summary_generation != generation).then(|| s.metadata.clone())
+    };
+    if let Some(latest) = newer {
+        let _ = write_metadata_atomic(&archive.path, &latest);
+    }
+    Ok(())
+}
+
+/// Blocking-pool helper that writes `draft.json` (if any) and `metadata.json`
+/// without holding `archive.state` across `fsync`/rename, preserving
+/// `summary_generation` checks on cancel.
+fn persist_summary_outcome(
+    archive: &archive::Archive,
+    generation: u64,
+    through: u64,
+    result: Result<recap_engines::SummaryDraft>,
+) {
+    match result {
+        Ok(d) => {
+            let draft = RecapDraft {
+                overview: d.overview,
+                decisions: d.decisions,
+                actions: d.actions,
+                open_questions: d.open_questions,
+                coverage: d.coverage,
+                source_event_ids: d.source_event_ids,
+            };
+            // Serialize and stage draft.json off-lock so archive.state is never
+            // held across blocking disk I/O / fsync.
+            let staged = stage_draft_off_lock(archive, generation, &draft);
+            let snapshot = {
+                let mut s = archive.state.lock().unwrap();
+                if s.summary_generation != generation {
+                    if let Ok((temp, _)) = staged {
+                        let _ = std::fs::remove_file(temp);
+                    }
+                    return;
+                }
+                match staged {
+                    Ok((temp, new_bytes)) => {
+                        let dest = archive.path.join("draft.json");
+                        match std::fs::rename(&temp, &dest) {
+                            Ok(()) => {
+                                s.metadata.bytes_used = new_bytes;
+                                s.metadata.summary_status = RecapSummaryStatus::Ready;
+                                s.metadata.summary_through_seq = Some(through);
+                            }
+                            Err(e) => {
+                                let _ = std::fs::remove_file(&temp);
+                                s.metadata.summary_status = RecapSummaryStatus::Error;
+                                s.metadata.summary_error = Some(format!("Recap archive: {e}"));
+                            }
+                        }
                     }
                     Err(e) => {
                         s.metadata.summary_status = RecapSummaryStatus::Error;
                         s.metadata.summary_error = Some(e.to_string());
                     }
                 }
-            }
-            Err(e) => {
+                s.metadata.clone()
+            };
+            let _ = persist_metadata_checked(archive, generation, snapshot);
+        }
+        Err(e) => {
+            let snapshot = {
+                let mut s = archive.state.lock().unwrap();
+                if s.summary_generation != generation {
+                    return;
+                }
                 s.metadata.summary_status = RecapSummaryStatus::Error;
                 s.metadata.summary_error = Some(e.to_string());
-            }
+                s.metadata.clone()
+            };
+            let _ = persist_metadata_checked(archive, generation, snapshot);
         }
-        let _ = archive.save(&s);
-    });
-    archive.state.lock().unwrap().summary_task = Some(task.abort_handle());
-    Ok(RecapQueued { queued: true })
-}
-pub async fn cancel_summary<C: RoomsCtx>(ctx: &C, owner: &str, id: &str) -> Result<()> {
-    let a = super::get_archive(ctx, id, owner).await?;
-    let mut s = a.state.lock().unwrap();
-    s.summary_generation += 1;
-    if let Some(task) = s.summary_task.take() {
-        task.abort();
     }
-    s.metadata.summary_status = RecapSummaryStatus::Cancelled;
-    a.save(&s)
+}
+
+fn stage_draft_off_lock(
+    archive: &archive::Archive,
+    generation: u64,
+    draft: &RecapDraft,
+) -> Result<(std::path::PathBuf, u64)> {
+    let (bytes_used, quota_bytes) = {
+        let s = archive.state.lock().unwrap();
+        if s.summary_generation != generation {
+            return Err(Error::Conflict("Summary was superseded".into()));
+        }
+        (s.metadata.bytes_used, s.metadata.quota_bytes)
+    };
+    let bytes =
+        serde_json::to_vec(draft).map_err(|e| Error::Internal(format!("Recap archive: {e}")))?;
+    let dest = archive.path.join("draft.json");
+    let previous = if dest.exists() {
+        let meta = std::fs::symlink_metadata(&dest)
+            .map_err(|e| Error::Internal(format!("Recap archive: {e}")))?;
+        if meta.file_type().is_symlink() {
+            return Err(Error::Forbidden(
+                "Archive symlinks are not supported".into(),
+            ));
+        }
+        meta.len()
+    } else {
+        0
+    };
+    let total = bytes_used.saturating_sub(previous) + bytes.len() as u64;
+    if total + 8192 > quota_bytes {
+        return Err(Error::Conflict(
+            "Recap quota cannot fit the draft; export the transcript".into(),
+        ));
+    }
+    let temp = dest.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    write_private_synced(&temp, &bytes)?;
+    Ok((temp, total))
+}
+
+fn write_metadata_atomic(archive_dir: &std::path::Path, metadata: &RecapMetadata) -> Result<()> {
+    let path = archive_dir.join("metadata.json");
+    let bytes =
+        serde_json::to_vec(metadata).map_err(|e| Error::Internal(format!("Recap archive: {e}")))?;
+    let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    write_private_synced(&temp, &bytes)?;
+    std::fs::rename(&temp, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&temp);
+        Error::Internal(format!("Recap archive: {e}"))
+    })
+}
+
+fn write_private_synced(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts
+        .open(path)
+        .map_err(|e| Error::Internal(format!("Recap archive: {e}")))?;
+    if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_data()) {
+        let _ = std::fs::remove_file(path);
+        return Err(Error::Internal(format!("Recap archive: {e}")));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_metadata(owner: &str) -> RecapMetadata {
+        let now = chrono::Utc::now().to_rfc3339();
+        RecapMetadata {
+            id: uuid::Uuid::new_v4().to_string(),
+            owner_id: owner.into(),
+            room_id: uuid::Uuid::new_v4().to_string(),
+            session_id: "s1".into(),
+            session_title: "Session".into(),
+            created_at: now.clone(),
+            updated_at: now,
+            status: RecapState::Stopped,
+            capture_epoch: 1,
+            bytes_used: 0,
+            quota_bytes: archive::QUOTA,
+            last_seq: 0,
+            speech_available: false,
+            speech_error: None,
+            summary_status: RecapSummaryStatus::Idle,
+            summary_error: None,
+            summary_through_seq: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn offloaded_metadata_save_preserves_generation_check_on_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = archive::Store::open(dir.path().join("archives")).unwrap();
+        let arch = store.create(sample_metadata("alice")).unwrap();
+
+        // Generation 1 starts running.
+        let (gen1, snap1) = {
+            let mut s = arch.state.lock().unwrap();
+            s.summary_generation += 1;
+            s.metadata.summary_status = RecapSummaryStatus::Running;
+            (s.summary_generation, s.metadata.clone())
+        };
+        persist_metadata_snapshot(arch.clone(), gen1, snap1)
+            .await
+            .unwrap();
+
+        // Generation 2 cancels before generation 1 finishes.
+        let (gen2, snap2) = {
+            let mut s = arch.state.lock().unwrap();
+            s.summary_generation += 1;
+            s.metadata.summary_status = RecapSummaryStatus::Cancelled;
+            (s.summary_generation, s.metadata.clone())
+        };
+        persist_metadata_snapshot(arch.clone(), gen2, snap2)
+            .await
+            .unwrap();
+
+        // Stale generation 1 finishing must NOT overwrite Cancelled status.
+        persist_summary_outcome(
+            &arch,
+            gen1,
+            10,
+            Ok(recap_engines::SummaryDraft {
+                overview: "stale draft".into(),
+                decisions: vec![],
+                actions: vec![],
+                open_questions: vec![],
+                coverage: vec![],
+                source_event_ids: vec![],
+            }),
+        );
+        assert_eq!(
+            arch.metadata().summary_status,
+            RecapSummaryStatus::Cancelled
+        );
+        assert!(!arch.path.join("draft.json").exists());
+        let on_disk: RecapMetadata =
+            serde_json::from_slice(&std::fs::read(arch.path.join("metadata.json")).unwrap())
+                .unwrap();
+        assert_eq!(on_disk.summary_status, RecapSummaryStatus::Cancelled);
+    }
 }

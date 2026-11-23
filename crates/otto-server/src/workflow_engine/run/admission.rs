@@ -58,6 +58,43 @@ pub(in crate::workflow_engine) async fn admit(
     let acting = run_identity(ctx, run_id, &workflow.created_by).await;
     let user = resolve_run_user(ctx, &acting).await;
     let input = seed_from_manual_trigger(workflow, input);
+    // Re-validate run location AFTER merging `manual_trigger.params` (and for
+    // webhook/schedule/event triggers whose specs set working_directory/repos).
+    // Only a manual run started by a root user gets the host-folder exception.
+    let allow_host = user.is_root
+        && repo
+            .run_created_by(run_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|s| !s.trim().is_empty());
+    if let Err(e) = ensure_run_location_as(ctx, ws, &input, allow_host).await {
+        let msg = e.to_string();
+        if let Ok(Some(rev)) = repo
+            .update_run_if(
+                run_id,
+                &[RunStatus::Pending, RunStatus::Running],
+                RunStatus::Error,
+                &[],
+                Some(&msg),
+                true,
+            )
+            .await
+        {
+            emit_run_updated(
+                ctx,
+                &workflow.workspace_id,
+                run_id,
+                "error",
+                None,
+                rev,
+                None,
+                &[],
+                false,
+            );
+        }
+        return None;
+    }
     // Per-run context files (design 2026-07-02): `<data_dir>/workflow-context/
     // <run_id>/` holds the instruction brief, the live `repos.json` registry
     // and per-step handoff files. Best-effort — a failed dir create disables
@@ -191,7 +228,15 @@ fn seed_from_manual_trigger(workflow: &Workflow, input: Value) -> Value {
         .iter()
         .find(|n| n.kind == "manual_trigger")
     {
-        if let Some(o) = mt.params.as_object() {
+        // Strip reserved trigger/routing keys from manual_trigger params so a
+        // saved graph cannot forge `origin_workspace_id`, `channel`, `chat`,
+        // `thread`, etc.
+        let mut params = mt.params.clone();
+        otto_workflows::triggers::strip_reserved_input(
+            &mut params,
+            otto_workflows::triggers::InputSource::Manual,
+        );
+        if let Some(o) = params.as_object() {
             for (k, v) in o {
                 if !v.is_null() {
                     seeded.insert(k.clone(), v.clone());
@@ -650,4 +695,50 @@ pub(in crate::workflow_engine) fn open_progress(
         ));
     }
     (progress, progress_pump)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use otto_core::workflows::{WorkflowGraph, WorkflowNode};
+
+    #[test]
+    fn seed_from_manual_trigger_strips_reserved_routing_keys() {
+        let wf = Workflow {
+            id: "wf-1".into(),
+            workspace_id: "ws-1".into(),
+            name: "test".into(),
+            description: String::new(),
+            instructions: String::new(),
+            graph: WorkflowGraph {
+                nodes: vec![WorkflowNode {
+                    id: "start".into(),
+                    kind: "manual_trigger".into(),
+                    name: "Start".into(),
+                    x: 0.0,
+                    y: 0.0,
+                    params: json!({
+                        "prompt": "hello",
+                        "origin_workspace_id": "ws-victim",
+                        "channel": "slack",
+                        "chat": "C-VICTIM",
+                        "thread": "123.45",
+                    }),
+                    retry: None,
+                }],
+                edges: vec![],
+            },
+            created_by: "u-1".into(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            version: 1,
+            on_restart: "resume".into(),
+        };
+        let merged = seed_from_manual_trigger(&wf, json!({ "prompt": "override" }));
+        assert_eq!(merged["prompt"], "override");
+        assert!(merged.get("origin_workspace_id").is_none());
+        assert!(merged.get("channel").is_none());
+        assert!(merged.get("chat").is_none());
+        assert!(merged.get("thread").is_none());
+    }
 }

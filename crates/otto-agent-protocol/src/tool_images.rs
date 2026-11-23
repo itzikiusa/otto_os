@@ -105,6 +105,41 @@ pub(crate) fn image_mime(b: &[u8]) -> Option<&'static str> {
     }
 }
 
+/// Confine an agent-reported tool image path to one of the allowed roots
+/// (session cwd, workspace root, attachments dir, or OS temp dir). Returns the
+/// canonical path only when it resolves inside a non-root allowed directory.
+pub(crate) fn confine_tool_image(
+    path: &std::path::Path,
+    roots: &[&std::path::Path],
+) -> Option<std::path::PathBuf> {
+    let canon = std::fs::canonicalize(path).ok()?;
+    for root in roots {
+        if let Ok(canon_root) = std::fs::canonicalize(root) {
+            if canon_root.parent().is_some() && canon.starts_with(&canon_root) {
+                return Some(canon);
+            }
+        }
+    }
+    None
+}
+
+/// Convenience wrapper for `AgentRuntime::tool_image`: confines `path` to
+/// `cwd`, optional `ws_root`, `attachments_dir`, or `std::env::temp_dir()`.
+pub(crate) fn confine_session_image(
+    path: &str,
+    cwd: &str,
+    ws_root: Option<&str>,
+    attachments_dir: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let tmp = std::env::temp_dir();
+    let cwd_p = std::path::Path::new(cwd);
+    let mut roots: Vec<&std::path::Path> = vec![cwd_p, attachments_dir, tmp.as_path()];
+    if let Some(wr) = ws_root {
+        roots.push(std::path::Path::new(wr));
+    }
+    confine_tool_image(std::path::Path::new(path), &roots)
+}
+
 /// Preserve mixed content and structured metadata without repeating base64 as text.
 /// Intentionally inspect only the provider's known top-level result shapes.
 pub(crate) fn extract(value: Option<&Value>) -> ToolOutput {
@@ -208,5 +243,24 @@ mod tests {
         result.image("image/gif", &STANDARD.encode(b"GIF89a"));
         assert_eq!(result.images.len(), 3);
         assert_eq!(extract(Some(&json!("legacy"))).text, "legacy");
+    }
+
+    #[test]
+    fn confine_tool_image_allows_under_root_and_blocks_escapes() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let allowed = dir.path().join("ok.png");
+        let secret = outside.path().join("other.png");
+        std::fs::write(&allowed, b"\x89PNG\r\n\x1a\n").unwrap();
+        std::fs::write(&secret, b"\x89PNG\r\n\x1a\n").unwrap();
+        let roots = [dir.path()];
+        assert!(confine_tool_image(&allowed, &roots).is_some());
+        assert!(confine_tool_image(&secret, &roots).is_none());
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("escape.png");
+            std::os::unix::fs::symlink(&secret, &link).unwrap();
+            assert!(confine_tool_image(&link, &roots).is_none());
+        }
     }
 }

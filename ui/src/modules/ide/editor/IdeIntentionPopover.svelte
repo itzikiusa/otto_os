@@ -70,11 +70,14 @@
 
   function closePopover(restoreFocus = true): void {
     onclose();
-    if (restoreFocus) returnFocusEl?.focus();
+    if (restoreFocus && returnFocusEl?.isConnected) returnFocusEl.focus({ preventScroll: true });
   }
+
+  let stacked = $state(typeof window !== 'undefined' && window.innerWidth <= 640);
 
   function updatePlacement(): void {
     if (typeof window === 'undefined' || !anchorEl || !popEl) return;
+    stacked = window.innerWidth <= 640;
     maxW = Math.min(560, Math.max(260, window.innerWidth - 16));
     pos = placeAnchored(anchorEl, popEl, { prefer: 'below', align: 'start', gap: 4 });
   }
@@ -96,7 +99,7 @@
   }
 
   function runDepAction(action: string, dep?: IdeDepItem | null, version?: string | null): void {
-    onclose();
+    closePopover(true);
     void executeIdeDepAction({ root, connectionId, projectFolders, path: filePath, content: docText, action, dep, version, deps: allManifestDeps }).then((res) => {
       if (res.updated_content && res.updated_content !== docText) onfilewritten();
     });
@@ -119,7 +122,7 @@
           previewPlus: [`-tags=${nextTags.join(',')}`],
           previewNote: 'Enables build tag for gopls diagnostics, navigation, Run, and Debug in this repository',
           run: () => {
-            onclose();
+            closePopover(true);
             void ide.setRepoGoBuildTags(filePath, nextTags);
           },
         });
@@ -250,7 +253,7 @@
         run: () => {
           if (sEdits?.length) onapplyedits(sEdits);
           else onapplyserveraction(sa);
-          onclose();
+          closePopover(true);
         },
       });
     }
@@ -266,7 +269,7 @@
         disabled: readOnly,
         previewMinus: p.before,
         previewPlus: p.after,
-        run: () => { onapplyclientfix(qf); onclose(); },
+        run: () => { onapplyclientfix(qf); closePopover(true); },
       });
     }
 
@@ -281,15 +284,15 @@
         disabled: readOnly,
         previewMinus: p.before,
         previewPlus: p.after,
-        run: () => { onapplyedits(df.edits); onclose(); },
+        run: () => { onapplyedits(df.edits); closePopover(true); },
       });
     }
 
     out.push(
-      { id: 'ref-rename', label: 'Rename symbol…', hint: '⇧F6', kind: 'refactor', disabled: readOnly, previewMinus: [], previewPlus: [], previewNote: 'Workspace-wide symbol rename with preview', run: () => { onclose(); onrename(); } },
-      { id: 'ref-usages', label: 'Find usages', hint: '⌥F7', kind: 'refactor', previewMinus: [], previewPlus: [], previewNote: 'Search all references across workspace', run: () => { onclose(); onfindusages(); } },
-      { id: 'ref-format', label: 'Reformat code', hint: '⌥⌘L', kind: 'refactor', disabled: readOnly, previewMinus: [], previewPlus: [], previewNote: 'Format current file with language formatter', run: () => { onclose(); onformat(); } },
-      { id: 'ask-agent', label: 'Ask Agent to fix…', hint: '⌘I', kind: 'agent', previewMinus: [], previewPlus: [], previewNote: 'Optional: open inline AI assistant on current line', run: () => { onclose(); onaskagent(); } },
+      { id: 'ref-rename', label: 'Rename symbol…', hint: '⇧F6', kind: 'refactor', disabled: readOnly, previewMinus: [], previewPlus: [], previewNote: 'Workspace-wide symbol rename with preview', run: () => { closePopover(true); onrename(); } },
+      { id: 'ref-usages', label: 'Find usages', hint: '⌥F7', kind: 'refactor', previewMinus: [], previewPlus: [], previewNote: 'Search all references across workspace', run: () => { closePopover(true); onfindusages(); } },
+      { id: 'ref-format', label: 'Reformat code', hint: '⌥⌘L', kind: 'refactor', disabled: readOnly, previewMinus: [], previewPlus: [], previewNote: 'Format current file with language formatter', run: () => { closePopover(true); onformat(); } },
+      { id: 'ask-agent', label: 'Ask Agent to fix…', hint: '⌘I', kind: 'agent', previewMinus: [], previewPlus: [], previewNote: 'Optional: open inline AI assistant on current line', run: () => { closePopover(true); onaskagent(); } },
     );
     return out;
   });
@@ -297,23 +300,33 @@
   let selectedIdx = $state(0);
   const activeRow = $derived(rows[Math.min(selectedIdx, Math.max(0, rows.length - 1))] ?? null);
 
+  let popEl = $state<HTMLDivElement | null>(null);
+  let listEl = $state<HTMLDivElement | null>(null);
+
+  function scrollSelectedIntoView(): void {
+    void tick().then(() => {
+      listEl?.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' });
+    });
+  }
+
   function handleKeydown(e: KeyboardEvent): void {
     if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closePopover(true); }
-    else if (e.key === 'ArrowDown') { e.preventDefault(); selectedIdx = (selectedIdx + 1) % Math.max(1, rows.length); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); selectedIdx = (selectedIdx - 1 + rows.length) % Math.max(1, rows.length); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); selectedIdx = (selectedIdx + 1) % Math.max(1, rows.length); scrollSelectedIntoView(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); selectedIdx = (selectedIdx - 1 + rows.length) % Math.max(1, rows.length); scrollSelectedIntoView(); }
     else if (e.key === 'Enter' && activeRow && !activeRow.disabled) { e.preventDefault(); activeRow.run(); }
   }
 
-  let popEl = $state<HTMLDivElement | null>(null);
+  $effect(() => {
+    const el = popEl;
+    if (!el) return;
+    void tick().then(() => el.focus({ preventScroll: true }));
+  });
+
   $effect(() => {
     void anchorX;
     void anchorY;
     void rows.length;
-    void selectedIdx;
-    void tick().then(() => {
-      updatePlacement();
-      popEl?.focus();
-    });
+    void tick().then(() => updatePlacement());
   });
 
   $effect(() => {
@@ -336,12 +349,12 @@
   style:left="{pos.left}px"
   style:top="{pos.top}px"
   style:max-inline-size="{maxW}px"
-  style:max-block-size="{Math.min(340, pos.maxH)}px"
+  style:max-block-size="{Math.min(stacked ? 480 : 340, pos.maxH)}px"
   data-testid="ide-intention-popover"
   data-dep-popover={eco ? 'true' : undefined}
 >
   {#if eco}<span class="sr-only" data-testid="ide-dep-intention-popover"></span>{/if}
-  <div class="ide-int-list" role="listbox" aria-label="Available actions">
+  <div bind:this={listEl} class="ide-int-list" role="listbox" aria-label="Available actions">
     {#each rows as row, idx (row.id)}
       {#if row.kind === 'agent' || (idx > 0 && rows[idx - 1].kind !== row.kind && (row.kind === 'refactor' || row.kind === 'fix'))}
         <div class="ide-int-divider" role="separator"></div>
@@ -409,4 +422,12 @@
   .ide-int-diff { padding: 2px var(--sp-2); border-radius: var(--radius-s); white-space: pre-wrap; word-break: break-all; }
   .ide-int-diff.is-minus { background: var(--danger-soft); color: var(--danger); }
   .ide-int-diff.is-plus { background: var(--success-soft); color: var(--success); }
+  @media (max-width: 640px) {
+    .ide-intention-popover { flex-direction: column; }
+    .ide-int-list { min-inline-size: 0; flex: 1 1 auto; max-block-size: 60%; }
+    .ide-int-preview {
+      inline-size: auto; border-inline-start: none; border-block-start: 1px solid var(--border);
+      flex: 0 1 auto; max-block-size: 40%;
+    }
+  }
 </style>

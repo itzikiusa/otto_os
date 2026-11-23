@@ -5,6 +5,7 @@
   // no hook; the PR's agent thread gets the path, the line range and the
   // rows themselves.
   import Icon from '../../lib/components/Icon.svelte';
+  import { clampLinePickPos, type PickRect } from './gitUiHelpers';
   import { lineLabel, type LinePick } from './pr-agent-context';
   import { pickFromSelection } from './pr-agent-diff-pick';
 
@@ -13,22 +14,35 @@
   }
   let { onexplain }: Props = $props();
 
-  let shown = $state.raw<{ pick: LinePick; pr: number; top: number; left: number } | null>(null);
+  let shown = $state.raw<{ pick: LinePick; pr: number; rect: PickRect; top: number; left: number } | null>(null);
   let btn = $state<HTMLButtonElement | null>(null);
   const GAP = 8;
 
   /** Under the selection's end when it fits, else above it — clamped into
    *  the viewport either way (never flipped off screen). */
-  function place(rect: DOMRect): { top: number; left: number } {
-    const w = btn?.offsetWidth || 200;
-    const h = btn?.offsetHeight || 34;
-    let top = rect.bottom + GAP;
-    if (top + h > window.innerHeight - GAP) top = rect.top - GAP - h;
-    return {
-      top: Math.max(GAP, Math.min(window.innerHeight - h - GAP, top)),
-      left: Math.max(GAP, Math.min(window.innerWidth - w - GAP, rect.left)),
-    };
+  function place(rect: PickRect, el: HTMLButtonElement | null = btn): { top: number; left: number } {
+    const box = el?.getBoundingClientRect();
+    const width = (box && box.width > 0 ? Math.ceil(box.width) : 0) || el?.offsetWidth || 200;
+    const height = (box && box.height > 0 ? Math.ceil(box.height) : 0) || el?.offsetHeight || 34;
+    return clampLinePickPos(
+      rect,
+      { width, height },
+      { width: window.innerWidth, height: window.innerHeight },
+      GAP,
+    );
   }
+
+  // Re-clamp once the button mounts (or its range label changes width) using
+  // its real rendered box so long labels near the right edge never clip on frame 1.
+  $effect(() => {
+    const s = shown;
+    const el = btn;
+    if (!s || !el) return;
+    const next = place(s.rect, el);
+    if (Math.abs(next.left - s.left) >= 0.5 || Math.abs(next.top - s.top) >= 0.5) {
+      shown = { ...s, ...next };
+    }
+  });
 
   $effect(() => {
     let raf = 0;
@@ -39,7 +53,8 @@
       if (hit) {
         if (hide) clearTimeout(hide);
         hide = null;
-        shown = { pick: hit.pick, pr: hit.pr, ...place(hit.rect) };
+        const rect: PickRect = { top: hit.rect.top, bottom: hit.rect.bottom, left: hit.rect.left };
+        shown = { pick: hit.pick, pr: hit.pr, rect, ...place(rect) };
       } else if (shown && !hide) {
         // A tap on the action can collapse the selection before its click
         // lands (touch): keep the action a beat longer.

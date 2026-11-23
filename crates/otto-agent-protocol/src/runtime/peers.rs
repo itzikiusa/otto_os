@@ -161,6 +161,30 @@ impl AgentRuntime {
         self.open_linked(caller, req, true).await
     }
 
+    /// HTTP entry point for `POST /runtime-sessions/{id}/peers`: when called
+    /// with an agent session credential (`!by_person`), confines `req.cwd` via
+    /// [`crate::RuntimeHost::check_agent_cwd`] and restricts `req.meta` to
+    /// `provider_slug` so an agent cannot escape its sandbox/workspace CWD or
+    /// smuggle privileged session metadata (`personal_agent`,
+    /// `network_profile_id`, `account_id`, etc.).
+    pub async fn open_peer_by(
+        &self,
+        caller: &Id,
+        mut req: OpenPeerReq,
+        by_person: bool,
+    ) -> Result<RuntimeSession> {
+        if !by_person {
+            let c = self.get(caller).await?;
+            let ws = self.inner.host.workspace(&c.workspace_id).await?;
+            self.inner
+                .host
+                .check_agent_cwd(&ws, &c.id, &c.cwd, req.cwd.as_deref())
+                .await?;
+            req.meta = sanitize_agent_peer_meta(req.meta);
+        }
+        self.open_peer(caller, req).await
+    }
+
     /// [`Self::open_peer`]. `framed = false` (daemon-only) sends the opening
     /// prompt as it is, without the "Opened by …" header: a prompt the daemon
     /// built itself (a council synthesis) that no thread's agent wrote.
@@ -179,7 +203,8 @@ impl AgentRuntime {
             self.resolve_target_provider(req.provider, Some(&requested_slug))?;
         self.ensure_group_room(&c).await?;
         // An agent's opening prompt is an agent-to-agent message (`loop_guard`).
-        if framed && req.prompt.as_deref().is_some_and(|p| !p.trim().is_empty()) {
+        let admitted = framed && req.prompt.as_deref().is_some_and(|p| !p.trim().is_empty());
+        if admitted {
             self.admit_agent_prompt(&c).await?;
         }
         let root = c.parent_id.clone().unwrap_or_else(|| c.id.clone());
@@ -202,7 +227,7 @@ impl AgentRuntime {
             }
         }
         inherit_embedded_origin(&c, &mut meta);
-        let created = self
+        let created = match self
             .create_linked(
                 &c.created_by,
                 &c.workspace_id,
@@ -217,7 +242,16 @@ impl AgentRuntime {
                 },
                 Some(root),
             )
-            .await?;
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                if admitted {
+                    self.refund_agent_prompt(&c);
+                }
+                return Err(e);
+            }
+        };
         let effort = req.effort.filter(|e| !e.trim().is_empty());
         if let Some(p) = req.prompt.filter(|p| !p.trim().is_empty()) {
             let text = if framed {
@@ -228,10 +262,19 @@ impl AgentRuntime {
             let mut prompt = RuntimePromptReq::of(&text);
             // Stored on the thread once its agent takes the prompt.
             prompt.effort = effort;
-            self.prompt_with(&created.id, &prompt).await?;
+            if let Err(e) = self.prompt_with(&created.id, &prompt).await {
+                if admitted {
+                    self.refund_agent_prompt(&c);
+                }
+                let _ = self.delete(&created.id).await;
+                return Err(e);
+            }
         } else if let Some(e) = effort.as_deref() {
             // No opening prompt: the thread keeps the pick for its first turn.
-            self.set_effort(&created.id, Some(e)).await?;
+            if let Err(err) = self.set_effort(&created.id, Some(e)).await {
+                let _ = self.delete(&created.id).await;
+                return Err(err);
+            }
         }
         self.get(&created.id).await
     }
@@ -367,5 +410,80 @@ impl AgentRuntime {
                 .and_then(|v| v.as_str().map(str::to_string)),
             text,
         })
+    }
+}
+
+/// Allowlist metadata keys an agent credential may supply when opening a peer
+/// thread via HTTP: only `provider_slug` (as a string) survives, ensuring
+/// `open_peer` always stamps `child_meta` and preventing privilege/sandbox
+/// metadata injection.
+fn sanitize_agent_peer_meta(meta: Option<serde_json::Value>) -> Option<serde_json::Value> {
+    let key = otto_core::agent_runtime::PROVIDER_SLUG_META_KEY;
+    let slug = meta
+        .as_ref()
+        .and_then(|m| m.get(key))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    Some(serde_json::json!({ key: slug }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::check_agent_cwd_basic;
+    use chrono::Utc;
+    use otto_core::domain::Workspace;
+
+    fn test_ws(root: &std::path::Path) -> Workspace {
+        Workspace {
+            id: "ws-1".into(),
+            name: "test".into(),
+            root_path: root.to_string_lossy().into_owned(),
+            created_at: Utc::now(),
+            settings: serde_json::json!({}),
+            archived: false,
+        }
+    }
+
+    #[test]
+    fn agent_peer_cwd_rejects_outside_workspace_and_nonexistent() {
+        let ws_dir = tempfile::tempdir().unwrap();
+        let sub = ws_dir.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let ws = test_ws(ws_dir.path());
+
+        assert!(check_agent_cwd_basic(&ws, &ws.root_path, None).is_ok());
+        assert!(check_agent_cwd_basic(&ws, &ws.root_path, Some(sub.to_str().unwrap())).is_ok());
+        assert!(matches!(
+            check_agent_cwd_basic(&ws, &ws.root_path, Some(outside.path().to_str().unwrap())),
+            Err(Error::Forbidden(_))
+        ));
+        assert!(matches!(
+            check_agent_cwd_basic(&ws, &ws.root_path, Some("/nonexistent/otto/path")),
+            Err(Error::Forbidden(_))
+        ));
+        assert!(matches!(
+            check_agent_cwd_basic(&ws, &ws.root_path, Some("relative/path")),
+            Err(Error::Forbidden(_))
+        ));
+    }
+
+    #[test]
+    fn agent_peer_meta_strips_privileged_keys() {
+        let raw = serde_json::json!({
+            "provider_slug": "claudework",
+            "personal_agent": "ops",
+            "network_profile_id": "prod-vpn",
+            "account_id": "other",
+            "read_only": false,
+        });
+        let clean = sanitize_agent_peer_meta(Some(raw)).unwrap();
+        assert_eq!(clean, serde_json::json!({ "provider_slug": "claudework" }));
+        assert_eq!(
+            sanitize_agent_peer_meta(Some(serde_json::json!({ "personal_agent": "ops" }))),
+            None
+        );
     }
 }

@@ -125,15 +125,9 @@ pub async fn meta(
             .iter()
             .map(|name| (name.as_str(), ctx.manager.providers().program_for(name))),
     );
-    let families = ctx.manager.providers().model_families();
+    let probe = otto_sessions::provider_models::ModelProbe::for_registry(ctx.manager.providers());
     let provider_families: std::collections::HashMap<String, String> =
-        families.iter().cloned().collect();
-    let claude_dirs = ctx
-        .manager
-        .providers()
-        .active_claude_config_dirs(&otto_transcript::roots::home_dir());
-    let probe = otto_sessions::provider_models::ModelProbe::from_tool_specs(families, &tool_specs)
-        .with_claude_config_dirs(claude_dirs);
+        probe.families.iter().cloned().collect();
     let (tools, (provider_models, provider_models_provisional)) = tokio::join!(
         otto_sessions::tool_probe::probe_tools_cached(tool_specs),
         otto_sessions::provider_models::probe_provider_models_cached_with_status(&probe),

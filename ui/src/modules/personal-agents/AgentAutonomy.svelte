@@ -106,15 +106,20 @@
     }
   }
 
+  let loadSeq = 0;
   async function load(): Promise<void> {
+    const seq = ++loadSeq;
+    const id = agentId;
     loading = true;
     loadError = null;
     try {
-      apply(await personalAgentsApi.autonomy(agentId));
+      const next = await personalAgentsApi.autonomy(id);
+      if (seq !== loadSeq || id !== agentId) return;
+      apply(next);
     } catch (e) {
-      loadError = loadErrorText(e);
+      if (seq === loadSeq && id === agentId) loadError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (seq === loadSeq && id === agentId) loading = false;
     }
   }
   $effect(() => {
@@ -157,11 +162,12 @@
 
   async function save(): Promise<void> {
     if (saving) return;
+    const id = agentId;
     saving = true;
     again = false;
     const sent = draftKey();
     try {
-      const next = await personalAgentsApi.saveAutonomy(agentId, {
+      const next = await personalAgentsApi.saveAutonomy(id, {
         proactive: {
           enabled: proactiveOn,
           runs_per_day: Math.min(24, Math.max(1, Math.round(Number(runsPerDay) || 1))),
@@ -171,6 +177,7 @@
         rules: rules.map((r) => ({ id: r.id, text: r.text })),
         primary,
       });
+      if (id !== agentId) return;
       if (draftKey() === sent) apply(next);
       else adopt(next);
       onsaved?.(next);
@@ -178,11 +185,11 @@
       clearTimeout(savedTimer);
       savedTimer = setTimeout(() => (justSaved = false), 2000);
     } catch (e) {
-      toasts.error('Couldn’t save the agent’s rules and background work', loadErrorText(e));
+      if (id === agentId) toasts.error('Couldn’t save the agent’s rules and background work', loadErrorText(e));
     } finally {
-      saving = false;
+      if (id === agentId) saving = false;
     }
-    if (again) autosave();
+    if (again && id === agentId) autosave();
   }
 
   let workingGoal = $state<string | null>(null);

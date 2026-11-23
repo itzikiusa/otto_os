@@ -216,8 +216,12 @@ async fn open_peer<S: RuntimeCtx>(
     Json(req): Json<OpenPeerReq>,
 ) -> ApiResult<(StatusCode, Json<RuntimeSession>)> {
     as_thread(&ctx, &user, &auth, &id).await?;
-    let s = ctx.agent_runtime().open_peer(&id, req).await?;
-    if ctx.is_human(&auth) {
+    let by_person = ctx.is_human(&auth);
+    let s = ctx
+        .agent_runtime()
+        .open_peer_by(&id, req, by_person)
+        .await?;
+    if by_person {
         ctx.agent_runtime().person_prompted(&id).await;
     }
     Ok((StatusCode::CREATED, Json(s)))

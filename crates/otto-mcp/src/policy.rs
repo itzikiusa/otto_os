@@ -9,7 +9,19 @@
 //! (exportable/importable as one JSON document).
 
 use otto_state::McpPolicy;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// One stage in the read-only governance pipeline trace returned by
+/// `POST /mcp/policies/evaluate` (`McpService::evaluate_preview`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyTraceStep {
+    pub stage: String,
+    pub outcome: String,
+    pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_id: Option<String>,
+}
 
 /// The context a call is evaluated against.
 pub struct PolicyCtx<'a> {
@@ -202,9 +214,8 @@ fn effect_rank(effect: &str) -> u8 {
     }
 }
 
-/// Evaluate the applicable rules for a call. `rules` should already be filtered
-/// to enabled + (global or this workspace).
-pub fn evaluate(rules: &[McpPolicy], ctx: &PolicyCtx) -> Effect {
+/// Find the winning (most-restrictive) enabled rule that matches `ctx`, if any.
+pub fn matching_rule<'a>(rules: &'a [McpPolicy], ctx: &PolicyCtx) -> Option<&'a McpPolicy> {
     let mut best: Option<(&McpPolicy, u8)> = None;
     for r in rules {
         if !r.enabled {
@@ -219,21 +230,36 @@ pub fn evaluate(rules: &[McpPolicy], ctx: &PolicyCtx) -> Effect {
             _ => best = Some((r, rank)),
         }
     }
-    match best {
-        None => Effect::Allow,
-        Some((r, _)) => {
-            let reason = r
-                .reason
-                .clone()
-                .unwrap_or_else(|| format!("policy '{}'", r.name));
-            match r.effect.as_str() {
-                "deny" => Effect::Deny(reason),
-                "require_approval" => Effect::RequireApproval(reason),
-                "require_dry_run" => Effect::RequireDryRun(reason),
-                _ => Effect::Allow,
-            }
-        }
+    best.map(|(r, _)| r)
+}
+
+/// Convert a matched policy row into its decided [`Effect`].
+pub fn effect_for_rule(r: &McpPolicy) -> Effect {
+    let reason = r
+        .reason
+        .clone()
+        .unwrap_or_else(|| format!("policy '{}'", r.name));
+    match r.effect.as_str() {
+        "deny" => Effect::Deny(reason),
+        "require_approval" => Effect::RequireApproval(reason),
+        "require_dry_run" => Effect::RequireDryRun(reason),
+        _ => Effect::Allow,
     }
+}
+
+/// Evaluate the applicable rules for a call, returning both the decided
+/// [`Effect`] and the winning policy's id (when a rule matched).
+pub fn evaluate_with_match(rules: &[McpPolicy], ctx: &PolicyCtx) -> (Effect, Option<String>) {
+    match matching_rule(rules, ctx) {
+        None => (Effect::Allow, None),
+        Some(r) => (effect_for_rule(r), Some(r.id.clone())),
+    }
+}
+
+/// Evaluate the applicable rules for a call. `rules` should already be filtered
+/// to enabled + (global or this workspace).
+pub fn evaluate(rules: &[McpPolicy], ctx: &PolicyCtx) -> Effect {
+    evaluate_with_match(rules, ctx).0
 }
 
 #[cfg(test)]
@@ -359,5 +385,27 @@ mod tests {
         assert!(glob_match("*_url", "fetch_url"));
         assert!(glob_match("a*b*c", "axxbyyc"));
         assert!(!glob_match("delete_*", "create_repo"));
+    }
+
+    #[test]
+    fn evaluate_with_match_returns_winning_policy_id() {
+        let mut allow = rule("allow_all", 0, "allow", json!({}));
+        allow.id = "pol-allow".into();
+        let mut deny = rule(
+            "deny_danger",
+            100,
+            "deny",
+            json!({"risk_label": "dangerous"}),
+        );
+        deny.id = "pol-deny".into();
+        deny.reason = Some("dangerous calls blocked".into());
+
+        let (effect, matched_id) = evaluate_with_match(&[allow, deny], &ctx());
+        assert_eq!(effect, Effect::Deny("dangerous calls blocked".into()));
+        assert_eq!(matched_id.as_deref(), Some("pol-deny"));
+
+        let (none_effect, none_id) = evaluate_with_match(&[], &ctx());
+        assert_eq!(none_effect, Effect::Allow);
+        assert_eq!(none_id, None);
     }
 }

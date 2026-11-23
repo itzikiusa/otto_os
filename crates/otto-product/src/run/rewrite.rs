@@ -7,7 +7,7 @@ use tracing::warn;
 
 use super::context::{append_answers_and_summary, skill_body, story_context_md, story_work};
 use super::prompts::{augment_with_out_path, build_rewrite_prompt, extract_json_as};
-use super::scratch::{session_cwd, trust_session_cwd};
+use super::scratch::{scratch_root_dir, session_cwd, trust_session_cwd, write_context_file};
 use super::SessionAppearance;
 use crate::host::ProductRunHost;
 
@@ -68,10 +68,8 @@ pub async fn run_rewrite<C: ProductRunHost>(
     //    (build_agent_context provides story body + Jira + learnings; we enrich
     //    further here with the answered questions and analysis summary).
     let rewrite_id = otto_core::new_id();
-    let context_path =
-        std::env::temp_dir().join(format!("otto-product-rewrite-{rewrite_id}-context.md"));
-
-    {
+    let context_name = format!("otto-product-rewrite-{rewrite_id}-context.md");
+    let context_guard = {
         let mut context_md = story_context_md(
             &ctx,
             &story_id,
@@ -81,14 +79,27 @@ pub async fn run_rewrite<C: ProductRunHost>(
         )
         .await;
         append_answers_and_summary(&ctx, &story_id, &mut context_md).await;
-        if let Err(e) = std::fs::write(&context_path, &context_md) {
-            warn!("product_run(rewrite): write context file: {e}");
+        match write_context_file(&context_name, &context_md).await {
+            Ok(g) => Some(g),
+            Err(e) => {
+                warn!("product_run(rewrite): write context file: {e}");
+                None
+            }
         }
-    }
+    };
+    let context_path_str = context_guard
+        .as_ref()
+        .map(|g| g.path_str())
+        .unwrap_or_else(|| {
+            scratch_root_dir()
+                .join(&context_name)
+                .to_string_lossy()
+                .to_string()
+        });
 
     // 4. Build prompt (references the context file) + out_path for JSON output.
     let out_path = std::env::temp_dir().join(format!("otto-product-rewrite-{rewrite_id}.json"));
-    let base_prompt = build_rewrite_prompt(&skill_body, &context_path.to_string_lossy());
+    let base_prompt = build_rewrite_prompt(&skill_body, &context_path_str);
     let prompt = augment_with_out_path(&base_prompt, &out_path.to_string_lossy());
 
     // 5. Pre-trust provider.
@@ -211,5 +222,8 @@ pub async fn run_rewrite<C: ProductRunHost>(
                 status: "error".into(),
             });
         }
+    }
+    if let Some(guard) = context_guard {
+        guard.cleanup().await;
     }
 }

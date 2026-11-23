@@ -90,8 +90,8 @@
   }
   .ide-phone-file:hover { background: var(--surface-2); }
   .ide-tab-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
-  /* In the header the file name is the one thing that must stay readable. */
-  .in-header .ide-tab-label { flex-shrink: 0; }
+  /* In the header keep the file name legible while letting it truncate before overflowing landscape headers. */
+  .in-header .ide-tab-label { flex: 0 1 auto; min-inline-size: 56px; }
   .ide-dirty-dot { inline-size: 6px; block-size: 6px; border-radius: 50%; background: var(--accent-solid); flex-shrink: 0; }
   .ide-disk-mark { display: inline-flex; color: var(--warning); flex-shrink: 0; }
   .ide-phone-count {

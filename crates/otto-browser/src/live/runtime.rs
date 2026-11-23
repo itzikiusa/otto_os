@@ -22,7 +22,7 @@ use super::chrome::LaunchSpec;
 use super::hooks::{LiveAudit, LiveHooks};
 use super::install::{
     self, current_platform, effective_sha256, is_installed, pin_for, resolve_binary, BinarySource,
-    DittoExtractor, Extractor, Fetcher, InstallJob, InstallState, ReqwestFetcher,
+    DittoExtractor, Extractor, FailingFetcher, Fetcher, InstallJob, InstallState, ReqwestFetcher,
 };
 use super::process::{ChromeProcess, ProcessKey};
 use super::proxy::GuardProxy;
@@ -125,13 +125,19 @@ fn remove_if_same<T>(
 
 impl LiveRuntime {
     pub fn new(data_dir: PathBuf, hooks: Arc<dyn LiveHooks>, settings: LiveSettings) -> Arc<Self> {
-        Self::with_io(
-            data_dir,
-            hooks,
-            settings,
-            Arc::new(ReqwestFetcher::new()),
-            Arc::new(DittoExtractor),
-        )
+        let fetcher: Arc<dyn Fetcher> = match ReqwestFetcher::new() {
+            Ok(f) => Arc::new(f),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "browser live: failed to build netguarded download client; engine installs will fail closed"
+                );
+                Arc::new(FailingFetcher::new(format!(
+                    "failed to initialize guarded download client: {e}"
+                )))
+            }
+        };
+        Self::with_io(data_dir, hooks, settings, fetcher, Arc::new(DittoExtractor))
     }
 
     /// Injectable download/extract (tests).
@@ -354,6 +360,9 @@ impl LiveRuntime {
         self.ensure_janitor();
         let session =
             LiveSession::create(proc, p, self.data_dir.clone(), self.hooks.clone()).await?;
+        if settings.guard_spa_mutations {
+            session.set_guard_spa_mutations(true);
+        }
         if let Ok(mut s) = self.sessions.lock() {
             s.insert(session.tab_id.clone(), session.clone());
         }

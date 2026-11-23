@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { copyTextOrThrow } from '../../../lib/clipboard';
+  import { copyWithToast } from '../../../lib/clipboard';
   import { formatBytes } from '../../../lib/metric-format';
   // One tool call inside a response's step group, as ONE scannable line —
   // kind icon · verb · target (command / file / pattern) · dim detail — with a
@@ -10,7 +10,6 @@
   // inline diff, a written file's content, a read's text, result images.
   // Elided live-push previews fetch the stored result on first expand.
   import { getContext, tick } from 'svelte';
-  import { toastError } from '../../../lib/toastError';
   import Icon from '../../../lib/components/Icon.svelte';
   import { announceShown } from '../../../lib/announce.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
@@ -22,7 +21,6 @@
   import Markdown from './Markdown.svelte';
   import McpToolCard from './McpToolCard.svelte';
   import { openFile } from '../../../lib/stores/openfile.svelte';
-  import { toasts } from '../../../lib/toast.svelte';
   import { linkifyOutput } from './chatMarkdown';
   import { openExternal } from '../../../lib/external';
   import { TOOL_CHROME, editInputPatch, relPath, lastLine, patchToDiff, toolLine, toolStatus } from './format';
@@ -216,12 +214,11 @@
     ctx?.openPreview?.({ kind: 'diff', title: filePath ? (filePath.split('/').pop() ?? filePath) : 'Diff', diff, focus: null });
   }
   async function copyCommand(): Promise<void> {
-    try {
-      await copyTextOrThrow(command);
-      toasts.info('Copied', 'The command');
-    } catch (e) {
-      toastError('Couldn’t copy to the clipboard', e);
-    }
+    await copyWithToast(command, 'command');
+  }
+  function bindOutClick(node: HTMLElement): { destroy(): void } {
+    node.addEventListener('click', onOutClick);
+    return { destroy: () => node.removeEventListener('click', onOutClick) };
   }
 </script>
 
@@ -295,8 +292,7 @@
           {#snippet row(l)}<div class="out-line mono hljs" dir="ltr">{@html highlightLine(l || ' ', lang)}</div>{/snippet}
         </VirtualList>
       {:else if text}
-        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-        <pre class="out mono hljs" class:err={status === 'err'} class:shell={isShell} dir="ltr" data-lang={lang} onclick={onOutClick}>{@html outHtml}</pre>
+        <pre class="out mono hljs" class:err={status === 'err'} class:shell={isShell} dir="ltr" data-lang={lang} use:bindOutClick>{@html outHtml}</pre>
       {:else if !result.image_ids.length && !previewOnly}
         <div class="pending">(no output)</div>
       {/if}

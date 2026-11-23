@@ -60,8 +60,25 @@ const ISSUE_FULL: &str = "id identifier title url description priority priorityL
 
 /// The shared client (one pool for every Linear account: the API is one host
 /// and the key rides per request) from the bounded transport cache.
-fn http_client() -> reqwest::Client {
-    crate::atlassian::cached_client("linear\x00https://api.linear.app")
+fn http_client_for(endpoint: &str) -> reqwest::Client {
+    if endpoint == LINEAR_GRAPHQL {
+        return crate::atlassian::cached_client_for(
+            "linear\x00https://api.linear.app",
+            true,
+            false,
+        );
+    }
+    match crate::atlassian::validate_account_base_url(endpoint) {
+        Ok(allow_loopback) => {
+            let https_only = !allow_loopback || endpoint.trim_start().starts_with("https://");
+            crate::atlassian::cached_client_for(
+                &format!("linear\x00{endpoint}"),
+                https_only,
+                allow_loopback,
+            )
+        }
+        Err(_) => crate::atlassian::cached_client_for("linear\x00refused", true, false),
+    }
 }
 
 /// The `Authorization` value for a Linear credential: a personal API key
@@ -131,33 +148,75 @@ impl LinearClient {
         Self {
             endpoint: endpoint.to_string(),
             auth: auth_value(token),
-            http: http_client(),
+            http: http_client_for(endpoint),
         }
     }
 
     /// Post one GraphQL document and return its `data`, mapping GraphQL
     /// `errors` (which Linear reports with HTTP 200 or 400) onto Otto errors.
+    /// A read query refused with 429 or 503+`Retry-After` (≤ 10 s) is retried
+    /// once after that wait; mutations are never retried.
     async fn gql(&self, what: &str, query: &str, variables: Value) -> Result<Value> {
-        let resp = self
-            .http
-            .post(&self.endpoint)
-            .header("Authorization", &self.auth)
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json")
-            .json(&json!({ "query": query, "variables": variables }))
-            .send()
+        const LINEAR_BODY_CAP: usize = 16 * 1024 * 1024;
+        let is_read = !query.trim_start().starts_with("mutation");
+        let payload = json!({ "query": query, "variables": variables });
+        let send = || {
+            self.http
+                .post(&self.endpoint)
+                .header("Authorization", &self.auth)
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .json(&payload)
+                .send()
+        };
+        let mut resp = send()
             .await
             .map_err(|e| Error::Upstream(format!("linear {what} request: {e}")))?;
+        if is_read {
+            if let Some(wait) =
+                crate::atlassian::rate_limit_wait(resp.status().as_u16(), resp.headers())
+            {
+                if wait <= crate::atlassian::RATE_LIMIT_RETRY_MAX {
+                    tracing::debug!(
+                        what,
+                        wait_secs = wait.as_secs(),
+                        "linear: rate limited, retrying once"
+                    );
+                    tokio::time::sleep(wait).await;
+                    resp = send()
+                        .await
+                        .map_err(|e| Error::Upstream(format!("linear {what} request: {e}")))?;
+                }
+            }
+        }
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let headers = resp.headers().clone();
+        let cap = if status.is_success() {
+            LINEAR_BODY_CAP
+        } else {
+            crate::atlassian::ERROR_BODY_CAP
+        };
+        let text = crate::atlassian::read_text_capped(resp, cap).await;
         let body: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
         if let Some(err) = graphql_error(&body) {
             return Err(map_error(what, status.as_u16(), &err));
         }
         if !status.is_success() {
+            if let Some(wait) = crate::atlassian::rate_limit_wait(status.as_u16(), &headers) {
+                return Err(Error::Upstream(format!(
+                    "linear rate limited — retry in {}s",
+                    wait.as_secs().max(1)
+                )));
+            }
+            if matches!(status.as_u16(), 401 | 403) {
+                return Err(Error::Forbidden(format!(
+                    "linear {what}: authentication failed ({status}) — check the account's API key ({})",
+                    otto_core::text::clip_chars(text.trim(), crate::atlassian::BODY_SNIPPET_MAX)
+                )));
+            }
             return Err(Error::Upstream(format!(
                 "linear {what} failed ({status}): {}",
-                otto_core::text::clip_chars(&text, 400)
+                otto_core::text::clip_chars(text.trim(), 400)
             )));
         }
         body.get("data")
@@ -682,8 +741,12 @@ fn map_error(what: &str, status: u16, err: &Value) -> Error {
     if lower.contains("entity not found") || code.contains("not_found") {
         return Error::NotFound(format!("linear {what}: {msg}"));
     }
-    if status == 401 || code.contains("authentication") {
-        return Error::Upstream(format!(
+    if status == 401
+        || status == 403
+        || code.contains("authentication")
+        || code.contains("forbidden")
+    {
+        return Error::Forbidden(format!(
             "linear {what}: authentication failed — check the account's API key ({msg})"
         ));
     }
@@ -1081,8 +1144,17 @@ mod tests {
         assert!(matches!(map_error("issue", 200, &nf), Error::NotFound(_)));
         let auth = json!({"message":"Authentication required","extensions":{"type":"authentication error"}});
         assert!(
-            matches!(map_error("issue", 400, &auth), Error::Upstream(m) if m.contains("API key"))
+            matches!(map_error("issue", 400, &auth), Error::Forbidden(m) if m.contains("API key"))
         );
+        let forb = json!({"message":"Access denied","extensions":{"code":"FORBIDDEN"}});
+        assert!(matches!(
+            map_error("issue", 403, &forb),
+            Error::Forbidden(_)
+        ));
+        assert!(matches!(
+            map_error("issue", 401, &json!({"message":"bad token"})),
+            Error::Forbidden(_)
+        ));
         let bad = json!({"message":"Field 'x' not defined","extensions":{"code":"GRAPHQL_VALIDATION_FAILED"}});
         assert!(matches!(map_error("issues", 400, &bad), Error::Invalid(_)));
         let other = json!({"message":"Rate limited","extensions":{"code":"RATELIMITED"}});
@@ -1240,5 +1312,100 @@ mod tests {
         }));
         assert_eq!(c.author, "GitHub");
         assert_eq!(c.body_md, "hi");
+    }
+
+    async fn spawn_stub_sequence(
+        responses: Vec<String>,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_bg = Arc::clone(&hits);
+        tokio::spawn(async move {
+            for reply in responses {
+                if let Ok((mut sock, _)) = listener.accept().await {
+                    hits_bg.fetch_add(1, Ordering::SeqCst);
+                    let mut buf = [0u8; 4096];
+                    let _ = sock.read(&mut buf).await;
+                    let _ = sock.write_all(reply.as_bytes()).await;
+                }
+            }
+        });
+        (format!("http://{addr}/graphql"), hits)
+    }
+
+    #[tokio::test]
+    async fn linear_read_retries_429_and_503_with_retry_after() {
+        use std::sync::atomic::Ordering;
+
+        let ok_body = r#"{"data":{"viewer":{"id":"u1"}}}"#;
+        let ok_resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{ok_body}",
+            ok_body.len()
+        );
+        let r429 = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nContent-Length: 4\r\nConnection: close\r\n\r\nslow".to_string();
+        let (url, hits) = spawn_stub_sequence(vec![r429, ok_resp.clone()]).await;
+        let client = LinearClient::with_endpoint(&url, "lin_api_test");
+        let data = client
+            .gql("viewer", "query { viewer { id } }", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(data["viewer"]["id"], "u1");
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "429 read retried once");
+
+        let r503 = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 0\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbusy".to_string();
+        let (url, hits) = spawn_stub_sequence(vec![r503, ok_resp]).await;
+        let client = LinearClient::with_endpoint(&url, "lin_api_test");
+        let data = client
+            .gql("viewer", "query { viewer { id } }", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(data["viewer"]["id"], "u1");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "503+Retry-After read retried once"
+        );
+    }
+
+    #[tokio::test]
+    async fn linear_mutation_never_retries_429() {
+        use std::sync::atomic::Ordering;
+
+        let r429 = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nContent-Length: 4\r\nConnection: close\r\n\r\nslow".to_string();
+        let (url, hits) = spawn_stub_sequence(vec![r429]).await;
+        let client = LinearClient::with_endpoint(&url, "lin_api_test");
+        let err = client
+            .gql("create", "mutation { issueCreate { success } }", json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Upstream(ref m) if m.contains("rate limited")),
+            "{err:?}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "mutations must not retry");
+    }
+
+    #[tokio::test]
+    async fn linear_http_401_and_403_map_to_forbidden() {
+        for (status, reason) in [(401, "Unauthorized"), (403, "Forbidden")] {
+            let reply = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Length: 6\r\nConnection: close\r\n\r\ndenied"
+            );
+            let (url, _) = spawn_stub_sequence(vec![reply]).await;
+            let client = LinearClient::with_endpoint(&url, "lin_api_bad");
+            let err = client
+                .gql("viewer", "query { viewer { id } }", json!({}))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, Error::Forbidden(_)),
+                "expected Forbidden for HTTP {status}, got {err:?}"
+            );
+        }
     }
 }

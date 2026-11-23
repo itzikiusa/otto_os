@@ -134,6 +134,9 @@ impl MemoryService {
                 state
             )));
         }
+        if let Some(r) = self.remote_client() {
+            return r.set_state(ws, id, state).await;
+        }
         self.repo().set_state(ws, id, state).await
     }
 
@@ -141,6 +144,9 @@ impl MemoryService {
     /// marked `active=0` and `state=stale`; it is NOT permanently removed.
     /// Presenting the token to `undo_forget` within the retention window restores it.
     pub async fn soft_forget(&self, ws: &str, id: &str) -> Result<ForgetResp> {
+        if let Some(r) = self.remote_client() {
+            return r.soft_forget(ws, id).await;
+        }
         let token = self.repo().soft_forget(ws, id).await?;
         Ok(ForgetResp { undo_token: token })
     }
@@ -148,12 +154,21 @@ impl MemoryService {
     /// Undo a soft-delete using the token returned by `soft_forget`. Restores
     /// the memory to `active=1` and clears the token (single-use).
     pub async fn undo_forget(&self, ws: &str, undo_token: &str) -> Result<Memory> {
+        if self.remote_client().is_some() {
+            return Err(Error::Invalid(
+                "unscoped undo_forget requires a memory id on a remote backend; use undo_forget_id"
+                    .into(),
+            ));
+        }
         self.repo().undo_forget(ws, undo_token).await
     }
 
     /// [`Self::undo_forget`] that only restores memory `id` (the
     /// `/memory/{mid}/forget/undo` route): a token naming another row is 404.
     pub async fn undo_forget_id(&self, ws: &str, id: &str, undo_token: &str) -> Result<Memory> {
+        if let Some(r) = self.remote_client() {
+            return r.undo_forget_id(ws, id, undo_token).await;
+        }
         self.repo()
             .undo_forget_scoped(ws, Some(id), undo_token)
             .await
@@ -170,6 +185,9 @@ impl MemoryService {
             return Err(Error::Invalid(
                 "merge requires at least 2 source memories".into(),
             ));
+        }
+        if let Some(r) = self.remote_client() {
+            return r.merge(ws, &req).await.map(|resp| resp.memory);
         }
         // Load the first source to inherit metadata.
         let first = self.repo().get(ws, &req.ids[0]).await?;
@@ -235,6 +253,9 @@ impl MemoryService {
             return Err(Error::Invalid(format!(
                 "split supports at most {MAX_SPLIT_PARTS} parts"
             )));
+        }
+        if let Some(r) = self.remote_client() {
+            return r.split(ws, mid, &req).await;
         }
         let parent = self.repo().get(ws, mid).await?;
 
@@ -309,6 +330,9 @@ impl MemoryService {
     /// of `suggested` memories tagged with the import kind, and persist them as
     /// a governed-import batch for auditability + reverting.
     pub async fn import_governed(&self, ws: &str, by: &str, req: ImportReq) -> Result<ImportResp> {
+        if let Some(r) = self.remote_client() {
+            return r.import_governed(ws, &req).await;
+        }
         let label = req.label.clone().unwrap_or_else(|| req.kind.clone());
 
         let parsed = parse_governance_file(&req.kind, &req.content);
@@ -341,14 +365,14 @@ impl MemoryService {
         })
         .to_string();
         for id in &ids {
-            let _ = self.repo().set_state(ws, id, STATE_SUGGESTED).await;
-            let _ =
-                sqlx::query("UPDATE memories SET provenance_json=? WHERE id=? AND workspace_id=?")
-                    .bind(&prov)
-                    .bind(id)
-                    .bind(ws)
-                    .execute(self.pool())
-                    .await;
+            self.repo().set_state(ws, id, STATE_SUGGESTED).await?;
+            sqlx::query("UPDATE memories SET provenance_json=? WHERE id=? AND workspace_id=?")
+                .bind(&prov)
+                .bind(id)
+                .bind(ws)
+                .execute(self.pool())
+                .await
+                .map_err(|e| Error::Internal(format!("memory.import provenance: {e}")))?;
         }
 
         let gi = self
@@ -364,6 +388,11 @@ impl MemoryService {
 
     /// List all governed imports for a workspace.
     pub async fn list_governed_imports(&self, ws: &str) -> Result<Vec<GovernedImport>> {
+        if self.remote_client().is_some() {
+            return Err(Error::Invalid(
+                "listing governed imports must run on the memory host".into(),
+            ));
+        }
         self.repo().list_governed_imports(ws).await
     }
 }
@@ -539,9 +568,74 @@ mod tests {
         assert!(mems.is_empty());
     }
 
-    // ── forget / undo lifecycle ───────────────────────────────────────────
-    // Full round-trip tests (set_state, soft_forget, undo_forget, merge, split)
-    // require a real SQLite pool and run via cargo test -p otto-memory under
-    // the integration-test harness (test_support.rs). The logic above is
-    // covered by the unit tests; the repo layer is tested in otto-state.
+    #[tokio::test]
+    async fn remote_governance_routes_to_remote_instead_of_local_sqlite() {
+        // Bind a tiny loopback mock server that answers POST /memory/*/forget
+        // and rejects everything else with 502 so we prove local SQLite is never
+        // touched when a remote backend is configured.
+        use axum::{routing::post, Json, Router};
+        let app = Router::new()
+            .route(
+                "/api/v1/workspaces/{ws}/memory/{mid}/forget",
+                post(|| async {
+                    Json(ForgetResp {
+                        undo_token: "remote-tok-1".into(),
+                    })
+                }),
+            )
+            .route(
+                "/api/v1/workspaces/{ws}/memory/import",
+                post(|| async {
+                    Json(ImportResp {
+                        imported: 3,
+                        import_id: "remote-imp-1".into(),
+                    })
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let (pool, ws, user) = crate::test_support::mem_pool().await;
+        let svc = MemoryService::remote(pool, format!("http://{addr}"), "tok".into());
+
+        // Routed to remote (not local SQLite, which has no row "m-remote"):
+        let forgot = svc.soft_forget(&ws, "m-remote").await.unwrap();
+        assert_eq!(forgot.undo_token, "remote-tok-1");
+
+        let imported = svc
+            .import_governed(
+                &ws,
+                &user,
+                ImportReq {
+                    kind: import_kind::AGENTS_MD.into(),
+                    content: "## Rule\n\nBody".into(),
+                    label: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(imported.imported, 3);
+        assert_eq!(imported.import_id, "remote-imp-1");
+
+        // Unsupported unscoped/local-only governance ops return a clear error
+        // rather than silently touching local SQLite.
+        assert!(matches!(
+            svc.undo_forget(&ws, "tok").await,
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            svc.list_governed_imports(&ws).await,
+            Err(Error::Invalid(_))
+        ));
+        // Unimplemented remote route propagates upstream error instead of falling back.
+        assert!(matches!(
+            svc.set_state(&ws, "m-remote", STATE_ACCEPTED).await,
+            Err(Error::Upstream(_))
+        ));
+
+        server.abort();
+    }
 }

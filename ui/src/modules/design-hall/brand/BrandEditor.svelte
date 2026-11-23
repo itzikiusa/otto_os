@@ -83,6 +83,10 @@
 
   /** Only the newest load (for the current kit) may assign (S18-09). */
   let loadSeq = 0;
+  let metaSeq = 0;
+  let usageSeq = 0;
+  let alive = true;
+  $effect(() => () => { alive = false; });
 
   async function load(): Promise<void> {
     const my = ++loadSeq;
@@ -131,8 +135,11 @@
   }
 
   async function refreshMeta(): Promise<void> {
+    const my = ++metaSeq;
+    const target = id;
     try {
-      const d = await api.getArtifact(id);
+      const d = await api.getArtifact(target);
+      if (!alive || my !== metaSeq || target !== id) return;
       artifact = d.artifact;
       head = d.head;
       approved = d.approved;
@@ -166,14 +173,19 @@
   let usageTimer: ReturnType<typeof setTimeout> | null = null;
 
   async function loadUsage(): Promise<void> {
+    const my = ++usageSeq;
+    const target = id;
+    const current = () => alive && my === usageSeq && target === id;
     usageLoading = true;
     usageError = null;
     try {
-      usage = await brandImpact(id);
+      const u = await brandImpact(target);
+      if (!current()) return;
+      usage = u;
     } catch (e) {
-      usageError = errText(e);
+      if (current()) usageError = errText(e);
     } finally {
-      usageLoading = false;
+      if (current()) usageLoading = false;
     }
   }
   function usageSoon(): void {

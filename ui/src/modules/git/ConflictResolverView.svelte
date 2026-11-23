@@ -3,6 +3,7 @@
   // unresolved indicator; RIGHT: the ConflictFilePane for the selected file.
   // Footer: Abort merge (confirm) and Complete merge (enabled once every file
   // is resolved). Leaving the view (abort/complete) is reported via `onleave`.
+  import { onDestroy } from 'svelte';
   import type { GitOpInProgress, MergeConflictStatus } from '../../lib/api/types';
   import { toastError } from '../../lib/toastError';
   import { announceShown } from '../../lib/announce.svelte';
@@ -80,15 +81,24 @@
   // instead of a neutral "No conflicted files." while the repo is mid-merge.
   let loadError = $state<string | null>(null);
   let reloadKey = $state(0);
+  let disposed = false;
+  let statusGen = 0;
+  onDestroy(() => {
+    disposed = true;
+    statusGen++;
+  });
 
   $effect(() => {
     const id = repoId;
     void reloadKey;
+    const gen = ++statusGen;
+    let live = true;
     loading = true;
     loadError = null;
     void git
       .getMergeStatus(id)
       .then((s) => {
+        if (!live || disposed || gen !== statusGen || id !== repoId) return;
         status = s;
         op = s.op ?? null;
         // Prefer the daemon's authoritative list; fall back to the seed.
@@ -102,6 +112,7 @@
         }
       })
       .catch((e) => {
+        if (!live || disposed || gen !== statusGen || id !== repoId) return;
         loadError = loadErrorText(e);
         // Fall back to the seed list from the merge that brought us here.
         status = { merging: initialFiles.length > 0, source: initialSource, conflicted_files: initialFiles };
@@ -110,8 +121,11 @@
         selected = initialFiles[0] ?? null;
       })
       .finally(() => {
-        loading = false;
+        if (live && !disposed && gen === statusGen && id === repoId) loading = false;
       });
+    return () => {
+      live = false;
+    };
   });
 
   const sourceLabel = $derived(status?.source ?? initialSource);
@@ -144,8 +158,11 @@
    *  not resolved through this view) are marked resolved. Never removes rows —
    *  progress display stays stable. */
   async function reconcile(): Promise<void> {
+    const id = repoId;
+    const gen = statusGen;
     try {
-      const s = await git.getMergeStatus(repoId);
+      const s = await git.getMergeStatus(id);
+      if (disposed || gen !== statusGen || id !== repoId) return;
       op = s.op ?? null;
       const live = new Set(s.conflicted_files);
       const known = new Set(pending);

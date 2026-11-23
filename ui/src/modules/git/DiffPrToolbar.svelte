@@ -52,6 +52,11 @@
     searchOf?: number;
     /** Search the files past the search load cap too. */
     onsearchall?: () => void;
+    /** Inline AI review findings count (hidden when 0). */
+    aiCount?: number;
+    /** Whether inline AI review finding cards are visible on diff lines. */
+    aiOpen?: boolean;
+    ontoggleai?: () => void;
   }
   let {
     lead,
@@ -85,6 +90,9 @@
     searchDone = null,
     searchOf = 0,
     onsearchall,
+    aiCount = 0,
+    aiOpen = true,
+    ontoggleai,
   }: Props = $props();
 
   // Its height, for the diff's file headers to land BELOW it on a jump
@@ -143,6 +151,16 @@
       Searched {searchDone} of {plural(searchOf, 'file')}
       {#if onsearchall}<button class="pt-link" onclick={onsearchall}>Load the rest</button>{/if}
     </span>
+  {/if}
+  {#if aiCount > 0 && ontoggleai}
+    <button
+      type="button"
+      class="btn small pt-ai-toggle"
+      data-testid="diff-ai-overlay-toggle"
+      aria-pressed={aiOpen}
+      title={aiOpen ? 'Hide inline AI review findings' : 'Show inline AI review findings on matching lines'}
+      onclick={ontoggleai}
+    ><Icon name="sparkle" size={12} /> AI findings ({aiCount})</button>
   {/if}
   <div class="pt-icons" role="group" aria-label="Diff view options">
     {#if canTree}
@@ -275,6 +293,16 @@
     color: var(--text-dim);
     pointer-events: none;
     white-space: nowrap;
+  }
+  .pt-ai-toggle {
+    border-radius: 999px;
+    gap: 4px;
+    white-space: nowrap;
+  }
+  .pt-ai-toggle[aria-pressed='true'] {
+    background: var(--accent-soft);
+    border-color: var(--accent-line);
+    color: var(--accent-text);
   }
   .pt-icons {
     display: inline-flex;

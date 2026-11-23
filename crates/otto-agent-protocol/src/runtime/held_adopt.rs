@@ -20,7 +20,7 @@ use super::{
     ProcTransport, RequestIds,
 };
 use crate::holder::{adopt_socket, best_effort_shutdown_socket, list_holder_sockets, LineStream};
-use crate::process::signal_group;
+use crate::process::ChildControl;
 
 impl AgentRuntime {
     /// Graceful daemon restart teardown: flush coalesced streaming items, push
@@ -61,9 +61,9 @@ impl AgentRuntime {
                             }));
                         }
                     }
-                    ProcTransport::Direct { stdin } => {
+                    ProcTransport::Direct { stdin, control } => {
                         drop(stdin);
-                        signal_group(proc.pid, libc::SIGTERM);
+                        let _ = control.send(ChildControl::Signal(libc::SIGTERM));
                     }
                 }
             }

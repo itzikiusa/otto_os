@@ -5,6 +5,7 @@ import { loadErrorText } from '../../../lib/loadError';
 import { canonicalizeLocalProjectPath } from '../shell/ideProjectHelpers';
 import type { DebugAndEnvHost } from './ideDebugAndEnvController';
 import {
+  ideTargetKey,
   streamIdeSse,
   type IdeBreakpoint,
   type IdeDebugSessionSnapshot,
@@ -24,14 +25,20 @@ export function attachDebugSessionStream(
 ): AbortController {
   prevCtl?.abort();
   const ctl = new AbortController();
+  const key = host.target ? ideTargetKey(host.target) : null;
+  const stale = (): boolean => key !== null && Boolean(host.target) && ideTargetKey(host.target) !== key;
   host.debugStreamActive = false;
   void streamIdeSse(`/ide/debug/sessions/${encodeURIComponent(sessionId)}/events`, {}, ctl.signal, (raw) => {
+    if (stale()) { ctl.abort(); return; }
     try {
       const parsed = JSON.parse(raw) as { session?: IdeDebugSessionSnapshot } & Partial<IdeDebugSessionSnapshot>;
       const snap = (parsed.session ?? parsed) as IdeDebugSessionSnapshot;
       if (snap?.id) onSnapshot(snap);
     } catch { /* heartbeat */ }
-  }, () => { host.debugStreamActive = true; }).catch(() => {}).finally(() => { host.debugStreamActive = false; });
+  }, () => {
+    if (stale()) { ctl.abort(); return; }
+    host.debugStreamActive = true;
+  }).catch(() => {}).finally(() => { if (!stale()) host.debugStreamActive = false; });
   return ctl;
 }
 

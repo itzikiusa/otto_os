@@ -19,20 +19,11 @@ pub async fn get_all(
     Ok(Json(SettingsRepo::new(ctx.pool.clone()).all().await?))
 }
 
-/// `PUT /api/v1/settings` — upserts every key in the body, returns the full
-/// settings object.
-pub async fn put_all(
-    State(ctx): State<ServerCtx>,
-    auth: crate::auth::CurrentAuthContext,
-    CurrentUser(user): CurrentUser,
-    Json(body): Json<Map<String, Value>>,
-) -> ApiResult<Json<Map<String, Value>>> {
-    require_root(&user)?;
-    crate::auth::require_human(&auth.0)?;
-    let repo = SettingsRepo::new(ctx.pool.clone());
-    // The owner's extra kubeconfig exec plugins: bare names, never a shell or
-    // interpreter — refused before anything is written.
-    let extra_plugins = match body.get(otto_core::kubeconfig_policy::EXTRA_PLUGINS_SETTING) {
+/// Validate settings patch entries before persisting (used by `PUT /settings`,
+/// `POST /settings/import`, and `POST /state/restore`). Returns validated
+/// `kubeconfig_exec_plugins` names when present.
+pub(crate) fn validate_settings_patch(body: &Map<String, Value>) -> ApiResult<Option<Vec<String>>> {
+    match body.get(otto_core::kubeconfig_policy::EXTRA_PLUGINS_SETTING) {
         Some(value) => {
             let names: Vec<String> = serde_json::from_value(value.clone()).map_err(|_| {
                 ApiError(otto_core::Error::Invalid(
@@ -47,35 +38,59 @@ pub async fn put_all(
                     refused.join(", ")
                 ))));
             }
-            Some(names)
+            Ok(Some(names))
         }
-        None => None,
-    };
-    // Every key commits together or not at all; the in-memory reloads below
-    // run only once the whole request is durable.
-    repo.put_many(&body).await?;
-    if let Some(names) = extra_plugins {
-        otto_core::kubeconfig_policy::set_extra_plugins(&names);
+        None => Ok(None),
     }
-    // Custom providers apply immediately — no daemon restart needed.
+}
+
+/// Apply live in-memory daemon side effects after persisting a settings patch
+/// (shared by `PUT /settings`, `POST /settings/import`, and `POST /state/restore`).
+pub(crate) async fn apply_setting_side_effects(
+    ctx: &ServerCtx,
+    repo: &SettingsRepo,
+    body: &Map<String, Value>,
+    extra_plugins: Option<&[String]>,
+) {
+    if let Some(names) = extra_plugins {
+        otto_core::kubeconfig_policy::set_extra_plugins(names);
+    }
     if let Some(value) = body.get("providers") {
         ctx.manager.providers().reload(Some(value));
     }
-    // Excluded providers apply immediately: hide them from every picker without a
-    // restart. A JSON array of names; anything else clears the exclusion.
     if let Some(value) = body.get("disabled_providers") {
         let names: Vec<String> = serde_json::from_value(value.clone()).unwrap_or_default();
         ctx.manager.providers().set_disabled(&names);
     }
-    // The skip-permissions opt-out applies immediately too: rebuild the registry
-    // against the current `providers` override with the new mode. New spawns pick
-    // it up; running sessions are untouched.
     if let Some(value) = body.get("agent_skip_permissions") {
         let skip = value.as_bool().unwrap_or(true);
         let overrides = repo.get("providers").await.ok().flatten();
         ctx.manager
             .providers()
             .set_skip_permissions(skip, overrides.as_ref());
+    }
+}
+
+/// `PUT /api/v1/settings` — upserts every key in the body, returns the full
+/// settings object.
+pub async fn put_all(
+    State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
+    CurrentUser(user): CurrentUser,
+    Json(body): Json<Map<String, Value>>,
+) -> ApiResult<Json<Map<String, Value>>> {
+    require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
+    let repo = SettingsRepo::new(ctx.pool.clone());
+    // The owner's extra kubeconfig exec plugins: bare names, never a shell or
+    // interpreter — refused before anything is written.
+    let extra_plugins = validate_settings_patch(&body)?;
+    // Every key commits together or not at all; the in-memory reloads below
+    // run only once the whole request is durable.
+    repo.put_many(&body).await?;
+    apply_setting_side_effects(&ctx, &repo, &body, extra_plugins.as_deref()).await;
+    if let Some(value) = body.get("agent_skip_permissions") {
+        let skip = value.as_bool().unwrap_or(true);
         ctx.audit(NewAuditEntry {
             user_id: Some(user.id.clone()),
             action: "agent_skip_permissions.toggle".into(),

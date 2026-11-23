@@ -42,6 +42,8 @@
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { vaultNote } from '../../lib/api/vault';
+  import { router } from '../../lib/router.svelte';
+  import { canvas } from '../../lib/stores/canvas.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { renderMermaid } from '../../lib/render/mermaid';
@@ -57,6 +59,12 @@
   import { linkPreview } from './previewStore.svelte';
   import { structuredModel } from './structuredNote';
   import { vault, vaultConflictKind } from './vault.svelte';
+  import { shouldIgnoreVaultShortcut } from './vaultShortcuts';
+  import { ottoRefMarkedExtension, parseOttoRef, upgradeOttoRefsInDom } from './ottoRefs';
+  import { hydrateOttoTransclusions } from './ottoTransclusions';
+  import CreateStoryFromNoteButton from './CreateStoryFromNoteButton.svelte';
+  import './ottoRefs.css';
+  const ottoRefExt = ottoRefMarkedExtension();
 
   // -- "Refine with Otto" drawer — open state lives here keyed BY PATH (outside
   // the note data), so reloading the note after the agent edits it does not
@@ -140,6 +148,7 @@
       resolve: resolverFrom(n.outgoing),
       assetUrl: noAssetUrl,
       lazyAssets: true,
+      use: [ottoRefExt],
     });
     cacheHtml(key, html);
     return html;
@@ -174,14 +183,22 @@
   $effect(() => {
     void rendered;
     const host = readEl;
-    if (host) untrack(() => hydrateImages(host));
+    if (!host) return;
+    let disposeCards: (() => void) | undefined;
+    untrack(() => { upgradeOttoRefsInDom(host); hydrateImages(host); disposeCards = hydrateOttoTransclusions(host); });
+    return () => disposeCards?.();
   });
 
   let readEl = $state<HTMLElement | undefined>();
 
   function onReadClick(e: MouseEvent): void {
-    const t = (e.target as HTMLElement).closest('a.internal-link, a.embed-title, span.tag, div.note-embed');
+    const t = (e.target as HTMLElement).closest('a.otto-ref, a.internal-link, a.embed-title, span.tag, div.note-embed');
     if (!t) return;
+    if (t.classList.contains('otto-ref')) {
+      const ref = parseOttoRef(t.getAttribute('data-raw') ?? '');
+      if (ref) { e.preventDefault(); if (ref.kind === 'canvas') canvas.pendingOpenId = ref.id; router.go(ref.route); }
+      return;
+    }
     if (t.classList.contains('tag')) {
       const tag = t.getAttribute('data-tag');
       if (tag) vault.searchTag(tag);
@@ -230,6 +247,25 @@
     const a = (e.target as HTMLElement).closest?.('a.internal-link[data-path]');
     if (a && !a.contains((e as MouseEvent).relatedTarget as Node | null)) linkPreview.hide();
   }
+  function attachReadSurface(el: HTMLElement): () => void {
+    const hide = () => linkPreview.hide();
+    el.addEventListener('click', onReadClick);
+    el.addEventListener('keydown', onReadKeydown);
+    el.addEventListener('mouseover', onReadOver);
+    el.addEventListener('mouseout', onReadOut);
+    el.addEventListener('focusin', onReadOver);
+    el.addEventListener('focusout', hide);
+    el.addEventListener('scroll', hide, { passive: true });
+    return () => {
+      el.removeEventListener('click', onReadClick);
+      el.removeEventListener('keydown', onReadKeydown);
+      el.removeEventListener('mouseover', onReadOver);
+      el.removeEventListener('mouseout', onReadOut);
+      el.removeEventListener('focusin', onReadOver);
+      el.removeEventListener('focusout', hide);
+      el.removeEventListener('scroll', hide);
+    };
+  }
   $effect(() => {
     void vault.notePath;
     void vault.editing;
@@ -276,13 +312,15 @@
       el.setAttribute('data-hydrated', '1');
       queue.push([el, p]);
     }
+    let stopped = false;
     const worker = async (): Promise<void> => {
       for (let next = queue.shift(); next; next = queue.shift()) {
         const [el, p] = next;
+        if (stopped || !el.isConnected) continue;
         try {
           const n = await readEmbed(wsId, vaultId, p);
+          if (stopped || !el.isConnected) continue;
           const html = renderNote(stripFrontmatter(n.raw), {
-            // Embedded content resolves its own links but never re-embeds.
             resolve: resolverFrom(n.outgoing),
             assetUrl: noAssetUrl,
             lazyAssets: true,
@@ -290,45 +328,47 @@
           const body = document.createElement('div');
           body.className = 'embed-body md-body';
           body.innerHTML = html;
-          // Strip nested embeds inside the embed (depth guard).
           body.querySelectorAll('div.note-embed').forEach((x) => x.removeAttribute('data-embed-path'));
           el.appendChild(body);
           hydrateImages(body);
         } catch {
-          el.classList.add('embed-error');
+          if (!stopped && el.isConnected) el.classList.add('embed-error');
         }
       }
     };
     untrack(() => {
       for (let i = 0; i < Math.min(EMBED_WORKERS, queue.length); i++) void worker();
     });
+    return () => { stopped = true; };
   });
 
-  // -- diagram blocks: render mermaid / D2 fences to inline SVG -----------------
-  // lib/render/markdown emits <div class="diagram-block" data-diagram=…><pre>src</pre></div>;
-  // swap each for the rendered SVG (lazy-loaded libs). On error keep the source
-  // visible with the parse message — never a blank hole in the note.
+  // -- diagram blocks: render mermaid / D2 fences to inline SVG (re-themes on scheme flip) --
   let diagramSeq = 0;
   $effect(() => {
     void rendered;
+    const dark = ui.resolvedScheme === 'dark';
+    const theme = dark ? 'dark' : 'light';
     const host = readEl;
     if (!host) return;
-    for (const el of Array.from(host.querySelectorAll('div.diagram-block:not([data-rendered])'))) {
-      el.setAttribute('data-rendered', '1');
+    for (const el of Array.from(host.querySelectorAll<HTMLElement>('div.diagram-block'))) {
+      if (el.dataset.renderedTheme === theme) continue;
+      const src = el.dataset.diagramSrc ?? (el.querySelector('pre.diagram-src')?.textContent ?? '');
+      el.dataset.diagramSrc = src;
+      el.dataset.renderedTheme = theme;
       const kind = el.getAttribute('data-diagram');
-      const src = el.querySelector('pre.diagram-src')?.textContent ?? '';
-      const id = `vault-diag-${++diagramSeq}`;
+      const seq = String(++diagramSeq);
+      el.dataset.renderSeq = seq;
+      const id = `vault-diag-${seq}`;
       untrack(() => {
-        const render =
-          kind === 'd2'
-            ? renderD2(id, src, { dark: ui.resolvedScheme === 'dark', isStale: () => !el.isConnected })
-            : renderMermaid(id, src, { dark: ui.resolvedScheme === 'dark', isStale: () => !el.isConnected });
-        void render.then(({ svg, error }) => {
-          if (!el.isConnected) return;
+        const isStale = () => !el.isConnected || el.dataset.renderSeq !== seq;
+        const render = kind === 'd2' ? renderD2(id, src, { dark, isStale }) : renderMermaid(id, src, { dark, isStale });
+        void render.then(({ svg, error, stale }) => {
+          if (stale || isStale()) return;
           if (svg) {
             el.innerHTML = svg;
             el.classList.add('diagram-ok');
           } else {
+            el.querySelector('.diagram-error')?.remove();
             const err = document.createElement('div');
             err.className = 'diagram-error';
             err.textContent = `Diagram error: ${error ?? 'unknown'}`;
@@ -381,11 +421,12 @@
   }
 
   function onKeydown(e: KeyboardEvent): void {
-    if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+    if (!e.metaKey && !e.ctrlKey) return;
+    const key = e.key.toLowerCase();
+    if (key === 's' && !shouldIgnoreVaultShortcut(e, { allowInEditor: true })) {
       e.preventDefault();
       void vault.saveNow();
-    }
-    if ((e.metaKey || e.ctrlKey) && e.key === 'e') {
+    } else if (key === 'e' && !shouldIgnoreVaultShortcut(e)) {
       e.preventDefault();
       vault.setView(!vault.editing);
     }
@@ -438,30 +479,15 @@
             <Icon name="layout" size={14} />
           </button>
         {/if}
+        {#if vault.current && vault.notePath}<CreateStoryFromNoteButton vaultId={vault.current.id} notePath={vault.notePath} raw={vault.draft} metaTitle={vault.note.meta.title} />{/if}
         <button class="mode-btn" title="Note edit history" aria-label="Note edit history" onclick={() => void vault.openHistory(vault.notePath ?? '')}><Icon name="clock" size={14} /></button>
-        <button
-          class="mode-btn"
-          class:refine-on={refineShown}
-          title="Refine with Otto"
-          aria-label="Refine with Otto"
-          aria-pressed={refineShown}
-          onclick={toggleRefine}
-        >
-          <Icon name="sparkle" size={14} />
-        </button>
-        <button
-          class="mode-btn labelled"
-          title={vault.editing ? 'Reading view (⌘E)' : 'Edit (⌘E)'}
-          onclick={() => vault.setView(!vault.editing)}
-        >
-          <Icon name={vault.editing ? 'eye' : 'edit'} size={13} />
-          {vault.editing ? 'Read' : 'Edit'}
-        </button>
+        <button class="mode-btn" class:refine-on={refineShown} title="Refine with Otto" aria-label="Refine with Otto" aria-pressed={refineShown} onclick={toggleRefine}><Icon name="sparkle" size={14} /></button>
+        <button class="mode-btn labelled" title={vault.editing ? 'Reading view (⌘E)' : 'Edit (⌘E)'} onclick={() => vault.setView(!vault.editing)}><Icon name={vault.editing ? 'eye' : 'edit'} size={13} />{vault.editing ? 'Read' : 'Edit'}</button>
       </div>
     </header>
 
     {#if vault.conflict}
-      <div class="conflict" role="alert">
+      <div class="conflict" use:announceShown={{ text: 'This note changed on disk while you were editing. Your edits are kept until you choose.', assertive: true }}>
         This note changed on disk while you were editing. Your edits are kept until you choose.
         <button class="btn small" onclick={() => void vault.conflictOverwrite()} title="Save your version; the disk version stays in History">Keep my edits</button>
         <button class="btn small danger" onclick={() => void vault.conflictReload()}>Discard my edits…</button>
@@ -485,26 +511,15 @@
         />
       </div>
     {:else}
-      <!-- Rendered markdown is sanitized in lib/render/markdown (allowlist). -->
-      <!-- svelte-ignore a11y_no_static_element_interactions, a11y_mouse_events_have_key_events -->
-      <div
-        class="read md-body"
-        bind:this={readEl}
-        onclick={onReadClick}
-        onkeydown={onReadKeydown}
-        onmouseover={onReadOver}
-        onmouseout={onReadOut}
-        onfocusin={onReadOver}
-        onfocusout={() => linkPreview.hide()}
-        onscroll={() => linkPreview.hide()}
-      >
+      <!-- Rendered markdown is sanitized in lib/render/markdown (allowlist); delegated wikilink/tag handlers attach via attachReadSurface. -->
+      <div class="read md-body" bind:this={readEl} {@attach attachReadSurface}>
         {#if structured && structuredOn && vault.note}
           <StructuredNote model={structured} note={vault.note} />
         {/if}
         {#if renderTimedOut !== null && renderTimedOut === renderKey}
           <div class="render-timeout" use:announceShown={'Rendering this note timed out; showing plain text.'}>
             <span>Rendering this note timed out · showing plain text.</span>
-            <button type="button" class="btn sm" onclick={retryRender}>Render again</button>
+            <button type="button" class="btn small" onclick={retryRender}>Render again</button>
           </div>
         {/if}
         {@html rendered}

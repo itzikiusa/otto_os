@@ -1,11 +1,5 @@
 <script module lang="ts">
-  interface IdeTermTab {
-    id: string;
-    label: string;
-    kind: 'local' | 'ssh';
-    targetKey: string;
-    cwd: string;
-  }
+  import { pruneIdeTerminalTabs, type IdeTerminalTabEntry as IdeTermTab } from './store/ideTerminalTabs';
 
   let savedTabs = $state<IdeTermTab[]>([]);
   // The selected shell per project (I3-19): coming back to A selects A's shell, not its first.
@@ -26,6 +20,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { api } from '../../lib/api/client';
   import type { Session } from '../../lib/api/types';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
   import { toastError } from '../../lib/toastError';
@@ -76,11 +71,16 @@
     }
   });
 
-  // Prune local shell tabs that were deleted/archived outside the IDE.
+  // Prune local and SSH shell tabs whose session was deleted or archived outside the IDE.
   $effect(() => {
     if (!ws.listSettled) return;
-    const liveIds = new Set(ws.sessions.filter((s) => !s.archived).map((s) => s.id));
-    const next = savedTabs.filter((t) => t.kind === 'ssh' || liveIds.has(t.id));
+    const next = pruneIdeTerminalTabs(
+      savedTabs,
+      ws.sessions,
+      ws.otherWsSessions,
+      ws.archivedSessions,
+      ws.statusMap,
+    );
     if (next.length !== savedTabs.length) {
       savedTabs = next;
     }
@@ -123,19 +123,30 @@
     void spawnTerminal();
   });
 
+  // Clear stale spawn error when switching to a different project/target.
+  $effect(() => {
+    void targetKey;
+    spawnError = null;
+  });
+
   async function spawnTerminal(customCwd?: string): Promise<void> {
     if (spawning || !ide.hasTarget) return;
     spawning = true;
     spawnError = null;
-    const launchCwd = customCwd || ide.target.root;
+    const launchTargetKey = targetKey;
+    const launchRoot = ide.target.root;
+    const launchIsSsh = isSshTarget;
+    const launchConnId = ide.target.connection_id;
+    const launchConnName = ide.target.connection_name;
+    const launchCwd = customCwd || launchRoot;
     const dirName = ideBasename(launchCwd) || folderLabel;
     try {
       const idx = nextTabNumber;
-      if (isSshTarget && ide.target.connection_id) {
-        const hostName = ide.target.connection_name || ide.target.connection_id;
+      if (launchIsSsh && launchConnId) {
+        const hostName = launchConnName || launchConnId;
         // Connections are global profiles: the session needs a workspace to live in.
         const s = await api.post<Session>(
-          `/connections/${encodeURIComponent(ide.target.connection_id)}/open`,
+          `/connections/${encodeURIComponent(launchConnId)}/open`,
           {
             title: `IDE SSH · ${hostName}`,
             workspace_id: ws.current ? ws.currentId : SCRATCH_WORKSPACE_ID,
@@ -147,13 +158,13 @@
           id: s.id,
           label: `SSH ${idx} · ${hostName}`,
           kind: 'ssh',
-          targetKey,
+          targetKey: launchTargetKey,
           cwd: launchCwd,
         };
         savedTabs = [...savedTabs.filter((t) => t.id !== s.id), entry];
-        savedActiveByTarget[targetKey] = s.id;
+        savedActiveByTarget[launchTargetKey] = s.id;
       } else {
-        const sub = launchCwd && launchCwd !== ide.target.root ? ` · ${dirName}` : '';
+        const sub = launchCwd && launchCwd !== launchRoot ? ` · ${dirName}` : '';
         const label = `Terminal ${idx}${sub}`;
         const s = await ws.createSessionQuiet(
           {
@@ -161,7 +172,7 @@
             provider: 'shell',
             title: `IDE · ${dirName}`,
             cwd: launchCwd || null,
-            meta: { surface: 'ide', ide_terminal: true, ide_root: ide.target.root, ide_label: label },
+            meta: { surface: 'ide', ide_terminal: true, ide_root: launchRoot, ide_label: label },
           },
           { scratch: ws.current === null && ws.currentId !== SCRATCH_WORKSPACE_ID },
         );
@@ -169,27 +180,40 @@
           id: s.id,
           label,
           kind: 'local',
-          targetKey,
+          targetKey: launchTargetKey,
           cwd: launchCwd,
         };
         savedTabs = [...savedTabs.filter((t) => t.id !== s.id), entry];
-        savedActiveByTarget[targetKey] = s.id;
+        savedActiveByTarget[launchTargetKey] = s.id;
       }
     } catch (e) {
-      const cause = loadErrorText(e);
-      if (targetTabs.length === 0) spawnError = cause;
-      else toastError('Couldn’t open terminal', e);
+      if (targetKey === launchTargetKey) {
+        const cause = loadErrorText(e);
+        if (targetTabs.length === 0) spawnError = cause;
+        else toastError('Couldn’t open terminal', e);
+      }
     } finally {
       spawning = false;
     }
   }
 
-  async function killTerminal(id: string): Promise<void> {
+  async function killTerminal(tab: IdeTermTab): Promise<void> {
+    const status = ws.statusMap[tab.id];
+    const isRunning = tab.kind === 'ssh' || status !== 'exited';
+    if (isRunning) {
+      const ok = await confirmer.ask(
+        tab.kind === 'ssh'
+          ? `Close SSH session “${tab.label}” and disconnect?`
+          : `Close “${tab.label}” and stop any running process?`,
+        { title: 'Close terminal', confirmLabel: 'Close terminal', danger: true },
+      );
+      if (!ok) return;
+    }
     try {
-      await ws.killSession(id);
-      savedTabs = savedTabs.filter((t) => t.id !== id);
-      if (savedActiveByTarget[targetKey] === id) {
-        savedActiveByTarget[targetKey] = savedTabs.find((t) => t.targetKey === targetKey)?.id ?? null;
+      await ws.killSession(tab.id);
+      savedTabs = savedTabs.filter((t) => t.id !== tab.id);
+      if (savedActiveByTarget[tab.targetKey] === tab.id) {
+        savedActiveByTarget[tab.targetKey] = savedTabs.find((t) => t.targetKey === tab.targetKey)?.id ?? null;
       }
     } catch (e) {
       toastError('Couldn’t close terminal', e);
@@ -264,7 +288,7 @@
       aria-label="Kill active terminal"
       title="Kill active terminal"
       disabled={!activeTab}
-      onclick={() => activeTab && void killTerminal(activeTab.id)}
+      onclick={() => activeTab && void killTerminal(activeTab)}
     >
       <Icon name="trash" size={13} />
     </button>

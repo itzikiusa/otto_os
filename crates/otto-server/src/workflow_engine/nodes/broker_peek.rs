@@ -7,13 +7,19 @@ use super::NodeCall;
 pub(in crate::workflow_engine) async fn execute(
     call: NodeCall<'_>,
 ) -> Result<(Value, Vec<String>)> {
-    let NodeCall { ctx, node, .. } = call;
+    let NodeCall { ctx, ws, node, .. } = call;
     let p = &node.params;
     let cluster_id: Id = p
         .get("cluster_id")
         .and_then(Value::as_str)
         .ok_or_else(|| otto_core::Error::Invalid("broker_peek: missing cluster_id".into()))?
         .to_string();
+    let cluster = ctx.brokers.get_cluster(&cluster_id).await?;
+    if cluster.workspace_id.as_deref().is_some_and(|w| w != ws.id) {
+        return Err(otto_core::Error::Forbidden(
+            "broker_peek: cluster belongs to another workspace".into(),
+        ));
+    }
     let topic = p
         .get("topic")
         .and_then(Value::as_str)

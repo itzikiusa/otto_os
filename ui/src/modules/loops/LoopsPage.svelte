@@ -21,6 +21,7 @@
   import { router } from '../../lib/router.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { recallSelection, rememberSelection } from '../../lib/lastSelection';
+  import { takeStagedGoalDraft } from './actionDraft';
 
   const PHASE_LABEL: Record<string, string> = {
     planning: 'Planning',
@@ -32,6 +33,20 @@
 
   let selectedId = $state<string | null>(null);
   let creating = $state(false);
+  let stagedSeed = $state('');
+
+  // Consume a staged Insights → Goal Loop handoff draft (E-22).
+  $effect(() => {
+    const draft = untrack(() => takeStagedGoalDraft());
+    if (draft) {
+      stagedSeed = draft.prompt;
+      selectedId = null;
+      creating = true;
+    }
+  });
+  $effect(() => {
+    if (!creating && stagedSeed) stagedSeed = '';
+  });
 
   // (Re)load the list when the workspace changes.
   $effect(() => {
@@ -132,8 +147,8 @@
       create,
       { id: 'loops.pause', title: `Pause “${name}”`, group: 'Goal Loops', keywords: 'pause goal loop', disabled: status !== 'running', run: () => loopActions.pause() },
       { id: 'loops.resume', title: `Resume “${name}”`, group: 'Goal Loops', keywords: 'resume goal loop', disabled: !resumable || needsAnswer, run: () => loopActions.resume() },
-      { id: 'loops.extend', title: `Extend budget for “${name}”`, group: 'Goal Loops', keywords: 'extend budget iterations runtime', disabled: !resumable || needsAnswer, run: () => loopActions.extend() },
-      { id: 'loops.stop', title: `Stop “${name}”`, group: 'Goal Loops', keywords: 'stop goal loop', disabled: !loop || status === 'draft' || status === 'succeeded' || status === 'failed' || status === 'stopped', run: () => loopActions.stop() },
+      { id: 'loops.extend', title: `Extend budget for “${name}”…`, group: 'Goal Loops', keywords: 'extend budget iterations runtime', disabled: !resumable || needsAnswer, run: () => loopActions.extend() },
+      { id: 'loops.stop', title: `Stop “${name}”…`, group: 'Goal Loops', keywords: 'stop goal loop', disabled: !loop || status === 'draft' || status === 'succeeded' || status === 'failed' || status === 'stopped', run: () => loopActions.stop() },
     ]);
   });
 </script>
@@ -146,7 +161,7 @@
       <LoopDetail id={selectedId} onback={back} actions={loopActions} />
     {/key}
   {:else if creating}
-    <LazyMount lazy={GoalDefineForm} what="the goal editor" props={{ oncancel: () => (creating = false), oncreated: open }} />
+    <LazyMount lazy={GoalDefineForm} what="the goal editor" props={{ oncancel: () => (creating = false), oncreated: open, initialSeed: stagedSeed }} />
   {:else}
     <PageHeader
       title="Goal Loops"

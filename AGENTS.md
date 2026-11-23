@@ -56,6 +56,7 @@ Otto.app (Tauri / otto-desktop)
 | `otto-git-cmd` | Leaf crate: the hardened `git` command builder (`hardened_command`, `HARDENED_GIT_CONFIG`) shared by `otto-git` and `otto-sessions` |
 | `otto-issues` | Jira / Confluence integration |
 | `otto-channels` | Slack / Telegram bridges |
+| `otto-phone` | Phone access — `tailscale serve` on/off (never Funnel) behind the `TailscaleCli` trait, QR pairing, per-phone device tokens (`otto_rbac::devices`) and the `/phone/*` routes + device-token feature-guard hooks (behind `PhoneCtx`) |
 | `otto-improve` | Self-improvement engine |
 | `otto-insights` | Insights — opt-in catch-up scheduler + reports/config/run API that runs the `insights` skill in a headless agent session (behind `InsightsCtx`) |
 | `otto-context` | Context assembly |
@@ -65,6 +66,7 @@ Otto.app (Tauri / otto-desktop)
 | `otto-canvas` | Canvas scene CRUD (file-backed visual scenes) + the agent-assist engine (`assist.rs`; the host hands over its SessionManager via `CanvasAssistCtx::sessions`; the turn runs in the shared assist job) |
 | `otto-design` | Design Hall artifact graph — projects, artifacts, content-addressed versions, typed `otto://design` links, FTS search, design signals, idempotent legacy import |
 | `otto-design-assist` | Design Hall agent-assist engine — assist turns, variants, learned team rules (the host hands over its SessionManager via `DesignAssistCtx::sessions`; the turn runs in the shared assist job; keeps `otto-design` free of session/agent deps) |
+| `otto-media` | Native 3D asset generation providers & jobs (Tencent Hunyuan3D-Omni, Microsoft TRELLIS.2, Custom HTTP/CLI — zero ComfyUI), built-in & extensible TTS engine (macOS `say` + OpenAI-compatible / ElevenLabs / Kokoro / Custom HTTP), and workspace-confined asset export behind `MediaCtx` |
 | `otto-mcp` | MCP Control Plane — outbound MCP client + the governance pipeline every governed tool call funnels through; `outward/` holds the outward `otto.*` tool catalog, policy lists, `route_for` self-call map and the MCP HTTP JSON-RPC framing (server glue: `otto-server`'s `mcp_outward` / `mcp_http`) |
 | `otto-workflows` | Workflow engine pieces with no server dependency — node catalog, graph validation, retry policy, loop checkpoints, run context files, `prepare_context` helpers, chat + event triggers — behind the `WorkflowCtx` trait (the executor itself is still `otto-server/src/workflow_engine.rs`) |
 | `otto-usage` | Embedded ClickHouse usage/metrics |
@@ -79,6 +81,8 @@ Otto.app (Tauri / otto-desktop)
 | `otto-automation` | Scheduled Tasks (cadence, 60 s supervisor, run engine, report delivery) + Goal Loops controller, behind the `AutomationCtx` trait (otto-server's impl: `src/automation_ctx.rs`) |
 | `otto-rooms` | Session rooms domain — capability registries, room actions, recap capture/archive/engines, the session-authority sync and per-room maintenance, ICE/TURN settings — behind the `RoomsCtx` trait (otto-server's impl: `src/rooms/ctx.rs`; the handlers, WS upgrades and socket run loops stay in `otto-server`) |
 | `otto-ide` | Multi-language IDE engine — Local + Remote SSH targets, OS/arch SDK & toolchain manager, cached login shell env, environments & run configs, DAP debugger, LSP intelligence & `/ws/lsp` host, dependency/vulnerability inspector, content-addressed Local History, live collaborative editing, and runtime IDE plugins (behind `IdeCtx`; host glue in `otto-server`'s `modules/ctx_impls.rs` and `lsp/`) |
+| `otto-simulators` | Mobile Simulators & Emulators control plane — dynamic Xcode/`xcrun simctl` + Android SDK/`adb`/`emulator`/`avdmanager` auto-detection, built-in 1-click SDK/runtime installer (`<data_dir>/android-sdk`, `xcodebuild -downloadPlatform iOS`), lifecycle, auto `adb reverse` localhost forwarding, screenshots/WS screencast (`WS /ws/simulators/{id}/stream`), live logs (`WS /ws/simulators/{id}/logs`), and `/simulators/*` REST router (behind `SimulatorsCtx`; host glue in `otto-server`'s `modules/ctx_impls.rs` and `routes/simulators_ws.rs`) |
+| `otto-containers` | Local Containers console — Docker Engine API v1.47 over Unix socket (Docker Desktop, Colima, OrbStack, Rancher Desktop, `/var/run/docker.sock`, `DOCKER_HOST`, or embedded headless `kiri` runtime managed by `ContainersService`), context discovery/selection, container/stack/image/volume/network operations, secret env masking + reveal, PTY `docker exec`, and the `/containers/*` REST router (behind `ContainersCtx`; host glue in `otto-server`'s `modules/ctx_impls.rs`) |
 | `otto-server` | Axum routes wiring the crates together; also hosts the code-review routes + orchestration, the session-rooms routes and sockets (domain in `otto-rooms`), workflow engine & plugin supervisor. `boot/` is the daemon composition root (`open_state` → `build_ctx` → recovery → `spawn_background`; `ServerCtx::from_parts` is the one context literal, shared with `ServerCtx::for_tests`) |
 | `ottod` | The daemon binary: process setup, single-instance lock, listeners, shutdown; drives `otto_server::boot` |
 
@@ -90,14 +94,15 @@ Otto.app (Tauri / otto-desktop)
 ### UI module areas (`ui/src/modules/`)
 
 `agents`, `api` (REST client), `aws` (AWS console), `brokers` (Kafka viewer),
-`browser`, `canvas`, `connections`, `database` (Database Explorer),
-`design-hall` (Design Hall: lobby, artifact view, brand kit, learning log —
+`browser`, `canvas`, `connections`, `containers` (local containers console), `database` (Database Explorer),
+`design-hall` (Design Hall: lobby, artifact view, brand kit, learning log,
+3D Studio, Voice Studio —
 embedded under unified `Product`), `desktop` (menu-bar tray & floating bar
 pages), `git`, `help`, `home` (personal dashboard of live boxes), `ide`
 (multi-language IDE), `insights`,
 `kubernetes` (Kubernetes console), `loops` (goal loops), `mcp` (MCP control
 plane), `panels`, `personal-agents` (embedded under unified `Scheduled Tasks`),
-`plugins`, `product` (unified Stories · Designs · Learnings hub), `rooms`
+`phone` (Phone access QR pairing page), `plugins`, `product` (unified Stories · Designs · Learnings hub), `rooms`
 (session rooms), `scheduled-tasks` (unified Tasks · Agents · Agent channels
 hub), `settings`, `share` (remote/mobile), `skills-eval`, `skills-lab`, `snip`
 (snipping tool), `threads` (experimental inbox-style conversational workspace:

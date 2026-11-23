@@ -112,6 +112,8 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
     id: 'product',
     icon: 'note',
     label: 'Product',
+    // Create (the plain-words front door) is Product's first tab and landing.
+    home: 'design/create',
     group: 'build',
     featureAny: ['product', 'design'],
     keywords: 'story jira confluence analysis rfc design hall studio frames graphics site 3d whiteboard canvas brand kit mockup diagram sketch excalidraw mermaid d2 spatial',
@@ -138,6 +140,7 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   // of them is viewable, same shape as Connections/Database.
   { id: 'aws', icon: 'cloud', label: 'AWS', group: 'infra', featureAny: ['aws', 'aws_s3', 'aws_sqs', 'aws_ec2', 'aws_athena', 'aws_eks', 'aws_rds'], keywords: 'amazon cloud s3 bucket sqs queue ec2 instance athena query eks account profile sso' },
   { id: 'kubernetes', icon: 'helm', label: 'Kubernetes', group: 'infra', feature: 'kubernetes', keywords: 'k8s kubectl k9s cluster context namespace pod deployment logs exec rollout argo argocd restart' },
+  { id: 'containers', icon: 'containers', label: 'Containers', group: 'infra', feature: 'containers', keywords: 'docker kiri container compose stack image volume network runtime colima orbstack' },
   { id: 'api', icon: 'send', label: 'API', group: 'infra', feature: 'api_client', keywords: 'api client postman http request rest curl' },
   { id: 'browser', icon: 'compass', label: 'Browser', group: 'infra', feature: 'browser', keywords: 'reader mode tabs annotate url fetch page web' },
   { id: 'mcp', icon: 'server', label: 'MCP Control Plane', group: 'infra', feature: 'mcp', keywords: 'model context protocol server tool governance allowlist policy approval audit injection risk' },

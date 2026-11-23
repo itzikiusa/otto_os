@@ -1,6 +1,7 @@
 <script lang="ts">
+  import { newId } from '../id';
   import { confirmer } from '../confirm.svelte';
-  import { announce } from '../announce.svelte';
+  import { announce, announceShown } from '../announce.svelte';
   import Skeleton from './Skeleton.svelte';
   import { toasts } from '../toast.svelte';
   import { untrack } from 'svelte';
@@ -100,7 +101,7 @@
   function addRule() {
     if (!policy) return;
     policy.rules.push({
-      id: crypto.randomUUID(),
+      id: newId(),
       subject_kind: 'group',
       subject_id: subjects.groups[0]?.id ?? '',
       effect: 'allow',
@@ -195,7 +196,7 @@
       >Reload saved access</button
     >
   </header>
-  {#if error}<p class="error" role="alert">{error}</p>{/if}
+  {#if error}<p class="error" use:announceShown={{ text: error, assertive: true }}>{error}</p>{/if}
   <!-- Spoken through announce() where it's set (a status inserted with its
        text is silent in VoiceOver); this line is the visible copy. -->
   {#if notice}<p>{notice}</p>{/if}

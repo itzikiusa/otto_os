@@ -131,7 +131,7 @@ test('start composer: an embed offers only installed agents that run a thread, a
 });
 
 test('the start composer remembers the last agent per scope, only while it is still installed', () => {
-  const sc = loadSource(new URL('../src/modules/threads/startComposer.ts', import.meta.url), {});
+  const sc = loadSource(new URL('../src/lib/startPick.ts', import.meta.url), {});
   const mem = new Map<string, string>();
   const store = { getItem: (k: string) => mem.get(k) ?? null, setItem: (k: string, v: string) => void mem.set(k, v) };
   const ready = (p: string) => p !== 'gemini';

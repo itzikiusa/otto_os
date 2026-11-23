@@ -16,6 +16,7 @@
   // render table cards with a "no relationships" hint.
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import { announceShown } from '../../lib/announce.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { database } from '../../lib/stores/database.svelte';
@@ -436,10 +437,7 @@
     </div>
 
     {#if graph?.truncated}
-      <!-- The server caps introspection (60 tables): edges to tables beyond the
-           cap simply vanish, so the diagram silently LIES about relationships
-           unless the cap is called out loudly. -->
-      <div class="trunc-banner" role="status">
+      <div class="trunc-banner" use:announceShown={`Schema capped — showing the first ${graph.tables.length} tables.`}>
         <Icon name="info" size={12} />
         <span>
           Schema capped — showing the first {graph.tables.length} tables the server introspected;

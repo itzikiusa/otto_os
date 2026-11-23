@@ -16,11 +16,19 @@ pub(in crate::workflow_engine) async fn execute(
         .and_then(Value::as_str)
         .filter(|s| !s.trim().is_empty())
         .unwrap_or(env.default_provider.as_str());
-    let workspace_id_override = p
+    if let Some(requested_ws) = p
         .get("workspace_id")
         .and_then(Value::as_str)
-        .unwrap_or(&ws.id);
-    let verdict = crate::budget::check_budget(ctx, workspace_id_override, provider).await;
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if requested_ws != ws.id {
+            return Err(otto_core::Error::Forbidden(
+                "budget_gate: cannot query another workspace's budget".into(),
+            ));
+        }
+    }
+    let verdict = crate::budget::check_budget(ctx, &ws.id, provider).await;
     if verdict.blocked {
         return Err(otto_core::Error::Upstream(
             verdict

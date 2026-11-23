@@ -19,7 +19,7 @@ test('HomeBox loads every box kind lazily', () => {
   const src = read('src/modules/home/HomeBox.svelte');
   const boxes = staticImports(src).filter((s) => /\/boxes\/\w+Box\.svelte$/.test(s));
   assert.deepEqual(boxes, [], 'map the kind to () => import(...) in BODY_LOADERS');
-  for (const k of ['SessionsBox', 'DbDashboardBox', 'K8sBox', 'InsightsBox', 'UsageBox']) {
+  for (const k of ['SessionsBox', 'DbDashboardBox', 'K8sBox', 'InsightsBox', 'UsageBox', 'PrQueueBox', 'AutomationsBox']) {
     assert.match(src, new RegExp(`import\\('\\./boxes/${k}\\.svelte'\\)`), k);
   }
 });

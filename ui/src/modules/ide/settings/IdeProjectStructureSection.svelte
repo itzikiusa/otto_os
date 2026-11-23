@@ -19,7 +19,8 @@
 
   const ALL_ECOS: readonly { id: string; label: string }[] = [
     { id: 'go', label: 'Go' }, { id: 'java', label: 'Java' }, { id: 'rust', label: 'Rust' }, { id: 'node', label: 'Node / TS' },
-    { id: 'python', label: 'Python' }, { id: 'shell', label: 'Shell' }, { id: 'json', label: 'JSON' }, { id: 'csv', label: 'CSV' },
+    { id: 'python', label: 'Python' }, { id: 'ios', label: 'iOS / Xcode' }, { id: 'android', label: 'Android' },
+    { id: 'flutter', label: 'Flutter' }, { id: 'shell', label: 'Shell' }, { id: 'json', label: 'JSON' }, { id: 'csv', label: 'CSV' },
   ];
 
   let activeEco = $state('go');
@@ -79,6 +80,9 @@
     else if (ecosystem === 'python') ideSettings.patchEnv({ python_interpreter: pathOrVer });
     else if (ecosystem === 'node') ideSettings.patchEnv({ node_home: pathOrVer });
     else if (ecosystem === 'rust') ideSettings.patchEnv({ rust_toolchain: pathOrVer });
+    else if (ecosystem === 'ios') ideSettings.patchEnv({ xcode_developer_dir: pathOrVer });
+    else if (ecosystem === 'android') ideSettings.patchEnv({ android_home: pathOrVer });
+    else if (ecosystem === 'flutter') ideSettings.patchEnv({ flutter_root: pathOrVer });
   }
 
   async function pickDetectedSdk(det: IdeDetectedSdk): Promise<void> {

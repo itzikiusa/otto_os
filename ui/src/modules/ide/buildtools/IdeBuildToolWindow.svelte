@@ -1,18 +1,27 @@
 <script lang="ts">
   // IntelliJ IDEA right-side Maven / Gradle Tool Window:
   // Profiles (Maven/Gradle + Spring Boot), multi-module projects, Lifecycle, Plugins, Dependencies, Repositories.
+  import { onDestroy } from 'svelte';
   import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
+  import type { IdeMobileProject } from '../../../lib/api/types';
   import { shortenHomePath } from '../../../lib/homePath';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import { confirmer } from '../../../lib/confirm.svelte';
-  import { ide, type IdeBuildToolModule, type IdeBuildToolProfile } from '../ideStore.svelte';
+  import { loadErrorText } from '../../../lib/loadError';
+  import { ide, ideTargetKey, type IdeBuildToolModule, type IdeBuildToolProfile } from '../ideStore.svelte';
   import {
     executeBuildToolGoal,
+    executeMobileProjectTask,
     GRADLE_LIFECYCLE,
     loadBuildToolWorkspaceModel,
     MAVEN_LIFECYCLE,
   } from './ideBuildToolModel';
+  import {
+    matchesBuildToolQuery,
+    moduleMatchesBuildFilter,
+    moduleSelfMatchesBuildFilter,
+  } from './ideBuildToolFilter';
 
   let loading = $state(false);
   let error = $state<string | null>(null);
@@ -21,32 +30,53 @@
   let profiles = $state<IdeBuildToolProfile[]>([]);
   let springProfiles = $state<string[]>([]);
   let modules = $state<IdeBuildToolModule[]>([]);
+  let mobileProjects = $state<IdeMobileProject[]>([]);
   let expanded = $state<Record<string, boolean>>({ profiles: false });
 
   const labelTitle = $derived((ide.buildToolKind ?? tool) === 'gradle' ? 'Gradle' : 'Maven');
   const badgeMark = $derived((ide.buildToolKind ?? tool) === 'gradle' ? 'G' : 'm');
 
+  let refreshSeq = 0;
+  const currentTargetSig = (): string => `${ideTargetKey(ide.target)}:${ide.additionalRoots.join('\0')}`;
+
   async function refreshModel(): Promise<void> {
-    if (!ide.hasTarget) return;
+    const seq = ++refreshSeq;
+    if (!ide.hasTarget) {
+      loading = false;
+      error = null;
+      profiles = [];
+      springProfiles = [];
+      modules = [];
+      return;
+    }
+    const targetSig = currentTargetSig();
+    const isStale = (): boolean => seq !== refreshSeq || currentTargetSig() !== targetSig;
     loading = true;
     error = null;
     try {
       const res = await loadBuildToolWorkspaceModel();
+      if (isStale()) return;
       tool = res.tool;
       profiles = res.profiles;
       springProfiles = res.springProfiles;
       modules = res.modules;
+      mobileProjects = res.mobileProjects;
       const nextExp = { ...expanded };
       if (modules.length <= 4) {
         for (const m of modules) {
           if (nextExp[`mod:${m.root_dir}`] === undefined) nextExp[`mod:${m.root_dir}`] = true;
         }
       }
+      for (const mp of mobileProjects) {
+        const k = `mob:${mp.framework}:${mp.root_dir}`;
+        if (nextExp[k] === undefined) nextExp[k] = true;
+      }
       expanded = nextExp;
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Couldn’t load build tool projects';
+      if (isStale()) return;
+      error = loadErrorText(e);
     } finally {
-      loading = false;
+      if (!isStale()) loading = false;
     }
   }
 
@@ -54,6 +84,10 @@
     void ide.target.root;
     void ide.additionalRoots.length;
     void refreshModel();
+  });
+
+  onDestroy(() => {
+    refreshSeq += 1;
   });
 
   function toggleNode(key: string): void {
@@ -68,7 +102,7 @@
     const primaryMod = modules[0];
     if (!primaryMod) return;
     const goal = await confirmer.promptText(`Enter ${labelTitle} goal or task to run in ${primaryMod.name}:`, {
-      title: `Execute ${labelTitle} Goal`,
+      title: `Execute ${labelTitle} goal`,
       placeholder: primaryMod.tool === 'gradle' ? 'clean build' : 'clean package',
       confirmLabel: 'Execute',
     });
@@ -78,7 +112,7 @@
   async function promptAddProfile(kind: 'maven' | 'spring'): Promise<void> {
     const name = await confirmer.promptText(
       kind === 'spring' ? 'Activate Spring Boot profile (SPRING_PROFILES_ACTIVE):' : `Activate ${labelTitle} profile (-P):`,
-      { title: kind === 'spring' ? 'Add Spring Profile' : `Add ${labelTitle} Profile`, placeholder: 'local', confirmLabel: 'Activate' },
+      { title: kind === 'spring' ? 'Add Spring profile' : `Add ${labelTitle} profile`, placeholder: 'local', confirmLabel: 'Activate' },
     );
     const id = name?.trim();
     if (!id) return;
@@ -117,16 +151,25 @@
   });
 
   function matchesFilter(text: string): boolean {
-    const q = filter.trim().toLowerCase();
-    return !q || text.toLowerCase().includes(q);
+    return matchesBuildToolQuery(text, filter);
   }
+
+  const visibleModules = $derived(modules.filter((m) => moduleMatchesBuildFilter(m, filter)));
+  const visibleMobileProjects = $derived(
+    mobileProjects.filter(
+      (mp) => !filter.trim() || matchesFilter(mp.name) || mp.tasks.some((t) => matchesFilter(t)),
+    ),
+  );
 </script>
 
 {#snippet moduleTree(mod: IdeBuildToolModule, depth: number)}
   {@const modKey = `mod:${mod.root_dir}`}
-  {@const isOpen = Boolean(expanded[modKey]) || Boolean(filter.trim())}
+  {@const hasFilter = Boolean(filter.trim())}
+  {@const modSelfMatch = moduleSelfMatchesBuildFilter(mod, filter)}
+  {@const isOpen = Boolean(expanded[modKey]) || hasFilter}
   {@const lifecycle = mod.lifecycle && mod.lifecycle.length > 0 ? mod.lifecycle : (mod.tool === 'gradle' ? GRADLE_LIFECYCLE : MAVEN_LIFECYCLE)}
-  {#if matchesFilter(mod.name) || matchesFilter(mod.artifact_id ?? '') || Boolean(filter.trim())}
+  {@const shownLifecycle = modSelfMatch ? lifecycle : lifecycle.filter((g) => matchesFilter(g))}
+  {#if moduleMatchesBuildFilter(mod, filter)}
     <div class="bt-node" style:padding-inline-start="{depth * 12}px">
       <div class="bt-row bt-mod-row">
         <button
@@ -158,13 +201,13 @@
       {#if isOpen}
         {@const lcKey = `${modKey}:lc`}
         <div class="bt-sub-group" style:padding-inline-start="12px">
-          <button type="button" class="bt-row bt-folder-row" aria-expanded={Boolean(expanded[lcKey])} onclick={() => toggleNode(lcKey)}>
-            <Icon name={expanded[lcKey] || Boolean(filter.trim()) ? 'chevronDown' : 'chevronRight'} size={12} noflip />
+          <button type="button" class="bt-row bt-folder-row" aria-expanded={Boolean(expanded[lcKey] || (hasFilter && shownLifecycle.length > 0))} onclick={() => toggleNode(lcKey)}>
+            <Icon name={expanded[lcKey] || (hasFilter && shownLifecycle.length > 0) ? 'chevronDown' : 'chevronRight'} size={12} noflip />
             <Icon name="layers" size={12} />
             <span class="bt-folder-lbl">Lifecycle</span>
           </button>
-          {#if expanded[lcKey] || Boolean(filter.trim())}
-            {#each lifecycle.filter((g) => matchesFilter(g)) as phase (phase)}
+          {#if expanded[lcKey] || (hasFilter && shownLifecycle.length > 0)}
+            {#each shownLifecycle as phase (phase)}
               <div class="bt-goal-row">
                 <button
                   type="button"
@@ -279,25 +322,25 @@
   </header>
 
   <div class="bt-toolbar" role="toolbar" aria-label={`${labelTitle} actions`}>
-    <button type="button" class="icon-btn" aria-label={`Reload all ${labelTitle} projects`} title={`Reload All ${labelTitle} Projects`} onclick={() => void refreshModel()} data-testid="ide-bt-reload">
+    <button type="button" class="icon-btn" aria-label={`Reload all ${labelTitle} projects`} title={`Reload all ${labelTitle} projects`} onclick={() => void refreshModel()} data-testid="ide-bt-reload">
       <Icon name="refresh" size={13} />
     </button>
-    <button type="button" class="icon-btn" aria-label="Download sources and documentation" title="Download Sources and Documentation" onclick={downloadSources} data-testid="ide-bt-download-sources">
+    <button type="button" class="icon-btn" aria-label="Download sources and documentation" title="Download sources and documentation" onclick={downloadSources} data-testid="ide-bt-download-sources">
       <Icon name="download" size={13} />
     </button>
-    <button type="button" class="icon-btn" aria-label={`Execute ${labelTitle} goal`} title={`Execute ${labelTitle} Goal…`} onclick={() => void promptExecuteGoal()} data-testid="ide-bt-exec-goal">
+    <button type="button" class="icon-btn" aria-label={`Execute ${labelTitle} goal`} title={`Execute ${labelTitle} goal…`} onclick={() => void promptExecuteGoal()} data-testid="ide-bt-exec-goal">
       <Icon name="play" size={13} />
     </button>
-    <button type="button" class="icon-btn bt-toggle" aria-pressed={ide.buildOffline} aria-label="Toggle offline mode" title="Toggle Offline Mode (-o / --offline)" onclick={() => ide.setBuildOffline(!ide.buildOffline)} data-testid="ide-bt-offline">
+    <button type="button" class="icon-btn bt-toggle" aria-pressed={ide.buildOffline} aria-label="Toggle offline mode" title="Toggle offline mode (-o / --offline)" onclick={() => ide.setBuildOffline(!ide.buildOffline)} data-testid="ide-bt-offline">
       <Icon name="cloud" size={13} />
     </button>
-    <button type="button" class="icon-btn bt-toggle" aria-pressed={ide.buildSkipTests} aria-label="Toggle skip tests" title="Toggle 'Skip Tests' Mode (-DskipTests)" onclick={() => ide.setBuildSkipTests(!ide.buildSkipTests)} data-testid="ide-bt-skip-tests">
+    <button type="button" class="icon-btn bt-toggle" aria-pressed={ide.buildSkipTests} aria-label="Toggle skip tests" title="Toggle skip tests mode (-DskipTests)" onclick={() => ide.setBuildSkipTests(!ide.buildSkipTests)} data-testid="ide-bt-skip-tests">
       <Icon name="flask" size={13} />
     </button>
-    <button type="button" class="icon-btn" aria-label="Collapse all" title="Collapse All" onclick={collapseAll} data-testid="ide-bt-collapse-all">
+    <button type="button" class="icon-btn" aria-label="Collapse all" title="Collapse all" onclick={collapseAll} data-testid="ide-bt-collapse-all">
       <Icon name="fold" size={13} />
     </button>
-    <button type="button" class="icon-btn" aria-label="Build tool settings" title={`${labelTitle} Settings…`} onclick={() => ide.openSettings('build.tools')}>
+    <button type="button" class="icon-btn" aria-label="Build tool settings" title={`${labelTitle} settings…`} onclick={() => ide.openSettings('build.tools')}>
       <Icon name="gear" size={13} />
     </button>
   </div>
@@ -354,10 +397,61 @@
         {/if}
       </div>
 
-      {#if modules.length === 0}
-        <div class="bt-state">No {labelTitle} manifests detected in open project roots.</div>
+      {#if visibleMobileProjects.length > 0}
+        {#each visibleMobileProjects as mp (`${mp.framework}:${mp.root_dir}`)}
+          {@const mobKey = `mob:${mp.framework}:${mp.root_dir}`}
+          {@const isOpen = Boolean(expanded[mobKey]) || Boolean(filter.trim())}
+          <div class="bt-node" data-testid="ide-bt-mobile-project">
+            <div class="bt-row bt-mod-row">
+              <button
+                type="button"
+                class="bt-row-main"
+                aria-expanded={isOpen}
+                onclick={() => toggleNode(mobKey)}
+                title={`${mp.framework} · ${mp.location_display}`}
+              >
+                <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} noflip />
+                <Icon name="phone" size={12} />
+                <span class="bt-name" dir="ltr">{mp.name}</span>
+                <Badge tone="info" variant="outline" label={mp.framework} />
+              </button>
+              <button
+                type="button"
+                class="bt-mini-btn"
+                aria-label="Open mobile devices"
+                title="Open Mobile Devices tool window"
+                onclick={() => ide.openBottomTab('devices')}
+              >
+                <Icon name="phone" size={12} />
+              </button>
+            </div>
+            {#if isOpen}
+              <div class="bt-sub-group" style:padding-inline-start="12px">
+                {#each mp.tasks.filter((t) => matchesFilter(t) || matchesFilter(mp.name)) as task (task)}
+                  <div class="bt-goal-row">
+                    <button
+                      type="button"
+                      class="bt-goal-main"
+                      onclick={(e) => firstClick(e) && executeMobileProjectTask(mp, task)}
+                      title={`Run ${task} in ${mp.name}`}
+                    >
+                      <Icon name="play" size={12} />
+                      <span dir="ltr">{task}</span>
+                    </button>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/each}
+      {/if}
+
+      {#if modules.length === 0 && mobileProjects.length === 0}
+        <div class="bt-state">No {labelTitle} or mobile manifests detected in open project roots.</div>
+      {:else if visibleModules.length === 0 && visibleMobileProjects.length === 0}
+        <div class="bt-state">No modules or goals match “{filter.trim()}”.</div>
       {:else}
-        {#each modules as mod (mod.root_dir)}
+        {#each visibleModules as mod (mod.root_dir)}
           {@render moduleTree(mod, 0)}
         {/each}
       {/if}

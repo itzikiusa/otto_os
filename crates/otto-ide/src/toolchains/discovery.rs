@@ -195,6 +195,7 @@ fn scan_otto_sdks(
                 push_sdk(out, seen, "json", "1.7.1", &jq, "otto");
             }
         }
+        EcosystemKind::Ios | EcosystemKind::Android | EcosystemKind::Flutter => {}
     }
 }
 
@@ -328,6 +329,10 @@ fn scan_system_sdks(
                 push_sdk(out, seen, "json", "system", &jq_bin, "system");
             }
         }
+        EcosystemKind::Ios | EcosystemKind::Android | EcosystemKind::Flutter => {
+            // System mobile SDKs are populated by `detected.rs::scan_mobile_sdks`
+            // and merged into `installed` in `ToolchainManager::list_local`.
+        }
     }
 }
 
@@ -353,6 +358,7 @@ pub(super) fn discover_local_lsp_with_shell(
             "json/lsp/node_modules/.bin/vscode-json-language-server",
             "json/lsp/node_modules/.bin/vscode-json-languageserver",
         ],
+        EcosystemKind::Ios | EcosystemKind::Android | EcosystemKind::Flutter => &[],
     };
     for cand in roots
         .iter()
@@ -376,6 +382,9 @@ pub(super) fn discover_local_lsp_with_shell(
         EcosystemKind::Python => &["pyright-langserver", "pyright"],
         EcosystemKind::Shell => &["bash-language-server"],
         EcosystemKind::Json => &["vscode-json-language-server", "vscode-json-languageserver"],
+        EcosystemKind::Ios => &["sourcekit-lsp"],
+        EcosystemKind::Android => &["kotlin-language-server"],
+        EcosystemKind::Flutter => &["dart"],
     };
     if let Some(sys) = find_executable_in(&system_search_dirs_with_shell(shell_path), sys_names) {
         return IdeToolBinaryStatus {
@@ -415,6 +424,7 @@ pub(super) fn discover_local_dap_with_shell(
         EcosystemKind::Python => vec!["python/dap/bin/python"],
         EcosystemKind::Shell => vec!["shell/bin/bashdb"],
         EcosystemKind::Json => vec!["json/bin/jq"],
+        EcosystemKind::Ios | EcosystemKind::Android | EcosystemKind::Flutter => Vec::new(),
     };
     for root in roots {
         for rel in &rels {
@@ -424,7 +434,10 @@ pub(super) fn discover_local_dap_with_shell(
                 EcosystemKind::Go
                 | EcosystemKind::Rust
                 | EcosystemKind::Shell
-                | EcosystemKind::Json => is_executable_file(&cand),
+                | EcosystemKind::Json
+                | EcosystemKind::Ios
+                | EcosystemKind::Android
+                | EcosystemKind::Flutter => is_executable_file(&cand),
             };
             if ok {
                 return IdeToolBinaryStatus {
@@ -445,6 +458,9 @@ pub(super) fn discover_local_dap_with_shell(
         EcosystemKind::Python => &["debugpy", "debugpy-adapter", "python3"],
         EcosystemKind::Shell => &["bashdb", "bash", "zsh"],
         EcosystemKind::Json => &["jq"],
+        EcosystemKind::Ios => &["lldb-dap", "lldb"],
+        EcosystemKind::Android => &["adb"],
+        EcosystemKind::Flutter => &["flutter"],
     };
     if let Some(sys) = find_executable_in(&system_search_dirs_with_shell(shell_path), sys_names) {
         return IdeToolBinaryStatus {
@@ -550,6 +566,9 @@ pub(super) fn mark_active_sdk(
         EcosystemKind::Rust => env.rust_toolchain.as_deref(),
         EcosystemKind::Node => env.node_home.as_deref(),
         EcosystemKind::Python => env.python_interpreter.as_deref(),
+        EcosystemKind::Ios => env.xcode_developer_dir.as_deref(),
+        EcosystemKind::Android => env.android_home.as_deref(),
+        EcosystemKind::Flutter => env.flutter_root.as_deref(),
         EcosystemKind::Shell | EcosystemKind::Json => None,
     });
     if let Some(sel) = chosen.filter(|s| !s.trim().is_empty()) {

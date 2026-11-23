@@ -1600,7 +1600,7 @@ class WorkspaceStore {
       const name = this.sessions.find((s) => s.id === id)?.title?.trim();
       const ok = await confirmer.ask(
         `Delete ${name ? `“${name}”` : 'this session'} and its entire history? This cannot be undone.${working ? ' It is working right now and will stop mid-turn.' : ''}`,
-        { title: 'Delete session', confirmLabel: 'Delete' },
+        { title: 'Delete session', confirmLabel: 'Delete', danger: true },
       );
       if (!ok) return;
     }

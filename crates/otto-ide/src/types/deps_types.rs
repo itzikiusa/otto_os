@@ -134,10 +134,44 @@ pub struct IdeBuildToolProject {
     pub modules: Vec<IdeBuildToolProject>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeMobileProject {
+    pub name: String,
+    /// `"xcode"` | `"swiftpm"` | `"android"` | `"flutter"` | `"react_native"` | `"expo"` | `"capacitor"`.
+    pub framework: String,
+    /// Platforms supported by this project (e.g. `["ios", "android"]`).
+    #[serde(default)]
+    pub platforms: Vec<String>,
+    pub root_dir: String,
+    pub location_display: String,
+    pub manifest_path: String,
+    /// Bundle ID / Android `applicationId` if detected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
+    /// Xcode schemes, Android Gradle tasks, or framework actions.
+    #[serde(default)]
+    pub targets: Vec<String>,
+    /// Suggested quick run tasks (`"installDebug"`, `"build"`, `"run-ios"`, etc.).
+    #[serde(default)]
+    pub tasks: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeBuildToolsModelResp {
     pub has_maven: bool,
     pub has_gradle: bool,
+    #[serde(default)]
+    pub has_xcode: bool,
+    #[serde(default)]
+    pub has_android: bool,
+    #[serde(default)]
+    pub has_flutter: bool,
+    #[serde(default)]
+    pub has_react_native: bool,
+    #[serde(default)]
+    pub has_capacitor: bool,
     pub profiles: Vec<IdeBuildToolProfile>,
     pub projects: Vec<IdeBuildToolProject>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mobile_projects: Vec<IdeMobileProject>,
 }

@@ -217,5 +217,60 @@ pub(super) fn normalize_and_validate_local_sdk(
             let ver = dir_name_version(&canon);
             Ok((canon.to_string_lossy().into_owned(), ver))
         }
+        EcosystemKind::Ios => {
+            let dev_dir = if canon.join("Contents/Developer").is_dir() {
+                canon.join("Contents/Developer")
+            } else {
+                canon.clone()
+            };
+            if !dev_dir.join("usr/bin/xcodebuild").is_file()
+                && !dev_dir.join("usr/bin/swift").is_file()
+                && !dev_dir.join("Platforms").is_dir()
+            {
+                return Err(Error::Invalid(format!(
+                    "'{}' is not a valid Xcode or Apple Developer directory",
+                    canon.display()
+                )));
+            }
+            let ver = dir_name_version(&canon);
+            Ok((dev_dir.to_string_lossy().into_owned(), ver))
+        }
+        EcosystemKind::Android => {
+            if !canon.join("platform-tools").is_dir()
+                && !canon.join("cmdline-tools").is_dir()
+                && !canon.join("platforms").is_dir()
+                && !canon.join("emulator").is_dir()
+            {
+                return Err(Error::Invalid(format!(
+                    "'{}' is not a valid Android SDK directory (expected platform-tools, cmdline-tools, or platforms)",
+                    canon.display()
+                )));
+            }
+            let ver = dir_name_version(&canon);
+            Ok((canon.to_string_lossy().into_owned(), ver))
+        }
+        EcosystemKind::Flutter => {
+            let root = if canon.is_file() && is_executable_file(&canon) {
+                canon
+                    .parent()
+                    .and_then(|b| b.parent())
+                    .map(Path::to_path_buf)
+                    .unwrap_or(canon)
+            } else {
+                canon
+            };
+            if !root.join("bin/flutter").is_file() {
+                return Err(Error::Invalid(format!(
+                    "'{}' does not contain bin/flutter",
+                    root.display()
+                )));
+            }
+            let ver = std::fs::read_to_string(root.join("version"))
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| dir_name_version(&root));
+            Ok((root.to_string_lossy().into_owned(), ver))
+        }
     }
 }

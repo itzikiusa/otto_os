@@ -25,17 +25,39 @@ interface Fixture {
   viewport: { isPhone: boolean; isTablet: boolean };
   store: Map<string, string>;
   went: string[];
-  router: { parts: string[]; go: (p: string) => void };
+  router: {
+    parts: string[];
+    go: (p: string) => void;
+    hasGuards: boolean;
+    goChecked: (p: string) => Promise<boolean>;
+  };
 }
 
 /** Load lightMode with a fake device: storage, viewport, router. The real
  *  sidebar module receives its scope, as in the app. */
-function loadLight(opts: { stored?: string; phone?: boolean; tablet?: boolean; route?: string[] } = {}): Fixture {
+function loadLight(opts: {
+  stored?: string;
+  phone?: boolean;
+  tablet?: boolean;
+  route?: string[];
+  hasGuards?: boolean;
+  allowLeave?: boolean;
+} = {}): Fixture {
   const store = new Map<string, string>();
   if (opts.stored !== undefined) store.set('otto_phone_light', opts.stored);
   const viewport = { isPhone: opts.phone ?? true, isTablet: opts.tablet ?? false };
   const went: string[] = [];
-  const router = { parts: opts.route ?? [], go: (p: string) => went.push(p) };
+  const allowLeave = opts.allowLeave ?? true;
+  const router = {
+    parts: opts.route ?? [],
+    go: (p: string) => went.push(p),
+    hasGuards: opts.hasGuards ?? false,
+    goChecked: async (p: string) => {
+      if (!allowLeave) return false;
+      went.push(p);
+      return true;
+    },
+  };
   const light = loadSource(new URL('../src/lib/lightMode.svelte.ts', import.meta.url), {
     './storage': { lsGet: (k: string) => store.get(k) ?? null, lsSet: (k: string, v: string) => store.set(k, v) },
     './stores/viewport.svelte': { viewport },
@@ -87,14 +109,34 @@ test('light on a phone: availableModules, ⌘K Go-to and their extras narrow to 
   assert.ok(inModuleScope('agents'));
 });
 
-test('light needs a phone-sized screen: a tablet or desktop with the stored choice is unchanged', () => {
+test('light works on phone and tablet viewports (defaulting to full), while non-touch desktop stays untouched', () => {
   const f = loadLight({ stored: '1', phone: false, tablet: true });
   assert.equal(f.light.lightMode.chosen, true);
-  assert.equal(f.light.lightMode.phoneSized, false, 'a tablet held upright is not a phone');
-  assert.equal(f.light.lightMode.active, false);
-  assert.ok(ids(availableModules(all, [])).includes('agents'));
+  assert.equal(f.light.lightMode.available, true, 'a tablet supports opt-in Lite mode');
+  assert.equal(f.light.lightMode.active, true);
+  assert.ok(!ids(availableModules(all, [])).includes('agents'));
+  // Non-touch desktop ignores the stored choice.
   f.viewport.isTablet = false;
-  assert.equal(f.light.lightMode.active, false, 'desktop');
+  assert.equal(f.light.lightMode.available, false, 'non-touch desktop');
+  assert.equal(f.light.lightMode.active, false, 'non-touch desktop');
+  assert.ok(ids(availableModules(all, [])).includes('agents'));
+  setModuleScope(null);
+});
+
+test('set(true) respects active leave-guards before flipping into light mode', async () => {
+  const declined = loadLight({ route: ['vault', 'doc1'], hasGuards: true, allowLeave: false });
+  const ok1 = await declined.light.lightMode.set(true);
+  assert.equal(ok1, false);
+  assert.equal(declined.light.lightMode.chosen, false, 'declined guard keeps full mode so unsaved edit stays mounted');
+  assert.equal(declined.store.get('otto_phone_light'), undefined);
+  assert.deepEqual(declined.went, []);
+
+  const accepted = loadLight({ route: ['vault', 'doc1'], hasGuards: true, allowLeave: true });
+  const ok2 = await accepted.light.lightMode.set(true);
+  assert.equal(ok2, true);
+  assert.equal(accepted.light.lightMode.chosen, true);
+  assert.equal(accepted.store.get('otto_phone_light'), '1');
+  assert.deepEqual(accepted.went, ['threads']);
   setModuleScope(null);
 });
 

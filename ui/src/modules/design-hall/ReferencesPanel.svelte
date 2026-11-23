@@ -9,6 +9,7 @@
   import { toastError } from '../../lib/toastError';
   import { loadErrorText } from '../../lib/loadError';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -81,6 +82,7 @@
     timer = setTimeout(() => untrack(() => void run()), 200);
     return () => {
       if (timer) clearTimeout(timer);
+      ctl?.abort();
     };
   });
 
@@ -174,14 +176,18 @@
   </div>
 
   <div class="results">
-    {#if error}
-      <div class="err" use:announceShown={{ text: 'Couldn’t search the references.', assertive: true }}><Icon name="warning" size={14} /> Couldn’t search the references. <button class="btn small ghost" onclick={() => void run()}>Retry</button></div>
-    {:else if loading && !hits.length}
-      <!-- Plain text while searching; the outcome is what gets spoken. -->
-      <p class="dim">Searching the library…</p>
-    {:else if !hits.length}
-      <p class="dim" use:announceShown={'No designs match.'}>No designs match. Try fewer words or clear a filter.</p>
-    {:else}
+    <LoadState
+      what="references"
+      errorTitle="Couldn’t search the references"
+      variant="compact"
+      {loading}
+      {error}
+      empty={!hits.length}
+      onretry={() => void run()}
+    >
+      {#snippet emptyView()}
+        <p class="dim" use:announceShown={'No designs match.'}>No designs match. Try fewer words or clear a filter.</p>
+      {/snippet}
       <p class="count dim" use:announceShown={plural(hits.length, 'result')}>{plural(hits.length, 'result')} from the team library · shipped first</p>
       <ul>
         {#each hits as h (h.artifact.id)}
@@ -221,7 +227,7 @@
           </li>
         {/each}
       </ul>
-    {/if}
+    </LoadState>
   </div>
 
   <section class="prov" aria-labelledby="dh-prov-h">
@@ -397,15 +403,6 @@
   }
   .grow {
     flex: 1;
-  }
-  .err {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--fs-s);
-  }
-  .err :global(svg) {
-    color: var(--danger);
   }
   .prov {
     padding: 12px 14px 16px;

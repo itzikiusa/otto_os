@@ -1,7 +1,9 @@
 // Pod HTTP actions (K-3) — pure helpers shared by PodHttpPanel and its unit
 // tests: the built-in Spring Boot actuator presets, `{{var}}` templates, the
 // console-kind → workload-kind mapping and the default port guess.
-import type { K8sPodHttpMethod, K8sResourceKind } from '../../lib/api/types';
+import type { ApiBodyMode, ApiKeyVal, K8sPodHttpMethod, K8sResourceKind } from '../../lib/api/types';
+import type { ApiDraft } from '../../lib/stores/apiClient/model';
+import { newId } from '../../lib/id.ts';
 
 export interface PodHttpPreset {
   id: string;
@@ -106,4 +108,135 @@ export function prettyBody(body: string): string {
   } catch {
     return body;
   }
+}
+
+export interface PodHttpToApiDraftInput {
+  clusterName: string;
+  ns: string;
+  pod?: string;
+  workload?: { kind: string; name: string } | null;
+  target: 'pod' | 'workload';
+  method: K8sPodHttpMethod;
+  port: number;
+  path: string;
+  headersText: string;
+  body: string;
+  vars: Record<string, string>;
+}
+
+/** Promote an ad-hoc Kubernetes Pod HTTP request into an API Client draft tab.
+ *  Targets `http://127.0.0.1:<port><path>` and documents the matching
+ *  `kubectl port-forward` command in `docs` so the user can replay or save it. */
+export function podHttpToApiDraft(input: PodHttpToApiDraftInput): ApiDraft {
+  const filledPath = fillTemplate(input.path.trim() || '/', input.vars);
+  const normPath = filledPath.startsWith('/') ? filledPath : `/${filledPath}`;
+  const port = Number.isFinite(input.port) && input.port > 0 ? Math.trunc(input.port) : 8080;
+  const headers: ApiKeyVal[] = [];
+  for (const line of input.headersText.split('\n')) {
+    const i = line.indexOf(':');
+    if (i <= 0) continue;
+    const key = line.slice(0, i).trim();
+    if (key) headers.push({ key, value: line.slice(i + 1).trim(), enabled: true });
+  }
+  const mutating = input.method !== 'GET';
+  const filledBody = mutating && input.body.trim() ? fillTemplate(input.body, input.vars) : '';
+  const hasJsonHeader = headers.some((h) => h.key.toLowerCase() === 'content-type' && h.value.toLowerCase().includes('json'));
+  const trimmedBody = filledBody.trim();
+  const body_mode: ApiBodyMode = !trimmedBody
+    ? 'none'
+    : hasJsonHeader || trimmedBody.startsWith('{') || trimmedBody.startsWith('[')
+      ? 'json'
+      : 'raw';
+  const resource = input.target === 'pod' && input.pod
+    ? `pod/${input.pod}`
+    : input.workload
+      ? `${input.workload.kind}/${input.workload.name}`
+      : input.pod
+        ? `pod/${input.pod}`
+        : 'pod/<name>';
+  const label = input.target === 'pod' && input.pod
+    ? input.pod
+    : (input.workload?.name ?? input.pod ?? 'pod');
+  const pfCmd = `kubectl${input.ns ? ` -n ${input.ns}` : ''} port-forward ${resource} ${port}:${port}`;
+  const docs = [
+    `Promoted from Kubernetes Pod HTTP (${input.clusterName}${input.ns ? ` · ${input.ns}` : ''} · ${resource}).`,
+    '',
+    'Start a port-forward before sending:',
+    '```bash',
+    pfCmd,
+    '```',
+    '',
+    'Enable **Allow local / private network targets** in API Client settings to send to `127.0.0.1`.',
+  ].join('\n');
+
+  return {
+    tabId: newId(),
+    requestId: null,
+    name: `${label} · ${input.method} ${normPath}`,
+    kind: 'http',
+    method: input.method,
+    url: `http://127.0.0.1:${port}${normPath}`,
+    headers,
+    query: [],
+    body_mode,
+    body: filledBody,
+    auth: { type: 'none' },
+    proto: '',
+    grpc_method: '',
+    docs,
+  };
+}
+
+/** Maximum character budget for Kubernetes log snippets sent to an agent (16 KiB). */
+export const K8S_LOG_PACKET_MAX_CHARS = 16_384;
+export const K8S_LOG_PACKET_MAX_LINES = 200;
+
+function scrubLogLine(text: string): string {
+  return text
+    .replace(/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g, '[REDACTED_PRIVATE_KEY]')
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi, '$1[REDACTED]')
+    .replace(/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, '[REDACTED_AWS_KEY]')
+    .replace(/(https?:\/\/)([^/\s:@]+):([^/\s@]+)@/gi, '$1[REDACTED]@')
+    .replace(
+      /\b(password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token)(["']?\s*[:=]\s*)(?:(")[^"]*"|(')[^']*'|[^\s,;}\]]+)/gi,
+      (_m, key: string, sep: string, dq?: string, sq?: string) => `${key}${sep}${dq ? '"[REDACTED]"' : sq ? "'[REDACTED]'" : '[REDACTED]'}`,
+    );
+}
+
+export interface K8sLogsPacketInput {
+  clusterName: string;
+  clusterEnv?: string | null;
+  ns: string;
+  pod?: string;
+  selector?: string;
+  container?: string;
+  search?: string;
+  lines: readonly string[];
+  maxLines?: number;
+  maxChars?: number;
+}
+
+/** Build a scrubbed, tail-capped context packet from visible Kubernetes log
+ *  lines so an agent can diagnose crashes/errors without blowing its context. */
+export function buildK8sLogsPacket(input: K8sLogsPacketInput) {
+  const maxLines = input.maxLines ?? K8S_LOG_PACKET_MAX_LINES;
+  const maxChars = input.maxChars ?? K8S_LOG_PACKET_MAX_CHARS;
+  const tailLines = input.lines.length > maxLines ? input.lines.slice(input.lines.length - maxLines) : input.lines;
+  const joined = scrubLogLine(tailLines.join('\n'));
+  const charTrimmed = joined.length > maxChars;
+  const logs = charTrimmed ? joined.slice(joined.length - maxChars) : joined;
+  return {
+    source: 'kubernetes_logs' as const,
+    cluster: input.clusterName,
+    environment: input.clusterEnv ?? null,
+    namespace: input.ns,
+    pod: input.pod || null,
+    selector: input.selector || null,
+    container: input.container || null,
+    filter: input.search?.trim() || null,
+    total_lines: input.lines.length,
+    included_lines: tailLines.length,
+    truncated: input.lines.length > maxLines || charTrimmed,
+    logs,
+  };
 }

@@ -1084,6 +1084,40 @@ async fn term_ws<S: SessionsCtx>(
 }
 
 /// Receive the next live output chunk, pending forever without a handle.
+/// Coalesce back-to-back broadcast chunks into one WS frame up to 64 KiB.
+/// A lone chunk (the common case) is returned as-is with zero copy.
+/// If `try_recv()` observes `TryRecvError::Lagged(n)`, Tokio advances the
+/// receiver past the dropped chunks — surface `Err(n)` so the caller triggers
+/// a full snapshot resync instead of silently corrupting the TUI screen.
+fn coalesce_burst(
+    first: Bytes,
+    rx: &mut broadcast::Receiver<Bytes>,
+) -> std::result::Result<Bytes, u64> {
+    match rx.try_recv() {
+        Ok(more) => {
+            let mut buf = bytes::BytesMut::with_capacity(first.len() + more.len());
+            buf.extend_from_slice(&first);
+            buf.extend_from_slice(&more);
+            // Cap at ~64 KiB to bound latency.
+            while buf.len() < 64 * 1024 {
+                match rx.try_recv() {
+                    Ok(more) => buf.extend_from_slice(&more),
+                    Err(broadcast::error::TryRecvError::Lagged(n)) => return Err(n),
+                    Err(
+                        broadcast::error::TryRecvError::Empty
+                        | broadcast::error::TryRecvError::Closed,
+                    ) => break,
+                }
+            }
+            Ok(buf.freeze())
+        }
+        Err(broadcast::error::TryRecvError::Lagged(n)) => Err(n),
+        Err(broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed) => {
+            Ok(first)
+        }
+    }
+}
+
 async fn next_output(
     rx: &mut Option<broadcast::Receiver<Bytes>>,
 ) -> Result<Bytes, broadcast::error::RecvError> {
@@ -1482,7 +1516,12 @@ impl DeferredInput {
 
     /// Hand one `input` frame to the queue — behind anything already
     /// deferred, so order is kept — or defer it when the budget is full.
+    /// Empty frames are ignored so 0-byte frames cannot grow `jobs` unboundedly
+    /// without incrementing `self.bytes`.
     fn push(&mut self, q: &InputQueue, bytes: Vec<u8>, user: bool, prev_owner: Option<u64>) {
+        if bytes.is_empty() {
+            return;
+        }
         let job = InputQueue::job(bytes, user, prev_owner);
         let job = if self.jobs.is_empty() {
             match q.try_queue(job) {
@@ -1818,6 +1857,9 @@ impl<S: SessionsCtx> TerminalConn<S> {
         let Ok(bytes) = B64.decode(data.as_bytes()) else {
             return Ok(());
         };
+        if bytes.is_empty() {
+            return Ok(());
+        }
         // The process this viewer shows is gone: never type blind into
         // whatever replaced it. Swap onto the respawn first (the user then
         // sees where the keystroke lands); with nothing live, `input` fails
@@ -2245,32 +2287,35 @@ async fn serve_terminal<S: SessionsCtx>(
                 match chunk {
                     Ok(first) => {
                         // Attempt a non-blocking drain to merge back-to-back
-                        // chunks into one WS frame. Lagged errors are harmless
-                        // (data is still in the ring buffer).
-                        // A lone chunk (the common case) is forwarded as is —
-                        // no copy (perf 01 F11); only a burst is coalesced.
-                        let mut out = first;
-                        if let Some(rx) = conn.out_rx.as_mut() {
-                            if let Ok(more) = rx.try_recv() {
-                                let mut buf = bytes::BytesMut::with_capacity(out.len() + more.len());
-                                buf.extend_from_slice(&out);
-                                buf.extend_from_slice(&more);
-                                // Cap at ~64 KiB to bound latency.
-                                while buf.len() < 64 * 1024 {
-                                    let Ok(more) = rx.try_recv() else { break };
-                                    buf.extend_from_slice(&more);
-                                }
-                                out = buf.freeze();
-                            }
-                        }
-                        // Credit mode: send only what the window allows (the
-                        // rest is held, or skipped → one snapshot later).
-                        let step = match conn.credit.as_mut() {
-                            Some(c) => c.push(out, tokio::time::Instant::now()),
-                            None => CreditStep::Send(out),
+                        // chunks into one WS frame. Surface Lagged explicitly
+                        // so dropped TUI sequences still trigger a snapshot
+                        // resync instead of silently advancing past the gap.
+                        let coalesced = match conn.out_rx.as_mut() {
+                            Some(rx) => coalesce_burst(first, rx),
+                            None => Ok(first),
                         };
-                        if apply_credit_step(step, &mut conn.socket, &mut conn.out_rx, conn.handle.as_ref(), conn.history, conn.binary_snapshots).await.is_err() {
-                            return;
+                        match coalesced {
+                            Ok(out) => {
+                                // Credit mode: send only what the window allows (the
+                                // rest is held, or skipped → one snapshot later).
+                                let step = match conn.credit.as_mut() {
+                                    Some(c) => c.push(out, tokio::time::Instant::now()),
+                                    None => CreditStep::Send(out),
+                                };
+                                if apply_credit_step(step, &mut conn.socket, &mut conn.out_rx, conn.handle.as_ref(), conn.history, conn.binary_snapshots).await.is_err() {
+                                    return;
+                                }
+                            }
+                            Err(n) => {
+                                tracing::debug!(session = %conn.session_id, "terminal ws lagged by {n} chunks during burst coalesce; resyncing from snapshot");
+                                if let (Some(rx), Some(h)) = (conn.out_rx.as_mut(), conn.handle.as_ref()) {
+                                    let frame = resync_frame(rx, pty_capture(h, conn.history), conn.binary_snapshots).await;
+                                    if frame.send(&mut conn.socket).await.is_err() {
+                                        return;
+                                    }
+                                    conn.superseded();
+                                }
+                            }
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -3904,5 +3949,42 @@ mod lookup_status_tests {
             lookup_failure_status(&Error::Internal("database is locked".into())),
             StatusCode::SERVICE_UNAVAILABLE
         );
+    }
+
+    #[test]
+    fn coalesce_burst_surfaces_broadcast_lag_for_resync() {
+        let (tx, mut rx) = broadcast::channel::<Bytes>(2);
+        tx.send(Bytes::from_static(b"a")).unwrap();
+        tx.send(Bytes::from_static(b"b")).unwrap();
+        let first = rx.try_recv().unwrap();
+        // Overfill the ring so the receiver lags before try_recv in coalesce_burst.
+        tx.send(Bytes::from_static(b"c")).unwrap();
+        tx.send(Bytes::from_static(b"d")).unwrap();
+        tx.send(Bytes::from_static(b"e")).unwrap();
+        let err = coalesce_burst(first, &mut rx).expect_err("lag must surface");
+        assert!(err >= 2, "expected dropped chunks >= 2, got {err}");
+
+        // Normal burst coalesces without dropping.
+        let (tx2, mut rx2) = broadcast::channel::<Bytes>(8);
+        tx2.send(Bytes::from_static(b"hi ")).unwrap();
+        tx2.send(Bytes::from_static(b"there")).unwrap();
+        let first2 = rx2.try_recv().unwrap();
+        assert_eq!(
+            coalesce_burst(first2, &mut rx2).unwrap(),
+            Bytes::from_static(b"hi there")
+        );
+    }
+
+    #[tokio::test]
+    async fn deferred_input_ignores_empty_frames_when_budget_full() {
+        let (q, _rx) = spawn_input_queue(|_, _| async { Ok(()) }, |_| {});
+        let mut deferred = DeferredInput::default();
+        // Saturate the queue budget with a large frame so subsequent frames defer.
+        deferred.push(&q, vec![b'x'; INPUT_BUDGET_BYTES + 1], true, None);
+        let initial_len = deferred.jobs.len();
+        for _ in 0..1000 {
+            deferred.push(&q, Vec::new(), true, None);
+        }
+        assert_eq!(deferred.jobs.len(), initial_len);
     }
 }

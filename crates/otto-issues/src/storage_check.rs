@@ -362,9 +362,15 @@ fn rules(n: &Node, parent: &str, path: &str) -> Result<(), String> {
         "br" | "hr" | "col" if !n.children.is_empty() => {
             return Err(format!("{here}: <{name}> must be empty (<{name} />)"));
         }
-        "a" if n.attr("href").is_none_or(str::is_empty) => {
-            return Err(format!("{here}: a link needs href"));
-        }
+        "a" => match n.attr("href") {
+            None | Some("") => {
+                return Err(format!("{here}: a link needs href"));
+            }
+            Some(href) if !crate::markdown::is_safe_link_href(href) => {
+                return Err(format!("{here}: disallowed link href scheme"));
+            }
+            Some(_) => {}
+        },
         "ac:structured-macro" => {
             let m = n.attr("ac:name").unwrap_or("");
             if !MACROS.contains(&m) {
@@ -574,6 +580,10 @@ mod tests {
             ("<p>a<br>b</br></p>", "must be empty"),
             ("<div>x</div>", "<div> is not allowed"),
             ("<a>x</a>", "needs href"),
+            ("<a href=\"javascript:alert(1)\">x</a>", "disallowed link href scheme"),
+            ("<a href=\"&#106;avascript:alert(1)\">x</a>", "disallowed link href scheme"),
+            ("<a href=\"data:text/html,hi\">x</a>", "disallowed link href scheme"),
+            ("<a href=\"vbscript:msgbox(1)\">x</a>", "disallowed link href scheme"),
             ("<ac:structured-macro ac:name=\"toc\" />", "unknown macro \"toc\""),
             ("<ac:structured-macro ac:name=\"code\"></ac:structured-macro>", "exactly one <ac:plain-text-body>"),
             (

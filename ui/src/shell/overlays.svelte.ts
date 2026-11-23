@@ -21,5 +21,6 @@ export const SlackSendChunk = lazyComponent(() => import('../lib/components/slac
 /** Shared by the Navigator and the TabBar; it bundles the QR encoder. */
 export const ShareModalChunk = lazyComponent(() => import('../modules/agents/ShareModal.svelte'));
 export const PaletteChunk = lazyComponent(() => import('./Palette.svelte'));
+export const TriageBarChunk = lazyComponent(() => import('./TriageBar.svelte'));
 export const ShortcutsOverlayChunk = lazyComponent(() => import('./ShortcutsOverlay.svelte'));
 export const FloatingBarChunk = lazyComponent(() => import('../lib/components/FloatingBar.svelte'));

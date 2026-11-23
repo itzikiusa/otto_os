@@ -7,6 +7,7 @@
   import { aws } from '../../lib/stores/aws.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
 
   const job = $derived(aws.status?.install ?? null);
   const running = $derived(job?.state === 'running');
@@ -38,21 +39,36 @@
       <div class="indeterminate" role="progressbar" aria-label="Installing the AWS CLI" aria-busy="true"></div>
       <p class="status">Installing… this can take a minute or two.</p>
     {:else if failed}
-      <p class="status err">
-        Couldn’t install the AWS CLI{job?.error ? `: ${job.error}` : ''}.
-      </p>
+      <LoadState
+        variant="compact"
+        what="the AWS CLI"
+        errorTitle="Couldn’t install the AWS CLI"
+        error={job?.error || 'The installer exited with an error.'}
+        empty={true}
+        loading={aws.installBusy}
+        onretry={canInstall ? () => void install() : undefined}
+      >
+        {#snippet errorActions()}
+          {#if !canInstall}
+            <span class="dim">Ask an administrator to install the CLI (Admin on <code>aws</code>).</span>
+          {/if}
+          <button class="btn small" onclick={() => void aws.loadStatus()}>Check again</button>
+        {/snippet}
+      </LoadState>
     {/if}
 
-    <div class="actions">
-      {#if canInstall}
-        <button class="btn primary" onclick={() => void install()} disabled={running || aws.installBusy}>
-          {running ? 'Installing…' : failed ? 'Retry install' : 'Install now'}
-        </button>
-      {:else}
-        <span class="dim">Ask an administrator to install the CLI (Admin on <code>aws</code>).</span>
-      {/if}
-      <button class="btn" onclick={() => void aws.loadStatus()}>Check again</button>
-    </div>
+    {#if !failed}
+      <div class="actions">
+        {#if canInstall}
+          <button class="btn primary" onclick={() => void install()} disabled={running || aws.installBusy}>
+            {running ? 'Installing…' : 'Install now'}
+          </button>
+        {:else}
+          <span class="dim">Ask an administrator to install the CLI (Admin on <code>aws</code>).</span>
+        {/if}
+        <button class="btn" onclick={() => void aws.loadStatus()}>Check again</button>
+      </div>
+    {/if}
 
     {#if job?.log_tail}
       <button class="log-toggle" onclick={() => (logOpen = !logOpen)} aria-expanded={logOpen}>
@@ -113,9 +129,6 @@
     margin: 0;
     font-size: var(--fs-m);
     color: var(--text-dim);
-  }
-  .status.err {
-    color: var(--danger);
   }
   .actions {
     display: flex;

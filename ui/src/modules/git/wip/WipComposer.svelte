@@ -31,12 +31,13 @@
     signError?: Snippet;
     onkey: (e: KeyboardEvent) => void;
     ondraft: () => void;
+    onstopdraft?: () => void;
     oncommit: () => void;
   }
   let {
     subject = $bindable(), body = $bindable(), amend = $bindable(), signOn = $bindable(), showDraftTerm = $bindable(),
     amendSubject, amendPublished, drafting, draftElapsed, draftable, draftedAt, liveDraftId, committing, canCommit,
-    commitHint, stagedCount, signCfg, signError, onkey, ondraft, oncommit,
+    commitHint, stagedCount, signCfg, signError, onkey, ondraft, onstopdraft, oncommit,
   }: Props = $props();
 
   /** git's 50/72 convention: a quiet count from 50, warning past 72. */
@@ -112,6 +113,15 @@
         <Icon name="sparkle" size={12} /> Draft message
       {/if}
     </button>
+    {#if drafting && onstopdraft}
+      <button
+        class="btn small ghost draft-btn"
+        onclick={onstopdraft}
+        title="Stop drafting commit message"
+      >
+        <Icon name="stop" size={12} /> Stop
+      </button>
+    {/if}
     {#if liveDraftId}
       <button
         class="btn small ghost draft-btn"

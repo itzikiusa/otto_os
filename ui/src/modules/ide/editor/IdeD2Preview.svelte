@@ -6,6 +6,7 @@
   import { untrack } from 'svelte';
   import PreviewNotice from '../../../lib/components/preview/PreviewNotice.svelte';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
+  import { loadErrorText } from '../../../lib/loadError';
   import { ui } from '../../../lib/stores/ui.svelte';
   import { renderD2 } from '../../canvas/d2';
 
@@ -32,15 +33,24 @@
         return;
       }
       loading = svg === null;
-      void renderD2(`ide-d2-${++idSeq}`, src, { dark, isStale: () => mine !== seq }).then((r) => {
-        if (mine !== seq || r.stale) return;
-        loading = false;
-        if (r.svg) {
-          svg = r.svg;
-          error = null;
-        } else error = r.error ?? 'Diagram error';
-      });
+      void renderD2(`ide-d2-${++idSeq}`, src, { dark, isStale: () => mine !== seq })
+        .then((r) => {
+          if (mine !== seq || r.stale) return;
+          loading = false;
+          if (r.svg) {
+            svg = r.svg;
+            error = null;
+          } else error = r.error ?? 'Diagram error';
+        })
+        .catch((e: unknown) => {
+          if (mine !== seq) return;
+          loading = false;
+          error = loadErrorText(e);
+        });
     });
+    return () => {
+      seq++;
+    };
   });
 </script>
 

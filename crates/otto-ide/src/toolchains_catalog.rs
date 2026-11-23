@@ -193,10 +193,13 @@ pub enum EcosystemKind {
     Python,
     Shell,
     Json,
+    Ios,
+    Android,
+    Flutter,
 }
 
 impl EcosystemKind {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 10] = [
         Self::Java,
         Self::Go,
         Self::Rust,
@@ -204,6 +207,9 @@ impl EcosystemKind {
         Self::Python,
         Self::Shell,
         Self::Json,
+        Self::Ios,
+        Self::Android,
+        Self::Flutter,
     ];
 
     pub fn parse(raw: &str) -> Option<Self> {
@@ -215,6 +221,9 @@ impl EcosystemKind {
             "python" | "py" | "uv" => Some(Self::Python),
             "shell" | "bash" | "sh" | "zsh" => Some(Self::Shell),
             "json" | "jsonc" | "jsonl" => Some(Self::Json),
+            "ios" | "xcode" | "swift" => Some(Self::Ios),
+            "android" | "android_sdk" => Some(Self::Android),
+            "flutter" | "dart" => Some(Self::Flutter),
             _ => None,
         }
     }
@@ -228,6 +237,9 @@ impl EcosystemKind {
             Self::Python => "python",
             Self::Shell => "shell",
             Self::Json => "json",
+            Self::Ios => "ios",
+            Self::Android => "android",
+            Self::Flutter => "flutter",
         }
     }
 
@@ -240,6 +252,9 @@ impl EcosystemKind {
             Self::Python => "Python (uv)",
             Self::Shell => "Shell (Bash / Zsh)",
             Self::Json => "JSON / JSONC / JSONL",
+            Self::Ios => "iOS / Xcode",
+            Self::Android => "Android SDK",
+            Self::Flutter => "Flutter / Dart",
         }
     }
 
@@ -252,6 +267,9 @@ impl EcosystemKind {
             Self::Python => "pyright",
             Self::Shell => "bash-language-server",
             Self::Json => "vscode-json-language-server",
+            Self::Ios => "sourcekit-lsp",
+            Self::Android => "kotlin-language-server",
+            Self::Flutter => "dart",
         }
     }
 
@@ -264,6 +282,9 @@ impl EcosystemKind {
             Self::Python => "debugpy",
             Self::Shell => "bashdb",
             Self::Json => "jq",
+            Self::Ios => "lldb-dap",
+            Self::Android => "adb",
+            Self::Flutter => "flutter",
         }
     }
 
@@ -276,6 +297,9 @@ impl EcosystemKind {
             Self::Python => "3.13",
             Self::Shell => "3.10.0",
             Self::Json => "1.7.1",
+            Self::Ios => "xcode",
+            Self::Android => "sdk",
+            Self::Flutter => "stable",
         }
     }
 }
@@ -305,6 +329,9 @@ impl From<crate::types::IdeEcosystemKind> for EcosystemKind {
             crate::types::IdeEcosystemKind::Python => Self::Python,
             crate::types::IdeEcosystemKind::Shell => Self::Shell,
             crate::types::IdeEcosystemKind::Json => Self::Json,
+            crate::types::IdeEcosystemKind::Ios => Self::Ios,
+            crate::types::IdeEcosystemKind::Android => Self::Android,
+            crate::types::IdeEcosystemKind::Flutter => Self::Flutter,
         }
     }
 }
@@ -319,6 +346,9 @@ impl From<EcosystemKind> for crate::types::IdeEcosystemKind {
             EcosystemKind::Python => Self::Python,
             EcosystemKind::Shell => Self::Shell,
             EcosystemKind::Json => Self::Json,
+            EcosystemKind::Ios => Self::Ios,
+            EcosystemKind::Android => Self::Android,
+            EcosystemKind::Flutter => Self::Flutter,
         }
     }
 }
@@ -555,6 +585,7 @@ pub fn curated_catalog(ecosystem: EcosystemKind, platform: TargetPlatform) -> Ve
             size_hint: Some("3 MB".to_string()),
             sha256: None,
         }],
+        EcosystemKind::Ios | EcosystemKind::Android | EcosystemKind::Flutter => Vec::new(),
     }
 }
 
@@ -684,6 +715,15 @@ pub fn resolve_sdk_download(
                 sha256: None,
             })
         }
+        EcosystemKind::Ios => Err(
+            "Xcode / iOS Simulator is installed from the Mac App Store (not downloadable as a tarball)".into(),
+        ),
+        EcosystemKind::Android => Err(
+            "Android SDK is installed via Android Studio or Homebrew (`android-commandlinetools`)".into(),
+        ),
+        EcosystemKind::Flutter => Err(
+            "Flutter SDK is installed via https://docs.flutter.dev or `brew install --cask flutter`".into(),
+        ),
     }
 }
 
@@ -1001,7 +1041,7 @@ impl CatalogClient {
             self.fetch_node(platform),
             self.fetch_python(platform),
         );
-        let mut map = HashMap::with_capacity(7);
+        let mut map = HashMap::with_capacity(10);
         map.insert(EcosystemKind::Java, java);
         map.insert(EcosystemKind::Go, go);
         map.insert(EcosystemKind::Rust, rust);
@@ -1015,6 +1055,9 @@ impl CatalogClient {
             EcosystemKind::Json,
             curated_catalog(EcosystemKind::Json, platform),
         );
+        map.insert(EcosystemKind::Ios, Vec::new());
+        map.insert(EcosystemKind::Android, Vec::new());
+        map.insert(EcosystemKind::Flutter, Vec::new());
 
         if let Ok(mut guard) = self.cache.lock() {
             guard.insert(
@@ -1169,6 +1212,16 @@ mod tests {
         for platform in ALL_PLATFORMS {
             for eco in EcosystemKind::ALL {
                 let items = curated_catalog(eco, platform);
+                if matches!(
+                    eco,
+                    EcosystemKind::Ios | EcosystemKind::Android | EcosystemKind::Flutter
+                ) {
+                    assert!(
+                        items.is_empty(),
+                        "{eco:?} is a native SDK and should not expose archive tarballs"
+                    );
+                    continue;
+                }
                 assert!(!items.is_empty(), "{eco:?} on {platform:?} empty");
                 for item in &items {
                     assert_eq!(item.os, platform.os.as_str());

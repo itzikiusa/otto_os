@@ -21,6 +21,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { toasts } from '../../lib/toast.svelte';
+  import { focusAppContent } from '../../lib/announce.svelte';
 
   // Views only some visits open stay out of the Git chunk (perf R7): the PR
   // list (+ CreatePr), the local review, the merge dialog and the conflict
@@ -303,6 +304,26 @@
       others.length > 8 ? { filter: true, filterPlaceholder: 'Filter repositories…', maxVisible: 12 } : undefined,
     );
   }
+  let repoViewEl = $state<HTMLDivElement | null>(null);
+  /** Move focus into the History/Blame drawer on open and restore it to the
+   *  opener (or an in-view control) on close so focus never drops to <body>. */
+  function drawerFocus(el: HTMLElement): () => void {
+    const prev = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    el.focus({ preventScroll: true });
+    return () => {
+      const hadFocus = el.contains(document.activeElement);
+      requestAnimationFrame(() => {
+        if (!hadFocus && document.activeElement && document.activeElement !== document.body) return;
+        if (prev?.isConnected) {
+          prev.focus({ preventScroll: true });
+        } else {
+          const fallback = repoViewEl?.querySelector<HTMLElement>('.rv-tab[aria-selected="true"], .rv-tab');
+          if (fallback) fallback.focus({ preventScroll: true });
+          else void focusAppContent();
+        }
+      });
+    };
+  }
 </script>
 
 <!-- Escape closes the History/Blame drawer unless a dialog above owns the key. -->
@@ -313,7 +334,7 @@
   }}
 />
 
-<div class="repoview">
+<div class="repoview" bind:this={repoViewEl}>
   <!-- ONE toolbar row: the view switcher, then the git verbs, then ⋯ for the
        repo-level tools. On the Git page the repo tab already names the repo, so
        the switcher only shows where there are no tabs (the agent right panel).
@@ -463,8 +484,8 @@
             onresolveconflicts={openResolver}
           />
           {#if fileTool}
-            <!-- Focus moves in (it stayed on the button behind the drawer). -->
-            <aside class="rv-drawer" tabindex="-1" {@attach (el: HTMLElement) => el.focus({ preventScroll: true })}>
+            <!-- Focus moves in on open and restores cleanly on close. -->
+            <aside class="rv-drawer" tabindex="-1" {@attach drawerFocus}>
               {#if fileTool.kind === 'history'}
                 <LazyMount lazy={FileHistoryLazy} what="the file history" variant="panel"
                   props={{ repoId: repo.id, path: fileTool.path, onclose: () => gitBridge.closeFileTool() }} />

@@ -43,11 +43,22 @@ pub enum ChildMsg {
     },
 }
 
+/// Commands sent to the waiter task that owns the `tokio::process::Child`.
+/// Because that task is the sole reaper, signals sent through it can never
+/// target a recycled PID after the child exits.
+#[derive(Debug, Clone, Copy)]
+pub enum ChildControl {
+    Signal(i32),
+    /// Wait `grace` for graceful exit, then `SIGTERM`, then `grace`, then `SIGKILL`.
+    Stop(std::time::Duration),
+}
+
 /// The live child. Dropping the stdin sender closes the child's stdin (EOF),
 /// which every supported CLI treats as "exit".
 pub struct ChildHandle {
     pub pid: u32,
     pub stdin: mpsc::UnboundedSender<String>,
+    pub control: mpsc::UnboundedSender<ChildControl>,
     pub messages: mpsc::Receiver<ChildMsg>,
 }
 
@@ -98,10 +109,13 @@ pub fn spawn_child(cmd: &ChildCommand) -> std::io::Result<ChildHandle> {
     let stderr_task = tokio::spawn(drain_stderr(stderr, Arc::clone(&tail)));
 
     let (tx, rx) = mpsc::channel(CHANNEL_DEPTH);
+    let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel::<ChildControl>();
     let reader_tx = tx.clone();
     let reader = tokio::spawn(read_lines(stdout, reader_tx));
     tokio::spawn(async move {
-        let status = child.wait().await;
+        let status = wait_with_control(&mut child, pid, &mut ctrl_rx).await;
+        // Drop control channel once reaped so late signals are guaranteed no-ops.
+        drop(ctrl_rx);
         let _ = reader.await;
         let _ = stderr_task.await;
         let code = status.ok().and_then(|s| s.code());
@@ -115,8 +129,43 @@ pub fn spawn_child(cmd: &ChildCommand) -> std::io::Result<ChildHandle> {
     Ok(ChildHandle {
         pid,
         stdin: stdin_tx,
+        control: ctrl_tx,
         messages: rx,
     })
+}
+
+/// Drive `child.wait()` while servicing PID-reuse-safe signals/stops.
+/// Because `child` is owned exclusively here, `signal_group(pid, ...)` can
+/// only ever run BEFORE `child.wait()` reaps `pid`.
+async fn wait_with_control(
+    child: &mut tokio::process::Child,
+    pid: u32,
+    ctrl_rx: &mut mpsc::UnboundedReceiver<ChildControl>,
+) -> std::io::Result<std::process::ExitStatus> {
+    loop {
+        tokio::select! {
+            biased;
+            status = child.wait() => return status,
+            Some(cmd) = ctrl_rx.recv() => match cmd {
+                ChildControl::Signal(sig) => signal_group(pid, sig),
+                ChildControl::Stop(grace) => {
+                    tokio::select! {
+                        biased;
+                        status = child.wait() => return status,
+                        _ = tokio::time::sleep(grace) => {}
+                    }
+                    signal_group(pid, libc::SIGTERM);
+                    tokio::select! {
+                        biased;
+                        status = child.wait() => return status,
+                        _ = tokio::time::sleep(grace) => {}
+                    }
+                    signal_group(pid, libc::SIGKILL);
+                    return child.wait().await;
+                }
+            },
+        }
+    }
 }
 
 async fn read_lines<R: AsyncRead + Unpin>(stdout: R, tx: mpsc::Sender<ChildMsg>) {
@@ -230,5 +279,34 @@ mod tests {
         assert_eq!(rx.recv().await.unwrap(), ChildMsg::Line("after".into()));
         writer.await.unwrap();
         drop(reader);
+    }
+
+    #[tokio::test]
+    async fn control_channel_closes_once_child_exits_preventing_post_reap_signals() {
+        let mut handle = spawn_child(&ChildCommand {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exit 0".into()],
+            cwd: "/tmp".into(),
+            env: vec![],
+        })
+        .expect("spawn");
+        let exited = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(msg) = handle.messages.recv().await {
+                if matches!(msg, ChildMsg::Exited { code: Some(0), .. }) {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .expect("timely exit");
+        assert!(exited);
+        assert!(
+            handle
+                .control
+                .send(ChildControl::Stop(std::time::Duration::from_millis(10)))
+                .is_err(),
+            "control channel must be closed once child is reaped"
+        );
     }
 }

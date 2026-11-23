@@ -58,8 +58,10 @@ otto-connections.workspace = true
 otto-agent-protocol.workspace = true
 otto-aws.workspace = true
 otto-k8s.workspace = true
+otto-containers.workspace = true
 otto-ssh.workspace = true
 otto-ide.workspace = true
+otto-simulators.workspace = true
 otto-dbviewer.workspace = true
 otto-brokers.workspace = true
 otto-mcp.workspace = true
@@ -86,6 +88,8 @@ otto-canvas.workspace = true
 # Design Hall — the artifact graph (projects / artifacts / versions / links).
 otto-design.workspace = true
 otto-design-assist.workspace = true
+# Native 3D asset generation providers + built-in/extensible TTS engine.
+otto-media.workspace = true
 otto-workflows.workspace = true
 otto-memory.workspace = true
 otto-vault.workspace = true
@@ -114,6 +118,7 @@ otto-keychain.workspace = true
 [dev-dependencies]
 # Self dev-dependency: turns on `test-util` for tests/*.rs.
 otto-server = { path = ".", features = ["test-util"] }
+otto-simulators = { path = "../otto-simulators", features = ["test-util"] }
 # RBAC guard integration tests drive a minimal router via tower's oneshot and
 # read the response body. Pinned to the versions axum 0.8 already resolves.
 tower = { version = "0.5.3", features = ["util"] }

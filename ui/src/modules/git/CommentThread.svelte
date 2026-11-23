@@ -9,10 +9,13 @@
   import { renderPrMarkdown } from './prMarkdown';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import { rel } from '../../lib/stores/now.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import PrReactions from './PrReactions.svelte';
   import { prCommentActions } from './pr-comment-ctx';
   import { isReviewSummary, replyingTo, reviewChip } from './pr-comments';
+  import { isComposerSubmitKey, prCommentPostHint } from './gitUiHelpers';
 
   interface Props {
     comment: PrComment;
@@ -71,24 +74,21 @@
   const canResolve = $derived(isHead && onresolve != null && comment.thread_id != null);
 
   // On a phone the desktop 18px-per-level indent quickly eats the narrow width
-  // for deep reply chains; halve it under ≤1024 so nested threads stay readable
-  // without pushing content off-screen. Tracked via matchMedia (same convention
-  // as the other git views) so desktop nesting is unchanged.
-  let isMobile = $state(false);
-  $effect(() => {
-    const mq = window.matchMedia('(max-width: 1024px)');
-    const sync = () => (isMobile = mq.matches);
-    sync();
-    mq.addEventListener('change', sync);
-    return () => mq.removeEventListener('change', sync);
-  });
-  const indent = $derived(Math.min(depth, 4) * (isMobile ? 9 : 18));
+  // for deep reply chains; halve it under ≤1024 via the shared viewport store
+  // (no per-comment matchMedia listener).
+  const indent = $derived(Math.min(depth, 4) * (viewport.isMobile ? 9 : 18));
 
-  function fmtDate(iso: string): string {
-    const d = new Date(iso);
-    return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) +
-      ' ' +
-      d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  function onEditKey(e: KeyboardEvent): void {
+    if (isComposerSubmitKey(e)) {
+      e.preventDefault();
+      void saveEdit();
+    }
+  }
+  function onReplyKey(e: KeyboardEvent): void {
+    if (isComposerSubmitKey(e)) {
+      e.preventDefault();
+      void submitReply();
+    }
   }
 
   async function submitReply(): Promise<void> {
@@ -100,7 +100,7 @@
       replying = false;
       replyText = '';
     } catch (e) {
-      replyError = e instanceof Error ? e.message : String(e);
+      replyError = loadErrorText(e);
     } finally {
       busy = false;
     }
@@ -128,7 +128,7 @@
       <span class="chip ok cmt-status" title="This thread is resolved on the provider">Resolved</span>
     {/if}
     {#if chip}<span class="cmt-review tone-{chip.tone}" title="GitHub review">{chip.label}</span>{/if}
-    <span class="cmt-date dim">{fmtDate(comment.created_at)}</span>
+    <span class="cmt-date dim" title={new Date(comment.created_at).toLocaleString()}>{rel(comment.created_at)}</span>
     {#if canEdit && !editing}
       <button class="btn small ghost cmt-more" aria-haspopup="menu" aria-label="Comment actions" title="Edit or delete your comment" onclick={ownMenu}>
         <Icon name="more" size={14} />
@@ -138,11 +138,12 @@
   {#if answers}<div class="cmt-answers dim" dir="auto">↪ replying to {answers}</div>{/if}
   {#if editing}
     <div class="cmt-actions">
-      <textarea dir="auto" class="input" rows="3" bind:value={editText} disabled={editBusy} aria-label="Edit comment"></textarea>
+      <textarea dir="auto" class="input" rows="3" bind:value={editText} disabled={editBusy} aria-label="Edit comment" onkeydown={onEditKey}></textarea>
       {#if editError}<p class="reply-error" use:announceShown={{ text: `Couldn’t save the comment. ${editError}`, assertive: true }}>Couldn’t save the comment. {editError}</p>{/if}
-      <div class="row" style="justify-content: flex-end">
+      <div class="cmt-compose-foot">
+        <span class="cmt-compose-hint dim">{prCommentPostHint(actions?.postTarget?.(), 'edit')}</span>
         <button class="btn small" disabled={editBusy} onclick={() => (editing = false)}>Cancel</button>
-        <button class="btn small primary" disabled={editBusy || editText.trim() === ''} onclick={saveEdit}>{editBusy ? 'Saving…' : 'Save'}</button>
+        <button class="btn small primary" disabled={editBusy || editText.trim() === ''} title="Save comment (⌘↵)" onclick={saveEdit}>{editBusy ? 'Saving…' : 'Save'}</button>
       </div>
     </div>
   {:else}
@@ -155,11 +156,12 @@
   {#if onreply || canResolve}
     <div class="cmt-actions">
       {#if replying}
-        <textarea dir="auto" class="input" rows="2" bind:value={replyText} disabled={busy} aria-label="Reply" placeholder="Reply…"></textarea>
+        <textarea dir="auto" class="input" rows="2" bind:value={replyText} disabled={busy} aria-label="Reply" placeholder="Reply…" onkeydown={onReplyKey}></textarea>
         {#if replyError}<p class="reply-error" use:announceShown={{ text: `Couldn’t post reply. ${replyError}`, assertive: true }}>Couldn’t post reply. {replyError} Try Reply again.</p>{/if}
-        <div class="row" style="justify-content: flex-end">
+        <div class="cmt-compose-foot">
+          <span class="cmt-compose-hint dim">{prCommentPostHint(actions?.postTarget?.(), 'reply')}</span>
           <button class="btn small" disabled={busy} onclick={() => (replying = false)}>Cancel</button>
-          <button class="btn small primary" disabled={busy || replyText.trim() === ''} onclick={submitReply}>
+          <button class="btn small primary" disabled={busy || replyText.trim() === ''} title="Post reply (⌘↵)" onclick={submitReply}>
             {busy ? 'Posting…' : 'Reply'}
           </button>
         </div>
@@ -242,6 +244,18 @@
     flex-direction: column;
     gap: 6px;
     max-width: 480px;
+  }
+  .cmt-compose-foot {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .cmt-compose-hint {
+    flex: 1 1 180px;
+    min-width: 0;
+    font-size: var(--fs-xs);
   }
 
   /* ── Mobile + tablet (≤1024px) ──────────────────────────────────────────────

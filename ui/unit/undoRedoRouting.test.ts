@@ -112,6 +112,7 @@ test('menu.ts routes the undo/redo ids', () => {
     './stores/workspace.svelte': { ws: {} },
     './router.svelte': { router: { go() {} } },
     './snip': { startSnip() {} },
+    './keepAwake.svelte': { keepAwake: { promptCustom() {} } },
     './selectall': { selectAllInFocus() {} },
     './undoredo': { undoRedoInFocus: (a: string) => calls.push(a), installUndoKeyGuard: () => () => {} },
     './stores/sidePane.svelte': { sidePane: { handleMenu: () => false, nativeState: null, focused: false } },

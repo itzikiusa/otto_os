@@ -56,6 +56,7 @@
   // dashboards, API-client collections — and links into those views. Read
   // only: nothing here changes another module's state beyond navigating.
   import { untrack } from 'svelte';
+  import { announceShown } from '../../lib/announce.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
@@ -306,9 +307,9 @@
     <p class="dim">Looking for matching workloads, repos and connections…</p>
   {:else if ctx}
     {#if ctx.failed.length}
-      <p class="warn" role="alert">
+      <p class="warn" use:announceShown={{ text: `Couldn’t read ${ctx.failed.join(', ')}.`, assertive: true }}>
         Couldn’t read {ctx.failed.join(', ')}.
-        <button class="link" onclick={refresh}>Retry</button>
+        <button class="link" onclick={refresh}>Retry</button><!-- ui-guards: allow — partial-section inline refresh while loaded cards remain visible -->
       </p>
     {/if}
     {#if total === 0 && !ctx.failed.length}

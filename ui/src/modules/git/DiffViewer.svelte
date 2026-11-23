@@ -1,7 +1,12 @@
 <script lang="ts">
   import { loadErrorText } from '../../lib/loadError';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import DiffAiFindingCard from './DiffAiFindingCard.svelte';
+  import { aiOverlayCountForFile, aiOverlayForFile, aiOverlayForLine, buildAiOverlayIndex, type AiOverlayItem, type DiffAiOverlayData } from './diffAiOverlay';
   import { plural } from '../../lib/plural';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import { prCommentActions } from './pr-comment-ctx';
+  import { isComposerSubmitKey, prCommentPostHint } from './gitUiHelpers';
   // Shared diff renderer (Changes / commit / PR views): unified or side-by-side, collapse,
   // highlight; PR mode adds threads, composer and a file tree + toolbar (lazy chunks).
   //
@@ -37,6 +42,9 @@
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { git } from '../../lib/stores/git.svelte';
+  import { router } from '../../lib/router.svelte';
+  import { buildIdeRoute } from './gitQuickJump';
   import { gitBridge } from '../../lib/diff/gitBridge.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import CommentThread from './CommentThread.svelte';
@@ -114,6 +122,8 @@
     viewedStorageKey?: string;
     /** PR mode: offer "Hide whitespace changes" (the host's loaders follow it). */
     canIgnoreWs?: boolean;
+    /** PR mode: inline AI review draft comments & persisted findings overlay (E-08). */
+    aiOverlay?: DiffAiOverlayData;
   }
   let {
     diff,
@@ -130,7 +140,14 @@
     toolbarLead,
     viewedStorageKey,
     canIgnoreWs = false,
+    aiOverlay,
   }: Props = $props();
+
+  let showAiOverlay = $state(true);
+  const aiIdx = $derived(prMode && aiOverlay ? buildAiOverlayIndex(aiOverlay.comments, aiOverlay.findings) : null);
+  const aiCount = $derived(aiIdx?.total ?? 0);
+
+  const commentActions = prCommentActions();
 
   // ── PR-mode view preferences (persisted; helpers in diff-pr.ts) ──────────
   /** File tree (the nav sidebar) shown — PR mode, hidden by default. */
@@ -1068,14 +1085,13 @@
   const sign = (l: DiffLine) => (l.origin === 'add' ? '+' : l.origin === 'del' ? '−' : '');
 </script>
 
-<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div
   class="diff-root"
   class:with-nav={navShown}
   class:pr={prMode}
   class:nowrap={prMode && !wrapLines}
   bind:this={rootEl}
-  onkeydown={onDiffKeydown}
+  {@attach (el) => { el.addEventListener('keydown', onDiffKeydown); return () => el.removeEventListener('keydown', onDiffKeydown); }}
   role="region"
   aria-label="Diff viewer"
   tabindex="-1"
@@ -1098,8 +1114,7 @@
         onclick={act}
       >{n}</button>
     {:else}
-      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-      <span data-find-skip class="gut {side}" class:commentable={!!act && kind === 'comment'} class:selectable={!!act && kind === 'select'} onclick={act ?? undefined}>{n ?? ''}</span>
+      <span data-find-skip class="gut {side}">{n ?? ''}</span>
     {/if}
   {/snippet}
 
@@ -1122,20 +1137,13 @@
 
   {#snippet composerBox()}
     <div class="composer">
-      <textarea dir="auto" aria-label="Line comment"
-        class="input"
-        rows="2"
-        bind:value={composerText}
-        onfocus={revealComposer}
-        placeholder="Comment on {vs.composer?.side === 'old' ? 'old ' : ''}line {vs.composer?.line}…"
-      ></textarea>
+      <textarea dir="auto" aria-label="Line comment" class="input" rows="2" bind:value={composerText} onfocus={revealComposer}
+        onkeydown={(e) => { if (isComposerSubmitKey(e)) { e.preventDefault(); void submitComment(); } }}
+        placeholder="Comment on {vs.composer?.side === 'old' ? 'old ' : ''}line {vs.composer?.line}…"></textarea>
       <div class="composer-actions">
+        <span class="composer-hint dim">{prCommentPostHint(commentActions?.postTarget?.(), 'post')}</span>
         <button class="btn small" onclick={() => patchVs({ composer: null })}>Cancel</button>
-        <button
-          class="btn small primary"
-          disabled={composerBusy || composerText.trim() === ''}
-          onclick={submitComment}
-        >
+        <button class="btn small primary" disabled={composerBusy || composerText.trim() === ''} title="Post comment (⌘↵)" onclick={submitComment}>
           {composerBusy ? 'Posting…' : 'Comment'}
         </button>
       </div>
@@ -1153,10 +1161,18 @@
         onclick={(e) => { expandedLines.add(key); void refocusRow(e.currentTarget, rootEl); }}>… expand line ({kb(content.length)})</button
       >{:else}{@html markWords(hl.html(content, lang), words)}{/if}{/snippet}
 
+  {#snippet aiCards(items: readonly AiOverlayItem[])}
+    <div class="ai-overlay-slot" data-find-skip>
+      {#each items as item (item.key)}<DiffAiFindingCard {item} onEditComment={aiOverlay?.onEditComment} onPostComment={aiOverlay?.onPostComment} onDismissItem={aiOverlay?.onDismissItem} onFixItem={aiOverlay?.onFixItem} />{/each}
+    </div>
+  {/snippet}
+
   {#snippet rowView(r: Row, i: number)}
     {#if r.kind === 'file'}
       {@const stats = fileStat(r.file)}
       {@const cCount = commentCounts.get(r.file.path) ?? 0}
+      {@const aiFileCount = showAiOverlay && aiIdx ? aiOverlayCountForFile(aiIdx, r.file.path) : 0}
+      {@const aiFileItems = !r.collapsed && showAiOverlay && aiIdx ? aiOverlayForFile(aiIdx, r.file.path) : []}
       {@const isViewed = prMode && viewed.has(r.file.path)}
       {@const st = prMode ? fileStatus(r.file) : null}
       <div
@@ -1182,9 +1198,12 @@
               {#if r.file.old_path}{r.file.old_path}<span class="rename-arrow"> → </span>{/if}{r.file.path}
             </span>
             <span class="grow"></span>
+            {#if prMode && aiFileCount > 0}
+              <span class="file-comment-badge" data-find-skip title="{plural(aiFileCount, 'AI finding')}"><Icon name="sparkle" size={12} /> {aiFileCount}</span>
+            {/if}
             {#if prMode && cCount > 0}
               <span class="file-comment-badge" data-find-skip title="{plural(cCount, 'comment')}">
-                💬 {cCount}
+                <Icon name="comment" size={12} /> {cCount}
               </span>
             {/if}
             <span class="add" data-find-skip>+{stats.add}</span>
@@ -1203,6 +1222,17 @@
             </label>
           {/if}
           {#if repoId}
+            {@const repoPath = git.allRepos.find((x) => x.id === repoId)?.path ?? git.repos.find((x) => x.id === repoId)?.path}
+            {@const ideRoute = buildIdeRoute(repoPath, r.file.path, r.file.hunks[0]?.lines.find((l) => l.new_line != null)?.new_line)}
+            {#if ideRoute}
+              <button
+                class="dfile-tools"
+                data-find-skip
+                title="Open in IDE"
+                aria-label="Open {r.file.path} in IDE"
+                onclick={(e) => { e.stopPropagation(); router.go(ideRoute); }}
+              ><Icon name="ide" size={13} /></button>
+            {/if}
             <button
               class="dfile-tools"
               title="File history / blame"
@@ -1214,6 +1244,7 @@
             ><Icon name="more" size={13} /></button>
           {/if}
         </div>
+        {#if aiFileItems.length > 0}{@render aiCards(aiFileItems)}{/if}
       </div>
     {:else if r.kind === 'hunk'}
       <div class="drow inf hunk-header mono" dir="ltr" data-rk={r.key} use:measure={[r.key, i]}>
@@ -1250,6 +1281,7 @@
         {@render gut('new', r.line.new_line, r.line.old_line, act, wip ? 'select' : 'comment', picked)}
         <span class="sign" data-find-skip>{sign(r.line)}</span>
         <span class="code mono">{@render codeText(r.line.content, lang, r.key, lineWords(vs.loaded.get(r.file.path) ?? r.file, r.hi, r.line))}</span>
+        {#if showAiOverlay && aiIdx}{@const aiItems = aiOverlayForLine(aiIdx, r.file.path, r.line.new_line, r.line.old_line)}{#if aiItems.length > 0}{@render aiCards(aiItems)}{/if}{/if}
       </div>
     {:else if r.kind === 'split'}
       {@const lang = langOf(r.file.path)}
@@ -1262,6 +1294,7 @@
         {@render gut('new', R?.new_line ?? null, null, prMode && onAddComment && R ? () => gutterClick(r.file.path, R) : null, 'comment')}
         <span class="code mono half {R ? (R.origin === 'add' ? 'add' : '') : 'void'}"
           >{#if R}{@render codeText(R.content, lang, r.key + ':R', lineWords(vs.loaded.get(r.file.path) ?? r.file, r.hi, R))}{/if}</span>
+        {#if showAiOverlay && aiIdx}{@const aiItems = aiOverlayForLine(aiIdx, r.file.path, R?.new_line ?? null, L?.old_line ?? null)}{#if aiItems.length > 0}{@render aiCards(aiItems)}{/if}{/if}
       </div>
     {:else if r.kind === 'comment'}
       <div class="comment-row" data-rk={r.key} use:measure={[r.key, i]}>
@@ -1308,10 +1341,7 @@
         <Skeleton rows={1} height={14} label="this file’s diff" grace={false} />
       </div>
     {:else if r.kind === 'error'}
-      <div class="drow inf dfile-error" role="alert" data-rk={r.key} use:measure={[r.key, i]}>
-        <span>Couldn’t load this file’s diff: {r.message}</span>
-        <button class="btn small" onclick={() => retryLoad(r.file)}>Retry</button>
-      </div>
+      <div class="drow inf dfile-error" data-rk={r.key} use:measure={[r.key, i]}><LoadState variant="compact" what="this file’s diff" error={r.message} empty onretry={() => retryLoad(r.file)} /></div>
     {:else if r.kind === 'end'}
       <div class="drow drow-end" data-rk={r.key} use:measure={[r.key, i]}></div>
     {/if}
@@ -1348,6 +1378,7 @@
         canWs={canIgnoreWs} {ignoreWs} wsUnsupported={ignoreWs && diff.whitespace_ignored === false} ontogglews={toggleWs}
         searchDone={searchLeft > 0 ? totalFiles - searchLeft : null} searchOf={totalFiles}
         onsearchall={searchCapped && searchLeft > 0 && searchAllFor !== search ? () => (searchAllFor = search) : undefined}
+        {aiCount} aiOpen={showAiOverlay} ontoggleai={() => (showAiOverlay = !showAiOverlay)}
       />{:else}<div class="diff-toolbar" aria-hidden="true"></div>{/if}
     {:else}
     <div class="diff-toolbar">
@@ -1519,48 +1550,15 @@
     position: relative;
     min-width: 0;
   }
-  .drow-file {
-    padding-top: 10px;
-  }
-  .drow-file.first {
-    padding-top: 0;
-  }
-  .inf,
-  .dtable {
-    border-inline: 1px solid var(--border);
-    background: var(--surface);
-  }
-  .drow-end {
-    height: 4px;
-    border: 1px solid var(--border);
-    border-top: none;
-    border-end-start-radius: var(--radius-m);
-    border-end-end-radius: var(--radius-m);
-    background: var(--surface);
-  }
-  .drow-overlay {
-    position: absolute;
-    inset-inline: 0;
-    top: 0;
-  }
-  .dfile-large,
-  .dfile-error {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 12px 14px;
-    font-size: var(--fs-s);
-  }
-  .dfile-large {
-    color: var(--text-dim);
-  }
-  .dfile-error {
-    color: var(--danger);
-  }
-  .dfile-pending {
-    padding: 12px 14px;
-    font-size: var(--fs-s);
-  }
+  .drow-file { padding-top: 10px; }
+  .drow-file.first { padding-top: 0; }
+  .inf, .dtable { border-inline: 1px solid var(--border); background: var(--surface); }
+  .drow-end { height: 4px; border: 1px solid var(--border); border-top: none; border-end-start-radius: var(--radius-m); border-end-end-radius: var(--radius-m); background: var(--surface); }
+  .drow-overlay { position: absolute; inset-inline: 0; top: 0; }
+  .dfile-large, .dfile-error { display: flex; align-items: center; gap: 8px; padding: 12px 14px; font-size: var(--fs-s); }
+  .dfile-large { color: var(--text-dim); }
+  .dfile-error { color: var(--danger); }
+  .dfile-pending { padding: 12px 14px; font-size: var(--fs-s); }
   .dfile-head {
     display: flex;
     align-items: center;
@@ -1594,12 +1592,7 @@
     padding: 14px;
     font-size: var(--fs-s);
   }
-  .file-comment-badge {
-    font-size: var(--fs-xs);
-    color: var(--accent-text);
-    white-space: nowrap;
-    flex-shrink: 0;
-  }
+  .file-comment-badge { display: inline-flex; align-items: center; gap: 2px; font-size: var(--fs-xs); color: var(--accent-text); white-space: nowrap; flex-shrink: 0; }
 
   .outdated-chip {
     display: inline-block;
@@ -1747,22 +1740,11 @@
     word-break: break-all;
     user-select: text;
   }
-  .comment-row {
-    padding: 6px 12px;
-    background: var(--bg);
-    border: 1px solid var(--border);
-  }
-  .composer {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    max-width: 560px;
-  }
-  .composer-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 6px;
-  }
+  .comment-row { padding: 6px 12px; background: var(--bg); border: 1px solid var(--border); }
+  .ai-overlay-slot { grid-column: 1 / -1; padding: 4px 12px; background: var(--bg); border-block: 1px solid var(--border); }
+  .composer { display: flex; flex-direction: column; gap: 6px; max-width: 560px; }
+  .composer-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+  .composer-hint { flex: 1 1 180px; min-width: 0; font-size: var(--fs-xs); }
 
   /* ── Mobile + tablet (≤1024px): readable diffs that fit the viewport width.
      Wrap long code lines (no horizontal page overflow), bump the tiny code +

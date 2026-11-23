@@ -12,6 +12,7 @@
 export type KeyAction =
   | 'palette'
   | 'askOtto'
+  | 'triage'
   | 'broadcast'
   | 'hardReload'
   | 'settings'
@@ -230,7 +231,7 @@ export function appModifier(
 export type ModalKeyVerdict = 'run' | 'drop' | 'dismiss';
 
 const DROP_UNDER_MODAL = new Set<string>([
-  'palette', 'askOtto', 'broadcast', 'hardReload', 'settings', 'updateCLIs',
+  'palette', 'askOtto', 'triage', 'broadcast', 'hardReload', 'settings', 'updateCLIs',
   'newSession', 'reopenTab', 'nextTab', 'prevTab', 'nextSession', 'prevSession',
   'jumpSession', 'splitVertical', 'splitHorizontal', 'navBack', 'navForward',
   'toggleSidePane',
@@ -383,6 +384,15 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
         // stays supported; nothing else binds it.
         e.preventDefault();
         dispatch('updateCLIs', e);
+        return;
+      case 'a':
+        if (e.shiftKey) {
+          // ⌘⇧A → cross-workspace triage bar (approvals + waiting sessions).
+          // Plain ⌘A stays native select-all.
+          e.preventDefault();
+          dispatch('triage', e);
+          return;
+        }
         return;
       case 'b':
         if (e.shiftKey) {

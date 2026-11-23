@@ -187,9 +187,9 @@ pub const GROUPS: &[ToolGroup] = &[
     },
     ToolGroup {
         id: "browser",
-        label: "Browser",
-        description: "The in-app browser: navigate, read, query and summarize pages.",
-        prefixes: &["browser_"],
+        label: "Browser & Simulators",
+        description: "The in-app browser and embedded iOS/Android simulators: navigate, read, screenshot, tap/swipe/type, and inspect logs.",
+        prefixes: &["browser_", "sim_"],
         exact: &[],
     },
     ToolGroup {
@@ -278,13 +278,38 @@ pub const GROUPS: &[ToolGroup] = &[
     ToolGroup {
         id: "product",
         label: "Product & design",
-        description: "Product story analysis, Design Hall artifacts and links, and canvas scenes.",
+        description: "Product story analysis, Design Hall artifacts, links and comments, canvas scenes, 3D generation, voice clips, sounds and music, and Smart-mode productions.",
         prefixes: &["design_", "canvas_"],
         exact: &[
             "list_product_stories",
             "get_product_story",
             "product_story",
             "list_design_projects",
+            "list_3d_providers",
+            "start_3d_job",
+            "get_3d_job",
+            "list_3d_jobs",
+            "cancel_3d_job",
+            "export_3d_artifact",
+            "list_tts_providers",
+            "list_tts_voices",
+            "synthesize_voice",
+            "list_voice_clips",
+            "delete_voice_clip",
+            "create_production",
+            "get_production",
+            "list_productions",
+            "start_production",
+            "cancel_production",
+            "steer_production",
+            "redraw_production_item",
+            "revert_production",
+            "rebuild_production_scene",
+            "start_sound",
+            "start_music",
+            "get_audio_job",
+            "list_audio_jobs",
+            "cancel_audio_job",
         ],
     },
     ToolGroup {
@@ -525,6 +550,37 @@ pub async fn resolve_param(
         Some(raw) => Ok(Some(resolve(pool, &parse_ids(raw)).await?)),
         None => Ok(None),
     }
+}
+
+/// Strict variant of [`resolve_param`] for invocation enforcement: if a caller
+/// explicitly specifies `profile(s)`, every requested profile id must resolve
+/// (and empty values are rejected) rather than silently widening to `Full`.
+pub async fn resolve_param_strict(
+    pool: &otto_state::DbPool,
+    raw: Option<&str>,
+) -> Result<Option<ToolFilter>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let ids = parse_ids(raw);
+    if ids.is_empty() {
+        return Err(Error::Invalid("empty MCP profile parameter".into()));
+    }
+    let repo = otto_state::McpProfileRepo::new(pool.clone());
+    let mut rows = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let p = if id == "default" {
+            repo.default_profile().await?
+        } else {
+            repo.get(id).await?
+        };
+        if !rows.iter().any(|o: &otto_state::McpProfile| o.id == p.id) {
+            rows.push(p);
+        }
+    }
+    Ok(Some(ToolFilter::new(
+        rows.iter().map(ProfileDef::from).collect(),
+    )))
 }
 
 /// An [`OutwardTools`] narrowed by a profile: `tools/list` keeps the allowed

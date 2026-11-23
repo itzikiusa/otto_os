@@ -46,11 +46,10 @@ export type {
   IdeShellEnvResp,
   IdeUpdateEnvironmentReq,
 };
-export type * from '../../../lib/api/types/ide-db-watch';
 
 export type IdeTargetKind = 'local' | 'ssh';
 export type IdeKeymapPreset = 'jetbrains' | 'standard';
-export type IdeBottomTab = 'debug' | 'run' | 'git' | 'problems' | 'usages' | 'terminal' | 'dbwatch';
+export type IdeBottomTab = 'debug' | 'run' | 'git' | 'problems' | 'usages' | 'terminal' | 'dbwatch' | 'devices';
 export type BottomTab = IdeBottomTab;
 export type IdeSearchMode = 'files' | 'text' | 'symbols' | 'all';
 export type IdeCollabRole = 'viewer' | 'editor';
@@ -111,6 +110,8 @@ export interface IdeOpenTab {
   binary?: boolean;
   loading: boolean; error: string | null; preview: boolean;
   pinned?: boolean; external?: boolean;
+  /** Opened from a project definition. Keep external source reads on that project target. */
+  projectScoped?: boolean;
   lastAccessedAt?: number;
 }
 
@@ -274,6 +275,7 @@ export interface IdeEnvVar { key: string; value?: string; secret: boolean; has_s
 export interface IdeProjectEnvironment {
   java_home?: string | null; go_root?: string | null; rust_toolchain?: string | null;
   node_home?: string | null; python_interpreter?: string | null;
+  android_home?: string | null; flutter_root?: string | null; xcode_developer_dir?: string | null;
   dotenv_path?: string | null; extra_path?: string | null;
   inherit_shell_env?: boolean; additional_roots?: string[];
   module_sdks?: Record<string, string>;

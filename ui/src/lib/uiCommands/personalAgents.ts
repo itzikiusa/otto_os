@@ -37,6 +37,7 @@ import {
   type PaCreateFill,
   type PaScheduleArg,
 } from './personalAgentsPlan';
+import { newId } from '../id';
 
 /** The New-agent sheet's templates — the same ONE file it reads. */
 type Template = { id: string; title: string; name: string; soul_md: string; directive: string; schedule: Record<string, unknown> };
@@ -314,7 +315,7 @@ registerUiCommands('scheduled-tasks', {
     if (!ok) throw new UiCommandError('cancelled_by_user', 'The user declined the schedule.');
     const before = new Set((personalAgents.schedulesByAgent[agent.id] ?? []).map((x) => x.id));
     try {
-      await personalAgents.createSchedule(agent.id, { ...s, idempotency_key: crypto.randomUUID() });
+      await personalAgents.createSchedule(agent.id, { ...s, idempotency_key: newId() });
     } catch (e) {
       throw asUiError(e);
     }

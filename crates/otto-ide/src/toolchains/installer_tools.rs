@@ -174,6 +174,16 @@ pub(super) async fn install_local_lsp(
                 .to_string_lossy()
                 .into_owned())
         }
+        EcosystemKind::Ios => Err(
+            "sourcekit-lsp ships with Xcode / Command Line Tools (`xcode-select --install`)."
+                .into(),
+        ),
+        EcosystemKind::Android => {
+            Err("Install Kotlin Language Server via `brew install kotlin-language-server`.".into())
+        }
+        EcosystemKind::Flutter => Err(
+            "The Dart language server ships inside the Flutter SDK (`flutter/bin/dart`).".into(),
+        ),
     }
 }
 
@@ -345,5 +355,8 @@ pub(super) async fn install_local_dap(
             }
             Ok(jq.to_string_lossy().into_owned())
         }
+        EcosystemKind::Ios => Err("lldb-dap ships with Xcode / Command Line Tools.".into()),
+        EcosystemKind::Android => Err("adb ships with Android SDK platform-tools.".into()),
+        EcosystemKind::Flutter => Err("Flutter debugging ships inside the Flutter SDK.".into()),
     }
 }

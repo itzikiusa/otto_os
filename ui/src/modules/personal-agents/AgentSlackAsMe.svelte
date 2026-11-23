@@ -3,8 +3,11 @@
   // connected Slack workspaces (Settings → Channels → Act as me in Slack) the
   // agent may act in as them — read DMs, search, post (always approval-gated),
   // mark unread. Default none. Only the owner can change it.
+  import { untrack } from 'svelte';
   import { api } from '../../lib/api/client';
   import type { PersonalAgentSlackGrant } from '../../lib/api/types';
+  import { confirmOutward } from '../../lib/confirmOutward';
+  import { guardUnsaved } from '../../lib/leaveGuard';
   import { toasts } from '../../lib/toast.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { router } from '../../lib/router.svelte';
@@ -19,25 +22,32 @@
   let loading = $state(true);
   let loadError = $state('');
   let saving = $state(false);
+  let loadSeq = 0;
   const dirty = $derived(!!grant && [...picked].sort().join(',') !== [...grant.teams].sort().join(','));
+  $effect(() => guardUnsaved(() => dirty, { what: 'this agent’s Slack permission' }));
 
   async function load(): Promise<void> {
+    const seq = ++loadSeq;
+    const id = agentId;
     loading = true;
     loadError = '';
+    grant = null;
+    picked = [];
     try {
-      const g = await api.get<Partial<PersonalAgentSlackGrant>>(`/personal-agents/${encodeURIComponent(agentId)}/slack-as-me`);
+      const g = await api.get<Partial<PersonalAgentSlackGrant>>(`/personal-agents/${encodeURIComponent(id)}/slack-as-me`);
+      if (seq !== loadSeq || id !== agentId) return;
       // An older daemon (or a partial reply) may omit the lists — never crash the panel.
       grant = { ...g, teams: g.teams ?? [], available: g.available ?? [], is_owner: g.is_owner ?? false } as PersonalAgentSlackGrant;
       picked = [...grant.teams];
     } catch (e) {
-      loadError = loadErrorText(e);
+      if (seq === loadSeq && id === agentId) loadError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (seq === loadSeq && id === agentId) loading = false;
     }
   }
   $effect(() => {
     void agentId;
-    void load();
+    untrack(() => void load());
   });
 
   function toggle(id: string, on: boolean): void {
@@ -45,15 +55,36 @@
   }
 
   async function save(): Promise<void> {
+    if (saving || !grant) return;
+    const id = agentId;
+    const nextTeams = [...picked];
+    const added = nextTeams.filter((t) => !grant!.teams.includes(t));
+    if (added.length > 0) {
+      const names = added.map((tid) => {
+        const match = grant?.available.find((a) => a.team_id === tid);
+        return match ? `${match.team} (as ${match.user})` : tid;
+      });
+      const ok = await confirmOutward({
+        verb: 'Grant Slack access',
+        title: 'Let this agent act as you in Slack?',
+        danger: true,
+        where: names.join(', '),
+        what: 'Read your Slack channels and DMs, search messages, mark messages unread, and draft posts as you (every post still asks you first).',
+        who: 'Actions appear under your own Slack identity in the workspace(s) above.',
+      });
+      if (!ok || id !== agentId) return;
+    }
     saving = true;
     try {
-      grant = await api.put<PersonalAgentSlackGrant>(`/personal-agents/${encodeURIComponent(agentId)}/slack-as-me`, { teams: picked });
-      picked = [...grant.teams];
+      const updated = await api.put<PersonalAgentSlackGrant>(`/personal-agents/${encodeURIComponent(id)}/slack-as-me`, { teams: nextTeams });
+      if (id !== agentId) return;
+      grant = updated;
+      picked = [...updated.teams];
       toasts.success(picked.length ? 'This agent can now act as you in Slack' : 'This agent can no longer act as you in Slack');
     } catch (e) {
-      toasts.error('Couldn’t save the Slack permission', loadErrorText(e));
+      if (id === agentId) toasts.error('Couldn’t save the Slack permission', loadErrorText(e));
     } finally {
-      saving = false;
+      if (id === agentId) saving = false;
     }
   }
 </script>

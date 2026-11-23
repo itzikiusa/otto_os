@@ -18,6 +18,48 @@
 export type Gen3dKind = 'text' | 'image';
 export type Gen3dProviderId = 'local-blender' | 'tripo' | 'meshy';
 export type Gen3dQuality = 'draft' | 'standard';
+export type Media3dStage = 'generate' | 'gameready' | 'rig' | 'animate';
+
+export const HUNYUAN_TERRITORY_WARNING =
+  'Territory restriction: Tencent Hunyuan3D license excludes the EU, UK, and South Korea (including use of outputs).';
+
+export interface ProviderSelectionCandidate {
+  id: string;
+  kind: string;
+  enabled: boolean;
+  ready: boolean;
+  license_warning?: string | null;
+}
+
+/** Return an explicit license/territory warning for a 3D provider, if any. */
+export function licenseWarningFor(p: Pick<ProviderSelectionCandidate, 'id' | 'kind' | 'license_warning'>): string | null {
+  if (p.license_warning?.trim()) return p.license_warning.trim();
+  if (p.kind === 'hunyuan3d_omni' || p.id === 'hunyuan3d-omni') return HUNYUAN_TERRITORY_WARNING;
+  return null;
+}
+
+export const OTTO_FORGE_ID = 'otto-forge';
+
+/** Otto Forge (local) is THE 3D provider: the Generate dialog and the provider
+ *  manager show it plus any other provider the user has set up (enabled and
+ *  ready); every other entry waits behind a closed "Advanced" disclosure. */
+export function split3dProviders<P extends ProviderSelectionCandidate>(providers: readonly P[]): { shown: P[]; advanced: P[] } {
+  const isSetUp = (p: P) => p.id === OTTO_FORGE_ID || (p.enabled && p.ready);
+  const forge = providers.filter((p) => p.id === OTTO_FORGE_ID);
+  return { shown: [...forge, ...providers.filter((p) => p.id !== OTTO_FORGE_ID && isSetUp(p))], advanced: providers.filter((p) => !isSetUp(p)) };
+}
+
+/** Pick the safest ready 3D provider as default: NEVER auto-selects Hunyuan3D-Omni
+ *  (due to EU/UK/KR territory restrictions). Falls back to Otto Forge when none is
+ *  ready, so the dialog says how to install it. */
+export function pickDefault3dProvider(
+  providers: readonly ProviderSelectionCandidate[],
+  fallbackId = OTTO_FORGE_ID,
+): string {
+  const ready = providers.filter((p) => p.enabled && p.ready);
+  const unrestricted = ready.find((p) => p.kind !== 'hunyuan3d_omni' && p.id !== 'hunyuan3d-omni');
+  return unrestricted?.id ?? fallbackId;
+}
 
 export interface Gen3dProvider {
   id: Gen3dProviderId;

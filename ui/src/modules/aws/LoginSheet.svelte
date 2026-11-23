@@ -7,6 +7,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import { awsApi } from '../../lib/api/aws';
+  import { awsLoadText } from './loadText';
   import { aws } from '../../lib/stores/aws.svelte';
   import { toasts } from '../../lib/toast.svelte';
 
@@ -27,6 +28,7 @@
     if (closed) return;
     try {
       const r = await awsApi.test(accountId);
+      if (closed) return;
       if (r.ok) {
         done = true;
         lastMsg = `Signed in${r.identity ? ` as ${r.identity.arn}` : ''}.`;
@@ -39,8 +41,10 @@
       }
       lastMsg = r.login_required ? 'Still waiting for sign-in…' : r.message;
     } catch (e) {
-      lastMsg = e instanceof Error ? e.message : String(e);
+      if (closed) return;
+      lastMsg = awsLoadText(e);
     }
+    if (closed) return;
     timer = setTimeout(() => void poll(), 3000);
   }
 

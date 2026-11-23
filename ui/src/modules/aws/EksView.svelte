@@ -11,6 +11,7 @@
   // row) and navigates to `#/kubernetes/<clusterId>`.
   import { untrack } from 'svelte';
   import { aws } from '../../lib/stores/aws.svelte';
+  import { k8s } from '../../lib/stores/k8s.svelte';
   import { awsApi, isLoginRequired } from '../../lib/api/aws';
   import { auth } from '../../lib/stores/auth.svelte';
   import { router } from '../../lib/router.svelte';
@@ -30,7 +31,8 @@
   import { ALL_REGIONS } from '../../lib/api/aws';
   import { fmtAgo, fmtDate, awsErrorText } from './util';
   import { awsLoadText } from './loadText';
-  import type { AwsAccount, EksClusterDetail, EksClusterSummary } from '../../lib/api/types';
+  import { findMatchingK8sCluster } from './crossLinks';
+  import type { AwsAccount, EksClusterDetail, EksClusterSummary, K8sCluster } from '../../lib/api/types';
 
   interface Props {
     account: AwsAccount;
@@ -39,7 +41,14 @@
   let { account, onsignin }: Props = $props();
 
   $effect(() => { void resourceAccess.load('aws_account', account.id); });
+  $effect(() => { if (!k8s.clustersLoaded) void k8s.loadClusters(); });
   const canImport = $derived(resourceAccess.can('aws_account', account.id, 'eks_import', 'aws_eks', 'edit') && auth.isRoot);
+  function matchedK8s(c: EksClusterSummary): K8sCluster | null {
+    return findMatchingK8sCluster(c, account.id, rowRegion(c), k8s.clusters);
+  }
+  function jumpToK8s(clusterId: string): void {
+    router.go(`kubernetes/${encodeURIComponent(clusterId)}`);
+  }
   // The view is remounted per account (AwsPage {#key}s on account+service), so
   // seeding the region from the initial account is intentional.
   // svelte-ignore state_referenced_locally
@@ -111,8 +120,9 @@
     importing = c.name;
     try {
       const k = await awsApi.eksImport(account.id, c.name, {}, rowRegion(c));
+      void k8s.loadClusters();
       toasts.success('Cluster imported', k.name);
-      router.go(`kubernetes/${k.id}`);
+      jumpToK8s(k.id);
     } catch (e) {
       toastError('Couldn’t import', e);
     } finally {
@@ -130,11 +140,16 @@
   }
 
   function menu(e: MouseEvent | KeyboardEvent, c: EksClusterSummary): void {
+    const match = matchedK8s(c);
     ctxMenu.show(e, [
       { label: 'Details', icon: 'info', action: () => void openDetail(c) },
       ...(c.arn ? [{ label: 'Copy ARN', icon: 'copy', action: () => void copy(c.arn!, 'ARN') }] : []),
       ...(c.endpoint ? [{ label: 'Copy endpoint', icon: 'copy', action: () => void copy(c.endpoint!, 'endpoint') }] : []),
-      ...(canImport ? [{ separator: true }, { label: 'Open in Kubernetes…', icon: 'helm', action: () => void openInK8s(c) }] : []),
+      ...(match
+        ? [{ separator: true }, { label: 'Open in Kubernetes', icon: 'helm', action: () => jumpToK8s(match.id) }]
+        : canImport
+          ? [{ separator: true }, { label: 'Import into Kubernetes…', icon: 'helm', action: () => void openInK8s(c) }]
+          : []),
     ]);
   }
 
@@ -171,6 +186,7 @@
       <thead><tr><th>Cluster</th>{#if allRegions}<th>Region</th>{/if}<th>Status</th><th>Version</th><th class="hide-sm">Endpoint</th><th class="hide-sm">Created</th><th class="act"></th></tr></thead>
       <tbody>
         {#each shown as c (`${c.region ?? ''}/${c.name}`)}
+          {@const match = matchedK8s(c)}
           <tr use:rowMenu class="trow" tabindex="0" onclick={() => void openDetail(c)} onkeydown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); void openDetail(c); } }} oncontextmenu={(e) => menu(e, c)}>
             <td class="strong"><Icon name="helm" size={13} /> {c.name}</td>
             {#if allRegions}<td class="mono">{c.region ?? '—'}</td>{/if}
@@ -179,9 +195,13 @@
             <td class="mono dim hide-sm" title={c.endpoint ?? ''}>{c.endpoint ?? '—'}</td>
             <td class="dim hide-sm" title={fmtDate(c.created_at)}>{fmtAgo(c.created_at)}</td>
             <td class="act">
-              {#if canImport}
-                <button class="btn small" onclick={(e) => { e.stopPropagation(); void openInK8s(c); }} disabled={importing === c.name}>
-                  <Icon name="helm" size={12} /> {importing === c.name ? 'Importing…' : 'Open in Kubernetes'}
+              {#if match}
+                <button class="btn small primary" onclick={(e) => { e.stopPropagation(); jumpToK8s(match.id); }} title="Jump directly to this cluster in the Kubernetes console">
+                  <Icon name="helm" size={12} /> Open in Kubernetes
+                </button>
+              {:else if canImport}
+                <button class="btn small" onclick={(e) => { e.stopPropagation(); void openInK8s(c); }} disabled={importing === c.name} title="Import this EKS cluster’s kubeconfig into the Kubernetes console">
+                  <Icon name="helm" size={12} /> {importing === c.name ? 'Importing…' : 'Import into Kubernetes'}
                 </button>
               {/if}
             </td>
@@ -194,6 +214,7 @@
 
 {#if detail}
   {@const d = detail}
+  {@const detailMatch = matchedK8s(d.c)}
   <Modal title={d.c.name} width={820} onclose={() => (detail = null)}>
     <div class="dt">
       <div class="dt-top">
@@ -201,9 +222,12 @@
         <span class="mono">v{d.c.version ?? '?'}</span>
         <span class="mono dim ell" title={d.c.arn ?? ''}>{d.c.arn ?? ''}</span>
         <button class="btn small" onclick={() => router.go(`aws/${account.id}/logs/${encodeURIComponent(`/aws/eks/${d.c.name}/cluster`)}/${encodeURIComponent(rowRegion(d.c))}`)} title="Open the control-plane log group in CloudWatch Logs (needs control-plane logging enabled on the cluster)"><Icon name="text" size={12} /> Control-plane logs</button>
-        {#if canImport}
+        {#if detailMatch}
           <span class="spacer"></span>
-          <button class="btn primary small" onclick={() => void openInK8s(d.c)} disabled={importing === d.c.name}><Icon name="helm" size={12} /> Open in Kubernetes</button>
+          <button class="btn primary small" onclick={() => { detail = null; jumpToK8s(detailMatch.id); }}><Icon name="helm" size={12} /> Open in Kubernetes</button>
+        {:else if canImport}
+          <span class="spacer"></span>
+          <button class="btn primary small" onclick={() => void openInK8s(d.c)} disabled={importing === d.c.name}><Icon name="helm" size={12} /> {importing === d.c.name ? 'Importing…' : 'Import into Kubernetes'}</button>
         {/if}
       </div>
       <h3>Node groups</h3>

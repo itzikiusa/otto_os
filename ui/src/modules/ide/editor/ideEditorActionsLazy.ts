@@ -1,10 +1,12 @@
 // Lazy-loaded tab context menus, code-dive (⌘B / ⌘⌥B) resolution, and Git blame
 // fetching for `IdeTabBar` and `ideEditorStoreBridge`.
 
+import type { IdeLspJumpTarget } from '../../../lib/components/cm-ide-lsp-dive';
 import { api } from '../../../lib/api/client';
 import { gitApi } from '../../../lib/api/git';
 import type { BlameLine, IdeGitBaseResp } from '../../../lib/api/types';
 import { copyWithToast } from '../../../lib/clipboard';
+import { toasts } from '../../../lib/toast.svelte';
 import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
 import { isBroadNonProjectRootClient, normalizeMacPrivatePath } from '../../../lib/fileUri';
 import { ideGit } from '../git/ideGitController.svelte';
@@ -117,7 +119,7 @@ function isImportBindingLine(lineText: string): boolean {
 export async function runPerformIdeDive(
   mode: 'definition' | 'implementation',
   fromPath: string,
-  target: { path?: string; line: number; column: number; symbol?: string; originLine?: number; originColumn?: number },
+  target: IdeLspJumpTarget,
   content: string,
 ): Promise<void> {
   const originLine = target.originLine ?? (ide.cursorInfo.line || target.line);
@@ -131,7 +133,7 @@ export async function runPerformIdeDive(
     if (mode === 'definition' && sameFile && isImportBindingLine(destLineText)) {
       sameFileImportFallback = { path: target.path, line: target.line, column: target.column };
     } else {
-      await ide.openFile(target.path, { line: target.line, col: target.column, preview: false });
+      await ide.openFile(target.path, { line: target.line, col: target.column, preview: false, projectScoped: true });
       pushIdeNavLocation(target.path, target.line, target.column);
       return;
     }
@@ -140,13 +142,14 @@ export async function runPerformIdeDive(
   if (mode === 'definition') {
     const localHit = resolveLocalFastDive(fromPath, ide.target.root, content, originLine, target.symbol);
     if (localHit) {
-      await ide.openFile(localHit.path, { line: localHit.line, col: localHit.column, preview: false });
+      await ide.openFile(localHit.path, { line: localHit.line, col: localHit.column, preview: false, projectScoped: true });
       pushIdeNavLocation(localHit.path, localHit.line, localHit.column);
       return;
     }
   }
 
   const endpoint = mode === 'implementation' ? '/ide/lsp/implementation' : '/ide/lsp/definition';
+  let lookupError: string | undefined;
   try {
     const resp = await api.post<{ symbol: string; locations: IdeReferenceLocation[] }>(endpoint, {
       target: { ...ide.targetPayload, additional_roots: getIdeProjectFolders().slice(1) },
@@ -155,7 +158,7 @@ export async function runPerformIdeDive(
     const locs = resp.locations ?? [];
     if (locs.length === 1) {
       const hit = locs[0];
-      await ide.openFile(hit.path, { line: hit.line, col: hit.column, preview: false });
+      await ide.openFile(hit.path, { line: hit.line, col: hit.column, preview: false, projectScoped: true });
       pushIdeNavLocation(hit.path, hit.line, hit.column);
       return;
     }
@@ -165,23 +168,41 @@ export async function runPerformIdeDive(
         hint: loc.preview || ide.relativePath(loc.path),
         icon: 'file' as const,
         action: () => {
-          void ide.openFile(loc.path, { line: loc.line, col: loc.column, preview: false });
+          void ide.openFile(loc.path, { line: loc.line, col: loc.column, preview: false, projectScoped: true });
           pushIdeNavLocation(loc.path, loc.line, loc.column);
         },
       }));
       const anchor = document.querySelector<HTMLElement>('[data-testid="ide-editor-area"]');
       if (anchor) ctxMenu.showAt(anchor, items, { align: 'start' });
-      else await ide.openFile(locs[0].path, { line: locs[0].line, col: locs[0].column, preview: false });
+      else await ide.openFile(locs[0].path, { line: locs[0].line, col: locs[0].column, preview: false, projectScoped: true });
       return;
     }
-  } catch { /* fall back below */ }
+  } catch (error) {
+    lookupError = error instanceof Error ? error.message : 'The project lookup failed.';
+  }
 
   if (sameFileImportFallback) {
-    await ide.openFile(sameFileImportFallback.path, { line: sameFileImportFallback.line, col: sameFileImportFallback.column, preview: false });
+    await ide.openFile(sameFileImportFallback.path, { line: sameFileImportFallback.line, col: sameFileImportFallback.column, preview: false, projectScoped: true });
     pushIdeNavLocation(sameFileImportFallback.path, sameFileImportFallback.line, sameFileImportFallback.column);
     return;
   }
-  await ide.findReferences(fromPath, originLine, originCol, target.symbol);
+  const where = target.symbol ? ` for ${target.symbol}` : ' at the cursor';
+  if (target.languageServerState === 'unavailable') {
+    toasts.info(`No ${mode} found${where}`, 'The language server could not start. Check Plugins & Language Servers.');
+    return;
+  }
+  if (lookupError !== undefined) {
+    toasts.error(`Couldn’t look up the ${mode}${where}`, lookupError);
+    return;
+  }
+  let detail: string | undefined;
+  if (ide.target.kind === 'local') {
+    const { getLspCapabilities, lspLanguageIdFor, normalizeIdeLspServerLang } = await import('../../../lib/components/cm-editor-ondemand');
+    const lang = lspLanguageIdFor(fromPath, true);
+    const server = lang && (await getLspCapabilities())?.servers.find((s) => s.lang === normalizeIdeLspServerLang(lang));
+    if (server && !server.available) detail = `${server.command} is unavailable. Check Plugins & Language Servers.`;
+  }
+  toasts.info(`No ${mode} found${where}`, detail);
 }
 
 type RawBlameEntry = Partial<BlameLine> & {

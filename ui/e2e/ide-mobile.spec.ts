@@ -342,3 +342,21 @@ test.describe('IDE on phones and tablets', () => {
     }
   });
 });
+
+test('IDE dock on a phone: the "More tabs" chevron stays on the tab row when the dock controls wrap', async ({ page }, info) => {
+  test.skip(info.project.name !== 'iphone-portrait', 'one narrow phone is enough');
+  // A folded Galaxy Z Fold's 280 px cover screen: the four dock tabs overflow it even on a row of their own.
+  await page.setViewportSize({ width: 280, height: 653 });
+  await bootIde(page);
+  await page.getByTestId('ide-stack-tab-tools').click();
+  const dock = page.getByTestId('ide-bottom-dock');
+  const list = dock.getByTestId('ide-dock-tabs');
+  await expect(list).toBeVisible({ timeout: 20_000 });
+  const more = dock.getByTestId('tabs-more');
+  await expect(more, 'the dock tabs overflow a phone').toBeVisible();
+  await settle(page);
+  const l = (await list.boundingBox())!;
+  const m = (await more.boundingBox())!;
+  expect(m.y + m.height / 2, 'the chevron sits beside the tabs it scrolls').toBeGreaterThan(l.y);
+  expect(m.y + m.height / 2, 'the chevron sits beside the tabs it scrolls').toBeLessThan(l.y + l.height);
+});

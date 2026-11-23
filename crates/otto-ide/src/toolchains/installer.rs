@@ -27,21 +27,18 @@ pub(super) struct InstallerProcessGroupGuard {
 }
 
 impl Drop for InstallerProcessGroupGuard {
-    #[allow(clippy::disallowed_methods)] // synchronous Drop safeguard against orphan installer children
     fn drop(&mut self) {
         if !self.disarmed {
             #[cfg(unix)]
             if let Some(pid) = self.pid {
-                let _ = std::process::Command::new("/bin/kill")
-                    .args(["-KILL", &format!("-{pid}")])
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
+                crate::lsp_host::pool_spawn::kill_process_group_sync(pid);
             }
         }
     }
 }
+
+pub(crate) const MAX_TOOLCHAIN_DOWNLOAD_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_COMPANION_SHA_BYTES: usize = 4096;
 
 pub(super) async fn download_https_to_file(
     mgr: &ToolchainManager,
@@ -50,6 +47,27 @@ pub(super) async fn download_https_to_file(
     dest: &Path,
     expected_sha256: Option<&str>,
     base_pct: u8,
+) -> std::result::Result<(), String> {
+    download_https_to_file_capped(
+        mgr,
+        job_id,
+        url,
+        dest,
+        expected_sha256,
+        base_pct,
+        MAX_TOOLCHAIN_DOWNLOAD_BYTES,
+    )
+    .await
+}
+
+pub(super) async fn download_https_to_file_capped(
+    mgr: &ToolchainManager,
+    job_id: &str,
+    url: &str,
+    dest: &Path,
+    expected_sha256: Option<&str>,
+    base_pct: u8,
+    max_bytes: u64,
 ) -> std::result::Result<(), String> {
     let client = if mgr.allows_test_loopback() && url.starts_with("http://127.0.0.1:") {
         reqwest::Client::builder()
@@ -80,6 +98,11 @@ pub(super) async fn download_https_to_file(
         return Err(format!("download HTTP {} from {url}", resp.status()));
     }
     let total = resp.content_length().unwrap_or(0);
+    if total > max_bytes {
+        return Err(format!(
+            "download Content-Length ({total} bytes) exceeds {max_bytes} byte limit ({url})"
+        ));
+    }
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -94,9 +117,15 @@ pub(super) async fn download_https_to_file(
 
     while let Some(chunk) = stream.next().await {
         let bytes = chunk.map_err(|e| format!("stream error: {e}"))?;
+        let next_received = received.saturating_add(bytes.len() as u64);
+        if next_received > max_bytes {
+            drop(file);
+            let _ = tokio::fs::remove_file(dest).await;
+            return Err(format!("download exceeded {max_bytes} byte limit ({url})"));
+        }
         hasher.update(&bytes);
         file.write_all(&bytes).await.map_err(|e| e.to_string())?;
-        received += bytes.len() as u64;
+        received = next_received;
         if total > 0 {
             let pct = (base_pct + ((received as f64 / total as f64) * 35.0) as u8).min(90);
             if pct >= last_pct + 10 {
@@ -422,6 +451,15 @@ pub(super) async fn install_local_sdk(
             run_local_cmd(mgr, job_id, 58, &jq, &["--version"], &[]).await?;
             Ok(jq.to_string_lossy().into_owned())
         }
+        EcosystemKind::Ios => {
+            Err("Install Xcode from the Mac App Store, then run `xcode-select --install` and `xcodebuild -downloadPlatform iOS`.".into())
+        }
+        EcosystemKind::Android => {
+            Err("Install Android SDK via Android Studio or `brew install --cask android-commandlinetools`, then register its path here.".into())
+        }
+        EcosystemKind::Flutter => {
+            Err("Install Flutter SDK from https://docs.flutter.dev or `brew install --cask flutter`, then register its path here.".into())
+        }
     }
 }
 
@@ -447,11 +485,18 @@ pub(super) async fn fetch_companion_sha256(
     } else {
         return None;
     };
-    let resp = client.get(&sha_url).send().await.ok()?;
+    let mut resp = client.get(&sha_url).send().await.ok()?;
     if !resp.status().is_success() {
         return None;
     }
-    let body = resp.text().await.ok()?;
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp.chunk().await.ok()? {
+        if buf.len().saturating_add(chunk.len()) > MAX_COMPANION_SHA_BYTES {
+            return None;
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    let body = String::from_utf8(buf).ok()?;
     let first_tok = body.split_whitespace().next()?.trim();
     (first_tok.len() == 64 && first_tok.chars().all(|c| c.is_ascii_hexdigit()))
         .then(|| first_tok.to_ascii_lowercase())

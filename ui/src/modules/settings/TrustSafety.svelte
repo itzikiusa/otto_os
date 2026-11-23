@@ -21,6 +21,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import { auth } from '../../lib/stores/auth.svelte';
   import SecretsStore from './SecretsStore.svelte';
+  import SecurityPostureCard from './SecurityPostureCard.svelte';
   import { daemonStatus } from './daemonStatus.svelte';
 
   const PAGE_SIZE = 100;
@@ -255,7 +256,7 @@
       <LoadState what="the security posture" error={postureError} empty variant="compact" onretry={() => void loadPosture()} />
     {:else if posture}
       <div class="cards">
-        <div class="card">
+        <div class="card posture-card">
           <div class="card-label">Network listener</div>
           <div class="card-value">
             {#if posture.network_listener}
@@ -272,12 +273,12 @@
             {/if}
           </div>
         </div>
-        <div class="card">
+        <div class="card posture-card">
           <div class="card-label">Binding</div>
           <div class="card-value mono-val">{posture.loopback_only ? '127.0.0.1' : '0.0.0.0'}</div>
           <div class="card-note">{posture.loopback_only ? 'Loopback only' : 'All network interfaces'}</div>
         </div>
-        <div class="card">
+        <div class="card posture-card">
           <div class="card-label">Active API tokens</div>
           <div class="card-value num">{posture.active_api_tokens}</div>
           <div class="card-note">
@@ -286,6 +287,12 @@
           </div>
         </div>
       </div>
+      <SecurityPostureCard
+        {posture}
+        loading={postureLoading}
+        error={postureError}
+        onrefresh={() => void loadPosture()}
+      />
     {/if}
   </section>
 
@@ -434,7 +441,7 @@
     grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
     gap: 12px;
   }
-  .card {
+  .posture-card {
     min-width: 0;
     padding: 12px 14px;
     display: flex;

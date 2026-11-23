@@ -38,6 +38,7 @@
   <div class="frame-stage" class:dark={scheme === 'dark'}>
     <div
       class="device {device}"
+      dir="ltr"
       style={`--dev-w:${size.w}px;--dev-h:${size.h}px`}
       title={size.label}
     >
@@ -103,7 +104,7 @@
     content: '';
     position: absolute;
     top: -20px;
-    left: 12px;
+    inset-inline-start: 12px;
     width: 12px;
     height: 12px;
     border-radius: 50%;
@@ -113,7 +114,7 @@
   .notch {
     position: absolute;
     top: 8px;
-    left: 50%;
+    inset-inline-start: 50%;
     transform: translateX(-50%);
     width: 120px;
     height: 30px;

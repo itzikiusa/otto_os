@@ -204,4 +204,15 @@
     font-size: var(--fs-s);
     color: var(--text-dim);
   }
+  /* Fingers: state pills and the add / options buttons are 40 px targets. */
+  @media (pointer: coarse) {
+    .seg button,
+    .states :global(.icon-btn) {
+      min-block-size: 40px;
+      min-inline-size: 40px;
+    }
+    .seg button {
+      padding-inline: 14px;
+    }
+  }
 </style>

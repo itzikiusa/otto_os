@@ -689,10 +689,13 @@
   });
 
   function loadEditorH(hasResult: boolean): number {
-    if (typeof localStorage === 'undefined') return defaultEditorH(hasResult);
-    const v = Number(localStorage.getItem('db.editorH'));
     if (!hasResult) return defaultEditorH(false);
-    return Number.isFinite(v) && v > 80 ? Math.min(v, maxEditorH()) : defaultEditorH(true);
+    try {
+      const v = Number(localStorage.getItem('db.editorH'));
+      return Number.isFinite(v) && v > 80 ? Math.min(v, maxEditorH()) : defaultEditorH(true);
+    } catch {
+      return defaultEditorH(true);
+    }
   }
   // Tallest the editor may grow to — viewport-relative so it can take most of the
   // pane on big screens, while always reserving room for the results grid so it
@@ -733,26 +736,20 @@
       /* ignore */
     }
   }
+  let stopEditorResize: (() => void) | null = null;
+  onDestroy(() => stopEditorResize?.());
   function startResize(e: PointerEvent): void {
-    e.preventDefault();
+    e.preventDefault(); stopEditorResize?.();
     resizing = true;
-    const startY = e.clientY;
-    const startH = editorH;
-    const onMove = (ev: PointerEvent): void => {
-      editorH = Math.max(100, Math.min(maxEditorH(), startH + (ev.clientY - startY)));
-    };
+    const startY = e.clientY, startH = editorH;
+    const onMove = (ev: PointerEvent): void => { editorH = Math.max(100, Math.min(maxEditorH(), startH + (ev.clientY - startY))); };
     const onUp = (): void => {
-      resizing = false;
-      persistEditorH();
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      window.removeEventListener('pointercancel', onUp);
+      resizing = false; persistEditorH();
+      window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp); window.removeEventListener('pointercancel', onUp);
+      if (stopEditorResize === onUp) stopEditorResize = null;
     };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-    // A cancelled gesture (system gesture, focus loss) ends the drag too —
-    // else pointermove stays attached and the pane follows the cursor.
-    window.addEventListener('pointercancel', onUp);
+    stopEditorResize = onUp;
+    window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', onUp); window.addEventListener('pointercancel', onUp);
   }
   function setEditorH(h: number): void {
     editorH = h;
@@ -1069,26 +1066,41 @@
       window.removeEventListener('keydown', onKey);
     };
   });
-  // Clamp the popover into the viewport: never off the right/left edge, and
-  // its height capped to the room below its top so the list scrolls instead
-  // of running off the bottom (AGENTS.md "Floating UI must survive long content").
+  // Clamp the popover into the viewport (both X and Y, flipping upward when
+  // short windows leave little room below) and re-clamp on resize.
   $effect(() => {
     const el = kbdPopEl;
     if (!shortcutsOpen || !el) return;
-    el.style.transform = '';
-    const vw = window.innerWidth;
-    el.style.maxWidth = `${Math.max(160, vw - 16)}px`;
-    el.style.maxHeight = `${Math.max(120, window.innerHeight - el.getBoundingClientRect().top - 8)}px`;
-    const r = el.getBoundingClientRect();
-    let dx = 0;
-    if (r.right > vw - 8) dx = vw - 8 - r.right;
-    if (r.left + dx < 8) dx = 8 - r.left;
-    if (dx !== 0) el.style.transform = `translateX(${dx}px)`;
+    const clamp = (): void => {
+      el.style.transform = '';
+      const pad = 8, vw = window.innerWidth, vh = window.innerHeight;
+      el.style.maxWidth = `${Math.max(160, vw - pad * 2)}px`;
+      const base = el.getBoundingClientRect();
+      const below = vh - base.top - pad;
+      let dx = 0, dy = 0;
+      if (below < 140 && base.top > below) {
+        const maxH = Math.max(80, Math.min(vh - pad * 2, base.top - pad * 2));
+        el.style.maxHeight = `${maxH}px`;
+        const h = Math.min(el.scrollHeight, maxH);
+        dy = Math.max(pad - base.top, -(h + (kbdWrapEl?.offsetHeight ?? 24) + 12));
+      } else {
+        el.style.maxHeight = `${Math.max(80, Math.min(vh - pad * 2, below))}px`;
+      }
+      const r = el.getBoundingClientRect();
+      if (r.right > vw - pad) dx = vw - pad - r.right;
+      if (r.left + dx < pad) dx = pad - r.left;
+      if (r.bottom + dy > vh - pad) dy -= (r.bottom + dy) - (vh - pad);
+      if (r.top + dy < pad) dy = pad - r.top;
+      if (dx !== 0 || dy !== 0) el.style.transform = `translate(${dx}px, ${dy}px)`;
+    };
+    clamp();
+    window.addEventListener('resize', clamp);
+    return () => window.removeEventListener('resize', clamp);
   });
 </script>
 
 <div class="query-editor" bind:this={rootEl}>
-  <div class="qe-tabs scroll-thin" role="tablist" aria-label="Query tabs">
+  <div class="qe-tabs scroll-thin" class:single={database.tabs.length === 1} role="tablist" aria-label="Query tabs"><!-- ui-guards: allow — closable/renamable document tabs (inline rename, pin, close per tab): <Tabs> has no per-tab slot -->
     {#each database.tabs as t, i (t.id)}
       <!-- The tab and its ✕ are SIBLING buttons in a presentational wrapper (as
            in BrokersPage / TabBar), so the close control isn't nested inside an
@@ -1193,7 +1205,7 @@
   <div class="qe-toolbar">
     <div class="qe-actions">
     {#if tab.running}
-      <button class="btn small danger qe-stop" onclick={() => database.abortQuery(undefined, { report: true })} title="Stop the running query">
+      <button class="btn small qe-stop" onclick={() => database.abortQuery(undefined, { report: true })} title="Stop the running query">
         <Icon name="stop" size={12} />
         Stop
       </button>
@@ -1409,7 +1421,7 @@
           onclick={() => void probeMongosh()}
           title="Probe the daemon for the mongosh CLI again"
         >
-          <Icon name="refresh" size={12} /> Retry
+          <Icon name="refresh" size={12} /> Check again
         </button>
       {/if}
     </div>
@@ -1671,6 +1683,10 @@
     background: var(--accent);
     animation: otto-pulse 1.4s ease-in-out infinite;
   }
+  @media (prefers-reduced-motion: reduce) {
+    .qe-tab-dot.running { animation: none; }
+  }
+  .qe-tabs.single { padding-block: 0; min-height: 24px; }
   .qe-tab-dot.error {
     background: var(--status-exited);
   }

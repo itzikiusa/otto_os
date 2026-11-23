@@ -70,6 +70,8 @@ export const SETTINGS_SECTIONS = [
   { id: 'session-names', label: 'Session names', group: 'general', keywords: 'theme auto name rename agent session', scope: 'me', settings: ['Active theme', 'Custom themes', 'Theme name'] },
   { id: 'notifications', label: 'Notifications', group: 'general', keywords: 'alerts credential expiry warnings native macos session finished waiting banner', scope: 'everyone', settings: ['Alerts', 'Channel notifications', 'Credential expiry', 'Warn before a credential expires'] },
   { id: 'snipping', label: 'Snipping', group: 'general', keywords: 'snip screenshot capture annotate clipboard shortcut', scope: 'device', settings: ['Snip shortcut', 'Capture shortcut'] },
+  { id: 'clipboard', label: 'Clipboard history', group: 'general', keywords: 'clipboard history paste copy pinned raycast pasteboard shortcut privacy', scope: 'device', settings: ['Clipboard history', 'Pause capture', 'Clear history', 'Shortcut', 'Paste into apps'] },
+  { id: 'keep-awake', label: 'Keep awake', group: 'general', keywords: 'keep awake caffeinate sleep display indefinitely forever shortcut', scope: 'device', settings: ['Shortcut'] },
   { id: 'browser', label: 'Browser', group: 'general', keywords: 'live tabs engine lightpanda web view reader', gate: { feature: 'browser', level: 'view' }, scope: 'device', scopeNote: 'The renderer is per device; the browser engine and downloads are daemon-wide.', settings: ['Live tabs on this device', 'Browser beside a session', 'Browser engine', 'Downloads from web pages'] },
   { id: 'tokens', label: 'Personal access tokens', group: 'general', keywords: 'api token pat key cli script ci', scope: 'me', settings: ['New token', 'Your tokens', 'Using a token'] },
   // ── Integrations ──

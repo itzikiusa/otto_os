@@ -58,35 +58,38 @@ pub(crate) fn sweep_idle_jars(map: &mut JarMap, now: Instant) {
 /// caller's pre-flight check switches under the same flag.
 /// Idle entries are dropped after [`TUNNEL_IDLE_TTL`] (S6-310), which also
 /// releases their hold on the scope's cookie jar.
-pub(crate) fn http_client(wid: &Id, allow_local: bool) -> reqwest::Client {
+pub(crate) fn http_client(wid: &Id, allow_local: bool) -> Result<reqwest::Client, String> {
     static CLIENTS: OnceLock<StdMutex<HashMap<String, (reqwest::Client, Instant)>>> =
         OnceLock::new();
     let clients = CLIENTS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let key = format!("{wid}|{allow_local}");
+    {
+        let mut map = clients.lock().unwrap_or_else(|e| e.into_inner());
+        map.retain(|_, (_, used)| used.elapsed() < TUNNEL_IDLE_TTL);
+        if let Some((client, used)) = map.get_mut(&key) {
+            *used = Instant::now();
+            return Ok(client.clone());
+        }
+    }
+    let builder = if allow_local {
+        // Private targets allowed; metadata + the daemon's own
+        // listener still refused, at connect time and per hop.
+        otto_netguard::allow_local_client_builder()
+    } else {
+        // SSRF guard: the guarded resolver re-vets every address at
+        // CONNECT time (a DNS-rebinding answer can't swap in 127.0.0.1
+        // after the pre-flight check), and each redirect hop is capped
+        // + re-validated.
+        otto_netguard::guarded_client_builder()
+    };
+    let client = builder
+        .user_agent("Otto-ApiClient/1.0")
+        .cookie_provider(cookie_jar(wid))
+        .build()
+        .map_err(|e| format!("couldn't build guarded HTTP client ({e})"))?;
     let mut map = clients.lock().unwrap_or_else(|e| e.into_inner());
-    map.retain(|_, (_, used)| used.elapsed() < TUNNEL_IDLE_TTL);
-    let (client, used) = map
-        .entry(format!("{wid}|{allow_local}"))
-        .or_insert_with(|| {
-            let builder = if allow_local {
-                // Private targets allowed; metadata + the daemon's own
-                // listener still refused, at connect time and per hop.
-                otto_netguard::allow_local_client_builder()
-            } else {
-                // SSRF guard: the guarded resolver re-vets every address at
-                // CONNECT time (a DNS-rebinding answer can't swap in 127.0.0.1
-                // after the pre-flight check), and each redirect hop is capped
-                // + re-validated.
-                otto_netguard::guarded_client_builder()
-            };
-            let client = builder
-                .user_agent("Otto-ApiClient/1.0")
-                .cookie_provider(cookie_jar(wid))
-                .build()
-                .unwrap_or_default();
-            (client, Instant::now())
-        });
-    *used = Instant::now();
-    client.clone()
+    map.insert(key, (client.clone(), Instant::now()));
+    Ok(client)
 }
 
 /// Workspace opt-in for local/private targets: reads

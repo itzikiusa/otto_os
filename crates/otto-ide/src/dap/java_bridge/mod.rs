@@ -313,7 +313,7 @@ impl JdwpBridgeState {
 async fn run_jdwp_bridge_loop(
     server_io: DuplexStream,
     client: Arc<JdwpClient>,
-    jdwp_rx: &mut mpsc::UnboundedReceiver<Option<Vec<u8>>>,
+    jdwp_rx: &mut mpsc::Receiver<Option<Vec<u8>>>,
     out_rx: &mut mpsc::UnboundedReceiver<(String, String)>,
     target: IdeTargetSpec,
     spec: JavaJdwpBridgeSpec,

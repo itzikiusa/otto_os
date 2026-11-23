@@ -6,6 +6,7 @@
   // syntax-highlighted code. Content is loaded by the store (vault.openFile).
   import { onMount } from 'svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import Icon from '../../lib/components/Icon.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import { formatHtml } from '../../lib/formatHtml';
@@ -29,9 +30,12 @@
   const isLarge = $derived(!isImage && !isPdf && vault.fileSize > RICH_TEXT_MAX);
 
   // .html renders in a sandboxed iframe (mockups/reference views agents drop in
-  // the vault) with a Source toggle. No allow-same-origin: scripts run in an
-  // opaque origin and can't reach the app or the daemon.
+  // the vault) with a Source toggle. Defaults to sandbox="" (scripts off,
+  // matching Product MockupViewer & Design Hall ArtifactStage); an explicit
+  // per-file toggle opts into allow-scripts (still no allow-same-origin).
   const isHtml = $derived(ext === 'html' || ext === 'htm');
+  let allowScripts = $state(false);
+  const htmlSandbox = $derived(allowScripts ? 'allow-scripts' : '');
 
   // .d2 files render as diagrams (WASM, lazy) with a Source toggle — d2 is the
   // preferred format for data-model diagrams (sql_table), so agents drop these
@@ -46,12 +50,16 @@
     d2Svg = null;
     d2Error = null;
     if (!isD2 || isLarge || text == null) return;
-    const id = `vault-d2-file-${++d2Seq}`;
-    void renderD2(id, text, { dark, isStale: () => vault.fileText !== text }).then(({ svg, error }) => {
-      if (vault.fileText !== text) return; // switched files meanwhile
+    const seq = ++d2Seq;
+    const id = `vault-d2-file-${seq}`;
+    void renderD2(id, text, { dark, isStale: () => seq !== d2Seq || vault.fileText !== text }).then(({ svg, error }) => {
+      if (seq !== d2Seq || vault.fileText !== text) return; // superseded by theme switch or file switch
       d2Svg = svg ?? null;
       d2Error = error ?? null;
     });
+    return () => {
+      d2Seq++;
+    };
   });
 
   // Re-render highlighted lines once hljs lazily arrives.
@@ -81,11 +89,21 @@
   });
   /** OpenAPI/D2/HTML: toggle between the rendered view and the raw source. */
   let showRaw = $state(false);
+  let bigFormatTimer: ReturnType<typeof setTimeout> | null = null;
   $effect(() => {
     void path;
     showRaw = false;
+    allowScripts = false;
     bigPretty = null;
     bigPrettyError = '';
+    bigFormatting = false;
+    if (bigFormatTimer) {
+      clearTimeout(bigFormatTimer);
+      bigFormatTimer = null;
+    }
+  });
+  $effect(() => () => {
+    if (bigFormatTimer) clearTimeout(bigFormatTimer);
   });
 
   const prettyJson = $derived(
@@ -209,15 +227,19 @@
   );
   function formatBigJson(): void {
     const text = vault.fileText;
+    const targetPath = path;
     if (text == null || bigFormatting) return;
     bigFormatting = true;
     bigPrettyError = '';
     // Let the button repaint to its "Formatting…" state before we block.
-    setTimeout(() => {
+    if (bigFormatTimer) clearTimeout(bigFormatTimer);
+    bigFormatTimer = setTimeout(() => {
+      bigFormatTimer = null;
+      if (path !== targetPath || vault.fileText !== text) return;
       try {
         bigPretty = JSON.stringify(JSON.parse(text), null, 2);
       } catch (e) {
-        bigPrettyError = e instanceof Error ? e.message : String(e);
+        bigPrettyError = loadErrorText(e);
       } finally {
         bigFormatting = false;
       }
@@ -262,6 +284,12 @@
         {/if}
       {/each}
     </nav>
+    {#if !isLarge && isHtml && !showRaw}
+      <label class="fv-toggle" title="Run scripts inside the sandboxed iframe">
+        <input type="checkbox" bind:checked={allowScripts} />
+        Enable interactivity
+      </label>
+    {/if}
     {#if !isLarge && (openapi || (isD2 && d2Svg) || isHtml)}
       <button class="mode-btn" onclick={() => (showRaw = !showRaw)}>
         <Icon name={showRaw ? 'eye' : 'function'} size={13} />
@@ -270,11 +298,18 @@
     {/if}
   </header>
 
+  {#if !isLarge && isHtml && !showRaw && allowScripts}
+    <div class="fv-warn">
+      <Icon name="info" size={13} />
+      Interactivity is ON — this HTML file’s scripts run inside a sandboxed iframe (no same-origin access). Only enable for files you trust.
+    </div>
+  {/if}
+
   <div class="body">
     {#if vault.fileLoading}
       <LoadState what="the file" loading empty />
     {:else if vault.fileError}
-      <div class="notice err">{vault.fileError}</div>
+      <LoadState what="the file" variant="compact" error={vault.fileError} empty onretry={() => void vault.openFile(path)} />
     {:else if isImage && vault.fileBlobUrl}
       <div class="img-wrap">
         <img src={vault.fileBlobUrl} alt={name} />
@@ -303,8 +338,10 @@
         <div class="notice">Showing the first {BIG_MAX_ROWS.toLocaleString()} lines.</div>
       {/if}
     {:else if isHtml && !showRaw && vault.fileText != null}
-      <iframe class="html-frame" sandbox="allow-scripts" srcdoc={vault.fileText} title={name}
-      ></iframe>
+      {#key htmlSandbox}
+        <iframe class="html-frame" sandbox={htmlSandbox} srcdoc={vault.fileText} title={name}
+        ></iframe>
+      {/key}
     {:else if isD2 && !showRaw && d2Svg}
       <div class="d2-wrap">{@html d2Svg}</div>
     {:else if isD2 && !showRaw && d2Error}
@@ -525,5 +562,29 @@
   }
   .more-rows {
     margin-top: 8px;
+  }
+  .fv-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .fv-toggle input {
+    cursor: pointer;
+  }
+  .fv-warn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    font-size: var(--fs-xs);
+    color: var(--warning);
+    background: var(--warning-soft);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    line-height: 1.4;
   }
 </style>

@@ -151,8 +151,19 @@ fn summarizer_failed(review: &Review) -> bool {
 /// fails it, so nothing is left `running`.
 pub async fn settle_after_restart(reviews: &otto_state::ReviewsRepo) -> Result<Vec<Id>> {
     let mut resume = Vec::new();
+    let mut repo_paths = Vec::new();
     for review in reviews.list_running().await? {
         let id = review.id.clone();
+        if let Ok(Some(ctx)) = reviews.get_run_context(&id).await {
+            if let Some(cwd) = ctx.cwd.as_deref().filter(|s| !s.is_empty()) {
+                let p = std::path::PathBuf::from(cwd);
+                if let Some(parent_repo) = crate::worktree::repo_path_from_worktree(&p).await {
+                    repo_paths.push(parent_repo);
+                } else if tokio::fs::metadata(&p).await.is_ok_and(|m| m.is_dir()) {
+                    repo_paths.push(p);
+                }
+            }
+        }
         let settled = match (on_restart(&review), review.scope_plan) {
             (RestartAction::ResumeSummarizer, Some(mut plan)) => {
                 let n = restart_resumes(&plan) + 1;
@@ -184,6 +195,26 @@ pub async fn settle_after_restart(reviews: &otto_state::ReviewsRepo) -> Result<V
     reviews
         .fail_orphaned_agents("Interrupted by a daemon restart")
         .await?;
+
+    // Sweep orphaned `$TMPDIR/otto-review-wt-*` directories and stale
+    // `otto-review-*` branches / `refs/otto/pr-review/*` refs left behind by
+    // the previous daemon life (never touching any still-active review).
+    let active: std::collections::HashSet<String> = reviews
+        .list_running()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    let swept = crate::worktree::sweep_orphaned_worktrees(&active, &repo_paths).await;
+    if swept.worktrees_removed > 0 || swept.branches_deleted > 0 || swept.refs_deleted > 0 {
+        tracing::info!(
+            worktrees = swept.worktrees_removed,
+            branches = swept.branches_deleted,
+            refs = swept.refs_deleted,
+            "review recovery: swept orphaned PR worktrees and refs"
+        );
+    }
     Ok(resume)
 }
 

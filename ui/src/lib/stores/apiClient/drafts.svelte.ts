@@ -13,6 +13,7 @@ import type { ApiClientStore } from '../apiClient.svelte';
 import {
   blankDraft, draftToExtras, extrasToDraft, FULL_REQUESTS_MAX, historyResponse, requestItem, type ApiDraft,
 } from './model';
+import { newId } from '../../id';
 
 /** The store members this part reads and calls (its whole contract with the façade). */
 export type DraftsHost = Pick<
@@ -123,7 +124,7 @@ export class ApiDrafts {
     if (this.host.fullRequests.get(r.id) !== r) this.cacheFull(r);
     this.placeDraft(extrasToDraft(
       {
-        tabId: crypto.randomUUID(),
+        tabId: newId(),
         requestId: r.id,
         name: r.name,
         kind: 'http',
@@ -274,7 +275,7 @@ export class ApiDrafts {
       saved,
     );
     this.placeDraft({
-      tabId: crypto.randomUUID(),
+      tabId: newId(),
       requestId: null,
       name: '',
       kind: 'http',

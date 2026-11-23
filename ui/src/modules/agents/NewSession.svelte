@@ -2,7 +2,7 @@
   // ⌘T sheet: workspace (current / none), provider (from /meta.providers),
   // title, cwd.
   import Modal from '../../lib/components/Modal.svelte';
-  import { toastError } from '../../lib/toastError';
+  import { toastError } from '../../lib/toastError'; import { loadErrorText } from '../../lib/loadError';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
   import AccountPicker from '../../lib/components/AccountPicker.svelte';
   import NetworkProfilePicker from '../connections/NetworkProfilePicker.svelte';
@@ -399,7 +399,7 @@
           created.push(session.id);
         } catch (error) {
           failed.push(spawn);
-          failures.push(`${spawn.title} (${spawn.provider}): ${error instanceof Error ? error.message : String(error)}`);
+          failures.push(`${spawn.title} (${spawn.provider}): ${loadErrorText(error)}`);
         }
       }
       // Commit outcome before navigation; successful members can never enter a retry.

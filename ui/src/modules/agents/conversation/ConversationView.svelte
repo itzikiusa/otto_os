@@ -83,6 +83,7 @@
     runApprovedPlanImplementation,
     UNAVAILABLE_TRANSCRIPT_COPY,
   } from './conversationMenu';
+  import { copyLoadedTranscriptMarkdown } from './exportMarkdown';
   import {
     bindPanelPointerResize,
     captureFirstTurnAnchor,
@@ -813,6 +814,7 @@
         onToggleSystem: () => transcript.setShowSystem(!showSystem),
         onToggleExpandAll: () => (ctx.expandAll = !ctx.expandAll),
         onOpenAllChanges: openAllChanges,
+        onCopyMarkdown: conv.turns.length > 0 ? () => void copyLoadedTranscriptMarkdown({ title: t?.title ?? null, provider: effectiveProvider, model: t?.model, cwd: t?.cwd ?? ctx.cwd, turns: conv.turns }) : undefined,
         onPrevPrompt: () => jumpPrompt(-1),
         onNextPrompt: () => jumpPrompt(1),
         onJumpLatest: scrollToBottomAll,
@@ -837,10 +839,22 @@
     if (st.duration_ms != null) parts.push(fmtDuration(st.duration_ms));
     return parts.join(' · ');
   });
+  function bindConvKeys(node: HTMLElement): { destroy(): void } {
+    node.addEventListener('keydown', onConvKey);
+    return { destroy: () => node.removeEventListener('keydown', onConvKey) };
+  }
+  function bindScrollTouch(node: HTMLElement): { destroy(): void } {
+    node.tabIndex = 0;
+    const onDown = () => { lastPointer = performance.now(); touched(); };
+    node.addEventListener('pointerdown', onDown);
+    node.addEventListener('wheel', touched, { passive: true });
+    node.addEventListener('touchstart', touched, { passive: true });
+    node.addEventListener('keydown', touched);
+    return { destroy: () => { node.removeEventListener('pointerdown', onDown); node.removeEventListener('wheel', touched); node.removeEventListener('touchstart', touched); node.removeEventListener('keydown', touched); } };
+  }
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="conv" bind:clientWidth={convW} data-session={sessionId} data-ws={workspaceId} data-surface={surface} data-readonly={ctx.readonly} data-loaded={t != null} onkeydown={onConvKey} onfocusin={claimFind} onfocusout={releaseFind}>
+<div class="conv" bind:clientWidth={convW} data-session={sessionId} data-ws={workspaceId} data-surface={surface} data-readonly={ctx.readonly} data-loaded={t != null} use:bindConvKeys onfocusin={claimFind} onfocusout={releaseFind}>
   <ConversationHeader
     bind:this={headRef}
     {surface}
@@ -876,19 +890,11 @@
   <div class="conv-frame">
   <!-- The wheel/touch/key listeners only record that the reader scrolled (so
        the first-mount settle stops re-pinning); they never act on the input. -->
-  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
   <div
     class="conv-list"
     bind:this={listEl}
     onscroll={onScroll}
-    onpointerdown={() => {
-      lastPointer = performance.now();
-      touched();
-    }}
-    onwheel={touched}
-    ontouchstart={touched}
-    onkeydown={touched}
-    tabindex="0"
+    use:bindScrollTouch
     role="region"
     aria-label="Conversation with {agentName}"
   >
@@ -980,7 +986,7 @@
           {/each}
         </div>
       {/if}
-      {#if conv.error}<div class="inline-err" role="alert">{conv.error} <button class="btn small ghost" onclick={() => void conv.load()}>Retry</button></div>{/if}
+      {#if conv.error}<LoadState what="messages" variant="compact" error={conv.error} onretry={() => void conv.load()} />{/if}
     {/if}
     </div>
   </div>
@@ -1128,7 +1134,7 @@
   .conv-main:not(.beside) .pv-slot {
     position: absolute;
     inset: 0;
-    z-index: 5;
+    z-index: var(--z-sticky);
   }
   .pv-resize {
     flex-shrink: 0;
@@ -1136,7 +1142,7 @@
     margin-inline: -2px;
     cursor: col-resize;
     position: relative;
-    z-index: 2;
+    z-index: var(--z-sticky);
   }
   .pv-resize:hover,
   .pv-resize:focus-visible {
@@ -1319,14 +1325,6 @@
     font-size: var(--fs-xs);
     cursor: pointer;
     unicode-bidi: isolate;
-  }
-  .inline-err {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--danger);
-    font-size: var(--fs-xs);
-    padding: 4px 0;
   }
   .jump-pill {
     position: absolute;

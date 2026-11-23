@@ -97,6 +97,6 @@
   .ide-tool-toggle[aria-pressed='true'] { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-text); }
   /* A finger-sized ⋯ on touch screens (the desktop icon button is 28 px). */
   @media (pointer: coarse) {
-    .ide-more-btn { min-inline-size: 36px; min-block-size: 36px; }
+    .ide-more-btn { min-inline-size: var(--hit-min); min-block-size: var(--hit-min); }
   }
 </style>

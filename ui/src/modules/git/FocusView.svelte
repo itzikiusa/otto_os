@@ -21,52 +21,55 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import { groupPrRowsByForge, prCandidateRepos, type FocusPrRow as PrRow } from './focusPrHelpers';
 
-  // ── MY PULL REQUESTS ────────────────────────────────────────────────────────
-  interface PrRow {
-    repo: Repo;
-    pr: PrSummary;
-  }
   let prRows = $state<PrRow[]>([]);
   let prsLoading = $state(true);
   /** Repos whose PR listing failed (no forge account, network) — shown once. */
   let prErrors = $state(0);
   let prFilter = $state<'all' | 'mine'>('all');
   let myHandles = $state<Set<string>>(new Set());
+  let prsRevision = 0;
+  let prsAbort: AbortController | null = null;
 
   async function loadPrs(): Promise<void> {
+    prsAbort?.abort();
+    const ctl = new AbortController();
+    prsAbort = ctl;
+    const rev = ++prsRevision;
+    const stale = () => ctl.signal.aborted || rev !== prsRevision;
     prsLoading = true;
     prErrors = 0;
     try {
       if (!git.allReposLoaded) await git.loadAllRepos();
-      const accs = await api.get<GitAccount[]>('/git/accounts').catch(() => null);
+      if (stale()) return;
+      const accs = await api.get<GitAccount[]>('/git/accounts', ctl.signal).catch(() => null);
+      if (stale()) return;
       if (accs) myHandles = new Set(accs.map((a) => a.username.toLowerCase()).filter(Boolean));
-      const configuredProviders = accs ? new Set(accs.map((a) => a.provider)) : null;
-      const candidates = git.allRepos.filter((r) => {
-        const forge = r.provider ?? (r.forge && r.forge !== 'unrecognized' ? r.forge : null);
-        return Boolean(forge && (r.git_account_id || (configuredProviders ? configuredProviders.has(forge) : r.provider)));
-      });
-      // One provider API call per repo (0.5–3 s each) across every workspace:
-      // at most 2 at a time, on the background lane (r3-04-05). The old
-      // unbounded fan-out filled the alias host's six sockets for ~(R/6) ×
-      // provider latency, stalling every poll, git auto-fetch and DB "Run".
+      const candidates = prCandidateRepos(git.allRepos, accs);
+      // At most 2 provider calls at a time on the background lane (r3-04-05).
       const settled = await mapLimit(candidates, 2, async (repo): Promise<PromiseSettledResult<PrRow[]>> => {
+        if (stale()) return { status: 'fulfilled', value: [] };
         try {
-          const page = await api.bg.get<PrListResp>(`/repos/${repo.id}/prs?state=open`);
+          const page = await api.bg.get<PrListResp>(`/repos/${repo.id}/prs?state=open`, ctl.signal);
           return { status: 'fulfilled', value: page.items.map((pr) => ({ repo, pr })) };
         } catch (reason) {
           return { status: 'rejected', reason };
         }
       });
+      if (stale()) return;
       const rows: PrRow[] = [];
+      let errors = 0;
       for (const s of settled) {
         if (s.status === 'fulfilled') rows.push(...s.value);
-        else prErrors++;
+        else errors++;
       }
       rows.sort((a, b) => (b.pr.updated_at ?? '').localeCompare(a.pr.updated_at ?? ''));
+      prErrors = errors;
       prRows = rows;
     } finally {
-      prsLoading = false;
+      if (prsAbort === ctl) prsAbort = null;
+      if (!stale()) prsLoading = false;
     }
   }
 
@@ -75,18 +78,7 @@
       ? prRows.filter((r) => myHandles.has(r.pr.author.toLowerCase()))
       : prRows,
   );
-
-  /** Rows grouped by forge, insertion-ordered github → bitbucket → gitlab. */
-  const prGroups = $derived.by(() => {
-    const groups = new Map<string, PrRow[]>();
-    for (const row of visiblePrRows) {
-      const forge = (row.repo.forge as string) ?? 'other';
-      const list = groups.get(forge);
-      if (list) list.push(row);
-      else groups.set(forge, [row]);
-    }
-    return [...groups.entries()];
-  });
+  const prGroups = $derived(groupPrRowsByForge(visiblePrRows));
 
   // ── MY WORK (Jira) ──────────────────────────────────────────────────────────
   let issueAccounts = $state<IssueAccount[]>([]);
@@ -132,6 +124,11 @@
   $effect(() => {
     void loadPrs();
     void loadAccounts();
+    return () => {
+      prsRevision++;
+      prsAbort?.abort();
+      prsAbort = null;
+    };
   });
   $effect(() => {
     const id = issueAccountId;
@@ -473,10 +470,8 @@
           {/if}
         </div>
       {:else}
-        <div class="fx-empty fx-empty-row" role="alert">
-          <Icon name="warning" size={14} />
-          <span class="grow">Couldn’t load {quickKey}. {#if quickError}<span class="dim">{quickError}</span>{/if}</span>
-          <button class="btn small" onclick={() => quickKey && void openQuick(quickKey)}>Retry</button>
+        <div class="fx-empty">
+          <LoadState variant="compact" what={quickKey ?? 'the issue'} error={quickError || 'Try again.'} empty onretry={() => quickKey && void openQuick(quickKey)} />
         </div>
       {/if}
     </aside>
@@ -546,10 +541,6 @@
   .fx-empty-row > :global(svg) {
     color: var(--danger);
     flex-shrink: 0;
-  }
-  .fx-empty-row .grow {
-    flex: 1;
-    min-width: 0;
   }
   .fx-warn {
     padding: 4px 10px;

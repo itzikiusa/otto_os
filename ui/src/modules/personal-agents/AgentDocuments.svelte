@@ -4,7 +4,7 @@
   import { listVaults } from '../../lib/api/vault';
   import type { PersonalAgentDocument, Vault } from '../../lib/api/types';
   import Markdown from '../agents/conversation/Markdown.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { guardUnsaved } from '../../lib/leaveGuard';
@@ -85,8 +85,7 @@
     ? 'Notes the agent reads and updates between runs.'
     : 'Notes and file references it reads at the start of every run and new chat.'}</p>
   {#if kind === 'memory' && sharedWorkspace}<p class="hint">Agents using this same working folder share this memory file.</p>{/if}
-  {#if loading}<Skeleton rows={3} label={label.toLowerCase()} />
-  {:else}
+  <LoadState what={label.toLowerCase()} variant="compact" {loading} error={document ? null : error} empty={!document} rows={3} onretry={() => void load()}>
     {#if error}<div class="error" use:announceShown={{ text: error, assertive: true }}>{error}</div>{/if}
     {#if document}
       {#if editing}
@@ -115,8 +114,8 @@
           {#if editable}<button type="button" class="btn" data-edit-for={`doc-${kind}`} aria-label={`Edit ${label.toLowerCase()}`} onclick={() => (editing = true)}>Edit</button>{/if}
         </div>
       {/if}
-    {:else}<button type="button" class="btn" onclick={load}>Retry</button>{/if}
-  {/if}
+    {/if}
+  </LoadState>
 </section>
 {#if picker !== null}<FolderPicker title="Choose context reference" start={picker} files onpick={addReference} onclose={() => (picker = null)} />{/if}
 <style>

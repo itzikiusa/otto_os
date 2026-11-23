@@ -5,23 +5,41 @@
   // `browser_tab_updated` WS event, which the store applies in place (see
   // `browser.applyEvent` wired from `lib/events.svelte.ts`); no polling here.
 
+  import { tick } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { browser } from '../../lib/stores/browser.svelte';
   import { toastError } from '../../lib/toastError';
 
   // inbar: rendered inside the PageHeader bar (no own border row / padding).
   let { onnew, inbar = false }: { onnew: () => void; inbar?: boolean } = $props();
+  let stripEl = $state<HTMLDivElement | null>(null);
+  let newBtnEl = $state<HTMLButtonElement | null>(null);
 
-  function close(e: MouseEvent, id: string): void {
+  async function close(e: MouseEvent, id: string): Promise<void> {
     e.stopPropagation();
-    browser.closeTab(id).catch((err: unknown) => toastError('Couldn’t close the tab', err));
+    const idx = browser.tabs.findIndex((t) => t.id === id);
+    const hadFocus = stripEl?.contains(document.activeElement) ?? false;
+    try {
+      await browser.closeTab(id);
+    } catch (err: unknown) {
+      toastError('Couldn’t close the tab', err);
+      return;
+    }
+    if (!hadFocus) return;
+    await tick();
+    const mains = stripEl?.querySelectorAll<HTMLButtonElement>('.tab-main');
+    if (mains && mains.length > 0) {
+      mains[Math.min(Math.max(idx, 0), mains.length - 1)]?.focus();
+    } else {
+      newBtnEl?.focus();
+    }
   }
 </script>
 
 <!-- The tabs scroll in their own box and "+" sits OUTSIDE it: as the last
      child of the scroller (inside PageHeader's width-capped tab slot) it was
      scrolled/clipped off the edge once a few tabs were open. -->
-<div class="strip" class:inbar>
+<div class="strip" class:inbar bind:this={stripEl}>
   <div class="tabs-scroll scroll-thin">
   {#each browser.tabs as tab (tab.id)}
     <!-- The tab is a wrapper holding TWO real buttons (select + close): a
@@ -31,7 +49,7 @@
       <button
         class="tab-main"
         onclick={() => browser.select(tab.id)}
-        onauxclick={(e) => { if (e.button === 1) close(e, tab.id); }}
+        onauxclick={(e) => { if (e.button === 1) void close(e, tab.id); }}
         title={tab.title ? `${tab.title}\n${tab.url}` : tab.url}
         aria-current={tab.id === browser.activeId ? 'page' : undefined}
       >
@@ -40,7 +58,7 @@
       </button>
       <button
         class="close"
-        onclick={(e) => close(e, tab.id)}
+        onclick={(e) => void close(e, tab.id)}
         aria-label="Close tab {tab.title || tab.url}"
         title="Close tab {tab.title || tab.url}"
       >
@@ -49,7 +67,7 @@
     </div>
   {/each}
   </div>
-  <button class="new" onclick={onnew} title="New tab" aria-label="New tab">
+  <button class="new" bind:this={newBtnEl} onclick={onnew} title="New tab" aria-label="New tab">
     <Icon name="plus" size={13} />
   </button>
 </div>

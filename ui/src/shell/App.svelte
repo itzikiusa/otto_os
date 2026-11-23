@@ -25,9 +25,11 @@
   import {
     SharePageChunk, HandoverChunk, AttachIssueChunk, AttachProductStoryChunk,
     BroadcastModalChunk, NewSessionChunk, NewWorkspaceChunk, SlackSendChunk,
-    PaletteChunk, ShortcutsOverlayChunk, FloatingBarChunk,
+    PaletteChunk, TriageBarChunk, ShortcutsOverlayChunk, FloatingBarChunk,
   } from './overlays.svelte';
+  import { triage } from './triage.svelte';
   import { loadErrorText } from '../lib/loadError';
+  import { announceShown } from '../lib/announce.svelte';
   import StatusBar from './StatusBar.svelte';
   import CapsBanner from './CapsBanner.svelte';
   import { barStore } from '../lib/stores/bar.svelte';
@@ -46,7 +48,7 @@
   import { ui, isTauri } from '../lib/stores/ui.svelte';
   import { SIDE_PANEL } from '../lib/rightTabs';
   import { rightPanel } from '../lib/stores/rightPanel.svelte';
-  import { startWindowDrag } from '../lib/windowDrag';
+  import { startWindowDrag, windowDrag } from '../lib/windowDrag';
   import { isPopout, isEmbedded, popoutTitle, currentRoute, closePopoutWindow } from '../lib/desktop';
   import SidePane from './SidePane.svelte';
   import {
@@ -74,6 +76,8 @@
   import { ctxMenu } from '../lib/contextmenu.svelte';
   import { viewport } from '../lib/stores/viewport.svelte';
   import { pageChrome } from '../lib/stores/pageChrome.svelte';
+  import { lightMode } from '../lib/lightMode.svelte';
+  import { resyncViewportFit } from '../lib/viewportFit';
   import { ws, LS_ATTENTION } from '../lib/stores/workspace.svelte';
   import { git } from '../lib/stores/git.svelte';
   import { auth, impersonationStartedMs } from '../lib/stores/auth.svelte';
@@ -173,7 +177,7 @@
     return queue.length ? prefetchPagesWhenIdle(queue) : undefined;
   });
   const compactShell = $derived(!viewport.isDesktop && !isPopout && !isEmbedded);
-  const navFolded = $derived(compactShell && viewport.isTablet && pageChrome.foldNav && !ui.railExpanded);
+  const navFolded = $derived(compactShell && viewport.isTablet && (viewport.tabletNavFolded !== null ? viewport.tabletNavFolded : pageChrome.foldNav && !ui.railExpanded));
   // The page draws its own PageHeader (the first registered header, in the
   // centre column — not one inside the right panel's browser tab).
   const pageTitled = $derived(compactShell && !!uiControl.barOwner?.closest('.mcenter'));
@@ -210,11 +214,9 @@
     const page = moduleName === 'agents' ? (ws.activeSession?.title ?? 'Agents') : moduleName === 'ide' && ideWindowTitle.project ? `${ideWindowTitle.project} — IDE` : moduleTitle;
     document.title = page ? `${page} — Otto` : 'Otto';
   });
-  // Navigation and breakpoint changes dismiss compact overlays.
-  $effect.pre(() => {
-    void [router.parts.join('/'), viewport.mode, viewport.isShort]; // a rotation re-buckets the shell too
-    ui.resetDrawers(compactShell);
-  });
+  // Navigation / rotation / mode switches dismiss overlays and reset drifted shell scroll.
+  $effect.pre(() => { void [router.parts.join('/'), viewport.mode, viewport.isShort, lightMode.active]; ui.resetDrawers(compactShell); });
+  $effect(() => { void [router.parts.join('/'), viewport.mode, viewport.isShort, lightMode.active]; resyncViewportFit(); const raf = requestAnimationFrame(() => resyncViewportFit()); return () => cancelAnimationFrame(raf); });
 
   // The Side panel (Git/Files/Notes/…, plus a page's own tabs) is on every
   // page, pop-out windows included (a popped-out page keeps its tools; e2e
@@ -447,6 +449,7 @@
   // ---- boot ----
   $effect(() => {
     events.start();
+    let disposed = false;
     let unlistenMenu: (() => void) | null = null;
     let unlistenClose: (() => void) | null = null;
     // Once per WINDOW, never in the side-by-side pane (an iframe of this
@@ -454,23 +457,15 @@
     // the pane its menu items — a second listener would run each one twice).
     if (!isEmbedded) {
       void gcWindowKeys();
-      void attachMenuBridge().then((fn) => (unlistenMenu = fn));
-      void attachCloseHandler().then((fn) => (unlistenClose = fn));
+      void attachMenuBridge().then((fn) => (disposed ? fn() : (unlistenMenu = fn)));
+      void attachCloseHandler().then((fn) => (disposed ? fn() : (unlistenClose = fn)));
     }
 
     // Suppress the native WKWebView context menu globally, except on editable
     // elements and elements that opt in with .allow-native-menu.
     function suppressNativeMenu(e: MouseEvent): void {
       const target = e.target as Element | null;
-      if (!target) return;
-      if (
-        target.closest('input') ||
-        target.closest('textarea') ||
-        target.closest('[contenteditable]') ||
-        target.closest('.allow-native-menu')
-      ) {
-        return;
-      }
+      if (!target || target.closest('input, textarea, [contenteditable], .allow-native-menu')) return;
       e.preventDefault();
     }
     window.addEventListener('contextmenu', suppressNativeMenu);
@@ -491,6 +486,7 @@
     window.addEventListener('click', onLinkClick, { capture: true });
 
     return () => {
+      disposed = true;
       events.stop();
       unlistenMenu?.();
       unlistenClose?.();
@@ -576,6 +572,7 @@
       case 'snip':
         void startSnip();
         break;
+      case 'triage': triage.toggle(); break;
       case 'broadcast':
         ui.openBroadcast();
         break;
@@ -587,7 +584,9 @@
         window.location.reload();
         break;
       case 'toggleRail':
-        ui.toggleRail();
+        if (viewport.navDrawer) ui.navDrawerOpen = !ui.navDrawerOpen;
+        else if (viewport.isTablet) viewport.toggleTabletRail(navFolded);
+        else ui.toggleRail();
         break;
       case 'toggleRight':
         ui.toggleRight();
@@ -983,16 +982,11 @@
     </div>
   {/if}
   {#if serviceHealth.visible}
-    <div class="provider-banner" role="alert">
+    <div class="provider-banner" use:announceShown={{ text: 'A request to your Git provider failed with a gateway error. Local work remains available.', assertive: true }}>
       <Icon name="warning" size={14} />
-      <span>
-        A request to your Git provider failed with a <strong>gateway error</strong>.
-        Local work remains available.
-      </span>
+      <span>A request to your Git provider failed with a <strong>gateway error</strong>. Local work remains available.</span>
       <span class="grow"></span>
-      <button class="pb-dismiss" onclick={() => serviceHealth.dismiss()} aria-label="Dismiss notice" title="Dismiss notice">
-        <Icon name="x" size={12} />
-      </button>
+      <button class="pb-dismiss" onclick={() => serviceHealth.dismiss()} aria-label="Dismiss notice" title="Dismiss notice"><Icon name="x" size={12} /></button>
     </div>
   {/if}
   {#if moduleName === 'agents'}
@@ -1050,13 +1044,7 @@
 <div class="shell" class:vibrant class:embedded={isEmbedded} class:mobile={compactShell} class:tablet={compactShell && viewport.isTablet} class:short={compactShell && viewport.isShort} class:bnav={compactShell && viewport.isPhone} class:page-titled={pageTitled}>
   <!-- Threads draws the one header row on phones and tablets (no second pair of panel toggles); a narrow Mac window keeps it for the traffic lights. -->
   {#if compactShell && !(moduleName === 'threads' && (viewport.navDrawer || !isTauri))}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <header
-    class="mtopbar"
-    class:tauri-top={isTauri}
-    data-tauri-drag-region
-    onmousedown={isTauri ? startWindowDrag : undefined}
-  >
+  <header class="mtopbar" class:tauri-top={isTauri} data-tauri-drag-region use:windowDrag={isTauri}>
     {#if viewport.navDrawer}
       <button
         class="mtop-btn"
@@ -1128,7 +1116,7 @@
       {#if isTauri && !compactShell}
         <div class="titlebar-drag" role="presentation" data-tauri-drag-region onmousedown={startWindowDrag}></div>
       {/if}
-      {#if (compactShell && !navFolded) || ui.railExpanded}
+      {#if compactShell ? !navFolded : ui.railExpanded}
         <Navigator />
       {:else}
         <Rail />
@@ -1196,8 +1184,8 @@
   </Drawer>
 {/if}
 
-
 {#if ui.paletteOpen}<LazyMount lazy={PaletteChunk} what="the command palette" quiet onerror={() => (ui.paletteOpen = false)} />{/if}
+{#if triage.open}<LazyMount lazy={TriageBarChunk} what="the triage bar" quiet onerror={() => triage.close()} />{/if}
 {#if shortcutsOpen}<LazyMount lazy={ShortcutsOverlayChunk} what="keyboard shortcuts" quiet onerror={() => (shortcutsOpen = false)} props={{ open: true, onclose: () => (shortcutsOpen = false) }} />{/if}
 
 <!-- Focused-session action modals opened from the palette (mirror SessionView). -->
@@ -1214,17 +1202,9 @@
   <LazyMount lazy={AttachProductStoryChunk} what="the attach-story dialog" quiet onerror={closeSessionAction} props={{ sessionId: id, onclose: closeSessionAction }} />
 {/if}
 
-{#if ui.broadcastOpen}
-  <LazyMount lazy={BroadcastModalChunk} what="the broadcast dialog" quiet onerror={() => (ui.broadcastOpen = false)} />
-{/if}
-
-{#if ui.newSessionOpen}
-  <LazyMount lazy={NewSessionChunk} what="the new-session sheet" quiet onerror={closeNewSession} props={{ initialScratch: ui.newSessionScratch, onclose: closeNewSession }} />
-{/if}
-
-{#if ui.newWorkspaceOpen}
-  <LazyMount lazy={NewWorkspaceChunk} what="the new-workspace dialog" quiet onerror={closeNewWorkspace} props={{ onclose: closeNewWorkspace }} />
-{/if}
+{#if ui.broadcastOpen}<LazyMount lazy={BroadcastModalChunk} what="the broadcast dialog" quiet onerror={() => (ui.broadcastOpen = false)} />{/if}
+{#if ui.newSessionOpen}<LazyMount lazy={NewSessionChunk} what="the new-session sheet" quiet onerror={closeNewSession} props={{ initialScratch: ui.newSessionScratch, onclose: closeNewSession }} />{/if}
+{#if ui.newWorkspaceOpen}<LazyMount lazy={NewWorkspaceChunk} what="the new-workspace dialog" quiet onerror={closeNewWorkspace} props={{ onclose: closeNewWorkspace }} />{/if}
 
 <ConfirmDialog />
 {#if slackSend.req}<LazyMount lazy={SlackSendChunk} what="the Slack dialog" quiet onerror={() => slackSend.close()} />{/if}
@@ -1246,14 +1226,11 @@
   }
   .shell {
     /* 100% (of #app), NOT 100vh — in the transparent overlay-titlebar
-       WKWebView, 100vh resolves to the full screen height, making the shell
-       taller than the window and clipping the bottom row (input, footer,
-       status bar) off-screen. */
+       WKWebView, 100vh resolves to the full screen height, clipping the bottom. */
     height: 100%;
     display: flex;
     flex-direction: column;
-    /* The ambient backdrop (tokens.css) lives on the window itself: the
-       sidebar's glass blurs it; content columns stay opaque (.center). */
+    /* Ambient backdrop (tokens.css) lives on the window: sidebar glass blurs it; content stays opaque (.center). */
     background-color: var(--bg);
     background-image: var(--ambient-image);
     background-size: cover;
@@ -1262,6 +1239,7 @@
   .shell-main {
     flex: 1;
     display: flex;
+    min-width: 0;
     min-height: 0;
   }
   .sidebar {
@@ -1342,6 +1320,7 @@
   }
   .primary-row {
     flex: 1;
+    min-width: 0;
     min-height: 0;
     display: flex;
   }
@@ -1386,6 +1365,7 @@
     border-bottom: 1px solid var(--border);
     background: var(--bg-sidebar);
   }
+  .shell.page-titled .mtopbar { height: 38px; }
   .shell.short .mtopbar { height: 36px; } /* phone on its side: every row of height counts */
   .mtopbar.tauri-top {
     height: calc(var(--mobile-topbar-h) + 22px);
@@ -1426,12 +1406,13 @@
   .shell.page-titled .mtop-title {
     display: none;
   }
-  .mbody { flex: 1; display: flex; min-height: 0; }
+  .mbody { flex: 1; display: flex; min-width: 0; min-height: 0; }
   .msidebar {
     height: 100%;
     width: 220px;
     flex-shrink: 0;
     display: flex;
+    overflow: hidden;
     border-inline-end: 1px solid var(--border);
   }
   .msidebar.mfolded { width: auto; border-inline-end: 0; } /* tablet + pageChrome.foldNav: the Rail (own border) */
@@ -1502,6 +1483,7 @@
   }
   .content {
     flex: 1;
+    min-width: 0;
     min-height: 0;
     overflow: hidden;
   }

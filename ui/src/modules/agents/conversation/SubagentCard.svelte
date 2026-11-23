@@ -5,6 +5,7 @@
   // from `Transcript.subagents[]` (parent_agent_id), never from the body.
   import { getContext, untrack } from 'svelte';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import TurnItem from './TurnItem.svelte';
   import SubagentCard from './SubagentCard.svelte';
@@ -71,8 +72,7 @@
         <div class="sub-note"><Skeleton rows={2} height={18} label="the subagent transcript" /></div>
       {:else}
         {#if body?.error}
-          <div class="sub-note err">Couldn’t load: {body.error}</div>
-          {#if body.retryable}<button class="btn small ghost" onclick={() => ctx.conv.loadSubagent(agentId)}>Retry</button>{/if}
+          <LoadState what="subagent transcript" variant="compact" error={body.error} onretry={body.retryable ? () => ctx.conv.loadSubagent(agentId) : undefined} />
         {/if}
         {#if !items.length && !body?.error}
           <div class="dim sub-note">No recorded turns.</div>
@@ -190,9 +190,6 @@
   .sub-note {
     font-size: var(--fs-s);
     padding: 2px 6px;
-  }
-  .sub-note.err {
-    color: var(--danger);
   }
   .sub-children {
     display: flex;

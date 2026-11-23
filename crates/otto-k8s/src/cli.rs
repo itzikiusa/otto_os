@@ -91,10 +91,13 @@ pub async fn run_raw(
             });
         }
     }
-    let waited = tokio::time::timeout(timeout, child.wait_with_output()).await;
-    let output = match waited {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => return Err(Error::Internal(format!("{program}: {e}"))),
+    let (status, stdout, stderr) = match tokio::time::timeout(
+        timeout,
+        read_raw_bounded(program, &mut child, MAX_RAW_STDOUT, MAX_RAW_STDERR),
+    )
+    .await
+    {
+        Ok(res) => res?,
         Err(_) => {
             return Err(Error::Upstream(format!(
                 "{program} timed out after {}s",
@@ -103,11 +106,67 @@ pub async fn run_raw(
         }
     };
     Ok(CliOutput {
-        status: output.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        status,
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
         duration_ms: started.elapsed().as_millis() as u64,
     })
+}
+
+/// Hard cap on stdout buffered by [`run_raw`] (32 MiB).
+const MAX_RAW_STDOUT: usize = 32 * 1024 * 1024;
+/// Hard cap on stderr retained by [`run_raw`] (1 MiB; extra bytes drained).
+const MAX_RAW_STDERR: usize = 1024 * 1024;
+
+async fn read_raw_bounded(
+    program: &str,
+    child: &mut tokio::process::Child,
+    stdout_cap: usize,
+    stderr_cap: usize,
+) -> Result<(i32, Vec<u8>, Vec<u8>)> {
+    use tokio::io::AsyncReadExt;
+    let (Some(mut out), Some(mut err)) = (child.stdout.take(), child.stderr.take()) else {
+        return Err(Error::Internal(format!("{program}: no stdio pipes")));
+    };
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut obuf = vec![0u8; 64 * 1024];
+    let mut ebuf = vec![0u8; 8 * 1024];
+    let (mut out_done, mut err_done) = (false, false);
+    while !(out_done && err_done) {
+        tokio::select! {
+            r = out.read(&mut obuf), if !out_done => {
+                let n = r.map_err(|e| Error::Internal(format!("{program}: {e}")))?;
+                if n == 0 {
+                    out_done = true;
+                } else if stdout.len().saturating_add(n) > stdout_cap {
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    return Err(Error::Upstream(format!(
+                        "{program} output exceeded {stdout_cap} bytes limit"
+                    )));
+                } else {
+                    stdout.extend_from_slice(&obuf[..n]);
+                }
+            }
+            r = err.read(&mut ebuf), if !err_done => {
+                let n = r.map_err(|e| Error::Internal(format!("{program}: {e}")))?;
+                if n == 0 {
+                    err_done = true;
+                } else {
+                    let take = n.min(stderr_cap.saturating_sub(stderr.len()));
+                    stderr.extend_from_slice(&ebuf[..take]);
+                }
+            }
+        }
+    }
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| Error::Internal(format!("{program}: {e}")))?
+        .code()
+        .unwrap_or(-1);
+    Ok((status, stdout, stderr))
 }
 
 /// Bytes of stderr kept by [`run_raw_capped`] (the classification only
@@ -858,5 +917,20 @@ mod tests {
         assert!(parse_json("  \n").unwrap().is_object());
         assert_eq!(parse_json("{\"a\":1}").unwrap()["a"], 1);
         assert!(parse_json("nope").is_err());
+    }
+
+    #[tokio::test]
+    async fn read_raw_bounded_kills_and_rejects_oversized_stdout() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "dd if=/dev/zero bs=1024 count=64 2>/dev/null"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let err = read_raw_bounded("kubectl", &mut child, 4096, 1024)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Upstream(ref m) if m.contains("exceeded 4096")));
     }
 }

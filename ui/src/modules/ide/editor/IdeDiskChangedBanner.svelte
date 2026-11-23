@@ -3,7 +3,6 @@
   // edits: Compare (disk vs your buffer), Reload from disk (confirmed: it discards edits),
   // Keep mine (dismiss; the next save overwrites the disk copy knowingly). It also runs the
   // dirty-tab disk watcher (see store/ideDiskChange.svelte.ts) while the editor area is up.
-  import { onDestroy } from 'svelte';
   import { announceShown } from '../../../lib/announce.svelte';
   import { confirmer } from '../../../lib/confirm.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
@@ -12,21 +11,25 @@
   import { subscribeIdeDiskConflict, subscribeIdeFileSaved } from '../store/ideBufferPerf';
   import { ideDiskChange, type ConflictSet } from '../store/ideDiskChange.svelte';
 
-  let { tab }: { tab: IdeOpenTab } = $props();
+  let { tab, watch = true }: { tab: IdeOpenTab; watch?: boolean } = $props();
 
   // Autosave already waits on the buffer controller's conflict set; the banner joins it.
   // (The store keeps the controller private and is at its size cap, hence the cast.)
   const conflicts = (): ConflictSet | null =>
     (ide as unknown as { bufPerf?: { conflictedPaths?: Set<string> } }).bufPerf?.conflictedPaths ?? null;
 
-  const stop = ideDiskChange.start(ide, conflicts);
-  const unsubSaved = subscribeIdeFileSaved((p) => ideDiskChange.forget(p, conflicts()));
-  const unsubConflict = subscribeIdeDiskConflict(() => void ideDiskChange.check(ide, conflicts()));
-  onDestroy(() => { stop(); unsubSaved(); unsubConflict(); });
+  $effect(() => {
+    if (!watch) return;
+    const stop = ideDiskChange.start(ide, conflicts);
+    const unsubSaved = subscribeIdeFileSaved((p) => ideDiskChange.forget(p, conflicts()));
+    const unsubConflict = subscribeIdeDiskConflict(() => void ideDiskChange.check(ide, conflicts()));
+    return () => { stop(); unsubSaved(); unsubConflict(); };
+  });
 
   // A repo watcher bump (an agent or the CLI wrote files) re-checks dirty tabs soon after.
   let revTimer: ReturnType<typeof setTimeout> | null = null;
   $effect(() => {
+    if (!watch) return;
     void JSON.stringify(git.liveRev);
     if (revTimer !== null) clearTimeout(revTimer);
     revTimer = setTimeout(() => { revTimer = null; void ideDiskChange.check(ide, conflicts()); }, 400);

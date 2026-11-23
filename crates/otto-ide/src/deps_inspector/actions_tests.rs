@@ -340,3 +340,36 @@ async fn a_missing_tool_is_a_failed_action_not_an_error() {
         "{output}"
     );
 }
+
+#[test]
+fn pom_property_bump_treats_dollar_signs_in_version_literally() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pom_path = tmp.path().join("pom.xml");
+    let pom = r#"<project>
+  <properties>
+    <guava.version>32.0.0-jre</guava.version>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>com.google.guava</groupId>
+      <artifactId>guava</artifactId>
+      <version>${guava.version}</version>
+    </dependency>
+  </dependencies>
+</project>"#;
+    fs::write(&pom_path, pom).unwrap();
+    let bumped = bump_manifest_version_in_place_scoped(
+        &pom_path,
+        "pom.xml",
+        pom,
+        "com.google.guava:guava",
+        "33.0.0-$1-$$",
+        &[tmp.path().to_path_buf()],
+        true,
+    )
+    .expect("bump should succeed");
+    assert!(
+        bumped.contains("<guava.version>33.0.0-$1-$$</guava.version>"),
+        "version must be substituted literally without regex capture expansion:\n{bumped}"
+    );
+}

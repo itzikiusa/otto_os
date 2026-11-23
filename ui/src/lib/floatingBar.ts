@@ -288,27 +288,59 @@ export function hitVaultNote(hit: { kind: string; id: string }): { vault: string
   return { vault: hit.id.slice(0, at), path: hit.id.slice(at + 1) };
 }
 
-/** The search-hit actions the ⌘K palette can perform. The server may list
- *  more (`rerun`, `review`) — those stay hidden until they have a handler, so
- *  no button closes the palette and does nothing. Legacy labels such as the
- *  canvas hit's "Open in Canvas" count as `open`. */
-export type HitAction = 'open' | 'copy-context' | 'send-to-agent';
+/** The search-hit actions the ⌘K palette can perform. Unknown server actions
+ *  stay hidden until they have a handler, so no button closes the palette and
+ *  does nothing. Legacy labels such as the canvas hit's "Open in Canvas" count
+ *  as `open`. */
+export type HitAction = 'open' | 'rerun' | 'review' | 'copy-context' | 'send-to-agent';
+
+const HIT_ACTION_ORDER: Record<HitAction, number> = {
+  open: 0,
+  rerun: 1,
+  review: 2,
+  'send-to-agent': 3,
+  'copy-context': 4,
+};
 
 export function normalizeHitAction(action: string): HitAction | null {
   const a = action.trim().toLowerCase();
   if (a === 'open' || a.startsWith('open ')) return 'open';
-  if (a === 'copy-context' || a === 'send-to-agent') return a;
+  if (a === 'rerun' || a === 'review' || a === 'copy-context' || a === 'send-to-agent') return a;
   return null;
 }
 
+function actionSupportedForKind(action: HitAction, kind?: string): boolean {
+  if (!kind) return true;
+  if (action === 'rerun') return kind === 'workflow' || kind === 'api_request';
+  if (action === 'review') return kind === 'repo';
+  return true;
+}
+
 /** The hit's actions the palette can run, deduped, `open` first. */
-export function hitActions(hit: { actions: readonly string[] }): HitAction[] {
+export function hitActions(hit: { kind?: string; actions: readonly string[] }): HitAction[] {
   const out: HitAction[] = [];
   for (const a of hit.actions) {
     const n = normalizeHitAction(a);
-    if (n && !out.includes(n)) out.push(n);
+    if (n && actionSupportedForKind(n, hit.kind) && !out.includes(n)) out.push(n);
   }
-  return out.sort((x, y) => Number(y === 'open') - Number(x === 'open'));
+  return out.sort((x, y) => HIT_ACTION_ORDER[x] - HIT_ACTION_ORDER[y]);
+}
+
+/** Resolve which action Enter (+ optional modifier) invokes on a selected hit.
+ *  ⏎ opens; ⌘⏎ / Ctrl+⏎ runs the primary power verb (`rerun` or `review`);
+ *  ⌥⏎ copies context; ⇧⏎ sends to agent. */
+export function resolveHitKeyAction(
+  acts: readonly HitAction[],
+  e?: { metaKey?: boolean; ctrlKey?: boolean; altKey?: boolean; shiftKey?: boolean },
+): HitAction | null {
+  if (acts.length === 0) return null;
+  if (e?.metaKey || e?.ctrlKey) {
+    if (acts.includes('rerun')) return 'rerun';
+    if (acts.includes('review')) return 'review';
+  }
+  if (e?.altKey && acts.includes('copy-context')) return 'copy-context';
+  if (e?.shiftKey && acts.includes('send-to-agent')) return 'send-to-agent';
+  return acts[0] ?? null;
 }
 
 /** Plain-text context for a hit (copy-context / send-to-agent). */

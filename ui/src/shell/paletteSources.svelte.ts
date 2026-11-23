@@ -25,7 +25,12 @@ import { auth } from '../lib/stores/auth.svelte';
 import { toasts } from '../lib/toast.svelte';
 import { toastError } from '../lib/toastError';
 import { startSnip } from '../lib/snip';
+import { keepAwake } from '../lib/keepAwake.svelte';
+import { triage } from './triage.svelte';
 import { lightMode, lightRouteAllowed } from '../lib/lightMode.svelte';
+import { viewport } from '../lib/stores/viewport.svelte';
+import { pageChrome } from '../lib/stores/pageChrome.svelte';
+import { composerTraceOn, toggleComposerTrace } from '../lib/composerTrace';
 
 /** What the sources need from the app root (its local state and helpers). */
 export interface PaletteDeps {
@@ -44,6 +49,7 @@ export function installPaletteSources(deps: PaletteDeps): () => void {
         { id: 'core.new-session', title: 'New session…', group: 'Session', shortcut: '⌘T', keywords: 'spawn agent terminal claude codex shell', run: () => (ui.newSessionOpen = true) },
         { id: 'core.new-session-scratch', title: 'New session (no workspace)…', group: 'Session', keywords: 'scratch home adhoc workspace-less', run: () => { ui.newSessionScratch = true; ui.newSessionOpen = true; } },
         { id: 'core.ask-otto', title: 'Ask Otto (plain English)', group: 'Session', shortcut: '⌘I', keywords: 'orchestrate natural language command free text', run: () => ui.openPalette('english') },
+        { id: 'core.triage', title: 'Open Triage Bar (needs you across workspaces)', group: 'Session', shortcut: '⌘⇧A', keywords: 'triage approvals waiting needs you inbox queue cross workspace', run: () => triage.show() },
         { id: 'core.broadcast', title: 'Broadcast message to sessions…', group: 'Session', shortcut: '⌘⇧B', keywords: 'send message every agent tell all selected', run: () => ui.openBroadcast() },
         { id: 'core.close-tab', title: 'Close tab', group: 'Session', shortcut: '⌘W', run: () => ws.closeActiveTab() },
         { id: 'core.reopen-tab', title: 'Reopen closed tab', group: 'Session', shortcut: '⌘⇧T', keywords: 'restore undo close tab session', run: () => ws.reopenClosedTab() },
@@ -60,7 +66,19 @@ export function installPaletteSources(deps: PaletteDeps): () => void {
         { id: 'core.go-settings', title: 'Go to Settings', group: 'Navigate', shortcut: '⌘,', keywords: 'preferences appearance', run: () => router.go('settings/appearance') },
         { id: 'core.go-back', title: 'Go back', group: 'Navigate', shortcut: '⌘⇧←', keywords: 'previous page history return', run: () => router.back() },
         { id: 'core.go-forward', title: 'Go forward', group: 'Navigate', shortcut: '⌘⇧→', keywords: 'next page history', run: () => router.forward() },
-        { id: 'core.toggle-rail', title: 'Toggle sidebar', group: 'View', shortcut: '⌘1', run: () => ui.toggleRail() },
+        {
+          id: 'core.toggle-rail',
+          title: 'Toggle sidebar',
+          group: 'View',
+          shortcut: '⌘1',
+          run: () => {
+            if (viewport.navDrawer) ui.navDrawerOpen = !ui.navDrawerOpen;
+            else if (viewport.isTablet) {
+              const folded = viewport.tabletNavFolded !== null ? viewport.tabletNavFolded : pageChrome.foldNav && !ui.railExpanded;
+              viewport.toggleTabletRail(folded);
+            } else ui.toggleRail();
+          },
+        },
         { id: 'core.toggle-right', title: `Toggle ${SIDE_PANEL}`, group: 'View', shortcut: '⌘J', run: () => ui.toggleRight() },
         ...(isTauri ? [{ id: 'core.open-in-window', title: 'Open in new window', group: 'View', keywords: 'pop out popout detach separate native window', run: () => void openPopout(currentRoute(), moduleLabel(deps.moduleName())).catch((e: unknown) => toastError('Couldn’t open window', e)) }] : []),
         { id: 'core.scheme-auto', title: 'Use automatic color scheme (follow system)', group: 'View', keywords: 'color scheme light dark system automatic mode', run: () => ui.setScheme('auto') },
@@ -86,6 +104,23 @@ export function installPaletteSources(deps: PaletteDeps): () => void {
         { id: 'core.logout', title: 'Sign out', group: 'Tools', keywords: 'log out logout account', run: () => auth.logout() },
       ]);
       return unreg;
+    });
+
+    // ---- palette commands: keep awake (desktop shell, keep_awake.rs) ----
+    $effect(() => {
+      if (!isTauri) return;
+      keepAwake.init();
+      const k = 'awake caffeinate sleep display idle prevent';
+      const keep = (id: string, title: string, minutes: number | null, more = '') =>
+        ({ id: `keep-awake.${id}`, title, group: 'Tools', keywords: `${k} ${more}`.trim(), run: () => void keepAwake.start(minutes) });
+      return registry.register('keep-awake', [
+        keep('15', 'Keep awake for 15 minutes', 15),
+        keep('60', 'Keep awake for 1 hour', 60),
+        keep('120', 'Keep awake for 2 hours', 120),
+        { id: 'keep-awake.custom', title: 'Keep awake for a custom time…', group: 'Tools', keywords: k, run: () => void keepAwake.promptCustom() },
+        keep('on', 'Keep awake indefinitely', null, 'indefinitely forever infinite until'),
+        ...(keepAwake.state.active ? [{ id: 'keep-awake.off', title: 'Stop keeping awake', group: 'Tools', keywords: `${k} turn off cancel`, run: () => void keepAwake.stop() }] : []),
+      ]);
     });
 
     // ---- palette commands: Go to <module> ----
@@ -114,12 +149,10 @@ export function installPaletteSources(deps: PaletteDeps): () => void {
       );
     });
 
-    // ---- palette commands: the phone's light version ----
-    // Only on a phone-sized screen (lib/lightMode.svelte.ts): one command that
-    // switches to the other side. A phone on its side has no bottom nav, so
-    // this and Settings ▸ Appearance are its ways back to the full app.
+    // ---- palette commands: mobile & tablet light version ----
+    // Available on phones, tablets, and touch devices (lib/lightMode.svelte.ts).
     $effect(() => {
-      if (!lightMode.phoneSized) return;
+      if (!lightMode.available) return;
       const on = lightMode.active;
       return registry.register('light', [
         {
@@ -127,8 +160,17 @@ export function installPaletteSources(deps: PaletteDeps): () => void {
           title: on ? 'Show the full app' : 'Use the light version',
           group: 'View',
           detail: on ? 'Every module' : 'Threads, Connections, Git, API, Usage',
-          keywords: 'light lite version phone mobile full app modules simple',
-          run: () => lightMode.set(!on),
+          keywords: 'light lite version phone tablet mobile full app modules simple',
+          run: () => void lightMode.set(!on),
+        },
+        // The phone composer's on-device trace (lib/composerTrace.ts); reloads the page.
+        {
+          id: 'core.composer-trace',
+          title: composerTraceOn() ? 'Turn off the composer trace' : 'Turn on the composer trace',
+          group: 'View',
+          detail: 'Diagnostics on this device',
+          keywords: 'debug trace composer jump scroll keyboard caret diagnostics phone',
+          run: toggleComposerTrace,
         },
       ]);
     });

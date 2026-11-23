@@ -1,7 +1,7 @@
 <script lang="ts">
   import { scrollBehavior } from '../../lib/motion';
   import { loadErrorText } from '../../lib/loadError';
-  import { announce, announceShown } from '../../lib/announce.svelte';
+  import { announce, announceShown, focusAppContent } from '../../lib/announce.svelte';
   import PathField from '../../lib/components/PathField.svelte';
   // Usage dashboard: tokens first (provider/day/model/session rollups; cost is
   // the secondary figure), the ccusage-style Report tab, and — for root only —
@@ -32,6 +32,8 @@
   import { ws, SCRATCH_WORKSPACE_ID } from '../../lib/stores/workspace.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import { budgetBus } from '../../lib/events.svelte';
+  import { handleBarChartKey } from './chartKeys';
+  import { computeBudgetForecast } from './budgetForecast';
   // Work-graph attribution drilldown + cost forecast (B1).
   import AttributionDrilldown from './AttributionDrilldown.svelte';
   import CostForecastChip from './CostForecastChip.svelte';
@@ -134,20 +136,12 @@
     const tick = budgetBus.tick;
     if (tick === 0 || tick === budgetAlertTick) return;
     budgetAlertTick = tick;
-    if (budgetBus.direction === 'recovered') {
-      budgetAlert = null;
-    } else {
-      budgetAlert = {
-        provider: budgetBus.provider,
-        spendUsd: budgetBus.spendUsd,
-        capUsd: budgetBus.capUsd,
-        direction: budgetBus.direction,
-      };
-    }
+    budgetAlert = { provider: budgetBus.provider, spendUsd: budgetBus.spendUsd, capUsd: budgetBus.capUsd, direction: budgetBus.direction };
   });
 
   function dismissBudgetAlert(): void {
     budgetAlert = null;
+    void focusAppContent();
   }
 
   // The Storage & retention panel renders at the TOP of the body and scrolls
@@ -265,15 +259,19 @@
   async function saveBudgets(): Promise<void> {
     if (usage.savingBudgets || budgetValidation) return;
     const submitted = JSON.stringify(budgetCfg);
-    // Drop blank rows before saving (no key or no cap = nothing to enforce).
     const cfg: UsageBudgetConfig = {
       ...budgetCfg,
       window_days: budgetCfg.window_days || 30,
       workspaces: budgetCfg.workspaces.filter((b) => b.workspace_id && b.monthly_usd > 0),
       providers: budgetCfg.providers.filter((b) => b.provider && b.monthly_usd > 0),
     };
+    const turningBlockOn = cfg.enforce && cfg.block_on_exceed && !usage.budgets?.config.block_on_exceed;
+    if (turningBlockOn) {
+      const over = (usage.budgets?.rows ?? []).filter((r) => r.exceeded).map((r) => (r.scope === 'workspace' ? wsName(r.key) : (r.label ?? r.key)));
+      const detail = over.length ? `Already over budget and blocked immediately: ${over.join(', ')}.` : 'New work in any scope that exceeds its cap will be refused until spend drops or the cap is raised.';
+      if (!(await confirmer.ask(detail, { title: 'Enable hard budget blocking?', confirmLabel: 'Enable blocking', danger: true }))) return;
+    }
     const saved = await usage.saveBudgets(cfg);
-    // The response acknowledges the submitted draft, never newer local edits.
     if (saved && JSON.stringify(budgetCfg) === submitted) budgetsDirty = false;
   }
 
@@ -323,7 +321,7 @@
 
   // Chart viewport (inner drawing area, inside the axis labels).
   let dailyChartWidth = $state(500);
-  const SVG_W = $derived(dailyChartWidth || 500);
+  const SVG_W = $derived(Math.max(240, dailyChartWidth || 500));
   const SVG_H = 110;
   const AXIS_L = 52;  // left margin for y-axis labels
   const AXIS_B = 22;  // bottom margin for x-axis labels
@@ -660,7 +658,7 @@
               <label for="cfg-path">ClickHouse binary</label>
               <PathField bind:value={chPath} files><input dir="ltr" id="cfg-path" class="input mono" bind:value={chPath} spellcheck="false" /></PathField>
             </div>
-            {#if storageError}<p class="budget-error" role="alert">{storageError}</p>{/if}
+            {#if storageError}<p class="budget-error" use:announceShown={{ text: storageError, assertive: true }}>{storageError}</p>{/if}
             <div class="cfg-actions">
               <button class="btn" disabled={usage.installing} onclick={() => usage.install()}>
                 {usage.installing ? 'Updating…' : 'Update ClickHouse'}
@@ -894,20 +892,14 @@
                          segments so hovering the bar itself shows this day. (A
                          bare <title> used to sit directly in the <svg>, which made
                          day 1's text the tooltip for every bar.) -->
-                    <rect
-                      class="bar-hit"
-                      role="button"
+                    <rect class="bar-hit" data-daily-bar={d.day} role="button"
                       tabindex={selectedDaily?.day === d.day ? 0 : -1}
                       aria-label="{d.day}: {d.total_tokens.toLocaleString()} tokens, {formatUsd(d.cost_usd)}"
                       aria-pressed={selectedDaily?.day === d.day}
                       onclick={() => (usageUi.selectedDailyKey = d.day)}
                       onfocus={() => (usageUi.selectedDailyKey = d.day)}
-                      onkeydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); usageUi.selectedDailyKey = d.day; } }}
-                      x={x - barW / 2}
-                      y={0}
-                      width={barW}
-                      height={SVG_H - AXIS_B}
-                    >
+                      onkeydown={(event) => handleBarChartKey(event, dailyDays.map((x) => x.day), i, 'data-daily-bar', (k) => (usageUi.selectedDailyKey = k))}
+                      x={x - barW / 2} y={0} width={barW} height={SVG_H - AXIS_B}>
                       <title>{shortDay(d.day)} · {d.total_tokens.toLocaleString()} tokens (≈ {formatUsd(d.cost_usd)}) · {breakdownTitle(d)}</title>
                     </rect>
 
@@ -1013,6 +1005,7 @@
             <div class="budget-rows">
               {#each usage.budgets.rows as r (r.scope + ':' + r.key)}
                 {@const name = r.scope === 'workspace' ? wsName(r.key) : (r.label ?? r.key)}
+                {@const fc = spendUnavailable ? null : computeBudgetForecast(r, { windowDays: usage.budgets.config.window_days, daily: usage.summary?.daily, dailyModels: usage.summary?.daily_models })}
                 <div class="budget-row" class:warn={r.warning && !r.exceeded} class:over={r.exceeded}>
                   <span class="budget-name" title="{r.scope === 'workspace' ? 'Workspace' : 'Provider'}: {name}">
                     <Badge label={r.scope === 'workspace' ? 'Workspace' : 'Provider'} />
@@ -1037,6 +1030,7 @@
                     {#if spendUnavailable}{:else if r.exceeded}<span class="over-tag">Over</span>
                     {:else if r.warning}<span class="warn-tag">{(r.used_fraction * 100).toFixed(0)}%</span>{/if}
                   </span>
+                  {#if fc}<span class="budget-fc fc-{fc.tone}" data-testid="budget-forecast">{fc.label}</span>{/if}
                 </div>
               {/each}
             </div>
@@ -1173,7 +1167,7 @@
                 {/each}
               </div>
 
-              {#if budgetValidated && budgetValidation}<p id="budget-validation" role="alert">{budgetValidation}</p>{/if}
+              {#if budgetValidated && budgetValidation}<p id="budget-validation" use:announceShown={{ text: budgetValidation, assertive: true }}>{budgetValidation}</p>{/if}
               <div class="editor-actions">
                 <span class="dim small">Rows without a scope or a cap above $0 are dropped on save.</span>
                 <button
@@ -1640,9 +1634,7 @@
 
   /* Sessions leaderboard: fixed column header + VirtualList rows ----------- */
   /* Wide table scrolls inside its own container, never the page. */
-  .sess-scroll {
-    overflow-x: auto;
-  }
+  .sess-scroll { max-width: 100%; min-width: 0; overflow-x: auto; }
   /* 7-column CSS grid: session · workspace · provider/model · events · tokens · cost · last active */
   .sess-head,
   .sess-row {
@@ -1833,8 +1825,12 @@
     display: grid;
     grid-template-columns: minmax(140px, 1.4fr) minmax(0, 2fr) minmax(120px, auto);
     align-items: center;
-    gap: 10px;
+    gap: 4px 10px;
   }
+  .budget-fc { grid-column: 1 / -1; font-size: var(--fs-xs); color: var(--text-dim); }
+  .budget-fc.fc-warn { color: var(--warning); }
+  .budget-fc.fc-bad { color: var(--danger); }
+  .budget-fc.fc-ok { color: var(--success); }
   .budget-name {
     font-size: var(--fs-s);
     display: flex;

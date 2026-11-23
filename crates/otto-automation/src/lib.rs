@@ -19,6 +19,7 @@ pub mod goal_loop_graph;
 pub mod goal_loop_parse;
 pub mod goal_loop_policy;
 pub mod goal_loop_roles;
+pub mod goal_loop_steering;
 pub mod goal_loop_workspace;
 pub mod report_delivery;
 pub mod scheduled_tasks_engine;

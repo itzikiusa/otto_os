@@ -11,6 +11,7 @@
   //   3. create the kept ones (passwords are never imported — the user sets them
   //      after, exactly like a hand-made connection).
   import Modal from '../../lib/components/Modal.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { toastError } from '../../lib/toastError';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -56,6 +57,7 @@
   // Step 2 — scan of one tool.
   let activeSource = $state<ImportSource | null>(null);
   let scanning = $state(false);
+  let scanSeq = 0;
   let scanPath = $state<string | null>(null);
   let warnings = $state<string[]>([]);
   let rows = $state<ParsedConnection[]>([]);
@@ -86,6 +88,9 @@
 
   $effect(() => {
     void loadSources();
+    return () => {
+      scanSeq++;
+    };
   });
 
   async function loadSources(): Promise<void> {
@@ -103,6 +108,7 @@
 
   async function pick(s: SourceStatus): Promise<void> {
     if (!s.present || scanning) return;
+    const seq = ++scanSeq;
     activeSource = s.source;
     step = 'preview';
     scanning = true;
@@ -112,6 +118,7 @@
     scanPath = s.path ?? null;
     try {
       const [res, saved] = await Promise.all([importScan(wsId, s.source), api.get<Connection[]>(`/workspaces/${wsId}/connections`)]);
+      if (seq !== scanSeq) return;
       existing = saved;
       targets = res.connections.map(c => { const matches = saved.filter(e => e.name === c.name && e.kind === c.kind); return matches.length === 1 ? matches[0].id : ''; });
       actions = res.connections.map((c, i) => targets[i] || !c.supported ? 'skip' : 'create');
@@ -121,17 +128,20 @@
       // Supported rows are kept by default; unsupported can never be selected.
       keep = res.connections.map((c) => c.supported);
     } catch (e) {
+      if (seq !== scanSeq) return;
       toastError('Couldn’t scan for connections', e);
       // Drop back to the picker so the user can retry / choose another tool.
       step = 'pick';
       activeSource = null;
     } finally {
-      scanning = false;
+      if (seq === scanSeq) scanning = false;
     }
   }
 
   function backToPick(): void {
     if (creating) return;
+    scanSeq++;
+    scanning = false;
     step = 'pick';
     activeSource = null;
     rows = [];
@@ -229,10 +239,7 @@
           <span class="imp-loading-text">Looking for installed tools…</span>
         </div>
       {:else if sourcesError}
-        <div class="imp-error">
-          <span>Couldn’t look for installed tools. {sourcesError}</span>
-          <button class="btn small" onclick={() => void loadSources()}>Retry</button>
-        </div>
+        <LoadState variant="compact" what="installed tools" error={sourcesError} empty onretry={() => void loadSources()} />
       {:else}
         <div class="tool-grid">
           {#each sources as s (s.source)}
@@ -327,7 +334,7 @@
                 <input
                   type="checkbox"
                   class="row-check"
-                  checked={keep[i] ?? false}
+                  checked={Boolean(keep[i])}
                   disabled={!c.supported}
                   onchange={() => toggleRow(i)}
                   aria-label={`Import ${c.name}`}
@@ -404,14 +411,6 @@
     margin: 0;
     font-size: var(--fs-s);
     color: var(--text-dim);
-    line-height: 1.5;
-  }
-  .imp-error {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: var(--fs-s);
-    color: var(--danger);
     line-height: 1.5;
   }
   .imp-empty {

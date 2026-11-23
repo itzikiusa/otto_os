@@ -203,6 +203,13 @@ impl Fixture {
     }
 
     async fn approve(&self, preview: Value, accepted: bool) -> Result<Value> {
+        // Driven outside the engine, so mark the run `running` the way the
+        // engine does: `human_approval` refuses to pause any other run.
+        sqlx::query("UPDATE workflow_runs SET status='running' WHERE id=?")
+            .bind(&self.run.id)
+            .execute(&self.ctx.pool)
+            .await
+            .unwrap();
         let pending = self.execute(&self.graph.nodes[1], preview);
         let decision = async {
             tokio::time::timeout(Duration::from_secs(5), async {

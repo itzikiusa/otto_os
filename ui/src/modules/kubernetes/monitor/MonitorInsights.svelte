@@ -17,6 +17,7 @@
   import { personalAgentsApi } from '../../../lib/api/personalAgents';
   import type { PersonalAgent, PersonalAgentRun } from '../../../lib/api/types';
   import Icon from '../../../lib/components/Icon.svelte';
+  import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
@@ -148,7 +149,7 @@
   {:else}
     <div class="head card">
       <div class="who">
-        <span class="avatar">{agent.avatar || '🛡️'}</span>
+        <span class="avatar" aria-hidden="true"><ProviderIcon provider={agent.provider || 'claude'} size={20} /></span>
         <div>
           <div class="name">{agent.name}</div>
           <div class="dim small">{agent.provider}{agent.model ? ` · ${agent.model}` : ''}{agent.enabled ? '' : ' · disabled'}</div>

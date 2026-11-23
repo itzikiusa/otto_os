@@ -4,6 +4,7 @@
   // (`otto-usage` ccusage.rs `VERSION`) locally with a timeout and
   // returns its numbers next to Otto's for the same dates, every session
   // (external included) on both sides.
+  import { announceShown } from '../../lib/announce.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { formatCount, formatUsd } from '../../lib/metric-format';
@@ -63,7 +64,7 @@
   {:else if usage.ccusageError}
     <LoadState what="the ccusage comparison" error={usage.ccusageError} empty onretry={() => usage.runCcusage(days)} />
   {:else if check && !check.ran}
-    <div class="cc-error" role="alert">
+    <div class="cc-error" use:announceShown={{ text: `ccusage didn’t run: ${check.error ?? 'no output'}`, assertive: true }}>
       <Icon name="warning" size={14} />
       <div>
         <div>ccusage didn’t run: {check.error ?? 'no output'}</div>

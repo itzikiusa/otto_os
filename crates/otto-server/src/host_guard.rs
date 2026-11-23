@@ -159,16 +159,62 @@ fn misdirected() -> Response {
         .into_response()
 }
 
+fn missing_host() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        axum::Json(otto_core::api::Problem {
+            code: "invalid".into(),
+            message: "missing Host header or :authority".into(),
+        }),
+    )
+        .into_response()
+}
+
+fn missing_required_host(req: &Request) -> bool {
+    req.version() >= axum::http::Version::HTTP_11
+        && req
+            .extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .is_some()
+}
+
+/// Extract the request's host/authority from the `Host` header OR the HTTP/2
+/// `:authority` pseudo-header (`uri.authority()`).
+///
+/// Over HTTP/2 (negotiated via ALPN on the TLS network listener and by h2c
+/// proxies), clients send `:authority` instead of `Host`, so reading only
+/// `header::HOST` bypassed host validation, broke LAN/Tailscale CORS, and
+/// misclassified remote peers as `Local`. If BOTH `Host` and `:authority` are
+/// present and disagree on their normalized host name, fail closed (`Err(())`).
+pub(crate) fn request_host_raw<'a>(
+    headers: &'a axum::http::HeaderMap,
+    uri: &'a axum::http::Uri,
+) -> Result<Option<&'a str>, ()> {
+    let hdr = match headers.get(header::HOST) {
+        Some(v) => Some(v.to_str().map_err(|_| ())?),
+        None => None,
+    };
+    let auth = uri.authority().map(|a| a.as_str());
+    match (hdr, auth) {
+        (Some(h), Some(a)) if host_of(h) != host_of(a) => Err(()),
+        (Some(h), _) => Ok(Some(h)),
+        (None, Some(a)) => Ok(Some(a)),
+        (None, None) => Ok(None),
+    }
+}
+
 /// Static-only middleware (no settings lookup) — for routers without a DB.
 pub async fn host_guard(req: Request, next: Next) -> Response {
-    if let Some(h) = req.headers().get(header::HOST) {
-        let ok = h
-            .to_str()
-            .map(|v| host_allowed(&host_of(v)))
-            .unwrap_or(false);
-        if !ok {
+    let raw = match request_host_raw(req.headers(), req.uri()) {
+        Ok(v) => v,
+        Err(()) => return misdirected(),
+    };
+    if let Some(v) = raw {
+        if !host_allowed(&host_of(v)) {
             return misdirected();
         }
+    } else if missing_required_host(&req) {
+        return missing_host();
     }
     next.run(req).await
 }
@@ -284,11 +330,12 @@ pub async fn host_guard_with_settings(
 ) -> Response {
     let mut host: Option<String> = None;
     let mut trusted_header: Option<String> = None;
-    if let Some(h) = req.headers().get(header::HOST) {
-        let Ok(raw) = h.to_str() else {
-            return misdirected();
-        };
-        let name = host_of(raw);
+    let raw_host = match request_host_raw(req.headers(), req.uri()) {
+        Ok(v) => v.map(str::to_owned),
+        Err(()) => return misdirected(),
+    };
+    if let Some(raw) = raw_host {
+        let name = host_of(&raw);
         let statically_ok = host_allowed(&name);
         // The tunnel host is a DNS name; a loopback/IP-literal Host never is,
         // so the desktop hot path never consults the settings cache.
@@ -308,6 +355,8 @@ pub async fn host_guard_with_settings(
                 .map(str::to_string);
         }
         host = Some(name);
+    } else if missing_required_host(&req) {
+        return missing_host();
     }
     match stamp_client_ip(&mut req, host.as_deref(), trusted_header.as_deref()) {
         Some(peer) => otto_core::auth::with_request_peer(peer, next.run(req)).await,
@@ -340,7 +389,7 @@ fn stamp_client_ip(
         .and_then(|h| req.headers().get(h))
         .and_then(|v| v.to_str().ok());
     let ip = resolve_client_ip(peer, trusted_header.is_some(), forwarded);
-    let local = peer.is_loopback() && host.is_none_or(is_loopback_name);
+    let local = peer.is_loopback() && host.is_some_and(is_loopback_name);
     req.extensions_mut().insert(ClientIp { ip, local });
     Some(classified)
 }
@@ -465,5 +514,145 @@ mod tests {
             let r = app.clone().oneshot(req(ok)).await.unwrap();
             assert_eq!(r.status(), StatusCode::OK, "{ok:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn middleware_enforces_http2_authority_and_rejects_host_mismatch() {
+        use axum::body::Body;
+        use axum::http::{Request, Version};
+        use tower::ServiceExt;
+        let app = axum::Router::new()
+            .fallback(|| async { "ok" })
+            .layer(axum::middleware::from_fn(host_guard));
+
+        // HTTP/2 `:authority` with no `Host` header: foreign host MUST be rejected.
+        let h2_bad = Request::builder()
+            .version(Version::HTTP_2)
+            .uri("https://evil.example:7443/api/v1/health")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(h2_bad).await.unwrap().status(),
+            StatusCode::MISDIRECTED_REQUEST
+        );
+
+        // HTTP/2 `:authority` with an allowed host passes.
+        let h2_ok = Request::builder()
+            .version(Version::HTTP_2)
+            .uri("https://192.168.1.20:7443/api/v1/health")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(h2_ok).await.unwrap().status(),
+            StatusCode::OK
+        );
+
+        // Disagreement between `Host` and `:authority` MUST fail closed.
+        let mismatch = Request::builder()
+            .version(Version::HTTP_2)
+            .uri("https://evil.example:7443/api/v1/health")
+            .header(header::HOST, "localhost:7443")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(mismatch).await.unwrap().status(),
+            StatusCode::MISDIRECTED_REQUEST
+        );
+
+        // Matching `Host` and `:authority` (case-insensitive) passes.
+        let matching = Request::builder()
+            .version(Version::HTTP_2)
+            .uri("https://LocalHost:7443/api/v1/health")
+            .header(header::HOST, "localhost:7443")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.oneshot(matching).await.unwrap().status(),
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn http2_authority_classifies_loopback_proxy_peer_as_non_local() {
+        use axum::body::Body;
+        use axum::extract::ConnectInfo;
+        use axum::http::{Request, Version};
+        use otto_core::peer::PeerKind;
+        use otto_sessions::share_throttle::ClientIp;
+        use std::net::SocketAddr;
+        use tower::ServiceExt;
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&pool)
+            .await
+            .unwrap();
+        let state = HostGuardState::new(pool.into());
+
+        let app = axum::Router::new()
+            .fallback(|req: axum::extract::Request| async move {
+                let cip = req.extensions().get::<ClientIp>().cloned().unwrap();
+                let peer = otto_core::auth::request_peer().unwrap();
+                format!("{}:{:?}", cip.local, peer.kind)
+            })
+            .layer(axum::middleware::from_fn_with_state(
+                state,
+                host_guard_with_settings,
+            ));
+
+        // Loopback socket + HTTP/2 `:authority` naming a Funnel/ts.net host (no Host header):
+        // must NOT be classified as Local.
+        let mut req = Request::builder()
+            .version(Version::HTTP_2)
+            .uri("https://my-mac.tail1234.ts.net/api/v1/auth/login")
+            .header("x-forwarded-for", "198.51.100.7")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(
+            "127.0.0.1:44444".parse::<SocketAddr>().unwrap(),
+        ));
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 256).await.unwrap();
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            format!("false:{:?}", PeerKind::Other)
+        );
+
+        // HTTP/2 request on a real socket with NEITHER `Host` NOR `:authority`
+        // MUST fail closed with 400 Bad Request (never treated as Local).
+        let mut h2_missing = Request::builder()
+            .version(Version::HTTP_2)
+            .uri("/api/v1/auth/login")
+            .body(Body::empty())
+            .unwrap();
+        h2_missing.extensions_mut().insert(ConnectInfo(
+            "127.0.0.1:44445".parse::<SocketAddr>().unwrap(),
+        ));
+        let missing_resp = app.clone().oneshot(h2_missing).await.unwrap();
+        assert_eq!(missing_resp.status(), StatusCode::BAD_REQUEST);
+
+        // HTTP/1.0 without Host on loopback still fails closed on Local/PeerKind.
+        let mut h10_missing = Request::builder()
+            .version(Version::HTTP_10)
+            .uri("/api/v1/auth/login")
+            .body(Body::empty())
+            .unwrap();
+        h10_missing.extensions_mut().insert(ConnectInfo(
+            "127.0.0.1:44446".parse::<SocketAddr>().unwrap(),
+        ));
+        let h10_resp = app.oneshot(h10_missing).await.unwrap();
+        assert_eq!(h10_resp.status(), StatusCode::OK);
+        let h10_body = axum::body::to_bytes(h10_resp.into_body(), 256)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&h10_body).unwrap(),
+            format!("false:{:?}", PeerKind::Other)
+        );
     }
 }

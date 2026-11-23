@@ -215,6 +215,8 @@ async fn create_account<S: IssuesCtx>(
             }
         }
     }
+    crate::atlassian::validate_account_base_url(&req.base_url)
+        .map_err(|e| Error::Invalid(format!("base_url: {e}")))?;
     let token_ref = format!("issueacct-{}", new_id());
     otto_core::secrets::put_async(s.secrets(), &token_ref, &req.token).await?;
     let created = s
@@ -251,6 +253,8 @@ async fn update_account<S: IssuesCtx>(
     let label = req.label.as_deref().unwrap_or(&account.label);
     let email = req.email.as_deref().unwrap_or(&account.email);
     let base_url = req.base_url.as_deref().unwrap_or(&account.base_url);
+    crate::atlassian::validate_account_base_url(base_url)
+        .map_err(|e| Error::Invalid(format!("base_url: {e}")))?;
     // Repointing the account at another HOST must come with a fresh token:
     // the stored one would otherwise be sent (as `email:token` Basic auth) to
     // whatever host the caller names — a PAT or a prompt-injected agent could
@@ -867,38 +871,95 @@ async fn assign_issue<S: IssuesCtx>(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// True only for passive media types that browsers can render inline without
+/// active script execution (safe raster images, audio/video streams, PDF).
+/// Active or sniffable formats (`text/html`, `image/svg+xml`, `application/xml`,
+/// `text/javascript`, etc.) return `false` so responses carry a strict sandbox
+/// CSP and `Content-Disposition: attachment`.
+pub(crate) fn is_passive_attachment_mime(mime: &str) -> bool {
+    let essence = mime
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    match essence.as_str() {
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif" | "image/bmp"
+        | "image/x-icon" | "application/pdf" => true,
+        _ => {
+            (essence.starts_with("audio/") && essence.len() > "audio/".len())
+                || (essence.starts_with("video/") && essence.len() > "video/".len())
+        }
+    }
+}
+
+fn build_attachment_response(mime: &str, bytes: Vec<u8>) -> Response {
+    let (content_type, passive) = match HeaderValue::from_str(mime) {
+        Ok(hv) => (hv, is_passive_attachment_mime(mime)),
+        Err(_) => (HeaderValue::from_static("application/octet-stream"), false),
+    };
+
+    let mut builder = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+    if !passive {
+        builder = builder
+            .header(
+                header::CONTENT_SECURITY_POLICY,
+                "sandbox; default-src 'none'",
+            )
+            .header(header::CONTENT_DISPOSITION, "attachment");
+    }
+
+    builder.body(Body::from(bytes)).unwrap_or_else(|_| {
+        Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::empty())
+            .unwrap()
+    })
+}
+
+fn verify_attachment_belongs_to_issue(
+    attachments: &[crate::jira::JiraAttachment],
+    key: &str,
+    attachment_id: &str,
+) -> Result<(), Error> {
+    if attachments.iter().any(|a| a.id == attachment_id) {
+        Ok(())
+    } else {
+        Err(Error::NotFound(format!(
+            "attachment {attachment_id} does not belong to issue {key}"
+        )))
+    }
+}
+
 /// `GET /issue/{account_id}/{key}/attachment/{attachment_id}`
 ///
 /// Proxies the attachment bytes from Jira (keeping the auth token server-side).
-/// Sets the correct `Content-Type` header from the upstream response so the
-/// browser can render images / PDFs directly.
+/// Verifies that `attachment_id` actually belongs to `{key}`, and sets the
+/// correct `Content-Type` header from the upstream response so the browser can
+/// render safe images / PDFs directly while sandboxing active types (HTML, SVG,
+/// XML, JS, …) as downloadable attachments.
 async fn get_attachment<S: IssuesCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
-    Path((account_id, _key, attachment_id)): Path<(Id, String, String)>,
+    Path((account_id, key, attachment_id)): Path<(Id, String, String)>,
 ) -> ApiResult<Response> {
     let account = load_authorized_account(&s, &account_id, &user).await?;
     let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
         .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = Tracker::for_account(&account, &token);
+    // Only Jira proxies attachments: a Linear account must get its 400 from
+    // `attachment_bytes` without first sending its key upstream for this lookup.
+    if let Some(jira) = client.as_jira() {
+        let issue = jira.get_issue_full(&key).await?;
+        verify_attachment_belongs_to_issue(&issue.attachments, &key, &attachment_id)?;
+    }
     let (mime, bytes) = client.attachment_bytes(&attachment_id).await?;
 
-    let content_type = HeaderValue::from_str(&mime)
-        .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
-
-    let response = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .body(Body::from(bytes))
-        .unwrap_or_else(|_| {
-            Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::empty())
-                .unwrap()
-        });
-
-    Ok(response)
+    Ok(build_attachment_response(&mime, bytes))
 }
 
 /// `GET /issue/{account_id}/{project_key}/issue-types`
@@ -1158,5 +1219,84 @@ mod tests {
             require_token_for_host_change(cur, "https://ACME.atlassian.net/wiki/", None).is_ok()
         );
         assert!(require_token_for_host_change(cur, cur, None).is_ok());
+    }
+
+    #[test]
+    fn attachment_response_sets_nosniff_and_sandboxes_active_types() {
+        for passive in [
+            "image/png",
+            "image/jpeg",
+            "image/gif",
+            "image/webp",
+            "image/avif",
+            "image/bmp",
+            "image/x-icon",
+            "application/pdf",
+            "audio/mpeg",
+            "video/mp4",
+        ] {
+            let resp = build_attachment_response(passive, b"ok".to_vec());
+            assert_eq!(
+                resp.headers().get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+                "nosniff",
+                "{passive}"
+            );
+            assert!(
+                resp.headers()
+                    .get(header::CONTENT_SECURITY_POLICY)
+                    .is_none(),
+                "{passive}"
+            );
+            assert!(
+                resp.headers().get(header::CONTENT_DISPOSITION).is_none(),
+                "{passive}"
+            );
+        }
+
+        for active in [
+            "text/html",
+            "text/html; charset=utf-8",
+            "image/svg+xml",
+            "application/xml",
+            "text/xml",
+            "text/javascript",
+            "application/javascript",
+            "application/octet-stream",
+            "invalid\r\nheader",
+        ] {
+            let resp = build_attachment_response(active, b"<svg/>".to_vec());
+            assert_eq!(
+                resp.headers().get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+                "nosniff",
+                "{active}"
+            );
+            assert_eq!(
+                resp.headers().get(header::CONTENT_SECURITY_POLICY).unwrap(),
+                "sandbox; default-src 'none'",
+                "{active}"
+            );
+            assert_eq!(
+                resp.headers().get(header::CONTENT_DISPOSITION).unwrap(),
+                "attachment",
+                "{active}"
+            );
+        }
+    }
+
+    #[test]
+    fn verify_attachment_belongs_to_issue_checks_membership() {
+        let attachments = vec![crate::jira::JiraAttachment {
+            id: "1001".into(),
+            filename: "diagram.png".into(),
+            mime: "image/png".into(),
+            size: 42,
+            created: String::new(),
+            author: String::new(),
+        }];
+        assert!(verify_attachment_belongs_to_issue(&attachments, "ENG-1", "1001").is_ok());
+        assert!(matches!(
+            verify_attachment_belongs_to_issue(&attachments, "ENG-1", "9999"),
+            Err(Error::NotFound(_))
+        ));
     }
 }

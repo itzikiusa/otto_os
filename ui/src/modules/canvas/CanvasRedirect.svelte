@@ -31,32 +31,40 @@
     hallId = copy && copy !== 'unavailable' ? copy.id : null;
   }
 
+  let alive = true;
+
   async function openEditor(): Promise<void> {
     editorFailed = false;
     canvas.pendingOpenId = sceneId; // CanvasPage opens it on mount
     try {
-      Editor = (await import('./CanvasPage.svelte')).default as Component;
+      const mod = (await import('./CanvasPage.svelte')).default as Component;
+      if (!alive) return;
+      Editor = mod;
     } catch {
-      editorFailed = true;
+      if (alive) editorFailed = true;
     }
   }
 
   onMount(() => {
+    alive = true;
     sceneId = canvas.pendingOpenId ?? router.parts[1] ?? null;
     canvas.pendingOpenId = null;
     if (!sceneId) {
       router.replace('design/studio/whiteboard');
-      return;
+      return () => { alive = false; };
     }
     const id = sceneId;
     if (router.parts[2] === 'editor') {
       // The caller already looked for a Hall copy: open now, explain once known.
       explain(null);
       void openEditor();
-      void findSceneHallCopy(id, 1).then(explain);
-      return;
+      void findSceneHallCopy(id, 1).then((copy) => {
+        if (alive) explain(copy);
+      });
+      return () => { alive = false; };
     }
     void findSceneHallCopy(id).then((copy) => {
+      if (!alive) return;
       if (opensInHall(copy)) {
         router.replace(`design/a/${encodeURIComponent(copy.id)}`);
         return;
@@ -64,6 +72,7 @@
       explain(copy);
       void openEditor();
     });
+    return () => { alive = false; };
   });
 </script>
 

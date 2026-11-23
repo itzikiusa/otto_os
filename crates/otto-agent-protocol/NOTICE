@@ -23,6 +23,8 @@ finished child threads release their agent process), #33151, #29208 and
 progress for the stall watchdog), #37335 (Grok steering through
 `_x.ai/interject`), #33124 and #34181 (quote a passage of an answer into
 the composer), #10439 (find in a thread), #15907 and #30257 (a private secret request card).
+Ported from T3 Code main on 2026-11-19 (behaviour only): #39049 (an idle-released
+thread keeps nothing loaded once its agent process is gone).
 Threads
 inside a thread (`src/runtime/children.rs` and Otto's Threads UI) follow
 `apps/web/src/components/chat/V2LifecycleRow.tsx` (`SubagentTimelineLink`,

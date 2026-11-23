@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 
 pub(crate) use self::runner_cmd_langs::find_build_wrapper;
 use self::runner_cmd_langs::{
-    build_custom_cmd, build_gradle_cmd, build_java_main_cmd, build_maven_cmd, build_npm_cmd,
-    build_pytest_cmd, build_script_cmd, build_shell_cmd, build_vitest_cmd,
+    build_custom_cmd, build_flutter_cmd, build_gradle_cmd, build_java_main_cmd, build_maven_cmd,
+    build_npm_cmd, build_pytest_cmd, build_react_native_cmd, build_script_cmd, build_shell_cmd,
+    build_vitest_cmd, build_xcode_cmd,
 };
 pub(crate) use self::runner_java::pytest_rootdir;
 pub(super) use self::runner_java::{
@@ -63,33 +64,46 @@ pub(super) fn resolve_run_cwd(target: &IdeTargetSpec, raw_cwd: Option<&str>) -> 
     else {
         return target.root.clone();
     };
-    if c.starts_with('/') {
-        let extra = target.merged_extra_roots();
-        let allowed_roots =
-            std::iter::once(target.root.as_str()).chain(extra.iter().map(String::as_str));
-        if target.kind == IdeTargetKind::Local {
-            if let Ok(canon_c) = std::fs::canonicalize(c) {
-                for allowed in allowed_roots.clone() {
-                    if let Ok(canon_root) = std::fs::canonicalize(allowed) {
-                        if canon_c.starts_with(&canon_root) {
-                            return canon_c.to_string_lossy().into_owned();
-                        }
+    if c.chars().any(char::is_control) {
+        return target.root.clone();
+    }
+    let extra = target.merged_extra_roots();
+    match target.kind {
+        IdeTargetKind::Local => {
+            let candidate = if Path::new(c).is_absolute() {
+                PathBuf::from(c)
+            } else {
+                if Path::new(c)
+                    .components()
+                    .any(|comp| matches!(comp, std::path::Component::ParentDir))
+                {
+                    return target.root.clone();
+                }
+                Path::new(&target.root).join(c)
+            };
+            let Some(canon_c) = std::fs::canonicalize(&candidate)
+                .ok()
+                .or_else(|| otto_core::secret_paths::canonicalize_prospective(&candidate))
+            else {
+                return target.root.clone();
+            };
+            let allowed_roots =
+                std::iter::once(target.root.as_str()).chain(extra.iter().map(String::as_str));
+            for allowed in allowed_roots {
+                if let Ok(canon_root) = std::fs::canonicalize(allowed) {
+                    if canon_c.starts_with(&canon_root) {
+                        return canon_c.to_string_lossy().into_owned();
                     }
                 }
             }
+            target.root.clone()
         }
-        for allowed in allowed_roots {
-            if c == allowed || c.starts_with(&format!("{}/", allowed.trim_end_matches('/'))) {
-                return c.to_string();
-            }
+        IdeTargetKind::Ssh => {
+            crate::target::ssh_exec::resolve_remote_in_roots(&target.root, &extra, c)
+                .map(|(resolved, _)| resolved)
+                .unwrap_or_else(|_| target.root.clone())
         }
-        return target.root.clone();
     }
-    if c.contains("..") {
-        return target.root.clone();
-    }
-    let rel = c.trim_start_matches("./");
-    format!("{}/{rel}", target.root.trim_end_matches('/'))
 }
 
 pub(super) fn csv_list(items: &[String]) -> String {
@@ -425,8 +439,141 @@ pub(super) fn build_runner_command(
             build_gradle_cmd(cfg, target_kind, cwd, cmd_opt, args, build_flags, filter)
         }
         IdeRunnerKind::Shell => build_shell_cmd(cfg, cmd_opt, args, build_flags),
+        IdeRunnerKind::Xcode => build_xcode_cmd(env_map, cmd_opt, args, build_flags),
+        IdeRunnerKind::Flutter => build_flutter_cmd(env_map, cmd_opt, args, build_flags),
+        IdeRunnerKind::ReactNative => build_react_native_cmd(env_map, cmd_opt, args, build_flags),
         IdeRunnerKind::Compound | IdeRunnerKind::Custom => {
             build_custom_cmd(cmd_opt, args, build_flags)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_run_cwd;
+    use crate::types::{IdeTargetKind, IdeTargetSpec};
+
+    fn local_target(root: &std::path::Path, extra: Vec<String>) -> IdeTargetSpec {
+        IdeTargetSpec {
+            kind: IdeTargetKind::Local,
+            workspace_id: None,
+            root: root.to_string_lossy().into_owned(),
+            connection_id: None,
+            additional_roots: extra,
+            project_folders: vec![],
+        }
+    }
+
+    fn ssh_target(root: &str, extra: Vec<String>) -> IdeTargetSpec {
+        IdeTargetSpec {
+            kind: IdeTargetKind::Ssh,
+            workspace_id: None,
+            root: root.into(),
+            connection_id: Some("conn-1".into()),
+            additional_roots: extra,
+            project_folders: vec![],
+        }
+    }
+
+    #[test]
+    fn resolve_run_cwd_local_blocks_dotdot_and_symlink_escapes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspace");
+        let sub = root.join("pkg");
+        let extra = tmp.path().join("extra");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(&extra).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, root.join("escape_link")).unwrap();
+
+        let target = local_target(&root, vec![extra.to_string_lossy().into_owned()]);
+        let canon_sub = sub.canonicalize().unwrap().to_string_lossy().into_owned();
+        let canon_extra = extra.canonicalize().unwrap().to_string_lossy().into_owned();
+
+        // Legitimate subdirs (relative, absolute, and extra root) resolve cleanly.
+        assert_eq!(resolve_run_cwd(&target, Some("pkg")), canon_sub);
+        assert_eq!(resolve_run_cwd(&target, Some("./pkg")), canon_sub);
+        assert_eq!(
+            resolve_run_cwd(&target, Some(&sub.to_string_lossy())),
+            canon_sub
+        );
+        assert_eq!(
+            resolve_run_cwd(&target, Some(&extra.to_string_lossy())),
+            canon_extra
+        );
+
+        // Absolute `..` escape must NOT fall through to lexical prefix matching.
+        let abs_dotdot = format!("{}/../outside", root.display());
+        assert_eq!(resolve_run_cwd(&target, Some(&abs_dotdot)), target.root);
+
+        // Nonexistent intermediate + `..` escape must also fail closed to root.
+        let missing_dotdot = format!("{}/nonexistent/../../outside", root.display());
+        assert_eq!(resolve_run_cwd(&target, Some(&missing_dotdot)), target.root);
+
+        // Relative `..` escape.
+        assert_eq!(resolve_run_cwd(&target, Some("../outside")), target.root);
+
+        // Absolute and relative symlink escapes must fail closed to root.
+        let abs_symlink = root.join("escape_link").to_string_lossy().into_owned();
+        assert_eq!(resolve_run_cwd(&target, Some(&abs_symlink)), target.root);
+        assert_eq!(resolve_run_cwd(&target, Some("escape_link")), target.root);
+
+        // Symlink escape with nonexistent child tail.
+        let symlink_tail = format!("{}/escape_link/future", root.display());
+        assert_eq!(resolve_run_cwd(&target, Some(&symlink_tail)), target.root);
+    }
+
+    #[test]
+    fn resolve_run_cwd_ssh_blocks_dotdot_on_absolute_and_relative_paths() {
+        let target = ssh_target("/srv/app", vec!["/srv/lib".into()]);
+
+        // Valid relative, absolute, extra-root, and internally normalized paths.
+        assert_eq!(
+            resolve_run_cwd(&target, Some("cmd/api")),
+            "/srv/app/cmd/api"
+        );
+        assert_eq!(
+            resolve_run_cwd(&target, Some("./cmd/api")),
+            "/srv/app/cmd/api"
+        );
+        assert_eq!(
+            resolve_run_cwd(&target, Some("/srv/app/pkg")),
+            "/srv/app/pkg"
+        );
+        assert_eq!(
+            resolve_run_cwd(&target, Some("/srv/app/a/../b")),
+            "/srv/app/b"
+        );
+        assert_eq!(
+            resolve_run_cwd(&target, Some("/srv/lib/mod")),
+            "/srv/lib/mod"
+        );
+
+        // Absolute and relative `..` escapes and sibling-prefix tricks fall back to root.
+        assert_eq!(
+            resolve_run_cwd(&target, Some("/srv/app/../etc")),
+            "/srv/app"
+        );
+        assert_eq!(
+            resolve_run_cwd(&target, Some("/srv/app/../../etc")),
+            "/srv/app"
+        );
+        assert_eq!(resolve_run_cwd(&target, Some("../etc")), "/srv/app");
+        assert_eq!(resolve_run_cwd(&target, Some("/srv/app2")), "/srv/app");
+        assert_eq!(resolve_run_cwd(&target, Some("/etc")), "/srv/app");
+
+        // Tilde roots are confined too.
+        let tilde_target = ssh_target("~/app", vec![]);
+        assert_eq!(
+            resolve_run_cwd(&tilde_target, Some("~/app/sub")),
+            "~/app/sub"
+        );
+        assert_eq!(
+            resolve_run_cwd(&tilde_target, Some("~/app/../../etc")),
+            "~/app"
+        );
+        assert_eq!(resolve_run_cwd(&tilde_target, Some("~/other")), "~/app");
     }
 }

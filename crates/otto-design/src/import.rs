@@ -568,6 +568,7 @@ async fn sync_attachment(
         created_at: parse_ts(&r.created_at),
         version_kind: Some("import".into()),
         validate: false,
+        provenance: None,
     };
     match svc.create_artifact(input).await {
         Ok(saved) => {
@@ -760,6 +761,7 @@ async fn sync_scene(
         created_at: Some(created_at),
         version_kind: Some("import".into()),
         validate: false,
+        provenance: None,
     };
     match svc.create_artifact(input).await {
         Ok(saved) => {
@@ -1146,6 +1148,7 @@ mod tests {
                 created_at: None,
                 version_kind: None,
                 validate: true,
+                provenance: None,
             })
             .await
             .unwrap();

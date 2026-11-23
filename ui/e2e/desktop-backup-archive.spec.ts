@@ -52,7 +52,9 @@ test('data archives include feature records and Vault files with reviewed additi
     archive.files[0].content_base64 = Buffer.from('tampered').toString('base64');
     await card.locator('input[type=file]').setInputFiles({ name: 'tampered.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(archive)) });
     await card.getByRole('button', { name: 'Preview restore', exact: true }).click();
-    await expect(card.getByRole('alert')).toBeVisible();
+    const error = 'Archive asset hash/size validation failed';
+    await expect(card.getByText(error, { exact: false })).toBeVisible();
+    await expect(page.getByTestId('announcer-assertive')).toContainText(error);
     await expect(card.getByRole('button', { name: 'Restore new items', exact: true })).toHaveCount(0);
   } finally { await ctx.dispose(); }
 });

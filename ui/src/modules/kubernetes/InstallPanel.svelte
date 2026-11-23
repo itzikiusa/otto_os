@@ -11,6 +11,7 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import type { K8sTool } from '../../lib/api/types';
 
   interface Props {
@@ -23,7 +24,7 @@
 
   const POLL_MS = 1500;
   const job = $derived(k8s.status?.install[tool] ?? null);
-  const installed = $derived(k8s.status?.[tool].installed ?? false);
+  const installed = $derived(k8s.status?.[tool].installed === true);
   const canInstall = $derived(auth.can('kubernetes', 'admin'));
   let starting = $state(false);
   let logOpen = $state(false);
@@ -90,17 +91,34 @@
     <div class="indeterminate" role="progressbar" aria-label="Installing {label}" aria-busy="true"></div>
     <div class="dim">Installing… this can take a minute (polling every 1.5 s).</div>
   {:else if job?.state === 'failed'}
-    <div class="fail">
-      <Icon name="warning" size={14} />
-      <span>Couldn’t install {label}{job.error ? `: ${job.error}` : ''}.</span>
-    </div>
+    <LoadState
+      variant="compact"
+      what={label}
+      errorTitle={`Couldn’t install ${label}`}
+      error={job.error || 'The installer exited with an error.'}
+      empty={true}
+      loading={starting}
+      onretry={canInstall ? () => void start() : undefined}
+    >
+      {#snippet errorActions()}
+        {#if !canInstall}
+          <span class="dim">Ask an Otto admin to install {label} (needs the Kubernetes admin grant).</span>
+        {/if}
+        <button class="btn ghost small" onclick={() => void k8s.loadStatus()} title="Re-check">
+          <Icon name="refresh" size={13} /> Re-check
+        </button>
+        {#if !compact && oncontinue}
+          <button class="btn ghost small dim" onclick={oncontinue}>Continue without installing</button>
+        {/if}
+      {/snippet}
+    </LoadState>
   {/if}
 
-  {#if !installed}
+  {#if !installed && job?.state !== 'failed'}
     <div class="actions">
       {#if canInstall}
         <button class="btn primary" onclick={() => void start()} disabled={starting || job?.state === 'running'}>
-          {job?.state === 'running' ? 'Installing…' : job?.state === 'failed' ? 'Retry install' : `Install ${label}`}
+          {job?.state === 'running' ? 'Installing…' : `Install ${label}`}
         </button>
       {:else}
         <span class="dim">Ask an Otto admin to install {label} (needs the Kubernetes admin grant).</span>
@@ -179,13 +197,6 @@
     color: var(--success);
     font-size: var(--fs-m);
     flex-wrap: wrap;
-  }
-  .fail {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    color: var(--danger);
-    font-size: var(--fs-m);
   }
   .actions {
     display: flex;

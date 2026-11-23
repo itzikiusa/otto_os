@@ -13,6 +13,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { confirmOutward, destWho } from '../../lib/confirmOutward';
   import type { WorkflowTrigger, TriggerKind } from '../../lib/api/types';
   import { buildTriggerSpec, chatBindingHow, defaultTriggerForm, formFromTrigger, EVENT_KINDS } from './triggerForm';
   import { copyTextOrThrow } from '../../lib/clipboard';
@@ -48,13 +49,24 @@
       `  - under 20 minutes`,
   );
   let alive = true;
-  onDestroy(() => { alive = false; });
+  let copiedTimer: ReturnType<typeof setTimeout> | null = null;
+  onDestroy(() => {
+    alive = false;
+    if (copiedTimer) {
+      clearTimeout(copiedTimer);
+      copiedTimer = null;
+    }
+  });
   let copied = $state(false);
   async function copyChat(): Promise<void> {
     try {
       await copyTextOrThrow(chatSnippet);
       copied = true;
-      setTimeout(() => (copied = false), 1500);
+      if (copiedTimer) clearTimeout(copiedTimer);
+      copiedTimer = setTimeout(() => {
+        copied = false;
+        copiedTimer = null;
+      }, 1500);
     } catch {
       toasts.error('Couldn’t copy to the clipboard', 'Select the text and copy it manually.');
     }
@@ -165,13 +177,69 @@
 
   function buildSpec(): Record<string, unknown> { return buildTriggerSpec(form, originalSpec); }
 
+  function formatPreviewTime(iso: string, tz: string): string {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    const zone = tz.trim() || 'UTC';
+    try {
+      return d.toLocaleString(undefined, { timeZone: zone });
+    } catch {
+      return d.toLocaleString();
+    }
+  }
+
+  function outwardDeliveryInfo(spec: Record<string, unknown>): { key: string; where: string; who: string } | null {
+    const ch = typeof spec.result_channel === 'string' ? spec.result_channel.trim() : '';
+    const chat = typeof spec.result_chat === 'string' ? spec.result_chat.trim() : '';
+    const thread = typeof spec.result_thread === 'string' ? spec.result_thread.trim() : '';
+    const webhook = typeof spec.result_webhook === 'string' ? spec.result_webhook.trim() : '';
+    const places: string[] = [];
+    const audiences: string[] = [];
+    if (ch === 'slack' || ch === 'telegram') {
+      const target = chat
+        ? `${ch === 'slack' ? 'Slack channel' : 'Telegram chat'} ${chat}${thread ? ` (thread ${thread})` : ''}`
+        : `the ${ch === 'slack' ? 'Slack' : 'Telegram'} integration’s default channel`;
+      places.push(target);
+      audiences.push(destWho(ch));
+    }
+    if (webhook) {
+      places.push(`webhook ${webhook}`);
+      audiences.push(destWho('webhook'));
+    }
+    if (!places.length) return null;
+    return {
+      key: JSON.stringify([ch, chat, thread, webhook]),
+      where: places.join(' and '),
+      who: audiences.join(' '),
+    };
+  }
+
   async function addTrigger(): Promise<void> {
     if (saving) return;
+    let spec: Record<string, unknown>;
+    try {
+      spec = buildSpec();
+    } catch (e) {
+      toastError(editingId ? 'Couldn’t update the trigger' : 'Couldn’t add the trigger', e);
+      return;
+    }
+    const nextOut = outwardDeliveryInfo(spec);
+    const prevOut = editingId ? outwardDeliveryInfo(originalSpec) : null;
+    if (nextOut && nextOut.key !== prevOut?.key) {
+      const ok = await confirmOutward({
+        verb: editingId ? 'Save and deliver' : 'Add and deliver',
+        title: 'Deliver workflow results outside Otto?',
+        where: nextOut.where,
+        what: `The result of every run of “${workflowName || 'this workflow'}” started by this ${(KIND_LABEL[form.kind] ?? form.kind).toLowerCase()} trigger.`,
+        who: nextOut.who,
+      });
+      if (!ok || !alive) return;
+    }
     saving = true;
     try {
       const t = editingId
-        ? await api.patch<WorkflowTrigger>(`/workflow-triggers/${editingId}`, { spec: buildSpec() })
-        : await api.post<WorkflowTrigger>(`/workflows/${workflowId}/triggers`, { kind: form.kind, spec: buildSpec(), enabled: true });
+        ? await api.patch<WorkflowTrigger>(`/workflow-triggers/${editingId}`, { spec })
+        : await api.post<WorkflowTrigger>(`/workflows/${workflowId}/triggers`, { kind: form.kind, spec, enabled: true });
       if (!alive) return;
       triggers = editingId ? triggers.map((old) => old.id === t.id ? t : old) : [...triggers, t];
       ontriggers?.(triggers);
@@ -357,7 +425,7 @@
       <label class="fl"><span>Result webhook (optional)</span><input dir="ltr" type="url" bind:value={form.resultWebhook} placeholder="https://example.com/result" /></label>
       <button class="btn small" disabled={previewing} onclick={previewTrigger}>{previewing ? 'Checking…' : 'Preview / validate'}</button>
       {#if preview}
-        <div class="hint">{#if preview.length}Next fires ({previewTimezone}):<ul>{#each preview as at}<li>{new Date(at).toLocaleString(undefined, { timeZone: previewTimezone })}</li>{/each}</ul>{:else}Trigger configuration is valid.{/if}</div>
+        <div class="hint">{#if preview.length}Next fires ({previewTimezone.trim() || 'UTC'}):<ul>{#each preview as at, i (`${i}:${at}`)}<li>{formatPreviewTime(at, previewTimezone)}</li>{/each}</ul>{:else}Trigger configuration is valid.{/if}</div>
       {/if}
       <div class="add-btns">
         <button class="btn ghost small" onclick={() => (adding = false)}>Cancel</button>

@@ -7,6 +7,7 @@
   //   #/design/p/<id>         a project           #/design/studio/<id> a studio
   //   #/design/story/<id>     designs for a story #/design/brand       Brand Kit
   //   #/design/learned[/<tab>] Team design rules (`#/design/spatial` → lobby)
+  //   #/design/create[/…]     Create, the plain-words front door (Product's first tab)
   import { onDestroy } from 'svelte';
   import { router } from '../../lib/router.svelte';
   import { toastError } from '../../lib/toastError';
@@ -26,12 +27,17 @@
   import BrandKitPage from './BrandKitPage.svelte';
   import LearnedPage from './LearnedPage.svelte';
   import NewDesignModal from './NewDesignModal.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { parseDesignRoute, studioInfo } from './model';
   import { IMPORT_ACCEPT, importDesignFile } from './create';
   import { library } from './library.svelte';
   import { releaseModelCache } from './studio3d/sources';
 
+  const TtsStudioPage = lazyComponent(() => import('./tts/TtsStudioPage.svelte'));
+  const CreatePage = lazyComponent(() => import('./create/CreatePage.svelte'));
   const route = $derived(parseDesignRoute(router.parts));
+  const inCreate = $derived(router.parts[1] === 'create');
   // Leaving the Design Hall: hand back the cached 3D model blobs (each pins
   // its bytes until revoked; the ones a live scene still holds go on release).
   onDestroy(releaseModelCache);
@@ -76,6 +82,7 @@
       s('3d', '3D scene'),
       s('whiteboard', 'Whiteboard diagram or board'),
       s('brand', 'Brand kit'),
+      { label: 'Voice / TTS Studio', icon: 'volume', action: () => router.go('design/tts') },
       { separator: true },
       { label: 'Import file…', icon: 'download', disabled: !canEdit, action: pickFile },
       { label: 'New project…', icon: 'folder', disabled: !canEdit, action: () => void newProject() },
@@ -148,6 +155,7 @@
       { id: 'design.new-project', title: 'New design project…', group: 'Design Hall', keywords: 'create project epic', run: () => void newProject() },
       { id: 'design.import', title: 'Import design file…', group: 'Design Hall', keywords: 'upload png svg glb html excalidraw', run: pickFile },
       { id: 'design.brand', title: 'Go to Brand Kit', group: 'Design Hall', keywords: 'tokens colors palette typography', run: () => router.go('design/brand') },
+      { id: 'design.tts', title: 'Go to Voice Studio (TTS)', group: 'Design Hall', keywords: 'tts speech voice dialogue audio narration game', run: () => router.go('design/tts') },
       { id: 'design.learned', title: 'Go to team design rules', group: 'Design Hall', keywords: 'what otto learned signals rules memory learning', run: () => router.go('design/learned') },
     ]);
   });
@@ -164,11 +172,14 @@
       actionLabel={auth.can('product', 'view') ? 'Open Stories' : undefined}
       onaction={auth.can('product', 'view') ? () => router.go('product') : undefined}
     />
+  {:else if inCreate}
+    <LazyMount lazy={CreatePage} what="Create" />
   {:else if route.view === 'lobby'}
     <Lobby onnew={newMenu} onimport={pickFile} onnewproject={() => void newProject()} />
   {:else if route.view === 'artifact'}
-    {#key route.id}
-      <ArtifactView id={route.id} />
+    {@const artifactId = route.id.split('?')[0]}
+    {#key artifactId}
+      <ArtifactView id={artifactId} />
     {/key}
   {:else if route.view === 'project'}
     <CollectionView scope={{ kind: 'project', id: route.id }} onnew={openNew} />
@@ -178,6 +189,8 @@
     <CollectionView scope={{ kind: 'story', id: route.id }} onnew={openNew} />
   {:else if route.view === 'brand'}
     <BrandKitPage />
+  {:else if route.view === 'tts'}
+    <LazyMount lazy={TtsStudioPage} what="Voice Studio" />
   {:else if route.view === 'learned'}
     <LearnedPage tab={route.tab} />
   {/if}

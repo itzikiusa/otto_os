@@ -61,6 +61,12 @@ fn hardened_git_ro() -> tokio::process::Command {
 fn ssh_git_env() -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     env.insert("GIT_OPTIONAL_LOCKS".into(), "0".into());
+    env.insert(
+        "GIT_CONFIG_PARAMETERS".into(),
+        otto_git_cmd::HARDENED_GIT_CONFIG.into(),
+    );
+    env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
+    env.insert("GIT_PAGER".into(), "cat".into());
     env
 }
 
@@ -387,6 +393,7 @@ async fn detect_porcelain_rename_orig(toplevel: &Path, rel_path: &str) -> Option
             "-z",
             "-M",
             "--untracked-files=no",
+            "--ignore-submodules=dirty",
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -497,14 +504,9 @@ async fn resolve_ssh_git_toplevel_and_rel(
          ph=$(cd \"$HOME\" 2>/dev/null && pwd -P || printf '%s' \"$HOME\"); \
          printf 'TOP:%s\\nFILE:%s\\nHOME:%s\\n' \"$top\" \"$pf\" \"$ph\""
     );
+    let env = ssh_git_env();
     let out = mgr
-        .exec_shell(
-            target,
-            &script,
-            None,
-            &BTreeMap::new(),
-            SSH_GIT_BASE_TIMEOUT,
-        )
+        .exec_shell(target, &script, None, &env, SSH_GIT_BASE_TIMEOUT)
         .await?;
     if out.exit_code != 0 {
         return Err(Error::Upstream(format!(
@@ -641,11 +643,13 @@ async fn detect_ssh_staged_rename_orig(
         "-z".to_string(),
         "-M".to_string(),
         "--untracked-files=no".to_string(),
+        "--ignore-submodules=dirty".to_string(),
     ];
     let (mut cmd, preamble) = mgr
         .build_piped_command_with_preamble(target, "git", &st_args, None, &env)
         .ok()?;
     let mut child = cmd.spawn().ok()?;
+    let mut guard = PgKillGuard(child.id());
     write_ssh_env_preamble(&mut child, preamble, true)
         .await
         .ok()?;
@@ -664,6 +668,7 @@ async fn detect_ssh_staged_rename_orig(
     .ok()
     .flatten();
     ok?;
+    guard.0 = None;
     parse_porcelain_rename_orig(&buf, rel_path)
 }
 
@@ -828,5 +833,105 @@ pub(super) async fn read_git_base_for_target(
                 truncated: false,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod s22_tests {
+    use super::*;
+
+    #[test]
+    fn ssh_git_env_includes_hardened_git_config_parity() {
+        let env = ssh_git_env();
+        assert_eq!(env.get("GIT_OPTIONAL_LOCKS").map(String::as_str), Some("0"));
+        assert_eq!(
+            env.get("GIT_CONFIG_PARAMETERS").map(String::as_str),
+            Some(otto_git_cmd::HARDENED_GIT_CONFIG)
+        );
+        assert_eq!(
+            env.get("GIT_TERMINAL_PROMPT").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(env.get("GIT_PAGER").map(String::as_str), Some("cat"));
+    }
+
+    #[tokio::test]
+    async fn detect_porcelain_rename_orig_ignores_dirty_submodules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let sub = repo.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let ran = tmp.path().join("filter-ran");
+        let filt = tmp.path().join("filt.sh");
+        std::fs::write(
+            &filt,
+            format!("#!/bin/sh\ntouch '{}'\ncat\n", ran.display()),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&filt, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let git_run = |dir: &Path, args: &[&str]| {
+            let dir = dir.to_path_buf();
+            let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+            async move {
+                let st = otto_git_cmd::hardened_command()
+                    .current_dir(&dir)
+                    .args(&args)
+                    .status()
+                    .await
+                    .unwrap();
+                assert!(st.success(), "git {args:?} failed in {}", dir.display());
+            }
+        };
+        git_run(&repo, &["init", "-q"]).await;
+        std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
+        git_run(&repo, &["add", "a.txt"]).await;
+        git_run(
+            &repo,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "init",
+            ],
+        )
+        .await;
+        git_run(&sub, &["init", "-q"]).await;
+        std::fs::write(sub.join("f"), "a").unwrap();
+        git_run(&sub, &["add", "f"]).await;
+        git_run(
+            &sub,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "s",
+            ],
+        )
+        .await;
+        git_run(&sub, &["config", "filter.x.clean", filt.to_str().unwrap()]).await;
+        std::fs::write(sub.join(".gitattributes"), "* filter=x\n").unwrap();
+        std::fs::write(sub.join("f"), "b").unwrap();
+        git_run(&repo, &["add", "sub"]).await;
+        let _ = std::fs::remove_file(&ran);
+
+        let _ = detect_porcelain_rename_orig(&repo, "a.txt").await;
+        assert!(
+            !ran.exists(),
+            "git_base status ran an embedded submodule's filter.x.clean"
+        );
     }
 }

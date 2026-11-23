@@ -4,6 +4,7 @@
   persona, routines, rules — or in Settings (model, folder, delivery).
 -->
 <script lang="ts">
+  import { newId } from '../../lib/id';
   import { announceShown } from '../../lib/announce.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
@@ -113,7 +114,7 @@
           timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
           directive: t.directive,
           enabled: true,
-          idempotency_key: crypto.randomUUID(),
+          idempotency_key: newId(),
         });
       }
       // The agent exists either way; a refused personality is said, not dropped.

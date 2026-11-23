@@ -88,7 +88,7 @@
   /** Switch between the light version and the full app (one tap, either way). */
   function setLight(on: boolean): void {
     moreOpen = false;
-    lightMode.set(on);
+    void lightMode.set(on);
   }
 
   // "More" is active when the current module lives in the overflow set (or

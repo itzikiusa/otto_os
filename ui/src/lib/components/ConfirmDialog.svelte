@@ -2,6 +2,7 @@
   // Global confirmation / prompt dialog — mounted once in App. Driven by
   // `confirmer`. In prompt mode it shows a text input (native prompt() is a
   // no-op in the Tauri webview).
+  import { announceShown } from '../announce.svelte';
   import Modal from './Modal.svelte';
   import PathField from './PathField.svelte';
   import { confirmer } from '../confirm.svelte';
@@ -42,7 +43,7 @@
         <PathField bind:value={confirmer.inputValue}>{@render promptInput()}</PathField>
       {:else}{@render promptInput()}{/if}
       {#if confirmer.inputError}
-        <p class="field-error" id="cf-input-error" role="alert">{confirmer.inputError}</p>
+        <p class="field-error" id="cf-input-error" use:announceShown={{ text: confirmer.inputError, assertive: true }}>{confirmer.inputError}</p>
       {/if}
     {/if}
     {#if confirmer.choices && confirmer.checkboxLabel}

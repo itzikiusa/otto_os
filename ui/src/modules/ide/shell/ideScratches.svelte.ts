@@ -9,9 +9,13 @@ import { confirmer } from '../../../lib/confirm.svelte';
 import { toastError } from '../../../lib/toastError';
 import { ide } from '../ideStore.svelte';
 import { normalizeRootPath } from './ideProjectHelpers';
+import { sameRootKey, setRecentsExclusion } from './ideProjectRecents.svelte';
 
 /** The folder's absolute path once known. */
 export const scratches = $state({ root: null as string | null });
+
+// Scratches has its own switcher row: never listed as a recent folder.
+setRecentsExclusion((root) => Boolean(scratches.root) && sameRootKey(root) === sameRootKey(scratches.root));
 
 /** The IDE shows the Scratches project right now (reactive). */
 export function onScratches(): boolean {

@@ -15,7 +15,9 @@ import { TOKEN_COLOR_REF } from '../tokenGrammar.ts';
 import {
   EASINGS,
   ENV_PRESET_IDS,
+  GROUND_KINDS,
   LIGHT_TYPES,
+  SKY_BODY_KINDS,
   MATERIAL_PRESET_IDS,
   OBJECT_TYPES,
   SCENE3D_MAX_OBJECTS,
@@ -24,6 +26,7 @@ import {
   SCENE3D_VERSIONS,
   type Easing,
   type EnvPresetId,
+  type GroundKind,
   type LightType,
   type MaterialPresetId,
   type ObjectType,
@@ -38,7 +41,7 @@ import {
   type Scene3dState,
   type Scene3dStateOverride,
   type Vec3,
-} from './types';
+} from './types.ts';
 
 export interface ValidationIssue {
   /** JSON-pointer-ish path (`objects[3].scale`). */
@@ -282,6 +285,11 @@ function object(v: unknown, path: string, ctx: Ctx, seen: Set<string>): Scene3dO
   }
   const vis = bool(v.visible, `${path}.visible`, ctx);
   if (vis !== undefined) out.visible = vis;
+  if (bool(v.backdrop, `${path}.backdrop`, ctx)) out.backdrop = true;
+  if (Array.isArray(v.frame) && v.frame.length === 2) {
+    const [lo, hi] = [vec3(v.frame[0], `${path}.frame[0]`, ctx, null), vec3(v.frame[1], `${path}.frame[1]`, ctx, null)];
+    if (lo && hi) out.frame = [lo, hi];
+  }
   const notes = str(v.notes, `${path}.notes`, ctx, MAX_NOTES);
   if (notes) out.notes = notes;
   seen.add(out.id);
@@ -328,8 +336,12 @@ function light(v: unknown, path: string, ctx: Ctx, seen: Set<string>): Scene3dLi
   if (d !== undefined) out.distance = d;
   const a = nonNeg(v.angle, `${path}.angle`, ctx, 90);
   if (a !== undefined) out.angle = a;
+  const glow = ranged(v.glow, `${path}.glow`, ctx, 0, 20);
+  if (glow !== undefined) out.glow = glow;
   const s = bool(v.shadow, `${path}.shadow`, ctx);
   if (s !== undefined) out.shadow = s;
+  const strength = ranged(v.shadow_intensity, `${path}.shadow_intensity`, ctx, 0, 1);
+  if (strength !== undefined) out.shadow_intensity = strength;
   const vis = bool(v.visible, `${path}.visible`, ctx);
   if (vis !== undefined) out.visible = vis;
   const notes = str(v.notes, `${path}.notes`, ctx, MAX_NOTES);
@@ -503,6 +515,60 @@ export function validate(input: unknown): ValidationResult {
   return { ok: true, doc, issues: ctx.issues };
 }
 
+/** A Smart mode setting's environment fields (each dropped, warned, when malformed). */
+function settingFields(e: Record<string, unknown>, env: Scene3dEnvironment, ctx: Ctx): void {
+  if (e.sky !== undefined) {
+    const sky = Array.isArray(e.sky) && e.sky.length === 3 ? e.sky.map((c, k) => color(c, `environment.sky[${k}]`, ctx)) : [];
+    if (sky.length === 3 && sky.every(Boolean)) env.sky = sky as [string, string, string];
+    else ctx.warn('environment.sky', 'expected three "#rrggbb" colors');
+  }
+  if (isRecord(e.fog)) {
+    const c = color(e.fog.color, 'environment.fog.color', ctx);
+    const d = ranged(e.fog.density, 'environment.fog.density', ctx, 0, 1);
+    if (c && d !== undefined) env.fog = { color: c, density: d };
+  }
+  for (const at of ['ground', 'shore'] as const) {
+    const g = e[at];
+    if (!isRecord(g)) continue;
+    const kind = oneOf<GroundKind>(g.kind, `environment.${at}.kind`, ctx, GROUND_KINDS);
+    const center = vec3(g.center, `environment.${at}.center`, ctx, null);
+    const size = Array.isArray(g.size) ? g.size.map((n, k) => ranged(n, `environment.${at}.size[${k}]`, ctx, 0, 10_000)) : [];
+    if (kind && center && size.length === 2 && size.every((n) => n !== undefined)) env[at] = { kind, center, size: size as [number, number] };
+    if (at === 'ground' && kind === 'road' && env.ground && (g.axis === 'x' || g.axis === 'z')) env.ground.axis = g.axis;
+  }
+  if (isRecord(e.room)) {
+    const h = ranged(e.room.height, 'environment.room.height', ctx, 0.5, 100);
+    if (h !== undefined) env.room = { height: h };
+  }
+  const w = oneOf(e.weather, 'environment.weather', ctx, ['rain', 'snow'] as const);
+  if (w) env.weather = w;
+  const x = ranged(e.exposure, 'environment.exposure', ctx, 0.05, 8);
+  if (x !== undefined) env.exposure = x;
+  if (Array.isArray(e.local_effects)) {
+    const effects = e.local_effects.slice(0, 32).flatMap((v, i) => {
+      if (!isRecord(v)) return [];
+      const at = `environment.local_effects[${i}]`;
+      const kind = oneOf(v.kind, at + '.kind', ctx, ['rain_on_glass', 'steam'] as const);
+      const position = vec3(v.position, at + '.position', ctx, null);
+      const size = Array.isArray(v.size) ? v.size.map((n) => ranged(n, at + '.size', ctx, 0.0001, 10000)) : [];
+      const rotation = ranged(v.rotation, at + '.rotation', ctx, -3600, 3600);
+      return kind && position && size.length === 2 && size.every((n) => n !== undefined) && rotation !== undefined
+        ? [{ kind, position, size: size as [number, number], rotation }] : [];
+    });
+    if (effects.length) env.local_effects = effects;
+  }
+  if (Array.isArray(e.sky_bodies)) {
+    const bodies = e.sky_bodies.slice(0, 8).flatMap((b, k) => {
+      const kind = isRecord(b) ? oneOf(b.kind, `environment.sky_bodies[${k}].kind`, ctx, SKY_BODY_KINDS) : undefined;
+      const direction = isRecord(b) ? vec3(b.direction, `environment.sky_bodies[${k}].direction`, ctx, null) : null;
+      return kind && direction ? [{ kind, direction }] : [];
+    });
+    if (bodies.length) env.sky_bodies = bodies;
+  }
+  const stars = bool(e.stars, 'environment.stars', ctx);
+  if (stars) env.stars = true;
+}
+
 /** v2 top-level blocks. Malformed pieces are dropped (warned), never fatal. */
 function validateV2(input: Record<string, unknown>, doc: Scene3dDoc, ctx: Ctx, objectIds: Set<string>): void {
   if (input.brand !== undefined) {
@@ -521,6 +587,7 @@ function validateV2(input: Record<string, unknown>, doc: Scene3dDoc, ctx: Ctx, o
       if (b !== undefined) env.background = b;
       const r = ranged(e.rotation, 'environment.rotation', ctx, -360, 360);
       if (r !== undefined) env.rotation = r;
+      settingFields(e, env, ctx);
       doc.environment = env;
     }
   }

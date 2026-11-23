@@ -42,6 +42,8 @@
   import { copyText } from '../../lib/clipboard';
   import { convertOutcome } from './convertOutcome';
   import { runReason, runSummary } from './runRow';
+  import { takeStagedTaskDraft } from './actionDraft';
+  import FiresNextRadar from './FiresNextRadar.svelte';
   import AutomateTasksTabs from '../../lib/components/AutomateTasksTabs.svelte';
 
   let creating = $state(false);
@@ -111,23 +113,14 @@
   let reportRenderError = $state<string | null>(null);
   let reportRenderRetry = $state(0);
   $effect(() => {
-    const text = reportText;
-    const raw = reportRaw;
+    const text = reportText, raw = reportRaw;
     void reportRenderRetry;
-    reportHtml = '';
-    reportRenderError = null;
-    if (raw || !text.trim()) {
-      return;
-    }
+    reportHtml = ''; reportRenderError = null;
+    if (raw || !text.trim()) return;
     let canceled = false;
-    void import('../../lib/md').then(({ renderMarkdownGfm }) => {
-      if (!canceled) reportHtml = renderMarkdownGfm(text);
-    }).catch((error: unknown) => {
-      if (!canceled) reportRenderError = loadErrorText(error);
-    });
-    return () => {
-      canceled = true;
-    };
+    void import('../../lib/md').then(({ renderMarkdownGfm }) => { if (!canceled) reportHtml = renderMarkdownGfm(text); })
+      .catch((error: unknown) => { if (!canceled) reportRenderError = loadErrorText(error); });
+    return () => { canceled = true; };
   });
 
   /** Form snapshot taken when the form opens — Back/Cancel only asks before
@@ -166,6 +159,7 @@
       api.get<Integration[]>(`/workspaces/${wsId}/integrations`).catch(() => null),
       api.get<EmailSenderResp>('/email-sender').catch(() => null),
     ]);
+    if (ws.currentId !== wsId) return;
     const chan = (c: string) =>
       intg ? intg.some((i) => i.channel === c && i.enabled && i.has_bot_token) : true;
     destReady = { slack: chan('slack'), telegram: chan('telegram'), email: sender ? sender.verified === true : true };
@@ -252,6 +246,8 @@
     untrack(() => {
       void scheduledTasks.loadList(id);
       void scheduledTasks.loadPresets();
+      const draft = takeStagedTaskDraft();
+      if (draft) { startCreate(); fName = draft.title; fPrompt = draft.prompt; }
     });
   });
 
@@ -364,12 +360,14 @@
     wfLoading = true;
     wfError = '';
     try {
-      wfOptions = await api.get<Workflow[]>(`/workspaces/${wsId}/workflows`);
+      const list = await api.get<Workflow[]>(`/workspaces/${wsId}/workflows`);
+      if (ws.currentId !== wsId) return;
+      wfOptions = list;
       wfLoaded = true;
     } catch (e) {
-      wfError = loadErrorText(e);
+      if (ws.currentId === wsId) wfError = loadErrorText(e);
     } finally {
-      wfLoading = false;
+      if (ws.currentId === wsId) wfLoading = false;
     }
   }
   // Load the workflow picker the first time the form needs it.
@@ -451,9 +449,9 @@
     return !(Number(fEveryMin) >= 5);
   }
 
-  /** A corrected value drops the error immediately, so submit is not stuck on a stale flag. */
-  function onIntervalInput(): void {
-    if (intervalError && !intervalTooShort()) intervalError = '';
+  function onIntervalInput(event: Event): void {
+    const minutes = (event.currentTarget as HTMLInputElement).valueAsNumber;
+    intervalError = minutes >= 5 ? '' : 'The shortest interval is 5 minutes';
   }
 
   // ── "Next fires" preview (S20-17) ─────────────────────────────────────────
@@ -560,6 +558,10 @@
     }
     if (fKind === 'workflow' && !fWorkflowId.trim()) {
       failField('sched-workflow', 'Pick the workflow this task launches.');
+      return;
+    }
+    if (fKind === 'agent_prompt' && !fPrompt.trim()) {
+      failField('sched-prompt', fProvider === 'shell' ? 'Enter the shell command to run.' : 'Enter the prompt for the agent.');
       return;
     }
     if (fDestType === 'email' && !fEmailTo.trim()) {
@@ -709,6 +711,8 @@
   async function remove(t: ScheduledTask): Promise<void> {
     const ok = await confirmer.ask(`Delete “${t.name}”? It stops running and can’t be restored.`, {
       title: 'Delete scheduled task',
+      confirmLabel: 'Delete',
+      danger: true,
     });
     if (!ok) return;
     try {
@@ -928,7 +932,7 @@
           <span>Start from a preset</span>
           <select class="input" onchange={(e) => applyPreset((e.currentTarget as HTMLSelectElement).value)}>
             <option value="">Blank task</option>
-            {#each presets as p}<option value={p.id}>{p.name}</option>{/each}
+            {#each presets as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
           </select>
         </label>
       {/if}
@@ -957,7 +961,7 @@
               value={PROVIDERS.includes(fProvider) ? fProvider : 'custom'}
               onchange={(e) => onProviderSelect((e.currentTarget as HTMLSelectElement).value)}
             >
-              {#each PROVIDERS as p}<option value={p}>{p}</option>{/each}
+              {#each PROVIDERS as p (p)}<option value={p}>{p}</option>{/each}
               <option value="custom">Custom…</option>
             </select>
           </label>
@@ -974,10 +978,7 @@
               {/if}
             </select>
             {#if fieldError?.id === 'sched-workflow'}<small id="sched-workflow-err" class="field-hint bad" use:announceShown={{ text: fieldError.message, assertive: true }}>{fieldError.message}</small>{/if}
-            {#if wfError}
-              <small class="field-hint bad">Couldn’t load workflows. {wfError}
-                <button type="button" class="btn small ghost" onclick={loadWorkflowOptions}>Retry</button></small>
-            {/if}
+            {#if wfError}<LoadState what="workflows" variant="compact" error={wfError} empty onretry={() => void loadWorkflowOptions()} />{/if}
           </label>
         {/if}
       </div>
@@ -1002,15 +1003,11 @@
 
       {#if fKind === 'workflow'}
         <p class="hint">The task launches this workflow on its cadence and reports the run outcome — or add a Schedule trigger on the workflow itself.</p>
-      {:else if fProvider === 'shell'}
-        <label class="field">
-          <span>Shell command</span>
-          <textarea dir="ltr" class="input mono" bind:value={fPrompt} rows="4" placeholder="e.g. df -h && uptime"></textarea>
-        </label>
       {:else}
         <label class="field">
-          <span>Prompt (the agent’s instructions)</span>
-          <textarea dir="auto" class="input" bind:value={fPrompt} rows="6" placeholder="Go over every ticket updated in the last 24h…"></textarea>
+          <span>{fProvider === 'shell' ? 'Shell command' : 'Prompt (the agent’s instructions)'}</span>
+          <textarea id="sched-prompt" dir={fProvider === 'shell' ? 'ltr' : 'auto'} class={fProvider === 'shell' ? 'input mono' : 'input'} bind:value={fPrompt} rows={fProvider === 'shell' ? 4 : 6} placeholder={fProvider === 'shell' ? 'e.g. df -h && uptime' : 'Go over every ticket updated in the last 24h…'} oninput={() => { if (fieldError?.id === 'sched-prompt' && fPrompt.trim()) fieldError = null; }} aria-invalid={fieldError?.id === 'sched-prompt'} aria-describedby={fieldError?.id === 'sched-prompt' ? 'sched-prompt-err' : undefined}></textarea>
+          {#if fieldError?.id === 'sched-prompt'}<small id="sched-prompt-err" class="field-hint bad" use:announceShown={{ text: fieldError.message, assertive: true }}>{fieldError.message}</small>{/if}
         </label>
       {/if}
 
@@ -1061,7 +1058,7 @@
             <label class="field">
               <span>Weekday</span>
               <select class="input" bind:value={fWeekday}>
-                {#each ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'] as d, i}
+                {#each ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'] as d, i (i)}
                   <option value={i}>{d}</option>
                 {/each}
               </select>
@@ -1213,6 +1210,7 @@
       </div>
     {/if}
 
+    <FiresNextRadar wsId={ws.currentId} tasks={list} onopentask={(id) => void expandLinked(id)} />
     <LoadState
       what="scheduled tasks"
       variant="page"

@@ -8,8 +8,10 @@ use tokio::process::Command;
 /// `GIT_CONFIG_PARAMETERS` every daemon git runs with (otto-git's `LocalGit`
 /// explains each key next to its hook-verb variant):
 /// - `core.fsmonitor=false` — repo config can't name a monitor program;
-/// - `core.hooksPath=/dev/null` — no repo hook runs.
-pub const HARDENED_GIT_CONFIG: &str = "'core.fsmonitor=false' 'core.hooksPath=/dev/null'";
+/// - `core.hooksPath=/dev/null` — no repo hook runs;
+/// - `protocol.ext.allow=never` — forbid `ext::` arbitrary-command transports.
+pub const HARDENED_GIT_CONFIG: &str =
+    "'core.fsmonitor=false' 'core.hooksPath=/dev/null' 'protocol.ext.allow=never'";
 
 /// A `git` command for code OUTSIDE `otto_git::LocalGit` (rev-parse probes,
 /// goal-loop evidence, skill-eval scratch repos, plugin clones…) with the same
@@ -70,10 +72,11 @@ mod tests {
         let tokio_cmd = hardened_command();
         let std_cmd = hardened_std_command();
         for cmd in [tokio_cmd.as_std(), &std_cmd] {
-            assert_eq!(
-                env_of(cmd, "GIT_CONFIG_PARAMETERS").as_deref(),
-                Some(HARDENED_GIT_CONFIG)
-            );
+            let cfg = env_of(cmd, "GIT_CONFIG_PARAMETERS");
+            assert_eq!(cfg.as_deref(), Some(HARDENED_GIT_CONFIG));
+            assert!(cfg
+                .as_deref()
+                .is_some_and(|v| v.contains("'protocol.ext.allow=never'")));
             assert_eq!(env_of(cmd, "GIT_TERMINAL_PROMPT").as_deref(), Some("0"));
             assert_eq!(env_of(cmd, "GIT_PAGER").as_deref(), Some("cat"));
         }

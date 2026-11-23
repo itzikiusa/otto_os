@@ -318,6 +318,11 @@ class Router {
     return this.mayLeave('');
   }
 
+  /** Whether any leave-guard is currently registered. */
+  get hasGuards(): boolean {
+    return this.guards.size > 0;
+  }
+
   /** Ask every guard about leaving for `hash`; true = go ahead. A newer guarded
    *  navigation started meanwhile makes this one resolve false. */
   private async mayLeave(hash: string): Promise<boolean> {

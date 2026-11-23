@@ -24,6 +24,7 @@ import {
   blankDraft, emptySlot, MAX_TAB_RESPONSES, sanitizeDraft, tabsKey, TABS_FALLBACK_BODY_MAX, TABS_WRITE_DELAY_MS,
   type ApiDraft, type PersistedTabs, type TabResponse,
 } from './model';
+import { newId } from '../../id';
 
 /** The store members this part reads and calls (its whole contract with the façade). */
 export type TabsHost = Pick<ApiClientStore, 'fullRequests' | 'wsId' | 'upsertRequest'>;
@@ -52,7 +53,7 @@ export class ApiTabs {
     return this.tabs[this.activeTab] ?? this.tabs[0];
   }
   set draft(d: ApiDraft) {
-    this.tabs[this.activeTab] = {...d, tabId: d.tabId ?? this.tabs[this.activeTab]?.tabId ?? crypto.randomUUID()};
+    this.tabs[this.activeTab] = {...d, tabId: d.tabId ?? this.tabs[this.activeTab]?.tabId ?? newId()};
     this.persist();
   }
   /** A short label for a tab. */
@@ -66,7 +67,7 @@ export class ApiTabs {
     }
   }
   openTab(d: ApiDraft = blankDraft()): void {
-    this.tabs = [...this.tabs, {...d, tabId: crypto.randomUUID()}];
+    this.tabs = [...this.tabs, {...d, tabId: newId()}];
     this.activeTab = this.tabs.length - 1;
     this.persist();
   }

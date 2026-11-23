@@ -120,8 +120,10 @@
   });
 
   // Background drift check: fetch the provider bodies that have a copy to
-  // compare against. Four in flight; each result lands in `bodies`.
+  // compare against. Four in flight; each result lands in `bodies`. Unreadable
+  // copies stay unset (never cached as `''`, which falsely diffed as deleted).
   let inflight = new Set<string>();
+  let disposed = false;
   $effect(() => {
     if (loading) return;
     const need = namesNeedingBodies(groups, bodies).filter((n) => !inflight.has(bodyKey(n.source, n.name)));
@@ -129,13 +131,12 @@
     const queue = [...need];
     for (const n of queue) inflight.add(bodyKey(n.source, n.name));
     const worker = async () => {
-      for (let n = queue.shift(); n; n = queue.shift()) {
+      for (let n = queue.shift(); n && !disposed; n = queue.shift()) {
         try {
           const p = await skillLabApi.getProvider(n.source, n.name);
-          landBody(bodyKey(n.source, n.name), p.body);
+          if (!disposed) landBody(bodyKey(n.source, n.name), p.body);
         } catch {
-          // Unreadable copy: record an empty marker so the check settles.
-          landBody(bodyKey(n.source, n.name), '');
+          // Leave unreadable copy unset in `bodies` so compare() retries and reports the real error.
         }
       }
     };
@@ -148,10 +149,12 @@
   let pendingBodies: Record<string, string> = {};
   let bodyFlush: ReturnType<typeof setTimeout> | null = null;
   function landBody(key: string, body: string): void {
+    if (disposed) return;
     pendingBodies[key] = body;
     if (bodyFlush) return;
     bodyFlush = setTimeout(() => {
       bodyFlush = null;
+      if (disposed) return;
       const batch = pendingBodies;
       pendingBodies = {};
       bodies = { ...bodies, ...batch };
@@ -159,6 +162,7 @@
     }, 150);
   }
   $effect(() => () => {
+    disposed = true;
     if (bodyFlush) clearTimeout(bodyFlush);
   });
 
@@ -391,7 +395,7 @@
       icon="zap"
       title="No skills yet"
       body="Skills are instruction packs that teach an agent a method — how to review a diff, write release notes, run a report. Create one, or import a package."
-      actionLabel="New skill"
+      actionLabel="New skill…"
       actionIcon="plus"
       onaction={openNew}
     >
@@ -435,11 +439,7 @@
           <p class="bundled-sum dim" data-testid="bundled-summary">{bundledInstalled} of {bundled.length} bundled skills installed{bundledUpdates ? ` · ${bundledUpdates} with an update` : ''}</p>
         {/if}
         {#if partialError}
-          <div class="partial">
-            <Icon name="warning" size={12} />
-            <span class="grow" title={partialError}>{partialError}</span>
-            <button class="btn small ghost" onclick={loadAll}>Retry</button>
-          </div>
+          <LoadState what="some skills" variant="compact" error={partialError} onretry={loadAll} />
         {/if}
         <div class="list" bind:this={listEl} data-testid="skill-list" role="listbox" aria-label="Skills" tabindex="-1" onkeydown={onListKey}>
           {#each shownByCat as [cat, items] (cat)}
@@ -739,27 +739,6 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-  }
-  .partial {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 12px;
-    border-bottom: 1px solid var(--border);
-    background: var(--warning-soft);
-    font-size: var(--fs-xs);
-    color: var(--text);
-  }
-  .partial > :global(svg) {
-    color: var(--warning);
-    flex: none;
-  }
-  .partial .grow {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .no-match {
     padding: 16px 10px;

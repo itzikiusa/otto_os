@@ -4,8 +4,11 @@
   // Text that sits straight on the ambient backdrop is --text only (AA over
   // any backdrop pixel — unit/ambient.test.ts); dim text lives on the cards.
   import { untrack } from 'svelte';
+  import { announceShown } from '../../lib/announce.svelte';
+  import ApprovalActions from '../../lib/components/ApprovalActions.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import LiveWorkingDot from '../../lib/components/LiveWorkingDot.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -83,15 +86,20 @@
 <section class="today" aria-label="Today">
   <div class="greet">
     <h2 class="hello">{greeting}{name ? `, ${name}` : ''}</h2>
-    <p class="line">
-      {dateLine} · {summary}
-      {#if today.failed}
-        <!-- A source failed: say so instead of letting an empty card read as
-             "nothing here". Retry re-polls every source at once. -->
-        <span class="warn-line"><Icon name="warning" size={12} /> Some items couldn’t load</span>
-        <button class="retry" onclick={() => today.refresh()}>Retry</button>
-      {/if}
-    </p>
+    <p class="line">{dateLine} · {summary}</p>
+    {#if today.failed}
+      <!-- A source failed: say so via LoadState instead of letting an empty card
+           read as "nothing here". Retry re-polls every source at once. -->
+      <div class="today-err">
+        <LoadState
+          what="some Today items"
+          variant="compact"
+          error="One or more sources didn’t answer."
+          empty={false}
+          onretry={() => today.refresh()}
+        />
+      </div>
+    {/if}
   </div>
 
   <div class="glance">
@@ -112,7 +120,7 @@
         {:else}
           <ul class="gc-rows">
             {#each c.rows.slice(0, expanded[c.id] ? undefined : ROWS) as r (r.id)}
-              <li>
+              <li class:gc-approval-item={!!r.approval}>
                 <button class="gc-row" onclick={r.open} title={r.title}>
                   <span class="gc-mark">
                     {#if r.tone === 'working'}
@@ -126,6 +134,26 @@
                     <span class="gc-sub" title={r.detail}>{r.detail}{#if r.at && when(r.at)}{` · ${when(r.at)}`}{/if}</span>
                   </span>
                 </button>
+                {#if r.approval}
+                  {@const appr = r.approval}
+                  {@const err = today.decideErrors[appr.id]}
+                  <div class="gc-row-actions">
+                    <ApprovalActions
+                      size="small"
+                      busy={today.deciding[appr.id] ?? null}
+                      disabled={!today.canDecideApproval(appr)}
+                      disabledReason={today.decideBlockedReason(appr)}
+                      denyTarget={appr.title}
+                      denyTitle="Deny approval request"
+                      testid={`home-approval-${appr.id}`}
+                      onapprove={() => void today.decideApproval(appr, true)}
+                      ondeny={(reason) => void today.decideApproval(appr, false, reason)}
+                    />
+                  </div>
+                  {#if err}
+                    <p class="gc-row-err" use:announceShown={{ text: err, assertive: true }}>{err}</p>
+                  {/if}
+                {/if}
               </li>
             {/each}
           </ul>
@@ -164,22 +192,11 @@
     color: var(--text);
     opacity: 1;
   }
-  .warn-line {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    margin-inline-start: 8px;
-  }
-  .retry {
-    margin-inline-start: 6px;
-    padding: 0;
-    border: none;
-    background: none;
-    color: var(--text);
-    font: inherit;
-    font-weight: 600;
-    text-decoration: underline;
-    cursor: pointer;
+  .today-err {
+    margin-top: 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    overflow: hidden;
   }
   .glance {
     display: grid;
@@ -344,6 +361,23 @@
   .gc-sub {
     font-size: var(--fs-xs);
     color: var(--text-dim);
+  }
+  .gc-approval-item {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding-bottom: 4px;
+  }
+  .gc-row-actions {
+    padding-inline: 24px 6px;
+    display: flex;
+    justify-content: flex-start;
+  }
+  .gc-row-err {
+    margin: 0;
+    padding-inline: 24px 6px;
+    font-size: var(--fs-xs);
+    color: var(--danger);
   }
   .gc-more {
     align-self: flex-start;

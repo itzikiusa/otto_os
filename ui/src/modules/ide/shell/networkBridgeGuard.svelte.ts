@@ -44,11 +44,9 @@ class BridgeEnvironmentCache {
           workspaceId,
           ws.currentId,
           ...ws.workspaces.map((w) => w.id),
-          ws.scratch?.id ?? SCRATCH_WORKSPACE_ID,
-        ].filter((id): id is string => Boolean(id)),
+        ].filter((id): id is string => Boolean(id) && id !== SCRATCH_WORKSPACE_ID),
       ),
     );
-    if (scopes.length === 0) scopes.push(SCRATCH_WORKSPACE_ID);
     const missingScopes = scopes.filter((id) => !this.loadedSshWorkspaces.has(id));
     if (this.clustersLoaded && missingScopes.length === 0) return;
     if (this.inflight) {

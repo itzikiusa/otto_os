@@ -449,6 +449,37 @@ impl EnvironmentManager {
         if !caller_is_root {
             validate_run_config_for_non_root(&req.target, &cfg)?;
         }
+        let device_id = match req
+            .device_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(s) if is_valid_mobile_device_id(s) => Some(s.to_string()),
+            Some(_) => {
+                return Err(Error::Invalid(
+                    "invalid device_id: expected 1..=128 ASCII alphanumeric or [-_.:] characters without a leading '-'".into(),
+                ));
+            }
+            None => None,
+        };
+        let device_platform = parse_mobile_device_platform(req.device_platform.as_deref())?;
+
+        let inject_device = |env_map: &mut BTreeMap<String, String>| {
+            if let Some(ref did) = device_id {
+                env_map.insert("OTTO_MOBILE_DEVICE_ID".into(), did.clone());
+                match device_platform.as_deref() {
+                    Some("android") => {
+                        env_map.insert("ANDROID_SERIAL".into(), did.clone());
+                    }
+                    Some("ios") => {
+                        env_map.insert("OTTO_SIMULATOR_UDID".into(), did.clone());
+                    }
+                    _ => {}
+                }
+            }
+        };
+
         let mut steps: Vec<(IdeRunConfig, BTreeMap<String, String>)> = Vec::new();
         if cfg.runner == IdeRunnerKind::Compound && !cfg.compound_configs.is_empty() {
             for member_id in cfg.compound_configs.iter().take(12) {
@@ -473,7 +504,7 @@ impl EnvironmentManager {
                 member_cfg.skip_tests |= cfg.skip_tests;
                 member_cfg.offline |= cfg.offline;
                 member_cfg.coverage |= cfg.coverage;
-                let (member_proj, member_env) = self
+                let (member_proj, mut member_env) = self
                     .build_effective_env_with_loaded(
                         pool,
                         secrets,
@@ -482,6 +513,7 @@ impl EnvironmentManager {
                         caller_is_root,
                     )
                     .await?;
+                inject_device(&mut member_env);
                 apply_project_go_build_tags_to_cfg(&mut member_cfg, &member_proj.go_build_tags);
                 steps.push((member_cfg, member_env));
             }
@@ -491,7 +523,7 @@ impl EnvironmentManager {
                 ));
             }
         } else {
-            let (step_proj, env_map) = self
+            let (step_proj, mut env_map) = self
                 .build_effective_env_with_loaded(
                     pool,
                     secrets,
@@ -500,6 +532,7 @@ impl EnvironmentManager {
                     caller_is_root,
                 )
                 .await?;
+            inject_device(&mut env_map);
             apply_project_go_build_tags_to_cfg(&mut cfg, &step_proj.go_build_tags);
             steps.push((cfg.clone(), env_map));
         }
@@ -555,6 +588,15 @@ impl EnvironmentManager {
     }
 }
 
+pub(crate) fn is_valid_mobile_device_id(raw: &str) -> bool {
+    let s = raw.trim();
+    !s.is_empty()
+        && s.len() <= 128
+        && !s.starts_with('-')
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+}
+
 fn can_access_run(handle: &ActiveRunHandle, user: &User) -> bool {
     otto_core::auth::root_authority(user)
         || (!handle.owner_user_id.is_empty() && handle.owner_user_id == user.id)
@@ -584,6 +626,9 @@ fn is_allowed_standard_runner_command(runner: IdeRunnerKind, cmd: &str) -> bool 
         IdeRunnerKind::JavaJunit | IdeRunnerKind::Maven => matches!(cmd, "mvn" | "./mvnw"),
         IdeRunnerKind::Gradle => matches!(cmd, "gradle" | "./gradlew"),
         IdeRunnerKind::Shell => matches!(cmd, "bash" | "sh" | "bats"),
+        IdeRunnerKind::Xcode => matches!(cmd, "xcodebuild" | "swift"),
+        IdeRunnerKind::Flutter => matches!(cmd, "flutter" | "dart"),
+        IdeRunnerKind::ReactNative => matches!(cmd, "npx" | "npm" | "yarn" | "pnpm"),
         IdeRunnerKind::Compound => true,
         IdeRunnerKind::Custom => false,
     }
@@ -720,4 +765,15 @@ pub(super) fn validate_run_config_for_non_root(
         validate_target_confined_subpath(target, &ef, "env_file")?;
     }
     Ok(())
+}
+
+pub(crate) fn parse_mobile_device_platform(raw: Option<&str>) -> Result<Option<String>> {
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        Some("ios") => Ok(Some("ios".to_string())),
+        Some("android") => Ok(Some("android".to_string())),
+        Some(_) => Err(Error::Invalid(
+            "invalid device_platform: expected 'ios' or 'android'".into(),
+        )),
+        None => Ok(None),
+    }
 }

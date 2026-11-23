@@ -13,6 +13,7 @@ pub mod dap;
 pub mod db_watch;
 pub mod deps_inspector;
 pub mod environments;
+pub mod fs_watch;
 pub mod go_build_cache;
 pub mod go_build_tags;
 pub mod gutter;
@@ -55,6 +56,11 @@ pub trait IdeCtx: Clone + Send + Sync + 'static {
     fn secrets(&self) -> &Arc<dyn SecretStore>;
     fn data_dir(&self) -> &Path;
     fn roles(&self) -> &Arc<dyn RoleChecker>;
+    /// The daemon event bus; `None` (contexts without one) disables the live
+    /// project-tree watcher ([`fs_watch`]).
+    fn events(&self) -> Option<&tokio::sync::broadcast::Sender<otto_core::event::Event>> {
+        None
+    }
     fn resolve_ssh_connection<'a>(
         &'a self,
         user: &'a User,
@@ -112,6 +118,7 @@ pub struct IdeEngine {
     pub projects: projects::ProjectStore,
     pub lsp_pool: Arc<lsp_host::pool::LspPool>,
     pub db_watch: db_watch::DbWatchRegistry,
+    pub fs_watch: fs_watch::FsWatchRegistry,
     pub netbridge: netbridge::NetBridgeManager,
 }
 
@@ -149,6 +156,7 @@ impl IdeEngine {
             projects,
             lsp_pool,
             db_watch: db_watch::DbWatchRegistry::new(),
+            fs_watch: fs_watch::FsWatchRegistry::new(),
             netbridge: netbridge::NetBridgeManager::new(data_dir.clone()),
             data_dir,
         }

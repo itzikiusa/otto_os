@@ -44,12 +44,15 @@ export type PluginFrameAction =
   | null;
 
 /** Decode a `message` event for the plugin frame whose window is
- *  `frameWindow`; anything from another source is ignored. */
+ *  `frameWindow`; anything from another source (or another origin when
+ *  `expectedOrigin` is given) is ignored. */
 export function pluginFrameAction(
-  ev: { source: unknown; data: unknown },
+  ev: { source: unknown; origin?: unknown; data: unknown },
   frameWindow: unknown,
+  expectedOrigin?: string,
 ): PluginFrameAction {
   if (frameWindow == null || ev.source == null || ev.source !== frameWindow) return null;
+  if (expectedOrigin !== undefined && ev.origin !== expectedOrigin) return null;
   const m = ev.data as ({ type?: unknown; key?: unknown } & KeyboardEventInit) | null;
   if (!m) return null;
   if (m.type === 'otto:focus-leave') return { kind: 'focus-leave' };

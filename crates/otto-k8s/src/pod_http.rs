@@ -174,13 +174,15 @@ pub fn validate_path(p: &str) -> Result<()> {
         return bad("fill in the template variables first");
     }
     let path_only = p.split('?').next().unwrap_or(p);
-    if path_only
-        .split('/')
-        .any(|seg| seg == ".." || seg.eq_ignore_ascii_case("%2e%2e"))
-        || path_only.to_ascii_lowercase().contains("%2e%2e")
-        || path_only.to_ascii_lowercase().contains("%2f")
+    let path_lower = path_only.to_ascii_lowercase();
+    if path_only.split('/').any(|seg| seg == "..")
+        || path_only.contains('\\')
+        || path_lower.contains("%2e")
+        || path_lower.contains("%2f")
+        || path_lower.contains("%5c")
+        || path_lower.contains("%25")
     {
-        return bad("must not contain .. or encoded slashes");
+        return bad("must not contain .., backslashes, or encoded path separators/dots");
     }
     Ok(())
 }
@@ -803,7 +805,13 @@ mod tests {
             "/a#frag",
             "/actuator/loggers/{{logger}}",
             "/a/%2e%2e/b",
+            "/a/.%2e/b",
+            "/a/%2e./b",
+            "/a/%2E./b",
+            "/a/%252e%252e/b",
             "/a%2Fb",
+            "/a%5Cb",
+            "/a\\..\\b",
         ] {
             assert!(validate_path(bad).is_err(), "{bad}");
         }

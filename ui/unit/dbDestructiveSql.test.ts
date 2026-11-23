@@ -47,9 +47,54 @@ test('a batch lists every risky statement in order, with its first line', () => 
   assert.deepEqual(risky.map((r) => r.preview), ['DELETE FROM a', 'DROP TABLE b']);
 });
 
-test('non-SQL engines are never classified', () => {
-  assert.deepEqual(kinds('db.users.deleteMany({})', 'mongodb'), []);
-  assert.deepEqual(kinds('FLUSHALL', 'redis'), []);
+test('CTE-prefixed DELETE / UPDATE and data-modifying CTEs are classified', () => {
+  // CTE has a WHERE, but the main DELETE does not -> destructive!
+  assert.deepEqual(
+    kinds('WITH stale AS (SELECT id FROM sessions WHERE expired = 1) DELETE FROM orders', 'postgres'),
+    ['delete-all'],
+  );
+  // Multi-CTE + RECURSIVE + column list + MATERIALIZED
+  assert.deepEqual(
+    kinds(
+      'WITH RECURSIVE a(x) AS MATERIALIZED (SELECT 1), b AS NOT MATERIALIZED (SELECT * FROM a WHERE x = 1) UPDATE users SET active = 0',
+      'postgres',
+    ),
+    ['update-all'],
+  );
+  // CTE with WHERE on the main statement -> safe
+  assert.deepEqual(
+    kinds('WITH stale AS (SELECT id FROM sessions) DELETE FROM orders WHERE id IN (SELECT id FROM stale)', 'postgres'),
+    [],
+  );
+  // Postgres data-modifying CTE without WHERE -> destructive
+  assert.deepEqual(
+    kinds('WITH purged AS (DELETE FROM orders RETURNING id) SELECT * FROM purged', 'postgres'),
+    ['delete-all'],
+  );
+  // Postgres data-modifying CTE with WHERE -> safe
+  assert.deepEqual(
+    kinds('WITH purged AS (DELETE FROM orders WHERE status = 0 RETURNING id) SELECT * FROM purged', 'postgres'),
+    [],
+  );
+  // Plain CTE SELECT is safe
+  assert.deepEqual(kinds('WITH cte AS (SELECT 1) SELECT * FROM cte', 'mysql'), []);
+});
+
+test('MongoDB and Redis wholesale removals are classified; unknown engines are ignored', () => {
+  assert.deepEqual(kinds('db.users.deleteMany({})', 'mongodb'), ['delete-all']);
+  assert.deepEqual(kinds('db.users.remove({})', 'mongodb'), ['delete-all']);
+  assert.deepEqual(kinds('db.users.updateMany({}, { $set: { active: false } })', 'mongodb'), ['update-all']);
+  assert.deepEqual(kinds('db.users.drop()', 'mongodb'), ['drop']);
+  assert.deepEqual(kinds('db.dropDatabase()', 'mongodb'), ['drop']);
+  // Filtered Mongo writes and comments/strings are safe
+  assert.deepEqual(kinds('db.users.deleteMany({ active: false })', 'mongodb'), []);
+  assert.deepEqual(kinds('db.users.updateMany({ id: 1 }, { $set: { a: 2 } })', 'mongodb'), []);
+  assert.deepEqual(kinds('// db.users.drop()\ndb.users.find({})', 'mongodb'), []);
+  // Redis FLUSHALL / FLUSHDB are destructive; normal commands are not
+  assert.deepEqual(kinds('FLUSHALL', 'redis'), ['flush']);
+  assert.deepEqual(kinds('flushdb async', 'redis'), ['flush']);
+  assert.deepEqual(kinds('GET mykey\nDEL mykey', 'redis'), []);
+  // Unknown / empty engine is ignored
   assert.deepEqual(kinds('DROP TABLE x', ''), []);
 });
 

@@ -9,13 +9,15 @@ export interface ViewportLoopState {
   turntable: boolean;
   /** …but a gizmo drag pauses it. */
   dragging: boolean;
+  /** A skeletal/GLB animation clip is actively playing. */
+  animating?: boolean;
 }
 
 /** Whether the loop re-arms after a frame. Everything else (orbit, gizmo,
  *  reconcile, resize, selection) calls `invalidate()`, which requests one
  *  frame: an idle viewport schedules no rAF at all. */
 export function viewportHasWork(s: ViewportLoopState): boolean {
-  return s.tween || s.camTween || (s.turntable && !s.dragging);
+  return s.tween || s.camTween || Boolean(s.animating) || (s.turntable && !s.dragging);
 }
 
 /**

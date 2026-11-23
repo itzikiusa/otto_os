@@ -391,6 +391,30 @@ fn trust_codex(cwd: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Escape a value for a TOML double-quoted basic string (`"..."`) so a path
+/// containing `"`, `\`, newlines, or control characters cannot break out of
+/// `[projects."..."]` / `[folders."..."]` and inject arbitrary TOML keys.
+fn escape_toml_basic_string(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0C}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 || c == '\u{7F}' => {
+                use std::fmt::Write;
+                let _ = write!(out, "\\u{:04X}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// `~/.codex/config.toml` with a trusted `[projects."<path>"]` table appended
 /// for every variant that lacks one, or `None` when all are present. Trusts
 /// every path spelling codex might compare (literal + resolved + /private
@@ -399,8 +423,12 @@ fn codex_with_trust(current: &str, variants: &[String]) -> Option<String> {
     let mut next = current.to_string();
     let mut changed = false;
     for variant in variants {
-        let header = format!("[projects.\"{variant}\"]");
-        if next.contains(&header) {
+        if variant.is_empty() || variant == "/" {
+            continue;
+        }
+        let escaped = escape_toml_basic_string(variant);
+        let header = format!("[projects.\"{escaped}\"]");
+        if next.lines().any(|l| l.trim() == header) {
             continue;
         }
         if !next.is_empty() && !next.ends_with('\n') {
@@ -475,8 +503,9 @@ fn grok_with_trust(current: &str, variants: &[String], home_str: &str, now: i64)
         if variant.is_empty() || variant == "/" || variant == home_str {
             continue;
         }
-        let header = format!("[folders.\"{variant}\"]");
-        if next.contains(&header) {
+        let escaped = escape_toml_basic_string(variant);
+        let header = format!("[folders.\"{escaped}\"]");
+        if next.lines().any(|l| l.trim() == header) {
             continue;
         }
         if !next.is_empty() && !next.ends_with('\n') {
@@ -559,6 +588,38 @@ mod tests {
         assert!(next.starts_with("model = \"x\"\n"));
         assert!(next.contains("[projects.\"/w\"]\ntrust_level = \"trusted\"\n"));
         assert_eq!(codex_with_trust(&next, &v(&["/w"])), None);
+    }
+
+    #[test]
+    fn codex_and_grok_trust_escape_toml_injection_and_skip_root() {
+        let hostile = "/tmp/foo\"]\n[sandbox]\nmode = \"danger\"\n[x.\"\\bar";
+        let codex = codex_with_trust("", &v(&["/", hostile])).expect("write");
+        assert!(!codex.contains("[projects.\"/\"]"));
+        assert!(
+            !codex.contains("\n[sandbox]\n"),
+            "hostile newline/quote must not create a new TOML table: {codex}"
+        );
+        let parsed_codex = codex.parse::<toml_edit::DocumentMut>().expect("valid toml");
+        assert_eq!(
+            parsed_codex["projects"][hostile]["trust_level"].as_str(),
+            Some("trusted")
+        );
+        assert!(parsed_codex.get("sandbox").is_none());
+        assert_eq!(codex_with_trust(&codex, &v(&[hostile])), None);
+
+        let grok =
+            grok_with_trust("", &v(&["/", "/home/u", hostile]), "/home/u", 1234).expect("write");
+        assert!(!grok.contains("\n[sandbox]\n"), "hostile grok toml: {grok}");
+        let parsed_grok = grok.parse::<toml_edit::DocumentMut>().expect("valid toml");
+        assert_eq!(
+            parsed_grok["folders"][hostile]["trusted"].as_bool(),
+            Some(true)
+        );
+        assert!(parsed_grok.get("sandbox").is_none());
+        assert_eq!(
+            grok_with_trust(&grok, &v(&[hostile]), "/home/u", 1234),
+            None
+        );
     }
 
     #[test]

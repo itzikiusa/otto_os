@@ -13,7 +13,7 @@ use super::pool::{
 };
 #[cfg(unix)]
 use super::pool_spawn::kill_process_group_sync;
-use super::pool_spawn::sample_pids_rss_bytes;
+use super::pool_spawn::{sample_pids_fd_counts, sample_pids_rss_bytes};
 use super::servers;
 use crate::plugins::IdePluginRegistry;
 use crate::types::{IdeLspAvailableServer, IdeLspServerStat, IdeLspStatusResp};
@@ -152,6 +152,8 @@ impl LspPool {
         let pid_pairs: Vec<(PoolKey, Option<u32>)> =
             raw.iter().map(|(k, pid, _, _)| (k.clone(), *pid)).collect();
         let rss_map = self.compute_entry_rss_map(&pid_pairs);
+        let live_pids: Vec<u32> = pid_pairs.iter().filter_map(|(_, pid)| *pid).collect();
+        let fd_map = sample_pids_fd_counts(&live_pids);
         let total_rss_bytes: u64 = rss_map.values().copied().sum();
         let active_server_count = raw.len();
 
@@ -163,6 +165,7 @@ impl LspPool {
             .map(
                 |(k, pid, active_clients, open_documents)| IdeLspServerStat {
                     rss_bytes: rss_map.get(&k).copied().unwrap_or(0),
+                    fd_count: pid.and_then(|p| fd_map.get(&p).copied()),
                     language: k.lang,
                     root: k.root,
                     owner: k.owner,
@@ -407,5 +410,87 @@ impl LspPool {
             }
         }
         Self::finish_evicted_entries(evicted_out, EvictReason::MemoryBudget);
+    }
+}
+
+/// Select idle pooled language servers (`active_clients == 0` and idle for at
+/// least `idle_after`) whose resident memory meets or exceeds
+/// `rss_threshold_bytes`, ordered heaviest-RSS-first so idle bloat (e.g.
+/// `jdtls` / `rust-analyzer`) can be evicted proactively.
+#[allow(dead_code)]
+pub(crate) fn select_idle_memory_evictions(
+    entries: &[(PoolKey, u64, std::time::Duration, usize)],
+    idle_after: std::time::Duration,
+    rss_threshold_bytes: u64,
+) -> Vec<PoolKey> {
+    let mut victims: Vec<(PoolKey, u64, std::time::Duration)> = entries
+        .iter()
+        .filter(|(_, rss, idle_for, active)| {
+            *active == 0 && *idle_for >= idle_after && *rss >= rss_threshold_bytes
+        })
+        .map(|(k, rss, idle_for, _)| (k.clone(), *rss, *idle_for))
+        .collect();
+    victims.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.2.cmp(&a.2)));
+    victims.into_iter().map(|(k, _, _)| k).collect()
+}
+
+#[cfg(test)]
+mod idle_memory_eviction_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn key(lang: &str, root: &str) -> PoolKey {
+        PoolKey {
+            lang: lang.into(),
+            root: root.into(),
+            owner: "u1".into(),
+            ssh: None,
+            go_build_tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn select_idle_memory_evictions_orders_heaviest_idle_above_threshold_first() {
+        let k_active = key("java", "/active");
+        let k_small = key("rust", "/small");
+        let k_recent = key("rust", "/recent");
+        let k_heavy = key("java", "/heavy");
+        let k_med = key("rust", "/med");
+
+        let entries = vec![
+            (
+                k_active.clone(),
+                900 * 1024 * 1024,
+                Duration::from_secs(600),
+                1,
+            ),
+            (
+                k_small.clone(),
+                120 * 1024 * 1024,
+                Duration::from_secs(600),
+                0,
+            ),
+            (
+                k_recent.clone(),
+                800 * 1024 * 1024,
+                Duration::from_secs(30),
+                0,
+            ),
+            (
+                k_med.clone(),
+                550 * 1024 * 1024,
+                Duration::from_secs(400),
+                0,
+            ),
+            (
+                k_heavy.clone(),
+                950 * 1024 * 1024,
+                Duration::from_secs(350),
+                0,
+            ),
+        ];
+        let victims =
+            select_idle_memory_evictions(&entries, Duration::from_secs(300), 512 * 1024 * 1024);
+        assert_eq!(victims, vec![k_heavy, k_med]);
     }
 }

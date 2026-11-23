@@ -23,7 +23,7 @@ pub fn eligible(session: &Session) -> Result<()> {
         || session.meta.get("source").and_then(|s| s.as_str()) == Some("db_assist")
     {
         return Err(otto_core::Error::Forbidden(
-            "Only local agent and shell sessions can host rooms".into(),
+            "Only local agent sessions can host rooms".into(),
         ));
     }
     Ok(())

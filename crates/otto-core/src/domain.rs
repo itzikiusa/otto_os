@@ -176,7 +176,7 @@ pub struct Session {
 /// kept byte-identical, and every engine that stamps a `meta.source` on the
 /// sessions it owns must list that source here — otherwise its sessions render
 /// as foreground agents AND become durable (exempt from volume cleanup).
-pub const BACKGROUND_SESSION_SOURCES: [&str; 26] = [
+pub const BACKGROUND_SESSION_SOURCES: [&str; 27] = [
     "channel",
     "review",
     "review_summarizer",
@@ -207,6 +207,9 @@ pub const BACKGROUND_SESSION_SOURCES: [&str; 26] = [
     // summaries: throwaway sessions owned by their page, like `db_assist`.
     "design_assist",
     "browser_summarize",
+    // Smart mode's planner turn: one throwaway session per plan or steer,
+    // owned by its production.
+    "production_plan",
 ];
 
 impl Session {
@@ -2817,6 +2820,10 @@ pub enum Feature {
     /// Kubernetes — cluster/context management (`Admin`), read (`View`),
     /// exec/restart/rollout/Argo actions (`Edit`).
     Kubernetes,
+    /// Containers — local Docker/Kiri daemon console: read (`View`),
+    /// lifecycle/exec/run/pull/prune (`Edit`), context switch & embedded runtime
+    /// start/stop/restart (`Admin`).
+    Containers,
 }
 
 impl Feature {
@@ -2853,6 +2860,7 @@ impl Feature {
             "aws_eks" => Some(Self::AwsEks),
             "aws_rds" => Some(Self::AwsRds),
             "kubernetes" => Some(Self::Kubernetes),
+            "containers" => Some(Self::Containers),
             _ => None,
         }
     }
@@ -2890,6 +2898,7 @@ impl Feature {
             Self::AwsEks => "aws_eks",
             Self::AwsRds => "aws_rds",
             Self::Kubernetes => "kubernetes",
+            Self::Containers => "containers",
         }
     }
 }
@@ -2973,6 +2982,7 @@ mod tests {
             ("aws_eks", Feature::AwsEks),
             ("aws_rds", Feature::AwsRds),
             ("kubernetes", Feature::Kubernetes),
+            ("containers", Feature::Containers),
         ] {
             assert_eq!(Feature::parse(k), Some(f));
             assert_eq!(f.as_str(), k);
@@ -3067,6 +3077,8 @@ mod tests {
             "automation_run",
             "agent",
             "manual",
+            // A posed model's design provenance and meta (otto-media productions/pose.rs).
+            "pose",
             // Connection / cluster import origins (otto-connections, otto-k8s).
             "mysql_workbench",
             "kubeconfig",
@@ -3093,6 +3105,9 @@ mod tests {
             "CORTEX_STEP_SOURCE_USER_EXPLICIT",
             // IDE plugin install `source` URL test fixture (otto-ide).
             "https://example.com/plugin",
+            // Smart mode: a model taken from the Forge library (version provenance and
+            // artifact meta in otto-media's productions), not a session.
+            "library",
         ];
         let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -3142,10 +3157,11 @@ mod tests {
             "browser_summarize",
             "db_assist",
             "assistant",
+            "production_plan",
         ] {
             assert!(BACKGROUND_SESSION_SOURCES.contains(&src), "{src}");
         }
-        assert_eq!(BACKGROUND_SESSION_SOURCES.len(), 26);
+        assert_eq!(BACKGROUND_SESSION_SOURCES.len(), 27);
     }
 
     /// Every `"source": "<literal>"` / `"source":"<literal>"` in `text`.

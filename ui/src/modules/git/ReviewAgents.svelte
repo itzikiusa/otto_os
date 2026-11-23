@@ -16,6 +16,7 @@
   import { severityLabel } from '../../lib/labels';
   import Badge from '../../lib/components/Badge.svelte';
   import { summaryFallback, summaryFallbackTitle } from './reviewFallback';
+  import { agentRowKey, agentRowRetryAction, canStopReviewAgent } from './reviewAgentsRow';
 
   interface Props {
     review: Review;
@@ -106,7 +107,9 @@
 </script>
 
 <div class="rp-agents" class:rp-agents-done={view === 'done'}>
-  {#each rows as agent, i (agent.name)}
+  {#each rows as agent, i (agentRowKey(i, agent.name))}
+    {@const rowKey = agentRowKey(i, agent.name)}
+    {@const retryAction = agentRowRetryAction(i, rows.length, agent.status, view)}
     <div class="rp-agent card">
       <div class="rp-agent-top">
         <span class="rp-agent-name">{agent.name}</span>
@@ -117,7 +120,7 @@
             {openTerminals.has(agent.session_id) ? 'Hide' : 'Open'}
           </button>
         {/if}
-        {#if i < lastRetryable && (agent.status === 'running' || agent.status === 'waiting')}
+        {#if canStopReviewAgent(i, rows.length, agent.status)}
           <button
             class="btn small ghost rp-stop-btn"
             disabled={stopping[i]}
@@ -127,7 +130,7 @@
             {stopping[i] ? 'Stopping…' : 'Stop'}
           </button>
         {/if}
-        {#if i < lastRetryable && (agent.status === 'done' || agent.status === 'error' || agent.status === 'skipped')}
+        {#if retryAction === 'retry-agent'}
           <!-- A single agent is retryable only once the whole review has settled:
                the run's end-of-review cleanup would delete a retried agent's
                files mid-read (the server answers 409 too). -->
@@ -135,18 +138,18 @@
             class="btn small ghost"
             disabled={retrying[i] || review.status === 'running'}
             onclick={() => retryAgent(i)}
-            title={review.status === 'running' ? 'Retry once the review has finished' : 'Re-run this agent'}
+            title={review.status === 'running' ? 'Re-run once the review has finished' : 'Re-run this agent'}
           >
-            {retrying[i] ? 'Retrying…' : 'Retry'}
+            {retrying[i] ? 'Re-running…' : 'Re-run'}
           </button>
-        {:else if view === 'done' || agent.status === 'done' || agent.status === 'error' || agent.status === 'skipped'}
+        {:else if retryAction === 'retry-summary'}
           <button
             class="btn small ghost"
             disabled={retryingSummary}
             onclick={retrySummarizer}
             title="Re-run only the summary over the agents' stored findings (replaces draft comments; approved/posted ones stay)"
           >
-            {retryingSummary ? 'Retrying…' : 'Retry summary'}
+            {retryingSummary ? 'Re-running…' : 'Re-run summary'}
           </button>
         {/if}
         {#if agent.fallback}
@@ -168,8 +171,8 @@
           </span>
         {/if}
         {#if agent.findings && agent.findings.length > 0}
-          <button class="btn small ghost" onclick={() => toggleAgent(agent.name)}>
-            {agentExpanded[agent.name]
+          <button class="btn small ghost" onclick={() => toggleAgent(rowKey)}>
+            {agentExpanded[rowKey]
               ? 'Hide'
               : `${plural(agent.findings.length, 'finding')}`}
           </button>
@@ -198,17 +201,17 @@
                every parent re-render; during a RUNNING review (the panel
                refetches `review` on every poll/bus tick) that became a ~90/sec
                WS reconnect storm, leaving a running agent's terminal stuck on
-               "reconnecting". The {#each} is keyed by agent.name, so the
+               "reconnecting". The {#each} is keyed by index+name, so the
                component instance is stable across refetches. -->
           <LazyTerminal sessionId={agent.session_id} preferDom resumeOnOpen={false} />
         </div>
       {/if}
-      {#if agentExpanded[agent.name] && agent.findings}
+      {#if agentExpanded[rowKey] && agent.findings}
         <ul class="rp-agent-findings">
           <!-- Keyed by location + index: an agent's raw findings carry no stable id (the
                fingerprint lives on the persisted ReviewFindingRow), and one agent can report
                the same text at two lines, so the body alone is not a unique key. -->
-          {#each agent.findings as f, i (`${f.path ?? ''}:${f.line ?? ''}:${i}`)}
+          {#each agent.findings as f, fi (`${f.path ?? ''}:${f.line ?? ''}:${fi}`)}
             <li class="rp-finding">
               <Badge tone={SEV_TONE[f.severity] ?? 'neutral'} label={severityLabel(f.severity)} />
               {#if f.path}<span class="mono rp-loc">{f.path}{f.line ? ':' + f.line : ''}</span>{/if}

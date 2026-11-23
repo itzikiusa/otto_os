@@ -1,5 +1,6 @@
 <script lang="ts">
   import { vault } from './vault.svelte';
+  import { announceShown } from '../../lib/announce.svelte';
   import { PROPERTY_FIELDS, patchProperties, readProperties } from './properties';
   let editing = $state(false);
   let base = $state('');
@@ -25,7 +26,7 @@
     else error = 'Properties remain in your draft. Resolve the save error or conflict before leaving.';
   }
 </script>
-{#if error}<p class="error" role="alert">{error}</p>{/if}
+{#if error}<p class="error" use:announceShown={{ text: error, assertive: true }}>{error}</p>{/if}
 {#if editing}
   <form onsubmit={(e) => {e.preventDefault(); void apply();}}>
     {#each PROPERTY_FIELDS as key (key)}

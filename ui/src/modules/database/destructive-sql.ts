@@ -13,7 +13,7 @@ import type { EngineLike } from '../../lib/database/sql-dialect.ts';
 import { splitModeFor } from '../../lib/database/sql-dialect.ts';
 import { codeStatements } from '../../lib/database/sql-util.ts';
 
-export type RiskKind = 'delete-all' | 'update-all' | 'drop' | 'truncate' | 'alter-drop';
+export type RiskKind = 'delete-all' | 'update-all' | 'drop' | 'truncate' | 'alter-drop' | 'flush';
 
 export interface RiskyStatement {
   kind: RiskKind;
@@ -31,17 +31,117 @@ const WHY: Record<RiskKind, string> = {
   drop: 'drops the object',
   truncate: 'empties the table',
   'alter-drop': 'drops part of the table',
+  flush: 'empties the database',
 };
 
-/** The kind of wholesale removal `code` (one statement, blanked) performs. */
-function classify(code: string): RiskKind | null {
-  const s = code.replace(/\s+/g, ' ').trim().toLowerCase();
+/** Advance past a balanced `(...)` starting at `openIdx`; returns the index
+ *  just after the matching `)`, or -1 if unclosed. */
+function skipBalancedParens(s: string, openIdx: number): number {
+  if (s[openIdx] !== '(') return -1;
+  let depth = 0;
+  for (let i = openIdx; i < s.length; i++) {
+    if (s[i] === '(') depth++;
+    else if (s[i] === ')') {
+      depth--;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return -1;
+}
+
+/** Split a leading `WITH [RECURSIVE] …` CTE chain into `{ bodies, main }` so
+ *  CTE predicates never mask a missing `WHERE` on the main `DELETE`/`UPDATE`,
+ *  and Postgres data-modifying CTEs (`WITH d AS (DELETE FROM t) SELECT …`) are
+ *  checked too. Assumes strings/comments are already blanked. */
+function splitCtes(s: string): { bodies: string[]; main: string } {
+  if (!/^with\b/.test(s)) return { bodies: [], main: s };
+  let i = 4; // past 'with'
+  const skipWs = (): void => {
+    while (i < s.length && /\s/.test(s[i])) i++;
+  };
+  skipWs();
+  if (/^recursive\b/.test(s.slice(i))) {
+    i += 9;
+    skipWs();
+  }
+  const bodies: string[] = [];
+  while (i < s.length) {
+    // CTE name (already blanked if quoted, or plain identifier)
+    const nameMatch = /^[a-z0-9_$]+/.exec(s.slice(i));
+    if (nameMatch) i += nameMatch[0].length;
+    skipWs();
+    // Optional column list `(c1, c2)`
+    if (s[i] === '(') {
+      const end = skipBalancedParens(s, i);
+      if (end < 0) return { bodies, main: s };
+      i = end;
+      skipWs();
+    }
+    if (!/^as\b/.test(s.slice(i))) return { bodies, main: s };
+    i += 2;
+    skipWs();
+    // Postgres optional `[NOT] MATERIALIZED`
+    const matMatch = /^(?:not\s+)?materialized\b/.exec(s.slice(i));
+    if (matMatch) {
+      i += matMatch[0].length;
+      skipWs();
+    }
+    if (s[i] !== '(') return { bodies, main: s };
+    const end = skipBalancedParens(s, i);
+    if (end < 0) return { bodies, main: s };
+    bodies.push(s.slice(i + 1, end - 1).trim());
+    i = end;
+    skipWs();
+    if (s[i] === ',') {
+      i++;
+      skipWs();
+      continue;
+    }
+    return { bodies, main: s.slice(i).trim() };
+  }
+  return { bodies, main: s };
+}
+
+/** Classify a single SQL statement body (after CTE stripping). */
+function classifySqlCore(s: string): RiskKind | null {
   const where = /\bwhere\b/.test(s);
   if (/^delete\b/.test(s)) return where ? null : 'delete-all';
   if (/^update\b/.test(s)) return where ? null : 'update-all';
   if (/^drop\b/.test(s)) return 'drop';
   if (/^truncate\b/.test(s)) return 'truncate';
   if (/^alter table\b/.test(s) && /\bdrop\b/.test(s)) return 'alter-drop';
+  return null;
+}
+
+/** The kind of wholesale removal a SQL statement (`code`, blanked) performs. */
+function classifySql(code: string): RiskKind | null {
+  const s = code.replace(/\s+/g, ' ').trim().toLowerCase();
+  const { bodies, main } = splitCtes(s);
+  const direct = classifySqlCore(main);
+  if (direct) return direct;
+  for (const body of bodies) {
+    const inner = classifySqlCore(body);
+    if (inner) return inner;
+  }
+  return null;
+}
+
+/** Wholesale removals in MongoDB shell statements (blanked code). */
+function classifyMongo(code: string): RiskKind | null {
+  // Blank JS `//` line comments in addition to SQL-style comments already blanked.
+  const s = code.replace(/\/\/[^\n]*/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!s) return null;
+  if (/\.\s*dropDatabase\s*\(/i.test(s) || /\.\s*drop\s*\(/i.test(s)) return 'drop';
+  if (/\.\s*(?:deleteMany|remove)\s*\(\s*\{\s*\}\s*(?:,|\))/i.test(s)) return 'delete-all';
+  if (/\.\s*updateMany\s*\(\s*\{\s*\}\s*,/i.test(s)) return 'update-all';
+  return null;
+}
+
+/** Wholesale removals in Redis commands (one command per line). */
+function classifyRedis(code: string): RiskKind | null {
+  const s = code.replace(/\s+/g, ' ').trim().toLowerCase();
+  if (!s) return null;
+  if (/^(?:flushall|flushdb)\b/.test(s)) return 'flush';
   return null;
 }
 
@@ -53,10 +153,26 @@ function previewOf(text: string, code: string): string {
   return line.length > 120 ? `${line.slice(0, 119)}…` : line;
 }
 
-/** The statements of `sql` that delete / update every row, drop or truncate,
- *  in order. Empty for a non-SQL engine (Mongo, Redis). */
+/** The statements of `sql` that delete / update every row, drop, truncate or
+ *  flush, in order. Covers SQL engines (including CTEs), MongoDB and Redis. */
 export function destructiveStatements(sql: string, engine: EngineLike): RiskyStatement[] {
-  if (!engine || !SQL_ENGINES.has(engine)) return [];
+  if (!engine) return [];
+  if (engine === 'redis') {
+    const out: RiskyStatement[] = [];
+    for (const rawLine of sql.split(/\r?\n/)) {
+      const trimmed = rawLine.trim();
+      if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('--')) continue;
+      const kind = classifyRedis(trimmed);
+      if (kind) out.push({ kind, preview: trimmed.length > 120 ? `${trimmed.slice(0, 119)}…` : trimmed });
+    }
+    return out;
+  }
+  const classify = SQL_ENGINES.has(engine)
+    ? classifySql
+    : engine === 'mongodb'
+      ? classifyMongo
+      : null;
+  if (!classify) return [];
   const out: RiskyStatement[] = [];
   for (const { text, code } of codeStatements(sql, splitModeFor(engine))) {
     const kind = classify(code);

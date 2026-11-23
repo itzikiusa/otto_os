@@ -618,7 +618,9 @@ fn scope_of(event: &Event) -> Scope<'_> {
         // A secret request is the thread owner's alone.
         | Event::SecretRequestUpdated { user_id, .. }
         // A notice-list change (read/dismiss) cues only the actor's windows.
-        | Event::NotificationsChanged { user_id } => Scope::Owner(user_id),
+        | Event::NotificationsChanged { user_id }
+        // Folder paths of one IDE window's project: its user's alone.
+        | Event::IdeFsChanged { user_id, .. } => Scope::Owner(user_id),
     }
 }
 

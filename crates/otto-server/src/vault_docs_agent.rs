@@ -413,7 +413,7 @@ fn update_refine_entry(
     session: Option<&Id>,
     finished: bool,
 ) {
-    let mut registry = registry.lock().unwrap();
+    let mut registry = registry.lock().unwrap_or_else(|e| e.into_inner());
     let Some(entry) = registry
         .get_mut(key)
         .filter(|entry| entry.turn_id.as_deref() == Some(turn_id))
@@ -430,7 +430,11 @@ fn update_refine_entry(
 
 /// Mutate one run's snapshot under the registry lock (no-op when gone).
 fn with_run(reg: &RunRegistry, run_id: &str, f: impl FnOnce(&mut VaultDocsRun)) {
-    if let Some(e) = reg.lock().unwrap().get_mut(run_id) {
+    if let Some(e) = reg
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_mut(run_id)
+    {
         if !is_terminal(&e.run.state) {
             f(&mut e.run);
         }
@@ -531,7 +535,7 @@ async fn flush_persister(tx: &PersistTx) {
 /// the registry stays bounded for the daemon's life.
 async fn finalize_run(reg: &RunRegistry, repo: &otto_state::VaultDocsRunsRepo, run_id: &str) {
     let (snap, tx) = {
-        let reg = reg.lock().unwrap();
+        let reg = reg.lock().unwrap_or_else(|e| e.into_inner());
         let e = reg.get(run_id);
         (
             e.map(|e| e.run.clone()),
@@ -549,7 +553,7 @@ async fn finalize_run(reg: &RunRegistry, repo: &otto_state::VaultDocsRunsRepo, r
         }
     }
     // Dropping the entry drops its sender → the persister task exits.
-    reg.lock().unwrap().remove(run_id);
+    reg.lock().unwrap_or_else(|e| e.into_inner()).remove(run_id);
 }
 
 /// Set a terminal run state + `finished_at`, unless one already landed.
@@ -750,18 +754,24 @@ async fn start_run(
         let reg = ctx.vault_docs_runs.clone();
         let snap_id = run_id.clone();
         spawn_persister(repo.clone(), move || {
-            reg.lock().unwrap().get(&snap_id).map(|e| e.run.clone())
+            reg.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&snap_id)
+                .map(|e| e.run.clone())
         })
     };
-    ctx.vault_docs_runs.lock().unwrap().insert(
-        run_id.clone(),
-        RunEntry {
-            run: run.clone(),
-            cancel: Arc::new(AtomicBool::new(false)),
-            retries: Default::default(),
-            persist_tx: Some(persist_tx),
-        },
-    );
+    ctx.vault_docs_runs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(
+            run_id.clone(),
+            RunEntry {
+                run: run.clone(),
+                cancel: Arc::new(AtomicBool::new(false)),
+                retries: Default::default(),
+                persist_tx: Some(persist_tx),
+            },
+        );
     // Awaited (not fire-and-forget): the row must exist before the response so
     // an immediate runs-list reload in another tab already sees this run.
     if let Err(e) = repo.upsert(&run_row(&run)).await {
@@ -932,7 +942,10 @@ async fn delete_run(
         )));
     }
     repo.delete(&run_id).await.map_err(ApiError)?;
-    ctx.vault_docs_runs.lock().unwrap().remove(&run_id);
+    ctx.vault_docs_runs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&run_id);
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
@@ -981,7 +994,10 @@ async fn list_runs(
 
     let mut runs: Vec<VaultDocsRun> = Vec::with_capacity(rows.len());
     {
-        let reg = ctx.vault_docs_runs.lock().unwrap();
+        let reg = ctx
+            .vault_docs_runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut seen: HashSet<String> = HashSet::new();
         for row in &rows {
             seen.insert(row.id.clone());
@@ -1019,7 +1035,10 @@ async fn cancel_run(
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<axum::http::StatusCode> {
     let (ws_id, cancel, session_ids) = {
-        let reg = ctx.vault_docs_runs.lock().unwrap();
+        let reg = ctx
+            .vault_docs_runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let e = reg
             .get(&run_id)
             .ok_or_else(|| ApiError(Error::NotFound(format!("docs run {run_id}"))))?;

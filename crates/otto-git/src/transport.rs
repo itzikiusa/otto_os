@@ -140,6 +140,16 @@ mod tests {
                 "Password for 'https://gitlab.example:8443@evil.example': ",
                 false,
             ),
+            (
+                "Password for 'https://evil.example?@gitlab.example:8443': ",
+                false,
+            ),
+            (
+                "Password for 'https://evil.example#@gitlab.example:8443': ",
+                false,
+            ),
+            ("Password for 'https://gitlab.example:8443?foo=bar': ", true),
+            ("Password for 'https://gitlab.example:8443#section': ", true),
             ("Enter passphrase for key '/tmp/key': ", false),
         ] {
             let envs = helper.envs();

@@ -458,12 +458,15 @@ pub fn validate_key(key: &str) -> Result<()> {
     if key.chars().any(|c| c.is_control()) {
         return Err(Error::Invalid("key contains control characters".into()));
     }
+    crate::cli::reject_url_param_expansion("key", key)?;
     Ok(())
 }
 
 pub fn validate_bucket(b: &str) -> Result<()> {
     if b.len() < 3
         || b.len() > 63
+        || b.starts_with(['-', '.'])
+        || b.ends_with(['-', '.'])
         || !b
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
@@ -497,6 +500,8 @@ pub async fn list_objects(
     validate_bucket(bucket)?;
     let prefix = q.prefix.clone().unwrap_or_default();
     let max = q.max.unwrap_or(500).clamp(1, 1000).to_string();
+    let prefix_arg;
+    let token_arg;
     let mut args: Vec<&str> = vec![
         "s3api",
         "list-objects-v2",
@@ -508,10 +513,14 @@ pub async fn list_objects(
         &max,
     ];
     if !prefix.is_empty() {
-        args.extend(["--prefix", prefix.as_str()]);
+        crate::cli::reject_url_param_expansion("prefix", &prefix)?;
+        prefix_arg = format!("--prefix={prefix}");
+        args.push(prefix_arg.as_str());
     }
     if let Some(t) = q.token.as_deref().filter(|t| !t.is_empty()) {
-        args.extend(["--starting-token", t]);
+        crate::cli::reject_url_param_expansion("token", t)?;
+        token_arg = format!("--starting-token={t}");
+        args.push(token_arg.as_str());
     }
     let v = svc.run_json(a, q.region.as_deref(), &args).await?;
     Ok(normalize_objects(&v, &prefix))
@@ -526,11 +535,12 @@ pub async fn head_object(
 ) -> Result<HeadResp> {
     validate_bucket(bucket)?;
     validate_key(key)?;
+    let key_arg = format!("--key={key}");
     let v = svc
         .run_json(
             a,
             region,
-            &["s3api", "head-object", "--bucket", bucket, "--key", key],
+            &["s3api", "head-object", "--bucket", bucket, key_arg.as_str()],
         )
         .await?;
     Ok(normalize_head(key, &v))
@@ -1081,10 +1091,17 @@ pub async fn delete_object(
 ) -> Result<()> {
     validate_bucket(bucket)?;
     validate_key(key)?;
+    let key_arg = format!("--key={key}");
     svc.run(
         a,
         region,
-        &["s3api", "delete-object", "--bucket", bucket, "--key", key],
+        &[
+            "s3api",
+            "delete-object",
+            "--bucket",
+            bucket,
+            key_arg.as_str(),
+        ],
     )
     .await?;
     Ok(())

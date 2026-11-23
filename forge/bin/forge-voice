@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+python="$root/forge/voice/.venv/bin/python"
+if [ ! -x "$python" ]; then
+    echo '{"error":"Install the voice environment first (docs/voice.md)."}' >&2
+    exit 1
+fi
+export PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}"
+export HF_HOME="$root/models/voice/hf" XDG_CACHE_HOME="$root/models/voice/cache"
+export HF_HUB_OFFLINE=1 HF_HUB_DISABLE_IMPLICIT_TOKEN=1
+exec "$python" -m forge.voice "$@"

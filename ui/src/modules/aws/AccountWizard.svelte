@@ -14,6 +14,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { aws } from '../../lib/stores/aws.svelte';
   import { awsApi } from '../../lib/api/aws';
+  import { awsLoadText } from './loadText';
   import { toasts } from '../../lib/toast.svelte';
   import { radioKey } from '../../lib/radioKey';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
@@ -95,7 +96,7 @@
     try {
       profiles = (await awsApi.discover()).profiles;
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = awsLoadText(e);
       profiles = [];
     } finally {
       profilesLoading = false;
@@ -158,7 +159,7 @@
       step = 3;
       await runTest(a);
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = awsLoadText(e);
     } finally {
       busy = false;
     }
@@ -176,7 +177,7 @@
       testResult = {
         ok: false,
         latency_ms: 0,
-        message: e instanceof Error ? e.message : String(e),
+        message: awsLoadText(e),
         login_required: false,
       };
     } finally {

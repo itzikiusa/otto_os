@@ -16,10 +16,17 @@ export function agentEmojiFor(text: string): boolean {
   if (!agentEmoji.on || !text.includes(':') || !MAYBE.test(text)) return false;
   if (!lib && !loading) {
     loading = true;
-    void import('./emojiShortcodes').then(async (m) => {
-      await m.loadEmojiTable();
-      lib = m;
-    });
+    void import('./emojiShortcodes')
+      .then(async (m) => {
+        await m.loadEmojiTable();
+        lib = m;
+      })
+      .catch(() => {
+        /* transient load failure: allow next render to retry */
+      })
+      .finally(() => {
+        loading = false;
+      });
   }
   return lib !== null;
 }

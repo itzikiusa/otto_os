@@ -278,52 +278,64 @@ impl FileStore {
     }
 
     fn save(&self, map: &BTreeMap<String, String>) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| Error::Internal(format!("secrets dir: {e}")))?;
-        }
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+        let parent = self
+            .path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        std::fs::create_dir_all(parent)
+            .map_err(|e| Error::Internal(format!("secrets dir: {e}")))?;
         let body = serde_json::to_string_pretty(map)
             .map_err(|e| Error::Internal(format!("secrets serialize: {e}")))?;
 
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&self.path)
-            .map_err(|e| Error::Internal(format!("secrets file open: {e}")))?;
-        f.write_all(body.as_bytes())
-            .map_err(|e| Error::Internal(format!("secrets file write: {e}")))?;
-        // The file may pre-exist with looser permissions; enforce 0600 anyway.
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = f
-            .metadata()
-            .map_err(|e| Error::Internal(format!("secrets file meta: {e}")))?
-            .permissions();
-        perms.set_mode(0o600);
-        std::fs::set_permissions(&self.path, perms)
-            .map_err(|e| Error::Internal(format!("secrets file chmod: {e}")))?;
+        let name = self
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("secrets.json");
+        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = parent.join(format!(".{name}.tmp.{}.{seq}", std::process::id()));
+
+        let write_result = (|| -> std::io::Result<()> {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            f.write_all(body.as_bytes())?;
+            f.sync_all()?;
+            drop(f);
+            std::fs::rename(&tmp, &self.path)?;
+            Ok(())
+        })();
+        if let Err(e) = write_result {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(Error::Internal(format!("secrets file save: {e}")));
+        }
         Ok(())
     }
 }
 
 impl SecretStore for FileStore {
     fn put(&self, key: &str, value: &str) -> Result<()> {
-        let _guard = self.lock.lock().expect("secrets lock poisoned");
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut map = self.load()?;
         map.insert(key.to_string(), value.to_string());
         self.save(&map)
     }
 
     fn get(&self, key: &str) -> Result<Option<String>> {
-        let _guard = self.lock.lock().expect("secrets lock poisoned");
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         Ok(self.load()?.get(key).cloned())
     }
 
     fn delete(&self, key: &str) -> Result<()> {
-        let _guard = self.lock.lock().expect("secrets lock poisoned");
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut map = self.load()?;
         if map.remove(key).is_some() {
             self.save(&map)?;
@@ -418,5 +430,27 @@ mod tests {
             assert_eq!(b.as_deref(), Some("v"));
         });
         assert_eq!(inner.gets.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn file_store_saves_atomically_with_0600_mode_and_no_tmp_leftovers() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("otto-keychain-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join(PLAINTEXT_FILE);
+        let store = FileStore::new(&dir);
+        store.put("a", "1").unwrap();
+        store.put("b", "2").unwrap();
+        assert_eq!(store.get("a").unwrap().as_deref(), Some("1"));
+        assert_eq!(store.get("b").unwrap().as_deref(), Some("2"));
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec!["secrets.json"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

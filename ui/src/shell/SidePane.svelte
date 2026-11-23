@@ -8,6 +8,7 @@
   // cover shaped like the page (a header row + skeleton) stands in, with a
   // Close button; a pane that never boots says so, with Retry.
   import { untrack } from 'svelte';
+  import { announceShown } from '../lib/announce.svelte';
   import { nativePane, nativePaneAvailable } from '../lib/nativePane';
   import { paneBounds, LatestPaneLayout, type PaneBounds } from '../lib/nativePanePolicy';
   import { ctxMenu } from '../lib/contextmenu.svelte';
@@ -123,7 +124,7 @@
           <Skeleton rows={6} height={28} {label} />
         </div>
       {:else}
-        <div class="sp-error" role="alert">
+        <div class="sp-error" use:announceShown={{ text: `Couldn’t load ${label}. The side pane didn’t start.`, assertive: true }}>
           <span class="sp-error-icon"><Icon name="warning" size={24} /></span>
           <h3>Couldn’t load {label}</h3>
           <p>The side pane didn’t start. Everything in the main pane is unaffected.</p>

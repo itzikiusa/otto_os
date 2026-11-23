@@ -3,6 +3,8 @@
   // bottom of the editor pane — Resume · Step over · Step into · Step out · Stop, 44 px
   // each, and where the program stopped. The same store actions as the debugger panel;
   // the paused line is scrolled clear of the pill after every stop. Stacked layout only.
+  import { onDestroy } from 'svelte';
+  import { announceShown } from '../../../lib/announce.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { ide } from '../ideStore.svelte';
   import { ideLayout } from '../shell/ideLayout.svelte';
@@ -35,6 +37,10 @@
     void run();
   }
 
+  onDestroy(() => {
+    clearTimeout(stepTimer);
+  });
+
   // After every stop: the paused line must not sit under the pill.
   $effect(() => {
     void ide.activeDebug?.paused_line;
@@ -64,7 +70,7 @@
     <button type="button" class="tdb-btn" aria-label="Step into" title="Step into" disabled={!bar.paused} onclick={() => step(ide.stepInto)} data-testid="ide-touch-debug-step-into"><Icon name="stepInto" size={16} /></button>
     <button type="button" class="tdb-btn" aria-label="Step out" title="Step out" disabled={!bar.paused} onclick={() => step(ide.stepOut)} data-testid="ide-touch-debug-step-out"><Icon name="stepOut" size={16} /></button>
     <button type="button" class="tdb-btn tdb-stop" aria-label="Stop debug session" title="Stop debug session" onclick={() => void ide.stopDebug()} data-testid="ide-touch-debug-stop"><Icon name="stop" size={16} /></button>
-    <span class="tdb-where mono" dir="ltr" role="status" data-testid="ide-touch-debug-where">{bar.where || 'Running…'}</span>
+    <span class="tdb-where mono" dir="ltr" use:announceShown={bar.where || 'Running…'} data-testid="ide-touch-debug-where">{bar.where || 'Running…'}</span>
   </div>
 {/if}
 
@@ -73,10 +79,10 @@
   :global(.ide-pane:has(> .ide-touch-dbg)) { position: relative; }
   :global(.ide-pane:has(> .ide-touch-dbg) .cm-content) { padding-block-end: 72px; }
   .ide-touch-dbg {
-    position: absolute; inset-block-end: var(--sp-3); inset-inline: var(--sp-3); z-index: 5;
+    position: absolute; inset-block-end: var(--sp-3); inset-inline: var(--sp-3); z-index: var(--z-sticky);
     display: flex; align-items: center; gap: 2px; padding: 2px; max-inline-size: calc(100% - 2 * var(--sp-3));
     background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-l);
-    box-shadow: var(--shadow-card);
+    box-shadow: var(--glass-shadow);
   }
   .tdb-btn {
     display: grid; place-items: center; inline-size: 44px; block-size: 44px; flex-shrink: 0;

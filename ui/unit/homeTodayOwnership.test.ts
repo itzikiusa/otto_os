@@ -7,10 +7,13 @@ function fixture() {
   const ws = { currentId: 'A', listSettled: true, foregroundActive: [], activeSessions: [], sessionById: new Map(), threadsNeedsYouCount: 0, activeWorkflowRuns: [], needsYou: {}, statusMap: {} };
   const { today } = loadSource(new URL('../src/modules/home/today.svelte.ts', import.meta.url), {
     '../../lib/api/client': { api: { get: () => pending.promise } }, '../../lib/api/design': { listArtifacts: async () => [] },
+    '../../lib/api/mcp': { mcpCpApi: { cpDecide: async () => ({}) } },
     '../../lib/api/scheduledTasks': { scheduledTasksApi: { list: async () => [] } }, svelte: { untrack: (fn: () => unknown) => fn() },
     '../../lib/router.svelte': { router: { go() {} } }, '../../lib/stores/auth.svelte': { auth: { can: () => true } },
     '../../lib/stores/notifications.svelte': { notifications: { notices: [], ensureLoaded() {} } },
-    '../../lib/stores/workspace.svelte': { ws }, './boxes/poll': { livePoll: () => ({ now() {}, stop() {} }) },
+    '../../lib/stores/resource-access.svelte': { resourceAccess: { can: () => true, load: async () => {} } },
+    '../../lib/stores/workspace.svelte': { ws }, '../../lib/toast.svelte': { toasts: { success() {} } },
+    './boxes/poll': { livePoll: () => ({ now() {}, stop() {} }) },
     '../../lib/plural': { plural: () => '' },
     './homeThreads': { threadSessions: () => [], threadRoute: (id: string) => `threads/${id}`, unlistedWaiting: () => 0 },
     '../../lib/stores/runtimeAttention.svelte': { runtimeWaiting: () => [] },

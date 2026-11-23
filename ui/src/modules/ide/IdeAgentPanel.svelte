@@ -49,7 +49,7 @@
   ]);
   function useSuggestion(prompt: string): void {
     ideAgent.composerText = prompt;
-    requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('[data-testid="ide-agent-composer"] textarea')?.focus());
+    requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('[data-testid="ide-agent-composer"]')?.focus());
   }
   const PtyConversationView = lazyComponent(loadPtyConversationView);
 

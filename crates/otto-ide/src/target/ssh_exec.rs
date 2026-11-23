@@ -10,8 +10,10 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use otto_core::{Error, Result};
 use otto_ssh::{SftpParams, SftpSession};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
 
+use crate::lsp_host::pool_spawn::kill_process_group_sync;
 use crate::types::IdeSshSpec;
 
 use super::fs_ops::resolve_local_existing_in_roots;
@@ -19,6 +21,80 @@ pub(crate) use super::path_resolve::*;
 use super::{ExecOutput, ResolvedTarget, SshPoolKey, TargetManager, SFTP_IDLE_TTL};
 
 const SSH_POOL_CAPACITY: usize = 32;
+pub(crate) const MAX_EXEC_STDOUT_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_EXEC_STDERR_BYTES: usize = 2 * 1024 * 1024;
+
+/// Reaps a spawned child's process group (`-pgid`) on drop unless disarmed
+/// after normal exit — guarantees timed-out or cancelled subtrees never linger.
+pub(crate) struct ProcessGroupKillGuard(Option<u32>);
+
+impl ProcessGroupKillGuard {
+    pub(crate) fn new(pid: Option<u32>) -> Self {
+        Self(pid)
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for ProcessGroupKillGuard {
+    fn drop(&mut self) {
+        if let Some(pgid) = self.0.take() {
+            #[cfg(unix)]
+            kill_process_group_sync(pgid);
+            #[cfg(not(unix))]
+            let _ = pgid;
+        }
+    }
+}
+
+/// Read up to `cap` bytes from `reader`, draining any excess to EOF so the
+/// child process never blocks on a full pipe while keeping memory bounded.
+pub(crate) async fn read_pipe_capped<R: AsyncRead + Unpin>(
+    mut reader: R,
+    cap: usize,
+) -> std::io::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = reader.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        let room = cap.saturating_sub(out.len());
+        if room > 0 {
+            out.extend_from_slice(&chunk[..n.min(room)]);
+        }
+    }
+    Ok(out)
+}
+
+/// Atomically create a private `0o700` directory under `base` (`O_EXCL`-like:
+/// fails and retries with a new sequence number if a path already exists, so a
+/// pre-created symlink/directory in `/tmp` is never reused).
+pub(crate) fn create_private_temp_dir(base: &Path, prefix: &str) -> Result<PathBuf> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let pid = std::process::id();
+    for _ in 0..64 {
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = base.join(format!("{prefix}-{pid}-{n}"));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match builder.create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(Error::Internal(format!("create ssh control dir: {e}"))),
+        }
+    }
+    Err(Error::Internal(
+        "create ssh control dir: exhausted unique directory attempts".into(),
+    ))
+}
 
 const REMOTE_TOOLCHAIN_PATH_EXPRS: &[&str] = &[
     "\"$HOME\"/.otto/toolchains/java/current/bin",
@@ -45,23 +121,12 @@ pub(crate) struct SshControlSocket {
 
 impl SshControlSocket {
     pub(crate) fn new(spec: &IdeSshSpec) -> Result<Self> {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
         let base = if Path::new("/tmp").is_dir() {
             PathBuf::from("/tmp")
         } else {
             std::env::temp_dir()
         };
-        let dir = base.join(format!("oi-{pid}-{n}"));
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| Error::Internal(format!("create ssh control dir: {e}")))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
-                .map_err(|e| Error::Internal(format!("secure ssh control dir: {e}")))?;
-        }
+        let dir = create_private_temp_dir(&base, "oi")?;
         let ctl_path = dir.join("c.s").to_string_lossy().into_owned();
         let ssh_target = if spec.user.is_empty() {
             spec.host.clone()
@@ -180,6 +245,8 @@ impl TargetManager {
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .kill_on_drop(true);
+                #[cfg(unix)]
+                cmd.process_group(0);
                 Ok((cmd, None))
             }
             ResolvedTarget::Ssh {
@@ -205,6 +272,8 @@ impl TargetManager {
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .kill_on_drop(true);
+                #[cfg(unix)]
+                cmd.process_group(0);
                 Ok((cmd, preamble))
             }
         }
@@ -250,6 +319,8 @@ impl TargetManager {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        #[cfg(unix)]
+        cmd.process_group(0);
         Ok((cmd, env_preamble.map(|(_, b)| b)))
     }
 
@@ -551,10 +622,9 @@ pub(crate) fn wrap_remote_null_stdin_with_eof_kill_and_env(
     )
 }
 
-/// Wrap a remote command that reads binary frames on `stdin` (DAP stdio adapters)
+/// Wrap a remote command that reads binary frames on `stdin` (DAP/LSP stdio adapters)
 /// or listens on TCP (`dlv`, JDWP, Node inspector) so closing the local `ssh` pipe
 /// cleanly terminates the remote process without `-tt` PTY newline mangling.
-#[cfg(test)]
 pub(crate) fn wrap_remote_stdio_with_eof_kill(exec_line: &str) -> String {
     wrap_remote_stdio_with_eof_kill_and_env(exec_line, None)
 }
@@ -609,27 +679,137 @@ pub(crate) async fn write_ssh_env_preamble(
     Ok(())
 }
 
-async fn run_command_bounded(
+pub(crate) async fn run_command_bounded_with_caps(
     mut cmd: Command,
     preamble: Option<Vec<u8>>,
     timeout: Duration,
+    stdout_cap: usize,
+    stderr_cap: usize,
 ) -> Result<ExecOutput> {
+    #[cfg(unix)]
+    cmd.process_group(0);
+    cmd.kill_on_drop(true);
     let mut child = cmd
         .spawn()
         .map_err(|e| Error::Upstream(format!("failed to start process: {e}")))?;
-    if preamble.is_some() {
-        write_ssh_env_preamble(&mut child, preamble, true).await?;
-    }
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(out)) => Ok(ExecOutput {
-            exit_code: out.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        }),
-        Ok(Err(e)) => Err(Error::Upstream(format!("process wait failed: {e}"))),
+    let mut guard = ProcessGroupKillGuard::new(child.id());
+    let stdin = child.stdin.take();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let work = async {
+        let feed = async move {
+            if let Some(bytes) = preamble {
+                if let Some(mut si) = stdin {
+                    use tokio::io::AsyncWriteExt;
+                    if let Err(e) = si.write_all(&bytes).await {
+                        if e.kind() != std::io::ErrorKind::BrokenPipe {
+                            return Err(Error::Upstream(format!("write ssh env preamble: {e}")));
+                        }
+                    }
+                    let _ = si.shutdown().await;
+                }
+            } else {
+                drop(stdin);
+            }
+            Ok(())
+        };
+        let read_out = async move {
+            match stdout {
+                Some(r) => read_pipe_capped(r, stdout_cap).await,
+                None => Ok(Vec::new()),
+            }
+        };
+        let read_err = async move {
+            match stderr {
+                Some(r) => read_pipe_capped(r, stderr_cap).await,
+                None => Ok(Vec::new()),
+            }
+        };
+        let (fed, out_res, err_res) = tokio::join!(feed, read_out, read_err);
+        fed?;
+        let stdout_bytes =
+            out_res.map_err(|e| Error::Upstream(format!("read process stdout: {e}")))?;
+        let stderr_bytes =
+            err_res.map_err(|e| Error::Upstream(format!("read process stderr: {e}")))?;
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| Error::Upstream(format!("process wait failed: {e}")))?;
+        Ok(ExecOutput {
+            exit_code: status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
+        })
+    };
+
+    match tokio::time::timeout(timeout, work).await {
+        Ok(res) => {
+            guard.disarm();
+            res
+        }
         Err(_) => Err(Error::Upstream(format!(
             "command timed out after {}s",
             timeout.as_secs()
         ))),
+    }
+}
+
+async fn run_command_bounded(
+    cmd: Command,
+    preamble: Option<Vec<u8>>,
+    timeout: Duration,
+) -> Result<ExecOutput> {
+    run_command_bounded_with_caps(
+        cmd,
+        preamble,
+        timeout,
+        MAX_EXEC_STDOUT_BYTES,
+        MAX_EXEC_STDERR_BYTES,
+    )
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_private_temp_dir_sets_0700_atomically() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = create_private_temp_dir(tmp.path(), "oi").unwrap();
+        assert!(dir.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "ssh control dir must be 0o700, got {mode:#o}");
+        }
+    }
+
+    #[tokio::test]
+    async fn run_command_bounded_caps_output_and_reaps_timeout_subtree() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "yes abcdefgh | head -c 100000"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let out = run_command_bounded_with_caps(cmd, None, Duration::from_secs(5), 256, 256)
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.stdout.len(), 256);
+
+        let mut slow = Command::new("/bin/sh");
+        slow.args(["-c", "sleep 30 & wait"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let start = tokio::time::Instant::now();
+        let err = run_command_bounded_with_caps(slow, None, Duration::from_millis(150), 256, 256)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "unexpected: {err}");
+        assert!(start.elapsed() < Duration::from_secs(3));
     }
 }

@@ -105,6 +105,16 @@ impl ServerCtx {
             });
         agent_runtime.set_usage_engine(usage.clone());
         let ide = Arc::new(otto_ide::IdeEngine::new(data_dir.clone()));
+        let simulators = Arc::new(otto_simulators::SimulatorsService::new_with_data_dir(
+            data_dir.clone(),
+        ));
+        let containers = Arc::new(otto_containers::ContainersService::new(data_dir.clone()));
+        let media = Arc::new(otto_media::MediaService::new(
+            pool.clone(),
+            data_dir.clone(),
+            secrets.clone(),
+            Some(events.clone()),
+        ));
         let scratches_home = crate::routes::scratches::default_home();
         ServerCtx {
             scratches_home,
@@ -175,6 +185,7 @@ impl ServerCtx {
             canvas_repo: otto_state::CanvasRepo::new(pool.clone()),
             product_agent_cancels: otto_product::run::new_cancel_registry(),
             design_jobs: crate::design_blender::new_job_registry(),
+            media,
             memory,
             // Vault v3 — the file-backed docs home (markdown vaults on disk,
             // derived SQLite index, OKF validation). No embeddings anywhere.
@@ -191,6 +202,8 @@ impl ServerCtx {
             ui_bridge: Default::default(),
             agent_runtime,
             ide,
+            simulators,
+            containers,
             secrets,
             events,
             pool,

@@ -5,6 +5,7 @@
 pub mod activity;
 pub mod agent_runtime;
 pub mod api_client;
+pub mod archive_schema;
 pub mod audit;
 pub mod aws_accounts;
 pub mod broker_audit;

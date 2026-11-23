@@ -185,6 +185,33 @@ fn write_tools_are_dangerous_reads_are_default_enabled() {
     assert!(DEFAULT_ENABLED.contains(&"list_scheduled_task_runs"));
 }
 
+/// Gemini accepts only string enum values and answers a non-string one with
+/// "enum[0]: cannot be empty" for the whole request, so one such tool breaks
+/// every turn of a session that is given it (`ui_db_page`'s `delta` did).
+#[test]
+fn no_advertised_schema_has_a_non_string_enum_value() {
+    fn bad(v: &serde_json::Value) -> bool {
+        match v {
+            serde_json::Value::Object(o) => {
+                o.get("enum")
+                    .and_then(|e| e.as_array())
+                    .is_some_and(|e| e.iter().any(|x| !x.is_string()))
+                    || o.values().any(bad)
+            }
+            serde_json::Value::Array(a) => a.iter().any(bad),
+            _ => false,
+        }
+    }
+    let specs = otto_tool_specs();
+    assert!(specs.iter().any(|t| t["name"] == "otto.ui_db_page"));
+    let offenders: Vec<_> = specs
+        .iter()
+        .filter(|t| bad(&t["inputSchema"]))
+        .map(|t| t["name"].to_string())
+        .collect();
+    assert!(offenders.is_empty(), "{offenders:?}");
+}
+
 #[test]
 fn create_tool_is_marked_mutating() {
     let specs = otto_tool_specs();
@@ -2221,6 +2248,88 @@ fn design_writes_are_approval_gated_and_route_to_the_design_api() {
     .is_err());
 }
 
+/// Design Hall review comments: the list is a default-on read; commenting and
+/// resolving are approval-gated like the other Design Hall writes (not
+/// irreversible), scoped to the artifact's own workspace, and each routes to
+/// the comment routes with only the fields those routes read.
+#[test]
+fn design_comment_tools_are_tiered_and_route_to_the_comment_api() {
+    let specs = otto_tool_specs();
+    for (t, write) in [
+        ("design_comments", false),
+        ("design_comment", true),
+        ("design_resolve_comment", true),
+    ] {
+        let spec = specs
+            .iter()
+            .find(|s| s["name"] == format!("otto.{t}"))
+            .unwrap();
+        assert_eq!(spec["category"], json!("Product & Design"), "{t}");
+        assert_eq!(spec["mutating"], json!(write), "{t}");
+        assert_eq!(DANGEROUS.contains(&t), write, "{t}");
+        assert_eq!(DEFAULT_ENABLED.contains(&t), !write, "{t}");
+        assert!(!tool_is_irreversible(t), "{t}");
+        assert!(DESIGN_WS_TOOLS.contains(&t), "{t}");
+        assert!(
+            REF_ARGS.contains(&(t, "artifact_id", "design_artifact")),
+            "{t}"
+        );
+        if write {
+            let d = dangerous_detail(
+                &format!("otto.{t}"),
+                &json!({"artifact_id": "A1", "comment_id": "C1", "body": "too dark"}),
+            );
+            assert!(d.contains("A1") && !d.starts_with("External agent"), "{d}");
+        }
+    }
+    assert!(
+        dangerous_detail("otto.design_resolve_comment", &json!({"resolved": "false"}))
+            .starts_with("Reopen")
+    );
+
+    let r = |t: &str, a: serde_json::Value| route_for(t, &a).unwrap();
+    assert_eq!(
+        r("design_comments", json!({"artifact_id": "A 1"})).path,
+        "/api/v1/design/artifacts/A%201/comments"
+    );
+    assert_eq!(
+        r(
+            "design_comments",
+            json!({"artifact_id": "A", "version_id": "V", "resolved": false})
+        )
+        .path,
+        "/api/v1/design/artifacts/A/comments?version=V&resolved=false"
+    );
+    let pin = json!({"selection_kind": "point", "position": [0.0, 1.0, 0.0]});
+    let c = r(
+        "design_comment",
+        json!({"artifact_id": "A", "body": "dent", "pin_3d": pin, "parent_id": "",
+                "workspace_id": "W"}),
+    );
+    assert_eq!(
+        (c.method, c.path.as_str()),
+        (Method::Post, "/api/v1/design/artifacts/A/comments")
+    );
+    assert_eq!(c.body.unwrap(), json!({"body": "dent", "pin_3d": pin}));
+    for (resolved, want) in [
+        (json!(null), true),
+        (json!(false), false),
+        (json!("false"), false),
+    ] {
+        let c = r(
+            "design_resolve_comment",
+            json!({"artifact_id": "A", "comment_id": "C", "resolved": resolved}),
+        );
+        assert_eq!(
+            (c.method, c.path.as_str()),
+            (Method::Patch, "/api/v1/design/artifacts/A/comments/C")
+        );
+        assert_eq!(c.body.unwrap(), json!({ "resolved": want }), "{resolved}");
+    }
+    assert!(route_for("design_comment", &json!({"artifact_id": "A"})).is_err());
+    assert!(route_for("design_resolve_comment", &json!({"artifact_id": "A"})).is_err());
+}
+
 #[test]
 fn vault_tools_do_not_require_workspace_id() {
     // Vaults are a global library: `workspace_id` is an optional hint on
@@ -2903,4 +3012,198 @@ fn jira_and_confluence_cards_show_where_and_what_is_published() {
         d.contains("preset 'blunt'") && d.contains("\"never ask me\""),
         "{d}"
     );
+}
+
+/// 3D, voice and Smart-mode tools: reads default-on, writers approval-gated
+/// (a clip delete irreversible), each routed to its own REST route.
+#[test]
+fn media_tools_are_tiered_and_route_to_the_media_api() {
+    const READS: &[&str] = &[
+        "list_3d_providers",
+        "get_3d_job",
+        "list_3d_jobs",
+        "list_tts_providers",
+        "list_tts_voices",
+        "list_voice_clips",
+        "get_production",
+        "list_productions",
+        "get_audio_job",
+        "list_audio_jobs",
+    ];
+    const WRITES: &[&str] = &[
+        "start_3d_job",
+        "cancel_3d_job",
+        "export_3d_artifact",
+        "synthesize_voice",
+        "delete_voice_clip",
+        "create_production",
+        "start_production",
+        "cancel_production",
+        "steer_production",
+        "redraw_production_item",
+        "revert_production",
+        "rebuild_production_scene",
+        "start_sound",
+        "start_music",
+        "cancel_audio_job",
+    ];
+    let specs = otto_tool_specs();
+    for t in READS.iter().chain(WRITES) {
+        let spec = specs
+            .iter()
+            .find(|s| s["name"] == format!("otto.{t}"))
+            .unwrap();
+        assert_eq!(spec["category"], json!("Product & Design"), "{t}");
+        let write = WRITES.contains(t);
+        assert_eq!(spec["mutating"], json!(write), "{t}");
+        assert_eq!(DANGEROUS.contains(t), write, "{t}");
+        assert_eq!(DEFAULT_ENABLED.contains(t), !write, "{t}");
+        if write {
+            assert!(
+                !dangerous_detail(&format!("otto.{t}"), &json!({})).starts_with("External agent"),
+                "{t}"
+            );
+        }
+    }
+    assert!(tool_is_irreversible("delete_voice_clip"));
+    assert!(!tool_is_irreversible("start_3d_job"));
+    // No provider admin, no keys.
+    assert!(!specs.iter().any(|s| s["name"].as_str().is_some_and(|n| {
+        n.contains("3d_provider") && !n.ends_with("list_3d_providers")
+            || n.contains("tts_provider") && !n.ends_with("list_tts_providers")
+    })));
+
+    let r = |t: &str, a: serde_json::Value| route_for(t, &a).unwrap();
+    let job = r(
+        "start_3d_job",
+        json!({"workspace_id": "W", "prompt": "a crate"}),
+    );
+    assert_eq!(
+        (job.method, job.path.as_str()),
+        (Method::Post, "/api/v1/design/3d/jobs")
+    );
+    assert_eq!(job.body.unwrap()["provider_id"], "otto-forge");
+    assert_eq!(
+        r("get_3d_job", json!({"job_id": "J 1"})).path,
+        "/api/v1/design/3d/jobs/J%201"
+    );
+    assert_eq!(
+        r("list_3d_jobs", json!({"workspace_id": "W", "limit": 5})).path,
+        "/api/v1/design/3d/jobs?workspace_id=W&limit=5"
+    );
+    assert_eq!(
+        r("cancel_3d_job", json!({"job_id": "J"})).path,
+        "/api/v1/design/3d/jobs/J/cancel"
+    );
+    let exp = r(
+        "export_3d_artifact",
+        json!({"artifact_id": "A", "relative_path": "m.glb", "workspace_id": "W"}),
+    );
+    assert_eq!(exp.path, "/api/v1/design/3d/artifacts/A/export-workspace");
+    assert_eq!(exp.body.unwrap(), json!({"relative_path": "m.glb"}));
+    assert_eq!(
+        r("list_tts_voices", json!({"provider_id": "macos-say"})).path,
+        "/api/v1/product/tts/providers/macos-say/voices"
+    );
+    assert_eq!(
+        r(
+            "synthesize_voice",
+            json!({"workspace_id": "W", "voice_id": "v", "text": "hi"})
+        )
+        .path,
+        "/api/v1/product/tts/synthesize"
+    );
+    assert_eq!(
+        r(
+            "list_voice_clips",
+            json!({"workspace_id": "W", "story_id": "S"})
+        )
+        .path,
+        "/api/v1/product/tts/clips?workspace_id=W&story_id=S"
+    );
+    assert_eq!(
+        r("delete_voice_clip", json!({"clip_id": "C"})).method,
+        Method::Delete
+    );
+    assert_eq!(
+        r(
+            "create_production",
+            json!({"workspace_id": "W", "description": "d"})
+        )
+        .path,
+        "/api/v1/design/productions"
+    );
+    assert_eq!(
+        r("list_productions", json!({"workspace_id": "W"})).path,
+        "/api/v1/design/productions?workspace_id=W"
+    );
+    assert_eq!(
+        r("start_production", json!({"production_id": "P"})).path,
+        "/api/v1/design/productions/P/start"
+    );
+    assert_eq!(
+        r("cancel_production", json!({"production_id": "P"})).path,
+        "/api/v1/design/productions/P/cancel"
+    );
+    let steer = r(
+        "steer_production",
+        json!({"production_id": "P", "comment": "daytime", "pins": [{"item_id": "fox", "note": "bigger"}]}),
+    );
+    assert_eq!(
+        (steer.method, steer.path.as_str()),
+        (Method::Post, "/api/v1/design/productions/P/steer")
+    );
+    assert_eq!(
+        steer.body.unwrap(),
+        json!({"comment": "daytime", "pins": [{"item_id": "fox", "note": "bigger"}]})
+    );
+    assert_eq!(
+        r(
+            "redraw_production_item",
+            json!({"production_id": "P", "item_id": "fox 1"})
+        )
+        .path,
+        "/api/v1/design/productions/P/items/fox%201/redraw"
+    );
+    let rev = r(
+        "revert_production",
+        json!({"production_id": "P", "revision_id": "R"}),
+    );
+    assert_eq!(rev.path, "/api/v1/design/productions/P/revert");
+    assert_eq!(rev.body.unwrap(), json!({"revision_id": "R"}));
+    assert_eq!(
+        r("rebuild_production_scene", json!({"production_id": "P"})).path,
+        "/api/v1/design/productions/P/scene"
+    );
+    assert!(route_for("steer_production", &json!({"production_id": "P"})).is_err());
+    for (tool, kind) in [("start_sound", "sound"), ("start_music", "music")] {
+        let c = r(
+            tool,
+            json!({"workspace_id": "W", "prompt": "rain", "seconds": 5, "kind": "x"}),
+        );
+        assert_eq!(
+            (c.method, c.path.as_str()),
+            (Method::Post, "/api/v1/product/audio/jobs")
+        );
+        assert_eq!(c.body.unwrap()["kind"], kind, "the tool sets the kind");
+    }
+    assert_eq!(
+        r("get_audio_job", json!({"job_id": "J"})).path,
+        "/api/v1/product/audio/jobs/J"
+    );
+    assert_eq!(
+        r(
+            "list_audio_jobs",
+            json!({"workspace_id": "W", "kind": "music"})
+        )
+        .path,
+        "/api/v1/product/audio/jobs?workspace_id=W&kind=music"
+    );
+    assert_eq!(
+        r("cancel_audio_job", json!({"job_id": "J"})).path,
+        "/api/v1/product/audio/jobs/J/cancel"
+    );
+    assert!(route_for("get_3d_job", &json!({})).is_err());
+    assert!(route_for("list_3d_jobs", &json!({})).is_err());
+    assert_eq!(call_timeout("synthesize_voice", &json!({})).as_secs(), 100);
 }

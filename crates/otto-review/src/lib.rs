@@ -15,6 +15,7 @@
 //! otto-server mounts the routes and drives the ctx-bound orchestration.
 
 pub mod contract;
+pub mod delta;
 pub mod engine;
 pub mod fallback;
 pub mod fix_goal;

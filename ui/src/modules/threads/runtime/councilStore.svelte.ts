@@ -200,12 +200,17 @@ export async function stopSeats(ids: readonly string[]): Promise<void> {
 }
 
 /** A thread's last answer: from its open conversation, else loaded briefly. */
-async function answerFor(id: string): Promise<string> {
-  if (runtimeViews.projections[id]) return answerOf(runtimeViews.projections[id]);
+async function answerFor(id: string): Promise<{ text: string; error?: string }> {
+  if (runtimeViews.projections[id]) return { text: answerOf(runtimeViews.projections[id]) };
   const release = runtimeViews.open(id);
   try {
-    for (let i = 0; i < 60 && !runtimeViews.projections[id]; i++) await new Promise((r) => setTimeout(r, 100));
-    return answerOf(runtimeViews.projections[id]);
+    for (let i = 0; i < 60 && !runtimeViews.projections[id] && !runtimeViews.loadError[id]; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    if (!runtimeViews.projections[id] && runtimeViews.loadError[id]) {
+      return { text: '', error: runtimeViews.loadError[id] };
+    }
+    return { text: answerOf(runtimeViews.projections[id]) };
   } finally {
     release();
   }
@@ -216,7 +221,11 @@ async function answerFor(id: string): Promise<string> {
  *  Nothing is sent until the person presses Send. */
 export async function continueWithAnswer(id: string): Promise<void> {
   const s = runtimeThreads.get(id);
-  const text = await answerFor(id);
+  const { text, error } = await answerFor(id);
+  if (error) {
+    toasts.error('Couldn’t load the answer', error);
+    return;
+  }
   if (!s || !text.trim()) {
     toasts.info('No answer to continue with yet', 'Wait for it to answer, then try again.');
     return;
@@ -227,7 +236,11 @@ export async function continueWithAnswer(id: string): Promise<void> {
 /** "Send to a thread ▸ <thread>": the shared Message sheet opens with the
  *  answer quoted (the person edits it and presses Send). */
 async function sendAnswer(id: string, target: string): Promise<void> {
-  const text = await answerFor(id);
+  const { text, error } = await answerFor(id);
+  if (error) {
+    toasts.error('Couldn’t load the answer', error);
+    return;
+  }
   if (!text.trim()) {
     toasts.info('No answer to send yet', 'Wait for it to answer, then try again.');
     return;

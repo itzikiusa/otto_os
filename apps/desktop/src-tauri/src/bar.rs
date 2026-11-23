@@ -72,19 +72,33 @@ fn state() -> std::sync::MutexGuard<'static, State> {
     STATE.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// Build the hidden bar window (startup). Failure is non-fatal: the shortcut
-/// then just logs, and every in-app entry point still works.
+/// Defer pre-warming the hidden bar window past cold startup so the main
+/// window's first paint and daemon boot don't contend with a second WebContent
+/// process. Summoning the bar earlier (⌥Space / tray) still builds it on
+/// demand via `show` → `build`.
+pub const PREWARM_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Schedule deferred pre-warming of the hidden bar window (startup). Failure is
+/// non-fatal: the shortcut then just logs, and every in-app entry point still
+/// works.
 pub fn init(app: &AppHandle) {
-    if let Err(e) = build(app) {
-        eprintln!("assistant bar unavailable: {e}");
-    }
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(PREWARM_DELAY).await;
+        if handle.get_webview_window(LABEL).is_some() {
+            return;
+        }
+        if let Err(e) = build(&handle) {
+            eprintln!("assistant bar unavailable: {e}");
+        }
+    });
 }
 
 fn build(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     if let Some(w) = app.get_webview_window(LABEL) {
         return Ok(w);
     }
-    let win = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("index.html#/bar".into()))
+    let win = match WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("index.html#/bar".into()))
         .title("Otto Assistant")
         .inner_size(DEFAULT_W, PILL_H)
         .decorations(false)
@@ -101,7 +115,16 @@ fn build(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
         .accept_first_mouse(true)
         .disable_drag_drop_handler()
         .initialization_script(format!("window.__OTTO_WIN__='{LABEL}';"))
-        .build()?;
+        .build()
+    {
+        Ok(win) => win,
+        Err(e) => {
+            if let Some(existing) = app.get_webview_window(LABEL) {
+                return Ok(existing);
+            }
+            return Err(e);
+        }
+    };
     let for_main = win.clone();
     let _ = app.run_on_main_thread(move || {
         crate::panel::make_nonactivating_panel(&for_main);
@@ -392,5 +415,11 @@ mod tests {
         };
         let (x, _, w, _) = fit(&a, DEFAULT_W, PILL_H);
         assert!(x >= 0.0 && x + w <= 400.0);
+    }
+
+    #[test]
+    fn prewarm_delay_defers_past_cold_boot() {
+        assert!(PREWARM_DELAY >= std::time::Duration::from_secs(1));
+        assert!(PREWARM_DELAY <= std::time::Duration::from_secs(5));
     }
 }

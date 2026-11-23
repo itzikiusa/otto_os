@@ -873,3 +873,50 @@ async fn ide_tables_scrub_credentials_and_enforce_portable_export_rules() {
         archive.reconnect
     );
 }
+
+#[tokio::test]
+async fn phone_device_and_pairing_credential_tables_are_excluded_from_full_export() {
+    assert!(schema::excluded_table("phone_devices", false));
+    assert!(schema::excluded_table("phone_devices", true));
+    assert!(schema::excluded_table("phone_pairings", false));
+    assert!(schema::excluded_table("phone_pairings", true));
+
+    let pool = otto_state::db::test_pool().await;
+    let user_id = "u-phone-test";
+    let now = "2026-01-01T00:00:00Z";
+    sqlx::query(
+        "INSERT INTO users (id, username, display_name, password_hash, is_root, disabled, created_at)
+         VALUES (?, 'owner', 'Owner', 'hash', 1, 0, ?)",
+    )
+    .bind(user_id)
+    .bind(now)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO phone_pairings (id, user_id, code_hash, status, confirm_code, created_at, expires_at)
+         VALUES ('pair-1', ?, 'secret-code-hash', 'waiting', '123456', ?, '2026-01-02T00:00:00Z')",
+    )
+    .bind(user_id)
+    .bind(now)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO phone_devices (id, user_id, token_hash, token_prefix, name, created_at, last_seen_at, expires_at, idle_expires_at)
+         VALUES ('dev-1', ?, 'secret-device-token-hash', 'otto_ph', 'iPhone', ?, ?, '2026-06-01T00:00:00Z', '2026-02-01T00:00:00Z')",
+    )
+    .bind(user_id)
+    .bind(now)
+    .bind(now)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let archive = snapshot(&pool).await;
+    assert!(!archive.records.contains_key("phone_devices"));
+    assert!(!archive.records.contains_key("phone_pairings"));
+    let serialized = serde_json::to_string(&archive).unwrap();
+    assert!(!serialized.contains("secret-code-hash"));
+    assert!(!serialized.contains("secret-device-token-hash"));
+}

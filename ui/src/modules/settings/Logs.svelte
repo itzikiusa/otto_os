@@ -232,7 +232,7 @@
   /** A failed read. While Live is on this ran every 1.5 s and stacked a toast
    *  per tick; pause Live instead and say so once. */
   function failed(title: string, e: unknown): void {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = loadErrorText(e);
     if (autoRefresh) {
       autoRefresh = false;
       toasts.error(`${title} — live updates paused`, `${msg} Turn Live back on to retry.`);

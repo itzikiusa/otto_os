@@ -19,6 +19,8 @@ mod runtime_debug;
 mod sse_framing;
 #[path = "http/toolchains_env.rs"]
 mod toolchains_env;
+#[path = "http/tree_watch.rs"]
+mod tree_watch;
 
 use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::StatusCode;
@@ -130,6 +132,7 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
         )
         .route("/ide/fs/git-base", get(fs_git_base::<S>))
         .route("/ide/fs/mutate", post(fs_mutate::<S>))
+        .route("/ide/fs/watch", post(tree_watch::fs_watch::<S>))
         .route("/ide/fs/complete", post(fs_complete::<S>))
         .route("/ide/search", post(search_workspace::<S>))
         .route("/ide/replace", post(replace_workspace::<S>))

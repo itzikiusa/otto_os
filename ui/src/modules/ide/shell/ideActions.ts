@@ -93,7 +93,7 @@ const notPaneInMore = (c: IdeActionCtx, h: IdeActionHome): boolean => h !== 'mor
 
 /** Stacked: a tool window is a pane; pick its tab without touching the workbench's
  *  persisted "dock open" preference. */
-function showTool(ctx: IdeActionCtx, tab: 'git' | 'dbwatch' | 'terminal' | 'problems' | 'debug'): void {
+function showTool(ctx: IdeActionCtx, tab: 'git' | 'dbwatch' | 'devices' | 'terminal' | 'problems' | 'debug'): void {
   if (ctx.stack) {
     ide.activeBottomTab = tab;
     ctx.onShowPane?.('tools');
@@ -148,13 +148,14 @@ export const IDE_ACTIONS: readonly IdeAction[] = [
   // Tool windows (one ⋯ submenu)
   { id: 'toggleExplorer', title: 'Toggle project explorer', group: 'Tool windows', icon: 'sidebar', homes: ['more'], shortcut: 'toggleExplorer', label: (c) => (c.explorerVisible ? 'Hide project explorer' : 'Show project explorer'), when: (c) => desktop(c) && Boolean(c.onToggleExplorer), run: (c) => c.onToggleExplorer?.() },
   { id: 'toggleDock', title: 'Toggle tool dock', group: 'Tool windows', icon: 'terminal', homes: ['palette', 'search', 'more'], shortcut: 'toggleDock', label: () => (ide.bottomDockOpen ? 'Hide tool dock' : 'Show tool dock'), when: desktop, run: () => ide.toggleBottomDock() },
-  { id: 'toggleBuildTool', title: 'Toggle Maven / Gradle tool window', group: 'Tool windows', icon: 'layers', homes: ['palette', 'search', 'more'], keywords: 'pom lifecycle spring profiles', label: () => `${ide.buildToolOpen ? 'Hide' : 'Show'} ${ide.buildToolKind === 'gradle' ? 'Gradle' : 'Maven'} tool window`, when: (c, h) => !c.stack && (h === 'palette' || Boolean(ide.buildToolKind)), run: () => ide.toggleBuildTool() },
+  { id: 'toggleBuildTool', title: 'Toggle Maven / Gradle / Mobile build tools', group: 'Tool windows', icon: 'layers', homes: ['palette', 'search', 'more'], keywords: 'pom lifecycle spring profiles xcode android flutter mobile', label: () => `${ide.buildToolOpen ? 'Hide' : 'Show'} ${ide.buildToolKind === 'gradle' ? 'Gradle' : 'Build'} tool window`, when: (_c, h) => h === 'palette' || Boolean(ide.buildToolKind), run: () => ide.toggleBuildTool() },
   { id: 'toggleAgent', title: 'Toggle AI agent', group: 'Tool windows', icon: 'assistant', homes: ['palette', 'search', 'more'], shortcut: 'toggleAgent', keywords: 'ai assistant chat context', label: (c) => (c.stack ? 'AI agent' : ideAgent.panelOpen ? 'Hide AI agent' : 'Show AI agent'), when: (c, h) => notPaneInMore(c, h) && Boolean(c.stack ? c.onShowPane : c.onTriggerAgent), run: (c) => (c.stack ? c.onShowPane?.('agent') : c.onTriggerAgent?.()) },
   { id: 'gitChanges', title: 'Open Git changes', group: 'Tool windows', icon: 'branch', homes: ['palette', 'search', 'more'], shortcut: 'gitPanel', keywords: 'vcs commit diff branches', label: () => 'Git changes', when: notPaneInMore, disabled: noTarget, run: (c) => showTool(c, 'git') },
   { id: 'terminal', title: 'Open terminal', group: 'Tool windows', icon: 'terminal', homes: PS, shortcut: 'terminal', disabled: noTarget, run: (c) => showTool(c, 'terminal') },
   { id: 'debugger', title: 'Open debugger', group: 'Tool windows', icon: 'bug', homes: PS, shortcut: 'debugPanel', keywords: 'debug variables frames console breakpoints', disabled: noTarget, run: (c) => showTool(c, 'debug') },
   { id: 'problems', title: 'Open problems', group: 'Tool windows', icon: 'warning', homes: PS, shortcut: 'problemsPanel', disabled: noTarget, run: (c) => showTool(c, 'problems') },
   { id: 'dbWatch', title: 'Open live DB watch', group: 'Tool windows', icon: 'db', homes: ['palette', 'search', 'more'], keywords: 'database testcontainers mysql postgres mongo redis clickhouse diff', label: () => 'Live DB watch', disabled: noTarget, run: (c) => showTool(c, 'dbwatch') },
+  { id: 'mobileDevices', title: 'Open mobile devices & simulators', group: 'Tool windows', icon: 'phone', homes: ['palette', 'search', 'more'], keywords: 'ios android simulator emulator avd xcode logcat adb preview', label: () => 'Mobile devices', run: (c) => showTool(c, 'devices') },
   { id: 'scratches', title: 'Open scratches', group: 'Tool windows', icon: 'workbench', homes: ['more'], label: () => 'Scratches', when: (c) => c.stack === true && Boolean(c.onOpenScratches), run: (c) => c.onOpenScratches?.() },
   // Settings
   { id: 'settings', title: 'Open settings…', group: 'Settings', icon: 'gear', homes: ['palette', 'search', 'more'], shortcut: 'settings', keywords: 'preferences project structure goroot jdk sdk', run: () => ide.openSettings('project.project') },

@@ -31,9 +31,24 @@ class CiRouteTests(unittest.TestCase):
         r = route(["docs/testing/build-performance.md", "README.md", "marketing/videos/out/Git.mp4"])
         self.assertEqual((r["rust"], r["code"], r["plugin"], r["desktop"]), (False, False, False, False))
 
+    def test_ui_files_mirrored_by_rust_guards_run_rust(self) -> None:
+        for p in [
+            "ui/src/lib/sidebar.ts",
+            "ui/src/lib/sidePane.ts",
+            "ui/src/lib/uiCommands.ts",
+            "ui/src/lib/uiCommands/catalog.ts",
+        ]:
+            r = route([p])
+            self.assertTrue(r["rust"], p)
+            self.assertTrue(r["code"], p)
+
     def test_contracts_are_code_and_rust(self) -> None:
         r = route(["docs/contracts/api.md"])
         self.assertTrue(r["rust"] and r["code"])
+
+    def test_forge_toolchain_runs_no_otto_gates(self) -> None:
+        r = route(["forge/forge/cli.py", "forge/bin/forge-voice", "forge/docs/voice.md"])
+        self.assertEqual((r["rust"], r["code"], r["plugin"], r["desktop"]), (False, False, False, False))
 
     def test_unknown_top_level_paths_fail_open(self) -> None:
         r = route(["newdir/thing.toml"])

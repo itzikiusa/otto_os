@@ -8,9 +8,9 @@
   // the prompt and "Import a file". Brand Kit and Team design rules live in
   // the header ⋯; the studios are the prompt's picker and the Studio chip.
   import { untrack } from 'svelte';
-  import { announceShown } from '../../lib/announce.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import ProductModeTabs from '../../lib/components/ProductModeTabs.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -27,6 +27,7 @@
   import GridFilterBar from './GridFilterBar.svelte';
   import LobbyPrompt from './LobbyPrompt.svelte';
   import LobbyRail from './LobbyRail.svelte';
+  import Provider3DManagerModal from './studio3d/Provider3DManagerModal.svelte';
   import { library } from './library.svelte';
   import { NO_FILTERS, type GridFilters, type GroupBy } from './designGrid';
 
@@ -66,8 +67,12 @@
     document.getElementById('dh-all-h')?.scrollIntoView({ block: 'start' });
   }
 
+  let providers3dOpen = $state(false);
   function moreMenu(e: MouseEvent): void {
     ctxMenu.show(e, [
+      { label: 'Voice Studio (TTS)', icon: 'volume', action: () => router.go('design/tts') },
+      { label: '3D generation providers…', icon: 'box', action: () => (providers3dOpen = true) },
+      { separator: true },
       { label: 'Brand Kit', icon: 'palette', action: () => router.go('design/brand') },
       { label: 'Team design rules', icon: 'bulb', action: () => router.go('design/learned') },
       { separator: true },
@@ -103,6 +108,14 @@
       searching = true;
       debounce = setTimeout(() => void runSearch(term), 220);
     });
+  });
+  $effect(() => () => {
+    if (debounce) {
+      clearTimeout(debounce);
+      debounce = null;
+    }
+    ctl?.abort();
+    ctl = null;
   });
 
   async function runSearch(term: string): Promise<void> {
@@ -145,7 +158,7 @@
   </label>
 {/snippet}
 
-<PageHeader title="Product" subtitle="Stories, specs and design studios" class="dh-header">
+<PageHeader title="Product" subtitle="Stories, specs and design studios" class="dh-header" tabsPlacement="start">
   {#snippet tabs()}
     <ProductModeTabs active="design" />
   {/snippet}
@@ -175,21 +188,24 @@
         <span class="grow"></span>
         <button class="btn small ghost" onclick={() => (q = '')}>Clear search</button>
       </div>
-      {#if searchError}
-        <div class="inline-err" use:announceShown={{ text: 'Couldn’t search. Check the connection and try again.', assertive: true }}>
-          <Icon name="warning" size={14} />
-          <span title={searchError}>Couldn’t search. Check the connection and try again.</span>
-          <button class="btn small" onclick={() => void runSearch(q.trim())}>Retry</button>
-        </div>
-      {:else if !searching && results.length === 0}
-        <p class="dim">No designs match “{q.trim()}”. Search looks at titles, tags, text inside designs, linked stories and project names.</p>
-      {:else}
+      <LoadState
+        what="search results"
+        errorTitle="Couldn’t search"
+        variant="compact"
+        loading={searching}
+        error={searchError}
+        empty={results.length === 0}
+        onretry={() => void runSearch(q.trim())}
+      >
+        {#snippet emptyView()}
+          <p class="dim">No designs match “{q.trim()}”. Search looks at titles, tags, text inside designs, linked stories and project names.</p>
+        {/snippet}
         <div class="cards">
           {#each results as h (h.artifact.id)}
             <ArtifactCard artifact={h.artifact} stories={library.storyKeys(h.artifact.id)} referenceCount={h.reference_count} />
           {/each}
         </div>
-      {/if}
+      </LoadState>
     </section>
   {:else if firstRun}
     <section class="first" aria-labelledby="dh-first-h" data-testid="design-first-run">
@@ -230,6 +246,10 @@
   {/if}
   </div>
 </PageBody>
+
+{#if providers3dOpen}
+  <Provider3DManagerModal canAdmin={auth.can('design', 'admin')} onclose={() => (providers3dOpen = false)} />
+{/if}
 
 <style>
   /* The rail stacks under the main column when the PAGE BODY is narrow (a
@@ -373,16 +393,6 @@
   p.dim {
     margin: 0;
     font-size: var(--fs-s);
-  }
-  .inline-err {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-    font-size: var(--fs-s);
-  }
-  .inline-err > :global(svg) {
-    color: var(--danger);
   }
   @media (pointer: coarse), (max-width: 640px) {
     .search {

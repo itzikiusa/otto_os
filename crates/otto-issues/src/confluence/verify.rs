@@ -61,13 +61,15 @@ impl ConfluenceClient {
             .await
             .map_err(|e| format!("request failed: {e}"))?;
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
+            let text =
+                crate::atlassian::read_text_capped(resp, crate::atlassian::ERROR_BODY_CAP).await;
             return Err(format!(
                 "answered {status}: {}",
                 text.chars().take(300).collect::<String>()
             ));
         }
+        let text = resp.text().await.unwrap_or_default();
         serde_json::from_str(&text).map_err(|e| format!("unreadable JSON: {e}"))
     }
 

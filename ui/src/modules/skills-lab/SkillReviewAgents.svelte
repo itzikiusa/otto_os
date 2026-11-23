@@ -78,7 +78,7 @@
         {/if}
         {#if i < lastRetryable && agent.name !== 'summarizer'}
           <button class="btn small ghost" disabled={retrying[i]} onclick={() => retryAgent(i)} title="Re-run this agent">
-            {retrying[i] ? 'Retrying…' : 'Retry'}
+            {retrying[i] ? 'Re-running…' : 'Re-run'}
           </button>
         {/if}
         {#if agent.findings && agent.findings.length > 0}

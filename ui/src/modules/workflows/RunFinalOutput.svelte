@@ -16,7 +16,7 @@
       <Icon name="check" size={13} />
       <span>Final output</span>
     </summary>
-    <iframe class="final-output-frame" title="Final output" sandbox="allow-same-origin" srcdoc={mon.finalOutputSrcdoc}></iframe>
+    <iframe class="final-output-frame" title="Final output" sandbox="" srcdoc={mon.finalOutputSrcdoc}></iframe>
   </details>
 {:else if mon.finalOutputError?.runId === run.id}
   {@const runId = run.id}

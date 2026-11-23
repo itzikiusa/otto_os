@@ -50,7 +50,7 @@
     if (!onchange) return;
     busy = true;
     try { await onchange(id); refresh++; }
-    catch (e) { error = e instanceof Error ? e.message : String(e); }
+    catch (e) { error = loadErrorText(e); }
     finally { busy = false; }
   }
   // Spoken at the state edge through the shell's always-mounted announcer: a

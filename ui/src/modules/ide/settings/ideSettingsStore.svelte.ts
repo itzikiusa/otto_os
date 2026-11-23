@@ -213,6 +213,9 @@ export interface EnvDraftState {
   rust_toolchain: string;
   node_home: string;
   python_interpreter: string;
+  android_home: string;
+  flutter_root: string;
+  xcode_developer_dir: string;
   inherit_shell_env: boolean;
   dotenv_path: string;
   network_bridge?: IdeNetworkBridgeConfig | null;
@@ -226,6 +229,9 @@ function emptyEnvDraft(env: IdeProjectEnvironment | null): EnvDraftState {
     rust_toolchain: env?.rust_toolchain ?? '',
     node_home: env?.node_home ?? '',
     python_interpreter: env?.python_interpreter ?? '',
+    android_home: env?.android_home ?? '',
+    flutter_root: env?.flutter_root ?? '',
+    xcode_developer_dir: env?.xcode_developer_dir ?? '',
     inherit_shell_env: env?.inherit_shell_env ?? true,
     dotenv_path: env?.dotenv_path ?? '',
     network_bridge: env?.network_bridge ?? undefined,
@@ -309,6 +315,9 @@ class IdeSettingsController {
         rust_toolchain: this.envDraft.rust_toolchain || null,
         node_home: this.envDraft.node_home || null,
         python_interpreter: this.envDraft.python_interpreter || null,
+        android_home: this.envDraft.android_home || null,
+        flutter_root: this.envDraft.flutter_root || null,
+        xcode_developer_dir: this.envDraft.xcode_developer_dir || null,
         inherit_shell_env: this.envDraft.inherit_shell_env,
         dotenv_path: this.envDraft.dotenv_path || null,
         module_sdks: snap.moduleSdkMap,

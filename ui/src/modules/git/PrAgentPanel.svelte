@@ -11,7 +11,7 @@
   // Each carries the PR's context (pr-agent-context.ts); Fix edits the clone,
   // and says so first. New thread (/new) closes this one and starts over, on
   // any agent.
-  import { tick, untrack } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { api } from '../../lib/api/client';
   import type { FileDiff, PrDetail, RuntimeAccessMode, RuntimeSession } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
@@ -59,7 +59,20 @@
   }
   let { repoId, number, title, layout, folded = false, ontogglefolded, onmaximize, onrestore, onasked, statusOnly = false }: Props = $props();
   let disposed = false;
-  $effect(() => () => { disposed = true; });
+  let fileDiffsAbort: AbortController | null = null;
+  $effect(() => {
+    void repoId;
+    void number;
+    return () => {
+      fileDiffsAbort?.abort();
+      fileDiffsAbort = null;
+    };
+  });
+  onDestroy(() => {
+    disposed = true;
+    fileDiffsAbort?.abort();
+    fileDiffsAbort = null;
+  });
   const hidden = $derived((folded && layout === 'dock') || statusOnly);
 
   const ThreadView = lazyComponent(loadRuntimeThreadView);
@@ -162,11 +175,18 @@
     if (!feed) return [];
     const byPath = new Map(feed.files.map((f) => [f.path, f]));
     const load = prDiffFileLoader(repoId, number);
-    const signal = new AbortController().signal;
+    fileDiffsAbort?.abort();
+    const ac = new AbortController();
+    fileDiffsAbort = ac;
+    const { signal } = ac;
     const picked = paths.map((p) => byPath.get(p)).filter((f): f is FileDiff => !!f).slice(0, INLINE_CAP.files);
-    const got = await Promise.all(picked.map((f) =>
-      f.hunks.length > 0 || f.is_binary ? Promise.resolve(f) : load(f, { full: false, signal }).catch(() => null)));
-    return got.filter((f): f is FileDiff => !!f);
+    try {
+      const got = await Promise.all(picked.map((f) =>
+        f.hunks.length > 0 || f.is_binary ? Promise.resolve(f) : load(f, { full: false, signal }).catch(() => null)));
+      return signal.aborted ? [] : got.filter((f): f is FileDiff => !!f);
+    } finally {
+      if (fileDiffsAbort === ac) fileDiffsAbort = null;
+    }
   }
 
   function confirmFix(pr: PrDetail, path: string, name: string): Promise<boolean> {
@@ -190,6 +210,7 @@
       const detail = await prDetail();
       if (ask.kind === 'fix' && !(await confirmFix(detail, r.path, r.name))) return;
       const diffs = ask.kind === 'files' ? await fileDiffs(ask.paths) : [];
+      if (disposed) return;
       const msg = buildAskMessage(ask, detail, r, diffs);
       await h.send(msg.text, { accessMode: msg.access });
       lastAsk = null;

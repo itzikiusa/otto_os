@@ -1,3 +1,8 @@
+<script lang="ts" module>
+  /** The open file the tree last revealed; outlives a remount (see the autoReveal effect). */
+  let lastAutoReveal: string | null = null;
+</script>
+
 <script lang="ts">
   import { tick, untrack } from 'svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -24,6 +29,10 @@
   import { ideBreakpointsNav } from './debug/ideBreakpointsNav.svelte';
   import IdeProjectMissingState from './shell/IdeProjectMissingState.svelte';
   import { newScratchFile, onScratches } from './shell/ideScratches.svelte';
+  import { ideTabRestore } from './shell/ideProjectHelpers';
+  import { IdeTreeLive, LEASE_HEARTBEAT_MS } from './store/ideTreeLive';
+  import { pollWhileVisible } from '../../lib/poll';
+  import { appLive } from '../../lib/live';
 
   const FolderPickerLazy = lazyComponent(() => import('../../lib/components/FolderPicker.svelte'));
   const IdeTreeSecondaryTabsLazy = lazyComponent(
@@ -63,6 +72,10 @@
   let clientHeight = $state(720);
   let addFolderPickerOpen = $state(false);
   let selectedDirPath = $state<string | null>(null);
+  $effect(() => {
+    void ide.target.root;
+    selectedDirPath = null;
+  });
   let manifestTreeModal = $state<{ title: string; output: string } | null>(null);
   let liveGit = $state<typeof IdeGitSingleton | null>(null);
   // One Tab stop for the whole tree (roving tabindex): the row last moved to with the arrow
@@ -83,6 +96,43 @@
     untrack(() => { if (!filterTimer && ext !== filterDraft) filterDraft = ext; });
   });
   $effect(() => () => { if (filterTimer) clearTimeout(filterTimer); });
+
+  // Live tree: the daemon watches the folders shown here and names the ones whose entries
+  // changed on disk (ideTreeLive). The lease follows the project and its open folders.
+  const treeLive = new IdeTreeLive(ide);
+  let leaseTimer: ReturnType<typeof setTimeout> | null = null;
+  $effect(() => {
+    void ide.target.root;
+    void ide.target.kind;
+    void ide.projectRoots;
+    void ide.expandedDirs;
+    void ide.childrenByDir;
+    untrack(() => {
+      if (leaseTimer) clearTimeout(leaseTimer);
+      leaseTimer = setTimeout(() => { leaseTimer = null; treeLive.sync(); }, 250);
+    });
+  });
+  $effect(() => {
+    // Back to the window (Remote SSH's only refresh), or events were lost.
+    const catchUp = (): void => {
+      if (document.visibilityState === 'visible') treeLive.onFocus();
+    };
+    const offChanged = appLive.on(['ide_fs_changed'], (ev) => treeLive.apply(String(ev.client_id), (ev.dirs as string[] | undefined) ?? []));
+    const offResync = appLive.onResync(() => treeLive.onResync());
+    // Paused while hidden: the lease then lapses and the return to the window re-posts it.
+    const beat = pollWhileVisible(() => treeLive.sync(true), { ms: LEASE_HEARTBEAT_MS, immediate: false });
+    window.addEventListener('focus', catchUp);
+    document.addEventListener('visibilitychange', catchUp);
+    return () => {
+      offChanged();
+      offResync();
+      beat.stop();
+      window.removeEventListener('focus', catchUp);
+      document.removeEventListener('visibilitychange', catchUp);
+      if (leaseTimer) clearTimeout(leaseTimer);
+      treeLive.release();
+    };
+  });
 
   $effect(() => {
     void import('./git/ideGitController.svelte').then((m) => {
@@ -272,6 +322,27 @@
     return { virtual: true, items: visibleNodes.slice(start, end), topPx: start * ROW_H, bottomPx: Math.max(0, (total - end) * ROW_H) };
   });
 
+  // What is on screen drives the listings: a folder open but not listed yet (it came back
+  // open with the project) is listed as it scrolls into view, a few at a time, and the live
+  // tree re-lists folders that may have changed off screen once they show again.
+  let lazyLoads = 0;
+  $effect(() => {
+    const items = treeWin.items;
+    untrack(() => {
+      const onScreen = new Set<string>();
+      for (const n of items) {
+        if (n.isProjectRoot || n.loadError) continue;
+        onScreen.add(parentDirOfPath(n.entry.path));
+        if (n.entry.kind !== 'dir' || !rowExpanded(n)) continue;
+        onScreen.add(n.entry.path);
+        if (ide.childrenByDir[n.entry.path] || ideTreeDirErrors.byPath[n.entry.path] || lazyLoads >= 4) continue;
+        lazyLoads += 1;
+        void ide.loadTree(n.entry.path).finally(() => { lazyLoads -= 1; });
+      }
+      treeLive.onScreen(onScreen);
+    });
+  });
+
   /** Scroll `path`'s row into view if it is not already (never moves focus). */
   async function scrollRowIntoView(path: string): Promise<void> {
     await tick();
@@ -295,12 +366,14 @@
   });
 
   // Reveal the active file (VS Code's autoReveal): when the open tab changes while the Files
-  // view shows, open its folders and bring its row into view — without taking focus.
-  let lastAutoReveal: string | null = null;
+  // view shows, open its folders and bring its row into view — without taking focus. Coming
+  // back to the IDE (a remount) or tabs coming back with the project (a switch, a reload) is
+  // not the open tab changing: the tree stays as the person left it.
   $effect(() => {
     const p = ide.activePath;
     if (!p || activeTab !== 'files' || p === lastAutoReveal) return;
     lastAutoReveal = p;
+    if (ideTabRestore.active) return;
     // Already on screen in the flattened tree: just scroll; else the store opens its folders
     // (loading them) and sends a reveal request the effect above scrolls to.
     untrack(() => {
@@ -380,7 +453,7 @@
       ...(local
         ? [
             { label: 'Add folder to project…', icon: 'worktree', action: () => (addFolderPickerOpen = true) },
-            { label: 'Local history and deleted files…', icon: 'clock', action: () => openCompareModal({ mode: 'local-history', path: ide.target.root || selectedDirPath || '', isDir: true, filter: 'all' }) },
+            { label: 'Local history and deleted files…', icon: 'clock', action: () => openCompareModal({ mode: 'local-history', path: selectedDirPath || ide.target.root || '', isDir: true, filter: 'all' }) },
           ]
         : []),
       { label: 'Show dotfiles', checked: ide.showHidden, action: () => { ide.showHidden = !ide.showHidden; void ide.loadTree(); } },
@@ -405,7 +478,7 @@
     <div class="tree-panel" role="tabpanel" id="ide-explorer-panel-files" aria-labelledby="ide-explorer-tab-files">
       <div class="tree-toolbar">
         <input class="tree-filter" type="search" dir="ltr" aria-label="Filter files" placeholder="Filter…" value={filterDraft} oninput={(e) => onFilterInput(e.currentTarget.value)} data-testid="ide-tree-filter" />
-        <button type="button" class="tree-act" aria-label={onScratches() ? 'New scratch file…' : 'New file…'} title={onScratches() ? 'New scratch file…' : 'New file…'} onclick={() => (onScratches() ? void newScratchFile() : triggerNewTreeEntry(ide.target.root || selectedDirPath || '', 'create_file'))} data-testid="ide-tree-new-file">
+        <button type="button" class="tree-act" aria-label={onScratches() ? 'New scratch file…' : 'New file…'} title={onScratches() ? 'New scratch file…' : 'New file…'} onclick={() => (onScratches() ? void newScratchFile() : triggerNewTreeEntry(selectedDirPath || ide.target.root || '', 'create_file'))} data-testid="ide-tree-new-file">
           <Icon name="plus" size={12} />
         </button>
         <button type="button" class="tree-act" aria-label="Explorer options" title="Explorer options" aria-haspopup="menu" onclick={openExplorerMenu} data-testid="ide-tree-more-btn">

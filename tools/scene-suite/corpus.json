@@ -1,0 +1,3655 @@
+[
+ {
+  "id": "t01-pier",
+  "plan_from": "owner",
+  "use": "pc",
+  "expect": {
+   "things": [
+    [
+     "pier"
+    ],
+    [
+     "robot",
+     "keeper"
+    ],
+    [
+     "lantern"
+    ],
+    [
+     "fox"
+    ],
+    [
+     "crate"
+    ],
+    [
+     "telescope"
+    ],
+    [
+     "rope"
+    ],
+    [
+     "yip"
+    ],
+    [
+     "wave"
+    ],
+    [
+     "foghorn",
+     "horn"
+    ],
+    [
+     "plank",
+     "creak"
+    ],
+    [
+     "gull",
+     "seagull"
+    ],
+    [
+     "accordion",
+     "music",
+     "tune"
+    ]
+   ],
+   "relations": [
+    [
+     "keeper",
+     "on",
+     "pier"
+    ],
+    [
+     "lantern",
+     "held",
+     "keeper"
+    ],
+    [
+     "crate",
+     "on",
+     "pier"
+    ],
+    [
+     "fox",
+     "on",
+     "crate"
+    ],
+    [
+     "crate",
+     "beside",
+     "keeper"
+    ],
+    [
+     "telescope",
+     "on",
+     "pier"
+    ],
+    [
+     "rope",
+     "on",
+     "pier"
+    ]
+   ],
+   "facing": [
+    [
+     "fox",
+     "keeper"
+    ]
+   ],
+   "bigger": [
+    [
+     "keeper",
+     "fox"
+    ]
+   ],
+   "lines": [
+    {
+     "speaker": [
+      "robot",
+      "keeper"
+     ],
+     "text": "Storm is coming, little one. Stay close to the light."
+    },
+    {
+     "speaker": [
+      "fox"
+     ],
+     "text": "You say that every night."
+    }
+   ],
+   "setting": "over the sea, at night, in fog",
+   "details": [
+    {
+     "what": "water under the pier",
+     "words": [
+      "water",
+      "sea",
+      "ocean"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "a lighthouse",
+     "words": [
+      "lighthouse"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "night",
+     "words": [
+      "night",
+      "dark",
+      "moon"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "fog",
+     "words": [
+      "fog",
+      "mist"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "the lantern's light on things",
+     "words": [
+      "point",
+      "spot"
+     ],
+     "where": "lights"
+    },
+    {
+     "what": "the fox sitting",
+     "words": [
+      "sit",
+      "sitting",
+      "seated"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the fox looking up at him",
+     "words": [
+      "look up",
+      "looking up",
+      "looks up"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "waves",
+     "words": [
+      "wave"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "a foghorn",
+     "words": [
+      "foghorn"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "seagulls",
+     "words": [
+      "gull"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "accordion music",
+     "words": [
+      "accordion"
+     ],
+     "where": "sound"
+    }
+   ],
+   "allow": [
+    "fog"
+   ]
+  },
+  "description": "A foggy wooden pier at night. A tall rusty robot lighthouse keeper, about 2 metres, stands holding a glowing lantern in his right hand. A small red fox sits on top of a wooden crate beside him, looking up at him. Next to them are a brass telescope on a tripod and a big coil of thick rope.\n\nThe robot speaks slowly in a deep, tired voice: \"Storm is coming, little one. Stay close to the light.\"\nThe fox answers in a quick, cheeky voice: \"You say that every night.\"\nThen the fox gives a short yip.\n\nSounds: waves slapping against wood, a far-away foghorn, creaking planks, and seagulls. Music: a slow, lonely accordion tune that feels a little hopeful.",
+  "covers": [
+   "things on a surface, a held thing, a thing on a thing, a four-legged body, implied water and lighthouse, night + fog + a light, two voices, a non-word sound."
+  ]
+ },
+ {
+  "id": "t02-breakfast",
+  "use": "pc",
+  "expect": {
+   "things": [
+    [
+     "table"
+    ],
+    [
+     "teapot"
+    ],
+    [
+     "cup"
+    ],
+    [
+     "pancake",
+     "plate"
+    ],
+    [
+     "cat"
+    ],
+    [
+     "grandmother",
+     "grandma",
+     "granny"
+    ],
+    [
+     "spoon"
+    ],
+    [
+     "meow"
+    ],
+    [
+     "kettle"
+    ],
+    [
+     "bird"
+    ],
+    [
+     "music",
+     "tune"
+    ]
+   ],
+   "count": [
+    {
+     "of": [
+      "cup"
+     ],
+     "n": 2
+    }
+   ],
+   "relations": [
+    [
+     "teapot",
+     "on",
+     "table"
+    ],
+    [
+     "cup",
+     "on",
+     "table"
+    ],
+    [
+     "plate",
+     "on",
+     "table"
+    ],
+    [
+     "cat",
+     "under",
+     "table"
+    ],
+    [
+     "grandmother",
+     "beside",
+     "table"
+    ],
+    [
+     "spoon",
+     "held",
+     "grandmother"
+    ]
+   ],
+   "bigger": [
+    [
+     "grandmother",
+     "cat"
+    ]
+   ],
+   "lines": [
+    {
+     "speaker": [
+      "grandmother",
+      "grandma",
+      "granny"
+     ],
+     "text": "Pancakes are ready!"
+    }
+   ],
+   "setting": "indoors, a kitchen, a sunny morning",
+   "details": [
+    {
+     "what": "a kitchen",
+     "words": [
+      "kitchen"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "morning sunlight",
+     "words": [
+      "morning",
+      "sun",
+      "sunny",
+      "daylight"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "a window (birds outside)",
+     "words": [
+      "window"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "the cat curled up asleep",
+     "words": [
+      "curl",
+      "sleep"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "her apron",
+     "words": [
+      "apron"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the kettle whistling",
+     "words": [
+      "kettle"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "birds outside",
+     "words": [
+      "bird"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "a happy morning tune",
+     "words": [
+      "morning",
+      "happy",
+      "gentle"
+     ],
+     "where": "sound"
+    }
+   ]
+  },
+  "description": "A sunny kitchen in the morning. A round wooden table with a red teapot, two blue cups and a plate of pancakes on it. A sleepy orange cat is curled up under the table. A grandmother in an apron stands beside the table holding a wooden spoon.\n\nShe says warmly: \"Pancakes are ready!\" The cat answers with a lazy meow.\n\nSounds: a kettle whistling, birds outside the window. Music: a gentle, happy morning tune.",
+  "covers": [
+   "several small things ON a table, something UNDER it, a held thing, indoors, daylight, small objects that must stay visible."
+  ]
+ },
+ {
+  "id": "t03-campfire",
+  "use": "pc",
+  "expect": {
+   "things": [
+    [
+     "campfire",
+     "fire"
+    ],
+    [
+     "log"
+    ],
+    [
+     "child",
+     "children",
+     "kid",
+     "boy",
+     "girl",
+     "@character"
+    ],
+    [
+     "tent"
+    ],
+    [
+     "owl"
+    ],
+    [
+     "branch"
+    ],
+    [
+     "stick"
+    ],
+    [
+     "marshmallow"
+    ],
+    [
+     "hoot"
+    ],
+    [
+     "crackle",
+     "crackling",
+     "crackles"
+    ],
+    [
+     "cricket"
+    ],
+    [
+     "wind"
+    ]
+   ],
+   "relations": [
+    [
+     "tent",
+     "back",
+     "campfire"
+    ],
+    [
+     "owl",
+     "on",
+     "branch"
+    ],
+    [
+     "stick",
+     "held",
+     "child"
+    ],
+    [
+     "log",
+     "beside",
+     "campfire"
+    ]
+   ],
+   "absent": [
+    "music"
+   ],
+   "lines": [
+    {
+     "speaker": [
+      "child",
+      "kid",
+      "boy",
+      "girl",
+      "@character"
+     ],
+     "text": "Did you hear that?"
+    },
+    {
+     "speaker": [
+      "child",
+      "kid",
+      "boy",
+      "girl",
+      "@character"
+     ],
+     "text": "It's just the owl."
+    }
+   ],
+   "setting": "a forest clearing at dusk, firelight",
+   "details": [
+    {
+     "what": "trees around",
+     "words": [
+      "tree",
+      "forest",
+      "wood"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "dusk",
+     "words": [
+      "dusk",
+      "evening",
+      "sunset",
+      "twilight"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "the fire's light",
+     "words": [
+      "point",
+      "spot"
+     ],
+     "where": "lights"
+    },
+    {
+     "what": "the children sitting",
+     "words": [
+      "sit",
+      "sitting",
+      "seated"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "a marshmallow on the stick",
+     "words": [
+      "marshmallow"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the owl above them",
+     "words": [
+      "branch",
+      "above"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "fire crackling",
+     "words": [
+      "crackl"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "crickets",
+     "words": [
+      "cricket"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "wind in the trees",
+     "words": [
+      "wind"
+     ],
+     "where": "sound"
+    }
+   ]
+  },
+  "description": "A forest clearing at dusk. Three children sit on logs around a crackling campfire. A small green tent stands behind them, and an owl sits on a branch above. One child holds a stick with a marshmallow over the fire.\n\nThe child whispers: \"Did you hear that?\" Another giggles: \"It's just the owl.\" The owl hoots twice.\n\nSounds: fire crackling, crickets, wind in the trees. Music: none.",
+  "covers": [
+   "an arrangement in a circle around a centre, sitting, something above, a held thing reaching toward another, dusk with firelight, trees implied, a scene with no music."
+  ]
+ },
+ {
+  "id": "t04-giant-mouse",
+  "use": "pc",
+  "expect": {
+   "things": [
+    [
+     "giant"
+    ],
+    [
+     "mouse"
+    ],
+    [
+     "meadow",
+     "grass"
+    ],
+    [
+     "wind"
+    ],
+    [
+     "sheep"
+    ],
+    [
+     "flute",
+     "music"
+    ]
+   ],
+   "relations": [
+    [
+     "mouse",
+     "held",
+     "giant"
+    ]
+   ],
+   "bigger": [
+    [
+     "giant",
+     "mouse"
+    ]
+   ],
+   "lines": [
+    {
+     "speaker": [
+      "giant"
+     ],
+     "text": "Hello, little friend."
+    },
+    {
+     "speaker": [
+      "mouse"
+     ],
+     "text": "You're very tall!"
+    }
+   ],
+   "setting": "a green meadow",
+   "details": [
+    {
+     "what": "a green meadow",
+     "words": [
+      "meadow",
+      "grass",
+      "field"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "the giant kneeling",
+     "words": [
+      "kneel"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "his open hand held out",
+     "words": [
+      "hand",
+      "palm"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the mouse's red scarf",
+     "words": [
+      "scarf"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "wind in the grass",
+     "words": [
+      "wind"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "sheep far away",
+     "words": [
+      "sheep"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "a soft flute",
+     "words": [
+      "flute"
+     ],
+     "where": "sound"
+    }
+   ]
+  },
+  "description": "A huge, friendly giant, as tall as a house, kneels in a green meadow and holds out his open hand. A tiny grey mouse in a red scarf stands on his palm.\n\nThe giant whispers in a deep, soft voice: \"Hello, little friend.\" The mouse squeaks back: \"You're very tall!\"\n\nSounds: wind in the grass, sheep far away. Music: a soft, curious flute.",
+  "covers": [
+   "extreme difference in size in one picture, a small thing standing on a hand, a kneeling pose, both still visible."
+  ]
+ },
+ {
+  "id": "t05-moon",
+  "use": "pc",
+  "expect": {
+   "things": [
+    [
+     "astronaut"
+    ],
+    [
+     "flag"
+    ],
+    [
+     "rover"
+    ],
+    [
+     "dog",
+     "robot"
+    ],
+    [
+     "earth"
+    ],
+    [
+     "beep"
+    ],
+    [
+     "static",
+     "radio"
+    ],
+    [
+     "breath"
+    ],
+    [
+     "music",
+     "hum"
+    ]
+   ],
+   "relations": [
+    [
+     "flag",
+     "beside",
+     "rover"
+    ],
+    [
+     "dog",
+     "back",
+     "astronaut"
+    ],
+    [
+     "earth",
+     "sky",
+     "astronaut"
+    ]
+   ],
+   "absent_words": [
+    "wind"
+   ],
+   "lines": [
+    {
+     "speaker": [
+      "astronaut"
+     ],
+     "text": "Base, this is Luna One. We made it."
+    }
+   ],
+   "setting": "the moon's surface, a black sky",
+   "details": [
+    {
+     "what": "the moon's grey ground",
+     "words": [
+      "moon",
+      "lunar",
+      "regolith",
+      "crater",
+      "dust"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "a black sky",
+     "words": [
+      "black",
+      "space",
+      "star",
+      "night"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "the robot dog's six legs",
+     "words": [
+      "six-leg",
+      "six leg",
+      "6 leg",
+      "six"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the rover's six wheels",
+     "words": [
+      "six wheel",
+      "six-wheel",
+      "6 wheel",
+      "six"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the voice over the radio",
+     "words": [
+      "radio"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "radio static",
+     "words": [
+      "static"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "breathing in the helmet",
+     "words": [
+      "breath"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "a spacey hum",
+     "words": [
+      "hum",
+      "spac"
+     ],
+     "where": "sound"
+    }
+   ]
+  },
+  "description": "The grey, dusty surface of the moon. A small astronaut plants a flag next to a boxy rover with six wheels. A six-legged robot dog trots behind the astronaut. The Earth hangs in the black sky.\n\nThe astronaut says over the radio: \"Base, this is Luna One. We made it.\" The robot dog beeps three times.\n\nSounds: radio static, slow breathing inside a helmet. Music: a slow, wide, spacey hum.",
+  "covers": [
+   "six legs, wheels, a thing in the sky, a black sky with a bright ground, a voice with a radio effect, no air (no wind)."
+  ]
+ },
+ {
+  "id": "t06-under-the-sea",
+  "use": "pc",
+  "expect": {
+   "things": [
+    [
+     "octopus"
+    ],
+    [
+     "drum"
+    ],
+    [
+     "fish"
+    ],
+    [
+     "chest",
+     "treasure"
+    ],
+    [
+     "seaweed"
+    ],
+    [
+     "bubble"
+    ],
+    [
+     "whale"
+    ],
+    [
+     "music",
+     "groove"
+    ]
+   ],
+   "count": [
+    {
+     "of": [
+      "fish"
+     ],
+     "n": 2
+    }
+   ],
+   "relations": [
+    [
+     "fish",
+     "floating",
+     null
+    ],
+    [
+     "octopus",
+     "beside",
+     "drum"
+    ],
+    [
+     "seaweed",
+     "back",
+     "chest"
+    ]
+   ],
+   "lines": [
+    {
+     "speaker": [
+      "octopus"
+     ],
+     "text": "One, two, three, four!"
+    }
+   ],
+   "setting": "the sandy sea floor in clear blue water",
+   "details": [
+    {
+     "what": "water all around (underwater)",
+     "words": [
+      "underwater",
+      "water"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "a sandy sea floor",
+     "words": [
+      "sand",
+      "seabed",
+      "sea floor",
+      "seafloor"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "bubbles rising from the chest",
+     "words": [
+      "bubble"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the chest open",
+     "words": [
+      "open"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the drum kit made of shells",
+     "words": [
+      "shell"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the fish clapping their fins",
+     "words": [
+      "clap"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "a whale far away",
+     "words": [
+      "whale"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "an underwater groove",
+     "words": [
+      "groove",
+      "bouncy"
+     ],
+     "where": "sound"
+    }
+   ]
+  },
+  "description": "The sandy sea floor in clear blue water. An octopus plays a drum kit made of shells while two striped fish watch. An open treasure chest sits on the sand with bubbles rising from it, and tall seaweed sways behind.\n\nThe octopus says in a bubbly voice: \"One, two, three, four!\" The fish clap their fins.\n\nSounds: bubbles, a deep whale call far away, shell drums. Music: a bouncy underwater groove.",
+  "covers": [
+   "eight arms, legless swimmers that float above the floor, an open container, an underwater setting (blue light, no ground slab), things that should not all stand on the ground."
+  ]
+ },
+ {
+  "id": "t07-snowman",
+  "use": "pc",
+  "expect": {
+   "things": [
+    [
+     "snowman"
+    ],
+    [
+     "hat"
+    ],
+    [
+     "sled",
+     "sledge"
+    ],
+    [
+     "robin",
+     "bird"
+    ],
+    [
+     "child",
+     "kid",
+     "boy",
+     "girl"
+    ],
+    [
+     "snowball"
+    ],
+    [
+     "chirp"
+    ],
+    [
+     "crunch",
+     "boot"
+    ],
+    [
+     "bell"
+    ],
+    [
+     "music",
+     "tune"
+    ]
+   ],
+   "relations": [
+    [
+     "hat",
+     "on",
+     "snowman"
+    ],
+    [
+     "snowman",
+     "on",
+     "sled"
+    ],
+    [
+     "robin",
+     "on",
+     "hat"
+    ],
+    [
+     "snowball",
+     "held",
+     "child"
+    ],
+    [
+     "child",
+     "beside",
+     "sled"
+    ]
+   ],
+   "bigger": [
+    [
+     "snowman",
+     "robin"
+    ]
+   ],
+   "lines": [
+    {
+     "speaker": [
+      "child",
+      "kid",
+      "boy",
+      "girl",
+      "@character"
+     ],
+     "text": "You look cold!"
+    }
+   ],
+   "setting": "a snowy garden on a bright winter day",
+   "details": [
+    {
+     "what": "snow on the ground",
+     "words": [
+      "snow"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "a garden",
+     "words": [
+      "garden",
+      "yard",
+      "fence"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "daylight",
+     "words": [
+      "day",
+      "sun",
+      "bright"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "a carrot nose",
+     "words": [
+      "carrot"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "a striped scarf",
+     "words": [
+      "scarf"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the child's red coat",
+     "words": [
+      "red coat"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the snowman sitting",
+     "words": [
+      "sit",
+      "sitting",
+      "seated"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "boots crunching",
+     "words": [
+      "crunch"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "a church bell",
+     "words": [
+      "bell"
+     ],
+     "where": "sound"
+    }
+   ]
+  },
+  "description": "A snowy garden on a bright winter day. A snowman with a carrot nose wears a black top hat and a striped scarf and sits on a wooden sled. A little robin is perched on his hat. A child in a red coat stands next to the sled holding a snowball.\n\nThe child laughs: \"You look cold!\" The robin chirps.\n\nSounds: boots crunching in snow, a far-away church bell. Music: a light, sparkly winter tune.",
+  "covers": [
+   "a chain of four (robin on hat on snowman on sled), clothing worn by a figure, a legless character, snow on the ground, daylight."
+  ]
+ },
+ {
+  "id": "t08-animal-band",
+  "use": "pc",
+  "expect": {
+   "things": [
+    [
+     "stage"
+    ],
+    [
+     "bear"
+    ],
+    [
+     "bass"
+    ],
+    [
+     "rabbit"
+    ],
+    [
+     "trumpet"
+    ],
+    [
+     "frog"
+    ],
+    [
+     "drum"
+    ],
+    [
+     "cat"
+    ],
+    [
+     "microphone",
+     "mic"
+    ],
+    [
+     "applause",
+     "cheer",
+     "crowd"
+    ],
+    [
+     "jazz",
+     "music"
+    ]
+   ],
+   "relations": [
+    [
+     "bear",
+     "on",
+     "stage"
+    ],
+    [
+     "rabbit",
+     "on",
+     "stage"
+    ],
+    [
+     "frog",
+     "on",
+     "stage"
+    ],
+    [
+     "cat",
+     "on",
+     "stage"
+    ],
+    [
+     "trumpet",
+     "held",
+     "rabbit"
+    ],
+    [
+     "bass",
+     "beside",
+     "bear"
+    ],
+    [
+     "frog",
+     "beside",
+     "drum"
+    ],
+    [
+     "microphone",
+     "on",
+     "stand"
+    ],
+    [
+     "cat",
+     "beside",
+     "microphone"
+    ]
+   ],
+   "lines": [
+    {
+     "speaker": [
+      "cat"
+     ],
+     "text": "Good evening, everybody!"
+    }
+   ],
+   "setting": "a small stage with red curtains and a spotlight",
+   "details": [
+    {
+     "what": "red curtains",
+     "words": [
+      "curtain"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "a spotlight",
+     "words": [
+      "spot"
+     ],
+     "where": "lights"
+    },
+    {
+     "what": "a microphone stand",
+     "words": [
+      "stand"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "applause",
+     "words": [
+      "applause",
+      "clap",
+      "cheer"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "a drum roll",
+     "words": [
+      "drum roll",
+      "drumroll"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "a cheerful jazz tune",
+     "words": [
+      "jazz"
+     ],
+     "where": "sound"
+    }
+   ]
+  },
+  "description": "A small stage with red curtains and a spotlight. A band of four animals plays: a bear on double bass, a rabbit with a trumpet, a frog on drums, and a cat singing into a microphone on a stand.\n\nThe cat sings: \"Good evening, everybody!\" The crowd cheers.\n\nSounds: applause, a drum roll. Music: a quick, cheerful jazz tune — the most important part of this scene.",
+  "covers": [
+   "four different bodies in a row, each with its own instrument, a stage and curtains as the place, a spotlight, music as the main thing."
+  ]
+ },
+ {
+  "id": "t09-desert-road",
+  "use": "pc",
+  "expect": {
+   "things": [
+    [
+     "road"
+    ],
+    [
+     "car"
+    ],
+    [
+     "cowboy"
+    ],
+    [
+     "cactus"
+    ],
+    [
+     "vulture"
+    ],
+    [
+     "steam"
+    ],
+    [
+     "croak"
+    ],
+    [
+     "wind"
+    ],
+    [
+     "tick",
+     "engine"
+    ],
+    [
+     "train",
+     "horn"
+    ],
+    [
+     "guitar",
+     "music"
+    ]
+   ],
+   "relations": [
+    [
+     "cowboy",
+     "beside",
+     "car"
+    ],
+    [
+     "vulture",
+     "on",
+     "cactus"
+    ]
+   ],
+   "bigger": [
+    [
+     "cactus",
+     "vulture"
+    ],
+    [
+     "car",
+     "cowboy"
+    ]
+   ],
+   "lines": [
+    {
+     "speaker": [
+      "cowboy"
+     ],
+     "text": "Well, that's just great."
+    }
+   ],
+   "setting": "an empty desert road at noon",
+   "details": [
+    {
+     "what": "desert all around",
+     "words": [
+      "desert",
+      "sand",
+      "dune"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "the road as the ground",
+     "words": [
+      "road",
+      "asphalt",
+      "highway"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "harsh noon sun",
+     "words": [
+      "noon",
+      "midday",
+      "sun",
+      "bright"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "steam from the engine",
+     "words": [
+      "steam"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the hood up",
+     "words": [
+      "hood"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the cowboy leaning, arms crossed",
+     "words": [
+      "lean"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "hot wind",
+     "words": [
+      "wind"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "a train horn far away",
+     "words": [
+      "train"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "a dusty guitar",
+     "words": [
+      "guitar"
+     ],
+     "where": "sound"
+    }
+   ]
+  },
+  "description": "A long, empty desert road at noon. An old yellow car stands at the side with its hood up and steam coming out. A cowboy leans against the car with his arms crossed. A vulture sits on top of a tall cactus nearby.\n\nThe cowboy sighs: \"Well, that's just great.\" The vulture croaks.\n\nSounds: hot wind, the engine ticking as it cools, a far-away train horn. Music: a slow, dusty guitar.",
+  "covers": [
+   "a vehicle, a figure leaning on it, a bird on top of a tall plant, a road as the ground, harsh daylight, an effect (steam)."
+  ]
+ },
+ {
+  "id": "t10-bedtime",
+  "use": "pc",
+  "expect": {
+   "things": [
+    [
+     "bed"
+    ],
+    [
+     "quilt"
+    ],
+    [
+     "teddy",
+     "bear"
+    ],
+    [
+     "lamp"
+    ],
+    [
+     "bedside",
+     "nightstand"
+    ],
+    [
+     "bookshelf",
+     "shelf",
+     "bookcase"
+    ],
+    [
+     "train"
+    ],
+    [
+     "rug"
+    ],
+    [
+     "eye",
+     "monster",
+     "creature"
+    ],
+    [
+     "clock",
+     "tick"
+    ],
+    [
+     "rain"
+    ],
+    [
+     "lullaby",
+     "music"
+    ]
+   ],
+   "relations": [
+    [
+     "teddy",
+     "on",
+     "bed"
+    ],
+    [
+     "lamp",
+     "on",
+     "bedside"
+    ],
+    [
+     "bedside",
+     "beside",
+     "bed"
+    ],
+    [
+     "train",
+     "on",
+     "rug"
+    ],
+    [
+     "eye",
+     "under",
+     "bed"
+    ]
+   ],
+   "lines": [
+    {
+     "speaker": [
+      "eye",
+      "monster",
+      "creature",
+      "shy",
+      "something"
+     ],
+     "text": "Is it morning yet?"
+    }
+   ],
+   "setting": "a child's bedroom at night, one warm lamp",
+   "details": [
+    {
+     "what": "a bedroom",
+     "words": [
+      "bedroom",
+      "room"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "a wall (the bookshelf against it)",
+     "words": [
+      "wall"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "night",
+     "words": [
+      "night",
+      "dark",
+      "moon"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "the lamp glowing",
+     "words": [
+      "point",
+      "spot"
+     ],
+     "where": "lights"
+    },
+    {
+     "what": "the teddy tucked in under the quilt",
+     "words": [
+      "tuck",
+      "under the quilt"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "a patchwork quilt",
+     "words": [
+      "patchwork"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "a clock ticking",
+     "words": [
+      "tick",
+      "clock"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "rain on the window",
+     "words": [
+      "rain"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "a music-box lullaby",
+     "words": [
+      "lullaby",
+      "music box",
+      "music-box"
+     ],
+     "where": "sound"
+    }
+   ]
+  },
+  "description": "A child's bedroom at night. A bed with a patchwork quilt, a teddy bear tucked in under the quilt, a small lamp glowing on a bedside table, a bookshelf against the wall and a toy train on the rug. Two round eyes peek out from under the bed.\n\nA small, shy voice from under the bed asks: \"Is it morning yet?\"\n\nSounds: a clock ticking, rain on the window. Music: a quiet music-box lullaby.",
+  "covers": [
+   "indoors at night with one warm light, something under and something tucked in, furniture against a wall, a speaker that is barely visible, a calm scene."
+  ]
+ },
+ {
+  "id": "s01-pier",
+  "covers": [
+   "the owner's scene verbatim",
+   "things on a deck",
+   "something held (lantern)",
+   "a creature on a crate",
+   "voices, sounds, music"
+  ],
+  "description": "A foggy wooden pier at night. A tall rusty robot lighthouse keeper, about\n2 metres, stands holding a glowing lantern in his right hand. A small red\nfox sits on top of a wooden crate beside him, looking up at him. Next to\nthem are a brass telescope on a tripod and a big coil of thick rope.\n\nThe robot speaks slowly in a deep, tired voice: \"Storm is coming, little\none. Stay close to the light.\"\nThe fox answers in a quick, cheeky voice: \"You say that every night.\"\nThen the fox gives a short yip.\n\nSounds: waves slapping against wood, a far-away foghorn, creaking planks,\nand seagulls. Music: a slow, lonely accordion tune that feels a little\nhopeful.",
+  "use": "pc",
+  "plan_from": "owner",
+  "expect": {
+   "things": [
+    [
+     "pier"
+    ],
+    [
+     "robot",
+     "keeper"
+    ],
+    [
+     "lantern"
+    ],
+    [
+     "fox"
+    ],
+    [
+     "crate"
+    ],
+    [
+     "telescope"
+    ],
+    [
+     "rope"
+    ]
+   ],
+   "relations": [
+    [
+     "keeper",
+     "on",
+     "pier"
+    ],
+    [
+     "lantern",
+     "held",
+     "keeper"
+    ],
+    [
+     "crate",
+     "on",
+     "pier"
+    ],
+    [
+     "fox",
+     "on",
+     "crate"
+    ],
+    [
+     "crate",
+     "beside",
+     "keeper"
+    ],
+    [
+     "telescope",
+     "on",
+     "pier"
+    ],
+    [
+     "rope",
+     "on",
+     "pier"
+    ]
+   ],
+   "facing": [
+    [
+     "fox",
+     "keeper"
+    ]
+   ],
+   "bigger": [
+    [
+     "keeper",
+     "fox"
+    ]
+   ],
+   "lines": [
+    {
+     "speaker": [
+      "robot",
+      "keeper"
+     ],
+     "text": "Storm is coming, little one. Stay close to the light."
+    },
+    {
+     "speaker": [
+      "fox"
+     ],
+     "text": "You say that every night."
+    }
+   ],
+   "allow": [
+    "wave",
+    "foghorn",
+    "plank",
+    "seagull",
+    "gull",
+    "accordion",
+    "music",
+    "yip",
+    "fog"
+   ],
+   "setting": "over the sea, at night, in fog",
+   "details": [
+    {
+     "what": "water under the pier",
+     "words": [
+      "water",
+      "sea",
+      "ocean"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "a lighthouse",
+     "words": [
+      "lighthouse"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "night",
+     "words": [
+      "night",
+      "dark",
+      "moon"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "fog",
+     "words": [
+      "fog",
+      "mist"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "the lantern's light on things",
+     "words": [
+      "point",
+      "spot"
+     ],
+     "where": "lights"
+    },
+    {
+     "what": "the fox sitting",
+     "words": [
+      "sit",
+      "sitting",
+      "seated"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the fox looking up at him",
+     "words": [
+      "look up",
+      "looking up",
+      "looks up"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "waves",
+     "words": [
+      "wave"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "foghorn",
+     "words": [
+      "foghorn"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "seagulls",
+     "words": [
+      "gull"
+     ],
+     "where": "sound"
+    }
+   ]
+  }
+ },
+ {
+  "id": "s02-dinner",
+  "covers": [
+   "several things on one surface",
+   "beside"
+  ],
+  "use": "pc",
+  "description": "A dinner table set for two. A round wooden table with two plates, a fork on the left of each plate and a knife on the right, two wine glasses and a tall candle in the middle. Two chairs, one on each side of the table.",
+  "expect": {
+   "things": [
+    [
+     "table"
+    ],
+    [
+     "plate"
+    ],
+    [
+     "fork"
+    ],
+    [
+     "knife"
+    ],
+    [
+     "glass"
+    ],
+    [
+     "candle"
+    ],
+    [
+     "chair"
+    ]
+   ],
+   "count": [
+    {
+     "of": [
+      "plate"
+     ],
+     "n": 2
+    },
+    {
+     "of": [
+      "chair"
+     ],
+     "n": 2
+    }
+   ],
+   "relations": [
+    [
+     "plate",
+     "on",
+     "table"
+    ],
+    [
+     "fork",
+     "on",
+     "table"
+    ],
+    [
+     "knife",
+     "on",
+     "table"
+    ],
+    [
+     "glass",
+     "on",
+     "table"
+    ],
+    [
+     "candle",
+     "on",
+     "table"
+    ],
+    [
+     "chair",
+     "beside",
+     "table"
+    ]
+   ],
+   "setting": "indoors, a dining room, evening",
+   "details": [
+    {
+     "what": "indoors (a room)",
+     "words": [
+      "room",
+      "floor",
+      "wall",
+      "indoor",
+      "dining"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "the candle lit",
+     "words": [
+      "point",
+      "spot"
+     ],
+     "where": "lights"
+    },
+    {
+     "what": "a round table",
+     "words": [
+      "round"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "wine in the glasses",
+     "words": [
+      "wine"
+     ],
+     "where": "plan"
+    }
+   ]
+  }
+ },
+ {
+  "id": "s03-cat-under-table",
+  "covers": [
+   "under",
+   "inside",
+   "on"
+  ],
+  "use": "pc",
+  "description": "A grey cat is sleeping under the kitchen table. On top of the table there's a basket full of red apples.",
+  "expect": {
+   "things": [
+    [
+     "cat"
+    ],
+    [
+     "table"
+    ],
+    [
+     "basket"
+    ],
+    [
+     "apple"
+    ]
+   ],
+   "relations": [
+    [
+     "cat",
+     "under",
+     "table"
+    ],
+    [
+     "basket",
+     "on",
+     "table"
+    ],
+    [
+     "apple",
+     "in",
+     "basket"
+    ]
+   ],
+   "bigger": [
+    [
+     "table",
+     "cat"
+    ]
+   ],
+   "setting": "indoors, a kitchen",
+   "details": [
+    {
+     "what": "a kitchen",
+     "words": [
+      "kitchen"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "a floor",
+     "words": [
+      "floor",
+      "room",
+      "indoor"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "the cat asleep",
+     "words": [
+      "sleep",
+      "asleep",
+      "curled",
+      "lying"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "grey cat",
+     "words": [
+      "grey",
+      "gray"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "red apples",
+     "words": [
+      "red"
+     ],
+     "where": "plan"
+    }
+   ]
+  }
+ },
+ {
+  "id": "s04-cage-and-bowl",
+  "covers": [
+   "inside (bird in a cage, fish in a bowl)",
+   "on a small table"
+  ],
+  "use": "pc",
+  "description": "On a little side table there is a birdcage with a yellow canary inside it, and next to the cage a round glass bowl with a goldfish swimming in it.",
+  "expect": {
+   "things": [
+    [
+     "table"
+    ],
+    [
+     "cage",
+     "birdcage"
+    ],
+    [
+     "canary",
+     "bird"
+    ],
+    [
+     "bowl"
+    ],
+    [
+     "goldfish",
+     "fish"
+    ]
+   ],
+   "relations": [
+    [
+     "canary",
+     "in",
+     "cage"
+    ],
+    [
+     "goldfish",
+     "in",
+     "bowl"
+    ],
+    [
+     "cage",
+     "on",
+     "table"
+    ],
+    [
+     "bowl",
+     "on",
+     "table"
+    ],
+    [
+     "bowl",
+     "beside",
+     "cage"
+    ]
+   ],
+   "setting": "indoors, a living room",
+   "details": [
+    {
+     "what": "indoors (a room)",
+     "words": [
+      "room",
+      "floor",
+      "wall",
+      "indoor"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "water in the bowl",
+     "words": [
+      "water"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the goldfish swimming",
+     "words": [
+      "swim"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "a glass bowl",
+     "words": [
+      "glass"
+     ],
+     "where": "plan"
+    }
+   ]
+  }
+ },
+ {
+  "id": "s05-umbrella-balloon",
+  "covers": [
+   "held in each hand (umbrella, balloon on a string)"
+  ],
+  "use": "phone",
+  "description": "A girl in a yellow raincoat holding a red umbrella over her head in her right hand and a blue balloon on a string in her left hand.",
+  "expect": {
+   "things": [
+    [
+     "girl"
+    ],
+    [
+     "umbrella"
+    ],
+    [
+     "balloon"
+    ]
+   ],
+   "relations": [
+    [
+     "umbrella",
+     "held",
+     "girl"
+    ],
+    [
+     "balloon",
+     "held",
+     "girl"
+    ]
+   ],
+   "max_3d": 4,
+   "allow": [
+    "string"
+   ],
+   "setting": "outdoors in the rain",
+   "details": [
+    {
+     "what": "rain",
+     "words": [
+      "rain"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "outdoors (a street or park)",
+     "words": [
+      "street",
+      "park",
+      "outdoor",
+      "pavement",
+      "road",
+      "puddle"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "the umbrella open over her head",
+     "words": [
+      "over her head",
+      "open"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the balloon on a string, floating",
+     "words": [
+      "string"
+     ],
+     "where": "plan"
+    }
+   ]
+  }
+ },
+ {
+  "id": "s06-waiter-tray",
+  "covers": [
+   "held tray with cups on it"
+  ],
+  "use": "pc",
+  "description": "A waiter carrying a silver tray with three cups of coffee on it, walking toward a small café table.",
+  "expect": {
+   "things": [
+    [
+     "waiter"
+    ],
+    [
+     "tray"
+    ],
+    [
+     "cup"
+    ],
+    [
+     "table"
+    ]
+   ],
+   "count": [
+    {
+     "of": [
+      "cup"
+     ],
+     "n": 3
+    }
+   ],
+   "relations": [
+    [
+     "tray",
+     "held",
+     "waiter"
+    ],
+    [
+     "cup",
+     "on",
+     "tray"
+    ]
+   ],
+   "facing": [
+    [
+     "waiter",
+     "table"
+    ]
+   ],
+   "setting": "a café",
+   "details": [
+    {
+     "what": "a café",
+     "words": [
+      "cafe",
+      "café",
+      "restaurant"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "coffee in the cups",
+     "words": [
+      "coffee"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the waiter walking",
+     "words": [
+      "walk"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "a silver tray",
+     "words": [
+      "silver"
+     ],
+     "where": "plan"
+    }
+   ]
+  }
+ },
+ {
+  "id": "s07-snowman-sled",
+  "covers": [
+   "stacked chain: hat on snowman on sled",
+   "a boy pulling"
+  ],
+  "use": "pc",
+  "description": "A snowman wearing a black top hat stands on a wooden sled, and a little boy is pulling the sled by a rope.",
+  "expect": {
+   "things": [
+    [
+     "snowman"
+    ],
+    [
+     "hat"
+    ],
+    [
+     "sled",
+     "sledge"
+    ],
+    [
+     "boy"
+    ],
+    [
+     "rope"
+    ]
+   ],
+   "relations": [
+    [
+     "hat",
+     "on",
+     "snowman"
+    ],
+    [
+     "snowman",
+     "on",
+     "sled"
+    ],
+    [
+     "boy",
+     "beside",
+     "sled"
+    ],
+    [
+     "rope",
+     "held",
+     "boy"
+    ]
+   ],
+   "bigger": [
+    [
+     "snowman",
+     "hat"
+    ]
+   ],
+   "setting": "outdoors in winter, snow on the ground",
+   "details": [
+    {
+     "what": "snow on the ground",
+     "words": [
+      "snow"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "winter outdoors",
+     "words": [
+      "winter",
+      "snowy",
+      "outdoor",
+      "field",
+      "hill"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "the boy pulling",
+     "words": [
+      "pull"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the rope from the boy to the sled",
+     "words": [
+      "rope"
+     ],
+     "where": "plan"
+    }
+   ]
+  }
+ },
+ {
+  "id": "s08-dog-and-duck",
+  "covers": [
+   "non-human cast",
+   "facing each other",
+   "animal sounds"
+  ],
+  "use": "phone",
+  "description": "A brown dog and a white duck stand by a small pond looking at each other. The dog barks and the duck quacks back.",
+  "expect": {
+   "things": [
+    [
+     "dog"
+    ],
+    [
+     "duck"
+    ],
+    [
+     "pond"
+    ],
+    [
+     "bark"
+    ],
+    [
+     "quack"
+    ]
+   ],
+   "relations": [
+    [
+     "dog",
+     "beside",
+     "pond"
+    ],
+    [
+     "duck",
+     "beside",
+     "pond"
+    ]
+   ],
+   "facing": [
+    [
+     "dog",
+     "duck"
+    ],
+    [
+     "duck",
+     "dog"
+    ]
+   ],
+   "bigger": [
+    [
+     "dog",
+     "duck"
+    ]
+   ],
+   "setting": "outdoors by a pond, daytime",
+   "details": [
+    {
+     "what": "the pond's water",
+     "words": [
+      "water",
+      "pond"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "grass around it",
+     "words": [
+      "grass",
+      "meadow",
+      "park",
+      "field"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "the dog barking",
+     "words": [
+      "bark"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "the duck quacking",
+     "words": [
+      "quack"
+     ],
+     "where": "sound"
+    }
+   ]
+  }
+ },
+ {
+  "id": "s09-snake-spider-rock",
+  "covers": [
+   "non-human cast (snake, spider)",
+   "on a rock"
+  ],
+  "use": "phone",
+  "description": "A green snake curled up on a big flat rock, and a hairy black spider sitting on the rock right next to it.",
+  "expect": {
+   "things": [
+    [
+     "snake"
+    ],
+    [
+     "spider"
+    ],
+    [
+     "rock"
+    ]
+   ],
+   "relations": [
+    [
+     "snake",
+     "on",
+     "rock"
+    ],
+    [
+     "spider",
+     "on",
+     "rock"
+    ],
+    [
+     "spider",
+     "beside",
+     "snake"
+    ]
+   ],
+   "bigger": [
+    [
+     "rock",
+     "spider"
+    ]
+   ],
+   "setting": "outdoors (wild ground)",
+   "details": [
+    {
+     "what": "outdoor ground",
+     "words": [
+      "ground",
+      "grass",
+      "forest",
+      "desert",
+      "jungle",
+      "outdoor",
+      "sand"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "the snake curled",
+     "words": [
+      "curl",
+      "coil"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "a hairy spider",
+     "words": [
+      "hair"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "a flat rock",
+     "words": [
+      "flat"
+     ],
+     "where": "plan"
+    }
+   ]
+  }
+ },
+ {
+  "id": "s10-giant-and-mouse",
+  "covers": [
+   "very different sizes",
+   "a line from a tiny speaker"
+  ],
+  "use": "pc",
+  "description": "A friendly giant as tall as a house looks down at a tiny mouse standing by his foot. The mouse squeaks \"Hello up there!\" and the giant laughs.",
+  "expect": {
+   "things": [
+    [
+     "giant"
+    ],
+    [
+     "mouse"
+    ]
+   ],
+   "relations": [
+    [
+     "mouse",
+     "beside",
+     "giant"
+    ]
+   ],
+   "bigger": [
+    [
+     "giant",
+     "mouse"
+    ]
+   ],
+   "facing": [
+    [
+     "giant",
+     "mouse"
+    ]
+   ],
+   "lines": [
+    {
+     "speaker": [
+      "mouse"
+     ],
+     "text": "Hello up there!"
+    }
+   ],
+   "allow": [
+    "laugh"
+   ],
+   "setting": "outdoors (a field or village)",
+   "details": [
+    {
+     "what": "outdoors",
+     "words": [
+      "grass",
+      "field",
+      "village",
+      "meadow",
+      "outdoor",
+      "ground"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "the giant looking down",
+     "words": [
+      "look down",
+      "looking down",
+      "looks down"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the giant laughing",
+     "words": [
+      "laugh"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "as tall as a house",
+     "words": [
+      "house"
+     ],
+     "where": "plan"
+    }
+   ]
+  }
+ },
+ {
+  "id": "s11-lighthouse-boat",
+  "covers": [
+   "very different sizes",
+   "front of"
+  ],
+  "use": "pc",
+  "description": "A tall white lighthouse with a red stripe, and a small wooden rowing boat with two oars lying on the beach in front of it.",
+  "expect": {
+   "things": [
+    [
+     "lighthouse"
+    ],
+    [
+     "boat"
+    ],
+    [
+     "oar"
+    ]
+   ],
+   "relations": [
+    [
+     "boat",
+     "front",
+     "lighthouse"
+    ],
+    [
+     "oar",
+     "in",
+     "boat"
+    ]
+   ],
+   "bigger": [
+    [
+     "lighthouse",
+     "boat"
+    ]
+   ],
+   "allow": [
+    "beach",
+    "sand"
+   ],
+   "setting": "a beach by the sea",
+   "details": [
+    {
+     "what": "the sea",
+     "words": [
+      "sea",
+      "ocean",
+      "water",
+      "wave"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "a beach",
+     "words": [
+      "beach",
+      "sand",
+      "shore"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "a red stripe",
+     "words": [
+      "stripe"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the boat on the beach",
+     "words": [
+      "beach",
+      "sand",
+      "shore"
+     ],
+     "where": "plan"
+    }
+   ]
+  }
+ },
+ {
+  "id": "s12-five-children",
+  "covers": [
+   "a crowd in a row, ordered by height"
+  ],
+  "use": "pc",
+  "description": "Five children standing in a row for a class photo, from the shortest on the left to the tallest on the right.",
+  "expect": {
+   "things": [
+    [
+     "@character"
+    ]
+   ],
+   "count": [
+    {
+     "of": [
+      "@character"
+     ],
+     "n": 5
+    }
+   ],
+   "row_ascending": [
+    "@character"
+   ],
+   "setting": "a school (class photo)",
+   "details": [
+    {
+     "what": "a school",
+     "words": [
+      "school",
+      "playground",
+      "classroom"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "a class photo",
+     "words": [
+      "photo",
+      "camera",
+      "picture"
+     ],
+     "where": "plan"
+    }
+   ]
+  }
+ },
+ {
+  "id": "s13-band",
+  "covers": [
+   "a band of four with instruments",
+   "left/right/front/back on a stage"
+  ],
+  "use": "pc",
+  "description": "A rock band of four on a stage: a singer with a microphone at the front, a guitarist on the left, a drummer behind his drum kit at the back and a girl playing a trumpet on the right. Loud rock music plays.",
+  "expect": {
+   "things": [
+    [
+     "stage"
+    ],
+    [
+     "singer"
+    ],
+    [
+     "microphone",
+     "mic"
+    ],
+    [
+     "guitarist"
+    ],
+    [
+     "guitar"
+    ],
+    [
+     "drummer"
+    ],
+    [
+     "drum"
+    ],
+    [
+     "trumpet"
+    ],
+    [
+     "music"
+    ]
+   ],
+   "relations": [
+    [
+     "singer",
+     "on",
+     "stage"
+    ],
+    [
+     "guitarist",
+     "on",
+     "stage"
+    ],
+    [
+     "drummer",
+     "on",
+     "stage"
+    ],
+    [
+     "microphone",
+     "held",
+     "singer"
+    ],
+    [
+     "guitar",
+     "held",
+     "guitarist"
+    ],
+    [
+     "trumpet",
+     "held",
+     [
+      "girl",
+      "trumpeter",
+      "player"
+     ]
+    ],
+    [
+     "guitarist",
+     "left",
+     "singer"
+    ],
+    [
+     "drummer",
+     "back",
+     "singer"
+    ]
+   ],
+   "allow": [
+    "trumpeter",
+    "girl",
+    "player"
+   ],
+   "setting": "a concert stage",
+   "details": [
+    {
+     "what": "stage lights",
+     "words": [
+      "point",
+      "spot"
+     ],
+     "where": "lights"
+    },
+    {
+     "what": "rock music",
+     "words": [
+      "rock"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "a drum kit",
+     "words": [
+      "drum"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the trumpet being played",
+     "words": [
+      "play"
+     ],
+     "where": "plan"
+    }
+   ]
+  }
+ },
+ {
+  "id": "s14-rocking-horse",
+  "covers": [
+   "a single object alone"
+  ],
+  "use": "phone",
+  "description": "An old wooden rocking horse.",
+  "expect": {
+   "things": [
+    [
+     "horse",
+     "rocking"
+    ]
+   ],
+   "max_3d": 1,
+   "setting": "none stated",
+   "details": [
+    {
+     "what": "old",
+     "words": [
+      "old",
+      "worn",
+      "antique"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "wooden",
+     "words": [
+      "wood"
+     ],
+     "where": "plan"
+    }
+   ]
+  }
+ },
+ {
+  "id": "s15-bicycle",
+  "covers": [
+   "a vehicle with a rider",
+   "in a basket"
+  ],
+  "use": "pc",
+  "description": "A boy riding a red bicycle with a basket on the front, and a little puppy sitting in the basket.",
+  "expect": {
+   "things": [
+    [
+     "boy"
+    ],
+    [
+     "bicycle",
+     "bike"
+    ],
+    [
+     "basket"
+    ],
+    [
+     "puppy",
+     "dog"
+    ]
+   ],
+   "relations": [
+    [
+     "boy",
+     "on",
+     "bicycle"
+    ],
+    [
+     "basket",
+     "on",
+     "bicycle"
+    ],
+    [
+     "puppy",
+     "in",
+     "basket"
+    ]
+   ],
+   "setting": "outdoors, a road or park",
+   "details": [
+    {
+     "what": "a road or path",
+     "words": [
+      "road",
+      "street",
+      "path",
+      "park",
+      "pavement"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "the boy riding",
+     "words": [
+      "ride",
+      "riding",
+      "pedal"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "a red bicycle",
+     "words": [
+      "red"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the puppy sitting",
+     "words": [
+      "sit"
+     ],
+     "where": "plan"
+    }
+   ]
+  }
+ },
+ {
+  "id": "s16-room-corner",
+  "covers": [
+   "furniture in a room corner",
+   "a shelf with rows"
+  ],
+  "use": "pc",
+  "description": "A cosy corner of a living room: a green armchair in the corner, a tall floor lamp beside it, a round rug in front of the chair, and a bookshelf against the left wall with a row of books on each shelf.",
+  "expect": {
+   "things": [
+    [
+     "armchair",
+     "chair"
+    ],
+    [
+     "lamp"
+    ],
+    [
+     "rug"
+    ],
+    [
+     "bookshelf",
+     "shelf",
+     "bookcase"
+    ],
+    [
+     "book"
+    ]
+   ],
+   "relations": [
+    [
+     "lamp",
+     "beside",
+     "armchair"
+    ],
+    [
+     "rug",
+     "front",
+     "armchair"
+    ],
+    [
+     "book",
+     "on",
+     "bookshelf"
+    ],
+    [
+     "bookshelf",
+     "left",
+     "armchair"
+    ]
+   ],
+   "allow": [
+    "wall",
+    "floor",
+    "corner"
+   ],
+   "setting": "indoors, the corner of a living room",
+   "details": [
+    {
+     "what": "two walls meeting",
+     "words": [
+      "wall"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "the corner",
+     "words": [
+      "corner"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "a floor",
+     "words": [
+      "floor"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "the lamp lit",
+     "words": [
+      "point",
+      "spot"
+     ],
+     "where": "lights"
+    },
+    {
+     "what": "a row of books on each shelf",
+     "words": [
+      "row"
+     ],
+     "where": "plan"
+    }
+   ]
+  }
+ },
+ {
+  "id": "s17-campfire",
+  "covers": [
+   "an outdoor place: around, behind, over",
+   "ambient sounds"
+  ],
+  "use": "pc",
+  "description": "A campfire in a forest clearing with four logs around it to sit on, a small orange tent behind the fire, and a cooking pot hanging over the flames. Crickets chirp and the fire crackles.",
+  "expect": {
+   "things": [
+    [
+     "campfire",
+     "fire"
+    ],
+    [
+     "log"
+    ],
+    [
+     "tent"
+    ],
+    [
+     "pot"
+    ],
+    [
+     "cricket"
+    ],
+    [
+     "crackle",
+     "crackling"
+    ]
+   ],
+   "count": [
+    {
+     "of": [
+      "log"
+     ],
+     "n": 4
+    }
+   ],
+   "relations": [
+    [
+     "log",
+     "beside",
+     "campfire"
+    ],
+    [
+     "tent",
+     "back",
+     "campfire"
+    ],
+    [
+     "pot",
+     "above",
+     "campfire"
+    ]
+   ],
+   "allow": [
+    "tree",
+    "stick",
+    "tripod",
+    "clearing"
+   ],
+   "setting": "a forest clearing, evening",
+   "details": [
+    {
+     "what": "trees around",
+     "words": [
+      "tree",
+      "forest",
+      "wood"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "the clearing's ground",
+     "words": [
+      "grass",
+      "ground",
+      "clearing",
+      "dirt"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "the fire's light",
+     "words": [
+      "point",
+      "spot"
+     ],
+     "where": "lights"
+    },
+    {
+     "what": "evening or night",
+     "words": [
+      "night",
+      "dark",
+      "evening",
+      "dusk"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "flames",
+     "words": [
+      "flame"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "crickets",
+     "words": [
+      "cricket"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "the fire crackling",
+     "words": [
+      "crackl"
+     ],
+     "where": "sound"
+    }
+   ]
+  }
+ },
+ {
+  "id": "s18-radio-sounds",
+  "covers": [
+   "only sounds and one prop"
+  ],
+  "use": "phone",
+  "description": "An old radio on the floor. You hear rain on the window, thunder far away and a clock ticking.",
+  "expect": {
+   "things": [
+    [
+     "radio"
+    ],
+    [
+     "rain"
+    ],
+    [
+     "thunder"
+    ],
+    [
+     "clock",
+     "tick",
+     "ticking"
+    ]
+   ],
+   "max_3d": 1,
+   "allow": [
+    "floor"
+   ],
+   "setting": "indoors, a room with a window, a storm outside",
+   "details": [
+    {
+     "what": "a room",
+     "words": [
+      "room",
+      "floor",
+      "indoor"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "a window",
+     "words": [
+      "window"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "rain on the window",
+     "words": [
+      "rain"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "thunder",
+     "words": [
+      "thunder"
+     ],
+     "where": "sound"
+    },
+    {
+     "what": "a clock ticking",
+     "words": [
+      "clock",
+      "tick"
+     ],
+     "where": "sound"
+    }
+   ]
+  }
+ },
+ {
+  "id": "s19-bus-stop",
+  "covers": [
+   "a conversation between three speakers"
+  ],
+  "use": "pc",
+  "description": "Three friends wait at a bus stop. Maya says \"Did you see the comet last night?\" Ben says \"No, I fell asleep on the sofa.\" Old Mr. Lee smiles and says \"I watched it from my roof.\"",
+  "expect": {
+   "things": [
+    [
+     "maya"
+    ],
+    [
+     "ben"
+    ],
+    [
+     "lee"
+    ],
+    [
+     "bus",
+     "stop"
+    ]
+   ],
+   "lines": [
+    {
+     "speaker": [
+      "maya"
+     ],
+     "text": "Did you see the comet last night?"
+    },
+    {
+     "speaker": [
+      "ben"
+     ],
+     "text": "No, I fell asleep on the sofa."
+    },
+    {
+     "speaker": [
+      "lee"
+     ],
+     "text": "I watched it from my roof."
+    }
+   ],
+   "setting": "outdoors, a street with a bus stop",
+   "details": [
+    {
+     "what": "a street",
+     "words": [
+      "street",
+      "road",
+      "pavement",
+      "sidewalk"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "a bus stop",
+     "words": [
+      "bus stop",
+      "shelter",
+      "bus sign"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "Mr. Lee is old",
+     "words": [
+      "old",
+      "elderly",
+      "grey",
+      "gray"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "Mr. Lee smiling",
+     "words": [
+      "smil"
+     ],
+     "where": "plan"
+    }
+   ]
+  }
+ },
+ {
+  "id": "s20-wizard-desk",
+  "covers": [
+   "a long description with many small details",
+   "many things on one desk"
+  ],
+  "use": "pc",
+  "description": "An old wizard's desk in a tower room. On the desk lie an open spell book with a red ribbon, a quill pen standing in a little ink pot, three candles of different heights, a brass hourglass, a crystal ball on a small stand, a sleeping black cat curled up at one end, and a rolled-up map tied with string. A broom leans against the side of the desk and a stack of old books sits on the floor beside it. An owl watches from a perch behind the desk.",
+  "expect": {
+   "things": [
+    [
+     "desk"
+    ],
+    [
+     "book",
+     "spellbook"
+    ],
+    [
+     "quill",
+     "pen"
+    ],
+    [
+     "ink"
+    ],
+    [
+     "candle"
+    ],
+    [
+     "hourglass"
+    ],
+    [
+     "crystal",
+     "ball"
+    ],
+    [
+     "cat"
+    ],
+    [
+     "map"
+    ],
+    [
+     "broom"
+    ],
+    [
+     "owl"
+    ],
+    [
+     "perch"
+    ]
+   ],
+   "count": [
+    {
+     "of": [
+      "candle"
+     ],
+     "n": 3
+    }
+   ],
+   "relations": [
+    [
+     "spellbook",
+     "on",
+     "desk"
+    ],
+    [
+     "quill",
+     "in",
+     "ink"
+    ],
+    [
+     "ink",
+     "on",
+     "desk"
+    ],
+    [
+     "candle",
+     "on",
+     "desk"
+    ],
+    [
+     "hourglass",
+     "on",
+     "desk"
+    ],
+    [
+     "crystal",
+     "on",
+     "stand"
+    ],
+    [
+     "cat",
+     "on",
+     "desk"
+    ],
+    [
+     "map",
+     "on",
+     "desk"
+    ],
+    [
+     "broom",
+     "beside",
+     "desk"
+    ],
+    [
+     "owl",
+     "on",
+     "perch"
+    ],
+    [
+     "perch",
+     "back",
+     "desk"
+    ]
+   ],
+   "allow": [
+    "stand",
+    "stack",
+    "ribbon",
+    "tower",
+    "room"
+   ],
+   "setting": "indoors, a tower room, candlelight",
+   "details": [
+    {
+     "what": "a tower room",
+     "words": [
+      "tower",
+      "room",
+      "wall",
+      "stone",
+      "floor"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "candlelight",
+     "words": [
+      "point",
+      "spot"
+     ],
+     "where": "lights"
+    },
+    {
+     "what": "the book open",
+     "words": [
+      "open"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "a red ribbon",
+     "words": [
+      "ribbon"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the map tied with string",
+     "words": [
+      "string",
+      "tied"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the broom leaning",
+     "words": [
+      "lean"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the owl watching",
+     "words": [
+      "watch"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the cat asleep",
+     "words": [
+      "sleep",
+      "curled"
+     ],
+     "where": "plan"
+    }
+   ]
+  }
+ },
+ {
+  "id": "s21-robot-waving",
+  "covers": [
+   "very short"
+  ],
+  "use": "phone",
+  "description": "a robot waving",
+  "expect": {
+   "things": [
+    [
+     "robot"
+    ]
+   ],
+   "max_3d": 1,
+   "note_mentions": [
+    "wav"
+   ],
+   "setting": "none stated",
+   "details": [
+    {
+     "what": "waving",
+     "words": [
+      "wav"
+     ],
+     "where": "plan"
+    }
+   ]
+  }
+ },
+ {
+  "id": "s22-child-spelling",
+  "covers": [
+   "simple child language with spelling mistakes"
+  ],
+  "use": "phone",
+  "description": "a dragun is sleping on top of the castel and a princes with a flowr is standing nex to the castel and she is not scard",
+  "expect": {
+   "things": [
+    [
+     "dragon",
+     "dragun"
+    ],
+    [
+     "castle",
+     "castel"
+    ],
+    [
+     "princess",
+     "princes"
+    ],
+    [
+     "flower",
+     "flowr"
+    ]
+   ],
+   "relations": [
+    [
+     "dragon",
+     "on",
+     "castle"
+    ],
+    [
+     "flower",
+     "held",
+     "princess"
+    ],
+    [
+     "princess",
+     "beside",
+     "castle"
+    ]
+   ],
+   "bigger": [
+    [
+     "castle",
+     "princess"
+    ]
+   ],
+   "setting": "outdoors, a fairy-tale castle",
+   "details": [
+    {
+     "what": "outdoors",
+     "words": [
+      "grass",
+      "ground",
+      "hill",
+      "outdoor",
+      "meadow"
+     ],
+     "where": "scene"
+    },
+    {
+     "what": "the dragon asleep",
+     "words": [
+      "sleep",
+      "asleep"
+     ],
+     "where": "plan"
+    },
+    {
+     "what": "the princess not scared",
+     "words": [
+      "scared",
+      "afraid",
+      "brave",
+      "calm",
+      "smil",
+      "fear"
+     ],
+     "where": "plan"
+    }
+   ]
+  }
+ }
+]

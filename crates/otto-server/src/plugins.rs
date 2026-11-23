@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use tokio::process::{Child, Command};
 
 use otto_core::auth::AuthUser;
-use otto_core::{new_id, Error};
+use otto_core::Error;
 use otto_state::{NewPlugin, PluginRecord, PluginsRepo};
 
 use crate::auth::{require_root, CurrentUser};
@@ -60,6 +60,51 @@ pub struct PluginManifestFile {
     /// Full tools for `/plugin-host/agents/run` turns (default: tool-less, sandboxed).
     #[serde(default)]
     pub agent_tools: bool,
+    /// Optional explicit capability allow-list for `/plugin-host/*` endpoints
+    /// (e.g. `"repos"`, `"jira"`, `"jira:credentials"`, `"agents"`). When
+    /// declared, host-API calls outside this list are denied with `403`.
+    #[serde(default)]
+    pub capabilities: Option<Vec<String>>,
+}
+
+/// Mint a 256-bit CSPRNG plugin token (64 hex chars).
+fn mint_plugin_token() -> String {
+    use rand::rand_core::UnwrapErr;
+    use rand::rngs::SysRng;
+    use rand::Rng;
+    let mut buf = [0u8; 32];
+    UnwrapErr(SysRng).fill_bytes(&mut buf);
+    hex::encode(buf)
+}
+
+/// Constant-time byte comparison for equal-length secrets.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Check whether `rec`'s manifest allows `capability` on `/plugin-host/*`.
+/// When `capabilities` is declared in `otto-plugin.json`, only listed
+/// capabilities are allowed; manifests omitting the field remain compatible.
+/// If `otto-plugin.json` exists on disk but fails to parse, fail CLOSED.
+fn plugin_allows_capability(rec: &PluginRecord, capability: &str) -> bool {
+    let dir = Path::new(&rec.source);
+    if !dir.join("otto-plugin.json").exists() {
+        return true;
+    }
+    match load_manifest(dir) {
+        Ok(m) => match m.capabilities {
+            Some(caps) => caps.iter().any(|c| c == capability),
+            None => true,
+        },
+        Err(_) => false,
+    }
 }
 
 fn default_icon() -> String {
@@ -93,6 +138,32 @@ fn load_manifest(dir: &Path) -> Result<PluginManifestFile, String> {
 // Supervisor
 // ===========================================================================
 
+/// Max stdout/stderr lines retained per managed plugin sidecar.
+const MAX_LOG_LINES: usize = 200;
+/// Max bytes retained per single captured log line (prevents OOM from huge lines).
+const MAX_LOG_LINE_BYTES: usize = 4 * 1024;
+
+/// One captured stdout/stderr line from a managed plugin sidecar.
+#[derive(Debug, Clone, Serialize)]
+pub struct PluginLogLine {
+    pub ts: String,
+    pub stream: &'static str,
+    pub line: String,
+}
+
+/// Live runtime telemetry for a single plugin (surfaced on `GET /plugin-admin`,
+/// `POST /plugins/{slug}/restart`, and `GET /plugins/{slug}/logs`).
+#[derive(Debug, Clone)]
+pub struct PluginRuntimeSnapshot {
+    pub running: bool,
+    pub last_error: Option<String>,
+    pub pid: Option<u32>,
+    pub started_at: Option<String>,
+    pub uptime_secs: Option<u64>,
+    pub restart_count: u64,
+    pub health_status: &'static str,
+}
+
 /// A live sidecar. Its `Child` is owned by a per-plugin watcher task (see
 /// [`PluginManager::adopt`]), which reaps it the moment it exits — a crashed
 /// sidecar must not linger as a zombie with its port still published to the
@@ -102,6 +173,10 @@ struct RunningPlugin {
     port: u16,
     /// Sent as `x-otto-plugin-token` on every proxied request (sidecar auth).
     token: String,
+    /// OS process ID while running.
+    pid: Option<u32>,
+    /// UTC timestamp when this sidecar spawned.
+    started_at: chrono::DateTime<chrono::Utc>,
     /// Which spawn this entry belongs to: the watcher of an older spawn must
     /// never remove a newer one's entry.
     generation: u64,
@@ -116,6 +191,8 @@ type RunningMap = std::sync::Arc<Mutex<HashMap<String, RunningPlugin>>>;
 /// cleared by a successful start. Shown in the admin list so an enabled but
 /// dead plugin is not just "Enabled".
 type LastErrors = std::sync::Arc<Mutex<HashMap<String, String>>>;
+type LogBuffers = std::sync::Arc<Mutex<HashMap<String, std::collections::VecDeque<PluginLogLine>>>>;
+type RestartCounts = std::sync::Arc<Mutex<HashMap<String, u64>>>;
 
 /// Remove `owner`'s entry only while it still belongs to `generation`: the
 /// watcher of an older spawn must never un-publish a newer spawn's port.
@@ -133,6 +210,42 @@ fn remove_if_generation(
     }
 }
 
+fn push_plugin_log(logs: &LogBuffers, slug: &str, stream: &'static str, raw: &str) {
+    let line = if raw.len() > MAX_LOG_LINE_BYTES {
+        let mut end = MAX_LOG_LINE_BYTES;
+        while end > 0 && !raw.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &raw[..end])
+    } else {
+        raw.to_string()
+    };
+    let entry = PluginLogLine {
+        ts: chrono::Utc::now().to_rfc3339(),
+        stream,
+        line,
+    };
+    let mut map = logs.lock().unwrap_or_else(|e| e.into_inner());
+    let ring = map.entry(slug.to_string()).or_default();
+    if ring.len() >= MAX_LOG_LINES {
+        ring.pop_front();
+    }
+    ring.push_back(entry);
+}
+
+fn spawn_log_pump<R>(pipe: R, logs: LogBuffers, slug: String, stream: &'static str)
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut lines = BufReader::new(pipe).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            push_plugin_log(&logs, &slug, stream, &line);
+        }
+    });
+}
+
 /// Supervises enabled plugin sidecars (spawn/stop) and tracks their ports for the
 /// reverse proxy.
 pub struct PluginManager {
@@ -143,6 +256,8 @@ pub struct PluginManager {
     host_api_base: String,
     running: RunningMap,
     last_errors: LastErrors,
+    logs: LogBuffers,
+    restart_counts: RestartCounts,
     /// Source of [`RunningPlugin::generation`].
     generations: std::sync::atomic::AtomicU64,
     /// Serialize management transitions, including copying replacement files.
@@ -164,6 +279,8 @@ impl PluginManager {
             host_api_base,
             running: RunningMap::default(),
             last_errors: LastErrors::default(),
+            logs: LogBuffers::default(),
+            restart_counts: RestartCounts::default(),
             generations: std::sync::atomic::AtomicU64::new(0),
             lifecycle: tokio::sync::Mutex::new(()),
             http: proxy_client(PROXY_CONNECT_TIMEOUT, PROXY_TIMEOUT),
@@ -217,18 +334,37 @@ impl PluginManager {
         let data_dir = self.data_dir.join("plugins").join(&p.slug);
         let _ = std::fs::create_dir_all(&data_dir);
 
+        let runtime_token = mint_plugin_token();
         let mut cmd = Command::new(&p.exec[0]);
         cmd.args(&p.exec[1..]);
         cmd.current_dir(&p.source);
         cmd.env("OTTO_PLUGIN_SLUG", &p.slug);
         cmd.env("OTTO_PLUGIN_PORT", port.to_string());
-        cmd.env("OTTO_PLUGIN_TOKEN", &p.token);
+        cmd.env("OTTO_PLUGIN_TOKEN", &runtime_token);
         cmd.env("OTTO_HOST_API", &self.host_api_base);
         cmd.env("OTTO_PLUGIN_DATA_DIR", &data_dir);
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
         cmd.kill_on_drop(true);
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("spawn `{}`: {e}", p.exec.join(" ")))?;
+        if let Some(stdout) = child.stdout.take() {
+            spawn_log_pump(
+                stdout,
+                std::sync::Arc::clone(&self.logs),
+                p.slug.clone(),
+                "stdout",
+            );
+        }
+        if let Some(stderr) = child.stderr.take() {
+            spawn_log_pump(
+                stderr,
+                std::sync::Arc::clone(&self.logs),
+                p.slug.clone(),
+                "stderr",
+            );
+        }
 
         // Best-effort readiness wait (don't fail the spawn if slow).
         let health = if p.health.is_empty() {
@@ -250,7 +386,7 @@ impl PluginManager {
             if self
                 .http
                 .get(&url)
-                .header("x-otto-plugin-token", &p.token)
+                .header("x-otto-plugin-token", &runtime_token)
                 .timeout(Duration::from_millis(500))
                 .send()
                 .await
@@ -272,8 +408,11 @@ impl PluginManager {
         }
         // Keep ownership local during readiness: cancellation or failure kills
         // the child and cannot leave a stale published port.
-        self.adopt(&p.slug, port, &p.token, child);
-        self.last_errors.lock().unwrap().remove(&p.slug);
+        self.adopt(&p.slug, port, &runtime_token, child);
+        self.last_errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&p.slug);
         tracing::info!(plugin = %p.slug, port, "plugins: sidecar started");
         Ok(port)
     }
@@ -294,11 +433,12 @@ impl PluginManager {
         let owner = slug.to_string();
         // Publish under the lock the watcher takes: a child that dies at once
         // cannot be reaped before its entry exists (and so stay published).
-        let mut map = self.running.lock().unwrap();
+        let pid = child.id();
+        let mut map = self.running.lock().unwrap_or_else(|e| e.into_inner());
         let watcher = tokio::spawn(async move {
             tokio::select! {
                 status = child.wait() => {
-                    let mut map = running.lock().unwrap();
+                    let mut map = running.lock().unwrap_or_else(|e| e.into_inner());
                     let current = remove_if_generation(&mut map, &owner, generation);
                     drop(map);
                     let cause = match &status {
@@ -311,7 +451,7 @@ impl PluginManager {
                     }
                     // Only the current spawn's death is the plugin's state.
                     if current {
-                        last_errors.lock().unwrap().insert(owner, cause);
+                        last_errors.lock().unwrap_or_else(|e| e.into_inner()).insert(owner, cause);
                     }
                 }
                 // A stop request, or the manager (the sender) went away.
@@ -328,11 +468,51 @@ impl PluginManager {
             RunningPlugin {
                 port,
                 token: token.to_string(),
+                pid,
+                started_at: chrono::Utc::now(),
                 generation,
                 stop,
                 watcher,
             },
         );
+    }
+
+    /// Caller holds the lifecycle lock. Restart an enabled plugin sidecar.
+    async fn restart(&self, slug: &str) -> otto_core::Result<PluginRecord> {
+        let rec = self
+            .repo
+            .get(slug)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("plugin {slug}")))?;
+        if !rec.enabled {
+            return Err(Error::Invalid(format!(
+                "plugin '{slug}' is disabled — enable it before restarting"
+            )));
+        }
+        self.stop(slug).await;
+        if let Err(error) = self.spawn(&rec).await {
+            self.set_last_error(slug, error.clone());
+            return Err(Error::Internal(format!("restart spawn: {error}")));
+        }
+        {
+            let mut counts = self
+                .restart_counts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *counts.entry(slug.to_string()).or_insert(0) += 1;
+        }
+        Ok(rec)
+    }
+
+    /// Tail up to `limit` captured stdout/stderr lines for `slug` (capped at `MAX_LOG_LINES`).
+    pub fn logs_of(&self, slug: &str, limit: usize) -> Vec<PluginLogLine> {
+        let cap = limit.clamp(1, MAX_LOG_LINES);
+        let map = self.logs.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(ring) = map.get(slug) else {
+            return Vec::new();
+        };
+        let skip = ring.len().saturating_sub(cap);
+        ring.iter().skip(skip).cloned().collect()
     }
 
     /// Caller holds the lifecycle lock. Enable only survives a viable startup.
@@ -357,7 +537,11 @@ impl PluginManager {
 
     /// Stop a running plugin (kills the child). No-op if not running.
     pub async fn stop(&self, slug: &str) {
-        let running = self.running.lock().unwrap().remove(slug);
+        let running = self
+            .running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(slug);
         if let Some(rp) = running {
             // The watcher kills and reaps the child; awaiting it keeps `stop`
             // synchronous (the port is free when this returns).
@@ -367,32 +551,103 @@ impl PluginManager {
         }
     }
 
+    /// Stop every running plugin sidecar (called during daemon teardown).
+    pub async fn stop_all(&self) {
+        let entries: Vec<(String, RunningPlugin)> = self
+            .running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain()
+            .collect();
+        for (slug, rp) in entries {
+            let _ = rp.stop.send(());
+            let _ = rp.watcher.await;
+            tracing::info!(plugin = %slug, "plugins: sidecar stopped on shutdown");
+        }
+    }
+
     #[cfg(test)]
     fn port_of(&self, slug: &str) -> Option<u16> {
         self.route_of(slug).map(|(port, _)| port)
     }
 
     fn route_of(&self, slug: &str) -> Option<(u16, String)> {
-        let map = self.running.lock().unwrap();
+        let map = self.running.lock().unwrap_or_else(|e| e.into_inner());
         map.get(slug).map(|r| (r.port, r.token.clone()))
+    }
+
+    /// Authenticate a running sidecar's ephemeral in-memory token using
+    /// constant-time comparison across all live sidecars.
+    fn slug_for_running_token(&self, token: &str) -> Option<String> {
+        let map = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        let mut matched = None;
+        for (slug, rp) in map.iter() {
+            if ct_eq(rp.token.as_bytes(), token.as_bytes()) {
+                matched = Some(slug.clone());
+            }
+        }
+        matched
     }
 
     fn set_last_error(&self, slug: &str, error: String) {
         self.last_errors
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(slug.to_string(), error);
     }
 
     /// `(running, last_error)` for the admin list.
     fn runtime_of(&self, slug: &str) -> (bool, Option<String>) {
-        let running = self.running.lock().unwrap().contains_key(slug);
+        let snap = self.snapshot_of(slug, true);
+        (snap.running, snap.last_error)
+    }
+
+    /// Full live telemetry snapshot for a plugin row.
+    pub fn snapshot_of(&self, slug: &str, enabled: bool) -> PluginRuntimeSnapshot {
+        let (running, pid, started_at, uptime_secs) = {
+            let map = self.running.lock().unwrap_or_else(|e| e.into_inner());
+            match map.get(slug) {
+                Some(rp) => {
+                    let secs = (chrono::Utc::now() - rp.started_at).num_seconds().max(0) as u64;
+                    (true, rp.pid, Some(rp.started_at.to_rfc3339()), Some(secs))
+                }
+                None => (false, None, None, None),
+            }
+        };
         let last_error = if running {
             None
         } else {
-            self.last_errors.lock().unwrap().get(slug).cloned()
+            self.last_errors
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(slug)
+                .cloned()
         };
-        (running, last_error)
+        let restart_count = self
+            .restart_counts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(slug)
+            .copied()
+            .unwrap_or(0);
+        let health_status = if !enabled {
+            "disabled"
+        } else if running {
+            "running"
+        } else if last_error.is_some() {
+            "error"
+        } else {
+            "stopped"
+        };
+        PluginRuntimeSnapshot {
+            running,
+            last_error,
+            pid,
+            started_at,
+            uptime_secs,
+            restart_count,
+            health_status,
+        }
     }
 }
 
@@ -417,6 +672,8 @@ fn free_port() -> Option<u16> {
 pub fn api_routes() -> Router<ServerCtx> {
     Router::new()
         .route("/plugins", get(list_enabled))
+        .route("/plugins/{slug}/restart", post(restart_plugin))
+        .route("/plugins/{slug}/logs", get(plugin_logs))
         .route("/plugins/{slug}", any(proxy))
         .route("/plugins/{slug}/{*rest}", any(proxy))
         .route("/plugin-admin", get(admin_list))
@@ -540,10 +797,14 @@ const PROXY_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// one of the webview's 6 sockets forever (perf SI-08); now it answers 504.
 const PROXY_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The proxy's client: bounded connect + total time. The readiness probe sets
-/// its own shorter per-request timeout on top.
+/// The proxy's client: loopback-only, bounded connect + total time, never
+/// routes through ambient HTTP proxies and NEVER follows redirects (a sidecar
+/// returning 302/307 must not trigger SSRF or leak `x-otto-plugin-token` /
+/// `x-otto-user` to another host).
 fn proxy_client(connect: Duration, total: Duration) -> reqwest::Client {
     reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(connect)
         .timeout(total)
         .build()
@@ -653,6 +914,27 @@ struct PluginAdminRow {
     record: PluginRecord,
     running: bool,
     last_error: Option<String>,
+    pid: Option<u32>,
+    started_at: Option<String>,
+    uptime_secs: Option<u64>,
+    restart_count: u64,
+    health_status: &'static str,
+}
+
+impl PluginAdminRow {
+    fn from_record(manager: &PluginManager, record: PluginRecord) -> Self {
+        let snap = manager.snapshot_of(&record.slug, record.enabled);
+        Self {
+            record,
+            running: snap.running,
+            last_error: snap.last_error,
+            pid: snap.pid,
+            started_at: snap.started_at,
+            uptime_secs: snap.uptime_secs,
+            restart_count: snap.restart_count,
+            health_status: snap.health_status,
+        }
+    }
 }
 
 /// `GET /api/v1/plugin-admin` — full installed-plugin list (admin).
@@ -664,16 +946,63 @@ async fn admin_list(
     let rows = ctx.plugins.repo().list().await.map_err(ApiError)?;
     Ok(Json(
         rows.into_iter()
-            .map(|record| {
-                let (running, last_error) = ctx.plugins.runtime_of(&record.slug);
-                PluginAdminRow {
-                    record,
-                    running,
-                    last_error,
-                }
-            })
+            .map(|record| PluginAdminRow::from_record(&ctx.plugins, record))
             .collect(),
     ))
+}
+
+#[derive(Deserialize)]
+struct PluginLogsQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct PluginLogsResp {
+    slug: String,
+    running: bool,
+    pid: Option<u32>,
+    lines: Vec<PluginLogLine>,
+}
+
+/// `POST /api/v1/plugins/{slug}/restart` — stop & respawn an enabled plugin helper.
+async fn restart_plugin(
+    State(ctx): State<ServerCtx>,
+    AxPath(slug): AxPath<String>,
+    auth: crate::auth::CurrentAuthContext,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<PluginAdminRow>> {
+    require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
+    let _guard = ctx.plugins.lifecycle.lock().await;
+    let rec = ctx.plugins.restart(&slug).await.map_err(ApiError)?;
+    audit(&ctx, Some(&user), "plugin.restarted", &slug, None).await;
+    Ok(Json(PluginAdminRow::from_record(&ctx.plugins, rec)))
+}
+
+/// `GET /api/v1/plugins/{slug}/logs?limit=200` — recent stdout/stderr ring buffer.
+async fn plugin_logs(
+    State(ctx): State<ServerCtx>,
+    AxPath(slug): AxPath<String>,
+    Query(q): Query<PluginLogsQuery>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<PluginLogsResp>> {
+    require_root(&user)?;
+    let rec = ctx
+        .plugins
+        .repo()
+        .get(&slug)
+        .await
+        .map_err(ApiError)?
+        .ok_or_else(|| ApiError(Error::NotFound(format!("plugin {slug}"))))?;
+    let snap = ctx.plugins.snapshot_of(&slug, rec.enabled);
+    let lines = ctx.plugins.logs_of(&slug, q.limit.unwrap_or(MAX_LOG_LINES));
+    Ok(Json(PluginLogsResp {
+        slug,
+        running: snap.running,
+        pid: snap.pid,
+        lines,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -712,6 +1041,13 @@ async fn install(
         let name = otto_core::paths::safe_component(&name)
             .ok_or_else(|| ApiError(Error::Invalid(format!("unsafe repo name '{name}'"))))?;
         let dest = home.join(name);
+        // Clone into a fresh staging directory first so a failed network clone
+        // never clobbers an existing installation, and reinstalling an existing
+        // git-URL plugin cleanly replaces `home/<name>` (matching local-path).
+        static CLONE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = CLONE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let staging = home.join(format!(".clone-{name}-{}-{seq}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&staging).await;
         // The URL is caller-supplied: only http(s) reaches git, rebuilt from
         // its parsed parts (never the raw string, so no `-…` option smuggling
         // and no `ext::`/`file://` transports), with every other transport
@@ -725,7 +1061,7 @@ async fn install(
                     "unsupported plugin source url '{src}'"
                 )))
             })?;
-        let out = otto_git::hardened_command()
+        let out = match otto_git::hardened_command()
             .args([
                 "-c",
                 "protocol.allow=never",
@@ -739,15 +1075,41 @@ async fn install(
                 "--",
                 clone_url.as_str(),
             ])
-            .arg(&dest)
+            .arg(&staging)
             .output()
             .await
-            .map_err(|e| ApiError(Error::Internal(format!("git clone: {e}"))))?;
+        {
+            Ok(out) => out,
+            Err(e) => {
+                let _ = tokio::fs::remove_dir_all(&staging).await;
+                return Err(ApiError(Error::Internal(format!("git clone: {e}"))));
+            }
+        };
         if !out.status.success() {
+            let _ = tokio::fs::remove_dir_all(&staging).await;
             return Err(ApiError(Error::Invalid(format!(
                 "git clone failed: {}",
                 String::from_utf8_lossy(&out.stderr)
             ))));
+        }
+        let staged_manifest = match load_manifest(&staging) {
+            Ok(m) => m,
+            Err(e) => {
+                let _ = tokio::fs::remove_dir_all(&staging).await;
+                return Err(ApiError(Error::Invalid(e)));
+            }
+        };
+        // Stop/disable any existing plugin under this slug before swapping files.
+        let _ = ctx
+            .plugins
+            .repo()
+            .set_enabled(&staged_manifest.slug, false)
+            .await;
+        ctx.plugins.stop(&staged_manifest.slug).await;
+        let (st, dst) = (staging.clone(), dest.clone());
+        if let Err(e) = crate::offload::blocking(move || replace_dir(&st, &dst)).await {
+            let _ = tokio::fs::remove_dir_all(&staging).await;
+            return Err(ApiError(Error::Internal(e)));
         }
         dest
     } else {
@@ -784,7 +1146,7 @@ async fn install(
             exec: m.exec,
             ui_dir: m.ui,
             health: m.health.unwrap_or_else(|| "/health".into()),
-            token: new_id(),
+            token: mint_plugin_token(),
         })
         .await
         .map_err(ApiError)?;
@@ -885,6 +1247,21 @@ fn ui_dir_inside_source(source: &str, c_base: &std::path::Path) -> bool {
         .is_ok_and(|src| c_base.starts_with(src))
 }
 
+/// Content-Security-Policy for static plugin UIs served under `/plugins/{slug}/ui/*`.
+/// Blocks external scripts, external network/image exfiltration, `<object>`,
+/// `<base>` hijacking, and third-party framing while keeping local plugin
+/// bundles, inline bootstrap scripts, and `blob:` report downloads working.
+const PLUGIN_UI_CSP: &str = "default-src 'self'; \
+    script-src 'self' 'unsafe-inline'; \
+    style-src 'self' 'unsafe-inline'; \
+    img-src 'self' data: blob:; \
+    font-src 'self' data:; \
+    connect-src 'self' blob: data:; \
+    object-src 'none'; \
+    base-uri 'self'; \
+    form-action 'self'; \
+    frame-ancestors 'self'";
+
 async fn asset(State(ctx): State<ServerCtx>, AxPath(p): AxPath<AssetPath>) -> Response {
     let rec = match ctx.plugins.repo().get(&p.slug).await {
         Ok(Some(r)) if r.enabled => r,
@@ -911,15 +1288,12 @@ async fn asset(State(ctx): State<ServerCtx>, AxPath(p): AxPath<AssetPath>) -> Re
     match tokio::fs::read(&c_target).await {
         Ok(bytes) => {
             let ct = mime_for(&c_target);
-            // nosniff: a plugin file is served with an extension-derived type;
-            // never let the browser re-interpret it as script/HTML. (A CSP
-            // `sandbox` without `allow-same-origin` isn't possible here: the
-            // plugin page calls `/api/v1/plugins/{slug}` with the bearer from
-            // `otto:init`, which an opaque origin can't do under our CORS.)
             Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", ct)
+                .header("content-security-policy", PLUGIN_UI_CSP)
                 .header("x-content-type-options", "nosniff")
+                .header("x-frame-options", "SAMEORIGIN")
                 .header("referrer-policy", "no-referrer")
                 .body(Body::from(bytes))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
@@ -962,15 +1336,61 @@ async fn auth_plugin(ctx: &ServerCtx, headers: &HeaderMap) -> Result<PluginRecor
             (StatusCode::UNAUTHORIZED, "missing plugin token").into_response(),
         ));
     }
+    // Prefer live ephemeral in-memory tokens minted per spawn.
+    if let Some(slug) = ctx.plugins.slug_for_running_token(token) {
+        return match ctx.plugins.repo().get(&slug).await {
+            Ok(Some(rec)) if rec.enabled => Ok(rec),
+            Ok(_) => Err(Box::new(
+                (StatusCode::UNAUTHORIZED, "invalid plugin token").into_response(),
+            )),
+            Err(e) => {
+                tracing::error!(plugin = %slug, "plugin auth lookup failed: {e}");
+                Err(Box::new(
+                    (StatusCode::INTERNAL_SERVER_ERROR, "internal server error").into_response(),
+                ))
+            }
+        };
+    }
     match ctx.plugins.repo().find_enabled_by_token(token).await {
         Ok(Some(rec)) => Ok(rec),
         Ok(None) => Err(Box::new(
             (StatusCode::UNAUTHORIZED, "invalid plugin token").into_response(),
         )),
-        Err(e) => Err(Box::new(
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-        )),
+        Err(e) => {
+            tracing::error!("plugin token lookup failed: {e}");
+            Err(Box::new(
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error").into_response(),
+            ))
+        }
     }
+}
+
+async fn require_capability(
+    ctx: &ServerCtx,
+    rec: &PluginRecord,
+    capability: &str,
+) -> Result<(), Box<Response>> {
+    if plugin_allows_capability(rec, capability) {
+        return Ok(());
+    }
+    audit(
+        ctx,
+        None,
+        "plugin.capability_denied",
+        &rec.slug,
+        Some(serde_json::json!({ "capability": capability })),
+    )
+    .await;
+    Err(Box::new(
+        (
+            StatusCode::FORBIDDEN,
+            format!(
+                "plugin '{}' does not declare capability '{capability}'",
+                rec.slug
+            ),
+        )
+            .into_response(),
+    ))
 }
 
 #[derive(Serialize)]
@@ -982,7 +1402,11 @@ struct HostRepo {
 }
 
 async fn host_repos(State(ctx): State<ServerCtx>, headers: HeaderMap) -> Response {
-    if let Err(r) = auth_plugin(&ctx, &headers).await {
+    let rec = match auth_plugin(&ctx, &headers).await {
+        Ok(r) => r,
+        Err(r) => return *r,
+    };
+    if let Err(r) = require_capability(&ctx, &rec, "repos").await {
         return *r;
     }
     match ctx.git_store.list_all_repos().await {
@@ -998,13 +1422,20 @@ async fn host_repos(State(ctx): State<ServerCtx>, headers: HeaderMap) -> Respons
                 .collect::<Vec<_>>(),
         )
         .into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => {
+            tracing::error!(plugin = %rec.slug, "plugin host_repos failed: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal server error").into_response()
+        }
     }
 }
 
 /// `GET /plugin-host/repos/{id}/prs…` (see `host_routes`).
 async fn host_prs(State(ctx): State<ServerCtx>, req: Request) -> Response {
-    if let Err(r) = auth_plugin(&ctx, req.headers()).await {
+    let rec = match auth_plugin(&ctx, req.headers()).await {
+        Ok(r) => r,
+        Err(r) => return *r,
+    };
+    if let Err(r) = require_capability(&ctx, &rec, "repos").await {
         return *r;
     }
     let root = otto_state::UsersRepo::new(ctx.pool.clone())
@@ -1022,7 +1453,11 @@ struct HostJiraAccount {
 }
 
 async fn host_jira_accounts(State(ctx): State<ServerCtx>, headers: HeaderMap) -> Response {
-    if let Err(r) = auth_plugin(&ctx, &headers).await {
+    let rec = match auth_plugin(&ctx, &headers).await {
+        Ok(r) => r,
+        Err(r) => return *r,
+    };
+    if let Err(r) = require_capability(&ctx, &rec, "jira").await {
         return *r;
     }
     match ctx.issues_store.list_all_accounts().await {
@@ -1041,7 +1476,10 @@ async fn host_jira_accounts(State(ctx): State<ServerCtx>, headers: HeaderMap) ->
                 .collect::<Vec<_>>(),
         )
         .into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => {
+            tracing::error!(plugin = %rec.slug, "plugin host_jira_accounts failed: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal server error").into_response()
+        }
     }
 }
 
@@ -1058,13 +1496,18 @@ struct HostJiraCreds {
 }
 
 /// Returns the Jira credentials (incl. token) for an account. The plugin is
-/// trusted user-installed code; the token never leaves the loopback host API.
+/// trusted user-installed code; the token never leaves the loopback host API,
+/// and every access is recorded in the audit log.
 async fn host_jira_credentials(
     State(ctx): State<ServerCtx>,
     headers: HeaderMap,
     Query(q): Query<AccountQuery>,
 ) -> Response {
-    if let Err(r) = auth_plugin(&ctx, &headers).await {
+    let rec = match auth_plugin(&ctx, &headers).await {
+        Ok(r) => r,
+        Err(r) => return *r,
+    };
+    if let Err(r) = require_capability(&ctx, &rec, "jira:credentials").await {
         return *r;
     }
     let account = match ctx
@@ -1073,7 +1516,7 @@ async fn host_jira_credentials(
         .await
     {
         Ok(a) => a,
-        Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+        Err(_) => return (StatusCode::NOT_FOUND, "account not found").into_response(),
     };
     if account.provider != otto_core::domain::IssueProviderKind::Jira {
         return (StatusCode::NOT_FOUND, "not a Jira account").into_response();
@@ -1081,8 +1524,19 @@ async fn host_jira_credentials(
     let token = match otto_core::secrets::get_async(&ctx.secrets, &account.token_ref).await {
         Ok(Some(t)) => t,
         Ok(None) => return (StatusCode::NOT_FOUND, "token missing").into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => {
+            tracing::error!(plugin = %rec.slug, account = %account.id, "plugin jira secret read failed: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal server error").into_response();
+        }
     };
+    audit(
+        &ctx,
+        None,
+        "plugin.jira_credentials_read",
+        &rec.slug,
+        Some(serde_json::json!({ "account_id": account.id })),
+    )
+    .await;
     Json(HostJiraCreds {
         base_url: account.base_url,
         email: account.email,
@@ -1119,6 +1573,9 @@ async fn host_agents_run(
         Ok(rec) => rec,
         Err(r) => return *r,
     };
+    if let Err(r) = require_capability(&ctx, &rec, "agents").await {
+        return *r;
+    }
     // The prompt carries text the plugin collected (Jira, git…): untrusted,
     // tool-less turn unless the manifest opts into `agent_tools` (then only
     // in the plugin's data dir or a registered repo). See otto-orchestrator.
@@ -1158,6 +1615,24 @@ async fn host_agents_run(
 }
 
 pub(crate) use otto_core::paths::copy_dir;
+
+/// Atomically replace `dst` with staged directory `src` (both under `plugins_home`),
+/// falling back to `copy_dir` if cross-device. Runs inside `crate::offload::blocking`.
+#[allow(clippy::disallowed_methods)]
+fn replace_dir(src: &Path, dst: &Path) -> Result<(), String> {
+    if dst.exists() {
+        std::fs::remove_dir_all(dst)
+            .map_err(|e| format!("remove existing plugin dir {}: {e}", dst.display()))?;
+    }
+    match std::fs::rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            copy_dir(src, dst)?;
+            let _ = std::fs::remove_dir_all(src);
+            Ok(())
+        }
+    }
+}
 
 #[cfg(test)]
 mod proxy_timeout_tests {
@@ -1282,6 +1757,8 @@ mod proxy_timeout_tests {
             RunningPlugin {
                 port: 7,
                 token: String::new(),
+                pid: None,
+                started_at: chrono::Utc::now(),
                 generation,
                 stop,
                 watcher: tokio::spawn(async {}),
@@ -1544,5 +2021,210 @@ mod proxy_timeout_tests {
         let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
         assert_eq!(&body[..], b"ok");
         h.abort();
+    }
+
+    /// A plugin sidecar returning 302/307 MUST NOT cause ottod to follow the
+    /// redirect (SSRF) or forward `x-otto-plugin-token` to the redirect target.
+    #[tokio::test]
+    async fn proxy_client_does_not_follow_redirects_or_leak_plugin_token() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let target_hit = Arc::new(AtomicBool::new(false));
+        let target_hit_bg = Arc::clone(&target_hit);
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_port = target.local_addr().unwrap().port();
+        let target_task = tokio::spawn(async move {
+            if let Ok((mut s, _)) = target.accept().await {
+                target_hit_bg.store(true, Ordering::SeqCst);
+                let mut buf = [0u8; 512];
+                let _ = s.read(&mut buf).await;
+                let _ = s
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 6\r\n\r\nsecret")
+                    .await;
+            }
+        });
+
+        let sidecar = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let sidecar_port = sidecar.local_addr().unwrap().port();
+        let sidecar_task = tokio::spawn(async move {
+            if let Ok((mut s, _)) = sidecar.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{target_port}/steal\r\nContent-Length: 0\r\n\r\n"
+                );
+                let _ = s.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let client = proxy_client(PROXY_CONNECT_TIMEOUT, PROXY_TIMEOUT);
+        let resp = forward(
+            client
+                .get(format!("http://127.0.0.1:{sidecar_port}/x"))
+                .header("x-otto-plugin-token", "live-secret-token"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !target_hit.load(Ordering::SeqCst),
+            "redirect target must never be contacted by proxy_client"
+        );
+        target_task.abort();
+        sidecar_task.abort();
+    }
+
+    #[tokio::test]
+    async fn running_ephemeral_token_authenticates_and_capabilities_are_enforced() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = PluginManager::new(
+            PluginsRepo::new(pool),
+            tmp.path().join("plugins"),
+            tmp.path().into(),
+            "http://127.0.0.1:1".into(),
+        );
+        let tok = mint_plugin_token();
+        assert_eq!(tok.len(), 64);
+        assert_ne!(tok, mint_plugin_token());
+
+        let child = Command::new("/bin/sh")
+            .args(["-c", "exec sleep 60"])
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        manager.adopt("ephem", 9, &tok, child);
+        assert_eq!(
+            manager.slug_for_running_token(&tok).as_deref(),
+            Some("ephem")
+        );
+        assert_eq!(manager.slug_for_running_token("wrong"), None);
+        manager.stop("ephem").await;
+        assert_eq!(manager.slug_for_running_token(&tok), None);
+
+        // Capability allow-list enforcement when declared in manifest.
+        std::fs::write(
+            tmp.path().join("otto-plugin.json"),
+            r#"{"slug":"ephem","name":"E","exec":["node"],"capabilities":["repos"]}"#,
+        )
+        .unwrap();
+        let rec = PluginRecord {
+            slug: "ephem".into(),
+            name: "E".into(),
+            icon: "box".into(),
+            version: "1".into(),
+            description: String::new(),
+            source: tmp.path().to_string_lossy().into(),
+            exec: vec!["node".into()],
+            ui_dir: None,
+            health: "/health".into(),
+            enabled: true,
+            token: String::new(),
+            installed_at: String::new(),
+        };
+        assert!(plugin_allows_capability(&rec, "repos"));
+        assert!(!plugin_allows_capability(&rec, "jira:credentials"));
+        assert!(!plugin_allows_capability(&rec, "agents"));
+
+        // Corrupt on-disk manifest MUST fail closed.
+        std::fs::write(tmp.path().join("otto-plugin.json"), "{not-valid-json").unwrap();
+        assert!(!plugin_allows_capability(&rec, "repos"));
+        assert!(!plugin_allows_capability(&rec, "jira:credentials"));
+
+        assert!(PLUGIN_UI_CSP.contains("frame-ancestors 'self'"));
+        assert!(PLUGIN_UI_CSP.contains("object-src 'none'"));
+    }
+
+    #[tokio::test]
+    async fn stop_all_terminates_running_sidecars_and_replace_dir_overwrites() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = otto_state::db::test_pool().await;
+        let manager = PluginManager::new(
+            PluginsRepo::new(pool),
+            tmp.path().join("plugins"),
+            tmp.path().into(),
+            "http://127.0.0.1:1".into(),
+        );
+        for slug in ["alpha", "beta"] {
+            let child = Command::new("/bin/sh")
+                .args(["-c", "exec sleep 60"])
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            manager.adopt(slug, 9, &mint_plugin_token(), child);
+        }
+        assert!(manager.runtime_of("alpha").0);
+        assert!(manager.runtime_of("beta").0);
+        manager.stop_all().await;
+        assert!(!manager.runtime_of("alpha").0);
+        assert!(!manager.runtime_of("beta").0);
+
+        let dst = tmp.path().join("installed");
+        let src = tmp.path().join("staged");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("old.txt"), "old").unwrap();
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("new.txt"), "new").unwrap();
+        replace_dir(&src, &dst).unwrap();
+        assert!(!dst.join("old.txt").exists());
+        assert_eq!(std::fs::read_to_string(dst.join("new.txt")).unwrap(), "new");
+        assert!(!src.exists());
+    }
+
+    #[tokio::test]
+    async fn plugin_logs_ring_buffer_is_bounded_and_snapshot_tracks_telemetry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = otto_state::db::test_pool().await;
+        let manager = PluginManager::new(
+            PluginsRepo::new(pool),
+            tmp.path().join("plugins"),
+            tmp.path().into(),
+            "http://127.0.0.1:1".into(),
+        );
+        // Ring buffer caps at MAX_LOG_LINES and truncates overlong lines safely.
+        for i in 0..(MAX_LOG_LINES + 25) {
+            push_plugin_log(&manager.logs, "demo", "stdout", &format!("line-{i}"));
+        }
+        let all = manager.logs_of("demo", MAX_LOG_LINES + 50);
+        assert_eq!(all.len(), MAX_LOG_LINES);
+        assert_eq!(all.first().unwrap().line, "line-25");
+        assert_eq!(
+            all.last().unwrap().line,
+            format!("line-{}", MAX_LOG_LINES + 24)
+        );
+        let tail5 = manager.logs_of("demo", 5);
+        assert_eq!(tail5.len(), 5);
+
+        let huge = "x".repeat(MAX_LOG_LINE_BYTES + 200);
+        push_plugin_log(&manager.logs, "demo", "stderr", &huge);
+        let last = manager.logs_of("demo", 1).pop().unwrap();
+        assert_eq!(last.stream, "stderr");
+        assert!(last.line.len() <= MAX_LOG_LINE_BYTES + 4);
+
+        // Snapshot tracks disabled / stopped / error / running + pid + restart_count.
+        assert_eq!(manager.snapshot_of("demo", false).health_status, "disabled");
+        assert_eq!(manager.snapshot_of("demo", true).health_status, "stopped");
+        manager.set_last_error("demo", "boom".into());
+        assert_eq!(manager.snapshot_of("demo", true).health_status, "error");
+
+        let child = Command::new("/bin/sh")
+            .args(["-c", "exec sleep 60"])
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let expected_pid = child.id();
+        manager.adopt("demo", 9, &mint_plugin_token(), child);
+        let live = manager.snapshot_of("demo", true);
+        assert!(live.running);
+        assert_eq!(live.health_status, "running");
+        assert_eq!(live.pid, expected_pid);
+        assert!(live.started_at.is_some());
+        assert!(live.uptime_secs.is_some());
+        manager.stop_all().await;
     }
 }

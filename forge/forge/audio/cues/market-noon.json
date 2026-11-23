@@ -1,0 +1,53 @@
+{
+  "scene": "A busy medieval market square at noon: crowd chatter, merchants, carts, chickens, a blacksmith nearby.",
+  "seed": 202,
+  "ambience": [
+    {
+      "id": "market-crowd",
+      "prompt": "busy outdoor medieval market crowd, many people talking, footsteps, no music",
+      "seconds": 20,
+      "loop": true
+    },
+    {
+      "id": "square-birds",
+      "prompt": "daytime town square ambience, pigeons and sparrows, light breeze",
+      "seconds": 16,
+      "loop": true
+    }
+  ],
+  "spots": [
+    {
+      "id": "cart-pass",
+      "prompt": "a wooden cart with iron wheels rolling over cobblestones",
+      "seconds": 4,
+      "variations": 2
+    },
+    {
+      "id": "anvil",
+      "prompt": "blacksmith hammer striking an anvil, three strikes",
+      "seconds": 3,
+      "variations": 2
+    },
+    {
+      "id": "chicken",
+      "prompt": "a chicken clucking and flapping its wings",
+      "seconds": 2.5,
+      "variations": 2
+    },
+    {
+      "id": "coin-pouch",
+      "prompt": "a leather pouch of coins dropped on a wooden table",
+      "seconds": 1.5,
+      "variations": 3
+    }
+  ],
+  "music": [
+    {
+      "id": "market-theme",
+      "prompt": "lively medieval market music, recorder, lute and tambourine, bright and busy",
+      "seconds": 32,
+      "loop": true,
+      "bpm": 120
+    }
+  ]
+}

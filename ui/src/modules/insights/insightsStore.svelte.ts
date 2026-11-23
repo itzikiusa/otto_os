@@ -114,6 +114,7 @@ class InsightsStore {
   private pollReportKey: string | null = null;
   private reportBeforeRun: string | null | undefined;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
+  private fallbackLoadTimer: ReturnType<typeof setTimeout> | null = null;
   private pollGoneTicks = 0;
   private indexRequest = 0;
 
@@ -288,7 +289,11 @@ class InsightsStore {
         this.reportBeforeRun = resp.report_revision;
         this.schedulePoll();
       } else {
-        setTimeout(() => void this.load(null, false), 2500);
+        if (this.fallbackLoadTimer) clearTimeout(this.fallbackLoadTimer);
+        this.fallbackLoadTimer = setTimeout(() => {
+          this.fallbackLoadTimer = null;
+          void this.load(null, false);
+        }, 2500);
         toasts.success('Insights run started', 'The report appears here when it is ready.');
       }
     } catch (e) {
@@ -361,6 +366,8 @@ class InsightsStore {
   resetForTests(): void {
     if (this.pollTimer) clearTimeout(this.pollTimer);
     this.pollTimer = null;
+    if (this.fallbackLoadTimer) clearTimeout(this.fallbackLoadTimer);
+    this.fallbackLoadTimer = null;
     this.indexRequest++;
     this.reports = [];
     this.loading = true;

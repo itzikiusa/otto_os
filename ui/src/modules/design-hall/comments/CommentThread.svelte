@@ -8,7 +8,8 @@
   import { confirmer } from '../../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { toastError } from '../../../lib/toastError';
-  import type { DesignComment } from '../../../lib/api/types';
+  import type { CommentPin3d, DesignComment } from '../../../lib/api/types';
+  import { pin3dLabel, pin3dWords } from '../../../lib/design/scene3d/pin3d';
   import type { CommentsStore } from './commentsStore.svelte';
   import { pinWords, versionChip, type Thread } from './pins';
 
@@ -21,8 +22,10 @@
     /** Root may delete anyone's comment (workspace admins get the daemon's answer). */
     canDeleteAny: boolean;
     onjump: (versionId: string, seq: number) => void;
+    /** Fly the 3D camera to a polygon/mesh comment anchor and highlight it. */
+    onfocus3d?: (pin: CommentPin3d) => void;
   }
-  let { thread, store, shownVersionId, meId, canComment, canDeleteAny, onjump }: Props = $props();
+  let { thread, store, shownVersionId, meId, canComment, canDeleteAny, onjump, onfocus3d }: Props = $props();
 
   const root = $derived(thread.root);
   const selected = $derived(store.selectedId === root.id);
@@ -103,7 +106,13 @@
 {#snippet entry(c: DesignComment)}
   <div class="entry" class:reply={!!c.parent_id}>
     <div class="meta">
-      {#if !c.parent_id}<span class="num" class:pinned={!!c.pin} title={c.pin ? `Pinned at ${pinWords(c.pin)}` : 'About the whole design'}>{#if c.pin}{thread.n}{:else}<Icon name="comment" size={12} />{/if}</span>{/if}
+      {#if !c.parent_id}
+        <span
+          class="num"
+          class:pinned={!!c.pin || !!c.pin_3d}
+          title={c.pin_3d ? pin3dWords(c.pin_3d) : c.pin ? `Pinned at ${pinWords(c.pin)}` : 'About the whole design'}
+        >{#if c.pin || c.pin_3d}{thread.n}{:else}<Icon name="comment" size={12} />{/if}</span>
+      {/if}
       <strong class="who">{c.author_kind === 'agent' ? `Otto · ${c.author_name}` : c.author_name}</strong>
       <time class="dim" datetime={c.created_at}>{when(c.created_at)}</time>
       {#if c.edited_at}<span class="dim">· edited</span>{/if}
@@ -126,11 +135,33 @@
 {/snippet}
 
 <li class="thread" class:sel={selected} class:resolved={root.resolved} bind:this={el} data-testid="design-comment" data-comment-id={root.id}>
-  <button class="select" onclick={() => (store.selectedId = selected ? null : root.id)} aria-pressed={selected}
-    aria-label={`${selected ? 'Unselect' : 'Select'} comment ${thread.n}${root.pin ? ' and highlight its pin' : ''}`} title={root.pin ? 'Highlight its pin' : 'Select'}></button>
+  <button
+    class="select"
+    onclick={() => {
+      const next = selected ? null : root.id;
+      store.selectedId = next;
+      if (next && root.pin_3d) onfocus3d?.(root.pin_3d);
+    }}
+    aria-pressed={selected}
+    aria-label={`${selected ? 'Unselect' : 'Select'} comment ${thread.n}${root.pin || root.pin_3d ? ' and highlight its pin' : ''}`}
+    title={root.pin_3d ? 'Focus polygon in 3D' : root.pin ? 'Highlight its pin' : 'Select'}
+  ></button>
   {@render entry(root)}
-  {#if chip || root.resolved}
+  {#if root.pin_3d || chip || root.resolved}
     <div class="tags">
+      {#if root.pin_3d}
+        {@const anchor = root.pin_3d}
+        <button
+          type="button"
+          class="ver-jump pin3d-jump"
+          onclick={() => {
+            store.selectedId = root.id;
+            onfocus3d?.(anchor);
+          }}
+          title={pin3dWords(anchor)}
+          data-testid="design-comment-focus3d"
+        ><Icon name="target" size={12} /> {pin3dLabel(anchor)}</button>
+      {/if}
       {#if chip && root.version_id && root.version_seq != null}
         {@const vid = root.version_id}
         {@const seq = root.version_seq}
@@ -264,6 +295,14 @@
     font: inherit;
     font-size: var(--fs-xs);
     cursor: pointer;
+  }
+  .pin3d-jump {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 6px;
+    border-radius: var(--radius-s);
+    background: var(--accent-soft);
   }
   .ver-jump:hover {
     text-decoration: underline;

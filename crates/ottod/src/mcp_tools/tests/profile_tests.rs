@@ -223,3 +223,27 @@ async fn no_profile_leaves_the_listing_and_calls_untouched() {
     assert_eq!(call(&ctx, "otto_run_workflow").await["isError"], false);
     assert_eq!(*state.invokes.lock().unwrap(), ["otto.run_workflow"]);
 }
+
+#[tokio::test]
+async fn profile_fails_closed_when_unresolvable_or_daemon_unreachable() {
+    // 1. Daemon returns `profile: null` for an unknown/deleted profile id.
+    let state = Arc::new(Daemon::default());
+    let mut ctx = ctx_at(&daemon(state.clone()).await);
+    ctx.profiles = Some("unknown".into());
+    assert!(
+        listed(&ctx).await.is_empty(),
+        "unknown profile must list zero tools"
+    );
+    let r = call(&ctx, "otto_run_workflow").await;
+    assert_eq!(r["isError"], true);
+    assert!(
+        state.invokes.lock().unwrap().is_empty(),
+        "unknown profile must never invoke daemon tools"
+    );
+
+    // 2. Daemon unreachable: still fails closed.
+    let mut dead = ctx_at("http://127.0.0.1:9");
+    dead.profiles = Some("git".into());
+    assert!(listed(&dead).await.is_empty());
+    assert_eq!(call(&dead, "otto_list_repos").await["isError"], true);
+}

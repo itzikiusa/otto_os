@@ -13,8 +13,8 @@ use super::db_store::{
     clean_opt, discover_local_dotenv_files, discover_local_python_venvs,
     is_dangerous_loader_env_key, is_reserved_internal_env_key, is_valid_env_key,
     load_stored_project_env, secret_key_ref, validate_attached_folder_path, StoredEnvVar,
-    RESERVED_GO_BUILD_TAGS_KEY, RESERVED_MODULE_GO_BUILD_TAGS_KEY, RESERVED_MODULE_SDKS_KEY,
-    RESERVED_NETBRIDGE_KEY,
+    StoredMobileSdks, RESERVED_GO_BUILD_TAGS_KEY, RESERVED_MOBILE_SDKS_KEY,
+    RESERVED_MODULE_GO_BUILD_TAGS_KEY, RESERVED_MODULE_SDKS_KEY, RESERVED_NETBRIDGE_KEY,
 };
 use super::discovery::discover_run_configs;
 use super::module_sdks::{sanitize_module_go_build_tags, sanitize_module_sdks};
@@ -93,6 +93,21 @@ pub(crate) fn local_env_mutation_requires_root(
             prev.python_interpreter.as_deref(),
         ),
         (
+            "android_home",
+            trimmed_opt(&req.android_home),
+            prev.android_home.as_deref(),
+        ),
+        (
+            "flutter_root",
+            trimmed_opt(&req.flutter_root),
+            prev.flutter_root.as_deref(),
+        ),
+        (
+            "xcode_developer_dir",
+            trimmed_opt(&req.xcode_developer_dir),
+            prev.xcode_developer_dir.as_deref(),
+        ),
+        (
             "extra_path",
             trimmed_opt(&req.extra_path),
             prev.extra_path.as_deref(),
@@ -140,6 +155,21 @@ fn validate_environment_update_permissions(
                 "python_interpreter",
                 clean_opt(&req.python_interpreter),
                 prev_proj.python_interpreter.clone(),
+            ),
+            (
+                "android_home",
+                clean_opt(&req.android_home),
+                prev_proj.android_home.clone(),
+            ),
+            (
+                "flutter_root",
+                clean_opt(&req.flutter_root),
+                prev_proj.flutter_root.clone(),
+            ),
+            (
+                "xcode_developer_dir",
+                clean_opt(&req.xcode_developer_dir),
+                prev_proj.xcode_developer_dir.clone(),
             ),
             (
                 "extra_path",
@@ -473,6 +503,33 @@ impl EnvironmentManager {
                 .map_err(|e| Error::Internal(format!("serialize network_bridge: {e}")))?;
             next_stored.push(StoredEnvVar {
                 key: RESERVED_NETBRIDGE_KEY.into(),
+                value: Some(encoded),
+                secret: false,
+                secret_ref: None,
+            });
+        }
+
+        let next_mobile_sdks = if caller_is_root {
+            StoredMobileSdks {
+                android_home: clean_opt(&req.android_home),
+                flutter_root: clean_opt(&req.flutter_root),
+                xcode_developer_dir: clean_opt(&req.xcode_developer_dir),
+            }
+        } else {
+            StoredMobileSdks {
+                android_home: prev_proj.android_home.clone(),
+                flutter_root: prev_proj.flutter_root.clone(),
+                xcode_developer_dir: prev_proj.xcode_developer_dir.clone(),
+            }
+        };
+        if next_mobile_sdks.android_home.is_some()
+            || next_mobile_sdks.flutter_root.is_some()
+            || next_mobile_sdks.xcode_developer_dir.is_some()
+        {
+            let encoded = serde_json::to_string(&next_mobile_sdks)
+                .map_err(|e| Error::Internal(format!("serialize mobile_sdks: {e}")))?;
+            next_stored.push(StoredEnvVar {
+                key: RESERVED_MOBILE_SDKS_KEY.into(),
                 value: Some(encoded),
                 secret: false,
                 secret_ref: None,

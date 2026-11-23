@@ -143,11 +143,13 @@ export function createGraphActions(h: GraphActionsHost) {
       });
       if (!message) return;
     }
-    // Ask whether to push the new tag straight to origin.
-    const push = await confirmer.ask(`Push tag “${name}” to origin?`, {
-      title: 'Push tag',
-      confirmLabel: 'Push',
-      danger: false,
+    // Ask whether to push the new tag straight to origin (outward-facing).
+    const push = await confirmOutward({
+      verb: 'Push tag',
+      title: 'Push tag to origin?',
+      where: `origin · tag ${name}`,
+      what: annotated ? `Annotated tag “${name}” (${message})` : `Lightweight tag “${name}” at ${sha.slice(0, 8)}`,
+      who: 'Everyone with access to the remote sees the tag; CI or release jobs may react to it.',
     });
     await mutate(
       '/tag',
@@ -177,12 +179,20 @@ export function createGraphActions(h: GraphActionsHost) {
    *  as `remote_name` on both the safe and the forced request (the daemon
    *  otherwise defaults to origin). */
   async function deleteLocalBranch(name: string, alsoRemote: boolean, remote = 'origin'): Promise<void> {
-    const ok = await confirmer.ask(
-      alsoRemote
-        ? `Delete branch “${name}” locally AND “${remote}/${name}” on the remote “${remote}”? This cannot be undone.`
-        : `Delete local branch “${name}”?`,
-      { title: 'Delete branch', confirmLabel: 'Delete', danger: true },
-    );
+    const ok = alsoRemote
+      ? await confirmOutward({
+          verb: 'Delete branch',
+          title: 'Delete local and remote branch?',
+          where: `${remote} · branch ${name}`,
+          what: `Deletes local branch “${name}” and remote branch “${remote}/${name}”. This cannot be undone.`,
+          who: 'Everyone with access to the remote loses this branch; open pull requests from it may close.',
+          danger: true,
+        })
+      : await confirmer.ask(`Delete local branch “${name}”?`, {
+          title: 'Delete branch',
+          confirmLabel: 'Delete',
+          danger: true,
+        });
     if (!ok) return;
     const okTitle = alsoRemote ? 'Branch deleted (local + remote)' : 'Branch deleted';
     // Safe delete first (`-d`): git refuses when the branch holds unmerged
@@ -220,9 +230,12 @@ export function createGraphActions(h: GraphActionsHost) {
 
   async function deleteRemoteBranch(name: string, remote = 'origin'): Promise<void> {
     const full = `${remote}/${name}`;
-    const ok = await confirmer.ask(`Delete branch “${full}” on the remote “${remote}”? This cannot be undone.`, {
-      title: 'Delete remote branch',
-      confirmLabel: 'Delete',
+    const ok = await confirmOutward({
+      verb: `Delete ${full}`,
+      title: 'Delete remote branch?',
+      where: `${remote} · branch ${name}`,
+      what: `Deletes remote branch “${full}”. Local branches are untouched. This cannot be undone.`,
+      who: 'Everyone with access to the remote loses this branch; open pull requests from it may close.',
       danger: true,
     });
     if (!ok) return;

@@ -21,9 +21,9 @@
   import { launchBlocker } from './launchBlocker';
   import { goalTemplates, templateDraft, researchDraft, type GoalTemplateId, type PocScope } from './templates';
 
-  let { oncancel, oncreated }: { oncancel: () => void; oncreated: (id: string) => void } = $props();
+  let { oncancel, oncreated, initialSeed = '' }: { oncancel: () => void; oncreated: (id: string) => void; initialSeed?: string } = $props();
 
-  let seed = $state('');
+  let seed = $state(untrack(() => initialSeed));
   let mode = $state<'build' | 'research'>('build');
   let allowCommits = $state(false);
   let requireReview = $state(false);
@@ -48,6 +48,7 @@
   let maxIterations = $state(5);
   let maxMinutes = $state(30);
   let perPhaseMinutes = $state(10);
+  let maxCostUsd = $state('');
   let executorCount = $state(1);
   // Executor agent: provider from /meta (shell can't take an agent prompt);
   // model is a free-text alias ("" = provider default).
@@ -69,8 +70,9 @@
   $effect(() => router.guard(() => canLeaveForm()));
 
   function formState(): string {
+    const costCap = typeof maxCostUsd === 'undefined' ? '' : maxCostUsd;
     return JSON.stringify([seed, mode, allowCommits, requireReview, sourceLinks, selectedSkills, repoPath,
-      feedback, draft, name, maxIterations, maxMinutes, perPhaseMinutes, executorCount,
+      feedback, draft, name, maxIterations, maxMinutes, perPhaseMinutes, costCap, executorCount,
       execProvider, execModel, defProvider, defModel, selectedTemplate, pocScope, draftSource, execution, savedGraph]);
   }
 
@@ -88,6 +90,9 @@
     maxIterations = d.suggested_limits.max_iterations;
     maxMinutes = Math.round(d.suggested_limits.max_runtime_secs / 60);
     perPhaseMinutes = Math.max(1, Math.round(d.suggested_limits.per_phase_timeout_secs / 60));
+    if (typeof maxCostUsd !== 'undefined') {
+      maxCostUsd = d.suggested_limits.max_cost_usd != null ? String(d.suggested_limits.max_cost_usd) : '';
+    }
     feedback = '';
   }
 
@@ -188,11 +193,20 @@
   function launchReason(): string | null {
     if (!draft) return null;
     const criteria = draft.definition.acceptance_criteria;
-    return launchBlocker({
+    const base = launchBlocker({
       name, seed, mode, repoPath, maxIterations, maxMinutes, perPhaseMinutes, executorCount, criteria,
       graphIssue: graphError(draft.suggested_config.graph, criteria),
       graphTasks: draft.suggested_config.graph?.nodes.length ?? 1,
     });
+    if (base) return base;
+    const costRaw = typeof maxCostUsd === 'undefined' ? '' : String(maxCostUsd).trim();
+    if (costRaw !== '') {
+      const parsed = Number(costRaw);
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        return 'Max cost must be greater than $0 (or leave blank for no cap).';
+      }
+    }
+    return null;
   }
   function canLaunch(): boolean {
     return alive && !!ws.currentId && !!draft && !launchReason();
@@ -204,6 +218,27 @@
     if (launching) return;
     const generation = formGeneration;
     const ownsForm = () => alive && generation === formGeneration && ws.currentId === wsId;
+    const cmdCriteria = draft.definition.acceptance_criteria
+      .filter((c) => c.verify_kind === 'command' && (c.verify_cmd ?? '').trim())
+      .map((c) => (c.verify_cmd ?? '').trim());
+    const commitsOn = mode === 'build' && allowCommits;
+    if (cmdCriteria.length > 0 || commitsOn) {
+      const details: string[] = [];
+      if (cmdCriteria.length > 0) {
+        details.push(`Runs shell verification ${cmdCriteria.length > 1 ? 'commands' : 'command'} each iteration: ${cmdCriteria.map((cmd) => `\`${cmd}\``).join(', ')}.`);
+      }
+      if (commitsOn) {
+        details.push('May create local git commits on the loop’s isolated branch.');
+      }
+      const ok = await confirmer.ask(
+        `Start “${name.trim()}” automatically? ${details.join(' ')}`,
+        { title: 'Launch autonomous goal loop?', confirmLabel: 'Launch loop', danger: true },
+      );
+      if (!ok || !ownsForm()) return;
+    }
+    const costRaw = typeof maxCostUsd === 'undefined' ? '' : String(maxCostUsd).trim();
+    const parsedCost = costRaw === '' ? null : Number(costRaw);
+    const maxCost = parsedCost != null && Number.isFinite(parsedCost) && parsedCost > 0 ? parsedCost : null;
     launching = true;
     try {
       const base = draft.suggested_config.executors[0] ?? {
@@ -226,7 +261,7 @@
           max_iterations: maxIterations,
           max_runtime_secs: maxMinutes * 60,
           per_phase_timeout_secs: perPhaseMinutes * 60,
-          max_cost_usd: null,
+          max_cost_usd: maxCost,
           max_attempts_per_executor: 3,
         },
         config: { ...draft.suggested_config, executors, mode, allow_commits: mode === 'build' && allowCommits,
@@ -414,6 +449,7 @@
         <label>Max iterations <input class="input in num" type="number" min="1" bind:value={maxIterations} /></label>
         <label>Max minutes <input class="input in num" type="number" min="1" bind:value={maxMinutes} aria-describedby="goal-run-cap" /></label>
         <label>Per-phase minutes <input class="input in num" type="number" min="1" bind:value={perPhaseMinutes} /></label>
+        <label>Max cost (USD) <input class="input in num" type="number" min="0.5" step="0.5" placeholder="No cap" bind:value={maxCostUsd} /></label>
         <label>Executors <input class="input in num" type="number" min="1" max="6" bind:value={executorCount} /></label>
       </div>
       <div class="lbl">Executor agent <span class="hint">(does the work each iteration)</span></div>
@@ -458,7 +494,7 @@
       <textarea dir="ltr" id="gl-sources" class="input in area mono" rows="3" bind:value={sourceLinks} placeholder="https://…"></textarea>
       <label class="lbl" for="gl-skills">Selected skills (comma separated)</label>
       <input dir="auto" id="gl-skills" class="input in" bind:value={selectedSkills} placeholder="e.g. db-mysql, golang-testing" />
-      {#each ['planner', 'evaluator', 'digester'] as role}
+      {#each ['planner', 'evaluator', 'digester'] as role (role)}
         {@const key = role as 'planner' | 'evaluator' | 'digester'}
         <label class="lbl" for={`gl-${role}`}>{role[0].toUpperCase() + role.slice(1)} provider</label>
         <select id={`gl-${role}`} class="input in" bind:value={draft.suggested_config[key].provider} onchange={() => { if (draft) draft.suggested_config[key].model = ''; }}>

@@ -5,7 +5,6 @@
 // ResultsGrid; the views (GridView / VerticalView / VerticalTree / JsonView /
 // CellViewer / DocEditor / ReviewModal) read and call it through their `flow`
 // prop.
-//
 // Runes live on class fields only — a `.svelte.ts` class must not create
 // effects at construction — so ResultsGrid keeps two thin `$effect`s: one that
 // pushes the inputs via `update()`, one that re-runs `resolveTarget()` on the
@@ -13,6 +12,7 @@
 // plain prototype method (unbound): call it as `() => flow.method()`, never
 // pass `flow.method` itself as a handler.
 import type { QueryResult, DbForeignKey, DbEngine } from '../../lib/api/types';
+import { loadErrorText } from '../../lib/loadError';
 import { toasts } from '../../lib/toast.svelte';
 import { database } from '../../lib/stores/database.svelte';
 import {
@@ -1026,7 +1026,7 @@ export class EditFlow {
         // generated statement both work off the same form.
         value = compactJson(JSON.parse(this.viewerDraft));
       } catch (e) {
-        this.viewerErr = `Invalid JSON: ${e instanceof Error ? e.message : String(e)}`;
+        this.viewerErr = `Invalid JSON: ${loadErrorText(e)}`;
         return;
       }
     }
@@ -1086,7 +1086,7 @@ export class EditFlow {
       }
       doc = parsed as Record<string, unknown>;
     } catch (e) {
-      this.docEditor.err = `Invalid JSON: ${e instanceof Error ? e.message : String(e)}`;
+      this.docEditor.err = `Invalid JSON: ${loadErrorText(e)}`;
       return;
     }
     const ctx = rowIdx < 0 ? ins && this.ctx({ ...ins, pkCols: [] }) : this.editCtx();

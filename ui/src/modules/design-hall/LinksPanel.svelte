@@ -11,6 +11,7 @@
   import { toastError } from '../../lib/toastError';
   import { toasts } from '../../lib/toast.svelte';
   import { ApiError } from '../../lib/api/client';
+  import { loadErrorText } from '../../lib/loadError';
   import { createLink, deleteLink, search } from '../../lib/api/design';
   import { openExternal } from '../../lib/external';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -180,7 +181,7 @@
           ? `That link would make a loop — ${picked?.title ?? 'the target'} already ${relLabel(rel)} this design, directly or through another design.`
           : `This link already exists. ${e.message}`;
       } else {
-        addError = e instanceof Error ? e.message : String(e);
+        addError = loadErrorText(e);
       }
     } finally {
       busy = false;
@@ -189,18 +190,7 @@
 </script>
 
 <div class="links" data-testid="design-links-panel">
-  {#if (loading || error) && !uses.length && !usedIn.length}
-    <div class="pad"><LoadState what="links" variant="compact" {loading} {error} empty={true} onretry={onreload} /></div>
-  {:else}
-    {#if error}
-      <!-- Stale: keep the links already loaded; say the refresh failed.
-           Inserted with its text, so it is spoken by the action (no role). -->
-      <div class="pad err" title={error} use:announceShown={{ text: `Couldn’t refresh the links. ${error}`, assertive: true }}>
-        <Icon name="warning" size={14} /> Refresh failed — showing the last good load.
-        <button class="btn small ghost" onclick={onreload} disabled={loading}>{loading ? 'Retrying…' : 'Retry'}</button>
-      </div>
-    {/if}
-    {#snippet row(r: LinkRow, incoming: boolean)}
+  {#snippet row(r: LinkRow, incoming: boolean)}
       {@const newer = incoming ? null : newerThanPinned(r)}
       <li class="row" data-testid={incoming ? 'design-link-in' : 'design-link-out'}>
         <span class="lead">
@@ -240,6 +230,7 @@
       </li>
     {/snippet}
 
+  <LoadState what="links" variant="compact" {loading} {error} empty={(loading || !!error) && !uses.length && !usedIn.length} onretry={onreload}>
     <section>
       <header>
         <h3>Uses</h3>
@@ -267,7 +258,7 @@
       {/if}
     </section>
     <p class="foot dim">Links are version-aware: a design that follows the approved version updates when you approve; a pinned one stays put and shows when something newer exists.</p>
-  {/if}
+  </LoadState>
 </div>
 
 {#if adding}
@@ -346,18 +337,6 @@
   .links {
     display: flex;
     flex-direction: column;
-  }
-  .pad {
-    padding: 14px;
-  }
-  .err {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--fs-s);
-  }
-  .err :global(svg) {
-    color: var(--danger);
   }
   section {
     padding: 12px 14px;

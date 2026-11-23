@@ -298,7 +298,7 @@
   {:else}
     {#if dirty}<p class="unsaved">Unsaved changes — Save to apply them.</p>{/if}
     <h2 class="section-title first">Network</h2>
-    <div class="card pad dm-card">
+    <div class="card dm-pad dm-card">
       <SettingToggle label="Enable network listener (binds 0.0.0.0)" checked={enabled} onchange={(v) => { enabled = v; }}>
         Served over HTTPS with a self-signed certificate. Takes effect the next time the daemon
         starts — restart it here, or quit and reopen Otto.
@@ -333,12 +333,12 @@
           aria-invalid={!!portError}
           aria-describedby={portError ? 'dm-port-err' : undefined}
         />
-        {#if portError}<span class="hint port-error" id="dm-port-err" role="alert">{portError}</span>{/if}
+        {#if portError}<span class="hint port-error" id="dm-port-err" use:announceShown={{ text: portError, assertive: true }}>{portError}</span>{/if}
       </div>
     </div>
 
     <h2 class="section-title">Process sandbox</h2>
-    <div class="card pad dm-card">
+    <div class="card dm-pad dm-card">
       <SettingToggle label="Confine agent sessions with the OS sandbox (macOS Seatbelt)" checked={sandboxEnabled} testid="sandbox-enabled" onchange={(v) => { sandboxEnabled = v; }}>
         When on, spawned agent CLIs — custom providers included — can only write to the
         workspace, its git dir, the CLIs' own caches and temp — never the rest of your disk.
@@ -386,7 +386,7 @@
     </div>
 
     <h2 class="section-title">Sessions</h2>
-    <div class="card pad dm-card">
+    <div class="card dm-pad dm-card">
       <SettingToggle
         label="Keep sessions running when the daemon restarts"
         checked={persistEnabled}
@@ -446,7 +446,7 @@
     <MachineResources bind:form={machine} errors={machineErrors} />
 
     <h2 class="section-title">Logs</h2>
-    <div class="card pad dm-card logs">
+    <div class="card dm-pad dm-card logs">
       <div class="log-line">
         <span class="dim">Folder</span>
         <span class="mono path" dir="ltr" title={LOG_DIR}>{LOG_DIR}</span>
@@ -483,7 +483,7 @@
     font-size: var(--fs-s);
     color: var(--warning);
   }
-  .card.pad {
+  .dm-pad {
     display: flex;
     flex-direction: column;
     gap: 8px;

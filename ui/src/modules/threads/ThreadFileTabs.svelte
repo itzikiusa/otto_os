@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { api, baseUrl, getToken, isAbortError } from '../../lib/api/client';
+  import { tick } from 'svelte';
+  import { api, authedBlobUrl, isAbortError } from '../../lib/api/client';
   import { copyWithToast } from '../../lib/clipboard';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -9,7 +10,7 @@
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { router } from '../../lib/router.svelte';
-  import { onTabKey } from '../../lib/tabKeys';
+  import { nextTabIndex, onTabKey } from '../../lib/tabKeys';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type { FsBrowse, FsEntry, FsRead } from '../../lib/api/types';
@@ -146,11 +147,38 @@
     entries.filter((e) => showHidden || !e.name.startsWith('.')),
   );
 
-  function rawMediaSrc(path: string): string {
-    const tok = getToken();
-    const q = new URLSearchParams({ path: resolveFilePath(path) });
-    if (tok) q.set('token', tok);
-    return `${baseUrl()}/api/v1/fs/raw?${q.toString()}`;
+  // Fetch media bytes with Authorization header via authedBlobUrl (never ?token=
+  // in image URLs). FilePreview owns and revokes the returned blob: URL.
+  function rawMediaSrc(path: string): Promise<string> {
+    const resolved = resolveFilePath(path);
+    return authedBlobUrl(`/fs/raw?path=${encodeURIComponent(resolved)}`);
+  }
+
+  let wrapEl = $state<HTMLDivElement | null>(null);
+
+  function closeTab(path: string): void {
+    threads.closeFileTab(wsKey, path);
+    void tick().then(() => {
+      const target =
+        wrapEl?.querySelector<HTMLElement>('.tf-tab-btn[aria-pressed="true"]') ??
+        wrapEl?.querySelector<HTMLElement>('.tf-entry, .tf-exp-toggle');
+      target?.focus({ preventScroll: true });
+    });
+  }
+
+  function onFileTabKey(e: KeyboardEvent): void {
+    if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
+    const btn = e.currentTarget as HTMLButtonElement;
+    const strip = btn.closest<HTMLElement>('.tf-tabstrip');
+    if (!strip) return;
+    const buttons = Array.from(strip.querySelectorAll<HTMLButtonElement>('.tf-tab-btn'));
+    const idx = buttons.indexOf(btn);
+    if (idx < 0) return;
+    const next = nextTabIndex(e.key, idx, buttons.length, { rtl: getComputedStyle(strip).direction === 'rtl' });
+    if (next < 0) return;
+    e.preventDefault();
+    buttons[next].focus();
+    buttons[next].click();
   }
 
   function insertIntoComposer(path: string): void {
@@ -158,8 +186,12 @@
     const ref = `@${rel} `;
     const fid = threads.focusedSessionId;
     if (fid && typeof document !== 'undefined') {
-      const paneEl = document.querySelector(`[data-testid="thread-pane-${fid}"]`);
-      const ta = paneEl?.querySelector<HTMLTextAreaElement>('textarea:not([disabled])');
+      const paneEl = document.querySelector(`[data-testid="thread-pane-${CSS.escape(fid)}"]`);
+      // Target the thread composer specifically — never a question/secret input
+      // inside an open RuntimeAttentionDock above it.
+      const ta = paneEl?.querySelector<HTMLTextAreaElement>(
+        '[data-testid="runtime-composer"]:not([disabled]), .composer textarea:not([disabled])',
+      );
       if (ta) {
         const start = ta.selectionStart ?? ta.value.length;
         const end = ta.selectionEnd ?? ta.value.length;
@@ -178,7 +210,7 @@
   }
 </script>
 
-<div class="tf-wrap" data-testid="inspector-files-tab">
+<div bind:this={wrapEl} class="tf-wrap" data-testid="inspector-files-tab">
   <div class="tf-explorer" class:collapsed={!treeOpen}>
     <div class="tf-exp-bar">
       <button
@@ -285,9 +317,10 @@
           <button
             type="button"
             aria-pressed={active}
+            tabindex={active ? 0 : -1}
             class="tf-tab-btn"
             title={tab.path}
-            onkeydown={onTabKey}
+            onkeydown={onFileTabKey}
             onclick={() => threads.setActiveFile(wsKey, tab.path)}
             ondblclick={() => threads.pinFileTab(wsKey, tab.path)}
           >
@@ -299,7 +332,7 @@
             class="icon-btn tf-tab-close"
             aria-label="Close {baseName(tab.path)}"
             title="Close file tab"
-            onclick={() => threads.closeFileTab(wsKey, tab.path)}
+            onclick={() => closeTab(tab.path)}
           >
             <Icon name="x" size={12} />
           </button>
@@ -321,11 +354,13 @@
     {:else}
       <div class="tf-file-toolbar">
         {#if hasRichPreview}
-          <div class="segmented" role="group" aria-label="File view mode">
+          <div class="segmented" role="tablist" aria-label="File view mode">
             <button
               type="button"
+              role="tab"
               class:active={viewMode === 'preview'}
-              aria-pressed={viewMode === 'preview'}
+              aria-selected={viewMode === 'preview'}
+              tabindex={viewMode === 'preview' ? 0 : -1}
               onkeydown={onTabKey}
               onclick={() => (viewMode = 'preview')}
             >
@@ -334,8 +369,10 @@
             {#if previewKind !== 'image'}
               <button
                 type="button"
+                role="tab"
                 class:active={viewMode === 'source'}
-                aria-pressed={viewMode === 'source'}
+                aria-selected={viewMode === 'source'}
+                tabindex={viewMode === 'source' ? 0 : -1}
                 onkeydown={onTabKey}
                 onclick={() => (viewMode = 'source')}
               >

@@ -6,6 +6,7 @@
   // a native <select> instead.
   import { tick } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import type { K8sNamespace } from '../../lib/api/types';
 
@@ -77,9 +78,9 @@
     pos = { top, left, width, maxH };
   }
 
-  async function show(): Promise<void> {
+  async function show(resetQuery = true): Promise<void> {
     if (disabled) return;
-    query = '';
+    if (resetQuery) query = '';
     active = 0;
     open = true;
     await tick();
@@ -90,6 +91,25 @@
     open = false;
     query = '';
     if (v !== value) onchange(v);
+  }
+
+  async function onPhoneSelect(e: Event): Promise<void> {
+    const sel = e.currentTarget as HTMLSelectElement;
+    if (sel.value === '__custom') {
+      // Restore the visible selection while the prompt is open.
+      sel.value = value;
+      const typed = await confirmer.promptText('Enter a namespace name (lowercase DNS label).', {
+        title: 'Use namespace',
+        confirmLabel: 'Use',
+        initial: value,
+        placeholder: 'e.g. default',
+        danger: false,
+      });
+      const norm = typed?.trim().toLowerCase() ?? '';
+      if (norm && norm !== value) onchange(norm);
+      return;
+    }
+    onchange(sel.value);
   }
 
   function onKey(e: KeyboardEvent): void {
@@ -125,7 +145,7 @@
 
   function onInput(): void {
     active = 0;
-    if (!open) void show();
+    if (!open) void show(false);
   }
 
   // Close on outside pointerdown + keep placed on resize/scroll.
@@ -161,13 +181,15 @@
     aria-label="Namespace"
     {disabled}
     value={value}
-    onchange={(e) => onchange((e.currentTarget as HTMLSelectElement).value)}
+    onchange={(e) => void onPhoneSelect(e)}
     data-testid="k8s-ns-picker"
   >
     {#if allowAll}<option value="">All namespaces</option>{/if}
     {#each namespaces as n (n.name)}<option value={n.name}>{n.name}</option>{/each}
     {#if value && !namespaces.some((n) => n.name === value)}<option value={value}>{value}</option>{/if}
-    {#if limited}<option disabled value="__partial">Only namespaces you’ve used are listed</option>{/if}
+    {#if limited}
+      <option value="__custom">Other namespace…</option>
+    {/if}
   </select>
 {:else}
   <div class="ns" class:has-error={limited} data-testid="k8s-ns-picker">

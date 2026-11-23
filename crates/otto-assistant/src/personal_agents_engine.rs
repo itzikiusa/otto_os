@@ -706,7 +706,8 @@ pub async fn run_agent<C: AssistantCtx>(
             // schedule stays due and re-fires every 60 s tick for as long as
             // the error persists.
             if !matches!(&e, Error::Conflict(_)) {
-                advance_cursor(ctx, schedule, trigger, Utc::now()).await;
+                let served = schedule.map_or_else(Utc::now, |s| served_for(s, Utc::now()));
+                advance_cursor(ctx, schedule, trigger, served).await;
             }
             return Err(e);
         }
@@ -1050,6 +1051,10 @@ async fn complete_agent_run<C: AssistantCtx>(
 ) -> Result<String> {
     let repo = repo(ctx);
     let run_id = run_id.to_string();
+    // Occurrence this run is serving, captured before work starts so a slow
+    // run does not drift future fires forward or swallow an occurrence that
+    // became due while it ran. Manual/unscheduled runs fall back to Utc::now().
+    let served = schedule.map_or_else(Utc::now, |s| served_for(s, Utc::now()));
     // A routine with its own destination delivers there.
     let destination = schedule
         .and_then(|s| s.delivery.clone())
@@ -1104,7 +1109,7 @@ async fn complete_agent_run<C: AssistantCtx>(
             },
         )
         .await;
-        advance_cursor(ctx, schedule, trigger, Utc::now()).await;
+        advance_cursor(ctx, schedule, trigger, served).await;
         prune(ctx, &agent.id).await;
         emit(
             ctx,
@@ -1182,9 +1187,10 @@ async fn complete_agent_run<C: AssistantCtx>(
                 },
             )
             .await;
-            // The run happened — advance even when settling its row failed
-            // (S4-25c), so the schedule doesn't re-fire every tick.
-            advance_cursor(ctx, schedule, trigger, now).await;
+            // The run happened — advance from the scheduled fire time even when
+            // settling its row failed (S4-25c), so the schedule doesn't re-fire
+            // every tick or drift forward on slow runs.
+            advance_cursor(ctx, schedule, trigger, served).await;
             prune(ctx, &agent.id).await;
             emit(ctx, agent, &run_id, status);
             agent_notice(ctx, agent, report_error.as_deref(), derr.as_deref()).await;
@@ -1204,7 +1210,7 @@ async fn complete_agent_run<C: AssistantCtx>(
                 },
             )
             .await;
-            advance_cursor(ctx, schedule, trigger, Utc::now()).await;
+            advance_cursor(ctx, schedule, trigger, served).await;
             // Failed runs count against the history cap too (an always-failing
             // agent used to grow its run list without bound).
             prune(ctx, &agent.id).await;
@@ -1279,20 +1285,46 @@ async fn record_finish(repo: &PersonalAgentsRepo, run_id: &str, f: FinishAgentRu
     }
 }
 
+fn parse_schedule_ts(s: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
+}
+
+/// Occurrence this run is serving, captured from the schedule cursor before
+/// work begins so slow runs do not drift future fires forward (mirrors
+/// `scheduled_tasks_engine::served_for`). Falls back to `now` when the
+/// schedule has no due occurrence (e.g. manual/unscheduled invocation).
+fn served_for(schedule: &PersonalAgentSchedule, now: DateTime<Utc>) -> DateTime<Utc> {
+    let cursor = otto_core::cadence::effective_cursor(
+        &schedule.schedule,
+        schedule.last_run_at.as_deref().and_then(parse_schedule_ts),
+        schedule.armed_at.as_deref().and_then(parse_schedule_ts),
+    );
+    otto_core::cadence::served_occurrence(
+        &schedule.schedule,
+        cursor,
+        parse_schedule_ts(&schedule.created_at),
+        now,
+        otto_core::cadence::task_tz(&schedule.timezone),
+    )
+}
+
 /// Advance the fired schedule's cursor on completion — only for scheduled
-/// triggers, and only that schedule's (per-schedule cursor).
+/// triggers, and only that schedule's (per-schedule cursor), anchored to
+/// `served` (the scheduled occurrence time) rather than completion time.
 async fn advance_cursor<C: AssistantCtx>(
     ctx: &C,
     schedule: Option<&PersonalAgentSchedule>,
     trigger: &str,
-    now: DateTime<Utc>,
+    served: DateTime<Utc>,
 ) {
     if trigger != "schedule" {
         return;
     }
     let Some(s) = schedule else { return };
-    let next = C::cadence_next_run(&s.schedule, now, &s.timezone).map(|d| d.to_rfc3339());
-    settle_cursor_with_retry(&repo(ctx), s, &now.to_rfc3339(), next.as_deref()).await;
+    let next = C::cadence_next_run(&s.schedule, served, &s.timezone).map(|d| d.to_rfc3339());
+    settle_cursor_with_retry(&repo(ctx), s, &served.to_rfc3339(), next.as_deref()).await;
 }
 
 /// [`advance_cursor`]'s write: settle the captured occurrence, retrying a
@@ -1877,6 +1909,56 @@ mod tests {
         let delegated = serde_json::json!({"personal_agent": "a1", "delegated_by_agent": "lead"});
         assert!(!is_run_thread(Some(&delegated), "run-1"));
         assert!(!is_run_thread(None, "run-1"));
+    }
+
+    /// S-12: slow runs advance the schedule cursor from `served_for` (the
+    /// scheduled occurrence captured at launch) rather than completion time,
+    /// so intervals don't drift forward and cron occurrences aren't swallowed.
+    #[test]
+    fn served_for_anchors_schedule_cursor_without_drift() {
+        let utc = |h, m, s| chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 10, 5, h, m, s).unwrap();
+        let mut sched = PersonalAgentSchedule {
+            schedule_generation: 0,
+            admission_generation: 0,
+            id: "s1".into(),
+            agent_id: "a1".into(),
+            schedule: serde_json::json!({"cadence": "interval", "every_min": 15}),
+            timezone: "UTC".into(),
+            directive: "check".into(),
+            enabled: true,
+            last_run_at: Some(utc(9, 0, 0).to_rfc3339()),
+            next_run_at: Some(utc(9, 15, 0).to_rfc3339()),
+            armed_at: None,
+            permission: "directed".into(),
+            delivery: None,
+            created_at: utc(8, 0, 0).to_rfc3339(),
+            updated_at: utc(8, 0, 0).to_rfc3339(),
+        };
+
+        // Fired 5s past 09:15; even if the run finishes at 09:27, the served
+        // occurrence captured at launch is 09:15:00 so next_run stays 09:30:00.
+        let started_at = utc(9, 15, 5);
+        let served = served_for(&sched, started_at);
+        assert_eq!(served, utc(9, 15, 0));
+        let next = otto_core::cadence::next_run(&sched.schedule, served, chrono_tz::UTC);
+        assert_eq!(next, Some(utc(9, 30, 0)));
+
+        // Cron `*/5`: started at 09:05:02, finishes at 09:12:00. Capturing
+        // `served_for` at start keeps 09:10:00 due instead of swallowing it.
+        sched.schedule = serde_json::json!({"cadence": "cron", "expr": "*/5 * * * *"});
+        let cron_served = served_for(&sched, utc(9, 5, 2));
+        assert_eq!(cron_served, utc(9, 5, 0));
+        assert!(otto_core::cadence::is_due_since(
+            &sched.schedule,
+            Some(cron_served),
+            None,
+            utc(9, 12, 0),
+            chrono_tz::UTC,
+        ));
+
+        // Manual / not-yet-due invocation falls back to `now`.
+        let early = utc(9, 2, 0);
+        assert_eq!(served_for(&sched, early), early);
     }
 }
 

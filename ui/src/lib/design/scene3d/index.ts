@@ -11,6 +11,10 @@ export { exportSceneToGlb, exportObjectToGlb, exportObjectToUsdz, glbFileName } 
 export * from './presets';
 export * from './tokens';
 export * from './states';
+export * from './pin3d';
+export * from './meshInspector';
+export * from './polygonTools';
+export * from './rigPlayer';
 export { default as Scene3DViewport } from './Scene3DViewport.svelte';
 export { default as Hierarchy } from './Hierarchy.svelte';
 export { default as Inspector } from './Inspector.svelte';

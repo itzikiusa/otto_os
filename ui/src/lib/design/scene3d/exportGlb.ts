@@ -107,7 +107,7 @@ export async function exportSceneToGlb(
 }
 
 /** Suggested download filename for a scene export. */
-export function glbFileName(title: string | undefined, ext: 'glb' | 'usdz' | 'png' = 'glb'): string {
+export function glbFileName(title: string | undefined, ext: 'glb' | 'gltf' | 'obj' | 'usdz' | 'png' = 'glb'): string {
   const base = (title ?? 'scene').replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'scene';
   return `${base}.${ext}`;
 }

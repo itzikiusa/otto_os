@@ -219,9 +219,13 @@ impl ProjectsRepo {
         input.validate()?;
         let id = new_id();
         let now = fmt(Utc::now());
+        let references_json = serde_json::to_string(&input.references)
+            .map_err(|e| Error::Internal(format!("encode project references: {e}")))?;
+        let artifacts_json = serde_json::to_string(&input.artifacts)
+            .map_err(|e| Error::Internal(format!("encode project artifacts: {e}")))?;
         sqlx::query("INSERT INTO swarm_projects (id, workspace_id, swarm_id, name, description, repo_path, goal_md, instructions_md, references_json, memory_md, decisions_md, artifacts_json, status, created_by, created_at, updated_at) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .bind(&id).bind(workspace_id).bind(input.name.trim()).bind(input.description).bind(input.repo_path).bind(input.goal_md).bind(input.instructions_md)
-            .bind(serde_json::to_string(&input.references).unwrap()).bind(input.memory_md).bind(input.decisions_md).bind(serde_json::to_string(&input.artifacts).unwrap())
+            .bind(references_json).bind(input.memory_md).bind(input.decisions_md).bind(artifacts_json)
             .bind(if input.status.is_empty() { active() } else { input.status }).bind(user_id).bind(&now).bind(&now)
             .execute(&self.pool).await.map_err(dberr("create project"))?;
         self.get(&id).await
@@ -233,9 +237,13 @@ impl ProjectsRepo {
         expected_version: i64,
     ) -> Result<Project> {
         input.validate()?;
+        let references_json = serde_json::to_string(&input.references)
+            .map_err(|e| Error::Internal(format!("encode project references: {e}")))?;
+        let artifacts_json = serde_json::to_string(&input.artifacts)
+            .map_err(|e| Error::Internal(format!("encode project artifacts: {e}")))?;
         let result = sqlx::query("UPDATE swarm_projects SET name=?, description=?, repo_path=?, goal_md=?, instructions_md=?, references_json=?, memory_md=?, decisions_md=?, artifacts_json=?, status=?, context_version=context_version+1, updated_at=? WHERE id=? AND context_version=?")
             .bind(input.name.trim()).bind(input.description).bind(input.repo_path).bind(input.goal_md).bind(input.instructions_md)
-            .bind(serde_json::to_string(&input.references).unwrap()).bind(input.memory_md).bind(input.decisions_md).bind(serde_json::to_string(&input.artifacts).unwrap())
+            .bind(references_json).bind(input.memory_md).bind(input.decisions_md).bind(artifacts_json)
             .bind(if input.status.is_empty() { active() } else { input.status }).bind(fmt(Utc::now())).bind(id).bind(expected_version)
             .execute(&self.pool).await.map_err(dberr("update project"))?;
         if result.rows_affected() == 0 {

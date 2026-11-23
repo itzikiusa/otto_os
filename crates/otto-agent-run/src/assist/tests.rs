@@ -452,3 +452,32 @@ async fn a_failed_load_never_starts_the_turn() {
     assert_eq!(runner.calls.load(Ordering::SeqCst), 0);
     assert_eq!(doc.applied.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn stop_cancels_hanging_turn_and_kills_session_instead_of_locking_claim() {
+    let slots = slots();
+    let doc = FakeDoc::new("doc");
+    let runner = FakeRunner::new(&doc, Script::Hang);
+    let claim = slots.claim("doc").unwrap();
+    let stopper = tokio::spawn({
+        let previews = Arc::clone(&doc.live);
+        async move {
+            previews.wait_first().await;
+            assert!(slots.stop("doc"));
+        }
+    });
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(2),
+        run_assist_job(&runner, &doc, &claim),
+    )
+    .await
+    .expect("stop must unwind a hanging turn promptly");
+    stopper.await.unwrap();
+    assert!(
+        matches!(&outcome, AssistOutcome::Stopped { session: Some(s) } if s == "sid-1"),
+        "{outcome:?}"
+    );
+    assert_eq!(*runner.killed.lock().unwrap(), ["sid-1"]);
+    assert_eq!(doc.applied.load(Ordering::SeqCst), 0);
+    assert_eq!(doc.states(), ["running", "stopped"]);
+}

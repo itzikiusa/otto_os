@@ -60,8 +60,9 @@ const SEND_ATTEMPTS: u32 = 3;
 /// collector to write its last partial batch before it is stopped.
 const DRAIN_WAIT: Duration = Duration::from_secs(11);
 const DRAIN_DEADLINE: Duration = Duration::from_secs(25);
-/// Canceled futures still account for drained spans. An unacknowledged request
-/// may have reached the collector, so this is not a claim of end-to-end loss.
+/// Canceled futures still account for drained records. An unacknowledged
+/// request may have reached the collector, so this is not a claim of
+/// end-to-end loss.
 struct PendingExport<'a> {
     discarded: &'a AtomicU64,
     count: u64,
@@ -71,6 +72,21 @@ impl Drop for PendingExport<'_> {
     fn drop(&mut self) {
         if !self.accepted {
             self.discarded.fetch_add(self.count, Ordering::Relaxed);
+        }
+    }
+}
+/// Spans drained from the queue for one OTLP export. On drop — whether from a
+/// send error or a config-change cancellation in `run()` — unacknowledged spans
+/// are requeued via [`TelemetryService::requeue`] (which preserves them while
+/// enabled, and discards + counts them on opt-out/shutdown).
+struct PendingSpans<'a> {
+    service: &'a TelemetryService,
+    spans: Vec<SpanRecord>,
+}
+impl Drop for PendingSpans<'_> {
+    fn drop(&mut self) {
+        if !self.spans.is_empty() {
+            self.service.requeue(std::mem::take(&mut self.spans));
         }
     }
 }
@@ -1027,25 +1043,18 @@ impl TelemetryService {
             if spans.is_empty() {
                 break;
             }
-            let mut pending = PendingExport {
-                discarded: &self.dropped,
-                count: spans.len() as u64,
-                accepted: false,
+            let mut pending = PendingSpans {
+                service: self,
+                spans,
             };
-            if let Err(error) = self
-                .send_retry(endpoint, "traces", otlp::traces(&spans))
-                .await
-            {
-                self.requeue(spans);
-                pending.accepted = true;
-                return Err(error);
-            }
-            *accepted += spans.len() as u64;
-            pending.accepted = true;
-            if spans.iter().any(|s| s.status == "error") {
+            self.send_retry(endpoint, "traces", otlp::traces(&pending.spans))
+                .await?;
+            let delivered = std::mem::take(&mut pending.spans);
+            *accepted += delivered.len() as u64;
+            if delivered.iter().any(|s| s.status == "error") {
                 // The spans are delivered; a lost error-log copy is not retried.
                 let _ = self
-                    .send_retry(endpoint, "logs", otlp::errors(&spans))
+                    .send_retry(endpoint, "logs", otlp::errors(&delivered))
                     .await;
             }
         }
@@ -1240,5 +1249,67 @@ impl SpanSink for TelemetryService {
     }
     fn record(&self, span: SpanRecord) {
         TelemetryService::record(self, span);
+    }
+}
+
+#[cfg(test)]
+mod s17_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pending_spans_requeue_on_config_change_cancel_and_drop_on_opt_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let usage = UsageEngine::start(
+            otto_usage::UsageConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            dir.path().join("usage"),
+        )
+        .await;
+        let svc =
+            TelemetryService::start(usage, dir.path().to_path_buf(), TelemetryConfig::default())
+                .await;
+        svc.enable_ingestion_for_tests();
+
+        let s1 = SpanRecord::new("op.one", "daemon", 10.0);
+        let s2 = SpanRecord::new("op.two", "daemon", 20.0);
+        assert!(svc.record(s1.clone()));
+        assert!(svc.record(s2.clone()));
+
+        // Drain like `export()` does, then drop `PendingSpans` without
+        // acknowledging (simulating `tokio::select!` config-change cancel).
+        {
+            let drained: Vec<_> = svc.queue.lock().unwrap().drain(..).collect();
+            assert_eq!(drained.len(), 2);
+            let _pending = PendingSpans {
+                service: &svc,
+                spans: drained,
+            };
+        }
+        let requeued = svc.queued_spans_for_tests();
+        assert_eq!(
+            requeued.len(),
+            2,
+            "in-flight spans must be preserved on cancel"
+        );
+        assert_eq!(requeued[0].name, "op.one");
+        assert_eq!(requeued[1].name, "op.two");
+        assert_eq!(svc.status().dropped, 0);
+
+        // When telemetry is disabled (opt-out), dropping `PendingSpans` drops
+        // and accounts for them instead of refilling the queue.
+        let drained: Vec<_> = svc.queue.lock().unwrap().drain(..).collect();
+        svc.enabled.store(false, Ordering::SeqCst);
+        {
+            let _pending = PendingSpans {
+                service: &svc,
+                spans: drained,
+            };
+        }
+        assert!(svc.queued_spans_for_tests().is_empty());
+        assert_eq!(svc.status().dropped, 2);
+
+        svc.shutdown().await;
     }
 }

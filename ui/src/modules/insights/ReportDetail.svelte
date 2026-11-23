@@ -21,8 +21,12 @@
 
 <script lang="ts">
   import { announce } from '../../lib/announce.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { plural } from '../../lib/plural';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { router } from '../../lib/router.svelte';
+  import { buildAutomationDraft, stageAutomationDraft } from './actionHandoff';
   // The right-hand pane of Insights → Reports: one report, rendered.
   //
   //   header   — period chip · date · generated-at, the one-line headline, and
@@ -105,33 +109,42 @@
   let htmlFor = $state<string | null>(null);
   let htmlError = $state<string | null>(null);
   let htmlLoading = $state(false);
+  let htmlLoadingFor = $state<string | null>(null);
+  let htmlSeq = 0;
   /** The path whose last load FAILED: the auto-load skips it (a missing or
    *  mid-write file used to re-fire the GET back to back forever, flickering
    *  skeleton ↔ error); Retry clears it. */
   let htmlFailedFor = $state<string | null>(null);
 
   async function loadHtml(path: string): Promise<void> {
+    const seq = ++htmlSeq;
     htmlLoading = true;
+    htmlLoadingFor = path;
     htmlError = null;
     htmlFailedFor = null;
     try {
       const text = await insightsApi.readText(path);
-      if (report.html_path === path) {
+      if (seq === htmlSeq && report.html_path === path) {
         html = text;
         htmlFor = path;
       }
     } catch (e) {
-      if (report.html_path === path) {
-        htmlError = e instanceof Error ? e.message : String(e);
+      if (seq === htmlSeq && report.html_path === path) {
+        htmlError = loadErrorText(e);
         htmlFailedFor = path;
       }
     } finally {
-      htmlLoading = false;
+      if (seq === htmlSeq) {
+        htmlLoading = false;
+        htmlLoadingFor = null;
+      }
     }
   }
   $effect(() => {
     const p = report.html_path;
-    if (effectiveMode === 'html' && p && htmlFor !== p && htmlFailedFor !== p && !htmlLoading) void loadHtml(p);
+    if (effectiveMode === 'html' && p && htmlFor !== p && htmlFailedFor !== p && htmlLoadingFor !== p) {
+      void loadHtml(p);
+    }
   });
 
   // ---- Display helpers ------------------------------------------------------
@@ -203,6 +216,26 @@
     if (!m) return k;
     return `${kindLabel(m[1])} ${dateLabel(`${m[2]}-${m[3]}-${m[4]}`)}`;
   }
+  function automateMenu(e: MouseEvent, a: ActionItem): void {
+    ctxMenu.showAt(e.currentTarget as HTMLElement, [
+      {
+        label: 'Turn into Goal Loop…',
+        icon: 'refresh',
+        action: () => {
+          stageAutomationDraft(buildAutomationDraft('goal_loop', a, periodText));
+          router.go('loops');
+        },
+      },
+      {
+        label: 'Schedule Task…',
+        icon: 'calendar',
+        action: () => {
+          stageAutomationDraft(buildAutomationDraft('scheduled_task', a, periodText));
+          router.go('scheduled-tasks');
+        },
+      },
+    ]);
+  }
   // Spoken at the state edge through the shell's always-mounted announcer: a
   // live region inserted together with its text is not read (WebKit/VoiceOver).
   $effect(() => { if (htmlError) announce(`Couldn’t load the HTML report. ${htmlError}`, { assertive: true }); });
@@ -245,18 +278,17 @@
 
   {#if effectiveMode === 'html'}
     <div class="r-html">
-      {#if htmlError}
-        <div class="r-error">
-          <Icon name="warning" size={14} />
-          <div>
-            <strong>Couldn’t load the HTML report.</strong>
-            <span class="dim">The file may still be being written. Retry, or use Preview.</span>
-            <span class="dim mono err-detail">{htmlError}</span>
-          </div>
-          <button class="btn small" onclick={() => report.html_path && loadHtml(report.html_path)}>Retry</button>
+      {#if (htmlError && htmlFailedFor === report.html_path) || html == null || htmlFor !== report.html_path || htmlLoading}
+        <div class="r-loading">
+          <LoadState
+            what="the HTML report"
+            loading={htmlLoading || (htmlFor !== report.html_path && !htmlError)}
+            error={htmlFailedFor === report.html_path ? htmlError : null}
+            empty
+            rows={6}
+            onretry={() => report.html_path && void loadHtml(report.html_path)}
+          />
         </div>
-      {:else if html == null || htmlLoading}
-        <div class="r-loading"><Skeleton rows={6} height={28} label="the HTML report" /></div>
       {:else}
         <!-- Sandboxed: scripts run (charts), but never same-origin and never
              a popup — links go through the bridge to the system browser. -->
@@ -328,6 +360,16 @@
                       {#if a.effort}
                         <Badge title="Effort: {a.effort === 'S' ? 'small' : a.effort === 'M' ? 'medium' : 'large'}" label="Effort {a.effort}" />
                       {/if}
+                      <button
+                        type="button"
+                        class="btn small ghost"
+                        aria-haspopup="menu"
+                        title="Turn this action into a Goal Loop or Scheduled Task"
+                        data-testid="insight-action-automate"
+                        onclick={(e) => automateMenu(e, a)}
+                      >
+                        <Icon name="zap" size={12} /> Automate…
+                      </button>
                     </span>
                   </div>
                   {#if a.metric || a.current}
@@ -714,31 +756,6 @@
   .r-loading {
     padding: 20px;
     margin: 0;
-  }
-  .r-error {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    margin: 16px 20px;
-    padding: 12px 14px;
-    border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
-    border-radius: var(--radius-m);
-    background: var(--surface);
-  }
-  .r-error > :global(svg) {
-    color: var(--danger);
-    margin-top: 2px;
-  }
-  .r-error > div {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
-  }
-  .err-detail {
-    font-size: var(--fs-xs);
-    overflow-wrap: anywhere;
   }
   .sr-only {
     position: absolute;

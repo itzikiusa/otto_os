@@ -52,6 +52,7 @@ export function buildConversationMenuItems(opts: {
   onToggleSystem: () => void;
   onToggleExpandAll: () => void;
   onOpenAllChanges: () => void;
+  onCopyMarkdown?: () => void;
   onPrevPrompt: () => void;
   onNextPrompt: () => void;
   onJumpLatest: () => void;
@@ -77,6 +78,9 @@ export function buildConversationMenuItems(opts: {
     },
     ...(opts.hasChanges
       ? [{ label: 'All changes', icon: 'split' as const, action: opts.onOpenAllChanges }]
+      : []),
+    ...(opts.onCopyMarkdown
+      ? [{ label: 'Copy transcript (Markdown)', icon: 'copy' as const, action: opts.onCopyMarkdown }]
       : []),
     { separator: true },
     { label: 'Previous message of yours', icon: 'chevronUp', hint: '⌥↑', action: opts.onPrevPrompt },

@@ -17,9 +17,13 @@ mod completion;
 pub mod ide_watch;
 mod metadata;
 mod multirun;
+mod persistence;
 pub mod process_list;
 mod read_only_guard;
 mod validation;
+
+#[cfg(test)]
+use persistence::{ensure_widget_statement, widget_request};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,10 +35,7 @@ use crate::resource_cache::{Lifecycle, ResourceCache};
 use otto_core::domain::Connection;
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id, Result};
-use otto_state::{
-    ConnectionsRepo, Dashboard, DbExplorerRepo, HistoryEntry, NewSavedQuery, NewWidget, SavedQuery,
-    Widget,
-};
+use otto_state::{ConnectionsRepo, DbExplorerRepo};
 use serde_json::Value;
 
 use crate::config::{self};
@@ -948,7 +949,7 @@ impl DbViewerService {
         // Production writes must use the independent reviewed-change adapter.
         // Neither root nor confirm_write can turn an approval into an access grant.
         if conn.environment == otto_core::domain::Environment::Prod
-            && operations.iter().any(|op| *op != "db_query")
+            && !crate::access::only_reads(&operations)
         {
             return Err(Error::Forbidden(format!(
                 "review_required: on production connection '{}', changes require an approved \
@@ -1102,6 +1103,64 @@ impl DbViewerService {
             // Early actionable error; the driver also checks each statement.
             self.require_local_path_access(conn_id, user_id).await?;
         }
+        Ok(())
+    }
+
+    /// Carry the caller's host-execution permission into MongoDB's `mongosh`
+    /// fallback. `mongosh` embeds a full Node.js runtime on the Otto daemon
+    /// host, so only a signed-in human root user (never an agent credential or
+    /// detached task outside a person request) may invoke it; saved params can
+    /// never supply `__mongosh_authorized`.
+    async fn prepare_mongosh_access(
+        &self,
+        user_id: &Id,
+        statement: &str,
+        config: &mut ResolvedConfig,
+    ) -> Result<()> {
+        if let Some(params) = config.params.as_object_mut() {
+            params.remove("__mongosh_authorized");
+        }
+        if config.engine != Engine::Mongodb || !crate::drivers::mongodb::requires_mongosh(statement)
+        {
+            return Ok(());
+        }
+        crate::access::count_read();
+        let user = otto_state::UsersRepo::new(self.connections.pool())
+            .get(user_id)
+            .await?;
+        if !otto_core::auth::root_authority(&user) {
+            return Err(if user.is_root {
+                otto_core::auth::root_refusal()
+            } else {
+                Error::Forbidden(
+                    "mongosh script execution runs local JavaScript on the Otto daemon host and \
+                     requires the root account"
+                        .into(),
+                )
+            });
+        }
+        if !otto_core::auth::request_is_person() {
+            return Err(Error::Forbidden(
+                "mongosh script execution runs local JavaScript on the Otto daemon host and \
+                 requires a person signed in to Otto"
+                    .into(),
+            ));
+        }
+        if user.disabled {
+            return Err(Error::Forbidden(
+                "mongosh script execution runs local JavaScript on the Otto daemon host and \
+                 requires an active root account"
+                    .into(),
+            ));
+        }
+        if !config.params.is_object() {
+            config.params = serde_json::json!({});
+        }
+        config
+            .params
+            .as_object_mut()
+            .unwrap()
+            .insert("__mongosh_authorized".into(), Value::Bool(true));
         Ok(())
     }
 
@@ -2530,7 +2589,7 @@ impl DbViewerService {
         let svc = self.clone();
         let (cid, uid, req_owned) = (conn_id.clone(), user_id.clone(), req.clone());
         let abort_key = qid.clone();
-        let task = tokio::spawn(async move {
+        let task = tokio::spawn(otto_core::auth::carry_request_credential(async move {
             let _guard = guard;
             let result = svc
                 .execute_recorded(r, &cid, &uid, &req_owned, &token, record, pre)
@@ -2544,7 +2603,7 @@ impl DbViewerService {
             }
             // `_guard` drops here — AFTER parking — so `query_status` never
             // reports "unknown" in the gap between running and parked.
-        });
+        }));
         // Let a cancel abort the task. If it already finished, its guard removed
         // the entry and there is nothing to attach to.
         if let Ok(mut map) = self.in_flight.lock() {
@@ -2589,6 +2648,8 @@ impl DbViewerService {
             }
         }
         self.prepare_local_infile(conn_id, user_id, &req.statement, &mut r.config)
+            .await?;
+        self.prepare_mongosh_access(user_id, &req.statement, &mut r.config)
             .await?;
         let execution = otto_telemetry::context::measure_result(
             "db.driver.execute",
@@ -3671,231 +3732,6 @@ impl DbViewerService {
         };
         Ok(CancelOutcome { status })
     }
-
-    // -- Persistence pass-throughs (saved queries / history / dashboards) ----
-
-    /// All saved queries for a workspace — root / ws-Admin view.
-    pub async fn list_saved(&self, ws: &Id) -> Result<Vec<SavedQuery>> {
-        self.repo.list_saved(ws).await
-    }
-    /// Saved queries for a workspace scoped to a single user — non-admin view.
-    pub async fn list_saved_for_user(&self, ws: &Id, user_id: &Id) -> Result<Vec<SavedQuery>> {
-        let mut visible = Vec::new();
-        for query in self.repo.list_saved_for_user(ws, user_id).await? {
-            if let Some(conn) = &query.connection_id {
-                if self
-                    .authorize(conn, user_id, None, "db_query")
-                    .await
-                    .is_err()
-                {
-                    continue;
-                }
-            }
-            visible.push(query);
-        }
-        Ok(visible)
-    }
-    pub async fn create_saved(&self, q: NewSavedQuery) -> Result<SavedQuery> {
-        if let Some(conn) = &q.connection_id {
-            self.authorize(conn, &q.created_by, None, "db_query")
-                .await?;
-        }
-        self.repo.create_saved(q).await
-    }
-    pub async fn get_saved(&self, id: &Id) -> Result<SavedQuery> {
-        self.repo.get_saved(id).await
-    }
-    pub async fn update_saved(
-        &self,
-        id: &Id,
-        name: Option<&str>,
-        statement: Option<&str>,
-    ) -> Result<SavedQuery> {
-        self.repo.update_saved(id, name, statement).await
-    }
-    pub async fn delete_saved(&self, id: &Id) -> Result<()> {
-        self.repo.delete_saved(id).await
-    }
-    /// All history for a connection — root / ws-Admin view.
-    pub async fn list_history(&self, conn_id: &Id, limit: i64) -> Result<Vec<HistoryEntry>> {
-        self.repo.list_history(conn_id, limit).await
-    }
-    /// One history row with its full statement, scoped like the list: it must
-    /// belong to `conn_id`, and a non-root caller may only read their own rows.
-    pub async fn get_history(
-        &self,
-        conn_id: &Id,
-        user_id: &Id,
-        entry_id: &Id,
-        is_root: bool,
-    ) -> Result<HistoryEntry> {
-        self.authorize(conn_id, user_id, None, "db_query").await?;
-        let entry = self.repo.get_history(entry_id).await?;
-        let visible =
-            &entry.connection_id == conn_id && (is_root || entry.user_id.as_ref() == Some(user_id));
-        if !visible {
-            return Err(Error::NotFound(format!("history entry {entry_id}")));
-        }
-        Ok(entry)
-    }
-    /// History for a connection scoped to a single user — non-admin view.
-    pub async fn list_history_for_user(
-        &self,
-        conn_id: &Id,
-        user_id: &Id,
-        limit: i64,
-    ) -> Result<Vec<HistoryEntry>> {
-        self.authorize(conn_id, user_id, None, "db_query").await?;
-        self.repo
-            .list_history_for_user(conn_id, user_id, limit)
-            .await
-    }
-
-    /// All dashboards for a workspace — root / ws-Admin view.
-    pub async fn list_dashboards(&self, ws: &Id) -> Result<Vec<Dashboard>> {
-        self.repo.list_dashboards(ws).await
-    }
-    /// Dashboards for a workspace scoped to a single user — non-admin view (#L13).
-    pub async fn list_dashboards_for_user(&self, ws: &Id, user_id: &Id) -> Result<Vec<Dashboard>> {
-        self.repo.list_dashboards_for_user(ws, user_id).await
-    }
-    pub async fn get_dashboard(&self, id: &Id) -> Result<Dashboard> {
-        self.repo.get_dashboard(id).await
-    }
-    pub async fn create_dashboard(&self, ws: &Id, name: &str, by: &Id) -> Result<Dashboard> {
-        self.repo.create_dashboard(ws, name, by).await
-    }
-    pub async fn update_dashboard(
-        &self,
-        id: &Id,
-        name: Option<&str>,
-        layout: Option<&Value>,
-        refresh_secs: Option<Option<i64>>,
-    ) -> Result<Dashboard> {
-        self.repo
-            .update_dashboard(id, name, layout, refresh_secs)
-            .await
-    }
-    pub async fn delete_dashboard(&self, id: &Id) -> Result<()> {
-        self.repo.delete_dashboard(id).await
-    }
-
-    /// All widgets for a workspace — root / ws-Admin view.
-    pub async fn list_widgets(&self, ws: &Id) -> Result<Vec<Widget>> {
-        self.repo.list_widgets(ws).await
-    }
-    /// Widgets for a workspace scoped to a single user — non-admin view (#L13).
-    pub async fn list_widgets_for_user(&self, ws: &Id, user_id: &Id) -> Result<Vec<Widget>> {
-        let mut visible = Vec::new();
-        for widget in self.repo.list_widgets_for_user(ws, user_id).await? {
-            if self
-                .authorize(&widget.connection_id, user_id, None, "db_query")
-                .await
-                .is_ok()
-            {
-                visible.push(widget);
-            }
-        }
-        Ok(visible)
-    }
-    pub async fn get_widget(&self, id: &Id) -> Result<Widget> {
-        self.repo.get_widget(id).await
-    }
-    pub async fn create_widget(&self, w: NewWidget) -> Result<Widget> {
-        self.authorize(&w.connection_id, &w.created_by, None, "db_query")
-            .await?;
-        self.ensure_widget_statement_reads(&w.connection_id, &w.statement)
-            .await?;
-        if let Some(dash) = w.dashboard_id.as_deref() {
-            self.ensure_dashboard_in_workspace(&w.workspace_id, dash)
-                .await?;
-        }
-        self.repo.create_widget(w).await
-    }
-
-    /// A widget may only be filed under a dashboard of its OWN workspace — an
-    /// unknown or foreign id would leave it invisible on every screen (no FK
-    /// guards `db_widgets.dashboard_id`).
-    async fn ensure_dashboard_in_workspace(&self, ws: &Id, dashboard_id: &str) -> Result<()> {
-        match self.repo.dashboard_workspace(dashboard_id).await? {
-            Some(owner) if &owner == ws => Ok(()),
-            _ => Err(Error::Invalid(format!(
-                "dashboard '{dashboard_id}' does not exist in this workspace"
-            ))),
-        }
-    }
-
-    /// Widgets re-run unattended on every refresh, so only a statement the
-    /// read-only classifier accepts may be saved as one (S16-08) — a widget
-    /// holding `UPDATE counters …` would otherwise re-execute the write every
-    /// `refresh_secs`. [`Self::run_widget`] enforces it again at run time
-    /// (with the engine's native read-only mode) for widgets saved earlier.
-    async fn ensure_widget_statement_reads(&self, conn_id: &Id, statement: &str) -> Result<()> {
-        let conn = self.connections.get(conn_id).await?;
-        let Some(engine) = Engine::from_kind(conn.kind) else {
-            return Err(Error::Invalid(format!(
-                "connection '{}' is not a queryable database (kind {:?})",
-                conn.name, conn.kind
-            )));
-        };
-        ensure_widget_statement(engine, statement)
-    }
-    #[allow(clippy::too_many_arguments)]
-    pub async fn update_widget(
-        &self,
-        id: &Id,
-        dashboard_id: Option<Option<&str>>,
-        title: Option<&str>,
-        statement: Option<&str>,
-        viz: Option<&str>,
-        mapping: Option<&Value>,
-        options: Option<&Value>,
-    ) -> Result<Widget> {
-        if statement.is_some() || matches!(dashboard_id, Some(Some(_))) {
-            let widget = self.repo.get_widget(id).await?;
-            if let Some(statement) = statement {
-                self.ensure_widget_statement_reads(&widget.connection_id, statement)
-                    .await?;
-            }
-            if let Some(Some(dash)) = dashboard_id {
-                self.ensure_dashboard_in_workspace(&widget.workspace_id, dash)
-                    .await?;
-            }
-        }
-        self.repo
-            .update_widget(id, dashboard_id, title, statement, viz, mapping, options)
-            .await
-    }
-    pub async fn delete_widget(&self, id: &Id) -> Result<()> {
-        self.repo.delete_widget(id).await
-    }
-
-    /// Run a widget's query for rendering.
-    ///
-    /// `user_id` is threaded through to history recording (since migration 0042).
-    pub async fn run_widget(&self, id: &Id, user_id: &Id) -> Result<QueryResult> {
-        let widget = self.repo.get_widget(id).await?;
-        let req = widget_request(widget.statement);
-        self.run(&widget.connection_id, user_id, &req).await
-    }
-}
-
-/// The request a dashboard widget runs with. An unattended re-run must never
-/// write (S16-08): `read_only` classifies the statement first and then runs it
-/// in the engine's native read-only mode, on ANY connection.
-fn widget_request(statement: String) -> QueryRequest {
-    QueryRequest {
-        statement,
-        max_rows: Some(5000),
-        read_only: true,
-        ..Default::default()
-    }
-}
-
-/// Save-time gate for a widget statement (create / update).
-fn ensure_widget_statement(engine: Engine, statement: &str) -> Result<()> {
-    ensure_read_only_request(engine, statement)
-        .map_err(|e| Error::Invalid(format!("widgets must be read-only queries — {e}")))
 }
 
 /// Render a plan `QueryResult` as compact text for display + drafter feedback.

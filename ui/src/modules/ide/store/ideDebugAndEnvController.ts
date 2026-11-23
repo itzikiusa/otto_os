@@ -8,6 +8,7 @@ import { pollWhileVisible, type Poller } from '../../../lib/poll';
 import { auth } from '../../../lib/stores/auth.svelte';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
+import { getIdeMobileRunTarget } from '../devices/ideDeviceRunTarget';
 import { ideCollabNotices } from './ideCollabNotices.svelte';
 import { debugActionVerb, debugStartErrorFrom, ideDebugLaunch } from './ideDebugLaunch.svelte';
 import {
@@ -152,6 +153,8 @@ export async function fetchToolchains(
   opts: { includeCatalog?: boolean } = {},
 ): Promise<void> {
   if (!host.target.root) return;
+  const key = ideTargetKey(host.target);
+  const stale = (): boolean => ideTargetKey(host.target) !== key;
   host.toolchainsLoading = true;
   host.toolchainsError = null;
   try {
@@ -160,6 +163,7 @@ export async function fetchToolchains(
       target_os: string; target_arch: string; ecosystems: IdeToolchainEcosystem[];
       detected?: IdeDetectedSdk[]; jobs: IdeInstallJob[];
     }>(`/ide/toolchains?${q}`);
+    if (stale()) return;
     if (resp.target_os) host.targetOs = resp.target_os;
     if (resp.target_arch) host.targetArch = resp.target_arch;
     const ecosystems = resp.ecosystems ?? [];
@@ -176,9 +180,9 @@ export async function fetchToolchains(
       const d = rawDetected[i];
       const p = (d.path || d.home_path || '').trim();
       if (!p) continue;
-      const key = `${d.ecosystem}:${p}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
+      const sdkKey = `${d.ecosystem}:${p}`;
+      if (seen.has(sdkKey)) continue;
+      seen.add(sdkKey);
       normalizedDetected.push({
         ...d,
         name: d.name || d.label || `${d.ecosystem.toUpperCase()} ${d.version || ''}`.trim(),
@@ -189,8 +193,8 @@ export async function fetchToolchains(
     host.detectedSdks = normalizedDetected;
     host.installJobs = resp.jobs ?? [];
     onEnsureJobs();
-  } catch (e) { host.toolchainsError = loadErrorText(e); }
-  finally { host.toolchainsLoading = false; }
+  } catch (e) { if (!stale()) host.toolchainsError = loadErrorText(e); }
+  finally { if (!stale()) host.toolchainsLoading = false; }
 }
 
 export async function registerLocalToolchain(
@@ -223,12 +227,15 @@ export async function registerLocalToolchain(
 export async function fetchShellEnv(host: DebugAndEnvHost, reload = false): Promise<IdeShellEnvResp | null> {
   host.shellEnvAttempted = true;
   if (!auth.isRoot) return null;
+  const key = ideTargetKey(host.target);
+  const stale = (): boolean => ideTargetKey(host.target) !== key;
   host.shellEnvLoading = true;
   host.shellEnvError = null;
   try {
     const resp = reload
       ? await api.post<IdeShellEnvResp>('/ide/shell-env/reload', { target: host.targetPayload })
       : await api.get<IdeShellEnvResp>(`/ide/shell-env?${host.targetQuery()}`);
+    if (stale()) return null;
     const normalized: IdeShellEnvResp = {
       ...resp,
       shell: resp.shell || '/bin/zsh',
@@ -239,24 +246,30 @@ export async function fetchShellEnv(host: DebugAndEnvHost, reload = false): Prom
     if (reload) toasts.success('Reloaded shell environment', `${Object.keys(normalized.vars).length} variables`);
     return normalized;
   } catch (e) {
-    host.shellEnvError = loadErrorText(e);
-    if (reload) toastError('Couldn’t reload shell environment', e);
+    if (!stale()) {
+      host.shellEnvError = loadErrorText(e);
+      if (reload) toastError('Couldn’t reload shell environment', e);
+    }
     return null;
   } finally {
-    host.shellEnvLoading = false;
+    if (!stale()) host.shellEnvLoading = false;
   }
 }
 
 export function startJobsPoller(host: DebugAndEnvHost, prev: Poller | null, onDone: () => void): Poller | null {
   if (!host.installJobs.some((j) => j.status === 'running')) { prev?.stop(); return null; }
   if (prev) return prev;
+  const key = host.target ? ideTargetKey(host.target) : null;
+  const stale = (): boolean => key !== null && Boolean(host.target) && ideTargetKey(host.target) !== key;
   const poller = pollWhileVisible(async (signal) => {
+    if (stale()) { poller.stop(); return; }
     const running = host.installJobs.filter((j) => j.status === 'running');
     if (running.length === 0) { poller.stop(); return; }
     let finishedAny = false;
     for (const job of running) {
       try {
         const resp = await api.bg.get<{ job: IdeInstallJob }>(`/ide/toolchains/jobs/${encodeURIComponent(job.id)}`, signal);
+        if (stale()) { poller.stop(); return; }
         host.installJobs = host.installJobs.map((j) => (j.id === resp.job.id ? resp.job : j));
         if (resp.job.status !== 'running') {
           finishedAny = true;
@@ -265,7 +278,7 @@ export function startJobsPoller(host: DebugAndEnvHost, prev: Poller | null, onDo
           }
         }
       } catch (e) {
-        if (signal.aborted) return;
+        if (signal.aborted || stale()) { if (stale()) poller.stop(); return; }
         if (e instanceof ApiError && e.status === 404) {
           const msg = 'Install job is no longer available on the daemon';
           host.installJobs = host.installJobs.map((j) =>
@@ -276,7 +289,7 @@ export function startJobsPoller(host: DebugAndEnvHost, prev: Poller | null, onDo
         }
       }
     }
-    if (finishedAny) onDone();
+    if (finishedAny && !stale()) onDone();
   }, { ms: 1200, immediate: false });
   return poller;
 }
@@ -407,6 +420,8 @@ export async function launchIdeRun(
   prevSseCtl: AbortController | null = null,
 ): Promise<{ poller: Poller | null; sseCtl: AbortController | null }> {
   if (!host.target.root) return { poller: prevPoller, sseCtl: prevSseCtl };
+  const key = ideTargetKey(host.target);
+  const stale = (): boolean => ideTargetKey(host.target) !== key;
   const gutterItem = opts.adhoc || opts.configId ? null : selectedGutterTarget(host);
   if (gutterItem) launchGutterAction(host, gutterItem, 'run', (adhoc) => { opts = { ...opts, adhoc }; }, () => {});
   const plan = toolbarLaunchPlan(host, opts);
@@ -460,8 +475,10 @@ export async function launchIdeRun(
       skip_tests: host.buildSkipTests,
       offline: host.buildOffline,
       coverage: wantCoverage || undefined,
+      ...getIdeMobileRunTarget(),
       ...(opts.confirmProdTargets ? { confirm_prod_targets: true } : {}),
     });
+    if (stale()) { prevPoller?.stop(); prevSseCtl?.abort(); return { poller: null, sseCtl: null }; }
     host.activeRun = resp.run;
     rememberLaunchedConfig(host, rawId);
     host.recordRunLaunch?.(resp.run.id, {
@@ -477,6 +494,7 @@ export async function launchIdeRun(
     let pollerRef: Poller | null = null;
     const stopBoth = (): void => { sseCtl.abort(); pollerRef?.stop(); };
     const applyRunState = (incoming: IdeRunState): void => {
+      if (stale()) { stopBoth(); return; }
       const boundedOutput = incoming.output.length > 2000 ? incoming.output.slice(-2000) : incoming.output;
       const liveRun: IdeRunState = boundedOutput === incoming.output ? incoming : { ...incoming, output: boundedOutput };
       host.activeRun = liveRun;
@@ -487,6 +505,7 @@ export async function launchIdeRun(
       }
     };
     void streamIdeSse(`/ide/runs/${encodeURIComponent(resp.run.id)}/events`, {}, sseCtl.signal, (raw) => {
+      if (stale()) { stopBoth(); return; }
       try {
         const parsed = JSON.parse(raw) as { run?: IdeRunState } & Partial<IdeRunState>;
         const runSnap = (parsed.run ?? parsed) as IdeRunState;
@@ -495,14 +514,16 @@ export async function launchIdeRun(
           applyRunState(runSnap);
         }
       } catch { /* heartbeat */ }
-    }, () => { sseActive = true; }).catch(() => {}).finally(() => { sseActive = false; });
+    }, () => { if (stale()) { stopBoth(); return; } sseActive = true; }).catch(() => {}).finally(() => { sseActive = false; });
     pollerRef = pollWhileVisible(async (signal) => {
+      if (stale()) { stopBoth(); return; }
       if (sseActive && host.activeRun?.status === 'running') return;
       try {
         const r = await api.bg.get<{ run: IdeRunState }>(`/ide/runs/${encodeURIComponent(resp.run.id)}`, signal);
+        if (stale()) { stopBoth(); return; }
         applyRunState(r.run);
       } catch (e) {
-        if (signal.aborted) return;
+        if (signal.aborted || stale()) { if (stale()) stopBoth(); return; }
         if (e instanceof ApiError && e.status === 404) {
           if (host.activeRun && host.activeRun.id === resp.run.id) {
             const evicted: IdeRunState = { ...host.activeRun, status: 'failed' };
@@ -517,6 +538,7 @@ export async function launchIdeRun(
     }, { ms: 750, floorMs: 500, immediate: false });
     return { poller: pollerRef, sseCtl };
   } catch (e) {
+    if (stale()) { prevPoller?.stop(); prevSseCtl?.abort(); return { poller: null, sseCtl: null }; }
     toastError('Couldn’t start run', e);
     return { poller: prevPoller, sseCtl: prevSseCtl };
   }
@@ -604,6 +626,8 @@ export async function launchDebugSession(
   retry?: () => Promise<void>,
 ): Promise<AbortController | null> {
   if (!host.target.root) return prevCtl;
+  const key = ideTargetKey(host.target);
+  const stale = (): boolean => ideTargetKey(host.target) !== key;
   const gutterItem = opts.launch || opts.configId ? null : selectedGutterTarget(host);
   if (gutterItem) launchGutterAction(host, gutterItem, 'debug', () => {}, (o) => { opts = { ...opts, ...o }; });
   ideDebugLaunch.startError = null;
@@ -669,12 +693,14 @@ export async function launchDebugSession(
       break_on_exceptions: Boolean(host.breakOnExceptions),
       ...(opts.confirmProdTargets ? { confirm_prod_targets: true } : {}),
     });
+    if (stale()) { prevCtl?.abort(); return null; }
     host.lastDebugLaunch = { configId: persistedConfigId, language, launch: effectiveLaunch };
     rememberLaunchedConfig(host, rawCfgId);
     host.expandedVariables = {};
     onSnapshot(resp.session);
-    return attachDebugSessionStream(host, resp.session.id, prevCtl, onSnapshot);
+    return attachDebugSessionStream(host, resp.session.id, prevCtl, (snap) => { if (!stale()) onSnapshot(snap); });
   } catch (e) {
+    if (stale()) { prevCtl?.abort(); return null; }
     // No session exists: the debugger panel shows this inline (with the
     // snapshot's own `error` once a session does exist), not as a toast.
     ideDebugLaunch.startError = debugStartErrorFrom(e);
@@ -685,7 +711,7 @@ export async function launchDebugSession(
     }
     return prevCtl;
   } finally {
-    host.debugLoading = false;
+    if (!stale()) host.debugLoading = false;
   }
 }
 

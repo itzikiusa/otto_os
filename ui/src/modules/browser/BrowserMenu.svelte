@@ -11,7 +11,15 @@
   import { nativeBrowserAvailable } from '../../lib/nativeBrowser';
   import { CLEAR_DATA_TEXT, clearBrowsingData } from './clearBrowsingData';
 
-  let { oncredentials }: { oncredentials: () => void } = $props();
+  let {
+    oncredentials,
+    onsimulators,
+    simActive = false,
+  }: {
+    oncredentials: () => void;
+    onsimulators?: () => void;
+    simActive?: boolean;
+  } = $props();
 
   async function clearData(): Promise<void> {
     const ok = await confirmer.ask(CLEAR_DATA_TEXT, {
@@ -33,7 +41,25 @@
   }
 </script>
 
+{#if onsimulators}
+  <button
+    class="icon-btn sim-trigger"
+    class:sim-on={simActive}
+    aria-label="iOS Simulators and Android Emulators"
+    title="iOS Simulators & Android Emulators"
+    onclick={onsimulators}
+  >
+    <Icon name="phone" size={14} />
+  </button>
+{/if}
 <button class="icon-btn" aria-label="Site credentials" title="Site credentials" onclick={oncredentials}><Icon name="key" size={14} /></button>
 {#if nativeBrowserAvailable}
   <button class="icon-btn" data-label="Clear browsing data…" data-icon="trash" aria-label="More browser actions" title="More browser actions" aria-haspopup="menu" onclick={more}><Icon name="more" size={14} /></button>
 {/if}
+
+<style>
+  .sim-trigger.sim-on {
+    background: var(--accent-soft);
+    color: var(--accent-text);
+  }
+</style>

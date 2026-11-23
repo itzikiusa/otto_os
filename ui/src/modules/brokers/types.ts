@@ -31,6 +31,7 @@ export interface ReplayEvidence {
 }
 
 export type { BrokerReplayResp as ReplayResp } from '../../lib/api/types';
+export type { ReplayPrefill } from './messagePrefill';
 
 // ---- Offset-reset dry-run preview -------------------------------------------
 

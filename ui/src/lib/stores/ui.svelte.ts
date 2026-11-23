@@ -11,6 +11,7 @@ import {
   type AutoVerticalPrefs,
 } from '../db-view-prefs';
 import { insertFavorite, loadReconciledSidebarStorage, mergeSavedOrder, persistKnownSidebarModules, reorderAmong } from '../sidebar';
+import { newId } from '../id';
 
 export type ThemeName = 'native' | 'pro-dark' | 'warm';
 export type SchemePref = 'auto' | 'light' | 'dark';
@@ -150,10 +151,7 @@ function lsGetStrings(key: string): string[] {
 export function clientId(): string {
   let id = lsGet(LS.clientId);
   if (!id) {
-    id =
-      typeof crypto !== 'undefined' && 'randomUUID' in crypto
-        ? crypto.randomUUID()
-        : `dev-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    id = newId();
     lsSet(LS.clientId, id);
   }
   return id;

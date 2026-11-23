@@ -22,6 +22,7 @@ export const PAGES = [
   'walkthroughs',
   'insights',
   'kubernetes',
+  'containers',
   'settings/plugins',
   'product',
   'settings',

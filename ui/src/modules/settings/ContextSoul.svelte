@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { announce } from '../../lib/announce.svelte';
+  import { announce, announceShown } from '../../lib/announce.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { NO_WORKSPACE } from '../../lib/labels';
   import { toastError } from '../../lib/toastError';
@@ -194,7 +194,7 @@
       toasts.success('Workspace context saved', 'Used when agent sessions start or restart.');
     } catch (e) {
       if (request === generation && wsId === id) {
-        error = e instanceof Error ? e.message : String(e);
+        error = loadErrorText(e);
         toasts.error('Couldn’t save workspace context', error);
       }
     } finally {
@@ -271,7 +271,7 @@
     {#if !editing}<p class="readonly"><strong>Read-only.</strong> Workspace administrators can edit shared context.</p>{/if}
     {#if dirty && editing && !error}<p class="form-note unsaved">Unsaved changes — Save to apply them.</p>{/if}
     {#if error}
-      <div class="save-err" role="alert">
+      <div class="save-err" use:announceShown={{ text: `Couldn’t save workspace context. ${error}`, assertive: true }}>
         <p><strong>Couldn’t save workspace context.</strong> <span class="dim">{error}</span></p>
         <p class="dim">Your draft is still here. Save again, or reload to replace it with the saved version.</p>
         <button class="btn small" disabled={saving} onclick={() => wsId && load(wsId)}>Reload saved context</button>
@@ -589,7 +589,7 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  textarea.input {
+  textarea {
     resize: vertical;
     line-height: 1.5;
     font-size: var(--fs-s);

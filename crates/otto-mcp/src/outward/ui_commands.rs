@@ -632,7 +632,7 @@ mod tests {
         let s = &get("db_page").unwrap().input_schema;
         assert!(validate_args(s, &json!({"tab_id":"t","delta":-1})).is_ok());
         let e = validate_args(s, &json!({"tab_id":"t","delta":2})).unwrap_err();
-        assert!(e.contains("one of"), "{e}");
+        assert!(e.contains("≤"), "{e}");
 
         let s = &get("db_open_object").unwrap().input_schema;
         let e = validate_args(s, &json!({"connection_id":"c","path":[]})).unwrap_err();

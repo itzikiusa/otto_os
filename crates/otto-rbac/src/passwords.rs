@@ -56,6 +56,22 @@ fn verify_permits() -> &'static tokio::sync::Semaphore {
     PERMITS.get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_VERIFIES))
 }
 
+/// [`hash_password`] on a blocking thread behind the shared argon2 semaphore
+/// so onboarding and user-management password hashing never stalls Tokio async
+/// workers.
+pub async fn hash_password_bounded(password: &str) -> Result<String> {
+    let permit = verify_permits()
+        .acquire()
+        .await
+        .map_err(|_| Error::Internal("password hash semaphore closed".into()))?;
+    let password = password.to_string();
+    let out = tokio::task::spawn_blocking(move || hash_password(&password))
+        .await
+        .unwrap_or_else(|e| Err(Error::Internal(format!("hash password task: {e}"))));
+    drop(permit);
+    out
+}
+
 /// [`verify_password`] on a blocking thread, behind a process-wide bound of
 /// [`MAX_CONCURRENT_VERIFIES`] (S8-303): argon2 never runs on an async worker,
 /// and a flood of guesses queues briefly then gets [`VerifySaturated`] rather
@@ -113,6 +129,17 @@ mod tests {
         assert!(matches!(
             verify_password_bounded(&random_pw(), &h).await,
             Ok(Ok(false))
+        ));
+    }
+
+    #[tokio::test]
+    async fn bounded_hash_runs_off_thread_and_verifies() {
+        let pw = random_pw();
+        let h = hash_password_bounded(&pw).await.unwrap();
+        assert!(h.starts_with("$argon2id$"));
+        assert!(matches!(
+            verify_password_bounded(&pw, &h).await,
+            Ok(Ok(true))
         ));
     }
 }

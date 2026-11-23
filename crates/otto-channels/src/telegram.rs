@@ -482,38 +482,75 @@ fn redact_token(s: impl std::fmt::Display, token: &str) -> String {
 // Long-poll listener
 // ---------------------------------------------------------------------------
 
-/// Last confirmed `getUpdates` offset per bot token, shared across listener
-/// generations. A config edit respawns the poller; seeding the new one from
-/// here (instead of `0`) means it neither re-fetches nor re-dispatches the
-/// updates the previous generation already handled.
-fn offsets() -> &'static std::sync::Mutex<std::collections::HashMap<String, i64>> {
-    static MAP: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, i64>>> =
-        std::sync::OnceLock::new();
+/// Non-reversible 128-bit FNV-1a digest of a bot token so raw credentials
+/// never reside as keys in process-wide global maps or locks.
+fn token_key(token: &str) -> u128 {
+    const OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
+    const PRIME: u128 = 0x0000000001000000000000000000013b;
+    let mut h = OFFSET;
+    for &b in token.as_bytes() {
+        h ^= u128::from(b);
+        h = h.wrapping_mul(PRIME);
+    }
+    h
+}
+
+/// Hard cap on tracked per-bot `getUpdates` offsets in this process.
+const OFFSETS_CAP: usize = 256;
+
+#[derive(Default)]
+struct OffsetTable {
+    map: std::collections::HashMap<u128, i64>,
+    order: std::collections::VecDeque<u128>,
+}
+
+impl OffsetTable {
+    fn load(&self, token: &str) -> i64 {
+        self.map.get(&token_key(token)).copied().unwrap_or(0)
+    }
+
+    fn store(&mut self, token: &str, offset: i64) {
+        let key = token_key(token);
+        if let Some(existing) = self.map.get_mut(&key) {
+            // Offsets only move forward.
+            *existing = (*existing).max(offset);
+            return;
+        }
+        while self.map.len() >= OFFSETS_CAP {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.map.remove(&oldest);
+        }
+        self.map.insert(key, offset);
+        self.order.push_back(key);
+    }
+}
+
+/// Last confirmed `getUpdates` offset per hashed bot token, shared across
+/// listener generations. A config edit respawns the poller; seeding the new
+/// one from here (instead of `0`) means it neither re-fetches nor
+/// re-dispatches the updates the previous generation already handled.
+fn offsets() -> &'static std::sync::Mutex<OffsetTable> {
+    static MAP: std::sync::OnceLock<std::sync::Mutex<OffsetTable>> = std::sync::OnceLock::new();
     MAP.get_or_init(Default::default)
 }
 
 fn load_offset(token: &str) -> i64 {
-    offsets()
-        .lock()
-        .map(|m| m.get(token).copied().unwrap_or(0))
-        .unwrap_or(0)
+    offsets().lock().map(|m| m.load(token)).unwrap_or(0)
 }
 
 fn store_offset(token: &str, offset: i64) {
     if let Ok(mut m) = offsets().lock() {
-        let e = m.entry(token.to_string()).or_insert(0);
-        // Offsets only move forward.
-        *e = (*e).max(offset);
+        m.store(token, offset);
     }
 }
 
-/// One poller per bot token in this process. A respawned generation waits for
-/// the previous poller to notice its cancel flag and release this lock before
-/// it issues its own `getUpdates` — two concurrent long-polls on one token get
-/// a 409 "Conflict" from Telegram, which used to surface as a false failure.
-/// The shared [`otto_core::keyed_lock::KeyedLocks`] prunes an idle token's entry, so a rotated
-/// token's string does not stay in memory for the life of the process.
-static POLLER_LOCKS: otto_core::keyed_lock::KeyedLocks<String> =
+/// One poller per bot token in this process, keyed by a non-reversible token
+/// hash so raw credentials never live in the lock table. A respawned
+/// generation waits for the previous poller to notice its cancel flag and
+/// release this lock before it issues its own `getUpdates`.
+static POLLER_LOCKS: otto_core::keyed_lock::KeyedLocks<u128> =
     otto_core::keyed_lock::KeyedLocks::new();
 
 /// Sleep `ms`, waking early (in 250 ms slices) once `cancel` is set so a
@@ -624,7 +661,7 @@ pub async fn run(
 ) {
     // Wait out the previous generation's poller on this token (it releases
     // the lock once it sees its own cancel flag — at most one long-poll).
-    let _guard = POLLER_LOCKS.lock(token.as_str()).await;
+    let _guard = POLLER_LOCKS.lock(&token_key(&token)).await;
     if cancel.load(Ordering::Relaxed) {
         debug!("telegram listener cancelled before start");
         return;
@@ -789,19 +826,22 @@ async fn handle_update(
                 update_id = update.update_id,
                 "telegram: inbound text update received"
             );
+            // Check `integration_admits` BEFORE consuming an admission permit
+            // so unauthorized chats never burn admission capacity.
+            if !crate::bridge::integration_admits(integ, &inbound.user) {
+                bridge.record_rejected(Channel::Telegram, &inbound).await;
+                return true;
+            }
             // Handle OFF the poll loop (as Slack does): a slow trigger
             // (workflow / swarm / run launch, session spawn) must not
             // stall polling for every other chat of this bot. Same-
             // conversation routing stays serialized by the bridge's
             // find-or-create lock.
             use crate::admission::{Admission, BUSY_REPLY};
-            let permit = bridge.admission.admit_chat(
-                &format!("telegram:{}", integ.workspace_id),
-                &inbound.chat,
-                inbound.thread.as_deref(),
-                &inbound.text,
-                inbound.edited,
-            );
+            let Some(permit) = admit_telegram_inbound(&bridge.admission, integ, &inbound) else {
+                bridge.record_rejected(Channel::Telegram, &inbound).await;
+                return true;
+            };
             match permit {
                 Admission::Work(permit) => {
                     let order = bridge
@@ -848,6 +888,25 @@ async fn handle_update(
         }
     }
     true
+}
+
+/// Gate Telegram admission on `integration_admits` BEFORE consuming a permit
+/// so unauthorized chats never burn admission capacity.
+fn admit_telegram_inbound(
+    admission: &crate::admission::InboundAdmission,
+    integ: &Integration,
+    inbound: &Inbound,
+) -> Option<crate::admission::Admission> {
+    if !crate::bridge::integration_admits(integ, &inbound.user) {
+        return None;
+    }
+    Some(admission.admit_chat(
+        &format!("telegram:{}", integ.workspace_id),
+        &inbound.chat,
+        inbound.thread.as_deref(),
+        &inbound.text,
+        inbound.edited,
+    ))
 }
 
 #[cfg(test)]
@@ -1380,12 +1439,72 @@ mod tests {
 
     #[tokio::test]
     async fn new_generation_waits_for_previous_poller() {
-        let a = POLLER_LOCKS.handle("lock-test-token");
-        let b = POLLER_LOCKS.handle("lock-test-token");
+        let a = POLLER_LOCKS.handle(&token_key("lock-test-token"));
+        let b = POLLER_LOCKS.handle(&token_key("lock-test-token"));
         assert!(Arc::ptr_eq(&a, &b), "one lock per token");
         let held = a.lock().await;
         assert!(b.try_lock().is_err(), "second poller must wait");
         drop(held);
         assert!(b.try_lock().is_ok());
+    }
+
+    #[test]
+    fn offset_table_hashes_tokens_and_enforces_cap() {
+        let mut table = OffsetTable::default();
+        assert_ne!(token_key("tg-bot-a"), token_key("tg-bot-b"));
+        for i in 0..(OFFSETS_CAP + 40) {
+            table.store(&format!("tg-bot-{i}"), i as i64 + 1);
+        }
+        assert!(
+            table.map.len() <= OFFSETS_CAP,
+            "offset table exceeded cap: {}",
+            table.map.len()
+        );
+    }
+
+    #[test]
+    fn unauthorized_telegram_sender_does_not_consume_admission_permits() {
+        let admission = crate::admission::InboundAdmission::default();
+        let integ = Integration {
+            workspace_id: "ws-1".into(),
+            channel: Channel::Telegram,
+            channel_id: String::new(),
+            enabled: true,
+            allowed_users: "111".into(),
+            open_to_all: false,
+            agent_reply: false,
+            reply_instructions: String::new(),
+            preferred_cli: String::new(),
+            has_bot_token: true,
+            has_app_token: false,
+            updated_at: chrono::Utc::now(),
+        };
+        let stranger = Inbound {
+            workspace_id: "ws-1".into(),
+            chat: "chat-1".into(),
+            thread: None,
+            user: "999".into(),
+            user_name: None,
+            text: "spam".into(),
+            edited: false,
+        };
+        for _ in 0..32 {
+            assert!(
+                admit_telegram_inbound(&admission, &integ, &stranger).is_none(),
+                "unauthorized sender must not consume an admission permit"
+            );
+        }
+        let allowed = Inbound {
+            user: "111".into(),
+            ..stranger
+        };
+        let mut permits = Vec::new();
+        for _ in 0..8 {
+            match admit_telegram_inbound(&admission, &integ, &allowed) {
+                Some(crate::admission::Admission::Work(p)) => permits.push(p),
+                other => panic!("expected Work permit, got {:?}", other.is_some()),
+            }
+        }
+        assert_eq!(permits.len(), 8);
     }
 }

@@ -123,12 +123,16 @@ impl Lightpanda {
         let Some(mut child) = guard.take() else {
             return;
         };
+        #[cfg(unix)]
         if let Some(pid) = child.id() {
-            let _ = Command::new("kill")
-                .arg("-TERM")
-                .arg(pid.to_string())
-                .output()
-                .await;
+            if let Ok(p) = libc::pid_t::try_from(pid) {
+                if p > 1 {
+                    // SAFETY: sending SIGTERM to our own unreaped child PID.
+                    unsafe {
+                        libc::kill(p, libc::SIGTERM);
+                    }
+                }
+            }
         }
         match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
             Ok(_) => {}

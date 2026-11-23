@@ -43,9 +43,9 @@
   }
 
   function placeSub(): void {
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    maxH = Math.max(80, vh - PAD * 2);
+    const vw = window.visualViewport?.width ?? window.innerWidth;
+    const vh = window.visualViewport?.height ?? window.innerHeight;
+    maxH = Math.max(80, Math.round(vh) - PAD * 2);
     if (!subEl || !subAnchorRect) return;
     const w = subEl.offsetWidth;
     const h = Math.min(subEl.offsetHeight, maxH);
@@ -98,9 +98,9 @@
   }
 
   function place(): void {
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    maxH = Math.max(80, vh - PAD * 2);
+    const vw = window.visualViewport?.width ?? window.innerWidth;
+    const vh = window.visualViewport?.height ?? window.innerHeight;
+    maxH = Math.max(80, Math.round(vh) - PAD * 2);
     if (!menuEl) return;
     const w = menuEl.offsetWidth;
     const h = Math.min(menuEl.offsetHeight, maxH);
@@ -137,13 +137,13 @@
     openSubIndex = -1;
     subAnchorRect = null;
     subReady = false;
-    maxH = Math.max(80, window.innerHeight - PAD * 2);
+    maxH = Math.max(80, Math.round(window.visualViewport?.height ?? window.innerHeight) - PAD * 2);
     // Defer one frame so the menu has rendered and can be measured.
     const raf = requestAnimationFrame(async () => {
       place();
       ready = true;
       await tick();
-      if (ctxMenu.filter) searchEl?.focus();
+      if (ctxMenu.filter) searchEl?.focus({ preventScroll: true });
       else focusAt(0);
     });
     return () => cancelAnimationFrame(raf);
@@ -156,10 +156,10 @@
   function focusAt(i: number, root: HTMLElement | null = menuEl): void {
     const els = itemEls(root);
     if (!els.length) {
-      root?.focus();
+      root?.focus({ preventScroll: true });
       return;
     }
-    els[(i + els.length) % els.length].focus();
+    els[(i + els.length) % els.length].focus({ preventScroll: true });
   }
   function focusSubAt(i: number): void {
     focusAt(i, subEl);
@@ -168,7 +168,7 @@
     const els = itemEls(root);
     const cur = els.indexOf(document.activeElement as HTMLButtonElement);
     if (cur === -1) focusAt(delta > 0 ? 0 : -1, root);
-    else if (root === menuEl && ctxMenu.filter && cur === 0 && delta < 0) searchEl?.focus();
+    else if (root === menuEl && ctxMenu.filter && cur === 0 && delta < 0) searchEl?.focus({ preventScroll: true });
     else focusAt(cur + delta, root);
   }
   function typeAhead(ch: string, root: HTMLElement | null = menuEl): void {
@@ -178,7 +178,7 @@
     for (let k = 1; k <= els.length; k++) {
       const el = els[(start + k) % els.length];
       if ((el.textContent ?? '').trim().toLowerCase().startsWith(ch)) {
-        el.focus();
+        el.focus({ preventScroll: true });
         return;
       }
     }
@@ -256,7 +256,7 @@
     swallow();
     if (!inSub && ctxMenu.filter && searchEl) {
       // Typing on a row of a filterable menu goes to its search box.
-      searchEl.focus();
+      searchEl.focus({ preventScroll: true });
       ctxMenu.query += e.key;
     } else {
       typeAhead(e.key.toLowerCase(), activeRoot);
@@ -600,6 +600,14 @@
       background: var(--surface);
       backdrop-filter: none;
       -webkit-backdrop-filter: none;
+      max-width: min(300px, calc(100vw - 16px));
+    }
+  }
+  @media (pointer: coarse) {
+    .ctx-item {
+      min-height: 40px;
+      padding-block: 6px;
+      padding-inline: 10px 12px;
     }
   }
 

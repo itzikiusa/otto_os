@@ -49,7 +49,7 @@
   <div class="fp-toolbar">
     <span class="fp-count dim">{sections.length} / {MAX}</span>
     <button
-      class="icon-btn fp-add-btn"
+      class="btn small ghost fp-add-btn"
       disabled={sections.length >= MAX}
       title={sections.length >= MAX ? `Up to ${MAX} file sections` : 'Add file section'}
       aria-label="Add file section"
@@ -106,30 +106,10 @@
   }
 
   .fp-add-btn {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    /* .icon-btn is a fixed 24px square — this one carries a label too, so let
-       it size to its content or "Add section" spills past the hover box. */
-    width: auto;
-    height: 22px;
-    padding: 2px 6px;
+    padding-inline: 6px;
     font-size: var(--fs-xs);
-    border-radius: var(--radius-s);
-    color: var(--text-dim);
-    transition: color var(--dur-fast) ease-out, background var(--dur-fast) ease-out;
   }
-  .fp-add-btn:hover:not(:disabled) {
-    color: var(--text);
-    background: var(--surface);
-  }
-  .fp-add-btn:disabled {
-    opacity: var(--disabled-opacity);
-    cursor: not-allowed;
-  }
-
   .fp-add-label {
-    font-size: var(--fs-xs);
     white-space: nowrap;
   }
 

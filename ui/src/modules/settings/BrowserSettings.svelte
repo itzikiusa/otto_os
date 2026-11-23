@@ -217,9 +217,10 @@
               </span>
             </div>
           {:else if job?.state === 'failed'}
-            <p class="error" role="alert">The last download failed: {job.error || 'the download ended without a reason. Try again, or check Settings › Logs.'}</p>
+            {@const downloadFailText = `The last download failed: ${job.error || 'the download ended without a reason. Try again, or check Settings › Logs.'}`}
+            <p class="error" use:announceShown={{ text: downloadFailText, assertive: true }}>{downloadFailText}</p>
           {/if}
-          {#if installError}<p class="error" role="alert">Couldn’t start the download: {installError}</p>{/if}
+          {#if installError}<p class="error" use:announceShown={{ text: `Couldn’t start the download: ${installError}`, assertive: true }}>Couldn’t start the download: {installError}</p>{/if}
         {/if}
       </section>
 
@@ -264,7 +265,7 @@
       {#if !isAdmin}
         <p class="row-desc note">Only a Browser admin can change the engine settings.</p>
       {/if}
-      {#if saveError}<p class="error" role="alert">Couldn’t save: {saveError}</p>{/if}
+      {#if saveError}<p class="error" use:announceShown={{ text: `Couldn’t save: ${saveError}`, assertive: true }}>Couldn’t save: {saveError}</p>{/if}
     {/if}
   </PageBody>
 </div>

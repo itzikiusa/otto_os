@@ -15,6 +15,7 @@
   import { PanZoom, type Transform } from './pointerZoom';
   import { toastAgentEdit } from './agentUndo';
   import { toastError } from '../../lib/toastError';
+  import { loadErrorText } from '../../lib/loadError';
   import { announce } from '../../lib/announce.svelte';
   import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
@@ -150,6 +151,7 @@
     pz.fitView();
   }
 
+  let exportSeq = 0;
   function fileBase(): string {
     return (canvas.scene?.title ?? 'canvas').replace(/[^\w.-]+/g, '-');
   }
@@ -158,7 +160,7 @@
   async function exportSvg(): Promise<SVGSVGElement | null> {
     const src = (canvas.source ?? '').trim();
     if (!src) return null;
-    const out = await renderMermaid(`cv-export-${sceneId ?? 'x'}-${++renderToken}`, src, { dark: false });
+    const out = await renderMermaid(`cv-export-${sceneId ?? 'x'}-${++exportSeq}`, src, { dark: false });
     if (!out.svg) {
       toasts.error('Couldn’t export the diagram', out.error);
       return null;
@@ -236,7 +238,7 @@
       void canvas.refreshSession();
       return true;
     } catch (e) {
-      canvas.pushConvo('assistant', `Failed: ${e instanceof Error ? e.message : String(e)}`, sceneId);
+      canvas.pushConvo('assistant', `Failed: ${loadErrorText(e)}`, sceneId);
       toastError('Couldn’t ask Otto', e);
       return false;
     } finally {
@@ -270,6 +272,7 @@
     return () => observer.disconnect();
   });
   onDestroy(() => {
+    ++renderToken;
     flushPendingCode();
     if (liveId === canvas.currentId) liveId = null;
   });
@@ -297,22 +300,15 @@
     {/if}
 
     <div class="preview-wrap">
-      <!-- A focusable application surface: arrow keys pan it (panKeys.ts). -->
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+      <!-- A focusable application surface: arrow keys pan it (panKeys.ts); pz.attach wires tabIndex + listeners. -->
       <div
         class="surface"
         class:grabbing={dragging}
         role="application"
-        tabindex="0"
         aria-label={PAN_LABEL}
         title="Drag to pan · scroll to zoom · arrow keys pan when focused (Shift = bigger steps)"
         bind:this={surface}
-        onkeydown={(e) => pz.key(e)}
-        onwheel={(e) => pz.wheel(e)}
-        onpointerdown={(e) => pz.pointerDown(e)}
-        onpointermove={(e) => pz.pointerMove(e)}
-        onpointerup={(e) => pz.pointerUp(e)}
-        onpointercancel={(e) => pz.pointerUp(e)}
+        {@attach (el) => pz.attach(el)}
       >
         {#if svgHtml}
           <div

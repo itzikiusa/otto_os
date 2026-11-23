@@ -71,6 +71,12 @@ impl otto_phone::PhoneCtx for ServerCtx {
     }
 }
 
+impl otto_simulators::SimulatorsCtx for ServerCtx {
+    fn simulators(&self) -> &Arc<otto_simulators::SimulatorsService> {
+        &self.simulators
+    }
+}
+
 impl otto_ide::IdeCtx for ServerCtx {
     fn ide(&self) -> &Arc<otto_ide::IdeEngine> {
         &self.ide
@@ -86,6 +92,9 @@ impl otto_ide::IdeCtx for ServerCtx {
     }
     fn roles(&self) -> &Arc<dyn RoleChecker> {
         &self.roles
+    }
+    fn events(&self) -> Option<&tokio::sync::broadcast::Sender<Event>> {
+        Some(&self.events)
     }
     fn resolve_ssh_connection<'a>(
         &'a self,
@@ -353,6 +362,18 @@ impl otto_k8s::K8sCtx for ServerCtx {
     }
     fn monitor_sink(&self) -> Option<Arc<dyn otto_k8s::MonitorSink>> {
         Some(Arc::new(UsageSink(self.usage.clone())))
+    }
+}
+
+impl otto_containers::ContainersCtx for ServerCtx {
+    fn containers(&self) -> &Arc<otto_containers::ContainersService> {
+        &self.containers
+    }
+    fn spawner(&self) -> &Arc<dyn Spawner> {
+        &self.spawner
+    }
+    fn roles(&self) -> &Arc<dyn RoleChecker> {
+        &self.roles
     }
 }
 
@@ -836,6 +857,36 @@ impl otto_design::DesignCtx for ServerCtx {
     }
     fn validate_content(&self, format: &str, bytes: &[u8]) -> otto_core::Result<()> {
         crate::design_hall::validate_content(format, bytes)
+    }
+}
+
+impl otto_media::MediaCtx for ServerCtx {
+    fn media(&self) -> &Arc<otto_media::MediaService> {
+        &self.media
+    }
+    fn design(&self) -> otto_design::DesignService {
+        crate::design_hall::service(self)
+    }
+    fn roles(&self) -> &Arc<dyn RoleChecker> {
+        &self.roles
+    }
+    fn workspaces(&self) -> &otto_state::WorkspacesRepo {
+        &self.workspaces
+    }
+    async fn production_planner(
+        &self,
+        ws: &otto_core::domain::Workspace,
+        user: &otto_core::domain::User,
+        pick: &otto_media::productions::AgentPick,
+    ) -> otto_core::Result<Arc<dyn otto_media::productions::ProductionPlanner>> {
+        if otto_core::e2e::isolated() {
+            return Ok(Arc::new(otto_media::productions::e2e::FixedPlanner));
+        }
+        let provider =
+            ServerCtx::resolve_provider(self, Some(ws), pick.provider.as_deref()).await?;
+        let (ws, user, m) = (ws.clone(), user.clone(), self.manager.clone());
+        otto_media::productions::agent::agent_planner(m, ws, user, provider, pick, &self.data_dir)
+            .await
     }
 }
 

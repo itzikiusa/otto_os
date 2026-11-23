@@ -37,7 +37,7 @@ pub async fn create(
     }
     // Enforce the shared minimum-password policy (same rule as onboarding).
     otto_rbac::validate_password(&req.password)?;
-    let hash = otto_rbac::hash_password(&req.password)?;
+    let hash = otto_rbac::hash_password_bounded(&req.password).await?;
     let display_name = req.display_name.unwrap_or_else(|| req.username.clone());
     let created = UsersRepo::new(ctx.pool.clone())
         .create(req.username.trim(), &hash, &display_name, false)
@@ -68,7 +68,7 @@ pub async fn update(
                 verify_current_password(&repo, &target.username, req.current_password.as_deref())
                     .await?;
             }
-            Some(otto_rbac::hash_password(p)?)
+            Some(otto_rbac::hash_password_bounded(p).await?)
         }
         None => None,
     };

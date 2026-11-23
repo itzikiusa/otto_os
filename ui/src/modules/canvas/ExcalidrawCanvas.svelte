@@ -51,6 +51,8 @@
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let restore: ((els: any[], local: any) => any[]) | null = null;
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  let suppressTimer: ReturnType<typeof setTimeout> | null = null;
+  let apiReady = $state(false);
   let destroyed = false;
   let generating = $state(false);
   let suppressSave = false;
@@ -216,7 +218,9 @@
       ex.updateScene({ elements, appState: persistedAppState(raw) });
       if (elements.length) ex.scrollToContent(elements, { fitToContent: true, animate: false });
     } finally {
-      setTimeout(() => {
+      if (suppressTimer) clearTimeout(suppressTimer);
+      suppressTimer = setTimeout(() => {
+        suppressTimer = null;
         suppressSave = false;
       }, 160);
     }
@@ -275,6 +279,25 @@
   export function isGenerating(): boolean {
     return generating;
   }
+
+  // Keep mounted Excalidraw in sync when the user switches light/dark scheme.
+  $effect(() => {
+    const theme = ui.resolvedScheme;
+    if (!apiReady || !excaliApi) return;
+    untrack(() => {
+      if (excaliApi.getAppState?.()?.theme === theme) return;
+      suppressSave = true;
+      try {
+        excaliApi.updateScene({ appState: { theme } });
+      } finally {
+        if (suppressTimer) clearTimeout(suppressTimer);
+        suppressTimer = setTimeout(() => {
+          suppressTimer = null;
+          suppressSave = false;
+        }, 160);
+      }
+    });
+  });
 
   // source → board: reload when the source changes from the store (agent edit /
   // live / generate). Skips our own just-saved source (lastApplied).
@@ -439,6 +462,7 @@
         excalidrawAPI: (a: any) => {
           excaliApi = a;
           liveApi = a;
+          apiReady = !!a;
         },
         initialData: initialData(),
         onChange: onSceneChange,
@@ -452,6 +476,10 @@
 
   onDestroy(() => {
     destroyed = true;
+    if (suppressTimer) {
+      clearTimeout(suppressTimer);
+      suppressTimer = null;
+    }
     if (saveTimer) {
       clearTimeout(saveTimer);
       saveTimer = null;

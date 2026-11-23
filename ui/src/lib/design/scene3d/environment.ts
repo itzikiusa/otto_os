@@ -79,7 +79,10 @@ function backdropTexture(THREE: Three, colors: [string, string]): THREE_NS.Textu
  * rotation changes (or the viewer unmounts).
  */
 export function buildEnvironment(THREE: Three, renderer: THREE_NS.WebGLRenderer, env: Scene3dEnvironment): BuiltEnvironment {
-  const preset = envPreset(env.preset) ?? envPreset('studio-soft')!;
+  const base = envPreset(env.preset) ?? envPreset('studio-soft')!;
+  // A setting's own sky lights the scene and is its backdrop (the preset keeps its highlights).
+  // Its softboxes would show as studio panels in water and on glossy pieces outdoors, so they go.
+  const preset: EnvPresetDef = env.sky ? { ...base, sky: env.sky, panels: [], backdrop: [env.sky[0], env.sky[1]], exposure: env.exposure ?? base.exposure } : base;
   if (preset.id === 'none') {
     return { envMap: null, backdrop: null, preset, dispose: () => {} };
   }
@@ -106,5 +109,5 @@ export function buildEnvironment(THREE: Three, renderer: THREE_NS.WebGLRenderer,
 
 /** Stable key: rebuild only when the preset or its rotation changes. */
 export function environmentKey(env: Scene3dEnvironment | undefined): string {
-  return env ? `${env.preset}:${env.rotation ?? 0}` : 'none';
+  return env ? `${env.preset}:${env.rotation ?? 0}:${env.sky ?? ''}:${env.exposure ?? ''}` : 'none';
 }

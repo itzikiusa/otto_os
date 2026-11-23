@@ -101,8 +101,12 @@ pub fn call_timeout(tool: &str, args: &Value) -> Duration {
         "update_issue" => 120,
         // Write (+ full-width property POSTs / version GET), then a verify GET.
         "create_confluence_page" | "update_confluence_page" | "comment_confluence_page" => 90,
+        // Cold Android emulator boot can take up to ~120 s.
+        "sim_action" if args.get("action").and_then(Value::as_str) == Some("boot") => 150,
         // Push check + create + reviewer follow-ups.
         "create_pr" => 60,
+        // An HTTP voice engine answers within 90 s.
+        "synthesize_voice" => 100,
         _ => 30,
     };
     Duration::from_secs(secs)
@@ -318,6 +322,13 @@ pub fn opt_query(args: &Value, pairs: &[(&str, &str)]) -> String {
     q.trim_start_matches('&').to_string()
 }
 
+/// `otto.design_resolve_comment`'s `resolved`: true unless `false` (or the
+/// `"false"` a stringifying client sends) — omitted means resolve.
+pub(super) fn wants_resolved(args: &Value) -> bool {
+    args.get("resolved")
+        .is_none_or(|v| *v != false && *v != "false")
+}
+
 /// The HTTP verb a tool's self-call uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
@@ -339,14 +350,14 @@ pub struct SelfCall {
 }
 
 impl SelfCall {
-    fn get(path: String) -> Self {
+    pub(super) fn get(path: String) -> Self {
         Self {
             method: Method::Get,
             path,
             body: None,
         }
     }
-    fn post(path: String, body: Value) -> Self {
+    pub(super) fn post(path: String, body: Value) -> Self {
         Self {
             method: Method::Post,
             path,
@@ -884,9 +895,202 @@ fn body_without(args: &Value, keys: &[&str]) -> Value {
     body
 }
 
+/// The 3D, voice and Smart-mode slice of [`route_for`] (`/design/3d/*`,
+/// `/product/tts/*`, `/design/productions*`). `None` = not one of them.
+fn media_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
+    const TOOLS: &[&str] = &[
+        "list_3d_providers",
+        "start_3d_job",
+        "get_3d_job",
+        "list_3d_jobs",
+        "cancel_3d_job",
+        "export_3d_artifact",
+        "list_tts_providers",
+        "list_tts_voices",
+        "synthesize_voice",
+        "list_voice_clips",
+        "delete_voice_clip",
+        "create_production",
+        "get_production",
+        "list_productions",
+        "start_production",
+        "cancel_production",
+        "steer_production",
+        "redraw_production_item",
+        "revert_production",
+        "rebuild_production_scene",
+        "start_sound",
+        "start_music",
+        "get_audio_job",
+        "list_audio_jobs",
+        "cancel_audio_job",
+    ];
+    let id = |k: &str| arg_str(args, k).map(|v| seg(&v));
+    let in_ws = |path: &str, extra: &[(&str, &str)]| -> Result<String, Error> {
+        let more = opt_query(args, extra);
+        let ws = seg(&arg_str(args, "workspace_id")?);
+        Ok(match more.is_empty() {
+            true => format!("{path}?workspace_id={ws}"),
+            false => format!("{path}?workspace_id={ws}&{more}"),
+        })
+    };
+    let call = || -> Result<SelfCall, Error> {
+        Ok(match tool {
+            "list_3d_providers" => SelfCall::get("/api/v1/design/3d/providers".into()),
+            "start_3d_job" => {
+                let mut body = args.clone();
+                if body.get("provider_id").is_none_or(Value::is_null) {
+                    body["provider_id"] = json!("otto-forge");
+                }
+                SelfCall::post("/api/v1/design/3d/jobs".into(), body)
+            }
+            "get_3d_job" => SelfCall::get(format!("/api/v1/design/3d/jobs/{}", id("job_id")?)),
+            "list_3d_jobs" => SelfCall::get(in_ws(
+                "/api/v1/design/3d/jobs",
+                &[("artifact_id", "artifact_id"), ("limit", "limit")],
+            )?),
+            "cancel_3d_job" => SelfCall::post(
+                format!("/api/v1/design/3d/jobs/{}/cancel", id("job_id")?),
+                json!({}),
+            ),
+            "export_3d_artifact" => SelfCall::post(
+                format!(
+                    "/api/v1/design/3d/artifacts/{}/export-workspace",
+                    id("artifact_id")?
+                ),
+                body_without(args, &["artifact_id"]),
+            ),
+            "list_tts_providers" => SelfCall::get("/api/v1/product/tts/providers".into()),
+            "list_tts_voices" => SelfCall::get(format!(
+                "/api/v1/product/tts/providers/{}/voices",
+                id("provider_id")?
+            )),
+            "synthesize_voice" => {
+                SelfCall::post("/api/v1/product/tts/synthesize".into(), args.clone())
+            }
+            "list_voice_clips" => SelfCall::get(in_ws(
+                "/api/v1/product/tts/clips",
+                &[
+                    ("story_id", "story_id"),
+                    ("artifact_id", "artifact_id"),
+                    ("limit", "limit"),
+                ],
+            )?),
+            "delete_voice_clip" => {
+                SelfCall::delete(format!("/api/v1/product/tts/clips/{}", id("clip_id")?))
+            }
+            "create_production" => {
+                SelfCall::post("/api/v1/design/productions".into(), args.clone())
+            }
+            "get_production" => SelfCall::get(format!(
+                "/api/v1/design/productions/{}",
+                id("production_id")?
+            )),
+            "list_productions" => SelfCall::get(in_ws("/api/v1/design/productions", &[])?),
+            "start_production" | "cancel_production" => SelfCall::post(
+                format!(
+                    "/api/v1/design/productions/{}/{}",
+                    id("production_id")?,
+                    tool.trim_end_matches("_production")
+                ),
+                json!({}),
+            ),
+            "steer_production" => SelfCall::post(
+                format!("/api/v1/design/productions/{}/steer", id("production_id")?),
+                json!({ "comment": arg_str(args, "comment")?, "pins": args.get("pins").cloned().unwrap_or(json!([])) }),
+            ),
+            "redraw_production_item" => SelfCall::post(
+                format!(
+                    "/api/v1/design/productions/{}/items/{}/redraw",
+                    id("production_id")?,
+                    id("item_id")?
+                ),
+                json!({}),
+            ),
+            "revert_production" => SelfCall::post(
+                format!("/api/v1/design/productions/{}/revert", id("production_id")?),
+                json!({ "revision_id": arg_str(args, "revision_id")? }),
+            ),
+            "rebuild_production_scene" => SelfCall::post(
+                format!("/api/v1/design/productions/{}/scene", id("production_id")?),
+                json!({}),
+            ),
+            "start_sound" | "start_music" => {
+                let mut body = args.clone();
+                body["kind"] = json!(tool.trim_start_matches("start_"));
+                SelfCall::post("/api/v1/product/audio/jobs".into(), body)
+            }
+            "get_audio_job" => {
+                SelfCall::get(format!("/api/v1/product/audio/jobs/{}", id("job_id")?))
+            }
+            "list_audio_jobs" => SelfCall::get(in_ws(
+                "/api/v1/product/audio/jobs",
+                &[("kind", "kind"), ("limit", "limit")],
+            )?),
+            "cancel_audio_job" => SelfCall::post(
+                format!("/api/v1/product/audio/jobs/{}/cancel", id("job_id")?),
+                json!({}),
+            ),
+            _ => return Err(Error::Invalid(format!("unknown tool otto.{tool}"))),
+        })
+    };
+    TOOLS.contains(&tool).then(call)
+}
+
+/// The Design Hall review-comment slice of [`route_for`]
+/// (`/design/artifacts/{id}/comments*`). `None` = not a comment tool.
+fn comment_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
+    const TOOLS: &[&str] = &[
+        "design_comments",
+        "design_comment",
+        "design_resolve_comment",
+    ];
+    let call = || -> Result<SelfCall, Error> {
+        Ok(match tool {
+            "design_comments" => {
+                let id = arg_str(args, "artifact_id")?;
+                let q = opt_query(args, &[("version", "version_id"), ("resolved", "resolved")]);
+                let path = format!("/api/v1/design/artifacts/{}/comments", seg(&id));
+                SelfCall::get(if q.is_empty() {
+                    path
+                } else {
+                    format!("{path}?{q}")
+                })
+            }
+            "design_comment" => {
+                let id = arg_str(args, "artifact_id")?;
+                let mut body = json!({ "body": arg_str(args, "body")? });
+                for k in ["version_id", "parent_id", "pin_3d"] {
+                    if let Some(v) = args.get(k).filter(|v| !v.is_null() && *v != "") {
+                        body[k] = v.clone();
+                    }
+                }
+                SelfCall::post(
+                    format!("/api/v1/design/artifacts/{}/comments", seg(&id)),
+                    body,
+                )
+            }
+            "design_resolve_comment" => SelfCall::patch(
+                format!(
+                    "/api/v1/design/artifacts/{}/comments/{}",
+                    seg(&arg_str(args, "artifact_id")?),
+                    seg(&arg_str(args, "comment_id")?)
+                ),
+                json!({ "resolved": wants_resolved(args) }),
+            ),
+            _ => return Err(Error::Invalid(format!("unknown tool otto.{tool}"))),
+        })
+    };
+    TOOLS.contains(&tool).then(call)
+}
+
 /// The "Agent admin" slice of [`route_for`] (a person's personal agents, set
 /// up and run for them). `None` = not an agent-admin tool.
 fn admin_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
+    // The media and design-comment slices ride here, off `route_for`'s size ratchet.
+    if let Some(call) = media_route(tool, args).or_else(|| comment_route(tool, args)) {
+        return Some(call);
+    }
     let agent =
         || arg_str(args, "agent_id").map(|id| format!("/api/v1/personal-agents/{}", seg(&id)));
     let schedule = || {
@@ -2386,7 +2590,7 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                 body,
             )
         }
-        other => return Err(Error::Invalid(format!("unknown otto tool '{other}'"))),
+        other => return super::simulators::route_for(other, args),
     })
 }
 

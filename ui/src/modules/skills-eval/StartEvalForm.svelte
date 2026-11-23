@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { plural } from '../../lib/plural';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   // The "new evaluation" form: pick a skill (library / provider / a path or
@@ -77,6 +78,10 @@
   });
 
   let loaded = $state(false);
+  let loadedWs = '';
+  let loadSeq = 0;
+  let disposed = false;
+  onDestroy(() => { disposed = true; loadSeq++; });
   // A failed defaults/sources load is shown inline with Retry: the form would
   // otherwise look ready with no skills and no validations.
   let loadError = $state<string | null>(null);
@@ -85,17 +90,22 @@
   let improverModel = $state('');
 
   $effect(() => {
-    if (!loaded) void load();
+    const targetWs = ws.currentId ?? '';
+    if (!loaded || loadedWs !== targetWs) {
+      loadedWs = targetWs;
+      void load(targetWs);
+    }
   });
 
-  async function load(): Promise<void> {
+  async function load(wsId = ws.currentId ?? ''): Promise<void> {
+    const seq = ++loadSeq;
     loadError = null;
     try {
-      const wsId = ws.currentId;
       const [cfg, src] = await Promise.all([
         skillsEvalApi.getConfig(),
         wsId ? skillsEvalApi.listSources(wsId) : Promise.resolve({ sources: [] }),
       ]);
+      if (disposed || seq !== loadSeq) return;
       validations = cfg.validations.map((v) => ({ ...v, providers: [...v.providers] }));
       iterations = cfg.iterations ?? 2;
       validatorPasses = cfg.validator_passes ?? 1;
@@ -108,10 +118,12 @@
       const want = initialSkill ? matchSource(sources, initialSkill) : -1;
       if (want >= 0) sourceSel = want;
       else if (sources.length > 0) sourceSel = 0;
+      else sourceSel = -1;
     } catch (e) {
+      if (disposed || seq !== loadSeq) return;
       loadError = loadErrorText(e);
     } finally {
-      loaded = true;
+      if (!disposed && seq === loadSeq) loaded = true;
     }
   }
 

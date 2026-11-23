@@ -8,6 +8,7 @@ pub mod config;
 pub mod http;
 pub mod library;
 pub mod materialize;
+pub mod memory_brief;
 pub mod merge;
 pub mod provider_skills;
 pub mod provisioner;

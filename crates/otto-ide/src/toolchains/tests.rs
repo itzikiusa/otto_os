@@ -78,6 +78,29 @@ fn discovers_otto_managed_sdks_lsps_daps_and_marks_active_selection() {
 }
 
 #[test]
+fn detects_otto_managed_android_sdk_under_data_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let toolchains_root = tmp.path().join("toolchains");
+    let android_sdk = tmp.path().join("android-sdk");
+    std::fs::create_dir_all(&toolchains_root).unwrap();
+    std::fs::create_dir_all(android_sdk.join("platform-tools")).unwrap();
+    std::fs::write(android_sdk.join("platform-tools/adb"), "#!/bin/sh\n").unwrap();
+    std::fs::create_dir_all(android_sdk.join("platforms/android-35")).unwrap();
+
+    let detected = scan_detected_sdks(&[toolchains_root], &[]);
+    let sdk_str = android_sdk.to_string_lossy().into_owned();
+    assert!(
+        detected.iter().any(|d| {
+            d.ecosystem == IdeEcosystemKind::Android
+                && d.source == "otto"
+                && d.path == sdk_str
+                && d.version == "API 35"
+        }),
+        "expected Otto-managed Android SDK under <data_dir>/android-sdk to be detected, got: {detected:?}"
+    );
+}
+
+#[test]
 fn parses_batched_ssh_probe_for_remote_linux_aarch64() {
     let sample = concat!(
         "UNAME:Linux aarch64\n",
@@ -173,7 +196,7 @@ async fn register_and_remove_local_sdk_round_trip_persists_and_surfaces_in_fast_
         elapsed < Duration::from_millis(500),
         "non-catalog list_toolchains must not make network requests (took {elapsed:?})"
     );
-    assert_eq!(resp.ecosystems.len(), 7);
+    assert_eq!(resp.ecosystems.len(), EcosystemKind::ALL.len());
     assert!(!resp.detected.is_empty());
     let go_eco = resp
         .ecosystems

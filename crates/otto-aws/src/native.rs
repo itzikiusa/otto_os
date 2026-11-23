@@ -186,17 +186,44 @@ pub fn calls_total() -> u64 {
     NATIVE_CALLS.load(Ordering::Relaxed)
 }
 
-fn client() -> &'static reqwest::Client {
+/// Hard cap on a native AWS API response body (16 MiB). Prevents a misbehaving
+/// or hostile custom endpoint from OOMing the daemon.
+const MAX_NATIVE_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
+fn client() -> Result<&'static reqwest::Client> {
     // One pooled client: keep-alive TLS connections are what make a 2 s tail
     // tick ~one round trip instead of a Python start-up + TLS handshake.
-    static C: OnceLock<reqwest::Client> = OnceLock::new();
-    C.get_or_init(|| {
-        reqwest::Client::builder()
+    // Uses `allow_local_client_builder` so LocalStack/VPC custom endpoints
+    // still work while cloud metadata (169.254.169.254) and Otto's own daemon
+    // listener remain blocked, and disables redirects so SigV4-signed requests
+    // can never be bounced cross-host or downgraded.
+    static C: OnceLock<std::result::Result<reqwest::Client, String>> = OnceLock::new();
+    let res = C.get_or_init(|| {
+        otto_netguard::allow_local_client_builder()
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(NATIVE_TIMEOUT)
             .pool_idle_timeout(Duration::from_secs(90))
             .build()
-            .unwrap_or_default()
-    })
+            .map_err(|e| format!("aws native client build failed: {e}"))
+    });
+    res.as_ref().map_err(|e| Error::Internal(e.clone()))
+}
+
+async fn read_body_capped(mut resp: reqwest::Response, max: usize) -> Result<String> {
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| Error::Upstream(format!("read response: {}", e.without_url())))?
+    {
+        if buf.len().saturating_add(chunk.len()) > max {
+            return Err(Error::Upstream(format!(
+                "aws native response exceeded {max} byte cap"
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -286,6 +313,8 @@ async fn post(
         Some(base) => format!("{base}/"),
         None => format!("https://{host}/"),
     };
+    otto_netguard::precheck_url_allow_local(&url)
+        .map_err(|m| Error::Forbidden(format!("aws endpoint blocked: {m}")))?;
     if transport_backoff(&url) {
         return Err(Error::Upstream(format!(
             "{TRANSPORT}{service}: recent failure"
@@ -317,7 +346,7 @@ async fn post(
         service,
         now,
     );
-    let mut req = client().post(&url).header("authorization", auth);
+    let mut req = client()?.post(&url).header("authorization", auth);
     for (k, v) in &headers {
         // reqwest derives Host from the URL; with an endpoint override the
         // signed host differs from the URL's, so send the signed one.
@@ -331,10 +360,9 @@ async fn post(
         .await
         .map_err(|e| transport_error(&url, format!("{service}: {}", e.without_url())))?;
     let status = resp.status().as_u16();
-    let text = resp
-        .text()
+    let text = read_body_capped(resp, MAX_NATIVE_RESPONSE_BYTES)
         .await
-        .map_err(|e| transport_error(&url, format!("{service}: {}", e.without_url())))?;
+        .map_err(|e| transport_error(&url, format!("{service}: {e}")))?;
     tracing::debug!(target: "otto_aws::native", service, ms = started.elapsed().as_millis() as u64, status, "aws native call");
     Ok((status, text, url))
 }
@@ -728,5 +756,23 @@ mod tests {
     fn form_encoding_is_rfc3986() {
         assert_eq!(form_enc("a b/c=d"), "a%20b%2Fc%3Dd");
         assert_eq!(form_enc("Filter.1.Value.1"), "Filter.1.Value.1");
+    }
+
+    #[tokio::test]
+    async fn native_post_blocks_cloud_metadata_endpoint() {
+        let t = Target {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
+            secret_access_key: "secret".into(),
+            session_token: None,
+            region: "us-east-1".into(),
+            endpoint: Some("http://169.254.169.254".into()),
+        };
+        let err = post(&t, "logs", "application/x-amz-json-1.1", None, vec![])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Forbidden(_)),
+            "expected Forbidden, got {err:?}"
+        );
     }
 }

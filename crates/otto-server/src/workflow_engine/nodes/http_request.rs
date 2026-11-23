@@ -40,7 +40,9 @@ pub(in crate::workflow_engine) async fn execute(
         .await
         .map_err(|e| otto_core::Error::Upstream(format!("http: {e}")))?;
     let status = resp.status().as_u16();
-    let text = resp.text().await.unwrap_or_default();
+    let text =
+        otto_workflows::http::read_text_capped(resp, otto_workflows::http::HTTP_RESPONSE_MAX_BYTES)
+            .await?;
     let body: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
     Ok((
         json!({ "status": status, "body": body }),

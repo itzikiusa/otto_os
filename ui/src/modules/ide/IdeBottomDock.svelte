@@ -20,6 +20,7 @@
   } from '../../lib/paneResizer';
   import { ideDockPrefs } from './debug/ideDockPrefs.svelte';
   import { ideDbWatch } from './dbwatch/ideDbWatchState.svelte';
+  import { ideDevices } from './devices/ideDevicesState.svelte';
   import { ideGit } from './git/ideGitController.svelte';
   import { IDE_DOCK_ON_DEMAND, ideDockOrder, ideDockTabMemory, ideDockTabVisible } from './ideDockTabs.svelte';
   import { ide, type IdeBottomTab } from './ideStore.svelte';
@@ -28,6 +29,7 @@
   type DockTab = IdeBottomTab | 'git';
 
   const IdeDbWatchPanelLazy = lazyComponent(() => import('./dbwatch/IdeDbWatchPanel.svelte'));
+  const IdeDevicesPanelLazy = lazyComponent(() => import('./devices/IdeDevicesPanel.svelte'));
   const IdeDebuggerPanelLazy = lazyComponent(() => import('./IdeDebuggerPanel.svelte'));
   const IdeGitToolPanelLazy = lazyComponent(() => import('./git/IdeGitToolPanel.svelte'));
   const IdeProblemsPanelLazy = lazyComponent(() => import('./IdeProblemsPanel.svelte'));
@@ -163,6 +165,13 @@
       count: ideDbWatch.changeBadgeCount,
       testid: 'ide-tab-dbwatch',
     },
+    {
+      id: 'devices',
+      label: 'Devices',
+      icon: 'phone',
+      count: ideDevices.bootedDevices.length > 0 ? ideDevices.bootedDevices.length : undefined,
+      testid: 'ide-tab-devices',
+    },
     { id: 'terminal', label: 'Terminal', icon: 'terminal', testid: 'ide-tab-terminal' },
   ]));
 
@@ -171,6 +180,7 @@
     if (id === 'debug') return Boolean(ide.activeDebug);
     if (id === 'usages') return ide.usages.length > 0 || ide.usagesLoading;
     if (id === 'dbwatch') return Boolean(ideDbWatch.baselineSnapshot || ideDbWatch.liveWatch);
+    if (id === 'devices') return ideDevices.hasMobileContext;
     return true;
   }
 
@@ -351,6 +361,8 @@
         <LazyMount lazy={IdeUsagesPanelLazy} what="the usages panel" variant="panel" />
       {:else if activeDockTab === 'dbwatch'}
         <LazyMount lazy={IdeDbWatchPanelLazy} what="the database watch panel" variant="panel" />
+      {:else if activeDockTab === 'devices'}
+        <LazyMount lazy={IdeDevicesPanelLazy} what="mobile simulators & emulators" variant="panel" />
       {:else if activeDockTab === 'terminal'}
         <LazyMount lazy={IdeTerminalPanelLazy} what="the terminal" variant="panel" />
       {/if}
@@ -380,5 +392,5 @@
   .dock-shell.stack .dock-header { block-size: auto; min-block-size: 44px; max-block-size: none; }
   .dock-shell.stack .dock-header :global(.otabs) { block-size: auto; min-block-size: 44px; }
   .dock-shell.stack .dock-header :global(.otab) { min-block-size: 44px; }
-  .dock-shell.stack .dock-act { block-size: 36px; inline-size: 36px; }
+  .dock-shell.stack .dock-act { block-size: var(--hit-min); inline-size: var(--hit-min); }
 </style>

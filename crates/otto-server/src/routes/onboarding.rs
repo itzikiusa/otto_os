@@ -28,7 +28,7 @@ pub async fn onboard_root(
         .into());
     }
 
-    let hash = otto_rbac::hash_password(&req.password)?;
+    let hash = otto_rbac::hash_password_bounded(&req.password).await?;
     let display_name = req
         .display_name
         .filter(|d| !d.trim().is_empty())

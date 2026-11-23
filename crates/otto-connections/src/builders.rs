@@ -84,7 +84,12 @@ fn runs_on_jump_host(p: &Value) -> bool {
 /// `MYSQL_PWD` / `PGPASSWORD` / `REDISCLI_AUTH` would only sit in the local ssh
 /// process without ever reaching the client. Builders ask the remote client
 /// to prompt instead (see the MySQL arm).
-fn maybe_wrap_ssh_tunnel(p: &Value, spec: CommandSpec, kind_name: &str) -> Result<CommandSpec> {
+fn maybe_wrap_ssh_tunnel(
+    p: &Value,
+    spec: CommandSpec,
+    kind_name: &str,
+    user_ssh_cfg: Option<&str>,
+) -> Result<CommandSpec> {
     let jump = match opt_str(p, "jump") {
         Some(j) => j,
         None => return Ok(spec),
@@ -100,7 +105,7 @@ fn maybe_wrap_ssh_tunnel(p: &Value, spec: CommandSpec, kind_name: &str) -> Resul
         "-o".into(),
         "StrictHostKeyChecking=accept-new".into(),
     ];
-    ssh_args.extend(keepalive_opts(user_ssh_config().as_deref()));
+    ssh_args.extend(keepalive_opts(user_ssh_cfg));
     if let Some(identity) = opt_str(p, "identity_file") {
         ssh_args.push("-i".into());
         ssh_args.push(identity.into());
@@ -155,10 +160,39 @@ fn user_ssh_config() -> Option<String> {
     std::fs::read_to_string(std::path::Path::new(&home).join(".ssh/config")).ok()
 }
 
+async fn user_ssh_config_async() -> Option<String> {
+    if cfg!(test) {
+        return None;
+    }
+    let home = std::env::var_os("HOME")?;
+    tokio::fs::read_to_string(std::path::Path::new(&home).join(".ssh/config"))
+        .await
+        .ok()
+}
+
+/// Async variant of [`build_command`] that reads `~/.ssh/config` via
+/// `tokio::fs` instead of blocking a Tokio worker thread.
+pub async fn build_command_async(
+    conn: &Connection,
+    secret: Option<&str>,
+) -> Result<(CommandSpec, bool)> {
+    let cfg = user_ssh_config_async().await;
+    build_command_with_ssh_config(conn, secret, cfg.as_deref())
+}
+
 /// Build the terminal command for a connection. Returns the spec plus
 /// `warn_argv`: true when the secret unavoidably appears in argv
 /// (clickhouse-client, and mongosh when its URI carries a password).
 pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(CommandSpec, bool)> {
+    let cfg = user_ssh_config();
+    build_command_with_ssh_config(conn, secret, cfg.as_deref())
+}
+
+fn build_command_with_ssh_config(
+    conn: &Connection,
+    secret: Option<&str>,
+    user_ssh_cfg: Option<&str>,
+) -> Result<(CommandSpec, bool)> {
     let p = &conn.params;
     match conn.kind {
         ConnectionKind::Ssh => {
@@ -174,7 +208,7 @@ pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(Command
                 "-o".to_string(),
                 "StrictHostKeyChecking=accept-new".to_string(),
             ];
-            args.extend(keepalive_opts(user_ssh_config().as_deref()));
+            args.extend(keepalive_opts(user_ssh_cfg));
             let identity = opt_str(p, "identity_file");
             if let Some(identity) = identity {
                 args.push("-i".into());
@@ -246,6 +280,7 @@ pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(Command
                     env,
                 },
                 "mysql",
+                user_ssh_cfg,
             )?;
             Ok((spec, false))
         }
@@ -276,6 +311,7 @@ pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(Command
                     env,
                 },
                 "redis",
+                user_ssh_cfg,
             )?;
             Ok((spec, false))
         }
@@ -317,15 +353,18 @@ pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(Command
             } else {
                 template.to_string()
             };
-            Ok((
+            let spec = maybe_wrap_ssh_tunnel(
+                p,
                 CommandSpec {
                     program: "mongosh".into(),
                     args: vec![conn_string],
                     cwd: None,
                     env: vec![],
                 },
-                warn_argv,
-            ))
+                "mongodb",
+                user_ssh_cfg,
+            )?;
+            Ok((spec, warn_argv))
         }
         ConnectionKind::Clickhouse => {
             let host = match opt_str(p, "host") {
@@ -362,6 +401,7 @@ pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(Command
                     env: vec![],
                 },
                 "clickhouse",
+                user_ssh_cfg,
             )?;
             Ok((spec, warn_argv))
         }
@@ -398,6 +438,7 @@ pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(Command
                     env,
                 },
                 "postgres",
+                user_ssh_cfg,
             )?;
             Ok((spec, false))
         }
@@ -425,17 +466,25 @@ pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(Command
                     rendered = rendered.replace(&placeholder, &replacement);
                 }
             }
-            if rendered.contains("{secret}") {
-                let secret = secret.ok_or_else(|| {
+            let has_secret = rendered.contains("{secret}");
+            let secret_val = if has_secret {
+                Some(secret.ok_or_else(|| {
                     Error::Invalid(
                         "custom command references {secret} but no secret is stored".into(),
                     )
-                })?;
-                rendered = rendered.replace("{secret}", secret);
-            }
+                })?)
+            } else {
+                None
+            };
+            // Tokenize BEFORE substituting `{secret}` so secrets containing
+            // spaces, quotes, or backslashes stay inside their intended argv
+            // token instead of splitting or injecting extra flags.
             let words = shell_words::split(&rendered)
                 .map_err(|e| Error::Invalid(format!("custom command parse error: {e}")))?;
-            let mut iter = words.into_iter();
+            let mut iter = words.into_iter().map(|w| match secret_val {
+                Some(s) => w.replace("{secret}", s),
+                None => w,
+            });
             let program = iter
                 .next()
                 .ok_or_else(|| Error::Invalid("custom command is empty".into()))?;
@@ -446,7 +495,7 @@ pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(Command
                     cwd: None,
                     env: vec![],
                 },
-                false,
+                has_secret,
             ))
         }
     }
@@ -856,13 +905,50 @@ mod tests {
             json!({"command_template":"psql -h {host} -p {port} -U {user} --password={secret}",
                    "host":"pg1","port":5432,"user":"admin"}),
         );
-        let (spec, warn) = build_command(&c, Some("pw")).unwrap();
+        let (spec, warn) = build_command(&c, Some("p w 'quoted' \"dq\"")).unwrap();
         assert_eq!(spec.program, "psql");
         assert_eq!(
             spec.args,
-            vec!["-h", "pg1", "-p", "5432", "-U", "admin", "--password=pw"]
+            vec![
+                "-h",
+                "pg1",
+                "-p",
+                "5432",
+                "-U",
+                "admin",
+                "--password=p w 'quoted' \"dq\"",
+            ]
         );
-        assert!(!warn);
+        // Secret was placed in argv: flagged.
+        assert!(warn);
+
+        // Without {secret}, warn_argv stays false.
+        let plain = conn(
+            ConnectionKind::Custom,
+            json!({"command_template":"psql -h {host}", "host":"pg1"}),
+        );
+        assert!(!build_command(&plain, Some("unused")).unwrap().1);
+    }
+
+    #[test]
+    fn mongodb_tunneled_via_jump() {
+        let c = conn(
+            ConnectionKind::Mongodb,
+            json!({
+                "conn_string": "mongodb://app:{secret}@m1:27017/db?retryWrites=true&authSource=admin",
+                "jump": "ops@bastion.internal"
+            }),
+        );
+        let (spec, warn) = build_command(&c, Some("pw")).unwrap();
+        assert_eq!(spec.program, "ssh");
+        assert!(warn);
+        let sep = spec.args.iter().position(|a| a == "--").unwrap();
+        assert_eq!(spec.args[sep - 1], "ops@bastion.internal");
+        assert_eq!(spec.args[sep + 1], "mongosh");
+        assert_eq!(
+            spec.args[sep + 2],
+            "'mongodb://app:pw@m1:27017/db?retryWrites=true&authSource=admin'"
+        );
     }
 
     #[test]

@@ -34,6 +34,79 @@ pub enum CdpError {
     /// by the SSRF guard. Carries the refused host, never the full URL.
     #[error("navigation to {0} blocked (SSRF guard)")]
     Blocked(String),
+    /// The rendered DOM exceeded the page byte cap before WS serialization.
+    #[error("page exceeded {0} byte cap")]
+    TooLarge(usize),
+}
+
+/// Capacity of the bounded CDP event channel per `CdpClient`. Large enough to
+/// buffer normal navigation + interception traffic without stalling replies,
+/// while bounding daemon memory if an engine floods events.
+const CDP_EVENTS_CAP: usize = 1024;
+
+/// RAII cleanup guard ensuring Lightpanda targets and browser contexts are
+/// closed/disposed even if the driving future times out or is cancelled mid-await.
+struct CdpCleanupGuard {
+    client: Arc<CdpClient>,
+    ctx_id: Option<String>,
+    target_id: Option<String>,
+    armed: bool,
+}
+
+impl CdpCleanupGuard {
+    fn new(client: Arc<CdpClient>) -> Self {
+        Self {
+            client,
+            ctx_id: None,
+            target_id: None,
+            armed: true,
+        }
+    }
+
+    fn set_ctx(&mut self, id: String) {
+        self.ctx_id = Some(id);
+    }
+
+    fn set_target(&mut self, id: String) {
+        self.target_id = Some(id);
+    }
+
+    async fn cleanup(mut self) {
+        self.armed = false;
+        if let Some(tid) = self.target_id.take() {
+            let _ = self.client.close_target(&tid).await;
+        }
+        if let Some(cid) = self.ctx_id.take() {
+            let _ = self.client.dispose_browser_context(&cid).await;
+        }
+        self.client.close().await;
+    }
+}
+
+impl Drop for CdpCleanupGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        let client = self.client.clone();
+        let target_id = self.target_id.take();
+        let ctx_id = self.ctx_id.take();
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(async move {
+                let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                    if let Some(tid) = target_id {
+                        let _ = client.close_target(&tid).await;
+                    }
+                    if let Some(cid) = ctx_id {
+                        let _ = client.dispose_browser_context(&cid).await;
+                    }
+                    client.close().await;
+                })
+                .await;
+            });
+        }
+    }
 }
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>;
@@ -78,9 +151,9 @@ pub struct CdpClient {
     next_id: AtomicU64,
     pending: PendingMap,
     out: mpsc::UnboundedSender<Message>,
-    /// Raw CDP events (`method`, `params`), single-consumer — fine, this
-    /// client drives exactly one page fetch at a time.
-    events: Mutex<mpsc::UnboundedReceiver<(String, Value)>>,
+    /// Raw CDP events (`method`, `params`), single-consumer — bounded so a
+    /// noisy page cannot grow daemon memory without limit.
+    events: Mutex<mpsc::Receiver<(String, Value)>>,
     reader: JoinHandle<()>,
     writer: JoinHandle<()>,
 }
@@ -107,7 +180,7 @@ impl CdpClient {
             }
         });
 
-        let (events_tx, events_rx) = mpsc::unbounded_channel::<(String, Value)>();
+        let (events_tx, events_rx) = mpsc::channel::<(String, Value)>(CDP_EVENTS_CAP);
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let pending_reader = pending.clone();
         let reader = tokio::spawn(async move {
@@ -122,7 +195,7 @@ impl CdpClient {
                     }
                 } else if let Some(method) = v.get("method").and_then(Value::as_str) {
                     let params = v.get("params").cloned().unwrap_or(Value::Null);
-                    let _ = events_tx.send((method.to_string(), params));
+                    let _ = events_tx.try_send((method.to_string(), params));
                 }
             }
         });
@@ -340,9 +413,32 @@ impl CdpClient {
     }
 
     pub async fn evaluate_outer_html(&self, session_id: &str) -> Result<String, CdpError> {
-        self.evaluate(session_id, "document.documentElement.outerHTML")
-            .await?
-            .as_str()
+        // Enforce PAGE_BYTE_CAP in JS BEFORE serializing the entire DOM over
+        // CDP WebSocket so an adversarial multi-hundred-MB DOM cannot OOM the
+        // daemon before the Rust length check runs.
+        let expr = format!(
+            "(() => {{\
+                const el = document.documentElement;\
+                if (!el) return '';\
+                const h = el.outerHTML;\
+                if (h.length > {cap}) return {{ __otto_too_large: true }};\
+                if (h.length > {third} && typeof TextEncoder !== 'undefined' && new TextEncoder().encode(h).length > {cap}) {{\
+                    return {{ __otto_too_large: true }};\
+                }}\
+                return h;\
+            }})()",
+            cap = PAGE_BYTE_CAP,
+            third = PAGE_BYTE_CAP / 3
+        );
+        let val = self.evaluate(session_id, &expr).await?;
+        if val
+            .get("__otto_too_large")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Err(CdpError::TooLarge(PAGE_BYTE_CAP));
+        }
+        val.as_str()
             .map(str::to_string)
             .ok_or_else(|| CdpError::Protocol("Runtime.evaluate: no string value".into()))
     }
@@ -433,6 +529,7 @@ fn cdp_err(e: CdpError) -> EngineError {
         CdpError::Protocol(msg) => EngineError::Nav(msg),
         CdpError::Timeout(_) => EngineError::Timeout(PAGE_TIMEOUT_SECS),
         e @ CdpError::Blocked(_) => EngineError::Nav(e.to_string()),
+        CdpError::TooLarge(cap) => EngineError::TooLarge(cap),
     }
 }
 
@@ -602,11 +699,12 @@ impl LightpandaEngine {
     }
 
     async fn navigate_and_snapshot_inner(&self, url: &str) -> Result<String, EngineError> {
-        let client = CdpClient::connect(&self.cdp_url).await.map_err(cdp_err)?;
-        let html = self.drive(&client, url).await;
-        // Deterministic cleanup on every path — success or the `?` bailouts
-        // inside `drive` — `Drop` is the safety net if this is ever skipped.
-        client.close().await;
+        let client = Arc::new(CdpClient::connect(&self.cdp_url).await.map_err(cdp_err)?);
+        let mut guard = CdpCleanupGuard::new(client.clone());
+        let html = self.drive(&client, url, &mut guard).await;
+        // Deterministic cleanup on normal return; if this future is dropped on
+        // timeout or cancellation, `CdpCleanupGuard::drop` disposes target + ctx.
+        guard.cleanup().await;
         let html = html?;
         if html.len() > PAGE_BYTE_CAP {
             return Err(EngineError::TooLarge(PAGE_BYTE_CAP));
@@ -621,9 +719,17 @@ impl LightpandaEngine {
     /// later fetches. Reads fall back to the connection's default context
     /// when the engine refuses `Target.createBrowserContext` (logged);
     /// `login()` never does (see [`Self::login_flow_inner`]).
-    async fn drive(&self, client: &CdpClient, url: &str) -> Result<String, EngineError> {
+    async fn drive(
+        &self,
+        client: &CdpClient,
+        url: &str,
+        guard: &mut CdpCleanupGuard,
+    ) -> Result<String, EngineError> {
         let ctx = match client.create_browser_context().await {
-            Ok(id) => Some(id),
+            Ok(id) => {
+                guard.set_ctx(id.clone());
+                Some(id)
+            }
             Err(CdpError::Protocol(e)) => {
                 tracing::warn!(
                     "browser: lightpanda refused Target.createBrowserContext ({e}); \
@@ -633,11 +739,7 @@ impl LightpandaEngine {
             }
             Err(e) => return Err(cdp_err(e)),
         };
-        let result = self.drive_in(client, url, ctx.as_deref()).await;
-        if let Some(id) = &ctx {
-            let _ = client.dispose_browser_context(id).await;
-        }
-        result
+        self.drive_in(client, url, ctx.as_deref(), guard).await
     }
 
     async fn drive_in(
@@ -645,23 +747,20 @@ impl LightpandaEngine {
         client: &CdpClient,
         url: &str,
         ctx: Option<&str>,
+        guard: &mut CdpCleanupGuard,
     ) -> Result<String, EngineError> {
         let target_id = client
             .create_target_in("about:blank", ctx)
             .await
             .map_err(cdp_err)?;
+        guard.set_target(target_id.clone());
         let session_id = client.attach_to_target(&target_id).await.map_err(cdp_err)?;
         client.enable_page(&session_id).await.map_err(cdp_err)?;
-        if let Err(e) = self.navigate_guarded(client, &session_id, url).await {
-            let _ = client.close_target(&target_id).await;
-            return Err(e);
-        }
-        let html = client
+        self.navigate_guarded(client, &session_id, url).await?;
+        client
             .evaluate_outer_html(&session_id)
             .await
-            .map_err(cdp_err)?;
-        let _ = client.close_target(&target_id).await;
-        Ok(html)
+            .map_err(cdp_err)
     }
 
     /// Caller must netguard-check `url` first — see crate docs.
@@ -691,25 +790,27 @@ impl LightpandaEngine {
         username: &str,
         password: &str,
     ) -> Result<bool, EngineError> {
-        let client = CdpClient::connect(&self.cdp_url).await.map_err(cdp_err)?;
+        let client = Arc::new(CdpClient::connect(&self.cdp_url).await.map_err(cdp_err)?);
+        let mut guard = CdpCleanupGuard::new(client.clone());
         // A credential is only ever typed into a throwaway, isolated context —
         // never the sidecar's shared default one (whose cookies another
         // workspace's fetch could later see). No isolation → no login.
         let ctx = match client.create_browser_context().await {
-            Ok(id) => id,
+            Ok(id) => {
+                guard.set_ctx(id.clone());
+                id
+            }
             Err(e) => {
-                client.close().await;
+                guard.cleanup().await;
                 return Err(EngineError::Unavailable(format!(
                     "lightpanda cannot create an isolated browser context for sign-in: {e}"
                 )));
             }
         };
         let result = self
-            .drive_login(&client, url, username, password, &ctx)
+            .drive_login(&client, url, username, password, &ctx, &mut guard)
             .await;
-        let _ = client.dispose_browser_context(&ctx).await;
-        // Deterministic cleanup on every path, same as `navigate_and_snapshot_inner`.
-        client.close().await;
+        guard.cleanup().await;
         result
     }
 
@@ -720,17 +821,16 @@ impl LightpandaEngine {
         username: &str,
         password: &str,
         ctx: &str,
+        guard: &mut CdpCleanupGuard,
     ) -> Result<bool, EngineError> {
         let target_id = client
             .create_target_in("about:blank", Some(ctx))
             .await
             .map_err(cdp_err)?;
+        guard.set_target(target_id.clone());
         let session_id = client.attach_to_target(&target_id).await.map_err(cdp_err)?;
         client.enable_page(&session_id).await.map_err(cdp_err)?;
-        if let Err(e) = self.navigate_guarded(client, &session_id, url).await {
-            let _ = client.close_target(&target_id).await;
-            return Err(e);
-        }
+        self.navigate_guarded(client, &session_id, url).await?;
 
         // The credential belongs to the REQUESTED site: the fill script
         // refuses (before touching any field) when the page settled on
@@ -738,7 +838,6 @@ impl LightpandaEngine {
         // not receive the password — or when the form would post it off-site
         // or downgrade it to plain http.
         let Some(expected) = LoginOrigin::of(url) else {
-            let _ = client.close_target(&target_id).await;
             return Err(EngineError::Nav("login url has no host".into()));
         };
 
@@ -747,19 +846,13 @@ impl LightpandaEngine {
         // one safe way to splice an arbitrary username/password into a JS
         // expression string without risking injection into the surrounding
         // script (see `fill_and_submit_expr`'s doc comment).
-        let outcome = match client
+        let outcome = client
             .evaluate(
                 &session_id,
                 &fill_and_submit_expr(username, password, &expected),
             )
             .await
-        {
-            Ok(outcome) => outcome,
-            Err(e) => {
-                let _ = client.close_target(&target_id).await;
-                return Err(login_fill_error(e));
-            }
-        };
+            .map_err(login_fill_error)?;
         let refusal = match outcome.as_str() {
             Some("no-password-field") => Some("no password field found on login page"),
             Some("wrong-origin") => Some(
@@ -773,7 +866,6 @@ impl LightpandaEngine {
             _ => None,
         };
         if let Some(message) = refusal {
-            let _ = client.close_target(&target_id).await;
             return Err(EngineError::Nav(message.into()));
         }
 
@@ -787,7 +879,6 @@ impl LightpandaEngine {
             .pump_until_load(&session_id, Duration::from_secs(5), self.guard)
             .await
         {
-            let _ = client.close_target(&target_id).await;
             return Err(cdp_err(e));
         }
 
@@ -798,7 +889,6 @@ impl LightpandaEngine {
             )
             .await
             .map_err(cdp_err)?;
-        let _ = client.close_target(&target_id).await;
         Ok(!still_present.as_bool().unwrap_or(true))
     }
 }
@@ -1160,5 +1250,124 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, EngineError::Unavailable(_)));
         assert!(!err.to_string().contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn cancel_mid_navigation_disposes_target_and_context_via_drop_guard() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let log: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let log2 = log.clone();
+        let nav_seen = Arc::new(tokio::sync::Notify::new());
+        let nav_seen2 = nav_seen.clone();
+        tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(t))) = ws.next().await {
+                let v: Value = serde_json::from_str(&t).unwrap();
+                let method = v["method"].as_str().unwrap_or("").to_string();
+                log2.lock().unwrap().push(method.clone());
+                let id = v["id"].clone();
+                if method == "Page.navigate" {
+                    nav_seen2.notify_one();
+                    // Stall forever without replying so the caller cancels mid-await.
+                    continue;
+                }
+                let reply = match method.as_str() {
+                    "Target.createBrowserContext" => {
+                        json!({"id": id, "result": {"browserContextId": "CTX_CANCEL"}})
+                    }
+                    "Target.createTarget" => json!({"id": id, "result": {"targetId": "T_CANCEL"}}),
+                    "Target.attachToTarget" => {
+                        json!({"id": id, "result": {"sessionId": "S_CANCEL"}})
+                    }
+                    _ => json!({"id": id, "result": {}}),
+                };
+                if ws
+                    .send(Message::Text(reply.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        let engine = LightpandaEngine::new(format!("ws://127.0.0.1:{port}"));
+        {
+            let fut = engine.navigate_and_snapshot_inner("https://8.8.8.8/");
+            tokio::pin!(fut);
+            tokio::select! {
+                _ = &mut fut => panic!("navigate should stall"),
+                _ = nav_seen.notified() => {}
+            }
+            // Leaving this block drops `fut` and triggers `CdpCleanupGuard::drop`.
+        }
+        for _ in 0..40 {
+            let methods = log.lock().unwrap().clone();
+            if methods.iter().any(|m| m == "Target.closeTarget")
+                && methods.iter().any(|m| m == "Target.disposeBrowserContext")
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let methods = log.lock().unwrap().clone();
+        panic!("expected drop guard to close target and dispose context, got {methods:?}");
+    }
+
+    #[tokio::test]
+    async fn evaluate_outer_html_rejects_oversized_sentinel_before_ws_transfer() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(t))) = ws.next().await {
+                let v: Value = serde_json::from_str(&t).unwrap();
+                let method = v["method"].as_str().unwrap_or("");
+                let id = v["id"].clone();
+                let reply = match method {
+                    "Target.createBrowserContext" => {
+                        json!({"id": id, "result": {"browserContextId": "CTX1"}})
+                    }
+                    "Target.createTarget" => json!({"id": id, "result": {"targetId": "T1"}}),
+                    "Target.attachToTarget" => json!({"id": id, "result": {"sessionId": "S1"}}),
+                    "Runtime.evaluate" => {
+                        let expr = v["params"]["expression"].as_str().unwrap_or("");
+                        let value = if expr == "location.href" {
+                            json!("https://8.8.8.8/")
+                        } else {
+                            json!({"__otto_too_large": true})
+                        };
+                        json!({"id": id, "result": {"result": {"value": value}}})
+                    }
+                    _ => json!({"id": id, "result": {}}),
+                };
+                if ws
+                    .send(Message::Text(reply.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                if method == "Page.navigate" {
+                    let ev =
+                        json!({"method": "Page.loadEventFired", "sessionId": "S1", "params": {}});
+                    let _ = ws.send(Message::Text(ev.to_string().into())).await;
+                }
+            }
+        });
+
+        let engine = LightpandaEngine::new(format!("ws://127.0.0.1:{port}"));
+        let err = engine.fetch_page("https://8.8.8.8/").await.unwrap_err();
+        assert!(
+            matches!(err, EngineError::TooLarge(PAGE_BYTE_CAP)),
+            "{err:?}"
+        );
     }
 }

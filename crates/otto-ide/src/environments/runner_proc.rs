@@ -18,17 +18,11 @@ pub(super) struct ChildProcessGroupGuard {
 }
 
 impl Drop for ChildProcessGroupGuard {
-    #[allow(clippy::disallowed_methods)] // synchronous Drop safeguard against orphan child processes
     fn drop(&mut self) {
         if !self.disarmed && self.is_local {
             #[cfg(unix)]
             if let Some(pid) = self.pid {
-                let _ = std::process::Command::new("/bin/kill")
-                    .args(["-KILL", &format!("-{pid}")])
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
+                crate::lsp_host::pool_spawn::kill_process_group_sync(pid);
             }
         }
     }
@@ -42,34 +36,15 @@ pub(super) async fn kill_child_process_group(
     #[cfg(unix)]
     if is_local {
         if let Some(p) = pid {
-            let neg = format!("-{p}");
-            let _ = Command::new("/bin/kill")
-                .args(["-TERM", &neg])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .await;
+            crate::lsp_host::pool_spawn::term_process_group_sync(p);
             if tokio::time::timeout(Duration::from_millis(150), child.wait())
                 .await
                 .is_ok()
             {
-                let _ = Command::new("/bin/kill")
-                    .args(["-KILL", &neg])
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .await;
+                crate::lsp_host::pool_spawn::kill_process_group_sync(p);
                 return;
             }
-            let _ = Command::new("/bin/kill")
-                .args(["-KILL", &neg])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .await;
+            crate::lsp_host::pool_spawn::kill_process_group_sync(p);
         }
     }
     #[cfg(not(unix))]
@@ -83,13 +58,7 @@ pub(super) async fn cleanup_remaining_process_group(pid: Option<u32>, is_local: 
     #[cfg(unix)]
     if is_local {
         if let Some(p) = pid {
-            let _ = Command::new("/bin/kill")
-                .args(["-KILL", &format!("-{p}")])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .await;
+            crate::lsp_host::pool_spawn::kill_process_group_sync(p);
         }
     }
     #[cfg(not(unix))]

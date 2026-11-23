@@ -325,7 +325,8 @@ impl ConfluenceClient {
         let resp = self.t.send_raw(req, "confluence update_page").await?;
 
         if resp.status() == reqwest::StatusCode::CONFLICT {
-            let body = resp.text().await.unwrap_or_default();
+            let body =
+                crate::atlassian::read_text_capped(resp, crate::atlassian::ERROR_BODY_CAP).await;
             let body = otto_core::text::clip_chars(body.trim(), crate::atlassian::BODY_SNIPPET_MAX);
             // 409 = someone saved a newer version between our read and this
             // write (`version + 1` is taken). Surface it as a conflict, not an

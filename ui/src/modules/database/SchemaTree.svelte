@@ -9,6 +9,7 @@
   import { tick, untrack } from 'svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import RedisKeyFilter from './RedisKeyFilter.svelte';
   import { database } from '../../lib/stores/database.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
@@ -20,6 +21,7 @@
   // have not opened. `searchObjects` (server-side, catalog-backed) is what makes
   // that possible; the scope picker chooses between them.
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
+  $effect(() => () => { if (searchTimer) clearTimeout(searchTimer); });
 
   // Redis has no object namespace to search — its key filter already covers it.
   const searchable = $derived(database.queryLanguage !== 'redis');
@@ -137,11 +139,10 @@
     }
   }
 
-  // ── Expand with inline failure state ───────────────────────────────────────
-  // The store's expand() reports a failed child-load only as a toast and folds
-  // the node back — track the failure here so a "failed — retry" row renders
-  // under the node instead of leaving no trace once the toast fades.
+  // Track failed child-loads inline; clear when switching connections so an
+  // error for `public`/`db0` never bleeds onto another connection's schema.
   let failedNodes = $state<Set<string>>(new Set());
+  $effect(() => { void database.selectedConnId; failedNodes = new Set(); });
   async function expandNode(node: SchemaNode): Promise<void> {
     const wasOpen = database.isExpanded(node.id);
     await database.expand(node);
@@ -557,13 +558,7 @@
       Loading schema…
     </div>
   {:else if database.activeConnStatus?.phase === 'error'}
-    <div class="tree-error">
-      <div class="tree-error-head"><Icon name="warning" size={12} />Couldn’t connect</div>
-      <div class="tree-error-msg">{database.activeConnStatus.error}</div>
-      <button class="btn small tree-error-retry" onclick={() => database.retryConnection()}>
-        <Icon name="refresh" size={12} />Retry
-      </button>
-    </div>
+    <LoadState variant="compact" what="the connection" error={database.activeConnStatus.error} empty={false} onretry={() => database.retryConnection()} />
   {:else if database.schemaRoot.length === 0}
     <div class="tree-empty">No objects. Test the connection or refresh.</div>
   {:else if hits !== null}
@@ -708,29 +703,6 @@
     padding: 8px 6px;
     font-size: var(--fs-s);
     color: var(--text-dim);
-  }
-  .tree-error {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 6px;
-    padding: 10px 8px;
-    font-size: var(--fs-s);
-  }
-  .tree-error-head {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    color: var(--danger);
-    font-weight: 600;
-  }
-  .tree-error-msg {
-    color: var(--text-dim);
-    line-height: 1.4;
-    word-break: break-word;
-  }
-  .tree-error-retry {
-    align-self: flex-start;
   }
   .node {
     display: flex;

@@ -10,6 +10,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import { announceShown } from '../../lib/announce.svelte';
   import TableDesigner from './TableDesigner.svelte';
   import JsonTree from '../../lib/components/JsonTree.svelte';
   import { database } from '../../lib/stores/database.svelte';
@@ -634,10 +635,7 @@
 
 <div class="structure">
   {#if database.objectLoading}
-    <!-- The loaded layout's own header + a skeleton of the Columns table, so
-         the structure fills in place instead of a centred spinner snapping to
-         a top-aligned page when the detail lands. -->
-    <div class="st-head" role="status" aria-live="polite" aria-label="Loading structure">
+    <div class="st-head" use:announceShown={'Loading structure'}>
       <div class="st-title">
         <Icon name="grid" size={14} />
         <h2 class="mono">{loadingName}</h2>

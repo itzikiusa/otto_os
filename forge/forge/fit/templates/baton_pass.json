@@ -1,0 +1,200 @@
+{
+ "name": "baton_pass",
+ "duration": 2.6,
+ "fps": 60,
+ "props": {
+  "baton": {
+   "class": "baton",
+   "file": "baton.glb",
+   "start": {
+    "place": {
+     "anchor": "grip",
+     "axis": "grip_axis",
+     "z": "up",
+     "x": "forward",
+     "at": {
+      "base": "floor",
+      "add": [
+       [
+        "forward",
+        0.34,
+        "m"
+       ],
+       [
+        "right",
+        0.2,
+        "m"
+       ],
+       [
+        "up",
+        0.92,
+        "m"
+       ]
+      ]
+     }
+    }
+   }
+  }
+ },
+ "grips": {
+  "baton_grip": {
+   "hand": "right",
+   "prop": "baton",
+   "kind": "power"
+  }
+ },
+ "order": [
+  "right_hand",
+  "baton",
+  "head"
+ ],
+ "tracks": {
+  "spine": [
+   {
+    "t": 0,
+    "bend": 0
+   },
+   {
+    "t": 0.6,
+    "bend": 10
+   },
+   {
+    "t": 1.2,
+    "bend": 0
+   },
+   {
+    "t": 1.8,
+    "bend": 10
+   },
+   {
+    "t": 2.6,
+    "bend": 0
+   }
+  ],
+  "head": [
+   {
+    "t": 0,
+    "rest": true
+   },
+   {
+    "t": 0.4,
+    "look": "prop:baton.grip"
+   },
+   {
+    "t": 2.2,
+    "look": "prop:baton.grip"
+   },
+   {
+    "t": 2.6,
+    "rest": true
+   }
+  ],
+  "right_hand": [
+   {
+    "t": 0,
+    "rest": true
+   },
+   {
+    "t": 0.6,
+    "grip": "baton_grip"
+   },
+   {
+    "t": 0.7,
+    "grip": "baton_grip"
+   },
+   {
+    "t": 1.25,
+    "carry": {
+     "grip": "baton_grip",
+     "place": {
+      "anchor": "grip",
+      "axis": "grip_axis",
+      "z": "up",
+      "x": "forward",
+      "at": {
+       "base": "joint:chest",
+       "add": [
+        [
+         "forward",
+         0.3,
+         "m"
+        ],
+        [
+         "right",
+         0.12,
+         "m"
+        ]
+       ]
+      }
+     }
+    }
+   },
+   {
+    "t": 1.85,
+    "carry": {
+     "grip": "baton_grip",
+     "place": {
+      "anchor": "grip",
+      "axis": "grip_axis",
+      "z": "up",
+      "x": "forward",
+      "at": {
+       "base": "floor",
+       "add": [
+        [
+         "forward",
+         0.34,
+         "m"
+        ],
+        [
+         "right",
+         0.2,
+         "m"
+        ],
+        [
+         "up",
+         0.92,
+         "m"
+        ]
+       ]
+      }
+     }
+    }
+   },
+   {
+    "t": 1.95,
+    "grip": "baton_grip"
+   },
+   {
+    "t": 2.6,
+    "rest": true
+   }
+  ],
+  "baton": [
+   {
+    "t": 0,
+    "static": true
+   },
+   {
+    "t": 0.7,
+    "follow": "right_hand"
+   },
+   {
+    "t": 1.95,
+    "static": true
+   }
+  ]
+ },
+ "events": [
+  {
+   "t": 0.7,
+   "attach": "baton",
+   "to": "right_hand"
+  },
+  {
+   "t": 1.95,
+   "attach": "baton",
+   "to": "world"
+  }
+ ]
+}

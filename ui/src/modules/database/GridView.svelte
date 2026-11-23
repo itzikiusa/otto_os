@@ -781,23 +781,20 @@
     }
     if (e.key === 'Escape') focusCell = null;
   }
+  function gridFrame(el: HTMLDivElement, p: { mini: boolean; active: string | undefined }) {
+    const sync = (v: { mini: boolean; active: string | undefined }) => {
+      if (v.mini) el.removeAttribute('tabindex'); else el.tabIndex = 0;
+      if (v.active) el.setAttribute('aria-activedescendant', v.active); else el.removeAttribute('aria-activedescendant');
+    };
+    sync(p); el.addEventListener('keydown', onGridKeydown);
+    return { update: sync, destroy() { el.removeEventListener('keydown', onGridKeydown); } };
+  }
+  function gridBody(el: HTMLTableSectionElement) {
+    el.addEventListener('click', onBodyClick); el.addEventListener('dblclick', onBodyDblClick); el.addEventListener('contextmenu', onBodyContextMenu);
+    return { destroy() { el.removeEventListener('click', onBodyClick); el.removeEventListener('dblclick', onBodyDblClick); el.removeEventListener('contextmenu', onBodyContextMenu); } };
+  }
 </script>
-
-<!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions a11y_no_static_element_interactions -->
-<div
-  class="grid-scroll"
-  class:mini
-  data-grid-frame={mini ? undefined : ''}
-  bind:this={scrollEl}
-  onscroll={onScroll}
-  tabindex={mini ? undefined : 0}
-  role={mini ? undefined : 'group'}
-  aria-activedescendant={activeCellId}
-  aria-label={mini
-    ? undefined
-    : 'Results grid — arrow keys move, Enter edits or expands, ⌘C copies the cell, Shift+F10 opens the row menu'}
-  onkeydown={onGridKeydown}
->
+<div class="grid-scroll" class:mini data-grid-frame={mini ? undefined : ''} bind:this={scrollEl} onscroll={onScroll} use:gridFrame={{ mini, active: activeCellId }} role={mini ? undefined : 'group'} aria-label={mini ? undefined : 'Results grid — arrow keys move, Enter edits or expands, ⌘C copies the cell, Shift+F10 opens the row menu'}>
   <table
     class="grid mono"
     class:expanded={expandJson}
@@ -925,8 +922,7 @@
         </tr>
       {/if}
     </thead>
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_click_events_have_key_events -->
-    <tbody onclick={onBodyClick} ondblclick={onBodyDblClick} oncontextmenu={onBodyContextMenu}>
+    <tbody use:gridBody>
       {#if padTop > 0}
         <tr class="spacer" aria-hidden="true"><td colspan={cols.length + 1} style="height:{padTop}px"></td></tr>
       {/if}

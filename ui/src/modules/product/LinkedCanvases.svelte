@@ -2,6 +2,7 @@
   // Canvases linked to this story (canvas scenes whose story_id == this story).
   // Lists them with a click-to-open deep-link into the Canvas module, and a
   // "New canvas" action that creates one already linked to the story.
+  import { onDestroy, untrack } from 'svelte';
   import { rel } from '../../lib/stores/now.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { toastError } from '../../lib/toastError';
@@ -26,22 +27,39 @@
   let linkingId = $state('');
   /** A failed load — inline with Retry (never a silent "No canvases linked"). */
   let loadError = $state<string | null>(null);
+  let loadSeq = 0;
+  let alive = true;
+  onDestroy(() => {
+    alive = false;
+    ++loadSeq;
+  });
 
-  async function load(): Promise<void> {
+  async function load(targetId = storyId): Promise<void> {
+    const seq = ++loadSeq;
     loading = true;
     try {
-      scenes = await api.get<CanvasSceneSummary[]>(`/product/stories/${storyId}/linked-canvases`);
+      const list = await api.get<CanvasSceneSummary[]>(`/product/stories/${encodeURIComponent(targetId)}/linked-canvases`);
+      if (!alive || seq !== loadSeq || targetId !== storyId) return;
+      scenes = list;
       loadError = null;
     } catch (e) {
+      if (!alive || seq !== loadSeq || targetId !== storyId) return;
       // Keep the last good list (LoadState shows a stale bar over it).
       loadError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (alive && seq === loadSeq && targetId === storyId) loading = false;
     }
   }
 
   $effect(() => {
-    if (storyId) void load();
+    const id = storyId;
+    untrack(() => {
+      scenes = [];
+      loadError = null;
+      picking = false;
+      if (id) void load(id);
+      else ++loadSeq;
+    });
   });
 
   // Existing canvases that aren't already linked to this story (the picker).
@@ -71,16 +89,20 @@
 
   async function link(sceneId: string): Promise<void> {
     if (linkingId) return;
+    const targetId = storyId;
     linkingId = sceneId;
     try {
-      await canvas.updateMeta(sceneId, { story_id: storyId });
+      await canvas.updateMeta(sceneId, { story_id: targetId });
+      if (!alive || targetId !== storyId) return;
       picking = false;
-      await load();
+      await load(targetId);
+      if (!alive || targetId !== storyId) return;
       toasts.success('Canvas linked', 'Attached to this story');
     } catch (e) {
+      if (!alive) return;
       toastError('Couldn’t link the canvas', e);
     } finally {
-      linkingId = '';
+      if (alive) linkingId = '';
     }
   }
 

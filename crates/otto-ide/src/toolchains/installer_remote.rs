@@ -150,7 +150,7 @@ pub(super) fn build_remote_install_script(
     sdk: Option<&CatalogSdkEntry>,
 ) -> std::result::Result<String, String> {
     let mut s = String::from(
-        "set -eu\nTC=\"$HOME/.otto/toolchains\"\nmkdir -p \"$TC/.downloads\"\nverify_sha256() {\n  file=\"$1\"; expected=\"$2\"\n  if [ -z \"$expected\" ]; then return 0; fi\n  if command -v sha256sum >/dev/null 2>&1; then\n    actual=$(sha256sum \"$file\" | awk '{print tolower($1)}')\n  elif command -v shasum >/dev/null 2>&1; then\n    actual=$(shasum -a 256 \"$file\" | awk '{print tolower($1)}')\n  elif command -v openssl >/dev/null 2>&1; then\n    actual=$(openssl dgst -sha256 \"$file\" | awk '{print tolower($NF)}')\n  else\n    rm -f \"$file\"\n    echo \"ERROR: no sha256sum/shasum/openssl found to verify checksum\" >&2\n    exit 1\n  fi\n  exp_lc=$(printf '%s' \"$expected\" | tr 'A-Z' 'a-z')\n  if [ \"$actual\" != \"$exp_lc\" ]; then\n    rm -f \"$file\"\n    echo \"SHA-256 checksum mismatch: expected $exp_lc, got $actual\" >&2\n    exit 1\n  fi\n}\nfor d in \"$TC\"/go/sdks/*/go/bin \"$TC\"/node/sdks/*/bin; do [ -d \"$d\" ] && PATH=\"$d:$PATH\"; done\nexport PATH=\"$TC/java/current/bin:$TC/go/current/bin:$TC/node/current/bin:$TC/rust/cargo/bin:$TC/python/bin:$PATH\"\n",
+        "set -eu\nTC=\"$HOME/.otto/toolchains\"\nmkdir -p \"$TC/.downloads\"\nMAX_DL_BYTES=1073741824\nverify_sha256() {\n  file=\"$1\"; expected=\"$2\"\n  if [ -z \"$expected\" ]; then return 0; fi\n  if command -v sha256sum >/dev/null 2>&1; then\n    actual=$(sha256sum \"$file\" | awk '{print tolower($1)}')\n  elif command -v shasum >/dev/null 2>&1; then\n    actual=$(shasum -a 256 \"$file\" | awk '{print tolower($1)}')\n  elif command -v openssl >/dev/null 2>&1; then\n    actual=$(openssl dgst -sha256 \"$file\" | awk '{print tolower($NF)}')\n  else\n    rm -f \"$file\"\n    echo \"ERROR: no sha256sum/shasum/openssl found to verify checksum\" >&2\n    exit 1\n  fi\n  exp_lc=$(printf '%s' \"$expected\" | tr 'A-Z' 'a-z')\n  if [ \"$actual\" != \"$exp_lc\" ]; then\n    rm -f \"$file\"\n    echo \"SHA-256 checksum mismatch: expected $exp_lc, got $actual\" >&2\n    exit 1\n  fi\n}\ndownload_and_verify() {\n  url=\"$1\"; dest=\"$2\"; expected=\"${3:-}\"\n  curl --proto '=https' --tlsv1.2 --max-filesize \"$MAX_DL_BYTES\" -fsSL \"$url\" -o \"$dest\"\n  if [ -z \"$expected\" ]; then\n    cand=$(curl --proto '=https' --tlsv1.2 --max-filesize 4096 -fsSL \"${url}.sha256\" 2>/dev/null | awk '{print $1}' | head -n 1 || true)\n    case \"$cand\" in\n      [0-9a-fA-F]*) [ \"${#cand}\" -eq 64 ] && expected=\"$cand\" ;;\n    esac\n  fi\n  verify_sha256 \"$dest\" \"$expected\"\n}\nfor d in \"$TC\"/go/sdks/*/go/bin \"$TC\"/node/sdks/*/bin; do [ -d \"$d\" ] && PATH=\"$d:$PATH\"; done\nexport PATH=\"$TC/java/current/bin:$TC/go/current/bin:$TC/node/current/bin:$TC/rust/cargo/bin:$TC/python/bin:$PATH\"\n",
     );
     if matches!(
         component,
@@ -177,15 +177,18 @@ pub(super) fn build_remote_install_script(
         );
         match eco {
             EcosystemKind::Java => s.push_str(&format!(
-                "DEST=\"$TC/java/jdks/jdk-{0}\"\nARCH=\"$TC/.downloads/temurin-{0}.tar.gz\"\nrm -rf \"$DEST\" && mkdir -p \"$DEST\"\ncurl -fsSL {u} -o \"$ARCH\"\nverify_sha256 \"$ARCH\" '{exp_sha}'\ntar -xzf \"$ARCH\" -C \"$DEST\"\nrm -f \"$ARCH\"\nJH=\"\"\nfor cand in \"$DEST/Contents/Home\" \"$DEST\" \"$DEST\"/*/Contents/Home \"$DEST\"/*; do\n  if [ -x \"$cand/bin/java\" ]; then JH=\"$cand\"; break; fi\ndone\n[ -n \"$JH\" ] || {{ echo \"JDK archive missing bin/java\" >&2; exit 1; }}\nchmod +x \"$JH/bin/java\"\n\"$JH/bin/java\" -version\nln -sfn \"$JH\" \"$TC/java/current\"\nexport PATH=\"$TC/java/current/bin:$PATH\"\necho \"INSTALLED_PATH:$JH\"\n",
+                "DEST=\"$TC/java/jdks/jdk-{0}\"\nARCH=\"$TC/.downloads/temurin-{0}.tar.gz\"\nrm -rf \"$DEST\" && mkdir -p \"$DEST\"\ndownload_and_verify {u} \"$ARCH\" '{exp_sha}'\ntar -xzf \"$ARCH\" -C \"$DEST\"\nrm -f \"$ARCH\"\nJH=\"\"\nfor cand in \"$DEST/Contents/Home\" \"$DEST\" \"$DEST\"/*/Contents/Home \"$DEST\"/*; do\n  if [ -x \"$cand/bin/java\" ]; then JH=\"$cand\"; break; fi\ndone\n[ -n \"$JH\" ] || {{ echo \"JDK archive missing bin/java\" >&2; exit 1; }}\nchmod +x \"$JH/bin/java\"\n\"$JH/bin/java\" -version\nln -sfn \"$JH\" \"$TC/java/current\"\nexport PATH=\"$TC/java/current/bin:$PATH\"\necho \"INSTALLED_PATH:$JH\"\n",
                 entry.version
             )),
-            EcosystemKind::Go => s.push_str(&format!("DEST=\"$TC/go/sdks/{0}\"\nARCH=\"$TC/.downloads/go-{0}.tar.gz\"\nrm -rf \"$DEST\" && mkdir -p \"$DEST\"\ncurl -fsSL {u} -o \"$ARCH\"\nverify_sha256 \"$ARCH\" '{exp_sha}'\ntar -xzf \"$ARCH\" -C \"$DEST\"\nrm -f \"$ARCH\"\n\"$DEST/go/bin/go\" version\nln -sfn \"$DEST/go\" \"$TC/go/current\"\nexport PATH=\"$TC/go/current/bin:$PATH\"\necho \"INSTALLED_PATH:$DEST/go\"\n", entry.version)),
-            EcosystemKind::Rust => s.push_str(&format!("INIT=\"$TC/.downloads/rustup-init\"\ncurl -fsSL {u} -o \"$INIT\"\nverify_sha256 \"$INIT\" '{exp_sha}'\nchmod +x \"$INIT\"\nRUSTUP_HOME=\"$TC/rust/rustup\" CARGO_HOME=\"$TC/rust/cargo\" \"$INIT\" -y --no-modify-path --default-toolchain {v}\nrm -f \"$INIT\"\necho \"INSTALLED_PATH:$TC/rust/cargo\"\n")),
-            EcosystemKind::Node => s.push_str(&format!("DEST=\"$TC/node/sdks/{0}\"\nARCH=\"$TC/.downloads/node-{0}.tar.gz\"\nrm -rf \"$DEST\" && mkdir -p \"$DEST\"\ncurl -fsSL {u} -o \"$ARCH\"\nverify_sha256 \"$ARCH\" '{exp_sha}'\ntar -xzf \"$ARCH\" --strip-components=1 -C \"$DEST\"\nrm -f \"$ARCH\"\n\"$DEST/bin/node\" --version\nln -sfn \"$DEST\" \"$TC/node/current\"\nexport PATH=\"$TC/node/current/bin:$PATH\"\necho \"INSTALLED_PATH:$DEST\"\n", entry.version)),
-            EcosystemKind::Python => s.push_str(&format!("mkdir -p \"$TC/python/bin\" \"$TC/python/interpreters\"\nARCH=\"$TC/.downloads/uv.tar.gz\"\ncurl -fsSL {u} -o \"$ARCH\"\nUV_SHA='{exp_sha}'\nif [ -z \"$UV_SHA\" ]; then\n  UV_SHA=$(curl -fsSL {u}.sha256 2>/dev/null | awk '{{print $1}}' | head -n 1 || true)\nfi\nverify_sha256 \"$ARCH\" \"$UV_SHA\"\ntar -xzf \"$ARCH\" -C \"$TC/.downloads\"\nrm -f \"$ARCH\"\nUV_BIN=$(find \"$TC/.downloads\" -name uv -type f | head -n 1)\ncp \"$UV_BIN\" \"$TC/python/bin/uv\" && chmod +x \"$TC/python/bin/uv\"\nUV_PYTHON_INSTALL_DIR=\"$TC/python/interpreters\" \"$TC/python/bin/uv\" python install {v}\necho \"INSTALLED_PATH:$TC/python/interpreters\"\n")),
-            EcosystemKind::Shell => s.push_str(&format!("mkdir -p \"$TC/shell/bin\"\nSHFMT_TMP=\"$TC/.downloads/shfmt\"\ncurl -fsSL '{}' -o \"$SHFMT_TMP\"\nverify_sha256 \"$SHFMT_TMP\" '{exp_sha}'\nmv \"$SHFMT_TMP\" \"$TC/shell/bin/shfmt\" && chmod +x \"$TC/shell/bin/shfmt\"\necho \"INSTALLED_PATH:$TC/shell/bin/shfmt\"\n", shfmt_binary_url(&entry.version, platform))),
-            EcosystemKind::Json => s.push_str(&format!("mkdir -p \"$TC/json/bin\"\nJQ_TMP=\"$TC/.downloads/jq\"\ncurl -fsSL '{}' -o \"$JQ_TMP\"\nverify_sha256 \"$JQ_TMP\" '{exp_sha}'\nmv \"$JQ_TMP\" \"$TC/json/bin/jq\" && chmod +x \"$TC/json/bin/jq\"\necho \"INSTALLED_PATH:$TC/json/bin/jq\"\n", jq_binary_url(&entry.version, platform))),
+            EcosystemKind::Go => s.push_str(&format!("DEST=\"$TC/go/sdks/{0}\"\nARCH=\"$TC/.downloads/go-{0}.tar.gz\"\nrm -rf \"$DEST\" && mkdir -p \"$DEST\"\ndownload_and_verify {u} \"$ARCH\" '{exp_sha}'\ntar -xzf \"$ARCH\" -C \"$DEST\"\nrm -f \"$ARCH\"\n\"$DEST/go/bin/go\" version\nln -sfn \"$DEST/go\" \"$TC/go/current\"\nexport PATH=\"$TC/go/current/bin:$PATH\"\necho \"INSTALLED_PATH:$DEST/go\"\n", entry.version)),
+            EcosystemKind::Rust => s.push_str(&format!("INIT=\"$TC/.downloads/rustup-init\"\ndownload_and_verify {u} \"$INIT\" '{exp_sha}'\nchmod +x \"$INIT\"\nRUSTUP_HOME=\"$TC/rust/rustup\" CARGO_HOME=\"$TC/rust/cargo\" \"$INIT\" -y --no-modify-path --default-toolchain {v}\nrm -f \"$INIT\"\necho \"INSTALLED_PATH:$TC/rust/cargo\"\n")),
+            EcosystemKind::Node => s.push_str(&format!("DEST=\"$TC/node/sdks/{0}\"\nARCH=\"$TC/.downloads/node-{0}.tar.gz\"\nrm -rf \"$DEST\" && mkdir -p \"$DEST\"\ndownload_and_verify {u} \"$ARCH\" '{exp_sha}'\ntar -xzf \"$ARCH\" --strip-components=1 -C \"$DEST\"\nrm -f \"$ARCH\"\n\"$DEST/bin/node\" --version\nln -sfn \"$DEST\" \"$TC/node/current\"\nexport PATH=\"$TC/node/current/bin:$PATH\"\necho \"INSTALLED_PATH:$DEST\"\n", entry.version)),
+            EcosystemKind::Python => s.push_str(&format!("mkdir -p \"$TC/python/bin\" \"$TC/python/interpreters\"\nARCH=\"$TC/.downloads/uv.tar.gz\"\nUV_SHA='{exp_sha}'\ndownload_and_verify {u} \"$ARCH\" \"$UV_SHA\"\ntar -xzf \"$ARCH\" -C \"$TC/.downloads\"\nrm -f \"$ARCH\"\nUV_BIN=$(find \"$TC/.downloads\" -name uv -type f | head -n 1)\ncp \"$UV_BIN\" \"$TC/python/bin/uv\" && chmod +x \"$TC/python/bin/uv\"\nUV_PYTHON_INSTALL_DIR=\"$TC/python/interpreters\" \"$TC/python/bin/uv\" python install {v}\necho \"INSTALLED_PATH:$TC/python/interpreters\"\n")),
+            EcosystemKind::Shell => s.push_str(&format!("mkdir -p \"$TC/shell/bin\"\nSHFMT_TMP=\"$TC/.downloads/shfmt\"\ndownload_and_verify '{}' \"$SHFMT_TMP\" '{exp_sha}'\nmv \"$SHFMT_TMP\" \"$TC/shell/bin/shfmt\" && chmod +x \"$TC/shell/bin/shfmt\"\necho \"INSTALLED_PATH:$TC/shell/bin/shfmt\"\n", shfmt_binary_url(&entry.version, platform))),
+            EcosystemKind::Json => s.push_str(&format!("mkdir -p \"$TC/json/bin\"\nJQ_TMP=\"$TC/.downloads/jq\"\ndownload_and_verify '{}' \"$JQ_TMP\" '{exp_sha}'\nmv \"$JQ_TMP\" \"$TC/json/bin/jq\" && chmod +x \"$TC/json/bin/jq\"\necho \"INSTALLED_PATH:$TC/json/bin/jq\"\n", jq_binary_url(&entry.version, platform))),
+            EcosystemKind::Ios | EcosystemKind::Android | EcosystemKind::Flutter => {
+                return Err(format!("{} SDK is not installed via remote archive scripts", eco.display_name()));
+            }
         }
     }
     if matches!(
@@ -193,13 +196,16 @@ pub(super) fn build_remote_install_script(
         IdeInstallComponent::Lsp | IdeInstallComponent::All
     ) {
         match eco {
-            EcosystemKind::Java => s.push_str(&format!("mkdir -p \"$TC/java/lsp\"\ncurl -fsSL '{JDTLS_TARBALL_URL}' | tar -xz -C \"$TC/java/lsp\" && chmod +x \"$TC/java/lsp/bin/jdtls\"\necho \"INSTALLED_PATH:$TC/java/lsp/bin/jdtls\"\n")),
+            EcosystemKind::Java => s.push_str(&format!("mkdir -p \"$TC/java/lsp\"\nARCH=\"$TC/.downloads/jdtls.tar.gz\"\ndownload_and_verify '{JDTLS_TARBALL_URL}' \"$ARCH\"\ntar -xzf \"$ARCH\" -C \"$TC/java/lsp\" && rm -f \"$ARCH\" && chmod +x \"$TC/java/lsp/bin/jdtls\"\necho \"INSTALLED_PATH:$TC/java/lsp/bin/jdtls\"\n")),
             EcosystemKind::Go => s.push_str(&format!("export PATH=\"$TC/go/current/bin:$PATH\"\nmkdir -p \"$TC/go/bin\"\nGOBIN=\"$TC/go/bin\" GOPATH=\"$TC/go/gopath\" go install '{GOPLS_PKG}'\necho \"INSTALLED_PATH:$TC/go/bin/gopls\"\n")),
-            EcosystemKind::Rust => s.push_str(&format!("mkdir -p \"$TC/rust/bin\"\ncurl -fsSL '{}' | gzip -d > \"$TC/rust/bin/rust-analyzer\" && chmod +x \"$TC/rust/bin/rust-analyzer\"\necho \"INSTALLED_PATH:$TC/rust/bin/rust-analyzer\"\n", rust_analyzer_gz_url(platform))),
+            EcosystemKind::Rust => s.push_str(&format!("mkdir -p \"$TC/rust/bin\"\nARCH=\"$TC/.downloads/rust-analyzer.gz\"\ndownload_and_verify '{}' \"$ARCH\"\ngzip -dc \"$ARCH\" > \"$TC/rust/bin/rust-analyzer\" && rm -f \"$ARCH\" && chmod +x \"$TC/rust/bin/rust-analyzer\"\necho \"INSTALLED_PATH:$TC/rust/bin/rust-analyzer\"\n", rust_analyzer_gz_url(platform))),
             EcosystemKind::Node => s.push_str("export PATH=\"$TC/node/current/bin:$PATH\"\nmkdir -p \"$TC/node/lsp\"\nnpm install --prefix \"$TC/node/lsp\" typescript typescript-language-server\necho \"INSTALLED_PATH:$TC/node/lsp/node_modules/.bin/typescript-language-server\"\n"),
             EcosystemKind::Python => s.push_str(&format!("UV_TOOL_DIR=\"$TC/python/tools\" UV_TOOL_BIN_DIR=\"$TC/python/bin\" \"$TC/python/bin/uv\" tool install --force '{PYRIGHT_PKG}'\necho \"INSTALLED_PATH:$TC/python/bin/pyright-langserver\"\n")),
             EcosystemKind::Shell => s.push_str("export PATH=\"$TC/node/current/bin:$PATH\"\nmkdir -p \"$TC/shell/lsp\"\nnpm install --prefix \"$TC/shell/lsp\" bash-language-server\necho \"INSTALLED_PATH:$TC/shell/lsp/node_modules/.bin/bash-language-server\"\n"),
             EcosystemKind::Json => s.push_str("export PATH=\"$TC/node/current/bin:$PATH\"\nmkdir -p \"$TC/json/lsp\"\nnpm install --prefix \"$TC/json/lsp\" vscode-langservers-extracted\necho \"INSTALLED_PATH:$TC/json/lsp/node_modules/.bin/vscode-json-language-server\"\n"),
+            EcosystemKind::Ios | EcosystemKind::Android | EcosystemKind::Flutter => {
+                return Err(format!("{} LSP is provided by the native SDK installation", eco.display_name()));
+            }
         }
     }
     if matches!(
@@ -207,13 +213,16 @@ pub(super) fn build_remote_install_script(
         IdeInstallComponent::Dap | IdeInstallComponent::All
     ) {
         match eco {
-            EcosystemKind::Java => s.push_str(&format!("mkdir -p \"$TC/java/dap\"\ncurl -fsSL '{JAVA_DEBUG_JAR_URL}' -o \"$TC/java/dap/{JAVA_DEBUG_JAR_NAME}\"\necho \"INSTALLED_PATH:$TC/java/dap/{JAVA_DEBUG_JAR_NAME}\"\n")),
+            EcosystemKind::Java => s.push_str(&format!("mkdir -p \"$TC/java/dap\"\nJAR_TMP=\"$TC/.downloads/{JAVA_DEBUG_JAR_NAME}\"\ndownload_and_verify '{JAVA_DEBUG_JAR_URL}' \"$JAR_TMP\"\nmv \"$JAR_TMP\" \"$TC/java/dap/{JAVA_DEBUG_JAR_NAME}\"\necho \"INSTALLED_PATH:$TC/java/dap/{JAVA_DEBUG_JAR_NAME}\"\n")),
             EcosystemKind::Go => s.push_str(&format!("export PATH=\"$TC/go/current/bin:$PATH\"\nmkdir -p \"$TC/go/bin\"\nGOBIN=\"$TC/go/bin\" GOPATH=\"$TC/go/gopath\" go install '{DLV_PKG}'\necho \"INSTALLED_PATH:$TC/go/bin/dlv\"\n")),
-            EcosystemKind::Rust => s.push_str(&format!("rm -rf \"$TC/rust/dap\" && mkdir -p \"$TC/rust/dap\"\ncurl -fsSL '{}' -o \"$TC/.downloads/codelldb.vsix\" && unzip -q -o \"$TC/.downloads/codelldb.vsix\" -d \"$TC/rust/dap\" && chmod +x \"$TC/rust/dap/extension/adapter/codelldb\"\nln -sfn \"$TC/rust/dap/extension\" \"$TC/rust/codelldb\"\necho \"INSTALLED_PATH:$TC/rust/dap/extension/adapter/codelldb\"\n", codelldb_vsix_url(platform))),
-            EcosystemKind::Node => s.push_str(&format!("rm -rf \"$TC/node/dap\" && mkdir -p \"$TC/node/dap\"\ncurl -fsSL '{JS_DEBUG_TARBALL_URL}' | tar -xz -C \"$TC/node/dap\"\nln -sfn \"$TC/node/dap/js-debug\" \"$TC/node/js-debug\"\necho \"INSTALLED_PATH:$TC/node/dap/js-debug/src/dapDebugServer.js\"\n")),
+            EcosystemKind::Rust => s.push_str(&format!("rm -rf \"$TC/rust/dap\" && mkdir -p \"$TC/rust/dap\"\nVSIX=\"$TC/.downloads/codelldb.vsix\"\ndownload_and_verify '{}' \"$VSIX\"\nunzip -q -o \"$VSIX\" -d \"$TC/rust/dap\" && rm -f \"$VSIX\" && chmod +x \"$TC/rust/dap/extension/adapter/codelldb\"\nln -sfn \"$TC/rust/dap/extension\" \"$TC/rust/codelldb\"\necho \"INSTALLED_PATH:$TC/rust/dap/extension/adapter/codelldb\"\n", codelldb_vsix_url(platform))),
+            EcosystemKind::Node => s.push_str(&format!("rm -rf \"$TC/node/dap\" && mkdir -p \"$TC/node/dap\"\nARCH=\"$TC/.downloads/js-debug.tar.gz\"\ndownload_and_verify '{JS_DEBUG_TARBALL_URL}' \"$ARCH\"\ntar -xzf \"$ARCH\" -C \"$TC/node/dap\" && rm -f \"$ARCH\"\nln -sfn \"$TC/node/dap/js-debug\" \"$TC/node/js-debug\"\necho \"INSTALLED_PATH:$TC/node/dap/js-debug/src/dapDebugServer.js\"\n")),
             EcosystemKind::Python => s.push_str(&format!("\"$TC/python/bin/uv\" venv --clear \"$TC/python/dap\" && \"$TC/python/bin/uv\" pip install --python \"$TC/python/dap/bin/python\" '{DEBUGPY_PKG}'\necho \"INSTALLED_PATH:$TC/python/dap/bin/python\"\n")),
             EcosystemKind::Shell => s.push_str("mkdir -p \"$TC/shell/bin\"\nprintf '#!/usr/bin/env bash\\nexec bash -x \"$@\"\\n' > \"$TC/shell/bin/bashdb\" && chmod +x \"$TC/shell/bin/bashdb\"\necho \"INSTALLED_PATH:$TC/shell/bin/bashdb\"\n"),
-            EcosystemKind::Json => s.push_str(&format!("mkdir -p \"$TC/json/bin\"\ncurl -fsSL '{}' -o \"$TC/json/bin/jq\" && chmod +x \"$TC/json/bin/jq\"\necho \"INSTALLED_PATH:$TC/json/bin/jq\"\n", jq_binary_url("1.7.1", platform))),
+            EcosystemKind::Json => s.push_str(&format!("mkdir -p \"$TC/json/bin\"\nJQ_TMP=\"$TC/.downloads/jq\"\ndownload_and_verify '{}' \"$JQ_TMP\"\nmv \"$JQ_TMP\" \"$TC/json/bin/jq\" && chmod +x \"$TC/json/bin/jq\"\necho \"INSTALLED_PATH:$TC/json/bin/jq\"\n", jq_binary_url("1.7.1", platform))),
+            EcosystemKind::Ios | EcosystemKind::Android | EcosystemKind::Flutter => {
+                return Err(format!("{} debugger is provided by the native SDK installation", eco.display_name()));
+            }
         }
     }
     Ok(s)
@@ -345,5 +354,67 @@ mod tests {
                 .await
                 .unwrap_err();
         assert!(err_private.contains("blocked toolchain URL"));
+    }
+
+    #[tokio::test]
+    async fn download_https_to_file_capped_rejects_oversized_archive_and_cleans_up() {
+        use crate::toolchains::installer::download_https_to_file_capped;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            // Serve a chunked response (no Content-Length) exceeding 512 bytes.
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut req = [0u8; 1024];
+            let _ = sock.read(&mut req).await;
+            let body = "A".repeat(1024);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{body}\r\n0\r\n\r\n",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = ToolchainManager::new(tmp.path().join("data"));
+        mgr.allow_test_loopback
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let dest = tmp.path().join("sdk.tar.gz");
+        let url = format!("http://127.0.0.1:{port}/sdk.tar.gz");
+        let err = download_https_to_file_capped(&mgr, "job_cap", &url, &dest, None, 10, 512)
+            .await
+            .unwrap_err();
+        assert!(err.contains("exceeded 512 byte limit"), "unexpected: {err}");
+        assert!(!dest.exists(), "partial oversized file must be deleted");
+        drop(server);
+    }
+
+    #[test]
+    fn remote_install_scripts_avoid_unverified_curl_pipes_and_cap_downloads() {
+        let platform = TargetPlatform::host();
+        for (eco, comp) in [
+            (EcosystemKind::Java, IdeInstallComponent::Lsp),
+            (EcosystemKind::Rust, IdeInstallComponent::Lsp),
+            (EcosystemKind::Java, IdeInstallComponent::Dap),
+            (EcosystemKind::Rust, IdeInstallComponent::Dap),
+            (EcosystemKind::Node, IdeInstallComponent::Dap),
+            (EcosystemKind::Json, IdeInstallComponent::Dap),
+        ] {
+            let script = build_remote_install_script(eco, comp, platform, None).unwrap();
+            assert!(
+                !script.contains("| tar") && !script.contains("| gzip"),
+                "remote {eco:?}/{comp:?} script must not pipe curl directly into tar/gzip:\n{script}"
+            );
+            assert!(
+                script.contains("download_and_verify"),
+                "remote {eco:?}/{comp:?} script must verify downloaded artifacts:\n{script}"
+            );
+            assert!(
+                script.contains("--max-filesize"),
+                "remote {eco:?}/{comp:?} script must bound download size:\n{script}"
+            );
+        }
     }
 }

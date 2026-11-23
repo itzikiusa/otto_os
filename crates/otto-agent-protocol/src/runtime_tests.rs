@@ -913,6 +913,84 @@ async fn closed_and_failed_sessions_evict_from_live_map_after_persistence() {
     );
 }
 
+/// T3 Code #39049: a released thread keeps nothing loaded once its agent
+/// process is gone (projection, replay ring, persister); a read loads it again.
+#[tokio::test]
+async fn released_sessions_leave_the_live_map_once_their_process_exits() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap().to_string();
+    let host = Arc::new(LibTestHost {
+        root: cwd.clone(),
+        events: Mutex::new(Vec::new()),
+        notify: tokio::sync::Notify::new(),
+    });
+    let drivers: Arc<dyn DriverFactory> = Arc::new(|_| -> Option<Box<dyn StructuredDriver>> {
+        Some(Box::new(TimedShellDriver {
+            turn_id: None,
+            thought_text: String::new(),
+            msg_text: String::new(),
+        }))
+    });
+    let rt = AgentRuntime::new(
+        AgentRuntimeRepo::new(test_pool().await),
+        Arc::clone(&host) as Arc<dyn RuntimeHost>,
+        drivers,
+        RuntimeConfig {
+            close_grace: Duration::from_millis(20),
+            attachments_dir: dir.path().join("att"),
+            ..RuntimeConfig::default()
+        },
+    );
+    let s = rt
+        .create(
+            &"u1".into(),
+            &"w1".into(),
+            CreateRuntimeSessionReq {
+                title_auto: false,
+                provider: Some(RuntimeProvider::Claude),
+                cwd: Some(cwd),
+                title: None,
+                model: None,
+                access_mode: Some(RuntimeAccessMode::FullAccess),
+                meta: None,
+            },
+        )
+        .await
+        .unwrap();
+    rt.prompt(&s.id, "hi").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !host
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e.body, RuntimeEventBody::TurnTerminal { .. }))
+        {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    })
+    .await
+    .expect("the turn ends");
+
+    let later = Utc::now() + chrono::TimeDelta::minutes(31);
+    assert_eq!(
+        rt.release_idle_processes(30, later).await,
+        vec![s.id.clone()]
+    );
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while rt.inner.live.contains_key(&s.id) {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    })
+    .await
+    .expect("a released session must leave AgentRuntime::live once its process exits");
+    assert_eq!(
+        rt.get(&s.id).await.unwrap().status,
+        otto_core::agent_runtime::RuntimeSessionStatus::Dormant,
+        "released, not closed"
+    );
+}
+
 #[tokio::test]
 async fn prompt_validates_attachment_magic_bytes_and_rejects_dash_prefixed_models() {
     use otto_core::agent_runtime::{PromptFile, PromptImage};

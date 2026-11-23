@@ -524,7 +524,7 @@ impl BrokersService {
                 .map(|url| (url, row.tls_skip_verify)),
         });
         let now = Instant::now();
-        self.pool.insert(
+        let replaced = self.pool.insert(
             id.clone(),
             Pooled {
                 lease: client.clone(),
@@ -532,6 +532,17 @@ impl BrokersService {
                 last_used: now,
             },
         );
+        // Dropping the superseded `Pooled` can be the last `Arc` ref to an old
+        // `KafkaClient`, running `rd_kafka_destroy` (blocking thread join).
+        // Keep it off runtime workers just like `evict` and `reap_idle`.
+        if let Some(old) = replaced {
+            match tokio::runtime::Handle::try_current() {
+                Ok(h) => {
+                    h.spawn_blocking(move || drop(old));
+                }
+                Err(_) => drop(old),
+            }
+        }
         Ok((client, registry))
     }
 

@@ -4,7 +4,6 @@
   // download, remove and the add form. Split out of OverviewTab
   // (architecture-5-04); OverviewTab is keyed by story, so a fresh instance —
   // and fresh form/expansion state — per story.
-  import { announceShown } from '../../lib/announce.svelte';
   import { tick, untrack } from 'svelte';
   import { rel } from '../../lib/stores/now.svelte';
   import { toastError } from '../../lib/toastError';
@@ -118,15 +117,17 @@
   </div>
   <div class="muted" data-find-skip>⌘F searches all imported transcripts, including older pages. Download keeps the complete text available.</div>
 
-  {#if product.transcriptsError}
-    <div use:announceShown={{ text: `Couldn’t load transcripts. ${product.transcriptsError}`, assertive: true }}>Couldn’t load transcripts. {product.transcriptsError}</div>
-    <button class="btn small" onclick={() => void product.loadTranscripts()}>Retry</button>
-  {/if}
-  {#if product.loadingTranscripts}
-    <LoadState what="transcripts" variant="compact" loading empty />
-  {:else if product.transcripts.length === 0 && !product.transcriptsError}
-    <div class="muted">No transcripts yet. Paste a conversation below.</div>
-  {:else}
+  <LoadState
+    what="transcripts"
+    variant="compact"
+    loading={product.loadingTranscripts}
+    error={product.transcriptsError}
+    empty={product.transcripts.length === 0}
+    onretry={() => void product.loadTranscripts()}
+  >
+    {#snippet emptyView()}
+      <div class="muted">No transcripts yet. Paste a conversation below.</div>
+    {/snippet}
     <div class="transcript-list" bind:this={transcriptListEl}>
       {#each product.transcripts as t (t.id)}
         <div class="transcript-item" data-transcript-id={t.id}>
@@ -151,17 +152,25 @@
           {#if expandedTranscripts[t.id]}
             {#if product.transcriptBodies[t.id] !== undefined}
               <div class="transcript-body">{product.transcriptBodies[t.id]}</div>
-            {:else if product.transcriptBodyLoading[t.id]}
-              <div data-find-skip><LoadState what="this transcript" variant="compact" loading empty /></div>
+            {:else if product.transcriptBodyLoading[t.id] || product.transcriptBodyErrors[t.id]}
+              <div data-find-skip>
+                <LoadState
+                  what="this transcript"
+                  variant="compact"
+                  loading={product.transcriptBodyLoading[t.id]}
+                  error={product.transcriptBodyErrors[t.id] ?? null}
+                  empty
+                  onretry={() => void product.loadTranscriptBody(t.id)}
+                />
+              </div>
             {:else}
-              {#if product.transcriptBodyErrors[t.id]}<div data-find-skip use:announceShown={{ text: product.transcriptBodyErrors[t.id], assertive: true }}>{product.transcriptBodyErrors[t.id]}</div>{/if}
-              <button class="btn small" data-find-skip onclick={() => void product.loadTranscriptBody(t.id)}>{product.transcriptBodyErrors[t.id] ? 'Retry' : 'Load transcript'}</button>
+              <button class="btn small" data-find-skip onclick={() => void product.loadTranscriptBody(t.id)}>Load transcript</button>
             {/if}
           {/if}
         </div>
       {/each}
     </div>
-  {/if}
+  </LoadState>
   {#if product.transcriptPreviousCursors.length || product.transcriptNextCursor}
     <div data-find-skip>
       <button class="btn small" disabled={product.loadingTranscripts || !product.transcriptPreviousCursors.length} onclick={() => void product.previousTranscriptPage()}>Previous transcripts</button>

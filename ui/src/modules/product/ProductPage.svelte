@@ -31,6 +31,7 @@
   import PlanTab from './PlanTab.svelte';
   import MockupsTab from './MockupsTab.svelte';
   import { canonicalProductTab } from './chatActions';
+  import { nextStoryAfterDelete } from './storySelection';
   import ChatTab from './ChatTab.svelte';
   import ProductModeTabs, { type ProductMode } from '../../lib/components/ProductModeTabs.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -118,10 +119,11 @@
     const existing = [...new Set(product.childrenOf(epic.id).map((c) => c.folder).filter(Boolean))];
     const folder = await confirmer.promptText(
       existing.length ? `Folder (existing: ${existing.join(', ')}) — leave empty for none:` : 'Folder (e.g. Design, PO) — leave empty for none:',
-      { title: 'Folder', confirmLabel: 'Create', placeholder: 'Design' },
+      { title: 'Folder', confirmLabel: 'Create', placeholder: 'Design', allowEmpty: true },
     );
+    if (folder === null) return;
     try {
-      await product.createChild(epic.id, { title, tree_kind: kind, folder: folder ?? '' });
+      await product.createChild(epic.id, { title, tree_kind: kind, folder });
       collapsedEpics = { ...collapsedEpics, [epic.id]: false };
       product.tab = 'overview';
       mobileSection = 'content';
@@ -195,11 +197,11 @@
     const existing = s.parent_id ? [...new Set(product.childrenOf(s.parent_id).map((c) => c.folder).filter(Boolean))] : [];
     const folder = await confirmer.promptText(
       existing.length ? `Folder (existing: ${existing.join(', ')}). Empty = unfiled:` : 'Folder name (e.g. Design, PO). Empty = unfiled:',
-      { title: 'Set folder', confirmLabel: 'Save', initial: s.folder, placeholder: 'Design' },
+      { title: 'Set folder', confirmLabel: 'Save', initial: s.folder, placeholder: 'Design', allowEmpty: true },
     );
-    if (folder === s.folder) return;
+    if (folder === null || folder === s.folder) return;
     try {
-      await product.patchStory(s.id, { folder: folder ?? '' });
+      await product.patchStory(s.id, { folder });
     } catch (e) {
       toastError('Couldn’t set the folder', e);
     }
@@ -230,9 +232,9 @@
   const canDesign = $derived(auth.can('design', 'view'));
 
   async function handleModeSelect(mode: ProductMode): Promise<void> {
-    if (mode === 'design') {
+    if (mode === 'design' || mode === 'voice' || mode === 'create') {
       if (!(await product.mayLeaveDraft())) return;
-      router.go('design');
+      router.go(mode === 'voice' ? 'design/tts' : mode === 'create' ? 'design/create' : 'design');
       return;
     }
     await product.changeView(mode);
@@ -534,15 +536,10 @@
     );
     if (!ok) return;
     // Deleting the open story lands on its neighbour (the row below, else the
-    // one above) — never on an empty "pick one" pane.
+    // one above) — never on an empty "pick one" pane. Children move to top level
+    // rather than being deleted, so only `s.id` is excluded.
     const wasOpen = product.selectedId === s.id;
-    const order = visibleOrder();
-    const i = order.findIndex((x) => x.id === s.id);
-    const gone = new Set([s.id, ...product.childrenOf(s.id).map((c) => c.id)]);
-    const next =
-      order.slice(i + 1).find((x) => !gone.has(x.id)) ??
-      order.slice(0, Math.max(i, 0)).reverse().find((x) => !gone.has(x.id)) ??
-      null;
+    const next = nextStoryAfterDelete(visibleOrder(), s.id);
     try {
       await product.deleteStory(s.id);
     } catch (e) {
@@ -661,7 +658,7 @@
 </div>
 {:else}
 <div class="product-shell">
-<PageHeader
+<PageHeader tabsPlacement="start"
   title={viewport.isPhone && mobileSection === 'list' ? 'Product' : headerTitle}
   crumbs={viewport.isPhone && mobileSection === 'list' ? [] : headerCrumbs}
   subtitle={product.view === 'stories' && selectedStory ? undefined : 'Jira / Confluence stories — analyze, plan, test, publish back'}
@@ -807,7 +804,7 @@
          shows no pills, since the group click already navigates there. -->
     {#if product.view === 'stories' && product.selectedId}
       <div class="product-header-row2">
-        <div class="tab-strip" role="tablist" aria-label="Story tabs" tabindex="-1" onkeydown={onTabKey}>
+        <div class="tab-strip" role="tablist" aria-label="Story tabs" tabindex="-1" onkeydown={onTabKey}><!-- ui-guards: allow — keyboard-complete via onTabKey; async leave-guard + E2E .tab-strip .st -->
           {#each visibleGroups as g (g.id)}
             <button
               class="st"
@@ -826,7 +823,7 @@
           <!-- Keeps the `tab-strip` class too (on top of `sub-tab-strip`): the
                product-mockups E2E locates a sub-view button via the generic
                `.tab-strip .st` selector, matching whichever strip has it. -->
-          <div class="tab-strip sub-tab-strip" role="tablist" aria-label="{activeGroup.label} sub-tabs" tabindex="-1" onkeydown={onTabKey}>
+          <div class="tab-strip sub-tab-strip" role="tablist" aria-label="{activeGroup.label} sub-tabs" tabindex="-1" onkeydown={onTabKey}><!-- ui-guards: allow — keyboard-complete via onTabKey; E2E .tab-strip .st -->
             {#each activeGroup.subs as s (s.id)}
               <button
                 class="st"
@@ -903,13 +900,11 @@
       {:else if product.tab === 'notes'}
         <NotesTab />
       {:else if product.tab === 'rewrite'}
-        {#key product.selectedId}
-          <RewriteTab />
-        {/key}
+        {#key product.selectedId}<RewriteTab />{/key}
       {:else if product.tab === 'testcases'}
         <TestCasesTab />
       {:else if product.tab === 'plan'}
-        <PlanTab />
+        {#key product.selectedId}<PlanTab />{/key}
       {:else if product.tab === 'history'}
         <LazyMount lazy={HistoryLazy} what="the story history" variant="panel" />
       {:else if product.tab === 'inject'}

@@ -33,6 +33,8 @@
   import { mcpCpExtraApi } from './cp-api';
   import NeedsYouLink from '../home/LazyNeedsYouLink.svelte';
   import { userLabel } from '../../lib/userLabel';
+  import { scrollBehavior } from '../../lib/motion';
+  import { approvalTriageAction } from './approvalKeys';
   import type { MemberEntry } from '../../lib/api/types';
 
   let approvals = $state<McpApproval[]>([]);
@@ -88,7 +90,9 @@
       mcpCpExtraApi
         .members(w)
         .then((m) => (members = [...members, ...m]))
-        .catch(() => {});
+        .catch(() => {
+          membersFetched.delete(w);
+        });
     }
   });
   const who = (id: string | null | undefined): string => userLabel(id, auth.me?.id, members);
@@ -148,6 +152,9 @@
     busy = { ...busy, [a.id]: approved ? 'approve' : 'deny' };
     try {
       await mcpCpApi.cpDecide(a.id, { approved, note: reason?.trim() || notes[a.id]?.trim() || null });
+      const nextNotes = { ...notes };
+      delete nextNotes[a.id];
+      notes = nextNotes;
       toasts.success(approved ? 'Approved' : 'Denied', a.title);
       ondecided?.();
       await load();
@@ -171,12 +178,52 @@
       return json;
     }
   }
+
+  let focusedId = $state<string | null>(null);
+  const pendingIds = $derived(approvals.filter((a) => a.status === 'pending').map((a) => a.id));
+  $effect(() => {
+    if (pendingIds.length === 0) {
+      focusedId = null;
+    } else if (!focusedId || !pendingIds.includes(focusedId)) {
+      focusedId = pendingIds[0];
+    }
+  });
+
+  function onTriageKey(ev: KeyboardEvent): void {
+    const action = approvalTriageAction(ev, pendingIds, focusedId, {
+      modalOpen: !!allowFor,
+      canDecideId: (id) => {
+        const row = approvals.find((x) => x.id === id);
+        return !!row && canDecide(row) && !busy[id];
+      },
+    });
+    if (!action) return;
+    ev.preventDefault();
+    if (action.kind === 'select') {
+      focusedId = action.id;
+      const escaped = typeof CSS !== 'undefined' && typeof CSS.escape === 'function' ? CSS.escape(action.id) : action.id;
+      document
+        .querySelector<HTMLElement>(`[data-approval-id="${escaped}"]`)
+        ?.scrollIntoView({ block: 'nearest', behavior: scrollBehavior() });
+      return;
+    }
+    const row = approvals.find((x) => x.id === action.id);
+    if (!row) return;
+    void decide(row, action.kind === 'approve');
+  }
 </script>
+
+<svelte:window onkeydown={onTriageKey} />
 
 <div class="appr" data-testid="mcp-approvals">
   <div class="bar">
     <h2>Approvals</h2>
     <span class="count chip" class:warn={!showAll && approvals.length > 0}>{approvals.length} {showAll ? 'total' : 'pending'}</span>
+    {#if pendingIds.length > 0}
+      <span class="kbd-hint" data-testid="mcp-approvals-kbd" aria-label="Keyboard shortcuts: J and K select, A approves, D denies">
+        <kbd>J</kbd>/<kbd>K</kbd> select · <kbd>A</kbd> approve · <kbd>D</kbd> deny
+      </span>
+    {/if}
     <span class="grow"></span>
     <!-- MCP approvals are one source; the canonical inbox joins all — S20-07. -->
     <NeedsYouLink />
@@ -199,7 +246,12 @@
     {/snippet}
     <div class="list">
       {#each approvals as a (a.id)}
-        <div class="card">
+        <div
+          class="card"
+          class:triage-focus={a.status === 'pending' && a.id === focusedId}
+          data-approval-id={a.id}
+          onfocusin={() => { if (a.status === 'pending') focusedId = a.id; }}
+        >
           <div class="chead">
             <span class="chip">{a.kind === 'human_ask' ? 'Human ask' : 'Tool call'}</span>
             <span class="title">{a.title}</span>
@@ -240,7 +292,7 @@
             <div class="actions">
               <input
                 class="note"
-                placeholder="Checked the arguments, looks safe"
+                placeholder="Optional note for the audit log"
                 aria-label="Decision note (optional)"
                 value={notes[a.id] ?? ''}
                 oninput={(e) => (notes = { ...notes, [a.id]: (e.currentTarget as HTMLInputElement).value })}
@@ -450,5 +502,28 @@
     color: var(--text-dim);
     text-align: center;
     padding: 40px 24px;
+  }
+  .kbd-hint {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .kbd-hint kbd {
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    padding: 0 4px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+    color: var(--text);
+  }
+  .triage-focus {
+    border-color: var(--accent-line-strong);
+    box-shadow: 0 0 0 1px var(--accent-line-strong);
+  }
+  @media (max-width: 640px) {
+    .kbd-hint { display: none; }
   }
 </style>

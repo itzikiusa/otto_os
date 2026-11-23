@@ -2656,7 +2656,7 @@ fn resolve_retry(node: &WorkflowNode) -> otto_core::workflows::RetryPolicy {
 /// Whether a node kind should be retried on failure. Interactive / entry kinds
 /// are never retried.
 fn is_retryable(kind: &str) -> bool {
-    !matches!(kind, "human_approval" | "manual_trigger")
+    otto_workflows::retry::is_outer_retryable(kind)
 }
 
 // Retry classification + backoff live in `otto_workflows::retry` (imported above).

@@ -6,17 +6,34 @@
   // runWithOtto convention). Live rows arrive via the `browser_annotation_added`
   // WS event, which the store applies in place — no polling here.
 
+  import { tick } from 'svelte';
   import type { BrowserAnnotation } from '../../lib/api/types';
+  import { focusAppContent } from '../../lib/announce.svelte';
   import { toastError } from '../../lib/toastError';
   import { browser } from '../../lib/stores/browser.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import SendToSession from './SendToSession.svelte';
 
-  let { annotations }: { annotations: BrowserAnnotation[] } = $props();
+  let {
+    annotations,
+    liveMode = false,
+    onclose,
+    onfocusmark,
+  }: {
+    annotations: BrowserAnnotation[];
+    /** True when rendered beside a live tab (tailors the empty-state hint). */
+    liveMode?: boolean;
+    /** Optional close callback to collapse the rail. */
+    onclose?: () => void;
+    /** Jump to the marked element in the page. */
+    onfocusmark?: (selector: string) => void;
+  } = $props();
 
+  let railEl = $state<HTMLDivElement | null>(null);
   let editingId = $state<string | null>(null);
   let editText = $state('');
+  let savingEdit = $state(false);
 
   function startEdit(a: BrowserAnnotation): void {
     editingId = a.id;
@@ -24,11 +41,15 @@
   }
 
   async function saveEdit(id: string): Promise<void> {
+    if (savingEdit) return;
+    savingEdit = true;
     try {
       await browser.updateAnnotationComment(id, editText);
       editingId = null;
     } catch (e) {
       toastError('Couldn’t update note', e);
+    } finally {
+      savingEdit = false;
     }
   }
 
@@ -36,36 +57,68 @@
     editingId = null;
   }
 
-  async function remove(id: string): Promise<void> {
+  async function remove(id: string): Promise<boolean> {
     const mark = annotations.find(a => a.id === id);
-    if (!mark || !await confirmer.ask(`Delete this mark and its note? “${mark.text.slice(0, 180)}”`, { title: 'Delete mark', confirmLabel: 'Delete mark', danger: true })) return;
-    if (!annotations.some(a => a.id === id)) return;
+    if (!mark || !await confirmer.ask(`Delete this mark and its note? “${mark.text.slice(0, 180)}”`, { title: 'Delete mark', confirmLabel: 'Delete mark', danger: true })) return false;
+    if (!annotations.some(a => a.id === id)) return false;
     try {
       await browser.deleteAnnotation(id);
+      return true;
     } catch (e) {
       toastError('Couldn’t delete mark', e);
+      return false;
+    }
+  }
+
+  async function removeAndFocus(id: string, idx: number): Promise<void> {
+    const deleted = await remove(id);
+    if (!deleted) return;
+    await tick();
+    const btns = railEl?.querySelectorAll<HTMLButtonElement>('.row .actions button, .rail-close');
+    if (btns && btns.length > 0) {
+      btns[Math.min(idx, btns.length - 1)]?.focus();
+    } else {
+      void focusAppContent();
     }
   }
 </script>
 
-<div class="notes-rail">
+<div class="notes-rail" bind:this={railEl}>
   <div class="rail-head">
     <Icon name="note" size={13} />
     <span>Marks</span>
     <span class="count">{annotations.length}</span>
+    {#if onclose}
+      <button class="icon-btn rail-close" onclick={onclose} aria-label="Hide marks" title="Hide marks">
+        <Icon name="x" size={12} />
+      </button>
+    {/if}
   </div>
 
   {#if annotations.length === 0}
     <p class="empty">
-      No marks yet. Turn on Mark passage above the page, then click a passage to mark it.
+      {#if liveMode}
+        No marks yet. Turn on the target picker in the toolbar, then click an element on the page to mark it.
+      {:else}
+        No marks yet. Turn on Mark passage above the page, then click a passage to mark it.
+      {/if}
     </p>
   {:else}
     <ul class="list">
-      {#each annotations as a (a.id)}
+      {#each annotations as a, idx (a.id)}
         <li class="row">
           <span class="swatch" style:background={a.color || 'var(--warning)'}></span>
           <div class="body">
-            <p class="excerpt">{a.text}</p>
+            {#if onfocusmark}
+              <button
+                type="button"
+                class="excerpt excerpt-btn"
+                onclick={() => onfocusmark?.(a.selector)}
+                title="Jump to marked passage"
+              >{a.text}</button>
+            {:else}
+              <p class="excerpt">{a.text}</p>
+            {/if}
             {#if editingId === a.id}
               <div class="edit">
                 <textarea dir="auto"
@@ -80,8 +133,10 @@
                   }}
                 ></textarea>
                 <div class="edit-actions">
-                  <button class="btn small" onclick={cancelEdit}>Cancel</button>
-                  <button class="btn small primary" onclick={() => saveEdit(a.id)} title="Save note (⌘↩)">Save note</button>
+                  <button class="btn small" onclick={cancelEdit} disabled={savingEdit}>Cancel</button>
+                  <button class="btn small primary" onclick={() => saveEdit(a.id)} disabled={savingEdit} title="Save note (⌘↩)">
+                    {savingEdit ? 'Saving…' : 'Save note'}
+                  </button>
                 </div>
               </div>
             {:else if a.comment}
@@ -95,7 +150,7 @@
               </button>
             {/if}
             <SendToSession annotationId={a.id} />
-            <button class="icon-btn" title="Delete mark" aria-label="Delete mark" onclick={() => remove(a.id)}>
+            <button class="icon-btn" title="Delete mark" aria-label="Delete mark" onclick={() => void removeAndFocus(a.id, idx)}>
               <Icon name="trash" size={12} />
             </button>
           </div>
@@ -177,6 +232,19 @@
     line-clamp: 3;
     -webkit-box-orient: vertical;
   }
+  .excerpt-btn {
+    padding: 0;
+    border: none;
+    background: none;
+    font: inherit;
+    font-size: var(--fs-m);
+    text-align: start;
+    cursor: pointer;
+    border-radius: var(--radius-s);
+  }
+  .excerpt-btn:hover {
+    color: var(--accent-text);
+  }
   .comment {
     margin: 0;
     font-size: var(--fs-s);
@@ -215,8 +283,21 @@
     width: 24px;
     height: 24px;
   }
-  /* Phone: the rail drops under the page (BrowserView stacks .body). */
-  @media (max-width: 640px) {
+  .rail-close {
+    width: 22px;
+    height: 22px;
+    flex-shrink: 0;
+  }
+  /* Phone / short landscape: rail collapses to compact vertical cap. */
+  @media (max-width: 640px), (max-height: 500px) {
+    .notes-rail {
+      width: auto;
+      max-height: 34%;
+      border-inline-start: none;
+      border-top: 1px solid var(--border);
+    }
+  }
+  @container (max-width: 640px) {
     .notes-rail {
       width: auto;
       max-height: 40%;

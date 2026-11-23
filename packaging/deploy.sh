@@ -147,6 +147,11 @@ build_manifest() {
         { fail_verify 'source tree changed or is dirty; rebuild from the clean merged commit'; return 1; }
     codesign --verify --deep --strict "$APP" || return 1
     codesign --verify --strict "$APP/Contents/MacOS/ottod" || return 1
+    if [[ -f "$APP/Contents/MacOS/kiri" ]]; then
+        codesign --verify --strict "$APP/Contents/MacOS/kiri" || return 1
+        codesign -d --entitlements - "$APP/Contents/MacOS/kiri" 2>&1 | grep -q 'com.apple.security.virtualization' ||
+            { fail_verify 'embedded kiri sidecar is missing com.apple.security.virtualization entitlement'; return 1; }
+    fi
     commit="$(git -C "$ROOT" rev-parse HEAD)" || return 1
     app_hash="$(sha256 "$APP/Contents/MacOS/otto-desktop")" || return 1
     daemon_hash="$(sha256 "$APP/Contents/MacOS/ottod")" || return 1
@@ -634,7 +639,7 @@ lock_release() {
 # `held: false` dies too ("unheld"); a daemon too old to send `held` is
 # counted as surviving, as before.
 # Prints "<total> <held> <connections> <background> <unheld>".
-BACKGROUND_SOURCES="channel review review_summarizer skilleval skillreview product-analysis product_refine swarm canvas_assist canvas_assist_preview mockup_assist db_assist workflow vault-docs vault-docs-review pr-draft commit-draft insights run_with_otto goal_loop discovery_chat scheduled_task finding assistant design_assist browser_summarize"
+BACKGROUND_SOURCES="channel review review_summarizer skilleval skillreview product-analysis product_refine swarm canvas_assist canvas_assist_preview mockup_assist db_assist workflow vault-docs vault-docs-review pr-draft commit-draft insights run_with_otto goal_loop discovery_chat scheduled_task finding assistant design_assist browser_summarize production_plan"
 classify_live_sessions() {
     BACKGROUND_SOURCES="$BACKGROUND_SOURCES" /usr/bin/python3 -c '
 import json, os, sys
@@ -795,6 +800,25 @@ cp "$ROOT/target/release/ottod" "$APP_SRC/binaries/ottod-$TRIPLE"
 
 echo "==> 3/7  Desktop app (Tauri bundle)"
 ( cd "$APP_SRC" && npx --yes @tauri-apps/cli@^2 build --bundles app )
+
+# Optional embedded headless Kiri sidecar (staged via `packaging/stage-kiri.sh`
+# or explicit `OTTO_KIRI_BIN`). Strictly no-op when absent so CI and normal
+# builds never fail or require Kiri.
+KIRI_STAGE_DIR="${OTTO_KIRI_STAGE_DIR:-$ROOT/target/kiri-stage}"
+KIRI_SRC_BIN="${OTTO_KIRI_BIN:-$KIRI_STAGE_DIR/bin/kiri}"
+KIRI_SRC_GUEST="${OTTO_KIRI_GUEST_DIR:-$KIRI_STAGE_DIR/guest}"
+if [[ -f "$KIRI_SRC_BIN" ]]; then
+    cp -f "$KIRI_SRC_BIN" "$APP/Contents/MacOS/kiri"
+    chmod 0755 "$APP/Contents/MacOS/kiri"
+    echo "    embedded kiri sidecar -> $APP/Contents/MacOS/kiri"
+    if [[ -d "$KIRI_SRC_GUEST" ]]; then
+        mkdir -p "$APP/Contents/Resources/guest"
+        for gf in Image bzImage initramfs.cpio data.img.tgz data.img; do
+            [[ -f "$KIRI_SRC_GUEST/$gf" ]] && cp -f "$KIRI_SRC_GUEST/$gf" "$APP/Contents/Resources/guest/$gf"
+        done
+        echo "    embedded kiri guest assets -> $APP/Contents/Resources/guest/"
+    fi
+fi
 
 # Compile + bundle done: the disk watchdog stops here, so it can never
 # interrupt signing or the install (neither grows target/).

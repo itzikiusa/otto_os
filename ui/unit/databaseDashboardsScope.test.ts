@@ -3,6 +3,7 @@
 // one (rename/delete/add-widget act on those ids by id alone), a switch drops
 // the old lists, and a superseded load never clears the newer load's spinner.
 import { test } from 'node:test';
+import * as id from '../src/lib/id.ts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -55,6 +56,7 @@ function setup() {
         saveFlag() {},
       };
       if (path.endsWith('/lazyModule')) return { announceModule() {} };
+      if (path.endsWith('/id')) return id;
       if (path.endsWith('/db-result-budget')) return resultBudget;
       if (path.endsWith('/grid-tab-state')) return { parkedEditCount: () => 0 };
       if (path.endsWith('/sql-dialect')) return { obviousWriteVerb: (s: string) => (/^\s*update\b/i.test(s) ? 'UPDATE' : null), tableRefFromNodeId() {} };

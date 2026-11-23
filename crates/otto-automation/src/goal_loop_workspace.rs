@@ -299,6 +299,125 @@ pub async fn capture_work(cwd: &str, base: Option<&str>) -> Result<String> {
     Ok(text)
 }
 
+/// Inspect a loop worktree's current `git diff --stat`, capped unified patch,
+/// and untracked files for `GET /api/v1/goal-loops/{id}/diff`. Returns
+/// `available: false` cleanly when the loop has no git worktree yet (e.g.
+/// draft or research mode).
+pub async fn worktree_diff(
+    loop_: &GoalLoop,
+    max_patch_bytes: usize,
+) -> Result<crate::goal_loop_steering::GoalLoopDiff> {
+    let empty = || crate::goal_loop_steering::GoalLoopDiff {
+        loop_id: loop_.id.clone(),
+        available: false,
+        branch: loop_.branch.clone(),
+        stat: String::new(),
+        patch: String::new(),
+        truncated: false,
+        untracked: Vec::new(),
+    };
+    if loop_.config.mode == "research" {
+        return Ok(empty());
+    }
+    let Some(wt) = loop_.worktree_path.as_deref().filter(|s| !s.is_empty()) else {
+        return Ok(empty());
+    };
+    if !tokio::fs::try_exists(wt).await.unwrap_or(false) {
+        return Ok(empty());
+    }
+    let base = loop_
+        .base_commit
+        .as_deref()
+        .filter(|b| !b.is_empty() && !b.starts_with('-'))
+        .unwrap_or("HEAD");
+    let safe = diff_safety_args(wt).await;
+
+    async fn run_git(cwd: &str, prefix: &[String], args: &[&str], cap: usize) -> (Vec<u8>, bool) {
+        use tokio::io::AsyncReadExt;
+        let mut cmd = otto_git::hardened_command();
+        cmd.args(prefix)
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        let fut = async {
+            let mut child = cmd.spawn().ok()?;
+            let mut out = Vec::new();
+            if let Some(stdout) = child.stdout.take() {
+                let _ = stdout
+                    .take((cap as u64).saturating_add(1))
+                    .read_to_end(&mut out)
+                    .await;
+            }
+            let cut = out.len() > cap;
+            if cut {
+                out.truncate(cap);
+                let _ = child.start_kill();
+            }
+            let _ = child.wait().await;
+            Some((out, cut))
+        };
+        tokio::time::timeout(CAPTURE_GIT_TIMEOUT, fut)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| (Vec::new(), false))
+    }
+
+    let (stat_bytes, _) = run_git(
+        wt,
+        &safe,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--stat",
+            base,
+            "--",
+        ],
+        64 * 1024,
+    )
+    .await;
+    let (patch_bytes, truncated) = run_git(
+        wt,
+        &safe,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            base,
+            "--",
+        ],
+        max_patch_bytes,
+    )
+    .await;
+    let (untracked_bytes, _) = run_git(
+        wt,
+        &[],
+        &["ls-files", "--others", "--exclude-standard"],
+        64 * 1024,
+    )
+    .await;
+    let untracked = String::from_utf8_lossy(&untracked_bytes)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(500)
+        .map(str::to_string)
+        .collect();
+    Ok(crate::goal_loop_steering::GoalLoopDiff {
+        loop_id: loop_.id.clone(),
+        available: true,
+        branch: loop_.branch.clone(),
+        stat: String::from_utf8_lossy(&stat_bytes).trim_end().to_string(),
+        patch: String::from_utf8_lossy(&patch_bytes).into_owned(),
+        truncated,
+        untracked,
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // tests: plain sync fs / process / secret store is fine
 mod evidence_tests {
@@ -411,5 +530,75 @@ mod evidence_tests {
         .unwrap();
         assert!(diff.contains("evidence"));
         assert!(!marker.exists(), "capture ran the repo's fsmonitor");
+    }
+
+    #[tokio::test]
+    async fn worktree_diff_returns_stat_patch_untracked_and_respects_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .unwrap()
+        };
+        assert!(git(&["init", "-q"]).status.success());
+        assert!(git(&["config", "user.email", "t@example.invalid"])
+            .status
+            .success());
+        assert!(git(&["config", "user.name", "Test"]).status.success());
+        std::fs::write(dir.path().join("a.txt"), "hello\n").unwrap();
+        assert!(git(&["add", "a.txt"]).status.success());
+        assert!(git(&["commit", "-q", "-m", "init"]).status.success());
+        std::fs::write(dir.path().join("a.txt"), "hello\nworld\n").unwrap();
+        std::fs::write(dir.path().join("new.txt"), "untracked\n").unwrap();
+
+        let now = chrono::Utc::now();
+        let loop_ = otto_core::domain::GoalLoop {
+            id: "gl-1".into(),
+            workspace_id: "ws-1".into(),
+            name: "test".into(),
+            repo_path: dir.path().to_string_lossy().into_owned(),
+            definition: otto_core::domain::GoalLoopDefinition {
+                title: "g".into(),
+                summary: String::new(),
+                objectives: vec![],
+                acceptance_criteria: vec![],
+                constraints: vec![],
+                out_of_scope: vec![],
+                success_signal: String::new(),
+            },
+            limits: otto_core::domain::GoalLoopLimits::default(),
+            config: otto_core::domain::GoalLoopConfig::default(),
+            status: otto_core::domain::GoalLoopStatus::Running,
+            phase: otto_core::domain::GoalLoopPhase::Executing,
+            iterations_started: 1,
+            current_iteration: 1,
+            progress_pct: 0,
+            context_digest: String::new(),
+            ledger: Default::default(),
+            branch: Some("goal-loop/gl-1".into()),
+            worktree_path: Some(dir.path().to_string_lossy().into_owned()),
+            base_commit: Some("HEAD".into()),
+            summary: None,
+            error: None,
+            run_started_at: Some(now),
+            elapsed_secs: 0,
+            cost_usd: 0.0,
+            created_by: "u-1".into(),
+            created_at: now,
+            updated_at: now,
+            finished_at: None,
+        };
+        let d = super::worktree_diff(&loop_, 64 * 1024).await.unwrap();
+        assert!(d.available);
+        assert!(d.stat.contains("a.txt"));
+        assert!(d.patch.contains("+world"));
+        assert!(!d.truncated);
+        assert_eq!(d.untracked, vec!["new.txt"]);
+
+        let capped = super::worktree_diff(&loop_, 16).await.unwrap();
+        assert!(capped.truncated);
+        assert!(capped.patch.len() <= 16);
     }
 }

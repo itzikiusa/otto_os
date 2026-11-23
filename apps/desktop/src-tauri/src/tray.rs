@@ -12,7 +12,8 @@
 //! Left click toggles a 360×520 popover anchored under the icon — a
 //! non-activating panel (panel.rs) with native popover vibrancy that hides
 //! when it loses key status. Right click opens a small native menu (Open
-//! Otto / Ask Otto / Settings / Quit) whose ids main.rs handles.
+//! Otto / Ask Otto / Keep Awake ▸ / Settings / Quit) whose ids main.rs
+//! handles; while keep awake is on, its time left is the item's title.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -20,7 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, LogicalPosition, Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -153,12 +154,36 @@ pub fn init(app: &AppHandle) {
     }
 }
 
-fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-    let menu = Menu::with_items(
+/// The right-click menu. Rebuilt when keep awake turns on or off (its
+/// submenu's label and Turn Off item follow the state).
+fn menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let awake = crate::keep_awake::state().active;
+    let item = |id: &str, text: &str| MenuItem::with_id(app, id, text, true, None::<&str>);
+    let keep_awake = Submenu::with_items(
+        app,
+        if awake {
+            "Keep Awake — On"
+        } else {
+            "Keep Awake"
+        },
+        true,
+        &[
+            &item("keep-awake-15", "For 15 Minutes")?,
+            &item("keep-awake-60", "For 1 Hour")?,
+            &item("keep-awake-120", "For 2 Hours")?,
+            &item(crate::keep_awake::MENU_CUSTOM, "For a Custom Time…")?,
+            &item("keep-awake-on", "Indefinitely")?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "keep-awake-off", "Turn Off", awake, None::<&str>)?,
+        ],
+    )?;
+    Menu::with_items(
         app,
         &[
             &MenuItem::with_id(app, MENU_OPEN, "Open Otto", true, None::<&str>)?,
             &MenuItem::with_id(app, MENU_ASK, "Ask Otto…", true, None::<&str>)?,
+            &PredefinedMenuItem::separator(app)?,
+            &keep_awake,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, MENU_SETTINGS, "Settings…", true, None::<&str>)?,
             &MenuItem::with_id(
@@ -173,12 +198,32 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             // exit path for it.
             &MenuItem::with_id(app, "quit", "Quit Otto", true, None::<&str>)?,
         ],
-    )?;
+    )
+}
+
+/// Keep awake changed or its countdown ticked: the time left as the status
+/// item's title (beside the glyph), and the menu when it turned on/off.
+pub fn show_keep_awake(app: &AppHandle, rebuild_menu: bool) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    let _ = tray.set_title(crate::keep_awake::title(
+        crate::keep_awake::state(),
+        now_ms(),
+    ));
+    if rebuild_menu {
+        if let Ok(m) = menu(app) {
+            let _ = tray.set_menu(Some(m));
+        }
+    }
+}
+
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon(Glyph::Idle))
         .icon_as_template(true)
         .tooltip("Otto")
-        .menu(&menu)
+        .menu(&menu(app)?)
         // Left click = popover; the menu is the right-click affordance.
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| {
@@ -263,6 +308,9 @@ fn build_popover(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     .focused(false)
     .accept_first_mouse(true)
     .disable_drag_drop_handler()
+    // Hidden most of its life, yet its socket/polls drive the menu-bar glyph
+    // (`tray_set_status`) — disabling throttling keeps status updates live.
+    .background_throttling(crate::NO_THROTTLE)
     .initialization_script(format!("window.__OTTO_WIN__='{POPOVER_LABEL}';"))
     .build()?;
     let for_main = win.clone();

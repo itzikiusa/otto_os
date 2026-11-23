@@ -648,9 +648,51 @@ impl AuthRepo {
             }
             total += hashes.len() as u64;
             if (hashes.len() as i64) < BATCH {
-                return Ok(total);
+                break;
             }
         }
+        // Purge expired or already-terminal phone_pairings rows past the grace window.
+        loop {
+            let res = sqlx::query(
+                "DELETE FROM phone_pairings WHERE rowid IN \
+                 (SELECT rowid FROM phone_pairings \
+                  WHERE expires_at < ? \
+                     OR (status IN ('consumed','denied','expired') AND created_at < ?) \
+                  LIMIT ?)",
+            )
+            .bind(&cutoff)
+            .bind(&cutoff)
+            .bind(BATCH)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| Error::Internal(format!("purge expired phone pairings: {e}")))?;
+            let n = res.rows_affected();
+            total += n;
+            if (n as i64) < BATCH {
+                break;
+            }
+        }
+        // Purge expired or idle-expired phone_devices rows past the grace window.
+        loop {
+            let res = sqlx::query(
+                "DELETE FROM phone_devices WHERE rowid IN \
+                 (SELECT rowid FROM phone_devices \
+                  WHERE expires_at < ? OR idle_expires_at < ? \
+                  LIMIT ?)",
+            )
+            .bind(&cutoff)
+            .bind(&cutoff)
+            .bind(BATCH)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| Error::Internal(format!("purge expired phone devices: {e}")))?;
+            let n = res.rows_affected();
+            total += n;
+            if (n as i64) < BATCH {
+                break;
+            }
+        }
+        Ok(total)
     }
 
     /// Mint a long-lived API (personal access) token for `user_id`. Returns the
@@ -3816,5 +3858,59 @@ mod tests {
             ctx2.effective_user.id, uid,
             "cached result must match the original DB result"
         );
+    }
+
+    #[tokio::test]
+    async fn purge_expired_prunes_phone_pairings_and_expired_phone_devices() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let uid = seed_user(&pool, "alice_phone_purge").await;
+        let old = (Utc::now() - Duration::days(30)).to_rfc3339();
+        let future = (Utc::now() + Duration::days(30)).to_rfc3339();
+
+        // Expired pairing + live waiting pairing.
+        sqlx::query(
+            "INSERT INTO phone_pairings (id, user_id, code_hash, status, confirm_code, created_at, expires_at)
+             VALUES ('p-old', ?, 'h-old', 'waiting', '111111', ?, ?),
+                    ('p-consumed', ?, 'h-cons', 'consumed', '222222', ?, ?),
+                    ('p-live', ?, 'h-live', 'waiting', '333333', ?, ?)",
+        )
+        .bind(&uid).bind(&old).bind(&old)
+        .bind(&uid).bind(&old).bind(&future)
+        .bind(&uid).bind(&future).bind(&future)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Expired device + idle-expired device + live device.
+        sqlx::query(
+            "INSERT INTO phone_devices (id, user_id, token_hash, token_prefix, name, created_at, last_seen_at, expires_at, idle_expires_at)
+             VALUES ('d-exp', ?, 'dh-exp', 'p1', 'Old', ?, ?, ?, ?),
+                    ('d-idle', ?, 'dh-idle', 'p2', 'Idle', ?, ?, ?, ?),
+                    ('d-live', ?, 'dh-live', 'p3', 'Live', ?, ?, ?, ?)",
+        )
+        .bind(&uid).bind(&old).bind(&old).bind(&old).bind(&future)
+        .bind(&uid).bind(&old).bind(&old).bind(&future).bind(&old)
+        .bind(&uid).bind(&future).bind(&future).bind(&future).bind(&future)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let deleted = repo.purge_expired(7).await.unwrap();
+        assert_eq!(deleted, 4);
+
+        let left_pairings: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM phone_pairings ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(left_pairings, vec!["p-live"]);
+
+        let left_devices: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM phone_devices ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(left_devices, vec!["d-live"]);
     }
 }

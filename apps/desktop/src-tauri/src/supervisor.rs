@@ -83,19 +83,29 @@ fn plist_path() -> PathBuf {
         .join("Library/LaunchAgents/com.otto.daemon.plist")
 }
 
+/// Shared loopback HTTP client for health/meta probes — reused across polls so
+/// `wait_healthy` never churns client pools or panics on builder failure.
+fn http_client() -> Option<&'static reqwest::Client> {
+    static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .ok()
+        })
+        .as_ref()
+}
+
 async fn health() -> bool {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .unwrap();
+    let Some(client) = http_client() else {
+        return false;
+    };
     matches!(client.get(HEALTH_URL).send().await, Ok(r) if r.status().is_success())
 }
 
 async fn daemon_version() -> Option<String> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .ok()?;
+    let client = http_client()?;
     let v: serde_json::Value = client.get(META_URL).send().await.ok()?.json().await.ok()?;
     v.get("version")?.as_str().map(String::from)
 }
@@ -153,7 +163,7 @@ fn install_binary(src: &PathBuf, dst: &PathBuf) -> Result<bool, String> {
     // (Code Signature Invalid) and launchd KeepAlive turns that into a
     // respawn/throttle loop. rename() gives new execs a fresh inode with an
     // intact seal, and is atomic on the same volume.
-    let tmp = dst.with_extension(format!("tmp.{}", std::process::id()));
+    let tmp = unique_temp_path(dst);
     std::fs::copy(src, &tmp).map_err(|e| format!("copy ottod: {e}"))?;
     // Keep the binary being replaced as `bin/ottod.prev` so a bad update can
     // be rolled back by hand (or by deploy.sh) without a rebuild.
@@ -163,6 +173,14 @@ fn install_binary(src: &PathBuf, dst: &PathBuf) -> Result<bool, String> {
         format!("swap ottod into place: {e}")
     })?;
     Ok(true)
+}
+
+/// Unique sibling temp path per swap (PID + monotonic sequence) so two swaps
+/// inside the same process can never collide on the same staging file.
+fn unique_temp_path(dst: &std::path::Path) -> PathBuf {
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    dst.with_extension(format!("tmp.{}.{seq}", std::process::id()))
 }
 
 /// What [`ensure_daemon`] does about the daemon it found.
@@ -191,6 +209,9 @@ fn recovery_plan(needs_install: &Result<bool, String>, healthy: bool, loaded: bo
 /// How long a loaded-but-silent daemon gets to finish booting before the
 /// supervisor kickstarts it.
 const BOOT_WAIT: Duration = Duration::from_secs(30);
+/// How long `ensure_daemon` waits for health after installing/bootstrapping
+/// `ottod` (large DBs take 5–7 s to finish startup/compaction).
+const POST_INSTALL_WAIT: Duration = Duration::from_secs(20);
 
 #[cfg(test)]
 mod recovery_tests {
@@ -243,6 +264,53 @@ mod recovery_tests {
         assert_eq!(std::fs::read_to_string(&dst).unwrap(), "v3");
         assert_eq!(std::fs::read_to_string(&prev).unwrap(), "v2");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unique_temp_paths_never_collide_within_a_process() {
+        let dst = PathBuf::from("/tmp/otto-bin/ottod");
+        let a = unique_temp_path(&dst);
+        let b = unique_temp_path(&dst);
+        assert_ne!(a, b);
+        assert_eq!(a.parent(), dst.parent());
+        assert_eq!(b.parent(), dst.parent());
+    }
+
+    #[test]
+    fn shared_http_client_is_reused_without_panicking() {
+        let first = http_client().expect("http client builds");
+        let second = http_client().expect("http client stays cached");
+        assert!(std::ptr::eq(first, second));
+    }
+
+    #[tokio::test]
+    async fn supervisor_op_mutex_releases_on_drop_and_blocks_reentry() {
+        let guard = SUPERVISOR_OP.try_lock().expect("unlocked initially");
+        assert!(SUPERVISOR_OP.try_lock().is_err(), "held while guard alive");
+        drop(guard);
+        assert!(
+            SUPERVISOR_OP.try_lock().is_ok(),
+            "released immediately on drop"
+        );
+    }
+
+    #[test]
+    fn post_install_wait_covers_large_db_boot_and_getuid_matches_posix() {
+        assert!(POST_INSTALL_WAIT >= Duration::from_secs(15));
+        #[cfg(unix)]
+        {
+            let expected: u32 = String::from_utf8_lossy(
+                &std::process::Command::new("id")
+                    .arg("-u")
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .trim()
+            .parse()
+            .unwrap();
+            assert_eq!(libc_getuid(), expected);
+        }
     }
 }
 
@@ -457,18 +525,18 @@ fn wait_service_gone(target: &str, budget: Duration) -> bool {
     }
 }
 
+#[cfg(unix)]
 fn libc_getuid() -> u32 {
-    // std exposes no getuid; shell out once (cheap, install path only).
-    String::from_utf8_lossy(
-        &std::process::Command::new("id")
-            .arg("-u")
-            .output()
-            .map(|o| o.stdout)
-            .unwrap_or_default(),
-    )
-    .trim()
-    .parse()
-    .unwrap_or(501)
+    unsafe extern "C" {
+        fn getuid() -> u32;
+    }
+    // SAFETY: `getuid(2)` is an infallible POSIX syscall with no preconditions.
+    unsafe { getuid() }
+}
+
+#[cfg(not(unix))]
+fn libc_getuid() -> u32 {
+    501
 }
 
 /// Poll [`health`] every 500 ms for up to `budget`.
@@ -509,9 +577,10 @@ fn not_answering_detail(waited: Duration) -> String {
 /// boot-time `otto://daemon-state` event still gets the diagnosis
 /// (`daemon_status` carries its detail while the daemon is down).
 static LAST_REPORT: std::sync::Mutex<Option<DaemonReport>> = std::sync::Mutex::new(None);
-/// One `ensure_daemon` at a time: the boot path and a window's `daemon_start`
-/// must not install/bootstrap concurrently.
-static ENSURING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Serializes every install/bootstrap/restart lifecycle mutation across the
+/// boot path, `daemon_start`, `daemon_restart` and `daemon_install`. Using a
+/// mutex guard guarantees release even if an operation panics or is cancelled.
+static SUPERVISOR_OP: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Emit `report` as `otto://daemon-state` to every window and remember it.
 pub fn publish(app: &tauri::AppHandle, report: &DaemonReport) {
@@ -536,14 +605,13 @@ fn last_unhealthy_detail() -> String {
 }
 
 /// [`ensure_daemon`] with every interim and final report published. While
-/// another call is already ensuring, answers the current status instead of
-/// starting a second install.
+/// another supervisor operation is already in flight, answers the current
+/// status instead of starting a second install.
 pub async fn ensure_and_publish(app: &tauri::AppHandle) -> DaemonReport {
-    if ENSURING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    let Ok(_guard) = SUPERVISOR_OP.try_lock() else {
         return daemon_status().await;
-    }
+    };
     let report = ensure_daemon(|interim| publish(app, interim)).await;
-    ENSURING.store(false, std::sync::atomic::Ordering::SeqCst);
     publish(app, &report);
     report
 }
@@ -554,7 +622,11 @@ pub async fn ensure_and_publish(app: &tauri::AppHandle) -> DaemonReport {
 /// the UI can say "waiting for boot" instead of looking hung.
 pub async fn ensure_daemon(progress: impl Fn(&DaemonReport)) -> DaemonReport {
     let app_version = env!("CARGO_PKG_VERSION").to_string();
-    let needs_install = daemon_needs_install();
+    // `daemon_needs_install()` hashes/compares the whole ottod binary on disk:
+    // keep synchronous file I/O off the Tokio runtime worker thread.
+    let needs_install = tokio::task::spawn_blocking(daemon_needs_install)
+        .await
+        .unwrap_or_else(|e| Err(format!("update check panicked: {e}")));
     let target = format!("gui/{}/{LAUNCHD_LABEL}", libc_getuid());
     let healthy = health().await;
     let loaded = !healthy && service_loaded_async(&target).await;
@@ -623,18 +695,15 @@ pub async fn ensure_daemon(progress: impl Fn(&DaemonReport)) -> DaemonReport {
         Err(e) => format!("install panicked: {e}"),
     };
 
-    // Give launchd a moment, then re-check.
-    for _ in 0..10 {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        if health().await {
-            return DaemonReport {
-                healthy: true,
-                installed: true,
-                daemon_version: daemon_version().await,
-                app_version,
-                detail,
-            };
-        }
+    // Give launchd + ottod enough room to finish DB startup/compaction.
+    if wait_healthy(POST_INSTALL_WAIT).await {
+        return DaemonReport {
+            healthy: true,
+            installed: true,
+            daemon_version: daemon_version().await,
+            app_version,
+            detail,
+        };
     }
 
     DaemonReport {
@@ -671,6 +740,7 @@ pub async fn daemon_start(app: tauri::AppHandle) -> Result<DaemonReport, String>
 
 #[tauri::command]
 pub async fn daemon_restart() -> Result<String, String> {
+    let _guard = SUPERVISOR_OP.lock().await;
     let uid = libc_getuid();
     let target = format!("gui/{uid}/{LAUNCHD_LABEL}");
     // `kickstart` only restarts an ALREADY-REGISTERED job — against an unloaded
@@ -700,6 +770,7 @@ pub async fn daemon_restart() -> Result<String, String> {
 /// Force reinstall (used after an app update ships a newer ottod).
 #[tauri::command]
 pub async fn daemon_install() -> Result<String, String> {
+    let _guard = SUPERVISOR_OP.lock().await;
     tokio::task::spawn_blocking(install_daemon)
         .await
         .map_err(|e| format!("install panicked: {e}"))?

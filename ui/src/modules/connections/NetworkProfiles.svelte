@@ -15,18 +15,22 @@
   let editing = $state<NetworkProfile | null>(null);
   let name = $state('');
   let sshId = $state('');
+  let nextEpId = 1;
   let endpoints = $state<NetworkEndpoint[]>([emptyEndpoint()]);
+  let endpointIds = $state<number[]>([nextEpId++]);
   let archived = $state(false);
   let endpointNames = $state<HTMLInputElement[]>([]);
   async function addEndpoint() {
     if (busy || endpoints.length >= 8) return;
     endpoints = [...endpoints, emptyEndpoint()];
+    endpointIds = [...endpointIds, nextEpId++];
     await tick();
     endpointNames[endpoints.length - 1]?.focus();
   }
   async function removeEndpoint(index: number) {
     if (busy || endpoints.length === 1) return;
     endpoints = endpoints.filter((_, i) => i !== index);
+    endpointIds = endpointIds.filter((_, i) => i !== index);
     await tick();
     endpointNames[Math.min(index, endpoints.length - 1)]?.focus();
   }
@@ -49,6 +53,7 @@
   function edit(profile: NetworkProfile | null) {
     editing = profile; name = profile?.name ?? ''; sshId = profile?.ssh_connection_id ?? '';
     endpoints = profile?.endpoints.map((e) => ({...e})) ?? [emptyEndpoint()];
+    endpointIds = endpoints.map(() => nextEpId++);
     archived = profile?.archived ?? false; error = '';
   }
   async function reloadSaved() {
@@ -69,7 +74,7 @@
         ? await api.put<NetworkProfile>(`/network-profiles/${editing.id}`, {...payload, version: editing.version})
         : await api.post<NetworkProfile>(`/workspaces/${workspaceId}/network-profiles`, payload);
       if (alive) { edit(saved); onsaved(saved); }
-    } catch (e) { error = e instanceof Error ? e.message : String(e); }
+    } catch (e) { error = loadErrorText(e); }
     finally { busy = false; }
   }
   // Spoken at the state edge through the shell's always-mounted announcer: a
@@ -89,7 +94,7 @@
   </select></label>
   <LoadState what="SSH connections" loading={connectionsLoading} error={connectionsError} empty={connections.length === 0} variant="compact" onretry={() => attempt++} />
   {#if !connectionsLoading && !connectionsError && !connections.length}<p>Create an SSH connection in Connections before saving a network profile.</p>{/if}
-  {#each endpoints as endpoint, i (i)}
+  {#each endpoints as endpoint, i (endpointIds[i])}
     <fieldset disabled={busy}><legend>Endpoint {i + 1}</legend>
       <div class="endpoint-fields">
       <label>Name<input dir="ltr" aria-label={`Endpoint ${i + 1} name`} bind:this={endpointNames[i]} bind:value={endpoint.name} placeholder="DB" /></label>

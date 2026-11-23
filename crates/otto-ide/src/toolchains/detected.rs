@@ -99,6 +99,10 @@ pub(super) fn scan_detected_sdks(
                 );
             }
         }
+        // Otto-managed Android SDK installed by `otto-simulators` at `<data_dir>/android-sdk`.
+        if let Some(parent) = root.parent() {
+            push_android_sdk_if_valid(&parent.join("android-sdk"), "otto", &mut out, &mut seen);
+        }
     }
 
     // 2. Java: macOS JVMs, Homebrew OpenJDK, SDKMAN, /usr/lib/jvm
@@ -464,6 +468,213 @@ fn scan_python_and_rust_sdks(
             }
         }
     }
+
+    // 7. iOS / Xcode, Android SDK, and Flutter (zero-subprocess disk scan)
+    scan_mobile_sdks(home, out, seen);
+}
+
+fn read_xcode_plist_version(app_dir: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(app_dir.join("Contents/version.plist")).ok()?;
+    let key_idx = raw.find("<key>CFBundleShortVersionString</key>")?;
+    let after = &raw[key_idx..];
+    let s_start = after.find("<string>")? + "<string>".len();
+    let rest = &after[s_start..];
+    let s_end = rest.find("</string>")?;
+    let v = rest[..s_end].trim();
+    (!v.is_empty()).then(|| v.to_string())
+}
+
+fn read_android_sdk_version(sdk_dir: &Path) -> String {
+    let mut apis: Vec<u32> = read_subdirs(&sdk_dir.join("platforms"))
+        .into_iter()
+        .filter_map(|p| {
+            let name = p.file_name()?.to_str()?;
+            let rest = name.strip_prefix("android-")?;
+            rest.split('-').next()?.parse::<u32>().ok()
+        })
+        .collect();
+    apis.sort_unstable();
+    if let Some(max_api) = apis.last() {
+        format!("API {max_api}")
+    } else if sdk_dir.join("platform-tools/adb").is_file() {
+        "platform-tools".into()
+    } else {
+        "sdk".into()
+    }
+}
+
+fn push_android_sdk_if_valid(
+    cand: &Path,
+    src: &str,
+    out: &mut Vec<IdeDetectedSdk>,
+    seen: &mut BTreeSet<String>,
+) {
+    if cand.is_dir()
+        && (cand.join("platform-tools").is_dir()
+            || cand.join("cmdline-tools").is_dir()
+            || cand.join("platforms").is_dir()
+            || cand.join("emulator").is_dir())
+    {
+        let ver = read_android_sdk_version(cand);
+        push_det(
+            out,
+            seen,
+            "android",
+            format!("Android SDK ({ver})"),
+            &ver,
+            cand,
+            src,
+        );
+    }
+}
+
+fn read_flutter_version(flutter_root: &Path) -> String {
+    std::fs::read_to_string(flutter_root.join("version"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "installed".into())
+}
+
+#[allow(clippy::disallowed_methods)] // synchronous scanner invoked inside spawn_blocking
+pub(crate) fn scan_mobile_sdks(
+    home: Option<&Path>,
+    out: &mut Vec<IdeDetectedSdk>,
+    seen: &mut BTreeSet<String>,
+) {
+    // 7a. Xcode / Apple Developer Tools
+    if let Ok(rd) = std::fs::read_dir(Path::new("/Applications")) {
+        let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        entries.sort();
+        for p in entries {
+            let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if name.starts_with("Xcode") && name.ends_with(".app") && p.is_dir() {
+                let dev_dir = p.join("Contents/Developer");
+                if dev_dir.is_dir() {
+                    let ver = read_xcode_plist_version(&p).unwrap_or_else(|| "installed".into());
+                    let label = format!("{} ({ver})", name.trim_end_matches(".app"));
+                    push_det(out, seen, "ios", label, &ver, &dev_dir, "xcode");
+                }
+            } else if name.starts_with("Xcode") && name.ends_with(".appdownload") {
+                out.push(IdeDetectedSdk {
+                    ecosystem: IdeEcosystemKind::Ios,
+                    name: format!("{} (downloading…)", name.trim_end_matches(".appdownload")),
+                    subtitle: format!("downloading · {}", p.to_string_lossy()),
+                    version: "downloading".into(),
+                    arch: std::env::consts::ARCH.to_string(),
+                    home_path: p.to_string_lossy().into_owned(),
+                    bin_path: p.to_string_lossy().into_owned(),
+                    path: p.to_string_lossy().into_owned(),
+                    source: "downloading".into(),
+                    valid: false,
+                });
+            }
+        }
+    }
+    if let Ok(dev) = std::env::var("DEVELOPER_DIR") {
+        let p = PathBuf::from(dev.trim());
+        if p.is_dir()
+            && (p.join("usr/bin/xcodebuild").is_file() || p.join("usr/bin/swift").is_file())
+        {
+            let ver = p
+                .parent()
+                .and_then(|c| c.parent())
+                .and_then(read_xcode_plist_version)
+                .unwrap_or_else(|| "env".into());
+            push_det(
+                out,
+                seen,
+                "ios",
+                format!("DEVELOPER_DIR ({ver})"),
+                &ver,
+                &p,
+                "env",
+            );
+        }
+    }
+    let clt = PathBuf::from("/Library/Developer/CommandLineTools");
+    if clt.join("usr/bin/swift").is_file() {
+        push_det(
+            out,
+            seen,
+            "ios",
+            "Apple Command Line Tools".into(),
+            "clt",
+            &clt,
+            "system",
+        );
+    }
+
+    // 7b. Android SDK
+    let mut android_cands: Vec<(PathBuf, &str)> = Vec::new();
+    for env_key in ["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
+        if let Ok(val) = std::env::var(env_key) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                android_cands.push((PathBuf::from(trimmed), "env"));
+            }
+        }
+    }
+    if let Some(h) = home {
+        android_cands.push((h.join("Library/Android/sdk"), "android-studio"));
+        android_cands.push((h.join("Android/Sdk"), "android-studio"));
+    }
+    android_cands.push((
+        PathBuf::from("/opt/homebrew/share/android-commandlinetools"),
+        "homebrew",
+    ));
+    android_cands.push((
+        PathBuf::from("/usr/local/share/android-commandlinetools"),
+        "homebrew",
+    ));
+    for (cand, src) in android_cands {
+        push_android_sdk_if_valid(&cand, src, out, seen);
+    }
+
+    // 7c. Flutter SDK
+    let mut flutter_cands: Vec<(PathBuf, &str)> = Vec::new();
+    if let Ok(val) = std::env::var("FLUTTER_ROOT") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            flutter_cands.push((PathBuf::from(trimmed), "env"));
+        }
+    }
+    if let Some(h) = home {
+        flutter_cands.push((h.join("development/flutter"), "user"));
+        flutter_cands.push((h.join("flutter"), "user"));
+        for dir in read_subdirs(&h.join(".fvm/versions")) {
+            flutter_cands.push((dir, "fvm"));
+        }
+    }
+    for cask_root in [
+        "/opt/homebrew/Caskroom/flutter",
+        "/usr/local/Caskroom/flutter",
+    ] {
+        for dir in read_subdirs(Path::new(cask_root)) {
+            flutter_cands.push((dir.join("flutter"), "homebrew"));
+        }
+    }
+    if let Some(fb) = find_executable_in(&system_search_dirs(), &["flutter"]) {
+        if let Some(root) = bin_prefix(&fb) {
+            flutter_cands.push((root, "path"));
+        }
+    }
+    for (cand, src) in flutter_cands {
+        if cand.join("bin/flutter").is_file() {
+            let ver = read_flutter_version(&cand);
+            push_det(
+                out,
+                seen,
+                "flutter",
+                format!("Flutter {ver}"),
+                &ver,
+                &cand,
+                src,
+            );
+        }
+    }
 }
 
 pub(super) fn read_pyvenv_cfg_version(venv_dir: &Path) -> Option<String> {
@@ -498,6 +709,9 @@ fn push_det(
         "node" => IdeEcosystemKind::Node,
         "python" => IdeEcosystemKind::Python,
         "shell" => IdeEcosystemKind::Shell,
+        "ios" => IdeEcosystemKind::Ios,
+        "android" => IdeEcosystemKind::Android,
+        "flutter" => IdeEcosystemKind::Flutter,
         _ => IdeEcosystemKind::Json,
     };
     let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
@@ -518,6 +732,9 @@ fn push_det(
                 IdeEcosystemKind::Rust => path.join("bin/rustc"),
                 IdeEcosystemKind::Node => path.join("bin/node"),
                 IdeEcosystemKind::Python => path.join("bin/python3"),
+                IdeEcosystemKind::Ios => path.join("usr/bin/xcodebuild"),
+                IdeEcosystemKind::Android => path.join("platform-tools/adb"),
+                IdeEcosystemKind::Flutter => path.join("bin/flutter"),
                 _ => path.to_path_buf(),
             };
             (

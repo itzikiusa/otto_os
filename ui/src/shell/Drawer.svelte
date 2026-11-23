@@ -60,7 +60,7 @@
     // Restore only the control already focused here before the layout changed.
     const focused = document.activeElement;
     if (focused instanceof HTMLElement && panel?.contains(focused)) {
-      void tick().then(() => { if (focused.isConnected && (inline || open)) focused.focus(); });
+      void tick().then(() => { if (focused.isConnected && (inline || open)) focused.focus({ preventScroll: true }); });
     }
   });
   // Register as an open overlay (like Modal) so the native browser webview and
@@ -136,9 +136,13 @@
     background: var(--bg);
     box-shadow: var(--glass-shadow);
     overflow: hidden;
+    max-width: 100%;
+    padding-block-start: var(--safe-top);
+    padding-block-end: var(--safe-bottom);
   }
   .drawer.inline {
     display: contents;
+    padding: 0;
   }
   .drawer[hidden] {
     display: none;
@@ -170,7 +174,7 @@
   /* Floating close button pinned to the panel's top corner, above content. */
   .drawer-close {
     position: absolute;
-    top: 8px;
+    top: calc(8px + var(--safe-top));
     inset-inline-end: 8px;
     z-index: 2;
     /* The shared 24px .icon-btn (same as Modal's ✕); this only floats it over
@@ -187,12 +191,14 @@
   .drawer.left {
     inset-inline-start: 0;
     border-inline-end: 1px solid var(--border);
+    padding-inline-start: var(--safe-start);
     --slide-from: -100%;
     animation: otto-slide-in var(--dur-enter) var(--ease-out);
   }
   .drawer.right {
     inset-inline-end: 0;
     border-inline-start: 1px solid var(--border);
+    padding-inline-end: var(--safe-end);
     --slide-from: 100%;
     animation: otto-slide-in var(--dur-enter) var(--ease-out);
   }

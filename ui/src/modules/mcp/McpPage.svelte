@@ -104,7 +104,8 @@
       // The count route, not 200 whole rows just to take their length.
       pending = (await mcpCpApi.cpApprovalsCount('pending')).count;
     } catch {
-      pending = 0;
+      // Keep the last known pending count on transient failures rather than
+      // clearing the approval badge while items may still be waiting.
     }
   }
 

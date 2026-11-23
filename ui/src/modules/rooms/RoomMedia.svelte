@@ -35,6 +35,9 @@
     await media?.unmute(microphone || undefined);
     devices = (await navigator.mediaDevices?.enumerateDevices() ?? []).filter(d => d.kind === 'audioinput');
   }
+  function onMicrophoneChange() {
+    if (!mediaState.muted && connected && !busy && !self?.room_muted) void act(unmute);
+  }
 </script>
 <div class="media-controls" aria-label="Room voice and screens">
   <div class="controls">
@@ -42,7 +45,7 @@
       <span>{self?.room_muted ? 'Muted by host' : mediaState.muted ? 'Microphone off' : 'Microphone on'}</span>
       <button class="btn small" disabled={!connected || busy || self?.room_muted} onclick={() => mediaState.muted ? act(unmute) : media?.mute()}>{mediaState.muted ? 'Turn microphone on' : 'Mute microphone'}</button>
       <button class="btn small" onclick={() => media?.leaveAudio()}>Leave audio</button>
-      {#if devices.length > 1}<label>Microphone <select bind:value={microphone} onchange={() => { media?.mute(); }}><option value="">System default</option>{#each devices as device}<option value={device.deviceId}>{device.label || 'Microphone'}</option>{/each}</select></label>{/if}
+      {#if devices.length > 1}<label>Microphone <select bind:value={microphone} onchange={onMicrophoneChange}><option value="">System default</option>{#each devices as device}<option value={device.deviceId}>{device.label || 'Microphone'}</option>{/each}</select></label>{/if}
     {:else}<button class="btn small" disabled={!connected || busy} onclick={() => act(async () => { await media?.joinAudio(); })}>Join audio</button>{/if}
     {#if mediaState.presenting}<button class="btn small" onclick={() => media?.stopPresentation()}>Stop sharing screen</button>
     {:else if self?.role === 'host' || self?.presenter_allowed}<button class="btn small" disabled={!connected || busy} onclick={() => act(async () => { await media?.startPresentation(); })}>Share screen…</button>

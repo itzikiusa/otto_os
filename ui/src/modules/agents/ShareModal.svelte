@@ -182,11 +182,12 @@
 
   // ── revoke a single share ────────────────────────────────────────────────────
   async function revoke(shareId: string): Promise<void> {
+    if (revoking[shareId]) return;
     const ok = await confirmer.ask(
       'Revoke this share link? Guests attached through it are disconnected, and the link can’t be used again.',
       { title: 'Revoke share link', confirmLabel: 'Revoke link', danger: true },
     );
-    if (!ok) return;
+    if (!ok || revoking[shareId]) return;
     revoking = { ...revoking, [shareId]: true };
     try {
       await api.del(`/auth/shares/${encodeURIComponent(shareId)}`);
@@ -217,7 +218,7 @@
     const n = shares.length;
     const ok = await confirmer.ask(
       `Revoke ${n === 1 ? 'the share link' : `all ${n} share links`} for this session? Guests attached through ${n === 1 ? 'it' : 'them'} are disconnected, and ${n === 1 ? 'the link' : 'the links'} can’t be used again.`,
-      { title: 'Revoke share links', confirmLabel: n === 1 ? 'Revoke link' : `Revoke ${n} links` },
+      { title: 'Revoke share links', confirmLabel: n === 1 ? 'Revoke link' : `Revoke ${n} links`, danger: true },
     );
     if (!ok) return;
     revokingAll = true;
@@ -227,7 +228,7 @@
         await api.del(`/auth/shares/${encodeURIComponent(share.id)}`);
         shares = shares.filter((s) => s.id !== share.id);
       } catch (e) {
-        failed.push(e instanceof Error ? e.message : String(e));
+        failed.push(loadErrorText(e));
       }
     }
     if (failed.length === 0) {

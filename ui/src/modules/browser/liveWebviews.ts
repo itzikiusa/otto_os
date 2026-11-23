@@ -66,3 +66,77 @@ export const liveWebviews = {
     return evicted;
   },
 };
+
+export interface NativeEventSource {
+  onUrlChange(cb: (id: string, url: string) => void): Promise<() => void>;
+  onNewTab(cb: (url: string) => void): Promise<() => void>;
+}
+
+export interface NativeEventHandlers {
+  onUrlChange(id: string, url: string): void;
+  onNewTab(url: string): void;
+  onLocalUrlChange?: (id: string, url: string) => void;
+}
+
+/** Ref-counted singleton bridge for native child-webview events. Multiple
+ *  mounted BrowserView instances (standalone page + embedded panels / split
+ *  ThreadInspector) share ONE underlying Tauri listener so `window.open()` /
+ *  `onUrlChange` never fire once per mounted view and duplicate tabs. */
+export function createNativeEventHub() {
+  const locals = new Set<(id: string, url: string) => void>();
+  let refs = 0;
+  let gen = 0;
+  let unUrl: (() => void) | null = null;
+  let unTab: (() => void) | null = null;
+  let sharedUrl: ((id: string, url: string) => void) | null = null;
+  let sharedNewTab: ((url: string) => void) | null = null;
+
+  return {
+    attach(source: NativeEventSource, handlers: NativeEventHandlers): () => void {
+      if (handlers.onLocalUrlChange) locals.add(handlers.onLocalUrlChange);
+      sharedUrl = handlers.onUrlChange;
+      sharedNewTab = handlers.onNewTab;
+      refs += 1;
+      if (refs === 1) {
+        const mine = ++gen;
+        void source
+          .onUrlChange((id, url) => {
+            if (mine !== gen) return;
+            sharedUrl?.(id, url);
+            for (const fn of locals) fn(id, url);
+          })
+          .then((un) => {
+            if (mine !== gen) un();
+            else unUrl = un;
+          });
+        void source
+          .onNewTab((url) => {
+            if (mine !== gen) return;
+            sharedNewTab?.(url);
+          })
+          .then((un) => {
+            if (mine !== gen) un();
+            else unTab = un;
+          });
+      }
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        if (handlers.onLocalUrlChange) locals.delete(handlers.onLocalUrlChange);
+        refs = Math.max(0, refs - 1);
+        if (refs === 0) {
+          gen += 1;
+          unUrl?.();
+          unTab?.();
+          unUrl = null;
+          unTab = null;
+          sharedUrl = null;
+          sharedNewTab = null;
+        }
+      };
+    },
+  };
+}
+
+export const nativeEventHub = createNativeEventHub();

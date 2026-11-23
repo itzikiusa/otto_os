@@ -5,8 +5,8 @@
 // chose to show them from the dock's ⋯. An explicit hide (`ideDockPrefs.hiddenDockTabs`) wins
 // over everything except being the open tab.
 
-export const IDE_DOCK_ORDER = ['terminal', 'problems', 'git', 'run', 'debug', 'usages', 'dbwatch'] as const;
-export const IDE_DOCK_ON_DEMAND: readonly string[] = ['debug', 'usages', 'dbwatch'];
+export const IDE_DOCK_ORDER = ['terminal', 'problems', 'git', 'run', 'devices', 'debug', 'usages', 'dbwatch'] as const;
+export const IDE_DOCK_ON_DEMAND: readonly string[] = ['devices', 'debug', 'usages', 'dbwatch'];
 
 export interface IdeDockTabFacts {
   /** Explicitly hidden from the dock's ⋯ (the persisted preference). */

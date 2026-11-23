@@ -82,6 +82,8 @@ struct Proc {
     /// Deliberately stopped for idleness — restarts on the next request, and
     /// counts as alive for the self-heal check (it did not crash).
     parked: bool,
+    /// Permanently shut down — refuses any subsequent respawn/unpark.
+    shut_down: bool,
     inflight: usize,
     last_use: std::time::Instant,
 }
@@ -144,6 +146,11 @@ impl ClickHouse {
     pub async fn wake_background(self: &std::sync::Arc<Self>) -> Result<ClickHouseLease> {
         let parked = {
             let mut p = self.proc.lock().unwrap();
+            if p.shut_down {
+                return Err(Error::Internal(
+                    "clickhouse server has been shut down".into(),
+                ));
+            }
             p.inflight += 1;
             p.parked
         };
@@ -165,7 +172,7 @@ impl ClickHouse {
     /// decides under, so the server cannot stop under a held lease.
     pub fn try_keep_awake_background(self: &std::sync::Arc<Self>) -> Option<ClickHouseLease> {
         let mut p = self.proc.lock().unwrap();
-        if p.parked || p.child.is_none() {
+        if p.shut_down || p.parked || p.child.is_none() {
             return None;
         }
         p.inflight += 1;
@@ -252,6 +259,7 @@ impl ClickHouse {
                 child: Some(child),
                 base_url,
                 parked: false,
+                shut_down: false,
                 inflight: 0,
                 last_use: std::time::Instant::now(),
             }),
@@ -279,6 +287,9 @@ impl ClickHouse {
     /// that cannot come back still trips the heal).
     pub fn server_alive(&self) -> bool {
         let mut p = self.proc.lock().unwrap();
+        if p.shut_down {
+            return false;
+        }
         if p.parked {
             return true;
         }
@@ -326,6 +337,11 @@ impl ClickHouse {
     async fn begin(&self, what: &str) -> Result<(Busy<'_>, String)> {
         let parked = {
             let mut p = self.proc.lock().unwrap();
+            if p.shut_down {
+                return Err(Error::Internal(
+                    "clickhouse server has been shut down".into(),
+                ));
+            }
             p.inflight += 1;
             p.parked
         };
@@ -341,39 +357,61 @@ impl ClickHouse {
     }
 
     /// Restart a parked server (serialized; a no-op if another request
-    /// already did). A failed restart leaves `parked = false` with no child,
-    /// so [`Self::server_alive`] reports dead and the engine's heal reinits.
+    /// already did). Refuses to respawn after [`Self::shutdown`]. A failed
+    /// restart leaves `parked = false` with no child, so [`Self::server_alive`]
+    /// reports dead and the engine's heal reinits.
     /// `cause` says who woke it (2026-11-12: 58 starts and 33 parks in a day
     /// and nothing said which caller kept waking it).
     async fn unpark(&self, cause: &str) -> Result<()> {
         let _g = self.life.lock().await;
-        if !self.proc.lock().unwrap().parked {
-            return Ok(());
+        {
+            let p = self.proc.lock().unwrap();
+            if p.shut_down {
+                return Err(Error::Internal(
+                    "clickhouse server has been shut down".into(),
+                ));
+            }
+            if !p.parked {
+                return Ok(());
+            }
         }
         let started = std::time::Instant::now();
         let res = spawn_server(&self.bin, &self.data_dir, &self.http).await;
-        let mut p = self.proc.lock().unwrap();
-        p.parked = false;
-        match res {
-            Ok((child, base_url)) => {
-                p.child = Some(child);
-                p.base_url = base_url;
-                self.restarts
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                tracing::info!(
-                    "usage: clickhouse woke from idle-stop in {} ms (woken by: {cause})",
-                    started.elapsed().as_millis()
-                );
-                if let Some(hook) = self.wake_hook.get() {
-                    hook.notify_one();
-                }
-                Ok(())
-            }
-            Err(e) => {
+        let stale_child = {
+            let mut p = self.proc.lock().unwrap();
+            p.parked = false;
+            if p.shut_down {
                 p.child = None;
-                Err(e)
+                res.ok().map(|(child, _)| child)
+            } else {
+                match res {
+                    Ok((child, base_url)) => {
+                        p.child = Some(child);
+                        p.base_url = base_url;
+                        self.restarts
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        tracing::info!(
+                            "usage: clickhouse woke from idle-stop in {} ms (woken by: {cause})",
+                            started.elapsed().as_millis()
+                        );
+                        if let Some(hook) = self.wake_hook.get() {
+                            hook.notify_one();
+                        }
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        p.child = None;
+                        return Err(e);
+                    }
+                }
             }
+        };
+        if let Some(child) = stale_child {
+            stop_child(child).await;
         }
+        Err(Error::Internal(
+            "clickhouse server has been shut down".into(),
+        ))
     }
 
     /// Idle-stop the server when nothing is in flight and the last request
@@ -384,7 +422,7 @@ impl ClickHouse {
         let _g = self.life.lock().await;
         let child = {
             let mut p = self.proc.lock().unwrap();
-            if p.parked || p.child.is_none() || p.inflight > 0 {
+            if p.shut_down || p.parked || p.child.is_none() || p.inflight > 0 {
                 return false;
             }
             if p.last_use.elapsed() < idle_after {
@@ -527,6 +565,11 @@ impl ClickHouse {
     ) -> Result<Option<Vec<serde_json::Value>>> {
         let (parked, base_url) = {
             let mut p = self.proc.lock().unwrap();
+            if p.shut_down {
+                return Err(Error::Internal(
+                    "clickhouse server has been shut down".into(),
+                ));
+            }
             if p.parked && !wake {
                 return Ok(None);
             }
@@ -594,6 +637,11 @@ impl ClickHouse {
         }
         let base_url = {
             let mut p = self.proc.lock().unwrap();
+            if p.shut_down {
+                return Err(Error::Internal(
+                    "clickhouse server has been shut down".into(),
+                ));
+            }
             if p.parked {
                 return Ok(false);
             }
@@ -653,6 +701,7 @@ impl ClickHouse {
                 child: None,
                 base_url: base_url.to_string(),
                 parked,
+                shut_down: false,
                 inflight: 0,
                 last_use: std::time::Instant::now(),
             }),
@@ -666,13 +715,22 @@ impl ClickHouse {
     }
 
     /// Stop the server: SIGTERM (clean flush), bounded wait, SIGKILL fallback.
-    /// Final — a shut-down handle is not restarted by later requests.
+    /// Final — sets `shut_down = true` so a shut-down handle is never restarted
+    /// by later requests or racing `unpark` calls.
     pub async fn shutdown(&self) {
-        let child = self.proc.lock().ok().and_then(|mut g| {
+        let initial_child = self.proc.lock().ok().and_then(|mut g| {
+            g.shut_down = true;
             g.parked = false;
             g.child.take()
         });
-        if let Some(child) = child {
+        if let Some(child) = initial_child {
+            stop_child(child).await;
+        }
+        // Serialize with any in-flight `unpark` / `maybe_park` so no child can
+        // remain live after `shutdown()` returns.
+        let _g = self.life.lock().await;
+        let leftover = self.proc.lock().ok().and_then(|mut g| g.child.take());
+        if let Some(child) = leftover {
             stop_child(child).await;
         }
     }
@@ -1093,8 +1151,7 @@ async fn reclaim_dir(data_dir: &Path) {
         Err(_) => return,
     };
     let cmd = String::from_utf8_lossy(&out.stdout);
-    let dir_s = data_dir.to_string_lossy();
-    if !(cmd.contains("clickhouse") && cmd.contains(dir_s.as_ref())) {
+    if !cmd_matches_data_dir(&cmd, data_dir) {
         return; // stale status file / PID reused by an unrelated process
     }
     tracing::warn!("usage: reclaiming clickhouse data dir from stale server pid {pid}");
@@ -1123,6 +1180,48 @@ async fn reclaim_dir(data_dir: &Path) {
         .output()
         .await;
     tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
+/// Verify that a `ps -o command=` line belongs to a ClickHouse server targeting
+/// `data_dir` at an exact path boundary (checking both raw and canonical paths
+/// so symlinks like `/var` → `/private/var` match while sibling prefixes like
+/// `/tmp/ch2/server.xml` never match `/tmp/ch`).
+fn cmd_matches_data_dir(cmd: &str, data_dir: &Path) -> bool {
+    if !cmd.contains("clickhouse") {
+        return false;
+    }
+    let mut candidates = Vec::new();
+    let raw = data_dir.to_string_lossy().trim_end_matches('/').to_string();
+    if !raw.is_empty() {
+        candidates.push(raw);
+    }
+    if let Ok(canon) = std::fs::canonicalize(data_dir) {
+        let s = canon.to_string_lossy().trim_end_matches('/').to_string();
+        if !s.is_empty() && !candidates.contains(&s) {
+            candidates.push(s);
+        }
+    }
+    candidates
+        .iter()
+        .any(|dir| has_path_boundary_match(cmd, dir))
+}
+
+fn has_path_boundary_match(cmd: &str, dir: &str) -> bool {
+    let bytes = cmd.as_bytes();
+    let mut offset = 0;
+    while let Some(rel) = cmd[offset..].find(dir) {
+        let start = offset + rel;
+        let end = start + dir.len();
+        let before_ok =
+            start == 0 || matches!(bytes[start - 1], b' ' | b'\t' | b'\n' | b'=' | b'"' | b'\'');
+        let after_ok =
+            end == bytes.len() || matches!(bytes[end], b'/' | b' ' | b'\t' | b'\n' | b'"' | b'\'');
+        if before_ok && after_ok {
+            return true;
+        }
+        offset = start + 1;
+    }
+    false
 }
 
 /// Parse the PID from a ClickHouse `status` file (first `PID: <n>` line).
@@ -1184,6 +1283,7 @@ mod tests {
                 child: None,
                 base_url: format!("http://{addr}"),
                 parked: false,
+                shut_down: false,
                 inflight: 0,
                 last_use: std::time::Instant::now(),
             }),
@@ -1386,5 +1486,61 @@ mod tests {
             "wait_ping overran its deadline: {:?}",
             started.elapsed()
         );
+    }
+
+    #[tokio::test]
+    async fn shutdown_prevents_subsequent_unpark_or_requests() {
+        let ch = std::sync::Arc::new(ClickHouse::for_tests("http://127.0.0.1:1", true));
+        assert!(
+            ch.server_alive(),
+            "parked server counts as alive before shutdown"
+        );
+        ch.shutdown().await;
+        assert!(!ch.server_alive(), "shut-down server must not report alive");
+        assert!(
+            ch.try_keep_awake_background().is_none(),
+            "background lease must fail after shutdown"
+        );
+        let err = ch.unpark("test").await.unwrap_err();
+        assert!(err.to_string().contains("shut down"), "{err}");
+        let err = ch.wake_background().await.err().unwrap();
+        assert!(err.to_string().contains("shut down"), "{err}");
+        let err = ch.query_rows("SELECT 1").await.unwrap_err();
+        assert!(err.to_string().contains("shut down"), "{err}");
+        let err = ch
+            .insert_ndjson_background("t", "{\"a\":1}\n")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("shut down"), "{err}");
+    }
+
+    #[test]
+    fn reclaim_dir_matches_exact_path_boundary_not_substring() {
+        let dir = Path::new("/tmp/otto/ch");
+        // Exact matches: --config-file=<dir>/server.xml and --path <dir>
+        assert!(cmd_matches_data_dir(
+            "/opt/homebrew/bin/clickhouse server --config-file=/tmp/otto/ch/server.xml",
+            dir
+        ));
+        assert!(cmd_matches_data_dir(
+            "clickhouse server --path /tmp/otto/ch",
+            dir
+        ));
+        // Sibling prefix must NOT match (previously matched via substring .contains)
+        assert!(!cmd_matches_data_dir(
+            "/opt/homebrew/bin/clickhouse server --config-file=/tmp/otto/ch2/server.xml",
+            dir
+        ));
+        assert!(!cmd_matches_data_dir(
+            "/opt/homebrew/bin/clickhouse server --config-file=/tmp/otto/ch-backup/server.xml",
+            dir
+        ));
+        // Suffix under another root must NOT match
+        assert!(!cmd_matches_data_dir(
+            "/opt/homebrew/bin/clickhouse server --config-file=/other/tmp/otto/ch/server.xml",
+            dir
+        ));
+        // Non-clickhouse process must NOT match
+        assert!(!cmd_matches_data_dir("python3 /tmp/otto/ch/script.py", dir));
     }
 }

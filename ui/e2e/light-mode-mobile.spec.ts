@@ -109,13 +109,19 @@ test('the five pages open, fit the width and never pull in a hidden page', async
   if (await portrait(page)) {
     await expect.poll(() => navIds(page)).toEqual(LIGHT);
   } else {
-    // On its side: the tablet layout (sidebar, no bottom nav) with the same five.
+    // On its side: no bottom nav; the Navigator lives in a closable left drawer
+    // (ShortNavDrawer on touch) or the tablet sidebar, carrying the same five.
     await expect(bottomNav(page)).toHaveCount(0);
     const sidebar = page.locator('.sidebar');
-    await expect(sidebar.locator('[data-nav-id="git"]').first()).toBeVisible();
+    const drawer = page.locator('.drawer[aria-label="Navigator"]');
+    const inDrawer = (await sidebar.count()) === 0;
+    if (inDrawer) await page.getByRole('button', { name: 'Open navigator' }).first().click();
+    const navHost = inDrawer ? drawer : sidebar;
+    await expect(navHost.locator('[data-nav-id="git"]').first()).toBeVisible();
     for (const id of ['agents', 'home', 'kubernetes', 'vault', 'workflows']) {
-      await expect(sidebar.locator(`[data-nav-id="${id}"]`)).toHaveCount(0);
+      await expect(navHost.locator(`[data-nav-id="${id}"]`)).toHaveCount(0);
     }
+    if (inDrawer) await page.keyboard.press('Escape');
   }
 
   for (const id of LIGHT) {

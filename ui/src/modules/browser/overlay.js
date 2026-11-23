@@ -38,6 +38,8 @@
   var queue = [];
   var hoverBox = null;
   var markBoxes = {}; // selector -> box element
+  var pendingMarks = {}; // selector -> grace deadline ms while createAnnotation round-trips
+  var PENDING_GRACE_MS = 2500;
 
   // Escapes a value for a `[attr="…"]` selector STRING — not identifier
   // position, so CSS.escape() (used below for #id) isn't reused here; it
@@ -160,9 +162,9 @@
       text: (target.textContent || '').trim().slice(0, 500),
       rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
     });
-    // Instant feedback — a persistent box right away, keyed by selector. The
-    // next highlight tick (once the app round-trips the created annotation)
-    // just finds it already drawn and leaves it alone.
+    // Instant feedback — keep the box alive briefly while createAnnotation
+    // round-trips so the next 700ms tick doesn't delete and redraw it.
+    pendingMarks[selector] = Date.now() + PENDING_GRACE_MS;
     if (!markBoxes[selector]) markBoxes[selector] = makeBox(rect, '__otto_mark__');
   }
 
@@ -171,23 +173,41 @@
 
   function applyHighlights(marks) {
     var seen = {};
+    var now = Date.now();
     for (var i = 0; i < marks.length; i++) {
       var selector = marks[i].selector;
       seen[selector] = true;
-      if (markBoxes[selector]) continue; // already drawn
+      delete pendingMarks[selector];
       var el;
       try {
         el = document.querySelector(selector);
       } catch (err) {
         el = null; // an invalid/stale selector is skipped, not thrown
       }
-      if (el) markBoxes[selector] = makeBox(el.getBoundingClientRect(), '__otto_mark__');
+      if (!el) {
+        if (markBoxes[selector]) {
+          markBoxes[selector].remove();
+          delete markBoxes[selector];
+        }
+        continue;
+      }
+      var rect = el.getBoundingClientRect();
+      if (markBoxes[selector]) positionBox(markBoxes[selector], rect);
+      else markBoxes[selector] = makeBox(rect, '__otto_mark__');
     }
     for (var sel in markBoxes) {
-      if (!seen[sel]) {
-        markBoxes[sel].remove();
-        delete markBoxes[sel];
+      if (seen[sel]) continue;
+      if (pendingMarks[sel] && pendingMarks[sel] > now) {
+        var pel = null;
+        try { pel = document.querySelector(sel); } catch (err) { pel = null; }
+        if (pel) {
+          positionBox(markBoxes[sel], pel.getBoundingClientRect());
+          continue;
+        }
       }
+      delete pendingMarks[sel];
+      markBoxes[sel].remove();
+      delete markBoxes[sel];
     }
   }
 
@@ -199,7 +219,12 @@
       } catch (err) {
         el = null;
       }
-      if (el) positionBox(markBoxes[sel], el.getBoundingClientRect());
+      if (el) {
+        markBoxes[sel].style.display = '';
+        positionBox(markBoxes[sel], el.getBoundingClientRect());
+      } else {
+        markBoxes[sel].style.display = 'none';
+      }
     }
   }
   window.addEventListener('scroll', repositionAll, true);

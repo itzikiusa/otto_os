@@ -129,6 +129,26 @@ pub(crate) fn apply_project_sdk_layers(
             format!("{}/bin", nh.trim_end_matches('/')),
         );
     }
+    if let Some(ah) = proj.android_home.as_deref().filter(|s| !s.is_empty()) {
+        let base = ah.trim_end_matches('/');
+        map.insert("ANDROID_HOME".into(), base.to_string());
+        map.insert("ANDROID_SDK_ROOT".into(), base.to_string());
+        for sub in ["platform-tools", "emulator", "cmdline-tools/latest/bin"] {
+            push_unique(&mut proj_path_dirs, format!("{base}/{sub}"));
+        }
+    }
+    if let Some(fr) = proj.flutter_root.as_deref().filter(|s| !s.is_empty()) {
+        let base = fr.trim_end_matches('/');
+        map.insert("FLUTTER_ROOT".into(), base.to_string());
+        push_unique(&mut proj_path_dirs, format!("{base}/bin"));
+    }
+    if let Some(xd) = proj
+        .xcode_developer_dir
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        map.insert("DEVELOPER_DIR".into(), xd.trim_end_matches('/').to_string());
+    }
     (proj_path_dirs, has_explicit_py)
 }
 

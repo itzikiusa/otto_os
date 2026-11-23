@@ -14,7 +14,7 @@
   // Hosted two ways: as the right-panel **Outputs** tab (no props → the focused
   // agent session) and embedded under the History conversation (`embedded`).
   import { copyText } from '../../lib/clipboard';
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { activity } from '../../lib/stores/activity.svelte';
@@ -107,6 +107,18 @@
    *  DOM shouldn't hold more than a couple hundred KB of <pre>. */
   const TEXT_CAP = 200 * 1024;
 
+  /** Only http(s) links are clickable — never render `javascript:` / `data:` as `<a href>`. */
+  function safeHttpUrl(raw: string | null | undefined): string | undefined {
+    const t = raw?.trim();
+    if (!t) return undefined;
+    try {
+      const u = new URL(t);
+      return u.protocol === 'http:' || u.protocol === 'https:' ? u.href : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   async function select(a: Artifact): Promise<void> {
     const request = ++previewRequest;
     previewIdentity = JSON.stringify(a);
@@ -118,7 +130,7 @@
     revokeCreated();
     const kind = classify(a);
     if (kind === 'link') {
-      preview = { kind, url: a.url ?? undefined };
+      preview = { kind, url: safeHttpUrl(a.url) };
       return;
     }
     if (!sid) {
@@ -198,13 +210,22 @@
     });
   });
 
+  let listEl = $state<HTMLUListElement | null>(null);
+
   function closePreview(): void {
+    const prevId = selectedId;
     previewRequest++;
     dismissed = true;
     selectedId = null;
     preview = null;
     loading = false;
     revokeCreated();
+    void tick().then(() => {
+      const target =
+        (prevId ? listEl?.querySelector<HTMLElement>(`button.arow[data-artifact-id="${CSS.escape(prevId)}"]`) : null) ??
+        listEl?.querySelector<HTMLElement>('button.arow');
+      target?.focus({ preventScroll: true });
+    });
   }
 
   function onArtifactKey(e: KeyboardEvent, index: number): void {
@@ -293,11 +314,12 @@
           Nothing produced yet. Files the agent writes, PRs it opens and images it captures show up here.
         </p>
       {/snippet}
-      <ul class="alist" role="listbox" aria-label="Artifacts">
+      <ul class="alist" role="listbox" aria-label="Artifacts" bind:this={listEl}>
         {#each list as a, index (a.id)}
           <li role="none">
             <button
               class="arow"
+              data-artifact-id={a.id}
               class:on={selectedId === a.id}
               role="option"
               aria-selected={selectedId === a.id}
@@ -321,15 +343,15 @@
         <div class="phead">
           <span class="ptitle" role="region" aria-label="Output name" use:scrollableIdentity title={selected.path ?? selected.url ?? ''}>{selected.label}</span>
           <span class="pactions">
-            <button class="icon-btn" title="Copy path" aria-label="Copy path" onclick={() => void copyPath(selected!)}>
+            <button class="icon-btn pact" title="Copy path" aria-label="Copy path" onclick={() => void copyPath(selected!)}>
               <Icon name="copy" size={12} />
             </button>
             {#if preview?.kind === 'download' || preview?.kind === 'image' || preview?.kind === 'pdf'}
-              <a class="icon-btn" href={preview.url} download={downloadName(selected)} title="Download" aria-label="Download">
+              <a class="icon-btn pact" href={preview.url} download={downloadName(selected)} title="Download" aria-label="Download">
                 <Icon name="arrowDown" size={12} />
               </a>
             {/if}
-            <button class="icon-btn" title="Close preview" aria-label="Close preview" onclick={closePreview}>
+            <button class="icon-btn pact" title="Close preview" aria-label="Close preview" onclick={closePreview}>
               <Icon name="x" size={12} />
             </button>
           </span>
@@ -343,9 +365,13 @@
           </div>
         {:else if preview?.kind === 'link'}
           <div class="pbody">
-            <a class="ext-link" href={preview.url} target="_blank" rel="noopener noreferrer">
-              <Icon name="external" size={12} /> {preview.url}
-            </a>
+            {#if preview.url}
+              <a class="ext-link" href={preview.url} target="_blank" rel="noopener noreferrer">
+                <Icon name="external" size={12} /> {preview.url}
+              </a>
+            {:else}
+              <span class="dim mono">{selected.url ?? 'Unsupported link scheme'}</span>
+            {/if}
           </div>
         {:else if preview?.kind === 'none'}
           <div class="pbody dim">
@@ -507,21 +533,15 @@
     gap: 2px;
     flex-shrink: 0;
   }
-  .pactions .icon-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
+  .pact {
     width: 22px;
     height: 22px;
-    border: none;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
   }
-  .pactions .icon-btn:hover {
-    background: var(--hover);
-    color: var(--text);
+  @media (pointer: coarse) {
+    .pact {
+      min-inline-size: var(--hit-min);
+      min-block-size: var(--hit-min);
+    }
   }
   .pbody {
     flex: 1;

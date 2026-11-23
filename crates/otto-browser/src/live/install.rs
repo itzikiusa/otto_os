@@ -246,18 +246,37 @@ pub struct ReqwestFetcher {
 }
 
 impl ReqwestFetcher {
-    pub fn new() -> Self {
+    /// Build a netguarded HTTP client for engine downloads. Returns an error
+    /// rather than ever falling back to an unhardened `reqwest::Client::default()`.
+    pub fn new() -> Result<Self, reqwest::Error> {
         let client = otto_netguard::guarded_client_builder()
             .connect_timeout(Duration::from_secs(30))
-            .build()
-            .unwrap_or_default();
-        Self { client }
+            .build()?;
+        Ok(Self { client })
     }
 }
 
-impl Default for ReqwestFetcher {
-    fn default() -> Self {
-        Self::new()
+/// Fail-closed fetcher used when constructing [`ReqwestFetcher`] fails so no
+/// download can ever proceed over an unhardened client.
+pub struct FailingFetcher {
+    reason: String,
+}
+
+impl FailingFetcher {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Fetcher for FailingFetcher {
+    async fn open(
+        &self,
+        _url: &str,
+    ) -> Result<(Option<u64>, BoxStream<'static, Result<Vec<u8>, String>>), String> {
+        Err(self.reason.clone())
     }
 }
 
@@ -653,5 +672,34 @@ mod tests {
         assert!(!is_installed(tmp.path(), &pin), "no marker yet");
         std::fs::write(build_dir(tmp.path(), &pin).join(INSTALLED_MARKER), b"sha").unwrap();
         assert!(is_installed(tmp.path(), &pin));
+    }
+
+    #[test]
+    fn reqwest_fetcher_new_returns_result_with_guarded_client() {
+        let fetcher = ReqwestFetcher::new();
+        assert!(fetcher.is_ok(), "guarded client builder should succeed");
+    }
+
+    #[tokio::test]
+    async fn failing_fetcher_fails_closed_during_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        let body = b"archive";
+        let pin = fake_pin(body.len() as u64);
+        let fetcher = FailingFetcher::new("guarded client build failed");
+        let last = Mutex::new(None);
+        let err = install(
+            tmp.path(),
+            &pin,
+            &sha(body),
+            &fetcher,
+            Arc::new(FakeExtractor),
+            &|j: &InstallJob| *last.lock().unwrap() = Some(j.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("guarded client build failed"), "{err}");
+        assert!(!is_installed(tmp.path(), &pin));
+        let last = last.lock().unwrap().clone().unwrap();
+        assert_eq!(last.state, InstallState::Failed);
     }
 }

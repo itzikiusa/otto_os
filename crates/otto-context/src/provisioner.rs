@@ -6,10 +6,12 @@ use std::path::PathBuf;
 
 use otto_core::domain::Workspace;
 use otto_core::hooks::{PreSpawnHook, SessionSpawnContext, SpawnInjection};
+use otto_state::MemoriesRepo;
 
 use crate::config;
 use crate::library::Library;
-use crate::materialize;
+use crate::materialize::{self, MaterializeOptions};
+use crate::memory_brief::{self, MemoryBriefFilter};
 
 /// Materializes Otto's library into a provider's out-of-tree context bundle at
 /// spawn time. Bundles live under `ctx_root` (`~/.otto/context` by default) —
@@ -17,6 +19,7 @@ use crate::materialize;
 pub struct Provisioner {
     library: Library,
     ctx_root: PathBuf,
+    memories: Option<MemoriesRepo>,
 }
 
 impl Provisioner {
@@ -25,12 +28,48 @@ impl Provisioner {
         Self {
             library,
             ctx_root: materialize::default_context_root(),
+            memories: None,
         }
     }
 
     /// Construct with an explicit bundle root (used by tests).
     pub fn with_root(library: Library, ctx_root: PathBuf) -> Self {
-        Self { library, ctx_root }
+        Self {
+            library,
+            ctx_root,
+            memories: None,
+        }
+    }
+
+    /// Attach a workspace memory repository so spawn-time `CONTEXT.md` assembly
+    /// includes relevant workspace memories when `cfg.include_memory` is enabled.
+    pub fn with_memories(mut self, repo: MemoriesRepo) -> Self {
+        self.memories = Some(repo);
+        self
+    }
+
+    fn load_memory_brief_sync(&self, ws: &Workspace, cwd: &str, include_memory: bool) -> String {
+        if !include_memory {
+            return String::new();
+        }
+        let Some(repo) = self.memories.clone() else {
+            return String::new();
+        };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return String::new();
+        };
+        if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+            return String::new();
+        }
+        let filter = MemoryBriefFilter {
+            query: memory_brief::intent_query_for_cwd(cwd, &ws.name),
+            ..Default::default()
+        };
+        tokio::task::block_in_place(|| {
+            handle.block_on(memory_brief::load_workspace_memory_brief(
+                &repo, &ws.id, &filter,
+            ))
+        })
     }
 }
 
@@ -50,13 +89,18 @@ impl PreSpawnHook for Provisioner {
             cfg.extra_context_md.push_str("\n\n");
             cfg.extra_context_md.push_str(&context.extra_context_md);
         }
-        materialize::provision_with_home(
+        let memory_brief = self.load_memory_brief_sync(ws, cwd, cfg.include_memory);
+        let opts = MaterializeOptions {
+            provider_home: context.provider_home.as_deref(),
+            memory_brief_md: (!memory_brief.is_empty()).then_some(memory_brief.as_str()),
+        };
+        materialize::provision_with_options(
             &self.library,
             &cfg,
             cwd,
             provider,
             &self.ctx_root.join("sessions").join(namespace),
-            context.provider_home.as_deref(),
+            &opts,
         )
         .1
     }
@@ -85,8 +129,19 @@ impl PreSpawnHook for Provisioner {
     /// injection).
     fn before_spawn(&self, ws: &Workspace, cwd: &str, provider: &str) -> SpawnInjection {
         let cfg = config::from_settings(&ws.settings);
-        let (_result, injection) =
-            materialize::provision(&self.library, &cfg, cwd, provider, &self.ctx_root);
+        let memory_brief = self.load_memory_brief_sync(ws, cwd, cfg.include_memory);
+        let opts = MaterializeOptions {
+            provider_home: None,
+            memory_brief_md: (!memory_brief.is_empty()).then_some(memory_brief.as_str()),
+        };
+        let (_result, injection) = materialize::provision_with_options(
+            &self.library,
+            &cfg,
+            cwd,
+            provider,
+            &self.ctx_root,
+            &opts,
+        );
         injection
     }
 

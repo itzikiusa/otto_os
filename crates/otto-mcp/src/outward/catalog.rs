@@ -7,7 +7,7 @@
 use otto_core::Error;
 use serde_json::{json, Value};
 
-use super::exec::i64_lenient;
+use super::exec::{i64_lenient, wants_resolved};
 use super::ui_commands;
 
 pub const DEFAULT_ENABLED: &[&str] = &[
@@ -111,6 +111,18 @@ pub const DEFAULT_ENABLED: &[&str] = &[
     "design_get",
     "design_links",
     "design_search",
+    "design_comments",
+    // 3D generation, voice clips and Smart-mode productions (reads)
+    "list_3d_providers",
+    "get_3d_job",
+    "list_3d_jobs",
+    "list_tts_providers",
+    "list_tts_voices",
+    "list_voice_clips",
+    "get_production",
+    "list_productions",
+    "get_audio_job",
+    "list_audio_jobs",
     // Sessions
     "list_sessions",
     "get_session",
@@ -158,6 +170,8 @@ pub const DEFAULT_ENABLED: &[&str] = &[
     "k8s_top",
     "k8s_health",
     "k8s_pod_actions_list",
+    // Mobile Simulators & Emulators device list (`browser`: View).
+    "sim_list",
     // (Vault v2 structural reads removed — Vault feature disabled.)
 ];
 pub const DANGEROUS: &[&str] = &[
@@ -228,10 +242,30 @@ pub const DANGEROUS: &[&str] = &[
     "vault_rename",
     "vault_delete",
     // Design Hall writes — starting an agent turn (spawns a session + commits
-    // a version) and filing an explicit link. Approving a version stays
-    // human-only: there is deliberately no tool for it.
+    // a version), filing an explicit link, and commenting on / resolving a
+    // review thread. Approving a version stays human-only: there is
+    // deliberately no tool for it.
     "design_assist",
     "design_link",
+    "design_comment",
+    "design_resolve_comment",
+    // 3D / voice / Smart mode: local GPU minutes, new artifacts and clips, a
+    // workspace file, a hard delete, an agent planning turn.
+    "start_3d_job",
+    "cancel_3d_job",
+    "export_3d_artifact",
+    "synthesize_voice",
+    "delete_voice_clip",
+    "create_production",
+    "start_production",
+    "cancel_production",
+    "steer_production",
+    "redraw_production_item",
+    "revert_production",
+    "rebuild_production_scene",
+    "start_sound",
+    "start_music",
+    "cancel_audio_job",
     // A Logs Insights scan, billed per GB scanned.
     "aws_logs_insights",
     // AWS / Kubernetes console writers — a billed Athena scan, a produced SQS
@@ -248,6 +282,9 @@ pub const DANGEROUS: &[&str] = &[
     // A database write/DDL through the Explorer's own query path — the
     // connection's read-only / production guard still refuses it there.
     "query_db",
+    // Mobile Simulators & Emulators controls (`browser`: Edit, reversible).
+    "sim_action",
+    "sim_input",
 ];
 
 /// The **irreversible** tier of [`DANGEROUS`] — the guardrail for auto-approve
@@ -273,6 +310,8 @@ pub const IRREVERSIBLE: &[&str] = &[
     "delete_personal_agent",
     // A committed UPDATE / DELETE / DROP has no undo inside Otto.
     "query_db",
+    // Removes the clip row and its audio file.
+    "delete_voice_clip",
 ];
 
 /// The IRREVERSIBLE writers an agent session's in-session stdio bridge
@@ -565,10 +604,11 @@ pub const OPT_IN_READS: &[&str] = &[
     "slack_read_messages",
     "slack_search",
     "slack_my_activity",
-    // Console content: an S3 object's bytes, log events, pod logs.
+    // Console content: an S3 object's bytes, log events, pod and device logs.
     "aws_s3_preview",
     "aws_logs_filter",
     "k8s_logs",
+    "sim_logs",
     // (search_memory + Vault v2 content reads removed — Vault feature disabled.)
 ];
 
@@ -1188,8 +1228,221 @@ pub fn otto_tool_specs() -> Vec<Value> {
     ]);
     // Agent UI control: one governed tool per `docs/contracts/ui-commands.json`
     // entry (`otto.ui_*`, category "UI control") — see `crate::ui_commands`.
-    specs.extend(agent_admin_specs().into_iter().chain(ui_commands::specs()));
+    specs.extend(extra_tool_specs());
     specs
+}
+
+fn extra_tool_specs() -> impl Iterator<Item = Value> {
+    agent_admin_specs()
+        .into_iter()
+        .chain(super::simulators::specs())
+        .chain(ui_commands::specs())
+}
+
+/// The Design Hall review-comment slice of [`otto_tool_specs`] (after
+/// `otto.design_link`): the list default-on, comment and resolve / reopen
+/// approval-gated like the other Design Hall writes.
+fn design_comment_specs() -> [Value; 3] {
+    [
+        json!({"name":"otto.design_comments","mutating":false,"category":"Product & Design",
+            "description":"A design artifact's review comments, oldest first: id, body, author_name, version_seq, parent_id (a reply), pin, pin_3d, resolved. version_id = threads on that version; resolved narrows. Read-only.",
+            "inputSchema":{"type":"object","required":["artifact_id"],"properties":{
+                "artifact_id":{"type":"string","description":DESIGN_REF_DESC},"version_id":{"type":"string"},"resolved":{"type":"boolean"}}}}),
+        json!({"name":"otto.design_comment","mutating":true,"category":"Product & Design",
+            "description":"Comment on a design artifact (default: its head version), or reply to a thread with parent_id. pin_3d anchors it on a 3D model: {selection_kind: point|polygon|region|mesh, position: [x,y,z], mesh_name?, face_index?, face_indices?, normal?, camera?: {pos, target}}. DANGEROUS — approval-gated.",
+            "inputSchema":{"type":"object","required":["artifact_id","body"],"properties":{
+                "artifact_id":{"type":"string","description":DESIGN_REF_DESC},"body":{"type":"string"},
+                "version_id":{"type":"string"},"parent_id":{"type":"string"},"pin_3d":{"type":"object"}}}}),
+        json!({"name":"otto.design_resolve_comment","mutating":true,"category":"Product & Design",
+            "description":"Resolve a comment thread, or reopen it with resolved false. DANGEROUS — approval-gated.",
+            "inputSchema":{"type":"object","required":["artifact_id","comment_id"],"properties":{
+                "artifact_id":{"type":"string","description":DESIGN_REF_DESC},"comment_id":{"type":"string"},"resolved":{"type":"boolean"}}}}),
+    ]
+}
+
+/// The 3D, voice and Smart-mode slice of [`otto_tool_specs`] (after the
+/// Design Hall tools): reads default-on, the writers (local GPU minutes, new
+/// artifacts and clips, an agent turn) approval-gated. No provider admin and
+/// no keys: those stay person-only in the app.
+fn media_tool_specs() -> [Value; 25] {
+    let cat = "Product & Design";
+    let s = json!({"type":"string"});
+    let job = json!({"type":"string","description":"3D job id (otto.list_3d_jobs)."});
+    let prod = json!({"type":"string","description":"Production id (otto.list_productions)."});
+    let limit = json!({"type":"integer"});
+    let audio_job = json!({"type":"string","description":"Audio job id (otto.list_audio_jobs)."});
+    let audio = json!({"workspace_id":s,"prompt":s,"seconds":{"type":"number"},"loop":{"type":"boolean"},
+        "seed":{"type":"integer"},"title":s,"story_id":s,"artifact_id":s});
+    let mut music = audio.clone();
+    music["bpm"] = json!({"type":"integer"});
+    [
+        json!({"name":"otto.list_3d_providers","mutating":false,"category":cat,
+            "description":"3D generators: id, name, ready, status_detail, capabilities (supported_stages, output_formats). Read-only.",
+            "inputSchema":{"type":"object","properties":{}}}),
+        json!({"name":"otto.start_3d_job","mutating":true,"category":cat,
+            "description":"Start a 3D job (default generator otto-forge). stage generate (prompt and/or image_artifact_id) or gameready | rig | animate on source_artifact_id (optional source_version_id); the mesh lands as a new artifact or a new version of the source. Poll otto.get_3d_job. preset: low_poly_prop | stylized_character | environment_asset | hero_mesh. DANGEROUS: local GPU minutes, writes an artifact — approval-gated.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{
+                "workspace_id":s,"provider_id":s,"stage":s,"prompt":s,"image_artifact_id":s,
+                "source_artifact_id":s,"source_version_id":s,"preset":s,"poly_budget":{"type":"integer"},"title":s}}}),
+        json!({"name":"otto.get_3d_job","mutating":false,"category":cat,
+            "description":"One 3D job: status (queued|running|succeeded|failed|cancelled), progress_pct, stage (the progress message), error, artifact_id and version_id of the result. Read-only.",
+            "inputSchema":{"type":"object","required":["job_id"],"properties":{"job_id":job}}}),
+        json!({"name":"otto.list_3d_jobs","mutating":false,"category":cat,
+            "description":"A workspace's 3D jobs, newest first; artifact_id narrows to one model's jobs. Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":s,"artifact_id":s,"limit":limit}}}),
+        json!({"name":"otto.cancel_3d_job","mutating":true,"category":cat,
+            "description":"Cancel a queued or running 3D job; its local generator is stopped. DANGEROUS — approval-gated.",
+            "inputSchema":{"type":"object","required":["job_id"],"properties":{"job_id":job}}}),
+        json!({"name":"otto.export_3d_artifact","mutating":true,"category":cat,
+            "description":"Write a 3D artifact (head, or version_id) into its workspace folder at relative_path (.glb/.gltf/.obj). DANGEROUS: writes a file — approval-gated.",
+            "inputSchema":{"type":"object","required":["artifact_id","relative_path"],"properties":{
+                "artifact_id":{"type":"string","description":DESIGN_REF_DESC},"relative_path":s,"version_id":s,"overwrite":{"type":"boolean"}}}}),
+        json!({"name":"otto.list_tts_providers","mutating":false,"category":cat,
+            "description":"Voice engines: id, name, kind, ready, supported_formats. Read-only.",
+            "inputSchema":{"type":"object","properties":{}}}),
+        json!({"name":"otto.list_tts_voices","mutating":false,"category":cat,
+            "description":"A voice engine's voices: id, name, locale, gender. Read-only.",
+            "inputSchema":{"type":"object","required":["provider_id"],"properties":{"provider_id":s}}}),
+        json!({"name":"otto.synthesize_voice","mutating":true,"category":cat,
+            "description":"Speak text with a voice into a stored clip (default wav, built-in macOS voices). Returns the clip: id, duration_ms, visemes (set when a lip-sync timeline was stored). Optional character_name, story_id, artifact_id link it. DANGEROUS — approval-gated.",
+            "inputSchema":{"type":"object","required":["workspace_id","voice_id","text"],"properties":{
+                "workspace_id":s,"voice_id":s,"text":s,"provider_id":s,"character_name":s,"story_id":s,
+                "artifact_id":s,"format":s,"speed":{"type":"number"},"title":s}}}),
+        json!({"name":"otto.list_voice_clips","mutating":false,"category":cat,
+            "description":"A workspace's voice clips (id, title, character_name, duration_ms, visemes); story_id or artifact_id narrow. Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":s,"story_id":s,"artifact_id":s,"limit":limit}}}),
+        json!({"name":"otto.delete_voice_clip","mutating":true,"category":cat,
+            "description":"Delete a voice clip and its audio file. DANGEROUS: irreversible — approval-gated.",
+            "inputSchema":{"type":"object","required":["clip_id"],"properties":{"clip_id":s}}}),
+        json!({"name":"otto.create_production","mutating":true,"category":cat,
+            "description":"Smart mode: plan a whole scene from one plain description (characters, props, voice lines, sounds, music, layout). An agent turn writes the plan: status planning, then ready. Check it with otto.get_production, then otto.start_production. use: phone | pc (default) | closeup. DANGEROUS: runs an agent turn — approval-gated.",
+            "inputSchema":{"type":"object","required":["workspace_id","description"],"properties":{"workspace_id":s,"description":s,"use":s,
+                "project_id":{"type":"string","description":"Any creation of a project (otto.get_production's project_id): the new scene is in that project and reuses its made characters and objects. Omitted: a new project."}}}}),
+        json!({"name":"otto.get_production","mutating":false,"category":cat,
+            "description":"One production: status, message, eta_secs, project_id and project_name, the plan's items (kind, name, status, progress_pct, message, result artifact or clip, details.reuse when taken from its project), notes, scene_artifact_id, revisions (ids for otto.revert_production). Read-only.",
+            "inputSchema":{"type":"object","required":["production_id"],"properties":{"production_id":prod}}}),
+        json!({"name":"otto.list_productions","mutating":false,"category":cat,
+            "description":"A workspace's productions, newest first (id, title, status, project_id, project_name). Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":s}}}),
+        json!({"name":"otto.start_production","mutating":true,"category":cat,
+            "description":"Make every enabled item of a ready production not made yet (3D one at a time, voices, then the scene). Poll otto.get_production. DANGEROUS: GPU minutes, writes artifacts — approval-gated.",
+            "inputSchema":{"type":"object","required":["production_id"],"properties":{"production_id":prod}}}),
+        json!({"name":"otto.cancel_production","mutating":true,"category":cat,
+            "description":"Stop a production: its running item is cancelled and the rest skipped. DANGEROUS — approval-gated.",
+            "inputSchema":{"type":"object","required":["production_id"],"properties":{"production_id":prod}}}),
+        json!({"name":"otto.steer_production","mutating":true,"category":cat,
+            "description":"Change a production in words, as Create's change box does: an agent turn revises the plan (status planning, then ready; the revision says what changed). otto.start_production then makes only the changed and added items; a change of setting alone rebuilds the scene at once. pins: notes on the scene ({note, item_id?, artifact_id?, point?: [x,y,z]}). DANGEROUS: runs an agent turn — approval-gated.",
+            "inputSchema":{"type":"object","required":["production_id","comment"],"properties":{"production_id":prod,"comment":s,
+                "pins":{"type":"array","items":{"type":"object","required":["note"],"properties":{"note":s,"item_id":s,"artifact_id":s,"point":{"type":"array","items":{"type":"number"}}}}}}}}),
+        json!({"name":"otto.redraw_production_item","mutating":true,"category":cat,
+            "description":"\"Not this one\" for an item whose 3D shape is not built yet: its picture is drawn again (another seed) at its turn. DANGEROUS — approval-gated.",
+            "inputSchema":{"type":"object","required":["production_id","item_id"],"properties":{"production_id":prod,"item_id":s}}}),
+        json!({"name":"otto.revert_production","mutating":true,"category":cat,
+            "description":"Undo a change: the plan and the made results from before revision_id (one of otto.get_production's revisions) come back. DANGEROUS — approval-gated.",
+            "inputSchema":{"type":"object","required":["production_id","revision_id"],"properties":{"production_id":prod,"revision_id":s}}}),
+        json!({"name":"otto.rebuild_production_scene","mutating":true,"category":cat,
+            "description":"Write a ready, done or stopped production's scene again from what is made, with the current scene builder; nothing is made. DANGEROUS — approval-gated.",
+            "inputSchema":{"type":"object","required":["production_id"],"properties":{"production_id":prod}}}),
+        json!({"name":"otto.start_sound","mutating":true,"category":cat,
+            "description":"Make a sound effect, or with loop an ambience bed, into a stored clip (Otto Forge sound engine). seconds 0.5-30 (loop ≤ 26.5). Poll otto.get_audio_job; status not_installed = no engine. DANGEROUS: GPU minutes, writes a clip — approval-gated.",
+            "inputSchema":{"type":"object","required":["workspace_id","prompt","seconds"],"properties":audio.clone()}}),
+        json!({"name":"otto.start_music","mutating":true,"category":cat,
+            "description":"Make background music into a stored clip (Otto Forge sound engine). seconds 10-590 (loop ≤ 500), optional loop and bpm 30-300. Poll otto.get_audio_job. DANGEROUS: GPU minutes, writes a clip — approval-gated.",
+            "inputSchema":{"type":"object","required":["workspace_id","prompt","seconds"],"properties":music}}),
+        json!({"name":"otto.get_audio_job","mutating":false,"category":cat,
+            "description":"One sound or music job: status (queued|running|succeeded|failed|cancelled|not_installed), progress_pct, stage, error, and the clip once made (id, duration_ms, manifest). Read-only.",
+            "inputSchema":{"type":"object","required":["job_id"],"properties":{"job_id":audio_job}}}),
+        json!({"name":"otto.list_audio_jobs","mutating":false,"category":cat,
+            "description":"A workspace's sound and music jobs, newest first; kind sound | music narrows. Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":s,"kind":s,"limit":limit}}}),
+        json!({"name":"otto.cancel_audio_job","mutating":true,"category":cat,
+            "description":"Cancel a queued or running sound or music job; the engine is stopped. DANGEROUS — approval-gated.",
+            "inputSchema":{"type":"object","required":["job_id"],"properties":{"job_id":audio_job}}}),
+    ]
+}
+
+/// The approval card's line for a media writer; `None` for every other tool.
+fn media_detail(short: &str, args: &Value) -> Option<String> {
+    let a = |k: &str| {
+        args.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_string()
+    };
+    Some(match short {
+        "start_3d_job" => format!(
+            "Start a 3D '{}' job in workspace '{}' (local GPU minutes, writes an artifact): {}",
+            args.get("stage")
+                .and_then(Value::as_str)
+                .unwrap_or("generate"),
+            a("workspace_id"),
+            preview(
+                args.get("prompt").and_then(Value::as_str).unwrap_or(""),
+                160
+            )
+        ),
+        "cancel_3d_job" => format!("Cancel 3D job '{}'", a("job_id")),
+        "export_3d_artifact" => format!(
+            "Write 3D artifact '{}' to '{}' in its workspace",
+            a("artifact_id"),
+            a("relative_path")
+        ),
+        "synthesize_voice" => format!(
+            "Make a voice clip with voice '{}' in workspace '{}': {}",
+            a("voice_id"),
+            a("workspace_id"),
+            preview(args.get("text").and_then(Value::as_str).unwrap_or(""), 160)
+        ),
+        "delete_voice_clip" => format!("Delete voice clip '{}' and its audio file", a("clip_id")),
+        "create_production" => format!(
+            "Plan a Smart-mode scene in workspace '{}' (runs an agent turn): {}",
+            a("workspace_id"),
+            preview(
+                args.get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+                160
+            )
+        ),
+        "start_production" => format!(
+            "Make production '{}' (GPU minutes, writes artifacts and clips)",
+            a("production_id")
+        ),
+        "cancel_production" => format!("Stop production '{}'", a("production_id")),
+        "steer_production" => format!(
+            "Change production '{}' (runs an agent turn): {}",
+            a("production_id"),
+            preview(
+                args.get("comment").and_then(Value::as_str).unwrap_or(""),
+                160
+            )
+        ),
+        "redraw_production_item" => format!(
+            "Draw item '{}' of production '{}' again",
+            a("item_id"),
+            a("production_id")
+        ),
+        "revert_production" => format!(
+            "Undo change '{}' of production '{}'",
+            a("revision_id"),
+            a("production_id")
+        ),
+        "rebuild_production_scene" => {
+            format!("Rebuild the scene of production '{}'", a("production_id"))
+        }
+        "start_sound" | "start_music" => format!(
+            "Make {} s of {} in workspace '{}' (local GPU minutes, writes a clip): {}",
+            args.get("seconds").and_then(Value::as_f64).unwrap_or(0.0),
+            short.trim_start_matches("start_"),
+            a("workspace_id"),
+            preview(
+                args.get("prompt").and_then(Value::as_str).unwrap_or(""),
+                160
+            )
+        ),
+        "cancel_audio_job" => format!("Cancel sound or music job '{}'", a("job_id")),
+        _ => return None,
+    })
 }
 
 /// The "Agent admin" slice of [`otto_tool_specs`]: a person's personal agents
@@ -1464,6 +1717,8 @@ fn team_tool_specs() -> [Value; 3] {
 fn splice_session_specs(specs: &mut Vec<Value>) {
     splice_before(specs, "otto.wait_session", thread_tool_specs());
     splice_before(specs, "otto.wait_session", own_tool_specs());
+    splice_before(specs, "otto.list_sessions", design_comment_specs());
+    splice_before(specs, "otto.list_sessions", media_tool_specs());
 }
 
 /// A personal agent's own-scope slice of [`otto_tool_specs`]: its routines,
@@ -1854,7 +2109,10 @@ pub async fn detail_with_target(pool: &otto_state::DbPool, tool: &str, args: &Va
 /// recurring autonomous capability they are granting (security review fix).
 pub fn dangerous_detail(tool: &str, args: &Value) -> String {
     let short = tool.strip_prefix("otto.").unwrap_or(tool);
-    if let Some(d) = slack_detail(short, args) {
+    if let Some(d) = slack_detail(short, args)
+        .or_else(|| media_detail(short, args))
+        .or_else(|| super::simulators::dangerous_detail(short, args))
+    {
         return d;
     }
     match short {
@@ -2174,6 +2432,17 @@ pub fn dangerous_detail(tool: &str, args: &Value) -> String {
             args.get("rel").and_then(Value::as_str).unwrap_or("?"),
             args.get("dst_kind").and_then(Value::as_str).unwrap_or("?"),
             args.get("dst_id").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "design_comment" => format!(
+            "Comment on design artifact '{}': {}",
+            args.get("artifact_id").and_then(Value::as_str).unwrap_or("?"),
+            preview(args.get("body").and_then(Value::as_str).unwrap_or(""), 160)
+        ),
+        "design_resolve_comment" => format!(
+            "{} comment '{}' on design artifact '{}'",
+            if wants_resolved(args) { "Resolve" } else { "Reopen" },
+            args.get("comment_id").and_then(Value::as_str).unwrap_or("?"),
+            args.get("artifact_id").and_then(Value::as_str).unwrap_or("?")
         ),
         _ => format!("External agent requests the dangerous tool '{tool}'."),
     }

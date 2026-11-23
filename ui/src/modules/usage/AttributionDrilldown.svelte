@@ -106,6 +106,14 @@
     toasts.success('Exported attribution as JSON', `otto-attribution-${selectedDim}-${days}d.json`);
   }
 
+  let copyTimer: ReturnType<typeof setTimeout> | null = null;
+  $effect(() => () => {
+    if (copyTimer) {
+      clearTimeout(copyTimer);
+      copyTimer = null;
+    }
+  });
+
   async function copyRow(r: AttributionRow): Promise<void> {
     // A blocked clipboard must not flash the "copied" tick — swallow it here
     // and leave the row unmarked so the failure is visible, not silent.
@@ -116,8 +124,10 @@
       return;
     }
     copiedRow = r.key;
-    setTimeout(() => {
+    if (copyTimer) clearTimeout(copyTimer);
+    copyTimer = setTimeout(() => {
       copiedRow = null;
+      copyTimer = null;
     }, 1500);
   }
 </script>
@@ -165,13 +175,13 @@
       <table class="attr-table">
         <thead>
           <tr>
-            <th class="col-key">{DIM_LABELS[selectedDim]}</th>
-            <th class="col-bar"><span class="sr-only">Share of cost</span></th>
-            <th class="col-cost">Cost</th>
-            <th class="col-pct">Share</th>
-            <th class="col-tokens">Tokens</th>
-            <th class="col-sessions">Sessions</th>
-            <th class="col-copy"><span class="sr-only">Actions</span></th>
+            <th scope="col" class="col-key">{DIM_LABELS[selectedDim]}</th>
+            <th scope="col" class="col-bar"><span class="sr-only">Share of cost</span></th>
+            <th scope="col" class="col-cost">Cost</th>
+            <th scope="col" class="col-pct">Share</th>
+            <th scope="col" class="col-tokens">Tokens</th>
+            <th scope="col" class="col-sessions">Sessions</th>
+            <th scope="col" class="col-copy"><span class="sr-only">Actions</span></th>
           </tr>
         </thead>
         <tbody>

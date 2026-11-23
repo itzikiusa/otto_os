@@ -252,6 +252,13 @@ impl Fixture {
             .iter()
             .map(|(rel, l, _)| json!({ "path": self.path(rel), "line": l }))
             .collect();
+        // Compile the Rust fixture with debug symbols even when the CI runner strips its own binaries.
+        let mut launch =
+            json!({ "program": program, "args": [], "cwd": spec["cwd"], "test_name": test_name });
+        if item["language"] == "rust" {
+            launch["env"] =
+                json!({"CARGO_PROFILE_DEV_DEBUG": "2", "CARGO_PROFILE_TEST_DEBUG": "2"});
+        }
         let (st, body) = send_json(
             &self.app,
             Method::POST,
@@ -260,7 +267,7 @@ impl Fixture {
                 "target": self.target(),
                 "project_folders": self.folders(),
                 "language": item["language"],
-                "launch": { "program": program, "args": [], "cwd": spec["cwd"], "test_name": test_name },
+                "launch": launch,
                 "breakpoints": bps,
                 "offline": true,
             })),

@@ -572,7 +572,14 @@
       />
       <div class="box" class:busy class:needs-approval={needsApproval} class:plan-mode={threadCfg.interactionMode === 'plan'}>
         {#if needsApproval}
-          <ComposerApprovalDock sessionId={ownerId} {agentName} {pendingCall} oncustomreply={beginCustomReply} />
+          <ComposerApprovalDock
+            sessionId={ownerId}
+            {agentName}
+            {provider}
+            {pendingCall}
+            oncustomreply={beginCustomReply}
+            onopenterminal={ontoggleterminal}
+          />
         {/if}
         <ComposerAttachments {mentionedFiles} onremovemention={removeFileMention} />
         <textarea

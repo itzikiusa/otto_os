@@ -58,8 +58,12 @@
 
   // ── Load on mount / attachment change ───────────────────────────────────────
   $effect(() => {
-    // Re-run when the attachment id changes.
+    // Re-run when the attachment id changes: clear any pending pin from the
+    // previous attachment so it can't be saved onto the newly selected one.
     attachmentId;
+    pending = null;
+    pendingBody = '';
+    viaButton = false;
     void loadNotes();
   });
 
@@ -119,13 +123,16 @@
       pending = null;
       return;
     }
+    const targetId = attachmentId;
+    const spot = pending;
     saving = true;
     try {
-      const created = await product.addAnnotation(attachmentId, {
-        x_pct: pending.x_pct,
-        y_pct: pending.y_pct,
+      const created = await product.addAnnotation(targetId, {
+        x_pct: spot.x_pct,
+        y_pct: spot.y_pct,
         body,
       });
+      if (targetId !== attachmentId) return;
       notes = [...notes, created];
       pending = null;
       pendingBody = '';
@@ -134,7 +141,7 @@
         void tick().then(() => addBtn?.focus());
       }
     } catch (e) {
-      toastError('Couldn’t add note', e);
+      if (targetId === attachmentId) toastError('Couldn’t add note', e);
     } finally {
       saving = false;
     }
@@ -273,26 +280,30 @@
   });
 
   async function toggleResolved(n: MockupAnnotation): Promise<void> {
+    const targetId = attachmentId;
     try {
       const updated = await product.patchAnnotation(n.id, { resolved: !n.resolved });
+      if (targetId !== attachmentId) return;
       notes = notes.map((x) => (x.id === n.id ? updated : x));
     } catch (e) {
-      toastError('Couldn’t update note', e);
+      if (targetId === attachmentId) toastError('Couldn’t update note', e);
     }
   }
 
   async function removeNote(n: MockupAnnotation): Promise<void> {
+    const targetId = attachmentId;
     const ok = await confirmer.ask('Delete this annotation?', {
       title: 'Delete annotation',
       confirmLabel: 'Delete',
       danger: true,
     });
-    if (!ok) return;
+    if (!ok || targetId !== attachmentId) return;
     try {
       await product.deleteAnnotation(n.id);
+      if (targetId !== attachmentId) return;
       notes = notes.filter((x) => x.id !== n.id);
     } catch (e) {
-      toastError('Couldn’t delete note', e);
+      if (targetId === attachmentId) toastError('Couldn’t delete note', e);
     }
   }
 
@@ -478,6 +489,11 @@
   .pin.pending {
     background: var(--status-warn);
     animation: otto-pulse 1.4s ease-in-out infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .pin.pending {
+      animation: none;
+    }
   }
 
   .editor {

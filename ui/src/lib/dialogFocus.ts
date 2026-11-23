@@ -35,14 +35,14 @@ export function dialogFocusReturn(): () => void {
     !el.matches(':disabled') && el.getClientRects().length > 0;
   return () => queueMicrotask(() => {
     if (previous && usable(previous)) {
-      previous.focus();
+      previous.focus({ preventScroll: true });
       if (document.activeElement === previous) return;
     }
     const container = scope?.isConnected ? scope : document.querySelector<HTMLElement>('main');
     const fallback = Array.from(container?.querySelectorAll<HTMLElement>(
       'a[href], button, input, select, textarea, [tabindex]',
     ) ?? []).find((el) => el.tabIndex >= 0 && usable(el));
-    fallback?.focus();
+    fallback?.focus({ preventScroll: true });
   });
 }
 
@@ -57,7 +57,7 @@ export function dialogFocus(node: HTMLElement, onEscape: () => void) {
     return dialogs.at(-1) === node;
   };
   const frame = requestAnimationFrame(() => {
-    if (topmost() && !node.contains(document.activeElement)) controls()[0]?.focus();
+    if (topmost() && !node.contains(document.activeElement)) controls()[0]?.focus({ preventScroll: true });
   });
   function onKey(event: KeyboardEvent): void {
     if (event.defaultPrevented || !topmost()) return;
@@ -70,7 +70,7 @@ export function dialogFocus(node: HTMLElement, onEscape: () => void) {
       const index = items.indexOf(document.activeElement as HTMLElement);
       if (!items.length || index < 0 || (event.shiftKey ? index === 0 : index === items.length - 1)) {
         event.preventDefault();
-        (event.shiftKey ? items.at(-1) : items[0])?.focus();
+        (event.shiftKey ? items.at(-1) : items[0])?.focus({ preventScroll: true });
       }
     }
   }

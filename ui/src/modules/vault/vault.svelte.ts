@@ -1079,7 +1079,7 @@ class VaultStore {
       if (failed.length) {
         const shown = failed.slice(0, 3).join(', ') + (failed.length > 3 ? ` +${failed.length - 3} more` : '');
         toasts.warn(
-          `Moved, but links in ${failed.length === 1 ? '1 note' : `${failed.length} notes`} weren't updated`,
+          `Moved, but links in ${failed.length === 1 ? '1 note' : `${failed.length} notes`} weren’t updated`,
           shown,
         );
       }

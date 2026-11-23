@@ -9,6 +9,8 @@
   // The assistant's own threads/reminders arrive with the assistant API.
   import { onMount } from 'svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import Icon from '../../lib/components/Icon.svelte';
   // StatusDot + sessionState directly, not LiveWorkingDot: the tray is in the
   // entry bundle and LiveWorkingDot's default reads the main window's events
@@ -214,7 +216,7 @@
         return true;
       } catch (e) {
         if (isAbortError(e)) return true;
-        errors = { ...errors, [key]: e instanceof Error ? e.message : String(e) };
+        errors = { ...errors, [key]: loadErrorText(e) };
         return false;
       }
     };
@@ -276,18 +278,22 @@
         askChord = a?.accel ? prettyChord(a.accel) : '';
       })
       .catch(() => {});
+    let disposed = false;
     let unlisten: (() => void) | null = null;
     let unlistenDaemon: (() => void) | null = null;
-    void onDesktopEvent('otto://tray-shown', refreshAll).then((fn) => (unlisten = fn));
+    void onDesktopEvent('otto://tray-shown', refreshAll).then((fn) => (disposed ? fn() : (unlisten = fn)));
     void daemonSupervisor
       .onState((report) => (daemonReport = report))
-      .then((fn) => (unlistenDaemon = fn))
+      .then((fn) => (disposed ? fn() : (unlistenDaemon = fn)))
       .catch(() => {});
     void daemonSupervisor
       .status()
-      .then((report) => (daemonReport ??= report))
+      .then((report) => {
+        if (!disposed) daemonReport ??= report;
+      })
       .catch(() => {});
     return () => {
+      disposed = true;
       unlisten?.();
       unlistenDaemon?.();
     };
@@ -312,26 +318,31 @@
 
   <div class="body">
     {#if loadError}
-      <div class="state" role="alert">
-        <p>Couldn’t refresh your work: {loadError}</p>
-        {#if loaded}<p>Showing the last loaded activity.</p>{/if}
-        <button class="btn small" onclick={refreshAll}>Retry</button>
-      </div>
+      <LoadState
+        what="your work"
+        variant="compact"
+        error={loadError}
+        empty={!loaded}
+        onretry={refreshAll}
+      />
     {/if}
     {#if auth.phase === 'loading' || (auth.phase === 'ready' && !loaded && !loadError)}
       <Skeleton rows={3} height={32} label="your work" />
     {:else if auth.phase === 'offline'}
-      <div class="state">
-        <p>The Otto daemon isn’t running yet.</p>
-        {#if daemonDetail}<p class="detail">{daemonDetail}</p>{/if}
-        {#if restartError}<p class="error" role="alert">{restartError}</p>{/if}
-        <div class="state-actions">
-          <button class="btn small" onclick={() => void auth.boot()}>Retry</button>
+      <LoadState
+        what="the Otto daemon"
+        errorTitle="The Otto daemon isn’t running yet"
+        error={restartError || daemonDetail || 'Check that Otto is running, or restart the daemon.'}
+        empty
+        variant="compact"
+        onretry={() => void auth.boot()}
+      >
+        {#snippet errorActions()}
           <button class="btn small" onclick={() => void restartDaemon()} disabled={restarting}>
             {restarting ? 'Restarting…' : 'Restart daemon'}
           </button>
-        </div>
-      </div>
+        {/snippet}
+      </LoadState>
     {:else if auth.phase !== 'ready'}
       <div class="state">
         <p>Sign in to Otto to see your work here.</p>
@@ -341,7 +352,7 @@
       <section aria-labelledby="tray-needs">
         <h2 id="tray-needs">Needs you{needs.length ? ` · ${needs.length}` : ''}</h2>
         {#each needs as row (row.id)}
-          <button class="row" onclick={() => open(row.route)} title={row.title}>
+          <button class="tray-row" onclick={() => open(row.route)} title={row.title}>
             <span class="row-icon needs"><Icon name={row.icon} size={13} /></span>
             <span class="row-text">
               <span class="row-title">{row.title}</span>
@@ -356,7 +367,7 @@
       <section aria-labelledby="tray-running">
         <h2 id="tray-running">Running{running.length ? ` · ${running.length}` : ''}</h2>
         {#each running as r (r.session.id)}
-          <button class="row" onclick={() => open(`agents/${r.session.id}`)} title={r.session.title}>
+          <button class="tray-row" onclick={() => open(`agents/${r.session.id}`)} title={r.session.title}>
             <span class="row-icon"><StatusDot state={workingDot} size={7} /></span>
             <span class="row-text">
               <span class="row-title">{r.session.title}</span>
@@ -372,7 +383,7 @@
         <h2 id="tray-today">Today</h2>
         {#each today as n (n.id)}
           {@const sid = sessionIdOf(n)}
-          <button class="row" onclick={() => open(sid ? `agents/${sid}` : undefined)} title={n.title}>
+          <button class="tray-row" onclick={() => open(sid ? `agents/${sid}` : undefined)} title={n.title}>
             <span class="row-icon"><Icon name="bell" size={13} /></span>
             <span class="row-text">
               <span class="row-title">{n.title}</span>
@@ -471,7 +482,7 @@
     letter-spacing: .06em;
     color: var(--text-dim);
   }
-  .row {
+  .tray-row {
     display: flex;
     align-items: flex-start;
     gap: 8px;
@@ -486,10 +497,10 @@
     text-align: start;
     cursor: pointer;
   }
-  .row:hover {
+  .tray-row:hover {
     background: var(--hover);
   }
-  .row:focus-visible,
+  .tray-row:focus-visible,
   .ask:focus-visible {
     outline: 2px solid var(--accent-text);
     outline-offset: -2px;
@@ -539,19 +550,6 @@
   }
   .state p {
     margin: 0;
-  }
-  .state .detail {
-    font-size: var(--fs-s);
-    overflow-wrap: anywhere;
-  }
-  .state .error {
-    color: var(--danger);
-    font-size: var(--fs-s);
-  }
-  .state-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
   }
   .foot {
     display: flex;

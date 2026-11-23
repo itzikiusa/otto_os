@@ -15,6 +15,11 @@ interface Conn { ws: WebSocketRoute; msgs: { method?: string; id?: number; param
 /** Mock server: full-text sync; every line containing `BAD` is an error. */
 class MockLsp {
   conns: Conn[] = [];
+  /** Return a LocationLink on the retry, once the test ends its index job. */
+  duringIndex = false;
+  definitionUri?: string;
+  pauseInitialize = false;
+  acceptInitialize?: () => void;
   docs = new Map<string, string>();
   /** Extra publishes (uri → message) sent right after each `didOpen`. */
   ghosts: Array<{ uri: (openUri: string) => string; message: string }> = [];
@@ -50,7 +55,8 @@ class MockLsp {
     const uri: string | undefined = m.params?.textDocument?.uri;
     switch (m.method) {
       case 'initialize':
-        this.reply(c, m.id!, { capabilities: { textDocumentSync: 1, referencesProvider: true, codeActionProvider: { codeActionKinds: ['quickfix'] } } });
+        this.acceptInitialize = () => this.reply(c, m.id!, { capabilities: { textDocumentSync: 1, definitionProvider: true, referencesProvider: true, codeActionProvider: { codeActionKinds: ['quickfix'] } } });
+        if (!this.pauseInitialize) this.acceptInitialize();
         return;
       case 'textDocument/didOpen':
         this.docs.set(uri!, m.params.textDocument.text);
@@ -60,6 +66,15 @@ class MockLsp {
       case 'textDocument/didChange':
         this.docs.set(uri!, m.params.contentChanges[m.params.contentChanges.length - 1].text);
         this.diagnose(c, uri!);
+        return;
+      case 'textDocument/definition':
+        if (this.definitionUri || this.pauseInitialize || (this.duringIndex && this.count('textDocument/definition') > 1)) {
+          const start = { line: 0, character: 13 };
+          const range = { start, end: { line: 0, character: 14 } };
+          this.reply(c, m.id!, [{ targetUri: this.definitionUri ?? uri!.replace('lsp-mock-a.ts', 'lsp-mock-b.ts'), targetRange: range, targetSelectionRange: range }]);
+        } else {
+          this.reply(c, m.id!, null);
+        }
         return;
       case 'textDocument/references':
         this.reply(c, m.id!, [0, 1].map((line) => ({ uri, range: { start: { line, character: line === 0 ? 6 : 12 }, end: { line, character: line === 0 ? 7 : 13 } } })));
@@ -90,6 +105,7 @@ class MockLsp {
 // A service worker would answer the capabilities fetch before `page.route` sees it.
 test.use({ serviceWorkers: 'block' });
 // One worker: the seeded scratch files are shared.
+
 test.describe.configure({ mode: 'serial' });
 
 let ws = '';
@@ -137,6 +153,7 @@ async function lintPluginIds(page: Page, marker: string): Promise<string[]> {
   return editor(page, marker).evaluate((ed) =>
     [...ed.querySelectorAll('.cm-lintRange-error')].flatMap((el) => [...el.classList].filter((c) => /^\d+(\.\d+)?$/.test(c))));
 }
+
 
 test('a dropped /ws/lsp socket re-attaches: a new error is reported without reopening the tab', async ({ page }) => {
   const lsp = await openIde(page);
@@ -234,4 +251,108 @@ test('the lint tooltip lists only quick fixes, as themed buttons in light and da
     expect(bg).toBe(want);
     if (process.env.OTTO_E2E_LINT_SHOTS) await page.screenshot({ path: `${process.env.OTTO_E2E_LINT_SHOTS}/lint-tooltip-${scheme}.png` });
   }
+});
+
+test('a definition with no target names the symbol and leaves Find Usages closed', async ({ page }) => {
+  const lsp = await openIde(page);
+  let fallback = 0;
+  await page.route('**/api/v1/ide/lsp/definition', (route) => {
+    fallback++;
+    return route.fulfill({ json: { symbol: 'absentSymbol', locations: [] } });
+  });
+  await openFile(page, lsp, 'lsp-mock-a.ts');
+  await typeLineAfter(page, 'console.log(x)', 'console.log(x)', 'absentSymbol();');
+  await editor(page, 'absentSymbol').getByText('absentSymbol', { exact: true }).click({ modifiers: ['Meta'] });
+  await expect(page.getByText(/no definition found.*absentSymbol/i)).toBeVisible();
+  expect(fallback).toBe(1);
+  expect(lsp.count('textDocument/definition')).toBe(1);
+  expect(lsp.count('textDocument/references')).toBe(0);
+});
+
+test('an unresolved Rust dependency explains the unavailable language server', async ({ page }) => {
+  const { ctx, base } = await apiCtx();
+  const name = 'lsp-no-server.rs';
+  const file = await ctx.put(`${base}/api/v1/scratches/file`, {
+    data: { path: name, content: 'pub type Count = AtomicUsize;\n' },
+  });
+  expect(file.ok()).toBe(true);
+  await ctx.dispose();
+  await page.route('**/api/v1/lsp/capabilities', (route) => route.fulfill({
+    json: { servers: [{ lang: 'rust', available: false, command: 'rust-analyzer', install_command: 'rustup component add rust-analyzer' }] },
+  }));
+  await page.route('**/api/v1/ide/lsp/definition', (route) =>
+    route.fulfill({ json: { symbol: 'AtomicUsize', locations: [] } }));
+  await page.addInitScript((id) => localStorage.setItem('otto_workspace', id), ws);
+  await page.goto('/#/ide?scratches=1');
+  await page.getByTestId('ide-project-tree').getByText(name, { exact: true }).dblclick();
+  await editor(page, 'AtomicUsize').getByText('AtomicUsize', { exact: true }).click({ modifiers: ['Meta'] });
+  await expect(page.getByText(/rust-analyzer is unavailable/i)).toBeVisible();
+});
+
+test('a failed definition lookup shows the error', async ({ page }) => {
+  const lsp = await openIde(page);
+  await page.route('**/api/v1/ide/lsp/definition', (route) =>
+    route.fulfill({ status: 503, json: { error: 'Cannot read project index' } }));
+  await openFile(page, lsp, 'lsp-mock-a.ts');
+  await typeLineAfter(page, 'console.log(x)', 'console.log(x)', 'absentSymbol();');
+  await editor(page, 'absentSymbol').getByText('absentSymbol', { exact: true }).click({ modifiers: ['Meta'] });
+  await expect(page.getByText(/couldn’t look up the definition/i)).toBeVisible();
+});
+
+test('definition retries once when indexing finishes and opens the LocationLink', async ({ page }) => {
+  const lsp = await openIde(page);
+  lsp.duringIndex = true;
+  await page.route('**/api/v1/ide/lsp/definition', (route) =>
+    route.fulfill({ json: { symbol: 'lateSymbol', locations: [] } }));
+  await openFile(page, lsp, 'lsp-mock-a.ts');
+  await typeLineAfter(page, 'console.log(x)', 'console.log(x)', 'lateSymbol();');
+  const progress = (kind: 'begin' | 'end') => lsp.live()[0].ws.send(JSON.stringify({
+    jsonrpc: '2.0', method: '$/progress', params: { token: 'index', value: { kind, title: 'Indexing project' } },
+  }));
+  progress('begin');
+  const token = editor(page, 'lateSymbol').getByText('lateSymbol', { exact: true });
+  await token.click({ modifiers: ['Meta'] });
+  await expect.poll(() => lsp.count('textDocument/definition')).toBe(1);
+  await expect(page.getByText(/still indexing/i)).toBeVisible();
+  progress('end');
+  await expect(editor(page, 'export const y').locator('.cm-content')).toContainText('export const y');
+  expect(lsp.count('textDocument/definition')).toBe(2);
+  expect(lsp.count('textDocument/references')).toBe(0);
+});
+
+test('a definition requested during startup continues after the handshake', async ({ page }) => {
+  const lsp = await openIde(page);
+  lsp.pauseInitialize = true;
+  await page.route('**/api/v1/ide/lsp/definition', (route) =>
+    route.fulfill({ json: { symbol: 'log', locations: [] } }));
+  await page.getByTestId('ide-project-tree').getByText('lsp-mock-a.ts', { exact: true }).dblclick();
+  await expect.poll(() => lsp.count('initialize')).toBe(1);
+  const token = editor(page, 'console.log(x)').getByText('log', { exact: true });
+  await token.click({ modifiers: ['Meta'] });
+  await expect(page.getByText(/waiting for the language server/i)).toBeVisible();
+  lsp.acceptInitialize!();
+  await expect(editor(page, 'export const y').locator('.cm-content')).toContainText('export const y');
+  expect(lsp.count('textDocument/definition')).toBe(1);
+});
+
+test('a definition outside the project opens read-only on the original target', async ({ page }) => {
+  const lsp = await openIde(page);
+  await openFile(page, lsp, 'lsp-mock-a.ts');
+  const project = new URL(lsp.openedUri('lsp-mock-a.ts')).pathname.replace(/\/[^/]+$/, '');
+  const outside = '/tmp/otto-definition-fixture/sdk/library.ts';
+  lsp.definitionUri = 'file://' + outside;
+  let requestedRoot = '';
+  await page.route('**/api/v1/ide/fs/file?**', (route) => {
+    const query = new URL(route.request().url()).searchParams;
+    if (query.get('path') !== outside) return route.fallback();
+    requestedRoot = query.get('root') ?? '';
+    return route.fulfill({ json: {
+      path: outside, content: 'export const LibraryDefinition = 42;\n',
+      language: 'typescript', size: 37, sha256: 'sdk-fixture', read_only: true, truncated: false,
+    } });
+  });
+  await editor(page, 'console.log(x)').getByText('log', { exact: true }).click({ modifiers: ['Meta'] });
+  await expect(editor(page, 'LibraryDefinition').locator('.cm-content')).toContainText('LibraryDefinition');
+  expect(requestedRoot.replace(/^\/private\/tmp\//, '/tmp/')).toBe(project.replace(/^\/private\/tmp\//, '/tmp/'));
+  await expect(page.getByText('Read-only', { exact: true }).first()).toBeVisible();
 });

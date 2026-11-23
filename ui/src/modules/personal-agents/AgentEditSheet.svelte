@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { newId } from '../../lib/id';
   import { announceShown } from '../../lib/announce.svelte';
   import { untrack } from 'svelte';
   import PathField from '../../lib/components/PathField.svelte';
@@ -228,10 +229,10 @@
           pendingSchedule = o ? {
             schedule: o.schedule, timezone: o.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,
             directive: o.directive?.trim() || t?.directive || '', enabled: o.enabled ?? true,
-            permission: o.permission, idempotency_key: crypto.randomUUID(),
+            permission: o.permission, idempotency_key: newId(),
           } : t?.schedule ? {
             schedule: t.schedule, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-            directive: t.directive, enabled: true, idempotency_key: crypto.randomUUID(),
+            directive: t.directive, enabled: true, idempotency_key: newId(),
           } : null;
           createdAgent = await personalAgents.create(ws.currentId!, { ...body, ...(t?.primary ? { primary: true } : {}) });
         } else {

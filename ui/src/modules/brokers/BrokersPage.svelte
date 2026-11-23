@@ -2,8 +2,9 @@
   import { rowMenu } from '../../lib/rowMenu';
   import Badge from '../../lib/components/Badge.svelte';
   import { toastError } from '../../lib/toastError';
-  import { CLUSTER_VIEWS, type ClusterView } from './types';
+  import { CLUSTER_VIEWS, type ClusterView, type ReplayPrefill } from './types';
   import Icon from '../../lib/components/Icon.svelte';
+  import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -28,37 +29,41 @@
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
-  import { onTabKey } from '../../lib/tabKeys';
   import { router } from '../../lib/router.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import { untrack } from 'svelte';
 
   type Tab = ClusterView;
   let tab = $state<Tab>('overview');
+  let replayPrefill = $state<ReplayPrefill | null>(null);
+  let replayPrefillSeq = 0;
   let formOpen = $state(false);
   let editTarget = $state<BrokerCluster | null>(null);
   let testing = $state(false);
+
+  function openReplayFrom(prefill: ReplayPrefill) {
+    replayPrefill = { ...prefill, seq: ++replayPrefillSeq };
+    tab = 'replay';
+  }
 
   // Mobile (≤640px): the cluster list and the cluster content stack vertically
   // and each is a collapsible, independently-scrollable section. These toggles
   // only affect the phone layout (the headers/carets are hidden on desktop).
   let clustersOpen = $state(true);
   let contentOpen = $state(true);
-  // Auto-collapse the cluster list after picking a cluster on a phone so the
-  // content gets the screen; expand it again when nothing is selected.
-  $effect(() => {
-    if (brokers.selectedId) clustersOpen = false;
-    else clustersOpen = true;
-  });
-
-  // ---- resizable cluster sidebar --------------------------------------------
-  // Drag the divider between the cluster list and the content to resize it; the
-  // chosen width survives reloads. Mirrors the Database page's sidebar resizer.
-  // (On phones the list is a full-width stacked band — the width var is ignored
-  // by the media query there and the divider is hidden.)
+  // Auto-collapse cluster list on phone when a cluster is open; register ⌘K verbs.
+  $effect(() => { clustersOpen = !brokers.selectedId; });
+  $effect(() =>
+    registry.register('brokers', [
+      { id: 'brokers.add', title: 'Add a Kafka cluster…', group: 'Message Brokers', keywords: 'kafka broker new', run: openAdd },
+      { id: 'brokers.refresh', title: 'Refresh Kafka clusters', group: 'Message Brokers', keywords: 'kafka reload', run: () => { if (ws.currentId) void brokers.load(ws.currentId); } },
+      ...brokers.clusters.map((c) => ({
+        id: `brokers.open.${c.id}`, title: `Open cluster ${c.name}`, group: 'Message Brokers', detail: c.environment, keywords: 'kafka broker topics groups',
+        run: () => brokers.select(c.id),
+      })),
+    ]),
+  );
   let sideW = $state(loadPaneWidth('brokers.sideW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
-  // Tablet/desktop: the header `sidebar` icon hides the list pane (the one
-  // collapse affordance, as on Database / Canvas / Skills Lab). Phone keeps its
-  // stacked accordions.
   let listHidden = $state(false);
 
   $effect(() => {
@@ -70,11 +75,15 @@
     // reset to overview when the selected cluster changes
     void brokers.selectedId;
     tab = 'overview';
+    replayPrefill = null;
   });
   // Agent UI control (lib/uiCommands/brokers.ts) switches the sub-tab here.
   $effect(() => brokersPagePort.bind({ setTab: (v) => (tab = v) }));
 
   const selected = $derived(brokers.selected);
+  const openClusterTabs = $derived<TabItem<string>[]>(
+    brokers.openClusters.map((c) => ({ id: c.id, label: c.name, title: c.name })),
+  );
 
   // The URL carries the open cluster (`#/brokers/<id>`) so a reload / share /
   // link lands on it. Route → page: a link (or Back/Forward) opens that cluster
@@ -371,9 +380,10 @@
     {#if selected}
       <button class="btn small danger" data-overflow="-1" onclick={() => removeCluster(selected)} title="Remove this cluster profile from Otto (topics on the broker are untouched)">Remove…</button>
       <button class="btn small" onclick={() => openEdit(selected)}>Edit</button>
-      <button class="btn small" data-keep onclick={() => testConn(selected)} disabled={testing}>
-        {testing ? 'Testing…' : 'Test'}
-      </button>
+      <button class="btn small" data-keep onclick={() => testConn(selected)} disabled={testing}>{testing ? 'Testing…' : 'Test'}</button>
+    {/if}
+    {#if !isEmpty}
+      <button class="btn small primary" onclick={openAdd} aria-label="New cluster" title="Add Kafka cluster"><Icon name="plus" size={12} />{#if !viewport.isPhone} New cluster{/if}</button>
     {/if}
   {/snippet}
 </PageHeader>
@@ -451,58 +461,46 @@
 
   <main class="cluster-main" class:collapsed={!contentOpen}>
     {#if brokers.openClusters.length > 0}
-      <div class="tabstrip" role="tablist" aria-label="Open clusters">
-        {#each brokers.openClusters as c (c.id)}
-          <!-- The tab and its close are TWO real buttons, so the close control
-               isn't nested inside an interactive role=tab. ←/→ move between
-               the open clusters (roving tabindex). -->
-          <div class="ctab" class:on={brokers.selectedId === c.id} role="presentation">
-            <button
-              class="ctab-main"
-              role="tab"
-              aria-selected={brokers.selectedId === c.id}
-              tabindex={brokers.selectedId === c.id ? 0 : -1}
-              title={c.name}
-              onclick={() => brokers.select(c.id)}
-              onkeydown={onTabKey}
-            >
-              <span class="dot" style="background: {c.color || 'var(--accent)'}"></span>
-              <span class="ctab-name">{c.name}</span>
-            </button>
-            <button
-              class="ctab-x"
-              aria-label="Close {c.name}"
-              title="Close tab"
-              onclick={(e) => {
-                e.stopPropagation();
-                brokers.close(c.id);
-              }}
-            >
-              <Icon name="x" size={12} />
-            </button>
-          </div>
-        {/each}
+      <div class="tabstrip">
+        <Tabs
+          label="Open clusters"
+          tabs={openClusterTabs}
+          value={brokers.selectedId ?? ''}
+          onchange={(id) => brokers.select(id)}
+          idBase="brokers-open"
+        >
+          {#snippet trailing()}
+            {#if selected}
+              <button
+                class="icon-btn"
+                aria-label="Close {selected.name}"
+                title="Close {selected.name}"
+                onclick={() => brokers.close(selected.id)}
+              >
+                <Icon name="x" size={12} />
+              </button>
+            {/if}
+          {/snippet}
+        </Tabs>
       </div>
     {/if}
     {#if selected}
-      <div class="tabs" role="tablist" aria-label="Kafka cluster views" tabindex="-1" onkeydown={onTabKey}>
-        {#each CLUSTER_VIEWS as v (v.id)}
-          <button class:on={tab === v.id} role="tab" aria-selected={tab === v.id} tabindex={tab === v.id ? 0 : -1} onclick={() => (tab = v.id)}>{v.label}</button>
-        {/each}
+      <div class="tabs">
+        <Tabs label="Kafka cluster views" tabs={CLUSTER_VIEWS} value={tab} onchange={(id) => (tab = id)} idBase="brokers-view" />
       </div>
 
-      <div class="tab-body">
+      <div class="tab-body" role="tabpanel" id="brokers-view-panel-{tab}" aria-labelledby="brokers-view-tab-{tab}">
         {#key selected.id}
           {#if tab === 'overview'}
             <OverviewTab clusterId={selected.id} />
           {:else if tab === 'topics'}
-            <TopicsTab cluster={selected} />
+            <TopicsTab cluster={selected} onreplayfrom={openReplayFrom} />
           {:else if tab === 'groups'}
             <GroupsTab cluster={selected} />
           {:else if tab === 'schema'}
             <SchemaTab cluster={selected} />
           {:else if tab === 'replay'}
-            <ReplayPanel cluster={selected} />
+            <ReplayPanel cluster={selected} prefill={replayPrefill} />
           {:else if tab === 'alerts'}
             <LagAlertsPanel cluster={selected} />
           {/if}
@@ -781,92 +779,11 @@
     min-height: 0;
   }
   .tabstrip {
-    display: flex;
-    align-items: stretch;
-    gap: 1px;
-    border-bottom: 1px solid var(--border);
     background: var(--surface);
-    overflow-x: auto;
-    min-height: 36px;
-  }
-  .ctab {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 0 10px;
-    border-inline-end: 1px solid var(--border);
-    font-size: var(--fs-m);
-    color: var(--text-dim);
-    white-space: nowrap;
-    border-top: 2px solid transparent;
-  }
-  .ctab:hover {
-    background: var(--hover);
-  }
-  .ctab.on {
-    color: var(--text);
-    background: var(--bg);
-    border-top-color: var(--accent);
-  }
-  .ctab-main {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    align-self: stretch;
-    padding: 0;
-    border: none;
-    background: transparent;
-    color: inherit;
-    font: inherit;
-    cursor: pointer;
-  }
-  .ctab-name {
-    max-width: 180px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .ctab-x {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    border-radius: var(--radius-s);
-    padding: 2px;
-  }
-  .ctab-x:hover {
-    color: var(--text);
-    background: var(--hover);
-  }
-  .tabs {
-    display: flex;
-    gap: 2px;
-    padding: 6px 14px 0;
-    border-bottom: 1px solid var(--border);
-    /* The six tabs can be wider than the content pane on narrow desktop-layout
-       widths (e.g. tablet portrait 834px, phone landscape). Scroll the strip
-       horizontally inside itself rather than letting the last tabs jut off the
-       right edge where they become unreachable. */
-    overflow-x: auto;
-    flex-wrap: nowrap;
-    -webkit-overflow-scrolling: touch;
-  }
-  .tabs button {
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    padding: 8px 14px;
-    cursor: pointer;
-    font-size: var(--fs-m);
-    border-bottom: 2px solid transparent;
-    white-space: nowrap;
     flex: none;
   }
-  .tabs button.on {
-    color: var(--text);
-    border-bottom-color: var(--accent);
+  .tabs {
+    flex: none;
   }
   /* The panels size themselves to the tab body (height: 100%) and scroll
      inside; the body itself scrolls only when a panel's guaranteed minimum (the
@@ -987,13 +904,6 @@
       flex: 1;
       min-height: 0;
     }
-    .tabstrip {
-      min-height: 42px;
-    }
-    .ctab {
-      font-size: var(--fs-l);
-      padding: 0 12px;
-    }
     /* The page header carries the phone-only content toggle. */
     .content-toggle {
       display: inline-flex;
@@ -1003,20 +913,6 @@
     .cluster-main.collapsed .tabs,
     .cluster-main.collapsed .tab-body {
       display: none;
-    }
-    /* Tabs scroll horizontally with comfortable tap targets. */
-    .tabs {
-      overflow-x: auto;
-      flex-wrap: nowrap;
-      padding: 6px 10px 0;
-      gap: 4px;
-      -webkit-overflow-scrolling: touch;
-    }
-    .tabs button {
-      font-size: var(--fs-l);
-      padding: 10px 12px;
-      white-space: nowrap;
-      flex: none;
     }
     /* The active tab's content is its own scroll region. */
     .tab-body {

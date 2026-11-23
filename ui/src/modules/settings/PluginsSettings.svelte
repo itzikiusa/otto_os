@@ -7,7 +7,7 @@
   // Runtime custom-plugins management (root). Install from a local path or git
   // URL, enable/disable (starts/stops the helper process), remove. Access for non-root
   // users is granted per-plugin in Settings → Users.
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
@@ -17,9 +17,19 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { formatSeconds } from '../../lib/metric-format';
   import { loadErrorText } from '../../lib/loadError';
+  import PluginLogDrawer from './PluginLogDrawer.svelte';
 
-  let list = $state<PluginRecord[]>([]);
+  type PluginAdminRow = PluginRecord & {
+    pid?: number | null;
+    started_at?: string | null;
+    uptime_secs?: number | null;
+    restart_count?: number;
+    health_status?: 'running' | 'stopped' | 'error' | 'disabled';
+  };
+
+  let list = $state<PluginAdminRow[]>([]);
   let loading = $state(true);
   let loadError = $state('');
   let source = $state('');
@@ -32,22 +42,44 @@
   let pickerOpen = $state(false);
   let sourceEl = $state<HTMLInputElement | null>(null);
 
-  async function load(attempt = 0): Promise<void> {
+  let alive = true;
+  let loadSeq = 0;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  onDestroy(() => {
+    alive = false;
+    loadSeq++;
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+  });
+
+  async function load(attempt = 0, seq = ++loadSeq): Promise<void> {
+    if (!alive) return;
     loading = true;
     try {
-      list = await api.get<PluginRecord[]>('/plugin-admin');
+      const rows = await api.get<PluginAdminRow[]>('/plugin-admin');
+      if (!alive || seq !== loadSeq) return;
+      list = rows;
       loadError = '';
     } catch (e) {
+      if (!alive || seq !== loadSeq) return;
       // The daemon can be briefly unreachable right after an app update (it
       // restarts), which surfaces as a fetch "Load failed". Retry once on a fresh
       // connection before showing an error.
       if (attempt < 1) {
-        await new Promise((r) => setTimeout(r, 600));
-        return load(attempt + 1);
+        await new Promise<void>((resolve) => {
+          retryTimer = setTimeout(() => {
+            retryTimer = null;
+            resolve();
+          }, 600);
+        });
+        if (!alive || seq !== loadSeq) return;
+        return load(attempt + 1, seq);
       }
       loadError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (alive && seq === loadSeq) loading = false;
     }
   }
   onMount(() => void load());
@@ -61,11 +93,35 @@
     return p.enabled && p.running === false;
   }
 
+  /** Restart a running/enabled plugin's helper process in place (E-20). */
+  async function restartHelper(p: PluginAdminRow): Promise<void> {
+    if (busy !== null) return;
+    busy = p.slug;
+    try {
+      const updated = await api.post<PluginAdminRow>(`/plugins/${encodeURIComponent(p.slug)}/restart`);
+      list = list.map((row) => (row.slug === p.slug ? { ...row, ...updated } : row));
+      toasts.success(`Restarted ${p.name}`);
+      await plugins.load();
+    } catch (e) {
+      toasts.error(`Couldn’t restart ${p.name}`, errText(e));
+      await load();
+    } finally {
+      busy = null;
+    }
+  }
+
+  function healthBadge(p: PluginAdminRow): { tone: 'success' | 'warning' | 'danger' | 'neutral'; label: string } {
+    if (p.health_status === 'error') return { tone: 'danger', label: 'Error' };
+    if (p.health_status === 'stopped' || stopped(p)) return { tone: 'warning', label: 'Enabled · not running' };
+    if (p.health_status === 'running' || (p.enabled && p.running)) return { tone: 'success', label: 'Running' };
+    return { tone: p.enabled ? 'success' : 'neutral', label: p.enabled ? 'Enabled' : 'Disabled' };
+  }
+
   /** Start an enabled plugin's stopped service again (re-runs enable). */
   async function startAgain(p: PluginRecord): Promise<void> {
     busy = p.slug;
     try {
-      await api.post(`/plugin-admin/${p.slug}/enable`);
+      await api.post(`/plugin-admin/${encodeURIComponent(p.slug)}/enable`);
       toasts.success(`${p.name} is running again`);
       await load();
       await plugins.load();
@@ -101,14 +157,14 @@
     if (
       !p.enabled &&
       !(await confirmer.ask(
-        `Enable “${p.name}”? Its helper process starts and runs with your permissions, and its page appears in every user’s sidebar. Only enable plugins you trust.`,
+        `Enable “${p.name}”? Its helper process starts and runs with your permissions, and its page appears in every user’s sidebar.${p.exec.length ? ` Command: ${p.exec.join(' ')}.` : ''} Only enable plugins you trust.`,
         { title: 'Enable plugin?', confirmLabel: 'Enable plugin', danger: true },
       ))
     )
       return;
     busy = p.slug;
     try {
-      await api.post(`/plugin-admin/${p.slug}/${p.enabled ? 'disable' : 'enable'}`);
+      await api.post(`/plugin-admin/${encodeURIComponent(p.slug)}/${p.enabled ? 'disable' : 'enable'}`);
       await load();
       await plugins.load();
     } catch (e) {
@@ -128,7 +184,7 @@
       return;
     busy = p.slug;
     try {
-      await api.del(`/plugin-admin/${p.slug}`);
+      await api.del(`/plugin-admin/${encodeURIComponent(p.slug)}`);
       toasts.success(`Removed ${p.name}`, `Its files are kept — install it again any time.`);
       await load();
       await plugins.load();
@@ -146,7 +202,19 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title={sectionLabel('plugins')} subtitle="Helper processes installed at runtime, no rebuild" />
+  <PageHeader title={sectionLabel('plugins')} subtitle="Helper processes installed at runtime, no rebuild">
+    {#snippet actions()}
+      <button
+        class="icon-btn"
+        onclick={() => void load()}
+        disabled={loading}
+        aria-label="Refresh plugins"
+        title="Refresh plugin health and status"
+      >
+        <Icon name="refresh" size={14} />
+      </button>
+    {/snippet}
+  </PageHeader>
   <PageBody width="readable">
   <SectionIntro>
     Install from a local folder or a git URL, then enable it to run. A plugin runs as its own process on this Mac —
@@ -181,7 +249,7 @@
       {busy === 'install' ? 'Installing…' : 'Install'}
     </button>
   </div>
-  {#if installError}<p class="field-err" id="plugin-install-err" role="alert">{installError}</p>{/if}
+  {#if installError}<p class="field-err" id="plugin-install-err" use:announceShown={{ text: installError, assertive: true }}>{installError}</p>{/if}
 
   <LoadState what="plugins" {loading} error={loadError} empty={list.length === 0} rows={3} onretry={() => void load()}>
     {#snippet emptyView()}
@@ -193,18 +261,20 @@
     {/snippet}
     <div class="plist">
       {#each list as p (p.slug)}
+        {@const hb = healthBadge(p)}
         <div class="prow" class:off={!p.enabled}>
           <span class="picon"><Icon name={asIcon(p.icon, 'box')} size={16} /></span>
           <div class="pmain">
             <div class="pname">
               <span class="name-text" title={p.name}>{p.name}</span>
               {#if p.version}<span class="chip version" dir="ltr" title="v{p.version}">v{p.version}</span>{/if}
-              {#if stopped(p)}
-                <StatusBadge variant="text" tone="warning" label="Enabled · not running" />
-              {:else}
-                <StatusBadge variant="text" tone={p.enabled ? 'success' : 'neutral'} label={p.enabled ? 'Enabled' : 'Disabled'} />
-              {/if}
+              <StatusBadge variant="text" tone={hb.tone} label={hb.label} />
             </div>
+            {#if p.pid != null || p.uptime_secs != null || (p.restart_count ?? 0) > 0}
+              <div class="pmeta mono" dir="ltr" data-testid="plugin-runtime-meta">
+                {#if p.pid != null}PID {p.pid}{/if}{#if p.pid != null && p.uptime_secs != null}{' · '}{/if}{#if p.uptime_secs != null}up {formatSeconds(p.uptime_secs)}{/if}{#if (p.restart_count ?? 0) > 0}{' · '}{p.restart_count} {p.restart_count === 1 ? 'restart' : 'restarts'}{/if}
+              </div>
+            {/if}
             {#if stopped(p)}
               <div class="pstopped" use:announceShown={`${p.name}: its service isn’t running${p.last_error ? ` — ${p.last_error}` : ''}.`}>
                 Its service isn’t running{p.last_error ? ` — ${p.last_error}` : ''}. Its page loads, but nothing in it works until it starts.
@@ -217,6 +287,10 @@
             {#if stopped(p)}
               <button class="btn small primary" onclick={() => void startAgain(p)} disabled={busy !== null}>
                 {busy === p.slug ? 'Starting…' : 'Start again'}
+              </button>
+            {:else if p.enabled && p.exec.length > 0}
+              <button class="btn small" onclick={() => void restartHelper(p)} disabled={busy !== null} title="Stop and respawn this plugin’s helper service" data-testid="plugin-restart-btn">
+                {busy === p.slug ? 'Restarting…' : 'Restart helper'}
               </button>
             {/if}
             <button class="btn small" onclick={() => void toggle(p)} disabled={busy !== null}>
@@ -232,6 +306,9 @@
               <Icon name="trash" size={14} />
             </button>
           </div>
+          {#if p.exec.length > 0}
+            <PluginLogDrawer slug={p.slug} name={p.name} />
+          {/if}
           <details class="plugin-details">
             <summary>Plugin details</summary>
             <dl>
@@ -239,6 +316,9 @@
               <dt>Version</dt><dd dir="ltr">{p.version || 'Not specified'}</dd>
               <dt>Source</dt><dd class="mono" dir="ltr">{p.source}</dd>
               <dt>Identifier</dt><dd class="mono" dir="ltr">{p.slug}</dd>
+              <dt>Command</dt><dd class="mono" dir="ltr">{p.exec.length ? p.exec.join(' ') : 'None (UI only)'}</dd>
+              <dt>Health check</dt><dd class="mono" dir="ltr">{p.health || 'None'}</dd>
+              <dt>UI directory</dt><dd class="mono" dir="ltr">{p.ui_dir || 'None'}</dd>
               {#if p.description}<dt>Description</dt><dd>{p.description}</dd>{/if}
             </dl>
           </details>
@@ -343,7 +423,7 @@
     color: var(--text-dim);
   }
   .prow.off .picon {
-    opacity: 0.6;
+    opacity: var(--disabled-opacity);
   }
   .pmain {
     flex: 1;
@@ -380,7 +460,8 @@
     overflow-wrap: anywhere;
   }
   .pdesc,
-  .psrc {
+  .psrc,
+  .pmeta {
     font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;

@@ -25,6 +25,14 @@ use crate::store::{stamp, Store};
 pub const MAX_BODY_CHARS: usize = 4_000;
 /// Longest pin frame/page id.
 pub const MAX_FRAME_CHARS: usize = 128;
+/// Longest 3D mesh name / object id on a `CommentPin3d`.
+pub const MAX_PIN_3D_NAME_CHARS: usize = 256;
+/// Maximum polygon face indices carried by one 3D comment.
+pub const MAX_PIN_3D_FACES: usize = 2_048;
+/// Maximum serialized byte size of `pin_3d_json`.
+pub const MAX_PIN_3D_JSON_BYTES: usize = 32 * 1024;
+/// Valid 3D pin selection kinds.
+pub const PIN_3D_SELECTION_KINDS: &[&str] = &["point", "polygon", "region", "mesh"];
 /// `GET …/comments` page size: the default and the cap.
 pub const DEFAULT_LIST_LIMIT: i64 = 500;
 pub const MAX_LIST_LIMIT: i64 = 1_000;
@@ -45,6 +53,46 @@ pub struct CommentPin {
     pub frame: Option<String>,
 }
 
+/// Camera viewpoint saved alongside a 3D polygon comment so clicking the
+/// comment smoothly flies the 3D viewport back to the exact inspection angle.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CameraBookmark3d {
+    pub pos: [f32; 3],
+    pub target: [f32; 3],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fov: Option<f32>,
+}
+
+/// 3D surface / polygon / region / sub-mesh anchor on a 3D Design Hall artifact.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommentPin3d {
+    /// `point` | `polygon` | `region` | `mesh`.
+    pub selection_kind: String,
+    /// Sub-mesh name (e.g. `"HeroHelmet"`), when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_name: Option<String>,
+    /// Optional `scene3d` object id or GLB node identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_id: Option<String>,
+    /// Primary hit triangle/polygon face index (0-based).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_index: Option<u32>,
+    /// Selected polygon cluster / region face indices (deduped, capped at 2,048).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub face_indices: Vec<u32>,
+    /// Vertex indices `[a, b, c]` of the primary hit triangle, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertices: Option<[u32; 3]>,
+    /// World-space anchor point / polygon centroid `[x, y, z]`.
+    pub position: [f32; 3],
+    /// Surface normal `[nx, ny, nz]` at the anchor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal: Option<[f32; 3]>,
+    /// Optional camera bookmark for fly-to focus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera: Option<CameraBookmark3d>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DesignComment {
     pub id: Id,
@@ -62,6 +110,9 @@ pub struct DesignComment {
     pub session_id: Option<Id>,
     pub body: String,
     pub pin: Option<CommentPin>,
+    /// Top-level 3D polygon / mesh anchor (`None` for 2D or unpinned comments).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin_3d: Option<CommentPin3d>,
     pub resolved: bool,
     pub resolved_by: Option<Id>,
     pub resolved_by_name: Option<String>,
@@ -72,7 +123,7 @@ pub struct DesignComment {
     pub updated_at: DateTime<Utc>,
 }
 
-/// A row to insert (validated by the caller with [`clean_body`] / [`clean_pin`]).
+/// A row to insert (validated by the caller with [`clean_body`] / [`clean_pin`] / [`clean_pin_3d`]).
 #[derive(Debug, Clone)]
 pub struct NewComment {
     pub artifact_id: Id,
@@ -86,14 +137,16 @@ pub struct NewComment {
     pub session_id: Option<Id>,
     pub body: String,
     pub pin: Option<CommentPin>,
+    pub pin_3d: Option<CommentPin3d>,
 }
 
-/// `GET …/comments` filters. `version_id` / `resolved` select THREADS; a
-/// matching thread brings its replies along.
+/// `GET …/comments` filters. `version_id` / `resolved` / `mesh_name` select THREADS;
+/// a matching thread brings its replies along.
 #[derive(Debug, Clone, Default)]
 pub struct CommentFilter {
     pub version_id: Option<Id>,
     pub resolved: Option<bool>,
+    pub mesh_name: Option<String>,
     pub limit: Option<i64>,
 }
 
@@ -144,6 +197,128 @@ pub fn clean_pin(pin: Option<CommentPin>) -> Result<Option<CommentPin>> {
     }))
 }
 
+fn clean_opt_name(raw: Option<String>, field: &str) -> Result<Option<String>> {
+    let cleaned = raw
+        .map(|s| {
+            s.chars()
+                .filter(|c| !c.is_control())
+                .collect::<String>()
+                .trim()
+                .to_string()
+        })
+        .filter(|s| !s.is_empty());
+    if cleaned
+        .as_ref()
+        .is_some_and(|s| s.chars().count() > MAX_PIN_3D_NAME_CHARS)
+    {
+        return Err(Error::Invalid(format!(
+            "pin_3d.{field} is at most {MAX_PIN_3D_NAME_CHARS} characters"
+        )));
+    }
+    Ok(cleaned)
+}
+
+fn check_vec3(v: [f32; 3], field: &str) -> Result<[f32; 3]> {
+    if v.iter().all(|c| c.is_finite()) {
+        Ok(v)
+    } else {
+        Err(Error::Invalid(format!(
+            "pin_3d.{field} coordinates must be finite numbers"
+        )))
+    }
+}
+
+/// Validate and normalize a 3D polygon/surface pin.
+pub fn clean_pin_3d(pin: Option<CommentPin3d>) -> Result<Option<CommentPin3d>> {
+    let Some(p) = pin else { return Ok(None) };
+    let selection_kind = p.selection_kind.trim().to_ascii_lowercase();
+    if !PIN_3D_SELECTION_KINDS.contains(&selection_kind.as_str()) {
+        return Err(Error::Invalid(format!(
+            "pin_3d.selection_kind must be one of: {}",
+            PIN_3D_SELECTION_KINDS.join(", ")
+        )));
+    }
+    let mesh_name = clean_opt_name(p.mesh_name, "mesh_name")?;
+    let object_id = clean_opt_name(p.object_id, "object_id")?;
+    let position = check_vec3(p.position, "position")?;
+    let normal = match p.normal {
+        Some(n) => Some(check_vec3(n, "normal")?),
+        None => None,
+    };
+    let camera = match p.camera {
+        Some(cam) => {
+            let pos = check_vec3(cam.pos, "camera.pos")?;
+            let target = check_vec3(cam.target, "camera.target")?;
+            let fov = match cam.fov {
+                Some(f) if f.is_finite() && (1.0..=179.0).contains(&f) => Some(f),
+                Some(_) => {
+                    return Err(Error::Invalid(
+                        "pin_3d.camera.fov must be a finite number between 1 and 179".into(),
+                    ))
+                }
+                None => None,
+            };
+            Some(CameraBookmark3d { pos, target, fov })
+        }
+        None => None,
+    };
+
+    // Deduplicate face indices while preserving selection order.
+    let mut seen = std::collections::HashSet::with_capacity(p.face_indices.len().min(64));
+    let mut face_indices = Vec::with_capacity(p.face_indices.len().min(MAX_PIN_3D_FACES));
+    for idx in p.face_indices {
+        if seen.insert(idx) {
+            if face_indices.len() >= MAX_PIN_3D_FACES {
+                return Err(Error::Invalid(format!(
+                    "pin_3d.face_indices may contain at most {MAX_PIN_3D_FACES} unique faces"
+                )));
+            }
+            face_indices.push(idx);
+        }
+    }
+    let face_index = p.face_index.or_else(|| face_indices.first().copied());
+
+    match selection_kind.as_str() {
+        "polygon" if face_index.is_none() && face_indices.is_empty() => {
+            return Err(Error::Invalid(
+                "pin_3d with selection_kind 'polygon' requires face_index or face_indices".into(),
+            ));
+        }
+        "region" if face_indices.is_empty() => {
+            return Err(Error::Invalid(
+                "pin_3d with selection_kind 'region' requires at least one face_indices entry"
+                    .into(),
+            ));
+        }
+        "mesh" if mesh_name.is_none() && object_id.is_none() => {
+            return Err(Error::Invalid(
+                "pin_3d with selection_kind 'mesh' requires mesh_name or object_id".into(),
+            ));
+        }
+        _ => {}
+    }
+
+    let cleaned = CommentPin3d {
+        selection_kind,
+        mesh_name,
+        object_id,
+        face_index,
+        face_indices,
+        vertices: p.vertices,
+        position,
+        normal,
+        camera,
+    };
+    let encoded = serde_json::to_string(&cleaned)
+        .map_err(|e| Error::Invalid(format!("pin_3d serialization failed: {e}")))?;
+    if encoded.len() > MAX_PIN_3D_JSON_BYTES {
+        return Err(Error::Invalid(format!(
+            "pin_3d payload exceeds {MAX_PIN_3D_JSON_BYTES} bytes"
+        )));
+    }
+    Ok(Some(cleaned))
+}
+
 fn dberr(op: &'static str) -> impl Fn(sqlx::Error) -> Error {
     move |e| Error::Internal(format!("{op}: {e}"))
 }
@@ -189,6 +364,16 @@ fn row_comment(r: &sqlx::sqlite::SqliteRow) -> Result<DesignComment> {
         }),
         _ => None,
     };
+    let pin_3d: Option<CommentPin3d> = r
+        .try_get::<Option<String>, _>("pin_3d_json")
+        .ok()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            serde_json::from_str::<CommentPin3d>(&s)
+                .map_err(|e| Error::Internal(format!("design.comment.pin_3d_json: {e}")))
+        })
+        .transpose()?;
     let resolved_by_name = r
         .try_get::<Option<String>, _>("resolver_now")
         .ok()
@@ -207,6 +392,7 @@ fn row_comment(r: &sqlx::sqlite::SqliteRow) -> Result<DesignComment> {
         session_id: r.get("session_id"),
         body: r.get("body"),
         pin,
+        pin_3d,
         resolved: r.get::<i64, _>("resolved") != 0,
         resolved_by: r.get("resolved_by"),
         resolved_by_name,
@@ -236,12 +422,18 @@ impl Store {
             Some(p) => (Some(p.x), Some(p.y), p.frame.clone()),
             None => (None, None, None),
         };
+        let pin_3d_json = c
+            .pin_3d
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| Error::Internal(format!("design.comment.pin_3d serialize: {e}")))?;
         sqlx::query(
             "INSERT INTO design_comments
              (id, artifact_id, workspace_id, version_id, version_seq, parent_id, author_kind,
-              author_id, author_name, session_id, body, pin_x, pin_y, pin_frame, resolved,
-              created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+              author_id, author_name, session_id, body, pin_x, pin_y, pin_frame, pin_3d_json,
+              resolved, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
         )
         .bind(&id)
         .bind(&c.artifact_id)
@@ -257,6 +449,7 @@ impl Store {
         .bind(px)
         .bind(py)
         .bind(&pf)
+        .bind(&pin_3d_json)
         .bind(&now)
         .bind(&now)
         .execute(self.pool())
@@ -291,14 +484,21 @@ impl Store {
             .limit
             .unwrap_or(DEFAULT_LIST_LIMIT)
             .clamp(1, MAX_LIST_LIMIT);
-        // Replies carry their thread's version; the resolved state is the
-        // thread's (a reply's own flag is never set).
+        // Replies carry their thread's version; the resolved state and 3D mesh
+        // anchor belong to the thread (a reply's own flag/pin is never set).
         let resolved = f.resolved.map(i64::from);
+        let mesh_name = f
+            .mesh_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
         let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
             "{SELECT} WHERE c.artifact_id = ?
                AND (? IS NULL OR c.version_id = ?)
                AND (? IS NULL OR (CASE WHEN c.parent_id IS NULL THEN c.resolved
                     ELSE (SELECT p.resolved FROM design_comments p WHERE p.id = c.parent_id) END) = ?)
+               AND (? IS NULL OR (CASE WHEN c.parent_id IS NULL THEN json_extract(c.pin_3d_json, '$.mesh_name')
+                    ELSE (SELECT json_extract(p.pin_3d_json, '$.mesh_name') FROM design_comments p WHERE p.id = c.parent_id) END) = ?)
              ORDER BY c.created_at DESC, c.id DESC LIMIT ?"
         )))
         .bind(artifact_id)
@@ -306,6 +506,8 @@ impl Store {
         .bind(&f.version_id)
         .bind(resolved)
         .bind(resolved)
+        .bind(mesh_name)
+        .bind(mesh_name)
         .bind(limit)
         .fetch_all(self.pool())
         .await
@@ -408,6 +610,32 @@ pub fn pin_words(p: &CommentPin) -> String {
     format!("pinned at {}% across, {}% down{frame}", pct(p.x), pct(p.y))
 }
 
+/// A 3D polygon/surface pin in words for an agent:
+/// `3D polygon on mesh "HeroHelmet" face #412 (+2 faces) at (0.12, 1.45, -0.08)`.
+pub fn pin_3d_words(p: &CommentPin3d) -> String {
+    let mut parts = vec![format!("3D {}", p.selection_kind)];
+    if let Some(mesh) = p.mesh_name.as_deref() {
+        parts.push(format!("on mesh \"{mesh}\""));
+    } else if let Some(obj) = p.object_id.as_deref() {
+        parts.push(format!("on object \"{obj}\""));
+    }
+    if let Some(fi) = p.face_index {
+        let extra = p.face_indices.len().saturating_sub(1);
+        if extra > 0 {
+            parts.push(format!("face #{fi} (+{extra} faces)"));
+        } else {
+            parts.push(format!("face #{fi}"));
+        }
+    } else if !p.face_indices.is_empty() {
+        parts.push(format!("{} faces", p.face_indices.len()));
+    }
+    parts.push(format!(
+        "at ({:.2}, {:.2}, {:.2})",
+        p.position[0], p.position[1], p.position[2]
+    ));
+    parts.join(" ")
+}
+
 /// One brief line per open thread, labelled `[C1]`… oldest first: version,
 /// pin, author and the (single-line, capped) body. The caller fences them as
 /// reviewer notes — data, never instructions.
@@ -427,9 +655,10 @@ pub fn brief_lines(open: &[DesignComment]) -> Vec<String> {
                 .map(|s| format!("on v{s}"))
                 .unwrap_or_else(|| "on the draft".into());
             let pin = c
-                .pin
+                .pin_3d
                 .as_ref()
-                .map(pin_words)
+                .map(pin_3d_words)
+                .or_else(|| c.pin.as_ref().map(pin_words))
                 .unwrap_or_else(|| "no pin (the whole design)".into());
             let body: String = c
                 .body

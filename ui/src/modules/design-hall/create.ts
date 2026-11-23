@@ -88,8 +88,9 @@ export async function createDesign(input: NewDesignInput): Promise<string> {
   return res.artifact.id;
 }
 
-/** The daemon's per-version cap (docs/features/design-hall.md: 25 MB raw). */
+/** The daemon's per-version cap (25 MB general, 128 MiB for rigged/PBR 3D models). */
 export const MAX_IMPORT_BYTES = 25 * 1024 * 1024;
+export const MAX_IMPORT_3D_BYTES = 128 * 1024 * 1024;
 
 /** Import a local file as a new artifact (format from its extension / mime). */
 export async function importDesignFile(
@@ -97,11 +98,11 @@ export async function importDesignFile(
   opts: { workspaceId: string; projectId?: string | null },
 ): Promise<string> {
   const format = formatForFile(file.name, file.type);
-  if (!format) throw new Error(`Design Hall can’t import “${file.name}”. Use HTML, SVG, PNG, JPEG, GIF, WebP, PDF, GLB, glTF, Mermaid, D2 or Excalidraw.`);
-  // Refuse before base64-encoding and uploading: a 60 MB .glb used to be read,
-  // encoded and sent only for the daemon to reject it (S18-24).
-  if (file.size > MAX_IMPORT_BYTES) {
-    throw new Error(`“${file.name}” is ${(file.size / 1048576).toFixed(1)} MB — Design Hall imports up to 25 MB per file.`);
+  if (!format) throw new Error(`Design Hall can’t import “${file.name}”. Use HTML, SVG, PNG, JPEG, GIF, WebP, PDF, GLB, glTF, OBJ, Mermaid, D2 or Excalidraw.`);
+  const maxBytes = format === 'glb' || format === 'gltf' || format === 'obj' ? MAX_IMPORT_3D_BYTES : MAX_IMPORT_BYTES;
+  if (file.size > maxBytes) {
+    const capMb = Math.round(maxBytes / 1048576);
+    throw new Error(`“${file.name}” is ${(file.size / 1048576).toFixed(1)} MB — Design Hall imports up to ${capMb} MB for this format.`);
   }
   const title = file.name.replace(/\.[^.]+$/, '') || file.name;
   const body: CreateDesignArtifactReq = {
@@ -119,4 +120,4 @@ export async function importDesignFile(
 
 /** Files the import picker accepts. */
 export const IMPORT_ACCEPT =
-  '.html,.htm,.svg,.png,.jpg,.jpeg,.gif,.webp,.pdf,.glb,.gltf,.mmd,.mermaid,.d2,.excalidraw';
+  '.html,.htm,.svg,.png,.jpg,.jpeg,.gif,.webp,.pdf,.glb,.gltf,.obj,.mmd,.mermaid,.d2,.excalidraw';

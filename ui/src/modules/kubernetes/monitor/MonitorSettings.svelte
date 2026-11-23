@@ -367,7 +367,7 @@
         <span>Probe metrics-server every cycle <span class="dim">(CPU + working-set memory; turn off when RBAC denies it — saves one call per namespace per cycle)</span></span>
       </label>
       <label class="toggle small">
-        <span class="sw-slot" data-testid="k8s-monitor-request-labels"><Switch checked={cfg.request_labels ?? false} onchange={(v) => { if (cfg) cfg.request_labels = v; }} label="Keep request path labels" disabled={!canEdit} /></span>
+        <span class="sw-slot" data-testid="k8s-monitor-request-labels"><Switch checked={Boolean(cfg.request_labels)} onchange={(v) => { if (cfg) cfg.request_labels = v; }} label="Keep request path labels" disabled={!canEdit} /></span>
         <span>Keep request path labels <span class="dim">(per-route <code>path</code> + <code>method</code> on the request / latency counters — never on histogram buckets — so the Fleet dashboard’s Requests tab can drill down to a route; multiplies request rows per pod by the number of routes)</span></span>
       </label>
     </section>

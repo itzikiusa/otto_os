@@ -444,15 +444,63 @@ fn dedup_ts(event: &serde_json::Value) -> String {
 // Adapter implementation
 // ---------------------------------------------------------------------------
 
+/// Non-reversible 128-bit FNV-1a digest of a bot token so raw credentials
+/// never reside as keys in process-wide global maps.
+fn token_key(token: &str) -> u128 {
+    const OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
+    const PRIME: u128 = 0x0000000001000000000000000000013b;
+    let mut h = OFFSET;
+    for &b in token.as_bytes() {
+        h ^= u128::from(b);
+        h = h.wrapping_mul(PRIME);
+    }
+    h
+}
+
+/// Hard cap on tracked per-bot dedup windows in this process.
+const SEEN_WINDOW_CAP: usize = 256;
+
+#[derive(Default)]
+struct SeenWindowTable {
+    map: std::collections::HashMap<u128, Arc<Mutex<DedupWindow>>>,
+    order: std::collections::VecDeque<u128>,
+}
+
+impl SeenWindowTable {
+    fn get_or_insert(&mut self, token: &str) -> Arc<Mutex<DedupWindow>> {
+        let key = token_key(token);
+        if let Some(existing) = self.map.get(&key) {
+            return Arc::clone(existing);
+        }
+        while self.map.len() >= SEEN_WINDOW_CAP {
+            // Prefer evicting an idle window (no live listener holding an Arc).
+            let idle_pos = self.order.iter().position(|k| {
+                self.map
+                    .get(k)
+                    .is_some_and(|arc| Arc::strong_count(arc) <= 1)
+            });
+            let victim = match idle_pos {
+                Some(pos) => self.order.remove(pos),
+                None => self.order.pop_front(),
+            };
+            let Some(victim) = victim else { break };
+            self.map.remove(&victim);
+        }
+        let window: Arc<Mutex<DedupWindow>> = Default::default();
+        self.map.insert(key, Arc::clone(&window));
+        self.order.push_back(key);
+        window
+    }
+}
+
 /// The dedup window for `bot_token`, shared by every listener generation of
-/// this bot in the process (see `run`).
+/// this bot in the process (see `run`). Keyed by a non-reversible token hash
+/// and bounded to [`SEEN_WINDOW_CAP`] entries.
 fn seen_window(bot_token: &str) -> Arc<Mutex<DedupWindow>> {
-    static MAP: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, Arc<Mutex<DedupWindow>>>>,
-    > = std::sync::OnceLock::new();
+    static MAP: std::sync::OnceLock<std::sync::Mutex<SeenWindowTable>> = std::sync::OnceLock::new();
     let map = MAP.get_or_init(Default::default);
-    let mut m = map.lock().unwrap_or_else(|p| p.into_inner());
-    Arc::clone(m.entry(bot_token.to_string()).or_default())
+    let mut table = map.lock().unwrap_or_else(|p| p.into_inner());
+    table.get_or_insert(bot_token)
 }
 
 /// Slack bot adapter: post, edit and upload messages via the Web API.
@@ -1014,16 +1062,28 @@ pub async fn run(
                         debug!("slack: {why}; acknowledged without admission");
                         seen.lock().await.insert(dedup_key.clone(), DEDUP_CAP);
                     }
-                    let admission = if duplicate || skipped.is_some() {
+                    // Check `integration_admits` BEFORE consuming an admission
+                    // permit so unauthorized senders can never exhaust permits.
+                    let unauthorized = if !duplicate && skipped.is_none() {
+                        let inbound = slack_inbound(event, &integ);
+                        if !crate::bridge::integration_admits(&integ, &inbound.user) {
+                            info!(
+                                user = %inbound.user,
+                                "slack: sender not in allowed_users, acknowledged without admission"
+                            );
+                            bridge.record_rejected(Channel::Slack, &inbound).await;
+                            seen.lock().await.insert(dedup_key.clone(), DEDUP_CAP);
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    let admission = if duplicate || skipped.is_some() || unauthorized {
                         None
                     } else {
-                        Some(bridge.admission.admit_chat(
-                            &format!("slack:{}", integ.workspace_id),
-                            chat,
-                            thread,
-                            strip_mention(content["text"].as_str().unwrap_or("")),
-                            event["subtype"].as_str() == Some("message_changed"),
-                        ))
+                        admit_slack_event(&bridge.admission, &integ, event, content, chat, thread)
                     };
                     match admission {
                         Some(Admission::Retry) => {
@@ -1124,6 +1184,29 @@ pub async fn run(
         sleep_unless_cancelled(backoff_ms, &cancel).await;
         backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
     }
+}
+
+/// Gate admission on `integration_admits` BEFORE consuming an admission permit
+/// so unauthorized senders never burn permits.
+fn admit_slack_event(
+    admission: &crate::admission::InboundAdmission,
+    integ: &Integration,
+    event: &serde_json::Value,
+    content: &serde_json::Value,
+    chat: &str,
+    thread: Option<&str>,
+) -> Option<crate::admission::Admission> {
+    let inbound = slack_inbound(event, integ);
+    if !crate::bridge::integration_admits(integ, &inbound.user) {
+        return None;
+    }
+    Some(admission.admit_chat(
+        &format!("slack:{}", integ.workspace_id),
+        chat,
+        thread,
+        strip_mention(content["text"].as_str().unwrap_or("")),
+        event["subtype"].as_str() == Some("message_changed"),
+    ))
 }
 
 /// A rejected message can be acknowledged only after its notice is delivered.
@@ -2044,5 +2127,69 @@ mod tests {
         crate::health::remove(&ws.id, Channel::Slack);
         drop((bridge, manager, pool));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn seen_window_table_hashes_tokens_and_enforces_cap() {
+        let mut table = SeenWindowTable::default();
+        assert_ne!(token_key("xoxb-alpha"), token_key("xoxb-beta"));
+        assert_eq!(token_key("xoxb-alpha"), token_key("xoxb-alpha"));
+        for i in 0..(SEEN_WINDOW_CAP + 40) {
+            let _ = table.get_or_insert(&format!("xoxb-token-{i}"));
+        }
+        assert!(
+            table.map.len() <= SEEN_WINDOW_CAP,
+            "table exceeded cap: {}",
+            table.map.len()
+        );
+    }
+
+    #[test]
+    fn unauthorized_slack_sender_does_not_consume_admission_permits() {
+        let admission = crate::admission::InboundAdmission::default();
+        let integ = Integration {
+            workspace_id: "ws-1".into(),
+            channel: Channel::Slack,
+            channel_id: String::new(),
+            enabled: true,
+            allowed_users: "U_ALLOWED".into(),
+            open_to_all: false,
+            agent_reply: false,
+            reply_instructions: String::new(),
+            preferred_cli: String::new(),
+            has_bot_token: true,
+            has_app_token: true,
+            updated_at: chrono::Utc::now(),
+        };
+        let stranger = serde_json::json!({
+            "type": "message",
+            "channel": "C1",
+            "user": "U_STRANGER",
+            "ts": "1.1",
+            "text": "spam"
+        });
+        for _ in 0..32 {
+            assert!(
+                admit_slack_event(&admission, &integ, &stranger, &stranger, "C1", Some("1.1"))
+                    .is_none(),
+                "unauthorized sender must not consume an admission permit"
+            );
+        }
+        // An allowed sender still gets all 8 conversation permits cleanly.
+        let allowed = serde_json::json!({
+            "type": "message",
+            "channel": "C1",
+            "user": "U_ALLOWED",
+            "ts": "1.2",
+            "text": "hello"
+        });
+        let mut permits = Vec::new();
+        for _ in 0..8 {
+            match admit_slack_event(&admission, &integ, &allowed, &allowed, "C1", Some("1.2")) {
+                Some(crate::admission::Admission::Work(p)) => permits.push(p),
+                other => panic!("expected Work permit, got {:?}", other.is_some()),
+            }
+        }
+        assert_eq!(permits.len(), 8);
     }
 }

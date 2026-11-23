@@ -9,6 +9,7 @@
   // only mounts the root and keeps the broadcast bar.
   import SplitNode from './SplitNode.svelte';
   import { ws, DB_PANE_ID } from '../../lib/stores/workspace.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { layout, type Preset, type Rect, type Side } from '../../lib/stores/splitLayout.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { api } from '../../lib/api/client';
@@ -187,7 +188,11 @@
   {/if}
   <div class="tree">
     {#if layout.tree}
-      <SplitNode node={layout.tree} />
+      <!-- On a phone (≤640px), multi-pane splits persisted from desktop would
+           crush terminals to ~175px wide: focus the active leaf full-width
+           without destroying the saved desktop layout (TabBar switches tabs). -->
+      {@const phoneLeaf = viewport.isPhone && layout.leaves.length > 1 ? (layout.leaves[layout.focusedIndex] ?? layout.leaves[0]) : null}
+      <SplitNode node={phoneLeaf ?? layout.tree} />
     {/if}
   </div>
 </div>

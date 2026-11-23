@@ -39,7 +39,8 @@
   // replacement (the only case where a value is sent on save). `storedKey` is
   // the Keychain name (null for new rows) — renaming sends `secret_renames` so
   // the stored value follows the new name instead of being deleted.
-  interface VarRow { key: string; value: string; secret: boolean; touched: boolean; storedKey: string | null; }
+  interface VarRow { id: number; key: string; value: string; secret: boolean; touched: boolean; storedKey: string | null; }
+  let nextRowId = 1;
   let rows: VarRow[] = $state([]);
   let dirty = $state(false);
   let loadedFor = $state<string | null>(null);
@@ -72,14 +73,14 @@
     dirty = false;
     rows = env
       ? [
-          ...Object.entries(env.variables).map(([key, value]) => ({ key, value, secret: false, touched: false, storedKey: null })),
-          ...env.secret_keys.map((key) => ({ key, value: '', secret: true, touched: false, storedKey: key })),
+          ...Object.entries(env.variables).map(([key, value]) => ({ id: nextRowId++, key, value, secret: false, touched: false, storedKey: null })),
+          ...env.secret_keys.map((key) => ({ id: nextRowId++, key, value: '', secret: true, touched: false, storedKey: key })),
         ]
       : [];
     if (env && canEdit) rows.push(blankRow());
   }
   function blankRow(): VarRow {
-    return { key: '', value: '', secret: false, touched: false, storedKey: null };
+    return { id: nextRowId++, key: '', value: '', secret: false, touched: false, storedKey: null };
   }
   $effect(() => {
     const env = selected;
@@ -294,7 +295,7 @@
               <span class="vt-secret" aria-hidden="true">Secret</span>
               <span></span>
             </div>
-            {#each rows as row, i (i)}
+            {#each rows as row, i (row.id)}
               <div class="vt-row var-row">
                 <input dir="ltr" class="input mono var-key" placeholder="base_url" value={row.key} disabled={!canEdit}
                   aria-label="Variable name" oninput={(e) => updateRow(i, { key: (e.currentTarget as HTMLInputElement).value })} />

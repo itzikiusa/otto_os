@@ -168,6 +168,8 @@
     flex: 1;
     min-width: 0;
     min-height: 0;
+    display: flex;
+    flex-direction: column;
     overflow-y: auto;
     padding: 0 16px;
   }
@@ -187,7 +189,9 @@
   }
   .progress-card {
     max-width: 420px;
-    margin: 15vh auto 0;
+    width: 100%;
+    margin: auto;
+    padding: 24px 0;
     display: flex;
     flex-direction: column;
     align-items: center;

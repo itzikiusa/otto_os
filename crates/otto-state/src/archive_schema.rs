@@ -1,0 +1,1079 @@
+#[path = "archive_schema_ide.rs"]
+mod schema_ide;
+
+use base64::{engine::general_purpose::STANDARD, Engine};
+use futures_util::TryStreamExt;
+use otto_core::{Error, Result};
+use serde_json::{json, Value};
+use sqlx::{Column, Row, SqliteConnection, TypeInfo, ValueRef};
+use std::collections::{BTreeMap, BTreeSet};
+
+pub const MAX_ARCHIVE_BYTES: usize = 256 * 1024 * 1024;
+pub type ArchiveRow = BTreeMap<String, Value>;
+
+fn invalid(message: &str) -> Error {
+    Error::Invalid(message.into())
+}
+
+fn db_error(error: sqlx::Error) -> Error {
+    Error::Internal(format!("Archive database: {error}"))
+}
+
+/// True when a settings/config key name indicates a secret credential that must
+/// be excluded from exports or redacted.
+pub fn is_secret_key(key: &str) -> bool {
+    let k = key.to_lowercase();
+    k.contains("password")
+        || k.contains("passwd")
+        || k.contains("secret")
+        || k.contains("token")
+        || k.contains("api_key")
+        || k.contains("apikey")
+        || k.contains("access_key")
+        || k.contains("private_key")
+        || k.contains("credential")
+        || k.contains("keychain")
+        || k.contains("keyref")
+        || k.contains("auth_token")
+}
+
+fn api_auth_secret_members(auth_type: &str) -> &'static [&'static str] {
+    match auth_type {
+        "bearer" => &["token"],
+        "basic" => &["password"],
+        "api_key" => &["value"],
+        "oauth2" => &["client_secret", "refresh_token", "password", "access_token"],
+        _ => &[],
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ColumnSpec {
+    pub name: String,
+    pub nullable: bool,
+    pub pk: i64,
+}
+#[derive(Clone, Debug)]
+pub struct TableSpec {
+    pub columns: Vec<ColumnSpec>,
+    pub user_columns: Vec<String>,
+}
+
+pub fn quoted(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+pub async fn schema(conn: &mut SqliteConnection) -> Result<BTreeMap<String, TableSpec>> {
+    let names:Vec<String>=sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_sqlx_%' ORDER BY name").fetch_all(&mut *conn).await.map_err(db_error)?;
+    let mut tables = BTreeMap::new();
+    for name in names {
+        let columns = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "PRAGMA table_info({})",
+            quoted(&name)
+        )))
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(db_error)?;
+        let foreign = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "PRAGMA foreign_key_list({})",
+            quoted(&name)
+        )))
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(db_error)?;
+        let user_columns = foreign
+            .iter()
+            .filter(|r| r.get::<String, _>("table") == "users")
+            .map(|r| r.get::<String, _>("from"))
+            .collect();
+        tables.insert(
+            name,
+            TableSpec {
+                user_columns,
+                columns: columns
+                    .iter()
+                    .map(|r| ColumnSpec {
+                        name: r.get("name"),
+                        nullable: r.get::<i64, _>("notnull") == 0,
+                        pk: r.get("pk"),
+                    })
+                    .collect(),
+            },
+        );
+    }
+    Ok(tables)
+}
+pub fn excluded_table(name: &str, portable: bool) -> bool {
+    if name.starts_with("sqlite_") || name.starts_with("_sqlx_") || name.contains("_fts") {
+        return true;
+    }
+    if matches!(
+        name,
+        "resource_access_policies"
+            | "resource_access_policy_versions"
+            | "workspace_members"
+            | "access_group_members"
+            | "user_feature_grants"
+            | "plugin_feature_grants"
+            | "mcp_allowlist"
+            | "mcp_policies"
+            | "auth_sessions"
+            | "phone_devices"
+            | "phone_pairings"
+            | "transcript_index"
+            | "provider_models"
+            | "workflow_node_cache"
+            | "vault_notes"
+            | "vault_links"
+            | "vault_tags"
+            | "vault_files"
+            | "plugin_migrations"
+    ) {
+        return true;
+    }
+    portable
+        && !(matches!(
+            name,
+            "settings"
+                | "workspaces"
+                | "repos"
+                | "connections"
+                | "connection_sections"
+                | "api_collections"
+                | "api_requests"
+                | "api_environments"
+                | "api_automations"
+                | "workflows"
+                | "workflow_versions"
+                | "workflow_triggers"
+                | "scheduled_tasks"
+                | "personal_agents"
+                | "personal_agent_schedules"
+                | "db_saved_queries"
+                | "db_dashboards"
+                | "db_widgets"
+                | "vaults"
+                | "canvas_scenes"
+                | "product_attachments"
+                | "product_stories"
+                | "product_story_versions"
+                | "product_notes"
+                | "product_learnings"
+                | "product_transcripts"
+                | "repo_rules"
+                | "memories"
+                | "memory_links"
+                | "name_themes"
+                | "saved_views"
+                | "swarms"
+                | "swarm_agents"
+                | "mcp_servers"
+                | "mcp_policies"
+                | "mcp_profiles"
+                | "broker_clusters"
+                | "aws_accounts"
+                | "k8s_clusters"
+                | "git_accounts"
+                | "issue_accounts"
+                | "ide_project_environments"
+                | "ide_run_configs"
+                | "ide_local_sdks"
+                | "ide_named_projects"
+                | "users"
+        ))
+}
+/// How an archived `mcp_profiles` row restores (data-integrity-6-03). The
+/// table is archived — custom profiles, edits to the presets and the choice
+/// of default — but every install SEEDS the built-in presets, so a plain
+/// insert of an archived built-in always collided and the preview refused
+/// the restore (why the table used to be excluded, which silently widened
+/// every session that named a custom profile to Full).
+pub enum ProfileRestore {
+    /// A built-in whose id exists here: merged, never a conflict.
+    MergedBuiltin,
+    /// Not a built-in already present: insert it like any other row.
+    Insert,
+}
+
+/// An archived 0/1 (or boolean) column.
+pub fn truthy(row: &ArchiveRow, column: &str) -> bool {
+    match row.get(column) {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Number(n)) => n.as_i64().is_some_and(|n| n != 0),
+        _ => false,
+    }
+}
+
+/// Merge an archived built-in profile into this install's seeded copy: its
+/// editable fields are applied only while the local copy is untouched
+/// (`updated_at == created_at`) and not locked — an edit made here wins, as
+/// "existing rows are never overwritten" promises. `is_default` is never
+/// written here; [`restore_default_profile`] applies it once all rows are in.
+pub async fn restore_mcp_profile(
+    conn: &mut SqliteConnection,
+    row: &mut ArchiveRow,
+) -> Result<ProfileRestore> {
+    row.insert("is_default".into(), json!(0));
+    let id = row.get("id").and_then(Value::as_str).unwrap_or_default();
+    if !truthy(row, "builtin") {
+        return Ok(ProfileRestore::Insert);
+    }
+    let local = sqlx::query(
+        "SELECT locked, created_at = updated_at AS pristine FROM mcp_profiles WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(|e| invalid(&e.to_string()))?;
+    let Some(local) = local else {
+        return Ok(ProfileRestore::Insert);
+    };
+    if local.get::<i64, _>("locked") == 0 && local.get::<i64, _>("pristine") != 0 {
+        let text = |c: &str| row.get(c).and_then(Value::as_str).unwrap_or("").to_owned();
+        // A name taken by another local profile keeps the local preset as is.
+        let _ = sqlx::query(
+            "UPDATE mcp_profiles SET name = ?, description = ?, all_tools = ?,
+                 groups_json = ?, include_tools_json = ?, exclude_tools_json = ?,
+                 updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(text("name"))
+        .bind(text("description"))
+        .bind(i64::from(truthy(row, "all_tools")))
+        .bind(text("groups_json"))
+        .bind(text("include_tools_json"))
+        .bind(text("exclude_tools_json"))
+        .bind(text("updated_at"))
+        .bind(id)
+        .execute(&mut *conn)
+        .await;
+    }
+    Ok(ProfileRestore::MergedBuiltin)
+}
+
+/// Re-apply the archive's default profile through the repo's one-default
+/// switch — only onto an install still on the initial default (`full`), so
+/// a default chosen here is kept, and only when the profile was restored.
+pub async fn restore_default_profile(conn: &mut SqliteConnection, id: &str) -> Result<()> {
+    let current: Option<String> =
+        sqlx::query_scalar("SELECT id FROM mcp_profiles WHERE is_default = 1")
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(|e| invalid(&e.to_string()))?;
+    let exists: Option<i64> = sqlx::query_scalar("SELECT 1 FROM mcp_profiles WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(|e| invalid(&e.to_string()))?;
+    let initial = current
+        .as_deref()
+        .is_none_or(|c| c == crate::FULL_PROFILE_ID);
+    if exists.is_some() && initial && current.as_deref() != Some(id) {
+        crate::mcp_profiles::switch_default(conn, id).await?;
+    }
+    Ok(())
+}
+
+pub fn secret_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase().replace('-', "_");
+    !matches!(
+        key.as_str(),
+        "secret_keys"
+            | "secret_keys_json"
+            | "secret_env_keys"
+            | "secret_header_keys"
+            | "token_type"
+            | "tokens_input"
+            | "tokens_output"
+            | "tokens_total"
+            | "total_tokens"
+            | "max_tokens"
+            | "max_total_tokens"
+            | "max_output_tokens"
+            | "max_input_tokens"
+            | "token_budget"
+            | "token_limit"
+            | "token_count"
+            | "input_tokens"
+            | "output_tokens"
+            | "cached_tokens"
+            | "cache_read_input_tokens"
+            | "cache_creation_input_tokens"
+    ) && (is_secret_key(&key)
+        || matches!(
+            key.as_str(),
+            "authorization"
+                | "cookie"
+                | "set-cookie"
+                | "password_hash"
+                | "otp_hash"
+                | "token_hash"
+                | "bot_token_ref"
+                | "app_token_ref"
+        ))
+}
+/// Sanitize structured transport credentials without rewriting free-form documents.
+pub(super) fn scrub_string(text: &str) -> String {
+    if text.starts_with("keychain:")
+        || text.starts_with("secret:")
+        || text.starts_with("otto-keychain:")
+    {
+        return String::new();
+    }
+    let normalized = match otto_core::connection_credentials::extract_password(text) {
+        Ok(Some((template, _))) => template.replace("{secret}", ""),
+        Err(_) => return "[invalid credential URI removed]".into(),
+        _ => text.to_owned(),
+    };
+    if let Ok(mut url) = url::Url::parse(&normalized) {
+        if matches!(
+            url.scheme(),
+            "http"
+                | "https"
+                | "mongodb"
+                | "mongodb+srv"
+                | "redis"
+                | "rediss"
+                | "mysql"
+                | "postgres"
+                | "postgresql"
+                | "clickhouse"
+                | "ssh"
+        ) {
+            let _ = url.set_password(None);
+            let pairs: Vec<(String, String)> = url
+                .query_pairs()
+                .filter(|(key, _)| !secret_key(key))
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect();
+            url.set_query(None);
+            if !pairs.is_empty() {
+                url.query_pairs_mut().extend_pairs(pairs);
+            }
+            return url.to_string();
+        }
+    }
+    // Mongo replica-set authorities are not accepted by URL parsers.
+    if let Some((base, query)) = normalized.split_once('?') {
+        if base.contains("://") {
+            let mut parsed = url::Url::parse("https://archive.invalid/").expect("constant URL");
+            parsed.set_query(Some(query));
+            let pairs: Vec<_> = parsed
+                .query_pairs()
+                .filter(|(k, _)| !secret_key(k))
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect();
+            parsed.set_query(None);
+            if !pairs.is_empty() {
+                parsed.query_pairs_mut().extend_pairs(pairs);
+            }
+            let query = parsed.query().unwrap_or_default();
+            return if query.is_empty() {
+                base.into()
+            } else {
+                format!("{base}?{query}")
+            };
+        }
+    }
+    if normalized.contains("-----BEGIN")
+        || normalized.to_ascii_lowercase().starts_with("bearer ")
+        || normalized.to_ascii_lowercase().starts_with("basic ")
+    {
+        return String::new();
+    }
+    normalized
+}
+fn has_credentials(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => {
+            if map
+                .get("key")
+                .and_then(Value::as_str)
+                .is_some_and(schema_ide::is_otto_internal_key)
+            {
+                return false;
+            }
+            map.get("type").and_then(Value::as_str).is_some_and(|kind| {
+                api_auth_secret_members(kind)
+                    .iter()
+                    .any(|key| map.contains_key(*key))
+            }) || map
+                .keys()
+                .filter(|k| !schema_ide::is_otto_internal_key(k))
+                .any(|k| secret_key(k) || k == "$secret")
+                || ["key", "name"]
+                    .iter()
+                    .any(|k| map.get(*k).and_then(Value::as_str).is_some_and(secret_key))
+                || map
+                    .iter()
+                    .filter(|(k, _)| !schema_ide::is_otto_internal_key(k))
+                    .any(|(_, v)| has_credentials(v))
+        }
+        Value::Array(values) => values.iter().any(has_credentials),
+        Value::String(text) => {
+            if text.starts_with("keychain:")
+                || text.starts_with("secret:")
+                || text.starts_with("otto-keychain:")
+                || text.contains("-----BEGIN")
+                || text.to_ascii_lowercase().starts_with("bearer ")
+                || text.to_ascii_lowercase().starts_with("basic ")
+            {
+                return true;
+            }
+            if matches!(
+                otto_core::connection_credentials::extract_password(text),
+                Ok(Some(_))
+            ) {
+                return true;
+            }
+            if let Ok(url) = url::Url::parse(text) {
+                if url.query_pairs().any(|(k, _)| secret_key(&k)) {
+                    return true;
+                }
+            }
+            serde_json::from_str::<Value>(text)
+                .ok()
+                .filter(|v| !v.is_string())
+                .is_some_and(|v| has_credentials(&v))
+        }
+        _ => false,
+    }
+}
+fn non_secret_short_p_command(segment: &str) -> bool {
+    for token in segment.split_whitespace() {
+        if matches!(token, "env" | "export" | "sudo" | "command" | "nohup")
+            || (token.contains('=') && !token.starts_with('-'))
+        {
+            continue;
+        }
+        let bin = token.rsplit('/').next().unwrap_or(token);
+        return matches!(
+            bin,
+            "cargo" | "mkdir" | "rmdir" | "cp" | "install" | "type" | "jobs" | "read" | "ulimit"
+        );
+    }
+    false
+}
+
+/// Scrub inline credentials and secret CLI/env arguments from shell command
+/// strings stored in portable run configurations (`command`, `before_launch`).
+pub(super) fn scrub_shell_text(input: &str) -> (String, bool) {
+    use regex::{Captures, Regex};
+    use std::sync::OnceLock;
+
+    static RE_URL_CRED: OnceLock<Regex> = OnceLock::new();
+    static RE_URL_QUERY: OnceLock<Regex> = OnceLock::new();
+    static RE_AUTH: OnceLock<Regex> = OnceLock::new();
+    static RE_LONG_EQ: OnceLock<Regex> = OnceLock::new();
+    static RE_LONG_SP: OnceLock<Regex> = OnceLock::new();
+    static RE_SHORT_P: OnceLock<Regex> = OnceLock::new();
+    static RE_ENV: OnceLock<Regex> = OnceLock::new();
+
+    if input.is_empty() {
+        return (String::new(), false);
+    }
+    let redacted = otto_core::redact::redact_text(input);
+    let mut text = redacted.value;
+
+    let re_url_cred = RE_URL_CRED.get_or_init(|| {
+        Regex::new(r#"([a-zA-Z][a-zA-Z0-9+.-]*://[^/\s:@'"]+):([^@\s'"]+)@"#).expect("regex")
+    });
+    text = re_url_cred
+        .replace_all(&text, |caps: &Captures<'_>| {
+            if &caps[2] == "[REDACTED]" {
+                caps[0].to_owned()
+            } else {
+                format!("{}:[REDACTED]@", &caps[1])
+            }
+        })
+        .into_owned();
+
+    let re_url_query = RE_URL_QUERY
+        .get_or_init(|| Regex::new(r#"([?&])([A-Za-z0-9_.-]+)=([^&\s'"]+)"#).expect("regex"));
+    text = re_url_query
+        .replace_all(&text, |caps: &Captures<'_>| {
+            if secret_key(&caps[2]) && &caps[3] != "[REDACTED]" {
+                format!("{}{}=[REDACTED]", &caps[1], &caps[2])
+            } else {
+                caps[0].to_owned()
+            }
+        })
+        .into_owned();
+
+    let re_auth = RE_AUTH
+        .get_or_init(|| Regex::new(r#"(?i)\b(bearer|basic)\s+([^\s'";|&)]+)"#).expect("regex"));
+    text = re_auth
+        .replace_all(&text, |caps: &Captures<'_>| {
+            if &caps[2] == "[REDACTED]" {
+                caps[0].to_owned()
+            } else {
+                format!("{} [REDACTED]", &caps[1])
+            }
+        })
+        .into_owned();
+
+    let re_long_eq = RE_LONG_EQ.get_or_init(|| {
+        Regex::new(r#"(?i)(--[a-z0-9][a-z0-9_-]*)=("[^"]*"|'[^']*'|[^\s;|&)"]+)"#).expect("regex")
+    });
+    text = re_long_eq
+        .replace_all(&text, |caps: &Captures<'_>| {
+            let flag = caps[1].trim_start_matches('-');
+            if secret_key(flag) && &caps[2] != "[REDACTED]" {
+                format!("{}=[REDACTED]", &caps[1])
+            } else {
+                caps[0].to_owned()
+            }
+        })
+        .into_owned();
+
+    let re_long_sp = RE_LONG_SP.get_or_init(|| {
+        Regex::new(r#"(?i)(--[a-z0-9][a-z0-9_-]*)(\s+)("[^"]*"|'[^']*'|[^\s-][^\s;|&)"]*)"#)
+            .expect("regex")
+    });
+    text = re_long_sp
+        .replace_all(&text, |caps: &Captures<'_>| {
+            let flag = caps[1].trim_start_matches('-');
+            if secret_key(flag) && &caps[3] != "[REDACTED]" {
+                format!("{}{}[REDACTED]", &caps[1], &caps[2])
+            } else {
+                caps[0].to_owned()
+            }
+        })
+        .into_owned();
+
+    let re_short_p = RE_SHORT_P.get_or_init(|| {
+        Regex::new(
+            r#"((?:^|[\s;|&(])-p)(?:=("[^"]*"|'[^']*'|[^\s;|&)"]+)|(\s+)("[^"]*"|'[^']*'|[^\s-][^\s;|&)"]*))"#,
+        )
+        .expect("regex")
+    });
+    let snapshot_for_p = text.clone();
+    text = re_short_p
+        .replace_all(&snapshot_for_p, |caps: &Captures<'_>| {
+            let m = caps.get(0).expect("match");
+            let prefix = &snapshot_for_p[..m.start()];
+            let seg_start = prefix
+                .rfind([';', '|', '&', '\n', '('])
+                .map_or(0, |idx| idx + 1);
+            if non_secret_short_p_command(&snapshot_for_p[seg_start..m.end()]) {
+                return caps[0].to_owned();
+            }
+            if let Some(eq_val) = caps.get(2) {
+                if eq_val.as_str() == "[REDACTED]" {
+                    caps[0].to_owned()
+                } else {
+                    format!("{}=[REDACTED]", &caps[1])
+                }
+            } else if caps.get(4).is_some_and(|v| v.as_str() == "[REDACTED]") {
+                caps[0].to_owned()
+            } else {
+                format!("{}{}[REDACTED]", &caps[1], &caps[3])
+            }
+        })
+        .into_owned();
+
+    let re_env = RE_ENV.get_or_init(|| {
+        Regex::new(
+            r#"(^|[\s;|&(])((?:export\s+|env\s+)?)([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|'[^']*'|[^\s;|&)]*)"#,
+        )
+        .expect("regex")
+    });
+    text = re_env
+        .replace_all(&text, |caps: &Captures<'_>| {
+            if secret_key(&caps[3]) && !caps[4].is_empty() && &caps[4] != "[REDACTED]" {
+                format!("{}{}{}=[REDACTED]", &caps[1], &caps[2], &caps[3])
+            } else {
+                caps[0].to_owned()
+            }
+        })
+        .into_owned();
+
+    let changed = text != input;
+    (text, changed)
+}
+
+pub fn scrub_json(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            let auth_type = map
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            for key in api_auth_secret_members(&auth_type) {
+                map.remove(*key);
+            }
+            if map.contains_key("$secret") {
+                map.clear();
+                return;
+            }
+            let sensitive_pair = ["key", "name"].iter().any(|key| {
+                map.get(*key)
+                    .and_then(Value::as_str)
+                    .is_some_and(secret_key)
+            });
+            if sensitive_pair {
+                map.insert("value".into(), json!(""));
+            }
+            let keys: Vec<String> = map.keys().filter(|key| secret_key(key)).cloned().collect();
+            for key in keys {
+                map.remove(&key);
+            }
+            for value in map.values_mut() {
+                scrub_json(value);
+            }
+        }
+        Value::Array(values) => values.iter_mut().for_each(scrub_json),
+        Value::String(text) => *text = scrub_string(text),
+        _ => {}
+    }
+}
+pub fn inert(table: &str, row: &mut ArchiveRow) {
+    inert_with(table, row, |_, _| None);
+}
+
+pub fn inert_with(
+    table: &str,
+    row: &mut ArchiveRow,
+    settle_entity: fn(&str, &str) -> Option<String>,
+) {
+    if table == "users" {
+        row.insert("password_hash".into(), json!(""));
+        row.insert("disabled".into(), json!(1));
+        row.insert("is_root".into(), json!(0));
+    }
+    if matches!(
+        table,
+        "scheduled_tasks"
+            | "mcp_auto_approve_rules"
+            | "personal_agents"
+            | "personal_agent_schedules"
+            | "workflow_triggers"
+            | "swarm_channel_triggers"
+            | "mcp_servers"
+            | "plugins"
+            | "workspace_integrations"
+            | "broker_lag_alerts"
+            | "k8s_monitor_configs"
+    ) && row.contains_key("enabled")
+    {
+        row.insert("enabled".into(), json!(0));
+    }
+    if table == "sessions" {
+        row.insert("status".into(), json!("exited"));
+        row.insert("provider_session_id".into(), Value::Null);
+    }
+    if table == "agent_runtime_sessions" {
+        for col in ["ui_control", "ui_control_json", "native_thread_id"] {
+            if row.contains_key(col) {
+                row.insert(col.into(), Value::Null);
+            }
+        }
+    }
+    if table == "agent_runtime_entities" {
+        let kind = row
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let payload_col = if row.contains_key("payload_json") {
+            Some("payload_json")
+        } else if row.contains_key("payload") {
+            Some("payload")
+        } else {
+            None
+        };
+        if let Some(col) = payload_col {
+            if let Some(Value::String(raw)) = row.get_mut(col) {
+                if let Some(settled) = settle_entity(&kind, raw) {
+                    *raw = settled;
+                }
+            }
+        }
+    }
+    if table == "ide_project_environments" {
+        schema_ide::disable_ide_network_bridge_row(row);
+    }
+    if (table == "goal_loops" && row.get("status") == Some(&json!("running")))
+        || (matches!(table, "swarms" | "swarm_agents")
+            && row.get("status") == Some(&json!("active")))
+    {
+        row.insert("status".into(), json!("paused"));
+    }
+    if matches!(
+        table,
+        "workflow_runs"
+            | "otto_runs"
+            | "swarm_runs"
+            | "scheduled_task_runs"
+            | "personal_agent_runs"
+            | "skill_evals"
+            | "skill_reviews"
+            | "product_analyses"
+            | "product_analysis_agents"
+            | "product_discovery_runs"
+            | "goal_loop_iterations"
+            | "improvement_runs"
+    ) && row.get("status").and_then(Value::as_str).is_some_and(|s| {
+        matches!(
+            s,
+            "pending"
+                | "queued"
+                | "running"
+                | "executing"
+                | "waiting"
+                | "waiting_approval"
+                | "planning"
+                | "evaluating"
+                | "digesting"
+        )
+    }) {
+        row.insert(
+            "status".into(),
+            json!(if matches!(table, "otto_runs" | "improvement_runs") {
+                "failed"
+            } else {
+                "error"
+            }),
+        );
+    }
+    if matches!(table, "mcp_approvals" | "work_approvals") {
+        row.insert("status".into(), json!("expired"));
+    }
+    if table == "api_automation_runs" && row.get("status") == Some(&json!("running")) {
+        row.insert("status".into(), json!("interrupted"));
+        if let Some(Value::String(raw)) = row.get_mut("record_json") {
+            if let Ok(mut record) = serde_json::from_str::<Value>(raw) {
+                record["status"] = json!("interrupted");
+                record["error"] = json!("Imported history; execution was not resumed.");
+                *raw = record.to_string();
+            }
+        }
+    }
+    if table == "vaults" {
+        row.insert("scan_state".into(), json!("idle"));
+        row.insert("last_scan_at".into(), Value::Null);
+    }
+}
+pub fn sanitize(
+    table: &str,
+    spec: &TableSpec,
+    row: &mut ArchiveRow,
+    reconnect: &mut BTreeSet<String>,
+) {
+    sanitize_with(table, spec, row, reconnect, |_, _| None);
+}
+
+pub fn sanitize_with(
+    table: &str,
+    spec: &TableSpec,
+    row: &mut ArchiveRow,
+    reconnect: &mut BTreeSet<String>,
+    settle_entity: fn(&str, &str) -> Option<String>,
+) {
+    let id = row
+        .get("id")
+        .or_else(|| row.get("project_key"))
+        .map(Value::to_string)
+        .unwrap_or_default();
+    let mcp_env_keys: Vec<String> = row
+        .get("secret_env_keys")
+        .and_then(Value::as_str)
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    let mcp_header_keys: Vec<String> = row
+        .get("secret_header_keys")
+        .and_then(Value::as_str)
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    let env_keys: Vec<String> = row
+        .get("secret_keys_json")
+        .and_then(Value::as_str)
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    if row.values().any(has_credentials)
+        || !env_keys.is_empty()
+        || !mcp_env_keys.is_empty()
+        || !mcp_header_keys.is_empty()
+    {
+        reconnect.insert(format!(
+            "{table}/{id}: review and reconnect saved credentials"
+        ));
+    }
+    for column in &spec.columns {
+        if let Some(value) = row.get_mut(&column.name) {
+            if secret_key(&column.name) {
+                if !value.is_null() && value != &json!("") {
+                    reconnect.insert(format!("{table}/{id}: reconnect credentials"));
+                }
+                *value = if column.nullable {
+                    Value::Null
+                } else {
+                    json!("")
+                };
+            } else if let Value::String(text) = value {
+                if matches!(
+                    column.name.as_str(),
+                    "url" | "uri" | "remote_url" | "api_base_url" | "url_match"
+                ) {
+                    *text = scrub_string(text);
+                }
+                if let Ok(mut document) = serde_json::from_str::<Value>(text) {
+                    if column.name == "variables_json" {
+                        if let Some(map) = document.as_object_mut() {
+                            for key in &env_keys {
+                                map.remove(key);
+                            }
+                        }
+                    }
+                    if let Some(map) = document.as_object_mut() {
+                        let secrets = if column.name == "env_json" {
+                            &mcp_env_keys
+                        } else if column.name == "headers_json" {
+                            &mcp_header_keys
+                        } else {
+                            &env_keys[..0]
+                        };
+                        map.retain(|key, _| !secrets.iter().any(|s| s.eq_ignore_ascii_case(key)));
+                    }
+                    // User documents/history remain private, lossless content; only
+                    // configuration/request JSON passes through credential filtering.
+                    if table == "ide_project_environments" && column.name == "env_vars_json" {
+                        if schema_ide::sanitize_ide_project_env_vars(&mut document) {
+                            reconnect.insert(format!(
+                                "{table}/{id}: review and reconnect saved credentials"
+                            ));
+                        }
+                        *text = document.to_string();
+                    } else if matches!(
+                        table,
+                        "settings"
+                            | "workspaces"
+                            | "connections"
+                            | "api_requests"
+                            | "api_environments"
+                            | "mcp_servers"
+                            | "broker_clusters"
+                            | "aws_accounts"
+                            | "k8s_clusters"
+                            | "workspace_integrations"
+                            | "git_accounts"
+                            | "issue_accounts"
+                            | "repos"
+                            | "plugins"
+                            | "workflows"
+                            | "workflow_versions"
+                            | "scheduled_tasks"
+                            | "personal_agents"
+                            | "personal_agent_schedules"
+                            | "swarms"
+                            | "swarm_agents"
+                            | "swarm_channel_triggers"
+                            | "goal_loops"
+                            | "api_automations"
+                    ) {
+                        scrub_json(&mut document);
+                        *text = document.to_string();
+                    }
+                }
+            }
+        }
+    }
+    if matches!(
+        table,
+        "connections"
+            | "api_requests"
+            | "api_environments"
+            | "mcp_servers"
+            | "settings"
+            | "broker_clusters"
+            | "aws_accounts"
+            | "k8s_clusters"
+            | "workspace_integrations"
+            | "git_accounts"
+            | "issue_accounts"
+    ) {
+        for (key, value) in row.iter_mut() {
+            if matches!(
+                key.as_str(),
+                "config"
+                    | "config_json"
+                    | "uri"
+                    | "url"
+                    | "headers_json"
+                    | "auth_json"
+                    | "value"
+                    | "env_json"
+                    | "kubeconfig_yaml"
+                    | "params_json"
+                    | "value_json"
+                    | "api_base_url"
+                    | "remote_url"
+            ) {
+                if let Value::String(text) = value {
+                    if let Ok(mut doc) = serde_json::from_str::<Value>(text) {
+                        scrub_json(&mut doc);
+                        *text = doc.to_string();
+                    } else if let Ok(mut doc) = serde_yaml::from_str::<Value>(text) {
+                        if doc.is_object() || doc.is_array() {
+                            scrub_json(&mut doc);
+                            *text = serde_yaml::to_string(&doc).unwrap_or_default();
+                        } else {
+                            *text = otto_core::redact::redact_text(&scrub_string(text)).value;
+                        }
+                    } else {
+                        *text = otto_core::redact::redact_text(&scrub_string(text)).value;
+                    }
+                }
+            }
+        }
+    }
+    if table == "ide_run_configs" && schema_ide::sanitize_ide_run_config_row(row) {
+        reconnect.insert(format!(
+            "{table}/{id}: review and reconnect saved credentials"
+        ));
+    }
+    inert_with(table, row, settle_entity);
+}
+pub async fn read_rows(conn: &mut SqliteConnection, table: &str) -> Result<Vec<ArchiveRow>> {
+    // Name the stored columns (`PRAGMA table_info`, which leaves generated
+    // ones out) instead of `SELECT *`, which returns generated columns too —
+    // e.g. `sessions.source` (migration 0162) — that `insert_row` can't write
+    // back and that `schema()` doesn't list.
+    let info: Vec<(String, i64)> = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "PRAGMA table_info({})",
+        quoted(table)
+    )))
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_error)?
+    .iter()
+    .map(|r| (quoted(&r.get::<String, _>("name")), r.get::<i64, _>("pk")))
+    .collect();
+    let columns: Vec<&str> = info.iter().map(|(c, _)| c.as_str()).collect();
+    // Deterministic row order (a git snapshot must not churn between runs)
+    // comes from SQL: the primary key first (SQLite walks its index), then
+    // every other stored column as the tiebreak, so a table without a key —
+    // or with NULLs in a legacy non-INTEGER key — still sorts totally. This
+    // replaced an in-memory sort whose comparator re-serialized both rows to
+    // JSON on every comparison (backend-performance-3-03).
+    let mut order: Vec<&(String, i64)> = info.iter().collect();
+    order.sort_by_key(|(_, pk)| if *pk > 0 { *pk } else { i64::MAX });
+    let order: Vec<&str> = order.iter().map(|(c, _)| c.as_str()).collect();
+    let sql = if columns.is_empty() {
+        format!("SELECT * FROM {}", quoted(table))
+    } else {
+        format!(
+            "SELECT {} FROM {} ORDER BY {}",
+            columns.join(","),
+            quoted(table),
+            order.join(",")
+        )
+    };
+    let mut rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).fetch(conn);
+    let mut output = Vec::new();
+    let mut size = 0;
+    // `updated_at` is INTEGER unix seconds (migration 0205).
+    let draft_cutoff = (table == "runtime_composer_drafts")
+        .then(|| (chrono::Utc::now() - chrono::Duration::days(30)).timestamp());
+    while let Some(row) = rows.try_next().await.map_err(db_error)? {
+        let mut values = ArchiveRow::new();
+        for column in row.columns() {
+            let raw = row.try_get_raw(column.ordinal()).map_err(db_error)?;
+            let value = if raw.is_null() {
+                Value::Null
+            } else {
+                match raw.type_info().name() {
+                    "INTEGER" => {
+                        json!(row.try_get::<i64, _>(column.ordinal()).map_err(db_error)?)
+                    }
+                    "REAL" => json!(row.try_get::<f64, _>(column.ordinal()).map_err(db_error)?),
+                    "BLOB" => {
+                        json!({"$base64":STANDARD.encode(row.try_get::<Vec<u8>,_>(column.ordinal()).map_err(db_error)?)})
+                    }
+                    _ => json!(row
+                        .try_get::<String, _>(column.ordinal())
+                        .map_err(db_error)?),
+                }
+            };
+            values.insert(column.name().into(), value);
+        }
+        if let Some(cutoff) = draft_cutoff {
+            if values
+                .get("updated_at")
+                .and_then(Value::as_i64)
+                .is_some_and(|ts| ts < cutoff)
+            {
+                continue;
+            }
+        }
+        size += serde_json::to_vec(&values)
+            .map_err(|e| invalid(&e.to_string()))?
+            .len();
+        if size > MAX_ARCHIVE_BYTES {
+            return Err(invalid("Saved records exceed archive size limit"));
+        }
+        output.push(values);
+    }
+    Ok(output)
+}
+pub async fn insert_row(
+    conn: &mut SqliteConnection,
+    table: &str,
+    spec: &TableSpec,
+    row: &ArchiveRow,
+) -> Result<bool> {
+    if row.is_empty()
+        || row
+            .keys()
+            .any(|k| !spec.columns.iter().any(|c| &c.name == k))
+    {
+        return Err(invalid(&format!("Unknown or empty columns in {table}")));
+    }
+    let mut query =
+        sqlx::QueryBuilder::<sqlx::Sqlite>::new(format!("INSERT INTO {} (", quoted(table)));
+    query
+        .push(row.keys().map(|k| quoted(k)).collect::<Vec<_>>().join(","))
+        .push(") VALUES (");
+    let mut values = query.separated(",");
+    for value in row.values() {
+        match value {
+            Value::Null => {
+                values.push_bind(Option::<String>::None);
+            }
+            Value::String(s) => {
+                values.push_bind(s);
+            }
+            Value::Bool(b) => {
+                values.push_bind(i64::from(*b));
+            }
+            Value::Number(n) => {
+                if let Some(n) = n.as_i64() {
+                    values.push_bind(n);
+                } else if let Some(n) = n.as_f64() {
+                    values.push_bind(n);
+                } else {
+                    return Err(invalid("Unsupported archive number"));
+                }
+            }
+            Value::Object(object) if object.len() == 1 && object.contains_key("$base64") => {
+                let bytes = STANDARD
+                    .decode(
+                        object["$base64"]
+                            .as_str()
+                            .ok_or_else(|| invalid("Invalid database blob"))?,
+                    )
+                    .map_err(|_| invalid("Invalid database blob"))?;
+                values.push_bind(bytes);
+            }
+            _ => return Err(invalid("Archive rows must contain scalar database values")),
+        }
+    }
+    query.push(") ON CONFLICT DO NOTHING");
+    Ok(query
+        .build()
+        .execute(conn)
+        .await
+        .map_err(db_error)?
+        .rows_affected()
+        == 1)
+}

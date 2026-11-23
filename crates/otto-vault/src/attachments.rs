@@ -172,18 +172,18 @@ pub(crate) struct AttachmentStyle {
 /// note the attachment is for (its folder anchors `./` settings).
 pub(crate) fn style_for(root: &str, note: Option<&str>) -> AttachmentStyle {
     let obsidian = Path::new(root).join(".obsidian");
-    let settings: Option<serde_json::Value> = std::fs::symlink_metadata(&obsidian)
+    let is_obsidian = std::fs::symlink_metadata(&obsidian)
         .ok()
-        .filter(|m| m.is_dir())
-        .and_then(|_| {
-            let app = obsidian.join("app.json");
-            let meta = std::fs::symlink_metadata(&app).ok()?;
-            if !meta.is_file() || meta.len() > 256 * 1024 {
-                return None;
-            }
-            serde_json::from_slice(&std::fs::read(app).ok()?).ok()
-        });
-    let is_obsidian = obsidian.is_dir();
+        .is_some_and(|m| m.is_dir());
+    let settings: Option<serde_json::Value> = if is_obsidian {
+        let app = obsidian.join("app.json");
+        std::fs::symlink_metadata(&app)
+            .ok()
+            .filter(|m| m.is_file() && m.len() <= 256 * 1024)
+            .and_then(|_| serde_json::from_slice(&std::fs::read(app).ok()?).ok())
+    } else {
+        None
+    };
     let configured = settings
         .as_ref()
         .and_then(|s| s.get("attachmentFolderPath"))
@@ -327,13 +327,17 @@ impl VaultEngine {
         let state = self.index_state(id);
         state.ensure(self.store(), id).await?;
         let publication = state.publication.lock().await;
-        let (parent, _) = Self::text_parent(&root, &probe)?;
+        let root_for_write = root.clone();
+        let probe_for_write = probe.clone();
         let bytes = bytes.to_vec();
+        let size = bytes.len() as i64;
         let (stem2, ext2) = (stem.clone(), ext.clone());
-        let saved =
-            tokio::task::spawn_blocking(move || create_unique(&parent, &stem2, &ext2, &bytes))
-                .await
-                .map_err(|e| Error::Internal(format!("attachment write: {e}")))??;
+        let saved = tokio::task::spawn_blocking(move || {
+            let (parent, _) = Self::text_parent(&root_for_write, &probe_for_write)?;
+            create_unique(&parent, &stem2, &ext2, &bytes)
+        })
+        .await
+        .map_err(|e| Error::Internal(format!("attachment write: {e}")))??;
         let rel = if style.folder.is_empty() {
             saved
         } else {
@@ -343,9 +347,6 @@ impl VaultEngine {
         drop(publication);
         // Index it now so the embed resolves on the next render.
         self.rescan_after_mutation(id).await;
-        let size = std::fs::metadata(Path::new(&root).join(&rel))
-            .map(|m| m.len() as i64)
-            .unwrap_or_default();
         Ok(VaultAttachment {
             embed: embed_for(&rel, style.markdown_links),
             path: rel,
@@ -559,5 +560,22 @@ mod tests {
             .await
             .is_err());
         assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn symlinked_obsidian_dir_is_not_treated_as_obsidian_vault() {
+        let vault = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(
+            outside.path().join("app.json"),
+            r#"{"attachmentFolderPath":"custom"}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(outside.path(), vault.path().join(".obsidian")).unwrap();
+        let style = style_for(vault.path().to_str().unwrap(), None);
+        assert_eq!(
+            style.folder, "attachments",
+            "symlinked .obsidian must fall back to non-Obsidian default folder"
+        );
     }
 }

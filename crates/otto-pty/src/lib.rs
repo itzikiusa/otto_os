@@ -13,7 +13,7 @@ pub mod holder;
 pub use holder::{AdoptError, HolderConfig, HolderInfo, HolderLauncher};
 
 use std::io::Read;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -171,6 +171,22 @@ impl ChildState {
         drop(exited);
         true
     }
+
+    /// Send `sig` directly to `pid` (not a process group) only while the child
+    /// has not yet exited/been reaped.
+    #[cfg(unix)]
+    pub(crate) fn signal_pid(&self, pid: u32, sig: i32) -> bool {
+        let exited = lock_unpoisoned(&self.exited);
+        if *exited {
+            return false;
+        }
+        // SAFETY: `pid` is our not-yet-reaped child while `exited` is false.
+        unsafe {
+            libc::kill(pid as i32, sig);
+        }
+        drop(exited);
+        true
+    }
 }
 
 #[cfg(unix)]
@@ -209,7 +225,7 @@ const SIGKILL: i32 = 9;
 /// pid cannot be recycled until the caller reaps it). Returns on any error too
 /// — the caller then reaps as before.
 #[cfg(unix)]
-fn wait_exit_unreaped(pid: u32) {
+pub(crate) fn wait_exit_unreaped(pid: u32) {
     loop {
         // SAFETY: `siginfo_t` is plain data; all-zero is a valid out-param.
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
@@ -231,7 +247,7 @@ fn wait_exit_unreaped(pid: u32) {
 }
 
 #[cfg(not(unix))]
-fn wait_exit_unreaped(_pid: u32) {}
+pub(crate) fn wait_exit_unreaped(_pid: u32) {}
 
 /// Who is waiting for a queued input write to reach the PTY.
 enum WriteDone {
@@ -327,6 +343,8 @@ pub struct PtyHandle {
     /// thread saw EOF; held: the holder reported the exit). Lets a holder send
     /// its final output before the exit notice.
     reader_done: watch::Receiver<bool>,
+    /// Ensures `kill()` spawns at most one SIGTERM/SIGKILL escalation thread.
+    kill_escalated: AtomicBool,
 }
 
 /// The output side shared by both backends: the screen emulator, the raw
@@ -634,6 +652,7 @@ impl PtyHandle {
             spawn_seq: next_spawn_seq(),
             child_pid,
             reader_done,
+            kill_escalated: AtomicBool::new(false),
         })
     }
 
@@ -683,6 +702,7 @@ impl PtyHandle {
             spawn_seq: next_spawn_seq(),
             child_pid,
             reader_done,
+            kill_escalated: AtomicBool::new(false),
         }
     }
 
@@ -952,14 +972,16 @@ impl PtyHandle {
         if !self.child_state.signal(pid, fg_pgrp, SIGHUP) {
             return Ok(());
         }
-        let state = Arc::clone(&self.child_state);
-        std::thread::spawn(move || {
-            for sig in [SIGTERM, SIGKILL] {
-                if state.wait_exited(KILL_GRACE) || !state.signal(pid, fg_pgrp, sig) {
-                    return;
+        if !self.kill_escalated.swap(true, Ordering::SeqCst) {
+            let state = Arc::clone(&self.child_state);
+            std::thread::spawn(move || {
+                for sig in [SIGTERM, SIGKILL] {
+                    if state.wait_exited(KILL_GRACE) || !state.signal(pid, fg_pgrp, sig) {
+                        return;
+                    }
                 }
-            }
-        });
+            });
+        }
         Ok(())
     }
 
@@ -1310,6 +1332,17 @@ mod tests {
             write_error(std::io::Error::other("eio")),
             Error::Internal(_)
         ));
+    }
+
+    #[test]
+    fn child_state_never_signals_after_exit() {
+        let state = ChildState::default();
+        state.mark_exited();
+        #[cfg(unix)]
+        assert!(
+            !state.signal_pid(std::process::id(), libc::SIGKILL),
+            "exited child state must never signal a (possibly recycled) pid"
+        );
     }
 
     #[test]

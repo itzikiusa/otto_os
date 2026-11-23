@@ -15,22 +15,19 @@ import {
   attachProjectFolder, canonicalizeLocalProjectPath, canonicalRootKey, createTemplatedFile, detachProjectFolder,
   detectBuildToolFromState, formatRelativeToRoots, loadActiveProjectIdLocal, loadNamedProjectsLocal,
   confirmDiscardOnSwitch, mutatePathBreakpoints, normalizeRootPath, performCloseAllTabs, pushNavigationHistory,
-  restoreWorkspaceTabsOrInitial, revealPathInTree, saveActiveProjectIdLocal, saveBuildToolPrefsLocal, saveLastIdeRoot, loadLastSshTarget,
+  restoreWorkspaceTabsOrInitial, revealPathInTree, saveActiveProjectIdLocal, saveBuildToolPrefsLocal, saveLastIdeRoot, loadLastSshTarget, shouldSkipLocalTargetSwitch,
 } from './shell/ideProjectHelpers';
 import {
   applyFallbackPrefixSuffix, computeFallbackSelection, IdeBufferPerfController, nextTabAccessStamp,
   performAgentEdit, performCloseTab, performOpenFile, performSaveFile, saveWorkspaceOpenTabs,
 } from './store/ideBufferPerf';
 import {
-  computeIdeProjectRoots, fetchIdeWorkspaceTree, IdeCollabState, IdeDebugState, IdeTargetEnvState,
-  normalizePathDiagnostics, performCloseTabBatch, resetTargetLifecycleState, syncAdditionalRootsFromEnvState,
+  computeIdeProjectRoots, fetchIdeWorkspaceTree, loadIdeWorkspaceTree, toggledExpansion, IdeCollabState, IdeDebugState, IdeTargetEnvState,
+  normalizePathDiagnostics, onIdeTargetReset, performCloseTabBatch, resetTargetLifecycleState, syncAdditionalRootsFromEnvState,
   type IdeDebugLaunchMemo, type IdeRunLaunchMemo, type IncomingIdeDiagnostic,
 } from './store/ideStateSlices.svelte';
-import {
-  resolveRepoGoBuildTags,
-  resolveRepoRootForPath,
-  type RepoTestExecutionMode,
-} from './store/ideRepoTestAndBuildTags';
+import { setParkedRunReopener } from './store/ideParkedRuns';
+import { resolveRepoGoBuildTags, resolveRepoRootForPath, type RepoTestExecutionMode } from './store/ideRepoTestAndBuildTags';
 import type * as RepoActionsMod from './store/ideRepoActions';
 import type * as ProjMod from './shell/ideProjectsManager';
 import type * as LspSearchMod from './shell/ideLspAndSearchHelpers';
@@ -221,9 +218,12 @@ class IdeStore {
   private debugSseCtl: AbortController | null = null;
   private collabSseCtl: AbortController | null = null;
   private cursorSendTimer: ReturnType<typeof setTimeout> | null = null;
-  private collabEditTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
+    onIdeTargetReset(() => { if (lspModP) void lspModP.then((m) => m.cancelLspAndSearch()); });
+    setParkedRunReopener((t) => {
+      void (t.project_id && this.namedProjects.some((p) => p.id === t.project_id) ? this.activateProject(t.project_id) : t.kind === 'ssh' && t.connection_id ? this.setSshTarget(t.connection_id, t.root, t.connection_name ?? null) : this.setLocalTarget(t.root, t.workspace_id ?? null));
+    });
     if (typeof window !== 'undefined') {
       window.addEventListener('otto:ide-storage-cleared', () => {
         this.namedProjects = []; this.activeProjectId = null; this.closedTabPaths = []; this.recentPaths = []; this.clearTarget();
@@ -312,7 +312,7 @@ class IdeStore {
   ): Promise<boolean> {
     const clean = normalizeRootPath(root);
     if (!clean) return false;
-    if (opts.projectId === undefined && this.target.kind === 'local' && canonicalRootKey(this.target.root) === canonicalRootKey(clean) && !opts.additionalRoots) return true;
+    if (shouldSkipLocalTargetSwitch(this, clean, opts)) return true;
     if (!opts.discardConfirmed && !(await this.confirmDiscardUnsaved())) return false;
     const matchedProj = opts.projectId !== undefined ? opts.projectId : (this.namedProjects.find((p) => canonicalRootKey(p.primary_root) === canonicalRootKey(clean))?.id ?? null); // `/var` ≡ `/private/var` (I3-21)
     this.activeProjectId = matchedProj;
@@ -386,10 +386,11 @@ class IdeStore {
   flushHistorySnapshot(path?: string): void { this.bufPerf.flushHistorySnapshot(this, path); }
   flushAutoSave(path?: string): Promise<void> { return this.bufPerf.flushDirtyAutoSave(this, path); }
   clearLiveBuffer(path: string): void { this.bufPerf.liveBuffers.delete(this.resolvePath(path)); }
-  loadTree(dirPath?: string): Promise<void> { return fetchIdeWorkspaceTree(this, dirPath, () => void loadProjMod().then((m) => m.probeWorkspaceBuildTool(this))); }
+  loadTree(dirPath?: string): Promise<void> { return loadIdeWorkspaceTree(this, dirPath, () => void loadProjMod().then((m) => m.probeWorkspaceBuildTool(this))); }
+  relistDir(dirPath: string): Promise<void> { return fetchIdeWorkspaceTree(this, dirPath, () => {}, { listingOnly: true }); }
   async toggleDir(dirPath: string): Promise<void> {
     const clean = normalizeRootPath(dirPath); const next = !this.expandedDirs[clean];
-    this.expandedDirs = { ...this.expandedDirs, [clean]: next };
+    this.expandedDirs = toggledExpansion(this.expandedDirs, clean, next);
     if (next) await this.loadTree(clean); // every expand rereads the disk (no fs watcher); the cached listing shows meanwhile
   }
   collapseAllDirs(): void {
@@ -437,9 +438,9 @@ class IdeStore {
       this.sharedBuffers = Object.fromEntries(Object.entries(this.sharedBuffers).filter(([k]) => !set.has(k)));
     }
   }
-  async openFile(rawPath: string, opts: { line?: number; col?: number; preview?: boolean; inSplit?: boolean; reload?: boolean; background?: boolean } = {}): Promise<void> {
+  async openFile(rawPath: string, opts: { line?: number; col?: number; preview?: boolean; inSplit?: boolean; reload?: boolean; background?: boolean; projectScoped?: boolean } = {}): Promise<void> {
     await performOpenFile(this, this.bufPerf, this.isNavigatingHistory, rawPath, opts);
-    saveWorkspaceOpenTabs(this.target.root, this.tabs.map((t) => t.path), this._activePath, this.splitPath);
+    saveWorkspaceOpenTabs(this.target.root, this.tabs, this._activePath, this.splitPath);
     this.syncWorkspacePort();
   }
   pushNavLocation(path: string, line: number, col = 1): void {
@@ -474,7 +475,7 @@ class IdeStore {
     await performCloseTab(this, this.bufPerf, path);
     if (!this.tabs.some((t) => t.path === path)) {
       this.forgetClosedTabs([path]);
-      saveWorkspaceOpenTabs(this.target.root, this.tabs.map((t) => t.path), this._activePath, this.splitPath);
+      saveWorkspaceOpenTabs(this.target.root, this.tabs, this._activePath, this.splitPath);
     }
     this.syncWorkspacePort();
   }
@@ -490,7 +491,7 @@ class IdeStore {
 
   async closeAllTabs(opts?: { force?: boolean }): Promise<void> {
     await performCloseAllTabs(this, this.bufPerf, (paths) => this.forgetClosedTabs(paths), (p) => this.saveFile(p, false, { silent: true }), opts);
-    saveWorkspaceOpenTabs(this.target.root, this.tabs.map((t) => t.path), this._activePath, this.splitPath);
+    saveWorkspaceOpenTabs(this.target.root, this.tabs, this._activePath, this.splitPath);
     this.syncWorkspacePort();
   }
 
@@ -504,8 +505,7 @@ class IdeStore {
     if (!this.bufPerf.recordEdit(this, fullPath, content)) return;
     this.syncWorkspacePort();
     if (this.collabRoom && this.canEditCollab) {
-      if (this.collabEditTimer) clearTimeout(this.collabEditTimer);
-      this.collabEditTimer = setTimeout(() => void this.sendCollabEdit(fullPath, this.getBuffer(fullPath), false), 120);
+      this.bufPerf.scheduleCollabEdit(fullPath, () => void this.sendCollabEdit(fullPath, this.getBuffer(fullPath), false));
     }
   }
 
@@ -552,7 +552,7 @@ class IdeStore {
   }
 
   applyPrefixSuffix(prefix: string, suffix: string): void {
-    if (!prefix && !suffix) return;
+    if ((!prefix && !suffix) || !this.canEditCollab) return;
     if (this.editorHandles.primary) { this.editorHandles.primary.applyPrefixSuffix(prefix, suffix); return; }
     const tab = this.activeTab;
     if (!tab || tab.readOnly) return;
@@ -576,8 +576,8 @@ class IdeStore {
   lspRenameEdits(path: string, line: number, column: number, name: string): Promise<IdeTextEdit[] | null> { return this.editorHandleForPath(path)?.lspRenameEdits?.(line, column, name) ?? Promise.resolve(null); }
   previewRename(newName?: string): Promise<void> { return loadLspMod().then((m) => m.runPreviewRename(this, newName, this.bufPerf)); }
   applyRename(): Promise<boolean> { return loadLspMod().then((m) => m.runApplyRename(this, this.bufPerf)); }
-  formatActiveFile(): Promise<void> { return loadLspMod().then((m) => m.runFormatActiveFile(this, this.bufPerf)); }
-  organizeImportsActiveFile(): Promise<void> { return loadLspMod().then((m) => m.runFormatActiveFile(this, this.bufPerf, { organizeImports: true })); }
+  formatActiveFile(path?: string): Promise<void> { return this.bufPerf.enqueuePathOp((path ? this.resolvePath(path) : this._activePath) ?? '', () => loadLspMod().then((m) => m.runFormatActiveFile(this, this.bufPerf, path ? { path } : {}))); }
+  organizeImportsActiveFile(): Promise<void> { return this.bufPerf.enqueuePathOp(this._activePath ?? '', () => loadLspMod().then((m) => m.runFormatActiveFile(this, this.bufPerf, { organizeImports: true }))); }
   fetchCodeActions(path: string, line: number, column: number): Promise<IdeCodeAction[]> { return loadLspMod().then((m) => m.runFetchCodeActions(this, this.bufPerf, path, line, column)); }
   applyCodeAction(path: string, action: IdeCodeAction | IdeQuickFix): Promise<boolean> { return loadLspMod().then((m) => m.runApplyCodeAction(this, this.bufPerf, path, action)); }
   applyQuickFixEdits(edits: IdeTextEdit[], title?: string): Promise<boolean> { return loadLspMod().then((m) => m.runApplyQuickFixEdits(this, this.bufPerf, edits, title)); }
@@ -613,12 +613,12 @@ class IdeStore {
     return this.startRun(memo);
   }
   async startRun(opts: { configId?: string; adhoc?: Partial<IdeRunConfig>; keepTestcontainers?: boolean; coverage?: boolean; skipProdConfirm?: boolean } = {}): Promise<void> {
+    const k = `${this.target.kind}:${this.target.connection_id ?? ''}:${this.target.root}`;
     const gate = await (await loadRepoActionsMod()).confirmIdeTargetProdLaunch(this.target, this.projectEnv, opts.skipProdConfirm);
-    if (!gate.allowed) return;
+    if (!gate.allowed || `${this.target.kind}:${this.target.connection_id ?? ''}:${this.target.root}` !== k) return;
     if (idePreferences.current.autoSave) await this.flushAutoSave();
     const { poller, sseCtl } = await (await loadDebugEnvMod()).launchIdeRun(this, { ...opts, confirmProdTargets: gate.confirmProdTargets }, this.runPoller, this.runSseCtl);
-    this.runPoller = poller;
-    this.runSseCtl = sseCtl;
+    if (`${this.target.kind}:${this.target.connection_id ?? ''}:${this.target.root}` === k) { this.runPoller = poller; this.runSseCtl = sseCtl; }
   }
   runFromGutter(item: IdeGutterItem, mode: 'run' | 'debug' | 'run_keep_tc'): void {
     void loadDebugEnvMod().then((m) =>
@@ -688,10 +688,12 @@ class IdeStore {
     } catch { /* exited */ }
   }
   async startDebug(opts: { configId?: string; language?: string; skipProdConfirm?: boolean; launch?: IdeDebugLaunchMemo['launch'] } = {}): Promise<void> {
+    const k = `${this.target.kind}:${this.target.connection_id ?? ''}:${this.target.root}`;
     const gate = await (await loadRepoActionsMod()).confirmIdeTargetProdLaunch(this.target, this.projectEnv, opts.skipProdConfirm);
-    if (!gate.allowed || !(await (await loadDebugEnvMod()).guardDebugRelaunch(this, (s) => this.applyDebugSnapshot(s)))) return; // one live session, never an orphan
+    if (!gate.allowed || `${this.target.kind}:${this.target.connection_id ?? ''}:${this.target.root}` !== k || !(await (await loadDebugEnvMod()).guardDebugRelaunch(this, (s) => this.applyDebugSnapshot(s)))) return; // one live session, never an orphan
     if (idePreferences.current.autoSave) await this.flushAutoSave();
-    this.debugSseCtl = await (await loadDebugEnvMod()).launchDebugSession(this, { ...opts, confirmProdTargets: gate.confirmProdTargets }, this.debugSseCtl, (s) => this.applyDebugSnapshot(s), () => this.startDebug(opts));
+    const ctl = await (await loadDebugEnvMod()).launchDebugSession(this, { ...opts, confirmProdTargets: gate.confirmProdTargets }, this.debugSseCtl, (s) => this.applyDebugSnapshot(s), () => this.startDebug(opts));
+    if (`${this.target.kind}:${this.target.connection_id ?? ''}:${this.target.root}` === k) this.debugSseCtl = ctl; else ctl?.abort();
   }
   applyDebugSnapshot(raw: IdeDebugSessionSnapshot): void {
     const apply = (m: typeof DebugEnvMod): void => {
@@ -767,8 +769,8 @@ class IdeStore {
     this.leaveCollabRoom();
     return true;
   }
-  leaveCollabRoom(): void { this.collabSseCtl?.abort(); this.collabSseCtl = null; this.collabState.leave(); }
-  onCollabJoinFailed(errorMsg: string): void { this.collabSseCtl?.abort(); this.collabSseCtl = null; this.collabState.joinFailed(errorMsg); }
+  leaveCollabRoom(): void { this.bufPerf.clearAllCollabEditTimers(); this.collabSseCtl?.abort(); this.collabSseCtl = null; this.collabState.leave(); }
+  onCollabJoinFailed(errorMsg: string): void { this.bufPerf.clearAllCollabEditTimers(); this.collabSseCtl?.abort(); this.collabSseCtl = null; this.collabState.joinFailed(errorMsg); }
   async joinCollabRoom(roomId: string, token: string, displayName = 'Teammate'): Promise<void> {
     this.collabSseCtl = await (await loadCollabMod()).joinCollabSession(this, roomId, token, displayName, this.collabSseCtl);
   }
@@ -787,8 +789,7 @@ class IdeStore {
   disposeStreams(): void {
     this.bufPerf.resetAll(this, { discardDirty: true }); // only after the discard prompt (or a storage wipe)
     if (this.cursorSendTimer) clearTimeout(this.cursorSendTimer);
-    if (this.collabEditTimer) clearTimeout(this.collabEditTimer);
-    this.cursorSendTimer = null; this.collabEditTimer = null;
+    this.cursorSendTimer = null;
     this.runPoller?.stop(); this.runPoller = null; this.runSseCtl?.abort(); this.runSseCtl = null;
     this.jobsPoller?.stop(); this.jobsPoller = null;
     this.debugSseCtl?.abort(); this.debugSseCtl = null; this.debugStreamActive = false; this.collabSseCtl?.abort(); this.collabSseCtl = null;

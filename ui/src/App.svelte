@@ -3,7 +3,7 @@
   // Boot flow: GET /meta → onboarding wizard | login | main shell.
   import Toasts from './lib/components/Toasts.svelte';
   import Announcer from './lib/components/Announcer.svelte';
-  import { announce } from './lib/announce.svelte';
+  import { announce, announceShown } from './lib/announce.svelte';
   // The tray / bar pages are their own chunks (below); the stores they share
   // with the main window stay in this boot chunk, so moving their UI out
   // shrinks first paint without reshuffling what the shell loads.
@@ -44,6 +44,7 @@
   ]> | null = null;
   let barChunk: Promise<typeof import('./modules/desktop/BarHost.svelte')> | null = null;
   let trayChunk: Promise<typeof import('./modules/desktop/TrayPage.svelte')> | null = null;
+  let clipChunk: Promise<typeof import('./modules/clipboard/ClipboardPanel.svelte')> | null = null;
   // The shell resolves together with the page its route shows (each page is
   // its own chunk, shell/pages.svelte.ts), so the first shell paint has its
   // page. `untrack`: the template's `{#await shell()}` must not depend on the
@@ -64,6 +65,7 @@
     ]));
   const barHost = () => (barChunk ??= import('./modules/desktop/BarHost.svelte'));
   const trayPage = () => (trayChunk ??= import('./modules/desktop/TrayPage.svelte'));
+  const clipPanel = () => (clipChunk ??= import('./modules/clipboard/ClipboardPanel.svelte'));
 
   // Capability-token IDE guest link (`#/ide?collab=<roomId>&token=<inviteToken>`):
   // invited teammates have no owner account, so bypass login/onboarding and
@@ -79,7 +81,7 @@
   let ideCollabGuest = $state(initialIdeGuest);
 
   // The main window fetches the shell chunk while /meta is still in flight.
-  if (!['bar', 'tray', 's', 'room', 'room-host', 'pair'].includes(router.module) && !initialIdeGuest) {
+  if (!['bar', 'tray', 'clipboard', 's', 'room', 'room-host', 'pair'].includes(router.module) && !initialIdeGuest) {
     void shell().catch(() => {});
   }
 
@@ -87,8 +89,9 @@
   // reading `router.module` inside the effect re-ran boot() on every sidebar
   // switch, which reset the phase to 'loading' and remounted the whole shell.
   // The phone pairing page (`#/pair`) is pre-auth too: it signs the phone in
-  // itself and reloads into the normal boot once approved.
-  const needsAuth = $derived(router.module !== 'room' && router.module !== 'pair' && !ideCollabGuest);
+  // itself and reloads into the normal boot once approved. The clipboard
+  // history panel never talks to the daemon at all (its privacy boundary).
+  const needsAuth = $derived(!['room', 'pair', 'clipboard'].includes(router.module) && !ideCollabGuest);
   $effect(() => {
     if (needsAuth) untrack(() => void auth.boot());
   });
@@ -158,7 +161,7 @@
       else if (!router.module.startsWith('ide')) ideCollabGuest = false;
     };
     window.addEventListener('hashchange', syncIdeGuest);
-    if (!isTauri || ['bar', 'tray', 's', 'room'].includes(untrack(() => router.module)) || untrack(() => ideCollabGuest)) {
+    if (!isTauri || ['bar', 'tray', 'clipboard', 's', 'room'].includes(untrack(() => router.module)) || untrack(() => ideCollabGuest)) {
       return () => window.removeEventListener('hashchange', syncIdeGuest);
     }
     let disposed = false;
@@ -247,6 +250,9 @@
 {:else if router.module === 'tray'}
   <!-- Desktop shell's menu-bar popover (`otto-tray`); same rules as the bar. -->
   {#await trayPage() then m}<m.default />{:catch}{@render chunkError()}{/await}
+{:else if router.module === 'clipboard'}
+  <!-- Desktop shell's clipboard-history panel (`otto-clipboard`): no sign-in. -->
+  {#await clipPanel() then m}<m.default />{:catch}{@render chunkError()}{/await}
 {:else if auth.phase === 'loading' && isEmbedded}
   <!-- The side-by-side pane boots under its host's loading cover: no second
        "Otto" splash inside the pane. -->
@@ -273,7 +279,7 @@
       <div class="boot-hint mono">{daemonDetail}</div>
     {/if}
     {#if daemonActionError}
-      <div class="boot-hint boot-error" role="alert">{daemonActionError}</div>
+      <div class="boot-hint boot-error" use:announceShown={{ text: daemonActionError, assertive: true }}>{daemonActionError}</div>
     {/if}
     <div class="boot-actions">
       <button class="btn primary" onclick={retryNow} disabled={retrying}>{retrying ? 'Retrying…' : 'Retry now'}</button>
@@ -310,7 +316,7 @@
 {#snippet chunkError()}
   <div class="boot">
     <div class="boot-mark">Otto</div>
-    <div class="boot-sub" role="alert">Otto couldn’t finish loading.</div>
+    <div class="boot-sub" use:announceShown={{ text: 'Otto couldn’t finish loading.', assertive: true }}>Otto couldn’t finish loading.</div>
     <button class="btn primary" onclick={() => location.reload()}>Reload</button>
   </div>
 {/snippet}

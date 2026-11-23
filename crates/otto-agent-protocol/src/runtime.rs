@@ -64,7 +64,7 @@ use crate::driver::{
     item, ChildSignal, DriverEvent, DriverFactory, DriverStep, LaunchContext, StructuredDriver,
 };
 use crate::host::RuntimeHost;
-use crate::process::{signal_group, spawn_child, ChildCommand, ChildMsg};
+use crate::process::{spawn_child, ChildCommand, ChildControl, ChildMsg};
 use crate::ring::{EventRing, RingLimits};
 
 /// T3 Code `THREAD_RESUME_MAX_REPLAY_EVENTS` / `…_ENCODED_BYTES`.
@@ -382,6 +382,7 @@ mod erased {
 pub(super) enum ProcTransport {
     Direct {
         stdin: mpsc::UnboundedSender<String>,
+        control: mpsc::UnboundedSender<ChildControl>,
     },
     Held {
         client: crate::holder::HolderClient,
@@ -405,7 +406,7 @@ pub(super) struct Proc {
 impl Proc {
     fn send_stdin(&self, line: String) {
         match &self.transport {
-            ProcTransport::Direct { stdin } => {
+            ProcTransport::Direct { stdin, .. } => {
                 let _ = stdin.send(line);
             }
             ProcTransport::Held { client, .. } => {
@@ -416,7 +417,9 @@ impl Proc {
 
     fn interrupt_process_group(&self) {
         match &self.transport {
-            ProcTransport::Direct { .. } => signal_group(self.pid, libc::SIGINT),
+            ProcTransport::Direct { control, .. } => {
+                let _ = control.send(ChildControl::Signal(libc::SIGINT));
+            }
             ProcTransport::Held { client, .. } => {
                 client.signal(crate::holder::HolderSignal::Interrupt);
             }
@@ -425,7 +428,9 @@ impl Proc {
 
     fn kill_process_group(&self) {
         match &self.transport {
-            ProcTransport::Direct { .. } => signal_group(self.pid, libc::SIGKILL),
+            ProcTransport::Direct { control, .. } => {
+                let _ = control.send(ChildControl::Signal(libc::SIGKILL));
+            }
             ProcTransport::Held { client, .. } => {
                 client.signal(crate::holder::HolderSignal::Kill);
             }
@@ -472,6 +477,9 @@ pub(super) struct State {
     /// The model before a live switch the agent has not refused (yet): a
     /// refusal rolls back to it (`selection::on_error`).
     pub(super) switch_from: Option<Option<String>>,
+    /// The idle release stopped its process: once that process is gone,
+    /// nothing of the thread stays loaded (T3 Code #39049).
+    released: bool,
 }
 
 impl State {
@@ -755,9 +763,9 @@ impl AgentRuntime {
             if let Some(p) = live.lock().proc.take() {
                 live.proc_ended.notify_waiters();
                 match p.transport {
-                    ProcTransport::Direct { stdin } => {
+                    ProcTransport::Direct { stdin, control } => {
                         drop(stdin);
-                        signal_group(p.pid, libc::SIGTERM);
+                        let _ = control.send(ChildControl::Signal(libc::SIGTERM));
                     }
                     ProcTransport::Held { client, .. } => {
                         held_shutdowns.push(tokio::spawn(async move {
@@ -818,9 +826,9 @@ impl AgentRuntime {
                 if let Some(p) = proc {
                     live.proc_ended.notify_waiters();
                     match p.transport {
-                        ProcTransport::Direct { stdin } => {
+                        ProcTransport::Direct { stdin, control } => {
                             drop(stdin);
-                            signal_group(p.pid, libc::SIGTERM);
+                            let _ = control.send(ChildControl::Signal(libc::SIGTERM));
                         }
                         ProcTransport::Held { client, .. } => {
                             held_shutdowns.push(tokio::spawn(async move {
@@ -1057,6 +1065,7 @@ impl AgentRuntime {
                     secrets: Vec::new(),
                     model_from_provider: false,
                     switch_from: None,
+                    released: false,
                 }),
                 persist: tx,
                 detaching_for_restart: std::sync::atomic::AtomicBool::new(false),
@@ -1197,7 +1206,10 @@ impl AgentRuntime {
                 epoch,
                 request_ids: RequestIds::new(),
                 pid: child.pid,
-                transport: ProcTransport::Direct { stdin: child.stdin },
+                transport: ProcTransport::Direct {
+                    stdin: child.stdin,
+                    control: child.control,
+                },
                 driver,
             });
             st.reserved = st.next_seq + self.inner.config.seq_reserve;
@@ -1787,6 +1799,21 @@ impl AgentRuntime {
             })
             .ok_or_else(|| Error::NotFound("no such image".into()))?;
         let gone = || Error::NotFound("the image is gone".into());
+        let row = self.get(id).await?;
+        let ws_root = self
+            .inner
+            .host
+            .workspace(&row.workspace_id)
+            .await
+            .ok()
+            .map(|w| w.root_path);
+        let path = crate::tool_images::confine_session_image(
+            &path,
+            &row.cwd,
+            ws_root.as_deref(),
+            &self.attachments(id),
+        )
+        .ok_or_else(gone)?;
         let meta = tokio::fs::metadata(&path).await.map_err(|_| gone())?;
         if !meta.is_file() || meta.len() > 25 * 1024 * 1024 {
             return Err(gone());
@@ -2355,7 +2382,7 @@ fn interrupt_turn(inner: &Arc<Inner>, live: &Arc<Live>) -> bool {
         return true;
     };
     let step = proc.driver.interrupt();
-    let (epoch, pid) = (proc.epoch, proc.pid);
+    let (epoch, _) = (proc.epoch, proc.pid);
     apply_step_opts(inner, live, &mut st, step, true, true);
     drop(st);
     let grace = inner.config.interrupt_grace;
@@ -2369,8 +2396,6 @@ fn interrupt_turn(inner: &Arc<Inner>, live: &Arc<Live>) -> bool {
             tracing::warn!("runtime turn ignored interrupt; killing its process group");
             if let Some(p) = st.proc.as_ref() {
                 p.kill_process_group();
-            } else {
-                signal_group(pid, libc::SIGKILL);
             }
         }
     });
@@ -2771,19 +2796,14 @@ fn resume_refused_for_good(st: &State) -> bool {
     })
 }
 
-/// Close stdin (EOF), then SIGTERM and SIGKILL the group after `grace`.
+/// Close stdin (EOF), then SIGTERM and SIGKILL the group after `grace` via the
+/// child's exclusive reaper task (so a reaped/recycled PID is never signalled).
 fn stop_child(p: Proc, grace: Duration) {
-    let pid = p.pid;
     match p.transport {
-        ProcTransport::Direct { stdin } => {
+        ProcTransport::Direct { stdin, control } => {
             drop(stdin);
             drop(p.driver);
-            tokio::spawn(async move {
-                tokio::time::sleep(grace).await;
-                signal_group(pid, libc::SIGTERM);
-                tokio::time::sleep(grace).await;
-                signal_group(pid, libc::SIGKILL);
-            });
+            let _ = control.send(ChildControl::Stop(grace));
         }
         ProcTransport::Held { client, .. } => {
             drop(p.driver);
@@ -3748,10 +3768,11 @@ pub(super) fn is_evictable_dead(st: &State) -> bool {
         return true;
     }
     st.proj.queue.is_empty()
-        && st.proj.session.as_ref().is_some_and(|p| {
-            p.status == ProviderSessionStatus::Error
-                || (p.status == ProviderSessionStatus::Stopped && p.last_error.is_some())
-        })
+        && (st.released
+            || st.proj.session.as_ref().is_some_and(|p| {
+                p.status == ProviderSessionStatus::Error
+                    || (p.status == ProviderSessionStatus::Stopped && p.last_error.is_some())
+            }))
 }
 
 pub(super) fn try_evict_dead(inner: &Inner, id: &Id) {

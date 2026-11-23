@@ -1,0 +1,21 @@
+#!/bin/sh
+# forge-gameready INPUT.glb --output OUT.glb [--tris 15000] [--quads] [--texture 2048] [--lods 3] [--collision] [--pack DIR]
+# Game-ready stage of Otto Forge (contract v1.1): runs forge/gameready/gameready.py in headless Blender.
+# stderr: progress as JSON lines, last line {"error":...} on failure. Blender's own log goes to stdout.
+HERE="$(cd "$(dirname "$0")/.." && pwd)/forge/gameready"
+BLENDER="${BLENDER:-/Applications/Blender.app/Contents/MacOS/Blender}"
+err() { printf '{"error":"%s"}\n' "$1" >&2; exit "${2:-1}"; }
+# CoACD + xatlas (both MIT) are installed once into a gitignored --target dir that Blender's bundled
+# Python 3.13 reads (Blender 5.2; change --python-version with Blender's Python).
+[ -d "$HERE/.venv/coacd" ] && [ -f "$HERE/.venv/xatlas-0.0.11.dist-info/METADATA" ] \
+  || uv pip install -q --no-cache --no-deps --python-version 3.13 --python-platform aarch64-apple-darwin \
+       --target "$HERE/.venv" coacd==1.0.14 xatlas==0.0.11 >&2 \
+  || err "could not install coacd==1.0.14 and xatlas==0.0.11 with uv"
+FORGE_PROGRESS_FD=3 "$BLENDER" -b --factory-startup --python-exit-code 4 --python "$HERE/gameready.py" -- "$@" 3>&2 2>&1 &
+pid=$!
+trap 'kill -KILL $pid 2>/dev/null; err "cancelled" 130' TERM INT
+wait $pid 2>/dev/null   # 2>/dev/null: no shell "Trace/BPT trap" line between the JSON lines
+rc=$?
+[ $rc -eq 3 ] && exit 1            # the script already wrote its {"error"} line
+[ $rc -ne 0 ] && err "blender exited with code $rc (log on stdout)"
+exit 0

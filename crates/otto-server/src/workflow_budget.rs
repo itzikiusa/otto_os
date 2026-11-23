@@ -17,14 +17,14 @@ impl ActiveBudget {
     }
 
     pub(super) fn expired(&self) -> bool {
-        let state = self.0.lock().unwrap();
+        let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         state.paused.is_none() && Instant::now() >= state.deadline
     }
 
     pub(super) async fn exhausted(&self) {
         loop {
             let delay = {
-                let state = self.0.lock().unwrap();
+                let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
                 if state.paused.is_some() {
                     Duration::from_millis(100)
                 } else {
@@ -42,7 +42,7 @@ impl ActiveBudget {
     }
 
     pub(super) fn pause(&self) -> ApprovalPause<'_> {
-        self.0.lock().unwrap().paused = Some(Instant::now());
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).paused = Some(Instant::now());
         ApprovalPause(self)
     }
 }
@@ -51,7 +51,7 @@ impl ActiveBudget {
 pub(super) struct ApprovalPause<'a>(&'a ActiveBudget);
 impl Drop for ApprovalPause<'_> {
     fn drop(&mut self) {
-        let mut state = self.0 .0.lock().unwrap();
+        let mut state = self.0 .0.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(start) = state.paused.take() {
             state.deadline += start.elapsed();
         }

@@ -9,6 +9,7 @@
   import type { Component } from 'svelte';
   import { toastError } from '../lib/toastError';
   import { announce } from '../lib/announce.svelte';
+  import LoadState from '../lib/components/LoadState.svelte';
   import { SvelteMap, SvelteSet } from 'svelte/reactivity';
   import { ui as uiStore } from '../lib/stores/ui.svelte';
   import { RIGHT_MIN, RIGHT_MAX } from '../lib/stores/ui.svelte';
@@ -344,10 +345,7 @@
   {#if Panel}
     <Panel {...props} />
   {:else if failedPanels.has(key)}
-    <div class="rp-fail" role="alert">
-      <span>Couldn’t load this panel.</span>
-      <button class="btn small" onclick={() => void loadPanel(key)}>Retry</button>
-    </div>
+    <LoadState what="this panel" variant="compact" error="Couldn’t load this panel." empty onretry={() => void loadPanel(key)} />
   {:else}
     <div class="rp-loading"><Skeleton rows={4} /></div>
   {/if}
@@ -528,16 +526,6 @@
     flex: 1;
     width: 100%;
     min-width: 0;
-  }
-  .rp-fail {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    padding: 24px 12px;
-    color: var(--text-dim);
-    font-size: var(--fs-s);
   }
   .rp-loading {
     padding: 12px;

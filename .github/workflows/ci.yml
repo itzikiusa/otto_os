@@ -125,6 +125,9 @@ jobs:
       - name: Rust LOC ratchet
         run: python3 scripts/loc-ratchet.py
 
+      - name: Repo static guards (Rust + control bytes)
+        run: python3 scripts/repo-guards.py --rust
+
       - name: Enable fast lld linker
         run: |
           if command -v ld.lld >/dev/null 2>&1; then
@@ -447,6 +450,11 @@ jobs:
           python3 -B -m unittest discover -s scripts -p 'test_ci_apt_install.py'
           python3 -B -m unittest discover -s scripts -p 'test_ci_cargo_cache.py'
           python3 -B -m unittest discover -s scripts -p 'test_ci_route.py'
+          python3 -B -m unittest discover -s scripts -p 'test_repo_guards.py'
+
+      - name: Repo static guards (UI + control bytes)
+        working-directory: .
+        run: python3 scripts/repo-guards.py --ui
 
       - name: Install Node
         uses: actions/setup-node@v7.1.0

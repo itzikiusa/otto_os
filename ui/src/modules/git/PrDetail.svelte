@@ -21,6 +21,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import { toastError } from '../../lib/toastError';
   import { git } from '../../lib/stores/git.svelte';
+  import { router } from '../../lib/router.svelte';
+  import { buildBrowserRoute, detectPreviewUrls } from './gitQuickJump';
   import { confirmOutward } from '../../lib/confirmOutward';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { copyWithToast } from '../../lib/clipboard';
@@ -60,6 +62,8 @@
   import { headMoved, headMovedLabel, newCommitCount } from './pr-head-follow';
   import { pickLabel, pickTarget, rememberReviewedHead, reviewedHead, sinceReviewItems, sinceReviewPick } from './pr-since-review';
   import { withComment } from './pr-comments';
+  import { isCompactPrHeaderTab, prCloseLabels, type PrTabId } from './gitUiHelpers';
+  import { createPrAiOverlay } from './prAiOverlay.svelte';
 
   interface Props {
     repoId: string;
@@ -71,7 +75,7 @@
   let disposed = false;
   onDestroy(() => { disposed = true; });
 
-  type Tab = 'summary' | 'timeline' | 'code' | 'review';
+  type Tab = PrTabId;
   const TABS: { id: Tab; label: string }[] = [
     { id: 'summary', label: 'Summary' },
     { id: 'timeline', label: 'Timeline' },
@@ -90,8 +94,10 @@
     }
   }
   let activeTab: Tab = $state(untrack(savedTab));
+  let compactInfoOpen = $state(false);
   function selectTab(t: Tab): void {
     activeTab = t;
+    compactInfoOpen = false;
     try { localStorage.setItem(tabKey(), t); } catch { /* not persisted */ }
     // A short screen (a phone in landscape) is filled by the PR header: bring the code into view.
     if (t === 'code' && matchMedia('(max-height: 500px)').matches) requestAnimationFrame(() => document.querySelector('.prd-code:not([hidden])')?.scrollIntoView({ block: 'start' }));
@@ -105,6 +111,20 @@
   let diff = $state.raw<DiffResp | null>(null);
   let commits = $state.raw<PrCommit[] | null>(null);
   let checks = $state.raw<PrChecksResp | null>(null);
+  const previewUrls = $derived(detectPreviewUrls(checks));
+  function openPreview(e: MouseEvent): void {
+    if (previewUrls.length === 1) {
+      const route = buildBrowserRoute(previewUrls[0].url, 'live');
+      if (route) router.go(route);
+      return;
+    }
+    ctxMenu.show(e, previewUrls.map((p) => ({
+      label: p.name,
+      hint: new URL(p.url).hostname,
+      icon: 'globe',
+      action: () => { const route = buildBrowserRoute(p.url, 'live'); if (route) router.go(route); },
+    })));
+  }
   const loadPrFile = $derived(prDiffFileLoader(repoId, number));
   let diffAbort: AbortController | null = null;
   onDestroy(() => diffAbort?.abort());
@@ -290,6 +310,8 @@
     const m = u.match(/[:/]([^/:]+\/[^/]+?)(?:\.git)?\/?$/);
     return m?.[1] ?? repoLabel;
   });
+  const closeCopy = $derived(prCloseLabels(prRepo?.provider));
+  const compactHead = $derived(!editMode && isCompactPrHeaderTab(activeTab));
   const declineWhat = $derived(
     prRepo?.provider === 'bitbucket'
       ? `Bitbucket declines the PR: it is closed without merging and can’t be reopened.`
@@ -415,14 +437,16 @@
   // Edit / delete / react on comments, for every CommentThread below (pr-comment-ctx).
   providePrCommentActions(createCommentOps({
     repoId: () => repoId, number: () => number, get: () => pr, set: patchNow, where: prWhere,
+    postTarget: () => `PR #${number} on ${repoLabel}`,
     reload: () => load(repoId, number, true, true), alive: (rid, num) => !disposed && rid === repoId && num === number,
   }));
+  const aiOverlay = createPrAiOverlay({ repoId: () => repoId, prNumber: () => number, where: prWhere, onPosted: () => { invalidatePr(repoId, number); void load(repoId, number, true, true); } });
 
   async function action(kind: 'approve' | 'decline'): Promise<void> {
     const approve = kind === 'approve';
     const ok = await confirmOutward({
-      verb: approve ? 'Approve PR' : 'Decline PR',
-      title: approve ? `Approve PR #${number}?` : `Decline PR #${number}?`,
+      verb: approve ? 'Approve PR' : closeCopy.verb,
+      title: approve ? `Approve PR #${number}?` : closeCopy.title(number),
       where: `${repoLabel} on ${providerName} · PR #${number}${pr ? ` “${pr.title}”` : ''}`,
       what: approve ? 'Your approval, posted under your git account.' : declineWhat,
       who: `${pr?.author ? `${pr.author} (the author)` : 'The author'} and the PR’s reviewers are notified.`,
@@ -435,11 +459,11 @@
       await api.post(`/repos/${repoId}/prs/${number}/${kind}`);
       if (approve) { rememberReviewedHead(repoId, number, diffHead); reviewReconciler.note(repoId, number, 'approved'); }
       if (disposed) return;
-      toasts.success(`PR ${approve ? 'approved' : 'declined'}`, `#${number}`);
+      toasts.success(`PR ${approve ? 'approved' : closeCopy.toastDone}`, `#${number}`);
       if (pr) patchNow(approve ? withMyReview(pr, 'approved', isMe, myName) : { ...pr, state: 'declined' });
       await load(repoId, number, true, true);
     } catch (e) {
-      toastError(approve ? 'Couldn’t approve the PR' : 'Couldn’t decline the PR', e);
+      toastError(approve ? 'Couldn’t approve the PR' : closeCopy.toastFail, e);
     } finally {
       if (!disposed) busy = '';
     }
@@ -528,7 +552,7 @@
       { label: 'Copy PR number', icon: 'copy', action: () => void copyWithToast(`#${pr?.number}`, 'PR number') },
     ];
     if (open) {
-      items.push({ separator: true }, { label: prRepo?.provider === 'bitbucket' ? 'Decline pull request…' : 'Close pull request…', icon: 'x', danger: true, action: () => void action('decline') });
+      items.push({ separator: true }, { label: closeCopy.menu, icon: 'x', danger: true, action: () => void action('decline') });
     }
     ctxMenu.show(e, items);
   }
@@ -604,7 +628,7 @@
       <LoadState what="this pull request" variant="page" rows={5} {loading} error={prError} empty onretry={() => void load(repoId, number)} />
     </div>
   {:else if pr}
-    <header class="prd-head">
+    <header class="prd-head" class:compact={compactHead}>
       <div class="prd-row prd-row-top">
         <button class="prd-repo link" onclick={() => openExternal(pr?.url)} title="Open on {providerName}">
           <span class="prd-slug">{repoSlug}</span>
@@ -616,14 +640,28 @@
           {pr.draft && pr.state === 'open' ? 'Draft' : (PR_STATE_LABEL[pr.state] ?? pr.state)}
         </span>
         {#if pr.mergeable === false}<span class="prd-state st-declined"><Icon name="warning" size={12} /> Conflicts</span>{/if}
-        <span class="grow"></span>
+        {#if compactHead}
+          <h2 class="prd-title-inline" dir="auto" title={pr.title || `Pull request #${pr.number}`}>{pr.title || `Pull request #${pr.number}`}</h2>
+        {:else}
+          <span class="grow"></span>
+        {/if}
         <PrHeadPill pending={!!pending} {headNote} onapply={() => void applyPending()} ondismiss={() => (headNote = null)} />
         <div class="prd-actions">
+          {#if compactHead}
+            <button class="btn small ghost icon-only" aria-expanded={compactInfoOpen} aria-label="Pull request details" title={compactInfoOpen ? 'Hide PR details' : 'Show PR details, branches and checks'} onclick={() => (compactInfoOpen = !compactInfoOpen)}>
+              <Icon name="info" size={13} />
+            </button>
+          {/if}
           {#if pr.state === 'open'}
             <PrReviewButtons review={mine} {busy} onapprove={() => void action('approve')} onrequestchanges={openRequestChanges}
               onwithdraw={(k) => void withdraw(k)} canWithdrawChanges={prRepo?.provider !== 'gitlab'} />
             <button class="btn small primary" disabled={busy !== ''} onclick={() => openMerge()} title="Merge this pull request (asks first)">
               <Icon name="merge" size={12} /> Merge
+            </button>
+          {/if}
+          {#if previewUrls.length > 0}
+            <button class="btn small" aria-haspopup={previewUrls.length > 1 ? 'menu' : undefined} onclick={openPreview} title={previewUrls.length === 1 ? `Open ${previewUrls[0].url} in Otto Browser` : `Open one of ${previewUrls.length} preview deployments in Otto Browser`}>
+              <Icon name="globe" size={12} /> Preview in Browser
             </button>
           {/if}
           <button class="btn small" aria-haspopup="menu" disabled={busy === 'checkout'} onclick={checkoutMenu} title="Check out this pull request locally">
@@ -637,42 +675,53 @@
 
       {#if editMode}
         <input dir="auto" class="input prd-title-input" aria-label="Pull request title" bind:value={editTitle} disabled={busy === 'edit'} use:focusFirstField />
-      {:else}
+      {:else if !compactHead}
         <h2 class="prd-title" dir="auto">{pr.title || `Pull request #${pr.number}`}</h2>
       {/if}
 
-      <div class="prd-row prd-meta">
-        <PrAvatar name={pr.author} />
-        <span class="prd-author">{pr.author}</span>
-        <span class="dim" title={new Date(pr.updated_at).toLocaleString()}>
-          {pr.created_at ? `opened ${rel(pr.created_at)} · ` : ''}updated {rel(pr.updated_at)}
-        </span>
-        <button class="prd-cmd mono" onclick={() => void copyWithToast(checkoutCmd, 'Checkout command')} title="Copy: {checkoutCmd}">{checkoutCmd}</button>
-      </div>
+      {#if !compactHead || compactInfoOpen}
+        <div class="prd-row prd-meta">
+          <PrAvatar name={pr.author} />
+          <span class="prd-author">{pr.author}</span>
+          <span class="dim" title={new Date(pr.updated_at).toLocaleString()}>
+            {pr.created_at ? `opened ${rel(pr.created_at)} · ` : ''}updated {rel(pr.updated_at)}
+          </span>
+          <button class="prd-cmd mono" onclick={() => void copyWithToast(checkoutCmd, 'Checkout command')} title="Copy: {checkoutCmd}">{checkoutCmd}</button>
+        </div>
+        <div class="prd-row prd-branches">
+          <span class="mono dim prd-branch" title="{pr.source_branch} → {pr.target_branch}">
+            {pr.target_branch} <span class="dir-arrow" aria-label="from">←</span> {pr.source_branch}
+          </span>
+          <span class="grow"></span>
+          {#if stats}
+            <span class="prd-stats" title="Files changed, lines added and deleted">
+              <Icon name="file" size={12} /> {plural(stats.files, 'file')}
+              <span class="add">+{stats.add.toLocaleString()}</span>
+              <span class="del">−{stats.del.toLocaleString()}</span>
+            </span>
+          {/if}
+        </div>
+        <PrMergeChecks {pr} compact />
+      {/if}
 
-      <div class="prd-row prd-branches">
-        <span class="mono dim prd-branch" title="{pr.source_branch} → {pr.target_branch}">
-          {pr.target_branch} <span class="dir-arrow" aria-label="from">←</span> {pr.source_branch}
-        </span>
-        <span class="grow"></span>
-        {#if stats}
-          <span class="prd-stats" title="Files changed, lines added and deleted">
+      <div class="prd-row prd-tabs-row">
+        <div class="segmented prd-tabs" role="tablist" aria-label="Pull request views" tabindex="-1" onkeydown={onTabKey}>
+          {#each TABS as t (t.id)}
+            <button role="tab" aria-label={t.label} aria-selected={activeTab === t.id} tabindex={activeTab === t.id ? 0 : -1}
+              class:active={activeTab === t.id} onclick={() => selectTab(t.id)}>
+              {t.label}
+              {#if t.id === 'summary' && generalComments.length > 0}<span class="prd-tab-count" aria-hidden="true">{generalComments.length}</span>{/if}
+            </button>
+          {/each}
+        </div>
+        {#if compactHead && !compactInfoOpen && stats}
+          <span class="grow"></span>
+          <span class="prd-stats prd-stats-compact" title="{pr.source_branch} → {pr.target_branch}">
             <Icon name="file" size={12} /> {plural(stats.files, 'file')}
             <span class="add">+{stats.add.toLocaleString()}</span>
             <span class="del">−{stats.del.toLocaleString()}</span>
           </span>
         {/if}
-      </div>
-
-      <PrMergeChecks {pr} compact />
-      <div class="segmented prd-tabs" role="tablist" aria-label="Pull request views" tabindex="-1" onkeydown={onTabKey}>
-        {#each TABS as t (t.id)}
-          <button role="tab" aria-label={t.label} aria-selected={activeTab === t.id} tabindex={activeTab === t.id ? 0 : -1}
-            class:active={activeTab === t.id} onclick={() => selectTab(t.id)}>
-            {t.label}
-            {#if t.id === 'summary' && generalComments.length > 0}<span class="prd-tab-count" aria-hidden="true">{generalComments.length}</span>{/if}
-          </button>
-        {/each}
       </div>
     </header>
 
@@ -692,7 +741,7 @@
               </div>
             {:else}
               <div class="md-body">
-                <!-- renderPrMarkdown (lib/md renderMarkdown) escapes input before transforming -->
+                <!-- renderPrMarkdown (lib/md renderMarkdownGfm) sanitizes output via allowlist -->
                 {@html renderPrMarkdown(pr.description_md || '_No description._')}
               </div>
               <button class="btn small ghost edit-btn" aria-label="Edit the title and description" onclick={startEdit} title="Edit the title and description on {providerName}"><Icon name="edit" size={12} /> Edit</button>
@@ -703,7 +752,7 @@
             <section class="prd-review-bar">
               <span class="grow"></span>
               <button class="btn small ghost danger-text" data-testid="prd-decline" disabled={busy !== ''} title="Close PR #{number} without merging (asks first)" onclick={() => action('decline')}>
-                {busy === 'decline' ? 'Declining…' : 'Decline…'}
+                {busy === 'decline' ? closeCopy.busy : closeCopy.button}
               </button>
             </section>
           {/if}
@@ -751,6 +800,7 @@
               toolbarLead={commitPicker}
               stateKey={`${repoId}#${number}`}
               viewedStorageKey={prFilesKey(repoId, number)}
+              aiOverlay={aiOverlay.data}
             />
           {/if}
         </section>
@@ -796,87 +846,38 @@
 {/if}
 
 <style>
-  .prd {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    min-height: 0;
-    min-width: 0;
-  }
+  .prd { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; }
   .prd-pad { padding: 16px; }
-  .prd-head {
-    flex: none;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding: 12px 16px 0;
-    border-block-end: 1px solid var(--separator);
-  }
-  .prd-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-  }
+  .prd-head { flex: none; display: flex; flex-direction: column; gap: 6px; padding: 12px 16px 0; border-block-end: 1px solid var(--separator); }
+  .prd-head.compact { gap: 4px; padding: 6px 16px; }
+  .prd-head.compact .prd-tabs { margin-block: 0; }
+  .prd-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .prd-row-top { flex-wrap: wrap; row-gap: 6px; } /* actions wrap, never crush repo · #n · state */
-  .prd-repo {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    min-width: min(14ch, 100%);
-    overflow: hidden;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
+  .prd-repo { display: inline-flex; align-items: center; gap: 4px; min-width: min(14ch, 100%); overflow: hidden; font-size: var(--fs-s); color: var(--text-dim); }
   .prd-slug { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .prd-num { color: var(--success); font-variant-numeric: tabular-nums; }
-  .prd-state {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 1px 8px;
-    border-radius: 999px;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    white-space: nowrap;
-  }
+  .prd-state { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; font-size: var(--fs-xs); font-weight: 600; white-space: nowrap; }
   .st-open { color: var(--success); background: var(--success-soft); }
   .st-merged { color: var(--accent-text); background: var(--accent-soft); }
   .st-declined { color: var(--danger); background: var(--danger-soft); }
   .st-draft { color: var(--text-dim); background: var(--surface-2); }
   .prd-actions { display: inline-flex; align-items: center; gap: 6px; flex: none; margin-inline-start: auto; }
   .icon-only { padding-inline: 6px; }
-  .prd-title {
-    margin: 2px 0 0;
-    font-size: var(--fs-xl);
-    font-weight: 600;
-    line-height: 1.25;
-    overflow-wrap: anywhere;
-  }
+  .prd-title { margin: 2px 0 0; font-size: var(--fs-xl); font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
+  .prd-title-inline { margin: 0; flex: 1 1 160px; min-width: 0; font-size: var(--fs-m); font-weight: 600; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .prd-title-input { width: 100%; font-size: var(--fs-l); height: 32px; }
   .prd-meta { font-size: var(--fs-s); }
   .prd-author { font-weight: 550; white-space: nowrap; }
   .prd-meta .dim { white-space: nowrap; }
-  .prd-cmd {
-    min-width: 0;
-    flex: 1 1 auto;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    text-align: start;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    background: none;
-    border: none;
-    padding: 0;
-    cursor: copy;
-  }
+  .prd-cmd { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: start; font-size: var(--fs-xs); color: var(--text-dim); background: none; border: none; padding: 0; cursor: copy; }
   .prd-cmd:hover { color: var(--text); }
   .prd-branches { font-size: var(--fs-s); }
   .prd-branch { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .prd-stats { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--text-dim); }
+  .prd-stats-compact { font-size: var(--fs-xs); }
   .add { color: var(--success); }
   .del { color: var(--danger); }
+  .prd-tabs-row { flex-wrap: wrap; }
   .prd-tabs { align-self: flex-start; margin-block: 6px 10px; }
   .prd-tab-count { margin-inline-start: 4px; font-size: var(--fs-xs); color: var(--text-dim); }
 
@@ -922,14 +923,7 @@
   .prd-compose-foot { justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
   .prd-compose-foot .hint { flex: 1 1 220px; min-width: 0; font-size: var(--fs-xs); }
 
-  .link {
-    background: none;
-    border: none;
-    padding: 0;
-    color: var(--accent-text);
-    cursor: pointer;
-    font: inherit;
-  }
+  .link { background: none; border: none; padding: 0; color: var(--accent-text); cursor: pointer; font: inherit; }
   .link:hover { text-decoration: underline; }
   .prd-repo.link { color: var(--text-dim); }
   .dir-arrow { display: inline-block; }

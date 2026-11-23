@@ -80,9 +80,11 @@ impl NetworkProfilesRepo {
         self.validate_connection(workspace, &input).await?;
         let id = new_id();
         let now = fmt(Utc::now());
+        let endpoints_json = serde_json::to_string(&input.endpoints)
+            .map_err(|e| Error::Internal(format!("encode network profile endpoints: {e}")))?;
         sqlx::query("INSERT INTO network_profiles(id,workspace_id,name,ssh_connection_id,endpoints_json,archived,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)")
             .bind(&id).bind(workspace).bind(input.name.trim()).bind(input.ssh_connection_id)
-            .bind(serde_json::to_string(&input.endpoints).unwrap()).bind(input.archived).bind(user).bind(&now).bind(&now)
+            .bind(endpoints_json).bind(input.archived).bind(user).bind(&now).bind(&now)
             .execute(&self.pool).await.map_err(dberr("create network profile"))?;
         self.get(&id).await
     }
@@ -95,8 +97,10 @@ impl NetworkProfilesRepo {
         let previous = self.get(id).await?;
         self.validate_connection(&previous.workspace_id, &input)
             .await?;
+        let endpoints_json = serde_json::to_string(&input.endpoints)
+            .map_err(|e| Error::Internal(format!("encode network profile endpoints: {e}")))?;
         let changed=sqlx::query("UPDATE network_profiles SET name=?,ssh_connection_id=?,endpoints_json=?,archived=?,version=version+1,updated_at=? WHERE id=? AND version=?")
-            .bind(input.name.trim()).bind(input.ssh_connection_id).bind(serde_json::to_string(&input.endpoints).unwrap())
+            .bind(input.name.trim()).bind(input.ssh_connection_id).bind(endpoints_json)
             .bind(input.archived).bind(fmt(Utc::now())).bind(id).bind(version).execute(&self.pool).await.map_err(dberr("update network profile"))?;
         if changed.rows_affected() == 0 {
             return Err(Error::Conflict(

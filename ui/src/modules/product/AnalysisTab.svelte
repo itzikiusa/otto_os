@@ -1,7 +1,6 @@
 <script lang="ts">
   // Analysis tab — multi-provider per-lens config, summarizer select, live polling.
   import { rel } from '../../lib/stores/now.svelte';
-  import { announceShown } from '../../lib/announce.svelte';
   import type { Poller } from '../../lib/poll';
   import { liveQuery } from '../../lib/live';
   import { untrack } from 'svelte';
@@ -550,8 +549,7 @@
       {#if loadingHistory}
         <span class="spinner" role="img" aria-label="Loading past runs" title="Loading past runs"></span>
       {:else if historyError}
-        <span class="dim-sm hist-error" title={historyError} use:announceShown={{ text: `Couldn’t load past runs. ${historyError}`, assertive: true }}><Icon name="warning" size={12} /> Couldn’t load past runs</span>
-        <button class="btn small ghost" onclick={() => void loadHistory()}>Retry</button>
+        <LoadState what="past runs" variant="compact" error={historyError} empty onretry={() => void loadHistory()} />
       {:else if historyLoaded && product.analyses.length === 0}
         <span class="dim-sm">No runs yet — configure the lenses above and run the first analysis.</span>
       {/if}
@@ -628,9 +626,7 @@
                     disabled={isRetrying}
                     onclick={() => retryAgent(currentAnalysis!.id, agent.id, agent.name || agent.skill)}
                     title="Re-run this agent"
-                  >
-                    {isRetrying ? 'Retrying…' : 'Retry'}
-                  </button>
+                  >{isRetrying ? 'Retrying…' : 'Retry'}</button><!-- ui-guards: allow — re-runs a single agent turn, not a list load -->
                 {/if}
                 {#if agent.status === 'running' || agent.status === 'waiting'}
                   <button
@@ -692,9 +688,7 @@
                       disabled={retryingAgents.has(agent.id)}
                       onclick={() => retryAgent(currentAnalysis!.id, agent.id, agent.name || agent.skill)}
                       title="Re-run this agent"
-                    >
-                      {retryingAgents.has(agent.id) ? 'Retrying…' : 'Retry'}
-                    </button>
+                    >{retryingAgents.has(agent.id) ? 'Retrying…' : 'Retry'}</button><!-- ui-guards: allow — re-runs a single agent turn, not a list load -->
                   {/if}
                   <span class="rp-status-pill" data-status="done"><StatusBadge status={anStatus('done')} /></span>
                 </div>
@@ -866,9 +860,7 @@
                     disabled={retryingAgents.has(agent.id)}
                     onclick={() => retryAgent(currentAnalysis!.id, agent.id, agent.name || agent.skill)}
                     title="Re-run this agent"
-                  >
-                    {retryingAgents.has(agent.id) ? 'Retrying…' : 'Retry'}
-                  </button>
+                  >{retryingAgents.has(agent.id) ? 'Retrying…' : 'Retry'}</button><!-- ui-guards: allow — re-runs a single agent turn, not a list load -->
                 {/if}
                 <span class="rp-status-pill" data-status="error"><StatusBadge status={anStatus('error')} /></span>
               </div>
@@ -1059,12 +1051,6 @@
     font-size: var(--fs-s);
     padding: 2px 8px;
     height: 26px;
-  }
-  .hist-error {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    color: var(--danger);
   }
 
   /* ── History row ──────────────────────────────────────────────── */

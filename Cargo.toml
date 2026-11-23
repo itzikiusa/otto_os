@@ -48,6 +48,9 @@ members = [
     "crates/otto-rooms",
     "crates/otto-phone",
     "crates/otto-ide",
+    "crates/otto-simulators",
+    "crates/otto-containers",
+    "crates/otto-media",
 ]
 # Custom plugins are out-of-process sidecars installed at RUNTIME under
 # ~/otto-plugins (not workspace members, not compiled into the app). See
@@ -70,6 +73,7 @@ otto-sessions = { path = "crates/otto-sessions" }
 otto-connections = { path = "crates/otto-connections" }
 otto-aws = { path = "crates/otto-aws" }
 otto-k8s = { path = "crates/otto-k8s" }
+otto-containers = { path = "crates/otto-containers" }
 otto-dbviewer = { path = "crates/otto-dbviewer" }
 otto-apiclient = { path = "crates/otto-apiclient" }
 otto-orchestrator = { path = "crates/otto-orchestrator" }
@@ -105,6 +109,8 @@ otto-transcript = { path = "crates/otto-transcript" }
 otto-workflows = { path = "crates/otto-workflows" }
 otto-rooms = { path = "crates/otto-rooms" }
 otto-ide = { path = "crates/otto-ide" }
+otto-simulators = { path = "crates/otto-simulators" }
+otto-media = { path = "crates/otto-media" }
 
 # Tree-sitter repo map (otto-context). A coherent grammar set pinned to one
 # tree-sitter ABI; `ignore` walks the repo honoring .gitignore.

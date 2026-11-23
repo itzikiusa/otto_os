@@ -22,6 +22,7 @@
     gitPullRepo,
     gitPushRepo,
   } from './ideGitQuickMenu';
+  import { buildMultiAgentReviewRoute } from './ideGitReviewRoute';
 
   let refreshTick = $state(0);
   let busyRefresh = $state(false);
@@ -85,6 +86,32 @@
       ws.select(repo.workspace_id);
     }
     router.go('git');
+  }
+
+  async function runMultiAgentReview(): Promise<void> {
+    if (ide.target.kind !== 'local') {
+      toasts.info('Multi-agent review runs on local Git repositories — open a local repo to review changes.');
+      return;
+    }
+    if (!git.allReposLoaded) await git.initializeOpenTabs();
+    const targetPath = activeRepo?.path || ideGit.activeRoot?.path || ide.target.root;
+    const dest = buildMultiAgentReviewRoute(git.allRepos, targetPath);
+    if (!dest.registered || !dest.repoId) {
+      toasts.info('This repository isn’t registered in Git yet — add it there to run a multi-agent review.');
+      router.go('git');
+      return;
+    }
+    const matchedRepo = git.allRepos.find((r) => r.id === dest.repoId);
+    if (
+      matchedRepo?.workspace_id &&
+      matchedRepo.workspace_id !== SCRATCH_WORKSPACE_ID &&
+      ws.workspaces.some((w) => w.id === matchedRepo.workspace_id) &&
+      ws.currentId !== matchedRepo.workspace_id
+    ) {
+      ws.select(matchedRepo.workspace_id);
+    }
+    git.openRepoTab(dest.repoId, 'review');
+    router.go(dest.route);
   }
 
   /** The panel's one ⋯: remote actions and the jump to the full Git module. */
@@ -218,6 +245,19 @@
 
     <span class="grow"></span>
 
+    {#if ide.target.kind === 'local' && activeRepo}
+      <button
+        type="button"
+        class="btn small ig-review-btn"
+        title="Open this repository in Git Review to run a multi-agent review"
+        onclick={() => void runMultiAgentReview()}
+        data-testid="ide-git-run-review-btn"
+      >
+        <Icon name="sparkle" size={12} />
+        <span>Run Multi-Agent Review</span>
+      </button>
+    {/if}
+
     <button
       type="button"
       class="ig-act"
@@ -336,5 +376,6 @@
   }
   .ig-act:hover:not(:disabled) { background: var(--hover); color: var(--text); }
   .ig-act:disabled { opacity: var(--disabled-opacity); cursor: default; }
+  .ig-review-btn { block-size: 22px; min-block-size: 22px; padding-block: 0; flex-shrink: 0; white-space: nowrap; }
   .ig-body { display: flex; flex-direction: column; flex: 1; min-block-size: 0; min-inline-size: 0; overflow: hidden; }
 </style>

@@ -15,7 +15,7 @@
   //              rendered through the sanitized GFM renderer
   //   Edit     — the multi-file editor (SkillEditor)
   //   Evals / Usage — SkillActivity
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { toastError } from '../../lib/toastError';
   import { loadErrorText } from '../../lib/loadError';
   import Tabs from '../../lib/components/Tabs.svelte';
@@ -32,6 +32,7 @@
   import DiffView from '../../lib/components/DiffView.svelte';
   import SkillEditor from './SkillEditor.svelte';
   import SkillActivity from './SkillActivity.svelte';
+  import SyncProvidersModal from './SyncProvidersModal.svelte';
   import { metaList, parseFrontmatter, sourceLabel, type SkillGroup, type VariantSource } from './skillGroups';
   import { deleteQuestion, installedNote, noteKeptCopies, noteUserOwned, replaceQuestion } from './bundledActions';
 
@@ -86,6 +87,8 @@
   const variant = $derived(group.variants.find((v) => v.source === source) ?? group.variants[0]);
   const isBundled = $derived(variant.source === 'bundled');
   const hasLibrary = $derived(group.variants.some((v) => v.source === 'library'));
+  const driftedProviders = $derived(group.driftedSources.filter((s) => s !== 'bundled' && s !== 'library'));
+  let syncOpen = $state(false);
   const bundled = $derived(group.variants.find((v) => v.source === 'bundled'));
 
   // ---- Load the selected copy’s SKILL.md + file list ----------------------
@@ -243,21 +246,28 @@
       busy = false;
     }
   }
+  let driftEl = $state<HTMLDivElement | null>(null);
+  function closeCompare(): void {
+    const src = comparing;
+    comparing = null;
+    void tick().then(() => {
+      const btn = (src ? driftEl?.querySelector<HTMLElement>(`button[data-compare="${CSS.escape(src)}"]`) : null) ?? driftEl?.querySelector<HTMLElement>('button');
+      btn?.focus({ preventScroll: true });
+    });
+  }
   async function remove(): Promise<void> {
-    const name = group.name;
-    const owner = selectionKey;
-    const generation = loadGeneration;
+    if (busy) return;
+    const name = group.name, owner = selectionKey, generation = loadGeneration;
     if (!(await confirmer.ask(...deleteQuestion(group.name)))) return;
+    if (busy || disposed || owner !== selectionKey || generation !== loadGeneration) return;
+    busy = true;
     try {
-      if (disposed || owner !== selectionKey || generation !== loadGeneration) return;
       const r = await skillLabApi.remove(name);
       noteKeptCopies(r?.kept_copies);
       if (disposed || owner !== selectionKey || generation !== loadGeneration) return;
       toasts.success('Skill deleted', group.name);
       ondeleted();
-    } catch (e) {
-      toastError(`Couldn’t delete ${group.name}`, e);
-    }
+    } catch (e) { toastError(`Couldn’t delete ${group.name}`, e); } finally { busy = false; }
   }
   function more(e: MouseEvent): void {
     const items: MenuItem[] = [
@@ -340,7 +350,7 @@
       {/if}
     </div>
     {#if group.drift.length > 0}
-      <div class="drift" role="note">
+      <div class="drift" role="note" bind:this={driftEl}>
         <Icon name="warning" size={14} />
         <ul>
           {#each group.drift as note, i (i)}
@@ -348,11 +358,14 @@
             <li>
               {note}
               {#if s}
-                <button class="btn small ghost" aria-expanded={comparing === s} onclick={() => compare(s)}>{comparing === s ? 'Hide diff' : `Compare with ${sourceLabel(s === 'bundled' ? 'library' : group.reference)}`}</button>
+                <button class="btn small ghost" data-compare={s} aria-expanded={comparing === s} onclick={() => compare(s)}>{comparing === s ? 'Hide diff' : `Compare with ${sourceLabel(s === 'bundled' ? 'library' : group.reference)}`}</button>
               {/if}
             </li>
           {/each}
         </ul>
+        {#if hasLibrary && driftedProviders.length > 0}
+          <button type="button" class="btn small" data-testid="sync-providers-btn" onclick={() => (syncOpen = true)}><Icon name="refresh" size={12} /> Sync to all providers…</button>
+        {/if}
       </div>
     {/if}
     <!-- activate="click": leaving Edit can be refused (unsaved changes). -->
@@ -366,7 +379,7 @@
       <section class="compare">
         <div class="compare-head">
           <span class="section-title">{comparing === 'bundled' ? 'Library → Bundled' : `${sourceLabel(group.reference)} → ${sourceLabel(comparing)}`}</span>
-          <button class="icon-btn" onclick={() => (comparing = null)} aria-label="Close diff" title="Close diff"><Icon name="x" size={14} /></button>
+          <button class="icon-btn" onclick={closeCompare} aria-label="Close diff" title="Close diff"><Icon name="x" size={14} /></button>
         </div>
         {#if compareError}
           <p class="compare-err">{compareError}</p>
@@ -452,6 +465,7 @@
         }}
         oninstall={install}
         oncopytolibrary={hasLibrary ? undefined : copyToLibrary}
+        {onevaluate}
         ondirty={setDirty}
       />
     {:else}
@@ -459,6 +473,10 @@
     {/if}
   </div>
 </div>
+
+{#if syncOpen && driftedProviders.length > 0}
+  <SyncProvidersModal name={group.name} providers={driftedProviders} onclose={() => (syncOpen = false)} onsynced={onchanged} />
+{/if}
 
 <style>
   .detail {
@@ -769,30 +787,7 @@
   .skill-md :global(a) {
     color: var(--accent-text);
   }
-  .skill-md :global(ul),
-  .skill-md :global(ol) {
-    padding-inline-start: 0;
-    padding-inline-start: 22px;
-  }
-  @container skilldetail (max-width: 760px) {
-    .overview {
-      grid-template-columns: minmax(0, 1fr);
-    }
-    .meta {
-      order: 0;
-      position: static;
-    }
-  }
-  @media (max-width: 640px) {
-    .d-head {
-      padding: 12px 14px 0;
-    }
-    .d-body {
-      padding: 12px 14px 24px;
-    }
-    .variant {
-      min-height: var(--hit-min);
-      padding-inline: 10px;
-    }
-  }
+  .skill-md :global(ul), .skill-md :global(ol) { padding-inline-start: 22px; }
+  @container skilldetail (max-width: 760px) { .overview { grid-template-columns: minmax(0, 1fr); } .meta { order: 0; position: static; } }
+  @media (max-width: 640px) { .d-head { padding: 12px 14px 0; } .d-body { padding: 12px 14px 24px; } .variant { min-height: var(--hit-min); padding-inline: 10px; } }
 </style>

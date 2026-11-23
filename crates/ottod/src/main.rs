@@ -432,9 +432,12 @@ async fn run(cfg: Config) -> Result<(), String> {
             ctx.agent_runtime.shutdown_for_restart(),
         )
         .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), ctx.containers.shutdown())
+            .await;
         let telemetry = ctx.telemetry.clone();
         teardown(
             &ctx.manager,
+            &ctx.plugins,
             &ctx.browser,
             &ctx.ide,
             telemetry.as_deref(),
@@ -460,6 +463,7 @@ async fn run(cfg: Config) -> Result<(), String> {
     // the teardown.
     let pool = ctx.pool.clone();
     let manager = Arc::clone(&ctx.manager);
+    let plugins = Arc::clone(&ctx.plugins);
     let usage = Arc::clone(&ctx.usage);
     let telemetry = ctx.telemetry.clone();
     // Shutdown stops the remote live browser's Chromium processes.
@@ -468,6 +472,8 @@ async fn run(cfg: Config) -> Result<(), String> {
     let ide = Arc::clone(&ctx.ide);
     // …and the structured agent runtime (detached into runtime-holders across restart).
     let agent_runtime = ctx.agent_runtime.clone();
+    // …and Otto-managed embedded container runtimes (kiri daemon).
+    let containers = Arc::clone(&ctx.containers);
     let (api_extras, root_extras) = module_routers(&ctx);
     #[cfg(feature = "embed-ui")]
     let assets: Option<otto_server::spa::AssetLoader> = Some(ui_assets::load);
@@ -520,8 +526,15 @@ async fn run(cfg: Config) -> Result<(), String> {
     {
         tracing::warn!("agent runtime restart detach exceeded 2 s — continuing teardown");
     }
+    if tokio::time::timeout(std::time::Duration::from_secs(3), containers.shutdown())
+        .await
+        .is_err()
+    {
+        tracing::warn!("managed container runtime shutdown exceeded 3 s — continuing teardown");
+    }
     teardown(
         &manager,
+        &plugins,
         &browser_handle,
         &ide,
         telemetry.as_deref(),
@@ -780,6 +793,7 @@ async fn serve_loopback(
 /// neither push the stop past launchd's SIGKILL nor cost the flush after it.
 async fn teardown(
     manager: &otto_sessions::SessionManager,
+    plugins: &otto_server::plugins::PluginManager,
     browser: &otto_server::routes::browser::BrowserEngineHandle,
     ide: &otto_server::otto_ide::IdeEngine,
     telemetry: Option<&otto_telemetry::TelemetryService>,
@@ -794,6 +808,15 @@ async fn teardown(
             reserve,
         )
     };
+    if tokio::time::timeout(
+        slot(Duration::from_secs(2), CLICKHOUSE_RESERVE),
+        plugins.stop_all(),
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!("plugin sidecar shutdown exceeded its slot");
+    }
     let sessions_slot = slot(Duration::from_secs(12), CLICKHOUSE_RESERVE);
     let (killed, kept) =
         match tokio::time::timeout(sessions_slot, manager.shutdown_for_restart()).await {
@@ -1067,6 +1090,18 @@ async fn load_or_make_tls_config(
     let key_path = tls_dir.join("key.pem");
 
     if !cert_path.exists() || !key_path.exists() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&tls_dir)
+                .map_err(|e| format!("create {}: {e}", tls_dir.display()))?;
+            std::fs::set_permissions(&tls_dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| format!("chmod {}: {e}", tls_dir.display()))?;
+        }
+        #[cfg(not(unix))]
         std::fs::create_dir_all(&tls_dir)
             .map_err(|e| format!("create {}: {e}", tls_dir.display()))?;
         // Self-signed cert valid for loopback + LAN hostnames. The listener is
@@ -1082,14 +1117,8 @@ async fn load_or_make_tls_config(
         let key_pem = cert.signing_key.serialize_pem();
         std::fs::write(&cert_path, &cert_pem)
             .map_err(|e| format!("write {}: {e}", cert_path.display()))?;
-        std::fs::write(&key_path, &key_pem)
-            .map_err(|e| format!("write {}: {e}", key_path.display()))?;
-        // Lock the private key down to the owner.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
-        }
+        // Create key.pem directly with mode 0600 (no 0644 TOCTOU window).
+        write_private_key_0600(&key_path, key_pem.as_bytes())?;
         tracing::info!(
             "network TLS: generated self-signed cert at {} (fingerprint {})",
             cert_path.display(),
@@ -1105,6 +1134,33 @@ async fn load_or_make_tls_config(
     RustlsConfig::from_pem_file(&cert_path, &key_path)
         .await
         .map_err(|e| format!("load TLS cert/key: {e}"))
+}
+
+/// Write a TLS private key directly with mode `0600` (no default-umask
+/// creation window) and propagate permission errors instead of ignoring them.
+fn write_private_key_0600(key_path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts
+        .open(key_path)
+        .map_err(|e| format!("open {}: {e}", key_path.display()))?;
+    f.write_all(bytes)
+        .map_err(|e| format!("write {}: {e}", key_path.display()))?;
+    f.sync_all()
+        .map_err(|e| format!("sync {}: {e}", key_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("chmod {}: {e}", key_path.display()))?;
+    }
+    Ok(())
 }
 
 /// SHA-256 fingerprint of a DER cert, formatted as colon-separated hex.
@@ -1281,5 +1337,21 @@ mod shutdown_budget_tests {
         let late = t0 + s(40);
         let d = teardown_deadline(late, Some(t0));
         assert_eq!(d.saturating_duration_since(late), Duration::ZERO);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn write_private_key_0600_creates_owner_only_key_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("otto-tls-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let key_path = dir.join("key.pem");
+        write_private_key_0600(&key_path, b"PRIVATE-KEY-TEST").unwrap();
+        assert_eq!(std::fs::read(&key_path).unwrap(), b"PRIVATE-KEY-TEST");
+        let mode = std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

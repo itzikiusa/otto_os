@@ -198,6 +198,7 @@ impl ResolvedConfig {
         if let Some(map) = cache_params.as_object_mut() {
             map.remove("__read_only_execution");
             map.remove("__mysql_local_infile_authorized");
+            map.remove("__mongosh_authorized");
         }
         let raw = format!(
             "{engine}|{host}|{port}|{user}|pw{password_len}|{database}|\

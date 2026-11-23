@@ -9,6 +9,7 @@
   import { rel } from '../../lib/stores/now.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
 
   let {mode}: {mode: 'trash' | 'history'} = $props();
   let trash = $state<VaultTrashEntry[]>([]);
@@ -115,8 +116,13 @@
 <section class="recovery" aria-label={mode === 'trash' ? 'Vault trash' : 'Vault edit history'}>
   <header><h2>{mode === 'trash' ? 'Trash' : 'Edit history'}</h2><button class="btn small" disabled={loading} onclick={() => vault.current && void load(vault.current.id, vault.historyPath)}><Icon name="refresh" size={12} /> Refresh</button></header>
   {#if error}
-    <div role="alert" class="error"><span>Couldn’t load {mode === 'trash' ? 'the trash' : 'the edit history'}: {error}</span>
-      <button class="btn small" disabled={loading} onclick={() => vault.current && void load(vault.current.id, vault.historyPath)}>Retry</button></div>
+    <LoadState
+      what={mode === 'trash' ? 'the trash' : 'the edit history'}
+      variant="compact"
+      {error}
+      empty={mode === 'trash' ? trash.length === 0 : visibleRevisions.length === 0}
+      onretry={() => vault.current && void load(vault.current.id, vault.historyPath)}
+    />
   {/if}
   {#if mode === 'trash'}
     <p>Restore to the original path or enter a new destination. Existing files are never replaced.</p>
@@ -172,7 +178,6 @@
   /* Many "Load older" pages: off-screen rows skip layout and paint. */
   nav .rev { content-visibility: auto; contain-intrinsic-size: auto 52px; }
   nav .rev.active { border-color: var(--accent); background: var(--accent-soft); }
-  .error { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0; padding: 8px 12px; border-radius: var(--radius-s); background: var(--danger-soft); color: var(--text); font-size: var(--fs-s); overflow-wrap: anywhere; }
   .revision-detail { min-width: 0; overflow: auto; } .actions { margin-bottom: 12px; }
   pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 500px; overflow: auto; font-size: var(--fs-s); }
   @media (max-width: 640px) { .history-layout { grid-template-columns: minmax(0, 1fr); } nav { max-height: 240px; overflow: auto; } }

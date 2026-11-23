@@ -2772,12 +2772,13 @@ async fn promote_skill(
         .await
         .map_err(|e| {
             if matches!(e, Error::NotFound(_)) {
-                return ApiError(Error::Internal(format!(
+                return ApiError(Error::internal_public(format!(
                     "skill '{name}' was written to the library, but its evaluation no longer exists; inspect the library skill before starting another evaluation"
                 )));
             }
-            ApiError(Error::Internal(format!(
-                "skill '{name}' was written to the library, but promotion metadata could not be saved; retry the same promotion to finish: {e}"
+            tracing::error!(eval_id = %eval_id, skill = %name, "skill promotion metadata write failed: {e}");
+            ApiError(Error::internal_public(format!(
+                "skill '{name}' was written to the library, but promotion metadata could not be saved; retry the same promotion to finish"
             )))
         })?;
     ctx.context_library

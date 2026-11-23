@@ -4,6 +4,7 @@
 // the outcome; the learning page and the lobby rail share them.
 
 import { ApiError } from '../../../lib/api/client';
+import { loadErrorText } from '../../../lib/loadError';
 import { confirmer } from '../../../lib/confirm.svelte';
 import { toasts } from '../../../lib/toast.svelte';
 import type { DesignLearnedEdit, DesignLearnedRule } from '../../../lib/api/types';
@@ -13,7 +14,7 @@ import { editHeadline } from './model';
 function why(e: unknown): string {
   if (e instanceof ApiError && e.status === 403) return 'Deciding on rules needs Self-improvement edit access in this workspace.';
   if (e instanceof ApiError && e.status === 409) return 'The rules file changed since this was proposed. Otto re-proposes it against the current file on the next pass.';
-  return e instanceof Error ? e.message : String(e);
+  return loadErrorText(e);
 }
 
 const quote = (s: string) => (s.length > 160 ? `${s.slice(0, 159)}…` : s);

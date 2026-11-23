@@ -11,6 +11,7 @@ import type {
 } from '../../api/types';
 import { isSecretRef } from '../../api/types';
 import type { TestResult } from '../../api/scripts';
+import { newId } from '../../id';
 
 /** Request transport: classic HTTP, server-sent events, WebSocket, or gRPC. */
 export type ApiRequestKind = 'http' | 'sse' | 'websocket' | 'grpc';
@@ -80,7 +81,7 @@ export const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'O
 
 export function blankDraft(): ApiDraft {
   return {
-    tabId: crypto.randomUUID(),
+    tabId: newId(),
     requestId: null,
     name: '',
     kind: 'http',
@@ -266,7 +267,7 @@ export function sanitizeDraft(raw: unknown): ApiDraft | null {
   return {
     ...blankDraft(),
     ...d,
-    tabId: typeof d.tabId === 'string' ? d.tabId : crypto.randomUUID(),
+    tabId: typeof d.tabId === 'string' ? d.tabId : newId(),
     requestId: typeof d.requestId === 'string' ? d.requestId : null,
     name: str(d.name, ''),
     kind: DRAFT_KINDS.includes(d.kind as ApiRequestKind) ? (d.kind as ApiRequestKind) : 'http',

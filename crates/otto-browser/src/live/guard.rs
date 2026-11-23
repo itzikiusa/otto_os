@@ -13,6 +13,9 @@ use serde_json::Value;
 pub const VERDICT_TTL: Duration = Duration::from_secs(60);
 const VERDICT_CAP: usize = 1024;
 
+/// Maximum characters included in a redacted `body_preview` on approval cards.
+pub const MAX_BODY_PREVIEW_CHARS: usize = 512;
+
 /// A `Fetch.requestPaused` event, reduced to what the guard needs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Paused {
@@ -22,6 +25,8 @@ pub struct Paused {
     /// `None` when the engine omitted it (treated as a document — fail closed).
     pub resource_type: Option<String>,
     pub frame_id: Option<String>,
+    /// Optional raw request body (`request.postData`) for preview on held SPA mutations.
+    pub post_data: Option<String>,
 }
 
 impl Paused {
@@ -46,6 +51,10 @@ impl Paused {
                 .get("frameId")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            post_data: params
+                .pointer("/request/postData")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         })
     }
 
@@ -53,6 +62,118 @@ impl Paused {
         self.resource_type
             .as_deref()
             .is_none_or(|t| t == "Document")
+    }
+
+    pub fn is_spa_request(&self) -> bool {
+        matches!(self.resource_type.as_deref(), Some("Fetch" | "XHR"))
+    }
+}
+
+/// True when `url` targets a known analytics, telemetry, or RUM beacon host/path
+/// that should not interrupt an agent with SPA mutation approval prompts.
+pub fn is_beacon_or_analytics_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+    const BEACON_HOST_SUFFIXES: &[&str] = &[
+        "google-analytics.com",
+        "analytics.google.com",
+        "doubleclick.net",
+        "googletagmanager.com",
+        "segment.io",
+        "segment.com",
+        "sentry.io",
+        "datadoghq.com",
+        "datadoghq.eu",
+        "amplitude.com",
+        "mixpanel.com",
+        "posthog.com",
+        "plausible.io",
+        "fullstory.com",
+        "hotjar.com",
+        "intercom.io",
+        "clarity.ms",
+        "newrelic.com",
+        "nr-data.net",
+        "bugsnag.com",
+        "rollbar.com",
+        "heapanalytics.com",
+    ];
+    if BEACON_HOST_SUFFIXES
+        .iter()
+        .any(|sfx| host == *sfx || host.ends_with(&format!(".{sfx}")))
+    {
+        return true;
+    }
+    let path = parsed.path().to_ascii_lowercase();
+    const BEACON_PATH_MARKERS: &[&str] = &[
+        "/beacon",
+        "/telemetry",
+        "/analytics",
+        "/collect",
+        "/rum",
+        "/cdn-cgi/rum",
+        "/_vercel/insights",
+        "/j/collect",
+        "/g/collect",
+    ];
+    BEACON_PATH_MARKERS
+        .iter()
+        .any(|m| path == *m || path.starts_with(&format!("{m}/")) || path.ends_with(m))
+}
+
+/// Redact non-JSON request bodies (form-encoded, truncated JSON, plain text)
+/// without breaking `Bearer <tok>` or PEM blocks while still catching secrets
+/// embedded inside `a=1&token=ghp_...` or truncated `"token":"ghp_...`.
+fn redact_non_json_body(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut start = 0;
+    for (idx, ch) in input.char_indices() {
+        if matches!(ch, '&' | '"') {
+            if idx > start {
+                out.push_str(&otto_core::redact::redact_text(&input[start..idx]).value);
+            }
+            out.push(ch);
+            start = idx + ch.len_utf8();
+        }
+    }
+    if start < input.len() {
+        out.push_str(&otto_core::redact::redact_text(&input[start..]).value);
+    }
+    out
+}
+
+/// Format a redacted, single-line-collapsed, length-capped preview of a
+/// `Fetch`/`XHR` request body for human approval cards.
+pub fn format_body_preview(post_data: Option<&str>) -> Option<String> {
+    let raw = post_data?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    // Bound input before redaction so multi-megabyte uploads don't waste CPU.
+    let bounded: String = raw.chars().take(MAX_BODY_PREVIEW_CHARS * 4).collect();
+    let redacted = if let Ok(val) = serde_json::from_str::<serde_json::Value>(&bounded) {
+        let cleaned = otto_core::redact::redact_json(&val).value;
+        serde_json::to_string(&cleaned).unwrap_or_else(|_| redact_non_json_body(&bounded))
+    } else {
+        redact_non_json_body(&bounded)
+    };
+    let collapsed: String = redacted
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let trimmed = collapsed.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let char_count = trimmed.chars().count();
+    if char_count > MAX_BODY_PREVIEW_CHARS {
+        let mut out: String = trimmed.chars().take(MAX_BODY_PREVIEW_CHARS).collect();
+        out.push('…');
+        Some(out)
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -69,18 +190,38 @@ pub enum Decision {
     Fail {
         document: bool,
     },
-    /// An agent-driven outward document request: screenshot + approval first.
+    /// An agent-driven outward request: screenshot + approval first.
     HoldOutward,
 }
 
 /// `main_frame` = the request belongs to a live session's top-level frame.
 pub fn decide(allowed: bool, req: &Paused, main_frame: bool, agent_drives: bool) -> Decision {
+    decide_with_spa_guard(allowed, req, main_frame, agent_drives, false)
+}
+
+/// Decision helper supporting opt-in SPA `Fetch`/`XHR` outward mutation gating.
+pub fn decide_with_spa_guard(
+    allowed: bool,
+    req: &Paused,
+    main_frame: bool,
+    agent_drives: bool,
+    guard_spa_mutations: bool,
+) -> Decision {
     if !allowed {
         return Decision::Fail {
             document: req.is_document(),
         };
     }
     if agent_drives && main_frame && req.is_document() && is_outward_method(&req.method) {
+        return Decision::HoldOutward;
+    }
+    if guard_spa_mutations
+        && agent_drives
+        && main_frame
+        && req.is_spa_request()
+        && is_outward_method(&req.method)
+        && !is_beacon_or_analytics_url(&req.url)
+    {
         return Decision::HoldOutward;
     }
     Decision::Continue
@@ -241,5 +382,65 @@ mod tests {
         assert!(vet("data:text/plain,hi", &cache).await);
         // Cached verdict still refuses.
         assert!(!vet("http://127.0.0.1:7700/other", &cache).await);
+    }
+
+    #[test]
+    fn spa_mutation_guard_holds_non_idempotent_fetch_xhr_and_skips_beacons() {
+        let mut fetch_post = paused("POST", Some("Fetch"));
+        fetch_post.url = "https://api.github.com/repos/o/r/pulls/1/merge".into();
+        let mut xhr_delete = paused("DELETE", Some("XHR"));
+        xhr_delete.url = "https://jira.example/rest/api/3/issue/ENG-1".into();
+        let mut fetch_get = paused("GET", Some("Fetch"));
+        fetch_get.url = "https://api.github.com/repos/o/r".into();
+        let mut analytics = paused("POST", Some("Fetch"));
+        analytics.url = "https://www.google-analytics.com/g/collect?v=2".into();
+        let mut beacon_path = paused("POST", Some("XHR"));
+        beacon_path.url = "https://app.example/telemetry".into();
+
+        // Off by default -> Continue.
+        assert_eq!(
+            decide_with_spa_guard(true, &fetch_post, true, true, false),
+            Decision::Continue
+        );
+        // Enabled + agent drives -> holds Fetch/XHR mutations, skips GET & beacons.
+        assert_eq!(
+            decide_with_spa_guard(true, &fetch_post, true, true, true),
+            Decision::HoldOutward
+        );
+        assert_eq!(
+            decide_with_spa_guard(true, &xhr_delete, true, true, true),
+            Decision::HoldOutward
+        );
+        assert_eq!(
+            decide_with_spa_guard(true, &fetch_get, true, true, true),
+            Decision::Continue
+        );
+        assert_eq!(
+            decide_with_spa_guard(true, &analytics, true, true, true),
+            Decision::Continue
+        );
+        assert_eq!(
+            decide_with_spa_guard(true, &beacon_path, true, true, true),
+            Decision::Continue
+        );
+        // Human driving -> never held.
+        assert_eq!(
+            decide_with_spa_guard(true, &fetch_post, true, false, true),
+            Decision::Continue
+        );
+    }
+
+    #[test]
+    fn body_preview_redacts_secrets_and_truncates() {
+        let secret = format!("ghp_{}", "Z".repeat(36));
+        let body = format!(r#"{{"merge_method":"squash","token":"{secret}"}}"#);
+        let preview = format_body_preview(Some(&body)).unwrap();
+        assert!(!preview.contains(&secret), "secret leaked: {preview}");
+        assert!(preview.contains("squash"));
+
+        let huge = "a".repeat(MAX_BODY_PREVIEW_CHARS + 200);
+        let capped = format_body_preview(Some(&huge)).unwrap();
+        assert!(capped.ends_with('…'));
+        assert_eq!(capped.chars().count(), MAX_BODY_PREVIEW_CHARS + 1);
     }
 }

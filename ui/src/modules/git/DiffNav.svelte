@@ -7,8 +7,10 @@
   import { plural } from '../../lib/plural';
   import { startMouseDrag } from '../../lib/dragCursor';
   import { paneResizer } from '../../lib/paneResizer';
+  import { lsGet, lsSet } from '../../lib/storage';
   import DiffFileTree from './DiffFileTree.svelte';
   import type { NavDir } from './diff-pr';
+  import { computeSidebarResizeWidth } from './gitUiHelpers';
 
   interface Props {
     tree: NavDir;
@@ -46,15 +48,11 @@
   // mobile rules simply ignore.
   let navCollapsed = $state(false);
   const NAV_W_KEY = 'otto_diffnav_w';
-  let navW = $state(Number(localStorage.getItem(NAV_W_KEY)) || 240);
+  let navW = $state(Number(lsGet(NAV_W_KEY)) || 240);
   let navResizing = $state(false);
   const clampNavW = (w: number): number => Math.max(180, Math.min(520, Math.round(w)));
   function persistNavW(): void {
-    try {
-      localStorage.setItem(NAV_W_KEY, String(navW));
-    } catch {
-      /* blocked storage: the width just doesn't persist */
-    }
+    lsSet(NAV_W_KEY, String(navW));
   }
   function setNavW(w: number): void {
     navW = clampNavW(w);
@@ -68,11 +66,12 @@
     navResizing = true;
     const startX = e.clientX;
     const startW = navW;
+    const rtl = getComputedStyle(e.currentTarget as Element).direction === 'rtl';
     startMouseDrag(e, {
       cursor: 'col-resize',
-      // Physical left-anchored sidebar: dragging right widens it.
+      // Inline-start sidebar: dragging toward inline-end widens it (flips in RTL).
       onMove: (ev) => {
-        navW = clampNavW(startW + (ev.clientX - startX));
+        navW = computeSidebarResizeWidth(startW, startX, ev.clientX, rtl);
       },
       onEnd: () => {
         navResizing = false;
@@ -146,7 +145,6 @@
     width: var(--navw, 240px);
     min-width: var(--navw, 240px);
     max-width: var(--navw, 240px);
-    position: relative;
     flex-shrink: 0;
     border-inline-end: 1px solid var(--border);
     background: var(--surface-2);

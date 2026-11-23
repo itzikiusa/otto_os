@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { announce } from '../../lib/announce.svelte';
+  import { announce, announceShown } from '../../lib/announce.svelte';
   import { onDestroy, untrack } from 'svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { plural } from '../../lib/plural';
   import { api, baseUrl } from '../../lib/api/client';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -47,7 +48,7 @@
   async function perform(what: string, action: () => Promise<void>) {
     const seq = generation;
     busy = true; error = ''; notice = '';
-    try { await action(); } catch (e) { if (seq === generation) error = `Couldn’t ${what}. ${e instanceof Error ? e.message : String(e)}`; }
+    try { await action(); } catch (e) { if (seq === generation) error = `Couldn’t ${what}. ${loadErrorText(e)}`; }
     finally { if (seq === generation) busy = false; }
   }
   async function loadStatus() {
@@ -177,7 +178,7 @@
   {/if}
   {#if busy}<p class="dim">Working…</p>{/if}
   {#if notice}<p>{notice}</p>{/if}
-  {#if error}<p class="error" role="alert">{error}</p>{/if}
+  {#if error}<p class="error" use:announceShown={{ text: error, assertive: true }}>{error}</p>{/if}
 </section>
 {#if browsing}<FolderPicker title="Choose backup repository" start={repoPath || '~'} gitOnly onpick={chooseRepo} onclose={() => browsing = false} />{/if}
 

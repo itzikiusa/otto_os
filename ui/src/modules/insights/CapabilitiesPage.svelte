@@ -100,7 +100,7 @@
           <!-- Issues (reasons + fixes) -->
           {#if cap.reasons.length > 0}
             <ul class="cap-issues">
-              {#each cap.reasons as reason, i (reason)}
+              {#each cap.reasons as reason, i (`${i}:${reason}`)}
                 <li class="issue-row">
                   <Icon name="warning" size={13} />
                   <div class="issue-text">
@@ -117,7 +117,7 @@
           <!-- Expanded check breakdown -->
           {#if open && cap.deps.length > 0}
             <ul class="dep-list" id="deps-{cap.feature}">
-              {#each cap.deps as dep (dep.name + dep.kind)}
+              {#each cap.deps as dep, di (`${dep.kind}:${dep.name}:${di}`)}
                 <li class="dep-row">
                   <span class="dep-ok" class:bad={!dep.ok} role="img" aria-label={dep.ok ? 'OK' : 'Not OK'} title={dep.ok ? 'OK' : 'Not OK'}>
                     <Icon name={dep.ok ? 'check' : 'x'} size={12} />

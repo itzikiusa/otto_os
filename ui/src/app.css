@@ -39,6 +39,10 @@
 .shell.mobile {
   padding-block-start: var(--safe-top);
   padding-inline: var(--safe-start) var(--safe-end);
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+  overflow: clip;
 }
 .shell.mobile:not(.bnav) {
   padding-block-end: var(--safe-bottom);
@@ -50,6 +54,9 @@ html .shell.mobile .mtopbar:not(.tauri-top) {
   margin-block-start: calc(-1 * var(--safe-top));
   padding-block-start: var(--safe-top);
   height: calc(var(--mobile-topbar-h) + var(--safe-top));
+}
+html .shell.mobile.page-titled .mtopbar:not(.tauri-top) {
+  height: calc(38px + var(--safe-top));
 }
 html .shell.mobile.short .mtopbar:not(.tauri-top) {
   height: calc(36px + var(--safe-top));
@@ -63,8 +70,11 @@ html,
 body {
   margin: 0;
   padding: 0;
+  width: 100%;
   height: 100%;
   overflow: hidden;
+  overflow: clip;
+  overscroll-behavior: none;
 }
 
 body {
@@ -83,7 +93,34 @@ body {
 #app {
   /* Touch devices: the visible viewport's height (lib/viewportFit.ts), so the
      on-screen keyboard never pans the page's top off screen. */
+  width: 100%;
   height: var(--app-h, 100%);
+  overflow: hidden;
+  overflow: clip;
+}
+/* Keyboard up: #app sits exactly on the visible area (`--app-top` undoes Android's
+   visual-viewport pan), and the transform makes it the box that fixed overlays —
+   dialogs, menus, sheets — size against, so they stay above the keyboard. */
+html[data-kb='open'] #app {
+  transform: translateY(var(--app-top, 0px));
+}
+/* Keyboard up on a short screen (a phone on its side keeps ~70 px above it): the shell's top
+   row and the page header step aside so the field being typed in and its action stay in
+   view; they come back when the keyboard closes. No motion, so nothing to reduce. */
+html[data-kb-short] .mtopbar,
+html[data-kb-short] .page-header-bar {
+  display: none;
+}
+/* Non-scrolling shell containers use overflow: clip so programmatic focus /
+   scrollIntoView on off-screen drawers cannot drift scrollLeft ("half cut off").
+   (Global, not in App.svelte: that file may not grow past its line cap.) */
+#app > .shell,
+#app > .shell > .shell-main,
+#app-content {
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+  overflow: clip;
 }
 
 input,
@@ -952,6 +989,16 @@ button.chip:focus-visible {
    specificity, so a module that positions its own button (`position: absolute`
    close buttons, overlay controls) or uses ::after still wins. */
 @media (pointer: coarse) {
+  /* iOS Safari auto-zooms into any text input/textarea/select under 16px on
+     focus and leaves the visual viewport zoomed & panned across subsequent
+     navigations ("screen half cut off"). Enforce >= 16px app-wide on touch. */
+  :where(
+    input:not([type='checkbox'], [type='radio'], [type='range'], [type='file'], [type='color'], [type='button'], [type='submit'], [type='reset']),
+    textarea,
+    select
+  ) {
+    font-size: 16px !important; /* ui-guards: allow — 16px stops iOS zoom-on-focus */
+  }
   :where(.icon-btn, .btn, .pill-toggle, button.chip, .segmented > button, button.row-action) {
     position: relative;
   }
@@ -983,6 +1030,24 @@ button.chip:focus-visible {
     position: absolute;
     inset-block: -8px;
     inset-inline: -4px;
+  }
+  .palette .pal-item {
+    height: auto;
+    min-height: 40px;
+    padding-block: 6px;
+  }
+}
+@media (max-width: 640px), (max-height: 500px) {
+  .pal-backdrop {
+    padding-block: var(--safe-top) var(--safe-bottom);
+    padding-inline: var(--safe-start) var(--safe-end);
+  }
+  .pal-backdrop::before {
+    flex: 0 0 12px;
+  }
+  .pal-backdrop .palette {
+    max-width: calc(100% - 16px);
+    max-height: calc(100% - 24px);
   }
 }
 

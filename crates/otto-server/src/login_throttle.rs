@@ -76,7 +76,7 @@ pub struct AttemptStore {
 impl AttemptStore {
     /// If `key` is currently locked out, return the remaining lock duration.
     pub fn check_locked(&self, key: &str) -> Option<Duration> {
-        let mut store = self.inner.lock().unwrap();
+        let mut store = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         if let Some(entry) = store.get_mut(key) {
             match entry.locked_until {
@@ -108,7 +108,7 @@ impl AttemptStore {
     }
 
     fn record(&self, key: &str, pinned: bool) {
-        let mut store = self.inner.lock().unwrap();
+        let mut store = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         if store.len() >= MAX_TRACKED_KEYS && !store.contains_key(key) {
             // Only a full map pays the O(n) prune.
@@ -131,7 +131,7 @@ impl AttemptStore {
     /// tracked: that attempt's failures could not be counted, so the handler
     /// refuses it (fail closed, S8-303).
     pub fn untracked_while_full(&self, keys: &[&str]) -> bool {
-        let mut store = self.inner.lock().unwrap();
+        let mut store = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if store.len() < MAX_TRACKED_KEYS || keys.iter().all(|k| store.contains_key(*k)) {
             return false;
         }
@@ -141,7 +141,10 @@ impl AttemptStore {
 
     /// Clear a key's failure history (called on a successful login).
     pub fn clear(&self, key: &str) {
-        self.inner.lock().unwrap().remove(key);
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(key);
     }
 
     /// Longest remaining lock across `keys`, if any is locked. Used by the

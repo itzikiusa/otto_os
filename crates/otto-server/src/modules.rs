@@ -996,8 +996,10 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         otto_aws::api_router::<ServerCtx>(),
         otto_phone::protected_router::<ServerCtx>(),
         otto_ide::api_router::<ServerCtx>(),
+        otto_simulators::api_router::<ServerCtx>(),
         otto_agent_protocol::api_router::<ServerCtx>(),
         otto_k8s::api_router::<ServerCtx>(),
+        otto_containers::api_router::<ServerCtx>(),
         otto_dbviewer::api_router::<ServerCtx>(),
         otto_brokers::api_router::<ServerCtx>(),
         otto_mcp::api_router::<ServerCtx>(),
@@ -1005,6 +1007,8 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         otto_canvas::router::<ServerCtx>(),
         // Design Hall — the artifact graph (`/design/*`, Feature::Design).
         otto_design::router::<ServerCtx>(),
+        // Native 3D generation providers/jobs (`/design/3d/*`) + TTS (`/product/tts/*`).
+        otto_media::api_router::<ServerCtx>(),
         // The unified design-assist pipeline (agent turns, variants, learned
         // rules) — otto-design-assist's; the turn runs via `DesignAssistCtx`.
         otto_design_assist::routes::<ServerCtx>(),
@@ -1055,6 +1059,8 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         crate::routes::api_stream::ws_router(ctx.clone()),
         // Remote live browser viewer socket (`/ws/browser/{tab_id}/live`).
         crate::routes::browser_live::ws_router(ctx.clone()),
+        // Mobile simulator screencast + logs sockets (`/ws/simulators/{id}/stream|logs`).
+        crate::routes::simulators_ws::ws_router(ctx.clone()),
         browser_proxy_router(),
         // Runtime-plugin iframe assets: /plugins/{slug}/ui/* served as public
         // static files (root-mounted, outside /api/v1; the iframe's API calls are

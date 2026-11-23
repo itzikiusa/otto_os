@@ -37,6 +37,18 @@ export interface IdeFsTreeResp {
   entries: IdeFsEntry[];
 }
 
+/** `POST /ide/fs/watch`: one project tree's live-refresh lease (empty `roots` releases it). */
+export interface IdeFsWatchReq {
+  client_id: string;
+  roots: string[];
+  dirs: string[];
+}
+
+export interface IdeFsWatchResp {
+  /** The requested roots with a live watcher. */
+  watched: string[];
+}
+
 export interface IdeFileReadResp {
   path: string;
   content: string;
@@ -165,6 +177,9 @@ export type IdeRunnerKind =
   | 'pytest'
   | 'python'
   | 'shell'
+  | 'xcode'
+  | 'flutter'
+  | 'react_native'
   | 'compound'
   | 'custom';
 
@@ -196,7 +211,17 @@ export interface IdeGutterResp {
 
 // ── Toolchains, Detected SDKs & OS/Arch SDK Downloader ───────────────────────
 
-export type IdeEcosystem = 'java' | 'go' | 'rust' | 'node' | 'python' | 'shell' | 'json';
+export type IdeEcosystem =
+  | 'java'
+  | 'go'
+  | 'rust'
+  | 'node'
+  | 'python'
+  | 'shell'
+  | 'json'
+  | 'ios'
+  | 'android'
+  | 'flutter';
 export type IdeInstallComponent = 'sdk' | 'lsp' | 'dap' | 'all';
 
 export interface IdeInstalledSdk {
@@ -375,6 +400,9 @@ export interface IdeProjectEnvironment {
   rust_toolchain?: string | null;
   node_home?: string | null;
   python_interpreter?: string | null;
+  android_home?: string | null;
+  flutter_root?: string | null;
+  xcode_developer_dir?: string | null;
   dotenv_path?: string | null;
   extra_path?: string | null;
   inherit_shell_env?: boolean;
@@ -502,6 +530,8 @@ export interface IdeStartRunReq {
   offline?: boolean;
   coverage?: boolean;
   confirm_prod_targets?: boolean;
+  device_id?: string | null;
+  device_platform?: 'ios' | 'android' | null;
 }
 
 export interface IdeRunResp {

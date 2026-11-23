@@ -73,16 +73,31 @@
     });
   });
 
-  async function saveDraft(): Promise<void> {
+  async function saveDraft(): Promise<boolean> {
+    if (draftSaving) return false;
     draftSaving = true;
     try {
       await product.updateDraft({ title: draftTitle, body_md: draftBody });
       toasts.success('Draft saved');
+      return true;
     } catch (e) {
       toastError('Couldn’t save the draft', e);
+      return false;
     } finally {
       draftSaving = false;
     }
+  }
+
+  /** Save unsaved edits before opening PublishDialog so the preview & outward
+   *  write never silently send stale/empty saved content. */
+  async function publishDraft(mode: 'story' | 'rfc'): Promise<void> {
+    if (draftSaving) return;
+    if (draftDirty) {
+      const owns = product.captureSelection();
+      const saved = await saveDraft();
+      if (!saved || !owns()) return;
+    }
+    onpublish(mode);
   }
 
   /**
@@ -162,10 +177,10 @@
 
       <!-- ── Publish bar ─────────────────────────────────────── -->
       <div class="publish-bar">
-        <button class="btn" onclick={() => onpublish('rfc')}>
+        <button class="btn" disabled={draftSaving} onclick={() => void publishDraft('rfc')}>
           Publish as Confluence RFC…
         </button>
-        <button class="btn primary" onclick={() => onpublish('story')}>
+        <button class="btn primary" disabled={draftSaving} onclick={() => void publishDraft('story')}>
           Publish as Jira story…
         </button>
       </div>

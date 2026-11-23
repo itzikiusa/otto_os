@@ -77,23 +77,23 @@
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
+        e.stopPropagation();
         closePopover();
       }
     };
     const onResize = (): void => updatePlacement();
-    window.addEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
     window.addEventListener('resize', onResize);
     return () => {
-      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keydown', onKey, true);
       window.removeEventListener('resize', onResize);
     };
   });
 
-  // A right-click opens this editor for a line without a breakpoint: only Done (or Enter)
-  // creates it, so Escape, × or a click outside leaves nothing behind.
+  // Only Done (or Enter) creates or saves the breakpoint; Escape, × and clicking
+  // outside all discard unsaved edits and close consistently.
   function dismiss(): void {
-    if (existing) saveAndClose();
-    else closePopover();
+    closePopover();
   }
 
   function saveAndClose(e?: SubmitEvent): void {
@@ -250,7 +250,7 @@
     background: var(--surface);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-m);
-    box-shadow: var(--shadow-card);
+    box-shadow: var(--glass-shadow);
     padding: var(--sp-4);
     display: flex;
     flex-direction: column;

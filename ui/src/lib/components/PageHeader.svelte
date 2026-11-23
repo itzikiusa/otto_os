@@ -23,8 +23,10 @@
   //   `.click()`s the hidden original, so its handler/state stay the source of
   //   truth. A wrapper child (e.g. a button group) becomes one row per button.
   // • `tabs` renders a segmented/tab control either INLINE (in the bar, after
-  //   the title — the native-toolbar look) or BELOW (a second row directly
-  //   under the bar, for wide tab sets).
+  //   the title — the native-toolbar look), at the START of the bar (before
+  //   the title: a switcher shared by several pages, which must not move with
+  //   their titles) or BELOW (a second row directly under the bar, for wide
+  //   tab sets).
   // • `crumbs` draws a breadcrumb trail before the title (sub-pages such as
   //   Kubernetes / Monitor / Fleet); `leading` hosts a back button for detail
   //   views; `titleContent` swaps the title text for richer content (a
@@ -39,7 +41,7 @@
   import Icon, { type IconName } from './Icon.svelte';
   import { ui, isTauri } from '../stores/ui.svelte';
   import { viewport } from '../stores/viewport.svelte';
-  import { startWindowDrag } from '../windowDrag';
+  import { windowDrag } from '../windowDrag';
   import { isPopout, isEmbedded } from '../desktop';
   import { sidePane } from '../stores/sidePane.svelte';
   import { embedChrome } from '../stores/embedChrome.svelte';
@@ -71,7 +73,7 @@
     more?: () => MenuItem[];
     /** Segmented control / tab row. */
     tabs?: Snippet;
-    tabsPlacement?: 'inline' | 'below';
+    tabsPlacement?: 'inline' | 'start' | 'below';
     /** Extra class on the root (page-specific tweaks). */
     class?: string;
   }
@@ -202,7 +204,9 @@
       if (rootEl && titleEl) {
         const iconW = iconEl ? iconEl.offsetWidth + 8 : 0;
         const badgeW = badgeEl ? badgeEl.offsetWidth + 8 : 0;
-        titleMin = Math.ceil(titleEl.scrollWidth + iconW + badgeW);
+        // The h1 is a flex row of shrinkable parts: add up their natural widths (+ the "/" margins).
+        const full = Array.from(titleEl.children as HTMLCollectionOf<HTMLElement>).reduce((s, k) => s + k.scrollWidth + (k.classList.contains('ph-sep') ? 12 : 0), 0);
+        titleMin = Math.ceil(full + iconW + badgeW);
       }
       // When even the kept controls can't fit next to the title (a phone), the
       // reservation is capped and the actions scroll horizontally instead —
@@ -371,18 +375,20 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
 <header
   bind:this={rootEl}
   class="page-header-bar chrome-material {klass}"
   class:tauri-pad={padTraffic}
   class:has-below={tabsBelow}
   data-tauri-drag-region
-  onmousedown={startWindowDrag}
+  use:windowDrag
   data-testid="page-header"
 >
   <div class="ph-row">
     {#if leading}<div class="ph-leading">{@render leading()}</div>{/if}
+    {#if tabs && !tabsBelow && tabsPlacement === 'start'}
+      <div class="ph-tabs-inline">{@render tabs()}</div>
+    {/if}
     <div class="ph-title-block">
       {#if icon}<span class="ph-icon" bind:this={iconEl}><Icon name={icon} size={16} /></span>{/if}
       <div class="ph-titles">
@@ -391,14 +397,14 @@
             {#each crumbs as c (c.label)}
               <button class="ph-crumb" onclick={c.onclick}>{c.label}</button><span class="ph-sep" aria-hidden="true">/</span>
             {/each}
-            {#if titleContent}{@render titleContent()}{:else}{title}{/if}
+            <span class="ph-title-text">{#if titleContent}{@render titleContent()}{:else}{title}{/if}</span>
           </h1>
           {#if badge}<span class="ph-badge" bind:this={badgeEl}>{@render badge()}</span>{/if}
         </div>
         {#if subtitle}<div class="ph-sub" title={subtitle}>{subtitle}</div>{/if}
       </div>
     </div>
-    {#if tabs && !tabsBelow}
+    {#if tabs && !tabsBelow && tabsPlacement === 'inline'}
       <div class="ph-tabs-inline">{@render tabs()}</div>
     {/if}
     <div class="ph-actions-wrap" bind:this={wrapEl}>
@@ -512,7 +518,26 @@
     text-overflow: ellipsis;
     min-width: 0;
   }
+  /* The h1 is a row: crumbs give up their room first, the page's own title
+     last (an artifact header kept "Design Hall / …" and lost its name). */
+  .ph-title {
+    display: flex;
+    align-items: baseline;
+  }
+  .ph-title-text,
   .ph-crumb {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ph-title-text {
+    flex: 0 1 auto;
+  }
+  .ph-crumb {
+    /* Shrink weight is factor × width: this many orders above the title's 1 means the title
+       loses nothing (not even the sub-pixel that shows an ellipsis) until the crumbs are gone. */
+    flex: 0 999999 auto;
     border: none;
     background: none;
     padding: 0;
@@ -525,6 +550,7 @@
     color: var(--accent-text);
   }
   .ph-sep {
+    flex: none;
     color: var(--text-dim);
     opacity: 0.6;
     margin: 0 6px;
@@ -642,6 +668,21 @@
     .ph-tabs-below {
       padding-block: 4px;
       padding-inline: 12px;
+    }
+  }
+  /* Phone landscape (short touch screen): keep PageHeader compact so the page
+     body retains vertical space on 360-430px tall viewports. */
+  @media (max-height: 500px) and (pointer: coarse) {
+    .page-header-bar {
+      --ph-h: 38px;
+    }
+    .ph-row {
+      padding-block: 0;
+      padding-inline: 12px 10px;
+      gap: 8px;
+    }
+    .ph-sub {
+      display: none;
     }
   }
 </style>

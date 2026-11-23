@@ -20,6 +20,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import { plural } from '../../lib/plural';
   import Modal from '../../lib/components/Modal.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -249,7 +250,7 @@
       stage = 'results';
       watch(job.id);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = e instanceof ApiError ? e.message : loadErrorText(e);
       if (e instanceof ApiError && msg.startsWith('plan_changed:')) {
         // The daemon re-planned and got different statements — show them.
         stage = 'setup';
@@ -437,8 +438,7 @@
                     {#if sc === 'loading'}
                       <span class="mr-dim"><span class="spinner" style="--spinner-size: 11px" aria-hidden="true"></span> Loading databases…</span>
                     {:else if sc && 'error' in sc}
-                      <span class="mr-err">Couldn’t list databases: {sc.error}</span>
-                      <button class="btn small ghost" onclick={() => loadScopes(c.id)}>Retry</button>
+                      <LoadState variant="compact" what="databases" error={sc.error} empty onretry={() => loadScopes(c.id)} />
                     {:else if sc && sc.length > 0}
                       {#each sc as s (s.value)}
                         <label class="mr-scope">
@@ -538,11 +538,7 @@
       </section>
 
       {#if planError}
-        <div class="mr-error">
-          <Icon name="warning" size={13} />
-          <span>{planError}</span>
-          <button class="btn small ghost" onclick={preview}>Retry</button>
-        </div>
+        <LoadState variant="compact" what="the plan" error={planError} empty onretry={preview} />
       {/if}
     {:else if stage === 'preview' && plan}
       <p class="mr-lead" tabindex="-1" data-stage-focus>

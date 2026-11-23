@@ -203,6 +203,7 @@
     activeRunId = null;
     caseActions = {};
     showPublishForm = false;
+    publishingRun = false;
     selected = new Set();
     order.ids = [];
     clearPoll();
@@ -487,27 +488,25 @@
 
   async function publishTests(): Promise<void> {
     if (!activeRun || publishingRun) return;
-    // Pin the run: `activeRun` is derived and may point elsewhere after the awaits.
+    // Pin the run & story selection: `activeRun` is derived and may point elsewhere after awaits.
     const run = activeRun;
+    const owns = product.captureSelection();
     publishingRun = true;
     try {
-      // publishTests reloads the runs itself (for confluence_url) — no second fetch.
       await product.publishTests(run.id, {
         space_key: publishSpaceKey.trim() || null,
         parent_id: publishParentId,
       });
+      if (!owns()) return;
       showPublishForm = false;
       const updatedRun = product.testcaseRuns.find((r) => r.run.id === run.id);
       const url = updatedRun?.run.confluence_url ?? run.confluence_url;
-      if (url) {
-        toasts.success('Published to Confluence', url);
-      } else {
-        toasts.success('Published to Confluence');
-      }
+      if (url) toasts.success('Published to Confluence', url);
+      else toasts.success('Published to Confluence');
     } catch (e) {
-      toastError('Couldn’t publish the test cases', e);
+      if (owns()) toastError('Couldn’t publish the test cases', e);
     } finally {
-      publishingRun = false;
+      if (owns()) publishingRun = false;
     }
   }
 
@@ -636,10 +635,11 @@
           </div>
 
           <div class="rh-actions">
-            <!-- Approve run -->
+            <!-- Approve run (demoted while the inline Publish form holds the one primary) -->
             {#if activeRun.status !== 'approved' && activeRun.status !== 'published'}
               <button
-                class="btn small primary"
+                class="btn small"
+                class:primary={!showPublishForm}
                 onclick={approveRun}
                 disabled={approvingRun}
                 title="Approve this run — triggers skill self-improvement from the reviewed cases"

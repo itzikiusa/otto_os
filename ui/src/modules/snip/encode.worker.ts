@@ -6,6 +6,8 @@
 // part — `convertToBlob('image/png')`, ~100s of ms for a 5K screenshot — so
 // typing pauses never jank the editor. Plain TS, no DOM APIs.
 
+import { loadErrorText } from '../../lib/loadError';
+
 export type EncodeIn = { id: number; bitmap: ImageBitmap };
 export type EncodeOut = { id: number; blob?: Blob; error?: string };
 
@@ -21,6 +23,6 @@ self.onmessage = async (e: MessageEvent<EncodeIn>) => {
     bitmap.close();
     post({ id, blob: await canvas.convertToBlob({ type: 'image/png' }) });
   } catch (err) {
-    post({ id, error: err instanceof Error ? err.message : String(err) });
+    post({ id, error: loadErrorText(err) });
   }
 };

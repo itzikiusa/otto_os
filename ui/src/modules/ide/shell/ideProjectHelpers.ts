@@ -65,6 +65,24 @@ export function canonicalRootKey(raw: string): string {
   return clean.replace(PRIVATE_SYMLINK_RE, '');
 }
 
+/** True only when `setLocalTarget(clean)` is already the exact active standalone local target.
+ *  A named or multi-root project sharing the same primary root must NOT early-return, or the
+ *  user cannot switch from that multi-repo project back to its standalone primary folder. */
+export function shouldSkipLocalTargetSwitch(
+  state: { target: Pick<IdeTargetSpec, 'kind' | 'root'>; activeProjectId: string | null; additionalRoots: readonly string[] },
+  cleanRoot: string,
+  opts: { projectId?: string | null; additionalRoots?: readonly string[] },
+): boolean {
+  return (
+    opts.projectId === undefined &&
+    !opts.additionalRoots &&
+    !state.activeProjectId &&
+    state.additionalRoots.length === 0 &&
+    state.target.kind === 'local' &&
+    canonicalRootKey(state.target.root) === canonicalRootKey(cleanRoot)
+  );
+}
+
 export function canonicalizeLocalProjectPath(
   fullPath: string,
   roots: readonly IdeProjectRoot[],
@@ -454,18 +472,19 @@ export async function revealPathInTree(host: ProjectHelperHost, rawPath: string,
   const root = findContainingRoot(fullPath, host.projectRoots);
   if (!root) return;
   const base = normalizeRootPath(root.path);
-  const nextExpanded: Record<string, boolean> = { ...host.expandedDirs, [base]: true };
+  const chain: Record<string, boolean> = { [base]: true };
   const rel = fullPath.startsWith(`${base}/`) ? fullPath.slice(base.length + 1) : '';
   const parts = rel.split('/').filter(Boolean);
   let cursor = base;
   for (let i = 0; i < parts.length - 1; i++) {
     cursor = `${cursor}/${parts[i]}`;
-    nextExpanded[cursor] = true;
+    chain[cursor] = true;
     if (!host.childrenByDir[cursor]) {
       await host.loadTree(cursor);
     }
   }
-  host.expandedDirs = nextExpanded;
+  // Merged into the folders open NOW: one folded elsewhere while the listings loaded stays folded.
+  host.expandedDirs = { ...host.expandedDirs, ...chain };
   host.treeRevealRequest = { path: fullPath, seq };
 }
 
@@ -683,7 +702,7 @@ export const ideTabRestore = { active: false };
 export async function restoreWorkspaceTabsOrInitial(host: {
   target: IdeTargetSpec; collabIsGuest: boolean; tabs: IdeOpenTab[]; hasClosedAllTabs: boolean; activePath: string | null;
   treeRootEntries: IdeFsEntry[]; childrenByDir: Record<string, IdeFsEntry[]>;
-  toggleDir(dirPath: string): Promise<void>; openFile(rawPath: string, opts?: { preview?: boolean }): Promise<void>; openInSplit(path: string, dir?: 'right' | 'down'): void;
+  toggleDir(dirPath: string): Promise<void>; openFile(rawPath: string, opts?: { preview?: boolean; projectScoped?: boolean }): Promise<void>; openInSplit(path: string, dir?: 'right' | 'down'): void;
 }): Promise<void> {
   if (host.collabIsGuest || host.tabs.length > 0 || host.hasClosedAllTabs) return;
   if (typeof window !== 'undefined' && /[?&](file|collab)=/.test(window.location.hash)) return;
@@ -704,7 +723,7 @@ async function restoreTabs(host: Parameters<typeof restoreWorkspaceTabsOrInitial
   if (saved && saved.paths.length > 0) {
     for (let i = 0; i < saved.paths.length; i++) {
       if (ideTargetKey(host.target) !== key) return;
-      await host.openFile(saved.paths[i], { preview: false });
+      await host.openFile(saved.paths[i], { preview: false, projectScoped: saved.projectScoped.includes(saved.paths[i]) });
     }
     if (ideTargetKey(host.target) !== key) return;
     const validTabs = host.tabs.filter((t) => !t.error);

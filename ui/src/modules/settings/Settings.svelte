@@ -37,11 +37,11 @@
   // section instead of routing, and ✕ closes the sheet.
   let { sheet = null }: { sheet?: { onclose: () => void } | null } = $props();
 
-  // Phone (≤640 px): two levels, like iOS Settings — the grouped list (with
-  // the filter) first, then one section with a back control. A deep link
-  // (#/settings/<id>) opens the section directly; bare #/settings is the list.
-  // Wider screens keep the split and open Appearance by default.
-  const phone = $derived(viewport.mode === 'phone');
+  // Phone (≤640 px) and phone landscape (short touch screen): two levels, like
+  // iOS Settings — the grouped list (with the filter) first, then one section
+  // with a back control. A deep link (#/settings/<id>) opens the section
+  // directly; bare #/settings is the list. Wider tablets/desktop keep the split.
+  const phone = $derived(viewport.mode === 'phone' || viewport.isShort);
 
   // Explicit exit: go back to where you were, or home (Agents) if there's no
   // history — so you don't have to click another module to leave Settings.
@@ -78,6 +78,8 @@
     'session-names': lazyComponent(() => import('./SessionNames.svelte')),
     notifications: lazyComponent(() => import('./Notifications.svelte')),
     snipping: lazyComponent(() => import('./SnipSettings.svelte')),
+    clipboard: lazyComponent(() => import('./ClipboardSettings.svelte')),
+    'keep-awake': lazyComponent(() => import('./KeepAwakeSettings.svelte')),
     browser: lazyComponent(() => import('./BrowserSettings.svelte')),
     tokens: lazyComponent(() => import('./PersonalAccessTokens.svelte')),
     'git-accounts': lazyComponent(() => import('../git/GitAccounts.svelte')),
@@ -243,6 +245,7 @@
     aria-current={current ? 'page' : undefined}
     title={warnSecrets(s) ? `${scopeDescription(s)} Secrets are not encrypted.` : scopeDescription(s)}
     onclick={() => open(s)}
+    onkeydown={onListKey}
     onpointerenter={() => VIEWS[s.id].prefetch()}
     onfocus={() => VIEWS[s.id].prefetch()}
     oncontextmenu={(e) => rowMenu(e, s)}
@@ -295,8 +298,7 @@
       />
     </label>
     <!-- Arrow-key roving between the row buttons (each row is a real button). -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="settings-nav-list" id="settings-nav-list" bind:this={listEl} onkeydown={onListKey}>
+    <div class="settings-nav-list" id="settings-nav-list" bind:this={listEl}>
       {#if results}
         <div class="settings-nav-group">
           {#each results as s (s.id)}
@@ -553,10 +555,19 @@
     }
   }
 
-  /* Phone: a two-level list (iOS Settings). Level one is the filter plus
-     the grouped sections as full-width rows; level two is one section with a
-     back control above its own PageHeader (which carries the title). */
-  @media (max-width: 640px) {
+  /* Tablet: trim the settings subnav so the form pane keeps generous width
+     even beside the shell Navigator on iPad / Android tablet portrait. */
+  @media (min-width: 641px) and (max-width: 1024px) {
+    .settings-nav {
+      width: min(190px, 32%);
+      min-width: 160px;
+    }
+  }
+
+  /* Phone (and phone landscape): a two-level list (iOS Settings). Level one is
+     the filter plus the grouped sections as full-width rows; level two is one
+     section with a back control above its own PageHeader (which carries the title). */
+  @media (max-width: 640px), (max-height: 500px) and (pointer: coarse) {
     .settings {
       flex-direction: column;
     }

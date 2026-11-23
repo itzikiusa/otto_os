@@ -8,6 +8,9 @@ use otto_core::{Error, Result};
 
 /// Raw content cap per version (matches the product-attachment cap).
 pub const MAX_CONTENT_BYTES: usize = 25 * 1024 * 1024;
+/// Higher cap for 3D mesh formats (`glb`, `gltf`, `obj`) so rigged 4K PBR
+/// characters with animation clips fit natively (up to 256 MiB).
+pub const MAX_3D_CONTENT_BYTES: usize = 256 * 1024 * 1024;
 /// Above this a `design_artifact_updated` event carries `content: null`.
 /// Small on purpose: every design window parses each event and the UI keeps a
 /// short event log — a big payload fans out to all clients (they re-fetch).
@@ -178,6 +181,7 @@ pub const FORMATS: &[FormatSpec] = &[
         "3d",
         Encoding::Json,
     ),
+    f("obj", "model/obj", "model.obj", "3d", Encoding::Text),
 ];
 
 /// Look a format up by its wire name.
@@ -192,10 +196,15 @@ pub fn from_mime(mime: &str) -> Option<&'static FormatSpec> {
 
 /// The cheap save-time checks: size cap, then per-encoding shape.
 pub fn validate(spec: &FormatSpec, bytes: &[u8]) -> Result<()> {
-    if bytes.len() > MAX_CONTENT_BYTES {
+    let cap = if matches!(spec.name, "glb" | "gltf" | "obj") {
+        MAX_3D_CONTENT_BYTES
+    } else {
+        MAX_CONTENT_BYTES
+    };
+    if bytes.len() > cap {
         return Err(Error::PayloadTooLarge(format!(
             "design content exceeds the {} MB cap",
-            MAX_CONTENT_BYTES / (1024 * 1024)
+            cap / (1024 * 1024)
         )));
     }
     match spec.encoding {
@@ -269,6 +278,7 @@ pub fn default_content(spec: &FormatSpec) -> Option<Vec<u8>> {
         })
         .to_string(),
         "otto-brand" => crate::brand::default_doc("Brand kit").to_string(),
+        "obj" => "# Otto 3D OBJ\n".into(),
         "gltf" => return None,
         other if spec.encoding == Encoding::Json => {
             serde_json::json!({ "type": other, "version": 1 }).to_string()

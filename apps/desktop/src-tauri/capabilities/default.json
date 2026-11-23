@@ -20,7 +20,6 @@
     "core:window:allow-close",
     "core:window:allow-destroy",
     "core:webview:allow-set-webview-zoom",
-    "shell:allow-open",
     "opener:allow-open-url",
     "opener:allow-reveal-item-in-dir",
     "notification:default"

@@ -13,6 +13,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import { mcpCpApi } from '../../lib/api/mcp';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import type {
     McpInvokeResp,
     McpRiskLabel,
@@ -95,6 +96,36 @@
       delete n[t.id];
       busyTool = n;
     }
+  }
+
+  async function toggleRequireApproval(t: McpToolView): Promise<void> {
+    if (t.require_approval && t.risk_label !== 'read') {
+      const ok = await confirmer.ask(
+        `Stop requiring approval for “${t.name}” (${t.risk_label})? Agents will run this tool without asking a person first.`,
+        { title: 'Remove approval gate?', confirmLabel: 'Allow without approval', danger: true },
+      );
+      if (!ok) return;
+    }
+    await patchTool(t, { require_approval: !t.require_approval });
+  }
+
+  async function changeRiskLabel(
+    t: McpToolView,
+    next: McpRiskLabel,
+    selectEl?: HTMLSelectElement,
+  ): Promise<void> {
+    if (next === t.risk_label) return;
+    if (t.risk_label === 'dangerous' && next !== 'dangerous') {
+      const ok = await confirmer.ask(
+        `Downgrade “${t.name}” from dangerous to ${next}? Policy rules targeting dangerous tools will stop matching it.`,
+        { title: 'Downgrade tool risk?', confirmLabel: 'Downgrade risk', danger: true },
+      );
+      if (!ok) {
+        if (selectEl) selectEl.value = t.risk_label;
+        return;
+      }
+    }
+    await patchTool(t, { risk_label: next });
   }
 
   async function discover(): Promise<void> {
@@ -228,11 +259,16 @@
             <ToolReviewBadge tool={t} busy={busyTool[t.id]} canConfigure={can('configure', t.name)} onacknowledge={() => void patchTool(t, { acknowledge: true })} />
           </div>
           <span class="cell">
+            <span class="cl">Risk</span>
             <McpPill kind="risk" value={t.risk_label} small />
             {#if t.risk_overridden}<span class="pinned" title="Human-pinned override (survives re-discovery)"><Icon name="key" size={12} /></span>{/if}
           </span>
-          <span class="cell"><McpPill kind="injection" value={t.injection_risk} small /></span>
           <span class="cell">
+            <span class="cl">Injection</span>
+            <McpPill kind="injection" value={t.injection_risk} small />
+          </span>
+          <span class="cell">
+            <span class="cl">Enabled</span>
             <Switch
               tone="success"
               checked={t.enabled}
@@ -243,24 +279,26 @@
             />
           </span>
           <span class="cell">
+            <span class="cl">Approval</span>
             <Switch
               tone="success"
               checked={t.require_approval}
               disabled={busyTool[t.id] || !can('configure', t.name)}
-              onchange={() => void patchTool(t, { require_approval: !t.require_approval })}
+              onchange={() => void toggleRequireApproval(t)}
               label={`Require approval for ${t.name}`}
               title={!can('configure', t.name) ? NO_CONFIGURE : t.require_approval ? 'Requires approval — click to allow without approval' : 'No approval required — click to require it'}
             />
           </span>
           <span class="cell">
+            <span class="cl">Override risk</span>
             <select
               value={t.risk_label}
               aria-label={`Risk label for ${t.name}`}
               disabled={busyTool[t.id] || !can('configure',t.name)}
-              onchange={(e) =>
-                void patchTool(t, {
-                  risk_label: (e.currentTarget as HTMLSelectElement).value as McpRiskLabel,
-                })}
+              onchange={(e) => {
+                const select = e.currentTarget as HTMLSelectElement;
+                void changeRiskLabel(t, select.value as McpRiskLabel, select);
+              }}
             >
               <option value="read">read</option>
               <option value="write">write</option>
@@ -553,16 +591,34 @@
     padding: 16px;
   }
 
+  .cl {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
   @media (max-width: 640px) {
     .thead {
       display: none;
     }
     .trow {
-      grid-template-columns: 1fr 1fr;
-      gap: 6px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px 12px;
     }
     .tname {
       grid-column: 1 / -1;
+    }
+    .cl {
+      position: static;
+      inline-size: auto;
+      block-size: auto;
+      overflow: visible;
+      clip-path: none;
+      font-size: var(--fs-xs);
+      color: var(--text-dim);
     }
   }
 </style>

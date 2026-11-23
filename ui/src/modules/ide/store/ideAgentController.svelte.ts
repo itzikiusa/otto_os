@@ -88,6 +88,25 @@ class IdeAgentControllerShell {
     return chip;
   }
 
+  attachGitHunk(
+    hunk: {
+      path: string;
+      startLine: number;
+      endLine: number;
+      anchorLine: number;
+      addedCount: number;
+      removedCount: number;
+      unifiedDiff: string;
+    },
+    opts?: { openPanel?: boolean },
+  ): IdeContextChip | null {
+    const chip = ideAgentState.attachGitHunkSync(hunk);
+    if (!chip) return null;
+    if (opts?.openPanel !== false) this.panelOpen = true;
+    else void loadIdeAgentEngine().then((eng) => eng.syncSubscriptions());
+    return chip;
+  }
+
   openInlineEdit(sel?: IdeShellSelectionInput): void {
     if (!ideAgentState.openInlinePromptSync(sel)) return;
     void loadIdeAgentEngine().then((eng) => eng.syncInlineOpen());

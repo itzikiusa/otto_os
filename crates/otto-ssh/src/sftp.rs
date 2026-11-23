@@ -65,6 +65,43 @@ pub struct SftpParams {
     pub jump: Option<String>,
 }
 
+impl SftpParams {
+    /// Validate host, user, jump chain, and identity file using the same rules
+    /// as [`crate::SshTunnelConfig::validate`] so malformed fields cannot
+    /// inject options or control characters into `sftp` / `ProxyCommand`.
+    pub fn validate(&self) -> Result<()> {
+        if !crate::valid_ssh_host(&self.host) {
+            return Err(Error::Invalid(format!(
+                "sftp host '{}' is not a valid hostname or IP address",
+                self.host
+            )));
+        }
+        if let Some(user) = self.user.as_deref().filter(|s| !s.is_empty()) {
+            if !crate::valid_ssh_user(user) {
+                return Err(Error::Invalid(format!(
+                    "sftp user '{user}' is not a valid user name"
+                )));
+            }
+        }
+        if let Some(id) = self.identity_file.as_deref().filter(|s| !s.is_empty()) {
+            if !crate::valid_identity_file(id) {
+                return Err(Error::Invalid(
+                    "sftp identity_file must not contain control characters or newlines".into(),
+                ));
+            }
+        }
+        if let Some(jump) = self.jump.as_deref().filter(|s| !s.trim().is_empty()) {
+            if !crate::valid_proxy_jump(jump) {
+                return Err(Error::Invalid(format!(
+                    "sftp jump host '{jump}' must be [user@]host[:port] hops separated by commas, \
+                     with no spaces and none starting with '-'"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// A live SFTP "session": a set of base `sftp` args plus a private control
 /// socket. Methods run `sftp -b -` per op; the control master keeps the
 /// underlying connection warm between ops.
@@ -89,6 +126,7 @@ impl SftpSession {
     /// control this value; production uses the system SFTP client.
     #[doc(hidden)]
     pub fn with_program(params: SftpParams, program: PathBuf) -> Result<Self> {
+        params.validate()?;
         // A unique dir per session keeps the control socket private (0700 by
         // mkdir default under TMPDIR) and lets Drop clean it up wholesale.
         let ctl_dir = std::env::temp_dir().join(format!("otto-sftp-{}", uniq_token()));
@@ -276,7 +314,7 @@ impl SftpSession {
     pub async fn list_capped(&self, path: &str, max: usize) -> Result<(Vec<SftpEntry>, bool)> {
         // Listing an explicit directory makes OpenSSH prefix every filename
         // with that path. Enter it first so returned identities are basenames.
-        let batch = format!("cd {}\nls -la", quote_checked(path)?);
+        let batch = format!("cd {}\nls -la", quote_path_checked(path)?);
         let out = self.run(&batch).await?;
         Ok(parse_longname_listing_capped(&out, max))
     }
@@ -345,7 +383,11 @@ impl SftpSession {
 
     /// Download a remote file to a local path (sftp `get`).
     pub async fn download(&self, remote: &str, local: &str) -> Result<()> {
-        let batch = format!("get {} {}", quote_checked(remote)?, quote_checked(local)?);
+        let batch = format!(
+            "get {} {}",
+            quote_path_checked(remote)?,
+            quote_path_checked(local)?
+        );
         self.run_bounded(&batch, TRANSFER_TIMEOUT).await.map(|_| ())
     }
 
@@ -358,80 +400,144 @@ impl SftpSession {
     /// accounts with no remote shell. Returns `true` when the file is larger
     /// than `cap` (stopped early, or completed over the cap).
     pub async fn download_prefix(&self, remote: &str, local: &str, cap: u64) -> Result<bool> {
-        let batch = format!("get {} {}", quote_checked(remote)?, quote_checked(local)?);
+        let batch = format!(
+            "get {} {}",
+            quote_path_checked(remote)?,
+            quote_path_checked(local)?
+        );
         let get = self.run_bounded(&batch, TRANSFER_TIMEOUT);
         get_until_cap(get, std::path::Path::new(local), cap, PREFIX_POLL).await
     }
 
     /// Upload a local file to a remote path (sftp `put`).
     pub async fn upload(&self, local: &str, remote: &str) -> Result<()> {
-        let batch = format!("put {} {}", quote_checked(local)?, quote_checked(remote)?);
+        let batch = format!(
+            "put {} {}",
+            quote_path_checked(local)?,
+            quote_path_checked(remote)?
+        );
         self.run_bounded(&batch, TRANSFER_TIMEOUT).await.map(|_| ())
     }
 
     /// Create a remote directory.
     pub async fn mkdir(&self, path: &str) -> Result<()> {
-        let batch = format!("mkdir {}", quote_checked(path)?);
+        let batch = format!("mkdir {}", quote_path_checked(path)?);
         self.run(&batch).await.map(|_| ())
     }
 
     /// Remove a remote file.
     pub async fn remove(&self, path: &str) -> Result<()> {
-        let batch = format!("rm {}", quote_checked(path)?);
+        let batch = format!("rm {}", quote_path_checked(path)?);
         self.run(&batch).await.map(|_| ())
     }
 
     /// Remove a remote directory.
     pub async fn rmdir(&self, path: &str) -> Result<()> {
-        let batch = format!("rmdir {}", quote_checked(path)?);
+        let batch = format!("rmdir {}", quote_path_checked(path)?);
         self.run(&batch).await.map(|_| ())
     }
 
     /// Rename/move a remote path.
     pub async fn rename(&self, from: &str, to: &str) -> Result<()> {
-        let batch = format!("rename {} {}", quote_checked(from)?, quote_checked(to)?);
+        let batch = format!(
+            "rename {} {}",
+            quote_path_checked(from)?,
+            quote_path_checked(to)?
+        );
         self.run(&batch).await.map(|_| ())
     }
 }
 
+struct SftpCleanupJob {
+    dir: PathBuf,
+    path: String,
+    target: String,
+}
+
+fn cleanup_control_sync(job: SftpCleanupJob) {
+    if std::path::Path::new(&job.path).exists() {
+        if let Ok(mut child) = std::process::Command::new("ssh")
+            .args([
+                "-o",
+                &format!("ControlPath={}", job.path),
+                "-O",
+                "exit",
+                "--",
+                &job.target,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                if child.try_wait().ok().flatten().is_some() {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(job.dir);
+}
+
+fn sftp_reaper() -> &'static std::sync::mpsc::SyncSender<SftpCleanupJob> {
+    static TX: std::sync::OnceLock<std::sync::mpsc::SyncSender<SftpCleanupJob>> =
+        std::sync::OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<SftpCleanupJob>(256);
+        let _ = std::thread::Builder::new()
+            .name("otto-sftp-reaper".into())
+            .spawn(move || {
+                while let Ok(job) = rx.recv() {
+                    cleanup_control_sync(job);
+                }
+            });
+        tx
+    })
+}
+
 impl Drop for SftpSession {
     fn drop(&mut self) {
-        // Never block an async request on process cleanup. No connection is
-        // opened for an unused session, and a stuck control client is bounded.
-        let dir = self.ctl_dir.clone();
-        let path = self.ctl_path.clone();
-        let target = self.target();
-        std::thread::spawn(move || {
-            if std::path::Path::new(&path).exists() {
-                if let Ok(mut child) = std::process::Command::new("ssh")
-                    .args([
-                        "-o",
-                        &format!("ControlPath={path}"),
-                        "-O",
-                        "exit",
-                        "--",
-                        &target,
-                    ])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()
-                {
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-                    loop {
-                        if child.try_wait().ok().flatten().is_some() {
-                            break;
-                        }
-                        if std::time::Instant::now() >= deadline {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            break;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                    }
+        // Never block an async request and never spawn an unbounded OS thread
+        // per dropped session: prefer the current Tokio runtime, falling back
+        // to a single bounded background reaper thread.
+        let job = SftpCleanupJob {
+            dir: self.ctl_dir.clone(),
+            path: self.ctl_path.clone(),
+            target: self.target(),
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if tokio::fs::try_exists(&job.path).await.unwrap_or(false) {
+                    let exit = Command::new("ssh")
+                        .args([
+                            "-o",
+                            &format!("ControlPath={}", job.path),
+                            "-O",
+                            "exit",
+                            "--",
+                            &job.target,
+                        ])
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .kill_on_drop(true)
+                        .status();
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), exit).await;
                 }
-            }
-            let _ = std::fs::remove_dir_all(dir);
-        });
+                let _ = tokio::fs::remove_dir_all(&job.dir).await;
+            });
+            return;
+        }
+        if sftp_reaper().try_send(job).is_err() {
+            let _ = std::fs::remove_dir_all(&self.ctl_dir);
+        }
     }
 }
 
@@ -605,6 +711,17 @@ fn quote_checked(path: &str) -> Result<String> {
         ));
     }
     Ok(quote(path))
+}
+
+/// Like [`quote_checked`], and prefixes leading-`-` relative paths with `./`
+/// so OpenSSH `sftp` commands (`get`/`put`/`rm`/`mkdir`/`rename`/`cd`) never
+/// interpret a filename like `-r` or `-a` as an option flag.
+fn quote_path_checked(path: &str) -> Result<String> {
+    if path.starts_with('-') {
+        quote_checked(&format!("./{path}"))
+    } else {
+        quote_checked(path)
+    }
 }
 
 /// Parse the absolute path out of sftp `pwd` output. The client prints a line
@@ -916,6 +1033,48 @@ not-a-mode-string here we go
         assert!(!args.iter().any(|a| a == "-i"));
         assert!(!args.iter().any(|a| a == "-J"));
         assert_eq!(args.last().unwrap(), "h");
+    }
+
+    #[test]
+    fn sftp_params_validate_rejects_malformed_fields_and_dash_paths_are_prefixed() {
+        let bad_host = SftpSession::new(SftpParams {
+            host: "-oProxyCommand=evil".into(),
+            port: None,
+            user: None,
+            identity_file: None,
+            jump: None,
+        });
+        assert!(matches!(bad_host, Err(Error::Invalid(_))));
+
+        let bad_user = SftpSession::new(SftpParams {
+            host: "h.example.com".into(),
+            port: None,
+            user: Some("-bad".into()),
+            identity_file: None,
+            jump: None,
+        });
+        assert!(matches!(bad_user, Err(Error::Invalid(_))));
+
+        let bad_jump = SftpSession::new(SftpParams {
+            host: "h.example.com".into(),
+            port: None,
+            user: None,
+            identity_file: None,
+            jump: Some("-oProxyCommand=evil".into()),
+        });
+        assert!(matches!(bad_jump, Err(Error::Invalid(_))));
+
+        let bad_id = SftpSession::new(SftpParams {
+            host: "h.example.com".into(),
+            port: None,
+            user: None,
+            identity_file: Some("/tmp/id\n-oEvil=1".into()),
+            jump: None,
+        });
+        assert!(matches!(bad_id, Err(Error::Invalid(_))));
+
+        assert_eq!(quote_path_checked("-r").unwrap(), "\"./-r\"");
+        assert_eq!(quote_path_checked("/abs/-r").unwrap(), "\"/abs/-r\"");
     }
 }
 

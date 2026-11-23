@@ -181,7 +181,7 @@
   {#if auth.isRoot}<DatabaseCompact /><DesignStorage />{/if}
 
   <!-- Settings only: export/import + backup/restore with a manifest -->
-  <section class="card pad" aria-label="Settings file">
+  <section class="card br-pad" aria-label="Settings file">
     <h2 class="card-title">Settings only</h2>
     <p class="hint">
       Daemon settings as a JSON file — for moving your configuration to another Mac. Secrets (tokens,
@@ -250,7 +250,7 @@
     height: 100%;
     min-height: 0;
   }
-  .card.pad {
+  .br-pad {
     padding: 16px 18px;
     max-width: var(--settings-col);
     margin-bottom: 16px;

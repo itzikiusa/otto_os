@@ -70,27 +70,38 @@ export function takePendingDraft(repoId: string): DraftCommitMessageResp | null 
 }
 
 const inflight = new Map<string, Promise<DraftCommitMessageResp>>();
+const controllers = new Map<string, AbortController>();
 const watchers = new Map<string, number>();
 
 /** Start (or join) the agent draft for `repoId`. If no panel is watching the
  *  repo when it lands, the reply is parked for {@link takePendingDraft}. */
 export function startDraft(
   repoId: string,
-  run: () => Promise<DraftCommitMessageResp>,
+  run: (signal: AbortSignal) => Promise<DraftCommitMessageResp>,
 ): Promise<DraftCommitMessageResp> {
   const running = inflight.get(repoId);
   if (running) return running;
-  const p = run();
+  const ctl = new AbortController();
+  controllers.set(repoId, ctl);
+  const p = run(ctl.signal);
   inflight.set(repoId, p);
   p.then(
     (d) => {
-      if (!watchers.get(repoId)) write(repoId, { ...read(repoId), pending: d });
+      if (!ctl.signal.aborted && !watchers.get(repoId)) write(repoId, { ...read(repoId), pending: d });
     },
     () => {},
   ).finally(() => {
     if (inflight.get(repoId) === p) inflight.delete(repoId);
+    if (controllers.get(repoId) === ctl) controllers.delete(repoId);
   });
   return p;
+}
+
+/** Abort and forget any in-flight agent draft for `repoId`. */
+export function cancelDraft(repoId: string): void {
+  controllers.get(repoId)?.abort();
+  controllers.delete(repoId);
+  inflight.delete(repoId);
 }
 
 /** The draft still running for `repoId`, if any (a remounted panel resumes

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { newId } from '../../lib/id';
   import { announceEdge } from '../../lib/announce.svelte';
   import { onDestroy, tick, untrack } from 'svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -64,11 +65,6 @@
   ];
   onDestroy(() => { alive = false; ++loadSeq; });
 
-  function newTurnId(): string {
-    return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-      ? crypto.randomUUID()
-      : `turn-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  }
 
   // Keep the newest turn in view on initial load, user send, and agent reply.
   $effect(() => {
@@ -210,7 +206,7 @@
     const body = inputText.trim();
     if (!body || sending || stopping || loading || Boolean(loadError)) return;
     const target = tid;
-    const turnId = newTurnId();
+    const turnId = newId();
     const generation = loadSeq;
     const current = () => alive && tid === target && loadSeq === generation && activeTurnId === turnId;
     drafts.delete(target);

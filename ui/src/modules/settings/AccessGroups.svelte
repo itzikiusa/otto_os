@@ -13,6 +13,7 @@
   import type { AccessGroup, AccessRole, User, ResourceKind } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import { announceShown } from '../../lib/announce.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { guardUnsaved } from '../../lib/leaveGuard';
@@ -148,7 +149,7 @@
       if (done) toasts.success(done);
     } catch (e) {
       // Inline, next to the form — the fix is usually in the fields above.
-      error = `Couldn’t ${what}. ${e instanceof Error ? e.message : String(e)}`;
+      error = `Couldn’t ${what}. ${loadErrorText(e)}`;
     } finally {
       busy = false;
     }
@@ -260,7 +261,7 @@
         Role presets <span class="count">{roles.length}</span>
       </button>
     </div>
-    {#if error}<p role="alert" class="error"><Icon name="warning" size={12} /> {error}</p>{/if}
+    {#if error}<p class="error" use:announceShown={{ text: error, assertive: true }}><Icon name="warning" size={12} /> {error}</p>{/if}
     {#if tab === 'groups'}
     <section aria-label="Groups">
       <!-- An empty list hides its pane: the page opens on the create form. -->

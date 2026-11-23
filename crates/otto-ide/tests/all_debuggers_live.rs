@@ -748,7 +748,8 @@ async fn live_rust_lldb_bridge_builds_cargo_artifact_hits_breakpoint_reads_local
         Some(json!({
             "target": { "kind": "local", "root": crate_str },
             "language": "rust",
-            "launch": { "program": main_str, "cwd": crate_str },
+            // CI strips symbols from Otto itself. The debuggee needs locals and line tables.
+            "launch": { "program": main_str, "cwd": crate_str, "env": { "CARGO_PROFILE_DEV_DEBUG": "2" } },
             "breakpoints": [{ "path": main_str, "line": 3 }],
         })),
     )

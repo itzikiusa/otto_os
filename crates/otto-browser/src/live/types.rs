@@ -5,6 +5,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::emulation::EmulationConfig;
+
 /// Settings-KV key the daemon-wide [`LiveSettings`] are stored under.
 pub const SETTINGS_KEY: &str = "browser_live";
 
@@ -72,6 +74,11 @@ pub struct LiveSettings {
     pub max_sessions: u32,
     pub idle_timeout_secs: u64,
     pub downloads: DownloadPolicy,
+    /// Opt-in SPA outward mutation guard: when `true`, agent-driven
+    /// non-idempotent `Fetch`/`XHR` requests (excluding analytics/beacons)
+    /// require human approval alongside form-submit `Document` requests.
+    #[serde(default)]
+    pub guard_spa_mutations: bool,
 }
 
 impl Default for LiveSettings {
@@ -82,6 +89,7 @@ impl Default for LiveSettings {
             max_sessions: 6,
             idle_timeout_secs: 900,
             downloads: DownloadPolicy::Quarantine,
+            guard_spa_mutations: false,
         }
     }
 }
@@ -94,6 +102,7 @@ pub struct LiveSettingsPatch {
     pub max_sessions: Option<u32>,
     pub idle_timeout_secs: Option<u64>,
     pub downloads: Option<DownloadPolicy>,
+    pub guard_spa_mutations: Option<bool>,
 }
 
 impl LiveSettings {
@@ -132,6 +141,9 @@ impl LiveSettings {
             max_sessions: patch.max_sessions.unwrap_or(self.max_sessions),
             idle_timeout_secs: patch.idle_timeout_secs.unwrap_or(self.idle_timeout_secs),
             downloads: patch.downloads.unwrap_or(self.downloads),
+            guard_spa_mutations: patch
+                .guard_spa_mutations
+                .unwrap_or(self.guard_spa_mutations),
         };
         next.validate()?;
         Ok(next)
@@ -223,9 +235,13 @@ pub struct LiveSessionInfo {
     pub can_go_back: bool,
     pub can_go_forward: bool,
     pub viewport: Viewport,
+    pub emulation: EmulationConfig,
+    pub devtools_enabled: bool,
     pub controller: ControllerKind,
     pub controller_user_id: Option<String>,
     pub viewers: u32,
+    #[serde(default)]
+    pub guard_spa_mutations: bool,
     pub created_at: String,
     pub last_activity_at: String,
 }

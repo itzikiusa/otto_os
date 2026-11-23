@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { announceShown } from '../../lib/announce.svelte';
   import { toastError } from '../../lib/toastError';
   import { onTabKey } from '../../lib/tabKeys';
   import { sectionLabel } from './sections';
@@ -438,7 +439,7 @@
                 oninput={() => (nameError = '')}
               />
               {#if nameError}
-                <span class="field-err" id="lib-name-hint" role="alert">{nameError}</span>
+                <span class="field-err" id="lib-name-hint" use:announceShown={{ text: nameError, assertive: true }}>{nameError}</span>
               {:else}
                 <span class="hint" id="lib-name-hint">
                   Letters, numbers, “-” and “_” only. Changing the name of an existing entry renames it.

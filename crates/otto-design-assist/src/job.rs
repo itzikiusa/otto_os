@@ -66,9 +66,9 @@ enum Proposal {
     Commit { out: Outcome, doc: Vec<u8> },
 }
 
-fn done_marker() -> (PathBuf, String) {
-    let path = std::env::temp_dir().join(format!("otto-design-done-{}.txt", new_id()));
-    let _ = std::fs::write(&path, "");
+async fn done_marker(dir: &FsPath) -> (PathBuf, String) {
+    let path = dir.join(format!(".otto-design-done-{}.txt", new_id()));
+    let _ = tokio::fs::write(&path, "").await;
     let line = format!(
         "\nLAST OF ALL — strictly after every other step above is complete — write your ONE-LINE \
          summary (with its [R…] citations) as plain text to this exact filesystem path: `{}`. \
@@ -461,7 +461,7 @@ pub(crate) async fn run_job<C: DesignAssistCtx>(
     let aid = job.artifact.id.clone();
     let tid = job.turn_id.clone();
     let ready_tx = job.ready_tx.take();
-    let (done_path, done_line) = done_marker();
+    let (done_path, done_line) = done_marker(&job.dir).await;
     let turn = DesignTurn {
         job: &job,
         title: match &job.branch {
@@ -475,7 +475,7 @@ pub(crate) async fn run_job<C: DesignAssistCtx>(
         partial: Mutex::new(None),
     };
     let ran = run_assist_job(ctx.sessions(), &turn, claim).await;
-    let _ = std::fs::remove_file(&turn.done_path);
+    let _ = tokio::fs::remove_file(&turn.done_path).await;
     let partial = turn
         .partial
         .lock()
@@ -607,12 +607,28 @@ pub(crate) async fn restore_document(
     let fresh = svc.store().require_artifact(&artifact.id).await?;
     let (_, head) = svc.head_content(&fresh).await?;
     if let Some(wf) = work_file {
-        tokio::fs::write(wf, &head).await.map_err(io)?;
+        crate::write_file_atomic(wf, head.clone())
+            .await
+            .map_err(io)?;
     }
     if adapter.canvas_inner.is_some() {
-        tokio::fs::write(agent_path, adapter.agent_source(&head))
+        crate::write_file_atomic(agent_path, adapter.agent_source(&head).into_bytes())
             .await
             .map_err(io)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn done_marker_lives_inside_job_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, line) = done_marker(dir.path()).await;
+        assert_eq!(path.parent(), Some(dir.path()));
+        assert!(path.exists());
+        assert!(line.contains(&path.display().to_string()));
+    }
 }

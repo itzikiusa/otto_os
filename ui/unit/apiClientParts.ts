@@ -5,6 +5,7 @@
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import * as id from '../src/lib/id.ts';
 
 /** Import specifier (without extension) → source file. `model` first: the
  *  other parts read its helpers. */
@@ -26,7 +27,7 @@ export function apiClientParts() {
   return {
     /** strictRequire entries for the parts: the store imports them as
      *  `./apiClient/<k>`, the parts import each other as `./<k>`. */
-    entries: names.flatMap((k) => [[`/apiClient/${k}`, exports[k]], [`./${k}`, exports[k]]] as const),
+    entries: [...names.flatMap((k) => [[`/apiClient/${k}`, exports[k]], [`./${k}`, exports[k]]] as const), ['/id', id] as const],
     /** Run every part in `context`'s sandbox; call before running the store. */
     load(context: Record<string, unknown>): void {
       for (const k of names) {

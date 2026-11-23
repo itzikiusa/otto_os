@@ -36,14 +36,15 @@ pub(in crate::workflow_engine) async fn execute(
                  SET waiting_approval = 1, approval_node_id = ?,
                      approved_by = NULL, approval_note = NULL, approved_at = NULL,
                      rev = rev + 1
-                 WHERE id = ?
+                 WHERE id = ? AND status = 'running'
                  RETURNING rev",
     )
     .bind(&node.id)
     .bind(run_id)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await
-    .map_err(|e| otto_core::Error::Internal(format!("human_approval mark: {e}")))?;
+    .map_err(|e| otto_core::Error::Internal(format!("human_approval mark: {e}")))?
+    .ok_or_else(|| otto_core::Error::Conflict("human_approval: run is no longer running".into()))?;
     emit_run_updated(
         ctx,
         &ws.id,

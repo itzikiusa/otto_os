@@ -1,6 +1,7 @@
 <script lang="ts">
   import { toastError } from '../../lib/toastError';
   import { loadErrorText } from '../../lib/loadError';
+  import { shouldFetchGitAccounts } from './gitUiHelpers';
   // Git module page. Workspace-INDEPENDENT: shows GitKraken-style top-level repo
   // tabs (one per open repo) above the active repo's RepoView. With no tab open
   // it shows a full-width landing — the repo browser/list + "Add Repository"
@@ -35,12 +36,11 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import { lsGet, lsSet } from '../../lib/storage';
 
   // The PR detail (+ its review panel, comment threads and merge dialog) is a
   // deep-linked route most Git visits never open: its own chunk (perf R7).
-
-  // Route awareness is now limited to PR detail + deep-links into a repo tab.
-
+  // Route awareness is limited to PR detail + deep-links into a repo tab.
   // The active repo is driven by the tab store, not the route.
   const activeRepo = $derived(git.allRepos.find((r) => r.id === git.activeRepoId) ?? null);
   const activeStatus = $derived(activeRepo ? (git.statusById[activeRepo.id] ?? null) : null);
@@ -81,15 +81,14 @@
   let busy = $state(false);
   let pickerOpen = $state(false);
 
-
   // Clone destination dir — REMEMBERED across sessions so the user never has to
   // re-pick it (persisted to localStorage; defaults to the last-used location).
   const CLONE_DIR_KEY = 'otto_git_clone_dir';
-  let cloneDir = $state(localStorage.getItem(CLONE_DIR_KEY) ?? '');
+  let cloneDir = $state(lsGet(CLONE_DIR_KEY) ?? '');
   let cloneDirPickerOpen = $state(false);
   function rememberCloneDir(): void {
     const v = cloneDir.trim();
-    if (v) localStorage.setItem(CLONE_DIR_KEY, v);
+    if (v) lsSet(CLONE_DIR_KEY, v);
   }
 
   // "Browse remote" mode: search repos under a git account's namespace.
@@ -255,16 +254,15 @@
     }
   }
 
-  // Accounts back both the add/clone flow and the per-card account picker on
-  // the landing hub, so they load on mount — not only when the sheet opens.
-  // Re-read on every `addOpen` toggle so an account added there shows up in the
-  // cards without a reload.
+  // Load accounts once on mount and whenever the Add Repository sheet opens
+  // (never on close); abort stale fetches and keep existing accounts on error.
+  let accountsInitialized = false;
   $effect(() => {
-    void addOpen;
-    void api
-      .get<GitAccount[]>('/git/accounts')
-      .then((a) => (accounts = a))
-      .catch(() => (accounts = []));
+    if (!shouldFetchGitAccounts(addOpen, accountsInitialized)) return;
+    accountsInitialized = true;
+    const ctl = new AbortController();
+    void api.get<GitAccount[]>('/git/accounts', ctl.signal).then((a) => { if (!ctl.signal.aborted) accounts = a; }).catch(() => {});
+    return () => ctl.abort();
   });
 
   /** Accounts that could serve a repo on `provider` (a token is provider-bound). */
@@ -546,10 +544,8 @@
           {#if remoteLoading}
             <div class="dim pad">Searching repositories…</div>
           {:else if remoteError}
-            <div class="err pad" role="alert">
-              <Icon name="warning" size={14} />
-              <span class="grow">Couldn’t search the account’s repositories. <span class="dim">{remoteError}</span></span>
-              <button class="btn small" onclick={() => void runRemoteSearch()}>Retry</button>
+            <div class="pad">
+              <LoadState variant="compact" what="the account’s repositories" errorTitle="Couldn’t search the account’s repositories" error={remoteError} empty onretry={() => void runRemoteSearch()} />
             </div>
           {:else if remoteRepos.length === 0}
             <div class="dim pad">{browseQuery.trim() ? `No repositories match “${browseQuery.trim()}”.` : 'This account has no repositories.'}</div>
@@ -739,22 +735,6 @@
   .pad {
     padding: 14px;
     font-size: var(--fs-s);
-  }
-  .err {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 12px;
-    font-size: var(--fs-s);
-    color: var(--text);
-  }
-  .err > :global(svg) {
-    color: var(--danger);
-    flex-shrink: 0;
-  }
-  .err .grow {
-    flex: 1;
-    min-width: 0;
   }
   /* Filter row above the repo grid — styled like an input but with an inline
      leading icon + live match count, so it reads as part of the hub chrome. */

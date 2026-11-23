@@ -172,6 +172,11 @@
     font-variant-numeric: tabular-nums;
     outline: none;
   }
+  @media (pointer: coarse) {
+    .nd {
+      height: 40px;
+    }
+  }
   .nd-unit {
     padding-block: 0; padding-inline: 0 4px;
     font-size: var(--fs-xs);

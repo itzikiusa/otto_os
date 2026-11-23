@@ -27,6 +27,10 @@
     title: string;
     /** Full queue row, when this viewer can read the queue (mcp:view). */
     detail: McpApproval | null;
+    /** Optional resource_type from the live WS approval frame (Document | Fetch | XHR). */
+    resourceType?: string | null;
+    /** Optional redacted body_preview from the live WS approval frame. */
+    bodyPreview?: string | null;
     /** The live session's profile (the "As" line). */
     profile: string | null;
     /** `reason` is only set for a deny that came through the DenySheet. */
@@ -36,7 +40,7 @@
     /** Why the last decision failed, inline. */
     error?: string;
   }
-  let { id, title, detail, profile, ondecide, busy = false, error = '' }: Props = $props();
+  let { id, title, detail, resourceType = null, bodyPreview = null, profile, ondecide, busy = false, error = '' }: Props = $props();
 
   let cardEl = $state<HTMLElement | null>(null);
 
@@ -50,7 +54,7 @@
 
   // Which decision is in flight, so the busy label names it ("Denying…").
   let inflight = $state<'approve' | 'deny'>('approve');
-  const facts = $derived(approvalFacts(detail, profile));
+  const facts = $derived(approvalFacts(detail, profile, { resourceType, bodyPreview }));
   const titleId = $derived(`approval-title-${id}`);
   // Spoken at the state edge through the shell's always-mounted announcer: a
   // live region inserted together with its text is not read (WebKit/VoiceOver).
@@ -87,6 +91,13 @@
 
   {#if facts.why}
     <p class="why"><span class="dim">Agent’s reason:</span> {facts.why}</p>
+  {/if}
+
+  {#if facts.bodyPreview}
+    <div class="payload-box" data-testid="live-approval-payload">
+      <div class="payload-label">Payload preview (redacted)</div>
+      <pre class="payload-pre" dir="ltr">{facts.bodyPreview}</pre>
+    </div>
   {/if}
 
   {#if facts.screenshot}
@@ -206,6 +217,29 @@
   .why {
     margin: 12px 0 0;
     font-size: var(--fs-s);
+  }
+  .payload-box {
+    margin: 12px 0 0;
+    padding: 8px;
+    border-radius: var(--radius-m);
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+  }
+  .payload-label {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    margin-bottom: 4px;
+  }
+  .payload-pre {
+    margin: 0;
+    max-height: 140px;
+    overflow: auto;
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    color: var(--text);
   }
   .dim {
     color: var(--text-dim);

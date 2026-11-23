@@ -4,14 +4,16 @@
 // Engine status/settings/install are daemon-wide (`/browser/live/*`); the
 // live session is per tab (`/browser/tabs/{id}/live`), private to its owner.
 
-import { api, wsConnect } from './client';
+import { api, authedResponse, wsConnect } from './client';
 import type {
   BrowserChromeBuild,
   BrowserEngineInstallJob,
   BrowserLiveCreateReq,
+  BrowserLiveEmulateReq,
   BrowserLiveSession,
   BrowserLiveSettings,
   BrowserLiveStatus,
+  BrowserScreenshotReq,
 } from './types';
 
 export function liveStatus() {
@@ -36,6 +38,22 @@ export function openLive(tabId: string, body: BrowserLiveCreateReq) {
 
 export function closeLive(tabId: string) {
   return api.del<void>(`/browser/tabs/${tabId}/live`);
+}
+
+/** Apply device emulation (preset, mobile/touch, UA, color scheme, orientation)
+ *  and optionally resize the remote Chromium viewport. */
+export function emulateLive(tabId: string, body: BrowserLiveEmulateReq) {
+  return api.post<BrowserLiveSession>(`/browser/tabs/${tabId}/live/emulate`, body);
+}
+
+/** Capture a PNG or JPEG screenshot of the live tab (viewport, full_page, or element). */
+export async function screenshotLive(tabId: string, body: BrowserScreenshotReq = {}): Promise<Blob> {
+  const resp = await authedResponse(`/browser/tabs/${tabId}/live/screenshot`, {
+    method: 'POST',
+    contentType: 'application/json',
+    body: JSON.stringify(body),
+  });
+  return resp.blob();
 }
 
 /** The screencast + input socket (bearer via the subprotocol, never the URL). */

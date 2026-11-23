@@ -28,6 +28,7 @@
   import { activity } from '../../lib/stores/activity.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { copyText } from '../../lib/clipboard';
+  import { copySessionTranscriptMarkdown } from './conversation/exportMarkdown';
   import StartRoomModal from '../rooms/StartRoomModal.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { sessionHandoffItems } from './sessionHandoff';
@@ -58,6 +59,7 @@
   import { uiControl } from '../../lib/stores/uiControl.svelte';
   import { commandLabel, providerName } from '../../lib/uiCommands/frames';
   import { moduleLabel } from '../../lib/sidebar';
+  import { announceShown } from '../../lib/announce.svelte';
   import ApprovalActions from '../../lib/components/ApprovalActions.svelte';
 
   interface Props {
@@ -618,6 +620,7 @@
           ]
         : []),
       ...terminalItems(),
+      ...(isAgent ? [{ label: 'Copy transcript (Markdown)', icon: 'copy', action: () => void copySessionTranscriptMarkdown(sessionId, { title: session?.title, provider: session?.provider, cwd: session?.cwd }) } as MenuItem] : []),
       ...(!readOnly && isAgent
         ? [
             {
@@ -697,18 +700,18 @@
   function openPaneMenu(e: MouseEvent | KeyboardEvent): void {
     ctxMenu.show(e, sessionMenuItems());
   }
+  function attendPane(node: HTMLElement): { destroy(): void } {
+    const onDown = () => { ws.clearNeedsYou(sessionId); onfocus(); };
+    node.addEventListener('mousedown', onDown);
+    return { destroy: () => node.removeEventListener('mousedown', onDown) };
+  }
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
 <section
   class="pane"
   class:focused
   class:current={kbFocused}
-  onmousedown={() => {
-    // Interacting with the pane attends to it — drop the "needs you" flag.
-    ws.clearNeedsYou(sessionId);
-    onfocus();
-  }}
+  use:attendPane
 >
   <!-- ONE row, adapted to the PANE width by the `@container pane` rules below
        (full ≥720 · compact 420–719 · minimal 200–419 · micro <200). Priority:
@@ -730,7 +733,6 @@
         ondragstart={onGripDragStart}
         ondragend={onGripDragEnd}
         onclick={openPaneMenu}
-        onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && openPaneMenu(e)}
       >
         <Icon name="grip" size={12} />
       </button>
@@ -750,11 +752,10 @@
         onmousedown={(e) => e.stopPropagation()}
       />
     {:else}
-      <span use:rowMenu
+      <button use:rowMenu
+        type="button"
         class="pane-title"
         class:draggable={gripOn}
-        role="button"
-        tabindex="0"
         draggable={gripOn ? 'true' : undefined}
         title="{session?.title ?? sessionId}{nameFull && nameFull !== session?.title ? ` (${nameFull})` : ''} — double-click to rename, right-click for options"
         ondragstart={gripOn ? onGripDragStart : undefined}
@@ -770,7 +771,7 @@
             openPaneMenu(e);
           }
         }}
-      >{session?.title ?? sessionId}</span>
+      >{session?.title ?? sessionId}</button>
     {/if}
     {#if paneState.key === 'needs-you'}
       <span class="needs-you-badge" title="This session is waiting on you (input or a permission)">
@@ -821,7 +822,7 @@
       <span class="meta-text">
         <span class="provider-name">{session?.provider ?? '?'}</span>
         {#if idleHint}<span class="meta-extra meta-idle">{idleHint.label}</span>{/if}
-        {#if session?.cwd}<span class="meta-extra meta-cwd mono">{cwdLabel(session.cwd)}</span>{/if}
+        {#if session?.cwd}<span class="meta-extra meta-cwd mono" dir="ltr">{cwdLabel(session.cwd)}</span>{/if}
       </span>
     </button>
     <span class="grow"></span>
@@ -867,7 +868,6 @@
       class="icon-btn pane-more"
       onmousedown={(e) => e.stopPropagation()}
       onclick={openPaneMenu}
-      onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && openPaneMenu(e)}
       title="More…"
       aria-label="More… — {session?.title ?? sessionId}"
       aria-haspopup="menu"
@@ -884,7 +884,7 @@
          carries a mark), Allow lasts for the session. -->
     <div class="ui-ask" role="group" aria-label="UI control request" data-testid="ui-control-request">
       <span class="ui-ask-mark" aria-hidden="true"><Icon name="cursor" size={13} /></span>
-      <span class="ui-ask-text" aria-live="polite">
+      <span class="ui-ask-text" use:announceShown={{ text: `${agentWho}${session?.title ? ` · ${session.title}` : ''} wants to drive Otto — ${uiAskWhat}.` }}>
         <strong>{agentWho}{session?.title ? ` · ${session.title}` : ''} wants to drive Otto</strong> — {uiAskWhat}. Everything it does shows beside this session, and writes still ask you.
       </span>
       <span class="ui-ask-actions">
@@ -937,7 +937,7 @@
         <ul class="dir-list">
           {#each extraDirs as dir (dir)}
             <li class="dir-row">
-              <span class="dir-path mono" title={dir}>{dir}</span>
+              <span class="dir-path mono" dir="ltr" title={dir}>{dir}</span>
               <button
                 type="button"
                 class="dir-remove"
@@ -1067,20 +1067,11 @@
   /* The title gets the space: it is the one item that grows, and the chips
      beside it shrink (and fold away by tier) before it does. */
   .pane-title {
-    flex: 0 1 auto;
-    min-width: 0;
-    font-size: var(--fs-s);
-    font-weight: 600;
-    color: var(--text);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    border-radius: var(--radius-s);
-    padding-inline: 2px;
-    transition: color var(--dur-fast) ease-out;
-  }
-  .pane-title[role='button'] {
-    cursor: default;
+    flex: 0 1 auto; min-width: 0; border: 0; background: none; font: inherit;
+    font-size: var(--fs-s); font-weight: 600; color: var(--text); text-align: start;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    border-radius: var(--radius-s); padding-block: 0; padding-inline: 2px;
+    cursor: default; transition: color var(--dur-fast) ease-out;
   }
   .pane-title.draggable {
     cursor: grab;

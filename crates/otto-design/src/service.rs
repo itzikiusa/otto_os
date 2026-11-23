@@ -176,6 +176,8 @@ pub struct CreateInput {
     /// First version's kind (default `named`; imports pass `import`).
     pub version_kind: Option<String>,
     pub validate: bool,
+    /// First version's provenance when not forking (a 3D job's generator + manifest).
+    pub provenance: Option<Value>,
 }
 
 #[derive(Clone)]
@@ -609,7 +611,7 @@ impl DesignService {
             Some((src, v)) => {
                 json!({ "fork": { "artifact_id": src.id, "version_id": v.id, "seq": v.seq } })
             }
-            None => json!({}),
+            None => input.provenance.clone().unwrap_or_else(|| json!({})),
         };
         let kind = input
             .version_kind
@@ -1367,12 +1369,18 @@ impl DesignService {
         let mut blob_ref = None;
         let prev_thumb = a.thumb_blob.clone();
         if let Some(b64) = req.thumb_b64 {
-            let bytes = decode_content(None, Some(b64))?.unwrap_or_default();
-            if bytes.len() > MAX_THUMB_BYTES {
-                return Err(Error::PayloadTooLarge("thumbnail exceeds 2 MB".into()));
-            }
-            let png = format::spec("png").expect("png is a known format");
-            format::validate(png, &bytes)?;
+            let decode_and_check = move || -> Result<Vec<u8>> {
+                let bytes = decode_content(None, Some(b64))?.unwrap_or_default();
+                if bytes.len() > MAX_THUMB_BYTES {
+                    return Err(Error::PayloadTooLarge("thumbnail exceeds 2 MB".into()));
+                }
+                let png = format::spec("png").expect("png is a known format");
+                format::validate(png, &bytes)?;
+                Ok(bytes)
+            };
+            let bytes = tokio::task::spawn_blocking(decode_and_check)
+                .await
+                .map_err(|e| Error::Internal(format!("thumbnail decode worker: {e}")))??;
             blob_ref = Some(self.blobs.reference_guard().await?);
             a.thumb_blob = Some(self.blobs.put(&bytes).await?);
         }
@@ -2067,6 +2075,7 @@ mod tests {
             created_at: None,
             version_kind: None,
             validate: true,
+            provenance: None,
         }
     }
 

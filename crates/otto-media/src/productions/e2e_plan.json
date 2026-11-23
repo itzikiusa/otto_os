@@ -1,0 +1,178 @@
+{
+  "title": "The sword, the monster and the gold",
+  "summary": "A tired man pulls a sword out of the ground and fights the monster that guards a chest of gold.",
+  "items": [
+    {
+      "id": "man",
+      "kind": "character",
+      "name": "The man",
+      "description": "A strong, tired fighter who takes the sword and fights the monster.",
+      "details": {
+        "prompt": "a rugged middle-aged male warrior, short dark hair, thick beard, scar across one cheek, worn brown leather armor with a fur collar, cloth trousers, heavy boots, stylized fantasy game character, full body",
+        "voice": "deep and a bit broken",
+        "moves": [
+          "idle",
+          "walk",
+          "run"
+        ],
+        "holds": [
+          {
+            "item": "sword",
+            "socket": "right_hand"
+          }
+        ],
+        "actions": [
+          "pull_sword",
+          "swing_sword"
+        ],
+        "size_m": 1.8
+      }
+    },
+    {
+      "id": "monster",
+      "kind": "character",
+      "name": "The monster",
+      "description": "A big beast with a key on a cord around its neck. It guards the chest.",
+      "details": {
+        "prompt": "a big hairy beast with horns",
+        "moves": [
+          "idle",
+          "walk"
+        ],
+        "holds": [
+          {
+            "item": "key",
+            "socket": "neck"
+          }
+        ],
+        "size_m": 2.8
+      }
+    },
+    {
+      "id": "sword",
+      "kind": "object",
+      "name": "Sword",
+      "description": "An old sword stuck in the ground.",
+      "details": {
+        "prompt": "an old iron sword",
+        "size_m": 1
+      }
+    },
+    {
+      "id": "chest",
+      "kind": "object",
+      "name": "Treasure chest",
+      "description": "A wooden chest full of gold coins.",
+      "details": {
+        "prompt": "a wooden treasure chest with iron bands",
+        "size_m": 0.8
+      }
+    },
+    {
+      "id": "key",
+      "kind": "object",
+      "name": "Key",
+      "description": "A big iron key on a cord.",
+      "details": {
+        "prompt": "a big iron key",
+        "size_m": 0.2
+      }
+    },
+    {
+      "id": "coins",
+      "kind": "object",
+      "name": "Gold coins",
+      "description": "A pile of shiny gold coins inside the chest.",
+      "details": {
+        "prompt": "a pile of gold coins",
+        "attach_to": {
+          "item": "chest",
+          "where": "inside"
+        },
+        "size_m": 0.6
+      }
+    },
+    {
+      "id": "line1",
+      "kind": "voice_line",
+      "name": "The man: “This sword is mine now.”",
+      "description": "He says it in a deep, broken voice.",
+      "details": {
+        "speaker": "man",
+        "text": "This sword is mine now.",
+        "voice": "deep and a bit broken"
+      }
+    },
+    {
+      "id": "growl",
+      "kind": "voice_line",
+      "name": "The monster growls",
+      "description": "A deep growl.",
+      "details": {
+        "speaker": "monster",
+        "nonverbal": true,
+        "text": "Grrr. Rrraaah!"
+      }
+    },
+    {
+      "id": "clash",
+      "kind": "sound",
+      "name": "Sword clashes",
+      "description": "Metal hitting metal.",
+      "details": {}
+    },
+    {
+      "id": "music",
+      "kind": "music",
+      "name": "Fight music",
+      "description": "Fast, brave drums.",
+      "details": {
+        "loop": true
+      }
+    }
+  ],
+  "notes": [
+    "People can stand, walk and run today, so the man stands ready next to the sword."
+  ],
+  "layout": [
+    {
+      "item": "man",
+      "place": "left",
+      "facing": "monster"
+    },
+    {
+      "item": "sword",
+      "place": "front-left",
+      "scale_hint": "small"
+    },
+    {
+      "item": "monster",
+      "place": "right",
+      "facing": "man",
+      "scale_hint": "big"
+    },
+    {
+      "item": "chest",
+      "place": "back-right",
+      "facing": "man"
+    },
+    {
+      "item": "coins",
+      "place": "back-right",
+      "attach_to": {
+        "item": "chest",
+        "where": "inside"
+      },
+      "scale_hint": "small"
+    },
+    {
+      "item": "key",
+      "place": "right",
+      "attach_to": {
+        "item": "monster",
+        "where": "neck"
+      },
+      "scale_hint": "small"
+    }
+  ]
+}

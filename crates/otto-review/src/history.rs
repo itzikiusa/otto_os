@@ -24,7 +24,19 @@ pub async fn prior_claims(
     Ok(claims)
 }
 
-pub async fn prior_review_context(
+/// Resolved prior `Done` review plus its recorded head SHA, findings, and
+/// formatted prompt context.
+pub struct PriorReviewSnapshot {
+    pub review_id: Id,
+    pub prev_head_sha: Option<String>,
+    pub findings: Vec<otto_core::finding::Finding>,
+    pub context: String,
+    pub finding_ids: Vec<String>,
+}
+
+/// Resolve the most recent prior `Done` review (or `explicit` review) together
+/// with its recorded `head_sha` and findings lineage.
+pub async fn load_prior_review(
     reviews: &otto_state::ReviewsRepo,
     findings_store: &otto_state::ReviewFindingsRepo,
     repo_id: &Id,
@@ -32,7 +44,7 @@ pub async fn prior_review_context(
     current: &Id,
     branches: Option<&ReviewBranches>,
     explicit: Option<&Id>,
-) -> Result<(String, Vec<String>)> {
+) -> Result<Option<PriorReviewSnapshot>> {
     let previous = if let Some(id) = explicit {
         let prior = reviews.get_review(id).await?;
         if prior.repo_id != *repo_id || prior.pr_number != pr || prior.id == *current {
@@ -48,8 +60,8 @@ pub async fn prior_review_context(
         if review.id == *current || review.status != ReviewStatus::Done {
             continue;
         }
+        let recorded = reviews.get_run_context(&review.id).await?;
         if pr == 0 && explicit.is_none() {
-            let recorded = reviews.get_run_context(&review.id).await?;
             let branch = branches
                 .map(|b| b.source.as_str())
                 .filter(|s| !s.is_empty());
@@ -59,6 +71,17 @@ pub async fn prior_review_context(
                 continue;
             }
         }
+        let prev_head_sha = recorded
+            .and_then(|c| c.head_sha)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                review
+                    .scope_plan
+                    .as_ref()
+                    .map(|p| p.head_sha.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            });
         let mut findings = findings_store.list_seen_for_review(&review.id).await?;
         if let Some(plan) = &review.scope_plan {
             for prior in &plan.prior_findings {
@@ -67,11 +90,43 @@ pub async fn prior_review_context(
                 }
             }
         }
-        let ids = findings.iter().map(|f| f.id.clone()).collect();
-        return Ok((format!("\n## Prior review {} — verify before fresh review\nFor EACH prior finding, cite its ID and record fixed + concrete current-code/check evidence, still_open + trigger/evidence, or not_relevant + causal-scope reason. Missing from fresh output is NOT proof of a fix. Do not inherit earlier claims without rechecking. Then perform an additional fresh review of the current causal diff.\n{}\n",
-            review.id, serde_json::to_string(&findings).map_err(|e| Error::Internal(e.to_string()))?), ids));
+        let finding_ids = findings.iter().map(|f| f.id.clone()).collect();
+        let context = format!(
+            "\n## Prior review {} — verify before fresh review\nFor EACH prior finding, cite its ID and record fixed + concrete current-code/check evidence, still_open + trigger/evidence, or not_relevant + causal-scope reason. Missing from fresh output is NOT proof of a fix. Do not inherit earlier claims without rechecking. Then perform an additional fresh review of the current causal diff.\n{}\n",
+            review.id,
+            serde_json::to_string(&findings).map_err(|e| Error::Internal(e.to_string()))?
+        );
+        return Ok(Some(PriorReviewSnapshot {
+            review_id: review.id,
+            prev_head_sha,
+            findings,
+            context,
+            finding_ids,
+        }));
     }
-    Ok((String::new(), vec![]))
+    Ok(None)
+}
+
+pub async fn prior_review_context(
+    reviews: &otto_state::ReviewsRepo,
+    findings_store: &otto_state::ReviewFindingsRepo,
+    repo_id: &Id,
+    pr: u64,
+    current: &Id,
+    branches: Option<&ReviewBranches>,
+    explicit: Option<&Id>,
+) -> Result<(String, Vec<String>)> {
+    Ok(load_prior_review(
+        reviews,
+        findings_store,
+        repo_id,
+        pr,
+        current,
+        branches,
+        explicit,
+    )
+    .await?
+    .map_or_else(|| (String::new(), vec![]), |s| (s.context, s.finding_ids)))
 }
 
 #[cfg(test)]

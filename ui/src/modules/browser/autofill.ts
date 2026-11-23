@@ -75,19 +75,25 @@ export function buildFillScript(domain: string, username: string, password: stri
     "if (!(p === 'https:' || (p === 'http:' && loop))) return 'origin-changed';" +
     'var pwd = document.querySelector(\'input[type="password"]\');' +
     "if (!pwd) return 'no-password-field';" +
-    'var user = document.querySelector(\'input[type="email"]\') || ' +
-    'document.querySelector(\'input[autocomplete="username"]\') || ' +
-    'document.querySelector(\'input[type="text"]\');' +
-    'if (user) {' +
-    'user.focus();' +
-    `user.value = ${userJs};` +
-    "user.dispatchEvent(new Event('input', {bubbles: true}));" +
-    "user.dispatchEvent(new Event('change', {bubbles: true}));" +
+    'var scope = (pwd.form && typeof pwd.form.querySelector === \'function\') ? pwd.form : document;' +
+    'var user = scope.querySelector(\'input[type="email"]\') || ' +
+    'scope.querySelector(\'input[autocomplete="username"]\') || ' +
+    'scope.querySelector(\'input[type="text"]\') || ' +
+    '(scope !== document ? (document.querySelector(\'input[type="email"]\') || document.querySelector(\'input[autocomplete="username"]\')) : null);' +
+    'function setVal(el, v) {' +
+    'el.focus();' +
+    'var applied = false;' +
+    'try {' +
+    'var proto = typeof HTMLInputElement !== \'undefined\' && HTMLInputElement.prototype;' +
+    'var desc = proto && Object.getOwnPropertyDescriptor(proto, \'value\');' +
+    'if (desc && typeof desc.set === \'function\') { desc.set.call(el, v); applied = true; }' +
+    '} catch (_) {}' +
+    'if (!applied) el.value = v;' +
+    "el.dispatchEvent(new Event('input', {bubbles: true}));" +
+    "el.dispatchEvent(new Event('change', {bubbles: true}));" +
     '}' +
-    'pwd.focus();' +
-    `pwd.value = ${passJs};` +
-    "pwd.dispatchEvent(new Event('input', {bubbles: true}));" +
-    "pwd.dispatchEvent(new Event('change', {bubbles: true}));" +
+    `if (user) setVal(user, ${userJs});` +
+    `setVal(pwd, ${passJs});` +
     "return 'filled';" +
     '})()'
   );

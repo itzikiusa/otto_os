@@ -1,0 +1,260 @@
+{
+ "name": "pull_sword",
+ "duration": 2,
+ "fps": 60,
+ "props": {
+  "sword": {
+   "class": "sword",
+   "file": "sword.glb",
+   "start": {
+    "place": {
+     "anchor": "tip",
+     "axis": "grip_axis",
+     "at": {
+      "base": "floor",
+      "add": [
+       [
+        "forward",
+        0.3,
+        "m"
+       ],
+       [
+        "down",
+        0.15,
+        "m"
+       ]
+      ]
+     },
+     "z": "down",
+     "x": "forward"
+    }
+   }
+  }
+ },
+ "grips": {
+  "right_grip": {
+   "hand": "right",
+   "prop": "sword",
+   "kind": "power",
+   "reverse": true,
+   "roll": "d",
+   "slot": 0
+  },
+  "left_grip": {
+   "hand": "left",
+   "prop": "sword",
+   "kind": "power",
+   "reverse": true,
+   "roll": "d",
+   "slot": 1
+  }
+ },
+ "order": [
+  "right_hand",
+  "sword",
+  "left_hand",
+  "head"
+ ],
+ "tracks": {
+  "hips": [
+   {
+    "t": 0,
+    "offset": [
+     0,
+     0,
+     0
+    ]
+   },
+   {
+    "t": 0.6,
+    "offset": [
+     0,
+     -0.03,
+     -0.03
+    ]
+   },
+   {
+    "t": 0.75,
+    "offset": [
+     0,
+     -0.03,
+     -0.03
+    ]
+   },
+   {
+    "t": 1.6,
+    "offset": [
+     0,
+     0,
+     0
+    ]
+   }
+  ],
+  "spine": [
+   {
+    "t": 0,
+    "bend": 0
+   },
+   {
+    "t": 0.6,
+    "bend": 35
+   },
+   {
+    "t": 0.75,
+    "bend": 35
+   },
+   {
+    "t": 1.6,
+    "bend": 4
+   },
+   {
+    "t": 2,
+    "bend": 0
+   }
+  ],
+  "head": [
+   {
+    "t": 0,
+    "rest": true
+   },
+   {
+    "t": 0.45,
+    "look": "prop:sword.grip"
+   },
+   {
+    "t": 1.5,
+    "look": "prop:sword.grip"
+   },
+   {
+    "t": 2,
+    "look": "forward"
+   }
+  ],
+  "sword": [
+   {
+    "t": 0,
+    "static": true
+   },
+   {
+    "t": 0.62,
+    "follow": "right_hand"
+   }
+  ],
+  "right_hand": [
+   {
+    "t": 0,
+    "rest": true
+   },
+   {
+    "t": 0.55,
+    "grip": "right_grip"
+   },
+   {
+    "t": 0.62,
+    "grip": "right_grip"
+   },
+   {
+    "t": 1.1,
+    "carry": {
+     "grip": "right_grip",
+     "place": {
+      "anchor": "grip",
+      "axis": "grip_axis",
+      "at": {
+       "base": "floor",
+       "add": [
+        [
+         "forward",
+         0.3,
+         "m"
+        ],
+        [
+         "up",
+         1,
+         "m"
+        ]
+       ]
+      },
+      "z": "down",
+      "x": "forward"
+     }
+    }
+   },
+   {
+    "t": 1.6,
+    "carry": {
+     "grip": "right_grip",
+     "place": {
+      "anchor": "grip",
+      "axis": "grip_axis",
+      "at": {
+       "base": "joint:chest",
+       "add": [
+        [
+         "forward",
+         0.32,
+         "m"
+        ],
+        [
+         "down",
+         0.05,
+         "m"
+        ]
+       ]
+      },
+      "z": "down",
+      "x": "forward"
+     }
+    }
+   },
+   {
+    "t": 2,
+    "carry": {
+     "grip": "right_grip",
+     "place": {
+      "anchor": "grip",
+      "axis": "grip_axis",
+      "at": {
+       "base": "joint:chest",
+       "add": [
+        [
+         "forward",
+         0.32,
+         "m"
+        ],
+        [
+         "down",
+         0.05,
+         "m"
+        ]
+       ]
+      },
+      "z": "down",
+      "x": "forward"
+     }
+    }
+   }
+  ],
+  "left_hand": [
+   {
+    "t": 0,
+    "rest": true
+   },
+   {
+    "t": 0.58,
+    "grip": "left_grip"
+   },
+   {
+    "t": 2,
+    "grip": "left_grip"
+   }
+  ]
+ },
+ "events": [
+  {
+   "t": 0.62,
+   "attach": "sword",
+   "to": "right_hand"
+  }
+ ]
+}

@@ -107,7 +107,7 @@ impl Bitbucket {
     /// [`Self::learn_me`] from a write's response body (a participant
     /// object); an empty or non-JSON body changes nothing.
     async fn learn_from_participant(&self, resp: reqwest::Response) {
-        if let Ok(v) = resp.json::<Value>().await {
+        if let Ok(v) = super::client::read_response_json_capped("bitbucket", resp).await {
             self.learn_me(v.get("user"));
         }
     }
@@ -251,17 +251,19 @@ impl Bitbucket {
         body: Option<&serde_json::Value>,
     ) -> Result<serde_json::Value> {
         let resp = self.send(method, path, body).await?;
-        resp.json::<serde_json::Value>()
-            .await
-            .map_err(|e| Error::Upstream(format!("bitbucket decode: {e}")))
+        super::client::read_response_json_capped("bitbucket", resp).await
     }
 
     /// Send and return the response body as plain text.
     async fn send_text(&self, method: reqwest::Method, path: &str) -> Result<String> {
         let resp = self.send(method, path, None).await?;
-        resp.text()
-            .await
-            .map_err(|e| Error::Upstream(format!("bitbucket read: {e}")))
+        super::client::read_response_text_capped(
+            "bitbucket",
+            resp,
+            super::client::MAX_PROVIDER_BODY_BYTES,
+            false,
+        )
+        .await
     }
 
     /// `POST …/pullrequests/{id}/merge`, then — when Bitbucket answers **202

@@ -41,6 +41,24 @@ impl TargetManager {
             .map_err(Error::Forbidden)
     }
 
+    /// Walk `remote_path` up to its nearest existing ancestor inside
+    /// `matched_root` and verify it via [`Self::confine_remote_write`].
+    /// Must run before `mkdir -p -- <parent>` so missing intermediate
+    /// directories cannot be created through a remote symlink escaping
+    /// `matched_root`.
+    pub(crate) async fn confine_remote_nearest_ancestor(
+        &self,
+        target: &ResolvedTarget,
+        matched_root: &str,
+        remote_path: &str,
+    ) -> Result<String> {
+        confine_remote_nearest_ancestor_with(matched_root, remote_path, |candidate| async move {
+            self.confine_remote_write(target, matched_root, &candidate)
+                .await
+        })
+        .await
+    }
+
     /// E2 on SSH targets: a non-root caller's write, create, rename (either
     /// end), duplicate or delete of `raw_path` is refused when its REAL
     /// remote path (parent resolved on the host; the entry itself not
@@ -179,9 +197,83 @@ fn check_real_remote_write(
     Ok(format!("{}/{leaf}", real_parent.trim_end_matches('/')))
 }
 
+/// Arguments for remote `mkdir -p -- <parent>` so a directory starting with `-`
+/// is never interpreted as a flag.
+pub(crate) fn remote_mkdir_args(parent: String) -> [String; 3] {
+    ["-p".into(), "--".into(), parent]
+}
+
+/// Candidate paths to probe from `remote_path` upward until the nearest
+/// existing ancestor whose parent is inside (or equal to) `matched_root`.
+pub(crate) fn remote_ancestor_candidates(matched_root: &str, remote_path: &str) -> Vec<String> {
+    let root = matched_root.trim_end_matches('/');
+    let clean_root = if root.is_empty() && matched_root.starts_with('/') {
+        "/"
+    } else {
+        root
+    };
+    let mut out = Vec::new();
+    let mut cur = remote_path.trim_end_matches('/').to_string();
+    if cur.is_empty() && remote_path.starts_with('/') {
+        cur = "/".into();
+    }
+    while !cur.is_empty() && cur != clean_root {
+        let Some(parent) = remote_parent(&cur) else {
+            break;
+        };
+        out.push(cur);
+        if parent == clean_root {
+            break;
+        }
+        let parent_inside = clean_root == "/"
+            || parent == clean_root
+            || parent.starts_with(&format!("{clean_root}/"));
+        if !parent_inside {
+            break;
+        }
+        cur = parent;
+    }
+    out
+}
+
+async fn confine_remote_nearest_ancestor_with<F, Fut>(
+    matched_root: &str,
+    remote_path: &str,
+    mut probe: F,
+) -> Result<String>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+{
+    let candidates = remote_ancestor_candidates(matched_root, remote_path);
+    if candidates.is_empty() {
+        return probe(remote_path.to_string()).await;
+    }
+    let mut last_not_found = None;
+    for candidate in candidates {
+        match probe(candidate).await {
+            Ok(real) => return Ok(real),
+            Err(Error::NotFound(msg)) => last_not_found = Some(Error::NotFound(msg)),
+            Err(err) => return Err(err),
+        }
+    }
+    Err(last_not_found.unwrap_or_else(|| {
+        Error::NotFound(format!(
+            "no existing ancestor of '{remote_path}' under '{matched_root}'"
+        ))
+    }))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::check_real_remote_write;
+    use std::sync::{Arc, Mutex};
+
+    use super::{
+        check_real_remote_write, confine_remote_nearest_ancestor_with, leaf_of,
+        remote_ancestor_candidates, remote_mkdir_args, REALPATH_SCRIPT,
+    };
+    use crate::target::remote_parent;
+    use otto_core::Error;
 
     #[test]
     fn a_remote_symlink_cannot_carry_a_write_out_of_the_root() {
@@ -195,5 +287,126 @@ mod tests {
         // A final-component symlink is refused even inside the root.
         assert!(check_real_remote_write("/home/u/repo", "/home/u/repo", true, "link").is_err());
         assert!(check_real_remote_write("/", "/etc", false, "x").is_ok());
+    }
+
+    #[test]
+    fn remote_mkdir_args_includes_end_of_options_marker() {
+        assert_eq!(
+            remote_mkdir_args("-dashdir/sub".into()),
+            ["-p", "--", "-dashdir/sub"]
+        );
+    }
+
+    #[test]
+    fn remote_ancestor_candidates_walks_up_to_root_boundary_only() {
+        assert_eq!(
+            remote_ancestor_candidates("/srv/repo", "/srv/repo/a/b/file.txt"),
+            vec!["/srv/repo/a/b/file.txt", "/srv/repo/a/b", "/srv/repo/a",]
+        );
+        assert_eq!(
+            remote_ancestor_candidates("/srv/repo", "/srv/repo/file.txt"),
+            vec!["/srv/repo/file.txt"]
+        );
+        assert_eq!(
+            remote_ancestor_candidates("~/repo", "~/repo/a/b.txt"),
+            vec!["~/repo/a/b.txt", "~/repo/a"]
+        );
+        assert!(remote_ancestor_candidates("/srv/repo", "/srv/repo").is_empty());
+    }
+
+    #[tokio::test]
+    async fn nearest_ancestor_confinement_blocks_symlink_escape_before_mkdir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspace");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+
+        let root_str = root.to_string_lossy().into_owned();
+        let target_file = format!("{root_str}/escape/new_dir/deep/file.txt");
+        let probed = Arc::new(Mutex::new(Vec::new()));
+        let probed_clone = probed.clone();
+        let root_for_probe = root_str.clone();
+
+        // Execute the real POSIX REALPATH_SCRIPT locally to verify ancestor confinement.
+        let err = confine_remote_nearest_ancestor_with(&root_str, &target_file, move |cand| {
+            let root_s = root_for_probe.clone();
+            let probed = probed_clone.clone();
+            async move {
+                probed.lock().unwrap().push(cand.clone());
+                let parent = remote_parent(&cand).unwrap();
+                let out = tokio::process::Command::new("sh")
+                    .args(["-c", REALPATH_SCRIPT, "sh", &root_s, &parent, &cand])
+                    .output()
+                    .await
+                    .unwrap();
+                if out.status.code() == Some(4) {
+                    return Err(Error::NotFound(parent));
+                }
+                assert!(out.status.success(), "{out:?}");
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let mut lines = stdout.lines().map(str::trim);
+                let real_root = lines.next().unwrap();
+                let real_parent = lines.next().unwrap();
+                let is_link = lines.next().unwrap() == "LINK";
+                check_real_remote_write(real_root, real_parent, is_link, leaf_of(&cand))
+                    .map_err(Error::Forbidden)
+            }
+        })
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, Error::Forbidden(_)),
+            "expected Forbidden, got {err:?}"
+        );
+        assert!(
+            !outside.join("new_dir").exists(),
+            "outside directory must not be created"
+        );
+        // Probed deep child -> missing intermediate -> symlink parent (caught!).
+        let seen = probed.lock().unwrap().clone();
+        assert_eq!(seen.len(), 3, "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn nearest_ancestor_confinement_allows_missing_nested_dir_inside_real_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspace");
+        let existing_sub = root.join("src");
+        std::fs::create_dir_all(&existing_sub).unwrap();
+
+        let root_str = root.to_string_lossy().into_owned();
+        let target_file = format!("{root_str}/src/a/b/new.rs");
+        let root_for_probe = root_str.clone();
+        let real = confine_remote_nearest_ancestor_with(&root_str, &target_file, move |cand| {
+            let root_s = root_for_probe.clone();
+            async move {
+                let parent = remote_parent(&cand).unwrap();
+                let out = tokio::process::Command::new("sh")
+                    .args(["-c", REALPATH_SCRIPT, "sh", &root_s, &parent, &cand])
+                    .output()
+                    .await
+                    .unwrap();
+                if out.status.code() == Some(4) {
+                    return Err(Error::NotFound(parent));
+                }
+                assert!(out.status.success(), "{out:?}");
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let mut lines = stdout.lines().map(str::trim);
+                let real_root = lines.next().unwrap();
+                let real_parent = lines.next().unwrap();
+                let is_link = lines.next().unwrap() == "LINK";
+                check_real_remote_write(real_root, real_parent, is_link, leaf_of(&cand))
+                    .map_err(Error::Forbidden)
+            }
+        })
+        .await
+        .unwrap();
+
+        let canon_sub = existing_sub.canonicalize().unwrap();
+        assert_eq!(real, format!("{}/a", canon_sub.display()));
     }
 }

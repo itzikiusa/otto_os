@@ -85,7 +85,6 @@
   let error = $state('');
   /** A failed "Load more" — inline beside the button, never wipes the rows. */
   let moreError = $state('');
-  const moreErrId = $props.id();
   let errorCause = $state('The provider is unreachable.');
   let createOpen = $state(false);
   let retryRev = $state(0);
@@ -549,12 +548,14 @@
       </div>
       {#if hasMore}
         <div class="pr-more">
-          <button class="btn small" disabled={loadingMore} onclick={loadMore} aria-describedby={moreError ? moreErrId : undefined}>
-            {loadingMore ? 'Loading more pull requests…' : moreError ? 'Retry' : 'Load more'}
-          </button>
+          {#if moreError}
+            <LoadState variant="compact" what="more pull requests" error={moreError} loading={loadingMore} empty onretry={loadMore} />
+          {:else}
+            <button class="btn small" disabled={loadingMore} onclick={loadMore}>
+              {loadingMore ? 'Loading more pull requests…' : 'Load more'}
+            </button>
+          {/if}
           {#if filtering}<span class="dim pr-more-hint">Search covers the {prs.length} loaded</span>{/if}
-          <!-- Always mounted: a status region inserted with its text is usually silent. -->
-          <span id={moreErrId} class="pr-more-err" role="status">{moreError ? `Couldn’t load more: ${moreError}` : ''}</span>
         </div>
       {/if}
     {/if}
@@ -736,10 +737,6 @@
   }
   .pr-more-hint {
     font-size: var(--fs-xs);
-  }
-  .pr-more-err {
-    color: var(--danger);
-    font-size: var(--fs-s);
   }
 
   /* ── Mobile + tablet (≤1024px): full-width pane, 32px+ touch targets,

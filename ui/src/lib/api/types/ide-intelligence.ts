@@ -415,11 +415,29 @@ export interface IdeBuildToolProject {
   modules: IdeBuildToolProject[];
 }
 
+export interface IdeMobileProject {
+  name: string;
+  framework: 'xcode' | 'swiftpm' | 'android' | 'flutter' | 'react_native' | 'expo' | 'capacitor' | string;
+  platforms: string[];
+  root_dir: string;
+  location_display: string;
+  manifest_path: string;
+  app_id?: string | null;
+  targets: string[];
+  tasks: string[];
+}
+
 export interface IdeBuildToolsModelResp {
   has_maven: boolean;
   has_gradle: boolean;
+  has_xcode?: boolean;
+  has_android?: boolean;
+  has_flutter?: boolean;
+  has_react_native?: boolean;
+  has_capacitor?: boolean;
   profiles: IdeBuildToolProfile[];
   projects: IdeBuildToolProject[];
+  mobile_projects?: IdeMobileProject[];
 }
 
 // ── Collaborative IDE ("Share with Friends") & Runtime Plugins ───────────────

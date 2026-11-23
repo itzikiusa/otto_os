@@ -27,6 +27,8 @@
   import { severityLabel } from '../../lib/labels';
   import { runStatus, sentenceCase, type StatusInfo } from '../../lib/status';
   import Modal from '../../lib/components/Modal.svelte';
+  import DiffView from '../../lib/components/DiffView.svelte';
+  import PromoteDiffPreview from './PromoteDiffPreview.svelte';
   import Scorecard from './Scorecard.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { latestOnly } from '../../lib/latest';
@@ -198,9 +200,11 @@
     return it.agents.reduce((sum, a) => sum + a.findings.length, 0);
   }
 
-  function diffLineClass(line: string): string {
-    if (line.startsWith('+ ')) return 'add';
-    if (line.startsWith('- ')) return 'del';
+  function unifiedDiffLineClass(line: string): string {
+    if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('diff ')) return 'hdr';
+    if (line.startsWith('@@')) return 'hunk';
+    if (line.startsWith('+')) return 'add';
+    if (line.startsWith('-')) return 'del';
     return 'ctx';
   }
 
@@ -302,15 +306,18 @@
     const open = openImplDiffs.has(it.id);
     openImplDiffs = toggle(openImplDiffs, it.id);
     if (!open && !implDiffs[it.id] && run) {
+      const runId = run.id;
       implDiffLoading = new Set(implDiffLoading).add(it.id);
       try {
-        implDiffs[it.id] = await skillsEvalApi.implDiff(run.id, it.id);
+        const resp = await skillsEvalApi.implDiff(runId, it.id);
+        if (disposed || run?.id !== runId) return;
+        implDiffs[it.id] = resp;
       } catch (e) {
+        if (disposed || run?.id !== runId) return;
         toastError('Couldn’t load the code diff', e);
-        // Collapse again so the toggle doesn't read "Hide code diff" over nothing.
         openImplDiffs = toggle(openImplDiffs, it.id);
       } finally {
-        implDiffLoading = new Set([...implDiffLoading].filter((k) => k !== it.id));
+        if (!disposed && run?.id === runId) implDiffLoading = new Set([...implDiffLoading].filter((k) => k !== it.id));
       }
     }
   }
@@ -336,33 +343,31 @@
     a.click();
     URL.revokeObjectURL(url);
   }
-  // Promote gate + force-override (root).
+  // Promote gate + force-override (root); gateSeq stops stale gate results crossing iterations.
   let promoteForce = $state(false);
   let promoteGate = $state<PromoteGate | null>(null);
   let gateLoading = $state(false);
   let gateError = $state(false);
-  // Inline name check (was a toast after clicking Promote).
+  let gateSeq = 0;
   const promoteNameError = $derived(
     promoteName.trim() && !/^[A-Za-z0-9_-]+$/.test(promoteName.trim()) ? "Use letters, digits, '-' or '_' only." : '',
   );
 
   async function openPromote(it: EvalIteration, source: 'tested' | 'improved'): Promise<void> {
-    promoteIterId = it.id;
-    promoteSource = source;
-    promoteName = run?.source_skill ?? it.skill_name;
-    promoteForce = false;
-    promoteGate = null;
-    gateError = false;
-    promoteOpen = true;
+    const seq = ++gateSeq;
+    promoteIterId = it.id; promoteSource = source; promoteName = run?.source_skill ?? it.skill_name;
+    promoteForce = false; promoteGate = null; gateError = false; promoteOpen = true;
     if (!run) return;
     gateLoading = true;
     try {
-      promoteGate = await skillsEvalApi.promoteGate(run.id, it.id);
+      const gate = await skillsEvalApi.promoteGate(run.id, it.id);
+      if (seq !== gateSeq || disposed || !promoteOpen) return;
+      promoteGate = gate;
     } catch {
-      promoteGate = null;
-      gateError = true;
+      if (seq !== gateSeq || disposed || !promoteOpen) return;
+      promoteGate = null; gateError = true;
     } finally {
-      gateLoading = false;
+      if (seq === gateSeq && !disposed) gateLoading = false;
     }
   }
   function promoteWinner(): void {
@@ -481,7 +486,7 @@
         {/if}
         {#if run.best_iteration != null && canPromote}
           <button class="btn small primary" onclick={promoteWinner} title="Save the best-scoring iteration’s skill to the library">
-            <Icon name="check" size={12} /> Promote winning skill
+            <Icon name="check" size={12} /> Promote winning skill…
           </button>
         {/if}
         <button class="icon-btn" disabled={deleting} onclick={moreRunActions} aria-label="More actions" title="More actions" aria-haspopup="menu">
@@ -538,12 +543,12 @@
             <span class="chip mono">{it.impl_provider}</span>
             <span class="grow"></span>
             {#if it.worktree_path}
-              <button class="btn small ghost" onclick={() => toggleImplDiff(it)}>
+              <button class="btn small ghost" aria-expanded={openImplDiffs.has(it.id)} onclick={() => toggleImplDiff(it)}>
                 {openImplDiffs.has(it.id) ? 'Hide code diff' : 'View code diff'}
               </button>
             {/if}
             {#if it.impl_session_id}
-              <button class="btn small ghost" onclick={() => (openTerminals = toggle(openTerminals, it.impl_session_id ?? ''))}>
+              <button class="btn small ghost" aria-expanded={openTerminals.has(it.impl_session_id ?? '')} onclick={() => (openTerminals = toggle(openTerminals, it.impl_session_id ?? ''))}>
                 {openTerminals.has(it.impl_session_id ?? '') ? 'Hide session' : 'Open session'}
               </button>
             {/if}
@@ -558,7 +563,7 @@
               <Skeleton rows={4} height={14} label="the diff" />
             {:else if implDiffs[it.id]}
               {#if implDiffs[it.id].diff.trim()}
-                <pre class="diff">{#each implDiffs[it.id].diff.split('\n') as line, li (li)}<span class="dl {line.startsWith('+') ? 'add' : line.startsWith('-') ? 'del' : 'ctx'}">{line || ' '}</span>{'\n'}{/each}</pre>
+                <pre class="diff">{#each implDiffs[it.id].diff.split('\n') as line, li (li)}<span class="dl {unifiedDiffLineClass(line)}">{line || ' '}</span>{'\n'}{/each}</pre>
               {:else}
                 <p class="muted">No code changes captured.</p>
               {/if}
@@ -589,7 +594,7 @@
                   </button>
                 {/if}
                 <button class="btn small ghost" disabled={retrying.has(rk)} onclick={() => retry(it, ai)} title="Re-run this validation">
-                  {retrying.has(rk) ? 'Retrying…' : 'Retry'}
+                  {retrying.has(rk) ? 'Re-running…' : 'Re-run'}
                 </button>
                 {#if a.findings.length > 0}
                   <button class="btn small ghost" aria-expanded={openFindings.has(key)} onclick={() => (openFindings = toggle(openFindings, key))}>
@@ -674,7 +679,7 @@
           <button class="btn small ghost" onclick={() => copySkill(it, 'tested')}>Copy</button>
           <button class="btn small ghost" onclick={() => downloadSkill(it, 'tested')}>Download</button>
           {#if canPromote}
-            <button class="btn small ghost" onclick={() => openPromote(it, 'tested')}>Promote</button>
+            <button class="btn small ghost" onclick={() => openPromote(it, 'tested')}>Promote…</button>
           {:else}
             <span class="promote-note dim">Saving to the library is an admin action</span>
           {/if}
@@ -689,18 +694,22 @@
               {#if it.skill_after}
                 <button class="btn small ghost" onclick={() => copySkill(it, 'improved')}>Copy improved</button>
                 {#if canPromote}
-                  <button class="btn small ghost" onclick={() => openPromote(it, 'improved')}>Promote improved</button>
+                  <button class="btn small ghost" onclick={() => openPromote(it, 'improved')}>Promote improved…</button>
                 {/if}
               {/if}
-              {#if it.skill_diff}
-                <button class="btn small ghost" onclick={() => (openDiffs = toggle(openDiffs, it.id))}>
+              {#if it.skill_diff || it.skill_after != null}
+                <button class="btn small ghost" aria-expanded={openDiffs.has(it.id)} onclick={() => (openDiffs = toggle(openDiffs, it.id))}>
                   {openDiffs.has(it.id) ? 'Hide skill diff' : 'View skill diff'}
                 </button>
               {/if}
             </div>
             <p class="improve-summary">{it.improvement_summary}</p>
-            {#if it.skill_diff && openDiffs.has(it.id)}
-              <pre class="diff">{#each it.skill_diff.split('\n') as line, li (li)}<span class="dl {diffLineClass(line)}">{line || ' '}</span>{'\n'}{/each}</pre>
+            {#if openDiffs.has(it.id)}
+              {#if it.skill_after != null}
+                <DiffView before={it.skill_before} after={it.skill_after} mode="word" contextLines={3} />
+              {:else if it.skill_diff}
+                <pre class="diff">{#each it.skill_diff.split('\n') as line, li (li)}<span class="dl {unifiedDiffLineClass(line)}">{line || ' '}</span>{'\n'}{/each}</pre>
+              {/if}
             {/if}
           </div>
         {/if}
@@ -714,7 +723,7 @@
 {/if}
 
 {#if promoteOpen && canPromote}
-  <Modal title="Promote skill to library" width={460} onclose={() => (promoteOpen = false)}>
+  <Modal title="Promote skill to library" width={640} onclose={() => (promoteOpen = false)}>
     {#snippet children()}
       <p class="modal-lede">
         Saves this {promoteSource === 'improved' ? 'improved' : 'tested'} skill into the Otto library
@@ -734,6 +743,10 @@
             Improved version
           </label>
         </div>
+      {/if}
+
+      {#if promoteIter}
+        <PromoteDiffPreview name={promoteName} candidate={skillContent(promoteIter, promoteSource)} invalidName={!!promoteNameError} />
       {/if}
 
       <!-- Promote gate: score + proof must pass, else show why. -->
@@ -1099,31 +1112,17 @@
   }
 
   .diff {
-    margin: 6px 0 0;
-    max-height: 360px;
-    overflow: auto;
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    line-height: 1.45;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    padding: 8px 10px;
-    white-space: pre-wrap;
-    word-break: break-word;
+    margin: 6px 0 0; max-height: 360px; overflow: auto;
+    font-family: var(--font-mono); font-size: var(--fs-xs); line-height: 1.45;
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-s);
+    padding: 8px 10px; white-space: pre-wrap; word-break: break-word;
   }
-  .dl {
-    display: inline;
-  }
-  .dl.add {
-    color: var(--success);
-  }
-  .dl.del {
-    color: var(--danger);
-  }
-  .dl.ctx {
-    color: var(--text-dim);
-  }
+  .dl { display: inline; }
+  .dl.add { color: var(--success); }
+  .dl.del { color: var(--danger); }
+  .dl.hdr { color: var(--text); font-weight: 600; }
+  .dl.hunk { color: var(--accent-text); }
+  .dl.ctx { color: var(--text-dim); }
 
   .pf {
     font-size: var(--fs-xs);

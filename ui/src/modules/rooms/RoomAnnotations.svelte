@@ -59,6 +59,19 @@
     drawing = false; points = [];
   }
   function polyline(value: RoomPoint[]) { return value.map(p => `${p.x * source.width},${p.y * source.height}`).join(' '); }
+  function bindPlaceSurface(node: HTMLElement): { destroy(): void } {
+    node.tabIndex = 0;
+    node.addEventListener('focus', kbFocus);
+    node.addEventListener('blur', kbBlur);
+    node.addEventListener('keydown', kbKey);
+    return {
+      destroy: () => {
+        node.removeEventListener('focus', kbFocus);
+        node.removeEventListener('blur', kbBlur);
+        node.removeEventListener('keydown', kbKey);
+      },
+    };
+  }
 </script>
 <div class="media-stage">
   {@render children()}
@@ -74,8 +87,7 @@
   {/if}
 </svg>
 {#if allowed && keyboardTool}
-  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-  <div class="place-surface" tabindex="0" role="application" aria-label={tool === 'pointer' ? `Place a pointer on ${source.title}` : `Place a highlight on ${source.title}`} aria-describedby={`place-help-${source.id}`} onfocus={kbFocus} onblur={kbBlur} onkeydown={kbKey}></div>
+  <div class="place-surface" role="application" aria-label={tool === 'pointer' ? `Place a pointer on ${source.title}` : `Place a highlight on ${source.title}`} aria-describedby={`place-help-${source.id}`} use:bindPlaceSurface></div>
   <span class="sr-only" id={`place-help-${source.id}`}>Arrow keys move the cursor, Shift for larger steps. {tool === 'pointer' ? 'Enter places the pointer.' : 'Enter sets the first corner, then Enter again completes the highlight.'} Escape cancels. Tab leaves.</span>
   <span class="sr-only" role="status" aria-live="polite">{kbNote}</span>
 {/if}

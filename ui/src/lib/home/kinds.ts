@@ -11,7 +11,9 @@ export type HomeBoxKind =
   | 'db-dashboard'
   | 'k8s'
   | 'insights'
-  | 'usage';
+  | 'usage'
+  | 'pr-queue'
+  | 'automations';
 
 export interface HomeBoxKindDef {
   kind: HomeBoxKind;
@@ -79,6 +81,26 @@ export const HOME_KINDS: HomeBoxKindDef[] = [
     w: 6,
     h: 4,
     route: 'usage',
+  },
+  {
+    kind: 'pr-queue',
+    label: 'PR review queue',
+    blurb: 'Open pull requests and active AI reviews across your repos.',
+    icon: 'branch',
+    feature: 'git',
+    w: 6,
+    h: 4,
+    route: 'git',
+  },
+  {
+    kind: 'automations',
+    label: 'Workflows & loops',
+    blurb: 'Active workflow runs, goal loops and workspace workflows.',
+    icon: 'split',
+    feature: 'workflows',
+    w: 6,
+    h: 4,
+    route: 'workflows',
   },
 ];
 

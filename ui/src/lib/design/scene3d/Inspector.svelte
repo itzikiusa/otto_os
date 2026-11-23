@@ -33,7 +33,7 @@
     setVisible,
     summarize,
   } from './ops';
-  import { MATERIAL_PRESETS, resolveMaterial } from './presets';
+  import { MATERIAL_PRESETS, envPreset, resolveMaterial } from './presets';
   import { colorLabel, isTokenRef, type BrandSwatch } from './tokens';
   import { plainColors, type ColorResolver } from './build';
   import { findState } from './states';
@@ -110,6 +110,10 @@
   function inputChecked(e: Event): boolean {
     return (e.currentTarget as HTMLInputElement).checked;
   }
+  // With an environment shown as the backdrop, the canvas paints the preset's
+  // gradient, not doc.background: say so beside the colour instead of letting
+  // the swatch disagree with the canvas.
+  const backdropName = $derived(doc.environment && doc.environment.preset !== 'none' && doc.environment.background !== false ? (envPreset(doc.environment.preset)?.label ?? null) : null);
 </script>
 
 {#snippet panelHead(key: string, title: string, meta?: string)}
@@ -168,9 +172,12 @@
       {#if open.scene !== false}
         <div class="s3d-panel-body">
           {@render colorRow('Background', doc.background, '#0f172a', (c) => emit(setScene(doc, { background: c ?? null })))}
+          {#if backdropName}
+            <div class="s3d-hint" data-testid="s3d-bg-covered">The {backdropName} environment is the backdrop, so this color shows only when Scene › Environment › Show as backdrop is off.</div>
+          {/if}
           <label class="s3d-field s3d-check">
             <span class="s3d-flabel">Grid</span>
-            <input type="checkbox" checked={doc.grid ?? true} disabled={readonly} onchange={(e) => emit(setScene(doc, { grid: inputChecked(e) }))} />
+            <input type="checkbox" checked={doc.grid !== false} disabled={readonly} onchange={(e) => emit(setScene(doc, { grid: inputChecked(e) }))} />
             <span class="s3d-hint">Editor only — Play hides it</span>
           </label>
         </div>
@@ -330,7 +337,7 @@
               {@render colorRow('Emissive', mat.emissive, '#000000', (c) => onMat('emissive', c))}
               <label class="s3d-field s3d-check">
                 <span class="s3d-flabel">Wireframe</span>
-                <input type="checkbox" checked={mat.wireframe ?? false} disabled={readonly} onchange={(e) => onMat('wireframe', inputChecked(e) || undefined)} />
+                <input type="checkbox" checked={Boolean(mat.wireframe)} disabled={readonly} onchange={(e) => onMat('wireframe', inputChecked(e) || undefined)} />
               </label>
             </div>
           {/if}
@@ -369,7 +376,7 @@
             {#if light.type !== 'ambient' && light.type !== 'hemisphere'}
               <label class="s3d-field s3d-check">
                 <span class="s3d-flabel">Shadows</span>
-                <input type="checkbox" checked={light.shadow ?? false} disabled={readonly} onchange={(e) => emit(patchLight(doc, light.id, { shadow: inputChecked(e) || undefined }))} />
+                <input type="checkbox" checked={Boolean(light.shadow)} disabled={readonly} onchange={(e) => emit(patchLight(doc, light.id, { shadow: inputChecked(e) || undefined }))} />
               </label>
             {/if}
           </div>
@@ -773,5 +780,11 @@
     border-radius: var(--radius-s);
     background: var(--info-soft);
     color: var(--text);
+  }
+  /* Fingers: every field, section header and small button is touch-sized. */
+  @media (pointer: coarse) {
+    .s3d-hex, .s3d-text, .s3d-select, .s3d-color, .s3d-ph, .s3d-mini { min-block-size: 40px; }
+    .s3d-reset { width: 32px; height: 40px; }
+    .s3d-head-name-input { min-block-size: 40px; }
   }
 </style>

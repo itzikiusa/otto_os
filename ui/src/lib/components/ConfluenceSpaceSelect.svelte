@@ -6,6 +6,7 @@
 -->
 <script lang="ts">
   import { tick } from 'svelte';
+  import { announceShown } from '../announce.svelte';
   import Skeleton from './Skeleton.svelte';
   import { listConfluenceSpaces } from '../api/issues';
   import type { ConfluenceSpace } from '../api/types/product';
@@ -75,7 +76,7 @@
 {#if loading}
   <Skeleton rows={1} height={27} label="spaces" />
 {:else if error}
-  <div role="alert" class="field-error">{error}</div>
+  <div class="field-error" use:announceShown={{ text: error, assertive: true }}>{error}</div>
   <button type="button" class="btn small" bind:this={retryEl} onclick={() => void retry()}>Retry spaces</button>
 {:else}
   <select

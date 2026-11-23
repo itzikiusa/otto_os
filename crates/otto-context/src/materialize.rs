@@ -15,6 +15,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use otto_core::api::{
     ContextEnforcement, ContextPlanFile, ContextPlanSkill, ContextPreviewProvider, LibrarySkill,
@@ -175,10 +177,31 @@ pub fn default_context_root() -> PathBuf {
 /// disk and the bundle has sat unused for the grace window.
 pub const BUNDLE_CWD_MARKER: &str = ".otto-cwd";
 
+/// Maximum byte size of `CONTEXT.md` inlined onto Codex's `argv` via
+/// `-c developer_instructions=...`. Above this threshold we instruct Codex to
+/// read the `CONTEXT.md` file already inside the `--add-dir` bundle directory
+/// so huge context blocks never risk `E2BIG` or leak via process listings.
+const MAX_CODEX_INLINE_BYTES: usize = 4 * 1024;
+
+/// Serializes bundle materialization/swaps across concurrent spawns so two
+/// threads targeting the same `(provider, cwd)` bundle never race on directory
+/// swaps or manifest reconciliation.
+static BUNDLE_PROVISION_LOCK: Mutex<()> = Mutex::new(());
+
+fn next_stage_id() -> String {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 /// Best-effort: a bundle without a marker is only ever kept longer.
 fn write_cwd_marker(dir: &Path, cwd: &str) {
-    if let Err(e) = fs::write(dir.join(BUNDLE_CWD_MARKER), cwd) {
-        tracing::debug!(path = %dir.display(), error = %e, "write bundle cwd marker failed");
+    let target = dir.join(BUNDLE_CWD_MARKER);
+    if !write_file(&target, cwd) {
+        tracing::debug!(path = %dir.display(), "write bundle cwd marker failed");
     }
 }
 
@@ -188,6 +211,17 @@ fn write_cwd_marker(dir: &Path, cwd: &str) {
 /// without re-materializing.
 fn bundle_dir(ctx_root: &Path, provider: &str, cwd: &str) -> PathBuf {
     ctx_root.join(provider).join(roots::encode_cwd(cwd))
+}
+
+/// Optional extra inputs for [`provision_with_options`] / [`preview_with_options`].
+/// Leaving fields `None` preserves the exact legacy output (strict no-op).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct MaterializeOptions<'a> {
+    /// Named provider home override (e.g. a non-default Codex account home).
+    pub provider_home: Option<&'a Path>,
+    /// Pre-formatted `## Relevant Workspace Memory` section produced by
+    /// [`crate::memory_brief`]. `None` or whitespace-only is a strict no-op.
+    pub memory_brief_md: Option<&'a str>,
 }
 
 /// Materialize the active context for `provider` into its out-of-tree bundle
@@ -203,7 +237,14 @@ pub fn provision(
     provider: &str,
     ctx_root: &Path,
 ) -> (MaterializeProviderResult, SpawnInjection) {
-    provision_with_home(library, cfg, cwd, provider, ctx_root, None)
+    provision_with_options(
+        library,
+        cfg,
+        cwd,
+        provider,
+        ctx_root,
+        &MaterializeOptions::default(),
+    )
 }
 
 pub fn provision_with_home(
@@ -214,16 +255,44 @@ pub fn provision_with_home(
     ctx_root: &Path,
     provider_home: Option<&Path>,
 ) -> (MaterializeProviderResult, SpawnInjection) {
-    let plan = plan(library, cfg, cwd, provider, ctx_root);
+    provision_with_options(
+        library,
+        cfg,
+        cwd,
+        provider,
+        ctx_root,
+        &MaterializeOptions {
+            provider_home,
+            memory_brief_md: None,
+        },
+    )
+}
+
+/// Like [`provision`], accepting optional provider-home and workspace memory
+/// brief inputs without breaking existing call sites.
+pub fn provision_with_options(
+    library: &Library,
+    cfg: &WorkspaceContextConfig,
+    cwd: &str,
+    provider: &str,
+    ctx_root: &Path,
+    opts: &MaterializeOptions<'_>,
+) -> (MaterializeProviderResult, SpawnInjection) {
+    let plan = plan(library, cfg, cwd, provider, ctx_root, opts.memory_brief_md);
     let bundle = plan.bundle.clone();
+    let _locked = bundle.as_ref().map(|_| {
+        BUNDLE_PROVISION_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    });
     let result = execute(plan);
     if let (Some(dir), false) = (&bundle, result.skipped) {
         write_cwd_marker(dir, cwd);
     }
     // Compute the injection AFTER writing — codex reads the materialized context
-    // file back to pass it inline.
+    // file back to pass it inline (or points to it when over the inline cap).
     let injection = match (&bundle, result.skipped) {
-        (Some(dir), false) => injection_for_home(provider, dir, provider_home),
+        (Some(dir), false) => injection_for_home(provider, dir, opts.provider_home),
         _ => SpawnInjection::default(),
     };
     (result, injection)
@@ -307,7 +376,14 @@ fn injection_for_home(provider: &str, dir: &Path, provider_home: Option<&Path>) 
                 let text = text.trim();
                 if !text.is_empty() {
                     args.push("-c".to_string());
-                    args.push(format!("developer_instructions={text}"));
+                    if text.len() <= MAX_CODEX_INLINE_BYTES {
+                        args.push(format!("developer_instructions={text}"));
+                    } else {
+                        args.push(format!(
+                            "developer_instructions=Read and follow the workspace instructions in `{}` before starting.",
+                            ctx.display()
+                        ));
+                    }
                 }
             }
             SpawnInjection {
@@ -353,8 +429,8 @@ fn opencode_injection(dir: &Path, ctx: &Path) -> SpawnInjection {
         "$schema": "https://opencode.ai/config.json",
         "instructions": [ctx.to_string_lossy()],
     });
-    if let Err(e) = fs::write(&config, body.to_string()) {
-        tracing::warn!(path = %config.display(), error = %e, "write opencode config failed");
+    if !write_file(&config, &body.to_string()) {
+        tracing::warn!(path = %config.display(), "write opencode config failed");
         return SpawnInjection::default();
     }
     SpawnInjection {
@@ -429,7 +505,33 @@ pub fn preview(
     provider: &str,
     ctx_root: &Path,
 ) -> ContextPreviewProvider {
-    describe(plan(library, cfg, cwd, provider, ctx_root))
+    preview_with_options(
+        library,
+        cfg,
+        cwd,
+        provider,
+        ctx_root,
+        &MaterializeOptions::default(),
+    )
+}
+
+/// Like [`preview`], accepting optional workspace memory brief inputs.
+pub fn preview_with_options(
+    library: &Library,
+    cfg: &WorkspaceContextConfig,
+    cwd: &str,
+    provider: &str,
+    ctx_root: &Path,
+    opts: &MaterializeOptions<'_>,
+) -> ContextPreviewProvider {
+    describe(plan(
+        library,
+        cfg,
+        cwd,
+        provider,
+        ctx_root,
+        opts.memory_brief_md,
+    ))
 }
 
 /// Resolve every artifact `provider` would materialize for `cfg` into its bundle
@@ -441,9 +543,12 @@ fn plan(
     cwd: &str,
     provider: &str,
     ctx_root: &Path,
+    memory_brief_md: Option<&str>,
 ) -> ProviderPlan {
     match provider {
-        p if delivers_context(p) => plan_provider(library, cfg, cwd, provider, ctx_root),
+        p if delivers_context(p) => {
+            plan_provider(library, cfg, cwd, provider, ctx_root, memory_brief_md)
+        }
         other => ProviderPlan {
             provider: other.to_string(),
             skipped: true,
@@ -510,6 +615,7 @@ fn build_block(
     soul_name: &Option<String>,
     skills: &[LibrarySkill],
     index: SkillIndex,
+    memory_brief_md: Option<&str>,
 ) -> String {
     let mut sections: Vec<String> = Vec::new();
 
@@ -583,6 +689,13 @@ fn build_block(
                 sections.push(format!("## Memory\n\n{mem}"));
             }
         }
+        if let Some(brief) = memory_brief_md.map(str::trim).filter(|s| !s.is_empty()) {
+            if brief.starts_with("## ") {
+                sections.push(brief.to_string());
+            } else {
+                sections.push(format!("## Relevant Workspace Memory\n\n{brief}"));
+            }
+        }
     }
 
     // Aider-style repo map — LAST (lowest priority) so the line budget trims it
@@ -628,8 +741,10 @@ fn enforce_line_budget(block: String) -> String {
     )
 }
 
-/// Recursively copy all files from `src` into `dest`, creating parent
-/// directories as needed. Returns the list of destination paths written.
+/// Recursively copy regular files and directories from `src` into `dest`,
+/// creating parent directories as needed. Symlinks are skipped (checked via
+/// `symlink_metadata`, never followed) to prevent symlink loops and escapes
+/// outside the library root. Returns the list of destination paths written.
 /// On Unix, `.sh` files receive the executable bit (0o755).
 fn copy_dir_all(src: &Path, dest: &Path) -> std::io::Result<Vec<String>> {
     let mut written = Vec::new();
@@ -638,11 +753,22 @@ fn copy_dir_all(src: &Path, dest: &Path) -> std::io::Result<Vec<String>> {
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let src_path = entry.path();
+        let meta = match fs::symlink_metadata(&src_path) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(path = %src_path.display(), error = %e, "stat skill entry failed; skipping");
+                continue;
+            }
+        };
+        if meta.file_type().is_symlink() {
+            tracing::warn!(path = %src_path.display(), "skipping symlink during skill copy");
+            continue;
+        }
         let dest_path = dest.join(entry.file_name());
 
-        if src_path.is_dir() {
+        if meta.is_dir() {
             written.extend(copy_dir_all(&src_path, &dest_path)?);
-        } else {
+        } else if meta.is_file() {
             fs::write(&dest_path, fs::read(&src_path)?)?;
 
             #[cfg(unix)]
@@ -655,6 +781,35 @@ fn copy_dir_all(src: &Path, dest: &Path) -> std::io::Result<Vec<String>> {
         }
     }
     Ok(written)
+}
+
+/// Swap a uniquely staged directory into `dest_dir` so readers never observe a
+/// half-populated skill directory. Cleans up the previous directory after the
+/// new one is in place (and restores it if the rename fails).
+fn swap_staged_dir(staged: &Path, dest_dir: &Path) -> std::io::Result<()> {
+    let parent = dest_dir.parent().unwrap_or_else(|| Path::new("."));
+    let backup = if dest_dir.exists() {
+        let old = parent.join(format!(".otto-old-{}", next_stage_id()));
+        fs::rename(dest_dir, &old)?;
+        Some(old)
+    } else {
+        None
+    };
+    match fs::rename(staged, dest_dir) {
+        Ok(()) => {
+            if let Some(old) = backup {
+                let _ = fs::remove_dir_all(&old);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            if let Some(old) = backup {
+                let _ = fs::rename(&old, dest_dir);
+            }
+            let _ = fs::remove_dir_all(staged);
+            Err(e)
+        }
+    }
 }
 
 /// Build the on-disk skill artifacts for `skills`, targeting `skills_dir`. For
@@ -704,6 +859,7 @@ fn plan_provider(
     cwd: &str,
     provider: &str,
     ctx_root: &Path,
+    memory_brief_md: Option<&str>,
 ) -> ProviderPlan {
     let skills = active_skills(library, cfg);
     let soul_name = active_soul_name(library, cfg);
@@ -720,7 +876,15 @@ fn plan_provider(
     } else {
         SkillIndex::None
     };
-    let block = build_block(library, cfg, cwd, &soul_name, &skills, index);
+    let block = build_block(
+        library,
+        cfg,
+        cwd,
+        &soul_name,
+        &skills,
+        index,
+        memory_brief_md,
+    );
     let instruction = Some(InstructionPlan {
         path: bundle.join(context_file_name(provider)),
         merged: block,
@@ -759,38 +923,54 @@ fn execute(plan: ProviderPlan) -> MaterializeProviderResult {
 
     let mut files_written: Vec<String> = Vec::new();
 
-    // Skills + manifest reconciliation (claude).
+    // Skills + manifest reconciliation (staged into unique dirs then swapped).
     if let Some(skills_dir) = &plan.skills_dir {
+        if let Err(e) = fs::create_dir_all(skills_dir) {
+            tracing::warn!(path = %skills_dir.display(), error = %e, "create skills dir failed");
+        }
         let active_names: Vec<String> = plan.skills.iter().map(|s| s.name.clone()).collect();
         for (artifact, skill) in plan.skill_artifacts.iter().zip(plan.skills.iter()) {
             match artifact {
                 SkillArtifact::CopyDir { lib_dir, dest_dir } => {
-                    // Remove the old managed copy and re-copy the whole library
-                    // dir so references/assets/scripts stay in sync.
-                    if dest_dir.exists() {
-                        if let Err(e) = fs::remove_dir_all(dest_dir) {
-                            tracing::warn!(skill = %skill.name, error = %e, "remove existing skill dir failed");
-                            continue;
+                    let stage_dir = skills_dir.join(format!(".otto-stage-{}", next_stage_id()));
+                    match copy_dir_all(lib_dir, &stage_dir) {
+                        Ok(copied) => {
+                            if let Err(e) = swap_staged_dir(&stage_dir, dest_dir) {
+                                tracing::warn!(skill = %skill.name, error = %e, "swap staged skill dir failed");
+                            } else {
+                                // Map staged paths back to final dest paths for reporting.
+                                for p in copied {
+                                    let final_path = Path::new(&p)
+                                        .strip_prefix(&stage_dir)
+                                        .map(|rel| dest_dir.join(rel))
+                                        .unwrap_or_else(|_| PathBuf::from(&p));
+                                    files_written.push(final_path.to_string_lossy().into_owned());
+                                }
+                            }
                         }
-                    }
-                    match copy_dir_all(lib_dir, dest_dir) {
-                        Ok(copied) => files_written.extend(copied),
                         Err(e) => {
-                            tracing::warn!(skill = %skill.name, error = %e, "copy skill dir failed")
+                            let _ = fs::remove_dir_all(&stage_dir);
+                            tracing::warn!(skill = %skill.name, error = %e, "copy skill dir failed");
                         }
                     }
                 }
                 SkillArtifact::Body { dest_dir, body } => {
-                    if let Err(e) = fs::create_dir_all(dest_dir) {
-                        tracing::warn!(skill = %skill.name, error = %e, "create skill dir failed");
+                    let stage_dir = skills_dir.join(format!(".otto-stage-{}", next_stage_id()));
+                    if let Err(e) = fs::create_dir_all(&stage_dir) {
+                        tracing::warn!(skill = %skill.name, error = %e, "create staged skill dir failed");
                         continue;
                     }
-                    let path = dest_dir.join("SKILL.md");
-                    match fs::write(&path, body) {
-                        Ok(()) => files_written.push(path.to_string_lossy().into_owned()),
-                        Err(e) => {
-                            tracing::warn!(path = %path.display(), error = %e, "write skill failed")
-                        }
+                    let staged_file = stage_dir.join("SKILL.md");
+                    if let Err(e) = fs::write(&staged_file, body) {
+                        let _ = fs::remove_dir_all(&stage_dir);
+                        tracing::warn!(path = %staged_file.display(), error = %e, "write skill failed");
+                        continue;
+                    }
+                    if let Err(e) = swap_staged_dir(&stage_dir, dest_dir) {
+                        tracing::warn!(skill = %skill.name, error = %e, "swap staged skill body failed");
+                    } else {
+                        files_written
+                            .push(dest_dir.join("SKILL.md").to_string_lossy().into_owned());
                     }
                 }
             }
@@ -952,24 +1132,32 @@ fn describe_copy_dir(root: &Path, src: &Path, dest: &Path, out: &mut Vec<Context
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
             describe_copy_dir(root, &path, dest, out);
-        } else if let Ok(rel) = path.strip_prefix(root) {
-            let dest_path = dest.join(rel);
-            let body = fs::read_to_string(&path).unwrap_or_default();
-            // A SKILL.md at the skill root is the skill itself; everything else
-            // is a supporting asset.
-            let kind = if rel.as_os_str() == "SKILL.md" {
-                "skill"
-            } else {
-                "skill_asset"
-            };
-            out.push(plan_file(
-                dest_path,
-                kind,
-                ContextEnforcement::Advisory,
-                &body,
-            ));
+        } else if meta.is_file() {
+            if let Ok(rel) = path.strip_prefix(root) {
+                let dest_path = dest.join(rel);
+                let body = fs::read_to_string(&path).unwrap_or_default();
+                // A SKILL.md at the skill root is the skill itself; everything else
+                // is a supporting asset.
+                let kind = if rel.as_os_str() == "SKILL.md" {
+                    "skill"
+                } else {
+                    "skill_asset"
+                };
+                out.push(plan_file(
+                    dest_path,
+                    kind,
+                    ContextEnforcement::Advisory,
+                    &body,
+                ));
+            }
         }
     }
 }
@@ -1057,19 +1245,30 @@ fn plan_claude_hooks(bundle: &Path) -> Option<HooksPlan> {
     Some(HooksPlan { path, merged })
 }
 
-/// Write `content` to `path`, creating parents as needed. Best-effort: logs and
-/// returns `false` on failure.
+/// Atomically write `content` to `path` via a unique sibling temp file +
+/// rename, creating parents as needed. Best-effort: logs and returns `false`
+/// on failure.
 fn write_file(path: &Path, content: &str) -> bool {
-    if let Some(parent) = path.parent() {
-        if let Err(e) = fs::create_dir_all(parent) {
-            tracing::warn!(path = %path.display(), error = %e, "create parent dir failed");
-            return false;
-        }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    if let Err(e) = fs::create_dir_all(parent) {
+        tracing::warn!(path = %path.display(), error = %e, "create parent dir failed");
+        return false;
     }
-    match fs::write(path, content) {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("context");
+    let tmp = parent.join(format!(".{name}.{}.tmp", next_stage_id()));
+    if let Err(e) = fs::write(&tmp, content) {
+        let _ = fs::remove_file(&tmp);
+        tracing::warn!(path = %path.display(), error = %e, "write staged context file failed");
+        return false;
+    }
+    match fs::rename(&tmp, path) {
         Ok(()) => true,
         Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "write context file failed");
+            let _ = fs::remove_file(&tmp);
+            tracing::warn!(path = %path.display(), error = %e, "rename staged context file failed");
             false
         }
     }
@@ -1988,5 +2187,172 @@ mod tests {
         let kinds: Vec<&str> = p.files.iter().map(|f| f.kind.as_str()).collect();
         assert!(kinds.contains(&"skill"), "SKILL.md described");
         assert!(kinds.contains(&"skill_asset"), "asset described");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_dir_all_skips_symlinks_preventing_loops_and_escapes() {
+        let src = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let dest = TempDir::new().unwrap();
+
+        fs::write(src.path().join("SKILL.md"), "safe skill").unwrap();
+        fs::write(outside.path().join("secret.txt"), "top secret").unwrap();
+        // Symlink loop back to src itself + symlink to an outside secret file.
+        std::os::unix::fs::symlink(src.path(), src.path().join("loop_dir")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.txt"),
+            src.path().join("escaped.txt"),
+        )
+        .unwrap();
+
+        let written = copy_dir_all(src.path(), dest.path()).unwrap();
+        assert_eq!(written.len(), 1);
+        assert!(dest.path().join("SKILL.md").is_file());
+        assert!(!dest.path().join("loop_dir").exists());
+        assert!(!dest.path().join("escaped.txt").exists());
+    }
+
+    #[test]
+    fn codex_large_context_points_to_file_instead_of_stuffing_argv() {
+        let (_l, cwd, root, lib) = setup();
+        let cwd_path = cwd.path().to_string_lossy().into_owned();
+        let big = "Workspace rule line with substantial guidance.\n".repeat(200);
+        assert!(big.len() > MAX_CODEX_INLINE_BYTES);
+        let cfg = WorkspaceContextConfig {
+            extra_context_md: big,
+            ..Default::default()
+        };
+        let (res, inj) = provision(&lib, &cfg, &cwd_path, "codex", root.path());
+        assert!(!res.skipped);
+        let bundle = bundle_of(&root, "codex", &cwd_path);
+        let ctx_path = bundle.join(CONTEXT_FILE);
+        assert!(ctx_path.is_file());
+
+        let di = inj
+            .args
+            .windows(2)
+            .find(|w| w[0] == "-c" && w[1].starts_with("developer_instructions="))
+            .map(|w| w[1].clone())
+            .expect("developer_instructions arg");
+        assert!(
+            di.len() < 1024,
+            "oversized CONTEXT.md must not be stuffed onto argv (len={})",
+            di.len()
+        );
+        assert!(
+            di.contains(&ctx_path.display().to_string()),
+            "developer_instructions should point Codex to CONTEXT.md: {di}"
+        );
+    }
+
+    #[test]
+    fn concurrent_provisions_leave_atomic_complete_bundle_without_staging_leftovers() {
+        let (_l, cwd, root, lib) = setup();
+        let cwd_path = cwd.path().to_string_lossy().into_owned();
+        lib.put_soul("otto", "Concurrent persona.").unwrap();
+        lib.put_skill("triage", "---\ndescription: d\n---\nSKILL BODY")
+            .unwrap();
+        let cfg = WorkspaceContextConfig {
+            soul: Some("otto".into()),
+            extra_context_md: "Shared rules.\n".repeat(40),
+            ..Default::default()
+        };
+
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| {
+                    let (res, inj) = provision(&lib, &cfg, &cwd_path, "claude", root.path());
+                    assert!(!res.skipped);
+                    assert!(!inj.args.is_empty());
+                });
+            }
+        });
+
+        let bundle = bundle_of(&root, "claude", &cwd_path);
+        assert!(fs::read_to_string(bundle.join("CONTEXT.md"))
+            .unwrap()
+            .contains("Concurrent persona."));
+        assert!(bundle.join(".claude/skills/triage/SKILL.md").is_file());
+        for dir in [&bundle, &bundle.join(".claude/skills")] {
+            for entry in fs::read_dir(dir).unwrap().flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                assert!(
+                    !name.ends_with(".tmp")
+                        && !name.starts_with(".otto-stage-")
+                        && !name.starts_with(".otto-old-"),
+                    "leftover staging artifact: {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn memory_brief_empty_is_noop_and_populated_injects_into_context_md() {
+        let (_l, cwd, root, lib) = setup();
+        let cwd_path = cwd.path().to_string_lossy().into_owned();
+        lib.put_soul("otto", "Base persona.").unwrap();
+        let cfg = WorkspaceContextConfig {
+            soul: Some("otto".into()),
+            extra_context_md: "User rules.".into(),
+            include_memory: true,
+            ..Default::default()
+        };
+
+        let baseline = preview(&lib, &cfg, &cwd_path, "claude", root.path());
+        let with_empty = preview_with_options(
+            &lib,
+            &cfg,
+            &cwd_path,
+            "claude",
+            root.path(),
+            &MaterializeOptions {
+                memory_brief_md: Some("   \n  "),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            baseline.generated_instructions, with_empty.generated_instructions,
+            "empty memory brief must be a byte-for-byte no-op"
+        );
+
+        let brief = "## Relevant Workspace Memory\n\n- [decision · workspace · 2026-06-12] **WAL** — Keep WAL enabled (source: ADR-1)";
+        let with_brief = preview_with_options(
+            &lib,
+            &cfg,
+            &cwd_path,
+            "claude",
+            root.path(),
+            &MaterializeOptions {
+                memory_brief_md: Some(brief),
+                ..Default::default()
+            },
+        );
+        assert!(with_brief
+            .generated_instructions
+            .contains("## Relevant Workspace Memory"));
+        assert!(with_brief
+            .generated_instructions
+            .contains("**WAL** — Keep WAL enabled (source: ADR-1)"));
+
+        // When include_memory is false, the memory brief is omitted.
+        let cfg_off = WorkspaceContextConfig {
+            include_memory: false,
+            ..cfg
+        };
+        let without_mem = preview_with_options(
+            &lib,
+            &cfg_off,
+            &cwd_path,
+            "claude",
+            root.path(),
+            &MaterializeOptions {
+                memory_brief_md: Some(brief),
+                ..Default::default()
+            },
+        );
+        assert!(!without_mem
+            .generated_instructions
+            .contains("Relevant Workspace Memory"));
     }
 }

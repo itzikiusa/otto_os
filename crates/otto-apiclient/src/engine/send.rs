@@ -170,9 +170,10 @@ pub async fn prepare_request_with(
 
     // Per-request settings: a custom client when any non-default is set or the
     // request is tunnelled, otherwise the workspace's shared pooled client.
-    let shared_client = http_client(wid, allow_local);
-    let custom_client = build_settings_client_for(wid, req, proxy, allow_local, credentialed)?;
-    let client = custom_client.as_ref().unwrap_or(&shared_client);
+    let client = match build_settings_client_for(wid, req, proxy, allow_local, credentialed)? {
+        Some(custom) => custom,
+        None => http_client(wid, allow_local)?,
+    };
     let mut builder = client.request(method, &url);
     if whole_body_timeout {
         builder = builder.timeout(effective_timeout(req.timeout_ms));

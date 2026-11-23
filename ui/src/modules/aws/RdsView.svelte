@@ -28,7 +28,9 @@
   import MetricsPanel from './MetricsPanel.svelte';
   import { fmtAgo, fmtDate, awsErrorText } from './util';
   import { awsLoadText } from './loadText';
+  import { TableWindow } from '../../lib/tableWindow.svelte';
   import { router } from '../../lib/router.svelte';
+  import { RDS_PREFILL_STORAGE_KEY, rdsToConnectionPrefill } from './crossLinks';
   import type { AwsAccount, RdsInstance, RdsInstanceDetail } from '../../lib/api/types';
 
   interface Props {
@@ -139,12 +141,26 @@
     return i.port ? `${i.endpoint}:${i.port}` : i.endpoint;
   }
 
+  function openInConnections(i: RdsInstance): void {
+    const prefill = rdsToConnectionPrefill(i, account.environment);
+    if (!prefill) return;
+    try {
+      sessionStorage.setItem(RDS_PREFILL_STORAGE_KEY, JSON.stringify(prefill));
+    } catch {
+      toasts.error('Couldn’t prepare the connection form', 'Copy the RDS endpoint and add the connection manually.');
+      return;
+    }
+    router.go('database');
+  }
+
   function menu(e: MouseEvent | KeyboardEvent, i: RdsInstance): void {
+    const prefill = rdsToConnectionPrefill(i, account.environment);
     ctxMenu.show(e, [
       { label: 'Details', icon: 'info', action: () => void openDetail(i) },
       { label: 'Metrics', icon: 'chart', action: () => { void openDetail(i); drawerTab = 'metrics'; } },
       { label: 'Copy identifier', icon: 'copy', action: () => void copy(i.identifier, 'identifier') },
       ...(i.endpoint ? [{ label: `Copy endpoint ${endpointOf(i)}`, icon: 'copy', action: () => void copy(endpointOf(i), 'endpoint') }] : []),
+      ...(prefill ? [{ separator: true }, { label: 'Open in Connections…', icon: 'db', action: () => openInConnections(i) }] : []),
     ]);
   }
 
@@ -156,6 +172,13 @@
   });
   // Spoken at the state edge through the shell's always-mounted announcer: a
   // live region inserted together with its text is not read (WebKit/VoiceOver).
+  // Window large multi-region RDS instance tables.
+  const tw = new TableWindow();
+  let wrapEl = $state<HTMLDivElement | null>(null);
+  const win = $derived(tw.range(shown.length));
+  const rowsWindow = $derived(shown.slice(win.start, win.end));
+  $effect(() => { void rowsWindow; tw.measure(wrapEl); });
+  $effect(() => { void region; void filter; tw.reset(wrapEl); });
   const detailError = $derived(detail?.error ?? '');
   $effect(() => { if (detailError) announce(`Couldn’t load the DB instance details. ${awsErrorText(detailError)}`, { assertive: true }); });
 </script>
@@ -174,7 +197,7 @@
 </ViewToolbar>
 
 <div class="body">
-<div class="tbl-wrap">
+<div class="tbl-wrap" class:windowed={tw.active(shown.length)} bind:this={wrapEl} bind:clientHeight={tw.viewH} onscroll={tw.onscroll}>
   <RegionErrors errors={regionErrors} />
   {#if loading && !instances}
     <div class="pad"><Skeleton rows={8} label="RDS instances" /></div>
@@ -191,7 +214,8 @@
         </tr>
       </thead>
       <tbody>
-        {#each shown as i (`${i.region ?? ''}/${i.identifier}`)}
+        {#if win.top}<tr class="tw-spacer" aria-hidden="true"><td colspan={allRegions ? 10 : 9} style="height:{win.top}px"></td></tr>{/if}
+        {#each rowsWindow as i (`${i.region ?? ''}/${i.identifier}`)}
           <tr use:rowMenu
             class="trow"
             class:sel={detail?.inst.identifier === i.identifier && detail.inst.region === rowRegion(i)}
@@ -214,6 +238,7 @@
             </td>
           </tr>
         {/each}
+        {#if win.bottom}<tr class="tw-spacer" aria-hidden="true"><td colspan={allRegions ? 10 : 9} style="height:{win.bottom}px"></td></tr>{/if}
       </tbody>
     </table>
   {/if}
@@ -234,8 +259,12 @@
     onclose={() => (detail = null)}
   >
     {#if drawerTab === 'overview'}
+      {@const connPrefill = rdsToConnectionPrefill(inst, account.environment)}
       <div class="dt">
         <div class="logs-link">
+          {#if connPrefill}
+            <button class="btn small" onclick={() => openInConnections(inst)} title="Open the new-connection form pre-filled with this RDS instance’s engine, host, port and database"><Icon name="db" size={12} /> Open in Connections…</button>
+          {/if}
           <button class="btn small" onclick={() => router.go(`aws/${account.id}/logs/${encodeURIComponent(`/aws/rds/instance/${inst.identifier}/`)}/${encodeURIComponent(rowRegion(inst))}`)} title="Open this instance’s exported log groups in CloudWatch Logs (needs log exports enabled)"><Icon name="text" size={12} /> Logs</button>
         </div>
         <dl class="kv">
@@ -283,6 +312,8 @@
   .logs-link {
     display: flex;
     justify-content: flex-end;
+    gap: 6px;
+    flex-wrap: wrap;
   }
   .pad {
     padding: 12px;

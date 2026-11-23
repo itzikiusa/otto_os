@@ -13,7 +13,6 @@ tauri-build = { version = "2.7.4", features = [] }
 [dependencies]
 tauri = { version = "2.12.5", features = ["macos-private-api", "tray-icon", "unstable", "devtools"] }
 tauri-plugin-notification = "2.8.0"
-tauri-plugin-shell = "2.6.0"
 tauri-plugin-opener = "2.7.2"
 tauri-plugin-global-shortcut = "2.4.1"
 window-vibrancy = "0.8.1"
@@ -26,6 +25,10 @@ serde_json = "1.0.154"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "process", "time"] }
 dirs = "7.0.0"
+# Clipboard history (clipboard/mac.rs): typed NSPasteboard / NSWorkspace —
+# the same objc2 0.6 family tao and wry already build.
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSData", "NSArray", "NSURL", "NSDictionary", "NSValue", "NSAttributedString"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPasteboard", "NSPasteboardItem", "NSWorkspace", "NSRunningApplication", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSAttributedString"] }
 # desktop.log: SIGTERM / SIGINT / SIGHUP via a self-pipe (lifecycle.rs).
 signal-hook = { version = "0.4.6", default-features = false, features = ["iterator"] }
 

@@ -632,6 +632,35 @@ fn closer_scan(
     None
 }
 
+/// Explicit URL scheme allowlist for Markdown / Confluence / Jira links:
+/// allows `http:`, `https:`, `mailto:`, `tel:`, or relative / `#fragment`
+/// references without a scheme. Blocks `javascript:`, `data:`, `vbscript:`,
+/// control characters (which browsers strip inside schemes), and other
+/// non-allowlisted schemes.
+pub(crate) fn is_safe_link_href(href: &str) -> bool {
+    if href.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return false;
+    }
+    let s = href.trim();
+    if s.is_empty() {
+        return false;
+    }
+    if s.starts_with('#') || s.starts_with('/') || s.starts_with('?') {
+        return true;
+    }
+    let Some(colon) = s.find(':') else {
+        return true;
+    };
+    // A `/` or `?` or `#` before `:` means there is no scheme (relative URL).
+    if s[..colon].contains(['/', '?', '#']) {
+        return true;
+    }
+    matches!(
+        s[..colon].to_ascii_lowercase().as_str(),
+        "http" | "https" | "mailto" | "tel"
+    )
+}
+
 /// `[text](dest "title")` starting at `i` (the `[`): (text, dest, end index).
 fn link_at(c: &[char], i: usize, memo: &mut Memo) -> Option<(Vec<char>, String, usize)> {
     if memo.no_bracket_close_from.is_some_and(|d| i >= d) {
@@ -743,10 +772,11 @@ fn parse_inline(c: &[char], marks: &[Mark], out: &mut Vec<Inl>, depth: usize) {
                     i += end + 1;
                     continue;
                 }
-                let is_url = ["http://", "https://", "mailto:"]
+                let lower = tag.to_ascii_lowercase();
+                let is_url = ["http://", "https://", "mailto:", "tel:"]
                     .iter()
-                    .any(|p| tag.starts_with(p));
-                if is_url && !tag.contains(char::is_whitespace) {
+                    .any(|p| lower.starts_with(p));
+                if is_url && !tag.contains(char::is_whitespace) && is_safe_link_href(&tag) {
                     flush(&mut buf, out);
                     out.push(Inl::Text(tag.clone(), with(marks, &[Mark::Link(tag)])));
                     i += end + 1;
@@ -759,12 +789,17 @@ fn parse_inline(c: &[char], marks: &[Mark], out: &mut Vec<Inl>, depth: usize) {
             let at = if ch == '!' { i + 1 } else { i };
             if let Some((text, dest, end)) = link_at(c, at, &mut memo) {
                 flush(&mut buf, out);
+                let safe = is_safe_link_href(&dest);
                 let text = if text.is_empty() {
-                    dest.chars().collect()
+                    if safe {
+                        dest.chars().collect()
+                    } else {
+                        Vec::new()
+                    }
                 } else {
                     text
                 };
-                if dest.is_empty() {
+                if !safe {
                     parse_inline(&text, marks, out, depth + 1);
                 } else {
                     parse_inline(&text, &with(marks, &[Mark::Link(dest)]), out, depth + 1);
@@ -836,4 +871,79 @@ pub(crate) fn para_spans(lines: &[String]) -> Vec<Inl> {
         spans.extend(inlines(l.trim_start()));
     }
     spans
+}
+
+#[cfg(test)]
+mod link_scheme_tests {
+    use super::*;
+
+    #[test]
+    fn link_href_allowlist_blocks_dangerous_schemes_and_allows_safe_ones() {
+        for safe in [
+            "https://example.com/a?b=1#c",
+            "HTTP://EXAMPLE.COM/path",
+            "mailto:alice@example.com",
+            "tel:+15551234567",
+            "#section-1",
+            "/docs/guide",
+            "/docs/colon:page",
+            "./local.md",
+            "../parent/file.md",
+            "relative/path:colon",
+            "?query=a:b",
+        ] {
+            assert!(is_safe_link_href(safe), "expected safe: {safe}");
+        }
+
+        for blocked in [
+            "",
+            "   ",
+            "javascript:alert(1)",
+            "JaVaScRiPt:alert(1)",
+            "  javascript:alert(1)",
+            "java\tscript:alert(1)",
+            "java\nscript:alert(1)",
+            "javascript://%0aalert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "vbscript:msgbox(1)",
+            "file:///etc/passwd",
+        ] {
+            assert!(!is_safe_link_href(blocked), "expected blocked: {blocked}");
+        }
+    }
+
+    #[test]
+    fn markdown_parser_strips_disallowed_link_schemes() {
+        for md in [
+            "[click](javascript:alert(1))",
+            "[click](DATA:text/html;base64,PHNjcmlwdD4=)",
+            "[click](vbscript:msgbox(1))",
+            "![img](javascript:alert(1))",
+        ] {
+            let spans = inlines(md);
+            assert!(
+                spans
+                    .iter()
+                    .all(|s| !matches!(s, Inl::Text(_, m) if m.iter().any(|mk| matches!(mk, Mark::Link(_))))),
+                "unexpected link mark for {md}: {spans:?}"
+            );
+        }
+
+        let safe =
+            inlines("[ok](https://example.com) [mail](mailto:a@b.c) [call](tel:123) [frag](#top)");
+        let links: Vec<&str> = safe
+            .iter()
+            .filter_map(|s| match s {
+                Inl::Text(_, m) => m.iter().find_map(|mk| match mk {
+                    Mark::Link(h) => Some(h.as_str()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            links,
+            vec!["https://example.com", "mailto:a@b.c", "tel:123", "#top"]
+        );
+    }
 }

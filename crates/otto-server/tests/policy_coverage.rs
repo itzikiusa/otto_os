@@ -114,8 +114,14 @@ fn is_policy_exempt_by_design(path: &str) -> bool {
     // `/ws/*` and `/browser/proxy` self-authenticate (bearer / ticket). The runtime
     // plugin reverse-proxy + iframe-asset routes (`/plugins/{slug}/…`) are
     // feature-gated by the dedicated plugin branch in `feature_guard` BEFORE
-    // `policy_for` is consulted, so they intentionally have no policy-table entry.
-    path.starts_with("/ws/") || path == "/browser/proxy" || path.starts_with("/plugins/")
+    // `policy_for` is consulted, so they intentionally have no policy-table entry —
+    // EXCEPT the root-only daemon-managed admin routes (`/plugins/{slug}/restart`
+    // and `/plugins/{slug}/logs`), which bypass the proxy branch and are covered
+    // directly by `policy_for` + `route_class`.
+    path.starts_with("/ws/")
+        || path == "/browser/proxy"
+        || (path.starts_with("/plugins/")
+            && !matches!(path, "/plugins/{slug}/restart" | "/plugins/{slug}/logs"))
 }
 
 #[test]

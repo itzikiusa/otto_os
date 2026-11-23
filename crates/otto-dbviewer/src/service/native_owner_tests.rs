@@ -525,3 +525,168 @@ async fn unrestricted_callers_run_unparsed_sql_forms_editors_do_not() {
         Error::Forbidden(_)
     ));
 }
+
+#[tokio::test]
+async fn mongosh_access_grant_is_root_only_and_strips_forged_flags() {
+    use otto_core::auth::{with_request_credential, RequestCredential};
+
+    let fixture = Fixture::new().await;
+    let mut resolved = fixture.resolved(&fixture.root).await;
+    resolved.config.engine = Engine::Mongodb;
+    let script = "const x = 1; print(x);";
+    let human_root = RequestCredential {
+        agent: false,
+        root_withheld: false,
+    };
+
+    // A signed-in human root user is permitted to invoke mongosh scripts.
+    with_request_credential(
+        human_root,
+        fixture
+            .service
+            .prepare_mongosh_access(&fixture.root, script, &mut resolved.config),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resolved.config.params["__mongosh_authorized"], true);
+
+    // Ordinary native MongoDB reads do not get the mongosh flag.
+    with_request_credential(
+        human_root,
+        fixture.service.prepare_mongosh_access(
+            &fixture.root,
+            "db.users.find({})",
+            &mut resolved.config,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(resolved.config.params.get("__mongosh_authorized").is_none());
+
+    // Even a pre-injected flag is stripped and non-root human callers are refused.
+    resolved.config.params["__mongosh_authorized"] = Value::Bool(true);
+    assert!(matches!(
+        with_request_credential(
+            human_root,
+            fixture
+                .service
+                .prepare_mongosh_access(&fixture.editor, script, &mut resolved.config),
+        )
+        .await,
+        Err(Error::Forbidden(_))
+    ));
+    assert!(resolved.config.params.get("__mongosh_authorized").is_none());
+
+    // An agent session owned by root (with root withheld) is refused.
+    resolved.config.params["__mongosh_authorized"] = Value::Bool(true);
+    let agent_withheld = RequestCredential {
+        agent: true,
+        root_withheld: true,
+    };
+    assert!(matches!(
+        with_request_credential(
+            agent_withheld,
+            fixture
+                .service
+                .prepare_mongosh_access(&fixture.root, script, &mut resolved.config),
+        )
+        .await,
+        Err(Error::Forbidden(_))
+    ));
+    assert!(resolved.config.params.get("__mongosh_authorized").is_none());
+
+    // Even an agent credential with root_withheld=false (or outside a request) is refused.
+    let agent_unwithheld = RequestCredential {
+        agent: true,
+        root_withheld: false,
+    };
+    assert!(matches!(
+        with_request_credential(
+            agent_unwithheld,
+            fixture
+                .service
+                .prepare_mongosh_access(&fixture.root, script, &mut resolved.config),
+        )
+        .await,
+        Err(Error::Forbidden(_))
+    ));
+    assert!(matches!(
+        fixture
+            .service
+            .prepare_mongosh_access(&fixture.root, script, &mut resolved.config)
+            .await,
+        Err(Error::Forbidden(_))
+    ));
+
+    // Carrying the request credential across tokio::spawn preserves both allow and deny.
+    let svc = fixture.service.clone();
+    let root_id = fixture.root.clone();
+    let mut cfg_ok = resolved.config.clone();
+    let ok = with_request_credential(human_root, async move {
+        tokio::spawn(otto_core::auth::carry_request_credential(async move {
+            svc.prepare_mongosh_access(&root_id, script, &mut cfg_ok)
+                .await
+                .map(|()| cfg_ok.params["__mongosh_authorized"].clone())
+        }))
+        .await
+        .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(ok, Value::Bool(true));
+
+    let svc = fixture.service.clone();
+    let root_id = fixture.root.clone();
+    let mut cfg_deny = resolved.config.clone();
+    let denied = with_request_credential(agent_withheld, async move {
+        tokio::spawn(otto_core::auth::carry_request_credential(async move {
+            svc.prepare_mongosh_access(&root_id, script, &mut cfg_deny)
+                .await
+        }))
+        .await
+        .unwrap()
+    })
+    .await;
+    assert!(matches!(denied, Err(Error::Forbidden(_))));
+}
+
+#[tokio::test]
+async fn enforced_prod_connection_allows_catalog_reads_but_blocks_writes() {
+    let fixture = Fixture::new().await;
+    let conn = mysql_owned_by(&fixture, "mysql-prod", false).await;
+    sqlx::query("UPDATE connections SET environment = 'prod' WHERE id = ?")
+        .bind(&conn)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    put_rules(&fixture, &conn, vec![allow("root", &fixture.root, None)]).await;
+    let snap = fixture.service.access_snapshot(&conn).await.unwrap();
+
+    for sql in [
+        "SHOW TABLES",
+        "DESCRIBE orders",
+        "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_NAME = 'orders'",
+    ] {
+        let req = QueryRequest {
+            statement: sql.into(),
+            ..QueryRequest::default()
+        };
+        fixture
+            .service
+            .execution_access_snap(&snap, &fixture.root, &req)
+            .await
+            .unwrap_or_else(|e| panic!("catalog read '{sql}' should pass on prod: {e}"));
+    }
+
+    let write = QueryRequest {
+        statement: "DELETE FROM orders WHERE id = 1".into(),
+        ..QueryRequest::default()
+    };
+    let err = fixture
+        .service
+        .execution_access_snap(&snap, &fixture.root, &write)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("review_required"), "unexpected error: {err}");
+}

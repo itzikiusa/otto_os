@@ -14,6 +14,8 @@ esac
 scheme=${url%%://*}
 authority=${url#*://}
 authority=${authority%%/*}
+authority=${authority%%\?*}
+authority=${authority%%#*}
 authority=${authority##*@}
 authority=$(printf '%s' "$authority" | /usr/bin/tr '[:upper:]' '[:lower:]')
 case "$scheme:$authority" in

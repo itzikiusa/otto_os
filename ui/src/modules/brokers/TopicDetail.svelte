@@ -3,8 +3,9 @@
   import Badge from '../../lib/components/Badge.svelte';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
@@ -12,6 +13,8 @@
   import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { confirmProd } from '../../lib/confirmProd';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { copyWithToast } from '../../lib/clipboard';
   import { formatBytes } from '../../lib/metric-format';
   import { loadErrorText } from '../../lib/loadError';
   import { pollWhileVisible } from '../../lib/poll';
@@ -19,12 +22,14 @@
   import { TableWindow } from '../../lib/tableWindow.svelte';
   import { copyAsJson, downloadJson, exportCsv } from '../../lib/components/exporters';
   import type { BrokerCluster, ConsumeReq, ConsumeResp, KafkaMessage, MessageHeader,
-    PartitionRange, ProduceReq, StartPosition, TopicDetail, ValueFormat } from '../../lib/api/types';
+    ProduceReq, StartPosition, TopicDetail, ValueFormat } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { brokersTopicPort } from '../../lib/uiCommands/brokers';
   import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
   import ConsumeScanNote from './ConsumeScanNote.svelte';
+  import { buildKcatSnippet } from './cliSnippet';
+  import { buildProducePrefill, mergePartitionRanges, offsetPct, rangePct, type ReplayPrefill } from './messagePrefill';
 
   // ── Send-to-agent dialog (B2a) ─────────────────────────────────────────────
   let sendToAgentOpen = $state(false);
@@ -33,8 +38,9 @@
     cluster: BrokerCluster;
     topic: string;
     ondeleted: () => void;
+    onreplayfrom?: (prefill: ReplayPrefill) => void;
   }
-  let { cluster, topic, ondeleted }: Props = $props();
+  let { cluster, topic, ondeleted, onreplayfrom }: Props = $props();
 
   const guarded = $derived(cluster.read_only || cluster.environment === 'prod');
 
@@ -195,6 +201,8 @@
   /** Inline field error for the produce form (shown under Value, not a toast). */
   let pValueErr = $state<string | null>(null);
   let produceError = $state<string | null>(null);
+  let pKeyEl = $state<HTMLInputElement>();
+  let pValueEl = $state<HTMLTextAreaElement>();
 
   // Agent UI control (lib/uiCommands/brokers.ts): the agent's peek runs in
   // THIS form (the user sees the options and the grid), and a produce is
@@ -394,25 +402,6 @@
     }
   }
 
-  /** Merge two PartitionRange arrays, keeping the widest [low, high] per partition. */
-  function mergePartitionRanges(a: PartitionRange[], b: PartitionRange[]): PartitionRange[] {
-    const map = new Map<number, PartitionRange>();
-    for (const r of a) map.set(r.partition, { ...r });
-    for (const r of b) {
-      const existing = map.get(r.partition);
-      if (!existing) {
-        map.set(r.partition, { ...r });
-      } else {
-        map.set(r.partition, {
-          partition: r.partition,
-          low: Math.min(existing.low, r.low),
-          high: Math.max(existing.high, r.high),
-        });
-      }
-    }
-    return [...map.values()].sort((a, b) => a.partition - b.partition);
-  }
-
   async function consume(preview = true) {
     if (consuming || consumeError) return;
     const owner = consumeUrl();
@@ -461,21 +450,6 @@
     } finally {
       consuming = false;
     }
-  }
-
-  /**
-   * Compute the 0–100% position of `offset` within a partition's [low, high]
-   * watermark range. Returns null when the watermark data is unavailable or the
-   * range is empty (high === low).
-   */
-  function offsetPct(msg: KafkaMessage, partitions: PartitionRange[]): number | null {
-    return rangePct(msg, partitions.find((r) => r.partition === msg.partition));
-  }
-  function rangePct(msg: KafkaMessage, range: PartitionRange | undefined): number | null {
-    if (!range) return null;
-    const span = range.high - range.low;
-    if (span <= 0) return null;
-    return Math.min(100, Math.max(0, ((msg.offset - range.low) / span) * 100));
   }
 
   function addHeader() {
@@ -537,19 +511,23 @@
       pHeaders = [];
       loadDetail(true);
     } catch (e) {
-      produceError = e instanceof Error ? e.message : String(e);
+      produceError = loadErrorText(e);
     } finally {
       producing = false;
     }
   }
 
   async function setConfig() {
-    if (!cfgName.trim()) return;
+    if (cluster.read_only || !cfgName.trim()) return;
     if (guarded) {
-      const ok = await confirmer.ask(
-        `Change config on guarded cluster "${cluster.name}"?`,
-        { title: 'Alter config on guarded cluster', confirmLabel: 'Apply', danger: true },
-      );
+      const ok = await confirmProd({
+        env: cluster.environment,
+        verb: 'Apply config',
+        title: cluster.environment === 'prod' ? 'Alter config on production?' : 'Alter config on guarded cluster?',
+        where: `Topic ${topic} · ${cluster.name}`,
+        what: `${cfgName.trim()} = ${cfgValue}`,
+        danger: true,
+      });
       if (!ok) return;
     }
     cfgSaving = true;
@@ -645,6 +623,78 @@
       toasts.error('Couldn’t copy', 'The browser blocked the clipboard write. Select the message text and copy it manually.');
     }
   }
+
+  function copyKcat(msg?: KafkaMessage, mode: 'consume' | 'produce' = 'consume') {
+    const part = msg
+      ? msg.partition
+      : mode === 'produce'
+        ? (pPartition === '' ? undefined : Number(pPartition))
+        : (partition === '' ? undefined : Number(partition));
+    const offset = msg
+      ? msg.offset
+      : mode === 'consume' && startMode === 'offset'
+        ? Number(startOffset)
+        : undefined;
+    void copyWithToast(buildKcatSnippet(cluster, { topic, partition: part, offset, mode }), 'kcat command');
+  }
+
+  async function editAndProduceCopy(msg: KafkaMessage) {
+    if (cluster.read_only) return;
+    let src = msg;
+    if (src.value?.truncated) {
+      try {
+        const full = await fetchFull(src);
+        if (!full) {
+          toasts.warn('Message unavailable', 'This message is no longer available (retention or compaction).');
+          return;
+        }
+        src = full;
+      } catch (e) {
+        toastError('Couldn’t load the full message', e);
+        return;
+      }
+    }
+    const pre = buildProducePrefill(src);
+    pKey = pre.key;
+    pKeyBase64 = pre.keyBase64;
+    pValue = pre.value;
+    pValueBase64 = pre.valueBase64;
+    pTombstone = pre.tombstone;
+    pPartition = pre.partition;
+    pHeaders = pre.headers;
+    pValueErr = null;
+    produceError = null;
+    tab = 'produce';
+    await tick();
+    if (pTombstone) pKeyEl?.focus();
+    else pValueEl?.focus();
+  }
+
+  function replayFromMessage(msg: KafkaMessage) {
+    if (cluster.read_only || !onreplayfrom) return;
+    onreplayfrom({ sourceTopic: topic, partition: msg.partition, offset: msg.offset });
+  }
+
+  function openMessageMenu(e: MouseEvent, m: KafkaMessage) {
+    ctxMenu.show(e, [
+      {
+        label: 'Edit & Produce copy…',
+        icon: 'edit',
+        disabled: cluster.read_only,
+        title: cluster.read_only ? 'Read-only cluster — producing messages is disabled' : 'Copy into the Produce tab to edit before sending',
+        action: () => void editAndProduceCopy(m),
+      },
+      {
+        label: 'Replay to topic…',
+        icon: 'send',
+        disabled: cluster.read_only || !onreplayfrom,
+        title: cluster.read_only ? 'Read-only cluster — replaying messages is disabled' : 'Open the Replay tab for this partition and offset',
+        action: () => replayFromMessage(m),
+      },
+      { separator: true },
+      { label: 'Copy as kcat', icon: 'terminal', action: () => copyKcat(m) },
+    ]);
+  }
   $effect(() => { if (detailErr) announce(`Couldn’t load topic details. ${detailErr}`, { assertive: true }); });
   $effect(() => { if (consumeError) announce(consumeError, { assertive: true }); });
   $effect(() => { if (produceError) announce(produceError, { assertive: true }); });
@@ -662,7 +712,7 @@
       <span class="name" title={topic}>{topic}</span>
       {#if detail}<span class="muted">· {detail.partitions.length}p · {detail.message_count.toLocaleString()} msgs</span>{/if}
     </div>
-    <button class="btn small danger" onclick={deleteTopic}>Delete topic</button>
+    <button class="btn small danger" onclick={deleteTopic} disabled={cluster.read_only} title={cluster.read_only ? 'Read-only cluster — deleting topics is disabled' : undefined}>Delete topic</button>
   </header>
 
   <!-- The topic's main view switch: a real tablist (S19-302), so VoiceOver
@@ -672,13 +722,7 @@
   </div>
 
   {#if detailErr}
-    <div class="err">
-      <Icon name="warning" size={13} />
-      <span class="err-text">Couldn’t load topic details. <span class="muted">{detailErr}</span></span>
-      <button class="btn small" onclick={() => loadDetail(detail !== null)}>
-        <Icon name="refresh" size={12} /> Retry
-      </button>
-    </div>
+    <LoadState variant="compact" what="topic details" error={detailErr} empty={detail === null} onretry={() => loadDetail(detail !== null)} />
   {/if}
 
   <div class="tpanel" role="tabpanel" id="topic-panel-{tab}" aria-labelledby="topic-tab-{tab}">
@@ -735,6 +779,9 @@
       <button class="btn primary small" onclick={() => consume()} disabled={consuming || !!consumeError}>
         {consuming ? 'Reading…' : 'Peek'}
       </button>
+      <button class="btn small" onclick={() => copyKcat()} title="Copy kcat consume command for this topic">
+        <Icon name="terminal" size={12} /> Copy as kcat
+      </button>
       {#if result && result.messages.length > 0}
         <button class="btn small" onclick={() => exportMessages('json')} disabled={exporting} title="Export all as JSON">
           <Icon name="download" size={12} /> JSON
@@ -763,7 +810,11 @@
             {#if win.top}<tr class="tw-spacer" aria-hidden="true"><td colspan="6" style="height:{win.top}px"></td></tr>{/if}
             {#each messages.slice(win.start, win.end) as m (m.partition + '-' + m.offset)}
               {@const pct = rangePct(m, rangeByPartition.get(m.partition))}
-              <tr class:sel={selKey === `${m.partition}-${m.offset}`} data-message-key={`${m.partition}-${m.offset}`}>
+              <tr
+                class:sel={selKey === `${m.partition}-${m.offset}`}
+                data-message-key={`${m.partition}-${m.offset}`}
+                oncontextmenu={(e) => openMessageMenu(e, m)}
+              >
                 <td>{m.partition}</td>
                 <td class="mono"><button class="message-open" aria-label={`Inspect partition ${m.partition} offset ${m.offset}`} title={`Inspect partition ${m.partition} offset ${m.offset}`} aria-pressed={selKey === `${m.partition}-${m.offset}`} onclick={() => selectMessage(m)}>{m.offset}</button></td>
                 <td class="pos-cell">
@@ -792,14 +843,19 @@
         {#if result?.masked}
           <p class="masked-note pad small">PII masked — sensitive values were redacted server-side.</p>
         {/if}
-        {#if autoPoll && (tailOffsets.size > 0 || tailError)}
+        {#if autoPoll && tailError}
+          <LoadState
+            variant="compact"
+            what="live tail"
+            errorTitle="Live tail interrupted — retrying"
+            error={`${tailError}${tailLastSuccess ? ` Last received successfully at ${fmtTs(tailLastSuccess)}.` : ''}`}
+            loading={consuming}
+            empty
+            onretry={() => consumeWithTail(true)}
+          />
+        {:else if autoPoll && tailOffsets.size > 0}
           <p class="muted pad small tail-note">
-            {#if tailError}
-              Live tail interrupted — retrying. {tailError}{tailLastSuccess ? ` Last received successfully at ${fmtTs(tailLastSuccess)}.` : ''}
-              <button class="btn small" disabled={consuming} onclick={() => consumeWithTail(true)}>Retry now</button>
-            {:else}
-              Live tail active — appending new messages (cap {TAIL_CAP}){tailAdded > 0 ? ` · +${tailAdded} new` : ''}.
-            {/if}
+            Live tail active — appending new messages (cap {TAIL_CAP}){tailAdded > 0 ? ` · +${tailAdded} new` : ''}.
           </p>
         {/if}
       </div>
@@ -829,6 +885,33 @@
             <button class="btn small" onclick={copySelectedAsJson} disabled={!!selected.value?.truncated} title="Copy message as JSON">
               <Icon name="copy" size={12} /> Copy
             </button>
+            <button class="btn small" onclick={() => selected && copyKcat(selected)} title="Copy kcat command for this partition and offset">
+              <Icon name="terminal" size={12} /> Copy as kcat
+            </button>
+            <button
+              class="btn small"
+              onclick={() => selected && void editAndProduceCopy(selected)}
+              disabled={cluster.read_only || !!selected.value?.truncated}
+              title={cluster.read_only
+                ? 'Read-only cluster — producing messages is disabled'
+                : selected.value?.truncated
+                  ? 'Waiting for the full message value'
+                  : 'Copy into the Produce tab to edit before sending'}
+            >
+              <Icon name="edit" size={12} /> Edit & Produce copy…
+            </button>
+            {#if onreplayfrom}
+              <button
+                class="btn small"
+                onclick={() => selected && replayFromMessage(selected)}
+                disabled={cluster.read_only}
+                title={cluster.read_only
+                  ? 'Read-only cluster — replaying messages is disabled'
+                  : 'Open the Replay tab for this partition and offset'}
+              >
+                <Icon name="send" size={12} /> Replay to topic…
+              </button>
+            {/if}
             {#if ws.current}
               <button class="btn small" onclick={() => (sendToAgentOpen = true)} disabled={!!selected.value?.truncated} title="Send message to a running agent (redacted preview)">
                 <Icon name="send" size={12} /> To agent
@@ -841,10 +924,20 @@
           {/if}
           <h5>Value</h5>{#if selected.value?.notice}<p class="muted small schema-notice">{selected.value.notice}</p>{/if}
           {#if selected.value?.truncated}
-            <p class="muted small">
-              {#if fullLoading}Loading the full value… (showing the first 2 KiB){:else if fullErr}{fullErr} Showing the first 2 KiB.
-                <button class="btn small" onclick={() => selected && selectMessage(selected)}>Retry</button>{:else}Showing the first 2 KiB.{/if}
-            </p>
+            {#if fullErr && !fullLoading}
+              <LoadState
+                variant="compact"
+                what="the full value"
+                error={`${fullErr} Showing the first 2 KiB.`}
+                loading={fullLoading}
+                empty
+                onretry={() => selected && selectMessage(selected)}
+              />
+            {:else}
+              <p class="muted small">
+                {#if fullLoading}Loading the full value… (showing the first 2 KiB){:else}Showing the first 2 KiB.{/if}
+              </p>
+            {/if}
           {/if}
           <pre class="payload">{rawView
               ? (selected.value?.raw_base64 ?? '')
@@ -891,12 +984,7 @@
     <div class="cfg-set">
       <input dir="ltr" class="grow" bind:value={cfgName} placeholder="retention.ms" aria-label="Config name" />
       <input dir="ltr" class="grow" bind:value={cfgValue} placeholder="604800000" aria-label="Config value" />
-      <button
-        class="btn small"
-        onclick={setConfig}
-        disabled={cfgSaving || !cfgName.trim()}
-        title={cfgName.trim() ? `Set ${cfgName.trim()}` : 'Enter a config name first'}
-      >{cfgSaving ? 'Setting…' : 'Set'}</button>
+      <button class="btn small" onclick={setConfig} disabled={cluster.read_only || cfgSaving || !cfgName.trim()} title={cluster.read_only ? 'Read-only cluster — config changes are disabled' : cfgName.trim() ? `Set ${cfgName.trim()}` : 'Enter a config name first'}>{cfgSaving ? 'Setting…' : 'Set'}</button>
     </div>
     {#if !detail && !detailErr}
       <div class="pad"><Skeleton rows={6} label="config" /></div>
@@ -925,7 +1013,7 @@
       </div>
       <label class="field">
         <span>Key (optional){pKeyBase64 ? ' — base64' : ''}</span>
-        <input dir="auto" bind:value={pKey} placeholder={pKeyBase64 ? 'base64-encoded bytes' : 'string key'} />
+        <input dir="auto" bind:this={pKeyEl} bind:value={pKey} placeholder={pKeyBase64 ? 'base64-encoded bytes' : 'string key'} />
       </label>
       <label class="field">
         <span>Partition (optional)</span>
@@ -938,6 +1026,7 @@
         <label class="field grow">
           <span>Value{pValueBase64 ? ' — base64' : ''}</span>
           <textarea dir="ltr"
+            bind:this={pValueEl}
             bind:value={pValue}
             rows="6"
             placeholder={pValueBase64 ? 'base64-encoded bytes' : '{ "hello": "world" }'}
@@ -968,9 +1057,14 @@
         {/each}
       </div>
       {#if produceError}<p class="field-err">{produceError}</p>{/if}
-      <button class="btn primary" onclick={produce} disabled={producing}>
-        {producing ? 'Producing…' : pTombstone ? 'Produce tombstone' : 'Produce message'}
-      </button>
+      <div class="produce-actions">
+        <button class="btn primary" onclick={produce} disabled={cluster.read_only || producing} title={cluster.read_only ? 'Read-only cluster — producing is disabled' : undefined}>
+          {producing ? 'Producing…' : pTombstone ? 'Produce tombstone' : 'Produce message'}
+        </button>
+        <button class="btn small" onclick={() => copyKcat(undefined, 'produce')} title="Copy kcat produce command for this topic">
+          <Icon name="terminal" size={12} /> Copy as kcat
+        </button>
+      </div>
     </div>
   {/if}
   </div>
@@ -996,21 +1090,14 @@
 {/if}
 
 <style>
-  .td {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    min-height: 0;
-  }
+  .td { display: flex; flex-direction: column; height: 100%; min-height: 0; }
   header {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 12px;
     padding: 10px 14px;
     border-bottom: 1px solid var(--border);
-  }
-  header {
-    gap: 12px;
   }
   header .title {
     display: flex;
@@ -1019,11 +1106,7 @@
     /* Long topic names truncate instead of shoving "Delete topic" off-screen. */
     min-width: 0;
   }
-  header .title > :global(svg),
-  header .title > .muted {
-    flex: none;
-    white-space: nowrap;
-  }
+  header .title > :global(svg), header .title > .muted { flex: none; white-space: nowrap; }
   header .name {
     font-weight: 600;
     font-family: var(--font-mono);
@@ -1032,19 +1115,9 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  header > .btn {
-    flex: none;
-  }
-  .subtabs {
-    padding: 0 12px;
-    border-bottom: 1px solid var(--border);
-  }
-  .tpanel {
-    display: flex;
-    flex-direction: column;
-    flex: 1 1 auto;
-    min-height: 0;
-  }
+  header > .btn { flex: none; }
+  .subtabs { padding: 0 12px; border-bottom: 1px solid var(--border); }
+  .tpanel { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
   .consume-bar {
     display: flex;
     flex-wrap: wrap;
@@ -1054,7 +1127,10 @@
     border-bottom: 1px solid var(--border);
   }
   .consume-bar select,
-  .consume-bar input {
+  .consume-bar input,
+  .cfg-set input,
+  .header-key,
+  .header-val {
     padding: 4px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -1062,29 +1138,10 @@
     color: var(--text);
     font-size: var(--fs-s);
   }
-  .sm {
-    width: 110px;
-  }
-  /* key filter + "from start" checkbox grouped inline */
-  .filter-group {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    flex: 1;
-    min-width: 100px;
-  }
-  .filter-group input:not([type='checkbox']) {
-    flex: 1;
-  }
-  .chk-small {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    white-space: nowrap;
-    cursor: pointer;
-  }
+  .sm { width: 110px; }
+  .filter-group { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 100px; }
+  .filter-group input:not([type='checkbox']) { flex: 1; }
+  .chk-small,
   .auto {
     display: flex;
     align-items: center;
@@ -1094,42 +1151,16 @@
     white-space: nowrap;
     cursor: pointer;
   }
-  .auto.on {
-    color: var(--accent-text);
-  }
-  /* Server-side PII masking active badge — shown below the message list. */
-  .masked-note {
-    color: var(--accent-text);
-    font-weight: 600;
-  }
-  .grow {
-    flex: 1;
-    min-width: 100px;
-  }
+  .auto.on { color: var(--accent-text); }
+  .masked-note { color: var(--accent-text); font-weight: 600; }
+  .grow { flex: 1; min-width: 100px; }
   /* A guaranteed height so the list/detail never shrink to a sliver on a short
      viewport (a phone in landscape): the detail overflows into the brokers tab
      body, which scrolls, instead of compressing behind the header. */
-  .msg-layout {
-    display: flex;
-    flex: 1;
-    min-height: 180px;
-  }
-  .msg-list {
-    flex: 1;
-    overflow: auto;
-    border-inline-end: 1px solid var(--border);
-  }
-  .msg-detail {
-    width: 45%;
-    min-width: 320px;
-    overflow: auto;
-    padding: 12px 14px;
-  }
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: var(--fs-m);
-  }
+  .msg-layout { display: flex; flex: 1; min-height: 180px; }
+  .msg-list { flex: 1; overflow: auto; border-inline-end: 1px solid var(--border); }
+  .msg-detail { width: 45%; min-width: 320px; overflow: auto; padding: 12px 14px; }
+  table { width: 100%; border-collapse: collapse; font-size: var(--fs-m); }
   th {
     text-align: start;
     font-weight: 500;
@@ -1142,10 +1173,7 @@
     top: 0;
     background: var(--surface);
   }
-  tbody td {
-    padding: 4px 10px;
-    border-top: 1px solid var(--border);
-  }
+  tbody td { padding: 4px 10px; border-top: 1px solid var(--border); }
   .message-open {
     border: none;
     border-radius: var(--radius-s);
@@ -1159,31 +1187,12 @@
   }
   .msg-list tbody tr { cursor: pointer; }
   .msg-list tbody tr.tw-spacer { cursor: default; }
-  .msg-list tbody tr.tw-spacer td {
-    padding: 0;
-    border: 0;
-  }
-  .msg-list tbody tr:not(.tw-spacer):hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
-  }
-  .msg-list tbody tr.sel {
-    background: var(--accent-soft);
-  }
-  .key {
-    max-width: 180px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-family: var(--font-mono);
-  }
-  .nowrap {
-    white-space: nowrap;
-  }
-  /* Offset-position bar cell */
-  .pos-cell {
-    width: 56px;
-    padding: 4px 8px;
-  }
+  .msg-list tbody tr.tw-spacer td { padding: 0; border: 0; }
+  .msg-list tbody tr:not(.tw-spacer):hover { background: color-mix(in srgb, var(--text-dim) 8%, transparent); }
+  .msg-list tbody tr.sel { background: var(--accent-soft); }
+  .key { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
+  .nowrap { white-space: nowrap; }
+  .pos-cell { width: 56px; padding: 4px 8px; }
   .pos-bar-wrap {
     width: 48px;
     height: 6px;
@@ -1191,37 +1200,12 @@
     border-radius: var(--radius-s);
     overflow: hidden;
   }
-  .pos-bar {
-    height: 100%;
-    background: var(--accent);
-    border-radius: var(--radius-s);
-    min-width: 2px;
-  }
-  /* Offset-position badge in the detail pane */
-  .tail-note {
-    padding-top: 4px;
-    padding-bottom: 6px;
-    color: var(--accent-text);
-    opacity: 0.75;
-  }
-  .grid.grid,
-  table.grid {
-    margin: 0;
-  }
-  table.grid tr.overridden td {
-    color: var(--text);
-  }
-  table.grid {
-    overflow: auto;
-    display: block;
-  }
-  .md-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-    margin-bottom: 8px;
-  }
+  .pos-bar { height: 100%; background: var(--accent); border-radius: var(--radius-s); min-width: 2px; }
+  .tail-note { padding-top: 4px; padding-bottom: 6px; color: var(--accent-text); opacity: 0.75; }
+  .grid.grid, table.grid { margin: 0; }
+  table.grid { overflow: auto; display: block; }
+  table.grid tr.overridden td { color: var(--text); }
+  .md-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
   h5 {
     margin: 12px 0 4px;
     font-size: var(--fs-xs);
@@ -1242,41 +1226,12 @@
     max-height: 40vh;
     overflow: auto;
   }
-  .payload.key {
-    max-height: 120px;
-  }
-  table.headers td {
-    border: none;
-    padding-block: 2px; padding-inline: 0 8px;
-    font-size: var(--fs-s);
-  }
-  .cfg-set {
-    display: flex;
-    gap: 6px;
-    padding: 10px 12px;
-    border-bottom: 1px solid var(--border);
-  }
-  .cfg-set input {
-    padding: 4px 6px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--bg);
-    color: var(--text);
-    font-size: var(--fs-s);
-  }
-  .produce {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    padding: 14px;
-    overflow: auto;
-  }
-  .produce-opts {
-    display: flex;
-    gap: 14px;
-    flex-wrap: wrap;
-    padding: 6px 0;
-  }
+  .payload.key { max-height: 120px; }
+  table.headers td { border: none; padding-block: 2px; padding-inline: 0 8px; font-size: var(--fs-s); }
+  .cfg-set { display: flex; gap: 6px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  .produce { display: flex; flex-direction: column; gap: 10px; padding: 14px; overflow: auto; }
+  .produce-opts { display: flex; gap: 14px; flex-wrap: wrap; padding: 6px 0; }
+  .produce-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .chk-opt {
     display: flex;
     align-items: center;
@@ -1286,59 +1241,16 @@
     cursor: pointer;
     white-space: nowrap;
   }
-  .headers-section {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .headers-title {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .dim-label {
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
-  .header-row {
-    display: flex;
-    gap: 4px;
-    align-items: center;
-  }
-  .header-key {
-    width: 140px;
-    padding: 4px 6px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--bg);
-    color: var(--text);
-    font-size: var(--fs-s);
-  }
-  .header-val {
-    flex: 1;
-    padding: 4px 6px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--bg);
-    color: var(--text);
-    font-size: var(--fs-s);
-  }
-  .danger-tiny {
-    color: var(--danger);
-  }
-  .field .field-err {
-    font-size: var(--fs-xs);
-    color: var(--danger);
-  }
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .field span {
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
+  .headers-section { display: flex; flex-direction: column; gap: 4px; }
+  .headers-title { display: flex; align-items: center; gap: 8px; }
+  .dim-label { font-size: var(--fs-s); color: var(--text-dim); }
+  .header-row { display: flex; gap: 4px; align-items: center; }
+  .header-key { width: 140px; }
+  .header-val { flex: 1; }
+  .danger-tiny { color: var(--danger); }
+  .field .field-err { font-size: var(--fs-xs); color: var(--danger); }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field span { font-size: var(--fs-s); color: var(--text-dim); }
   .field input,
   .field select,
   .field textarea {
@@ -1350,82 +1262,27 @@
     font-size: var(--fs-m);
     font-family: inherit;
   }
-  .field textarea {
-    font-family: var(--font-mono);
-    resize: vertical;
-  }
-  .mono {
-    font-family: var(--font-mono);
-  }
-  .muted {
-    color: var(--text-dim);
-  }
-  .small {
-    font-size: var(--fs-xs);
-  }
-  .pad {
-    padding: 14px;
-  }
-  .err {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 14px;
-    font-size: var(--fs-m);
-    color: var(--text);
-    border-bottom: 1px solid var(--border);
-  }
-  .err > :global(svg) {
-    color: var(--danger);
-  }
-  .err-text {
-    flex: 1;
-    min-width: 0;
-  }
+  .field textarea { font-family: var(--font-mono); resize: vertical; }
+  .mono { font-family: var(--font-mono); }
+  .muted { color: var(--text-dim); }
+  .small { font-size: var(--fs-xs); }
+  .pad { padding: 14px; }
 
-  /* Phone (≤640px): the message list + detail are side-by-side on desktop, which
-     can't fit a ~375–430px viewport (detail has a 320px min-width). Stack them
-     vertically, drop the min-width, and give each a real scrollable height so
-     neither collapses to a sliver on short screens. The consume-bar already
-     wraps; widen its controls so they don't jut off the edge. */
+  /* Phone (≤640px): stack message list + detail vertically so neither collapses. */
   @media (max-width: 640px) {
     .message-open { min-width: 36px; min-height: 36px; }
-    /* Let the detail grow past the viewport so the produce form / message rows
-       scroll into view (the brokers tab-body scrolls on phones) instead of being
-       compressed behind the sticky header + bottom nav. */
-    .td {
-      height: auto;
-      min-height: 100%;
-    }
-    .msg-layout {
-      flex-direction: column;
-      flex: none;
-    }
+    .td { height: auto; min-height: 100%; }
+    .msg-layout { flex-direction: column; flex: none; }
     .msg-list {
       border-inline-end: none;
       border-bottom: 1px solid var(--border);
       min-height: 200px;
       flex: 1 1 auto;
     }
-    /* A windowed list must be its own scroller (the page scrolls here). */
-    .msg-list.windowed {
-      max-height: 60vh;
-    }
-    .msg-detail {
-      width: 100%;
-      min-width: 0;
-      max-height: 50vh;
-    }
-    .consume-bar select,
-    .consume-bar .sm {
-      flex: 1 1 auto;
-      min-width: 0;
-    }
-    .key {
-      max-width: 120px;
-    }
-    .cfg-set {
-      flex-wrap: wrap;
-    }
+    .msg-list.windowed { max-height: 60vh; }
+    .msg-detail { width: 100%; min-width: 0; max-height: 50vh; }
+    .consume-bar select, .consume-bar .sm { flex: 1 1 auto; min-width: 0; }
+    .key { max-width: 120px; }
+    .cfg-set { flex-wrap: wrap; }
   }
 </style>

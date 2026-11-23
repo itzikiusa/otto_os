@@ -351,6 +351,7 @@ test.describe('scheduled tasks UI', () => {
     await openPage(page, 'scheduled-tasks');
     await page.getByRole('button', { name: 'New task' }).click();
     await page.getByPlaceholder('Nightly ticket review').fill('E2E short interval');
+    await page.locator('#sched-prompt').fill('Review recent tickets.');
     await page.locator('#sched-every').fill('2');
     // One click straight from the field: the hint used to appear on blur and
     // push the button down between mousedown and mouseup, losing the click.
@@ -363,6 +364,7 @@ test.describe('scheduled tasks UI', () => {
     await openPage(page, 'scheduled-tasks');
     await page.getByRole('button', { name: 'New task' }).click();
     await page.getByPlaceholder('Nightly ticket review').fill('E2E custom provider');
+    await page.locator('#sched-prompt').fill('Summarize recent changes.');
 
     // The provider <select> is the one carrying a 'codex' option.
     const providerSel = page

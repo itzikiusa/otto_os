@@ -66,7 +66,7 @@
       "description": "Move a tab's result grid to the next (`delta: 1`) or previous (`delta: -1`) page, re-running the paged query the user sees. Returns the new page summary.",
       "input_schema": { "type": "object", "required": ["tab_id", "delta"], "properties": {
         "tab_id": { "type": "string" },
-        "delta": { "type": "integer", "enum": [-1, 1] } },
+        "delta": { "type": "integer", "minimum": -1, "maximum": 1, "description": "1 = next page, -1 = previous page." } },
         "additionalProperties": false } },
     { "name": "db_set_view", "module": "connections", "route": "database", "risk": "navigate", "timeout_ms": 10000,
       "description": "Switch how a result is shown (`view`: grid | vertical | json) and/or the Explorer's main tab (`main_tab`: query | structure | diagram | builder).",

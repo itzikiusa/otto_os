@@ -36,29 +36,7 @@ pub(in crate::workflow_engine) async fn execute(
         .await
         .unwrap_or(Value::Null);
 
-    // `{key}` substitution draws from the run input FIRST, then the node
-    // input overlays it — so `{jira_ticket}` / `{working_directory}`
-    // resolve from the trigger while `{score}` / `{total}` / `{base}`
-    // come from the step that just ran (and win on any name collision).
-    let mut subs = serde_json::Map::new();
-    if let Some(obj) = run_input.as_object() {
-        for (k, v) in obj {
-            subs.insert(k.clone(), v.clone());
-        }
-    }
-    if let Some(obj) = input.as_object() {
-        for (k, v) in obj {
-            subs.insert(k.clone(), v.clone());
-        }
-    }
-    let message = subs.iter().fold(raw_msg, |acc, (k, v)| {
-        let placeholder = format!("{{{k}}}");
-        let replacement = match v {
-            Value::String(s) => s.clone(),
-            other => other.to_string(),
-        };
-        acc.replace(&placeholder, &replacement)
-    });
+    let message = render_notification(raw_msg, &run_input, &input);
 
     // Where the run was triggered from. A chat-triggered run carries the
     // originating chat + thread; every agent step already replies inside
@@ -171,6 +149,31 @@ pub(in crate::workflow_engine) async fn execute(
         json!({ "sent": sent, "message": message }),
         vec![format!("channel_notify: sent to {sent} integration(s)")],
     ))
+}
+
+/// Render a `channel_notify` template from `run_input` + `input` (node input
+/// wins on collision) and scrub secrets before outbound chat delivery.
+fn render_notification(raw_msg: String, run_input: &Value, input: &Value) -> String {
+    let mut subs = serde_json::Map::new();
+    if let Some(obj) = run_input.as_object() {
+        for (k, v) in obj {
+            subs.insert(k.clone(), v.clone());
+        }
+    }
+    if let Some(obj) = input.as_object() {
+        for (k, v) in obj {
+            subs.insert(k.clone(), v.clone());
+        }
+    }
+    let message = subs.iter().fold(raw_msg, |acc, (k, v)| {
+        let placeholder = format!("{{{k}}}");
+        let replacement = match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        acc.replace(&placeholder, &replacement)
+    });
+    otto_core::redact::redact_text(&message).value
 }
 
 /// The integrations a run in workspace `ws` notifies: that workspace's only
@@ -300,6 +303,19 @@ mod tests {
         assert_eq!(
             reply_target(&slack, Some("slack"), None, Some("1700.42")),
             ("C-DEFAULT", None)
+        );
+    }
+
+    #[test]
+    fn render_notification_redacts_interpolated_secrets() {
+        let msg = render_notification(
+            "Token: {body}".into(),
+            &json!({}),
+            &json!({ "body": "Authorization: Bearer sk-ant-api03-secretvalue1234567890" }),
+        );
+        assert!(
+            !msg.contains("sk-ant-api03-secretvalue1234567890"),
+            "secret leaked in channel_notify message: {msg}"
         );
     }
 }

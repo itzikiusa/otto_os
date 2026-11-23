@@ -155,7 +155,7 @@ export function restorableRoute(route: unknown): string | null {
   const r = routeOf(route.trim());
   if (r === '' || r.length > 512) return null;
   const mod = r.split('/')[0];
-  if (['s', 'snip', 'bar', 'tray'].includes(mod)) return null;
+  if (['s', 'snip', 'bar', 'tray', 'clipboard'].includes(mod)) return null;
   return r;
 }
 

@@ -821,7 +821,7 @@
             Anyone who can message the bot — in any {editChannel === 'slack' ? 'channel it’s in, or by DM' : 'chat it’s in'} — can run an agent on this Mac.
           </span>
         {:else if needsAllowedUser}
-          <span class="hint warn" id="ch-users-err" role="alert">
+          <span class="hint warn" id="ch-users-err" use:announceShown={{ text: `Add at least one allowed user ID above, or check “Open to everyone” before enabling ${channelLabel(editChannel)}.`, assertive: true }}>
             Add at least one allowed user ID above, or check “Open to everyone” before enabling {channelLabel(editChannel)}.
           </span>
         {/if}

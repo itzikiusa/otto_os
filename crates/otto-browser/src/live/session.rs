@@ -13,11 +13,13 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
 
 use super::conn::CdpEvent;
 use super::control::{ControlError, ControlLock};
+use super::devtools::{self, DevtoolsBuffer, DevtoolsSnapshot, InspectedElement};
+use super::emulation::{self, EmulationConfig};
 use super::flow::{Adaptive, ViewerFlow};
 use super::guard::{self, Paused};
 use super::hooks::{LiveAudit, LiveHooks, OutwardAction};
@@ -70,6 +72,8 @@ struct Inner {
     can_go_back: bool,
     can_go_forward: bool,
     viewport: Viewport,
+    emulation: EmulationConfig,
+    devtools: DevtoolsBuffer,
     control: ControlLock,
     created_at: String,
     last_activity: Instant,
@@ -81,6 +85,7 @@ struct Inner {
     last_probe: Option<Instant>,
     cursor: String,
     dialog_seq: u64,
+    guard_spa_mutations: bool,
 }
 
 /// What opening a session needs.
@@ -191,6 +196,8 @@ pub struct LiveSession {
     data_dir: PathBuf,
     hooks: Arc<dyn LiveHooks>,
     inner: StdMutex<Inner>,
+    emulation_lock: AsyncMutex<()>,
+    devtools_lock: AsyncMutex<()>,
     viewers: StdMutex<HashMap<u64, Viewer>>,
     next_viewer: AtomicU64,
     frame_seq: AtomicU64,
@@ -278,6 +285,8 @@ impl LiveSession {
                 can_go_back: false,
                 can_go_forward: false,
                 viewport: vp,
+                emulation: EmulationConfig::default(),
+                devtools: DevtoolsBuffer::default(),
                 control: ControlLock::default(),
                 created_at: now_rfc3339(),
                 last_activity: now,
@@ -289,7 +298,10 @@ impl LiveSession {
                 last_probe: None,
                 cursor: "default".into(),
                 dialog_seq: 0,
+                guard_spa_mutations: false,
             }),
+            emulation_lock: AsyncMutex::new(()),
+            devtools_lock: AsyncMutex::new(()),
             viewers: StdMutex::new(HashMap::new()),
             next_viewer: AtomicU64::new(1),
             frame_seq: AtomicU64::new(0),
@@ -423,9 +435,12 @@ impl LiveSession {
             can_go_back: i.can_go_back,
             can_go_forward: i.can_go_forward,
             viewport: i.viewport,
+            emulation: i.emulation.clone(),
+            devtools_enabled: i.devtools.enabled,
             controller: i.control.kind(),
             controller_user_id: i.control.human_user().map(str::to_string),
             viewers,
+            guard_spa_mutations: i.guard_spa_mutations,
             created_at: i.created_at.clone(),
             last_activity_at: i.last_activity_at.clone(),
         }
@@ -449,6 +464,37 @@ impl LiveSession {
             .lock()
             .map(|i| i.control.agent_drives())
             .unwrap_or(false)
+    }
+
+    pub fn guard_spa_mutations(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|i| i.guard_spa_mutations)
+            .unwrap_or(false)
+    }
+
+    /// Toggle the opt-in SPA (`Fetch`/`XHR`) outward mutation guard live for
+    /// this session and broadcast updated state to viewers.
+    pub fn set_guard_spa_mutations(&self, enabled: bool) -> bool {
+        let changed = self
+            .inner
+            .lock()
+            .map(|mut i| {
+                let prev = i.guard_spa_mutations;
+                i.guard_spa_mutations = enabled;
+                prev != enabled
+            })
+            .unwrap_or(false);
+        if changed {
+            self.touch();
+            self.broadcast_state();
+            self.audit(
+                "browser.live.guard",
+                None,
+                json!({ "guard_spa_mutations": enabled }),
+            );
+        }
+        changed
     }
 
     pub fn downloads_dir(&self) -> PathBuf {
@@ -504,15 +550,15 @@ impl LiveSession {
     fn broadcast_msg(&self, msg: ServerMsg) {
         let text = msg.to_json();
         let mut dead = Vec::new();
-        if let Ok(mut vs) = self.viewers.lock() {
+        if let Ok(vs) = self.viewers.lock() {
             for (id, v) in vs.iter() {
                 if v.tx.try_send(ViewerOut::Text(text.clone())).is_err() {
                     dead.push(*id);
                 }
             }
-            for id in dead {
-                vs.remove(&id); // wedged or gone — its socket task ends
-            }
+        }
+        if !dead.is_empty() {
+            self.remove_viewers(&dead);
         }
     }
 
@@ -586,22 +632,41 @@ impl LiveSession {
         })
     }
 
-    fn detach(&self, viewer_id: u64) {
-        let (user, remaining_for_user, remaining) = match self.viewers.lock() {
+    /// Single viewer-removal cleanup path (explicit detach and queue-full
+    /// evictions in `broadcast_msg`, `on_frame`, and `on_ack`): releases
+    /// `ControlLock` for any user with no remaining driving viewer, stops the
+    /// screencast when the last viewer leaves, bumps activity, and broadcasts
+    /// the updated state.
+    fn remove_viewers(&self, viewer_ids: &[u64]) {
+        if viewer_ids.is_empty() {
+            return;
+        }
+        let (departed_drivers, remaining) = match self.viewers.lock() {
             Ok(mut vs) => {
-                let user = vs.remove(&viewer_id).map(|v| v.user_id);
-                let remaining_for_user = user
-                    .as_ref()
-                    .map(|u| vs.values().filter(|v| &v.user_id == u).count())
-                    .unwrap_or(0);
-                (user, remaining_for_user, vs.len())
+                let mut removed_users = Vec::new();
+                for id in viewer_ids {
+                    if let Some(v) = vs.remove(id) {
+                        if !removed_users.contains(&v.user_id) {
+                            removed_users.push(v.user_id);
+                        }
+                    }
+                }
+                if removed_users.is_empty() {
+                    return;
+                }
+                let departed_drivers: Vec<String> = removed_users
+                    .into_iter()
+                    .filter(|u| !vs.values().any(|v| v.user_id == *u && v.can_drive))
+                    .collect();
+                (departed_drivers, vs.len())
             }
             Err(_) => return,
         };
-        let Some(user) = user else { return };
-        if remaining_for_user == 0 {
+        if !departed_drivers.is_empty() {
             if let Ok(mut i) = self.inner.lock() {
-                i.control.human_left(&user);
+                for user in &departed_drivers {
+                    i.control.human_left(user);
+                }
             }
         }
         if remaining == 0 {
@@ -611,10 +676,38 @@ impl LiveSession {
         self.broadcast_state();
     }
 
+    fn detach(&self, viewer_id: u64) {
+        self.remove_viewers(&[viewer_id]);
+    }
+
     fn set_can_drive(&self, viewer_id: u64, can_drive: bool) {
-        if let Ok(mut vs) = self.viewers.lock() {
-            if let Some(v) = vs.get_mut(&viewer_id) {
+        let release_user = match self.viewers.lock() {
+            Ok(mut vs) => {
+                let Some(v) = vs.get_mut(&viewer_id) else {
+                    return;
+                };
                 v.can_drive = can_drive;
+                if !can_drive {
+                    let user = v.user_id.clone();
+                    let still_driving = vs
+                        .values()
+                        .any(|other| other.user_id == user && other.can_drive);
+                    (!still_driving).then_some(user)
+                } else {
+                    None
+                }
+            }
+            Err(_) => return,
+        };
+        if let Some(user) = release_user {
+            let released = self
+                .inner
+                .lock()
+                .map(|mut i| i.control.human_left(&user))
+                .unwrap_or(false);
+            if released {
+                self.touch();
+                self.broadcast_state();
             }
         }
     }
@@ -702,23 +795,23 @@ impl LiveSession {
         let now = Instant::now();
         let mut any_capacity = false;
         let mut none = true;
+        let mut dead = Vec::new();
         if let Ok(mut vs) = self.viewers.lock() {
-            let mut dead = Vec::new();
             for (id, v) in vs.iter_mut() {
-                none = false;
                 if let Some(fr) = v.flow.offer(seq, frame.clone(), now) {
                     if v.tx.try_send(ViewerOut::Frame(fr)).is_err() {
                         dead.push(*id);
                         continue;
                     }
                 }
+                none = false;
                 if v.flow.has_capacity() {
                     any_capacity = true;
                 }
             }
-            for id in dead {
-                vs.remove(&id);
-            }
+        }
+        if !dead.is_empty() {
+            self.remove_viewers(&dead);
         }
         if none || any_capacity {
             self.ack_chrome(sc_sid);
@@ -731,8 +824,8 @@ impl LiveSession {
     fn on_ack(&self, viewer_id: u64, seq: u64) {
         let now = Instant::now();
         let mut sample = None;
+        let mut drop_it = false;
         if let Ok(mut vs) = self.viewers.lock() {
-            let mut drop_it = false;
             if let Some(v) = vs.get_mut(&viewer_id) {
                 if let Some(fr) = v.flow.ack(seq, now) {
                     drop_it = v.tx.try_send(ViewerOut::Frame(fr)).is_err();
@@ -740,16 +833,21 @@ impl LiveSession {
                 let (sent, dropped) = v.flow.take_counters();
                 sample = Some((v.flow.rtt_ms(), sent, dropped));
             }
-            if drop_it {
-                vs.remove(&viewer_id);
-            }
+        }
+        if drop_it {
+            self.remove_viewers(&[viewer_id]);
         }
         let (pending, change) = match self.inner.lock() {
             Ok(mut i) => {
                 if let Some((rtt, sent, dropped)) = sample {
                     i.adaptive.observe(rtt, sent, dropped);
                 }
-                (i.pending_cdp_ack.take(), i.adaptive.decide(now))
+                let change = if i.screencast_on {
+                    i.adaptive.decide(now)
+                } else {
+                    None
+                };
+                (i.pending_cdp_ack.take(), change)
             }
             Err(_) => (None, None),
         };
@@ -813,6 +911,36 @@ impl LiveSession {
                     );
                 }
             }
+            ClientMsg::Devtools { enabled } => match self.set_devtools(enabled).await {
+                Ok(snapshot) => {
+                    self.send_to(viewer_id, ServerMsg::DevtoolsSnapshot { snapshot });
+                }
+                Err(e) => {
+                    self.send_to(viewer_id, ServerMsg::error("input_failed", e.to_string()));
+                }
+            },
+            ClientMsg::ClearDevtools => {
+                self.clear_devtools();
+            }
+            ClientMsg::Inspect { x, y } => match self.inspect_at(x, y).await {
+                Ok(element) => {
+                    self.send_to(viewer_id, ServerMsg::Inspected { element });
+                }
+                Err(e) => {
+                    self.send_to(viewer_id, ServerMsg::error("input_failed", e.to_string()));
+                }
+            },
+            ClientMsg::SetGuard {
+                guard_spa_mutations,
+            } => {
+                if self.set_guard_spa_mutations(guard_spa_mutations) {
+                    self.audit(
+                        "browser.live.guard",
+                        Some(user.clone()),
+                        json!({ "guard_spa_mutations": guard_spa_mutations }),
+                    );
+                }
+            }
             other => {
                 let claim = match self.inner.lock() {
                     Ok(mut i) => i.control.human_input(&user),
@@ -854,7 +982,12 @@ impl LiveSession {
                 .map_err(cdp_live)
         };
         match msg {
-            ClientMsg::Ack { .. } | ClientMsg::Control { .. } => Ok(()),
+            ClientMsg::Ack { .. }
+            | ClientMsg::Control { .. }
+            | ClientMsg::Devtools { .. }
+            | ClientMsg::ClearDevtools
+            | ClientMsg::Inspect { .. }
+            | ClientMsg::SetGuard { .. } => Ok(()),
             ClientMsg::Mouse {
                 action,
                 x,
@@ -950,6 +1083,10 @@ impl LiveSession {
                 }
                 call(("Page.handleJavaScriptDialog", p)).await
             }
+            ClientMsg::Emulate {
+                viewport,
+                emulation,
+            } => self.apply_emulation(viewport, emulation).await.map(|_| ()),
         }
     }
 
@@ -1081,12 +1218,18 @@ impl LiveSession {
     }
 
     pub async fn resize(&self, vp: Viewport) -> Result<(), LiveError> {
+        let _guard = self.emulation_lock.lock().await;
         let vp = vp.clamped();
+        let emu = self
+            .inner
+            .lock()
+            .map(|i| i.emulation.clone())
+            .unwrap_or_default();
         self.proc
             .conn
             .call(
                 "Emulation.setDeviceMetricsOverride",
-                metrics_params(vp),
+                emulation::device_metrics_params(vp, &emu),
                 Some(&self.sid),
             )
             .await
@@ -1095,8 +1238,170 @@ impl LiveSession {
             i.viewport = vp;
         }
         self.restart_screencast();
+        drop(_guard);
         self.broadcast_state();
         Ok(())
+    }
+
+    /// Apply a device emulation profile (mobile metrics, orientation, touch,
+    /// User-Agent, `prefers-color-scheme`) and optionally update the viewport.
+    pub async fn apply_emulation(
+        &self,
+        viewport: Option<Viewport>,
+        emulation_cfg: EmulationConfig,
+    ) -> Result<LiveSessionInfo, LiveError> {
+        let _guard = self.emulation_lock.lock().await;
+        let mut emu = emulation_cfg.sanitized();
+        let (prev_vp, next_vp, prev_emu) = match self.inner.lock() {
+            Ok(i) => (
+                i.viewport,
+                viewport.map(Viewport::clamped).unwrap_or(i.viewport),
+                i.emulation.clone(),
+            ),
+            Err(_) => (
+                Viewport::default(),
+                viewport.map(Viewport::clamped).unwrap_or_default(),
+                EmulationConfig::default(),
+            ),
+        };
+        let sid = Some(self.sid.as_str());
+        let conn = &self.proc.conn;
+        conn.call(
+            "Emulation.setDeviceMetricsOverride",
+            emulation::device_metrics_params(next_vp, &emu),
+            sid,
+        )
+        .await
+        .map_err(cdp_live)?;
+        if let Err(e) = conn
+            .call(
+                "Emulation.setTouchEmulationEnabled",
+                emulation::touch_emulation_params(&emu),
+                sid,
+            )
+            .await
+        {
+            tracing::warn!("browser live: Emulation.setTouchEmulationEnabled failed: {e}");
+            emu.has_touch = prev_emu.has_touch;
+        }
+        if let Err(e) = conn
+            .call(
+                "Emulation.setUserAgentOverride",
+                emulation::user_agent_params(&emu),
+                sid,
+            )
+            .await
+        {
+            tracing::warn!("browser live: Emulation.setUserAgentOverride failed: {e}");
+            emu.user_agent = prev_emu.user_agent;
+        }
+        if let Err(e) = conn
+            .call(
+                "Emulation.setEmulatedMedia",
+                emulation::emulated_media_params(&emu),
+                sid,
+            )
+            .await
+        {
+            tracing::warn!("browser live: Emulation.setEmulatedMedia failed: {e}");
+            emu.color_scheme = prev_emu.color_scheme;
+        }
+        if let Ok(mut i) = self.inner.lock() {
+            i.viewport = next_vp;
+            i.emulation = emu;
+        }
+        if next_vp != prev_vp {
+            self.restart_screencast();
+        }
+        drop(_guard);
+        self.broadcast_state();
+        Ok(self.info())
+    }
+
+    /// Enable or disable opt-in Console + Network DevTools streaming on this
+    /// live session. Disabled by default so idle tabs pay zero CDP overhead.
+    pub async fn set_devtools(&self, enabled: bool) -> Result<DevtoolsSnapshot, LiveError> {
+        let _guard = self.devtools_lock.lock().await;
+        let sid = Some(self.sid.as_str());
+        let conn = &self.proc.conn;
+        if enabled {
+            // Flip enabled BEFORE Runtime.enable so console messages replayed
+            // during domain enablement are buffered instead of dropped.
+            if let Ok(mut i) = self.inner.lock() {
+                i.devtools.enabled = true;
+            }
+            if let Err(e) = conn.call("Runtime.enable", json!({}), sid).await {
+                if let Ok(mut i) = self.inner.lock() {
+                    i.devtools.enabled = false;
+                }
+                return Err(cdp_live(e));
+            }
+            // Zero body buffer caps: we only collect metadata (method, redacted
+            // URL, status, timing), never response payloads.
+            if let Err(e) = conn
+                .call(
+                    "Network.enable",
+                    json!({"maxTotalBufferSize": 0, "maxResourceBufferSize": 0}),
+                    sid,
+                )
+                .await
+            {
+                let _ = conn.call("Runtime.disable", json!({}), sid).await;
+                if let Ok(mut i) = self.inner.lock() {
+                    i.devtools.enabled = false;
+                }
+                return Err(cdp_live(e));
+            }
+        } else {
+            if let Ok(mut i) = self.inner.lock() {
+                i.devtools.enabled = false;
+            }
+            let _ = conn.call("Runtime.disable", json!({}), sid).await;
+            let _ = conn.call("Network.disable", json!({}), sid).await;
+        }
+        let snapshot = match self.inner.lock() {
+            Ok(i) => i.devtools.snapshot(),
+            Err(_) => DevtoolsSnapshot::default(),
+        };
+        drop(_guard);
+        self.broadcast_state();
+        Ok(snapshot)
+    }
+
+    pub fn clear_devtools(&self) {
+        let snapshot = match self.inner.lock() {
+            Ok(mut i) => {
+                i.devtools.clear();
+                i.devtools.snapshot()
+            }
+            Err(_) => DevtoolsSnapshot::default(),
+        };
+        self.broadcast_msg(ServerMsg::DevtoolsSnapshot { snapshot });
+    }
+
+    /// Inspect the DOM element at viewport CSS coordinates `(x, y)`.
+    pub async fn inspect_at(&self, x: f64, y: f64) -> Result<Option<InspectedElement>, LiveError> {
+        let r = self
+            .proc
+            .conn
+            .call_with_timeout(
+                "Runtime.evaluate",
+                json!({
+                    "expression": devtools::inspect_element_expr(x, y),
+                    "returnByValue": true,
+                }),
+                Some(&self.sid),
+                INPUT_TIMEOUT,
+            )
+            .await
+            .map_err(cdp_live)?;
+        let val = r.pointer("/result/value").cloned().unwrap_or(Value::Null);
+        if val.is_null() {
+            return Ok(None);
+        }
+        serde_json::from_value(val)
+            .map(Some)
+            .map_err(|e| LiveError::Engine(format!("bad inspect payload: {e}")))
     }
 
     async fn refresh_history(&self) {
@@ -1284,6 +1589,8 @@ impl LiveSession {
             .lock()
             .map(|i| (i.url.clone(), i.title.clone()))
             .unwrap_or_default();
+        let resource_type = req.resource_type.clone();
+        let body_preview = guard::format_body_preview(req.post_data.as_deref());
         let action = OutwardAction {
             workspace_id: self.workspace_id.clone(),
             tab_id: self.tab_id.clone(),
@@ -1293,6 +1600,8 @@ impl LiveSession {
             method: req.method.clone(),
             target_host: guard::host_of(&req.url),
             screenshot_path,
+            resource_type: resource_type.clone(),
+            body_preview: body_preview.clone(),
         };
         let title = action.title();
         let approved = match self.hooks.request_approval(&action).await {
@@ -1301,6 +1610,8 @@ impl LiveSession {
                     approval_id: id.clone(),
                     status: "pending",
                     title: title.clone(),
+                    resource_type: resource_type.clone(),
+                    body_preview: body_preview.clone(),
                 });
                 let decided = self
                     .hooks
@@ -1311,6 +1622,8 @@ impl LiveSession {
                     approval_id: id,
                     status: if ok { "approved" } else { "denied" },
                     title,
+                    resource_type,
+                    body_preview,
                 });
                 ok
             }
@@ -1358,6 +1671,7 @@ impl LiveSession {
             chrono::Utc::now().timestamp_millis()
         ));
         std::fs::write(&path, bytes).ok()?;
+        prune_approval_shots(&dir, APPROVAL_SHOT_MAX_FILES, APPROVAL_SHOT_MAX_AGE);
         Some(path.display().to_string())
     }
 
@@ -1491,17 +1805,7 @@ impl LiveSession {
                     }
                     Err(_) => 0,
                 };
-                self.broadcast_msg(ServerMsg::Dialog {
-                    dialog_type: p["type"].as_str().unwrap_or("alert").to_string(),
-                    message: p["message"]
-                        .as_str()
-                        .unwrap_or("")
-                        .chars()
-                        .take(4000)
-                        .collect(),
-                    default_prompt: p["defaultPrompt"].as_str().unwrap_or("").to_string(),
-                    url: p["url"].as_str().unwrap_or("").to_string(),
-                });
+                self.broadcast_msg(bound_dialog_msg(p));
                 let me = Arc::downgrade(self);
                 tokio::spawn(async move {
                     tokio::time::sleep(DIALOG_AUTO_DISMISS).await;
@@ -1534,6 +1838,56 @@ impl LiveSession {
             "Inspector.targetCrashed" => self.on_target_gone(true),
             "Fetch.requestPaused" => {
                 self.proc.on_paused(ev);
+            }
+            "Runtime.consoleAPICalled" => {
+                let entry = self
+                    .inner
+                    .lock()
+                    .ok()
+                    .and_then(|mut i| i.devtools.push_console_event(p));
+                if let Some(entry) = entry {
+                    self.broadcast_msg(ServerMsg::Console { entry });
+                }
+            }
+            "Runtime.exceptionThrown" => {
+                let entry = self
+                    .inner
+                    .lock()
+                    .ok()
+                    .and_then(|mut i| i.devtools.push_exception_event(p));
+                if let Some(entry) = entry {
+                    self.broadcast_msg(ServerMsg::Console { entry });
+                }
+            }
+            "Network.requestWillBeSent" => {
+                let entry = self
+                    .inner
+                    .lock()
+                    .ok()
+                    .and_then(|mut i| i.devtools.on_request_will_be_sent(p));
+                if let Some(entry) = entry {
+                    self.broadcast_msg(ServerMsg::Network { entry });
+                }
+            }
+            "Network.responseReceived" => {
+                let entry = self
+                    .inner
+                    .lock()
+                    .ok()
+                    .and_then(|mut i| i.devtools.on_response_received(p));
+                if let Some(entry) = entry {
+                    self.broadcast_msg(ServerMsg::Network { entry });
+                }
+            }
+            "Network.loadingFailed" => {
+                let entry = self
+                    .inner
+                    .lock()
+                    .ok()
+                    .and_then(|mut i| i.devtools.on_loading_failed(p));
+                if let Some(entry) = entry {
+                    self.broadcast_msg(ServerMsg::Network { entry });
+                }
             }
             _ => {}
         }
@@ -1594,14 +1948,9 @@ async fn session_loop(me: Weak<LiveSession>, mut rx: mpsc::Receiver<CdpEvent>) {
     }
 }
 
-/// `Emulation.setDeviceMetricsOverride` params.
+/// `Emulation.setDeviceMetricsOverride` params (default desktop emulation).
 pub fn metrics_params(vp: Viewport) -> Value {
-    json!({
-        "width": vp.width,
-        "height": vp.height,
-        "deviceScaleFactor": vp.device_scale_factor,
-        "mobile": false,
-    })
+    emulation::device_metrics_params(vp, &EmulationConfig::default())
 }
 
 /// A navigation target must be http(s) and pass the SSRF pre-check (the
@@ -1649,6 +1998,72 @@ impl ViewerHandle {
 impl Drop for ViewerHandle {
     fn drop(&mut self) {
         self.session.detach(self.id);
+    }
+}
+
+/// Retention caps for persisted approval screenshots (`browser/approvals/*.jpg`).
+const APPROVAL_SHOT_MAX_FILES: usize = 50;
+const APPROVAL_SHOT_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Prune old approval JPEG screenshots so `browser/approvals/` cannot grow
+/// without bound on disk. Removes `.jpg` files older than `max_age` and keeps
+/// at most the newest `max_files` by modification time.
+fn prune_approval_shots(dir: &std::path::Path, max_files: usize, max_age: Duration) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let mut entries: Vec<(std::time::SystemTime, std::path::PathBuf)> = Vec::new();
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jpg") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+        if now.duration_since(mtime).unwrap_or_default() > max_age {
+            let _ = std::fs::remove_file(&path);
+        } else {
+            entries.push((mtime, path));
+        }
+    }
+    if entries.len() > max_files {
+        // Newest first, remove everything past `max_files`.
+        entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+        for (_, path) in entries.into_iter().skip(max_files) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Cap all user-visible fields from `Page.javascriptDialogOpening` so a hostile
+/// page cannot flood viewers with multi-megabyte `defaultPrompt` or `url` strings.
+fn bound_dialog_msg(p: &Value) -> ServerMsg {
+    ServerMsg::Dialog {
+        dialog_type: p["type"]
+            .as_str()
+            .unwrap_or("alert")
+            .chars()
+            .take(64)
+            .collect(),
+        message: p["message"]
+            .as_str()
+            .unwrap_or("")
+            .chars()
+            .take(4000)
+            .collect(),
+        default_prompt: p["defaultPrompt"]
+            .as_str()
+            .unwrap_or("")
+            .chars()
+            .take(1000)
+            .collect(),
+        url: p["url"].as_str().unwrap_or("").chars().take(2048).collect(),
     }
 }
 
@@ -1726,6 +2141,570 @@ mod tests {
         assert_eq!(p["width"], 800);
         assert_eq!(p["deviceScaleFactor"], 2.0);
         assert_eq!(p["mobile"], false);
+    }
+
+    async fn read_cdp_frame<R: tokio::io::AsyncRead + Unpin>(r: &mut R) -> Value {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            r.read_exact(&mut byte).await.unwrap();
+            if byte[0] == 0 {
+                break;
+            }
+            buf.push(byte[0]);
+        }
+        serde_json::from_slice(&buf).unwrap()
+    }
+
+    async fn write_cdp_frame<W: tokio::io::AsyncWrite + Unpin>(w: &mut W, msg: Value) {
+        use tokio::io::AsyncWriteExt;
+        let mut bytes = serde_json::to_vec(&msg).unwrap();
+        bytes.push(0);
+        w.write_all(&bytes).await.unwrap();
+        w.flush().await.unwrap();
+    }
+
+    fn build_test_session(route_events: bool) -> (Arc<LiveSession>, tokio::io::DuplexStream) {
+        let (proc, browser) = ChromeProcess::for_test();
+        let rx = if route_events {
+            let (tx, rx) = mpsc::channel::<CdpEvent>(super::super::conn::QUEUE_MESSAGES);
+            proc.conn.route("S1", tx);
+            Some(rx)
+        } else {
+            None
+        };
+        let now = Instant::now();
+        let session = Arc::new(LiveSession {
+            tab_id: "tab-1".into(),
+            workspace_id: "ws-1".into(),
+            owner_id: "alice".into(),
+            profile: "ephemeral".into(),
+            proc,
+            target_id: "T1".into(),
+            sid: "S1".into(),
+            context_id: None,
+            downloads_dir: PathBuf::new(),
+            data_dir: PathBuf::new(),
+            hooks: Arc::new(super::super::hooks::NoopHooks),
+            inner: StdMutex::new(Inner {
+                state: SessionState::Ready,
+                url: "https://example.test/".into(),
+                title: String::new(),
+                loading: false,
+                can_go_back: false,
+                can_go_forward: false,
+                viewport: Viewport::default(),
+                emulation: EmulationConfig::default(),
+                devtools: DevtoolsBuffer::default(),
+                control: ControlLock::default(),
+                created_at: now_rfc3339(),
+                last_activity: now,
+                last_activity_at: now_rfc3339(),
+                screencast_on: false,
+                adaptive: Adaptive::new(now),
+                pending_cdp_ack: None,
+                last_move: None,
+                last_probe: None,
+                cursor: "default".into(),
+                dialog_seq: 0,
+                guard_spa_mutations: false,
+            }),
+            emulation_lock: AsyncMutex::new(()),
+            devtools_lock: AsyncMutex::new(()),
+            viewers: StdMutex::new(HashMap::new()),
+            next_viewer: AtomicU64::new(1),
+            frame_seq: AtomicU64::new(0),
+            closed: AtomicBool::new(false),
+            event_task: StdMutex::new(None),
+        });
+        if let Some(rx) = rx {
+            let task = tokio::spawn(session_loop(Arc::downgrade(&session), rx));
+            if let Ok(mut t) = session.event_task.lock() {
+                *t = Some(task);
+            }
+        }
+        (session, browser)
+    }
+
+    fn test_live_session() -> (
+        Arc<LiveSession>,
+        tokio::io::ReadHalf<tokio::io::DuplexStream>,
+        tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    ) {
+        let (session, browser) = build_test_session(true);
+        let (r, w) = tokio::io::split(browser);
+        (session, r, w)
+    }
+
+    fn test_session() -> (Arc<LiveSession>, tokio::io::DuplexStream) {
+        build_test_session(false)
+    }
+
+    #[tokio::test]
+    async fn apply_emulation_dispatches_cdp_commands_and_updates_info() {
+        let (session, mut browser_r, mut browser_w) = test_live_session();
+        let vp = Viewport {
+            width: 393,
+            height: 852,
+            device_scale_factor: 3.0,
+        };
+        let cfg = EmulationConfig {
+            preset_id: Some("iphone-16-pro".into()),
+            mobile: true,
+            has_touch: true,
+            user_agent: Some("Mozilla/5.0 (iPhone)".into()),
+            color_scheme: Some(super::emulation::ColorScheme::Dark),
+            orientation: Some(super::emulation::Orientation::Portrait),
+        };
+        let s2 = session.clone();
+        let task = tokio::spawn(async move { s2.apply_emulation(Some(vp), cfg).await });
+
+        let mut methods = Vec::new();
+        for _ in 0..4 {
+            let cmd = read_cdp_frame(&mut browser_r).await;
+            methods.push(cmd["method"].as_str().unwrap().to_string());
+            if cmd["method"] == "Emulation.setDeviceMetricsOverride" {
+                assert_eq!(cmd["params"]["width"], 393);
+                assert_eq!(cmd["params"]["height"], 852);
+                assert_eq!(cmd["params"]["mobile"], true);
+            }
+            write_cdp_frame(&mut browser_w, json!({"id": cmd["id"], "result": {}})).await;
+        }
+        assert_eq!(
+            methods,
+            vec![
+                "Emulation.setDeviceMetricsOverride",
+                "Emulation.setTouchEmulationEnabled",
+                "Emulation.setUserAgentOverride",
+                "Emulation.setEmulatedMedia",
+            ]
+        );
+        let info = task.await.unwrap().unwrap();
+        assert_eq!(info.viewport, vp);
+        assert_eq!(info.emulation.preset_id.as_deref(), Some("iphone-16-pro"));
+        assert!(info.emulation.mobile);
+        assert!(info.emulation.has_touch);
+        assert_eq!(
+            info.emulation.color_scheme,
+            Some(super::emulation::ColorScheme::Dark)
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_emulation_does_not_record_rejected_optional_overrides() {
+        let (session, mut browser_r, mut browser_w) = test_live_session();
+        let cfg = EmulationConfig {
+            preset_id: Some("pixel-9".into()),
+            mobile: true,
+            has_touch: true,
+            user_agent: Some("CustomUA".into()),
+            color_scheme: Some(super::emulation::ColorScheme::Dark),
+            orientation: Some(super::emulation::Orientation::Portrait),
+        };
+        let s2 = session.clone();
+        let task = tokio::spawn(async move { s2.apply_emulation(None, cfg).await });
+        for _ in 0..4 {
+            let cmd = read_cdp_frame(&mut browser_r).await;
+            let resp = if cmd["method"] == "Emulation.setEmulatedMedia" {
+                json!({"id": cmd["id"], "error": {"code": -32000, "message": "unsupported"}})
+            } else {
+                json!({"id": cmd["id"], "result": {}})
+            };
+            write_cdp_frame(&mut browser_w, resp).await;
+        }
+        let info = task.await.unwrap().unwrap();
+        assert!(info.emulation.mobile);
+        assert!(info.emulation.has_touch);
+        assert_eq!(info.emulation.user_agent.as_deref(), Some("CustomUA"));
+        assert_eq!(info.emulation.color_scheme, None);
+    }
+
+    #[tokio::test]
+    async fn set_devtools_captures_replayed_console_during_enable_and_reverts_on_error() {
+        let (session, mut browser_r, mut browser_w) = test_live_session();
+        let s2 = session.clone();
+        let enable = tokio::spawn(async move { s2.set_devtools(true).await });
+
+        // Browser receives Runtime.enable, replays a console message BEFORE
+        // replying, then replies to Runtime.enable and Network.enable.
+        let cmd1 = read_cdp_frame(&mut browser_r).await;
+        assert_eq!(cmd1["method"], "Runtime.enable");
+        write_cdp_frame(
+            &mut browser_w,
+            json!({
+                "method": "Runtime.consoleAPICalled",
+                "sessionId": "S1",
+                "params": {
+                    "type": "log",
+                    "args": [{"type": "string", "value": "replayed-before-reply"}],
+                    "timestamp": 1234.0
+                }
+            }),
+        )
+        .await;
+        // Let session_loop process the event before replying to Runtime.enable.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        write_cdp_frame(&mut browser_w, json!({"id": cmd1["id"], "result": {}})).await;
+
+        let cmd2 = read_cdp_frame(&mut browser_r).await;
+        assert_eq!(cmd2["method"], "Network.enable");
+        write_cdp_frame(&mut browser_w, json!({"id": cmd2["id"], "result": {}})).await;
+
+        let snap = enable.await.unwrap().unwrap();
+        assert!(snap.enabled);
+        assert!(
+            snap.console
+                .iter()
+                .any(|c| c.text.contains("replayed-before-reply")),
+            "console event replayed during Runtime.enable must be captured: {:?}",
+            snap.console
+        );
+
+        // Disable, then test rollback when Network.enable fails.
+        let s3 = session.clone();
+        let disable = tokio::spawn(async move { s3.set_devtools(false).await });
+        for expected in ["Runtime.disable", "Network.disable"] {
+            let cmd = read_cdp_frame(&mut browser_r).await;
+            assert_eq!(cmd["method"], expected);
+            write_cdp_frame(&mut browser_w, json!({"id": cmd["id"], "result": {}})).await;
+        }
+        assert!(!disable.await.unwrap().unwrap().enabled);
+
+        let s4 = session.clone();
+        let fail_enable = tokio::spawn(async move { s4.set_devtools(true).await });
+        let cmd_rt = read_cdp_frame(&mut browser_r).await;
+        assert_eq!(cmd_rt["method"], "Runtime.enable");
+        write_cdp_frame(&mut browser_w, json!({"id": cmd_rt["id"], "result": {}})).await;
+        let cmd_net = read_cdp_frame(&mut browser_r).await;
+        assert_eq!(cmd_net["method"], "Network.enable");
+        write_cdp_frame(
+            &mut browser_w,
+            json!({"id": cmd_net["id"], "error": {"code": -32000, "message": "network denied"}}),
+        )
+        .await;
+        let cmd_cleanup = read_cdp_frame(&mut browser_r).await;
+        assert_eq!(cmd_cleanup["method"], "Runtime.disable");
+        write_cdp_frame(
+            &mut browser_w,
+            json!({"id": cmd_cleanup["id"], "result": {}}),
+        )
+        .await;
+
+        assert!(fail_enable.await.unwrap().is_err());
+        assert!(
+            !session.info().devtools_enabled,
+            "devtools_enabled must revert to false when Network.enable fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_emulation_and_resize_are_serialized() {
+        let (session, mut browser_r, mut browser_w) = test_live_session();
+        let mobile_vp = Viewport {
+            width: 393,
+            height: 852,
+            device_scale_factor: 3.0,
+        };
+        let resized_vp = Viewport {
+            width: 852,
+            height: 393,
+            device_scale_factor: 3.0,
+        };
+        let cfg = EmulationConfig {
+            preset_id: Some("iphone-16-pro".into()),
+            mobile: true,
+            has_touch: true,
+            user_agent: None,
+            color_scheme: None,
+            orientation: None,
+        };
+
+        let s_emu = session.clone();
+        let emu_task =
+            tokio::spawn(async move { s_emu.apply_emulation(Some(mobile_vp), cfg).await });
+        // Wait until apply_emulation has sent its first command and holds emulation_lock.
+        let first = read_cdp_frame(&mut browser_r).await;
+        assert_eq!(first["method"], "Emulation.setDeviceMetricsOverride");
+        assert_eq!(first["params"]["width"], 393);
+
+        // Start a concurrent resize while apply_emulation is mid-flight.
+        let s_res = session.clone();
+        let resize_task = tokio::spawn(async move { s_res.resize(resized_vp).await });
+        tokio::task::yield_now().await;
+
+        // Finish apply_emulation's 4 commands; resize must NOT interleave.
+        write_cdp_frame(&mut browser_w, json!({"id": first["id"], "result": {}})).await;
+        for expected in [
+            "Emulation.setTouchEmulationEnabled",
+            "Emulation.setUserAgentOverride",
+            "Emulation.setEmulatedMedia",
+        ] {
+            let cmd = read_cdp_frame(&mut browser_r).await;
+            assert_eq!(
+                cmd["method"], expected,
+                "resize must wait until apply_emulation completes"
+            );
+            write_cdp_frame(&mut browser_w, json!({"id": cmd["id"], "result": {}})).await;
+        }
+        emu_task.await.unwrap().unwrap();
+
+        // Now resize runs with the updated mobile EmulationConfig!
+        let resize_cmd = read_cdp_frame(&mut browser_r).await;
+        assert_eq!(resize_cmd["method"], "Emulation.setDeviceMetricsOverride");
+        assert_eq!(resize_cmd["params"]["width"], 852);
+        assert_eq!(resize_cmd["params"]["height"], 393);
+        assert_eq!(resize_cmd["params"]["mobile"], true);
+        write_cdp_frame(
+            &mut browser_w,
+            json!({"id": resize_cmd["id"], "result": {}}),
+        )
+        .await;
+        resize_task.await.unwrap().unwrap();
+
+        let info = session.info();
+        assert_eq!(info.viewport, resized_vp);
+        assert!(info.emulation.mobile);
+    }
+
+    fn fill_viewer_queue(session: &LiveSession, viewer_id: u64) {
+        let tx = session
+            .viewers
+            .lock()
+            .unwrap()
+            .get(&viewer_id)
+            .unwrap()
+            .tx
+            .clone();
+        while tx.try_send(ViewerOut::Text("pad".into())).is_ok() {}
+    }
+
+    fn latest_state_msg(rx: &mut ViewerHandle) -> Option<Value> {
+        let mut last = None;
+        while let Ok(item) = rx.rx.try_recv() {
+            if let ViewerOut::Text(txt) = item {
+                if let Ok(v) = serde_json::from_str::<Value>(&txt) {
+                    if v["type"] == "state" {
+                        last = Some(v);
+                    }
+                }
+            }
+        }
+        last
+    }
+
+    #[tokio::test]
+    async fn broadcast_msg_eviction_releases_control_stops_screencast_and_broadcasts() {
+        let (session, _browser) = test_session();
+        let alice = session.attach("alice", true).unwrap();
+        let mut bob = session.attach("bob", false).unwrap();
+        let _ = latest_state_msg(&mut bob);
+
+        // Agent acquires, then alice takes over (so agent is waiting).
+        {
+            let mut i = session.inner.lock().unwrap();
+            i.control.agent_acquire().unwrap();
+            assert!(i.control.take_over("alice"));
+            assert!(i.screencast_on);
+        }
+
+        // Wedge alice's outbound queue; broadcasting evicts alice.
+        fill_viewer_queue(&session, alice.id);
+        session.notify_popup("https://example.test/pop");
+
+        assert_eq!(session.viewer_count(), 1);
+        assert!(
+            session.agent_drives(),
+            "evicted driver must release control to waiting agent"
+        );
+        assert_eq!(session.info().controller, ControllerKind::Agent);
+        assert_eq!(session.info().controller_user_id, None);
+        let state = latest_state_msg(&mut bob).expect("peer viewer must receive updated state");
+        assert_eq!(state["session"]["controller"], "agent");
+        assert_eq!(state["session"]["viewers"], 1);
+
+        // Now wedge bob too: last viewer evicted -> screencast stops.
+        fill_viewer_queue(&session, bob.id);
+        session.notify_popup("https://example.test/pop2");
+        assert_eq!(session.viewer_count(), 0);
+        assert!(!session.inner.lock().unwrap().screencast_on);
+    }
+
+    #[tokio::test]
+    async fn on_frame_eviction_releases_control_and_stops_screencast() {
+        let (session, _browser) = test_session();
+        let alice = session.attach("alice", true).unwrap();
+        {
+            let mut i = session.inner.lock().unwrap();
+            assert!(i.control.take_over("alice"));
+            assert!(i.screencast_on);
+        }
+        fill_viewer_queue(&session, alice.id);
+
+        let frame_params = json!({
+            "sessionId": 42,
+            "data": base64::engine::general_purpose::STANDARD.encode(b"fake-jpeg"),
+            "metadata": {
+                "deviceWidth": 1280.0,
+                "deviceHeight": 800.0,
+                "pageScaleFactor": 1.0,
+                "offsetTop": 0.0,
+                "scrollOffsetX": 0.0,
+                "scrollOffsetY": 0.0,
+                "timestamp": 1.0
+            }
+        });
+        session.on_frame(&frame_params);
+
+        assert_eq!(session.viewer_count(), 0);
+        assert_eq!(session.info().controller, ControllerKind::None);
+        assert_eq!(session.info().controller_user_id, None);
+        assert!(!session.inner.lock().unwrap().screencast_on);
+    }
+
+    #[tokio::test]
+    async fn on_ack_eviction_releases_control_and_stops_screencast() {
+        let (session, _browser) = test_session();
+        let alice = session.attach("alice", true).unwrap();
+        {
+            let mut i = session.inner.lock().unwrap();
+            assert!(i.control.take_over("alice"));
+            assert!(i.screencast_on);
+        }
+        // Fill alice's flow window so the next offered frame is buffered in `flow`
+        // and flushed on `on_ack`.
+        let now = Instant::now();
+        let dummy = Arc::new(vec![1u8, 2, 3]);
+        {
+            let mut vs = session.viewers.lock().unwrap();
+            let v = vs.get_mut(&alice.id).unwrap();
+            let mut seq = 1u64;
+            while v.flow.offer(seq, dummy.clone(), now).is_some() {
+                seq += 1;
+            }
+            // Buffer one pending frame beyond the in-flight window.
+            assert!(v.flow.offer(seq, dummy.clone(), now).is_none());
+        }
+        fill_viewer_queue(&session, alice.id);
+
+        // Acking seq 1 tries to send the buffered frame -> queue full -> eviction.
+        session.on_ack(alice.id, 1);
+
+        assert_eq!(session.viewer_count(), 0);
+        assert_eq!(session.info().controller, ControllerKind::None);
+        assert_eq!(session.info().controller_user_id, None);
+        assert!(!session.inner.lock().unwrap().screencast_on);
+    }
+
+    #[tokio::test]
+    async fn set_can_drive_false_releases_control_when_last_driver_revoked_and_broadcasts() {
+        let (session, _browser) = test_session();
+        let alice1 = session.attach("alice", true).unwrap();
+        let alice2 = session.attach("alice", true).unwrap();
+        let mut bob = session.attach("bob", false).unwrap();
+        let _ = latest_state_msg(&mut bob);
+
+        {
+            let mut i = session.inner.lock().unwrap();
+            i.control.agent_acquire().unwrap();
+            assert!(i.control.take_over("alice"));
+        }
+
+        // Revoking one of alice's two driving viewers keeps her control lock.
+        alice1.set_can_drive(false);
+        assert_eq!(session.info().controller, ControllerKind::Human);
+        assert_eq!(session.info().controller_user_id.as_deref(), Some("alice"));
+        assert!(latest_state_msg(&mut bob).is_none());
+
+        // Revoking alice's last driving viewer releases control and broadcasts state.
+        alice2.set_can_drive(false);
+        assert_eq!(session.info().controller, ControllerKind::Agent);
+        assert_eq!(session.info().controller_user_id, None);
+        let state = latest_state_msg(&mut bob).expect("peer must receive state broadcast");
+        assert_eq!(state["session"]["controller"], "agent");
+    }
+
+    #[tokio::test]
+    async fn detaching_last_driving_viewer_releases_control_even_with_watch_only_viewer() {
+        let (session, _browser) = test_session();
+        let alice_driver = session.attach("alice", true).unwrap();
+        let mut alice_watcher = session.attach("alice", false).unwrap();
+        let _ = latest_state_msg(&mut alice_watcher);
+
+        {
+            let mut i = session.inner.lock().unwrap();
+            assert!(i.control.take_over("alice"));
+        }
+
+        drop(alice_driver);
+
+        assert_eq!(session.viewer_count(), 1);
+        assert_eq!(session.info().controller, ControllerKind::None);
+        assert_eq!(session.info().controller_user_id, None);
+        let state = latest_state_msg(&mut alice_watcher).expect("watcher must see release");
+        assert_eq!(state["session"]["controller"], "none");
+    }
+
+    #[test]
+    fn bound_dialog_msg_caps_all_fields() {
+        let huge = "x".repeat(10_000);
+        let msg = bound_dialog_msg(&json!({
+            "type": huge,
+            "message": huge,
+            "defaultPrompt": huge,
+            "url": huge,
+        }));
+        match msg {
+            ServerMsg::Dialog {
+                dialog_type,
+                message,
+                default_prompt,
+                url,
+            } => {
+                assert_eq!(dialog_type.len(), 64);
+                assert_eq!(message.len(), 4000);
+                assert_eq!(default_prompt.len(), 1000);
+                assert_eq!(url.len(), 2048);
+            }
+            other => panic!("expected Dialog, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prune_approval_shots_caps_count_and_keeps_non_jpg_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..8 {
+            std::fs::write(dir.path().join(format!("shot-{i:02}.jpg")), b"jpg").unwrap();
+        }
+        std::fs::write(dir.path().join("keep.txt"), b"txt").unwrap();
+        prune_approval_shots(dir.path(), 3, Duration::from_secs(3600));
+        let jpgs: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jpg"))
+            .collect();
+        assert_eq!(jpgs.len(), 3);
+        assert!(dir.path().join("keep.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn set_guard_spa_mutations_toggles_and_broadcasts_state() {
+        let (session, _browser) = test_session();
+        let mut viewer = session.attach("alice", true).unwrap();
+        let _ = latest_state_msg(&mut viewer);
+
+        assert!(!session.guard_spa_mutations());
+        assert!(!session.info().guard_spa_mutations);
+
+        assert!(session.set_guard_spa_mutations(true));
+        assert!(session.guard_spa_mutations());
+        assert!(session.info().guard_spa_mutations);
+        let state = latest_state_msg(&mut viewer).expect("viewer must receive updated state");
+        assert_eq!(state["session"]["guard_spa_mutations"], true);
+
+        // Idempotent second call does not re-broadcast.
+        assert!(!session.set_guard_spa_mutations(true));
+        assert!(latest_state_msg(&mut viewer).is_none());
     }
 }
 

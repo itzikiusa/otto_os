@@ -12,7 +12,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { routineLabel } from '../../lib/personalAgentBadges';
   import type { PersonalAgent, PersonalAgentPermission, PersonalAgentSchedule } from '../../lib/api/types';
-  import { browserTz, buildCadence, DAY_CHIPS, daysOf, loadCadence, nextForDays, scheduleForDays, timezones, workdays, type CadenceForm } from './cadence';
+  import { browserTz, buildCadence, DAY_CHIPS, daysOf, loadCadence, nextForDays, nextForOnce, scheduleForDays, timezones, workdays, type CadenceForm } from './cadence';
   import { joinDirective, nextRunWords, splitDirective } from './agentHome';
 
   interface Props {
@@ -57,15 +57,43 @@
       const mine = tz === browserTz();
       return `Next: ${nextRunWords(n)}${mine ? '' : ` your time (${at} ${tz})`}`;
     }
-    if (repeats === 'interval') return `Next: ${nextRunWords(new Date(Date.now() + Math.max(5, other.everyMin) * 60_000))}`;
-    return '';
+    if (repeats === 'interval') {
+      const mins = Number(other.everyMin);
+      if (!Number.isFinite(mins) || mins < 5) return 'The shortest interval is 5 minutes.';
+      return `Next: ${nextRunWords(new Date(Date.now() + mins * 60_000))}`;
+    }
+    if (repeats === 'once') {
+      if (!other.runAt) return '';
+      const d = nextForOnce(other.runAt, tz);
+      if (!d) return '';
+      if (d.getTime() <= Date.now()) return 'That time is in the past — pick a future time.';
+      const mine = tz === browserTz();
+      return `Next: ${nextRunWords(d)}${mine ? '' : ` your time (${other.runAt.replace('T', ' ')} ${tz})`}`;
+    }
+    const fields = other.cronExpr.trim().split(/\s+/).filter(Boolean);
+    if (fields.length !== 5) return `Needs 5 fields (minute hour day month weekday) — has ${fields.length}.`;
+    const simple = daysOf({ cadence: 'cron', expr: other.cronExpr });
+    if (simple) {
+      const n = nextForDays(simple.days, simple.at, tz);
+      if (n) {
+        const mine = tz === browserTz();
+        return `Next: ${nextRunWords(n)}${mine ? '' : ` your time (${simple.at} ${tz})`}`;
+      }
+    }
+    return `Runs on cron “${other.cronExpr.trim()}” (${tz}).`;
   });
 
   async function save(): Promise<void> {
     if (busy) return;
     error = '';
     if (repeats === 'days' && days.length === 0) return void (error = 'Pick at least one day.');
+    if (repeats === 'interval' && (!Number.isFinite(Number(other.everyMin)) || Number(other.everyMin) < 5)) {
+      return void (error = 'The shortest interval is 5 minutes.');
+    }
     if (repeats === 'once' && !other.runAt) return void (error = 'Pick the date and time it runs.');
+    if (repeats === 'cron' && other.cronExpr.trim().split(/\s+/).filter(Boolean).length !== 5) {
+      return void (error = 'Cron expression needs 5 fields (minute hour day month weekday).');
+    }
     if (!directive.trim()) return void (error = 'Say what it should do.');
     const schedule = repeats === 'days' ? scheduleForDays(days, at) : buildCadence({ ...other, cadence: repeats });
     const body = { schedule, timezone: tz, directive: joinDirective(name, directive), permission, enabled: init?.enabled ?? true };

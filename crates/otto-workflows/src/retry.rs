@@ -98,6 +98,14 @@ pub fn retry_backoff(
     (attempt <= max_eff).then_some((sleep_ms, max_eff, reason))
 }
 
+/// Whether the outer workflow executor retry loop should retry a node kind.
+/// Interactive / entry kinds are never retried, and `loop` nodes already own
+/// durable retries through [`crate::checkpoint`] so the outer loop must not
+/// double-retry them.
+pub fn is_outer_retryable(kind: &str) -> bool {
+    !matches!(kind, "human_approval" | "manual_trigger" | "loop")
+}
+
 /// The step log line for a scheduled retry: whole seconds, or milliseconds for
 /// a sub-second backoff (a 500 ms pause used to read "in 0s").
 pub fn retry_log_line(next: u32, of: u32, sleep_ms: u64, reason: &str) -> String {
@@ -186,5 +194,15 @@ mod tests {
         let long = "x".repeat(500);
         let (_, _, reason) = retry_backoff(&long, &policy, 1, 1, 0).expect("retryable");
         assert!(reason.chars().count() <= 121, "{}", reason.chars().count());
+    }
+
+    #[test]
+    fn outer_retryable_excludes_interactive_and_checkpointed_loop_nodes() {
+        assert!(is_outer_retryable("agent_prompt"));
+        assert!(is_outer_retryable("http_request"));
+        assert!(is_outer_retryable("prepare_context"));
+        assert!(!is_outer_retryable("human_approval"));
+        assert!(!is_outer_retryable("manual_trigger"));
+        assert!(!is_outer_retryable("loop"));
     }
 }

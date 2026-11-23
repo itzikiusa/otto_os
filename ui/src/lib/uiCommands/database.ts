@@ -132,7 +132,7 @@ async function ensureExplorer(ctx: UiCommandCtx): Promise<void> {
   if (!database.connections.length && !database.connectionsLoading) await database.loadConnections();
   await waitFor(() => !database.connectionsLoading, ctx.signal, 15_000, 'the connection list');
   if (database.connectionsError) {
-    throw new UiCommandError('failed', `Could not load connections: ${database.connectionsError}`);
+    throw new UiCommandError('failed', `Couldn’t load connections: ${database.connectionsError}`);
   }
 }
 
@@ -171,7 +171,7 @@ async function openConn(c: Connection, ctx: UiCommandCtx, dbName?: string): Prom
     `${c.name} to connect`,
   );
   if (st.phase === 'error') {
-    throw new UiCommandError('failed', `Could not connect to ${c.name}: ${st.error ?? 'unknown error'}`);
+    throw new UiCommandError('failed', `Couldn’t connect to ${c.name}: ${st.error ?? 'unknown error'}`);
   }
   if (dbName !== undefined && dbName.trim()) database.setActiveDb(dbName.trim());
 }

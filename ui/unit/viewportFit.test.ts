@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fitToVisualViewport, isTextEntry, keyboardState, nextBaseline, onKeyboard, KEYBOARD_MIN_PX } from '../src/lib/viewportFit.ts';
+import { fitToVisualViewport, isTextEntry, keyboardState, nextBaseline, onKeyboard, resetShellScroll, KEYBOARD_MIN_PX } from '../src/lib/viewportFit.ts';
 
 test('the app follows the visible viewport and an iOS keyboard pan is undone', () => {
   const handlers: Record<string, () => void> = {};
@@ -125,4 +125,106 @@ test('Android resizes-content: layout and visual viewport shrink together — st
   h.doc.activeElement = null;
   h.handlers.resize();
   assert.equal(h.dataset.kb, undefined);
+});
+
+test('Android resizes-visual: a visual-viewport pan the window cannot scroll back is followed (--app-top), and the field is brought back into view', async () => {
+  const h = harness({ innerHeight: 778, vvHeight: 778, width: 412 });
+  let revealed = 0;
+  h.doc.activeElement = Object.assign(field('TEXTAREA'), { scrollIntoView: () => void revealed++ });
+  // Chrome shrinks the visual viewport and pans it 195 px down to show the field.
+  Object.assign(h.vv, { height: 471, offsetTop: 195 });
+  h.handlers.resize();
+  assert.equal(h.dataset.kb, 'open');
+  assert.equal(h.props['--app-h'], '471px');
+  assert.equal(h.props['--app-top'], '195px', 'the app moves onto the panned visible area, no blank band');
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(revealed, 1, 'the focused field is scrolled back into the shrunk app once');
+  Object.assign(h.vv, { height: 778, offsetTop: 0 });
+  h.handlers.resize();
+  assert.equal(h.dataset.kb, undefined);
+  assert.equal(h.props['--app-top'], '0px');
+});
+
+test('a keyboard that leaves a short strip (a phone on its side) marks data-kb-short; a tall one does not', () => {
+  const h = harness({ innerHeight: 304, vvHeight: 304, width: 864 });
+  h.doc.activeElement = field('TEXTAREA');
+  Object.assign(h.vv, { height: 67 });
+  h.handlers.resize();
+  assert.equal(h.dataset.kb, 'open');
+  assert.equal(h.dataset.kbShort, '', 'the shell chrome steps aside');
+  Object.assign(h.vv, { height: 304 });
+  h.handlers.resize();
+  assert.equal(h.dataset.kbShort, undefined, 'and comes back when the keyboard closes');
+  const tall = harness({ innerHeight: 784, vvHeight: 784, width: 412 });
+  tall.doc.activeElement = field('TEXTAREA');
+  Object.assign(tall.vv, { height: 472 });
+  tall.handlers.resize();
+  assert.equal(tall.dataset.kb, 'open');
+  assert.equal(tall.dataset.kbShort, undefined, 'portrait with room keeps its chrome');
+});
+
+test('horizontal drift on window or shell containers is reset on sync and via resetShellScroll', () => {
+  const handlers: Record<string, () => void> = {};
+  const winHandlers: Record<string, () => void> = {};
+  const vv = { height: 844, scale: 1, offsetTop: 0, offsetLeft: 160, addEventListener: (t: string, f: () => void) => (handlers[t] = f) };
+  const scrolls: number[][] = [];
+  const docEl = { scrollLeft: 180, scrollTop: 24 };
+  const body = { scrollLeft: 90, scrollTop: 0 };
+  const content = { scrollLeft: 210, scrollTop: 0 };
+  const shell = { scrollLeft: 75, scrollTop: 12 };
+  const win = {
+    visualViewport: vv as never,
+    scrollX: 160,
+    scrollY: 0,
+    scrollTo: (x: number, y: number) => {
+      scrolls.push([x, y]);
+      win.scrollX = x;
+      win.scrollY = y;
+    },
+    innerHeight: 844,
+    innerWidth: 390,
+    document: {
+      activeElement: null as Element | null,
+      documentElement: docEl,
+      body,
+      getElementById: (id: string) => (id === 'app-content' ? content : null),
+      querySelector: (sel: string) => (sel === '.shell' ? shell : null),
+    },
+    addEventListener: (t: string, f: () => void) => (winHandlers[t] = f),
+  };
+  const props: Record<string, string> = {};
+  const dataset: Record<string, string | undefined> = {};
+  fitToVisualViewport(win, { style: { setProperty: (k, v) => (props[k] = v) }, dataset });
+  assert.deepEqual(scrolls, [[0, 0]]);
+  assert.equal(docEl.scrollLeft, 0);
+  assert.equal(docEl.scrollTop, 0);
+  assert.equal(body.scrollLeft, 0);
+  assert.equal(content.scrollLeft, 0);
+  assert.equal(shell.scrollLeft, 0);
+  // Explicit resetShellScroll undoes later drift (e.g. after navigation).
+  content.scrollLeft = 140;
+  vv.offsetLeft = 40;
+  resetShellScroll(win);
+  assert.equal(content.scrollLeft, 0);
+  assert.equal(scrolls.length, 2);
+  // Orientation change re-syncs --app-h immediately.
+  Object.assign(vv, { height: 390, offsetLeft: 0 });
+  win.innerWidth = 844;
+  win.innerHeight = 390;
+  winHandlers.orientationchange();
+  assert.equal(props['--app-h'], '390px');
+});
+
+test('data-kb is never stuck open if focus leaves while zoomed', () => {
+  const h = harness({ innerHeight: 844, vvHeight: 844, width: 390 });
+  h.doc.activeElement = field('INPUT');
+  Object.assign(h.vv, { height: 460 });
+  h.handlers.resize();
+  assert.equal(h.dataset.kb, 'open');
+  // iOS auto-zoomed while typing, then user tapped outside / navigated away.
+  Object.assign(h.vv, { scale: 1.25 });
+  h.doc.activeElement = null;
+  h.handlers.resize();
+  assert.equal(h.dataset.kb, undefined, 'BottomNav must not stay hidden');
+  assert.equal(h.props['--kb-h'], '0px');
 });

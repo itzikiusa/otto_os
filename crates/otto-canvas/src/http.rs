@@ -518,6 +518,7 @@ async fn get_file<S: CanvasCtx>(
                 header::CONTENT_TYPE,
                 "text/plain; charset=utf-8".to_string(),
             ),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
             (header::ETAG, etag),
             (cache.0, cache.1.to_string()),
         ],

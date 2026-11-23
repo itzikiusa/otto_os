@@ -108,6 +108,18 @@ function wallToInstant(y: number, mo: number, d: number, h: number, mi: number, 
   return guess - tzOffset(first, tz);
 }
 
+/** Parse a `datetime-local` value (`YYYY-MM-DDTHH:MM`) in `tz` into a Date, or null. */
+export function nextForOnce(runAt: string, tz: string): Date | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(runAt.trim());
+  if (!m) return null;
+  try {
+    const ms = wallToInstant(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), tz);
+    return Number.isNaN(ms) ? null : new Date(ms);
+  } catch {
+    return null;
+  }
+}
+
 /** The next fire of "these days at HH:MM" in `tz` after `now` (a preview —
  *  the daemon's own next run is the truth once saved). */
 export function nextForDays(days: number[], at: string, tz: string, now = new Date()): Date | null {

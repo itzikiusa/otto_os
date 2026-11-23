@@ -161,9 +161,17 @@ export function deleteLink(id: Id, linkId: Id) {
 // ── Review comments ─────────────────────────────────────────────────────────
 
 /** Oldest first; the newest `limit` (default 500, cap 1,000). */
-export function listComments(id: Id, p: { version?: Id; resolved?: boolean; limit?: number } = {}) {
+export function listComments(
+  id: Id,
+  p: { version?: Id; resolved?: boolean; mesh_name?: string; limit?: number } = {},
+) {
   // `resolved=false` must reach the daemon (qs drops `false`).
-  const q = qs({ version: p.version, limit: p.limit, resolved: p.resolved === undefined ? undefined : String(p.resolved) });
+  const q = qs({
+    version: p.version,
+    mesh_name: p.mesh_name,
+    limit: p.limit,
+    resolved: p.resolved === undefined ? undefined : String(p.resolved),
+  });
   return api.get<DesignComment[]>(`/design/artifacts/${enc(id)}/comments${q}`);
 }
 

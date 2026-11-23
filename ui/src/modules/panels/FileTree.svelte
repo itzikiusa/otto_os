@@ -73,6 +73,8 @@
   let rootRequest: AbortController | undefined;
   let fileGeneration = 0;
   let fileRequest: AbortController | undefined;
+  let treeListEl = $state<HTMLDivElement | null>(null);
+  let lastViewerReq: { path: string; line?: number; col?: number; preview: boolean; revealParent: boolean } | null = null;
 
   // ── navigation state ──────────────────────────────────────────────────────
   // The folder actually listed (canonical, from the daemon) + its parent, the
@@ -285,6 +287,7 @@
   }
 
   async function readFile(path: string, line: number | undefined, col: number | undefined, preview: boolean, revealParent: boolean): Promise<void> {
+    lastViewerReq = { path, line, col, preview, revealParent };
     const generation = ++fileGeneration;
     fileRequest?.abort();
     const controller = new AbortController();
@@ -313,9 +316,11 @@
   }
 
   function closeViewer(): void {
+    const prevPath = viewerFile?.path ?? activeRow;
     fileGeneration++; fileRequest?.abort();
     viewerFile = null; viewerError = ''; viewerLoading = false;
     viewerName = ''; viewerGotoLine = null; viewerGotoCol = null;
+    if (treeListEl) { const idx = visibleNodes.findIndex((n) => n.entry.path === prevPath); void focusRow(treeListEl, idx >= 0 ? idx : 0); }
   }
 
   onDestroy(() => {
@@ -560,7 +565,7 @@
       {/if}
       <!-- Tree pane -->
       <div class="tree-pane" class:has-viewer={!!viewerFile}>
-        <div class="tree-list" role="tree" aria-label="Files in {basename(effectiveRoot)}" {@attach treeWin.attach}>
+        <div class="tree-list" role="tree" aria-label="Files in {basename(effectiveRoot)}" bind:this={treeListEl} {@attach treeWin.attach}>
           {#if treeRange.top > 0}<div style="height:{treeRange.top}px" aria-hidden="true"></div>{/if}
           {#each visibleNodes.slice(treeRange.start, treeRange.end) as node (node.entry.path)}
             {@const place = positions.get(node.entry.path)}
@@ -648,10 +653,10 @@
           {#if viewerLoading}
             <div class="loading"><Skeleton rows={8} height={14} label={viewerName} /></div>
           {:else if viewerError}
-            <div class="error-msg" role="alert">{viewerError}</div>
+            <div class="load-pad"><LoadState what={viewerName || 'this file'} variant="compact" error={viewerError} onretry={() => lastViewerReq && void readFile(lastViewerReq.path, lastViewerReq.line, lastViewerReq.col, lastViewerReq.preview, lastViewerReq.revealParent)} /></div>
           {:else if viewerFile}
             {#if canPreview && previewMode}
-              <iframe class="preview-frame" title="Preview" sandbox="allow-same-origin" srcdoc={previewSrcdoc}></iframe>
+              <iframe class="preview-frame" title="Preview" sandbox="" srcdoc={previewSrcdoc}></iframe>
             {:else}
               <div class="code-scroll">
                 <LazyCodeEditor
@@ -976,13 +981,5 @@
     padding: 12px;
     font-size: var(--fs-s);
   }
-  .load-pad {
-    padding: 12px;
-  }
-  .error-msg {
-    padding: 12px;
-    font-size: var(--fs-s);
-    color: var(--danger);
-    word-break: break-all;
-  }
+  .load-pad { padding: 12px; }
 </style>

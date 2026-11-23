@@ -128,34 +128,30 @@
   const sel = $derived(useSelection ? selection : null);
 
   // ── Loading (sequence-guarded) ────────────────────────────────────────────
-  let turnsSeq = 0;
-  let runsSeq = 0;
+  let turnsSeq = 0, runsSeq = 0, rejSeq = 0, rulesSeq = 0, alive = true;
+  $effect(() => () => { alive = false; });
   async function loadTurns(): Promise<void> {
-    const my = ++turnsSeq;
-    const known = new Set(turns.map((t) => t.turn_id)); // authoritative for these
-    const fetched = await listTurns(artifact.id);
-    if (my !== turnsSeq) return;
+    const my = ++turnsSeq, aid = artifact.id;
+    const known = new Set(turns.map((t) => t.turn_id));
+    const fetched = await listTurns(aid);
+    if (!alive || my !== turnsSeq || artifact.id !== aid) return;
     turns = mergeTurns(turns, fetched, known);
   }
   async function loadRuns(): Promise<void> {
-    const my = ++runsSeq;
-    const r = await listVariantRuns(artifact.id);
-    if (my !== runsSeq) return;
+    const my = ++runsSeq, aid = artifact.id;
+    const r = await listVariantRuns(aid);
+    if (!alive || my !== runsSeq || artifact.id !== aid) return;
     runs = r;
   }
   async function loadAll(): Promise<void> {
-    try {
-      await Promise.all([loadTurns(), loadRuns()]);
-      phase = 'ready';
-      loadError = null;
-    } catch (e) {
-      if (phase !== 'ready') phase = 'error';
-      loadError = loadErrorText(e);
-    }
+    try { await Promise.all([loadTurns(), loadRuns()]); phase = 'ready'; loadError = null; }
+    catch (e) { if (phase !== 'ready') phase = 'error'; loadError = loadErrorText(e); }
   }
   async function loadRejections(): Promise<void> {
+    const my = ++rejSeq, aid = artifact.id;
     try {
-      const s = await listSignals({ artifact_id: artifact.id, kind: 'variant_rejected', limit: 200 });
+      const s = await listSignals({ artifact_id: aid, kind: 'variant_rejected', limit: 200 });
+      if (!alive || my !== rejSeq || artifact.id !== aid) return;
       const next: Record<string, string> = {};
       for (const x of s) {
         const p = x.payload ?? {};
@@ -163,17 +159,15 @@
         next[x.version_id] = REJECT_REASONS.find((r) => r.id === p.reason)?.label ?? 'Other';
       }
       rejected = { ...next, ...rejected };
-    } catch {
-      /* best effort: the tray just doesn't mark earlier rejections */
-    }
+    } catch { /* best effort */ }
   }
   async function loadRules(): Promise<void> {
+    const my = ++rulesSeq, wsId = artifact.workspace_id;
     try {
-      const l = await getLearned(artifact.workspace_id);
+      const l = await getLearned(wsId);
+      if (!alive || my !== rulesSeq || artifact.workspace_id !== wsId) return;
       ruleTexts = Object.fromEntries(l.active.map((r) => [r.key, r.rule]));
-    } catch {
-      /* keys are shown instead of rule text */
-    }
+    } catch { /* keys are shown instead of rule text */ }
   }
 
   $effect(() => {

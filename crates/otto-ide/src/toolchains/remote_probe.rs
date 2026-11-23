@@ -137,7 +137,12 @@ fn normalize_remote_sdk_path(eco: EcosystemKind, raw_path: &str) -> String {
             }
             trimmed.to_string()
         }
-        EcosystemKind::Python | EcosystemKind::Shell | EcosystemKind::Json => trimmed.to_string(),
+        EcosystemKind::Python
+        | EcosystemKind::Shell
+        | EcosystemKind::Json
+        | EcosystemKind::Ios
+        | EcosystemKind::Android
+        | EcosystemKind::Flutter => trimmed.to_string(),
     }
 }
 

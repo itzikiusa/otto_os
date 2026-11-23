@@ -390,3 +390,91 @@ async fn create_adds_a_new_branch_worktree_beside_the_repo_and_refuses_reuse() {
     let err = git.worktree_create("--force", None).await.unwrap_err();
     assert!(!matches!(err, Error::Conflict(_)), "{err:?}");
 }
+
+#[tokio::test]
+async fn worktree_inspect_never_runs_embedded_submodule_filter() {
+    use std::os::unix::fs::PermissionsExt;
+    let (tmp, repo) = fixture();
+    let wt = add_wt(&repo, "wt-submod", "feat/submod");
+
+    let ran = tmp.path().join("filter-ran");
+    let filt = tmp.path().join("clean.sh");
+    std::fs::write(
+        &filt,
+        format!("#!/bin/sh\ntouch '{}'\ncat\n", ran.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&filt, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let sub = wt.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    sh(&sub, &["init", "-q", "-b", "main"]);
+    std::fs::write(sub.join("f"), "a").unwrap();
+    sh(&sub, &["add", "f"]);
+    sh(
+        &sub,
+        &[
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "s",
+        ],
+    );
+    sh(&sub, &["config", "filter.x.clean", filt.to_str().unwrap()]);
+    std::fs::write(sub.join(".gitattributes"), "* filter=x\n").unwrap();
+    std::fs::write(sub.join("f"), "b").unwrap();
+    sh(&wt, &["add", "sub"]);
+    let _ = std::fs::remove_file(&ran);
+
+    let git = LocalGit::new(&repo);
+    let (w, admin) = git.worktree_inspect(wt.to_str().unwrap()).await.unwrap();
+    assert!(admin.is_some());
+    assert!(w.dirty_known);
+    assert!(
+        !ran.exists(),
+        "worktree_inspect ran an embedded submodule's .git/config filter"
+    );
+    // The staged gitlink itself still registers as a tracked change.
+    assert!(w.changes >= 1, "staged gitlink should still count as dirty");
+}
+
+#[tokio::test]
+async fn stash_detail_truncates_oversized_patch_at_cap() {
+    let (_tmp, repo) = fixture();
+    // Write a ~500 KiB tracked change (> STASH_PATCH_CAP = 400 KiB) plus an untracked file.
+    let big = "0123456789abcdef\n".repeat(32_000);
+    std::fs::write(repo.join("a.txt"), &big).unwrap();
+    std::fs::write(repo.join("u.txt"), "extra untracked\n").unwrap();
+    sh(&repo, &["stash", "push", "-q", "-u", "-m", "big"]);
+
+    let git = LocalGit::new(&repo);
+    let sha = git.stash_list().await.unwrap()[0].sha.clone();
+    let d = git.stash_detail(&sha).await.unwrap();
+    assert!(d.truncated, "oversized stash patch must report truncated");
+    assert!(
+        d.patch.len() <= STASH_PATCH_CAP,
+        "patch exceeded cap: {} > {}",
+        d.patch.len(),
+        STASH_PATCH_CAP
+    );
+    let paths: Vec<&str> = d.files.iter().map(|f| f.path.as_str()).collect();
+    assert!(paths.contains(&"a.txt") && paths.contains(&"u.txt"));
+}
+
+#[tokio::test]
+async fn submodule_update_rejects_empty_and_control_char_paths() {
+    let (_tmp, repo) = fixture();
+    let git = LocalGit::new(&repo);
+    for bad in ["", "sub\nmod", "sub\rmod", "sub\0mod"] {
+        let res = git.submodule_update(Some(bad)).await;
+        assert!(
+            matches!(res, Err(Error::Invalid(_))),
+            "expected Invalid for submodule path {bad:?}, got {res:?}"
+        );
+    }
+}

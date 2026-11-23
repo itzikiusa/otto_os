@@ -30,6 +30,7 @@
   } from './search/ideQuickOpenModel';
   import { currentIdeShellCtx, ideActionHint, ideActionsFor, type IdeAction } from './shell/ideActions';
   import { ideLayout } from './shell/ideLayout.svelte';
+  import { cancelWorkspaceSearch } from './shell/ideLspAndSearchHelpers';
 
   type NavRow =
     | { kind: 'action'; action: IdeAction }
@@ -141,6 +142,7 @@
 
   onDestroy(() => {
     if (debounceTimer) clearTimeout(debounceTimer);
+    cancelWorkspaceSearch();
   });
 
   const actionCtx = $derived({ ...currentIdeShellCtx(), stack: ideLayout.stack });
@@ -206,6 +208,8 @@
   function close(): void {
     if (ide.replaceLoading) return;
     if (debounceTimer) clearTimeout(debounceTimer);
+    cancelWorkspaceSearch();
+    ide.searchLoading = false;
     ide.searchReplaceMode = false;
     ide.searchScopePath = null;
     ide.searchEverywhereOpen = false;
@@ -215,6 +219,8 @@
     if (debounceTimer) clearTimeout(debounceTimer);
     const effectiveQ = tab === 'text' ? query : parsed.cleanQuery.trim();
     if (tab === 'actions' || effectiveQ.length === 0) {
+      cancelWorkspaceSearch();
+      ide.searchLoading = false;
       ide.searchResults = [];
       return;
     }
@@ -418,15 +424,21 @@
       </div>
 
       {#if replaceOpen}
-        <div class="se-replace-row">
+        <form
+          class="se-replace-row"
+          onsubmit={(e) => {
+            e.preventDefault();
+            if (query.length > 0 && !ide.replaceLoading) void confirmAndReplaceAll();
+          }}
+        >
           <input class="se-input" type="text" dir="ltr" aria-label="Replacement text" placeholder="Replace with…" bind:value={replacement} data-testid="ide-replace-input" />
           <button type="button" class="btn small" disabled={query.length === 0 || ide.replaceLoading} onclick={() => void previewReplace()}>
             {ide.replaceLoading && replaceMode === 'preview' ? 'Previewing…' : 'Preview'}
           </button>
-          <button type="button" class="btn small primary" disabled={query.length === 0 || ide.replaceLoading} onclick={() => void confirmAndReplaceAll()} data-testid="ide-replace-all-btn">
+          <button type="submit" class="btn small primary" disabled={query.length === 0 || ide.replaceLoading} data-testid="ide-replace-all-btn">
             {ide.replaceLoading && replaceMode === 'apply' ? 'Replacing…' : 'Replace all'}
           </button>
-        </div>
+        </form>
 
         {#if ide.replacePreview}
           <div class="se-preview-box">

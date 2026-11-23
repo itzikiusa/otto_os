@@ -3,7 +3,6 @@
   // Info tab: shows active session metadata + the attached tracker issue (Jira or Linear).
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toastError } from '../../lib/toastError';
-  import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -44,13 +43,16 @@
   );
 
   async function onDefaultAgentChange(e: Event): Promise<void> {
-    const value = (e.currentTarget as HTMLSelectElement).value;
+    const sel = e.currentTarget as HTMLSelectElement;
+    const prev = wsDefaultAgent;
+    const value = sel.value;
     try {
       await ws.saveDefaultAgent(value);
       toasts.info(
         value === '' ? 'Workspace uses the global default agent' : `Workspace default agent: ${value}`,
       );
     } catch (err) {
+      sel.value = prev;
       toastError('Couldn’t save default agent', err);
     }
   }
@@ -170,7 +172,7 @@
       {#if session.cwd}
         <div class="info-row">
           <span class="key">Folder</span>
-          <span class="val mono cwd" title={session.cwd}>{session.cwd}</span>
+          <span class="val mono cwd" dir="ltr" title={session.cwd}>{session.cwd}</span>
         </div>
       {/if}
       <div class="info-row">
@@ -186,7 +188,7 @@
           <ul class="dir-list">
             {#each extraDirs as dir (dir)}
               <li class="dir-row">
-                <span class="dir-path mono" title={dir}>{dir}</span>
+                <span class="dir-path mono" dir="ltr" title={dir}>{dir}</span>
                 <button
                   class="icon-btn dir-remove"
                   title="Remove {dir} (restarts the session)"
@@ -419,6 +421,12 @@
     flex-shrink: 0;
     width: 20px;
     height: 20px;
+  }
+  @media (pointer: coarse) {
+    .dir-remove {
+      min-inline-size: var(--hit-min);
+      min-block-size: var(--hit-min);
+    }
   }
   .dir-remove:hover {
     color: var(--danger);

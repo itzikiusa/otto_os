@@ -372,14 +372,60 @@ async fn install(dir: &Path) -> Result<std::path::PathBuf> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(300))
         .build()?;
-    let url=format!("https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v{VERSION}/otelcol-contrib_{VERSION}_{platform}.tar.gz");
+    let url = format!("https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v{VERSION}/otelcol-contrib_{VERSION}_{platform}.tar.gz");
+    download_and_extract_archive(
+        &client,
+        &url,
+        &install_dir,
+        &archive,
+        checksum,
+        &bin,
+        &stamp,
+        400 * 1024 * 1024,
+    )
+    .await?;
+    Ok(bin)
+}
+
+/// RAII cleanup that deletes `download.tar.gz` on any error or cancellation so
+/// partial/corrupt archives are never left behind on disk.
+struct ArchiveCleanup(Option<PathBuf>);
+impl ArchiveCleanup {
+    fn new(path: PathBuf) -> Self {
+        Self(Some(path))
+    }
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+impl Drop for ArchiveCleanup {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn download_and_extract_archive(
+    client: &reqwest::Client,
+    url: &str,
+    install_dir: &Path,
+    archive: &Path,
+    checksum: &str,
+    bin: &Path,
+    stamp: &Path,
+    max_bytes: usize,
+) -> Result<()> {
     let mut response = client.get(url).send().await?.error_for_status()?;
-    let mut file = tokio::fs::File::create(&archive).await?;
+    let mut cleanup = ArchiveCleanup::new(archive.to_path_buf());
+    let mut file = tokio::fs::File::create(archive).await?;
     let mut digest = Sha256::new();
     let mut bytes = 0usize;
     while let Some(chunk) = response.chunk().await? {
         bytes += chunk.len();
-        if bytes > 400 * 1024 * 1024 {
+        if bytes > max_bytes {
+            drop(file);
             bail!("collector archive exceeds download limit");
         }
         digest.update(&chunk);
@@ -393,20 +439,21 @@ async fn install(dir: &Path) -> Result<std::path::PathBuf> {
     // Extract exactly the signed distribution binary, never arbitrary archive paths.
     let status = Command::new("tar")
         .arg("-xzf")
-        .arg(&archive)
+        .arg(archive)
         .arg("-C")
-        .arg(&install_dir)
+        .arg(install_dir)
         .arg("otelcol-contrib")
         .status()
         .await?;
     if !status.success() {
         bail!("collector archive extraction failed");
     }
-    let path = bin.clone();
+    let path = bin.to_path_buf();
     let digest = tokio::task::spawn_blocking(move || hash_file(&path)).await??;
     tokio::fs::write(stamp, digest).await?;
     tokio::fs::remove_file(archive).await?;
-    Ok(bin)
+    cleanup.disarm();
+    Ok(())
 }
 /// Identity of an on-disk file for the verified-digest cache. `ctime` cannot
 /// be set by user code, so an in-place rewrite never matches a stale entry.
@@ -719,3 +766,99 @@ fn recover_orphans_blocking(dir: &Path) -> Result<()> {
 #[cfg(test)]
 #[path = "collector_recovery_tests.rs"]
 mod recovery_tests;
+
+#[cfg(test)]
+mod archive_cleanup_tests {
+    use super::*;
+
+    async fn serve_once(payload: Vec<u8>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await;
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    payload.len()
+                );
+                let _ = stream.write_all(header.as_bytes()).await;
+                let _ = stream.write_all(&payload).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        format!("http://{addr}/download.tar.gz")
+    }
+
+    #[tokio::test]
+    async fn partial_archive_is_removed_on_limit_checksum_and_extract_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install_dir = tmp.path();
+        let archive = install_dir.join("download.tar.gz");
+        let bin = install_dir.join("otelcol-contrib");
+        let stamp = install_dir.join("binary.sha256");
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        // 1. Download limit exceeded
+        let url = serve_once(vec![b'x'; 256]).await;
+        let err = download_and_extract_archive(
+            &client,
+            &url,
+            install_dir,
+            &archive,
+            "unused",
+            &bin,
+            &stamp,
+            64,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("download limit"), "{err}");
+        assert!(
+            !archive.exists(),
+            "partial archive must be removed on size limit"
+        );
+
+        // 2. Checksum mismatch
+        let url = serve_once(b"not a valid archive".to_vec()).await;
+        let err = download_and_extract_archive(
+            &client,
+            &url,
+            install_dir,
+            &archive,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            &bin,
+            &stamp,
+            1024,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("checksum mismatch"), "{err}");
+        assert!(
+            !archive.exists(),
+            "archive must be removed on checksum mismatch"
+        );
+
+        // 3. Valid checksum of non-tar payload → tar extraction fails and cleans up archive
+        let bad_tar = b"definitely not a gzip tar archive".to_vec();
+        let good_sum = hex::encode(Sha256::digest(&bad_tar));
+        let url = serve_once(bad_tar).await;
+        let err = download_and_extract_archive(
+            &client,
+            &url,
+            install_dir,
+            &archive,
+            &good_sum,
+            &bin,
+            &stamp,
+            1024,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("extraction failed"), "{err}");
+        assert!(
+            !archive.exists(),
+            "archive must be removed on extract error"
+        );
+    }
+}

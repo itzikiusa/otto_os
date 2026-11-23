@@ -84,7 +84,7 @@ test('replacement import fetches global scope, confirms empty visible workspace,
 });
 test('extended budget survives Resume failure and retry skips repeat PATCH', async () => {
   let updates = 0, resumes = 0;
-  const state = compile(`let loop={iterations_started:1,limits:{}}, id='loop', acting=false, extIters=5, extMinutes=10;
+  const state = compile(`let loop={iterations_started:1,limits:{}}, id='loop', acting=false, extIters=5, extMinutes=10, extCostUsd='';
     let extError='', savedExtension='', extendOpen=true;
     ${methods('modules/loops/LoopDetail.svelte', ['extendAndResume'])}
     return {extendAndResume, read(){return {extError,extendOpen,acting}}};`, {

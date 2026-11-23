@@ -6,12 +6,20 @@
   // Inactive (AI-suggested) learnings surface with an Accept button.
   import Icon from '../../lib/components/Icon.svelte';
   import { product } from '../../lib/stores/product.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
+  import { untrack } from 'svelte';
   import { renderMarkdown } from '../../lib/md';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { focusFirstField, refocusEditTrigger } from '../../lib/inlineEdit';
+  import {
+    learningRefClass as refClass,
+    learningRefHref as refHref,
+    parseLearningRefs as parseRefs,
+    parseLearningTags as parseTags,
+  } from './learningRefs';
   import type { ProductLearning, NewLearningReq, UpdateLearningReq } from './types';
 
   // ── Filter (the view's own segmented control — no side rail) ─────────────────
@@ -22,13 +30,6 @@
     { value: 'pattern', label: 'Patterns to follow' },
     { value: 'avoid', label: 'Cases to avoid' },
   ];
-
-  // Ref shape parsed from refs_json.
-  interface LearningRef {
-    type: string;
-    ref: string;
-    label?: string;
-  }
 
   // ── Local state ───────────────────────────────────────────────────────────────
   let loaded = $state(false);
@@ -58,20 +59,28 @@
 
 
   // Load all learnings on mount / when workspace changes.
+  let loadSeq = 0;
+  let loadedForWs: string | null = null;
   $effect(() => {
-    if (!loaded) {
-      void loadAll();
-    }
+    const wsId = ws.currentId;
+    if (!wsId) return;
+    if (loaded && loadedForWs === wsId) return;
+    untrack(() => void loadAll());
   });
 
   /** A failed load — inline with Retry, never as "No patterns yet". */
   let loadError = $state<string | null>(null);
   async function loadAll(): Promise<void> {
+    const targetWs = ws.currentId;
+    const seq = ++loadSeq;
     loadError = null;
     try {
       await product.loadLearnings(); // load ALL (active + inactive)
+      if (seq !== loadSeq || ws.currentId !== targetWs) return;
       loaded = true;
+      loadedForWs = targetWs ?? null;
     } catch (e) {
+      if (seq !== loadSeq || ws.currentId !== targetWs) return;
       loadError = loadErrorText(e);
     }
   }
@@ -83,44 +92,6 @@
 
   const showPatterns = $derived(filter === 'all' || filter === 'pattern');
   const showAvoids = $derived(filter === 'all' || filter === 'avoid');
-
-  // ── Helpers ───────────────────────────────────────────────────────────────────
-
-  function parseTags(tags: string): string[] {
-    return tags
-      ? tags
-          .split(',')
-          .map((t) => t.trim())
-          .filter(Boolean)
-      : [];
-  }
-
-  function parseRefs(refsJson: string): LearningRef[] {
-    if (!refsJson) return [];
-    try {
-      const parsed = JSON.parse(refsJson);
-      if (Array.isArray(parsed)) return parsed as LearningRef[];
-    } catch {
-      // ignore malformed
-    }
-    return [];
-  }
-
-  function refHref(r: LearningRef): string | null {
-    if (r.type === 'url') return r.ref;
-    if (r.type === 'jira') return r.ref.startsWith('http') ? r.ref : null;
-    if (r.type === 'confluence') return r.ref.startsWith('http') ? r.ref : null;
-    return null;
-  }
-
-  function refClass(type: string): string {
-    switch (type) {
-      case 'jira': return 'ref-jira';
-      case 'confluence': return 'ref-confluence';
-      case 'url': return 'ref-url';
-      default: return 'ref-other';
-    }
-  }
 
   // ── CRUD actions ──────────────────────────────────────────────────────────────
 

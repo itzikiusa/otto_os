@@ -206,26 +206,24 @@ pub(crate) fn browse_canceled(flag: &std::sync::atomic::AtomicBool) -> ApiResult
     }
 }
 
-/// Secret locations a NON-root caller may never browse into or read through
-/// `/fs/*`, even when the daemon's OS account can: Otto's own data dir (the
-/// state DB, `secrets.json`, TLS keys, logs, tokens), the default data dir even
-/// when `$OTTO_DATA_DIR` points elsewhere, the home credential dirs (`~/.ssh`,
-/// `~/.aws`, …) and system secret prefixes, plus key-like file names. Root keeps
-/// unrestricted (OS-permission) access. `raw` is the caller's path; it is
-/// expanded + canonicalized here so `..`/symlinks can't dodge the prefixes.
-fn non_root_fs_denied(raw: &str) -> ApiResult<()> {
+/// Resolve `raw` once and enforce the non-root protected-dir / denied-file
+/// policy on that exact canonical path, returning `Ok(Some(canonical))` so
+/// `/fs/browse` and `/fs/stat` operate directly on the verified `PathBuf` with
+/// zero double-`canonicalize` TOCTOU window (matching `/fs/read`).
+fn non_root_fs_denied(raw: &str) -> ApiResult<Option<std::path::PathBuf>> {
     use std::path::Path;
     let expanded = expand_home(if raw.is_empty() { "~" } else { raw })?;
     // A path that doesn't resolve is left to the handler's own error.
     let Ok(canonical) = Path::new(&expanded).canonicalize() else {
-        return Ok(());
+        return Ok(None);
     };
-    non_root_canonical_denied(&canonical)
+    non_root_canonical_denied(&canonical)?;
+    Ok(Some(canonical))
 }
 
-/// [`non_root_fs_denied`] for a path that is ALREADY canonical — `/fs/read`
-/// checks the very path it then opens (S8-09: no second resolution a symlink
-/// swap could slip between).
+/// [`non_root_canonical_denied`] checks an ALREADY-canonicalized path so
+/// `/fs/browse`, `/fs/stat`, and `/fs/read` validate the exact path they open
+/// with zero double-`canonicalize` TOCTOU window.
 fn non_root_canonical_denied(canonical: &std::path::Path) -> ApiResult<()> {
     use otto_core::secret_paths as sp;
     if sp::in_protected_dir(canonical) || sp::is_denied_file(canonical) {
@@ -252,42 +250,57 @@ pub async fn browse(
         admission,
         std::time::Duration::from_secs(10),
         move |cancel| {
-            if restricted {
-                non_root_fs_denied(params.path.as_deref().unwrap_or(""))?;
-            }
-            browse_sync(params, &cancel)
+            let verified = if restricted {
+                non_root_fs_denied(params.path.as_deref().unwrap_or(""))?
+            } else {
+                None
+            };
+            browse_sync_with(params, verified, &cancel)
         },
     )
     .await
     .map(Json)
 }
 
+#[allow(dead_code)] // called directly by unit tests
 #[allow(clippy::disallowed_methods)] // sync helper: browse runs it via filesystem_work (blocking pool)
 fn browse_sync(
     params: BrowseParams,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> ApiResult<FsBrowse> {
-    browse_canceled(cancel)?;
-    // Resolve the target path.
-    let raw = params
-        .path
-        .as_deref()
-        .filter(|p| !p.is_empty())
-        .unwrap_or("~");
-    let expanded = expand_home(raw)?;
-    let target = std::path::Path::new(&expanded);
+    browse_sync_with(params, None, cancel)
+}
 
-    let metadata =
-        std::fs::metadata(target).map_err(|e| filesystem_error("access directory", target, e))?;
+#[allow(clippy::disallowed_methods)] // sync helper: browse runs it via filesystem_work (blocking pool)
+fn browse_sync_with(
+    params: BrowseParams,
+    verified_canonical: Option<std::path::PathBuf>,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> ApiResult<FsBrowse> {
+    browse_canceled(cancel)?;
+    let canonical = match verified_canonical {
+        Some(c) => c,
+        None => {
+            let raw = params
+                .path
+                .as_deref()
+                .filter(|p| !p.is_empty())
+                .unwrap_or("~");
+            let expanded = expand_home(raw)?;
+            let target = std::path::Path::new(&expanded);
+            target
+                .canonicalize()
+                .map_err(|e| filesystem_error("access directory", target, e))?
+        }
+    };
+    let metadata = std::fs::metadata(&canonical)
+        .map_err(|e| filesystem_error("access directory", &canonical, e))?;
     if !metadata.is_dir() {
         return Err(ApiError(Error::Invalid(format!(
             "not a directory: {}",
-            target.display()
+            canonical.display()
         ))));
     }
-    let canonical = target
-        .canonicalize()
-        .map_err(|e| filesystem_error("resolve directory", target, e))?;
     browse_canceled(cancel)?;
 
     let path_str = canonical.to_string_lossy().into_owned();
@@ -374,25 +387,38 @@ pub async fn stat(
         .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(8)))
         .clone();
     filesystem_work(admission, std::time::Duration::from_secs(5), move |_| {
-        if restricted {
-            non_root_fs_denied(&params.path)?;
-        }
-        stat_sync(&params.path)
+        let verified = if restricted {
+            non_root_fs_denied(&params.path)?
+        } else {
+            None
+        };
+        stat_sync_with(&params.path, verified)
     })
     .await
     .map(Json)
 }
 
+#[allow(dead_code)] // called directly by unit tests
 #[allow(clippy::disallowed_methods)] // sync helper: stat runs it via filesystem_work (blocking pool)
 fn stat_sync(raw: &str) -> ApiResult<FsStat> {
+    stat_sync_with(raw, None)
+}
+
+#[allow(clippy::disallowed_methods)] // sync helper: stat runs it via filesystem_work (blocking pool)
+fn stat_sync_with(raw: &str, verified_canonical: Option<std::path::PathBuf>) -> ApiResult<FsStat> {
     if raw.trim().is_empty() {
         return Err(ApiError(Error::Invalid("path is required".into())));
     }
-    let expanded = expand_home(raw.trim())?;
-    let target = std::path::Path::new(&expanded);
-    let canonical = target
-        .canonicalize()
-        .map_err(|e| filesystem_error("access", target, e))?;
+    let canonical = match verified_canonical {
+        Some(c) => c,
+        None => {
+            let expanded = expand_home(raw.trim())?;
+            let target = std::path::Path::new(&expanded);
+            target
+                .canonicalize()
+                .map_err(|e| filesystem_error("access", target, e))?
+        }
+    };
     let metadata =
         std::fs::metadata(&canonical).map_err(|e| filesystem_error("access", &canonical, e))?;
     let is_dir = metadata.is_dir();

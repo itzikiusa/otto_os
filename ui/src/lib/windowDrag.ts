@@ -36,3 +36,21 @@ export async function startWindowDrag(e: MouseEvent): Promise<void> {
     console.error('[window-drag] startDragging failed:', err);
   }
 }
+
+/** Svelte action attaching `startWindowDrag` on mousedown without requiring
+ *  an interactive element role on chrome headers. */
+export function windowDrag(node: HTMLElement, enabled = true) {
+  let on = enabled;
+  const handler = (e: MouseEvent) => {
+    if (on) void startWindowDrag(e);
+  };
+  node.addEventListener('mousedown', handler);
+  return {
+    update(next: boolean) {
+      on = next;
+    },
+    destroy() {
+      node.removeEventListener('mousedown', handler);
+    },
+  };
+}

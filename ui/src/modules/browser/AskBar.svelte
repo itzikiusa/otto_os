@@ -52,8 +52,10 @@
     inputEl?.focus();
   });
   // Clear the hint once the user starts typing or moves to another page.
+  let lastUrl: string | undefined;
   $effect(() => {
-    void url;
+    if (lastUrl !== undefined && url !== lastUrl) justMarked = false;
+    lastUrl = url;
     if (text !== '') justMarked = false;
   });
 
@@ -80,6 +82,7 @@
       await browser.ask({ session_id: sessionId, url, text: q, annotation_ids: ids, page_text });
       text = '';
       justMarked = false;
+      if (inputEl) inputEl.style.height = 'auto';
       // The answer streams into the agent's terminal; when that isn't on
       // screen (collapsed dock, or the embedded bar) say where it went.
       if (!terminalVisible) toasts.success('Sent to the agent', session?.title ?? undefined);

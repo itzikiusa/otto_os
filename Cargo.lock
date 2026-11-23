@@ -1801,9 +1801,9 @@ dependencies = [
 
 [[package]]
 name = "email-encoding"
-version = "0.4.2"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "420b9da095f052ea597503e39073b5b3c522f7db933fbac202d91d24492693fd"
+checksum = "9f690ae2169f2ceb3f45b28b6fcd8fa16839f2f5c8818546774b9425f5f71004"
 dependencies = [
  "base64 0.23.1",
  "memchr",
@@ -2017,9 +2017,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -3126,9 +3126,9 @@ checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "lettre"
-version = "0.11.23"
+version = "0.11.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2c646bd5cc763b1087b15493e29a64be6147ba8f19342004fa52048ee596eae"
+checksum = "f294f3d7cdb313e578acef7d7727d4e8d897e0fcd0d6d58c19959cec95073f19"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -3197,9 +3197,9 @@ dependencies = [
 
 [[package]]
 name = "libz-sys"
-version = "1.1.31"
+version = "1.1.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff20308ecabd635a2dc1dd5834a86c462cca20efba1d5d3ddab1f8aea3455cb2"
+checksum = "fee3f59f4321dab0c78d828942e7aa09d0bd8ad6e78a501977e6bf3d02938045"
 dependencies = [
  "cc",
  "libc",
@@ -4210,6 +4210,7 @@ dependencies = [
  "otto-core",
  "otto-design",
  "otto-state",
+ "rustix",
  "serde",
  "serde_json",
  "sqlx",
@@ -4235,6 +4236,7 @@ dependencies = [
  "otto-state",
  "otto-transcript",
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
  "tokio",
@@ -4261,6 +4263,33 @@ dependencies = [
  "serde_json",
  "shell-words",
  "sqlx",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
+name = "otto-containers"
+version = "0.3.0"
+dependencies = [
+ "axum",
+ "bytes",
+ "chrono",
+ "dirs",
+ "flate2",
+ "futures-util",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "otto-connections",
+ "otto-core",
+ "otto-pty",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
  "tokio",
  "tower",
  "tracing",
@@ -4355,6 +4384,7 @@ dependencies = [
  "hex",
  "http-body-util",
  "otto-core",
+ "otto-mcp",
  "otto-state",
  "serde",
  "serde_json",
@@ -4380,6 +4410,7 @@ dependencies = [
  "otto-sessions",
  "otto-skills",
  "otto-state",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
@@ -4437,6 +4468,7 @@ dependencies = [
  "hex",
  "http-body-util",
  "ignore",
+ "notify",
  "otto-core",
  "otto-git-cmd",
  "otto-netguard",
@@ -4587,6 +4619,37 @@ dependencies = [
  "sqlx",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
+name = "otto-media"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.23.1",
+ "bytes",
+ "chrono",
+ "hex",
+ "http-body-util",
+ "libc",
+ "otto-agent-run",
+ "otto-core",
+ "otto-design",
+ "otto-mcp",
+ "otto-netguard",
+ "otto-sandbox",
+ "otto-sessions",
+ "otto-state",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "sqlx",
+ "tempfile",
  "tokio",
  "tower",
  "tracing",
@@ -4796,6 +4859,7 @@ dependencies = [
  "otto-canvas",
  "otto-channels",
  "otto-connections",
+ "otto-containers",
  "otto-context",
  "otto-core",
  "otto-dbviewer",
@@ -4809,6 +4873,7 @@ dependencies = [
  "otto-k8s",
  "otto-keychain",
  "otto-mcp",
+ "otto-media",
  "otto-memory",
  "otto-netguard",
  "otto-orchestrator",
@@ -4821,6 +4886,7 @@ dependencies = [
  "otto-sandbox",
  "otto-server",
  "otto-sessions",
+ "otto-simulators",
  "otto-skills",
  "otto-ssh",
  "otto-state",
@@ -4883,6 +4949,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-simulators"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.23.1",
+ "bytes",
+ "chrono",
+ "dirs",
+ "futures-util",
+ "otto-core",
+ "otto-netguard",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "otto-skills"
 version = "0.3.0"
 dependencies = [
@@ -4911,17 +4999,21 @@ dependencies = [
 name = "otto-state"
 version = "0.3.0"
 dependencies = [
+ "base64 0.23.1",
  "chrono",
  "futures-util",
  "hex",
  "otto-core",
+ "regex",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2 0.11.1",
  "sqlx",
  "tempfile",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -7818,9 +7910,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

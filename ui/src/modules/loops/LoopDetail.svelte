@@ -20,12 +20,14 @@
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
-  import { formatSeconds } from '../../lib/metric-format';
+  import { formatSeconds, formatUsd } from '../../lib/metric-format';
+  import { now } from '../../lib/stores/now.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import type { GoalLoop } from '../../lib/api/types';
   import { budgetCap, extendBlocker, extendDefaults, hasBudgetLeft } from './budget';
   import { loopStatusOf, pausedByRestart } from './loopSafety';
   import LoopSafetyNotes from './LoopSafetyNotes.svelte';
+  import LoopOpsDrawer from './LoopOpsDrawer.svelte';
   import { tick } from 'svelte';
 
   /** ⌘K verbs registered by the detail page (or bound via optional actions prop). */
@@ -71,6 +73,9 @@
   });
 
   const detail = $derived(loops.detail && loops.detail.loop.id === id ? loops.detail : null);
+  const detailOps = $derived(detail as (typeof detail & { spent_usd?: number | null; steering_notes?: string[] }) | null);
+  const spentUsd = $derived(detailOps?.spent_usd ?? null);
+  const queuedSteering = $derived(detailOps?.steering_notes ?? []);
   const loop = $derived<GoalLoop | null>(detail?.loop ?? null);
   // Newest iteration first.
   const iterations = $derived([...(detail?.iterations ?? [])].reverse());
@@ -87,7 +92,7 @@
   function elapsedSecs(l: GoalLoop): number {
     let s = l.elapsed_secs;
     if (l.status === 'running' && l.run_started_at) {
-      s += Math.max(0, (Date.now() - new Date(l.run_started_at).getTime()) / 1000);
+      s += Math.max(0, (now() - new Date(l.run_started_at).getTime()) / 1000);
     }
     return s;
   }
@@ -108,7 +113,7 @@
   async function del(): Promise<void> {
     const loopId = id;
     const name = loop?.name ?? 'this goal loop';
-    if (!(await confirmer.ask(`Delete “${name}” and its iteration history? Retained work on disk is kept.`, { title: 'Delete goal loop' }))) return;
+    if (!(await confirmer.ask(`Delete “${name}” and its iteration history? Retained work on disk is kept.`, { title: 'Delete goal loop', confirmLabel: 'Delete', danger: true }))) return;
     try {
       await loops.remove(loopId);
     } catch (e) {
@@ -141,6 +146,7 @@
   let extendOpen = $state(false);
   let extIters = $state(0);
   let extMinutes = $state(0);
+  let extCostUsd = $state('');
   let extError = $state('');
   let savedExtension = $state('');
   const cap = $derived(loop ? budgetCap(loop, elapsedSecs(loop)) : null);
@@ -152,6 +158,7 @@
     const d = extendDefaults(loop, elapsedSecs(loop));
     extIters = d.max_iterations;
     extMinutes = d.runtime_minutes;
+    extCostUsd = loop.limits.max_cost_usd != null ? String(loop.limits.max_cost_usd) : '';
     extError = '';
     savedExtension = '';
     extendOpen = true;
@@ -161,6 +168,16 @@
     const loopId = id;
     const iters = Math.floor(Number(extIters));
     const mins = Math.floor(Number(extMinutes));
+    const rawCost = extCostUsd.trim();
+    let parsedCost: number | null = null;
+    if (rawCost !== '') {
+      const n = Number(rawCost);
+      if (!Number.isFinite(n) || n <= 0) {
+        extError = 'Max cost must be greater than $0 (or leave blank for no cap).';
+        return;
+      }
+      parsedCost = n;
+    }
     // Name the limit still without room (the engine refuses it the same way).
     const blocker = extendBlocker(loop, elapsedSecs(loop), iters, mins);
     if (blocker) {
@@ -169,17 +186,22 @@
     }
     extError = '';
     acting = true;
+    const signature = `${loopId}:${iters}:${mins}:${parsedCost ?? ''}`;
     try {
-      const signature = `${loopId}:${iters}:${mins}`;
       if (savedExtension !== signature) {
-        await loops.updateLimits(loopId, { ...loop.limits, max_iterations: iters, max_runtime_secs: mins * 60 });
+        await loops.updateLimits(loopId, {
+          ...loop.limits,
+          max_iterations: iters,
+          max_runtime_secs: mins * 60,
+          max_cost_usd: parsedCost,
+        });
         savedExtension = signature;
       }
       await loops.resume(loopId);
       if (id === loopId) extendOpen = false;
     } catch (e) {
       const detail = loadErrorText(e);
-      const message = savedExtension === `${loopId}:${iters}:${mins}`
+      const message = savedExtension === signature
         ? `Budget saved, but the loop did not resume. Retry to resume with the saved budget. ${detail}`
         : detail;
       if (id === loopId && extendOpen) extError = message;
@@ -312,6 +334,16 @@
       <dl class="stats">
         <div><dt>Iteration</dt><dd>{loop.current_iteration} <span class="of" class:cap-hit={cap === 'iterations'}>/ {loop.limits.max_iterations}</span>{#if cap === 'iterations'} <span class="cap-hit">cap reached</span>{/if}</dd></div>
         <div><dt>Time used</dt><dd>{formatSeconds(Math.round(elapsedSecs(loop)))} <span class="of" class:cap-hit={cap === 'runtime'}>/ {formatSeconds(loop.limits.max_runtime_secs)}</span>{#if cap === 'runtime'} <span class="cap-hit">cap reached</span>{/if}</dd></div>
+        {#if spentUsd != null || loop.limits.max_cost_usd != null}
+          {@const costHit = spentUsd != null && loop.limits.max_cost_usd != null && spentUsd >= loop.limits.max_cost_usd}
+          <div>
+            <dt>{spentUsd != null ? 'Spend' : 'Max cost'}</dt>
+            <dd>
+              {#if spentUsd != null}{formatUsd(spentUsd)}{#if loop.limits.max_cost_usd != null} <span class="of" class:cap-hit={costHit}>/ {formatUsd(loop.limits.max_cost_usd)}</span>{/if}{#if costHit} <span class="cap-hit">cap reached</span>{/if}
+              {:else}{formatUsd(loop.limits.max_cost_usd)}{/if}
+            </dd>
+          </div>
+        {/if}
         <div><dt>Work type</dt><dd>{loop.config.mode === 'research' ? 'Research' : 'Build'}</dd></div>
         {#if loop.branch}<div class="wide"><dt>Branch</dt><dd class="mono" title={loop.branch}>{loop.branch}</dd></div>{/if}
       </dl>
@@ -324,6 +356,8 @@
         <p class="retained">Retained work <code title={loop.worktree_path}>{loop.worktree_path}</code></p>
       {/if}
     </section>
+
+    <LoopOpsDrawer loopId={id} status={loop.status} hasWorktree={!!loop.worktree_path || loop.config.mode === 'build'} queuedNotes={queuedSteering} />
 
     {#if loop.config.graph}
       <div class="card-box">
@@ -449,6 +483,8 @@
       <input id="gl-ext-iters" class="input" type="number" min={loop.iterations_started + 1} step="1" bind:value={extIters} />
       <label class="extend-lbl" for="gl-ext-mins">Max runtime (minutes)</label>
       <input id="gl-ext-mins" class="input" type="number" min="1" step="1" bind:value={extMinutes} />
+      <label class="extend-lbl" for="gl-ext-cost">Max cost (USD, optional)</label>
+      <input id="gl-ext-cost" class="input" type="number" min="0.5" step="0.5" placeholder="No cap" bind:value={extCostUsd} />
       {#if extError}<p class="errline" use:announceShown={{ text: extError, assertive: true }}><Icon name="warning" size={13} /> <span>{extError}</span></p>{/if}
     </form>
     {#snippet footer()}

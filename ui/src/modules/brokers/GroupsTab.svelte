@@ -17,6 +17,7 @@
   import type { DryRunResp } from './types';
   import ResetWarning, { resetWarning } from './ResetWarning.svelte';
   import GroupLagBadge from './GroupLagBadge.svelte'; import { nextLagPoll } from './brokerFigures';
+  import { buildResetBody as makeResetBody, groupStateClass as stateClass, resetTargetText as formatResetTarget } from './groupsUtil';
 
   interface Props {
     cluster: BrokerCluster;
@@ -39,6 +40,13 @@
   let detailLoading = $state(false);
   let detailRequest = 0;
   let listRequest = 0;
+  let lagTimer: ReturnType<typeof setTimeout> | null = null;
+  function clearLagTimer(): void {
+    if (lagTimer !== null) {
+      clearTimeout(lagTimer);
+      lagTimer = null;
+    }
+  }
   // Sort offsets table by lag descending; toggle to sort by topic+partition.
   let sortByLag = $state(true);
   // Offset reset state.
@@ -57,6 +65,7 @@
 
   $effect(() => {
     void cluster.id;
+    clearLagTimer();
     detailRequest++;
     selected = null;
     detail = null;
@@ -68,16 +77,22 @@
     untrack(() => groupsTw.reset(groupsEl));
     loadError = null;
     loadGroups();
+    return () => {
+      clearLagTimer();
+      listRequest++;
+      detailRequest++;
+    };
   });
 
   function loadGroups(poll = 0): void {
+    clearLagTimer();
     const request = ++listRequest;
     const clusterId = cluster.id;
     const current = () => request === listRequest && cluster.id === clusterId;
-    loading = true;
+    if (poll === 0) loading = true;
     accessDenied = false;
     api
-      .get<GroupSummary[]>(`/brokers/clusters/${cluster.id}/groups`)
+      .get<GroupSummary[]>(`/brokers/clusters/${clusterId}/groups`)
       .then((g) => {
         if (!current()) return;
         groups = g;
@@ -86,7 +101,12 @@
         // List/detail opens on an item, never on an empty "pick one" pane.
         if (!selected && g.length > 0) open(g[0].group_id);
         const wait = nextLagPoll(g, poll); // list lag still computing server-side
-        if (wait != null) setTimeout(() => { if (current()) loadGroups(poll + 1); }, wait);
+        if (wait != null) {
+          lagTimer = setTimeout(() => {
+            lagTimer = null;
+            if (current()) loadGroups(poll + 1);
+          }, wait);
+        }
       })
       .catch((e) => {
         if (!current()) return;
@@ -119,13 +139,6 @@
       .then((d) => { if (current()) detail = d; })
       .catch((e) => { if (current()) detailError = loadErrorText(e); })
       .finally(() => { if (current()) detailLoading = false; });
-  }
-
-  function stateClass(s: string): string {
-    const v = s.toLowerCase();
-    if (v.includes('stable')) return 'ok';
-    if (v.includes('empty') || v.includes('dead')) return 'dim';
-    return 'warn';
   }
 
   // Per-topic subtotals: sum lag across partitions.
@@ -208,22 +221,8 @@
         ? 'Offset must be a non-negative whole number' : null,
   );
 
-  function buildResetBody(confirm: boolean): Record<string, unknown> {
-    let body: Record<string, unknown>;
-    if (resetMode === 'offset') {
-      body = { mode: 'offset', offset: Number(resetOffset), confirm };
-    } else if (resetMode === 'timestamp') {
-      body = {
-        mode: 'timestamp',
-        timestamp_ms: new Date(resetTs).getTime(),
-        confirm,
-      };
-    } else {
-      body = { mode: resetMode, confirm };
-    }
-    if (resetTopic) body['topic'] = resetTopic;
-    return body;
-  }
+  const buildResetBody = (confirm: boolean): Record<string, unknown> =>
+    makeResetBody({ mode: resetMode, offset: resetOffset, ts: resetTs, topic: resetTopic, confirm });
 
   async function previewReset() {
     if (!selected || resetError) return;
@@ -254,12 +253,7 @@
     await resetOffsets();
   }
 
-  /** "to earliest" / "to offset 42" / "to 2026-10-05 12:00" — the reset target. */
-  function resetTargetText(): string {
-    if (resetMode === 'offset') return `to offset ${Number(resetOffset)}`;
-    if (resetMode === 'timestamp') return `to ${new Date(resetTs).toLocaleString()}`;
-    return `to ${resetMode}`;
-  }
+  const resetTargetText = (): string => formatResetTarget(resetMode, resetOffset, resetTs);
 
   async function resetOffsets() {
     if (!selected || resetError) return;

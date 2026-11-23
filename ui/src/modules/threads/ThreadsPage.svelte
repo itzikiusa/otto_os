@@ -11,6 +11,8 @@
   import { registry } from '../../lib/commands.svelte';
   import { keyContext } from '../../lib/keys';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import { toastError } from '../../lib/toastError';
   import { events } from '../../lib/events.svelte';
   import { loadPaneWidth } from '../../lib/paneResizer';
   import { router } from '../../lib/router.svelte';
@@ -18,8 +20,9 @@
   import { pageChrome } from '../../lib/stores/pageChrome.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
+  import { lightMode } from '../../lib/lightMode.svelte';
   import { keyboard } from '../../lib/stores/keyboard.svelte';
-  import { trackComposerFocus, typingChrome } from './threadsTyping';
+  import { trackComposerFocus, typingChrome } from './threadsTyping'; import { consumeThreadDraftHandoff } from './recapThreadConsumer';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
   import { sessionState } from '../../lib/status';
   import NewThreadStage from './NewThreadStage.svelte';
@@ -178,9 +181,11 @@
     if (wid) void threads.seedWorkspaceTrail(wid);
   });
 
-  // Consume global "Open in Files" requests (`file:line` clicks in conversation turns).
   $effect(() => {
-    if (router.module !== 'threads' || !openFile.request) return;
+    if (router.module !== 'threads') return;
+    const handoff = untrack(() => consumeThreadDraftHandoff());
+    if (handoff) untrack(() => threads.startNewThread({ workspaceId: handoff.workspaceId ?? ws.currentId, draft: handoff.draft }));
+    if (!openFile.request) return;
     const focused = threads.focusedSessionId ? ws.getSession(threads.focusedSessionId) : null;
     const wsKey = focused?.workspace_id ?? ws.currentId ?? 'scratch';
     untrack(() => threads.consumeOpenFileRequest(wsKey));
@@ -311,9 +316,10 @@
   );
 
   const failedListId = $derived([ws.currentId, ws.scratch ? SCRATCH_WORKSPACE_ID : null].find((id) => id && runtimeThreads.loadErrors[id]) ?? null);
-  const threadListError = $derived(failedListId ? runtimeThreads.loadErrors[failedListId] : null);
+  const threadListError = $derived((failedListId ? runtimeThreads.loadErrors[failedListId] : null) ?? ws.sessionsError ?? null);
   function retryThreads(): void {
     if (failedListId) void runtimeThreads.load(failedListId).catch(() => {});
+    if (ws.sessionsError) void ws.retrySessions();
   }
   const showWelcomeStage = $derived(threads.newDraftMode || threads.paneIds.length === 0);
   const focused = $derived.by(() => {
@@ -337,6 +343,16 @@
     return cwd ? projectNameFromCwd(cwd, ws.current?.name ?? 'Workspace') : (ws.current?.name ?? 'Scratch');
   });
   const crumbTitle = $derived(showWelcomeStage ? 'New thread' : (focused?.title ?? 'Thread'));
+  async function renameFocusedThread(): Promise<void> {
+    if (!focused) return;
+    const id = focused.id;
+    const next = await confirmer.promptText('Thread name', { title: 'Rename thread', initial: focused.title, confirmLabel: 'Rename' });
+    if (next == null || !next.trim() || next.trim() === focused.title) return;
+    try {
+      if (runtimeThreads.get(id)) await runtimeThreads.rename(id, next.trim());
+      else await ws.renameSession(id, next.trim());
+    } catch (e) { toastError('Couldn’t rename thread', e); }
+  }
   const rightOpen = $derived(threads.inspectorVisible);
   const contextCwd = $derived(
     focused?.cwd ?? (showWelcomeStage ? threads.stageCwd : null) ?? ws.current?.root_path ?? null,
@@ -432,9 +448,10 @@
 >
   <PageHeader title="Threads">
     {#snippet leading()}
-      {#if viewport.isShort}
-        <!-- A phone on its side: this is the only header row (the shell's bar
-             steps aside), so Otto's Navigator — and its bell — opens here. -->
+      {#if viewport.isShort || (viewport.isPhone && !lightMode.active)}
+        <!-- Phone landscape, or Phone portrait in Full mode (where the shell
+             top bar steps aside): keep Otto's Navigator, workspace switcher and
+             notification bell one tap away. -->
         <button
           type="button"
           class="icon-btn"
@@ -469,9 +486,16 @@
         <span class="th-crumb-project ellipsis" dir="auto">{crumbProject}</span>
         <span class="th-crumb-sep" aria-hidden="true">/</span>
         {#if focusedState}<StatusDot state={focusedState} />{/if}
-        <span class="th-crumb-title ellipsis" dir="auto">{crumbTitle}</span>
-        {#if focused}<RelatedThreadsChip threadId={focused.id} onstartroom={(sid) => (roomSessionId = sid)} /><ThreadParentChip threadId={focused.id} />{/if}
+        {#if focused}
+          <button type="button" class="th-crumb-title th-crumb-btn ellipsis" dir="auto" title="{crumbTitle} — double-click to rename" ondblclick={() => void renameFocusedThread()} onkeydown={(e) => { if (e.key === 'F2') { e.preventDefault(); void renameFocusedThread(); } }}>{crumbTitle}</button>
+        {:else}
+          <span class="th-crumb-title ellipsis" dir="auto">{crumbTitle}</span>
+        {/if}
       </span>
+    {/snippet}
+
+    {#snippet badge()}
+      {#if focused}<span class="th-header-chips"><RelatedThreadsChip threadId={focused.id} onstartroom={(sid) => (roomSessionId = sid)} /><ThreadParentChip threadId={focused.id} /></span>{/if}
     {/snippet}
 
     {#snippet actions()}
@@ -521,8 +545,8 @@
       {/if}
 
       <div class="th-center-col" class:th-hidden={maximized} bind:clientWidth={centerWidth}>
-        {#if threadListError && liveThreadIds.length > 0}
-          <LoadState what="threads" error={threadListError} onretry={retryThreads} />
+        {#if threadListError && !(liveThreadIds.length === 0 && showWelcomeStage)}
+          <LoadState what="threads" variant="compact" error={threadListError} onretry={retryThreads} />
         {/if}
         <div class="th-stage" class:th-card-reserve={cardReserve}>
           {#if threadListError && liveThreadIds.length === 0 && showWelcomeStage}
@@ -603,6 +627,7 @@
     font-size: var(--fs-m);
     font-weight: 400;
   }
+  .th-header-chips { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
   .th-crumb-project {
     color: var(--text-dim);
     max-width: 200px;
@@ -610,11 +635,9 @@
   .th-crumb-sep {
     color: var(--text-dim);
   }
-  .th-crumb-title {
-    color: var(--text);
-    font-weight: 500;
-    min-width: 0;
-  }
+  .th-crumb-title { color: var(--text); font-weight: 500; min-width: 0; }
+  .th-crumb-btn { border: 0; background: none; padding: 0 2px; border-radius: var(--radius-s); font: inherit; font-weight: 500; color: var(--text); cursor: default; }
+  .th-crumb-btn:hover { background: var(--hover); }
   @media (max-width: 640px), (max-height: 500px) and (pointer: coarse) {
     .th-crumb-project, .th-crumb-sep { display: none; }
   }
@@ -752,25 +775,12 @@
      menu) instead of wrapping both chips onto a row of their own. */
   @media (pointer: coarse) {
     @container (max-inline-size: 420px) {
-      .th-page :global(.rt-foot) {
-        flex-wrap: nowrap;
-      }
-      .th-page :global(.rt-foot .rt-grow) {
-        order: 0;
-        flex-basis: auto;
-        flex-wrap: nowrap;
-      }
-      .th-page :global(.rt-foot .rt-agent) {
-        min-inline-size: 72px;
-      }
-      .th-page :global(.rt-foot .ac:not(.static) > .ellipsis) {
-        display: none;
-      }
+      .th-page :global(.rt-foot) { flex-wrap: nowrap; }
+      .th-page :global(.rt-foot .rt-grow) { order: 0; flex-basis: auto; flex-wrap: nowrap; }
+      .th-page :global(.rt-foot .rt-agent) { min-inline-size: 72px; }
+      .th-page :global(.rt-foot .ac:not(.static) > .ellipsis) { display: none; }
     }
-  }
-  /* iOS zooms the page into any text field under 16px on focus and stays
-     zoomed after blur — the Threads header ended up cut off at the top. */
-  @media (pointer: coarse) {
+    /* 16px stops iOS zoom-on-focus that leaves the Threads header cut off. */
     .th-page :global(:is(textarea, select, input:not([type='checkbox'], [type='radio'], [type='range'], [type='file']))) {
       font-size: 16px !important; /* ui-guards: allow — 16px stops iOS zoom-on-focus */
     }

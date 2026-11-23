@@ -517,7 +517,9 @@ default; an operator may exempt one tool at a time in MCP → Otto server):
 | `otto.design_assist` | `otto_design_assist` | `POST /design/artifacts/{id}/assist` |
 | `otto.design_link` | `otto_design_link` | `POST /design/artifacts/{id}/links` |
 
-Both are scoped to the target artifact's own workspace (a workspace-pinned
+Review comments have their own three tools: the read `otto.design_comments` (default-enabled, `GET /design/artifacts/{id}/comments`; `version_id` and `resolved` narrow), and two approval-gated writes, `otto.design_comment` (`POST …/comments`; `pin_3d` pins it on a 3D model, `parent_id` replies) and `otto.design_resolve_comment` (`PATCH …/comments/{comment_id}`; `resolved: false` reopens). Sessions see them as `otto_design_comments` / `otto_design_comment` / `otto_design_resolve_comment`; review sessions do not.
+
+All of them are scoped to the target artifact's own workspace (a workspace-pinned
 token can't write elsewhere). No tool approves a version — approval stays
 with people.
 
@@ -798,6 +800,8 @@ present, and refuses a token colour in a v1 document.
 | `material.color` / `emissive`, state `color` | `#rrggbb` or `token:color.<name>` — a brand-kit colour |
 | `brand` | `otto://design/<kit>@approved` — the kit tokens resolve against (a `uses_tokens` link). Unset: the project's `brand_kit_id`, else its first `otto-brand` kit; picking a swatch pins the kit |
 | `environment` | `{preset: studio-soft \| sunset \| night \| none, intensity?, background?, rotation?}` — procedural IBL (a gradient sky + softbox panels prefiltered with PMREM) and a gradient backdrop. Nothing is fetched and no HDRI ships |
+| `environment.{sky, fog, ground, shore, room, weather, exposure, sky_bodies, stars}` | A Smart mode setting (written by the productions scene writer, drawn by `scene3d/settingView.ts`, outside the content group so picking, framing and export never see it): `sky` `[zenith, horizon, below]` hex colours — a sky dome round the camera and the IBL's sky; `fog` `{color, density}` (`FogExp2`); `ground` `{kind: water \| grass \| meadow \| sand \| soil \| stone \| snow \| moon_dust \| sea_floor \| wood_floor \| carpet \| tiles \| stage \| road, center: [x, surface y, z], size: [x, z]}` — water a glossy plane with moving generated ripples, the others a generated speckle, plank or tile texture, a road a 7 m asphalt strip along x; `shore` (same shape as `ground`) — a low land box from under the water up to its centre's y, the backdrop's far shore; `sky_bodies` `[{kind: sun | moon | earth | planet, direction}]` — discs on the sky toward each direction from the camera; `stars` — points over the upper sky; `room` `{height}` — two walls on the floor's far sides from the camera; `weather` `rain \| snow` — falling streaks or flakes; `exposure` the tone-mapping exposure. Nothing moves under prefers-reduced-motion A road may set `ground.axis` to `z` to follow a parked vehicle. It runs along x by default. |
+| light `glow` | A point light's halo radius in metres (a glowing lantern), drawn as an additive sprite that shows through fog |
 | `cameras[]` | Named views (`{id, name, position, target, fov}`) — "Hero angle". Embeds ask for one as `otto://design/<id>@approved#view:<id>` |
 | `states[]`, `default_state` | Named states (`{id, name, duration_ms ≤ 10 000, easing: linear \| ease-in \| ease-out \| ease-in-out \| spring, overrides: {objectId: {position, rotation, scale, visible, opacity, color, emissive}}}`); the viewer tweens between them. `#state:<id>` addresses one |
 | `turntable` | `{enabled?, speed?}` (deg/s) — the studio's Turntable button and embeds' auto-rotate |
@@ -838,8 +842,8 @@ Unsaved edits must be saved first.
 | Item | What happens |
 |---|---|
 | Blockout from prompt (scene JSON) | `mode: generate` with a scene3d v2 brief (studio environment, key + rim, presets, a `hero` view, Idle/Hover) |
-| Text → 3D model | A provider picker. **Local: Otto + Blender MCP** runs a `refine` turn that adds the model as a new group of primitives (Draft / Standard quality); the agent may use the Blender MCP tools, and each of those calls asks for approval in the MCP control plane. **Cloud: Tripo / Meshy** are listed with their cost and "sends your prompt to …", and stay **disabled** — this build has no Keychain key store for them, so they never run |
-| Image → 3D model | Same picker; the image is saved as a reference design in the project first and handed to the agent as `[R1]` (nothing leaves the Mac) |
+| Generate 3D asset | Otto Forge runs it on this Mac, with no provider picker while Forge is the only provider set up; without Forge the dialog shows its install step. Under the closed **Advanced** disclosure: TRELLIS.2, Hunyuan3D-Omni (with its territory warning), custom providers and **Local: Otto + Blender MCP**, which runs a `refine` turn that adds the model as a new group of primitives (Draft / Standard quality); the agent may use the Blender MCP tools, and each of those calls asks for approval in the MCP control plane. A provider that is enabled and ready shows beside Forge (see [Otto Forge](otto-forge.md) §1.2) |
+| Image → 3D model | Same dialog; the image is saved as a reference design in the project first and handed to the agent as `[R1]` (nothing leaves the Mac) |
 | Refine in Blender (MCP) | A confirmation that states whether Blender is installed (`GET /product/design/blender`), that Blender MCP calls ask first and that Blender runs model-generated code without guards; then a `refine` turn |
 
 The provider interface is `studio3d/providers.ts` (availability rules are

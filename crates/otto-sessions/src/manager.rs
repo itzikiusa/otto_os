@@ -1262,7 +1262,7 @@ pub struct SessionManager {
     /// Grid feed for terminal viewers (crate::grid, the WS `grid` frame).
     grids: Arc<crate::grid::GridFeeds>,
     /// Per-session authority locks issue epochs rechecked by the PTY writer.
-    room_authority: crate::room_authority::RoomAuthorityMap,
+    pub(crate) room_authority: crate::room_authority::RoomAuthorityMap,
     /// Last observed cumulative CPU (ms) of each live session's DESCENDANT
     /// process tree (excluding the direct child), sampled by the idle-suspend
     /// sweep. A tree that accrued CPU since the previous sweep is running a
@@ -1316,7 +1316,7 @@ pub struct SessionManager {
     /// Per-session ingest tokens. An agent's hooks present this token to the
     /// (otherwise unauthenticated) `/ingest/*` endpoints; the route verifies it
     /// against this map. Minted at spawn, dropped when the session is removed.
-    ingest_tokens: Arc<DashMap<Id, String>>,
+    pub(crate) ingest_tokens: Arc<DashMap<Id, String>>,
     /// Optional activity store: records Otto-side lifecycle and user actions to
     /// the session trail (so the trail is populated for every provider, not just
     /// ones with native hooks).
@@ -1393,8 +1393,9 @@ pub struct SessionManager {
     /// broadcast, relay, nudges), humans (`human_submit_text_checked`) and the
     /// channel bridge — holds it across the whole pair, so two submissions
     /// within the paste delay can't land as paste A, paste B, Enter, Enter
-    /// (one merged prompt plus an empty submit). Evicted in `remove`.
-    submit_locks: Arc<DashMap<Id, Arc<Mutex<()>>>>,
+    /// (one merged prompt plus an empty submit). Weak-entry auto-pruned via
+    /// `KeyedLocks` once no submitter holds the mutex.
+    submit_locks: Arc<otto_core::keyed_lock::KeyedLocks<Id>>,
     /// Where user-started sessions' PTY holders live and how to launch one
     /// (see [`SESSION_PERSISTENCE_SETTING`]). `None` = every PTY is local (the
     /// pre-holder behaviour; bare test harnesses).
@@ -1459,7 +1460,7 @@ impl SessionManager {
             name_themes: None,
             title_probe: Arc::new(DashMap::new()),
             resume_locks: Arc::new(DashMap::new()),
-            submit_locks: Arc::new(DashMap::new()),
+            submit_locks: Arc::new(otto_core::keyed_lock::KeyedLocks::new()),
             holders: None,
             admission: Arc::new(crate::admission::AdmissionGate::os()),
         }
@@ -1774,17 +1775,6 @@ impl SessionManager {
 
     pub fn providers(&self) -> &ProviderRegistry {
         &self.providers
-    }
-
-    /// Verify an agent hook's ingest token for `session_id`. Returns false when
-    /// the session has no token (not an agent / not spawned by this daemon) or
-    /// the token doesn't match. Used by the unauthenticated `/ingest/*` routes.
-    pub fn verify_ingest_token(&self, session_id: &Id, token: &str) -> bool {
-        !token.is_empty()
-            && self
-                .ingest_tokens
-                .get(session_id)
-                .is_some_and(|t| t.as_str() == token)
     }
 
     /// Test seam: mint (or reuse) `session_id`'s ingest token without spawning
@@ -2114,6 +2104,7 @@ impl SessionManager {
     /// token's 10-year TTL. Every respawn mints a fresh one
     /// (`maybe_enable_otto_tools`). Best-effort, logged.
     async fn retire_credentials(&self, session: &Session) {
+        self.ingest_tokens.remove(&session.id);
         if let Err(e) = self
             .revoke_mcp_token(&session.created_by, &session.id)
             .await
@@ -3543,10 +3534,7 @@ impl SessionManager {
     /// session's PTY — the channel bridge included — must hold it across both
     /// writes. The entry ref is dropped before the caller awaits the lock.
     pub fn submit_lock(&self, id: &Id) -> Arc<Mutex<()>> {
-        self.submit_locks
-            .entry(id.clone())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
+        self.submit_locks.handle(id)
     }
 
     /// The per-session resume mutex (created lazily). The map entry ref is
@@ -4985,8 +4973,6 @@ impl SessionManager {
         if Arc::strong_count(&lock) == 2 {
             self.resume_locks.remove(id);
         }
-        // An in-flight submitter keeps its Arc; it fails on the missing PTY.
-        self.submit_locks.remove(id);
         let _ = self.events.send(Event::SessionRemoved {
             session_id: id.clone(),
             workspace_id: session.workspace_id,
@@ -5827,6 +5813,7 @@ impl SessionManager {
         let attached = Arc::clone(&self.attached);
         let grid_maps = (Arc::clone(&self.grids), Arc::clone(&self.attached_conns));
         let size_owner = Arc::clone(&self.size_owner);
+        let ingest_tokens = Arc::clone(&self.ingest_tokens);
         tokio::spawn(async move {
             let mut exit_rx = handle.on_exit();
             let mut current = SessionStatus::Running;
@@ -5905,6 +5892,7 @@ impl SessionManager {
                             suspend_cpu.remove(&id);
                             suspend_hold.remove(&id);
                             passive_resume.remove(&id);
+                            ingest_tokens.remove(&id);
                             // Its MCP credential has no live holder any more
                             // (a resume mints a fresh one).
                             if let Ok(s) = repo.get(&id).await {

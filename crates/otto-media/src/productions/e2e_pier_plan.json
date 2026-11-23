@@ -1,0 +1,79 @@
+{
+ "title": "The keeper's light",
+ "summary": "A robot keeper stands on a wooden pier over the sea at night, holding up a glowing lantern in the fog.",
+ "items": [
+  {
+   "id": "keeper",
+   "kind": "character",
+   "name": "Robot keeper",
+   "description": "A tall rusty robot who keeps the lighthouse.",
+   "enabled": true,
+   "details": {
+    "prompt": "a tall rusty robot lighthouse keeper, game character, full body",
+    "size_m": 2,
+    "moves": [
+     "idle"
+    ]
+   }
+  },
+  {
+   "id": "pier",
+   "kind": "object",
+   "name": "Wooden pier",
+   "description": "Wet boards on thick posts.",
+   "enabled": true,
+   "details": {
+    "prompt": "a wooden pier deck of dark planks like an old chest lid",
+    "size_m": 6
+   }
+  },
+  {
+   "id": "lantern",
+   "kind": "object",
+   "name": "Glowing lantern",
+   "description": "A small lantern with a warm flame.",
+   "enabled": true,
+   "details": {
+    "prompt": "a small iron lantern with a key ring handle",
+    "size_m": 0.4
+   }
+  }
+ ],
+ "notes": [],
+ "layout": [
+  {
+   "item": "pier",
+   "place": "center"
+  },
+  {
+   "item": "keeper",
+   "place": "center",
+   "attach_to": {
+    "item": "pier",
+    "where": "top"
+   }
+  },
+  {
+   "item": "lantern",
+   "place": "center",
+   "attach_to": {
+    "item": "pier",
+    "where": "top"
+   }
+  }
+ ],
+ "setting": {
+  "summary": "A wooden pier over the sea at night, in thick fog.",
+  "ground": "water",
+  "time": "night",
+  "weather": "fog",
+  "indoor": false,
+  "lights": [
+   {
+    "item": "lantern",
+    "color": "warm",
+    "strength": "high"
+   }
+  ]
+ }
+}
