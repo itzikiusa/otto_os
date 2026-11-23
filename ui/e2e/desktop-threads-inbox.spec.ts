@@ -172,6 +172,25 @@ test('the sidebar is an inbox: status words, needs you first, Working and Histor
   await expect(doneMain).toBeFocused();
 });
 
+test('Working and History stay pinned above the footer while the list scrolls', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, ids.idle);
+  const side = page.getByTestId('threads-sidebar');
+  const fold = side.getByTestId('threads-working-toggle');
+  const history = side.getByTestId('threads-history-toggle');
+  await expect(fold).toBeVisible();
+  // Not part of the scrolling list: they sit between it and the footer.
+  expect(await fold.evaluate((el) => !!el.closest('.th-scroll'))).toBe(false);
+  expect(await history.evaluate((el) => !!el.closest('.th-scroll'))).toBe(false);
+  const foot = (await side.locator('.th-foot').boundingBox())!;
+  const h = (await history.boundingBox())!;
+  expect(foot.y - (h.y + h.height)).toBeLessThan(60);
+  // An open fold takes at most ~40 % of the sidebar and scrolls inside.
+  const sb = (await side.boundingBox())!;
+  const folds = (await side.locator('.th-folds').boundingBox())!;
+  expect(folds.height).toBeLessThanOrEqual(sb.height * 0.42);
+});
+
 test('Group by project brings back the folders and is remembered', async ({ page }) => {
   await page.setViewportSize({ width: 1600, height: 1000 });
   await open(page, ids.idle);

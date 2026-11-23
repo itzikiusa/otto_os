@@ -453,7 +453,9 @@
     </div>
   {/if}
 
-  <div class="th-scroll" use:listKeys>
+  <!-- The list scrolls; Working and History stay pinned above the footer. -->
+  <div class="th-body" use:listKeys>
+  <div class="th-scroll">
     {#if pinnedThreads.length > 0}
       <section class="th-group" aria-label="Pinned threads">
         <h2 class="th-label">Pinned</h2>
@@ -524,6 +526,8 @@
       />
     {/if}
 
+  </div>
+  <div class="th-folds">
     {#if sections.working.length > 0}
       <section class="th-group" aria-label="Working threads">
         <button
@@ -582,6 +586,7 @@
         </div>
       {/if}
     </section>
+  </div>
   </div>
 
   <ThreadSidebarFooter {onselect} />
@@ -666,6 +671,35 @@
     font-size: var(--fs-s);
     color: var(--text-dim);
     flex-shrink: 0;
+  }
+  .th-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  /* At most ~40 % of the sidebar; an open fold scrolls inside, its header stays. */
+  .th-folds {
+    flex-shrink: 0;
+    max-block-size: 40%;
+    display: flex;
+    flex-direction: column;
+    padding: var(--sp-2) var(--sp-4);
+    border-block-start: 1px solid var(--separator);
+  }
+  .th-folds:empty {
+    display: none;
+  }
+  .th-folds .th-group {
+    flex: 0 1 auto;
+    min-height: 0;
+  }
+  .th-folds .th-fold {
+    flex-shrink: 0;
+  }
+  .th-folds .th-list {
+    min-height: 0;
+    overflow-y: auto;
   }
   .th-scroll {
     flex: 1;
