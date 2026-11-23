@@ -1,5 +1,6 @@
 <script lang="ts">
   // Structured agent runtime thread view shared between Threads and IDE Agent dock.
+  import type { McpServerStatus } from '../../../lib/api/types';
   import { reviewNotes } from './reviewNotes.svelte';
   import { setContext, tick, untrack, type Snippet } from 'svelte';
   import { announceShown } from '../../../lib/announce.svelte';
@@ -131,6 +132,9 @@
   setContext(PATH_LINK_CTX, () => ({ sessionId, cwd: effectiveCwd, workspaceId: session?.workspace_id }));
 
   const p = $derived(runtimeViews.projections[sessionId] ?? null);
+  /** Stable while the agent's server list is (not a new value per stream batch). */
+  const NO_SERVERS: McpServerStatus[] = [];
+  const mcpServers = $derived(p?.mcpServers ?? NO_SERVERS);
   const loadError = $derived(runtimeViews.loadError[sessionId] ?? null);
   const staleError = $derived(runtimeViews.staleError[sessionId] ?? null);
   const loadingOlder = $derived(!!runtimeViews.loadingOlder[sessionId]);
@@ -568,7 +572,7 @@
         onjump={jumpTo}
       />
     {/if}
-    <RuntimeChildApprovals {sessionId} />{#if p && session && !closed}<RuntimeMcpChanged {sessionId} workspaceId={session?.workspace_id} servers={p?.mcpServers ?? []} idle={!running} />{/if}
+    <RuntimeChildApprovals {sessionId} />{#if p && session && !closed}<RuntimeMcpChanged {sessionId} workspaceId={session?.workspace_id} servers={mcpServers} idle={!running} />{/if}
     {#if composerTopSlot}{@render composerTopSlot({ focusComposer })}{/if}
 
     <div class="rt-composer" style:border-color={planOn ? 'color-mix(in srgb, var(--warning) 42%, var(--border))' : undefined} bind:this={composerBoxEl}>
