@@ -54,6 +54,17 @@ const NOT_SUPPORTED: i64 = -32601;
 /// Output kept per client terminal for a tool row that embeds it late.
 const TERMINAL_KEEP: usize = 256 << 10;
 
+/// Keep the last [`TERMINAL_KEEP`] bytes of `s` (on a char boundary).
+fn tail_cap(s: &mut String) {
+    if s.len() > TERMINAL_KEEP {
+        let mut cut = s.len() - TERMINAL_KEEP;
+        while !s.is_char_boundary(cut) {
+            cut += 1;
+        }
+        s.drain(..cut);
+    }
+}
+
 fn error_line(id: &Value, code: i64, message: &str) -> String {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}}).to_string()
 }
@@ -480,13 +491,7 @@ impl AcpDriver {
             .entry(terminal_id.to_string())
             .or_default();
         kept.push_str(chunk);
-        if kept.len() > TERMINAL_KEEP {
-            let mut cut = kept.len() - TERMINAL_KEEP;
-            while !kept.is_char_boundary(cut) {
-                cut += 1;
-            }
-            kept.drain(..cut);
-        }
+        tail_cap(kept);
         if let Some((id, t)) = self
             .state
             .tools
@@ -494,6 +499,8 @@ impl AcpDriver {
             .find(|(_, t)| t.terminal.as_deref() == Some(terminal_id))
         {
             t.output.push_str(chunk);
+            // A long-running command (a dev server): the row keeps the tail.
+            tail_cap(&mut t.output);
             step.push(DriverEvent::CommandOutput {
                 item_id: format!("{turn}:tool:{id}"),
                 chunk: chunk.to_string(),

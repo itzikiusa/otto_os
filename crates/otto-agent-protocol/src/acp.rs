@@ -3830,6 +3830,25 @@ mod tests {
                 if file_name == "/w/old.rs, /w/new.rs")));
     }
 
+    /// Security 6: a chatty command's row keeps only the tail.
+    #[test]
+    fn a_client_terminals_row_keeps_a_bounded_tail() {
+        let mut d = AcpDriver::grok();
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"g"}}"#);
+        d.state.access = RuntimeAccessMode::FullAccess;
+        d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+        d.on_line(r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"g","update":{"sessionUpdate":"tool_call","toolCallId":"c1","title":"run","kind":"execute","status":"in_progress","rawInput":{"command":"yes"}}}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":3,"method":"terminal/create","params":{"sessionId":"g","command":"yes"}}"#);
+        let chunk = "y\n".repeat(32 * 1024);
+        for _ in 0..16 {
+            d.on_client_output("term-1", &chunk);
+        }
+        assert!(d.state.tools["c1"].output.len() <= 256 << 10);
+        assert!(d.state.terminal_output["term-1"].len() <= 256 << 10);
+    }
+
     /// Review note: under Auto-accept edits a served command still asks
     /// (edits only are auto-accepted); a write does not.
     #[test]

@@ -210,7 +210,7 @@ async fn run(
                 exit: rx,
                 pgid: child.id().map(|p| p as i32),
             });
-            let limit = byte_limit.map_or(DEFAULT_BYTE_LIMIT, |b| b as usize);
+            let limit = output_limit(byte_limit);
             let pipes = [
                 child
                     .stdout
@@ -304,6 +304,15 @@ async fn run(
     }
 }
 
+/// The agent's `outputByteLimit`, never above Otto's own cap.
+fn output_limit(asked: Option<u64>) -> usize {
+    asked.map_or(DEFAULT_BYTE_LIMIT, |b| {
+        usize::try_from(b)
+            .unwrap_or(usize::MAX)
+            .min(DEFAULT_BYTE_LIMIT)
+    })
+}
+
 fn kill(t: &Terminal) {
     if let Some(pgid) = t.pgid {
         // SAFETY: a plain signal to the process group this terminal created.
@@ -316,6 +325,13 @@ fn kill(t: &Terminal) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_agents_output_limit_is_clamped_to_otto_s() {
+        assert_eq!(output_limit(Some(u64::MAX)), DEFAULT_BYTE_LIMIT);
+        assert_eq!(output_limit(Some(4096)), 4096);
+        assert_eq!(output_limit(None), DEFAULT_BYTE_LIMIT);
+    }
 
     /// A dangling link in the folder points outside it: the write is
     /// refused and nothing lands at the link's target.
