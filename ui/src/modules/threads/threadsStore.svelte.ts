@@ -7,6 +7,7 @@ import { toasts } from '../../lib/toast.svelte';
 import { toastError } from '../../lib/toastError';
 import type { TrailEvent } from '../../lib/api/types';
 import { threadsChrome } from './threadsChrome.svelte';
+import { offerUndo } from './threadUndo';
 
 export type ThreadsLayoutMode = 'single' | 'split' | 'grid';
 export type ThreadsInspectorTab = 'files' | 'changes' | 'pr' | 'side' | 'connections' | 'browser';
@@ -361,12 +362,17 @@ class ThreadsStore {
     return this.pinnedIds.includes(id);
   }
 
+  /** Pin / unpin at once, with an Undo notice (threadUndo.ts). */
   togglePin(id: string): void {
-    if (this.pinnedIds.includes(id)) {
-      this.pinnedIds = this.pinnedIds.filter((x) => x !== id);
-    } else {
-      this.pinnedIds = [id, ...this.pinnedIds];
-    }
+    const was = this.pinnedIds.includes(id);
+    const at = this.pinnedIds.indexOf(id);
+    this.setPinned(id, !was);
+    offerUndo(was ? 'Unpinned' : 'Pinned', () => this.setPinned(id, was, at));
+  }
+
+  private setPinned(id: string, on: boolean, at = 0): void {
+    const rest = this.pinnedIds.filter((x) => x !== id);
+    this.pinnedIds = on ? [...rest.slice(0, Math.max(0, at)), id, ...rest.slice(Math.max(0, at))] : rest;
     this.save();
   }
 
@@ -374,12 +380,16 @@ class ThreadsStore {
     return this.settledIds.includes(id);
   }
 
+  /** Move to History / back at once, with an Undo notice (threadUndo.ts). */
   toggleSettle(id: string): void {
-    if (this.settledIds.includes(id)) {
-      this.settledIds = this.settledIds.filter((x) => x !== id);
-    } else {
-      this.settledIds = [id, ...this.settledIds];
-    }
+    const was = this.settledIds.includes(id);
+    this.setSettled(id, !was);
+    offerUndo(was ? 'Moved back to Active' : 'Moved to History', () => this.setSettled(id, was));
+  }
+
+  private setSettled(id: string, on: boolean): void {
+    const rest = this.settledIds.filter((x) => x !== id);
+    this.settledIds = on ? [id, ...rest] : rest;
     this.save();
   }
 

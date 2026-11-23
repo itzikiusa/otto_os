@@ -180,6 +180,51 @@ test('Group by project brings back the folders and is remembered', async ({ page
   await expect(side.getByRole('region', { name: 'Project harbor', exact: true })).toHaveCount(0);
 });
 
+test('pin and Move to History act at once with one Undo notice; ⌘Z undoes outside a text field', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await open(page, ids.idle);
+  const side = page.getByTestId('threads-sidebar');
+  const undo = page.locator('.toast', { hasText: /Pinned|History|Active/ }).locator('.toast-action');
+
+  // Pin: no question, the row moves to Pinned, Undo puts it back.
+  await row(page, 'failed').hover();
+  await page.getByTestId(`thread-pin-${ids.failed}`).click();
+  await expect(side.getByTestId(`thread-pinned-${ids.failed}`)).toBeVisible();
+  await expect(page.locator('.toast', { hasText: 'Pinned' })).toBeVisible();
+  await undo.click();
+  await expect(side.getByTestId(`thread-pinned-${ids.failed}`)).toHaveCount(0);
+  await expect(row(page, 'failed')).toBeVisible();
+
+  // Move to History from the row's menu; a second action replaces the notice.
+  await row(page, 'idle').locator('.tr-main').click({ button: 'right' });
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Move to History' }).click();
+  await expect(side.getByTestId('threads-active-list').getByTestId(`thread-row-${ids.idle}`)).toHaveCount(0);
+  await expect(page.locator('.toast', { hasText: 'Moved to History' })).toBeVisible();
+  await expect(page.locator('.toast', { hasText: 'Pinned' })).toHaveCount(0);
+
+  // ⌘Z inside the composer is the field's own undo …
+  await page.getByTestId(`runtime-thread-${ids.idle}`).getByTestId('runtime-composer').focus();
+  await page.keyboard.press('Meta+z');
+  await expect(page.locator('.toast', { hasText: 'Moved to History' })).toBeVisible();
+  // … elsewhere it is the notice's Undo.
+  await side.getByTestId('threads-search').focus();
+  await page.locator('body').click({ position: { x: 900, y: 400 } });
+  await page.keyboard.press('Meta+z');
+  await expect(side.getByTestId('threads-active-list').getByTestId(`thread-row-${ids.idle}`)).toBeVisible();
+  await expect(page.locator('.toast', { hasText: 'Moved to History' })).toHaveCount(0);
+
+  // Dismissing a side chat acts at once; Undo brings it back.
+  const composer = page.getByTestId(`runtime-thread-${ids.idle}`).getByTestId('runtime-composer');
+  await composer.fill('/btw what changed so far?');
+  await composer.press('Enter');
+  const sideChat = page.getByTestId('threads-side-chat');
+  await expect(sideChat.getByTestId('side-chat-dismiss')).toBeVisible({ timeout: 15_000 });
+  await sideChat.getByTestId('side-chat-dismiss').click();
+  await expect(sideChat.getByTestId('side-chat-dismiss')).toHaveCount(0);
+  await page.locator('.toast', { hasText: 'Side chat dismissed' }).locator('.toast-action').click();
+  await expect(sideChat.getByTestId('side-chat-dismiss')).toBeVisible({ timeout: 15_000 });
+});
+
 const SHOTS = process.env.OTTO_SHOTS_DIR ?? '';
 
 test('screenshots: the sidebar, light and dark, desktop and phone', async ({ page, browser }, info) => {
