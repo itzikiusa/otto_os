@@ -165,7 +165,7 @@ jobs:
 
       - name: Install librdkafka build deps
         run: |
-          if ! compgen -G "target/debug/build/rdkafka-sys-*/out/lib/librdkafka.a" >/dev/null && ! dpkg -s cmake libcurl4-openssl-dev pkg-config libssl-dev >/dev/null 2>&1; then
+          if ! dpkg -s cmake libcurl4-openssl-dev pkg-config libssl-dev >/dev/null 2>&1 || ! cc -E -x c -include curl/curl.h /dev/null >/dev/null 2>&1; then
             sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
             sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev pkg-config libssl-dev
           fi
