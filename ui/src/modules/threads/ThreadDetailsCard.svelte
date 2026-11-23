@@ -31,7 +31,7 @@
   import { runtimeViews } from './runtime/runtimeView.svelte';
   import { gitAction } from './threadDetails';
   import { anyThread } from './threadRelay';
-  import { subagentSection, type SubagentRow } from './runtime/childThreads';
+  import { subagentSection, subagentTally, type ChildTone, type SubagentRow, type SubagentWord } from './runtime/childThreads';
   import { delegatedParentId } from './threadsHelpers';
   import { openBranchMenu, openOpenInMenu } from './threadGitMenus';
   import { threadPrs } from './threadPrs.svelte';
@@ -137,6 +137,8 @@
     });
     return s.parent || s.running.length || s.previous.length ? s : null;
   });
+  /** The header tallies like the timeline row, most urgent first ("1 needs you · 1 working"). */
+  const WORD_TONE: Record<SubagentWord, ChildTone> = { Working: 'working', 'Needs you': 'needs-you', Done: 'done', Failed: 'failed', Stopped: 'stopped' };
   let previousOpen = $state(false);
   // A short screen (a phone on its side): heading the panel, the card is one
   // summary row (folder · branch · changes) that opens on tap, so the
@@ -312,7 +314,7 @@
         </button>
       {/if}
       {#if s.running.length || s.previous.length}
-        <p class="dc-cap">Subagents{s.running.length ? ` · ${s.running.length} working` : ''}</p>
+        <p class="dc-cap" data-testid="details-subagents-cap">Subagents{s.running.length ? ` · ${subagentTally(s.running.map((r) => WORD_TONE[r.word])).text}` : ''}</p>
       {/if}
       {#each s.running as r (r.id)}
         {@render subagent(r)}

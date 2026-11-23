@@ -142,16 +142,18 @@ test('a subagent opens as a tab beside its parent; ⌘-click and the setting ope
   await page.getByTestId('threads-back-to-parent').first().click();
   await expect(page.getByTestId('runtime-thread-rt_sub_lead')).toBeVisible();
 
-  // The one per-device setting (Settings ▸ Threads) flips the default.
-  await page.evaluate(() => {
-    const k = 'otto_threads_chrome_v1';
-    const v = JSON.parse(localStorage.getItem(k) ?? '{}');
-    localStorage.setItem(k, JSON.stringify({ ...v, subagentsIn: 'main' }));
-  });
-  await delegated(page);
+  // The one per-device setting, Settings ▸ Threads › Open a subagent in, flips the default.
+  await page.evaluate(() => (location.hash = '#/settings/threads'));
+  const sec = page.getByTestId('settings-threads');
+  await sec.getByRole('radio', { name: 'Main view' }).click();
+  await expect(sec.getByRole('radio', { name: 'Main view' })).toHaveAttribute('aria-checked', 'true');
+  await page.evaluate(() => (location.hash = '#/threads/rt_sub_lead'));
+  await expect(page.getByTestId('runtime-thread-rt_sub_lead')).toBeVisible({ timeout: 15_000 });
   await page.getByTestId('runtime-thread-rt_sub_lead').getByTestId('runtime-child-group-toggle').click();
   await page.getByTestId('runtime-thread-rt_sub_lead').getByTestId('runtime-child-row-01M84S0000000000000000000B').getByTestId('runtime-item-open').click();
-  await expect(page.getByTestId('threads-back-to-parent').first()).toBeVisible();
+  // In the main view, not a tab.
+  await expect(page.getByTestId('runtime-thread-01M84S0000000000000000000B').first()).toBeVisible();
+  await expect(page.getByTestId('threads-inspector').getByTestId('runtime-thread-01M84S0000000000000000000B')).toHaveCount(0);
   await expect(page.getByTestId('runtime-subagent-of').first()).toContainText('Share link tests');
 });
 
@@ -171,6 +173,9 @@ test('a subagent’s question its parent’s agent did not answer shows in the p
   await expect(card).toContainText('Question from Pick the store');
   await expect(card).toContainText('Which database?');
   await expect(thread.getByTestId('runtime-child-approval')).toHaveCount(0);
+  // The details' header counts it the way its row says it.
+  const cap = page.getByTestId('details-subagents-cap');
+  if (await cap.count()) await expect(cap).toHaveText('Subagents · 1 needs you');
   for (const scheme of ['light', 'dark'] as const) {
     await page.emulateMedia({ colorScheme: scheme });
     await page.screenshot({ path: test.info().outputPath(`subagent-question-desktop-${scheme}.png`), animations: 'disabled' });
