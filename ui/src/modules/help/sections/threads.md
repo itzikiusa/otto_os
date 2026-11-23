@@ -36,6 +36,9 @@ Threads (Experimental) is a conversation-first workspace for coding agents. It k
 - Type `/` for Otto's commands and, under "<Agent> commands", the agent's own commands and skills (fuzzy filtered); picking one types `/name ` for you to finish and send.
 - In an empty composer **↑** brings back the prompts you sent in this thread (**↓** goes forward, then back to empty).
 - Type `@` to attach workspace files or ask another agent; paste or drop images and PDFs anywhere on the thread (a type the agent cannot take is refused by name).
+- **Review notes**: in **Changes**, click a line number (⇧-click another line for a range) to write a note for the agent. Notes show under their lines and in the **Review · N notes** bar; **Send to agent** puts them all in the thread's message as one item (add a sentence or press Enter). Sent notes can be resolved; a note whose lines the agent changed reads **Outdated**.
+- **Minimap**: a long thread (6+ of your messages) has a rail of ticks at the column's edge, one per message you sent (failed and approval turns marked). Click to jump, ⌥↑ / ⌥↓ to step; on a phone, ⋯ › **Jump to…**.
+- **Settings › Threads** holds this device's Threads choices (Queue / Steer, tool calls, where a subagent opens, sidebar grouping, the details card).
 - The toolbar ⋯ › **View** › **Tool calls**: *show all* (default), *hide successful* or *hide all*. Failures, approvals, questions and replies always show.
 - Slide up the optional **Terminal** drawer on any thread pane whenever you want raw PTY access without leaving Threads. Select text in it and **Add to chat** attaches the selection to the thread's message as a "Terminal · N lines" chip (nothing is sent).
 

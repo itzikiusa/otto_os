@@ -411,6 +411,45 @@ Muse — and pi) unless a line says otherwise.
   message stays in sight (the timeline keeps following the bottom as the
   keyboard opens).
 
+## Review notes, the minimap and Settings › Threads
+
+- **Review notes on the diff** (`ThreadChangesTab.svelte`,
+  `runtime/reviewNotes.ts`, `DiffNote*.svelte`, `DiffReviewBar.svelte`):
+  - In Changes (uncommitted, the unpushed range or one commit), a line number
+    starts a note; ⇧-click another line in the same hunk for a range.
+  - Notes show under their last line and in one **Review · N notes** bar,
+    with **Send to agent** and **Clear**, and Edit / Resolve / Delete on
+    each note.
+  - **Send to agent** puts every draft note into the focused thread's
+    message as one context item (file, new / old lines, quoted lines,
+    comment). Add a sentence, or press Enter to send as is.
+  - After sending, notes read **Sent** and can be resolved. A note whose
+    lines are gone from its file's diff (the agent changed them) reads
+    **Outdated**; it is not removed.
+  - With nothing typed, the note box can still add the lines as plain
+    context.
+  - Notes are kept per thread on this device (localStorage, newest 50
+    threads × 200 notes). The daemon draft's context items have no field
+    for a note's state.
+  - On a phone the note box is a sheet above the keyboard.
+- **Minimap** (`runtime/RuntimeMinimap.svelte`, `runtime/minimap.ts`):
+  - A thread with six or more of your messages gets a slim rail at the
+    reading column's edge: one tick per message, a failed turn and an
+    approval turn marked.
+  - The turn you are reading is lit; hover or focus shows the message's
+    first line; a click jumps.
+  - ⌥↑ / ⌥↓ step between your messages (not while typing).
+  - On a phone the toolbar ⋯ › **Jump to…** opens the same list as a sheet.
+- **Settings › Threads** (General, this device; `ThreadsSettings.svelte`):
+  - While the agent works, Enter: Queue / Steer.
+  - Tool calls: Show all / Hide successful / Hide all.
+  - Open a subagent in: side panel / main view (`threadPrefs.subagentIn`,
+    read by the subagent views).
+  - Group the sidebar by project.
+  - Show the thread details card.
+
+  The toolbar ⋯ › View switches the same prefs.
+
 ## On a phone and a tablet
 
 Threads is the main way to steer agents on the Mac from a phone, so the page
