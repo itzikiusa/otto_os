@@ -23,6 +23,7 @@ export function assembleComposerMessage(text: string, context: readonly Composer
     if (c.id.startsWith('file:')) return 'File context';
     if (c.id.startsWith('dir:')) return 'Folder context';
     if (c.id.startsWith('terminal:')) return 'Terminal output';
+    if (c.id.startsWith('notes:')) return 'Review notes on the diff';
     return c.kind === 'diff' ? 'Diff context' : 'Review conversation';
   };
   return [text, ...context.map((c) => `--- ${headerFor(c)}: ${c.label} ---\n${c.text}`)].filter(Boolean).join('\n\n');

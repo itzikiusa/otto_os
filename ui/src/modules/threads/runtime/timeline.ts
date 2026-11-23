@@ -11,6 +11,7 @@
 
 import type {
   ApprovalOption,
+  ContextHandoff,
   MessageAttachment,
   ProviderTurn,
   RequestKind,
@@ -80,7 +81,8 @@ export type TimelineRow =
   | { kind: 'work'; id: string; parts: WorkPart[] }
   /** A date separator, only in a thread that spans more than one day. */
   | { kind: 'day'; id: string; label: string }
-  | { kind: 'session'; id: string }
+  /** `handoff`: a provider switch ("Context handoff · Claude Code → Codex"). */
+  | { kind: 'session'; id: string; handoff?: ContextHandoff }
   /** Subtle divider before an autonomous/reactive agent wakeup turn (`origin === 'agent'`). */
   | { kind: 'agent_turn'; id: string; label: string }
   /** A quiet line where a model / effort / access switch took effect or was refused (settingsChange.ts). */
@@ -339,7 +341,7 @@ export function timelineRows(items: readonly TurnItem[], turns: readonly Provide
       flush();
       let sRow = sessionRowCache.get(item);
       if (!sRow) {
-        sRow = { kind: 'session', id: item.id };
+        sRow = { kind: 'session', id: item.id, ...(item.handoff ? { handoff: item.handoff } : {}) };
         rowAnchorItem.set(sRow, item);
         sessionRowCache.set(item, sRow);
       }

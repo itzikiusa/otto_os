@@ -26,6 +26,8 @@ test('review conversations and selected diffs stack in the owning draft and send
   await page.route(`**/api/v1/workspaces/${workspaceId}/runtime-sessions`, (route) => route.fulfill({ json: sessions }));
   await page.route('**/api/v1/runtime-sessions/review-*/events**', (route) => route.fulfill({ json: { kind: 'snapshot', snapshot_sequence: 1, snapshot: { provider_session: { status: 'ready', cwd: repo.path, model: null, updated_at: ts, last_error: null }, provider_thread: null, turns: [], turn_items: [], runtime_requests: [], plans: [] } } }));
   await page.route('**/api/v1/workspaces/*/repos', (route) => route.fulfill({ json: [repo] }));
+  // The PR panel reads pull requests only with a linked account of the repo's forge.
+  await page.route('**/api/v1/git/accounts', (route) => route.fulfill({ json: [{ id: 'acct', provider: 'github', label: 'Alice', username: 'alice', created_at: ts }] }));
   await page.route('**/api/v1/workspaces/*/repos/detect', (route) => route.fulfill({ json: repo }));
   await page.route('**/api/v1/repos/review-repo/status', (route) => route.fulfill({ json: { branch: 'feature', upstream: null, ahead: 0, behind: 0, changes: [{ path: 'src/a.ts', orig_path: null, kind: 'modified' }] } }));
   await page.route('**/api/v1/repos/review-repo/prs?*', (route) => route.fulfill({ json: { items: [pr], page: 1, per_page: 50, has_more: false } }));
@@ -71,7 +73,9 @@ test('review conversations and selected diffs stack in the owning draft and send
   await chips.getByRole('button', { name: 'Remove Carol · General comment' }).click();
   await expect(chips.locator('li')).toHaveCount(1);
   await page.getByTestId('threads-tab-changes').click();
-  await page.getByRole('button', { name: 'Add src/a.ts new line 9 to chat', exact: true }).click();
+  // A line number starts a note; with nothing typed its lines can still go to the chat as context.
+  await page.getByRole('button', { name: 'Note on src/a.ts new line 9', exact: true }).click();
+  await page.getByTestId('diff-note-plain').click();
   await page.getByTestId('diff-hunk-context-0').click();
   await page.getByTestId('diff-file-context').click();
   await expect(chips.locator('li')).toHaveCount(4);

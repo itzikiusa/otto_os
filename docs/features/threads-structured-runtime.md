@@ -600,7 +600,7 @@ Turn item types:
 | `dynamic_tool` | `tool_name`, `input`, `output?`, `images?[{mime, data_base64}]` |
 | `web_search` | `patterns` |
 | `approval_request` | `request_id`, `request_kind`, `prompt?`, `reason?`, `options[{decision, label}]`, `tool_item_id?`, `cancel_reason?` (`agent` / `interrupt` / `closed`) |
-| `session_boundary` | No extra fields; rendered as **New session** before the accepted fresh prompt |
+| `session_boundary` | `handoff?` (a provider switch: `{from_provider, to_provider, from_model?, to_model?, turns, omitted_turns, images_omitted, text}`); rendered as **New session**, or **Context handoff · A → B**, before the accepted fresh prompt |
 | `system_notice` | `message` |
 | `error` | `failure` |
 
@@ -915,13 +915,34 @@ provider error after acceptance is a failed turn in the newly committed
 conversation. The frontend keeps the submitted draft and fresh intent on a
 rejected send.
 
+### Continue on another provider
+
+A prompt whose `provider` names another enabled provider with a structured
+driver (built-in or a named account) is an explicit fresh context onto that
+provider (`runtime/fresh.rs`, after T3 Code's `ProviderSwitchService`
+`create_with_handoff`). Under the same admission lock and 409s, the old process
+is dropped and the session is moved in memory: `provider`,
+`meta.provider_slug`, the prompt's `model` (else the provider default), no
+effort, the new provider's baseline capabilities. The normal spawn then
+prepares everything provider-specific. `runtime/handoff.rs` builds the block
+from the projection (after T3 Code's `handoffBudget.ts`): turns since the last
+plain boundary, whole, newest first within 16,000 estimated tokens; per turn the
+message, final answer, changed paths, a tool-call count, errors; an open plan
+first; images counted, never sent. `start_turn` sends block + message to the
+driver and records only the message. `commit_fresh` persists provider, meta,
+model and effort (`set_provider`; no schema change) and emits the boundary
+with `handoff`; `provider_session.updated` carries `provider` /
+`provider_slug`. A failure restores every moved field and the native identity,
+and adds no boundary. Pi has no fake CLI, so its leg is covered only by the
+shared code path.
+
 ### Durable composer state
 
 `GET/PUT /runtime-sessions/{id}/draft` uses `{revision, draft}` records backed by
 `runtime_composer_drafts`, scoped to user, workspace and runtime session. The
 human-only routes reject managed-agent, MCP and share credentials. Draft
 content includes text, attachments (bytes and names), model, effort,
-`access_mode`, `fresh_context`, and attributed review/diff context chips. Action
+`access_mode`, `fresh_context`, `provider` (an armed switch), and attributed review/diff context chips. Action
 flags such as sending, stopping and replay sequence are live UI state only.
 No draft content is put in browser local storage.
 
