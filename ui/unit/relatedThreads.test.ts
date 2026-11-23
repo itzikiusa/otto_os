@@ -47,3 +47,19 @@ test('toolbar ⋯ on the stage and on a phone; Related appears once', () => {
   const legacy = threadsPageMenu({ threadItems: [{ label: RELATED_LABEL }], layout: 'single', terminalOpen: false, cardOn: true, threadId: 'x' }, acts);
   assert.equal(legacy.filter((i) => i.label === RELATED_LABEL).length, 1);
 });
+
+test('View carries the per-device "while working" choice, on a phone too (without layouts)', () => {
+  let picked = '';
+  const a = { ...acts, setMidTurn: (m: string) => (picked = m) };
+  const desk = threadsPageMenu({ threadItems: [], layout: 'single', terminalOpen: false, cardOn: null, threadId: 'x', sidebarVisible: true, midTurn: 'queue' }, a);
+  const view = desk.find((i) => i.label === 'View')?.children ?? [];
+  assert.deepEqual(labels(view), ['Single thread', 'Split', 'Grid', '—', 'While working, messages queue', 'While working, messages steer']);
+  assert.equal(view.find((i) => i.label === 'While working, messages queue')?.checked, true);
+  view.find((i) => i.label === 'While working, messages steer')?.action?.();
+  assert.equal(picked, 'steer');
+  const phone = threadsPageMenu({ threadItems: [], layout: 'single', terminalOpen: false, cardOn: null, threadId: 'x', compact: true, midTurn: 'steer' }, a);
+  const pview = phone.find((i) => i.label === 'View')?.children ?? [];
+  assert.deepEqual(labels(pview), ['While working, messages queue', 'While working, messages steer']);
+  assert.equal(pview[1].checked, true);
+  assert.equal(pview[1].hint, undefined, 'no ⌘↵ hint on a touch screen');
+});

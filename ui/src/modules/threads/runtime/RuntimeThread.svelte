@@ -8,7 +8,9 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import LazyMount from '../../../lib/components/LazyMount.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
-  import { enterSends } from '../../../lib/enterSends';
+  import { enterSends, isTouchFirst } from '../../../lib/enterSends';
+  import { isMacPlatform } from '../../../lib/keys';
+  import { toasts } from '../../../lib/toast.svelte';
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   import { PATH_LINK_CTX } from '../../../lib/pathLinks/open';
   import { personalAgentOf } from '../../../lib/personalAgentBadges';
@@ -36,6 +38,9 @@
   import { attentionItems, attentionPillText } from './attentionDock';
   import RuntimeAttentionDock from './RuntimeAttentionDock.svelte';
   import RuntimeComposerActions from './RuntimeComposerActions.svelte';
+  import RuntimeComposerAttach from './RuntimeComposerAttach.svelte';
+  import { isAltSend, midTurnDelivery, primaryAction } from './composerSend';
+  import { threadPrefs } from './threadPrefs.svelte';
   import RuntimeModelChip from './RuntimeModelChip.svelte';
   import RuntimeBannerStack from './RuntimeBannerStack.svelte';
   import {
@@ -202,7 +207,6 @@
   const planOn = $derived(!!caps.plan && !!runtimeThreads.planIds[ownerId]); // every prompt, until turned off
   const canFiles = $derived(attachmentSupport(caps).files);
   const takes = (f: File): boolean => takesFile(caps, f);
-  let fileEl = $state<HTMLInputElement | null>(null);
   /** "Stop background work and start fresh": `next` = the next fresh send asks the daemon to
    *  stop it first; `tried` = it was asked and still refused (an older daemon) — the reason shows. */
   let freshStopBg = $state<'' | 'next' | 'tried'>('');
@@ -248,6 +252,7 @@
         sent.images,
       );
       draft.awaitSeq = resp.queued_id ? null : resp.sequence;
+      if (delivery === 'steer' && resp.queued_id) toasts.info('Queued instead', 'The agent couldn’t take it mid-turn; it goes when this turn ends.');
       if (resp.queued_id && typeof optimisticMessage !== 'undefined') optimisticMessage = null;
       if (!runtimeDrafts.owns(ownerId, draft)) return;
       acknowledgeComposer(draft, sent);
@@ -279,7 +284,7 @@
     return ok;
   }
 
-  function submit(): void {
+  function submit(chosen?: PromptDelivery): void {
     let t = draft.text.trim();
     const extCtx = typeof hasExternalContext !== 'undefined' && Boolean(hasExternalContext);
     if ((!t && draft.images.length === 0 && draft.context.length === 0 && !extCtx) || draft.reopening || draft.sending || draft.recovered === false) {
@@ -302,7 +307,7 @@
       return void askFromComposer(ownerId, draft, payload, effectiveAccess);
     }
     const submitted = snapshotDraft(draft);
-    const delivery: PromptDelivery | undefined = !submitted.fresh_context ? 'queue' : undefined;
+    const delivery: PromptDelivery | undefined = !submitted.fresh_context ? (chosen ?? 'queue') : undefined;
     acknowledgeComposer(draft, submitted);
     if (typeof composerEl !== 'undefined' && composerEl) composerEl.style.height = '';
     if (!running && !submitted.fresh_context && typeof buildOptimisticUserMessage === 'function') {
@@ -360,6 +365,14 @@
     }
   }
 
+  /** While a turn runs: the person's mid-turn delivery, or (`alt`, ⌘↵) the other one (composerSend.ts). */
+  function midTurn(alt: boolean): PromptDelivery | undefined {
+    if (!running) return undefined;
+    const d = midTurnDelivery(threadPrefs.midTurn, alt, !!caps.steer);
+    if (d.refused && alt) toasts.info(`${agentName} can’t take a message mid-turn`, 'Queued — it goes when this turn ends.');
+    return d.delivery;
+  }
+
   async function stop(): Promise<void> {
     if (draft.stopping) return;
     draft.stopping = true;
@@ -391,7 +404,7 @@
     }
     if (enterSends(e)) {
       e.preventDefault();
-      submit();
+      submit(midTurn(isAltSend(e, isMacPlatform(), isTouchFirst())));
     }
   }
 
@@ -570,7 +583,7 @@
         autocapitalize="off"
         autocomplete="off"
         disabled={draft.reopening}
-        placeholder={composerPlaceholderText(closed, approvals, running, agentChat, planOn)}
+        placeholder={composerPlaceholderText(closed, approvals, running, agentChat, planOn, threadPrefs.midTurn === 'steer' && !!caps.steer)}
         aria-label="Message"
         aria-autocomplete="list"
         aria-controls={suggestions.length > 0 ? `${popId}-list` : undefined}
@@ -585,30 +598,7 @@
       <div class="rt-foot">
         {#if composerFootLeadSlot}{@render composerFootLeadSlot({ focusComposer })}{/if}
         <RuntimeDraftStatus {draft} />
-        {#if canImages}
-          <button
-            type="button"
-            class="icon-btn"
-            aria-label={canFiles ? 'Attach an image or PDF' : 'Attach an image'}
-            title={canFiles ? 'Attach an image or PDF (or paste one)' : 'Attach an image (or paste one)'}
-            data-testid={testIds?.attach ?? 'runtime-attach'}
-            disabled={draft.reopening}
-            onclick={() => fileEl?.click()}
-          >
-            <Icon name="image" size={14} />
-          </button>
-          <input
-            bind:this={fileEl}
-            type="file"
-            accept={canFiles ? 'image/*,application/pdf' : 'image/*'}
-            multiple
-            hidden
-            onchange={(e) => {
-              void appendDraftAttachments(ownerId, draft, e.currentTarget.files ?? [], takes);
-              e.currentTarget.value = '';
-            }}
-          />
-        {/if}
+        {#if canImages}<RuntimeComposerAttach {canFiles} testId={testIds?.attach ?? 'runtime-attach'} disabled={draft.reopening} onfiles={(f) => void appendDraftAttachments(ownerId, draft, f, takes)} />{/if}
         {#if !agentChat}<RuntimeAskAgent part="button" {sessionId} {provider} access={accessMode} disabled={closed || !session} />{/if}
         <span class="rt-grow">
           {#if !agentChat}
@@ -641,15 +631,17 @@
           {/if}
         </span>
         <RuntimeComposerActions
+          action={primaryAction({ running, canSend: canSendOrQueue, pref: threadPrefs.midTurn, canSteer: !!caps.steer })}
+          canSteer={!!caps.steer}
+          agent={agentName}
           {running}
-          canSend={canSendOrQueue}
           sendDisabled={!draft.recovered || draft.reopening || draft.sending || !canSendOrQueue}
           stopping={draft.stopping}
           waiting={attention.length > 0}
           stopTestId={testIds?.stop ?? 'runtime-stop'}
           sendTestId={testIds?.send ?? 'runtime-send'}
           onstop={() => void stop()}
-          onsend={submit}
+          onsend={() => submit(midTurn(false))}
         />
       </div>
     </div>

@@ -7,6 +7,6 @@ export function enterSends(e: KeyboardEvent, touch = isTouchFirst()): boolean {
   return !touch || e.metaKey || e.ctrlKey;
 }
 
-function isTouchFirst(): boolean {
+export function isTouchFirst(): boolean {
   return typeof matchMedia === 'function' && matchMedia('(hover: none) and (pointer: coarse)').matches;
 }

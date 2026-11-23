@@ -440,6 +440,7 @@ export function composerPlaceholderText(
   running: boolean,
   agentChat?: string,
   plan = false,
+  steer = false,
 ): string {
   if (closed) return 'Send a message to reopen this thread';
   if (approvals.size > 0) {
@@ -448,6 +449,6 @@ export function composerPlaceholderText(
       : 'Waiting for your approval above';
   }
   if (plan) return 'Plan mode: the agent researches and proposes, and changes nothing. ⇧⇥ leaves Plan';
-  if (running) return 'Queue a follow-up for when this turn ends';
+  if (running) return steer ? 'Steer: the agent reads this at its next step' : 'Queue a follow-up for when this turn ends';
   return agentChat ? `Message ${agentChat}…` : 'Ask anything. @ files or agents, / commands';
 }
