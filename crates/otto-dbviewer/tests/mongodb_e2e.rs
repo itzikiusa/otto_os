@@ -38,6 +38,13 @@ fn cfg() -> ResolvedConfig {
     }
 }
 
+// These driver-level shell tests exercise a request already authorized by the service.
+fn root_shell_cfg() -> ResolvedConfig {
+    let mut config = cfg();
+    config.params["__mongosh_authorized"] = json!(true);
+    config
+}
+
 /// `test()` connects and reports the server version from buildInfo.
 #[tokio::test]
 #[ignore]
@@ -414,10 +421,7 @@ async fn mongo_shell_fallback_preserves_options_and_returns_values() {
         return;
     }
     let driver = MongoDriver::default();
-    let mut config = cfg();
-    if let Ok(port) = std::env::var("OTTO_MONGO_PARITY_PORT") {
-        config.port = port.parse().unwrap();
-    }
+    let config = root_shell_cfg();
     let collection = format!("otto_parity_{}", std::process::id());
     let run = |statement: String| QueryRequest {
         statement,
@@ -644,10 +648,7 @@ async fn mongo_shell_timeout_bounds_long_running_scripts() {
     if std::env::var("OTTO_DBV_E2E").is_err() {
         return;
     }
-    let mut config = cfg();
-    if let Ok(port) = std::env::var("OTTO_MONGO_PARITY_PORT") {
-        config.port = port.parse().unwrap();
-    }
+    let config = root_shell_cfg();
     let started = std::time::Instant::now();
     let error = MongoDriver::default()
         .run(
@@ -880,12 +881,13 @@ async fn mongo_show_helpers_list_names_without_quotes() {
         return;
     }
     let d = MongoDriver::default();
+    let config = root_shell_cfg();
     let run = |statement: &str| QueryRequest {
         statement: statement.into(),
         node: Some("shopdb".into()),
         ..Default::default()
     };
-    d.run(&cfg(), &run("db.otto_show_probe.insertOne({ n: 1 })"))
+    d.run(&config, &run("db.otto_show_probe.insertOne({ n: 1 })"))
         .await
         .expect("insert");
     let cells = |res: otto_dbviewer::types::QueryResult| -> Vec<String> {
@@ -895,15 +897,15 @@ async fn mongo_show_helpers_list_names_without_quotes() {
             .collect()
     };
     for statement in ["show collections", "db.getCollectionNames()"] {
-        let names = cells(d.run(&cfg(), &run(statement)).await.expect(statement));
+        let names = cells(d.run(&config, &run(statement)).await.expect(statement));
         assert!(
             names.contains(&"otto_show_probe".to_string()),
             "{statement}: {names:?}"
         );
     }
-    let dbs = cells(d.run(&cfg(), &run("show dbs")).await.expect("show dbs"));
+    let dbs = cells(d.run(&config, &run("show dbs")).await.expect("show dbs"));
     assert!(dbs.contains(&"admin".to_string()), "{dbs:?}");
-    d.run(&cfg(), &run("db.otto_show_probe.drop()"))
+    d.run(&config, &run("db.otto_show_probe.drop()"))
         .await
         .expect("drop");
 }
