@@ -14,7 +14,9 @@ export type InboxClass = 'needs' | 'failed' | 'done' | 'working' | 'rest';
 export function inboxClass(key: string | null | undefined, unread: boolean): InboxClass {
   if (key === 'needs-you') return 'needs';
   if (key === 'failed') return 'failed';
-  if (key === 'working' || key === 'running' || key === 'stale') return 'working';
+  // `running`: alive but idle — a thread whose agent is done while its
+  // background work runs (taskStop.ts `withBackgroundState`) stays calm, never "Working".
+  if (key === 'working' || key === 'stale') return 'working';
   return unread ? 'done' : 'rest';
 }
 

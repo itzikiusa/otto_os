@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx } from './seed';
+import { requireProviderSwitch } from './daemonFeatures';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -31,6 +32,7 @@ test.beforeAll(async () => {
   const r = await ctx.post(`${base}/api/v1/workspaces`, { data: { name: 'Switch WS', root_path: fixtureDir } });
   expect(r.ok(), await r.text()).toBeTruthy();
   wsId = (await r.json()).id as string;
+  await requireProviderSwitch(ctx, base, wsId, fixtureDir);
 });
 
 test.afterAll(async () => {
