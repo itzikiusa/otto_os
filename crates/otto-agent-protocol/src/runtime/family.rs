@@ -69,6 +69,8 @@ impl AgentRuntime {
             ..FamilyStopResp::default()
         };
         for (n, sid) in ids.iter().enumerate() {
+            // Before its turn ends: a queued reply must not start a new one.
+            self.drop_wakes(sid).await;
             if self.interrupt(sid).await.unwrap_or(false) {
                 out.turns += 1;
             }
@@ -79,7 +81,6 @@ impl AgentRuntime {
                 }
             }
         }
-        self.drop_wakes(id).await;
         Ok(out)
     }
 

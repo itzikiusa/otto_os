@@ -672,3 +672,32 @@ async fn stop_on_a_subagent_still_tells_its_lead() {
     assert!(family::recently_stopped(&grand));
     assert!(!family::recently_stopped(&lead));
 }
+
+/// Review 6: a family stop drops the replies queued for every member, not
+/// only for the thread Stop was pressed on.
+#[tokio::test]
+async fn a_family_stop_drops_every_members_queued_replies() {
+    let (f, lead) = fixture(false, false, RuntimeConfig::default()).await;
+    let a = subagent(&f, &lead).await;
+    let b = subagent(&f, &a).await;
+    for (on, from) in [(&lead, &a), (&a, &b)] {
+        f.live(on).lock().proj.queue.push(QueuedRecord {
+            id: new_id(),
+            created_at: Utc::now(),
+            req: Arc::new(RuntimePromptReq::of("a reply")),
+            wake: Some(children::WakeKey {
+                child: from.clone(),
+                turn: "t".into(),
+            }),
+            error: None,
+        });
+    }
+    f.rt.stop_family(&lead, false).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    for id in [&lead, &a] {
+        let live = f.live(id);
+        let st = live.lock();
+        assert!(st.proj.queue.is_empty(), "{id}");
+        assert!(st.turn.is_none(), "{id} stays stopped");
+    }
+}
