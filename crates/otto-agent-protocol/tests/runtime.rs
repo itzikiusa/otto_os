@@ -5112,13 +5112,23 @@ async fn an_agent_initiated_mode_change_moves_the_threads_access() {
     let host = TestHost::new(root, false);
     let rt = runtime(&pool, &host, RuntimeConfig::default());
     let s = create_as(&rt, root, RuntimeProvider::Agy).await;
+    // Wider than the thread's access: Otto keeps it, sets the agent back
+    // and says so.
     rt.prompt(&s.id, "agent-mode accept-edits").await.unwrap();
     host.wait(is_terminal).await;
-    let s = rt.get(&s.id).await.unwrap();
-    assert_eq!(s.access_mode, RuntimeAccessMode::AutoAcceptEdits);
-    assert!(host.items().iter().any(|i| i.id.starts_with("selection:")
-        || i.id.contains(":selection:")
-        || matches!(&i.kind, TurnItemKind::SystemNotice { message, .. } if message.starts_with("Access"))));
+    assert_eq!(
+        rt.get(&s.id).await.unwrap().access_mode,
+        RuntimeAccessMode::ApprovalRequired
+    );
+    assert!(host.items().iter().any(|i| matches!(&i.kind,
+        TurnItemKind::SystemNotice { message, .. } if message.contains("switched itself to accept-edits"))));
+    rt.prompt(&s.id, "mode").await.unwrap();
+    host.wait_n(is_terminal, 2).await;
+    assert_eq!(
+        last_assistant_text(&host),
+        "mode: default",
+        "the agent was set back"
+    );
     rt.close(&s.id).await.unwrap();
 }
 
@@ -5576,4 +5586,138 @@ async fn every_structured_provider_takes_and_gives_a_handoff() {
     }
     assert_eq!(handoffs(&host).len(), chain.len());
     rt.close(&s.id).await.unwrap();
+}
+
+/// Security 2 / review R3 + R4: a client terminal's commands die with the
+/// thread (close) and with its agent process (exit), its whole process group
+/// included; `wait_for_exit` answers when the shell exits even though a
+/// background child still holds the pipes.
+#[tokio::test]
+async fn client_terminals_die_with_the_thread_and_wait_ignores_background_pipes() {
+    use otto_agent_protocol::acp::AcpFlavor;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap().display().to_string();
+    let host = TestHost::new(&root, false);
+    let drivers: Arc<dyn DriverFactory> =
+        Arc::new(|p: RuntimeProvider| -> Option<Box<dyn StructuredDriver>> {
+            Some(Box::new(AcpDriver::with_flavor(
+                p,
+                AcpFlavor {
+                    program: fake_bin!("otto-fake-agent"),
+                    client_fs: true,
+                    client_terminal: true,
+                    ..AcpFlavor::default()
+                },
+            )))
+        });
+    let rt = AgentRuntime::new(
+        AgentRuntimeRepo::new(pool().await),
+        Arc::clone(&host) as Arc<dyn RuntimeHost>,
+        drivers,
+        RuntimeConfig {
+            attachments_dir: dir.path().join("a"),
+            ..RuntimeConfig::default()
+        },
+    );
+    let create = || async {
+        rt.create(
+            &"u1".into(),
+            &"w1".into(),
+            CreateRuntimeSessionReq {
+                provider: Some(RuntimeProvider::Grok),
+                cwd: Some(root.clone()),
+                access_mode: Some(RuntimeAccessMode::FullAccess),
+                ..CreateRuntimeSessionReq::default()
+            },
+        )
+        .await
+        .unwrap()
+    };
+    // A ticker in a subshell (a grandchild of the terminal's shell).
+    let ticker =
+        |name: &str| format!("term-keep (while true; do echo x >> {name}; sleep 0.1; done) & wait");
+    let alive = |name: &'static str| {
+        let path = dir.path().join(name);
+        async move {
+            let a = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            let b = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            b > a
+        }
+    };
+    let s = create().await;
+    rt.prompt(&s.id, &ticker("close.txt")).await.unwrap();
+    host.wait(is_terminal).await;
+    assert!(alive("close.txt").await, "the command runs");
+    rt.close(&s.id).await.unwrap();
+    assert!(!alive("close.txt").await, "closing the thread killed it");
+
+    let s2 = create().await;
+    rt.prompt(&s2.id, &ticker("exit.txt")).await.unwrap();
+    host.wait_n(is_terminal, 2).await;
+    assert!(alive("exit.txt").await);
+    rt.prompt(&s2.id, "crash").await.unwrap();
+    host.wait_n(is_terminal, 3).await;
+    assert!(!alive("exit.txt").await, "the agent's exit killed it");
+
+    // `sleep 30 &`: the shell exits at once; the turn must not wait 30 s.
+    let s3 = create().await;
+    let t0 = std::time::Instant::now();
+    rt.prompt(&s3.id, "term sleep 30 & echo bg-started")
+        .await
+        .unwrap();
+    host.wait_n(is_terminal, 4).await;
+    assert!(t0.elapsed() < Duration::from_secs(10), "{:?}", t0.elapsed());
+    assert_eq!(last_assistant_text(&host), "term: bg-started");
+    rt.close(&s3.id).await.unwrap();
+}
+
+/// Security 3: an elicitation (MCP server / ACP agent asking the person)
+/// inside a subagent never goes to the delegating agent, and
+/// `otto.thread_answer` refuses it; the person still answers it.
+#[tokio::test]
+async fn a_subagents_elicitation_is_for_the_person_not_the_parent_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let lead = create(&rt, cwd).await;
+    let mut asks = worker_req("signs in", Some("elicit-url https://example.com/login"));
+    asks.provider = RuntimeProvider::Gemini;
+    let kid = rt.open_peer(&lead.id, asks).await.unwrap();
+    let req = host
+        .wait(|e| {
+            e.session_id == kid.id
+                && matches!(&e.body, RuntimeEventBody::RuntimeRequestUpdated { runtime_request }
+                    if runtime_request.status == RuntimeRequestStatus::Pending)
+        })
+        .await;
+    let RuntimeEventBody::RuntimeRequestUpdated { runtime_request } = req.body else {
+        unreachable!()
+    };
+    assert!(runtime_request.for_person);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        !host.all().iter().any(|e| e.session_id == lead.id
+            && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+                if matches!(&turn_item.kind, TurnItemKind::UserMessage { text, .. }
+                    if text.starts_with("[Question from subagent")))),
+        "the lead's agent never hears of it"
+    );
+    use otto_core::agent_runtime::QuestionAnswer;
+    let open = vec![QuestionAnswer::Single {
+        question_id: "acp_url".into(),
+        value: "open".into(),
+    }];
+    assert!(matches!(
+        rt.answer_child(&lead.id, &kid.id, &runtime_request.id, open.clone())
+            .await,
+        Err(Error::Forbidden(_))
+    ));
+    rt.respond_question(&kid.id, &runtime_request.id, open)
+        .await
+        .unwrap();
+    let back = rt.latest_reply(&kid.id, WAIT).await.unwrap();
+    assert!(back.text.contains("url: accept"), "{}", back.text);
 }

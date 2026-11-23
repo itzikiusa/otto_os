@@ -26,11 +26,16 @@ export function askTool(a: Pick<McpApproval, 'server_name' | 'tool' | 'title'>):
   return a.tool ? `${a.server_name ?? 'MCP'} · ${bare(a.tool)}` : a.title;
 }
 
-/** The arguments on one line, capped — the card's redacted copy. */
-function argsLine(json: string): string | null {
-  const flat = json.trim().replace(/\s+/g, ' ');
-  if (!flat || flat === '{}' || flat === 'null') return null;
-  return flat.length > 400 ? `${flat.slice(0, 399)}…` : flat;
+/** The arguments in full — the card's redacted copy, pretty-printed: the
+ *  person approves what they can read (the block scrolls, height-capped). */
+export function argsText(json: string): string | null {
+  const raw = json.trim();
+  if (!raw || raw === '{}' || raw === 'null') return null;
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2);
+  } catch {
+    return raw;
+  }
 }
 
 /** The dock row for a card. "Always" (a workspace auto-approve rule) is
@@ -45,7 +50,7 @@ export function askAsPending(a: McpApproval, opts: { canDecide: boolean; always:
   return {
     requestId: MCP_ASK + a.id,
     kind: 'permission',
-    prompt: argsLine(a.args_redacted_json),
+    prompt: argsText(a.args_redacted_json),
     reason: a.detail,
     options,
     canRespond: opts.canDecide,

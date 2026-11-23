@@ -33,6 +33,9 @@ impl AgentRuntime {
             self.shutdown().await;
             return;
         }
+        // Client terminals are the daemon's own children: nothing reaches
+        // them after this (the agents' pending calls are refused on adopt).
+        super::client_calls::drop_all();
         let lives: Vec<Arc<Live>> = self
             .inner
             .live

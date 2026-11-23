@@ -22,6 +22,8 @@
 //! * `fs-read <path>` / `fs-write <path>` — `fs/read_text_file` /
 //!   `fs/write_text_file` (content `written\n`) on the client, then
 //!   `read: <content>` / `wrote` (or `refused <code>`).
+//! * `term-keep <command>` — `terminal/create` only (left running), then
+//!   `started <terminalId>`.
 //! * `term <command>` — an `execute` tool call run on a client terminal:
 //!   `terminal/create`, the terminal embedded in the call's content,
 //!   `wait_for_exit`, `output`, `release`, then `term: <output>`.
@@ -395,7 +397,10 @@ fn main() {
                         );
                         done("end_turn");
                     }
-                    t if t.starts_with("fs-") || t.starts_with("term ") => {
+                    t if t.starts_with("fs-")
+                        || t.starts_with("term ")
+                        || t.starts_with("term-keep ") =>
+                    {
                         if client_turn(&mut lines, &id, &sid, t).is_none() {
                             return;
                         }
@@ -482,6 +487,21 @@ fn client_turn(
     let done = |stop: &str| reply(id, json!({"stopReason":stop}));
     let mut lines = lines;
     match text {
+        // A terminal left running: created, never waited on or released.
+        t if t.starts_with("term-keep ") => {
+            let m = call(
+                lines,
+                "tk",
+                "terminal/create",
+                json!({"sessionId":sid,"command":t[10..].to_string()}),
+            )?;
+            let tid = m["result"]["terminalId"]
+                .as_str()
+                .unwrap_or("none")
+                .to_string();
+            chunk(&sid, "agent_message_chunk", &format!("started {tid}"));
+            done("end_turn");
+        }
         t if t.starts_with("fs-read ") || t.starts_with("fs-write ") => {
             let path = std::env::current_dir()
                 .map(|d| {

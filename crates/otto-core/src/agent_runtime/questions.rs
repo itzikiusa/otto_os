@@ -30,6 +30,12 @@ pub struct RuntimeQuestion {
     pub allow_empty: bool,
     pub allow_free_text: bool,
     pub options: Vec<QuestionOption>,
+    /// The page an ACP url-mode elicitation asks the person to open — set
+    /// only by Otto's driver, never from a model- or schema-supplied
+    /// question. The card opens exactly this URL, and only when the person
+    /// chooses its open option.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,6 +139,7 @@ mod tests {
             required: true,
             allow_empty: false,
             allow_free_text: false,
+            open_url: None,
             options: vec![QuestionOption {
                 value: "raw".into(),
                 label: "Display".into(),

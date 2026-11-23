@@ -776,6 +776,7 @@ impl AgentRuntime {
     /// stop), then wait for the queued DB writes. The next boot's
     /// [`Self::recover`] settles the turns they leave open.
     pub async fn shutdown(&self) {
+        client_calls::drop_all();
         let lives: Vec<Arc<Live>> = self
             .inner
             .live
@@ -838,6 +839,7 @@ impl AgentRuntime {
     /// processes first) and reconcile the persisted projection after a
     /// portable state-archive restore.
     pub async fn reset_for_restore(&self) -> Result<usize> {
+        client_calls::drop_all();
         let keys: Vec<Id> = self.inner.live.iter().map(|e| e.key().clone()).collect();
         let mut held_shutdowns = Vec::new();
         for id in keys {
@@ -3257,6 +3259,7 @@ pub(super) fn apply_step_opts(
                     questions: vec![],
                     question_title: None,
                     answers: None,
+                    for_person: false,
                 };
                 let mut item = item(
                     format!("{}:approval:{id}", turn_id.as_deref().unwrap_or_default()),
@@ -3289,6 +3292,7 @@ pub(super) fn apply_step_opts(
                 title,
                 questions,
                 tool_item_id: _,
+                for_person,
             } => {
                 let id = scope_request_id(st, &id);
                 let turn_id = st.turn.as_ref().map(|t| t.id.clone());
@@ -3305,6 +3309,7 @@ pub(super) fn apply_step_opts(
                     questions,
                     question_title: title,
                     answers: None,
+                    for_person,
                 };
                 emit(
                     inner,

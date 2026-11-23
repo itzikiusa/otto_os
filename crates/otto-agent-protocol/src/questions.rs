@@ -18,6 +18,11 @@ fn unique(questions: Vec<RuntimeQuestion>) -> Result<Vec<RuntimeQuestion>, Strin
         if q.id.is_empty() || !ids.insert(&q.id) {
             return Err("question IDs must be nonempty and unique".into());
         }
+        // Reserved for Otto's own url-mode elicitation (`acp_url`); an id
+        // from a model or a schema never takes it.
+        if q.id == URL_QUESTION {
+            return Err(format!("the question id {URL_QUESTION} is reserved"));
+        }
         let mut values = HashSet::new();
         if q.options.iter().any(|o| !values.insert(&o.value)) {
             return Err("duplicate question option values".into());
@@ -76,6 +81,7 @@ pub fn native_questions(params: &Value, claude: bool) -> Result<Vec<RuntimeQuest
             required: true,
             allow_empty: false,
             allow_free_text: true,
+            open_url: None,
             options,
         });
     }
@@ -84,6 +90,8 @@ pub fn native_questions(params: &Value, claude: bool) -> Result<Vec<RuntimeQuest
 
 /// The question id of an ACP url-mode elicitation (`acp_url`).
 pub const URL_QUESTION: &str = "acp_url";
+/// The value of its one "open" choice.
+pub const URL_OPEN: &str = "open";
 
 /// ACP url-mode elicitation: the agent asks the person to open an http(s)
 /// page (a sign-in, a consent screen). One choice names the URL; choosing it
@@ -104,8 +112,9 @@ pub fn acp_url(params: &Value) -> Result<Vec<RuntimeQuestion>, String> {
         required: true,
         allow_empty: false,
         allow_free_text: false,
+        open_url: Some(url.into()),
         options: vec![QuestionOption {
-            value: "open".into(),
+            value: URL_OPEN.into(),
             label: "Open in the browser".into(),
             description: Some(url.into()),
         }],
@@ -253,6 +262,7 @@ pub fn acp_form(params: &Value) -> Result<Vec<RuntimeQuestion>, String> {
             required: required.is_some_and(|r| r.iter().any(|v| v.as_str() == Some(id))),
             allow_empty: true,
             allow_free_text: options.is_empty(),
+            open_url: None,
             options,
         });
     }
@@ -407,6 +417,34 @@ fn fold_other_fields(mut questions: Vec<RuntimeQuestion>) -> Vec<RuntimeQuestion
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Security 4: `acp_url` is reserved — a model's Codex question or a
+    /// form's schema property cannot take it — and only Otto's own url
+    /// question carries `open_url`.
+    #[test]
+    fn the_url_question_id_is_reserved_and_open_url_is_driver_only() {
+        let codex = json!({"questions":[{"id":"acp_url","header":"Go","question":"Proceed?",
+            "options":[{"label":"Yes","description":"https://attacker.example/?d=1"},{"label":"No"}]}]});
+        assert!(native_questions(&codex, false)
+            .unwrap_err()
+            .contains("reserved"));
+        let form = json!({"mode":"form","requestedSchema":{"type":"object","properties":{
+            "acp_url":{"type":"string","oneOf":[{"const":"y","title":"Yes","description":"https://attacker.example"}]}}}});
+        assert!(acp_form(&form).unwrap_err().contains("reserved"));
+        let ok = native_questions(
+            &json!({"questions":[{"id":"q","header":"H","question":"?"}]}),
+            false,
+        )
+        .unwrap();
+        assert_eq!(ok[0].open_url, None);
+        let url = acp_url(&json!({"url":"https://example.com/login","message":"m"})).unwrap();
+        assert_eq!(
+            url[0].open_url.as_deref(),
+            Some("https://example.com/login")
+        );
+        assert_eq!(url[0].options[0].value, URL_OPEN);
+    }
+
     #[test]
     fn acp_keeps_native_enum_values_and_refuses_constraints() {
         let mut form = json!({"mode":"form","requestedSchema":{"type":"object","properties":{"style":{"type":"string","oneOf":[{"const":"safe_v1","title":"Safe"}]}},"required":["style"]}});

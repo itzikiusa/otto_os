@@ -338,6 +338,9 @@ pub(super) struct AcpDriverState {
     pub(super) terminal_output: HashMap<String, String>,
     pub(super) client_seq: u64,
     pub(super) client_waits: HashMap<String, client::ClientWait>,
+    /// Restored waits nobody can answer any more (answered with an error).
+    #[serde(skip)]
+    pub(super) client_orphans: Vec<Value>,
     /// Supervised writes / commands waiting for the person.
     pub(super) client_held: HashMap<String, client::HeldCall>,
     /// The session's running cost (`usage_update.cost`, USD) and its value
@@ -442,6 +445,7 @@ impl AcpDriver {
                 terminal_output: HashMap::new(),
                 client_seq: 0,
                 client_waits: HashMap::new(),
+                client_orphans: Vec::new(),
                 client_held: HashMap::new(),
                 cost_total: None,
                 cost_at_turn: None,
@@ -1020,24 +1024,59 @@ impl AcpDriver {
         }
     }
 
-    /// The access mode whose `mode_id` is `mode`, when the agent moved to
-    /// it on its own: the thread's access chip follows (gap 5).
+    /// The agent moved itself to the session mode `mode`. One rule: the
+    /// thread never shows a narrower access than the process really has,
+    /// and Otto never widens it silently.
+    /// - The thread's access is not a session mode here (agy's Full access
+    ///   is a launch flag): the process keeps it, nothing follows.
+    /// - A narrower (or equal) mode: the thread follows.
+    /// - A wider one: the thread keeps Otto's access, Otto sets the agent's
+    ///   mode back, and one line says so; the person widens through the
+    ///   access menu if they want it.
     fn follow_mode(&mut self, step: &mut DriverStep, mode: &str) {
         let Some(f) = self.flavor.mode_id else { return };
-        let to = [
+        if f(self.state.access).is_none() {
+            return;
+        }
+        let rank = |m: RuntimeAccessMode| match m {
+            RuntimeAccessMode::ApprovalRequired => 0,
+            RuntimeAccessMode::AutoAcceptEdits => 1,
+            RuntimeAccessMode::FullAccess => 2,
+        };
+        let Some(to) = [
             RuntimeAccessMode::ApprovalRequired,
             RuntimeAccessMode::AutoAcceptEdits,
             RuntimeAccessMode::FullAccess,
         ]
         .into_iter()
-        .find(|m| f(*m) == Some(mode));
-        if let Some(to) = to.filter(|to| *to != self.state.access) {
+        .find(|m| f(*m) == Some(mode))
+        .filter(|to| *to != self.state.access) else {
+            return;
+        };
+        if rank(to) < rank(self.state.access) {
             self.state.access = to;
             step.push(DriverEvent::AgentSettings {
                 model: None,
                 access: Some(to),
             });
+            return;
         }
+        // Wider: Otto keeps its access and sets the agent's mode back; the
+        // line says so (the person widens through the access menu).
+        let back = self.state.access;
+        if let Some(sid) = self.state.session_id.clone() {
+            self.write_mode(step, &sid, back);
+        }
+        self.ensure_autonomous_turn(step);
+        self.state.client_seq += 1;
+        step.push(DriverEvent::TurnItem(notice(
+            format!("{}:mode-kept:{}", self.turn(), self.state.client_seq),
+            format!(
+                "{} switched itself to {mode} \u{b7} Otto kept this thread on {} (choose a wider access to allow it)",
+                crate::driver::provider_name(self.provider),
+                back.as_str()
+            ),
+        )));
     }
 
     /// The model the agent reports in a `config_option_update` (its model
@@ -2744,6 +2783,7 @@ impl StructuredDriver for AcpDriver {
 
     fn on_line(&mut self, line: &str) -> DriverStep {
         let mut step = DriverStep::default();
+        self.answer_orphans(&mut step);
         let Ok(msg) = serde_json::from_str::<Value>(line) else {
             step.push(DriverEvent::Error(ProviderFailure {
                 class: "protocol_error".into(),
@@ -2818,6 +2858,8 @@ impl StructuredDriver for AcpDriver {
                                 .map(str::to_string),
                             questions,
                             tool_item_id: None,
+                            // An ACP elicitation (often an MCP server's, relayed).
+                            for_person: true,
                         });
                     }
                     Err(message) => step.write(
@@ -2893,6 +2935,7 @@ impl StructuredDriver for AcpDriver {
         s.sideband.ensure_restored(self.provider);
         s.mcp_servers = std::mem::take(&mut self.state.mcp_servers);
         self.state = s;
+        self.orphan_restored_waits();
         Ok(())
     }
 
@@ -3822,6 +3865,210 @@ mod tests {
         assert!(s.events.iter().any(|e| matches!(e,
             DriverEvent::TurnItem(TurnItem { kind: TurnItemKind::FileChange { file_name, .. }, .. })
                 if file_name == "/w/old.rs, /w/new.rs")));
+    }
+
+    /// Security 7 + review R7: the agent's own mode move never widens the
+    /// thread silently, and never relabels a mode the provider cannot
+    /// express (agy's Full access is a flag).
+    #[test]
+    fn an_agent_mode_move_never_widens_silently_or_understates() {
+        let update = |m: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"current_mode_update","currentModeId":"{m}"}}}}}}"#
+            )
+        };
+        let ready = |d: &mut AcpDriver, access| {
+            d.start(&LaunchContext {
+                access_mode: access,
+                ..ctx(None)
+            });
+            d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+            d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s","modes":{"currentModeId":"default","availableModes":[{"id":"default","name":"d"},{"id":"accept-edits","name":"a"},{"id":"promptUnmatched","name":"p"},{"id":"onRequest","name":"o"},{"id":"allowAll","name":"x"}]}}}"#);
+        };
+        let settings = |s: &DriverStep| {
+            s.events.iter().find_map(|e| match e {
+                DriverEvent::AgentSettings { access, .. } => *access,
+                _ => None,
+            })
+        };
+        // Wider (Supervised → allowAll): kept, set back, said.
+        let mut d = AcpDriver::muse("muse");
+        ready(&mut d, RuntimeAccessMode::ApprovalRequired);
+        let s = d.on_line(&update("allowAll"));
+        assert_eq!(settings(&s), None, "never widened silently");
+        assert_eq!(
+            sent(&s, 0)["params"]["modeId"],
+            "promptUnmatched",
+            "set back"
+        );
+        assert!(s.events.iter().any(|e| matches!(e,
+            DriverEvent::TurnItem(i) if matches!(&i.kind, TurnItemKind::SystemNotice { message, .. }
+                if message.contains("switched itself to allowAll") && message.contains("approval-required")))));
+        // The person chose Full access (the runtime's access switch).
+        let mut d = AcpDriver::muse("muse");
+        ready(&mut d, RuntimeAccessMode::FullAccess);
+        // Narrower (allowAll → onRequest): followed.
+        let s = d.on_line(&update("onRequest"));
+        assert_eq!(settings(&s), Some(RuntimeAccessMode::AutoAcceptEdits));
+        // agy on Full access (a launch flag): "default" relabels nothing.
+        let mut a = AcpDriver::agy("agy");
+        ready(&mut a, RuntimeAccessMode::FullAccess);
+        let s = a.on_line(&update("default"));
+        assert_eq!(settings(&s), None);
+        assert!(!s
+            .events
+            .iter()
+            .any(|e| matches!(e, DriverEvent::Request { .. })));
+    }
+
+    /// Security 5: a held write shows its content, a held command its cwd
+    /// and the env names the agent adds — bounded.
+    #[test]
+    fn a_held_write_or_command_shows_what_it_does() {
+        let mut d = AcpDriver::grok();
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"g"}}"#);
+        d.state.access = RuntimeAccessMode::ApprovalRequired;
+        let prompt_of = |s: &DriverStep| {
+            s.events
+                .iter()
+                .find_map(|e| match e {
+                    DriverEvent::Request { prompt, .. } => prompt.clone(),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let big = "secret-line\n".repeat(1000);
+        let w = json!({"jsonrpc":"2.0","id":"w1","method":"fs/write_text_file","params":{"sessionId":"g","path":"/w/run.sh","content":big}});
+        let p = prompt_of(&d.on_line(&w.to_string()));
+        assert!(p.starts_with("Write /w/run.sh\nsecret-line"), "{p}");
+        assert!(
+            p.contains("more bytes") && p.len() < 4300,
+            "bounded: {}",
+            p.len()
+        );
+        let c = r#"{"jsonrpc":"2.0","id":"c1","method":"terminal/create","params":{"sessionId":"g","command":"make deploy","cwd":"/etc","env":[{"name":"AWS_PROFILE","value":"prod"}]}}"#;
+        let p = prompt_of(&d.on_line(c));
+        assert_eq!(p, "make deploy\nin /etc\nenv: AWS_PROFILE");
+    }
+
+    /// Security 6: a chatty command's row keeps only the tail.
+    #[test]
+    fn a_client_terminals_row_keeps_a_bounded_tail() {
+        let mut d = AcpDriver::grok();
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"g"}}"#);
+        d.state.access = RuntimeAccessMode::FullAccess;
+        d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+        d.on_line(r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"g","update":{"sessionUpdate":"tool_call","toolCallId":"c1","title":"run","kind":"execute","status":"in_progress","rawInput":{"command":"yes"}}}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":3,"method":"terminal/create","params":{"sessionId":"g","command":"yes"}}"#);
+        let chunk = "y\n".repeat(32 * 1024);
+        for _ in 0..16 {
+            d.on_client_output("term-1", &chunk);
+        }
+        assert!(d.state.tools["c1"].output.len() <= 256 << 10);
+        assert!(d.state.terminal_output["term-1"].len() <= 256 << 10);
+    }
+
+    /// Review note: under Auto-accept edits a served command still asks
+    /// (edits only are auto-accepted); a write does not.
+    #[test]
+    fn auto_accept_edits_still_asks_before_a_client_command() {
+        let mut d = AcpDriver::grok();
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"g"}}"#);
+        d.state.access = RuntimeAccessMode::AutoAcceptEdits;
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":"c1","method":"terminal/create","params":{"sessionId":"g","command":"rm -rf build"}}"#);
+        assert!(s.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::Request {
+                kind: RequestKind::Command,
+                ..
+            }
+        )));
+        assert!(!s
+            .events
+            .iter()
+            .any(|e| matches!(e, DriverEvent::ClientCall { .. })));
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":"w1","method":"fs/write_text_file","params":{"sessionId":"g","path":"/tmp/x/a.txt","content":"hi"}}"#);
+        assert!(
+            s.events
+                .iter()
+                .any(|e| matches!(e, DriverEvent::ClientCall { .. })),
+            "an edit goes ahead"
+        );
+    }
+
+    /// Review R5: a client call in flight at a daemon restart is answered
+    /// with an error once the restored driver sees the agent's next line.
+    #[test]
+    fn a_client_call_in_flight_at_a_restart_is_answered_with_an_error() {
+        let mut d = AcpDriver::grok();
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"g"}}"#);
+        d.state.access = RuntimeAccessMode::FullAccess;
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":"w9","method":"terminal/wait_for_exit","params":{"sessionId":"g","terminalId":"term-1"}}"#);
+        assert!(s
+            .events
+            .iter()
+            .any(|e| matches!(e, DriverEvent::ClientCall { .. })));
+        let snap = d.snapshot_state();
+        let mut adopted = AcpDriver::grok();
+        adopted.restore_state(&snap).unwrap();
+        let s = adopted.on_line(r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"g","update":{"sessionUpdate":"usage_update","used":1,"size":2}}}"#);
+        assert_eq!(sent(&s, 0)["id"], "w9");
+        assert_eq!(sent(&s, 0)["error"]["code"], -32000);
+        let s = adopted.on_line(r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"g","update":{"sessionUpdate":"usage_update","used":1,"size":2}}}"#);
+        assert!(s.writes.is_empty(), "answered once");
+    }
+
+    /// Finding 1: a confined (Seatbelt) grok gets no `fs` capability and its
+    /// `fs/*` calls are refused — the daemon would write past the profile.
+    /// Terminals stay (they run under the same profile).
+    #[test]
+    fn a_confined_agent_is_not_served_fs() {
+        let init_of = |confined: bool| {
+            let mut d = AcpDriver::grok();
+            let mut spec = LaunchSpec {
+                program: if confined {
+                    "/usr/bin/sandbox-exec".into()
+                } else {
+                    "grok".into()
+                },
+                args: if confined {
+                    vec!["-p".into(), "(version 1)".into(), "grok".into()]
+                } else {
+                    Vec::new()
+                },
+                tail_args: Vec::new(),
+                env: Vec::new(),
+            };
+            d.adopt_spec(&mut spec);
+            let s = d.start(&ctx(None));
+            (d, sent(&s, 0))
+        };
+        let (_, open) = init_of(false);
+        assert_eq!(
+            open["params"]["clientCapabilities"]["fs"]["writeTextFile"],
+            true
+        );
+        let (mut d, init) = init_of(true);
+        let caps = &init["params"]["clientCapabilities"];
+        assert_eq!(caps["fs"]["writeTextFile"], false, "{caps}");
+        assert_eq!(caps["fs"]["readTextFile"], false, "{caps}");
+        assert_eq!(caps["terminal"], true);
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"g"}}"#);
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":7,"method":"fs/write_text_file","params":{"sessionId":"g","path":"/w/.git/hooks/post-checkout","content":"x"}}"#);
+        assert_eq!(sent(&s, 0)["error"]["code"], -32601);
+        assert!(!s
+            .events
+            .iter()
+            .any(|e| matches!(e, DriverEvent::ClientCall { .. })));
     }
 
     #[test]
