@@ -2,12 +2,15 @@
   // Under a finished turn that changed files: "3 changed files +71 −2 ·
   // Open diff", opening to the file list with each file's +/− (turnChanges.ts).
   // Open diff opens the thread's Changes surface on that file (the first,
-  // from the header). A file without diff text shows its name only.
+  // from the header). A file without diff text shows its name only. Open
+  // by default up to five files, folded past that.
+  import { untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { changeTotals, type FileDelta } from './turnChanges';
 
   let { files, onopendiff }: { files: FileDelta[]; onopendiff?: (path: string) => void } = $props();
-  let open = $state(false);
+  // A few files show at once; more than five start folded.
+  let open = $state(untrack(() => files.length <= 5));
   const total = $derived(changeTotals(files));
   const name = $derived(`${files.length} changed ${files.length === 1 ? 'file' : 'files'}`);
 </script>
@@ -27,12 +30,15 @@
     <ul class="tc-files">
       {#each files as f (f.path)}
         <li>
+          {#snippet row()}
+            <span class="ellipsis mono" dir="ltr">{f.path}</span>
+            {#if f.added !== null}<span class="tc-n"><span class="tc-add">+{f.added}</span> <span class="tc-del">−{f.removed}</span></span>{/if}
+          {/snippet}
           {#if onopendiff}
-            <button type="button" class="tc-file" title="Open {f.path} in Changes" onclick={() => onopendiff(f.path)}><span class="ellipsis mono" dir="ltr">{f.path}</span></button>
+            <button type="button" class="tc-file" title="Open {f.path} in Changes" onclick={() => onopendiff(f.path)}>{@render row()}</button>
           {:else}
-            <span class="tc-file"><span class="ellipsis mono" dir="ltr">{f.path}</span></span>
+            <span class="tc-file">{@render row()}</span>
           {/if}
-          {#if f.added !== null}<span class="tc-add">+{f.added}</span><span class="tc-del">−{f.removed}</span>{/if}
         </li>
       {/each}
     </ul>
@@ -94,8 +100,14 @@
     gap: var(--sp-2);
     min-block-size: 28px;
   }
+  .tc-n {
+    flex-shrink: 0;
+    margin-inline-start: auto;
+  }
   .tc-file {
     display: flex;
+    align-items: center;
+    gap: var(--sp-2);
     flex: 1;
     min-inline-size: 0;
     padding: 0;
@@ -120,7 +132,7 @@
     .tc-toggle,
     .tc-open,
     button.tc-file {
-      min-block-size: var(--hit-min);
+      min-block-size: calc(var(--hit-min) + 8px);
     }
   }
 </style>

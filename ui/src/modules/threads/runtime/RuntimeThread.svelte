@@ -727,6 +727,7 @@
     border-radius: var(--radius-l);
     background: var(--surface);
     box-shadow: var(--shadow-card);
+    flex-shrink: 0;
   }
   /* Files dragged over the pane (composerDrop.ts): a calm ring, no overlay. */
   .rt-composer:global([data-drop]) { border-color: var(--accent-line-strong); background: var(--accent-faint); }
@@ -751,6 +752,11 @@
     text-align: start;
     outline: none;
     field-sizing: content;
+  }
+  /* A short pane (a phone on its side with the keyboard up): one row, so the
+     conversation keeps its lines. */
+  @container (max-block-size: 420px) {
+    .rt-composer textarea { min-block-size: 1lh; }
   }
   .rt-foot {
     display: flex;

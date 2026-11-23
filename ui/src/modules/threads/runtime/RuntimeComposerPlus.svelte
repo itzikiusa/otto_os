@@ -72,8 +72,8 @@
   }
   @media (pointer: coarse) {
     .rt-plus {
-      inline-size: var(--hit-min);
-      block-size: var(--hit-min);
+      inline-size: calc(var(--hit-min) + 8px);
+      block-size: calc(var(--hit-min) + 8px);
     }
   }
 </style>

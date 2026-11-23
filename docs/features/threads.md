@@ -311,7 +311,8 @@ Muse — and pi) unless a line says otherwise.
   or *hide all* (`workLog.ts` `visibleTools`, per device). Failures, gated
   calls, threads the agent opened, replies, questions and notices always show.
 - **Changes card.** A finished turn that changed files ends with "3 changed
-  files +6 −2 · Open diff", opening to each file's +/− (`runtime/turnChanges.ts`,
+  files +6 −2 · Open diff", listing each file's +/− (open up to five files,
+  folded past that; `runtime/turnChanges.ts`,
   `RuntimeTurnChanges.svelte`). The counts come from the turn's own
   file-change items, the same shape from every driver (a unified `diff_str`,
   or `old_str` / `new_str`); a file whose items carry no text shows its name
