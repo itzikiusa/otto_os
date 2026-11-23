@@ -1237,74 +1237,86 @@ same for every provider, and Otto now does too.
   for the agent; Shift-click several models in a new thread's picker sends
   one prompt to each.
 
-**Otto's version.** One visual language for every child — a thread a person
-asked from the composer, one the agent opened with `otto.thread_open`, a
-council's seats — on Claude, Codex and the ACP providers (Gemini, Grok,
-opencode, pi) alike:
+**Otto's version.** One concept: anything working under a thread is a
+**subagent** of it — whoever started it, whichever provider runs it (Claude,
+Codex, the ACP providers Gemini / Antigravity / Grok / opencode / Muse, and
+pi). The verb is **Delegate**; statuses are always **Working · Needs you ·
+Done · Failed · Stopped**. A subagent shows in four places only.
 
-- **Start one** — in a runtime thread's composer, **Ask another agent**
-  (the people icon beside Attach) opens the agent menu; each model picked
-  becomes a chip above the text ("Ask Codex · GPT-5"), and picking 2–4 is
-  **Ask several**. Typing `@` and part of a provider or model name (`@cod`,
-  `@opus`) offers the same agents (↑ ↓, ↵ / Tab picks, Esc closes). With
-  chips set, Send asks them instead of this thread's agent:
-  `POST /runtime-sessions/{id}/children` opens one new thread per agent,
-  all or none, linked to this one, in its folder. The chip row says what
-  they may do: this thread's access ("asks before it edits", "can edit
-  files", "full access", or "read-only"); the composer's access chip narrows
-  it, never widens it (a wider pick is refused in words). A full group (8
-  open threads beside the root) is refused above the composer with how many
-  still fit.
-- **Inside the thread** — where they were asked, the parent shows a live
-  card per child (`RuntimeChildCard.svelte`): provider icon, title, model ·
-  effort, Starting / Working / Needs you / Done / Failed / Stopped, elapsed
-  time, its latest step while it works and its answer's first line once it
-  ends, with **Stop**, **Open beside** and **Open**; clicking the row opens
-  its last answer inline, read-only. Several asked together sit under one
-  header ("3 agents · 2 working · Stop all"). An agent's `thread_open` call
-  becomes the same card once it returned (a stretch holding one never folds
-  into "Worked for …"); a provider's own subagent keeps its card, drawn with
-  the same row. Cards follow each child's own session events (its projection
-  stays live while the card is on screen) — no polling.
-- **On the side** — the sidebar nests threads under the thread they belong
-  to (indented, provider icon, status dot); the parent row reads "· 3", its
-  dot speaks for the family (one needs you → needs you, one works →
-  working), and its chevron folds them. A child whose parent is closed,
-  archived or filtered out still shows, marked **detached**. A council's
-  seats nest the same way under seat 1. History and search
-  are unchanged.
-- **Hearing back** — each child turn's end writes one line in the parent:
-  "Codex finished: <first line> · Open". When the parent's **agent** opened
-  the child and the turn answered what it asked (its opening prompt or an
-  `otto.thread_message`), the answer is also queued for that agent (T3's
-  wake-on-completion): `[Reply from thread "…" (codex, id …): its turn
-  finished …]` + the answer (cut at 16,000 characters). It waits in the
-  parent's queue — the queue bar shows it, with Send now / Remove — and goes
-  out at the parent's next idle moment; one entry per child (a newer answer
-  replaces an older one), never twice for one turn. A dormant parent is not
-  respawned for it, not after a restart either (the person's next message or
-  Revive sends it); a closed one gets nothing — closing a parent does not
-  stop its children (they stay, marked detached, with their answers; Stop
-  them in their own thread) — and a delivered reply never wakes a
-  grandparent. The parent's turn runs under
-  the parent's own access mode, so every approval it would need is asked as
-  usual. A person's ask never wakes the parent's agent.
-- **Both at once** — **Open beside** (card, sidebar row) puts the child in
-  the split next to its parent (1-up → 2-up → grid). On a phone the child
-  opens in place and the header shows **‹ <parent title>** to go back.
+- **The agent drives** — every top-level thread's first turn (and the first
+  after a fresh context) reaches its agent with short delegation rules ahead
+  of the person's words (`runtime/delegation.rs`; the timeline keeps the
+  person's text): delegate with `otto.thread_open` (one subagent per part, a
+  self-contained task), call `otto.thread_capabilities` once first (the
+  providers, models and efforts enabled here —
+  `GET /runtime-sessions/{id}/subagent-targets`), never substitute a missing
+  provider, never poll — completion wakes you — and report a failed subagent
+  instead of retrying it. `otto.thread_open` answers "Completion wakes this
+  thread … Do not poll it". So "do this with a Codex subagent and a Gemini
+  subagent" typed to a Claude (or Codex) thread is enough. A subagent's first
+  message reads as a task: `[Subagent task from thread "…" (…, id …). Do the
+  work yourself; start no subagents unless this task says to. …]`. It keeps
+  its opener's MCP profiles, browser opt-in and network profile, and — on the
+  same CLI — its named account.
+- **A person delegates too** — **Delegate to…** (the people icon, or `@cod`,
+  `@opus`) adds provider chips above the text; Send opens one subagent per
+  chip (`POST /runtime-sessions/{id}/children`, 1–4, this thread's folder and
+  access or narrower). By default the subagent gets the message, its images
+  and a bounded block of the conversation so far (≤ 6 000 characters, newest
+  kept), and its answer goes to the thread's agent like an agent-opened one;
+  **Answer to me only** (off by default) keeps it with the person.
+- **1. The timeline row** — a turn's subagents are ONE row
+  (`RuntimeChildGroup.svelte`, `turnSubagents` in `childThreads.ts`): up to
+  three stacked provider icons and "+N", "3 subagents", the tally ("2 working
+  · 1 done"), elapsed, and a chevron to one row each (provider icon, title,
+  status word, elapsed, one-line result) whose full answer still opens inline.
+  A provider's own subagent (Claude's Task, Codex's agents, agy's swarm) is a
+  subagent like any other in that row. A subagent's "finished" notice adds no
+  second line (it still draws the row when its start is not in the timeline).
+- **2. The waiting line** — under the timeline: "Waiting on 2 subagents and 1
+  command · <titles> · **Stop**" (`liveStatus.ts`). The strip above the
+  composer and thread details keep only commands and timers, as **Background
+  tasks**.
+- **3. The attention dock** — a subagent's approval shows above the parent's
+  composer, "Approval needed from <title>", answered there through the
+  subagent's own request route (`RuntimeChildApprovals.svelte`; only
+  subagents whose row says they wait on the person are loaded).
+- **4. Thread details' Subagents section** — `subagentSection` in
+  `childThreads.ts` gives its rows: the parent first, the working ones, then
+  "Previous".
+- **Opening one** — a click (its row's Open, Answer) opens it as a tab in the
+  right panel while the parent stays put (`RuntimeSubagentPane.svelte`);
+  ⌘/Ctrl-click opens it in the main view, and one per-device setting in that
+  tab ("Open subagents in the main view") flips the default. On a phone the
+  panel is a full-height sheet. Inside a subagent a fixed line reads
+  "Subagent of <parent> · <task> · **Open parent**".
+- **One Stop** — the composer's Stop and the waiting line's Stop call
+  `POST /runtime-sessions/{id}/stop-family`: the thread's turn and every open
+  subagent's (recursively) turn and background work (the waiting line also
+  the thread's own background work). A subagent stopped this way does not wake
+  the thread again. Each subagent row keeps its own Stop.
+- **Hearing back** — each answer the thread's agent asked for is queued for
+  it as `[Reply from subagent "…" (codex, id …): its turn finished. …]` + the
+  answer (cut at 16,000 characters; a failed turn carries its error); replies
+  waiting together go out as one turn ("2 subagents finished"); a dormant
+  parent is resumed to read it (not for replies a daemon restart cut off); a
+  closed one gets nothing. The parent's row rolls up its subagents
+  (`childRollup`: working / needs you / failed) from the rows alone.
+- **Compare models** — the new-thread stage's **Compare models** (was "Ask
+  several" / Council) sends one prompt to 2–4 read-only threads;
+  **Compare answers** (was Synthesize) adds the judge.
 
-| Word | Where | What |
-|---|---|---|
-| **Ask another agent** | a thread's composer (people icon, or `@`) | one new linked thread on the chosen provider / model / effort |
-| **Ask several** | the new-thread stage (a council), or 2–4 chips in a thread's composer | the same message to each, side by side |
-| `otto.thread_open` | the agent itself | a linked thread whose answers come back to the agent |
+Not yet: a subagent's question is not routed to the parent's agent first (it
+shows as Needs you on its row); provider switch inside a thread, a worktree
+per subagent, fork / merge and `@thread` mentions.
 
 Meta and markers: a child carries `meta.child_of {id, by: "person" |
 "agent"}` (the opener; `parent_id` stays the group's root). The parent's
 notices end in `[otto-thread:<id>[,<id>…]:started|finished|failed|stopped]`
 (`threadNoticeOf` in `runtime/childThreads.ts`). Code:
 `crates/otto-agent-protocol/src/runtime/children.rs`;
-`ui/src/modules/threads/runtime/{childThreads.ts,askAgents.ts,askTargets.svelte.ts,childNav.ts,RuntimeAskAgent.svelte,RuntimeChildCard.svelte,RuntimeChildGroup.svelte,RuntimeChildNotice.svelte,ThreadParentChip.svelte}`,
+`crates/otto-agent-protocol/src/runtime/{delegation.rs,family.rs}`;
+`ui/src/modules/threads/runtime/{childThreads.ts,askAgents.ts,askTargets.svelte.ts,childNav.ts,liveStatus.ts,RuntimeAskAgent.svelte,RuntimeChildCard.svelte,RuntimeChildGroup.svelte,RuntimeChildNotice.svelte,RuntimeChildApprovals.svelte,RuntimeSubagentPane.svelte,RuntimeSubagentOf.svelte,ThreadParentChip.svelte}`,
 `ui/src/modules/threads/threadFamilies.ts`.
 
 ### Threads layout
