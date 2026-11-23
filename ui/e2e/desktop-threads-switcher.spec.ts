@@ -228,3 +228,20 @@ test('switching threads with the composer focused throws nothing (Chromium blur 
   }
   expect(errors.filter((e) => /state_unsafe_mutation/.test(e))).toEqual([]);
 });
+
+test('RTL: status words and key hints keep their own order', async ({ page }) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.addInitScript(() => localStorage.setItem('otto_direction', 'rtl'));
+  const id = await thread('codex', `Sw rtl ${RUN}`);
+  await prompt(id, 'hello');
+  await page.goto(`/#/threads/${id}`);
+  await expect(page.getByTestId(`runtime-thread-${id}`)).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator('html')).toHaveAttribute('dir', 'rtl');
+  const dir = (l: ReturnType<Page['locator']>) => l.first().evaluate((el) => getComputedStyle(el).direction);
+  // "1 subagent", "Working 18s", "5m": an English run, never reordered by the page's RTL.
+  expect(await dir(page.getByTestId(`thread-status-${id}`))).toBe('ltr');
+  await openPalette(page);
+  await expect(palette(page).locator('kbd').first()).toBeVisible();
+  expect(await dir(palette(page).locator('kbd'))).toBe('ltr');
+  expect(await dir(threadRow(page, id).locator('.opt-meta'))).toBe('ltr');
+});
