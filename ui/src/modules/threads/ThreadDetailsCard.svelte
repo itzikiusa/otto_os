@@ -53,8 +53,10 @@
     floating?: boolean;
     /** Hides the floating card (remembered; ⋯ › View › Thread details brings it back). */
     ondismiss?: () => void;
+    /** One summary row that opens on tap (a surface is open below it). */
+    summary?: boolean;
   }
-  let { cwd, threadId = null, floating = false, ondismiss }: Props = $props();
+  let { cwd, threadId = null, floating = false, ondismiss, summary = false }: Props = $props();
   /** "MCP · N servers" (the thread's MCP server list, from its last start). */
   const mcpServers = $derived(threadId ? (runtimeViews.projections[threadId]?.mcpServers ?? null) : null);
   const mcpLine = $derived(mcpServers && mcpServers.length ? mcpSummary(mcpServerRows(mcpServers, [], 'The agent')) : null);
@@ -165,7 +167,7 @@
   // A short screen (a phone on its side): heading the panel, the card is one
   // summary row (folder · branch · changes) that opens on tap, so the
   // surface below (Changes, a diff) keeps its height.
-  const short = $derived(!floating && viewport.isShort);
+  const short = $derived(!floating && (viewport.isShort || summary));
   let expanded = $state(false);
   const nowMs = $derived(subagents?.running.length ? now() : Date.now());
 
@@ -196,9 +198,18 @@
     }
   });
 
-  function commit(r: Repo): void {
-    git.requestWip(r.id);
-    router.go(`git/${encodeURIComponent(r.id)}`);
+  // The commit sheet (Git's changes panel over the thread) loads on first open.
+  const CommitSheetLazy = lazyComponent(() => import('./ThreadCommitSheet.svelte'));
+  let commitOpen = $state(false);
+  $effect(() => {
+    if (commitOpen && CommitSheetLazy.error) {
+      toasts.error('Couldn’t open the commit sheet', CommitSheetLazy.error);
+      commitOpen = false;
+      CommitSheetLazy.retry();
+    }
+  });
+  function commit(_r: Repo): void {
+    commitOpen = true;
   }
 
   function runAction(): void {
@@ -217,7 +228,7 @@
     const dirty = (status?.changes.length ?? 0) > 0;
     const canPush = !!branch && !!r.remote_url && (!status?.upstream || (status?.ahead ?? 0) > 0);
     const items: MenuItem[] = [
-      { label: 'Commit…', icon: 'commit', disabled: !dirty, title: dirty ? 'Open the commit composer in Git' : 'Nothing to commit', action: () => commit(r) },
+      { label: 'Commit…', icon: 'commit', disabled: !dirty, title: dirty ? 'Review the changes and commit' : 'Nothing to commit', action: () => commit(r) },
       {
         label: status?.upstream ? 'Push…' : 'Publish branch…',
         icon: 'arrowUp',
@@ -384,6 +395,11 @@
     {#if r.task && threadId && runtimeThreads.get(threadId)}<RuntimeTaskStop part="button" sessionId={threadId} task={r.task} />{/if}
   </div>
 {/snippet}
+
+{#if commitOpen && repo && CommitSheetLazy.component}
+  {@const CommitSheet = CommitSheetLazy.component}
+  <CommitSheet {repo} onclose={() => (commitOpen = false)} />
+{/if}
 
 {#if prOpen && repo && CreatePrLazy.component}
   {@const CreatePr = CreatePrLazy.component}
