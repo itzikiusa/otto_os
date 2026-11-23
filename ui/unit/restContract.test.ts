@@ -27,8 +27,9 @@ const rust = stripRs(
     .map((p) => readFileSync(new URL(p, root), 'utf8'))
     .join('\n'),
 );
-// lib/api/types.ts is an export-* barrel over lib/api/types/<area>.ts; read them all.
-const ts = ['types.ts', ...readdirSync(new URL('ui/src/lib/api/types/', root)).sort().map((f) => `types/${f}`)]
+// lib/api/types.ts is an export-* barrel over lib/api/types/<area>.ts (an area
+// may be split into lib/api/types/<area>/*.ts); read them all.
+const ts = ['types.ts', ...readdirSync(new URL('ui/src/lib/api/types/', root), { recursive: true }).map(String).filter((f) => f.endsWith('.ts')).sort().map((f) => `types/${f}`)]
   .map((p) => readFileSync(new URL(`ui/src/lib/api/${p}`, root), 'utf8'))
   .join('\n')
   .replace(/\/\*[\s\S]*?\*\//g, '')
