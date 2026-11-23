@@ -115,7 +115,7 @@ test('an approval docks above the composer and ⌘↵ answers it from an empty c
 
   // Typing in the composer never answers it…
   await composer.fill('a thought');
-  await composer.press('ControlOrMeta+Enter');
+  await composer.press('Enter'); // queues (the default mid-turn delivery; ⌘↵ would steer)
   await expect(dock).toBeVisible();
   await expect(thread.getByTestId('runtime-queued')).toContainText('a thought');
   // … an empty composer's ⌘↵ does.

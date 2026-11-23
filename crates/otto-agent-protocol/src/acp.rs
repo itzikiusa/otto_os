@@ -682,7 +682,7 @@ impl AcpDriver {
             format!("acp-reset:{id}:session-boundary"),
             TurnItemStatus::Completed,
             None,
-            TurnItemKind::SessionBoundary,
+            TurnItemKind::SessionBoundary { handoff: None },
         )));
         step.push(DriverEvent::TurnItem(notice(
             format!("acp-reset:{id}"),

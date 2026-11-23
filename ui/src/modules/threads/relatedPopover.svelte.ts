@@ -1,6 +1,6 @@
-// Which thread's "Related threads" popover is open. The header chip owns the
-// popover; a ⋯ menu ("Related threads…", page or pane) asks it to open here,
-// so a thread with nothing related yet can still message one or start a room.
+// Which thread's "Send to another thread" popover is open. ⋯ › Send to
+// another thread… (page or pane) asks ThreadsPage to open it under the
+// toolbar's ⋯: message a thread, open one beside, start a room.
 class RelatedPopover {
   openFor = $state<string | null>(null);
 

@@ -137,7 +137,7 @@ test('toolbar ⋯ on desktop: at most 9 entries, one terminal, layout in View', 
     'Open in IDE', 'Rename…', 'Terminal drawer', 'Allow UI control', 'Continue on phone…', '—', 'Close thread…', 'Delete thread…', '—', RELATED_LABEL, 'View',
   ]);
   const view = items.find((i) => i.label === 'View');
-  assert.deepEqual(labels(view?.children ?? []), ['Single thread', 'Split', 'Grid', '—', 'Project card']);
+  assert.deepEqual(labels(view?.children ?? []), ['Single thread', 'Split', 'Grid', '—', 'Thread details']);
   // The page's drawer open: that one (checked) replaces the thread's.
   const open = threadsPageMenu({ threadItems: runtimeItems, layout: 'single', terminalOpen: true, cardOn: false, threadId: 'x', sidebarVisible: true }, acts);
   const term = open.filter((i) => /terminal/i.test(i.label ?? ''));

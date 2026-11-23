@@ -198,7 +198,7 @@ test('three threads in Grid: the pane strip, Message every pane, broadcast, and 
 
   // Related › Message › All open threads in this project reaches a structured thread.
   await page.getByTestId(`thread-pane-${a}`).getByRole('button', { name: 'More thread actions' }).click();
-  await page.locator('.ctx-menu').first().getByRole('menuitem', { name: 'Related threads…' }).click();
+  await page.locator('.ctx-menu').first().getByRole('menuitem', { name: 'Send to another thread…' }).click();
   await page.getByTestId('related-message-any').click();
   await page.locator('.ctx-menu').first().getByRole('menuitem', { name: /All open threads in this project/ }).click();
   const dialog = page.getByRole('dialog');

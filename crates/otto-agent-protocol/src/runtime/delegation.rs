@@ -29,15 +29,23 @@ Ordinary tasks need none of this. When the user asks for a subagent, another pro
 - A subagent that failed: tell the user why (its reply carries the error); do not retry it or open another unasked.
 - otto_thread_message sends a finished subagent follow-up work; otto_thread_close stops one you no longer need.";
 
-/// What the driver sends for `req` in `st`'s thread ([`with_rules`] on a
-/// conversation's first turn: no turn yet, or a fresh context).
+/// What the driver sends for `req` in `st`'s thread: a provider switch's
+/// context handoff (`fresh::with_handoff`), then [`with_rules`] on a
+/// conversation's first turn — no turn yet, or a fresh context (a switch
+/// included, so the new provider gets the rules too).
 pub(super) fn for_driver<'a>(
     inner: &Inner,
     st: &State,
     req: &'a RuntimePromptReq,
 ) -> Cow<'a, RuntimePromptReq> {
     let first = st.proj.next_turn_ordinal == 0 || req.fresh_context;
-    with_rules(inner.host.teaches_delegation(), &st.session, req, first)
+    let teaches = inner.host.teaches_delegation();
+    match super::fresh::with_handoff(st, req) {
+        Some(switched) => {
+            Cow::Owned(with_rules(teaches, &st.session, &switched, first).into_owned())
+        }
+        None => with_rules(teaches, &st.session, req, first),
+    }
 }
 
 /// The rules ahead of the person's words on a conversation's first turn

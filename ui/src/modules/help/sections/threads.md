@@ -13,26 +13,41 @@ Threads (Experimental) is a conversation-first workspace for coding agents. It k
 ## Getting started
 
 1. Open **Threads** in the **Work** group of the sidebar (or press `⌘K` and run **Go to Threads**).
-2. Click **New thread** (in the sidebar or the toolbar ⋯) to open the welcome stage, pick **Claude Code**, **Codex**, **Antigravity** or any custom provider, choose your repository folder, and type your opening prompt.
-3. Click any thread in the left rail to read its live conversation, or `⌘`-click (or choose **Open beside**) to compare up to 4 threads side-by-side in **Split** or **Grid** mode.
+2. Click **New thread** (in the sidebar or the toolbar ⋯) to open the welcome stage, pick **Claude Code**, **Codex**, **Antigravity** or any custom provider, choose your repository folder, and type your opening prompt. To keep the work apart, pick **New worktree** in the checkout chip under the composer: nothing is asked — when you send, Otto names a branch from your message (under the repo's usual prefix, like `feat/`), makes the worktree and starts the thread in it. **Name the branch…** in the same menu picks the name yourself. If making it fails, your message stays and **Retry** tries again.
+3. Press `⌘K` in Threads: it opens on your threads — what needs you first (**Approval**, **Question**, **Failed**), then **Done**, then **Working**, then the rest. Type to filter threads and commands together; **New thread: …** starts one with what you typed. `↵` opens a thread, `⌘↵` opens it beside the current one in a split. Elsewhere in Otto, `⌘K` shows **Threads needing you** while any wait. On a phone it is **More › Commands**.
+4. Click any thread in the left rail to read its live conversation, or `⌘`-click (or choose **Open beside**) to compare up to 4 threads side-by-side in **Split** or **Grid** mode.
 
 ## Everything it can do
 
+**Thread details**
+- One card holds the thread's facts: its folder (**Open in ▾**: Files, Git, a terminal, copy path, project scripts), its branch, the one git step that comes next (**Commit**, **Push**, **Create PR** or **PR #N**), **Changes +N −M**, and its **Subagents** — running ones with their status, time and **Stop**, earlier ones under **Previous**, and the thread it works under when it is a subagent itself.
+- On a wide window it floats at the top right beside the conversation (which moves over, so nothing is covered). Otherwise it is at the top of the right panel; on a phone, tap the right-panel button. Hide the floating card with its **×**; ⋯ › **View** › **Thread details** brings it back.
+
 **Thread rail**
-- **Pinned**: keep key threads at the top across restarts.
-- **Active**: live sessions with status dots, **Needs approval** badges, git branch chips, and indented delegated workers (`delegated_by`).
-- **Projects**: folders grouped by repository/working directory with one-click **+** to start a thread in that repo.
-- **History**: settled and archived conversations you can search, reopen, or view beside an active thread.
+- **An inbox**: one list across projects. Threads that need you come first, then failed ones, then finished ones you have not opened (**Done**), then the most recent.
+- **Each row says it in a word**: **Approval**, **Question**, **Failed**, **Done** or **Working 18s**, beside the project. Under the title: the branch (or the folder) and the agent.
+- **Pinned** keeps key threads on top. **Working** holds threads that are busy and not waiting on you. **History** keeps threads you moved there and closed ones.
+- **Group by project** (the filter menu) shows a folder per project instead. Otto remembers it on this device.
+- **Undo**: pinning, moving to History and dismissing a side chat happen at once. The notice offers **Undo** for 5 seconds, or press **⌘Z** outside a text field.
+- **Usage meter**: the footer shows how much of the focused agent's tightest plan limit is used (for example **5h 62%**). It turns amber at 80 % and red at 95 %. Hover it to see every limit and when it resets; click it to open Usage.
+- Pins, History and what you have seen follow you: pin on the Mac and the phone shows it pinned straight away.
 
 **Rich conversation & composer**
 - Full GitHub-flavored Markdown, syntax-highlighted code blocks, inline workspace/local image thumbnails with zoomable lightbox, and expandable **Thinking** blocks (including full reasoning prose on Antigravity sessions).
 - **Inline approval dock** right above the composer when an agent pauses on a tool permission (`Approve`, `Always allow`, `Deny`, or custom reply).
-- Type `@` in the composer to attach workspace files with keyboard-navigable typeahead, paste or drop screenshots, and choose **Steer** (`⇧⌘↵`) or **Queue** (`↵`) while an agent is working.
-- Slide up the optional **Terminal** drawer on any thread pane whenever you want raw PTY access without leaving Threads.
+- The conversation reads as one centred column in reading-size type: your message on the right, the agent's answer as plain prose. A finished turn's steps fold into one dim line ("Worked for 2m 13s · ran 4 commands and edited 3 files"); while a turn runs, its earlier steps fold to "N earlier steps" and the live one stays in view. Failures, approvals and questions never fold. A message's time and **Copy** show when you point at it.
+- A turn that changed files ends with a card: "3 changed files +6 −2". Open it for the file list with each file's +/−; **Open diff** (or a file) opens the **Changes** panel on that file.
+- **The composer**: one card with **+** (attach an image or PDF, mention a file or agent, **Plan mode**, the thread's access), then only what differs from the default (the Plan chip while Plan is on, the access chip when the thread is not on your default access), the model chip and one button that says what it will do: **Send**; **Stop** while the agent works and nothing is typed; **Queue** (sends when the turn ends) or **Steer** (the agent reads it at its next step) when you type while it works. **↵** does the default and **⌘↵** the other; the default is in the toolbar ⋯ › **View** › *While working, messages queue / steer*. An agent that cannot take a message mid-turn only queues, and the button says so.
+- **Continue with another provider**: the model chip lists the thread's provider first, then the others. Pick a model of another one and the line above the composer reads **Next message continues on Codex · Cancel**; nothing is sent yet. Your next message continues the same thread there, after a **Context handoff · Claude Code → Codex** divider; open it to see what was handed over (recent turns, files changed, an open plan; earlier images are not). Switching back is another handoff.
+- Type `/` for Otto's commands and, under "<Agent> commands", the agent's own commands and skills (fuzzy filtered); picking one types `/name ` for you to finish and send.
+- In an empty composer **↑** brings back the prompts you sent in this thread (**↓** goes forward, then back to empty).
+- Type `@` to attach workspace files or ask another agent; paste or drop images and PDFs anywhere on the thread (a type the agent cannot take is refused by name).
+- The toolbar ⋯ › **View** › **Tool calls**: *show all* (default), *hide successful* or *hide all*. Failures, approvals, questions and replies always show.
+- Slide up the optional **Terminal** drawer on any thread pane whenever you want raw PTY access without leaving Threads. Select text in it and **Add to chat** attaches the selection to the thread's message as a "Terminal · N lines" chip (nothing is sent).
 
 **Multi-session & peer collaboration**
 - Pick the layout from the toolbar ⋯: **Single thread**, **Split** (2-up resizable) or **Grid** (up to 4 live threads at once).
-- The **Related threads** chip beside the title appears when a thread has related threads (a parent, workers, threads it opened, its side chat). Its popover lists them with their status and the thread's session rooms; each row opens, opens beside or messages. **Message a thread…** sends to any thread (or all of them), and **Start a room…** starts a **Session Room**. It replaces the old Peers tab and the pane's relay bar.
+- ⋯ › **Send to another thread…** lists the threads this one is connected to with their status and the thread's session rooms; each row opens, opens beside or messages. **Message a thread…** sends to any thread (or all of them), and **Start a room…** starts a **Session Room**.
 
 **Subagents: several agents and providers under one thread**
 - Just ask: "do this with a Codex subagent and a Gemini subagent". The thread's agent checks which providers and models are enabled, delegates, and is woken when each one finishes. It never polls.

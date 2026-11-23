@@ -31,6 +31,10 @@
     provider: string;
     /** A live thread can't change harness: other providers are shown disabled. */
     lockProvider?: boolean;
+    /** A live thread's own provider: the others follow it under "Continue
+     *  with another provider", and picking one of their models arms a switch
+     *  (`onprovider` then `onmodel`); browsing the rail picks nothing. */
+    home?: string;
     model: string | null;
     effectiveModel?: string | null;
     effort: EffortLevel | null;
@@ -50,6 +54,7 @@
     providers,
     provider,
     lockProvider = false,
+    home,
     model,
     effectiveModel = null,
     effort,
@@ -299,7 +304,12 @@
         ? `${harnessLabel(p)} — ${ready.message}`
         : lockProvider && p !== provider
           ? `${harnessLabel(p)} — start a new thread to use it`
-          : harnessLabel(p)}
+          : home && p !== home
+            ? `Continue on ${harnessLabel(p)}`
+            : harnessLabel(p)}
+      {#if home && p !== home && providers[0] === home && providers[1] === p}
+        <hr class="mp-sep" aria-label="Continue with another provider" title="Continue with another provider" />
+      {/if}
       <button
         type="button"
         class="mp-prov"
@@ -312,7 +322,7 @@
         onclick={() => {
           view = p;
           showAll = false;
-          if (!lockProvider && p !== provider) onprovider?.(p);
+          if (!lockProvider && !home && p !== provider) onprovider?.(p);
         }}
       >
         <ProviderIcon provider={p} size={16} />
@@ -326,6 +336,11 @@
         <h3 class="mp-provname" data-testid="model-picker-provider-name">
           {#if view === '★'}<Icon name="star" size={13} />Favorite models{:else}<ProviderIcon provider={view} size={14} />{harnessLabel(view)}{/if}
         </h3>
+        {#if home && view !== home && view !== '★'}
+          <p class="mp-switch" data-testid="model-picker-switch-hint">
+            Continue with another provider: pick a model and your next message continues on {harnessLabel(view)}, with this thread’s history.
+          </p>
+        {/if}
         <div class="mp-search">
           <Icon name="search" size={13} />
           <input
@@ -482,6 +497,18 @@
   .mp-prov:disabled {
     opacity: var(--disabled-opacity);
     cursor: default;
+  }
+  .mp-sep {
+    inline-size: 20px;
+    margin: 4px auto;
+    border: 0;
+    border-block-start: 1px solid var(--border);
+  }
+  .mp-switch {
+    margin: 0;
+    padding: 0 8px 4px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
   }
   .mp-main {
     flex: 1;

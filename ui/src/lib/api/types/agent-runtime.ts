@@ -33,6 +33,26 @@ export interface ProviderSession {
   capabilities?: RuntimeCapabilities;
   /** The thread's title: a rename, or the agent's own name for it. */
   title?: string;
+  /** The provider the thread runs on now and its slug (a named account's
+   *  own): a provider switch changes them. */
+  provider?: RuntimeProvider;
+  provider_slug?: string;
+  /** The client-owned thread meta (`ThreadMetaPatch` keys); absent = none set. */
+  thread?: ThreadMetaPatch;
+}
+
+/** What a provider switch handed the new provider (`session_boundary.handoff`):
+ *  whole turns, newest first within a budget; `text` is the block as the
+ *  agent read it. */
+export interface ContextHandoff {
+  from_provider: string;
+  to_provider: string;
+  from_model?: string;
+  to_model?: string;
+  turns: number;
+  omitted_turns: number;
+  images_omitted: number;
+  text: string;
 }
 
 /** What a thread's agent takes besides plain text — the provider baseline
@@ -226,7 +246,7 @@ export type TurnItemKind =
       /** Set when cancelled; `agent` = the provider withdrew it. */
       cancel_reason?: RequestCancelReason;
     }
-  | { type: 'session_boundary' }
+  | { type: 'session_boundary'; handoff?: ContextHandoff }
   | { type: 'system_notice'; message: string; task_settlement?: TaskSettlement }
   /** A subagent (Claude's Agent / Task tool): its own messages and tools are
    *  items whose `parent_item_id` is this item. A background one stays
@@ -654,8 +674,21 @@ export interface ListRuntimeSessionsQuery {
 
 /** Body of POST /runtime-sessions/{id}/prompt. */
 /** `PATCH /runtime-sessions/{id}` — rename. */
+/** `PATCH /runtime-sessions/{id}`: a rename and/or the client-owned thread meta. */
 export interface UpdateRuntimeSessionReq {
-  title: string;
+  title?: string;
+  /** A merge patch of the thread keys only (`null` clears one). */
+  meta?: ThreadMetaPatch;
+}
+
+/** The client-owned Threads keys on a session's `meta` — a structured one
+ *  (`PATCH /runtime-sessions/{id}`) and a terminal one (`PATCH /sessions/{id}`) alike. */
+export interface ThreadMetaPatch {
+  thread_pinned?: boolean | null;
+  /** Moved to History. */
+  thread_history?: boolean | null;
+  /** RFC 3339: when the person last had the thread in front of them. */
+  thread_seen_at?: string | null;
 }
 
 /** `text` may be empty when `images` is not. `model` / `effort` apply to this
@@ -666,6 +699,10 @@ export interface UpdateRuntimeSessionReq {
 export interface RuntimePromptReq {
   /** Start a fresh provider conversation in the same thread; refuses outstanding work. */
   fresh_context?: boolean;
+  /** Continue the thread on another provider (a slug, built-in or a named
+   *  account): a fresh conversation there, handed the thread's history
+   *  (`session_boundary.handoff`). Implies `fresh_context`. */
+  provider?: string;
   /** With `fresh_context`: stop the thread's background tasks first instead
    *  of refusing (an older daemon ignores it and still answers 409). */
   stop_background?: boolean;
@@ -738,6 +775,8 @@ export interface RuntimeDraftContent {
   effort: import('../../providerModels').EffortLevel | null;
   access_mode: RuntimeAccessMode | null;
   fresh_context: boolean;
+  /** An armed provider switch (`RuntimePromptReq.provider` of the next send). */
+  provider?: string | null;
   context: RuntimeComposerContext[];
 }
 export interface RuntimeDraftRecord { revision: number; draft: RuntimeDraftContent | null }

@@ -474,8 +474,9 @@ takes the size back too.
 
 ### Clickable URLs and file references
 
-In a local agent terminal, click an HTTP(S) URL to open the system browser, or a
-file reference such as `ui/src/App.svelte:42:3`, `../Cargo.toml#L8`, or
+In a local agent terminal, click an HTTP(S) URL to open the system browser (a
+plain click, ⌘-click and ⌃-click all open it — also while the agent has mouse
+reporting on), or a file reference such as `ui/src/App.svelte:42:3`, `../Cargo.toml#L8`, or
 `/tmp/report.md` to open the Files viewer. A folder printed with its trailing
 slash (`marketing/videos/tour/`) is a link too: clicking it opens the side
 panel's Files tree at that folder. Version tags (`v0.2.2`), numbers and
@@ -492,6 +493,12 @@ how many places were checked, and offers **Copy path**. Hover shows the
 resolved target. Otto does not track `cd` inside a running agent; a basename
 printed for a nested file is found only if it sits directly in one of those
 folders.
+
+In the desktop app, URLs open through the opener plugin, whose `open_url` grant
+in `apps/desktop/src-tauri/capabilities/default.json` is scoped to `http://`,
+`https://` and `mailto:` (the bare permission has an empty scope and refuses
+every URL). A refused open shows a "Couldn’t open the link" toast; the webview
+cannot open browser windows itself, so there is no silent fallback.
 
 Right-click (or ⌃-click) a file or folder link for its menu: **Open in side
 panel**, **Show in Finder** (desktop app on this Mac only — hidden in a
@@ -532,7 +539,14 @@ copy from — xterm only syncs its selection into the hidden textarea on
 > macOS escape hatch is **⌥ Option + drag** (`macOptionClickForcesSelection`,
 > set in `Terminal.svelte`) — the same gesture iTerm2 and Terminal.app use.
 > Plain drag still belongs to the app, deliberately: stealing it would break the
-> TUI's own click handling.
+> TUI's own click handling. The first plain drag that selects nothing in such
+> an app shows a one-time "Hold ⌥ to select text" toast.
+>
+> Claude turns on *any-motion* tracking (1003), where xterm reports every
+> pointer move to the app as user input — and xterm clears its selection on
+> user input. So while text is selected, Otto keeps button-less pointer moves
+> local: the selection stays through repaints and pointer moves until you
+> copy, click or type. ⌘C copies whether or not ⌥ is still held (⌥⌘C).
 >
 > This is worth knowing because of how it FAILS: with no selection there is
 > nothing to copy, so ⌘C does nothing, right-click ▸ Copy shows up **greyed**,
@@ -543,7 +557,7 @@ copy from — xterm only syncs its selection into the hidden textarea on
 | Gesture | Behaviour |
 |---|---|
 | ⌥-drag (mouse-reporting sessions) | Forces a local selection. Without it, agent sessions cannot be selected at all on macOS. |
-| Drag-select + `⌘C` (or `Ctrl+Shift+C`) | Copies the terminal selection. Only claimed when a selection exists, so bare `Ctrl+C` remains SIGINT. |
+| Drag-select + `⌘C` (or `⌥⌘C`, `Ctrl+Shift+C`) | Copies the terminal selection. Only claimed when a selection exists, so bare `Ctrl+C` remains SIGINT. |
 | Right-click → Copy | Native browser copy (xterm's own path). |
 | Copy-on-select | ⋯ → *Copy on select* in a session pane (the terminal toolbar `copy` toggle elsewhere) — any new selection is copied immediately. Off by default, and stored per-origin in `localStorage`, so enabling it locally does **not** enable it on a remote origin. |
 | `⌘V` / `Ctrl+V` | Native paste, handled by xterm from the `paste` event. |

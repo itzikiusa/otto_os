@@ -1,13 +1,13 @@
 <script lang="ts">
-  // A finished stretch of the work log under one quiet line — "Worked for
-  // 2m 14s · 6 steps" — that opens to every call (T3 Code's collapsed work
-  // log). A stretch that is still running, or holds a failure or an approval
+  // A finished stretch of the work log under one quiet line that says how
+  // long and what was done — "Worked for 2m 14s · ran 2 commands and edited
+  // 3 files" — and opens to every call (T3 Code's collapsed work log). A stretch that is still running, or holds a failure or an approval
   // waiting on you, is never folded: it renders as is (workLog.ts shouldFold).
   import { tick, type Snippet } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { foldScrollCompensation } from './follow';
   import type { WorkEntry } from './timeline';
-  import { workedFor } from './workLog';
+  import { foldLine } from './workLog';
 
   interface Props {
     id: string;
@@ -57,8 +57,7 @@
   {#if fold}
     <details class="rf" bind:open={userOpen} data-testid="runtime-fold-{id}">
       <summary>
-        <Icon name="check" size={12} />
-        <span class="ellipsis">{workedFor(entries)} · {entries.length} steps{tokens ? ` · ${tokens}` : ''}</span>
+        <span class="ellipsis">{foldLine(entries)}{tokens ? ` · ${tokens}` : ''}</span>
         <Icon name="chevronRight" size={12} />
       </summary>
       {#if userOpen}
@@ -76,15 +75,16 @@
     flex-direction: column;
     gap: 2px;
   }
+  /* One dim line, a hairline under it, then the answer (the target's fold). */
   .rf > summary {
     display: flex;
     align-items: center;
-    gap: 8px;
-    min-block-size: 28px;
-    padding: 2px 6px;
-    border-radius: var(--radius-s);
+    gap: var(--sp-1);
+    min-block-size: 32px;
+    padding-block: var(--sp-2);
+    border-block-end: 1px solid var(--border);
     color: var(--text-dim);
-    font-size: var(--fs-s);
+    font-size: var(--fs-m);
     list-style: none;
     cursor: pointer;
   }
@@ -92,7 +92,6 @@
     display: none;
   }
   .rf > summary:hover {
-    background: var(--hover);
     color: var(--text);
   }
   .rf > summary:focus-visible {
@@ -100,8 +99,10 @@
     outline-offset: -2px;
   }
   .rf > summary .ellipsis {
-    flex: 1;
     min-width: 0;
+  }
+  .rf-wrap:has(> .rf) {
+    margin-block-end: var(--sp-3);
   }
   .rf[open] > summary > :global(svg:last-child) {
     transform: rotate(90deg);

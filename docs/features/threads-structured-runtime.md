@@ -600,7 +600,7 @@ Turn item types:
 | `dynamic_tool` | `tool_name`, `input`, `output?`, `images?[{mime, data_base64}]` |
 | `web_search` | `patterns` |
 | `approval_request` | `request_id`, `request_kind`, `prompt?`, `reason?`, `options[{decision, label}]`, `tool_item_id?`, `cancel_reason?` (`agent` / `interrupt` / `closed`) |
-| `session_boundary` | No extra fields; rendered as **New session** before the accepted fresh prompt |
+| `session_boundary` | `handoff?` (a provider switch: `{from_provider, to_provider, from_model?, to_model?, turns, omitted_turns, images_omitted, text}`); rendered as **New session**, or **Context handoff · A → B**, before the accepted fresh prompt |
 | `system_notice` | `message` |
 | `error` | `failure` |
 
@@ -915,13 +915,34 @@ provider error after acceptance is a failed turn in the newly committed
 conversation. The frontend keeps the submitted draft and fresh intent on a
 rejected send.
 
+### Continue on another provider
+
+A prompt whose `provider` names another enabled provider with a structured
+driver (built-in or a named account) is an explicit fresh context onto that
+provider (`runtime/fresh.rs`, after T3 Code's `ProviderSwitchService`
+`create_with_handoff`). Under the same admission lock and 409s, the old process
+is dropped and the session is moved in memory: `provider`,
+`meta.provider_slug`, the prompt's `model` (else the provider default), no
+effort, the new provider's baseline capabilities. The normal spawn then
+prepares everything provider-specific. `runtime/handoff.rs` builds the block
+from the projection (after T3 Code's `handoffBudget.ts`): turns since the last
+plain boundary, whole, newest first within 16,000 estimated tokens; per turn the
+message, final answer, changed paths, a tool-call count, errors; an open plan
+first; images counted, never sent. `start_turn` sends block + message to the
+driver and records only the message. `commit_fresh` persists provider, meta,
+model and effort (`set_provider`; no schema change) and emits the boundary
+with `handoff`; `provider_session.updated` carries `provider` /
+`provider_slug`. A failure restores every moved field and the native identity,
+and adds no boundary. Pi has no fake CLI, so its leg is covered only by the
+shared code path.
+
 ### Durable composer state
 
 `GET/PUT /runtime-sessions/{id}/draft` uses `{revision, draft}` records backed by
 `runtime_composer_drafts`, scoped to user, workspace and runtime session. The
 human-only routes reject managed-agent, MCP and share credentials. Draft
 content includes text, attachments (bytes and names), model, effort,
-`access_mode`, `fresh_context`, and attributed review/diff context chips. Action
+`access_mode`, `fresh_context`, `provider` (an armed switch), and attributed review/diff context chips. Action
 flags such as sending, stopping and replay sequence are live UI state only.
 No draft content is put in browser local storage.
 
@@ -1059,8 +1080,11 @@ secret question forms are refused instead of being collected into history.
 | `ui/src/modules/threads/runtime/{RuntimeBannerStack.svelte,banners.ts}` | everything above the composer in one priority order (error > question / approval > plan > queue > notices), at most two in full |
 | `ui/src/modules/threads/runtime/Runtime{SubagentCard,AgentRow,ThreadCallRow}.svelte`, `agentRows.ts` | one compact row for another agent: a subagent, or the agent's `thread_open` / `thread_message` call |
 | `ui/src/modules/threads/runtime/Runtime{QueueBar,TurnStatus}.svelte` | background work, the queue (Steer / Send now / Edit / Remove) and Closed · Reopen; the turn's status line (working, own turn, stopped, stalled, partly done) |
-| `ui/src/modules/threads/{RelatedThreadsChip,RelatedThreadsList,ThreadPopover}.svelte`, `relatedThreads.ts`, `relatedCollect.ts`, `relatedMessage.ts` | the header's one Related threads control (linked threads, workers, side chat, rooms; open, open beside, message, start a room) |
-| `ui/src/modules/threads/threadsPageMenu.ts` | the toolbar ⋯: the thread's actions, then New thread, Related threads…, Project card, Terminal drawer and the layout |
+| `ui/src/modules/threads/{RelatedThreadsList,ThreadPopover}.svelte`, `relatedThreads.ts`, `relatedCollect.ts`, `relatedMessage.ts` | ⋯ › Send to another thread… (connected threads, rooms; open, open beside, message, start a room) |
+| `ui/src/modules/threads/{ThreadDetailsCard,ProjectBadge}.svelte`, `threadDetails.ts`, `threadSubagents.ts` | the thread details card (folder, branch, the one git action, Changes, Subagents) and the project badge |
+| `ui/src/lib/paletteThreads.svelte.ts`, `ui/src/lib/threadSwitch.ts`, `ui/src/modules/threads/{threadSwitcher.ts,threadSwitcherSource.svelte.ts}` | ⌘K's Threads group (needs you first, frozen while open, New thread: <query>) |
+| `ui/src/modules/threads/worktreeBranch.ts` | a new thread's worktree branch name (prompt slug, repo prefix, collision suffix, dated) |
+| `ui/src/modules/threads/threadsPageMenu.ts` | the toolbar ⋯: the thread's actions, then New thread, Send to another thread…, Thread details, Terminal drawer and the layout |
 | `ui/src/lib/stores/runtimeDraftPersistence.ts`, `runtimeDraftRecovery.svelte.ts`, `runtimeDrafts.svelte.ts` | draft snapshot acknowledgement, serialized persistence and recovery |
 | `ui/src/modules/threads/runtime/Runtime{Questions,QuestionCard,ToolImages,ContextChips,DraftStatus}.svelte` | typed questions, image enlargement, context preview/removal and save status |
 | `ui/src/modules/threads/runtime/composerContext.ts` | attributed review conversations and file/hunk/line excerpts assembled on send |
@@ -1328,7 +1352,7 @@ thing on screen:
   right panel, ⋯. The ⋯ holds the thread's own actions, then **New thread**
   (also the sidebar's New button and ⌘K "New thread"), **Related threads…**,
   **Terminal drawer** (also `/terminal` and ⌘K) and **View ▸** — the layout
-  (Single / Split / Grid, also in ⌘K) and the Project card; a phone gets no
+  (Single / Split / Grid, also in ⌘K) and Thread details; a phone gets no
   View. Back and Forward are the
   shell's own (⌘⇧← / ⌘⇧→, ⌘K "Go back" / "Go forward"). Continue on phone is
   a ⋯ item, in the toolbar and in a split pane's header alike.

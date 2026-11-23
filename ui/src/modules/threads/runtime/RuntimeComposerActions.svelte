@@ -1,34 +1,44 @@
 <script lang="ts">
-  // The composer's round buttons. While a turn runs, Stop is ALWAYS there:
-  // with text in the composer Send (queue / steer, as before) sits beside it,
-  // never in its place. While the agent waits on the person (the attention
-  // dock), Stop steps back to a quiet outline so the dock's answer is the one
-  // primary action. Stop's keys (Esc / ⌘.) are stopKeys.ts.
-  import Icon from '../../../lib/components/Icon.svelte';
+  // The composer's ONE primary button (composerSend.ts): Send when idle;
+  // Stop while the agent works and nothing is typed; with a draft, the
+  // mid-turn delivery it will do (Queue / Steer, named in its icon, tooltip
+  // and label), and Stop steps back to a small quiet control beside it.
+  // While the agent waits on the person (the attention dock), Stop is quiet
+  // too, so the dock's answer is the one primary action. Stop's keys (Esc /
+  // ⌘.) are stopKeys.ts.
+  import Icon, { type IconName } from '../../../lib/components/Icon.svelte';
   import { isMacPlatform } from '../../../lib/keys';
+  import { primaryLabel, type PrimaryAction } from './composerSend';
 
   interface Props {
-    running: boolean;
-    /** Something to send or queue is in the composer. */
-    canSend: boolean;
+    action: PrimaryAction;
+    /** The agent takes a message mid-turn (`caps.steer`). */
+    canSteer: boolean;
+    agent: string;
     sendDisabled: boolean;
     stopping: boolean;
     /** The agent waits on an answer in the dock: Stop is secondary. */
     waiting: boolean;
+    /** Stop shows beside the primary (a turn runs with a draft typed). */
+    running: boolean;
     stopTestId: string;
     sendTestId: string;
     onstop: () => void;
     onsend: () => void;
   }
-  let { running, canSend, sendDisabled, stopping, waiting, stopTestId, sendTestId, onstop, onsend }: Props = $props();
-  const stopKeys = isMacPlatform() ? 'Esc · ⌘.' : 'Esc · Ctrl+.';
+  let { action, canSteer, agent, sendDisabled, stopping, waiting, running, stopTestId, sendTestId, onstop, onsend }: Props = $props();
+  const mac = isMacPlatform();
+  const stopKeys = mac ? 'Esc · ⌘.' : 'Esc · Ctrl+.';
+  const ICON: Record<Exclude<PrimaryAction, 'stop'>, IconName> = { send: 'arrowUp', queue: 'clock', steer: 'zap' };
+  const named = $derived(primaryLabel(action, { agent, canSteer, mac }));
 </script>
 
 {#if running}
   <button
     type="button"
     class="rt-send stop"
-    class:quiet={waiting || canSend}
+    class:quiet={waiting || action !== 'stop'}
+    class:small={action !== 'stop'}
     aria-label="Stop the turn"
     aria-keyshortcuts="Escape"
     title="Stop ({stopKeys})"
@@ -36,20 +46,21 @@
     disabled={stopping}
     onclick={onstop}
   >
-    <Icon name="stop" size={14} />
+    <Icon name="stop" size={action === 'stop' ? 14 : 12} />
   </button>
 {/if}
-{#if !running || canSend}
+{#if action !== 'stop'}
   <button
     type="button"
     class="rt-send"
-    aria-label={running ? 'Queue message' : 'Send message'}
-    title={running ? 'Queue' : 'Send'}
+    aria-label={named.label}
+    title={named.title}
     data-testid={sendTestId}
+    data-delivery={action}
     disabled={sendDisabled}
     onclick={onsend}
   >
-    <Icon name="arrowUp" size={16} />
+    <Icon name={ICON[action]} size={action === 'send' ? 16 : 14} />
   </button>
 {/if}
 
@@ -78,6 +89,10 @@
   .rt-send.stop.quiet:hover:not(:disabled) {
     background: var(--hover);
   }
+  .rt-send.small {
+    inline-size: 24px;
+    block-size: 24px;
+  }
   .rt-send:disabled {
     background: var(--surface-3);
     color: var(--text-dim);
@@ -87,9 +102,13 @@
     outline: 2px solid var(--accent-text);
     outline-offset: 2px;
   }
-  /* Touch: the most-pressed controls in the thread get a full 44 px target. */
+  /* Touch: the primary gets a full 44 px+ target; the secondary Stop a 44 px one. */
   @media (pointer: coarse) {
     .rt-send {
+      inline-size: calc(var(--hit-min) + 8px);
+      block-size: calc(var(--hit-min) + 8px);
+    }
+    .rt-send.small {
       inline-size: calc(var(--hit-min) + 8px);
       block-size: calc(var(--hit-min) + 8px);
     }

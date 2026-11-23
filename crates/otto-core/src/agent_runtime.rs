@@ -127,6 +127,17 @@ pub struct ProviderSession {
     /// name for the conversation as it lands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// The provider the thread runs on now (`RuntimeSession::provider`) and,
+    /// for a named account, its slug (`meta.provider_slug`): a provider
+    /// switch changes them in every client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<RuntimeProvider>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_slug: Option<String>,
+    /// The client-owned thread meta (`THREAD_META_KEYS`: pinned, History,
+    /// seen at), so a pin on the Mac shows on the phone as it lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<serde_json::Value>,
 }
 
 /// One piece of background work an agent started (Claude Code's
@@ -432,8 +443,12 @@ pub enum TurnItemKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cancel_reason: Option<CancelReason>,
     },
-    /// A fresh provider conversation began in this same visible thread.
-    SessionBoundary,
+    /// A fresh provider conversation began in this same visible thread;
+    /// with `handoff`, on another provider that was handed the history.
+    SessionBoundary {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handoff: Option<ContextHandoff>,
+    },
     SystemNotice {
         message: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -465,6 +480,29 @@ pub enum TurnItemKind {
     Error {
         failure: ProviderFailure,
     },
+}
+
+/// What a provider switch handed the new provider (`session_boundary.handoff`):
+/// a bounded, newest-first selection of whole turns, after T3 Code's portable
+/// handoffs. `text` is the block exactly as the agent read it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ContextHandoff {
+    /// Provider slugs (a named account's own slug).
+    pub from_provider: String,
+    pub to_provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_model: Option<String>,
+    /// Turns handed over, and earlier turns the budget left out.
+    pub turns: u32,
+    #[serde(default)]
+    pub omitted_turns: u32,
+    /// Images sent earlier in the thread: never handed over.
+    #[serde(default)]
+    pub images_omitted: u32,
+    #[serde(default)]
+    pub text: String,
 }
 
 /// One timeline item (`OrchestrationV2TurnItem`).
@@ -1895,10 +1933,64 @@ impl RuntimeAccessMode {
     }
 }
 
-/// `PATCH /runtime-sessions/{id}` (rename; T3 Code `thread.metadata-updated`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `PATCH /runtime-sessions/{id}` (rename and/or the client-owned thread
+/// meta; T3 Code `thread.metadata-updated`). At least one of the two.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateRuntimeSessionReq {
-    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// A merge patch of [`THREAD_META_KEYS`] only (`null` clears a key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// The thread meta a person's client owns on a session — the same keys on a
+/// terminal session (`PATCH /sessions/{id}` meta) and a structured one:
+/// pinned, moved to History, and when the person last had it in front of them.
+pub const THREAD_META_KEYS: &[&str] = &["thread_pinned", "thread_history", "thread_seen_at"];
+
+/// Checks a thread-meta patch: only [`THREAD_META_KEYS`]; `thread_pinned` /
+/// `thread_history` a bool, `thread_seen_at` an RFC 3339 time; `null` clears.
+pub fn validate_thread_meta(
+    patch: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    if patch.is_empty() {
+        return Err("meta is empty".into());
+    }
+    for (k, v) in patch {
+        let ok = match k.as_str() {
+            "thread_pinned" | "thread_history" => v.is_boolean() || v.is_null(),
+            "thread_seen_at" => {
+                v.is_null()
+                    || v.as_str()
+                        .is_some_and(|s| DateTime::parse_from_rfc3339(s).is_ok())
+            }
+            _ => {
+                return Err(format!(
+                    "meta.{k} is not a client-owned thread key ({})",
+                    THREAD_META_KEYS.join(", ")
+                ))
+            }
+        };
+        if !ok {
+            return Err(format!("meta.{k} has the wrong type"));
+        }
+    }
+    Ok(())
+}
+
+/// The client-owned thread keys set in `meta` (`None` when none is).
+pub fn thread_meta_of(meta: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    let m = meta?.as_object()?;
+    let out: serde_json::Map<_, _> = THREAD_META_KEYS
+        .iter()
+        .filter_map(|k| {
+            m.get(*k)
+                .filter(|v| !v.is_null())
+                .map(|v| ((*k).to_string(), v.clone()))
+        })
+        .collect();
+    (!out.is_empty()).then_some(serde_json::Value::Object(out))
 }
 
 /// `POST /runtime-sessions/{id}/prompt`. `model` / `effort` select this
@@ -1909,6 +2001,11 @@ pub struct RuntimePromptReq {
     /// Start a new provider conversation in this thread; refuses outstanding work.
     #[serde(default)]
     pub fresh_context: bool,
+    /// Continue this thread on another provider (a slug: built-in or a named
+    /// account): a fresh conversation there, handed the thread's history.
+    /// Implies `fresh_context`; the current provider's slug is no switch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     #[serde(default)]
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2128,6 +2225,31 @@ mod tests {
     }
 
     #[test]
+    fn thread_meta_patch_takes_only_client_owned_keys() {
+        let m = |v: serde_json::Value| v.as_object().unwrap().clone();
+        assert!(validate_thread_meta(&m(serde_json::json!({"thread_pinned": true, "thread_history": null, "thread_seen_at": "2026-11-23T10:00:00Z"}))).is_ok());
+        assert!(validate_thread_meta(&m(serde_json::json!({}))).is_err());
+        assert!(
+            validate_thread_meta(&m(serde_json::json!({"source": "pr-agent"})))
+                .unwrap_err()
+                .contains("not a client-owned")
+        );
+        assert!(validate_thread_meta(&m(serde_json::json!({"thread_pinned": "yes"}))).is_err());
+        assert!(
+            validate_thread_meta(&m(serde_json::json!({"thread_seen_at": "yesterday"}))).is_err()
+        );
+        let meta = serde_json::json!({"source": "pr-agent", "thread_pinned": true, "thread_history": null});
+        assert_eq!(
+            thread_meta_of(Some(&meta)),
+            Some(serde_json::json!({"thread_pinned": true}))
+        );
+        assert_eq!(
+            thread_meta_of(Some(&serde_json::json!({"source": "pr-agent"}))),
+            None
+        );
+    }
+
+    #[test]
     fn every_event_round_trips_and_matches_type_name() {
         let bodies = vec![
             RuntimeEventBody::ProviderSessionUpdated {
@@ -2149,6 +2271,9 @@ mod tests {
                     }],
                     capabilities: None,
                     title: None,
+                    provider: Some(RuntimeProvider::Codex),
+                    provider_slug: Some("codex".into()),
+                    thread: Some(serde_json::json!({"thread_pinned": true})),
                 },
             },
             RuntimeEventBody::ProviderThreadUpdated {
@@ -2523,6 +2648,36 @@ mod tests {
                 .as_ref()
                 .and_then(|m| m.get(PROVIDER_SLUG_META_KEY)),
             Some(&json!("claudework"))
+        );
+    }
+
+    /// A rollback reads a switch's divider: the build before it had a unit
+    /// `session_boundary` (internally tagged, flattened), which ignores
+    /// `handoff`; and the new shape reads the old row.
+    #[test]
+    fn a_session_boundary_with_a_handoff_reads_on_the_previous_build() {
+        #[derive(Debug, Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum OldKind {
+            SessionBoundary,
+        }
+        #[derive(Debug, Deserialize)]
+        struct OldItem {
+            #[allow(dead_code)]
+            id: String,
+            #[serde(flatten)]
+            kind: OldKind,
+        }
+        let new = json!({"id": "b", "type": "session_boundary", "handoff": {
+            "from_provider": "claude", "to_provider": "codex", "turns": 1, "text": "x"}});
+        let old: OldItem = serde_json::from_value(new.clone()).unwrap();
+        assert!(matches!(old.kind, OldKind::SessionBoundary));
+        let back: TurnItemKind =
+            serde_json::from_value(json!({"type": "session_boundary"})).unwrap();
+        assert_eq!(back, TurnItemKind::SessionBoundary { handoff: None });
+        let full: TurnItemKind = serde_json::from_value(new).unwrap();
+        assert!(
+            matches!(full, TurnItemKind::SessionBoundary { handoff: Some(h) } if h.turns == 1 && h.omitted_turns == 0)
         );
     }
 }

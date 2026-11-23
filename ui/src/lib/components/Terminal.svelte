@@ -244,7 +244,7 @@
   import { registerSelectAll } from '../selectall';
   import TermKeysBar from './TermKeysBar.svelte';
   import Icon from './Icon.svelte';
-  import { terminalReply } from './terminalInput';
+  import { terminalReply } from './terminalInput'; import { guardSelection } from './termSelection';
   import { plural } from '../plural';
 
   interface Props {
@@ -349,8 +349,9 @@
      *  was clicked yet) — a loop timeline or the right panel keeps the page
      *  find. A focused terminal / editor / text field still wins. Default 0. */
     findRank?: number;
+    onselection?: (text: string) => void; // the selected text on every selection change ('' when cleared)
   }
-  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, socketFactory, transformFrame, onImagePaste, readOnlyReason, onstatus, onfontfit, onsearchresult, showToolbar = true, autoFocus = false, claimOnAttach = false, keepAlive = false, scrollback = EMBED_SCROLLBACK, resumeOnOpen = true, findRank = 0 }: Props = $props();
+  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, socketFactory, transformFrame, onImagePaste, readOnlyReason, onstatus, onfontfit, onsearchresult, onselection, showToolbar = true, autoFocus = false, claimOnAttach = false, keepAlive = false, scrollback = EMBED_SCROLLBACK, resumeOnOpen = true, findRank = 0 }: Props = $props();
   // Scrollback results: a listbox driven from the find input (aria-activedescendant).
   const findId = $props.id();
 
@@ -1773,13 +1774,13 @@
   let hoveredLink: TerminalLink | null = null; // the right-click target (onLinkMenu)
   function activateLink(event: MouseEvent, link: TerminalLink): void {
     event.preventDefault();
-    if (event.button !== 0 || event.ctrlKey) return; // a right-click / ⌃-click is the link menu's
+    if (event.button !== 0) return; // ⌃-click opens a URL; a file link leaves it to its menu (onLinkMenu)
     if (link.kind === 'url') {
       if (socketFactory) { void copyWithToast(link.text, 'the link'); return; }
       void openExternal(link.text);
-    } else if (localFileContext().allowed) void activatePathLink(link, localFileContext().target);
+    } else if (!event.ctrlKey && localFileContext().allowed) void activatePathLink(link, localFileContext().target);
   }
-  const onLinkMenu = (e: MouseEvent) => { if (hoveredLink?.kind === 'file' && localFileContext().allowed) showPathLinkMenu(e, hoveredLink, localFileContext().target); };
+  const onLinkMenu = (e: MouseEvent) => { if (hoveredLink?.kind === 'file' && localFileContext().allowed) showPathLinkMenu(e, hoveredLink, localFileContext().target); else if (hoveredLink?.kind === 'url' && e.ctrlKey) e.preventDefault(); /* ⌃-click opened it */ };
 
   function makeLinkProvider(): LinkProvider {
     return {
@@ -1932,9 +1933,9 @@
     // the chord ourselves against `getSelection()`, which is always correct.
     //
     // Ctrl+Shift+C is the terminal convention on Linux/Windows (bare Ctrl+C
-    // must stay SIGINT). Both are only claimed when there IS a selection —
-    // otherwise ⌘C/Ctrl+Shift+C fall through untouched.
-    if (e.type === 'keydown' && !e.altKey && (e.key === 'c' || e.key === 'C')) {
+    // must stay SIGINT); ⌥⌘C counts as ⌘C (⌥ may still be down from the ⌥-drag
+    // and turns e.key into "ç"). Only claimed when there IS a selection.
+    if (e.type === 'keydown' && (e.key === 'c' || e.key === 'C' || (e.altKey && e.code === 'KeyC'))) {
       const chord = (e.metaKey && !e.ctrlKey) || (e.ctrlKey && e.shiftKey && !e.metaKey);
       if (chord && term?.hasSelection()) {
         const sel = term.getSelection();
@@ -1969,14 +1970,14 @@
           // send us down the permissioned path the browser is refusing.)
           copySawEvent = false;
           e.stopPropagation();
-          // Ctrl+Shift+C has NO native copy command behind it (on any OS —
-          // the browser's own chord is ⌘C / Ctrl+C), so leaving it to the
-          // browser means no `copy` event ever fires and the fallback below
-          // runs 80 ms later, outside the gesture, on the permissioned API.
-          // Run the permission-free command ourselves, synchronously, while
-          // the keydown is still a user gesture; `onCopy` fills the clipboard
-          // with the terminal selection and sets `copySawEvent`.
-          if (e.ctrlKey && e.shiftKey && !e.metaKey) {
+          // Ctrl+Shift+C and ⌥⌘C have NO native copy command behind them (the
+          // browser's is ⌘C / Ctrl+C; its own binding for these is the element
+          // inspector, hence preventDefault): no `copy` event would fire and the
+          // fallback below would run outside the gesture on the permissioned
+          // API. Run the permission-free command ourselves, synchronously;
+          // `onCopy` fills the clipboard with the selection, sets `copySawEvent`.
+          if (!e.metaKey || e.altKey) {
+            e.preventDefault();
             try {
               document.execCommand('copy');
             } catch {
@@ -2060,7 +2061,7 @@
     // compete with the find input, and copy-on-select would overwrite the
     // clipboard with every hit. closeFind re-mirrors.
     if (findOpen && document.activeElement !== term.textarea) return;
-    const text = term.hasSelection() ? term.getSelection() : '';
+    const text = term.hasSelection() ? term.getSelection() : ''; onselection?.(text);
 
     // Mirror the selection into xterm's hidden textarea and select it there.
     //
@@ -2093,7 +2094,6 @@
     // TypeError on any origin without the async API — the `.catch()` never
     // ran, and the throw landed inside xterm's selection-change emitter.
     if (ui.termCopyOnSelect && text) void copyText(text);
-  
   }
 
   function onTermBinary(data: string): void {
@@ -2146,7 +2146,7 @@
     // is a DOM overlay above the renderer).
     const linkProvider = t.registerLinkProvider(makeLinkProvider());
     t.attachCustomKeyEventHandler(termKeyHandler);
-    const subs = [t.onData(onTermData), t.onSelectionChange(onTermSelection), t.onBinary(onTermBinary)];
+    const subs = [t.onData(onTermData), t.onSelectionChange(onTermSelection), t.onBinary(onTermBinary), { dispose: guardSelection(t) }];
     if (keyLat) subs.push(t.onRender(() => keyLat?.rendered(performance.now())));
     // The find bar's "3/12" (fires only for decorated passes — 2+ chars).
     if (search) {
