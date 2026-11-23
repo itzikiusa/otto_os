@@ -268,7 +268,10 @@ plus `adapter.ts`.
    any `fs/*` / `terminal/*` request with `-32601`. T3 Code prefers the ACP
    v2 preview and falls back to v1 (`packages/effect-acp/src/client.ts:679-703`).
    Otto speaks **v1**, which both installed agents answer.
-2. **Session.** With a known id, send `session/load` if the agent advertised
+2. **Session.** With a known id, send `session/resume` when the agent
+   advertises `sessionCapabilities.resume` (no history replay; agy, grok,
+   opencode and muse do — live 2026-11-23), retrying as `session/load` if it
+   is refused; else `session/load` if the agent advertised
    `loadSession`; otherwise send `session/new {cwd, mcpServers:[]}`
    (`AcpSessionRuntime.ts:2217-2260`). A failed load starts a fresh session
    (`adapter.ts:6997-7019`). Otto drops the history the agent replays
@@ -303,6 +306,7 @@ plus `adapter.ts`.
    | accept | `allow_once` |
    | accept for session | `allow_always` |
    | decline | `reject_once` |
+   | decline always (offered only when the agent offers it) | `reject_always`, else `reject_once` |
    | cancel, or no matching option | `{outcome:"cancelled"}` |
 
    The answer is never a wider grant than asked for.
@@ -574,6 +578,41 @@ client-side auto-answering (`clientPolicy.ts:143-200`): whatever the CLI
 still asks reaches a person. Otto's Seatbelt, folder trust and prompt guard
 apply in every mode.
 
+### ACP per provider (re-verified live 2026-11-23)
+
+Installed versions and what each advertised: [ACP capabilities](./acp-capabilities.md).
+"live" = an `acp_live` test or a recorded wire run on the installed CLI;
+"fake" = `otto-fake-agent`; "unit" = a driver test on recorded wire lines.
+
+| Feature | gemini 0.43 | agy 1.5.15 | grok 1.0.92 | opencode 2.3.0 | muse 1.4.25 |
+|---|---|---|---|---|---|
+| Starts a session | **no**: the CLI refuses personal accounts ("no longer supported… migrate to Antigravity"); the thread shows that message (live) | yes (live) | yes (live) | yes (live) | yes (live) |
+| Otto MCP tools (`mcpServers` stdio) | – | yes (live) | yes under full access (live) | yes (live) | yes (live) |
+| Supervised asks first | – | yes (live) | **no**: grok denies unapproved tools without a request ("denied by prompt policy"); a notice says so and suggests Full access (live + unit) | yes, through `OPENCODE_CONFIG_CONTENT` (live) | only for actions Muse's own rules don't cover; a workspace shell write ran unasked (live) |
+| Auto-accept edits | `--approval-mode auto_edit` | `accept-edits` mode | `--permission-mode acceptEdits` (code; not run live) | permission object | `onRequest` |
+| Plan mode | only if advertised (none: no session) | yes (live) | no ACP plan mode | yes, `mode` option (unit; advertised live) | none |
+| Model / effort | flag / none | live / `thought_level` | flag / `reasoning_effort` | live / `effort` | live / none offered |
+| Agent switches mode/model itself | chips follow (fake + unit) | same | – (no modes) | same (model option) | same; muse sends `current_mode_update` (live) |
+| Slash commands reach the thread | – | 81 (live) | 235 (live) | 4 (live) | 84 (live) |
+| A typed `/command` runs | – | **no**: `/compact` went to the model as text (live) | not run | not run | not run |
+| Stop | – | yes (live) | yes (live) | yes (live) | yes (live) |
+| Reopen keeps the session | – | `session/resume` (live) | `session/resume` (live) | `session/resume` (live) | yes once prompted; an un-prompted session is "not found" and starts fresh with a notice (live) |
+| Notices, compaction, image / link answers | shown when sent (unit); no live agent sent any | | | | |
+| `fs/*`, `terminal/*` served by Otto | not advertised (see below) | | | | |
+| Steer a running turn | – | no (ACP v1 has none) | yes (`_x.ai/interject`) | no | no |
+
+`fs/*` and `terminal/*` are still not advertised. One live turn per agent
+with a client that serves them showed only **grok** uses them
+(`fs/read_text_file`, `terminal/create` → `wait_for_exit` → `output` →
+`release`); agy, opencode and muse keep their own tools. Serving them for
+grok would put its commands and reads through Otto and stream command output
+live; it was not landed because Otto's implementation could not be verified
+against grok within this pass's turn budget.
+
+url-mode `elicitation/create` is one question naming the URL; choosing
+"Open in the browser" answers `accept` and opens the page (unit; no
+installed agent sent one).
+
 ## 3. The normalized event model
 
 T3 Code's adapters emit `ProviderAdapterV2Event`
@@ -740,8 +779,8 @@ Otto takes the cheapest correct path per provider:
 |---|---|---|---|
 | Claude | live: `control_request {subtype:"set_model"}` (the SDK's `setModel`) | live: `apply_flag_settings {effortLevel}` | `image` blocks, `source: {type:"base64"}` (`ClaudeAdapterV2.ts:2410-2414`) |
 | Codex | `turn/start {model}` (this turn and later ones) | `turn/start {effort}` (`minimal`…`xhigh`); a steered message at another effort waits for the next turn (`turn/steer` carries none) | `{type:"image", url:"data:<mime>;base64,…"}` inputs (`CodexAdapterV2.ts:3268-3269`) |
-| Gemini, Grok, Muse (ACP) | restart with `--model` / `-m`, then `session/load` | Grok / Muse: the advertised config option; Gemini: none | `image` blocks when `promptCapabilities.image` (`adapter.ts:7035`, `:7777`) |
-| Antigravity, opencode (ACP) | live: `session/set_model` / the model config option | Antigravity: `thought_level`; opencode: none | `image` blocks |
+| Gemini, Grok (ACP) | restart with `--model` / `-m`, then `session/resume` / `session/load` | Grok: `reasoning_effort`; Gemini: none | `image` blocks when `promptCapabilities.image` (`adapter.ts:7035`, `:7777`) |
+| Antigravity, opencode, Muse (ACP) | live: `session/set_model` / the `model` config option | Antigravity: `thought_level`; opencode: `effort`; Muse: only where the session advertises `thought_level` (1.4.25 does not) | `image` blocks |
 | Pi | restart with `--session <id>` | the RPC's thinking level | images |
 
 An effort the agent does not take is **dropped with a notice** ("… this turn
