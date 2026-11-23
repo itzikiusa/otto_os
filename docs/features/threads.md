@@ -590,6 +590,21 @@ a match in an older message widens the mounted window to show it. History
 not loaded yet (above "Load older") is not searched. A focused terminal or
 editor keeps its own ⌘F (T3 Code #10439).
 
+## Context window, usage limits and ready worktrees
+
+- **Context meter** (`RuntimeContextMeter.svelte`, `contextMeter.ts`): a
+  small ring beside the model chip once the provider has reported how full
+  the context window is (`ProviderThread.context_usage`, pushed with
+  `provider_thread.updated`, no polling). It shows the percent from 80 %
+  (`--warning`) and turns `--danger` at 95 %. Its menu names the tokens and,
+  when the agent publishes a `compact` command, offers **Compact the
+  conversation** (types `/compact` into the composer; nothing is sent). The
+  details card has the same **Context** row. Providers that report a window:
+  Claude Code (the result frame's `modelUsage[model].contextWindow`), Codex
+  (`thread/tokenUsage/updated` `modelContextWindow`), ACP agents (Gemini,
+  agy, Grok, opencode, Muse) when they send `usage_update`, pi
+  (`context_window`). Until one does, there is no meter.
+
 ## API & WebSocket Surface
 
 - `GET /api/v1/sessions/{id}/transcript` (`?sub=<subagentId>` supported for

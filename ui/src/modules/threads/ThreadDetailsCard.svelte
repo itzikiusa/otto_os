@@ -28,6 +28,7 @@
   import RuntimeTaskStop from './runtime/RuntimeTaskStop.svelte';
   import { runtimeThreads } from './runtime/runtimeThreads.svelte';
   import { runtimeViews } from './runtime/runtimeView.svelte';
+  import { contextMeter } from './runtime/contextMeter';
   import { gitAction } from './threadDetails';
   import { anyThread } from './threadRelay';
   import { subagentSection, type SubagentRow } from './threadSubagents';
@@ -51,6 +52,7 @@
     ondismiss?: () => void;
   }
   let { cwd, threadId = null, floating = false, ondismiss }: Props = $props();
+  const ctxMeter = $derived(contextMeter(threadId ? runtimeViews.projections[threadId]?.thread?.context_usage : null));
 
   let openInEl = $state<HTMLButtonElement | null>(null);
   let branchEl = $state<HTMLButtonElement | null>(null);
@@ -283,6 +285,14 @@
     {:else}
       <p class="dc-note">{!project ? 'Pick a project folder' : repoChecked ? 'Not a git repository' : 'Looking for a git repository…'}</p>
     {/if}
+    {#if ctxMeter}
+      <!-- How full the agent's context is (runtime/contextMeter.ts). -->
+      <div class="dc-row dc-static" title="Context: {ctxMeter.text}" data-testid="details-context">
+        <Icon name="gauge" size={14} />
+        <span class="dc-label">Context</span>
+        <span class="dc-stat mono" class:dc-warn={ctxMeter.tone === 'warning'} class:dc-danger={ctxMeter.tone === 'danger'} dir="ltr">{ctxMeter.pct} %</span>
+      </div>
+    {/if}
   </div>
 
   {#if subagents}
@@ -451,6 +461,12 @@
     font-size: var(--fs-s);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
+  }
+  .dc-warn {
+    color: var(--warning);
+  }
+  .dc-danger {
+    color: var(--danger);
   }
   .dc-stat {
     display: inline-flex;

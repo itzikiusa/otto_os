@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx } from './seed';
+import { expectFullyInViewport } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The Threads composer on a phone, on REAL fake-agent threads (otto-fake-codex).
@@ -249,4 +250,20 @@ test('a drag that starts on the New-thread composer stays in it', async ({ page,
     await page.waitForTimeout(300); // ui-guards: allow — absence: the page did not pan after the drag
     expect(await top(), `a drag of ${dy} px on the New-thread composer leaves the page where it was`).toBe(start);
   }
+});
+
+test('the context meter is a 44 px tap target; its menu fits the screen', async ({ page }) => {
+  const id = await newThread('Context meter phone');
+  await page.goto(`/#/threads/${id}`);
+  const thread = page.getByTestId(`runtime-thread-${id}`);
+  await expect(thread).toBeVisible({ timeout: 30_000 });
+  await send(thread, 'hi');
+  const meter = thread.getByTestId('runtime-context-meter');
+  await expect(meter).toBeVisible({ timeout: 20_000 });
+  const box = (await meter.boundingBox())!;
+  expect(box.height).toBeGreaterThanOrEqual(44);
+  await meter.tap();
+  const info = page.getByRole('menuitem', { name: /Context · 7 of 1k tokens/ });
+  await expect(info).toBeVisible();
+  await expectFullyInViewport(page, page.getByRole('menu'), 'context menu');
 });

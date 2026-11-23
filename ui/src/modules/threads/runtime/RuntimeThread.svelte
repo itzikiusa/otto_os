@@ -39,6 +39,7 @@
   import RuntimeComposerActions from './RuntimeComposerActions.svelte';
   import RuntimeComposerPlus from './RuntimeComposerPlus.svelte';
   import RuntimeMinimap from './RuntimeMinimap.svelte';
+  import RuntimeContextMeter from './RuntimeContextMeter.svelte';
   import { threadAccessDefault } from '../threadAccessDefault.svelte';
   import { isAltSend, midTurnDelivery, primaryAction } from './composerSend';
   import { threadPrefs } from './threadPrefs.svelte';
@@ -635,6 +636,7 @@
         {/if}
         <span class="rt-grow"></span>
         {#if !agentChat}
+          <RuntimeContextMeter usage={p?.thread?.context_usage} compact={p?.commands.some((c) => c.name === 'compact') ? 'compact' : null} oncompact={(c) => { draft.text = `/${c}`; focusComposer(); }} />
           <RuntimeModelControl {provider} {session} {draft} efforts={caps.efforts ?? []} disabled={closed || !session} testId={testIds?.model ?? 'runtime-model'} />
         {/if}
         <RuntimeComposerActions
