@@ -144,6 +144,17 @@
   });
   /** The header tallies like the timeline row, most urgent first ("1 needs you · 1 working"). */
   const WORD_TONE: Record<SubagentWord, ChildTone> = { Working: 'working', 'Needs you': 'needs-you', Done: 'done', Failed: 'failed', Stopped: 'stopped' };
+  /** "Subagents · 1 needs you · 1 working"; compared threads are counted as
+   *  models, not subagents ("Compared with 2 models"). */
+  function subagentsCap(s: { running: SubagentRow[]; previous: SubagentRow[] }): string {
+    const isCompared = (r: SubagentRow): boolean => !!r.threadId && !!councilOf(runtimeThreads.get(r.threadId));
+    const all = [...s.running, ...s.previous];
+    const models = all.filter(isCompared).length;
+    const working = s.running.filter((r) => !isCompared(r));
+    if (models && models === all.length) return `Compared with ${models} ${models === 1 ? 'model' : 'models'}`;
+    const head = `Subagents${working.length ? ` · ${subagentTally(working.map((r) => WORD_TONE[r.word])).text}` : ''}`;
+    return models ? `${head} · compared with ${models} ${models === 1 ? 'model' : 'models'}` : head;
+  }
   let previousOpen = $state(false);
   // A short screen (a phone on its side): heading the panel, the card is one
   // summary row (folder · branch · changes) that opens on tap, so the
@@ -329,7 +340,7 @@
         </button>
       {/if}
       {#if s.running.length || s.previous.length}
-        <p class="dc-cap" data-testid="details-subagents-cap">Subagents{s.running.length ? ` · ${subagentTally(s.running.map((r) => WORD_TONE[r.word])).text}` : ''}</p>
+        <p class="dc-cap" data-testid="details-subagents-cap">{subagentsCap(s)}</p>
       {/if}
       {#each s.running as r (r.id)}
         {@render subagent(r)}

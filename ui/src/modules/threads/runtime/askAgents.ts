@@ -1,4 +1,4 @@
-// "Ask another agent" from a runtime thread's composer: typing `@` and part
+// "Delegate to…" from a runtime thread's composer: typing `@` and part
 // of a provider or model name offers them as chips (T3 Code's model mentions,
 // apps/web/src/components/chat/composerModelMentions.ts, MIT, Copyright (c)
 // 2026 T3 Tools Inc. — `@opus`, `@gpt`, words joined with `:` `/` `-`). In

@@ -445,7 +445,7 @@
       textareaEl={composerEl}
       anchorEl={composerBoxEl}
       allowAgents={true}
-      agentSectionLabel={councilOn ? 'Add council agent' : 'Switch agent'}
+      agentSectionLabel={councilOn ? 'Add a model to compare' : 'Switch agent'}
       onpickfile={handleMentionFile}
       onpickagent={handleMentionAgent}
       ondrilldir={(nextText) => { prompt = nextText; }}

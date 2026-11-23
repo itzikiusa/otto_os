@@ -81,7 +81,7 @@ test('a subagent’s approval is answered in the parent, and one Stop stops the 
     await page.screenshot({ path: test.info().outputPath(`subagent-approval-phone-${scheme}.png`), animations: 'disabled' });
   }
   await page.emulateMedia({ colorScheme: 'light' });
-  await card.getByRole('button', { name: /^Approve/ }).first().tap();
+  await card.getByRole('button', { name: /^Allow once/ }).first().tap();
   const answers = () => page.evaluate(() => ((window as unknown as { __mockRuntime: { answers?: { id: string; decision: string }[] } }).__mockRuntime.answers ?? []));
   await expect.poll(answers).toEqual([expect.objectContaining({ id: '01M84S0000000000000000000A', decision: 'accept' })]);
   await expect(card).toHaveCount(0);

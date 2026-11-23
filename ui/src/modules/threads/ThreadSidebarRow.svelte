@@ -24,7 +24,7 @@
   import ProjectBadge from './ProjectBadge.svelte';
   import { councilOf } from './runtime/council';
   import { inboxClass, statusWord, subagentWord } from './threadInbox';
-  import { childRollup } from './runtime/childThreads';
+  import { childRollup, familyCountLabel } from './runtime/childThreads';
   import { inboxLive } from './threadInbox.svelte';
   import { threadMeta } from './threadMeta.svelte';
   import { threadRepos } from './threadRepos.svelte';
@@ -141,7 +141,7 @@
     {/if}
     <span class="tr-line tr-l2">
       <span class="tr-title ellipsis" dir="auto">{label}</span>
-      {#if kids.length > 0}<span class="tr-kids" data-testid="thread-family-count-{s.id}">{kids.length} {kids.length === 1 ? 'subagent' : 'subagents'}</span>{/if}
+      {#if kids.length > 0}<span class="tr-kids" data-testid="thread-family-count-{s.id}">{familyCountLabel(kids.map((id) => !!councilOf(runtimeThreads.get(id))))}</span>{/if}
     </span>
     <span class="tr-line tr-l3">
       {#if child}

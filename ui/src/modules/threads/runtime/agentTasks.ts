@@ -47,7 +47,7 @@ export interface AgentTask {
   endedAt: string | null;
   /** Linked TurnItem id (subagent card, command_execution, or dynamic_tool). */
   itemId: string | null;
-  /** Linked child RuntimeSession id (`otto.thread_open` / `Ask another agent`). */
+  /** Linked child RuntimeSession id (`otto.thread_open` / `Delegate to…`). */
   childSessionId: string | null;
   /** The provider's task id (a Claude background command's output file). */
   taskId: string | null;

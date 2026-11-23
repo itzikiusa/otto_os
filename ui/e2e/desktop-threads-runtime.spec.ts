@@ -93,15 +93,15 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   await expect(approval).toContainText('Codex wants to run');
   await expect(approval).toContainText('make clean');
   await expect(thread.locator('[data-item-type="command_execution"]').getByText('Waiting for your approval')).toBeVisible();
-  await expect(thread.getByRole('button', { name: 'Approve', exact: true })).toHaveCount(1);
+  await expect(thread.getByRole('button', { name: 'Allow once', exact: true })).toHaveCount(1);
   await page.screenshot({ path: info.outputPath('runtime-approval-light.png'), animations: 'disabled' });
   // Dark: the secondary actions are dark buttons (once the theme transition settles).
   await page.emulateMedia({ colorScheme: 'dark' });
-  const decline = approval.getByRole('button', { name: 'Decline', exact: true });
+  const decline = approval.getByRole('button', { name: 'Deny', exact: true });
   await expect.poll(() => bgLuminance(decline)).toBeLessThan(0.35);
   await page.screenshot({ path: info.outputPath('runtime-approval-dark.png'), animations: 'disabled' });
   await page.emulateMedia({ colorScheme: 'light' });
-  await approval.getByRole('button', { name: 'Approve', exact: true }).click();
+  await approval.getByRole('button', { name: 'Allow once', exact: true }).click();
   await expect(approval).toHaveCount(0);
   const command = thread.locator('[data-item-type="command_execution"]').last();
   await expect(command).toBeVisible();
@@ -516,10 +516,10 @@ test('runtime polish: RTL, details card, grouped tools, folded approvals, access
   await thread.getByTestId('runtime-item-c2').getByTestId('runtime-approval-answer').click();
   await expect(dock.getByTestId('runtime-attention-count')).toHaveText('2 of 2');
   await expect(dock).toContainText('git log -1');
-  await dock.getByRole('button', { name: 'Approve', exact: true }).click();
+  await dock.getByRole('button', { name: 'Allow once', exact: true }).click();
   await thread.getByTestId('runtime-item-c1').getByTestId('runtime-approval-answer').click();
   await expect(dock).toContainText('git status');
-  await dock.getByRole('button', { name: 'Decline', exact: true }).click();
+  await dock.getByRole('button', { name: 'Deny', exact: true }).click();
   await expect.poll(() => answered.sort()).toEqual(['r4', 'r5']);
   await page.screenshot({ path: info.outputPath('runtime-polish-work-light.png'), animations: 'disabled' });
   await page.emulateMedia({ colorScheme: 'dark' });

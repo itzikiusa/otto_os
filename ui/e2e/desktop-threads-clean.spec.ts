@@ -126,7 +126,7 @@ test('subagents sit in the details card; ⋯ › Send to another thread… holds
   await expect(page.getByTestId('details-subagents')).toHaveCount(0);
   await more.click();
   await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Send to another thread…' }).click();
-  await expect(page.getByTestId('threads-related-popover')).toContainText('No related threads yet');
+  await expect(page.getByTestId('threads-related-popover')).toContainText('No other threads yet');
 });
 
 test('the right panel offers no Terminal, Peers or (without DB work) Connections', async ({ page }) => {

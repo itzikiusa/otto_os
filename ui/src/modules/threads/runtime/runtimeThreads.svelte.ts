@@ -506,7 +506,7 @@ class RuntimeThreads {
     return hit;
   }
 
-  /** "Ask another agent" (or several): new threads linked to `parentId`,
+  /** "Delegate to…" (or several): new threads linked to `parentId`,
    *  each sent `req.prompt`; all or none. Their rows land before this resolves. */
   async askChildren(parentId: string, req: AskChildReq): Promise<RuntimeSession[]> {
     const { children } = await api.post<AskChildResp>(`/runtime-sessions/${parentId}/children`, req);

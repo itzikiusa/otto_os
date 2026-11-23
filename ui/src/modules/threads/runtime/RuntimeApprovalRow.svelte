@@ -36,14 +36,29 @@
     mcp_elicitation: 'App access approval',
   };
   const DEFAULT_OPTIONS: ApprovalOption[] = [
-    { decision: 'decline', label: 'Decline' },
-    { decision: 'accept', label: 'Approve' },
+    { decision: 'decline', label: 'Deny' },
+    { decision: 'accept', label: 'Allow once' },
   ];
+  /** One vocabulary for every approval — runtime, subagent, MCP, ACP: the
+   *  provider's own label stays as the button's tooltip (its exact scope). */
+  const WORDS: Partial<Record<ApprovalDecision, string>> = {
+    accept: 'Allow once',
+    accept_always: 'Always allow',
+    accept_for_session: 'Always allow',
+    decline: 'Deny',
+    decline_always: 'Always deny',
+    cancel: 'Deny and stop',
+  };
+  const word = (o: ApprovalOption): string => WORDS[o.decision] ?? o.label;
 
   let responding = $state(false);
   const options = $derived(approval.options.length > 0 ? approval.options : DEFAULT_OPTIONS);
-  const primary = $derived(options.filter((o) => o.decision === 'decline' || o.decision === 'accept'));
-  const more = $derived(options.filter((o) => o.decision !== 'decline' && o.decision !== 'accept'));
+  /** Allow once · Always allow (when offered) · Deny — the same layout everywhere; the rest under More. */
+  const always = $derived(options.find((o) => o.decision === 'accept_always') ?? options.find((o) => o.decision === 'accept_for_session'));
+  const primary = $derived(
+    [options.find((o) => o.decision === 'accept'), always, options.find((o) => o.decision === 'decline')].filter((o): o is ApprovalOption => !!o),
+  );
+  const more = $derived(options.filter((o) => !primary.includes(o)));
 
   /** Also the dock's keyboard answer (one request in flight at a time). */
   export async function respond(decision: ApprovalDecision): Promise<void> {
@@ -59,7 +74,7 @@
   function openMore(e: MouseEvent): void {
     ctxMenu.show(
       e,
-      more.map((o) => ({ label: o.label, action: () => void respond(o.decision) })),
+      more.map((o) => ({ label: word(o), title: o.label, action: () => void respond(o.decision) })),
     );
   }
 
@@ -82,11 +97,12 @@
             class:primary={o.decision === 'accept'}
             disabled={responding}
             data-testid="runtime-dock-{o.decision}"
-            aria-label={o.label}
-            aria-keyshortcuts={hints ? (o.decision === 'accept' ? 'Meta+Enter' : 'Meta+Backspace') : undefined}
+            aria-label={word(o)}
+            title={o.label !== word(o) ? o.label : undefined}
+            aria-keyshortcuts={hints && (o.decision === 'accept' || o.decision === 'decline') ? (o.decision === 'accept' ? 'Meta+Enter' : 'Meta+Backspace') : undefined}
             onclick={() => void respond(o.decision)}
           >
-            {o.label}{#if hints}<kbd class="ra-kbd">{keyHint(o.decision === 'accept' ? 'accept' : 'decline', mac)}</kbd>{/if}
+            {word(o)}{#if hints && (o.decision === 'accept' || o.decision === 'decline')}<kbd class="ra-kbd">{keyHint(o.decision === 'accept' ? 'accept' : 'decline', mac)}</kbd>{/if}
           </button>
         {/each}
         {#if more.length > 0}

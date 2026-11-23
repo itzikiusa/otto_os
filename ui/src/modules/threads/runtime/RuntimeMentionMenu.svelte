@@ -35,7 +35,7 @@
 
   let {
     text, cwd = null, textareaEl = null, anchorEl = null, allowAgents = true,
-    agentSectionLabel = 'Ask another agent', onpickfile, onpickagent, ondrilldir,
+    agentSectionLabel = 'Delegate to…', onpickfile, onpickagent, ondrilldir,
   }: Props = $props();
 
   let filter = $state<MentionFilterMode>('all');

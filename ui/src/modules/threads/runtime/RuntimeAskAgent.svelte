@@ -1,5 +1,5 @@
 <!--
-  "Ask another agent" + unified `@` file/folder & agent mention menu in a
+  "Delegate to…" + unified `@` file/folder & agent mention menu in a
   runtime thread's composer. `part="button"` (in the composer's foot) opens
   the agent menu: each model picked becomes a chip, so one is "Ask another
   agent" and 2–4 are "Ask several". `part="chips"` mounts `RuntimeMentionMenu`
