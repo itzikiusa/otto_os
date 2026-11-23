@@ -30,6 +30,7 @@
   import { runtimeThreads } from './runtime/runtimeThreads.svelte';
   import { runtimeViews } from './runtime/runtimeView.svelte';
   import { gitAction } from './threadDetails';
+  import { perfCount } from '../../lib/perfCount';
   import { anyThread } from './threadRelay';
   import { subagentSection, type SubagentRow } from './threadSubagents';
   import { delegatedParentId } from './threadsHelpers';
@@ -115,24 +116,36 @@
   // Everything working under this thread (threadSubagents.ts): a runtime
   // thread's subagents and the threads opened from it, a terminal thread's
   // delegated threads, and the thread it works under itself.
-  const subagents = $derived.by(() => {
+  // The thread's relatives depend on the thread lists, not on its stream:
+  // derived apart, so a streamed delta does not rescan every thread.
+  const relatives = $derived.by(() => {
     if (!threadId) return null;
     const rt = runtimeThreads.get(threadId);
-    const p = rt ? (runtimeViews.projections[threadId] ?? null) : null;
-    const tasks = rt
-      ? agentTasks(p?.items ?? [], p?.session?.background_tasks ?? rt.background_tasks ?? [], {
-          childThreads: mapChildThreadSummaries(linkedChildren(Object.values(runtimeThreads.byId), threadId)),
-        })
-      : { running: [], finished: [] };
+    perfCount('detailsRelatives');
+    const all = Object.values(runtimeThreads.byId);
     const parent = anyThread(rt?.parent_id ?? delegatedParentId(ws.getSession(threadId)));
-    const s = subagentSection(tasks, {
+    return {
+      children: rt ? mapChildThreadSummaries(linkedChildren(all, threadId)) : [],
       parent: parent ? { id: parent.id, title: parent.title } : null,
       // Delegated terminal threads, and a council's other seats (peers that
       // linkedChildren leaves out of the task list).
       delegated: [
         ...ws.sessions.filter((x) => !x.archived && delegatedParentId(x) === threadId),
-        ...Object.values(runtimeThreads.byId).filter((x) => x.parent_id === threadId && councilOf(x)),
+        ...all.filter((x) => x.parent_id === threadId && councilOf(x)),
       ].map((x) => ({ id: x.id, title: x.title, provider: x.provider, status: ws.statusMap[x.id] ?? x.status })),
+    };
+  });
+  const subagents = $derived.by(() => {
+    const rel = relatives;
+    if (!threadId || !rel) return null;
+    const rt = runtimeThreads.get(threadId);
+    const p = rt ? (runtimeViews.projections[threadId] ?? null) : null;
+    const tasks = rt
+      ? agentTasks(p?.items ?? [], p?.session?.background_tasks ?? rt.background_tasks ?? [], { childThreads: rel.children })
+      : { running: [], finished: [] };
+    const s = subagentSection(tasks, {
+      parent: rel.parent,
+      delegated: rel.delegated,
       providerOf: (id) => runtimeThreads.get(id)?.provider ?? null,
     });
     return s.parent || s.running.length || s.previous.length ? s : null;

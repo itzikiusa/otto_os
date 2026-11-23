@@ -223,6 +223,8 @@ test('a. opening a 60- and a 300-turn thread; d. composer typing', async ({ page
 });
 
 test('c. streaming a long answer after 30 tool calls into the 300-turn thread', async ({ page }) => {
+  // Wide enough for the details card to float beside the conversation.
+  await page.setViewportSize({ width: 1600, height: 1000 });
   await boot(page, '#/threads/' + ids.t300);
   const conv = page.getByTestId('runtime-thread-' + ids.t300);
   await expect(conv.getByText('Turn 299: tighten').last()).toBeVisible({ timeout: 30_000 });
