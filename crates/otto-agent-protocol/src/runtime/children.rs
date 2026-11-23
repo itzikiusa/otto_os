@@ -41,6 +41,8 @@ use super::*;
 const WAKE_MAX_CHARS: usize = 16_000;
 /// Characters of the one line a notice quotes.
 const NOTICE_LINE_CHARS: usize = 140;
+/// Characters of conversation a delegated subagent gets as context.
+const CONTEXT_MAX_CHARS: usize = 6_000;
 /// Characters of the prompt a child's default title takes.
 const TITLE_MAX_CHARS: usize = 60;
 
@@ -245,6 +247,63 @@ fn wake_text_how(child: &RuntimeSession, how: &str, answer: &str) -> String {
     )
 }
 
+/// The context block from `lines` (oldest first): the newest that fit in
+/// [`CONTEXT_MAX_CHARS`], in order; empty when there is none.
+fn context_text(lines: Vec<String>) -> String {
+    let mut kept: Vec<String> = Vec::new();
+    let mut used = 0;
+    for l in lines.into_iter().rev() {
+        let n = l.chars().count();
+        if used + n > CONTEXT_MAX_CHARS {
+            if kept.is_empty() {
+                let tail: String = l.chars().skip(n - CONTEXT_MAX_CHARS).collect();
+                kept.push(format!("…{tail}"));
+            }
+            break;
+        }
+        used += n;
+        kept.push(l);
+    }
+    if kept.is_empty() {
+        return String::new();
+    }
+    kept.reverse();
+    format!(
+        "The conversation so far in that thread (for context):\n{}\n\nYour task:\n",
+        kept.join("\n\n")
+    )
+}
+
+/// Merge every subagent reply waiting in `queue` into the first one, so
+/// completions wake the agent once ("2 subagents finished", T3 Code's
+/// batched `delegatedCompletion`); the queue is re-sent when it did.
+pub(super) fn merge_wakes(inner: &Inner, live: &Live, st: &mut State) {
+    if merge_queue(&mut st.proj.queue) {
+        emit_queue(inner, live, st);
+    }
+}
+
+/// [`merge_wakes`] on the queue alone: `true` when it merged any.
+fn merge_queue(queue: &mut Vec<QueuedRecord>) -> bool {
+    let ready: Vec<usize> = (0..queue.len())
+        .filter(|&i| queue[i].wake.is_some() && queue[i].error.is_none())
+        .collect();
+    if ready.len() < 2 {
+        return false;
+    }
+    let texts: Vec<String> = ready.iter().map(|&i| queue[i].req.text.clone()).collect();
+    let first = ready[0];
+    queue[first].req = Arc::new(RuntimePromptReq::of(&format!(
+        "{} subagents finished. Their replies:\n\n{}",
+        texts.len(),
+        texts.join("\n\n---\n\n")
+    )));
+    for &i in ready[1..].iter().rev() {
+        queue.remove(i);
+    }
+    true
+}
+
 /// The turn answered something `parent` asked: its prompt is the framed
 /// opening prompt or a `thread_message` from that thread ([`AgentRuntime::peer_header`]).
 pub(super) fn asked_by(prompt: &str, parent: &Id) -> bool {
@@ -399,7 +458,11 @@ impl AgentRuntime {
                         cwd: None,
                         meta: Some(child_meta_with_slug(
                             caller,
-                            ChildOpener::Person,
+                            if req.to_me_only {
+                                ChildOpener::Person
+                            } else {
+                                ChildOpener::Agent
+                            },
                             custom_slug.as_deref(),
                         )),
                     },
@@ -414,9 +477,17 @@ impl AgentRuntime {
                 }
             }
         }
+        // Reporting to the thread's agent: the task header (so its answer wakes
+        // that agent) and a bounded summary of the conversation so far.
+        let text = if req.to_me_only {
+            prompt.clone()
+        } else {
+            let context = self.context_block(caller).await;
+            format!("{}\n\n{context}{prompt}", delegation::task_header(&c))
+        };
         for (s, t) in made.iter().zip(&req.targets) {
             let p = RuntimePromptReq {
-                text: prompt.clone(),
+                text: text.clone(),
                 effort: t.effort.clone().filter(|e| !e.trim().is_empty()),
                 images: req.images.clone(),
                 // Narrower than the parent's: the child's first turn sets it.
@@ -436,6 +507,34 @@ impl AgentRuntime {
             tracing::warn!(session = %caller, "could not note the asked threads: {e}");
         }
         Ok(out)
+    }
+
+    /// The recent conversation of thread `id` a delegated subagent gets
+    /// (after T3 Code's bounded handoff, `handoffBudget.ts`): its last
+    /// person / agent messages, newest kept, at most [`CONTEXT_MAX_CHARS`].
+    async fn context_block(&self, id: &Id) -> String {
+        let Ok(live) = self.live(id).await else {
+            return String::new();
+        };
+        let mut said: Vec<(u32, String)> = {
+            let st = live.lock();
+            st.proj
+                .items
+                .values()
+                .filter(|i| i.parent_item_id.is_none())
+                .filter_map(|i| match &i.kind {
+                    TurnItemKind::UserMessage { text, .. } if !text.starts_with('[') => {
+                        Some((i.ordinal, format!("Person: {}", text.trim())))
+                    }
+                    TurnItemKind::AssistantMessage { text, .. } if !text.trim().is_empty() => {
+                        Some((i.ordinal, format!("Agent: {}", text.trim())))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        said.sort_by_key(|(o, _)| *o);
+        context_text(said.into_iter().map(|(_, t)| t).collect())
     }
 
     /// Remove children a failed ask already made (none has answered yet).
@@ -487,7 +586,10 @@ impl AgentRuntime {
             } else {
                 wake_text(&child, status, &answer)
             };
-            if let Err(e) = self.queue_wake(&of.id, &child.id, &turn, text).await {
+            if let Err(e) = self
+                .queue_wake(&of.id, &child.id, &turn, text, !restarted)
+                .await
+            {
                 tracing::warn!(session = %of.id, child = %child.id, "could not queue a reply: {e}");
             }
         }
@@ -537,6 +639,7 @@ impl AgentRuntime {
         child: &Id,
         turn: &Id,
         text: String,
+        respawn: bool,
     ) -> Result<()> {
         let live = self.live(parent).await?;
         let key = WakeKey {
@@ -585,9 +688,19 @@ impl AgentRuntime {
                 }),
             }
             emit_queue(&self.inner, &live, &mut st);
-            error.is_none() && st.proc.is_some() && st.turn.is_none()
+            error.is_none() && st.turn.is_none()
         };
-        if kick {
+        // A dormant parent is woken: its agent resumes to read the reply
+        // (not on boot — a restart's cut-off replies wait for the person).
+        let dormant = live.lock().proc.is_none();
+        if kick && dormant && respawn {
+            let _prompt = live.prompt_lock.lock().await;
+            if let Err(e) = self.spawn_resuming(parent, &live).await {
+                tracing::warn!(session = %parent, "could not wake the thread for a reply: {e}");
+                return Ok(());
+            }
+        }
+        if kick && (!dormant || respawn) {
             self.kick_queue(parent);
         }
         Ok(())
@@ -796,6 +909,43 @@ mod tests {
         let mut same = None;
         inherit_tools(&lead, RuntimeProvider::Claude, &mut same);
         assert_eq!(same.unwrap()["account_id"], "work");
+    }
+
+    #[test]
+    fn replies_waiting_together_wake_the_agent_once() {
+        let rec = |id: &str, text: &str, wake: bool| QueuedRecord {
+            id: id.into(),
+            created_at: Utc::now(),
+            req: Arc::new(RuntimePromptReq::of(text)),
+            wake: wake.then(|| WakeKey {
+                child: id.into(),
+                turn: "t".into(),
+            }),
+            error: None,
+        };
+        let mut q = vec![
+            rec("a", "A said", true),
+            rec("p", "person", false),
+            rec("b", "B said", true),
+        ];
+        assert!(merge_queue(&mut q));
+        assert_eq!(q.len(), 2);
+        assert!(q[0].req.text.starts_with("2 subagents finished."));
+        assert!(q[0].req.text.contains("A said") && q[0].req.text.contains("B said"));
+        assert_eq!(q[1].id, "p");
+        assert!(!merge_queue(&mut q), "one reply alone is left as it is");
+    }
+
+    #[test]
+    fn a_delegated_task_gets_the_newest_conversation_that_fits() {
+        assert_eq!(context_text(Vec::new()), "");
+        let t = context_text(vec!["Person: old".into(), "Agent: new".into()]);
+        assert!(t.contains("Person: old\n\nAgent: new"));
+        assert!(t.ends_with("Your task:\n"));
+        let long = "x".repeat(CONTEXT_MAX_CHARS + 50);
+        let t = context_text(vec!["Person: dropped".into(), long]);
+        assert!(!t.contains("dropped"));
+        assert!(t.chars().count() < CONTEXT_MAX_CHARS + 200);
     }
 
     #[test]

@@ -150,7 +150,10 @@
       {/each}
       <span class="aa-access" title="A thread you ask here works in this thread’s folder with this thread’s access (the access chip below narrows it)">· {accessText}</span>
       <button type="button" class="btn small ghost" onclick={() => askTargets.clear(sessionId)}>Cancel</button>
-      <span class="aa-what" data-testid="runtime-ask-what">Gets your message and attachments — not this conversation. The answer comes back to you as a card, not to {ownAgent}.</span>
+      <label class="aa-what" data-testid="runtime-ask-what">
+        <input type="checkbox" checked={!!askTargets.toMeOnly[sessionId]} data-testid="runtime-ask-to-me" onchange={(e) => (askTargets.toMeOnly = { ...askTargets.toMeOnly, [sessionId]: e.currentTarget.checked })} />
+        {askTargets.toMeOnly[sessionId] ? 'Answer to me only — gets your message, not this conversation' : `Gets your message and this conversation so far; the answer goes to ${ownAgent}`}
+      </label>
     </div>
   {/if}
 {/if}
@@ -212,6 +215,9 @@
     font-size: var(--fs-xs);
   }
   .aa-what {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     flex-basis: 100%;
     font-size: var(--fs-xs);
   }

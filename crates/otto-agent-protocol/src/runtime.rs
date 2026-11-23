@@ -1642,10 +1642,11 @@ impl AgentRuntime {
         let _one = live.drain_lock.lock().await;
         let _prompt = live.prompt_lock.lock().await;
         let next = {
-            let st = live.lock();
+            let mut st = live.lock();
             if st.session.status == RuntimeSessionStatus::Closed || st.turn.is_some() {
                 return;
             }
+            children::merge_wakes(&self.inner, &live, &mut st);
             // A child thread's reply never respawns a stopped agent: it waits
             // for the person (their next message, or Revive). A queue with a
             // person's message in it goes out in order.

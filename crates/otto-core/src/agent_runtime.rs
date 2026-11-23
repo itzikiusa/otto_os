@@ -1697,6 +1697,10 @@ pub struct AskChildReq {
     pub access_mode: Option<RuntimeAccessMode>,
     #[serde(default)]
     pub images: Vec<PromptImage>,
+    /// The answer goes back to the thread's agent (default), like a subagent
+    /// the agent opened; `true` = "answer to me only" (it stays with the person).
+    #[serde(default)]
+    pub to_me_only: bool,
 }
 
 /// The children `POST /runtime-sessions/{id}/children` opened, in target order.

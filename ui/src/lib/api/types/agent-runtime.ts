@@ -548,6 +548,9 @@ export interface AskChildReq {
   title?: string;
   access_mode?: RuntimeAccessMode;
   images?: PromptImage[];
+  /** "Answer to me only": the answer stays with the person (default: it
+   *  wakes the thread's agent, and the subagent gets the conversation so far). */
+  to_me_only?: boolean;
 }
 
 export interface AskChildResp {

@@ -52,6 +52,9 @@ test('Ask another agent opens a linked child shown live in the parent and nested
   const chips = thread.getByTestId('runtime-ask-targets');
   await expect(chips).toContainText('Codex');
   await expect(chips).toContainText('asks before it edits, like this thread');
+  // Delegate: the answer goes to the thread's agent unless "answer to me only".
+  await expect(thread.getByTestId('runtime-ask-what')).toContainText('the answer goes to Claude');
+  await expect(thread.getByTestId('runtime-ask-to-me')).not.toBeChecked();
 
   await thread.getByTestId('runtime-composer').fill('Why does the linker fail?');
   await thread.getByTestId('runtime-send').click();
@@ -65,6 +68,7 @@ test('Ask another agent opens a linked child shown live in the parent and nested
   await expect.poll(async () => (await read()).asks.length).toBe(1);
   const sent = await read();
   expect(sent.asks[0]).toMatchObject({ id: 'rt_lead', prompt: 'Why does the linker fail?', targets: [{ provider: 'codex' }] });
+  expect(sent.asks[0]).not.toHaveProperty('to_me_only');
   expect(sent.prompts).toBe(0);
   await expect(chips).toHaveCount(0);
   await expect(thread.getByTestId('runtime-composer')).toHaveValue('');

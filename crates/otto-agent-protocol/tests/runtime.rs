@@ -1757,8 +1757,58 @@ async fn linked_threads_open_message_and_read_within_their_group() {
 
 /// A person asks other agents from a thread: the children are linked to it,
 /// get the message as typed (no "Opened by" frame), the parent's timeline
-/// names them and notes each finished turn — and the parent's AGENT is not
-/// woken (a person asked, a person reads).
+/// names them and notes each finished turn — and with "answer to me only"
+/// the parent's AGENT is not woken (a person asked, a person reads).
+/// "Delegate to…" by default: the subagent gets the task under its header
+/// with the conversation so far, and its answer wakes the thread's agent.
+#[tokio::test]
+async fn a_person_delegates_and_the_answer_returns_to_the_threads_agent() {
+    use otto_core::agent_runtime::{AskChildReq, AskChildTarget};
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let lead = create(&rt, cwd).await;
+    rt.prompt(&lead.id, "we use postgres 16").await.unwrap();
+    host.wait(is_terminal).await;
+    let kids = rt
+        .ask_children(
+            &lead.id,
+            AskChildReq {
+                prompt: "Which index helps?".into(),
+                targets: vec![AskChildTarget {
+                    provider: RuntimeProvider::Gemini,
+                    provider_slug: None,
+                    model: None,
+                    effort: None,
+                }],
+                ..AskChildReq::default()
+            },
+        )
+        .await
+        .unwrap();
+    let kid = &kids[0];
+    assert_eq!(
+        kid.meta.as_ref().unwrap()["child_of"],
+        serde_json::json!({"id": lead.id, "by": "agent"})
+    );
+    let reply = rt.latest_reply(&kid.id, WAIT).await.unwrap();
+    assert!(reply.text.contains("Which index helps?"), "{}", reply.text);
+    assert!(
+        reply.text.contains("Person: we use postgres 16"),
+        "{}",
+        reply.text
+    );
+    host.wait(|e| {
+        e.session_id == lead.id
+            && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+                if matches!(&turn_item.kind, TurnItemKind::UserMessage { text, .. }
+                    if text.starts_with("[Reply from subagent")))
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn a_person_asks_other_agents_from_a_thread() {
     use otto_core::agent_runtime::{AskChildReq, AskChildTarget};
@@ -1779,6 +1829,7 @@ async fn a_person_asks_other_agents_from_a_thread() {
         .ask_children(
             &lead.id,
             AskChildReq {
+                to_me_only: true,
                 prompt: "check it".into(),
                 targets: vec![target(RuntimeProvider::Gemini)],
                 access_mode: Some(RuntimeAccessMode::FullAccess),
@@ -1793,6 +1844,7 @@ async fn a_person_asks_other_agents_from_a_thread() {
         .ask_children(
             &lead.id,
             AskChildReq {
+                to_me_only: true,
                 prompt: "Why does CI fail?".into(),
                 targets: vec![
                     target(RuntimeProvider::Gemini),
@@ -1847,6 +1899,7 @@ async fn a_person_asks_other_agents_from_a_thread() {
         .ask_children(
             &lead.id,
             AskChildReq {
+                to_me_only: true,
                 prompt: " ".into(),
                 targets: vec![target(RuntimeProvider::Gemini)],
                 ..AskChildReq::default()
@@ -1859,6 +1912,7 @@ async fn a_person_asks_other_agents_from_a_thread() {
         .ask_children(
             &lead.id,
             AskChildReq {
+                to_me_only: true,
                 prompt: "x".into(),
                 targets: (0..5).map(|_| target(RuntimeProvider::Gemini)).collect(),
                 ..AskChildReq::default()
@@ -2275,15 +2329,14 @@ async fn queued_child_replies_are_delivered_when_the_parent_is_revived() {
     rt2.recover().await.unwrap();
     assert!(host2.prepared.lock().unwrap().is_empty());
     rt2.reopen(&lead.id).await.unwrap();
-    host2.wait_n(is_terminal, 2).await;
+    host2.wait_n(is_terminal, 1).await;
+    // Both replies wake the agent once (batched).
     let sent = user_texts(&host2);
-    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].starts_with("2 subagents finished."), "{sent:?}");
     assert!(
-        sent[0].starts_with("[Reply from subagent \"worker 1\""),
-        "{sent:?}"
-    );
-    assert!(
-        sent[1].starts_with("[Reply from subagent \"worker 2\""),
+        sent[0].contains("[Reply from subagent \"worker 1\"")
+            && sent[0].contains("[Reply from subagent \"worker 2\""),
         "{sent:?}"
     );
     host2
