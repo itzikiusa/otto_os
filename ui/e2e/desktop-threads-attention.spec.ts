@@ -106,7 +106,13 @@ test('an approval docks above the composer and ⌘↵ answers it from an empty c
   await expect(thread.locator('[data-item-type="command_execution"]').getByText('Waiting for your approval')).toBeVisible();
   // Stop steps back: the dock's Approve is the one primary action.
   await expect(thread.getByTestId('runtime-stop')).toHaveClass(/quiet/);
-  await expect(composer).toHaveAttribute('placeholder', 'Waiting for your approval above');
+  await expect(composer).toHaveAttribute('placeholder', 'Answer above, or type to send a message instead');
+  // One place: the timeline keeps a quiet line, no second box; the composer
+  // folds to one row and focus is on the dock's primary action.
+  await expect(thread.locator('.ra:not(.ra-docked)')).toHaveCount(0);
+  await expect(thread.getByTestId('runtime-approval-answer')).toContainText('Waiting for your approval');
+  await expect(composer).toHaveAttribute('rows', '1');
+  await expect(dock.getByTestId('runtime-dock-accept')).toBeFocused();
   // Desktop hints on the answers.
   await expect(dock.getByTestId('runtime-dock-accept')).toContainText(/⌘↵|Ctrl\+↵/);
   await expect(dock.getByRole('button', { name: 'Approve', exact: true })).toBeVisible();

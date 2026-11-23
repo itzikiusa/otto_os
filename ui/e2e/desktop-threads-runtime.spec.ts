@@ -526,6 +526,9 @@ test('runtime polish: RTL, details card, grouped tools, folded approvals, access
   await page.screenshot({ path: info.outputPath('runtime-polish-work-dark.png'), animations: 'disabled' });
   await page.emulateMedia({ colorScheme: 'light' });
 
+  // (The mocked answers leave the requests pending: type first, so the
+  // composer unfolds from its one-row waiting state.)
+  await thread.getByTestId('runtime-composer').fill('שלום');
   // Access: Full access asks once and rides the next prompt. The chip shows
   // only off the person's default (Full access when agent_skip_permissions is
   // on, the default), so Supervised shows it and Full access hides it; "+"

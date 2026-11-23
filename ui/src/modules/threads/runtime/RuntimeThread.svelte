@@ -163,6 +163,7 @@
   $effect(() => void secretRequests.load());
   // What the agent waits on the person for: answered in the attention dock.
   const attention = $derived(attentionItems(p?.requests ?? [], secretAsk, mcpAsks.pending(sessionId)));
+  const composerFolded = $derived(attention.length > 0 && !draft.text.trim() && draft.images.length === 0); // the dock answers: one row until they type
 
   let scroller = $state<HTMLDivElement | null>(null);
   let streamEl = $state<HTMLDivElement | null>(null);
@@ -185,8 +186,7 @@
   const provider = $derived(session ? sessionProviderSlug(session) : '');
   const agentName = $derived(harnessLabel(provider).replace(/ Code$/, ''));
 
-  // A failed turn is ONE block (RuntimeTurnStatus): its error row and the
-  // dormant "Agent stopped" line would only repeat it.
+  // A failed turn is ONE block (RuntimeTurnStatus): its error row and the dormant "Agent stopped" line would only repeat it.
   const failedError = $derived(outcome?.kind === 'failed' && p ? turnErrorItem(p.items, turn?.id) : null);
   const lastError = $derived(p?.session?.last_error ? { class: '', message: p.session.last_error } : null);
   const failure = $derived(outcome?.kind === 'failed' ? failureView(failedError?.failure ?? lastError, harnessLabel(provider)) : null);
@@ -570,7 +570,7 @@
     <RuntimeChildApprovals {sessionId} />{#if p && session && !closed}<RuntimeMcpChanged {sessionId} workspaceId={session?.workspace_id} servers={p?.mcpServers ?? []} idle={!running} />{/if}
     {#if composerTopSlot}{@render composerTopSlot({ focusComposer })}{/if}
 
-    <div class="rt-composer" style:border-color={planOn ? 'color-mix(in srgb, var(--warning) 42%, var(--border))' : undefined} bind:this={composerBoxEl}>
+    <div class="rt-composer" class:rt-folded={composerFolded} style:border-color={planOn ? 'color-mix(in srgb, var(--warning) 42%, var(--border))' : undefined} bind:this={composerBoxEl}>
       {#if suggestions.length > 0}
         <StageSlashPopup id={popId} items={suggestions} active={cmdIdx} onaccept={acceptCmd} onhover={(i) => (cmdIdx = i)} />
       {/if}
@@ -596,7 +596,7 @@
         bind:value={draft.text}
         use:composerViewState={composerStateArg}
         dir="auto"
-        rows={2}
+        rows={composerFolded ? 1 : 2}
         spellcheck="false"
         {...{ autocorrect: 'off' }}
         autocapitalize="off"
@@ -749,6 +749,8 @@
     box-shadow: var(--shadow-card);
     flex-shrink: 0;
   }
+  .rt-composer.rt-folded { flex-direction: row; align-items: center; padding-block: var(--sp-2); } /* waiting on the person: one row */
+  .rt-composer.rt-folded textarea { flex: 1; min-inline-size: 0; } .rt-folded .rt-foot > :global(:not(:first-child):not(:last-child)) { display: none; }
   /* Files dragged over the pane (composerDrop.ts): a calm ring, no overlay. */
   .rt-composer:global([data-drop]) { border-color: var(--accent-line-strong); background: var(--accent-faint); }
   /* A visible focus ring (the shared accent line), not just a border shade. */
@@ -773,8 +775,7 @@
     outline: none;
     field-sizing: content;
   }
-  /* A short pane (a phone on its side with the keyboard up): one row, so the
-     conversation keeps its lines. */
+  /* A short pane (a phone on its side with the keyboard up): one row, so the conversation keeps its lines. */
   @container (max-block-size: 420px) {
     .rt-composer { gap: var(--sp-1); padding-block: var(--sp-2) var(--sp-1); }
     .rt-composer textarea { min-block-size: 1lh; }
@@ -787,10 +788,7 @@
     min-inline-size: 0;
     margin-inline-start: calc(-1 * var(--sp-2));
   }
-  .rt-grow {
-    flex: 1;
-    min-inline-size: 0;
-  }
+  .rt-grow { flex: 1; min-inline-size: 0; }
   /* A-9: a narrow embed (PR dock, 280–360 px) keeps its chips readable: the
      row wraps rather than cutting a chip to "…". */
   @container (max-inline-size: 380px) {

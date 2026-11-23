@@ -1,9 +1,9 @@
 <script lang="ts">
   // A pending approval. Its live controls live ONCE, in the attention dock
   // above the composer (`docked`: what it wants to run / change, its reason,
-  // Decline · Approve · More, with keyboard hints on desktop). In the
-  // timeline it is the record (`marker`): "Waiting for your approval ·
-  // Answer", which brings that request up in the dock.
+  // the decision buttons, with keyboard hints on desktop). In the timeline it
+  // is one quiet line, "Waiting for your approval · <command>", that brings
+  // that request up in the dock and focuses it.
   // Ported from T3 Code (MIT, Copyright (c) 2026 T3 Tools Inc.):
   // apps/web/src/components/chat/TimelinePendingApprovalRow.tsx and
   // ComposerPendingApprovalActions.tsx (accept / decline as buttons, every
@@ -108,19 +108,17 @@
     </div>
   </div>
 {:else}
-  <div class="ra" class:inline role="group" aria-label={LABELS[approval.kind]} data-testid="runtime-approval-{approval.requestId}">
-    {#if !inline}
-      <div class="ra-head">
-        <Icon name="shield" size={13} />
-        <code class="ra-detail" dir="auto">{approval.prompt || LABELS[approval.kind]}</code>
-      </div>
+  <!-- The timeline's record: one quiet line; the dock above the composer is the one place to answer. -->
+  <div class="ra-line" class:inline role="group" aria-label={LABELS[approval.kind]} data-testid="runtime-approval-{approval.requestId}">
+    {#if approval.canRespond}
+      <button type="button" class="ra-pick" title="Answer it above the composer" data-testid="runtime-approval-answer" onclick={pick}>
+        <Icon name="shield" size={12} />
+        <span class="ra-wait">Waiting for your approval</span>
+        {#if !inline && approval.prompt}<span class="ra-what ellipsis" dir="auto">· {approval.prompt}</span>{/if}
+      </button>
+    {:else}
+      <span class="ra-wait">The agent process is gone. Stop the turn to continue.</span>
     {/if}
-    <div class="ra-actions">
-      <span class="ra-wait">{approval.canRespond ? 'Waiting for your approval' : 'The agent process is gone. Stop the turn to continue.'}</span>
-      {#if approval.canRespond}
-        <button type="button" class="btn small ghost ra-btn" title="Answer it in the bar above the composer" data-testid="runtime-approval-answer" onclick={pick}>Answer</button>
-      {/if}
-    </div>
   </div>
 {/if}
 
@@ -135,14 +133,6 @@
     border-radius: var(--radius-m);
     background: var(--warning-soft);
     font-size: var(--fs-s);
-  }
-  .ra.inline {
-    margin-block: 2px 6px;
-    margin-inline-start: 22px;
-    padding: 4px 8px;
-  }
-  .ra.inline .ra-actions {
-    padding-inline-start: 0;
   }
   .ra-docked {
     flex: 0 1 auto;
@@ -162,13 +152,6 @@
   }
   .ra-docked .ra-actions {
     flex: none;
-  }
-  .ra-head {
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-    min-width: 0;
-    color: var(--warning);
   }
   .ra-detail {
     flex: 1;
@@ -213,6 +196,47 @@
     margin-inline-end: 4px;
     color: var(--warning);
     font-size: var(--fs-xs);
+  }
+  .ra-line {
+    display: flex;
+    min-inline-size: 0;
+    margin-block: 2px;
+  }
+  .ra-line.inline {
+    margin-inline-start: 22px;
+  }
+  .ra-pick {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-inline-size: 0;
+    max-inline-size: 100%;
+    padding: 2px 6px;
+    border: 0;
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--warning);
+    font: inherit;
+    font-size: var(--fs-s);
+    cursor: pointer;
+  }
+  .ra-pick:hover {
+    background: var(--hover);
+  }
+  .ra-pick:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: -2px;
+  }
+  .ra-what {
+    min-inline-size: 0;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+  }
+  @media (pointer: coarse) {
+    .ra-pick {
+      min-block-size: 44px;
+    }
   }
   .ra-kbd {
     margin-inline-start: 6px;
