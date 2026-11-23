@@ -438,3 +438,77 @@ async fn gemini_live_handshake() {
     }
     live.rt.close(&live.s.id).await.unwrap();
 }
+
+/// No turn spent: handshake, the agent's slash commands reach the thread
+/// (`commands.updated`), close + reopen resumes the same session (with
+/// `session/resume` where advertised). Safe to run any time.
+/// `same`: the agent keeps an un-prompted session (Muse 1.4.25 does not:
+/// `session/resume` answers "session … not found", so it starts fresh).
+async fn handshake(provider: RuntimeProvider, make: fn() -> AcpDriver, same: bool) {
+    let live = start(provider, make, ASK).await;
+    let s = live.ready(1).await;
+    let native = s.native_thread_id.expect("the agent named its session");
+    let commands = live
+        .host
+        .wait_n(
+            |e| matches!(&e.body, RuntimeEventBody::CommandsUpdated { commands } if !commands.is_empty()),
+            1,
+        )
+        .await;
+    if let RuntimeEventBody::CommandsUpdated { commands } = commands.body {
+        let names: Vec<_> = commands.iter().map(|c| c.name.as_str()).take(8).collect();
+        println!("commands: {} ({names:?}…)", commands.len());
+    }
+    live.rt.close(&live.s.id).await.unwrap();
+    live.rt.reopen(&live.s.id).await.unwrap();
+    live.host.wait_n(is_ready, 2).await;
+    let s = live.rt.get(&live.s.id).await.unwrap();
+    assert_eq!(s.native_thread_id.as_deref() == Some(native.as_str()), same);
+    let lost = live.host.all().iter().any(|e| {
+        matches!(&e.body,
+        RuntimeEventBody::TurnItemUpdated { turn_item }
+            if matches!(turn_item.kind, TurnItemKind::SessionBoundary))
+    });
+    assert_eq!(
+        lost, !same,
+        "a fresh session says so, a resumed one does not"
+    );
+    live.rt.close(&live.s.id).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "needs the real agy CLI; no turn"]
+async fn agy_live_handshake() {
+    handshake(RuntimeProvider::Agy, || AcpDriver::agy("agy"), true).await;
+}
+
+#[tokio::test]
+#[ignore = "needs the real grok CLI; no turn"]
+async fn grok_live_handshake() {
+    handshake(RuntimeProvider::Grok, AcpDriver::grok, true).await;
+}
+
+#[tokio::test]
+#[ignore = "needs the real opencode CLI; no turn"]
+async fn opencode_live_handshake() {
+    handshake(RuntimeProvider::Opencode, AcpDriver::opencode, true).await;
+}
+
+#[tokio::test]
+#[ignore = "needs the real muse CLI; no turn"]
+async fn muse_live_handshake() {
+    handshake(RuntimeProvider::Muse, || AcpDriver::muse("muse"), false).await;
+}
+
+/// Slash commands: the text `/compact` goes as the prompt and the agent
+/// runs its own command (one short turn).
+#[tokio::test]
+#[ignore = "needs the real agy CLI, signed in; spends 1 turn"]
+async fn agy_live_slash_command() {
+    let live = start(RuntimeProvider::Agy, || AcpDriver::agy("agy"), ASK).await;
+    live.ready(1).await;
+    let (status, _) = live.turn("/compact", 1).await;
+    println!("/compact: {status:?}\n{}", live.host.transcript());
+    assert_eq!(status, TurnTerminalStatus::Completed);
+    live.rt.close(&live.s.id).await.unwrap();
+}
