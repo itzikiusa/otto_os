@@ -33,9 +33,14 @@
     type PendingApproval,
     type TimelineRow,
     type WorkEntry,
+    type WorkPart,
   } from './timeline';
-  import { formatDuration, shouldFold } from './workLog';
+  import RuntimeTurnChanges from './RuntimeTurnChanges.svelte';
+  import { turnChanges, type FileDelta } from './turnChanges';
+  import { earlierSteps, formatDuration, shouldFold, visibleTools } from './workLog';
+  import { threadPrefs } from './threadPrefs.svelte';
   import { turnUsageText } from './turnUsage';
+  import { handoffSummary, handoffTitle } from './providerSwitch';
 
   interface Props {
     sessionId: string;
@@ -54,6 +59,8 @@
     onopenpath?: (path: string, line?: number) => void;
     formatAssistantText?: (item: Extract<TurnItem, { type: 'assistant_message' }>) => string;
     assistantFooter?: Snippet<[Extract<TurnItem, { type: 'assistant_message' }>]>;
+    /** Open the thread's Changes surface on a file (the turn changes card). */
+    onopendiff?: (path: string) => void;
   }
 
   let {
@@ -70,6 +77,7 @@
     onopenpath,
     formatAssistantText,
     assistantFooter,
+    onopendiff,
   }: Props = $props();
 
   /** Edit as new message: only on the person's latest message (less chrome). */
@@ -102,6 +110,23 @@
     return out;
   });
 
+  /** A finished turn that changed files gets its changes card after its last row. */
+  const changesByRow = $derived.by(() => {
+    const last = new Map<string, string>();
+    for (const r of rows) {
+      const tid = r.kind === 'message' ? r.item.turn_id : r.kind === 'work' ? workRowEntries(r)[0]?.item.turn_id : null;
+      if (tid) last.set(tid, r.kind === 'message' ? r.item.id : r.id);
+    }
+    const out = new Map<string, FileDelta[]>();
+    for (const [tid, key] of last) {
+      const t = turnById.get(tid);
+      if (!t || t.status === 'running' || t.status === 'pending') continue;
+      const files = turnChanges(projection.items, tid, cwd);
+      if (files.length) out.set(key, files);
+    }
+    return out;
+  });
+
   const BADGE_ICONS: Record<ParsedContextBadge['kind'], IconName> = {
     selection: 'cursor',
     file: 'file',
@@ -123,7 +148,8 @@
   const turnById = $derived(turns.length === 0 ? EMPTY_TURNS : new Map(turns.map((t) => [t.id, t] as const)));
   const outputMap = $derived(projection.output);
   const rawRequests = $derived(projection.requests);
-  const rows = $derived(providedRows ?? timelineRows(projection.items, turns));
+  // Tool calls the person chose to hide (⋯ › View) are left out; failures and approvals stay.
+  const rows = $derived(visibleTools(providedRows ?? timelineRows(projection.items, turns), threadPrefs.tools));
   const approvals = $derived.by(() => {
     if (rawRequests.length === 0 || !rawRequests.some((r) => r.status === 'pending')) return EMPTY_APPROVALS;
     const pending = pendingApprovals(projection);
@@ -170,8 +196,24 @@
   {/if}
 {/snippet}
 
+{#snippet workPart(part: WorkPart)}
+  {#if part.kind === 'item'}
+    {@render entryRow(part.entry)}
+  {:else}
+    <RuntimeWorkGroup id={part.id} entries={part.entries} cwd={cwd ?? undefined} open={part.entries.some((e) => e.approval && approvals.has(e.approval.request_id))}>
+      {#each part.entries as e (e.item.id)}{@render entryRow(e)}{/each}
+    </RuntimeWorkGroup>
+  {/if}
+{/snippet}
+
 {#each rows as row (row.kind === 'message' ? row.item.id : row.id)}
-  {#if row.kind === 'session'}
+  {#if row.kind === 'session' && row.handoff}
+    <details class="rt-handoff" data-testid="runtime-handoff">
+      <summary class="rt-day" aria-label={handoffTitle(row.handoff)}><span>{handoffTitle(row.handoff)}</span></summary>
+      <p class="rt-handoff-note">{handoffSummary(row.handoff)}</p>
+      {#if row.handoff.text}<pre class="rt-handoff-text" dir="auto">{row.handoff.text}</pre>{/if}
+    </details>
+  {:else if row.kind === 'session'}
     <div class="rt-day" role="separator" aria-label="New session" data-testid="runtime-session-boundary"><span>New session</span></div>
   {:else if row.kind === 'agent_turn'}
     <div class="rt-day rt-agent-turn" role="separator" aria-label={row.label} data-testid="runtime-agent-turn-divider">
@@ -281,19 +323,23 @@
     </div>
   {:else if row.kind === 'work'}
     {@const flat = workRowEntries(row)}
+    {@const fold = shouldFold(flat, turns, pendingIds, turnById)}
+    {@const earlier = fold ? 0 : earlierSteps(row.parts, pendingIds)}
     <div class="rt-work">
-      <RuntimeWorkFold id={row.id} entries={flat} fold={shouldFold(flat, turns, pendingIds, turnById)} tokens={tokensByRow.get(row.id) ?? ''}>
-        {#each row.parts as part (part.kind === 'group' ? part.id : part.entry.item.id)}
-          {#if part.kind === 'item'}
-            {@render entryRow(part.entry)}
-          {:else}
-            <RuntimeWorkGroup id={part.id} entries={part.entries} cwd={cwd ?? undefined} open={part.entries.some((e) => e.approval && approvals.has(e.approval.request_id))}>
-              {#each part.entries as e (e.item.id)}{@render entryRow(e)}{/each}
-            </RuntimeWorkGroup>
-          {/if}
-        {/each}
+      <RuntimeWorkFold id={row.id} entries={flat} {fold} tokens={tokensByRow.get(row.id) ?? ''}>
+        {#if earlier}
+          <!-- A running turn: the steps before the live one fold to one line. -->
+          <details class="rt-earlier" data-testid="runtime-earlier-steps">
+            <summary>{earlier} earlier steps <Icon name="chevronRight" size={12} /></summary>
+            {#each row.parts.slice(0, earlier) as part (part.kind === 'group' ? part.id : part.entry.item.id)}{@render workPart(part)}{/each}
+          </details>
+        {/if}
+        {#each row.parts.slice(earlier) as part (part.kind === 'group' ? part.id : part.entry.item.id)}{@render workPart(part)}{/each}
       </RuntimeWorkFold>
     </div>
+  {/if}
+  {#if changesByRow.get(row.kind === 'message' ? row.item.id : row.id)}
+    <RuntimeTurnChanges files={changesByRow.get(row.kind === 'message' ? row.item.id : row.id)!} {onopendiff} />
   {/if}
 {/each}
 
@@ -305,8 +351,9 @@
     gap: 6px;
     padding-block-end: 12px;
   }
+  /* Turns breathe (--sp-9 between them); a turn's parts sit --sp-5 apart. */
   .rt-user:not(:first-child) {
-    margin-block-start: 20px;
+    margin-block-start: var(--sp-9);
   }
   .rt-ctx-badges {
     display: flex;
@@ -335,24 +382,42 @@
   .rt-ctx-badge.static {
     cursor: default;
   }
+  /* The person's message: a calm right-aligned bubble in reading type. */
   .rt-bubble {
-    max-inline-size: min(80%, 78ch);
-    padding: 8px 14px;
-    border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--border));
+    max-inline-size: 82%;
+    padding-block: var(--sp-3);
+    padding-inline: var(--sp-5);
     border-radius: var(--radius-l);
-    background: color-mix(in srgb, var(--accent) 16%, var(--surface));
+    background: var(--surface-2);
     color: var(--text);
+    font-size: var(--fs-l);
+    line-height: 1.6;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     unicode-bidi: plaintext;
   }
+  /* The agent's answer: plain prose in reading type, no bubble, no gutter.
+     Wide content (code, tables) scrolls inside the column, never widens it. */
   .rt-assistant {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: var(--sp-3);
     min-inline-size: 0;
-    padding-block-end: 12px;
+    padding-block: var(--sp-2) var(--sp-5);
     color: var(--text);
+    font-size: var(--fs-l);
+    line-height: 1.6;
+  }
+  .rt-assistant :global(.md.md-body:not(.small)) {
+    font-size: var(--fs-l);
+    line-height: 1.6;
+  }
+  .rt-assistant :global(:is(pre, table)) {
+    max-inline-size: 100%;
+    overflow-x: auto;
+  }
+  .rt-assistant :global(table) {
+    display: block;
   }
   .rt-assistant :global(:is(code, a.ref-chip)) {
     unicode-bidi: isolate;
@@ -375,6 +440,51 @@
     content: '';
     flex: 1;
     border-block-start: 1px solid var(--border);
+  }
+  /* A provider switch: the divider opens on what was handed over. */
+  .rt-handoff > summary {
+    list-style: none;
+    cursor: pointer;
+    min-block-size: 32px;
+  }
+  .rt-handoff > summary::-webkit-details-marker {
+    display: none;
+  }
+  .rt-handoff > summary span {
+    max-inline-size: 80%;
+    overflow-wrap: anywhere;
+    text-align: center;
+  }
+  .rt-handoff > summary:hover,
+  .rt-handoff[open] > summary {
+    color: var(--text);
+  }
+  .rt-handoff > summary:focus-visible {
+    outline: 2px solid var(--accent-line);
+    outline-offset: 2px;
+    border-radius: var(--radius-m);
+  }
+  .rt-handoff-note {
+    margin: 0 0 6px;
+    color: var(--text-dim);
+    font-size: var(--fs-s);
+  }
+  .rt-handoff-text {
+    margin: 0 0 14px;
+    padding: 8px 10px;
+    max-block-size: 320px;
+    overflow: auto;
+    border-radius: var(--radius-m);
+    background: var(--surface-2);
+    color: var(--text);
+    font-size: var(--fs-s);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  @media (pointer: coarse) {
+    .rt-handoff > summary {
+      min-block-size: 44px;
+    }
   }
   .rt-setting {
     font-size: var(--fs-xs);
@@ -459,14 +569,22 @@
   .rt-user > .rt-msg-foot {
     align-self: flex-end;
   }
-  /* Message actions show on hover / focus with a pointer, always on touch. */
+  /* A message's time and actions show on hover / focus with a pointer
+     (still in the accessibility tree), always on touch. */
   @media (hover: hover) {
-    .rt-msg-act {
+    .rt-msg-act,
+    .rt-msg-foot > .rt-msg-time {
       opacity: 0;
     }
-    :is(.rt-user, .rt-assistant):is(:hover, :focus-within) .rt-msg-act,
+    :is(.rt-user, .rt-assistant):is(:hover, :focus-within) :is(.rt-msg-act, .rt-msg-foot > .rt-msg-time),
     .rt-msg-act:focus-visible {
       opacity: 1;
+    }
+  }
+  @media (hover: hover) and (prefers-reduced-motion: no-preference) {
+    .rt-msg-act,
+    .rt-msg-foot > .rt-msg-time {
+      transition: opacity var(--dur-fast) ease;
     }
   }
   @media (pointer: coarse) {
@@ -476,11 +594,34 @@
       padding-inline: 10px;
     }
   }
+  .rt-earlier > summary {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-1);
+    min-block-size: 28px;
+    color: var(--text-dim);
+    font-size: var(--fs-m);
+    list-style: none;
+    cursor: pointer;
+  }
+  .rt-earlier > summary::-webkit-details-marker {
+    display: none;
+  }
+  .rt-earlier > summary:hover {
+    color: var(--text);
+  }
+  .rt-earlier > summary:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: 2px;
+  }
+  .rt-earlier[open] > summary > :global(svg) {
+    transform: rotate(90deg);
+  }
   .rt-work {
     display: flex;
     flex-direction: column;
     gap: 2px;
     min-inline-size: 0;
-    padding-block-end: 10px;
+    padding-block-end: var(--sp-4);
   }
 </style>

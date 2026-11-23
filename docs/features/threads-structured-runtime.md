@@ -268,7 +268,10 @@ plus `adapter.ts`.
    any `fs/*` / `terminal/*` request with `-32601`. T3 Code prefers the ACP
    v2 preview and falls back to v1 (`packages/effect-acp/src/client.ts:679-703`).
    Otto speaks **v1**, which both installed agents answer.
-2. **Session.** With a known id, send `session/load` if the agent advertised
+2. **Session.** With a known id, send `session/resume` when the agent
+   advertises `sessionCapabilities.resume` (no history replay; agy, grok,
+   opencode and muse do — live 2026-11-23), retrying as `session/load` if it
+   is refused; else `session/load` if the agent advertised
    `loadSession`; otherwise send `session/new {cwd, mcpServers:[]}`
    (`AcpSessionRuntime.ts:2217-2260`). A failed load starts a fresh session
    (`adapter.ts:6997-7019`). Otto drops the history the agent replays
@@ -303,6 +306,7 @@ plus `adapter.ts`.
    | accept | `allow_once` |
    | accept for session | `allow_always` |
    | decline | `reject_once` |
+   | decline always (offered only when the agent offers it) | `reject_always`, else `reject_once` |
    | cancel, or no matching option | `{outcome:"cancelled"}` |
 
    The answer is never a wider grant than asked for.
@@ -370,10 +374,19 @@ protocol from a script.
   returned its env secret to the model.
 - `session/load` with the earlier id remembered the earlier turn. The replayed
   history is dropped.
-- The access mode is the `OPENCODE_PERMISSION` env. opencode deep-merges this
-  JSON object over the user's config:
+- **opencode 2.3.0** (re-verified live 2026-11-23, see
+  [ACP capabilities](./acp-capabilities.md)): `OPENCODE_PERMISSION` is gone
+  (2.3.0 ignores it and ran a shell command unasked), so the access mode is
+  now a `permission` object in `OPENCODE_CONFIG_CONTENT` (inline config,
+  merged over the user's), which restores `session/request_permission`.
+  2.3.0 also advertises `effort` and `mode` (`build` / `plan`) config
+  options: Otto offers effort and plan mode through `session/set_config_option`.
+  The binary lives in `~/.opencode/bin`, which ottod now adds to its PATH.
+- The access mode (1.19.5: `OPENCODE_PERMISSION`; 2.x: `{"permission": …}`
+  in `OPENCODE_CONFIG_CONTENT`) is this JSON object, merged over the user's
+  config:
 
-  | Mode | `OPENCODE_PERMISSION` |
+  | Mode | permission object |
   |---|---|
   | full access | `{"*":"allow"}` |
   | auto-accept edits | `{"*":"ask", "read"/"glob"/"grep"/"list"/"edit": "allow"}` |
@@ -565,6 +578,60 @@ client-side auto-answering (`clientPolicy.ts:143-200`): whatever the CLI
 still asks reaches a person. Otto's Seatbelt, folder trust and prompt guard
 apply in every mode.
 
+### ACP per provider (re-verified live 2026-11-23)
+
+Installed versions and what each advertised: [ACP capabilities](./acp-capabilities.md).
+"live" = an `acp_live` test or a recorded wire run on the installed CLI;
+"fake" = `otto-fake-agent`; "unit" = a driver test on recorded wire lines.
+
+| Feature | gemini 0.43 | agy 1.5.15 | grok 1.0.92 | opencode 2.3.0 | muse 1.4.25 |
+|---|---|---|---|---|---|
+| Starts a session | **no**: the CLI refuses personal accounts ("no longer supported… migrate to Antigravity"); the thread shows that message (live) | yes (live) | yes (live) | yes (live) | yes (live) |
+| Otto MCP tools (`mcpServers` stdio) | – | yes (live) | yes under full access (live) | yes (live) | yes (live) |
+| Supervised asks first | – | yes (live) | **no**: grok denies unapproved tools without a request ("denied by prompt policy"); a notice says so and suggests Full access (live + unit) | yes, through `OPENCODE_CONFIG_CONTENT` (live) | only for actions Muse's own rules don't cover; a workspace shell write ran unasked (live) |
+| Auto-accept edits | `--approval-mode auto_edit` | `accept-edits` mode | `--permission-mode acceptEdits` (code; not run live) | permission object | `onRequest` |
+| Plan mode | only if advertised (none: no session) | yes (live) | no ACP plan mode | yes, `mode` option (unit; advertised live) | none |
+| Model / effort | flag / none | live / `thought_level` | flag / `reasoning_effort` | live / `effort` | live / none offered |
+| Agent switches mode/model itself | chips follow (fake + unit) | same | – (no modes) | same (model option) | same; muse sends `current_mode_update` (live) |
+| Slash commands reach the thread | – | 81 (live) | 235 (live) | 4 (live) | 84 (live) |
+| A typed `/command` runs | – | **no**: `/compact` went to the model as text (live) | not run | not run | not run |
+| Stop | – | yes (live) | yes (live) | yes (live) | yes (live) |
+| Reopen keeps the session | – | `session/resume` (live) | `session/resume` (live) | `session/resume` (live) | yes once prompted; an un-prompted session is "not found" and starts fresh with a notice (live) |
+| Notices, compaction, image / link answers | shown when sent (unit); no live agent sent any | | | | |
+| `fs/*`, `terminal/*` served by Otto | off | off (agent keeps its own tools) | **on**: reads, writes and commands go through Otto; the command's output streams into its row (live) | off (own tools) | off (own tools) |
+| Steer a running turn | – | no (ACP v1 has none) | yes (`_x.ai/interject`) | no | no |
+
+`fs/*` and `terminal/*` are served per flavour (`AcpFlavor::client_fs` /
+`client_terminal`), on for **grok** only: a live turn per agent showed grok
+is the one that uses them (`fs/read_text_file`, `terminal/create` →
+`wait_for_exit` → `output` → `release`); agy, opencode and muse keep their
+own tools whatever is advertised. What Otto does
+(`acp_client.rs`, `runtime/client_calls.rs`):
+
+- Files stay inside the thread's folder (canonical paths: no `..` or symlink
+  escape); reads up to 8 MB.
+- A write becomes a file-change row with its diff. Under approval-required it
+  waits for the person (a File change approval); a refusal answers the agent
+  with an error.
+- A command runs under the agent's own sandbox profile (the `sandbox-exec -p`
+  wrapper of its prepared spec) and env, asks first under approval-required,
+  and streams its output into the running command row as it arrives (grok
+  never embeds `terminal` content, so the open `execute` call whose command
+  it runs gets it). Output is kept up to the agent's `outputByteLimit`
+  (default 1 MB); at most 16 terminals per thread; all are killed when the
+  thread closes.
+- Live (grok 1.0.92, full access): the command's output streamed through
+  Otto and a requested file landed in the folder.
+
+Decision: control-plane MCP servers keep reaching ACP agents only through
+Otto's governed `otto` bridge (approvals, audit, per-workspace enablement),
+never as direct `http` entries in `mcpServers`, even where the agent
+advertises http.
+
+url-mode `elicitation/create` is one question naming the URL; choosing
+"Open in the browser" answers `accept` and opens the page (unit; no
+installed agent sent one).
+
 ## 3. The normalized event model
 
 T3 Code's adapters emit `ProviderAdapterV2Event`
@@ -600,7 +667,7 @@ Turn item types:
 | `dynamic_tool` | `tool_name`, `input`, `output?`, `images?[{mime, data_base64}]` |
 | `web_search` | `patterns` |
 | `approval_request` | `request_id`, `request_kind`, `prompt?`, `reason?`, `options[{decision, label}]`, `tool_item_id?`, `cancel_reason?` (`agent` / `interrupt` / `closed`) |
-| `session_boundary` | No extra fields; rendered as **New session** before the accepted fresh prompt |
+| `session_boundary` | `handoff?` (a provider switch: `{from_provider, to_provider, from_model?, to_model?, turns, omitted_turns, images_omitted, text}`); rendered as **New session**, or **Context handoff · A → B**, before the accepted fresh prompt |
 | `system_notice` | `message` |
 | `error` | `failure` |
 
@@ -775,8 +842,8 @@ Otto takes the cheapest correct path per provider:
 |---|---|---|---|
 | Claude | live: `control_request {subtype:"set_model"}` (the SDK's `setModel`) | live: `apply_flag_settings {effortLevel}` | `image` blocks, `source: {type:"base64"}` (`ClaudeAdapterV2.ts:2410-2414`) |
 | Codex | `turn/start {model}` (this turn and later ones) | `turn/start {effort}` (`minimal`…`xhigh`); a steered message at another effort waits for the next turn (`turn/steer` carries none) | `{type:"image", url:"data:<mime>;base64,…"}` inputs (`CodexAdapterV2.ts:3268-3269`) |
-| Gemini, Grok, Muse (ACP) | restart with `--model` / `-m`, then `session/load` | Grok / Muse: the advertised config option; Gemini: none | `image` blocks when `promptCapabilities.image` (`adapter.ts:7035`, `:7777`) |
-| Antigravity, opencode (ACP) | live: `session/set_model` / the model config option | Antigravity: `thought_level`; opencode: none | `image` blocks |
+| Gemini, Grok (ACP) | restart with `--model` / `-m`, then `session/resume` / `session/load` | Grok: `reasoning_effort`; Gemini: none | `image` blocks when `promptCapabilities.image` (`adapter.ts:7035`, `:7777`) |
+| Antigravity, opencode, Muse (ACP) | live: `session/set_model` / the `model` config option | Antigravity: `thought_level`; opencode: `effort`; Muse: only where the session advertises `thought_level` (1.4.25 does not) | `image` blocks |
 | Pi | restart with `--session <id>` | the RPC's thinking level | images |
 
 An effort the agent does not take is **dropped with a notice** ("… this turn
@@ -959,13 +1026,34 @@ provider error after acceptance is a failed turn in the newly committed
 conversation. The frontend keeps the submitted draft and fresh intent on a
 rejected send.
 
+### Continue on another provider
+
+A prompt whose `provider` names another enabled provider with a structured
+driver (built-in or a named account) is an explicit fresh context onto that
+provider (`runtime/fresh.rs`, after T3 Code's `ProviderSwitchService`
+`create_with_handoff`). Under the same admission lock and 409s, the old process
+is dropped and the session is moved in memory: `provider`,
+`meta.provider_slug`, the prompt's `model` (else the provider default), no
+effort, the new provider's baseline capabilities. The normal spawn then
+prepares everything provider-specific. `runtime/handoff.rs` builds the block
+from the projection (after T3 Code's `handoffBudget.ts`): turns since the last
+plain boundary, whole, newest first within 16,000 estimated tokens; per turn the
+message, final answer, changed paths, a tool-call count, errors; an open plan
+first; images counted, never sent. `start_turn` sends block + message to the
+driver and records only the message. `commit_fresh` persists provider, meta,
+model and effort (`set_provider`; no schema change) and emits the boundary
+with `handoff`; `provider_session.updated` carries `provider` /
+`provider_slug`. A failure restores every moved field and the native identity,
+and adds no boundary. Pi has no fake CLI, so its leg is covered only by the
+shared code path.
+
 ### Durable composer state
 
 `GET/PUT /runtime-sessions/{id}/draft` uses `{revision, draft}` records backed by
 `runtime_composer_drafts`, scoped to user, workspace and runtime session. The
 human-only routes reject managed-agent, MCP and share credentials. Draft
 content includes text, attachments (bytes and names), model, effort,
-`access_mode`, `fresh_context`, and attributed review/diff context chips. Action
+`access_mode`, `fresh_context`, `provider` (an armed switch), and attributed review/diff context chips. Action
 flags such as sending, stopping and replay sequence are live UI state only.
 No draft content is put in browser local storage.
 
@@ -1103,8 +1191,11 @@ secret question forms are refused instead of being collected into history.
 | `ui/src/modules/threads/runtime/{RuntimeBannerStack.svelte,banners.ts}` | everything above the composer in one priority order (error > question / approval > plan > queue > notices), at most two in full |
 | `ui/src/modules/threads/runtime/Runtime{SubagentCard,AgentRow,ThreadCallRow}.svelte`, `agentRows.ts` | one compact row for another agent: a subagent, or the agent's `thread_open` / `thread_message` call |
 | `ui/src/modules/threads/runtime/Runtime{QueueBar,TurnStatus}.svelte` | background work, the queue (Steer / Send now / Edit / Remove) and Closed · Reopen; the turn's status line (working, own turn, stopped, stalled, partly done) |
-| `ui/src/modules/threads/{RelatedThreadsChip,RelatedThreadsList,ThreadPopover}.svelte`, `relatedThreads.ts`, `relatedCollect.ts`, `relatedMessage.ts` | the header's one Related threads control (linked threads, workers, side chat, rooms; open, open beside, message, start a room) |
-| `ui/src/modules/threads/threadsPageMenu.ts` | the toolbar ⋯: the thread's actions, then New thread, Related threads…, Project card, Terminal drawer and the layout |
+| `ui/src/modules/threads/{RelatedThreadsList,ThreadPopover}.svelte`, `relatedThreads.ts`, `relatedCollect.ts`, `relatedMessage.ts` | ⋯ › Send to another thread… (connected threads, rooms; open, open beside, message, start a room) |
+| `ui/src/modules/threads/{ThreadDetailsCard,ProjectBadge}.svelte`, `threadDetails.ts`, `threadSubagents.ts` | the thread details card (folder, branch, the one git action, Changes, Subagents) and the project badge |
+| `ui/src/lib/paletteThreads.svelte.ts`, `ui/src/lib/threadSwitch.ts`, `ui/src/modules/threads/{threadSwitcher.ts,threadSwitcherSource.svelte.ts}` | ⌘K's Threads group (needs you first, frozen while open, New thread: <query>) |
+| `ui/src/modules/threads/worktreeBranch.ts` | a new thread's worktree branch name (prompt slug, repo prefix, collision suffix, dated) |
+| `ui/src/modules/threads/threadsPageMenu.ts` | the toolbar ⋯: the thread's actions, then New thread, Send to another thread…, Thread details, Terminal drawer and the layout |
 | `ui/src/lib/stores/runtimeDraftPersistence.ts`, `runtimeDraftRecovery.svelte.ts`, `runtimeDrafts.svelte.ts` | draft snapshot acknowledgement, serialized persistence and recovery |
 | `ui/src/modules/threads/runtime/Runtime{Questions,QuestionCard,ToolImages,ContextChips,DraftStatus}.svelte` | typed questions, image enlargement, context preview/removal and save status |
 | `ui/src/modules/threads/runtime/composerContext.ts` | attributed review conversations and file/hunk/line excerpts assembled on send |
@@ -1360,7 +1451,7 @@ thing on screen:
   right panel, ⋯. The ⋯ holds the thread's own actions, then **New thread**
   (also the sidebar's New button and ⌘K "New thread"), **Related threads…**,
   **Terminal drawer** (also `/terminal` and ⌘K) and **View ▸** — the layout
-  (Single / Split / Grid, also in ⌘K) and the Project card; a phone gets no
+  (Single / Split / Grid, also in ⌘K) and Thread details; a phone gets no
   View. Back and Forward are the
   shell's own (⌘⇧← / ⌘⇧→, ⌘K "Go back" / "Go forward"). Continue on phone is
   a ⋯ item, in the toolbar and in a split pane's header alike.

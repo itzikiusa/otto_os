@@ -82,6 +82,36 @@ pub fn native_questions(params: &Value, claude: bool) -> Result<Vec<RuntimeQuest
     unique(questions)
 }
 
+/// The question id of an ACP url-mode elicitation (`acp_url`).
+pub const URL_QUESTION: &str = "acp_url";
+
+/// ACP url-mode elicitation: the agent asks the person to open an http(s)
+/// page (a sign-in, a consent screen). One choice names the URL; choosing it
+/// answers `accept` and the UI opens the page in the system browser.
+pub fn acp_url(params: &Value) -> Result<Vec<RuntimeQuestion>, String> {
+    let url = params
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|u| u.starts_with("https://") || u.starts_with("http://"))
+        .filter(|u| !u.chars().any(char::is_control))
+        .ok_or("url elicitation needs an http(s) url")?;
+    let message = params.get("message").and_then(Value::as_str).unwrap_or("");
+    Ok(vec![RuntimeQuestion {
+        id: URL_QUESTION.into(),
+        header: "Open a link".into(),
+        prompt: format!("{message}\n{url}").trim().to_string(),
+        kind: QuestionKind::Single,
+        required: true,
+        allow_empty: false,
+        allow_free_text: false,
+        options: vec![QuestionOption {
+            value: "open".into(),
+            label: "Open in the browser".into(),
+            description: Some(url.into()),
+        }],
+    }])
+}
+
 /// The draft ACP elicitation/create form subset: plain strings and string enums/arrays.
 /// Constraints and other primitive types are explicitly refused, never silently discarded.
 pub fn acp_form(params: &Value) -> Result<Vec<RuntimeQuestion>, String> {
@@ -244,6 +274,7 @@ pub fn acp_form(params: &Value) -> Result<Vec<RuntimeQuestion>, String> {
 pub fn mcp_elicitation(params: &Value) -> Result<Vec<RuntimeQuestion>, String> {
     let mode = match params.get("mode").and_then(Value::as_str).unwrap_or("form") {
         "openai/form" | "openaiForm" => "form",
+        "url" => return acp_url(params),
         m => m,
     };
     let schema = params
@@ -289,7 +320,7 @@ pub fn confirmation_result(decision: otto_core::agent_runtime::ApprovalDecision)
     use otto_core::agent_runtime::ApprovalDecision as D;
     let action = match decision {
         D::Accept | D::AcceptForSession | D::AcceptAlways => "accept",
-        D::Decline => "decline",
+        D::Decline | D::DeclineAlways => "decline",
         D::Cancel => "cancel",
     };
     // Codex's MCP tool approval offers `_meta.persist` (session / always).
@@ -303,6 +334,19 @@ pub fn confirmation_result(decision: otto_core::agent_runtime::ApprovalDecision)
         _ if action == "accept" => serde_json::json!({ "action": action, "content": {} }),
         _ => serde_json::json!({ "action": action }),
     }
+}
+
+/// The `{action: "accept", …}` result of an answered elicitation, for every
+/// agent: a url question (the person opened the page) is a bare accept, a
+/// form its fields as `content`.
+pub fn elicitation_answer(
+    questions: &[RuntimeQuestion],
+    answers: &[otto_core::agent_runtime::QuestionAnswer],
+) -> Value {
+    if questions.iter().any(|q| q.id == URL_QUESTION) {
+        return serde_json::json!({ "action": "accept" });
+    }
+    serde_json::json!({ "action": "accept", "content": form_content(questions, answers) })
 }
 
 /// The `content` of an accepted form elicitation: each answer under its

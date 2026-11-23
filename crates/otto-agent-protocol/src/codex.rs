@@ -740,7 +740,7 @@ impl CodexDriver {
             ReqProto::V2Decision => json!({"decision": match decision {
                 ApprovalDecision::Accept => "accept",
                 ApprovalDecision::AcceptForSession | ApprovalDecision::AcceptAlways => "acceptForSession",
-                ApprovalDecision::Decline => "decline",
+                ApprovalDecision::Decline | ApprovalDecision::DeclineAlways => "decline",
                 ApprovalDecision::Cancel => "cancel",
             }}),
             ReqProto::Permissions => match decision {
@@ -748,7 +748,9 @@ impl CodexDriver {
                 ApprovalDecision::AcceptForSession | ApprovalDecision::AcceptAlways => {
                     json!({"permissions": p.permissions, "scope": "session"})
                 }
-                ApprovalDecision::Decline | ApprovalDecision::Cancel => {
+                ApprovalDecision::Decline
+                | ApprovalDecision::DeclineAlways
+                | ApprovalDecision::Cancel => {
                     json!({"permissions": {}, "scope": "turn"})
                 }
             },
@@ -1374,11 +1376,9 @@ impl StructuredDriver for CodexDriver {
                 crate::questions::mcp_elicitation(&p.permissions).map_err(DriverError)?;
             otto_core::agent_runtime::validate_question_answers(&questions, answers)
                 .map_err(DriverError)?;
-            let content = crate::questions::form_content(&questions, answers);
+            let result = crate::questions::elicitation_answer(&questions, answers);
             let mut step = DriverStep::default();
-            step.write(
-                json!({"id":p.rpc_id,"result":{"action":"accept","content":content}}).to_string(),
-            );
+            step.write(json!({"id":p.rpc_id,"result":result}).to_string());
             self.pending.remove(request_id);
             return Ok(step);
         }
@@ -2177,13 +2177,27 @@ mod tests {
             parse(&r.writes[0]),
             json!({"id":73,"result":{"action":"accept","content":{}}})
         );
-        // URL mode: declined at once.
+        // URL mode: the shared one-choice question; choosing it accepts.
         let s = feed(
             &mut d,
             json!({"id":72,"method":"mcpServer/elicitation/request","params":{"threadId":"th1","serverName":"probe","message":"Sign in","mode":"url","url":"https://x","elicitationId":"e"}}),
         );
-        assert!(s.events.is_empty());
-        assert_eq!(parse(&s.writes[0])["result"]["action"], "decline");
+        let DriverEvent::Question { id, .. } = &s.events[0] else {
+            panic!("{:?}", s.events)
+        };
+        let r = d
+            .respond_question(
+                id,
+                &[QuestionAnswer::Single {
+                    question_id: crate::questions::URL_QUESTION.into(),
+                    value: "open".into(),
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            parse(&r.writes[0]),
+            json!({"id":72,"result":{"action":"accept"}})
+        );
     }
 
     #[test]

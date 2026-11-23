@@ -90,7 +90,7 @@ fn estimate_item_lines(item: &TurnItem, compact: bool) -> usize {
                 + prompt.as_deref().map_or(0, text_lines)
                 + reason.as_deref().map_or(0, text_lines)
         }
-        TurnItemKind::SessionBoundary => 1,
+        TurnItemKind::SessionBoundary { .. } => 1,
         TurnItemKind::SystemNotice { message, .. } => text_lines(message).max(1),
         TurnItemKind::Subagent { prompt, output, .. } => {
             if omit_settled {
@@ -670,7 +670,7 @@ mod tests {
                         updated_at: Utc::now(),
                         parent_item_id: None,
                         detail_omitted: false,
-                        kind: TurnItemKind::SessionBoundary,
+                        kind: TurnItemKind::SessionBoundary { handoff: None },
                     },
                 );
                 item_ord += 1;

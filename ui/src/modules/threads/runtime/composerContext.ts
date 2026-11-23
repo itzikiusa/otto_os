@@ -22,6 +22,8 @@ export function assembleComposerMessage(text: string, context: readonly Composer
   const headerFor = (c: ComposerContext): string => {
     if (c.id.startsWith('file:')) return 'File context';
     if (c.id.startsWith('dir:')) return 'Folder context';
+    if (c.id.startsWith('terminal:')) return 'Terminal output';
+    if (c.id.startsWith('notes:')) return 'Review notes on the diff';
     return c.kind === 'diff' ? 'Diff context' : 'Review conversation';
   };
   return [text, ...context.map((c) => `--- ${headerFor(c)}: ${c.label} ---\n${c.text}`)].filter(Boolean).join('\n\n');
@@ -61,6 +63,17 @@ export function reviewCommentContext(repoId: string, prUrl: string, comment: PrC
     ...(comment.path ? { path: comment.path } : {}),
     text: `Pull request: ${prUrl}\nComment: ${comment.id}\nLocation: ${location}${comment.side === 'old' ? ' (old side)' : ''}${comment.outdated ? ' (outdated)' : ''}\n${comment.resolved ? 'Resolved conversation\n' : ''}\n${conversation(comment)}`,
   };
+}
+
+/** Text selected in a thread's terminal ("Terminal · N lines"). The draft
+ *  stores kind `diff` (the daemon knows two kinds); the `terminal:` id
+ *  names it. The same selection twice is one chip. */
+export function terminalContext(selection: string): ComposerContext {
+  const text = selection.replace(/\s+$/, '');
+  const n = text.split('\n').length;
+  let h = 0;
+  for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) | 0;
+  return { id: `terminal:${text.length}:${(h >>> 0).toString(36)}`, kind: 'diff', label: `Terminal · ${n} ${n === 1 ? 'line' : 'lines'}`, text };
 }
 
 /** Keep the displayed selection, including old/new numbering for deleted lines. */

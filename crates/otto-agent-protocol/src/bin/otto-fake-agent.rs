@@ -17,6 +17,25 @@
 //! * `hang-hard`  — like `hang` but ignores `session/cancel`.
 //! * `plan`       — a `plan` update, then `end_turn`.
 //! * `fs`         — calls `fs/read_text_file` on the client and reports the error.
+//! * `agent-mode <id>` — the agent switches its own mode
+//!   (`current_mode_update`), then `end_turn`.
+//! * `fs-read <path>` / `fs-write <path>` — `fs/read_text_file` /
+//!   `fs/write_text_file` (content `written\n`) on the client, then
+//!   `read: <content>` / `wrote` (or `refused <code>`).
+//! * `term <command>` — an `execute` tool call run on a client terminal:
+//!   `terminal/create`, the terminal embedded in the call's content,
+//!   `wait_for_exit`, `output`, `release`, then `term: <output>`.
+//! * `tool`       — two `read` tool calls that complete on their own (no
+//!   permission request; the work fold collapses), then `done`.
+//! * `notice`     — a `notice` and a finished `compaction_update`, then `noted`.
+//! * `image`      — an image (1×1 PNG) as the answer.
+//! * `ask-never`  — a permission request offering `reject_always`; answers
+//!   `answer: <optionId>`.
+//! * `elicit-url <url>` — a url-mode `elicitation/create`; answers
+//!   `url: <action>`.
+//! * `edit <path>` — an `edit` tool call on `<path>` (relative to the cwd)
+//!   that completes with a `diff` content block (`old` → `new` text), as
+//!   real ACP agents report a file change, then `edited`.
 //! * `big:<n>`    — `n` one-byte message chunks.
 //! * `usage`      — a `usage_update` (context 1200 of 1048576, $0.25 so far)
 //!   and a `session_info_update` naming the session, then `end_turn`.
@@ -26,7 +45,8 @@
 //! out, no auth method to offer). `--approval-mode <m>` sets the starting
 //! mode; `session/new|load` advertise the modes `default`, `autoEdit`,
 //! `accept-edits` and `plan` (not `yolo`), which `session/set_mode` switches
-//! between, and list two slash commands (`available_commands_update`).
+//! between, a `thought_level` config option (low … xhigh), and list two
+//! slash commands (`available_commands_update`).
 //! `initialize` advertises `promptCapabilities.embeddedContext` (no images).
 //!
 //! `session/load` replays one history chunk before answering (clients must
@@ -78,6 +98,22 @@ fn commands(sid: &str) {
     );
 }
 
+/// A request to the client; waits for its answer (other lines are dropped).
+fn call(
+    lines: &mut impl Iterator<Item = std::io::Result<String>>,
+    id: &str,
+    method: &str,
+    params: Value,
+) -> Option<Value> {
+    out(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}));
+    loop {
+        let m = next(lines)?;
+        if m.get("id") == Some(&json!(id)) && m.get("method").is_none() {
+            return Some(m);
+        }
+    }
+}
+
 fn reply(id: &Value, result: Value) {
     out(json!({"jsonrpc":"2.0","id":id,"result":result}));
 }
@@ -95,6 +131,9 @@ fn main() {
     let modes = json!({"currentModeId": "default", "availableModes": [
         {"id": "default", "name": "Default"}, {"id": "autoEdit", "name": "Auto edit"},
         {"id": "accept-edits", "name": "Accept edits"}, {"id": "plan", "name": "Plan"}]});
+    // The `thought_level` option real agy / Muse catalogs advertise.
+    let efforts = json!([{"id":"thought_level","category":"thought_level","type":"select",
+        "currentValue":"medium","options":[{"value":"low"},{"value":"medium"},{"value":"high"},{"value":"xhigh"}]}]);
     let mut model = "none".to_string();
     let mut effort = "none".to_string();
     let mut system = "none".to_string();
@@ -119,7 +158,10 @@ fn main() {
             "session/new" => {
                 system = system_of(&params);
                 let sid = format!("fake-{}", std::process::id());
-                reply(&id, json!({"sessionId": sid, "modes": modes}));
+                reply(
+                    &id,
+                    json!({"sessionId": sid, "modes": modes, "configOptions": efforts}),
+                );
                 commands(&sid);
             }
             "session/set_model" => {
@@ -335,6 +377,47 @@ fn main() {
                         );
                         done("end_turn");
                     }
+                    t if t.starts_with("agent-mode ") => {
+                        mode = t[11..].trim().to_string();
+                        update(
+                            &sid,
+                            json!({"sessionUpdate":"current_mode_update","currentModeId":mode}),
+                        );
+                        done("end_turn");
+                    }
+                    t if t.starts_with("fs-") || t.starts_with("term ") => {
+                        if client_turn(&mut lines, &id, &sid, t).is_none() {
+                            return;
+                        }
+                    }
+                    t @ ("tool" | "notice" | "image" | "ask-never") => {
+                        if more_turn(&mut lines, &id, &sid, t).is_none() {
+                            return;
+                        }
+                    }
+                    t if t.starts_with("elicit-url ") => {
+                        if more_turn(&mut lines, &id, &sid, t).is_none() {
+                            return;
+                        }
+                    }
+                    t if t.starts_with("edit ") => {
+                        // ACP paths are absolute; the fake runs in the session cwd.
+                        let path = std::env::current_dir()
+                            .map(|d| d.join(t[5..].trim()).display().to_string())
+                            .unwrap_or_default();
+                        let path = path.as_str();
+                        update(
+                            &sid,
+                            json!({"sessionUpdate":"tool_call","toolCallId":"e1","title":format!("Edit {path}"),"kind":"edit","status":"in_progress","locations":[{"path":path}]}),
+                        );
+                        update(
+                            &sid,
+                            json!({"sessionUpdate":"tool_call_update","toolCallId":"e1","status":"completed","locations":[{"path":path}],
+                                "content":[{"type":"diff","path":path,"oldText":"old line\n","newText":"new line\n"}]}),
+                        );
+                        chunk(&sid, "agent_message_chunk", "edited");
+                        done("end_turn");
+                    }
                     "fs" => {
                         out(
                             json!({"jsonrpc":"2.0","id":"fs1","method":"fs/read_text_file","params":{"sessionId":sid,"path":"/etc/hosts"}}),
@@ -376,4 +459,180 @@ fn main() {
             _ => {}
         }
     }
+}
+
+/// The `fs-read` / `fs-write` / `term` prompts: client methods Otto serves.
+fn client_turn(
+    lines: &mut impl Iterator<Item = std::io::Result<String>>,
+    id: &Value,
+    sid: &str,
+    text: &str,
+) -> Option<()> {
+    let sid = sid.to_string();
+    let done = |stop: &str| reply(id, json!({"stopReason":stop}));
+    let mut lines = lines;
+    match text {
+        t if t.starts_with("fs-read ") || t.starts_with("fs-write ") => {
+            let path = std::env::current_dir()
+                .map(|d| {
+                    d.join(t[t.find(' ').unwrap() + 1..].trim())
+                        .display()
+                        .to_string()
+                })
+                .unwrap_or_default();
+            let read = t.starts_with("fs-read ");
+            let (method, params) = if read {
+                ("fs/read_text_file", json!({"sessionId":sid,"path":path}))
+            } else {
+                (
+                    "fs/write_text_file",
+                    json!({"sessionId":sid,"path":path,"content":"written\n"}),
+                )
+            };
+            let m = call(&mut lines, "fs1", method, params)?;
+            let text = match (&m["error"]["code"], read) {
+                (Value::Number(c), _) => format!("refused {c}"),
+                (_, true) => format!(
+                    "read: {}",
+                    m["result"]["content"].as_str().unwrap_or_default()
+                ),
+                (_, false) => "wrote".into(),
+            };
+            chunk(&sid, "agent_message_chunk", &text);
+            done("end_turn");
+        }
+        t if t.starts_with("term ") => {
+            let command = t[5..].to_string();
+            update(
+                &sid,
+                json!({"sessionUpdate":"tool_call","toolCallId":"x1","title":command,"kind":"execute","status":"in_progress","rawInput":{"command":command}}),
+            );
+            let m = call(
+                &mut lines,
+                "t1",
+                "terminal/create",
+                json!({"sessionId":sid,"command":command}),
+            )?;
+            let Some(tid) = m["result"]["terminalId"].as_str().map(str::to_string) else {
+                chunk(
+                    &sid,
+                    "agent_message_chunk",
+                    &format!("refused {}", m["error"]["code"]),
+                );
+                update(
+                    &sid,
+                    json!({"sessionUpdate":"tool_call_update","toolCallId":"x1","status":"failed"}),
+                );
+                done("end_turn");
+                return Some(());
+            };
+            update(
+                &sid,
+                json!({"sessionUpdate":"tool_call_update","toolCallId":"x1","content":[{"type":"terminal","terminalId":tid}]}),
+            );
+            let ids = json!({"sessionId":sid,"terminalId":tid});
+            call(&mut lines, "t2", "terminal/wait_for_exit", ids.clone());
+            let o = call(&mut lines, "t3", "terminal/output", ids.clone())?;
+            call(&mut lines, "t4", "terminal/release", ids);
+            let output = o["result"]["output"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            update(
+                &sid,
+                json!({"sessionUpdate":"tool_call_update","toolCallId":"x1","status":"completed"}),
+            );
+            chunk(
+                &sid,
+                "agent_message_chunk",
+                &format!("term: {}", output.trim()),
+            );
+            done("end_turn");
+        }
+        _ => {}
+    }
+    Some(())
+}
+
+/// The `tool` / `notice` / `image` / `ask-never` / `elicit-url` prompts.
+fn more_turn(
+    lines: &mut impl Iterator<Item = std::io::Result<String>>,
+    id: &Value,
+    sid: &str,
+    text: &str,
+) -> Option<()> {
+    let done = |stop: &str| reply(id, json!({"stopReason":stop}));
+    match text {
+        "tool" => {
+            for (c, f) in [("t1", "README.md"), ("t2", "Cargo.toml")] {
+                update(
+                    sid,
+                    json!({"sessionUpdate":"tool_call","toolCallId":c,"title":format!("Read {f}"),"kind":"read","status":"in_progress","rawInput":{"path":f}}),
+                );
+                update(
+                    sid,
+                    json!({"sessionUpdate":"tool_call_update","toolCallId":c,"status":"completed","content":[{"type":"content","content":{"type":"text","text":"hello\n"}}]}),
+                );
+            }
+            chunk(sid, "agent_message_chunk", "done");
+        }
+        "notice" => {
+            update(
+                sid,
+                json!({"sessionUpdate":"notice","severity":"warning","title":"Rate limited","description":"retrying in 5s"}),
+            );
+            update(
+                sid,
+                json!({"sessionUpdate":"compaction_update","compactionId":"k1","status":"completed"}),
+            );
+            chunk(sid, "agent_message_chunk", "noted");
+        }
+        "image" => {
+            update(
+                sid,
+                json!({"sessionUpdate":"agent_message_chunk","content":{"type":"image","mimeType":"image/png",
+                    "data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}}),
+            );
+        }
+        "ask-never" => {
+            update(
+                sid,
+                json!({"sessionUpdate":"tool_call","toolCallId":"n1","title":"rm -rf build","kind":"execute","status":"pending","rawInput":{"command":"rm -rf build"}}),
+            );
+            let m = call(
+                lines,
+                "pn",
+                "session/request_permission",
+                json!({"sessionId":sid,"toolCall":{"toolCallId":"n1","kind":"execute","title":"rm -rf build"},
+                    "options":[{"optionId":"a1","name":"Allow","kind":"allow_once"},
+                        {"optionId":"r1","name":"Deny","kind":"reject_once"},
+                        {"optionId":"never","name":"Always reject","kind":"reject_always"}]}),
+            )?;
+            let picked = m["result"]["outcome"]["optionId"]
+                .as_str()
+                .unwrap_or("cancelled")
+                .to_string();
+            update(
+                sid,
+                json!({"sessionUpdate":"tool_call_update","toolCallId":"n1","status":"failed"}),
+            );
+            chunk(sid, "agent_message_chunk", &format!("answer: {picked}"));
+        }
+        t => {
+            let url = t.trim_start_matches("elicit-url ").to_string();
+            let m = call(
+                lines,
+                "eu",
+                "elicitation/create",
+                json!({"sessionId":sid,"mode":"url","elicitationId":"e1","url":url,"message":"Sign in to continue"}),
+            )?;
+            let action = m["result"]["action"]
+                .as_str()
+                .unwrap_or("error")
+                .to_string();
+            chunk(sid, "agent_message_chunk", &format!("url: {action}"));
+        }
+    }
+    done("end_turn");
+    Some(())
 }

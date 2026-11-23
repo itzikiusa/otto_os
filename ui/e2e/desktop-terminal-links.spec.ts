@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-async function fixture(page: Page, text: string | ((cols: number) => string) = 'Read ui/src/App.svelte:2:3\r\n', query = '') {
+async function fixture(page: Page, text: string | ((cols: number) => string) = 'Read ui/src/App.svelte:2:3\r\n', query = '', anyRenderer = false) {
   await page.addInitScript(() => { localStorage.setItem('otto_base', location.origin); localStorage.setItem('otto_token', 'fixture'); });
   await page.route('**/api/v1/**', async route => {
     const url = new URL(route.request().url()), path = url.searchParams.get('path') ?? '';
@@ -23,8 +23,10 @@ async function fixture(page: Page, text: string | ((cols: number) => string) = '
     });
   });
   await page.goto(`/e2e/fixtures/terminal-links.html${query}`);
-  await expect(page.locator('.xterm-rows')).toContainText('Read');
+  if (anyRenderer) await expect.poll(() => page.evaluate(() => (window as unknown as ProbeWindow).__ottoTermProbe.some(p => !p.disposed && p.text().includes('Read')))).toBe(true);
+  else await expect(page.locator('.xterm-rows')).toContainText('Read');
 }
+type ProbeWindow = Window & { __ottoTermProbe: { disposed: boolean; text(): string; renderer(): string }[]; __opened: string[] };
 async function clickText(page: Page, text: string) {
   const span = page.locator('.xterm-rows span').filter({ hasText: text }).first();
   let point = { x: NaN, y: NaN };
@@ -149,3 +151,62 @@ test('Claude bold cursor-addressed continuation opens the complete relative path
   await expect(page.getByLabel('Opened file')).toContainText(`"path":"/work/${prefix}${suffix}"`);
   await expect(page.getByLabel('Opened file')).toContainText('"n":2');
 });
+
+// Real agent TUIs (claude, codex, agy) turn mouse reporting on and Claude
+// prints OSC 8 hyperlinks; desktop panes draw on WebGL. A URL must open on a
+// plain click, ⌘-click and ⌃-click in every one of those states (⌃-click used
+// to be swallowed as "the link menu's", which only file links have).
+// Renderer-agnostic: cells are located through the parsed buffer
+// (__ottoTermProbe), not the DOM renderer's row spans.
+const WRAPPED = `https://example.invalid/wrap/${'w'.repeat(150)}/wrapEND`;
+const URL_TEXT = 'Read links\r\n'
+  + 'plain https://example.invalid/plain?q=1 done\r\n'
+  + '\x1b]8;;https://example.invalid/osc8\x07osc label\x1b]8;;\x07\r\n'
+  + `${WRAPPED}\r\n`;
+for (const renderer of ['dom', 'webgl'] as const) for (const mode of [0, 1000, 1002, 1003]) {
+  test(`URL links open on click, ⌘-click and ⌃-click (${renderer}, mouse reporting ${mode || 'off'})`, async ({ page }) => {
+    await page.addInitScript((dom) => {
+      // The functional suite pins DOM (global-setup); the app draws on WebGL.
+      if (dom) localStorage.setItem('otto.term.renderer', 'dom');
+      else localStorage.removeItem('otto.term.renderer');
+      const w = window as unknown as ProbeWindow;
+      w.__ottoTermProbe = [];
+      w.__opened = [];
+      window.open = (url?: string | URL) => { w.__opened.push(String(url)); return null; };
+    }, renderer === 'dom');
+    let cols = 0;
+    await fixture(page, c => { cols = c; return (mode ? `\x1b[?${mode}h\x1b[?1006h` : '') + URL_TEXT; }, '', true);
+    const active = await page.evaluate(() => (window as unknown as ProbeWindow).__ottoTermProbe.find(p => !p.disposed)!.renderer());
+    test.skip(active !== renderer, `${renderer} renderer unavailable in this engine (got ${active})`);
+    // The TUI really owns the mouse: xterm hands clicks/drags to the app.
+    if (mode) await expect(page.locator('.xterm')).toHaveClass(/enable-mouse-events/);
+    const box = (await page.locator('.xterm-screen').boundingBox())!;
+    const clickCell = async (needle: string, modifier?: 'Meta' | 'Control') => {
+      const at = await page.evaluate((n) => {
+        const rows = (window as unknown as ProbeWindow).__ottoTermProbe.find(p => !p.disposed)!.text().split('\n');
+        const row = rows.findIndex(r => r.includes(n));
+        return { row, col: rows[row]?.indexOf(n) ?? -1, rows: rows.length };
+      }, needle);
+      expect(at.row, `${needle} on screen`).toBeGreaterThanOrEqual(0);
+      const x = box.x + (at.col + 1.5) * (box.width / cols), y = box.y + (at.row + 0.5) * (box.height / at.rows);
+      await page.mouse.move(x - 3, y);
+      await page.mouse.move(x, y);
+      await expect(page.locator('.xterm-screen')).toHaveClass(/xterm-cursor-pointer/); // the hover found the link
+      if (modifier) await page.keyboard.down(modifier);
+      await page.mouse.click(x, y);
+      if (modifier) await page.keyboard.up(modifier);
+    };
+    const expected: string[] = [];
+    for (const modifier of [undefined, 'Meta', 'Control'] as const) {
+      for (const [needle, url] of [
+        ['example.invalid/plain', 'https://example.invalid/plain?q=1'],
+        ['osc label', 'https://example.invalid/osc8'],
+        ['wrapEND', WRAPPED],
+      ]) {
+        await clickCell(needle, modifier);
+        expected.push(url);
+        await expect.poll(() => page.evaluate(() => (window as unknown as ProbeWindow).__opened), { message: `${needle} ${modifier ?? 'click'}` }).toEqual(expected);
+      }
+    }
+  });
+}

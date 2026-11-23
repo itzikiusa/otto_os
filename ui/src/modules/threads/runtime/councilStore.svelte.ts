@@ -102,7 +102,7 @@ class CouncilStore {
       ...(req.images?.length ? { images: req.images } : {}),
     };
     const resp = await api.post<CouncilResp>(`/workspaces/${workspaceId}/runtime-sessions/council`, body);
-    for (const s of resp.seats) runtimeThreads.byId[s.id] = s;
+    for (const s of resp.seats) runtimeThreads.put(s);
     this.on = false;
     this.seats = [];
     const ids = resp.seats.map((x) => x.id);
@@ -120,7 +120,7 @@ class CouncilStore {
   /** Open the council's judge (409 while a seat still works). */
   async synthesize(id: string, req: SynthesizeCouncilReq): Promise<RuntimeSession> {
     const judge = await api.post<RuntimeSession>(`/runtime-sessions/${id}/council/synthesize`, req);
-    runtimeThreads.byId[judge.id] = judge;
+    runtimeThreads.put(judge);
     return judge;
   }
 }

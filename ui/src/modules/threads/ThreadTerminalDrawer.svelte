@@ -1,13 +1,17 @@
 <script lang="ts">
   import Icon from '../../lib/components/Icon.svelte';
   import LazyTerminal from '../../lib/components/LazyTerminal.svelte'; // xterm stays out of page:threads until a terminal shows
+  import TerminalAddToChat from './TerminalAddToChat.svelte';
 
   interface Props {
     sessionId: string;
     title: string;
     onclose: () => void;
+    /** The runtime thread a selection can be added to ("Add to chat"). */
+    threadId?: string | null;
   }
-  let { sessionId, title, onclose }: Props = $props();
+  let { sessionId, title, onclose, threadId = null }: Props = $props();
+  let selection = $state('');
 
   let tall = $state(false);
 </script>
@@ -46,7 +50,8 @@
     </div>
   </header>
   <div class="tt-body">
-    <LazyTerminal {sessionId} forceDark autoFocus resumeOnOpen />
+    <TerminalAddToChat text={selection} {threadId} />
+    <LazyTerminal {sessionId} forceDark autoFocus resumeOnOpen onselection={(t) => (selection = t)} />
   </div>
 </section>
 
@@ -95,6 +100,7 @@
     flex-shrink: 0;
   }
   .tt-body {
+    position: relative;
     flex: 1;
     min-height: 0;
     min-width: 0;

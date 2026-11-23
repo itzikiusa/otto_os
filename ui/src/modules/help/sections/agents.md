@@ -40,8 +40,8 @@ Agents is where your coding agents run. Each session is a real terminal on this 
 
 **Terminal**
 - Full scrollback survives reconnects (the daemon keeps 10,000 lines per session). Find (`⌘F`, or the search button in the pane header) searches the screen and the daemon's full buffer. `⌘F` reaches the active pane's terminal even when you last clicked its header or a side panel
-- Click a URL to open it in your browser, or a file reference like `src/App.svelte:42` to open it in the Files panel.
-- `⌥`-drag selects text in agent CLIs (they capture the mouse). Copy-on-select is a toggle in the pane's ⋯ menu.
+- Click (or `⌘`/`⌃`-click) a URL to open it in your browser, or a file reference like `src/App.svelte:42` to open it in the Files panel.
+- `⌥`-drag selects text in agent CLIs (they capture the mouse); the selection stays while the agent keeps writing, until you copy, click or type. `⌘C` copies it, with or without `⌥` still held. Copy-on-select is a toggle in the pane's ⋯ menu.
 - Paste an image and Otto uploads it, then types the saved file's path into the terminal.
 - `⇧↵` inserts a newline in the agent's prompt instead of submitting.
 - Terminal font size: *Terminal font larger / smaller / Reset* in the pane's ⋯ menu, or the zoom keys while the terminal is focused.

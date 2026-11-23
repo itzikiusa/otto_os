@@ -12,6 +12,8 @@ const t = mcpThreads('desktop-browser');
 
 test('an approval-gated Otto tool asks in the thread, and Allow once runs the waiting call', async ({ page }) => {
   const { thread, dock } = await t.askBroadcast(page, 'MCP approve', 'hello from the dock');
+  // The inbox says what the thread waits on, like any other approval.
+  await expect(page.getByRole('complementary', { name: 'Threads' }).getByRole('button', { name: /MCP approve/ }).first()).toContainText('Approval');
   await expect(dock.getByRole('button', { name: 'Deny', exact: true })).toBeVisible();
   await dock.getByRole('button', { name: 'Allow once', exact: true }).click();
   await expect(dock).toBeHidden({ timeout: 15_000 });
@@ -31,9 +33,17 @@ test('thread ⋯ ▸ MCP servers lists what the agent has, each with a word and 
   expect(made.ok(), await made.text()).toBeTruthy();
   const { thread } = await t.send(page, 'MCP list', 'hello');
   await expect(thread.getByText('echo: hello')).toBeVisible({ timeout: 30_000 });
+  // The details card's row says it in one line and opens the same list
+  // (the card heads the right panel when it doesn't float).
+  const detailsRow = page.getByTestId('details-mcp').first();
+  if (!(await detailsRow.isVisible())) await page.getByRole('button', { name: 'Right panel' }).click();
+  await expect(detailsRow).toContainText(/MCP · \d+ servers · \d+ needs? attention/);
+  await detailsRow.click();
+  const sheet = page.getByTestId('runtime-mcp-servers');
+  await expect(sheet).toBeVisible();
+  await page.getByRole('button', { name: 'Done' }).click();
   await page.getByRole('button', { name: 'Thread and view actions' }).click();
   await page.getByRole('menuitem', { name: 'MCP servers' }).click();
-  const sheet = page.getByTestId('runtime-mcp-servers');
   await expect(sheet).toBeVisible();
   const row = (name: string) => sheet.locator(`[data-testid="runtime-mcp-server"][data-name="${name}"]`);
   await expect(row('otto')).toContainText('Connected');

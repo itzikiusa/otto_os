@@ -153,7 +153,7 @@
                     family={{
                       kids: item.kids,
                       detached: item.detached,
-                      folded: foldedFamilies[item.session.id] === true,
+                      folded: foldedFamilies[item.session.id] !== false,
                       ontoggle: () => ontogglefamily(item.session.id),
                     }}
                     {onrowclick}

@@ -153,7 +153,7 @@ fn mcp_links_resources_and_audio_read_as_words_for_codex_and_acp() {
     );
     for want in [
         "Link: report.pdf — https://x/report.pdf (The report)",
-        "file:///notes.md:\n# Notes",
+        "# Notes",
         "Resource: file:///a.zip (application/zip",
         "Audio (audio/wav",
     ] {

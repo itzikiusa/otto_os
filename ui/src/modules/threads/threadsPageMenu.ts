@@ -8,11 +8,16 @@
 // stay on the sidebar row (its hover buttons and ⋯), New thread is the
 // sidebar's pencil and ⌘T while the sidebar shows, and there is ONE terminal
 // entry (the thread's own drawer, or the page's while that one is open).
-// Layout lives in a View submenu; a phone gets no Split / Grid at all.
+// Layout lives in a View submenu, with the per-device thread prefs
+// (threadPrefs.svelte.ts: tool-call visibility, what Enter does while the
+// agent works); a phone
+// gets no Split / Grid at all, only the prefs.
 import type { MenuItem } from '../../lib/contextmenu.svelte';
+import type { MidTurn } from './runtime/composerSend';
+import type { ToolVisibility } from './runtime/workLog';
 import type { ThreadsLayoutMode } from './threadsStore.svelte';
 
-export const RELATED_LABEL = 'Related threads…';
+export const RELATED_LABEL = 'Send to another thread…';
 export const TERMINAL_LABEL = 'Terminal drawer';
 
 /** Thread items the sidebar row already offers (runtimeMenu.ts, threadMenu.ts). */
@@ -42,6 +47,10 @@ export interface PageMenuState {
   phone?: boolean;
   /** The sidebar (with its New thread button) is on screen. */
   sidebarVisible?: boolean;
+  /** While the agent works, Enter queues or steers (threadPrefs). */
+  midTurn?: MidTurn;
+  /** How many tool calls the timeline shows (threadPrefs). */
+  tools?: ToolVisibility;
 }
 
 export interface PageMenuActions {
@@ -50,6 +59,10 @@ export interface PageMenuActions {
   toggleCard(): void;
   layout(mode: ThreadsLayoutMode): void;
   toggleTerminal(): void;
+  setMidTurn?(m: MidTurn): void;
+  setTools?(t: ToolVisibility): void;
+  /** A phone / tablet: the focused structured thread's "Jump to…" list (its minimap). */
+  jump?(): void;
 }
 
 export function threadsPageMenu(s: PageMenuState, act: PageMenuActions): MenuItem[] {
@@ -71,27 +84,38 @@ export function threadsPageMenu(s: PageMenuState, act: PageMenuActions): MenuIte
     ...(compact || s.sidebarVisible === false ? [{ label: 'New thread', icon: 'edit', hint: '⌘T', action: () => act.newThread() }] : []),
     // A terminal thread's own menu already carries it (threadMenu.ts).
     ...(s.threadId && !s.threadItems.some((i) => i.label === RELATED_LABEL)
-      ? [{ label: RELATED_LABEL, icon: 'people', action: () => act.related(s.threadId!) }] : []),
+      ? [{ label: RELATED_LABEL, icon: 'send', action: () => act.related(s.threadId!) }] : []),
+    ...(compact && s.threadId && act.jump ? [{ label: 'Jump to…', icon: 'arrowUp', title: 'Your messages in this thread', action: () => act.jump!() }] : []),
     ...(pageTerminal
       ? [{ label: TERMINAL_LABEL, icon: 'terminal', checked: s.terminalOpen, hint: '/terminal', action: () => act.toggleTerminal() }] : []),
-    ...(compact ? [] : [viewMenu(s, act)]),
+    ...viewMenu(s, act),
   ];
   return thread.length ? [...thread, { separator: true }, ...page] : page;
 }
 
-/** Layout (and the project card where it can float): one row, a flyout. */
-function viewMenu(s: PageMenuState, act: PageMenuActions): MenuItem {
-  return {
-    label: 'View',
-    icon: 'layout',
-    children: [
-      { label: 'Single thread', hint: '1-up', checked: s.layout === 'single', action: () => act.layout('single') },
-      { label: 'Split', hint: '2-up', checked: s.layout === 'split', action: () => act.layout('split') },
-      { label: 'Grid', hint: '4-up', checked: s.layout === 'grid', action: () => act.layout('grid') },
-      ...(s.cardOn !== null
-        ? [{ separator: true }, { label: 'Project card', icon: 'note', checked: s.cardOn, action: () => act.toggleCard() }] : []),
-    ],
-  };
+/** Layout (and the project card where it can float), then the thread
+ *  prefs: one row, a flyout. A phone / tablet keeps only the prefs. */
+function viewMenu(s: PageMenuState, act: PageMenuActions): MenuItem[] {
+  const layout: MenuItem[] = s.compact === true ? [] : [
+    { label: 'Single thread', hint: '1-up', checked: s.layout === 'single', action: () => act.layout('single') },
+    { label: 'Split', hint: '2-up', checked: s.layout === 'split', action: () => act.layout('split') },
+    { label: 'Grid', hint: '4-up', checked: s.layout === 'grid', action: () => act.layout('grid') },
+    ...(s.cardOn !== null
+      ? [{ separator: true }, { label: 'Thread details', icon: 'note', checked: s.cardOn, action: () => act.toggleCard() }] : []),
+  ];
+  const prefs: MenuItem[] = s.midTurn && act.setMidTurn ? [
+    { label: 'While working, messages queue', hint: s.compact ? undefined : '⌘↵ steers', title: 'A message sent while the agent works waits for the turn to end', checked: s.midTurn === 'queue', action: () => act.setMidTurn!('queue') },
+    { label: 'While working, messages steer', hint: s.compact ? undefined : '⌘↵ queues', title: 'A message sent while the agent works goes into the running turn; the agent reads it at its next step', checked: s.midTurn === 'steer', action: () => act.setMidTurn!('steer') },
+  ] : [];
+  const TOOLS: [ToolVisibility, string, string][] = [
+    ['all', 'Tool calls: show all', 'Every command, edit and search the agent ran'],
+    ['hide-ok', 'Tool calls: hide successful', 'Only failed or gated calls; replies, questions and approvals always show'],
+    ['none', 'Tool calls: hide all', 'No tool calls except failures and approvals; replies and questions always show'],
+  ];
+  const tools: MenuItem[] = s.tools && act.setTools
+    ? TOOLS.map(([v, label, title]) => ({ label, title, checked: s.tools === v, action: () => act.setTools!(v) })) : [];
+  const children = trimSeparators([...layout, { separator: true }, ...tools, { separator: true }, ...prefs]);
+  return children.length ? [{ label: 'View', icon: 'layout', children }] : [];
 }
 
 /** No separator first, last or twice in a row once items are filtered out. */

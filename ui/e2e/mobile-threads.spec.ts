@@ -222,9 +222,10 @@ test('the phone lists every workspace’s threads under their folders, light and
     const sidebar = page.getByTestId('threads-sidebar');
     // The window has the home workspace open; both threads live elsewhere.
     for (const [title, dir] of [['Phone thread', 1], ['Desk terminal thread', 2]] as const) {
-      const group = sidebar.getByRole('region', { name: `Project ${folder(dir)}` });
-      await expect(group, `${scheme}: ${title}`).toBeVisible({ timeout: 30_000 });
-      await expect(group).toContainText(title);
+      const row = sidebar
+        .locator('[data-testid^="thread-row-"]', { hasText: title })
+        .filter({ has: page.locator('.tr-proj').getByText(folder(dir), { exact: true }) });
+      await expect(row, `${scheme}: ${title}`).toBeVisible({ timeout: 30_000 });
     }
     await expectFullyInViewport(page, sidebar, `threads sidebar (${scheme})`);
     await expectNoHorizontalOverflow(page);
@@ -437,9 +438,14 @@ test('a 60-turn conversation opens via tail_turns=12&compact=true on phone, lazi
     };
   });
 
-  // Warm shell first, then time switching/opening the 60-turn thread.
+  // Warm shell first, then time switching/opening the 60-turn thread. The
+  // conversation's own modules are warmed too: on the e2e Vite dev server
+  // their first import compiles them (~600 ms cold, measured), which a built
+  // app never pays and which made the first run of this spec on a fresh
+  // server fail on main as well.
   await page.goto('/#/threads');
   await expect(page.getByTestId('threads-page')).toBeVisible({ timeout: 30_000 });
+  await page.evaluate(() => import(/* @vite-ignore */ '/src/modules/threads/runtime/RuntimeThread.svelte'));
   const t0 = Date.now();
   await page.goto(`/#/threads/${threadId}`);
   const thread = page.getByTestId(`runtime-thread-${threadId}`);

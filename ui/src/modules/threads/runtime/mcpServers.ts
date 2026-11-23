@@ -72,11 +72,11 @@ export function mcpServerRows(servers: readonly McpServerStatus[], governed: rea
     .map(({ rank: _rank, ...r }) => r);
 }
 
-/** One line for a details card: "4 MCP servers · 1 needs attention". */
+/** One line for the details card: "MCP · 4 servers · 1 needs attention". */
 export function mcpSummary(rows: readonly McpServerRow[]): string {
-  if (rows.length === 0) return 'No MCP servers';
+  if (rows.length === 0) return 'MCP · no servers';
   const off = rows.filter((r) => r.tone === 'danger' || r.tone === 'warning').length;
-  const n = `${rows.length} MCP ${rows.length === 1 ? 'server' : 'servers'}`;
+  const n = `MCP · ${rows.length} ${rows.length === 1 ? 'server' : 'servers'}`;
   return off > 0 ? `${n} · ${off} ${off === 1 ? 'needs' : 'need'} attention` : n;
 }
 

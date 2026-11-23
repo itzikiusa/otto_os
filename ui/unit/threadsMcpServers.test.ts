@@ -32,7 +32,7 @@ test('problems first, each with its word and reason; then Otto, the workspace, t
   assert.equal(rows.find((r) => r.name === 'linear')!.from, 'Through Otto · 2 tools');
   assert.equal(rows.find((r) => r.name === 'github')!.from, 'Gemini’s own config');
   assert.equal(rows.find((r) => r.name === 'down')!.reason, 'connection refused');
-  assert.equal(mcpSummary(rows), '7 MCP servers · 3 need attention');
+  assert.equal(mcpSummary(rows), 'MCP · 7 servers · 3 need attention');
 });
 
 test('a governed server says so when the thread has no Otto tools', () => {
@@ -40,7 +40,7 @@ test('a governed server says so when the thread has no Otto tools', () => {
   const linear = rows.find((r) => r.name === 'linear')!;
   assert.equal(linear.status, 'Not available');
   assert.match(linear.reason!, /through Otto’s tools/);
-  assert.equal(mcpSummary([]), 'No MCP servers');
+  assert.equal(mcpSummary([]), 'MCP · no servers');
 });
 
 test('"MCP servers changed" only when an enabled server was added or removed since the start', () => {

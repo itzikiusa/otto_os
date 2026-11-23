@@ -19,8 +19,10 @@ import {
   resetText,
   windowReset,
   windowText,
+  providerMeter,
+  windowShort,
 } from '../src/modules/usage/limitsText.ts';
-import type { WindowLimit } from '../src/lib/api/types/usage-limits.ts';
+import type { AccountLimits, WindowLimit } from '../src/lib/api/types/usage-limits.ts';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -159,4 +161,29 @@ test('Claude check status line: off, checking, failed, checked', () => {
   assert.match(CHECK_CONFIRM, /own claude CLI/);
   assert.match(CHECK_CONFIRM, /Anthropic/);
   assert.match(CHECK_CONFIRM, /does not read the login/);
+});
+
+test('the Threads meter: the tightest fresh window, its tone, every window in the tooltip', () => {
+  const acct = (over: Partial<AccountLimits>): AccountLimits => ({
+    key: 'codex:default', provider: 'codex', account_id: null, label: 'Default Codex login', source: 'default', status: 'ok', reason: null,
+    plan: 'pro', taken_at: iso(NOW - 4 * MIN), credits: null, limit_reached: null,
+    windows: [
+      { id: 'primary', name: '5-hour', window_minutes: 300, used_percent: 62, left_percent: 38, resets_at: iso(NOW + 2 * HOUR), reset_since_snapshot: false },
+      { id: 'secondary', name: 'Weekly', window_minutes: 10080, used_percent: 41, left_percent: 59, resets_at: iso(NOW + 76 * HOUR), reset_since_snapshot: false },
+    ],
+    ...over,
+  });
+  const m = providerMeter([acct({})], 'codex', 1800, NOW)!;
+  assert.deepEqual([m.short, m.used, m.tone], ['5h', 62, 'ok']);
+  assert.equal(m.lines[0], 'Codex · Default Codex login');
+  assert.match(m.lines[1], /^5-hour: 38% left · resets in 2 h$/);
+  assert.match(m.lines[2], /^Weekly: 59% left/);
+  const hot = acct({ windows: [{ ...acct({}).windows[1], used_percent: 96, left_percent: 4 }] });
+  assert.deepEqual([providerMeter([hot], 'codex', 1800, NOW)!.short, providerMeter([hot], 'codex', 1800, NOW)!.tone], ['7d', 'danger']);
+  assert.equal(providerMeter([acct({ windows: [{ ...acct({}).windows[0], used_percent: 80 }] })], 'codex', 1800, NOW)!.tone, 'warning');
+  // No numbers: another provider, a stale or unknown reading.
+  assert.equal(providerMeter([acct({})], 'claude', 1800, NOW), null);
+  assert.equal(providerMeter([acct({ taken_at: iso(NOW - 3 * HOUR) })], 'codex', 1800, NOW), null);
+  assert.equal(providerMeter([acct({ status: 'unknown' })], 'codex', 1800, NOW), null);
+  assert.equal(windowShort({ name: 'Monthly', window_minutes: null }), 'Monthly');
 });

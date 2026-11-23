@@ -135,8 +135,36 @@ impl RuntimeSession {
             Some(TurnOutcome::Failed) => failure.map(|f| error_class(f).to_string()),
             _ => None,
         };
+        // When that turn ended (`meta.last_turn_ended_at`, derived, never
+        // stored): a client's "finished since you last looked" compares it with
+        // `meta.thread_seen_at` — `last_active_at` also moves on a pin.
+        let ended = self
+            .last_turn_status
+            .and(latest)
+            .and_then(|t| t.completed_at)
+            .map(|at| serde_json::Value::String(at.to_rfc3339()));
+        match (
+            self.meta
+                .as_mut()
+                .and_then(serde_json::Value::as_object_mut),
+            ended,
+        ) {
+            (Some(m), Some(at)) => {
+                m.insert(TURN_ENDED_AT_META.into(), at);
+            }
+            (Some(m), None) => {
+                m.remove(TURN_ENDED_AT_META);
+            }
+            (None, Some(at)) => {
+                self.meta = Some(serde_json::json!({ TURN_ENDED_AT_META: at }));
+            }
+            (None, None) => {}
+        }
     }
 }
+
+/// Derived `RuntimeSession::meta` key: when the latest turn ended (RFC 3339).
+pub const TURN_ENDED_AT_META: &str = "last_turn_ended_at";
 
 #[cfg(test)]
 mod tests {
@@ -149,6 +177,32 @@ mod tests {
             code: code.map(str::to_string),
             retryable: None,
         }
+    }
+
+    #[test]
+    fn the_latest_ended_turn_dates_the_row_and_a_running_one_clears_it() {
+        let mut s: RuntimeSession = serde_json::from_value(serde_json::json!({
+            "id": "s", "workspace_id": "w", "provider": "claude", "title": "t", "cwd": "/",
+            "status": "idle", "access_mode": "full-access", "created_by": "u",
+            "created_at": "2026-11-23T10:00:00Z", "last_active_at": "2026-11-23T10:00:00Z",
+            "last_sequence": 1, "capabilities": {}, "meta": {"thread_pinned": true}
+        }))
+        .unwrap();
+        let mut turn: ProviderTurn = serde_json::from_value(serde_json::json!({
+            "id": "t1", "ordinal": 1, "status": "completed",
+            "started_at": "2026-11-23T10:00:00Z", "completed_at": "2026-11-23T10:05:00Z"
+        }))
+        .unwrap();
+        s.set_outcome(Some(&turn), None);
+        assert_eq!(
+            s.meta.as_ref().unwrap()[TURN_ENDED_AT_META],
+            "2026-11-23T10:05:00+00:00"
+        );
+        assert_eq!(s.meta.as_ref().unwrap()["thread_pinned"], true);
+        turn.status = ProviderTurnStatus::Running;
+        turn.completed_at = None;
+        s.set_outcome(Some(&turn), None);
+        assert!(s.meta.as_ref().unwrap().get(TURN_ENDED_AT_META).is_none());
     }
 
     #[test]

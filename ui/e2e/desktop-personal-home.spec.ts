@@ -247,8 +247,8 @@ test('Threads keeps an agent’s chat under its NAME, folds its runs into “Age
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/#/threads');
   const sidebar = page.getByTestId('threads-sidebar');
-  // The chat's group header is the agent's name — never its folder's ULID.
-  await expect(sidebar.locator('section[aria-label="Project Otto"]')).toBeVisible();
+  // The chat's row names the agent as its project — never its folder's ULID.
+  await expect(sidebar.getByTestId('thread-row-thr-chat').locator('.tr-proj')).toHaveText('Otto');
   await expect(sidebar).not.toContainText(SCOUT);
   await expect(page.getByTestId('thread-badge-thr-chat')).toHaveText('Chat');
   // Routine runs and delegated work are not conversations a person started:

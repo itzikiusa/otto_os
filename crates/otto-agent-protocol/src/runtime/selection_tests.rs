@@ -560,5 +560,5 @@ async fn fresh_context_can_stop_leftover_background_work() {
         .proj
         .items
         .values()
-        .any(|i| matches!(i.kind, TurnItemKind::SessionBoundary)));
+        .any(|i| matches!(i.kind, TurnItemKind::SessionBoundary { .. })));
 }

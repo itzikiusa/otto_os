@@ -17,6 +17,8 @@ import type { PendingApproval } from './timeline';
 
 class McpAsks {
   all = $state<McpApproval[]>([]);
+  /** Threads with a pending card (the inbox's "Approval"). */
+  private waitingIds = $derived(new Set(this.all.filter((a) => a.status === 'pending').map((a) => a.requested_by_session_id)));
   /** Tools a rule may only cover with the second toggle (never "Always"). */
   private irreversible = $state<ReadonlySet<string>>(new Set());
   private users = 0;
@@ -43,6 +45,11 @@ class McpAsks {
   private async load(signal: AbortSignal): Promise<void> {
     this.all = (await api.get<McpApproval[]>('/mcp/approvals?status=pending', signal)) ?? [];
     for (const a of this.all) if (a.server_id) void resourceAccess.load('mcp_server', a.server_id, a.tool ?? undefined);
+  }
+
+  /** Whether thread `id` has an MCP card waiting on the person. */
+  waiting(id: string): boolean {
+    return this.waitingIds.has(id);
   }
 
   /** This thread's cards as dock rows. */
@@ -74,3 +81,20 @@ class McpAsks {
 }
 
 export const mcpAsks = new McpAsks();
+
+/** A thread view's MCP cards (call during component init): keeps the shared
+ *  list live while the view shows, the rows for its dock, and answer routing. */
+export function mcpThread(id: () => string) {
+  $effect(() => mcpAsks.hold());
+  return {
+    get pending(): McpApproval[] {
+      return mcpAsks.pending(id());
+    },
+    rows(): PendingApproval[] {
+      return mcpAsks.pending(id()).map((a) => mcpAsks.asRow(a));
+    },
+    respond(requestId: string, decision: ApprovalDecision, other: () => Promise<void>): Promise<void> {
+      return isMcpAsk(requestId) ? mcpAsks.answer(requestId, decision) : other();
+    },
+  };
+}

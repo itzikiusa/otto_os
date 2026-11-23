@@ -103,7 +103,7 @@ impl ToolOutput {
                 let r = part.get("resource").unwrap_or(part);
                 let s = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or_default();
                 if let Some(text) = r.get("text").and_then(Value::as_str) {
-                    self.line(&format!("{}:\n{text}", s("uri")));
+                    self.line(text);
                 } else if s("mimeType").starts_with("image/") {
                     self.image(s("mimeType"), s("blob"));
                 } else {

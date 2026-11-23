@@ -852,7 +852,7 @@ impl ClaudeDriver {
                     "toolUseID": p.tool_use_id,
                 })
             }
-            ApprovalDecision::Decline => json!({
+            ApprovalDecision::Decline | ApprovalDecision::DeclineAlways => json!({
                 "behavior": "deny",
                 "message": "User declined tool execution.",
                 "toolUseID": p.tool_use_id,
@@ -1367,12 +1367,9 @@ impl StructuredDriver for ClaudeDriver {
             let questions = crate::questions::mcp_elicitation(&p.input).map_err(DriverError)?;
             otto_core::agent_runtime::validate_question_answers(&questions, answers)
                 .map_err(DriverError)?;
-            let content = crate::questions::form_content(&questions, answers);
+            let result = crate::questions::elicitation_answer(&questions, answers);
             let mut step = DriverStep::default();
-            step.write(Self::control_success(
-                &p.cli_request_id,
-                json!({"action":"accept","content":content}),
-            ));
+            step.write(Self::control_success(&p.cli_request_id, result));
             self.pending.remove(request_id);
             return Ok(step);
         }
@@ -2545,9 +2542,23 @@ mod tests {
             &mut d,
             json!({"type":"control_request","request_id":"e3","request":{"subtype":"elicitation","mcp_server_name":"probe","message":"Sign in","mode":"url","url":"https://x"}}),
         );
-        assert!(url.events.is_empty());
-        let v: Value = serde_json::from_str(&url.writes[0]).unwrap();
-        assert_eq!(v["response"]["response"]["action"], "decline");
+        // URL mode: the same one-choice question every agent gets; choosing it
+        // is a bare accept (the UI opens the page).
+        let DriverEvent::Question { questions, .. } = &url.events[0] else {
+            panic!("{:?}", url.events)
+        };
+        assert_eq!(questions[0].id, crate::questions::URL_QUESTION);
+        let r = d
+            .respond_question(
+                "claude-e3",
+                &[QuestionAnswer::Single {
+                    question_id: crate::questions::URL_QUESTION.into(),
+                    value: "open".into(),
+                }],
+            )
+            .unwrap();
+        let v: Value = serde_json::from_str(&r.writes[0]).unwrap();
+        assert_eq!(v["response"]["response"], json!({"action":"accept"}));
     }
 
     #[test]
