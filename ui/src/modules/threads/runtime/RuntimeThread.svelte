@@ -38,6 +38,7 @@
   import RuntimeAttentionDock from './RuntimeAttentionDock.svelte';
   import RuntimeComposerActions from './RuntimeComposerActions.svelte';
   import RuntimeComposerPlus from './RuntimeComposerPlus.svelte';
+  import RuntimeMinimap from './RuntimeMinimap.svelte';
   import { threadAccessDefault } from '../threadAccessDefault.svelte';
   import { isAltSend, midTurnDelivery, primaryAction } from './composerSend';
   import { threadPrefs } from './threadPrefs.svelte';
@@ -499,6 +500,7 @@
       </div>
     </div>
   </div>
+  <RuntimeMinimap {sessionId} items={p?.items ?? []} turns={p?.turns ?? []} {messageIds} {scroller} onexpand={() => { rowCap = Math.max(rowCap, rows.length); followRef?.releaseBottom(); }} />
   <RuntimeFollow bind:this={followRef} {scroller} seq={p?.lastSequence} {messageIds} needs={attentionPillText(attention)} firstRow={visibleRows[0] ? timelineRowKey(visibleRows[0]) : null} bind:holdFrom />
   <RuntimeStreamTools root={streamEl} {rows} bind:rowCap bind:text={draft.text} composer={composerEl} />
 
@@ -651,6 +653,7 @@
     min-inline-size: 0;
     /* Size, not just inline: the composer grows to 40 % of the pane (cqb). */
     container-type: size;
+    position: relative;
     background: var(--bg);
   }
   .rt-scroll {

@@ -421,6 +421,7 @@
         toggleTerminal: () => threadsChrome.setTerminal(!threadsChrome.terminalOpen),
         setMidTurn: (m) => threadPrefs.setMidTurn(m),
         setTools: (t) => threadPrefs.setTools(t),
+        jump: focused && isRuntimeThread(focused) ? () => window.dispatchEvent(new CustomEvent('otto:thread-jump', { detail: { sessionId: focused.id } })) : undefined,
       },
     ));
   }
