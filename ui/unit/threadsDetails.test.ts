@@ -27,7 +27,9 @@ test('new local work comes before the open pull request; nothing to do says so',
 test('the card floats only beside one conversation with a full reading column left', () => {
   const base = { centerWidth: 1284, compact: false, rightPanel: false, panes: 1, altView: false };
   assert.equal(cardFloats(base), true);
-  assert.equal(cardFloats({ ...base, centerWidth: 1124 }), false);
+  // 1440 with the sidebar open leaves ~1123 px: it floats there.
+  assert.equal(cardFloats({ ...base, centerWidth: 1123 }), true);
+  assert.equal(cardFloats({ ...base, centerWidth: 1103 }), false);
   assert.equal(cardFloats({ ...base, rightPanel: true }), false);
   assert.equal(cardFloats({ ...base, compact: true }), false);
   assert.equal(cardFloats({ ...base, panes: 2 }), false);

@@ -7,6 +7,7 @@
 // Pure (unit/threadsInbox.test.ts); states come in from lib/status.ts.
 import type { Session } from '../../lib/api/types';
 import { inboxOrder, type FamilyRow } from './threadFamilies';
+import { perfCount } from '../../lib/perfCount.ts';
 
 /** Where a row belongs, from its derived state key and unread flag. */
 export type InboxClass = 'needs' | 'failed' | 'done' | 'working' | 'rest';
@@ -38,6 +39,7 @@ export function inboxSections(
   /** When the thread last came back to the person (ISO, newest first). */
   at?: (s: Session) => string,
 ): { main: FamilyRow[]; working: FamilyRow[] } {
+  perfCount('inboxSections');
   const byId = new Map(list.map((s) => [s.id, s] as const));
   const rootOf = (s: Session): string => {
     let cur = s;

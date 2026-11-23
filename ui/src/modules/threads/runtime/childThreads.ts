@@ -11,6 +11,7 @@ import { threadCall } from './agentRows';
 import type { AgentTask, AgentTaskStatus } from './agentTasks';
 import type { RuntimeProjection } from './projection';
 import { latestTurn, workLabel } from './timeline';
+import { perfCount } from '../../../lib/perfCount.ts';
 
 export type ChildEvent = 'started' | 'finished' | 'failed' | 'stopped';
 
@@ -164,6 +165,7 @@ export const kidKey = (k: Kid): string => (k.kind === 'thread' ? k.id : k.item.i
  *  settled `otto.thread_open` calls, a person's "Delegate" notice and the
  *  provider's own `subagent` cards. */
 export function turnSubagents(items: readonly TurnItem[]): { groups: Map<string, Kid[]>; skip: Set<string> } {
+  perfCount('turnSubagents');
   const groups = new Map<string, Kid[]>();
   const skip = new Set<string>();
   const anchorOf = new Map<string, string>();
@@ -325,6 +327,7 @@ export function subagentSection(
   tasks: { running: readonly AgentTask[]; finished: readonly AgentTask[] },
   more: { parent?: { id: string; title: string } | null; delegated?: readonly SubagentThread[]; providerOf?: (threadId: string) => string | null },
 ): SubagentSection {
+  perfCount('detailsSubagents');
   const row = (t: AgentTask): SubagentRow => ({
     id: t.id,
     title: t.label,

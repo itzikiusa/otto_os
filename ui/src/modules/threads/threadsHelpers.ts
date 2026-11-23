@@ -2,6 +2,7 @@ import type { Repo, Session } from '../../lib/api/types';
 import { ws } from '../../lib/stores/workspace.svelte';
 import { harnessLabel, isPlainShellSession } from '../../lib/providers';
 import { delegatedParentId, inThreadsScope, type SessionPool } from '../../lib/stores/sessionBuckets';
+import { worktreeProjects } from './worktreeProjects.svelte';
 
 export { harnessLabel, isPlainShellSession };
 
@@ -42,6 +43,11 @@ export function projectNameFromCwd(cwd: string | null | undefined, fallback = 'W
   if (clean === '~' || clean === (ws.scratch?.root_path ?? '').replace(/\/+$/, '')) return 'Home';
   const parts = clean.split('/').filter(Boolean);
   return parts[parts.length - 1] ?? fallback;
+}
+
+/** The project a thread folder belongs to, by name: a worktree's main checkout. */
+export function projectName(cwd: string | null | undefined, fallback = 'Workspace'): string {
+  return projectNameFromCwd(worktreeProjects.root(cwd), fallback);
 }
 
 /** Compact path for chips and subtitles (`~/repo/sub` or last two segments). */
