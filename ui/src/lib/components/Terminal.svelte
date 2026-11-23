@@ -244,8 +244,7 @@
   import { registerSelectAll } from '../selectall';
   import TermKeysBar from './TermKeysBar.svelte';
   import Icon from './Icon.svelte';
-  import { terminalReply } from './terminalInput';
-  import { guardSelection } from './termSelection';
+  import { terminalReply } from './terminalInput'; import { guardSelection } from './termSelection';
   import { plural } from '../plural';
 
   interface Props {
