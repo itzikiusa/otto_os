@@ -31,9 +31,6 @@ test('review conversations and selected diffs stack in the owning draft and send
   await page.route('**/api/v1/workspaces/*/repos/detect', (route) => route.fulfill({ json: repo }));
   await page.route('**/api/v1/repos/review-repo/status', (route) => route.fulfill({ json: { branch: 'feature', upstream: null, ahead: 0, behind: 0, changes: [{ path: 'src/a.ts', orig_path: null, kind: 'modified' }] } }));
   await page.route('**/api/v1/repos/review-repo/prs?*', (route) => route.fulfill({ json: { items: [pr], page: 1, per_page: 50, has_more: false } }));
-  // A GitHub account covers the repo (threadPrs reads PRs only then; without
-  // one the surface says "No GitHub account linked").
-  await page.route('**/api/v1/git/accounts', (route) => route.fulfill({ json: [{ id: 'acct-gh', provider: 'github', label: 'GitHub' }] }));
   let releaseDetail: (() => void) | undefined;
   let delayDetail = false;
   let detailRequests = 0;

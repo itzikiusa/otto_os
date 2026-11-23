@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx } from './seed';
+import { requireThreadMeta } from './daemonFeatures';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -182,6 +183,7 @@ test('Group by project brings back the folders and is remembered', async ({ page
 });
 
 test('pin and Move to History act at once with one Undo notice; ⌘Z undoes outside a text field', async ({ page }) => {
+  await requireThreadMeta(ctx, base);
   await page.setViewportSize({ width: 1600, height: 1000 });
   await open(page, ids.idle);
   const side = page.getByTestId('threads-sidebar');

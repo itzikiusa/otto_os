@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx } from './seed';
+import { requireThreadMeta } from './daemonFeatures';
 
 // Pins, History and "seen" live on the thread (docs/contracts/api.md
 // PATCH /runtime-sessions/{id} `meta`), so a Mac and a phone on one daemon
@@ -31,6 +32,7 @@ async function idle(id: string): Promise<void> {
 
 test.beforeAll(async () => {
   ({ ctx, base } = await apiCtx());
+  await requireThreadMeta(ctx, base);
   root = mkdtempSync(join(tmpdir(), 'otto-e2e-sync-'));
   writeFileSync(join(root, 'README.md'), '# Sync\n');
   const r = await ctx.post(`${base}/api/v1/workspaces`, { data: { name: 'Sync WS', root_path: root } });

@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx } from './seed';
+import { requireThreadMeta } from './daemonFeatures';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 
 // The Threads inbox on a phone / tablet, with touch (tap, long press):
@@ -28,6 +29,7 @@ async function thread(key: string, title: string, prompt: string): Promise<void>
 
 test.beforeAll(async () => {
   ({ ctx, base } = await apiCtx());
+  await requireThreadMeta(ctx, base);
   root = mkdtempSync(join(tmpdir(), 'otto-e2e-inbox-phone-'));
   writeFileSync(join(root, 'README.md'), '# Inbox on a phone\n');
   const r = await ctx.post(`${base}/api/v1/workspaces`, { data: { name: 'Inbox phone', root_path: root } });
