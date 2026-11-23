@@ -52,7 +52,9 @@ test('tool images retain text, enlarge with keyboard, survive reload and fit pho
   await page.keyboard.press('Escape');
   await stage.getByTestId('new-thread-input').fill('tool image');
   await stage.getByTestId('new-thread-send-btn').click();
-  const row = page.locator('[data-item-type="dynamic_tool"]').filter({ hasText: 'preview.screenshot' });
+  // The row's label as a person reads it (toolWords): the raw "preview.screenshot"
+  // sits only in the live item's input, which a reload's compact snapshot omits.
+  const row = page.locator('[data-item-type="dynamic_tool"]').filter({ hasText: 'preview · screenshot' });
   await expect(row).toHaveCount(1, { timeout: 30_000 });
   await openFinishedWork(page);
   await expect(row).toBeVisible();
