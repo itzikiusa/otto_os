@@ -506,7 +506,7 @@
       </div>
     </div>
   </div>
-  <RuntimeMinimap {sessionId} items={p?.items ?? []} turns={p?.turns ?? []} {messageIds} {scroller} onexpand={() => { rowCap = Math.max(rowCap, rows.length); followRef?.releaseBottom(); }} />
+  <RuntimeMinimap {sessionId} {focused} items={p?.items ?? []} turns={p?.turns ?? []} {messageIds} {scroller} onexpand={() => { rowCap = Math.max(rowCap, rows.length); followRef?.releaseBottom(); }} />
   <RuntimeFollow bind:this={followRef} {scroller} seq={p?.lastSequence} {messageIds} needs={attentionPillText(attention)} firstRow={visibleRows[0] ? timelineRowKey(visibleRows[0]) : null} bind:holdFrom />
   <RuntimeStreamTools root={streamEl} {rows} bind:rowCap bind:text={draft.text} composer={composerEl} />
 
@@ -564,7 +564,7 @@
         onjump={jumpTo}
       />
     {/if}
-    <RuntimeChildApprovals {sessionId} />{#if p && session && !closed}<RuntimeMcpChanged {sessionId} workspaceId={session?.workspace_id} servers={p?.mcpServers ?? []} idle={!running} />{/if}
+    <RuntimeChildApprovals {sessionId} />{#if p && session && !closed}<RuntimeMcpChanged {sessionId} workspaceId={session?.workspace_id} idle={!running} />{/if}
     {#if composerTopSlot}{@render composerTopSlot({ focusComposer })}{/if}
 
     <div class="rt-composer" style:border-color={planOn ? 'color-mix(in srgb, var(--warning) 42%, var(--border))' : undefined} bind:this={composerBoxEl}>

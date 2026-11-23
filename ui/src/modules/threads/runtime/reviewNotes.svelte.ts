@@ -36,6 +36,13 @@ class ReviewNotes {
     this.set(threadId, this.for(threadId).map((n) => (n.id === id ? { ...n, ...patch } : n)));
   }
 
+  /** The composer chip that carried them was removed before sending: back to Draft. */
+  unsend(chip: string): void {
+    for (const [threadId, list] of Object.entries(this.byThread)) {
+      if (list.some((n) => n.chip === chip)) this.set(threadId, list.map((n) => (n.chip === chip && n.state === 'sent' ? { ...n, state: 'draft' as const, chip: undefined } : n)));
+    }
+  }
+
   remove(threadId: string, id: string): void {
     this.set(threadId, this.for(threadId).filter((n) => n.id !== id));
   }

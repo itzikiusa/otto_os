@@ -186,3 +186,68 @@ test('outside Threads ⌘K gains "Threads needing you" only when one waits', asy
   await w.click();
   await expect(page.getByTestId(`runtime-thread-${waits}`)).toBeVisible({ timeout: 30_000 });
 });
+
+test('each ⌘K open orders by what needs you now, not by the last open', async ({ page }) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  // Same title: the filter scores them alike, so only the open's order separates them
+  // (other specs' threads on this daemon stay out of the way of the typed query).
+  const first = await thread('codex', `Sw order ${RUN}`);
+  const later = await thread('codex', `Sw order ${RUN}`);
+  await prompt(first, 'hello');
+  await prompt(later, 'hello');
+  await page.goto(`/#/threads/${first}`);
+  await expect(page.getByTestId(`runtime-thread-${first}`)).toBeVisible({ timeout: 30_000 });
+  const mine = async (): Promise<string[]> =>
+    (await palette(page).locator('[data-cmd^="thread:"]').evaluateAll((els) => els.map((e) => (e.getAttribute('data-cmd') ?? '').slice(7)))).filter((id) => id === first || id === later);
+  await openPalette(page);
+  await barInput(page).fill(`order ${RUN}`);
+  await expect.poll(mine).toHaveLength(2);
+  // The one this open lists second starts waiting on the person while the bar is closed.
+  const waiter = (await mine())[1];
+  await expect(async () => {
+    await page.keyboard.press('Escape');
+    await expect(palette(page)).toHaveCount(0, { timeout: 1_000 });
+  }).toPass({ timeout: 10_000 });
+  await prompt(waiter, 'ask');
+  await expect(page.getByTestId(`thread-status-${waiter}`)).toHaveText('Approval', { timeout: 20_000 });
+  await openPalette(page);
+  await barInput(page).fill(`order ${RUN}`);
+  await expect.poll(mine).toHaveLength(2);
+  expect((await mine())[0]).toBe(waiter);
+});
+test('switching threads with the composer focused throws nothing (Chromium blur during teardown)', async ({ page }) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  const a = await thread('codex', `Sw teardown a ${RUN}`);
+  const b = await thread('codex', `Sw teardown b ${RUN}`);
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+  await page.goto(`/#/threads/${a}`);
+  const composer = page.getByTestId(`runtime-thread-${a}`).getByTestId('runtime-composer');
+  await expect(composer).toBeVisible({ timeout: 30_000 });
+  for (const [from, to] of [[a, b], [b, a]]) {
+    await page.getByTestId(`runtime-thread-${from}`).getByTestId('runtime-composer').focus();
+    // Switch without moving the focus first (a route change, ⌥⌘↓, a notification).
+    await page.evaluate((h) => { location.hash = h; }, `#/threads/${to}`);
+    await expect(page.getByTestId(`runtime-thread-${to}`)).toBeVisible({ timeout: 30_000 });
+  }
+  expect(errors.filter((e) => /state_unsafe_mutation/.test(e))).toEqual([]);
+});
+
+test('RTL: status words and key hints keep their own order', async ({ page }) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.addInitScript(() => localStorage.setItem('otto_direction', 'rtl'));
+  const id = await thread('codex', `Sw rtl ${RUN}`);
+  await prompt(id, 'hello');
+  await page.goto(`/#/threads/${id}`);
+  await expect(page.getByTestId(`runtime-thread-${id}`)).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator('html')).toHaveAttribute('dir', 'rtl');
+  const dir = (l: ReturnType<Page['locator']>) => l.first().evaluate((el) => getComputedStyle(el).direction);
+  // "1 subagent", "Working 18s", "5m": an English run, never reordered by the page's RTL.
+  expect(await dir(page.getByTestId(`thread-status-${id}`))).toBe('ltr');
+  await openPalette(page);
+  await expect(palette(page).locator('kbd').first()).toBeVisible();
+  expect(await dir(palette(page).locator('kbd'))).toBe('ltr');
+  await barInput(page).fill(`rtl ${RUN}`);
+  expect(await dir(threadRow(page, id).locator('.opt-meta'))).toBe('ltr');
+});
