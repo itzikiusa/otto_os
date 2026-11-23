@@ -165,12 +165,13 @@ test('the thread’s next action (Revive / Reopen) is never folded behind "N mor
     '../../../lib/providerRegistry': { sessionProviderSlug: () => '' },
   }) as typeof import('../src/modules/threads/runtime/runtimeComposer.ts');
   const revive = buildRuntimeBanners({ ...base, sessionError: 'Agent executable unavailable.', needsRevive: true });
-  assert.deepEqual(keys(splitBanners(revive)), [['error', 'queue'], ['plan', 'fresh']]);
-  assert.deepEqual(keys(splitBanners(revive, 0)), [['error', 'queue'], ['plan', 'fresh']], 'not even with the keyboard up');
+  assert.deepEqual(keys(splitBanners(revive)), [['error', 'queue', 'fresh'], ['plan']]);
+  assert.deepEqual(keys(splitBanners(revive, 0)), [['error', 'queue', 'fresh'], ['plan']], 'not even with the keyboard up');
   // An armed provider switch ("Next message continues on …") never folds either; a failed one is the error line.
   const sw = buildRuntimeBanners({ ...base, switchTo: 'codex' });
   assert.deepEqual(keys(splitBanners(sw, 0)), [['switch'], ['plan', 'queue']]);
   assert.deepEqual(keys(splitBanners(buildRuntimeBanners({ ...base, switchTo: 'codex', sessionError: 'Codex is not signed in.' }), 0)), [['error', 'switch'], ['plan', 'queue']]);
-  // A live queue is a quiet notice.
-  assert.deepEqual(keys(splitBanners(buildRuntimeBanners(base))), [['plan'], ['queue', 'fresh']]);
+  // A live queue is a quiet notice; "Next message starts fresh" says what the next message does.
+  assert.deepEqual(keys(splitBanners(buildRuntimeBanners(base))), [['fresh'], ['plan', 'queue']]);
+  assert.deepEqual(keys(splitBanners(buildRuntimeBanners({ ...base, freshContext: false }))), [['plan'], ['queue']]);
 });

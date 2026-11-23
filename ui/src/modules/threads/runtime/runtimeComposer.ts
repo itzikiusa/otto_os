@@ -420,9 +420,9 @@ export function buildRuntimeBanners(opts: {
     // always shows with its button, never behind "N more" (an error, which
     // carries sign-in / restart advice, and a UI-control ask are urgent too).
     ...(opts.queueShown ? [{ key: 'queue', label: opts.needsRevive ? 'revive' : 'queue', ...(opts.needsRevive ? { urgent: true } : {}) }] : []),
-    // An armed provider switch ("Next message continues on … · Cancel") is the
-    // next message's destination: never folded either.
-    ...(opts.switchTo ? [{ key: 'switch', label: 'provider switch', urgent: true }] : opts.freshContext ? [{ key: 'fresh', label: 'fresh context' }] : []),
+    // What the NEXT message will do — continue on another provider, or start
+    // fresh — with its Cancel: never folded either.
+    ...(opts.switchTo ? [{ key: 'switch', label: 'provider switch', urgent: true }] : opts.freshContext ? [{ key: 'fresh', label: 'fresh context', urgent: true }] : []),
     // The record of settled questions is the least pressing notice.
     ...(opts.hasQuestions ? [{ key: 'questions', label: 'previous questions' }] : []),
   ];

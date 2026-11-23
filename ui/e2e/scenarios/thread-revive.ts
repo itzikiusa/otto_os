@@ -77,7 +77,8 @@ export function threadReviveScenario(): void {
     expect(col.width).toBeLessThanOrEqual(760 + 2 * 24 + 1);
     expect(col.width).toBeGreaterThan(Math.min(pane.width * 0.9, 760));
     expect(Math.abs(col.x + col.width / 2 - (dock.x + dock.width / 2))).toBeLessThan(2);
-    expect(Math.abs(col.width - dock.width)).toBeLessThan(2);
+    // (A classic scrollbar's gutter is reserved on both sides of the conversation.)
+    expect(Math.abs(col.width - dock.width)).toBeLessThan(32);
     await expectNoHorizontalOverflow(page);
     for (const scheme of ['light', 'dark'] as const) {
       await page.emulateMedia({ colorScheme: scheme });
