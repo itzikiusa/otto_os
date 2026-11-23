@@ -21,7 +21,10 @@ const parentOf = (x: Session): string | null => ((x.meta as Record<string, unkno
 test('a state and the unread flag give the class', () => {
   assert.equal(inboxClass('needs-you', true), 'needs');
   assert.equal(inboxClass('failed', false), 'failed');
-  for (const k of ['working', 'running', 'stale']) assert.equal(inboxClass(k, true), 'working');
+  for (const k of ['working', 'stale']) assert.equal(inboxClass(k, true), 'working');
+  // Idle with background work running: calm, not Working (D-06).
+  assert.equal(inboxClass('running', false), 'rest');
+  assert.equal(inboxClass('running', true), 'done');
   assert.equal(inboxClass('idle', true), 'done');
   assert.equal(inboxClass('stopped', false), 'rest');
 });
