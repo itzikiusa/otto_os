@@ -338,6 +338,9 @@ pub(super) struct AcpDriverState {
     pub(super) terminal_output: HashMap<String, String>,
     pub(super) client_seq: u64,
     pub(super) client_waits: HashMap<String, client::ClientWait>,
+    /// Restored waits nobody can answer any more (answered with an error).
+    #[serde(skip)]
+    pub(super) client_orphans: Vec<Value>,
     /// Supervised writes / commands waiting for the person.
     pub(super) client_held: HashMap<String, client::HeldCall>,
     /// The session's running cost (`usage_update.cost`, USD) and its value
@@ -442,6 +445,7 @@ impl AcpDriver {
                 terminal_output: HashMap::new(),
                 client_seq: 0,
                 client_waits: HashMap::new(),
+                client_orphans: Vec::new(),
                 client_held: HashMap::new(),
                 cost_total: None,
                 cost_at_turn: None,
@@ -2744,6 +2748,7 @@ impl StructuredDriver for AcpDriver {
 
     fn on_line(&mut self, line: &str) -> DriverStep {
         let mut step = DriverStep::default();
+        self.answer_orphans(&mut step);
         let Ok(msg) = serde_json::from_str::<Value>(line) else {
             step.push(DriverEvent::Error(ProviderFailure {
                 class: "protocol_error".into(),
@@ -2893,6 +2898,7 @@ impl StructuredDriver for AcpDriver {
         s.sideband.ensure_restored(self.provider);
         s.mcp_servers = std::mem::take(&mut self.state.mcp_servers);
         self.state = s;
+        self.orphan_restored_waits();
         Ok(())
     }
 
@@ -3822,6 +3828,30 @@ mod tests {
         assert!(s.events.iter().any(|e| matches!(e,
             DriverEvent::TurnItem(TurnItem { kind: TurnItemKind::FileChange { file_name, .. }, .. })
                 if file_name == "/w/old.rs, /w/new.rs")));
+    }
+
+    /// Review R5: a client call in flight at a daemon restart is answered
+    /// with an error once the restored driver sees the agent's next line.
+    #[test]
+    fn a_client_call_in_flight_at_a_restart_is_answered_with_an_error() {
+        let mut d = AcpDriver::grok();
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"g"}}"#);
+        d.state.access = RuntimeAccessMode::FullAccess;
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":"w9","method":"terminal/wait_for_exit","params":{"sessionId":"g","terminalId":"term-1"}}"#);
+        assert!(s
+            .events
+            .iter()
+            .any(|e| matches!(e, DriverEvent::ClientCall { .. })));
+        let snap = d.snapshot_state();
+        let mut adopted = AcpDriver::grok();
+        adopted.restore_state(&snap).unwrap();
+        let s = adopted.on_line(r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"g","update":{"sessionUpdate":"usage_update","used":1,"size":2}}}"#);
+        assert_eq!(sent(&s, 0)["id"], "w9");
+        assert_eq!(sent(&s, 0)["error"]["code"], -32000);
+        let s = adopted.on_line(r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"g","update":{"sessionUpdate":"usage_update","used":1,"size":2}}}"#);
+        assert!(s.writes.is_empty(), "answered once");
     }
 
     /// Finding 1: a confined (Seatbelt) grok gets no `fs` capability and its

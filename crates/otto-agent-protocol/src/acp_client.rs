@@ -327,6 +327,31 @@ impl AcpDriver {
         }
     }
 
+    /// After a daemon restart (holder adoption): the calls in flight died
+    /// with the old daemon, and its terminals were killed. Each restored wait
+    /// is answered with an error on the next line, so the agent never waits
+    /// for an answer nobody will send (review R5).
+    pub(super) fn orphan_restored_waits(&mut self) {
+        for (_, wait) in self.state.client_waits.drain() {
+            let rpc_id = match wait {
+                ClientWait::Plain { rpc_id }
+                | ClientWait::Write { rpc_id, .. }
+                | ClientWait::Create { rpc_id, .. } => rpc_id,
+            };
+            self.state.client_orphans.push(rpc_id);
+        }
+    }
+
+    pub(super) fn answer_orphans(&mut self, step: &mut DriverStep) {
+        for rpc_id in std::mem::take(&mut self.state.client_orphans) {
+            step.write(error_line(
+                &rpc_id,
+                -32000,
+                "Otto restarted; this call was not completed.",
+            ));
+        }
+    }
+
     /// The person's answer to a held client call, if `request_id` is one.
     pub(super) fn respond_client(
         &mut self,
