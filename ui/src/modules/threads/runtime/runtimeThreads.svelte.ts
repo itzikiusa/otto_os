@@ -332,7 +332,7 @@ class RuntimeThreads {
     void api
       .get<RuntimeSession>(`/runtime-sessions/${id}`)
       .then((r) => {
-        this.byId[r.id] = r;
+        this.put(r);
         noteRuntimeWaiting(r.id, r.status === 'awaiting_permission', r.title);
         this.emitSequence(r.id, r.last_sequence);
       })
@@ -353,7 +353,21 @@ class RuntimeThreads {
       .sort((a, b) => (a.id === root ? -1 : b.id === root ? 1 : a.created_at.localeCompare(b.created_at)));
   }
 
+  /** The newest status an event carried per thread, kept even while its row
+   *  is not here yet: a fast turn can end before the HTTP response that
+   *  creates the row lands (a council's judge), and that response must not
+   *  bring back a stale "working" (`put`). One small entry per thread. */
+  private seen: Record<string, { status: RuntimeSessionStatus; ts: string; outcome?: Pick<RuntimeSession, 'last_turn_status' | 'last_error_class'> }> = {};
+
+  /** Insert a row from an HTTP response, keeping a newer live status. */
+  put(r: RuntimeSession): void {
+    const s = this.seen[r.id];
+    this.byId[r.id] = s && Date.parse(s.ts) > Date.parse(r.last_active_at) ? { ...r, status: s.status, ...s.outcome } : r;
+  }
+
   private onEvent(ev: RuntimeEvent): void {
+    if (ev.type === 'provider_session.updated') this.seen[ev.session_id] = { status: SESSION_STATUS[ev.provider_session.status], ts: ev.ts, outcome: this.seen[ev.session_id]?.outcome };
+    else if (ev.type === 'turn.terminal' && this.seen[ev.session_id]) this.seen[ev.session_id].outcome = turnOutcomeOf(ev.status, ev.failure);
     if (!this.byId[ev.session_id]) this.adopt(ev.session_id);
     if (ev.type === 'queue.updated') this.releaseQueued(ev.session_id, ev.queued_prompts ?? []);
     // A turn that ended (done or failed) off screen leaves an unread dot.
@@ -436,7 +450,7 @@ class RuntimeThreads {
       if (!refused) throw e;
       created = await api.post<RuntimeSession>(path, body);
     }
-    this.byId[created.id] = created;
+    this.put(created);
     if (req.plan) this.planIds[created.id] = true;
     this.emitSequence(created.id, created.last_sequence);
     const pics = (req.attachments ?? []).filter((f) => f.mime.startsWith('image/'));
