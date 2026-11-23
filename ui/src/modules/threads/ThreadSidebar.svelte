@@ -698,6 +698,11 @@
   .th-fold :global(svg) {
     flex-shrink: 0;
   }
+  @media (hover: none), (pointer: coarse) {
+    .th-fold {
+      block-size: 44px;
+    }
+  }
   .th-list {
     display: flex;
     flex-direction: column;

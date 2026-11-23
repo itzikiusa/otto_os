@@ -17,7 +17,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { Session } from '../../lib/api/types';
   import { agentThreadBadge, personalAgentName } from '../../lib/personalAgentBadges';
-  import { harnessLabel, projectNameFromCwd } from './threadsHelpers';
+  import { baseName, harnessLabel, projectNameFromCwd } from './threadsHelpers';
   import { threads } from './threadsStore.svelte';
   import { isRuntimeThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
@@ -145,8 +145,10 @@
       {:else if branch}
         <Icon name={worktreeBranch ? 'worktree' : 'branch'} size={12} />
         <span class="tr-branch ellipsis" dir="ltr">{branch}</span>
-      {:else if history}
-        <span class="tr-branch">Closed</span>
+      {:else}
+        <!-- No branch known: where the thread works, so line 3 always says it. -->
+        <Icon name="folder" size={12} />
+        <span class="tr-branch ellipsis" dir="auto">{history ? 'Closed · ' : ''}{baseName(s.cwd ?? '') || '~'}</span>
       {/if}
       {#if hasProviderIcon(s.provider)}<span class="tr-prov" title={harnessLabel(s.provider)}><ProviderIcon provider={s.provider} size={12} /></span>{:else}<span class="tr-prov tr-prov-name">{harnessLabel(s.provider)}</span>{/if}
     </span>
@@ -155,7 +157,7 @@
     {#if variant !== 'pinned'}
       <button
         type="button"
-        class="icon-btn"
+        class="icon-btn tr-act"
         class:tr-pin-on={pinned}
         aria-label="{pinned ? 'Unpin' : 'Pin'} {s.title}"
         title={pinned ? 'Unpin thread' : 'Pin thread'}
@@ -167,7 +169,7 @@
     {/if}
     <button
       type="button"
-      class="icon-btn"
+      class="icon-btn tr-act"
       aria-label="Open {s.title} beside"
       title="Open beside (Split)"
       data-testid="thread-split-{s.id}"
@@ -183,7 +185,7 @@
     </button>
     <button
       type="button"
-      class="icon-btn"
+      class="icon-btn tr-act"
       aria-label="More actions for {s.title}"
       title="More actions"
       aria-haspopup="menu"
@@ -210,8 +212,9 @@
   .tr-row.in-pane {
     --tr-tint: var(--accent-faint);
   }
+  /* Stronger than hover in light and dark alike. */
   .tr-row.selected {
-    --tr-tint: var(--surface-2);
+    --tr-tint: color-mix(in srgb, var(--text) 12%, transparent);
   }
   .tr-row.child {
     margin-inline-start: var(--sp-6);
@@ -334,7 +337,7 @@
     background: linear-gradient(var(--tr-tint), var(--tr-tint)), var(--bg-sidebar);
   }
   /* Line 3's height, so they never reach the title above it. */
-  .tr-actions .icon-btn {
+  .tr-act {
     block-size: 20px;
     min-block-size: 20px;
   }
@@ -349,9 +352,16 @@
   .tr-pin-on :global(svg path) {
     fill: currentColor;
   }
+  /* Touch: the row is one tap target; pin / beside / ⋯ live in its
+     long-press menu (use:rowMenu); the subagents chevron is finger-sized. */
   @media (hover: none), (pointer: coarse) {
     .tr-actions {
       display: none;
+    }
+    .tr-fold {
+      inline-size: var(--hit-min);
+      block-size: var(--hit-min);
+      margin-block-start: var(--sp-5);
     }
   }
 </style>
