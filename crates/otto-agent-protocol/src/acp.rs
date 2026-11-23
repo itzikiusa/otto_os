@@ -3824,6 +3824,51 @@ mod tests {
                 if file_name == "/w/old.rs, /w/new.rs")));
     }
 
+    /// Finding 1: a confined (Seatbelt) grok gets no `fs` capability and its
+    /// `fs/*` calls are refused — the daemon would write past the profile.
+    /// Terminals stay (they run under the same profile).
+    #[test]
+    fn a_confined_agent_is_not_served_fs() {
+        let init_of = |confined: bool| {
+            let mut d = AcpDriver::grok();
+            let mut spec = LaunchSpec {
+                program: if confined {
+                    "/usr/bin/sandbox-exec".into()
+                } else {
+                    "grok".into()
+                },
+                args: if confined {
+                    vec!["-p".into(), "(version 1)".into(), "grok".into()]
+                } else {
+                    Vec::new()
+                },
+                tail_args: Vec::new(),
+                env: Vec::new(),
+            };
+            d.adopt_spec(&mut spec);
+            let s = d.start(&ctx(None));
+            (d, sent(&s, 0))
+        };
+        let (_, open) = init_of(false);
+        assert_eq!(
+            open["params"]["clientCapabilities"]["fs"]["writeTextFile"],
+            true
+        );
+        let (mut d, init) = init_of(true);
+        let caps = &init["params"]["clientCapabilities"];
+        assert_eq!(caps["fs"]["writeTextFile"], false, "{caps}");
+        assert_eq!(caps["fs"]["readTextFile"], false, "{caps}");
+        assert_eq!(caps["terminal"], true);
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"g"}}"#);
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":7,"method":"fs/write_text_file","params":{"sessionId":"g","path":"/w/.git/hooks/post-checkout","content":"x"}}"#);
+        assert_eq!(sent(&s, 0)["error"]["code"], -32601);
+        assert!(!s
+            .events
+            .iter()
+            .any(|e| matches!(e, DriverEvent::ClientCall { .. })));
+    }
+
     #[test]
     fn decisions_map_onto_acp_option_kinds() {
         let mut d = AcpDriver::gemini("gemini");

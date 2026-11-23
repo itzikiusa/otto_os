@@ -59,9 +59,17 @@ fn error_line(id: &Value, code: i64, message: &str) -> String {
 }
 
 impl AcpDriver {
+    /// `fs/*` is served only for an agent that runs unconfined: under
+    /// Seatbelt the daemon's own write would skip the profile's denials
+    /// (`.git/hooks`, a read-only thread's `.claude/settings.json` …), so a
+    /// confined agent keeps its own file tools, inside the profile.
+    fn serves_fs(&self) -> bool {
+        self.flavor.client_fs && self.state.confine.is_empty()
+    }
+
     /// The client capabilities this flavour advertises in `initialize`.
     pub(super) fn client_capabilities(&self, init: &mut Value) {
-        if self.flavor.client_fs {
+        if self.serves_fs() {
             init["clientCapabilities"]["fs"] = json!({"readTextFile": true, "writeTextFile": true});
         }
         if self.flavor.client_terminal {
@@ -72,7 +80,7 @@ impl AcpDriver {
     /// The prepared spec's sandbox wrapper (`sandbox-exec -p <profile>`) and
     /// env: a client terminal runs exactly as confined as the agent.
     pub(super) fn adopt_confinement(&mut self, spec: &LaunchSpec) {
-        if !self.flavor.client_terminal {
+        if !self.flavor.client_terminal && !self.flavor.client_fs {
             return;
         }
         let wrapped = spec.program.ends_with("sandbox-exec")
@@ -99,7 +107,7 @@ impl AcpDriver {
         params: &Value,
     ) {
         let enabled = if method.starts_with("fs/") {
-            self.flavor.client_fs
+            self.serves_fs()
         } else {
             self.flavor.client_terminal
         };

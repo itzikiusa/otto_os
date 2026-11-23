@@ -91,6 +91,27 @@ async fn confined(root: &str, path: &str, must_exist: bool) -> Result<PathBuf, S
     real.starts_with(&root).then_some(real).ok_or_else(outside)
 }
 
+/// Write `path` without following a symbolic link at it: a dangling link
+/// inside the folder (only its parent is canonical) must not carry the
+/// write outside it. `O_NOFOLLOW` also closes the check-then-write race.
+async fn write_no_follow(path: &Path, content: &str) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    if tokio::fs::symlink_metadata(path)
+        .await
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        return Err(std::io::Error::other("is a symbolic link; not followed"));
+    }
+    let mut f = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .await?;
+    f.write_all(content.as_bytes()).await
+}
+
 async fn run(
     inner: &Arc<Inner>,
     live: &Arc<Live>,
@@ -139,7 +160,7 @@ async fn run(
         } => {
             let real = confined(&root, &path, false).await?;
             let old = tokio::fs::read_to_string(&real).await.ok();
-            tokio::fs::write(&real, content)
+            write_no_follow(&real, &content)
                 .await
                 .map_err(|e| format!("{path}: {e}"))?;
             Ok(json!({"old": old}))
@@ -274,5 +295,36 @@ async fn run(
 fn kill(t: &Terminal) {
     if let Some(c) = t.child.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
         let _ = c.start_kill();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A dangling link in the folder points outside it: the write is
+    /// refused and nothing lands at the link's target.
+    #[tokio::test]
+    async fn a_write_never_follows_a_dangling_symlink_out_of_the_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("planted.plist");
+        let link = root.path().join("a.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let root_s = root.path().canonicalize().unwrap().display().to_string();
+        let path = format!("{root_s}/a.txt");
+        let real = confined(&root_s, &path, false).await.unwrap();
+        let err = write_no_follow(&real, "x").await.unwrap_err();
+        assert!(err.to_string().contains("symbolic link"), "{err}");
+        assert!(!target.exists(), "nothing written outside the folder");
+        // A plain new file still works.
+        let ok = confined(&root_s, &format!("{root_s}/b.txt"), false)
+            .await
+            .unwrap();
+        write_no_follow(&ok, "hi").await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("b.txt")).unwrap(),
+            "hi"
+        );
     }
 }
