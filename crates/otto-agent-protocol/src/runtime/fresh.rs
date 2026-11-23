@@ -26,6 +26,9 @@ struct Before {
     model_from_provider: bool,
     capabilities: RuntimeCapabilities,
     shown_model: Option<Option<String>>,
+    /// The old agent's slash commands, put aside until the new one says its
+    /// own (a new process never re-sends the old list).
+    commands: Vec<otto_core::agent_runtime::ProviderCommand>,
 }
 
 impl Before {
@@ -39,6 +42,7 @@ impl Before {
         if let (Some(ps), Some(m)) = (st.proj.session.as_mut(), self.shown_model) {
             ps.model = m;
         }
+        st.proj.commands = self.commands;
     }
 }
 
@@ -91,6 +95,7 @@ fn switch_to(st: &mut State, sw: Switch, model: Option<String>) -> Before {
             RuntimeCapabilities::for_provider(sw.provider),
         ),
         shown_model: st.proj.session.as_mut().map(|ps| ps.model.take()),
+        commands: std::mem::take(&mut st.proj.commands),
     };
     st.handoff = Some(ContextHandoff {
         from_model: before.model.clone(),
@@ -175,7 +180,17 @@ impl AgentRuntime {
             // A switch that did not take: back on the provider it ran.
             st.handoff = None;
             if let Some(b) = before {
+                let shown = st.proj.commands.clone();
                 b.restore(&mut st);
+                if st.proj.commands != shown {
+                    let commands = st.proj.commands.clone();
+                    emit(
+                        &self.inner,
+                        live,
+                        &mut st,
+                        RuntimeEventBody::CommandsUpdated { commands },
+                    );
+                }
             }
             st.session.native_thread_id = old_native.clone();
             let restored = old_thread.unwrap_or(ProviderThread {
@@ -266,6 +281,16 @@ impl AgentRuntime {
             let _ = live.persist.send(PersistOp::Provider(s.provider, slug));
             let _ = live.persist.send(PersistOp::Model(s.model.clone()));
             let _ = live.persist.send(PersistOp::Effort(None));
+            // The old agent's commands go unless the new one listed its own.
+            if st.proj.commands.is_empty() {
+                let commands = Vec::new();
+                emit(
+                    &self.inner,
+                    live,
+                    st,
+                    RuntimeEventBody::CommandsUpdated { commands },
+                );
+            }
         }
         let op = match &st.session.native_thread_id {
             Some(n) => PersistOp::NativeThreadId(n.clone()),

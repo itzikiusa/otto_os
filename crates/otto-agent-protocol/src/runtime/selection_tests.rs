@@ -603,6 +603,7 @@ async fn a_switch_whose_request_is_dropped_still_ends() {
         .unwrap();
     let f = Fixture { rt, rec, _dir: dir };
     f.send(&s.id, RuntimePromptReq::of("hi")).await;
+    seed_commands(&f, &s.id);
     let switch = RuntimePromptReq {
         provider: Some("codex".into()),
         ..RuntimePromptReq::of("go")
@@ -625,6 +626,11 @@ async fn a_switch_whose_request_is_dropped_still_ends() {
         assert_eq!(st.session.provider, RuntimeProvider::Claude);
         assert_eq!(st.session.native_thread_id.as_deref(), Some("native-1"));
         assert!(st.handoff.is_none());
+        assert_eq!(
+            st.proj.commands.len(),
+            1,
+            "a failed switch keeps the old commands"
+        );
         assert!(!st
             .proj
             .items
@@ -700,4 +706,30 @@ async fn a_family_stop_drops_every_members_queued_replies() {
         assert!(st.proj.queue.is_empty(), "{id}");
         assert!(st.turn.is_none(), "{id} stays stopped");
     }
+}
+
+fn seed_commands(f: &Fixture, id: &Id) {
+    f.live(id).lock().proj.commands = vec![otto_core::agent_runtime::ProviderCommand {
+        name: "old-skill".into(),
+        description: String::new(),
+        hint: None,
+    }];
+}
+
+/// Review 10: after a switch the old agent's slash commands are gone, even
+/// when the new agent lists none of its own.
+#[tokio::test]
+async fn a_switch_drops_the_old_agents_commands() {
+    let (f, id) = fixture(false, false, RuntimeConfig::default()).await;
+    f.send(&id, RuntimePromptReq::of("hi")).await;
+    seed_commands(&f, &id);
+    let switch = RuntimePromptReq {
+        provider: Some("codex".into()),
+        ..RuntimePromptReq::of("go")
+    };
+    f.send(&id, switch).await;
+    let live = f.live(&id);
+    let st = live.lock();
+    assert_eq!(st.session.provider, RuntimeProvider::Codex);
+    assert!(st.proj.commands.is_empty(), "{:?}", st.proj.commands);
 }
