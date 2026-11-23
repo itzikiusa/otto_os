@@ -123,6 +123,36 @@ export function meterLabel(a: Pick<AccountLimits, 'label' | 'provider'>, w: Wind
   return `${providerName(a.provider)} ${a.label}, ${w.name}: ${text}`;
 }
 
+/** "5h" / "7d" / "30d" for a window's length, else its own name. */
+export function windowShort(w: Pick<WindowLimit, 'name' | 'window_minutes'>): string {
+  const m = w.window_minutes;
+  if (!m) return w.name;
+  if (m % 1440 === 0) return `${m / 1440}d`;
+  if (m % 60 === 0) return `${m / 60}h`;
+  return `${m}m`;
+}
+
+/** The Threads sidebar's compact meter for one provider: its tightest
+ *  window (most used) on a fresh reading — "5h 62%" — the tone (warning at
+ *  ≥ 80 % used, danger at ≥ 95 %), and one tooltip line per window with its
+ *  reset. Null when the provider has no fresh numbers (the plain Usage icon). */
+export function providerMeter(
+  accounts: readonly AccountLimits[],
+  provider: string,
+  staleAfterSecs: number,
+  now: number,
+): { short: string; used: number; tone: 'danger' | 'warning' | 'ok'; lines: string[] } | null {
+  const mine = accounts.filter((a) => a.provider === provider && a.status === 'ok' && !isStale(a, staleAfterSecs, now));
+  const a = mine.find((x) => x.source === 'default') ?? mine[0];
+  if (!a) return null;
+  const live = a.windows.filter((w) => w.active !== false && !windowReset(w, now) && w.used_percent !== null);
+  if (live.length === 0) return null;
+  const top = live.reduce((x, y) => ((y.used_percent ?? 0) > (x.used_percent ?? 0) ? y : x));
+  const used = Math.round(top.used_percent ?? 0);
+  const lines = [`${providerName(a.provider)} · ${a.label}`, ...a.windows.map((w) => `${w.name}: ${windowText(w, false, a.taken_at, now)}`)];
+  return { short: windowShort(top), used, tone: used >= 95 ? 'danger' : used >= 80 ? 'warning' : 'ok', lines };
+}
+
 /** The daemon reuses a Claude check for 5 minutes (limits/cli.rs CHECK_TTL). */
 export const CHECK_TTL_MS = 5 * MIN;
 

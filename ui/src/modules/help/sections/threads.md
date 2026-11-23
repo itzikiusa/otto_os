@@ -19,10 +19,13 @@ Threads (Experimental) is a conversation-first workspace for coding agents. It k
 ## Everything it can do
 
 **Thread rail**
-- **Pinned**: keep key threads at the top across restarts.
-- **Active**: live sessions with status dots, **Needs approval** badges, git branch chips, and indented delegated workers (`delegated_by`).
-- **Projects**: folders grouped by repository/working directory with one-click **+** to start a thread in that repo.
-- **History**: settled and archived conversations you can search, reopen, or view beside an active thread.
+- **An inbox**: one list across projects. Threads that need you come first, then failed ones, then finished ones you have not opened (**Done**), then the most recent.
+- **Each row says it in a word**: **Approval**, **Question**, **Failed**, **Done** or **Working 18s**, beside the project. Under the title: the branch (or the folder) and the agent.
+- **Pinned** keeps key threads on top. **Working** holds threads that are busy and not waiting on you. **History** keeps threads you moved there and closed ones.
+- **Group by project** (the filter menu) shows a folder per project instead. Otto remembers it on this device.
+- **Undo**: pinning, moving to History and dismissing a side chat happen at once. The notice offers **Undo** for 5 seconds, or press **⌘Z** outside a text field.
+- **Usage meter**: the footer shows how much of the focused agent's tightest plan limit is used (for example **5h 62%**). It turns amber at 80 % and red at 95 %. Hover it to see every limit and when it resets; click it to open Usage.
+- Pins and History are kept by this browser, so a phone and the Mac can differ.
 
 **Rich conversation & composer**
 - Full GitHub-flavored Markdown, syntax-highlighted code blocks, inline workspace/local image thumbnails with zoomable lightbox, and expandable **Thinking** blocks (including full reasoning prose on Antigravity sessions).
@@ -45,12 +48,12 @@ Threads (Experimental) is a conversation-first workspace for coding agents. It k
 - With chips set, **Send** asks those agents instead of this thread's agent. Each one gets its own new thread, linked to this one and in the same folder. Pick up to 4.
 - The chip row says what they may do. They get this thread's access or a narrower one you pick, never wider.
 - The parent shows a live card per child: status, elapsed time, its latest step, and its answer's first line when it ends, with **Stop**, **Open beside** and **Open**.
-- The sidebar nests child threads under their parent. Fold them with the parent row's chevron.
+- The sidebar folds these subagents under the thread that started them; the row says how many. When one needs you, the thread says **Needs you**. Open them with the row's chevron.
 
 **Council: one prompt, several agents**
 - In the new-thread stage, turn on **Ask several** beside the agent chip, then pick 2–4 models. Each one is a seat; the send button reads e.g. **Ask 3**.
 - The seats open side by side (Split for 2, Grid for 3–4). Each one is a normal thread with its own composer: to follow up with one agent, type in its thread. Every seat is read-only, so agents working in one folder never clash on files. ⌘↵ starts them in the background and a toast offers **Show**.
-- The sidebar nests the seats under seat 1. On a phone, the header's **Related threads** chip switches between seats.
+- The sidebar folds the seats under seat 1 (open them with its chevron). On a phone, the header's **Related threads** chip switches between seats.
 - The thread's **⋯** menu holds the rest: **Open council side by side**, **Ask every seat…** (the same follow-up to each seat; a busy seat queues it) and **Synthesize with ▸** a judge (seat 1's agent first). The judge is one more read-only thread, opened beside the seats, that compares each seat's latest answer: where they agree, where they differ, and a pick or a merge.
 
 **Workspace inspector** (the right panel: Browser, Files, Diff, Pull request, Side chat)

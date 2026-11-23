@@ -1,5 +1,6 @@
 <script lang="ts">
-  // The sidebar's project filter (T3): "Search projects…", All projects, then
+  // The sidebar's project filter (T3): "Search projects…", "Group by project"
+  // (folders instead of one inbox list, remembered here), All projects, then
   // each project with a check (multi-select), a pin star and a ⚙ for the
   // project's own menu. A clamped popover under the filter button.
   import { onMount, tick } from 'svelte';
@@ -53,8 +54,9 @@
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
+      const back = anchor; // closing unmounts this popover and clears the prop
       onclose();
-      anchor.focus();
+      back.focus();
     }
   }
 </script>
@@ -77,6 +79,17 @@
     <input bind:this={searchEl} bind:value={query} type="search" dir="auto" placeholder="Search projects…" aria-label="Search projects" />
   </div>
   <div class="pf-list">
+    <button
+      type="button"
+      class="pf-row"
+      aria-pressed={threads.groupByProject}
+      data-testid="threads-group-by-project"
+      onclick={() => threads.setGroupByProject(!threads.groupByProject)}
+    >
+      <span class="pf-check">{#if threads.groupByProject}<Icon name="check" size={12} />{/if}</span>
+      <span class="pf-name">Group by project</span>
+    </button>
+    <hr class="pf-sep" />
     <button
       type="button"
       class="pf-row"
@@ -221,6 +234,11 @@
   }
   .pf-pin.on :global(svg path) {
     fill: currentColor;
+  }
+  .pf-sep {
+    margin: var(--sp-2) var(--sp-3);
+    border: 0;
+    border-block-start: 1px solid var(--separator);
   }
   .pf-empty {
     margin: 0;
