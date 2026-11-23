@@ -76,3 +76,29 @@ test('a short thread has no minimap', async ({ page }) => {
   await expect(thread.getByText('Answer 4.')).toBeVisible({ timeout: 30_000 });
   await expect(thread.getByTestId('runtime-minimap')).toHaveCount(0);
 });
+
+test('the rail stays beside the reading column, clear of the floating details card, 1280–1920 px', async ({ page }) => {
+  const { items, turns } = longThread(8);
+  await mockThread(page, workspaceId, 'mm-card', items, turns);
+  for (const width of [1280, 1440, 1600, 1920]) {
+    await page.setViewportSize({ width, height: 960 });
+    await page.goto('/#/threads/mm-card');
+    const thread = page.getByTestId('runtime-thread-mm-card');
+    await expect(thread.getByText('Answer 8.')).toBeVisible({ timeout: 30_000 });
+    const rail = thread.getByTestId('runtime-minimap');
+    await expect(rail).toBeVisible();
+    const r = (await rail.boundingBox())!;
+    const col = (await thread.locator('.rt-col').boundingBox())!;
+    expect(r.x, `rail starts at the column edge at ${width}`).toBeGreaterThanOrEqual(col.x + col.width - 24);
+    const card = page.getByTestId('thread-details-card');
+    if (await card.isVisible()) {
+      const c = (await card.boundingBox())!;
+      const overlap = r.x < c.x + c.width && c.x < r.x + r.width && r.y < c.y + c.height && c.y < r.y + r.height;
+      expect(overlap, `rail and details card overlap at ${width}`).toBe(false);
+    }
+    if (SHOTS && (width === 1280 || width === 1920)) {
+      mkdirSync(SHOTS, { recursive: true });
+      await page.screenshot({ path: `${SHOTS}/minimap-card-${width}.png`, animations: 'disabled' });
+    }
+  }
+});
