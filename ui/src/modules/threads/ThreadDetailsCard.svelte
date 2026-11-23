@@ -52,6 +52,13 @@
     ondismiss?: () => void;
   }
   let { cwd, threadId = null, floating = false, ondismiss }: Props = $props();
+  // A thread stopped on its provider's usage limit, and when it resumes (RuntimeUsageLimit).
+  const limitRow = $derived.by(() => {
+    const rt = threadId ? runtimeThreads.get(threadId) : null;
+    if (rt?.last_turn_status !== 'failed' || rt.last_error_class !== 'usage_limit') return null;
+    const at = (rt.meta as Record<string, unknown> | null | undefined)?.resume_at;
+    return typeof at === 'string' ? `resumes ${new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : '';
+  });
   const ctxMeter = $derived(contextMeter(threadId ? runtimeViews.projections[threadId]?.thread?.context_usage : null));
 
   let openInEl = $state<HTMLButtonElement | null>(null);
@@ -284,6 +291,13 @@
       </button>
     {:else}
       <p class="dc-note">{!project ? 'Pick a project folder' : repoChecked ? 'Not a git repository' : 'Looking for a git repository…'}</p>
+    {/if}
+    {#if limitRow !== null}
+      <div class="dc-row dc-static" data-testid="details-limit">
+        <Icon name="clock" size={14} />
+        <span class="dc-label">Limited</span>
+        <span class="dc-stat dc-warn">{limitRow}</span>
+      </div>
     {/if}
     {#if ctxMeter}
       <!-- How full the agent's context is (runtime/contextMeter.ts). -->

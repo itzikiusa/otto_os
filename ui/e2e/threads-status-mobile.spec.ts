@@ -58,7 +58,7 @@ test('phone rows: two lines, ≥ 44 px, the state in words, one tap target; Next
   }
   await expect(side.getByTestId('thread-status-rt_wait')).toHaveText('Approval');
   await expect(side.getByTestId('thread-status-rt_work')).toHaveText(/^Working/);
-  await expect(side.getByTestId('thread-status-rt_fail')).toHaveText('Failed');
+  await expect(side.getByTestId('thread-status-rt_fail')).toHaveText('Limited');
   await expect(side.getByTestId('thread-status-rt_done')).not.toHaveText(/Idle/);
   // The waiting thread ranks first.
   const first = await side.locator('[data-testid^="thread-row-"]').first().getAttribute('data-testid');

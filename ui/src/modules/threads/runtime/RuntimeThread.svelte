@@ -40,6 +40,7 @@
   import RuntimeComposerPlus from './RuntimeComposerPlus.svelte';
   import RuntimeMinimap from './RuntimeMinimap.svelte';
   import RuntimeContextMeter from './RuntimeContextMeter.svelte';
+  import RuntimeUsageLimit from './RuntimeUsageLimit.svelte';
   import { threadAccessDefault } from '../threadAccessDefault.svelte';
   import { isAltSend, midTurnDelivery, primaryAction } from './composerSend';
   import { threadPrefs } from './threadPrefs.svelte';
@@ -192,7 +193,7 @@
   const failedQuiet = $derived(!!failure && dormant);
   const queueShown = $derived((background.length > 0 && !closed) || (p?.queued.length ?? 0) > 0 || (needsRevive && !failedQuiet));
   const banners = $derived(buildRuntimeBanners({
-    sessionError, uiAsk, queueShown, needsRevive, freshContext: draft.freshContext, switchTo: draft.provider,
+    sessionError, uiAsk, queueShown, needsRevive, freshContext: draft.freshContext, switchTo: draft.provider, limited: failure?.cause === 'usage_limit' && !closed,
     hasQuestions: Boolean(p?.requests.some((r) => r.kind === 'question' && r.status !== 'pending')),
     hasPlan: Boolean(plan),
   }));
@@ -542,6 +543,7 @@
             <span>{armedSwitchLine(draft.provider)}</span>
             <button type="button" class="btn small ghost" onclick={() => { draft.provider = null; draft.model = undefined; draft.effort = null; focusComposer(); }}>Cancel</button>
           </div>
+        {:else if key === 'limit' && failure}<RuntimeUsageLimit {sessionId} {provider} detail={failure.detail} {draft} onfocus={focusComposer} />
         {:else if key === 'fresh'}
           <div class="rt-fresh" data-testid="runtime-fresh-notice" use:announceShown={'Next message starts fresh'}>
             <span>Next message starts fresh</span>

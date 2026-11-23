@@ -31,6 +31,7 @@ test('the status word vocabulary', () => {
   assert.equal(statusWord('needs', { kinds: ['question'] }), 'Question');
   assert.equal(statusWord('needs', {}), 'Approval');
   assert.equal(statusWord('failed'), 'Failed');
+  assert.equal(statusWord('failed', { limited: true }), 'Limited');
   assert.equal(statusWord('done'), 'Done');
   assert.equal(statusWord('working'), 'Working');
   assert.equal(statusWord('working', { workingSince: 1000, now: 19_500 }), 'Working 18s');

@@ -105,6 +105,7 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
         )
         .route("/runtime-sessions/{id}/close", post(close::<S>))
         .route("/runtime-sessions/{id}/reopen", post(reopen::<S>))
+        .route("/runtime-sessions/{id}/resume-at", post(resume_at::<S>))
         .route(
             "/runtime-sessions/{id}/queue/{queued_id}",
             post(deliver_queued::<S>).delete(unqueue::<S>),
@@ -562,6 +563,34 @@ async fn reopen<S: RuntimeCtx>(
     require_human(&ctx, &auth)?;
     authorized(&ctx, &user, &id).await?;
     Ok(Json(ctx.agent_runtime().reopen_fast(&id).await?))
+}
+
+/// Body of `POST /runtime-sessions/{id}/resume-at`.
+#[derive(Deserialize)]
+struct ResumeAtReq {
+    /// When the usage limit resets; `null` cancels the armed resume.
+    at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// POST /runtime-sessions/{id}/resume-at — arm the thread's ONE resume when
+/// its provider's usage limit resets (kept in its meta, so a restart keeps
+/// it), or cancel it. At most a week ahead.
+async fn resume_at<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Id>,
+    Json(req): Json<ResumeAtReq>,
+) -> ApiResult<Json<RuntimeSession>> {
+    require_human(&ctx, &auth)?;
+    authorized(&ctx, &user, &id).await?;
+    if req
+        .at
+        .is_some_and(|t| t > chrono::Utc::now() + chrono::Duration::days(7))
+    {
+        return Err(Error::Invalid("a resume can be at most a week ahead".into()).into());
+    }
+    Ok(Json(ctx.agent_runtime().set_resume_at(&id, req.at).await?))
 }
 
 /// DELETE /runtime-sessions/{id} — stop its agent and remove it with its history.
@@ -1068,6 +1097,122 @@ mod tests {
             .unwrap()
             .session;
         assert_eq!(row.meta, got.meta);
+    }
+
+    #[tokio::test]
+    async fn resume_at_arms_cancels_and_a_restart_re_arms_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_str().unwrap().to_string();
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true);
+        let raw_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&raw_pool)
+            .await
+            .unwrap();
+        let pool: DbPool = raw_pool.into();
+        let users = UsersRepo::new(pool.clone());
+        let owner = users.create("owner", "Owner", "h", false).await.unwrap();
+        let other = users.create("other", "Other", "h", false).await.unwrap();
+        let ws = WorkspacesRepo::new(pool.clone())
+            .create("ws", &cwd, &owner.id)
+            .await
+            .unwrap();
+        let host = Arc::new(RecHost(cwd.clone(), Default::default()));
+        let drivers: Arc<dyn DriverFactory> = Arc::new(|_| None);
+        let rt = AgentRuntime::new(
+            AgentRuntimeRepo::new(pool.clone()),
+            host.clone(),
+            drivers,
+            RuntimeConfig {
+                attachments_dir: dir.path().join("att"),
+                ..RuntimeConfig::default()
+            },
+        );
+        let s = rt
+            .repo()
+            .create(NewRuntimeSession {
+                id: otto_core::new_id(),
+                workspace_id: ws.id,
+                provider: RuntimeProvider::Codex,
+                title: "t".into(),
+                cwd,
+                model: None,
+                access_mode: RuntimeAccessMode::FullAccess,
+                created_by: owner.id.clone(),
+                parent_id: None,
+                meta: None,
+            })
+            .await
+            .unwrap()
+            .session;
+        let ctx = TestRuntimeCtx {
+            rt: rt.clone(),
+            roles: Arc::new(Roles { editor: true }),
+        };
+        let call = |user: &User, at: Option<chrono::DateTime<chrono::Utc>>| {
+            resume_at(
+                State(ctx.clone()),
+                Extension(AuthUser(user.clone())),
+                Extension(auth(user, false)),
+                Path(s.id.clone()),
+                Json(ResumeAtReq { at }),
+            )
+        };
+        let soon = chrono::Utc::now() + chrono::Duration::hours(2);
+        let err = |r: ApiResult<Json<RuntimeSession>>| r.err().map(|e| e.into_response().status());
+        assert_eq!(
+            err(call(&other, Some(soon)).await),
+            Some(StatusCode::FORBIDDEN)
+        );
+        let far = chrono::Utc::now() + chrono::Duration::days(8);
+        assert_eq!(
+            err(call(&owner, Some(far)).await),
+            Some(StatusCode::BAD_REQUEST)
+        );
+
+        // Armed: on the meta, and sent to clients with the thread keys.
+        let Json(got) = call(&owner, Some(soon)).await.ok().unwrap();
+        let stored = got
+            .meta
+            .as_ref()
+            .and_then(|m| m.get(otto_core::agent_runtime::RESUME_AT))
+            .and_then(|v| v.as_str())
+            .map(|v| chrono::DateTime::parse_from_rfc3339(v).unwrap().timestamp());
+        assert_eq!(stored, Some(soon.timestamp()));
+        let last = host.1.lock().unwrap().last().cloned().expect("an event");
+        let thread = match &last.body {
+            otto_core::agent_runtime::RuntimeEventBody::ProviderSessionUpdated {
+                provider_session,
+            } => provider_session.thread.clone(),
+            _ => None,
+        };
+        assert!(thread.and_then(|t| t.get("resume_at").cloned()).is_some());
+        // Cancelled: gone.
+        let Json(got) = call(&owner, None).await.ok().unwrap();
+        assert_eq!(got.meta, None);
+
+        // A resume already due when the daemon starts fires at boot: this
+        // thread's last turn did not end on the limit, so it is just cleared.
+        let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+        rt.repo()
+            .patch_meta(&s.id, &serde_json::json!({ "resume_at": past }))
+            .await
+            .unwrap();
+        rt.recover().await.unwrap();
+        for _ in 0..100 {
+            let meta = rt.repo().get(&s.id).await.unwrap().session.meta;
+            if meta.as_ref().and_then(|m| m.get("resume_at")).is_none() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("the due resume was not re-armed after recover");
     }
 
     #[tokio::test]

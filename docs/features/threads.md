@@ -605,6 +605,26 @@ editor keeps its own ⌘F (T3 Code #10439).
   agy, Grok, opencode, Muse) when they send `usage_update`, pi
   (`context_window`). Until one does, there is no meter.
 
+- **Usage limit as a state** (`usageLimit.ts`, `RuntimeUsageLimit.svelte`,
+  `runtime/usage_hook/resume_at.rs`): a turn that failed on the provider's
+  usage limit reads **Limited** (sidebar, ⌘K switcher, details card; it ranks
+  with Failed) and the composer has ONE line, *"Codex limit reached · resets
+  14:00"*, with **Resume at reset** and **Continue with <other provider>**
+  (arms the provider switch). The reset time comes from the provider's own
+  words (Claude's `…limit reached|<epoch>` / "resets 3pm", Codex "try again
+  in 2 hours", Gemini "retry in 41s", an ISO time) or else the Usage meter's
+  limits snapshot (the shared 60 s visible-only poller, mounted only while
+  the line shows and the error does not say); unknown → the line says
+  *reset time unknown* and offers only the switch. **Resume at reset** calls
+  `POST /runtime-sessions/{id}/resume-at`: the daemon keeps the time in the
+  thread's `meta.resume_at` (every client sees *"resumes at 14:00 · Cancel"*
+  live), sleeps until then and sends one short continue, unless it was
+  cancelled, the thread was closed or its last turn no longer ended on the
+  limit. A daemon restart re-arms it (`recover`). Detection: Codex's
+  structured `usageLimitExceeded`, and for Claude, Gemini / ACP agents and pi
+  their limit text ("usage limit", "rate limit", "quota", "429",
+  `RESOURCE_EXHAUSTED`), the same lists the daemon's `error_class` uses.
+
 ## API & WebSocket Surface
 
 - `GET /api/v1/sessions/{id}/transcript` (`?sub=<subagentId>` supported for

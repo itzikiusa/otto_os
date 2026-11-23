@@ -1719,7 +1719,8 @@ published on the streaming path, never through the internal bus.
 - `event` is a `RuntimeEvent`: `session_id`, `sequence`, `ts` plus one of
   (`type` tag → payload): `provider_session.updated {provider_session}`
   (`provider_session.thread?`: the session's client-owned thread meta —
-  `{thread_pinned?, thread_history?, thread_seen_at?}`, absent when none is
+  `{thread_pinned?, thread_history?, thread_seen_at?}` plus an armed
+  `resume_at` (api.md `POST /runtime-sessions/{id}/resume-at`), absent when none is
   set — so a pin / History / "seen" written on one device reaches every
   other client at once; api.md `PATCH /runtime-sessions/{id}`),
   `provider_thread.updated {provider_thread}`, `provider_turn.updated

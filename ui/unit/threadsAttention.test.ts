@@ -41,7 +41,7 @@ test('sessionState: a failed last turn is not idle; the error class names it', (
     [sessionState(thread({ last_turn_status: 'failed' }), 'idle').key, sessionState(thread({ last_turn_status: 'failed' }), 'idle').label, sessionState(thread({ last_turn_status: 'failed' }), 'idle').tone],
     ['failed', 'Failed', 'danger'],
   );
-  assert.equal(sessionState(thread({ last_turn_status: 'failed', last_error_class: 'usage_limit' }), 'idle').label, 'Usage limit');
+  assert.equal(sessionState(thread({ last_turn_status: 'failed', last_error_class: 'usage_limit' }), 'idle').label, 'Limited');
   assert.equal(sessionState(thread({ last_turn_status: 'failed', last_error_class: 'auth' }), 'idle').label, 'Not signed in');
   assert.equal(sessionState(thread({ last_turn_status: 'failed', last_error_class: 'brand_new' }), 'idle').label, 'Failed');
   const stopped = sessionState(thread({ last_turn_status: 'interrupted' }), 'idle');

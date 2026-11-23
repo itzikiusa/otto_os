@@ -140,16 +140,18 @@ export function elapsed(ms: number): string {
 }
 
 /** The one status word a row shows, or null (it shows the relative time).
- *  The vocabulary is fixed: Approval · Question · Failed · Done · Working. */
+ *  The vocabulary is fixed: Approval · Question · Failed · Limited · Done ·
+ *  Working. Limited: a failed turn that hit the provider's usage limit
+ *  (`limited`, from the row's state label — lib/status.ts). */
 export function statusWord(
   cls: InboxClass,
-  opts: { kinds?: readonly string[]; workingSince?: number | null; now?: number } = {},
+  opts: { kinds?: readonly string[]; workingSince?: number | null; now?: number; limited?: boolean } = {},
 ): string | null {
   switch (cls) {
     case 'needs':
       return waitingWord(opts.kinds ?? []);
     case 'failed':
-      return 'Failed';
+      return opts.limited ? 'Limited' : 'Failed';
     case 'done':
       return 'Done';
     case 'working':

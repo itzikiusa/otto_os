@@ -40,6 +40,7 @@ export const threadSwitcherSource: PaletteThreadSource = {
           kinds: inboxLive.kindsOf(s.id),
           workingSince: cls === 'working' ? (inboxLive.since[s.id] ?? null) : null,
           now: cls === 'working' ? now() : 0,
+          limited: cls === 'failed' && threadRowState(s).label === 'Limited',
         }) ?? rel(s.last_active_at);
       return { id: s.id, title: s.title, project: s.cwd ? projectNameFromCwd(s.cwd, '') : '', word, tone: wordTone(word) };
     });

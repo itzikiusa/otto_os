@@ -37,8 +37,9 @@ export interface ProviderSession {
    *  own): a provider switch changes them. */
   provider?: RuntimeProvider;
   provider_slug?: string;
-  /** The client-owned thread meta (`ThreadMetaPatch` keys); absent = none set. */
-  thread?: ThreadMetaPatch;
+  /** The client-owned thread meta (`ThreadMetaPatch` keys) and an armed
+   *  `resume_at`; absent = none set. */
+  thread?: ThreadMetaPatch & { resume_at?: string };
 }
 
 /** What a provider switch handed the new provider (`session_boundary.handoff`):
@@ -669,6 +670,13 @@ export interface ThreadMetaPatch {
   thread_history?: boolean | null;
   /** RFC 3339: when the person last had the thread in front of them. */
   thread_seen_at?: string | null;
+}
+
+/** `POST /runtime-sessions/{id}/resume-at` → `RuntimeSession` (its
+ *  `meta.resume_at`): arm the one "Resume at reset", or cancel it (`null`). */
+export interface ResumeAtReq {
+  /** RFC 3339, at most a week ahead; `null` cancels. */
+  at: string | null;
 }
 
 /** `text` may be empty when `images` is not. `model` / `effort` apply to this

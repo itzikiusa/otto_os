@@ -17,10 +17,11 @@ export interface FailureView {
 }
 
 /** Classify a provider failure (class + message) into a cause people know. */
-export function failureCause(f: Pick<ProviderFailure, 'class' | 'message'> | null): FailureCause {
+export function failureCause(f: Pick<ProviderFailure, 'class' | 'message'> & { code?: string | null } | null): FailureCause {
   const cls = f?.class ?? '';
   const msg = f?.message ?? '';
-  if (cls === 'usage_limit' || /usage limit|rate.?limit|quota|limit (?:reached|exceeded)|\b429\b|too many requests/i.test(msg)) {
+  // Codex states it (`codexErrorInfo: "usageLimitExceeded"` → `code`); the rest say it in words.
+  if (cls === 'usage_limit' || /usage.?limit/i.test(f?.code ?? '') || /usage.?limit|rate.?limit|quota|limit (?:reached|exceeded)|resource_exhausted|\b429\b|too many requests/i.test(msg)) {
     return 'usage_limit';
   }
   if (/not (?:logged|signed) in|log ?in required|please run \/login|\/login|unauthori[sz]ed|\b401\b|invalid api key|authentication|expired (?:token|credentials|session)|oauth/i.test(msg)) {
@@ -42,14 +43,14 @@ export function failureCause(f: Pick<ProviderFailure, 'class' | 'message'> | nul
 }
 
 /** The failure block's words for `agent` ("Claude Code", "Codex"). */
-export function failureView(f: Pick<ProviderFailure, 'class' | 'message'> | null, agent: string): FailureView {
+export function failureView(f: Pick<ProviderFailure, 'class' | 'message'> & { code?: string | null } | null, agent: string): FailureView {
   const cause = failureCause(f);
   const detail = (f?.message ?? '').trim();
   switch (cause) {
     case 'signed_out':
       return { cause, title: `${agent} isn’t signed in`, hint: `Sign in to ${agent} in a terminal, then send again.`, detail };
     case 'usage_limit':
-      return { cause, title: `${agent} reached its usage limit`, hint: 'Send again once the limit resets, or switch the model.', detail };
+      return { cause, title: `${agent} reached its usage limit`, hint: '', detail }; // the composer line has the next step
     case 'cli_missing':
       return { cause, title: `${agent} isn’t installed or can’t start`, hint: `Install ${agent}, then send again.`, detail };
     case 'cli_unsupported':

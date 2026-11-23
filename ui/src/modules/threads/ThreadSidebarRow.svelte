@@ -69,10 +69,11 @@
       kinds: inboxLive.kindsOf(s.id),
       workingSince: cls === 'working' ? (inboxLive.since[s.id] ?? null) : null,
       now: cls === 'working' ? now() : 0,
+      limited: st.label === 'Limited',
     }),
   );
   const tone = $derived(
-    word === 'Approval' || word === 'Question' || word === 'Needs you' ? 'warning' : word === 'Failed' ? 'danger' : word === 'Done' ? 'success' : '',
+    word === 'Approval' || word === 'Question' || word === 'Needs you' || word === 'Limited' ? 'warning' : word === 'Failed' ? 'danger' : word === 'Done' ? 'success' : '',
   );
 
   const meta = $derived(s.meta as Record<string, unknown> | undefined);

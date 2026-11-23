@@ -599,8 +599,8 @@ impl AgentRuntime {
     /// turn this cut off reports it to its parent (`children.rs`). Returns
     /// sessions touched.
     pub async fn recover(&self) -> Result<usize> {
-        self.recover_excluding(&std::collections::HashSet::new())
-            .await
+        let touched = self.recover_excluding(&std::collections::HashSet::new()).await?;
+        Ok(self.arm_resumes(touched)) // "Resume at reset" survives the restart
     }
 
     /// Evict idle cached projections and reconcile non-live sessions in SQLite
