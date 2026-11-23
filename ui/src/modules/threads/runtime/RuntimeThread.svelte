@@ -1,5 +1,6 @@
 <script lang="ts">
   // Structured agent runtime thread view shared between Threads and IDE Agent dock.
+  import { reviewNotes } from './reviewNotes.svelte';
   import { setContext, tick, untrack, type Snippet } from 'svelte';
   import { announceShown } from '../../../lib/announce.svelte';
   import { ApiError } from '../../../lib/api/client';
@@ -575,7 +576,7 @@
         <StageSlashPopup id={popId} items={suggestions} active={cmdIdx} onaccept={acceptCmd} onhover={(i) => (cmdIdx = i)} />
       {/if}
       {#if EmojiAssistView.component}<EmojiAssistView.component bind:this={emojiEl} textareaEl={composerEl} />{/if}
-      <RuntimeContextChips context={draft.context} onremove={(id) => { draft.context = draft.context.filter((c) => c.id !== id); }} onfocus={focusComposer} />
+      <RuntimeContextChips context={draft.context} onremove={(id) => { draft.context = draft.context.filter((c) => c.id !== id); if (id.startsWith('notes:')) reviewNotes.unsend(sessionId, id); }} onfocus={focusComposer} />
       <RuntimeAskAgent
         bind:this={askEl}
         part="chips"

@@ -274,8 +274,9 @@
   function sendNotes(): void {
     const drafts = notes.filter((n) => n.state === 'draft');
     if (!threadId || !drafts.length || !oncontext) return;
-    oncontext({ id: `notes:${newId()}`, kind: 'review-comment', label: `Review · ${plural(drafts.length, 'note')}`, text: reviewMessage(drafts) }, threadId);
-    for (const n of drafts) reviewNotes.update(threadId, n.id, { state: 'sent' });
+    const chip = `notes:${newId()}`;
+    oncontext({ id: chip, kind: 'review-comment', label: `Review · ${plural(drafts.length, 'note')}`, text: reviewMessage(drafts) }, threadId);
+    for (const n of drafts) reviewNotes.update(threadId, n.id, { state: 'sent', chip });
   }
   // The agent changed the noted lines since: the note says Outdated (kept, never lost).
   $effect(() => {
@@ -334,7 +335,7 @@
 {#snippet noteCard(n: ReviewNote)}
   <DiffNoteCard
     note={n}
-    onedit={(comment) => threadId && reviewNotes.update(threadId, n.id, { comment })}
+    onedit={(comment) => threadId && reviewNotes.update(threadId, n.id, { comment, state: 'draft', chip: undefined })}
     onresolve={(r) => threadId && reviewNotes.update(threadId, n.id, { state: r ? 'resolved' : 'sent' })}
     ondelete={() => threadId && reviewNotes.remove(threadId, n.id)}
   />
@@ -432,7 +433,7 @@
         {notes}
         onsend={sendNotes}
         onclear={() => threadId && reviewNotes.clear(threadId)}
-        onedit={(id, comment) => threadId && reviewNotes.update(threadId, id, { comment })}
+        onedit={(id, comment) => threadId && reviewNotes.update(threadId, id, { comment, state: 'draft', chip: undefined })}
         onresolve={(id, r) => threadId && reviewNotes.update(threadId, id, { state: r ? 'resolved' : 'sent' })}
         ondelete={(id) => threadId && reviewNotes.remove(threadId, id)}
       />
