@@ -19,6 +19,7 @@
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { now } from '../../lib/stores/now.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { agentTasks, taskElapsed } from './runtime/agentTasks';
@@ -137,6 +138,11 @@
     return s.parent || s.running.length || s.previous.length ? s : null;
   });
   let previousOpen = $state(false);
+  // A short screen (a phone on its side): heading the panel, the card is one
+  // summary row (folder · branch · changes) that opens on tap, so the
+  // surface below (Changes, a diff) keeps its height.
+  const short = $derived(!floating && viewport.isShort);
+  let expanded = $state(false);
   const nowMs = $derived(subagents?.running.length ? now() : Date.now());
   const PREVIOUS_ROWS = 5;
 
@@ -221,6 +227,14 @@
 </script>
 
 <section class="dc-card" class:floating aria-label="Thread details" data-testid="thread-details-card">
+  {#if short}
+    <button type="button" class="dc-row dc-summary" aria-expanded={expanded} title={expanded ? 'Fold the thread details' : 'Show the thread details'} data-testid="details-summary" onclick={() => (expanded = !expanded)}>
+      <Icon name="folder" size={14} />
+      <span class="dc-label" dir="auto">{[project.split('/').pop(), branch, totals ? (totals.added + totals.deleted ? `+${fmt(totals.added)} −${fmt(totals.deleted)}` : 'No changes') : null].filter(Boolean).join(' · ')}</span>
+      <Icon name={expanded ? 'chevronDown' : 'chevronRight'} size={12} />
+    </button>
+  {/if}
+  {#if !short || expanded}
   <div class="dc-group">
     <div class="dc-line">
       <div class="dc-row dc-grow dc-static" title={project} data-testid="details-folder">
@@ -318,6 +332,7 @@
         {/if}
       {/if}
     </div>
+  {/if}
   {/if}
 </section>
 

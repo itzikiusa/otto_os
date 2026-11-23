@@ -48,7 +48,9 @@ test.beforeEach(async ({ page }, info) => {
 });
 
 test('file, folder and missing references in a runtime thread resolve against its folder', async ({ page }) => {
-  await page.goto('/#/threads');
+  // The stage directly: /#/threads opens the most recent thread, which in a
+  // shared e2e daemon may be another spec's.
+  await page.goto('/#/threads/new');
   const stage = page.getByTestId('new-thread-stage');
   await expect(stage).toBeVisible({ timeout: 30_000 });
   await stage.getByTestId('picker-agent').click();

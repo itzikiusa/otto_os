@@ -271,9 +271,12 @@
     background: var(--surface);
     border-inline-start: 1px solid var(--border);
   }
+  /* The card never takes more than half the panel: the surface below keeps a usable height. */
   .ti-card {
     padding: 10px 10px 6px;
     flex-shrink: 0;
+    max-block-size: 50%;
+    overflow-y: auto;
   }
   .ti-head {
     display: flex;

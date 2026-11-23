@@ -24,6 +24,7 @@ pub mod council;
 pub use secret_request::{answer_secret_request, pending_secret_requests};
 mod descendants;
 mod fresh;
+mod handoff;
 mod held_adopt;
 mod held_proc;
 mod keep_awake;
@@ -52,13 +53,13 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use dashmap::DashMap;
 use otto_core::agent_runtime::{
-    ApprovalDecision, Attachment, AttachmentKind, CancelReason, CreateRuntimeSessionReq,
-    PlanArtifact, PromptDelivery, ProviderCommand, ProviderFailure, ProviderSession,
-    ProviderSessionStatus, ProviderThread, ProviderTurn, ProviderTurnStatus, QueuedPrompt,
-    ResponseCapability, RuntimeEvent, RuntimeEventBody, RuntimePromptReq, RuntimePromptResp,
-    RuntimeReplay, RuntimeRequest, RuntimeRequestStatus, RuntimeSession, RuntimeSessionStatus,
-    RuntimeSnapshot, TurnItem, TurnItemKind, TurnItemStatus, TurnOrigin, TurnTerminalStatus,
-    TurnTokenUsage,
+    ApprovalDecision, Attachment, AttachmentKind, CancelReason, ContextHandoff,
+    CreateRuntimeSessionReq, PlanArtifact, PromptDelivery, ProviderCommand, ProviderFailure,
+    ProviderSession, ProviderSessionStatus, ProviderThread, ProviderTurn, ProviderTurnStatus,
+    QueuedPrompt, ResponseCapability, RuntimeEvent, RuntimeEventBody, RuntimePromptReq,
+    RuntimePromptResp, RuntimeProvider, RuntimeReplay, RuntimeRequest, RuntimeRequestStatus,
+    RuntimeSession, RuntimeSessionStatus, RuntimeSnapshot, TurnItem, TurnItemKind, TurnItemStatus,
+    TurnOrigin, TurnTerminalStatus, TurnTokenUsage,
 };
 use otto_core::{new_id, Error, Id, Result};
 use otto_state::{AgentRuntimeRepo, NewRuntimeSession, RawRuntimeEntityRow, RuntimeEntityRow};
@@ -68,7 +69,7 @@ use crate::driver::{
     item, ChildSignal, DriverEvent, DriverFactory, DriverStep, LaunchContext, StructuredDriver,
 };
 use crate::host::RuntimeHost;
-use crate::process::{spawn_child, ChildCommand, ChildControl, ChildMsg};
+use crate::process::{map_spawn_error, spawn_child, ChildCommand, ChildControl, ChildMsg};
 use crate::ring::{EventRing, RingLimits};
 
 /// T3 Code `THREAD_RESUME_MAX_REPLAY_EVENTS` / `…_ENCODED_BYTES`.
@@ -187,6 +188,8 @@ enum PersistOp {
     /// The agent's own name for the conversation (the title stays auto).
     Title(String),
     ClearNativeThreadId,
+    /// A provider switch took effect: the provider and its account slug.
+    Provider(RuntimeProvider, Option<String>),
     /// The thread's model / effort / access, in the order they took effect.
     Model(Option<String>),
     Effort(Option<String>),
@@ -457,6 +460,8 @@ pub(super) struct State {
     pub(super) epoch: u64,
     /// Native identity is committed only after the first fresh prompt is accepted.
     pub(super) fresh_starting: bool,
+    /// A provider switch in flight: what its first prompt hands over (`fresh.rs`).
+    pub(super) handoff: Option<ContextHandoff>,
     ring: EventRing,
     pub(super) proj: Projection,
     pub(super) turn: Option<ActiveTurn>,
@@ -1027,36 +1032,6 @@ impl AgentRuntime {
         Ok(st.session.clone())
     }
 
-    /// Merge a client-owned thread-meta patch (`otto_core::agent_runtime::
-    /// THREAD_META_KEYS`, already validated) into the session's `meta` and
-    /// tell every client through `provider_session.updated` (its `thread`).
-    /// Allowed on a `closed` session too (History, pins).
-    pub async fn update_thread_meta(
-        &self,
-        id: &Id,
-        patch: serde_json::Map<String, serde_json::Value>,
-    ) -> Result<RuntimeSession> {
-        let live = self.live(id).await?;
-        let patch = serde_json::Value::Object(patch);
-        self.inner.repo.patch_meta(id, &patch).await?;
-        let mut st = live.lock();
-        let mut meta = match st.session.meta.take() {
-            Some(serde_json::Value::Object(m)) => m,
-            _ => serde_json::Map::new(),
-        };
-        for (k, v) in patch.as_object().into_iter().flatten() {
-            if v.is_null() {
-                meta.remove(k);
-            } else {
-                meta.insert(k.clone(), v.clone());
-            }
-        }
-        st.session.meta = (!meta.is_empty()).then_some(serde_json::Value::Object(meta));
-        let (status, last_error) = current_status(&st);
-        set_session_status(&self.inner, &live, &mut st, status, last_error);
-        Ok(st.session.clone())
-    }
-
     /// The session's live entry, loaded from the DB on first use in this
     /// daemon life (its sequence resumes above the persisted floor).
     async fn live(&self, id: &Id) -> Result<Arc<Live>> {
@@ -1087,6 +1062,7 @@ impl AgentRuntime {
                     reserved: rec.seq_reserved,
                     epoch: 0,
                     fresh_starting: false,
+                    handoff: None,
                     ring: EventRing::new(self.inner.config.ring),
                     proj,
                     turn: None,
@@ -1350,8 +1326,9 @@ impl AgentRuntime {
             }
             crate::http::drafts::validate_attachment_bytes(&file.mime, &file.data_base64)?;
         }
-        if req.fresh_context {
-            return self.prompt_fresh(id, live, req).await;
+        let switch = self.provider_switch(live, req)?;
+        if req.fresh_context || switch.is_some() {
+            return self.prompt_fresh(id, live, req, switch).await;
         }
         for _ in 0..8 {
             if !poll_driver_sideband(&self.inner, live, None).await {
@@ -1398,9 +1375,7 @@ impl AgentRuntime {
         let req = &self.apply_selection(&live, req).await?;
         self.spawn_resuming(id, &live).await?;
         if req.fresh_context && !self.fresh_process_ready(&live).await {
-            return Err(Error::Invalid(
-                "the fresh agent could not start — retry the message".into(),
-            ));
+            return Err(fresh::not_started(&live.lock()));
         }
         if !req.images.is_empty() || !req.files.is_empty() {
             let still_starting = live.lock().proj.session.as_ref().is_none_or(|p| {
@@ -1433,6 +1408,7 @@ impl AgentRuntime {
         let mut st = live.lock();
         check_can_prompt(&st)?;
         let turn_id = new_id();
+        let switched = fresh::with_handoff(&st, req);
         let Some(proc) = st.proc.as_mut() else {
             // It died in its handshake (signed out, bad argv) before this
             // prompt reached it; the next prompt respawns.
@@ -1444,7 +1420,7 @@ impl AgentRuntime {
         };
         let step = proc
             .driver
-            .prompt(&turn_id, req)
+            .prompt(&turn_id, switched.as_ref().unwrap_or(req))
             .map_err(|e| Error::Invalid(e.0))?;
         if req.fresh_context {
             self.commit_fresh(live, &mut st, &turn_id);
@@ -2843,6 +2819,8 @@ fn set_session_status(
             && p.background_tasks == background_tasks
             && p.capabilities == capabilities
             && p.title == title
+            && p.provider == Some(st.session.provider)
+            && p.provider_slug.as_deref() == Some(st.session.provider_slug())
             && p.thread == thread
     }) {
         return;
@@ -2857,6 +2835,8 @@ fn set_session_status(
         background_tasks,
         capabilities,
         title,
+        provider: Some(st.session.provider),
+        provider_slug: Some(st.session.provider_slug().into()),
         thread,
     };
     emit(
@@ -3825,6 +3805,7 @@ async fn persister(repo: AgentRuntimeRepo, id: Id, mut rx: mpsc::UnboundedReceiv
             PersistOp::NativeThreadId(n) => repo.set_native_thread_id(&id, &n).await,
             PersistOp::Title(t) => repo.set_title(&id, &t, true).await,
             PersistOp::ClearNativeThreadId => repo.clear_native_thread_id(&id).await,
+            PersistOp::Provider(p, slug) => repo.set_provider(&id, p, slug.as_deref()).await,
             PersistOp::Model(Some(m)) => repo.set_model(&id, &m).await,
             PersistOp::Model(None) => repo.clear_model(&id).await,
             PersistOp::Effort(e) => repo.set_effort(&id, e.as_deref()).await,
@@ -3864,17 +3845,6 @@ fn scope_request_id(st: &State, native: &str) -> String {
         .expect("driver event has a live process")
         .request_ids
         .scoped(native)
-}
-
-pub(super) fn map_spawn_error(provider: &str, program: &str, e: std::io::Error) -> Error {
-    let msg = format!("could not start {provider} ({program}): {e}");
-    match e.kind() {
-        std::io::ErrorKind::NotFound
-        | std::io::ErrorKind::PermissionDenied
-        | std::io::ErrorKind::InvalidInput => Error::Invalid(msg),
-        std::io::ErrorKind::TimedOut => Error::Upstream(msg),
-        _ => Error::Internal(msg),
-    }
 }
 
 #[cfg(test)]

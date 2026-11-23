@@ -211,8 +211,8 @@ carry into another conversation.
 ## Recoverable runtime drafts
 
 The composer saves unsent text, attachments, selected review/diff context,
-model, reasoning effort, access mode and the **Next message starts fresh**
-choice to the daemon's SQLite state, scoped to your user, workspace and
+model, reasoning effort, access mode, the **Next message starts fresh**
+choice and an armed provider switch to the daemon's SQLite state, scoped to your user, workspace and
 thread. It does not store them in browser local storage. The composer
 says nothing while saving works and shows **Draft not saved · Retry** when it
 fails; recovery never sends a
@@ -287,6 +287,35 @@ requests. Finish or stop that work, answer or skip requests, and send or remove
 queued messages before retrying. A closed idle thread can start fresh directly.
 If initialization or local prompt validation fails, no divider is added, the
 previous provider identity is restored for resume, and the draft stays armed.
+
+## Continue with another provider
+
+The model chip lists the thread's own provider and, below a divider, every
+other provider that is enabled and installed (named accounts too). Browsing
+one changes nothing; picking one of its models (or **Default model**) arms the
+switch: **Next message continues on Codex · Cancel** sits above the composer.
+Nothing is sent or stopped by arming it.
+
+Your next accepted message continues the same thread (id, sidebar row,
+folder, worktree, files, draft) on the new provider. The timeline shows a
+**Context handoff · Claude Code → Codex** divider; open it to read what was
+handed over and how much was left out. The new provider's first prompt is
+that block followed by your message, whole. The block holds whole turns,
+newest first, within about 16,000 tokens (never cut mid-message): your
+messages, the agent's final answers, the files each turn changed, a count of
+its tool calls (tool output is not replayed) and an open plan. Earlier images
+are not handed over, and the divider says how many were left. History before a
+plain **/clear** is not handed over.
+
+The rules are the fresh-start rules: no active turn, background work, queued
+messages or pending requests (the refusal names which one and how to clear
+it). If the new provider fails to start or refuses the message, no divider is
+added, the thread stays on the provider it ran (its conversation resumes), the
+draft stays armed and the reason shows above the composer. MCP servers,
+access mode, model defaults, sandbox and usage are set up for the new provider
+as for a new thread. The chip, the title glyph and the details card show the
+provider the thread runs on now. Switching back is another handoff: a fresh
+conversation on that provider, never a resume of the old one.
 
 ## Add context and inspect tool images
 
@@ -463,6 +492,45 @@ Muse — and pi) unless a line says otherwise.
   420 px tall gets a one-row input with tighter padding, so the latest
   message stays in sight (the timeline keeps following the bottom as the
   keyboard opens).
+
+## Review notes, the minimap and Settings › Threads
+
+- **Review notes on the diff** (`ThreadChangesTab.svelte`,
+  `runtime/reviewNotes.ts`, `DiffNote*.svelte`, `DiffReviewBar.svelte`):
+  - In Changes (uncommitted, the unpushed range or one commit), a line number
+    starts a note; ⇧-click another line in the same hunk for a range.
+  - Notes show under their last line and in one **Review · N notes** bar,
+    with **Send to agent** and **Clear**, and Edit / Resolve / Delete on
+    each note.
+  - **Send to agent** puts every draft note into the focused thread's
+    message as one context item (file, new / old lines, quoted lines,
+    comment). Add a sentence, or press Enter to send as is.
+  - After sending, notes read **Sent** and can be resolved. A note whose
+    lines are gone from its file's diff (the agent changed them) reads
+    **Outdated**; it is not removed.
+  - With nothing typed, the note box can still add the lines as plain
+    context.
+  - Notes are kept per thread on this device (localStorage, newest 50
+    threads × 200 notes). The daemon draft's context items have no field
+    for a note's state.
+  - On a phone the note box is a sheet above the keyboard.
+- **Minimap** (`runtime/RuntimeMinimap.svelte`, `runtime/minimap.ts`):
+  - A thread with six or more of your messages gets a slim rail at the
+    reading column's edge: one tick per message, a failed turn and an
+    approval turn marked.
+  - The turn you are reading is lit; hover or focus shows the message's
+    first line; a click jumps.
+  - ⌥↑ / ⌥↓ step between your messages (not while typing).
+  - On a phone the toolbar ⋯ › **Jump to…** opens the same list as a sheet.
+- **Settings › Threads** (General, this device; `ThreadsSettings.svelte`):
+  - While the agent works, Enter: Queue / Steer.
+  - Tool calls: Show all / Hide successful / Hide all.
+  - Open a subagent in: side panel / main view (`threadPrefs.subagentIn`,
+    read by the subagent views).
+  - Group the sidebar by project.
+  - Show the thread details card.
+
+  The toolbar ⋯ › View switches the same prefs.
 
 ## On a phone and a tablet
 

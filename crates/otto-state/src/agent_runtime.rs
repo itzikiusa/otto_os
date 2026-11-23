@@ -377,6 +377,27 @@ impl AgentRuntimeRepo {
         Ok(())
     }
 
+    /// A provider switch: the provider, and the named account's slug merged
+    /// into `meta.provider_slug` (`None` removes it; other meta keys stay).
+    pub async fn set_provider(
+        &self,
+        id: &Id,
+        provider: RuntimeProvider,
+        slug: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE agent_runtime_sessions SET provider = ?, \
+             meta = json_patch(COALESCE(meta, '{}'), ?) WHERE id = ?",
+        )
+        .bind(provider.as_str())
+        .bind(serde_json::json!({ "provider_slug": slug }).to_string())
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("set runtime session provider"))?;
+        Ok(())
+    }
+
     /// Merge `patch` into the session's `meta` (RFC 7396: a `null` value
     /// removes its key). Callers pass only the client-owned thread keys.
     pub async fn patch_meta(&self, id: &Id, patch: &serde_json::Value) -> Result<()> {

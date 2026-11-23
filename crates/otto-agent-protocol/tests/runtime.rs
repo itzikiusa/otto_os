@@ -2847,7 +2847,7 @@ async fn fresh_context_keeps_history_and_changes_native_session_only_on_send() {
     let items = host.items();
     let boundaries: Vec<_> = items
         .iter()
-        .filter(|i| matches!(i.kind, TurnItemKind::SessionBoundary))
+        .filter(|i| matches!(i.kind, TurnItemKind::SessionBoundary { .. }))
         .collect();
     assert_eq!(boundaries.len(), 1);
     assert_eq!(boundaries[0].turn_id.as_ref(), Some(&sent.turn_id));
@@ -2900,7 +2900,7 @@ async fn fresh_context_refuses_pending_and_queued_work_and_scopes_reused_request
     assert!(!host
         .items()
         .iter()
-        .any(|i| matches!(i.kind, TurnItemKind::SessionBoundary)));
+        .any(|i| matches!(i.kind, TurnItemKind::SessionBoundary { .. })));
     rt.unqueue(&s.id, queued.queued_id.as_ref().unwrap())
         .await
         .unwrap();
@@ -2965,7 +2965,7 @@ async fn rejected_fresh_prompt_preserves_old_native_identity_without_a_boundary(
     assert!(!host
         .items()
         .iter()
-        .any(|i| matches!(i.kind, TurnItemKind::SessionBoundary)));
+        .any(|i| matches!(i.kind, TurnItemKind::SessionBoundary { .. })));
     rt.flush(&s.id).await;
     assert_eq!(
         AgentRuntimeRepo::new(pool.clone())
@@ -3110,7 +3110,7 @@ async fn fresh_context_failed_spawn_preserves_closed_history_and_resume_identity
     assert!(!refusing
         .items()
         .iter()
-        .any(|i| matches!(i.kind, TurnItemKind::SessionBoundary)));
+        .any(|i| matches!(i.kind, TurnItemKind::SessionBoundary { .. })));
     rt.flush(&s.id).await;
     let stored = AgentRuntimeRepo::new(pool.clone())
         .get(&s.id)
@@ -3304,7 +3304,7 @@ async fn fresh_context_waits_for_questions_and_old_cards_cannot_answer_new_proce
     assert_eq!(
         host.items()
             .iter()
-            .filter(|i| matches!(i.kind, TurnItemKind::SessionBoundary))
+            .filter(|i| matches!(i.kind, TurnItemKind::SessionBoundary { .. }))
             .count(),
         1
     );
@@ -5068,4 +5068,280 @@ async fn acp_client_fs_and_terminal_are_served_confined_and_asked_for() {
     ends(2).await;
     assert_eq!(last_assistant_text(&host), "term: approved");
     rt.close(&s2.id).await.unwrap();
+}
+
+// ---- provider switch (continue the thread on another provider) -------------
+
+fn switch_to(text: &str, provider: &str) -> RuntimePromptReq {
+    RuntimePromptReq {
+        text: text.into(),
+        provider: Some(provider.into()),
+        ..Default::default()
+    }
+}
+
+/// The agent's answer in `turn` (the fakes echo the prompt they read).
+fn answer_of(host: &TestHost, turn: &Id) -> String {
+    host.items()
+        .into_iter()
+        .filter(|i| i.turn_id.as_ref() == Some(turn))
+        .filter_map(|i| match i.kind {
+            TurnItemKind::AssistantMessage { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+fn handoffs(host: &TestHost) -> Vec<otto_core::agent_runtime::ContextHandoff> {
+    host.items()
+        .into_iter()
+        .filter_map(|i| match i.kind {
+            TurnItemKind::SessionBoundary { handoff } => handoff,
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_provider_switch_hands_the_history_over_in_both_directions() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    rt.prompt(&s.id, "first").await.unwrap();
+    host.wait_n(is_terminal, 1).await;
+    let claude_native = rt.get(&s.id).await.unwrap().native_thread_id;
+    // A pin set from another device survives the switch's meta write.
+    let pin = serde_json::json!({"thread_pinned": true});
+    rt.update_thread_meta(&s.id, pin.as_object().unwrap().clone())
+        .await
+        .unwrap();
+
+    // Claude → Codex: same thread, the answer shows Codex read the handoff.
+    let t2 = rt
+        .prompt_with(&s.id, &switch_to("second", "codex"))
+        .await
+        .unwrap();
+    host.wait_n(is_terminal, 2).await;
+    let now = rt.get(&s.id).await.unwrap();
+    assert_eq!(
+        (now.id.clone(), now.provider),
+        (s.id.clone(), RuntimeProvider::Codex)
+    );
+    assert_eq!(now.cwd, s.cwd);
+    let a2 = answer_of(&host, &t2.turn_id);
+    assert!(a2.contains("[Context handoff from Claude Code]"), "{a2}");
+    assert!(
+        a2.contains("Person: first") && a2.contains("Agent: echo: first"),
+        "{a2}"
+    );
+    assert!(
+        a2.ends_with("second"),
+        "the message follows the block whole: {a2}"
+    );
+    // The timeline keeps the person's own words.
+    assert!(host
+        .items()
+        .iter()
+        .any(|i| i.turn_id.as_ref() == Some(&t2.turn_id)
+            && matches!(&i.kind, TurnItemKind::UserMessage { text, .. } if text == "second")));
+
+    // Codex → Gemini (ACP), then back to Claude: each a fresh conversation.
+    let t3 = rt
+        .prompt_with(&s.id, &switch_to("third", "gemini"))
+        .await
+        .unwrap();
+    host.wait_n(is_terminal, 3).await;
+    let a3 = answer_of(&host, &t3.turn_id);
+    assert!(
+        a3.contains("[Context handoff from Codex]") && a3.contains("Person: second"),
+        "{a3}"
+    );
+    assert_eq!(
+        rt.get(&s.id).await.unwrap().provider,
+        RuntimeProvider::Gemini
+    );
+    let t4 = rt
+        .prompt_with(&s.id, &switch_to("fourth", "claude"))
+        .await
+        .unwrap();
+    host.wait_n(is_terminal, 4).await;
+    let a4 = answer_of(&host, &t4.turn_id);
+    assert!(
+        a4.contains("[Context handoff from Gemini]") && a4.contains("Person: first"),
+        "{a4}"
+    );
+    let back = rt.get(&s.id).await.unwrap();
+    assert_eq!(back.provider, RuntimeProvider::Claude);
+    assert_ne!(
+        back.native_thread_id, claude_native,
+        "switching back starts fresh"
+    );
+    let spawns = host.prepared.lock().unwrap().clone();
+    assert_eq!(spawns.len(), 4);
+    assert!(!spawns[3].args.iter().any(|a| a == "--resume"));
+
+    let h = handoffs(&host);
+    let pairs: Vec<_> = h
+        .iter()
+        .map(|h| (h.from_provider.as_str(), h.to_provider.as_str(), h.turns))
+        .collect();
+    assert_eq!(
+        pairs,
+        [
+            ("claude", "codex", 1),
+            ("codex", "gemini", 2),
+            ("gemini", "claude", 3)
+        ]
+    );
+    // Persisted: a restart runs the thread on the provider it switched to.
+    rt.flush(&s.id).await;
+    let stored = AgentRuntimeRepo::new(pool.clone())
+        .get(&s.id)
+        .await
+        .unwrap();
+    assert_eq!(stored.session.provider, RuntimeProvider::Claude);
+    assert_eq!(stored.session.native_thread_id, back.native_thread_id);
+    assert_eq!(
+        stored
+            .session
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("thread_pinned")),
+        Some(&serde_json::json!(true))
+    );
+    rt.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_switch_that_cannot_start_stays_on_the_provider_it_ran() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Codex).await;
+    rt.prompt(&s.id, "first").await.unwrap();
+    host.wait_n(is_terminal, 1).await;
+    let before = rt.get(&s.id).await.unwrap();
+
+    // Grok's fake is signed out (its handshake fails): the refusal says why.
+    match rt.prompt_with(&s.id, &switch_to("hi", "grok")).await {
+        Err(Error::Invalid(m)) => {
+            assert!(m.starts_with("the fresh agent could not start: "), "{m}")
+        }
+        other => panic!("{other:?}"),
+    }
+    // Claude's spawn is refused by the safety pipeline.
+    *host.refuse_provider.lock().unwrap() = Some(RuntimeProvider::Claude);
+    assert!(rt
+        .prompt_with(&s.id, &switch_to("hi", "claude"))
+        .await
+        .is_err());
+    // An unknown provider is refused before anything stops.
+    assert!(matches!(
+        rt.prompt_with(&s.id, &switch_to("hi", "nope")).await,
+        Err(Error::Invalid(_))
+    ));
+    let after = rt.get(&s.id).await.unwrap();
+    assert_eq!(after.provider, RuntimeProvider::Codex);
+    assert_eq!(after.native_thread_id, before.native_thread_id);
+    assert!(handoffs(&host).is_empty());
+    assert!(!host
+        .items()
+        .iter()
+        .any(|i| matches!(i.kind, TurnItemKind::SessionBoundary { .. })));
+    rt.flush(&s.id).await;
+    let stored = AgentRuntimeRepo::new(pool.clone())
+        .get(&s.id)
+        .await
+        .unwrap();
+    assert_eq!(stored.session.provider, RuntimeProvider::Codex);
+    // The next plain message resumes the Codex conversation.
+    *host.refuse_provider.lock().unwrap() = None;
+    rt.prompt(&s.id, "again").await.unwrap();
+    host.wait_n(is_terminal, 2).await;
+    assert_eq!(
+        rt.get(&s.id).await.unwrap().native_thread_id,
+        before.native_thread_id
+    );
+    rt.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_switch_waits_for_pending_work_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create(&rt, cwd).await;
+    rt.prompt(&s.id, "ask").await.unwrap();
+    host.wait(is_pending_request).await;
+    match rt.prompt_with(&s.id, &switch_to("hi", "codex")).await {
+        Err(Error::Conflict(m)) => assert!(m.contains("switching provider"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        rt.get(&s.id).await.unwrap().provider,
+        RuntimeProvider::Gemini
+    );
+    rt.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn every_structured_provider_takes_and_gives_a_handoff() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    rt.prompt(&s.id, "start").await.unwrap();
+    host.wait_n(is_terminal, 1).await;
+    let mut prev = "Claude Code";
+    let chain = [
+        ("codex", "Codex"),
+        ("agy", "Antigravity"),
+        ("muse", "Muse"),
+        ("opencode", "OpenCode"),
+        ("gemini", "Gemini"),
+        ("claude", "Claude Code"),
+    ];
+    for (n, (slug, name)) in chain.into_iter().enumerate() {
+        let req = RuntimePromptReq {
+            model: Some(format!("m-{slug}")),
+            ..switch_to(&format!("step {n}"), slug)
+        };
+        let t = rt.prompt_with(&s.id, &req).await.unwrap();
+        host.wait_n(is_terminal, n + 2).await;
+        let a = answer_of(&host, &t.turn_id);
+        assert!(
+            a.contains(&format!("[Context handoff from {prev}]")),
+            "{slug}: {a}"
+        );
+        assert!(a.contains("Person: start"), "{slug}: {a}");
+        let now = rt.get(&s.id).await.unwrap();
+        assert_eq!(now.provider_slug(), slug);
+        assert_eq!(now.model.as_deref(), Some(format!("m-{slug}").as_str()));
+        // Every client hears the provider change on the session entity.
+        let last = host
+            .all()
+            .into_iter()
+            .rev()
+            .find_map(|e| match e.body {
+                RuntimeEventBody::ProviderSessionUpdated { provider_session } => {
+                    Some(provider_session)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(last.provider_slug.as_deref(), Some(slug));
+        assert_eq!(last.provider, Some(now.provider));
+        prev = name;
+    }
+    assert_eq!(handoffs(&host).len(), chain.len());
+    rt.close(&s.id).await.unwrap();
 }

@@ -348,7 +348,7 @@ impl Live {
         let lost = self.host.all().iter().any(|e| {
             matches!(&e.body,
             RuntimeEventBody::TurnItemUpdated { turn_item }
-                if matches!(turn_item.kind, TurnItemKind::SessionBoundary))
+                if matches!(turn_item.kind, TurnItemKind::SessionBoundary { .. }))
         });
         assert!(!lost, "no fresh-session boundary after reopen");
         self.rt.close(&self.s.id).await.unwrap();
@@ -467,7 +467,7 @@ async fn handshake(provider: RuntimeProvider, make: fn() -> AcpDriver, same: boo
     let lost = live.host.all().iter().any(|e| {
         matches!(&e.body,
         RuntimeEventBody::TurnItemUpdated { turn_item }
-            if matches!(turn_item.kind, TurnItemKind::SessionBoundary))
+            if matches!(turn_item.kind, TurnItemKind::SessionBoundary { .. }))
     });
     assert_eq!(
         lost, !same,

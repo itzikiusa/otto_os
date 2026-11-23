@@ -13,6 +13,14 @@
   import { git } from '../../lib/stores/git.svelte';
   import type { CommitInfo, DiffLine, DiffResp, RepoStatusResp } from '../../lib/api/types';
   import { diffContext, type ComposerContext } from './runtime/composerContext';
+  import Modal from '../../lib/components/Modal.svelte';
+  import { newId } from '../../lib/id';
+  import { viewport } from '../../lib/stores/viewport.svelte';
+  import DiffNoteCard from './DiffNoteCard.svelte';
+  import DiffNoteEditor from './DiffNoteEditor.svelte';
+  import DiffReviewBar from './DiffReviewBar.svelte';
+  import { endsAt, isOutdated, noteAnchor, noteWhere, reviewMessage, type ReviewNote } from './runtime/reviewNotes';
+  import { reviewNotes } from './runtime/reviewNotes.svelte';
   import { threadRepos } from './threadRepos.svelte';
   import { threads } from './threadsStore.svelte';
 
@@ -233,6 +241,48 @@
 
   const activeFileDiff = $derived(diffResp?.files[0] ?? null);
 
+  // ── Review notes (runtime/reviewNotes.ts): a line number starts a note,
+  // ⇧-click another in the same hunk makes it a range; notes show under
+  // their last line and in the Review bar, and go to the agent as one message.
+  const notes = $derived(reviewNotes.for(threadId));
+  const fileNotes = $derived(repo && activeFileDiff ? notes.filter((n) => n.repoId === repo.id && n.target === (diffTarget ?? 'working') && n.path === activeFileDiff.path) : []);
+  let pending = $state<{ hunk: number; from: number; to: number } | null>(null);
+  /** A phone (upright or on its side): the note box is a sheet, not inline. */
+  const sheet = $derived(viewport.isPhone || viewport.isShort);
+  $effect(() => {
+    void activeFileDiff;
+    pending = null;
+  });
+  const pendingLines = $derived(pending && activeFileDiff ? activeFileDiff.hunks[pending.hunk].lines.slice(Math.min(pending.from, pending.to), Math.max(pending.from, pending.to) + 1) : []);
+  const pendingWhere = $derived(activeFileDiff && pendingLines.length ? `${activeFileDiff.path} · ${noteWhere(noteAnchor(pendingLines))}` : '');
+  const picked = (h: number, l: number): boolean => !!pending && pending.hunk === h && l >= Math.min(pending.from, pending.to) && l <= Math.max(pending.from, pending.to);
+  const editorAt = (h: number, l: number): boolean => !!pending && !sheet && pending.hunk === h && l === Math.max(pending.from, pending.to);
+
+  function lineClick(e: MouseEvent, hunk: number, line: number): void {
+    pending = e.shiftKey && pending && pending.hunk === hunk ? { ...pending, to: line } : { hunk, from: line, to: line };
+  }
+  function saveNote(comment: string): void {
+    if (!repo || !activeFileDiff || !threadId || !pendingLines.length) return;
+    reviewNotes.add(threadId, { repoId: repo.id, target: diffTarget ?? 'working', path: activeFileDiff.path, comment, ...noteAnchor(pendingLines) });
+    pending = null;
+  }
+  function plainLines(): void {
+    if (pending) addDiff({ hunk: pending.hunk, ...(pending.from === pending.to ? { line: pending.from } : {}) });
+    pending = null;
+  }
+  function sendNotes(): void {
+    const drafts = notes.filter((n) => n.state === 'draft');
+    if (!threadId || !drafts.length || !oncontext) return;
+    oncontext({ id: `notes:${newId()}`, kind: 'review-comment', label: `Review · ${plural(drafts.length, 'note')}`, text: reviewMessage(drafts) }, threadId);
+    for (const n of drafts) reviewNotes.update(threadId, n.id, { state: 'sent' });
+  }
+  // The agent changed the noted lines since: the note says Outdated (kept, never lost).
+  $effect(() => {
+    const f = activeFileDiff;
+    if (!f || !threadId || diffLoading) return;
+    for (const n of fileNotes) if (!n.outdated && n.state !== 'resolved' && isOutdated(n, f)) reviewNotes.update(threadId, n.id, { outdated: true });
+  });
+
   function addDiff(selection?: { hunk: number; line?: number }): void {
     if (repo && activeFileDiff && threadId && !diffLoading) {
       oncontext?.(diffContext(repo.id, activeFileDiff, selection, diffTarget ?? 'working'), threadId);
@@ -279,6 +329,22 @@
     return out;
   }
 </script>
+
+{#snippet noteCard(n: ReviewNote)}
+  <DiffNoteCard
+    note={n}
+    onedit={(comment) => threadId && reviewNotes.update(threadId, n.id, { comment })}
+    onresolve={(r) => threadId && reviewNotes.update(threadId, n.id, { state: r ? 'resolved' : 'sent' })}
+    ondelete={() => threadId && reviewNotes.remove(threadId, n.id)}
+  />
+{/snippet}
+
+{#if pending && sheet && pendingWhere}
+  <!-- A phone: the note box is a sheet, above the on-screen keyboard. -->
+  <Modal title="Note for the agent" onclose={() => (pending = null)}>
+    <DiffNoteEditor where={pendingWhere} onsave={saveNote} oncancel={() => (pending = null)} onplain={oncontext ? plainLines : undefined} />
+  </Modal>
+{/if}
 
 <div class="tch-wrap" data-testid="inspector-changes-tab">
   {#if !repo}
@@ -359,6 +425,17 @@
         </button>
       </div>
     </div>
+
+    {#if threadId}
+      <DiffReviewBar
+        {notes}
+        onsend={sendNotes}
+        onclear={() => threadId && reviewNotes.clear(threadId)}
+        onedit={(id, comment) => threadId && reviewNotes.update(threadId, id, { comment })}
+        onresolve={(id, r) => threadId && reviewNotes.update(threadId, id, { state: r ? 'resolved' : 'sent' })}
+        ondelete={(id) => threadId && reviewNotes.remove(threadId, id)}
+      />
+    {/if}
 
     {#if activeScope === 'commits'}
       <div class="tch-commit-pick">
@@ -460,31 +537,37 @@
                   </div>
                   {#if diffMode === 'unified'}
                     {#each hunk.lines as ln, lIdx (lIdx)}
-                      <div class="tch-line {ln.origin}">
+                      <div class="tch-line {ln.origin}" class:picked={picked(hIdx, lIdx)}>
                         <span class="tch-ln">{ln.old_line ?? ''}</span>
                         {#if oncontext && threadId}
-                          <button type="button" class="tch-ln tch-line-add" aria-label="Add {activeFileDiff.path} {ln.origin === 'del' ? 'old' : 'new'} line {ln.new_line ?? ln.old_line} to chat" title="Add line to chat" onclick={() => addDiff({ hunk: hIdx, line: lIdx })}>{ln.new_line ?? ln.old_line ?? '+'}</button>
+                          <button type="button" class="tch-ln tch-line-add" aria-label="Note on {activeFileDiff.path} {ln.origin === 'del' ? 'old' : 'new'} line {ln.new_line ?? ln.old_line}" title="Add a note (⇧-click another line for a range)" data-testid="diff-line-note" onclick={(e) => lineClick(e, hIdx, lIdx)}>{ln.new_line ?? ln.old_line ?? '+'}</button>
                         {:else}<span class="tch-ln">{ln.new_line ?? ''}</span>{/if}
                         <span class="tch-sig">{ln.origin === 'add' ? '+' : ln.origin === 'del' ? '-' : ' '}</span>
                         <span class="tch-code">{ln.content}</span>
                       </div>
+                      {#each fileNotes.filter((n) => endsAt(n, ln)) as n (n.id)}{@render noteCard(n)}{/each}
+                      {#if editorAt(hIdx, lIdx)}<DiffNoteEditor where={pendingWhere} onsave={saveNote} oncancel={() => (pending = null)} onplain={oncontext ? plainLines : undefined} />{/if}
                     {/each}
                   {:else}
                     {#each buildSplitRows(hunk.lines) as pair, pIdx (pIdx)}
-                      <div class="tch-split-row">
+                      {@const endLine = pair.right ?? pair.left}
+                      {@const endIdx = endLine ? hunk.lines.indexOf(endLine) : -1}
+                      <div class="tch-split-row" class:picked={picked(hIdx, endIdx)}>
                         <div class="tch-half {pair.left?.origin ?? 'empty'}">
                           {#if oncontext && threadId && pair.left}
-                            <button type="button" class="tch-ln tch-line-add" aria-label="Add {activeFileDiff.path} old line {pair.left.old_line} to chat" title="Add line to chat" onclick={() => addDiff({ hunk: hIdx, line: hunk.lines.indexOf(pair.left!) })}>{pair.left.old_line ?? '+'}</button>
+                            <button type="button" class="tch-ln tch-line-add" aria-label="Note on {activeFileDiff.path} old line {pair.left.old_line}" title="Add a note (⇧-click another line for a range)" onclick={(e) => lineClick(e, hIdx, hunk.lines.indexOf(pair.left!))}>{pair.left.old_line ?? '+'}</button>
                           {:else}<span class="tch-ln">{pair.left?.old_line ?? ''}</span>{/if}
                           <span class="tch-code">{pair.left?.content ?? ''}</span>
                         </div>
                         <div class="tch-half {pair.right?.origin ?? 'empty'}">
                           {#if oncontext && threadId && pair.right}
-                            <button type="button" class="tch-ln tch-line-add" aria-label="Add {activeFileDiff.path} new line {pair.right.new_line} to chat" title="Add line to chat" onclick={() => addDiff({ hunk: hIdx, line: hunk.lines.indexOf(pair.right!) })}>{pair.right.new_line ?? '+'}</button>
+                            <button type="button" class="tch-ln tch-line-add" aria-label="Note on {activeFileDiff.path} new line {pair.right.new_line}" title="Add a note (⇧-click another line for a range)" onclick={(e) => lineClick(e, hIdx, hunk.lines.indexOf(pair.right!))}>{pair.right.new_line ?? '+'}</button>
                           {:else}<span class="tch-ln">{pair.right?.new_line ?? ''}</span>{/if}
                           <span class="tch-code">{pair.right?.content ?? ''}</span>
                         </div>
                       </div>
+                      {#if endLine}{#each fileNotes.filter((n) => endsAt(n, endLine)) as n (n.id)}{@render noteCard(n)}{/each}{/if}
+                      {#if editorAt(hIdx, endIdx) || (pair.left && pair.right && editorAt(hIdx, hunk.lines.indexOf(pair.left)))}<DiffNoteEditor where={pendingWhere} onsave={saveNote} oncancel={() => (pending = null)} onplain={oncontext ? plainLines : undefined} />{/if}
                     {/each}
                   {/if}
                 {/each}
@@ -500,6 +583,7 @@
 <style>
   .tch-line-add { border: 0; border-radius: 0; background: transparent; font: inherit; cursor: pointer; }
   .tch-line-add:hover { color: var(--accent-text); background: var(--hover); }
+  .tch-line.picked, .tch-split-row.picked { background: var(--accent-soft); }
   .tch-hunk-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   @media (max-width: 640px) {
     .tch-line-add { min-block-size: 36px; }

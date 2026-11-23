@@ -287,6 +287,36 @@ impl AgentRuntime {
         Ok(out)
     }
 
+    /// Merge a client-owned thread-meta patch (`otto_core::agent_runtime::
+    /// THREAD_META_KEYS`, already validated) into the session's `meta` and
+    /// tell every client through `provider_session.updated` (its `thread`).
+    /// Allowed on a `closed` session too (History, pins).
+    pub async fn update_thread_meta(
+        &self,
+        id: &Id,
+        patch: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<RuntimeSession> {
+        let live = self.live(id).await?;
+        let patch = serde_json::Value::Object(patch);
+        self.inner.repo.patch_meta(id, &patch).await?;
+        let mut st = live.lock();
+        let mut meta = match st.session.meta.take() {
+            Some(serde_json::Value::Object(m)) => m,
+            _ => serde_json::Map::new(),
+        };
+        for (k, v) in patch.as_object().into_iter().flatten() {
+            if v.is_null() {
+                meta.remove(k);
+            } else {
+                meta.insert(k.clone(), v.clone());
+            }
+        }
+        st.session.meta = (!meta.is_empty()).then_some(serde_json::Value::Object(meta));
+        let (status, last_error) = current_status(&st);
+        set_session_status(&self.inner, &live, &mut st, status, last_error);
+        Ok(st.session.clone())
+    }
+
     /// Store `effort` as the thread's (create, an opening agent's pick with
     /// no prompt). Checked against what the provider takes.
     pub async fn set_effort(&self, id: &Id, effort: Option<&str>) -> Result<RuntimeSession> {
