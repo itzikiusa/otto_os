@@ -15,6 +15,7 @@
 //! run on a per-session persister task fed in that order.
 
 mod admission;
+mod archive;
 mod attention;
 mod auto_close;
 mod children;
@@ -29,12 +30,14 @@ mod loop_guard;
 mod outcome;
 mod paging;
 mod peers;
+mod reopen;
 mod request_ids;
 mod secret_request;
 mod selection;
 mod task_stop;
 mod usage_hook;
 pub use admission::{HANDSHAKE_TIMEOUT, MAX_QUEUED_BYTES, MAX_QUEUED_PROMPTS};
+pub use archive::settle_archived_entity_json;
 pub use loop_guard::{AGENT_HOPS_MAX, PAUSED_ERROR, PAUSED_NOTICE, PAUSED_QUEUED};
 use request_ids::RequestIds;
 pub use selection::check_effort;
@@ -2023,108 +2026,6 @@ impl AgentRuntime {
         Ok(s)
     }
 
-    /// Revive a closed or dormant session: it takes prompts again and its agent is
-    /// respawned now, resuming the provider's own thread (`native_thread_id`).
-    /// A provider that cannot resume it (its process dies before it is
-    /// ready) gets a fresh thread instead and the timeline says so (a
-    /// `system_notice`). Its meta is kept. A live process is left alone.
-    /// What waits in its queue (a child thread's reply) then goes out.
-    pub async fn reopen(&self, id: &Id) -> Result<RuntimeSession> {
-        let live = self.live(id).await?;
-        let _prompt = live.prompt_lock.lock().await;
-        {
-            let mut st = live.lock();
-            if st.session.status == RuntimeSessionStatus::Closed {
-                st.session.status = RuntimeSessionStatus::Dormant;
-                // After the close's own write, in order.
-                let _ = live.persist.send(PersistOp::Opened);
-            } else if st.proc.is_some() {
-                return Ok(st.session.clone());
-            }
-            // A revive is activity: the idle release must not stop it again.
-            st.session.last_active_at = Utc::now();
-        }
-        self.flush(id).await;
-        self.spawn_resuming(id, &live).await?;
-        let (s, queued) = {
-            let st = live.lock();
-            (st.session.clone(), !st.proj.queue.is_empty())
-        };
-        // What waited for the person — a child thread's reply above all —
-        // goes out now, oldest first (after this call: the drain takes the
-        // prompt lock held here).
-        if queued {
-            self.kick_queue(id);
-        }
-        Ok(s)
-    }
-
-    /// Low-latency HTTP reopen: validates & spawns the CLI process immediately
-    /// (`< 30 ms`), returning the revived [`RuntimeSession`] without blocking
-    /// the HTTP caller for up to `start_wait` (20 s) on MCP/CLI boot. A
-    /// background task finishes the readiness check, fresh-thread fallback on
-    /// refused resume, and queued reply delivery.
-    pub async fn reopen_fast(&self, id: &Id) -> Result<RuntimeSession> {
-        let live = self.live(id).await?;
-        let (s, resume_key, need_bg_watch) = {
-            let _prompt = live.prompt_lock.lock().await;
-            {
-                let mut st = live.lock();
-                if st.session.status == RuntimeSessionStatus::Closed {
-                    st.session.status = RuntimeSessionStatus::Dormant;
-                    let _ = live.persist.send(PersistOp::Opened);
-                } else if st.proc.is_some() {
-                    return Ok(st.session.clone());
-                }
-                st.session.last_active_at = Utc::now();
-            }
-            self.flush(id).await;
-            self.ensure_process(&live).await?;
-            let st = live.lock();
-            let resume_key = st.session.native_thread_id.clone();
-            let need_bg = resume_key.is_some() || !st.proj.queue.is_empty();
-            (st.session.clone(), resume_key, need_bg)
-        };
-        if need_bg_watch {
-            let rt = self.clone();
-            let sid = id.clone();
-            let live_bg = Arc::clone(&live);
-            tokio::spawn(async move {
-                let started = resume_key.is_none() || rt.wait_started(&live_bg).await;
-                if !started {
-                    let _prompt = live_bg.prompt_lock.lock().await;
-                    let idle = {
-                        let st = live_bg.lock();
-                        st.proc.is_none() && st.turn.is_none() && st.starting == 0
-                    };
-                    if idle {
-                        if let Err(e) = rt.spawn_resuming(&sid, &live_bg).await {
-                            tracing::warn!(session = %sid, "background reopen_fast resume failed: {e}");
-                            let mut st = live_bg.lock();
-                            if st.proc.is_none() && st.turn.is_none() {
-                                set_session_status(
-                                    &rt.inner,
-                                    &live_bg,
-                                    &mut st,
-                                    ProviderSessionStatus::Error,
-                                    Some(e.to_string()),
-                                );
-                            }
-                        }
-                    }
-                }
-                let queued = {
-                    let st = live_bg.lock();
-                    !st.proj.queue.is_empty() && st.turn.is_none()
-                };
-                if queued {
-                    rt.kick_queue(&sid);
-                }
-            });
-        }
-        Ok(s)
-    }
-
     /// Fetch a single full (uncompacted) `TurnItem` by ID for lazy row expansion.
     pub async fn get_item(&self, id: &Id, item_id: &Id) -> Result<TurnItem> {
         let res = otto_telemetry::context::measure_result("threads.get_item", async {
@@ -3114,61 +3015,6 @@ fn settle_item(item: &mut TurnItem, status: TurnItemStatus, now: chrono::DateTim
         }
         _ => {}
     }
-}
-
-/// Settle an archived `agent_runtime_entities` JSON payload so exported or
-/// restored history never preserves mid-turn spinners, running provider
-/// sessions, or pending approvals. Returns `Some(updated_json)` only when the
-/// entity required settling.
-pub fn settle_archived_entity_json(kind: &str, payload_json: &str) -> Option<String> {
-    let now = Utc::now();
-    let raw: serde_json::Value = serde_json::from_str(payload_json).ok()?;
-    let updated = match kind {
-        K_TURN => serde_json::from_value::<ProviderTurn>(raw)
-            .ok()
-            .filter(|t| !t.status.is_terminal())
-            .and_then(|mut t| {
-                t.status = ProviderTurnStatus::Interrupted;
-                t.completed_at = Some(now);
-                serde_json::to_value(t).ok()
-            }),
-        K_ITEM => serde_json::from_value::<TurnItem>(raw)
-            .ok()
-            .filter(|i| i.status.is_open() || i.is_streaming())
-            .and_then(|mut i| {
-                settle_item(&mut i, TurnItemStatus::Interrupted, now);
-                serde_json::to_value(i).ok()
-            }),
-        K_REQUEST => serde_json::from_value::<RuntimeRequest>(raw)
-            .ok()
-            .filter(|q| q.status == RuntimeRequestStatus::Pending)
-            .and_then(|mut q| {
-                q.status = RuntimeRequestStatus::Expired;
-                q.response_capability = ResponseCapability::NotResumable {
-                    reason: "Imported history; pending request was not resumed.".into(),
-                };
-                serde_json::to_value(q).ok()
-            }),
-        K_SESSION => serde_json::from_value::<ProviderSession>(raw)
-            .ok()
-            .filter(|s| {
-                s.status != ProviderSessionStatus::Stopped || !s.background_tasks.is_empty()
-            })
-            .and_then(|mut s| {
-                s.background_tasks.clear();
-                s.status = ProviderSessionStatus::Stopped;
-                s.updated_at = now;
-                serde_json::to_value(s).ok()
-            }),
-        // Imported prompts never send themselves: boot recovery would dispatch a
-        // person's queued message on the next start.
-        K_QUEUE => raw
-            .as_array()
-            .filter(|q| !q.is_empty())
-            .map(|_| serde_json::json!([])),
-        _ => None,
-    }?;
-    serde_json::to_string(&updated).ok()
 }
 
 fn resolve_request(
