@@ -338,6 +338,8 @@ pub(super) struct AcpDriverState {
     pub(super) terminal_output: HashMap<String, String>,
     pub(super) client_seq: u64,
     pub(super) client_waits: HashMap<String, client::ClientWait>,
+    /// A wider mode the agent moved itself to, waiting for Keep / Revert.
+    pub(super) mode_held: Option<(String, RuntimeAccessMode)>,
     /// Restored waits nobody can answer any more (answered with an error).
     #[serde(skip)]
     pub(super) client_orphans: Vec<Value>,
@@ -446,6 +448,7 @@ impl AcpDriver {
                 client_seq: 0,
                 client_waits: HashMap::new(),
                 client_orphans: Vec::new(),
+                mode_held: None,
                 client_held: HashMap::new(),
                 cost_total: None,
                 cost_at_turn: None,
@@ -1024,24 +1027,85 @@ impl AcpDriver {
         }
     }
 
-    /// The access mode whose `mode_id` is `mode`, when the agent moved to
-    /// it on its own: the thread's access chip follows (gap 5).
+    /// The agent moved itself to the session mode `mode`. One rule: the
+    /// thread never shows a narrower access than the process really has,
+    /// and Otto never widens it silently.
+    /// - The thread's access is not a session mode here (agy's Full access
+    ///   is a launch flag): the process keeps it, nothing follows.
+    /// - A narrower (or equal) mode: the thread follows.
+    /// - A wider one: the thread keeps Otto's access and the person decides —
+    ///   Keep (the thread takes the wider mode) or Revert (Otto sets its mode
+    ///   back).
     fn follow_mode(&mut self, step: &mut DriverStep, mode: &str) {
         let Some(f) = self.flavor.mode_id else { return };
-        let to = [
+        if f(self.state.access).is_none() {
+            return;
+        }
+        let rank = |m: RuntimeAccessMode| match m {
+            RuntimeAccessMode::ApprovalRequired => 0,
+            RuntimeAccessMode::AutoAcceptEdits => 1,
+            RuntimeAccessMode::FullAccess => 2,
+        };
+        let Some(to) = [
             RuntimeAccessMode::ApprovalRequired,
             RuntimeAccessMode::AutoAcceptEdits,
             RuntimeAccessMode::FullAccess,
         ]
         .into_iter()
-        .find(|m| f(*m) == Some(mode));
-        if let Some(to) = to.filter(|to| *to != self.state.access) {
+        .find(|m| f(*m) == Some(mode))
+        .filter(|to| *to != self.state.access) else {
+            return;
+        };
+        if rank(to) < rank(self.state.access) {
             self.state.access = to;
             step.push(DriverEvent::AgentSettings {
                 model: None,
                 access: Some(to),
             });
+            return;
         }
+        self.ensure_autonomous_turn(step);
+        self.state.client_seq += 1;
+        let id = format!("acp-mode-{}", self.state.client_seq);
+        self.state.mode_held = Some((id.clone(), to));
+        let name = crate::driver::provider_name(self.provider);
+        step.push(DriverEvent::Request {
+            id,
+            kind: RequestKind::Permission,
+            title: Some(format!("{name} switched itself to {mode}")),
+            prompt: Some(format!(
+                "The agent switched itself to {mode} \u{b7} Keep / Revert (this thread stays on {} until you keep it)",
+                self.state.access.as_str()
+            )),
+            reason: None,
+            options: vec![
+                ApprovalOption { decision: ApprovalDecision::Accept, label: "Keep".into() },
+                ApprovalOption { decision: ApprovalDecision::Decline, label: "Revert".into() },
+            ],
+            tool_item_id: None,
+        });
+    }
+
+    /// The person's Keep / Revert for a mode the agent widened itself to.
+    fn respond_mode(&mut self, request_id: &str, decision: ApprovalDecision) -> Option<DriverStep> {
+        let (_, to) = self.state.mode_held.take_if(|(id, _)| id == request_id)?;
+        let mut step = DriverStep::default();
+        if matches!(
+            decision,
+            ApprovalDecision::Accept
+                | ApprovalDecision::AcceptForSession
+                | ApprovalDecision::AcceptAlways
+        ) {
+            self.state.access = to;
+            step.push(DriverEvent::AgentSettings {
+                model: None,
+                access: Some(to),
+            });
+        } else if let Some(sid) = self.state.session_id.clone() {
+            let access = self.state.access;
+            self.write_mode(&mut step, &sid, access);
+        }
+        Some(step)
     }
 
     /// The model the agent reports in a `config_option_update` (its model
@@ -2670,6 +2734,9 @@ impl StructuredDriver for AcpDriver {
         if let Some(step) = self.respond_client(request_id, decision) {
             return Ok(step);
         }
+        if let Some(step) = self.respond_mode(request_id, decision) {
+            return Ok(step);
+        }
         let p = self
             .state
             .pending
@@ -3828,6 +3895,70 @@ mod tests {
         assert!(s.events.iter().any(|e| matches!(e,
             DriverEvent::TurnItem(TurnItem { kind: TurnItemKind::FileChange { file_name, .. }, .. })
                 if file_name == "/w/old.rs, /w/new.rs")));
+    }
+
+    /// Security 7 + review R7: the agent's own mode move never widens the
+    /// thread silently, and never relabels a mode the provider cannot
+    /// express (agy's Full access is a flag).
+    #[test]
+    fn an_agent_mode_move_never_widens_silently_or_understates() {
+        let update = |m: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"current_mode_update","currentModeId":"{m}"}}}}}}"#
+            )
+        };
+        let ready = |d: &mut AcpDriver, access| {
+            d.start(&LaunchContext {
+                access_mode: access,
+                ..ctx(None)
+            });
+            d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+            d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s","modes":{"currentModeId":"default","availableModes":[{"id":"default","name":"d"},{"id":"accept-edits","name":"a"},{"id":"promptUnmatched","name":"p"},{"id":"onRequest","name":"o"},{"id":"allowAll","name":"x"}]}}}"#);
+        };
+        let settings = |s: &DriverStep| {
+            s.events.iter().find_map(|e| match e {
+                DriverEvent::AgentSettings { access, .. } => *access,
+                _ => None,
+            })
+        };
+        // Wider (Supervised → allowAll): held for the person.
+        let mut d = AcpDriver::muse("muse");
+        ready(&mut d, RuntimeAccessMode::ApprovalRequired);
+        let s = d.on_line(&update("allowAll"));
+        assert_eq!(settings(&s), None, "never widened silently");
+        let id = s
+            .events
+            .iter()
+            .find_map(|e| match e {
+                DriverEvent::Request { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .expect("Keep / Revert");
+        let revert = d.respond(&id, ApprovalDecision::Decline).unwrap();
+        assert_eq!(sent(&revert, 0)["params"]["modeId"], "promptUnmatched");
+        let s = d.on_line(&update("allowAll"));
+        let id = s
+            .events
+            .iter()
+            .find_map(|e| match e {
+                DriverEvent::Request { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let keep = d.respond(&id, ApprovalDecision::Accept).unwrap();
+        assert_eq!(settings(&keep), Some(RuntimeAccessMode::FullAccess));
+        // Narrower (allowAll → onRequest): followed.
+        let s = d.on_line(&update("onRequest"));
+        assert_eq!(settings(&s), Some(RuntimeAccessMode::AutoAcceptEdits));
+        // agy on Full access (a launch flag): "default" relabels nothing.
+        let mut a = AcpDriver::agy("agy");
+        ready(&mut a, RuntimeAccessMode::FullAccess);
+        let s = a.on_line(&update("default"));
+        assert_eq!(settings(&s), None);
+        assert!(!s
+            .events
+            .iter()
+            .any(|e| matches!(e, DriverEvent::Request { .. })));
     }
 
     /// Security 6: a chatty command's row keeps only the tail.

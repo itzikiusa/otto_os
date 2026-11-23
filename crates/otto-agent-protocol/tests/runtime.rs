@@ -5112,13 +5112,22 @@ async fn an_agent_initiated_mode_change_moves_the_threads_access() {
     let host = TestHost::new(root, false);
     let rt = runtime(&pool, &host, RuntimeConfig::default());
     let s = create_as(&rt, root, RuntimeProvider::Agy).await;
+    // Wider than the thread's access: held for the person (Keep / Revert).
     rt.prompt(&s.id, "agent-mode accept-edits").await.unwrap();
+    let req = host.wait(is_type("runtime_request.updated")).await;
+    let RuntimeEventBody::RuntimeRequestUpdated { runtime_request } = req.body else {
+        unreachable!()
+    };
+    assert_eq!(
+        rt.get(&s.id).await.unwrap().access_mode,
+        RuntimeAccessMode::ApprovalRequired
+    );
+    rt.respond(&s.id, &runtime_request.id, ApprovalDecision::Accept)
+        .await
+        .unwrap();
     host.wait(is_terminal).await;
     let s = rt.get(&s.id).await.unwrap();
     assert_eq!(s.access_mode, RuntimeAccessMode::AutoAcceptEdits);
-    assert!(host.items().iter().any(|i| i.id.starts_with("selection:")
-        || i.id.contains(":selection:")
-        || matches!(&i.kind, TurnItemKind::SystemNotice { message, .. } if message.starts_with("Access"))));
     rt.close(&s.id).await.unwrap();
 }
 
