@@ -175,6 +175,13 @@ pub enum DriverEvent {
     },
     /// The agent's own slash commands, whole (`commands.updated`).
     Commands(Vec<otto_core::agent_runtime::ProviderCommand>),
+    /// MCP servers as the CLI reports them (merged by name into the thread's
+    /// list), or — `spawn`, emitted by the runtime — the list Otto gave the
+    /// new process, whole (`mcp_servers.updated`).
+    McpServers {
+        servers: Vec<otto_core::agent_runtime::McpServerStatus>,
+        spawn: bool,
+    },
     /// The agent named the conversation (Codex `thread/name/updated`, an
     /// ACP `session_info_update`). Adopted while the thread still has the
     /// title Otto gave it.

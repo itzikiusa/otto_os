@@ -12,6 +12,7 @@
 // lost event: the caller replays from `lastSequence` (`gap`).
 
 import type {
+  McpServerStatus,
   PlanArtifact,
   ProviderCommand,
   ProviderSession,
@@ -46,6 +47,8 @@ export interface RuntimeProjection {
   olderTurns: number;
   /** The agent's own slash commands (`commands.updated`). */
   commands: ProviderCommand[];
+  /** The MCP servers its agent has (`mcp_servers.updated`). */
+  mcpServers: McpServerStatus[];
 }
 
 export function emptyProjection(): RuntimeProjection {
@@ -63,6 +66,7 @@ export function emptyProjection(): RuntimeProjection {
     oldestTurnOrdinal: null,
     olderTurns: 0,
     commands: [],
+    mcpServers: [],
   };
 }
 
@@ -88,6 +92,7 @@ export function fromSnapshot(snapshot: RuntimeSnapshot, sequence: number): Runti
     queued: snapshot.queued_prompts ?? [],
     output: {},
     commands: snapshot.commands ?? [],
+    mcpServers: snapshot.mcp_servers ?? [],
     hasOlder: !!snapshot.has_older,
     oldestTurnOrdinal: snapshot.oldest_turn_ordinal ?? minTurnOrdinal(turns),
     olderTurns: snapshot.older_turns ?? 0,
@@ -214,6 +219,7 @@ function foldEventBatch(
   let plansCloned = false;
   let queued = p.queued;
   let commands = p.commands;
+  let mcpServers = p.mcpServers;
   let output = p.output;
   let outputCloned = false;
   let mutated = false;
@@ -288,6 +294,9 @@ function foldEventBatch(
       case 'commands.updated':
         commands = ev.commands;
         break;
+      case 'mcp_servers.updated':
+        mcpServers = ev.mcp_servers;
+        break;
       case 'command_output.delta':
         if (!outputCloned) {
           output = { ...output };
@@ -320,6 +329,7 @@ function foldEventBatch(
       plans,
       queued,
       commands,
+      mcpServers,
       output,
     },
     gap,

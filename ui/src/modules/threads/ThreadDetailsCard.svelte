@@ -29,6 +29,8 @@
   import RuntimeTaskStop from './runtime/RuntimeTaskStop.svelte';
   import { runtimeThreads } from './runtime/runtimeThreads.svelte';
   import { runtimeViews } from './runtime/runtimeView.svelte';
+  import { mcpServerRows, mcpSummary } from './runtime/mcpServers';
+  import { mcpServersSheet } from './runtime/mcpServersSheet.svelte';
   import { gitAction } from './threadDetails';
   import { anyThread } from './threadRelay';
   import { subagentSection, subagentTally, type ChildTone, type SubagentRow, type SubagentWord } from './runtime/childThreads';
@@ -52,6 +54,9 @@
     ondismiss?: () => void;
   }
   let { cwd, threadId = null, floating = false, ondismiss }: Props = $props();
+  /** "MCP · N servers" (the thread's MCP server list, from its last start). */
+  const mcpServers = $derived(threadId ? (runtimeViews.projections[threadId]?.mcpServers ?? null) : null);
+  const mcpLine = $derived(mcpServers && mcpServers.length ? mcpSummary(mcpServerRows(mcpServers, [], 'The agent')) : null);
 
   let openInEl = $state<HTMLButtonElement | null>(null);
   let branchEl = $state<HTMLButtonElement | null>(null);
@@ -302,6 +307,16 @@
       <p class="dc-note">{!project ? 'Pick a project folder' : repoChecked ? 'Not a git repository' : 'Looking for a git repository…'}</p>
     {/if}
   </div>
+
+  {#if mcpLine && threadId}
+    {@const id = threadId}
+    <div class="dc-group">
+      <button type="button" class="dc-row" title="What this thread’s agent can use over MCP, and why a server is missing" data-testid="details-mcp" onclick={() => mcpServersSheet.open(id)}>
+        <Icon name="plug" size={14} />
+        <span class="dc-label">{mcpLine}</span>
+      </button>
+    </div>
+  {/if}
 
   {#if subagents}
     {@const s = subagents}

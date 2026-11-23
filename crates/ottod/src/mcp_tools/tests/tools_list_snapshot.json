@@ -2444,7 +2444,10 @@
           "type": "string"
         },
         "answers": {
-          "type": "array"
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
         }
       }
     },

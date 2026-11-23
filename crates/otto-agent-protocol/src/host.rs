@@ -35,6 +35,16 @@ pub trait RuntimeHost: Send + Sync + 'static {
         mcp: McpDelivery,
     ) -> Result<Vec<McpServerDef>>;
 
+    /// The MCP servers the spawn just prepared for `session` gave its agent,
+    /// and the enabled ones it could not take with why (its thread's server
+    /// list). Empty by default (tests).
+    fn mcp_status(
+        &self,
+        _session: &RuntimeSession,
+    ) -> Vec<otto_core::agent_runtime::McpServerStatus> {
+        Vec::new()
+    }
+
     /// The child of `session` is gone (exited, stopped, closed): revoke what
     /// its spawn minted (the `otto` MCP credential). Best-effort.
     async fn retire(&self, _session: &RuntimeSession) {}
@@ -247,6 +257,13 @@ impl RuntimeHost for SessionManagerHost {
         self.manager
             .retire_runtime_credentials(&as_agent_session(session))
             .await;
+    }
+
+    fn mcp_status(
+        &self,
+        session: &RuntimeSession,
+    ) -> Vec<otto_core::agent_runtime::McpServerStatus> {
+        self.manager.runtime_mcp_status(&session.id)
     }
 
     fn network_profile_active(&self, session: &RuntimeSession) -> bool {

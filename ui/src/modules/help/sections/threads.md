@@ -61,6 +61,12 @@ Threads (Experimental) is a conversation-first workspace for coding agents. It k
 - **Open** puts a subagent in a tab on the right while the thread stays put; ⌘-click opens it in the main view. Settings ▸ Threads makes the main view the default on this device. Inside a subagent, the first line says whose subagent it is, with **Open parent**.
 - Statuses are always Working, Needs you, Done, Failed or Stopped.
 
+**MCP tools in a thread**
+- **⋯ → MCP servers** lists every server the thread's agent has (Otto's tools, this workspace's servers, the agent's own config), each with a word: Connected, Added, Needs sign-in, Failed, Disabled or Not supported, and why when it isn't connected.
+- When the agent calls a tool that needs your approval, it asks right above the composer: **Deny**, **Allow once**, or (for Otto's reversible tools) **Always allow in this workspace**. The call goes on as soon as you answer; nothing has to be retried.
+- An MCP server that asks you something shows its question in the same place.
+- Turned a server on or off while the agent runs? The thread says **MCP servers changed** with **Restart agent to apply**; the conversation continues.
+
 **Compare models: one prompt, several models**
 - In the new-thread stage, turn on **Compare models** beside the agent chip, then pick 2–4 models; the send button reads e.g. **Ask 3**.
 - They open side by side (Split for 2, Grid for 3–4). Each is a normal, read-only thread with its own composer. ⌘↵ starts them in the background.

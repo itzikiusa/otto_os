@@ -1295,8 +1295,9 @@ impl AcpDriver {
                         t.output.push_str(&tx.text);
                     } else if let ContentBlock::Image(image) = &c.content {
                         media.image(&image.mime_type, &image.data);
-                    } else if let Some(text) = block_text(&c.content) {
-                        t.output.push_str(&text);
+                    } else if let Ok(v) = serde_json::to_value(&c.content) {
+                        // Resource links, embedded resources, audio.
+                        media.block(&v);
                     }
                 }
                 ToolCallContent::Terminal(term) => {
@@ -2382,12 +2383,18 @@ fn raw_output_text(raw: Option<&Value>) -> Option<String> {
     if let Some(s) = raw.as_str() {
         return (!s.is_empty()).then(|| s.to_string());
     }
-    raw.get("output")
+    if let Some(s) = raw
+        .get("output")
         .or_else(|| raw.get("stdout"))
         .or_else(|| raw.get("error"))
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
-        .map(str::to_string)
+    {
+        return Some(s.to_string());
+    }
+    // An MCP tool's own result (`{content: [...], isError}`) as its rawOutput.
+    let text = crate::tool_images::extract(raw.get("content").map(|_| raw)).text;
+    (!text.is_empty()).then_some(text)
 }
 
 impl StructuredDriver for AcpDriver {
@@ -2710,41 +2717,11 @@ impl StructuredDriver for AcpDriver {
             .ok_or_else(|| DriverError("no such pending question".into()))?;
         otto_core::agent_runtime::validate_question_answers(questions, answers)
             .map_err(DriverError)?;
-        if questions
-            .iter()
-            .any(|q| q.id == crate::questions::URL_QUESTION)
-        {
-            // url mode: the person chose to open it (the UI opens the page).
-            let line = json!({"jsonrpc":"2.0","id":rpc_id,"result":{"action":"accept"}});
-            self.state.questions.remove(request_id);
-            let mut step = DriverStep::default();
-            step.write(line.to_string());
-            return Ok(step);
-        }
-        use otto_core::agent_runtime::{QuestionAnswer, QuestionKind};
-        let content: serde_json::Map<String, Value> = answers
-            .iter()
-            .map(|a| {
-                let id = a.question_id();
-                let single = questions
-                    .iter()
-                    .any(|q| q.id == id && q.kind == QuestionKind::Single);
-                match a {
-                    QuestionAnswer::Multi { values, .. } => (id.to_string(), json!(values)),
-                    // Typed text for a single choice is its folded
-                    // `<id>__other` field's answer (`questions::acp_form`).
-                    QuestionAnswer::Text { text, .. } if single => {
-                        (crate::questions::other_field(id), json!(text))
-                    }
-                    _ => (id.to_string(), json!(a.values()[0])),
-                }
-            })
-            .collect();
+        // One mapping for every agent: a url answer is a bare accept, a form
+        // answer its fields (`questions::elicitation_answer`).
+        let result = crate::questions::elicitation_answer(questions, answers);
         let mut step = DriverStep::default();
-        step.write(
-            json!({"jsonrpc":"2.0","id":rpc_id,"result":{"action":"accept","content":content}})
-                .to_string(),
-        );
+        step.write(json!({"jsonrpc":"2.0","id":rpc_id,"result":result}).to_string());
         self.state.questions.remove(request_id);
         Ok(step)
     }

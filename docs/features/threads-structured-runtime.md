@@ -768,6 +768,50 @@ expires them as not resumable. An old card cannot answer a replacement
 process's request. Question payloads and responses are separate from permission
 decisions, so one cannot be used in place of the other.
 
+### MCP in a thread (every provider)
+
+What reaches a thread's agent, and how it is shown (live-checked 2026-11-23
+against claude 2.1.330, codex 0.171.0, agy 1.5.15, grok 1.0.92, muse 1.4.23):
+
+- **Delivery.** Claude, Codex and pi get Otto's `otto` server and the
+  workspace's native servers through their launcher (`--mcp-config`, `-c`,
+  `-e`); ACP agents (Gemini, Antigravity, grok, opencode, Muse) in
+  `session/new|load.mcpServers`, plus `otto-browser` when the thread opted
+  in. Before an ACP spawn Otto takes its own entries out of that CLI's
+  project file (agy `.agents/mcp_config.json`, Gemini `.gemini/settings.json`,
+  grok `.grok/config.toml`; for Muse and opencode every managed `.mcp.json`
+  entry), so the file can't start a second, tokenless `otto` — Muse refused
+  the whole session over the clashing names. pi 0.x has no
+  `registerMcpServer`: it gets nothing and says so.
+- **Server list** (`mcp_servers.updated`, thread ⋯ → MCP servers): what the
+  spawn gave (`added`) and skipped (`unsupported`, with why), refined by
+  name from Claude's `system init.mcp_servers` and Codex's
+  `mcpServer/startupStatus/updated` (both also list the CLI's own servers).
+  ACP agents report no status: their servers stay "Added".
+- **Approvals.** An approval-gated Otto or governed tool asks in the thread's
+  attention dock; the governed call waits up to 5 min and runs on the answer.
+  Supervised Codex asks MCP tool approval itself, as an elicitation with an
+  empty form (`_meta.codex_approval_kind: "mcp_tool_call"`): it is an approval
+  (Allow · Always allow · Allow for this thread · Deny).
+- **Elicitation.** Claude's `elicitation` control request and Codex's
+  `mcpServer/elicitation/request` are question cards (answers go back as
+  `{action, content}`; URL mode is declined). ACP `elicitation/create` was
+  already one. Live: agy answers `cancel` itself and Muse hangs, neither
+  forwards a server's elicitation over ACP; grok never forwarded one.
+- **Results.** Governed servers' content blocks pass through the bridge
+  unchanged (images stay images); resource links, resources and audio read as
+  words, never base64; an ACP MCP result given only as `rawOutput` is read.
+  Cards are titled "<server> · <tool>" for every provider's spelling.
+  Live: agy returns no result content for a successful MCP call (it keeps
+  images in its own brain folder), grok 1.0.92 fails the turn
+  ("Internal error") on an MCP image result.
+- **Changes mid-thread.** The bridge sends `tools/list_changed` after a call
+  when the enabled Otto / governed tools changed; a native server turned on or
+  off shows "MCP servers changed · Restart agent to apply".
+- **Subagents.** Live: a Claude `Task` subagent and a Codex spawned agent both
+  called a workspace MCP server; an Otto child thread gets its own spawn
+  preparation (its own `otto` credential and the workspace's servers).
+
 ### Tool-result images
 
 `dynamic_tool.images?` contains `{mime, data_base64}` records alongside

@@ -7,6 +7,7 @@
 // has loaded, from the persisted waiting list. Logic is pure in
 // threadAttention.ts (unit/threadsAttention.test.ts).
 import type { Session } from '../../lib/api/types';
+import { mcpAsks } from './runtime/mcpAsksStore.svelte';
 import { events } from '../../lib/events.svelte';
 import { keyContext } from '../../lib/keys';
 import { router } from '../../lib/router.svelte';
@@ -28,7 +29,7 @@ export function threadNeedsYou(id: string): boolean {
 
 /** The one state a Threads list row shows for `s` (dot, label, tooltip). */
 export function threadRowState(s: Session): SessionStateInfo {
-  const needs = ws.needsYou[s.id] === true || runtimeThreads.get(s.id)?.status === 'awaiting_permission';
+  const needs = ws.needsYou[s.id] === true || runtimeThreads.get(s.id)?.status === 'awaiting_permission' || mcpAsks.waiting(s.id);
   return withBackgroundState(
     sessionState(s, ws.statusMap[s.id] ?? s.status, needs, { stale: events.state !== 'connected' }),
     runtimeThreads.get(s.id)?.background_tasks?.length ?? 0,

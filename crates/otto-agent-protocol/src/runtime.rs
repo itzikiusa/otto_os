@@ -36,6 +36,7 @@ mod loop_guard;
 mod outcome;
 mod paging;
 mod peers;
+mod provider_lists;
 mod reopen;
 mod request_ids;
 mod secret_request;
@@ -59,12 +60,12 @@ use chrono::Utc;
 use dashmap::DashMap;
 use otto_core::agent_runtime::{
     ApprovalDecision, Attachment, AttachmentKind, CancelReason, ContextHandoff,
-    CreateRuntimeSessionReq, PlanArtifact, PromptDelivery, ProviderCommand, ProviderFailure,
-    ProviderSession, ProviderSessionStatus, ProviderThread, ProviderTurn, ProviderTurnStatus,
-    QueuedPrompt, ResponseCapability, RuntimeEvent, RuntimeEventBody, RuntimePromptReq,
-    RuntimePromptResp, RuntimeProvider, RuntimeReplay, RuntimeRequest, RuntimeRequestStatus,
-    RuntimeSession, RuntimeSessionStatus, RuntimeSnapshot, TurnItem, TurnItemKind, TurnItemStatus,
-    TurnOrigin, TurnTerminalStatus, TurnTokenUsage,
+    CreateRuntimeSessionReq, McpServerStatus, PlanArtifact, PromptDelivery, ProviderCommand,
+    ProviderFailure, ProviderSession, ProviderSessionStatus, ProviderThread, ProviderTurn,
+    ProviderTurnStatus, QueuedPrompt, ResponseCapability, RuntimeEvent, RuntimeEventBody,
+    RuntimePromptReq, RuntimePromptResp, RuntimeProvider, RuntimeReplay, RuntimeRequest,
+    RuntimeRequestStatus, RuntimeSession, RuntimeSessionStatus, RuntimeSnapshot, TurnItem,
+    TurnItemKind, TurnItemStatus, TurnOrigin, TurnTerminalStatus, TurnTokenUsage,
 };
 use otto_core::{new_id, Error, Id, Result};
 use otto_state::{AgentRuntimeRepo, NewRuntimeSession, RawRuntimeEntityRow, RuntimeEntityRow};
@@ -155,6 +156,7 @@ const K_REQUEST: &str = "runtime_request";
 const K_PLAN: &str = "plan";
 const K_QUEUE: &str = "queue";
 const K_COMMANDS: &str = "commands";
+const K_MCP: &str = "mcp_servers";
 
 /// A queued message as persisted: the whole prompt (its images / files
 /// too), so it goes out unchanged after a restart.
@@ -224,6 +226,8 @@ pub(crate) struct Projection {
     queue: Vec<QueuedRecord>,
     /// The agent's own slash commands.
     commands: Vec<ProviderCommand>,
+    /// The MCP servers its agent has (`provider_lists`).
+    mcp_servers: Vec<McpServerStatus>,
     next_item_ordinal: u32,
     next_turn_ordinal: u32,
 }
@@ -277,6 +281,7 @@ impl Projection {
                 K_COMMANDS => {
                     p.commands = serde_json::from_str(s).unwrap_or_default();
                 }
+                K_MCP => p.mcp_servers = serde_json::from_str(s).unwrap_or_default(),
                 _ => {}
             }
         }
@@ -312,6 +317,7 @@ impl Projection {
             plans,
             queued_prompts: self.queue.iter().map(QueuedRecord::public).collect(),
             commands: self.commands.clone(),
+            mcp_servers: self.mcp_servers.clone(),
             has_older: false,
             oldest_turn_ordinal: None,
             older_turns: 0,
@@ -370,6 +376,10 @@ impl Projection {
             RuntimeEventBody::CommandsUpdated { commands } => {
                 self.commands = commands.clone();
                 Some(row(K_COMMANDS, "commands", json(commands)))
+            }
+            RuntimeEventBody::McpServersUpdated { mcp_servers } => {
+                self.mcp_servers = mcp_servers.clone();
+                Some(row(K_MCP, K_MCP, json(mcp_servers)))
             }
             // The queue's row (the whole prompts) is written by `emit_queue`.
             RuntimeEventBody::CommandOutputDelta { .. }
@@ -1216,7 +1226,8 @@ impl AgentRuntime {
                 .store(false, std::sync::atomic::Ordering::Release);
             st.epoch += 1;
             let epoch = st.epoch;
-            let step = driver.start(&ctx);
+            let spawn_mcp = self.inner.host.mcp_status(&session);
+            let step = provider_lists::with_spawn_mcp(driver.start(&ctx), spawn_mcp);
             st.proc = Some(Proc {
                 epoch,
                 request_ids: RequestIds::new(),
@@ -2410,29 +2421,6 @@ fn transcript_title(path: &std::path::Path) -> Option<String> {
     find(&head)
 }
 
-/// An agent's command list as the session keeps it: at most 400 commands,
-/// unique by name, each description one line of at most 160 characters
-/// (Claude Code lists every skill with its whole description).
-fn bounded_commands(list: Vec<ProviderCommand>) -> Vec<ProviderCommand> {
-    let mut seen = std::collections::HashSet::new();
-    list.into_iter()
-        .filter(|c| !c.name.trim().is_empty() && seen.insert(c.name.clone()))
-        .take(400)
-        .map(|mut c| {
-            let line = c
-                .description
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            c.description = match line.char_indices().nth(160) {
-                Some((i, _)) => format!("{}…", line[..i].trim_end()),
-                None => line,
-            };
-            c
-        })
-        .collect()
-}
-
 /// Persist and publish the queue (`queue.updated`). Returns its sequence.
 fn emit_queue(inner: &Inner, live: &Live, st: &mut State) -> u64 {
     let queued_prompts = st.proj.queue.iter().map(QueuedRecord::public).collect();
@@ -3390,7 +3378,7 @@ pub(super) fn apply_step_opts(
                 }
             }
             DriverEvent::Commands(list) => {
-                let commands = bounded_commands(list);
+                let commands = provider_lists::bounded_commands(list);
                 if commands != st.proj.commands {
                     emit(
                         inner,
@@ -3401,6 +3389,9 @@ pub(super) fn apply_step_opts(
                 }
             }
             DriverEvent::Title(title) => adopt_title(inner, live, st, &title),
+            DriverEvent::McpServers { servers, spawn } => {
+                provider_lists::on_mcp(inner, live, st, servers, spawn)
+            }
             DriverEvent::ContextUsage(usage)
                 if st
                     .proj
