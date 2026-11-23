@@ -94,9 +94,9 @@
   function councilMenu(e: MouseEvent): void {
     if (!anchorId) return;
     ctxMenu.show(e, [
-      { label: 'Ask every seat…', icon: 'send', action: () => void askEverySeat(anchorId) },
-      { label: 'Synthesize with', icon: 'sparkle', disabled: !gate.enabled, title: gate.reason || undefined, children: judgeItems(anchorId) },
-      ...(busy.length ? [{ label: `Stop ${busy.length === 1 ? 'the working seat' : `${busy.length} working seats`}`, icon: 'stop', action: () => void stopAll() }] : []),
+      { label: 'Ask every model…', icon: 'send', action: () => void askEverySeat(anchorId) },
+      { label: 'Compare answers with', icon: 'sparkle', disabled: !gate.enabled, title: gate.reason || undefined, children: judgeItems(anchorId) },
+      ...(busy.length ? [{ label: `Stop ${busy.length === 1 ? 'the working model' : `${busy.length} working models`}`, icon: 'stop', action: () => void stopAll() }] : []),
       { separator: true },
       ...answerItems(anchorId),
     ]);
@@ -111,16 +111,16 @@
     class="ps"
     class:phone
     role="toolbar"
-    aria-label={council ? `Council ${council.title}` : 'Panes'}
+    aria-label={council ? `Compare models: ${council.title}` : 'Panes'}
     data-testid="threads-pane-strip"
     data-council={council ? council.id : undefined}
   >
     {#if council && !phone}
-      <span class="ps-title ellipsis" title="Council · {council.title}" data-testid="pane-strip-title">
-        <Icon name="people" size={13} /><span class="ellipsis">Council · {council.title}</span>
+      <span class="ps-title ellipsis" title="Compare models · {council.title}" data-testid="pane-strip-title">
+        <Icon name="people" size={13} /><span class="ellipsis">Compare models · {council.title}</span>
       </span>
     {/if}
-    <div class="ps-chips" role="group" aria-label={council ? 'Seats' : 'Panes'}>
+    <div class="ps-chips" role="group" aria-label={council ? 'Compared models' : 'Panes'}>
       {#each model.chips as c (c.id)}
         <button
           type="button"
@@ -148,7 +148,7 @@
     <div class="ps-actions">
       {#if phone}
         <button type="button" class="btn small" aria-haspopup="menu" data-testid="pane-strip-council-menu" onclick={councilMenu}>
-          Council <Icon name="chevronDown" size={12} />
+          Compare <Icon name="chevronDown" size={12} />
         </button>
       {:else if !council}
         <button type="button" class="btn small ghost" data-testid="pane-strip-message" onclick={() => void messagePanes(paneIds)}>
@@ -156,7 +156,7 @@
         </button>
       {:else}
         <button type="button" class="btn small ghost" data-testid="pane-strip-ask" onclick={() => anchorId && void askEverySeat(anchorId)}>
-          <Icon name="send" size={12} />Ask every seat…
+          <Icon name="send" size={12} />Ask every model…
         </button>
         {#if busy.length}
           <button type="button" class="btn small ghost" disabled={stopping} data-testid="pane-strip-stop" onclick={() => void stopAll()}>
@@ -170,18 +170,18 @@
             class="btn small"
             class:primary={gate.enabled && !answered}
             aria-disabled={!gate.enabled}
-            title={gate.enabled ? 'Compare the seats’ answers in a new thread' : gate.reason}
+            title={gate.enabled ? 'Compare the answers in a new thread' : gate.reason}
             data-testid="pane-strip-synthesize"
             onclick={synthesize}
           >
-            <Icon name="sparkle" size={12} />{synth ? 'Synthesize again' : 'Synthesize'}
+            <Icon name="sparkle" size={12} />{synth ? 'Compare again' : 'Compare answers'}
           </button>
           <button
             type="button"
             class="btn small ps-caret"
             aria-haspopup="menu"
-            aria-label="Synthesize with…"
-            title={gate.enabled ? 'Synthesize with…' : gate.reason}
+            aria-label="Compare answers with…"
+            title={gate.enabled ? 'Compare answers with…' : gate.reason}
             aria-disabled={!gate.enabled}
             data-testid="pane-strip-synthesize-with"
             onclick={(e) => gate.enabled && anchorId && ctxMenu.show(e, judgeItems(anchorId))}

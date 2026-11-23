@@ -233,3 +233,35 @@ export function childRollup(rows: readonly RuntimeSession[], parentId: string): 
   }
   return out;
 }
+
+/** One row of thread details' "Subagents" section. */
+export interface SubagentRow {
+  id: string;
+  title: string;
+  provider: string;
+  /** Working · Needs you · Done · Failed · Stopped (the parent's row: null). */
+  status: string | null;
+  tone: 'live' | 'ask' | 'done' | 'failed' | 'off';
+  /** "↑ parent" row: this thread was opened from it. */
+  parent?: true;
+}
+
+/** The "Subagents" section of `threadId`'s details (T3 Code's Lineage,
+ *  ThreadRelationshipsControl.tsx): its parent first, then its subagents
+ *  still at work (oldest first), then the "Previous" ones (newest first).
+ *  From the rows alone — no projection per subagent. */
+export function subagentSection(rows: readonly RuntimeSession[], threadId: string): { parent: SubagentRow | null; running: SubagentRow[]; previous: SubagentRow[] } {
+  const me = rows.find((r) => r.id === threadId);
+  const ofId = childOf(me)?.id;
+  const p = ofId ? rows.find((r) => r.id === ofId) : undefined;
+  const parent: SubagentRow | null = p ? { id: p.id, title: p.title, provider: p.provider, status: null, tone: 'off', parent: true } : null;
+  const running: SubagentRow[] = [];
+  const previous: SubagentRow[] = [];
+  for (const k of childrenOf(rows, threadId)) {
+    const st = childState(k, null);
+    const row: SubagentRow = { id: k.id, title: k.title, provider: k.provider, status: st.label, tone: rowTone(st.tone) };
+    (row.tone === 'live' || row.tone === 'ask' ? running : previous).push(row);
+  }
+  previous.reverse();
+  return { parent, running, previous };
+}

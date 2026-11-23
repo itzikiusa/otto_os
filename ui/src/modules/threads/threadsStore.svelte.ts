@@ -9,7 +9,7 @@ import type { TrailEvent } from '../../lib/api/types';
 import { threadsChrome } from './threadsChrome.svelte';
 
 export type ThreadsLayoutMode = 'single' | 'split' | 'grid';
-export type ThreadsInspectorTab = 'files' | 'changes' | 'pr' | 'side' | 'connections' | 'browser';
+export type ThreadsInspectorTab = 'files' | 'changes' | 'pr' | 'side' | 'connections' | 'browser' | 'subagent';
 
 export interface OpenFileTab {
   path: string;

@@ -21,7 +21,7 @@ const ROW_ONLY = new Set([
   'Move to History', 'Move back to Active', 'Settle to History',
 ]);
 /** Side by side needs room; the hand-off is meaningless on the phone itself. */
-const NOT_COMPACT = new Set(['Open with parent in Split', 'Open council side by side']);
+const NOT_COMPACT = new Set(['Open with parent in Split', 'Open side by side']);
 const PHONE_HANDOFF = 'Continue on phone…';
 
 const isTerminal = (i: MenuItem): boolean => !!i.label && /terminal drawer/i.test(i.label);

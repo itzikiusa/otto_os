@@ -1,6 +1,6 @@
 // Client-side interactive slash commands for Threads & ConversationView.
 // Turns `/model`, `/effort`, `/plan`, `/mode`, `/status`, `/diff`, `/files`,
-// `/terminal`, `/new`, `/clear`, `/fork`, and `/review` into real interactive
+// `/terminal`, `/new`, `/clear`, `/new-beside`, and `/review` into real interactive
 // in-thread controls (matching T3Code & PandaCode) instead of sending dead
 // text to a hidden TUI.
 import type { SlashCommand } from './api/types';
@@ -99,8 +99,8 @@ export const INTERACTIVE_SLASH_COMMANDS: readonly ComposerSlashCommand[] = [
     source: 'interactive',
   },
   {
-    name: 'fork',
-    description: 'Open a parallel thread beside this one in Split view',
+    name: 'new-beside',
+    description: 'Open a new thread beside this one in Split view',
     source: 'interactive',
   },
   {
@@ -141,7 +141,7 @@ const IMMEDIATE_PICKER_COMMANDS = new Set([
   'terminal',
   'new',
   'clear',
-  'fork',
+  'new-beside',
   'review',
 ]);
 
@@ -221,7 +221,7 @@ export function parseInteractiveSlashInput(raw: string): ParsedSlashIntent | nul
       return { kind: 'new-thread', beside: false };
     case 'clear':
       return { kind: 'fresh-context' };
-    case 'fork':
+    case 'new-beside':
       return { kind: 'new-thread', beside: true };
     case 'btw':
       return { kind: 'side-chat', question: arg };

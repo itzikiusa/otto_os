@@ -49,7 +49,7 @@ test('a child thread on a phone: its row in the parent, Open, and back', async (
   await row.getByTestId('runtime-item-open').tap();
   await expect(page.getByTestId('runtime-thread-rt_ph_kid')).toBeVisible();
   const back = page.getByTestId('threads-back-to-parent');
-  await expect(back).toContainText('Plan the release');
+  await expect(page.getByTestId('runtime-subagent-of').first()).toContainText('Subagent of Plan the release');
   await expectFullyInViewport(page, back);
   await expectNoHorizontalOverflow(page);
 

@@ -85,3 +85,21 @@ test('a subagent’s approval is answered in the parent, and one Stop stops the 
   const stops = () => page.evaluate(() => ((window as unknown as { __mockRuntime: { familyStops?: unknown[] } }).__mockRuntime.familyStops ?? []));
   await expect.poll(stops).toEqual([{ id: 'rt_ap_lead', background: true }]);
 });
+
+test('a subagent opens as a sheet over its parent on a phone, by touch', async ({ page }, info) => {
+  await delegated(page);
+  const thread = page.getByTestId('runtime-thread-rt_sub_lead');
+  await thread.getByTestId('runtime-child-group-toggle').tap();
+  await thread.getByTestId('runtime-child-row-01M84S0000000000000000000C').getByTestId('runtime-item-open').tap();
+  const pane = page.getByTestId('runtime-subagent-pane');
+  await expect(pane).toBeVisible();
+  await expect(pane.getByTestId('runtime-subagent-of')).toContainText('Subagent of Share links');
+  await expectNoHorizontalOverflow(page);
+  for (const scheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await page.screenshot({ path: info.outputPath(`subagent-tab-phone-${scheme}.png`), animations: 'disabled' });
+  }
+  await page.emulateMedia({ colorScheme: 'light' });
+  await pane.getByTestId('threads-back-to-parent').tap();
+  await expect(page.getByTestId('runtime-thread-rt_sub_lead')).toBeVisible();
+});

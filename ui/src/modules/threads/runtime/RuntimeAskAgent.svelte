@@ -115,8 +115,8 @@
     class="icon-btn"
     aria-haspopup="dialog"
     aria-expanded={open}
-    aria-label={targets.length ? 'Ask one more agent' : 'Ask another agent'}
-    title={full ? `At most ${ASK_MAX_TARGETS} agents at once` : 'Ask another agent: a new thread on another model gets this message and its images — not this conversation. Its answer comes back to you as a card (pick more to ask several; or type @)'}
+    aria-label={targets.length ? 'Delegate to one more' : 'Delegate to…'}
+    title={full ? `At most ${ASK_MAX_TARGETS} agents at once` : 'Delegate to…: a subagent on another model gets this message, its images and a short summary of this conversation. Its answer comes back to you as a card (pick more to ask several; or type @)'}
     data-testid="runtime-ask-agent"
     disabled={disabled || full || allowedProviders.length === 0}
     onpointerenter={() => ModelPicker.prefetch()}
@@ -138,7 +138,7 @@
   />
   {#if targets.length > 0 && allowAgents}
     <div class="aa-chips" role="group" aria-label="Agents this message goes to" data-testid="runtime-ask-targets">
-      <span class="aa-lead">{targets.length > 1 ? `Ask ${targets.length} agents` : 'Ask'}</span>
+      <span class="aa-lead">{targets.length > 1 ? `Delegate to ${targets.length}` : 'Delegate to'}</span>
       {#each targets as t, i (`${t.provider}:${t.model}:${t.effort}`)}
         <span class="aa-chip">
           {#if hasProviderIcon(t.provider)}<ProviderIcon provider={t.provider} size={12} />{/if}

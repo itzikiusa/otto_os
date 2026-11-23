@@ -14,6 +14,7 @@ interface Persisted {
   terminalIds?: string[];
   terminalSplit?: boolean;
   lastProjectByWs?: Record<string, string>;
+  subagentsIn?: 'panel' | 'main';
 }
 
 const SURFACES: readonly ThreadsInspectorTab[] = ['files', 'changes', 'pr', 'side', 'connections', 'browser'];
@@ -46,6 +47,10 @@ class ThreadsChrome {
   /** Folder of the last thread started per workspace (Scratch included): the
    *  new-thread stage opens there until the person picks another. */
   lastProjectByWs = $state<Record<string, string>>({});
+  /** The subagent open as the right panel's tab (not remembered). */
+  subagentId = $state<string | null>(null);
+  /** Where a click opens a subagent on this device (⌘-click: the other). */
+  subagentsIn = $state<'panel' | 'main'>('panel');
 
   constructor() {
     const p = read();
@@ -56,6 +61,7 @@ class ThreadsChrome {
     if (typeof p.terminalSplit === 'boolean') this.terminalSplit = p.terminalSplit;
     if (p.lastProjectByWs && typeof p.lastProjectByWs === 'object') this.lastProjectByWs = p.lastProjectByWs;
     this.terminalActive = this.terminalIds[0] ?? null;
+    if (p.subagentsIn === 'main') this.subagentsIn = 'main';
   }
 
   private save(): void {
@@ -67,6 +73,7 @@ class ThreadsChrome {
         terminalIds: this.terminalIds,
         terminalSplit: this.terminalSplit,
         lastProjectByWs: this.lastProjectByWs,
+        subagentsIn: this.subagentsIn,
       };
       localStorage.setItem(KEY, JSON.stringify(v));
     } catch {
@@ -94,6 +101,11 @@ class ThreadsChrome {
     this.surfaces = this.surfaces.filter((s) => s !== tab);
     this.save();
     return this.surfaces[Math.min(Math.max(i, 0), this.surfaces.length - 1)] ?? null;
+  }
+
+  setSubagentsIn(where: 'panel' | 'main'): void {
+    this.subagentsIn = where;
+    this.save();
   }
 
   toggleCard(): void {

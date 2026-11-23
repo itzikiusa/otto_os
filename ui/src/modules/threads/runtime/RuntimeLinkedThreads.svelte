@@ -35,18 +35,18 @@
       class="rt-chip"
       aria-haspopup="dialog"
       aria-expanded={open}
-      aria-label="Linked threads: {linked.length}"
-      title="Linked threads"
+      aria-label="Subagents: {linked.length}"
+      title="Subagents"
       data-testid="runtime-linked"
       onclick={() => (open = !open)}
     >
-      <Icon name="people" size={12} />{linked.length} linked
+      <Icon name="people" size={12} />{linked.length - 1} {linked.length === 2 ? 'subagent' : 'subagents'}
     </button>
   </div>
 {/if}
 {#if open && btn}
-  <ThreadPopover anchor={btn} label="Linked threads" onclose={() => (open = false)}>
-    <ul class="rt-list" aria-label="Linked threads">
+  <ThreadPopover anchor={btn} label="Subagents" onclose={() => (open = false)}>
+    <ul class="rt-list" aria-label="Subagents">
       {#each linked as t (t.id)}
         {@const current = t.id === sessionId}
         {@const st = relatedStatus(t.status)}

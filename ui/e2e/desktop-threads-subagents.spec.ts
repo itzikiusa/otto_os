@@ -104,3 +104,36 @@ test('a subagent’s approval is answered in the parent, and one Stop stops the 
   const stops = () => page.evaluate(() => ((window as unknown as { __mockRuntime: { familyStops?: unknown[] } }).__mockRuntime.familyStops ?? []));
   await expect.poll(stops).toEqual([{ id: 'rt_ap_lead', background: true }]);
 });
+
+test('a subagent opens as a tab beside its parent; ⌘-click and the setting open it in the main view', async ({ page }, info) => {
+  await delegated(page);
+  const thread = page.getByTestId('runtime-thread-rt_sub_lead');
+  await thread.getByTestId('runtime-child-group-toggle').click();
+  await thread.getByTestId('runtime-child-row-01M84S0000000000000000000C').getByTestId('runtime-item-open').click();
+  const pane = page.getByTestId('runtime-subagent-pane');
+  await expect(pane).toBeVisible();
+  await expect(pane.getByTestId('runtime-subagent-of')).toContainText('Subagent of Share links');
+  await expect(pane.getByTestId('runtime-subagent-of')).toContainText('Share link docs');
+  await expect(page.getByTestId('threads-tab-subagent')).toContainText('Share link docs');
+  await expect(thread).toBeVisible();
+  for (const scheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await page.screenshot({ path: info.outputPath(`subagent-tab-desktop-${scheme}.png`), animations: 'disabled' });
+  }
+  await page.emulateMedia({ colorScheme: 'light' });
+
+  // ⌘-click: the main view, with the fixed "Subagent of …" line.
+  await thread.getByTestId('runtime-child-row-01M84S0000000000000000000A').getByTestId('runtime-item-open').click({ modifiers: ['ControlOrMeta'] });
+  await expect(page.locator('main, body').getByTestId('runtime-thread-01M84S0000000000000000000A').first()).toBeVisible();
+  await expect(page.getByTestId('runtime-subagent-of').first()).toContainText('Subagent of Share links');
+  await page.getByTestId('threads-back-to-parent').first().click();
+  await expect(page.getByTestId('runtime-thread-rt_sub_lead')).toBeVisible();
+
+  // The one setting flips the default.
+  await thread.getByTestId('runtime-child-group-toggle').click();
+  await thread.getByTestId('runtime-child-row-01M84S0000000000000000000C').getByTestId('runtime-item-open').click();
+  await page.getByTestId('runtime-subagents-in-main').check();
+  await thread.getByTestId('runtime-child-row-01M84S0000000000000000000B').getByTestId('runtime-item-open').click();
+  await expect(page.getByTestId('threads-back-to-parent').first()).toBeVisible();
+  await expect(page.getByTestId('runtime-subagent-of').first()).toContainText('Share link tests');
+});

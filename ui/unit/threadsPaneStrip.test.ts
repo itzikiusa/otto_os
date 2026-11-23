@@ -60,12 +60,12 @@ test('seat labels: meta.council.seat, else seat order; effort, model and the syn
   const s2 = row('s2', { provider: 'codex', parent_id: 's1', meta: seatMeta(2, { model: 'sol' }) });
   const s3 = row('s3', { parent_id: 's1', meta: seatMeta(0) });
   const seats = [s1, s2, s3];
-  assert.equal(ps.seatLabel(s1, seats, namer), 'Seat 1 · Claude · High');
-  assert.equal(ps.seatLabel(s1, seats, namer, true), 'Seat 1 · Claude');
-  assert.equal(ps.seatLabel(s2, seats, namer), 'Seat 2 · SOL');
+  assert.equal(ps.seatLabel(s1, seats, namer), '1 · Claude · High');
+  assert.equal(ps.seatLabel(s1, seats, namer, true), '1 · Claude');
+  assert.equal(ps.seatLabel(s2, seats, namer), '2 · SOL');
   assert.equal(ps.seatNo(s3, seats), 3, 'no seat number: its place in seat order');
   const judge = row('j', { parent_id: 's1', meta: seatMeta(0, { provider: 'codex' }, 'synthesis') });
-  assert.equal(ps.seatLabel(judge, seats, namer), 'Synthesis · Codex');
+  assert.equal(ps.seatLabel(judge, seats, namer), 'Compared · Codex');
   assert.equal(ps.councilTitle('Cache choice · Seat 3 · Claude High'), 'Cache choice');
   assert.equal(ps.councilTitle('Cache plan · claude'), 'Cache plan', 'titles before seat numbers');
 });
@@ -82,9 +82,9 @@ test('the strip is the council row only when every pane is one council', () => {
   const m = ps.stripModel(input(['s1', 's2'], all, { s1: answered('Redis', 1200) }));
   assert.equal(m.council?.title, 'Cache');
   assert.deepEqual(m.chips.map((c) => [c.label, c.state, c.shown]), [
-    ['Seat 1 · Claude', 'answered', true],
-    ['Seat 2 · Claude', 'working', true],
-    ['Seat 3 · Claude', 'idle', false],
+    ['1 · Claude', 'answered', true],
+    ['2 · Claude', 'working', true],
+    ['3 · Claude', 'idle', false],
   ], 'every seat has a chip, shown or not');
   assert.equal(m.chips[0].tokens, 1200);
   assert.equal(m.tokens, 1200);
@@ -93,17 +93,17 @@ test('the strip is the council row only when every pane is one council', () => {
 
 test('Synthesize waits for working seats and for a first answer, and says why', () => {
   const chip = (seat: number, state: import('../src/modules/threads/runtime/paneStrip.ts').PaneState) => ({ id: `s${seat}`, label: '', name: '', provider: 'claude', state, seat, tokens: 0, shown: true, focused: false });
-  assert.deepEqual(ps.synthGate([chip(1, 'answered'), chip(2, 'working')]), { enabled: false, reason: 'Waiting for seat 2' });
-  assert.deepEqual(ps.synthGate([chip(1, 'working'), chip(2, 'needs-you'), chip(3, 'working')]), { enabled: false, reason: 'Waiting for seats 1, 2 and 3' });
-  assert.deepEqual(ps.synthGate([chip(1, 'failed'), chip(2, 'idle')]), { enabled: false, reason: 'No seat has answered yet' });
+  assert.deepEqual(ps.synthGate([chip(1, 'answered'), chip(2, 'working')]), { enabled: false, reason: 'Waiting for model 2' });
+  assert.deepEqual(ps.synthGate([chip(1, 'working'), chip(2, 'needs-you'), chip(3, 'working')]), { enabled: false, reason: 'Waiting for models 1, 2 and 3' });
+  assert.deepEqual(ps.synthGate([chip(1, 'failed'), chip(2, 'idle')]), { enabled: false, reason: 'No model has answered yet' });
   assert.deepEqual(ps.synthGate([chip(1, 'failed'), chip(2, 'answered'), { ...chip(0, 'working'), seat: 0 }]), { enabled: true, reason: '' }, 'a running judge does not block a new synthesis');
   assert.deepEqual(ps.stoppable([chip(1, 'answered'), chip(2, 'working'), chip(3, 'needs-you')]).map((c) => c.id), ['s2', 's3']);
 });
 
 test('Ask every seat says how many and which restart', () => {
-  assert.equal(ps.askSeatsText([row('a'), row('b', { status: 'dormant' }), row('c', { status: 'dormant' }), row('d', { status: 'closed' })]), '3 seats (2 stopped — they will restart)');
-  assert.equal(ps.askSeatsText([row('a'), row('b')]), '2 seats');
-  assert.equal(ps.askSeatsText([row('a'), row('b', { status: 'dormant' })]), '2 seats (1 stopped — it will restart)');
+  assert.equal(ps.askSeatsText([row('a'), row('b', { status: 'dormant' }), row('c', { status: 'dormant' }), row('d', { status: 'closed' })]), '3 models (2 stopped — they will restart)');
+  assert.equal(ps.askSeatsText([row('a'), row('b')]), '2 models');
+  assert.equal(ps.askSeatsText([row('a'), row('b', { status: 'dormant' })]), '2 models (1 stopped — it will restart)');
 });
 
 test('side by side with four seats keeps the synthesis and the three most recent seats', () => {
@@ -137,9 +137,9 @@ test('the add-a-thread slot: needs you, then working, then recent; never shown o
 
 test('council route errors read as sentences, never "conflict:"', () => {
   const err = (message: string) => ({ status: 409, message });
-  assert.equal(ps.councilErrorText(err('conflict: no seat has answered yet — nothing to synthesize')), 'No seat has answered yet, so there is nothing to compare.');
+  assert.equal(ps.councilErrorText(err('conflict: no seat has answered yet — nothing to synthesize')), 'No model has answered yet, so there is nothing to compare.');
   assert.equal(ps.councilErrorText(err('conflict: seat 2 is still working — wait for it or stop it, then synthesize')), 'Seat 2 is still working. Wait for it or stop it, then synthesize.');
-  assert.equal(ps.councilErrorText(err('conflict: seat 1 is closed — reopen it, then synthesize')), 'Seat 1 is closed. Reopen it, then synthesize.');
-  assert.equal(ps.councilErrorText(err('conflict: seat 2 (codex): busy')), 'Seat 2 (codex): Busy.');
+  assert.equal(ps.councilErrorText(err('conflict: seat 1 is closed — reopen it, then synthesize')), 'The first compared thread is closed. Reopen it, then compare.');
+  assert.equal(ps.councilErrorText(err('conflict: seat 2 (codex): busy')), 'Model 2 (codex): Busy.');
   assert.ok(!/conflict/i.test(ps.councilErrorText(err('conflict: the group is full'))));
 });

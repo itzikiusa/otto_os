@@ -99,15 +99,15 @@ test('a council runs from the strip: seat states, Synthesize with its reason, St
   const strip = page.getByTestId('threads-pane-strip');
   await expect(strip).toBeVisible();
   await expect(strip).toHaveAttribute('data-council', /.+/);
-  await expect(strip.getByTestId('pane-strip-title')).toContainText('Council · Cache choice');
+  await expect(strip.getByTestId('pane-strip-title')).toContainText('Compare models · Cache choice');
   for (const [i, id] of seats.entries()) {
     const chip = strip.getByTestId(`pane-chip-${id}`);
-    await expect(chip).toContainText(`Seat ${i + 1}`);
+    await expect(chip).toContainText(`${i + 1} · `);
     await expect(chip).toHaveAttribute('data-state', 'answered', { timeout: 30_000 });
   }
   // Two seats of one agent are told apart in their pane headers.
-  await expect(page.getByTestId(`pane-title-${seats[0]}`)).toHaveText(/^Seat 1 · /);
-  await expect(page.getByTestId(`pane-title-${seats[1]}`)).toHaveText(/^Seat 2 · .*High/);
+  await expect(page.getByTestId(`pane-title-${seats[0]}`)).toHaveText(/^1 · /);
+  await expect(page.getByTestId(`pane-title-${seats[1]}`)).toHaveText(/^2 · .*High/);
   const synth = strip.getByTestId('pane-strip-synthesize');
   await expect(synth).toHaveClass(/primary/);
 
@@ -119,8 +119,8 @@ test('a council runs from the strip: seat states, Synthesize with its reason, St
   await expect(strip.getByTestId(`pane-chip-${seats[0]}`)).toHaveAttribute('data-state', 'working', { timeout: 20_000 });
   await expect(synth).toHaveAttribute('aria-disabled', 'true');
   await expect(synth).not.toHaveClass(/primary/);
-  await expect(synth).toHaveAttribute('title', 'Waiting for seat 1');
-  await expect(strip.getByTestId('pane-strip-why')).toHaveText('Waiting for seat 1');
+  await expect(synth).toHaveAttribute('title', 'Waiting for model 1');
+  await expect(strip.getByTestId('pane-strip-why')).toHaveText('Waiting for model 1');
   await shot(page, 'council-strip-mid-run');
 
   // Stop all stops the working seat.
@@ -133,7 +133,7 @@ test('a council runs from the strip: seat states, Synthesize with its reason, St
   await synth.click();
   const panes = page.getByTestId('threads-canvas').locator('[data-testid^="thread-pane-"]');
   await expect(panes).toHaveCount(4, { timeout: 30_000 });
-  const judgeChip = strip.locator('[data-testid^="pane-chip-"]', { hasText: 'Synthesis' });
+  const judgeChip = strip.locator('[data-testid^="pane-chip-"]', { hasText: 'Compared' });
   await expect(judgeChip).toHaveAttribute('data-state', 'answered', { timeout: 40_000 });
   await expect(page.locator('.toast', { hasText: /conflict/i })).toHaveCount(0);
   const cont = strip.getByTestId('pane-strip-continue');

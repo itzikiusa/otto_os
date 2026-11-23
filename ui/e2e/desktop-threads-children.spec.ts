@@ -85,8 +85,9 @@ test('Ask another agent opens a linked child shown live in the parent and nested
   await page.getByTestId('thread-family-fold-rt_lead').click();
   await expect(page.getByTestId(`thread-row-${childId}`)).toBeVisible();
 
-  // Open beside: parent and child side by side.
-  await card.getByTestId('runtime-item-beside').click();
+  // Open: a tab in the right panel while the parent stays put.
+  await card.getByTestId('runtime-item-open').click();
+  await expect(page.getByTestId('runtime-subagent-pane')).toBeVisible();
   await expect(page.getByTestId(`runtime-thread-${childId}`)).toBeVisible();
   await expect(page.getByTestId('runtime-thread-rt_lead')).toBeVisible();
 

@@ -20,6 +20,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import ThreadProjectCard from './ThreadProjectCard.svelte';
   import ThreadAgentsTasks from './runtime/ThreadAgentsTasks.svelte';
+  import RuntimeSubagentPane from './runtime/RuntimeSubagentPane.svelte';
   import { PrSurfaceView, SideChatView } from './threadLazy.svelte';
   import { threadPrs } from './threadPrs.svelte';
   import { threadRepos } from './threadRepos.svelte';
@@ -86,6 +87,7 @@
     side: 'Side chat',
     connections: 'Connections',
     browser: 'Browser',
+    subagent: 'Subagent',
   };
   const launcher = $derived<Surface[]>([
     { id: 'browser', label: 'Browser', key: 'B', icon: 'globe', prefetch: () => BrowserTab.prefetch() },
@@ -105,7 +107,7 @@
   const open = $derived(threadsChrome.surfaces);
   const active = $derived(open.includes(threads.inspectorTab) ? threads.inspectorTab : null);
   const tabs = $derived<TabItem<ThreadsInspectorTab>[]>(
-    open.map((id) => ({ id, label: SURFACE_LABEL[id], testid: `threads-tab-${id}` })),
+    open.map((id) => ({ id, label: id === 'subagent' ? (runtimeThreads.get(threadsChrome.subagentId)?.title ?? 'Subagent') : SURFACE_LABEL[id], testid: `threads-tab-${id}` })),
   );
 
   // No Terminal surface: the drawer is the toolbar ⋯ › Terminal drawer, the
@@ -126,6 +128,7 @@
   function closeActive(): void {
     if (!active) return;
     const next = threadsChrome.closeSurface(active);
+    if (active === 'subagent') threadsChrome.subagentId = null;
     if (next) threads.setInspectorTab(next);
     void tick().then(() => {
       const target = next
@@ -236,6 +239,8 @@
       <LazyMount lazy={SideChatView} what="the side chat" variant="panel" props={{ mainId: focusedSession?.id ?? null }} />
     {:else if active === 'connections'}
       <LazyMount lazy={ConnectionsView} what="connections" variant="panel" props={{ workspaceId, focusedSessionId: threads.focusedSessionId }} />
+    {:else if active === 'subagent' && threadsChrome.subagentId}
+      <RuntimeSubagentPane id={threadsChrome.subagentId} />
     {:else if active === 'browser'}
       <!-- The ask bar submits to the focused terminal thread; a structured
            thread has no PTY to type into, so it gets the unbound hint. -->

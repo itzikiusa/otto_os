@@ -59,7 +59,7 @@
     <button type="button" class="icon-btn" aria-label="Open {name} beside" title="Open beside (Split)" data-testid="runtime-item-beside" onclick={onbeside}><Icon name="split" size={12} /></button>
   {/if}
   {#if onopen}
-    <button type="button" class="btn small ghost ar-open" title="{openLabel} (⇧-click: beside)" data-testid="runtime-item-open" onclick={onopen}>{openLabel}</button>
+    <button type="button" class="btn small ghost ar-open" title="{openLabel} (⌘-click: main view)" data-testid="runtime-item-open" onclick={onopen}>{openLabel}</button>
   {/if}
 </div>
 

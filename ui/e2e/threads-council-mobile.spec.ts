@@ -50,7 +50,7 @@ test('a council on a phone: the Related chip switches seats, the parent chip goe
   // The ⋯ council items are reachable on the phone too.
   await page.getByTestId('threads-thread-menu').click();
   const menu = page.locator('.ctx-menu').first();
-  await expect(menu.getByRole('menuitem', { name: 'Ask every seat…' })).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: 'Ask every model…' })).toBeVisible();
   await expectFullyInViewport(page, menu, 'thread ⋯ menu (phone)');
   await page.keyboard.press('Escape');
 
@@ -85,7 +85,7 @@ test('a council on a phone is not laid side by side: the ⋯ offers no grid', as
   // "Open council side by side".
   await page.getByTestId('threads-thread-menu').click();
   const names = await page.locator('.ctx-menu').first().locator('[role^="menuitem"]').allInnerTexts();
-  expect(names.some((n) => /^Open council side by side/.test(n))).toBe(false);
+  expect(names.some((n) => /^Open side by side/.test(n))).toBe(false);
   await page.keyboard.press('Escape');
   await expectNoHorizontalOverflow(page);
 });
