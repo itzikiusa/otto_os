@@ -48,8 +48,8 @@ let wsId = '';
 let dir = '';
 const ids: Record<string, string> = {};
 
-async function thread(title: string): Promise<string> {
-  const r = await ctx.post(base + '/api/v1/workspaces/' + wsId + '/runtime-sessions', { data: { provider: 'codex', cwd: dir, title } });
+async function thread(title: string, provider: 'claude' | 'codex' = 'codex'): Promise<string> {
+  const r = await ctx.post(base + '/api/v1/workspaces/' + wsId + '/runtime-sessions', { data: { provider, cwd: dir, title } });
   expect(r.ok(), await r.text()).toBeTruthy();
   return (await r.json()).id as string;
 }
@@ -69,8 +69,8 @@ async function say(id: string, text: string): Promise<void> {
 }
 
 /** A thread with `turns` finished echo turns (each turn: prompt + answer). */
-async function history(title: string, turns: number): Promise<string> {
-  const id = await thread(title);
+async function history(title: string, turns: number, provider: 'claude' | 'codex' = 'codex'): Promise<string> {
+  const id = await thread(title, provider);
   for (let i = 0; i < turns; i++) {
     await say(id, 'Turn ' + i + ': tighten the retry clamp in module ' + (i % 40) + ' and keep the API stable.');
     await idle(id);
@@ -90,6 +90,7 @@ test.beforeAll(async () => {
   await idle(ids.small);
   ids.t60 = await history('Perf sixty turns', 60);
   ids.t300 = await history('Perf three hundred turns', 300);
+  ids.c60 = await history('Perf subagents', 60, 'claude');
 });
 
 test.afterAll(async () => {
@@ -244,6 +245,28 @@ test('c. streaming a long answer after 30 tool calls into the 300-turn thread', 
   record('stream300', { wallMs: wall, frames: frames.length, framesOver50: frames.filter((d) => d > 50).length, worstFrameMs: Math.round(Math.max(0, ...frames)), scriptMs: script, counts });
 });
 
+test('c2. a long answer streaming while three subagents work (Claude)', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await boot(page, '#/threads/' + ids.c60);
+  const conv = page.getByTestId('runtime-thread-' + ids.c60);
+  await expect(conv.getByText('Turn 59: tighten').last()).toBeVisible({ timeout: 30_000 });
+  for (let i = 0; i < 3; i++) {
+    await say(ids.c60, 'agent 90');
+    await idle(ids.c60);
+  }
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Performance.enable');
+  await page.evaluate(() => ((window as unknown as { __ottoPerfCounts: Record<string, number> }).__ottoPerfCounts = {}));
+  const s0 = await scriptMs(cdp);
+  await startFrames(page);
+  await say(ids.c60, 'stream 4000 3');
+  await expect(conv.getByText('c3999', { exact: false }).last()).toBeVisible({ timeout: 120_000 });
+  const frames = await stopFrames(page);
+  const script = (await scriptMs(cdp)) - s0;
+  const counts = await page.evaluate(() => (window as unknown as { __ottoPerfCounts: Record<string, number> }).__ottoPerfCounts);
+  record('streamSubagents', { frames: frames.length, framesOver50: frames.filter((d) => d > 50).length, worstFrameMs: Math.round(Math.max(0, ...frames)), scriptMs: script, counts });
+});
+
 test('b. a 500-thread sidebar over 20 projects: first render, Search, switching', async ({ page }) => {
   const rows = Array.from({ length: 500 }, (_, i) => ({
     id: 'mock-' + i, workspace_id: wsId, provider: i % 3 ? 'codex' : 'claude', title: 'Mock thread ' + i + ' ' + ['retry', 'cache', 'auth', 'sync'][i % 4],
@@ -347,8 +370,12 @@ test('e. six threads streaming at once: memory, CPU, requests', async ({ page })
   const wsPerMin: number[] = [];
   let api = 0;
   let ws = 0;
+  const paths: Record<string, number> = {};
   page.on('request', (r) => {
-    if (r.url().includes('/api/v1/')) api++;
+    if (!r.url().includes('/api/v1/')) return;
+    api++;
+    const p = r.method() + ' ' + new URL(r.url()).pathname.replace(/\/api\/v1/, '').replace(/[0-9A-HJKMNP-TV-Z]{26}|[0-9a-f-]{36}/g, ':id');
+    paths[p] = (paths[p] ?? 0) + 1;
   });
   page.on('websocket', (s) => s.on('framereceived', () => ws++));
   await boot(page, '#/threads/' + six[0]);
@@ -382,4 +409,5 @@ test('e. six threads streaming at once: memory, CPU, requests', async ({ page })
   await loops;
   await sample('end');
   record('soakPerMin', { apiRequests: dist(apiPerMin), wsMessages: dist(wsPerMin) });
+  record('soakApiPaths', Object.fromEntries(Object.entries(paths).sort((a, b) => b[1] - a[1])));
 });
