@@ -351,7 +351,7 @@
     findRank?: number;
     onselection?: (text: string) => void; // the selected text on every selection change ('' when cleared)
   }
-  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, socketFactory, transformFrame, onImagePaste, readOnlyReason, onstatus, onfontfit, onsearchresult, showToolbar = true, autoFocus = false, claimOnAttach = false, keepAlive = false, scrollback = EMBED_SCROLLBACK, resumeOnOpen = true, findRank = 0, onselection }: Props = $props();
+  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, socketFactory, transformFrame, onImagePaste, readOnlyReason, onstatus, onfontfit, onsearchresult, onselection, showToolbar = true, autoFocus = false, claimOnAttach = false, keepAlive = false, scrollback = EMBED_SCROLLBACK, resumeOnOpen = true, findRank = 0 }: Props = $props();
   // Scrollback results: a listbox driven from the find input (aria-activedescendant).
   const findId = $props.id();
 
