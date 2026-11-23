@@ -40,6 +40,7 @@
   import { earlierSteps, formatDuration, shouldFold, visibleTools } from './workLog';
   import { threadPrefs } from './threadPrefs.svelte';
   import { turnUsageText } from './turnUsage';
+  import { handoffSummary, handoffTitle } from './providerSwitch';
 
   interface Props {
     sessionId: string;
@@ -206,7 +207,13 @@
 {/snippet}
 
 {#each rows as row (row.kind === 'message' ? row.item.id : row.id)}
-  {#if row.kind === 'session'}
+  {#if row.kind === 'session' && row.handoff}
+    <details class="rt-handoff" data-testid="runtime-handoff">
+      <summary class="rt-day" aria-label={handoffTitle(row.handoff)}><span>{handoffTitle(row.handoff)}</span></summary>
+      <p class="rt-handoff-note">{handoffSummary(row.handoff)}</p>
+      {#if row.handoff.text}<pre class="rt-handoff-text" dir="auto">{row.handoff.text}</pre>{/if}
+    </details>
+  {:else if row.kind === 'session'}
     <div class="rt-day" role="separator" aria-label="New session" data-testid="runtime-session-boundary"><span>New session</span></div>
   {:else if row.kind === 'agent_turn'}
     <div class="rt-day rt-agent-turn" role="separator" aria-label={row.label} data-testid="runtime-agent-turn-divider">
@@ -433,6 +440,51 @@
     content: '';
     flex: 1;
     border-block-start: 1px solid var(--border);
+  }
+  /* A provider switch: the divider opens on what was handed over. */
+  .rt-handoff > summary {
+    list-style: none;
+    cursor: pointer;
+    min-block-size: 32px;
+  }
+  .rt-handoff > summary::-webkit-details-marker {
+    display: none;
+  }
+  .rt-handoff > summary span {
+    max-inline-size: 80%;
+    overflow-wrap: anywhere;
+    text-align: center;
+  }
+  .rt-handoff > summary:hover,
+  .rt-handoff[open] > summary {
+    color: var(--text);
+  }
+  .rt-handoff > summary:focus-visible {
+    outline: 2px solid var(--accent-line);
+    outline-offset: 2px;
+    border-radius: var(--radius-m);
+  }
+  .rt-handoff-note {
+    margin: 0 0 6px;
+    color: var(--text-dim);
+    font-size: var(--fs-s);
+  }
+  .rt-handoff-text {
+    margin: 0 0 14px;
+    padding: 8px 10px;
+    max-block-size: 320px;
+    overflow: auto;
+    border-radius: var(--radius-m);
+    background: var(--surface-2);
+    color: var(--text);
+    font-size: var(--fs-s);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  @media (pointer: coarse) {
+    .rt-handoff > summary {
+      min-block-size: 44px;
+    }
   }
   .rt-setting {
     font-size: var(--fs-xs);

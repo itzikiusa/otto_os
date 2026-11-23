@@ -44,6 +44,7 @@
   import { recallPrompt, sentPrompts, type HistoryState } from './promptHistory';
   import { dropAttachments, fileDrop } from './composerDrop';
   import RuntimeModelControl from './RuntimeModelControl.svelte';
+  import { armedSwitchLine, switchPromptFields } from './providerSwitch';
   import RuntimeBannerStack from './RuntimeBannerStack.svelte';
   import {
     appendDraftAttachments, buildOptimisticUserMessage, buildRuntimeBanners, collectMessageIds,
@@ -189,7 +190,7 @@
   const failedQuiet = $derived(!!failure && dormant);
   const queueShown = $derived((background.length > 0 && !closed) || (p?.queued.length ?? 0) > 0 || (needsRevive && !failedQuiet));
   const banners = $derived(buildRuntimeBanners({
-    sessionError, uiAsk, queueShown, needsRevive, freshContext: draft.freshContext,
+    sessionError, uiAsk, queueShown, needsRevive, freshContext: draft.freshContext, switchTo: draft.provider,
     hasQuestions: Boolean(p?.requests.some((r) => r.kind === 'question' && r.status !== 'pending')),
     hasPlan: Boolean(plan),
   }));
@@ -244,6 +245,7 @@
           ...(docs.length ? { files: docs } : {}),
           ...(effectiveAccess ? { access_mode: effectiveAccess } : {}),
           ...(sent.fresh_context ? { fresh_context: true, ...(typeof freshStopBg !== 'undefined' && freshStopBg === 'next' ? { stop_background: true } : {}) } : {}),
+          ...(typeof switchPromptFields === 'function' ? switchPromptFields(sent, typeof provider === 'string' ? provider : '') : {}),
           ...(delivery ? { delivery } : {}),
         },
         sent.images,
@@ -304,17 +306,21 @@
       return void askFromComposer(ownerId, draft, payload, effectiveAccess);
     }
     const submitted = snapshotDraft(draft);
-    const delivery: PromptDelivery | undefined = !submitted.fresh_context ? (chosen ?? 'queue') : undefined;
+    // A provider switch is a fresh start on another provider: never queued.
+    const fresh =
+      submitted.fresh_context ||
+      (typeof switchPromptFields === 'function' && !!switchPromptFields(submitted, typeof provider === 'string' ? provider : '').provider);
+    const delivery: PromptDelivery | undefined = !fresh ? (chosen ?? 'queue') : undefined;
     acknowledgeComposer(draft, submitted);
     if (typeof composerEl !== 'undefined' && composerEl) composerEl.style.height = '';
-    if (!running && !submitted.fresh_context && typeof buildOptimisticUserMessage === 'function') {
+    if (!running && !fresh && typeof buildOptimisticUserMessage === 'function') {
       const assembled = assembleComposerMessage(t, submitted.context);
       const finalPrompt =
         typeof transformOutgoingText === 'function' ? transformOutgoingText(assembled, submitted.fresh_context) : assembled;
       const lastOrd = typeof p !== 'undefined' && p && p.items.length > 0 ? p.items[p.items.length - 1].ordinal : 0;
       optimisticMessage = buildOptimisticUserMessage(finalPrompt, lastOrd, submitted.images);
     }
-    const mustReopenFirst = (typeof closed === 'boolean' ? closed : needsRevive) && !submitted.fresh_context;
+    const mustReopenFirst = (typeof closed === 'boolean' ? closed : needsRevive) && !fresh;
     if (mustReopenFirst) {
       void reopen().then((ok) => {
         if (ok) return send(t, delivery, submitted, extCtx, true);
@@ -528,6 +534,11 @@
             onreopen={() => void reopen()}
             onedit={(t, restoredAtts, editedSessionId) => restorePoppedQueuedMessageToDraft({ activeSessionId: sessionId, editedSessionId, text: t, restoredAtts, transformText: transformRestoredQueuedText, focusComposer })}
           />
+        {:else if key === 'switch' && draft.provider}
+          <div class="rt-fresh" data-testid="runtime-switch-notice" use:announceShown={armedSwitchLine(draft.provider)}>
+            <span>{armedSwitchLine(draft.provider)}</span>
+            <button type="button" class="btn small ghost" onclick={() => { draft.provider = null; draft.model = undefined; draft.effort = null; focusComposer(); }}>Cancel</button>
+          </div>
         {:else if key === 'fresh'}
           <div class="rt-fresh" data-testid="runtime-fresh-notice" use:announceShown={'Next message starts fresh'}>
             <span>Next message starts fresh</span>

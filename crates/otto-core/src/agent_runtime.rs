@@ -127,6 +127,13 @@ pub struct ProviderSession {
     /// name for the conversation as it lands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// The provider the thread runs on now (`RuntimeSession::provider`) and,
+    /// for a named account, its slug (`meta.provider_slug`): a provider
+    /// switch changes them in every client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<RuntimeProvider>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_slug: Option<String>,
 }
 
 /// One piece of background work an agent started (Claude Code's
@@ -432,8 +439,12 @@ pub enum TurnItemKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cancel_reason: Option<CancelReason>,
     },
-    /// A fresh provider conversation began in this same visible thread.
-    SessionBoundary,
+    /// A fresh provider conversation began in this same visible thread;
+    /// with `handoff`, on another provider that was handed the history.
+    SessionBoundary {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handoff: Option<ContextHandoff>,
+    },
     SystemNotice {
         message: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -465,6 +476,29 @@ pub enum TurnItemKind {
     Error {
         failure: ProviderFailure,
     },
+}
+
+/// What a provider switch handed the new provider (`session_boundary.handoff`):
+/// a bounded, newest-first selection of whole turns, after T3 Code's portable
+/// handoffs. `text` is the block exactly as the agent read it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ContextHandoff {
+    /// Provider slugs (a named account's own slug).
+    pub from_provider: String,
+    pub to_provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_model: Option<String>,
+    /// Turns handed over, and earlier turns the budget left out.
+    pub turns: u32,
+    #[serde(default)]
+    pub omitted_turns: u32,
+    /// Images sent earlier in the thread: never handed over.
+    #[serde(default)]
+    pub images_omitted: u32,
+    #[serde(default)]
+    pub text: String,
 }
 
 /// One timeline item (`OrchestrationV2TurnItem`).
@@ -1870,6 +1904,11 @@ pub struct RuntimePromptReq {
     /// Start a new provider conversation in this thread; refuses outstanding work.
     #[serde(default)]
     pub fresh_context: bool,
+    /// Continue this thread on another provider (a slug: built-in or a named
+    /// account): a fresh conversation there, handed the thread's history.
+    /// Implies `fresh_context`; the current provider's slug is no switch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     #[serde(default)]
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2110,6 +2149,8 @@ mod tests {
                     }],
                     capabilities: None,
                     title: None,
+                    provider: Some(RuntimeProvider::Codex),
+                    provider_slug: Some("codex".into()),
                 },
             },
             RuntimeEventBody::ProviderThreadUpdated {
@@ -2484,6 +2525,36 @@ mod tests {
                 .as_ref()
                 .and_then(|m| m.get(PROVIDER_SLUG_META_KEY)),
             Some(&json!("claudework"))
+        );
+    }
+
+    /// A rollback reads a switch's divider: the build before it had a unit
+    /// `session_boundary` (internally tagged, flattened), which ignores
+    /// `handoff`; and the new shape reads the old row.
+    #[test]
+    fn a_session_boundary_with_a_handoff_reads_on_the_previous_build() {
+        #[derive(Debug, Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum OldKind {
+            SessionBoundary,
+        }
+        #[derive(Debug, Deserialize)]
+        struct OldItem {
+            #[allow(dead_code)]
+            id: String,
+            #[serde(flatten)]
+            kind: OldKind,
+        }
+        let new = json!({"id": "b", "type": "session_boundary", "handoff": {
+            "from_provider": "claude", "to_provider": "codex", "turns": 1, "text": "x"}});
+        let old: OldItem = serde_json::from_value(new.clone()).unwrap();
+        assert!(matches!(old.kind, OldKind::SessionBoundary));
+        let back: TurnItemKind =
+            serde_json::from_value(json!({"type": "session_boundary"})).unwrap();
+        assert_eq!(back, TurnItemKind::SessionBoundary { handoff: None });
+        let full: TurnItemKind = serde_json::from_value(new).unwrap();
+        assert!(
+            matches!(full, TurnItemKind::SessionBoundary { handoff: Some(h) } if h.turns == 1 && h.omitted_turns == 0)
         );
     }
 }

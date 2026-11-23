@@ -306,6 +306,7 @@ export function restoreOptimisticDraft(
     images: ComposerFile[];
     context: RuntimeDraftContent['context'];
     freshContext: boolean;
+    provider?: string | null;
   },
   sent: RuntimeDraftContent,
 ): void {
@@ -317,6 +318,7 @@ export function restoreOptimisticDraft(
     draft.context = [...sent.context.filter((c) => !existing.has(c.id)), ...draft.context];
   }
   if (sent.fresh_context) draft.freshContext = true;
+  if (sent.provider) draft.provider = sent.provider;
 }
 
 /** A slash command that acts on the view; `false` = send it to the agent. */
@@ -407,13 +409,15 @@ export function buildRuntimeBanners(opts: {
   queueShown: boolean;
   needsRevive: boolean;
   freshContext: boolean;
+  /** An armed provider switch (its line replaces the fresh one). */
+  switchTo?: string | null;
 }): BannerBlock[] {
   return [
     ...(opts.sessionError ? [{ key: 'error', label: 'error', urgent: true }] : []),
     ...(opts.uiAsk ? [{ key: 'ui', label: 'UI control request', urgent: true }] : []),
     ...(opts.hasPlan ? [{ key: 'plan', label: 'plan' }] : []),
     ...(opts.queueShown ? [{ key: 'queue', label: opts.needsRevive ? 'revive' : 'queue' }] : []),
-    ...(opts.freshContext ? [{ key: 'fresh', label: 'fresh context' }] : []),
+    ...(opts.switchTo ? [{ key: 'switch', label: 'provider switch' }] : opts.freshContext ? [{ key: 'fresh', label: 'fresh context' }] : []),
     // The record of settled questions is the least pressing notice.
     ...(opts.hasQuestions ? [{ key: 'questions', label: 'previous questions' }] : []),
   ];

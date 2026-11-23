@@ -8,6 +8,7 @@ interface ComposerContent {
   effort: RuntimeDraftContent['effort'];
   pickedMode: RuntimeDraftContent['access_mode'];
   freshContext: boolean;
+  provider?: string | null;
 }
 
 /** Accessors retain Svelte tracking while exposing the wire format to the writer. */
@@ -24,6 +25,7 @@ export function composerContent(d: ComposerContent): RuntimeDraftContent {
     get effort() { return d.effort; }, set effort(v) { d.effort = v; },
     get access_mode() { return d.pickedMode; }, set access_mode(v) { d.pickedMode = v; },
     get fresh_context() { return d.freshContext; }, set fresh_context(v) { d.freshContext = v; },
+    get provider() { return d.provider ?? null; }, set provider(v) { d.provider = v ?? null; },
     get context() { return d.context; }, set context(v) { d.context = v; },
   };
 }
@@ -51,6 +53,7 @@ export function emptyDraft(): RuntimeDraftContent {
     effort: null,
     access_mode: null,
     fresh_context: false,
+    provider: null,
     context: [],
   };
 }
@@ -66,6 +69,7 @@ function isEmptyDraftContent(d: RuntimeDraftContent | null | undefined): boolean
       d.images.length === 0 &&
       d.context.length === 0 &&
       !d.fresh_context &&
+      !d.provider &&
       !d.model &&
       !d.model_default &&
       !d.effort &&
@@ -79,6 +83,7 @@ const DRAFT_KEYS: readonly (keyof RuntimeDraftContent)[] = [
   'effort',
   'access_mode',
   'fresh_context',
+  'provider',
   'context',
 ];
 const copy = <T>(v: T): T => {
@@ -104,6 +109,7 @@ export function acknowledgeDraft(current: RuntimeDraftContent, sent: RuntimeDraf
   });
   current.context = current.context.filter(x => !sent.context.some(s => equal(s, x)));
   if (current.fresh_context === sent.fresh_context) current.fresh_context = false;
+  if (sent.provider && current.provider === sent.provider) current.provider = null;
 }
 /** The daemon refuses a stored draft over 24 MiB of JSON (otto-state
  *  agent_runtime/drafts.rs) and its route body over 24 MiB (otto-agent-protocol

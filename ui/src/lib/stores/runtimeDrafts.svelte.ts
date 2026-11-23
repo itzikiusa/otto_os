@@ -7,6 +7,8 @@ export type ComposerFile = PromptImage & { name: string };
 export interface RuntimeComposerDraft {
   text: string;
   freshContext: boolean;
+  /** An armed provider switch: the next message continues on this provider. */
+  provider: string | null;
   context: RuntimeComposerContext[];
   recovered: boolean;
   saveStatus: 'loading' | 'saving' | 'saved' | 'error';
@@ -158,7 +160,7 @@ export class RuntimeDrafts {
   for(id: string): RuntimeComposerDraft {
     if (this.byId[id]) return this.byId[id];
     this.byId[id] = {
-      freshContext: false, context: [], recovered: false, saveStatus: 'loading', saveError: null, attachError: null, retrySave: () => {}, flushSave: () => {},
+      freshContext: false, provider: null, context: [], recovered: false, saveStatus: 'loading', saveError: null, attachError: null, retrySave: () => {}, flushSave: () => {},
       text: '', images: [], model: undefined, effort: null, pickedMode: null,
       sending: false, reopening: false, stopping: false, awaitSeq: null, startError: null,
     };

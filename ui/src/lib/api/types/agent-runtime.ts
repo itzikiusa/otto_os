@@ -33,6 +33,24 @@ export interface ProviderSession {
   capabilities?: RuntimeCapabilities;
   /** The thread's title: a rename, or the agent's own name for it. */
   title?: string;
+  /** The provider the thread runs on now and its slug (a named account's
+   *  own): a provider switch changes them. */
+  provider?: RuntimeProvider;
+  provider_slug?: string;
+}
+
+/** What a provider switch handed the new provider (`session_boundary.handoff`):
+ *  whole turns, newest first within a budget; `text` is the block as the
+ *  agent read it. */
+export interface ContextHandoff {
+  from_provider: string;
+  to_provider: string;
+  from_model?: string;
+  to_model?: string;
+  turns: number;
+  omitted_turns: number;
+  images_omitted: number;
+  text: string;
 }
 
 /** What a thread's agent takes besides plain text — the provider baseline
@@ -226,7 +244,7 @@ export type TurnItemKind =
       /** Set when cancelled; `agent` = the provider withdrew it. */
       cancel_reason?: RequestCancelReason;
     }
-  | { type: 'session_boundary' }
+  | { type: 'session_boundary'; handoff?: ContextHandoff }
   | { type: 'system_notice'; message: string; task_settlement?: TaskSettlement }
   /** A subagent (Claude's Agent / Task tool): its own messages and tools are
    *  items whose `parent_item_id` is this item. A background one stays
@@ -646,6 +664,10 @@ export interface UpdateRuntimeSessionReq {
 export interface RuntimePromptReq {
   /** Start a fresh provider conversation in the same thread; refuses outstanding work. */
   fresh_context?: boolean;
+  /** Continue the thread on another provider (a slug, built-in or a named
+   *  account): a fresh conversation there, handed the thread's history
+   *  (`session_boundary.handoff`). Implies `fresh_context`. */
+  provider?: string;
   /** With `fresh_context`: stop the thread's background tasks first instead
    *  of refusing (an older daemon ignores it and still answers 409). */
   stop_background?: boolean;
@@ -718,6 +740,8 @@ export interface RuntimeDraftContent {
   effort: import('../../providerModels').EffortLevel | null;
   access_mode: RuntimeAccessMode | null;
   fresh_context: boolean;
+  /** An armed provider switch (`RuntimePromptReq.provider` of the next send). */
+  provider?: string | null;
   context: RuntimeComposerContext[];
 }
 export interface RuntimeDraftRecord { revision: number; draft: RuntimeDraftContent | null }

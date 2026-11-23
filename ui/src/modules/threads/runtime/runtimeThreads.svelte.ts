@@ -27,6 +27,7 @@ import type {
   RuntimeEvent,
   RuntimePromptReq,
   RuntimePromptResp,
+  RuntimeProvider,
   RuntimeProviderOrSlug,
   RuntimeSession,
   RuntimeSessionStatus,
@@ -368,7 +369,9 @@ class RuntimeThreads {
         const status = SESSION_STATUS[ps.status];
         // A new turn clears how the last one ended (the daemon's rule for `last_turn_status`).
         const fresh = status === 'working' || status === 'starting' ? { last_turn_status: null, last_error_class: null } : {};
-        this.byId[ev.session_id] = { ...row, ...fresh, status, background_tasks: ps.background_tasks ?? [], capabilities: ps.capabilities ?? row.capabilities, title: ps.title ?? row.title, last_active_at: ev.ts };
+        // A provider switch moves the row (title glyph, details card) to the new provider.
+        const moved = ps.provider ? providerPatch(row, ps.provider, ps.provider_slug, ps.model) : {};
+        this.byId[ev.session_id] = { ...row, ...fresh, ...moved, status, background_tasks: ps.background_tasks ?? [], capabilities: ps.capabilities ?? row.capabilities, title: ps.title ?? row.title, last_active_at: ev.ts };
       } else this.byId[ev.session_id] = { ...row, last_active_at: ev.ts };
     }
     // How the turn ended stays on the row until the next one starts — live,
@@ -653,3 +656,20 @@ uiControl.addSource({
   },
 });
 
+
+/** The row change a `provider_session.updated` carrying `provider` makes:
+ *  `{}` when the thread still runs there, else its new provider, account
+ *  slug (`meta.provider_slug`, kept only for a named account) and model. */
+function providerPatch(
+  row: Pick<RuntimeSession, 'provider' | 'meta' | 'model'>,
+  provider: RuntimeProvider,
+  slug: string | undefined,
+  model: string | null,
+): Partial<Pick<RuntimeSession, 'provider' | 'meta' | 'model'>> {
+  const to = slug || provider;
+  if (row.provider === provider && sessionProviderSlug(row) === to) return {};
+  const meta: Record<string, unknown> = { ...(row.meta ?? {}) };
+  if (to !== provider) meta.provider_slug = to;
+  else delete meta.provider_slug;
+  return { provider, meta, model: model ?? undefined };
+}

@@ -377,6 +377,24 @@ impl AgentRuntimeRepo {
         Ok(())
     }
 
+    /// A provider switch: the provider and the meta naming its account
+    /// (`meta.provider_slug`), in one write.
+    pub async fn set_provider(
+        &self,
+        id: &Id,
+        provider: RuntimeProvider,
+        meta: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        sqlx::query("UPDATE agent_runtime_sessions SET provider = ?, meta = ? WHERE id = ?")
+            .bind(provider.as_str())
+            .bind(meta.map(|m| m.to_string()))
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set runtime session provider"))?;
+        Ok(())
+    }
+
     pub async fn set_model(&self, id: &Id, model: &str) -> Result<()> {
         sqlx::query("UPDATE agent_runtime_sessions SET model = ? WHERE id = ?")
             .bind(model)

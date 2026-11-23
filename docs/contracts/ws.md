@@ -1733,7 +1733,11 @@ published on the streaming path, never through the internal bus.
   command_execution | dynamic_tool | web_search | approval_request |
   system_notice | session_boundary | subagent | error`. A `session_boundary`
   marks the first accepted turn of an explicit fresh provider conversation in
-  the same Otto thread. It has no additional fields; preceding history remains.
+  the same Otto thread; preceding history remains. After a provider switch it
+  carries `handoff: {from_provider, to_provider, from_model?, to_model?, turns,
+  omitted_turns, images_omitted, text}` (api.md "Continue on another
+  provider"); `provider_session.provider?` / `provider_slug?` name the
+  provider the thread runs on now.
   Request IDs are opaque, scoped to one provider process, and never reused by
   a replacement process. A `subagent`'s own activity items carry
   `parent_item_id` (the card). A `system_notice` whose `title` is `Model`,
