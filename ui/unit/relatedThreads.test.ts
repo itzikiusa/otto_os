@@ -33,7 +33,7 @@ test('toolbar ⋯ holds what left the toolbar: related, terminal, a View flyout 
   const items = threadsPageMenu({ threadItems: [{ label: 'Rename…' }], layout: 'split', terminalOpen: true, cardOn: false, threadId: 'x', sidebarVisible: true }, acts);
   assert.deepEqual(labels(items), ['Rename…', '—', RELATED_LABEL, 'Terminal drawer', 'View']);
   const view = items.find((i) => i.label === 'View')?.children ?? [];
-  assert.deepEqual(labels(view), ['Single thread', 'Split', 'Grid', '—', 'Project card']);
+  assert.deepEqual(labels(view), ['Single thread', 'Split', 'Grid', '—', 'Thread details']);
   assert.equal(view.find((i) => i.label === 'Split')?.checked, true);
   assert.equal(items.find((i) => i.label === 'Terminal drawer')?.checked, true);
 });

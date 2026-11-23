@@ -18,7 +18,7 @@
   import { isRuntimeThread } from './runtime/runtimeThreads.svelte';
   import { loadBrowserView } from '../../lib/browserPort';
   import { ws } from '../../lib/stores/workspace.svelte';
-  import ThreadProjectCard from './ThreadProjectCard.svelte';
+  import ThreadDetailsCard from './ThreadDetailsCard.svelte';
   import ThreadAgentsTasks from './runtime/ThreadAgentsTasks.svelte';
   import { PrSurfaceView, SideChatView } from './threadLazy.svelte';
   import { threadPrs } from './threadPrs.svelte';
@@ -34,12 +34,6 @@
   // The Browser opens HERE, as an inspector tab — never the shell's Side
   // panel, which Threads hides (it would be a second right column).
   const BrowserTab = lazyComponent(loadBrowserView);
-
-  interface Props {
-    /** Phone / tablet drawer: the project card can't float there, so it heads the panel. */
-    showCard?: boolean;
-  }
-  let { showCard = false }: Props = $props();
 
   // On the new-thread stage the panel follows the draft's folder.
   const focusedSession = $derived.by(() => {
@@ -111,7 +105,7 @@
   // No Terminal surface: the drawer is the toolbar ⋯ › Terminal drawer, the
   // pane's own button and /terminal. Connections shows once the thread has
   // touched a database (or its tab is already open); related threads live in
-  // the header's Related threads popover.
+  // ⋯ › Send to another thread… (subagents sit in the details card).
   const dbActive = $derived(
     open.includes('connections') || threads.mcpActivities.some((a) => a.session_id === focusedSession?.id),
   );
@@ -170,8 +164,10 @@
 </script>
 
 <aside bind:this={inspectorEl} class="ti" aria-label="Thread panel" data-testid="threads-inspector" use:surfaceKeys>
-  {#if showCard && contextCwd}
-    <div class="ti-card"><ThreadProjectCard cwd={contextCwd} compact={threads.inspectorCompact} /></div>
+  <!-- Thread details head the panel (they float beside the conversation
+       only while this panel is closed). -->
+  {#if contextCwd && !threadsChrome.maximized}
+    <div class="ti-card"><ThreadDetailsCard cwd={contextCwd} threadId={focusedSession?.id ?? null} /></div>
   {/if}
   {#if contextThreadId}<ThreadAgentsTasks sessionId={contextThreadId} />{/if}
   <header class="ti-head">

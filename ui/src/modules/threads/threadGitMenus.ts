@@ -169,8 +169,10 @@ async function newWorktree(
 
 /** Otto has no native-editor launcher, so "Open in" offers the places Otto
  *  itself can open a folder: the Files inspector, the Git page, a terminal
- *  thread — plus copying the path for any outside editor. */
+ *  thread — plus copying the path for any outside editor, and the folder's
+ *  project scripts (run one in a terminal thread, or add one). */
 export function openOpenInMenu(anchor: Element, opts: { cwd: string; repo: Repo | null }): void {
+  const scripts = threads.scriptsFor(opts.cwd);
   const items: MenuItem[] = [
     { label: 'Files', icon: 'file', hint: 'Inspector', action: () => threads.setInspectorTab('files') },
     ...(opts.repo
@@ -179,6 +181,18 @@ export function openOpenInMenu(anchor: Element, opts: { cwd: string; repo: Repo 
     { label: 'Terminal', icon: 'terminal', hint: 'New shell thread', action: () => void runInShell(opts.cwd, null) },
     { separator: true },
     { label: 'Copy path', icon: 'copy', action: () => void copyWithToast(opts.cwd, 'path') },
+    { separator: true },
+    ...scripts.map((s): MenuItem => ({
+      label: s.name,
+      icon: 'play',
+      title: `Run “${s.command}” in a terminal thread`,
+      children: [
+        { label: 'Run', icon: 'play', action: () => void runInShell(opts.cwd, s) },
+        { label: 'Copy command', icon: 'copy', action: () => void copyWithToast(s.command, 'command') },
+        { label: 'Remove script', icon: 'x', action: () => threads.removeScript(opts.cwd, s.name) },
+      ],
+    })),
+    { label: 'Add project script…', icon: 'plus', disabled: !opts.cwd, action: () => void promptNewScript(opts.cwd) },
   ];
   ctxMenu.showAt(anchor, items, { align: 'end' });
 }
@@ -219,12 +233,3 @@ export async function promptNewScript(project: string): Promise<void> {
   threads.addScript(project, { name: cmd.length > 40 ? `${cmd.slice(0, 39)}…` : cmd, command: cmd });
 }
 
-export function showScriptMenu(e: MouseEvent, project: string, script: ProjectScript): void {
-  e.preventDefault();
-  ctxMenu.show(e, [
-    { label: 'Run', icon: 'play', action: () => void runInShell(project, script) },
-    { label: 'Copy command', icon: 'copy', action: () => void copyWithToast(script.command, 'command') },
-    { separator: true },
-    { label: 'Remove script', icon: 'x', action: () => threads.removeScript(project, script.name) },
-  ]);
-}

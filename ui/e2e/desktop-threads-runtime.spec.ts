@@ -7,13 +7,6 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 import type { Locator } from '@playwright/test';
 
 /** Relative luminance (0 dark … 1 light) of an element's computed background. */
-/** The project card lives in the toolbar's ⋯ › View (threadsPageMenu.ts). */
-async function toggleProjectCard(page: Page): Promise<void> {
-  await page.getByTestId('threads-thread-menu').click();
-  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'View' }).click();
-  await page.locator('.ctx-submenu').getByRole('menuitemcheckbox', { name: 'Project card' }).click();
-}
-
 async function bgLuminance(el: Locator): Promise<number> {
   return el.evaluate((node) => {
     const [r, g, b] = (getComputedStyle(node).backgroundColor.match(/[\d.]+/g) ?? ['0', '0', '0']).map(Number);
@@ -346,7 +339,7 @@ test('a Claude thread: background work, its own turn, a subagent card, reopen an
 // withdrawn: "Withdrawn by Claude"), a failed tool shows its error, the user
 // message shows its attachments, and the access chip rides the next prompt.
 // ─────────────────────────────────────────────────────────────────────────────
-test('runtime polish: RTL, project card, grouped tools, folded approvals, access mode', async ({ page }, info) => {
+test('runtime polish: RTL, details card, grouped tools, folded approvals, access mode', async ({ page }, info) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const created = await ctx.post(`${base}/api/v1/workspaces/${wsId}/runtime-sessions`, {
     data: { provider: 'codex', cwd: fixtureDir, title: 'שיחה בעברית' },
@@ -455,15 +448,17 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
   await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog')).toHaveCount(0);
 
-  // The project card opens from the toolbar and covers no message.
-  await toggleProjectCard(page);
-  const card = page.getByTestId('threads-project-card');
-  await expectFullyInViewport(page, card, 'project card');
+  // Thread details float beside the conversation where a whole reading
+  // column is left, and cover no message (LTR and RTL).
+  await page.setViewportSize({ width: 1600, height: 900 });
+  const card = page.getByTestId('thread-details-card');
+  await expect(card).toBeVisible();
+  await expectFullyInViewport(page, card, 'details card');
   const cardBox = (await card.boundingBox())!;
   for (const el of [bubble, answer, thread.getByTestId('runtime-composer')]) {
     const b = (await el.boundingBox())!;
     const overlaps = b.x < cardBox.x + cardBox.width && cardBox.x < b.x + b.width && b.y < cardBox.y + cardBox.height && cardBox.y < b.y + b.height;
-    expect(overlaps, 'a message runs under the project card').toBe(false);
+    expect(overlaps, 'a message runs under the details card').toBe(false);
   }
   await page.screenshot({ path: info.outputPath('runtime-rtl-card-light.png'), animations: 'disabled' });
   await page.emulateMedia({ colorScheme: 'dark' });
@@ -474,8 +469,7 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
   await page.reload();
   await expect.poll(() => page.evaluate(() => document.documentElement.dir)).toBe('rtl');
   await expect(bubble).toBeVisible({ timeout: 30_000 });
-  await toggleProjectCard(page);
-  await expectFullyInViewport(page, card, 'project card (RTL)');
+  await expectFullyInViewport(page, card, 'details card (RTL)');
   const rtlCard = (await card.boundingBox())!;
   const rtlBubble = (await bubble.boundingBox())!;
   expect(rtlCard.x + rtlCard.width <= rtlBubble.x || rtlBubble.x + rtlBubble.width <= rtlCard.x).toBe(true);
@@ -486,43 +480,11 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
   await page.evaluate(() => localStorage.removeItem('otto_direction'));
   await page.reload();
   await expect(bubble).toBeVisible({ timeout: 30_000 });
-  await toggleProjectCard(page);
-  await expect(card).toBeVisible();
   // The user's window: a ~810 px centre column can't spare the card's width,
-  // so the card docks above the timeline instead of covering it (LTR + RTL).
+  // so it does not float there (it heads the right panel instead).
   await page.setViewportSize({ width: 1130, height: 900 });
-  for (const dir of ['ltr', 'rtl'] as const) {
-    if (dir === 'rtl') {
-      await page.evaluate(() => localStorage.setItem('otto_direction', 'rtl'));
-      await page.reload();
-      await expect(bubble).toBeVisible({ timeout: 30_000 });
-      await toggleProjectCard(page);
-    }
-    const centre = (await page.locator('.th-center-col').boundingBox())!;
-    expect(centre.width, 'centre column width').toBeGreaterThanOrEqual(800);
-    expect(centre.width, 'centre column width').toBeLessThanOrEqual(830);
-    await expectFullyInViewport(page, card, `project card (${dir}, narrow)`);
-    const c = (await card.boundingBox())!;
-    for (const el of [bubble, answer, thread.locator('.rt-work').first(), thread.getByTestId('runtime-composer')]) {
-      const b = (await el.boundingBox())!;
-      const overlaps = b.x < c.x + c.width && c.x < b.x + b.width && b.y < c.y + c.height && c.y < b.y + b.height;
-      expect(overlaps, `a message runs under the project card (${dir}, narrow)`).toBe(false);
-    }
-    await page.screenshot({ path: info.outputPath(`runtime-card-narrow-${dir}.png`), animations: 'disabled' });
-  }
-  await page.evaluate(() => localStorage.removeItem('otto_direction'));
+  await expect(card).toHaveCount(0);
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.reload();
-  await expect(bubble).toBeVisible({ timeout: 30_000 });
-  await toggleProjectCard(page);
-  await expect(card).toBeVisible();
-  // Outside click closes it (and Esc after reopening).
-  await thread.locator('.rt-col').click({ position: { x: 10, y: 10 } });
-  await expect(card).toHaveCount(0);
-  await toggleProjectCard(page);
-  await expect(card).toBeVisible();
-  await page.keyboard.press('Escape');
-  await expect(card).toHaveCount(0);
 
   // Parallel fetches group under one summary; the failed one shows its error;
   // the withdrawn approval reads as such on its tool's row (no shield row).

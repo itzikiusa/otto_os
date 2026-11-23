@@ -79,9 +79,9 @@ test('phone: ⋯ has no layouts or hand-off; the details drawer is compact', asy
   await page.getByTestId('threads-toggle-inspector').click();
   const panel = page.getByTestId('threads-inspector');
   await expect(panel).toBeVisible();
-  const card = panel.getByTestId('threads-project-card');
+  const card = panel.getByTestId('thread-details-card');
   await expect(card).toBeVisible();
-  expect((await card.boundingBox())?.height ?? 999).toBeLessThan(80);
+  await expectFullyInViewport(page, card, 'details card (drawer)');
   await expect(panel.getByRole('button', { name: /Maximize panel|Restore panel/ })).toHaveCount(0);
   await expect(panel.locator('.ti-key').first()).toBeHidden();
   await expect(panel.getByTestId('threads-surface-changes')).toContainText('Changes');

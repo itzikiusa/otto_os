@@ -21,18 +21,13 @@
   import RuntimeStartComposer from './RuntimeStartComposer.svelte';
   import type { StartLaunch } from './startComposer';
   import { placeholderTitle } from './threadTitle';
-  import { FolderPickerModal, ProjectCardView } from './threadLazy.svelte';
+  import { FolderPickerModal } from './threadLazy.svelte';
   import { threadAccessDefault } from './threadAccessDefault.svelte';
   import { startNewWorktree } from './threadGitMenus';
   import { threadRepos } from './threadRepos.svelte';
   import { threadsChrome } from './threadsChrome.svelte';
   import { harnessLabel, isThreadSession } from './threadsHelpers';
   import { threads } from './threadsStore.svelte';
-
-  interface Props {
-    showCard?: boolean;
-  }
-  let { showCard = false }: Props = $props();
 
   // Null until the person picks: the folder then follows the workspace as it
   // loads (newThreadDefaults.ts), so a late workspace never leaves the stage
@@ -226,13 +221,7 @@
   }
 </script>
 
-<div class="nt-stage" class:with-card={showCard} data-testid="new-thread-stage">
-  {#if showCard && ProjectCardView.component}
-    <div class="nt-card-slot">
-      <ProjectCardView.component floating cwd={cleanCwd} onpickfolder={openProjectMenu} />
-    </div>
-  {/if}
-
+<div class="nt-stage" data-testid="new-thread-stage">
   <div class="nt-inner">
     <h1 class="nt-title">
       {#if projectName}
@@ -319,13 +308,6 @@
     justify-content: center;
     padding: 24px 16px;
     background: var(--bg);
-  }
-  .nt-card-slot {
-    position: absolute;
-    inset-block-start: 16px;
-    inset-inline-end: 16px;
-    inline-size: 300px;
-    z-index: var(--z-sticky);
   }
   .nt-inner {
     inline-size: 100%;

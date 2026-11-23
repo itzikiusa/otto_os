@@ -386,7 +386,7 @@ test('multi-session split canvas, pins, file viewer, and peer-to-peer message re
   // Related threads (⋯ › Related threads…) relays a direct message Alpha → Beta.
   await canvas.getByTestId(`thread-pane-${sessionA}`).click();
   await page.getByTestId('threads-thread-menu').click();
-  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Related threads…' }).click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Send to another thread…' }).click();
   const related = page.getByTestId('threads-related-popover');
   await expect(related).toBeVisible();
   await expectFullyInViewport(page, related, 'related threads popover');
@@ -406,7 +406,8 @@ test('multi-session split canvas, pins, file viewer, and peer-to-peer message re
   expect(sentResp.ok()).toBeTruthy();
 
   await expect(related.getByTestId('related-recent')).toContainText(relayMsg);
-  await page.getByTestId('threads-related-chip').click();
+  await related.focus();
+  await page.keyboard.press('Escape');
   await expect(related).toHaveCount(0);
 
   // Narrow viewport drawer layout stays free of horizontal overflow.
