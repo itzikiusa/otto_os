@@ -6852,6 +6852,8 @@ questions are explicitly unsupported; the provider receives an error/denial,
 never a fabricated answer. ACP support follows the upstream draft and does not
 imply every ACP provider emits these requests.
 
+An approval's `decision` is one of `accept`, `accept_for_session`, `accept_always`, `decline`, `decline_always` (offered only where the agent offers it — ACP `reject_always`; Claude and Codex treat it as `decline`) or `cancel`, and must be one of the request's `options` or `cancel`.
+
 A question can also be dismissed without answering via `question_action` (`decline` or `cancel`). ACP preserves that native action; Claude denies only the question tool, and Codex returns an empty native answer map. The request becomes `cancelled`, without granting any permission.
 
 For unconstrained ACP fields, `allow_empty: true` preserves schema semantics: required means the property must be present, so an empty text value or empty multi-select array remains valid. Native Codex/Claude required answers must be nonempty.

@@ -5,6 +5,7 @@
   import { runtimeThreads } from './runtimeThreads.svelte';
   import { announce } from '../../../lib/announce.svelte';
   import { loadErrorText } from '../../../lib/loadError';
+  import { openExternal } from '../../../lib/external';
 
   // `docked`: the live form in the attention dock — its fields scroll inside
   // a bounded body and Send answer stays in view at the bottom (never below
@@ -46,6 +47,10 @@
     error = questionAnswerError(questions, values);
     if (error) return;
     busy = true;
+    // An agent's "open this page" (ACP url mode): the card named the URL and
+    // the person chose to open it.
+    const link = questions.find((q) => q.id === 'acp_url')?.options[0]?.description;
+    if (link) void openExternal(link);
     try {
       await runtimeThreads.respondQuestion(sessionId, request.id, values);
       announce('Answer sent');

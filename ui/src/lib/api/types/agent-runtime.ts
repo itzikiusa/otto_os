@@ -184,7 +184,7 @@ export interface PlanStep {
 
 export type RequestKind = 'command' | 'file_read' | 'file_change' | 'mcp_elicitation' | 'permission' | 'question';
 
-export type ApprovalDecision = 'accept' | 'accept_for_session' | 'accept_always' | 'decline' | 'cancel';
+export type ApprovalDecision = 'accept' | 'accept_for_session' | 'accept_always' | 'decline' | 'decline_always' | 'cancel';
 
 export interface ApprovalOption {
   decision: ApprovalDecision;

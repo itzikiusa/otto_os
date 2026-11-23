@@ -18,10 +18,10 @@ use std::collections::{HashMap, VecDeque};
 use agent_client_protocol::schema::{MaybeUndefined, ProtocolVersion};
 use agent_client_protocol::v1::schema::{
     AuthenticateRequest, AvailableCommandInput, BlobResourceContents, CancelNotification,
-    ContentBlock, EmbeddedResource, EmbeddedResourceResource, EnvVariable, ImageContent,
-    InitializeRequest, InitializeResponse, LoadSessionRequest, McpServer, McpServerStdio,
-    NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind, Plan,
-    PlanEntryStatus, PromptRequest, PromptResponse, RequestPermissionOutcome,
+    CompactionStatus, ContentBlock, EmbeddedResource, EmbeddedResourceResource, EnvVariable,
+    ImageContent, InitializeRequest, InitializeResponse, LoadSessionRequest, McpServer,
+    McpServerStdio, NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind,
+    Plan, PlanEntryStatus, PromptRequest, PromptResponse, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
     SessionNotification, SessionUpdate, SetSessionModeRequest, StopReason, TextContent, ToolCall,
     ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
@@ -35,8 +35,8 @@ use otto_core::agent_runtime::{
 use serde_json::{json, Value};
 
 use crate::driver::{
-    item, notice, provider_name, rpc_failure, rpc_key, tool_error, DriverError, DriverEvent,
-    DriverStep, LaunchContext, LaunchSpec, McpDelivery, McpServerDef, SidebandPayload,
+    compaction_notice, item, notice, provider_name, rpc_failure, rpc_key, tool_error, DriverError,
+    DriverEvent, DriverStep, LaunchContext, LaunchSpec, McpDelivery, McpServerDef, SidebandPayload,
     SidebandPoll, SidebandResumeSeed, SidebandSource, StructuredDriver,
 };
 
@@ -55,6 +55,9 @@ const AUTH_REQUIRED: i64 = -32000;
 const M_SESSION_NEW: &str = "session/new";
 const M_SET_CONFIG_OPTION: &str = "session/set_config_option";
 const M_SESSION_LOAD: &str = "session/load";
+/// ACP `session/resume` (`sessionCapabilities.resume`): the session back
+/// without replaying its history (live: agy, grok, opencode, muse).
+const M_SESSION_RESUME: &str = "session/resume";
 const M_SESSION_PROMPT: &str = "session/prompt";
 const M_SESSION_CANCEL: &str = "session/cancel";
 const M_SESSION_UPDATE: &str = "session/update";
@@ -246,6 +249,9 @@ pub(super) struct AcpDriverState {
     pub(super) modes: Vec<String>,
     /// That config option's id: modes then go as `session/set_config_option`.
     pub(super) mode_config_id: Option<String>,
+    /// The agent advertised `sessionCapabilities.resume` and a resume is
+    /// in flight as `session/resume` (a refusal retries as `session/load`).
+    pub(super) resuming: bool,
     /// `models.availableModels[].modelId` from `session/new|load`, when advertised.
     #[serde(default)]
     pub(super) available_models: Vec<String>,
@@ -364,6 +370,7 @@ impl AcpDriver {
                 embedded: false,
                 modes: Vec::new(),
                 mode_config_id: None,
+                resuming: false,
                 available_models: Vec::new(),
                 effort_options: Vec::new(),
                 access: RuntimeAccessMode::default(),
@@ -673,7 +680,13 @@ impl AcpDriver {
                 let mut req = LoadSessionRequest::new(sid.clone(), self.state.cwd.clone())
                     .mcp_servers(self.acp_mcp_servers());
                 req.meta = self.session_meta();
-                let (id, l) = self.request(M_SESSION_LOAD, req);
+                // Same params as `session/load`.
+                let method = if self.state.resuming {
+                    M_SESSION_RESUME
+                } else {
+                    M_SESSION_LOAD
+                };
+                let (id, l) = self.request(method, req);
                 self.state.create_id = id;
                 l
             }
@@ -960,6 +973,52 @@ impl AcpDriver {
         }
     }
 
+    /// The access mode whose `mode_id` is `mode`, when the agent moved to
+    /// it on its own: the thread's access chip follows (gap 5).
+    fn follow_mode(&mut self, step: &mut DriverStep, mode: &str) {
+        let Some(f) = self.flavor.mode_id else { return };
+        let to = [
+            RuntimeAccessMode::ApprovalRequired,
+            RuntimeAccessMode::AutoAcceptEdits,
+            RuntimeAccessMode::FullAccess,
+        ]
+        .into_iter()
+        .find(|m| f(*m) == Some(mode));
+        if let Some(to) = to.filter(|to| *to != self.state.access) {
+            self.state.access = to;
+            step.push(DriverEvent::AgentSettings {
+                model: None,
+                access: Some(to),
+            });
+        }
+    }
+
+    /// The model the agent reports in a `config_option_update` (its model
+    /// config option), when it differs from the one the person picked.
+    fn follow_model(&mut self, step: &mut DriverStep, update: &Value) {
+        let (Some(config_id), Some(current)) =
+            (self.flavor.model_config_id, self.state.model.clone())
+        else {
+            return;
+        };
+        let reported = update
+            .get("configOptions")
+            .and_then(Value::as_array)
+            .and_then(|a| {
+                a.iter()
+                    .find(|c| c.get("id").and_then(Value::as_str) == Some(config_id))
+            })
+            .and_then(|c| c.get("currentValue"))
+            .and_then(Value::as_str);
+        if let Some(m) = reported.filter(|m| *m != current) {
+            self.state.model = Some(m.to_string());
+            step.push(DriverEvent::AgentSettings {
+                model: Some(m.to_string()),
+                access: None,
+            });
+        }
+    }
+
     /// `session/set_mode`, or the agent's mode config option.
     fn set_mode(&mut self, step: &mut DriverStep, sid: &str, mode: &str) {
         let (id, line) = match self.state.mode_config_id.clone() {
@@ -1176,6 +1235,8 @@ impl AcpDriver {
                         t.output.push_str(&tx.text);
                     } else if let ContentBlock::Image(image) = &c.content {
                         media.image(&image.mime_type, &image.data);
+                    } else if let Some(text) = block_text(&c.content) {
+                        t.output.push_str(&text);
                     }
                 }
                 ToolCallContent::Diff(d) => {
@@ -1566,7 +1627,9 @@ impl AcpDriver {
                 return;
             }
             SessionUpdate::CurrentModeUpdate(u) => {
-                self.state.plan_active = u.current_mode_id.0.as_ref() == "plan";
+                let id = u.current_mode_id.0.as_ref();
+                self.state.plan_active = id == "plan";
+                self.follow_mode(step, id);
                 return;
             }
             _ => {}
@@ -1576,7 +1639,20 @@ impl AcpDriver {
         }
         match n.update {
             SessionUpdate::AgentMessageChunk(c) => {
-                if let ContentBlock::Text(t) = c.content {
+                let t = match c.content {
+                    ContentBlock::Text(t) => t,
+                    ContentBlock::Image(img) => {
+                        self.note_stdout_activity();
+                        self.ensure_autonomous_turn(step);
+                        self.answer_image(step, &img);
+                        return;
+                    }
+                    other => match block_text(&other) {
+                        Some(text) => TextContent::new(text),
+                        None => return,
+                    },
+                };
+                {
                     self.note_stdout_activity();
                     if let Some(text) = self
                         .state
@@ -1655,8 +1731,57 @@ impl AcpDriver {
                 self.ensure_autonomous_turn(step);
                 self.on_plan(step, plan);
             }
+            // One quiet timeline line each (gap 6).
+            SessionUpdate::Notice(n) => {
+                self.ensure_autonomous_turn(step);
+                self.close_segment(step);
+                let message = match n.description.filter(|d| !d.trim().is_empty()) {
+                    Some(d) => format!("{} \u{2014} {d}", n.title),
+                    None => n.title,
+                };
+                let id = format!("{}:notice:{}", self.turn(), otto_core::new_id());
+                step.push(DriverEvent::TurnItem(notice(id, message)));
+            }
+            SessionUpdate::CompactionUpdate(c) => {
+                self.ensure_autonomous_turn(step);
+                let turn = self.turn();
+                step.push(DriverEvent::TurnItem(match c.status {
+                    CompactionStatus::InProgress => compaction_notice(&turn, false),
+                    CompactionStatus::Completed => compaction_notice(&turn, true),
+                    _ => {
+                        let why = match c.error {
+                            MaybeUndefined::Value(e) if !e.trim().is_empty() => format!(": {e}"),
+                            _ => String::new(),
+                        };
+                        notice(
+                            format!("{turn}:compaction"),
+                            format!("Context compaction did not finish{why}"),
+                        )
+                    }
+                }));
+            }
             _ => {}
         }
+    }
+
+    /// An image in the agent's answer: its own row, rendered like a tool's.
+    fn answer_image(&mut self, step: &mut DriverStep, img: &ImageContent) {
+        self.close_segment(step);
+        let mut media = crate::tool_images::ToolOutput::default();
+        media.image(&img.mime_type, &img.data);
+        let id = format!("{}:image:{}", self.turn(), otto_core::new_id());
+        step.push(DriverEvent::TurnItem(item(
+            id,
+            TurnItemStatus::Completed,
+            Some("Image".into()),
+            TurnItemKind::DynamicTool {
+                image_files: Vec::new(),
+                tool_name: "Image".into(),
+                input: Value::Null,
+                output: (!media.text.is_empty()).then_some(media.text),
+                images: media.images,
+            },
+        )));
     }
 
     fn on_permission(
@@ -1680,8 +1805,9 @@ impl AcpDriver {
                 PermissionOptionKind::AllowOnce => ApprovalDecision::Accept,
                 PermissionOptionKind::AllowAlways => ApprovalDecision::AcceptForSession,
                 PermissionOptionKind::RejectOnce => ApprovalDecision::Decline,
-                // reject_always and unknown kinds have no decision of their own;
-                // `cancel` (always allowed) rejects without remembering.
+                PermissionOptionKind::RejectAlways => ApprovalDecision::DeclineAlways,
+                // Unknown kinds have no decision of their own; `cancel`
+                // (always allowed) rejects without remembering.
                 _ => continue,
             };
             if !options.iter().any(|x| x.decision == decision) {
@@ -1729,6 +1855,10 @@ impl AcpDriver {
             }
         }
         if id == self.state.init_id && self.state.phase == Phase::Initializing {
+            let result_resume = result
+                .as_ref()
+                .and_then(|r| r.pointer("/agentCapabilities/sessionCapabilities/resume"))
+                .is_some();
             self.state.auth_methods = result
                 .as_ref()
                 .and_then(|r| r.get("authMethods"))
@@ -1747,6 +1877,7 @@ impl AcpDriver {
                 .and_then(|r| serde_json::from_value::<InitializeResponse>(r).ok())
                 .map(|r| r.agent_capabilities);
             let load = caps.as_ref().is_some_and(|c| c.load_session);
+            self.state.resuming = result_resume;
             self.state.images = caps.as_ref().is_some_and(|c| c.prompt_capabilities.image);
             self.state.embedded = caps.is_some_and(|c| c.prompt_capabilities.embedded_context);
             if let Some(e) = error {
@@ -1770,6 +1901,11 @@ impl AcpDriver {
                         step.write(line);
                         return;
                     }
+                }
+                if loading && std::mem::take(&mut self.state.resuming) {
+                    // A refused `session/resume`: the replaying `session/load`.
+                    self.create_session(step, true);
+                    return;
                 }
                 if loading {
                     // T3 Code: a failed load / resume starts a fresh session
@@ -2108,6 +2244,22 @@ pub(super) fn command_text(raw: Option<&Value>) -> Option<String> {
     }
 }
 
+/// A non-text, non-image content block as a line of text: a resource link
+/// as a markdown link, an embedded text resource as its text, a blob or an
+/// audio clip named (gap 7).
+fn block_text(block: &ContentBlock) -> Option<String> {
+    Some(match block {
+        ContentBlock::ResourceLink(l) => format!("[{}]({})", l.name, l.uri),
+        ContentBlock::Resource(r) => match &r.resource {
+            EmbeddedResourceResource::TextResourceContents(t) => t.text.clone(),
+            EmbeddedResourceResource::BlobResourceContents(b) => format!("(attachment {})", b.uri),
+            _ => return None,
+        },
+        ContentBlock::Audio(_) => "(audio clip — not played here)".into(),
+        _ => return None,
+    })
+}
+
 fn raw_output_text(raw: Option<&Value>) -> Option<String> {
     let raw = raw?;
     if let Some(s) = raw.as_str() {
@@ -2401,6 +2553,10 @@ impl StructuredDriver for AcpDriver {
                 PermissionOptionKind::AllowOnce,
             ],
             ApprovalDecision::Decline => &[PermissionOptionKind::RejectOnce],
+            ApprovalDecision::DeclineAlways => &[
+                PermissionOptionKind::RejectAlways,
+                PermissionOptionKind::RejectOnce,
+            ],
             ApprovalDecision::Cancel => &[],
         };
         let option = kinds.iter().find_map(|k| {
@@ -2431,6 +2587,17 @@ impl StructuredDriver for AcpDriver {
             .ok_or_else(|| DriverError("no such pending question".into()))?;
         otto_core::agent_runtime::validate_question_answers(questions, answers)
             .map_err(DriverError)?;
+        if questions
+            .iter()
+            .any(|q| q.id == crate::questions::URL_QUESTION)
+        {
+            // url mode: the person chose to open it (the UI opens the page).
+            let line = json!({"jsonrpc":"2.0","id":rpc_id,"result":{"action":"accept"}});
+            self.state.questions.remove(request_id);
+            let mut step = DriverStep::default();
+            step.write(line.to_string());
+            return Ok(step);
+        }
         use otto_core::agent_runtime::{QuestionAnswer, QuestionKind};
         let content: serde_json::Map<String, Value> = answers
             .iter()
@@ -2499,6 +2666,12 @@ impl StructuredDriver for AcpDriver {
             (Some(m), None) if m == M_SESSION_UPDATE => {
                 if let Some(up) = params.get("update") {
                     self.update_effort_options(up);
+                    if up.get("sessionUpdate").and_then(Value::as_str)
+                        == Some("config_option_update")
+                        && self.state.config_req.is_none()
+                    {
+                        self.follow_model(&mut step, up);
+                    }
                 }
                 if self.state.cancelling {
                     return step;
@@ -2524,6 +2697,8 @@ impl StructuredDriver for AcpDriver {
                     || params.get("requestId").is_some()
                 {
                     Err("elicitation must belong to this live session".to_string())
+                } else if params.get("mode").and_then(Value::as_str) == Some("url") {
+                    crate::questions::acp_url(&params)
                 } else {
                     crate::questions::acp_form(&params)
                 };
@@ -3144,6 +3319,24 @@ mod tests {
         assert_eq!(cfg(&sent(&s, 0)), (json!("mode"), json!("build")));
     }
 
+    /// Gap 11: an agent advertising `sessionCapabilities.resume` gets
+    /// `session/resume` (no history replay); a refusal retries as load.
+    #[test]
+    fn resume_is_preferred_and_falls_back_to_load() {
+        let mut d = AcpDriver::opencode();
+        d.start(&ctx(Some("ses_old")));
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}}"#);
+        assert_eq!(sent(&s, 0)["method"], "session/resume");
+        assert_eq!(sent(&s, 0)["params"]["sessionId"], "ses_old");
+        let s = d.on_line(
+            r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32603,"message":"not resident"}}"#,
+        );
+        assert_eq!(sent(&s, 0)["method"], "session/load");
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":3,"result":{}}"#);
+        assert!(s.events.iter().any(|e| matches!(e,
+            DriverEvent::Ready { native_thread_id: Some(n), .. } if n == "ses_old")));
+    }
+
     #[test]
     fn handshake_loads_when_resuming_and_supported_and_queues_the_prompt() {
         let mut d = AcpDriver::gemini("gemini");
@@ -3281,6 +3474,140 @@ mod tests {
         };
         assert_eq!(notices(&d.on_line(&denied("c1"))), 1);
         assert_eq!(notices(&d.on_line(&denied("c2"))), 0, "once per session");
+    }
+
+    /// Gaps 6 + 7: notices and compaction are quiet timeline lines; an
+    /// image answer gets its own row; links and embedded text resources
+    /// read as text, in answers and in tool output.
+    #[test]
+    fn notices_compaction_and_non_text_content_are_shown() {
+        let mut d = AcpDriver::gemini("gemini");
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s"}}"#);
+        d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+        let up = |u: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s","update":{u}}}}}"#
+            )
+        };
+        let items = |s: DriverStep| -> Vec<TurnItem> {
+            s.events
+                .into_iter()
+                .filter_map(|e| match e {
+                    DriverEvent::TurnItem(i) => Some(i),
+                    _ => None,
+                })
+                .collect()
+        };
+        let msg = |i: &TurnItem| match &i.kind {
+            TurnItemKind::SystemNotice { message, .. } => message.clone(),
+            TurnItemKind::AssistantMessage { text, .. } => text.clone(),
+            TurnItemKind::DynamicTool { output, images, .. } => {
+                format!(
+                    "{} images:{}",
+                    output.clone().unwrap_or_default(),
+                    images.len()
+                )
+            }
+            _ => String::new(),
+        };
+        let n = items(d.on_line(&up(
+            r#"{"sessionUpdate":"notice","severity":"warning","title":"Rate limited","description":"retrying in 5s"}"#,
+        )));
+        assert_eq!(msg(&n[0]), "Rate limited \u{2014} retrying in 5s");
+        let c = items(d.on_line(&up(
+            r#"{"sessionUpdate":"compaction_update","compactionId":"k1","status":"in_progress"}"#,
+        )));
+        assert_eq!(msg(&c[0]), "Compacting context\u{2026}");
+        let c = items(d.on_line(&up(
+            r#"{"sessionUpdate":"compaction_update","compactionId":"k1","status":"completed"}"#,
+        )));
+        assert_eq!(
+            (msg(&c[0]).as_str(), c[0].id.as_str()),
+            ("Context compacted", "t1:compaction")
+        );
+        let l = items(d.on_line(&up(
+            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"resource_link","name":"spec","uri":"file:///a/spec.md"}}"#,
+        )));
+        assert_eq!(msg(l.last().unwrap()), "[spec](file:///a/spec.md)");
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        let i = items(d.on_line(&up(&format!(
+            r#"{{"sessionUpdate":"agent_message_chunk","content":{{"type":"image","mimeType":"image/png","data":"{png}"}}}}"#
+        ))));
+        assert!(
+            msg(i.last().unwrap()).ends_with("images:1"),
+            "{:?}",
+            i.last()
+        );
+        d.on_line(&up(r#"{"sessionUpdate":"tool_call","toolCallId":"c1","title":"fetch","kind":"fetch","status":"in_progress"}"#));
+        let t = items(d.on_line(&up(
+            r#"{"sessionUpdate":"tool_call_update","toolCallId":"c1","status":"completed","content":[{"type":"content","content":{"type":"resource","resource":{"uri":"file:///n.txt","text":"note body"}}}]}"#,
+        )));
+        assert!(
+            msg(t.last().unwrap()).starts_with("note body"),
+            "{:?}",
+            t.last()
+        );
+    }
+
+    /// Gap 10: url-mode elicitation is one choice naming the URL (accept
+    /// when chosen); a non-http(s) url is refused `-32602`.
+    #[test]
+    fn url_elicitation_names_the_url_and_accepts_when_chosen() {
+        let mut d = AcpDriver::gemini("gemini");
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s"}}"#);
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":9,"method":"elicitation/create","params":{"sessionId":"s","mode":"url","elicitationId":"e1","url":"https://example.com/login","message":"Sign in to continue"}}"#);
+        let (id, qs) = s
+            .events
+            .iter()
+            .find_map(|e| match e {
+                DriverEvent::Question { id, questions, .. } => {
+                    Some((id.clone(), questions.clone()))
+                }
+                _ => None,
+            })
+            .expect("a question");
+        assert_eq!(
+            qs[0].options[0].description.as_deref(),
+            Some("https://example.com/login")
+        );
+        assert!(qs[0].prompt.contains("Sign in to continue"));
+        let answer = otto_core::agent_runtime::QuestionAnswer::Single {
+            question_id: "acp_url".into(),
+            value: "open".into(),
+        };
+        let s = d.respond_question(&id, &[answer]).unwrap();
+        assert_eq!(sent(&s, 0)["result"], json!({"action": "accept"}));
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":10,"method":"elicitation/create","params":{"sessionId":"s","mode":"url","url":"file:///etc/passwd","message":"x"}}"#);
+        assert_eq!(sent(&s, 0)["error"]["code"], -32602);
+    }
+
+    /// Gap 10: `reject_always` is offered as `decline_always` and answers
+    /// with that option.
+    #[test]
+    fn reject_always_is_offered_and_answered() {
+        let mut d = AcpDriver::gemini("gemini");
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s"}}"#);
+        d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":"p1","method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"c1","kind":"execute","title":"rm"},"options":[{"optionId":"a","name":"Allow","kind":"allow_once"},{"optionId":"n","name":"Never","kind":"reject_always"},{"optionId":"r","name":"Deny","kind":"reject_once"}]}}"#);
+        let (id, options) = s
+            .events
+            .iter()
+            .find_map(|e| match e {
+                DriverEvent::Request { id, options, .. } => Some((id.clone(), options.clone())),
+                _ => None,
+            })
+            .unwrap();
+        assert!(options
+            .iter()
+            .any(|o| o.decision == ApprovalDecision::DeclineAlways && o.label == "Never"));
+        let s = d.respond(&id, ApprovalDecision::DeclineAlways).unwrap();
+        assert_eq!(sent(&s, 0)["result"]["outcome"]["optionId"], "n");
     }
 
     #[test]

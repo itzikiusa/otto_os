@@ -4915,3 +4915,23 @@ async fn fake_acp_tool_without_a_request_and_a_file_edit() {
     assert_eq!(last_assistant_text(&host), "edited");
     rt.close(&s.id).await.unwrap();
 }
+
+/// Gap 5: the agent moves to another access mode itself
+/// (`current_mode_update`); the thread's access follows, noted once.
+#[tokio::test]
+async fn an_agent_initiated_mode_change_moves_the_threads_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(root, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, root, RuntimeProvider::Agy).await;
+    rt.prompt(&s.id, "agent-mode accept-edits").await.unwrap();
+    host.wait(is_terminal).await;
+    let s = rt.get(&s.id).await.unwrap();
+    assert_eq!(s.access_mode, RuntimeAccessMode::AutoAcceptEdits);
+    assert!(host.items().iter().any(|i| i.id.starts_with("selection:")
+        || i.id.contains(":selection:")
+        || matches!(&i.kind, TurnItemKind::SystemNotice { message, .. } if message.starts_with("Access"))));
+    rt.close(&s.id).await.unwrap();
+}

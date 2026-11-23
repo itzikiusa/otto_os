@@ -17,6 +17,8 @@
 //! * `hang-hard`  — like `hang` but ignores `session/cancel`.
 //! * `plan`       — a `plan` update, then `end_turn`.
 //! * `fs`         — calls `fs/read_text_file` on the client and reports the error.
+//! * `agent-mode <id>` — the agent switches its own mode
+//!   (`current_mode_update`), then `end_turn`.
 //! * `tool`       — a `read` tool call that completes on its own (no
 //!   permission request), then `done`.
 //! * `edit <path>` — an `edit` tool call on `<path>` (relative to the cwd)
@@ -31,7 +33,8 @@
 //! out, no auth method to offer). `--approval-mode <m>` sets the starting
 //! mode; `session/new|load` advertise the modes `default`, `autoEdit`,
 //! `accept-edits` and `plan` (not `yolo`), which `session/set_mode` switches
-//! between, and list two slash commands (`available_commands_update`).
+//! between, a `thought_level` config option (low … xhigh), and list two
+//! slash commands (`available_commands_update`).
 //! `initialize` advertises `promptCapabilities.embeddedContext` (no images).
 //!
 //! `session/load` replays one history chunk before answering (clients must
@@ -100,6 +103,9 @@ fn main() {
     let modes = json!({"currentModeId": "default", "availableModes": [
         {"id": "default", "name": "Default"}, {"id": "autoEdit", "name": "Auto edit"},
         {"id": "accept-edits", "name": "Accept edits"}, {"id": "plan", "name": "Plan"}]});
+    // The `thought_level` option real agy / Muse catalogs advertise.
+    let efforts = json!([{"id":"thought_level","category":"thought_level","type":"select",
+        "currentValue":"medium","options":[{"value":"low"},{"value":"medium"},{"value":"high"},{"value":"xhigh"}]}]);
     let mut model = "none".to_string();
     let mut effort = "none".to_string();
     let mut system = "none".to_string();
@@ -124,7 +130,10 @@ fn main() {
             "session/new" => {
                 system = system_of(&params);
                 let sid = format!("fake-{}", std::process::id());
-                reply(&id, json!({"sessionId": sid, "modes": modes}));
+                reply(
+                    &id,
+                    json!({"sessionId": sid, "modes": modes, "configOptions": efforts}),
+                );
                 commands(&sid);
             }
             "session/set_model" => {
@@ -337,6 +346,14 @@ fn main() {
                             json!({"sessionUpdate":"plan","entries":[
                             {"content":"read","priority":"high","status":"completed"},
                             {"content":"write","priority":"medium","status":"in_progress"}]}),
+                        );
+                        done("end_turn");
+                    }
+                    t if t.starts_with("agent-mode ") => {
+                        mode = t[11..].trim().to_string();
+                        update(
+                            &sid,
+                            json!({"sessionUpdate":"current_mode_update","currentModeId":mode}),
                         );
                         done("end_turn");
                     }

@@ -630,7 +630,7 @@ impl CodexDriver {
             ReqProto::V2Decision => json!({"decision": match decision {
                 ApprovalDecision::Accept => "accept",
                 ApprovalDecision::AcceptForSession | ApprovalDecision::AcceptAlways => "acceptForSession",
-                ApprovalDecision::Decline => "decline",
+                ApprovalDecision::Decline | ApprovalDecision::DeclineAlways => "decline",
                 ApprovalDecision::Cancel => "cancel",
             }}),
             ReqProto::Permissions => match decision {
@@ -638,7 +638,9 @@ impl CodexDriver {
                 ApprovalDecision::AcceptForSession | ApprovalDecision::AcceptAlways => {
                     json!({"permissions": p.permissions, "scope": "session"})
                 }
-                ApprovalDecision::Decline | ApprovalDecision::Cancel => {
+                ApprovalDecision::Decline
+                | ApprovalDecision::DeclineAlways
+                | ApprovalDecision::Cancel => {
                     json!({"permissions": {}, "scope": "turn"})
                 }
             },

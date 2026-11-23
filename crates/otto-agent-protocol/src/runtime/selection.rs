@@ -120,6 +120,23 @@ pub(super) fn set_access(inner: &Inner, live: &Live, st: &mut State, to: Runtime
     );
 }
 
+/// The agent switched its own mode or model: the thread follows (noted
+/// like a person's switch, nothing is sent back).
+pub(super) fn follow_agent(
+    inner: &Inner,
+    live: &Live,
+    st: &mut State,
+    model: Option<String>,
+    access: Option<RuntimeAccessMode>,
+) {
+    if let Some(m) = model.filter(|m| st.session.model.as_ref() != Some(m)) {
+        set_model(inner, live, st, Some(m), false);
+    }
+    if let Some(a) = access.filter(|a| *a != st.session.access_mode) {
+        set_access(inner, live, st, a);
+    }
+}
+
 pub(super) fn set_effort(inner: &Inner, live: &Live, st: &mut State, to: Option<String>) {
     if st.session.effort == to {
         return;

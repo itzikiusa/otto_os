@@ -122,6 +122,12 @@ pub enum DriverEvent {
     /// What the running turn cost in US dollars (merged into its usage).
     TurnCost(f64),
     ContextUsage(ThreadTokenUsage),
+    /// The agent changed its mode or model itself (ACP `current_mode_update`,
+    /// `config_option_update`): the thread's chips follow it.
+    AgentSettings {
+        model: Option<String>,
+        access: Option<otto_core::agent_runtime::RuntimeAccessMode>,
+    },
     /// The agent's own slash commands, whole (`commands.updated`).
     Commands(Vec<otto_core::agent_runtime::ProviderCommand>),
     /// The agent named the conversation (Codex `thread/name/updated`, an

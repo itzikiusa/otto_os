@@ -794,7 +794,7 @@ impl ClaudeDriver {
                     "toolUseID": p.tool_use_id,
                 })
             }
-            ApprovalDecision::Decline => json!({
+            ApprovalDecision::Decline | ApprovalDecision::DeclineAlways => json!({
                 "behavior": "deny",
                 "message": "User declined tool execution.",
                 "toolUseID": p.tool_use_id,

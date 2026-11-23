@@ -3424,6 +3424,9 @@ pub(super) fn apply_step_opts(
                 todo.turn_id = turn_id;
                 upsert_item(inner, live, st, todo);
             }
+            DriverEvent::AgentSettings { model, access } => {
+                selection::follow_agent(inner, live, st, model, access)
+            }
             DriverEvent::CommandOutput { item_id, chunk } => {
                 emit(
                     inner,

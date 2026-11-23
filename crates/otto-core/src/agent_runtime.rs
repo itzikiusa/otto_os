@@ -328,6 +328,9 @@ pub enum ApprovalDecision {
     AcceptForSession,
     AcceptAlways,
     Decline,
+    /// Reject and remember it (ACP `reject_always`); a provider with no
+    /// such grant treats it as `Decline`.
+    DeclineAlways,
     Cancel,
 }
 
