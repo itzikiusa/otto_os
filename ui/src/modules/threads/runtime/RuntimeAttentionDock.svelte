@@ -59,7 +59,8 @@
   });
 
   // A new request takes focus — its primary action, or a question's first
-  // field — unless the person is typing in the composer.
+  // field — unless the person is typing in the composer or works elsewhere
+  // (another pane, the sidebar): focus never jumps out from under them.
   /** The dock's primary action, else a question's first field (in that order, not document order). */
   function primaryControl(): HTMLElement | null {
     for (const sel of ['[data-testid="runtime-dock-accept"]', '.ad-body button.primary:not([disabled])', '.ad-body input', '.ad-body textarea', '.ad-body button:not([disabled])']) {
@@ -80,6 +81,7 @@
     let tries = 12;
     const take = (): void => {
       const active = document.activeElement as HTMLTextAreaElement | null;
+      if (active && active !== document.body && !root?.closest('.rt')?.contains(active)) return;
       const typing = active?.tagName === 'TEXTAREA' && !root?.contains(active) && !!active.value.trim();
       if (typing && --tries > 0) return void requestAnimationFrame(take);
       if (!typing) primaryControl()?.focus({ preventScroll: true });
