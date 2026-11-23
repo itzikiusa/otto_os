@@ -217,9 +217,19 @@ impl SessionManager {
         // Snapshot-at-spawn: what this provider was actually given, what it
         // was not, plus the lookup fault if any (json_patch: a null clears a
         // stale error / skip list).
-        // A structured runtime session has no `sessions` row to snapshot into.
+        // A structured runtime session has no `sessions` row: its thread
+        // shows the same snapshot as a server list (`runtime_mcp_status`).
         let structured = session.meta.get("runtime").and_then(|v| v.as_str()) == Some("structured");
         if structured {
+            let otto_on = self.otto_mcp_enabled(&session.workspace_id).await;
+            let status = spawn_mcp_status(
+                &cli_family,
+                otto_on,
+                &delivered,
+                skipped.as_deref().unwrap_or_default(),
+                lookup_error.as_deref(),
+            );
+            self.runtime_mcp.insert(session.id.clone(), status);
             return launch_args;
         }
         if let Err(e) = self
@@ -284,5 +294,110 @@ impl SessionManager {
             }
             None => (Some(Vec::new()), None),
         }
+    }
+}
+
+/// A structured thread's MCP servers at spawn, as its server list shows them:
+/// Otto's own (`otto`, `otto-browser`) and the control-plane servers this
+/// provider was given (`Added` until the CLI reports a connection), the
+/// enabled ones it could not take with why, and a failed lookup. Pure.
+pub(crate) fn spawn_mcp_status(
+    provider: &str,
+    otto_on: bool,
+    delivered: &[String],
+    skipped: &[serde_json::Value],
+    lookup_error: Option<&str>,
+) -> Vec<otto_core::agent_runtime::McpServerStatus> {
+    use otto_core::agent_runtime::{McpServerSource as Src, McpServerState as St, McpServerStatus};
+    let own = |n: &str| n == crate::mcp::OTTO_TOOLS_KEY || n == crate::mcp::SERVER_KEY;
+    let mut out = Vec::new();
+    if !delivered.iter().any(|n| n == crate::mcp::OTTO_TOOLS_KEY) {
+        out.push(if otto_on {
+            McpServerStatus::new(crate::mcp::OTTO_TOOLS_KEY, Src::Otto, St::Failed)
+                .because("Otto couldn’t issue this thread’s tool credential (see the daemon log)")
+        } else {
+            McpServerStatus::new(crate::mcp::OTTO_TOOLS_KEY, Src::Otto, St::Disabled)
+                .because("Otto’s tools are off for this workspace (MCP → Otto server)")
+        });
+    }
+    for n in delivered {
+        let src = if own(n) { Src::Otto } else { Src::Workspace };
+        out.push(McpServerStatus::new(n.clone(), src, St::Added));
+    }
+    for s in skipped {
+        let name = s
+            .get("server")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let why = s
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        out.push(
+            McpServerStatus::new(name, Src::Workspace, St::Unsupported)
+                .because(format!("{} can’t take it: {why}", provider_name(provider))),
+        );
+    }
+    if let Some(e) = lookup_error {
+        out.push(
+            McpServerStatus::new("Workspace servers", Src::Workspace, St::Failed)
+                .because(format!("Otto couldn’t read the enabled servers: {e}")),
+        );
+    }
+    out
+}
+
+/// "Claude", "Codex" … for a sentence (the slug for an unknown family).
+pub(crate) fn provider_name(family: &str) -> String {
+    match family {
+        "claude" => "Claude".into(),
+        "codex" => "Codex".into(),
+        "gemini" => "Gemini".into(),
+        "agy" => "Antigravity".into(),
+        "grok" => "Grok".into(),
+        "opencode" => "opencode".into(),
+        "muse" => "Muse".into(),
+        other => other.into(),
+    }
+}
+
+#[cfg(test)]
+mod spawn_status_tests {
+    use super::*;
+    use otto_core::agent_runtime::{McpServerSource as Src, McpServerState as St};
+
+    #[test]
+    fn a_thread_lists_what_it_was_given_and_what_it_was_not_with_why() {
+        let skipped = [
+            serde_json::json!({"server": "probe", "reason": "its command “probe” isn’t on the daemon’s PATH"}),
+        ];
+        let s = spawn_mcp_status(
+            "gemini",
+            true,
+            &["otto".into(), "jira".into()],
+            &skipped,
+            None,
+        );
+        let view: Vec<_> = s
+            .iter()
+            .map(|s| (s.name.as_str(), s.source, s.state))
+            .collect();
+        assert_eq!(
+            view,
+            vec![
+                ("otto", Src::Otto, St::Added),
+                ("jira", Src::Workspace, St::Added),
+                ("probe", Src::Workspace, St::Unsupported),
+            ]
+        );
+        assert_eq!(
+            s[2].reason.as_deref(),
+            Some("Gemini can’t take it: its command “probe” isn’t on the daemon’s PATH")
+        );
+        // Otto's tools off for the workspace, and a failed lookup, are said too.
+        let s = spawn_mcp_status("codex", false, &[], &[], Some("db locked"));
+        assert_eq!(s[0].state, St::Disabled);
+        assert_eq!(s[1].state, St::Failed);
+        assert!(s[1].reason.as_deref().unwrap().contains("db locked"));
     }
 }

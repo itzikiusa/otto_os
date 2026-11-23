@@ -59,6 +59,18 @@ export interface ProviderCommand {
   hint?: string;
 }
 
+/** One MCP server a thread's agent has (`mcp_servers.updated`): Otto's own
+ *  tools, a control-plane server Otto handed it, or one from the CLI's own
+ *  config — set at spawn, refined by what the CLI reports. */
+export interface McpServerStatus {
+  name: string;
+  source: 'otto' | 'workspace' | 'cli';
+  /** `added`: given to the agent; the CLI reports no connection status. */
+  state: 'connected' | 'starting' | 'added' | 'needs_auth' | 'failed' | 'disabled' | 'unsupported';
+  /** Why it is not connected, in words. */
+  reason?: string;
+}
+
 /** `GET /runtime-sessions/{id}/tasks/{task_id}/output` — a Claude background
  *  command's output so far (the tail). */
 export interface RuntimeTaskOutput {
@@ -334,6 +346,8 @@ export type RuntimeEventBody =
   | { type: 'queue.updated'; queued_prompts: QueuedPrompt[] }
   /** The agent's own slash commands, whole. */
   | { type: 'commands.updated'; commands: ProviderCommand[] }
+  /** The MCP servers its agent has, whole. */
+  | { type: 'mcp_servers.updated'; mcp_servers: McpServerStatus[] }
   | { type: 'command_output.delta'; item_id: Id; chunk: string }
   | {
       type: 'turn.terminal';
@@ -366,6 +380,8 @@ export interface RuntimeSnapshot {
   queued_prompts?: QueuedPrompt[];
   /** The agent's own slash commands. */
   commands?: ProviderCommand[];
+  /** The MCP servers its agent has. */
+  mcp_servers?: McpServerStatus[];
   /** Set when `tail_turns` / `before_turn_ordinal` omitted earlier turns. */
   has_older?: boolean;
   /** `ordinal` of the earliest turn included in this slice, when paginated. */

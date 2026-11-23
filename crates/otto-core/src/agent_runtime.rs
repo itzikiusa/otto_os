@@ -804,6 +804,9 @@ pub enum RuntimeEventBody {
     /// The agent's own slash commands, whole (replaces the last list).
     #[serde(rename = "commands.updated")]
     CommandsUpdated { commands: Vec<ProviderCommand> },
+    /// The MCP servers the thread's agent has, whole (replaces the last list).
+    #[serde(rename = "mcp_servers.updated")]
+    McpServersUpdated { mcp_servers: Vec<McpServerStatus> },
     /// Live command output (never persisted; the item's `output` holds the total).
     #[serde(rename = "command_output.delta")]
     CommandOutputDelta { item_id: Id, chunk: String },
@@ -829,6 +832,7 @@ impl RuntimeEventBody {
             Self::PlanUpdated { .. } => "plan.updated",
             Self::QueueUpdated { .. } => "queue.updated",
             Self::CommandsUpdated { .. } => "commands.updated",
+            Self::McpServersUpdated { .. } => "mcp_servers.updated",
             Self::CommandOutputDelta { .. } => "command_output.delta",
             Self::TurnTerminal { .. } => "turn.terminal",
         }
@@ -866,6 +870,9 @@ pub struct RuntimeSnapshot {
     /// The agent's own slash commands (`commands.updated`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<ProviderCommand>,
+    /// The MCP servers its agent has (`mcp_servers.updated`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<McpServerStatus>,
     /// Set when `tail_turns` / `before_turn_ordinal` omitted earlier turns.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub has_older: bool,
@@ -930,6 +937,63 @@ pub struct ProviderCommand {
     /// What to type after it (ACP `input.hint`), when it takes input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+}
+
+/// One MCP server a thread's agent has — Otto's own tools, a control-plane
+/// server Otto handed the CLI, or one from the CLI's own config — and whether
+/// the agent can use it (`mcp_servers.updated`). Set at spawn from what Otto
+/// gave the agent (and skipped, with why), then refined by what the CLI
+/// reports (Claude's `system init`, Codex's `mcpServer/startupStatus`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerStatus {
+    pub name: String,
+    pub source: McpServerSource,
+    pub state: McpServerState,
+    /// Why it is not connected, in words (absent when it is).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpServerSource {
+    /// Otto's own tool server (`otto`, `otto-browser`).
+    Otto,
+    /// A control-plane server Otto handed the agent.
+    Workspace,
+    /// From the CLI's own config (Otto did not add it).
+    Cli,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpServerState {
+    Connected,
+    /// The CLI is still starting it.
+    Starting,
+    /// Given to the agent; the CLI does not report whether it connected.
+    Added,
+    NeedsAuth,
+    Failed,
+    Disabled,
+    /// The provider (or this mode) cannot take it.
+    Unsupported,
+}
+
+impl McpServerStatus {
+    pub fn new(name: impl Into<String>, source: McpServerSource, state: McpServerState) -> Self {
+        Self {
+            name: name.into(),
+            source,
+            state,
+            reason: None,
+        }
+    }
+
+    pub fn because(mut self, reason: impl Into<String>) -> Self {
+        self.reason = Some(reason.into());
+        self
+    }
 }
 
 impl ProviderCommand {

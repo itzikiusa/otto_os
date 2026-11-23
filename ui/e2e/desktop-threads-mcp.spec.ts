@@ -19,3 +19,26 @@ test('an approval-gated Otto tool asks in the thread, and Allow once runs the wa
   await expect(row).not.toContainText('pending_approval');
   await expect(row).not.toContainText('resubmit');
 });
+
+test('thread ⋯ ▸ MCP servers lists what the agent has, each with a word and why', async ({ page }) => {
+  const { ctx, base, wsId } = t.state;
+  const made = await ctx.post(`${base}/api/v1/workspaces/${wsId}/mcp-servers`, {
+    data: { name: 'probe-missing', command: '/nonexistent/otto-e2e-probe', enabled: true },
+  });
+  expect(made.ok(), await made.text()).toBeTruthy();
+  const { thread } = await t.send(page, 'MCP list', 'hello');
+  await expect(thread.getByText('echo: hello')).toBeVisible({ timeout: 30_000 });
+  await page.getByRole('button', { name: 'Thread and view actions' }).click();
+  await page.getByRole('menuitem', { name: 'MCP servers' }).click();
+  const sheet = page.getByTestId('runtime-mcp-servers');
+  await expect(sheet).toBeVisible();
+  const row = (name: string) => sheet.locator(`[data-testid="runtime-mcp-server"][data-name="${name}"]`);
+  await expect(row('otto')).toContainText('Connected');
+  await expect(row('otto')).toContainText('Otto');
+  await expect(row('probe-missing')).toContainText('Failed');
+  await expect(row('probe-missing')).toContainText('This workspace');
+  await expect(row('own-docs')).toContainText('Needs sign-in');
+  await expect(row('own-docs')).toContainText('Claude’s own config');
+  // Problems first.
+  await expect(sheet.locator('[data-testid="runtime-mcp-server"]').first()).toHaveAttribute('data-name', /probe-missing|own-docs/);
+});

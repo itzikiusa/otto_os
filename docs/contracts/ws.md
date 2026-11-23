@@ -1725,7 +1725,15 @@ published on the streaming path, never through the internal bus.
   description?, hint?}]}` (the agent's own slash commands, whole: Claude
   `initialize.commands`, ACP `available_commands_update`, pi `get_commands`,
   Codex `skills/list`; descriptions one line ≤ 160 chars, ≤ 400 commands;
-  also `RuntimeSnapshot.commands`), `command_output.delta {item_id, chunk}`,
+  also `RuntimeSnapshot.commands`), `mcp_servers.updated {mcp_servers:
+  [{name, source: otto|workspace|cli, state: connected|starting|added|
+  needs_auth|failed|disabled|unsupported, reason?}]}` (the MCP servers the
+  thread's agent has, whole: at each spawn what Otto gave it — `added` — and
+  the enabled control-plane servers it could not take, `unsupported` with
+  why; then refined by name from what the CLI reports — Claude `system
+  init.mcp_servers`, Codex `mcpServer/startupStatus/updated` — which also
+  adds the CLI's own servers as `source: cli`; ≤ 100; persisted; also
+  `RuntimeSnapshot.mcp_servers`), `command_output.delta {item_id, chunk}`,
   `turn.terminal {turn_id, status: completed|interrupted|cancelled|failed,
   failure?, reason?}` (`reason: "stalled"` = the stall watchdog stopped it).
   Entities are sent WHOLE (replace by id); `turn_item.type` ∈ `user_message |

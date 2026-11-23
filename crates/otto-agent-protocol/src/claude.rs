@@ -1380,6 +1380,12 @@ impl StructuredDriver for ClaudeDriver {
                     native_thread_id: self.session_id.clone(),
                     model: msg.get("model").and_then(Value::as_str).map(str::to_string),
                 });
+                if let Some(servers) = msg.get("mcp_servers").and_then(Value::as_array) {
+                    step.push(DriverEvent::McpServers {
+                        servers: servers.iter().filter_map(claude_mcp_status).collect(),
+                        spawn: false,
+                    });
+                }
             }
             // T3 Code #33151 / #24334: a retry or compaction is one quiet row.
             "system" if self.turn_id.is_some() && Self::is_retry_or_compaction(&msg) => {
@@ -1445,6 +1451,52 @@ impl StructuredDriver for ClaudeDriver {
 
     fn restore_state(&mut self, state: &Value) -> Result<(), DriverError> {
         restore_keeping_program(self, state, |d| &mut d.program)
+    }
+}
+
+/// One `system init` `mcp_servers` entry (`{name, status}`; status
+/// `connected` | `pending` | `needs-auth` | `failed` | `disabled`).
+fn claude_mcp_status(v: &Value) -> Option<otto_core::agent_runtime::McpServerStatus> {
+    use otto_core::agent_runtime::{McpServerSource, McpServerState as St, McpServerStatus};
+    let name = v.get("name").and_then(Value::as_str)?;
+    let (state, why) = match v.get("status").and_then(Value::as_str).unwrap_or_default() {
+        "connected" => (St::Connected, None),
+        "pending" => (St::Starting, None),
+        "needs-auth" => (
+            St::NeedsAuth,
+            Some("Sign in with `claude mcp` or /mcp in Claude Code"),
+        ),
+        "disabled" => (
+            St::Disabled,
+            Some("Turned off in Claude Code’s own settings"),
+        ),
+        _ => (St::Failed, Some("Claude Code couldn’t start it")),
+    };
+    let s = McpServerStatus::new(name, McpServerSource::Cli, state);
+    Some(match why {
+        Some(w) => s.because(w),
+        None => s,
+    })
+}
+
+#[cfg(test)]
+mod mcp_status_tests {
+    use super::*;
+    use otto_core::agent_runtime::McpServerState as St;
+
+    #[test]
+    fn the_init_frames_server_list_reads_as_states_with_reasons() {
+        let s = |status: &str| {
+            claude_mcp_status(&serde_json::json!({"name": "x", "status": status})).unwrap()
+        };
+        assert_eq!(s("connected").state, St::Connected);
+        assert_eq!(s("connected").reason, None);
+        assert_eq!(s("pending").state, St::Starting);
+        assert_eq!(s("needs-auth").state, St::NeedsAuth);
+        assert!(s("needs-auth").reason.unwrap().contains("Sign in"));
+        assert_eq!(s("failed").state, St::Failed);
+        assert_eq!(s("disabled").state, St::Disabled);
+        assert!(claude_mcp_status(&serde_json::json!({"status": "connected"})).is_none());
     }
 }
 

@@ -343,6 +343,10 @@ impl CodexDriver {
             return;
         }
         self.mcp_failures.retain(|(n, _)| n != name);
+        step.push(DriverEvent::McpServers {
+            servers: vec![codex_mcp_status(name, params)],
+            spawn: false,
+        });
         if params.get("status").and_then(Value::as_str) != Some("failed") {
             return;
         }
@@ -1485,6 +1489,37 @@ impl StructuredDriver for CodexDriver {
     }
 }
 
+/// `mcpServer/startupStatus/updated` as the thread's server list shows it
+/// (`starting` | `ready` | `failed`; an auth failure reads as sign-in).
+fn codex_mcp_status(name: &str, params: &Value) -> otto_core::agent_runtime::McpServerStatus {
+    use otto_core::agent_runtime::{McpServerSource, McpServerState as St, McpServerStatus};
+    let error = params
+        .get("error")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    let auth = ["auth", "401", "login", "oauth"]
+        .iter()
+        .any(|k| error.to_ascii_lowercase().contains(k));
+    let state = match params
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "ready" => St::Connected,
+        "starting" => St::Starting,
+        "failed" if auth => St::NeedsAuth,
+        _ => St::Failed,
+    };
+    let s = McpServerStatus::new(name, McpServerSource::Cli, state);
+    match state {
+        St::NeedsAuth => s.because(format!("Sign in with `codex mcp login {name}`")),
+        St::Failed if !error.is_empty() => s.because(error),
+        St::Failed => s.because("Codex couldn’t start it"),
+        _ => s,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1967,13 +2002,18 @@ mod tests {
         let mut d = CodexDriver::with_program("codex");
         ready(&mut d, false);
         let status = |name: &str, status: &str, error: Value| json!({"method":"mcpServer/startupStatus/updated","params":{"threadId":"th1","name":name,"status":status,"error":error}});
-        // Before the turn: held until one runs; a recovered server is dropped.
-        assert!(feed(
+        // Before the turn: held until one runs (the server list hears it at
+        // once); a recovered server is dropped.
+        let s = feed(
             &mut d,
-            status("jira", "failed", json!("spawn jira-mcp: ENOENT"))
-        )
-        .events
-        .is_empty());
+            status("jira", "failed", json!("spawn jira-mcp: ENOENT")),
+        );
+        assert!(
+            matches!(&s.events[..], [DriverEvent::McpServers { servers, spawn: false }]
+            if servers[0].name == "jira"
+                && servers[0].state == otto_core::agent_runtime::McpServerState::Failed
+                && servers[0].reason.as_deref() == Some("spawn jira-mcp: ENOENT"))
+        );
         feed(&mut d, status("slack", "failed", Value::Null));
         feed(&mut d, status("slack", "ready", Value::Null));
         // Another thread's report is not this one's.
@@ -2000,7 +2040,7 @@ mod tests {
         );
         // During a turn: shown at once, with a fallback text.
         let s = feed(&mut d, status("slack", "failed", json!("  ")));
-        assert!(matches!(&s.events[0], DriverEvent::TurnItem(i)
+        assert!(matches!(&s.events[1], DriverEvent::TurnItem(i)
             if matches!(&i.kind, TurnItemKind::SystemNotice { message, .. } if message == "MCP server slack failed to start.")));
         // Shown once: the next turn carries nothing.
         feed(

@@ -26,6 +26,9 @@
 //!   this process), runs `initialize` + `tools/call` off the main loop, and
 //!   reports it as Claude Code does: a `mcp__<server>__<tool>` tool_use, its
 //!   tool_result (the MCP `content`, `is_error`), "mcp done", `result`.
+//! * (every start) `system init` lists `mcp_servers`: the `--mcp-config`
+//!   servers ("connected" when the command exists, else "failed") and
+//!   `own-docs` ("needs-auth", as if from Claude Code's own config).
 //! * anything else — `echo: <text>` as stream events + `assistant`.
 //!
 //! An `interrupt` control request ends the running turn as interrupted; a
@@ -143,6 +146,28 @@ fn expand_env(v: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// `system init`'s `mcp_servers`: each `--mcp-config` server "connected"
+/// when its command exists, else "failed", plus one server of the CLI's own
+/// config waiting for a sign-in (`own-docs`, "needs-auth").
+fn init_mcp_servers(config: &str) -> Value {
+    let raw = std::fs::read_to_string(config).unwrap_or_default();
+    let doc: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+    let mut list: Vec<Value> = doc["mcpServers"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(name, spec)| {
+            let cmd = spec["command"].as_str().unwrap_or_default();
+            let found = std::path::Path::new(cmd).is_file()
+                || std::env::var_os("PATH")
+                    .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(cmd).is_file()));
+            json!({"name": name, "status": if found { "connected" } else { "failed" }})
+        })
+        .collect();
+    list.push(json!({"name": "own-docs", "status": "needs-auth"}));
+    Value::Array(list)
 }
 
 /// One stdio MCP call against `server` from the `--mcp-config` document.
@@ -367,7 +392,7 @@ fn main() {
                 );
                 if sub == Some("initialize") {
                     out(
-                        json!({"type":"system","subtype":"init","session_id":session,"model":"fake-claude"}),
+                        json!({"type":"system","subtype":"init","session_id":session,"model":"fake-claude","mcp_servers":init_mcp_servers(&mcp_config)}),
                     );
                 }
                 if sub == Some("interrupt") && waiting.take().is_some() {
