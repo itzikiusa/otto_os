@@ -7,6 +7,7 @@
   // other modules' groups, "Working N" (open) and "History N" (folded), and a
   // quiet footer (Settings · Git · Usage · Sync).
   import Icon from '../../lib/components/Icon.svelte';
+  import { worktreeProjects } from './worktreeProjects.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { git } from '../../lib/stores/git.svelte';
@@ -30,7 +31,9 @@
   import {
     delegatedParentId,
     isThreadSession,
+    projectName,
     projectNameFromCwd,
+    repoForCwd,
     sessionBranch,
   } from './threadsHelpers';
   import { FilterPopover, FolderPickerModal, OriginGroupsView, ProjectGroupsView } from './threadLazy.svelte';
@@ -78,7 +81,7 @@
     }
     return m;
   });
-  const folderLabel = (cwd: string, fallback?: string): string => agentFolderNames.get(cwd) ?? projectNameFromCwd(cwd, fallback);
+  const folderLabel = (cwd: string, fallback?: string): string => agentFolderNames.get(cwd) ?? projectName(cwd, fallback);
   // Id index over live + archived sessions: a delegated worker's parent
   // lookup is O(1) instead of a scan of every session per row.
   const allPool = $derived(new Map([...ws.archivedSessions, ...ws.otherWsSessions, ...ws.sessions].map((s) => [s.id, s] as const)));
@@ -89,6 +92,20 @@
     ...runtimeThreads.rows(),
   ]);
 
+  // A worktree thread files under its main checkout (worktreeProjects): learn
+  // the worktrees of each repo a thread works in, once per repo.
+  $effect(() => {
+    const repos = [...git.repos, ...git.allRepos];
+    const seen = new Set<string>();
+    for (const s of allLiveThreads) {
+      const r = s.cwd ? repoForCwd(s.cwd, repos) : null;
+      if (r && !seen.has(r.id)) {
+        seen.add(r.id);
+        worktreeProjects.ensure(r);
+      }
+    }
+  });
+
   // Distinct project roots across workspaces, repos and threads for the filter pill.
   const projectOptions = $derived.by(() => {
     const map = new Map<string, { key: string; label: string; cwd: string }>();
@@ -98,10 +115,10 @@
     }
     for (const r of git.repos) {
       const rp = r.path.replace(/\/+$/, '');
-      if (!map.has(rp)) map.set(rp, { key: rp, label: r.name || projectNameFromCwd(rp), cwd: rp });
+      if (!map.has(rp) && !worktreeProjects.of(rp)) map.set(rp, { key: rp, label: r.name || projectNameFromCwd(rp), cwd: rp });
     }
     for (const s of allLiveThreads) {
-      const c = (s.cwd ?? '').replace(/\/+$/, '');
+      const c = worktreeProjects.root(s.cwd);
       if (c && !map.has(c)) map.set(c, { key: c, label: folderLabel(c), cwd: c });
     }
     for (const c of threads.extraProjects) {
@@ -230,7 +247,7 @@
     };
     for (const s of mainPool) {
       if (ideGrouping.matchedSessionIds.has(s.id)) continue;
-      ensure((s.cwd ?? ws.current?.root_path ?? '~').replace(/\/+$/, '') || '~').items.push(s);
+      ensure(worktreeProjects.root(s.cwd ?? ws.current?.root_path ?? '~') || '~').items.push(s);
     }
     if (!search.trim()) {
       // First open with no threads: the open workspace's project, ready for one.
