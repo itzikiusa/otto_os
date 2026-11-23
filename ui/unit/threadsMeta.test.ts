@@ -19,18 +19,19 @@ function load(patch: (path: string, body: unknown) => Promise<unknown>, rows: Re
   const toasts: string[] = [];
   const patched: [string, unknown][] = [];
   const store = { byId: rows, get: (id: string) => rows[id] ?? null, loadAll: async () => {} };
+  const wsMock = { getSession: () => null, otherWsSessions: [], archivedSessions: [], updateSessionMeta: async () => {}, sessionsLoading: false, listSettled: true, refreshOtherSessions: async () => {} };
   const ls = new Map<string, string>();
   (globalThis as { localStorage?: unknown }).localStorage = { getItem: (k: string) => ls.get(k) ?? null, setItem: (k: string, v: string) => void ls.set(k, v) };
   const { threadMeta } = loadSource(new URL('../src/modules/threads/threadMeta.svelte.ts', import.meta.url), {
     '../../lib/api/client': { api: { patch: (p: string, b: unknown) => { patched.push([p, b]); return patch(p, b); } } },
     '../../lib/stores/auth.svelte': { auth: { me: { id: 'me' } } },
-    '../../lib/stores/workspace.svelte': { ws: { getSession: () => null, otherWsSessions: [], archivedSessions: [], updateSessionMeta: async () => {} } },
+    '../../lib/stores/workspace.svelte': { ws: wsMock },
     '../../lib/live': { onLive: () => () => {} },
     '../../lib/toastError': { toastError: (t: string) => void toasts.push(t) },
     './runtime/runtimeThreads.svelte': { runtimeThreads: store },
     './threadInbox': inbox,
-  }) as { threadMeta: { write: (id: string, p: unknown) => Promise<boolean>; pinned: (id: string) => boolean; history: (id: string) => boolean; unread: (id: string, live: boolean) => boolean; migrate: (p: string[], h: string[]) => Promise<boolean>; markSeen: (id: string) => void } };
-  return { threadMeta, toasts, patched, rows, ls };
+  }) as { threadMeta: { write: (id: string, p: unknown) => Promise<boolean>; pinned: (id: string) => boolean; history: (id: string) => boolean; unread: (id: string, live: boolean) => boolean; migrate: (p: string[], h: string[]) => Promise<{ pins: string[]; history: string[] } | null>; markSeen: (id: string) => void } };
+  return { threadMeta, toasts, patched, rows, ls, wsMock };
 }
 const row = (meta: Record<string, unknown> = {}) => ({ id: 'a', status: 'idle', created_by: 'me', last_turn_status: 'completed', last_active_at: '2026-11-23T10:00:00Z', meta });
 
@@ -55,12 +56,12 @@ test('a write that lands keeps the daemon’s meta on the row', async () => {
 
 test('the local lists move onto threads that still exist, once', async () => {
   const t = load(async (_p, b) => ({ meta: (b as { meta: unknown }).meta }), { a: row(), b: { ...row(), id: 'b' } });
-  assert.equal(await t.threadMeta.migrate(['a', 'gone'], ['b', 'a']), true);
+  assert.equal(JSON.stringify(await t.threadMeta.migrate(['a', 'gone'], ['b', 'a'])), JSON.stringify({ pins: [], history: [] }));
   assert.equal(JSON.stringify(t.patched.sort()), JSON.stringify([
     ['/runtime-sessions/a', { meta: { thread_pinned: true, thread_history: true } }],
     ['/runtime-sessions/b', { meta: { thread_history: true } }],
   ]));
-  assert.equal(await t.threadMeta.migrate(['a'], []), true);
+  assert.equal(JSON.stringify(await t.threadMeta.migrate(['a'], [])), JSON.stringify({ pins: [], history: [] }));
   assert.equal(t.patched.length, 2);
 });
 
@@ -101,4 +102,17 @@ test('a seen mark that fails is tried once per ended turn, not in a loop', async
   (t.rows.a.meta as Record<string, unknown>).last_turn_ended_at = '2026-11-23T10:09:00Z';
   t.threadMeta.markSeen('a');
   assert.equal(t.patched.length, 2);
+});
+
+test('the migration waits for the session lists and keeps what failed to write', async () => {
+  const t = load(async (p) => { if (p.endsWith('/b')) throw new Error('refused'); return { meta: {} }; }, { a: row(), b: { ...row(), id: 'b' } });
+  // Still loading: not now (a terminal thread could look gone), nothing written.
+  t.wsMock.sessionsLoading = true;
+  assert.equal(await t.threadMeta.migrate(['a', 'b'], ['b']), null);
+  assert.equal(t.patched.length, 0);
+  t.wsMock.sessionsLoading = false;
+  const left = await t.threadMeta.migrate(['a', 'b'], ['b']);
+  assert.equal(JSON.stringify(left), JSON.stringify({ pins: ['b'], history: ['b'] }));
+  // Not marked done: the next load tries b again.
+  assert.equal(t.ls.get('otto_threads_meta_migrated'), undefined);
 });
