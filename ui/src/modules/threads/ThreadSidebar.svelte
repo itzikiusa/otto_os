@@ -39,7 +39,6 @@
   import { FilterPopover, FolderPickerModal, OriginGroupsView, ProjectGroupsView } from './threadLazy.svelte';
   import { threadsChrome } from './threadsChrome.svelte';
   import { buildSidebarLegacyThreadMenu, reviveLegacyThread } from './threadMenu';
-  import { promptNewScript } from './threadGitMenus';
   import { runtimeThreadMenu } from './runtime/runtimeMenu';
   import { isRuntimeThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
   import { threads } from './threadsStore.svelte';
@@ -322,7 +321,7 @@
         icon: 'filter',
         action: () => threads.toggleProjectFilter(grp.key),
       },
-      { label: 'Add project script…', icon: 'play', action: () => void promptNewScript(grp.cwd) },
+      { label: 'Add project script…', icon: 'play', action: () => void import('./threadGitMenus').then((m) => m.promptNewScript(grp.cwd)) },
       ...(added ? [{ separator: true }, { label: 'Remove from sidebar', icon: 'x', action: () => threads.removeProject(grp.key) }] : []),
     ]);
   }

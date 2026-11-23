@@ -19,7 +19,7 @@
   import { runtimeThreads } from './runtimeThreads.svelte';
   import { runtimeViews } from './runtimeView.svelte';
   import { pendingApprovals } from './timeline';
-  import RuntimeQuestionCard from './RuntimeQuestionCard.svelte';
+  import { QuestionCardView } from '../threadLazy.svelte';
 
   let { sessionId }: { sessionId: string } = $props();
 
@@ -83,7 +83,7 @@
       {#if cur.approval}
         <RuntimeApprovalRow approval={cur.approval} onrespond={answer} docked />
       {:else if cur.question}
-        <RuntimeQuestionCard request={cur.question} sessionId={cur.kid.id} agent={cur.kid.title} onanswered={() => {}} docked />
+        {#if QuestionCardView.component}<QuestionCardView.component request={cur.question} sessionId={cur.kid.id} agent={cur.kid.title} onanswered={() => {}} docked />{/if}
       {/if}
     {/key}
   </div>

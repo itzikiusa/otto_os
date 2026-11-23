@@ -20,7 +20,7 @@
   } from './attentionDock';
   import RuntimeApprovalRow from './RuntimeApprovalRow.svelte';
   import { isMcpAsk } from './mcpAsks';
-  import RuntimeQuestionCard from './RuntimeQuestionCard.svelte';
+  import { QuestionCardView } from '../threadLazy.svelte';
   import RuntimeSecretCard from './RuntimeSecretCard.svelte';
   import type { PendingApproval } from './timeline';
 
@@ -177,7 +177,7 @@
         {#if approval}
           <RuntimeApprovalRow bind:this={rowRef} {approval} onrespond={answer} docked hints={hover} {mac} />
         {:else if question}
-          <RuntimeQuestionCard request={question} {sessionId} {agent} {onanswered} docked />
+          {#if QuestionCardView.component}<QuestionCardView.component request={question} {sessionId} {agent} {onanswered} docked />{/if}
         {:else if cur.kind === 'secret' && secret}
           <RuntimeSecretCard request={secret} docked />
         {/if}
