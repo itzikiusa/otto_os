@@ -3259,6 +3259,7 @@ pub(super) fn apply_step_opts(
                     questions: vec![],
                     question_title: None,
                     answers: None,
+                    for_person: false,
                 };
                 let mut item = item(
                     format!("{}:approval:{id}", turn_id.as_deref().unwrap_or_default()),
@@ -3291,6 +3292,7 @@ pub(super) fn apply_step_opts(
                 title,
                 questions,
                 tool_item_id: _,
+                for_person,
             } => {
                 let id = scope_request_id(st, &id);
                 let turn_id = st.turn.as_ref().map(|t| t.id.clone());
@@ -3307,6 +3309,7 @@ pub(super) fn apply_step_opts(
                     questions,
                     question_title: title,
                     answers: None,
+                    for_person,
                 };
                 emit(
                     inner,

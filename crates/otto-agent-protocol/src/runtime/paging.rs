@@ -1068,6 +1068,7 @@ mod tests {
                 questions: Vec::new(),
                 question_title: None,
                 answers: None,
+                for_person: false,
             },
         );
 

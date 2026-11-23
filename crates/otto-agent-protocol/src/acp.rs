@@ -2890,6 +2890,8 @@ impl StructuredDriver for AcpDriver {
                                 .map(str::to_string),
                             questions,
                             tool_item_id: None,
+                            // An ACP elicitation (often an MCP server's, relayed).
+                            for_person: true,
                         });
                     }
                     Err(message) => step.write(

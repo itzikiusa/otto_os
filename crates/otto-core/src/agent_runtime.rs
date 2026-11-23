@@ -767,6 +767,11 @@ pub struct RuntimeRequest {
     pub question_title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answers: Option<Vec<QuestionAnswer>>,
+    /// A question only the person answers: an MCP server's (or an ACP
+    /// agent's) elicitation. Never passed to the agent that delegated a
+    /// subagent; `otto.thread_answer` refuses it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub for_person: bool,
 }
 
 /// Why a request was cancelled: the provider withdrew it (`agent` — Claude
@@ -2382,6 +2387,7 @@ mod tests {
                     questions: vec![],
                     question_title: None,
                     answers: None,
+                    for_person: false,
                 },
             },
             RuntimeEventBody::PlanUpdated {

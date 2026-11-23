@@ -19,7 +19,12 @@ pub(super) fn on_waiting(inner: &Inner, st: &State) {
         .proj
         .requests
         .values()
-        .filter(|r| r.status == RuntimeRequestStatus::Pending && r.kind == RequestKind::Question)
+        .filter(|r| {
+            r.status == RuntimeRequestStatus::Pending
+                && r.kind == RequestKind::Question
+                // An MCP / ACP elicitation is the person's to answer.
+                && !r.for_person
+        })
         .max_by_key(|r| r.created_at)
     else {
         return;
@@ -87,6 +92,21 @@ impl AgentRuntime {
         if p.child_of().is_none_or(|of| of.id != c.id) {
             return Err(Error::Forbidden(
                 "only the thread that delegated to it answers its questions".into(),
+            ));
+        }
+        let for_person = {
+            let live = self.live(&p.id).await?;
+            let st = live.lock();
+            st.proj
+                .requests
+                .get(request_id)
+                .is_some_and(|r| r.for_person)
+        };
+        if for_person {
+            return Err(Error::Forbidden(
+                "this question is for the person (an MCP server or the agent asked them directly); \
+                 only they answer it, in their dock"
+                    .into(),
             ));
         }
         self.respond_question(&p.id, request_id, answers).await
@@ -160,6 +180,7 @@ mod tests {
             }],
             question_title: None,
             answers: None,
+            for_person: false,
         };
         let t = question_text(&child, "rq1", &r);
         assert!(t.starts_with("[Question from subagent \"kid\""));

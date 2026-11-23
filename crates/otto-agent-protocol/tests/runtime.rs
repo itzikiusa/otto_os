@@ -5670,3 +5670,53 @@ async fn client_terminals_die_with_the_thread_and_wait_ignores_background_pipes(
     assert_eq!(last_assistant_text(&host), "term: bg-started");
     rt.close(&s3.id).await.unwrap();
 }
+
+/// Security 3: an elicitation (MCP server / ACP agent asking the person)
+/// inside a subagent never goes to the delegating agent, and
+/// `otto.thread_answer` refuses it; the person still answers it.
+#[tokio::test]
+async fn a_subagents_elicitation_is_for_the_person_not_the_parent_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let lead = create(&rt, cwd).await;
+    let mut asks = worker_req("signs in", Some("elicit-url https://example.com/login"));
+    asks.provider = RuntimeProvider::Gemini;
+    let kid = rt.open_peer(&lead.id, asks).await.unwrap();
+    let req = host
+        .wait(|e| {
+            e.session_id == kid.id
+                && matches!(&e.body, RuntimeEventBody::RuntimeRequestUpdated { runtime_request }
+                    if runtime_request.status == RuntimeRequestStatus::Pending)
+        })
+        .await;
+    let RuntimeEventBody::RuntimeRequestUpdated { runtime_request } = req.body else {
+        unreachable!()
+    };
+    assert!(runtime_request.for_person);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        !host.all().iter().any(|e| e.session_id == lead.id
+            && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+                if matches!(&turn_item.kind, TurnItemKind::UserMessage { text, .. }
+                    if text.starts_with("[Question from subagent")))),
+        "the lead's agent never hears of it"
+    );
+    use otto_core::agent_runtime::QuestionAnswer;
+    let open = vec![QuestionAnswer::Single {
+        question_id: "acp_url".into(),
+        value: "open".into(),
+    }];
+    assert!(matches!(
+        rt.answer_child(&lead.id, &kid.id, &runtime_request.id, open.clone())
+            .await,
+        Err(Error::Forbidden(_))
+    ));
+    rt.respond_question(&kid.id, &runtime_request.id, open)
+        .await
+        .unwrap();
+    let back = rt.latest_reply(&kid.id, WAIT).await.unwrap();
+    assert!(back.text.contains("url: accept"), "{}", back.text);
+}

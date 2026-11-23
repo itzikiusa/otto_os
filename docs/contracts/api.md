@@ -6852,7 +6852,11 @@ cancels all its studio turns through the existing story lifecycle.
 `runtime_request.kind: "question"` carries `questions: [{id, header, prompt,
 kind: "single"|"multi"|"text", required, allow_free_text, allow_empty?, options:
 [{value, label, description?}], open_url?}]` and optional `question_title`. IDs and option
-values are opaque native values, distinct from labels. `open_url` is set only by
+values are opaque native values, distinct from labels. `for_person: true` marks a
+question only the person answers (an MCP server's or ACP agent's elicitation):
+a subagent's such question is never passed to the agent that delegated it, and
+`POST /runtime-sessions/{id}/peers/{peer}/answer` (`otto.thread_answer`)
+answers it **403**. `open_url` is set only by
 Otto for an ACP url-mode elicitation (id `acp_url`, which no model- or
 schema-supplied question may take): the client opens exactly that URL, and only
 when the answer picks the question's `open` option. Full forms live on the

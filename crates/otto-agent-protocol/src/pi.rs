@@ -526,6 +526,7 @@ impl PiDriver {
                     title: Some(title),
                     questions: vec![question],
                     tool_item_id: None,
+                    for_person: false,
                 });
             }
             _ => {}

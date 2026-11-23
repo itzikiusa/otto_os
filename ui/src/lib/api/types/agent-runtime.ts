@@ -346,6 +346,9 @@ export interface RuntimeRequest {
   questions?: RuntimeQuestion[];
   question_title?: string;
   answers?: QuestionAnswer[];
+  /** Only the person answers it (an MCP / ACP elicitation): never passed to
+   *  the agent a subagent reports to; shown in the parent's dock at once. */
+  for_person?: boolean;
 }
 
 export interface PlanArtifact {
