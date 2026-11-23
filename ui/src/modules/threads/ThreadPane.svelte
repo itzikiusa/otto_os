@@ -322,7 +322,7 @@
   </div>
 
   {#if showTerminal && runtime && TerminalDrawerView.component}
-    {#if runtimeShell}<TerminalDrawerView.component sessionId={runtimeShell.id} title={runtime.title} onclose={toggleTerminal} />{/if}
+    {#if runtimeShell}<TerminalDrawerView.component sessionId={runtimeShell.id} title={runtime.title} onclose={toggleTerminal} threadId={runtime.id} />{/if}
   {:else if showTerminal && session && !isPlainShellSession(session) && TerminalDrawerView.component}
     <TerminalDrawerView.component
       sessionId={paneId}

@@ -16,6 +16,7 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 //   • The / popup lists the agent's own commands (hostCommands.ts).
 //   • ↑ / ↓ recall sent prompts (promptHistory.ts).
 //   • Files dropped on the pane attach like a paste (composerDrop.ts).
+//   • A terminal selection → "Add to chat" context chip (TerminalAddToChat).
 // ─────────────────────────────────────────────────────────────────────────────
 
 test.use({ serviceWorkers: 'block' });
@@ -227,4 +228,35 @@ test('files dropped on the thread attach like a paste; an unsupported type is re
     await expect(thread.getByTestId('runtime-attach-error')).toContainText('notes.zip not added: application/zip can’t be attached here');
     await expect(box).not.toHaveAttribute('data-drop', '');
   }
+});
+
+test('a terminal selection becomes an “Add to chat” context chip; nothing is sent, the draft stays', async ({ page }) => {
+  test.setTimeout(120_000);
+  const { thread } = await open(page, 'codex', 'Terminal chip');
+  const composer = thread.getByTestId('runtime-composer');
+  await composer.fill('/terminal');
+  await composer.press('Enter');
+  const drawer = page.locator('[data-testid^="thread-terminal-drawer-"]');
+  await expect(drawer).toBeVisible({ timeout: 30_000 });
+  const screen = drawer.locator('.xterm-screen');
+  await expect(screen).toBeVisible({ timeout: 30_000 });
+  await drawer.locator('.xterm').click();
+  await page.keyboard.type('echo otto-selection-check\n');
+  await page.waitForTimeout(800);
+  await composer.fill('keep this draft');
+  const add = drawer.getByTestId('terminal-add-to-chat');
+  await expect(add).toHaveCount(0);
+  const box = (await screen.boundingBox())!;
+  await page.mouse.move(box.x + 2, box.y + 4);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.6, box.y + 60, { steps: 8 });
+  await page.mouse.up();
+  await expect(add).toBeVisible();
+  await expectFullyInViewport(page, add, 'Add to chat');
+  await add.click();
+  const chip = thread.getByTestId('runtime-context-chips');
+  await expect(chip).toContainText(/Terminal · \d+ lines?/);
+  await expect(composer).toHaveValue('keep this draft');
+  await expect(thread.getByTestId('runtime-queued')).toHaveCount(0);
+  await expect(thread.locator('.rt-user')).toHaveCount(0); // nothing was sent
 });

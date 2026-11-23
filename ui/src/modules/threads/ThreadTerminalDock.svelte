@@ -8,6 +8,9 @@
   import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
   import { toastError } from '../../lib/toastError';
   import { threadsChrome } from './threadsChrome.svelte';
+  import { threads } from './threadsStore.svelte';
+  import { runtimeThreads } from './runtime/runtimeThreads.svelte';
+  import TerminalAddToChat from './TerminalAddToChat.svelte';
   import { projectNameFromCwd } from './threadsHelpers';
 
   interface Props {
@@ -16,6 +19,9 @@
   let { cwd }: Props = $props();
 
   let busy = $state(false);
+  let selection = $state('');
+  /** "Add to chat" goes to the focused thread's draft (a runtime thread only). */
+  const chatId = $derived(threads.focusedSessionId && runtimeThreads.get(threads.focusedSessionId) ? threads.focusedSessionId : null);
   let tall = $state(false);
 
   const terms = $derived(
@@ -139,14 +145,15 @@
     </button>
   </header>
   <div class="ttd-body" class:split={!!second}>
+    <TerminalAddToChat text={selection} threadId={chatId} />
     {#if active}
       {#key active.id}
-        <div class="ttd-pane"><LazyTerminal sessionId={active.id} forceDark autoFocus resumeOnOpen /></div>
+        <div class="ttd-pane"><LazyTerminal sessionId={active.id} forceDark autoFocus resumeOnOpen onselection={(t) => (selection = t)} /></div>
       {/key}
     {/if}
     {#if second}
       {#key second.id}
-        <div class="ttd-pane"><LazyTerminal sessionId={second.id} forceDark resumeOnOpen /></div>
+        <div class="ttd-pane"><LazyTerminal sessionId={second.id} forceDark resumeOnOpen onselection={(t) => (selection = t)} /></div>
       {/key}
     {/if}
   </div>
@@ -208,6 +215,7 @@
     color: var(--accent-text);
   }
   .ttd-body {
+    position: relative;
     flex: 1;
     min-height: 0;
     display: flex;
