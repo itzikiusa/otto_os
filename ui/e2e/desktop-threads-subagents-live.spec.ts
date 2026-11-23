@@ -77,4 +77,14 @@ test('a person-delegated subagent that finished settles without a reload', async
   await expect(thread.getByTestId('runtime-bg-waiting')).toHaveCount(0, { timeout: 5_000 });
   const group = thread.getByTestId('runtime-child-group-summary');
   await expect(group).toHaveText('2 done');
+  // ⋯ › Send to another thread lists them with the thread status words.
+  await page.getByTestId('threads-thread-menu').click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Send to another thread…' }).click();
+  const pop = page.getByTestId('threads-related-popover');
+  await expect(pop.locator('.rl-meta').first()).toHaveText('Subagent · Done');
+  const shots = process.env.OTTO_E2E_SHOTS;
+  for (const scheme of shots ? (['light', 'dark'] as const) : []) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await page.screenshot({ path: `${shots}/subagents-live-done-send-to-${scheme}.png`, animations: 'disabled' });
+  }
 });
