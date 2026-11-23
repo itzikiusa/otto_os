@@ -71,10 +71,14 @@ export function threadReviveScenario(): void {
     const pane = (await thread.boundingBox())!;
     const col = (await thread.locator('.rt-col').boundingBox())!;
     const dock = (await thread.locator('.rt-dock').boundingBox())!;
-    expect(col.width).toBeGreaterThan(pane.width * 0.95);
-    expect(Math.abs(col.x - dock.x)).toBeLessThan(2);
-    expect(Math.abs(col.width - dock.width)).toBeLessThan(2);
-    if (desktop) expect(col.width).toBeGreaterThan(1200);
+    // One reading column for the conversation and the composer: 760 px of
+    // text (plus its gutters) centred in a wide pane, the whole pane on a
+    // narrow one; the two always line up.
+    expect(col.width).toBeLessThanOrEqual(760 + 2 * 24 + 1);
+    expect(col.width).toBeGreaterThan(Math.min(pane.width * 0.9, 760));
+    expect(Math.abs(col.x + col.width / 2 - (dock.x + dock.width / 2))).toBeLessThan(2);
+    // (A classic scrollbar's gutter is reserved on both sides of the conversation.)
+    expect(Math.abs(col.width - dock.width)).toBeLessThan(32);
     await expectNoHorizontalOverflow(page);
     for (const scheme of ['light', 'dark'] as const) {
       await page.emulateMedia({ colorScheme: scheme });
@@ -91,8 +95,9 @@ export function threadReviveScenario(): void {
         const split = page.getByTestId(`runtime-thread-${id}`);
         const box = (await split.boundingBox())!;
         const splitCol = (await split.locator('.rt-col').boundingBox())!;
-        expect(splitCol.width).toBeGreaterThan(box.width * 0.95);
-        expect(splitCol.width).toBeLessThan(col.width);
+        // Each split pane keeps the same reading column (capped, centred).
+        expect(splitCol.width).toBeLessThanOrEqual(Math.min(box.width, 760 + 2 * 24 + 1));
+        expect(splitCol.width).toBeGreaterThan(Math.min(box.width * 0.9, 760));
       }
       await expectNoHorizontalOverflow(page);
       await page.screenshot({ path: info.outputPath('thread-width-split.png'), animations: 'disabled' });

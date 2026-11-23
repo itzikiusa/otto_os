@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx, seedWorkspace } from './seed';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
-import { ITEMS, mockThread, TURNS } from './threadsReadingFixture';
+import { ITEMS, longThread, mockThread, TURNS } from './threadsReadingFixture';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The Threads composer and reading view on phones and tablets, with real
@@ -191,4 +191,39 @@ test('phone: a finished turn reads as one line and a changes card; times show wi
   await expect(thread.locator('[data-item-type="command_execution"]')).toHaveCount(0);
   await expect(thread.getByText('Offline edits now survive')).toBeVisible();
   await expect(card).toBeVisible();
+});
+
+test('phone: Settings › Threads by touch', async ({ page }, info) => {
+  await page.goto('/#/settings/threads');
+  const sec = page.getByTestId('settings-threads');
+  await expect(sec).toBeVisible({ timeout: 30_000 });
+  const steer = sec.getByRole('radiogroup', { name: 'While the agent works, Enter' }).getByRole('radio', { name: 'Steer' });
+  await atLeast44(steer, 'Steer option');
+  await steer.tap();
+  await expect(steer).toHaveAttribute('aria-checked', 'true');
+  await sec.getByRole('radiogroup', { name: 'Tool calls' }).getByRole('radio', { name: 'Hide all' }).tap();
+  expect(JSON.parse((await page.evaluate(() => localStorage.getItem('otto_threads_prefs_v1'))) ?? '{}')).toMatchObject({ midTurn: 'steer', tools: 'none' });
+  await expectNoHorizontalOverflow(page);
+  await shoot(page, 'settings-threads', info.project.name);
+});
+
+test('phone: a long thread’s turns are a "Jump to…" sheet in ⋯ (no rail)', async ({ page }, info) => {
+  const { items, turns } = longThread(10);
+  await mockThread(page, mockWs, 'phone-long', items, turns);
+  await page.goto('/#/threads/phone-long');
+  const thread = page.getByTestId('runtime-thread-phone-long');
+  await expect(thread.getByText('Answer 10.')).toBeVisible({ timeout: 30_000 });
+  if (/^iphone-|^android-phone/.test(info.project.name)) await expect(thread.getByTestId('runtime-minimap')).toHaveCount(0);
+  await page.getByTestId('threads-thread-menu').tap();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Jump to…' }).tap();
+  const list = page.getByTestId('runtime-jump-list');
+  await expect(list.getByRole('button')).toHaveCount(10);
+  await expect(list.getByRole('button').nth(2)).toContainText('Failed');
+  await expect(list.getByRole('button').nth(4)).toContainText('Approval');
+  await atLeast44(list.getByRole('button').first(), 'a turn in the jump list');
+  await expectNoHorizontalOverflow(page);
+  await shoot(page, 'jump-sheet', info.project.name);
+  await list.getByRole('button', { name: /Question number 2:/ }).tap();
+  await expect(list).toHaveCount(0);
+  await expect(thread.locator('[data-rt-msg="u2"]')).toBeInViewport();
 });

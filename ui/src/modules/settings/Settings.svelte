@@ -80,6 +80,7 @@
     snipping: lazyComponent(() => import('./SnipSettings.svelte')),
     clipboard: lazyComponent(() => import('./ClipboardSettings.svelte')),
     'keep-awake': lazyComponent(() => import('./KeepAwakeSettings.svelte')),
+    threads: lazyComponent(() => /* ui-guards: allow — Threads owns its prefs section (its stores) */ import('../threads/ThreadsSettings.svelte')),
     browser: lazyComponent(() => import('./BrowserSettings.svelte')),
     tokens: lazyComponent(() => import('./PersonalAccessTokens.svelte')),
     'git-accounts': lazyComponent(() => import('../git/GitAccounts.svelte')),

@@ -56,3 +56,21 @@ export async function mockThread(page: Page, workspaceId: string, id: string, it
 
 
 export const TURNS = [{ id: 't1', ordinal: 1, status: 'completed', started_at: at(0), completed_at: at(134) }];
+
+/** A long thread: `n` turns of a question and a long answer; turn 3 failed,
+ *  turn 5 asked for an approval (the minimap marks both). */
+export function longThread(n: number): { items: unknown[]; turns: unknown[] } {
+  const items: unknown[] = [];
+  const turns: unknown[] = [];
+  const para = 'This answer is long enough that a few of them fill the screen. '.repeat(12);
+  for (let k = 1; k <= n; k++) {
+    const t = `t${k}`;
+    const s = k * 10;
+    const mk = (id: string, ord: number, body: Record<string, unknown>) => ({ id, turn_id: t, ordinal: ord, status: 'completed', title: null, started_at: at(s), completed_at: at(s + 5), updated_at: at(s + 5), ...body });
+    items.push(mk(`u${k}`, k * 10, { type: 'user_message', text: `Question number ${k}: what about part ${k}?` }));
+    if (k === 5) items.push(mk('ap5', k * 10 + 1, { type: 'approval_request', request_id: 'r5', request_kind: 'command', prompt: 'ls', options: [] }));
+    items.push(mk(`a${k}`, k * 10 + 2, { type: 'assistant_message', message_id: `a${k}`, text: `Answer ${k}. ${para}`, streaming: false }));
+    turns.push({ id: t, ordinal: k, status: k === 3 ? 'failed' : 'completed', started_at: at(s), completed_at: at(s + 5) });
+  }
+  return { items, turns };
+}
