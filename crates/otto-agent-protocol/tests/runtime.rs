@@ -4870,6 +4870,206 @@ async fn usage_of_a_settled_acp_turn_is_recorded_once_and_claude_turns_are_left_
     usage.shutdown().await;
 }
 
+/// otto-fake-agent's `tool` and `edit <path>` (for UI e2e on ACP threads):
+/// a tool that completes with no request, and a file change with its diff.
+#[tokio::test]
+async fn fake_acp_tool_without_a_request_and_a_file_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(root, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create(&rt, root).await;
+    rt.prompt(&s.id, "tool").await.unwrap();
+    host.wait(is_terminal).await;
+    assert!(!host
+        .all()
+        .iter()
+        .any(|e| e.body.type_name() == "runtime_request.updated"));
+    assert!(host
+        .items()
+        .iter()
+        .any(|i| i.status == TurnItemStatus::Completed
+            && i.title.as_deref() == Some("Read README.md")));
+    rt.prompt(&s.id, "edit src/a.rs").await.unwrap();
+    host.wait_n(is_terminal, 2).await;
+    let edit = host
+        .items()
+        .into_iter()
+        .find_map(|i| match i.kind {
+            TurnItemKind::FileChange {
+                file_name,
+                old_str,
+                new_str,
+                diff_str,
+            } => Some((file_name, old_str, new_str, diff_str)),
+            _ => None,
+        })
+        .expect("a file change");
+    assert!(edit.0.ends_with("src/a.rs"), "{edit:?}");
+    assert!(
+        edit.3.as_deref().is_some_and(|d| d.contains("+new line"))
+            || edit.2.as_deref() == Some("new line\n"),
+        "{edit:?}"
+    );
+    assert_eq!(last_assistant_text(&host), "edited");
+    rt.close(&s.id).await.unwrap();
+}
+
+/// Gap 5: the agent moves to another access mode itself
+/// (`current_mode_update`); the thread's access follows, noted once.
+#[tokio::test]
+async fn an_agent_initiated_mode_change_moves_the_threads_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(root, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, root, RuntimeProvider::Agy).await;
+    rt.prompt(&s.id, "agent-mode accept-edits").await.unwrap();
+    host.wait(is_terminal).await;
+    let s = rt.get(&s.id).await.unwrap();
+    assert_eq!(s.access_mode, RuntimeAccessMode::AutoAcceptEdits);
+    assert!(host.items().iter().any(|i| i.id.starts_with("selection:")
+        || i.id.contains(":selection:")
+        || matches!(&i.kind, TurnItemKind::SystemNotice { message, .. } if message.starts_with("Access"))));
+    rt.close(&s.id).await.unwrap();
+}
+
+/// Slice 4: `fs/*` and `terminal/*` served by Otto for a flavour that
+/// asks for them (grok's flags) — confined to the session folder, a write is
+/// a file-change row, a terminal streams into its tool row, and under
+/// approval-required each write / command waits for the person.
+#[tokio::test]
+async fn acp_client_fs_and_terminal_are_served_confined_and_asked_for() {
+    use otto_agent_protocol::acp::AcpFlavor;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap().display().to_string();
+    std::fs::write(dir.path().join("README.md"), "hello\n").unwrap();
+    let host = TestHost::new(&root, false);
+    let host2 = TestHost::new(&root, false);
+    let drivers: Arc<dyn DriverFactory> =
+        Arc::new(|p: RuntimeProvider| -> Option<Box<dyn StructuredDriver>> {
+            Some(Box::new(AcpDriver::with_flavor(
+                p,
+                AcpFlavor {
+                    program: fake_bin!("otto-fake-agent"),
+                    client_fs: true,
+                    client_terminal: true,
+                    ..AcpFlavor::default()
+                },
+            )))
+        });
+    let build = |host: &Arc<TestHost>, pool: DbPool| {
+        AgentRuntime::new(
+            AgentRuntimeRepo::new(pool),
+            Arc::clone(host) as Arc<dyn RuntimeHost>,
+            Arc::clone(&drivers),
+            RuntimeConfig {
+                attachments_dir: dir.path().join("a"),
+                ..RuntimeConfig::default()
+            },
+        )
+    };
+    let rt = build(&host, pool().await);
+    let rt2 = build(&host2, pool().await);
+    let make = |access| CreateRuntimeSessionReq {
+        provider: Some(RuntimeProvider::Grok),
+        cwd: Some(root.clone()),
+        access_mode: Some(access),
+        ..CreateRuntimeSessionReq::default()
+    };
+    let s = rt
+        .create(
+            &"u1".into(),
+            &"w1".into(),
+            make(RuntimeAccessMode::FullAccess),
+        )
+        .await
+        .unwrap();
+    let mut n = 0;
+    let mut say = |text: &'static str| {
+        n += 1;
+        let (rt, host, id, n) = (&rt, &host, s.id.clone(), n);
+        async move {
+            rt.prompt(&id, text).await.unwrap();
+            host.wait_n(is_terminal, n).await;
+            last_assistant_text(host)
+        }
+    };
+    assert_eq!(say("fs-read README.md").await, "read: hello\n");
+    assert_eq!(say("fs-write out.txt").await, "wrote");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("out.txt")).unwrap(),
+        "written\n"
+    );
+    assert!(host.items().iter().any(|i| matches!(&i.kind,
+        TurnItemKind::FileChange { file_name, .. } if file_name.ends_with("out.txt"))));
+    assert_eq!(
+        say("fs-read ../../../../../../etc/hosts").await,
+        "refused -32000"
+    );
+    assert_eq!(say("term echo otto-term").await, "term: otto-term");
+    let streamed: String = host
+        .all()
+        .iter()
+        .filter_map(|e| match &e.body {
+            RuntimeEventBody::CommandOutputDelta { chunk, .. } => Some(chunk.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        streamed, "otto-term\n",
+        "the output streamed into the tool row"
+    );
+    let row = host.items().into_iter().find_map(|i| match i.kind {
+        TurnItemKind::CommandExecution { output, .. } => output,
+        _ => None,
+    });
+    assert_eq!(row.as_deref(), Some("otto-term\n"));
+    rt.close(&s.id).await.unwrap();
+
+    // Supervised: the person decides each write and command.
+    let (rt, host) = (rt2, host2);
+    let s2 = rt
+        .create(
+            &"u1".into(),
+            &"w1".into(),
+            make(RuntimeAccessMode::ApprovalRequired),
+        )
+        .await
+        .unwrap();
+    let ask = |text: &'static str, decision| {
+        let (rt, host, id) = (&rt, &host, s2.id.clone());
+        async move {
+            let before = host
+                .all()
+                .iter()
+                .filter(|e| e.body.type_name() == "runtime_request.updated")
+                .count();
+            rt.prompt(&id, text).await.unwrap();
+            let req = host
+                .wait_n(is_type("runtime_request.updated"), before + 1)
+                .await;
+            let RuntimeEventBody::RuntimeRequestUpdated { runtime_request } = req.body else {
+                unreachable!()
+            };
+            rt.respond(&id, &runtime_request.id, decision)
+                .await
+                .unwrap();
+        }
+    };
+    let ends = |n| host.wait_n(is_terminal, n);
+    ask("fs-write denied.txt", ApprovalDecision::Decline).await;
+    ends(1).await;
+    assert_eq!(last_assistant_text(&host), "refused -32000");
+    assert!(!dir.path().join("denied.txt").exists());
+    ask("term echo approved", ApprovalDecision::Accept).await;
+    ends(2).await;
+    assert_eq!(last_assistant_text(&host), "term: approved");
+    rt.close(&s2.id).await.unwrap();
+}
+
 // ---- provider switch (continue the thread on another provider) -------------
 
 fn switch_to(text: &str, provider: &str) -> RuntimePromptReq {
