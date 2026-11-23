@@ -39,6 +39,7 @@
   import RelatedThreadsChip from './RelatedThreadsChip.svelte';
   import { relatedPopover } from './relatedPopover.svelte';
   import { threadsPageMenu } from './threadsPageMenu';
+  import { threadPrefs } from './runtime/threadPrefs.svelte';
   import { fitRightPanel } from './threadsLayout';
   import { prepareDeepLink } from '../../lib/deepLinkOpen';
   import { runtimeThreadMenu } from './runtime/runtimeMenu';
@@ -409,6 +410,8 @@
         // A phone on its side is tablet-wide but still the phone: no hand-off to itself.
         phone: viewport.isPhone || viewport.isShort,
         sidebarVisible: !listDrawer && threads.sidebarOpen,
+        midTurn: threadPrefs.midTurn,
+        tools: threadPrefs.tools,
       },
       {
         newThread: () => threads.startNewThread({ workspaceId: ws.currentId }),
@@ -416,6 +419,8 @@
         toggleCard: () => (showWelcomeStage ? threadsChrome.toggleCard() : (cardOpen = !cardPopover)),
         layout: pickLayout,
         toggleTerminal: () => threadsChrome.setTerminal(!threadsChrome.terminalOpen),
+        setMidTurn: (m) => threadPrefs.setMidTurn(m),
+        setTools: (t) => threadPrefs.setTools(t),
       },
     ));
   }

@@ -1,7 +1,7 @@
 <script lang="ts">
   // The notices above the composer, in one stack with one order (error > UI
-  // control > plan > queue > notices): at most two show in full, the rest
-  // fold into "2 more: plan, queued message · Show". What the agent waits on
+  // control > plan > queue > notices): one quiet notice shows in full (an
+  // urgent one always does), the rest fold into "2 more: plan, queued message". What the agent waits on
   // the person for (approval, question, secret) is the attention dock below
   // this stack, never folded.
   // T3 Code's ComposerBannerStack (docs/internals/web-ui.md).

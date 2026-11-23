@@ -3,7 +3,7 @@
 // folds into "Worked for …" unless it holds something a person must see; a
 // running group names its live call; labels lose `cd <dir> &&` and the
 // thread's folder; a failed command reads "exit N"; notices above the
-// composer stack by priority with at most two shown.
+// composer stack by priority with one quiet one shown.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
@@ -87,9 +87,9 @@ test('a running group names its live call, then +N more', () => {
 test('banners: urgent ones always show; the rest fill two, then fold', () => {
   const b = (key: string, urgent = false) => ({ key, label: key, urgent });
   const names = (r: { shown: { key: string }[]; folded: { key: string }[] }) => [r.shown.map((x) => x.key), r.folded.map((x) => x.key)];
-  assert.deepEqual(names(splitBanners([b('plan'), b('queue'), b('fresh')])), [['plan', 'queue'], ['fresh']]);
+  assert.deepEqual(names(splitBanners([b('plan'), b('queue'), b('fresh')])), [['plan'], ['queue', 'fresh']]);
   assert.deepEqual(names(splitBanners([b('error', true), b('questions', true), b('ui', true), b('plan')])), [['error', 'questions', 'ui'], ['plan']]);
-  assert.deepEqual(names(splitBanners([b('error', true), b('plan'), b('queue')])), [['error', 'plan'], ['queue']]);
+  assert.deepEqual(names(splitBanners([b('error', true), b('plan'), b('queue')])), [['error'], ['plan', 'queue']]);
   assert.deepEqual(names(splitBanners([])), [[], []]);
 });
 
@@ -105,4 +105,41 @@ test('thread_open / thread_message calls read as an agent row', () => {
   assert.equal(threadCall(tool('mcp__otto__otto_thread_read', {})), null);
   assert.equal(elapsedBetween(T0, Date.parse(at(125))), '2m 5s');
   assert.equal(elapsedBetween(null, 0), null);
+});
+
+test('a folded stretch says how long and what was done', () => {
+  const edit = (id: string, s: number, e: number): TurnItem => ({ ...cmd(id, s, e), type: 'file_change', changes: [] }) as unknown as TurnItem;
+  const think = (id: string): TurnItem => ({ ...cmd(id, 0, 1), type: 'reasoning', text: 'hm' }) as unknown as TurnItem;
+  const e = (item: TurnItem) => ({ item });
+  assert.equal(wl.foldLine([e(cmd('a', 0, 60)), e(cmd('b', 60, 134)), e(edit('c', 70, 80)), e(think('r'))]), 'Worked for 2m 14s · ran 2 commands and edited 1 file');
+  assert.equal(wl.foldLine([e(think('r')), e(think('s'))]), wl.workedFor([e(think('r')), e(think('s'))]), 'thinking alone: just the time');
+});
+
+test('tool-call visibility: hide successful keeps failures, gated and running calls; hide all keeps failures and gates; never messages', () => {
+  const ok = cmd('ok', 0, 1);
+  const bad = cmd('bad', 1, 2, { status: 'failed', error: 'Exit code 1' });
+  const live = cmd('live', 2, null);
+  const gated = cmd('gated', 3, 4);
+  const approval = { id: 'ap', type: 'approval_request', request_id: 'r1', status: 'completed' } as unknown as never;
+  const msg = { kind: 'message', item: { id: 'm', type: 'assistant_message', text: 'done' } } as never;
+  const rows = [
+    msg,
+    { kind: 'work', id: 'w1', parts: [{ kind: 'item', entry: { item: ok } }, { kind: 'item', entry: { item: bad } }, { kind: 'item', entry: { item: live } }, { kind: 'item', entry: { item: gated, approval } }] },
+    { kind: 'work', id: 'w2', parts: [{ kind: 'group', id: 'g', entries: [{ item: cmd('x', 0, 1) }, { item: cmd('y', 0, 1) }] }] },
+  ] as never[];
+  const ids = (r: ReturnType<typeof wl.visibleTools>) => r.map((row) => (row.kind === 'work' ? `${row.id}:${row.parts.map((p) => (p.kind === 'item' ? p.entry.item.id : p.entries.map((x) => x.item.id).join('+'))).join(',')}` : row.kind));
+  assert.equal(wl.visibleTools(rows, 'all'), rows, 'show all is a no-op');
+  assert.deepEqual(ids(wl.visibleTools(rows, 'hide-ok')), ['message', 'w1:bad,live,gated']);
+  assert.deepEqual(ids(wl.visibleTools(rows, 'none')), ['message', 'w1:bad,gated']);
+});
+
+test('a running stretch folds its finished steps before the live one; a failure stops the fold', () => {
+  const part = (item: TurnItem) => ({ kind: 'item' as const, entry: { item } });
+  const done = [cmd('a', 0, 1), cmd('b', 1, 2), cmd('c', 2, 3)].map(part);
+  assert.equal(wl.earlierSteps([...done, part(cmd('live', 3, null))], none), 3);
+  assert.equal(wl.earlierSteps(done, none), 0, 'nothing runs: the finished fold handles it');
+  assert.equal(wl.earlierSteps([done[0], part(cmd('live', 3, null))], none), 0, 'one earlier step stays as is');
+  const bad = part(cmd('bad', 1, 2, { status: 'failed', error: 'Exit code 1' }));
+  assert.equal(wl.earlierSteps([done[0], done[1], bad, done[2], part(cmd('live', 3, null))], none), 2);
+  assert.equal(wl.earlierSteps([bad, done[0], done[1], part(cmd('live', 3, null))], none), 0);
 });

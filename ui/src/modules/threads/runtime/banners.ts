@@ -1,6 +1,7 @@
 // The order and folding of RuntimeBannerStack (unit/runtimeWorkLog.test.ts).
 /** One notice above the composer. `urgent` ones (an error, a question, an
- *  approval) always show; the rest fill up to two, then fold into one line. */
+ *  approval) always show; the rest fill up to one, then fold into one "N
+ *  more" line — one quiet notice at a time above the composer. */
 export interface BannerBlock {
   key: string;
   /** Its name in the folded line ("plan", "queued message"). */
@@ -8,7 +9,7 @@ export interface BannerBlock {
   urgent?: boolean;
 }
 
-export const BANNER_ROOM = 2;
+export const BANNER_ROOM = 1;
 
 /** Which blocks show fully and which fold, given blocks in priority order. */
 export function splitBanners(blocks: readonly BannerBlock[], room = BANNER_ROOM): { shown: BannerBlock[]; folded: BannerBlock[] } {

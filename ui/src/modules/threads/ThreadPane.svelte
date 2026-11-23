@@ -322,7 +322,7 @@
   </div>
 
   {#if showTerminal && runtime && TerminalDrawerView.component}
-    {#if runtimeShell}<TerminalDrawerView.component sessionId={runtimeShell.id} title={runtime.title} onclose={toggleTerminal} />{/if}
+    {#if runtimeShell}<TerminalDrawerView.component sessionId={runtimeShell.id} title={runtime.title} onclose={toggleTerminal} threadId={runtime.id} />{/if}
   {:else if showTerminal && session && !isPlainShellSession(session) && TerminalDrawerView.component}
     <TerminalDrawerView.component
       sessionId={paneId}
@@ -440,5 +440,24 @@
     min-height: 0;
     min-width: 0;
     display: flex;
+  }
+  /* A transcript (PTY) thread reads like a structured one: the reading
+     column's gutters, the person's message a calm right-aligned bubble, the
+     agent's prose plain, both at --fs-l / 1.6 (ConversationView sets the
+     760 px measure for its threads surface; the classic Agents view is untouched). */
+  .tp-body :global(.conv[data-surface='threads'] .conv-col) {
+    padding-inline: var(--sp-6);
+  }
+  .tp-body :global(.conv[data-surface='threads'] .bubble) {
+    max-width: 82%;
+    border-color: transparent;
+    background: var(--surface-2);
+    box-shadow: none;
+    font-size: var(--fs-l);
+    line-height: 1.6;
+  }
+  .tp-body :global(.conv[data-surface='threads'] .md.md-body:not(.small)) {
+    font-size: var(--fs-l);
+    line-height: 1.6;
   }
 </style>

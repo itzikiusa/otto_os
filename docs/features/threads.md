@@ -75,8 +75,9 @@ carry into another conversation.
      MCP tool cards, and incoming peer-session attribution chips) plus an
      on-demand slide-up **Terminal** drawer attached to the live PTY.
    - Composer supports `@file` typeahead, image attachments, inline MCP
-     permission docks, and **Steer** (interrupt/nudge immediately) vs **Queue**
-     (hold until the active turn finishes).
+     permission docks, and **Queue** (hold until the active turn finishes) vs
+     **Steer** (the agent reads it at its next step) — see *Composer and
+     timeline* below.
 4. **Workspace Inspector (`ThreadInspector`):**
    - **Agents & tasks** (structured threads, hidden when there are none):
      every subagent and background task — running first with its elapsed
@@ -240,8 +241,10 @@ result, as it does for any tool. Threads only (T3 Code #15907, #30257).
   requests step with ‹ / › ("1 of 3"). From an empty composer **⌘↵** approves
   and **⌘⌫** declines. The dock is capped to a share of its pane (45 % with a
   mouse, 60 % on touch) and never pushes the composer off screen.
-- **Stop.** While a turn runs, Stop sits next to Send. **Esc** stops (press it
-  twice when the composer has text) and **⌘.** stops (`runtime/stopKeys.ts`).
+- **Stop.** While a turn runs with nothing typed, Stop is the composer's one
+  button; with a draft it is a small control beside Queue / Steer. **Esc**
+  stops (press it twice when the composer has text) and **⌘.** stops
+  (`runtime/stopKeys.ts`).
 - **A failed turn** is one block (`runtime/turnFailure.ts`) that names the
   cause — not signed in, usage limit, CLI missing, CLI unsupported, stopped
   unexpectedly, provider error — with Details and Revive.
@@ -282,6 +285,84 @@ result, as it does for any tool. Threads only (T3 Code #15907, #30257).
   (`threadRelay.ts`).
 - *(Coordinator: sidebar rows / status words of this round — T-ATTENTION — go
   here once that work lands.)*
+
+## Composer and timeline (2026-11 redesign)
+
+What a structured (runtime) thread's reading view and composer do; every
+provider (Claude, Codex, ACP agents — Gemini, Antigravity, Grok, OpenCode,
+Muse — and pi) unless a line says otherwise.
+
+- **Reading column.** Conversation and composer share one column, 760 px
+  wide and centred in the pane (single, Split, Grid; a narrower pane or a
+  phone fills it with `--sp-6` gutters). Messages are `--fs-l` / 1.6: your
+  message a right-aligned bubble (`--surface-2`), the agent's answer plain
+  prose. Turns sit `--sp-9` apart; wide code and tables scroll inside the
+  column. A transcript (PTY) thread in Threads gets the same column and type
+  (`ThreadPane.svelte`); the classic Agents view is unchanged. A message's
+  time and **Copy** appear on hover / focus (always on touch; always in the
+  accessibility tree).
+- **Work fold.** A finished stretch of steps is one dim line with a hairline
+  under it: "Worked for 2m 13s · ran 4 commands and edited 3 files"
+  (`runtime/workLog.ts` `foldLine`, T3's `summarizeToolGroup` sentence).
+  While a turn runs, the finished steps before the live one fold to "N earlier
+  steps" (`earlierSteps`); a failure, an approval or a question — and what
+  follows it — never folds.
+- **Tool calls** (toolbar ⋯ › View): *show all* (default), *hide successful*
+  or *hide all* (`workLog.ts` `visibleTools`, per device). Failures, gated
+  calls, threads the agent opened, replies, questions and notices always show.
+- **Changes card.** A finished turn that changed files ends with "3 changed
+  files +6 −2 · Open diff", listing each file's +/− (open up to five files,
+  folded past that; `runtime/turnChanges.ts`,
+  `RuntimeTurnChanges.svelte`). The counts come from the turn's own
+  file-change items, the same shape from every driver (a unified `diff_str`,
+  or `old_str` / `new_str`); a file whose items carry no text shows its name
+  only. **Open diff** or a file opens the Changes panel on that file
+  (`threads.changesFocus`).
+- **Composer card.** Input at `--fs-l`, two rows tall, growing to 40 % of the
+  pane. Bottom row: **+** (`RuntimeComposerPlus.svelte`: attach an image or
+  PDF, mention a file or agent, **Plan mode**, **Access: …**), the **Ask
+  another agent** icon, then only non-default state — the Plan chip while
+  Plan is on, the access chip when the thread is not on your default access
+  (Settings › Providers › *Skip permission prompts*: on = Full access, off =
+  Supervised), a read-only seat, or an embed that fixes the access — then
+  the model chip (`RuntimeModelControl.svelte`) and one primary button.
+- **One primary button** (`runtime/composerSend.ts`): **Send** when idle;
+  **Stop** while the agent works and nothing is typed; with a draft, **Queue**
+  ("sends when this turn ends", clock icon) or **Steer** ("the agent reads it
+  at its next step", bolt icon), Stop then a small quiet control beside it.
+  **↵** does the default mid-turn delivery and **⌘↵** (Ctrl+↵ off macOS) the
+  other; on a touch-first device ⌘↵ stays the default (it is the only
+  keyboard send there). The default is per device: toolbar ⋯ › View ›
+  *While working, messages queue / steer* (`threadPrefs.svelte.ts`, also on a
+  phone). Steer goes the queue bar's way (`delivery: steer`). An agent
+  without the `steer` capability (Gemini, Antigravity, OpenCode, Muse — ACP
+  agents other than Grok) only queues: the button says "… can't take a
+  message mid-turn", ⌘↵ shows a notice, and a steer the daemon queued anyway
+  is reported as "Queued instead".
+- **Slash popup.** `/` lists Otto's commands, then "<Agent> commands": the
+  agent's own commands and skills (`commands.updated` — Claude's initialize
+  list, Codex `skills/list`, ACP `available_commands_update`, pi
+  `get_commands`), fuzzy filtered, with argument hints. Choosing one types
+  `/name ` to finish and send as a normal prompt. An agent command Otto takes
+  itself (`/review`, `/clear`, the view commands the host handles) is left
+  out. The list scrolls and keeps the active row in view.
+- **↑ recalls prompts** (`runtime/promptHistory.ts`): in an empty composer
+  ↑ fills the last prompt you sent in this thread, ↑ again goes back, ↓
+  forward and past the newest back to empty; any edit leaves history. Not in
+  your own draft, with the mention or slash menu open, or during IME
+  composition. Text only.
+- **Drop files** on the thread (`runtime/composerDrop.ts`): they attach
+  through the same intake as paste (images and PDFs, the same per-file and
+  per-message limits); a type the agent cannot take is refused by name in
+  the composer; only the composer box lights up. The desktop app keeps the
+  webview's own HTML5 drop (`dragDropEnabled: false`).
+- **Terminal selection → Add to chat** (`TerminalAddToChat.svelte`): select
+  text in the thread's terminal drawer or the Threads terminal dock and a
+  small **Add to chat** button attaches it to the focused structured
+  thread's draft as a "Terminal · N lines" chip (sent as "Terminal output"
+  context). Nothing is sent and the draft stays.
+- **Notices above the composer** show one quiet line at a time (an urgent
+  one always shows); the rest fold into "N more: …" (`runtime/banners.ts`).
 
 ## On a phone and a tablet
 

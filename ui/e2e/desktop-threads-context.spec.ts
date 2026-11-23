@@ -1,8 +1,15 @@
-import { test, expect, type Route } from '@playwright/test';
+import { test, expect, type Locator, type Page, type Route } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 
 test.use({ serviceWorkers: 'block' });
+
+/** The thread's access as the composer's "+" menu checks it (the chip shows only off the default). */
+async function expectAccess(page: Page, thread: Locator, label: string): Promise<void> {
+  await thread.getByTestId('runtime-plus').click();
+  await expect(page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: `Access: ${label}`, exact: true })).toHaveAttribute('aria-checked', 'true');
+  await page.keyboard.press('Escape');
+}
 
 test('thread drafts, attachments and permissions stay with their owner; mobile commands open accessible drawers', async ({ page }, info) => {
   const { ctx, base } = await apiCtx();
@@ -51,10 +58,12 @@ test('thread drafts, attachments and permissions stay with their owner; mobile c
   await alpha.getByTestId('runtime-composer').fill('Alpha private draft');
   await alpha.locator('input[type=file]').setInputFiles({ name: 'alpha.png', mimeType: 'image/png', buffer: Buffer.from('image fixture') });
   await expect(alpha.getByTestId('runtime-images').getByRole('img', { name: 'alpha.png' })).toBeVisible();
-  await alpha.getByTestId('runtime-access').click();
-  await page.getByRole('menuitemcheckbox', { name: 'Full access', exact: true }).click();
+  // The access chip shows only off the default (Full access here), so pick it from "+".
+  await alpha.getByTestId('runtime-plus').click();
+  await page.getByRole('menuitemcheckbox', { name: 'Access: Full access', exact: true }).click();
   await page.getByRole('button', { name: 'Allow full access', exact: true }).click();
-  await expect(alpha.getByTestId('runtime-access')).toContainText('Full access');
+  await expect(alpha.getByTestId('runtime-access')).toHaveCount(0);
+  await expectAccess(page, alpha, 'Full access');
 
   await page.getByTestId('threads-sidebar').getByText('Beta thread', { exact: true }).click();
   await expect(beta).toBeVisible();
@@ -72,7 +81,7 @@ test('thread drafts, attachments and permissions stay with their owner; mobile c
   await expect(alpha).toBeVisible();
   await expect(alpha.getByTestId('runtime-composer')).toHaveValue('Alpha private draft');
   await expect(alpha.getByTestId('runtime-images').getByRole('img', { name: 'alpha.png' })).toBeVisible();
-  await expect(alpha.getByTestId('runtime-access')).toContainText('Full access');
+  await expectAccess(page, alpha, 'Full access');
   // A→B→A must restore the same draft, not clear it to fix the leak.
   await alpha.getByTestId('runtime-images').getByRole('button', { name: 'Remove alpha.png' }).click();
   await alpha.getByTestId('runtime-composer').fill('');

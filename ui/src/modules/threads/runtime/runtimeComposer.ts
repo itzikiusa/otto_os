@@ -147,8 +147,16 @@ export async function appendDraftAttachments<TDraft extends { images: ComposerFi
   draft: TDraft,
   files: Iterable<File>,
   takes: (f: File) => boolean,
+  /** What the agent takes ("images and PDFs"): a file it doesn't is refused by name (a drop). */
+  accepts?: string,
 ): Promise<void> {
   let refused: string | null = null;
+  if (accepts) {
+    const list = [...files];
+    const no = list.find((f) => !takes(f));
+    if (no) refused = `${no.name || 'That file'} not added: ${no.type || 'this file type'} can’t be attached here — this agent takes ${accepts}.`;
+    files = list;
+  }
   const read = await readAttachments(files, takes, {
     usedBytes: attachmentBytes(draft.images),
     refuse: (m) => (refused ??= m),
@@ -440,6 +448,7 @@ export function composerPlaceholderText(
   running: boolean,
   agentChat?: string,
   plan = false,
+  steer = false,
 ): string {
   if (closed) return 'Send a message to reopen this thread';
   if (approvals.size > 0) {
@@ -448,6 +457,6 @@ export function composerPlaceholderText(
       : 'Waiting for your approval above';
   }
   if (plan) return 'Plan mode: the agent researches and proposes, and changes nothing. ⇧⇥ leaves Plan';
-  if (running) return 'Queue a follow-up for when this turn ends';
+  if (running) return steer ? 'Steer: the agent reads this at its next step' : 'Queue a follow-up for when this turn ends';
   return agentChat ? `Message ${agentChat}…` : 'Ask anything. @ files or agents, / commands';
 }

@@ -561,13 +561,14 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
   await page.screenshot({ path: info.outputPath('runtime-polish-work-dark.png'), animations: 'disabled' });
   await page.emulateMedia({ colorScheme: 'light' });
 
-  // Access chip: Full access asks once, warns, and rides the next prompt.
+  // Access: Full access asks once and rides the next prompt. The chip shows
+  // only off the person's default (Full access when agent_skip_permissions is
+  // on, the default), so Supervised shows it and Full access hides it; "+"
+  // always offers the choice.
   const chip = thread.getByTestId('runtime-access');
-  // New threads start in Full access when agent_skip_permissions is on (the
-  // default), so step down to Supervised first — that direction never asks.
-  if (/Full access/.test((await chip.textContent()) ?? '')) {
-    await chip.click();
-    await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Supervised' }).click();
+  if ((await chip.count()) === 0) {
+    await thread.getByTestId('runtime-plus').click();
+    await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Access: Supervised' }).click();
   }
   await expect(chip).toContainText('Supervised');
   await chip.click();
@@ -575,8 +576,7 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
   const dlg = page.getByRole('dialog');
   await expect(dlg).toContainText('without asking');
   await dlg.getByRole('button', { name: 'Allow full access' }).click();
-  await expect(chip).toContainText('Full access');
-  await expect(chip).toHaveClass(/full/);
+  await expect(chip).toHaveCount(0);
   const sent = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith(`/runtime-sessions/${id}/prompt`));
   await page.route(`**/api/v1/runtime-sessions/${id}/prompt`, (r) => r.fulfill({ json: { turn_id: 't2', sequence: 1 } }));
   const composer = thread.getByTestId('runtime-composer');
@@ -584,8 +584,8 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
   await composer.press('Enter');
   expect(((await sent).postDataJSON() as { access_mode?: string }).access_mode).toBe('full-access');
   // The next switch back needs no confirm.
-  await chip.click();
-  await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Supervised' }).click();
+  await thread.getByTestId('runtime-plus').click();
+  await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Access: Supervised' }).click();
   await expect(chip).toContainText('Supervised');
   await expectNoHorizontalOverflow(page);
 });

@@ -350,8 +350,9 @@
      *  was clicked yet) — a loop timeline or the right panel keeps the page
      *  find. A focused terminal / editor / text field still wins. Default 0. */
     findRank?: number;
+    onselection?: (text: string) => void; // the selected text on every selection change ('' when cleared)
   }
-  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, socketFactory, transformFrame, onImagePaste, readOnlyReason, onstatus, onfontfit, onsearchresult, showToolbar = true, autoFocus = false, claimOnAttach = false, keepAlive = false, scrollback = EMBED_SCROLLBACK, resumeOnOpen = true, findRank = 0 }: Props = $props();
+  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, socketFactory, transformFrame, onImagePaste, readOnlyReason, onstatus, onfontfit, onsearchresult, onselection, showToolbar = true, autoFocus = false, claimOnAttach = false, keepAlive = false, scrollback = EMBED_SCROLLBACK, resumeOnOpen = true, findRank = 0 }: Props = $props();
   // Scrollback results: a listbox driven from the find input (aria-activedescendant).
   const findId = $props.id();
 
@@ -2061,7 +2062,7 @@
     // compete with the find input, and copy-on-select would overwrite the
     // clipboard with every hit. closeFind re-mirrors.
     if (findOpen && document.activeElement !== term.textarea) return;
-    const text = term.hasSelection() ? term.getSelection() : '';
+    const text = term.hasSelection() ? term.getSelection() : ''; onselection?.(text);
 
     // Mirror the selection into xterm's hidden textarea and select it there.
     //
