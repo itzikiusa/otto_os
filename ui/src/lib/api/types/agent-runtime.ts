@@ -313,7 +313,6 @@ export interface MessageAttachment {
 export type RuntimeRequestStatus = 'pending' | 'resolved' | 'expired' | 'cancelled';
 
 export type ResponseCapability = { type: 'live' } | { type: 'not_resumable'; reason: string };
-
 export interface QuestionOption { value: string; label: string; description?: string; }
 export interface RuntimeQuestion {
   id: string;
@@ -324,9 +323,7 @@ export interface RuntimeQuestion {
   allow_empty?: boolean;
   allow_free_text: boolean;
   options: QuestionOption[];
-  /** Set only by Otto's driver for an ACP url-mode elicitation: the page the
-   *  card opens when the person chooses its `open` option. */
-  open_url?: string;
+  /** Driver-set only (ACP url elicitation): opened when the person picks `open`. */ open_url?: string;
 }
 export type QuestionAnswer =
   | { question_id: string; type: 'single'; value: string }
@@ -346,9 +343,7 @@ export interface RuntimeRequest {
   questions?: RuntimeQuestion[];
   question_title?: string;
   answers?: QuestionAnswer[];
-  /** Only the person answers it (an MCP / ACP elicitation): never passed to
-   *  the agent a subagent reports to; shown in the parent's dock at once. */
-  for_person?: boolean;
+  /** An MCP / ACP elicitation: only the person answers it, never a parent agent. */ for_person?: boolean;
 }
 
 export interface PlanArtifact {
