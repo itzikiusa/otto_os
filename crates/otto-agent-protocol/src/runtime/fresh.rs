@@ -20,18 +20,23 @@ pub(super) struct Switch {
 /// What a switch replaced, put back when its first prompt fails.
 struct Before {
     provider: RuntimeProvider,
-    meta: Option<serde_json::Value>,
+    /// `meta.provider_slug` before (only that key is put back: a pin or
+    /// "seen" patched meanwhile stays).
+    slug: Option<serde_json::Value>,
     model: Option<String>,
     effort: Option<String>,
     model_from_provider: bool,
     capabilities: RuntimeCapabilities,
     shown_model: Option<Option<String>>,
+    /// The old agent's slash commands, put aside until the new one says its
+    /// own (a new process never re-sends the old list).
+    commands: Vec<otto_core::agent_runtime::ProviderCommand>,
 }
 
 impl Before {
     fn restore(self, st: &mut State) {
         st.session.provider = self.provider;
-        st.session.meta = self.meta;
+        set_slug(st, self.slug);
         st.session.model = self.model;
         st.session.effort = self.effort;
         st.model_from_provider = self.model_from_provider;
@@ -39,7 +44,22 @@ impl Before {
         if let (Some(ps), Some(m)) = (st.proj.session.as_mut(), self.shown_model) {
             ps.model = m;
         }
+        st.proj.commands = self.commands;
     }
+}
+
+/// Set (or with `None` remove) `meta.provider_slug`, returning what it was.
+fn set_slug(st: &mut State, to: Option<serde_json::Value>) -> Option<serde_json::Value> {
+    let mut meta = match st.session.meta.take() {
+        Some(serde_json::Value::Object(m)) => m,
+        _ => serde_json::Map::new(),
+    };
+    let was = match to {
+        Some(v) => meta.insert(PROVIDER_SLUG_META_KEY.into(), v),
+        None => meta.remove(PROVIDER_SLUG_META_KEY),
+    };
+    st.session.meta = (!meta.is_empty()).then_some(serde_json::Value::Object(meta));
+    was
 }
 
 /// Move the thread onto `sw` in memory (persisted once the first prompt is
@@ -61,28 +81,10 @@ fn switch_to(st: &mut State, sw: Switch, model: Option<String>) -> Before {
         &sw.slug,
         handoff::BUDGET_TOKENS,
     );
-    let mut meta = st
-        .session
-        .meta
-        .clone()
-        .unwrap_or_else(|| serde_json::json!({}));
-    if let Some(o) = meta.as_object_mut() {
-        match &sw.meta_slug {
-            Some(s) => {
-                o.insert(PROVIDER_SLUG_META_KEY.into(), s.clone().into());
-            }
-            None => {
-                o.remove(PROVIDER_SLUG_META_KEY);
-            }
-        }
-    }
-    let meta = meta
-        .as_object()
-        .is_some_and(|o| !o.is_empty())
-        .then_some(meta);
+    let slug = set_slug(st, sw.meta_slug.clone().map(Into::into));
     let before = Before {
         provider: std::mem::replace(&mut st.session.provider, sw.provider),
-        meta: std::mem::replace(&mut st.session.meta, meta),
+        slug,
         model: std::mem::replace(&mut st.session.model, model.clone()),
         effort: st.session.effort.take(),
         model_from_provider: std::mem::replace(&mut st.model_from_provider, false),
@@ -91,6 +93,7 @@ fn switch_to(st: &mut State, sw: Switch, model: Option<String>) -> Before {
             RuntimeCapabilities::for_provider(sw.provider),
         ),
         shown_model: st.proj.session.as_mut().map(|ps| ps.model.take()),
+        commands: std::mem::take(&mut st.proj.commands),
     };
     st.handoff = Some(ContextHandoff {
         from_model: before.model.clone(),
@@ -175,7 +178,17 @@ impl AgentRuntime {
             // A switch that did not take: back on the provider it ran.
             st.handoff = None;
             if let Some(b) = before {
+                let shown = st.proj.commands.clone();
                 b.restore(&mut st);
+                if st.proj.commands != shown {
+                    let commands = st.proj.commands.clone();
+                    emit(
+                        &self.inner,
+                        live,
+                        &mut st,
+                        RuntimeEventBody::CommandsUpdated { commands },
+                    );
+                }
             }
             st.session.native_thread_id = old_native.clone();
             let restored = old_thread.unwrap_or(ProviderThread {
@@ -266,6 +279,16 @@ impl AgentRuntime {
             let _ = live.persist.send(PersistOp::Provider(s.provider, slug));
             let _ = live.persist.send(PersistOp::Model(s.model.clone()));
             let _ = live.persist.send(PersistOp::Effort(None));
+            // The old agent's commands go unless the new one listed its own.
+            if st.proj.commands.is_empty() {
+                let commands = Vec::new();
+                emit(
+                    &self.inner,
+                    live,
+                    st,
+                    RuntimeEventBody::CommandsUpdated { commands },
+                );
+            }
         }
         let op = match &st.session.native_thread_id {
             Some(n) => PersistOp::NativeThreadId(n.clone()),
@@ -367,4 +390,21 @@ pub(super) fn not_started(st: &State) -> Error {
             None => "the fresh agent could not start — retry the message".into(),
         },
     )
+}
+
+impl AgentRuntime {
+    /// [`Self::prompt_with`] run to its end even when the caller goes away
+    /// (a page reload drops the HTTP request): a provider switch or fresh
+    /// start is otherwise left half-done in memory, neither committed nor
+    /// restored.
+    pub async fn prompt_to_end(
+        &self,
+        id: &Id,
+        req: &RuntimePromptReq,
+    ) -> Result<RuntimePromptResp> {
+        let (rt, id, req) = (self.clone(), id.clone(), req.clone());
+        tokio::spawn(async move { rt.prompt_with(&id, &req).await })
+            .await
+            .map_err(|e| Error::Internal(format!("the prompt task failed: {e}")))?
+    }
 }
