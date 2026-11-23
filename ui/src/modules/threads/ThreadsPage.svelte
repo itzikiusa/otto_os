@@ -34,6 +34,8 @@
   import { buildThreadMenu } from './threadMenu';
   import ThreadParentChip from './runtime/ThreadParentChip.svelte';
   import ProjectBadge from './ProjectBadge.svelte';
+  import { paletteThreads } from '../../lib/paletteThreads.svelte';
+  import { threadSwitcherSource } from './threadSwitcherSource.svelte';
   import RelatedThreadsList from './RelatedThreadsList.svelte';
   import ThreadPopover from './ThreadPopover.svelte';
   import { CARD_RESERVE, cardFloats } from './threadDetails';
@@ -108,6 +110,8 @@
     if (id) untrack(() => runtimeThreads.markRead(id));
   });
 
+  // ⌘K opens on these threads, what needs you first (threadSwitcherSource).
+  onMount(() => paletteThreads.install(threadSwitcherSource));
   // Subscribe to live cross-session messages + MCP DB activity while mounted.
   onMount(() => threads.mountLive());
   // The header's phone button used to learn this at mount; with the handoff

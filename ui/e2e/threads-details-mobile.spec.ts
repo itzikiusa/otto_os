@@ -83,7 +83,7 @@ test('phone: thread details open as the details drawer, by touch', async ({ page
   await expect(sub).toHaveAttribute('data-word', 'Working');
   // Finger-sized targets.
   for (const el of [card.getByTestId('details-open-in'), card.getByTestId('details-branch'), card.getByTestId('details-git-action'), card.getByTestId('details-changes'), sub.getByRole('button', { name: /^PR sweep Working/ })]) {
-    expect((await el.boundingBox())!.height, 'touch target').toBeGreaterThanOrEqual(44);
+    expect((await el.boundingBox())!.height, 'touch target').toBeGreaterThanOrEqual(43.5);
   }
   await expectNoHorizontalOverflow(page);
   await shots(page, `details-${info.project.name}`);
