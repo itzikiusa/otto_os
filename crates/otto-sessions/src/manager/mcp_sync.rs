@@ -379,9 +379,96 @@ pub(crate) fn provider_name(family: &str) -> String {
     }
 }
 
+/// pi 0.x takes no MCP servers: Otto's and every enabled one, each with why.
+fn pi_too_old(
+    users: Option<&[crate::mcp::UserMcpServer]>,
+) -> Vec<otto_core::agent_runtime::McpServerStatus> {
+    use otto_core::agent_runtime::{McpServerSource as Src, McpServerState as St, McpServerStatus};
+    let why =
+        "This pi (0.x) can’t load MCP servers; pi 1.x can (update pi in Settings › Providers)";
+    std::iter::once(
+        McpServerStatus::new(crate::mcp::OTTO_TOOLS_KEY, Src::Otto, St::Unsupported).because(why),
+    )
+    .chain(
+        users
+            .into_iter()
+            .flatten()
+            .filter(|s| s.name != crate::mcp::OTTO_TOOLS_KEY && s.name != crate::mcp::SERVER_KEY)
+            .map(|s| {
+                McpServerStatus::new(s.name.clone(), Src::Workspace, St::Unsupported).because(why)
+            }),
+    )
+    .collect()
+}
+
+impl SessionManager {
+    /// The installed pi's major version (`pi --version`, read once per daemon
+    /// run — an update shows after a restart), `None` when unknown.
+    pub(super) async fn pi_major(&self) -> Option<u64> {
+        // Unit tests never read the host's pi (its version is not theirs).
+        if cfg!(test) {
+            return None;
+        }
+        static PI_MAJOR: tokio::sync::OnceCell<u64> = tokio::sync::OnceCell::const_new();
+        let program = self
+            .providers
+            .program_for("pi")
+            .unwrap_or_else(|| "pi".into());
+        // Only a version read is kept: a failed read tries again next spawn.
+        let read = PI_MAJOR.get_or_try_init(|| async move {
+            let mut cmd = tokio::process::Command::new(&program);
+            let out = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                cmd.arg("--version").kill_on_drop(true).output(),
+            )
+            .await
+            .map_err(|_| format!("{program} --version timed out"))?
+            .map_err(|e| format!("{program} --version: {e}"))?;
+            // pi 0.x prints it on stderr.
+            let mut v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if v.is_empty() {
+                v = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            }
+            v.trim_start_matches(|c: char| !c.is_ascii_digit())
+                .split('.')
+                .next()
+                .and_then(|m| m.parse::<u64>().ok())
+                .ok_or_else(|| format!("{program} --version said {v:?}"))
+        });
+        match read.await {
+            Ok(m) => Some(*m),
+            Err(e) => {
+                tracing::info!("pi version unknown: {e}");
+                None
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod spawn_status_tests {
     use super::*;
+
+    #[test]
+    fn a_too_old_pi_lists_every_server_as_not_supported_with_why() {
+        use otto_core::agent_runtime::McpServerState as St;
+        let users = [crate::mcp::UserMcpServer {
+            name: "jira".into(),
+            command: "node".into(),
+            args: vec![],
+            env: Default::default(),
+        }];
+        let s = pi_too_old(Some(&users));
+        assert_eq!(
+            s.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["otto", "jira"]
+        );
+        assert!(
+            s.iter()
+                .all(|s| s.state == St::Unsupported
+                    && s.reason.as_deref().unwrap().contains("pi 1.x"))
+        );
+    }
     use otto_core::agent_runtime::{McpServerSource as Src, McpServerState as St};
 
     #[test]
@@ -417,67 +504,5 @@ mod spawn_status_tests {
         assert_eq!(s[0].state, St::Disabled);
         assert_eq!(s[1].state, St::Failed);
         assert!(s[1].reason.as_deref().unwrap().contains("db locked"));
-    }
-}
-
-/// pi 0.x takes no MCP servers: Otto's and every enabled one, each with why.
-fn pi_too_old(
-    users: Option<&[crate::mcp::UserMcpServer]>,
-) -> Vec<otto_core::agent_runtime::McpServerStatus> {
-    use otto_core::agent_runtime::{McpServerSource as Src, McpServerState as St, McpServerStatus};
-    let why =
-        "This pi (0.x) can’t load MCP servers; pi 1.x can (update pi in Settings › Providers)";
-    std::iter::once(
-        McpServerStatus::new(crate::mcp::OTTO_TOOLS_KEY, Src::Otto, St::Unsupported).because(why),
-    )
-    .chain(
-        users
-            .into_iter()
-            .flatten()
-            .filter(|s| s.name != crate::mcp::OTTO_TOOLS_KEY && s.name != crate::mcp::SERVER_KEY)
-            .map(|s| {
-                McpServerStatus::new(s.name.clone(), Src::Workspace, St::Unsupported).because(why)
-            }),
-    )
-    .collect()
-}
-
-impl SessionManager {
-    /// The installed pi's major version (`pi --version`, read once per daemon
-    /// run — an update shows after a restart), `None` when unknown.
-    pub(super) async fn pi_major(&self) -> Option<u64> {
-        static PI_MAJOR: tokio::sync::OnceCell<u64> = tokio::sync::OnceCell::const_new();
-        let program = self
-            .providers
-            .program_for("pi")
-            .unwrap_or_else(|| "pi".into());
-        // Only a version read is kept: a failed read tries again next spawn.
-        let read = PI_MAJOR.get_or_try_init(|| async move {
-            let mut cmd = tokio::process::Command::new(&program);
-            let out = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                cmd.arg("--version").kill_on_drop(true).output(),
-            )
-            .await
-            .map_err(|_| format!("{program} --version timed out"))?
-            .map_err(|e| format!("{program} --version: {e}"))?;
-            // pi 0.x prints it on stderr.
-            let mut v = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if v.is_empty() {
-                v = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            }
-            v.trim_start_matches(|c: char| !c.is_ascii_digit())
-                .split('.')
-                .next()
-                .and_then(|m| m.parse::<u64>().ok())
-                .ok_or_else(|| format!("{program} --version said {v:?}"))
-        });
-        match read.await {
-            Ok(m) => Some(*m),
-            Err(e) => {
-                tracing::info!("pi version unknown: {e}");
-                None
-            }
-        }
     }
 }
