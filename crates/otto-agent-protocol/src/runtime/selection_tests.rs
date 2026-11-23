@@ -565,9 +565,6 @@ async fn fresh_context_can_stop_leftover_background_work() {
         .any(|i| matches!(i.kind, TurnItemKind::SessionBoundary { .. })));
 }
 
-/// Review 1: a switch whose request is dropped mid-handshake (a page reload)
-/// still ends: the agent never comes up, so the thread is exactly as before.
-
 /// A Claude thread whose switch to Codex never comes up (its handshake
 /// never answers; `start_wait` gives up after 600 ms).
 async fn silent_codex() -> (Fixture, Id) {
@@ -609,6 +606,8 @@ async fn silent_codex() -> (Fixture, Id) {
     (f, s.id)
 }
 
+/// Review 1: a switch whose request is dropped mid-handshake (a page reload)
+/// still ends: the agent never comes up, so the thread is exactly as before.
 #[tokio::test]
 async fn a_switch_whose_request_is_dropped_still_ends() {
     let (f, id) = silent_codex().await;
