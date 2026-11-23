@@ -143,3 +143,10 @@ test('a running stretch folds its finished steps before the live one; a failure 
   assert.equal(wl.earlierSteps([done[0], done[1], bad, done[2], part(cmd('live', 3, null))], none), 2);
   assert.equal(wl.earlierSteps([bad, done[0], done[1], part(cmd('live', 3, null))], none), 0);
 });
+
+test('a short screen (or the keyboard up) folds every quiet notice; urgent ones still show', () => {
+  const b = (key: string, urgent = false) => ({ key, label: key, ...(urgent ? { urgent } : {}) });
+  const names = (s: ReturnType<typeof splitBanners>) => [s.shown.map((x) => x.key), s.folded.map((x) => x.key)];
+  assert.deepEqual(names(splitBanners([b('plan'), b('queue')], 0)), [[], ['plan', 'queue']]);
+  assert.deepEqual(names(splitBanners([b('error', true), b('queue')], 0)), [['error'], ['queue']]);
+});
