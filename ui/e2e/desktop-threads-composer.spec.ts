@@ -344,3 +344,31 @@ test('gemini (ACP): gated tool calls never fold or hide; ↑ recalls the prompt'
   await composer.press('ArrowUp');
   await expect(composer).toHaveValue('ask2');
 });
+
+test('the Threads terminal dock: a selection → “Add to chat” goes to the focused thread’s draft', async ({ page }) => {
+  test.setTimeout(120_000);
+  // The page's bottom terminal dock, open from the start (threadsChrome, per device).
+  await page.addInitScript(() => localStorage.setItem('otto_threads_chrome_v1', JSON.stringify({ terminalOpen: true })));
+  const { thread } = await open(page, 'codex', 'Dock chip');
+  const dock = page.getByTestId('threads-terminal-dock');
+  await expect(dock).toBeVisible({ timeout: 30_000 });
+  const screen = dock.locator('.xterm-screen').first();
+  await expect(screen).toBeVisible({ timeout: 30_000 });
+  await dock.locator('.xterm').first().click();
+  await page.keyboard.type('echo otto-dock-check\n');
+  const composer = thread.getByTestId('runtime-composer');
+  await composer.fill('dock draft stays');
+  const add = dock.getByTestId('terminal-add-to-chat');
+  await expect(add).toHaveCount(0);
+  const box = (await screen.boundingBox())!;
+  await page.mouse.move(box.x + 2, box.y + 4);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.6, box.y + 60, { steps: 8 });
+  await page.mouse.up();
+  await expect(add).toBeVisible();
+  await expectFullyInViewport(page, add, 'Add to chat (dock)');
+  await add.click();
+  await expect(thread.getByTestId('runtime-context-chips')).toContainText(/Terminal · \d+ lines?/);
+  await expect(composer).toHaveValue('dock draft stays');
+  await expect(thread.locator('.rt-user')).toHaveCount(0);
+});
