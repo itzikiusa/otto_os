@@ -2362,6 +2362,11 @@ fn kick_queue(inner: &Inner, id: &Id) {
 fn adopt_title(inner: &Inner, live: &Live, st: &mut State, title: &str) {
     let title: String = title.split_whitespace().collect::<Vec<_>>().join(" ");
     let title: String = title.chars().take(120).collect();
+    // A CLI that names the conversation after its first prompt (Codex does,
+    // verbatim) would name it after Otto's preamble: the placeholder stays.
+    if delegation::is_preamble(&title) {
+        return;
+    }
     if st.session.title_auto && !title.is_empty() && title != st.session.title {
         st.session.title = title.clone();
         let _ = live.persist.send(PersistOp::Title(title));

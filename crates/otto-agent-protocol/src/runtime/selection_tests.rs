@@ -33,6 +33,7 @@ while IFS= read -r l; do
   case "$l" in
     EXIT) exit 0 ;;
     SLOW) sleep 0.5; echo DONE ;;
+    TITLE*) echo "$l"; echo DONE ;;
     *) echo DONE ;;
   esac
 done
@@ -102,6 +103,7 @@ impl StructuredDriver for ScriptDriver {
                 native_thread_id: Some("native-1".into()),
                 model: None,
             }),
+            l if l.starts_with("TITLE ") => step.push(DriverEvent::Title(l[6..].into())),
             "DONE" => step.push(DriverEvent::Terminal {
                 status: TurnTerminalStatus::Completed,
                 failure: None,
@@ -773,4 +775,32 @@ async fn a_failed_switch_keeps_meta_patched_meanwhile() {
         Some(&serde_json::json!(true)),
         "{meta}"
     );
+}
+
+/// An agent that names the conversation after its first prompt (Codex does,
+/// verbatim) names it after Otto's preamble: that is never the title.
+#[tokio::test]
+async fn otto_preamble_never_becomes_the_title() {
+    let (f, id) = fixture(false, false, RuntimeConfig::default()).await;
+    {
+        let live = f.live(&id);
+        let mut st = live.lock();
+        st.session.title = "fix the login bug".into();
+        st.session.title_auto = true;
+    }
+    for named in [
+        "TITLE <otto_instructions> ## Otto subagents Ordinary tasks need none",
+        "TITLE [Context handoff from Claude Code] You continue a thread",
+        "TITLE [Subagent task from thread \"x\"]",
+    ] {
+        f.send(&id, RuntimePromptReq::of(named)).await;
+        assert_eq!(
+            f.rt.get(&id).await.unwrap().title,
+            "fix the login bug",
+            "{named}"
+        );
+    }
+    f.send(&id, RuntimePromptReq::of("TITLE Login bug fix"))
+        .await;
+    assert_eq!(f.rt.get(&id).await.unwrap().title, "Login bug fix");
 }
