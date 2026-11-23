@@ -76,6 +76,8 @@ interface PersistedThreadsPrefs {
   pinnedProjects?: string[];
   lastProject?: string | null;
   scriptsByProject?: Record<string, ProjectScript[]>;
+  /** The sidebar shows per-project folders instead of one inbox list. */
+  groupByProject?: boolean;
 }
 
 const STORAGE_KEY = 'otto_threads_v1';
@@ -138,6 +140,8 @@ class ThreadsStore {
   /** Project folders added from the sidebar's "Add project" before they have a thread. */
   extraProjects = $state<string[]>([]);
   scriptsByProject = $state<Record<string, ProjectScript[]>>({});
+  /** The sidebar's "Group by project" (filter menu): folders per project instead of one inbox. */
+  groupByProject = $state(false);
   /** Projects pinned to the top of the sidebar (T3 0.1.6 "pin favorite projects"). */
   pinnedProjects = $state<string[]>([]);
   /** Folder of the last thread started here — the next draft opens on it. */
@@ -191,6 +195,7 @@ class ThreadsStore {
       this.pinnedProjects = p.pinnedProjects.filter((x): x is string => typeof x === 'string');
     }
     if (typeof p.lastProject === 'string') this.lastProject = p.lastProject;
+    if (typeof p.groupByProject === 'boolean') this.groupByProject = p.groupByProject;
     if (p.scriptsByProject && typeof p.scriptsByProject === 'object') {
       this.scriptsByProject = p.scriptsByProject;
     }
@@ -216,6 +221,7 @@ class ThreadsStore {
         scriptsByProject: this.scriptsByProject,
         pinnedProjects: this.pinnedProjects,
         lastProject: this.lastProject,
+        groupByProject: this.groupByProject,
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
     } catch {
@@ -553,6 +559,11 @@ class ThreadsStore {
     if (this.projectFilters.length === 0) return true;
     const c = (cwd ?? '').replace(/\/+$/, '');
     return this.projectFilters.some((k) => c === k || c.startsWith(`${k}/`));
+  }
+
+  setGroupByProject(on: boolean): void {
+    this.groupByProject = on;
+    this.save();
   }
 
   isProjectPinned(path: string): boolean {

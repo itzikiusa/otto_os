@@ -197,7 +197,7 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Close thread…' }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Close thread', exact: true }).click();
   const sidebar = page.getByTestId('threads-sidebar');
-  await sidebar.locator('.th-history').click();
+  await sidebar.getByTestId('threads-history-toggle').click();
   await sidebar.locator('[data-testid^="thread-history-"]', { hasText: 'Renamed runtime' }).getByRole('button').first().click();
   await expect(thread.getByTestId('runtime-closed')).toBeVisible();
   await thread.getByTestId('runtime-reopen').click();
@@ -430,7 +430,8 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
   await rowTitle.hover();
   const actions = rowTitle.locator('xpath=ancestor::*[contains(@class,"tr-row")][1]//*[contains(@class,"tr-actions")]');
   const [tb, ab] = [(await rowTitle.boundingBox())!, (await actions.boundingBox())!];
-  expect(tb.x + tb.width <= ab.x || ab.x + ab.width <= tb.x, 'row actions overlap the title').toBeTruthy();
+  const apart = tb.x + tb.width <= ab.x || ab.x + ab.width <= tb.x || tb.y + tb.height <= ab.y || ab.y + ab.height <= tb.y;
+  expect(apart, 'row actions overlap the title').toBeTruthy();
 
   // RTL: the bubble and the answer resolve right-to-left; code / #130 stay isolated LTR.
   const bubble = thread.locator('.rt-bubble');

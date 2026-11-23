@@ -76,14 +76,15 @@ test('Ask another agent opens a linked child shown live in the parent and nested
   await card.locator('button[aria-expanded]').click();
   await expect(thread.locator('[data-testid^="runtime-child-answer-"]')).toContainText('Mock codex: here is my answer.');
 
-  // The sidebar nests the child under its parent, foldable.
-  await expect(page.getByTestId('thread-family-count-rt_lead')).toHaveText('· 1');
+  // The sidebar folds the subagent under its parent; it opens on demand.
+  await expect(page.getByTestId('thread-family-count-rt_lead')).toHaveText('1 subagent');
   const childId = (await card.getAttribute('data-testid'))!.replace('runtime-child-row-', '');
-  await expect(page.getByTestId(`thread-row-${childId}`)).toBeVisible();
-  await page.getByTestId('thread-family-fold-rt_lead').click();
   await expect(page.getByTestId(`thread-row-${childId}`)).toHaveCount(0);
   await page.getByTestId('thread-family-fold-rt_lead').click();
   await expect(page.getByTestId(`thread-row-${childId}`)).toBeVisible();
+  await expect(page.getByTestId(`thread-status-${childId}`)).toHaveText('Done');
+  await page.getByTestId('thread-family-fold-rt_lead').click();
+  await expect(page.getByTestId(`thread-row-${childId}`)).toHaveCount(0);
 
   // Open beside: parent and child side by side.
   await card.getByTestId('runtime-item-beside').click();
