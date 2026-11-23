@@ -324,6 +324,9 @@ export interface RuntimeQuestion {
   allow_empty?: boolean;
   allow_free_text: boolean;
   options: QuestionOption[];
+  /** Set only by Otto's driver for an ACP url-mode elicitation: the page the
+   *  card opens when the person chooses its `open` option. */
+  open_url?: string;
 }
 export type QuestionAnswer =
   | { question_id: string; type: 'single'; value: string }

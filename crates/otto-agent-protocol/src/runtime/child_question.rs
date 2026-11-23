@@ -144,6 +144,7 @@ mod tests {
                 required: true,
                 allow_empty: false,
                 allow_free_text: false,
+                open_url: None,
                 options: vec![
                     QuestionOption {
                         value: "pg".into(),

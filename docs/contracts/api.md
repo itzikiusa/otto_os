@@ -6851,8 +6851,11 @@ cancels all its studio turns through the existing story lifecycle.
 
 `runtime_request.kind: "question"` carries `questions: [{id, header, prompt,
 kind: "single"|"multi"|"text", required, allow_free_text, allow_empty?, options:
-[{value, label, description?}]}]` and optional `question_title`. IDs and option
-values are opaque native values, distinct from labels. Full forms live on the
+[{value, label, description?}], open_url?}]` and optional `question_title`. IDs and option
+values are opaque native values, distinct from labels. `open_url` is set only by
+Otto for an ACP url-mode elicitation (id `acp_url`, which no model- or
+schema-supplied question may take): the client opens exactly that URL, and only
+when the answer picks the question's `open` option. Full forms live on the
 request entity, independently of compact tool/timeline rows and replay windows.
 Pending questions use the existing session `waiting` state (the legacy session
 row status is `awaiting_permission`), but are never permission approvals.
