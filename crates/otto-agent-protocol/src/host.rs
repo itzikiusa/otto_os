@@ -35,6 +35,16 @@ pub trait RuntimeHost: Send + Sync + 'static {
         mcp: McpDelivery,
     ) -> Result<Vec<McpServerDef>>;
 
+    /// The MCP servers the spawn just prepared for `session` gave its agent,
+    /// and the enabled ones it could not take with why (its thread's server
+    /// list). Empty by default (tests).
+    fn mcp_status(
+        &self,
+        _session: &RuntimeSession,
+    ) -> Vec<otto_core::agent_runtime::McpServerStatus> {
+        Vec::new()
+    }
+
     /// The child of `session` is gone (exited, stopped, closed): revoke what
     /// its spawn minted (the `otto` MCP credential). Best-effort.
     async fn retire(&self, _session: &RuntimeSession) {}
@@ -56,6 +66,18 @@ pub trait RuntimeHost: Send + Sync + 'static {
     /// structured [`RuntimeProvider`] when enabled in `ProviderRegistry`.
     fn resolve_custom_provider(&self, _slug: &str) -> Option<RuntimeProvider> {
         None
+    }
+
+    /// The providers a thread's agent may delegate to (`SubagentTarget`).
+    /// Unit-test hosts: none.
+    async fn subagent_targets(&self) -> Vec<otto_core::agent_runtime::SubagentTarget> {
+        Vec::new()
+    }
+
+    /// Whether a thread's first prompt carries the delegation rules
+    /// (`runtime::delegation`). Off for unit-test hosts.
+    fn teaches_delegation(&self) -> bool {
+        false
     }
 
     /// Whether `slug` (built-in or custom) is enabled in `ProviderRegistry`.
@@ -237,6 +259,13 @@ impl RuntimeHost for SessionManagerHost {
             .await;
     }
 
+    fn mcp_status(
+        &self,
+        session: &RuntimeSession,
+    ) -> Vec<otto_core::agent_runtime::McpServerStatus> {
+        self.manager.runtime_mcp_status(&session.id)
+    }
+
     fn network_profile_active(&self, session: &RuntimeSession) -> bool {
         self.manager
             .network_status(session.id.as_str())
@@ -260,6 +289,32 @@ impl RuntimeHost for SessionManagerHost {
 
     fn is_provider_enabled(&self, slug: &str) -> bool {
         self.manager.providers().is_enabled(slug)
+    }
+
+    fn teaches_delegation(&self) -> bool {
+        true
+    }
+
+    async fn subagent_targets(&self) -> Vec<otto_core::agent_runtime::SubagentTarget> {
+        use otto_sessions::provider_models as pm;
+        let reg = self.manager.providers();
+        let (models, _) =
+            pm::probe_provider_models_cached_with_status(&pm::ModelProbe::for_registry(reg)).await;
+        reg.names()
+            .into_iter()
+            .filter(|slug| reg.is_enabled(slug))
+            .filter_map(|slug| {
+                let p = reg
+                    .runtime_provider_for(&slug)
+                    .or_else(|| RuntimeProvider::parse(&slug))?;
+                let ids = models.get(&slug).into_iter().flatten();
+                Some(otto_core::agent_runtime::SubagentTarget {
+                    models: ids.take(12).map(|m| m.id.clone()).collect(),
+                    efforts: otto_core::agent_runtime::RuntimeCapabilities::for_provider(p).efforts,
+                    provider: slug,
+                })
+            })
+            .collect()
     }
 
     fn claude_config_dir_for(&self, slug: &str) -> Option<std::path::PathBuf> {

@@ -81,8 +81,8 @@ test('the council switcher changes seat in one tap and keeps every action in one
   // Every council action sits in one menu that fits the phone.
   await strip.getByTestId('pane-strip-council-menu').click();
   const menu = page.locator('.ctx-menu').first();
-  await expect(menu.getByRole('menuitem', { name: 'Ask every seat…' })).toBeVisible();
-  await expect(menu.getByRole('menuitem', { name: /Synthesize with/ })).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: 'Ask every model…' })).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: /Compare answers with/ })).toBeVisible();
   await expect(menu.getByRole('menuitem', { name: 'Continue with this answer' })).toBeVisible();
   await expectFullyInViewport(page, menu, 'Council menu (phone)');
   await shot('council-menu');

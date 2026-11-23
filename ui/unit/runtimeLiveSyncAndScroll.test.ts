@@ -439,10 +439,11 @@ test('liveStatus.ts and timelineRows surface autonomous Background updates, live
   });
 
   assert.deepEqual(
-    plain(live.deriveLiveFooter(proj, null, false, [{ label: 'Timer (30s)' }, { label: 'Swarm board wait' }])),
+    plain(live.deriveLiveFooter(proj, null, false, [{ label: 'Timer (30s)', kind: 'timer', childSessionId: null }, { label: 'Swarm board wait', kind: 'agent', childSessionId: null }])),
     {
       mode: 'waiting_bg',
-      text: 'Waiting on 2 background tasks: Timer (30s), Swarm board wait — new messages will appear automatically',
+      text: 'Waiting on 1 subagent and 1 timer',
+      detail: 'Timer (30s), Swarm board wait',
     },
   );
 });

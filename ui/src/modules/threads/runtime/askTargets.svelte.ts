@@ -12,6 +12,8 @@ import { runtimeThreads } from './runtimeThreads.svelte';
 
 class AskTargets {
   byThread = $state<Record<string, AskChildTarget[]>>({});
+  /** "Answer to me only" (off by default: the answer goes to the thread's agent). */
+  toMeOnly = $state<Record<string, boolean>>({});
 
   for(id: string): AskChildTarget[] {
     return this.byThread[id] ?? [];
@@ -28,6 +30,8 @@ class AskTargets {
   clear(id: string): void {
     const { [id]: _gone, ...rest } = this.byThread;
     this.byThread = rest;
+    const { [id]: _off, ...keep } = this.toMeOnly;
+    this.toMeOnly = keep;
   }
 }
 
@@ -50,6 +54,7 @@ export async function askFromComposer(parentId: string, draft: RuntimeComposerDr
     await runtimeThreads.askChildren(parentId, {
       prompt: text,
       targets,
+      ...(askTargets.toMeOnly[parentId] ? { to_me_only: true } : {}),
       // Omitted = this thread's own mode; a wider pick is refused (400) in words.
       ...(access ? { access_mode: access } : {}),
       ...(pics.length
@@ -64,7 +69,7 @@ export async function askFromComposer(parentId: string, draft: RuntimeComposerDr
     askTargets.clear(parentId);
   } catch (e) {
     if (e instanceof ApiError && (e.status === 400 || e.status === 409)) draft.startError = e.message;
-    else toastError('Couldn’t ask the other agent', e);
+    else toastError('Couldn’t delegate', e);
   } finally {
     draft.sending = false;
   }

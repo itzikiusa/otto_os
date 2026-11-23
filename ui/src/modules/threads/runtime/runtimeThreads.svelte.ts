@@ -371,6 +371,10 @@ class RuntimeThreads {
     else if (ev.type === 'turn.terminal' && this.seen[ev.session_id]) this.seen[ev.session_id].outcome = turnOutcomeOf(ev.status, ev.failure);
     if (!this.byId[ev.session_id]) this.adopt(ev.session_id);
     if (ev.type === 'queue.updated') this.releaseQueued(ev.session_id, ev.queued_prompts ?? []);
+    // A model / access switch was recorded — the agent's own too (ACP
+    // `current_mode_update`): the row, and so the chips, re-read it.
+    // (`selection:` notices — the shape settingsChange.ts reads.)
+    if (ev.type === 'turn_item.updated' && ev.turn_item.type === 'system_notice' && ev.turn_item.id.startsWith('selection:')) this.adopt(ev.session_id);
     // A turn that ended (done or failed) off screen leaves an unread dot.
     if (ev.type === 'turn.terminal' && (ev.status === 'completed' || ev.status === 'failed') && !this.onScreen(ev.session_id)) {
       this.unread = { ...this.unread, [ev.session_id]: true };

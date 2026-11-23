@@ -6,6 +6,7 @@
 import { api } from '../../lib/api/client';
 import type { RuntimeEvent, RuntimeReplay } from '../../lib/api/types';
 import { onLive } from '../../lib/live';
+import { mcpAsks } from './runtime/mcpAsksStore.svelte';
 
 const MAX_READS = 3;
 
@@ -36,9 +37,11 @@ class InboxLive {
     } else if (ev.type === 'turn.terminal') delete this.since[id];
   }
 
-  /** The kinds of `id`'s pending requests (empty when unknown). */
+  /** The kinds of `id`'s pending requests (empty when unknown); a waiting
+   *  MCP approval card (`mcpAsks`) counts as a permission request. */
   kindsOf(id: string): string[] {
-    return Object.values(this.kinds[id] ?? {});
+    const kinds = Object.values(this.kinds[id] ?? {});
+    return mcpAsks.waiting(id) ? [...kinds, 'permission'] : kinds;
   }
 
   /** Read a waiting / working thread's newest turn once, when this tab has
@@ -79,8 +82,10 @@ class InboxLive {
 
   /** Listen while the sidebar is mounted; returns the unsubscribe. */
   mount(): () => void {
+    const releaseMcp = mcpAsks.hold();
     if (this.refs++ === 0) this.stop = onLive(['agent_runtime_event'], (e) => this.fold(e.event as RuntimeEvent));
     return () => {
+      releaseMcp();
       if (--this.refs === 0) {
         this.stop?.();
         this.stop = null;

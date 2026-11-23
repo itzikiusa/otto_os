@@ -192,6 +192,8 @@
     "otto_steer_production",
     "otto_synthesize_voice",
     "otto_test_integration",
+    "otto_thread_answer",
+    "otto_thread_capabilities",
     "otto_thread_close",
     "otto_thread_list",
     "otto_thread_message",
@@ -315,6 +317,8 @@
     "otto_set_scheduled_task_enabled",
     "otto_start_pr_review",
     "otto_test_integration",
+    "otto_thread_answer",
+    "otto_thread_capabilities",
     "otto_thread_close",
     "otto_thread_list",
     "otto_thread_message",
@@ -533,6 +537,8 @@
     "otto_steer_production",
     "otto_synthesize_voice",
     "otto_test_integration",
+    "otto_thread_answer",
+    "otto_thread_capabilities",
     "otto_thread_close",
     "otto_thread_list",
     "otto_thread_message",
@@ -778,6 +784,8 @@
     "otto_set_scheduled_task_enabled",
     "otto_start_pr_review",
     "otto_test_integration",
+    "otto_thread_answer",
+    "otto_thread_capabilities",
     "otto_thread_close",
     "otto_thread_list",
     "otto_thread_message",
@@ -2414,6 +2422,32 @@
         "effort": {
           "type": "string",
           "description": "low|medium|high|xhigh|max"
+        }
+      }
+    },
+    "otto_thread_capabilities": {
+      "type": "object",
+      "properties": {}
+    },
+    "otto_thread_answer": {
+      "type": "object",
+      "required": [
+        "peer_session_id",
+        "request_id",
+        "answers"
+      ],
+      "properties": {
+        "peer_session_id": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "answers": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
         }
       }
     },

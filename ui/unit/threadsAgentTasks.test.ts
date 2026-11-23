@@ -14,8 +14,8 @@ test('two concurrent background agents both run, and the strip counts them', () 
   const t = agentTasks(items, [bg('ta', 'alpha probe', '2026-11-13T10:00:00Z', 't1:tool:a'), bg('tb', 'beta probe', '2026-11-13T10:00:01Z', 't1:tool:b')]);
   assert.deepEqual(t.running.map((r) => r.label), ['alpha probe', 'beta probe']);
   assert.equal(t.finished.length, 0);
-  assert.equal(backgroundStripText(t.running), '2 running in the background');
-  assert.equal(backgroundStripText(t.running.slice(0, 1)), 'Running in the background: alpha probe');
+  assert.equal(backgroundStripText(t.running), '2 background tasks');
+  assert.equal(backgroundStripText(t.running.slice(0, 1)), 'Background task: alpha probe');
 });
 
 test('a background card still running counts even when the session list lost its task', () => {
@@ -106,7 +106,7 @@ test('drill-down surfaces live subagent child steps, streaming command output, c
   assert.equal(t.running[2].childSessionId, 'rt_child_1');
   assert.equal(t.running[2].sublabel, 'codex · gpt-5.4');
   assert.equal(t.running[2].stepSummary, 'Read 6 files');
-  assert.equal(backgroundStripText([t.running[0]]), 'Running in the background: IDE Backend Fixer (3 steps · last: edit_file)');
+  assert.equal(backgroundStripText([t.running[0]]), 'Background task: IDE Backend Fixer (3 steps · last: edit_file)');
 
   assert.equal(t.finished.length, 1);
   assert.equal(t.finished[0].kind, 'timer');

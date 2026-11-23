@@ -30,6 +30,12 @@ follows `apps/server/src/orchestration-v2/ProviderSwitchService.ts`
 (`create_with_handoff`), `ContextHandoffService.ts` and
 `packages/provider-core/src/server/handoffBudget.ts` (16,000-token default,
 four bytes a token, whole items); its divider follows `V2LifecycleRow.tsx`.
+Ported from T3 Code f58085a1 on 2026-11-23 (behaviour only): the delegation
+rules a thread's first prompt carries (`src/runtime/delegation.rs`, after
+`packages/provider-core/src/server/orchestrationInstructions.ts`), the
+"Completion wakes this thread" hint an opened subagent returns and the
+capabilities tool (`delegate_task` `next`, `orchestrator_capabilities`,
+`packages/contracts/src/orchestratorMcp.ts`).
 Threads
 inside a thread (`src/runtime/children.rs` and Otto's Threads UI) follow
 `apps/web/src/components/chat/V2LifecycleRow.tsx` (`SubagentTimelineLink`,

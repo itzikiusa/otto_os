@@ -38,7 +38,8 @@ describe('slashActions', () => {
     });
     assert.deepEqual(parseInteractiveSlashInput('/status'), { kind: 'toggle-status' });
     assert.deepEqual(parseInteractiveSlashInput('/diff'), { kind: 'open-diff' });
-    assert.deepEqual(parseInteractiveSlashInput('/fork'), { kind: 'new-thread', beside: true });
+    assert.deepEqual(parseInteractiveSlashInput('/new-beside'), { kind: 'new-thread', beside: true });
+    assert.equal(parseInteractiveSlashInput('/fork'), null, 'not a fork: the name says what it does');
     assert.equal(parseInteractiveSlashInput('/commit fix tests'), null);
   });
 });

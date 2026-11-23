@@ -23,6 +23,7 @@
   // council: their code loads after the page, not with it.
   const PaneStrip = lazyComponent(() => import('./runtime/PaneStrip.svelte'));
   const PaneMessageSheet = lazyComponent(() => import('./runtime/PaneMessageSheet.svelte'));
+  const McpServersSheet = lazyComponent(() => import('./runtime/RuntimeMcpServers.svelte'));
 
   let splitContainer = $state<HTMLDivElement | null>(null);
   let splitRatio = $state(50);
@@ -191,6 +192,7 @@
 </div>
 </div>
 <LazyMount lazy={PaneMessageSheet} what="the message sheet" quiet />
+<LazyMount lazy={McpServersSheet} what="the MCP server list" quiet />
 
 <style>
   .tc-root {

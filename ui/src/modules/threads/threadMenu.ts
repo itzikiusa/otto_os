@@ -12,7 +12,6 @@ import { delegatedParentId, isPlainShellSession } from './threadsHelpers';
 import { threads } from './threadsStore.svelte';
 import { phoneHandoff } from '../../lib/stores/phoneHandoff.svelte';
 import { openProjectInIde } from './ideProjects.svelte';
-import { messageThread } from './relatedMessage';
 import { relatedPopover } from './relatedPopover.svelte';
 import { RELATED_LABEL } from './threadsPageMenu';
 
@@ -121,8 +120,6 @@ export function buildSidebarLegacyThreadMenu(
   const pinned = threads.isPinned(s.id);
   const settled = threads.isSettled(s.id);
   const cwd = (s.cwd ?? '').trim().replace(/\/+$/, '');
-  const canSendFromFocused =
-    Boolean(threads.focusedSessionId && threads.focusedSessionId !== s.id && !s.archived);
   return [
     {
       label: pinned ? 'Unpin thread' : 'Pin thread',
@@ -143,23 +140,9 @@ export function buildSidebarLegacyThreadMenu(
     ...(cwd && cwd !== '~'
       ? [{ label: 'Open in IDE', icon: 'ide' as const, action: () => openProjectInIde(cwd, s.id) }]
       : []),
-    ...(canSendFromFocused
-      ? [
-          {
-            label: 'Send message from active thread…',
-            icon: 'send' as const,
-            action: () => void messageThread(threads.focusedSessionId, s.id),
-          },
-        ]
-      : []),
     ...(!s.archived ? legacyReviveItem(s) : []),
     ...(!s.archived
       ? [
-          {
-            label: 'Open Room…',
-            icon: 'people' as const,
-            action: () => opts.onstartroom(s.id),
-          },
           {
             label: settled ? 'Move back to Active' : 'Move to History',
             icon: 'check' as const,

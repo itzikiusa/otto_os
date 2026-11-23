@@ -1353,6 +1353,9 @@ pub struct SessionManager {
     /// token minted for the `otto` server can be revoked when the session is
     /// removed. Keyed like `ingest_tokens`.
     mcp_tokens: Arc<DashMap<Id, String>>,
+    /// A structured thread's MCP servers as its last spawn left them (given /
+    /// skipped with why); `runtime_mcp_status` hands them to the runtime.
+    runtime_mcp: Arc<DashMap<Id, Vec<otto_core::agent_runtime::McpServerStatus>>>,
     /// Serializes the post-spawn codex session-id capture so two codex sessions
     /// launched in the SAME cwd claim DISTINCT on-disk rollouts: each capture
     /// runs under this lock and persists its claim before releasing, so the next
@@ -1454,6 +1457,7 @@ impl SessionManager {
                 .and_then(|p| p.to_str().map(str::to_owned))
                 .unwrap_or_else(|| "ottod".to_string()),
             mcp_tokens: Arc::new(DashMap::new()),
+            runtime_mcp: Arc::new(DashMap::new()),
             codex_capture_lock: Arc::new(Mutex::new(())),
             capture_probes: Arc::new(DashMap::new()),
             captures_in_flight: Arc::new(DashMap::new()),

@@ -173,12 +173,17 @@ carry into another conversation.
      **Steer** (the agent reads it at its next step) — see *Composer and
      timeline* below.
 4. **Workspace Inspector (`ThreadInspector`):**
-   - **Agents & tasks** (structured threads, hidden when there are none):
-     every subagent and background task — running first with its elapsed
-     time, the last five finished under one "N finished" line
-     (`runtime/agentTasks.ts`, `ThreadAgentsTasks.svelte`). The strip above
-     the composer names one background task or counts several ("2 running in
-     the background"); tapping it opens this section.
+   - **Background tasks** (structured threads, hidden when there are none):
+     the thread's commands and timers — running first with their elapsed
+     time, the last finished under one "N finished" line
+     (`runtime/agentTasks.ts`, `ThreadAgentsTasks.svelte`). Subagents are not
+     listed here: they are the timeline's subagent row, the waiting line, the
+     attention dock and the details' Subagents section (see
+     threads-structured-runtime.md "Threads inside a thread"). The strip
+     above the composer names one background task or counts several ("2
+     background tasks"); tapping it opens this section.
+   - **Subagent** tab: a subagent opened from its row while the parent stays
+     put (⌘-click: the main view instead).
    - **Files:** Workspace file tree + multi-tab file viewer (`Preview | Source`
      for Markdown and images, line-numbered code viewer, `file:line` jump).
    - **Changes** (key **C**; was "Diff"): Working-tree staged/unstaged status + Unified/Split git diff
@@ -395,7 +400,7 @@ result, as it does for any tool. Threads only (T3 Code #15907, #30257).
   focuses its pane, and **Message every pane…**. When every pane is one
   council it is the council strip instead: "Council · *title*", seat chips
   "Seat N · model", **Ask every seat…** (a multi-line sheet that says which
-  stopped seats it restarts), **Synthesize** (disabled, with its reason,
+  stopped seats it restarts), **Compare answers** (disabled, with its reason,
   until a seat has answered and none is working), **Stop all** while a seat
   works, **Continue with this answer** (opens the new-thread stage with the
   quoted answer; nothing is sent) and **Send to a thread ▸**

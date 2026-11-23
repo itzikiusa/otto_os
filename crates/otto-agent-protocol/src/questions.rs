@@ -82,6 +82,36 @@ pub fn native_questions(params: &Value, claude: bool) -> Result<Vec<RuntimeQuest
     unique(questions)
 }
 
+/// The question id of an ACP url-mode elicitation (`acp_url`).
+pub const URL_QUESTION: &str = "acp_url";
+
+/// ACP url-mode elicitation: the agent asks the person to open an http(s)
+/// page (a sign-in, a consent screen). One choice names the URL; choosing it
+/// answers `accept` and the UI opens the page in the system browser.
+pub fn acp_url(params: &Value) -> Result<Vec<RuntimeQuestion>, String> {
+    let url = params
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|u| u.starts_with("https://") || u.starts_with("http://"))
+        .filter(|u| !u.chars().any(char::is_control))
+        .ok_or("url elicitation needs an http(s) url")?;
+    let message = params.get("message").and_then(Value::as_str).unwrap_or("");
+    Ok(vec![RuntimeQuestion {
+        id: URL_QUESTION.into(),
+        header: "Open a link".into(),
+        prompt: format!("{message}\n{url}").trim().to_string(),
+        kind: QuestionKind::Single,
+        required: true,
+        allow_empty: false,
+        allow_free_text: false,
+        options: vec![QuestionOption {
+            value: "open".into(),
+            label: "Open in the browser".into(),
+            description: Some(url.into()),
+        }],
+    }])
+}
+
 /// The draft ACP elicitation/create form subset: plain strings and string enums/arrays.
 /// Constraints and other primitive types are explicitly refused, never silently discarded.
 pub fn acp_form(params: &Value) -> Result<Vec<RuntimeQuestion>, String> {
@@ -103,6 +133,7 @@ pub fn acp_form(params: &Value) -> Result<Vec<RuntimeQuestion>, String> {
                 "title",
                 "description",
                 "_meta",
+                "$schema",
             ]
             .contains(&k.as_str())
         })
@@ -235,6 +266,114 @@ pub fn acp_form(params: &Value) -> Result<Vec<RuntimeQuestion>, String> {
 }
 
 /// The free-text companion of an ACP single choice: `<id>__other`.
+/// An MCP server's elicitation as the agent CLI forwards it — Claude's
+/// `elicitation` control request (`requested_schema`), Codex's
+/// `mcpServer/elicitation/request` (`requestedSchema`; its `openai/form`
+/// modes are the same form) — as questions: the subset [`acp_form`] takes.
+/// A URL-mode request or a form outside it is refused (the caller declines).
+pub fn mcp_elicitation(params: &Value) -> Result<Vec<RuntimeQuestion>, String> {
+    let mode = match params.get("mode").and_then(Value::as_str).unwrap_or("form") {
+        "openai/form" | "openaiForm" => "form",
+        "url" => return acp_url(params),
+        m => m,
+    };
+    let schema = params
+        .get("requestedSchema")
+        .or_else(|| params.get("requested_schema"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    acp_form(&serde_json::json!({ "mode": mode, "requestedSchema": schema }))
+}
+
+/// An elicitation with no fields to fill (a missing, `true` or empty
+/// `properties` schema, in any form mode): a yes/no for the person — Codex
+/// asks MCP tool approval this way — shown as an approval, not a form.
+pub fn is_confirmation(params: &Value) -> bool {
+    let mode = params.get("mode").and_then(Value::as_str).unwrap_or("form");
+    let schema = params
+        .get("requestedSchema")
+        .or_else(|| params.get("requested_schema"));
+    mode != "url"
+        && schema
+            .and_then(|s| s.get("properties"))
+            .and_then(Value::as_object)
+            .is_none_or(|p| p.is_empty())
+}
+
+/// Allow / Deny for [`is_confirmation`].
+pub fn confirmation_options() -> Vec<otto_core::agent_runtime::ApprovalOption> {
+    use otto_core::agent_runtime::{ApprovalDecision, ApprovalOption};
+    vec![
+        ApprovalOption {
+            decision: ApprovalDecision::Accept,
+            label: "Allow".into(),
+        },
+        ApprovalOption {
+            decision: ApprovalDecision::Decline,
+            label: "Deny".into(),
+        },
+    ]
+}
+
+/// The elicitation result for an approval answer (no content to send).
+pub fn confirmation_result(decision: otto_core::agent_runtime::ApprovalDecision) -> Value {
+    use otto_core::agent_runtime::ApprovalDecision as D;
+    let action = match decision {
+        D::Accept | D::AcceptForSession | D::AcceptAlways => "accept",
+        D::Decline | D::DeclineAlways => "decline",
+        D::Cancel => "cancel",
+    };
+    // Codex's MCP tool approval offers `_meta.persist` (session / always).
+    match decision {
+        D::AcceptForSession => {
+            serde_json::json!({"action": action, "content": {}, "_meta": {"persist": "session"}})
+        }
+        D::AcceptAlways => {
+            serde_json::json!({"action": action, "content": {}, "_meta": {"persist": "always"}})
+        }
+        _ if action == "accept" => serde_json::json!({ "action": action, "content": {} }),
+        _ => serde_json::json!({ "action": action }),
+    }
+}
+
+/// The `{action: "accept", …}` result of an answered elicitation, for every
+/// agent: a url question (the person opened the page) is a bare accept, a
+/// form its fields as `content`.
+pub fn elicitation_answer(
+    questions: &[RuntimeQuestion],
+    answers: &[otto_core::agent_runtime::QuestionAnswer],
+) -> Value {
+    if questions.iter().any(|q| q.id == URL_QUESTION) {
+        return serde_json::json!({ "action": "accept" });
+    }
+    serde_json::json!({ "action": "accept", "content": form_content(questions, answers) })
+}
+
+/// The `content` of an accepted form elicitation: each answer under its
+/// field id (typed text for a single choice under its `<id>__other` field).
+pub fn form_content(
+    questions: &[RuntimeQuestion],
+    answers: &[otto_core::agent_runtime::QuestionAnswer],
+) -> serde_json::Map<String, Value> {
+    use otto_core::agent_runtime::{QuestionAnswer, QuestionKind};
+    answers
+        .iter()
+        .map(|a| {
+            let id = a.question_id();
+            let single = questions
+                .iter()
+                .any(|q| q.id == id && q.kind == QuestionKind::Single);
+            match a {
+                QuestionAnswer::Multi { values, .. } => (id.to_string(), serde_json::json!(values)),
+                QuestionAnswer::Text { text, .. } if single => {
+                    (other_field(id), serde_json::json!(text))
+                }
+                _ => (id.to_string(), serde_json::json!(a.values()[0])),
+            }
+        })
+        .collect()
+}
+
 pub fn other_field(id: &str) -> String {
     format!("{id}__other")
 }

@@ -106,6 +106,13 @@ impl SessionManager {
                     Vec::new()
                 })
             });
+            // Gemini reads no `.mcp.json` either: its project settings.
+            let gemini_names = (provider == "gemini").then(|| {
+                crate::mcp::reconcile_managed_servers_gemini(&cwd, &cfg).unwrap_or_else(|e| {
+                    tracing::warn!(session = %sid, cwd = %cwd, "reconcile gemini MCP config: {e}");
+                    Vec::new()
+                })
+            });
             // Terminal Muse reads the workspace `.mcp.json` above (its `otto`
             // entry forwards the bridge env by name, which Muse requires);
             // opencode is unverified. Their Threads sessions get the full set
@@ -114,17 +121,18 @@ impl SessionManager {
                 ("grok", Some(users)) => Some(crate::mcp::reconcile_user_servers_grok(&cwd, users)),
                 _ => None,
             };
-            (mcp_json_names, agy_names, grok)
+            (mcp_json_names, agy_names.or(gemini_names), grok)
         })
         .await;
-        let (mcp_json_names, agy_names, grok_result) = reconciled.unwrap_or_else(|e| {
+        // `own_names`: agy's or Gemini's own file (each reads no `.mcp.json`).
+        let (mcp_json_names, own_names, grok_result) = reconciled.unwrap_or_else(|e| {
             tracing::warn!(session = %session.id, "MCP launcher reconcile task failed: {e}");
             (Vec::new(), None, None)
         });
         let mut launch_args = Vec::new();
         let delivered: Vec<String> = match cli_family.as_str() {
-            // agy never reads `.mcp.json` — same managed set, its own file.
-            "agy" => agy_names.unwrap_or_default(),
+            // agy and Gemini never read `.mcp.json` — same set, their own file.
+            "agy" | "gemini" => own_names.unwrap_or_default(),
             // grok: `otto` via `enable_otto_tools_grok` (at token mint), user
             // tables here; no browser entry. Unknown user set → leave its
             // tables alone (preserved, but not claimed in the snapshot).
@@ -180,6 +188,11 @@ impl SessionManager {
             // extension registers this spawn's set (the browser per this
             // session's own opt-in, like codex). Unknown user set → otto and
             // the browser only.
+            // pi 0.x has no `registerMcpServer`: give it nothing and say so.
+            "pi" if self.pi_major().await == Some(0) => {
+                let _ = std::fs::remove_file(pi_mcp_extension_path(&session.id));
+                Vec::new()
+            }
             "pi" => {
                 let (doc, names) = crate::mcp::pi_mcp_extension(
                     pi_otto.as_ref(),
@@ -217,9 +230,24 @@ impl SessionManager {
         // Snapshot-at-spawn: what this provider was actually given, what it
         // was not, plus the lookup fault if any (json_patch: a null clears a
         // stale error / skip list).
-        // A structured runtime session has no `sessions` row to snapshot into.
+        // A structured runtime session has no `sessions` row: its thread
+        // shows the same snapshot as a server list (`runtime_mcp_status`).
         let structured = session.meta.get("runtime").and_then(|v| v.as_str()) == Some("structured");
         if structured {
+            let otto_on = self.otto_mcp_enabled(&session.workspace_id).await;
+            if cli_family == "pi" && delivered.is_empty() && self.pi_major().await == Some(0) {
+                self.runtime_mcp
+                    .insert(session.id.clone(), pi_too_old(user_servers.as_deref()));
+                return launch_args;
+            }
+            let status = spawn_mcp_status(
+                &cli_family,
+                otto_on,
+                &delivered,
+                skipped.as_deref().unwrap_or_default(),
+                lookup_error.as_deref(),
+            );
+            self.runtime_mcp.insert(session.id.clone(), status);
             return launch_args;
         }
         if let Err(e) = self
@@ -284,5 +312,197 @@ impl SessionManager {
             }
             None => (Some(Vec::new()), None),
         }
+    }
+}
+
+/// A structured thread's MCP servers at spawn, as its server list shows them:
+/// Otto's own (`otto`, `otto-browser`) and the control-plane servers this
+/// provider was given (`Added` until the CLI reports a connection), the
+/// enabled ones it could not take with why, and a failed lookup. Pure.
+pub(crate) fn spawn_mcp_status(
+    provider: &str,
+    otto_on: bool,
+    delivered: &[String],
+    skipped: &[serde_json::Value],
+    lookup_error: Option<&str>,
+) -> Vec<otto_core::agent_runtime::McpServerStatus> {
+    use otto_core::agent_runtime::{McpServerSource as Src, McpServerState as St, McpServerStatus};
+    let own = |n: &str| n == crate::mcp::OTTO_TOOLS_KEY || n == crate::mcp::SERVER_KEY;
+    let mut out = Vec::new();
+    if !delivered.iter().any(|n| n == crate::mcp::OTTO_TOOLS_KEY) {
+        out.push(if otto_on {
+            McpServerStatus::new(crate::mcp::OTTO_TOOLS_KEY, Src::Otto, St::Failed)
+                .because("Otto couldn’t issue this thread’s tool credential (see the daemon log)")
+        } else {
+            McpServerStatus::new(crate::mcp::OTTO_TOOLS_KEY, Src::Otto, St::Disabled)
+                .because("Otto’s tools are off for this workspace (MCP → Otto server)")
+        });
+    }
+    for n in delivered {
+        let src = if own(n) { Src::Otto } else { Src::Workspace };
+        out.push(McpServerStatus::new(n.clone(), src, St::Added));
+    }
+    for s in skipped {
+        let name = s
+            .get("server")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let why = s
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        out.push(
+            McpServerStatus::new(name, Src::Workspace, St::Unsupported)
+                .because(format!("{} can’t take it: {why}", provider_name(provider))),
+        );
+    }
+    if let Some(e) = lookup_error {
+        out.push(
+            McpServerStatus::new("Workspace servers", Src::Workspace, St::Failed)
+                .because(format!("Otto couldn’t read the enabled servers: {e}")),
+        );
+    }
+    out
+}
+
+/// "Claude", "Codex" … for a sentence (the slug for an unknown family).
+pub(crate) fn provider_name(family: &str) -> String {
+    match family {
+        "claude" => "Claude".into(),
+        "codex" => "Codex".into(),
+        "gemini" => "Gemini".into(),
+        "agy" => "Antigravity".into(),
+        "grok" => "Grok".into(),
+        "opencode" => "opencode".into(),
+        "muse" => "Muse".into(),
+        other => other.into(),
+    }
+}
+
+/// pi 0.x takes no MCP servers: Otto's and every enabled one, each with why.
+fn pi_too_old(
+    users: Option<&[crate::mcp::UserMcpServer]>,
+) -> Vec<otto_core::agent_runtime::McpServerStatus> {
+    use otto_core::agent_runtime::{McpServerSource as Src, McpServerState as St, McpServerStatus};
+    let why =
+        "This pi (0.x) can’t load MCP servers; pi 1.x can (update pi in Settings › Providers)";
+    std::iter::once(
+        McpServerStatus::new(crate::mcp::OTTO_TOOLS_KEY, Src::Otto, St::Unsupported).because(why),
+    )
+    .chain(
+        users
+            .into_iter()
+            .flatten()
+            .filter(|s| s.name != crate::mcp::OTTO_TOOLS_KEY && s.name != crate::mcp::SERVER_KEY)
+            .map(|s| {
+                McpServerStatus::new(s.name.clone(), Src::Workspace, St::Unsupported).because(why)
+            }),
+    )
+    .collect()
+}
+
+impl SessionManager {
+    /// The installed pi's major version (`pi --version`, read once per daemon
+    /// run — an update shows after a restart), `None` when unknown.
+    pub(super) async fn pi_major(&self) -> Option<u64> {
+        // Unit tests never read the host's pi (its version is not theirs).
+        if cfg!(test) {
+            return None;
+        }
+        static PI_MAJOR: tokio::sync::OnceCell<u64> = tokio::sync::OnceCell::const_new();
+        let program = self
+            .providers
+            .program_for("pi")
+            .unwrap_or_else(|| "pi".into());
+        // Only a version read is kept: a failed read tries again next spawn.
+        let read = PI_MAJOR.get_or_try_init(|| async move {
+            let mut cmd = tokio::process::Command::new(&program);
+            let out = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                cmd.arg("--version").kill_on_drop(true).output(),
+            )
+            .await
+            .map_err(|_| format!("{program} --version timed out"))?
+            .map_err(|e| format!("{program} --version: {e}"))?;
+            // pi 0.x prints it on stderr.
+            let mut v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if v.is_empty() {
+                v = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            }
+            v.trim_start_matches(|c: char| !c.is_ascii_digit())
+                .split('.')
+                .next()
+                .and_then(|m| m.parse::<u64>().ok())
+                .ok_or_else(|| format!("{program} --version said {v:?}"))
+        });
+        match read.await {
+            Ok(m) => Some(*m),
+            Err(e) => {
+                tracing::info!("pi version unknown: {e}");
+                None
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod spawn_status_tests {
+    use super::*;
+
+    #[test]
+    fn a_too_old_pi_lists_every_server_as_not_supported_with_why() {
+        use otto_core::agent_runtime::McpServerState as St;
+        let users = [crate::mcp::UserMcpServer {
+            name: "jira".into(),
+            command: "node".into(),
+            args: vec![],
+            env: Default::default(),
+        }];
+        let s = pi_too_old(Some(&users));
+        assert_eq!(
+            s.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["otto", "jira"]
+        );
+        assert!(
+            s.iter()
+                .all(|s| s.state == St::Unsupported
+                    && s.reason.as_deref().unwrap().contains("pi 1.x"))
+        );
+    }
+    use otto_core::agent_runtime::{McpServerSource as Src, McpServerState as St};
+
+    #[test]
+    fn a_thread_lists_what_it_was_given_and_what_it_was_not_with_why() {
+        let skipped = [
+            serde_json::json!({"server": "probe", "reason": "its command “probe” isn’t on the daemon’s PATH"}),
+        ];
+        let s = spawn_mcp_status(
+            "gemini",
+            true,
+            &["otto".into(), "jira".into()],
+            &skipped,
+            None,
+        );
+        let view: Vec<_> = s
+            .iter()
+            .map(|s| (s.name.as_str(), s.source, s.state))
+            .collect();
+        assert_eq!(
+            view,
+            vec![
+                ("otto", Src::Otto, St::Added),
+                ("jira", Src::Workspace, St::Added),
+                ("probe", Src::Workspace, St::Unsupported),
+            ]
+        );
+        assert_eq!(
+            s[2].reason.as_deref(),
+            Some("Gemini can’t take it: its command “probe” isn’t on the daemon’s PATH")
+        );
+        // Otto's tools off for the workspace, and a failed lookup, are said too.
+        let s = spawn_mcp_status("codex", false, &[], &[], Some("db locked"));
+        assert_eq!(s[0].state, St::Disabled);
+        assert_eq!(s[1].state, St::Failed);
+        assert!(s[1].reason.as_deref().unwrap().contains("db locked"));
     }
 }

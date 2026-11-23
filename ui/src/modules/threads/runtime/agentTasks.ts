@@ -540,13 +540,15 @@ export function agentTasks(
   };
 }
 
-/** The strip's words: the one task named, several counted (the list is a tap away). */
+/** The strip's words for background work that is not a subagent (commands,
+ *  timers — subagents are on the waiting line): the one task named, several
+ *  counted (the list is a tap away). */
 export function backgroundStripText(tasks: readonly AgentTask[]): string {
   if (tasks.length === 1) {
     const step = tasks[0].stepSummary ? ` (${tasks[0].stepSummary})` : '';
-    return `Running in the background: ${tasks[0].label}${step}`;
+    return `Background task: ${tasks[0].label}${step}`;
   }
-  return `${tasks.length} running in the background`;
+  return `${tasks.length} background tasks`;
 }
 
 /** "12s", "4m 5s", "1h 2m" from a start to an end (or `nowMs`); null without a start. */
