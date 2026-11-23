@@ -3961,6 +3961,38 @@ mod tests {
             .any(|e| matches!(e, DriverEvent::Request { .. })));
     }
 
+    /// Security 5: a held write shows its content, a held command its cwd
+    /// and the env names the agent adds — bounded.
+    #[test]
+    fn a_held_write_or_command_shows_what_it_does() {
+        let mut d = AcpDriver::grok();
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"g"}}"#);
+        d.state.access = RuntimeAccessMode::ApprovalRequired;
+        let prompt_of = |s: &DriverStep| {
+            s.events
+                .iter()
+                .find_map(|e| match e {
+                    DriverEvent::Request { prompt, .. } => prompt.clone(),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let big = "secret-line\n".repeat(1000);
+        let w = json!({"jsonrpc":"2.0","id":"w1","method":"fs/write_text_file","params":{"sessionId":"g","path":"/w/run.sh","content":big}});
+        let p = prompt_of(&d.on_line(&w.to_string()));
+        assert!(p.starts_with("Write /w/run.sh\nsecret-line"), "{p}");
+        assert!(
+            p.contains("more bytes") && p.len() < 4300,
+            "bounded: {}",
+            p.len()
+        );
+        let c = r#"{"jsonrpc":"2.0","id":"c1","method":"terminal/create","params":{"sessionId":"g","command":"make deploy","cwd":"/etc","env":[{"name":"AWS_PROFILE","value":"prod"}]}}"#;
+        let p = prompt_of(&d.on_line(c));
+        assert_eq!(p, "make deploy\nin /etc\nenv: AWS_PROFILE");
+    }
+
     /// Security 6: a chatty command's row keeps only the tail.
     #[test]
     fn a_client_terminals_row_keeps_a_bounded_tail() {

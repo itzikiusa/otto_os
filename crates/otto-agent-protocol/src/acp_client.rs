@@ -54,6 +54,20 @@ const NOT_SUPPORTED: i64 = -32601;
 /// Output kept per client terminal for a tool row that embeds it late.
 const TERMINAL_KEEP: usize = 256 << 10;
 
+/// What a held write / command shows the person: up to 4 KB of it, and
+/// how much more there is.
+fn preview(text: &str) -> String {
+    const MAX: usize = 4096;
+    if text.len() <= MAX {
+        return text.to_string();
+    }
+    let mut end = MAX;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n… {} more bytes", &text[..end], text.len() - end)
+}
+
 /// Keep the last [`TERMINAL_KEEP`] bytes of `s` (on a char boundary).
 fn tail_cap(s: &mut String) {
     if s.len() > TERMINAL_KEEP {
@@ -156,12 +170,17 @@ impl AcpDriver {
                     content,
                 };
                 if supervised {
+                    let preview = match &op {
+                        ClientOpRepr::Write { content, .. } => preview(content),
+                        ClientOpRepr::Create { .. } => String::new(),
+                    };
                     self.hold(
                         step,
                         rpc_id,
                         op,
                         RequestKind::FileChange,
                         format!("Write {path}"),
+                        format!("Write {path}\n{preview}"),
                     );
                 } else {
                     self.run_held(step, rpc_id, op);
@@ -228,7 +247,24 @@ impl AcpDriver {
                 // Auto-accept edits covers edits only: a command asks unless
                 // the thread is on Full access.
                 if self.state.access != RuntimeAccessMode::FullAccess {
-                    self.hold(step, rpc_id, op, RequestKind::Command, line);
+                    let detail = match &op {
+                        ClientOpRepr::Create { cwd, .. } => {
+                            let extra: Vec<&str> = params
+                                .get("env")
+                                .and_then(Value::as_array)
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|e| e.get("name")?.as_str())
+                                .collect();
+                            let mut d = format!("{}\nin {cwd}", preview(&line));
+                            if !extra.is_empty() {
+                                d.push_str(&format!("\nenv: {}", extra.join(", ")));
+                            }
+                            d
+                        }
+                        ClientOpRepr::Write { .. } => line.clone(),
+                    };
+                    self.hold(step, rpc_id, op, RequestKind::Command, line, detail);
                 } else {
                     self.run_held(step, rpc_id, op);
                 }
@@ -268,6 +304,7 @@ impl AcpDriver {
         op: ClientOpRepr,
         kind: RequestKind,
         title: String,
+        prompt: String,
     ) {
         self.ensure_autonomous_turn(step);
         self.close_segment(step);
@@ -279,8 +316,8 @@ impl AcpDriver {
         step.push(DriverEvent::Request {
             id: request_id,
             kind,
-            title: Some(title.clone()),
-            prompt: Some(title),
+            title: Some(title),
+            prompt: Some(prompt),
             reason: None,
             options: vec![
                 ApprovalOption {
