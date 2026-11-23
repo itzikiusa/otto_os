@@ -11,7 +11,7 @@
   import { auth } from '../../../lib/stores/auth.svelte';
   import { limits } from '../../../lib/stores/usageLimits.svelte';
   import { toastError } from '../../../lib/toastError';
-  import { switchTargets } from './providerSwitch';
+  import { armSwitch, switchTargets } from './providerSwitch';
   import { runtimeThreads } from './runtimeThreads.svelte';
   import { resetClock, resetFromLimits, resetFromText } from './usageLimit';
 
@@ -33,7 +33,7 @@
   const armedRaw = $derived((runtimeThreads.get(sessionId)?.meta as Record<string, unknown> | null | undefined)?.resume_at);
   const armed = $derived(typeof armedRaw === 'string' && Date.parse(armedRaw) > 0 ? Date.parse(armedRaw) : null);
   const other = $derived(
-    switchTargets(provider, orderThreadHarnesses(agentProviders()), (p) => isRuntimeProvider(p, auth.meta) && providerReadiness(p).available)[0] ?? null,
+    switchTargets(provider, orderThreadHarnesses(agentProviders()), (p) => isRuntimeProvider(p, auth.meta) && providerReadiness(p).available)[1] ?? null, // [0] is its own
   );
   const name = $derived(harnessLabel(provider));
   const line = $derived(
@@ -64,7 +64,7 @@
       <button type="button" class="btn small" disabled={busy} data-testid="runtime-resume-at-reset" onclick={() => void setResume(reset)}>Resume at reset</button>
     {/if}
     {#if other}
-      <button type="button" class="btn small ghost" data-testid="runtime-limit-switch" onclick={() => { draft.provider = other; draft.model = null; draft.effort = null; onfocus(); }}>Continue with {harnessLabel(other)}</button>
+      <button type="button" class="btn small ghost" data-testid="runtime-limit-switch" onclick={() => { armSwitch(draft, provider, other); onfocus(); }}>Continue with {harnessLabel(other)}</button>
     {/if}
   {/if}
 </div>

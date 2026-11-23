@@ -3,7 +3,7 @@
 // scripts. Every action routes through an existing Otto store/endpoint — the
 // git store's checkout, `GET /repos/{id}/worktrees`, the Git page, the
 // inspector — so nothing here owns git state.
-import { api } from '../../lib/api/client';
+import { api, postNdjsonStream } from '../../lib/api/client';
 import { gitApi } from '../../lib/api/git';
 import type { Repo, WorktreeCreateReq, WorktreeCreated, WorktreeInfo, WorktreeSetupResult, WorktreeSetupSetting } from '../../lib/api/types';
 import { copyWithToast } from '../../lib/clipboard';
@@ -165,9 +165,19 @@ export function createWorktree(repo: Repo, branch: string, base: string | null):
   return api.post<WorktreeCreated>(`/repos/${encodeURIComponent(repo.id)}/worktrees`, { branch, ...(base ? { base } : {}) } satisfies WorktreeCreateReq);
 }
 
-/** Run the repo's setup command in its new worktree at `path` (on the daemon). */
-export function runWorktreeSetup(repo: Repo, path: string): Promise<WorktreeSetupResult> {
-  return api.post<WorktreeSetupResult>(`/repos/${encodeURIComponent(repo.id)}/worktrees/setup`, { path });
+/** Run the repo's setup command in its new worktree at `path` (on the
+ *  daemon); `online` hears its latest output line while it runs (streamed). */
+export async function runWorktreeSetup(repo: Repo, path: string, online: (line: string) => void): Promise<WorktreeSetupResult> {
+  let result: WorktreeSetupResult | null = null;
+  let error: string | null = null;
+  await postNdjsonStream(`/repos/${encodeURIComponent(repo.id)}/worktrees/setup`, { path }, (o) => {
+    const m = o as { line?: string; result?: WorktreeSetupResult; error?: string };
+    if (typeof m.line === 'string') online(m.line);
+    if (m.result) result = m.result;
+    if (m.error) error = m.error;
+  });
+  if (!result) throw new Error(error ?? 'The setup stopped without a result');
+  return result;
 }
 
 /** Set (`command`) or clear (null) the command every new worktree of `repo`

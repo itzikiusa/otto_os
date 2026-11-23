@@ -6,11 +6,14 @@ use std::time::{Duration, Instant};
 
 use otto_core::agent_runtime::{
     CreateRuntimeSessionReq, OpenPeerReq, PeerInfo, PeerReply, ProviderTurn, RuntimePromptReq,
-    RuntimePromptResp, RuntimeProvider, RuntimeSession, RuntimeSessionStatus, TurnItemKind,
+    RuntimePromptResp, RuntimeProvider, RuntimeSession, RuntimeSessionStatus, SubagentTarget,
+    TurnItemKind,
 };
 use otto_core::{Error, Id, Result};
 
-use super::{children, inherit_embedded_origin, is_busy, AgentRuntime, MAX_LINKED_OPEN};
+use super::{
+    children, delegation, inherit_embedded_origin, is_busy, AgentRuntime, MAX_LINKED_OPEN,
+};
 
 impl AgentRuntime {
     /// Resolve a custom provider slug (e.g. `"claudework"`) via the host's
@@ -227,6 +230,7 @@ impl AgentRuntime {
             }
         }
         inherit_embedded_origin(&c, &mut meta);
+        children::inherit_tools(&c, provider, &mut meta);
         let created = match self
             .create_linked(
                 &c.created_by,
@@ -255,7 +259,7 @@ impl AgentRuntime {
         let effort = req.effort.filter(|e| !e.trim().is_empty());
         if let Some(p) = req.prompt.filter(|p| !p.trim().is_empty()) {
             let text = if framed {
-                format!("{}\n\n{p}", Self::peer_header(&c, "Opened by"))
+                format!("{}\n\n{p}", delegation::task_header(&c))
             } else {
                 p
             };
@@ -277,6 +281,12 @@ impl AgentRuntime {
             }
         }
         self.get(&created.id).await
+    }
+
+    /// The providers, models and efforts `caller`'s agent may delegate to.
+    pub async fn subagent_targets(&self, caller: &Id) -> Result<Vec<SubagentTarget>> {
+        self.get(caller).await?;
+        Ok(self.inner.host.subagent_targets().await)
     }
 
     /// Every thread in `caller`'s linked group.
@@ -321,7 +331,19 @@ impl AgentRuntime {
         } else {
             self.admit_agent_prompt(&c).await?;
         }
-        let framed = format!("{}\n\n{text}", Self::peer_header(&c, "Message from"));
+        // Its own subagent's reply comes back on its own: no need to answer.
+        let header = if p.child_of().is_some_and(|of| of.id == c.id) {
+            format!(
+                "[Message from thread \"{}\" ({}, id {}). Your reply goes back to it on its own \
+                 when your turn ends.]",
+                c.title,
+                c.provider_slug(),
+                c.id
+            )
+        } else {
+            Self::peer_header(&c, "Message from")
+        };
+        let framed = format!("{header}\n\n{text}");
         let sent = self.prompt(&p.id, &framed).await;
         if sent.is_err() && !by_person {
             self.refund_agent_prompt(&c);

@@ -229,3 +229,15 @@ test('the waiting store: reads the old id-array shape, keeps titles, syncs to th
   assert.equal(ra.runtimeFlagged({}), 0);
   assert.equal(JSON.parse(store.get('otto_runtime_waiting')!).length, 0);
 });
+
+test('a Limited thread (failed on the usage limit) rolls up and ranks exactly like Failed', async () => {
+  const { sessionState } = await import('../src/lib/status.ts');
+  const { rollup, rollupNote, mostUrgent } = await import('../src/modules/threads/threadAttention.ts');
+  const limited = sessionState({ kind: 'agent', status: 'idle', meta: { last_turn_status: 'failed', last_error_class: 'usage_limit' } } as never, 'idle');
+  assert.equal(limited.label, 'Limited');
+  assert.equal(limited.key, 'failed');
+  const idle = { key: 'idle', label: 'Idle' };
+  assert.deepEqual(rollup([limited, idle]), { needs: 0, working: 0, failed: 1, total: 2 });
+  assert.equal(rollupNote(rollup([limited]))?.text, '1 failed');
+  assert.equal(mostUrgent([idle, limited]), limited);
+});

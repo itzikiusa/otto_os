@@ -36,11 +36,11 @@
   import RuntimeAskAgent from './RuntimeAskAgent.svelte';
   import { attentionItems, attentionPillText } from './attentionDock';
   import RuntimeAttentionDock from './RuntimeAttentionDock.svelte';
+  import RuntimeChildApprovals from './RuntimeChildApprovals.svelte';
+  import { mcpAsks, RuntimeMcpChanged } from './mcpAsks.svelte';
   import RuntimeComposerActions from './RuntimeComposerActions.svelte';
   import RuntimeComposerPlus from './RuntimeComposerPlus.svelte';
   import RuntimeMinimap from './RuntimeMinimap.svelte';
-  import RuntimeContextMeter from './RuntimeContextMeter.svelte';
-  import RuntimeUsageLimit from './RuntimeUsageLimit.svelte';
   import { threadAccessDefault } from '../threadAccessDefault.svelte';
   import { isAltSend, midTurnDelivery, primaryAction } from './composerSend';
   import { threadPrefs } from './threadPrefs.svelte';
@@ -141,7 +141,7 @@
   const visibleRows = $derived(renderWindow(rows, rowCap, holdFrom, timelineRowKey));
   let prevMsgIds: string[] = [];
   const messageIds = $derived.by(() => (prevMsgIds = collectMessageIds(rows, prevMsgIds)));
-  const approvals = $derived(new Map((p ? pendingApprovals(p) : []).map((a) => [a.requestId, a] as const)));
+  const approvals = $derived(new Map([...(p ? pendingApprovals(p) : []), ...mcpAsks.rows(sessionId)].map((a) => [a.requestId, a] as const)));
   const turn = $derived(p ? latestTurn(p) : null);
   const closed = $derived(session?.status === 'closed');
   const dormant = $derived(session?.status === 'dormant');
@@ -162,7 +162,7 @@
   const secretAsk = $derived(session && !auth.isImpersonating && session.created_by === auth.me?.id ? (secretRequests.bySession[sessionId] ?? null) : null);
   $effect(() => void secretRequests.load());
   // What the agent waits on the person for: answered in the attention dock.
-  const attention = $derived(attentionItems(p?.requests ?? [], secretAsk));
+  const attention = $derived(attentionItems(p?.requests ?? [], secretAsk, mcpAsks.pending(sessionId)));
 
   let scroller = $state<HTMLDivElement | null>(null);
   let streamEl = $state<HTMLDivElement | null>(null);
@@ -389,7 +389,7 @@
   }
 
   const respond = (requestId: string, decision: ApprovalDecision): Promise<void> =>
-    runtimeThreads.respond(ownerId, requestId, decision).catch((e: unknown) => void toastError('Couldn’t answer the approval', e));
+    mcpAsks.respond(requestId, decision, () => runtimeThreads.respond(ownerId, requestId, decision)).catch((e: unknown) => void toastError('Couldn’t answer the approval', e));
 
   let askEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
   let emojiEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
@@ -489,6 +489,7 @@
             {workingFor}
             {ownTurn}
             background={closed ? [] : background}
+            {sessionId}
             {outcome}
             {failure}
             {agentName}
@@ -513,7 +514,7 @@
   <RuntimeStreamTools root={streamEl} {rows} bind:rowCap bind:text={draft.text} composer={composerEl} />
 
   <div class="rt-dock">
-    <RuntimeBannerStack blocks={banners}>
+    <RuntimeBannerStack blocks={banners} limit={failure?.cause === 'usage_limit' ? { sessionId, provider, detail: failure.detail, draft, onfocus: focusComposer } : null}>
       {#snippet block(key: string)}
         {#if key === 'error' && sessionError}
           <p class="rt-banner" dir="auto" use:announceShown={{ text: sessionError, assertive: true }}><Icon name="warning" size={13} />{sessionError}</p>
@@ -543,7 +544,6 @@
             <span>{armedSwitchLine(draft.provider)}</span>
             <button type="button" class="btn small ghost" onclick={() => { draft.provider = null; draft.model = undefined; draft.effort = null; focusComposer(); }}>Cancel</button>
           </div>
-        {:else if key === 'limit' && failure}<RuntimeUsageLimit {sessionId} {provider} detail={failure.detail} {draft} onfocus={focusComposer} />
         {:else if key === 'fresh'}
           <div class="rt-fresh" data-testid="runtime-fresh-notice" use:announceShown={'Next message starts fresh'}>
             <span>Next message starts fresh</span>
@@ -567,6 +567,7 @@
         onjump={jumpTo}
       />
     {/if}
+    <RuntimeChildApprovals {sessionId} />{#if p && session && !closed}<RuntimeMcpChanged {sessionId} workspaceId={session?.workspace_id} servers={p?.mcpServers ?? []} idle={!running} />{/if}
     {#if composerTopSlot}{@render composerTopSlot({ focusComposer })}{/if}
 
     <div class="rt-composer" style:border-color={planOn ? 'color-mix(in srgb, var(--warning) 42%, var(--border))' : undefined} bind:this={composerBoxEl}>
@@ -638,8 +639,7 @@
         {/if}
         <span class="rt-grow"></span>
         {#if !agentChat}
-          <RuntimeContextMeter usage={p?.thread?.context_usage} compact={p?.commands.some((c) => c.name === 'compact') ? 'compact' : null} oncompact={(c) => { draft.text = `/${c}`; focusComposer(); }} />
-          <RuntimeModelControl {provider} {session} {draft} efforts={caps.efforts ?? []} disabled={closed || !session} testId={testIds?.model ?? 'runtime-model'} />
+          <RuntimeModelControl {provider} {session} {draft} efforts={caps.efforts ?? []} disabled={closed || !session} testId={testIds?.model ?? 'runtime-model'} oncompact={(c) => { draft.text = `/${c}`; focusComposer(); }} />
         {/if}
         <RuntimeComposerActions
           action={primaryAction({ running, canSend: canSendOrQueue, pref: threadPrefs.midTurn, canSteer: !!caps.steer })}

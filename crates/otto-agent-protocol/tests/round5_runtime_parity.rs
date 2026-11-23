@@ -226,6 +226,7 @@ async fn claudework_custom_provider_create_children_council_and_agent_session_pa
         .ask_children(
             &s.id,
             AskChildReq {
+                to_me_only: true,
                 prompt: "Check auth".into(),
                 targets: vec![AskChildTarget {
                     provider: RuntimeProvider::Claude,
@@ -321,6 +322,7 @@ async fn claudework_custom_provider_create_children_council_and_agent_session_pa
         .ask_children(
             &s.id,
             AskChildReq {
+                to_me_only: true,
                 prompt: "Should fail".into(),
                 targets: vec![AskChildTarget {
                     provider: RuntimeProvider::Grok,

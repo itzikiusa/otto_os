@@ -339,6 +339,9 @@ pub enum ApprovalDecision {
     AcceptForSession,
     AcceptAlways,
     Decline,
+    /// Reject and remember it (ACP `reject_always`); a provider with no
+    /// such grant treats it as `Decline`.
+    DeclineAlways,
     Cancel,
 }
 
@@ -842,6 +845,9 @@ pub enum RuntimeEventBody {
     /// The agent's own slash commands, whole (replaces the last list).
     #[serde(rename = "commands.updated")]
     CommandsUpdated { commands: Vec<ProviderCommand> },
+    /// The MCP servers the thread's agent has, whole (replaces the last list).
+    #[serde(rename = "mcp_servers.updated")]
+    McpServersUpdated { mcp_servers: Vec<McpServerStatus> },
     /// Live command output (never persisted; the item's `output` holds the total).
     #[serde(rename = "command_output.delta")]
     CommandOutputDelta { item_id: Id, chunk: String },
@@ -867,6 +873,7 @@ impl RuntimeEventBody {
             Self::PlanUpdated { .. } => "plan.updated",
             Self::QueueUpdated { .. } => "queue.updated",
             Self::CommandsUpdated { .. } => "commands.updated",
+            Self::McpServersUpdated { .. } => "mcp_servers.updated",
             Self::CommandOutputDelta { .. } => "command_output.delta",
             Self::TurnTerminal { .. } => "turn.terminal",
         }
@@ -904,6 +911,9 @@ pub struct RuntimeSnapshot {
     /// The agent's own slash commands (`commands.updated`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<ProviderCommand>,
+    /// The MCP servers its agent has (`mcp_servers.updated`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<McpServerStatus>,
     /// Set when `tail_turns` / `before_turn_ordinal` omitted earlier turns.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub has_older: bool,
@@ -968,6 +978,63 @@ pub struct ProviderCommand {
     /// What to type after it (ACP `input.hint`), when it takes input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+}
+
+/// One MCP server a thread's agent has — Otto's own tools, a control-plane
+/// server Otto handed the CLI, or one from the CLI's own config — and whether
+/// the agent can use it (`mcp_servers.updated`). Set at spawn from what Otto
+/// gave the agent (and skipped, with why), then refined by what the CLI
+/// reports (Claude's `system init`, Codex's `mcpServer/startupStatus`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerStatus {
+    pub name: String,
+    pub source: McpServerSource,
+    pub state: McpServerState,
+    /// Why it is not connected, in words (absent when it is).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpServerSource {
+    /// Otto's own tool server (`otto`, `otto-browser`).
+    Otto,
+    /// A control-plane server Otto handed the agent.
+    Workspace,
+    /// From the CLI's own config (Otto did not add it).
+    Cli,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpServerState {
+    Connected,
+    /// The CLI is still starting it.
+    Starting,
+    /// Given to the agent; the CLI does not report whether it connected.
+    Added,
+    NeedsAuth,
+    Failed,
+    Disabled,
+    /// The provider (or this mode) cannot take it.
+    Unsupported,
+}
+
+impl McpServerStatus {
+    pub fn new(name: impl Into<String>, source: McpServerSource, state: McpServerState) -> Self {
+        Self {
+            name: name.into(),
+            source,
+            state,
+            reason: None,
+        }
+    }
+
+    pub fn because(mut self, reason: impl Into<String>) -> Self {
+        self.reason = Some(reason.into());
+        self
+    }
 }
 
 impl ProviderCommand {
@@ -1573,6 +1640,41 @@ pub struct PeerInfo {
     pub is_self: bool,
 }
 
+/// `POST /runtime-sessions/{id}/stop-family` — what one Stop for a thread and
+/// its subagents did.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FamilyStopReq {
+    /// Also stop the thread's own background work (the waiting line's Stop).
+    #[serde(default)]
+    pub background: bool,
+}
+
+/// The answer to [`FamilyStopReq`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FamilyStopResp {
+    /// Open subagents in the family (the thread itself not counted).
+    pub subagents: u32,
+    /// Turns that were running and got stopped.
+    pub turns: u32,
+    /// Background tasks asked to stop.
+    pub tasks: u32,
+}
+
+/// `GET /runtime-sessions/{id}/subagent-targets` — a provider a thread's agent
+/// may delegate to (`otto.thread_capabilities`): enabled here, driven over a
+/// structured protocol.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubagentTarget {
+    /// `otto.thread_open`'s `provider` (a built-in or custom slug).
+    pub provider: String,
+    /// Model ids its CLI lists (at most 12); empty = its default only.
+    #[serde(default)]
+    pub models: Vec<String>,
+    /// Effort levels a turn may ask for; empty = none.
+    #[serde(default)]
+    pub efforts: Vec<String>,
+}
+
 /// `GET /runtime-sessions/{id}/peers/{peer}/reply` — the peer's latest
 /// assistant text (its last turn), after an optional wait for it to settle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1700,6 +1802,10 @@ pub struct AskChildReq {
     pub access_mode: Option<RuntimeAccessMode>,
     #[serde(default)]
     pub images: Vec<PromptImage>,
+    /// The answer goes back to the thread's agent (default), like a subagent
+    /// the agent opened; `true` = "answer to me only" (it stays with the person).
+    #[serde(default)]
+    pub to_me_only: bool,
 }
 
 /// The children `POST /runtime-sessions/{id}/children` opened, in target order.

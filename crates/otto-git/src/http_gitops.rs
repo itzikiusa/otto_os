@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{optional_token, remote_shares_origin_host, repo_ctx, repo_lock, ApiResult, GitCtx};
 use crate::gitops::err_text;
-use crate::worktree_ready::{run_setup, Prepared, SetupResult, SETUP_KEY};
+use crate::worktree_ready::{run_setup, Prepared, SETUP_KEY};
 
 #[derive(Deserialize)]
 pub(super) struct WorktreeRemoveReq {
@@ -124,12 +124,15 @@ pub(super) struct WorktreeSetupReq {
 
 /// `POST /repos/{id}/worktrees/setup` — run the repo's setup command in one
 /// of its worktrees (a person's request only: it runs a shell command).
+/// Streams NDJSON: `{"line": …}` with its latest output line while it runs
+/// (at most every second), then `{"result": SetupResult}` (or `{"error": …}`).
+/// It runs to its end even when the caller goes away.
 pub(super) async fn repo_worktree_setup<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
     Json(req): Json<WorktreeSetupReq>,
-) -> ApiResult<Json<SetupResult>> {
+) -> ApiResult<axum::response::Response> {
     if !otto_core::auth::request_is_person() {
         return Err(Error::Forbidden("only a person can run a worktree's setup".into()).into());
     }
@@ -144,7 +147,35 @@ pub(super) async fn repo_worktree_setup<S: GitCtx>(
     let (name, command) = setup_of(&s, &main_checkout(&git).await)
         .await
         .ok_or_else(|| Error::NotFound("worktree setup".into()))?;
-    Ok(Json(run_setup(&name, &command, &want).await?))
+    let (tx, lines) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (done_tx, done) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let _ = done_tx.send(run_setup(&name, &command, &want, Some(tx)).await);
+    });
+    let ndjson = |v: serde_json::Value| axum::body::Bytes::from(format!("{v}\n"));
+    // Every progress line, then (once the sender is gone) the result.
+    let body =
+        futures_util::stream::unfold((lines, Some(done)), move |(mut lines, done)| async move {
+            if let Some(l) = lines.recv().await {
+                return Some((
+                    Ok::<_, std::convert::Infallible>(ndjson(serde_json::json!({ "line": l }))),
+                    (lines, done),
+                ));
+            }
+            let last = match done?.await {
+                Ok(Ok(r)) => serde_json::json!({ "result": r }),
+                Ok(Err(e)) => serde_json::json!({ "error": e.to_string() }),
+                Err(_) => serde_json::json!({ "error": "the setup stopped unexpectedly" }),
+            };
+            Some((Ok(ndjson(last)), (lines, None)))
+        });
+    Ok(axum::response::Response::builder()
+        .header(
+            axum::http::header::CONTENT_TYPE,
+            "application/x-ndjson; charset=utf-8",
+        )
+        .body(axum::body::Body::from_stream(body))
+        .map_err(|e| Error::Internal(e.to_string()))?)
 }
 
 #[derive(Deserialize)]

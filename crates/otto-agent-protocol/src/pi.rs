@@ -45,10 +45,10 @@
 use std::collections::HashMap;
 
 use otto_core::agent_runtime::{
-    ApprovalDecision, BackgroundTask, ProviderCommand, ProviderFailure, QuestionKind,
-    QuestionOption, RequestKind, RuntimeAccessMode, RuntimePromptReq, RuntimeProvider,
-    RuntimeQuestion, ThreadTokenUsage, TurnItemKind, TurnItemStatus, TurnTerminalStatus,
-    TurnTokenUsage,
+    ApprovalDecision, BackgroundTask, McpServerStatus, ProviderCommand, ProviderFailure,
+    QuestionKind, QuestionOption, RequestKind, RuntimeAccessMode, RuntimePromptReq,
+    RuntimeProvider, RuntimeQuestion, ThreadTokenUsage, TurnItemKind, TurnItemStatus,
+    TurnTerminalStatus, TurnTokenUsage,
 };
 use serde_json::{json, Value};
 
@@ -1419,6 +1419,22 @@ impl StructuredDriver for PiDriver {
     /// `get_state` reports the session id (the resume key) and the model.
     fn start(&mut self, ctx: &LaunchContext) -> DriverStep {
         let mut step = DriverStep::default();
+        // The thread's server list says which servers this mode left out.
+        if !self.user_mcp.is_empty() {
+            use otto_core::agent_runtime::{McpServerSource as Src, McpServerState as St};
+            let why = "pi runs every tool without asking, so this access mode leaves your servers out (Full access keeps them)";
+            step.push(DriverEvent::McpServers {
+                servers: self
+                    .user_mcp
+                    .iter()
+                    .map(|n| {
+                        McpServerStatus::new(n.clone(), Src::Workspace, St::Unsupported)
+                            .because(why)
+                    })
+                    .collect(),
+                spawn: false,
+            });
+        }
         if ctx.resume.is_none() {
             self.tools.clear();
             self.subagent_order.clear();

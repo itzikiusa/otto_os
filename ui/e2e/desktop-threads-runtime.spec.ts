@@ -277,7 +277,9 @@ test('a Claude thread: background work, its own turn, a subagent card, reopen an
   await expect(card).toContainText('PR sweep', { timeout: 15_000 });
   await expect(thread.getByText("I'm waiting for the PR sweep to come back.")).toBeVisible();
   await expect(card).toHaveAttribute('data-status', 'running');
-  await expect(card).toContainText('Background');
+  // A subagent like any other: "Working", never "Background".
+  await expect(card).toContainText('Working');
+  await expect(card).not.toContainText('Background');
   await card.getByRole('button', { name: /PR sweep/ }).click();
   await expect(card).toContainText('Looking at PRs');
   await expectNoHorizontalOverflow(page);

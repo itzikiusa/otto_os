@@ -170,7 +170,7 @@
       const ps = pendingSetup!;
       if (ps.name && !ps.skip) {
         wtProgress = `Setting up: ${ps.name}…`;
-        const r = await runWorktreeSetup(wt.repo, ps.path);
+        const r = await runWorktreeSetup(wt.repo, ps.path, (line) => (wtProgress = `Setting up: ${ps.name} · ${line}`));
         if (!r.ok) throw new Error(setupFailure(r));
       }
       pendingSetup = null;
@@ -363,7 +363,7 @@
           <p class="nt-note" data-testid="new-thread-access-caution">{caution}</p>
         {/if}
         {#if wtProgress}
-          <p class="nt-note nt-progress" use:announceShown={wtProgress} data-testid="new-thread-worktree-progress"><span class="spinner" aria-hidden="true"></span>{wtProgress}</p>
+          <p class="nt-note nt-progress" use:announceShown={wtProgress.split(' · ')[0]} data-testid="new-thread-worktree-progress"><span class="spinner" aria-hidden="true"></span><span class="ellipsis" dir="auto" title={wtProgress}>{wtProgress}</span></p>
         {:else if wtError}
           <div data-testid="new-thread-worktree-failed">
             <LoadState what="the worktree" errorTitle={pendingSetup ? 'The worktree’s setup failed — your message is still here' : 'Couldn’t create the worktree — your message is still here'} variant="compact" error={wtError} empty onretry={() => void composer?.retry()} />
@@ -447,6 +447,7 @@
     display: flex;
     align-items: center;
     gap: var(--sp-3);
+    min-inline-size: 0;
   }
   .nt-link {
     padding: 0;

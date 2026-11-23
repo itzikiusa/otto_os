@@ -80,6 +80,18 @@ export interface ProviderCommand {
   hint?: string;
 }
 
+/** One MCP server a thread's agent has (`mcp_servers.updated`): Otto's own
+ *  tools, a control-plane server Otto handed it, or one from the CLI's own
+ *  config — set at spawn, refined by what the CLI reports. */
+export interface McpServerStatus {
+  name: string;
+  source: 'otto' | 'workspace' | 'cli';
+  /** `added`: given to the agent; the CLI reports no connection status. */
+  state: 'connected' | 'starting' | 'added' | 'needs_auth' | 'failed' | 'disabled' | 'unsupported';
+  /** Why it is not connected, in words. */
+  reason?: string;
+}
+
 /** `GET /runtime-sessions/{id}/tasks/{task_id}/output` — a Claude background
  *  command's output so far (the tail). */
 export interface RuntimeTaskOutput {
@@ -205,7 +217,7 @@ export interface PlanStep {
 
 export type RequestKind = 'command' | 'file_read' | 'file_change' | 'mcp_elicitation' | 'permission' | 'question';
 
-export type ApprovalDecision = 'accept' | 'accept_for_session' | 'accept_always' | 'decline' | 'cancel';
+export type ApprovalDecision = 'accept' | 'accept_for_session' | 'accept_always' | 'decline' | 'decline_always' | 'cancel';
 
 export interface ApprovalOption {
   decision: ApprovalDecision;
@@ -355,6 +367,8 @@ export type RuntimeEventBody =
   | { type: 'queue.updated'; queued_prompts: QueuedPrompt[] }
   /** The agent's own slash commands, whole. */
   | { type: 'commands.updated'; commands: ProviderCommand[] }
+  /** The MCP servers its agent has, whole. */
+  | { type: 'mcp_servers.updated'; mcp_servers: McpServerStatus[] }
   | { type: 'command_output.delta'; item_id: Id; chunk: string }
   | {
       type: 'turn.terminal';
@@ -387,6 +401,8 @@ export interface RuntimeSnapshot {
   queued_prompts?: QueuedPrompt[];
   /** The agent's own slash commands. */
   commands?: ProviderCommand[];
+  /** The MCP servers its agent has. */
+  mcp_servers?: McpServerStatus[];
   /** Set when `tail_turns` / `before_turn_ordinal` omitted earlier turns. */
   has_older?: boolean;
   /** `ordinal` of the earliest turn included in this slice, when paginated. */
@@ -569,6 +585,9 @@ export interface AskChildReq {
   title?: string;
   access_mode?: RuntimeAccessMode;
   images?: PromptImage[];
+  /** "Answer to me only": the answer stays with the person (default: it
+   *  wakes the thread's agent, and the subagent gets the conversation so far). */
+  to_me_only?: boolean;
 }
 
 export interface AskChildResp {
@@ -594,6 +613,23 @@ export interface PeerInfo {
   title: string;
   status: RuntimeSessionStatus;
   is_self: boolean;
+}
+
+/** `POST /runtime-sessions/{id}/stop-family` (body `{background}`): one Stop
+ *  for the thread and its open subagents. */
+export interface FamilyStopResp {
+  subagents: number;
+  turns: number;
+  tasks: number;
+}
+
+/** `GET /runtime-sessions/{id}/subagent-targets`: a provider the thread's
+ *  agent may delegate to (`otto.thread_capabilities`). */
+export interface SubagentTarget {
+  provider: string;
+  /** Up to 12 model ids its CLI lists; empty = its default. */
+  models: string[];
+  efforts: string[];
 }
 
 /** `GET /runtime-sessions/{id}/peers/{peer}/reply?wait_secs=`. */
@@ -670,13 +706,6 @@ export interface ThreadMetaPatch {
   thread_history?: boolean | null;
   /** RFC 3339: when the person last had the thread in front of them. */
   thread_seen_at?: string | null;
-}
-
-/** `POST /runtime-sessions/{id}/resume-at` → `RuntimeSession` (its
- *  `meta.resume_at`): arm the one "Resume at reset", or cancel it (`null`). */
-export interface ResumeAtReq {
-  /** RFC 3339, at most a week ahead; `null` cancels. */
-  at: string | null;
 }
 
 /** `text` may be empty when `images` is not. `model` / `effort` apply to this

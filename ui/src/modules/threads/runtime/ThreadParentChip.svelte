@@ -1,8 +1,7 @@
 <!--
-  "‹ <parent title>" beside a child thread's title while the thread it was
-  opened from is not on screen (a phone, or a child opened in place): one
-  click back. A council's seats 2–4 and its synthesis count as children of
-  seat 1.
+  In a subagent shown in the main view: the fixed "Subagent of <parent> ·
+  Open parent" line with its task (RuntimeSubagentOf). A council's seats
+  2–4 and its synthesis keep a plain "‹ <seat 1>" back chip.
 -->
 <script lang="ts">
   import Icon from '../../../lib/components/Icon.svelte';
@@ -10,22 +9,24 @@
   import { childOf } from './childThreads';
   import { councilOf } from './council';
   import { runtimeThreads } from './runtimeThreads.svelte';
+  import RuntimeSubagentOf from './RuntimeSubagentOf.svelte';
 
   let { threadId }: { threadId: string } = $props();
 
-  const parent = $derived.by(() => {
-    const me = runtimeThreads.get(threadId);
-    const of = childOf(me)?.id ?? (councilOf(me) ? me?.parent_id : null);
-    if (!of) return null;
-    const p = runtimeThreads.get(of);
+  const me = $derived(runtimeThreads.get(threadId));
+  const seatParent = $derived.by(() => {
+    if (childOf(me) || !councilOf(me) || !me?.parent_id) return null;
+    const p = runtimeThreads.get(me.parent_id);
     return p && !threads.paneIds.includes(p.id) ? p : null;
   });
 </script>
 
-{#if parent}
-  {@const id = parent.id}
-  <button type="button" class="tp-back" title="Back to {parent.title}" data-testid="threads-back-to-parent" onclick={() => threads.selectThread(id)}>
-    <Icon name="chevronLeft" size={12} /><span class="ellipsis" dir="auto">{parent.title}</span>
+{#if childOf(me)}
+  <RuntimeSubagentOf {threadId} />
+{:else if seatParent}
+  {@const id = seatParent.id}
+  <button type="button" class="tp-back" title="Back to {seatParent.title}" data-testid="threads-back-to-parent" onclick={() => threads.selectThread(id)}>
+    <Icon name="chevronLeft" size={12} /><span class="ellipsis" dir="auto">{seatParent.title}</span>
   </button>
 {/if}
 
@@ -57,7 +58,7 @@
   }
   @media (pointer: coarse) {
     .tp-back {
-      min-block-size: var(--hit-min);
+      min-block-size: 44px;
     }
   }
 </style>

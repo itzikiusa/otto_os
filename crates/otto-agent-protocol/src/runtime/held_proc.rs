@@ -205,7 +205,8 @@ pub(super) async fn spawn_via_holder(
 ) -> Result<()> {
     let request_ids = RequestIds::new();
     let fresh_starting = live.lock().fresh_starting;
-    let start_step = driver.start(ctx);
+    let start_step =
+        super::provider_lists::with_spawn_mcp(driver.start(ctx), inner.host.mcp_status(session));
     let spec = HolderSpawnSpec {
         command: HolderChildCommand {
             program: cmd.program.clone(),

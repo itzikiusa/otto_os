@@ -10,7 +10,9 @@
   import type { RuntimeSession } from '../../../lib/api/types';
   import type { EffortLevel } from '../../../lib/providerModels';
   import { resolveEffectiveDraftModel } from './runtimeComposer';
-  import { switchTargets } from './providerSwitch';
+  import { armSwitch, switchTargets } from './providerSwitch';
+  import RuntimeContextMeter from './RuntimeContextMeter.svelte';
+  import { runtimeViews } from './runtimeView.svelte';
   import RuntimeModelChip from './RuntimeModelChip.svelte';
 
   const ModelPicker = lazyComponent(() => import('../../../lib/components/ModelPickerPopover.svelte'));
@@ -23,8 +25,12 @@
     efforts: string[];
     disabled: boolean;
     testId: string;
+    /** The context meter's "Compact the conversation": type the agent's command. */
+    oncompact?: (command: string) => void;
   }
-  let { provider, session, draft, efforts, disabled, testId }: Props = $props();
+  let { provider, session, draft, efforts, disabled, testId, oncompact }: Props = $props();
+  // How full the context is, beside the chip (RuntimeContextMeter).
+  const view = $derived(session ? runtimeViews.projections[session.id] : null);
   let open = $state(false);
   let el = $state<HTMLButtonElement | null>(null);
   const armed = $derived(draft.provider && draft.provider !== provider ? draft.provider : null);
@@ -39,14 +45,11 @@
     return effort ? `${name} · ${formatEffortShort(effort)}` : name;
   });
   function pickProvider(p: string): void {
-    const away = p !== provider;
-    draft.provider = away ? p : null;
-    // The other provider starts on its default until a model is picked.
-    draft.model = away ? null : undefined;
-    draft.effort = null;
+    armSwitch(draft, provider, p);
   }
 </script>
 
+<RuntimeContextMeter usage={view?.thread?.context_usage} compact={view?.commands.some((c) => c.name === 'compact') ? 'compact' : null} {oncompact} />
 <RuntimeModelChip
   bind:el
   provider={shown}

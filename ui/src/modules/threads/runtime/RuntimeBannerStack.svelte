@@ -10,13 +10,17 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import { splitBanners, type BannerBlock } from './banners';
   import { keyboard } from '../../../lib/stores/keyboard.svelte';
+  import RuntimeUsageLimit from './RuntimeUsageLimit.svelte';
+  import type { ComponentProps } from 'svelte';
 
   interface Props {
     /** In priority order, highest first. */
     blocks: BannerBlock[];
     block: Snippet<[string]>;
+    /** The usage limit's line (block `limit`), rendered here. */
+    limit?: ComponentProps<typeof RuntimeUsageLimit> | null;
   }
-  let { blocks, block }: Props = $props();
+  let { blocks, block, limit = null }: Props = $props();
   let expanded = $state(false);
   // The on-screen keyboard up leaves a few lines of conversation: every
   // quiet notice folds into the one "N more" line.
@@ -31,7 +35,7 @@
 {#if blocks.length > 0}
   <div class="bs" data-testid="runtime-banners">
     {#each shown as b (b.key)}
-      <div class="bs-item" data-banner={b.key}>{@render block(b.key)}</div>
+      <div class="bs-item" data-banner={b.key}>{#if b.key === 'limit' && limit}<RuntimeUsageLimit {...limit} />{:else}{@render block(b.key)}{/if}</div>
     {/each}
     {#if split.folded.length > 0}
       <button

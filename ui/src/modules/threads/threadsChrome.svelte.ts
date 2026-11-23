@@ -4,6 +4,7 @@
 // floating project card. Per-viewer prefs in localStorage; sheets and the
 // stage view are never persisted.
 import type { ThreadsInspectorTab } from './threadsStore.svelte';
+import { threadPrefs } from './runtime/threadPrefs.svelte';
 
 const KEY = 'otto_threads_chrome_v1';
 
@@ -14,6 +15,8 @@ interface Persisted {
   terminalIds?: string[];
   terminalSplit?: boolean;
   lastProjectByWs?: Record<string, string>;
+  /** Moved to threadPrefs.subagentIn (read once, then dropped). */
+  subagentsIn?: 'panel' | 'main';
 }
 
 const SURFACES: readonly ThreadsInspectorTab[] = ['files', 'changes', 'pr', 'side', 'connections', 'browser'];
@@ -46,6 +49,8 @@ class ThreadsChrome {
   /** Folder of the last thread started per workspace (Scratch included): the
    *  new-thread stage opens there until the person picks another. */
   lastProjectByWs = $state<Record<string, string>>({});
+  /** The subagent open as the right panel's tab (not remembered). */
+  subagentId = $state<string | null>(null);
 
   constructor() {
     const p = read();
@@ -56,6 +61,17 @@ class ThreadsChrome {
     if (typeof p.terminalSplit === 'boolean') this.terminalSplit = p.terminalSplit;
     if (p.lastProjectByWs && typeof p.lastProjectByWs === 'object') this.lastProjectByWs = p.lastProjectByWs;
     this.terminalActive = this.terminalIds[0] ?? null;
+    // Where a subagent opens moved to Settings ▸ Threads (threadPrefs): carry
+    // an old pick over once, unless that pref was already set.
+    if (p.subagentsIn) {
+      try {
+        const prefs = JSON.parse(localStorage.getItem('otto_threads_prefs_v1') ?? '{}') as { subagentIn?: unknown };
+        if (prefs.subagentIn === undefined) threadPrefs.setSubagentIn(p.subagentsIn);
+      } catch {
+        /* unreadable prefs: keep the default */
+      }
+      this.save();
+    }
   }
 
   private save(): void {

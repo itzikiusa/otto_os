@@ -72,6 +72,7 @@ test('desktop: Limited, one composer line, Continue with another provider arms t
   await expect(thread.getByTestId('runtime-failed')).toHaveAttribute('data-cause', 'usage_limit');
   const sw = line.getByTestId('runtime-limit-switch');
   await expect(sw).toHaveText(/^Continue with /);
+  await expect(sw).not.toHaveText(/Codex$/); // another provider, never its own
   await sw.click();
   await expect(thread.getByTestId('runtime-switch-notice')).toContainText('Next message continues on');
   await expect(thread.getByTestId('runtime-usage-limit')).toHaveCount(0); // the switch line is the next step now

@@ -199,9 +199,11 @@ test('a new worktree gets .env and node_modules, then runs the repo’s setup be
   test.setTimeout(120_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   seedInclude();
-  await setSetup('cat .env > .setup-done');
+  await setSetup('echo installing deps; sleep 3; cat .env > .setup-done');
   try {
     await startInWorktree(page, 'Prepare the release notes');
+    // While it runs, its latest output line streams into the progress line.
+    await expect(page.getByTestId('new-thread-worktree-progress')).toContainText('installing deps', { timeout: 20_000 });
     await expect(page.locator('[data-testid^="runtime-thread-"]').first()).toBeVisible({ timeout: 30_000 });
     await expect.poll(worktrees, { timeout: 15_000 }).toContain('[feat/prepare-release-notes]');
     const wt = pathOf('feat/prepare-release-notes');

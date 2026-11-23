@@ -23,8 +23,16 @@ pub const TEXT_CALL_TIMEOUT: Duration = Duration::from_secs(65);
 pub const SUMMARIZE_CALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// How long a governed call waits for a human decision before returning
-/// `pending_approval` — below [`CALL_TIMEOUT`] so the daemon answers first.
-pub const GOVERNED_WAIT_SECS: u64 = 15;
+/// `pending_approval`. The person answers in the thread (its attention dock)
+/// and the call then runs — so long enough to read and decide, while the
+/// wait plus [`GOVERNED_RUN_BUDGET`] stays under the shortest client cap
+/// ([`SHORTEST_CLIENT_CAP`]).
+pub const GOVERNED_WAIT_SECS: u64 = 300;
+
+/// The shortest per-call MCP timeout an agent CLI applies to Otto's server
+/// without being told one: Gemini CLI's 10 min default (ACP agents get no
+/// per-server timeout field). Codex is told [`CLIENT_TOOL_TIMEOUT_SECS`].
+pub const SHORTEST_CLIENT_CAP: Duration = Duration::from_secs(600);
 
 /// What the governed proxy allows the tool's own run after the approval wait:
 /// the longest per-tool self-call budget (`api_run_automation`, 180 s) plus a
@@ -58,6 +66,10 @@ mod tests {
         }
         // PC-8: the db query budget stays at or above 20 s.
         assert!(CALL_TIMEOUT >= Duration::from_secs(20));
-        assert!(Duration::from_secs(GOVERNED_WAIT_SECS) < CALL_TIMEOUT);
+        // A thread's approval wait plus the run still ends before the
+        // shortest client gives up on the call.
+        assert!(
+            Duration::from_secs(GOVERNED_WAIT_SECS) + GOVERNED_RUN_BUDGET < SHORTEST_CLIENT_CAP
+        );
     }
 }

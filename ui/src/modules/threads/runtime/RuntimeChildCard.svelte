@@ -3,7 +3,7 @@
   SubagentTimelineLink in V2LifecycleRow.tsx, MIT, Copyright (c) 2026 T3
   Tools Inc.): provider · model · effort · status · elapsed · its latest
   activity while it works and its answer's first line once it ends, with
-  Stop, Open beside and Open. The same card for a child a person asked, one
+  Stop and Open (a tab in the right panel; ⌘-click: the main view). The same card for a child a person asked, one
   the agent opened (`otto.thread_open`), on every runtime provider. It
   follows the child's own session events (runtimeViews keeps its projection
   live while the card is mounted; no polling). Clicking the row shows the
@@ -25,10 +25,11 @@
   import { activityOf, answerOf, childOf, childState, elapsedMs, firstLine, rowTone } from './childThreads';
   import { answerHandoff } from './askAgents';
   import { stopThreadWork } from './taskStops.svelte';
-  import { openChildThread } from './childNav';
+  import { mainViewKey, openChildThread } from './childNav';
   import RuntimeAgentRow from './RuntimeAgentRow.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
   import { runtimeViews } from './runtimeView.svelte';
+  import { threadMeta } from '../threadMeta.svelte';
 
   interface Props {
     id: string;
@@ -62,8 +63,6 @@
   const sub = $derived([model, hint.effort ? formatEffortShort(hint.effort) : null].filter(Boolean).join(' · ') || null);
   const name = $derived(s?.title ?? hint.title ?? (provider ? harnessLabel(provider) : 'Thread'));
   const answer = $derived(answerOf(p));
-  /** Waiting on a person: its primary action answers it, beside this thread (a phone opens it in place). */
-  const asks = $derived(st.tone === 'needs-you' && !gone);
   const live = $derived(st.tone === 'working' || st.tone === 'starting' || st.tone === 'background' || st.tone === 'needs-you');
   /** Asked by a person: its answer is the person's to pass on (the agent path wakes the parent itself). */
   const parent = $derived(childOf(s));
@@ -115,11 +114,9 @@
     {elapsed}
     result={line}
     expanded={open}
-    ontoggle={answer ? () => (open = !open) : undefined}
+    ontoggle={answer ? () => { open = !open; if (open) threadMeta.markSeen(id); } : undefined}
     onstop={live && !gone && s?.status !== 'closed' && !stopping ? () => void stop() : undefined}
-    onbeside={gone ? undefined : () => openChildThread(id, true)}
-    onopen={gone ? undefined : asks ? () => openChildThread(id, true) : (e) => openChildThread(id, e.shiftKey)}
-    openLabel={asks ? 'Answer' : 'Open'}
+    onrow={gone ? undefined : (e) => openChildThread(id, mainViewKey(e))}
     testid="runtime-child-row-{id}"
   />
   {#if parentRow && parentRow.status !== 'closed' && answer && !live && !gone}
@@ -151,15 +148,11 @@
   .rc-hand {
     align-self: flex-start;
   }
+  /* The settled answer reads as prose under its row, not as a second box. */
   .rc-answer {
-    max-block-size: 320px;
-    overflow-y: auto;
-    padding: 8px 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface-2);
+    padding-block: 2px 10px;
+    padding-inline: 36px 8px;
     color: var(--text);
-    font-size: var(--fs-s);
     overflow-wrap: anywhere;
   }
 </style>

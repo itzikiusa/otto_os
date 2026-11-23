@@ -54,7 +54,7 @@ impl ToolOutput {
         self.text.push_str(text);
     }
 
-    fn block(&mut self, part: &Value) {
+    pub(crate) fn block(&mut self, part: &Value) {
         match part.get("type").and_then(Value::as_str) {
             Some("image") => {
                 let source = part.get("source").unwrap_or(part);
@@ -84,6 +84,47 @@ impl ToolOutput {
                 if let Some(text) = part.get("text").and_then(Value::as_str) {
                     self.line(text);
                 }
+            }
+            // MCP links and embedded resources read as what they are, never
+            // as base64: a link is its name and address, a text resource its
+            // text, an image blob an image, any other blob one line.
+            Some("resource_link") => {
+                let s = |k: &str| part.get(k).and_then(Value::as_str).unwrap_or_default();
+                let name = [s("title"), s("name"), s("uri")]
+                    .into_iter()
+                    .find(|v| !v.is_empty());
+                let mut line = format!("Link: {} — {}", name.unwrap_or_default(), s("uri"));
+                if !s("description").is_empty() {
+                    line.push_str(&format!(" ({})", s("description")));
+                }
+                self.line(&line);
+            }
+            Some("resource") => {
+                let r = part.get("resource").unwrap_or(part);
+                let s = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or_default();
+                if let Some(text) = r.get("text").and_then(Value::as_str) {
+                    self.line(text);
+                } else if s("mimeType").starts_with("image/") {
+                    self.image(s("mimeType"), s("blob"));
+                } else {
+                    let kb = s("blob").len() * 3 / 4 / 1024;
+                    self.line(&format!(
+                        "Resource: {} ({}, {kb} KB, not shown)",
+                        s("uri"),
+                        s("mimeType")
+                    ));
+                }
+            }
+            Some("audio") => {
+                let mime = part
+                    .get("mimeType")
+                    .and_then(Value::as_str)
+                    .unwrap_or("audio");
+                let kb = part
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .map_or(0, |d| d.len() * 3 / 4 / 1024);
+                self.line(&format!("Audio ({mime}, {kb} KB, not played here)"));
             }
             _ => self.line(&part.to_string()),
         }

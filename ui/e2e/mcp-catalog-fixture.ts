@@ -6,6 +6,7 @@ import { expect, type APIRequestContext } from '@playwright/test';
 const REQUIRED_TOOLS = [
   'otto.create_pr', 'otto.comment_pr', 'otto.merge_pr',
   'otto.list_repos', 'otto.list_workflows', 'otto.run_workflow',
+  'otto.broadcast_message',
 ];
 
 /** Enable fixture tools without changing token scopes or approval policy. */

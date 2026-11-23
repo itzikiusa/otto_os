@@ -11,7 +11,7 @@ import { offerUndo } from './threadUndo';
 import { threadMeta } from './threadMeta.svelte';
 
 export type ThreadsLayoutMode = 'single' | 'split' | 'grid';
-export type ThreadsInspectorTab = 'files' | 'changes' | 'pr' | 'side' | 'connections' | 'browser';
+export type ThreadsInspectorTab = 'files' | 'changes' | 'pr' | 'side' | 'connections' | 'browser' | 'subagent';
 
 export interface OpenFileTab {
   path: string;

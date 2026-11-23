@@ -14,7 +14,9 @@ export type InboxClass = 'needs' | 'failed' | 'done' | 'working' | 'rest';
 export function inboxClass(key: string | null | undefined, unread: boolean): InboxClass {
   if (key === 'needs-you') return 'needs';
   if (key === 'failed') return 'failed';
-  if (key === 'working' || key === 'running' || key === 'stale') return 'working';
+  // `running`: alive but idle — a thread whose agent is done while its
+  // background work runs (taskStop.ts `withBackgroundState`) stays calm, never "Working".
+  if (key === 'working' || key === 'stale') return 'working';
   return unread ? 'done' : 'rest';
 }
 
@@ -74,37 +76,14 @@ export function waitingWord(kinds: readonly string[]): 'Approval' | 'Question' {
 }
 
 /** The status word of a subagent row (a thread working under another one):
- *  exactly Working · Needs you · Done · Failed · Stopped. */
-export function subagentWord(key: string | null | undefined): 'Working' | 'Needs you' | 'Done' | 'Failed' | 'Stopped' {
+ *  exactly Working · Needs you · Done · Failed · Limited · Stopped (Limited:
+ *  a failure on the usage limit — `limited`, the state label lib/status.ts gives it). */
+export function subagentWord(key: string | null | undefined, opts?: { limited?: boolean }): 'Working' | 'Needs you' | 'Done' | 'Failed' | 'Limited' | 'Stopped' {
   if (key === 'needs-you') return 'Needs you';
   if (key === 'working' || key === 'running' || key === 'stale') return 'Working';
-  if (key === 'failed') return 'Failed';
+  if (key === 'failed') return opts?.limited ? 'Limited' : 'Failed';
   if (key === 'stopped') return 'Stopped';
   return 'Done';
-}
-
-/** A thread's subagents, rolled up for its row. The one place the roll-up is
- *  computed, so a daemon-side roll-up on the row can replace it. */
-export interface SubagentRollup {
-  total: number;
-  working: number;
-  needsYou: number;
-  failed: number;
-  /** The title of the first subagent that needs the person, if any. */
-  needing: string | null;
-}
-
-export function subagentRollup(subs: readonly { title: string; key: string | null | undefined }[]): SubagentRollup {
-  const r: SubagentRollup = { total: subs.length, working: 0, needsYou: 0, failed: 0, needing: null };
-  for (const s of subs) {
-    const w = subagentWord(s.key);
-    if (w === 'Needs you') {
-      r.needsYou++;
-      r.needing ??= s.title;
-    } else if (w === 'Working') r.working++;
-    else if (w === 'Failed') r.failed++;
-  }
-  return r;
 }
 
 /** Finished unread ("Done") across reloads and devices: the last turn ended

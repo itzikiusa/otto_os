@@ -26,6 +26,8 @@ pub const COPY_CAP: u64 = 100 * 1024 * 1024;
 pub const SETUP_KEY: &str = "worktree_setup";
 /// How long a setup command may run.
 pub const SETUP_TIMEOUT: Duration = Duration::from_secs(600);
+/// How often a running setup's latest output line is sent at most.
+pub const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 /// How much of a setup command's output is kept (its end).
 const OUTPUT_TAIL: usize = 4000;
 
@@ -200,39 +202,104 @@ pub struct SetupResult {
 }
 
 /// Run `command` in `cwd` through the person's login shell, bounded by
-/// [`SETUP_TIMEOUT`]; a timeout is a failure, never an error.
-pub async fn run_setup(name: &str, command: &str, cwd: &Path) -> Result<SetupResult> {
+/// [`SETUP_TIMEOUT`]; a timeout is a failure, never an error. `progress`
+/// hears its latest output line as it runs: at once, then at most every
+/// [`PROGRESS_EVERY`] (the newest line of a burst is sent when it settles).
+pub async fn run_setup(
+    name: &str,
+    command: &str,
+    cwd: &Path,
+    progress: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+) -> Result<SetupResult> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    let child = tokio::process::Command::new(shell)
+    let mut child = tokio::process::Command::new(shell)
         .arg("-lc")
         .arg(command)
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
-        .output();
-    let (ok, exit_code, raw) = match tokio::time::timeout(SETUP_TIMEOUT, child).await {
-        Ok(Ok(o)) => {
-            let mut raw = o.stdout;
-            raw.extend_from_slice(&o.stderr);
-            (o.status.success(), o.status.code(), raw)
+        .spawn()
+        .map_err(|e| Error::Internal(format!("couldn't start the setup: {e}")))?;
+    // Both pipes, line by line, into one channel (closed when both end).
+    let (tx, mut lines) = tokio::sync::mpsc::unbounded_channel::<String>();
+    fn pump(
+        r: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+        tx: tokio::sync::mpsc::UnboundedSender<String>,
+    ) {
+        tokio::spawn(async move {
+            let mut r = BufReader::new(r).lines();
+            while let Ok(Some(l)) = r.next_line().await {
+                if tx.send(l).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    pump(child.stdout.take().expect("piped"), tx.clone());
+    pump(child.stderr.take().expect("piped"), tx);
+    let mut tail = String::new();
+    let (mut pending, mut sent_at) = (None::<String>, None::<std::time::Instant>);
+    let mut tick = tokio::time::interval(PROGRESS_EVERY);
+    let deadline = tokio::time::sleep(SETUP_TIMEOUT);
+    tokio::pin!(deadline);
+    let mut timed_out = false;
+    loop {
+        tokio::select! {
+            l = lines.recv() => {
+                let Some(l) = l else { break };
+                tail.push_str(&l);
+                tail.push('\n');
+                if tail.len() > 2 * OUTPUT_TAIL {
+                    let cut = tail.len() - OUTPUT_TAIL;
+                    let cut = (cut..tail.len()).find(|i| tail.is_char_boundary(*i)).unwrap_or(0);
+                    tail.drain(..cut);
+                }
+                if !l.trim().is_empty() {
+                    pending = Some(l.trim().to_string());
+                }
+                if sent_at.is_none_or(|t| t.elapsed() >= PROGRESS_EVERY) {
+                    if let (Some(p), Some(tx)) = (pending.take(), &progress) {
+                        let _ = tx.send(p);
+                        sent_at = Some(std::time::Instant::now());
+                    }
+                }
+            }
+            _ = tick.tick() => {
+                if let (Some(p), Some(tx)) = (pending.take(), &progress) {
+                    let _ = tx.send(p);
+                    sent_at = Some(std::time::Instant::now());
+                }
+            }
+            _ = &mut deadline => {
+                timed_out = true;
+                let _ = child.kill().await;
+                break;
+            }
         }
-        Ok(Err(e)) => return Err(Error::Internal(format!("couldn't start the setup: {e}"))),
-        Err(_) => (
-            false,
-            None,
-            format!("timed out after {} min", SETUP_TIMEOUT.as_secs() / 60).into_bytes(),
-        ),
+    }
+    let status = if timed_out {
+        None
+    } else {
+        child.wait().await.ok()
     };
-    let text = String::from_utf8_lossy(&raw);
-    let start = text.len().saturating_sub(OUTPUT_TAIL);
-    let start = (start..text.len())
-        .find(|i| text.is_char_boundary(*i))
-        .unwrap_or(text.len());
+    if timed_out {
+        tail.push_str(&format!(
+            "timed out after {} min",
+            SETUP_TIMEOUT.as_secs() / 60
+        ));
+    }
+    let start = tail.len().saturating_sub(OUTPUT_TAIL);
+    let start = (start..tail.len())
+        .find(|i| tail.is_char_boundary(*i))
+        .unwrap_or(tail.len());
     Ok(SetupResult {
         name: name.to_string(),
-        ok,
-        exit_code,
-        output: text[start..].trim().to_string(),
+        ok: status.is_some_and(|s| s.success()),
+        exit_code: status.and_then(|s| s.code()),
+        output: tail[start..].trim().to_string(),
     })
 }
 
@@ -303,10 +370,18 @@ mod tests {
     #[tokio::test]
     async fn setup_reports_failure_and_output() {
         let dir = tempfile::tempdir().unwrap();
-        let ok = run_setup("hi", "echo ready", dir.path()).await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ok = run_setup("hi", "echo ready", dir.path(), Some(tx))
+            .await
+            .unwrap();
+        assert_eq!(
+            rx.recv().await.as_deref(),
+            Some("ready"),
+            "the latest line streams"
+        );
         assert!(ok.ok);
         assert!(ok.output.contains("ready"));
-        let bad = run_setup("bad", "echo nope >&2; exit 3", dir.path())
+        let bad = run_setup("bad", "echo nope >&2; exit 3", dir.path(), None)
             .await
             .unwrap();
         assert!(!bad.ok);

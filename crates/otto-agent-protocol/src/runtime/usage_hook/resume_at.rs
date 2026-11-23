@@ -50,6 +50,15 @@ impl AgentRuntime {
         Ok(s)
     }
 
+    /// Cancel an armed resume: the person stopped the thread, or sent it
+    /// something (a provider switch, a fresh start, any message). A meta
+    /// write only when one is armed.
+    pub(in crate::runtime) async fn cancel_resume(&self, id: &Id) {
+        if self.get(id).await.is_ok_and(|s| resume_at_of(&s).is_some()) {
+            let _ = self.set_resume_at(id, None).await;
+        }
+    }
+
     /// Sleep until `at`, then resume if it is still the armed time.
     fn arm_resume(&self, id: Id, at: DateTime<Utc>) {
         let rt = self.clone();
