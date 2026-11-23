@@ -514,7 +514,7 @@ pub(crate) async fn ensure_macos_virtualization_signature(bin_path: &Path) -> Re
 }
 
 /// Keep a signature only when it carries the entitlement AND verifies.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 fn keep_signature(entitled: bool, verifies: bool) -> bool {
     entitled && verifies
 }
