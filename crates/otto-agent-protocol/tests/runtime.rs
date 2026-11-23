@@ -4869,3 +4869,49 @@ async fn usage_of_a_settled_acp_turn_is_recorded_once_and_claude_turns_are_left_
     assert_eq!(usage_outbox(&usage_dir).await.len(), 1);
     usage.shutdown().await;
 }
+
+/// otto-fake-agent's `tool` and `edit <path>` (for UI e2e on ACP threads):
+/// a tool that completes with no request, and a file change with its diff.
+#[tokio::test]
+async fn fake_acp_tool_without_a_request_and_a_file_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(root, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create(&rt, root).await;
+    rt.prompt(&s.id, "tool").await.unwrap();
+    host.wait(is_terminal).await;
+    assert!(!host
+        .all()
+        .iter()
+        .any(|e| e.body.type_name() == "runtime_request.updated"));
+    assert!(host
+        .items()
+        .iter()
+        .any(|i| i.status == TurnItemStatus::Completed
+            && i.title.as_deref() == Some("Read README.md")));
+    rt.prompt(&s.id, "edit src/a.rs").await.unwrap();
+    host.wait_n(is_terminal, 2).await;
+    let edit = host
+        .items()
+        .into_iter()
+        .find_map(|i| match i.kind {
+            TurnItemKind::FileChange {
+                file_name,
+                old_str,
+                new_str,
+                diff_str,
+            } => Some((file_name, old_str, new_str, diff_str)),
+            _ => None,
+        })
+        .expect("a file change");
+    assert!(edit.0.ends_with("src/a.rs"), "{edit:?}");
+    assert!(
+        edit.3.as_deref().is_some_and(|d| d.contains("+new line"))
+            || edit.2.as_deref() == Some("new line\n"),
+        "{edit:?}"
+    );
+    assert_eq!(last_assistant_text(&host), "edited");
+    rt.close(&s.id).await.unwrap();
+}

@@ -17,6 +17,11 @@
 //! * `hang-hard`  — like `hang` but ignores `session/cancel`.
 //! * `plan`       — a `plan` update, then `end_turn`.
 //! * `fs`         — calls `fs/read_text_file` on the client and reports the error.
+//! * `tool`       — a `read` tool call that completes on its own (no
+//!   permission request), then `done`.
+//! * `edit <path>` — an `edit` tool call on `<path>` (relative to the cwd)
+//!   that completes with a `diff` content block (`old` → `new` text), as
+//!   real ACP agents report a file change, then `edited`.
 //! * `big:<n>`    — `n` one-byte message chunks.
 //! * `usage`      — a `usage_update` (context 1200 of 1048576, $0.25 so far)
 //!   and a `session_info_update` naming the session, then `end_turn`.
@@ -333,6 +338,36 @@ fn main() {
                             {"content":"read","priority":"high","status":"completed"},
                             {"content":"write","priority":"medium","status":"in_progress"}]}),
                         );
+                        done("end_turn");
+                    }
+                    "tool" => {
+                        update(
+                            &sid,
+                            json!({"sessionUpdate":"tool_call","toolCallId":"t1","title":"Read README.md","kind":"read","status":"in_progress","rawInput":{"path":"README.md"}}),
+                        );
+                        update(
+                            &sid,
+                            json!({"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"hello\n"}}]}),
+                        );
+                        chunk(&sid, "agent_message_chunk", "done");
+                        done("end_turn");
+                    }
+                    t if t.starts_with("edit ") => {
+                        // ACP paths are absolute; the fake runs in the session cwd.
+                        let path = std::env::current_dir()
+                            .map(|d| d.join(t[5..].trim()).display().to_string())
+                            .unwrap_or_default();
+                        let path = path.as_str();
+                        update(
+                            &sid,
+                            json!({"sessionUpdate":"tool_call","toolCallId":"e1","title":format!("Edit {path}"),"kind":"edit","status":"in_progress","locations":[{"path":path}]}),
+                        );
+                        update(
+                            &sid,
+                            json!({"sessionUpdate":"tool_call_update","toolCallId":"e1","status":"completed","locations":[{"path":path}],
+                                "content":[{"type":"diff","path":path,"oldText":"old line\n","newText":"new line\n"}]}),
+                        );
+                        chunk(&sid, "agent_message_chunk", "edited");
                         done("end_turn");
                     }
                     "fs" => {
