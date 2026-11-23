@@ -470,7 +470,7 @@ export function groupSummary(entries: readonly WorkEntry[]): string {
       case 'command_execution':
         return `Ran ${n} ${s('command', 'commands')}`;
       case 'file_change':
-        return `Changed ${n} ${s('file', 'files')}`;
+        return `Edited ${n} ${s('file', 'files')}`;
       case 'web_search':
         return `Searched the web ${n} ${s('time', 'times')}`;
       case 'fetch':

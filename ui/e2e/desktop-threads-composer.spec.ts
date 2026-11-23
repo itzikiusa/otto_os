@@ -17,6 +17,7 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 //   • ↑ / ↓ recall sent prompts (promptHistory.ts).
 //   • Files dropped on the pane attach like a paste (composerDrop.ts).
 //   • A terminal selection → "Add to chat" context chip (TerminalAddToChat).
+//   • ⋯ › View › Tool calls: show all / hide successful / hide all (workLog.ts).
 // ─────────────────────────────────────────────────────────────────────────────
 
 test.use({ serviceWorkers: 'block' });
@@ -242,7 +243,6 @@ test('a terminal selection becomes an “Add to chat” context chip; nothing is
   await expect(screen).toBeVisible({ timeout: 30_000 });
   await drawer.locator('.xterm').click();
   await page.keyboard.type('echo otto-selection-check\n');
-  await page.waitForTimeout(800);
   await composer.fill('keep this draft');
   const add = drawer.getByTestId('terminal-add-to-chat');
   await expect(add).toHaveCount(0);
@@ -259,4 +259,32 @@ test('a terminal selection becomes an “Add to chat” context chip; nothing is
   await expect(composer).toHaveValue('keep this draft');
   await expect(thread.getByTestId('runtime-queued')).toHaveCount(0);
   await expect(thread.locator('.rt-user')).toHaveCount(0); // nothing was sent
+});
+
+test('codex: View › Tool calls hides successful (or all) calls; failures and replies always show', async ({ page }) => {
+  test.setTimeout(120_000);
+  const { thread } = await open(page, 'codex', 'Tool visibility');
+  await send(thread, 'hello');
+  const composer = thread.getByTestId('runtime-composer');
+  await composer.fill('tool image');
+  await composer.press('Enter');
+  const okTool = thread.locator('[data-item-type="dynamic_tool"]');
+  await expect(okTool).toHaveCount(1, { timeout: 30_000 });
+  await expect(thread.getByTestId('runtime-send')).toHaveAttribute('data-delivery', 'send', { timeout: 30_000 });
+  await composer.fill('fail');
+  await composer.press('Enter');
+  const failed = thread.locator('.rw.failed[data-item-type="command_execution"]');
+  await expect(failed).toHaveCount(1, { timeout: 30_000 });
+  await expect(thread.getByTestId('runtime-send')).toHaveAttribute('data-delivery', 'send', { timeout: 30_000 });
+
+  await pickView(page, 'Tool calls: hide successful');
+  await expect(okTool).toHaveCount(0);
+  await expect(failed).toHaveCount(1);
+  await expect(thread.getByText('echo: hello')).toBeVisible();
+  await pickView(page, 'Tool calls: hide all');
+  await expect(okTool).toHaveCount(0);
+  await expect(failed).toHaveCount(1);
+  expect(await page.evaluate(() => localStorage.getItem('otto_threads_prefs_v1'))).toContain('"tools":"none"');
+  await pickView(page, 'Tool calls: show all');
+  await expect(okTool).toHaveCount(1);
 });

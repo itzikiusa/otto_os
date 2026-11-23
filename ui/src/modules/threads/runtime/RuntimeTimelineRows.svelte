@@ -34,7 +34,8 @@
     type TimelineRow,
     type WorkEntry,
   } from './timeline';
-  import { formatDuration, shouldFold } from './workLog';
+  import { formatDuration, shouldFold, visibleTools } from './workLog';
+  import { threadPrefs } from './threadPrefs.svelte';
   import { turnUsageText } from './turnUsage';
 
   interface Props {
@@ -123,7 +124,8 @@
   const turnById = $derived(turns.length === 0 ? EMPTY_TURNS : new Map(turns.map((t) => [t.id, t] as const)));
   const outputMap = $derived(projection.output);
   const rawRequests = $derived(projection.requests);
-  const rows = $derived(providedRows ?? timelineRows(projection.items, turns));
+  // Tool calls the person chose to hide (⋯ › View) are left out; failures and approvals stay.
+  const rows = $derived(visibleTools(providedRows ?? timelineRows(projection.items, turns), threadPrefs.tools));
   const approvals = $derived.by(() => {
     if (rawRequests.length === 0 || !rawRequests.some((r) => r.status === 'pending')) return EMPTY_APPROVALS;
     const pending = pendingApprovals(projection);

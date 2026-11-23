@@ -1,13 +1,13 @@
 <script lang="ts">
-  // A finished stretch of the work log under one quiet line — "Worked for
-  // 2m 14s · 6 steps" — that opens to every call (T3 Code's collapsed work
-  // log). A stretch that is still running, or holds a failure or an approval
+  // A finished stretch of the work log under one quiet line that says how
+  // long and what was done — "Worked for 2m 14s · ran 2 commands and edited
+  // 3 files" — and opens to every call (T3 Code's collapsed work log). A stretch that is still running, or holds a failure or an approval
   // waiting on you, is never folded: it renders as is (workLog.ts shouldFold).
   import { tick, type Snippet } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { foldScrollCompensation } from './follow';
   import type { WorkEntry } from './timeline';
-  import { workedFor } from './workLog';
+  import { foldLine } from './workLog';
 
   interface Props {
     id: string;
@@ -58,7 +58,7 @@
     <details class="rf" bind:open={userOpen} data-testid="runtime-fold-{id}">
       <summary>
         <Icon name="check" size={12} />
-        <span class="ellipsis">{workedFor(entries)} · {entries.length} steps{tokens ? ` · ${tokens}` : ''}</span>
+        <span class="ellipsis">{foldLine(entries)}{tokens ? ` · ${tokens}` : ''}</span>
         <Icon name="chevronRight" size={12} />
       </summary>
       {#if userOpen}

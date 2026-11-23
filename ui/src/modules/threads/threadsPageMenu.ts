@@ -9,10 +9,12 @@
 // sidebar's pencil and ⌘T while the sidebar shows, and there is ONE terminal
 // entry (the thread's own drawer, or the page's while that one is open).
 // Layout lives in a View submenu, with the per-device thread prefs
-// (threadPrefs.svelte.ts: what Enter does while the agent works); a phone
+// (threadPrefs.svelte.ts: tool-call visibility, what Enter does while the
+// agent works); a phone
 // gets no Split / Grid at all, only the prefs.
 import type { MenuItem } from '../../lib/contextmenu.svelte';
 import type { MidTurn } from './runtime/composerSend';
+import type { ToolVisibility } from './runtime/workLog';
 import type { ThreadsLayoutMode } from './threadsStore.svelte';
 
 export const RELATED_LABEL = 'Related threads…';
@@ -47,6 +49,8 @@ export interface PageMenuState {
   sidebarVisible?: boolean;
   /** While the agent works, Enter queues or steers (threadPrefs). */
   midTurn?: MidTurn;
+  /** How many tool calls the timeline shows (threadPrefs). */
+  tools?: ToolVisibility;
 }
 
 export interface PageMenuActions {
@@ -56,6 +60,7 @@ export interface PageMenuActions {
   layout(mode: ThreadsLayoutMode): void;
   toggleTerminal(): void;
   setMidTurn?(m: MidTurn): void;
+  setTools?(t: ToolVisibility): void;
 }
 
 export function threadsPageMenu(s: PageMenuState, act: PageMenuActions): MenuItem[] {
@@ -99,7 +104,14 @@ function viewMenu(s: PageMenuState, act: PageMenuActions): MenuItem[] {
     { label: 'While working, messages queue', hint: s.compact ? undefined : '⌘↵ steers', title: 'A message sent while the agent works waits for the turn to end', checked: s.midTurn === 'queue', action: () => act.setMidTurn!('queue') },
     { label: 'While working, messages steer', hint: s.compact ? undefined : '⌘↵ queues', title: 'A message sent while the agent works goes into the running turn; the agent reads it at its next step', checked: s.midTurn === 'steer', action: () => act.setMidTurn!('steer') },
   ] : [];
-  const children = trimSeparators([...layout, { separator: true }, ...prefs]);
+  const TOOLS: [ToolVisibility, string, string][] = [
+    ['all', 'Tool calls: show all', 'Every command, edit and search the agent ran'],
+    ['hide-ok', 'Tool calls: hide successful', 'Only failed or gated calls; replies, questions and approvals always show'],
+    ['none', 'Tool calls: hide all', 'No tool calls except failures and approvals; replies and questions always show'],
+  ];
+  const tools: MenuItem[] = s.tools && act.setTools
+    ? TOOLS.map(([v, label, title]) => ({ label, title, checked: s.tools === v, action: () => act.setTools!(v) })) : [];
+  const children = trimSeparators([...layout, { separator: true }, ...tools, { separator: true }, ...prefs]);
   return children.length ? [{ label: 'View', icon: 'layout', children }] : [];
 }
 

@@ -411,6 +411,7 @@
         phone: viewport.isPhone || viewport.isShort,
         sidebarVisible: !listDrawer && threads.sidebarOpen,
         midTurn: threadPrefs.midTurn,
+        tools: threadPrefs.tools,
       },
       {
         newThread: () => threads.startNewThread({ workspaceId: ws.currentId }),
@@ -419,6 +420,7 @@
         layout: pickLayout,
         toggleTerminal: () => threadsChrome.setTerminal(!threadsChrome.terminalOpen),
         setMidTurn: (m) => threadPrefs.setMidTurn(m),
+        setTools: (t) => threadPrefs.setTools(t),
       },
     ));
   }
