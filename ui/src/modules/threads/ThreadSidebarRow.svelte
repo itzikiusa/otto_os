@@ -76,7 +76,9 @@
 
   const meta = $derived(s.meta as Record<string, unknown> | undefined);
   /** A personal agent's thread is under the agent's name, never its folder's id. */
-  const project = $derived(personalAgentName(meta, s.title) ?? projectNameFromCwd(s.cwd));
+  const agentName = $derived(personalAgentName(meta, s.title));
+  /** (Its folder is `…/personal/<agent id>`: never shown.) */
+  const project = $derived(agentName ?? projectNameFromCwd(s.cwd));
   /** A personal agent's thread says what started it (lib/personalAgentBadges.ts). */
   const badge = $derived(agentThreadBadge(meta));
   // The branch: the thread's own (a worktree's), else its repo's checked-out
@@ -148,7 +150,7 @@
       {:else}
         <!-- No branch known: where the thread works, so line 3 always says it. -->
         <Icon name="folder" size={12} />
-        <span class="tr-branch ellipsis" dir="auto">{history ? 'Closed · ' : ''}{baseName(s.cwd ?? '') || '~'}</span>
+        <span class="tr-branch ellipsis" dir="auto">{history ? 'Closed · ' : ''}{agentName ?? (baseName(s.cwd ?? '') || '~')}</span>
       {/if}
       {#if hasProviderIcon(s.provider)}<span class="tr-prov" title={harnessLabel(s.provider)}><ProviderIcon provider={s.provider} size={12} /></span>{:else}<span class="tr-prov tr-prov-name">{harnessLabel(s.provider)}</span>{/if}
     </span>
