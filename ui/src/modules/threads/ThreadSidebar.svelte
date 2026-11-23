@@ -17,7 +17,6 @@
   import { ideProjects, openProjectInIde } from './ideProjects.svelte';
   import type { OrderedIdeProjectGroup } from './ThreadIdeProjectsSection.svelte';
   import ThreadSidebarRow from './ThreadSidebarRow.svelte';
-  import ThreadProjectGroups from './ThreadProjectGroups.svelte';
   import ThreadSidebarFooter from './ThreadSidebarFooter.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { openAdjacentThread, openNextNeedsYou, THREAD_KEYS, threadNav } from './threadNav.svelte';
@@ -33,7 +32,7 @@
     projectNameFromCwd,
     sessionBranch,
   } from './threadsHelpers';
-  import { FilterPopover, FolderPickerModal, OriginGroupsView } from './threadLazy.svelte';
+  import { FilterPopover, FolderPickerModal, OriginGroupsView, ProjectGroupsView } from './threadLazy.svelte';
   import { threadsChrome } from './threadsChrome.svelte';
   import { buildSidebarLegacyThreadMenu, reviveLegacyThread } from './threadMenu';
   import { promptNewScript } from './threadGitMenus';
@@ -482,18 +481,23 @@
         {@render familyRows(sections.main)}
       </div>
     {:else}
-      <ThreadProjectGroups
-        ideGroups={ideProjectGroups}
-        groups={projectGroups}
-        {foldedFamilies}
-        rows={familyRows}
-        ontogglefamily={toggleFamily}
-        onnewthread={newThreadIn}
-        onprojectmenu={showProjectMenu}
-        onrowclick={handleRowClick}
-        onreopen={(sess, beside) => void reopenArchived(sess, beside)}
-        onmenu={showThreadMenu}
-        {onselect}
+      <LazyMount
+        lazy={ProjectGroupsView}
+        what="project groups"
+        variant="compact"
+        props={{
+          ideGroups: ideProjectGroups,
+          groups: projectGroups,
+          foldedFamilies,
+          rows: familyRows,
+          ontogglefamily: toggleFamily,
+          onnewthread: newThreadIn,
+          onprojectmenu: showProjectMenu,
+          onrowclick: handleRowClick,
+          onreopen: (sess: Session, beside: boolean) => void reopenArchived(sess, beside),
+          onmenu: showThreadMenu,
+          onselect,
+        }}
       />
     {/if}
 

@@ -44,11 +44,53 @@ carry into another conversation.
    - One search row with **filter by project** (several at once; a "Showing …
      · Clear" line appears while a filter is on), **Add project** (a folder that
      shows in the rail before its first thread) and **New thread**.
-   - **Pinned**, then each **project** with its threads — threads needing
-     approval first, then working ones, then most recent; `delegated_by`
-     workers nest under their lead.
-   - **History** (threads moved to History + closed ones) folded at the bottom.
-   - Footer: Settings, Git, Usage, and Refresh (sessions + git status).
+   - **An inbox, not a status board** (`threadInbox.ts`). One list across
+     projects: threads that need you first (**Approval**, **Question**), then
+     **Failed**, then finished-unread (**Done**), then by the time the thread
+     last came back to you, newest first. Each row is one button with three
+     lines: the project's badge and name … the status word (else the
+     relative time); the title (bold while it needs you or is Done); the
+     branch (worktree icon in a worktree, the folder's name when no branch is
+     known) … the agent's glyph. Pin / Open beside / ⋯ appear on hover and
+     focus; on touch they are in the row's long-press menu.
+   - **Words, not dots.** Approval · Question · Failed · Done · Working 18s.
+     Question vs Approval comes from the thread's pending requests (live
+     `runtime_request.updated` events; after a reload, one compact read of
+     the thread's newest turn — `threadInbox.svelte.ts`), as does the
+     working time. A terminal thread waiting on you reads Approval.
+   - **Done** is this window's unread flag: a turn that ended (completed or
+     failed) while the thread was not in front of you
+     (`runtimeThreads.unread` / `ws.unread`); opening the thread clears it.
+     It is per window and in memory: a reload or another device does not
+     carry it.
+   - **Subagents** (threads started from a thread) fold under it by default;
+     the row says "N subagents" and, when one of them needs you, the
+     thread's own word becomes **Needs you** (the tooltip names it). Opened,
+     they are two-line rows with Working · Needs you · Done · Failed ·
+     Stopped. The focused thread's family opens itself.
+   - **Pinned** sits on top when there are pins; **Working N** (running
+     threads not waiting on you, open by default) and **History N** (moved to
+     History + closed, folded) sit below the list. The focused thread stays
+     visible inside a folded section.
+   - **Group by project** in the filter menu brings back the per-project
+     folders (IDE projects first, pinned projects first, each foldable with a
+     "1 needs you" note when folded); remembered on this device.
+   - **Undo, not confirm** (`threadUndo.ts`). Pin / unpin, Move to History /
+     back and dismissing a side chat act at once with one "… · Undo" notice
+     for 5 s; a newer action replaces it, and ⌘Z / Ctrl+Z runs it while focus
+     is not in a text field, editor or terminal. Archiving a working session
+     still asks first.
+   - Pins and History are kept by this browser (`otto_threads_v1`), so the
+     Mac and a phone can differ: storing them on the thread needs a daemon
+     route a structured thread does not have yet (`PATCH /runtime-sessions/{id}`
+     takes only a title).
+   - Footer: Settings, Git, a **usage meter** in the Usage slot — the focused
+     thread's agent's tightest plan window ("5h 62%" used; warning from 80 %,
+     danger from 95 %; every window and its reset in the tooltip; click opens
+     Usage) when Usage has fresh numbers for that agent (Codex, Claude, agy,
+     Grok, Muse logins), else the plain icon — and Refresh. The meter reads
+     the Usage page's own `GET /usage/limits` poller
+     (`lib/stores/usageLimits.svelte.ts`, 60 s while visible).
 2. **New Thread Stage (`NewThreadStage`):**
    - "What should we build in *project*?" (click the project to switch folder
      or workspace) and a single composer: attach a file (`@path`), one agent
@@ -280,8 +322,8 @@ result, as it does for any tool. Threads only (T3 Code #15907, #30257).
 - **Message a thread › All open threads in this project** also reaches the
   structured threads in the same folder and reports who could not receive it
   (`threadRelay.ts`).
-- *(Coordinator: sidebar rows / status words of this round — T-ATTENTION — go
-  here once that work lands.)*
+- **The sidebar is an inbox** (rows, words, Working / History folds, Group by
+  project, subagents, Undo, the usage meter): see Layout › Sidebar above.
 
 ## On a phone and a tablet
 
