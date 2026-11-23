@@ -126,3 +126,23 @@ test('menu.ts routes the undo/redo ids', () => {
   handleMenu('redo');
   assert.deepEqual(calls, ['undo', 'redo']);
 });
+
+test('the menu route lets the app\'s own undo (a thread action\'s Undo) run first, outside text fields', () => {
+  const { mod, calls, deps } = load();
+  const asked: unknown[] = [];
+  mod.setAppUndo((focused: unknown) => (asked.push(focused), true));
+  const body = el('BODY');
+  assert.equal(mod.undoRedoInFocus('undo', body, deps, 1000), 'app');
+  assert.deepEqual(calls, []);
+  assert.deepEqual(asked, [body]);
+  // The same press's keydown arriving after the menu is swallowed.
+  const k = key();
+  mod.onHistoryKeydown(k, 1100);
+  assert.equal(k.stopped, true);
+  // Redo, and an app that has nothing to undo, keep the native route.
+  assert.equal(mod.undoRedoInFocus('redo', body, deps, 5000), 'native');
+  mod.setAppUndo(() => false);
+  assert.equal(mod.undoRedoInFocus('undo', body, deps, 9000), 'native');
+  assert.deepEqual(calls, ['exec:redo', 'exec:undo']);
+  mod.setAppUndo(null);
+});
