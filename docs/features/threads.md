@@ -405,6 +405,11 @@ Muse — and pi) unless a line says otherwise.
   context). Nothing is sent and the draft stays.
 - **Notices above the composer** show one quiet line at a time (an urgent
   one always shows); the rest fold into "N more: …" (`runtime/banners.ts`).
+  On a phone on its side or with the on-screen keyboard up, every quiet
+  notice (the queue strip too) folds into that one line, and a pane under
+  420 px tall gets a one-row input with tighter padding, so the latest
+  message stays in sight (the timeline keeps following the bottom as the
+  keyboard opens).
 
 ## On a phone and a tablet
 

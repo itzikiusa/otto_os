@@ -4,6 +4,17 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 
 test.use({ serviceWorkers: 'block' });
 
+/** Other specs' threads (the e2e daemon is shared) reach this page through
+ *  the live event stream: Threads fetches a thread it does not hold yet
+ *  (runtimeThreads.adopt) and opens on the newest. Answer those row reads
+ *  404 so the page keeps to the threads this spec mocks. */
+async function keepOthersOut(page: Page, ours?: RegExp): Promise<void> {
+  await page.route(/\/api\/v1\/runtime-sessions\/[^/?]+$/, (route) => {
+    const id = new URL(route.request().url()).pathname.split('/').at(-1)!;
+    return ours?.test(id) ? route.fallback() : route.fulfill({ status: 404, json: { code: 'not_found', message: 'not in this spec' } });
+  });
+}
+
 /** The thread's access as the composer's "+" menu checks it (the chip shows only off the default). */
 async function expectAccess(page: Page, thread: Locator, label: string): Promise<void> {
   await thread.getByTestId('runtime-plus').click();
@@ -29,6 +40,7 @@ test('thread drafts, attachments and permissions stay with their owner; mobile c
   await page.route(`**/api/v1/workspaces/${workspaceId}/runtime-sessions`, (route) => route.fulfill({ json: sessions }));
   // Threads lists every workspace's threads; keep this page to the seeded two.
   await page.route('**/api/v1/runtime-sessions', (route) => route.fulfill({ json: sessions }));
+  await keepOthersOut(page, /^focus-thread-/);
   await page.route('**/api/v1/runtime-sessions/focus-thread-*/events**', (route) => route.fulfill({ json: {
     kind: 'snapshot', snapshot_sequence: 1, snapshot: {
       provider_session: { status: 'ready', cwd: '/tmp', model: null, updated_at: ts, last_error: null },
@@ -144,6 +156,7 @@ test('a failed initial thread list shows Retry instead of an empty composer', as
   // Both lists: this workspace's and every workspace's (Threads loads both).
   await page.route(`**/api/v1/workspaces/${workspaceId}/runtime-sessions`, list);
   await page.route('**/api/v1/runtime-sessions', list);
+  await keepOthersOut(page);
   await page.goto('/#/threads');
   const error = page.getByTestId('load-error').filter({ hasText: 'Couldn’t load threads' });
   await expect(error).toBeVisible();

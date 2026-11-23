@@ -110,15 +110,30 @@ test('phone: one primary button by touch — Stop, Queue, Steer — with the key
   await expect(thread.getByText('Working…').last()).toBeVisible({ timeout: 20_000 });
   await expect(primary).toHaveCount(0);
   await atLeast44(stop, 'Stop');
-  // The keyboard up: the composer and its button stay on screen.
-  await page.setViewportSize(withKeyboard(page));
+  // The keyboard up (as on a device: focus first, then the keyboard takes
+  // its share of the screen): the composer and its button stay on screen.
   await composer.tap();
+  await page.setViewportSize(withKeyboard(page));
+  await expect(page.locator('html[data-kb="open"]')).toHaveCount(1);
   await composer.fill('queued from the phone');
   await expect(primary).toHaveAttribute('data-delivery', 'queue');
   await expectFullyInViewport(page, primary, 'Queue');
   await expectFullyInViewport(page, stop, 'small Stop');
   await atLeast44(stop, 'secondary Stop');
   await primary.tap();
+  // With the keyboard up the queue strip folds into the one notice line, the
+  // input is one row and the latest message stays in sight.
+  const more = thread.getByTestId('runtime-banners-more');
+  await expect(more).toContainText('queue');
+  await expect(thread.getByTestId('runtime-queued')).toHaveCount(0);
+  const lineH = await composer.evaluate((el) => parseFloat(getComputedStyle(el).lineHeight));
+  // A short pane (a phone with the keyboard up) gets a one-row input; a tablet keeps two rows.
+  const paneH = (await thread.boundingBox())!.height;
+  if (paneH <= 420) expect((await composer.boundingBox())!.height, 'one-row input in a short pane').toBeLessThan(lineH * 1.6);
+  const [sb, last] = [(await thread.locator('.rt-scroll').boundingBox())!, (await thread.getByText('Working…').last().boundingBox())!];
+  expect(last.y + last.height, 'the latest message is in sight').toBeLessThanOrEqual(sb.y + sb.height + 1);
+  expect(last.y, 'the latest message is in sight').toBeGreaterThanOrEqual(sb.y - 1);
+  await more.tap();
   await expect(thread.getByTestId('runtime-queued')).toHaveCount(1);
   await shoot(page, 'queue', info.project.name);
 
