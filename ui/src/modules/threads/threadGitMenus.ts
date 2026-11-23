@@ -5,7 +5,7 @@
 // inspector — so nothing here owns git state.
 import { api } from '../../lib/api/client';
 import { gitApi } from '../../lib/api/git';
-import type { Repo, WorktreeCreateReq, WorktreeInfo } from '../../lib/api/types';
+import type { Repo, WorktreeCreateReq, WorktreeCreated, WorktreeInfo, WorktreeSetupResult, WorktreeSetupSetting } from '../../lib/api/types';
 import { copyWithToast } from '../../lib/clipboard';
 import { confirmer } from '../../lib/confirm.svelte';
 import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
@@ -159,9 +159,35 @@ export async function takenBranches(repo: Repo): Promise<{ branches: string[]; b
   return { branches: read.refs.local.map((b) => b.name), base: read.refs.base_branch ?? null };
 }
 
-/** A new branch in a new worktree beside the repo (`POST /repos/{id}/worktrees`). */
-export function createWorktree(repo: Repo, branch: string, base: string | null): Promise<WorktreeInfo> {
-  return api.post<WorktreeInfo>(`/repos/${encodeURIComponent(repo.id)}/worktrees`, { branch, ...(base ? { base } : {}) } satisfies WorktreeCreateReq);
+/** A new branch in a new worktree beside the repo (`POST /repos/{id}/worktrees`),
+ *  given what the main checkout's `.worktreeinclude` names (`prepared`). */
+export function createWorktree(repo: Repo, branch: string, base: string | null): Promise<WorktreeCreated> {
+  return api.post<WorktreeCreated>(`/repos/${encodeURIComponent(repo.id)}/worktrees`, { branch, ...(base ? { base } : {}) } satisfies WorktreeCreateReq);
+}
+
+/** Run the repo's setup command in its new worktree at `path` (on the daemon). */
+export function runWorktreeSetup(repo: Repo, path: string): Promise<WorktreeSetupResult> {
+  return api.post<WorktreeSetupResult>(`/repos/${encodeURIComponent(repo.id)}/worktrees/setup`, { path });
+}
+
+/** Set (`command`) or clear (null) the command every new worktree of `repo`
+ *  runs once it is made — kept on the daemon (setting `worktree_setup`), so
+ *  a worktree made from the phone runs it too. */
+async function saveWorktreeSetup(repo: Repo, command: string | null): Promise<void> {
+  try {
+    // Keyed by the main checkout: every worktree of the repository shares it.
+    const list = await api.get<WorktreeInfo[]>(`/repos/${encodeURIComponent(repo.id)}/worktrees`);
+    const key = list.find((w) => w.is_main)?.path ?? repo.path;
+    const all = await api.get<Record<string, unknown>>('/settings');
+    const next: WorktreeSetupSetting = { ...((all.worktree_setup as WorktreeSetupSetting | undefined) ?? {}) };
+    const cmd = command?.trim() ?? '';
+    if (cmd) next[key] = { name: cmd.length > 40 ? `${cmd.slice(0, 39)}…` : cmd, command: cmd };
+    else delete next[key];
+    await api.put('/settings', { worktree_setup: next });
+    toasts.success(cmd ? 'New worktrees will run' : 'No worktree setup', cmd || undefined);
+  } catch (e) {
+    toastError('Couldn’t save the worktree setup', e);
+  }
 }
 
 /** A branch name the person types (the same rule `git` applies, roughly). */
@@ -194,6 +220,19 @@ export function openOpenInMenu(anchor: Element, opts: { cwd: string; repo: Repo 
       ],
     })),
     { label: 'Add project script…', icon: 'plus', disabled: !opts.cwd, action: () => void promptNewScript(opts.cwd) },
+    // What a new worktree of this repo runs once it is made: one of these scripts or another command.
+    ...(opts.repo
+      ? [{
+          label: 'Worktree setup',
+          icon: 'branch',
+          title: 'A command every new worktree of this repo runs once it is made',
+          children: [
+            ...scripts.map((s): MenuItem => ({ label: `Run “${s.name}”`, icon: 'play', action: () => void saveWorktreeSetup(opts.repo!, s.command) })),
+            { label: 'Other command…', icon: 'plus', action: () => void promptWorktreeSetup(opts.repo!) },
+            { label: 'None', icon: 'x', action: () => void saveWorktreeSetup(opts.repo!, null) },
+          ],
+        } satisfies MenuItem]
+      : []),
   ];
   ctxMenu.showAt(anchor, items, { align: 'end' });
 }
@@ -217,6 +256,16 @@ export async function runInShell(cwd: string, script: ProjectScript | null): Pro
   } catch (e) {
     toastError(script ? `Couldn’t run ${script.name}` : 'Couldn’t open a terminal', e);
   }
+}
+
+async function promptWorktreeSetup(repo: Repo): Promise<void> {
+  const command = await confirmer.promptText('Runs in every new worktree of this repo once it is made, e.g. "npm ci". Its output shows while it runs.', {
+    title: 'Worktree setup',
+    confirmLabel: 'Save',
+    placeholder: 'npm ci',
+    validate: (v) => (v.trim() ? null : 'Enter a command'),
+  });
+  if (command) await saveWorktreeSetup(repo, command);
 }
 
 export async function promptNewScript(project: string): Promise<void> {

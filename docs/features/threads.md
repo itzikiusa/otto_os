@@ -625,6 +625,33 @@ editor keeps its own ⌘F (T3 Code #10439).
   their limit text ("usage limit", "rate limit", "quota", "429",
   `RESOURCE_EXHAUSTED`), the same lists the daemon's `error_class` uses.
 
+- **Ready-to-work worktree** (`otto-git/src/worktree_ready.rs`,
+  `worktreeReady.ts`): a `.worktreeinclude` at the repo root names, in
+  gitignore patterns, the untracked or ignored files a new worktree gets.
+  They are copied from the MAIN checkout (`.env`, local config; at most
+  100 MB in all, the rest is named in a toast with why); the patterns after a
+  `[clone]` line (dependency folders) are cloned copy-on-write (`cp -c`,
+  APFS clonefile) or, only when the disk cannot clone, symlinked to the main
+  checkout (the toast says which). Git itself matches the patterns
+  (`ls-files --others --ignored --directory`), so nothing outside the
+  checkout and no symlink is ever followed. Example:
+
+  ```
+  .env
+  config/local.json
+  [clone]
+  node_modules/
+  ```
+
+  A repository's **worktree setup** (Details › Open in › **Worktree setup**:
+  one of the project's scripts or another command) is kept on the daemon
+  (setting `worktree_setup`, by main checkout), so a worktree made from the
+  phone runs it too. After the worktree is made the progress line reads
+  *Setting up: npm ci…*; a failure shows inline (*Setup "npm ci" failed (exit
+  1): …*) with **Retry** (runs only the setup again) and **Start without
+  setup**; the message is never lost. It runs before any provider starts, so
+  it is the same for every agent.
+
 ## API & WebSocket Surface
 
 - `GET /api/v1/sessions/{id}/transcript` (`?sub=<subagentId>` supported for

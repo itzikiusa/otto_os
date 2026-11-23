@@ -23,7 +23,9 @@
   import { placeholderTitle } from './threadTitle';
   import { FolderPickerModal } from './threadLazy.svelte';
   import { threadAccessDefault } from './threadAccessDefault.svelte';
-  import { BRANCH_NAME_OK, createWorktree, takenBranches, worktreeBase } from './threadGitMenus';
+  import { BRANCH_NAME_OK, createWorktree, runWorktreeSetup, takenBranches, worktreeBase } from './threadGitMenus';
+  import { preparedNote, setupFailure } from './worktreeReady';
+  import { toasts } from '../../lib/toast.svelte';
   import { worktreeBranch } from './worktreeBranch';
   import { confirmer } from '../../lib/confirm.svelte';
   import { loadErrorText } from '../../lib/loadError';
@@ -145,18 +147,35 @@
     if (name && newWt === wt) newWt = { ...wt, branch: name.trim() };
   }
 
-  /** Make the chosen new worktree; its path, or null (the error is shown). */
+  /** A worktree made whose setup command has not succeeded yet: Retry runs
+   *  only the setup ("Start without setup" skips it); the message stays. */
+  let pendingSetup = $state<{ of: NonNullable<typeof newWt>; path: string; branch: string | null; name: string; skip?: boolean } | null>(null);
+
+  /** Make the chosen new worktree (and run the repo's setup in it); its path,
+   *  or null (the error is shown). */
   async function makeWorktree(req: StartLaunch): Promise<string | null> {
     const wt = newWt!;
     wtError = null;
     try {
-      wtProgress = 'Naming the branch…';
-      const taken = await takenBranches(wt.repo);
-      const name = wt.branch ?? worktreeBranch({ prompt: req.withPrompt ? req.titleSeed : '', branches: taken.branches, defaultBranch: taken.base ?? wt.base, now: new Date() });
-      wtProgress = `Creating worktree ${name}${wt.base ? ` from ${wt.base}` : ''}…`;
-      const w = await createWorktree(wt.repo, name, wt.base);
-      pickWorktree(w.path, w.branch, wt.repo);
-      return w.path;
+      if (pendingSetup?.of !== wt) {
+        wtProgress = 'Naming the branch…';
+        const taken = await takenBranches(wt.repo);
+        const name = wt.branch ?? worktreeBranch({ prompt: req.withPrompt ? req.titleSeed : '', branches: taken.branches, defaultBranch: taken.base ?? wt.base, now: new Date() });
+        wtProgress = `Creating worktree ${name}${wt.base ? ` from ${wt.base}` : ''}…`;
+        const w = await createWorktree(wt.repo, name, wt.base);
+        const note = preparedNote(w.prepared);
+        if (note) toasts.info('Worktree made', note);
+        pendingSetup = { of: wt, path: w.path, branch: w.branch, name: w.prepared?.setup ?? '' };
+      }
+      const ps = pendingSetup!;
+      if (ps.name && !ps.skip) {
+        wtProgress = `Setting up: ${ps.name}…`;
+        const r = await runWorktreeSetup(wt.repo, ps.path);
+        if (!r.ok) throw new Error(setupFailure(r));
+      }
+      pendingSetup = null;
+      pickWorktree(ps.path, ps.branch, wt.repo);
+      return ps.path;
     } catch (e) {
       wtError = loadErrorText(e);
       return null;
@@ -347,7 +366,8 @@
           <p class="nt-note nt-progress" use:announceShown={wtProgress} data-testid="new-thread-worktree-progress"><span class="spinner" aria-hidden="true"></span>{wtProgress}</p>
         {:else if wtError}
           <div data-testid="new-thread-worktree-failed">
-            <LoadState what="the worktree" errorTitle="Couldn’t create the worktree — your message is still here" variant="compact" error={wtError} empty onretry={() => void composer?.retry()} />
+            <LoadState what="the worktree" errorTitle={pendingSetup ? 'The worktree’s setup failed — your message is still here' : 'Couldn’t create the worktree — your message is still here'} variant="compact" error={wtError} empty onretry={() => void composer?.retry()} />
+            {#if pendingSetup}<button type="button" class="btn small ghost" data-testid="new-thread-skip-setup" onclick={() => { pendingSetup!.skip = true; void composer?.retry(); }}>Start without setup</button>{/if}
           </div>
         {/if}
         {#if busyHere.length > 0 && !newWt}

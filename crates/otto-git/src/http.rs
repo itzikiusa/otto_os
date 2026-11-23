@@ -166,6 +166,10 @@ pub fn router<S: GitCtx>() -> Router<S> {
             get(repo_worktrees::<S>).post(gitops_routes::repo_worktree_create::<S>),
         )
         .route(
+            "/repos/{id}/worktrees/setup",
+            post(gitops_routes::repo_worktree_setup::<S>),
+        )
+        .route(
             "/repos/{id}/worktrees/remove",
             post(gitops_routes::repo_worktree_remove::<S>),
         )
