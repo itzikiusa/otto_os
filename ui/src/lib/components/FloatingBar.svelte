@@ -869,19 +869,19 @@
                     {#if row.kind === 'ask'}
                       <span class="opt-title">Ask Otto <span class="q-inline">“{row.text}”</span></span>
                       <span class="grow"></span>
-                      <span class="opt-meta">{space.name}</span>
+                      <span class="opt-meta" dir="auto">{space.name}</span>
                       {#if i === selected}<kbd>↵</kbd>{:else}<kbd>⌘↵</kbd>{/if}
                     {:else if row.kind === 'cmd'}
                       <span class="opt-title">{row.cmd.title}</span>
                       {#if row.cmd.detail}<span class="opt-detail">{row.cmd.detail}</span>{/if}
                       <span class="grow"></span>
-                      {#if row.cmd.group}<span class="opt-meta" data-tone={th ? threadPick.tone(row.cmd.id) : undefined}>{row.cmd.group}</span>{/if}
+                      {#if row.cmd.group}<span class="opt-meta" dir="auto" data-tone={th ? threadPick.tone(row.cmd.id) : undefined}>{row.cmd.group}</span>{/if}
                       {#if row.cmd.shortcut}<kbd>{row.cmd.shortcut}</kbd>{/if}
                     {:else}
                       <span class="opt-title">{row.hit.title}</span>
                       {#if row.hit.subtitle}<span class="opt-detail">{row.hit.subtitle}</span>{/if}
                       <span class="grow"></span>
-                      <span class="opt-meta">{row.hit.kind.replace('_', ' ')}</span>
+                      <span class="opt-meta" dir="auto">{row.hit.kind.replace('_', ' ')}</span>
                     {/if}
                   </li>
                 {/each}

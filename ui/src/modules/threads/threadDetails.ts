@@ -37,7 +37,8 @@ export function gitAction(s: GitActionState): GitAction {
 
 /** The card's inline size and the room it takes beside the conversation
  *  (card + a gap on each side): `--thread-card-reserve` while it floats. */
-export const CARD_INLINE = 296;
+// 264 + 32 + the 808 column = 1104: floats at 1440 with the sidebar open (~1123).
+export const CARD_INLINE = 264;
 export const CARD_RESERVE = CARD_INLINE + 32;
 /** The reading column the card must never cover, plus its side padding. */
 export const READING_COLUMN = 760 + 48;

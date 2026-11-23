@@ -49,6 +49,17 @@ test('typing matches title and project together', () => {
   ];
   assert.deepEqual(filterThreadRows(rows, 'dotfiles').map((r) => r.id), ['2']);
   assert.deepEqual(filterThreadRows(rows, 'flaky').map((r) => r.id), ['1']);
-  assert.deepEqual(filterThreadRows(rows, 'harbor flaky').map((r) => r.id), []);
+  assert.deepEqual(filterThreadRows(rows, 'harbor flaky').map((r) => r.id), ['1']);
   assert.equal(filterThreadRows(rows, '').length, 2);
+});
+
+test('a thread row needs the query to name it, so a command query keeps Enter', () => {
+  const rows = [
+    { id: '1', title: 'Fix sidebar navigation remount', project: 'otto' },
+    { id: '2', title: 'Git status in the sidebar', project: 'otto' },
+  ];
+  // "git" is a subsequence of "Fix sidebar navigation remount": no longer a hit.
+  assert.deepEqual(filterThreadRows(rows, 'git').map((r) => r.id), ['2']);
+  assert.deepEqual(filterThreadRows(rows, 'set').map((r) => r.id), []);
+  assert.deepEqual(filterThreadRows(rows, 'side nav').map((r) => r.id), ['1']);
 });

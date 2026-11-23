@@ -38,7 +38,7 @@ test('the row: Deny / Allow once, the summary as the reason, the redacted args a
   assert.equal(row.requestId, 'mcp:a');
   assert.deepEqual(row.options.map((o) => o.label), ['Deny', 'Allow once']);
   assert.equal(row.reason, 'Open a PR from feat into main');
-  assert.equal(row.prompt, '{"head":"feat"}');
+  assert.equal(row.prompt, '{\n  "head": "feat"\n}');
   assert.equal(askAsPending(card('a', { args_redacted_json: '{}' }), { canDecide: false, always: false }).prompt, null);
   assert.equal(askAsPending(card('a'), { canDecide: false, always: false }).canRespond, false);
   assert.deepEqual(askAsPending(card('a'), { canDecide: true, always: true }).options.map((o) => o.decision), ['decline', 'accept', 'accept_always']);
@@ -54,4 +54,11 @@ test('"Always" only for a reversible otto tool in a workspace, for an admin', ()
   assert.deepEqual(askDecision('accept'), { approved: true, always: false });
   assert.deepEqual(askDecision('accept_always'), { approved: true, always: true });
   assert.deepEqual(askDecision('decline'), { approved: false, always: false });
+});
+
+test('a long governed call shows every argument, not a 400-character cut (security 5)', () => {
+  const body = 'x'.repeat(1200);
+  const row = askAsPending(card('long', { args_redacted_json: JSON.stringify({ body, to: 'attacker@example.com' }) }), { canDecide: true, always: false });
+  assert.ok(row.prompt!.includes('attacker@example.com'), 'the part after the long body is visible');
+  assert.ok(row.prompt!.includes(body));
 });

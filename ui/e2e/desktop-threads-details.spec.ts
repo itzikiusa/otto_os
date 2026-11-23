@@ -30,6 +30,8 @@ test.beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'harbor-'));
   writeFileSync(join(dir, 'README.md'), '# harbor\n');
   git('init', '-q', '-b', 'main');
+  git('config', 'user.email', 'e2e@otto');
+  git('config', 'user.name', 'e2e');
   git('add', '.');
   git('commit', '-qm', 'init');
   git('checkout', '-qb', 'feat/offline-sync');
@@ -99,7 +101,7 @@ test('the details card floats beside a Claude thread, heads the right panel, and
   await expect(card.getByTestId('details-git-action')).toHaveAttribute('data-kind', 'commit');
   await expect(card.getByTestId('details-changes')).toContainText('+2');
   await expectFullyInViewport(page, card, 'details card');
-  expect(await page.locator('.th-stage').evaluate((el) => getComputedStyle(el).getPropertyValue('--thread-card-reserve').trim())).toBe('328px');
+  expect(await page.locator('.th-stage').evaluate((el) => getComputedStyle(el).getPropertyValue('--thread-card-reserve').trim())).toBe('296px');
 
   // Open in ▾ carries the project scripts (moved off the card).
   await card.getByTestId('details-open-in').click();
@@ -137,16 +139,31 @@ test('the details card floats beside a Claude thread, heads the right panel, and
   expect(await page.locator('.th-stage').evaluate((el) => getComputedStyle(el).getPropertyValue('--thread-card-reserve').trim())).toBe('0px');
   await shots(page, 'details-panel');
 
-  // Changes opens the Changes surface.
+  // Changes opens the Changes surface: the card folds to its one summary row
+  // and the panel opens wide enough for a diff, the conversation beside it.
   await panel.getByTestId('details-changes').click();
   await expect(page.getByTestId('threads-tab-changes')).toBeVisible();
+  await expect(panel.getByTestId('details-summary')).toBeVisible();
+  await expect(panel.getByTestId('details-folder')).toHaveCount(0);
+  expect((await panel.boundingBox())!.width).toBeGreaterThanOrEqual(480);
+  expect((await conv.boundingBox())!.width).toBeGreaterThanOrEqual(600);
   await page.getByTestId('threads-toggle-inspector').click();
   await expect(page.getByTestId('thread-details-card')).toBeVisible();
 
-  // Committed: the action moves on — with no remote there is no next step,
-  // so the row goes (never a dead row) and Changes says "No changes".
-  git('add', '.');
-  git('commit', '-qm', 'queue');
+  // Commit over the thread: Git's changes panel in a sheet, everything staged,
+  // the message, Commit. The action then moves on — with no remote there is
+  // no next step, so the row goes (never a dead row) and Changes says "No changes".
+  await card.getByTestId('details-git-action').click();
+  const sheet = page.getByTestId('thread-commit-sheet');
+  await expect(sheet).toBeVisible();
+  await expect(page.getByRole('dialog')).toContainText('Commit to feat/offline-sync');
+  await expect(sheet.getByText('Nothing staged yet.')).toHaveCount(0);
+  await expect(conv).toBeAttached();
+  await shots(page, 'details-commit-sheet');
+  await sheet.getByLabel('Commit summary').fill('Queue offline edits');
+  await sheet.locator('.wc-commit').click();
+  await expect(sheet).toHaveCount(0, { timeout: 20_000 });
+  expect(git('log', '-1', '--format=%s').trim()).toBe('Queue offline edits');
   await expect(card.getByTestId('details-git-action')).toHaveCount(0, { timeout: 20_000 });
   await expect(card.getByTestId('details-changes')).toHaveText('No changes');
 

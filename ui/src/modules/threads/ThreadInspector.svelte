@@ -170,8 +170,8 @@
   <!-- Thread details head the panel (they float beside the conversation
        only while this panel is closed). -->
   <!-- On a phone a subagent's tab is a full-height sheet: the card gives way. -->
-  {#if contextCwd && !threadsChrome.maximized && !(threads.inspectorCompact && active === 'subagent')}
-    <div class="ti-card"><ThreadDetailsCard cwd={contextCwd} threadId={focusedSession?.id ?? null} /></div>
+  {#if contextCwd && !(threads.inspectorCompact && active === 'subagent')}
+    <div class="ti-card"><ThreadDetailsCard cwd={contextCwd} threadId={focusedSession?.id ?? null} summary={active !== null} /></div>
   {/if}
   {#if contextThreadId}<ThreadAgentsTasks sessionId={contextThreadId} />{/if}
   <header class="ti-head">
@@ -212,8 +212,8 @@
       class="icon-btn"
       class:ti-on={threadsChrome.maximized}
       aria-pressed={threadsChrome.maximized}
-      aria-label={threadsChrome.maximized ? 'Restore panel' : 'Maximize panel'}
-      title={threadsChrome.maximized ? 'Restore' : 'Maximize'}
+      aria-label={threadsChrome.maximized ? 'Restore panel width' : 'Widen panel'}
+      title={threadsChrome.maximized ? 'Restore width' : 'Widen — the conversation stays beside it'}
       onclick={() => (threadsChrome.maximized = !threadsChrome.maximized)}
     >
       <Icon name={threadsChrome.maximized ? 'minimize' : 'maximize'} size={12} />

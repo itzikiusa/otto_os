@@ -510,6 +510,7 @@ impl PiDriver {
                     required: true,
                     allow_empty: method == "editor",
                     allow_free_text: !select,
+                    open_url: None,
                     options,
                 };
                 self.dialogs.insert(
@@ -525,6 +526,7 @@ impl PiDriver {
                     title: Some(title),
                     questions: vec![question],
                     tool_item_id: None,
+                    for_person: false,
                 });
             }
             _ => {}

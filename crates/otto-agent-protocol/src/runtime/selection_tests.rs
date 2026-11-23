@@ -33,6 +33,7 @@ while IFS= read -r l; do
   case "$l" in
     EXIT) exit 0 ;;
     SLOW) sleep 0.5; echo DONE ;;
+    TITLE*) echo "$l"; echo DONE ;;
     *) echo DONE ;;
   esac
 done
@@ -102,6 +103,7 @@ impl StructuredDriver for ScriptDriver {
                 native_thread_id: Some("native-1".into()),
                 model: None,
             }),
+            l if l.starts_with("TITLE ") => step.push(DriverEvent::Title(l[6..].into())),
             "DONE" => step.push(DriverEvent::Terminal {
                 status: TurnTerminalStatus::Completed,
                 failure: None,
@@ -561,4 +563,243 @@ async fn fresh_context_can_stop_leftover_background_work() {
         .items
         .values()
         .any(|i| matches!(i.kind, TurnItemKind::SessionBoundary { .. })));
+}
+
+/// A Claude thread whose switch to Codex never comes up (its handshake
+/// never answers; `start_wait` gives up after 600 ms).
+async fn silent_codex() -> (Fixture, Id) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_str().unwrap().to_string();
+    let rec = Arc::new(StdMutex::new(Rec::default()));
+    let r = Arc::clone(&rec);
+    // Codex never answers its handshake.
+    let drivers: Arc<dyn DriverFactory> = Arc::new(move |p| -> Option<Box<dyn StructuredDriver>> {
+        Some(Box::new(ScriptDriver {
+            rec: Arc::clone(&r),
+            live_model: false,
+            silent: p == RuntimeProvider::Codex,
+        }))
+    });
+    let rt = AgentRuntime::new(
+        AgentRuntimeRepo::new(pool().await),
+        Arc::new(Host { root: root.clone() }) as Arc<dyn RuntimeHost>,
+        drivers,
+        RuntimeConfig {
+            attachments_dir: dir.path().join("att"),
+            start_wait: Duration::from_millis(600),
+            ..RuntimeConfig::default()
+        },
+    );
+    let s = rt
+        .create(
+            &"u1".into(),
+            &"w1".into(),
+            CreateRuntimeSessionReq {
+                provider: Some(RuntimeProvider::Claude),
+                cwd: Some(root),
+                ..CreateRuntimeSessionReq::default()
+            },
+        )
+        .await
+        .unwrap();
+    let f = Fixture { rt, rec, _dir: dir };
+    (f, s.id)
+}
+
+/// Review 1: a switch whose request is dropped mid-handshake (a page reload)
+/// still ends: the agent never comes up, so the thread is exactly as before.
+#[tokio::test]
+async fn a_switch_whose_request_is_dropped_still_ends() {
+    let (f, id) = silent_codex().await;
+    let s = f.rt.get(&id).await.unwrap();
+    f.send(&s.id, RuntimePromptReq::of("hi")).await;
+    seed_commands(&f, &s.id);
+    let switch = RuntimePromptReq {
+        provider: Some("codex".into()),
+        ..RuntimePromptReq::of("go")
+    };
+    let dropped = tokio::time::timeout(
+        Duration::from_millis(150),
+        f.rt.prompt_to_end(&s.id, &switch),
+    );
+    assert!(
+        dropped.await.is_err(),
+        "the request is dropped mid-handshake"
+    );
+    let live = f
+        .until(&s.id, "the switch to end", |st| {
+            !st.fresh_starting && st.starting == 0
+        })
+        .await;
+    {
+        let st = live.lock();
+        assert_eq!(st.session.provider, RuntimeProvider::Claude);
+        assert_eq!(st.session.native_thread_id.as_deref(), Some("native-1"));
+        assert!(st.handoff.is_none());
+        assert_eq!(
+            st.proj.commands.len(),
+            1,
+            "a failed switch keeps the old commands"
+        );
+        assert!(!st
+            .proj
+            .items
+            .values()
+            .any(|i| matches!(i.kind, TurnItemKind::SessionBoundary { .. })));
+    }
+    f.rt.flush(&s.id).await;
+    let stored = f.rt.repo().get(&s.id).await.unwrap().session;
+    assert_eq!(stored.provider, RuntimeProvider::Claude);
+}
+
+/// A subagent of `of`, opened by its agent.
+async fn subagent(f: &Fixture, of: &Id) -> Id {
+    let cwd = f.rt.get(of).await.unwrap().cwd;
+    f.rt.create(
+        &"u1".into(),
+        &"w1".into(),
+        CreateRuntimeSessionReq {
+            provider: Some(RuntimeProvider::Claude),
+            cwd: Some(cwd),
+            meta: Some(children::child_meta(
+                of,
+                otto_core::agent_runtime::ChildOpener::Agent,
+            )),
+            ..CreateRuntimeSessionReq::default()
+        },
+    )
+    .await
+    .unwrap()
+    .id
+}
+
+/// Review 2: Stop pressed in a subagent's own thread quiets only what it
+/// delegated to; its own "was stopped" reply still wakes its lead.
+#[tokio::test]
+async fn stop_on_a_subagent_still_tells_its_lead() {
+    let (f, lead) = fixture(false, false, RuntimeConfig::default()).await;
+    let sub = subagent(&f, &lead).await;
+    let grand = subagent(&f, &sub).await;
+    f.rt.stop_family(&sub, false).await.unwrap();
+    assert!(
+        !family::recently_stopped(&sub),
+        "its reply to the lead is kept"
+    );
+    assert!(family::recently_stopped(&grand));
+    assert!(!family::recently_stopped(&lead));
+}
+
+/// Review 6: a family stop drops the replies queued for every member, not
+/// only for the thread Stop was pressed on.
+#[tokio::test]
+async fn a_family_stop_drops_every_members_queued_replies() {
+    let (f, lead) = fixture(false, false, RuntimeConfig::default()).await;
+    let a = subagent(&f, &lead).await;
+    let b = subagent(&f, &a).await;
+    for (on, from) in [(&lead, &a), (&a, &b)] {
+        f.live(on).lock().proj.queue.push(QueuedRecord {
+            id: new_id(),
+            created_at: Utc::now(),
+            req: Arc::new(RuntimePromptReq::of("a reply")),
+            wake: Some(children::WakeKey {
+                child: from.clone(),
+                turn: "t".into(),
+            }),
+            error: None,
+        });
+    }
+    f.rt.stop_family(&lead, false).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    for id in [&lead, &a] {
+        let live = f.live(id);
+        let st = live.lock();
+        assert!(st.proj.queue.is_empty(), "{id}");
+        assert!(st.turn.is_none(), "{id} stays stopped");
+    }
+}
+
+fn seed_commands(f: &Fixture, id: &Id) {
+    f.live(id).lock().proj.commands = vec![otto_core::agent_runtime::ProviderCommand {
+        name: "old-skill".into(),
+        description: String::new(),
+        hint: None,
+    }];
+}
+
+/// Review 10: after a switch the old agent's slash commands are gone, even
+/// when the new agent lists none of its own.
+#[tokio::test]
+async fn a_switch_drops_the_old_agents_commands() {
+    let (f, id) = fixture(false, false, RuntimeConfig::default()).await;
+    f.send(&id, RuntimePromptReq::of("hi")).await;
+    seed_commands(&f, &id);
+    let switch = RuntimePromptReq {
+        provider: Some("codex".into()),
+        ..RuntimePromptReq::of("go")
+    };
+    f.send(&id, switch).await;
+    let live = f.live(&id);
+    let st = live.lock();
+    assert_eq!(st.session.provider, RuntimeProvider::Codex);
+    assert!(st.proj.commands.is_empty(), "{:?}", st.proj.commands);
+}
+
+/// Review 11: a pin made while a switch starts is kept when the switch fails
+/// (only the provider's own meta key is put back).
+#[tokio::test]
+async fn a_failed_switch_keeps_meta_patched_meanwhile() {
+    let (f, id) = silent_codex().await;
+    f.send(&id, RuntimePromptReq::of("hi")).await;
+    let rt = f.rt.clone();
+    let sid = id.clone();
+    let switch = tokio::spawn(async move {
+        let req = RuntimePromptReq {
+            provider: Some("codex".into()),
+            ..RuntimePromptReq::of("go")
+        };
+        rt.prompt_to_end(&sid, &req).await
+    });
+    f.until(&id, "the switch to start", |st| st.fresh_starting)
+        .await;
+    let pin = serde_json::json!({"thread_pinned": true});
+    f.rt.update_thread_meta(&id, pin.as_object().unwrap().clone())
+        .await
+        .unwrap();
+    assert!(switch.await.unwrap().is_err(), "codex never comes up");
+    let s = f.rt.get(&id).await.unwrap();
+    assert_eq!(s.provider, RuntimeProvider::Claude);
+    let meta = s.meta.unwrap_or_default();
+    assert_eq!(
+        meta.get("thread_pinned"),
+        Some(&serde_json::json!(true)),
+        "{meta}"
+    );
+}
+
+/// An agent that names the conversation after its first prompt (Codex does,
+/// verbatim) names it after Otto's preamble: that is never the title.
+#[tokio::test]
+async fn otto_preamble_never_becomes_the_title() {
+    let (f, id) = fixture(false, false, RuntimeConfig::default()).await;
+    {
+        let live = f.live(&id);
+        let mut st = live.lock();
+        st.session.title = "fix the login bug".into();
+        st.session.title_auto = true;
+    }
+    for named in [
+        "TITLE <otto_instructions> ## Otto subagents Ordinary tasks need none",
+        "TITLE [Context handoff from Claude Code] You continue a thread",
+        "TITLE [Subagent task from thread \"x\"]",
+    ] {
+        f.send(&id, RuntimePromptReq::of(named)).await;
+        assert_eq!(
+            f.rt.get(&id).await.unwrap().title,
+            "fix the login bug",
+            "{named}"
+        );
+    }
+    f.send(&id, RuntimePromptReq::of("TITLE Login bug fix"))
+        .await;
+    assert_eq!(f.rt.get(&id).await.unwrap().title, "Login bug fix");
 }

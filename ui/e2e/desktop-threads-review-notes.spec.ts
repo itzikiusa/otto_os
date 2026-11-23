@@ -62,3 +62,30 @@ test('desktop: note a range, it survives a reload, goes to the agent as one mess
   await expectNoHorizontalOverflow(page);
 });
 
+
+test('desktop: a note put in the composer goes back to Draft when its chip is removed or it is edited', async ({ page }, info) => {
+  test.skip(info.project.name !== 'desktop-browser', 'desktop-browser project only');
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await setup(page, { inspector: true });
+  await page.goto('/#/threads/notes-alpha');
+  const tab = page.getByTestId('inspector-changes-tab');
+  await tab.getByRole('button', { name: 'Note on src/a.ts new line 9', exact: true }).click({ timeout: 30_000 });
+  await tab.getByTestId('diff-note-input').fill('Name the queue.');
+  await tab.getByTestId('diff-note-input').press('ControlOrMeta+Enter');
+  const note = tab.getByTestId('diff-note');
+  const bar = tab.getByTestId('diff-review-bar');
+  const chips = page.getByTestId('runtime-thread-notes-alpha').getByTestId('runtime-context-chips');
+  await bar.getByTestId('diff-review-send').click();
+  await expect(note.getByTestId('diff-note-state')).toHaveText('Sent');
+  // Only a chip was added: removing it takes the note back to Draft.
+  await chips.getByRole('button', { name: 'Remove Review · 1 note' }).click();
+  await expect(note.getByTestId('diff-note-state')).toHaveText('Draft');
+  await bar.getByTestId('diff-review-send').click();
+  await expect(note.getByTestId('diff-note-state')).toHaveText('Sent');
+  // An edited note needs sending again.
+  await note.getByRole('button', { name: /^Edit note on/ }).click();
+  await tab.getByTestId('diff-note-input').fill('Name the queue offlineQueue.');
+  await tab.getByTestId('diff-note-input').press('ControlOrMeta+Enter');
+  await expect(note.getByTestId('diff-note-state')).toHaveText('Draft');
+  await expect(bar.getByTestId('diff-review-send')).toBeEnabled();
+});

@@ -37,7 +37,10 @@
   $effect(() => {
     const el = textareaEl;
     if (!el) return;
-    const close = (): void => void (query = null);
+    // Deferred: Chromium fires blur while the focused composer is being
+    // removed, inside the block effect's teardown, where a state write throws
+    // (state_unsafe_mutation).
+    const close = (): void => queueMicrotask(() => (query = null));
     for (const t of ['input', 'keyup', 'click'] as const) el.addEventListener(t, sync);
     el.addEventListener('blur', close);
     return () => {

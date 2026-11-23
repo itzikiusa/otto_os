@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { fileURLToPath } from 'node:url';
 import { mcpThreads } from './threads-mcp-fixture';
 
@@ -25,7 +25,18 @@ test('an approval-gated Otto tool asks in the thread, and Allow once runs the wa
   await expect(row).not.toContainText('resubmit');
 });
 
-test('thread ⋯ ▸ MCP servers lists what the agent has, each with a word and why', async ({ page }) => {
+/** ⌘K › "MCP servers for this thread" (off the toolbar ⋯, which holds at most 9). */
+async function openMcpServers(page: Page): Promise<void> {
+  const bar = page.getByTestId('floating-bar');
+  await expect(async () => {
+    await page.keyboard.press('Meta+k');
+    await expect(bar.getByRole('combobox')).toBeVisible({ timeout: 1_000 });
+  }).toPass({ timeout: 15_000 });
+  await bar.getByRole('combobox').fill('MCP servers for this thread');
+  await bar.getByRole('option').filter({ hasText: 'MCP servers for this thread' }).first().click();
+}
+
+test('⌘K › MCP servers for this thread lists what the agent has, each with a word and why', async ({ page }) => {
   const { ctx, base, wsId } = t.state;
   const made = await ctx.post(`${base}/api/v1/workspaces/${wsId}/mcp-servers`, {
     data: { name: 'probe-missing', command: '/nonexistent/otto-e2e-probe', enabled: true },
@@ -42,8 +53,7 @@ test('thread ⋯ ▸ MCP servers lists what the agent has, each with a word and 
   const sheet = page.getByTestId('runtime-mcp-servers');
   await expect(sheet).toBeVisible();
   await page.getByRole('button', { name: 'Done' }).click();
-  await page.getByRole('button', { name: 'Thread and view actions' }).click();
-  await page.getByRole('menuitem', { name: 'MCP servers' }).click();
+  await openMcpServers(page);
   await expect(sheet).toBeVisible();
   const row = (name: string) => sheet.locator(`[data-testid="runtime-mcp-server"][data-name="${name}"]`);
   await expect(row('otto')).toContainText('Connected');
@@ -87,9 +97,29 @@ test('a server enabled mid-thread says "MCP servers changed", and Restart agent 
   await line.getByRole('button', { name: 'Restart agent to apply' }).click();
   await expect(line).toHaveCount(0, { timeout: 30_000 });
   // The restarted agent has it, and the conversation goes on.
-  await page.getByRole('button', { name: 'Thread and view actions' }).click();
-  await page.getByRole('menuitem', { name: 'MCP servers' }).click();
+  await openMcpServers(page);
   await expect(page.locator('[data-testid="runtime-mcp-server"][data-name="late-probe"]')).toContainText('Connected');
+});
+
+test('a subagent\'s MCP approval shows in its parent, and Allow once runs it', async ({ page }) => {
+  const { ctx, base } = t.state;
+  const { id, thread } = await t.send(page, 'MCP parent', 'hello');
+  await expect(thread.getByText('echo: hello')).toBeVisible({ timeout: 30_000 });
+  const kids = await ctx.post(`${base}/api/v1/runtime-sessions/${id}/children`, { data: { prompt: 'hi', targets: [{ provider: 'claude' }], title: 'MCP subagent' } });
+  expect(kids.ok(), await kids.text()).toBeTruthy();
+  const kid = ((await kids.json()) as { children: { id: string }[] }).children[0].id;
+  await expect
+    .poll(async () => ((await (await ctx.get(`${base}/api/v1/runtime-sessions/${kid}`)).json()) as { last_turn_status?: string }).last_turn_status ?? '', { timeout: 30_000 })
+    .toBe('completed');
+  // The subagent calls an approval-gated tool: the call is held for the person
+  // (its row never says awaiting_permission), and the parent shows the card.
+  const line = `mcp otto otto_broadcast_message ${JSON.stringify({ workspace_id: t.state.wsId, text: 'from the subagent' })}`;
+  expect((await ctx.post(`${base}/api/v1/runtime-sessions/${kid}/prompt`, { data: { text: line } })).ok()).toBeTruthy();
+  const card = thread.getByTestId('runtime-child-approval');
+  await expect(card).toBeVisible({ timeout: 30_000 });
+  await expect(card).toContainText('Approval needed from MCP subagent');
+  await card.getByRole('button', { name: 'Allow once', exact: true }).click();
+  await expect(card).toBeHidden({ timeout: 15_000 });
 });
 
 test('a fresh context (/clear) and a revive keep the thread\'s MCP tools', async ({ page }) => {
@@ -133,8 +163,7 @@ test('switching the thread to another provider hands it the same MCP servers', a
     const r = await (await ctx.get(`${base}/api/v1/runtime-sessions/${id}`)).json();
     return r.provider;
   }, { timeout: 30_000 }).toBe('codex');
-  await page.getByRole('button', { name: 'Thread and view actions' }).click();
-  await page.getByRole('menuitem', { name: 'MCP servers' }).click();
+  await openMcpServers(page);
   const sheet = page.getByTestId('runtime-mcp-servers');
   await expect(sheet.locator('[data-name="otto"]')).toBeVisible();
   await expect(sheet.locator('[data-name="switch-probe"]')).toBeVisible();

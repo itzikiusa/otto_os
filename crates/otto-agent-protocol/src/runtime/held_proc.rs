@@ -156,6 +156,7 @@ pub(super) fn finalize_child_exit(
     stderr_tail: String,
 ) {
     live.proc_ended.notify_waiters();
+    super::client_calls::drop_session(&st.session.id);
     st.released = false;
     retire(inner, &st.session);
     let step = proc.driver.on_exit(code);
@@ -457,6 +458,7 @@ fn handle_unexpected_holder_disconnect(inner: &Arc<Inner>, live: &Arc<Live>, epo
         client.shutdown_fire_and_forget(Duration::from_millis(250));
     }
     live.proc_ended.notify_waiters();
+    super::client_calls::drop_session(&st.session.id);
     retire(inner, &st.session);
     let step = proc.driver.on_exit(None);
     apply_step_opts(inner, live, &mut st, step, true, true);
