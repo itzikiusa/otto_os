@@ -77,7 +77,7 @@ async function idle(thread: Locator): Promise<void> {
   await expect(thread.getByTestId('runtime-send')).toHaveAttribute('data-delivery', 'send', { timeout: 30_000 });
 }
 
-test('the agent widening its own mode waits for Keep, then the access follows', async ({ page }, info) => {
+test('the agent widening its own mode never widens the thread', async ({ page }, info) => {
   test.skip(!desktop(info.project.name), 'desktop-browser project only');
   test.setTimeout(90_000);
   const thread = await open(page, 'agy', 'ACP mode');
@@ -90,14 +90,11 @@ test('the agent widening its own mode waits for Keep, then the access follows', 
   };
   await checked('Supervised');
   await say(thread, 'agent-mode accept-edits');
-  // Wider than the thread's access: never silently — the person keeps or reverts it.
-  const dock = thread.getByTestId('runtime-attention');
-  await expect(dock).toContainText('switched itself to accept-edits', { timeout: 20_000 });
-  await checked('Supervised');
-  await dock.getByRole('button', { name: 'Keep', exact: true }).click();
+  // Wider than the thread's access: never silently — Otto keeps the thread on
+  // Supervised and says so in one line.
   await idle(thread);
-  await expect(thread.getByText(/Access:.*auto-accept-edits/i).last()).toBeVisible({ timeout: 20_000 });
-  await checked('Auto-accept edits');
+  await expect(thread.getByText(/switched itself to accept-edits · Otto kept this thread on approval-required/)).toBeVisible({ timeout: 20_000 });
+  await checked('Supervised');
 });
 
 test('url elicitation names the URL and opens it once chosen', async ({ page }, info) => {

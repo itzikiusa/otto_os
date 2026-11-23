@@ -5112,22 +5112,23 @@ async fn an_agent_initiated_mode_change_moves_the_threads_access() {
     let host = TestHost::new(root, false);
     let rt = runtime(&pool, &host, RuntimeConfig::default());
     let s = create_as(&rt, root, RuntimeProvider::Agy).await;
-    // Wider than the thread's access: held for the person (Keep / Revert).
+    // Wider than the thread's access: Otto keeps it, sets the agent back
+    // and says so.
     rt.prompt(&s.id, "agent-mode accept-edits").await.unwrap();
-    let req = host.wait(is_type("runtime_request.updated")).await;
-    let RuntimeEventBody::RuntimeRequestUpdated { runtime_request } = req.body else {
-        unreachable!()
-    };
+    host.wait(is_terminal).await;
     assert_eq!(
         rt.get(&s.id).await.unwrap().access_mode,
         RuntimeAccessMode::ApprovalRequired
     );
-    rt.respond(&s.id, &runtime_request.id, ApprovalDecision::Accept)
-        .await
-        .unwrap();
-    host.wait(is_terminal).await;
-    let s = rt.get(&s.id).await.unwrap();
-    assert_eq!(s.access_mode, RuntimeAccessMode::AutoAcceptEdits);
+    assert!(host.items().iter().any(|i| matches!(&i.kind,
+        TurnItemKind::SystemNotice { message, .. } if message.contains("switched itself to accept-edits"))));
+    rt.prompt(&s.id, "mode").await.unwrap();
+    host.wait_n(is_terminal, 2).await;
+    assert_eq!(
+        last_assistant_text(&host),
+        "mode: default",
+        "the agent was set back"
+    );
     rt.close(&s.id).await.unwrap();
 }
 
