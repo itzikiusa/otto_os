@@ -25,6 +25,7 @@
   import { inboxOrder } from './threadFamilies';
   import { inboxClass, inboxScore, inboxSections } from './threadInbox';
   import { inboxLive } from './threadInbox.svelte';
+  import { threadMeta } from './threadMeta.svelte';
   import { threadRowState } from './threadNav.svelte';
   import {
     delegatedParentId,
@@ -50,6 +51,11 @@
   let historyExpanded = $state(false);
   let workingExpanded = $state(true);
   $effect(() => inboxLive.mount());
+  // Pins / History / "seen" live on the thread: hear other devices, move this
+  // browser's old local lists over once, and mark the thread in front as seen.
+  $effect(() => threadMeta.mount(() => (threads.newDraftMode ? null : threads.focusedSessionId)));
+  $effect(() => void threads.migrateLocal());
+  $effect(() => threadMeta.markSeen(threads.newDraftMode ? null : threads.focusedSessionId));
   let addingProject = $state(false);
 
   // Lazy-load archived sessions when History is expanded or when searching.
@@ -132,13 +138,14 @@
   const filteredLive = $derived(allLiveThreads.filter(isMain));
   const sideGroups = $derived(originGroups([...allLiveThreads, ...runtimeThreads.rows(true)].filter(matchesFilters)));
 
+  // Pinned on the thread itself (threadMeta): every device shows the same.
   const pinnedThreads = $derived.by(() => {
     const byId = new Map<string, Session>();
     for (const s of allLiveThreads) byId.set(s.id, s);
     for (const s of ws.archivedSessions) if (isThreadSession(s, allPool)) byId.set(s.id, s);
-    return threads.pinnedIds
-      .map((id) => byId.get(id))
-      .filter((s): s is Session => !!s && matchesFilters(s));
+    return [...byId.values()]
+      .filter((s) => threadMeta.pinned(s.id) && matchesFilters(s))
+      .sort((a, b) => threadMeta.cameBackAt(b).localeCompare(threadMeta.cameBackAt(a)));
   });
 
   // The inbox (threadInbox.ts): every live thread that is not pinned or in
@@ -161,16 +168,17 @@
   function classOf(s: Session): ReturnType<typeof inboxClass> {
     const st = threadRowState(s);
     const focused = threads.focusedSessionId === s.id && !threads.newDraftMode;
-    const unread = !focused && st.key !== 'needs-you' && (ws.unread[s.id] === true || runtimeThreads.unread[s.id] === true);
+    const unread = !focused && st.key !== 'needs-you' && threadMeta.unread(s.id, ws.unread[s.id] === true || runtimeThreads.unread[s.id] === true);
     return inboxClass(st.key, unread);
   }
   const score = (s: Session): number => inboxScore(classOf(s));
 
   const unsettledLive = $derived(filteredLive.filter((s) => !threads.isSettled(s.id) && !threads.isPinned(s.id)));
-  const sections = $derived(inboxSections(unsettledLive, classOf, delegatedParentId, isFolded));
+  const cameBack = (s: Session): string => threadMeta.cameBackAt(s);
+  const sections = $derived(inboxSections(unsettledLive, classOf, delegatedParentId, isFolded, cameBack));
   /** The threads of the main list, folded rows included (grouped by project). */
   /** Unfolded: what next / previous and "Next that needs you" walk. */
-  const allSections = $derived(inboxSections(unsettledLive, classOf, delegatedParentId));
+  const allSections = $derived(inboxSections(unsettledLive, classOf, delegatedParentId, undefined, cameBack));
   const mainPool = $derived.by(() => {
     const workingIds = new Set(allSections.working.map((r) => r.session.id));
     return unsettledLive.filter((s) => !workingIds.has(s.id));
@@ -201,7 +209,7 @@
       })
       .map((grp) => ({
         ...grp,
-        ordered: inboxOrder(grp.items, score, delegatedParentId, isFolded),
+        ordered: inboxOrder(grp.items, score, delegatedParentId, isFolded, cameBack),
       }));
   });
 
@@ -240,7 +248,7 @@
     };
     return [...groups.values()]
       .sort((a, b) => pinRank(a.key) - pinRank(b.key))
-      .map((g) => ({ ...g, ordered: inboxOrder(g.items, score, delegatedParentId, isFolded) }));
+      .map((g) => ({ ...g, ordered: inboxOrder(g.items, score, delegatedParentId, isFolded, cameBack) }));
   });
 
   // History combines settled threads + archived daemon threads.

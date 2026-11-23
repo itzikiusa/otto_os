@@ -8,6 +8,7 @@ import { toastError } from '../../lib/toastError';
 import type { TrailEvent } from '../../lib/api/types';
 import { threadsChrome } from './threadsChrome.svelte';
 import { offerUndo } from './threadUndo';
+import { threadMeta } from './threadMeta.svelte';
 
 export type ThreadsLayoutMode = 'single' | 'split' | 'grid';
 export type ThreadsInspectorTab = 'files' | 'changes' | 'pr' | 'side' | 'connections' | 'browser';
@@ -59,6 +60,7 @@ export interface McpDbActivity {
 }
 
 interface PersistedThreadsPrefs {
+  /** Legacy: this browser's pins / History before they moved onto the threads (`threadMeta`). */
   pinnedIds?: string[];
   settledIds?: string[];
   paneIds?: string[];
@@ -99,8 +101,9 @@ function readPrefs(): PersistedThreadsPrefs {
 }
 
 class ThreadsStore {
-  pinnedIds = $state<string[]>([]);
-  settledIds = $state<string[]>([]);
+  /** This browser's old local pins / History, kept only until `migrateLocal` moves them. */
+  private legacyPins: string[] = [];
+  private legacyHistory: string[] = [];
   paneIds = $state<string[]>([]);
   focusedSessionId = $state<string | null>(null);
   layoutMode = $state<ThreadsLayoutMode>('single');
@@ -167,8 +170,8 @@ class ThreadsStore {
 
   constructor() {
     const p = readPrefs();
-    if (Array.isArray(p.pinnedIds)) this.pinnedIds = p.pinnedIds.filter((x): x is string => typeof x === 'string');
-    if (Array.isArray(p.settledIds)) this.settledIds = p.settledIds.filter((x): x is string => typeof x === 'string');
+    if (Array.isArray(p.pinnedIds)) this.legacyPins = p.pinnedIds.filter((x): x is string => typeof x === 'string');
+    if (Array.isArray(p.settledIds)) this.legacyHistory = p.settledIds.filter((x): x is string => typeof x === 'string');
     if (Array.isArray(p.paneIds)) {
       this.paneIds = p.paneIds.filter((x): x is string => typeof x === 'string').slice(0, MAX_PANES);
     }
@@ -210,8 +213,7 @@ class ThreadsStore {
     if (typeof localStorage === 'undefined') return;
     try {
       const payload: PersistedThreadsPrefs = {
-        pinnedIds: this.pinnedIds,
-        settledIds: this.settledIds,
+        ...(this.legacyPins.length || this.legacyHistory.length ? { pinnedIds: this.legacyPins, settledIds: this.legacyHistory } : {}),
         paneIds: this.paneIds,
         focusedSessionId: this.focusedSessionId,
         layoutMode: this.layoutMode,
@@ -360,44 +362,38 @@ class ThreadsStore {
     }
   }
 
+  // Pins and History live on the thread (`threadMeta`: every device agrees).
   isPinned(id: string): boolean {
-    return this.pinnedIds.includes(id);
+    return threadMeta.pinned(id);
   }
 
-  /** Pin / unpin at once, with an Undo notice (threadUndo.ts). */
+  /** Pin / unpin at once, with an Undo notice (threadUndo.ts); a failed write
+   *  rolls back with the error toast and offers no Undo. */
   togglePin(id: string): void {
-    const was = this.pinnedIds.includes(id);
-    const at = this.pinnedIds.indexOf(id);
-    this.setPinned(id, !was);
-    offerUndo(was ? 'Unpinned' : 'Pinned', () => this.setPinned(id, was, at));
+    const was = this.isPinned(id);
+    void threadMeta.write(id, { thread_pinned: was ? null : true }).then((ok) => {
+      if (ok) offerUndo(was ? 'Unpinned' : 'Pinned', () => void threadMeta.write(id, { thread_pinned: was ? true : null }));
+    });
   }
 
-  private setPinned(id: string, on: boolean, at = 0): void {
-    const rest = this.pinnedIds.filter((x) => x !== id);
-    this.pinnedIds = on ? [...rest.slice(0, Math.max(0, at)), id, ...rest.slice(Math.max(0, at))] : rest;
-    this.save();
-  }
-
-  isSettled(id: string): boolean {
-    return this.settledIds.includes(id);
-  }
+  isSettled(id: string): boolean { return threadMeta.history(id); }
 
   /** Move to History / back at once, with an Undo notice (threadUndo.ts). */
   toggleSettle(id: string): void {
-    const was = this.settledIds.includes(id);
-    this.setSettled(id, !was);
-    offerUndo(was ? 'Moved back to Active' : 'Moved to History', () => this.setSettled(id, was));
+    const was = this.isSettled(id);
+    void threadMeta.write(id, { thread_history: was ? null : true }).then((ok) => {
+      if (ok) offerUndo(was ? 'Moved back to Active' : 'Moved to History', () => void threadMeta.write(id, { thread_history: was ? true : null }));
+    });
   }
 
-  private setSettled(id: string, on: boolean): void {
-    const rest = this.settledIds.filter((x) => x !== id);
-    this.settledIds = on ? [id, ...rest] : rest;
-    this.save();
-  }
+  unsettle(id: string): void { if (this.isSettled(id)) void threadMeta.write(id, { thread_history: null }); }
 
-  unsettle(id: string): void {
-    if (!this.settledIds.includes(id)) return;
-    this.settledIds = this.settledIds.filter((x) => x !== id);
+  /** Once: this browser's old local pins / History onto the threads. */
+  async migrateLocal(): Promise<void> {
+    if (!(await threadMeta.migrate(this.legacyPins, this.legacyHistory))) return;
+    if (!this.legacyPins.length && !this.legacyHistory.length) return;
+    this.legacyPins = [];
+    this.legacyHistory = [];
     this.save();
   }
 
@@ -406,6 +402,7 @@ class ThreadsStore {
     this.focusedSessionId = id;
     this.newDraftMode = false;
     ws.activeThreadId = id;
+    threadMeta.markSeen(id);
     ws.clearNeedsYou(id);
     if (ws.unread[id]) {
       const next = { ...ws.unread };
