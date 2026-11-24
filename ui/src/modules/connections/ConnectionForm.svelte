@@ -271,11 +271,11 @@
       secret = r.secret ?? '';
       fConnString = r.connString;
     } else {
-      if (r.host) fHost = r.host;
-      if (r.port) fPort = r.port;
-      if (r.user) fUser = r.user;
-      if (r.secret) secret = r.secret;
-      if (r.db) fDb = r.db;
+      fHost = r.host ?? '';
+      fPort = r.port ?? '';
+      fUser = r.user ?? '';
+      secret = r.secret ?? '';
+      fDb = r.db ?? '';
     }
     if (r.tlsMode) tlsMode = r.tlsMode;
     if (r.tlsVerify === false) tlsVerify = false;
@@ -383,11 +383,11 @@
         testResult = { ok: res.ok, detail: bits ? `${res.message} (${bits})` : res.message, argv: res.warn_argv };
       }
     } catch (e) {
-      if (seq !== testSeq) return;
-      testResult = { ok: false, detail: loadErrorText(e) };
+      if (seq === testSeq) testResult = { ok: false, detail: loadErrorText(e) };
     } finally {
       if (seq === testSeq) testing = false;
     }
+    if (seq === testSeq && formSig !== testedSig) testResult = null;
     if (seq === testSeq && testResult && (!testResult.ok || testResult.warn)) queueMicrotask(() => testPanel?.scrollIntoView({ block: 'nearest' }));
   }
 

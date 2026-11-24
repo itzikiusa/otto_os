@@ -11,7 +11,8 @@
 //   ran out (honouring the hover/focus pause), the user dismissed it, its
 //   action ran, or a burst pushed it out. A deferred commit ("Always delete")
 //   hangs off it, so a paused toast pauses the commit too (S13-301).
-// • At most MAX_VISIBLE stay up; a burst drops the oldest non-error first.
+// • At most MAX_VISIBLE stay up; a burst drops the oldest plain toast first,
+//   then one whose close commits something (an Undo ends early), then errors.
 
 export interface ToastAction {
   label: string;
@@ -68,7 +69,7 @@ class ToastStore {
     if (opts.onClose) this.onClose.set(id, opts.onClose);
     let next = [...this.toasts, { id, level, title, body, count: 1, action: opts.action }];
     while (next.length > MAX_VISIBLE) {
-      const drop = next.find((t) => t.level !== 'error') ?? next[0];
+      const drop = next.find((t) => t.level !== 'error' && !this.onClose.has(t.id)) ?? next.find((t) => t.level !== 'error') ?? next[0];
       this.clearTimer(drop.id);
       next = next.filter((t) => t.id !== drop.id);
       this.notifyClose(drop.id, 'dropped');

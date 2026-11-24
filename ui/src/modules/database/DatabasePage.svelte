@@ -261,13 +261,12 @@
   );
   async function onConnSaved(c: Connection): Promise<void> {
     connFormOpen = false;
-    connectionList.upsert(c);
+    connectionList.upsert(c, true);
     await database.loadConnections();
+    // The edit may have fixed (or broken) the open tab's connection: connect again.
+    if (database.selectedConnId === c.id) void database.retryConnection(c.id);
   }
-  function editCluster(cl: BrokerCluster): void {
-    editingCluster = cl;
-    clusterFormOpen = true;
-  }
+  function editCluster(cl: BrokerCluster): void { editingCluster = cl; clusterFormOpen = true; }
   // Open a Kafka cluster as a workbench tab (in place, next to the DB tabs) —
   // the brokers store owns the tab list + selection; `focusKafka` points the main
   // area at it. No navigation: the viewer renders right here.
@@ -376,7 +375,8 @@
     if (!connsSettled || !id) return;
     untrack(() => {
       deepTried = '';
-      void openDeep(id).finally(() => (deepTried = id));
+      // Only the link still in the URL: an older, slower open settling last must not claim it.
+      void openDeep(id).finally(() => { if (id === deepId) deepTried = id; });
     });
   });
   // …and the URL follows the open connection (a tab switch), so a reload or

@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import { parseConnectionUri } from '../src/modules/connections/connectionUri.ts';
+import { componentFunctions } from './componentFunctions.ts';
 function form(overrides: Record<string, unknown> = {}) {
   const text = readFileSync(new URL('../src/modules/connections/ConnectionForm.svelte', import.meta.url), 'utf8');
   const functions = text.slice(text.indexOf('  function buildParams()'), text.indexOf("  let dsnValue"));
@@ -140,4 +141,31 @@ test('a pasted URI fills the fields where URL leaves non-special schemes opaque'
   } finally {
     globalThis.URL = Real;
   }
+});
+
+test('re-pasting a URI replaces every field the first one filled (R1-007)', () => {
+  const c = form();
+  c.parseDsn('mysql://admin:prod-secret@prod.internal:3307/billing');
+  assert.equal(c.secret, 'prod-secret');
+  c.parseDsn('mysql://staging.internal/test');
+  assert.equal(c.fHost, 'staging.internal');
+  assert.equal(c.secret, '');
+  assert.equal(c.fUser, '');
+  assert.equal(c.fPort, '');
+  assert.equal(c.fDb, 'test');
+});
+
+test('a Test answer for values edited while it ran is dropped (R1-051)', async () => {
+  let resolve!: (v: unknown) => void;
+  const ctx = componentFunctions(new URL('../src/modules/connections/ConnectionForm.svelte', import.meta.url), ['testUnsaved'], {
+    testing: false, testResult: null, testedSig: '', testSeq: 0, formSig: 'sig1', kind: 'mysql', existing: null, secret: '',
+    auth: { isRoot: true }, ws: { currentId: 'w' }, buildParams: () => ({}), loadErrorText: String, queueMicrotask, testPanel: null,
+    api: { post: () => new Promise((r) => { resolve = r; }) },
+  });
+  const run = ctx.testUnsaved();
+  ctx.formSig = 'sig2'; // the host was edited while the probe ran
+  resolve({ ok: true, message: 'Connected' });
+  await run;
+  assert.equal(ctx.testing, false);
+  assert.equal(ctx.testResult, null, 'no green Connected for untested values');
 });

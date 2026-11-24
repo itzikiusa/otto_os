@@ -1,3 +1,9 @@
+<script module lang="ts">
+  /** Rows hidden while their Delete can still be undone — module-level, so
+   *  leaving the page and coming back inside the Undo window keeps them hidden. */
+  let deleting = $state<Record<string, true>>({});
+</script>
+
 <script lang="ts">
   // Connections — the list IS the page (docs/design/guidelines/patterns.md
   // §10): every saved profile (databases, SSH hosts, custom CLIs) and Kafka
@@ -79,8 +85,6 @@
     lsSet(FILTER_KEY, k);
   }
 
-  /** Rows hidden while their Delete can still be undone. */
-  let deleting = $state<Record<string, true>>({});
   /** Rows with a Test in flight. */
   let testing = $state<Record<string, true>>({});
   // Minute-grain: a check's freshness and "opened 4m ago" change per minute.
@@ -94,7 +98,8 @@
   const narrowed = $derived(!!q.trim() || kind !== 'all' || section !== null);
   const shown = $derived(allItems.filter((i) => matches(i, { q, kind, section }, connectionList.sections)));
   const groups = $derived(groupItems(shown, connectionList.sections, narrowed));
-  const isEmpty = $derived(connectionList.loaded && !connectionList.error && allItems.length === 0 && connectionList.sections.length === 0);
+  // Kafka clusters are rows too: not "No connections yet" while they load or failed to.
+  const isEmpty = $derived(connectionList.loaded && !connectionList.error && !brokers.loading && !brokers.loadError && allItems.length === 0 && connectionList.sections.length === 0);
 
   function filterMenu(e: MouseEvent): void {
     const items: MenuItem[] = [
@@ -149,7 +154,7 @@
   function onSaved(c: Connection): void {
     const wasNew = !form?.existing;
     form = null;
-    connectionList.upsert(c);
+    connectionList.upsert(c, !wasNew);
     void connectionList.refresh();
     // A new database opens straight into the workbench; SSH/custom wait for a click.
     if (wasNew && DB_KINDS.includes(c.kind)) open(fromConnection(c));
@@ -430,6 +435,10 @@
       {/if}
     {/if}
 
+    {#if brokers.loadError}
+      <LoadState what="Kafka clusters" variant="compact" error={brokers.loadError} loading={brokers.loading} empty={brokers.clusters.length === 0}
+        onretry={() => ws.currentId && void brokers.load(ws.currentId, { withSections: false })} />
+    {/if}
     <LoadState
       what="connections"
       variant="page"
@@ -471,7 +480,7 @@
                 {#snippet actions()}
                   <button class="icon-btn" aria-label="Section actions for {sec.name}" title="Section actions" onclick={(e) => sectionMenu(e, sec)}><Icon name="more" size={14} /></button>
                 {/snippet}
-                {#if g.items.length === 0}<p class="conn-empty-sec">No connections in this section.</p>{/if}
+                {#if g.items.length === 0 && !connectionList.sections.some((s) => s.parent_id === sec.id)}<p class="conn-empty-sec">No connections in this section.</p>{/if}
                 {@render rows(g.items)}
               </InboxFold>
             {:else}
@@ -599,6 +608,13 @@
     flex-shrink: 0;
     margin-inline-start: auto;
     font-variant-numeric: tabular-nums;
+  }
+  /* The hover ⋯ (24 px + its inset and lead-in) covers line 3's end: line 3
+     makes room, so its text ends in an ellipsis beside it, not under it. */
+  @media (hover: hover) {
+    .conn-row:is(:hover, :focus-within) :global(.tr-l3) {
+      padding-inline-end: calc(24px + var(--sp-2) + var(--sp-3) - var(--sp-5));
+    }
   }
   .conn-empty-sec {
     margin: 0;
