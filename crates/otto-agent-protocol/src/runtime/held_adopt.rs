@@ -33,9 +33,6 @@ impl AgentRuntime {
             self.shutdown().await;
             return;
         }
-        // Client terminals are the daemon's own children: nothing reaches
-        // them after this (the agents' pending calls are refused on adopt).
-        super::client_calls::drop_all();
         let lives: Vec<Arc<Live>> = self
             .inner
             .live
@@ -53,6 +50,9 @@ impl AgentRuntime {
                 if taken.is_some() {
                     live.proc_ended.notify_waiters();
                 }
+                // Client terminals are the daemon's own children: nothing
+                // reaches them after this (pending calls are refused on adopt).
+                super::client_calls::drop_session(&st.session.id);
                 taken
             };
             if let Some((proc, cp)) = taken {

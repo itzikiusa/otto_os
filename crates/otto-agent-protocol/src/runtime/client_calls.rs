@@ -61,14 +61,6 @@ pub(super) fn drop_session(sid: &Id) {
     }
 }
 
-/// Every terminal (the daemon is stopping: nothing could reach them after).
-pub(super) fn drop_all() {
-    TERMINALS.retain(|_, terms| {
-        terms.values().for_each(|t| kill(t));
-        false
-    });
-}
-
 fn deliver(
     inner: &Inner,
     live: &Live,
@@ -261,6 +253,7 @@ async fn run(
                 if let Some(mut terms) = TERMINALS.get_mut(sid) {
                     terms.remove(&terminal_id);
                 }
+                TERMINALS.remove_if(sid, |_, terms| terms.is_empty());
                 kill(&t);
                 return Err("the session ended".into());
             }
