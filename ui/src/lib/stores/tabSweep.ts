@@ -18,9 +18,10 @@ export const TAB_SWEEP_THROTTLE_MS = 60_000;
 export type StaleReason = 'gone' | 'archived';
 
 /** Ids worth asking about: real session tabs/panes (not the `__…` sentinels
- *  such as the docked DB Explorer), each once. */
-export function sweepIds(tabs: readonly Id[], panes: readonly Id[]): Id[] {
-  return [...new Set([...tabs, ...panes])].filter((id) => !id.startsWith('__'));
+ *  such as the docked DB Explorer, nor `threads` — a structured thread has no
+ *  session row, so "absent" would prove nothing), each once. */
+export function sweepIds(tabs: readonly Id[], panes: readonly Id[], threads: readonly Id[] = []): Id[] {
+  return [...new Set([...tabs, ...panes])].filter((id) => !id.startsWith('__') && !threads.includes(id));
 }
 
 /**
@@ -54,6 +55,7 @@ export function sweepDue(now: number, last: number, force = false): boolean {
 export interface TabSweepHost {
   readonly openTabs: readonly Id[];
   readonly panes: readonly Id[];
+  readonly threadPanes: readonly Id[];
   readonly currentId: Id | null;
   getSession(id: Id): { title: string; status: string } | null;
   readonly statusMap: Readonly<Record<Id, string>>;
@@ -70,7 +72,7 @@ export async function sweepTabs(
   fetchRows: (ids: Id[]) => Promise<{ id: Id; archived?: boolean }[]>,
   warn: (msg: string, detail: Record<string, unknown>) => void = (m, d) => console.warn(m, d),
 ): Promise<Id[]> {
-  const asked = sweepIds(host.openTabs, host.panes);
+  const asked = sweepIds(host.openTabs, host.panes, host.threadPanes);
   if (asked.length === 0) return [];
   const workspace = host.currentId;
   // Snapshot what we knew BEFORE asking: the log should say what the tab showed.

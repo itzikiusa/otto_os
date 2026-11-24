@@ -1,9 +1,10 @@
 // Split-layout tree — the PURE half (no runes, no DOM, no runtime imports) so
 // `node --test` can exercise it directly and the store file can re-export it.
 // A layout is a binary tree of `col`/`row` splits with a fraction per node and
-// session ids at the leaves. Leaves carry their own `key` because the same
-// session may legally sit in two panes (split() clones the focused id), so
-// every op addresses leaves by key, never by session id.
+// a typed pane ref at each leaf: a PTY session (terminal, or its transcript)
+// or a structured thread (the Threads conversation). Leaves carry their own
+// `key` because the same ref may legally sit in two panes (split() clones the
+// focused one), so every op addresses leaves by key, never by id.
 //
 // Erasable syntax only (no enums / namespaces / parameter properties): Node's
 // built-in type stripping runs the unit tests without a build step.
@@ -11,7 +12,12 @@ import type { Id } from '../api/types';
 
 export type Axis = 'col' | 'row';
 export type Side = 'left' | 'right' | 'up' | 'down';
-export type Leaf = { kind: 'leaf'; key: string; session: Id };
+/** What a pane shows. Ids are unique across both kinds (both are UUIDs). */
+export type PaneKind = 'session' | 'thread';
+export type PaneRef = { kind: PaneKind; id: Id };
+export const sessionRef = (id: Id): PaneRef => ({ kind: 'session', id });
+export const threadRef = (id: Id): PaneRef => ({ kind: 'thread', id });
+export type Leaf = { kind: 'leaf'; key: string; ref: PaneRef };
 export type Split = { kind: 'split'; key: string; axis: Axis; frac: number; a: LayoutNode; b: LayoutNode };
 export type LayoutNode = Leaf | Split;
 export type Preset = 'cols' | 'rows' | 'one-two-below' | 'one-two-beside' | 'grid';
@@ -33,7 +39,7 @@ export const LS_TILE_ORDER = 'otto_tile_order_'; // + ws key (C3a tiled order)
 export const clampFrac = (f: number): number =>
   Math.min(FRAC_MAX, Math.max(FRAC_MIN, Number.isFinite(f) ? f : 0.5));
 export const newKey = (): string => `p${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-export const leaf = (session: Id): Leaf => ({ kind: 'leaf', key: newKey(), session });
+export const leaf = (ref: PaneRef): Leaf => ({ kind: 'leaf', key: newKey(), ref });
 export const split = (axis: Axis, a: LayoutNode, b: LayoutNode, frac = 0.5): Split => ({
   kind: 'split',
   key: newKey(),
@@ -43,7 +49,7 @@ export const split = (axis: Axis, a: LayoutNode, b: LayoutNode, frac = 0.5): Spl
   b,
 });
 
-/** Leaves in reading order (a before b, depth-first) — `ws.panes` is this list's sessions. */
+/** Leaves in reading order (a before b, depth-first) — `ws.panes` is this list's ids. */
 export function leaves(t: LayoutNode | null): Leaf[] {
   return !t ? [] : t.kind === 'leaf' ? [t] : [...leaves(t.a), ...leaves(t.b)];
 }
@@ -75,7 +81,7 @@ export function removeLeaf(t: LayoutNode | null, key: string): LayoutNode | null
   if (a === t.a && b === t.b) return t;
   return !a ? b : !b ? a : { ...t, a, b };
 }
-/** Swap the SESSIONS of two leaves; both keys stay where they are (the focused SLOT is unchanged). */
+/** Swap the REFS of two leaves; both keys stay where they are (the focused SLOT is unchanged). */
 export function swapLeaves(t: LayoutNode, k1: string, k2: string): LayoutNode {
   const l1 = findLeaf(t, k1);
   const l2 = findLeaf(t, k2);
@@ -83,9 +89,9 @@ export function swapLeaves(t: LayoutNode, k1: string, k2: string): LayoutNode {
   const go = (n: LayoutNode): LayoutNode =>
     n.kind === 'leaf'
       ? n.key === k1
-        ? { ...n, session: l2.session }
+        ? { ...n, ref: l2.ref }
         : n.key === k2
-          ? { ...n, session: l1.session }
+          ? { ...n, ref: l1.ref }
           : n
       : { ...n, a: go(n.a), b: go(n.b) };
   return go(t);
@@ -103,17 +109,17 @@ export function setFrac(t: LayoutNode, splitKey: string, frac: number): LayoutNo
   if (t.key === splitKey) return { ...t, frac: clampFrac(frac) };
   return { ...t, a: setFrac(t.a, splitKey, frac), b: setFrac(t.b, splitKey, frac) };
 }
-/** Every leaf whose session is `from` becomes `to`; `to === null` removes them. Dedupe: a REPLACED leaf whose new
- *  session already exists in another leaf is removed instead (mirrors closeTab's `arr.indexOf(p) === i` filter for
+/** Every leaf showing id `from` becomes `to`; `to === null` removes them. Dedupe: a REPLACED leaf whose new
+ *  ref already shows in another leaf is removed instead (mirrors closeTab's `arr.indexOf(p) === i` filter for
  *  the replaced slots; pre-existing duplicates from split() are left alone). */
-export function replaceSession(t: LayoutNode | null, from: Id, to: Id | null): LayoutNode | null {
+export function replaceSession(t: LayoutNode | null, from: Id, to: PaneRef | null): LayoutNode | null {
   let out = t;
-  const present = new Set(leaves(t).filter((l) => l.session !== from).map((l) => l.session));
-  for (const l of leaves(t).filter((l) => l.session === from)) {
-    if (to === null || present.has(to)) out = removeLeaf(out, l.key);
+  const present = new Set(leaves(t).filter((l) => l.ref.id !== from).map((l) => l.ref.id));
+  for (const l of leaves(t).filter((l) => l.ref.id === from)) {
+    if (to === null || present.has(to.id)) out = removeLeaf(out, l.key);
     else {
-      present.add(to);
-      out = mapLeaf(out, l.key, (x) => ({ ...x, session: to }));
+      present.add(to.id);
+      out = mapLeaf(out, l.key, (x) => ({ ...x, ref: to }));
     }
   }
   return out;
@@ -124,16 +130,16 @@ function mapLeaf(t: LayoutNode | null, key: string, f: (l: Leaf) => Leaf): Layou
   return { ...t, a: mapLeaf(t.a, key, f)!, b: mapLeaf(t.b, key, f)! };
 }
 /** removeLeaf for every leaf failing `keep`. Returns the SAME object when nothing changed (callers compare by identity). */
-export function retain(t: LayoutNode | null, keep: (id: Id) => boolean): LayoutNode | null {
+export function retain(t: LayoutNode | null, keep: (ref: PaneRef) => boolean): LayoutNode | null {
   let out = t;
-  for (const l of leaves(t)) if (!keep(l.session)) out = removeLeaf(out, l.key);
+  for (const l of leaves(t)) if (!keep(l.ref)) out = removeLeaf(out, l.key);
   return out;
 }
-/** Rebuild a tree of the same sessions in a canonical shape (`ids` = leaves in reading order). BALANCED halving —
+/** Rebuild a tree of the same refs in a canonical shape (`refs` = leaves in reading order). BALANCED halving —
  *  never a head/tail chain: `1/n` would fall under FRAC_MIN at n ≥ 11 (cap 15) and the chain would be n−1 deep.
  *  Halving keeps every fraction in [1/3, 2/3] (never clamped), depth ⌈log₂ n⌉, exact 1/n shares at every n. */
-export function applyPreset(ids: Id[], preset: Preset): LayoutNode | null {
-  const L = ids.map(leaf);
+export function applyPreset(refs: PaneRef[], preset: Preset): LayoutNode | null {
+  const L = refs.map(leaf);
   const n = L.length;
   if (n === 0) return null;
   if (n === 1) return L[0];
@@ -165,7 +171,7 @@ export function applyPreset(ids: Id[], preset: Preset): LayoutNode | null {
  *  OVER p2 full-width at rowFrac (the user's example — the old 2×2 left an empty cell); n=4 two rows of two. */
 export function fromLegacy(v1: LayoutV1, colFrac: number, rowFrac: number): LayoutNode | null {
   const p = (v1.panes ?? []).slice(0, 4);
-  const L = p.map(leaf);
+  const L = p.map((id) => leaf(sessionRef(id)));
   const axis: Axis = v1.axis === 'row' ? 'row' : 'col';
   if (L.length === 0) return null;
   if (L.length === 1) return L[0];
@@ -176,18 +182,69 @@ export function fromLegacy(v1: LayoutV1, colFrac: number, rowFrac: number): Layo
     : split('row', top, split('col', L[2], L[3], colFrac), rowFrac);
 }
 export function toLegacy(t: LayoutNode | null): { panes: Id[]; axis: Axis } {
-  return { panes: leaves(t).map((l) => l.session), axis: t?.kind === 'split' ? t.axis : 'col' };
+  return { panes: leaves(t).map((l) => l.ref.id), axis: t?.kind === 'split' ? t.axis : 'col' };
 }
 
-/** Walk a persisted v2 node: leaves whose session is a string passing `valid` survive (keys regenerated when not
- *  a string); splits with a known axis recurse on a/b, clamp the fraction, and collapse into the surviving child
+/** Whether a tab / pane may keep showing `ref` (restore and reconcile): a thread always — the session list says
+ *  nothing about threads, so its pane drops it once the thread is gone — else a loaded, non-archived session
+ *  (`archived(id)` is undefined for an id with no loaded row: a phantom tab). */
+export function keepPane(ref: PaneRef, archived: (id: Id) => boolean | undefined): boolean {
+  return ref.kind === 'thread' || archived(ref.id) === false;
+}
+
+/** A leaf as STORED: `{session}` (the payload every build reads — a plain id is a session) or `{thread}`. An
+ *  older build drops a `{thread}` leaf (no `session`) and keeps the rest of the tree, so a rollback loses
+ *  only the thread panes. */
+export function storeTree(t: LayoutNode | null): unknown {
+  if (!t) return null;
+  if (t.kind === 'leaf') return { kind: 'leaf', key: t.key, [t.ref.kind]: t.ref.id };
+  return { ...t, a: storeTree(t.a), b: storeTree(t.b) };
+}
+/** The stored ref of a leaf or a tab entry: a plain string or `{session}` is a session, `{thread}` a thread. */
+function storedRef(o: unknown): PaneRef | null {
+  if (typeof o === 'string') return o ? sessionRef(o) : null;
+  if (!o || typeof o !== 'object') return null;
+  const r = o as Record<string, unknown>;
+  if (typeof r.thread === 'string' && r.thread) return threadRef(r.thread);
+  if (typeof r.session === 'string' && r.session) return sessionRef(r.session);
+  return null;
+}
+/** The open tabs as stored (`otto_tabs_<ws>`): sessions stay plain ids — the list every build reads; an older
+ *  build skips the `{thread}` entries. */
+export function storeTabs(refs: readonly PaneRef[]): string {
+  return JSON.stringify(refs.map((r) => (r.kind === 'session' ? r.id : { thread: r.id })));
+}
+/** Parse `otto_tabs_<ws>`: corrupt → no tabs (never a throw); unknown entries are skipped; duplicates dropped. */
+export function parseTabRefs(raw: string | null): PaneRef[] {
+  let v: unknown;
+  try {
+    v = JSON.parse(raw ?? '[]');
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(v)) return [];
+  const seen = new Set<Id>();
+  const out: PaneRef[] = [];
+  for (const x of v) {
+    const r = storedRef(x);
+    if (r && !seen.has(r.id)) {
+      seen.add(r.id);
+      out.push(r);
+    }
+  }
+  return out;
+}
+
+/** Walk a persisted v2 node: leaves whose stored ref (see storeTree) passes `valid` survive (keys regenerated when
+ *  not a string); splits with a known axis recurse on a/b, clamp the fraction, and collapse into the surviving child
  *  when the other came back null; anything else is dropped. */
-function parseNode(raw: unknown, valid: (id: Id) => boolean): LayoutNode | null {
+function parseNode(raw: unknown, valid: (ref: PaneRef) => boolean): LayoutNode | null {
   if (!raw || typeof raw !== 'object') return null;
   const o = raw as Record<string, unknown>;
   const key = typeof o.key === 'string' && o.key !== '' ? o.key : newKey();
   if (o.kind === 'leaf') {
-    return typeof o.session === 'string' && valid(o.session) ? { kind: 'leaf', key, session: o.session } : null;
+    const ref = storedRef(o);
+    return ref && valid(ref) ? { kind: 'leaf', key, ref } : null;
   }
   if (o.kind === 'split' && (o.axis === 'col' || o.axis === 'row')) {
     const a = parseNode(o.a, valid);
@@ -199,12 +256,12 @@ function parseNode(raw: unknown, valid: (id: Id) => boolean): LayoutNode | null 
   return null;
 }
 /** Parse whatever is in localStorage. (1) null → {tree:null}; (2) JSON.parse throws → {tree:null}; (3) `obj.v === 2`
- *  → walk `obj.tree` (see parseNode); `focused` kept only if it names a surviving leaf; (4) otherwise v1:
- *  `{panes: (obj.panes ?? []).filter(valid), axis: obj.axis}` → fromLegacy(v1, colFrac, rowFrac). Finally trailing
+ *  → walk `obj.tree` (see parseNode); `focused` kept only if it names a surviving leaf; (4) otherwise v1: its
+ *  session ids `(obj.panes ?? []).filter(valid)` and `obj.axis` → fromLegacy(v1, colFrac, rowFrac). Finally trailing
  *  leaves beyond MAX_PANES are removed. */
 export function parseLayout(
   raw: string | null,
-  valid: (id: Id) => boolean,
+  valid: (ref: PaneRef) => boolean,
   colFrac: number,
   rowFrac: number,
 ): { tree: LayoutNode | null; focused: string | null } {
@@ -224,7 +281,7 @@ export function parseLayout(
     focused = typeof o.focused === 'string' ? o.focused : null;
   } else {
     const panes = (Array.isArray(o.panes) ? o.panes : []).filter(
-      (p): p is Id => typeof p === 'string' && valid(p),
+      (p): p is Id => typeof p === 'string' && valid(sessionRef(p)),
     );
     const axis: Axis | undefined = o.axis === 'col' || o.axis === 'row' ? o.axis : undefined;
     tree = fromLegacy({ panes, axis }, colFrac, rowFrac);

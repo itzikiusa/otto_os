@@ -15,6 +15,9 @@
   // SessionView → Terminal's cleanup closes the WS → memory is reclaimed.
   import { onDestroy } from 'svelte';
   import SessionView from './SessionView.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  const ThreadPane = lazyComponent(() => import('./AgentsThreadPane.svelte'));
   import { EMBED_SCROLLBACK } from '../../lib/components/termFlow';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
@@ -26,7 +29,7 @@
   import { ui } from '../../lib/stores/ui.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { winKey } from '../../lib/win';
-  import { MAX_PANES, applyTileOrder } from '../../lib/stores/splitLayout';
+  import { MAX_PANES, applyTileOrder, sessionRef, threadRef } from '../../lib/stores/splitLayout';
   import { layout } from '../../lib/stores/splitLayout.svelte';
   import { liveTracks, type Tracks } from './tileTracks';
 
@@ -41,8 +44,9 @@
   const TILE_SCROLLBACK = EMBED_SCROLLBACK;
 
   // C3a: the user's drag order on top of the store order (unknown ids append,
-  // dead ids are skipped) — everything below counts/lays out `ordered`.
-  const ordered = $derived(applyTileOrder(ws.mainSessions, layout.tileOrder));
+  // dead ids are skipped) — everything below counts/lays out `ordered`. The
+  // thread tabs tile too, as chats (always live: no terminal socket to budget).
+  const ordered = $derived(applyTileOrder([...ws.mainSessions, ...ws.threadPanes.map((id) => ({ id, thread: true as const }))], layout.tileOrder));
 
   // Column count scales with tile count: 1→1, 2-4→2, 5-9→3, 10+→4, capped on
   // phone (1 col) and tablet (2 cols) so tiles stay readable.
@@ -402,7 +406,7 @@
   }
 </script>
 
-{#if ws.mainSessions.length === 0}
+{#if ordered.length === 0}
   <div class="tiled-empty">
     <EmptyState
       icon="terminal"
@@ -439,7 +443,7 @@
     <button
       class="btn small free-layout"
       onclick={() => {
-        layout.layoutSessions(ordered.map((s) => s.id), 'grid');
+        layout.layoutSessions(ordered.map((s) => ('thread' in s ? threadRef : sessionRef)(s.id)), 'grid');
         ws.setViewMode('tabs');
       }}
       title="Turn these tiles into a free layout: every pane edge resizable, panes nestable, presets in the ⋯ menu"
@@ -494,7 +498,9 @@
         ondrop={(e) => onTileDrop(e, s.id)}
         ondragend={onTileDragEnd}
       >
-        {#if liveIds.has(s.id)}
+        {#if 'thread' in s}
+          <LazyMount lazy={ThreadPane} what="the thread" variant="panel" props={{ threadId: s.id, focused: ws.activeSessionId === s.id, showClose: false, showGrip: ordered.length > 1, dragKey: s.id, ondragpane: (phase: 'start' | 'end') => (tileDragId = phase === 'start' ? s.id : null), onfocus: () => { ws.openSession(s.id); layout.focusIndex(0); }, onclose: () => ws.closeTab(s.id) }} />
+        {:else if liveIds.has(s.id)}
           <SessionView
             sessionId={s.id}
             focused={ws.activeSessionId === s.id}

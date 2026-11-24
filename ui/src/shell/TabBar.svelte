@@ -37,14 +37,25 @@
     ws.navigateToSession(id);
   }
 
+  // A thread tab (a chat pane) reads its title from Threads' store, loaded
+  // only once such a tab exists; it has no rename, share, pop-out or dot here.
+  type RuntimeStore = typeof import('../modules/threads/runtime/runtimeThreads.svelte').runtimeThreads;
+  let rt = $state<RuntimeStore | null>(null);
+  $effect(() => {
+    if (!rt && ws.threadPanes.length > 0) void import('../modules/threads/runtime/runtimeThreads.svelte').then((m) => (rt = m.runtimeThreads));
+  });
+  const notSession = (id: string): boolean => id === DB_PANE_ID || ws.threadPanes.includes(id);
+
   function title(id: string): string {
     if (id === DB_PANE_ID) return 'Database';
+    if (ws.threadPanes.includes(id)) return rt?.get(id)?.title ?? 'Thread';
     return ws.getSession(id)?.title ?? '…';
   }
 
   /** Rich hover tooltip: title · provider · cwd (+ suspended note). */
   function tabTooltip(id: string): string {
     if (id === DB_PANE_ID) return 'Database Explorer';
+    if (ws.threadPanes.includes(id)) return `${rt?.get(id)?.title ?? 'Thread'}\nThread`;
     const s = ws.getSession(id);
     if (!s) return 'Double-click to rename';
     // One short line per fact: a single very long line made a native tooltip
@@ -125,15 +136,15 @@
     const leftOk = rtl ? canFwd : canBack;
     const rightOk = rtl ? canBack : canFwd;
     return tidy([
-      ...(id !== DB_PANE_ID && ws.myRole !== 'viewer'
+      ...(!notSession(id) && ws.myRole !== 'viewer'
         ? [{ label: 'Rename', icon: 'edit', action: () => startRename(id) } as MenuItem]
         : []),
-      ...(id !== DB_PANE_ID
+      ...(!notSession(id)
         ? [{ label: 'Share…', icon: 'share', action: () => (shareSessionId = id) } as MenuItem]
         : []),
       ...(id === DB_PANE_ID
         ? popoutItems('database', 'Database')
-        : popoutItems(`agents/${id}`, ws.getSession(id)?.title)),
+        : notSession(id) ? [] : popoutItems(`agents/${id}`, ws.getSession(id)?.title)),
       ...(leftOk || rightOk
         ? [
             { separator: true } as MenuItem,
@@ -167,7 +178,7 @@
       ...(ws.recentlyClosed.length > 0
         ? [{ label: 'Reopen closed tab', icon: 'refresh', action: () => ws.reopenClosedTab() }]
         : []),
-      ...(id !== DB_PANE_ID ? sessionRows(id) : []),
+      ...(!notSession(id) ? sessionRows(id) : []),
       { separator: true },
       { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
       {
@@ -186,17 +197,17 @@
     return sessionState(s, ws.statusMap[id] ?? 'idle', needsYou(id), { stale: events.state !== 'connected' });
   }
   function isResumable(id: string): boolean {
-    return id !== DB_PANE_ID && tabState(id).resumable;
+    return !notSession(id) && tabState(id).resumable;
   }
 
   // A tab "needs you" when its session is blocked on operator input — distinct
   // from idle. Cleared by the store when the session is opened / fed input.
   function needsYou(id: string): boolean {
-    return id !== DB_PANE_ID && ws.needsYou[id] === true;
+    return !notSession(id) && ws.needsYou[id] === true;
   }
 
   function startRename(id: string): void {
-    if (ws.myRole === 'viewer' || id === DB_PANE_ID) return;
+    if (ws.myRole === 'viewer' || notSession(id)) return;
     renamingId = id;
     draft = title(id);
   }
@@ -333,7 +344,7 @@
         data-tab-id={id}
       >
         {#if renamingId === id}
-          {#if id !== DB_PANE_ID}<StatusDot state={tabState(id)} size={6} />{/if}
+          {#if !notSession(id)}<StatusDot state={tabState(id)} size={6} />{/if}
           <input dir="auto"
             class="tab-rename"
             bind:value={draft}

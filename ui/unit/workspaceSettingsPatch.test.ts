@@ -1,3 +1,4 @@
+import * as splitLayoutPure from '../src/lib/stores/splitLayout.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
@@ -16,7 +17,7 @@ function fixture() {
     '../router.svelte': { router: {} }, '../toast.svelte': { toasts: {} }, '../toastError': { toastError() {} },
     '../plural': { plural() {} }, '../confirm.svelte': { confirmer: {} },
     './ui.svelte': { ui: {}, clientId: () => 'test' }, '../win': { winKey: (k: string) => k },
-    './splitLayout.svelte': { layout: { panes: [], focusedIndex: 0 } }, './splitLayout': { MAX_PANES: 15, LS_PANES: 'panes' },
+    './splitLayout.svelte': { layout: { panes: [], focusedIndex: 0 } }, './splitLayout': { ...splitLayoutPure, LS_PANES: 'panes' },
     '../storage': { lsGet: () => null, lsSet() {} }, '../desktop': { isEmbedded: false },
     './runtimeAttention.svelte': { runtimeFlagged: () => 0 }, './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets,
     '../lazy-component.svelte': { whenIdle: () => () => {} },
