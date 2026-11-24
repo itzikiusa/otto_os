@@ -176,6 +176,13 @@ test('New session is a stage: tiles, Terminal | Chat, a first message, Start; th
   await page.keyboard.press('Meta+t');
   const dialog = page.getByRole('dialog', { name: 'New session' });
   await expect(dialog.getByTestId('ns-kind')).toBeVisible({ timeout: 10_000 });
+  // Tiles only for providers this machine can start; the rest behind one row.
+  const tiles = dialog.locator('.provider-card .card-main');
+  for (const t of await tiles.all()) await expect(t).toBeEnabled();
+  // Sized to its content: no band of empty sheet above the footer.
+  const optsBottom = (await dialog.getByTestId('ns-options').boundingBox())!;
+  const footTop = (await dialog.locator('footer').boundingBox())!.y;
+  expect(footTop - (optsBottom.y + optsBottom.height)).toBeLessThan(80);
   // Defaults cost no rows: title, folder, workspace are behind Options.
   await expect(dialog.locator('#ns-title')).toHaveCount(0);
   await expect(dialog.getByRole('radio', { name: 'No workspace' })).toHaveCount(0);
@@ -220,4 +227,16 @@ test('the right panel opens on the session details card; nothing loads while it 
     await scheme(page, s);
     if (SHOTS) await page.screenshot({ path: `${SHOTS}/agents-details-card-1440-${s}.png`, animations: 'disabled' });
   }
+});
+
+test('Chat from the stage carries the chosen provider into the thread it starts (R2)', async ({ page }) => {
+  await page.goto('/#/agents');
+  await expect(rows(page)).toHaveCount(3, { timeout: 20_000 });
+  await page.getByTestId('agents-inbox-new').click();
+  const dialog = page.getByRole('dialog', { name: 'New session' });
+  await dialog.getByTestId('ns-kind').getByRole('radio', { name: 'Chat' }).click();
+  await dialog.locator('.provider-card', { hasText: 'codex' }).locator('.card-main').click();
+  await dialog.getByRole('button', { name: 'Start chat' }).click();
+  await expect(page.getByTestId('new-thread-stage')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTestId('picker-agent')).toContainText(/codex/i);
 });

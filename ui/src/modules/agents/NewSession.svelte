@@ -12,6 +12,7 @@
   import ContextPreview from './ContextPreview.svelte';
   import DirList from './DirList.svelte';
   import { plural } from '../../lib/plural';
+  import { writeStartPick } from '../../lib/startPick';
   import McpProfilePicker from './McpProfilePicker.svelte';
   import { router } from '../../lib/router.svelte';
   import { api } from '../../lib/api/client';
@@ -59,7 +60,12 @@
     scratch = on;
   }
 
-  const providers = $derived(allProviders());
+  // Tiles for what is installed and enabled here (or chosen); the rest behind "More providers".
+  let moreOpen = $state(false);
+  const allP = $derived(allProviders());
+  const tile = (p: string): boolean => providerReadiness(p).available || (counts[p] ?? 0) > 0 || p === provider;
+  const providers = $derived(moreOpen ? allP : allP.filter(tile));
+  const hiddenCount = $derived(allP.filter((p) => !tile(p)).length);
   // Effective default agent: this workspace's override, else the global default
   // (a workspace-less session has no workspace setting to consult).
   const wsDefault = $derived(
@@ -309,6 +315,8 @@
   // choice shown as a chip so a default never costs a row.
   let kind = $state<'terminal' | 'chat'>('terminal');
   let optionsOpen = $state(false);
+  /** Always shown (disabled for a plain shell): switching tiles never resizes the sheet. */
+  const noPrompt = $derived(kind === 'terminal' && !chosen.some((p) => p !== 'shell'));
   const optionChips = $derived(
     [
       scratchMode && ws.current ? 'No workspace' : null,
@@ -327,6 +335,9 @@
   async function startChat(): Promise<void> {
     const draft = prompt.trim();
     if (draft) sessionStorage.setItem('otto.thread_draft_handoff', JSON.stringify({ draft, workspaceId: scratchMode ? null : ws.currentId, ts: Date.now() }));
+    // One choice, honoured: the tile (and the model, when set) is the pick
+    // Threads' stage restores for this workspace (lib/startPick).
+    if (provider && provider !== 'shell') writeStartPick(localStorage, `threads:${scratchMode ? SCRATCH_WORKSPACE_ID : (ws.currentId ?? SCRATCH_WORKSPACE_ID)}`, { provider, model: model || null, effort: null });
     prompt = '';
     if (await requestClose()) router.go(draft ? 'threads' : 'threads/new');
   }
@@ -459,7 +470,7 @@
 
 <svelte:window onkeydown={onGlobalKeydown} />
 
-<Modal title="New session" height={640} onclose={requestClose} dismissable={!busy}>
+<Modal title="New session" onclose={requestClose} dismissable={!busy}>
   <!-- Terminal (the agent's own CLI, here) or Chat (a structured thread in Threads). -->
   <div class="seg kind-seg" role="radiogroup" aria-label="Session kind" data-testid="ns-kind">
     {#each [['terminal', 'Terminal'], ['chat', 'Chat']] as [k, label] (k)}
@@ -526,6 +537,7 @@
          in the card visually but is reparented here in the accessibility tree,
          a sibling group outside the radiogroup. -->
     <div role="group" aria-label="Sessions per provider" aria-owns={providers.map((_, i) => `ns-steppers-${i}`).join(' ')}></div>
+    {#if hiddenCount > 0}<button type="button" class="btn small ghost more-prov" aria-expanded={moreOpen} data-testid="ns-more-providers" onclick={() => (moreOpen = !moreOpen)}>{moreOpen ? 'Fewer providers' : `More providers (${hiddenCount})`} <Icon name={moreOpen ? 'chevronDown' : 'chevronRight'} size={12} /></button>{/if}
     {#if total > 1}
       <span class="hint batch">Starting {total} sessions — {batchSummary}</span>
     {/if}
@@ -534,21 +546,20 @@
     <span class="sr-only" role="status">{countAnnounce}</span>
   </div>
 
-  {#if kind === 'chat' || chosen.some((p) => p !== 'shell')}
-    <div class="field">
+  <div class="field">
       <label for="ns-prompt">First message <span class="dim">(optional)</span></label>
       <textarea dir="auto"
         id="ns-prompt"
         class="input prompt-input"
         rows="3"
         bind:value={prompt}
-        placeholder="What should the agent start on? Sent once it is ready."
+        disabled={noPrompt}
+        placeholder={noPrompt ? 'A plain shell takes no first message.' : 'What should the agent start on? Sent once it is ready.'}
       ></textarea>
       <span class="hint">
         {total > 1 ? 'Sent to every agent in this batch. ' : ''}⌘↩ {total > 1 ? 'creates the sessions' : 'creates the session'}.
       </span>
     </div>
-  {/if}
 
 
   <!-- Everything else keeps its default until asked for: Options, with a chip
@@ -733,6 +744,7 @@
 {/if}
 
 <style>
+  .more-prov { align-self: flex-start; margin-block-start: var(--sp-2); }
   .kind-seg {
     margin-block-end: var(--sp-5);
   }
