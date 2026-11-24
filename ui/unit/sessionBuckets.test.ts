@@ -174,4 +174,6 @@ test('sessionRoute opens a session where it lives', () => {
   assert.equal(sessionRoute(worker, worker.id, pool), `threads/${worker.id}`);
   assert.equal(sessionRoute(term, term.id, pool), `agents/${term.id}`);
   assert.equal(sessionRoute(undefined, 'not-loaded', pool), 'agents/not-loaded', 'an unknown row keeps the old route');
+  const dock = mk({ meta: { surface: 'threads', threads_terminal: true } });
+  assert.equal(sessionRoute(dock, dock.id, pool), `agents/${dock.id}`, 'a Threads terminal-dock shell has no Threads pane: it opens on Agents');
 });

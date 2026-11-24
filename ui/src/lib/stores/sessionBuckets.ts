@@ -91,10 +91,17 @@ export function inThreadsScope(s: Session, pool: SessionPool = []): boolean {
   return false;
 }
 
-/** The route a session opens on: `threads/<id>` for a Threads-scope session,
- *  else `agents/<id>` (also when the row isn't loaded). */
+/** Whether Threads shows `s` as a pane: a Threads-scope session, except a
+ *  shell its terminal dock started (`meta.threads_terminal`) — Threads has
+ *  no pane for one, so it opens as a terminal on Agents. */
+export function opensInThreads(s: Session, pool: SessionPool = []): boolean {
+  return inThreadsScope(s, pool) && (s.meta as { threads_terminal?: unknown } | null)?.threads_terminal !== true;
+}
+
+/** The route a session opens on: `threads/<id>` when Threads shows it
+ *  ({@link opensInThreads}), else `agents/<id>` (also when the row isn't loaded). */
 export function sessionRoute(s: Session | null | undefined, id: string, pool: SessionPool = []): string {
-  return s && inThreadsScope(s, pool) ? `threads/${id}` : `agents/${id}`;
+  return s && opensInThreads(s, pool) ? `threads/${id}` : `agents/${id}`;
 }
 
 /** Whether the sidebar lists `s` (when live): a connection, a foreground
