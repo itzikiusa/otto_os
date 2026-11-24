@@ -157,6 +157,7 @@
       ...VIEWS.filter((v) => v.show()).map((v) => ({ label: v.label, checked: database.mainTab === v.id, action: () => database.setMainTab(v.id) })),
       { separator: true },
       ...query,
+      ...(!viewport.isPhone && !database.sidebarCollapsed ? [{ label: 'Hide tables', icon: 'panel' as const, hint: '⌘B', action: () => database.toggleSidebar() }] : []),
       { label: comparePin.value ? 'Clear comparison' : 'Compare results', icon: 'columns', title: 'Keep loaded results beside the current query', action: toggleCompare },
       { separator: true },
       { label: database.testing ? 'Testing connection…' : 'Test connection', icon: 'plug', disabled: database.testing, action: () => void database.testConnection() },
@@ -167,7 +168,7 @@
     ];
   }
 
-  // Tables / History: the sidebar on that view (again = hide it).
+  // Tables / History: open the hidden side pane on that view.
   // Phone: Tables / History are a sheet over the results (Back closes it).
   let phoneSide = $state<DbSideTab | null>(null);
   let sheetKey = '';
@@ -180,16 +181,10 @@
     });
   });
   function showSide(tab: DbSideTab): void {
-    if (viewport.isPhone) {
-      database.setSideTab(tab);
-      phoneSide = tab;
-      return;
-    }
-    const on = !database.sidebarCollapsed && (database.sideTab === tab || (tab === 'schema' && database.sideTab === 'connections'));
-    if (on) return database.toggleSidebar();
     database.setSideTab(tab);
+    if (viewport.isPhone) phoneSide = tab;
     // Reopening the tables puts focus back on the selected object.
-    if (database.sidebarCollapsed) void showSchemaSidebar();
+    else if (database.sidebarCollapsed) void showSchemaSidebar();
   }
 
   // The state, in words: Connected · MySQL 8.0.36 · 14 ms / Connecting… /
@@ -553,8 +548,13 @@
   {/snippet}
   {#snippet actions()}
     {#if database.selectedConn && database.activePane === null}
-      <button class="btn small ghost" data-keep aria-pressed={!database.sidebarCollapsed && database.sideTab !== 'history' && database.sideTab !== 'saved'} onclick={() => showSide('schema')} title="Tables (⌘B)">Tables</button>
-      <button class="btn small ghost" data-overflow="1" aria-pressed={!database.sidebarCollapsed && database.sideTab === 'history'} onclick={() => showSide('history')} title="Query history and saved queries">History</button>
+      <!-- One way to the side pane: while it is open its own tabs are Tables ·
+           Saved · History; while it is hidden (and on a phone, where it is a
+           sheet) these two open it on that tab. -->
+      {#if viewport.isPhone || database.sidebarCollapsed}
+        <button class="btn small ghost" data-keep onclick={() => showSide('schema')} title={viewport.isPhone ? 'Tables' : 'Tables (⌘B)'}>Tables</button>
+        <button class="btn small ghost" data-overflow="1" onclick={() => showSide('history')} title="Query history and saved queries">History</button>
+      {/if}
       {#if database.mainTab === 'query' && editorBar.cur}
         {#if editorBar.cur.running}
           <button class="btn small qe-stop" data-keep onclick={() => editorBar.cur?.stop()} title="Stop the running query (Esc)"><Icon name="stop" size={12} /> Stop</button>
