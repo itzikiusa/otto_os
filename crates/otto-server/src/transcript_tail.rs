@@ -433,6 +433,9 @@ fn rewindow(
 ) -> Option<Step> {
     // Retire when a fresh window would not leave room to grow (one huge line).
     let len = Tailer::current_len(&live.path);
+    // The fresh window replaces this one: holding both charges at once
+    // retired live tails while the global budget still had room for one.
+    st.budget = TailBudget::default();
     match refold_with(live.provider, &live.path, opts()) {
         Ok(fresh) if len.saturating_sub(fresh.start) <= TAIL_INPUT_CAP as u64 * 3 / 4 => {
             *st = fresh
