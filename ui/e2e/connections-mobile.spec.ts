@@ -113,6 +113,8 @@ test.describe('connections list — responsive', () => {
     await expect(row(page, 'prod-web-bastion')).toContainText('Not checked');
     await expect(row(page, 'ungrouped-host')).toBeVisible();
     await expect(row(page, 'my-custom-cli')).toContainText('read-only');
+    // Under its section's heading a row does not repeat the section's name.
+    await expect(row(page, 'my-custom-cli')).not.toContainText('Production servers');
     await expect(page.getByRole('region', { name: 'Production servers' }).first()).toBeVisible();
     await expect(page.getByRole('region', { name: 'Empty staging folder' }).first()).toBeVisible();
     await expect(page.getByRole('region', { name: 'Ungrouped' })).toBeVisible();
