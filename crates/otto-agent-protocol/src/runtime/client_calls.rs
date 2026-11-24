@@ -131,6 +131,16 @@ async fn write_no_follow(path: &Path, content: &str) -> std::io::Result<()> {
     f.flush().await
 }
 
+/// The text a write replaces, for its diff row: a regular file within the
+/// read cap only (opening a FIFO blocks for good; a huge file fills memory).
+async fn old_text(real: &Path) -> Option<String> {
+    let m = tokio::fs::symlink_metadata(real).await.ok()?;
+    if !m.file_type().is_file() || m.len() > MAX_FILE_BYTES {
+        return None;
+    }
+    tokio::fs::read_to_string(real).await.ok()
+}
+
 async fn run(
     inner: &Arc<Inner>,
     live: &Arc<Live>,
@@ -178,7 +188,7 @@ async fn run(
             content,
         } => {
             let real = confined(&root, &path, false).await?;
-            let old = tokio::fs::read_to_string(&real).await.ok();
+            let old = old_text(&real).await;
             write_no_follow(&real, &content)
                 .await
                 .map_err(|e| format!("{path}: {e}"))?;
@@ -353,6 +363,28 @@ mod tests {
         assert_eq!(output_limit(Some(u64::MAX)), DEFAULT_BYTE_LIMIT);
         assert_eq!(output_limit(Some(4096)), 4096);
         assert_eq!(output_limit(None), DEFAULT_BYTE_LIMIT);
+    }
+
+    /// Review R1-024: a write over a FIFO or an over-cap file answers at once
+    /// without its old text (the open blocked on a FIFO for good).
+    #[tokio::test]
+    async fn a_write_reads_the_old_text_of_a_regular_capped_file_only() {
+        let root = tempfile::tempdir().unwrap();
+        let fifo = root.path().join("pipe");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        // SAFETY: a plain mkfifo on a path in a temp dir.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let old = tokio::time::timeout(std::time::Duration::from_secs(2), old_text(&fifo)).await;
+        assert_eq!(old, Ok(None), "no blocking read of a FIFO");
+        let big = root.path().join("big.log");
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(MAX_FILE_BYTES + 1)
+            .unwrap();
+        assert_eq!(old_text(&big).await, None);
+        let small = root.path().join("a.txt");
+        std::fs::write(&small, "hi").unwrap();
+        assert_eq!(old_text(&small).await.as_deref(), Some("hi"));
     }
 
     /// A dangling link in the folder points outside it: the write is
