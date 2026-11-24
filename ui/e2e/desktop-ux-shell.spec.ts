@@ -94,22 +94,24 @@ test('Plain English palette traps focus and Escape works from its buttons', asyn
   await expect(palette).toBeHidden();
 });
 test('Needs you expands every source in place', async ({ page }) => {
-  await page.route('**/mcp/approvals?status=pending', (route) => route.fulfill({ json: Array.from({ length: 5 }, (_, i) => ({
+  // 7 approvals: more than the 5 rows a section shows, whatever else needs
+  // this workspace (notices no longer count as needs-you).
+  await page.route('**/mcp/approvals?status=pending', (route) => route.fulfill({ json: Array.from({ length: 7 }, (_, i) => ({
     id: `approval-${i}`, title: `Approval ${i + 1}`, created_at: new Date().toISOString(), workspace_id: workspaceId,
   })) }));
   await boot(page);
   const needs = page.locator('[data-card="needs"]');
-  // The 5 approvals plus whatever else on the shared e2e daemon needs this
-  // workspace (sessions other specs left waiting, notices): 5 rows shown, the
-  // rest behind one "N more" that matches the section's own count.
+  // The 7 approvals plus whatever else on the shared e2e daemon needs this
+  // workspace (sessions other specs left waiting): 5 rows shown, the rest
+  // behind one "N more" that matches the section's own count.
   await expect(needs.getByRole('button', { name: /Approval 3/ })).toBeVisible();
   const more = needs.getByRole('button', { name: /^\d+ more$/ });
   await expect(more).toBeVisible();
   const count = async (l: import('@playwright/test').Locator) => Number(((await l.textContent()) ?? '').match(/\d+/)?.[0]);
   await expect.poll(async () => (await count(more)) + 5 - (await count(needs.locator('.sec-count')))).toBe(0);
-  expect(await count(needs.locator('.sec-count'))).toBeGreaterThanOrEqual(6);
+  expect(await count(needs.locator('.sec-count'))).toBeGreaterThanOrEqual(7);
   await more.click();
-  await expect(needs.getByRole('button', { name: /Approval 5/ })).toBeVisible();
+  await expect(needs.getByRole('button', { name: /Approval 7/ })).toBeVisible();
   await expect(page).toHaveURL(/#\/home$/);
 });
 
