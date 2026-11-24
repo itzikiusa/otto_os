@@ -35,7 +35,9 @@ test('a PR deep link opens in the workspace with header, stats and timeline', as
   await expect(page.locator('.prd-title')).toContainText('VIP program');
   // The route is handed back to the tab store; the PR stays open as a tab.
   await expect.poll(() => page.evaluate(() => location.hash)).toBe('#/git');
-  await expect(page.locator('.prw-tab')).toHaveCount(1);
+  // One PR open: no tab strip; its header starts with the list toggle.
+  await expect(page.locator('.prw-tabs')).toHaveCount(0);
+  await expect(page.locator('.prd-head').getByRole('button', { name: 'Hide the list' })).toBeVisible();
   await expect(page.locator('.prd-stats')).toContainText('23 files');
   // One primary that follows state (the mock's CI fails), one secondary, ⋯ — Merge waits in ⋯.
   await expect(page.getByTestId('pr-primary')).toHaveText('Fix checks');
@@ -94,10 +96,14 @@ test('Code tab: hide tests, viewed marks persist, tree, one commit', async ({ pa
   expect(await heads.count()).toBeLessThan(17);
 });
 
-test('Files panel under the list: a tree that jumps into Code and shares Viewed marks', async ({ page }) => {
+test('Files panel under the list: only beside Files; a tree that jumps to a file and shares Viewed marks', async ({ page }) => {
   await page.goto('/#/git/rep_otto/pr/51');
   await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
   const panel = page.getByRole('region', { name: 'Files in pull request #51' });
+  // On Conversation the left column is the PR list (and the agent's bar).
+  await expect(page.getByRole('tab', { name: 'Conversation', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(panel).toHaveCount(0);
+  await page.getByRole('tab', { name: 'Files', exact: true }).click();
   await expect(panel).toContainText('0/23 viewed');
   // A real tree: folders fold their files away.
   const dir = panel.locator('.nav-dir-row').first();
@@ -222,10 +228,33 @@ test('PR header never overlaps: repo · #n · state stay whole as the window nar
   }
 });
 
+test('reading column: the details card beside it from 1200 px of content, under it below (1440×900, list open and hidden)', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/#/git/rep_otto/pr/51');
+  await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
+  const layout = () => page.evaluate(() => {
+    const r = (s: string) => document.querySelector(s)!.getBoundingClientRect();
+    return { content: (document.querySelector('.prd-body') as HTMLElement).clientWidth, main: r('.prd-main'), card: r('[data-testid="pr-details-card"]') };
+  });
+  // List open: under 1200 px of content, so the card drops under the column.
+  let l = await layout();
+  expect(l.content).toBeLessThan(1200);
+  expect(l.main.width).toBeLessThanOrEqual(761);
+  expect(l.card.top).toBeGreaterThanOrEqual(l.main.bottom);
+  // List hidden: room for both, the card floats beside the reading column.
+  await page.locator('.prd-head').getByRole('button', { name: 'Hide the list' }).click();
+  await expect.poll(async () => (await layout()).content).toBeGreaterThanOrEqual(1200);
+  l = await layout();
+  expect(l.main.width).toBeLessThanOrEqual(761);
+  expect(l.card.left).toBeGreaterThanOrEqual(l.main.right);
+  await page.locator('.prd-head').getByRole('button', { name: 'Show the list' }).click();
+  await expectNoHorizontalOverflow(page);
+});
+
 test('select several PRs in the list and open them together as tabs', async ({ page }) => {
   await page.goto('/#/git/rep_otto/pr/51');
   await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator('.prw-tab')).toHaveCount(1);
+  await expect(page.locator('.prw-tab')).toHaveCount(0); // one PR: no strip
   await page.getByRole('checkbox', { name: 'Select #42' }).check();
   await page.getByRole('checkbox', { name: 'Select #50' }).check();
   await page.getByRole('button', { name: /Open 2 together/ }).click();
@@ -234,6 +263,10 @@ test('select several PRs in the list and open them together as tabs', async ({ p
   // Close the front tab: the neighbour comes forward.
   await page.getByRole('button', { name: 'Close #42' }).click();
   await expect(page.locator('.prw-tab')).toHaveCount(2);
+  // Down to one: the strip goes; the list toggle moves into the PR header.
+  await page.getByRole('button', { name: /^Close #/ }).first().click();
+  await expect(page.locator('.prw-tabs')).toHaveCount(0);
+  await expect(page.locator('.prd-head').getByRole('button', { name: 'Hide the list' })).toBeVisible();
   // Search qualifiers narrow the list.
   await page.locator('.pr-search').fill('label:bug');
   await expect(page.locator('.pr-row')).toHaveCount(1);

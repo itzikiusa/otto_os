@@ -5,7 +5,7 @@
   // Merge), then two views — Conversation (a reading column + one details
   // card) | Files. Paints from the SWR cache; re-read every couple of minutes,
   // but a change only raises an "Updated" pill, never swaps content.
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy, untrack, type Snippet } from 'svelte';
   import { onTabKey } from '../../lib/tabKeys';
   import { api, isAbortError } from '../../lib/api/client';
   import type { DiffResp, MergeStrategy, NewPrCommentReq, PrChecksResp, PrComment, PrCommit, PrDetail, PrSummary } from '../../lib/api/types';
@@ -62,8 +62,12 @@
     number: number;
     /** Fresher PR data for the list pane (title/state/updated/head). */
     onloaded?: (pr: PrSummary) => void;
+    /** The view on show (the workspace shows its Files tree only beside Files). */
+    onview?: (tab: PrTabId) => void;
+    /** Controls at the header's start (the workspace's list toggle while it has no tab strip). */
+    lead?: Snippet;
   }
-  let { repoId, number, onloaded }: Props = $props();
+  let { repoId, number, onloaded, onview, lead }: Props = $props();
   let disposed = false;
   onDestroy(() => { disposed = true; });
 
@@ -88,6 +92,7 @@
     }
   }
   let activeTab: Tab = $state(untrack(savedTab));
+  $effect(() => onview?.(activeTab));
   let compactInfoOpen = $state(false);
   function selectTab(t: Tab): void {
     activeTab = t;
@@ -629,6 +634,7 @@
   {:else if pr}
     <header class="prd-head" class:compact={compactHead}>
       <div class="prd-row prd-row-top">
+        {@render lead?.()}
         <button class="prd-repo link" onclick={() => openExternal(pr?.url)} title="Open on {providerName}">
           <span class="prd-slug">{repoSlug}</span>
           <span class="prd-num">#{pr.number}</span>
@@ -719,7 +725,7 @@
     <div class="prd-body" class:code={activeTab === 'code'}>
       <!-- Summary stays mounted (hidden) so composer drafts survive a tab switch. -->
       <div class="prd-summary" hidden={activeTab !== 'summary'}>
-        <div class="prd-main">
+        <div class="prd-main read-prose">
           <section class="prd-desc card">
             {#if editMode}
               <textarea dir="auto" class="input" rows="10" bind:value={editDesc} aria-label="Pull request description" disabled={busy === 'edit'}></textarea>
@@ -885,8 +891,8 @@
   .prd-commit-pick { max-width: 340px; gap: 4px; font-weight: 550; }
   .prd-commit-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-  /* Summary: content + a details column (stacks under ~900px of pane). */
-  /* The reading column (760 px, reading type) with the details card beside it. */
+  /* The reading column (760 px, reading type) with the details card beside it
+     from 1200 px of content width, under it below. */
   .prd-summary {
     display: grid;
     grid-template-columns: minmax(0, var(--read-col)) 264px;
@@ -895,11 +901,11 @@
     align-items: start;
   }
   .prd-summary[hidden] { display: none; }
-  @container (max-width: 860px) {
-    .prd-summary { grid-template-columns: minmax(0, 1fr); }
+  @container (max-width: 1199px) {
+    .prd-summary { grid-template-columns: minmax(0, var(--read-col)); }
   }
   .prd-body { container-type: inline-size; }
-  .prd-main { min-width: 0; display: flex; flex-direction: column; gap: 12px; font-size: var(--fs-l); line-height: 1.6; }
+  .prd-main { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
   .prd-desc { position: relative; padding: 12px 16px; }
   .prd-desc textarea { width: 100%; }
   .edit-btn {
