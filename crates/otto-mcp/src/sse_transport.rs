@@ -342,7 +342,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut s, _) = l.accept().await.ok()?;
             let mut buf = [0u8; 4096];
-            s.read(&mut buf).await.ok()?;
+            s.read(&mut buf).await.ok().filter(|n| *n > 0)?;
             s.write_all(head.as_bytes()).await.ok()?;
             // What the client does next: 0 once it closes the connection.
             tokio::time::timeout(Duration::from_secs(5), s.read(&mut buf))
