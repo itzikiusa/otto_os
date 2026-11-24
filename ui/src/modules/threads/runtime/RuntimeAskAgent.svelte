@@ -17,7 +17,8 @@
   import { ASK_MAX_TARGETS, askableProviders, clampEffort } from './askAgents';
   import { askTargets } from './askTargets.svelte';
   import { fileMentionContext, type ComposerContext } from './composerContext';
-  import RuntimeMentionMenu, { type PickedAgentMention, type PickedFileMention } from './RuntimeMentionMenu.svelte';
+  import type { PickedAgentMention, PickedFileMention } from './RuntimeMentionMenu.svelte';
+  import { MentionMenuView } from '../threadLazy.svelte';
 
   interface Props {
     part: 'button' | 'chips';
@@ -125,7 +126,7 @@
     <Icon name="people" size={14} />
   </button>
 {:else}
-  <RuntimeMentionMenu
+  {#if MentionMenuView.component}<MentionMenuView.component
     bind:this={mentionMenuEl}
     {text}
     {cwd}
@@ -135,7 +136,7 @@
     onpickfile={handlePickFile}
     onpickagent={handlePickAgent}
     ondrilldir={(nextText) => onreplace?.(nextText)}
-  />
+  />{/if}
   {#if targets.length > 0 && allowAgents}
     <div class="aa-chips" role="group" aria-label="Agents this message goes to" data-testid="runtime-ask-targets">
       <span class="aa-lead">{targets.length > 1 ? `Delegate to ${targets.length}` : 'Delegate to'}</span>

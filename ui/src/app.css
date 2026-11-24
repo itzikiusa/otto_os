@@ -1126,3 +1126,22 @@ kbd {
   direction: ltr;
   unicode-bidi: isolate;
 }
+
+/* Threads (ThreadsPage.svelte), moved here to keep that file under its line cap
+   (`html` keeps the specificity the scoped rules had). */
+/* A narrow phone (iPhone SE): the composer's foot stays ONE row — send /
+   stop, attach and the model chip (truncated, never below ~5 letters); the
+   access mode shows as its icon (its name stays in the label and the
+   menu) instead of wrapping both chips onto a row of their own. */
+@media (pointer: coarse) {
+  @container (max-inline-size: 420px) {
+    html .th-page .rt-foot { flex-wrap: nowrap; }
+    html .th-page .rt-foot .rt-grow { order: 0; flex-basis: auto; flex-wrap: nowrap; }
+    html .th-page .rt-foot .rt-agent { min-inline-size: 72px; }
+    html .th-page .rt-foot .ac:not(.static) > .ellipsis { display: none; }
+  }
+  /* 16px stops iOS zoom-on-focus that leaves the Threads header cut off. */
+  html .th-page :is(textarea, select, input:not([type='checkbox'], [type='radio'], [type='range'], [type='file'])) {
+    font-size: 16px !important; /* ui-guards: allow — 16px stops iOS zoom-on-focus */
+  }
+}

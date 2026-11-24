@@ -25,7 +25,6 @@
   import { ui } from '../../../lib/stores/ui.svelte';
   import { uiControl } from '../../../lib/stores/uiControl.svelte';
   import { toastError } from '../../../lib/toastError';
-  import StageSlashPopup from '../StageSlashPopup.svelte';
   import { EmojiAssistView } from '../../../lib/components/emojiAssistLazy.svelte';
   import { sharedAgentTasks } from './agentTasks';
   import { askFromComposer, askTargets } from './askTargets.svelte';
@@ -40,14 +39,15 @@
   import { mcpAsks, RuntimeMcpChanged } from './mcpAsks.svelte';
   import RuntimeComposerActions from './RuntimeComposerActions.svelte';
   import RuntimeComposerPlus from './RuntimeComposerPlus.svelte';
-  import RuntimeMinimap from './RuntimeMinimap.svelte';
+  import { MinimapView, QuestionCardView, StageSlashView } from '../threadLazy.svelte';
   import { threadAccessDefault } from '../threadAccessDefault.svelte';
   import { isAltSend, midTurnDelivery, primaryAction } from './composerSend';
   import { threadPrefs } from './threadPrefs.svelte';
   import { recallPrompt, sentPrompts, type HistoryState } from './promptHistory';
   import { dropAttachments, fileDrop } from './composerDrop';
   import RuntimeModelControl from './RuntimeModelControl.svelte';
-  import { armedSwitchLine, switchPromptFields } from './providerSwitch';
+  import { switchPromptFields } from './providerSwitch';
+  import RuntimeNextLine from './RuntimeNextLine.svelte';
   import RuntimeBannerStack from './RuntimeBannerStack.svelte';
   import {
     appendDraftAttachments, buildOptimisticUserMessage, buildRuntimeBanners, collectMessageIds,
@@ -147,6 +147,8 @@
   const dormant = $derived(session?.status === 'dormant');
   const needsRevive = $derived(closed || dormant);
   const childThreads = $derived(mapChildThreadSummaries(linkedChildren(Object.values(runtimeThreads.byId), sessionId)));
+  // What the composer opens on demand (slash list, a question) loads while idle.
+  $effect(() => { const t = setTimeout(() => { StageSlashView.prefetch(); QuestionCardView.prefetch(); }, 1200); return () => clearTimeout(t); });
   // Shared with the details card (sharedAgentTasks): computed once per change.
   const tasks = $derived(
     sharedAgentTasks(sessionId, p?.items ?? [], p?.session?.background_tasks ?? session?.background_tasks ?? [], { output: p?.output, childThreads }),
@@ -506,7 +508,7 @@
       </div>
     </div>
   </div>
-  <RuntimeMinimap {sessionId} {focused} items={p?.items ?? []} turns={p?.turns ?? []} {messageIds} {scroller} onexpand={() => { rowCap = Math.max(rowCap, rows.length); followRef?.releaseBottom(); }} />
+  {#if MinimapView.component}<MinimapView.component {sessionId} {focused} items={p?.items ?? []} turns={p?.turns ?? []} {messageIds} {scroller} onexpand={() => { rowCap = Math.max(rowCap, rows.length); followRef?.releaseBottom(); }} />{/if}
   <RuntimeFollow bind:this={followRef} {scroller} seq={p?.lastSequence} {messageIds} needs={attentionPillText(attention)} firstRow={visibleRows[0] ? timelineRowKey(visibleRows[0]) : null} bind:holdFrom />
   <RuntimeStreamTools root={streamEl} {rows} bind:rowCap bind:text={draft.text} composer={composerEl} />
 
@@ -536,16 +538,8 @@
             onreopen={() => void reopen()}
             onedit={(t, restoredAtts, editedSessionId) => restorePoppedQueuedMessageToDraft({ activeSessionId: sessionId, editedSessionId, text: t, restoredAtts, transformText: transformRestoredQueuedText, focusComposer })}
           />
-        {:else if key === 'switch' && draft.provider}
-          <div class="rt-fresh" data-testid="runtime-switch-notice" use:announceShown={armedSwitchLine(draft.provider)}>
-            <span>{armedSwitchLine(draft.provider)}</span>
-            <button type="button" class="btn small ghost" onclick={() => { draft.provider = null; draft.model = undefined; draft.effort = null; focusComposer(); }}>Cancel</button>
-          </div>
-        {:else if key === 'fresh'}
-          <div class="rt-fresh" data-testid="runtime-fresh-notice" use:announceShown={'Next message starts fresh'}>
-            <span>Next message starts fresh</span>
-            <button type="button" class="btn small ghost" onclick={() => { draft.freshContext = false; focusComposer(); }}>Cancel</button>
-          </div>
+        {:else if (key === 'switch' && draft.provider) || key === 'fresh'}
+          <RuntimeNextLine kind={key === 'switch' ? 'switch' : 'fresh'} {draft} onfocus={focusComposer} />
         {/if}
       {/snippet}
     </RuntimeBannerStack>
@@ -568,8 +562,8 @@
     {#if composerTopSlot}{@render composerTopSlot({ focusComposer })}{/if}
 
     <div class="rt-composer" class:rt-folded={composerFolded} style:border-color={planOn ? 'color-mix(in srgb, var(--warning) 42%, var(--border))' : undefined} bind:this={composerBoxEl}>
-      {#if suggestions.length > 0}
-        <StageSlashPopup id={popId} items={suggestions} active={cmdIdx} onaccept={acceptCmd} onhover={(i) => (cmdIdx = i)} />
+      {#if suggestions.length > 0 && StageSlashView.component}
+        <StageSlashView.component id={popId} items={suggestions} active={cmdIdx} onaccept={acceptCmd} onhover={(i) => (cmdIdx = i)} />
       {/if}
       {#if EmojiAssistView.component}<EmojiAssistView.component bind:this={emojiEl} textareaEl={composerEl} />{/if}
       <RuntimeContextChips context={draft.context} onremove={(id) => { draft.context = draft.context.filter((c) => c.id !== id); }} onfocus={focusComposer} />
@@ -721,14 +715,6 @@
     color: var(--danger);
     font-size: var(--fs-s);
     overflow-wrap: anywhere;
-  }
-  .rt-fresh {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    color: var(--text-dim);
-    font-size: var(--fs-s);
   }
   /* The composer: one card in the reading column, reading-size input two
      rows tall that grows to 40 % of the pane; its bottom row holds "+",
