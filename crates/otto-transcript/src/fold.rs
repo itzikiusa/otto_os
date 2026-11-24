@@ -725,6 +725,7 @@ impl<'a> Fold<'a> {
                     .is_some_and(|oldest| oldest.first < first)
             });
         let cursor = first_idx
+            .or((self.base > 0).then_some(self.base))
             .map(|f| f.to_string())
             .unwrap_or_else(|| before.map(|b| b.to_string()).unwrap_or_else(|| "0".into()));
         Transcript {

@@ -236,3 +236,29 @@ fn agy_windows_page_exactly_the_whole_file_fold() {
     std::fs::write(&path, s).unwrap();
     windows_match_whole_file(Provider::Agy, &path);
 }
+
+
+/// A window whose base is its first record (the `None => first` case: a
+/// 64 MiB span with one turn) but whose only turn starts after a sidecar
+/// record: paging before that turn must step the cursor back to the base,
+/// not hand the client the same cursor again (a "Load earlier" loop).
+#[test]
+fn a_page_with_no_turn_before_the_cursor_steps_back_to_the_base() {
+    let mut folder = otto_transcript::Folder::new(Provider::Claude, FoldOpts::default());
+    folder.start_at(100);
+    folder.seed_bytes(
+        concat!(
+            r#"{"type":"permission-mode","permissionMode":"default","sessionId":"s"}"#,
+            "\n",
+            r#"{"type":"user","uuid":"u1","parentUuid":null,"sessionId":"s","timestamp":"2026-11-01T00:00:00.000Z","message":{"role":"user","content":"hello"}}"#,
+            "\n",
+        )
+        .as_bytes(),
+    );
+    folder.set_base(100);
+    let first = folder.turn_first(0).unwrap();
+    assert!(first > 100, "the turn starts after the sidecar record");
+    let page = folder.page(Some(first), 20, vec![]);
+    assert!(page.turns.is_empty() && page.has_earlier);
+    assert_eq!(page.cursor, "100");
+}
