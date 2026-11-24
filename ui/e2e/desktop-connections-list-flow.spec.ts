@@ -112,6 +112,27 @@ test('New connection: a pasted URI fills the fields and names the profile', asyn
   await expect(dialog.getByLabel(/^Database/)).toHaveValue('orders');
 });
 
+test('Re-pasting a verify-full URI after an allow-invalid-certificates one verifies again (R2-004)', async ({ page }) => {
+  await page.goto('/#/connections');
+  await page.getByRole('button', { name: /New connection/ }).first().click();
+  await page.getByRole('menuitem', { name: /^Database…/ }).click();
+  const dialog = page.getByRole('dialog');
+  const paste = async (uri: string) => {
+    await dialog.getByLabel('Paste a connection URI').fill(uri);
+    await dialog.getByRole('button', { name: 'Continue', exact: true }).click();
+  };
+  await paste('postgres://dev.internal/app?sslmode=require&tlsAllowInvalidCertificates=true');
+  await dialog.getByRole('button', { name: /More options/ }).click();
+  const verify = dialog.getByLabel('Verify server certificate');
+  await expect(verify).not.toBeChecked();
+  await dialog.getByRole('button', { name: 'Change', exact: true }).click();
+  await paste('postgres://prod.internal/app?sslmode=verify-full');
+  await expect(dialog.getByLabel('Host', { exact: true })).toHaveValue('prod.internal');
+  if ((await dialog.getByRole('button', { name: /More options/ }).getAttribute('aria-expanded')) !== 'true') await dialog.getByRole('button', { name: /More options/ }).click();
+  await expect(dialog.getByLabel('TLS / SSL')).toHaveValue('required');
+  await expect(verify).toBeChecked();
+});
+
 test('Editing a profile that uses TLS opens More options by itself', async ({ page }) => {
   const { ctx, base } = await apiCtx();
   const name = `tls-edit-${Date.now()}`;
