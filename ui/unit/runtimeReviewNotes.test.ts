@@ -1,7 +1,8 @@
 // Review notes on a diff (runtime/reviewNotes.ts).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { endsAt, isOutdated, noteAnchor, noteWhere, reviewMessage, type ReviewNote } from '../src/modules/threads/runtime/reviewNotes.ts';
+import { endsAt, isOutdated, noteAnchor, noteWhere, reviewMessage, sentReview, type ReviewNote } from '../src/modules/threads/runtime/reviewNotes.ts';
+import { assembleComposerMessage } from '../src/modules/threads/runtime/composerContext.ts';
 
 const L = (origin: string, content: string, old_line: number | null, new_line: number | null) => ({ origin, content, old_line, new_line }) as never;
 const lines = [L('context', 'a', 10, 12), L('del', 'b', 11, null), L('add', 'B', null, 13), L('add', 'C', null, 14)];
@@ -35,4 +36,20 @@ test('a note shows under its last line (new side first, an old-only note under i
   const old = noteAnchor([lines[1]]);
   assert.equal(endsAt(old, lines[1]), true);
   assert.equal(endsAt(old, lines[0]), false);
+});
+
+test('a sent review reads back from the message as its notes (the timeline block), for any agent', () => {
+  const notes = [
+    { id: 'a', repoId: 'r', target: 'working', path: 'src/a.ts', oldLines: '9', newLines: '9', quote: '-save(note);\n+queue.push(note);', comment: 'Keep the old name.', state: 'draft' },
+    { id: 'b', repoId: 'r', target: 'working', path: 'README.md', oldLines: '', newLines: '1', quote: '+# harbor', comment: 'Typo?\nAnd a second line.', state: 'draft' },
+  ] as ReviewNote[];
+  const text = assembleComposerMessage('Please fix these.', [{ id: 'notes:x', kind: 'review-comment', label: 'Review · 2 notes', text: reviewMessage(notes) }]);
+  const r = sentReview(text)!;
+  assert.equal(r.prose, 'Please fix these.');
+  assert.equal(r.label, 'Review · 2 notes');
+  assert.deepEqual(r.notes.map((n) => [n.path, n.quote.length, n.comment]), [
+    ['src/a.ts', 2, 'Keep the old name.'],
+    ['README.md', 1, 'Typo?\nAnd a second line.'],
+  ]);
+  assert.equal(sentReview('just words'), null);
 });

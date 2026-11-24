@@ -113,6 +113,7 @@ test('phone: one primary button by touch — Stop, Queue, Steer — with the key
   // The keyboard up (as on a device: focus first, then the keyboard takes
   // its share of the screen): the composer and its button stay on screen.
   await composer.tap();
+  const beforeKb = page.viewportSize()!;
   await page.setViewportSize(withKeyboard(page));
   await expect(page.locator('html[data-kb="open"]')).toHaveCount(1);
   await composer.fill('queued from the phone');
@@ -133,7 +134,16 @@ test('phone: one primary button by touch — Stop, Queue, Steer — with the key
   const [sb, last] = [(await thread.locator('.rt-scroll').boundingBox())!, (await thread.getByText('Working…').last().boundingBox())!];
   expect(last.y + last.height, 'the latest message is in sight').toBeLessThanOrEqual(sb.y + sb.height + 1);
   expect(last.y, 'the latest message is in sight').toBeGreaterThanOrEqual(sb.y - 1);
-  await more.tap();
+  // A phone on its side while typing has room for the field and its button
+  // only (lib typingChrome): the notice line steps aside and comes back with
+  // the keyboard down.
+  if (await page.locator('.th-page.kb-nobanners').count()) {
+    await expect(more).toBeHidden();
+    await composer.blur();
+    await page.setViewportSize(beforeKb); // keyboard down: the queue is the one notice, in full
+  } else {
+    await more.tap();
+  }
   await expect(thread.getByTestId('runtime-queued')).toHaveCount(1);
   await shoot(page, 'queue', info.project.name);
 
@@ -154,8 +164,12 @@ test('phone: a finished turn reads as one line and a changes card; times show wi
   await page.goto('/#/threads/phone-read');
   const thread = page.getByTestId('runtime-thread-phone-read');
   await expect(thread.getByText('Offline edits now survive')).toBeVisible({ timeout: 30_000 });
-  // No hover on touch: the time is always shown.
-  await expect(thread.getByTestId('runtime-assistant-time')).toHaveCSS('opacity', '1');
+  // No hover on touch: a message's time and Copy wait for a tap on it (one line per answer).
+  const foot = thread.locator('.rt-assistant .rt-msg-foot').first();
+  expect((await foot.boundingBox())!.width, 'time and Copy fold away on touch').toBeLessThanOrEqual(1);
+  await thread.locator('.rt-assistant').first().tap();
+  await expect.poll(async () => (await foot.boundingBox())!.width, { message: 'a tap shows them' }).toBeGreaterThan(40);
+  await expect(foot.getByTestId('runtime-assistant-time')).toBeVisible();
   const fold = thread.locator('[data-testid^="runtime-fold-"] > summary');
   await expect(fold).toContainText('ran 4 commands and edited 3 files');
   const card = thread.getByTestId('runtime-turn-changes');
@@ -170,10 +184,12 @@ test('phone: a finished turn reads as one line and a changes card; times show wi
   await expectNoHorizontalOverflow(page);
   await shoot(page, 'reading', info.project.name);
   // The keyboard up: the composer stays on screen and nothing of the thread sits under it.
+  // As on a device: the tap focuses the composer, then the keyboard takes its share.
   const full = page.viewportSize()!;
-  await page.setViewportSize(withKeyboard(page));
   const composer = thread.getByTestId('runtime-composer');
   await composer.tap();
+  await page.setViewportSize(withKeyboard(page));
+  await expect(page.locator('html[data-kb="open"]')).toHaveCount(1);
   await expectFullyInViewport(page, composer, 'composer with the keyboard up');
   // The conversation (changes card included) scrolls above the composer, never under it.
   const [sb, kb] = [(await thread.locator('.rt-scroll').boundingBox())!, (await thread.locator('.rt-composer').boundingBox())!];
@@ -207,12 +223,15 @@ test('phone: Settings › Threads by touch', async ({ page }, info) => {
   await shoot(page, 'settings-threads', info.project.name);
 });
 
-test('phone: a long thread’s turns are a "Jump to…" sheet in ⋯ (no rail)', async ({ page }, info) => {
+test('touch: a long thread’s turns are a "Jump to…" sheet in ⋯ (a phone has no rail, a wide tablet keeps it)', async ({ page }, info) => {
   const { items, turns } = longThread(10);
   await mockThread(page, mockWs, 'phone-long', items, turns);
   await page.goto('/#/threads/phone-long');
   const thread = page.getByTestId('runtime-thread-phone-long');
   await expect(thread.getByText('Answer 10.')).toBeVisible({ timeout: 30_000 });
+  // A tablet on its side (≥ 1025 px: the desktop layout) keeps the minimap
+  // rail; its ticks are too thin for a finger, so ⋯ offers the same sheet.
+  if (/^(ipad|android-tablet)-landscape$/.test(info.project.name)) await expect(thread.getByTestId('runtime-minimap')).toBeVisible();
   if (/^iphone-|^android-phone/.test(info.project.name)) await expect(thread.getByTestId('runtime-minimap')).toHaveCount(0);
   await page.getByTestId('threads-thread-menu').tap();
   await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Jump to…' }).tap();

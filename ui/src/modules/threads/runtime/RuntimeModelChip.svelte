@@ -21,6 +21,7 @@
   bind:this={el}
   type="button"
   class="rt-agent"
+  class:iconed={showIcon && hasProviderIcon(provider)}
   aria-haspopup="dialog"
   aria-expanded={expanded}
   aria-label="Model for the next turn: {label}"
@@ -63,6 +64,16 @@
   @media (pointer: coarse) {
     .rt-agent {
       block-size: var(--hit-min);
+    }
+  }
+  /* A narrow phone typing (the one-row composer): the chip keeps its glyph and
+     gives its name's width to the text being typed (the label stays in its title). */
+  @container (max-inline-size: 420px) {
+    :global(.th-page.kb-tight) .rt-agent.iconed {
+      min-inline-size: 0;
+    }
+    :global(.th-page.kb-tight) .rt-agent.iconed > .ellipsis {
+      display: none;
     }
   }
 </style>

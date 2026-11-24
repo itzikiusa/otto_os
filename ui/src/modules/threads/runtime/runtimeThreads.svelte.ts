@@ -69,6 +69,8 @@ const ROW_META_KEYS = [
   'read_only',
   'delegated_by_agent',
   'delegated_by_name',
+  // Derived turn times: "Working 4m" on a row after a reload, without a read.
+  'last_turn_started_at',
 ] as const;
 
 const threadSessionRowCache = new WeakMap<RuntimeSession, Session>();

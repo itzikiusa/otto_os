@@ -411,7 +411,7 @@
         terminalOpen: threadsChrome.terminalOpen,
         cardOn: cardRoom ? threadsChrome.cardVisible : null,
         threadId: focused?.id ?? null,
-        compact,
+        compact, touch: typeof matchMedia === 'function' && matchMedia('(hover: none) and (pointer: coarse)').matches,
         // A phone on its side is tablet-wide but still the phone: no hand-off to itself.
         phone: viewport.isPhone || viewport.isShort,
         sidebarVisible: !listDrawer && threads.sidebarOpen,
@@ -517,7 +517,7 @@
         aria-pressed={rightOpen}
         aria-label="Right panel"
         title={rightOpen ? 'Hide the right panel' : 'Show the right panel: files, changes, pull request, side chat'}
-        data-icon="panel"
+        data-icon="panel" data-keep
         data-testid="threads-toggle-inspector"
         onclick={toggleRightBar}
       >
@@ -529,7 +529,7 @@
         aria-haspopup="menu"
         aria-label="Thread and view actions"
         title="More: thread actions, project card, terminal, layout"
-        data-icon="more"
+        data-icon="more" data-keep
         data-testid="threads-thread-menu"
         bind:this={menuBtn}
         onpointerenter={() => { TerminalDock.prefetch(); RelatedListView.prefetch(); }}
@@ -643,10 +643,11 @@
     color: var(--accent-text);
   }
   .th-crumbs {
-    display: inline-flex;
+    display: flex;
     align-items: center;
     gap: var(--sp-4);
     min-width: 0;
+    max-inline-size: 100%;
     font-size: var(--fs-l);
     font-weight: 400;
   }
@@ -660,7 +661,7 @@
   }
   .th-crumb-title { color: var(--text); font-weight: 600; min-width: 0; }
   .th-crumb-btn { border: 0; background: none; padding: 0 2px; border-radius: var(--radius-s); font: inherit; font-weight: 600; color: var(--text); cursor: default; }
-  .th-crumb-btn:hover { background: var(--hover); }
+  @media (hover: hover) { .th-crumb-btn:hover { background: var(--hover); } } /* never a "selected" look on touch */
   @media (max-width: 640px), (max-height: 500px) and (pointer: coarse) {
     .th-crumbs > :global(.pb), .th-crumb-project, .th-crumb-sep { display: none; }
   }
@@ -778,21 +779,5 @@
   }
   .th-page.kb-dockhead :global(.rt-dock :is(.ad-body, .ad-jump)) {
     display: none;
-  }
-  /* A narrow phone (iPhone SE): the composer's foot stays ONE row — send /
-     stop, attach and the model chip (truncated, never below ~5 letters); the
-     access mode shows as its icon (its name stays in the label and the
-     menu) instead of wrapping both chips onto a row of their own. */
-  @media (pointer: coarse) {
-    @container (max-inline-size: 420px) {
-      .th-page :global(.rt-foot) { flex-wrap: nowrap; }
-      .th-page :global(.rt-foot .rt-grow) { order: 0; flex-basis: auto; flex-wrap: nowrap; }
-      .th-page :global(.rt-foot .rt-agent) { min-inline-size: 72px; }
-      .th-page :global(.rt-foot .ac:not(.static) > .ellipsis) { display: none; }
-    }
-    /* 16px stops iOS zoom-on-focus that leaves the Threads header cut off. */
-    .th-page :global(:is(textarea, select, input:not([type='checkbox'], [type='radio'], [type='range'], [type='file']))) {
-      font-size: 16px !important; /* ui-guards: allow — 16px stops iOS zoom-on-focus */
-    }
   }
 </style>

@@ -10,10 +10,13 @@
   import type { RuntimeSession } from '../../../lib/api/types';
   import type { EffortLevel } from '../../../lib/providerModels';
   import { resolveEffectiveDraftModel } from './runtimeComposer';
-  import { switchTargets } from './providerSwitch';
+  import { armSwitch, switchTargets } from './providerSwitch';
+  import { runtimeViews } from './runtimeView.svelte';
   import RuntimeModelChip from './RuntimeModelChip.svelte';
 
   const ModelPicker = lazyComponent(() => import('../../../lib/components/ModelPickerPopover.svelte'));
+  // Loaded once the provider has reported a context window (most turns start without one).
+  const ContextMeter = lazyComponent(() => import('./RuntimeContextMeter.svelte'));
 
   interface Props {
     provider: string;
@@ -23,8 +26,12 @@
     efforts: string[];
     disabled: boolean;
     testId: string;
+    /** The context meter's "Compact the conversation": type the agent's command. */
+    oncompact?: (command: string) => void;
   }
-  let { provider, session, draft, efforts, disabled, testId }: Props = $props();
+  let { provider, session, draft, efforts, disabled, testId, oncompact }: Props = $props();
+  // How full the context is, beside the chip (RuntimeContextMeter).
+  const view = $derived(session ? runtimeViews.projections[session.id] : null);
   let open = $state(false);
   let el = $state<HTMLButtonElement | null>(null);
   const armed = $derived(draft.provider && draft.provider !== provider ? draft.provider : null);
@@ -39,14 +46,13 @@
     return effort ? `${name} · ${formatEffortShort(effort)}` : name;
   });
   function pickProvider(p: string): void {
-    const away = p !== provider;
-    draft.provider = away ? p : null;
-    // The other provider starts on its default until a model is picked.
-    draft.model = away ? null : undefined;
-    draft.effort = null;
+    armSwitch(draft, provider, p);
   }
+  // A model of another provider picked: the switch is armed — the picker
+  // closes so the "Next message continues on …" line is in sight.
 </script>
 
+{#if view?.thread?.context_usage?.max_tokens && ContextMeter.component}<ContextMeter.component usage={view.thread.context_usage} compact={view.commands.some((c) => c.name === 'compact') ? 'compact' : null} {oncompact} />{/if}
 <RuntimeModelChip
   bind:el
   provider={shown}
@@ -72,7 +78,7 @@
     effort={draft.effort}
     mode="full"
     onprovider={pickProvider}
-    onmodel={(m) => (draft.model = m)}
+    onmodel={(m) => { draft.model = m; if (armed) open = false; }}
     oneffort={efforts.length || armed ? (e) => (draft.effort = e) : undefined}
     effortLevels={armed ? undefined : efforts}
     onclose={() => (open = false)}

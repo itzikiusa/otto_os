@@ -373,6 +373,44 @@ test('the Threads terminal dock: a selection → “Add to chat” goes to the f
   await expect(thread.locator('.rt-user')).toHaveCount(0);
 });
 
+test('context meter: codex reports its window (fake: 7 of 1000 → 1 %); the details card has the same row', async ({ page }) => {
+  test.setTimeout(90_000);
+  const { thread } = await open(page, 'codex', 'Context meter codex');
+  await expect(thread.getByTestId('runtime-context-meter')).toHaveCount(0); // nothing reported yet
+  await send(thread, 'hi');
+  const meter = thread.getByTestId('runtime-context-meter');
+  await expect(meter).toBeVisible({ timeout: 20_000 });
+  await expect(meter).toHaveAttribute('data-tone', 'ok');
+  await expect(meter).toHaveAttribute('aria-label', /Context 1 % full: 7 of 1k tokens/);
+  await meter.click();
+  await expect(page.getByRole('menuitem', { name: /Context · 7 of 1k tokens/ })).toBeVisible();
+  // codex publishes no compact command: no Compact entry.
+  await expect(page.getByRole('menuitem', { name: /Compact/ })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await page.getByTestId('threads-toggle-inspector').click();
+  await expect(page.getByTestId('thread-details-card').getByTestId('details-context')).toContainText('1 %');
+});
+
+test('context meter: gemini (ACP usage_update) — percent of 1M; Compact inserts the agent’s /compact', async ({ page }) => {
+  test.setTimeout(90_000);
+  const { thread } = await open(page, 'gemini', 'Context meter ACP');
+  await thread.getByTestId('runtime-composer').fill('usage');
+  await thread.getByTestId('runtime-send').click();
+  const meter = thread.getByTestId('runtime-context-meter');
+  await expect(meter).toBeVisible({ timeout: 20_000 });
+  await expect(meter).toHaveAttribute('aria-label', /Context 0 % full: 1\.2k of 1M tokens/);
+  await meter.click();
+  await page.getByRole('menuitem', { name: /Compact the conversation/ }).click();
+  await expect(thread.getByTestId('runtime-composer')).toHaveValue('/compact');
+});
+
+test('context meter: claude without a reported window shows no meter', async ({ page }) => {
+  test.setTimeout(90_000);
+  const { thread } = await open(page, 'claude', 'Context meter claude');
+  await send(thread, 'hi');
+  await expect(thread.getByTestId('runtime-context-meter')).toHaveCount(0);
+});
+
 test('the dock\'s "Add to chat" forgets a selection made in the terminal tab you left', async ({ page }) => {
   test.setTimeout(120_000);
   await page.addInitScript(() => localStorage.setItem('otto_threads_chrome_v1', JSON.stringify({ terminalOpen: true })));

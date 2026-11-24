@@ -81,7 +81,7 @@ test('codex → claude on a 390 px phone: arm in the sheet, the line and the div
   await picker.getByTestId('model-picker-provider-claude').tap();
   await expect(picker.getByTestId('model-picker-switch-hint')).toBeVisible();
   await picker.getByRole('button', { name: 'Default model' }).tap();
-  await page.getByRole('button', { name: 'Close model picker' }).tap({ position: { x: 4, y: 4 } });
+  await expect(picker).toHaveCount(0); // a pick that arms the switch closes the picker
   const notice = thread.getByTestId('runtime-switch-notice');
   await expect(notice).toContainText('Next message continues on Claude Code');
   await expectFullyInViewport(page, notice, 'armed line');

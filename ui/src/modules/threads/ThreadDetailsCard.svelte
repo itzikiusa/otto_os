@@ -29,6 +29,7 @@
   import RuntimeTaskStop from './runtime/RuntimeTaskStop.svelte';
   import { runtimeThreads } from './runtime/runtimeThreads.svelte';
   import { runtimeViews } from './runtime/runtimeView.svelte';
+  import { contextMeter } from './runtime/contextMeter';
   import { mcpServerRows, mcpSummary } from './runtime/mcpServers';
   import { mcpServersSheet } from './runtime/mcpServersSheet.svelte';
   import { gitAction } from './threadDetails';
@@ -57,6 +58,14 @@
     summary?: boolean;
   }
   let { cwd, threadId = null, floating = false, ondismiss, summary = false }: Props = $props();
+  // A thread stopped on its provider's usage limit, and when it resumes (RuntimeUsageLimit).
+  const limitRow = $derived.by(() => {
+    const rt = threadId ? runtimeThreads.get(threadId) : null;
+    if (rt?.last_turn_status !== 'failed' || rt.last_error_class !== 'usage_limit') return null;
+    const at = (rt.meta as Record<string, unknown> | null | undefined)?.resume_at;
+    return typeof at === 'string' ? `resumes ${new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : '';
+  });
+  const ctxMeter = $derived(contextMeter(threadId ? runtimeViews.projections[threadId]?.thread?.context_usage : null));
   /** "MCP · N servers" (the thread's MCP server list, from its last start). */
   const mcpServers = $derived(threadId ? (runtimeViews.projections[threadId]?.mcpServers ?? null) : null);
   const mcpLine = $derived(mcpServers && mcpServers.length ? mcpSummary(mcpServerRows(mcpServers, [], 'The agent')) : null);
@@ -140,7 +149,7 @@
       delegated: [
         ...ws.sessions.filter((x) => !x.archived && delegatedParentId(x) === threadId),
         ...all.filter((x) => x.parent_id === threadId && councilOf(x)),
-      ].map((x) => ({ id: x.id, title: x.title, provider: x.provider, status: ws.statusMap[x.id] ?? x.status })),
+      ].map((x) => ({ id: x.id, title: x.title, provider: x.provider, status: ws.statusMap[x.id] ?? x.status, startedAt: ((x.meta as Record<string, unknown> | null | undefined)?.last_turn_started_at as string | undefined) ?? null })),
     };
   });
   // The same object the conversation reads (sharedAgentTasks), kept while a
@@ -162,7 +171,7 @@
     return s.parent || s.running.length || s.previous.length ? s : null;
   });
   /** The header tallies like the timeline row, most urgent first ("1 needs you · 1 working"). */
-  const WORD_TONE: Record<SubagentWord, ChildTone> = { Working: 'working', 'Needs you': 'needs-you', Done: 'done', Failed: 'failed', Stopped: 'stopped' };
+  const WORD_TONE: Record<SubagentWord, ChildTone> = { Working: 'working', 'Needs you': 'needs-you', Done: 'done', Failed: 'failed', Limited: 'failed', Stopped: 'stopped' };
   /** "Subagents · 1 needs you · 1 working"; compared threads are counted as
    *  models, not subagents ("Compared with 2 models"). */
   function subagentsCap(s: { running: SubagentRow[]; previous: SubagentRow[] }): string {
@@ -345,6 +354,21 @@
     {:else}
       <p class="dc-note">{!project ? 'Pick a project folder' : repoChecked ? 'Not a git repository' : 'Looking for a git repository…'}</p>
     {/if}
+    {#if limitRow !== null}
+      <div class="dc-row dc-static" data-testid="details-limit">
+        <Icon name="clock" size={14} />
+        <span class="dc-label">Limited</span>
+        <span class="dc-stat dc-warn">{limitRow}</span>
+      </div>
+    {/if}
+    {#if ctxMeter}
+      <!-- How full the agent's context is (runtime/contextMeter.ts). -->
+      <div class="dc-row dc-static" title="Context: {ctxMeter.text}" data-testid="details-context">
+        <Icon name="gauge" size={14} />
+        <span class="dc-label">Context</span>
+        <span class="dc-stat mono" class:dc-warn={ctxMeter.tone === 'warning'} class:dc-danger={ctxMeter.tone === 'danger'} dir="ltr">{ctxMeter.pct} %</span>
+      </div>
+    {/if}
   </div>
 
   {#if mcpLine && threadId}
@@ -525,6 +549,12 @@
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
+  .dc-warn {
+    color: var(--warning);
+  }
+  .dc-danger {
+    color: var(--danger);
+  }
   .dc-stat {
     display: inline-flex;
     gap: var(--sp-3);
@@ -554,6 +584,9 @@
   .dc-word[data-word='Needs you'] {
     color: var(--warning);
     font-weight: 600;
+  }
+  .dc-word[data-word='Limited'] {
+    color: var(--warning);
   }
   .dc-word[data-word='Failed'] {
     color: var(--danger);

@@ -264,6 +264,18 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
+  /* Touch: the per-turn "Ran on … · N tokens" line stays for screen readers
+     only — the model is on the chip, the context meter and details hold the rest. */
+  @media (hover: none) {
+    p.ts[data-testid='runtime-ran-on'] {
+      position: absolute;
+      inline-size: 1px;
+      block-size: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+  }
   @media (pointer: coarse) {
     .ts-btn {
       min-block-size: calc(var(--hit-min) + 8px);

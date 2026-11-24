@@ -58,7 +58,7 @@
   const subs = $derived(
     kids.length === 0
       ? null
-      : childRollup(kids.map((id) => ({ title: ws.getSession(id)?.title ?? runtimeThreads.get(id)?.title ?? '', word: subagentWord(threadStateById(id)?.key) }))),
+      : childRollup(kids.map((id) => ({ title: ws.getSession(id)?.title ?? runtimeThreads.get(id)?.title ?? '', word: subagentWord(threadStateById(id)?.key, { limited: threadStateById(id)?.label === 'Limited' }) }))),
   );
   const subNeeds = $derived(!history && !!subs && subs.needsYou > 0);
   const cls = $derived(history ? 'rest' : subNeeds ? 'needs' : inboxClass(st.key, unread));
@@ -69,14 +69,15 @@
     if (runtime && (cls === 'needs' || cls === 'working')) inboxLive.ensure(s.id);
   });
   const word = $derived(
-    child ? subagentWord(st.key) : subNeeds ? 'Needs you' : statusWord(cls, {
+    child ? subagentWord(st.key, { limited: st.label === 'Limited' }) : subNeeds ? 'Needs you' : statusWord(cls, {
       kinds: inboxLive.kindsOf(s.id),
-      workingSince: cls === 'working' ? (inboxLive.since[s.id] ?? null) : null,
+      workingSince: cls === 'working' ? inboxLive.workingSince(s.id, s.meta as Record<string, unknown> | null) : null,
       now: cls === 'working' ? now() : 0,
+      limited: st.label === 'Limited',
     }),
   );
   const tone = $derived(
-    word === 'Approval' || word === 'Question' || word === 'Needs you' ? 'warning' : word === 'Failed' ? 'danger' : word === 'Done' ? 'success' : '',
+    word === 'Approval' || word === 'Question' || word === 'Needs you' || word === 'Limited' ? 'warning' : word === 'Failed' ? 'danger' : word === 'Done' ? 'success' : '',
   );
 
   const meta = $derived(s.meta as Record<string, unknown> | undefined);

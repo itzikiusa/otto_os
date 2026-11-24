@@ -392,6 +392,46 @@ async fn create_adds_a_new_branch_worktree_beside_the_repo_and_refuses_reuse() {
 }
 
 #[tokio::test]
+async fn a_new_worktree_gets_what_worktreeinclude_names_and_nothing_else() {
+    let (_tmp, repo) = fixture();
+    std::fs::write(repo.join(".gitignore"), "node_modules/\n.env\nbuild/\n").unwrap();
+    commit(
+        &repo,
+        ".gitignore",
+        "node_modules/\n.env\nbuild/\n",
+        "ignore",
+    );
+    std::fs::write(repo.join(".env"), "TOKEN=1").unwrap();
+    std::fs::write(repo.join("notes.txt"), "untracked, not named").unwrap();
+    std::fs::create_dir_all(repo.join("build")).unwrap();
+    std::fs::write(repo.join("build/out.o"), "ignored, not named").unwrap();
+    std::fs::create_dir_all(repo.join("node_modules/pkg")).unwrap();
+    std::fs::write(repo.join("node_modules/pkg/index.js"), "module.exports = 1").unwrap();
+    std::fs::write(
+        repo.join(crate::worktree_ready::INCLUDE_FILE),
+        "# local config\n.env\n../outside\n[clone]\nnode_modules/\n",
+    )
+    .unwrap();
+    let git = LocalGit::new(&repo);
+    let w = git.worktree_create("feat/ready", None).await.unwrap();
+    let dest = Path::new(&w.path);
+    let got = git.prepare_worktree(dest).await;
+    assert_eq!(got.copied, 1, "{got:?}");
+    assert_eq!(
+        std::fs::read_to_string(dest.join(".env")).unwrap(),
+        "TOKEN=1"
+    );
+    assert_eq!(
+        [got.cloned.clone(), got.linked.clone()].concat(),
+        ["node_modules"]
+    );
+    assert!(dest.join("node_modules/pkg/index.js").exists());
+    assert!(!dest.join("notes.txt").exists());
+    assert!(!dest.join("build").exists());
+    assert!(!repo.parent().unwrap().join("outside").exists());
+}
+
+#[tokio::test]
 async fn worktree_inspect_never_runs_embedded_submodule_filter() {
     use std::os::unix::fs::PermissionsExt;
     let (tmp, repo) = fixture();

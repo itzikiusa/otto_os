@@ -2,17 +2,21 @@ import { test, expect } from '@playwright/test';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 import { setup, shoot } from './threadsReviewNotesFixture';
 
-// Review notes on a phone, with real touch: a tapped line number opens the
-// note box as a sheet that stays above the on-screen keyboard.
+// Review notes by touch on every phone and tablet: a tapped line number opens
+// the note box (a sheet on a phone, inline in the details panel on a tablet)
+// and it stays above the on-screen keyboard, Save included.
 
 test.use({ serviceWorkers: 'block' });
-const MOBILE = /^(iphone-|android-)/;
+const MOBILE = /^(iphone-|ipad-|android-)/;
 
 test('phone: tap a line number → the note box is a sheet above the keyboard', async ({ page }, info) => {
-  test.skip(!MOBILE.test(info.project.name), 'phones');
+  test.skip(!MOBILE.test(info.project.name), 'phones and tablets');
   await setup(page, { inspector: true });
   await page.goto('/#/threads/notes-alpha');
-  await page.getByTestId('threads-toggle-inspector').tap();
+  // A wide tablet (desktop layout) shows the details panel already; a phone opens it.
+  const toggle = page.getByTestId('threads-toggle-inspector');
+  await expect(toggle).toBeVisible({ timeout: 30_000 });
+  if ((await toggle.getAttribute('aria-pressed')) !== 'true') await toggle.tap();
   const changesTab = page.getByTestId('threads-tab-changes');
   if (await changesTab.isVisible()) await changesTab.tap();
   const tab = page.getByTestId('inspector-changes-tab');

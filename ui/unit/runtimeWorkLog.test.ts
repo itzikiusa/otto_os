@@ -171,6 +171,9 @@ test('the thread’s next action (Revive / Reopen) is never folded behind "N mor
   const sw = buildRuntimeBanners({ ...base, switchTo: 'codex' });
   assert.deepEqual(keys(splitBanners(sw, 0)), [['switch'], ['plan', 'queue']]);
   assert.deepEqual(keys(splitBanners(buildRuntimeBanners({ ...base, switchTo: 'codex', sessionError: 'Codex is not signed in.' }), 0)), [['error', 'switch'], ['plan', 'queue']]);
+  // A usage limit's line (Resume at reset / Continue with …) never folds; an armed switch replaces it.
+  assert.deepEqual(keys(splitBanners(buildRuntimeBanners({ ...base, limited: true }), 0)), [['limit'], ['plan', 'queue']]);
+  assert.deepEqual(keys(splitBanners(buildRuntimeBanners({ ...base, limited: true, switchTo: 'codex' }), 0)), [['switch'], ['plan', 'queue']]);
   // A live queue is a quiet notice; "Next message starts fresh" says what the next message does.
   assert.deepEqual(keys(splitBanners(buildRuntimeBanners(base))), [['fresh'], ['plan', 'queue']]);
   assert.deepEqual(keys(splitBanners(buildRuntimeBanners({ ...base, freshContext: false }))), [['plan'], ['queue']]);

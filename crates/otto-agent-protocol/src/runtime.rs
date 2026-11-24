@@ -618,8 +618,8 @@ impl AgentRuntime {
     /// turn this cut off reports it to its parent (`children.rs`). Returns
     /// sessions touched.
     pub async fn recover(&self) -> Result<usize> {
-        self.recover_excluding(&std::collections::HashSet::new())
-            .await
+        let none = std::collections::HashSet::new();
+        Ok(self.arm_resumes(self.recover_excluding(&none).await?)) // + "Resume at reset"
     }
 
     /// Evict idle cached projections and reconcile non-live sessions in SQLite
@@ -1286,6 +1286,7 @@ impl AgentRuntime {
     /// A prompt with an optional model / effort / access mode and inline
     /// images and files.
     pub async fn prompt_with(&self, id: &Id, req: &RuntimePromptReq) -> Result<RuntimePromptResp> {
+        self.cancel_resume(id).await; // new input (a switch, a fresh start) takes over
         let live = self.live(id).await?;
         let _prompt = live.prompt_lock.lock().await;
         otto_telemetry::context::measure_result(
@@ -1792,6 +1793,7 @@ impl AgentRuntime {
 
     /// Interrupt the running turn. `false` when no turn was running.
     pub async fn interrupt(&self, id: &Id) -> Result<bool> {
+        self.cancel_resume(id).await; // Stop (a family Stop too) cancels "Resume at reset"
         let live = self.live(id).await?;
         Ok(interrupt_turn(&self.inner, &live))
     }

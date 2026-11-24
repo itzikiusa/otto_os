@@ -126,7 +126,7 @@ test('the sidebar is an inbox: status words, needs you first, Working and Histor
   // One word per row, the same vocabulary everywhere.
   await expect(word(page, 'approval')).toHaveText('Approval');
   await expect(word(page, 'question')).toHaveText('Question');
-  await expect(word(page, 'failed')).toHaveText('Failed');
+  await expect(word(page, 'failed')).toHaveText('Limited'); // its `limit` turn hit the usage limit
   await expect(word(page, 'idle')).toHaveText(/^(now|\d+[smhd])$/);
 
   // Needs you, then failed, then finished unread, then the rest — flat across projects.
@@ -172,6 +172,11 @@ test('the sidebar is an inbox: status words, needs you first, Working and Histor
   await expect(page.getByTestId(above!).locator('.tr-main')).toBeFocused();
   await page.keyboard.press('ArrowDown');
   await expect(doneMain).toBeFocused();
+
+  // After a reload (no live event for the turn already running, no read): still
+  // its elapsed time, from the row's derived `meta.last_turn_started_at`.
+  await page.reload();
+  await expect(word(page, 'working')).toHaveText(/^Working \d+[smh]/, { timeout: 15_000 });
 });
 
 test('Working and History stay pinned above the footer while the list scrolls', async ({ page }) => {

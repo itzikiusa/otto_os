@@ -3,6 +3,8 @@
   // between the main Threads module and `EmbeddedRuntimeThread` in IDE / PRs /
   // Personal Agents). Strips `<ide_context>` and file-context envelopes into
   // clickable badges so user bubbles stay clean in every surface.
+  import { lazyComponent } from '../../../lib/lazy-component.svelte';
+  import { REVIEW_HEADER, sentReview } from './reviewNotes';
   import type { Snippet } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import { copyWithToast } from '../../../lib/clipboard';
@@ -43,6 +45,10 @@
   import { threadPrefs } from './threadPrefs.svelte';
   import { turnUsageText } from './turnUsage';
   import { handoffSummary, handoffTitle } from './providerSwitch';
+  import { tapMeta } from './tapMeta';
+
+  // A sent review is rare: its block loads with the first one shown.
+  const ReviewBlock = lazyComponent(() => import('./RuntimeReviewBlock.svelte'));
 
   interface Props {
     sessionId: string;
@@ -260,7 +266,8 @@
     {@const parsed = parseUserMessageItemWithBadges(row.item)}
     {@const userIso = row.item.started_at ?? row.item.updated_at}
     {@const userClock = formatMessageClock(userIso)}
-    <div class="rt-user" data-rt-msg={row.item.id}>
+    {@const review = row.item.text.includes(REVIEW_HEADER) ? sentReview(row.item.text) : null}
+    <div class="rt-user" data-rt-msg={row.item.id} use:tapMeta>
       {#if row.item.attachments?.length}<RuntimeAttachments {sessionId} attachments={row.item.attachments} />{/if}
       {#if parsed.badges.length > 0}
         <div class="rt-ctx-badges">
@@ -285,7 +292,10 @@
           {/each}
         </div>
       {/if}
-      {#if parsed.prose || (parsed.badges.length === 0 && row.item.text)}
+      {#if review}
+        {#if review.prose}<div class="rt-bubble" dir="auto">{review.prose}</div>{/if}
+        {#if ReviewBlock.component}<ReviewBlock.component label={review.label} notes={review.notes} />{/if}
+      {:else if parsed.prose || (parsed.badges.length === 0 && row.item.text)}
         <div class="rt-bubble" dir="auto">{parsed.badges.length > 0 ? parsed.prose : row.item.text}</div>
       {/if}
       <div class="rt-msg-foot">
@@ -312,7 +322,7 @@
     {@const activeIso = row.item.streaming ? startIso : endIso}
     {@const assistantClock = formatMessageClock(activeIso)}
     {@const elapsedMs = !row.item.streaming && row.item.started_at && row.item.completed_at ? Date.parse(row.item.completed_at) - Date.parse(row.item.started_at) : 0}
-    <div class="rt-assistant" class:streaming={row.item.streaming} dir="auto" data-rt-msg={row.item.id}>
+    <div class="rt-assistant" class:streaming={row.item.streaming} dir="auto" data-rt-msg={row.item.id} use:tapMeta>
       {#if mdText || !assistantFooter}<Markdown md={mdText} streaming={row.item.streaming} />{/if}
       {#if assistantFooter}{@render assistantFooter(row.item)}{/if}
       <div class="rt-msg-foot">
@@ -580,8 +590,43 @@
   .rt-user > .rt-msg-foot {
     align-self: flex-end;
   }
-  /* A message's time and actions show on hover / focus with a pointer
-     (still in the accessibility tree), always on touch. */
+  /* The reading column's answers read as prose, not a tool panel: headings a
+     step up with air above, lists with breathing room, tables borderless at
+     body size with hairline rows, code blocks framed by one hairline with a
+     quiet header (compare T3 Code). The chat Markdown stays as it is elsewhere. */
+  .rt-assistant :global(.md :is(h1, h2)) { margin: 1.1em 0 0.4em; font-size: var(--fs-l); font-weight: 600; line-height: 1.35; }
+  .rt-assistant :global(.md :is(h3, h4, h5, h6)) { margin: 1em 0 0.35em; font-size: var(--fs-m); font-weight: 600; }
+  .rt-assistant :global(.md > :first-child) { margin-block-start: 0; }
+  .rt-assistant :global(.md li + li) { margin-block-start: 0.3em; }
+  .rt-assistant :global(.md :is(ul, ol)) { margin: 0.3em 0 0.8em; }
+  .rt-assistant :global(.md table) {
+    display: table;
+    inline-size: 100%;
+    margin: 0.6em 0 1em;
+    border: 0;
+    border-radius: 0;
+    font-size: inherit;
+  }
+  .rt-assistant :global(.md :is(th, td)) { padding-block: 8px; padding-inline: 0 12px; border-inline-end: 0; border-bottom: 1px solid var(--border); }
+  .rt-assistant :global(.md th) { background: none; color: var(--text); font-weight: 600; }
+  .rt-assistant :global(.md tbody tr:nth-child(even)) { background: none; }
+  .rt-assistant :global(.md tbody tr:last-child > *) { border-bottom: 1px solid var(--border); }
+  .rt-assistant :global(.md .code-block) { margin: 0.6em 0 1em; border-color: var(--border); background: none; }
+  .rt-assistant :global(.md .code-block .code-head) { background: none; border-bottom-color: var(--border); }
+  .rt-assistant :global(.md .code-lang) { font-weight: 500; color: var(--text-dim); letter-spacing: 0; }
+  /* A message's time and actions show on hover / focus with a pointer, and
+     on touch when the message is tapped (tapMeta.ts) — in the accessibility
+     tree either way; a touch screen does not spend a line per turn on them. */
+  @media (hover: none) {
+    :is(.rt-user, .rt-assistant):not(:global(.meta-on)) > .rt-msg-foot {
+      position: absolute;
+      inline-size: 1px;
+      block-size: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+  }
   @media (hover: hover) {
     .rt-msg-act,
     .rt-msg-foot > .rt-msg-time {

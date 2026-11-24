@@ -37,6 +37,16 @@ class InboxLive {
     } else if (ev.type === 'turn.terminal') delete this.since[id];
   }
 
+  /** When `id`'s running turn started (epoch ms): from its live events, else
+   *  the row's derived `meta.last_turn_started_at` (a thread already working
+   *  when the page loaded) — never a read. */
+  workingSince(id: string, meta: Record<string, unknown> | null | undefined): number | null {
+    const live = this.since[id];
+    if (live) return live;
+    const at = typeof meta?.last_turn_started_at === 'string' ? Date.parse(meta.last_turn_started_at) : NaN;
+    return Number.isFinite(at) ? at : null;
+  }
+
   /** The kinds of `id`'s pending requests (empty when unknown); a waiting
    *  MCP approval card (`mcpAsks`) counts as a permission request. */
   kindsOf(id: string): string[] {

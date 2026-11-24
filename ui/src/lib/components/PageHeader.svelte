@@ -207,6 +207,9 @@
         // The h1 is a flex row of shrinkable parts: add up their natural widths (+ the "/" margins).
         const full = Array.from(titleEl.children as HTMLCollectionOf<HTMLElement>).reduce((s, k) => s + k.scrollWidth + (k.classList.contains('ph-sep') ? 12 : 0), 0);
         titleMin = Math.ceil(full + iconW + badgeW);
+        // A phone: a long title ellipsizes before a kept control is squeezed
+        // into "⋯" (Threads on a 320 px screen hid its own ⋯ inside another).
+        if (viewport.isPhone) titleMin = Math.min(titleMin, 96);
       }
       // When even the kept controls can't fit next to the title (a phone), the
       // reservation is capped and the actions scroll horizontally instead —

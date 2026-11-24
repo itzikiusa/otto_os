@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx } from './seed';
+import { expectFullyInViewport } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The Threads composer on a phone, on REAL fake-agent threads (otto-fake-codex).
@@ -237,6 +238,12 @@ test('a drag that starts on the New-thread composer stays in it', async ({ page,
   await page.goto('/#/threads/new');
   const input = page.getByTestId('new-thread-input');
   await expect(input).toBeVisible({ timeout: 30_000 });
+  // A phone on its side keeps ~180 px above the keyboard and the stage's
+  // input sits at its top edge: a synthesized two-finger pinch around it puts
+  // a touch point above the screen, and zooming before the keyboard leaves no
+  // keyboard state (viewportFit leaves pinch-zoom alone). The zoomed drag is
+  // covered there by the thread-composer test above; portrait sizes run this.
+  test.skip(withKeyboard(page).height < 260, 'no room for a two-finger pinch above the keyboard (phone on its side)');
   await input.click();
   await page.setViewportSize(withKeyboard(page));
   await expect(page.locator('html[data-kb="open"]')).toHaveCount(1);
@@ -249,4 +256,20 @@ test('a drag that starts on the New-thread composer stays in it', async ({ page,
     await page.waitForTimeout(300); // ui-guards: allow — absence: the page did not pan after the drag
     expect(await top(), `a drag of ${dy} px on the New-thread composer leaves the page where it was`).toBe(start);
   }
+});
+
+test('the context meter is a 44 px tap target; its menu fits the screen', async ({ page }) => {
+  const id = await newThread('Context meter phone');
+  await page.goto(`/#/threads/${id}`);
+  const thread = page.getByTestId(`runtime-thread-${id}`);
+  await expect(thread).toBeVisible({ timeout: 30_000 });
+  await send(thread, 'hi');
+  const meter = thread.getByTestId('runtime-context-meter');
+  await expect(meter).toBeVisible({ timeout: 20_000 });
+  const box = (await meter.boundingBox())!;
+  expect(box.height).toBeGreaterThanOrEqual(44);
+  await meter.tap();
+  const info = page.getByRole('menuitem', { name: /Context · 7 of 1k tokens/ });
+  await expect(info).toBeVisible();
+  await expectFullyInViewport(page, page.getByRole('menu'), 'context menu');
 });

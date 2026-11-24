@@ -2107,11 +2107,18 @@ pub fn validate_thread_meta(
     Ok(())
 }
 
-/// The client-owned thread keys set in `meta` (`None` when none is).
+/// The thread's armed "Resume at reset" time (RFC 3339) in its `meta`: set
+/// only through `POST /runtime-sessions/{id}/resume-at`, but sent to
+/// clients with the thread meta.
+pub const RESUME_AT: &str = "resume_at";
+
+/// The client-owned thread keys set in `meta` (`None` when none is), with
+/// [`RESUME_AT`].
 pub fn thread_meta_of(meta: Option<&serde_json::Value>) -> Option<serde_json::Value> {
     let m = meta?.as_object()?;
     let out: serde_json::Map<_, _> = THREAD_META_KEYS
         .iter()
+        .chain(&[RESUME_AT])
         .filter_map(|k| {
             m.get(*k)
                 .filter(|v| !v.is_null())

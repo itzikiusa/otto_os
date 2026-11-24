@@ -4,6 +4,7 @@
   // can still go to the chat as plain context (the old "Add line to chat").
   import { untrack } from 'svelte';
   import { isMacPlatform } from '../../lib/keys';
+  import { keyboard } from '../../lib/stores/keyboard.svelte';
 
   interface Props {
     /** "src/a.ts · new 12–14". */
@@ -18,13 +19,26 @@
   let text = $state(untrack(() => initial)); // the box starts from it, then it is the person's
   let box = $state<HTMLTextAreaElement | null>(null);
   $effect(() => box?.focus({ preventScroll: false }));
+  let root = $state<HTMLDivElement | null>(null);
+  // The on-screen keyboard came up while typing: Save (the bottom of the box)
+  // stays in sight — inline in a tablet's details panel the keyboard would
+  // cover it, and a box taller than the panel would only show its top.
+  const keepInView = (): void => {
+    if (!keyboard.open || !root?.contains(document.activeElement)) return;
+    // After the shrunken layout settles (two frames), not before it.
+    requestAnimationFrame(() => requestAnimationFrame(() => root?.querySelector('.dne-actions')?.scrollIntoView({ block: 'nearest' })));
+  };
+  $effect(() => {
+    void keyboard.visibleHeight; // again whenever the visible area changes
+    keepInView();
+  });
   const save = (): void => {
     if (text.trim()) onsave(text.trim());
   };
   const keys = isMacPlatform() ? '⌘↵' : 'Ctrl+↵';
 </script>
 
-<div class="dne" data-testid="diff-note-editor">
+<div class="dne" data-testid="diff-note-editor" bind:this={root}>
   <span class="dne-where mono" dir="ltr">{where}</span>
   <textarea
     bind:value={text}
@@ -34,6 +48,7 @@
     aria-label="Note on {where}"
     placeholder="Note for the agent on these lines"
     data-testid="diff-note-input"
+    oninput={() => { if (keyboard.open) root?.querySelector('.dne-actions')?.scrollIntoView({ block: 'nearest' }); }}
     onkeydown={(e) => {
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -57,6 +72,8 @@
 
 <style>
   .dne {
+    /* Brought into view above the keyboard with a little air under Save. */
+    scroll-margin-block: var(--sp-4);
     display: flex;
     flex-direction: column;
     gap: var(--sp-2);

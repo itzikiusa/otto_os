@@ -46,7 +46,8 @@
   import { recallPrompt, sentPrompts, type HistoryState } from './promptHistory';
   import { dropAttachments, fileDrop } from './composerDrop';
   import RuntimeModelControl from './RuntimeModelControl.svelte';
-  import { armedSwitchLine, switchPromptFields } from './providerSwitch';
+  import { switchPromptFields } from './providerSwitch';
+  import RuntimeNextLine from './RuntimeNextLine.svelte';
   import RuntimeBannerStack from './RuntimeBannerStack.svelte';
   import {
     appendDraftAttachments, buildOptimisticUserMessage, buildRuntimeBanners, collectMessageIds,
@@ -191,12 +192,12 @@
   const failedQuiet = $derived(!!failure && dormant);
   const queueShown = $derived((background.length > 0 && !closed) || (p?.queued.length ?? 0) > 0 || (needsRevive && !failedQuiet));
   const banners = $derived(buildRuntimeBanners({
-    sessionError, uiAsk, queueShown, needsRevive, freshContext: draft.freshContext, switchTo: draft.provider,
+    sessionError, uiAsk, queueShown, needsRevive, freshContext: draft.freshContext, switchTo: draft.provider, limited: failure?.cause === 'usage_limit' && !closed,
     hasQuestions: Boolean(p?.requests.some((r) => r.kind === 'question' && r.status !== 'pending')),
     hasPlan: Boolean(plan),
   }));
   const accessMode = $derived(accessModeOverride ?? draft.pickedMode ?? session?.access_mode ?? 'approval-required');
-  // The access chip shows only off the person's default (threadAccessDefault: Full access when prompts are skipped).
+  // The access chip hides only for a calm default (Supervised / Auto-accept edits); Full access always shows (threadAccessDefault).
   const defaultAccess = $derived(threadAccessDefault.skipPermissions ? 'full-access' : 'approval-required');
   $effect(() => threadAccessDefault.ensure());
   const pickAccess = (m: RuntimeAccessMode): void => { draft.pickedMode = m; onaccessmodechange?.(m); };
@@ -512,7 +513,7 @@
   <RuntimeStreamTools root={streamEl} {rows} bind:rowCap bind:text={draft.text} composer={composerEl} />
 
   <div class="rt-dock">
-    <RuntimeBannerStack blocks={banners}>
+    <RuntimeBannerStack blocks={banners} limit={failure?.cause === 'usage_limit' ? { sessionId, provider, detail: failure.detail, draft, onfocus: focusComposer, retryText: outcome?.retryText ?? '', retryAttachments: outcome?.retryAttachments } : null}>
       {#snippet block(key: string)}
         {#if key === 'error' && sessionError}
           <p class="rt-banner" dir="auto" use:announceShown={{ text: sessionError, assertive: true }}><Icon name="warning" size={13} />{sessionError}</p>
@@ -537,16 +538,8 @@
             onreopen={() => void reopen()}
             onedit={(t, restoredAtts, editedSessionId) => restorePoppedQueuedMessageToDraft({ activeSessionId: sessionId, editedSessionId, text: t, restoredAtts, transformText: transformRestoredQueuedText, focusComposer })}
           />
-        {:else if key === 'switch' && draft.provider}
-          <div class="rt-fresh" data-testid="runtime-switch-notice" use:announceShown={armedSwitchLine(draft.provider)}>
-            <span>{armedSwitchLine(draft.provider)}</span>
-            <button type="button" class="btn small ghost" onclick={() => { draft.provider = null; draft.model = undefined; draft.effort = null; focusComposer(); }}>Cancel</button>
-          </div>
-        {:else if key === 'fresh'}
-          <div class="rt-fresh" data-testid="runtime-fresh-notice" use:announceShown={'Next message starts fresh'}>
-            <span>Next message starts fresh</span>
-            <button type="button" class="btn small ghost" onclick={() => { draft.freshContext = false; focusComposer(); }}>Cancel</button>
-          </div>
+        {:else if (key === 'switch' && draft.provider) || key === 'fresh'}
+          <RuntimeNextLine kind={key === 'switch' ? 'switch' : 'fresh'} {draft} onfocus={focusComposer} />
         {/if}
       {/snippet}
     </RuntimeBannerStack>
@@ -632,12 +625,12 @@
         {#if !agentChat}<RuntimeAskAgent part="button" {sessionId} {provider} access={accessMode} disabled={closed || !session} />{/if}
         <RuntimeDraftStatus {draft} />
         {#if planOn}<RuntimePlanToggle id={ownerId} on={planOn} disabled={closed || !session} />{/if}
-        {#if !agentChat && (session?.meta?.read_only || accessModeOverride || accessMode !== defaultAccess)}
+        {#if !agentChat && (session?.meta?.read_only || accessModeOverride || accessMode !== defaultAccess || accessMode === 'full-access')}
           <RuntimeAccessChip readOnly={!!session?.meta?.read_only} mode={accessMode} agent={harnessLabel(provider)} cwd={effectiveCwd ?? 'this folder'} disabled={closed || !session} onpick={pickAccess} />
         {/if}
         <span class="rt-grow"></span>
         {#if !agentChat}
-          <RuntimeModelControl {provider} {session} {draft} efforts={caps.efforts ?? []} disabled={closed || !session} testId={testIds?.model ?? 'runtime-model'} />
+          <RuntimeModelControl {provider} {session} {draft} efforts={caps.efforts ?? []} disabled={closed || !session} testId={testIds?.model ?? 'runtime-model'} oncompact={(c) => { draft.text = `/${c}`; focusComposer(); }} />
         {/if}
         <RuntimeComposerActions
           action={primaryAction({ running, canSend: canSendOrQueue, pref: threadPrefs.midTurn, canSteer: !!caps.steer })}
@@ -723,14 +716,6 @@
     font-size: var(--fs-s);
     overflow-wrap: anywhere;
   }
-  .rt-fresh {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-  }
   /* The composer: one card in the reading column, reading-size input two
      rows tall that grows to 40 % of the pane; its bottom row holds "+",
      only the non-default chips, the model and the one primary button. */
@@ -776,7 +761,7 @@
   /* A short pane (a phone on its side with the keyboard up): one row, so the conversation keeps its lines. */
   @container (max-block-size: 420px) {
     .rt-composer { gap: var(--sp-1); padding-block: var(--sp-2) var(--sp-1); }
-    .rt-composer textarea { min-block-size: 1lh; }
+    .rt-composer textarea { min-block-size: 1lh; } .rt-composer textarea:placeholder-shown { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .rt-dock { padding-block-end: var(--sp-2); }
   }
   .rt-foot {

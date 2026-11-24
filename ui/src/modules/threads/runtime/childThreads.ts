@@ -260,7 +260,8 @@ export function subagentTally(tones: readonly ChildTone[]): { text: string; tone
 // Commands and timers are not subagents (Background tasks). The one source
 // the details card and the sidebar read (unit/threadsSubagents.test.ts).
 
-export type SubagentWord = 'Working' | 'Needs you' | 'Done' | 'Failed' | 'Stopped';
+/** Limited: failed on the provider's usage limit — rolls up as Failed. */
+export type SubagentWord = 'Working' | 'Needs you' | 'Done' | 'Failed' | 'Limited' | 'Stopped';
 
 export interface SubagentRow {
   id: string;
@@ -290,6 +291,8 @@ export interface SubagentThread {
   title: string;
   provider: string;
   status: string;
+  /** When its running turn started (the row's derived `meta.last_turn_started_at`). */
+  startedAt?: string | null;
 }
 
 const WORD: Record<AgentTaskStatus, SubagentWord> = {
@@ -350,7 +353,7 @@ export function subagentSection(
   for (const t of tasks.running) if (isSubagent(t)) add(row(t));
   for (const t of tasks.finished) if (isSubagent(t)) add(row(t));
   for (const d of more.delegated ?? []) {
-    add({ id: d.id, title: d.title, provider: d.provider, word: subagentWord(d.status), startedAt: null, endedAt: null, threadId: d.id, task: null });
+    add({ id: d.id, title: d.title, provider: d.provider, word: subagentWord(d.status), startedAt: d.startedAt ?? null, endedAt: null, threadId: d.id, task: null });
   }
   return { parent: more.parent ?? null, running, previous };
 }
@@ -373,7 +376,7 @@ export function childRollup(subs: readonly { title: string; word: SubagentWord }
       r.needsYou++;
       r.needing ??= s.title;
     } else if (s.word === 'Working') r.working++;
-    else if (s.word === 'Failed') r.failed++;
+    else if (s.word === 'Failed' || s.word === 'Limited') r.failed++;
   }
   return r;
 }

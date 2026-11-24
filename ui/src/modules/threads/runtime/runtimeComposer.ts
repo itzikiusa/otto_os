@@ -411,6 +411,8 @@ export function buildRuntimeBanners(opts: {
   freshContext: boolean;
   /** An armed provider switch (its line replaces the fresh one). */
   switchTo?: string | null;
+  /** The last turn hit the provider's usage limit (RuntimeUsageLimit). */
+  limited?: boolean;
 }): BannerBlock[] {
   return [
     ...(opts.sessionError ? [{ key: 'error', label: 'error', urgent: true }] : []),
@@ -422,7 +424,8 @@ export function buildRuntimeBanners(opts: {
     ...(opts.queueShown ? [{ key: 'queue', label: opts.needsRevive ? 'revive' : 'queue', ...(opts.needsRevive ? { urgent: true } : {}) }] : []),
     // What the NEXT message will do — continue on another provider, or start
     // fresh — with its Cancel: never folded either.
-    ...(opts.switchTo ? [{ key: 'switch', label: 'provider switch', urgent: true }] : opts.freshContext ? [{ key: 'fresh', label: 'fresh context', urgent: true }] : []),
+    // A usage limit's line (resume at reset / continue elsewhere) is one too.
+    ...(opts.switchTo ? [{ key: 'switch', label: 'provider switch', urgent: true }] : opts.limited ? [{ key: 'limit', label: 'usage limit', urgent: true }] : opts.freshContext ? [{ key: 'fresh', label: 'fresh context', urgent: true }] : []),
     // The record of settled questions is the least pressing notice.
     ...(opts.hasQuestions ? [{ key: 'questions', label: 'previous questions' }] : []),
   ];

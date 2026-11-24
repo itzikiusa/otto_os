@@ -1,8 +1,9 @@
 <script lang="ts">
   // The Changes panel's one review line: "Review · N notes" with Send to
-  // agent and Clear, and every note (any file) one tap away. Send puts the
-  // notes in the focused thread's message as one context item — the person
-  // can add a sentence first; Enter in the composer sends it as is.
+  // agent (one message to the focused thread at once; the notes read Sent when
+  // the daemon took it), Add to message (the notes in the draft, to add a
+  // sentence first) in ⋯-less form as the quiet second action, Clear, and
+  // every note (any file) one tap away.
   import { plural } from '../../lib/plural';
   import DiffNoteCard from './DiffNoteCard.svelte';
   import type { ReviewNote } from './runtime/reviewNotes';
@@ -10,12 +11,15 @@
   interface Props {
     notes: readonly ReviewNote[];
     onsend: () => void;
+    /** Put the notes in the thread's draft instead (absent: no draft to add to). */
+    ondraft?: () => void;
+    sending?: boolean;
     onclear: () => void;
     onedit: (id: string, comment: string) => void;
     onresolve: (id: string, resolved: boolean) => void;
     ondelete: (id: string) => void;
   }
-  let { notes, onsend, onclear, onedit, onresolve, ondelete }: Props = $props();
+  let { notes, onsend, ondraft, sending = false, onclear, onedit, onresolve, ondelete }: Props = $props();
   let open = $state(false);
   const drafts = $derived(notes.filter((n) => n.state === 'draft').length);
 </script>
@@ -29,7 +33,8 @@
       </button>
       <span class="drb-grow"></span>
       <button type="button" class="btn small ghost" data-testid="diff-review-clear" onclick={onclear}>Clear</button>
-      <button type="button" class="btn small primary" data-testid="diff-review-send" disabled={!drafts} title="Put the notes in this thread’s message; add a sentence or press Enter to send" onclick={onsend}>Send to agent</button>
+      {#if ondraft}<button type="button" class="btn small ghost" data-testid="diff-review-draft" disabled={!drafts || sending} title="Put the notes in this thread’s message, to add a sentence before sending" onclick={ondraft}>Add to message</button>{/if}
+      <button type="button" class="btn small primary" data-testid="diff-review-send" disabled={!drafts || sending} title="Send the notes to this thread’s agent now (queued while it works)" onclick={onsend}>{sending ? 'Sending…' : 'Send to agent'}</button>
     </div>
     {#if open}
       <div class="drb-list">
