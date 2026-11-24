@@ -53,22 +53,23 @@ class ConnectionListStore {
   private listeners = new Set<(rows: Connection[]) => void>();
   private stale = true;
   private inflight: Promise<void> | null = null;
-  /** A re-read asked for while one is on the wire (whose answer may predate the change). */
-  private queued: Promise<void> | null = null;
+  /** Bumped per read: only the newest read's answer is applied — an older one
+   *  may predate a change, or belong to the previous workspace. */
+  private seq = 0;
 
   /** Load unless the cached list is current for this workspace. */
   ensure(): Promise<void> {
     const wid = ws.currentId;
     if (!wid) return Promise.resolve();
+    if (wid === this.wsKey && this.inflight) return this.inflight;
     if (wid === this.wsKey && !this.stale && this.loaded) return Promise.resolve();
     return this.refresh();
   }
 
-  /** Re-read now; during a read for the same workspace, once more after it. */
+  /** Re-read now; a read already on the wire is superseded, not waited on. */
   refresh(): Promise<void> {
     const wid = ws.currentId;
     if (!wid) return Promise.resolve();
-    if (this.inflight && this.wsKey === wid) return (this.queued ??= this.inflight.then(() => ((this.queued = null), this.refresh())));
     if (this.wsKey !== wid) {
       // Another workspace: never show the previous one's rows as this one's.
       this.wsKey = wid;
@@ -77,14 +78,14 @@ class ConnectionListStore {
       this.sections = [];
     }
     this.stale = false;
-    const p = this.fetch(wid).finally(() => {
+    const p = this.fetch(wid, ++this.seq).finally(() => {
       if (this.inflight === p) this.inflight = null;
     });
     this.inflight = p;
     return p;
   }
 
-  private async fetch(wid: Id): Promise<void> {
+  private async fetch(wid: Id, seq: number): Promise<void> {
     this.loading = true;
     try {
       const [rows, sections] = await Promise.all([
@@ -92,15 +93,15 @@ class ConnectionListStore {
         // Sections are optional: a failure leaves a flat list, never an error.
         api.get<ConnectionSection[]>(`/workspaces/${wid}/connection-sections`).catch(() => null),
       ]);
-      if (wid !== this.wsKey || this.queued) return;
+      if (seq !== this.seq) return;
       this.rows = rows;
       if (sections) this.sections = sections;
       this.error = null;
       this.notify();
     } catch (e) {
-      if (wid === this.wsKey && !this.queued) this.error = loadErrorText(e);
+      if (seq === this.seq) this.error = loadErrorText(e);
     } finally {
-      if (wid === this.wsKey && !this.queued) {
+      if (seq === this.seq) {
         this.loading = false;
         this.loaded = true;
       }
@@ -110,7 +111,7 @@ class ConnectionListStore {
   /** The daemon said the library changed: refetch if anyone has read it. */
   invalidate(): void {
     this.stale = true;
-    if (this.loaded) void this.refresh();
+    if (this.loaded || this.inflight) void this.refresh();
   }
 
   /** Called with the rows after every successful (re)load — the workbench
