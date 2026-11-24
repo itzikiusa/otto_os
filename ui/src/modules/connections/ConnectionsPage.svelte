@@ -1,3 +1,9 @@
+<script module lang="ts">
+  /** Rows hidden while their Delete can still be undone — module-level, so
+   *  leaving the page and coming back inside the Undo window keeps them hidden. */
+  let deleting = $state<Record<string, true>>({});
+</script>
+
 <script lang="ts">
   // Connections — the list IS the page (docs/design/guidelines/patterns.md
   // §10): every saved profile (databases, SSH hosts, custom CLIs) and Kafka
@@ -79,8 +85,6 @@
     lsSet(FILTER_KEY, k);
   }
 
-  /** Rows hidden while their Delete can still be undone. */
-  let deleting = $state<Record<string, true>>({});
   /** Rows with a Test in flight. */
   let testing = $state<Record<string, true>>({});
   // Minute-grain: a check's freshness and "opened 4m ago" change per minute.
