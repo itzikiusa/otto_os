@@ -13,7 +13,7 @@
   import { openExternal } from '../../lib/external';
   import { router } from '../../lib/router.svelte';
   import { rel } from '../../lib/stores/now.svelte';
-  import { threadPrs } from './threadPrs.svelte';
+  import { branchPrs as threadPrs } from '../../lib/stores/branchPrs.svelte';
   import { forgeLabel } from './threadsHelpers';
 
   interface Props {

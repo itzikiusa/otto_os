@@ -16,11 +16,16 @@ function fixture() {
   // The store's typed client (lib/api/git.ts) runs for real over the same
   // transport stub: `relative` loads it, `lib/api/client` is its import.
   const imports: Record<string, unknown> = {
-    '../api/client': { api: { post: (url: string) => {
-      const result = deferred<typeof status>();
-      calls.push({ id: url.split('/')[2], result });
-      return result.promise;
-    } } },
+    '../api/client': { api: {
+      // A repo's arrival also reads its overview (lib/api/gitOverview.ts): left
+      // pending here; no other read is served by this stub.
+      get: (url: string) => (url.endsWith('/overview') ? new Promise(() => {}) : Promise.reject(new Error(`no GET ${url} in this fixture`))),
+      post: (url: string) => {
+        const result = deferred<typeof status>();
+        calls.push({ id: url.split('/')[2], result });
+        return result.promise;
+      },
+    } },
     '../loadError': { loadErrorText: (e: unknown) => (e instanceof Error ? e.message : String(e)) },
     '../gitLivePaths': livePaths, '../latest': latest,
   };

@@ -25,6 +25,7 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { RESIZE_TITLE_VERTICAL } from '../../lib/paneResizer';
   import { nextTabAfterClose } from './gitUiHelpers';
+  import { firstNeedingPr } from './prStatus';
 
   interface Props {
     repoId: string;
@@ -159,6 +160,14 @@
     prWorkspace.open(repoId, pr.number, opts.background);
     if (!opts.background) mobileList = false;
   }
+  /** Never "pick one": with nothing open, the list opens on what needs you. */
+  function openFirst(prs: PrSummary[]): void {
+    if (tabs.active !== null) return;
+    const pr = firstNeedingPr(prs, (p) => p.is_mine ?? false);
+    if (!pr) return;
+    remember(pr);
+    prWorkspace.open(repoId, pr.number);
+  }
   function openMany(prs: PrSummary[]): void {
     for (const p of prs) remember(p);
     prWorkspace.openMany(repoId, prs.map((p) => p.number));
@@ -222,6 +231,7 @@
           onopen={openPr}
           onopenmany={openMany}
           {patch}
+          onfirst={openFirst}
         />
       </div>
       {#if tabs.active !== null}

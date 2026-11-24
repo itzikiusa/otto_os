@@ -125,7 +125,7 @@ test('Explain a file from the Files panel and lines from the diff', async ({ pag
   await expect.poll(async () => (await mockLog(page)).prompts.at(-1)?.text ?? '').toContain(path);
 
   // Lines: select two code rows of an expanded file, then the action beside it.
-  await page.getByRole('tab', { name: 'Code', exact: true }).click();
+  await page.getByRole('tab', { name: 'Files', exact: true }).click();
   await page.locator('.prd-code .dfile-head').first().click();
   const rows = page.locator('.prd-code .vrow[data-rk]');
   await expect(rows.nth(1)).toBeVisible();

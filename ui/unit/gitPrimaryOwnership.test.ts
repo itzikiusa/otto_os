@@ -141,7 +141,8 @@ test('activating a repo tab makes it the status bar\'s repo', async () => {
   await flush();
   git.openRepoTab('A');
   git.openRepoTab('B');
-  find('/repos/B/status').resolve(status('develop'));
+  // Opening a tab reads the repo's ONE overview; its status feeds the status bar.
+  find('/repos/B/overview').resolve({ status: status('develop'), refs: null, stashes: [], worktrees: [], submodules: [] });
   await flush();
   assert.equal(git.primary.id, 'B');
   assert.equal(git.primaryStatus.branch, 'develop');

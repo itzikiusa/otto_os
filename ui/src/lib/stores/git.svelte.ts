@@ -11,6 +11,7 @@ import {
   ACTIVE_AUTO_FETCH_SEC, RECENT_USE_MS, autoFetchAllowed, readAutoFetchConfig, writeAutoFetchConfig,
 } from '../gitAutoFetchConfig';
 import { gitApi, statusEq, type RefsRead } from '../api/git';
+import { readOverview, recentOverview } from '../api/gitOverview';
 import type {
   CheckoutReq,
   ConflictFile,
@@ -27,15 +28,13 @@ import type {
   RepoStatusResp,
 } from '../api/types';
 
-/** Sub-tab inside an open repo (mirrors RepoView's tab set). The old
- *  'changes' and 'history' tabs were folded into the graph (WIP row + detail
- *  panel); persisted values from before that fold are normalized to 'graph'. */
-export type GitSubTab = 'graph' | 'prs' | 'review';
+/** Sub-tab inside an open repo: Changes, History ('graph'), Pull requests, Review. */
+export type GitSubTab = 'changes' | 'graph' | 'prs' | 'review';
 
 /** Map a persisted/legacy sub-tab value onto the current tab set (Focus is
  *  a page-level view now, no longer a repo sub-tab). */
 function normSubTab(sub: string | null | undefined): string {
-  return sub == null || sub === 'changes' || sub === 'history' || sub === 'focus' ? DEFAULT_SUB : sub;
+  return sub == null || sub === 'history' || sub === 'focus' ? DEFAULT_SUB : sub;
 }
 
 /** Shape of the global open-tabs persistence blob. */
@@ -224,6 +223,7 @@ class GitStore {
     this.activeRepoId = repoId;
     this.repoUsedAt[repoId] = Date.now();
     this.persistOpenTabs();
+    readOverview(repoId).then((o) => o?.status && this.setStatus(repoId, o.status)).catch(() => {});
     this.fetchOnArrival();
     const repo = this.allRepos.find((r) => r.id === repoId);
     if (repo && this.primary?.id !== repoId) void this.selectPrimary(repo);
@@ -262,14 +262,14 @@ class GitStore {
     this.persistOpenTabs();
   }
 
-  /** Set the active sub-tab for a repo (graph/prs/review). */
+  /** Set the active sub-tab for a repo (changes/graph/prs/review). */
   setSubTab(repoId: string, sub: string): void {
     this.subTab = { ...this.subTab, [repoId]: sub };
     this.persistOpenTabs();
   }
 
-  /** The currently-active sub-tab for a repo (default 'graph'; legacy
-   *  'changes'/'history' values normalize to 'graph'). */
+  /** The currently-active sub-tab for a repo (default 'graph'; a legacy
+   *  'history' normalizes to 'graph'). */
   subTabFor(repoId: string): string {
     return normSubTab(this.subTab[repoId]);
   }
@@ -348,7 +348,8 @@ class GitStore {
     this.primary = repo;
     if (!this.repos.some((r) => r.id === repo.id)) this.repos = [...this.repos, repo];
     try {
-      const s = this.freshFetchStatus(repo.id) ?? await gitApi.status(repo.id);
+      const ov = recentOverview(repo.id); // an open's overview carries the status
+      const s = this.freshFetchStatus(repo.id) ?? (ov ? (await ov.catch(() => null))?.status : undefined) ?? await gitApi.status(repo.id);
       this.setStatus(repo.id, s);
       if (!t.current || this.primary?.id !== repo.id) return;
       this.primaryStatus = s;
@@ -547,7 +548,7 @@ class GitStore {
   /** Lazily load a repo's status once (used by the tab strip). `null` marks an
    *  in-flight / attempted load so we don't refetch on every render. */
   ensureStatus(repoId: string): void {
-    if (repoId in this.statusById) return;
+    if (repoId in this.statusById || recentOverview(repoId)) return; // an open's overview brings it
     this.statusById = { ...this.statusById, [repoId]: null };
     void this.refreshStatus(repoId);
   }
@@ -578,7 +579,7 @@ class GitStore {
         this.fetchCount++;
         void (async () => {
           try {
-            const status = await api.post<RepoStatusResp>(`/repos/${repoId}/fetch`);
+            const status = await api.post<RepoStatusResp>(`/repos/${repoId}/fetch${this.manualFetches.has(repoId) ? '' : '?background=true'}`); // a background one never queues behind a push
             this.setStatus(repoId, status);
             this.bumpRefs(repoId);
             this.lastFetchAt[repoId] = Date.now();
@@ -770,10 +771,8 @@ class GitStore {
     return s;
   }
 
-  // Post-mutation contract: every push / checkout / pull — the toolbar, the
-  // graph, Create PR or an agent command — stores the fresh status and bumps
-  // `refsRev` HERE, so no call site can skip half of it (architecture-6-04).
-  // `pushFlow.runPush` is the UX wrapper (toasts, rejected-push dialog).
+  // Post-mutation contract: every push / checkout / pull stores the fresh status and bumps
+  // `refsRev` HERE (architecture-6-04); `pushFlow.runPush` is the UX wrapper.
 
   /** Push (or publish) a branch — the checked-out one unless `body.branch`. */
   async push(repoId: Id, body: PushReq = {}): Promise<RepoStatusResp> {
