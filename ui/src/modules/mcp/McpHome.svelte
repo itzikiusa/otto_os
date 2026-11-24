@@ -46,7 +46,7 @@
   let status = $state<McpOttoServerStatus | null>(null);
   let rules = $state<number | null>(null);
   /** Denied requests (newest 200) — "N calls denied in the last 7 days". */
-  let denied = $state<McpApproval[]>([]);
+  let denied = $state<McpApproval[] | null>(null);
   let ownError = $state<string | null>(null);
   async function load(): Promise<void> {
     ownError = null;
@@ -93,6 +93,7 @@
       toasts.success(approved ? 'Approved' : 'Denied', a.title);
       if (open?.id === a.id) open = null;
       ondecided();
+      if (!approved) void load(); // the "denied in the last 7 days" count
     } catch (e) {
       toastError('Couldn’t record the decision', e);
     } finally {
@@ -153,7 +154,7 @@
         </div>
       {/each}
     </InboxFold>
-  {:else}
+  {:else if approvals !== null}
     <section class="calm read-prose" aria-label="Summary" data-testid="mcp-summary">
       <p class="lead"><Icon name="check" size={16} /> Nothing waits on you.</p>
       {#each sentences as s (s.testid)}
