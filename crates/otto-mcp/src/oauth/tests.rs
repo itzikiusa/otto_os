@@ -74,6 +74,9 @@ struct As {
     challenge: Option<String>,
     /// Pad the authorization-server metadata past the body cap.
     huge: bool,
+    /// Metadata that names another issuer / another resource.
+    wrong_issuer: bool,
+    wrong_resource: bool,
     revoked: bool,
     tokens_issued: u32,
 }
@@ -124,7 +127,7 @@ async fn fake_as() -> (String, Arc<Mutex<As>>, tokio::task::JoinHandle<()>) {
                     (
                         200,
                         String::new(),
-                        json!({"resource": format!("{b}/mcp"), "authorization_servers": [b.clone()]}),
+                        json!({"resource": if st.lock().unwrap().wrong_resource { "https://other.example/mcp".to_string() } else { format!("{b}/mcp") }, "authorization_servers": [b.clone()]}),
                     )
                 } else if path == "/.well-known/oauth-authorization-server"
                     && st.lock().unwrap().huge
@@ -138,7 +141,7 @@ async fn fake_as() -> (String, Arc<Mutex<As>>, tokio::task::JoinHandle<()>) {
                     (
                         200,
                         String::new(),
-                        json!({"issuer": b, "authorization_endpoint": format!("{b}/authorize"), "token_endpoint": format!("{b}/token"), "registration_endpoint": format!("{b}/register"), "code_challenge_methods_supported": ["S256"]}),
+                        json!({"issuer": if st.lock().unwrap().wrong_issuer { "https://other.example".to_string() } else { b.clone() }, "authorization_endpoint": format!("{b}/authorize"), "token_endpoint": format!("{b}/token"), "registration_endpoint": format!("{b}/register"), "code_challenge_methods_supported": ["S256"]}),
                     )
                 } else if path == "/register" {
                     (201, String::new(), json!({"client_id": "client-1"}))
@@ -306,6 +309,20 @@ async fn an_oversized_metadata_answer_is_refused_not_buffered() {
     st.lock().unwrap().huge = true;
     let e = start(&format!("{base}/mcp"), None).await.err().unwrap();
     assert!(e.contains("no metadata"), "{e}");
+    task.abort();
+}
+
+#[tokio::test]
+async fn metadata_for_another_issuer_or_resource_is_refused() {
+    let (base, st, task) = fake_as().await;
+    st.lock().unwrap().wrong_issuer = true;
+    let e = start(&format!("{base}/mcp"), None).await.err().unwrap();
+    assert!(e.contains("issuer"), "{e}");
+    let mut s = st.lock().unwrap();
+    (s.wrong_issuer, s.wrong_resource) = (false, true);
+    drop(s);
+    let e = start(&format!("{base}/mcp"), None).await.err().unwrap();
+    assert!(e.contains("resource"), "{e}");
     task.abort();
 }
 

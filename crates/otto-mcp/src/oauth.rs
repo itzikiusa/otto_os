@@ -183,6 +183,11 @@ pub(crate) fn resource_metadata_hint(header: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
+/// Two URLs that differ at most by a trailing slash.
+fn same_url(a: &str, b: &str) -> bool {
+    a.trim_end_matches('/') == b.trim_end_matches('/')
+}
+
 /// RFC 8414 / 9728 well-known URL with the path inserted after the prefix:
 /// `https://h/a/b` + `oauth-protected-resource` → `https://h/.well-known/oauth-protected-resource/a/b`.
 pub(crate) fn well_known(base: &reqwest::Url, name: &str) -> reqwest::Url {
@@ -242,6 +247,12 @@ pub async fn discover(server_url: &str) -> Result<AuthServer, String> {
     if prm.is_none() {
         prm = get_json(well_known(&server, "oauth-protected-resource")).await;
     }
+    // RFC 9728 §3.3: the metadata must be about this server.
+    if let Some(r) = prm.as_ref().and_then(|p| p["resource"].as_str()) {
+        if !same_url(r, server_url) {
+            return Err("the server's metadata names another resource; refused".into());
+        }
+    }
     let issuer = match prm
         .as_ref()
         .and_then(|p| p["authorization_servers"][0].as_str())
@@ -262,6 +273,12 @@ pub async fn discover(server_url: &str) -> Result<AuthServer, String> {
             .await
             .ok_or("the server's authorization server publishes no metadata")?,
     };
+    // RFC 8414 §3.3: the metadata must be the issuer's own.
+    if let Some(i) = meta["issuer"].as_str() {
+        if !same_url(i, issuer.as_str()) {
+            return Err("the authorization server's metadata names another issuer; refused".into());
+        }
+    }
     let s256 = meta["code_challenge_methods_supported"]
         .as_array()
         .is_some_and(|m| m.iter().any(|v| v == "S256"));

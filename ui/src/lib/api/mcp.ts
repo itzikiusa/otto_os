@@ -84,7 +84,7 @@ export const mcpCpApi = {
   cpDiscover: (id: Id) => api.post<McpToolView[]>(`/mcp/servers/${id}/discover`),
   // --- OAuth sign-in of a remote server (tokens stay in the Keychain) ---
   cpOAuthStart: (id: Id, body: { client_id?: string; client_secret?: string }) =>
-    api.post<{ authorization_url: string; authorization_host: string; server: string }>(`/mcp/servers/${id}/oauth/start`, body),
+    api.post<{ authorization_url: string; authorization_host: string; server: string; server_host: string | null }>(`/mcp/servers/${id}/oauth/start`, body),
   cpOAuthStatus: (id: Id) => api.get<McpOAuthStatus>(`/mcp/servers/${id}/oauth`),
   cpOAuthSignOut: (id: Id) => api.del<void>(`/mcp/servers/${id}/oauth`),
 

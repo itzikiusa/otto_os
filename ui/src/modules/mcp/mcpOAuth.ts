@@ -17,7 +17,7 @@ const WINDOW_MS = 5 * 60 * 1000;
 /** Sign in: start → confirm the server and its authorization host → browser →
  *  wait for the flow (≤ 5 min). Resolves true once signed in. */
 export async function signIn(s: McpServerDetail): Promise<boolean> {
-  let started: { authorization_url: string; authorization_host: string };
+  let started: { authorization_url: string; authorization_host: string; server_host?: string | null };
   try {
     started = await mcpCpApi.cpOAuthStart(s.id, {});
   } catch (e) {
@@ -38,7 +38,7 @@ export async function signIn(s: McpServerDetail): Promise<boolean> {
     }
   }
   const ok = await confirmer.ask(
-    `Sign in to ${s.name}? Your browser opens ${started.authorization_host} to sign in. Otto keeps the tokens in the Keychain; agents never see them.`,
+    `Sign in to ${s.name} (${started.server_host ?? s.url ?? 'remote server'})? Your browser opens ${started.authorization_host} to sign in. Otto keeps the tokens in the Keychain; agents never see them.`,
     { title: 'Sign in', confirmLabel: 'Open browser', danger: false },
   );
   if (!ok) return false;

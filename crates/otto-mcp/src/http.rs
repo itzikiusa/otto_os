@@ -671,13 +671,18 @@ async fn oauth_start<S: McpCtx>(
         .client_id
         .filter(|c| !c.trim().is_empty())
         .map(|c| (c, req.client_secret));
+    let server_host = server
+        .url
+        .as_deref()
+        .and_then(|u| reqwest::Url::parse(u).ok())
+        .and_then(|u| u.host_str().map(str::to_string));
     let (url, host) = ctx
         .mcp()
         .oauth_start(&server, manual)
         .await
         .map_err(ApiErr)?;
     Ok(Json(
-        json!({ "authorization_url": url, "authorization_host": host, "server": server.name }),
+        json!({ "authorization_url": url, "authorization_host": host, "server": server.name, "server_host": server_host }),
     ))
 }
 
