@@ -85,3 +85,21 @@ test('phone: a long-press in the code leaves the system selection alone', async 
   await expect(page.locator('.ctx-menu')).toHaveCount(0);
 });
 
+// A Makefile's ▶ per target shows on a phone too: the compact editor gives the ▶
+// slot's room to the breakpoint dot, and a Makefile has no breakpoints.
+test('phone: a Makefile shows a tappable ▶ per target', async ({ page }, info) => {
+  test.skip(!PHONES.includes(info.project.name), 'phones');
+  test.setTimeout(150_000);
+  await bootWriteIde(page);
+  await page.getByTestId('ide-stack-tab-files').tap();
+  const file = page.getByTestId('ide-project-tree').locator('button.tree-item[title="Makefile"], button.tree-item[title$="/Makefile"]').first();
+  await expect(file).toBeVisible({ timeout: 15_000 });
+  await file.tap();
+  const editorTab = page.getByTestId('ide-stack-tab-editor');
+  if ((await editorTab.getAttribute('aria-pressed')) !== 'true') await editorTab.tap();
+  const run = page.locator('.ide-editor-area [data-gutter-run][aria-label="Run make build"]');
+  await expect(run).toBeVisible({ timeout: 15_000 });
+  expect((await run.boundingBox())!.width).toBeGreaterThanOrEqual(15);
+  await run.tap();
+  await expect(page.locator('.ctx-menu')).toContainText("Run 'make build'");
+});
