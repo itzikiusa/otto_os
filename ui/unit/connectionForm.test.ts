@@ -153,3 +153,21 @@ test('re-pasting a URI replaces every field the first one filled (R1-007)', () =
   assert.equal(c.fPort, '');
   assert.equal(c.fDb, 'test');
 });
+
+test('a Test answer for values edited while it ran is dropped (R1-051)', async () => {
+  const text = readFileSync(new URL('../src/modules/connections/ConnectionForm.svelte', import.meta.url), 'utf8');
+  const fn = text.slice(text.indexOf('  async function testUnsaved()'), text.indexOf('  async function save()'));
+  let resolve!: (v: unknown) => void;
+  const ctx: Record<string, any> = {
+    testing: false, testResult: null, testedSig: '', testSeq: 0, formSig: 'sig1', kind: 'mysql', existing: null, secret: '',
+    auth: { isRoot: true }, ws: { currentId: 'w' }, buildParams: () => ({}), loadErrorText: String, queueMicrotask, testPanel: null,
+    api: { post: () => new Promise((r) => { resolve = r; }) },
+  };
+  runInNewContext(ts.transpileModule(fn, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, ctx);
+  const run = ctx.testUnsaved();
+  ctx.formSig = 'sig2'; // the host was edited while the probe ran
+  resolve({ ok: true, message: 'Connected' });
+  await run;
+  assert.equal(ctx.testing, false);
+  assert.equal(ctx.testResult, null, 'no green Connected for untested values');
+});

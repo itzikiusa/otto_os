@@ -383,11 +383,11 @@
         testResult = { ok: res.ok, detail: bits ? `${res.message} (${bits})` : res.message, argv: res.warn_argv };
       }
     } catch (e) {
-      if (seq !== testSeq) return;
-      testResult = { ok: false, detail: loadErrorText(e) };
+      if (seq === testSeq) testResult = { ok: false, detail: loadErrorText(e) };
     } finally {
       if (seq === testSeq) testing = false;
     }
+    if (seq === testSeq && formSig !== testedSig) testResult = null;
     if (seq === testSeq && testResult && (!testResult.ok || testResult.warn)) queueMicrotask(() => testPanel?.scrollIntoView({ block: 'nearest' }));
   }
 
