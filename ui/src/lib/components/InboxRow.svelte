@@ -7,7 +7,8 @@
   //   2. the title at --fs-l, bold while it needs you or finished unread;
   //   3. a dim third line (`line3`: branch, folder, kind · host …).
   // A `child` row (nested under its lead) is two lines: title, then its word
-  // and `line3`. Hover/focus actions (`actions`) sit over line 3's end; on
+  // and `line3`. A `twoLine` row (a list with no project, e.g. connections)
+  // drops line 1: the title carries the status word at its end, then `line3`. Hover/focus actions (`actions`) sit over line 3's end; on
   // touch they live in the row's long-press menu (use:rowMenu → oncontextmenu).
   // Purely presentational: the page derives the words, the state and the
   // handlers. The `tr-*` class names are kept (specs and the sidebar keyboard
@@ -30,6 +31,8 @@
     /** Hover tooltip of the row button. */
     tip?: string;
     child?: boolean;
+    /** Two lines: title … word, then `line3` (no project line). */
+    twoLine?: boolean;
     /** Needs you / finished unread: the title goes bold. */
     strong?: boolean;
     selected?: boolean;
@@ -62,6 +65,7 @@
     time = '',
     tip,
     child = false,
+    twoLine = false,
     strong = false,
     selected = false,
     inPane = false,
@@ -83,6 +87,7 @@
 <div
   class="tr-row reveal-host"
   class:child
+  class:two-line={twoLine}
   class:tr-family={!!fold}
   class:strong
   class:selected
@@ -98,7 +103,7 @@
     </button>
   {/if}
   <button type="button" class="tr-main" title={tip} aria-current={selected ? 'true' : undefined} {onclick} {oncontextmenu} use:rowMenu>
-    {#if !child}
+    {#if !child && !twoLine}
       <span class="tr-line tr-l1">
         {#if project}
           <ProjectBadge name={project} />
@@ -111,6 +116,9 @@
     <span class="tr-line tr-l2">
       <span class="tr-title ellipsis" dir="auto">{title}</span>
       {@render titleEnd?.()}
+      {#if twoLine}
+        <span class="tr-status {tone}" dir="auto" data-testid={statusTestid}>{word ?? time}</span>
+      {/if}
     </span>
     <span class="tr-line tr-l3">
       {#if child}
@@ -172,6 +180,9 @@
   }
   .tr-row.child .tr-main {
     min-block-size: 46px;
+  }
+  .tr-row.two-line .tr-main {
+    min-block-size: 56px;
   }
   .tr-line {
     display: flex;

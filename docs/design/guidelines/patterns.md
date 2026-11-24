@@ -399,13 +399,16 @@ text.
 2. the title at `--fs-l` (bold when `strong`: needs you / finished unread);
 3. a dim third line (`line3` snippet: branch, folder, kind · host …).
 
+A list with no project (Connections) uses `twoLine`: the title carries the
+word at its end, then `line3` (min 56 px).
+
 Hover actions go in the `actions` snippet (over line 3's end); on touch they
 live in the row's long-press menu (`use:rowMenu` → `oncontextmenu`), so give
 every row an `oncontextmenu` that opens the same actions with `ctxMenu`.
 `onPage` when the row sits on `--bg` instead of the sidebar.
 `lib/components/InboxFold.svelte` is a section around rows: a calm heading
 ("Pinned"), or a fold line ("Working 3 ›", "History 12 ›") when it has
-`ontoggle`. Order every list the same way: needs you first, then Failed,
+`ontoggle`; a calm heading may carry an `actions` snippet (a section's ⋯). Order every list the same way: needs you first, then Failed,
 then finished unread (Done), then most recent; running and finished items go
 to Working / History folds.
 
