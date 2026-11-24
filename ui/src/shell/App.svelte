@@ -1354,6 +1354,11 @@
     min-inline-size: 44px;
     min-block-size: 44px;
   }
+  /* …and the bell's count stays on the icon, inside the bar. */
+  .shell.bnav .mtopbar :global(.count-bubble) {
+    top: 6px;
+    inset-inline-end: 4px;
+  }
   .mtop-btn:hover {
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
     color: var(--text);
