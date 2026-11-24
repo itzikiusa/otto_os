@@ -19,6 +19,7 @@
   import { cwdLabel } from '../../lib/paneHeader';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
+  import { rightPanel } from '../../lib/stores/rightPanel.svelte';
   import { asThreadSession, runtimeThreads } from '../threads/runtime/runtimeThreads.svelte'; // ui-guards: allow — the thread's own row (one store with Threads)
   import { presetItems } from './SplitNode.svelte';
 
@@ -49,6 +50,13 @@
     return b ?? (s?.cwd ? cwdLabel(s.cwd) : null);
   });
   const current = $derived(focused || ws.activeSessionId === threadId);
+  // The side panel's Git / Files follow this pane's folder while it is focused.
+  $effect(() => {
+    const cwd = s?.cwd;
+    if (!cwd) return;
+    rightPanel.paneFolders.set(threadId, cwd);
+    return () => void rightPanel.paneFolders.delete(threadId);
+  });
   let paneW = $state(0);
   const gripOn = $derived(showGrip && dragKey != null && !viewport.isPhone);
 
