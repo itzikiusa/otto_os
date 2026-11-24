@@ -184,3 +184,21 @@ test('New session is a stage: tiles, Terminal | Chat, a first message, Start; th
   await expect(dialog).toHaveCount(0, { timeout: 10_000 });
   await expect(page.locator('[data-testid^="agents-row-"]', { hasText: 'Kaladze' })).toBeVisible({ timeout: 15_000 });
 });
+
+test('the right panel opens on the session details card; nothing loads while it is closed (A5)', async ({ page }) => {
+  const cardChunks: string[] = [];
+  page.on('request', (r) => { if (r.url().includes('ThreadDetailsCard')) cardChunks.push(r.url()); });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`/#/agents/${ids.Seedorf}`);
+  await expect(page.locator(`[data-pane-key][data-session="${ids.Seedorf}"]`).first()).toBeVisible({ timeout: 15_000 });
+  await page.waitForLoadState('networkidle');
+  expect(cardChunks).toEqual([]);
+  await page.keyboard.press('Meta+j');
+  const card = page.getByTestId('agents-details-card');
+  await expect(card).toBeVisible({ timeout: 15_000 });
+  await expect(card).toContainText('tmp');
+  for (const scheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    if (SHOTS) await page.screenshot({ path: `${SHOTS}/agents-details-card-1440-${scheme}.png` });
+  }
+});
