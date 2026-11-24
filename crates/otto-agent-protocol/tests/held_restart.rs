@@ -182,6 +182,15 @@ fn drivers() -> Arc<dyn DriverFactory> {
             RuntimeProvider::Claude => {
                 Box::new(ClaudeDriver::with_program(fake_bin!("otto-fake-claude")))
             }
+            // An ACP agent served client terminals (Grok's flavour).
+            RuntimeProvider::Grok => Box::new(AcpDriver::with_flavor(
+                p,
+                otto_agent_protocol::acp::AcpFlavor {
+                    program: fake_bin!("otto-fake-agent"),
+                    client_terminal: true,
+                    ..Default::default()
+                },
+            )),
             _ => Box::new(AcpDriver::gemini(&fake_bin!("otto-fake-agent"))),
         })
     })
@@ -456,6 +465,42 @@ async fn pending_approval(provider: RuntimeProvider) {
         host2.answers()
     );
     assert_eq!(host2.spawns(), 0, "{provider:?}");
+    rt2.close(&s.id).await.unwrap();
+}
+
+/// Review R1-036: the agent blocks on a client call (`terminal/wait_for_exit`)
+/// when the daemon restarts and prints nothing more; the adopted session
+/// answers the orphaned call at once, so the turn goes on. (Under plain
+/// `cargo test` a parallel test's restart kills this terminal through the
+/// process-wide terminal table; nextest runs each test in its own process.)
+#[tokio::test]
+async fn a_client_call_in_flight_at_a_restart_is_answered_on_adoption() {
+    let d = Dirs::new();
+    let pool = pool().await;
+    let host = d.host();
+    let rt = runtime(&pool, &host);
+    let s = create_with(
+        &rt,
+        d.cwd(),
+        RuntimeProvider::Grok,
+        Some(RuntimeAccessMode::FullAccess),
+    )
+    .await;
+    rt.prompt(&s.id, "term sleep 30").await.unwrap();
+    host.wait(|e| {
+        matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+            if matches!(turn_item.kind, TurnItemKind::CommandExecution { .. }))
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    rt.shutdown_for_restart().await;
+    drop(rt);
+
+    let host2 = d.host();
+    let rt2 = runtime(&pool, &host2);
+    rt2.recover_and_adopt().await.unwrap();
+    let t = host2.wait(is_terminal).await;
+    assert_eq!(terminal(&t), Some(TurnTerminalStatus::Completed));
     rt2.close(&s.id).await.unwrap();
 }
 

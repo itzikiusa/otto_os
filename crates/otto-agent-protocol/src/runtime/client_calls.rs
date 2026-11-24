@@ -32,6 +32,9 @@ struct Terminal {
     /// The command's process group (it leads its own): a kill reaches
     /// everything it started, also after the shell itself exited.
     pgid: Option<i32>,
+    /// The group was empty when the command exited: its id may be reused
+    /// by an unrelated group, so it is never signalled again.
+    gone: std::sync::atomic::AtomicBool,
 }
 
 /// Start `op` for the session `st` belongs to.
@@ -131,6 +134,16 @@ async fn write_no_follow(path: &Path, content: &str) -> std::io::Result<()> {
     f.flush().await
 }
 
+/// The text a write replaces, for its diff row: a regular file within the
+/// read cap only (opening a FIFO blocks for good; a huge file fills memory).
+async fn old_text(real: &Path) -> Option<String> {
+    let m = tokio::fs::symlink_metadata(real).await.ok()?;
+    if !m.file_type().is_file() || m.len() > MAX_FILE_BYTES {
+        return None;
+    }
+    tokio::fs::read_to_string(real).await.ok()
+}
+
 async fn run(
     inner: &Arc<Inner>,
     live: &Arc<Live>,
@@ -178,7 +191,7 @@ async fn run(
             content,
         } => {
             let real = confined(&root, &path, false).await?;
-            let old = tokio::fs::read_to_string(&real).await.ok();
+            let old = old_text(&real).await;
             write_no_follow(&real, &content)
                 .await
                 .map_err(|e| format!("{path}: {e}"))?;
@@ -215,6 +228,7 @@ async fn run(
                 output: Mutex::new((String::new(), false)),
                 exit: rx,
                 pgid: child.id().map(|p| p as i32),
+                gone: Default::default(),
             });
             let limit = output_limit(byte_limit);
             let pipes = [
@@ -231,6 +245,16 @@ async fn run(
                 .entry(sid.clone())
                 .or_default()
                 .insert(terminal_id.clone(), Arc::clone(&t));
+            // The session closed (or its agent went) while this started: its
+            // drop_session ran before the insert, so nothing else kills it.
+            // Checked after the insert: a drop under the lock after it sees it.
+            if live.lock().proc.as_ref().map(|p| p.epoch) != Some(epoch) {
+                if let Some(mut terms) = TERMINALS.get_mut(sid) {
+                    terms.remove(&terminal_id);
+                }
+                kill(&t);
+                return Err("the session ended".into());
+            }
             let mut readers = Vec::new();
             for mut pipe in pipes.into_iter().flatten() {
                 let (t, inner, live, tid) = (
@@ -266,6 +290,9 @@ async fn run(
                 // The command's own exit decides, not its pipes: a background
                 // process it left (`npm run dev &`) keeps them open.
                 let status = child.wait().await.ok();
+                if group_gone(t.pgid) {
+                    t.gone.store(true, std::sync::atomic::Ordering::Release);
+                }
                 let _ = tokio::time::timeout(std::time::Duration::from_millis(200), async {
                     for r in readers {
                         let _ = r.await;
@@ -325,7 +352,19 @@ fn output_limit(asked: Option<u64>) -> usize {
     })
 }
 
+/// No process is left in the group `pgid` (`ESRCH` to a null signal).
+fn group_gone(pgid: Option<i32>) -> bool {
+    // SAFETY: signal 0 only checks that the group exists.
+    pgid.is_some_and(|g| {
+        (unsafe { libc::killpg(g, 0) }) == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    })
+}
+
 fn kill(t: &Terminal) {
+    if t.gone.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
     if let Some(pgid) = t.pgid {
         // SAFETY: a plain signal to the process group this terminal created.
         unsafe {
@@ -343,6 +382,51 @@ mod tests {
         assert_eq!(output_limit(Some(u64::MAX)), DEFAULT_BYTE_LIMIT);
         assert_eq!(output_limit(Some(4096)), 4096);
         assert_eq!(output_limit(None), DEFAULT_BYTE_LIMIT);
+    }
+
+    /// Review R1-024: a write over a FIFO or an over-cap file answers at once
+    /// without its old text (the open blocked on a FIFO for good).
+    #[tokio::test]
+    async fn a_write_reads_the_old_text_of_a_regular_capped_file_only() {
+        let root = tempfile::tempdir().unwrap();
+        let fifo = root.path().join("pipe");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        // SAFETY: a plain mkfifo on a path in a temp dir.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let old = tokio::time::timeout(std::time::Duration::from_secs(2), old_text(&fifo)).await;
+        assert_eq!(old, Ok(None), "no blocking read of a FIFO");
+        let big = root.path().join("big.log");
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(MAX_FILE_BYTES + 1)
+            .unwrap();
+        assert_eq!(old_text(&big).await, None);
+        let small = root.path().join("a.txt");
+        std::fs::write(&small, "hi").unwrap();
+        assert_eq!(old_text(&small).await.as_deref(), Some("hi"));
+    }
+
+    /// Review R1-049: a command's group is "gone" only once nothing is left
+    /// in it, so a kill still reaches a background child it left.
+    #[test]
+    fn a_terminals_group_is_gone_only_when_empty() {
+        use std::os::unix::process::CommandExt;
+        let group = |script: &str| {
+            let mut c = std::process::Command::new("/bin/sh");
+            c.args(["-c", script]).process_group(0);
+            let mut child = c.spawn().unwrap();
+            let pgid = child.id() as i32;
+            child.wait().unwrap();
+            pgid
+        };
+        assert!(group_gone(Some(group("exit 0"))));
+        let left = group("sleep 5 >/dev/null 2>&1 & exit 0");
+        assert!(
+            !group_gone(Some(left)),
+            "its background child is still in it"
+        );
+        // SAFETY: the group this test just made.
+        unsafe { libc::killpg(left, libc::SIGKILL) };
     }
 
     /// A dangling link in the folder points outside it: the write is

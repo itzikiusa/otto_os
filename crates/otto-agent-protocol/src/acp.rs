@@ -2968,12 +2968,20 @@ impl StructuredDriver for AcpDriver {
         Ok(())
     }
 
+    fn after_adopt(&mut self) -> DriverStep {
+        // The agent waits on these answers and prints nothing until then.
+        let mut step = DriverStep::default();
+        self.answer_orphans(&mut step);
+        step
+    }
+
     fn needs_idle_turn_settle(&self) -> bool {
         self.state.autonomous
             && self.state.turn_id.is_some()
             && self.state.prompt_id.is_none()
             && self.state.pending.is_empty()
             && self.state.questions.is_empty()
+            && self.state.client_waits.is_empty()
             && !self.state.sideband.is_awaiting_followup()
             && !self.state.tools.values().any(|t| {
                 matches!(
@@ -3999,6 +4007,42 @@ mod tests {
         }
         assert!(d.state.tools["c1"].output.len() <= 256 << 10);
         assert!(d.state.terminal_output["term-1"].len() <= 256 << 10);
+    }
+
+    /// Review R1-023: no client call is served before the session exists, no
+    /// new write or command while the turn is being cancelled, and an
+    /// autonomous turn waiting on a client call does not idle-settle.
+    #[test]
+    fn client_calls_respect_the_session_and_its_turn() {
+        let no_call = |s: &DriverStep| {
+            !s.events
+                .iter()
+                .any(|e| matches!(e, DriverEvent::ClientCall { .. }))
+        };
+        let mut d = AcpDriver::grok();
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.state.access = RuntimeAccessMode::FullAccess;
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":"r1","method":"fs/read_text_file","params":{"path":"/tmp/x/a.txt"}}"#);
+        assert!(no_call(&s), "before session/new");
+        assert_eq!(sent(&s, 0)["error"]["code"], -32602);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"g"}}"#);
+
+        d.state.cancelling = true;
+        for line in [
+            r#"{"jsonrpc":"2.0","id":"w1","method":"fs/write_text_file","params":{"sessionId":"g","path":"/tmp/x/a.txt","content":"hi"}}"#,
+            r#"{"jsonrpc":"2.0","id":"t1","method":"terminal/create","params":{"sessionId":"g","command":"make"}}"#,
+        ] {
+            let s = d.on_line(line);
+            assert!(no_call(&s), "while cancelling: {line}");
+            assert_eq!(sent(&s, 0)["error"]["code"], -32000);
+        }
+        d.state.cancelling = false;
+
+        d.on_line(r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"g","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"Timer fired"}}}}"#);
+        assert!(d.needs_idle_turn_settle());
+        d.on_line(r#"{"jsonrpc":"2.0","id":"t2","method":"terminal/wait_for_exit","params":{"sessionId":"g","terminalId":"term-1"}}"#);
+        assert!(!d.needs_idle_turn_settle(), "it waits on Otto's answer");
     }
 
     /// Review note: under Auto-accept edits a served command still asks

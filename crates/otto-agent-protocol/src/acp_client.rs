@@ -144,8 +144,15 @@ impl AcpDriver {
             ));
             return;
         }
-        if params.get("sessionId").and_then(Value::as_str) != self.state.session_id.as_deref() {
+        if params.get("sessionId").and_then(Value::as_str) != self.state.session_id.as_deref()
+            || self.state.session_id.is_none()
+        {
             step.write(error_line(&rpc_id, -32602, "not this session"));
+            return;
+        }
+        // A cancelled turn starts no new write or command.
+        if self.state.cancelling && matches!(method, "fs/write_text_file" | "terminal/create") {
+            step.write(error_line(&rpc_id, -32000, "The turn was cancelled."));
             return;
         }
         let s = |k: &str| params.get(k).and_then(Value::as_str).map(str::to_string);
