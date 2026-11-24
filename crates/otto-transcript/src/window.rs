@@ -92,21 +92,27 @@ fn file_id(_: &std::fs::Metadata) -> Option<(u64, u64)> {
 }
 
 /// The line index of `path`, brought up to date (cached per path, so a
-/// re-open scans only what was appended since).
+/// re-open scans only what was appended since). Readers of one path take
+/// turns on its slot: a concurrent read waits for the tail scan in flight
+/// instead of finding the entry gone and rescanning the file from byte 0.
 pub fn line_index(path: &Path) -> std::io::Result<Arc<LineIndex>> {
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Arc<LineIndex>>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(Default::default);
-    let lock = || cache.lock().unwrap_or_else(|p| p.into_inner());
-    let mut index = lock().remove(path).unwrap_or_default();
-    Arc::make_mut(&mut index).update(path)?;
-    let mut map = lock();
-    if map.len() >= CACHED_INDEXES {
-        if let Some(old) = map.keys().next().cloned() {
-            map.remove(&old);
+    type Slot = Arc<Mutex<Arc<LineIndex>>>;
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Slot>>> = OnceLock::new();
+    let slot = {
+        let mut map = CACHE
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if map.len() >= CACHED_INDEXES && !map.contains_key(path) {
+            if let Some(old) = map.keys().next().cloned() {
+                map.remove(&old);
+            }
         }
-    }
-    map.insert(path.to_path_buf(), index.clone());
-    Ok(index)
+        map.entry(path.to_path_buf()).or_default().clone()
+    };
+    let mut index = slot.lock().unwrap_or_else(|p| p.into_inner());
+    Arc::make_mut(&mut index).update(path)?;
+    Ok(index.clone())
 }
 
 /// The newest window of `path` for a live tail: the whole file when it is

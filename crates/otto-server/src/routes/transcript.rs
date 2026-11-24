@@ -117,7 +117,8 @@ fn read_error(e: std::io::Error, what: &str) -> Error {
 }
 
 /// Authorization/resolution have already completed before entering the cache.
-/// A long transcript's window (keyed by `before`) is folded fresh: a few MB.
+/// A long transcript's newest window is cached like a whole fold; an older
+/// window (`before`) is folded fresh — a few MB — under the fold permits.
 async fn cached_fold(
     ctx: &ServerCtx,
     provider: Provider,
@@ -129,9 +130,15 @@ async fn cached_fold(
         if subagent_path_for(provider, path, sub).is_none() {
             return Err(ApiError(Error::Invalid("bad subagent id".into())));
         }
-    } else if window::is_long(path) {
+    } else if before.is_some() && window::is_long(path) {
         let (cx, path) = (ctx.clone(), path.to_path_buf());
-        let built = crate::offload::blocking(move || fold_with(&cx, provider, &path, None, before));
+        let permit = crate::transcript_cache::fold_workers()
+            .acquire_owned()
+            .await;
+        let built = crate::offload::blocking(move || {
+            let _permit = permit;
+            fold_with(&cx, provider, &path, None, before)
+        });
         let (folded, subagents) = built.await?;
         return Ok(std::sync::Arc::new(crate::transcript_cache::Snapshot {
             folded,
