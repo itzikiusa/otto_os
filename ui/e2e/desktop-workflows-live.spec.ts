@@ -110,7 +110,10 @@ test('expanded step survives live step transitions — same DOM node, no reset',
   // parallel workers a pre-started run can finish before the page loads.
   await gotoWorkflows(page);
   await expect(page.getByText('E2E LiveStable').first()).toBeVisible({ timeout: 15_000 });
-  await startRun(wfId);
+  const runId = await startRun(wfId);
+  // The daemon caps concurrent runs: under parallel workers the run can sit in
+  // the queue (`pending`) a while. Its steps exist only once it has started.
+  await expect.poll(async () => (await getRun(runId)).status, { timeout: 30_000 }).not.toBe('pending');
   const running = page.getByTestId('running-workflows');
   await expect(running).toBeVisible({ timeout: 15_000 });
   await running.getByText('E2E LiveStable').click();
@@ -225,7 +228,8 @@ test('a run whose start response lands after its first live events still goes li
   await page.route(`**/workflows/${wfId}/run`, async (route) => {
     const response = await route.fetch();
     const created = (await response.json()) as { id: string };
-    const deadline = Date.now() + 10_000;
+    // Generous: on a busy daemon the run may first wait in the run queue.
+    const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
       const cur = await getRun(created.id);
       if (cur.status === 'running' && (cur.rev ?? 0) > 1) break;
@@ -286,6 +290,8 @@ test('human-approval pause is announced promptly; approve resumes to success', a
 
   await gotoWorkflows(page);
   const runId = await startRun(wfId);
+  // A queued run (concurrency cap, parallel workers) has not paused yet.
+  await expect.poll(async () => (await getRun(runId)).status, { timeout: 30_000 }).not.toBe('pending');
 
   // The pause must surface as an approval badge on the Running sidebar row
   // promptly — driven by the pause EVENT, not by waiting for a poll to happen by.
