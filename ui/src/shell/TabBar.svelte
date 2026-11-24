@@ -18,6 +18,7 @@
   import { isEmbedded } from '../lib/desktop';
   import PaneControls from '../lib/components/PaneControls.svelte';
   import { ctxMenu } from '../lib/contextmenu.svelte';
+  import { layout, presetItems } from '../lib/stores/splitLayout.svelte';
   import { popoutItems } from '../lib/popoutMenu';
   import { confirmer } from '../lib/confirm.svelte';
   import type { MenuItem } from '../lib/contextmenu.svelte';
@@ -426,6 +427,12 @@
     >
       <Icon name="grid" size={12} />
     </button>
+    <!-- The free layout's presets act on the whole canvas, so they live with its view control, not in a pane's ⋯. -->
+    {#if ws.viewMode === 'tabs' && layout.panes.length > 1}
+      <button aria-haspopup="menu" onclick={(e) => ctxMenu.showAt(e.currentTarget, presetItems())} title="Arrange the panes: columns, rows, grid…" aria-label="Arrange panes" data-testid="arrange-panes">
+        <Icon name="split" size={12} />
+      </button>
+    {/if}
   </div>
   <button
     class="icon-btn new-tab"

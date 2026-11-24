@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
-import { expectFullyInViewport } from './helpers';
+import { expectFullyInViewport, openFloatingBar } from './helpers';
 
 // Home: one centred reading column over the ambient backdrop — the greeting,
 // "Needs you" and "Working" as inbox rows with status words, Up next / Recent
@@ -292,10 +292,17 @@ test('zooming a loaded widget reuses it: no second mount, no new request', async
 
 test('Go to Home is one ⌘K away and the page never overflows horizontally', async ({ page }) => {
   await boot(page, 'agents');
-  await page.keyboard.press('Meta+k');
+  // The bar loads lazily and focuses its input a tick after ⌘K: typing before
+  // then lost the first letters (the 1-in-2 flake). Wait for the focus.
+  await openFloatingBar(page);
+  // Off Home the bar carries the space switch…
+  await expect(page.getByRole('radiogroup', { name: /^Spaces/ })).toBeVisible();
   await page.keyboard.type('go to home');
   await page.keyboard.press('Enter');
   await expect(page.getByRole('region', { name: 'Home dashboard' })).toBeVisible();
+  // …on Home, Pinned's own tabs do: one switch, not two (M13).
+  await expect(page.getByRole('tablist', { name: 'Spaces' })).toBeVisible();
+  await expect(page.getByRole('radiogroup', { name: /^Spaces/ })).toHaveCount(0);
   const over = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(over).toBeLessThanOrEqual(1);
 });

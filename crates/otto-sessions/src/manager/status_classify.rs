@@ -55,6 +55,12 @@ const REPAINT_LINGER: Duration = Duration::from_secs(30);
 /// `Working`, and stops on an approval prompt or when the bytes stop.
 const BUSY_ANIMATION_CAP: Duration = Duration::from_secs(30 * 60);
 
+/// Output within this long of a resize is the redraw it provoked (a prompt,
+/// a TUI repainting in frames), not work: those samples only re-baseline the
+/// screen. Two status ticks, so a repaint spread over a second still lands
+/// inside it.
+const RESIZE_SETTLE: Duration = Duration::from_secs(4);
+
 /// How much of the transcript the status probe folds. Smaller than the idle
 /// sweep's window: it runs every tick the file moved. A tail that holds no
 /// parseable message (one huge tool result) is "unknown", never "idle".
@@ -207,12 +213,20 @@ impl ScreenTracker {
     /// whether the change is CONFIRMED output: two or more rows changed, a
     /// blank row filled (a line was appended), or rows changed on two ticks
     /// in a row. A single row redrawn in place once is a repaint until it
-    /// repeats. The first sample, and the first after a resize (re-wrapped
-    /// text, not output), only set the baseline.
-    pub fn observe(&mut self, size: (u16, u16), prints: Vec<u64>, now: Instant) -> bool {
+    /// repeats. The first sample, and every sample while `settling` after a
+    /// resize ([`RESIZE_SETTLE`]: re-wrapped text and the redraw it
+    /// provoked, not output), only set the baseline.
+    pub fn observe(
+        &mut self,
+        size: (u16, u16),
+        prints: Vec<u64>,
+        now: Instant,
+        settling: bool,
+    ) -> bool {
         let blank = row_prints(&[String::new()])[0];
         let (mut changed, mut appended) = (0usize, false);
-        if let Some(prev) = self.prints.as_ref().filter(|_| self.size == size) {
+        let same_grid = self.size == size && !settling;
+        if let Some(prev) = self.prints.as_ref().filter(|_| same_grid) {
             for i in 0..prev.len().max(prints.len()) {
                 let (a, b) = (prev.get(i).copied(), prints.get(i).copied());
                 if a != b {
@@ -378,7 +392,11 @@ impl StatusClassifier {
                 tokio::task::spawn_blocking(move || (h.screen_size(), h.screen_rows())).await;
             if let Ok((size, rows)) = sample {
                 self.screen.awaiting_approval = awaits_approval(&rows);
-                burst = self.screen.observe(size, row_prints(&rows), now);
+                let settling = self
+                    .handle
+                    .last_resize_at()
+                    .is_some_and(|t| now.saturating_duration_since(t) < RESIZE_SETTLE);
+                burst = self.screen.observe(size, row_prints(&rows), now, settling);
                 self.screen.observe_busy(busy_prints(&rows), now);
             }
         } else {
@@ -604,7 +622,7 @@ mod tests {
         let at = |secs: u64| t0 + Duration::from_secs(secs);
         let mut feed = |text: &str, clock: u64, when: Instant| {
             let rows = vec![format!("{text} · 09:00:{clock:02}"), "> ".to_string()];
-            t.observe((80, 2), row_prints(&rows), when);
+            t.observe((80, 2), row_prints(&rows), when, false);
             t.observe_busy(busy_prints(&rows), when);
             (t.changed_at, t.busy_at)
         };
@@ -636,7 +654,10 @@ mod tests {
         for (i, frame) in ["⠋", "⠙", "⠹", "⠸"].iter().enumerate() {
             let rows = vec![format!("{frame} idle (3s)"), "> ".to_string()];
             let at = now + Duration::from_secs(2 * i as u64);
-            assert!(!t.observe((80, 2), row_prints(&rows), at), "no burst");
+            assert!(
+                !t.observe((80, 2), row_prints(&rows), at, false),
+                "no burst"
+            );
             t.observe_busy(busy_prints(&rows), at);
         }
         assert!(t.changed_at.is_none() && t.busy_at.is_some());
@@ -656,37 +677,59 @@ mod tests {
         let now = Instant::now();
         let mut t = ScreenTracker::default();
         assert!(
-            !t.observe((80, 3), prints(&["⠹ a (0s)", "b 10:00", ""]), now),
+            !t.observe((80, 3), prints(&["⠹ a (0s)", "b 10:00", ""]), now, false),
             "baseline"
         );
         assert!(t.changed_at.is_none());
         // Spinner frame + elapsed tick: masked, no change at all.
-        assert!(!t.observe((80, 3), prints(&["⠋ a (1s)", "b 10:01", ""]), now));
-        assert!(!t.observe((80, 3), prints(&["⠙ a (3s)", "b 10:02", ""]), now));
+        assert!(!t.observe((80, 3), prints(&["⠋ a (1s)", "b 10:01", ""]), now, false));
+        assert!(!t.observe((80, 3), prints(&["⠙ a (3s)", "b 10:02", ""]), now, false));
         // One row redrawn in place once: changed, not confirmed.
-        assert!(!t.observe((80, 3), prints(&["⠙ a (3s)", "c 10:02", ""]), now));
+        assert!(!t.observe((80, 3), prints(&["⠙ a (3s)", "c 10:02", ""]), now, false));
         assert!(t.changed_at.is_some());
         // ...a quiet tick in between resets the streak.
         t.quiet_tick();
-        assert!(!t.observe((80, 3), prints(&["⠙ a (3s)", "d", ""]), now));
+        assert!(!t.observe((80, 3), prints(&["⠙ a (3s)", "d", ""]), now, false));
         // Same row again on the very next tick: streaming, confirmed.
-        assert!(t.observe((80, 3), prints(&["⠙ a (3s)", "de", ""]), now));
+        assert!(t.observe((80, 3), prints(&["⠙ a (3s)", "de", ""]), now, false));
     }
 
     #[test]
     fn status_classify_tracker_confirms_appends_and_scrolls_but_not_resizes() {
         let now = Instant::now();
         let mut t = ScreenTracker::default();
-        t.observe((80, 3), prints(&["$ make", "", ""]), now);
+        t.observe((80, 3), prints(&["$ make", "", ""]), now, false);
         assert!(
-            t.observe((80, 3), prints(&["$ make", "cc a.o", ""]), now),
+            t.observe((80, 3), prints(&["$ make", "cc a.o", ""]), now, false),
             "append"
         );
         assert!(
-            t.observe((80, 3), prints(&["cc a.o", "cc b.o", "cc c.o"]), now),
+            t.observe((80, 3), prints(&["cc a.o", "cc b.o", "cc c.o"]), now, false),
             "scroll"
         );
         // A resize re-wraps the same text: a new baseline, not output.
-        assert!(!t.observe((40, 3), prints(&["cc", "a.o", "cc"]), now));
+        assert!(!t.observe((40, 3), prints(&["cc", "a.o", "cc"]), now, false));
+    }
+
+    #[test]
+    fn status_classify_tracker_ignores_the_redraw_a_resize_provokes() {
+        // M5: a pane shrinks and grows back between two ticks (same grid on
+        // both samples), and the shell / TUI repaints its screen in frames.
+        let now = Instant::now();
+        let mut t = ScreenTracker::default();
+        t.observe((80, 3), prints(&["$ ls", "a b", "$ "]), now, false);
+        let redrawn = || prints(&["a b", "$ ", ""]);
+        assert!(
+            !t.observe((80, 3), redrawn(), now, true),
+            "a repaint inside the settle window is a new baseline"
+        );
+        assert!(t.changed_at.is_none(), "and never content movement");
+        assert!(!t.observe((80, 3), prints(&["1", "2", "3"]), now, true));
+        // Settled: real output counts again, against the repainted screen.
+        assert!(t.observe((80, 3), prints(&["2", "3", "4"]), now, false));
+        // Without the settle flag the same repaint read as output.
+        let mut old = ScreenTracker::default();
+        old.observe((80, 3), prints(&["$ ls", "a b", "$ "]), now, false);
+        assert!(old.observe((80, 3), redrawn(), now, false));
     }
 }
