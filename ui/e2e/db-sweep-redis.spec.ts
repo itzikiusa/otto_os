@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { editorSelectAll } from './helpers';
+import { editorSelectAll, showConnectionList, showDbTables } from './helpers';
 import { execFileSync } from 'node:child_process';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 
@@ -105,7 +105,7 @@ async function ensureEditorOpen(page: Page): Promise<void> {
   if (!isPhone(page)) return;
   const edit = page.locator('.qe-edit');
   if (!(await edit.isVisible().catch(() => false))) {
-    await page.locator('.qe-acc-head', { hasText: 'Editor' }).click();
+    await page.getByRole('button', { name: 'Edit the query', exact: true }).click();
   }
   await expect(edit).toBeVisible();
 }
@@ -435,29 +435,19 @@ test.describe('DB Explorer — Redis (mobile sweep)', () => {
     expect(redisConnId, 'docker-redis must be reachable').not.toBeNull();
     await openConnection(page);
 
-    // CHECK 7: the connection list is visible (and the selected connection is
-    // active). On phone the Connections accordion gates it (defaults open); on
-    // tablet/desktop it's the "Connections" tab — opening a connection switches
-    // the sidebar to Schema, so click back to Connections to reveal the list.
-    if (!isPhone(page)) {
-      await page.locator('.side-switch [role="tab"]', { hasText: 'Connections' }).click();
-    }
-    await expect(page.locator('.conn-list')).toBeVisible();
-    await expect(
-      page.locator('.conn-row.active .conn-name', { hasText: 'e2e-redis-docker' }),
-    ).toBeVisible();
+    // CHECK 7: the connection list (its own page; the workbench's back button
+    // goes there) is visible, and the connection just opened says so in words.
+    await showConnectionList(page);
+    const row = page.locator(`.conn-row[data-connection-id="${redisConnId}"]`);
+    await expect(row).toBeVisible();
+    await expect(row).toContainText('Connected');
 
-    // The Schema side panel hosts the Redis key browser (SchemaTree +
-    // RedisKeyFilter). On phone the schema accordion may be collapsed — expand it.
-    if (isPhone(page)) {
-      const schemaHead = page.locator('.acc-toggle', { hasText: 'Schema' });
-      const sideSwitch = page.locator('.side-switch');
-      if (!(await sideSwitch.isVisible().catch(() => false))) await schemaHead.click();
-    }
-    // The Schema / Saved / History switch is part of the side panel in every
-    // layout once a connection is open — its presence proves the key browser
-    // area renders and is reachable.
-    await expect(page.locator('.side-switch')).toBeVisible({ timeout: 20_000 });
-    await expect(page.locator('.side-switch [role="tab"]', { hasText: 'Schema' })).toBeVisible();
+    // The connection's row opens it again; its key browser (SchemaTree +
+    // RedisKeyFilter) is the side pane's Tables tab, a sheet on a phone. The
+    // Tables / Saved / History tabs prove that area renders and is reachable.
+    await row.locator('.tr-title').click();
+    await expect(page.getByTestId('db-conn-state')).toBeVisible({ timeout: 20_000 });
+    await showDbTables(page);
+    await expect(page.getByRole('tablist', { name: 'Sidebar view' }).getByRole('tab', { name: 'Tables', exact: true })).toBeVisible();
   });
 });

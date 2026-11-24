@@ -803,7 +803,7 @@
     role={mini ? undefined : 'grid'}
     aria-rowcount={mini ? undefined : liveRows.length + 1}
     aria-colcount={mini ? undefined : cols.length + 1}
-    style="--last:{cols.length}; --row-h:{ROW_H}px; --rn-w:calc({rnCh}ch + 30px)"
+    style="--last:{cols.length}; --row-h:{ROW_H}px; --rn-w:calc({rnCh}ch + 30px + var(--rn-dup, 0px))"
   >
     {#if hvirt}
       <!-- Column window on: the widths live here (fixed layout), so the header
@@ -1333,9 +1333,9 @@
     display: flex;
   }
   @media (hover: none) {
-    .row-dup {
-      display: flex;
-    }
+    .row-dup { display: flex; }
+    .grid { --rn-dup: 2.2ch; } /* touch always shows "+": the gutter makes room so it never covers the number */
+    .grid:not(.mini) .rownum { padding-inline-end: calc(2.2ch + 4px) !important; }
   }
   .row-dup:hover {
     background: color-mix(in srgb, var(--accent) 26%, var(--surface-2));

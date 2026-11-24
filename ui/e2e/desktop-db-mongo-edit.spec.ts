@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
+import { expectDbConnected } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DB Explorer — editing MongoDB documents over the live Docker Mongo.
@@ -79,7 +80,8 @@ async function openFind(page: Page, coll: string): Promise<void> {
   const conn = page.locator('.conn-list .tr-title', { hasText: 'e2e-mongodb' });
   await expect(conn.first()).toBeVisible({ timeout: 30_000 });
   await conn.first().click();
-  await expect(page.locator('.cap-chip', { hasText: 'mongodb' })).toBeAttached({ timeout: 20_000 });
+  // Connected, in words, with the server version: the capabilities are in.
+  await expectDbConnected(page, 'MongoDB');
   const content = page.locator('.qe-edit .cm-content');
   await content.click();
   await page.keyboard.press('ControlOrMeta+A');

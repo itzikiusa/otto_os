@@ -1,5 +1,6 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
+import { expectFingerSized } from './helpers';
 
 // Phone (spec A1 + A6): #/agents is the inbox; a tap pushes the session
 // full-height; "Sessions" (or the system Back) returns to the list.
@@ -71,11 +72,26 @@ test('a terminal\'s ‹ steps back to the list; the system Back then leaves Agen
 test('the list and the app bar give 44 px targets', async ({ page }) => {
   await page.goto('/#/agents');
   await expect(page.getByTestId('agents-inbox')).toBeVisible({ timeout: 20_000 });
-  const targets = [page.getByTestId('agents-select-toggle'), page.getByTestId('agents-sort-toggle'), page.getByTestId('agents-inbox-new')];
+  // …and the workspace switch and the usage meter (design review 2, H8).
+  const targets = [page.getByTestId('agents-select-toggle'), page.getByTestId('agents-sort-toggle'), page.getByTestId('agents-inbox-new'), page.getByTestId('agents-current-ws')];
+  await expect(page.getByTestId('threads-open-usage')).toBeVisible({ timeout: 15_000 });
+  targets.push(page.getByTestId('threads-open-usage'));
   for (const b of await page.locator('.mtopbar button:visible').all()) targets.push(b);
   for (const t of targets) {
     const box = (await t.boundingBox())!;
     expect(Math.round(box.height), await t.getAttribute('aria-label') ?? await t.innerText()).toBeGreaterThanOrEqual(44);
     expect(Math.round(box.width), await t.getAttribute('aria-label') ?? await t.innerText()).toBeGreaterThanOrEqual(44);
   }
+});
+
+// New session on a phone: the Terminal | Chat switch and each card's − / +
+// take a finger (design review 2, H8).
+test('the New session sheet gives 44 px targets', async ({ page }) => {
+  await page.goto('/#/agents');
+  await expect(page.getByTestId('agents-inbox')).toBeVisible({ timeout: 20_000 });
+  await page.getByTestId('agents-inbox-new').tap();
+  const dialog = page.getByRole('dialog', { name: 'New session' });
+  const kinds = dialog.getByTestId('ns-kind').getByRole('radio');
+  await expect(kinds.first()).toBeVisible({ timeout: 10_000 });
+  await expectFingerSized(...(await kinds.all()), ...(await dialog.locator('.count-ctl:visible .cbtn').all()));
 });

@@ -53,6 +53,8 @@ test('one list with words; needs you first; the navigator folds to its rail and 
   for (const t of TITLES) await expect(page.getByTestId(`agents-status-${ids[t]}`)).toHaveText(/\S/);
   // Folded: the expanded navigator is gone while Agents is open.
   await expect(page.locator('.navigator')).toHaveCount(0);
+  // The picker already scopes the list to this workspace: no row repeats it (review 2, N1).
+  await expect(rows(page).locator('.tr-proj')).toHaveCount(0);
 
   // A session that needs you rises to the top and says so (not the one on
   // screen: arrival opened the latest, and a raise you are watching is seen).
@@ -69,6 +71,11 @@ test('one list with words; needs you first; the navigator folds to its rail and 
     if (SHOTS) await page.screenshot({ path: `${SHOTS}/agents-inbox-1440-${s}.png`, animations: 'disabled' });
   }
 
+  // Under "All workspaces" each row names its workspace.
+  await page.getByTestId('agents-sort-toggle').click();
+  await page.getByRole('menuitemcheckbox', { name: 'All workspaces' }).click();
+  await expect(rows(page).first().locator('.tr-proj')).toBeVisible();
+
   // Leaving Agents brings the navigator back.
   await page.goto('/#/settings');
   await expect(page.locator('.navigator')).toBeVisible({ timeout: 15_000 });
@@ -80,6 +87,14 @@ test('select mode: Tile lays the checked sessions out side by side', async ({ pa
   await page.getByTestId('agents-select-toggle').click();
   await page.getByLabel('Select Pirlo').check();
   await page.getByLabel('Select Seedorf').check();
+  // The count never runs under Tile (design review 2, M3), and is said once.
+  const tools = page.getByTestId('agents-select-tools');
+  const count = (await tools.locator('.ai-count span').boundingBox())!;
+  const tile = (await page.getByTestId('agents-tile-selected').boundingBox())!;
+  expect(count.x + count.width).toBeLessThanOrEqual(tile.x + 0.5);
+  await expect(tools.locator('.ai-count span')).toHaveText('2');
+  await expect(page.getByTestId('agents-delete-selected')).toHaveText('Delete');
+  if (SHOTS) for (const s of ['light', 'dark'] as const) { await scheme(page, s); await page.screenshot({ path: `${SHOTS}/agents-select-mode-1440-${s}.png`, animations: 'disabled' }); }
   await page.getByTestId('agents-tile-selected').click();
   await expect(page.locator(`[data-tile-id="${ids.Pirlo}"]`)).toBeVisible({ timeout: 15_000 });
   await expect(page.locator(`[data-tile-id="${ids.Seedorf}"]`)).toBeVisible();

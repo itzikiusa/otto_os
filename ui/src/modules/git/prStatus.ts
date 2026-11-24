@@ -68,9 +68,10 @@ export function prRowWord(pr: PrSummary): { word: string; tone: PrTone } {
   if (pr.review?.status === 'changes_requested') return { word: 'Changes requested', tone: 'warning' };
   if (pr.draft) return { word: 'Draft', tone: 'calm' };
   if (pr.asks_me) return { word: 'Review requested', tone: 'warning' };
-  if (pr.review?.status === 'approved') return { word: 'Approved', tone: 'success' };
-  if (pr.review?.status === 'waiting') return { word: 'Waiting for review', tone: 'calm' };
+  // The header's order and words (prStatusLine): running checks before an approval, which reads "Ready to merge".
   if (ci === 'pending') return { word: 'Checks running', tone: 'calm' };
+  if (pr.review?.status === 'approved') return { word: 'Ready to merge', tone: 'success' };
+  if (pr.review?.status === 'waiting') return { word: 'Waiting for review', tone: 'calm' };
   return { word: 'Open', tone: 'calm' };
 }
 

@@ -507,4 +507,8 @@
     .prw-desk { display: none; }
     .prw-icon, .prw-tab-x { width: 32px; height: 32px; }
   }
+  /* A phone: ‹ back, the agent, a tab's ✕ and Find take a finger (44 px). */
+  @media (max-width: 640px) and (pointer: coarse) {
+    .prw-icon, .prw-tab-x { width: 44px; height: 44px; }
+  }
 </style>

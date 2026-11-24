@@ -411,7 +411,8 @@ test('the list row and the status line read the same checks; a green, approved P
   const primary = page.getByTestId('pr-primary');
   await expect(primary).toHaveText('Merge');
   await expect(primary).toHaveAttribute('data-next', 'merge');
-  await expect(page.locator('.pr-row[data-pr="52"]').getByTestId('pr-word')).not.toHaveText(/Checks/);
+  // The list says what the header says (design review 2, N7).
+  await expect(page.locator('.pr-row[data-pr="52"]').getByTestId('pr-word')).toHaveText('Ready to merge');
   await primary.click();
   await expect(page.getByRole('dialog', { name: 'Merge pull request' })).toBeVisible();
 });

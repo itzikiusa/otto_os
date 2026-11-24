@@ -627,7 +627,8 @@
     .conn-chips :global(.chip),
     .conn-root :global(.page-header-bar .btn),
     .conn-root :global(.page-header-bar .icon-btn),
-    .conn-list :global(.if-head .icon-btn) {
+    .conn-list :global(.if-head .icon-btn),
+    .conn-list :global(.tr-actions .icon-btn) {
       min-block-size: 44px;
       min-inline-size: 44px;
     }

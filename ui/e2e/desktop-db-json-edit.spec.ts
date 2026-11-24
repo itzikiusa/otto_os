@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
+import { expectDbConnected, confirmDestructiveRun } from './helpers';
 
 // ── JSON editing in the results grid (desktop-browser; needs the docker Mongo) ──
 //
@@ -50,10 +51,8 @@ async function openConn(page: Page): Promise<void> {
   await expect(conn.first()).toBeVisible({ timeout: 30_000 });
   await conn.first().click();
   await expect(page.getByTestId('db-conn-state')).toBeVisible({ timeout: 20_000 });
-  // The engine chip renders once capabilities load; a sub-900px workbench
-  // (1280px viewport + 300px sidebar) hides it by design, so wait for it in
-  // the DOM rather than on screen.
-  await expect(page.locator('.cap-chip', { hasText: 'mongodb' })).toBeAttached({ timeout: 20_000 });
+  // Connected, in words, with the server version: the capabilities are in.
+  await expectDbConnected(page, 'MongoDB');
 }
 
 // Same CodeMirror quirks as db-sweep-mongodb.spec.ts: one-shot insertText so the
@@ -91,6 +90,7 @@ test('JSON cell + JSON-view document editing round-trips through review', async 
 
   // Idempotence: a failed prior run leaves mutated docs behind — start clean.
   await runStatement(page, `db.${COLL}.deleteMany({})`);
+  await confirmDestructiveRun(page); // deleteMany({}) asks first
   await page.waitForTimeout(500);
 
   // Scratch doc with a complex (array-of-objects) field.
@@ -170,11 +170,13 @@ test('JSON cell + JSON-view document editing round-trips through review', async 
 
   // Cleanup the scratch collection.
   await runStatement(page, `db.${COLL}.deleteMany({})`);
+  await confirmDestructiveRun(page); // deleteMany({}) asks first
 });
 
 /** Reset the scratch collection to ONE known document and show it in Vertical. */
 async function seedAndOpenVertical(page: Page): Promise<void> {
   await runStatement(page, `db.${COLL}.deleteMany({})`);
+  await confirmDestructiveRun(page); // deleteMany({}) asks first
   await page.waitForTimeout(500);
   await runStatement(
     page,
@@ -233,6 +235,7 @@ test('Vertical: nested dbl-click → $set dotted path with diff', async ({ page 
 
   // Cleanup the scratch collection.
   await runStatement(page, `db.${COLL}.deleteMany({})`);
+  await confirmDestructiveRun(page); // deleteMany({}) asks first
 });
 
 test('Vertical: field menu → Delete field parks a $unset', async ({ page }) => {
@@ -266,6 +269,8 @@ test('Vertical: field menu → Delete field parks a $unset', async ({ page }) =>
   await expect(page.locator('.vrec').first().locator('.vk', { hasText: /^status$/ })).toHaveCount(0);
 
   await runStatement(page, `db.${COLL}.deleteMany({})`);
+
+  await confirmDestructiveRun(page); // deleteMany({}) asks first
 });
 
 test('Vertical: record menu → Insert document… reviews an insertOne', async ({ page }) => {
@@ -293,6 +298,8 @@ test('Vertical: record menu → Insert document… reviews an insertOne', async 
   await expect(page.locator('.vrec')).toHaveCount(2, { timeout: 20_000 });
 
   await runStatement(page, `db.${COLL}.deleteMany({})`);
+
+  await confirmDestructiveRun(page); // deleteMany({}) asks first
 });
 
 test('oversized nested Mongo values are explicitly read-only and safe projection restores editing', async ({ page }) => {

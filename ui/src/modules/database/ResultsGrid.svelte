@@ -2608,6 +2608,7 @@
     }
     .view-seg { height: 48px; }
     .vs, .rg-more { height: 44px; min-width: 44px; }
+    .rg-more::after { inset: 0; } /* already 44 px; app.css's -6px touch ring overflowed the toolbar */
     .gt-search-input {
       font-size: var(--fs-m);
       align-self: stretch;

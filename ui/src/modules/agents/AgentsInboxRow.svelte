@@ -1,6 +1,8 @@
 <script lang="ts">
   // One Agents inbox row on the shared InboxRow (patterns.md §10): the
-  // workspace's badge and name … the status WORD (lib/statusWords.ts); the
+  // workspace's badge and name (only when the list spans workspaces or the row
+  // is another workspace's — the picker names the one in scope; without it the
+  // row is two lines, the word at the title's end) … the status WORD (lib/statusWords.ts); the
   // title; branch or folder · provider · terminal / chat. Select mode puts a
   // checkbox before it; the Manual sort makes it a drag source. Everything a
   // row can do is in its menu (right-click / long-press), the same menu the
@@ -14,7 +16,7 @@
 
   interface Props {
     session: Session;
-    project: string;
+    project: string | null;
     status: StatusWord;
     strong: boolean;
     /** `chat` — a structured thread; `archived` — in History. */
@@ -61,6 +63,7 @@
   <InboxRow
     title={s.title}
     {project}
+    twoLine={!project}
     word={status.word}
     tone={status.tone}
     time={rel(s.last_active_at)}

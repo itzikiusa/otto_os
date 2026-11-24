@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { editorSelectAll } from './helpers';
+import { editorSelectAll, pickDbMenuItem } from './helpers';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -61,7 +61,7 @@ async function ensureEditorOpen(page: Page): Promise<void> {
   if (!isPhone(page)) return;
   const editor = page.locator('.qe-edit');
   if (!(await editor.isVisible().catch(() => false))) {
-    await page.locator('.qe-acc-head', { hasText: 'Editor' }).click();
+    await page.getByRole('button', { name: 'Edit the query', exact: true }).click();
   }
   await expect(editor).toBeVisible();
 }
@@ -150,7 +150,7 @@ test.describe('DB Explorer · query editor', () => {
     test.skip(connId == null, 'mysql unavailable');
     await openMysql(page);
     await setEditor(page, 'select 1 as a, 2 as b');
-    await page.getByRole('button', { name: 'Format', exact: true }).click();
+    await pickDbMenuItem(page, /^Format/); // the Query group of the header's ⋯
     // sql-formatter upper-cases keywords + adds newlines.
     await expect
       .poll(async () => ((await page.locator('.qe-edit .cm-content').textContent()) ?? ''))

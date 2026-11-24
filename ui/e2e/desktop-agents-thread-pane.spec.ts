@@ -207,6 +207,12 @@ test('a focused chat pane gets the details card in the right panel', async ({ pa
   await expect(card.getByTestId('thread-details-card')).toBeVisible({ timeout: 20_000 });
   await expect(card.getByTestId('details-folder')).toHaveAttribute('title', new RegExp(`${dir.split('/').pop()}$`));
   await shots(page, 'agents-thread-pane-details');
+  // Outside a repository the card says so; the Git tab does not say it again (design review 2, N2).
+  await page.locator('.rstrip').getByRole('button', { name: 'Git', exact: true }).click();
+  await expect(card).toContainText('Not a git repository', { timeout: 15_000 });
+  await expect(page.locator('.rpanel')).not.toContainText('isn’t a git repository');
+  await expect(page.locator('.rpanel').getByRole('button', { name: 'Open Git module' })).toHaveCount(0);
+  await shots(page, 'agents-thread-pane-git');
 });
 
 // A lone chat tab has no strip ✕: its ⋯ closes it.

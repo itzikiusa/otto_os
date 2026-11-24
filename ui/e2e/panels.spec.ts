@@ -199,7 +199,9 @@ test.describe('Panels — desktop', () => {
 
     // Switch to Info tab and verify session details render cleanly.
     await openPanelTab(page, 'Info');
-    await expect(panel.getByText('Panels E2E Session')).toBeVisible({ timeout: 15_000 });
+    await expect(panel.locator('.info-row .key', { hasText: 'Created' })).toBeVisible({ timeout: 15_000 });
+    // Title and status are the pane header's, the folder the details card's (design review 2, N3).
+    await expect(panel.locator('.info-row .key', { hasText: /^(Title|Status|Folder)$/ })).toHaveCount(0);
 
     // Verify vertical rail keyboard navigation (ArrowUp/ArrowDown).
     const infoRailBtn = page.locator('.rstrip').getByRole('button', { name: 'Info', exact: true });

@@ -546,7 +546,6 @@
         hint: i === 0 && open ? (status?.blocked ?? undefined) : undefined, title: status?.blocked ?? undefined, action: () => openMerge(st),
       })),
       { separator: true },
-      { label: `Check out ${pr.source_branch}`, icon: 'branch', disabled: busy !== '', action: () => void checkoutBranch() },
       { label: 'Copy checkout command', icon: 'copy', action: () => void copyWithToast(checkoutCmd, 'Checkout command') },
       { label: 'Copy branch name', icon: 'copy', action: () => void copyWithToast(pr?.source_branch ?? '', 'Branch name') },
       ...(previewUrls.length > 0 ? [{ label: 'Preview in Browser', icon: 'globe', action: () => openPreview(e) } as MenuItem] : []),
@@ -747,15 +746,6 @@
             {/if}
           </section>
 
-          {#if pr.state === 'open'}
-            <section class="prd-review-bar">
-              <span class="grow"></span>
-              <button class="btn small ghost danger-text" data-testid="prd-decline" disabled={busy !== ''} title="Close PR #{number} without merging (asks first)" onclick={() => action('decline')}>
-                {busy === 'decline' ? closeCopy.busy : closeCopy.button}
-              </button>
-            </section>
-          {/if}
-
           <PrConversation comments={generalComments} {number} {repoLabel} {providerName} reactionsSupported={pr.reactions_supported}
             bind:draft={newComment} posting={busy === 'comment'} onpost={addGeneralComment} onresolve={resolveThread}
             onreply={(parentId, body) => postComment(body, undefined, undefined, parentId)} />
@@ -919,8 +909,6 @@
   }
   .prd-desc:hover .edit-btn, .prd-desc:focus-within .edit-btn, .edit-btn:focus-visible { opacity: 1; }
   @media (hover: none) { .edit-btn { opacity: 1; } }
-  .prd-review-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .danger-text { color: var(--danger); }
   .prd-compose-foot { justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
   .prd-compose-foot .hint { flex: 1 1 220px; min-width: 0; font-size: var(--fs-xs); }
 
@@ -941,6 +929,8 @@
     .prd-head { padding: 10px 12px 0; }
     .prd-actions { flex-wrap: wrap; flex: 1 1 100%; }
     .prd-actions .btn { height: 44px; } /* finger-sized */
+    .prd-actions .icon-only { min-inline-size: 44px; }
+    .prd-tabs button, .edit-btn { min-block-size: 44px; }
     .prd-meta { flex-wrap: wrap; }
     .prd-title-input { height: 38px; font-size: 16px; } /* ui-guards: allow — 16px stops iOS zoom-on-focus */
     .prd-body { padding: 12px; }

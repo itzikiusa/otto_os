@@ -466,29 +466,6 @@
   </div>
 
   <div class="nav-scroll" bind:this={scrollEl}>
-    {#if !ui.sidebarEditMode}
-      <!-- "Needs you": opens the Agents inbox narrowed to the sessions blocked
-           on input. Only shown once at least one session is flagged (or while on). -->
-      {#if ws.needsYouCount > 0 || ws.needsYouFilter}
-        <button
-          class="needs-you-filter"
-          class:active={ws.needsYouFilter}
-          aria-pressed={ws.needsYouFilter}
-          onclick={() => {
-            ws.needsYouFilter = !ws.needsYouFilter;
-            if (ws.needsYouFilter && router.module !== 'agents') router.go('agents');
-          }}
-          title="Show only the sessions waiting on you"
-        >
-          <Icon name="bell" size={12} />
-          <span class="grow">Needs you</span>
-          {#if ws.needsYouCount > 0}
-            <span class="needs-you-count">{ws.needsYouCount}</span>
-          {/if}
-        </button>
-      {/if}
-    {/if}
-
     <div class="nav-section modules" data-testid="sidebar-modules">
       {#if ui.sidebarEditMode}
         <p class="edit-hint">Drag rows and section headers to reorder (or ⌥↑ / ⌥↓). Star to add to Favorites, eye to hide.</p>
@@ -1344,43 +1321,6 @@
     padding: 4px 10px 6px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
-  }
-  .needs-you-filter {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: calc(100% - 8px);
-    margin: 0 4px 6px;
-    height: 26px;
-    padding: 0 8px;
-    border: 1px solid color-mix(in srgb, var(--status-warn) 40%, transparent);
-    background: color-mix(in srgb, var(--status-warn) 8%, transparent);
-    border-radius: var(--radius-s);
-    color: var(--warning);
-    font-size: var(--fs-s);
-    font-weight: 600;
-    cursor: pointer;
-    transition: background var(--dur-fast) ease-out;
-  }
-  .needs-you-filter:hover {
-    background: color-mix(in srgb, var(--status-warn) 14%, transparent);
-  }
-  .needs-you-filter.active {
-    background: color-mix(in srgb, var(--status-warn) 22%, transparent);
-  }
-  .needs-you-count {
-    min-width: 16px;
-    height: 15px;
-    padding: 0 4px;
-    border-radius: 999px;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    display: grid;
-    place-items: center;
-    /* The Navigator's count-chip language (tint + semantic text), same as
-       the Assistant's needs-you chip. */
-    color: var(--warning);
-    background: var(--warning-soft);
   }
   .ellipsis {
     overflow: hidden;

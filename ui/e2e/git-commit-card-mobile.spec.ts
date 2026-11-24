@@ -47,8 +47,9 @@ test('phone: Changes first → one tap commits and pushes', async ({ page }, inf
       .map((el) => `${el.className} ${el.scrollWidth}>${el.clientWidth}`),
   );
   expect(sideways, 'inner horizontal scrollers').toEqual([]);
-  // Finger-sized (44 px): the view switch, Fetch, ⋯ and a file's include box.
-  for (const t of [page.locator('.git-views .rv-tab').first(), page.locator('.gitpage').getByRole('button', { name: /Fetch/ }), page.locator('.gitpage').getByRole('button', { name: 'More actions', exact: true }), page.locator('.wp-check-hit').first()]) {
+  // Finger-sized (44 px): the view switch, Fetch, ⋯, a file's include box and the
+  // Included header's Unstage all / Discard all (design review 2, H8).
+  for (const t of [page.locator('.git-views .rv-tab').first(), page.locator('.gitpage').getByRole('button', { name: /Fetch/ }), page.locator('.gitpage').getByRole('button', { name: 'More actions', exact: true }), page.locator('.wp-check-hit').first(), ...(await page.locator('.wp-sec-btn').all())]) {
     const b = (await t.boundingBox())!;
     expect(Math.min(b.width, b.height), await t.evaluate((el) => el.className)).toBeGreaterThanOrEqual(44);
   }

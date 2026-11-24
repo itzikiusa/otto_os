@@ -293,7 +293,7 @@
   }
   @media (max-width: 640px) {
     .tabs button {
-      height: 30px;
+      height: 44px;
       font-size: var(--fs-m);
     }
   }

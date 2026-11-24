@@ -63,7 +63,8 @@
           <p class="headline">Last {summary.days} days ≈ <strong>{formatUsd(summary.total_cost_usd)}</strong> · about {paceText} a day</p>
         {/if}
         <p class="sub">
-          Last {summary.days} days ≈ {formatUsd(summary.total_cost_usd)} ·
+          <!-- Without an outlook the headline already is the window's cost. -->
+          {#if outlook}Last {summary.days} days ≈ {formatUsd(summary.total_cost_usd)} ·{/if}
           <span title={breakdownTitle(summaryParts(summary))}>{formatCount(summary.total_tokens)} tokens</span> ·
           {formatCount(summary.sessions.length)} {pluralNoun(summary.sessions.length, 'session', 'sessions')} ·
           {formatCount(summary.providers.length)} {pluralNoun(summary.providers.length, 'provider', 'providers')}

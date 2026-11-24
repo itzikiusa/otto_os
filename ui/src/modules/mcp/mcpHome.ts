@@ -29,6 +29,8 @@ export interface Sentence {
 }
 
 const DAY = 86_400_000;
+/** A ULID or a UUID: an id a person cannot read. */
+const OPAQUE_ID = /^(?:[0-9A-HJKMNP-TV-Z]{26}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 const n = (count: number, one: string, many = `${one}s`) => `${count.toLocaleString('en-US')} ${count === 1 ? one : many}`;
 
 /** Pending requests first — newest first, as the list arrives. */
@@ -41,7 +43,8 @@ export function recentDenials(list: readonly ApprovalLike[], now: number, days =
 
 /** What a request will do, in words, from its redacted arguments: the tool,
  *  then up to three short top-level values ("otto.git_push · repo otto ·
- *  branch fx/x"). Objects, arrays and long strings are left out. */
+ *  branch fx/x"). Objects, arrays, long strings and opaque ids (a ULID or
+ *  UUID — the title names what they point at) are left out. */
 export function argsLine(a: Pick<ApprovalLike, 'tool' | 'args_redacted_json'>): string {
   const parts: string[] = [];
   if (a.tool) parts.push(a.tool);
@@ -49,7 +52,7 @@ export function argsLine(a: Pick<ApprovalLike, 'tool' | 'args_redacted_json'>): 
     const args = JSON.parse(a.args_redacted_json) as Record<string, unknown>;
     for (const [k, v] of Object.entries(args ?? {})) {
       if (parts.length >= 4) break;
-      if (typeof v === 'string' && v && v.length <= 40) parts.push(`${k} ${v}`);
+      if (typeof v === 'string' && v && v.length <= 40 && !OPAQUE_ID.test(v)) parts.push(`${k} ${v}`);
       else if (typeof v === 'number' || typeof v === 'boolean') parts.push(`${k} ${v}`);
     }
   } catch {

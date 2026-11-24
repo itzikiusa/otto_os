@@ -154,9 +154,17 @@ test.describe('connections list — responsive', () => {
     const editor = page.locator('.qe-edit .cm-content');
     await editor.click();
     await page.keyboard.press('ControlOrMeta+A');
-    await page.keyboard.insertText('SELECT * FROM shop.orders LIMIT 5');
+    await page.keyboard.insertText('SELECT * FROM shop.orders LIMIT 12');
     await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
     await expect(page.locator('.grid tbody tr').first()).toBeVisible();
+    // The query tabs' + takes a finger (design review 2, H8).
+    const plus = (await page.getByRole('button', { name: 'New query tab' }).boundingBox())!;
+    expect(Math.min(plus.width, plus.height), 'New query tab').toBeGreaterThanOrEqual(44);
+    // Row numbers from 10 up stay whole beside the touch "+" (design review 2, N8: row 10 read "1").
+    const tenth = page.locator('.grid tbody tr:not(.spacer)').nth(9);
+    await expect(tenth.locator('.rownum-n')).toHaveText('10');
+    const [num, dup] = await Promise.all([tenth.locator('.rownum-n').boundingBox(), tenth.locator('.row-dup').boundingBox()]);
+    expect(num!.x + num!.width, 'the number ends before the +').toBeLessThanOrEqual(dup!.x + 0.5);
     // The editor folds to its one line; the rows are what is on screen.
     await expect(page.locator('.qe-edit')).toBeHidden();
     await expect(page.getByRole('button', { name: 'Edit the query' })).toBeVisible();

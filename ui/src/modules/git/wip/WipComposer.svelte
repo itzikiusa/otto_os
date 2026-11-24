@@ -52,8 +52,8 @@
   const len = $derived(subject.trim().length);
   const included = $derived(
     stagedCount === totalCount
-      ? `${totalCount === 1 ? '1 file' : `${totalCount} files`} included`
-      : `${stagedCount} of ${totalCount} files included`,
+      ? 'all files included'
+      : `${stagedCount} of ${totalCount} included`,
   );
   const verb = $derived(amend ? 'Amend' : 'Commit');
 
