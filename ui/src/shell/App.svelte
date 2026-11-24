@@ -1347,6 +1347,12 @@
     cursor: pointer;
     flex-shrink: 0;
   }
+  /* Phone: every app-bar control (menu, back/forward, bell, side panel) is a
+     44 px target; on a 38 px titled bar they overhang it a little. */
+  .shell.bnav .mtopbar :global(button) {
+    min-inline-size: 44px;
+    min-block-size: 44px;
+  }
   .mtop-btn:hover {
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
     color: var(--text);

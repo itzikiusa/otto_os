@@ -65,3 +65,17 @@ test('a terminal\'s ‹ steps back to the list; the system Back then leaves Agen
   await page.goBack();
   await expect.poll(() => page.evaluate(() => location.hash)).toMatch(/^#\/settings/);
 });
+
+// Phone targets are 44 px: the list's Select / Sort, its New session, and the
+// app bar's controls (design review H8).
+test('the list and the app bar give 44 px targets', async ({ page }) => {
+  await page.goto('/#/agents');
+  await expect(page.getByTestId('agents-inbox')).toBeVisible({ timeout: 20_000 });
+  const targets = [page.getByTestId('agents-select-toggle'), page.getByTestId('agents-sort-toggle'), page.getByTestId('agents-inbox-new')];
+  for (const b of await page.locator('.mtopbar button:visible').all()) targets.push(b);
+  for (const t of targets) {
+    const box = (await t.boundingBox())!;
+    expect(Math.round(box.height), await t.getAttribute('aria-label') ?? await t.innerText()).toBeGreaterThanOrEqual(44);
+    expect(Math.round(box.width), await t.getAttribute('aria-label') ?? await t.innerText()).toBeGreaterThanOrEqual(44);
+  }
+});

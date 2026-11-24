@@ -367,7 +367,7 @@
   />
 {/snippet}
 
-<aside class="ai" aria-label="Sessions" data-testid="agents-inbox">
+<aside class="ai" class:touch={viewport.isPhone} aria-label="Sessions" data-testid="agents-inbox">
   <div class="ai-top">
     <label class="ai-search">
       <Icon name="search" size={14} />
@@ -589,6 +589,12 @@
   }
   .ai-more {
     margin: 6px 8px;
+  }
+  /* Phone: 44 px targets for the list's own controls. */
+  .ai.touch .ai-top :global(.icon-btn),
+  .ai.touch .ai-new {
+    min-inline-size: 44px;
+    min-block-size: 44px;
   }
   .ai-foot {
     display: flex;
