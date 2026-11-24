@@ -1,6 +1,6 @@
 import { test, expect, type Page, type Request } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, writeFileSync } from 'node:fs';
+import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { apiCtx, seedWorkspace, tempDir } from './seed';
 
@@ -23,7 +23,7 @@ async function seed(tag: string): Promise<Seeded> {
   const dir = join(root, 'work');
   for (const bare of [origin, upstream]) {
     execFileSync('git', ['init', '-q', '--bare', '-b', 'main', bare]);
-    writeFileSync(join(bare, 'hooks', 'pre-receive'), '#!/bin/sh\nsleep 0.3\n');
+    writeFileSync(join(bare, 'hooks', 'pre-receive'), '#!/bin/sh\necho push >> pushes\nsleep 0.3\n');
     chmodSync(join(bare, 'hooks', 'pre-receive'), 0o755);
   }
   execFileSync('git', ['init', '-q', '-b', 'main', dir]);
@@ -53,6 +53,9 @@ async function seed(tag: string): Promise<Seeded> {
   await ctx.dispose();
   return { id, dir, origin, upstream };
 }
+
+/** How many pushes a bare remote has received (its pre-receive hook counts them). */
+const pushes = (gitDir: string): number => readFileSync(join(gitDir, 'pushes'), 'utf8').split('\n').filter(Boolean).length;
 
 const heads = (gitDir: string): string[] =>
   execFileSync('git', ['--git-dir', gitDir, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/']).toString().split('\n').filter(Boolean);
@@ -160,12 +163,14 @@ test('timing: the bulk route for 8 local + remote branches against a 300 ms remo
   const s = await seed('bulkdel-t');
   const { ctx, base } = await apiCtx();
   const items = FEATURES.map((name) => ({ name, remote: 'origin' }));
+  const before = pushes(s.origin);
   const t0 = Date.now();
   const r = await ctx.post(base + '/api/v1/repos/' + s.id + '/branches/delete', { data: { items } });
   const ms = Date.now() - t0;
   expect(r.ok(), await r.text()).toBeTruthy();
   const body = (await r.json()) as { results: { local_deleted: boolean; remote_deleted: boolean; error: string | null }[] };
   expect(body.results.every((x) => x.local_deleted && x.remote_deleted && !x.error)).toBe(true);
+  expect(pushes(s.origin) - before, 'one push for all eight remote deletes').toBe(1);
   console.log('BULKDEL-ROUTE 8 local+remote ms', ms);
   await ctx.dispose();
 });
