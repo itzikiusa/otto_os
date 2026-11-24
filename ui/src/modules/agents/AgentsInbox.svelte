@@ -1,8 +1,3 @@
-<script module lang="ts">
-  /** The thread list and inbox feeds were started (once per app load). */
-  let feedsOn = false;
-</script>
-
 <script lang="ts">
   // The Agents inbox (patterns.md §10 — the Threads concept, where the owner
   // works): terminal sessions AND structured threads in ONE list, needs you
@@ -49,6 +44,7 @@
   import { newScratchSession, newSessionIn, workspaceMenuItems } from '../../shell/workspaceActions';
   import AgentsInboxRow from './AgentsInboxRow.svelte';
   import { agentsInbox, byRecent, matchesQuery } from './agentsInbox';
+  import { startThreadFeeds } from './threadFeeds.svelte';
 
   // The inbox lists the same structured threads as Threads (spec A: one set of sessions, two views).
   type RuntimeStore = typeof import('../threads/runtime/runtimeThreads.svelte').runtimeThreads; // ui-guards: allow — one store
@@ -86,23 +82,11 @@
     let gone = false;
     const cancel = whenIdle(() => {
       meterReady = true;
-      void Promise.all([
-        import('../threads/runtime/runtimeThreads.svelte'), // ui-guards: allow — see RuntimeStore
-        import('../threads/threadNav.svelte'), // ui-guards: allow — see ThreadNav
-        import('../threads/threadInbox.svelte'), // ui-guards: allow — see InboxLive
-      ]).then(([m, n, i]) => {
+      void startThreadFeeds().then(([m, n, i]) => {
         if (gone) return;
         rt = m.runtimeThreads;
         nav = n;
         live = i.inboxLive;
-        // Read once per app load: the first visit lists the threads and starts
-        // their (and the MCP asks') live feeds, which then stay on — events and
-        // a reconnect's resync keep them current, so a revisit reads nothing.
-        if (feedsOn) return;
-        feedsOn = true;
-        m.runtimeThreads.mount();
-        i.inboxLive.mount();
-        void m.runtimeThreads.loadAll().catch(() => {});
       });
     });
     return () => {
