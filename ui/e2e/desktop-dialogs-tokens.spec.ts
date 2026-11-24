@@ -164,6 +164,8 @@ test('light: Usage "Where it went" heading + work-item Group-by select are reada
   await expect(title).toHaveText('Where it went', { timeout: 30_000 });
   expect(await contrastOf(page, '#usage-where-title')).toBeGreaterThanOrEqual(4.5);
   await page.getByTestId('usage-where-work').click();
+  // The work-item view loads on first open.
+  await expect(page.locator('#attr-dim-select')).toBeVisible();
   // The select was a solid black box (#0d1117 fallback) in light mode.
   expect(await contrastOf(page, '#attr-dim-select')).toBeGreaterThanOrEqual(4.5);
   const selectBg = await page
