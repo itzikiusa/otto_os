@@ -20,13 +20,16 @@ import { expectFullyInViewport, openPage } from './helpers';
 // daemon, so this file's two tests can land in different workers and seed two
 // repos. A fixed name let the second worker open the FIRST worker's repo — a
 // different needle sha — and fail the selection check on a correct selection.
-const REPO_NAME = `e2e-search-repo-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+// Named IN beforeAll, not at module load: a worker that runs the file again
+// (--repeat-each) evaluates the module once but seeds a repo per pass.
+let REPO_NAME = '';
 const NEEDLE = 'feat: needle-xyz lands here';
 let repoDir = '';
 let needleSha = '';
 let wsId = '';
 
 test.beforeAll(async () => {
+  REPO_NAME = `e2e-search-repo-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
   const { ctx, base } = await apiCtx();
   wsId = await seedWorkspace(ctx, base);
   repoDir = mkdtempSync(join(tmpdir(), 'otto-e2e-search-'));

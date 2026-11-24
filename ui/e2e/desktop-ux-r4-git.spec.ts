@@ -103,8 +103,7 @@ test('graph leading branch chip stays inside its cell at 2048px', async ({ page 
   await openRepo(page);
   const cell = page.locator('.graph-row-head .branch-cell');
   await expect(cell.locator('.head-badge')).toBeVisible();
-  await page.screenshot({path: testInfo.outputPath('head-label-before.png')});
-  const bounds = await cell.evaluate(el => {
+  await page.screenshot({path: testInfo.outputPath('head-label-before.png')});  const bounds = await cell.evaluate(el => {
     const cell = el.getBoundingClientRect();
     return [...el.querySelectorAll('.ref-select, .head-badge')].map(item => ({left: item.getBoundingClientRect().left - cell.left, right: item.getBoundingClientRect().right - cell.right}));
   });
