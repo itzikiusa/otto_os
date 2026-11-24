@@ -664,6 +664,28 @@ impl SandboxPolicy {
         self
     }
 
+    /// Keep a daemon-written dir under a writable root (temp) away from the
+    /// agent: nothing in it is writable, and only the files whose names start
+    /// with one of `own` are readable (plus a `stat` of the dir itself).
+    /// Appended last.
+    pub fn private_dir(mut self, dir: &Path, own: &[String]) -> Self {
+        let dir = canonicalize_lenient(dir);
+        self.trailing_rules.push(format!(
+            "(deny file-read* file-write* {})",
+            filter("subpath", &dir)
+        ));
+        self.trailing_rules.push(format!(
+            "(allow file-read-metadata {})",
+            filter("literal", &dir)
+        ));
+        if !own.is_empty() {
+            let read: Vec<String> = own.iter().map(|p| filter("prefix", &dir.join(p))).collect();
+            self.trailing_rules
+                .push(format!("(allow file-read* {})", read.join(" ")));
+        }
+        self
+    }
+
     /// Re-open a custom provider CLI home (e.g. `CLAUDE_CONFIG_DIR=~/.claude-work`)
     /// only when it is an absolute path outside `data_dir` that does NOT cover
     /// `home` or `/`. When `read_only` is true, also write-denies
