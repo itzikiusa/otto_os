@@ -162,8 +162,8 @@ class WorkspaceStore {
   /** Open tabs in tab-bar order as typed refs (a PTY session, or a structured thread shown as a chat
    *  pane); `openTabs` are their ids, `threadPanes` the threads'. Persisted by {@link persistTabs}. */
   private tabRefs: PaneRef[] = $state.raw([]);
-  openTabs: Id[] = $derived(this.tabRefs.map((r) => r.id));
-  threadPanes: Id[] = $derived(this.tabRefs.filter((r) => r.kind === 'thread').map((r) => r.id));
+  get openTabs(): Id[] { return this.tabRefs.map((r) => r.id); }
+  get threadPanes(): Id[] { return this.tabRefs.filter((r) => r.kind === 'thread').map((r) => r.id); }
   /** Split panes — projections of the layout tree (leaf order; duplicates legal).
    *  Mutate via `layout` or the methods below. */
   get panes(): Id[] {
@@ -869,7 +869,7 @@ class WorkspaceStore {
    *  agent being watched) — so a refresh never drops what is on screen. */
   private pinnedIds(): Id[] {
     const ids = new Set<Id>();
-    for (const t of [...parseTabRefs(lsGet(winKey(LS_TABS + this.tabsKey))), ...this.tabRefs, ...this.pendingTabs, ...layout.leaves.map((l) => l.ref)]) if (t.kind === 'session') ids.add(t.id);
+    for (const t of [...parseTabRefs(lsGet(winKey(LS_TABS + this.tabsKey))), ...this.tabRefs, ...this.pendingTabs, ...layout.panes.map(sessionRef)]) if (t.kind === 'session' && !this.threadPanes.includes(t.id)) ids.add(t.id);
     const live = this.sessions
       .filter(
         (s) =>

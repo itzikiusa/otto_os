@@ -1,3 +1,4 @@
+import * as splitLayoutPure from '../src/lib/stores/splitLayout.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
@@ -51,7 +52,7 @@ function store(module: string, pref: '' | 'archive' | 'delete', confirmAnswer = 
     '../api/client': { api, getToken: () => 'tok' }, './workflowRuns.svelte': { workflowRuns: { list: [], refresh: async () => {}, apply() {}, clear() {} } }, '../api/workspaces': { fetchWorkspace: async () => ({}) },
     '../router.svelte': { router: { module, parts: [module], go() {} } }, '../toast.svelte': { toasts }, '../toastError': { toastError: () => {} }, '../plural': { plural: (n: number, w: string) => `${n} ${w}` }, '../confirm.svelte': { confirmer },
     './ui.svelte': { ui: { sessionIsolation: false, closeTabPref: pref, setCloseTabPref() {} }, clientId: () => 'test' },
-    '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { MAX_PANES: 15, LS_PANES: 'otto_panes_' },
+    '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { ...splitLayoutPure, LS_PANES: 'otto_panes_' },
     '../storage': { lsGet: () => null, lsSet() {}, lsRemove() {} },
     '../desktop': { isEmbedded: false }, './runtimeAttention.svelte': { runtimeFlagged: () => 0 }, './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets,
     '../lazy-component.svelte': { whenIdle: () => () => {} },
@@ -59,7 +60,7 @@ function store(module: string, pref: '' | 'archive' | 'delete', confirmAnswer = 
   ws.sessions = [{ id: 's1', workspace_id: 'w', kind: 'agent', status: 'idle', title: 'Agent one', archived: false }];
   ws.statusMap = { s1: 'idle' };
   ws.activeSessionId = 's1';
-  ws.openTabs = ['s1'];
+  ws.tabRefs = ['s1'].map((id: string) => ({ kind: 'session', id }));
   return { ws, deleted, posted, asked, undo, held, row };
 }
 
@@ -188,7 +189,7 @@ test('"Always delete": bulk close still confirms once and Cancel preserves every
   const { ws, deleted, posted, asked } = store('agents', 'delete', false);
   ws.sessions = [...ws.sessions, { ...ws.sessions[0], id: 's2', title: 'Agent two' }];
   ws.statusMap = { s1: 'working', s2: 'idle' };
-  ws.openTabs = ['s1', 's2'];
+  ws.tabRefs = ['s1', 's2'].map((id: string) => ({ kind: 'session', id }));
   await ws.requestCloseTabs(['s1', 's2']);
   assert.equal(asked.length, 1);
   assert.match(asked[0], /deletes 2 sessions/);
@@ -200,7 +201,7 @@ test('"Always delete": bulk close still confirms once and Cancel preserves every
 // S13-301: every way back from the archive cancels the pending delete.
 test('"Always delete" then ⌘⇧T: the reopened session is never deleted', async () => {
   const { ws, deleted, posted } = store('agents', 'delete');
-  ws.closeTab = (id: string) => { ws.openTabs = ws.openTabs.filter((t: string) => t !== id); ws.recentlyClosed = [...ws.recentlyClosed, id]; };
+  ws.closeTab = (id: string) => { ws.tabRefs = ws.tabRefs.filter((t: { id: string }) => t.id !== id); ws.recentlyClosed = [...ws.recentlyClosed, id]; };
   await ws.deleteWithUndo('s1', 20);
   assert.ok(ws.recentlyClosed.includes('s1'));
   await ws.reopenClosedTab();

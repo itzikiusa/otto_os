@@ -1,6 +1,7 @@
 // error-handling-4-08: bulk archive / delete named neither the sessions that
 // failed nor why ("2 sessions couldn’t be archived.") — a 403, a 409 and an
 // unreachable daemon all read the same.
+import * as splitLayoutPure from '../src/lib/stores/splitLayout.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
@@ -31,7 +32,7 @@ function load(fail: Record<string, unknown>) {
     '../router.svelte': { router: { module: 'agents', parts: ['agents'], go() {} } }, '../toast.svelte': { toasts }, '../toastError': { toastError: () => {} },
     '../plural': { plural: (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}` }, '../confirm.svelte': { confirmer: { ask: async () => true } },
     './ui.svelte': { ui: { sessionIsolation: false, closeTabPref: '', setCloseTabPref() {} }, clientId: () => 'test' },
-    '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { MAX_PANES: 15, LS_PANES: 'otto_panes_' },
+    '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { ...splitLayoutPure, LS_PANES: 'otto_panes_' },
     '../storage': { lsGet: () => null, lsSet() {}, lsRemove() {} }, '../loadError': { loadErrorText },
     '../desktop': { isEmbedded: false }, './runtimeAttention.svelte': { runtimeFlagged: () => 0 }, './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets,
     '../lazy-component.svelte': { whenIdle: () => () => {} },
