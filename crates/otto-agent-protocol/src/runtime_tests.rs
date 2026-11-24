@@ -1162,3 +1162,67 @@ async fn a_resume_re_arm_cancel_or_close_ends_the_earlier_timer() {
     rt.close(&sid).await.unwrap();
     assert!(timers(0).await, "a close ends the timer");
 }
+
+/// Review R3-001: startup's re-arm reads the stored time under the timers'
+/// lock, so a resume the person sets meanwhile (under that lock, as
+/// `set_resume_at` does) is not replaced by the stale one.
+#[tokio::test]
+async fn a_resume_set_while_startup_re_arms_stays_armed() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap().to_string();
+    let host = Arc::new(LibTestHost {
+        root: cwd.clone(),
+        events: Mutex::new(Vec::new()),
+        notify: tokio::sync::Notify::new(),
+    });
+    let drivers: Arc<dyn DriverFactory> =
+        Arc::new(|_| -> Option<Box<dyn StructuredDriver>> { None });
+    let rt = AgentRuntime::new(
+        AgentRuntimeRepo::new(test_pool().await),
+        Arc::clone(&host) as Arc<dyn RuntimeHost>,
+        drivers,
+        RuntimeConfig {
+            attachments_dir: dir.path().join("att"),
+            ..RuntimeConfig::default()
+        },
+    );
+    let sid: Id = "resume-timer-test".into();
+    rt.inner
+        .repo
+        .create(otto_state::NewRuntimeSession {
+            id: sid.clone(),
+            workspace_id: "w1".into(),
+            provider: RuntimeProvider::Codex,
+            title: "T".into(),
+            cwd,
+            model: None,
+            access_mode: RuntimeAccessMode::FullAccess,
+            created_by: "u1".into(),
+            parent_id: None,
+            meta: None,
+        })
+        .await
+        .unwrap();
+    let meta = |t: chrono::DateTime<Utc>| {
+        serde_json::Map::from_iter([(
+            otto_core::agent_runtime::RESUME_AT.to_string(),
+            t.to_rfc3339().into(),
+        )])
+    };
+    let stale = Utc::now() - chrono::Duration::minutes(1);
+    rt.update_thread_meta(&sid, meta(stale)).await.unwrap();
+    let mut timers = rt.inner.resume_timers.lock().await;
+    rt.arm_resumes(0);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let later = Utc::now() + chrono::Duration::hours(2);
+    rt.update_thread_meta(&sid, meta(later)).await.unwrap();
+    let person = tokio::spawn(tokio::time::sleep(Duration::from_secs(7200)));
+    timers.insert(sid.clone(), person.abort_handle());
+    drop(timers);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let armed = rt.inner.resume_timers.lock().await;
+    assert!(
+        armed.get(&sid).is_some_and(|t| !t.is_finished()),
+        "the later resume stays armed"
+    );
+}

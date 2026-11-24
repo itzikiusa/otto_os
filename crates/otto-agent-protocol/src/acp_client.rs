@@ -79,6 +79,23 @@ fn tail_cap(s: &mut String) {
     }
 }
 
+/// An env key whose name says it holds a secret: the prompt shows "(hidden)".
+fn secret_named(key: &str) -> bool {
+    let k = key.to_ascii_uppercase();
+    [
+        "TOKEN",
+        "KEY",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "AUTH",
+        "CREDENTIAL",
+        "COOKIE",
+    ]
+    .iter()
+    .any(|w| k.contains(w))
+}
+
 fn error_line(id: &Value, code: i64, message: &str) -> String {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}}).to_string()
 }
@@ -226,22 +243,27 @@ impl AcpDriver {
                     ),
                     [] => (program, args),
                 };
-                let (extra, ignored): (Vec<(String, String)>, Vec<_>) = params
+                // The prompt shows each applied key with its value (a
+                // secret-named one as "(hidden)"); what it could not show
+                // plainly is dropped and named (the command still runs).
+                let (mut extra, mut ignored) = (Vec::new(), Vec::<String>::new());
+                for e in params
                     .get("env")
                     .and_then(Value::as_array)
                     .into_iter()
                     .flatten()
-                    .filter_map(|e| {
-                        Some((
-                            e.get("name")?.as_str()?.to_string(),
-                            e.get("value")?.as_str()?.to_string(),
-                        ))
-                    })
-                    .partition(|(k, _)| !self.env_key_refused(k));
-                // The prompt shows env names only (values may be secrets), so
-                // a key that runs code or overrides Otto's own env is dropped
-                // (the command still runs, with Otto's value where it has one).
-                let ignored: Vec<String> = ignored.into_iter().map(|(k, _)| k).collect();
+                {
+                    let (Some(k), Some(v)) = (
+                        e.get("name").and_then(Value::as_str),
+                        e.get("value").and_then(Value::as_str),
+                    ) else {
+                        continue;
+                    };
+                    match self.env_refusal(k, v) {
+                        Some(why) => ignored.push(why),
+                        None => extra.push((k.to_string(), v.to_string())),
+                    }
+                }
                 if !ignored.is_empty() {
                     tracing::debug!(keys = ?ignored, "acp terminal/create: env ignored");
                 }
@@ -265,9 +287,14 @@ impl AcpDriver {
                         ClientOpRepr::Create { cwd, .. } => {
                             let mut d = format!("{}\nin {cwd}", preview(&line));
                             if !extra.is_empty() {
-                                let names: Vec<&str> =
-                                    extra.iter().map(|(k, _)| k.as_str()).collect();
-                                d.push_str(&format!("\nenv: {}", names.join(", ")));
+                                let shown: Vec<String> = extra
+                                    .iter()
+                                    .map(|(k, v)| match secret_named(k) {
+                                        true => format!("{k}=(hidden)"),
+                                        false => format!("{k}={v}"),
+                                    })
+                                    .collect();
+                                d.push_str(&format!("\nenv: {}", shown.join(", ")));
                             }
                             if !ignored.is_empty() {
                                 d.push_str(&format!("\nenv ignored: {}", ignored.join(", ")));
@@ -301,11 +328,18 @@ impl AcpDriver {
         self.call(step, ClientWait::Plain { rpc_id }, op);
     }
 
-    /// Review R1-003: an env key a served command may not take — it runs
-    /// code the approval cannot show (loaders, shell rc, interpreter hooks,
-    /// proxies) or overrides a key Otto set for the agent.
-    fn env_key_refused(&self, key: &str) -> bool {
-        const KEYS: [&str; 15] = [
+    /// Review R1-003: why a served command may not take this env entry
+    /// (`None` = it applies, shown with its value): a key that is not a plain
+    /// name, one that makes an innocent command run other code (loaders, shell
+    /// rc / xtrace hooks, interpreter hooks, proxies), one Otto set itself, or
+    /// a value the prompt cannot show in full.
+    fn env_refusal(&self, key: &str, value: &str) -> Option<String> {
+        let plain = key.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !plain {
+            return Some("a key that is not a plain name".into());
+        }
+        const KEYS: [&str; 20] = [
             "PATH",
             "BASH_ENV",
             "ENV",
@@ -321,13 +355,32 @@ impl AcpDriver {
             "HTTP_PROXY",
             "HTTPS_PROXY",
             "ALL_PROXY",
+            "SHELLOPTS",
+            "BASHOPTS",
+            "PS4",
+            "PROMPT_COMMAND",
+            "FPATH",
         ];
         let k = key.to_ascii_uppercase();
-        KEYS.contains(&k.as_str())
+        if KEYS.contains(&k.as_str())
             || ["DYLD_", "LD_", "OTTO_", "GIT_CONFIG"]
                 .iter()
                 .any(|p| k.starts_with(p))
-            || self.state.child_env.iter().any(|(own, _)| own == key)
+        {
+            return Some(format!("{key} (not allowed)"));
+        }
+        if self
+            .state
+            .child_env
+            .iter()
+            .any(|(own, _)| own.eq_ignore_ascii_case(key))
+        {
+            return Some(format!("{key} (set by Otto)"));
+        }
+        if value.chars().count() > 512 || value.chars().any(char::is_control) {
+            return Some(format!("{key} (value multi-line or over 512 chars)"));
+        }
+        None
     }
 
     fn call(&mut self, step: &mut DriverStep, wait: ClientWait, op: ClientOp) {

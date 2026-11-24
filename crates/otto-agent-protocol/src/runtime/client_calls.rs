@@ -32,8 +32,8 @@ struct Terminal {
     /// The command's process group (it leads its own): a kill reaches
     /// everything it started, also after the shell itself exited.
     pgid: Option<i32>,
-    /// The group was empty when the command exited: its id may be reused
-    /// by an unrelated group, so it is never signalled again.
+    /// The group was empty when the command exited, or was killed: its id
+    /// may be reused by an unrelated group, so it is never signalled again.
     gone: std::sync::atomic::AtomicBool,
 }
 
@@ -141,17 +141,28 @@ async fn old_text(real: &Path) -> Option<String> {
 }
 
 /// A regular file within the read cap (reading a FIFO blocks for good).
+/// Checked on the opened file and read through a cap: a swap after a check
+/// can't block it or read past the cap (review R3-010).
 async fn read_capped(real: &Path, path: &str) -> Result<String, String> {
-    let m = tokio::fs::metadata(real).await.map_err(|e| e.to_string())?;
-    if !m.is_file() {
+    let err = |e: std::io::Error| format!("{path}: {e}");
+    let f = tokio::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(real)
+        .await
+        .map_err(err)?;
+    if !f.metadata().await.map_err(err)?.is_file() {
         return Err(format!("{path} is not a regular file"));
     }
-    if m.len() > MAX_FILE_BYTES {
+    let mut s = String::new();
+    f.take(MAX_FILE_BYTES + 1)
+        .read_to_string(&mut s)
+        .await
+        .map_err(err)?;
+    if s.len() as u64 > MAX_FILE_BYTES {
         return Err(format!("{path} is larger than {} MB", MAX_FILE_BYTES >> 20));
     }
-    tokio::fs::read_to_string(real)
-        .await
-        .map_err(|e| format!("{path}: {e}"))
+    Ok(s)
 }
 
 async fn run(
@@ -376,11 +387,10 @@ fn kill(t: &Terminal) {
         unsafe {
             libc::killpg(pgid, libc::SIGKILL);
         }
-        // The shell is reaped and SIGKILL ended the rest of the group: its id
-        // is free for reuse, so it is never signalled again.
-        if t.exit.borrow().is_some() {
-            t.gone.store(true, std::sync::atomic::Ordering::Release);
-        }
+        // SIGKILL ended every process in the group and none can join it
+        // again: once the shell is reaped its id is free for reuse, so it is
+        // never signalled again.
+        t.gone.store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -422,6 +432,7 @@ mod tests {
         let r = tokio::time::timeout(quick, read_capped(&fifo, "pipe")).await;
         assert!(r.expect("the read blocked on a FIFO").is_err());
         assert!(read_capped(&root.path().join("."), ".").await.is_err());
+        assert!(read_capped(&big, "big.log").await.is_err(), "over the cap");
         assert_eq!(read_capped(&small, "a.txt").await.as_deref(), Ok("hi"));
     }
 
@@ -444,9 +455,10 @@ mod tests {
             !group_gone(Some(left)),
             "its background child is still in it"
         );
-        // Review R2-006: a kill after the shell exited ends the group and
-        // marks it gone, so a later release never signals its reused id.
-        let (_tx, exit) = watch::channel(Some((Some(0), None)));
+        // Review R2-006 / R3-002: a kill ends the group and marks it gone,
+        // also while the reaped shell's exit is not published yet (the pipe
+        // drain), so a later release never signals its reused id.
+        let (_tx, exit) = watch::channel(None);
         let t = Terminal {
             output: Mutex::new((String::new(), false)),
             exit,
