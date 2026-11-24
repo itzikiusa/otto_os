@@ -18,3 +18,10 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv;
 }
+
+/** Every Help guide's frontmatter + "Keyboard shortcuts" table, by path
+ *  (vite.config.ts `helpGuideIndex`; modules/help/sectionsIndex.ts). */
+declare module 'virtual:help-guide-index' {
+  const index: Record<string, string>;
+  export default index;
+}

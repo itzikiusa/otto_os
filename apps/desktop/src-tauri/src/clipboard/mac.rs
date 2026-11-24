@@ -251,6 +251,7 @@ mod tests {
 
     #[test]
     fn a_private_pasteboard_is_readable_and_text_round_trips() {
+        let _appkit = crate::appkit_guard::appkit_test_lock();
         let pb = private();
         assert_eq!(access(&pb), Access::Allowed);
         assert!(write(&pb, &entry(Kind::Text, "hello clipboard"), None));
@@ -262,6 +263,7 @@ mod tests {
 
     #[test]
     fn a_concealed_copy_is_not_read_at_all() {
+        let _appkit = crate::appkit_guard::appkit_test_lock();
         let pb = private();
         pb.clearContents();
         pb.setString_forType(&ns("hunter2"), &ns(T_STRING));
@@ -273,6 +275,7 @@ mod tests {
 
     #[test]
     fn files_round_trip_as_paths_and_oversized_text_is_skipped() {
+        let _appkit = crate::appkit_guard::appkit_test_lock();
         let pb = private();
         assert!(write(
             &pb,
@@ -291,6 +294,7 @@ mod tests {
 
     #[test]
     fn an_image_is_read_with_its_pixel_size() {
+        let _appkit = crate::appkit_guard::appkit_test_lock();
         const PNG: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/icons/32x32.png"));
         let pb = private();
         assert!(write(&pb, &entry(Kind::Image, ""), Some(PNG)));
@@ -301,6 +305,7 @@ mod tests {
 
     #[test]
     fn the_frontmost_app_has_a_name() {
+        let _appkit = crate::appkit_guard::appkit_test_lock();
         // Whatever app is in front while the tests run.
         assert!(frontmost().is_some_and(|s| !s.name.is_empty()));
     }

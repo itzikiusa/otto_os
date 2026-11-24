@@ -184,10 +184,11 @@ async function scriptMs(cdp: CDPSession): Promise<number> {
 const sumR = (xs: number[]): number => Math.round(xs.reduce((a, b) => a + b, 0));
 
 /** (a): open `id` from the warm app; first content, interactive, long tasks. */
-async function openThread(page: Page, id: string, last: string): Promise<Record<string, number>> {
+async function openThread(page: Page, id: string, last: string): Promise<Record<string, unknown>> {
   await page.evaluate((h) => (location.hash = h), '#/threads/' + ids.small);
   await expect(page.getByTestId('runtime-thread-' + ids.small)).toBeVisible();
   await watchLt(page);
+  await page.evaluate(() => ((window as unknown as { __ottoPerfCounts: Record<string, number> }).__ottoPerfCounts = {}));
   const t0 = Date.now();
   await page.evaluate((h) => (location.hash = h), '#/threads/' + id);
   const conv = page.getByTestId('runtime-thread-' + id);
@@ -206,7 +207,8 @@ async function openThread(page: Page, id: string, last: string): Promise<Record<
   });
   const interactive = Date.now() - t0;
   const l = await lts(page);
-  return { firstContentMs: firstContent, interactiveMs: interactive, longTasks: l.length, longTaskMs: sumR(l), domNodes: await page.evaluate(() => document.getElementsByTagName('*').length) };
+  const counts = await page.evaluate(() => (window as unknown as { __ottoPerfCounts?: Record<string, number> }).__ottoPerfCounts ?? {});
+  return { firstContentMs: firstContent, interactiveMs: interactive, longTasks: l.length, longTaskMs: sumR(l), domNodes: await page.evaluate(() => document.getElementsByTagName('*').length), counts };
 }
 
 /** (d): keystroke→paint while typing plain text, a slash command, a mention. */
