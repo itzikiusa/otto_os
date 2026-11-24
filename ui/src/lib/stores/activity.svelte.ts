@@ -70,6 +70,8 @@ class ActivityStore {
   private removedRevision = new Map<string, number>();
   private summaryRead = 0;
   private summaryPending = false;
+  /** The workspace the roll-up was read for (events keep it current after). */
+  private summaryFor: string | null = null;
   private summaryDeltas = new Map<string, Partial<SessionActivitySummary>>();
   private watched = new Map<string, { workspaceId: string; refs: number }>();
   private watchedArtifacts = new Map<string, number>();
@@ -166,8 +168,14 @@ class ActivityStore {
     }
   }
 
+  /** Read `workspaceId`'s roll-up unless it is the one held. */
+  ensureSummary(workspaceId: string): void {
+    if (this.summaryFor !== workspaceId) void this.loadSummary(workspaceId);
+  }
+
   /** Fetch the workspace-wide per-session roll-up (sidebar chips). */
   async loadSummary(workspaceId: string): Promise<void> {
+    this.summaryFor = workspaceId;
     const epoch = this.epoch;
     const token = getToken();
     const revision = ++this.summaryRead;
@@ -186,7 +194,7 @@ class ActivityStore {
       }
       this.summaryBySession = next;
     } catch {
-      /* best-effort */
+      if (revision === this.summaryRead) this.summaryFor = null; // the next arrival retries
     } finally {
       if (revision === this.summaryRead) {
         this.summaryPending = false;
@@ -326,6 +334,7 @@ class ActivityStore {
    *  identity's token. Panels refetch through `load` / `loadSummary`. */
   reset(): void {
     this.epoch++;
+    this.summaryFor = null;
     this.recoveryGeneration++;
     this.summaryRead++;
     this.summaryPending = false;

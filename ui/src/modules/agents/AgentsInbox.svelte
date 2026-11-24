@@ -1,3 +1,8 @@
+<script module lang="ts">
+  /** The thread list and inbox feeds were started (once per app load). */
+  let feedsOn = false;
+</script>
+
 <script lang="ts">
   // The Agents inbox (patterns.md §10 — the Threads concept, where the owner
   // works): terminal sessions AND structured threads in ONE list, needs you
@@ -79,7 +84,6 @@
   let meterReady = $state(false);
   onMount(() => {
     let gone = false;
-    const offs: (() => void)[] = [];
     const cancel = whenIdle(() => {
       meterReady = true;
       void Promise.all([
@@ -91,14 +95,19 @@
         rt = m.runtimeThreads;
         nav = n;
         live = i.inboxLive;
-        offs.push(m.runtimeThreads.mount(), i.inboxLive.mount());
+        // Read once per app load: the first visit lists the threads and starts
+        // their (and the MCP asks') live feeds, which then stay on — events and
+        // a reconnect's resync keep them current, so a revisit reads nothing.
+        if (feedsOn) return;
+        feedsOn = true;
+        m.runtimeThreads.mount();
+        i.inboxLive.mount();
         void m.runtimeThreads.loadAll().catch(() => {});
       });
     });
     return () => {
       gone = true;
       cancel();
-      for (const off of offs) off();
     };
   });
 
