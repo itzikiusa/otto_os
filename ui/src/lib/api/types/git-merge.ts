@@ -272,13 +272,21 @@ export interface DraftPrResp {
   session_id?: Id;
 }
 
+export interface DraftCommitMessageReq {
+  /** Answer as NDJSON {@link DraftCommitStreamLine}s while the model writes. */
+  stream?: boolean;
+}
+
 export interface DraftCommitMessageResp {
   message: string;
   /** True when drafted from the staged diff; false when it fell back to the working diff. */
   from_staged: boolean;
-  /** The `commit-draft` session that drafted this (same path as `DraftPrResp.session_id`). */
+  /** Always null since 0.5.1: drafts run headless, not as a session. */
   session_id?: Id | null;
 }
+
+/** One line of a streamed commit draft: text as it is written, then the draft or why it failed. */
+export type DraftCommitStreamLine = { delta: string } | { done: DraftCommitMessageResp } | { error: string };
 
 export interface UpdatePrReq {
   title?: string | null;

@@ -509,15 +509,17 @@ test('WipPanel.followDraft stores draftTick so unmount can clear it mid-draft', 
   const req = deferred<{ message: string; from_staged: boolean }>();
   const cleared: number[] = [];
   let nextId = 200;
-  const s = componentFunctions(git('WipPanel.svelte'), ['followDraft', 'applyDraft'], {
+  const s = componentFunctions(git('WipPanel.svelte'), ['followDraft', 'applyDraft', 'split'], {
     alive: true,
     repoId: 'r1',
     subject: '',
     body: '',
     drafting: false,
-    draftSessionId: null,
     draftElapsed: 0,
-    draftStartedAt: null,
+    draftPreview: '',
+    draftError: null,
+    previewShown: false,
+    streamed: null,
     draftedAt: null,
     draftTick: null,
     quietDraft: false,

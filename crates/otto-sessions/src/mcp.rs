@@ -323,45 +323,7 @@ fn reconcile_json_launcher(
     let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
 
     // Desired managed entries, in file order: browser, otto tools, user servers.
-    let mut desired: Vec<(String, Value)> = Vec::new();
-    if cfg.browser {
-        let (command, args) = browser_command();
-        desired.push((
-            SERVER_KEY.to_string(),
-            json!({ "command": command, "args": args }),
-        ));
-    }
-    if let Some(t) = &cfg.otto_tools {
-        // Identity-neutral: command/args and env NAMES, never a session value.
-        let mut entry = json!({ "command": t.command, "args": t.args });
-        if forward_env {
-            let env: Map<String, Value> = OTTO_TOOLS_ENV_NAMES
-                .iter()
-                .map(|k| (k.to_string(), Value::String(format!("${{{k}:-}}"))))
-                .collect();
-            entry["env"] = Value::Object(env);
-        }
-        desired.push((OTTO_TOOLS_KEY.to_string(), entry));
-    }
-    for s in cfg.user_servers.iter().flatten() {
-        // Reserved for Otto's own entries — a user server named "otto-browser"
-        // or "otto" can't clobber them.
-        if s.name == SERVER_KEY || s.name == OTTO_TOOLS_KEY {
-            continue;
-        }
-        // The server's env (Keychain secrets included) never lands in the
-        // work tree: it goes to a private env file the entry execs through.
-        let Some((command, args)) = launch_via_env_file(workspace_root, s) else {
-            continue;
-        };
-        let mut entry = Map::new();
-        entry.insert("command".into(), Value::String(command));
-        entry.insert(
-            "args".into(),
-            Value::Array(args.into_iter().map(Value::String).collect()),
-        );
-        desired.push((s.name.clone(), Value::Object(entry)));
-    }
+    let desired = desired_entries(workspace_root, cfg, forward_env);
     let desired_names: Vec<String> = desired.iter().map(|(n, _)| n.clone()).collect();
 
     // Nothing to manage and nothing on disk: don't create a file just to hold
@@ -447,6 +409,70 @@ fn reconcile_json_launcher(
     write_doc(path, &doc)?;
     exclude_launcher_artifacts(workspace_root);
     Ok(desired_names)
+}
+
+/// Everything `cfg` asks Otto to manage, as `(name, mcpServers entry)` in
+/// file order: browser, otto tools, user servers.
+fn desired_entries(
+    workspace_root: &str,
+    cfg: &ManagedMcpConfig,
+    forward_env: bool,
+) -> Vec<(String, Value)> {
+    let mut desired: Vec<(String, Value)> = Vec::new();
+    if cfg.browser {
+        let (command, args) = browser_command();
+        desired.push((
+            SERVER_KEY.to_string(),
+            json!({ "command": command, "args": args }),
+        ));
+    }
+    if let Some(t) = &cfg.otto_tools {
+        // Identity-neutral: command/args and env NAMES, never a session value.
+        let mut entry = json!({ "command": t.command, "args": t.args });
+        if forward_env {
+            let env: Map<String, Value> = OTTO_TOOLS_ENV_NAMES
+                .iter()
+                .map(|k| (k.to_string(), Value::String(format!("${{{k}:-}}"))))
+                .collect();
+            entry["env"] = Value::Object(env);
+        }
+        desired.push((OTTO_TOOLS_KEY.to_string(), entry));
+    }
+    for s in cfg.user_servers.iter().flatten() {
+        // Reserved for Otto's own entries — a user server named "otto-browser"
+        // or "otto" can't clobber them.
+        if s.name == SERVER_KEY || s.name == OTTO_TOOLS_KEY {
+            continue;
+        }
+        // The server's env (Keychain secrets included) never lands in the
+        // work tree: it goes to a private env file the entry execs through.
+        let Some((command, args)) = launch_via_env_file(workspace_root, s) else {
+            continue;
+        };
+        let mut entry = Map::new();
+        entry.insert("command".into(), Value::String(command));
+        entry.insert(
+            "args".into(),
+            Value::Array(args.into_iter().map(Value::String).collect()),
+        );
+        desired.push((s.name.clone(), Value::Object(entry)));
+    }
+    desired
+}
+
+/// The managed set as one `claude --mcp-config` document, built in memory:
+/// nothing is written under `workspace_root` (a user server's env goes to its
+/// private file in `<tmp>/otto-mcp`, as for `.mcp.json`). Returns the
+/// document (`None` when nothing is managed) and the names in it.
+pub fn claude_mcp_config(
+    workspace_root: &str,
+    cfg: &ManagedMcpConfig,
+) -> (Option<String>, Vec<String>) {
+    let desired = desired_entries(workspace_root, cfg, true);
+    let names = desired.iter().map(|(n, _)| n.clone()).collect();
+    let servers: Map<String, Value> = desired.into_iter().collect();
+    let doc = (!servers.is_empty()).then(|| json!({ "mcpServers": servers }).to_string());
+    (doc, names)
 }
 
 /// The command/args a shared launcher file (JSON or grok TOML) carries for a
@@ -1245,38 +1271,6 @@ fn write_grok_doc(dir: &Path, path: &Path, doc: &toml_edit::DocumentMut) -> Resu
 /// UTF-16 save, an I/O error) is propagated exactly like a parse error, so the
 /// reconcile is skipped and logged instead of atomically writing a fresh
 /// document over the user's hand-added servers.
-/// Only the Otto-MANAGED entries of the workspace `.mcp.json` (the
-/// `ottoManagedServers` marker), as a standalone `{"mcpServers": …}` document
-/// for `claude --mcp-config`: a structured (SDK-mode) Claude session gets
-/// exactly what Otto manages for this cwd, deterministically, without
-/// force-loading servers the user hand-added (those keep Claude's own
-/// project-approval flow). `None` when nothing is managed.
-pub fn managed_servers_document(workspace_root: &str) -> Result<Option<String>, String> {
-    let path = mcp_path(workspace_root);
-    let doc = {
-        let lock = cwd_lock(workspace_root);
-        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        read_doc(&path)?
-    };
-    let managed: Vec<&str> = doc
-        .get(MANAGED_KEY)
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    let Some(servers) = doc.get("mcpServers").and_then(Value::as_object) else {
-        return Ok(None);
-    };
-    let picked: Map<String, Value> = servers
-        .iter()
-        .filter(|(name, _)| managed.contains(&name.as_str()))
-        .map(|(n, v)| (n.clone(), v.clone()))
-        .collect();
-    if picked.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(json!({ "mcpServers": picked }).to_string()))
-}
-
 fn read_doc(path: &Path) -> Result<Map<String, Value>, String> {
     match read_launcher(path)? {
         Some(s) => serde_json::from_str(&s).map_err(|e| format!("parse {}: {e}", path.display())),

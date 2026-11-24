@@ -129,5 +129,7 @@ fn every_integration_test_file_is_linked() {
     );
 }
 
+#[path = "draft_headless.rs"]
+mod draft_headless;
 #[path = "goal_graph_routes.rs"]
 mod goal_graph_routes;

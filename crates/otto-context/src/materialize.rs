@@ -1239,7 +1239,12 @@ fn plan_claude_hooks(bundle: &Path) -> Option<HooksPlan> {
     for (event, with_matcher) in EVENTS {
         hooks.insert(event.to_string(), json!([otto_hook_group(*with_matcher)]));
     }
-    let doc = json!({ "hooks": Value::Object(hooks) });
+    // Otto's own project `.mcp.json` entries, which builds before 0.5.1
+    // wrote into repositories (Claude now gets them from `--mcp-config`):
+    // approved here, so a leftover never stops a non-bypass TUI on "New MCP
+    // server found in this project". Nothing of the person's is approved.
+    let doc =
+        json!({ "hooks": Value::Object(hooks), "enabledMcpjsonServers": ["otto", "otto-browser"] });
 
     let merged = serde_json::to_string_pretty(&doc).ok()?;
     Some(HooksPlan { path, merged })
@@ -1527,6 +1532,14 @@ mod tests {
         assert!(!ctx.contains("skill body A"));
         assert!(bundle.join(".claude/skills/triage/SKILL.md").is_file());
         assert!(bundle.join("settings.json").is_file());
+        // Otto's own leftover `.mcp.json` entries are approved, nothing else.
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(bundle.join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            settings["enabledMcpjsonServers"],
+            json!(["otto", "otto-browser"])
+        );
 
         // Launch flags: --add-dir + --append-system-prompt-file + --settings.
         assert!(inj
@@ -1789,7 +1802,10 @@ mod tests {
             "planted env survived: {text}"
         );
         let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(doc.as_object().unwrap().len(), 1, "only `hooks`: {doc}");
+        // Only Otto's own keys: its hooks and the approval of its own entries.
+        let mut keys: Vec<&String> = doc.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["enabledMcpjsonServers", "hooks"], "{doc}");
         assert!(doc["hooks"].get("PreToolUse").is_none());
         for event in ["PostToolUse", "UserPromptSubmit", "SessionStart", "Stop"] {
             let groups = doc["hooks"][event].as_array().unwrap();

@@ -5962,6 +5962,7 @@ async fn revoke_session_credentials(
 ) -> Result<()> {
     let _ = std::fs::remove_file(codex_creds_path(session_id));
     let _ = std::fs::remove_file(pi_mcp_extension_path(session_id));
+    let _ = std::fs::remove_file(runtime_spawn::claude_mcp_config_path(session_id));
     remove_codex_server_env_files(session_id).await;
     if let Some(auth) = auth {
         auth.revoke_session_tokens(owner, session_id).await?;
