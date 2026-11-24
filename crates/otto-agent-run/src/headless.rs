@@ -106,6 +106,13 @@ pub async fn text_turn(
     else {
         return Err(Error::Internal("the Claude CLI has no stdio".into()));
     };
+    // Drained alongside stdout: a CLI blocked on a full stderr pipe would
+    // never finish its stdout.
+    let stderr = tokio::spawn(async move {
+        let mut err = Vec::new();
+        let _ = stderr.read_to_end(&mut err).await;
+        String::from_utf8_lossy(&err).into_owned()
+    });
     let turn = async {
         let user = json!({
             "type": "user",
@@ -117,9 +124,12 @@ pub async fn text_turn(
         let _ = stdin.write_all(format!("{user}\n").as_bytes()).await;
         let _ = stdin.flush().await;
         let mut streamed = String::new();
-        let mut lines = BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let Ok(msg) = serde_json::from_str::<Value>(&line) else {
+        // Bytes, not `lines()`: one non-UTF-8 byte must not end the read.
+        let (mut out, mut buf) = (BufReader::new(stdout), Vec::new());
+        while out.read_until(b'\n', &mut buf).await.is_ok_and(|n| n > 0) {
+            let msg = serde_json::from_str::<Value>(&String::from_utf8_lossy(&buf));
+            buf.clear();
+            let Ok(msg) = msg else {
                 continue;
             };
             match msg.get("type").and_then(Value::as_str) {
@@ -151,8 +161,7 @@ pub async fn text_turn(
                 _ => {}
             }
         }
-        let mut err = String::new();
-        let _ = stderr.read_to_string(&mut err).await;
+        let err = stderr.await.unwrap_or_default();
         let why = err
             .lines()
             .rev()
@@ -254,6 +263,24 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"fix: a\n\n- b"}'"#,
             .await
             .unwrap_err();
         assert!(e.to_string().contains("unknown option --tools="), "{e}");
+    }
+
+    /// R1-038: a CLI that writes more than a pipe holds (64 KiB) to stderr
+    /// before its reply no longer deadlocks the turn, and a non-UTF-8 byte on
+    /// stdout no longer drops the reply.
+    #[tokio::test]
+    async fn a_loud_stderr_or_a_non_utf8_line_still_returns_the_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = fake(
+            dir.path(),
+            r#"head -c 200000 /dev/zero | tr '\0' x >&2
+printf '\377\n'
+printf '%s\n' '{"type":"result","is_error":false,"result":"fix: a"}'"#,
+        );
+        let reply = text_turn(&p, &[], &[], "x", Duration::from_secs(5), |_| {})
+            .await
+            .unwrap();
+        assert_eq!(reply, "fix: a");
     }
 
     /// R1-025: `~` in the provider's env is expanded as a session spawn does.
