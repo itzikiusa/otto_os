@@ -141,8 +141,9 @@
     const repo = s.cwd ? git.repos.find((r) => s.cwd === r.path || s.cwd!.startsWith(r.path.replace(/\/+$/, '') + '/')) : null;
     return repo ? (git.statusById[repo.id]?.branch ?? null) : null;
   };
+  // The branch / workspace lookups run only while a query asks (not per row on every change).
   const matches = (s: Session): boolean =>
-    (!ws.needsYouFilter || classOf(s) === 'needs') && matchesQuery(s, query, [branchOf(s), wsName(s.workspace_id)]);
+    (!ws.needsYouFilter || classOf(s) === 'needs') && (!query.trim() || matchesQuery(s, query, [branchOf(s), wsName(s.workspace_id)]));
 
   const inbox = $derived(agentsInbox([...ptyRows, ...threadRows].filter(matches), classOf));
   const historyRows = $derived(
