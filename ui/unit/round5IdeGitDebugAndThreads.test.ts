@@ -1,3 +1,4 @@
+import * as langForPath from '../src/lib/components/langForPath.ts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
@@ -56,6 +57,7 @@ const { computeIdeDiffHunks, parseSavedLines } = loadSource(
 const { computeMinimalTextUpdate } = loadSource(
   new URL('../src/lib/components/cm-editor-helpers.ts', import.meta.url),
   {
+    './langForPath.ts': langForPath,
     '@codemirror/autocomplete': cmAutocomplete,
     '@codemirror/commands': cmCommands,
     '@codemirror/language': cmLanguage,
@@ -75,6 +77,7 @@ const { computeMinimalTextUpdate } = loadSource(
 const { detectTextEol, normalizeEditorLf, serializeTabDiskContent } = loadSource(
   new URL('../src/modules/ide/store/ideTypes.ts', import.meta.url),
   {
+    '../../../lib/components/langForPath': langForPath,
     '../../../lib/api/client': { getToken: () => 'tok', laneFetch: async () => ({ ok: false, body: null }) },
   },
 );

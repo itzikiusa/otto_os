@@ -183,6 +183,8 @@ const ideHighlightStyle = HighlightStyle.define([
   { tag: tags.strong, fontWeight: '600' },
   { tag: tags.emphasis, fontStyle: 'italic' },
   { tag: tags.link, color: 'var(--accent-text)', textDecoration: 'underline' },
+  { tag: tags.inserted, color: 'var(--success)' },
+  { tag: tags.deleted, color: 'var(--danger)' },
 ]);
 
 function makeEditorSurfaceTheme(

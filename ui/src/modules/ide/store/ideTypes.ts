@@ -2,6 +2,7 @@
 // Re-exported from `../ideStore.svelte.ts` so all IDE components import from one place.
 
 import { getToken, laneFetch } from '../../../lib/api/client';
+import { LANG_KEYS, langKeyFor, sniffLangKey } from '../../../lib/components/langForPath';
 import type {
   IdeBridgedServiceSummary,
   IdeDebugLaunch,
@@ -448,6 +449,15 @@ export function detectIdeLanguage(p: string): string {
     sh: 'shell', bash: 'shell', zsh: 'shell', html: 'html', css: 'css', scss: 'css', svelte: 'html',
   };
   return map[ext] ?? 'txt';
+}
+
+/** The language of a file the IDE read: the server's, else the extension's, else one sniffed
+ *  from its first lines, so a config file with no known name still gets colours. */
+export function ideTabLanguage(serverLanguage: string | null | undefined, path: string, content: string): string {
+  if (serverLanguage && serverLanguage !== 'plaintext' && serverLanguage !== 'text') return serverLanguage;
+  // A name or extension the editor knows decides; the content is read only for the rest.
+  if (LANG_KEYS.has(langKeyFor(path))) return serverLanguage || detectIdeLanguage(path);
+  return sniffLangKey(content) || serverLanguage || detectIdeLanguage(path);
 }
 
 /** `selectedConfigId` of the test / main last launched from the gutter (`gutterTarget`):

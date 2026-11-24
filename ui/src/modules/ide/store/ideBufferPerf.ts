@@ -16,7 +16,7 @@ import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
 import { findContainingRoot, isPathExternal } from '../shell/ideProjectHelpers';
 import {
-  detectIdeLanguage, detectTextEol, diskEolsOf, ideBasename, isReadOnlySdkOrCachePath,
+  detectIdeLanguage, detectTextEol, diskEolsOf, ideBasename, ideTabLanguage, isReadOnlySdkOrCachePath,
   normalizeEditorLf, serializeTabDiskContent, sha256HexOfText,
   type IdeDiagnostic, type IdeEditorHandle, type IdeEditorSelectionRange, type IdeFileReadResp,
   type IdeGutterItem, type IdeOpenTab, type IdeProjectRoot, type IdeSymbolNode, type IdeTargetSpec,
@@ -25,6 +25,16 @@ import {
 /** A Makefile (makefilePath.ts): its symbols and ▶ targets are read from the buffer here,
  *  with no request. Inlined: the store's unit harness lists every import it allows. */
 const MAKEFILE_PATH = /(?:^|\/)(?:gnu)?makefile(?:\.[\w.-]+)?$|\.(?:mk|make|mak)$/i;
+/** Config files whose outline is read from the buffer too (configModel.ts), by name or by
+ *  the language the tab was given (a sniffed "key = value" file). */
+function configOutlineKind(path: string, language: string | undefined): 'properties' | 'yaml' | 'toml' | 'conf' | null {
+  const base = path.slice(path.lastIndexOf('/') + 1).toLowerCase();
+  if (base.endsWith('.properties')) return 'properties';
+  if (/\.ya?ml$/.test(base) || base === 'yarn.lock' || language === 'yaml') return 'yaml';
+  if (/\.toml$|^(?:cargo|poetry|uv|pdm)\.lock$|^pipfile$/.test(base) || language === 'toml') return 'toml';
+  if (/\.(?:ini|cfg|cnf|conf|env)$|^\.(?:editorconfig|gitconfig|npmrc|env(?:\.[\w.-]+)?)$/.test(base) || language === 'conf' || language === 'ini') return 'conf';
+  return null;
+}
 
 const BUFFER_SYNC_DEBOUNCE_MS = 250;
 const AUTO_SAVE_IDLE_MS = 1000;
@@ -393,11 +403,25 @@ export class IdeBufferPerfController {
   }
   scheduleSymbols(host: IdeBufferHost, path: string, content?: string): Promise<void> {
     return this.runDebouncedJob(host, this.symbolJobs, path, true,
-      // A Makefile's targets and variables are read here, from the buffer (no request).
-      (sig) => MAKEFILE_PATH.test(path)
-        ? import('../../../lib/components/makefileModel').then((m) => ({ symbols: m.makefileSymbols(content ?? this.getBuffer(host, path)) }))
-        : api.bg.post<{ symbols: IdeSymbolNode[] }>('/ide/lsp/symbols', { target: host.targetPayload, path, content: content ?? this.getBuffer(host, path) }, sig),
-      (resp) => { host.symbolsByPath = { ...host.symbolsByPath, [path]: resp.symbols ?? [] }; });
+      // A Makefile's targets and variables, a config file's keys: read here, from the buffer.
+      (sig): Promise<{ symbols: IdeSymbolNode[]; problems?: IdeDiagnostic[] }> => {
+        const text = content ?? this.getBuffer(host, path);
+        const cfg = configOutlineKind(path, host.tabs.find((t) => t.path === path)?.language);
+        if (cfg) {
+          return import('../../../lib/components/configModel').then(async (m) => ({
+            symbols: m.configSymbols(cfg, text),
+            problems: cfg === 'yaml' ? await m.yamlProblems(path, text) : undefined,
+          }));
+        }
+        return MAKEFILE_PATH.test(path)
+          ? import('../../../lib/components/makefileModel').then((m) => ({ symbols: m.makefileSymbols(text) }))
+          : api.bg.post<{ symbols: IdeSymbolNode[] }>('/ide/lsp/symbols', { target: host.targetPayload, path, content: text }, sig);
+      },
+      (resp) => {
+        host.symbolsByPath = { ...host.symbolsByPath, [path]: resp.symbols ?? [] };
+        // A YAML file's parse errors replace its previous ones in Problems.
+        if (resp.problems) host.problems = [...host.problems.filter((d) => !(d.path === path && d.source === 'yaml')), ...resp.problems];
+      });
   }
 }
 
@@ -513,7 +537,7 @@ export async function performOpenFile(
         const normContent = normalizeEditorLf(res.content);
         existing.eol = eol; existing.diskEols = diskEolsOf(res.content);
         perf.markClean(existing, normContent, res.sha256);
-        existing.language = res.language || detectIdeLanguage(fullPath);
+        existing.language = ideTabLanguage(res.language, fullPath, normContent);
         existing.truncated = Boolean(res.truncated);
         existing.binary = Boolean(res.binary);
         existing.readOnly = Boolean(res.read_only) || Boolean(res.truncated) || sdkReadOnly;
@@ -562,7 +586,7 @@ export async function performOpenFile(
       } else {
         perf.markClean(tab, normContent, res.sha256);
       }
-      tab.language = res.language || detectIdeLanguage(fullPath);
+      tab.language = ideTabLanguage(res.language, fullPath, normContent);
       tab.truncated = Boolean(res.truncated);
       tab.binary = Boolean(res.binary);
       tab.readOnly = isReadOnly;

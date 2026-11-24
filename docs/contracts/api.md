@@ -6802,7 +6802,9 @@ nullable `parent_span_id`, safe static `name`, `component`, `kind`,
 `start_unix_nano` (integer or decimal string on ingest), `duration_ms`, `status`,
 `attributes`. Browser spans accept only known module names and the operations
 `ui.navigation`, `ui.chunk`, `ui.render`, `ui.long_task`, `ui.frame_delay`, `http.client`,
-`ui.request.queue`, `ui.response.decode`. A `ui.navigation` span may carry
+`ui.request.queue`, `ui.response.decode`, `ui.thread.open`, `ui.thread.send`, and `ui.highlight`
+(component `ide`: an IDE editor's time from its language applying to the screen being
+coloured). A `ui.navigation` span may carry
 `otto.device` = `desktop` | `phone` | `tablet` (the device class, nothing more). Browser client spans remain exactly
 `http.client`; arbitrary endpoint-derived browser names and raw route/URL
 attributes reject the entire batch atomically. Endpoint attribution remains in

@@ -28,6 +28,44 @@ func main() {
 
 export const README = '# Games Management\n\nIntro paragraph.\n\n## Setup\n\nRun make.\n';
 
+/** Config files (the config-language specs): a Java .properties like the owner's, a
+ *  multi-document YAML, a Cargo.toml, a Dockerfile, a .env and an unknown key = value file. */
+export const CONFIG_PLACEHOLDER = '$' + '{DB_HOST:localhost}';
+export const CONFIG_FILES: Record<string, string> = {
+  'application.properties': [
+    '# Games service: database and Kafka',
+    'spring.datasource.url=jdbc:mysql://' + CONFIG_PLACEHOLDER + ':3306/games?useSSL=false&serverTimezone=UTC',
+    'spring.datasource.username=games',
+    'spring.kafka.consumer.properties={"max.poll.records": 500, "enable.auto.commit": false, "topics": ["bets", "wins"]}',
+    'server.port : 8080',
+    'app.banner=Welcome to the games service, the one with the very long property values that run off the screen \\',
+    '    and continue on the next line',
+    '! legacy',
+  ].join('\n') + '\n',
+  'deploy.yaml': [
+    '# Deployment',
+    'apiVersion: apps/v1',
+    'kind: Deployment',
+    'metadata:',
+    '  name: games',
+    '  labels: &labels',
+    '    app: games',
+    'spec:',
+    '  replicas: 3',
+    '  selector:',
+    '    matchLabels: *labels',
+    '  script: |',
+    '    echo starting',
+    '---',
+    'apiVersion: v1',
+    'kind: Service',
+  ].join('\n') + '\n',
+  'Cargo.toml': '[package]\nname = "otto"\nversion = "0.5.0"\n# the edition\nedition = "2021"\n\n[dependencies]\nserde = { version = "1", features = ["derive"] }\ntokio = "1"\n',
+  'Dockerfile': '# build stage\nFROM golang:1.23 AS build\nENV CGO_ENABLED=0\nRUN go build -o /out/app ./cmd/...\nEXPOSE 8080\n',
+  'prod.env': '# local settings\nexport DB_URL=postgres://u@h/db\nAPI_KEY="abc123"\nRETRIES=3\n',
+  'service.overrides': '# per-host overrides\nhost = db.internal\nport = 5432\n[cache]\nttl = 30\n',
+};
+
 export interface WriteSeed {
   workspaceId: string;
   root: string;
