@@ -40,3 +40,31 @@ test('a failed summary read records why; Retry reads it again', async () => {
   assert.deepEqual(Object.keys(s.summaryError), []);
   assert.equal(s.fullMd[key], '# Insights summary');
 });
+
+test('toggling A → B → A reads A once, and says it is reading meanwhile', async () => {
+  let reads = 0;
+  let release!: (t: string) => void;
+  const s = store(() => { reads++; return new Promise<string>((r) => (release = r)); });
+  s.loadSummaries([report]);
+  s.loadSummaries([report]);
+  assert.equal(reads, 1);
+  const key = [...s.summaryReads.keys()][0];
+  assert.ok(key && s.summaryReads.has(key));
+  release('# A');
+  await flush();
+  assert.equal(s.summaryReads.has(key), false);
+  assert.equal(s.fullMd[key], '# A');
+});
+
+test('a read superseded by Retry cannot land last', async () => {
+  const pending: ((t: string) => void)[] = [];
+  const s = store(() => new Promise<string>((r) => pending.push(r)));
+  s.loadSummaries([report]);
+  s.retrySummary(report);
+  assert.equal(pending.length, 2);
+  pending[1]('# new');
+  await flush();
+  pending[0]('# old');
+  await flush();
+  assert.deepEqual(Object.values(s.fullMd), ['# new']);
+});

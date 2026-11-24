@@ -69,6 +69,8 @@
     markdown: string;
     /** The summary file could not be read: say so with Retry, not a blank preview. */
     summaryError?: string | null;
+    /** The summary read (Retry) is under way. */
+    summaryLoading?: boolean;
     onretrysummary?: () => void;
     kpis: Kpi[];
     /** Label of the report the deltas compare against ("Tue 22 Sep"), if any. */
@@ -80,7 +82,7 @@
     onexportmd: () => void;
     ondownloadhtml: () => void;
   }
-  let { report, parsed, markdown, summaryError = null, onretrysummary, kpis, compareLabel, ledger, mode, onmode, onopenwindow, onexportmd, ondownloadhtml }: Props =
+  let { report, parsed, markdown, summaryError = null, summaryLoading = false, onretrysummary, kpis, compareLabel, ledger, mode, onmode, onopenwindow, onexportmd, ondownloadhtml }: Props =
     $props();
 
   const hasHtml = $derived(!!report.html_path);
@@ -309,7 +311,7 @@
   {:else}
     <div class="r-scroll">
       {#if summaryError}
-        <LoadState what="this report’s summary" variant="compact" error={summaryError} empty onretry={onretrysummary} />
+        <LoadState what="this report’s summary" variant="compact" error={summaryError} loading={summaryLoading} empty onretry={onretrysummary} />
       {/if}
       {#if kpis.length > 0}
         <section class="r-section" aria-labelledby="kf-title">

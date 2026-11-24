@@ -1,3 +1,4 @@
+import { SvelteMap } from 'svelte/reactivity';
 import { insightsApi } from '../../lib/api/insights';
 import type { InsightKind, InsightReport, InsightRunPeriod, InsightsConfig } from '../../lib/api/types';
 import { confirmer } from '../../lib/confirm.svelte';
@@ -98,6 +99,9 @@ class InsightsStore {
   /** Why a report's summary file could not be read, by report key: the reader
    *  says so with Retry instead of showing a blank preview. */
   summaryError: Record<string, string> = $state({});
+  /** Summary reads in flight, by report key: one read per key at a time, a
+   *  read superseded (Retry, a new report) never lands, and Retry says it runs. */
+  readonly summaryReads = new SvelteMap<string, Promise<string>>();
   schedule = $state<InsightsConfig | null>(null);
 
   filter: InsightsFilter = $state('all');
@@ -205,11 +209,14 @@ class InsightsStore {
   loadSummaries(reports: InsightReport[]): void {
     for (const x of reports) {
       const k = periodKey(x);
-      if (this.fullMd[k] != null) continue;
+      if (this.fullMd[k] != null || this.summaryReads.has(k)) continue;
       const path = x.html_path ? siblingPath(x.html_path, 'summary') : null;
       const read = path ? insightsApi.readText(path) : insightsApi.reportStatus(k, true).then(({ report }) => report?.summary ?? '');
+      this.summaryReads.set(k, read);
+      const mine = (): boolean => this.summaryReads.get(k) === read && this.summaryReads.delete(k);
       void read.then(
         (text) => {
+          if (!mine()) return;
           if (k in this.summaryError) {
             const rest = { ...this.summaryError };
             delete rest[k];
@@ -218,6 +225,7 @@ class InsightsStore {
           this.fullMd = { ...this.fullMd, [k]: text.trim() ? text : x.summary };
         },
         (e: unknown) => {
+          if (!mine()) return;
           this.summaryError = { ...this.summaryError, [k]: loadErrorText(e) };
           this.fullMd = { ...this.fullMd, [k]: x.summary };
         },
@@ -230,6 +238,7 @@ class InsightsStore {
     const rest = { ...this.fullMd };
     delete rest[periodKey(r)];
     this.fullMd = rest;
+    this.summaryReads.delete(periodKey(r));
     this.loadSummaries([r]);
   }
 
@@ -390,6 +399,7 @@ class InsightsStore {
         }
         this.fullMd = {};
         this.summaryError = {};
+        this.summaryReads.clear();
         this.setFilter('all');
         this.selectedKey = periodKey(ready);
         void this.loadIndex();
@@ -417,6 +427,7 @@ class InsightsStore {
     this.index = { series: [], ledger: new Map() };
     this.fullMd = {};
     this.summaryError = {};
+    this.summaryReads.clear();
     this.schedule = null;
     this.filter = 'all';
     this.selectedKey = null;
