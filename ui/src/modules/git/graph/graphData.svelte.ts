@@ -21,6 +21,7 @@ import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
 import { loadErrorText } from '../../../lib/loadError';
 import { git } from '../../../lib/stores/git.svelte';
+import { readOverview } from '../../../lib/api/gitOverview';
 import { gitBridge } from '../../../lib/diff/gitBridge.svelte';
 import { graphCache, type GraphSnapshot } from '../graph-cache';
 import { spliceHistory } from '../graph-splice';
@@ -36,18 +37,16 @@ export interface GraphDataHost {
 }
 
 // ── History paging ──────────────────────────────────────────────────────────
-// There is no ceiling on how far back the graph can reach. The page is big
-// enough that essentially every real repo loads its ENTIRE history in one
-// request (6k commits = one page), so clicking a ref never waits on a chain of
-// round-trips. Paging survives only as a backstop for genuinely huge repos —
-// every row renders as real DOM, so an unbounded fetch on a 100k-commit repo
-// would lock the webview on mount.
+// Windowed (perf G6): the first paint asks for FIRST_PAGE commits, scrolling
+// near the end asks for SCROLL_PAGE more, and a jump to an old ref is ONE
+// `until` walk (capped at PAGE) that stops at that commit. The whole history
+// is never read up front (it was: 2k, then the next 10k right after).
 export const PAGE = 10000;
 /** The first page of a cold mount, and what a background reload re-reads
- *  (perf R3): 2k commits paint at once; the next PAGE is prefetched right
- *  after, so a ref click still rarely waits. A reload splices this onto the
- *  held tail (graph-splice.ts). */
-export const FIRST_PAGE = 2000;
+ *  (spliced onto the held tail, graph-splice.ts). */
+export const FIRST_PAGE = 200;
+/** What one scroll to the end adds. */
+export const SCROLL_PAGE = 1000;
 
 export interface GraphFetch {
   gen: number;
@@ -133,7 +132,7 @@ export function createGraphData(h: GraphDataHost) {
    *  `until` (a sha) makes it ONE daemon walk that stops right after that
    *  commit — how a jump to an old ref reaches it, instead of a chain of
    *  10k-commit `--skip` pages that each re-walk everything before them. */
-  function loadMore(until?: string, limit = PAGE): Promise<boolean> {
+  function loadMore(until?: string, limit = until ? PAGE : SCROLL_PAGE): Promise<boolean> {
     if (inflight) return inflight;
     if (!hasMore) return Promise.resolve(false);
     const p = loadPage(until, limit);
@@ -349,21 +348,33 @@ export function createGraphData(h: GraphDataHost) {
     hasMore = true;
     skipCursor = 0;
 
-    // Stashes / worktrees / submodules are best-effort: a failure (or empty
-    // list) just leaves the section empty; it must never block the graph.
+    // Refs and the stash / worktree / submodule lists come with the repo's
+    // ONE overview read (shared with RepoView's status); a failed overview
+    // falls back to their own routes. Side lists are best-effort: a failure
+    // just leaves a section empty; it must never block the graph.
     stashesKnown = false;
     worktrees = [];
     submodules = [];
-    void reloadSideLists(id, true);
-    const gen = loadGen;
+    const sides = readOverview(id).then(
+      (o) => {
+        if (id !== h.repoId) return;
+        stashes = o.stashes;
+        stashesKnown = true;
+        worktrees = o.worktrees;
+        submodules = o.submodules;
+        if (!o.refs) return loadRefs(id);
+        setRefs(withoutRemoteHeads(o.refs));
+        refsLoading = false;
+      },
+      () => {
+        void reloadSideLists(id, true);
+        return loadRefs(id);
+      },
+    );
     await Promise.all([
-      loadRefs(id),
+      sides,
       loadMore(undefined, FIRST_PAGE).finally(() => {
         commitsLoading = false;
-        // Prefetch the next page once the first one has painted.
-        setTimeout(() => {
-          if (gen === loadGen && id === h.repoId && hasMore) void loadMore();
-        }, 0);
       }),
     ]);
   }

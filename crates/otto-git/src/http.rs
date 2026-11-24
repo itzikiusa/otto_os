@@ -151,6 +151,7 @@ pub fn router<S: GitCtx>() -> Router<S> {
         )
         // local ops (#37–47)
         .route("/repos/{id}/status", get(repo_status::<S>))
+        .route("/repos/{id}/overview", get(repo_overview::<S>))
         .route("/repos/{id}/file", get(file_routes::repo_file::<S>))
         .route("/repos/{id}/branches", get(repo_branches::<S>))
         .route("/repos/{id}/refs", get(repo_refs::<S>))
@@ -1686,6 +1687,37 @@ async fn repo_status<S: GitCtx>(
     // `status_cache`). Tagged `x-otto-status-cache: hit|miss`.
     let (body, cache) = crate::status_cache::status_body(&id, &git).await?;
     Ok(json_tagged(body, "x-otto-status-cache", cache))
+}
+
+/// `GET /repos/{id}/overview` — what opening a repository reads, in ONE
+/// request instead of five: the status (the same shared memo as `/status`),
+/// the refs (as `/refs`), stashes, worktrees and submodules. Status is the
+/// one that must succeed; a side list that fails comes back empty (refs:
+/// null) and the client reads it on its own again.
+async fn repo_overview<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
+    watch_repo(&s, &repo, &git).await;
+    let base = s.cleanup_base_branch(&id).await;
+    let (status, refs, stashes, worktrees, submodules) = tokio::join!(
+        crate::status_cache::status_body(&id, &git),
+        git.refs_with_base(base.as_deref()),
+        git.stash_list_counted(),
+        git.worktree_list_detailed(),
+        git.submodule_list(),
+    );
+    let status: serde_json::Value = serde_json::from_slice(&status?.0)
+        .map_err(|e| Error::Internal(format!("status json: {e}")))?;
+    Ok(Json(serde_json::json!({
+        "status": status,
+        "refs": refs.ok(),
+        "stashes": stashes.unwrap_or_default(),
+        "worktrees": worktrees.unwrap_or_default(),
+        "submodules": submodules.unwrap_or_default(),
+    })))
 }
 
 /// Keep the repo's working-tree watcher armed (see `watch.rs`): the client

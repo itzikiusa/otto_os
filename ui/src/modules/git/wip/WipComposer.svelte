@@ -39,11 +39,13 @@
     ondraft: () => void;
     onstopdraft?: () => void;
     oncommit: (push: boolean) => void;
+    /** Before ⋯ opens (the panel reads the signing default then). */
+    onoptions?: () => Promise<void> | void;
   }
   let {
     subject = $bindable(), body = $bindable(), amend = $bindable(), signOn = $bindable(), showDraftTerm = $bindable(),
     amendSubject, amendPublished, drafting, draftElapsed, draftable, draftedAt, liveDraftId, committing, canCommit,
-    commitHint, stagedCount, totalCount, pushTo, signCfg, signError, onkey, ondraft, onstopdraft, oncommit,
+    commitHint, stagedCount, totalCount, pushTo, signCfg, signError, onkey, ondraft, onstopdraft, oncommit, onoptions,
   }: Props = $props();
 
   /** git's 50/72 convention: a quiet count from 50, warning past 72. */
@@ -55,8 +57,10 @@
   );
   const verb = $derived(amend ? 'Amend' : 'Commit');
 
-  function moreMenu(e: MouseEvent): void {
-    ctxMenu.show(e, [
+  async function moreMenu(e: MouseEvent): Promise<void> {
+    const target = e.currentTarget as HTMLElement;
+    await onoptions?.();
+    ctxMenu.showAt(target, [
       { label: 'Amend the last commit', checked: amend, action: () => (amend = !amend) },
       {
         label: 'Sign this commit',
@@ -73,7 +77,7 @@
         action: ondraft,
       },
       ...(liveDraftId ? [{ label: showDraftTerm ? 'Hide the drafting agent' : 'Watch the drafting agent', icon: 'terminal', action: () => (showDraftTerm = !showDraftTerm) }] : []),
-    ]);
+    ], { align: 'end' });
   }
 </script>
 
@@ -118,7 +122,7 @@
       </p>
     </div>
     <div class="wc-actions">
-      <button type="button" class="icon-btn wc-more" aria-haspopup="menu" aria-label="Commit options" title="Amend, sign, draft the message" onclick={moreMenu}>
+      <button type="button" class="icon-btn wc-more" aria-haspopup="menu" aria-label="Commit options" title="Amend, sign, draft the message" onclick={(e) => void moreMenu(e)}>
         <Icon name="more" size={16} />
       </button>
       {#if pushTo}

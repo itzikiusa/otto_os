@@ -65,6 +65,12 @@
       remoteCountRepo = id;
       remoteCount = null;
     }
+    // A repo with an origin has a remote: no request (most repos). Only one
+    // without it asks which remotes exist (an `upstream`-only clone).
+    if ((git.allRepos.find((r) => r.id === id) ?? git.repos.find((r) => r.id === id))?.remote_url) {
+      remoteCount = 1;
+      return;
+    }
     const ctl = new AbortController();
     api
       .get<RemoteInfo[]>(`/repos/${id}/remotes`, ctl.signal)
@@ -116,8 +122,11 @@
   // "merge" mislabelled a repo configured to rebase.
   let pullMode = $state<PullMode | null>(null);
   let pullModeFor = '';
+  // The header shows the mode only inside its ⋯: read it when that opens.
   $effect(() => {
-    const id = repoId;
+    if (!inHeader) loadPullMode(repoId);
+  });
+  function loadPullMode(id: string): void {
     if (pullModeFor === id) return;
     pullModeFor = id;
     pullMode = null;
@@ -130,7 +139,7 @@
         // Not sticky: the next time this repo is shown, read it again.
         if (pullModeFor === id) pullModeFor = '';
       });
-  });
+  }
 
   const MODE_LABEL: Record<PullMode, string> = {
     merge: 'merge',
@@ -264,6 +273,7 @@
 
   /** The header's ⋯ rows for this repo, grouped: sync, then branch & stash. */
   export function menuItems(): MenuItem[] {
+    loadPullMode(repoId); // the "default" mark shows once it is known
     const why = detached ? 'HEAD is detached — check out a branch first' : noRemote ? NO_REMOTE : undefined;
     return [
       // The three pull modes; the repo's configured one says "default".

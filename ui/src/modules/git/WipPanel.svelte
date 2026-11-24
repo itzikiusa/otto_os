@@ -587,18 +587,16 @@
     selectedPath = path;
   });
 
-  // Repo signing defaults. A failed read must not look like "this repo doesn't
-  // sign": the toggle stays usable (per-commit override), but the row says the
-  // default couldn't be read and offers Retry. A response for a repo the panel
-  // has since left is dropped.
+  // Repo signing defaults; a failed read says so with Retry (the toggle stays usable).
   let signCfgError = $state(false);
   let signCfgLoading = $state(false);
   let signCfgSeq = 0;
-  function loadSignCfg(id: string): void {
+  // Read when the card's ⋯ opens (Sign shows the repo default), not on every open.
+  function loadSignCfg(id: string): Promise<void> {
     const seq = ++signCfgSeq;
     signCfgError = false;
     signCfgLoading = true;
-    void api
+    return api
       .get<CommitConfig>(`/repos/${id}/commit-config`)
       .then((c) => {
         if (seq !== signCfgSeq) return;
@@ -614,14 +612,6 @@
         if (seq === signCfgSeq) signCfgLoading = false;
       });
   }
-  $effect(() => {
-    const id = repoId;
-    untrack(() => loadSignCfg(id));
-    return () => {
-      signCfgSeq++;
-    };
-  });
-
   // Amend: HEAD's subject is shown as the PLACEHOLDER, never copied into the
   // field. An empty subject commits `--amend --no-edit`, which keeps the WHOLE
   // previous message — copying only the subject in (the log has no body) and
@@ -801,7 +791,8 @@
     try {
       const message = subject.trim() + (body.trim() ? `\n\n${body.trim()}` : '');
       if (virtualAll) await git.stage(repoId, inStaged.map((c) => c.path));
-      const r = await git.commit(repoId, { message, amend, sign: signOn });
+      // Unknown signing default (⋯ never opened): the repo's own config decides.
+      const r = await git.commit(repoId, { message, amend, sign: signCfg || signOn ? signOn : undefined });
       toasts.success('Committed', r.sha.slice(0, 8));
       subject = '';
       body = '';
@@ -863,6 +854,7 @@
     {amendSubject} {amendPublished} {drafting} {draftElapsed} {draftable} {draftedAt} {liveDraftId}
     {committing} {canCommit} {commitHint} stagedCount={inStaged.length} totalCount={status.changes.length} {pushTo} {signCfg} {signError}
     onkey={commitKey} ondraft={draftMessage} onstopdraft={stopDraft} oncommit={(push) => void commit(push)}
+    onoptions={() => (signCfg || signCfgLoading ? undefined : loadSignCfg(repoId))}
   />
   <div class="wp-head">
     <span class="wp-count">{plural(status.changes.length, 'file')} changed</span>

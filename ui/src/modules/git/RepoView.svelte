@@ -23,9 +23,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import { focusAppContent } from '../../lib/announce.svelte';
   import { untrack } from 'svelte';
-  import CommitCard from './CommitCard.svelte';
   import { remoteHost } from './gitUiHelpers';
-  import { prWorkspace } from './prWorkspaceStore.svelte';
+  import { readOverview } from '../../lib/api/gitOverview';
 
   // Views only some visits open stay out of the Git chunk (perf R7): the PR
   // list (+ CreatePr), the local review, the merge dialog and the conflict
@@ -40,6 +39,7 @@
   const FileHistoryLazy = lazyComponent(() => import('./FileHistoryPanel.svelte'));
   const RemotesLazy = lazyComponent(() => import('./RemotesPanel.svelte'));
   const RecoveryLazy = lazyComponent(() => import('./RecoveryTools.svelte'));
+  const CommitCardLazy = lazyComponent(() => import('./CommitCard.svelte'));
 
   interface Props {
     repo: Repo;
@@ -59,10 +59,7 @@
   }
   let { repo, tab, embedded = false, onTab, onopenrepo, onaddrepo, hostActions = false }: Props = $props();
 
-  // Legacy deep links / persisted state may still say 'changes' or 'history';
-  // both render the graph now, and the Graph tab must read as active for them.
-  // Legacy ids are the graph: changes/history, and focus (Focus is a
-  // page-level view of the Git page now, not a repo sub-tab).
+  // Legacy ids render the graph: 'history', and 'focus' (Focus is a page-level view now).
   const effTab = $derived(tab === 'history' || tab === 'focus' ? 'graph' : tab);
 
   // Status is owned by the git store (single source of truth) so the auto-fetch
@@ -102,9 +99,11 @@
   // status at all — once any status exists, a later failure keeps the stale one.
   const statusError = $derived(status ? null : (git.statusErrorById[repo.id] ?? null));
   let statusLoading = $state(false);
-  function loadStatus(id: string): void {
+  /** First read: the repo's ONE overview (shared with the graph); a retry re-reads the status. */
+  function loadStatus(id: string, retry = false): void {
     statusLoading = true;
-    void git.refreshStatus(id).finally(() => {
+    const read = retry ? git.refreshStatus(id) : readOverview(id).then((o) => void git.setStatus(id, o.status), () => git.refreshStatus(id));
+    void read.finally(() => {
       if (id === repo.id) statusLoading = false;
     });
   }
@@ -134,9 +133,16 @@
   // used to be a mount-only effect keyed on repo.id: a mid-session conflict left
   // the incoming files sitting in WIP with no way into the resolver until you
   // navigated away and back.)
+  const opKey = $derived(status?.op_in_progress ?? '');
   $effect(() => {
     const id = repo.id;
     const seen = conflictKey;
+    // Nothing conflicted and no operation in progress: nothing to ask the daemon.
+    if (!seen && !opKey) {
+      merging = false;
+      mergeOp = null;
+      return;
+    }
     void git
       .getMergeStatus(id)
       .then((m) => {
@@ -257,7 +263,7 @@
   // Changes first: a repository with uncommitted changes opens on Changes, a
   // clean one on History — decided once per open, so the view never jumps
   // under the reader afterwards.
-  let landedFor = '';
+  let landedFor = $state('');
   $effect(() => {
     const id = repo.id;
     const s = status;
@@ -281,7 +287,7 @@
   }
   function openPr(n: number): void {
     selectTab('prs');
-    prWorkspace.open(repo.id, n);
+    void import('./prWorkspaceStore.svelte').then((m) => m.prWorkspace.open(repo.id, n));
   }
 
   export function selectTab(id: string): void {
@@ -486,14 +492,14 @@
         </div>
       {/if}
     {:else if effTab === 'changes'}
-      <CommitCard {repo} onopenpr={openPr} onhistory={() => selectTab('graph')} onresolve={openResolver} />
+      <LazyMount lazy={CommitCardLazy} what="the commit card" props={{ repo, onopenpr: openPr, onhistory: () => selectTab('graph'), onresolve: openResolver }} />
     {:else if effTab === 'review'}
       <div class="rv-tab-scroll">
         <LazyMount lazy={LocalReviewLazy} what="the local review" variant="panel" props={{ repoId: repo.id }} />
       </div>
-    {:else if status}
-      <!-- Graph is the default for 'graph' AND any legacy tab id (changes /
-           history) still living in persisted state or old deep links. -->
+    {:else if status && landedFor === repo.id}
+      <!-- The graph (History) — mounted once the landing view is decided, so
+           a dirty repo opening on Changes never starts the graph's reads. -->
       <div class="rv-graph">
         <GraphSearchBar repoId={repo.id} />
         <div class="rv-graph-body">
@@ -527,7 +533,7 @@
         error={`${statusError} If the folder moved or was deleted, remove the repository from the Git page and add it again.`}
         empty
         loading={statusLoading}
-        onretry={() => loadStatus(repo.id)}
+        onretry={() => loadStatus(repo.id, true)}
       />
     {:else}
       <div style="padding: 16px"><Skeleton rows={5} height={36} /></div>

@@ -94,6 +94,7 @@ test('the Pull button names the repo’s mode, and ff-only refuses a diverged br
   // `pull.rebase=true` → the header ⋯ marks rebase as the repo's default.
   const menu = page.locator('.ctx-menu');
   await expect(async () => {
+    await page.keyboard.press('Escape');
     await page.locator('.git-header .ph-more').click();
     await expect(menu.getByRole('menuitem', { name: /^Pull \(rebase\)/ })).toContainText('default', { timeout: 1_000 });
   }).toPass({ timeout: 20_000 });

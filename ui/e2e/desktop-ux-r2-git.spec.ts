@@ -48,8 +48,10 @@ test.beforeEach(async ({ page }) => {
 });
 async function openRepo(page: Page, tab = 'graph') {
   await page.goto(`/#/git/${repoId}/${tab}`);
-  // Focus is the Git page's own view now (the legacy repo/focus link opens it).
-  if (tab === 'focus') await expect(page.getByRole('button', { name: 'Focus', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  // Focus is the Git page's own view now (the legacy repo/focus link opens it);
+  // a phone names it in the header's repo switcher (one header row).
+  if (tab === 'focus' && page.viewportSize()!.width <= 640) await expect(page.getByTestId('git-phone-repo')).toHaveText('Focus');
+  else if (tab === 'focus') await expect(page.getByRole('button', { name: 'Focus', exact: true })).toHaveAttribute('aria-pressed', 'true');
   else await expect(page.locator('.rv-tabs')).toBeVisible();
 }
 function diff(path: string) {
@@ -130,6 +132,8 @@ test('graph multi-ref list is keyboard accessible and returns focus', async ({ p
   await expect(expander).toBeFocused();
 });
 test('stash, stale worktree and submodule actions are accessible by keyboard and tap', async ({ page }) => {
+  // The fixtures replace the side-list routes: skip the one-request overview so the graph reads them.
+  await page.route('**/api/v1/repos/*/overview', r => r.fulfill({ status: 404, json: { code: 'not_found', message: 'fixture' } }));
   await page.route('**/api/v1/repos/*/worktrees', r => r.fulfill({ json: [{ path: '/tmp/stale-audit-tree', sha: firstSha, branch: 'stale-audit', is_main: false, locked: false, prunable: true, dirty: false, dirty_known: true }] }));
   await page.route('**/api/v1/repos/*/submodules', r => r.fulfill({ json: [{ path: 'vendor/audit-submodule', sha: firstSha, url: 'https://example.test/submodule', state: 'uninitialized' }] }));
   await openRepo(page);
