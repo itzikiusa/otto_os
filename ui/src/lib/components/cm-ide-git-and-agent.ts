@@ -11,6 +11,7 @@ import {
 } from '@codemirror/state';
 import { copyWithToast } from '../clipboard';
 import { ctxMenu, type MenuItem } from '../contextmenu.svelte';
+import { isCoarsePointer } from './cm-ide-touch-menu';
 import { diffLineArrays } from '../lineDiff.ts';
 
 export interface IdeEditorSelectionRange {
@@ -576,6 +577,8 @@ export function createIdeGitAndAgentExtensions(opts: CreateIdeGitAndAgentOptions
     },
     contextmenu(event, view) {
       if (event.target instanceof Element && event.target.closest('.cm-gutters')) return false;
+      // Touch: a long-press is the system's text selection (cm-ide-refactor.ts).
+      if (isCoarsePointer()) return false;
       const cbs = opts.getCallbacks();
       if (!cbs.onAgentAction && !cbs.onDefinitionJump && !cbs.onQuickFix && !cbs.onRenameSymbol && !cbs.onFormat) return false;
       const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
