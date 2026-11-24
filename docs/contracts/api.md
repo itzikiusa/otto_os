@@ -948,7 +948,10 @@ latest `turn` entity and its `<turn>:error` item — no column of its own.
 when that latest turn ended — absent with `last_turn_status`. A client's
 "finished since you last looked" compares it with the client-owned
 `meta.thread_seen_at` (PATCH below); `last_active_at` also moves on a meta
-write. On
+write. `meta.last_turn_started_at` (RFC 3339, derived the same way, never
+stored): when the latest turn started, kept while it runs — the inbox row,
+⌘K switcher and details card of a thread already working when a client
+loads say "Working 4m" without reading the thread. On
 get, list and every route that returns a `RuntimeSession`)
 (`title_auto`: the title is still the placeholder it was created with —
 the agent's own name for the conversation replaces it: Codex

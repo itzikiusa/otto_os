@@ -6,7 +6,9 @@
   // <other provider>" (arms the switch, providerSwitch.ts). With no known
   // reset time it says so and offers only the switch.
   import { api } from '../../../lib/api/client';
-  import type { ResumeAtReq, RuntimeSession } from '../../../lib/api/types';
+  import type { MessageAttachment, ResumeAtReq, RuntimeSession } from '../../../lib/api/types';
+  import type { runtimeDrafts } from '../../../lib/stores/runtimeDrafts.svelte';
+  import { restoreFailedTurnToDraft } from './runtimeRetryRestore';
   import { agentProviders, harnessLabel, isRuntimeProvider, orderThreadHarnesses, providerReadiness } from '../../../lib/providers';
   import { auth } from '../../../lib/stores/auth.svelte';
   import { limits } from '../../../lib/stores/usageLimits.svelte';
@@ -21,10 +23,13 @@
     provider: string;
     /** The provider's own words (they may say when it resets). */
     detail: string;
-    draft: { provider: string | null; model: string | null | undefined; effort: unknown };
+    draft: ReturnType<typeof runtimeDrafts.for>;
     onfocus: () => void;
+    /** The prompt the limited turn carried: "Continue with" brings it back. */
+    retryText?: string;
+    retryAttachments?: readonly MessageAttachment[];
   }
-  let { sessionId, provider, detail, draft, onfocus }: Props = $props();
+  let { sessionId, provider, detail, draft, onfocus, retryText = '', retryAttachments }: Props = $props();
 
   const fromText = $derived(resetFromText(detail, Date.now()));
   // Only when the error does not say: the shared usage-meter poller (visible-only).
@@ -40,6 +45,15 @@
     armed ? `${name} limit reached · resumes at ${resetClock(armed, Date.now())}` : `${name} limit reached · ${reset ? `resets ${resetClock(reset, Date.now())}` : 'reset time unknown'}`,
   );
   let busy = $state(false);
+
+  /** Arm the switch and bring the limited turn's prompt back into an empty
+   *  composer, so the person only presses Send (nothing is retyped). */
+  async function continueElsewhere(to: string): Promise<void> {
+    armSwitch(draft, provider, to);
+    if (!draft.text.trim() && (retryText || retryAttachments?.length)) {
+      await restoreFailedTurnToDraft({ sessionId, draft, text: retryText, attachments: retryAttachments, focusComposer: onfocus });
+    } else onfocus();
+  }
 
   async function setResume(at: number | null): Promise<void> {
     busy = true;
@@ -64,7 +78,7 @@
       <button type="button" class="btn small" disabled={busy} data-testid="runtime-resume-at-reset" onclick={() => void setResume(reset)}>Resume at reset</button>
     {/if}
     {#if other}
-      <button type="button" class="btn small ghost" data-testid="runtime-limit-switch" onclick={() => { armSwitch(draft, provider, other); onfocus(); }}>Continue with {harnessLabel(other)}</button>
+      <button type="button" class="btn small ghost" data-testid="runtime-limit-switch" onclick={() => void continueElsewhere(other)}>Continue with {harnessLabel(other)}</button>
     {/if}
   {/if}
 </div>

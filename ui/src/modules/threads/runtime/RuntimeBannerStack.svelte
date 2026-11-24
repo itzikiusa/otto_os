@@ -10,8 +10,11 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import { splitBanners, type BannerBlock } from './banners';
   import { keyboard } from '../../../lib/stores/keyboard.svelte';
-  import RuntimeUsageLimit from './RuntimeUsageLimit.svelte';
+  import type RuntimeUsageLimit from './RuntimeUsageLimit.svelte';
   import type { ComponentProps } from 'svelte';
+  import { lazyComponent } from '../../../lib/lazy-component.svelte';
+  // Only a thread on its usage limit shows it: loaded then, not with every thread.
+  const UsageLimit = lazyComponent(() => import('./RuntimeUsageLimit.svelte'));
 
   interface Props {
     /** In priority order, highest first. */
@@ -35,7 +38,7 @@
 {#if blocks.length > 0}
   <div class="bs" data-testid="runtime-banners">
     {#each shown as b (b.key)}
-      <div class="bs-item" data-banner={b.key}>{#if b.key === 'limit' && limit}<RuntimeUsageLimit {...limit} />{:else}{@render block(b.key)}{/if}</div>
+      <div class="bs-item" data-banner={b.key}>{#if b.key === 'limit' && limit}{#if UsageLimit.component}<UsageLimit.component {...limit} />{/if}{:else}{@render block(b.key)}{/if}</div>
     {/each}
     {#if split.folded.length > 0}
       <button
@@ -81,6 +84,18 @@
   .bs-more:hover {
     background: var(--hover);
     color: var(--text);
+  }
+  /* Touch: a notice's own button (Cancel on "Next message continues on …")
+     is a 44 px target, never a 22 px one. */
+  @media (pointer: coarse) {
+    .bs-item :global(.btn) {
+      min-block-size: calc(var(--hit-min) + 8px);
+    }
+    /* …so its hit-slop pseudo (app.css) has nothing to add: it reached past
+       the line and WebKit drew scrollbars around the notice. */
+    .bs-item :global(.btn::after) {
+      inset: 0;
+    }
   }
   .bs-more:focus-visible {
     outline: 2px solid var(--accent-text);

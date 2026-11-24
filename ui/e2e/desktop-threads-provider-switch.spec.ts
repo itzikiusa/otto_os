@@ -79,8 +79,7 @@ async function arm(page: Page, thread: Locator, to: string): Promise<void> {
   // Browsing the rail arms nothing.
   await expect(thread.getByTestId('runtime-switch-notice')).toHaveCount(0);
   await picker.getByRole('button', { name: 'Default model' }).click();
-  await page.keyboard.press('Escape');
-  await expect(picker).toHaveCount(0);
+  await expect(picker).toHaveCount(0); // a pick that arms the switch closes the picker
 }
 
 test('claude → codex → claude: the same thread, a handoff divider each way', async ({ page }) => {

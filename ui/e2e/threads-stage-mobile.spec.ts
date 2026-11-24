@@ -42,7 +42,7 @@ async function boot(page: Page, hash: string): Promise<void> {
 }
 
 test('phone: the stage shows the repo and the access before sending', async ({ page }, ti) => {
-  test.skip(!/^(iphone|android)/.test(ti.project.name), 'phones only');
+  test.skip(!/^(iphone|android-phone)/.test(ti.project.name), 'phones only');
   await boot(page, '#/threads/new');
   const stage = page.getByTestId('new-thread-stage');
   await expect(stage).toBeVisible({ timeout: 15_000 });
@@ -57,7 +57,7 @@ test('phone: the stage shows the repo and the access before sending', async ({ p
 });
 
 test('phone: ⋯ has no layouts or hand-off; the details drawer is compact', async ({ page }, ti) => {
-  test.skip(!/^(iphone|android)/.test(ti.project.name), 'phones only');
+  test.skip(!/^(iphone|android-phone)/.test(ti.project.name), 'phones only');
   await boot(page, '#/threads/rt_ph');
   await expect(page.getByTestId('runtime-thread-rt_ph')).toBeVisible({ timeout: 15_000 });
 
@@ -89,8 +89,8 @@ test('phone: ⋯ has no layouts or hand-off; the details drawer is compact', asy
   await shot(page, 'details-drawer');
 });
 
-test('iPad portrait: the Threads page fits with its thread list reachable', async ({ page }, ti) => {
-  test.skip(ti.project.name !== 'ipad-portrait', 'iPad portrait only');
+test('a tablet in portrait: the Threads page fits with its thread list reachable', async ({ page }, ti) => {
+  test.skip(!/^(ipad|android-tablet)-portrait$/.test(ti.project.name), 'tablets in portrait (iPad, Galaxy Tab)');
   await boot(page, '#/threads/rt_ph');
   await expect(page.getByTestId('runtime-thread-rt_ph')).toBeVisible({ timeout: 15_000 });
   await expectNoHorizontalOverflow(page);

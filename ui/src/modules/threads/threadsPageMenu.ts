@@ -32,6 +32,9 @@ const PHONE_HANDOFF = 'Continue on phone…';
 const isTerminal = (i: MenuItem): boolean => !!i.label && /terminal drawer/i.test(i.label);
 
 export interface PageMenuState {
+  /** A touch screen (no hover): the minimap rail's ticks are too small to tap,
+   *  so "Jump to…" is offered at any width. */
+  touch?: boolean;
   /** The focused thread's own actions (empty on the new-thread stage). */
   threadItems: MenuItem[];
   layout: ThreadsLayoutMode;
@@ -61,7 +64,7 @@ export interface PageMenuActions {
   toggleTerminal(): void;
   setMidTurn?(m: MidTurn): void;
   setTools?(t: ToolVisibility): void;
-  /** A phone / tablet: the focused structured thread's "Jump to…" list (its minimap). */
+  /** A phone / tablet / any touch screen: the focused structured thread's "Jump to…" list (its minimap). */
   jump?(): void;
 }
 
@@ -85,7 +88,7 @@ export function threadsPageMenu(s: PageMenuState, act: PageMenuActions): MenuIte
     // A terminal thread's own menu already carries it (threadMenu.ts).
     ...(s.threadId && !s.threadItems.some((i) => i.label === RELATED_LABEL)
       ? [{ label: RELATED_LABEL, icon: 'send', action: () => act.related(s.threadId!) }] : []),
-    ...(compact && s.threadId && act.jump ? [{ label: 'Jump to…', icon: 'arrowUp', title: 'Your messages in this thread', action: () => act.jump!() }] : []),
+    ...((compact || s.touch) && s.threadId && act.jump ? [{ label: 'Jump to…', icon: 'arrowUp', title: 'Your messages in this thread', action: () => act.jump!() }] : []),
     ...(pageTerminal
       ? [{ label: TERMINAL_LABEL, icon: 'terminal', checked: s.terminalOpen, hint: '/terminal', action: () => act.toggleTerminal() }] : []),
     ...viewMenu(s, act),

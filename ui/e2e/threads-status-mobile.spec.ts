@@ -11,7 +11,7 @@ import { expectNoHorizontalOverflow } from './helpers';
 // Screenshots: OTTO_E2E_SHOTS/fix-T-ATTENTION/ light and dark.
 
 test.beforeEach(async ({ page }, ti) => {
-  test.skip(!/^(iphone|android)/.test(ti.project.name), 'phones only');
+  test.skip(!/^(iphone|android-phone)/.test(ti.project.name), 'phones only');
   await page.addInitScript(() => {
     localStorage.setItem('otto_mock', '1');
     localStorage.setItem('otto_workspace', 'wsp_otto');

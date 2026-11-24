@@ -483,13 +483,13 @@ export interface RuntimeSession {
     origin?: EmbeddedOrigin;
     council?: CouncilMeta;
     provider_slug?: string;
+    /** Derived, never stored (RFC 3339): when the latest turn ended / started (kept while it runs). */
+    last_turn_ended_at?: string; last_turn_started_at?: string;
   }) | null;
-  /** Background work still pending (live; absent = none). */
-  background_tasks?: BackgroundTask[];
+  background_tasks?: BackgroundTask[]; // background work still pending (live; absent = none)
   /** What its agent takes (see `ProviderSession.capabilities` for the live value). */
   capabilities: RuntimeCapabilities;
-  /** The title is still the placeholder it was created with; the agent's own
-   *  name for the conversation replaces it. */
+  /** The title is still the placeholder; the agent's own name replaces it. */
   title_auto?: boolean;
   /** How the latest turn ended; absent / null before any turn ended and while
    *  a turn runs — a failure stays on the row until the next turn starts.

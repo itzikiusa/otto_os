@@ -198,7 +198,7 @@
     hasPlan: Boolean(plan),
   }));
   const accessMode = $derived(accessModeOverride ?? draft.pickedMode ?? session?.access_mode ?? 'approval-required');
-  // The access chip shows only off the person's default (threadAccessDefault: Full access when prompts are skipped).
+  // The access chip hides only for a calm default (Supervised / Auto-accept edits); Full access always shows (threadAccessDefault).
   const defaultAccess = $derived(threadAccessDefault.skipPermissions ? 'full-access' : 'approval-required');
   $effect(() => threadAccessDefault.ensure());
   const pickAccess = (m: RuntimeAccessMode): void => { draft.pickedMode = m; onaccessmodechange?.(m); };
@@ -514,7 +514,7 @@
   <RuntimeStreamTools root={streamEl} {rows} bind:rowCap bind:text={draft.text} composer={composerEl} />
 
   <div class="rt-dock">
-    <RuntimeBannerStack blocks={banners} limit={failure?.cause === 'usage_limit' ? { sessionId, provider, detail: failure.detail, draft, onfocus: focusComposer } : null}>
+    <RuntimeBannerStack blocks={banners} limit={failure?.cause === 'usage_limit' ? { sessionId, provider, detail: failure.detail, draft, onfocus: focusComposer, retryText: outcome?.retryText ?? '', retryAttachments: outcome?.retryAttachments } : null}>
       {#snippet block(key: string)}
         {#if key === 'error' && sessionError}
           <p class="rt-banner" dir="auto" use:announceShown={{ text: sessionError, assertive: true }}><Icon name="warning" size={13} />{sessionError}</p>
@@ -634,7 +634,7 @@
         {#if !agentChat}<RuntimeAskAgent part="button" {sessionId} {provider} access={accessMode} disabled={closed || !session} />{/if}
         <RuntimeDraftStatus {draft} />
         {#if planOn}<RuntimePlanToggle id={ownerId} on={planOn} disabled={closed || !session} />{/if}
-        {#if !agentChat && (session?.meta?.read_only || accessModeOverride || accessMode !== defaultAccess)}
+        {#if !agentChat && (session?.meta?.read_only || accessModeOverride || accessMode !== defaultAccess || accessMode === 'full-access')}
           <RuntimeAccessChip readOnly={!!session?.meta?.read_only} mode={accessMode} agent={harnessLabel(provider)} cwd={effectiveCwd ?? 'this folder'} disabled={closed || !session} onpick={pickAccess} />
         {/if}
         <span class="rt-grow"></span>
@@ -777,7 +777,7 @@
      conversation keeps its lines. */
   @container (max-block-size: 420px) {
     .rt-composer { gap: var(--sp-1); padding-block: var(--sp-2) var(--sp-1); }
-    .rt-composer textarea { min-block-size: 1lh; }
+    .rt-composer textarea { min-block-size: 1lh; } .rt-composer textarea:placeholder-shown { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .rt-dock { padding-block-end: var(--sp-2); }
   }
   .rt-foot {

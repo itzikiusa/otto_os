@@ -238,6 +238,12 @@ test('a drag that starts on the New-thread composer stays in it', async ({ page,
   await page.goto('/#/threads/new');
   const input = page.getByTestId('new-thread-input');
   await expect(input).toBeVisible({ timeout: 30_000 });
+  // A phone on its side keeps ~180 px above the keyboard and the stage's
+  // input sits at its top edge: a synthesized two-finger pinch around it puts
+  // a touch point above the screen, and zooming before the keyboard leaves no
+  // keyboard state (viewportFit leaves pinch-zoom alone). The zoomed drag is
+  // covered there by the thread-composer test above; portrait sizes run this.
+  test.skip(withKeyboard(page).height < 260, 'no room for a two-finger pinch above the keyboard (phone on its side)');
   await input.click();
   await page.setViewportSize(withKeyboard(page));
   await expect(page.locator('html[data-kb="open"]')).toHaveCount(1);

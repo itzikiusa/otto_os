@@ -12,7 +12,9 @@
   import { onTabKey } from '../../lib/tabKeys';
   import { git } from '../../lib/stores/git.svelte';
   import type { CommitInfo, DiffLine, DiffResp, RepoStatusResp } from '../../lib/api/types';
-  import { diffContext, type ComposerContext } from './runtime/composerContext';
+  import { assembleComposerMessage, diffContext, type ComposerContext } from './runtime/composerContext';
+  import { runtimeThreads } from './runtime/runtimeThreads.svelte';
+  import { toastError } from '../../lib/toastError';
   import Modal from '../../lib/components/Modal.svelte';
   import { newId } from '../../lib/id';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -270,11 +272,29 @@
     if (pending) addDiff({ hunk: pending.hunk, ...(pending.from === pending.to ? { line: pending.from } : {}) });
     pending = null;
   }
-  function sendNotes(): void {
+  const notesContext = (drafts: readonly ReviewNote[]): ComposerContext => ({ id: `notes:${newId()}`, kind: 'review-comment', label: `Review · ${plural(drafts.length, 'note')}`, text: reviewMessage(drafts) });
+  let sendingNotes = $state(false);
+  /** "Send to agent": one message to the thread now (queued while it works); the
+   *  notes read Sent once the daemon took it. A terminal thread gets them in its draft. */
+  async function sendNotes(): Promise<void> {
+    const id = threadId;
     const drafts = notes.filter((n) => n.state === 'draft');
-    if (!threadId || !drafts.length || !oncontext) return;
-    oncontext({ id: `notes:${newId()}`, kind: 'review-comment', label: `Review · ${plural(drafts.length, 'note')}`, text: reviewMessage(drafts) }, threadId);
-    for (const n of drafts) reviewNotes.update(threadId, n.id, { state: 'sent' });
+    if (!id || !drafts.length || sendingNotes) return;
+    if (!runtimeThreads.get(id)) return addNotesToDraft();
+    sendingNotes = true;
+    try {
+      await runtimeThreads.prompt(id, { text: assembleComposerMessage('', [notesContext(drafts)]) });
+      for (const n of drafts) reviewNotes.update(id, n.id, { state: 'sent' });
+    } catch (e) {
+      toastError('Couldn’t send the review', e);
+    } finally {
+      sendingNotes = false;
+    }
+  }
+  /** "Add to message": the notes as one context item in the thread's draft, to add a sentence first. */
+  function addNotesToDraft(): void {
+    const drafts = notes.filter((n) => n.state === 'draft');
+    if (threadId && drafts.length && oncontext) oncontext(notesContext(drafts), threadId);
   }
   // The agent changed the noted lines since: the note says Outdated (kept, never lost).
   $effect(() => {
@@ -429,7 +449,9 @@
     {#if threadId}
       <DiffReviewBar
         {notes}
-        onsend={sendNotes}
+        onsend={() => void sendNotes()}
+        ondraft={oncontext ? addNotesToDraft : undefined}
+        sending={sendingNotes}
         onclear={() => threadId && reviewNotes.clear(threadId)}
         onedit={(id, comment) => threadId && reviewNotes.update(threadId, id, { comment })}
         onresolve={(id, r) => threadId && reviewNotes.update(threadId, id, { state: r ? 'resolved' : 'sent' })}

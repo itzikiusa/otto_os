@@ -146,7 +146,7 @@
       delegated: [
         ...ws.sessions.filter((x) => !x.archived && delegatedParentId(x) === threadId),
         ...Object.values(runtimeThreads.byId).filter((x) => x.parent_id === threadId && councilOf(x)),
-      ].map((x) => ({ id: x.id, title: x.title, provider: x.provider, status: ws.statusMap[x.id] ?? x.status })),
+      ].map((x) => ({ id: x.id, title: x.title, provider: x.provider, status: ws.statusMap[x.id] ?? x.status, startedAt: ((x.meta as Record<string, unknown> | null | undefined)?.last_turn_started_at as string | undefined) ?? null })),
       providerOf: (id) => runtimeThreads.get(id)?.provider ?? null,
     });
     return s.parent || s.running.length || s.previous.length ? s : null;

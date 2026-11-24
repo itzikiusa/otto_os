@@ -328,6 +328,7 @@
       cwd={cleanCwd}
       pickerStart={homePath}
       draftKey={stageDraftKey}
+      hideCalmAccess
       rememberScope="threads:{targetWs}"
       error={cwdError}
       {accessMode}

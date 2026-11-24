@@ -63,3 +63,11 @@ test('View carries the per-device "while working" choice, on a phone too (withou
   assert.equal(pview[1].checked, true);
   assert.equal(pview[1].hint, undefined, 'no ⌘↵ hint on a touch screen');
 });
+
+test('Jump to… is offered on a phone / tablet and on any touch screen, never on a desktop with a pointer', () => {
+  const acts = { newThread() {}, related() {}, toggleCard() {}, layout() {}, toggleTerminal() {}, jump() {} };
+  const has = (s: Record<string, unknown>) => threadsPageMenu({ threadItems: [], layout: 'single', terminalOpen: false, cardOn: null, threadId: 'x', ...s } as never, acts).some((i) => i.label === 'Jump to…');
+  assert.equal(has({}), false);
+  assert.equal(has({ compact: true }), true);
+  assert.equal(has({ touch: true }), true);
+});

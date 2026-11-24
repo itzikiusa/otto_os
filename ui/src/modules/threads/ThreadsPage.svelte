@@ -394,7 +394,7 @@
         terminalOpen: threadsChrome.terminalOpen,
         cardOn: cardRoom ? threadsChrome.cardVisible : null,
         threadId: focused?.id ?? null,
-        compact,
+        compact, touch: typeof matchMedia === 'function' && matchMedia('(hover: none) and (pointer: coarse)').matches,
         // A phone on its side is tablet-wide but still the phone: no hand-off to itself.
         phone: viewport.isPhone || viewport.isShort,
         sidebarVisible: !listDrawer && threads.sidebarOpen,
@@ -500,7 +500,7 @@
         aria-pressed={rightOpen}
         aria-label="Right panel"
         title={rightOpen ? 'Hide the right panel' : 'Show the right panel: files, changes, pull request, side chat'}
-        data-icon="panel"
+        data-icon="panel" data-keep
         data-testid="threads-toggle-inspector"
         onclick={toggleRightBar}
       >
@@ -512,7 +512,7 @@
         aria-haspopup="menu"
         aria-label="Thread and view actions"
         title="More: thread actions, project card, terminal, layout"
-        data-icon="more"
+        data-icon="more" data-keep
         data-testid="threads-thread-menu"
         bind:this={menuBtn}
         onpointerenter={() => { TerminalDock.prefetch(); RelatedListView.prefetch(); }}
@@ -625,11 +625,14 @@
     background: var(--accent-soft);
     color: var(--accent-text);
   }
+  /* Toasts and Undo notices rise above the composer (never on its chip or Send). */
+  @media (min-width: 641px) { :global(:root:has(.th-page)) { --toast-lift-page: 150px; } }
   .th-crumbs {
-    display: inline-flex;
+    display: flex;
     align-items: center;
     gap: var(--sp-4);
     min-width: 0;
+    max-inline-size: 100%;
     font-size: var(--fs-l);
     font-weight: 400;
   }
@@ -643,7 +646,7 @@
   }
   .th-crumb-title { color: var(--text); font-weight: 600; min-width: 0; }
   .th-crumb-btn { border: 0; background: none; padding: 0 2px; border-radius: var(--radius-s); font: inherit; font-weight: 600; color: var(--text); cursor: default; }
-  .th-crumb-btn:hover { background: var(--hover); }
+  @media (hover: hover) { .th-crumb-btn:hover { background: var(--hover); } } /* never a "selected" look on touch */
   @media (max-width: 640px), (max-height: 500px) and (pointer: coarse) {
     .th-crumbs > :global(.pb), .th-crumb-project, .th-crumb-sep { display: none; }
   }

@@ -68,7 +68,7 @@
   const word = $derived(
     child ? subagentWord(st.key, { limited: st.label === 'Limited' }) : subNeeds ? 'Needs you' : statusWord(cls, {
       kinds: inboxLive.kindsOf(s.id),
-      workingSince: cls === 'working' ? (inboxLive.since[s.id] ?? null) : null,
+      workingSince: cls === 'working' ? inboxLive.workingSince(s.id, s.meta as Record<string, unknown> | null) : null,
       now: cls === 'working' ? now() : 0,
       limited: st.label === 'Limited',
     }),

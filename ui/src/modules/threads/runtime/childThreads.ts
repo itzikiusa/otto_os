@@ -289,6 +289,8 @@ export interface SubagentThread {
   title: string;
   provider: string;
   status: string;
+  /** When its running turn started (the row's derived `meta.last_turn_started_at`). */
+  startedAt?: string | null;
 }
 
 const WORD: Record<AgentTaskStatus, SubagentWord> = {
@@ -348,7 +350,7 @@ export function subagentSection(
   for (const t of tasks.running) if (isSubagent(t)) add(row(t));
   for (const t of tasks.finished) if (isSubagent(t)) add(row(t));
   for (const d of more.delegated ?? []) {
-    add({ id: d.id, title: d.title, provider: d.provider, word: subagentWord(d.status), startedAt: null, endedAt: null, threadId: d.id, task: null });
+    add({ id: d.id, title: d.title, provider: d.provider, word: subagentWord(d.status), startedAt: d.startedAt ?? null, endedAt: null, threadId: d.id, task: null });
   }
   return { parent: more.parent ?? null, running, previous };
 }

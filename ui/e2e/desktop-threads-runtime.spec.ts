@@ -526,14 +526,16 @@ test('runtime polish: RTL, details card, grouped tools, folded approvals, access
   await page.screenshot({ path: info.outputPath('runtime-polish-work-dark.png'), animations: 'disabled' });
   await page.emulateMedia({ colorScheme: 'light' });
 
-  // Access: Full access asks once and rides the next prompt. The chip shows
-  // only off the person's default (Full access when agent_skip_permissions is
-  // on, the default), so Supervised shows it and Full access hides it; "+"
-  // always offers the choice.
+  // Access: Full access asks once and rides the next prompt. The chip hides
+  // only for a calm default (Supervised / Auto-accept edits); Full access
+  // always shows it, in amber; "+" always offers the choice.
   const chip = thread.getByTestId('runtime-access');
   if ((await chip.count()) === 0) {
     await thread.getByTestId('runtime-plus').click();
     await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Access: Supervised' }).click();
+  } else if (!(await chip.textContent())?.includes('Supervised')) {
+    await chip.click();
+    await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Supervised' }).click();
   }
   await expect(chip).toContainText('Supervised');
   await chip.click();
@@ -541,7 +543,7 @@ test('runtime polish: RTL, details card, grouped tools, folded approvals, access
   const dlg = page.getByRole('dialog');
   await expect(dlg).toContainText('without asking');
   await dlg.getByRole('button', { name: 'Allow full access' }).click();
-  await expect(chip).toHaveCount(0);
+  await expect(chip).toContainText('Full access');
   const sent = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith(`/runtime-sessions/${id}/prompt`));
   await page.route(`**/api/v1/runtime-sessions/${id}/prompt`, (r) => r.fulfill({ json: { turn_id: 't2', sequence: 1 } }));
   const composer = thread.getByTestId('runtime-composer');

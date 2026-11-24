@@ -160,6 +160,11 @@ test('the sidebar is an inbox: status words, needs you first, Working and Histor
   await row(page, 'done').locator('.tr-main').focus();
   await page.keyboard.press('ArrowUp');
   await expect(row(page, 'failed').locator('.tr-main')).toBeFocused();
+
+  // After a reload (no live event for the turn already running, no read): still
+  // its elapsed time, from the row's derived `meta.last_turn_started_at`.
+  await page.reload();
+  await expect(word(page, 'working')).toHaveText(/^Working \d+[smh]/, { timeout: 15_000 });
 });
 
 test('Group by project brings back the folders and is remembered', async ({ page }) => {

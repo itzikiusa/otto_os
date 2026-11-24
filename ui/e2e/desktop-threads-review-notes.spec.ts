@@ -6,7 +6,9 @@ import { setup, shoot } from './threadsReviewNotesFixture';
 // Review notes on the Changes diff (runtime/reviewNotes.ts, after Orca's diff
 // comments): a line or ⇧-range gets a note, notes show under their lines and
 // in one "Review · N notes" bar, survive a reload (per device), go to the
-// focused thread as ONE message through its draft, then read Sent, can be
+// focused thread as ONE message at once (Send to agent; "Add to message"
+// puts them in the draft instead), read Sent only once the send was taken,
+// render in the timeline as a compact "Review · N notes" block, can be
 // resolved, and turn Outdated when the noted lines change.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -37,16 +39,17 @@ test('desktop: note a range, it survives a reload, goes to the agent as one mess
   // Per thread, per device: a reload keeps it.
   await page.reload();
   await expect(tab.getByTestId('diff-note')).toHaveCount(1, { timeout: 30_000 });
-  // Send: one context item in the thread's draft; the person may add a sentence; Enter sends.
-  await bar.getByTestId('diff-review-send').click();
+  // "Add to message": one context item in the thread's draft, the notes still Draft.
   const thread = page.getByTestId('runtime-thread-notes-alpha');
+  await bar.getByTestId('diff-review-draft').click();
   await expect(thread.getByTestId('runtime-context-chips')).toContainText('Review · 1 note');
-  await expect(note.getByTestId('diff-note-state')).toHaveText('Sent');
-  const composer = thread.getByTestId('runtime-composer');
-  await composer.fill('Please address these.');
-  await composer.press('Enter');
+  await expect(note.getByTestId('diff-note-state')).toHaveText('Draft');
+  expect(sent.length).toBe(0);
+  // "Send to agent": one message now; Sent once the daemon took it.
+  await bar.getByTestId('diff-review-send').click();
   await expect.poll(() => sent.length).toBe(1);
-  for (const t of ['Please address these.', 'Review notes on the diff', '1. src/a.ts (new 9–10 · old 9)', '> -save(note);', '> +queue.push(note);', 'Keep save() for the offline case.']) expect(sent[0]).toContain(t);
+  await expect(note.getByTestId('diff-note-state')).toHaveText('Sent');
+  for (const t of ['Review notes on the diff', '1. src/a.ts (new 9–10 · old 9)', '> -save(note);', '> +queue.push(note);', 'Keep save() for the offline case.']) expect(sent[0]).toContain(t);
   // The agent's next change rewrites the noted lines: Outdated, not lost.
   diff.lines.splice(1, 3, { origin: 'add', content: 'queue.push(note, { offline: true });', old_line: null, new_line: 9 });
   await tab.getByRole('button', { name: 'Refresh changes' }).click();

@@ -11,11 +11,12 @@
   import type { EffortLevel } from '../../../lib/providerModels';
   import { resolveEffectiveDraftModel } from './runtimeComposer';
   import { armSwitch, switchTargets } from './providerSwitch';
-  import RuntimeContextMeter from './RuntimeContextMeter.svelte';
   import { runtimeViews } from './runtimeView.svelte';
   import RuntimeModelChip from './RuntimeModelChip.svelte';
 
   const ModelPicker = lazyComponent(() => import('../../../lib/components/ModelPickerPopover.svelte'));
+  // Loaded once the provider has reported a context window (most turns start without one).
+  const ContextMeter = lazyComponent(() => import('./RuntimeContextMeter.svelte'));
 
   interface Props {
     provider: string;
@@ -47,9 +48,11 @@
   function pickProvider(p: string): void {
     armSwitch(draft, provider, p);
   }
+  // A model of another provider picked: the switch is armed — the picker
+  // closes so the "Next message continues on …" line is in sight.
 </script>
 
-<RuntimeContextMeter usage={view?.thread?.context_usage} compact={view?.commands.some((c) => c.name === 'compact') ? 'compact' : null} {oncompact} />
+{#if view?.thread?.context_usage?.max_tokens && ContextMeter.component}<ContextMeter.component usage={view.thread.context_usage} compact={view.commands.some((c) => c.name === 'compact') ? 'compact' : null} {oncompact} />{/if}
 <RuntimeModelChip
   bind:el
   provider={shown}
@@ -75,7 +78,7 @@
     effort={draft.effort}
     mode="full"
     onprovider={pickProvider}
-    onmodel={(m) => (draft.model = m)}
+    onmodel={(m) => { draft.model = m; if (armed) open = false; }}
     oneffort={efforts.length || armed ? (e) => (draft.effort = e) : undefined}
     effortLevels={armed ? undefined : efforts}
     onclose={() => (open = false)}
