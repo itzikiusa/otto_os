@@ -421,12 +421,12 @@ impl SessionManager {
     }
 
     /// A structured session's process ended (exit, close): revoke its `otto`
-    /// MCP credential and remove its per-session MCP files, as a PTY session's
-    /// retirement does. Every respawn mints a fresh one. Best-effort.
+    /// MCP credential and remove its per-session MCP files (the claude
+    /// `--mcp-config` included), as a PTY session's retirement does. Every
+    /// respawn mints a fresh one. Best-effort.
     pub async fn retire_runtime_credentials(&self, session: &Session) {
         self.networks.clear(&session.id);
         self.retire_credentials(session).await;
-        let _ = tokio::fs::remove_file(claude_mcp_config_path(&session.id)).await;
     }
 
     /// Whether the structured child of `session` will run Seatbelt-confined:
