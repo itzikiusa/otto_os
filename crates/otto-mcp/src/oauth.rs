@@ -27,6 +27,21 @@ pub const SIGN_IN_WINDOW: Duration = Duration::from_secs(300);
 /// A token this close to expiry is refreshed before use.
 const REFRESH_EARLY_SECS: i64 = 60;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+/// The most a discovery, registration or token answer may be (decoded).
+const MAX_BODY_BYTES: usize = 1024 * 1024;
+
+/// A JSON answer read in chunks up to [`MAX_BODY_BYTES`] (a compressed body
+/// can't inflate past it); `Null` for anything larger or not JSON.
+async fn read_json(mut resp: reqwest::Response) -> Value {
+    let mut bytes = Vec::new();
+    while let Ok(Some(chunk)) = resp.chunk().await {
+        if chunk.len() > MAX_BODY_BYTES - bytes.len() {
+            return Value::Null;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+}
 
 /// The Keychain entry of a server's OAuth tokens and client registration.
 pub fn token_key(server_id: &str) -> String {
@@ -152,7 +167,7 @@ async fn get_json(url: reqwest::Url) -> Option<Value> {
     if !resp.status().is_success() {
         return None;
     }
-    resp.json::<Value>().await.ok()
+    Some(read_json(resp).await).filter(|v| !v.is_null())
 }
 
 /// Find the authorization server of the MCP server at `server_url`.
@@ -239,7 +254,7 @@ pub async fn register(
         .await
         .map_err(|_| "client registration failed (network)".to_string())?;
     let status = resp.status();
-    let v: Value = resp.json().await.unwrap_or(Value::Null);
+    let v = read_json(resp).await;
     let id = v["client_id"].as_str().filter(|_| status.is_success());
     match id {
         Some(id) => Ok((
@@ -272,7 +287,7 @@ async fn token_request(
         .await
         .map_err(|_| "the token request failed (network)".to_string())?;
     let status = resp.status();
-    let v: Value = resp.json().await.unwrap_or(Value::Null);
+    let v = read_json(resp).await;
     if status.is_success() && v["access_token"].is_string() {
         return Ok(v);
     }

@@ -72,6 +72,8 @@ fn the_callback_needs_the_exact_path_and_state() {
 #[derive(Default)]
 struct As {
     challenge: Option<String>,
+    /// Pad the authorization-server metadata past the body cap.
+    huge: bool,
     revoked: bool,
     tokens_issued: u32,
 }
@@ -123,6 +125,14 @@ async fn fake_as() -> (String, Arc<Mutex<As>>, tokio::task::JoinHandle<()>) {
                         200,
                         String::new(),
                         json!({"resource": format!("{b}/mcp"), "authorization_servers": [b.clone()]}),
+                    )
+                } else if path == "/.well-known/oauth-authorization-server"
+                    && st.lock().unwrap().huge
+                {
+                    (
+                        200,
+                        String::new(),
+                        json!({"pad": "x".repeat(2 * 1024 * 1024)}),
                     )
                 } else if path == "/.well-known/oauth-authorization-server" {
                     (
@@ -264,6 +274,15 @@ async fn a_pkce_mismatch_is_refused_by_the_token_endpoint() {
     st.lock().unwrap().challenge = Some("not-the-challenge".into());
     let e = done.await.unwrap().unwrap_err();
     assert!(e.contains("invalid_grant") && !e.contains("leak"), "{e}");
+    task.abort();
+}
+
+#[tokio::test]
+async fn an_oversized_metadata_answer_is_refused_not_buffered() {
+    let (base, st, task) = fake_as().await;
+    st.lock().unwrap().huge = true;
+    let e = start(&format!("{base}/mcp"), None).await.err().unwrap();
+    assert!(e.contains("no metadata"), "{e}");
     task.abort();
 }
 
