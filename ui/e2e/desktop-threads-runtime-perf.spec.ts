@@ -233,12 +233,15 @@ test('c. streaming a long answer after 30 tool calls into the 300-turn thread', 
   await cdp.send('Performance.enable');
   await page.evaluate(() => ((window as unknown as { __ottoPerfCounts: Record<string, number> }).__ottoPerfCounts = {}));
   const s0 = await scriptMs(cdp);
+  const profile = !!process.env.OTTO_THREADS_RT_PERF_PROFILE;
+  if (profile) await cdp.send('Profiler.enable').then(() => cdp.send('Profiler.start'));
   await startFrames(page);
   const t0 = Date.now();
   await say(ids.t300, 'stream:4000:3:30');
   await expect(conv.getByText('c3999', { exact: false }).last()).toBeVisible({ timeout: 120_000 });
   await idle(ids.t300);
   const wall = Date.now() - t0;
+  if (profile) writeFileSync(process.env.OTTO_THREADS_RT_PERF_PROFILE!, JSON.stringify((await cdp.send('Profiler.stop')).profile));
   const frames = await stopFrames(page);
   const script = (await scriptMs(cdp)) - s0;
   const counts = await page.evaluate(() => (window as unknown as { __ottoPerfCounts: Record<string, number> }).__ottoPerfCounts);
@@ -378,6 +381,13 @@ test('e. six threads streaming at once: memory, CPU, requests', async ({ page })
     paths[p] = (paths[p] ?? 0) + 1;
   });
   page.on('websocket', (s) => s.on('framereceived', () => ws++));
+  // API latency as the page sees it (request start → response end).
+  const lat: number[] = [];
+  page.on('requestfinished', (r) => {
+    if (!r.url().includes('/api/v1/')) return;
+    const t = r.timing();
+    if (t.responseEnd > 0) lat.push(Math.round(t.responseEnd));
+  });
   await boot(page, '#/threads/' + six[0]);
   const cdp = await page.context().newCDPSession(page);
   const pid = Number(execFileSync('lsof', ['-ti', 'tcp:' + (process.env.OTTO_E2E_PORT ?? '7799'), '-sTCP:LISTEN']).toString().trim().split('\n')[0]);
@@ -409,5 +419,6 @@ test('e. six threads streaming at once: memory, CPU, requests', async ({ page })
   await loops;
   await sample('end');
   record('soakPerMin', { apiRequests: dist(apiPerMin), wsMessages: dist(wsPerMin) });
+  record('soakApiLatencyMs', dist(lat));
   record('soakApiPaths', Object.fromEntries(Object.entries(paths).sort((a, b) => b[1] - a[1])));
 });
