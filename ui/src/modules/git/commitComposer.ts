@@ -143,7 +143,9 @@ export const liveDraftText = (repoId: string): string => live.get(repoId) ?? '';
 export function onDraftText(repoId: string, fn: (text: string) => void): () => void {
   const set = sinks.get(repoId) ?? new Set();
   sinks.set(repoId, set.add(fn));
-  return () => void set.delete(fn);
+  return () => {
+    if (set.delete(fn) && !set.size) sinks.delete(repoId);
+  };
 }
 
 /** The draft still running for `repoId`, if any (a remounted panel resumes
