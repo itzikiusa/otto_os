@@ -352,10 +352,10 @@
     </div>
   {:else if row.kind === 'work'}
     {@const flat = workRowEntries(row)}
-    {@const fold = shouldFold(flat, turns, pendingIds, turnById) && !row.parts.some(keptOpen)}
+    {@const fold = shouldFold(flat, turns, pendingIds, turnById)}
     {@const earlier = fold ? 0 : earlierSteps(row.parts, pendingIds, !stretchDone(flat, turns, turnById), keptOpen)}
     <div class="rt-work">
-      <RuntimeWorkFold id={row.id} entries={flat} {fold} tokens={tokensByRow.get(row.id) ?? ''}>
+      <RuntimeWorkFold id={row.id} entries={flat} {fold} keepOpen={row.parts.some(keptOpen)} tokens={tokensByRow.get(row.id) ?? ''}>
         {#if earlier}
           <!-- A running turn: the steps before the live one fold to one line. -->
           <details class="rt-earlier" data-testid="runtime-earlier-steps">
