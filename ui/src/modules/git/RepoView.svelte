@@ -22,6 +22,10 @@
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { toasts } from '../../lib/toast.svelte';
   import { focusAppContent } from '../../lib/announce.svelte';
+  import { untrack } from 'svelte';
+  import CommitCard from './CommitCard.svelte';
+  import { remoteHost } from './gitUiHelpers';
+  import { prWorkspace } from './prWorkspaceStore.svelte';
 
   // Views only some visits open stay out of the Git chunk (perf R7): the PR
   // list (+ CreatePr), the local review, the merge dialog and the conflict
@@ -39,7 +43,7 @@
 
   interface Props {
     repo: Repo;
-    tab: string; // graph | prs | review (legacy changes/history render the graph)
+    tab: string; // changes | graph (History) | prs | review (legacy history renders the graph)
     /** Embedded in the agent-mode right panel: switch tabs via `onTab` (local
      *  state) instead of routing, and hide the "← Repos" back button. */
     embedded?: boolean;
@@ -59,7 +63,7 @@
   // both render the graph now, and the Graph tab must read as active for them.
   // Legacy ids are the graph: changes/history, and focus (Focus is a
   // page-level view of the Git page now, not a repo sub-tab).
-  const effTab = $derived(tab === 'changes' || tab === 'history' || tab === 'focus' ? 'graph' : tab);
+  const effTab = $derived(tab === 'history' || tab === 'focus' ? 'graph' : tab);
 
   // Status is owned by the git store (single source of truth) so the auto-fetch
   // loop, the tab strip and this toolbar all stay in sync from one fetch.
@@ -241,29 +245,38 @@
     gitBridge.fileTool?.repoId === repo.id ? gitBridge.fileTool : null,
   );
 
-  /** Host of a remote URL for the unsupported-forge message — handles
-   *  https://, ssh:// and scp-like (git@host:path) forms (mirrors the daemon's
-   *  detect.rs split). */
-  function remoteHost(url: string | null): string {
-    if (!url) return 'this remote';
-    const u = url.trim();
-    for (const scheme of ['https://', 'http://', 'ssh://', 'git://']) {
-      if (u.startsWith(scheme)) {
-        const rest = u.slice(scheme.length).replace(/^[^@/]+@/, '');
-        return rest.split('/')[0]?.split(':')[0] || 'this remote';
-      }
-    }
-    const scp = u.match(/^(?:[^@/]+@)?([^:/]+):/);
-    return scp?.[1] ?? 'this remote';
-  }
-
   // Per-repo views only. Focus (my PRs + my Jira work) is cross-repo: it is a
   // page-level view of the Git page (GitPage's header), not a sub-tab here.
   const tabs = [
-    { id: 'graph', label: 'Graph' },
+    { id: 'changes', label: 'Changes' },
+    { id: 'graph', label: 'History' },
     { id: 'prs', label: 'Pull requests' },
     { id: 'review', label: 'Review' },
   ];
+
+  // Changes first: a repository with uncommitted changes opens on Changes, a
+  // clean one on History — decided once per open, so the view never jumps
+  // under the reader afterwards.
+  let landedFor = '';
+  $effect(() => {
+    const id = repo.id;
+    const s = status;
+    if (!s || landedFor === id) return;
+    landedFor = id;
+    untrack(() => {
+      const dirty = s.changes.length > 0;
+      if (dirty && effTab === 'graph') selectTab('changes');
+      else if (!dirty && effTab === 'changes') selectTab('graph');
+    });
+  });
+  // An agent asking to show the working tree (git.requestWip) lands on Changes.
+  $effect(() => {
+    if (git.wipRequest?.repoId === repo.id && (status?.changes.length ?? 0) > 0) untrack(() => effTab !== 'changes' && selectTab('changes'));
+  });
+  function openPr(n: number): void {
+    selectTab('prs');
+    prWorkspace.open(repo.id, n);
+  }
 
   function selectTab(id: string): void {
     resolving = false;
@@ -369,10 +382,10 @@
           onkeydown={onTabKey}
         >
           {t.label}
-          {#if t.id === 'graph' && status && status.changes.length > 0}
-            <span class="count" title="{plural(status.changes.length, 'uncommitted change')} (WIP)">{status.changes.length}</span>
+          {#if t.id === 'changes' && status && status.changes.length > 0}
+            <span class="count" title={plural(status.changes.length, 'uncommitted change')}>{status.changes.length}</span>
           {/if}
-          {#if t.id === 'graph' && conflictedPaths.length > 0}
+          {#if t.id === 'changes' && conflictedPaths.length > 0}
             <span class="count conflict-count" title={plural(conflictedPaths.length, 'conflicted file')}><Icon name="warning" size={12} />{conflictedPaths.length}</span>
           {/if}
         </button>
@@ -464,6 +477,8 @@
           <LazyMount lazy={PrWorkspaceLazy} what="pull requests" props={{ repoId: repo.id }} />
         </div>
       {/if}
+    {:else if effTab === 'changes'}
+      <CommitCard {repo} onopenpr={openPr} onhistory={() => selectTab('graph')} onresolve={openResolver} />
     {:else if effTab === 'review'}
       <div class="rv-tab-scroll">
         <LazyMount lazy={LocalReviewLazy} what="the local review" variant="panel" props={{ repoId: repo.id }} />

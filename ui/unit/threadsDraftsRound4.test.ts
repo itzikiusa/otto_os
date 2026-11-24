@@ -254,14 +254,14 @@ test('K6: a snapshot reload keeps the live output of a command that is still run
 test('K4: a repo with no account for its forge is reported as "needs an account", not "no PR"', async () => {
   let accounts: GitAccount[] = [];
   const prs = loadSource(
-    new URL('../src/modules/threads/threadPrs.svelte.ts', import.meta.url),
+    new URL('../src/lib/stores/branchPrs.svelte.ts', import.meta.url),
     {
       'lib/api/client': { api: { get: async () => accounts } },
       'lib/api/git': { gitApi: { prs: { list: async () => ({ items: [], has_more: false }) } } },
     },
     {},
     { relative: true },
-  ).threadPrs as typeof import('../src/modules/threads/threadPrs.svelte.ts')['threadPrs'];
+  ).branchPrs as typeof import('../src/lib/stores/branchPrs.svelte.ts')['branchPrs'];
   const repo = {
     id: 'r1', workspace_id: 'w', name: 'demo', path: '/demo', remote_url: 'git@github.com:o/demo.git',
     provider: 'github', git_account_id: null, created_at: '2026-11-16T00:00:00Z',

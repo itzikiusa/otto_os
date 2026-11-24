@@ -1,3 +1,8 @@
+<script lang="ts" module>
+  /** Change sets the Changes card already asked the drafting agent about. */
+  const autoDrafted = new Set<string>();
+</script>
+
 <script lang="ts">
   import { announce } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
@@ -8,7 +13,6 @@
   // when the pane is wide, below it when narrow — and the commit composer
   // (wip/WipComposer.svelte). Replaces the old separate "Changes" tab.
   import { onDestroy, tick, untrack } from 'svelte';
-  import type { Attachment } from 'svelte/attachments';
   import { toastError } from '../../lib/toastError';
   import { api, isAbortError } from '../../lib/api/client';
   import type {
@@ -27,6 +31,8 @@
   import { lsGet, lsSet } from '../../lib/storage';
   import WipSection from './wip/WipSection.svelte';
   import WipComposer from './wip/WipComposer.svelte';
+  import { wipRowNav } from './wip/wipRowNav';
+  import { wipLineCounts } from './wip/wipLineCounts.svelte';
   import {
     AUTO_COLLAPSE_FILES, KIND_WORD, buildTree, listRows, splitPath, treeRows,
     type LineCounts, type Row, type TFolder, type WipSection as Section,
@@ -36,6 +42,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { cancelDraft, draftInFlight, readComposer, startDraft, takePendingDraft, watchComposer, writeComposer } from './commitComposer';
+  import { runPush } from './pushFlow';
 
   interface Props {
     repoId: string;
@@ -46,8 +53,21 @@
     onclose?: () => void; // omitted in a sheet with its own close (Threads' commit sheet)
     /** Open the conflict resolver (RepoView's tab) for a conflicted file. */
     onresolve?: () => void;
+    /** The repo has a remote: an unpublished branch can still "Commit and
+     *  push" (publish). Unknown/false → only a branch with an upstream does. */
+    remote?: boolean;
+    /** Open the first file's diff on mount (the Changes page, wide enough to
+     *  show it beside the list). */
+    selectFirst?: boolean;
+    /** Ask the drafting agent for a message on mount when the card is empty
+     *  (the Changes page / commit sheet). A failure stays quiet: the empty
+     *  message field has focus instead. */
+    autoDraft?: boolean;
+    /** Every change counts as included while nothing is staged — without
+     *  touching the index; the first uncheck (or the commit) writes it. */
+    includeAll?: boolean;
   }
-  let { repoId, status, onstatus, oncommitted, onclose, onresolve }: Props = $props();
+  let { repoId, status, onstatus, oncommitted, onclose, onresolve, remote = false, selectFirst = false, autoDraft = false, includeAll = false }: Props = $props();
 
   // Conflicted files get their OWN section with resolve actions — they must
   // not sit in the stage/unstage trees, where the checkbox would `git add`
@@ -61,6 +81,12 @@
   const unstaged = $derived(status.changes.filter((c) => c.unstaged && c.kind !== 'conflicted' && c.kind !== 'untracked'));
   const untracked = $derived(status.changes.filter((c) => c.kind === 'untracked'));
   const staged = $derived(status.changes.filter((c) => c.staged && c.kind !== 'conflicted'));
+  let materialized = $state(false);
+  const virtualAll = $derived(includeAll && !materialized && staged.length === 0 && conflicted.length === 0 && unstaged.length + untracked.length > 0);
+  // What the lists show: in the virtual "all included" state every open change sits under Included.
+  const inStaged = $derived(virtualAll ? [...unstaged, ...untracked] : staged);
+  const inUnstaged = $derived(virtualAll ? [] : unstaged);
+  const inUntracked = $derived(virtualAll ? [] : untracked);
   // The daemon caps untracked rows (a non-ignored build dir can hold 200k):
   // say how many were left out instead of pretending the list is complete.
   const hiddenUntracked = $derived(
@@ -368,6 +394,13 @@
 
   async function stagePaths(paths: string[], stage: boolean, origin?: Origin): Promise<void> {
     if (paths.length === 0) return;
+    if (virtualAll && !stage) {
+      // Leaving a file out of the virtual "all included" writes the index: the rest get staged.
+      materialized = true;
+      paths = inStaged.map((c) => c.path).filter((p) => !paths.includes(p));
+      stage = true;
+      if (paths.length === 0) return;
+    }
     const before = indexOf(origin);
     try {
       const s = await api.post<RepoStatusResp>(
@@ -500,9 +533,9 @@
     if (!treeView) return listRows(changes);
     return treeRows(buildTree(changes), (n) => isCollapsed(`${section}:${n.path}`, n));
   }
-  const unstagedRows = $derived(rowsFor(unstaged, 'unstaged'));
-  const untrackedRows = $derived(rowsFor(untracked, 'untracked'));
-  const stagedRows = $derived(rowsFor(staged, 'staged'));
+  const unstagedRows = $derived(rowsFor(inUnstaged, 'unstaged'));
+  const untrackedRows = $derived(rowsFor(inUntracked, 'untracked'));
+  const stagedRows = $derived(rowsFor(inStaged, 'staged'));
   // Each section is WINDOWED against the shared `.wp-scroll` scroller: only
   // the rows in view (+ overscan) mount, between spacers sized to the rest;
   // ⌘F searches every row.
@@ -542,94 +575,15 @@
     selectedPath = same ? null : path;
   }
 
-  // ── +/− line counts (one `summary=true` numstat per side, no patches) ──
-  // Refreshed (debounced) on every status / live change. Past COUNTS_MAX
-  // files the counts are skipped: the list must never wait on them, and a
-  // failed read just leaves the rows without counts.
-  const COUNTS_MAX = 2000;
-  let unstagedCounts = $state.raw<LineCounts | null>(null);
-  let stagedCounts = $state.raw<LineCounts | null>(null);
-  function countsOf(d: DiffResp): LineCounts {
-    const m: LineCounts = new Map();
-    for (const f of d.files) {
-      m.set(f.path, f.is_binary ? { added: null, deleted: null } : { added: f.added ?? 0, deleted: f.deleted ?? 0 });
-    }
-    return m;
-  }
-  $effect(() => {
-    const id = repoId;
-    const wantU = unstaged.length > 0 && unstaged.length <= COUNTS_MAX;
-    const wantS = staged.length > 0 && staged.length <= COUNTS_MAX;
-    void status.changes;
-    void git.liveRev[id];
-    const ctl = new AbortController();
-    const load = (target: 'worktree' | 'staged', set: (m: LineCounts | null) => void): void => {
-      void api
-        .get<DiffResp>(`/repos/${id}/diff?target=${target}&summary=true`, ctl.signal)
-        .then((d) => {
-          if (!ctl.signal.aborted) set(countsOf(d));
-        })
-        .catch(() => {});
-    };
-    const t = setTimeout(() => {
-      if (wantU) load('worktree', (m) => (unstagedCounts = m));
-      else unstagedCounts = null;
-      if (wantS) load('staged', (m) => (stagedCounts = m));
-      else stagedCounts = null;
-    }, 250);
-    return () => {
-      clearTimeout(t);
-      ctl.abort();
-    };
-  });
-  const totals = $derived.by(() => {
-    let added = 0;
-    let deleted = 0;
-    for (const m of [unstagedCounts, stagedCounts]) {
-      for (const v of m?.values() ?? []) {
-        added += v.added ?? 0;
-        deleted += v.deleted ?? 0;
-      }
-    }
-    return added + deleted > 0 ? { added, deleted } : null;
-  });
+  // +/− line counts per side (wip/wipLineCounts.svelte.ts).
+  const counts = wipLineCounts(() => ({ repoId, unstaged: unstaged.length, staged: staged.length, rev: [status.changes, git.liveRev[repoId]] }));
+  const totals = $derived(counts.totals);
 
-  // ── Keyboard: ↑/↓ (Home/End) move between rows across sections, ←/→ fold
-  // a folder; with a diff open the moved-to file opens in its place (Tower /
-  // VS Code). The checkbox and discard stay one Tab away.
-  const rowNav: Attachment<HTMLElement> = (el) => {
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
-      const cur = (e.target as HTMLElement | null)?.closest?.<HTMLElement>('[data-wp-nav]');
-      if (!cur) return;
-      const all = Array.from(el.querySelectorAll<HTMLElement>('[data-wp-nav]'));
-      const i = all.indexOf(cur);
-      const rtl = getComputedStyle(el).direction === 'rtl';
-      let next: HTMLElement | undefined;
-      if (e.key === 'ArrowDown') next = all[i + 1];
-      else if (e.key === 'ArrowUp') next = all[i - 1];
-      else if (e.key === 'Home') next = all[0];
-      else if (e.key === 'End') next = all.at(-1);
-      else if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && cur.classList.contains('wp-fold-name')) {
-        e.preventDefault();
-        const expand = (e.key === 'ArrowRight') !== rtl;
-        if (expand !== (cur.getAttribute('aria-expanded') === 'true')) cur.click();
-        return;
-      } else return;
-      e.preventDefault();
-      if (!next) return;
-      next.focus();
-      next.scrollIntoView({ block: 'nearest' });
-      const key = next.dataset.wpNav ?? '';
-      const section = next.closest<HTMLElement>('[data-wp-section]')?.dataset.wpSection as Section | undefined;
-      if (selectedPath !== null && section && key.startsWith('f:')) {
-        stagedView = section === 'staged';
-        selectedPath = key.slice(2);
-      }
-    };
-    el.addEventListener('keydown', onKey);
-    return () => el.removeEventListener('keydown', onKey);
-  };
+  // Keyboard across the rows (wip/wipRowNav.ts).
+  const rowNav = wipRowNav(() => selectedPath !== null, (section, path) => {
+    stagedView = section === 'staged';
+    selectedPath = path;
+  });
 
   // Repo signing defaults. A failed read must not look like "this repo doesn't
   // sign": the toggle stays usable (per-commit override), but the row says the
@@ -706,16 +660,16 @@
   const amendPublished = $derived(amend ? amendPublishedAt(status.upstream, status.ahead, headRemotes) : null);
 
   const canCommit = $derived(
-    !committing && !drafting && (subject.trim() !== '' || amend) && (staged.length > 0 || amend),
+    !committing && !drafting && (subject.trim() !== '' || amend) && (inStaged.length > 0 || amend),
   );
   /** Why Commit is grey — a disabled button with no reason reads as broken
    *  (a draft works from UNSTAGED changes, so a good message can exist). */
   const commitHint = $derived(
     committing || drafting || canCommit
       ? ''
-      : staged.length === 0 && !amend
-        ? unstaged.length > 0
-          ? 'Stage files to commit'
+      : inStaged.length === 0 && !amend
+        ? unstaged.length + untracked.length > 0
+          ? 'Include a file to commit'
           : 'Nothing to commit'
         : subject.trim() === '' && !amend
           ? 'Write a summary to commit'
@@ -726,8 +680,37 @@
   function commitKey(e: KeyboardEvent): void {
     if (e.key !== 'Enter' || !(e.metaKey || e.ctrlKey) || e.isComposing) return;
     e.preventDefault();
-    if (canCommit) void commit();
+    if (canCommit) void commit(!!pushTo);
   }
+  /** Where the primary pushes: the upstream, or origin/<branch> (publish) with a remote. */
+  const pushTo = $derived(
+    !status.branch || status.branch === '(detached)' ? null : (status.upstream ?? (remote ? `origin/${status.branch}` : null)),
+  );
+
+  // The Changes page opens on the first file's diff (once per mount).
+  let firstPicked = false;
+  $effect(() => {
+    if (!selectFirst || firstPicked) return;
+    const first = inStaged[0] ?? inUnstaged[0] ?? inUntracked[0];
+    if (!first) return;
+    firstPicked = true;
+    untrack(() => {
+      if (selectedPath === null) selectFile(first.path, inStaged[0] ? 'staged' : first.kind === 'untracked' ? 'untracked' : 'unstaged');
+    });
+  });
+
+  // Drafted on open, once per change set, quietly (a failure focuses the field).
+  let quietDraft = false;
+  $effect(() => {
+    if (!autoDraft) return;
+    const key = `${repoId}:${status.changes.map((c) => c.path).join('\n')}`;
+    untrack(() => {
+      if (autoDrafted.has(key) || subject.trim() || body.trim() || drafting || inStaged.length === 0 || !draftable) return;
+      autoDrafted.add(key);
+      quietDraft = true;
+      void draftMessage();
+    });
+  });
 
   let draftGen = 0;
   async function draftMessage(): Promise<void> {
@@ -758,7 +741,11 @@
       await applyDraft(d);
     } catch (e) {
       const aborted = typeof isAbortError === 'function' && isAbortError(e);
-      if (alive && repo === repoId && current() && !aborted) toastError('Couldn’t draft the message', e);
+      if (alive && repo === repoId && current() && !aborted) {
+        if (quietDraft) panelEl?.querySelector<HTMLInputElement>('.subject-input')?.focus();
+        else toastError('Couldn’t draft the message', e);
+      }
+      quietDraft = false;
     } finally {
       clearInterval(tick);
       if (typeof draftTick !== 'undefined' && draftTick === tick) draftTick = null;
@@ -793,6 +780,10 @@
       body = text.slice(nl + 1).replace(/^\s*\n/, '').trimEnd();
     }
     draftSessionId = d.session_id ?? null;
+    if (quietDraft) {
+      quietDraft = false;
+      return;
+    }
     toasts.info(
       'Draft ready',
       d.from_staged
@@ -801,11 +792,13 @@
     );
   }
 
-  async function commit(): Promise<void> {
+  async function commit(push = false): Promise<void> {
     if (committing) return;
     committing = true;
+    let pushed: { branch: string; upstream: string | null } | null = null;
     try {
       const message = subject.trim() + (body.trim() ? `\n\n${body.trim()}` : '');
+      if (virtualAll) await git.stage(repoId, inStaged.map((c) => c.path));
       const r = await git.commit(repoId, { message, amend, sign: signOn });
       toasts.success('Committed', r.sha.slice(0, 8));
       subject = '';
@@ -814,12 +807,15 @@
       amend = false;
       onstatus(r.status);
       selectedPath = null;
+      if (push && r.status.branch) pushed = { branch: r.status.branch, upstream: r.status.upstream };
       oncommitted();
     } catch (e) {
       toastError('Couldn’t commit the changes', e);
     } finally {
       committing = false;
     }
+    // After the panel may have closed; runPush owns its toasts and the rejected-push choice.
+    if (pushed) await runPush(repoId, pushed, onstatus);
   }
 </script>
 
@@ -859,9 +855,14 @@
 
 <div class="wip-panel" bind:this={panelEl}>
   <div class="sr-only" role="status" aria-live="polite">{announcement}</div>
+  <!-- The commit card first: what you are about to commit, one primary. -->
+  <WipComposer
+    bind:subject bind:body bind:amend bind:signOn bind:showDraftTerm
+    {amendSubject} {amendPublished} {drafting} {draftElapsed} {draftable} {draftedAt} {liveDraftId}
+    {committing} {canCommit} {commitHint} stagedCount={inStaged.length} totalCount={status.changes.length} {pushTo} {signCfg} {signError}
+    onkey={commitKey} ondraft={draftMessage} onstopdraft={stopDraft} oncommit={(push) => void commit(push)}
+  />
   <div class="wp-head">
-    <span class="wp-title">Changes</span>
-    <span class="wp-branch" title="On branch {status.branch}"><Icon name="branch" size={12} /><span dir="ltr">{status.branch}</span></span>
     <span class="wp-count">{plural(status.changes.length, 'file')} changed</span>
     {#if totals}
       <span class="wp-totals" title="{totals.added.toLocaleString()} lines added, {totals.deleted.toLocaleString()} deleted">
@@ -870,13 +871,13 @@
       </span>
     {/if}
     <span class="grow"></span>
-    {#if unstaged.length + untracked.length > 0}
+    {#if inUnstaged.length + inUntracked.length > 0}
       <button
         type="button"
         class="btn ghost small wp-stage-all"
-        title="Stage every unstaged and untracked file"
+        title="Include every changed and new file in the commit"
         onclick={() => void stagePaths([...unstaged, ...untracked].map((c) => c.path), true)}
-      >Stage all</button>
+      >Include all</button>
     {/if}
     <button
       type="button"
@@ -918,11 +919,14 @@
         </section>
       {/if}
 
-      {@render section('unstaged', 'Unstaged files', unstaged, unstagedRows, unstagedWin, 'Nothing unstaged.', unstagedCounts)}
-      {#if untracked.length > 0 || hiddenUntracked > 0}
-        {@render section('untracked', 'Untracked files', untracked, untrackedRows, untrackedWin, 'No untracked files shown.', null)}
+      <!-- Checked = in the commit (staged); uncheck to leave a file out. -->
+      {@render section('staged', 'Included', inStaged, stagedRows, stagedWin, 'Nothing included yet — check a file below.', virtualAll ? counts.unstaged : counts.staged)}
+      {#if inUnstaged.length > 0}
+        {@render section('unstaged', 'Not included', inUnstaged, unstagedRows, unstagedWin, 'Everything is included.', counts.unstaged)}
       {/if}
-      {@render section('staged', 'Staged files', staged, stagedRows, stagedWin, 'Nothing staged yet.', stagedCounts)}
+      {#if inUntracked.length > 0 || (hiddenUntracked > 0 && !virtualAll)}
+        {@render section('untracked', 'New files, not included', inUntracked, untrackedRows, untrackedWin, 'No new files shown.', null)}
+      {/if}
     </div>
 
     <!-- Per-file diff: a SIBLING of the list scroller, never its tail (inside
@@ -974,14 +978,6 @@
       </div>
     {/if}
 
-    <div class="wp-compose">
-      <WipComposer
-        bind:subject bind:body bind:amend bind:signOn bind:showDraftTerm
-        {amendSubject} {amendPublished} {drafting} {draftElapsed} {draftable} {draftedAt} {liveDraftId}
-        {committing} {canCommit} {commitHint} stagedCount={staged.length} {signCfg} {signError}
-        onkey={commitKey} ondraft={draftMessage} onstopdraft={stopDraft} oncommit={commit}
-      />
-    </div>
   </div>
 </div>
 
@@ -1005,27 +1001,6 @@
     flex-shrink: 0;
     min-width: 0;
   }
-  .wp-title {
-    font-size: var(--fs-m);
-    font-weight: 600;
-    color: var(--text);
-    flex-shrink: 0;
-  }
-  .wp-branch {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    min-width: 0;
-    max-width: 30%;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
-  .wp-branch > span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .wp-branch :global(svg) { flex-shrink: 0; }
   .wp-count {
     font-size: var(--fs-s);
     color: var(--text-dim);
@@ -1066,21 +1041,17 @@
   }
   /* With a diff open the list yields (capped, still scrollable) and the diff keeps half the body (the composer squeezed it to a header); the body scrolls. */
   .wp-body.has-diff .wp-scroll { flex: 0 1 auto; max-height: 45%; }
-  .wp-compose { flex-shrink: 0; }
   .wp-body.has-diff { overflow-y: auto; overscroll-behavior: contain; } .wp-body.has-diff .wp-diff { min-height: 50%; }
   @container wip (min-width: 760px) {
     .wp-body.has-diff {
       display: grid;
-      grid-template-columns: minmax(280px, 36%) minmax(0, 1fr);
-      grid-template-rows: minmax(0, 1fr) auto;
-      grid-template-areas: 'list diff' 'compose diff';
+      grid-template-columns: minmax(260px, 30%) minmax(0, 1fr);
+      grid-template-rows: minmax(0, 1fr);
+      grid-template-areas: 'list diff';
     }
     .wp-body.has-diff .wp-scroll {
       grid-area: list;
       max-height: none;
-    }
-    .wp-body.has-diff .wp-compose {
-      grid-area: compose;
     }
     .wp-body.has-diff .wp-diff {
       grid-area: diff;
@@ -1089,7 +1060,6 @@
     }
   }
   @container wip (max-width: 420px) {
-    .wp-branch,
     .wp-totals {
       display: none;
     }

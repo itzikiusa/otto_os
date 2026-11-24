@@ -1,15 +1,16 @@
-// The open pull request for a repo branch (the right panel's "Pull request"
-// surface, and whether its launcher row applies), cached per repo:branch.
+// The open pull request for a repo branch — Git's commit card ("Open pull
+// request"), Threads' details card and "Pull request" surface — cached per
+// repo:branch.
 // One `GET /repos/{id}/prs?state=open` per key; `forget` re-reads.
-import { api } from '../../lib/api/client';
-import { gitApi } from '../../lib/api/git';
-import type { GitAccount, GitProviderKind, PrSummary, Repo } from '../../lib/api/types';
-import { forgeLabel } from './threadsHelpers';
+import { api } from '../api/client';
+import { gitApi } from '../api/git';
+import type { GitAccount, GitProviderKind, PrSummary, Repo } from '../api/types';
+import { forgeLabel } from '../gitNextStep';
 
 const ACCOUNTS_TTL_MS = 60_000;
 const FAILED_RETRY_MS = 30_000;
 
-class ThreadPrs {
+class BranchPrs {
   private byKey = $state<Record<string, PrSummary | null>>({});
   /** Keys whose repo has no account and the person none for its forge:
    *  "no PR" there means "can't look", which the surface says. */
@@ -113,4 +114,4 @@ class ThreadPrs {
   }
 }
 
-export const threadPrs = new ThreadPrs();
+export const branchPrs = new BranchPrs();

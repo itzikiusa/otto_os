@@ -22,7 +22,7 @@
   import ThreadAgentsTasks from './runtime/ThreadAgentsTasks.svelte';
   import RuntimeSubagentPane from './runtime/RuntimeSubagentPane.svelte';
   import { PrSurfaceView, SideChatView } from './threadLazy.svelte';
-  import { threadPrs } from './threadPrs.svelte';
+  import { branchPrs as threadPrs } from '../../lib/stores/branchPrs.svelte';
   import { threadRepos } from './threadRepos.svelte';
   import { threadsChrome } from './threadsChrome.svelte';
   import { isPlainShellSession } from './threadsHelpers';

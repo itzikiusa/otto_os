@@ -42,6 +42,8 @@ test('an on-disk edit, a new file and a CLI `git add` appear without waiting for
   const menu = page.locator('.ctx-menu');
   await menu.locator('.ctx-search-input').fill(name);
   await menu.getByRole('menuitem', { name }).first().click();
+  // A dirty repository opens on Changes; this spec drives the graph's WIP row.
+  await page.locator('.rv-tab', { hasText: 'History' }).click();
   const wipRow = page.locator('.wip-row');
   await expect(wipRow).toBeVisible({ timeout: 15_000 });
   await wipRow.click();

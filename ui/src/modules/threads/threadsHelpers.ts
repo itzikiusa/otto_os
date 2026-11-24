@@ -5,6 +5,8 @@ import { delegatedParentId, inThreadsScope, type SessionPool } from '../../lib/s
 import { worktreeProjects } from './worktreeProjects.svelte';
 
 export { harnessLabel, isPlainShellSession };
+// The forge name (GitHub / Bitbucket / GitLab) is shared with Git's commit card.
+export { forgeLabel } from '../../lib/gitNextStep';
 
 // The file viewer's preview kinds and table parse live with the shared
 // FilePreview (lib/) — re-exported so callers keep importing them from here.
@@ -123,14 +125,6 @@ export function repoForCwd(cwd: string | null | undefined, repos: readonly Repo[
   return best;
 }
 
-/** "GitHub" / "Bitbucket" / "GitLab" for a repo's forge, else null. */
-export function forgeLabel(repo: Repo | null | undefined): string | null {
-  const kind = repo?.forge && repo.forge !== 'unrecognized' ? repo.forge : repo?.provider;
-  if (kind === 'github') return 'GitHub';
-  if (kind === 'bitbucket') return 'Bitbucket';
-  if (kind === 'gitlab') return 'GitLab';
-  return null;
-}
 
 /** File basename (`src/App.svelte` -> `App.svelte`). */
 export function baseName(path: string): string {

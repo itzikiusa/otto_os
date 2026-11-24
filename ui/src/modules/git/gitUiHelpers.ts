@@ -193,3 +193,19 @@ export function clampLinePickPos(
     left: Math.max(gap, Math.min(viewport.width - w - gap, rect.left)),
   };
 }
+
+/** Host of a remote URL for the unsupported-forge message — handles
+ *  https://, ssh:// and scp-like (git@host:path) forms (mirrors the daemon's
+ *  detect.rs split). */
+export function remoteHost(url: string | null): string {
+  if (!url) return 'this remote';
+  const u = url.trim();
+  for (const scheme of ['https://', 'http://', 'ssh://', 'git://']) {
+    if (u.startsWith(scheme)) {
+      const rest = u.slice(scheme.length).replace(/^[^@/]+@/, '');
+      return rest.split('/')[0]?.split(':')[0] || 'this remote';
+    }
+  }
+  const scp = u.match(/^(?:[^@/]+@)?([^:/]+):/);
+  return scp?.[1] ?? 'this remote';
+}

@@ -70,6 +70,8 @@ async function openWipFile(page: Page, name: string, path: string) {
     await menu.getByRole('menuitem', { name }).first().click();
   }
   await expect(page.locator('.rv-tabs')).toBeVisible();
+  // A dirty repository opens on Changes; this spec drives the graph.
+  await page.locator('.rv-tab', { hasText: 'History' }).click();
 
   const wipRow = page.locator('.wip-row');
   await expect(wipRow).toBeVisible({ timeout: 15_000 });

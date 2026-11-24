@@ -101,6 +101,8 @@ async function openRepo(page: Page): Promise<void> {
     await menu.getByRole('menuitem', { name: REPO_NAME }).first().click();
   }
   await expect(page.locator('.rv-tabs')).toBeVisible();
+  // A dirty repository opens on Changes; this spec drives the graph.
+  await page.locator('.rv-tab', { hasText: 'History' }).click();
   await expect(page.locator('.refs-panel')).toBeVisible({ timeout: 20_000 });
 }
 
