@@ -155,3 +155,20 @@ test('a reload with a chat pane focused restores it without a false "gone" toast
   await page.waitForTimeout(1500); // ui-guards: allow — proves an absence (no toast)
   await expect(page.locator('.toast.error')).toHaveCount(0);
 });
+
+// ⌘⇧T reopens a closed chat pane (not an older terminal tab).
+test('⌘⇧T reopens a closed chat pane', async ({ page }) => {
+  await page.goto(`/#/agents/${ids.Baresi}`);
+  await expect(paneOf(page, ids.Baresi)).toBeVisible({ timeout: 30_000 });
+  await expect(row(page, threadId)).toBeVisible({ timeout: 20_000 });
+  await row(page, threadId).click();
+  const pane = page.getByTestId(`thread-pane-${threadId}`);
+  await expect(pane).toBeVisible({ timeout: 20_000 });
+  await pane.locator('.tpane-title').click();
+  await page.keyboard.press('ControlOrMeta+w');
+  await expect(page.locator(`[data-tab-id="${threadId}"]`)).toHaveCount(0);
+  await page.keyboard.press('ControlOrMeta+Shift+t');
+  await expect(pane).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator(`[data-tab-id="${threadId}"]`)).toHaveCount(1);
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe(`#/agents/${threadId}`);
+});
