@@ -20,6 +20,7 @@ import { existsSync, mkdtempSync, readFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx, seedRedis } from './seed';
+import { expectMcpJsonHoldsNoCredential } from './helpers';
 
 const SLOT = process.env.OTTO_E2E_SLOT ?? '0';
 
@@ -138,13 +139,13 @@ test('Connections MCP: real otto MCP server queries a live DB read-only', async 
 
   // ---- (1) the otto server is attached to the session ----------------------
   // Shared configuration is identity-neutral; the PTY inherits its own credentials.
-  const mcpDoc = JSON.parse(readFileSync(join(root, '.mcp.json'), 'utf8')) as {
+  const mcpRaw = readFileSync(join(root, '.mcp.json'), 'utf8');
+  const mcpDoc = JSON.parse(mcpRaw) as {
     mcpServers?: Record<string, { command: string; args: string[]; env?: Record<string, string> }>;
   };
   const otto = mcpDoc.mcpServers?.otto;
   expect(otto, '.mcp.json must contain the otto MCP server').toBeTruthy();
   expect(otto!.args).toEqual(['mcp-tools']);
-  expect(otto!.env, 'shared workspace config must never persist session credentials').toBeUndefined();
   const sessionId = (await sessRes.json()).id as string;
   const tokenFile = join(root, '.fixture-session-token');
   let token = '';
@@ -158,6 +159,7 @@ test('Connections MCP: real otto MCP server queries a live DB read-only', async 
   } finally {
     if (existsSync(tokenFile)) unlinkSync(tokenFile);
   }
+  expectMcpJsonHoldsNoCredential(mcpRaw, token);
   const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('OTTO_')));
 
   // ---- (2)+(3) drive the REAL mcp-tools server over stdio ------------------
@@ -274,6 +276,9 @@ test('Connections MCP: real otto MCP server queries a live DB read-only', async 
   // sessions" on the Otto server page (one copy).
   await page.goto('/#/settings/mcp-servers');
   await expect.poll(() => page.evaluate(() => location.hash), { timeout: 30_000 }).toBe('#/mcp/servers');
+  // The page reopens on the section last used (another spec may have left it
+  // on External servers), so open the Otto server section first.
   await page.goto('/#/mcp');
+  await page.getByRole('tablist', { name: 'MCP sections' }).getByRole('tab', { name: 'Otto server' }).click();
   await expect(page.locator('input[data-testid="mcp-session-attach"]')).toBeVisible({ timeout: 30_000 });
 });

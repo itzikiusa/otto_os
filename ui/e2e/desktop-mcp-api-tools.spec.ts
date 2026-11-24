@@ -6,7 +6,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx } from './seed';
-import { openPage } from './helpers';
+import { expectMcpJsonHoldsNoCredential, openPage } from './helpers';
 
 // API Client through MCP: route contracts, inward/outward catalogs, and the
 // agent source marker in the live History UI. Desktop-browser project only.
@@ -254,13 +254,7 @@ test('inward mcp-tools advertises the API tools and lists the seeded request', a
     };
     const otto = mcpDoc.mcpServers?.otto;
     expect(otto, '.mcp.json must contain the otto MCP server').toBeTruthy();
-    // The shared file never holds a credential: the otto entry forwards each
-    // bridge variable by REFERENCE (`${OTTO_MCP_TOKEN:-}`, the Muse fix
-    // 26d7074f2), which each agent CLI expands from its own env — never a value.
-    expect(mcpRaw.includes(token), 'the session token is never written into .mcp.json').toBe(false);
-    for (const [name, value] of Object.entries(otto!.env ?? {})) {
-      expect(value, `${name} is a reference, not a literal`).toMatch(/^\$\{[A-Z][A-Z0-9_]*(:-)?\}$/);
-    }
+    expectMcpJsonHoldsNoCredential(mcpRaw, token);
 
     // `.mcp.json` is deliberately identity-neutral (references only — the daemon
     // never persists a session token into a file several sessions share), so the
