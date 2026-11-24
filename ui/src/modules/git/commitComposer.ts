@@ -16,6 +16,9 @@ export interface ComposerText {
   body: string;
   /** When the agent's message landed (the byline), null when hand-written. */
   draftedAt: number | null;
+  /** The fields hold what the running draft streamed, untouched by hand — a
+   *  panel remounted mid-stream (or after it ended) keeps them the agent's. */
+  agent?: boolean;
 }
 
 interface Stored extends ComposerText {
@@ -35,6 +38,7 @@ function read(repoId: string): Stored {
       subject: typeof v.subject === 'string' ? v.subject : '',
       body: typeof v.body === 'string' ? v.body : '',
       draftedAt: typeof v.draftedAt === 'number' ? v.draftedAt : null,
+      agent: v.agent === true,
       pending: v.pending && typeof v.pending.message === 'string' ? v.pending : null,
     };
   } catch {
@@ -53,8 +57,8 @@ function write(repoId: string, s: Stored): void {
 
 /** The saved summary / description for `repoId` (empty when none). */
 export function readComposer(repoId: string): ComposerText {
-  const { subject, body, draftedAt } = read(repoId);
-  return { subject, body, draftedAt };
+  const { subject, body, draftedAt, agent } = read(repoId);
+  return { subject, body, draftedAt, agent };
 }
 
 /** Save what the composer shows now (empty text clears the entry). */

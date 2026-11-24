@@ -159,6 +159,36 @@ test('R1-045: History and back mid-stream: the draft keeps streaming into the fi
   await expect(replaceAsk(page)).toHaveCount(0);
 });
 
+test('R1-045: a piece that streams while on History is caught up on return, and the end lands without asking', async ({ page }) => {
+  const { card, subject, body } = await slowDraftCard(page, 'r1-draft-away');
+  await subject.fill('');
+  await body.fill('');
+  await card.getByRole('button', { name: 'Draft from the diff' }).click();
+  await expect(subject).toHaveValue('feat(app): greet the world', { timeout: 10_000 });
+  await page.locator('.git-views .rv-tab', { hasText: 'History' }).click();
+  await page.waitForTimeout(2000); // ui-guards: allow — the body's first piece lands while away (1.5 s apart)
+  await page.locator('.git-views .rv-tab', { hasText: 'Changes' }).click();
+  const back = page.getByTestId('commit-card');
+  await expect(back.locator('.body-input')).toHaveValue(/^- say hello/, { timeout: 3000 });
+  await expect(back.locator('.body-input')).toHaveValue('- say hello world', { timeout: 15_000 });
+  await page.waitForTimeout(500); // ui-guards: allow — a confirm would open now
+  await expect(replaceAsk(page)).toHaveCount(0);
+});
+
+test('R1-045: a draft that finishes while on History lands on return without asking', async ({ page }) => {
+  const { card, subject, body } = await slowDraftCard(page, 'r1-draft-done-away');
+  await subject.fill('');
+  await body.fill('');
+  await card.getByRole('button', { name: 'Draft from the diff' }).click();
+  await expect(subject).toHaveValue('feat(app): greet the world', { timeout: 10_000 });
+  await page.locator('.git-views .rv-tab', { hasText: 'History' }).click();
+  await page.waitForTimeout(6000); // ui-guards: allow — the rest streams and the draft ends while away
+  await page.locator('.git-views .rv-tab', { hasText: 'Changes' }).click();
+  await expect(page.getByTestId('commit-card').locator('.body-input')).toHaveValue('- say hello world', { timeout: 10_000 });
+  await page.waitForTimeout(500); // ui-guards: allow — a confirm would open now
+  await expect(replaceAsk(page)).toHaveCount(0);
+});
+
 test('R1-016: local feat/x AND origin/feat/x — the force retry force-deletes the LOCAL branch', async ({ page }) => {
   const root = tempDir('otto-e2e-r1bd-');
   const origin = join(root, 'origin.git');

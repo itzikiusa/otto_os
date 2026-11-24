@@ -514,6 +514,7 @@ test('WipPanel.followDraft stores draftTick so unmount can clear it mid-draft', 
   let nextId = 200;
   const s = componentFunctions(git('WipPanel.svelte'), ['followDraft', 'applyDraft', 'split'], {
     alive: true,
+    liveDraftText: () => '',
     repoId: 'r1',
     subject: '',
     body: '',

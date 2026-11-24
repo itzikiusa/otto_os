@@ -143,7 +143,7 @@
   /** The draft streams in: into empty fields directly (`streamed` = what we
    *  wrote, so an edit stops it), else as a preview under them. */
   let draftPreview = $state('');
-  let streamed: { s: string; b: string } | null = null;
+  let streamed = $state.raw<{ s: string; b: string } | null>(null);
   let previewShown = $state(false);
   /** Why the last draft failed, in one line (shown with Retry). */
   let draftError = $state<string | null>(null);
@@ -168,18 +168,20 @@
       body = saved.body;
       draftedAt = saved.draftedAt;
       const stop = watchComposer(repo);
+      // Fields the agent last wrote (or empty ones) stay the agent's: they
+      // catch up on what streamed while away and take its end without asking.
+      const mine = saved.agent || (!subject && !body);
       const parked = takePendingDraft(repo);
-      if (parked) void applyDraft(parked);
+      if (parked) { streamed = mine ? { s: subject, b: body } : null; void applyDraft(parked); }
       const running = draftInFlight(repo);
-      // Joined mid-stream: fields holding what streamed so far are the agent's.
-      if (running && !drafting) { const so = split(liveDraftText(repo)); streamed = so.s === subject && so.b === body ? so : null; void followDraft(running, repo); }
+      if (running && !drafting) { streamed = mine ? split(liveDraftText(repo)) : null; if (streamed) ({ s: subject, b: body } = streamed); void followDraft(running, repo); }
       const unsink = onDraftText(repo, (t) => drafting && showStreamed(t));
       return () => { stop(); unsink(); };
     });
     return unwatch;
   });
   $effect(() => {
-    const text = { subject, body, draftedAt };
+    const text = { subject, body, draftedAt, agent: streamed !== null && subject === streamed.s && body === streamed.b };
     untrack(() => {
       if (composerRepo) writeComposer(composerRepo, text);
     });
@@ -736,7 +738,7 @@
   async function followDraft(p: Promise<DraftCommitMessageResp>, repo: string): Promise<void> {
     const gen = typeof draftGen === 'number' ? ++draftGen : 0;
     const current = () => typeof draftGen !== 'number' || gen === draftGen;
-    drafting = true; draftElapsed = 0; draftPreview = ''; draftError = null; previewShown = false;
+    drafting = true; draftElapsed = 0; draftPreview = liveDraftText(repo); draftError = null; previewShown = false;
     const tick = setInterval(() => (draftElapsed += 1), 1000);
     if (typeof draftTick !== 'undefined') { if (draftTick !== null) clearInterval(draftTick); draftTick = tick; }
     try {
