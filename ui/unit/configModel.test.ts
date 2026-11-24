@@ -97,3 +97,8 @@ test('YAML parse errors become Problems entries at their line', async () => {
 test('YAML: a key that starts with "-" is a key (no TypeError that empties Structure and Problems)', () => {
   assert.deepEqual(outline(yamlSymbols('-foo: 1\n--port: 8080\nbar:\n  - -x: 2\n')), ['key -foo:1', 'key --port:2', ['key bar:3', ['key -x:4']]]);
 });
+
+test('TOML / INI: only a """ or \'\'\' right after = opens a multi-line string; INI has none', () => {
+  assert.deepEqual(outline(tomlSymbols('[a]\nfoo = "x" # """\nbar = 1\n')), [['section a:1', ['key foo:2', 'key bar:3']]]);
+  assert.deepEqual(outline(confSymbols('[s]\nk = """\nm = 1\n')), [['section s:1', ['key k:2', 'key m:3']]]);
+});

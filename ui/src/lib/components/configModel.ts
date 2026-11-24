@@ -98,7 +98,7 @@ export function yamlSymbols(text: string): IdeSymbolNode[] {
 
 /** TOML tables ([a.b], [[arr]]) with their keys; keys before the first table at the top. */
 export function tomlSymbols(text: string): IdeSymbolNode[] {
-  return sectionSymbols(text, /^\s*(\[\[?)\s*([^\]#]+?)\s*\]\]?\s*(?:#.*)?$/, /^\s*((?:[A-Za-z0-9_-]+|"[^"]*"|'[^']*')(?:\s*\.\s*(?:[A-Za-z0-9_-]+|"[^"]*"|'[^']*'))*)\s*=/, '#');
+  return sectionSymbols(text, /^\s*(\[\[?)\s*([^\]#]+?)\s*\]\]?\s*(?:#.*)?$/, /^\s*((?:[A-Za-z0-9_-]+|"[^"]*"|'[^']*')(?:\s*\.\s*(?:[A-Za-z0-9_-]+|"[^"]*"|'[^']*'))*)\s*=/, '#', true);
 }
 
 /** INI / conf: [sections] with their keys. */
@@ -106,7 +106,7 @@ export function confSymbols(text: string): IdeSymbolNode[] {
   return sectionSymbols(text, /^\s*(\[)\s*([^\]]+?)\s*\]\s*(?:[#;].*)?$/, /^\s*(?:export\s+)?([^\s=:#;[]+?)\s*[=:]/, '#;');
 }
 
-function sectionSymbols(text: string, header: RegExp, key: RegExp, comments: string): IdeSymbolNode[] {
+function sectionSymbols(text: string, header: RegExp, key: RegExp, comments: string, multiline = false): IdeSymbolNode[] {
   const out: IdeSymbolNode[] = [];
   let section: IdeSymbolNode | null = null;
   let ml = ''; // inside a TOML multi-line string
@@ -122,7 +122,7 @@ function sectionSymbols(text: string, header: RegExp, key: RegExp, comments: str
     if (k) {
       (section ? section.children! : out).push(node(k[1].replace(/\s*\.\s*/g, '.'), 'key', n));
       if (section) section.end_line = n;
-      const open = /("""|''')/.exec(raw.slice(k[0].length));
+      const open = multiline && /^\s*("""|''')/.exec(raw.slice(k[0].length)); // a TOML value that opens one
       if (open && raw.split(open[1]).length === 2) ml = open[1];
     } else if (section) section.end_line = n;
   }

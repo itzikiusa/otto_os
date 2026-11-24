@@ -277,3 +277,10 @@ test('nginx, proto, HCL, diff, PowerShell and batch get their own tokens', () =>
   assert.equal(styleOf(v, 5, 'align:start'), 'attributeName');
   assert.equal(styleOf(v, 6, '<v Bob>'), 'labelName');
 });
+
+test('YAML: a flow mapping\'s first key is a key, after the outer key', () => {
+  const l = tokenize(yamlParser, 'outer: { a: 1, b: 2 }\nlist: [x, y]');
+  assert.equal(styleOf(l, 0, 'a'), 'propertyName');
+  assert.equal(styleOf(l, 0, 'b'), 'propertyName');
+  assert.notEqual(styleOf(l, 1, 'x'), 'propertyName');
+});
