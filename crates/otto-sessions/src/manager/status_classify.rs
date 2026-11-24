@@ -161,6 +161,10 @@ pub(super) struct Observation {
     pub burst: bool,
     /// Since a spinner / elapsed-time cell last ticked (`None` = never seen).
     pub busy_age: Option<Duration>,
+    /// Input (a person's or an agent's: a keystroke, a paste, a first
+    /// message) has reached this process, or it was adopted mid-life. Until
+    /// then its output is a start-up banner and first prompt, not work.
+    pub touched: bool,
 }
 
 /// The working / idle decision, pure.
@@ -187,8 +191,10 @@ pub(super) fn classify(o: &Observation) -> SessionStatus {
         return Idle;
     }
     // Idle → Working only on confirmed output (debounced: a periodic
-    // one-row redraw never flips the row).
-    if o.burst && content_within(WORKING_WINDOW) {
+    // one-row redraw never flips the row), and never before the first input:
+    // six shells started at once printed their prompts and read Working,
+    // then a false unread "Done", though nobody had asked them anything.
+    if o.touched && o.burst && content_within(WORKING_WINDOW) {
         Working
     } else {
         Idle
@@ -348,12 +354,20 @@ pub(super) struct StatusClassifier {
     /// An open mark already outlived [`OPEN_TURN_SILENCE`]: ignored from then
     /// on, so a later stray repaint cannot revive it (a flap every repaint).
     spent_open: Option<Instant>,
+    /// Re-adopted after a daemon restart: it may be mid-work with no new
+    /// input, so its output counts from the first tick ([`Observation::touched`]).
+    adopted: bool,
 }
 
 impl StatusClassifier {
     /// A classifier for `session`'s new process `handle`. A new process starts
     /// with no hook mark (a resume's old turn is not this process's).
-    pub fn new(manager: &SessionManager, session: &Session, handle: Arc<PtyHandle>) -> Self {
+    pub fn new(
+        manager: &SessionManager,
+        session: &Session,
+        handle: Arc<PtyHandle>,
+        adopted: bool,
+    ) -> Self {
         manager.turn_marks.remove(&session.id);
         let family = manager.cli_family(&session.provider);
         let transcript = matches!(family.as_str(), "claude" | "codex").then(|| TranscriptProbe {
@@ -375,6 +389,7 @@ impl StatusClassifier {
             seen_output: None,
             transcript,
             spent_open: None,
+            adopted,
         }
     }
 
@@ -428,6 +443,7 @@ impl StatusClassifier {
                 .screen
                 .busy_at
                 .map(|t| now.saturating_duration_since(t)),
+            touched: self.adopted || last_input.is_some(),
         })
     }
 }
@@ -446,6 +462,7 @@ mod tests {
             content_age: None,
             burst: false,
             busy_age: None,
+            touched: true,
         }
     }
 
@@ -731,5 +748,40 @@ mod tests {
         let mut old = ScreenTracker::default();
         old.observe((80, 3), prints(&["$ ls", "a b", "$ "]), now, false);
         assert!(old.observe((80, 3), redrawn(), now, false));
+    }
+
+    #[test]
+    fn status_classify_start_up_output_before_any_input_is_not_work() {
+        // A new shell prints its banner and first prompt: confirmed output,
+        // but nobody has asked it anything yet.
+        let started = Observation {
+            burst: true,
+            content_age: Some(Duration::ZERO),
+            touched: false,
+            ..obs(Running)
+        };
+        assert_eq!(classify(&started), Idle);
+        assert_eq!(
+            classify(&Observation {
+                current: Idle,
+                ..started
+            }),
+            Idle
+        );
+        // The first input (a typed command, an agent's first message) makes
+        // the same output work.
+        assert_eq!(
+            classify(&Observation {
+                touched: true,
+                ..started
+            }),
+            Working
+        );
+        // A turn signal still wins without input (a hook-driven agent).
+        let turn = Observation {
+            turn: Some(true),
+            ..started
+        };
+        assert_eq!(classify(&turn), Working);
     }
 }
