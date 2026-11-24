@@ -351,7 +351,7 @@
   {@const cls = s.archived ? 'rest' : classOf(s)}
   <AgentsInboxRow
     session={s}
-    project={wsName(s.workspace_id)}
+    project={ws.allWorkspaces || (s.workspace_id !== ws.currentId) ? wsName(s.workspace_id) : null}
     status={word}
     strong={cls === 'needs' || cls === 'done'}
     kind={s.archived ? 'archived' : thread ? 'chat' : 'terminal'}

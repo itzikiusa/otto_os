@@ -53,6 +53,8 @@ test('one list with words; needs you first; the navigator folds to its rail and 
   for (const t of TITLES) await expect(page.getByTestId(`agents-status-${ids[t]}`)).toHaveText(/\S/);
   // Folded: the expanded navigator is gone while Agents is open.
   await expect(page.locator('.navigator')).toHaveCount(0);
+  // The picker already scopes the list to this workspace: no row repeats it (review 2, N1).
+  await expect(rows(page).locator('.tr-proj')).toHaveCount(0);
 
   // A session that needs you rises to the top and says so (not the one on
   // screen: arrival opened the latest, and a raise you are watching is seen).
@@ -68,6 +70,11 @@ test('one list with words; needs you first; the navigator folds to its rail and 
     await scheme(page, s);
     if (SHOTS) await page.screenshot({ path: `${SHOTS}/agents-inbox-1440-${s}.png`, animations: 'disabled' });
   }
+
+  // Under "All workspaces" each row names its workspace.
+  await page.getByTestId('agents-sort-toggle').click();
+  await page.getByRole('menuitemcheckbox', { name: 'All workspaces' }).click();
+  await expect(rows(page).first().locator('.tr-proj')).toBeVisible();
 
   // Leaving Agents brings the navigator back.
   await page.goto('/#/settings');
