@@ -2968,6 +2968,13 @@ impl StructuredDriver for AcpDriver {
         Ok(())
     }
 
+    fn after_adopt(&mut self) -> DriverStep {
+        // The agent waits on these answers and prints nothing until then.
+        let mut step = DriverStep::default();
+        self.answer_orphans(&mut step);
+        step
+    }
+
     fn needs_idle_turn_settle(&self) -> bool {
         self.state.autonomous
             && self.state.turn_id.is_some()
