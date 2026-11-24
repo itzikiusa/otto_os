@@ -19,13 +19,13 @@
   import { cwdLabel } from '../../lib/paneHeader';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
+  import { rightPanel } from '../../lib/stores/rightPanel.svelte';
   import { asThreadSession, runtimeThreads } from '../threads/runtime/runtimeThreads.svelte'; // ui-guards: allow — the thread's own row (one store with Threads)
-  import { presetItems } from './SplitNode.svelte';
 
   interface Props {
     threadId: string;
     focused: boolean;
-    /** In a split: ✕ closes the pane (the thread keeps running) and ⋯ has the layout presets; ⋯ › Close pane always. */
+    /** In a split: ✕ closes the pane (the thread keeps running); ⋯ › Close pane always. */
     showClose: boolean;
     onfocus: () => void;
     onclose: () => void;
@@ -49,6 +49,13 @@
     return b ?? (s?.cwd ? cwdLabel(s.cwd) : null);
   });
   const current = $derived(focused || ws.activeSessionId === threadId);
+  // The side panel's Git / Files follow this pane's folder while it is focused.
+  $effect(() => {
+    const cwd = s?.cwd;
+    if (!cwd) return;
+    rightPanel.paneFolders.set(threadId, cwd);
+    return () => void rightPanel.paneFolders.delete(threadId);
+  });
   let paneW = $state(0);
   const gripOn = $derived(showGrip && dragKey != null && !viewport.isPhone);
 
@@ -67,8 +74,10 @@
   });
 
   /** The thread's own menu (Threads' runtimeMenu) without what belongs to
-   *  the Threads page (its pins, its "beside", its terminal drawer). */
-  const THREADS_ONLY = new Set(['Open beside', 'Terminal drawer', 'Pin thread', 'Unpin thread']);
+   *  the Threads page (its pins, its "beside", its terminal drawer, its
+   *  Active / History tidy — Agents' History is Close thread's, so "Move to
+   *  History" beside it was a near-duplicate that changed nothing here). */
+  const THREADS_ONLY = new Set(['Open beside', 'Terminal drawer', 'Pin thread', 'Unpin thread', 'Move to History', 'Move back to Active']);
   function openMenu(e: MouseEvent): void {
     void import('../threads/runtime/runtimeMenu').then((m) => { // ui-guards: allow — a thread's own menu
       const own = m.runtimeThreadMenu(threadId).filter((i) => !THREADS_ONLY.has(i.label ?? ''));
@@ -76,7 +85,6 @@
       ctxMenu.show(e, [
         { label: 'Open in Threads', icon: 'threads', action: () => router.go(`threads/${threadId}`) },
         ...own,
-        ...(showClose ? [sep, ...presetItems()] : []),
         // Always: a lone chat tab has no strip ✕ (only ⌘W).
         sep,
         { label: 'Close pane', icon: 'x', title: 'The thread keeps running', action: onclose } as MenuItem,
@@ -167,13 +175,18 @@
     flex-shrink: 0;
     margin-inline-start: calc(-1 * var(--sp-3));
   }
+  /* As a terminal pane's word: a calm one gives way before the title (M7). */
   .tpane-word {
-    flex-shrink: 0;
+    flex: 0 100 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     font-size: var(--fs-s);
     color: var(--text-dim);
     white-space: nowrap;
   }
   .tpane-word:is(.warning, .danger, .success) {
+    flex-shrink: 0;
     font-weight: 600;
   }
   .tpane-word.warning {

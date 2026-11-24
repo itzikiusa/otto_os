@@ -37,6 +37,9 @@ test.beforeEach(async ({ page }, info) => {
   await page.addInitScript((id) => {
     localStorage.setItem('otto_workspace', id as string);
     localStorage.setItem('otto_firstrun_dismissed', '1');
+    // This workspace only: every test seeds the same three titles, and an
+    // all-workspaces list put an earlier test's "Pirlo" first.
+    localStorage.setItem('otto_nav_all_ws', '0');
   }, wsId);
   await page.goto('/#/agents');
   await expect(page.getByText(TITLES[0]).first()).toBeVisible({ timeout: 20_000 });
@@ -49,7 +52,9 @@ test.afterEach(async () => {
 /** Open a seeded session from the sidebar and wait for ITS pane — waiting for
  *  any `.pane` races the route→store hop once one is already open. */
 async function openSession(page: Page, title: string): Promise<void> {
-  await page.locator('[data-testid^="agents-row-"] .tr-main', { hasText: title }).first().click();
+  // By id: the inbox lists every workspace's sessions (other runs' "Pirlo" too),
+  // and a finished one there ranks above this workspace's idle rows.
+  await page.locator(`[data-testid="agents-row-${idByTitle[title]}"] .tr-main`).click();
   await expect(
     page.locator(`[data-pane-key][data-session="${idByTitle[title]}"]`).first(),
   ).toBeVisible({ timeout: 15_000 });
@@ -157,14 +162,19 @@ test('a v1 payload restores as the legacy 3-pane shape', async ({ page }) => {
   expect(v).toBe(2);
 });
 
-test('⋯ → "Use one-beside-two layout" rebuilds the tree', async ({ page }) => {
+test('Arrange panes → "Use one-beside-two layout" rebuilds the tree (not in a pane ⋯)', async ({ page }) => {
   await openSession(page, 'Pirlo');
   await page.keyboard.press('Meta+d');
   await page.keyboard.press('Meta+d');
   await expect(leaves(page)).toHaveCount(3);
 
+  // The presets act on the canvas: they live with its view control, never in a pane's ⋯ (M2).
   await page.locator('button[title="More…"]').first().click();
   const menu = page.locator('.ctx-menu');
+  await expect(menu.getByRole('menuitem', { name: 'Rename' })).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: /^Use .* layout$/ })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await page.getByTestId('arrange-panes').click();
   await menu.getByRole('menuitem', { name: 'Use one-beside-two layout' }).click();
   await expect(menu).toBeHidden();
 

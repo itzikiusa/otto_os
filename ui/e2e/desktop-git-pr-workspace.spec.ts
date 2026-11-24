@@ -45,9 +45,11 @@ test('a PR deep link opens in the workspace with header, stats and timeline', as
   await expect(page.locator('.prd-actions .btn')).toHaveCount(3);
   await expect(page.locator('.prd-actions').getByRole('button', { name: 'Merge', exact: true })).toHaveCount(0);
   // Grouped list: my PRs first.
-  // Needs you first: #50 asks you for a review; then everything else.
-  await expect(page.getByRole('region', { name: 'Needs you' }).locator('.pr-row')).toHaveCount(1);
-  await expect(page.locator('.pr-row').first()).toHaveAttribute('data-pr', '50');
+  // Needs you first: #51 is yours and its checks fail (the row learns that
+  // from the open PR's /checks), #50 asks you for a review; then the rest.
+  const needsYou = page.getByRole('region', { name: 'Needs you' }).locator('.pr-row');
+  await expect(needsYou).toHaveCount(2);
+  await expect(needsYou.locator('xpath=self::*[@data-pr="51" or @data-pr="50"]')).toHaveCount(2);
   await expect(page.locator('.pr-row[data-pr="50"]').getByTestId('pr-word')).toHaveText('Review requested');
 
   await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
@@ -389,4 +391,27 @@ test('one statement of the checks: the status line; merge rules and tasks in the
   await expect(reasons).toContainText('1 task open');
   // The failing build check is the CI row's job, not repeated.
   await expect(reasons).not.toContainText('All builds passed');
+});
+
+test('the list row and the status line read the same checks; a green, approved PR reads Ready to merge with Merge as the primary', async ({ page }) => {
+  await page.goto('/#/git/rep_otto/pr/51');
+  await expect(page.getByTestId('pr-status')).toHaveText('1 of 2 checks failing');
+  // The row learns the checks from the same /checks read (the forge list has none).
+  await expect(page.locator('.pr-row[data-pr="51"]').getByTestId('pr-word')).toHaveText('Checks failing');
+
+  // #50: its checks are still running — the row never claims they fail.
+  await page.locator('.pr-row[data-pr="50"]').click();
+  await expect(page.getByTestId('pr-status')).toHaveText('1 of 2 checks running');
+  await expect(page.locator('.pr-row[data-pr="50"]').getByTestId('pr-word')).not.toHaveText(/Checks failing/);
+
+  // #52: approved, mergeable, every check green → Merge is the one primary.
+  await page.locator('.pr-row[data-pr="52"]').click();
+  await expect(page.locator('.prd-title')).toContainText('cache the Go module');
+  await expect(page.getByTestId('pr-status')).toHaveText('Ready to merge');
+  const primary = page.getByTestId('pr-primary');
+  await expect(primary).toHaveText('Merge');
+  await expect(primary).toHaveAttribute('data-next', 'merge');
+  await expect(page.locator('.pr-row[data-pr="52"]').getByTestId('pr-word')).not.toHaveText(/Checks/);
+  await primary.click();
+  await expect(page.getByRole('dialog', { name: 'Merge pull request' })).toBeVisible();
 });

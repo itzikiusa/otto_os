@@ -1,6 +1,6 @@
 import { test, expect, type Page, type Request } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { apiCtx, seedWorkspace } from './seed';
@@ -18,18 +18,29 @@ import { openPage } from './helpers';
 const CLEAN = 'e2e-open-perf-clean';
 const DIRTY = 'e2e-open-perf-dirty';
 
+// Every clone's temp root, removed in afterAll (pass or fail).
+const roots: string[] = [];
+
 test.beforeAll(async () => {
   const src = resolve(process.cwd(), '..');
   const { ctx, base } = await apiCtx();
   const wsId = await seedWorkspace(ctx, base);
   for (const name of [CLEAN, DIRTY]) {
-    const dir = join(mkdtempSync(join(tmpdir(), 'otto-e2e-open-perf-')), 'r');
-    execFileSync('git', ['clone', '-q', '--no-hardlinks', src, dir], { stdio: 'ignore' });
+    const root = mkdtempSync(join(tmpdir(), 'otto-e2e-open-perf-'));
+    roots.push(root);
+    const dir = join(root, 'r');
+    // --shared borrows this repo's object store: the same history and refs at a
+    // few MB (a --no-hardlinks copy left 1.2 GB per run in $TMPDIR).
+    execFileSync('git', ['clone', '-q', '--shared', src, dir], { stdio: 'ignore' });
     if (name === DIRTY) writeFileSync(join(dir, 'PERF_PROBE.txt'), 'probe\n');
     const r = await ctx.post(`${base}/api/v1/workspaces/${wsId}/repos`, { data: { path: dir, name } });
     if (!r.ok()) throw new Error(`repo seed failed: ${r.status()} ${await r.text()}`);
   }
   await ctx.dispose();
+});
+
+test.afterAll(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 async function openAndCount(page: Page, name: string): Promise<string[]> {

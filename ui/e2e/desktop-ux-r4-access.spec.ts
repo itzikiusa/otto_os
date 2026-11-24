@@ -95,7 +95,7 @@ test('late workspace list from an old identity cannot replace the current worksp
 for(const unavailable of ['removed','inert']) test(`nested sheet restores usable parent focus when trigger becomes ${unavailable}`,async({page})=>{
   await page.addInitScript(()=>localStorage.setItem('otto_firstrun_dismissed','1'));
   await page.goto('/#/agents');await expect(page.locator('.shell')).toBeVisible();await page.keyboard.press('Meta+t');
-  const parent=page.getByRole('dialog',{name:'New session',exact:true});const browse=parent.getByRole('button',{name:'Browse…'}).first();await browse.click();
+  const parent=page.getByRole('dialog',{name:'New session',exact:true});await parent.getByTestId('ns-options').click();const browse=parent.getByRole('button',{name:'Browse…'}).first();await browse.click();
   const picker=page.getByRole('dialog',{name:'Choose working folder'});await expect(picker).toBeVisible();
   await browse.evaluate((el,unavailable)=>{if(unavailable==='removed')el.remove();else el.setAttribute('inert','');},unavailable);
   await page.keyboard.press('Escape');await expect(picker).toBeHidden();

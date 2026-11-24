@@ -171,7 +171,7 @@ test.describe('mock rows', () => {
     await expect(page.locator('.ctx-menu')).toHaveCount(0);
 
     // Home names each waiting thread and opens that one.
-    const row = page.locator('button.gc-row[title="Wait for approval"]');
+    const row = page.locator('[data-card="needs"] button.tr-main[title="Wait for approval"]');
     await expect(row).toBeVisible({ timeout: 15_000 });
     await row.click();
     await expect(page).toHaveURL(/#\/threads\/rt_wait$/);

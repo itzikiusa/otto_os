@@ -1,9 +1,8 @@
 import { test, expect } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 import { expectFullyInViewport, openPage } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -22,7 +21,7 @@ let repoDir = '';
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   const wsId = await seedWorkspace(ctx, base);
-  repoDir = mkdtempSync(join(tmpdir(), 'otto-e2e-wip-'));
+  repoDir = tempDir('otto-e2e-wip-');
   const git = (...a: string[]) =>
     execFileSync('git', ['-C', repoDir, ...a], { stdio: 'ignore' });
   git('init', '-q');
@@ -138,7 +137,7 @@ test('selecting a file in a LARGE changeset shows its diff immediately', async (
   // tests in separate workers, each with its own beforeAll seed — sharing
   // REPO_NAME/repoDir would race the commit test's worker.
   const bigName = 'e2e-wip-big-repo';
-  const dir = mkdtempSync(join(tmpdir(), 'otto-e2e-wip-big-'));
+  const dir = tempDir('otto-e2e-wip-big-');
   const git = (...a: string[]) =>
     execFileSync('git', ['-C', dir, ...a], { stdio: 'ignore' });
   git('init', '-q');

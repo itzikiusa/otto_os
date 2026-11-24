@@ -525,6 +525,7 @@
   // list costs what a 50-file one does.
   const VIEW_KEY = 'otto.git.wip.view';
   let treeView = $state(lsGet(VIEW_KEY) !== 'list');
+  const folders = $derived(new Set(status.changes.map((c) => c.path.slice(0, Math.max(0, c.path.lastIndexOf('/'))))).size);
   function toggleView(): void {
     treeView = !treeView;
     lsSet(VIEW_KEY, treeView ? 'tree' : 'list');
@@ -865,8 +866,10 @@
     onkey={commitKey} ondraft={draftMessage} onstopdraft={stopDraft} oncommit={(push) => void commit(push)}
     onoptions={() => (signCfg || signCfgLoading ? undefined : loadSignCfg(repoId))}
   />
+  <!-- The commit card's caption and the Changes badge already count them; the
+       row holds only what it can do here (never a lone icon). -->
+  {#if !includeAll || totals || inUnstaged.length + inUntracked.length > 0 || folders > 1 || onclose}
   <div class="wp-head">
-    <!-- The commit card's caption and the Changes badge already count them. -->
     {#if !includeAll}<span class="wp-count">{plural(status.changes.length, 'file')} changed</span>{/if}
     {#if totals}
       <span class="wp-totals" title="{totals.added.toLocaleString()} lines added, {totals.deleted.toLocaleString()} deleted">
@@ -883,16 +886,11 @@
         onclick={() => void stagePaths([...unstaged, ...untracked].map((c) => c.path), true)}
       >Include all</button>
     {/if}
-    <button
-      type="button"
-      class="icon-btn wp-view-btn"
-      aria-pressed={treeView}
-      onclick={toggleView}
-      title={treeView ? 'Show as a list' : 'Group by folder'}
-      aria-label="Group by folder"
-    ><Icon name="folder" size={14} /></button>
+    <!-- Grouping helps only when the changes span folders. -->
+    {#if folders > 1}<button type="button" class="btn ghost small wp-view-btn" aria-pressed={treeView} onclick={toggleView} title={treeView ? 'Show the files as one list' : 'Group the files by folder'}>By folder</button>{/if}
     {#if onclose}<button class="icon-btn wp-close" onclick={onclose} title="Close the changes panel" aria-label="Close the changes panel"><Icon name="x" size={14} /></button>{/if}
   </div>
+  {/if}
 
   <div class="wp-body" class:has-diff={selectedPath !== null}>
     <div class="wp-scroll" {@attach rowNav}>

@@ -6,6 +6,7 @@
 export * from './splitLayout';
 import { winKey } from '../win';
 import type { Id } from '../api/types';
+import type { MenuItem } from '../contextmenu.svelte';
 import {
   MAX_PANES,
   LS_PANES,
@@ -391,6 +392,20 @@ class SplitLayoutStore {
 }
 
 export const layout = new SplitLayoutStore();
+
+/** The five layout presets as flat ctxMenu rows — one list for the canvas's
+ *  own Arrange control (shell/TabBar.svelte) and the Database pane's ✕
+ *  right-click; worded like their ⌘K commands ("Use grid layout"). */
+export function presetItems(): MenuItem[] {
+  const rows: [Preset, string][] = [
+    ['cols', 'Use equal-columns layout'],
+    ['rows', 'Use equal-rows layout'],
+    ['one-two-below', 'Use one-above-two layout'],
+    ['one-two-beside', 'Use one-beside-two layout'],
+    ['grid', 'Use grid layout'],
+  ];
+  return rows.map(([p, label]) => ({ label, icon: 'split', action: () => layout.applyPreset(p) }));
+}
 
 // The only debounced write in this store is the gutter drag; `pagehide` covers
 // reload / navigation / tab close, which all beat a 150 ms timer easily.

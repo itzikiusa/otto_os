@@ -637,6 +637,43 @@ IDE and `⌘K` opens the app's command bar, so a `⌘K V` chord can't exist.
   `ui/src/modules/ide/editor/IdePreviewPane.svelte`,
   `IdePreviewModeToggle.svelte`, `idePreviewMode.svelte.ts`.
 
+### 13. Makefiles and writing Markdown
+
+- **Makefiles** (`Makefile`, `makefile`, `GNUmakefile`, `Makefile.*`, `*.mk`,
+  `*.make`, `*.mak`) get their own language, loaded with the file type:
+  comments, directives (`include`, `export`, `override`, `define…endef`,
+  `ifeq…endif`), variable definitions for every assignment operator, references
+  (`$(NAME)`, `${NAME}`, `$@ $< $^`…) with function names (`$(shell …)`,
+  `$(call …)`) apart, targets, special targets (`.PHONY`), prerequisites, and
+  recipe lines as shell with the Makefile references inside still coloured.
+  A trailing `\` carries a line's kind to the next.
+- A Makefile has no debugger, folds or diagnostics, so its editor drops those
+  gutters: the text starts next to the line numbers, with one narrow column for
+  a ▶ on each target that runs `make <target>` in the file's folder (`-f` for a
+  file make would not pick by itself) in the Run panel.
+- **Structure** lists a Makefile's targets, then its variables. ⌘-click or Go to
+  definition (⌘B / F12) on a reference, a prerequisite or a `$(call name)` jumps
+  to its definition — in the file, else in a file it `include`s — and hovering
+  one shows its defining line. All of it is read from the buffer: no language
+  server and no request (`lib/components/makefileModel.ts`, `cm-lang-makefile.ts`).
+- **Markdown** (`.md`, `.markdown`): a formatting row above the editor —
+  Heading ▾ (H1–H3), Bold (⌘B), Italic, Code, Link, Bulleted / Numbered list,
+  Checklist, Quote, Table, and ⋯ (Format table, Code block, Divider, Callout).
+  It hides in Preview; on a phone it scrolls inside itself with 44 px buttons.
+  Markdown has no breakpoint or lint column, so its text starts next to the
+  fold markers.
+  ⌘I, ⌘E and ⌘K keep their IDE meanings (Edit with AI, Recent files, the command
+  bar).
+- Typing help: Enter continues a list, checklist or quote (an empty item ends
+  it) and closes an open code fence; Tab / ⇧Tab indent list items and move
+  between table cells (past the last cell a new row); typing `` ` ``, `*`, `_` or
+  `~` over a selection wraps it; a URL pasted over a selection makes a link.
+  `/` at the start of an empty line opens the block menu (Heading 1–3, Table,
+  Code block, Checklist, Quote, Divider, Callout).
+- Code: `ui/src/lib/components/cm-md-assist.ts`,
+  `ui/src/modules/ide/editor/IdeMarkdownBar.svelte`. Headings are in Structure;
+  Split and Preview are section 12.
+
 ## API & WebSocket summary
 
 Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api.md)

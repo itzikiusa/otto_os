@@ -128,6 +128,15 @@
   let clusterForm = $state<{ cluster: BrokerCluster | null } | null>(null);
   let sftpFor = $state<Connection | null>(null);
   let accessFor = $state<Connection | null>(null);
+  // A new identity (sign-out, token swap) must not keep the old one's forms or access editor open.
+  $effect(() =>
+    resourceAccess.subscribe((change) => {
+      if (change.type !== 'reset' || !change.identity) return;
+      form = clusterForm = null;
+      sftpFor = accessFor = null;
+      importOpen = false;
+    }),
+  );
 
   const ownerOnly = 'Only the owner can create connections';
   function newConnection(kinds: ConnectionKind[] = ALL_KINDS, prefill: ConnectionPrefill | null = null): void {

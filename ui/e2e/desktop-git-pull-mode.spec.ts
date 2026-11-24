@@ -1,9 +1,8 @@
 import { test, expect, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 import { openPage } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -20,7 +19,11 @@ import { openPage } from './helpers';
 // on the WP1 branch.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const REPO_NAME = 'e2e-pull-mode-repo';
+// Unique per beforeAll: the two tests can land in different workers against
+// ONE shared daemon, each seeding its own repo. A fixed name let the pull test
+// open the OTHER worker's repo — already rebased, so nothing left to refuse.
+// Named in beforeAll so a repeated pass (--repeat-each) gets its own too.
+let REPO_NAME = '';
 let repoDir = '';
 
 function git(dir: string, ...args: string[]): string {
@@ -28,10 +31,11 @@ function git(dir: string, ...args: string[]): string {
 }
 
 test.beforeAll(async () => {
+  REPO_NAME = `e2e-pull-mode-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
   const { ctx, base } = await apiCtx();
   const wsId = await seedWorkspace(ctx, base);
 
-  const root = mkdtempSync(join(tmpdir(), 'otto-e2e-pullmode-'));
+  const root = tempDir('otto-e2e-pullmode-');
   const origin = join(root, 'origin.git');
   const seed = join(root, 'seed');
   repoDir = join(root, 'work');

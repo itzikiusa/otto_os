@@ -25,6 +25,7 @@ import {
   createIdeGitAndAgentExtensions, selectionOrCurrentLine, setBaselineSourceEffect, setBlameLinesEffect, setSavedContentEffect,
   type IdeDiffBaselineSource, type IdeEditorSelectionRange,
 } from './cm-ide-git-and-agent.ts';
+import { isMakefilePath, isProseOrMakePath } from './cm-editor-helpers.ts';
 import { isBpTargetGutterElement } from './cm-ide-history.ts';
 import { createIdeHoverExtension } from './cm-ide-hover.ts';
 import {
@@ -203,7 +204,8 @@ class CombinedGutterMarker extends GutterMarker {
       const item = this.runItem, btn = document.createElement('button');
       btn.type = 'button'; btn.className = `cm-ide-gutter-run-btn cm-ide-run-btn is-${item.kind}`;
       btn.dataset.gutterRun = String(item.line); btn.dataset.gutterLine = String(item.line); btn.dataset.gutterKind = item.kind;
-      const label = `Run or debug ${item.label}`; btn.title = label; btn.setAttribute('aria-label', label);
+      const debuggable = item.language !== 'makefile';
+      const label = `${debuggable ? 'Run or debug' : 'Run'} ${item.label}`; btn.title = label; btn.setAttribute('aria-label', label);
       btn.appendChild(gutterSvg('play'));
       btn.addEventListener('mousedown', (e) => { e.stopPropagation(); });
       btn.addEventListener('click', (e) => {
@@ -214,7 +216,7 @@ class CombinedGutterMarker extends GutterMarker {
           ...(item.kind === 'test'
             ? [{ label: `Run '${item.label}' (keep containers)`, icon: 'play' as const, action: () => cbs.onGutterAction?.(item, 'run_keep_tc') }]
             : []),
-          { label: `Debug '${item.label}'`, icon: isIconName('bug') ? 'bug' : 'target', action: () => cbs.onGutterAction?.(item, 'debug') },
+          ...(debuggable ? [{ label: `Debug '${item.label}'`, icon: isIconName('bug') ? ('bug' as const) : ('target' as const), action: () => cbs.onGutterAction?.(item, 'debug') }] : []),
         ]);
       });
       actSlot.appendChild(btn);
@@ -349,7 +351,12 @@ export function createIdeGutterExtensions(opts: CreateIdeExtensionsOptions): Ext
   });
 
   // A click acts on the lines the person sees, so unreported moves reach the store first.
+  // A Makefile has no debugger: its gutter is a narrow column for the ▶ that runs a target.
+  // Markdown has neither breakpoints nor ▶: no column at all.
+  const runOnly = isProseOrMakePath(opts.filePath ?? '');
+  const hidden = runOnly && !isMakefilePath(opts.filePath ?? '');
   const handleBpClick = (v: EditorView, ln: number, me: MouseEvent): boolean => {
+    if (runOnly) return false;
     const cbs = opts.getCallbacks();
     if ((me.shiftKey && cbs.onEditBreakpoint) || cbs.onToggleBreakpoint) reportMoves(v);
     if (me.shiftKey && cbs.onEditBreakpoint) { me.preventDefault(); me.stopPropagation(); cbs.onEditBreakpoint(ln, me); return true; }
@@ -359,7 +366,7 @@ export function createIdeGutterExtensions(opts: CreateIdeExtensionsOptions): Ext
   // The line-number column behaves like the breakpoint lane (JetBrains): the editor popover.
   const handleBpCtx = (v: EditorView, ln: number, me: MouseEvent): boolean => {
     const cbs = opts.getCallbacks();
-    if (!cbs.onToggleBreakpoint && !cbs.onEditBreakpoint) return false;
+    if (runOnly || (!cbs.onToggleBreakpoint && !cbs.onEditBreakpoint)) return false;
     reportMoves(v);
     const bp = v.state.field(bpField).map.get(ln);
     me.preventDefault(); me.stopPropagation();
@@ -448,7 +455,7 @@ export function createIdeGutterExtensions(opts: CreateIdeExtensionsOptions): Ext
       this.onMove = (ev) => {
         const st = view.state.field(bpField, false);
         if (!st) return;
-        if (!opts.getCallbacks().onToggleBreakpoint || !isBpTargetGutterElement(ev.target)) {
+        if (runOnly || !opts.getCallbacks().onToggleBreakpoint || !isBpTargetGutterElement(ev.target)) {
           if (st.hoverLine !== null) view.dispatch({ effects: setHoverBpLineEffect.of(null) });
           return;
         }
@@ -485,8 +492,18 @@ export function createIdeGutterExtensions(opts: CreateIdeExtensionsOptions): Ext
     }
   });
 
-  return [bpField, runFieldInit, bpAndRunGutter, gutterHandlers];
+  return [bpField, runFieldInit, bpAndRunGutter, gutterHandlers, hidden ? hiddenGutterTheme : runOnly ? runOnlyGutterTheme : []];
 }
+
+// Zero width, not display: none (CodeMirror pins `.cm-gutter` to `display: flex !important`).
+const hiddenGutterTheme = EditorView.theme({
+  '.cm-ide-bp-gutter, .cm-ide-bp-gutter .cm-gutterElement': { inlineSize: '0', minInlineSize: '0', maxInlineSize: '0', padding: '0' },
+});
+const runOnlyGutterTheme = EditorView.theme({
+  '.cm-ide-bp-gutter, .cm-ide-bp-gutter .cm-gutterElement': { inlineSize: '18px', minInlineSize: '18px', maxInlineSize: '18px' },
+  '.cm-ide-bp-cell': { inlineSize: '15px', minInlineSize: '15px', maxInlineSize: '15px', gridTemplateColumns: '15px', columnGap: '0' },
+  '.cm-ide-bp-slot': { display: 'none' },
+});
 
 class InlineGhostValuesWidget extends WidgetType {
   summary: string;

@@ -32,6 +32,7 @@ import {
 import type { FindProvider } from '../findProviders';
 import type { SqlDialectName } from '../sql-dialects';
 import type * as CmIdeHistType from './cm-ide-history';
+import { isMakefilePath } from './makefilePath.ts';
 
 export function extOf(p: string): string {
   if (p.startsWith('jdt://')) return 'java';
@@ -41,7 +42,14 @@ export function extOf(p: string): string {
   return dot < 0 ? '' : base.slice(dot + 1).toLowerCase();
 }
 
-export const langExtOf = (filePath: string, hint?: string): string => extOf(filePath) || (hint ?? '');
+export { isMakefilePath };
+
+/** Files no debugger, runner or diagnostics serve (Makefiles keep a run column): the
+ *  editor drops their breakpoint and lint gutters. */
+export const isProseOrMakePath = (p: string): boolean => isMakefilePath(p) || /\.(?:md|markdown|mdx)$/i.test(p.split('?')[0]);
+
+export const langExtOf = (filePath: string, hint?: string): string =>
+  isMakefilePath(filePath) ? 'makefile' : extOf(filePath) || (hint ?? '');
 
 export function clampSelectionToDoc(docLen: number, anchor: number, head: number): { anchor: number; head: number } {
   const max = Math.max(0, docLen);

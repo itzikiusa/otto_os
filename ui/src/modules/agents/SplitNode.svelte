@@ -1,23 +1,3 @@
-<script lang="ts" module>
-  // Shared by the pane ⋯ menu (SessionView) and the Database pane's ✕
-  // right-click (below) — one list, so the five rows can't drift apart.
-  import { layout as layoutStore, type Preset as PresetOp } from '../../lib/stores/splitLayout.svelte';
-  import type { MenuItem as PresetMenuItem } from '../../lib/contextmenu.svelte';
-
-  /** The five layout presets as flat ctxMenu rows (the menu has no submenus);
-   *  worded like their ⌘K commands in Splits.svelte ("Use grid layout"). */
-  export function presetItems(): PresetMenuItem[] {
-    const rows: [PresetOp, string][] = [
-      ['cols', 'Use equal-columns layout'],
-      ['rows', 'Use equal-rows layout'],
-      ['one-two-below', 'Use one-above-two layout'],
-      ['one-two-beside', 'Use one-beside-two layout'],
-      ['grid', 'Use grid layout'],
-    ];
-    return rows.map(([p, label]) => ({ label, icon: 'split', action: () => layoutStore.applyPreset(p) }));
-  }
-</script>
-
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { rowMenu } from '../../lib/rowMenu';
@@ -53,6 +33,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import {
     layout,
+    presetItems,
     MIN_PANE_PX,
     type LayoutNode,
     type Side,

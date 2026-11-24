@@ -71,6 +71,7 @@
   const IdeDependencyAnalyzerLazy = lazyComponent(() => import('./editor/IdeDependencyAnalyzer.svelte'));
   const IdeClipboardHistoryModalLazy = lazyComponent(() => import('./editor/IdeClipboardHistoryModal.svelte'));
   const IdeGitHunkPopoverLazy = lazyComponent(() => import('./editor/IdeGitHunkPopover.svelte'));
+  const IdeMarkdownBarLazy = lazyComponent(() => import('./editor/IdeMarkdownBar.svelte'));
 
   const SPLIT_RATIO_KEY = 'otto.ide.splitRatio.v1';
   function readSavedSplitRatio(): number {
@@ -444,6 +445,7 @@
 
     {#if ideAgent.inlinePrompt?.open}<LazyMount lazy={IdeInlinePromptBarLazy} what="inline prompt" variant="compact" />{/if}
     <IdeDiskChangedBanner tab={activeTab} />
+    {#if idePreviewMode.kindOf(activeTab.path) === 'markdown' && idePreviewMode.layoutFor(activeTab.path) !== 'only' && !activeTab.readOnly}<LazyMount lazy={IdeMarkdownBarLazy} what="the Markdown toolbar" variant="compact" />{/if}
 
     <div class="ide-panes" class:split-down={ide.splitDirection === 'down'} bind:this={panesEl}>
       <div class="ide-pane {idePreviewMode.paneClass(stagedPrimaryTab?.path === activeTab.path ? stagedPrimaryTab : null)}" style:flex={ide.splitTab ? `0 0 calc(${(splitRatio * 100).toFixed(1)}% - 3px)` : '1 1 0%'}>

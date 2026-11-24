@@ -1,9 +1,8 @@
 import { test, expect, type Page, type TestInfo } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace, seedGitRepo, seedConflictRepo, seedDirtyRepo } from './seed';
+import { apiCtx, seedWorkspace, seedGitRepo, seedConflictRepo, seedDirtyRepo, tempDir } from './seed';
 
 // Durable mobile/tablet-layout coverage for the Git page. Asserts the REAL
 // workflow on a phone AND in the tablet/landscape range: the commit graph/list
@@ -107,6 +106,9 @@ async function expectFitsWidth(page: Page): Promise<void> {
  * and the DiffViewer cells (.code).
  */
 async function expectDiffCodeReachable(page: Page): Promise<void> {
+  // The file block's header paints before its lines (they mount a frame
+  // later, later still under load): wait for a code cell, then measure.
+  await expect(page.locator('.dl-code, td.code, .vrow .code').locator('visible=true').first(), 'diff code cells should be present').toBeVisible({ timeout: 15_000 });
   const m = await page.evaluate(() => {
     const cells = Array.from(
       document.querySelectorAll('.dl-code, td.code, .vrow .code'),
@@ -248,7 +250,7 @@ test.describe('pull requests: review state', () => {
 
   test('pull requests: each open row says where its review stands, and fits', async ({ page }) => {
     // A Bitbucket remote from the start (the forge is read when the repo is added).
-    const dir = mkdtempSync(join(tmpdir(), 'otto-e2e-bb-'));
+    const dir = tempDir('otto-e2e-bb-');
     for (const args of [['init', '-q'], ['remote', 'add', 'origin', 'https://bitbucket.org/acme/app.git'], ['-c', 'user.email=e2e@otto.local', '-c', 'user.name=E2E', 'commit', '-q', '--allow-empty', '-m', 'init']]) {
       execFileSync('git', ['-C', dir, ...args], { stdio: 'ignore' });
     }

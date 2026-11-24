@@ -54,10 +54,12 @@ async function openAgentsWithSession(page: Page, opts: { scheme?: 'light' | 'dar
     },
     { wsId: workspaceId, sid: sessionId, scheme: opts.scheme ?? '' },
   );
-  await openPage(page, 'agents');
+  // `#/agents/<id>`: on a phone `#/agents` is the session list, the session its own view.
+  await openPage(page, `agents/${sessionId}`);
   // Wait for the seeded agent session to hydrate so agent-only side panel tabs
-  // (Activity, Outputs, Info) are mounted before clicking the rail.
-  await expect(page.getByRole('tab', { name: /Panels E2E Session/ })).toBeVisible({ timeout: 15_000 });
+  // (Activity, Outputs, Info) are mounted before clicking the rail. A single
+  // open session has no tab strip; its pane carries the session id.
+  await expect(page.locator(`[data-pane-key][data-session="${sessionId}"]`)).toBeVisible({ timeout: 15_000 });
 }
 
 async function openPanelTab(page: Page, label: 'Files' | 'Activity' | 'Outputs' | 'Info'): Promise<void> {
