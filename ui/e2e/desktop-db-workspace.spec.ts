@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
-import { expectFullyInViewport, openPage } from './helpers';
+import { expectFullyInViewport, openPage, pickDbMenuItem } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DB Explorer — query-workspace real estate + object search.
@@ -50,9 +50,7 @@ test.beforeEach(async ({ page }) => {
 
 async function openWorkbench(page: import('@playwright/test').Page): Promise<void> {
   await openPage(page, 'database');
-  await page.locator('.db-side .conn-row, .db-side button', { hasText: 'e2e-mysql' })
-    .first()
-    .click();
+  await page.locator(`.conn-row[data-connection-id="${mysqlConn}"] .tr-title`).click();
   await expect(page.locator('.schema-tree')).toBeVisible({ timeout: 30_000 });
 }
 
@@ -60,21 +58,26 @@ test('⌘B collapses the schema sidebar and the header toggle brings it back', a
   await openWorkbench(page);
   const side = page.locator('aside.db-side');
   await expect(side).toBeVisible();
-  const hide = page.getByRole('button', { name: 'Hide sidebar', exact: true });
-  await expect(hide).toHaveAttribute('aria-expanded', 'true');
+  const header = page.getByTestId('page-header');
+  const show = header.getByRole('button', { name: 'Tables', exact: true });
+  // Open, the pane's own tabs are the way in; the header's ⋯ hides it (⌘B).
+  await expect(show).toHaveCount(0);
 
   await page.keyboard.press('Meta+b');
   await expect(side).toBeHidden();
-  // The one collapse control (header `sidebar` icon) stays reachable, so a
-  // hidden sidebar can always be brought back.
-  const show = page.getByRole('button', { name: 'Show schema sidebar', exact: true });
-  await expect(show).toHaveAttribute('aria-expanded', 'false');
+  // The header's Tables button stays reachable, so a hidden sidebar can
+  // always be brought back.
   await expectFullyInViewport(page, show, 'show-sidebar toggle');
 
-  // Restoring works from the header toggle as well as the chord.
+  // Restoring works from the header button as well as the chord.
   await show.click();
   await expect(page.locator('.schema-tree')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Hide sidebar', exact: true })).toHaveAttribute('aria-expanded', 'true');
+  await expect(show).toHaveCount(0);
+  // The header's ⋯ hides it too (Hide tables · ⌘B).
+  await pickDbMenuItem(page, /^Hide tables/);
+  await expect(side).toBeHidden();
+  await show.click();
+  await expect(page.locator('.schema-tree')).toBeVisible();
 });
 
 test('the editor keeps its own height per query tab', async ({ page }) => {
@@ -118,7 +121,7 @@ test('scoped search finds a table without expanding its schema', async ({ page }
   await expect(page.locator('.hit-schema').first()).not.toBeEmpty();
 
   // Clearing returns the browsable tree.
-  await page.locator('.tree-search-clear').click();
+  await page.getByRole('button', { name: 'Clear filter', exact: true }).click();
   await expect(page.locator('.hit')).toHaveCount(0);
 });
 

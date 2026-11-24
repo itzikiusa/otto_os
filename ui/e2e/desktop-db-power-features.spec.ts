@@ -1,5 +1,6 @@
 import { test, expect, type Page, type Locator } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
+import { pickDbMenuItem, openStructureOf } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DB Explorer — "power" feature batch, driven against the live Docker stack:
@@ -77,7 +78,8 @@ const editorText = (page: Page) =>
 // Find a table/collection's label in the tree, expanding collapsed nodes until it
 // appears (right-click bubbles to the row's oncontextmenu; left-click opens its
 // structure). Expanding every collapsed caret is the robust way to surface a
-// table regardless of which database holds it.
+// table regardless of which database holds it. (One click on a table now shows
+// its rows; its structure opens from its menu — openStructureOf.)
 async function objectLabel(page: Page, label: string): Promise<Locator> {
   await expect(page.locator('.node-label').first()).toBeVisible({ timeout: 20_000 });
   // EXACT label match on the node's `.nl-text`, scoped to OBJECT nodes
@@ -110,7 +112,7 @@ test('MySQL: Format unwraps Java string-concatenation into clean SQL', async ({ 
   test.skip(!conn.mysql, 'mysql docker not reachable');
   await openConn(page, 'e2e-mysql');
   await setEditor(page, '"SELECT * FROM " + products + " WHERE id = " + 1');
-  await page.getByRole('button', { name: /Format/ }).click();
+  await pickDbMenuItem(page, /^Format/); // the Query group of the header's ⋯
   // Formatting lazily imports the SQL formatter; wait for the transformed buffer.
   await expect.poll(() => editorText(page)).not.toContain('"SELECT');
   await expect(page.locator('.toast', { hasText: 'Format failed' })).toHaveCount(0);
@@ -157,7 +159,7 @@ test('MySQL: Table Designer can add an index and a foreign key', async ({ page }
   test.skip(!conn.mysql, 'mysql docker not reachable');
   await openConn(page, 'e2e-mysql');
   const lbl = await objectLabel(page, 'orders');
-  await lbl.click(); // open structure
+  await openStructureOf(page, lbl);
   await page.getByRole('button', { name: 'Design', exact: true }).click();
   await expect(page.locator('.td-modal')).toBeVisible({ timeout: 10_000 });
 
@@ -196,7 +198,7 @@ test('Mongo: Cmd+Z undoes an external statement rewrite (Format)', async ({ page
   // Let the typed insert close its undo group (CodeMirror coalesces edits within
   // ~0.5s) so Cmd+Z undoes ONLY the Format, not the insert too.
   await page.waitForTimeout(800);
-  await page.getByRole('button', { name: /Format/ }).click();
+  await pickDbMenuItem(page, /^Format/); // the Query group of the header's ⋯
   await expect.poll(() => editorText(page)).not.toBe(before); // reflowed
   await page.locator('.qe-edit .cm-content').click();
   await page.keyboard.press('ControlOrMeta+z');
@@ -209,7 +211,7 @@ test('Mongo: index builder offers NESTED field paths, and filters the list', asy
   test.skip(!conn.mongodb, 'mongodb docker not reachable');
   await openConn(page, 'e2e-mongodb');
   const lbl = await objectLabel(page, 'profiles');
-  await lbl.click(); // open structure
+  await openStructureOf(page, lbl);
   await page.getByRole('button', { name: /New index/ }).click();
   // profiles documents have an embedded `address.city` — it must be offered as a
   // row, not just the top-level `address`.
@@ -231,7 +233,7 @@ test('Mongo: index builder offers NESTED field paths, and filters the list', asy
 /** Open `object`'s structure and return the row for index `name`. */
 async function indexRow(page: Page, object: string, name: string): Promise<Locator> {
   const lbl = await objectLabel(page, object);
-  await lbl.click();
+  await openStructureOf(page, lbl);
   const row = page.locator('.idx-row').filter({ hasText: name }).first();
   await expect(row).toBeVisible({ timeout: 20_000 });
   await row.hover(); // actions are hover-revealed
@@ -302,7 +304,7 @@ test('MySQL: Drop index prepares ALTER TABLE … DROP INDEX (and DROP PRIMARY KE
 /** Open the New-index builder on `object`, select `field` as the key. */
 async function newIndexOn(page: Page, object: string, field: string): Promise<void> {
   const lbl = await objectLabel(page, object);
-  await lbl.click();
+  await openStructureOf(page, lbl);
   await page.getByRole('button', { name: /New index/ }).click();
   await page.locator('.idx-builder').getByRole('searchbox', { name: 'Filter index fields', exact: true }).fill(field);
   await page.locator('.ib-row', { hasText: field }).first().click();
