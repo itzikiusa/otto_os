@@ -714,10 +714,7 @@
     await followDraft(p, repo);
   }
   /** Split "subject\n\nbody" the way the fields hold it. */
-  function split(t: string): { s: string; b: string } {
-    const nl = t.indexOf('\n');
-    return nl === -1 ? { s: t.trim(), b: '' } : { s: t.slice(0, nl).trim(), b: t.slice(nl + 1).replace(/^\s*\n/, '').trimEnd() };
-  }
+  function split(t: string): { s: string; b: string } { const nl = t.indexOf('\n'); return nl === -1 ? { s: t.trim(), b: '' } : { s: t.slice(0, nl).trim(), b: t.slice(nl + 1).replace(/^\s*\n/, '').trimEnd() }; }
   function showStreamed(t: string): void {
     draftPreview = t;
     if (!streamed || subject !== streamed.s || body !== streamed.b) { streamed = null; previewShown = true; return; }
