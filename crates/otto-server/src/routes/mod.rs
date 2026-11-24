@@ -392,28 +392,7 @@ pub fn protected_routes() -> Router<ServerCtx> {
             post(crate::mcp_capabilities::context_packet),
         )
         // --- Usage tracking & system metrics (embedded ClickHouse) -------
-        .route(
-            "/telemetry/config",
-            get(telemetry::config).put(telemetry::put_config),
-        )
-        .route("/telemetry/status", get(telemetry::status))
-        .route("/telemetry/overview", get(telemetry::overview))
-        .route("/telemetry/navigation", get(telemetry::navigation))
-        .route("/telemetry/suggestions", get(telemetry::suggestions))
-        .route("/telemetry/analyze", post(telemetry::analyze))
-        .route(
-            "/telemetry/suggestions/{id}/dismiss",
-            post(telemetry::dismiss),
-        )
-        .route("/telemetry/traces/{id}", get(telemetry::trace))
-        .route(
-            "/telemetry/profile",
-            get(telemetry::latest_profile).post(telemetry::profile),
-        )
-        .route(
-            "/telemetry/ingest",
-            post(telemetry::ingest).layer(axum::extract::DefaultBodyLimit::max(131_072)),
-        )
+        .merge(telemetry::routes())
         .merge(usage::read_routes())
         .route("/usage/ccusage-check", post(usage::ccusage_check))
         .route("/usage/config", put(usage::put_config))
