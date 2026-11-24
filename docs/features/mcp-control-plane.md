@@ -1140,7 +1140,12 @@ migration 0146 and no longer read; auto-approve lives in the
   design.
 - **Per-tool cost in USD is partial** — latency / bytes / errors are metered; true
   per-vendor cost is not (`cost_usd` is nullable/estimated).
-- **No OAuth flows** for remote servers — header/token auth only.
+- **OAuth sign-in for remote servers is per server, by a person at the Mac** (CP6a–c):
+  a server row that answered 401 says "Needs sign-in" with a Sign in action (also in ⋯),
+  which names the server and its authorization host before the system browser opens.
+  The redirect is this Mac's loopback, so a phone can't sign in, and an agent never
+  can. Pending sign-ins live in memory (a daemon restart drops them; sign in again).
+  Native (not governed) servers sign in through their CLI, not Otto.
 - **Dry-run is a pure simulation** — it never calls the downstream tool, so it cannot
   reflect a tool's own validation.
 - **No `mcp_gateway_enabled` toggle** in the shipped code — the gateway surfaces

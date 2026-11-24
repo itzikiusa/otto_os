@@ -49,6 +49,8 @@ class ConfirmStore {
   // Choice mode: N labeled buttons + an optional "remember" checkbox.
   choices: ChoiceOption[] | null = $state(null);
   checkboxLabel = $state('');
+  /** The prompt's input is masked (`promptText({ secret: true })`). */
+  secret = $state(false);
   checkboxChecked = $state(false);
   private resolver: ((v: boolean | string | null) => void) | null = null;
   private choiceResolver: ((v: { value: string | null; remember: boolean }) => void) | null = null;
@@ -93,6 +95,8 @@ class ConfirmStore {
       validate?: (v: string) => string | null;
       mustMatch?: string;
       allowEmpty?: boolean;
+      /** Mask the typed value (a secret). */
+      secret?: boolean;
     },
   ): Promise<string | null> {
     this.supersede();
@@ -109,6 +113,7 @@ class ConfirmStore {
     this.validate = opts?.validate ?? null;
     this.mustMatch = opts?.mustMatch ?? '';
     this.allowEmpty = opts?.allowEmpty ?? false;
+    this.secret = opts?.secret ?? false;
     this.inputError = '';
     this.open = true;
     return new Promise<string | null>((resolve) => {

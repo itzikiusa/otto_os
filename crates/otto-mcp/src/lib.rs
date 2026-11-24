@@ -21,6 +21,7 @@ pub mod auto_approve;
 pub mod client;
 pub mod governance;
 pub mod http;
+pub mod oauth;
 pub mod outward;
 pub mod policy;
 pub mod profiles;

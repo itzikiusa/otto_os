@@ -37,6 +37,7 @@ import type {
   McpProfileList,
   McpProfileReq,
   McpServer,
+  McpOAuthStatus,
   McpServerDetail,
   McpServerWithTools,
   McpToolStats,
@@ -81,6 +82,11 @@ export const mcpCpApi = {
   cpDelete: (id: Id) => api.del<void>(`/mcp/servers/${id}`),
   cpHealth: (id: Id) => api.post<McpServerDetail>(`/mcp/servers/${id}/health`),
   cpDiscover: (id: Id) => api.post<McpToolView[]>(`/mcp/servers/${id}/discover`),
+  // --- OAuth sign-in of a remote server (tokens stay in the Keychain) ---
+  cpOAuthStart: (id: Id, body: { client_id?: string; client_secret?: string }) =>
+    api.post<{ authorization_url: string; authorization_host: string; server: string; server_host: string | null }>(`/mcp/servers/${id}/oauth/start`, body),
+  cpOAuthStatus: (id: Id) => api.get<McpOAuthStatus>(`/mcp/servers/${id}/oauth`),
+  cpOAuthSignOut: (id: Id) => api.del<void>(`/mcp/servers/${id}/oauth`),
 
   // --- tools + per-tool permission + the governed invoke (tester / gateway) ---
   cpTools: (id: Id) => api.get<McpToolView[]>(`/mcp/servers/${id}/tools`),

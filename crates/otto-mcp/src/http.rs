@@ -259,6 +259,11 @@ pub fn api_router<S: McpCtx>() -> Router<S> {
         )
         .route("/mcp/servers/{id}/health", post(health_server::<S>))
         .route("/mcp/servers/{id}/discover", post(discover_server::<S>))
+        .route(
+            "/mcp/servers/{id}/oauth",
+            get(oauth_status::<S>).delete(oauth_sign_out::<S>),
+        )
+        .route("/mcp/servers/{id}/oauth/start", post(oauth_start::<S>))
         .route("/mcp/servers/{id}/tools", get(list_tools::<S>))
         .route(
             "/mcp/servers/{id}/tools/{name}/invoke",
@@ -579,11 +584,8 @@ async fn delete_server<S: McpCtx>(
         WorkspaceRole::Editor,
     )
     .await?;
-    // Best-effort secret cleanup.
-    if server.has_secret {
-        let _ =
-            otto_core::secrets::delete_async(ctx.mcp_secrets(), &McpService::secret_ref(&id)).await;
-    }
+    // Best-effort secret cleanup (credentials and OAuth tokens).
+    ctx.mcp().forget_server_secrets(&id).await;
     ctx.mcp().evict_client(&id);
     ctx.mcp().registry().delete(&id).await.map_err(ApiErr)?;
     Ok(StatusCode::NO_CONTENT)
@@ -605,6 +607,122 @@ async fn health_server<S: McpCtx>(
     )
     .await?;
     ctx.mcp().health_check(&id).await.map(Json).map_err(ApiErr)
+}
+
+/// Signing a server in (or out) is a person's own act at Otto on the Mac:
+/// never an agent's or MCP credential, a share link, or a paired phone (the
+/// browser opens where the person clicked, and the loopback redirect only
+/// reaches this Mac).
+fn require_person_at_the_mac(
+    auth: &Option<Extension<otto_core::auth::AuthContext>>,
+) -> Result<(), ApiErr> {
+    let delegated = auth.as_ref().is_some_and(|a| {
+        a.0.managed_session_id.is_some()
+            || a.0.mcp_session_id.is_some()
+            || a.0.mcp_only
+            || a.0.mcp_scope.is_some()
+            || a.0.is_scoped()
+            || a.0.device_id.is_some()
+    });
+    if delegated || !otto_core::auth::request_is_person() {
+        return Err(ApiErr(Error::Forbidden(
+            "only a person in Otto on the Mac can sign a server in or out".into(),
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize, Default)]
+struct OAuthStartReq {
+    #[serde(default)]
+    client_id: Option<String>,
+    #[serde(default)]
+    client_secret: Option<String>,
+}
+
+/// `POST /mcp/servers/{id}/oauth/start` → the authorization URL to open in
+/// the browser and its host (the UI confirms both first).
+async fn oauth_start<S: McpCtx>(
+    Path(id): Path<Id>,
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    auth: Option<Extension<otto_core::auth::AuthContext>>,
+    body: Option<Json<OAuthStartReq>>,
+) -> ApiResult<Json<Value>> {
+    require_person_at_the_mac(&auth)?;
+    // The browser's answer comes back to this Mac's loopback only.
+    if otto_core::auth::request_peer().is_some_and(|p| p.kind != otto_core::peer::PeerKind::Local) {
+        return Err(ApiErr(Error::Forbidden(
+            "Sign in on the Mac: the sign-in answers on this Mac's loopback only".into(),
+        )));
+    }
+    let server = ctx.mcp().registry().get(&id).await.map_err(ApiErr)?;
+    require_resource(
+        &ctx,
+        &user,
+        &server,
+        "configure",
+        None,
+        WorkspaceRole::Editor,
+    )
+    .await?;
+    let req = body.map(|b| b.0).unwrap_or_default();
+    let manual = req
+        .client_id
+        .filter(|c| !c.trim().is_empty())
+        .map(|c| (c, req.client_secret));
+    let server_host = server
+        .url
+        .as_deref()
+        .and_then(|u| reqwest::Url::parse(u).ok())
+        .and_then(|u| u.host_str().map(str::to_string));
+    let (url, host) = ctx
+        .mcp()
+        .oauth_start(&server, manual)
+        .await
+        .map_err(ApiErr)?;
+    Ok(Json(
+        json!({ "authorization_url": url, "authorization_host": host, "server": server.name, "server_host": server_host }),
+    ))
+}
+
+async fn oauth_status<S: McpCtx>(
+    Path(id): Path<Id>,
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+) -> ApiResult<Json<crate::service::oauth_state::OAuthStatus>> {
+    let server = ctx.mcp().registry().get(&id).await.map_err(ApiErr)?;
+    require_resource(
+        &ctx,
+        &user,
+        &server,
+        "discover",
+        None,
+        WorkspaceRole::Viewer,
+    )
+    .await?;
+    Ok(Json(ctx.mcp().oauth_status(&id).await))
+}
+
+async fn oauth_sign_out<S: McpCtx>(
+    Path(id): Path<Id>,
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    auth: Option<Extension<otto_core::auth::AuthContext>>,
+) -> ApiResult<StatusCode> {
+    require_person_at_the_mac(&auth)?;
+    let server = ctx.mcp().registry().get(&id).await.map_err(ApiErr)?;
+    require_resource(
+        &ctx,
+        &user,
+        &server,
+        "configure",
+        None,
+        WorkspaceRole::Editor,
+    )
+    .await?;
+    ctx.mcp().oauth_sign_out(&id).await.map_err(ApiErr)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn discover_server<S: McpCtx>(
