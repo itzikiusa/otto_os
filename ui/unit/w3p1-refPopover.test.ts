@@ -92,7 +92,7 @@ test('Escape inside the popover dialog runs its close (dialogFocus)', () => {
     HTMLElement: class {},
     Element: class {},
   };
-  const { dialogFocus } = loadSource(new URL('../src/lib/dialogFocus.ts', import.meta.url), {}, globals);
+  const { dialogFocus } = loadSource(new URL('../src/lib/dialogFocus.ts', import.meta.url), { './backCloses': { backCloses: () => () => {} } }, globals);
   const { pop } = setup();
   pop.open(mouse().e, commit, [{ kind: 'local', label: 'topic', current: false }, { kind: 'tag', label: 'v1', current: false }]);
   dialogFocus(node, pop.close);

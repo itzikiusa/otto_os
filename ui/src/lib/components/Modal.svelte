@@ -7,6 +7,7 @@
   import { ui } from '../stores/ui.svelte';
   import Icon from './Icon.svelte';
   import { dialogFocusReturn } from '../dialogFocus';
+  import { backCloses } from '../backCloses';
 
   interface Props {
     title: string;
@@ -119,6 +120,9 @@
         if (!active || active === document.body || sheet?.contains(active)) restoreFocus();
       });
   }));
+
+  // A phone's Back closes the sheet like Escape (lib/backCloses.ts).
+  $effect(() => untrack(() => backCloses(() => { if (dismissable) onclose(); })));
 
   function onKeydown(e: KeyboardEvent) {
     // A key something inside already handled — CodeMirror closing its

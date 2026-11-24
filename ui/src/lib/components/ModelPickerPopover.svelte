@@ -5,6 +5,7 @@
   // footer. Anchored to its chip, preferring above it, and clamped into the
   // viewport with a capped, scrollable height (AGENTS.md floating-UI rule).
   import { onMount, tick, untrack } from 'svelte';
+  import { backCloses } from '../backCloses';
   import { placeAnchored } from '../anchorPlace';
   import { confirmer } from '../confirm.svelte';
   import {
@@ -196,6 +197,8 @@
     target?.focus();
   }
 
+  // A phone's Back closes the picker (lib/backCloses.ts).
+  onMount(() => backCloses(() => onclose()));
   onMount(() => {
     void tick().then(() => {
       place();
