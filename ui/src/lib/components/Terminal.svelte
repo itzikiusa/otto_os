@@ -570,7 +570,13 @@
   /** Whether the on-screen key accessory bar is shown on phone. */
   let keybarVisible = $state(false);
 
-  const touchGesture = createTerminalTouch(() => term, () => readOnly);
+  const touchGesture = createTerminalTouch(() => term, () => readOnly, (col, row) => {
+    const buffer = term?.buffer.active;
+    const hit = buffer && terminalLinksForRow(buffer, row, localFileContext().allowed).find(({ range: r }) =>
+      (row > r.start.y || col >= r.start.x) && (row < r.end.y || col <= r.end.x));
+    if (hit) activateLink(new MouseEvent('click', { button: 0 }), hit);
+    return !!hit;
+  });
 
   // ── Find / ring-search bar ──────────────────────────────────────────────────
   // Two complementary search modes share the single find bar:
