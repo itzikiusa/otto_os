@@ -856,7 +856,9 @@ UI shows as is ("This conversation is too large to show here (transcript
 resource limit). …"): a short (≤ 8 MiB) or subagent transcript whose fold
 charge exceeds 256 MiB or one of whose records exceeds 16 MiB, a single record
 over 64 MiB in a long one, or subagent metadata over its separate 8 MiB charge
-budget (one sidecar may be at most 1 MiB). No transcript is deleted or silently truncated; per-item caps (64 KB per
+budget (one sidecar may be at most 1 MiB). A transcript file that vanished
+between resolution and read is **404**. None of these is ever reported as 500
+(the fold cache used to re-wrap every fold error as `internal`). No transcript is deleted or silently truncated; per-item caps (64 KB per
 tool result, images by reference) keep any one turn small.
 
 | Method & path | Auth | Request | Response |

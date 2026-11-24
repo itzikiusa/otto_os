@@ -70,13 +70,7 @@ pub(crate) fn fold_with(
 ) -> Result<(Folded, Vec<otto_transcript::SubagentMeta>), Error> {
     let store = image_store(ctx, &store_key(provider, path));
     let subagents = if sub.is_none() && provider == Provider::Claude {
-        read_subagents_limited(path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::OutOfMemory {
-                Error::PayloadTooLarge(e.to_string())
-            } else {
-                Error::Internal(format!("read subagent metadata: {e}"))
-            }
-        })?
+        read_subagents_limited(path).map_err(|e| read_error(e, "subagent metadata"))?
     } else {
         Vec::new()
     };
@@ -103,19 +97,23 @@ pub(crate) fn fold_with(
     } else {
         fold_file_limited(provider, &target, opts, Default::default())
     }
-    .map_err(|e| {
-        if e.kind() == std::io::ErrorKind::OutOfMemory {
-            Error::PayloadTooLarge(e.to_string())
-        } else {
-            Error::Internal(format!("read transcript: {e}"))
-        }
-    })?;
+    .map_err(|e| read_error(e, "transcript"))?;
     let subagents = if sub.is_none() && provider == Provider::Agy {
         folded.subagents.clone()
     } else {
         subagents
     };
     Ok((folded, subagents))
+}
+
+/// A transcript read's IO error as what it is: a resource limit (413, its
+/// sentence shown as is), a file gone since it was resolved (404).
+fn read_error(e: std::io::Error, what: &str) -> Error {
+    match e.kind() {
+        std::io::ErrorKind::OutOfMemory => Error::PayloadTooLarge(e.to_string()),
+        std::io::ErrorKind::NotFound => Error::NotFound(format!("the {what} file is gone")),
+        _ => Error::Internal(format!("read {what}: {e}")),
+    }
 }
 
 /// Authorization/resolution have already completed before entering the cache.

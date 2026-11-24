@@ -151,4 +151,23 @@ async fn a_long_session_opens_on_its_recent_turns_and_pages_back() {
     let (status, block) = get(&app, &format!("{base}/tool/{}", long.big_tool_id), &token).await;
     assert_eq!(status, 200, "the big tool call opens: {block}");
     assert_eq!(block["result"]["truncated"], true);
+
+    // What is still refused says so in words with its own status, never 500:
+    // a sub-agent transcript holding one record over the 16 MiB record cap.
+    let subagents = path.with_extension("").join("subagents");
+    let huge = format!(
+        "{{\"type\":\"user\",\"message\":{{\"content\":\"{}\"}}}}\n",
+        "z".repeat(17 << 20)
+    );
+    std::fs::write(subagents.join("agent-huge.jsonl"), huge).unwrap();
+    let (status, body) = get(&app, &format!("{base}?sub=huge"), &token).await;
+    assert_eq!(status, 413, "{body}");
+    assert_eq!(body["code"], "payload_too_large");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("too large to show here"),
+        "{body}"
+    );
 }
