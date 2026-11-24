@@ -210,7 +210,8 @@ test('local review finishes and hands only selected findings to a synthetic agen
   await page.getByRole('button', {name: 'Send to agent (1)', exact: true}).click();
   await page.getByRole('menuitem', {name: 'claude', exact: true}).click();
   await expect(page).toHaveURL(/#\/agents\/synthetic-handoff$/);
-  await expect(page.locator('.tab').filter({hasText: 'Selected review fixes'}).first()).toBeVisible();
+  // One session open: no tab strip (it shows with two or more) — its pane header names it.
+  await expect(page.locator('.pane-title').filter({hasText: 'Selected review fixes'}).first()).toBeVisible();
 });
 
 test('creating a branch from a selected commit keeps that SHA while HEAD moves behind the dialog', async ({page}) => {
