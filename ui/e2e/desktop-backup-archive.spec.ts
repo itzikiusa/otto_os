@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { apiCtx, seedWorkspace, seedVaultDir } from './seed';
 import type { StateArchive } from '../src/lib/api/types';
 
@@ -50,7 +50,10 @@ test('data archives include feature records and Vault files with reviewed additi
     expect(connections.find((row: { id: string }) => row.id === connection.id).secret_ref).toBe(connection.secret_ref);
     // Archive contents must be checked again after tampering; no restore button should remain enabled.
     archive.files[0].content_base64 = Buffer.from('tampered').toString('base64');
-    await card.locator('input[type=file]').setInputFiles({ name: 'tampered.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(archive)) });
+    // A file, not a buffer: on a daemon holding much data the archive passes Playwright's 50 MB buffer cap.
+    const tampered = info.outputPath('tampered.json');
+    writeFileSync(tampered, JSON.stringify(archive));
+    await card.locator('input[type=file]').setInputFiles(tampered);
     await card.getByRole('button', { name: 'Preview restore', exact: true }).click();
     const error = 'Archive asset hash/size validation failed';
     await expect(card.getByText(error, { exact: false })).toBeVisible();
