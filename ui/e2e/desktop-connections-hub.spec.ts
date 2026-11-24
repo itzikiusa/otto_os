@@ -164,7 +164,7 @@ test.describe('connections hub', () => {
     // (5) The row ⋯ holds the row actions; Test runs on demand only.
     await mysqlRow.hover();
     await page.getByRole('button', { name: 'Actions for hub-mysql' }).click();
-    for (const item of ['Open', 'Test', 'Edit', 'Duplicate without password', 'Delete']) {
+    for (const item of ['Open', 'Test', 'Edit', 'Duplicate without password', 'Delete…']) {
       await expect(page.getByRole('menuitem', { name: item, exact: true })).toBeVisible();
     }
     await page.keyboard.press('Escape');
@@ -188,12 +188,12 @@ test.describe('connections hub', () => {
     await expect(page.getByText(/\d+ saved/)).toBeVisible();
   });
 
-  test('Delete hides the row at once and Undo brings it back without deleting', async ({ page }) => {
+  test('Delete… asks first: Cancel keeps the row and sends nothing, Delete removes it (R1-006)', async ({ page }) => {
     const { ctx, base } = await apiCtx();
     const wsId = await seedWorkspace(ctx, base);
-    const name = `undo-me-${Date.now()}`;
+    const name = `delete-me-${Date.now()}`;
     const res = await ctx.post(`${base}/api/v1/workspaces/${wsId}/connections`, {
-      data: { name, kind: 'ssh', params: { host: 'undo.invalid' }, secret: null },
+      data: { name, kind: 'ssh', params: { host: 'delete.invalid' }, secret: null },
     });
     expect(res.ok()).toBeTruthy();
     const { id } = await res.json();
@@ -204,14 +204,18 @@ test.describe('connections hub', () => {
     await page.addInitScript((w) => localStorage.setItem('otto_workspace', w as string), wsId);
     await page.goto('/#/connections');
     const row = page.locator('.conn-row', { hasText: name });
-    await pickMenuItem(page, () => row.click({ button: 'right' }), 'Delete');
-    await expect(row).toHaveCount(0);
-    await page.getByRole('button', { name: 'Undo', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Delete connection' });
+    await pickMenuItem(page, () => row.click({ button: 'right' }), 'Delete…');
+    await expect(dialog).toContainText('saved password');
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
     await expect(row).toBeVisible();
-    await page.waitForTimeout(7000); // ui-guards: allow — proves NO delete is sent after the toast is gone
     expect(deletes).toBe(0);
-    const still = await ctx.get(`${base}/api/v1/workspaces/${wsId}/connections`);
-    expect(((await still.json()) as { id: string }[]).some((c) => c.id === id)).toBe(true);
+    await pickMenuItem(page, () => row.click({ button: 'right' }), 'Delete…');
+    await dialog.getByRole('button', { name: 'Delete', exact: true }).click();
+    await expect(row).toHaveCount(0);
+    expect(deletes).toBe(1);
+    const left = await ctx.get(`${base}/api/v1/workspaces/${wsId}/connections`);
+    expect(((await left.json()) as { id: string }[]).some((c) => c.id === id)).toBe(false);
     await ctx.dispose();
   });
 });

@@ -1,9 +1,3 @@
-<script module lang="ts">
-  /** Rows hidden while their Delete can still be undone — module-level, so
-   *  leaving the page and coming back inside the Undo window keeps them hidden. */
-  let deleting = $state<Record<string, true>>({});
-</script>
-
 <script lang="ts">
   // Connections — the list IS the page (docs/design/guidelines/patterns.md
   // §10): every saved profile (databases, SSH hosts, custom CLIs) and Kafka
@@ -93,7 +87,7 @@
   const allItems = $derived([
     ...connectionList.rows.map(fromConnection),
     ...brokers.clusters.map(fromCluster),
-  ].filter((i) => !deleting[i.id]));
+  ]);
   const presentKinds = $derived(KIND_ORDER.filter((k) => allItems.some((i) => i.kind === k)));
   const narrowed = $derived(!!q.trim() || kind !== 'all' || section !== null);
   const shown = $derived(allItems.filter((i) => matches(i, { q, kind, section }, connectionList.sections)));
@@ -245,30 +239,17 @@
     }
   }
 
-  /** Delete with undo: the row hides now; the profile (and its Keychain
-   *  secret) is deleted when the toast goes away without Undo. */
-  function remove(c: Connection): void {
-    deleting = { ...deleting, [c.id]: true };
-    const restore = (): void => {
-      const { [c.id]: _, ...rest } = deleting;
-      deleting = rest;
-    };
-    toasts.push('info', `Deleted “${c.name}”`, 'Its saved password is removed too.', 6000, {
-      action: { label: 'Undo', run: restore },
-      onClose: (reason) => {
-        if (reason === 'action') return;
-        void api.del(`/connections/${c.id}`).then(
-          () => {
-            connectionList.remove(c.id);
-            restore();
-          },
-          (e: unknown) => {
-            restore();
-            toastError(`Couldn’t delete ${c.name}`, e);
-          },
-        );
-      },
-    });
+  /** Delete asks first (patterns.md §5): it destroys the saved password in
+   *  the Keychain too, so there is nothing to undo. */
+  async function remove(c: Connection): Promise<void> {
+    const ok = await confirmer.ask(`Delete “${c.name}”? The connection profile and its saved password are removed from Otto.`, { title: 'Delete connection', confirmLabel: 'Delete', danger: true });
+    if (!ok) return;
+    try {
+      await api.del(`/connections/${c.id}`);
+      connectionList.remove(c.id);
+    } catch (e) {
+      toastError(`Couldn’t delete ${c.name}`, e);
+    }
   }
 
   async function moveTo(c: Connection, sectionId: string | null): Promise<void> {
@@ -308,8 +289,7 @@
       ...(admin && auth.isRoot ? [{ label: 'Duplicate without password', icon: 'copy', action: () => void duplicate(c) }] : []),
       ...(admin && connectionList.sections.length > 0 ? [{ label: 'Move to section', icon: 'folder', children: moveItems(c.section_id, (id) => void moveTo(c, id)) }] : []),
       ...(auth.isRoot || can(c, 'manage_access', 'admin') ? [{ label: 'Access…', icon: 'key', action: () => (accessFor = c) }] : []),
-      // Undo, not a confirm: the label has no "…".
-      ...(admin ? [{ separator: true }, { label: 'Delete', icon: 'trash', danger: true, action: () => remove(c) }] : []), // ui-guards: allow — deletes with Undo, no confirm
+      ...(admin ? [{ separator: true }, { label: 'Delete…', icon: 'trash', danger: true, action: () => void remove(c) }] : []),
     ]);
   }
 
