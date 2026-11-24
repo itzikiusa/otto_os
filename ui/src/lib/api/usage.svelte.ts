@@ -412,10 +412,12 @@ class UsageStore {
       await this.loadStatus();
       if (this.status?.available) {
         mine = ++this.summarySeq;
-        this.summaries.clear();
+        // A new map, not clear(): a response begun before this refresh still
+        // writes into the old one and never back into the refreshed cache.
+        const cache = (this.summaries = new Map());
         const key = this.summaryQuery();
         const summary = await api.get<UsageSummary>(`/usage/summary?${key}`);
-        this.summaries.set(key, summary);
+        cache.set(key, summary);
         if (mine === this.summarySeq) {
           this.summary = summary;
           this.summaryError = null;
@@ -560,7 +562,7 @@ class UsageStore {
         total_tokens: m.total_tokens,
         cost_usd: m.cost_usd,
       })),
-      `otto-usage-models-${this.days}d.csv`,
+      `otto-usage-models-${this.summary?.days}d.csv`,
     );
   }
 
@@ -616,17 +618,22 @@ class UsageStore {
     if (known) {
       this.summary = known;
       this.summaryError = null;
+      this.loading = false;
       return;
     }
+    const cache = this.summaries;
+    this.loading = true;
     try {
       const summary = await api.get<UsageSummary>(`/usage/summary?${key}`);
-      this.summaries.set(key, summary);
+      cache.set(key, summary);
       if (mine === this.summarySeq) {
         this.summary = summary;
         this.summaryError = null;
       }
     } catch (e) {
       if (mine === this.summarySeq) this.summaryError = loadErrorText(e);
+    } finally {
+      if (mine === this.summarySeq) this.loading = false;
     }
   }
 
@@ -646,7 +653,7 @@ class UsageStore {
         total_tokens: p.total_tokens,
         cost_usd: p.cost_usd,
       })),
-      `otto-usage-providers-${this.days}d.csv`,
+      `otto-usage-providers-${this.summary.days}d.csv`,
     );
   }
 
@@ -664,7 +671,7 @@ class UsageStore {
         total_tokens: d.total_tokens,
         cost_usd: d.cost_usd,
       })),
-      `otto-usage-daily-${this.days}d.csv`,
+      `otto-usage-daily-${this.summary.days}d.csv`,
     );
   }
 
@@ -689,7 +696,7 @@ class UsageStore {
         fallback_priced: s.fallback_priced ? 'yes' : 'no',
         last_active: s.last_active,
       })),
-      `otto-usage-sessions-${this.days}d.csv`,
+      `otto-usage-sessions-${this.summary.days}d.csv`,
     );
   }
 
@@ -708,14 +715,14 @@ class UsageStore {
         total_tokens: f.total_tokens,
         cost_usd: f.cost_usd,
       })),
-      `otto-usage-features-${this.days}d.csv`,
+      `otto-usage-features-${this.summary.days}d.csv`,
     );
   }
 
   /** Export the full summary payload as JSON (for programmatic consumption). */
   exportSummaryJson(): void {
     if (!this.summary) return;
-    downloadJson(this.summary, `otto-usage-summary-${this.days}d.json`);
+    downloadJson(this.summary, `otto-usage-summary-${this.summary.days}d.json`);
   }
 
   /** Install/update ClickHouse via the official installer (large download). */
