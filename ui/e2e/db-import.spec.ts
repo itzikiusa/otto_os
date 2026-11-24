@@ -140,10 +140,10 @@ async function openConn(page: Page, name: string): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
   const id = name === 'e2e-mysql' ? conn.mysql : conn.mongodb;
-  const c = page.locator(`.conn-row[data-connection-id="${id}"] .conn-name`, { hasText: name });
+  const c = page.locator(`.conn-row[data-connection-id="${id}"] .tr-title`, { hasText: name });
   await expect(c.first()).toBeVisible({ timeout: 30_000 });
   await c.first().click();
-  await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('db-conn-state')).toBeVisible({ timeout: 20_000 });
 }
 
 async function runStatement(page: Page, sql: string): Promise<void> {

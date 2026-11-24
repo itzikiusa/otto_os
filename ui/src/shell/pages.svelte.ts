@@ -50,6 +50,9 @@ const LOADERS: Record<string, Loader> = {
   home: () => import('../modules/home/HomePage.svelte'),
   ide: () => import('../modules/ide/IdePage.svelte'),
   git: () => import('../modules/git/GitPage.svelte'),
+  // The connection list (`#/connections`, the sidebar entry) is its own small
+  // chunk; `#/database/<connection>` is the workbench.
+  connections: () => import('../modules/connections/ConnectionsPage.svelte'),
   database: () => import('../modules/database/DatabasePage.svelte'),
   vault: () => import('../modules/vault/VaultPage.svelte'),
   // The old Scratches page: forwards to the IDE's Scratches project.
@@ -116,8 +119,7 @@ export function loadedRightPanel(): PageComponent | null {
 const NOT_SHELL = new Set(['s', 'bar', 'tray', 'clipboard', 'room', 'room-host']);
 
 /** The page a route shows, or null for a route outside the shell:
- *  `connections` is the Database page, the bare route and a plugin route
- *  without a slug are Agents. An unknown module, or one the signed-in user's
+ *  the bare route and a plugin route without a slug are Agents. An unknown module, or one the signed-in user's
  *  role / a disabled feature hides (the sidebar's own gate), is the route
  *  gate — never a silent Agents, never a page that only fails with 403s. */
 export function pageKeyOf(parts: readonly string[]): string | null {
@@ -129,7 +131,7 @@ export function pageKeyOf(parts: readonly string[]): string | null {
   const light = lightMode.active;
   if (m === '' || (m === 'plugin' && !parts[1])) return light ? LIGHT_HOME : 'agents';
   if (light && knownRoute(m) && !lightRouteAllowed(m)) return ROUTE_GATE;
-  const key = m === 'connections' ? 'database' : m;
+  const key = m;
   // A known non-page route (`projects` redirects) keeps the old Agents fallback.
   if (!(key in LOADERS) || key === ROUTE_GATE) return knownRoute(m) ? 'agents' : ROUTE_GATE;
   return routeLocked(parts) ? ROUTE_GATE : key;

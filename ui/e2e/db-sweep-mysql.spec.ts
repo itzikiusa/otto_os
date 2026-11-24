@@ -14,7 +14,7 @@ import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 //   • ipad-portrait    834×1194 → tablet layout
 //   • ipad-landscape   1194×834 → desktop 3-pane layout (≥1025px)
 //
-// The three layouts share the SAME content selectors (`.conn-list .conn-name`,
+// The three layouts share the SAME content selectors (`.conn-list .tr-title`,
 // `.main-tabs`, `.qe-edit .cm-content`, `.grid`, `.grid-scroll`); only the phone
 // layout adds tappable accordion headers (`.qe-acc-head`, `.acc-toggle`) that
 // must be expanded first. We branch on viewport width (≤640 = phone) for those,
@@ -74,11 +74,11 @@ async function openMysql(page: Page): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
 
-  const conn = page.locator('.conn-list .conn-name', { hasText: 'e2e-mysql' });
+  const conn = page.locator('.conn-list .tr-title', { hasText: 'e2e-mysql' });
   await expect(conn.first()).toBeVisible({ timeout: 30_000 });
   await conn.first().click();
 
-  await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('db-conn-state')).toBeVisible({ timeout: 20_000 });
 }
 
 /** On a phone the Editor block is gated behind a collapsible accordion header —
@@ -338,7 +338,7 @@ test.describe('DB Explorer · MySQL sweep', () => {
       await page.locator('.side-switch [role="tab"]', { hasText: 'Connections' }).click();
     }
     await expect(page.locator('.conn-list')).toBeVisible();
-    await expect(page.locator('.conn-list .conn-name', { hasText: 'e2e-mysql' }).first()).toBeVisible();
+    await expect(page.locator('.conn-list .tr-title', { hasText: 'e2e-mysql' }).first()).toBeVisible();
 
     // Open the schema view. Phone: the "Schema & saved" accordion gates it.
     // Tablet/desktop: click the "Schema" tab.

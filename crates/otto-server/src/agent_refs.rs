@@ -867,8 +867,21 @@ pub(crate) async fn resolve_with(
             )));
         }
     }
-    let cands = load_candidates(caller, kind, pin, ws_filter, prefer).await?;
     let reference = reference.map(str::trim).filter(|s| !s.is_empty());
+    // The caller's own workspace first: one list instead of one per readable
+    // workspace (an agent's `otto_db_query` listed the connections of all 20).
+    // A hit there is what the full search returns too — an id is unique, and a
+    // single-field name match is settled in favour of the caller's workspace.
+    if let (Some(r), Some(p), None, Scope::Workspace) = (reference, prefer, ws_filter, kind.scope) {
+        if let Ok(cands) = load_candidates(caller, kind, pin, Some(p), Some(p)).await {
+            if let RefMatch::One(c, by) = match_ref(kind, &cands, r, Some(p)) {
+                if by == MatchedBy::Id || kind.names.len() == 1 {
+                    return Ok((c.clone(), by));
+                }
+            }
+        }
+    }
+    let cands = load_candidates(caller, kind, pin, ws_filter, prefer).await?;
     match reference {
         Some(r) => match match_ref(kind, &cands, r, prefer.or(ws_filter)) {
             RefMatch::One(c, by) => Ok((c.clone(), by)),

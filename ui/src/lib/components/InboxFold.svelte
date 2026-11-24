@@ -16,10 +16,12 @@
     ontoggle?: () => void;
     /** On the fold button. */
     testid?: string;
+    /** Controls at the end of a calm heading (a section's ⋯). */
+    actions?: Snippet;
     children: Snippet;
   }
 
-  let { label, ariaLabel, count, expanded = false, ontoggle, testid, children }: Props = $props();
+  let { label, ariaLabel, count, expanded = false, ontoggle, testid, actions, children }: Props = $props();
 </script>
 
 <section class="if-group" aria-label={ariaLabel ?? label}>
@@ -29,6 +31,12 @@
       {#if count}<span class="if-count">{count}</span>{/if}
       <Icon name={expanded ? 'chevronDown' : 'chevronRight'} size={12} />
     </button>
+  {:else if actions}
+    <div class="if-head">
+      <h2 class="if-label">{label}</h2>
+      {#if count}<span class="if-count">{count}</span>{/if}
+      {@render actions()}
+    </div>
   {:else}
     <h2 class="if-label">{label}</h2>
   {/if}
@@ -47,6 +55,16 @@
     font-size: var(--fs-s);
     font-weight: 500;
     color: var(--text-dim);
+  }
+  .if-head {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding-inline-end: var(--sp-3);
+  }
+  .if-head .if-label {
+    flex: 1;
+    min-width: 0;
   }
   .if-fold {
     display: flex;

@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { setDbView } from './helpers';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -44,10 +45,10 @@ async function openConnFromList(page: Page, name: string): Promise<void> {
   const connTab = page.locator('.side-switch [role="tab"]', { hasText: 'Connections' });
   if (await connTab.first().isVisible().catch(() => false)) await connTab.first().click();
   const id = name === 'e2e-mysql' ? conn.mysql : conn.redis;
-  const c = page.locator(`.conn-row[data-connection-id="${id}"] .conn-name`, { hasText: name });
+  const c = page.locator(`.conn-row[data-connection-id="${id}"] .tr-title`, { hasText: name });
   await expect(c.first()).toBeVisible({ timeout: 30_000 });
   await c.first().click();
-  await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('db-conn-state')).toBeVisible({ timeout: 20_000 });
   await expect(
     page.locator('.conn-tab.active .conn-tab-name', { hasText: name }),
   ).toBeVisible({ timeout: 20_000 });
@@ -71,8 +72,8 @@ test('workbench restores open tabs + selection + per-connection view on reload',
   await expect(page.locator('.conn-tab.active .conn-tab-name')).toHaveText('e2e-redis-docker');
 
   // Choose a per-connection main view on the focused (Redis) connection.
-  await page.locator('.main-tabs .mt', { hasText: 'Structure' }).first().click();
-  await expect(page.locator('.main-tabs .mt.active')).toHaveText('Structure');
+  await setDbView(page, 'Structure');
+  await expect(page.getByTestId('db-conn-state')).toContainText('Structure');
   // Let the localStorage writes (open set + per-conn view) settle before reload.
   await page.waitForTimeout(400);
 
@@ -85,7 +86,7 @@ test('workbench restores open tabs + selection + per-connection view on reload',
   await expect(page.locator('.conn-tab.active .conn-tab-name')).toHaveText('e2e-redis-docker', {
     timeout: 25_000,
   });
-  await expect(page.locator('.main-tabs .mt.active')).toHaveText('Structure', { timeout: 25_000 });
+  await expect(page.getByTestId('db-conn-state')).toContainText('Structure', { timeout: 25_000 });
 
   // Both connection names present (order preserved: mysql first, redis second).
   await expect(page.locator('.conn-tab .conn-tab-name').nth(0)).toHaveText('e2e-mysql');
@@ -99,7 +100,7 @@ test('workbench restores open tabs + selection + per-connection view on reload',
   // reload + re-run must come back in JSON without touching the switch again.
   await page.locator('.conn-tab .conn-tab-main', { hasText: 'e2e-mysql' }).click();
   await expect(page.locator('.conn-tab.active .conn-tab-name')).toHaveText('e2e-mysql');
-  await page.locator('.main-tabs .mt', { hasText: 'Query' }).first().click();
+  await setDbView(page, 'Query');
   await runStatement(page, 'SELECT 1 AS a');
   await expect(page.locator('.view-seg .vs.on')).toHaveText('Grid');
   await page.locator('.view-seg .vs', { hasText: 'JSON' }).click();

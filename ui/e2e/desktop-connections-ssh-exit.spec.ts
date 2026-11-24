@@ -47,7 +47,9 @@ test('an ended SSH tab says why, is marked, reconnects from the tree and closes 
   await expect(panel.getByTestId('ssh-exit-reconnect')).toBeVisible();
   await expect(page.getByTestId('ssh-tab-ended')).toBeVisible();
 
-  // The connection's row reconnects the ended tab instead of focusing it.
+  // The connection's row (back on the list) reconnects the ended tab instead
+  // of focusing it.
+  await page.getByRole('button', { name: 'All connections', exact: true }).click();
   await page.locator('.conn-row', { hasText: name }).click();
   await expect.poll(() => opens).toBe(2);
   await expect(page.getByTestId('ssh-tab')).toHaveCount(1);

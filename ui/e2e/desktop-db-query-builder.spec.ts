@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { setDbView } from './helpers';
 import { apiCtx, seedWorkspace } from './seed';
 import { mockDbRoutes, seedMockDbConnection } from './db-mock';
 
@@ -42,10 +43,10 @@ test.beforeEach(async ({ page }, testInfo) => {
 async function openBuilder(page: Page): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  const c = page.locator('.conn-list .conn-name', { hasText: CONN });
+  const c = page.locator('.conn-list .tr-title', { hasText: CONN });
   await expect(c.first()).toBeVisible({ timeout: 30_000 });
   await c.first().click();
-  await page.locator('.main-tabs .mt', { hasText: 'Builder' }).click();
+  await setDbView(page, 'Builder');
   await expect(page.locator('.builder')).toBeVisible({ timeout: 15_000 });
   await expect(page.getByTitle('Add orders to the canvas', { exact: true })).toBeVisible({ timeout: 15_000 });
 }
@@ -126,7 +127,7 @@ test('a loose column under GROUP BY is flagged, with a one-click fix', async ({ 
 test('round trip: Open in Builder parses a query tab; unsupported SQL is refused inline', async ({ page }) => {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  await page.locator('.conn-list .conn-name', { hasText: CONN }).first().click();
+  await page.locator('.conn-list .tr-title', { hasText: CONN }).first().click();
   await expect(page.locator('.query-editor')).toBeVisible({ timeout: 20_000 });
   const content = page.locator('.qe-edit .cm-content');
   await content.click();
@@ -145,7 +146,7 @@ test('round trip: Open in Builder parses a query tab; unsupported SQL is refused
   await expect(sqlText(page)).toContainText('ORDER BY `n` DESC');
 
   // Something the builder can't hold: refused with a reason, canvas untouched.
-  await page.locator('.main-tabs .mt', { hasText: 'Query' }).click();
+  await setDbView(page, 'Query');
   await content.click();
   await page.keyboard.press('ControlOrMeta+A');
   await page.keyboard.insertText('SELECT * FROM shop.orders UNION SELECT * FROM shop.orders');

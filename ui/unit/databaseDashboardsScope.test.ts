@@ -50,6 +50,9 @@ function setup() {
       if (path.endsWith('/loadError')) return { loadErrorText };
       if (path.endsWith('/router.svelte')) return { router: { module: 'database' } };
       if (path.endsWith('/clipHistory.svelte')) return { clipHistory: { setGuard() {} } };
+      if (path.endsWith('/connectionList.svelte')) return { connectionList: { onRefreshed: () => () => {}, recordStatus() {}, ensure: async () => {}, rows: [], error: null } };
+      if (path.endsWith('/userIdle')) return { idleMs: () => 0 };
+      if (path.endsWith('/sql-util')) return { isDdl: () => false };
       if (path.endsWith('/dbPrefs.svelte')) return {
         dbPrefs: { warmRestored: 'background', keepAlive: true, onKeepAliveChange() {}, setKeepAlive() {}, setWarmRestored() {} },
         loadFlag: (_key: string, def: boolean) => def,

@@ -24,7 +24,7 @@ for (const scheme of ['light', 'dark']) {
     }, { workspace, scheme });
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto('/#/database');
-    await page.locator('.conn-list .conn-name', { hasText: name }).click();
+    await page.locator('.conn-list .tr-title', { hasText: name }).click();
     const editor = page.locator('.qe-edit .cm-content');
     await editor.click();
     await page.keyboard.press('ControlOrMeta+A');

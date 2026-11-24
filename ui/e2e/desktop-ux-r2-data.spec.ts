@@ -22,7 +22,7 @@ async function setup(page: Page, kind: 'broker' | 'database') {
     await page.route('**/db/capabilities', r => r.fulfill({json:{engine:'mysql',query_language:'sql',version:'8.0',can_write:true,explain:true}}));
     await page.route('**/db/schema**', r => r.fulfill({json:[]}));
     await openPage(page,'database');
-    await page.locator('.conn-list .conn-name', {hasText:`Review SQL ${id}`} ).first().click();
+    await page.locator('.conn-list .tr-title', {hasText:`Review SQL ${id}`} ).first().click();
     await expect(page.getByRole('tablist', {name:'Query tabs'})).toBeVisible();
   }
   return entity;

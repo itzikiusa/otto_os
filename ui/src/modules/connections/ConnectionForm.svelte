@@ -8,6 +8,7 @@
   import PemField from './PemField.svelte';
   import TunnelFields from './TunnelFields.svelte';
   import { argvWarningFor } from './connection-warnings';
+  import { parseConnectionUri } from './connectionUri';
   import { toastError } from '../../lib/toastError';
   import { loadErrorText } from '../../lib/loadError';
   // New/Edit connection sheet — unified form with optional SSH tunnel toggle.
@@ -21,6 +22,7 @@
   import type { Connection, ConnectionKind, ConnectionSection,
     Environment, TestConnectionResp, TestUnsavedConnectionReq, UpsertConnectionReq } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { connectionList } from '../../lib/stores/connectionList.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { untrack } from 'svelte';
 
@@ -132,7 +134,8 @@
   // Section assignment (workspace connections only). `''` = ungrouped.
   // svelte-ignore state_referenced_locally
   let sectionId = $state<string>(existing?.section_id ?? '');
-  let sections: ConnectionSection[] = $state([]);
+  // The shared section tree (one cached read for the whole app).
+  const sections: ConnectionSection[] = $derived(connectionList.sections);
   let creatingSection = $state(false);
   let newSectionName = $state('');
   // Global (root-managed) connections are not assignable to a workspace section.
@@ -140,14 +143,8 @@
   const isGlobal = existing != null && existing.workspace_id === null;
 
   $effect(() => {
-    const wsId = ws.currentId;
-    if (!wsId || isGlobal) return;
-    let current = true;
-    void api
-      .get<ConnectionSection[]>(`/workspaces/${wsId}/connection-sections`)
-      .then((s) => { if (current) sections = s.sort((a, b) => a.position - b.position); })
-      .catch(() => {});
-    return () => { current = false; };
+    if (!ws.currentId || isGlobal) return;
+    void connectionList.ensure();
   });
 
   // Flatten the section tree into indented <option>s ("Platform / AWS").
@@ -170,7 +167,7 @@
         `/workspaces/${ws.currentId}/connection-sections`,
         { name: nm },
       );
-      sections = [...sections, sec];
+      connectionList.sections = [...connectionList.sections, sec];
       sectionId = sec.id;
       newSectionName = '';
       creatingSection = false;
@@ -261,126 +258,33 @@
     return p;
   }
 
-  // ── DSN / URI paste import ──────────────────────────────────────────────────
-  /** `decodeURIComponent` that never throws: a malformed escape (`%zz`) keeps
-   *  the raw text instead of aborting the import with an uncaught error. */
-  function safeDecode(v: string): string {
-    try {
-      return decodeURIComponent(v);
-    } catch {
-      return v;
-    }
-  }
-  /** Split the password out of a URI's RAW text (scheme://user:PASS@hosts/…):
-   *  the template keeps every other byte as pasted. `URL.password` can't be
-   *  used to find it — WHATWG re-encodes characters like `^ { } | " < > \` and
-   *  space, so a replace on its form missed and left the cleartext password in
-   *  the visible connection-string field. */
-  function splitUriPassword(text: string): { template: string; password: string } | null {
-    const start = text.indexOf('://');
-    if (start < 0) return null;
-    const authStart = start + 3;
-    const rest = text.slice(authStart);
-    const end = rest.search(/[/?#]/);
-    const authority = end < 0 ? rest : rest.slice(0, end);
-    let at = authority.lastIndexOf('@');
-    if (at < 0 && end >= 0) {
-      // An unencoded `/` in the password (`app:12/ss@h/db` — WHATWG parses
-      // it as host `app`, port `12`) ends the authority early. The real
-      // separator is then the first `@` past that cut which comes before any
-      // query: an `@` inside `?appName=a@b` is an option value, not userinfo.
-      const query = rest.search(/[?#]/);
-      const later = rest.indexOf('@', end);
-      if (later >= 0 && (query < 0 || later < query)) at = later;
-    }
-    if (at < 0) return null;
-    const userinfo = rest.slice(0, at);
-    const colon = userinfo.indexOf(':');
-    if (colon < 0) return null;
-    return {
-      template: text.slice(0, authStart) + userinfo.slice(0, colon) + ':{secret}' + text.slice(authStart + at),
-      password: safeDecode(userinfo.slice(colon + 1)),
-    };
-  }
-  // Parses a standard connection URI (mysql://, redis://, mongodb://, etc.) and
-  // fills the form fields in-place. Returns the inline field error for a URI it
+  // ── DSN / URI paste import (parsing: connectionUri.ts) ─────────────────────
+  // Fills the form fields in place. Returns the inline field error for a URI it
   // can't read (unparseable, unknown scheme) — the caller keeps the pasted
   // value next to it — or null once the fields are filled.
   function parseDsn(raw: string): string | null {
-    const s = raw.trim();
-    if (!s) return null;
-
-    let url: URL;
-    try {
-      url = new URL(s);
-    } catch {
-      // The usual cause with credentials: an unencoded `/ ? # @` in the
-      // password cuts the authority short (`app:pa/ss@h` → port `pa`).
-      return s.includes('@')
-        ? 'Couldn’t read this connection URL. Percent-encode / ? # @ in the password (for example %2F for /).'
-        : 'Couldn’t read this connection URL. Start it with a scheme, for example mysql://host:3306/db.';
-    }
-
-    const scheme = url.protocol.replace(':', '').toLowerCase();
-    const kindMap: Record<string, ConnectionKind> = {
-      mysql: 'mysql',
-      'mysql+tcp': 'mysql',
-      postgres: 'postgres',
-      postgresql: 'postgres',
-      'postgres+tcp': 'postgres',
-      redis: 'redis',
-      rediss: 'redis',
-      mongodb: 'mongodb',
-      'mongodb+srv': 'mongodb',
-      clickhouse: 'clickhouse',
-      'clickhouse+https': 'clickhouse',
-      'clickhouse+http': 'clickhouse',
-      ssh: 'ssh',
-    };
-    const mapped = kindMap[scheme];
-    if (!mapped) {
-      return `Couldn’t read this connection URL: “${scheme}://” isn’t a scheme Otto knows. Use mysql, postgres, redis, mongodb, clickhouse or ssh.`;
-    }
-
-    setKind(mapped);
-
-    if (mapped === 'mongodb') {
-      // Keep topology/options intact but move credentials to the secret field.
-      const split = splitUriPassword(s);
-      secret = split?.password ?? '';
-      fConnString = split ? split.template : s;
+    const r = parseConnectionUri(raw);
+    if (!r) return null;
+    if ('error' in r) return r.error;
+    setKind(r.kind);
+    if (r.connString !== undefined) {
+      secret = r.secret ?? '';
+      fConnString = r.connString;
     } else {
-      if (url.hostname) fHost = url.hostname;
-      if (url.port)     fPort = url.port;
-      if (url.username) fUser = safeDecode(url.username);
-      if (url.password) secret = safeDecode(url.password);
-      // The first path segment is the database/db-index.
-      const dbPart = url.pathname.replace(/^\//, '').split('/')[0];
-      if (dbPart) fDb = safeDecode(dbPart);
+      if (r.host) fHost = r.host;
+      if (r.port) fPort = r.port;
+      if (r.user) fUser = r.user;
+      if (r.secret) secret = r.secret;
+      if (r.db) fDb = r.db;
     }
-
-    if (scheme === 'rediss' || scheme === 'clickhouse+https') tlsMode = 'required';
-    const ssl = url.searchParams.get('sslmode') ?? url.searchParams.get('tls') ?? url.searchParams.get('ssl');
-    if (ssl && ['true', '1', 'require', 'verify-ca', 'verify-full'].includes(ssl)) tlsMode = 'required';
-    if (ssl && ['false', '0', 'disable'].includes(ssl)) tlsMode = 'disabled';
-    if (url.searchParams.get('tlsAllowInvalidCertificates') === 'true') tlsVerify = false;
-    if (mapped !== 'mongodb') {
-      const supported = new Set(['sslmode', 'tls', 'ssl', 'tlsAllowInvalidCertificates']);
-      const ignored = [...url.searchParams.keys()].filter((key) => !supported.has(key));
-      if (ignored.length) toasts.warn('URI options need review', `Not imported: ${ignored.join(', ')}`);
-    }
-
-    // Auto-fill name from host+db if the name field is still empty.
-    if (!name && url.hostname) {
-      const dbPart = url.pathname.replace(/^\//, '').split('/')[0];
-      name = dbPart ? `${url.hostname}/${dbPart}` : url.hostname;
-    }
-
-    toasts.success('URI parsed', `${kindLabels[mapped]} — fields populated`);
+    if (r.tlsMode) tlsMode = r.tlsMode;
+    if (r.tlsVerify === false) tlsVerify = false;
+    if (r.ignored.length) toasts.warn('URI options need review', `Not imported: ${r.ignored.join(', ')}`);
+    if (!name && r.name) name = r.name;
+    toasts.success('URI parsed', `${kindLabels[r.kind]} — fields populated`);
     return null;
   }
 
-  let showDsnInput = $state(false);
   let dsnValue = $state('');
   /** Inline error for the pasted URI (validation is inline, never a toast). */
   let dsnError: string | null = $state(null);
@@ -396,13 +300,38 @@
       return;
     }
     dsnValue = '';
-    showDsnInput = false;
+    step = 'fields';
   }
-  function cancelDsn(): void {
-    showDsnInput = false;
-    dsnValue = '';
-    dsnError = null;
+
+  // ── Two steps for a new connection ──────────────────────────────────────
+  // 1. paste a URI or pick a kind; 2. that kind's few fields + Test. An edit,
+  // a prefill (AWS RDS) or a single offered kind start on step 2.
+  // svelte-ignore state_referenced_locally
+  let step = $state<'pick' | 'fields'>(existing || prefill?.host || kinds.length === 1 ? 'fields' : 'pick');
+  function pickKind(k: ConnectionKind): void {
+    setKind(k);
+    step = 'fields';
   }
+  // "More options" (section, environment, time zone, TLS, SSH, first command)
+  // opens by itself when the profile being edited already uses any of them.
+  // svelte-ignore state_referenced_locally
+  let moreOpen = $state(
+    !!existing &&
+      (tlsMode !== 'disabled' || !!existingSsh || !!(existing.params?.jump || existing.params?.identity_file) ||
+        !!existing.first_command || (tzKinds.has(existing.kind) && !!fTimezone && fTimezone.toUpperCase() !== 'UTC') ||
+        existing.environment !== 'dev' || existing.read_only || !!existing.section_id) ||
+      (!existing && (!!prefill?.environment && prefill.environment !== 'dev')),
+  );
+  /** What is set under the folded More options, in words. */
+  const moreSummary = $derived(
+    [
+      environment === 'prod' ? 'Production' : environment === 'staging' ? 'Staging' : '',
+      readOnly ? 'read-only' : '',
+      tlsKinds.has(kind) && tlsMode !== 'disabled' ? 'TLS' : '',
+      tlsKinds.has(kind) && tunnelOpen && tunHost.trim() ? 'SSH tunnel' : '',
+      sectionId ? (sections.find((s) => s.id === sectionId)?.name ?? '') : '',
+    ].filter(Boolean).join(' · '),
+  );
 
   // ── Test-before-save ────────────────────────────────────────────────────
   // Probes the CURRENT form values (unsaved) — DB kinds via
@@ -490,11 +419,12 @@
 </script>
 
 <Modal title={existing ? `Edit ${existing.name}` : 'New connection'} width={500} {onclose}>
-  <!-- DSN / URI paste import -->
-  {#if !existing}
-    {#if showDsnInput}
-      <div class="field dsn-row">
-        <input dir="ltr" aria-label="Connection string"
+  {#if step === 'pick'}
+    <!-- Step 1: paste a URI (the fastest path) or pick a kind. -->
+    <div class="field">
+      <label for="cf-dsn">Paste a connection URI</label>
+      <div class="dsn-row">
+        <input dir="ltr" id="cf-dsn"
           class="input mono"
           bind:value={dsnValue}
           placeholder="mysql://user:pass@host:3306/db"
@@ -504,117 +434,33 @@
           oninput={() => (dsnError = null)}
           onkeydown={(e) => {
             if (e.key === 'Enter') commitDsn();
-            else if (e.key === 'Escape') cancelDsn();
           }}
         />
-        <button class="btn small primary" onclick={commitDsn}>Import</button>
-        <button class="btn small" onclick={cancelDsn}>Cancel</button>
+        <button class="btn small primary" disabled={!dsnValue.trim()} onclick={commitDsn}>Continue</button>
       </div>
       {#if dsnError}<p class="field-error" id="dsn-err">{dsnError}</p>{/if}
-    {:else}
-      <div class="dsn-hint">
-        <button class="btn small ghost dsn-btn" onclick={() => (showDsnInput = true)}>
-          Paste connection URI&hellip;
-        </button>
+    </div>
+    <div class="field">
+      <span class="group-label" id="cf-pick-label">…or pick a kind</span>
+      <div class="kind-tiles" role="group" aria-labelledby="cf-pick-label">
+        {#each kinds as k (k)}
+          <button class="kind-tile" onclick={() => pickKind(k)}>{kindLabels[k]}</button>
+        {/each}
       </div>
-    {/if}
+    </div>
+  {:else}
+  {#if !existing && kinds.length > 1}
+    <p class="kind-line"><span>{kindLabels[kind]}</span> <button class="link-btn" onclick={() => (step = 'pick')}>Change</button></p>
   {/if}
 
   <!-- Name -->
   <div class="field">
     <label for="cf-name">Name</label>
-    <input dir="auto" id="cf-name" class="input" bind:value={name} placeholder="staging mysql" />
+    <input dir="auto" id="cf-name" class="input" bind:value={name} placeholder="e.g. orders staging" />
   </div>
-
-  <!-- Section (workspace connections only) -->
-  {#if !isGlobal}
-    <div class="field">
-      <label for="cf-section">Section <span class="dim">(optional)</span></label>
-      {#if creatingSection}
-        <div class="section-new">
-          <input dir="auto" aria-label="New section name"
-            class="input"
-            bind:value={newSectionName}
-            placeholder="New section name"
-            onkeydown={(e) => {
-              if (e.key === 'Enter') createSection();
-              else if (e.key === 'Escape') {
-                creatingSection = false;
-                newSectionName = '';
-              }
-            }}
-          />
-          <button class="btn small primary" onclick={createSection}>Add</button>
-          <button
-            class="btn small"
-            onclick={() => {
-              creatingSection = false;
-              newSectionName = '';
-            }}
-          >
-            Cancel
-          </button>
-        </div>
-      {:else}
-        <div class="section-row">
-          <select id="cf-section" class="input" bind:value={sectionId}>
-            <option value="">Ungrouped</option>
-            {#each sectionOptions as opt (opt.id)}
-              <option value={opt.id}>{opt.label}</option>
-            {/each}
-          </select>
-          <button class="btn small" onclick={() => (creatingSection = true)}><Icon name="plus" size={12} /> New</button>
-        </div>
-      {/if}
-    </div>
-  {/if}
 
   {#if !auth.isRoot}<p class="hint">Owner manages credentials, native connection settings and environment.</p>{/if}
   <fieldset class="native-fields" disabled={!auth.isRoot}>
-  <!-- Kind -->
-  <div class="field">
-    <span class="group-label" id="cf-kind-label">Kind</span>
-    <div class="kind-row" role="group" aria-labelledby="cf-kind-label">
-      {#each kinds as k (k)}
-        <button class="kind-chip" class:selected={kind === k} aria-pressed={kind === k} onclick={() => setKind(k)}>{kindLabels[k]}</button>
-      {/each}
-    </div>
-  </div>
-
-  <!-- Environment + write guardrail -->
-  <div class="field">
-    <span class="group-label" id="cf-env-label">Environment</span>
-    <div class="env-row" role="group" aria-labelledby="cf-env-label">
-      {#each (['dev', 'staging', 'prod'] as Environment[]) as e (e)}
-        <button
-          class="env-chip"
-          class:selected={environment === e}
-          class:prod={e === 'prod'}
-          aria-pressed={environment === e}
-          onclick={() => (environment = e)}
-        >{e}</button>
-      {/each}
-    </div>
-    {#if environment === 'prod'}
-      <span class="hint danger">
-        {#if kind === 'ssh'}
-          Production — shown with a prod badge; file uploads, renames and deletes ask you to confirm first.
-        {:else if kind === 'custom'}
-          Production — shown with a prod badge so it can’t be mistaken for a dev target.
-        {:else}
-          Production — writes &amp; schema changes are blocked until you type a confirmation.
-        {/if}
-      </span>
-    {/if}
-  </div>
-
-  <div class="field ssh-toggle-row">
-    <label class="toggle-label">
-      <input type="checkbox" bind:checked={readOnly} />
-      Read-only <span class="dim">(writes / DDL need the connection name typed to confirm, even outside prod)</span>
-    </label>
-  </div>
-
   {#if argvWarn}<div class="warn-banner" data-testid="argv-warning">{argvWarn}</div>{/if}
 
   <!-- MongoDB: connection string only -->
@@ -702,6 +548,123 @@
     {/if}
   {/if}
 
+  <!-- Password (not for ssh kind) -->
+  {#if hasPasswordField.has(kind)}
+    <div class="field">
+      <label for="cf-secret">
+        {kind === 'mongodb' ? 'Secret (credential in the URI)' :
+         kind === 'custom'  ? 'Secret ({secret} in template)' : 'Password'}
+        <span class="dim">(optional)</span>
+      </label>
+      <input
+        id="cf-secret"
+        class="input"
+        type="password"
+        bind:value={secret}
+        placeholder={existing?.secret_ref ? '•••••• (leave blank to keep)' : ''}
+        autocomplete="new-password"
+      />
+      <span class="hint">Stored in the macOS Keychain — never in the database.</span>
+    </div>
+  {/if}
+  </fieldset>
+
+  <!-- Everything a first connection doesn't need: open on demand, and on its
+       own when editing a profile that already uses any of it. -->
+  <button class="more-toggle" aria-expanded={moreOpen} aria-controls="cf-more" onclick={() => (moreOpen = !moreOpen)}>
+    <Icon name={moreOpen ? 'chevronDown' : 'chevronRight'} size={12} /> More options
+    {#if !moreOpen && moreSummary}<span class="dim">· {moreSummary}</span>{/if}
+  </button>
+  {#if moreOpen}
+  <div id="cf-more" class="more-body">
+  <!-- Section (workspace connections only) -->
+  {#if !isGlobal}
+    <div class="field">
+      <label for="cf-section">Section <span class="dim">(optional)</span></label>
+      {#if creatingSection}
+        <div class="section-new">
+          <input dir="auto" aria-label="New section name"
+            class="input"
+            bind:value={newSectionName}
+            placeholder="New section name"
+            onkeydown={(e) => {
+              if (e.key === 'Enter') createSection();
+              else if (e.key === 'Escape') {
+                creatingSection = false;
+                newSectionName = '';
+              }
+            }}
+          />
+          <button class="btn small primary" onclick={createSection}>Add</button>
+          <button
+            class="btn small"
+            onclick={() => {
+              creatingSection = false;
+              newSectionName = '';
+            }}
+          >
+            Cancel
+          </button>
+        </div>
+      {:else}
+        <div class="section-row">
+          <select id="cf-section" class="input" bind:value={sectionId}>
+            <option value="">Ungrouped</option>
+            {#each sectionOptions as opt (opt.id)}
+              <option value={opt.id}>{opt.label}</option>
+            {/each}
+          </select>
+          <button class="btn small" onclick={() => (creatingSection = true)}><Icon name="plus" size={12} /> New</button>
+        </div>
+      {/if}
+    </div>
+  {/if}
+  <fieldset class="native-fields" disabled={!auth.isRoot}>
+  {#if existing}
+  <!-- Kind -->
+  <div class="field">
+    <span class="group-label" id="cf-kind-label">Kind</span>
+    <div class="kind-row" role="group" aria-labelledby="cf-kind-label">
+      {#each kinds as k (k)}
+        <button class="kind-chip" class:selected={kind === k} aria-pressed={kind === k} onclick={() => setKind(k)}>{kindLabels[k]}</button>
+      {/each}
+    </div>
+  </div>
+  {/if}
+  <!-- Environment + write guardrail -->
+  <div class="field">
+    <span class="group-label" id="cf-env-label">Environment</span>
+    <div class="env-row" role="group" aria-labelledby="cf-env-label">
+      {#each (['dev', 'staging', 'prod'] as Environment[]) as e (e)}
+        <button
+          class="env-chip"
+          class:selected={environment === e}
+          class:prod={e === 'prod'}
+          aria-pressed={environment === e}
+          onclick={() => (environment = e)}
+        >{e}</button>
+      {/each}
+    </div>
+    {#if environment === 'prod'}
+      <span class="hint danger">
+        {#if kind === 'ssh'}
+          Production — shown with a prod badge; file uploads, renames and deletes ask you to confirm first.
+        {:else if kind === 'custom'}
+          Production — shown with a prod badge so it can’t be mistaken for a dev target.
+        {:else}
+          Production — writes &amp; schema changes are blocked until you type a confirmation.
+        {/if}
+      </span>
+    {/if}
+  </div>
+
+  <div class="field ssh-toggle-row">
+    <label class="toggle-label">
+      <input type="checkbox" bind:checked={readOnly} />
+      Read-only <span class="dim">(writes / DDL need the connection name typed to confirm, even outside prod)</span>
+    </label>
+  </div>
+
   <!-- Session time zone (mysql / clickhouse) -->
   {#if tzKinds.has(kind)}
     <div class="field">
@@ -725,26 +688,6 @@
         <option value="Asia/Jerusalem"></option>
       </datalist>
       <span class="hint">View datetimes as the DB treats them — offset (e.g. +03:00) or a named zone. MySQL: <code>SET time_zone</code>; ClickHouse: <code>session_timezone</code>.</span>
-    </div>
-  {/if}
-
-  <!-- Password (not for ssh kind) -->
-  {#if hasPasswordField.has(kind)}
-    <div class="field">
-      <label for="cf-secret">
-        {kind === 'mongodb' ? 'Secret (credential in the URI)' :
-         kind === 'custom'  ? 'Secret ({secret} in template)' : 'Password'}
-        <span class="dim">(optional)</span>
-      </label>
-      <input
-        id="cf-secret"
-        class="input"
-        type="password"
-        bind:value={secret}
-        placeholder={existing?.secret_ref ? '•••••• (leave blank to keep)' : ''}
-        autocomplete="new-password"
-      />
-      <span class="hint">Stored in the macOS Keychain — never in the database.</span>
     </div>
   {/if}
 
@@ -857,8 +800,11 @@
     />
     <span class="hint">Sent to the terminal once the client connects.</span>
   </div>
-
   </fieldset>
+  </div>
+  {/if}
+  {/if}
+
 
   <!-- Test outcome: the full message (wrapping, selectable) plus what to fix.
        The footer chip only summarises it — and the chip is the ONE live
@@ -889,6 +835,7 @@
       {/if}
     </span>
     <button class="btn" onclick={onclose}>Cancel</button>
+    {#if step === 'fields'}
     {#if testableKinds.has(kind)}
       <button
         class="btn"
@@ -907,6 +854,7 @@
     >
       {busy ? 'Saving…' : existing ? 'Save changes' : 'Create connection'}
     </button>
+    {/if}
   {/snippet}
 </Modal>
 
@@ -923,6 +871,56 @@
 
 <style>
   .native-fields { border:0; padding:0; margin:0; min-width:0; }
+  .kind-tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: var(--sp-2);
+  }
+  .kind-tile {
+    min-block-size: var(--hit-min);
+    padding: var(--sp-3) var(--sp-4);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    font-size: var(--fs-m);
+    cursor: pointer;
+  }
+  .kind-tile:hover {
+    background: var(--hover);
+  }
+  .kind-line {
+    margin: 0 0 var(--sp-3);
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
+  .link-btn {
+    border: 0;
+    padding: 0;
+    background: none;
+    color: var(--accent-text);
+    font: inherit;
+    cursor: pointer;
+  }
+  .more-toggle {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    min-block-size: var(--hit-min);
+    margin-block: var(--sp-2);
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--text);
+    font: inherit;
+    font-size: var(--fs-m);
+    cursor: pointer;
+  }
+  .more-body {
+    display: flex;
+    flex-direction: column;
+  }
   /* Same look as `.field > label` for a group caption that labels a chip row
      (a <label> must point at a single form control). */
   .group-label { font-size: var(--fs-s); font-weight: 500; color: var(--text-dim); }
@@ -1048,13 +1046,6 @@
     margin: -4px 0 8px;
     font-size: var(--fs-xs);
     color: var(--danger);
-  }
-  .dsn-hint {
-    margin-bottom: 6px;
-  }
-  .dsn-btn {
-    color: var(--text-dim);
-    font-size: var(--fs-s);
   }
   .dsn-row {
     display: flex;

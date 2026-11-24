@@ -623,6 +623,12 @@ export type OttoEvent =
       resource_id?: Id;
     }
   | {
+      /** The connection library changed (a profile created, edited, pinned,
+       *  duplicated, imported or deleted, or the shared section tree) — a cue
+       *  only: refetch `GET /workspaces/{id}/connections` + its sections. */
+      type: 'connections_changed';
+    }
+  | {
       /** The caller's notice list changed without a new notice (read,
        *  read-all, dismiss, clear; one per bulk read / dismiss batch) —
        *  owner-only; refetch `/notifications`. */
