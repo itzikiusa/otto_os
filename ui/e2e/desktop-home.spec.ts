@@ -299,3 +299,31 @@ test('Go to Home is one ⌘K away and the page never overflows horizontally', as
   const over = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(over).toBeLessThanOrEqual(1);
 });
+
+// One place per session: a working session that needs you is under Needs you
+// only, and the line's counts are the sections' (design review H6).
+test('a working session that needs you shows once, under Needs you', async ({ page }) => {
+  const { ctx, base } = await apiCtx();
+  const r = await ctx.post(`${base}/api/v1/workspaces/${wsId}/sessions`, { data: { kind: 'agent', provider: 'shell', title: 'Clipboard fix', cwd: '/tmp', meta: { origin: 'e2e' } } });
+  expect(r.ok(), await r.text()).toBeTruthy();
+  const sid = (await r.json()).id as string;
+  await ctx.dispose();
+  await boot(page);
+  // A shell that keeps printing is working; then it raises "needs you".
+  const c2 = await apiCtx();
+  await c2.ctx.post(`${c2.base}/api/v1/sessions/${sid}/input`, { data: { text: 'while true; do date; sleep 0.3; done', submit: true } });
+  await c2.ctx.dispose();
+  await expect.poll(() => page.evaluate(async (id) => {
+    const path = '/src/lib/stores/workspace.svelte.ts';
+    const { ws } = await import(/* @vite-ignore */ path);
+    return ws.statusMap[id];
+  }, sid), { timeout: 20_000 }).toBe('working');
+  await page.evaluate(async (id) => {
+    const path = '/src/lib/stores/workspace.svelte.ts';
+    const { ws } = await import(/* @vite-ignore */ path);
+    ws.markNeedsYou(id);
+  }, sid);
+  await expect(page.getByTestId(`home-row-session:${sid}`)).toHaveCount(1);
+  await expect(page.locator('[data-card="needs"]').getByTestId(`home-row-session:${sid}`)).toBeVisible();
+  await expect(page.locator('[data-card="running"]').getByTestId(`home-row-session:${sid}`)).toHaveCount(0);
+});

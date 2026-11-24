@@ -247,7 +247,8 @@ class TodayStore {
 
   running: TodayRow[] = $derived.by(() => {
     const rows: TodayRow[] = ws.foregroundActive
-      .filter((s) => ws.statusMap[s.id] === 'working')
+      // A session that needs you is listed there only (one place per session).
+      .filter((s) => ws.statusMap[s.id] === 'working' && ws.needsYou[s.id] !== true)
       .map((s) => ({
         id: `session:${s.id}`,
         title: s.title,
@@ -260,7 +261,7 @@ class TodayStore {
         open: () => ws.navigateToSession(s.id),
       }));
     for (const s of this.threads) {
-      if (ws.statusMap[s.id] !== 'working') continue;
+      if (ws.statusMap[s.id] !== 'working' || ws.needsYou[s.id] === true) continue;
       rows.push({
         id: `thread:${s.id}`,
         title: s.title,
