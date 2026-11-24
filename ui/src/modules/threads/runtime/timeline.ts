@@ -535,7 +535,7 @@ export function approvalOutcome(item: ApprovalItem, request: RuntimeRequest | un
           : 'Canceled';
   }
   if (request?.status === 'expired') return 'Expired';
-  if (request?.decision === 'decline' || request?.decision === 'decline_always' || request?.decision === 'cancel') return 'Declined';
+  if (request?.decision === 'decline' || request?.decision === 'decline_always' || request?.decision === 'cancel') return 'Denied'; // the dock's word (Allow once · Deny)
   return null;
 }
 

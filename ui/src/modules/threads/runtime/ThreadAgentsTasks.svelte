@@ -141,6 +141,7 @@
   });
 
   const STATUS: Record<AgentTask['status'], { icon: IconName; label: string }> = {
+    // A subagent that runs says Working (the one subagent vocabulary); a command or timer, Running.
     running: { icon: 'dot', label: 'Running' },
     'needs-you': { icon: 'bell', label: 'Needs you' },
     done: { icon: 'check', label: 'Done' },
@@ -194,7 +195,7 @@
         <Icon name={kindIcon(t.kind)} size={12} />
         <span class="ellipsis" dir="auto" title={t.label}>{t.label}</span>
         <span class="tat-meta">
-          {STATUS[t.status].label}{e ? ` · ${e}` : ''}
+          {t.kind === 'agent' && t.status === 'running' ? 'Working' : STATUS[t.status].label}{e ? ` · ${e}` : ''}
         </span>
         <span class="tat-chev" aria-hidden="true">
           <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
