@@ -386,7 +386,7 @@
       return;
     }
     const other = database.otherConnections.find((c) => c.id === id);
-    if (other) return void openTerminal(other);
+    if (other) return openTerminal(other);
     const cl = brokers.clusters.find((c) => c.id === id) ?? (ws.currentId ? (await brokers.load(ws.currentId, { withSections: false }), brokers.clusters.find((c) => c.id === id)) : undefined);
     if (cl) openCluster(cl);
   }
