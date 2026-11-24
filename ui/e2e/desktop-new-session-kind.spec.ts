@@ -107,3 +107,22 @@ test('Enter on a provider\'s + steps the count instead of starting', async ({ pa
   await expect(sheet(page)).toBeVisible();
   await page.keyboard.press('Escape');
 });
+
+// A chat that started never asks to discard what it was given (the extra
+// folders are a terminal option), and its chips say what Chat still uses.
+test('a started chat closes without a discard prompt; Chat shows the chips it uses', async ({ page }) => {
+  await page.goto('/#/agents');
+  await expect(page.getByTestId('agents-inbox')).toBeVisible({ timeout: 30_000 });
+  const dialog = await openNewSessionSheet(page);
+  await dialog.getByTestId('ns-options').click();
+  await dialog.locator('#ns-title').fill('Kaka');
+  await dialog.locator('#ns-extra-dir').fill(dir);
+  await dialog.locator('#ns-extra-dir').press('Enter');
+  await dialog.getByTestId('ns-options').click();
+  await dialog.getByTestId('ns-kind').getByRole('radio', { name: 'Chat' }).click();
+  await expect(dialog.locator('.opt-chip')).toHaveText(['Title: Kaka']);
+  await dialog.locator('.provider-card', { hasText: 'codex' }).locator('.card-main').click();
+  await dialog.getByRole('button', { name: 'Start chat' }).click();
+  await expect(sheet(page)).toHaveCount(0, { timeout: 20_000 });
+  await expect(page.locator('[data-testid^="thread-pane-"]')).toBeVisible({ timeout: 20_000 });
+});
