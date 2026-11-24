@@ -17,6 +17,19 @@ test.beforeAll(async ({}, info) => {
   if (PHONES.includes(info.project.name)) repo = await seedCardRepo(`e2e-card-${info.project.name}`);
 });
 
+// Leaving one file out of "everything included" keeps the rest included (the
+// real-device pass: one uncheck left nothing included and staged nothing).
+test('phone: leaving one file out keeps the others included', async ({ page }, info) => {
+  test.skip(!PHONES.includes(info.project.name), 'phone projects only');
+  const r = await seedCardRepo(`e2e-card-out-${info.project.name}`);
+  await stubForge(page);
+  await openPage(page, `git/${r.id}`);
+  await expectChangesFirst(page);
+  await page.getByRole('checkbox', { name: /app\.txt$/ }).tap();
+  await expect(page.getByTestId('commit-card-included')).toHaveText('1 of 2 files included');
+  await expect(page.getByRole('checkbox', { name: /notes\.txt$/ })).toBeChecked();
+});
+
 test('phone: Changes first → one tap commits and pushes', async ({ page }, info) => {
   test.skip(!PHONES.includes(info.project.name), 'phone projects only');
   await stubForge(page);

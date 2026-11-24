@@ -405,8 +405,9 @@
     if (paths.length === 0) return;
     if (virtualAll && !stage) {
       // Leaving a file out of the virtual "all included" writes the index: the rest get staged.
-      materialized = true;
+      // Read the rows before materializing: `inStaged` derives from it and empties.
       paths = inStaged.map((c) => c.path).filter((p) => !paths.includes(p));
+      materialized = true;
       stage = true;
       if (paths.length === 0) return;
     }
