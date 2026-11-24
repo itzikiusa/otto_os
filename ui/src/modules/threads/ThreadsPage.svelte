@@ -205,9 +205,12 @@
       lastRoutedId = routeSessionId;
       untrack(() => {
         // Resolve the thread's workspace first: a link from another workspace
-        // (a phone QR) switches there instead of opening nothing.
+        // (a phone QR) switches there instead of opening nothing. A remembered
+        // route (the sidebar's resume point, the last route at launch) to a
+        // thread deleted since goes quietly to the list.
+        const forget = router.remembered ? () => { if (router.parts[1] === routeSessionId) router.replace('threads'); } : undefined;
         void (async () => {
-          if (!runtimeThreads.get(routeSessionId) && !(await prepareDeepLink(ws, routeSessionId, 'thread'))) return;
+          if (!runtimeThreads.get(routeSessionId) && !(await prepareDeepLink(ws, routeSessionId, 'thread', forget))) return;
           const s = await ws.ensureSession(routeSessionId);
           if (!s && !runtimeThreads.get(routeSessionId) && ws.currentId) await runtimeThreads.load(ws.currentId).catch(() => {});
           const id = s?.id ?? runtimeThreads.get(routeSessionId)?.id;
@@ -235,6 +238,7 @@
         } else if (!threads.focusedSessionId || !valid.includes(threads.focusedSessionId)) {
           threads.focusedSessionId = valid[0];
         }
+        threads.save(); // the pruned ids leave the saved panes too
       }
       if (threads.paneIds.length === 0 && !threads.newDraftMode) {
         if (liveThreadIds.length > 0 && !router.parts[1]) {

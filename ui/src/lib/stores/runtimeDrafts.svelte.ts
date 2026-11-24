@@ -56,6 +56,8 @@ export class RuntimeDrafts {
   private idle: string[] = [];
   /** Evicted drafts still saving: a re-open loads after the save lands. */
   private settling = new Map<string, Promise<void>>();
+  /** Threads deleted in this window (`forget`). */
+  private gone = new Set<string>();
   configure(initialize: (id: string, draft: RuntimeComposerDraft, after?: Promise<void>) => DraftRoot | (() => void)): void {
     this.initialize = initialize;
   }
@@ -89,13 +91,17 @@ export class RuntimeDrafts {
     this.byId = {};
   }
 
-  forget(id: string): void {
+  /** Drop `id`'s draft: its thread is being deleted. The returned undo lets
+   *  the draft load again (the delete failed). */
+  forget(id: string): () => void {
+    this.gone.add(id);
     this.live.get(id)?.();
     this.live.delete(id);
     void this.roots.get(id)?.dispose();
     this.roots.delete(id);
     this.idle = this.idle.filter((x) => x !== id);
     delete this.byId[id];
+    return () => void this.gone.delete(id);
   }
 
   /** A view shows `id`'s thread: keep its draft live until the returned release. */
@@ -159,11 +165,14 @@ export class RuntimeDrafts {
 
   for(id: string): RuntimeComposerDraft {
     if (this.byId[id]) return this.byId[id];
-    this.byId[id] = {
+    const blank: RuntimeComposerDraft = {
       freshContext: false, provider: null, context: [], recovered: false, saveStatus: 'loading', saveError: null, attachError: null, retrySave: () => {}, flushSave: () => {},
       text: '', images: [], model: undefined, effort: null, pickedMode: null,
       sending: false, reopening: false, stopping: false, awaitSeq: null, startError: null,
     };
+    // A deleted thread's view, still on screen for a frame, never reads its draft back.
+    if (this.gone.has(id)) return blank;
+    this.byId[id] = blank;
     const root = this.initialize?.(id, this.byId[id], this.settling.get(id));
     if (root) this.roots.set(id, typeof root === 'function' ? { dispose: root } : root);
     if (this.held(id)) this.startLive(id);

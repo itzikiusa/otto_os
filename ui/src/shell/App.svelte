@@ -336,7 +336,7 @@
       // still on pane A and "restore" A into the focused pane — clobbering the
       // click. Reading it untracked lets focusPane move the frame freely; a real
       // route change (tab/navigator/back-forward) still falls through to sync.
-      if (untrack(() => ws.activeSessionId) !== sessionId) void openSessionDeepLink(ws, sessionId);
+      if (untrack(() => ws.activeSessionId) !== sessionId) void openSessionDeepLink(ws, sessionId, router.remembered ? () => { if (router.parts[1] === sessionId) router.replace('agents'); } : undefined);
     }
   });
 
