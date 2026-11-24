@@ -68,7 +68,8 @@ test.beforeEach(async ({ page }, info) => {
 
 test('⌘K "Focus <thread>" opens the thread in Threads; a terminal session still opens in Agents', async ({ page }) => {
   await page.goto('/#/agents');
-  const nav = page.locator('.navigator');
+  // The session list is the Agents inbox now (it left the app navigator).
+  const nav = page.getByTestId('agents-inbox');
   await expect(nav).toBeVisible({ timeout: 30_000 });
   await expect(nav.getByText('Route Classic Terminal').first()).toBeVisible({ timeout: 15_000 });
 

@@ -8,20 +8,21 @@ test.beforeEach(async ({}, info) => {
 
 test('MCP arrow keys move focus together with the selected tab', async ({ page }) => {
   await page.goto('/#/mcp');
-  const otto = page.getByRole('tab', { name: 'Otto server' });
-  const external = page.getByRole('tab', { name: /External servers/ });
+  // MCP opens on its Overview; Otto's own tools are the next section.
+  const overview = page.getByRole('tab', { name: /^Overview/ });
+  const tools = page.getByRole('tab', { name: 'Tools', exact: true });
   const profiles = page.getByRole('tab', { name: 'Profiles', exact: true });
-  await otto.focus();
+  await overview.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(tools).toHaveAttribute('aria-selected', 'true');
+  await expect(tools).toBeFocused();
   await page.keyboard.press('ArrowRight');
   await expect(profiles).toHaveAttribute('aria-selected', 'true');
   await expect(profiles).toBeFocused();
-  await page.keyboard.press('ArrowRight');
-  await expect(external).toHaveAttribute('aria-selected', 'true');
-  await expect(external).toBeFocused();
   await page.keyboard.press('End');
   await expect(page.getByRole('tab', { name: /Activity/ })).toBeFocused();
   await page.keyboard.press('Home');
-  await expect(otto).toBeFocused();
+  await expect(overview).toBeFocused();
 });
 
 test('By-user membership load failure blocks role edits and offers Retry', async ({ page }) => {
@@ -107,6 +108,8 @@ test('Settings sections remain reachable and titled at desktop and phone widths'
       }
       await search.fill(label);
       await nav.getByRole('button', { name: new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`) }).first().click();
+      // The list's hidden body already titles Appearance: wait for the section itself.
+      if (width <= 640) await expect(page.locator('.settings.at-section')).toBeVisible();
       await expect(page.locator('.settings-body h1.ph-title')).toHaveText(label);
     }
   }

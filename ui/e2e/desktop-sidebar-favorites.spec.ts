@@ -263,13 +263,17 @@ test('sections reorder from edit mode and the header menu; persist; reset restor
 
 test('⌘K adds / removes the current page from Favorites', async ({ page }) => {
   await boot(page, 'vault');
+  // ⌘K focuses the bar a task later (FloatingBar openBar → tick); type once it has the caret.
+  const barInput = page.getByTestId('floating-bar').getByPlaceholder('Type or speak…');
   await page.keyboard.press('Meta+k');
+  await expect(barInput).toBeFocused();
   await page.keyboard.type('add vault to favorites');
   await page.getByTestId('floating-bar').getByRole('option').filter({ hasText: 'Add Vault to Favorites' }).first().click();
   expect(await favIds(page)).toEqual(['vault']);
   await expect(navRow(page, 'vault')).toHaveClass(/active/);
 
   await page.keyboard.press('Meta+k');
+  await expect(barInput).toBeFocused();
   await page.keyboard.type('remove vault from favorites');
   await page.getByTestId('floating-bar').getByRole('option').filter({ hasText: 'Remove Vault from Favorites' }).first().click();
   await expect(group(page, 'favorites')).toHaveCount(0);

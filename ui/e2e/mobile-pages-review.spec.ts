@@ -125,8 +125,8 @@ test('phone Connections can create and edit a profile and use its terminal', asy
   await form.getByRole('button', { name: 'Create connection', exact: true }).click();
   await expect(form).toHaveCount(0);
   const row = page.locator('.conn-row', { hasText: name });
-  // On touch a row's actions live in its long-press menu (InboxRow).
-  await row.locator('.tr-main').click({ button: 'right' });
+  // A full-page row keeps its ⋯ visible on touch (its long-press menu has the same actions).
+  await row.getByRole('button', { name: `Actions for ${name}` }).click();
   await expectFullyInViewport(page, page.getByRole('menu'));
   await page.getByRole('menuitem', { name: 'Edit', exact: true }).click();
   const edit = page.getByRole('dialog', { name: `Edit ${name}`, exact: true });

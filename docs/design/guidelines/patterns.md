@@ -405,7 +405,9 @@ word at its end, then `line3` (min 56 px).
 Hover actions go in the `actions` snippet (over line 3's end); on touch they
 live in the row's long-press menu (`use:rowMenu` → `oncontextmenu`), so give
 every row an `oncontextmenu` that opens the same actions with `ctxMenu`.
-`onPage` when the row sits on `--bg` instead of the sidebar.
+`onPage` when the row sits on `--bg` instead of the sidebar; a full-page list
+has the room, so on touch its `actions` stay visible as 44 px controls at the
+row's end (a sidebar row keeps them in the long-press menu only).
 `lib/components/InboxFold.svelte` is a section around rows: a calm heading
 ("Pinned"), or a fold line ("Working 3 ›", "History 12 ›") when it has
 `ontoggle`; a calm heading may carry an `actions` snippet (a section's ⋯). Order every list the same way: needs you first, then Failed,

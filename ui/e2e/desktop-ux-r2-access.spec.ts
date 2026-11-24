@@ -51,6 +51,7 @@ test('pointer-opened nested sheets return focus to Browse after Escape',async ({
   await page.goto('/#/agents'); await expect(page.locator('.shell')).toBeVisible();
   await page.keyboard.press('Meta+t');
   const session=page.getByRole('dialog',{name:'New session',exact:true});
+  await session.getByTestId('ns-options').click(); // Browse… sits under the stage's Options
   const browse=session.getByRole('button',{name:'Browse…'}).first();
   await browse.click();
   const picker=page.getByRole('dialog',{name:'Choose working folder'});
