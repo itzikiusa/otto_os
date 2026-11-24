@@ -89,11 +89,11 @@
   }
   function exportSummary(): void {
     usage.exportSummaryJson();
-    toasts.success('Exported the usage summary as JSON', `otto-usage-summary-${usage.days}d.json`);
+    toasts.success('Exported the usage summary as JSON', `otto-usage-summary-${usage.summary?.days ?? usage.days}d.json`);
   }
   function exportDaily(): void {
     usage.exportDailyCsv();
-    toasts.success('Exported daily totals as CSV', `otto-usage-daily-${usage.days}d.csv`);
+    toasts.success('Exported daily totals as CSV', `otto-usage-daily-${usage.summary?.days ?? usage.days}d.csv`);
   }
 
   // ⋯: everything that is not the first screen, still one visible click away.
