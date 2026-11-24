@@ -470,7 +470,7 @@ impl ActiveLimitProviders {
                 a.cache_read_tokens += b.cache_read_tokens;
                 a.cache_write_tokens += b.cache_write_tokens;
                 a.total_tokens += b.total_tokens;
-                a.cost_usd += b.cost_usd;
+                a.cost_usd = crate::engine::round6(a.cost_usd + b.cost_usd);
             },
         );
         summary
@@ -489,7 +489,7 @@ impl ActiveLimitProviders {
                 a.cache_read_tokens += b.cache_read_tokens;
                 a.cache_write_tokens += b.cache_write_tokens;
                 a.total_tokens += b.total_tokens;
-                a.cost_usd += b.cost_usd;
+                a.cost_usd = crate::engine::round6(a.cost_usd + b.cost_usd);
             },
         );
         summary
@@ -507,7 +507,7 @@ impl ActiveLimitProviders {
                 a.cache_read_tokens += b.cache_read_tokens;
                 a.cache_write_tokens += b.cache_write_tokens;
                 a.total_tokens += b.total_tokens;
-                a.cost_usd += b.cost_usd;
+                a.cost_usd = crate::engine::round6(a.cost_usd + b.cost_usd);
             },
         );
     }
@@ -1497,6 +1497,27 @@ mod tests {
             .map(|m| (m.provider.as_str(), m.total_tokens))
             .collect();
         assert_eq!(m, [("claudework", 1_050), ("claude-sub", 300)]);
+    }
+
+    #[test]
+    fn canonicalize_rounds_merged_costs_like_the_rollups() {
+        let active = ActiveLimitProviders::from_specs_with_env_in(
+            [("claudework", "claude-work", &[][..], Some("claude"), None)],
+            Path::new("/home/x"),
+        );
+        let mut summary = crate::UsageSummary::default();
+        for (provider, cost) in [("claudework", 0.1), ("claude-work", 0.2)] {
+            summary.providers.push(crate::ProviderUsage {
+                provider: provider.into(),
+                cost_usd: cost,
+                ..Default::default()
+            });
+        }
+        active.canonicalize_summary_in(&mut summary, Path::new("/home/x"));
+        assert_eq!(
+            summary.providers[0].cost_usd, 0.3,
+            "not 0.30000000000000004"
+        );
     }
 
     #[test]

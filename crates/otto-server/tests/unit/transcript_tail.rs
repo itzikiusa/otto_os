@@ -639,3 +639,87 @@ fn retired_tail_cannot_remove_its_replacement() {
     stop(&id);
     assert!(!should_continue(&id, &new));
 }
+
+/// Re-windowing swaps the outgrown window for a fresh one: it must not need
+/// room for both charges at once (a nearly full global budget retired the
+/// live chat of a long session that still fits).
+#[test]
+fn rewindow_reuses_the_charge_of_the_window_it_replaces() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rewindow.jsonl");
+    let mut f = std::fs::File::create(&path).unwrap();
+    for i in 0..(TAIL_INPUT_CAP + (2 << 20)) / 1050 {
+        let line = format!(
+            "{{\"type\":\"user\",\"uuid\":\"u{i}\",\"message\":{{\"content\":\"{}\"}}}}\n",
+            "x".repeat(1000)
+        );
+        f.write_all(line.as_bytes()).unwrap();
+    }
+    let mut st = refold_with(Provider::Claude, &path, Default::default()).unwrap();
+    let live = Live {
+        provider: Provider::Claude,
+        path: path.clone(),
+        state: Mutex::new(None),
+        settled: tokio::sync::watch::Sender::new(true),
+    };
+    // Fill the global budget to the brim: only this tail's own charge is left.
+    let fill = TOTAL_TAIL_BYTES - RETAINED_CHARGE.load(Ordering::Acquire);
+    RETAINED_CHARGE.fetch_add(fill, Ordering::AcqRel);
+    let out = rewindow(&|| Default::default(), &live, &mut st);
+    RETAINED_CHARGE.fetch_sub(fill, Ordering::AcqRel);
+    assert!(out.unwrap().oversize);
+    assert!(
+        !st.retired,
+        "the fresh window fits in the charge it replaced"
+    );
+}
+
+/// An open chat on a growing transcript costs one delta per append, never a
+/// page re-read (RS-1): a sidecar record that touches no turn sends no frame
+/// (an empty delta reads as "did not fit"), and a turn whose prose alone is
+/// over 64 KB still ships whole instead of `turns: []`.
+#[test]
+fn appends_to_a_live_chat_never_force_a_page_reread() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("growing.jsonl");
+    std::fs::write(
+        &path,
+        "{\"type\":\"user\",\"uuid\":\"u0\",\"message\":{\"content\":\"hi\"}}\n",
+    )
+    .unwrap();
+    let mut st = refold_with(Provider::Claude, &path, Default::default()).unwrap();
+    let live = Live {
+        provider: Provider::Claude,
+        path: path.clone(),
+        state: Mutex::new(None),
+        settled: tokio::sync::watch::Sender::new(true),
+    };
+    let mut known = HashSet::new();
+    let mut append = |line: String| {
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(format!("{line}\n").as_bytes()).unwrap();
+        step(
+            &|| Default::default(),
+            &"t".into(),
+            &live,
+            &mut st,
+            &mut known,
+        )
+    };
+    let sidecar = append(r#"{"type":"last-prompt","lastPrompt":"hi","sessionId":"s"}"#.into());
+    assert!(
+        sidecar.is_none(),
+        "no frame for a record that touches no turn"
+    );
+    let prose = "p".repeat(EVENT_CAP + 1024);
+    let out = append(format!(r#"{{"type":"assistant","uuid":"a1","requestId":"r1","message":{{"id":"m1","role":"assistant","content":[{{"type":"text","text":"{prose}"}}]}}}}"#)).unwrap();
+    assert!(
+        !out.oversize && out.turns.len() == 1,
+        "a 65 KB turn ships, no re-read"
+    );
+}

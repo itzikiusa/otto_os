@@ -42,9 +42,13 @@ pub const EXIT_GRACE: Duration = Duration::from_secs(60);
 /// view has been closed" — tails never outlive the view that armed them.
 pub const IDLE_STOP: Duration = Duration::from_secs(2 * 60);
 /// `transcript_appended` payloads above this are first shrunk
-/// ([`trim_oversized`]); only a delta still above it after that is sent with
-/// `turns: []` (the client then re-fetches the page).
+/// ([`trim_oversized`]); only a delta still above [`DELTA_MAX`] after that is
+/// sent with `turns: []` (the client then re-fetches the page).
 pub const EVENT_CAP: usize = 64 * 1024;
+/// A turn whose prose/inputs alone exceed [`EVENT_CAP`] still ships up to this
+/// size: re-sending it per append is far cheaper than the ~1.5 MB page re-read
+/// `turns: []` costs (the UI's `DELTA_CAP_BYTES` matches).
+pub const DELTA_MAX: usize = 512 * 1024;
 /// An oversized delta keeps this many bytes of each tool result's `text`
 /// (then `patch`), marked `elided: true`; the full result is one
 /// `GET …/transcript/tool/{tool_id}` away (SA-04).
@@ -433,6 +437,9 @@ fn rewindow(
 ) -> Option<Step> {
     // Retire when a fresh window would not leave room to grow (one huge line).
     let len = Tailer::current_len(&live.path);
+    // The fresh window replaces this one: holding both charges at once
+    // retired live tails while the global budget still had room for one.
+    st.budget = TailBudget::default();
     match refold_with(live.provider, &live.path, opts()) {
         Ok(fresh) if len.saturating_sub(fresh.start) <= TAIL_INPUT_CAP as u64 * 3 / 4 => {
             *st = fresh
@@ -622,8 +629,8 @@ fn step(
     let cursor = st.folder.record_count().saturating_sub(1).to_string();
     // Size the frame; over the cap, elide tool-result bodies first (the one
     // part of a turn that routinely reaches 64 KB) and only when even that
-    // does not fit send `turns: []` so the client re-fetches (served from
-    // this tail's memory by `live_page`).
+    // leaves it over DELTA_MAX send `turns: []` so the client re-fetches
+    // (served from this tail's memory by `live_page`).
     let size = trim_oversized(&mut turns);
     let new_artifacts = st
         .folder
@@ -631,11 +638,16 @@ fn step(
         .iter()
         .filter(|a| known_artifacts.insert(a.id.clone()))
         .cloned()
-        .collect();
+        .collect::<Vec<_>>();
+    // Records that touch no turn (sidecar lines): nothing to show, and an
+    // empty delta would read as "did not fit" and re-fetch the page.
+    if turns.is_empty() && new_artifacts.is_empty() && !needs_refold {
+        return None;
+    }
     Some(Step {
         turns,
         cursor,
-        oversize: size > EVENT_CAP,
+        oversize: size > DELTA_MAX,
         new_artifacts,
     })
 }

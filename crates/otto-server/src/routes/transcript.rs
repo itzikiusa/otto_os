@@ -117,7 +117,8 @@ fn read_error(e: std::io::Error, what: &str) -> Error {
 }
 
 /// Authorization/resolution have already completed before entering the cache.
-/// A long transcript's window (keyed by `before`) is folded fresh: a few MB.
+/// A long transcript's newest window is cached like a whole fold; an older
+/// window (`before`) is folded fresh — a few MB — under the fold permits.
 async fn cached_fold(
     ctx: &ServerCtx,
     provider: Provider,
@@ -129,9 +130,15 @@ async fn cached_fold(
         if subagent_path_for(provider, path, sub).is_none() {
             return Err(ApiError(Error::Invalid("bad subagent id".into())));
         }
-    } else if window::is_long(path) {
+    } else if before.is_some() && window::is_long(path) {
         let (cx, path) = (ctx.clone(), path.to_path_buf());
-        let built = crate::offload::blocking(move || fold_with(&cx, provider, &path, None, before));
+        let permit = crate::transcript_cache::fold_workers()
+            .acquire_owned()
+            .await;
+        let built = crate::offload::blocking(move || {
+            let _permit = permit;
+            fold_with(&cx, provider, &path, None, before)
+        });
         let (folded, subagents) = built.await?;
         return Ok(std::sync::Arc::new(crate::transcript_cache::Snapshot {
             folded,
@@ -519,6 +526,36 @@ async fn session_artifacts(ctx: &ServerCtx, session: &Session) -> ApiResult<Vec<
     Ok(newest_first(&snapshot.folded.artifacts))
 }
 
+/// An artifact of a long transcript's older turns (outside the newest window
+/// [`session_artifacts`] reads): walk the windows back until one holds it.
+async fn earlier_artifact(
+    ctx: &ServerCtx,
+    session: &Session,
+    id: String,
+) -> ApiResult<Option<Artifact>> {
+    let Ok(r) = resolve_transcript(ctx, session).await else {
+        return Ok(None);
+    };
+    if !window::is_long(&r.path) {
+        return Ok(None);
+    }
+    let (cx, permit) = (
+        ctx.clone(),
+        crate::transcript_cache::fold_workers()
+            .acquire_owned()
+            .await,
+    );
+    crate::offload::blocking(move || {
+        let _permit = permit;
+        let opts = crate::transcript::fold::fold_opts(&cx, r.provider, &r.path);
+        window::find_back(r.provider, &r.path, opts, |f| {
+            f.artifacts.into_iter().find(|a| a.id == id)
+        })
+    })
+    .await
+    .map_err(|e| ApiError(read_error(e, "transcript")))
+}
+
 /// `GET /sessions/{id}/artifacts` — everything the agent produced (design §4.7).
 pub async fn list_artifacts(
     AxPath(id): AxPath<Id>,
@@ -607,10 +644,12 @@ pub async fn get_artifact(
     let session = session_gate(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
     let owner = user.is_root && crate::ui_bridge::is_human(&auth);
     let arts = session_artifacts(&ctx, &session).await?;
-    let art = arts
-        .into_iter()
-        .find(|a| a.id == artifact_id)
-        .ok_or_else(|| ApiError(Error::NotFound("artifact not found".into())))?;
+    let art = match arts.into_iter().find(|a| a.id == artifact_id) {
+        Some(art) => art,
+        None => earlier_artifact(&ctx, &session, artifact_id)
+            .await?
+            .ok_or_else(|| ApiError(Error::NotFound("artifact not found".into())))?,
+    };
     let Some(path) = art.path.as_deref() else {
         return Err(ApiError(Error::Invalid(
             "artifact has no local file (a link)".into(),
