@@ -551,6 +551,10 @@ impl SandboxPolicy {
         }
         trailing.push(format!("(deny network-outbound {})", sockets.join(" ")));
 
+        // Every session's MCP launcher files (`<tmp>/otto-mcp`, otto-sessions'
+        // `mcp.rs`: tokens, Keychain-resolved env) sit under the writable temp
+        // root: no confined process reads or writes them. A session spawn
+        // re-opens reads of its own files with [`Self::private_dir`].
         Self {
             writable_roots: roots,
             deny_read: Vec::new(),
@@ -558,6 +562,7 @@ impl SandboxPolicy {
             mach_services: Some(AGENT_MACH_SERVICES.iter().map(|s| s.to_string()).collect()),
             trailing_rules: trailing,
         }
+        .private_dir(&std::env::temp_dir().join("otto-mcp"), &[])
     }
 
     /// Harden an agent policy for a **read-only** session (`meta.read_only`,
@@ -678,6 +683,11 @@ impl SandboxPolicy {
             "(allow file-read-metadata {})",
             filter("literal", &dir)
         ));
+        // An empty or path-bearing name would widen the prefix to the dir.
+        let own: Vec<&String> = own
+            .iter()
+            .filter(|p| !p.is_empty() && !p.contains('/'))
+            .collect();
         if !own.is_empty() {
             let read: Vec<String> = own.iter().map(|p| filter("prefix", &dir.join(p))).collect();
             self.trailing_rules
@@ -1620,6 +1630,30 @@ mod tests {
         assert!(last.contains("(literal \"/work/project/.claude/settings.json\")"));
         assert!(last.contains("(literal \"/work/project/.mcp.json\")"));
         assert!(last.contains("(subpath \"/work/project/.claude/hooks\")"));
+    }
+
+    /// R1-002: every agent profile (scheduled tasks, goal loops, untrusted
+    /// orchestrator turns too) closes `<tmp>/otto-mcp` after the writable temp
+    /// root; `private_dir` re-opens only real name prefixes, never the dir.
+    #[test]
+    fn agent_profiles_close_the_mcp_launcher_dir() {
+        let dir = canonicalize_lenient(&std::env::temp_dir().join("otto-mcp"));
+        let d = dir.display();
+        let sbpl = agent_policy("/nonexistent-otto-test/Otto").to_sbpl();
+        let deny = format!("(deny file-read* file-write* (subpath \"{d}\"))");
+        let at = |s: &str| {
+            sbpl.rfind(s)
+                .unwrap_or_else(|| panic!("{s} missing: {sbpl}"))
+        };
+        assert!(at(&deny) > at("(allow file-write*"), "{sbpl}");
+        assert!(
+            !sbpl.contains("otto-mcp/"),
+            "nothing in it is re-opened: {sbpl}"
+        );
+        let pol = agent_policy("/nonexistent-otto-test/Otto")
+            .private_dir(&dir, &["".into(), "a/b".into(), "s1.".into()]);
+        let last = pol.trailing_rules.last().unwrap();
+        assert_eq!(last, &format!("(allow file-read* (prefix \"{d}/s1.\"))"));
     }
 
     #[test]

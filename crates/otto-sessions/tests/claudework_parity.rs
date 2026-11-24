@@ -528,5 +528,9 @@ async fn wrapper_claude_config_dir_cli_family_non_claude_resume_and_seatbelt_wri
             sbpl.contains(&format!("{cfg_str}/settings.json")),
             "Seatbelt profile must still guard settings.json inside custom CLAUDE_CONFIG_DIR: {sbpl}"
         );
+        // R1-002: a read-only session reads its own MCP files, never its
+        // cwd's launcher env files (the user's Keychain-resolved secrets).
+        assert!(sbpl.contains("/otto-mcp/rt-ro-1.\")"), "{sbpl}");
+        assert!(!sbpl.contains("/otto-mcp/launch-"), "{sbpl}");
     }
 }

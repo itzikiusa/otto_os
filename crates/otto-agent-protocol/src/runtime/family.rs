@@ -24,11 +24,12 @@ fn stopped() -> &'static Mutex<HashMap<Id, Instant>> {
     S.get_or_init(Default::default)
 }
 
-/// Whether `parent` was family-stopped within [`QUIET`] (no wake then).
-pub(super) fn recently_stopped(parent: &Id) -> bool {
+/// Whether session `sid` was stopped with its family within [`QUIET`]
+/// (its reply then wakes nobody).
+pub(super) fn recently_stopped(sid: &Id) -> bool {
     let mut m = stopped().lock().unwrap_or_else(|e| e.into_inner());
     m.retain(|_, at| at.elapsed() < QUIET);
-    m.contains_key(parent)
+    m.contains_key(sid)
 }
 
 fn mark_stopped(ids: &[Id]) {
