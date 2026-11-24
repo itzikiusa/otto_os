@@ -2,6 +2,7 @@
 //! `/draft-pr` and `/draft-commit` handlers, and the hosting-remote owner check.
 
 use super::*;
+use axum::response::IntoResponse;
 
 /// Helper: build provider + remote ref from a repo row in ServerCtx.
 ///
@@ -340,7 +341,8 @@ pub(crate) async fn draft_commit_message(
     Path(repo_id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
-) -> crate::error::ApiResult<Json<otto_core::api::DraftCommitMessageResp>> {
+    Json(req): Json<otto_core::api::DraftCommitMessageReq>,
+) -> crate::error::ApiResult<axum::response::Response> {
     let repo = ctx
         .git_store
         .get_repo(&repo_id)
@@ -425,24 +427,48 @@ pub(crate) async fn draft_commit_message(
     let skill_text = resolve_skill_inline(&ctx.context_library, "commit-message");
     let prompt = compose_draft_prompt(&skill_text, &base_prompt);
 
-    // Headless on the drafting model, like the PR draft (`draft_pr_core_for`).
+    // Headless on the drafting model, like the PR draft (`draft_pr_core_for`);
+    // streamed when asked, so the card shows the message as it is written.
     let model = pr_draft_model(&ctx).await;
-    let reply =
-        otto_agent_run::headless::claude_draft(ctx.manager.providers(), &model, &prompt, |_| {})
-            .await?;
-    let message = parse_commit_draft(&reply);
-    // Always carry the Jira key in the subject line (the agent is asked to, but
-    // forgets under the Conventional-Commits format) — same guarantee as the PR.
-    let message = match jira_key_from_branch(&branch) {
-        Some(key) => ensure_jira_in_commit(&message, &key),
-        None => message,
+    let finish = move |reply: &str| {
+        let message = parse_commit_draft(reply);
+        // Always carry the Jira key in the subject line (the agent is asked to,
+        // but forgets under the Conventional-Commits format) — as the PR does.
+        let message = match jira_key_from_branch(&branch) {
+            Some(key) => ensure_jira_in_commit(&message, &key),
+            None => message,
+        };
+        otto_core::api::DraftCommitMessageResp {
+            message,
+            from_staged,
+            session_id: None,
+        }
     };
-
-    Ok(Json(otto_core::api::DraftCommitMessageResp {
-        message,
-        from_staged,
-        session_id: None,
-    }))
+    let draft = move |on_text: Box<dyn FnMut(&str) + Send>| async move {
+        otto_agent_run::headless::claude_draft(ctx.manager.providers(), &model, &prompt, on_text)
+            .await
+            .map(|reply| finish(&reply))
+    };
+    if !req.stream {
+        let resp = draft(Box::new(|_: &str| {})).await;
+        return Ok(Json(resp.map_err(crate::error::ApiError)?).into_response());
+    }
+    let lines = otto_agent_run::headless::ndjson_lines(|on_text| async move {
+        match draft(on_text).await {
+            Ok(done) => serde_json::json!({ "done": done }),
+            Err(Error::Upstream(why) | Error::Internal(why)) => serde_json::json!({ "error": why }),
+            Err(e) => serde_json::json!({ "error": e.to_string() }),
+        }
+    });
+    let body = axum::body::Body::from_stream(futures_util::StreamExt::map(
+        lines,
+        Ok::<_, std::convert::Infallible>,
+    ));
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "application/x-ndjson")],
+        body,
+    )
+        .into_response())
 }
 
 #[cfg(test)]

@@ -8,7 +8,8 @@
 // Kept apart from the git store on purpose: this is composer state, not
 // repo/fetch state.
 
-import type { DraftCommitMessageResp } from '../../lib/api/types';
+import { postNdjsonStream } from '../../lib/api/client';
+import type { DraftCommitMessageResp, DraftCommitStreamLine } from '../../lib/api/types';
 
 export interface ComposerText {
   subject: string;
@@ -95,6 +96,26 @@ export function startDraft(
     if (controllers.get(repoId) === ctl) controllers.delete(repoId);
   });
   return p;
+}
+
+/** Draft from the diff, streamed: `onText` gets the message so far (subject
+ *  first, then body) as the model writes it. A plain JSON answer (an older
+ *  daemon) is the draft itself. */
+export async function streamCommitDraft(
+  repoId: string,
+  onText: (text: string) => void,
+  signal: AbortSignal,
+): Promise<DraftCommitMessageResp> {
+  let text = '';
+  let done: DraftCommitMessageResp | null = null;
+  await postNdjsonStream(`/repos/${repoId}/draft-commit-message`, { stream: true }, (raw) => {
+    const line = raw as DraftCommitStreamLine | DraftCommitMessageResp;
+    if ('delta' in line) onText((text += line.delta));
+    else if ('error' in line) throw new Error(line.error);
+    else done = 'done' in line ? line.done : line;
+  }, signal);
+  if (!done) throw new Error('the draft ended before the message did');
+  return done;
 }
 
 /** Abort and forget any in-flight agent draft for `repoId`. */

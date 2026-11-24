@@ -617,7 +617,10 @@ branch/commit context menu, which pre-fills the source branch).
      nothing is read from or written into the repository;
    - a 30 s limit: a CLI that has not answered by then fails with a clear error.
 
-   The commit card's **Draft from the diff** runs the same way.
+   The commit card's **Draft from the diff** runs the same way and streams: the
+   message appears in the fields as the model writes it (subject first), with
+   **Drafting… · Stop** beside it — Stop keeps what has arrived — and a failed
+   draft says why in one line, with **Retry**.
 3. **Create.** On **Create Pull Request**, Otto:
    - **pushes the source branch first** (`POST /repos/{id}/push`,
      `--set-upstream` for a fresh branch) so the provider can see it. A real push

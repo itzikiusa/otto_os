@@ -1114,9 +1114,14 @@ pub struct DraftPrResp {
 
 /// `POST /repos/{id}/draft-commit-message` — ask an agent to draft a commit
 /// message from the staged diff (falls back to the full working diff when
-/// nothing is staged). No request body is required.
+/// nothing is staged). The body may be `{}`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DraftCommitMessageReq {}
+pub struct DraftCommitMessageReq {
+    /// Answer as NDJSON while the model writes: `{"delta": text}` lines, then
+    /// `{"done": DraftCommitMessageResp}` or `{"error": why}`.
+    #[serde(default)]
+    pub stream: bool,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DraftCommitMessageResp {

@@ -4008,6 +4008,7 @@ name = "otto-agent-run"
 version = "0.5.0"
 dependencies = [
  "chrono",
+ "futures-util",
  "otto-core",
  "otto-orchestrator",
  "otto-pty",

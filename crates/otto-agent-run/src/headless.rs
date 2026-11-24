@@ -164,6 +164,33 @@ fn one_line(s: &str) -> String {
     s.chars().take(240).collect()
 }
 
+/// An NDJSON body for a streamed draft: `{"delta": …}` per piece of text,
+/// then the single line `run` returns (`{"done": …}` / `{"error": …}`).
+/// Dropping the stream (the client went away, Stop) drops `run`, which
+/// kills the CLI.
+pub fn ndjson_lines<F, Fut>(run: F) -> impl futures_util::Stream<Item = String> + Send
+where
+    F: FnOnce(Box<dyn FnMut(&str) + Send>) -> Fut,
+    Fut: std::future::Future<Output = Value> + Send + 'static,
+{
+    use futures_util::StreamExt;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let deltas = tx.clone();
+    let turn = run(Box::new(move |t: &str| {
+        let _ = deltas.send(format!("{}\n", json!({ "delta": t })));
+    }));
+    let last = async move {
+        let line = turn.await;
+        let _ = tx.send(format!("{line}\n"));
+        None
+    };
+    let rx = futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|l| (Some(l), rx))
+    });
+    futures_util::stream::select(rx, futures_util::stream::once(last))
+        .filter_map(std::future::ready)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,5 +253,26 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"fix: a\n\n- b"}'"#,
             .unwrap_err();
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(e.to_string().contains("didn’t answer within"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn ndjson_keeps_deltas_before_the_last_line() {
+        use futures_util::StreamExt;
+        let lines: Vec<String> = ndjson_lines(|mut on_text| async move {
+            on_text("a");
+            tokio::task::yield_now().await;
+            on_text("b");
+            json!({"done": {"message": "ab"}})
+        })
+        .collect()
+        .await;
+        assert_eq!(
+            lines,
+            [
+                "{\"delta\":\"a\"}\n",
+                "{\"delta\":\"b\"}\n",
+                "{\"done\":{\"message\":\"ab\"}}\n"
+            ]
+        );
     }
 }

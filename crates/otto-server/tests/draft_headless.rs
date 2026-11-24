@@ -202,3 +202,103 @@ async fn one_file_commit_draft_is_headless_and_fast() {
     assert!(!f.repo_dir.join(".mcp.json").exists(), "wrote .mcp.json");
     assert!(!f.repo_dir.join(".claude").exists(), "wrote .claude/");
 }
+
+/// The card's live preview: with `stream`, the route answers NDJSON — the
+/// text as the model writes it (subject first, then body), then the draft.
+#[tokio::test]
+async fn the_commit_draft_streams_subject_first_then_body() {
+    let f = fixture(ANSWER).await;
+    let resp = reqwest::Client::new()
+        .post(&f.endpoint)
+        .bearer_auth(&f.token)
+        .json(&serde_json::json!({ "stream": true }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.status());
+    assert_eq!(resp.headers()["content-type"], "application/x-ndjson");
+    let text = resp.text().await.unwrap();
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            serde_json::json!({ "delta": "feat(app): greet the world" }),
+            serde_json::json!({ "delta": "\n\n- say hello world" }),
+            serde_json::json!({ "done": {
+                "message": "feat(app): greet the world\n\n- say hello world",
+                "from_staged": false,
+                "session_id": null,
+            } }),
+        ]
+    );
+}
+
+/// The stream is not buffered: a piece the model wrote reaches the client
+/// while the rest is still being written.
+#[tokio::test]
+async fn the_streamed_draft_arrives_piece_by_piece() {
+    let f = fixture(&ANSWER.replacen("'\n    printf", "'\n    sleep 1\n    printf", 2)).await;
+    let started = Instant::now();
+    let mut resp = reqwest::Client::new()
+        .post(&f.endpoint)
+        .bearer_auth(&f.token)
+        .json(&serde_json::json!({ "stream": true }))
+        .send()
+        .await
+        .unwrap();
+    let (mut first, mut body) = (None, String::new());
+    while let Some(chunk) = resp.chunk().await.unwrap() {
+        body.push_str(&String::from_utf8_lossy(&chunk));
+        if body.contains("greet the world") {
+            first.get_or_insert_with(|| started.elapsed());
+        }
+    }
+    let (first, done) = (first.unwrap(), started.elapsed());
+    assert!(body.contains("\"done\""), "{body}");
+    assert!(
+        done - first > Duration::from_millis(800),
+        "first {first:?}, done {done:?}"
+    );
+}
+
+/// A CLI that cannot draft (signed out) fails at once with its own words —
+/// as a 502 for the JSON caller, as an `error` line for the stream.
+#[tokio::test]
+async fn a_failed_draft_says_why_at_once() {
+    let f = fixture(
+        r#"    printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login"}'
+    exit 0"#,
+    )
+    .await;
+    let http = reqwest::Client::new();
+    let started = Instant::now();
+    let resp = http
+        .post(&f.endpoint)
+        .bearer_auth(&f.token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 502);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body["message"].as_str().unwrap().contains("Not logged in"),
+        "{body}"
+    );
+    let resp = http
+        .post(&f.endpoint)
+        .bearer_auth(&f.token)
+        .json(&serde_json::json!({ "stream": true }))
+        .send()
+        .await
+        .unwrap();
+    let text = resp.text().await.unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(text.trim()).unwrap(),
+        serde_json::json!({ "error": "Claude: Not logged in · Please run /login" })
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
