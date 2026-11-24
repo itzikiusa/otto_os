@@ -18,6 +18,7 @@ import { threads } from '../threadsStore.svelte';
 import { phoneHandoff } from '../../../lib/stores/phoneHandoff.svelte';
 import { openProjectInIde } from '../ideProjects.svelte';
 import { councilMenuItems } from './councilStore.svelte';
+import { mcpServersSheet } from './mcpServersSheet.svelte';
 import { runtimeThreads } from './runtimeThreads.svelte';
 
 /** The toolbar ⋯ leaves out what the sidebar row keeps (threadsPageMenu.ts). */

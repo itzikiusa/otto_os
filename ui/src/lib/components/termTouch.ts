@@ -11,16 +11,22 @@ export interface TouchPoint {
 
 interface TouchActions {
   scroll: (dx: number, dy: number, x: number, y: number) => void;
-  tap: () => void;
+  tap: (x: number, y: number) => void;
+  /** A press held still: select the line under it; a drag then extends it. */
+  hold?: (x: number, y: number, extend: boolean) => void;
   reset?: () => void;
   canCoast: () => boolean;
   frame?: (cb: FrameRequestCallback) => number;
   cancelFrame?: (id: number) => void;
 }
 
-/** A drag never focuses the keyboard; only a completed tap does. */
+const HOLD_MS = 500;
+
+/** A drag never focuses the keyboard; only a completed tap does. A press held
+ *  still selects (touch has no other way to select terminal text). */
 export class TerminalTouch {
-  private gesture: (TouchPoint & { startX: number; startY: number; moved: boolean; vx: number; vy: number }) | null = null;
+  private gesture: (TouchPoint & { startX: number; startY: number; moved: boolean; held: boolean; vx: number; vy: number }) | null = null;
+  private holdTimer: ReturnType<typeof setTimeout> | null = null;
   private frameId: number | null = null;
   private readonly frame: (cb: FrameRequestCallback) => number;
   private readonly cancelFrame: (id: number) => void;
@@ -35,13 +41,25 @@ export class TerminalTouch {
 
   start(p: TouchPoint): void {
     this.cancel();
-    this.gesture = { pointerId: p.pointerId, clientX: p.clientX, clientY: p.clientY, timeStamp: p.timeStamp,
-      startX: p.clientX, startY: p.clientY, moved: false, vx: 0, vy: 0 };
+    const g = { pointerId: p.pointerId, clientX: p.clientX, clientY: p.clientY, timeStamp: p.timeStamp,
+      startX: p.clientX, startY: p.clientY, moved: false, held: false, vx: 0, vy: 0 };
+    this.gesture = g;
+    const hold = this.actions.hold;
+    if (hold) this.holdTimer = setTimeout(() => {
+      this.holdTimer = null;
+      if (this.gesture !== g || g.moved) return;
+      g.held = true;
+      hold(g.startX, g.startY, false);
+    }, HOLD_MS);
   }
 
   move(p: TouchPoint): void {
     const g = this.gesture;
     if (!g || g.pointerId !== p.pointerId) return;
+    if (g.held) {
+      this.actions.hold?.(p.clientX, p.clientY, true);
+      return;
+    }
     if (!g.moved && Math.hypot(p.clientX - g.startX, p.clientY - g.startY) < 7) return;
     g.moved = true;
     const dx = g.clientX - p.clientX;
@@ -59,8 +77,10 @@ export class TerminalTouch {
     const g = this.gesture;
     if (!g || g.pointerId !== p.pointerId) return;
     this.gesture = null;
+    this.clearHold();
+    if (g.held) return;
     if (!g.moved) {
-      this.actions.tap();
+      this.actions.tap(p.clientX, p.clientY);
       return;
     }
     if (!this.actions.canCoast() || p.timeStamp - g.timeStamp > 80) return;
@@ -86,18 +106,48 @@ export class TerminalTouch {
   /** Cancellation, a new session or unmount never counts as a tap. */
   cancel(): void {
     this.gesture = null;
+    this.clearHold();
     this.actions.reset?.();
     if (this.frameId !== null) this.cancelFrame(this.frameId);
     this.frameId = null;
   }
+
+  private clearHold(): void {
+    if (this.holdTimer !== null) clearTimeout(this.holdTimer);
+    this.holdTimer = null;
+  }
 }
 
 /** Map touch movement to scrollback or the active terminal application. */
-export function createTerminalTouch(getTerminal: () => Terminal | null | undefined, readOnly: () => boolean): TerminalTouch {
+/** The buffer cell under a point: 1-based column, 0-based buffer row. */
+function cellAt(term: Terminal, x: number, y: number): { col: number; row: number } | null {
+  const box = term.element?.querySelector('.xterm-screen')?.getBoundingClientRect();
+  if (!box || !term.rows || !term.cols) return null;
+  const clamp = (v: number, n: number): number => Math.min(n - 1, Math.max(0, Math.floor(v * n)));
+  return { col: clamp((x - box.left) / box.width, term.cols) + 1, row: term.buffer.active.viewportY + clamp((y - box.top) / box.height, term.rows) };
+}
+
+/** `openLink(col, row)` (1-based, as xterm's link ranges): a tap on a link
+ *  opens it — touch sends no mouse click to xterm's link layer. */
+export function createTerminalTouch(getTerminal: () => Terminal | null | undefined, readOnly: () => boolean, openLink?: (col: number, row: number) => boolean): TerminalTouch {
   let touchScrollAccum = 0;
+  let anchor = 0;
   return new TerminalTouch({
     reset: () => { touchScrollAccum = 0; },
-    tap: () => { if (!readOnly()) getTerminal()?.focus(); },
+    tap: (x, y) => {
+      const term = getTerminal();
+      const cell = term ? cellAt(term, x, y) : null;
+      if (cell && openLink?.(cell.col, cell.row + 1)) return;
+      if (!readOnly()) term?.focus();
+    },
+    hold: (x, y, extend) => {
+      const term = getTerminal();
+      const cell = term ? cellAt(term, x, y) : null;
+      if (!term || !cell) return;
+      const row = cell.row;
+      if (!extend) anchor = row;
+      term.selectLines(Math.min(anchor, row), Math.max(anchor, row));
+    },
     canCoast: () => { const term = getTerminal(); return !!term && term.buffer.active.type === 'normal'
       && term.modes.mouseTrackingMode === 'none'
       && !window.matchMedia('(prefers-reduced-motion: reduce)').matches; },

@@ -46,6 +46,8 @@ struct TestHost {
     notify: tokio::sync::Notify,
     /// Each spawn brings up a network profile.
     network: bool,
+    /// ACP agents never answer `session/new`.
+    hang_acp: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait::async_trait]
@@ -76,6 +78,9 @@ impl RuntimeHost for TestHost {
                 format!("{}/bundle", self.root),
             ));
         }
+        if self.hang_acp.load(std::sync::atomic::Ordering::Relaxed) {
+            spec.env.push(("OTTO_FAKE_HANG_SESSION".into(), "1".into()));
+        }
         *self.spawns.lock().unwrap() += 1;
         Ok(Vec::new())
     }
@@ -97,6 +102,7 @@ impl TestHost {
             events: Mutex::default(),
             notify: tokio::sync::Notify::new(),
             network: false,
+            hang_acp: Default::default(),
         })
     }
 
@@ -701,5 +707,59 @@ async fn a_network_profile_child_is_not_held() {
     rt2.prompt(&s.id, "hi").await.unwrap();
     host2.wait(is_terminal).await;
     assert_eq!(host2.spawns(), 1, "resumed by a respawn");
+    rt2.close(&s.id).await.unwrap();
+}
+
+/// Review 12: a daemon restart while a provider switch waits for the new
+/// agent's handshake does not adopt that process with the old provider's
+/// driver: the thread comes back on the provider it ran, and resumes there.
+#[tokio::test]
+async fn a_restart_mid_switch_does_not_adopt_the_new_agent() {
+    let d = Dirs::new();
+    let pool = pool().await;
+    let host = d.host();
+    host.hang_acp
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let rt = runtime(&pool, &host);
+    let s = create(&rt, d.cwd(), RuntimeProvider::Claude).await;
+    rt.prompt(&s.id, "hello").await.unwrap();
+    host.wait(is_terminal).await;
+    let (rt_sw, sid) = (rt.clone(), s.id.clone());
+    let switch = tokio::spawn(async move {
+        let req = RuntimePromptReq {
+            provider: Some("gemini".into()),
+            ..RuntimePromptReq::of("go")
+        };
+        rt_sw.prompt_with(&sid, &req).await
+    });
+    for _ in 0..100 {
+        if host.spawns() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(host.spawns(), 2, "the new agent was spawned");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    rt.shutdown_for_restart().await;
+    switch.abort();
+    drop(rt);
+
+    let host2 = d.host();
+    let rt2 = runtime(&pool, &host2);
+    rt2.recover_and_adopt().await.unwrap();
+    assert_eq!(
+        rt2.get(&s.id).await.unwrap().provider,
+        RuntimeProvider::Claude
+    );
+    let reattach = host2.all().into_iter().any(|e| {
+        matches!(e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+            if matches!(&turn_item.kind, TurnItemKind::SystemNotice { message, .. }
+                if message.contains("could not reattach")))
+    });
+    assert!(!reattach, "not adopted with the wrong driver");
+    rt2.prompt(&s.id, "again").await.unwrap();
+    let t = host2.wait(is_terminal).await;
+    assert_eq!(terminal(&t), Some(TurnTerminalStatus::Completed));
+    assert!(host2.answers().last().is_some_and(|a| a.contains("again")));
     rt2.close(&s.id).await.unwrap();
 }

@@ -1,38 +1,44 @@
 <script lang="ts">
-  // The T3-style left rail: one search row (filter · add project · new thread),
-  // pinned threads, then projects → their threads (needs-you first, workers
-  // nested under their lead), History folded at the bottom, and a quiet footer
-  // (Settings · Git · Usage · Sync).
+  // The Threads sidebar as an inbox (T3 Code): one search row (filter · add
+  // project · new thread), Pinned when there are pins, then ONE list across
+  // projects — needs you, failed, finished unread, then the most recent
+  // (threadInbox.ts) — with workers nested under their lead; "Group by
+  // project" (filter menu) brings back the per-project folders. Below: the
+  // other modules' groups, "Working N" (open) and "History N" (folded), and a
+  // quiet footer (Settings · Git · Usage · Sync).
   import Icon from '../../lib/components/Icon.svelte';
+  import { worktreeProjects } from './worktreeProjects.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
-  import { toastError } from '../../lib/toastError';
   import type { Session } from '../../lib/api/types';
   import { personalAgentName } from '../../lib/personalAgentBadges';
   import { canonicalIdePath, groupThreadsByIdeProject } from './ideProjectModel';
   import { ideProjects, openProjectInIde } from './ideProjects.svelte';
   import type { OrderedIdeProjectGroup } from './ThreadIdeProjectsSection.svelte';
   import ThreadSidebarRow from './ThreadSidebarRow.svelte';
-  import ThreadGroupNote from './ThreadGroupNote.svelte';
-  import ThreadNextNeedsYou from './ThreadNextNeedsYou.svelte';
+  import ThreadSidebarFooter from './ThreadSidebarFooter.svelte';
   import { registry } from '../../lib/commands.svelte';
-  import { openAdjacentThread, openNextNeedsYou, THREAD_KEYS, threadNav, threadUrgency } from './threadNav.svelte';
+  import { openAdjacentThread, openNextNeedsYou, THREAD_KEYS, threadNav } from './threadNav.svelte';
   import { listKeys, sidebarOrder } from './threadSidebarNav';
   import { originGroups, threadOrigin } from './threadOrigins';
   import { inboxOrder } from './threadFamilies';
+  import { inboxClass, inboxScore, inboxSections } from './threadInbox';
+  import { inboxLive } from './threadInbox.svelte';
+  import { threadMeta } from './threadMeta.svelte';
+  import { threadRowState } from './threadNav.svelte';
   import {
     delegatedParentId,
     isThreadSession,
+    projectName,
     projectNameFromCwd,
+    repoForCwd,
     sessionBranch,
   } from './threadsHelpers';
-  import { threadRepos } from './threadRepos.svelte';
-  import { FilterPopover, FolderPickerModal, IdeProjectsSectionView, OriginGroupsView, PullRequestsView, SettingsView, UsageView } from './threadLazy.svelte';
+  import { FilterPopover, FolderPickerModal, OriginGroupsView, ProjectGroupsView } from './threadLazy.svelte';
   import { threadsChrome } from './threadsChrome.svelte';
   import { buildSidebarLegacyThreadMenu, reviveLegacyThread } from './threadMenu';
-  import { promptNewScript } from './threadGitMenus';
   import { runtimeThreadMenu } from './runtime/runtimeMenu';
   import { isRuntimeThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
   import { threads } from './threadsStore.svelte';
@@ -45,9 +51,14 @@
 
   let search = $state('');
   let historyExpanded = $state(false);
-  let closedFolders = $state<Record<string, boolean>>({});
+  let workingExpanded = $state(true);
+  $effect(() => inboxLive.mount());
+  // Pins / History / "seen" live on the thread: hear other devices, move this
+  // browser's old local lists over once, and mark the thread in front as seen.
+  $effect(() => threadMeta.mount(() => (threads.newDraftMode ? null : threads.focusedSessionId)));
+  $effect(() => void threads.migrateLocal());
+  $effect(() => threadMeta.markSeen(threads.newDraftMode ? null : threads.focusedSessionId));
   let addingProject = $state(false);
-  let syncing = $state(false);
 
   // Lazy-load archived sessions when History is expanded or when searching.
   $effect(() => {
@@ -69,7 +80,7 @@
     }
     return m;
   });
-  const folderLabel = (cwd: string, fallback?: string): string => agentFolderNames.get(cwd) ?? projectNameFromCwd(cwd, fallback);
+  const folderLabel = (cwd: string, fallback?: string): string => agentFolderNames.get(cwd) ?? projectName(cwd, fallback);
   // Id index over live + archived sessions: a delegated worker's parent
   // lookup is O(1) instead of a scan of every session per row.
   const allPool = $derived(new Map([...ws.archivedSessions, ...ws.otherWsSessions, ...ws.sessions].map((s) => [s.id, s] as const)));
@@ -80,6 +91,20 @@
     ...runtimeThreads.rows(),
   ]);
 
+  // A worktree thread files under its main checkout (worktreeProjects): learn
+  // the worktrees of each repo a thread works in, once per repo.
+  $effect(() => {
+    const repos = [...git.repos, ...git.allRepos];
+    const seen = new Set<string>();
+    for (const s of allLiveThreads) {
+      const r = s.cwd ? repoForCwd(s.cwd, repos) : null;
+      if (r && !seen.has(r.id)) {
+        seen.add(r.id);
+        worktreeProjects.ensure(r);
+      }
+    }
+  });
+
   // Distinct project roots across workspaces, repos and threads for the filter pill.
   const projectOptions = $derived.by(() => {
     const map = new Map<string, { key: string; label: string; cwd: string }>();
@@ -89,10 +114,10 @@
     }
     for (const r of git.repos) {
       const rp = r.path.replace(/\/+$/, '');
-      if (!map.has(rp)) map.set(rp, { key: rp, label: r.name || projectNameFromCwd(rp), cwd: rp });
+      if (!map.has(rp) && !worktreeProjects.of(rp)) map.set(rp, { key: rp, label: r.name || projectNameFromCwd(rp), cwd: rp });
     }
     for (const s of allLiveThreads) {
-      const c = (s.cwd ?? '').replace(/\/+$/, '');
+      const c = worktreeProjects.root(s.cwd);
       if (c && !map.has(c)) map.set(c, { key: c, label: folderLabel(c), cwd: c });
     }
     for (const c of threads.extraProjects) {
@@ -129,27 +154,58 @@
   const filteredLive = $derived(allLiveThreads.filter(isMain));
   const sideGroups = $derived(originGroups([...allLiveThreads, ...runtimeThreads.rows(true)].filter(matchesFilters)));
 
+  // Pinned on the thread itself (threadMeta): every device shows the same.
   const pinnedThreads = $derived.by(() => {
     const byId = new Map<string, Session>();
     for (const s of allLiveThreads) byId.set(s.id, s);
     for (const s of ws.archivedSessions) if (isThreadSession(s, allPool)) byId.set(s.id, s);
-    return threads.pinnedIds
-      .map((id) => byId.get(id))
-      .filter((s): s is Session => !!s && matchesFilters(s));
+    return [...byId.values()]
+      .filter((s) => threadMeta.pinned(s.id) && matchesFilters(s))
+      .sort((a, b) => threadMeta.cameBackAt(b).localeCompare(threadMeta.cameBackAt(a)));
   });
 
-  // Inbox order inside each project (threadFamilies.ts): needs-you first, then
-  // working, then failed, then most recent — a thread's children nested under
-  // it, foldable; a family ranks by its most urgent member (threadNav).
+  // The inbox (threadInbox.ts): every live thread that is not pinned or in
+  // History, split into the main list and "Working"; a family moves together
+  // and its children nest under it, foldable.
+  /** A thread's subagents start folded under it; `false` = opened here. */
   let foldedFamilies = $state<Record<string, boolean>>({});
-  const score = threadUrgency;
+  /** The focused thread's parents: their subagents open, so it stays in view. */
+  const focusedParents = $derived.by(() => {
+    const out = new Set<string>();
+    let cur = threads.focusedSessionId ? allPool.get(threads.focusedSessionId) ?? runtimeThreads.rows().find((r) => r.id === threads.focusedSessionId) : undefined;
+    for (let p = cur ? delegatedParentId(cur) : null; p && !out.has(p); p = cur ? delegatedParentId(cur) : null) {
+      out.add(p);
+      cur = allPool.get(p) ?? runtimeThreads.rows().find((r) => r.id === p);
+    }
+    return out;
+  });
+  const isFolded = (id: string): boolean => foldedFamilies[id] !== false && !focusedParents.has(id);
+  /** The class a row shows (ThreadSidebarRow derives the same). */
+  function classOf(s: Session): ReturnType<typeof inboxClass> {
+    const st = threadRowState(s);
+    const focused = threads.focusedSessionId === s.id && !threads.newDraftMode;
+    const unread = !focused && st.key !== 'needs-you' && threadMeta.unread(s.id, ws.unread[s.id] === true || runtimeThreads.unread[s.id] === true);
+    return inboxClass(st.key, unread, inboxLive.kindsOf(s.id).length);
+  }
+  const score = (s: Session): number => inboxScore(classOf(s));
 
-  const unsettledLive = $derived(filteredLive.filter((s) => !threads.isSettled(s.id)));
+  const unsettledLive = $derived(filteredLive.filter((s) => !threads.isSettled(s.id) && !threads.isPinned(s.id)));
+  const cameBack = (s: Session): string => threadMeta.cameBackAt(s);
+  const sections = $derived(inboxSections(unsettledLive, classOf, delegatedParentId, isFolded, cameBack));
+  /** The threads of the main list, folded rows included (grouped by project). */
+  /** Unfolded: what next / previous and "Next that needs you" walk. */
+  const allSections = $derived(inboxSections(unsettledLive, classOf, delegatedParentId, undefined, cameBack));
+  const mainPool = $derived.by(() => {
+    const workingIds = new Set(allSections.working.map((r) => r.session.id));
+    return unsettledLive.filter((s) => !workingIds.has(s.id));
+  });
+  const grouped = $derived(threads.groupByProject);
   const ideDiscoveredProjects = $derived(ideProjects.projectsFor(allLiveThreads));
-  const ideGrouping = $derived(groupThreadsByIdeProject(ideDiscoveredProjects, unsettledLive));
+  const ideGrouping = $derived(groupThreadsByIdeProject(ideDiscoveredProjects, grouped ? mainPool : []));
 
   const ideProjectGroups = $derived.by((): OrderedIdeProjectGroup[] => {
     const q = search.trim().toLowerCase();
+    if (!grouped) return [];
     return ideGrouping.groups
       .filter((grp) => {
         if (
@@ -169,12 +225,13 @@
       })
       .map((grp) => ({
         ...grp,
-        ordered: inboxOrder(grp.items, score, delegatedParentId, (id) => foldedFamilies[id] === true),
+        ordered: inboxOrder(grp.items, score, delegatedParentId, isFolded, cameBack),
       }));
   });
 
   // Projects → their unsettled threads (excluding threads already grouped under IDE Projects).
   const projectGroups = $derived.by(() => {
+    if (!grouped) return [];
     const groups = new Map<string, { key: string; label: string; cwd: string; items: Session[] }>();
     const claimedIdeFolders = new Set(
       ideDiscoveredProjects.flatMap((p) => p.folders.map((f) => canonicalIdePath(f))),
@@ -187,9 +244,9 @@
       }
       return g;
     };
-    for (const s of unsettledLive) {
+    for (const s of mainPool) {
       if (ideGrouping.matchedSessionIds.has(s.id)) continue;
-      ensure((s.cwd ?? ws.current?.root_path ?? '~').replace(/\/+$/, '') || '~').items.push(s);
+      ensure(worktreeProjects.root(s.cwd ?? ws.current?.root_path ?? '~') || '~').items.push(s);
     }
     if (!search.trim()) {
       // First open with no threads: the open workspace's project, ready for one.
@@ -207,7 +264,7 @@
     };
     return [...groups.values()]
       .sort((a, b) => pinRank(a.key) - pinRank(b.key))
-      .map((g) => ({ ...g, ordered: inboxOrder(g.items, score, delegatedParentId, (id) => foldedFamilies[id] === true) }));
+      .map((g) => ({ ...g, ordered: inboxOrder(g.items, score, delegatedParentId, isFolded, cameBack) }));
   });
 
   // History combines settled threads + archived daemon threads.
@@ -231,7 +288,8 @@
 
   // The order next / previous thread and "Next that needs you" walk (threadNav).
   $effect(() => {
-    threadNav.order = sidebarOrder(pinnedThreads, [...ideProjectGroups.map((g) => ({ items: g.ordered })), ...projectGroups.map((g) => ({ items: g.ordered }))], sideGroups);
+    const lists = grouped ? [...ideProjectGroups.map((g) => ({ items: g.ordered })), ...projectGroups.map((g) => ({ items: g.ordered }))] : [{ items: allSections.main }];
+    threadNav.order = sidebarOrder(pinnedThreads, [...lists, { items: allSections.working }], sideGroups);
   });
   $effect(() =>
     registry.register('threads-nav', [
@@ -244,23 +302,6 @@
   // The filter popover (lazy; multi-select, pin, per-project options).
   let filterAnchor = $state<HTMLElement | null>(null);
 
-  async function sync(): Promise<void> {
-    if (syncing) return;
-    syncing = true;
-    try {
-      threadRepos.reset();
-      await ws.refreshSessions();
-      await ws.refreshOtherSessions();
-      if (ws.currentId) await runtimeThreads.load(ws.currentId);
-      await runtimeThreads.loadAll();
-      if (ws.currentId) await git.loadRepos(ws.currentId, true);
-      for (const id of Object.keys(git.statusById)) void git.refreshStatus(id);
-    } catch (e) {
-      toastError('Couldn’t refresh threads', e);
-    } finally {
-      syncing = false;
-    }
-  }
 
   function showProjectMenu(e: MouseEvent, grp: { key: string; label: string; cwd: string }): void {
     e.preventDefault();
@@ -280,7 +321,7 @@
         icon: 'filter',
         action: () => threads.toggleProjectFilter(grp.key),
       },
-      { label: 'Add project script…', icon: 'play', action: () => void promptNewScript(grp.cwd) },
+      { label: 'Add project script…', icon: 'play', action: () => void import('./threadGitMenus').then((m) => m.promptNewScript(grp.cwd)) },
       ...(added ? [{ separator: true }, { label: 'Remove from sidebar', icon: 'x', action: () => threads.removeProject(grp.key) }] : []),
     ]);
   }
@@ -335,12 +376,50 @@
     } else threads.selectThread(s.id, { split });
     onselect?.();
   }
+  function toggleFamily(id: string): void {
+    foldedFamilies = { ...foldedFamilies, [id]: !isFolded(id) };
+  }
+  // Hundreds of rows: the first screenful renders at once, the rest follows
+  // in small chunks after the first paint (folds render nothing until open).
+  const FIRST_ROWS = 30;
+  const ROW_CHUNK = 60;
+  let rowCap = $state(FIRST_ROWS);
+  $effect(() => {
+    const n = sections.main.length;
+    if (rowCap >= n) return;
+    const t = setTimeout(() => (rowCap = Math.min(n, rowCap + ROW_CHUNK)), 16);
+    return () => clearTimeout(t);
+  });
+  const mainRows = $derived.by(() => {
+    const m = sections.main;
+    if (m.length <= rowCap) return m;
+    const out = m.slice(0, rowCap);
+    const f = m.find((r) => r.session.id === threads.focusedSessionId);
+    if (f && !out.includes(f)) out.push(f);
+    return out;
+  });
+
   let searchInputEl = $state<HTMLInputElement | null>(null);
   function clearSearch(): void {
     search = '';
     searchInputEl?.focus();
   }
 </script>
+
+{#snippet familyRows(rows: readonly { session: Session; child: boolean; kids: string[]; detached: boolean }[])}
+  {#each rows as item (item.session.id)}
+    <ThreadSidebarRow
+      session={item.session}
+      variant="active"
+      child={item.child}
+      family={{ kids: item.kids, detached: item.detached, folded: isFolded(item.session.id), ontoggle: () => toggleFamily(item.session.id) }}
+      onrowclick={handleRowClick}
+      onreopen={(sess, beside) => void reopenArchived(sess, beside)}
+      onmenu={showThreadMenu}
+      {onselect}
+    />
+  {/each}
+{/snippet}
 
 <aside class="th-sidebar" aria-label="Threads" data-testid="threads-sidebar">
   <div class="th-top">
@@ -410,8 +489,9 @@
     </div>
   {/if}
 
-  <div class="th-scroll" use:listKeys>
-    <ThreadNextNeedsYou {onselect} />
+  <!-- The list scrolls; Working and History stay pinned above the footer. -->
+  <div class="th-body" use:listKeys>
+  <div class="th-scroll">
     {#if pinnedThreads.length > 0}
       <section class="th-group" aria-label="Pinned threads">
         <h2 class="th-label">Pinned</h2>
@@ -430,80 +510,41 @@
       </section>
     {/if}
 
-    {#if ideProjectGroups.length === 0 && projectGroups.length === 0}
-      <div class="th-empty">
-        <p>{search.trim() ? 'No threads match' : 'No threads yet'}</p>
-        {#if search.trim()}<button type="button" class="btn small ghost" onclick={clearSearch}>Clear search</button>{/if}
+    {#if grouped ? ideProjectGroups.length === 0 && projectGroups.length === 0 : sections.main.length === 0}
+      {#if search.trim()}
+        <div class="th-empty">
+          <p>No threads match</p>
+          <button type="button" class="btn small ghost" onclick={clearSearch}>Clear search</button>
+        </div>
+      {:else if sections.working.length === 0 && pinnedThreads.length === 0}
+        <div class="th-empty">
+          <p>No threads yet</p>
+          <button type="button" class="btn small ghost" data-testid="threads-empty-new" onclick={() => newThreadIn(null)}>New thread</button>
+        </div>
+      {/if}
+    {:else if !grouped}
+      <div class="th-list" data-testid="threads-active-list">
+        {@render familyRows(mainRows)}
       </div>
     {:else}
-      <div data-testid="threads-active-list">
-        {#if ideProjectGroups.length > 0}
-          <LazyMount
-            lazy={IdeProjectsSectionView}
-            what="IDE projects"
-            variant="compact"
-            props={{
-              groups: ideProjectGroups,
-              foldedFamilies,
-              ontogglefamily: (id: string) => (foldedFamilies = { ...foldedFamilies, [id]: !foldedFamilies[id] }),
-              onnewthread: (cwd: string) => newThreadIn(cwd),
-              onrowclick: handleRowClick,
-              onreopen: (sess: Session, beside: boolean) => void reopenArchived(sess, beside),
-              onmenu: showThreadMenu,
-              onselect,
-            }}
-          />
-        {/if}
-        {#each projectGroups as grp (grp.key)}
-          {@const open = !closedFolders[grp.key]}
-          <section class="th-group" aria-label="Project {grp.label}">
-            <div class="th-proj reveal-host">
-              <button
-                type="button"
-                class="th-proj-toggle"
-                aria-expanded={open}
-                title={grp.cwd}
-                oncontextmenu={(e) => showProjectMenu(e, grp)}
-                onclick={() => (closedFolders = { ...closedFolders, [grp.key]: open })}
-              >
-                <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
-                <span class="ellipsis" dir="auto">{grp.label}</span>
-                {#if threads.isProjectPinned(grp.key)}
-                  <span class="th-pinned-mark" aria-label="Pinned" title="Pinned project"><Icon name="star" size={12} /></span>
-                {/if}
-                {#if !open}<ThreadGroupNote items={grp.items} testid="threads-project-note-{grp.key}" />{/if}
-              </button>
-              <button
-                type="button"
-                class="icon-btn reveal-on-hover"
-                aria-label="New thread in {grp.label}"
-                title="New thread in {grp.label}"
-                onclick={() => newThreadIn(grp.cwd)}
-              >
-                <Icon name="plus" size={12} />
-              </button>
-            </div>
-            {#if open}
-              <div class="th-list">
-                {#each grp.ordered as item (item.session.id)}
-                  <ThreadSidebarRow
-                    session={item.session}
-                    variant="active"
-                    child={item.child}
-                    family={{ kids: item.kids, detached: item.detached, folded: foldedFamilies[item.session.id] === true, ontoggle: () => (foldedFamilies = { ...foldedFamilies, [item.session.id]: !foldedFamilies[item.session.id] }) }}
-                    onrowclick={handleRowClick}
-                    onreopen={(sess, beside) => void reopenArchived(sess, beside)}
-                    onmenu={showThreadMenu}
-                    {onselect}
-                  />
-                {:else}
-                  <p class="th-empty-row">No threads yet <button type="button" class="btn small ghost" data-testid="threads-empty-new" onclick={() => newThreadIn(grp.cwd)}>New thread</button></p>
-                {/each}
-              </div>
-            {/if}
-          </section>
-        {/each}
-      </div>
+      <LazyMount
+        lazy={ProjectGroupsView}
+        what="project groups"
+        variant="compact"
+        props={{
+          ideGroups: ideProjectGroups,
+          groups: projectGroups,
+          foldedFamilies,
+          rows: familyRows,
+          ontogglefamily: toggleFamily,
+          onnewthread: newThreadIn,
+          onprojectmenu: showProjectMenu,
+          onrowclick: handleRowClick,
+          onreopen: (sess: Session, beside: boolean) => void reopenArchived(sess, beside),
+          onmenu: showThreadMenu,
+          onselect,
+        }}
+      />
     {/if}
 
     {#if sideGroups.length > 0}
@@ -521,104 +562,70 @@
       />
     {/if}
 
+  </div>
+  <div class="th-folds">
+    {#if sections.working.length > 0}
+      <section class="th-group" aria-label="Working threads">
+        <button
+          type="button"
+          class="th-fold"
+          aria-expanded={workingExpanded}
+          data-testid="threads-working-toggle"
+          onclick={() => (workingExpanded = !workingExpanded)}
+        >
+          <span>Working</span>
+          <span class="th-count">{sections.working.filter((r) => !r.child).length}</span>
+          <Icon name={workingExpanded ? 'chevronDown' : 'chevronRight'} size={12} />
+        </button>
+        <div class="th-list" data-testid="threads-working-list">
+          {@render familyRows(workingExpanded ? sections.working : sections.working.filter((r) => r.session.id === threads.focusedSessionId))}
+        </div>
+      </section>
+    {/if}
+
     <section class="th-group" aria-label="History and archived threads">
       <button
         type="button"
-        class="th-proj-toggle th-history"
+        class="th-fold"
         aria-expanded={historyExpanded}
+        data-testid="threads-history-toggle"
         onclick={() => (historyExpanded = !historyExpanded)}
       >
-        <Icon name={historyExpanded ? 'chevronDown' : 'chevronRight'} size={12} />
         <span>History</span>
         {#if historyItems.length > 0}<span class="th-count">{historyItems.length}</span>{/if}
+        <Icon name={historyExpanded ? 'chevronDown' : 'chevronRight'} size={12} />
       </button>
-      {#if historyExpanded}
-        {#if historyItems.length === 0 && !ws.archivedLoading}
-          <p class="th-empty-row">Settled and archived threads appear here.</p>
-        {:else}
-          <div class="th-list" data-testid="threads-history-list">
-            {#each historyItems as h (h.session.id)}
-              <ThreadSidebarRow
-                session={h.session}
-                variant="history"
-                onrowclick={handleRowClick}
-                onreopen={(sess, beside) => void reopenArchived(sess, beside)}
-                onmenu={showThreadMenu}
-                {onselect}
-              />
-            {/each}
-            {#if ws.archivedHasMore}
-              <button
-                type="button"
-                class="btn small ghost th-more"
-                disabled={ws.archivedLoading}
-                onclick={() => void ws.loadArchived(true)}
-              >
-                {ws.archivedLoading ? 'Loading more…' : 'Load older threads'}
-              </button>
-            {/if}
-          </div>
-        {/if}
+      {#if historyExpanded && historyItems.length === 0 && !ws.archivedLoading}
+        <p class="th-empty-row">Threads you move to History or close appear here.</p>
+      {:else}
+        <div class="th-list" data-testid="threads-history-list">
+          {#each historyExpanded ? historyItems : historyItems.filter((h) => h.session.id === threads.focusedSessionId) as h (h.session.id)}
+            <ThreadSidebarRow
+              session={h.session}
+              variant="history"
+              onrowclick={handleRowClick}
+              onreopen={(sess, beside) => void reopenArchived(sess, beside)}
+              onmenu={showThreadMenu}
+              {onselect}
+            />
+          {/each}
+          {#if historyExpanded && ws.archivedHasMore}
+            <button
+              type="button"
+              class="btn small ghost th-more"
+              disabled={ws.archivedLoading}
+              onclick={() => void ws.loadArchived(true)}
+            >
+              {ws.archivedLoading ? 'Loading more…' : 'Load older threads'}
+            </button>
+          {/if}
+        </div>
       {/if}
     </section>
   </div>
+  </div>
 
-  <footer class="th-foot">
-    {#if threadsChrome.stageView}
-      <button type="button" class="btn small ghost" data-testid="threads-stage-back" onclick={() => (threadsChrome.stageView = null)}>
-        <Icon name="chevronLeft" size={12} /> Back
-      </button>
-    {:else}
-      <button
-        type="button"
-        class="icon-btn"
-        aria-label="Settings"
-        title="Settings"
-        data-testid="threads-open-settings"
-        onpointerenter={() => SettingsView.prefetch()}
-        onclick={() => (threadsChrome.sheet = 'settings')}
-      >
-        <Icon name="gear" size={14} />
-      </button>
-      <button
-        type="button"
-        class="icon-btn"
-        aria-label="Pull requests"
-        title="Pull requests"
-        data-testid="threads-open-prs"
-        onpointerenter={() => PullRequestsView.prefetch()}
-        onclick={() => {
-          threadsChrome.stageView = 'prs';
-          onselect?.();
-        }}
-      >
-        <Icon name="branch" size={14} />
-      </button>
-      <button
-        type="button"
-        class="icon-btn"
-        aria-label="Usage statistics"
-        title="Usage statistics"
-        data-testid="threads-open-usage"
-        onpointerenter={() => UsageView.prefetch()}
-        onclick={() => (threadsChrome.sheet = 'usage')}
-      >
-        <Icon name="chart" size={14} />
-      </button>
-      <span class="th-spacer"></span>
-      <button
-        type="button"
-        class="icon-btn"
-        aria-label="Refresh threads and git status"
-        title="Refresh threads and git status"
-        aria-busy={syncing}
-        disabled={syncing}
-        onclick={() => void sync()}
-      >
-        <Icon name="refresh" size={14} />
-      </button>
-    {/if}
-  </footer>
+  <ThreadSidebarFooter {onselect} />
 </aside>
 
 {#if filterAnchor && FilterPopover.component}
@@ -650,15 +657,15 @@
     flex-direction: column;
     height: 100%;
     min-width: 0;
-    background: var(--surface);
+    background: var(--bg-sidebar);
     border-inline-end: 1px solid var(--border);
   }
   .th-top {
     display: flex;
     align-items: center;
     gap: 2px;
-    padding-block: 10px 6px;
-    padding-inline: 12px 8px;
+    padding-block: var(--sp-5) var(--sp-3);
+    padding-inline: var(--sp-6) var(--sp-4);
     flex-shrink: 0;
   }
   .th-search {
@@ -679,7 +686,7 @@
     background: transparent;
     color: var(--text);
     font: inherit;
-    font-size: var(--fs-m);
+    font-size: var(--fs-l);
     outline: none;
   }
   .th-search:focus-within {
@@ -701,14 +708,20 @@
     color: var(--text-dim);
     flex-shrink: 0;
   }
+  .th-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  /* At most ~40 % of the sidebar; an open fold scrolls inside, its header stays. */
+  .th-folds { flex-shrink: 0; max-block-size: 40%; display: flex; flex-direction: column; padding: var(--sp-2) var(--sp-4); border-block-start: 1px solid var(--separator); }
+  .th-folds .th-group { flex: 0 1 auto; min-height: 0; }
+  .th-folds .th-fold { flex-shrink: 0; }
+  .th-folds .th-list { min-height: 0; overflow-y: auto; }
   .th-scroll {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 4px 6px 8px;
+    padding: var(--sp-2) var(--sp-4) var(--sp-4);
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: var(--sp-5);
   }
   .th-group {
     display: flex;
@@ -716,55 +729,47 @@
   }
   .th-label {
     margin: 0;
-    padding: 6px 8px 2px;
-    font-size: var(--fs-xs);
+    padding: var(--sp-2) var(--sp-5);
+    font-size: var(--fs-s);
     font-weight: 500;
     color: var(--text-dim);
+  }
+  /* "Working N" / "History N": one calm line, the count and chevron at the end. */
+  .th-fold {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    block-size: 32px;
+    padding-inline: var(--sp-5);
+    border: 0;
+    border-radius: var(--radius-m);
+    background: transparent;
+    color: var(--text-dim);
+    font: inherit;
+    font-size: var(--fs-m);
+    text-align: start;
+    cursor: pointer;
+  }
+  .th-fold:hover {
+    background: var(--hover);
+    color: var(--text);
+  }
+  .th-fold :global(svg) {
+    flex-shrink: 0;
+  }
+  @media (hover: none), (pointer: coarse) {
+    .th-fold {
+      block-size: 44px;
+    }
   }
   .th-list {
     display: flex;
     flex-direction: column;
     gap: 1px;
   }
-  .th-proj {
-    display: flex;
-    align-items: center;
-  }
-  .th-proj-toggle {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    block-size: 28px;
-    padding-inline: 6px;
-    border: 0;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-m);
-    font-weight: 500;
-    text-align: start;
-    cursor: pointer;
-  }
-  .th-proj-toggle :global(svg) {
-    flex-shrink: 0;
-    color: var(--text-dim);
-  }
-  .th-proj-toggle:hover {
-    background: var(--hover);
-  }
-  .th-pinned-mark {
-    display: inline-flex;
-    color: var(--text-dim);
-  }
-  .th-history {
-    color: var(--text-dim);
-  }
   .th-count {
     margin-inline-start: auto;
-    font-size: var(--fs-xs);
+    font-size: var(--fs-s);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
@@ -780,15 +785,5 @@
   }
   .th-more {
     margin: 6px 8px;
-  }
-  .th-foot {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    padding: 6px 8px;
-    flex-shrink: 0;
-  }
-  .th-spacer {
-    flex: 1;
   }
 </style>

@@ -268,7 +268,10 @@ plus `adapter.ts`.
    any `fs/*` / `terminal/*` request with `-32601`. T3 Code prefers the ACP
    v2 preview and falls back to v1 (`packages/effect-acp/src/client.ts:679-703`).
    Otto speaks **v1**, which both installed agents answer.
-2. **Session.** With a known id, send `session/load` if the agent advertised
+2. **Session.** With a known id, send `session/resume` when the agent
+   advertises `sessionCapabilities.resume` (no history replay; agy, grok,
+   opencode and muse do — live 2026-11-23), retrying as `session/load` if it
+   is refused; else `session/load` if the agent advertised
    `loadSession`; otherwise send `session/new {cwd, mcpServers:[]}`
    (`AcpSessionRuntime.ts:2217-2260`). A failed load starts a fresh session
    (`adapter.ts:6997-7019`). Otto drops the history the agent replays
@@ -303,6 +306,7 @@ plus `adapter.ts`.
    | accept | `allow_once` |
    | accept for session | `allow_always` |
    | decline | `reject_once` |
+   | decline always (offered only when the agent offers it) | `reject_always`, else `reject_once` |
    | cancel, or no matching option | `{outcome:"cancelled"}` |
 
    The answer is never a wider grant than asked for.
@@ -355,7 +359,7 @@ through the driver. It is a plain ACP v1 agent:
 
 ### opencode (`opencode acp`) and pi (`pi --mode rpc`)
 
-Verified live on 2026-11-05 against **opencode 1.19.5** (npm `opencode-ai`)
+Verified live on 2026-11-05 against **opencode 1.19.5** (npm `opencode-ai`; re-verified on 2.3.0 and **2.4.1**, see "Live 2026-11-24")
 and **pi 1.5.0** (npm `@earendil-works/pi-coding-agent`), by speaking each
 protocol from a script.
 
@@ -370,10 +374,19 @@ protocol from a script.
   returned its env secret to the model.
 - `session/load` with the earlier id remembered the earlier turn. The replayed
   history is dropped.
-- The access mode is the `OPENCODE_PERMISSION` env. opencode deep-merges this
-  JSON object over the user's config:
+- **opencode 2.3.0** (re-verified live 2026-11-23, see
+  [ACP capabilities](./acp-capabilities.md)): `OPENCODE_PERMISSION` is gone
+  (2.3.0 ignores it and ran a shell command unasked), so the access mode is
+  now a `permission` object in `OPENCODE_CONFIG_CONTENT` (inline config,
+  merged over the user's), which restores `session/request_permission`.
+  2.3.0 also advertises `effort` and `mode` (`build` / `plan`) config
+  options: Otto offers effort and plan mode through `session/set_config_option`.
+  The binary lives in `~/.opencode/bin`, which ottod now adds to its PATH.
+- The access mode (1.19.5: `OPENCODE_PERMISSION`; 2.x: `{"permission": …}`
+  in `OPENCODE_CONFIG_CONTENT`) is this JSON object, merged over the user's
+  config:
 
-  | Mode | `OPENCODE_PERMISSION` |
+  | Mode | permission object |
   |---|---|
   | full access | `{"*":"allow"}` |
   | auto-accept edits | `{"*":"ask", "read"/"glob"/"grep"/"list"/"edit": "allow"}` |
@@ -565,6 +578,84 @@ client-side auto-answering (`clientPolicy.ts:143-200`): whatever the CLI
 still asks reaches a person. Otto's Seatbelt, folder trust and prompt guard
 apply in every mode.
 
+### Live 2026-11-24: opencode 2.4.1 and pi 1.6.0
+
+Updated on the test machine: `opencode upgrade` (2.3.0 → 2.4.1), and pi
+from `@mariozechner/pi-coding-agent@0.65.0` to
+`@earendil-works/pi-coding-agent@1.6.0` (`npm rm -g` the old package, which
+owned the `pi` bin, then `npm i -g`). Runs through an isolated daemon (own
+data dir and port) with a real Codex beside them; gemini CLI and Grok are out
+of scope for live checks (account: the owner's gemini login is not relevant;
+no Grok subscription).
+
+| | opencode 2.4.1 | pi 1.6.0 |
+|---|---|---|
+| A thread starts and answers | yes (live) | starts (`get_state`, commands, live); **no answer: pi has no signed-in provider** (empty `auth.json`, no API key) — the thread now says "pi has no signed-in provider · run `pi` and /login" (unit; the raw pi message was seen live) |
+| Otto MCP tools reach it | yes: `otto_broadcast_message` through its code-mode `execute` (live) | the `otto` server is registered by Otto's `-e` extension (`mcp_servers.updated: otto added`, live); no call without a model |
+| A governed call approved in the thread | yes: the `mcp_approvals` card for `otto.broadcast_message` raised by the thread, approved, the waiting call ran (live) | – (login) |
+| Supervised asks first | yes: command and the MCP `execute` each asked (live, `acp_live`) | pi has no approval round-trip; Supervised is the read-only tool set (code) |
+| Subagent of a Codex parent | yes: Codex opened it with `otto_thread_open`, it answered, the reply woke Codex (live) | – (login) |
+| Parent delegating to Codex | yes: it opened a Codex child (`child_of … by: agent`), which answered (live) | – (login) |
+| Provider switch Codex → it → Codex | yes: the handoff carried the word to it and back (live) | – (login) |
+| Context meter / usage | `usage_update`: 40 918 of 1 048 576 tokens, cost 0 (free model) (live) | context window from `get_state` (0 with no model) |
+| Elicitation | none sent in these runs | – |
+| Cancel, reopen (`session/resume`) | yes (live, `acp_live`) | – |
+| Sign-in failure | "opencode has no signed-in provider for <model> · pick a model from a provider you are signed in to" (unit; not reproduced live: opencode lists only its configured providers' models, all signed in here) | see above |
+
+### ACP per provider (re-verified live 2026-11-23)
+
+Installed versions and what each advertised: [ACP capabilities](./acp-capabilities.md).
+"live" = an `acp_live` test or a recorded wire run on the installed CLI;
+"fake" = `otto-fake-agent`; "unit" = a driver test on recorded wire lines.
+
+| Feature | gemini 0.43 — account (owner: not relevant) | agy 1.5.15 | grok 1.0.92 — account (owner: no subscription) | opencode 2.3.0 → 2.4.1 | muse 1.4.25 |
+|---|---|---|---|---|---|
+| Starts a session | **no**: the CLI refuses personal accounts ("no longer supported… migrate to Antigravity"); the thread shows that message (live) | yes (live) | yes (live) | yes (live) | yes (live) |
+| Otto MCP tools (`mcpServers` stdio) | – | yes (live) | yes under full access (live) | yes (live) | yes (live) |
+| Supervised asks first | – | yes (live) | **no**: grok denies unapproved tools without a request ("denied by prompt policy"); a notice says so and suggests Full access (live + unit) | yes, through `OPENCODE_CONFIG_CONTENT` (live) | only for actions Muse's own rules don't cover; a workspace shell write ran unasked (live) |
+| Auto-accept edits | `--approval-mode auto_edit` | `accept-edits` mode | `--permission-mode acceptEdits` (code; not run live) | permission object | `onRequest` |
+| Plan mode | only if advertised (none: no session) | yes (live) | no ACP plan mode | yes, `mode` option (unit; advertised live) | none |
+| Model / effort | flag / none | live / `thought_level` | flag / `reasoning_effort` | live / `effort` | live / none offered |
+| Agent switches mode/model itself | chips follow (fake + unit) | same | – (no modes) | same (model option) | same; muse sends `current_mode_update` (live) |
+| Slash commands reach the thread | – | 81 (live) | 235 (live) | 4 (live) | 84 (live) |
+| A typed `/command` runs | – | **no**: `/compact` went to the model as text (live) | not run | not run | not run |
+| Stop | – | yes (live) | yes (live) | yes (live) | yes (live) |
+| Reopen keeps the session | – | `session/resume` (live) | `session/resume` (live) | `session/resume` (live) | yes once prompted; an un-prompted session is "not found" and starts fresh with a notice (live) |
+| Notices, compaction, image / link answers | shown when sent (unit); no live agent sent any | | | | |
+| `fs/*`, `terminal/*` served by Otto | off | off (agent keeps its own tools) | **on**: reads, writes and commands go through Otto; the command's output streams into its row (live) | off (own tools) | off (own tools) |
+| Steer a running turn | – | no (ACP v1 has none) | yes (`_x.ai/interject`) | no | no |
+
+`fs/*` and `terminal/*` are served per flavour (`AcpFlavor::client_fs` /
+`client_terminal`), on for **grok** only: a live turn per agent showed grok
+is the one that uses them (`fs/read_text_file`, `terminal/create` →
+`wait_for_exit` → `output` → `release`); agy, opencode and muse keep their
+own tools whatever is advertised. What Otto does
+(`acp_client.rs`, `runtime/client_calls.rs`):
+
+- Files stay inside the thread's folder (canonical paths: no `..` or symlink
+  escape); reads up to 8 MB.
+- A write becomes a file-change row with its diff. Under approval-required it
+  waits for the person (a File change approval); a refusal answers the agent
+  with an error.
+- A command runs under the agent's own sandbox profile (the `sandbox-exec -p`
+  wrapper of its prepared spec) and env, asks first under approval-required,
+  and streams its output into the running command row as it arrives (grok
+  never embeds `terminal` content, so the open `execute` call whose command
+  it runs gets it). Output is kept up to the agent's `outputByteLimit`
+  (default 1 MB); at most 16 terminals per thread; all are killed when the
+  thread closes.
+- Live (grok 1.0.92, full access): the command's output streamed through
+  Otto and a requested file landed in the folder.
+
+Decision: control-plane MCP servers keep reaching ACP agents only through
+Otto's governed `otto` bridge (approvals, audit, per-workspace enablement),
+never as direct `http` entries in `mcpServers`, even where the agent
+advertises http.
+
+url-mode `elicitation/create` is one question naming the URL; choosing
+"Open in the browser" answers `accept` and opens the page (unit; no
+installed agent sent one).
+
 ## 3. The normalized event model
 
 T3 Code's adapters emit `ProviderAdapterV2Event`
@@ -600,7 +691,7 @@ Turn item types:
 | `dynamic_tool` | `tool_name`, `input`, `output?`, `images?[{mime, data_base64}]` |
 | `web_search` | `patterns` |
 | `approval_request` | `request_id`, `request_kind`, `prompt?`, `reason?`, `options[{decision, label}]`, `tool_item_id?`, `cancel_reason?` (`agent` / `interrupt` / `closed`) |
-| `session_boundary` | No extra fields; rendered as **New session** before the accepted fresh prompt |
+| `session_boundary` | `handoff?` (a provider switch: `{from_provider, to_provider, from_model?, to_model?, turns, omitted_turns, images_omitted, text}`); rendered as **New session**, or **Context handoff · A → B**, before the accepted fresh prompt |
 | `system_notice` | `message` |
 | `error` | `failure` |
 
@@ -701,6 +792,58 @@ expires them as not resumable. An old card cannot answer a replacement
 process's request. Question payloads and responses are separate from permission
 decisions, so one cannot be used in place of the other.
 
+### MCP in a thread (every provider)
+
+What reaches a thread's agent, and how it is shown (live-checked 2026-11-23
+against claude 2.1.330, codex 0.171.0, agy 1.5.15, grok 1.0.92, muse 1.4.23):
+
+- **Delivery.** Claude, Codex and pi get Otto's `otto` server and the
+  workspace's native servers through their launcher (`--mcp-config`, `-c`,
+  `-e`); ACP agents (Gemini, Antigravity, grok, opencode, Muse) in
+  `session/new|load.mcpServers`, plus `otto-browser` when the thread opted
+  in. Before an ACP spawn Otto takes its own entries out of that CLI's
+  project file (agy `.agents/mcp_config.json`, Gemini `.gemini/settings.json`,
+  grok `.grok/config.toml`; for Muse and opencode every managed `.mcp.json`
+  entry), so the file can't start a second, tokenless `otto` — Muse refused
+  the whole session over the clashing names. pi 0.x has no
+  `registerMcpServer`: it gets nothing and says so.
+- **Server list** (`mcp_servers.updated`, thread ⋯ → MCP servers): what the
+  spawn gave (`added`) and skipped (`unsupported`, with why), refined by
+  name from Claude's `system init.mcp_servers` and Codex's
+  `mcpServer/startupStatus/updated` (both also list the CLI's own servers).
+  ACP agents report no status: their servers stay "Added".
+- **Approvals.** An approval-gated Otto or governed tool asks in the thread's
+  attention dock; the governed call waits up to 5 min and runs on the answer.
+  Supervised Codex asks MCP tool approval itself, as an elicitation with an
+  empty form (`_meta.codex_approval_kind: "mcp_tool_call"`): it is an approval
+  (Allow · Always allow · Allow for this thread · Deny).
+- **Elicitation.** Claude's `elicitation` control request and Codex's
+  `mcpServer/elicitation/request` are question cards (answers go back as
+  `{action, content}`; URL mode is declined). ACP `elicitation/create` was
+  already one. Live: agy answers `cancel` itself and Muse hangs, neither
+  forwards a server's elicitation over ACP; grok never forwarded one.
+- **Results.** Governed servers' content blocks pass through the bridge
+  unchanged (images stay images); resource links, resources and audio read as
+  words, never base64; an ACP MCP result given only as `rawOutput` is read.
+  Cards are titled "<server> · <tool>" for every provider's spelling.
+  Live: agy returns no result content for a successful MCP call (it keeps
+  images in its own brain folder), grok 1.0.92 fails the turn
+  ("Internal error") on an MCP image result.
+- **Changes mid-thread.** The bridge sends `tools/list_changed` after a call
+  when the enabled Otto / governed tools changed; a native server turned on or
+  off shows "MCP servers changed · Restart agent to apply". Live (Claude
+  2.1.330): a tool enabled during a turn was found and called in the same
+  turn, after a daemon restart and resume. A provider switch, `/clear` and a
+  revive each respawn through the same spawn preparation (fake e2e).
+- **Codex persist.** "Allow for this thread" / "Always allow" answer
+  `{action: accept, content: {}, _meta: {persist: "session" | "always"}}` —
+  the values Codex itself offers in the request's `_meta.persist`, read by
+  `parse_mcp_tool_approval_elicitation_response` (codex-rs/core
+  `mcp_tool_call.rs`; the generated schema types `_meta` as free JSON).
+- **Subagents.** Live: a Claude `Task` subagent and a Codex spawned agent both
+  called a workspace MCP server; an Otto child thread gets its own spawn
+  preparation (its own `otto` credential and the workspace's servers).
+
 ### Tool-result images
 
 `dynamic_tool.images?` contains `{mime, data_base64}` records alongside
@@ -731,12 +874,12 @@ Otto takes the cheapest correct path per provider:
 |---|---|---|---|
 | Claude | live: `control_request {subtype:"set_model"}` (the SDK's `setModel`) | live: `apply_flag_settings {effortLevel}` | `image` blocks, `source: {type:"base64"}` (`ClaudeAdapterV2.ts:2410-2414`) |
 | Codex | `turn/start {model}` (this turn and later ones) | `turn/start {effort}` (`minimal`…`xhigh`); a steered message at another effort waits for the next turn (`turn/steer` carries none) | `{type:"image", url:"data:<mime>;base64,…"}` inputs (`CodexAdapterV2.ts:3268-3269`) |
-| Gemini, Grok, Muse (ACP) | restart with `--model` / `-m`, then `session/load` | Grok / Muse: the advertised config option; Gemini: none | `image` blocks when `promptCapabilities.image` (`adapter.ts:7035`, `:7777`) |
-| Antigravity, opencode (ACP) | live: `session/set_model` / the model config option | Antigravity: `thought_level`; opencode: none | `image` blocks |
+| Gemini, Grok (ACP) | restart with `--model` / `-m`, then `session/resume` / `session/load` | Grok: `reasoning_effort`; Gemini: none | `image` blocks when `promptCapabilities.image` (`adapter.ts:7035`, `:7777`) |
+| Antigravity, opencode, Muse (ACP) | live: `session/set_model` / the `model` config option | Antigravity: `thought_level`; opencode: `effort`; Muse: only where the session advertises `thought_level` (1.4.25 does not) | `image` blocks |
 | Pi | restart with `--session <id>` | the RPC's thinking level | images |
 
 An effort the agent does not take is **dropped with a notice** ("… this turn
-runs at its default effort"), never a refused prompt: an "Ask another agent"
+runs at its default effort"), never a refused prompt: a "Delegate to…"
 create carrying the previous provider's level still starts every child.
 
 When a restart cannot reload the conversation (the agent has no
@@ -915,13 +1058,34 @@ provider error after acceptance is a failed turn in the newly committed
 conversation. The frontend keeps the submitted draft and fresh intent on a
 rejected send.
 
+### Continue on another provider
+
+A prompt whose `provider` names another enabled provider with a structured
+driver (built-in or a named account) is an explicit fresh context onto that
+provider (`runtime/fresh.rs`, after T3 Code's `ProviderSwitchService`
+`create_with_handoff`). Under the same admission lock and 409s, the old process
+is dropped and the session is moved in memory: `provider`,
+`meta.provider_slug`, the prompt's `model` (else the provider default), no
+effort, the new provider's baseline capabilities. The normal spawn then
+prepares everything provider-specific. `runtime/handoff.rs` builds the block
+from the projection (after T3 Code's `handoffBudget.ts`): turns since the last
+plain boundary, whole, newest first within 16,000 estimated tokens; per turn the
+message, final answer, changed paths, a tool-call count, errors; an open plan
+first; images counted, never sent. `start_turn` sends block + message to the
+driver and records only the message. `commit_fresh` persists provider, meta,
+model and effort (`set_provider`; no schema change) and emits the boundary
+with `handoff`; `provider_session.updated` carries `provider` /
+`provider_slug`. A failure restores every moved field and the native identity,
+and adds no boundary. Pi has no fake CLI, so its leg is covered only by the
+shared code path.
+
 ### Durable composer state
 
 `GET/PUT /runtime-sessions/{id}/draft` uses `{revision, draft}` records backed by
 `runtime_composer_drafts`, scoped to user, workspace and runtime session. The
 human-only routes reject managed-agent, MCP and share credentials. Draft
 content includes text, attachments (bytes and names), model, effort,
-`access_mode`, `fresh_context`, and attributed review/diff context chips. Action
+`access_mode`, `fresh_context`, `provider` (an armed switch), and attributed review/diff context chips. Action
 flags such as sending, stopping and replay sequence are live UI state only.
 No draft content is put in browser local storage.
 
@@ -1059,8 +1223,11 @@ secret question forms are refused instead of being collected into history.
 | `ui/src/modules/threads/runtime/{RuntimeBannerStack.svelte,banners.ts}` | everything above the composer in one priority order (error > question / approval > plan > queue > notices), at most two in full |
 | `ui/src/modules/threads/runtime/Runtime{SubagentCard,AgentRow,ThreadCallRow}.svelte`, `agentRows.ts` | one compact row for another agent: a subagent, or the agent's `thread_open` / `thread_message` call |
 | `ui/src/modules/threads/runtime/Runtime{QueueBar,TurnStatus}.svelte` | background work, the queue (Steer / Send now / Edit / Remove) and Closed · Reopen; the turn's status line (working, own turn, stopped, stalled, partly done) |
-| `ui/src/modules/threads/{RelatedThreadsChip,RelatedThreadsList,ThreadPopover}.svelte`, `relatedThreads.ts`, `relatedCollect.ts`, `relatedMessage.ts` | the header's one Related threads control (linked threads, workers, side chat, rooms; open, open beside, message, start a room) |
-| `ui/src/modules/threads/threadsPageMenu.ts` | the toolbar ⋯: the thread's actions, then New thread, Related threads…, Project card, Terminal drawer and the layout |
+| `ui/src/modules/threads/{RelatedThreadsList,ThreadPopover}.svelte`, `relatedThreads.ts`, `relatedCollect.ts`, `relatedMessage.ts` | ⋯ › Send to another thread… (connected threads, rooms; open, open beside, message, start a room) |
+| `ui/src/modules/threads/{ThreadDetailsCard,ProjectBadge}.svelte`, `threadDetails.ts`, `threadSubagents.ts` | the thread details card (folder, branch, the one git action, Changes, Subagents) and the project badge |
+| `ui/src/lib/paletteThreads.svelte.ts`, `ui/src/lib/threadSwitch.ts`, `ui/src/modules/threads/{threadSwitcher.ts,threadSwitcherSource.svelte.ts}` | ⌘K's Threads group (needs you first, frozen while open, New thread: <query>) |
+| `ui/src/modules/threads/worktreeBranch.ts` | a new thread's worktree branch name (prompt slug, repo prefix, collision suffix, dated) |
+| `ui/src/modules/threads/threadsPageMenu.ts` | the toolbar ⋯: the thread's actions, then New thread, Send to another thread…, Thread details, Terminal drawer and the layout |
 | `ui/src/lib/stores/runtimeDraftPersistence.ts`, `runtimeDraftRecovery.svelte.ts`, `runtimeDrafts.svelte.ts` | draft snapshot acknowledgement, serialized persistence and recovery |
 | `ui/src/modules/threads/runtime/Runtime{Questions,QuestionCard,ToolImages,ContextChips,DraftStatus}.svelte` | typed questions, image enlargement, context preview/removal and save status |
 | `ui/src/modules/threads/runtime/composerContext.ts` | attributed review conversations and file/hunk/line excerpts assembled on send |
@@ -1237,74 +1404,96 @@ same for every provider, and Otto now does too.
   for the agent; Shift-click several models in a new thread's picker sends
   one prompt to each.
 
-**Otto's version.** One visual language for every child — a thread a person
-asked from the composer, one the agent opened with `otto.thread_open`, a
-council's seats — on Claude, Codex and the ACP providers (Gemini, Grok,
-opencode, pi) alike:
+**Otto's version.** One concept: anything working under a thread is a
+**subagent** of it — whoever started it, whichever provider runs it (Claude,
+Codex, the ACP providers Gemini / Antigravity / Grok / opencode / Muse, and
+pi). The verb is **Delegate**; statuses are always **Working · Needs you ·
+Done · Failed · Stopped**. A subagent shows in four places only.
 
-- **Start one** — in a runtime thread's composer, **Ask another agent**
-  (the people icon beside Attach) opens the agent menu; each model picked
-  becomes a chip above the text ("Ask Codex · GPT-5"), and picking 2–4 is
-  **Ask several**. Typing `@` and part of a provider or model name (`@cod`,
-  `@opus`) offers the same agents (↑ ↓, ↵ / Tab picks, Esc closes). With
-  chips set, Send asks them instead of this thread's agent:
-  `POST /runtime-sessions/{id}/children` opens one new thread per agent,
-  all or none, linked to this one, in its folder. The chip row says what
-  they may do: this thread's access ("asks before it edits", "can edit
-  files", "full access", or "read-only"); the composer's access chip narrows
-  it, never widens it (a wider pick is refused in words). A full group (8
-  open threads beside the root) is refused above the composer with how many
-  still fit.
-- **Inside the thread** — where they were asked, the parent shows a live
-  card per child (`RuntimeChildCard.svelte`): provider icon, title, model ·
-  effort, Starting / Working / Needs you / Done / Failed / Stopped, elapsed
-  time, its latest step while it works and its answer's first line once it
-  ends, with **Stop**, **Open beside** and **Open**; clicking the row opens
-  its last answer inline, read-only. Several asked together sit under one
-  header ("3 agents · 2 working · Stop all"). An agent's `thread_open` call
-  becomes the same card once it returned (a stretch holding one never folds
-  into "Worked for …"); a provider's own subagent keeps its card, drawn with
-  the same row. Cards follow each child's own session events (its projection
-  stays live while the card is on screen) — no polling.
-- **On the side** — the sidebar nests threads under the thread they belong
-  to (indented, provider icon, status dot); the parent row reads "· 3", its
-  dot speaks for the family (one needs you → needs you, one works →
-  working), and its chevron folds them. A child whose parent is closed,
-  archived or filtered out still shows, marked **detached**. A council's
-  seats nest the same way under seat 1. History and search
-  are unchanged.
-- **Hearing back** — each child turn's end writes one line in the parent:
-  "Codex finished: <first line> · Open". When the parent's **agent** opened
-  the child and the turn answered what it asked (its opening prompt or an
-  `otto.thread_message`), the answer is also queued for that agent (T3's
-  wake-on-completion): `[Reply from thread "…" (codex, id …): its turn
-  finished …]` + the answer (cut at 16,000 characters). It waits in the
-  parent's queue — the queue bar shows it, with Send now / Remove — and goes
-  out at the parent's next idle moment; one entry per child (a newer answer
-  replaces an older one), never twice for one turn. A dormant parent is not
-  respawned for it, not after a restart either (the person's next message or
-  Revive sends it); a closed one gets nothing — closing a parent does not
-  stop its children (they stay, marked detached, with their answers; Stop
-  them in their own thread) — and a delivered reply never wakes a
-  grandparent. The parent's turn runs under
-  the parent's own access mode, so every approval it would need is asked as
-  usual. A person's ask never wakes the parent's agent.
-- **Both at once** — **Open beside** (card, sidebar row) puts the child in
-  the split next to its parent (1-up → 2-up → grid). On a phone the child
-  opens in place and the header shows **‹ <parent title>** to go back.
+- **The agent drives** — every top-level thread's first turn (and the first
+  after a fresh context) reaches its agent with short delegation rules ahead
+  of the person's words (`runtime/delegation.rs`; the timeline keeps the
+  person's text): delegate with `otto.thread_open` (one subagent per part, a
+  self-contained task), call `otto.thread_capabilities` once first (the
+  providers, models and efforts enabled here —
+  `GET /runtime-sessions/{id}/subagent-targets`), never substitute a missing
+  provider, never poll — completion wakes you — and report a failed subagent
+  instead of retrying it. `otto.thread_open` answers "Completion wakes this
+  thread … Do not poll it". So "do this with a Codex subagent and a Gemini
+  subagent" typed to a Claude (or Codex) thread is enough. A subagent's first
+  message reads as a task: `[Subagent task from thread "…" (…, id …). Do the
+  work yourself; start no subagents unless this task says to. …]`. It keeps
+  its opener's MCP profiles, browser opt-in and network profile, and — on the
+  same CLI — its named account.
+- **A person delegates too** — **Delegate to…** (the people icon, or `@cod`,
+  `@opus`) adds provider chips above the text; Send opens one subagent per
+  chip (`POST /runtime-sessions/{id}/children`, 1–4, this thread's folder and
+  access or narrower). By default the subagent gets the message, its images
+  and a bounded block of the conversation so far (≤ 6 000 characters, newest
+  kept), and its answer goes to the thread's agent like an agent-opened one;
+  **Answer to me only** (off by default) keeps it with the person.
+- **1. The timeline row** — a turn's subagents are ONE row
+  (`RuntimeChildGroup.svelte`, `turnSubagents` in `childThreads.ts`): up to
+  three stacked provider icons and "+N", "3 subagents", the tally ("2 working
+  · 1 done"), elapsed, and a chevron to one row each (provider icon, title,
+  status word, elapsed, one-line result) whose full answer still opens inline.
+  A provider's own subagent (Claude's Task, Codex's agents, agy's swarm) is a
+  subagent like any other in that row. A subagent's "finished" notice adds no
+  second line (it still draws the row when its start is not in the timeline).
+- **2. The waiting line** — under the timeline: "Waiting on 2 subagents and 1
+  command · <titles> · **Stop**" (`liveStatus.ts`). The strip above the
+  composer and thread details keep only commands and timers, as **Background
+  tasks**.
+- **3. The attention dock** — a subagent's approval shows above the parent's
+  composer, "Approval needed from <title>", answered there through the
+  subagent's own request route (`RuntimeChildApprovals.svelte`; only
+  subagents whose row says they wait on the person are loaded).
+- **4. Thread details' Subagents section** — `subagentSection` in
+  `childThreads.ts` gives its rows: the parent first, the working ones, then
+  "Previous".
+- **Opening one** — a click (its row's Open, Answer) opens it as a tab in the
+  right panel while the parent stays put (`RuntimeSubagentPane.svelte`);
+  ⌘/Ctrl-click opens it in the main view, and one per-device setting
+  (Settings ▸ Threads, `threadsChrome.subagentsIn`) flips the default. Its first
+  message reads "Task from <parent>". Having it open counts as looking at it
+  (`thread_seen_at`), as does opening its answer inline. On a phone the
+  panel is a full-height sheet. Inside a subagent a fixed line reads
+  "Subagent of <parent> · <task> · **Open parent**".
+- **One Stop** — the composer's Stop and the waiting line's Stop call
+  `POST /runtime-sessions/{id}/stop-family`: the thread's turn and every open
+  subagent's (recursively) turn and background work (the waiting line also
+  the thread's own background work). A subagent stopped this way does not wake
+  the thread again. Each subagent row keeps its own Stop.
+- **Hearing back** — each answer the thread's agent asked for is queued for
+  it as `[Reply from subagent "…" (codex, id …): its turn finished. …]` + the
+  answer (cut at 16,000 characters; a failed turn carries its error); replies
+  waiting together go out as one turn ("2 subagents finished"); a dormant
+  parent is resumed to read it (not for replies a daemon restart cut off); a
+  closed one gets nothing. The parent's row rolls up its subagents
+  (`childRollup`: working / needs you / failed) from the rows alone.
+- **Compare models** — the new-thread stage's **Compare models** (was "Ask
+  several" / Council) sends one prompt to 2–4 read-only threads;
+  **Compare answers** (was Synthesize) adds the judge.
 
-| Word | Where | What |
-|---|---|---|
-| **Ask another agent** | a thread's composer (people icon, or `@`) | one new linked thread on the chosen provider / model / effort |
-| **Ask several** | the new-thread stage (a council), or 2–4 chips in a thread's composer | the same message to each, side by side |
-| `otto.thread_open` | the agent itself | a linked thread whose answers come back to the agent |
+- **Questions go to the agent first** — a subagent's QUESTION wakes the
+  thread's agent with it (`runtime/child_question.rs`), which answers with
+  `otto.thread_answer` (`POST …/peers/{peer}/answer`) when the task or the
+  person's instructions settle it; otherwise it asks the person and the
+  question shows in the parent's dock as "Question from <title>". An
+  APPROVAL always goes to the person.
+- **Provider switch** — after a switch the thread's subagents stay linked
+  (same thread id), and the new provider's first turn carries the delegation
+  rules again.
+
+Not yet: a worktree per subagent, fork / merge and `@thread` mentions.
 
 Meta and markers: a child carries `meta.child_of {id, by: "person" |
 "agent"}` (the opener; `parent_id` stays the group's root). The parent's
 notices end in `[otto-thread:<id>[,<id>…]:started|finished|failed|stopped]`
 (`threadNoticeOf` in `runtime/childThreads.ts`). Code:
 `crates/otto-agent-protocol/src/runtime/children.rs`;
-`ui/src/modules/threads/runtime/{childThreads.ts,askAgents.ts,askTargets.svelte.ts,childNav.ts,RuntimeAskAgent.svelte,RuntimeChildCard.svelte,RuntimeChildGroup.svelte,RuntimeChildNotice.svelte,ThreadParentChip.svelte}`,
+`crates/otto-agent-protocol/src/runtime/{delegation.rs,family.rs}`;
+`ui/src/modules/threads/runtime/{childThreads.ts,askAgents.ts,askTargets.svelte.ts,childNav.ts,liveStatus.ts,RuntimeAskAgent.svelte,RuntimeChildCard.svelte,RuntimeChildGroup.svelte,RuntimeChildNotice.svelte,RuntimeChildApprovals.svelte,RuntimeSubagentPane.svelte,RuntimeSubagentOf.svelte,ThreadParentChip.svelte}`,
 `ui/src/modules/threads/threadFamilies.ts`.
 
 ### Threads layout
@@ -1316,7 +1505,7 @@ thing on screen:
   right panel, ⋯. The ⋯ holds the thread's own actions, then **New thread**
   (also the sidebar's New button and ⌘K "New thread"), **Related threads…**,
   **Terminal drawer** (also `/terminal` and ⌘K) and **View ▸** — the layout
-  (Single / Split / Grid, also in ⌘K) and the Project card; a phone gets no
+  (Single / Split / Grid, also in ⌘K) and Thread details; a phone gets no
   View. Back and Forward are the
   shell's own (⌘⇧← / ⌘⇧→, ⌘K "Go back" / "Go forward"). Continue on phone is
   a ⋯ item, in the toolbar and in a split pane's header alike.

@@ -11,6 +11,7 @@
 
 import type {
   ApprovalOption,
+  ContextHandoff,
   MessageAttachment,
   ProviderTurn,
   RequestKind,
@@ -19,12 +20,16 @@ import type {
 } from '../../../lib/api/types';
 import type { RuntimeProjection } from './projection';
 import { settingsChangeOf, type SettingsChange } from './settingsChange.ts';
+import { perfCount } from '../../../lib/perfCount.ts';
+import { keepIfSame, sameItems } from './stableMap.ts';
 
 export interface PendingApproval {
   requestId: string;
   kind: RequestKind;
   prompt: string | null;
   reason: string | null;
+  /** `prompt` folds under "Details" (an app's request: the dock's headline already says what it wants). */
+  folded?: boolean;
   options: ApprovalOption[];
   /** False once the provider process is gone (`not_resumable`). */
   canRespond: boolean;
@@ -41,7 +46,8 @@ export function pendingApprovals(p: RuntimeProjection): PendingApproval[] {
       kind: r.kind,
       prompt: approval?.prompt ?? null,
       reason: approval?.reason ?? null,
-      options: approval?.options ?? [],
+      // "Never" arrives as decline + always (rollback-safe); it answers decline_always.
+      options: (approval?.options ?? []).map((o) => (o.always ? { ...o, decision: 'decline_always' as const } : o)),
       canRespond: r.response_capability.type === 'live',
     });
   }
@@ -80,7 +86,8 @@ export type TimelineRow =
   | { kind: 'work'; id: string; parts: WorkPart[] }
   /** A date separator, only in a thread that spans more than one day. */
   | { kind: 'day'; id: string; label: string }
-  | { kind: 'session'; id: string }
+  /** `handoff`: a provider switch ("Context handoff · Claude Code → Codex"). */
+  | { kind: 'session'; id: string; handoff?: ContextHandoff }
   /** Subtle divider before an autonomous/reactive agent wakeup turn (`origin === 'agent'`). */
   | { kind: 'agent_turn'; id: string; label: string }
   /** A quiet line where a model / effort / access switch took effect or was refused (settingsChange.ts). */
@@ -120,8 +127,25 @@ function groupParallel(entries: WorkEntry[]): WorkPart[] {
 
 const EMPTY_SUBAGENT_CHILDREN: ReadonlyMap<string, TurnItem[]> = new Map();
 
-/** A subagent's own activity (items with `parent_item_id`), by card id. */
+const childrenMemo = new WeakMap<readonly TurnItem[], Map<string, TurnItem[]>>();
+
+/** A subagent's own activity (items with `parent_item_id`), by card id —
+ *  once per items array, shared by the conversation and the tasks list. */
+let lastChildren: Map<string, TurnItem[]> | undefined;
 export function subagentChildren(items: readonly TurnItem[]): Map<string, TurnItem[]> {
+  let hit = childrenMemo.get(items);
+  if (!hit) {
+    // The same activity as the last call (a chunk of the answer streamed):
+    // the same Map, so the subagent rows reading it stay put.
+    hit = keepIfSame(lastChildren, groupSubagentChildren(items), sameItems);
+    lastChildren = hit;
+    childrenMemo.set(items, hit);
+  }
+  return hit;
+}
+
+function groupSubagentChildren(items: readonly TurnItem[]): Map<string, TurnItem[]> {
+  perfCount('subagentChildren');
   let hasParent = false;
   for (let idx = 0; idx < items.length; idx++) {
     if (items[idx].parent_item_id) {
@@ -225,19 +249,35 @@ const OTTO_TOOL_WORDS: Record<string, string> = {
   send_message: 'Sent a message',
 };
 
+/** An MCP tool call's server and tool from each provider's spelling:
+ *  Claude / Muse `mcp__github__list_pulls`, Codex `github.list_pulls`, grok
+ *  `github__list_pulls`, Antigravity `Run mcp_github_list_pulls` (its server
+ *  ends at the first `_`). `null` for any other tool. */
+export function mcpToolName(name: string): { server: string; tool: string } | null {
+  const m =
+    /^mcp__([^_]+(?:_[^_]+)*?)__(.+)$/.exec(name) ??
+    /^([A-Za-z0-9-]+)__([A-Za-z0-9_-]+)$/.exec(name) ??
+    // Not a file name (`README.md` is an ACP tool title, not a server).
+    (/\.(?:md|txt|json|[cm]?[jt]sx?|rs|py|go|toml|ya?ml|lock|html?|s?css|sh|svelte|vue|java|kt|swift|gradle|properties|xml|php|cs|c|h|cpp|rb|sql|csv|log|png|jpe?g|pdf)$/i.test(name)
+      ? null
+      : /^([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/.exec(name)) ??
+    /^(?:Run )?mcp_([A-Za-z0-9-]+)_([A-Za-z0-9_-]+)$/.exec(name);
+  return m ? { server: m[1], tool: m[2] } : null;
+}
+
 /** A tool's name as people say it: `mcp__otto__otto_routine_create` →
- *  "Created a routine", `mcp__github__list_pulls` → "List pulls (github)". */
+ *  "Created a routine", `mcp__github__list_pulls` → "github · list_pulls"
+ *  (every provider's MCP spelling, `mcpToolName`). */
 export function toolWords(name: string): string {
-  const m = /^mcp__([^_]+(?:_[^_]+)*?)__(.+)$/.exec(name);
+  const m = mcpToolName(name);
   if (!m) return name;
-  const [, server, tool] = m;
+  const { server, tool } = m;
   if (server === 'otto') {
     const bare = tool.replace(/^otto_/, '');
     const words = OTTO_TOOL_WORDS[bare] ?? bare.replaceAll('_', ' ');
     return words.charAt(0).toUpperCase() + words.slice(1);
   }
-  const words = tool.replaceAll('_', ' ');
-  return `${words.charAt(0).toUpperCase()}${words.slice(1)} (${server})`;
+  return `${server} · ${tool}`;
 }
 
 type MessageTurnItem = Extract<TurnItem, { type: 'user_message' | 'assistant_message' }>;
@@ -285,6 +325,7 @@ function getOrCreateWorkRow(workId: string, work: WorkEntry[]): WorkTimelineRow 
 }
 
 export function timelineRows(items: readonly TurnItem[], turns: readonly ProviderTurn[] = []): TimelineRow[] {
+  perfCount('timelineRows');
   // A subagent's own items render inside its card, not in the timeline;
   // plumbing tool calls and a lost-conversation error not at all.
   items = items.filter((i) => !i.parent_item_id && !isLostConversation(i) && !(i.type === 'dynamic_tool' && HIDDEN_TOOLS.has(i.tool_name)));
@@ -339,7 +380,7 @@ export function timelineRows(items: readonly TurnItem[], turns: readonly Provide
       flush();
       let sRow = sessionRowCache.get(item);
       if (!sRow) {
-        sRow = { kind: 'session', id: item.id };
+        sRow = { kind: 'session', id: item.id, ...(item.handoff ? { handoff: item.handoff } : {}) };
         rowAnchorItem.set(sRow, item);
         sessionRowCache.set(item, sRow);
       }
@@ -435,14 +476,19 @@ function withDays(rows: TimelineRow[], _items: readonly TurnItem[], now: Date = 
 /** Who a framed message came from — an agent's feed turn (`[Message from
  *  Scheduled · Brief (t-1)]: body`), a linked thread (`[Message from
  *  thread "Fix CI" (claude, id …). Answer it with …]\n\nbody`), or a child
- *  thread's answer woken into its parent (`[Reply from thread "Fix CI"
- *  (codex, id …): its turn finished. Answer it with …]\n\nbody`, otto-agent-protocol
- *  runtime/children.rs `wake_text`; `reply: true`). The header is the whole
+ *  thread's answer woken into its parent (`[Reply from subagent "Fix CI"
+ *  (codex, id …): its turn finished. …]\n\nbody`, otto-agent-protocol
+ *  runtime/children.rs `wake_text`; `reply: true`; stored history may
+ *  still read `[Reply from thread …]` / `[Opened by thread …]`), or a
+ *  subagent's task (`[Subagent task from thread "Fix CI" (…). …]`). The header is the whole
  *  first line, so a `]` in a title does not end it early. Null for a message
  *  the user typed. */
-export function messageAttribution(text: string): { from: string; body: string; reply?: true } | null {
-  const thread = /^\[(Message from|Opened by|Reply from) thread "(.*?)" \([^\n]*\]\s*\n\n?([\s\S]*)$/.exec(text);
-  if (thread) return { from: thread[2] || 'a linked thread', body: thread[3], ...(thread[1] === 'Reply from' ? { reply: true as const } : {}) };
+export function messageAttribution(text: string): { from: string; body: string; reply?: true; task?: true } | null {
+  const thread = /^\[(Message from thread|Opened by thread|Subagent task from thread|Reply from thread|Reply from subagent) "(.*?)" \([^\n]*\]\s*\n\n?([\s\S]*)$/.exec(text);
+  if (thread) {
+    const kind = thread[1].startsWith('Reply from') ? { reply: true as const } : thread[1] === 'Message from thread' ? {} : { task: true as const };
+    return { from: thread[2] || 'the parent thread', body: thread[3], ...kind };
+  }
   const feed = /^\[Message from ([^\]]+?)(?: \([^()\]]*\))?\]: ([\s\S]*)$/.exec(text);
   return feed ? { from: feed[1], body: feed[2] } : null;
 }
@@ -470,7 +516,7 @@ export function groupSummary(entries: readonly WorkEntry[]): string {
       case 'command_execution':
         return `Ran ${n} ${s('command', 'commands')}`;
       case 'file_change':
-        return `Changed ${n} ${s('file', 'files')}`;
+        return `Edited ${n} ${s('file', 'files')}`;
       case 'web_search':
         return `Searched the web ${n} ${s('time', 'times')}`;
       case 'fetch':
@@ -497,7 +543,7 @@ export function approvalOutcome(item: ApprovalItem, request: RuntimeRequest | un
           : 'Canceled';
   }
   if (request?.status === 'expired') return 'Expired';
-  if (request?.decision === 'decline' || request?.decision === 'cancel') return 'Declined';
+  if (request?.decision === 'decline' || request?.decision === 'decline_always' || request?.decision === 'cancel') return 'Denied'; // the dock's word (Allow once · Deny)
   return null;
 }
 

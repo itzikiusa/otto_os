@@ -42,7 +42,7 @@ async function boot(page: Page, hash: string): Promise<void> {
 }
 
 test('phone: the stage shows the repo and the access before sending', async ({ page }, ti) => {
-  test.skip(!/^(iphone|android)/.test(ti.project.name), 'phones only');
+  test.skip(!/^(iphone|android-phone)/.test(ti.project.name), 'phones only');
   await boot(page, '#/threads/new');
   const stage = page.getByTestId('new-thread-stage');
   await expect(stage).toBeVisible({ timeout: 15_000 });
@@ -57,7 +57,7 @@ test('phone: the stage shows the repo and the access before sending', async ({ p
 });
 
 test('phone: ⋯ has no layouts or hand-off; the details drawer is compact', async ({ page }, ti) => {
-  test.skip(!/^(iphone|android)/.test(ti.project.name), 'phones only');
+  test.skip(!/^(iphone|android-phone)/.test(ti.project.name), 'phones only');
   await boot(page, '#/threads/rt_ph');
   await expect(page.getByTestId('runtime-thread-rt_ph')).toBeVisible({ timeout: 15_000 });
 
@@ -65,7 +65,8 @@ test('phone: ⋯ has no layouts or hand-off; the details drawer is compact', asy
   const menu = page.locator('.ctx-menu').first();
   await expectFullyInViewport(page, menu, 'toolbar ⋯ (phone)');
   const names = await menu.locator('[role^="menuitem"]').allInnerTexts();
-  for (const gone of [/^View/, /^Split/, /^Grid/, /^Single thread/, /^Continue on phone/, /^Open beside/]) {
+  // A phone's View holds only the thread prefs (no layouts).
+  for (const gone of [/^Split/, /^Grid/, /^Single thread/, /^Continue on phone/, /^Open beside/]) {
     expect(names.some((n) => gone.test(n)), String(gone)).toBe(false);
   }
   expect(names.filter((n) => /terminal/i.test(n))).toHaveLength(1);
@@ -79,17 +80,17 @@ test('phone: ⋯ has no layouts or hand-off; the details drawer is compact', asy
   await page.getByTestId('threads-toggle-inspector').click();
   const panel = page.getByTestId('threads-inspector');
   await expect(panel).toBeVisible();
-  const card = panel.getByTestId('threads-project-card');
+  const card = panel.getByTestId('thread-details-card');
   await expect(card).toBeVisible();
-  expect((await card.boundingBox())?.height ?? 999).toBeLessThan(80);
-  await expect(panel.getByRole('button', { name: /Maximize panel|Restore panel/ })).toHaveCount(0);
+  await expectFullyInViewport(page, card, 'details card (drawer)');
+  await expect(panel.getByRole('button', { name: /Widen panel|Restore panel width/ })).toHaveCount(0);
   await expect(panel.locator('.ti-key').first()).toBeHidden();
   await expect(panel.getByTestId('threads-surface-changes')).toContainText('Changes');
   await shot(page, 'details-drawer');
 });
 
-test('iPad portrait: the Threads page fits with its thread list reachable', async ({ page }, ti) => {
-  test.skip(ti.project.name !== 'ipad-portrait', 'iPad portrait only');
+test('a tablet in portrait: the Threads page fits with its thread list reachable', async ({ page }, ti) => {
+  test.skip(!/^(ipad|android-tablet)-portrait$/.test(ti.project.name), 'tablets in portrait (iPad, Galaxy Tab)');
   await boot(page, '#/threads/rt_ph');
   await expect(page.getByTestId('runtime-thread-rt_ph')).toBeVisible({ timeout: 15_000 });
   await expectNoHorizontalOverflow(page);

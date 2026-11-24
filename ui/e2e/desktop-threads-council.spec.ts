@@ -118,15 +118,23 @@ test('a council is a group of threads: nested rows, side by side, synthesize and
 
   // The seats nest under seat 1 like any child thread, each named by its agent.
   const sidebar = page.getByTestId('threads-sidebar');
-  await expect(sidebar.getByTestId('thread-family-count-rt_s1')).toHaveText('· 2');
+  // Compared models are counted as models, not subagents.
+  await expect(sidebar.getByTestId('thread-family-count-rt_s1')).toHaveText('2 compared'); // short in the sidebar; the details card says "Compared with 2 models"
+  await sidebar.getByTestId('thread-family-fold-rt_s1').click();
   await expect(sidebar.getByTestId('thread-row-rt_s2')).toHaveText(/codex/);
   await expect(sidebar.getByTestId('thread-row-rt_s2')).not.toHaveText(/Cache plan/);
 
-  // The Related chip lists the other seats (one tap switches seats on a phone).
-  await expect(page.getByTestId('threads-related-chip')).toHaveText(/2/);
+  // The details card lists the other seats as subagents (one tap opens one).
+  await page.getByTestId('threads-toggle-inspector').click();
+  const seats = page.getByTestId('threads-inspector').getByTestId('details-subagents');
+  await expect(seats).toBeVisible();
+  // Seats that already answered sit under Previous.
+  if (await seats.getByTestId('details-previous').count()) await seats.getByTestId('details-previous').click();
+  await expect(seats.getByTestId('details-subagent')).toHaveCount(2);
+  await page.getByTestId('threads-toggle-inspector').click();
 
   // ⋯ › Open council side by side: three seats in the Grid.
-  await (await threadMenu(page, 'Open council side by side')).click();
+  await (await threadMenu(page, 'Open side by side')).click();
   const canvas = page.getByTestId('threads-canvas');
   await expect(canvas).toHaveAttribute('data-layout', 'grid');
   for (const id of ['rt_s1', 'rt_s2', 'rt_s3']) await expect(canvas.getByTestId(`thread-pane-${id}`)).toBeVisible();
@@ -135,10 +143,10 @@ test('a council is a group of threads: nested rows, side by side, synthesize and
   await expect(canvas.getByTestId('thread-pane-rt_s1')).not.toContainText(/background/i);
 
   // Seat 3 still works: Synthesize waits and says why.
-  const synth = await threadMenu(page, 'Synthesize with');
+  const synth = await threadMenu(page, 'Compare answers with');
   await expect(synth).toHaveAttribute('aria-disabled', 'true');
   await synth.hover();
-  await expect(synth).toHaveAttribute('title', 'Seat 3 still working');
+  await expect(synth).toHaveAttribute('title', 'One model is still working');
   await page.screenshot({ path: info.outputPath('council-panes-light.png'), animations: 'disabled' });
   await page.emulateMedia({ colorScheme: 'dark' });
   await page.screenshot({ path: info.outputPath('council-panes-dark.png'), animations: 'disabled' });
@@ -147,7 +155,7 @@ test('a council is a group of threads: nested rows, side by side, synthesize and
 
   // Once every seat is done: Synthesize with ▸ Claude opens the judge as a pane.
   await hook(page, 'status', 'rt_s3', 'ready');
-  await (await threadMenu(page, 'Synthesize with')).hover();
+  await (await threadMenu(page, 'Compare answers with')).hover();
   await page.locator('.ctx-submenu').getByRole('menuitem', { name: /^Claude/ }).click();
   const judge = canvas.locator('[data-testid^="thread-pane-"]', { hasText: 'Mock synthesis' });
   await expect(judge).toBeVisible({ timeout: 15_000 });
@@ -160,7 +168,7 @@ test('a council is a group of threads: nested rows, side by side, synthesize and
 
   // ⋯ › Ask every seat…: one multi-line sheet, the text queued in each seat.
   await canvas.getByTestId('thread-pane-rt_s2').click();
-  await (await threadMenu(page, 'Ask every seat…')).click();
+  await (await threadMenu(page, 'Ask every model…')).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByRole('textbox').fill('Why that one?');
   await dialog.getByRole('button', { name: 'Ask 3' }).click();

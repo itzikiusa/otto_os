@@ -102,7 +102,7 @@
 
 <div class="rl" data-testid="related-threads">
   {#if rows.length === 0 && myRooms.length === 0}
-    <p class="rl-empty">No related threads yet. An agent’s linked threads, workers, side chats and rooms show here.</p>
+    <p class="rl-empty">No other threads yet. Subagents, side chats and rooms show here.</p>
   {/if}
   {#if rows.length > 0}
     <ul class="rl-list" aria-label="Related threads">
@@ -119,7 +119,7 @@
             <button type="button" class="icon-btn" aria-label="Open {r.title} beside" title="Open beside" onclick={() => open(r, true)}>
               <Icon name="split" size={13} />
             </button>
-            <button type="button" class="icon-btn" aria-label="Message {r.title}" title={includeOutput && relayCtx ? 'Relay with recent output…' : 'Message…'} data-testid="related-message-{r.id}" onclick={() => relayTo(r.id)}>
+            <button type="button" class="icon-btn" aria-label="Message {r.title}" title={includeOutput && relayCtx ? 'Send with recent output…' : 'Send a message…'} data-testid="related-message-{r.id}" onclick={() => relayTo(r.id)}>
               <Icon name="send" size={13} />
             </button>
           {/if}
@@ -153,17 +153,17 @@
     <label class="rl-ctx" data-testid="relay-context-preview" title={relayCtx.snippet}>
       <input type="checkbox" bind:checked={includeOutput} />
       <span class="rl-ctx-body">
-        <span class="rl-ctx-lbl">Relay with recent output</span>
+        <span class="rl-ctx-lbl">Send with recent output</span>
         <span class="rl-ctx-snip ellipsis" dir="auto">{relayCtx.preview}</span>
       </span>
     </label>
   {/if}
   <div class="rl-foot">
     <button type="button" class="btn small" aria-haspopup="menu" data-testid="related-message-any" onclick={pickTarget}>
-      <Icon name="send" size={12} />{includeOutput && relayCtx ? 'Relay with output…' : 'Message a thread…'}
+      <Icon name="send" size={12} />{includeOutput && relayCtx ? 'Send with recent output…' : 'Send to a thread…'}
     </button>
     <button type="button" class="btn small" data-testid="related-start-room" onclick={() => { ondone?.(); onstartroom(threadId); }}>
-      <Icon name="people" size={12} />Start a room…
+      <Icon name="people" size={12} />Share live with people…
     </button>
   </div>
 </div>

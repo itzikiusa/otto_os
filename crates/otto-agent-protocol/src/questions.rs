@@ -18,6 +18,11 @@ fn unique(questions: Vec<RuntimeQuestion>) -> Result<Vec<RuntimeQuestion>, Strin
         if q.id.is_empty() || !ids.insert(&q.id) {
             return Err("question IDs must be nonempty and unique".into());
         }
+        // Reserved for Otto's own url-mode elicitation (`acp_url`); an id
+        // from a model or a schema never takes it.
+        if q.id == URL_QUESTION {
+            return Err(format!("the question id {URL_QUESTION} is reserved"));
+        }
         let mut values = HashSet::new();
         if q.options.iter().any(|o| !values.insert(&o.value)) {
             return Err("duplicate question option values".into());
@@ -76,10 +81,44 @@ pub fn native_questions(params: &Value, claude: bool) -> Result<Vec<RuntimeQuest
             required: true,
             allow_empty: false,
             allow_free_text: true,
+            open_url: None,
             options,
         });
     }
     unique(questions)
+}
+
+/// The question id of an ACP url-mode elicitation (`acp_url`).
+pub const URL_QUESTION: &str = "acp_url";
+/// The value of its one "open" choice.
+pub const URL_OPEN: &str = "open";
+
+/// ACP url-mode elicitation: the agent asks the person to open an http(s)
+/// page (a sign-in, a consent screen). One choice names the URL; choosing it
+/// answers `accept` and the UI opens the page in the system browser.
+pub fn acp_url(params: &Value) -> Result<Vec<RuntimeQuestion>, String> {
+    let url = params
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|u| u.starts_with("https://") || u.starts_with("http://"))
+        .filter(|u| !u.chars().any(char::is_control))
+        .ok_or("url elicitation needs an http(s) url")?;
+    let message = params.get("message").and_then(Value::as_str).unwrap_or("");
+    Ok(vec![RuntimeQuestion {
+        id: URL_QUESTION.into(),
+        header: "Open a link".into(),
+        prompt: format!("{message}\n{url}").trim().to_string(),
+        kind: QuestionKind::Single,
+        required: true,
+        allow_empty: false,
+        allow_free_text: false,
+        open_url: Some(url.into()),
+        options: vec![QuestionOption {
+            value: URL_OPEN.into(),
+            label: "Open in the browser".into(),
+            description: Some(url.into()),
+        }],
+    }])
 }
 
 /// The draft ACP elicitation/create form subset: plain strings and string enums/arrays.
@@ -103,6 +142,7 @@ pub fn acp_form(params: &Value) -> Result<Vec<RuntimeQuestion>, String> {
                 "title",
                 "description",
                 "_meta",
+                "$schema",
             ]
             .contains(&k.as_str())
         })
@@ -222,6 +262,7 @@ pub fn acp_form(params: &Value) -> Result<Vec<RuntimeQuestion>, String> {
             required: required.is_some_and(|r| r.iter().any(|v| v.as_str() == Some(id))),
             allow_empty: true,
             allow_free_text: options.is_empty(),
+            open_url: None,
             options,
         });
     }
@@ -235,6 +276,114 @@ pub fn acp_form(params: &Value) -> Result<Vec<RuntimeQuestion>, String> {
 }
 
 /// The free-text companion of an ACP single choice: `<id>__other`.
+/// An MCP server's elicitation as the agent CLI forwards it — Claude's
+/// `elicitation` control request (`requested_schema`), Codex's
+/// `mcpServer/elicitation/request` (`requestedSchema`; its `openai/form`
+/// modes are the same form) — as questions: the subset [`acp_form`] takes.
+/// A URL-mode request or a form outside it is refused (the caller declines).
+pub fn mcp_elicitation(params: &Value) -> Result<Vec<RuntimeQuestion>, String> {
+    let mode = match params.get("mode").and_then(Value::as_str).unwrap_or("form") {
+        "openai/form" | "openaiForm" => "form",
+        "url" => return acp_url(params),
+        m => m,
+    };
+    let schema = params
+        .get("requestedSchema")
+        .or_else(|| params.get("requested_schema"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    acp_form(&serde_json::json!({ "mode": mode, "requestedSchema": schema }))
+}
+
+/// An elicitation with no fields to fill (a missing, `true` or empty
+/// `properties` schema, in any form mode): a yes/no for the person — Codex
+/// asks MCP tool approval this way — shown as an approval, not a form.
+pub fn is_confirmation(params: &Value) -> bool {
+    let mode = params.get("mode").and_then(Value::as_str).unwrap_or("form");
+    let schema = params
+        .get("requestedSchema")
+        .or_else(|| params.get("requested_schema"));
+    mode != "url"
+        && schema
+            .and_then(|s| s.get("properties"))
+            .and_then(Value::as_object)
+            .is_none_or(|p| p.is_empty())
+}
+
+/// Allow / Deny for [`is_confirmation`].
+pub fn confirmation_options() -> Vec<otto_core::agent_runtime::ApprovalOption> {
+    use otto_core::agent_runtime::{ApprovalDecision, ApprovalOption};
+    vec![
+        ApprovalOption {
+            decision: ApprovalDecision::Accept,
+            label: "Allow".into(),
+        },
+        ApprovalOption {
+            decision: ApprovalDecision::Decline,
+            label: "Deny".into(),
+        },
+    ]
+}
+
+/// The elicitation result for an approval answer (no content to send).
+pub fn confirmation_result(decision: otto_core::agent_runtime::ApprovalDecision) -> Value {
+    use otto_core::agent_runtime::ApprovalDecision as D;
+    let action = match decision {
+        D::Accept | D::AcceptForSession | D::AcceptAlways => "accept",
+        D::Decline | D::DeclineAlways => "decline",
+        D::Cancel => "cancel",
+    };
+    // Codex's MCP tool approval offers `_meta.persist` (session / always).
+    match decision {
+        D::AcceptForSession => {
+            serde_json::json!({"action": action, "content": {}, "_meta": {"persist": "session"}})
+        }
+        D::AcceptAlways => {
+            serde_json::json!({"action": action, "content": {}, "_meta": {"persist": "always"}})
+        }
+        _ if action == "accept" => serde_json::json!({ "action": action, "content": {} }),
+        _ => serde_json::json!({ "action": action }),
+    }
+}
+
+/// The `{action: "accept", …}` result of an answered elicitation, for every
+/// agent: a url question (the person opened the page) is a bare accept, a
+/// form its fields as `content`.
+pub fn elicitation_answer(
+    questions: &[RuntimeQuestion],
+    answers: &[otto_core::agent_runtime::QuestionAnswer],
+) -> Value {
+    if questions.iter().any(|q| q.id == URL_QUESTION) {
+        return serde_json::json!({ "action": "accept" });
+    }
+    serde_json::json!({ "action": "accept", "content": form_content(questions, answers) })
+}
+
+/// The `content` of an accepted form elicitation: each answer under its
+/// field id (typed text for a single choice under its `<id>__other` field).
+pub fn form_content(
+    questions: &[RuntimeQuestion],
+    answers: &[otto_core::agent_runtime::QuestionAnswer],
+) -> serde_json::Map<String, Value> {
+    use otto_core::agent_runtime::{QuestionAnswer, QuestionKind};
+    answers
+        .iter()
+        .map(|a| {
+            let id = a.question_id();
+            let single = questions
+                .iter()
+                .any(|q| q.id == id && q.kind == QuestionKind::Single);
+            match a {
+                QuestionAnswer::Multi { values, .. } => (id.to_string(), serde_json::json!(values)),
+                QuestionAnswer::Text { text, .. } if single => {
+                    (other_field(id), serde_json::json!(text))
+                }
+                _ => (id.to_string(), serde_json::json!(a.values()[0])),
+            }
+        })
+        .collect()
+}
+
 pub fn other_field(id: &str) -> String {
     format!("{id}__other")
 }
@@ -268,6 +417,34 @@ fn fold_other_fields(mut questions: Vec<RuntimeQuestion>) -> Vec<RuntimeQuestion
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Security 4: `acp_url` is reserved — a model's Codex question or a
+    /// form's schema property cannot take it — and only Otto's own url
+    /// question carries `open_url`.
+    #[test]
+    fn the_url_question_id_is_reserved_and_open_url_is_driver_only() {
+        let codex = json!({"questions":[{"id":"acp_url","header":"Go","question":"Proceed?",
+            "options":[{"label":"Yes","description":"https://attacker.example/?d=1"},{"label":"No"}]}]});
+        assert!(native_questions(&codex, false)
+            .unwrap_err()
+            .contains("reserved"));
+        let form = json!({"mode":"form","requestedSchema":{"type":"object","properties":{
+            "acp_url":{"type":"string","oneOf":[{"const":"y","title":"Yes","description":"https://attacker.example"}]}}}});
+        assert!(acp_form(&form).unwrap_err().contains("reserved"));
+        let ok = native_questions(
+            &json!({"questions":[{"id":"q","header":"H","question":"?"}]}),
+            false,
+        )
+        .unwrap();
+        assert_eq!(ok[0].open_url, None);
+        let url = acp_url(&json!({"url":"https://example.com/login","message":"m"})).unwrap();
+        assert_eq!(
+            url[0].open_url.as_deref(),
+            Some("https://example.com/login")
+        );
+        assert_eq!(url[0].options[0].value, URL_OPEN);
+    }
+
     #[test]
     fn acp_keeps_native_enum_values_and_refuses_constraints() {
         let mut form = json!({"mode":"form","requestedSchema":{"type":"object","properties":{"style":{"type":"string","oneOf":[{"const":"safe_v1","title":"Safe"}]}},"required":["style"]}});

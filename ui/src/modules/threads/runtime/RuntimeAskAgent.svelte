@@ -1,5 +1,5 @@
 <!--
-  "Ask another agent" + unified `@` file/folder & agent mention menu in a
+  "Delegate to…" + unified `@` file/folder & agent mention menu in a
   runtime thread's composer. `part="button"` (in the composer's foot) opens
   the agent menu: each model picked becomes a chip, so one is "Ask another
   agent" and 2–4 are "Ask several". `part="chips"` mounts `RuntimeMentionMenu`
@@ -17,7 +17,8 @@
   import { ASK_MAX_TARGETS, askableProviders, clampEffort } from './askAgents';
   import { askTargets } from './askTargets.svelte';
   import { fileMentionContext, type ComposerContext } from './composerContext';
-  import RuntimeMentionMenu, { type PickedAgentMention, type PickedFileMention } from './RuntimeMentionMenu.svelte';
+  import type { PickedAgentMention, PickedFileMention } from './RuntimeMentionMenu.svelte';
+  import { MentionMenuView } from '../threadLazy.svelte';
 
   interface Props {
     part: 'button' | 'chips';
@@ -115,8 +116,8 @@
     class="icon-btn"
     aria-haspopup="dialog"
     aria-expanded={open}
-    aria-label={targets.length ? 'Ask one more agent' : 'Ask another agent'}
-    title={full ? `At most ${ASK_MAX_TARGETS} agents at once` : 'Ask another agent: a new thread on another model gets this message and its images — not this conversation. Its answer comes back to you as a card (pick more to ask several; or type @)'}
+    aria-label={targets.length ? 'Delegate to one more' : 'Delegate to…'}
+    title={full ? `At most ${ASK_MAX_TARGETS} agents at once` : 'Delegate to…: a subagent on another model gets this message, its images and a short summary of this conversation. Its answer comes back to you as a card (pick more to ask several; or type @)'}
     data-testid="runtime-ask-agent"
     disabled={disabled || full || allowedProviders.length === 0}
     onpointerenter={() => ModelPicker.prefetch()}
@@ -125,7 +126,7 @@
     <Icon name="people" size={14} />
   </button>
 {:else}
-  <RuntimeMentionMenu
+  {#if MentionMenuView.component}<MentionMenuView.component
     bind:this={mentionMenuEl}
     {text}
     {cwd}
@@ -135,10 +136,10 @@
     onpickfile={handlePickFile}
     onpickagent={handlePickAgent}
     ondrilldir={(nextText) => onreplace?.(nextText)}
-  />
+  />{/if}
   {#if targets.length > 0 && allowAgents}
     <div class="aa-chips" role="group" aria-label="Agents this message goes to" data-testid="runtime-ask-targets">
-      <span class="aa-lead">{targets.length > 1 ? `Ask ${targets.length} agents` : 'Ask'}</span>
+      <span class="aa-lead">{targets.length > 1 ? `Delegate to ${targets.length}` : 'Delegate to'}</span>
       {#each targets as t, i (`${t.provider}:${t.model}:${t.effort}`)}
         <span class="aa-chip">
           {#if hasProviderIcon(t.provider)}<ProviderIcon provider={t.provider} size={12} />{/if}
@@ -150,7 +151,10 @@
       {/each}
       <span class="aa-access" title="A thread you ask here works in this thread’s folder with this thread’s access (the access chip below narrows it)">· {accessText}</span>
       <button type="button" class="btn small ghost" onclick={() => askTargets.clear(sessionId)}>Cancel</button>
-      <span class="aa-what" data-testid="runtime-ask-what">Gets your message and attachments — not this conversation. The answer comes back to you as a card, not to {ownAgent}.</span>
+      <label class="aa-what" data-testid="runtime-ask-what">
+        <input type="checkbox" checked={!!askTargets.toMeOnly[sessionId]} data-testid="runtime-ask-to-me" onchange={(e) => (askTargets.toMeOnly = { ...askTargets.toMeOnly, [sessionId]: e.currentTarget.checked })} />
+        {askTargets.toMeOnly[sessionId] ? 'Answer to me only — gets your message, not this conversation' : `Gets your message and this conversation so far; the answer goes to ${ownAgent}`}
+      </label>
     </div>
   {/if}
 {/if}
@@ -212,6 +216,9 @@
     font-size: var(--fs-xs);
   }
   .aa-what {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     flex-basis: 100%;
     font-size: var(--fs-xs);
   }

@@ -13,6 +13,7 @@ import type {
 } from '../../../lib/api/types';
 import { plural } from '../../../lib/plural.ts';
 import { subagentChildren, workLabel } from './timeline.ts';
+import { perfCount } from '../../../lib/perfCount.ts';
 
 /** `needs-you`: a linked child thread waits on a person (an approval, a
  *  question, a secret) — still active, listed with the running ones. */
@@ -47,7 +48,7 @@ export interface AgentTask {
   endedAt: string | null;
   /** Linked TurnItem id (subagent card, command_execution, or dynamic_tool). */
   itemId: string | null;
-  /** Linked child RuntimeSession id (`otto.thread_open` / `Ask another agent`). */
+  /** Linked child RuntimeSession id (`otto.thread_open` / `Delegate to…`). */
   childSessionId: string | null;
   /** The provider's task id (a Claude background command's output file). */
   taskId: string | null;
@@ -255,6 +256,7 @@ export function agentTasks(
   background: readonly BackgroundTask[],
   opts: AgentTasksOptions = {},
 ): AgentTasks {
+  perfCount('agentTasks');
   const outputMap = opts.output ?? {};
   const itemsById = new Map<string, TurnItem>();
   let latestActivityMs = 0;
@@ -538,13 +540,40 @@ export function agentTasks(
   };
 }
 
-/** The strip's words: the one task named, several counted (the list is a tap away). */
+/** `agentTasks` computed once per change for one thread, however many
+ *  surfaces read it (the conversation and the details card): the last result
+ *  per `key` is reused while the items, background list and output buffers are
+ *  the same objects and the linked children say the same. A few threads are
+ *  kept (the ones on screen). */
+const shared = new Map<string, { items: readonly TurnItem[]; background: readonly BackgroundTask[]; output: unknown; kids: string; json: string; value: AgentTasks }>();
+const SHARED_MAX = 16;
+
+export function sharedAgentTasks(key: string, items: readonly TurnItem[], background: readonly BackgroundTask[], opts: AgentTasksOptions = {}): AgentTasks {
+  const kids = (opts.childThreads ?? []).map((c) => `${c.id}\u0001${c.status}\u0001${c.lastTurnStatus ?? ''}\u0001${c.title}\u0001${c.stepSummary ?? ''}`).join('\u0002');
+  const output = opts.output ?? null;
+  const hit = shared.get(key);
+  if (hit && hit.items === items && hit.background === background && hit.output === output && hit.kids === kids) return hit.value;
+  // A streamed chunk of the answer is a new items array but rarely a new
+  // task: an equal result keeps the old object, so what reads it stays put.
+  const fresh = agentTasks(items, background, opts);
+  const json = JSON.stringify(fresh);
+  const value = hit?.json === json ? hit.value : fresh;
+  if (value === fresh) perfCount('agentTasksChanged');
+  shared.delete(key);
+  shared.set(key, { items, background, output, kids, json, value });
+  if (shared.size > SHARED_MAX) shared.delete(shared.keys().next().value!);
+  return value;
+}
+
+/** The strip's words for background work that is not a subagent (commands,
+ *  timers — subagents are on the waiting line): the one task named, several
+ *  counted (the list is a tap away). */
 export function backgroundStripText(tasks: readonly AgentTask[]): string {
   if (tasks.length === 1) {
     const step = tasks[0].stepSummary ? ` (${tasks[0].stepSummary})` : '';
-    return `Running in the background: ${tasks[0].label}${step}`;
+    return `Background task: ${tasks[0].label}${step}`;
   }
-  return `${tasks.length} running in the background`;
+  return `${tasks.length} background tasks`;
 }
 
 /** "12s", "4m 5s", "1h 2m" from a start to an end (or `nowMs`); null without a start. */

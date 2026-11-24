@@ -1016,6 +1016,8 @@ fn augment_path() {
         format!("{home}/.claude/local"),
         format!("{home}/.cargo/bin"),
         format!("{home}/bin"),
+        // opencode's installer puts its binary here (not on a bare PATH).
+        format!("{home}/.opencode/bin"),
         // Go binaries (gopls, etc.) install here by default.
         format!("{home}/go/bin"),
         // Otto's own bin dir, where the usage feature installs `clickhouse`.

@@ -60,7 +60,7 @@
     inset-inline-end: 16px;
     /* --toast-lift: the floating command bar raises the stack while its pill
        floats over the content column, so a toast never covers it. */
-    bottom: calc(38px + var(--toast-lift));
+    bottom: calc(38px + var(--toast-lift) + var(--toast-lift-page));
     z-index: var(--z-toast);
     display: flex;
     flex-direction: column;
@@ -153,6 +153,13 @@
   }
   .toast-action {
     margin-top: 8px;
+  }
+  /* Touch: Undo was a 46 × 22 px target under a finger. */
+  @media (pointer: coarse) {
+    .toast-action {
+      min-block-size: var(--hit-min);
+      min-inline-size: calc(2 * var(--hit-min));
+    }
   }
   /* Phone: the bottom nav owns the window's bottom edge (the status bar is
      usually gone there), so the stack sits above it and spans the width. */

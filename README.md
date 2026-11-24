@@ -7,11 +7,47 @@ multi-agent code review, Jira/Confluence product workflows, SSH/database
 connections, an HTTP API client, real token-usage tracking, and Slack/Telegram
 bridges so an agent can work a ticket from a chat thread.
 
-**Version 0.3.0** · macOS (Apple Silicon; Intel from source) · actively developed, so
+**Version 0.4.0** · macOS (Apple Silicon; Intel from source) · actively developed, so
 expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
 
 🎬 **[Watch the product tour](https://github.com/itzikiusa/otto_os/releases/download/v0.3.0/otto-tour-20261116.mp4)**
 (also in the app under **Help → Walkthroughs**).
+
+### What's new in 0.4.0
+
+- **Threads, redesigned.** One centred reading column, a composer with one
+  primary action (Send, Queue, Steer or Stop), and a sidebar that works as an
+  inbox: status in words (Approval, Question, Done, Failed, Limited, Working),
+  what needs you first, pins and History that follow you to every device.
+  ⌘K opens on the threads that need you. A details card holds the folder,
+  branch, one git action (commit, push, pull request, without leaving the
+  thread), changes, context use and MCP servers.
+- **Several agents and providers under one thread.** Say it in one sentence
+  and the thread's agent delegates to subagents on other providers. They show
+  as one row, one "Waiting on N subagents · Stop" line and a section in the
+  details card; their approvals and questions are answered from the parent,
+  and Stop stops the family. Continue any thread on another provider: the
+  conversation is handed over and the switch shows in the timeline. Compare
+  models side by side.
+- **MCP for every agent.** Approvals for governed tools are asked in the
+  thread and the waiting call then runs. Each thread lists the servers its
+  agent really has and why one is missing. Server questions (elicitation)
+  reach you; images and links in results render. Remote servers can use SSE
+  and sign in with OAuth (tokens stay in the Keychain).
+- **ACP, verified against the installed CLIs.** Live tests per agent, modes
+  and models that follow the agent, session resume, "always deny", URL
+  questions, and file and terminal calls served through Otto where the agent
+  uses them.
+- **Review and ship from the thread.** Notes on diff lines sent to the agent
+  as one message, a changes card per turn, a new worktree in one step that
+  arrives with the files and dependencies `.worktreeinclude` names, a usage
+  limit shown as a state with "Resume at reset" or "Continue with another
+  provider", and a context meter.
+- **Phone and tablet.** Every Threads flow works by touch with the keyboard
+  up, in both orientations; Back closes the sheet on top.
+- **Fixes.** Links open again everywhere in the desktop app (the terminal
+  included), and a selection in an agent's terminal survives until you copy
+  it (⌥-drag, then ⌘C or ⌥⌘C).
 
 ### What's new in 0.3.0
 
@@ -513,7 +549,9 @@ Otto is a Tauri 2 desktop app with a Rust backend daemon and a Svelte 5 frontend
 ## Download (prebuilt DMG)
 
 **Versioned releases:** [Otto 0.3.0](../../releases/tag/v0.3.0) ships
-`Otto_0.3.0_aarch64.dmg` with its `.sha256` and the tour film.
+`Otto_0.3.0_aarch64.dmg` with its `.sha256` and the tour film. 0.4.0 is on
+`main`; until its release is published, build it from source or use the
+rolling `latest` build below.
 
 A GitHub Actions workflow builds the Apple-Silicon `.dmg` **monthly** (on the
 1st, 05:00 UTC; maintainers can also run it on demand via `workflow_dispatch`)

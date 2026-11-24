@@ -178,6 +178,10 @@ struct Ctx {
     /// session held the UI grant). When the grant flips, the bridge emits
     /// `notifications/tools/list_changed` so the client re-lists.
     advertised_ui: std::sync::atomic::AtomicBool,
+    /// [`listing_fingerprint`] of the enabled governed and gateway tools the
+    /// last `tools/list` advertised; a later difference (a tool or server
+    /// turned on or off in the control plane) sends `list_changed`.
+    advertised_listing: std::sync::Mutex<Option<u64>>,
     /// The single stdout writer's channel, for server-initiated
     /// notifications. Taken (dropped) at shutdown so the writer can finish.
     notify: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<Value>>>,
@@ -627,6 +631,34 @@ impl Ctx {
             .as_ref()
         {
             let _ = tx.send(msg);
+        }
+    }
+
+    /// After a call: when what `tools/list` would now advertise (read from the
+    /// enable and gateway caches, so at most one daemon read per TTL) differs
+    /// from what the client last listed, tell it to re-list. Clients that
+    /// honour `list_changed` see a tool enabled mid-thread without a restart.
+    async fn recheck_listing(&self) {
+        if self
+            .advertised_listing
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_none()
+        {
+            return;
+        }
+        let (gw, enabled) = tokio::join!(self.gateway_tools(false), self.enabled_info(false));
+        let now = listing_fingerprint(enabled.as_ref(), &gw);
+        let mut last = self
+            .advertised_listing
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if *last != Some(now) {
+            *last = Some(now);
+            drop(last);
+            self.send_notification(
+                json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" }),
+            );
         }
     }
 
@@ -1257,15 +1289,17 @@ async fn gateway_call(ctx: &Ctx, namespaced: &str, args: &Value) -> Result<(Valu
         "arguments": args,
         "workspace_id": ws,
         "session_id": ctx.session_id,
+        "wait_seconds": GOVERNED_WAIT_SECS,
     });
-    // The daemon may queue, cold-open (spawn + initialize) and then run the
-    // downstream call, each up to otto-mcp's `OP_TIMEOUT`: the default 20 s
-    // gave up first, dropping the handler mid-call (integrations-4-01).
+    // The daemon may wait on the person's approval, then queue, cold-open
+    // (spawn + initialize) and run the downstream call, each up to
+    // otto-mcp's `OP_TIMEOUT`: the default 20 s gave up first, dropping the
+    // handler mid-call (integrations-4-01).
     let v = ctx
         .post_json_within(
             "/mcp/gateway/invoke",
             &body,
-            otto_mcp::client::GATEWAY_CALL_TIMEOUT,
+            Duration::from_secs(GOVERNED_WAIT_SECS) + otto_mcp::client::GATEWAY_CALL_TIMEOUT,
         )
         .await?;
     let is_error = matches!(
@@ -1454,6 +1488,38 @@ fn rpc_err(id: Value, code: i64, message: impl Into<String>) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message.into() } })
 }
 
+/// The enabled governed names and gateway tool names, order-free.
+fn listing_fingerprint(enabled: Option<&EnabledInfo>, gateway: &[Value]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut names: Vec<&str> = enabled
+        .map(|i| i.names.iter().map(String::as_str).collect())
+        .unwrap_or_default();
+    names.extend(gateway.iter().filter_map(|t| t["name"].as_str()));
+    names.sort_unstable();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    names.hash(&mut h);
+    h.finish()
+}
+
+/// A governed call's result: an executed downstream call's own MCP content
+/// blocks as they are (its images, links and resources reach the agent as
+/// such), anything else — a denial, a pending approval, an `otto.*` REST
+/// value — as [`tool_result`]'s JSON text.
+fn governed_result(v: &Value, is_error: bool) -> Value {
+    match v.get("content").and_then(Value::as_array) {
+        Some(blocks)
+            if v.get("executed").and_then(Value::as_bool) == Some(true)
+                && !blocks.is_empty()
+                && blocks
+                    .iter()
+                    .all(|b| b.get("type").and_then(Value::as_str).is_some()) =>
+        {
+            json!({ "content": blocks, "isError": is_error })
+        }
+        _ => tool_result(v, is_error),
+    }
+}
+
 /// Wrap a tool result `Value` as MCP `tools/call` content (a single JSON text
 /// block, pretty-printed). `is_error` flags a tool-level failure to the client.
 fn tool_result(value: &Value, is_error: bool) -> Value {
@@ -1504,6 +1570,10 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
             // …plus the control-plane-enabled otto.* tools this surface doesn't
             // serve natively (what the operator ticked under MCP → Otto server),
             // UI-control tools only once this session holds the UI grant.
+            *ctx.advertised_listing
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) =
+                Some(listing_fingerprint(enabled.as_ref(), &gw));
             let filter = enabled.as_ref().and_then(|i| i.filter.clone());
             // The opt-in console content reads are listed only while their
             // control-plane twin is on (the call is refused otherwise).
@@ -1588,7 +1658,7 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
             // route it through the control-plane gateway (which audits it itself).
             if name.starts_with("mcp__") {
                 return Some(match gateway_call(ctx, &name, &args).await {
-                    Ok((v, is_error)) => rpc_ok(id, tool_result(&v, is_error)),
+                    Ok((v, is_error)) => rpc_ok(id, governed_result(&v, is_error)),
                     Err(e) => rpc_ok(id, tool_result(&json!({ "error": e }), true)),
                 });
             }
@@ -1694,6 +1764,7 @@ impl Ctx {
             enabled_cache: Default::default(),
             gateway_cache: Default::default(),
             advertised_ui: Default::default(),
+            advertised_listing: Default::default(),
             notify: Default::default(),
         }
     }
@@ -1840,8 +1911,12 @@ where
         };
         let (ctx, tx) = (ctx.clone(), tx.clone());
         inflight.spawn(async move {
+            let call = msg.get("method").and_then(Value::as_str) == Some("tools/call");
             if let Some(resp) = handle(&ctx, msg).await {
                 let _ = tx.send(resp);
+            }
+            if call {
+                ctx.recheck_listing().await;
             }
             drop(permit);
         });
@@ -1921,6 +1996,46 @@ mod tests {
     /// S5-07: a native irreversible writer's governed envelope maps back to
     /// the native result — executed → the tool's content; pending → the
     /// envelope (no error, the agent resubmits); denied / failed → an error.
+    #[test]
+    fn the_listing_fingerprint_changes_with_a_tool_turned_on_not_with_order() {
+        let info = |names: &[&str]| EnabledInfo {
+            names: names.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        let gw = [json!({"name":"mcp__jira__search"})];
+        let a = listing_fingerprint(Some(&info(&["otto.a", "otto.b"])), &gw);
+        assert_eq!(
+            a,
+            listing_fingerprint(Some(&info(&["otto.b", "otto.a"])), &gw)
+        );
+        assert_ne!(
+            a,
+            listing_fingerprint(Some(&info(&["otto.a", "otto.b", "otto.c"])), &gw)
+        );
+        assert_ne!(
+            a,
+            listing_fingerprint(Some(&info(&["otto.a", "otto.b"])), &[])
+        );
+    }
+
+    #[test]
+    fn a_governed_servers_content_blocks_reach_the_agent_as_blocks() {
+        let png = json!({"type":"image","mimeType":"image/png","data":"iVBORw0KGgo="});
+        let executed = json!({"decision":"allowed","executed":true,"content":[{"type":"text","text":"red"}, png]});
+        assert_eq!(
+            governed_result(&executed, false),
+            json!({"content":[{"type":"text","text":"red"}, png],"isError":false})
+        );
+        // A pending approval (or a REST value) stays the JSON envelope.
+        let pending = json!({"decision":"pending_approval","executed":false,"approval_id":"a1"});
+        assert_eq!(
+            governed_result(&pending, false),
+            tool_result(&pending, false)
+        );
+        let rest = json!({"executed":true,"content":{"session_ids":[]}});
+        assert_eq!(governed_result(&rest, false), tool_result(&rest, false));
+    }
+
     #[test]
     fn governed_native_results_map_back() {
         let ok = governed_native_result(
@@ -4250,10 +4365,10 @@ mod tests {
     /// tools (otto_steer_production, otto_redraw_production_item,
     /// otto_revert_production, otto_rebuild_production_scene) and project_id on
     /// otto_create_production (hidden from narrow sessions).
-    const TOOLS_LIST_BYTE_BUDGET: usize = 110_500;
+    const TOOLS_LIST_BYTE_BUDGET: usize = 110_900; // +otto_thread_answer
     /// A review-type session (R2 per-source scoping): 52_595 after slim-app cleanup.
     /// 56_895 with otto_request_secret (a thread's private secret card).
-    const NARROW_TOOLS_LIST_BYTE_BUDGET: usize = 57_000; // +otto_thread_*, +otto_personal_agent_*, +otto_request_secret
+    const NARROW_TOOLS_LIST_BYTE_BUDGET: usize = 57_400; // +otto_thread_* (incl. thread_answer), +otto_personal_agent_*, +otto_request_secret
 
     /// A Ctx pointing at an unreachable base; used by the no-upstream tests above
     /// (which never actually call out). Audit disabled.

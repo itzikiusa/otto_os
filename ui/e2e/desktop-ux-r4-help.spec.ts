@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
-import { expectNoHorizontalOverflow, tourChapter, tourVideoPath } from './helpers';
+import { expectNoHorizontalOverflow, tourChapter, tourVideoPath, withAgentClis } from './helpers';
 
 test.use({ serviceWorkers: 'block' });
 test.setTimeout(120_000);
@@ -27,7 +27,7 @@ test('provider recheck announces pending and failed detection, then recovers wit
     }
     const response = await r.fetch();
     const meta = await response.json();
-    await r.fulfill({ json: { ...meta, tools: meta.tools.map((tool: { name: string }) => ['claude', 'codex', 'agy'].includes(tool.name) ? { ...tool, found: phase === 'found', version: 'Synthetic 1.0' } : tool) } });
+    await r.fulfill({ json: withAgentClis(meta, phase === 'found', 'Synthetic 1.0') });
   });
   await page.goto('/#/agents', { waitUntil: 'domcontentloaded' });
   const coach = page.locator('.coach');

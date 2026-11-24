@@ -43,7 +43,14 @@ test('routine days round-trip through the schedule and preview the next run in i
 test('agent chats read in words: plain summaries, tool names, starter chips', () => {
   assert.equal(plainText('# Owned routine fired\n\nRoutine **executed** as [asked](x).'), 'Owned routine fired Routine executed as asked.');
   assert.equal(toolWords('mcp__otto__otto_routine_create'), 'Created a routine');
-  assert.equal(toolWords('mcp__github__list_pulls'), 'List pulls (github)');
+  assert.equal(toolWords('mcp__github__list_pulls'), 'github · list_pulls');
+  // Every provider's MCP spelling: Codex, grok, Antigravity.
+  assert.equal(toolWords('github.list_pulls'), 'github · list_pulls');
+  assert.equal(toolWords('probe__probe_echo'), 'probe · probe_echo');
+  assert.equal(toolWords('Run mcp_probe_probe_echo'), 'probe · probe_echo');
+  assert.equal(toolWords('otto.otto_routine_create'), 'Created a routine');
+  assert.equal(toolWords('Read file.txt'), 'Read file.txt');
+  assert.equal(toolWords('README.md'), 'README.md');
   assert.equal(toolWords('Bash'), 'Bash');
   assert.ok(!starterPrompts(false, false).some((p) => p.startsWith('Run your routine')));
   assert.ok(starterPrompts(false, true).some((p) => p.startsWith('Run your routine')));

@@ -5,6 +5,7 @@
   // footer. Anchored to its chip, preferring above it, and clamped into the
   // viewport with a capped, scrollable height (AGENTS.md floating-UI rule).
   import { onMount, tick, untrack } from 'svelte';
+  import { backCloses } from '../backCloses';
   import { placeAnchored } from '../anchorPlace';
   import { confirmer } from '../confirm.svelte';
   import {
@@ -22,6 +23,7 @@
   } from '../providerModels';
   import { harnessLabel, providerReadiness } from '../providers';
   import { auth } from '../stores/auth.svelte';
+  import { viewport } from '../stores/viewport.svelte';
   import Icon from './Icon.svelte';
   import ProviderIcon from './ProviderIcon.svelte';
 
@@ -31,6 +33,10 @@
     provider: string;
     /** A live thread can't change harness: other providers are shown disabled. */
     lockProvider?: boolean;
+    /** A live thread's own provider: the others follow it under "Continue
+     *  with another provider", and picking one of their models arms a switch
+     *  (`onprovider` then `onmodel`); browsing the rail picks nothing. */
+    home?: string;
     model: string | null;
     effectiveModel?: string | null;
     effort: EffortLevel | null;
@@ -50,6 +56,7 @@
     providers,
     provider,
     lockProvider = false,
+    home,
     model,
     effectiveModel = null,
     effort,
@@ -153,7 +160,7 @@
       onprovider?.(p);
     }
     // Drop an effort the new pick can't take BEFORE the model lands: a host
-    // that acts on `onmodel` at once (Ask another agent adds its chip there)
+    // that acts on `onmodel` at once (Delegate to… adds its chip there)
     // must not send the previous provider's level.
     if (effort !== null && oneffort) {
       const nextEfforts = supportsEffortSelection(p, meta) ? effortsForModel(p, id, meta) : [];
@@ -171,8 +178,10 @@
     oneffort?.(lvl);
   }
 
+  /** A phone: a titled bottom sheet (not a popover from the top edge). */
+  const sheet = $derived(viewport.isPhone);
   function place(): void {
-    if (panelEl) pos = placeAnchored(anchor, panelEl, { prefer: 'above', align: 'end' });
+    if (panelEl && !sheet) pos = placeAnchored(anchor, panelEl, { prefer: 'above', align: 'end' });
   }
 
   function closePicker(): void {
@@ -188,10 +197,14 @@
     target?.focus();
   }
 
+  // A phone's Back closes the picker (lib/backCloses.ts).
+  onMount(() => backCloses(() => onclose()));
   onMount(() => {
     void tick().then(() => {
       place();
-      searchEl?.focus();
+      // A phone keeps the keyboard down: the sheet opens on its list.
+      if (sheet) panelEl?.focus();
+      else searchEl?.focus();
     });
     const onResize = (): void => place();
     const onWinKey = (e: KeyboardEvent): void => {
@@ -272,15 +285,22 @@
 <div
   bind:this={panelEl}
   class="mp-panel"
+  class:sheet
   role="dialog"
   aria-label="Model, reasoning and access"
   tabindex="-1"
-  style:top="{pos.top}px"
-  style:left="{pos.left}px"
-  style:max-height="{pos.maxH}px"
+  style:top={sheet ? null : `${pos.top}px`}
+  style:left={sheet ? null : `${pos.left}px`}
+  style:max-height={sheet ? null : `${pos.maxH}px`}
   data-testid="model-picker"
   onkeydown={onKey}
 >
+  {#if sheet}
+    <header class="mp-sheet-head">
+      <h2 class="mp-sheet-title">Model</h2>
+      <button type="button" class="icon-btn mp-sheet-close" aria-label="Close" title="Close" onclick={closePicker}><Icon name="x" size={14} /></button>
+    </header>
+  {/if}
   <nav class="mp-rail" aria-label="Providers">
     <button
       type="button"
@@ -291,7 +311,7 @@
       title="Favorite models"
       onclick={() => (view = '★')}
     >
-      <Icon name="star" size={14} />
+      <Icon name="star" size={14} /><span class="mp-prov-name">Favorites</span>
     </button>
     {#each providers as p (p)}
       {@const ready = providerReadiness(p)}
@@ -299,7 +319,12 @@
         ? `${harnessLabel(p)} — ${ready.message}`
         : lockProvider && p !== provider
           ? `${harnessLabel(p)} — start a new thread to use it`
-          : harnessLabel(p)}
+          : home && p !== home
+            ? `Continue on ${harnessLabel(p)}`
+            : harnessLabel(p)}
+      {#if home && p !== home && providers[0] === home && providers[1] === p}
+        <hr class="mp-sep" aria-label="Continue with another provider" title="Continue with another provider" />
+      {/if}
       <button
         type="button"
         class="mp-prov"
@@ -312,10 +337,10 @@
         onclick={() => {
           view = p;
           showAll = false;
-          if (!lockProvider && p !== provider) onprovider?.(p);
+          if (!lockProvider && !home && p !== provider) onprovider?.(p);
         }}
       >
-        <ProviderIcon provider={p} size={16} />
+        <ProviderIcon provider={p} size={16} /><span class="mp-prov-name">{harnessLabel(p)}</span>
       </button>
     {/each}
   </nav>
@@ -326,6 +351,11 @@
         <h3 class="mp-provname" data-testid="model-picker-provider-name">
           {#if view === '★'}<Icon name="star" size={13} />Favorite models{:else}<ProviderIcon provider={view} size={14} />{harnessLabel(view)}{/if}
         </h3>
+        {#if home && view !== home && view !== '★'}
+          <p class="mp-switch" data-testid="model-picker-switch-hint">
+            Continue with another provider: pick a model and your next message continues on {harnessLabel(view)}, with this thread’s history.
+          </p>
+        {/if}
         <div class="mp-search">
           <Icon name="search" size={13} />
           <input
@@ -443,7 +473,7 @@
     position: fixed;
     z-index: var(--z-popover);
     display: flex;
-    inline-size: min(560px, calc(100vw - 16px));
+    inline-size: min(660px, calc(100vw - 16px));
     overflow: hidden;
     border: 1px solid var(--border);
     border-radius: var(--radius-l);
@@ -461,11 +491,18 @@
     overflow-y: auto;
     flex-shrink: 0;
   }
+  /* Each provider by its glyph AND its name (a two-letter tile alone says nothing). */
   .mp-prov {
-    display: grid;
-    place-items: center;
-    inline-size: 32px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    inline-size: 100%;
+    min-inline-size: 120px;
     block-size: 32px;
+    padding-inline: 8px;
+    font: inherit;
+    font-size: var(--fs-s);
+    text-align: start;
     border: 0;
     border-radius: var(--radius-m);
     background: transparent;
@@ -482,6 +519,24 @@
   .mp-prov:disabled {
     opacity: var(--disabled-opacity);
     cursor: default;
+  }
+  .mp-prov-name {
+    min-inline-size: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .mp-sep {
+    inline-size: 20px;
+    margin: 4px auto;
+    border: 0;
+    border-block-start: 1px solid var(--border);
+  }
+  .mp-switch {
+    margin: 0;
+    padding: 0 8px 4px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
   }
   .mp-main {
     flex: 1;
@@ -604,6 +659,53 @@
   .mp-name {
     flex: 1;
     min-width: 0;
+  }
+  /* A phone: a bottom sheet with its title, the providers in one scrolling row. */
+  .mp-panel.sheet {
+    inset-inline: 0;
+    inset-block-end: 0;
+    inline-size: 100%;
+    max-block-size: 85dvh;
+    flex-direction: column;
+    border-end-start-radius: 0;
+    border-end-end-radius: 0;
+    padding-block-end: var(--safe-bottom);
+  }
+  .mp-sheet-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-block: 6px;
+    padding-inline: 14px 6px;
+    border-block-end: 1px solid var(--border);
+  }
+  .mp-sheet-title {
+    margin: 0;
+    font-size: var(--fs-l);
+    font-weight: 600;
+  }
+  .mp-sheet-close {
+    inline-size: calc(var(--hit-min) + 8px);
+    block-size: calc(var(--hit-min) + 8px);
+  }
+  .mp-panel.sheet .mp-rail {
+    flex-direction: row;
+    overflow-x: auto;
+    border-inline-end: 0;
+    border-block-end: 1px solid var(--border);
+  }
+  .mp-panel.sheet .mp-prov {
+    inline-size: auto;
+    min-inline-size: 0;
+    block-size: calc(var(--hit-min) + 8px);
+    flex-shrink: 0;
+  }
+  .mp-panel.sheet .mp-sep {
+    inline-size: 1px;
+    block-size: 20px;
+    margin: auto 4px;
+    border-block-start: 0;
+    border-inline-start: 1px solid var(--border);
   }
   /* A touch screen has no ⌘ key: no shortcut hints there. */
   @media (pointer: coarse) {

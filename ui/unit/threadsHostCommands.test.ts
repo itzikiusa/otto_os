@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
-import { availableSlash, runHostSlash, VIEW_SLASH } from '../src/modules/threads/runtime/hostCommands.ts';
+import { availableSlash, ottoConsumes, runHostSlash, slashSuggestions, VIEW_SLASH } from '../src/modules/threads/runtime/hostCommands.ts';
 
 const cmd = (name: string) => ({ name, description: name, source: 'interactive' as const });
 const ALL = ['model', 'diff', 'files', 'terminal', 'new', 'clear', 'fork', 'review', 'btw'].map(cmd);
@@ -53,4 +53,61 @@ test('the embed contract defaults: no focus, plain chrome; detach defaults to Th
   assert.deepEqual({ ...port.EMBED_DEFAULTS }, { focusOnMount: false, compact: false });
   port.openInThreads('T9');
   assert.deepEqual(went, ['threads/T9']);
+});
+
+test('the / popup: Otto’s commands, then the agent’s own under its heading; fuzzy across both', () => {
+  const noop = () => {};
+  const host = { openDiff: noop, newThread: noop };
+  const otto = availableSlash(ALL, host);
+  const agent = [
+    { name: 'review', description: 'the agent’s review' }, // Otto takes /review: left out
+    { name: 'compact', description: 'Clear history but keep a summary' },
+    { name: 'frontend:component', description: 'Make a component', hint: '<name>' },
+    { name: 'diff', description: 'agent diff' }, // Otto opens the diff here
+    { name: 'model', description: 'the agent’s own model picker' }, // Otto does not take it in a thread
+  ];
+  const all = slashSuggestions('/', otto, agent, 'Claude', host);
+  assert.deepEqual(all.map((c) => `${c.group}:${c.name}`), [
+    'Otto:diff', 'Otto:new', 'Otto:clear', 'Otto:fork', 'Otto:review',
+    'Claude commands:compact', 'Claude commands:frontend:component', 'Claude commands:model',
+  ]);
+  assert.equal(all.find((c) => c.name === 'frontend:component')?.hint, '<name>');
+  assert.equal(all.find((c) => c.name === 'compact')?.source, 'agent');
+  // Prefix before substring before letters-in-order, in each group.
+  assert.deepEqual(names(slashSuggestions('/co', otto, agent, 'Claude', host)), ['compact', 'frontend:component']);
+  assert.deepEqual(names(slashSuggestions('/fc', otto, agent, 'Claude', host)), ['frontend:component']);
+  assert.deepEqual(names(slashSuggestions('/re', otto, agent, 'Claude', host)), ['review', 'frontend:component']);
+  // No agent commands (or none left): Otto's list alone, no heading.
+  assert.deepEqual(slashSuggestions('/', otto, [], 'Claude', host).map((c) => c.group), otto.map(() => undefined));
+  assert.equal(slashSuggestions('/rev', otto, [{ name: 'review' }], 'Codex', host).every((c) => !c.group), true);
+  // Not a lone /word: nothing.
+  assert.deepEqual(slashSuggestions('/compact now', otto, agent, 'Claude', host), []);
+  assert.deepEqual(slashSuggestions('hi', otto, agent, 'Claude', host), []);
+});
+
+test('what Otto takes itself depends on the host', () => {
+  assert.equal(ottoConsumes('review', undefined), true);
+  assert.equal(ottoConsumes('clear', undefined), true);
+  assert.equal(ottoConsumes('diff', undefined), false);
+  assert.equal(ottoConsumes('diff', { openDiff: () => {} }), true);
+  assert.equal(ottoConsumes('changes', { openDiff: () => {} }), true);
+  assert.equal(ottoConsumes('compact', { openDiff: () => {} }), false);
+});
+
+test('the slash list is built once per commands change and narrows as you type', () => {
+  const otto = [{ name: 'diff', description: 'd', source: 'builtin' }] as never[];
+  const agent = Array.from({ length: 235 }, (_, i) => ({ name: `cmd-${i}`, description: '' })) as never[];
+  const a = slashSuggestions('/cmd-1', otto, agent, 'Grok', undefined);
+  assert.equal(a[0].name, 'cmd-1'); // prefix first, then inside, then letters in order
+  assert.equal(a.length, 132);
+  // The same query (a re-render) returns the same array: the popup keeps its rows.
+  assert.equal(slashSuggestions('/cmd-1', otto, agent, 'Grok', undefined), a);
+  // Typing on narrows the matches, best first, grouped as before.
+  const b = slashSuggestions('/cmd-12', otto, agent, 'Grok', undefined);
+  assert.deepEqual(b.slice(0, 2).map((c) => c.name), ['cmd-12', 'cmd-120']);
+  assert.equal(b[0].group, 'Grok commands');
+  // Back to a shorter query: the whole list again.
+  assert.equal(slashSuggestions('/d', otto, agent, 'Grok', undefined)[0].name, 'diff');
+  // New commands (a new array): rebuilt.
+  assert.equal(slashSuggestions('/cmd-1', otto, [...agent], 'Grok', undefined).length, a.length);
 });

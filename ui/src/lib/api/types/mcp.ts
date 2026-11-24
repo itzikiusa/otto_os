@@ -55,7 +55,8 @@ export interface UpdateMcpServerReq {
 // `.mcp.json` config CRUD. The richer governed registry uses the DTOs below.
 // ---------------------------------------------------------------------------
 
-export type McpTransport = 'stdio' | 'http';
+/** `sse`: the legacy HTTP+SSE transport (protocol 2024-11-05), governed only. */
+export type McpTransport = 'stdio' | 'http' | 'sse';
 export type McpRiskLabel = 'read' | 'write' | 'dangerous' | 'unknown';
 export type McpInjectionRisk = 'low' | 'medium' | 'high';
 export type McpHealthStatus = 'unknown' | 'healthy' | 'unhealthy' | 'disabled';
@@ -680,4 +681,13 @@ export interface McpSessionAttach {
 /** `PATCH /workspaces/{wid}/mcp/session-attach`. */
 export interface UpdateMcpSessionAttachReq {
   enabled: boolean;
+}
+
+/** `GET /mcp/servers/{id}/oauth`: a remote server's sign-in. */
+export interface McpOAuthStatus {
+  signed_in: boolean;
+  /** A sign-in is waiting for the browser. */
+  pending: boolean;
+  error?: string;
+  auth_host?: string;
 }

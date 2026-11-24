@@ -102,20 +102,26 @@ test('an approval docks above the composer and ⌘↵ answers it from an empty c
   expect(d.y + d.height).toBeLessThanOrEqual(c.y + 1);
   expect(d.y).toBeGreaterThanOrEqual(s.y + s.height - 1);
   // One set of answers on screen; the timeline row is the record.
-  await expect(thread.getByRole('button', { name: 'Approve', exact: true })).toHaveCount(1);
+  await expect(thread.getByRole('button', { name: 'Allow once', exact: true })).toHaveCount(1);
   await expect(thread.locator('[data-item-type="command_execution"]').getByText('Waiting for your approval')).toBeVisible();
   // Stop steps back: the dock's Approve is the one primary action.
   await expect(thread.getByTestId('runtime-stop')).toHaveClass(/quiet/);
-  await expect(composer).toHaveAttribute('placeholder', 'Waiting for your approval above');
+  await expect(composer).toHaveAttribute('placeholder', 'Answer above, or type to send a message instead');
+  // One place: the timeline keeps a quiet line, no second box; the composer
+  // folds to one row and focus is on the dock's primary action.
+  await expect(thread.locator('.ra:not(.ra-docked)')).toHaveCount(0);
+  await expect(thread.getByTestId('runtime-approval-answer')).toContainText('Waiting for your approval');
+  await expect(composer).toHaveAttribute('rows', '1');
+  await expect(dock.getByTestId('runtime-dock-accept')).toBeFocused();
   // Desktop hints on the answers.
   await expect(dock.getByTestId('runtime-dock-accept')).toContainText(/⌘↵|Ctrl\+↵/);
-  await expect(dock.getByRole('button', { name: 'Approve', exact: true })).toBeVisible();
-  expect(await onTop(page, dock.getByRole('button', { name: 'Approve', exact: true }))).toBe(true);
+  await expect(dock.getByRole('button', { name: 'Allow once', exact: true })).toBeVisible();
+  expect(await onTop(page, dock.getByRole('button', { name: 'Allow once', exact: true }))).toBe(true);
   await shot(page, 'approval-dock');
 
   // Typing in the composer never answers it…
   await composer.fill('a thought');
-  await composer.press('ControlOrMeta+Enter');
+  await composer.press('Enter'); // queues (the default mid-turn delivery; ⌘↵ would steer)
   await expect(dock).toBeVisible();
   await expect(thread.getByTestId('runtime-queued')).toContainText('a thought');
   // … an empty composer's ⌘↵ does.

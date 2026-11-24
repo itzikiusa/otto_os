@@ -45,10 +45,10 @@
 use std::collections::HashMap;
 
 use otto_core::agent_runtime::{
-    ApprovalDecision, BackgroundTask, ProviderCommand, ProviderFailure, QuestionKind,
-    QuestionOption, RequestKind, RuntimeAccessMode, RuntimePromptReq, RuntimeProvider,
-    RuntimeQuestion, ThreadTokenUsage, TurnItemKind, TurnItemStatus, TurnTerminalStatus,
-    TurnTokenUsage,
+    ApprovalDecision, BackgroundTask, McpServerStatus, ProviderCommand, ProviderFailure,
+    QuestionKind, QuestionOption, RequestKind, RuntimeAccessMode, RuntimePromptReq,
+    RuntimeProvider, RuntimeQuestion, ThreadTokenUsage, TurnItemKind, TurnItemStatus,
+    TurnTerminalStatus, TurnTokenUsage,
 };
 use serde_json::{json, Value};
 
@@ -510,6 +510,7 @@ impl PiDriver {
                     required: true,
                     allow_empty: method == "editor",
                     allow_free_text: !select,
+                    open_url: None,
                     options,
                 };
                 self.dialogs.insert(
@@ -525,6 +526,7 @@ impl PiDriver {
                     title: Some(title),
                     questions: vec![question],
                     tool_item_id: None,
+                    for_person: false,
                 });
             }
             _ => {}
@@ -1322,10 +1324,12 @@ impl PiDriver {
                         .pointer("/data/sessionId")
                         .and_then(Value::as_str)
                         .map(str::to_string),
+                    // pi with no model available reports `unknown/unknown`.
                     model: v
                         .pointer("/data/model/provider")
                         .and_then(Value::as_str)
                         .zip(v.pointer("/data/model/id").and_then(Value::as_str))
+                        .filter(|(p, _)| *p != "unknown")
                         .map(|(p, m)| format!("{p}/{m}")),
                 });
             } else {
@@ -1348,11 +1352,21 @@ impl PiDriver {
                     .and_then(Value::as_str)
                     .unwrap_or("pi refused the prompt")
                     .to_string();
+                // pi 1.6 with no login and no API key: "No API key found for
+                // the selected model. Use /login …" (live 2026-11-24).
+                let (class, message) = if message.starts_with("No API key found") {
+                    (
+                        "auth",
+                        "pi has no signed-in provider \u{b7} run `pi` and /login (or set the provider's API key), then send again".to_string(),
+                    )
+                } else {
+                    ("provider_error", message)
+                };
                 self.finish(
                     step,
                     TurnTerminalStatus::Failed,
                     Some(ProviderFailure {
-                        class: "provider_error".into(),
+                        class: class.into(),
                         message,
                         code: None,
                         retryable: None,
@@ -1419,6 +1433,22 @@ impl StructuredDriver for PiDriver {
     /// `get_state` reports the session id (the resume key) and the model.
     fn start(&mut self, ctx: &LaunchContext) -> DriverStep {
         let mut step = DriverStep::default();
+        // The thread's server list says which servers this mode left out.
+        if !self.user_mcp.is_empty() {
+            use otto_core::agent_runtime::{McpServerSource as Src, McpServerState as St};
+            let why = "pi runs every tool without asking, so this access mode leaves your servers out (Full access keeps them)";
+            step.push(DriverEvent::McpServers {
+                servers: self
+                    .user_mcp
+                    .iter()
+                    .map(|n| {
+                        McpServerStatus::new(n.clone(), Src::Workspace, St::Unsupported)
+                            .because(why)
+                    })
+                    .collect(),
+                spawn: false,
+            });
+        }
         if ctx.resume.is_none() {
             self.tools.clear();
             self.subagent_order.clear();

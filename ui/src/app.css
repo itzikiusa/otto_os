@@ -19,12 +19,22 @@
      direction for logical padding. */
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
+  /* A page with a composer at the bottom raises the toast stack above it
+     (Threads: notices never cover the composer's model chip and Send). */
+  --toast-lift-page: 0px;
   --safe-left: env(safe-area-inset-left, 0px);
   --safe-right: env(safe-area-inset-right, 0px);
   --safe-start: var(--safe-left);
   --safe-end: var(--safe-right);
   /* The on-screen keyboard's height (lib/viewportFit.ts); 0 when closed. */
   --kb-h: 0px;
+}
+/* Threads (wider than a phone): toasts and Undo notices rise above the
+   composer, never onto its model chip or Send. */
+@media (min-width: 641px) {
+  :root:has(.th-page) {
+    --toast-lift-page: 150px;
+  }
 }
 :root[dir='rtl'] {
   --safe-start: var(--safe-right);
@@ -988,6 +998,15 @@ button.chip:focus-visible {
    grow vertically only — they sit 2 px apart). `:where()` keeps it at zero
    specificity, so a module that positions its own button (`position: absolute`
    close buttons, overlay controls) or uses ::after still wins. */
+/* A row whose long press opens its menu (lib/rowMenu.ts) is not text: the
+   press must not also select the word under the finger. */
+@media (pointer: coarse) {
+  [data-row-menu] {
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+}
 @media (pointer: coarse) {
   /* iOS Safari auto-zooms into any text input/textarea/select under 16px on
      focus and leaves the visual viewport zoomed & panned across subsequent
@@ -1108,5 +1127,38 @@ button.chip:focus-visible {
   .input-group:focus-within {
     outline: 2px solid Highlight;
     outline-offset: 1px;
+  }
+}
+
+/* Key hints are LTR glyph runs: an RTL page must not reorder ⌥⌘N. */
+kbd {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+/* Threads (ThreadsPage.svelte), moved here to keep that file under its line cap
+   (`html` keeps the specificity the scoped rules had). */
+/* A narrow phone (iPhone SE): the composer's foot stays ONE row — send /
+   stop, attach and the model chip (truncated, never below ~5 letters); the
+   access mode shows as its icon (its name stays in the label and the
+   menu) instead of wrapping both chips onto a row of their own. */
+@media (pointer: coarse) {
+  @container (max-inline-size: 420px) {
+    html .th-page .rt-foot { flex-wrap: nowrap; }
+    html .th-page .rt-foot .rt-grow { order: 0; flex-basis: auto; flex-wrap: nowrap; }
+    html .th-page .rt-foot .rt-agent { min-inline-size: 72px; }
+    html .th-page .rt-foot .ac:not(.static) > .ellipsis { display: none; }
+  }
+  /* 16px stops iOS zoom-on-focus that leaves the Threads header cut off. */
+  html .th-page :is(textarea, select, input:not([type='checkbox'], [type='radio'], [type='range'], [type='file'])) {
+    font-size: 16px !important; /* ui-guards: allow — 16px stops iOS zoom-on-focus */
+  }
+}
+/* Typing on a narrow phone (ThreadsPage kb-tight, one-row composer): the model
+   chip, context ring and save spinner step aside so the text keeps a usable
+   width (Full access, "+", Stop and the primary stay). */
+@container (max-inline-size: 420px) {
+  html .th-page.kb-tight .rt-foot :is(.rt-agent, [data-testid='runtime-context-meter'], .draft-status:not(:has(.attach-error))) {
+    display: none;
   }
 }

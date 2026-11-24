@@ -42,6 +42,9 @@ test('tool images retain text, enlarge with keyboard, survive reload and fit pho
     }
   }, workspace);
   await page.goto('/#/threads');
+  // /#/threads opens on the latest thread once any exists (a list page opens
+  // on an item; the list spans workspaces), so ask for the stage explicitly.
+  await page.getByTestId('threads-new-btn').click();
   const stage = page.getByTestId('new-thread-stage');
   await expect(stage).toBeVisible({ timeout: 30_000 });
   await stage.getByTestId('picker-agent').click();
@@ -49,7 +52,9 @@ test('tool images retain text, enlarge with keyboard, survive reload and fit pho
   await page.keyboard.press('Escape');
   await stage.getByTestId('new-thread-input').fill('tool image');
   await stage.getByTestId('new-thread-send-btn').click();
-  const row = page.locator('[data-item-type="dynamic_tool"]').filter({ hasText: 'preview.screenshot' });
+  // The row's label as a person reads it (toolWords): the raw "preview.screenshot"
+  // sits only in the live item's input, which a reload's compact snapshot omits.
+  const row = page.locator('[data-item-type="dynamic_tool"]').filter({ hasText: 'preview · screenshot' });
   await expect(row).toHaveCount(1, { timeout: 30_000 });
   await openFinishedWork(page);
   await expect(row).toBeVisible();
@@ -93,14 +98,16 @@ test('a tool image the daemon cannot serve shows an error line in its slot', asy
   test.skip(info.project.name !== 'desktop-browser', 'desktop-browser project only');
   await page.addInitScript((id) => localStorage.setItem('otto_workspace', id), workspace);
   await page.route('**/runtime-sessions/*/items/*/images/*', (route) => route.fulfill({ status: 404, body: 'gone' }));
-  await page.goto('/#/threads');
-  const stage = page.getByTestId('new-thread-stage');
-  await expect(stage).toBeVisible({ timeout: 30_000 });
-  await stage.getByTestId('picker-agent').click();
-  await page.getByTestId('model-picker-provider-codex').click();
-  await page.keyboard.press('Escape');
-  await stage.getByTestId('new-thread-input').fill('make image');
-  await stage.getByTestId('new-thread-send-btn').click();
+  // A thread of its own, opened by id: /#/threads would open on whichever
+  // thread is newest (another test's, in parallel), not on the stage.
+  const made = await ctx.post(`${base}/api/v1/workspaces/${workspace}/runtime-sessions`, { data: { provider: 'codex', cwd: dir, title: 'Image error' } });
+  expect(made.ok(), await made.text()).toBeTruthy();
+  const id = (await made.json()).id as string;
+  await page.goto(`/#/threads/${id}`);
+  const composer = page.getByTestId(`runtime-thread-${id}`).getByTestId('runtime-composer');
+  await expect(composer).toBeVisible({ timeout: 30_000 });
+  await composer.fill('make image');
+  await composer.press('Enter');
   const row = page.locator('[data-item-type="dynamic_tool"]');
   await expect(row).toHaveCount(1, { timeout: 30_000 });
   await openFinishedWork(page);

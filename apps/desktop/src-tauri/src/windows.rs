@@ -754,4 +754,33 @@ mod tests {
         assert!(perms.contains(&"core:window:allow-close"));
         assert!(perms.contains(&"core:window:allow-destroy"));
     }
+
+    /// Guard: `opener:allow-open-url` as a bare string only enables the
+    /// command — its URL scope is EMPTY, so `open_url` answers ForbiddenUrl
+    /// for every link and no external link in the app opens (terminal URLs,
+    /// PR links, markdown links all go through ui/src/lib/external.ts). The
+    /// grant must carry exactly the schemes `safeExternalUrl()` lets through.
+    #[test]
+    fn capability_scopes_open_url_to_web_and_mail_links() {
+        let raw = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/capabilities/default.json"
+        ))
+        .expect("capability file");
+        let cap: serde_json::Value = serde_json::from_slice(&raw).expect("valid json");
+        let grant = cap["permissions"]
+            .as_array()
+            .expect("permissions array")
+            .iter()
+            .find(|p| p["identifier"] == "opener:allow-open-url")
+            .expect("opener:allow-open-url must be granted WITH a url scope (object form)");
+        let mut allowed: Vec<&str> = grant["allow"]
+            .as_array()
+            .expect("allow list")
+            .iter()
+            .map(|e| e["url"].as_str().expect("url entry"))
+            .collect();
+        allowed.sort_unstable();
+        assert_eq!(allowed, ["http://*", "https://*", "mailto:*"]);
+    }
 }

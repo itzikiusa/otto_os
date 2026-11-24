@@ -7,13 +7,6 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 import type { Locator } from '@playwright/test';
 
 /** Relative luminance (0 dark … 1 light) of an element's computed background. */
-/** The project card lives in the toolbar's ⋯ › View (threadsPageMenu.ts). */
-async function toggleProjectCard(page: Page): Promise<void> {
-  await page.getByTestId('threads-thread-menu').click();
-  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'View' }).click();
-  await page.locator('.ctx-submenu').getByRole('menuitemcheckbox', { name: 'Project card' }).click();
-}
-
 async function bgLuminance(el: Locator): Promise<number> {
   return el.evaluate((node) => {
     const [r, g, b] = (getComputedStyle(node).backgroundColor.match(/[\d.]+/g) ?? ['0', '0', '0']).map(Number);
@@ -100,15 +93,15 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   await expect(approval).toContainText('Codex wants to run');
   await expect(approval).toContainText('make clean');
   await expect(thread.locator('[data-item-type="command_execution"]').getByText('Waiting for your approval')).toBeVisible();
-  await expect(thread.getByRole('button', { name: 'Approve', exact: true })).toHaveCount(1);
+  await expect(thread.getByRole('button', { name: 'Allow once', exact: true })).toHaveCount(1);
   await page.screenshot({ path: info.outputPath('runtime-approval-light.png'), animations: 'disabled' });
   // Dark: the secondary actions are dark buttons (once the theme transition settles).
   await page.emulateMedia({ colorScheme: 'dark' });
-  const decline = approval.getByRole('button', { name: 'Decline', exact: true });
+  const decline = approval.getByRole('button', { name: 'Deny', exact: true });
   await expect.poll(() => bgLuminance(decline)).toBeLessThan(0.35);
   await page.screenshot({ path: info.outputPath('runtime-approval-dark.png'), animations: 'disabled' });
   await page.emulateMedia({ colorScheme: 'light' });
-  await approval.getByRole('button', { name: 'Approve', exact: true }).click();
+  await approval.getByRole('button', { name: 'Allow once', exact: true }).click();
   await expect(approval).toHaveCount(0);
   const command = thread.locator('[data-item-type="command_execution"]').last();
   await expect(command).toBeVisible();
@@ -197,7 +190,7 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Close thread…' }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Close thread', exact: true }).click();
   const sidebar = page.getByTestId('threads-sidebar');
-  await sidebar.locator('.th-history').click();
+  await sidebar.getByTestId('threads-history-toggle').click();
   await sidebar.locator('[data-testid^="thread-history-"]', { hasText: 'Renamed runtime' }).getByRole('button').first().click();
   await expect(thread.getByTestId('runtime-closed')).toBeVisible();
   await thread.getByTestId('runtime-reopen').click();
@@ -214,10 +207,16 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   expect(created.ok(), await created.text()).toBeTruthy();
   const bgId = (await created.json()).id as string;
   expect((await ctx.post(`${base}/api/v1/runtime-sessions/${bgId}/prompt`, { data: { text: 'ask' } })).ok()).toBeTruthy();
-  const threadsNav = page.getByRole('button', { name: /^Threads ?, 1 waiting on you/ }).first();
+  // Other specs' threads wait on the same daemon, so the count is theirs too:
+  // the badge shows a count, and its source (the persisted waiting list the
+  // badge counts) holds THIS thread — before and after a reload.
+  const threadsNav = page.getByRole('button', { name: /^Threads ?, [1-9]\d* waiting on you/ }).first();
+  const waitingIds = () => page.evaluate(() => (JSON.parse(localStorage.getItem('otto_runtime_waiting') ?? '[]') as { id: string }[]).map((w) => w.id));
   await expect(threadsNav).toBeVisible({ timeout: 15_000 });
+  await expect.poll(waitingIds, { timeout: 15_000 }).toContain(bgId);
   await page.reload();
   await expect(threadsNav).toBeVisible({ timeout: 30_000 });
+  await expect.poll(waitingIds, { timeout: 30_000 }).toContain(bgId);
   await page.goto('/#/threads');
 
   // Phone width: the timeline and composer fit.
@@ -284,7 +283,9 @@ test('a Claude thread: background work, its own turn, a subagent card, reopen an
   await expect(card).toContainText('PR sweep', { timeout: 15_000 });
   await expect(thread.getByText("I'm waiting for the PR sweep to come back.")).toBeVisible();
   await expect(card).toHaveAttribute('data-status', 'running');
-  await expect(card).toContainText('Background');
+  // A subagent like any other: "Working", never "Background".
+  await expect(card).toContainText('Working');
+  await expect(card).not.toContainText('Background');
   await card.getByRole('button', { name: /PR sweep/ }).click();
   await expect(card).toContainText('Looking at PRs');
   await expectNoHorizontalOverflow(page);
@@ -346,7 +347,7 @@ test('a Claude thread: background work, its own turn, a subagent card, reopen an
 // withdrawn: "Withdrawn by Claude"), a failed tool shows its error, the user
 // message shows its attachments, and the access chip rides the next prompt.
 // ─────────────────────────────────────────────────────────────────────────────
-test('runtime polish: RTL, project card, grouped tools, folded approvals, access mode', async ({ page }, info) => {
+test('runtime polish: RTL, details card, grouped tools, folded approvals, access mode', async ({ page }, info) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const created = await ctx.post(`${base}/api/v1/workspaces/${wsId}/runtime-sessions`, {
     data: { provider: 'codex', cwd: fixtureDir, title: 'שיחה בעברית' },
@@ -430,7 +431,8 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
   await rowTitle.hover();
   const actions = rowTitle.locator('xpath=ancestor::*[contains(@class,"tr-row")][1]//*[contains(@class,"tr-actions")]');
   const [tb, ab] = [(await rowTitle.boundingBox())!, (await actions.boundingBox())!];
-  expect(tb.x + tb.width <= ab.x || ab.x + ab.width <= tb.x, 'row actions overlap the title').toBeTruthy();
+  const apart = tb.x + tb.width <= ab.x || ab.x + ab.width <= tb.x || tb.y + tb.height <= ab.y || ab.y + ab.height <= tb.y;
+  expect(apart, 'row actions overlap the title').toBeTruthy();
 
   // RTL: the bubble and the answer resolve right-to-left; code / #130 stay isolated LTR.
   const bubble = thread.locator('.rt-bubble');
@@ -455,15 +457,17 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
   await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog')).toHaveCount(0);
 
-  // The project card opens from the toolbar and covers no message.
-  await toggleProjectCard(page);
-  const card = page.getByTestId('threads-project-card');
-  await expectFullyInViewport(page, card, 'project card');
+  // Thread details float beside the conversation where a whole reading
+  // column is left, and cover no message (LTR and RTL).
+  await page.setViewportSize({ width: 1600, height: 900 });
+  const card = page.getByTestId('thread-details-card');
+  await expect(card).toBeVisible();
+  await expectFullyInViewport(page, card, 'details card');
   const cardBox = (await card.boundingBox())!;
   for (const el of [bubble, answer, thread.getByTestId('runtime-composer')]) {
     const b = (await el.boundingBox())!;
     const overlaps = b.x < cardBox.x + cardBox.width && cardBox.x < b.x + b.width && b.y < cardBox.y + cardBox.height && cardBox.y < b.y + b.height;
-    expect(overlaps, 'a message runs under the project card').toBe(false);
+    expect(overlaps, 'a message runs under the details card').toBe(false);
   }
   await page.screenshot({ path: info.outputPath('runtime-rtl-card-light.png'), animations: 'disabled' });
   await page.emulateMedia({ colorScheme: 'dark' });
@@ -474,8 +478,7 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
   await page.reload();
   await expect.poll(() => page.evaluate(() => document.documentElement.dir)).toBe('rtl');
   await expect(bubble).toBeVisible({ timeout: 30_000 });
-  await toggleProjectCard(page);
-  await expectFullyInViewport(page, card, 'project card (RTL)');
+  await expectFullyInViewport(page, card, 'details card (RTL)');
   const rtlCard = (await card.boundingBox())!;
   const rtlBubble = (await bubble.boundingBox())!;
   expect(rtlCard.x + rtlCard.width <= rtlBubble.x || rtlBubble.x + rtlBubble.width <= rtlCard.x).toBe(true);
@@ -486,43 +489,11 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
   await page.evaluate(() => localStorage.removeItem('otto_direction'));
   await page.reload();
   await expect(bubble).toBeVisible({ timeout: 30_000 });
-  await toggleProjectCard(page);
-  await expect(card).toBeVisible();
   // The user's window: a ~810 px centre column can't spare the card's width,
-  // so the card docks above the timeline instead of covering it (LTR + RTL).
+  // so it does not float there (it heads the right panel instead).
   await page.setViewportSize({ width: 1130, height: 900 });
-  for (const dir of ['ltr', 'rtl'] as const) {
-    if (dir === 'rtl') {
-      await page.evaluate(() => localStorage.setItem('otto_direction', 'rtl'));
-      await page.reload();
-      await expect(bubble).toBeVisible({ timeout: 30_000 });
-      await toggleProjectCard(page);
-    }
-    const centre = (await page.locator('.th-center-col').boundingBox())!;
-    expect(centre.width, 'centre column width').toBeGreaterThanOrEqual(800);
-    expect(centre.width, 'centre column width').toBeLessThanOrEqual(830);
-    await expectFullyInViewport(page, card, `project card (${dir}, narrow)`);
-    const c = (await card.boundingBox())!;
-    for (const el of [bubble, answer, thread.locator('.rt-work').first(), thread.getByTestId('runtime-composer')]) {
-      const b = (await el.boundingBox())!;
-      const overlaps = b.x < c.x + c.width && c.x < b.x + b.width && b.y < c.y + c.height && c.y < b.y + b.height;
-      expect(overlaps, `a message runs under the project card (${dir}, narrow)`).toBe(false);
-    }
-    await page.screenshot({ path: info.outputPath(`runtime-card-narrow-${dir}.png`), animations: 'disabled' });
-  }
-  await page.evaluate(() => localStorage.removeItem('otto_direction'));
+  await expect(card).toHaveCount(0);
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.reload();
-  await expect(bubble).toBeVisible({ timeout: 30_000 });
-  await toggleProjectCard(page);
-  await expect(card).toBeVisible();
-  // Outside click closes it (and Esc after reopening).
-  await thread.locator('.rt-col').click({ position: { x: 10, y: 10 } });
-  await expect(card).toHaveCount(0);
-  await toggleProjectCard(page);
-  await expect(card).toBeVisible();
-  await page.keyboard.press('Escape');
-  await expect(card).toHaveCount(0);
 
   // Parallel fetches group under one summary; the failed one shows its error;
   // the withdrawn approval reads as such on its tool's row (no shield row).
@@ -551,21 +522,27 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
   await thread.getByTestId('runtime-item-c2').getByTestId('runtime-approval-answer').click();
   await expect(dock.getByTestId('runtime-attention-count')).toHaveText('2 of 2');
   await expect(dock).toContainText('git log -1');
-  await dock.getByRole('button', { name: 'Approve', exact: true }).click();
+  await dock.getByRole('button', { name: 'Allow once', exact: true }).click();
   await thread.getByTestId('runtime-item-c1').getByTestId('runtime-approval-answer').click();
   await expect(dock).toContainText('git status');
-  await dock.getByRole('button', { name: 'Decline', exact: true }).click();
+  await dock.getByRole('button', { name: 'Deny', exact: true }).click();
   await expect.poll(() => answered.sort()).toEqual(['r4', 'r5']);
   await page.screenshot({ path: info.outputPath('runtime-polish-work-light.png'), animations: 'disabled' });
   await page.emulateMedia({ colorScheme: 'dark' });
   await page.screenshot({ path: info.outputPath('runtime-polish-work-dark.png'), animations: 'disabled' });
   await page.emulateMedia({ colorScheme: 'light' });
 
-  // Access chip: Full access asks once, warns, and rides the next prompt.
+  // (The mocked answers leave the requests pending: type first, so the
+  // composer unfolds from its one-row waiting state.)
+  await thread.getByTestId('runtime-composer').fill('שלום');
+  // Access: Full access asks once and rides the next prompt. The chip hides
+  // only for a calm default (Supervised / Auto-accept edits); Full access
+  // always shows it, in amber; "+" always offers the choice.
   const chip = thread.getByTestId('runtime-access');
-  // New threads start in Full access when agent_skip_permissions is on (the
-  // default), so step down to Supervised first — that direction never asks.
-  if (/Full access/.test((await chip.textContent()) ?? '')) {
+  if ((await chip.count()) === 0) {
+    await thread.getByTestId('runtime-plus').click();
+    await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Access: Supervised' }).click();
+  } else if (!(await chip.textContent())?.includes('Supervised')) {
     await chip.click();
     await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Supervised' }).click();
   }
@@ -576,7 +553,6 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
   await expect(dlg).toContainText('without asking');
   await dlg.getByRole('button', { name: 'Allow full access' }).click();
   await expect(chip).toContainText('Full access');
-  await expect(chip).toHaveClass(/full/);
   const sent = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith(`/runtime-sessions/${id}/prompt`));
   await page.route(`**/api/v1/runtime-sessions/${id}/prompt`, (r) => r.fulfill({ json: { turn_id: 't2', sequence: 1 } }));
   const composer = thread.getByTestId('runtime-composer');
@@ -584,8 +560,8 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
   await composer.press('Enter');
   expect(((await sent).postDataJSON() as { access_mode?: string }).access_mode).toBe('full-access');
   // The next switch back needs no confirm.
-  await chip.click();
-  await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Supervised' }).click();
+  await thread.getByTestId('runtime-plus').click();
+  await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Access: Supervised' }).click();
   await expect(chip).toContainText('Supervised');
   await expectNoHorizontalOverflow(page);
 });
@@ -828,4 +804,36 @@ test('threads composer typing and timeline scrolling stay lag-free with clamped 
     return el.scrollTop > 0;
   });
   expect(scrollOk).toBe(true);
+});
+
+test('a 4,000-token stream follows the bottom with at most one layout per frame', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const created = await ctx.post(`${base}/api/v1/workspaces/${wsId}/runtime-sessions`, { data: { provider: 'codex', cwd: fixtureDir, title: 'Layout per frame' } });
+  expect(created.ok(), await created.text()).toBeTruthy();
+  const { id } = (await created.json()) as { id: string };
+  await page.goto(`/#/threads/${id}`);
+  const thread = page.getByTestId(`runtime-thread-${id}`);
+  await expect(thread.getByTestId('runtime-composer')).toBeVisible({ timeout: 30_000 });
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Performance.enable');
+  const layouts = async (): Promise<number> => (await cdp.send('Performance.getMetrics')).metrics.find((m) => m.name === 'LayoutCount')!.value;
+  await page.evaluate(() => {
+    const w = window as unknown as { __frames: number; __counting: boolean };
+    w.__frames = 0;
+    w.__counting = true;
+    const tick = (): void => { if (!w.__counting) return; w.__frames++; requestAnimationFrame(tick); };
+    requestAnimationFrame(tick);
+  });
+  const l0 = await layouts();
+  const sent = await ctx.post(`${base}/api/v1/runtime-sessions/${id}/prompt`, { data: { text: 'stream:4000:3' } });
+  expect(sent.ok(), await sent.text()).toBeTruthy();
+  await expect(thread.getByText('c3999', { exact: false }).last()).toBeVisible({ timeout: 120_000 });
+  const forced = (await layouts()) - l0;
+  const frames = await page.evaluate(() => { const w = window as unknown as { __frames: number; __counting: boolean }; w.__counting = false; return w.__frames; });
+  // A layout per frame is the browser's own; more means something read
+  // layout between events (the follow used to, once per streamed event).
+  expect(forced, `${forced} layouts over ${frames} frames`).toBeLessThanOrEqual(frames + 10);
+  // Still following: the end of the answer is in view.
+  const scroller = thread.locator('.rt-scroll');
+  await expect.poll(() => scroller.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeLessThan(40);
 });

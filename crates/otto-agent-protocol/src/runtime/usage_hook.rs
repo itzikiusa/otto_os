@@ -15,6 +15,8 @@ use otto_core::agent_runtime::{ProviderTurn, RuntimeSession};
 
 use super::{AgentRuntime, Inner, State};
 
+pub mod resume_at;
+
 impl AgentRuntime {
     /// Wire the daemon's usage store (once; a later call is ignored). Until
     /// then — and in tests that never call it — settled turns record nothing.

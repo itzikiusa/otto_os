@@ -44,3 +44,15 @@ export function questionOutcome(request: RuntimeRequest): string {
     default: return 'Needs your answer';
   }
 }
+
+/** The page a url-mode elicitation may open: only a question Otto's driver
+ *  marked (`open_url`), only when the person chose its `open` option, and
+ *  exactly that URL. A question id alone (agents choose ids) never opens one. */
+export function urlToOpen(questions: readonly RuntimeQuestion[], answers: readonly QuestionAnswer[]): string | null {
+  for (const q of questions) {
+    if (!q.open_url) continue;
+    const a = answers.find((x) => x.question_id === q.id);
+    if (a?.type === 'single' && a.value === 'open') return q.open_url;
+  }
+  return null;
+}

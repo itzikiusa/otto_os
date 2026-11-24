@@ -45,10 +45,16 @@ struct TestHost {
     prepared: Mutex<Vec<LaunchSpec>>,
     events: Mutex<Vec<Arc<RuntimeEvent>>>,
     notify: tokio::sync::Notify,
+    /// Teach delegation (the daemon host does; most tests keep prompts plain).
+    teaches: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait::async_trait]
 impl RuntimeHost for TestHost {
+    fn teaches_delegation(&self) -> bool {
+        self.teaches.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     async fn workspace(&self, id: &Id) -> Result<Workspace> {
         Ok(Workspace {
             id: id.clone(),
@@ -101,6 +107,7 @@ impl TestHost {
             prepared: Mutex::default(),
             events: Mutex::default(),
             notify: tokio::sync::Notify::new(),
+            teaches: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -1598,6 +1605,52 @@ async fn daemon_threads_carry_meta_and_report_their_latest_reply() {
     assert!(parsed.meta.is_none());
 }
 
+/// One Stop for the family: the thread's subagent's hanging turn ends, and
+/// its "stopped" reply does not wake the thread again.
+#[tokio::test]
+async fn family_stop_ends_a_subagents_turn_without_waking_the_parent() {
+    use otto_core::agent_runtime::OpenPeerReq;
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let lead = create(&rt, cwd).await;
+    let kid = rt
+        .open_peer(
+            &lead.id,
+            OpenPeerReq {
+                provider: RuntimeProvider::Gemini,
+                prompt: Some("hang".into()),
+                title: Some("worker".into()),
+                model: None,
+                effort: None,
+                cwd: None,
+                meta: None,
+            },
+        )
+        .await
+        .unwrap();
+    let busy = rt
+        .peer_reply(&lead.id, &kid.id, Duration::from_millis(300))
+        .await
+        .unwrap();
+    assert!(busy.busy, "the subagent's turn hangs");
+    let r = rt.stop_family(&lead.id, false).await.unwrap();
+    assert_eq!(r.subagents, 1);
+    assert_eq!(r.turns, 1, "{r:?}");
+    let after = rt.peer_reply(&lead.id, &kid.id, WAIT).await.unwrap();
+    assert!(!after.busy);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let lead_reply = rt.latest_reply(&lead.id, WAIT).await.unwrap();
+    assert!(
+        lead_reply.text.is_empty(),
+        "the lead was not woken: {}",
+        lead_reply.text
+    );
+    assert!(lead_reply.turn_status.is_none());
+}
+
 /// Linked threads: a thread opens another (same owner/workspace/cwd/access,
 /// grouped under the root), messages it with a framed prompt, and reads its
 /// reply; an unrelated thread is not reachable.
@@ -1631,7 +1684,6 @@ async fn linked_threads_open_message_and_read_within_their_group() {
     // The opening prompt ran, framed with the opener.
     let first = rt.peer_reply(&lead.id, &worker.id, WAIT).await.unwrap();
     assert!(!first.busy);
-    assert!(first.text.contains("Opened by thread"), "{}", first.text);
     assert!(first.text.contains("you are my worker"), "{}", first.text);
 
     let ids = |v: Vec<otto_core::agent_runtime::PeerInfo>| {
@@ -1655,7 +1707,7 @@ async fn linked_threads_open_message_and_read_within_their_group() {
         e.session_id == lead.id
             && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
                 if matches!(&turn_item.kind, TurnItemKind::UserMessage { text, .. }
-                    if text.starts_with("[Reply from thread \"worker\"")))
+                    if text.starts_with("[Reply from subagent \"worker\"")))
     })
     .await;
     let woke = rt.latest_reply(&lead.id, WAIT).await.unwrap();
@@ -1712,8 +1764,139 @@ async fn linked_threads_open_message_and_read_within_their_group() {
 
 /// A person asks other agents from a thread: the children are linked to it,
 /// get the message as typed (no "Opened by" frame), the parent's timeline
-/// names them and notes each finished turn — and the parent's AGENT is not
-/// woken (a person asked, a person reads).
+/// names them and notes each finished turn — and with "answer to me only"
+/// the parent's AGENT is not woken (a person asked, a person reads).
+/// A subagent's QUESTION wakes the agent that delegated it, which answers it
+/// with `otto.thread_answer`; its APPROVAL never wakes that agent (the person
+/// answers it in the parent's dock).
+#[tokio::test]
+async fn a_subagents_question_goes_to_the_parent_agent_and_its_approval_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let lead = create(&rt, cwd).await;
+    let mut asks = worker_req("asks", Some("question form"));
+    asks.provider = RuntimeProvider::Codex;
+    let kid = rt.open_peer(&lead.id, asks).await.unwrap();
+    let woke = host
+        .wait(|e| {
+            e.session_id == lead.id
+                && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+                    if matches!(&turn_item.kind, TurnItemKind::UserMessage { text, .. }
+                        if text.starts_with("[Question from subagent \"asks\"")))
+        })
+        .await;
+    let RuntimeEventBody::TurnItemUpdated { turn_item } = &woke.body else {
+        unreachable!()
+    };
+    let TurnItemKind::UserMessage { text, .. } = &turn_item.kind else {
+        unreachable!()
+    };
+    assert!(text.contains("Which approach should I use?"), "{text}");
+    let request = text
+        .split("request_id ")
+        .nth(1)
+        .and_then(|s| s.split(')').next())
+        .unwrap()
+        .to_string();
+    // Only the thread that delegated it answers.
+    let other = create(&rt, cwd).await;
+    assert!(rt
+        .answer_child(&other.id, &kid.id, &request, Vec::new())
+        .await
+        .is_err());
+    use otto_core::agent_runtime::QuestionAnswer;
+    rt.answer_child(
+        &lead.id,
+        &kid.id,
+        &request,
+        vec![
+            QuestionAnswer::Single {
+                question_id: "strategy_native".into(),
+                value: "Careful".into(),
+            },
+            QuestionAnswer::Text {
+                question_id: "note_native".into(),
+                text: "keep it small".into(),
+            },
+        ],
+    )
+    .await
+    .unwrap();
+    let answered = rt.latest_reply(&kid.id, WAIT).await.unwrap();
+    assert!(
+        answered.text.contains("question answers"),
+        "{}",
+        answered.text
+    );
+
+    // An approval is the person's: the lead's agent hears nothing of it.
+    let mut needs = worker_req("needs approval", Some("ask"));
+    needs.provider = RuntimeProvider::Gemini;
+    let gated = rt.open_peer(&lead.id, needs).await.unwrap();
+    host.wait(|e| {
+        e.session_id == gated.id
+            && matches!(&e.body, RuntimeEventBody::RuntimeRequestUpdated { .. })
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(user_texts(&host)
+        .iter()
+        .all(|t| !t.starts_with("[Question from subagent \"needs approval\"")));
+}
+
+/// "Delegate to…" by default: the subagent gets the task under its header
+/// with the conversation so far, and its answer wakes the thread's agent.
+#[tokio::test]
+async fn a_person_delegates_and_the_answer_returns_to_the_threads_agent() {
+    use otto_core::agent_runtime::{AskChildReq, AskChildTarget};
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let lead = create(&rt, cwd).await;
+    rt.prompt(&lead.id, "we use postgres 16").await.unwrap();
+    host.wait(is_terminal).await;
+    let kids = rt
+        .ask_children(
+            &lead.id,
+            AskChildReq {
+                prompt: "Which index helps?".into(),
+                targets: vec![AskChildTarget {
+                    provider: RuntimeProvider::Gemini,
+                    provider_slug: None,
+                    model: None,
+                    effort: None,
+                }],
+                ..AskChildReq::default()
+            },
+        )
+        .await
+        .unwrap();
+    let kid = &kids[0];
+    assert_eq!(
+        kid.meta.as_ref().unwrap()["child_of"],
+        serde_json::json!({"id": lead.id, "by": "agent"})
+    );
+    let reply = rt.latest_reply(&kid.id, WAIT).await.unwrap();
+    assert!(reply.text.contains("Which index helps?"), "{}", reply.text);
+    assert!(
+        reply.text.contains("Person: we use postgres 16"),
+        "{}",
+        reply.text
+    );
+    host.wait(|e| {
+        e.session_id == lead.id
+            && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+                if matches!(&turn_item.kind, TurnItemKind::UserMessage { text, .. }
+                    if text.starts_with("[Reply from subagent")))
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn a_person_asks_other_agents_from_a_thread() {
     use otto_core::agent_runtime::{AskChildReq, AskChildTarget};
@@ -1734,6 +1917,7 @@ async fn a_person_asks_other_agents_from_a_thread() {
         .ask_children(
             &lead.id,
             AskChildReq {
+                to_me_only: true,
                 prompt: "check it".into(),
                 targets: vec![target(RuntimeProvider::Gemini)],
                 access_mode: Some(RuntimeAccessMode::FullAccess),
@@ -1748,6 +1932,7 @@ async fn a_person_asks_other_agents_from_a_thread() {
         .ask_children(
             &lead.id,
             AskChildReq {
+                to_me_only: true,
                 prompt: "Why does CI fail?".into(),
                 targets: vec![
                     target(RuntimeProvider::Gemini),
@@ -1795,13 +1980,14 @@ async fn a_person_asks_other_agents_from_a_thread() {
     // No wake for the lead's agent.
     assert!(user_texts(&host)
         .iter()
-        .all(|t| !t.starts_with("[Reply from thread")));
+        .all(|t| !t.starts_with("[Reply from subagent")));
 
     // Nothing to ask, or too many at once, is refused before anything starts.
     let none = rt
         .ask_children(
             &lead.id,
             AskChildReq {
+                to_me_only: true,
                 prompt: " ".into(),
                 targets: vec![target(RuntimeProvider::Gemini)],
                 ..AskChildReq::default()
@@ -1814,6 +2000,7 @@ async fn a_person_asks_other_agents_from_a_thread() {
         .ask_children(
             &lead.id,
             AskChildReq {
+                to_me_only: true,
                 prompt: "x".into(),
                 targets: (0..5).map(|_| target(RuntimeProvider::Gemini)).collect(),
                 ..AskChildReq::default()
@@ -2142,7 +2329,7 @@ async fn lead_with_queued_replies(
     let q = queue_texts(&host, &lead.id).unwrap();
     for (title, text) in workers.iter().zip(&q) {
         assert!(
-            text.starts_with(&format!("[Reply from thread \"{title}\"")),
+            text.starts_with(&format!("[Reply from subagent \"{title}\"")),
             "{q:?}"
         );
     }
@@ -2179,7 +2366,7 @@ async fn restart_does_not_respawn_a_parent_for_a_queued_child_reply() {
     assert_eq!(snapshot.queued_prompts.len(), 1, "the reply still waits");
     assert!(snapshot.queued_prompts[0]
         .text
-        .starts_with("[Reply from thread \"worker\""));
+        .starts_with("[Reply from subagent \"worker\""));
     assert!(user_texts(&host2).is_empty(), "nothing was sent");
 }
 
@@ -2199,7 +2386,7 @@ async fn a_person_queued_message_still_resumes_after_restart() {
     let sent = user_texts(&host2);
     assert_eq!(sent.len(), 2, "{sent:?}");
     assert!(
-        sent[0].starts_with("[Reply from thread \"worker\""),
+        sent[0].starts_with("[Reply from subagent \"worker\""),
         "{sent:?}"
     );
     assert_eq!(sent[1], "later");
@@ -2230,15 +2417,14 @@ async fn queued_child_replies_are_delivered_when_the_parent_is_revived() {
     rt2.recover().await.unwrap();
     assert!(host2.prepared.lock().unwrap().is_empty());
     rt2.reopen(&lead.id).await.unwrap();
-    host2.wait_n(is_terminal, 2).await;
+    host2.wait_n(is_terminal, 1).await;
+    // Both replies wake the agent once (batched).
     let sent = user_texts(&host2);
-    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].starts_with("2 subagents finished."), "{sent:?}");
     assert!(
-        sent[0].starts_with("[Reply from thread \"worker 1\""),
-        "{sent:?}"
-    );
-    assert!(
-        sent[1].starts_with("[Reply from thread \"worker 2\""),
+        sent[0].contains("[Reply from subagent \"worker 1\"")
+            && sent[0].contains("[Reply from subagent \"worker 2\""),
         "{sent:?}"
     );
     host2
@@ -2376,7 +2562,7 @@ async fn a_child_interrupted_by_restart_reports_to_its_parent() {
     );
     let q = queue_texts(&host2, &lead.id).expect("a reply was queued");
     assert_eq!(q.len(), 1, "{q:?}");
-    assert!(q[0].starts_with("[Reply from thread \"worker\""), "{q:?}");
+    assert!(q[0].starts_with("[Reply from subagent \"worker\""), "{q:?}");
     assert!(
         q[0].contains("was interrupted when Otto restarted"),
         "{q:?}"
@@ -2847,7 +3033,7 @@ async fn fresh_context_keeps_history_and_changes_native_session_only_on_send() {
     let items = host.items();
     let boundaries: Vec<_> = items
         .iter()
-        .filter(|i| matches!(i.kind, TurnItemKind::SessionBoundary))
+        .filter(|i| matches!(i.kind, TurnItemKind::SessionBoundary { .. }))
         .collect();
     assert_eq!(boundaries.len(), 1);
     assert_eq!(boundaries[0].turn_id.as_ref(), Some(&sent.turn_id));
@@ -2900,7 +3086,7 @@ async fn fresh_context_refuses_pending_and_queued_work_and_scopes_reused_request
     assert!(!host
         .items()
         .iter()
-        .any(|i| matches!(i.kind, TurnItemKind::SessionBoundary)));
+        .any(|i| matches!(i.kind, TurnItemKind::SessionBoundary { .. })));
     rt.unqueue(&s.id, queued.queued_id.as_ref().unwrap())
         .await
         .unwrap();
@@ -2965,7 +3151,7 @@ async fn rejected_fresh_prompt_preserves_old_native_identity_without_a_boundary(
     assert!(!host
         .items()
         .iter()
-        .any(|i| matches!(i.kind, TurnItemKind::SessionBoundary)));
+        .any(|i| matches!(i.kind, TurnItemKind::SessionBoundary { .. })));
     rt.flush(&s.id).await;
     assert_eq!(
         AgentRuntimeRepo::new(pool.clone())
@@ -3110,7 +3296,7 @@ async fn fresh_context_failed_spawn_preserves_closed_history_and_resume_identity
     assert!(!refusing
         .items()
         .iter()
-        .any(|i| matches!(i.kind, TurnItemKind::SessionBoundary)));
+        .any(|i| matches!(i.kind, TurnItemKind::SessionBoundary { .. })));
     rt.flush(&s.id).await;
     let stored = AgentRuntimeRepo::new(pool.clone())
         .get(&s.id)
@@ -3304,7 +3490,7 @@ async fn fresh_context_waits_for_questions_and_old_cards_cannot_answer_new_proce
     assert_eq!(
         host.items()
             .iter()
-            .filter(|i| matches!(i.kind, TurnItemKind::SessionBoundary))
+            .filter(|i| matches!(i.kind, TurnItemKind::SessionBoundary { .. }))
             .count(),
         1
     );
@@ -3533,8 +3719,8 @@ async fn council_seats_form_one_read_only_group_and_the_judge_reads_every_answer
         }
     }
     // Two seats of one provider differ by number; model / effort when picked.
-    assert_eq!(seats[1].title, "which cache? · Seat 2 · Gemini");
-    assert_eq!(seats[2].title, "which cache? · Seat 3 · Codex Low");
+    assert_eq!(seats[1].title, "which cache? · 2 · Gemini");
+    assert_eq!(seats[2].title, "which cache? · 3 · Codex Low");
     let c3 = seats[2].council().unwrap();
     assert_eq!(
         (c3.provider.as_deref(), c3.model, c3.effort.as_deref()),
@@ -3563,18 +3749,18 @@ async fn council_seats_form_one_read_only_group_and_the_judge_reads_every_answer
         (council.id.clone(), 0, CouncilRole::Synthesis)
     );
     assert!(judge.meta_flag("read_only"));
-    assert_eq!(judge.title, "which cache? · synthesis");
+    assert_eq!(judge.title, "which cache? · compared");
     let verdict = rt.latest_reply(&judge.id, WAIT).await.unwrap();
     assert!(
-        !verdict.text.contains("Opened by thread"),
+        !verdict.text.contains("Subagent task from thread"),
         "{}",
         verdict.text
     );
     for want in [
         "## The question",
         "which cache?",
-        "## Seat 1 — gemini",
-        "## Seat 3 — codex",
+        "## Answer 1 — gemini",
+        "## Answer 3 — codex",
         "disagree",
     ] {
         assert!(verdict.text.contains(want), "{want}: {}", verdict.text);
@@ -3747,11 +3933,11 @@ async fn the_judge_reads_each_seat_s_latest_exchange() {
         .synthesize_council(&seats[0].id, gemini_judge())
         .await
         .unwrap();
-    assert_eq!(judge.title, "which cache? · synthesis");
+    assert_eq!(judge.title, "which cache? · compared");
     let verdict = rt.latest_reply(&judge.id, WAIT).await.unwrap();
     for want in [
-        "## Seat 1 — gemini\n\nAsked: which cache?",
-        "## Seat 2 — gemini\n\nAsked: only you",
+        "## Answer 1 — gemini\n\nAsked: which cache?",
+        "## Answer 2 — gemini\n\nAsked: only you",
     ] {
         assert!(verdict.text.contains(want), "{want}: {}", verdict.text);
     }
@@ -4868,4 +5054,670 @@ async fn usage_of_a_settled_acp_turn_is_recorded_once_and_claude_turns_are_left_
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(usage_outbox(&usage_dir).await.len(), 1);
     usage.shutdown().await;
+}
+
+/// otto-fake-agent's `tool` and `edit <path>` (for UI e2e on ACP threads):
+/// a tool that completes with no request, and a file change with its diff.
+#[tokio::test]
+async fn fake_acp_tool_without_a_request_and_a_file_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(root, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create(&rt, root).await;
+    rt.prompt(&s.id, "tool").await.unwrap();
+    host.wait(is_terminal).await;
+    assert!(!host
+        .all()
+        .iter()
+        .any(|e| e.body.type_name() == "runtime_request.updated"));
+    assert!(host
+        .items()
+        .iter()
+        .any(|i| i.status == TurnItemStatus::Completed
+            && i.title.as_deref() == Some("Read README.md")));
+    rt.prompt(&s.id, "edit src/a.rs").await.unwrap();
+    host.wait_n(is_terminal, 2).await;
+    let edit = host
+        .items()
+        .into_iter()
+        .find_map(|i| match i.kind {
+            TurnItemKind::FileChange {
+                file_name,
+                old_str,
+                new_str,
+                diff_str,
+            } => Some((file_name, old_str, new_str, diff_str)),
+            _ => None,
+        })
+        .expect("a file change");
+    assert!(edit.0.ends_with("src/a.rs"), "{edit:?}");
+    assert!(
+        edit.3.as_deref().is_some_and(|d| d.contains("+new line"))
+            || edit.2.as_deref() == Some("new line\n"),
+        "{edit:?}"
+    );
+    assert_eq!(last_assistant_text(&host), "edited");
+    rt.close(&s.id).await.unwrap();
+}
+
+/// Gap 5: the agent moves to another access mode itself
+/// (`current_mode_update`); the thread's access follows, noted once.
+#[tokio::test]
+async fn an_agent_initiated_mode_change_moves_the_threads_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(root, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, root, RuntimeProvider::Agy).await;
+    // Wider than the thread's access: Otto keeps it, sets the agent back
+    // and says so.
+    rt.prompt(&s.id, "agent-mode accept-edits").await.unwrap();
+    host.wait(is_terminal).await;
+    assert_eq!(
+        rt.get(&s.id).await.unwrap().access_mode,
+        RuntimeAccessMode::ApprovalRequired
+    );
+    assert!(host.items().iter().any(|i| matches!(&i.kind,
+        TurnItemKind::SystemNotice { message, .. } if message.contains("switched itself to accept-edits"))));
+    rt.prompt(&s.id, "mode").await.unwrap();
+    host.wait_n(is_terminal, 2).await;
+    assert_eq!(
+        last_assistant_text(&host),
+        "mode: default",
+        "the agent was set back"
+    );
+    rt.close(&s.id).await.unwrap();
+}
+
+/// Slice 4: `fs/*` and `terminal/*` served by Otto for a flavour that
+/// asks for them (grok's flags) — confined to the session folder, a write is
+/// a file-change row, a terminal streams into its tool row, and under
+/// approval-required each write / command waits for the person.
+#[tokio::test]
+async fn acp_client_fs_and_terminal_are_served_confined_and_asked_for() {
+    use otto_agent_protocol::acp::AcpFlavor;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap().display().to_string();
+    std::fs::write(dir.path().join("README.md"), "hello\n").unwrap();
+    let host = TestHost::new(&root, false);
+    let host2 = TestHost::new(&root, false);
+    let drivers: Arc<dyn DriverFactory> =
+        Arc::new(|p: RuntimeProvider| -> Option<Box<dyn StructuredDriver>> {
+            Some(Box::new(AcpDriver::with_flavor(
+                p,
+                AcpFlavor {
+                    program: fake_bin!("otto-fake-agent"),
+                    client_fs: true,
+                    client_terminal: true,
+                    ..AcpFlavor::default()
+                },
+            )))
+        });
+    let build = |host: &Arc<TestHost>, pool: DbPool| {
+        AgentRuntime::new(
+            AgentRuntimeRepo::new(pool),
+            Arc::clone(host) as Arc<dyn RuntimeHost>,
+            Arc::clone(&drivers),
+            RuntimeConfig {
+                attachments_dir: dir.path().join("a"),
+                ..RuntimeConfig::default()
+            },
+        )
+    };
+    let rt = build(&host, pool().await);
+    let rt2 = build(&host2, pool().await);
+    let make = |access| CreateRuntimeSessionReq {
+        provider: Some(RuntimeProvider::Grok),
+        cwd: Some(root.clone()),
+        access_mode: Some(access),
+        ..CreateRuntimeSessionReq::default()
+    };
+    let s = rt
+        .create(
+            &"u1".into(),
+            &"w1".into(),
+            make(RuntimeAccessMode::FullAccess),
+        )
+        .await
+        .unwrap();
+    let mut n = 0;
+    let mut say = |text: &'static str| {
+        n += 1;
+        let (rt, host, id, n) = (&rt, &host, s.id.clone(), n);
+        async move {
+            rt.prompt(&id, text).await.unwrap();
+            host.wait_n(is_terminal, n).await;
+            last_assistant_text(host)
+        }
+    };
+    assert_eq!(say("fs-read README.md").await, "read: hello\n");
+    assert_eq!(say("fs-write out.txt").await, "wrote");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("out.txt")).unwrap(),
+        "written\n"
+    );
+    assert!(host.items().iter().any(|i| matches!(&i.kind,
+        TurnItemKind::FileChange { file_name, .. } if file_name.ends_with("out.txt"))));
+    assert_eq!(
+        say("fs-read ../../../../../../etc/hosts").await,
+        "refused -32000"
+    );
+    assert_eq!(say("term echo otto-term").await, "term: otto-term");
+    let streamed: String = host
+        .all()
+        .iter()
+        .filter_map(|e| match &e.body {
+            RuntimeEventBody::CommandOutputDelta { chunk, .. } => Some(chunk.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        streamed, "otto-term\n",
+        "the output streamed into the tool row"
+    );
+    let row = host.items().into_iter().find_map(|i| match i.kind {
+        TurnItemKind::CommandExecution { output, .. } => output,
+        _ => None,
+    });
+    assert_eq!(row.as_deref(), Some("otto-term\n"));
+    rt.close(&s.id).await.unwrap();
+
+    // Supervised: the person decides each write and command.
+    let (rt, host) = (rt2, host2);
+    let s2 = rt
+        .create(
+            &"u1".into(),
+            &"w1".into(),
+            make(RuntimeAccessMode::ApprovalRequired),
+        )
+        .await
+        .unwrap();
+    let ask = |text: &'static str, decision| {
+        let (rt, host, id) = (&rt, &host, s2.id.clone());
+        async move {
+            let before = host
+                .all()
+                .iter()
+                .filter(|e| e.body.type_name() == "runtime_request.updated")
+                .count();
+            rt.prompt(&id, text).await.unwrap();
+            let req = host
+                .wait_n(is_type("runtime_request.updated"), before + 1)
+                .await;
+            let RuntimeEventBody::RuntimeRequestUpdated { runtime_request } = req.body else {
+                unreachable!()
+            };
+            rt.respond(&id, &runtime_request.id, decision)
+                .await
+                .unwrap();
+        }
+    };
+    let ends = |n| host.wait_n(is_terminal, n);
+    ask("fs-write denied.txt", ApprovalDecision::Decline).await;
+    ends(1).await;
+    assert_eq!(last_assistant_text(&host), "refused -32000");
+    assert!(!dir.path().join("denied.txt").exists());
+    ask("term echo approved", ApprovalDecision::Accept).await;
+    ends(2).await;
+    assert_eq!(last_assistant_text(&host), "term: approved");
+    rt.close(&s2.id).await.unwrap();
+}
+
+// ---- provider switch (continue the thread on another provider) -------------
+
+fn switch_to(text: &str, provider: &str) -> RuntimePromptReq {
+    RuntimePromptReq {
+        text: text.into(),
+        provider: Some(provider.into()),
+        ..Default::default()
+    }
+}
+
+/// The agent's answer in `turn` (the fakes echo the prompt they read).
+fn answer_of(host: &TestHost, turn: &Id) -> String {
+    host.items()
+        .into_iter()
+        .filter(|i| i.turn_id.as_ref() == Some(turn))
+        .filter_map(|i| match i.kind {
+            TurnItemKind::AssistantMessage { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+fn handoffs(host: &TestHost) -> Vec<otto_core::agent_runtime::ContextHandoff> {
+    host.items()
+        .into_iter()
+        .filter_map(|i| match i.kind {
+            TurnItemKind::SessionBoundary { handoff } => handoff,
+            _ => None,
+        })
+        .collect()
+}
+
+/// A provider switch keeps the thread's subagents linked, and the new
+/// provider's first turn carries the delegation rules again.
+#[tokio::test]
+async fn after_a_provider_switch_subagents_stay_linked_and_the_rules_are_sent_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    host.teaches
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Gemini).await;
+    let kid = rt
+        .open_peer(&s.id, worker_req("worker", Some("look")))
+        .await
+        .unwrap();
+    rt.latest_reply(&kid.id, WAIT).await.unwrap();
+    // The subagent's reply wakes this thread: let that turn end.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    rt.latest_reply(&s.id, WAIT).await.unwrap();
+    // Gemini → Codex: the first Codex turn carries the rules…
+    let t = rt
+        .prompt_with(&s.id, &switch_to("rules?", "codex"))
+        .await
+        .unwrap();
+    host.wait(|e| e.session_id == s.id && terminal(e).is_some() && matches!(&e.body, RuntimeEventBody::TurnTerminal { turn_id, .. } if turn_id == &t.turn_id)).await;
+    assert!(
+        answer_of(&host, &t.turn_id).contains("rules: yes"),
+        "{}",
+        answer_of(&host, &t.turn_id)
+    );
+    // …a later one does not.
+    let t2 = rt.prompt(&s.id, "rules?").await.unwrap();
+    host.wait(|e| matches!(&e.body, RuntimeEventBody::TurnTerminal { turn_id, .. } if turn_id == &t2.turn_id)).await;
+    assert!(answer_of(&host, &t2.turn_id).contains("rules: no"));
+    // The subagent is still this thread's.
+    let after = rt.get(&kid.id).await.unwrap();
+    assert_eq!(after.child_of().map(|o| o.id), Some(s.id.clone()));
+    assert!(rt
+        .peers(&s.id)
+        .await
+        .unwrap()
+        .iter()
+        .any(|p| p.id == kid.id));
+}
+
+#[tokio::test]
+async fn a_provider_switch_hands_the_history_over_in_both_directions() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    rt.prompt(&s.id, "first").await.unwrap();
+    host.wait_n(is_terminal, 1).await;
+    let claude_native = rt.get(&s.id).await.unwrap().native_thread_id;
+    // A pin set from another device survives the switch's meta write.
+    let pin = serde_json::json!({"thread_pinned": true});
+    rt.update_thread_meta(&s.id, pin.as_object().unwrap().clone())
+        .await
+        .unwrap();
+
+    // Claude → Codex: same thread, the answer shows Codex read the handoff.
+    let t2 = rt
+        .prompt_with(&s.id, &switch_to("second", "codex"))
+        .await
+        .unwrap();
+    host.wait_n(is_terminal, 2).await;
+    let now = rt.get(&s.id).await.unwrap();
+    assert_eq!(
+        (now.id.clone(), now.provider),
+        (s.id.clone(), RuntimeProvider::Codex)
+    );
+    assert_eq!(now.cwd, s.cwd);
+    let a2 = answer_of(&host, &t2.turn_id);
+    assert!(a2.contains("[Context handoff from Claude Code]"), "{a2}");
+    assert!(
+        a2.contains("Person: first") && a2.contains("Agent: echo: first"),
+        "{a2}"
+    );
+    assert!(
+        a2.ends_with("second"),
+        "the message follows the block whole: {a2}"
+    );
+    // The timeline keeps the person's own words.
+    assert!(host
+        .items()
+        .iter()
+        .any(|i| i.turn_id.as_ref() == Some(&t2.turn_id)
+            && matches!(&i.kind, TurnItemKind::UserMessage { text, .. } if text == "second")));
+
+    // Codex → Gemini (ACP), then back to Claude: each a fresh conversation.
+    let t3 = rt
+        .prompt_with(&s.id, &switch_to("third", "gemini"))
+        .await
+        .unwrap();
+    host.wait_n(is_terminal, 3).await;
+    let a3 = answer_of(&host, &t3.turn_id);
+    assert!(
+        a3.contains("[Context handoff from Codex]") && a3.contains("Person: second"),
+        "{a3}"
+    );
+    assert_eq!(
+        rt.get(&s.id).await.unwrap().provider,
+        RuntimeProvider::Gemini
+    );
+    let t4 = rt
+        .prompt_with(&s.id, &switch_to("fourth", "claude"))
+        .await
+        .unwrap();
+    host.wait_n(is_terminal, 4).await;
+    let a4 = answer_of(&host, &t4.turn_id);
+    assert!(
+        a4.contains("[Context handoff from Gemini]") && a4.contains("Person: first"),
+        "{a4}"
+    );
+    let back = rt.get(&s.id).await.unwrap();
+    assert_eq!(back.provider, RuntimeProvider::Claude);
+    assert_ne!(
+        back.native_thread_id, claude_native,
+        "switching back starts fresh"
+    );
+    let spawns = host.prepared.lock().unwrap().clone();
+    assert_eq!(spawns.len(), 4);
+    assert!(!spawns[3].args.iter().any(|a| a == "--resume"));
+
+    let h = handoffs(&host);
+    let pairs: Vec<_> = h
+        .iter()
+        .map(|h| (h.from_provider.as_str(), h.to_provider.as_str(), h.turns))
+        .collect();
+    assert_eq!(
+        pairs,
+        [
+            ("claude", "codex", 1),
+            ("codex", "gemini", 2),
+            ("gemini", "claude", 3)
+        ]
+    );
+    // Persisted: a restart runs the thread on the provider it switched to.
+    rt.flush(&s.id).await;
+    let stored = AgentRuntimeRepo::new(pool.clone())
+        .get(&s.id)
+        .await
+        .unwrap();
+    assert_eq!(stored.session.provider, RuntimeProvider::Claude);
+    assert_eq!(stored.session.native_thread_id, back.native_thread_id);
+    assert_eq!(
+        stored
+            .session
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("thread_pinned")),
+        Some(&serde_json::json!(true))
+    );
+    rt.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_switch_that_cannot_start_stays_on_the_provider_it_ran() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Codex).await;
+    rt.prompt(&s.id, "first").await.unwrap();
+    host.wait_n(is_terminal, 1).await;
+    let before = rt.get(&s.id).await.unwrap();
+
+    // Grok's fake is signed out (its handshake fails): the refusal says why.
+    match rt.prompt_with(&s.id, &switch_to("hi", "grok")).await {
+        Err(Error::Invalid(m)) => {
+            assert!(m.starts_with("the fresh agent could not start: "), "{m}")
+        }
+        other => panic!("{other:?}"),
+    }
+    // Claude's spawn is refused by the safety pipeline.
+    *host.refuse_provider.lock().unwrap() = Some(RuntimeProvider::Claude);
+    assert!(rt
+        .prompt_with(&s.id, &switch_to("hi", "claude"))
+        .await
+        .is_err());
+    // An unknown provider is refused before anything stops.
+    assert!(matches!(
+        rt.prompt_with(&s.id, &switch_to("hi", "nope")).await,
+        Err(Error::Invalid(_))
+    ));
+    let after = rt.get(&s.id).await.unwrap();
+    assert_eq!(after.provider, RuntimeProvider::Codex);
+    assert_eq!(after.native_thread_id, before.native_thread_id);
+    assert!(handoffs(&host).is_empty());
+    assert!(!host
+        .items()
+        .iter()
+        .any(|i| matches!(i.kind, TurnItemKind::SessionBoundary { .. })));
+    rt.flush(&s.id).await;
+    let stored = AgentRuntimeRepo::new(pool.clone())
+        .get(&s.id)
+        .await
+        .unwrap();
+    assert_eq!(stored.session.provider, RuntimeProvider::Codex);
+    // The next plain message resumes the Codex conversation.
+    *host.refuse_provider.lock().unwrap() = None;
+    rt.prompt(&s.id, "again").await.unwrap();
+    host.wait_n(is_terminal, 2).await;
+    assert_eq!(
+        rt.get(&s.id).await.unwrap().native_thread_id,
+        before.native_thread_id
+    );
+    rt.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_switch_waits_for_pending_work_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create(&rt, cwd).await;
+    rt.prompt(&s.id, "ask").await.unwrap();
+    host.wait(is_pending_request).await;
+    match rt.prompt_with(&s.id, &switch_to("hi", "codex")).await {
+        Err(Error::Conflict(m)) => assert!(m.contains("switching provider"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        rt.get(&s.id).await.unwrap().provider,
+        RuntimeProvider::Gemini
+    );
+    rt.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn every_structured_provider_takes_and_gives_a_handoff() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    rt.prompt(&s.id, "start").await.unwrap();
+    host.wait_n(is_terminal, 1).await;
+    let mut prev = "Claude Code";
+    let chain = [
+        ("codex", "Codex"),
+        ("agy", "Antigravity"),
+        ("muse", "Muse"),
+        ("opencode", "OpenCode"),
+        ("gemini", "Gemini"),
+        ("claude", "Claude Code"),
+    ];
+    for (n, (slug, name)) in chain.into_iter().enumerate() {
+        let req = RuntimePromptReq {
+            model: Some(format!("m-{slug}")),
+            ..switch_to(&format!("step {n}"), slug)
+        };
+        let t = rt.prompt_with(&s.id, &req).await.unwrap();
+        host.wait_n(is_terminal, n + 2).await;
+        let a = answer_of(&host, &t.turn_id);
+        assert!(
+            a.contains(&format!("[Context handoff from {prev}]")),
+            "{slug}: {a}"
+        );
+        assert!(a.contains("Person: start"), "{slug}: {a}");
+        let now = rt.get(&s.id).await.unwrap();
+        assert_eq!(now.provider_slug(), slug);
+        assert_eq!(now.model.as_deref(), Some(format!("m-{slug}").as_str()));
+        // Every client hears the provider change on the session entity.
+        let last = host
+            .all()
+            .into_iter()
+            .rev()
+            .find_map(|e| match e.body {
+                RuntimeEventBody::ProviderSessionUpdated { provider_session } => {
+                    Some(provider_session)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(last.provider_slug.as_deref(), Some(slug));
+        assert_eq!(last.provider, Some(now.provider));
+        prev = name;
+    }
+    assert_eq!(handoffs(&host).len(), chain.len());
+    rt.close(&s.id).await.unwrap();
+}
+
+/// Security 2 / review R3 + R4: a client terminal's commands die with the
+/// thread (close) and with its agent process (exit), its whole process group
+/// included; `wait_for_exit` answers when the shell exits even though a
+/// background child still holds the pipes.
+#[tokio::test]
+async fn client_terminals_die_with_the_thread_and_wait_ignores_background_pipes() {
+    use otto_agent_protocol::acp::AcpFlavor;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap().display().to_string();
+    let host = TestHost::new(&root, false);
+    let drivers: Arc<dyn DriverFactory> =
+        Arc::new(|p: RuntimeProvider| -> Option<Box<dyn StructuredDriver>> {
+            Some(Box::new(AcpDriver::with_flavor(
+                p,
+                AcpFlavor {
+                    program: fake_bin!("otto-fake-agent"),
+                    client_fs: true,
+                    client_terminal: true,
+                    ..AcpFlavor::default()
+                },
+            )))
+        });
+    let rt = AgentRuntime::new(
+        AgentRuntimeRepo::new(pool().await),
+        Arc::clone(&host) as Arc<dyn RuntimeHost>,
+        drivers,
+        RuntimeConfig {
+            attachments_dir: dir.path().join("a"),
+            ..RuntimeConfig::default()
+        },
+    );
+    let create = || async {
+        rt.create(
+            &"u1".into(),
+            &"w1".into(),
+            CreateRuntimeSessionReq {
+                provider: Some(RuntimeProvider::Grok),
+                cwd: Some(root.clone()),
+                access_mode: Some(RuntimeAccessMode::FullAccess),
+                ..CreateRuntimeSessionReq::default()
+            },
+        )
+        .await
+        .unwrap()
+    };
+    // A ticker in a subshell (a grandchild of the terminal's shell).
+    let ticker =
+        |name: &str| format!("term-keep (while true; do echo x >> {name}; sleep 0.1; done) & wait");
+    let alive = |name: &'static str| {
+        let path = dir.path().join(name);
+        async move {
+            let a = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            let b = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            b > a
+        }
+    };
+    let s = create().await;
+    rt.prompt(&s.id, &ticker("close.txt")).await.unwrap();
+    host.wait(is_terminal).await;
+    assert!(alive("close.txt").await, "the command runs");
+    rt.close(&s.id).await.unwrap();
+    assert!(!alive("close.txt").await, "closing the thread killed it");
+
+    let s2 = create().await;
+    rt.prompt(&s2.id, &ticker("exit.txt")).await.unwrap();
+    host.wait_n(is_terminal, 2).await;
+    assert!(alive("exit.txt").await);
+    rt.prompt(&s2.id, "crash").await.unwrap();
+    host.wait_n(is_terminal, 3).await;
+    assert!(!alive("exit.txt").await, "the agent's exit killed it");
+
+    // `sleep 30 &`: the shell exits at once; the turn must not wait 30 s.
+    let s3 = create().await;
+    let t0 = std::time::Instant::now();
+    rt.prompt(&s3.id, "term sleep 30 & echo bg-started")
+        .await
+        .unwrap();
+    host.wait_n(is_terminal, 4).await;
+    assert!(t0.elapsed() < Duration::from_secs(10), "{:?}", t0.elapsed());
+    assert_eq!(last_assistant_text(&host), "term: bg-started");
+    rt.close(&s3.id).await.unwrap();
+}
+
+/// Security 3: an elicitation (MCP server / ACP agent asking the person)
+/// inside a subagent never goes to the delegating agent, and
+/// `otto.thread_answer` refuses it; the person still answers it.
+#[tokio::test]
+async fn a_subagents_elicitation_is_for_the_person_not_the_parent_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let lead = create(&rt, cwd).await;
+    let mut asks = worker_req("signs in", Some("elicit-url https://example.com/login"));
+    asks.provider = RuntimeProvider::Gemini;
+    let kid = rt.open_peer(&lead.id, asks).await.unwrap();
+    let req = host
+        .wait(|e| {
+            e.session_id == kid.id
+                && matches!(&e.body, RuntimeEventBody::RuntimeRequestUpdated { runtime_request }
+                    if runtime_request.status == RuntimeRequestStatus::Pending)
+        })
+        .await;
+    let RuntimeEventBody::RuntimeRequestUpdated { runtime_request } = req.body else {
+        unreachable!()
+    };
+    assert!(runtime_request.for_person);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        !host.all().iter().any(|e| e.session_id == lead.id
+            && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+                if matches!(&turn_item.kind, TurnItemKind::UserMessage { text, .. }
+                    if text.starts_with("[Question from subagent")))),
+        "the lead's agent never hears of it"
+    );
+    use otto_core::agent_runtime::QuestionAnswer;
+    let open = vec![QuestionAnswer::Single {
+        question_id: "acp_url".into(),
+        value: "open".into(),
+    }];
+    assert!(matches!(
+        rt.answer_child(&lead.id, &kid.id, &runtime_request.id, open.clone())
+            .await,
+        Err(Error::Forbidden(_))
+    ));
+    rt.respond_question(&kid.id, &runtime_request.id, open)
+        .await
+        .unwrap();
+    let back = rt.latest_reply(&kid.id, WAIT).await.unwrap();
+    assert!(back.text.contains("url: accept"), "{}", back.text);
 }

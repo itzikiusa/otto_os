@@ -81,9 +81,9 @@ test('phone: an approval waits in the dock with its answers in view', async ({ p
   const { thread } = await openThread(page, 'Phone approval', 'ask');
   const dock = thread.getByTestId('runtime-attention');
   await expect(dock).toHaveAttribute('data-kind', 'approval', { timeout: 20_000 });
-  const approve = dock.getByRole('button', { name: 'Approve', exact: true });
-  await expect(thread.getByRole('button', { name: 'Approve', exact: true })).toHaveCount(1);
-  for (const name of ['Approve', 'Decline']) {
+  const approve = dock.getByRole('button', { name: 'Allow once', exact: true });
+  await expect(thread.getByRole('button', { name: 'Allow once', exact: true })).toHaveCount(1);
+  for (const name of ['Allow once', 'Deny']) {
     const btn = dock.getByRole('button', { name, exact: true });
     await expectFullyInViewport(page, btn, `${name} in the dock`);
     expect((await btn.boundingBox())!.height, `${name} tap target`).toBeGreaterThanOrEqual(43.9);

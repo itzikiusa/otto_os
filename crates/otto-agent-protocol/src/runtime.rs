@@ -15,13 +15,20 @@
 //! run on a per-session persister task fed in that order.
 
 mod admission;
+mod archive;
 mod attention;
 mod auto_close;
+mod child_question;
 mod children;
+mod client_calls;
 pub mod council;
+mod delegation;
+mod drain;
+mod family;
 pub use secret_request::{answer_secret_request, pending_secret_requests};
 mod descendants;
 mod fresh;
+mod handoff;
 mod held_adopt;
 mod held_proc;
 mod keep_awake;
@@ -29,12 +36,16 @@ mod loop_guard;
 mod outcome;
 mod paging;
 mod peers;
+mod provider_lists;
+mod reopen;
 mod request_ids;
 mod secret_request;
 mod selection;
+mod swarm_resume;
 mod task_stop;
 mod usage_hook;
 pub use admission::{HANDSHAKE_TIMEOUT, MAX_QUEUED_BYTES, MAX_QUEUED_PROMPTS};
+pub use archive::settle_archived_entity_json;
 pub use loop_guard::{AGENT_HOPS_MAX, PAUSED_ERROR, PAUSED_NOTICE, PAUSED_QUEUED};
 use request_ids::RequestIds;
 pub use selection::check_effort;
@@ -48,13 +59,13 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use dashmap::DashMap;
 use otto_core::agent_runtime::{
-    ApprovalDecision, Attachment, AttachmentKind, CancelReason, CreateRuntimeSessionReq,
-    PlanArtifact, PromptDelivery, ProviderCommand, ProviderFailure, ProviderSession,
-    ProviderSessionStatus, ProviderThread, ProviderTurn, ProviderTurnStatus, QueuedPrompt,
-    ResponseCapability, RuntimeEvent, RuntimeEventBody, RuntimePromptReq, RuntimePromptResp,
-    RuntimeReplay, RuntimeRequest, RuntimeRequestStatus, RuntimeSession, RuntimeSessionStatus,
-    RuntimeSnapshot, TurnItem, TurnItemKind, TurnItemStatus, TurnOrigin, TurnTerminalStatus,
-    TurnTokenUsage,
+    ApprovalDecision, Attachment, AttachmentKind, CancelReason, ContextHandoff,
+    CreateRuntimeSessionReq, McpServerStatus, PlanArtifact, PromptDelivery, ProviderCommand,
+    ProviderFailure, ProviderSession, ProviderSessionStatus, ProviderThread, ProviderTurn,
+    ProviderTurnStatus, QueuedPrompt, ResponseCapability, RuntimeEvent, RuntimeEventBody,
+    RuntimePromptReq, RuntimePromptResp, RuntimeProvider, RuntimeReplay, RuntimeRequest,
+    RuntimeRequestStatus, RuntimeSession, RuntimeSessionStatus, RuntimeSnapshot, TurnItem,
+    TurnItemKind, TurnItemStatus, TurnOrigin, TurnTerminalStatus, TurnTokenUsage,
 };
 use otto_core::{new_id, Error, Id, Result};
 use otto_state::{AgentRuntimeRepo, NewRuntimeSession, RawRuntimeEntityRow, RuntimeEntityRow};
@@ -64,7 +75,7 @@ use crate::driver::{
     item, ChildSignal, DriverEvent, DriverFactory, DriverStep, LaunchContext, StructuredDriver,
 };
 use crate::host::RuntimeHost;
-use crate::process::{spawn_child, ChildCommand, ChildControl, ChildMsg};
+use crate::process::{map_spawn_error, spawn_child, ChildCommand, ChildControl, ChildMsg};
 use crate::ring::{EventRing, RingLimits};
 
 /// T3 Code `THREAD_RESUME_MAX_REPLAY_EVENTS` / `…_ENCODED_BYTES`.
@@ -145,6 +156,7 @@ const K_REQUEST: &str = "runtime_request";
 const K_PLAN: &str = "plan";
 const K_QUEUE: &str = "queue";
 const K_COMMANDS: &str = "commands";
+const K_MCP: &str = "mcp_servers";
 
 /// A queued message as persisted: the whole prompt (its images / files
 /// too), so it goes out unchanged after a restart.
@@ -183,6 +195,8 @@ enum PersistOp {
     /// The agent's own name for the conversation (the title stays auto).
     Title(String),
     ClearNativeThreadId,
+    /// A provider switch took effect: the provider and its account slug.
+    Provider(RuntimeProvider, Option<String>),
     /// The thread's model / effort / access, in the order they took effect.
     Model(Option<String>),
     Effort(Option<String>),
@@ -212,6 +226,8 @@ pub(crate) struct Projection {
     queue: Vec<QueuedRecord>,
     /// The agent's own slash commands.
     commands: Vec<ProviderCommand>,
+    /// The MCP servers its agent has (`provider_lists`).
+    mcp_servers: Vec<McpServerStatus>,
     next_item_ordinal: u32,
     next_turn_ordinal: u32,
 }
@@ -265,6 +281,7 @@ impl Projection {
                 K_COMMANDS => {
                     p.commands = serde_json::from_str(s).unwrap_or_default();
                 }
+                K_MCP => p.mcp_servers = serde_json::from_str(s).unwrap_or_default(),
                 _ => {}
             }
         }
@@ -300,6 +317,7 @@ impl Projection {
             plans,
             queued_prompts: self.queue.iter().map(QueuedRecord::public).collect(),
             commands: self.commands.clone(),
+            mcp_servers: self.mcp_servers.clone(),
             has_older: false,
             oldest_turn_ordinal: None,
             older_turns: 0,
@@ -358,6 +376,10 @@ impl Projection {
             RuntimeEventBody::CommandsUpdated { commands } => {
                 self.commands = commands.clone();
                 Some(row(K_COMMANDS, "commands", json(commands)))
+            }
+            RuntimeEventBody::McpServersUpdated { mcp_servers } => {
+                self.mcp_servers = mcp_servers.clone();
+                Some(row(K_MCP, K_MCP, json(mcp_servers)))
             }
             // The queue's row (the whole prompts) is written by `emit_queue`.
             RuntimeEventBody::CommandOutputDelta { .. }
@@ -453,6 +475,8 @@ pub(super) struct State {
     pub(super) epoch: u64,
     /// Native identity is committed only after the first fresh prompt is accepted.
     pub(super) fresh_starting: bool,
+    /// A provider switch in flight: what its first prompt hands over (`fresh.rs`).
+    pub(super) handoff: Option<ContextHandoff>,
     ring: EventRing,
     pub(super) proj: Projection,
     pub(super) turn: Option<ActiveTurn>,
@@ -594,8 +618,8 @@ impl AgentRuntime {
     /// turn this cut off reports it to its parent (`children.rs`). Returns
     /// sessions touched.
     pub async fn recover(&self) -> Result<usize> {
-        self.recover_excluding(&std::collections::HashSet::new())
-            .await
+        let none = std::collections::HashSet::new();
+        Ok(self.arm_resumes(self.recover_excluding(&none).await?)) // + "Resume at reset"
     }
 
     /// Evict idle cached projections and reconcile non-live sessions in SQLite
@@ -752,6 +776,7 @@ impl AgentRuntime {
     /// stop), then wait for the queued DB writes. The next boot's
     /// [`Self::recover`] settles the turns they leave open.
     pub async fn shutdown(&self) {
+        client_calls::drop_all();
         let lives: Vec<Arc<Live>> = self
             .inner
             .live
@@ -814,6 +839,7 @@ impl AgentRuntime {
     /// processes first) and reconcile the persisted projection after a
     /// portable state-archive restore.
     pub async fn reset_for_restore(&self) -> Result<usize> {
+        client_calls::drop_all();
         let keys: Vec<Id> = self.inner.live.iter().map(|e| e.key().clone()).collect();
         let mut held_shutdowns = Vec::new();
         for id in keys {
@@ -1053,6 +1079,7 @@ impl AgentRuntime {
                     reserved: rec.seq_reserved,
                     epoch: 0,
                     fresh_starting: false,
+                    handoff: None,
                     ring: EventRing::new(self.inner.config.ring),
                     proj,
                     turn: None,
@@ -1201,7 +1228,8 @@ impl AgentRuntime {
                 .store(false, std::sync::atomic::Ordering::Release);
             st.epoch += 1;
             let epoch = st.epoch;
-            let step = driver.start(&ctx);
+            let spawn_mcp = self.inner.host.mcp_status(&session);
+            let step = provider_lists::with_spawn_mcp(driver.start(&ctx), spawn_mcp);
             st.proc = Some(Proc {
                 epoch,
                 request_ids: RequestIds::new(),
@@ -1258,6 +1286,7 @@ impl AgentRuntime {
     /// A prompt with an optional model / effort / access mode and inline
     /// images and files.
     pub async fn prompt_with(&self, id: &Id, req: &RuntimePromptReq) -> Result<RuntimePromptResp> {
+        self.cancel_resume(id).await; // new input (a switch, a fresh start) takes over
         let live = self.live(id).await?;
         let _prompt = live.prompt_lock.lock().await;
         otto_telemetry::context::measure_result(
@@ -1316,8 +1345,9 @@ impl AgentRuntime {
             }
             crate::http::drafts::validate_attachment_bytes(&file.mime, &file.data_base64)?;
         }
-        if req.fresh_context {
-            return self.prompt_fresh(id, live, req).await;
+        let switch = self.provider_switch(live, req)?;
+        if req.fresh_context || switch.is_some() {
+            return self.prompt_fresh(id, live, req, switch).await;
         }
         for _ in 0..8 {
             if !poll_driver_sideband(&self.inner, live, None).await {
@@ -1364,9 +1394,7 @@ impl AgentRuntime {
         let req = &self.apply_selection(&live, req).await?;
         self.spawn_resuming(id, &live).await?;
         if req.fresh_context && !self.fresh_process_ready(&live).await {
-            return Err(Error::Invalid(
-                "the fresh agent could not start — retry the message".into(),
-            ));
+            return Err(fresh::not_started(&live.lock()));
         }
         if !req.images.is_empty() || !req.files.is_empty() {
             let still_starting = live.lock().proj.session.as_ref().is_none_or(|p| {
@@ -1399,6 +1427,7 @@ impl AgentRuntime {
         let mut st = live.lock();
         check_can_prompt(&st)?;
         let turn_id = new_id();
+        let sent = delegation::for_driver(&self.inner, &st, req);
         let Some(proc) = st.proc.as_mut() else {
             // It died in its handshake (signed out, bad argv) before this
             // prompt reached it; the next prompt respawns.
@@ -1410,7 +1439,7 @@ impl AgentRuntime {
         };
         let step = proc
             .driver
-            .prompt(&turn_id, req)
+            .prompt(&turn_id, &sent)
             .map_err(|e| Error::Invalid(e.0))?;
         if req.fresh_context {
             self.commit_fresh(live, &mut st, &turn_id);
@@ -1632,67 +1661,6 @@ impl AgentRuntime {
         kick_queue(&self.inner, id);
     }
 
-    async fn drain_queue(&self, id: &Id) {
-        let Ok(live) = self.live(id).await else {
-            return;
-        };
-        let _one = live.drain_lock.lock().await;
-        let _prompt = live.prompt_lock.lock().await;
-        let next = {
-            let st = live.lock();
-            if st.session.status == RuntimeSessionStatus::Closed || st.turn.is_some() {
-                return;
-            }
-            // A child thread's reply never respawns a stopped agent: it waits
-            // for the person (their next message, or Revive). A queue with a
-            // person's message in it goes out in order.
-            // A message whose delivery failed waits for a person's retry.
-            let mut ready = st.proj.queue.iter().filter(|q| q.error.is_none());
-            if st.proc.is_none() && ready.clone().all(|q| q.wake.is_some()) {
-                return;
-            }
-            ready.next().cloned()
-        };
-        let Some(rec) = next else {
-            return;
-        };
-        let res = self.prompt_now(id, &live, &rec.req).await;
-        let mut st = live.lock();
-        let failed = res
-            .as_ref()
-            .is_err_and(|e| !matches!(e, Error::Conflict(m) if m == TURN_RUNNING));
-        match res {
-            // A turn started first: this one waits for its end.
-            Err(Error::Conflict(m)) if m == TURN_RUNNING => return,
-            Ok(_) => st.proj.queue.retain(|q| q.id != rec.id),
-            Err(e) => {
-                // Never lost: it stays queued, marked, for Retry / Edit.
-                if let Some(q) = st.proj.queue.iter_mut().find(|q| q.id == rec.id) {
-                    q.error = Some(e.to_string());
-                }
-                let mut n = item(
-                    new_id(),
-                    TurnItemStatus::Failed,
-                    None,
-                    TurnItemKind::SystemNotice {
-                        message: format!(
-                            "A queued message could not be sent: {e}. It is still queued — retry, edit or remove it."
-                        ),
-                        task_settlement: None,
-                    },
-                );
-                n.turn_id = None;
-                upsert_item(&self.inner, &live, &mut st, n);
-            }
-        }
-        emit_queue(&self.inner, &live, &mut st);
-        drop(st);
-        if failed {
-            // The ones behind it still go out (each failure is marked once).
-            self.kick_queue(id);
-        }
-    }
-
     /// The session's attachment folder.
     fn attachments(&self, id: &Id) -> PathBuf {
         self.inner.config.attachments_dir.join(id)
@@ -1825,6 +1793,7 @@ impl AgentRuntime {
 
     /// Interrupt the running turn. `false` when no turn was running.
     pub async fn interrupt(&self, id: &Id) -> Result<bool> {
+        self.cancel_resume(id).await; // Stop (a family Stop too) cancels "Resume at reset"
         let live = self.live(id).await?;
         Ok(interrupt_turn(&self.inner, &live))
     }
@@ -1993,108 +1962,6 @@ impl AgentRuntime {
         Ok(s)
     }
 
-    /// Revive a closed or dormant session: it takes prompts again and its agent is
-    /// respawned now, resuming the provider's own thread (`native_thread_id`).
-    /// A provider that cannot resume it (its process dies before it is
-    /// ready) gets a fresh thread instead and the timeline says so (a
-    /// `system_notice`). Its meta is kept. A live process is left alone.
-    /// What waits in its queue (a child thread's reply) then goes out.
-    pub async fn reopen(&self, id: &Id) -> Result<RuntimeSession> {
-        let live = self.live(id).await?;
-        let _prompt = live.prompt_lock.lock().await;
-        {
-            let mut st = live.lock();
-            if st.session.status == RuntimeSessionStatus::Closed {
-                st.session.status = RuntimeSessionStatus::Dormant;
-                // After the close's own write, in order.
-                let _ = live.persist.send(PersistOp::Opened);
-            } else if st.proc.is_some() {
-                return Ok(st.session.clone());
-            }
-            // A revive is activity: the idle release must not stop it again.
-            st.session.last_active_at = Utc::now();
-        }
-        self.flush(id).await;
-        self.spawn_resuming(id, &live).await?;
-        let (s, queued) = {
-            let st = live.lock();
-            (st.session.clone(), !st.proj.queue.is_empty())
-        };
-        // What waited for the person — a child thread's reply above all —
-        // goes out now, oldest first (after this call: the drain takes the
-        // prompt lock held here).
-        if queued {
-            self.kick_queue(id);
-        }
-        Ok(s)
-    }
-
-    /// Low-latency HTTP reopen: validates & spawns the CLI process immediately
-    /// (`< 30 ms`), returning the revived [`RuntimeSession`] without blocking
-    /// the HTTP caller for up to `start_wait` (20 s) on MCP/CLI boot. A
-    /// background task finishes the readiness check, fresh-thread fallback on
-    /// refused resume, and queued reply delivery.
-    pub async fn reopen_fast(&self, id: &Id) -> Result<RuntimeSession> {
-        let live = self.live(id).await?;
-        let (s, resume_key, need_bg_watch) = {
-            let _prompt = live.prompt_lock.lock().await;
-            {
-                let mut st = live.lock();
-                if st.session.status == RuntimeSessionStatus::Closed {
-                    st.session.status = RuntimeSessionStatus::Dormant;
-                    let _ = live.persist.send(PersistOp::Opened);
-                } else if st.proc.is_some() {
-                    return Ok(st.session.clone());
-                }
-                st.session.last_active_at = Utc::now();
-            }
-            self.flush(id).await;
-            self.ensure_process(&live).await?;
-            let st = live.lock();
-            let resume_key = st.session.native_thread_id.clone();
-            let need_bg = resume_key.is_some() || !st.proj.queue.is_empty();
-            (st.session.clone(), resume_key, need_bg)
-        };
-        if need_bg_watch {
-            let rt = self.clone();
-            let sid = id.clone();
-            let live_bg = Arc::clone(&live);
-            tokio::spawn(async move {
-                let started = resume_key.is_none() || rt.wait_started(&live_bg).await;
-                if !started {
-                    let _prompt = live_bg.prompt_lock.lock().await;
-                    let idle = {
-                        let st = live_bg.lock();
-                        st.proc.is_none() && st.turn.is_none() && st.starting == 0
-                    };
-                    if idle {
-                        if let Err(e) = rt.spawn_resuming(&sid, &live_bg).await {
-                            tracing::warn!(session = %sid, "background reopen_fast resume failed: {e}");
-                            let mut st = live_bg.lock();
-                            if st.proc.is_none() && st.turn.is_none() {
-                                set_session_status(
-                                    &rt.inner,
-                                    &live_bg,
-                                    &mut st,
-                                    ProviderSessionStatus::Error,
-                                    Some(e.to_string()),
-                                );
-                            }
-                        }
-                    }
-                }
-                let queued = {
-                    let st = live_bg.lock();
-                    !st.proj.queue.is_empty() && st.turn.is_none()
-                };
-                if queued {
-                    rt.kick_queue(&sid);
-                }
-            });
-        }
-        Ok(s)
-    }
-
     /// Fetch a single full (uncompacted) `TurnItem` by ID for lazy row expansion.
     pub async fn get_item(&self, id: &Id, item_id: &Id) -> Result<TurnItem> {
         let res = otto_telemetry::context::measure_result("threads.get_item", async {
@@ -2124,7 +1991,11 @@ impl AgentRuntime {
         }
         self.ensure_process(live).await?;
         let resume = live.lock().session.native_thread_id.clone();
-        if resume.is_none() || self.wait_started(live).await {
+        if resume.is_none() {
+            return Ok(());
+        }
+        if self.wait_started(live).await {
+            self.card_swarm_members(live).await;
             return Ok(());
         }
         // A refusal that does not say the conversation is gone may pass (a
@@ -2330,6 +2201,7 @@ fn close_locked(inner: &Arc<Inner>, live: &Arc<Live>, st: &mut State) -> Runtime
         return st.session.clone();
     }
     cancel_pending(inner, live, st, CancelReason::Closed);
+    client_calls::drop_session(&st.session.id);
     finish_turn(
         inner,
         live,
@@ -2494,6 +2366,11 @@ fn kick_queue(inner: &Inner, id: &Id) {
 fn adopt_title(inner: &Inner, live: &Live, st: &mut State, title: &str) {
     let title: String = title.split_whitespace().collect::<Vec<_>>().join(" ");
     let title: String = title.chars().take(120).collect();
+    // A CLI that names the conversation after its first prompt (Codex does,
+    // verbatim) would name it after Otto's preamble: the placeholder stays.
+    if delegation::is_preamble(&title) {
+        return;
+    }
     if st.session.title_auto && !title.is_empty() && title != st.session.title {
         st.session.title = title.clone();
         let _ = live.persist.send(PersistOp::Title(title));
@@ -2551,29 +2428,6 @@ fn transcript_title(path: &std::path::Path) -> Option<String> {
     f.seek(SeekFrom::Start(0)).ok()?;
     f.read_exact(&mut head).ok()?;
     find(&head)
-}
-
-/// An agent's command list as the session keeps it: at most 400 commands,
-/// unique by name, each description one line of at most 160 characters
-/// (Claude Code lists every skill with its whole description).
-fn bounded_commands(list: Vec<ProviderCommand>) -> Vec<ProviderCommand> {
-    let mut seen = std::collections::HashSet::new();
-    list.into_iter()
-        .filter(|c| !c.name.trim().is_empty() && seen.insert(c.name.clone()))
-        .take(400)
-        .map(|mut c| {
-            let line = c
-                .description
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            c.description = match line.char_indices().nth(160) {
-                Some((i, _)) => format!("{}…", line[..i].trim_end()),
-                None => line,
-            };
-            c
-        })
-        .collect()
 }
 
 /// Persist and publish the queue (`queue.updated`). Returns its sequence.
@@ -2902,6 +2756,7 @@ fn set_session_status(
     let background_tasks = st.session.background_tasks.clone();
     let capabilities = Some(st.session.capabilities.clone());
     let title = Some(st.session.title.clone());
+    let thread = otto_core::agent_runtime::thread_meta_of(st.session.meta.as_ref());
     let prev = st.proj.session.as_ref();
     if prev.is_some_and(|p| {
         p.status == status
@@ -2909,6 +2764,9 @@ fn set_session_status(
             && p.background_tasks == background_tasks
             && p.capabilities == capabilities
             && p.title == title
+            && p.provider == Some(st.session.provider)
+            && p.provider_slug.as_deref() == Some(st.session.provider_slug())
+            && p.thread == thread
     }) {
         return;
     }
@@ -2922,6 +2780,9 @@ fn set_session_status(
         background_tasks,
         capabilities,
         title,
+        provider: Some(st.session.provider),
+        provider_slug: Some(st.session.provider_slug().into()),
+        thread,
     };
     emit(
         inner,
@@ -3081,61 +2942,6 @@ fn settle_item(item: &mut TurnItem, status: TurnItemStatus, now: chrono::DateTim
         }
         _ => {}
     }
-}
-
-/// Settle an archived `agent_runtime_entities` JSON payload so exported or
-/// restored history never preserves mid-turn spinners, running provider
-/// sessions, or pending approvals. Returns `Some(updated_json)` only when the
-/// entity required settling.
-pub fn settle_archived_entity_json(kind: &str, payload_json: &str) -> Option<String> {
-    let now = Utc::now();
-    let raw: serde_json::Value = serde_json::from_str(payload_json).ok()?;
-    let updated = match kind {
-        K_TURN => serde_json::from_value::<ProviderTurn>(raw)
-            .ok()
-            .filter(|t| !t.status.is_terminal())
-            .and_then(|mut t| {
-                t.status = ProviderTurnStatus::Interrupted;
-                t.completed_at = Some(now);
-                serde_json::to_value(t).ok()
-            }),
-        K_ITEM => serde_json::from_value::<TurnItem>(raw)
-            .ok()
-            .filter(|i| i.status.is_open() || i.is_streaming())
-            .and_then(|mut i| {
-                settle_item(&mut i, TurnItemStatus::Interrupted, now);
-                serde_json::to_value(i).ok()
-            }),
-        K_REQUEST => serde_json::from_value::<RuntimeRequest>(raw)
-            .ok()
-            .filter(|q| q.status == RuntimeRequestStatus::Pending)
-            .and_then(|mut q| {
-                q.status = RuntimeRequestStatus::Expired;
-                q.response_capability = ResponseCapability::NotResumable {
-                    reason: "Imported history; pending request was not resumed.".into(),
-                };
-                serde_json::to_value(q).ok()
-            }),
-        K_SESSION => serde_json::from_value::<ProviderSession>(raw)
-            .ok()
-            .filter(|s| {
-                s.status != ProviderSessionStatus::Stopped || !s.background_tasks.is_empty()
-            })
-            .and_then(|mut s| {
-                s.background_tasks.clear();
-                s.status = ProviderSessionStatus::Stopped;
-                s.updated_at = now;
-                serde_json::to_value(s).ok()
-            }),
-        // Imported prompts never send themselves: boot recovery would dispatch a
-        // person's queued message on the next start.
-        K_QUEUE => raw
-            .as_array()
-            .filter(|q| !q.is_empty())
-            .map(|_| serde_json::json!([])),
-        _ => None,
-    }?;
-    serde_json::to_string(&updated).ok()
 }
 
 fn resolve_request(
@@ -3424,6 +3230,10 @@ pub(super) fn apply_step_opts(
                 todo.turn_id = turn_id;
                 upsert_item(inner, live, st, todo);
             }
+            DriverEvent::ClientCall { id, op } => client_calls::start(inner, st, id, op),
+            DriverEvent::AgentSettings { model, access } => {
+                selection::follow_agent(inner, live, st, model, access)
+            }
             DriverEvent::CommandOutput { item_id, chunk } => {
                 emit(
                     inner,
@@ -3456,6 +3266,7 @@ pub(super) fn apply_step_opts(
                     questions: vec![],
                     question_title: None,
                     answers: None,
+                    for_person: false,
                 };
                 let mut item = item(
                     format!("{}:approval:{id}", turn_id.as_deref().unwrap_or_default()),
@@ -3488,6 +3299,7 @@ pub(super) fn apply_step_opts(
                 title,
                 questions,
                 tool_item_id: _,
+                for_person,
             } => {
                 let id = scope_request_id(st, &id);
                 let turn_id = st.turn.as_ref().map(|t| t.id.clone());
@@ -3504,6 +3316,7 @@ pub(super) fn apply_step_opts(
                     questions,
                     question_title: title,
                     answers: None,
+                    for_person,
                 };
                 emit(
                     inner,
@@ -3577,7 +3390,7 @@ pub(super) fn apply_step_opts(
                 }
             }
             DriverEvent::Commands(list) => {
-                let commands = bounded_commands(list);
+                let commands = provider_lists::bounded_commands(list);
                 if commands != st.proj.commands {
                     emit(
                         inner,
@@ -3588,6 +3401,9 @@ pub(super) fn apply_step_opts(
                 }
             }
             DriverEvent::Title(title) => adopt_title(inner, live, st, &title),
+            DriverEvent::McpServers { servers, spawn } => {
+                provider_lists::on_mcp(inner, live, st, servers, spawn)
+            }
             DriverEvent::ContextUsage(usage)
                 if st
                     .proj
@@ -3940,6 +3756,7 @@ async fn persister(repo: AgentRuntimeRepo, id: Id, mut rx: mpsc::UnboundedReceiv
             PersistOp::NativeThreadId(n) => repo.set_native_thread_id(&id, &n).await,
             PersistOp::Title(t) => repo.set_title(&id, &t, true).await,
             PersistOp::ClearNativeThreadId => repo.clear_native_thread_id(&id).await,
+            PersistOp::Provider(p, slug) => repo.set_provider(&id, p, slug.as_deref()).await,
             PersistOp::Model(Some(m)) => repo.set_model(&id, &m).await,
             PersistOp::Model(None) => repo.clear_model(&id).await,
             PersistOp::Effort(e) => repo.set_effort(&id, e.as_deref()).await,
@@ -3979,17 +3796,6 @@ fn scope_request_id(st: &State, native: &str) -> String {
         .expect("driver event has a live process")
         .request_ids
         .scoped(native)
-}
-
-pub(super) fn map_spawn_error(provider: &str, program: &str, e: std::io::Error) -> Error {
-    let msg = format!("could not start {provider} ({program}): {e}");
-    match e.kind() {
-        std::io::ErrorKind::NotFound
-        | std::io::ErrorKind::PermissionDenied
-        | std::io::ErrorKind::InvalidInput => Error::Invalid(msg),
-        std::io::ErrorKind::TimedOut => Error::Upstream(msg),
-        _ => Error::Internal(msg),
-    }
 }
 
 #[cfg(test)]

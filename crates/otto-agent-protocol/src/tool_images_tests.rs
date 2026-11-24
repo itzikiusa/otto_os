@@ -128,6 +128,70 @@ fn acp_opencode_images_replace_on_update_and_raw_attachments_are_supported() {
     assert_images(&s, 1, "Screenshot attachment");
 }
 
+/// MCP links, embedded resources and audio read as what they are (no base64
+/// in the text), for Codex and for ACP agents — ACP used to drop them.
+#[test]
+fn mcp_links_resources_and_audio_read_as_words_for_codex_and_acp() {
+    let blocks = json!([
+        {"type":"resource_link","uri":"https://x/report.pdf","name":"report.pdf","description":"The report"},
+        {"type":"resource","resource":{"uri":"file:///notes.md","mimeType":"text/markdown","text":"# Notes"}},
+        {"type":"resource","resource":{"uri":"file:///a.zip","mimeType":"application/zip","blob":"UEsDBAoAAAAAAA=="}},
+        {"type":"audio","mimeType":"audio/wav","data":"UklGRiQAAABXQVZF"}
+    ]);
+    let mut d = CodexDriver::with_program("codex");
+    d.start(&ctx());
+    feed(&mut d, json!({"id":1,"result":{"userAgent":"fake"}}));
+    feed(
+        &mut d,
+        json!({"id":2,"result":{"thread":{"id":"th1"},"model":"fake"}}),
+    );
+    d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+    let s = feed(
+        &mut d,
+        json!({"method":"item/completed","params":{"threadId":"th1","turnId":"turn1","item":{
+        "type":"mcpToolCall","id":"tool1","server":"probe","tool":"probe_link","arguments":{},"status":"completed","result":{"content":blocks}}}}),
+    );
+    for want in [
+        "Link: report.pdf — https://x/report.pdf (The report)",
+        "# Notes",
+        "Resource: file:///a.zip (application/zip",
+        "Audio (audio/wav",
+    ] {
+        assert_images(&s, 0, want);
+    }
+    let mut a = AcpDriver::opencode();
+    a.start(&ctx());
+    feed(
+        &mut a,
+        json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}),
+    );
+    feed(
+        &mut a,
+        json!({"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}),
+    );
+    a.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+    let content: Vec<Value> = blocks
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| json!({"type":"content","content":b}))
+        .collect();
+    let s = feed(
+        &mut a,
+        json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{
+        "sessionUpdate":"tool_call","toolCallId":"tool1","title":"probe_link","kind":"other","status":"completed","content":content}}}),
+    );
+    assert_images(&s, 0, "Link: report.pdf — https://x/report.pdf");
+    // An MCP result handed over as rawOutput only (no content) is read too.
+    let s = feed(
+        &mut a,
+        json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{
+        "sessionUpdate":"tool_call","toolCallId":"tool2","title":"probe_echo","kind":"other","status":"completed",
+        "rawOutput":{"content":[{"type":"text","text":"probe says: hi"}],"isError":false}}}}),
+    );
+    assert_images(&s, 0, "probe says: hi");
+}
+
 #[test]
 fn legacy_dynamic_tool_needs_no_images_field() {
     let kind: TurnItemKind = serde_json::from_value(

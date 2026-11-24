@@ -51,6 +51,8 @@
   import { SIDEBAR_MODULES, availableModules, goToEntries } from '../sidebar';
   import { bar, onDesktopEvent, openInOtto } from '../desktop';
   import { openHitInApp } from '../searchHitOpen';
+  import { threadCommands } from '../paletteThreads.svelte';
+  import { isThreadRow, rowIcon } from './floatingBarRowIcon';
 
   interface Props {
     host?: 'app' | 'window';
@@ -210,6 +212,9 @@
 
   const commands = $derived(inApp ? registry.all : windowCommands);
   const ranked = $derived(rankCommands(commands, query, loadFrecency(), Date.now(), CMD_LIMIT));
+  // Threads first (lib/paletteThreads.svelte.ts): what needs you, frozen while open.
+  const threadPick = threadCommands(() => (inApp && open ? query : null), () => closeBar());
+  $effect(() => void (open && untrack(() => threadPick.freeze())));
 
   // Cross-module search (repos, workflows, stories, …) — the palette's
   // /search fan-out, debounced; hits trail the commands.
@@ -251,7 +256,7 @@
   });
 
   const rows: BarRow<Command, SearchHit>[] = $derived(
-    buildRows(query, query.trim() === '' ? ranked.slice(0, 6).map((r) => r.cmd) : ranked.map((r) => r.cmd), hits),
+    buildRows(query, [...threadPick.commands, ...(query.trim() === '' ? ranked.slice(0, 6) : ranked).map((r) => r.cmd), ...threadPick.tail], hits),
   );
 
   // A new query puts the selection back on the Enter default (row 0). Rows
@@ -415,6 +420,7 @@
         return;
       case 'ask':
         e.preventDefault();
+        if (listOpen && rows[selected]?.kind === 'cmd' && threadPick.openBeside((rows[selected] as { cmd: Command }).cmd.id)) return;
         void submitAsk(query);
         return;
       case 'escape':
@@ -652,35 +658,6 @@
   });
 
   // ── rendering helpers ───────────────────────────────────────────────────
-  function rowIcon(row: BarRow<Command, SearchHit>): IconName {
-    if (row.kind === 'ask') return 'sparkle';
-    if (row.kind === 'hit') {
-      // Same glyph per kind as the ⌘K palette's results (Palette.svelte
-      // hitIcon) — one search, one vocabulary.
-      switch (row.hit.kind) {
-        case 'repo': return 'branch';
-        case 'workflow': return 'merge';
-        case 'story': return 'ticket';
-        case 'api_request': return 'zap';
-        case 'broker_cluster': return 'box';
-        case 'memory': return 'db';
-        default: return 'file';
-      }
-    }
-    const g = row.cmd.group ?? '';
-    if (row.cmd.id.startsWith('core.go-')) {
-      const mod = SIDEBAR_MODULES.find((m) => `core.go-${m.id}` === row.cmd.id);
-      return mod?.icon ?? 'chevronRight';
-    }
-    if (g === 'Navigate') return 'chevronRight';
-    if (g === 'Sessions' || g === 'Session') return 'terminal';
-    if (g === 'Git' || row.cmd.id.startsWith('repo.')) return 'branch';
-    if (g === 'Workspaces') return 'folder';
-    if (g === 'Connections') return 'plug';
-    if (g === 'Appearance' || g === 'View') return 'layout';
-    return 'command';
-  }
-
   function timeOf(ms: number): string {
     return ms ? new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
   }
@@ -867,10 +844,9 @@
               </div>
             {:else if view === 'results' || view === 'recent'}
               <ul class="list" id="fb-listbox" role="listbox" aria-label={view === 'recent' ? 'Recent commands' : 'Results'}>
-                {#if view === 'recent'}
-                  <li class="sec" role="presentation">Recent</li>
-                {/if}
                 {#each rows as row, i (row.key)}
+                  {@const th = isThreadRow(row)}
+                  {#if th ? i === 0 || !isThreadRow(rows[i - 1]) : view === 'recent' && (i === 0 || isThreadRow(rows[i - 1]))}<li class="sec" role="presentation">{th ? threadPick.label : 'Recent'}</li>{/if}
                   {#if row.kind === 'hit' && (i === 0 || rows[i - 1].kind !== 'hit')}
                     <li class="sec" role="presentation">{searching ? 'Searching…' : 'In this workspace'}</li>
                   {/if}
@@ -884,6 +860,7 @@
                     class:disabled={row.kind === 'cmd' && row.cmd.disabled}
                     role="option"
                     aria-selected={i === selected}
+                    data-cmd={row.kind === 'cmd' ? row.cmd.id : undefined}
                     aria-disabled={row.kind === 'cmd' && row.cmd.disabled ? 'true' : undefined}
                     onmousedown={(e) => { e.preventDefault(); runRow(row); }}
                     onmousemove={() => (selected = i)}
@@ -892,19 +869,19 @@
                     {#if row.kind === 'ask'}
                       <span class="opt-title">Ask Otto <span class="q-inline">“{row.text}”</span></span>
                       <span class="grow"></span>
-                      <span class="opt-meta">{space.name}</span>
+                      <span class="opt-meta" dir="auto">{space.name}</span>
                       {#if i === selected}<kbd>↵</kbd>{:else}<kbd>⌘↵</kbd>{/if}
                     {:else if row.kind === 'cmd'}
                       <span class="opt-title">{row.cmd.title}</span>
                       {#if row.cmd.detail}<span class="opt-detail">{row.cmd.detail}</span>{/if}
                       <span class="grow"></span>
-                      {#if row.cmd.group}<span class="opt-meta">{row.cmd.group}</span>{/if}
+                      {#if row.cmd.group}<span class="opt-meta" dir="auto" data-tone={th ? threadPick.tone(row.cmd.id) : undefined}>{row.cmd.group}</span>{/if}
                       {#if row.cmd.shortcut}<kbd>{row.cmd.shortcut}</kbd>{/if}
                     {:else}
                       <span class="opt-title">{row.hit.title}</span>
                       {#if row.hit.subtitle}<span class="opt-detail">{row.hit.subtitle}</span>{/if}
                       <span class="grow"></span>
-                      <span class="opt-meta">{row.hit.kind.replace('_', ' ')}</span>
+                      <span class="opt-meta" dir="auto">{row.hit.kind.replace('_', ' ')}</span>
                     {/if}
                   </li>
                 {/each}
@@ -1378,6 +1355,10 @@
     white-space: nowrap;
     flex-shrink: 0;
   }
+  /* A thread row's status word (lib/paletteThreads.svelte.ts): the word, coloured. */
+  .opt-meta[data-tone='warning'] { color: var(--warning); font-weight: 600; }
+  .opt-meta[data-tone='danger'] { color: var(--danger); font-weight: 600; }
+  .opt-meta[data-tone='success'] { color: var(--success); }
 
   .keys {
     display: flex;

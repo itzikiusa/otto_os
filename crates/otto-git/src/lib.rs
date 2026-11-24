@@ -42,6 +42,7 @@ pub mod watch;
 mod working_diff;
 mod worktree_changes;
 mod worktree_probe;
+pub mod worktree_ready;
 
 pub use http::{pr_read_router, router, serve_pr_read, GitCtx, PR_READ_PATHS};
 pub use local::{

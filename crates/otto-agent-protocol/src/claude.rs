@@ -739,6 +739,7 @@ impl ClaudeDriver {
                 title: None,
                 questions,
                 tool_item_id,
+                for_person: false,
             });
             return;
         }
@@ -751,6 +752,66 @@ impl ClaudeDriver {
             options,
             tool_item_id,
         });
+    }
+
+    /// An MCP server asks the person for input (Claude's `elicitation` control
+    /// request): a question in the thread; the answer goes back as the
+    /// elicitation's `{action, content}`. What the form subset can't show
+    /// (URL mode, constraints) is declined with why.
+    fn on_elicitation(&mut self, step: &mut DriverStep, cli_request_id: &str, req: Value) {
+        let confirm = crate::questions::is_confirmation(&req);
+        let questions = match crate::questions::mcp_elicitation(&req) {
+            _ if confirm => Vec::new(),
+            Ok(q) => q,
+            Err(why) => {
+                step.write(Self::control_success(
+                    cli_request_id,
+                    json!({"action":"decline","_meta":{"otto_reason":why}}),
+                ));
+                return;
+            }
+        };
+        let server = req
+            .get("mcp_server_name")
+            .and_then(Value::as_str)
+            .unwrap_or("An MCP server");
+        let message = req
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("needs your input");
+        let title = Some(format!("{server}: {message}"));
+        let request_id = format!("claude-{cli_request_id}");
+        if confirm {
+            step.push(DriverEvent::Request {
+                id: request_id.clone(),
+                kind: RequestKind::McpElicitation,
+                title: Some(server.to_string()),
+                prompt: Some(message.to_string()),
+                reason: None,
+                options: crate::questions::confirmation_options(),
+                tool_item_id: None,
+            });
+        }
+        self.pending.insert(
+            request_id.clone(),
+            Pending {
+                cli_request_id: cli_request_id.to_string(),
+                tool_name: ELICITATION.into(),
+                input: req,
+                tool_use_id: None,
+                suggestions: Vec::new(),
+            },
+        );
+        if !confirm {
+            step.push(DriverEvent::Question {
+                id: request_id,
+                title,
+                questions,
+                tool_item_id: None,
+                // An MCP server's elicitation.
+                for_person: true,
+            });
+        }
     }
 
     /// `permissionResultFromDecision` (`ClaudeAdapterV2.ts:3502-3545`).
@@ -794,7 +855,7 @@ impl ClaudeDriver {
                     "toolUseID": p.tool_use_id,
                 })
             }
-            ApprovalDecision::Decline => json!({
+            ApprovalDecision::Decline | ApprovalDecision::DeclineAlways => json!({
                 "behavior": "deny",
                 "message": "User declined tool execution.",
                 "toolUseID": p.tool_use_id,
@@ -1267,6 +1328,22 @@ impl StructuredDriver for ClaudeDriver {
         {
             return Err(DriverError("this request needs question answers".into()));
         }
+        if let Some(p) = self
+            .pending
+            .get(request_id)
+            .filter(|p| p.tool_name == ELICITATION)
+        {
+            if !crate::questions::is_confirmation(&p.input) {
+                return Err(DriverError("this request needs question answers".into()));
+            }
+            let mut step = DriverStep::default();
+            step.write(Self::control_success(
+                &p.cli_request_id,
+                crate::questions::confirmation_result(decision),
+            ));
+            self.pending.remove(request_id);
+            return Ok(step);
+        }
         let p = self
             .pending
             .remove(request_id)
@@ -1287,8 +1364,18 @@ impl StructuredDriver for ClaudeDriver {
         let p = self
             .pending
             .get(request_id)
-            .filter(|p| p.tool_name == "AskUserQuestion")
+            .filter(|p| p.tool_name == "AskUserQuestion" || p.tool_name == ELICITATION)
             .ok_or_else(|| DriverError("no such pending question".into()))?;
+        if p.tool_name == ELICITATION {
+            let questions = crate::questions::mcp_elicitation(&p.input).map_err(DriverError)?;
+            otto_core::agent_runtime::validate_question_answers(&questions, answers)
+                .map_err(DriverError)?;
+            let result = crate::questions::elicitation_answer(&questions, answers);
+            let mut step = DriverStep::default();
+            step.write(Self::control_success(&p.cli_request_id, result));
+            self.pending.remove(request_id);
+            return Ok(step);
+        }
         let questions = crate::questions::native_questions(&p.input, true).map_err(DriverError)?;
         otto_core::agent_runtime::validate_question_answers(&questions, answers)
             .map_err(DriverError)?;
@@ -1311,18 +1398,20 @@ impl StructuredDriver for ClaudeDriver {
     fn dismiss_question(
         &mut self,
         request_id: &str,
-        _action: otto_core::agent_runtime::QuestionDismissAction,
+        action: otto_core::agent_runtime::QuestionDismissAction,
     ) -> Result<DriverStep, DriverError> {
         let p = self
             .pending
             .get(request_id)
-            .filter(|p| p.tool_name == "AskUserQuestion")
+            .filter(|p| p.tool_name == "AskUserQuestion" || p.tool_name == ELICITATION)
             .ok_or_else(|| DriverError("no such pending question".into()))?;
         let mut step = DriverStep::default();
-        step.write(Self::control_success(
-            &p.cli_request_id,
-            json!({"behavior":"deny","message":"The user skipped this question"}),
-        ));
+        let answer = if p.tool_name == ELICITATION {
+            json!({ "action": action })
+        } else {
+            json!({"behavior":"deny","message":"The user skipped this question"})
+        };
+        step.write(Self::control_success(&p.cli_request_id, answer));
         self.pending.remove(request_id);
         Ok(step)
     }
@@ -1348,6 +1437,7 @@ impl StructuredDriver for ClaudeDriver {
                 let req = msg.get("request").cloned().unwrap_or(Value::Null);
                 match req.get("subtype").and_then(Value::as_str) {
                     Some("can_use_tool") => self.on_can_use_tool(&mut step, &rid, &req),
+                    Some("elicitation") => self.on_elicitation(&mut step, &rid, req),
                     other => step.write(
                         json!({"type":"control_response","response":{"subtype":"error","request_id":rid,"error":format!("unsupported control request: {}", other.unwrap_or("?"))}})
                             .to_string(),
@@ -1380,6 +1470,12 @@ impl StructuredDriver for ClaudeDriver {
                     native_thread_id: self.session_id.clone(),
                     model: msg.get("model").and_then(Value::as_str).map(str::to_string),
                 });
+                if let Some(servers) = msg.get("mcp_servers").and_then(Value::as_array) {
+                    step.push(DriverEvent::McpServers {
+                        servers: servers.iter().filter_map(claude_mcp_status).collect(),
+                        spawn: false,
+                    });
+                }
             }
             // T3 Code #33151 / #24334: a retry or compaction is one quiet row.
             "system" if self.turn_id.is_some() && Self::is_retry_or_compaction(&msg) => {
@@ -1445,6 +1541,55 @@ impl StructuredDriver for ClaudeDriver {
 
     fn restore_state(&mut self, state: &Value) -> Result<(), DriverError> {
         restore_keeping_program(self, state, |d| &mut d.program)
+    }
+}
+
+/// The [`Pending`] tool name of an MCP elicitation (not a tool Claude has).
+const ELICITATION: &str = "mcp:elicitation";
+
+/// One `system init` `mcp_servers` entry (`{name, status}`; status
+/// `connected` | `pending` | `needs-auth` | `failed` | `disabled`).
+fn claude_mcp_status(v: &Value) -> Option<otto_core::agent_runtime::McpServerStatus> {
+    use otto_core::agent_runtime::{McpServerSource, McpServerState as St, McpServerStatus};
+    let name = v.get("name").and_then(Value::as_str)?;
+    let (state, why) = match v.get("status").and_then(Value::as_str).unwrap_or_default() {
+        "connected" => (St::Connected, None),
+        "pending" => (St::Starting, None),
+        "needs-auth" => (
+            St::NeedsAuth,
+            Some("Sign in with `claude mcp` or /mcp in Claude Code"),
+        ),
+        "disabled" => (
+            St::Disabled,
+            Some("Turned off in Claude Code’s own settings"),
+        ),
+        _ => (St::Failed, Some("Claude Code couldn’t start it")),
+    };
+    let s = McpServerStatus::new(name, McpServerSource::Cli, state);
+    Some(match why {
+        Some(w) => s.because(w),
+        None => s,
+    })
+}
+
+#[cfg(test)]
+mod mcp_status_tests {
+    use super::*;
+    use otto_core::agent_runtime::McpServerState as St;
+
+    #[test]
+    fn the_init_frames_server_list_reads_as_states_with_reasons() {
+        let s = |status: &str| {
+            claude_mcp_status(&serde_json::json!({"name": "x", "status": status})).unwrap()
+        };
+        assert_eq!(s("connected").state, St::Connected);
+        assert_eq!(s("connected").reason, None);
+        assert_eq!(s("pending").state, St::Starting);
+        assert_eq!(s("needs-auth").state, St::NeedsAuth);
+        assert!(s("needs-auth").reason.unwrap().contains("Sign in"));
+        assert_eq!(s("failed").state, St::Failed);
+        assert_eq!(s("disabled").state, St::Disabled);
+        assert!(claude_mcp_status(&serde_json::json!({"status": "connected"})).is_none());
     }
 }
 
@@ -2334,6 +2479,91 @@ mod tests {
         assert_eq!(result["updatedInput"]["questions"][0]["multiSelect"], true);
         assert!(result.get("updatedPermissions").is_none());
     }
+    /// An MCP server's elicitation (Claude's `elicitation` control request)
+    /// is a question in the thread; the answer goes back as
+    /// `{action:"accept", content}`, a skip as the dismiss action, and a URL
+    /// form is declined at once.
+    #[test]
+    fn an_mcp_elicitation_is_a_question_and_the_answer_is_its_content() {
+        use otto_core::agent_runtime::{QuestionAnswer, QuestionDismissAction};
+        let mut d = ClaudeDriver::new();
+        ready(&mut d);
+        let ask = |rid: &str| json!({"type":"control_request","request_id":rid,"request":{"subtype":"elicitation","mcp_server_name":"probe","message":"Which colour?","requested_schema":{"type":"object","properties":{"colour":{"type":"string","title":"Colour"}},"required":["colour"]}}});
+        let s = feed(&mut d, ask("e1"));
+        let DriverEvent::Question {
+            id,
+            title,
+            questions,
+            ..
+        } = &s.events[0]
+        else {
+            panic!("question event missing: {:?}", s.events)
+        };
+        assert_eq!(title.as_deref(), Some("probe: Which colour?"));
+        assert_eq!(questions[0].id, "colour");
+        assert!(d.respond(id, ApprovalDecision::Accept).is_err());
+        let r = d
+            .respond_question(
+                id,
+                &[QuestionAnswer::Text {
+                    question_id: "colour".into(),
+                    text: "teal".into(),
+                }],
+            )
+            .unwrap();
+        let v: Value = serde_json::from_str(&r.writes[0]).unwrap();
+        assert_eq!(v["response"]["request_id"], "e1");
+        assert_eq!(
+            v["response"]["response"],
+            json!({"action":"accept","content":{"colour":"teal"}})
+        );
+
+        feed(&mut d, ask("e2"));
+        let r = d
+            .dismiss_question("claude-e2", QuestionDismissAction::Decline)
+            .unwrap();
+        let v: Value = serde_json::from_str(&r.writes[0]).unwrap();
+        assert_eq!(v["response"]["response"]["action"], "decline");
+
+        // An empty form is a yes/no: an approval answered by decision.
+        let s = feed(
+            &mut d,
+            json!({"type":"control_request","request_id":"e4","request":{"subtype":"elicitation","mcp_server_name":"probe","message":"Go ahead?","requested_schema":{"type":"object","properties":{}}}}),
+        );
+        assert!(matches!(
+            &s.events[0],
+            DriverEvent::Request {
+                kind: RequestKind::McpElicitation,
+                ..
+            }
+        ));
+        let r = d.respond("claude-e4", ApprovalDecision::Decline).unwrap();
+        let v: Value = serde_json::from_str(&r.writes[0]).unwrap();
+        assert_eq!(v["response"]["response"], json!({"action":"decline"}));
+
+        let url = feed(
+            &mut d,
+            json!({"type":"control_request","request_id":"e3","request":{"subtype":"elicitation","mcp_server_name":"probe","message":"Sign in","mode":"url","url":"https://x"}}),
+        );
+        // URL mode: the same one-choice question every agent gets; choosing it
+        // is a bare accept (the UI opens the page).
+        let DriverEvent::Question { questions, .. } = &url.events[0] else {
+            panic!("{:?}", url.events)
+        };
+        assert_eq!(questions[0].id, crate::questions::URL_QUESTION);
+        let r = d
+            .respond_question(
+                "claude-e3",
+                &[QuestionAnswer::Single {
+                    question_id: crate::questions::URL_QUESTION.into(),
+                    value: "open".into(),
+                }],
+            )
+            .unwrap();
+        let v: Value = serde_json::from_str(&r.writes[0]).unwrap();
+        assert_eq!(v["response"]["response"], json!({"action":"accept"}));
+    }
+
     #[test]
     fn multiple_typed_questions_withdraw_only_the_named_request() {
         use otto_core::agent_runtime::QuestionAnswer;

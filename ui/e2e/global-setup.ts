@@ -1,5 +1,6 @@
 import { request, type FullConfig } from '@playwright/test';
 import { execFileSync, execSync, spawn } from 'node:child_process';
+import { orphanHolders } from './holders';
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -45,6 +46,12 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
   if (!existsSync(OTTOD)) {
     throw new Error(`[e2e] ottod binary not found at ${OTTOD} (set OTTO_E2E_BIN or install Otto)`);
   }
+  // Holders an earlier run left behind (its teardown never ran): say so.
+  const leftovers = orphanHolders(OTTOD);
+  if (leftovers.length) {
+    // eslint-disable-next-line no-console
+    console.warn(`[e2e] WARNING: ${leftovers.length} orphaned runtime-holder process(es) from an earlier run (pids ${leftovers.map((p) => p.pid).join(', ')}). They run agent CLIs until killed.`);
+  }
   const dataDir = mkdtempSync(join(tmpdir(), 'otto-e2e-'));
   // Harmless stand-ins for the agent CLIs, first on the test daemon's PATH.
   // Sessions launch providers by bare name, so without these a spec that opens
@@ -63,14 +70,22 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
   // and the agent's own follow-up turn), `agent <s>` (a background subagent),
   // `slow <s>` and `silent`.
   const fakeClaude = join(dirname(OTTOD), 'otto-fake-claude');
-  for (const cli of ['claude', 'codex', 'agy', 'gemini', 'grok']) {
+  // The ACP agents with a stand-in here (`gemini --acp`, `agy acp`, `grok …
+  // agent stdio`) get `otto-fake-agent`: echo, `ask` (a
+  // permission request), `hang` (Stop), `plan`, and two slash commands. It
+  // has no steer, like every ACP agent but Grok's interject.
+  const fakeAcp = join(dirname(OTTOD), 'otto-fake-agent');
+  const ACP = ['agy', 'gemini', 'grok'];
+  for (const cli of ['claude', 'codex', ...ACP]) {
     const shim = join(fakeBin, cli);
     const runtime =
       cli === 'codex' && existsSync(fakeCodex)
         ? `for a in "$@"; do [ "$a" = app-server ] && exec '${fakeCodex}' "$@"; done\n`
         : cli === 'claude' && existsSync(fakeClaude)
           ? `for a in "$@"; do [ "$a" = stream-json ] && exec '${fakeClaude}' "$@"; done\n`
-          : '';
+          : ACP.includes(cli) && existsSync(fakeAcp)
+            ? `for a in "$@"; do case "$a" in --acp|acp|stdio) exec '${fakeAcp}' "$@";; esac; done\n`
+            : '';
     writeFileSync(
       shim,
       `#!/bin/sh\n${runtime}echo "otto e2e: the real ${cli} CLI is disabled in tests"\nexec cat\n`,

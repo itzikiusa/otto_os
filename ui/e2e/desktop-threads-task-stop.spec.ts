@@ -27,10 +27,13 @@ test.beforeEach(async ({ page }, info) => {
 test('stop one background task, Retry after a failure, asked state, Stop all; the row is calm, not working', async ({ page }, info) => {
   await mockedThread(page, workspaceId, 'stop-thread-a', 'Background stop');
   await threadWithTwoBackground(page, 'stop-thread-a');
-  // D-06: the sidebar row is "Background task running", not the working pulse.
-  const dot = page.getByTestId('thread-row-stop-thread-a').locator('[data-state]').first();
-  await expect(dot).toHaveAttribute('data-state', 'running');
-  await expect(dot).toHaveAttribute('aria-label', 'Background task running');
+  // D-06: the sidebar row is calm — background work running, the agent idle —
+  // never "Working" (and not in the Working fold).
+  const row = page.getByTestId('thread-row-stop-thread-a');
+  await expect(row).toHaveAttribute('data-state', 'running');
+  await expect(row).not.toHaveAttribute('data-class', 'working');
+  await expect(row.getByTestId('thread-status-stop-thread-a')).not.toHaveText(/^Working/);
+  await expect(row.locator('.tr-main')).toHaveAttribute('title', /2 background tasks running — the agent is idle/);
   await shoot(page, info, 'desktop-background-calm');
   await stopFlow(page, info, 'stop-thread-a', 'desktop');
 });

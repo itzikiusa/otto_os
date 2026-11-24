@@ -27,6 +27,7 @@ import type {
   RuntimeEvent,
   RuntimePromptReq,
   RuntimePromptResp,
+  RuntimeProvider,
   RuntimeProviderOrSlug,
   RuntimeSession,
   RuntimeSessionStatus,
@@ -68,6 +69,8 @@ const ROW_META_KEYS = [
   'read_only',
   'delegated_by_agent',
   'delegated_by_name',
+  // Derived turn times: "Working 4m" on a row after a reload, without a read.
+  'last_turn_started_at',
 ] as const;
 
 const threadSessionRowCache = new WeakMap<RuntimeSession, Session>();
@@ -332,7 +335,7 @@ class RuntimeThreads {
     void api
       .get<RuntimeSession>(`/runtime-sessions/${id}`)
       .then((r) => {
-        this.byId[r.id] = r;
+        this.put(r);
         noteRuntimeWaiting(r.id, r.status === 'awaiting_permission', r.title);
         this.emitSequence(r.id, r.last_sequence);
       })
@@ -353,9 +356,27 @@ class RuntimeThreads {
       .sort((a, b) => (a.id === root ? -1 : b.id === root ? 1 : a.created_at.localeCompare(b.created_at)));
   }
 
+  /** The newest status an event carried per thread, kept even while its row
+   *  is not here yet: a fast turn can end before the HTTP response that
+   *  creates the row lands (a council's judge), and that response must not
+   *  bring back a stale "working" (`put`). One small entry per thread. */
+  private seen: Record<string, { status: RuntimeSessionStatus; ts: string; outcome?: Pick<RuntimeSession, 'last_turn_status' | 'last_error_class'> }> = {};
+
+  /** Insert a row from an HTTP response, keeping a newer live status. */
+  put(r: RuntimeSession): void {
+    const s = this.seen[r.id];
+    this.byId[r.id] = s && Date.parse(s.ts) > Date.parse(r.last_active_at) ? { ...r, status: s.status, ...s.outcome } : r;
+  }
+
   private onEvent(ev: RuntimeEvent): void {
+    if (ev.type === 'provider_session.updated') this.seen[ev.session_id] = { status: SESSION_STATUS[ev.provider_session.status], ts: ev.ts, outcome: this.seen[ev.session_id]?.outcome };
+    else if (ev.type === 'turn.terminal' && this.seen[ev.session_id]) this.seen[ev.session_id].outcome = turnOutcomeOf(ev.status, ev.failure);
     if (!this.byId[ev.session_id]) this.adopt(ev.session_id);
     if (ev.type === 'queue.updated') this.releaseQueued(ev.session_id, ev.queued_prompts ?? []);
+    // A model / access switch was recorded — the agent's own too (ACP
+    // `current_mode_update`): the row, and so the chips, re-read it.
+    // (`selection:` notices — the shape settingsChange.ts reads.)
+    if (ev.type === 'turn_item.updated' && ev.turn_item.type === 'system_notice' && ev.turn_item.id.startsWith('selection:')) this.adopt(ev.session_id);
     // A turn that ended (done or failed) off screen leaves an unread dot.
     if (ev.type === 'turn.terminal' && (ev.status === 'completed' || ev.status === 'failed') && !this.onScreen(ev.session_id)) {
       this.unread = { ...this.unread, [ev.session_id]: true };
@@ -368,7 +389,9 @@ class RuntimeThreads {
         const status = SESSION_STATUS[ps.status];
         // A new turn clears how the last one ended (the daemon's rule for `last_turn_status`).
         const fresh = status === 'working' || status === 'starting' ? { last_turn_status: null, last_error_class: null } : {};
-        this.byId[ev.session_id] = { ...row, ...fresh, status, background_tasks: ps.background_tasks ?? [], capabilities: ps.capabilities ?? row.capabilities, title: ps.title ?? row.title, last_active_at: ev.ts };
+        // A provider switch moves the row (title glyph, details card) to the new provider.
+        const moved = ps.provider ? providerPatch(row, ps.provider, ps.provider_slug, ps.model) : {};
+        this.byId[ev.session_id] = { ...row, ...fresh, ...moved, status, background_tasks: ps.background_tasks ?? [], capabilities: ps.capabilities ?? row.capabilities, title: ps.title ?? row.title, last_active_at: ev.ts };
       } else this.byId[ev.session_id] = { ...row, last_active_at: ev.ts };
     }
     // How the turn ended stays on the row until the next one starts — live,
@@ -436,7 +459,7 @@ class RuntimeThreads {
       if (!refused) throw e;
       created = await api.post<RuntimeSession>(path, body);
     }
-    this.byId[created.id] = created;
+    this.put(created);
     if (req.plan) this.planIds[created.id] = true;
     this.emitSequence(created.id, created.last_sequence);
     const pics = (req.attachments ?? []).filter((f) => f.mime.startsWith('image/'));
@@ -485,12 +508,15 @@ class RuntimeThreads {
     return hit;
   }
 
-  /** "Ask another agent" (or several): new threads linked to `parentId`,
+  /** "Delegate to…" (or several): new threads linked to `parentId`,
    *  each sent `req.prompt`; all or none. Their rows land before this resolves. */
   async askChildren(parentId: string, req: AskChildReq): Promise<RuntimeSession[]> {
     const { children } = await api.post<AskChildResp>(`/runtime-sessions/${parentId}/children`, req);
     for (const c of children) {
-      this.byId[c.id] = c;
+      // A fast subagent's turn can end before this answer lands: keep the
+      // newer live status its events already brought (`put`), never a stale
+      // "working" that would keep "Waiting on …" up until a reload.
+      this.put(c);
       this.emitSequence(c.id, c.last_sequence);
     }
     return children;
@@ -653,3 +679,20 @@ uiControl.addSource({
   },
 });
 
+
+/** The row change a `provider_session.updated` carrying `provider` makes:
+ *  `{}` when the thread still runs there, else its new provider, account
+ *  slug (`meta.provider_slug`, kept only for a named account) and model. */
+function providerPatch(
+  row: Pick<RuntimeSession, 'provider' | 'meta' | 'model'>,
+  provider: RuntimeProvider,
+  slug: string | undefined,
+  model: string | null,
+): Partial<Pick<RuntimeSession, 'provider' | 'meta' | 'model'>> {
+  const to = slug || provider;
+  if (row.provider === provider && sessionProviderSlug(row) === to) return {};
+  const meta: Record<string, unknown> = { ...(row.meta ?? {}) };
+  if (to !== provider) meta.provider_slug = to;
+  else delete meta.provider_slug;
+  return { provider, meta, model: model ?? undefined };
+}

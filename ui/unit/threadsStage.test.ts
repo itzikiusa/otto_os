@@ -137,7 +137,7 @@ test('toolbar ⋯ on desktop: at most 9 entries, one terminal, layout in View', 
     'Open in IDE', 'Rename…', 'Terminal drawer', 'Allow UI control', 'Continue on phone…', '—', 'Close thread…', 'Delete thread…', '—', RELATED_LABEL, 'View',
   ]);
   const view = items.find((i) => i.label === 'View');
-  assert.deepEqual(labels(view?.children ?? []), ['Single thread', 'Split', 'Grid', '—', 'Project card']);
+  assert.deepEqual(labels(view?.children ?? []), ['Single thread', 'Split', 'Grid', '—', 'Thread details']);
   // The page's drawer open: that one (checked) replaces the thread's.
   const open = threadsPageMenu({ threadItems: runtimeItems, layout: 'single', terminalOpen: true, cardOn: false, threadId: 'x', sidebarVisible: true }, acts);
   const term = open.filter((i) => /terminal/i.test(i.label ?? ''));
@@ -167,4 +167,8 @@ test('right panel at 1280 gives way to keep the conversation, and the saved widt
   assert.equal(fitRightPanel(380, 1236, 0), 380);
   assert.equal(fitRightPanel(380, 1000, 272), 300);
   assert.equal(fitRightPanel(420, 1680, 272), 420);
+  // Beside an open surface at 1440 with the list open (stage 1396): ≥ 480 for Changes.
+  assert.ok(fitRightPanel(520, 1396, 272, 600) >= 480);
+  // "Wide": everything but the conversation's floor.
+  assert.equal(fitRightPanel(1396, 1396, 272), 1396 - 272 - 640 - 8);
 });

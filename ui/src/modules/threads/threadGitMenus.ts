@@ -3,9 +3,9 @@
 // scripts. Every action routes through an existing Otto store/endpoint — the
 // git store's checkout, `GET /repos/{id}/worktrees`, the Git page, the
 // inspector — so nothing here owns git state.
-import { api } from '../../lib/api/client';
+import { api, postNdjsonStream } from '../../lib/api/client';
 import { gitApi } from '../../lib/api/git';
-import type { Repo, WorktreeCreateReq, WorktreeInfo } from '../../lib/api/types';
+import type { Repo, WorktreeCreateReq, WorktreeCreated, WorktreeInfo, WorktreeSetupResult, WorktreeSetupSetting } from '../../lib/api/types';
 import { copyWithToast } from '../../lib/clipboard';
 import { confirmer } from '../../lib/confirm.svelte';
 import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
@@ -16,6 +16,7 @@ import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
 import { toasts } from '../../lib/toast.svelte';
 import { toastError } from '../../lib/toastError';
 import { compactPath, projectNameFromCwd } from './threadsHelpers';
+import { worktreeProjects } from './worktreeProjects.svelte';
 import { threads, type ProjectScript } from './threadsStore.svelte';
 
 /** `feature/very-long-name…tail` → keeps both ends readable (T3's ref list). */
@@ -92,6 +93,18 @@ async function createBranch(repo: Repo): Promise<void> {
   }
 }
 
+/** The new-thread stage's "New worktree" intent (NewThreadStage.svelte): the
+ *  worktree is made when the first message is sent, so choosing it only
+ *  records it — no name asked first. */
+export interface NewWorktreeChoice {
+  /** It is the stage's current choice. */
+  pending: boolean;
+  /** Chose "New worktree" (from `base`, the main checkout's branch). */
+  onNew: (base: string | null) => void;
+  /** "Name the branch…" (only while pending). */
+  onName: () => void;
+}
+
 /** "Current checkout" vs the repo's other worktrees (T3's checkout picker);
  *  `threadsHere` counts the open threads already working in a checkout. */
 export async function openCheckoutMenu(
@@ -99,7 +112,8 @@ export async function openCheckoutMenu(
   repo: Repo,
   cwd: string,
   onPick: (path: string, branch: string | null) => void,
-  threadsHere?: (path: string) => number,
+  threadsHere: ((path: string) => number) | undefined,
+  newWt: NewWorktreeChoice,
 ): Promise<void> {
   let list: WorktreeInfo[] = [];
   try {
@@ -118,59 +132,87 @@ export async function openCheckoutMenu(
         label: w.is_main ? 'Current checkout' : projectNameFromCwd(w.path),
         hint: [w.branch ?? 'detached', n > 0 ? `${n} ${n === 1 ? 'thread' : 'threads'} here` : ''].filter(Boolean).join(' · '),
         title: compactPath(w.path, home),
-        checked: here === w.path.replace(/\/+$/, '') || (w.is_main && here.startsWith(`${w.path.replace(/\/+$/, '')}/`)),
+        checked: !newWt.pending && (here === w.path.replace(/\/+$/, '') || (w.is_main && here.startsWith(`${w.path.replace(/\/+$/, '')}/`))),
         action: () => onPick(w.path, w.branch),
       };
     });
+  const base = list.find((w) => w.is_main)?.branch ?? git.statusById[repo.id]?.branch ?? null;
   items.push(
-    { label: 'New worktree…', icon: 'plus', action: () => void newWorktree(repo, list, onPick) },
+    { label: 'New worktree', icon: 'plus', checked: newWt.pending, hint: base ? `from ${base}` : undefined, title: 'Made when you send: a new branch named from your message, in its own folder', action: () => newWt.onNew(base) },
+    ...(newWt.pending ? [{ label: 'Name the branch…', icon: 'edit', action: newWt.onName } satisfies MenuItem] : []),
     { separator: true },
     { label: 'Manage worktrees in Git', icon: 'worktree', action: () => router.go(`git/${encodeURIComponent(repo.id)}`) },
   );
   ctxMenu.showAt(anchor, items, { align: 'start' });
 }
 
-/** "Use a new worktree" outside the checkout menu (the stage's same-checkout
- *  line): the same prompt, from the repo's main checkout branch. */
-export async function startNewWorktree(repo: Repo, onPick: (path: string, branch: string | null) => void): Promise<void> {
+/** The main checkout's branch: what a new worktree starts from. */
+export async function worktreeBase(repo: Repo): Promise<string | null> {
   const list = await api.get<WorktreeInfo[]>(`/repos/${encodeURIComponent(repo.id)}/worktrees`).catch(() => [] as WorktreeInfo[]);
-  await newWorktree(repo, list, onPick);
+  return list.find((w) => w.is_main)?.branch ?? git.statusById[repo.id]?.branch ?? null;
 }
 
-/** A new branch in a new worktree beside the repo, from the current branch
- *  (`POST /repos/{id}/worktrees`); the thread then starts in it. */
-async function newWorktree(
-  repo: Repo,
-  list: WorktreeInfo[],
-  onPick: (path: string, branch: string | null) => void,
-): Promise<void> {
-  const base = list.find((w) => w.is_main)?.branch ?? git.statusById[repo.id]?.branch ?? null;
-  const name = await confirmer.promptText(
-    `Creates a new branch${base ? ` from ${base}` : ''} checked out in its own folder next to ${repo.name}; the thread starts there.`,
-    {
-      title: 'New worktree',
-      confirmLabel: 'Create',
-      placeholder: 'feature/my-change',
-      validate: (v) => (/^[^\s~^:?*[\\]+$/.test(v.trim()) && !v.trim().startsWith('-') ? null : 'Enter a valid branch name'),
-    },
-  );
-  if (!name) return;
+/** Every branch name a new worktree's branch must not reuse: the local
+ *  branches (`GET /repos/{id}/refs`); the repo's base branch alongside. */
+export async function takenBranches(repo: Repo): Promise<{ branches: string[]; base: string | null }> {
+  const read = await gitApi.readRefs(repo.id);
+  if (!read.refs) throw new Error(loadErrorText(read.error));
+  return { branches: read.refs.local.map((b) => b.name), base: read.refs.base_branch ?? null };
+}
+
+/** A new branch in a new worktree beside the repo (`POST /repos/{id}/worktrees`),
+ *  given what the main checkout's `.worktreeinclude` names (`prepared`). */
+export function createWorktree(repo: Repo, branch: string, base: string | null): Promise<WorktreeCreated> {
+  return api
+    .post<WorktreeCreated>(`/repos/${encodeURIComponent(repo.id)}/worktrees`, { branch, ...(base ? { base } : {}) } satisfies WorktreeCreateReq)
+    .then((w) => (worktreeProjects.note(repo, w), w));
+}
+
+/** Run the repo's setup command in its new worktree at `path` (on the
+ *  daemon); `online` hears its latest output line while it runs (streamed). */
+export async function runWorktreeSetup(repo: Repo, path: string, online: (line: string) => void): Promise<WorktreeSetupResult> {
+  let result: WorktreeSetupResult | null = null;
+  let error: string | null = null;
+  await postNdjsonStream(`/repos/${encodeURIComponent(repo.id)}/worktrees/setup`, { path }, (o) => {
+    const m = o as { line?: string; result?: WorktreeSetupResult; error?: string };
+    if (typeof m.line === 'string') online(m.line);
+    if (m.result) result = m.result;
+    if (m.error) error = m.error;
+  });
+  if (!result) throw new Error(error ?? 'The setup stopped without a result');
+  return result;
+}
+
+/** Set (`command`) or clear (null) the command every new worktree of `repo`
+ *  runs once it is made — kept on the daemon (setting `worktree_setup`), so
+ *  a worktree made from the phone runs it too. */
+async function saveWorktreeSetup(repo: Repo, command: string | null): Promise<void> {
   try {
-    const w = await api.post<WorktreeInfo>(`/repos/${encodeURIComponent(repo.id)}/worktrees`, {
-      branch: name.trim(),
-      ...(base ? { base } : {}),
-    } satisfies WorktreeCreateReq);
-    toasts.success('Worktree created', w.path);
-    onPick(w.path, w.branch);
+    // Keyed by the main checkout: every worktree of the repository shares it.
+    const list = await api.get<WorktreeInfo[]>(`/repos/${encodeURIComponent(repo.id)}/worktrees`);
+    const key = list.find((w) => w.is_main)?.path ?? repo.path;
+    const all = await api.get<Record<string, unknown>>('/settings');
+    const next: WorktreeSetupSetting = { ...((all.worktree_setup as WorktreeSetupSetting | undefined) ?? {}) };
+    const cmd = command?.trim() ?? '';
+    if (cmd) next[key] = { name: cmd.length > 40 ? `${cmd.slice(0, 39)}…` : cmd, command: cmd };
+    else delete next[key];
+    await api.put('/settings', { worktree_setup: next });
+    toasts.success(cmd ? 'New worktrees will run' : 'No worktree setup', cmd || undefined);
   } catch (e) {
-    toastError('Couldn’t create the worktree', e);
+    toastError('Couldn’t save the worktree setup', e);
   }
 }
 
+/** A branch name the person types (the same rule `git` applies, roughly). */
+export const BRANCH_NAME_OK = (v: string): string | null =>
+  /^[^\s~^:?*[\\]+$/.test(v.trim()) && !v.trim().startsWith('-') ? null : 'Enter a valid branch name';
+
 /** Otto has no native-editor launcher, so "Open in" offers the places Otto
  *  itself can open a folder: the Files inspector, the Git page, a terminal
- *  thread — plus copying the path for any outside editor. */
+ *  thread — plus copying the path for any outside editor, and the folder's
+ *  project scripts (run one in a terminal thread, or add one). */
 export function openOpenInMenu(anchor: Element, opts: { cwd: string; repo: Repo | null }): void {
+  const scripts = threads.scriptsFor(opts.cwd);
   const items: MenuItem[] = [
     { label: 'Files', icon: 'file', hint: 'Inspector', action: () => threads.setInspectorTab('files') },
     ...(opts.repo
@@ -179,6 +221,31 @@ export function openOpenInMenu(anchor: Element, opts: { cwd: string; repo: Repo 
     { label: 'Terminal', icon: 'terminal', hint: 'New shell thread', action: () => void runInShell(opts.cwd, null) },
     { separator: true },
     { label: 'Copy path', icon: 'copy', action: () => void copyWithToast(opts.cwd, 'path') },
+    { separator: true },
+    ...scripts.map((s): MenuItem => ({
+      label: s.name,
+      icon: 'play',
+      title: `Run “${s.command}” in a terminal thread`,
+      children: [
+        { label: 'Run', icon: 'play', action: () => void runInShell(opts.cwd, s) },
+        { label: 'Copy command', icon: 'copy', action: () => void copyWithToast(s.command, 'command') },
+        { label: 'Remove script', icon: 'x', action: () => threads.removeScript(opts.cwd, s.name) },
+      ],
+    })),
+    { label: 'Add project script…', icon: 'plus', disabled: !opts.cwd, action: () => void promptNewScript(opts.cwd) },
+    // What a new worktree of this repo runs once it is made: one of these scripts or another command.
+    ...(opts.repo
+      ? [{
+          label: 'Worktree setup',
+          icon: 'branch',
+          title: 'A command every new worktree of this repo runs once it is made',
+          children: [
+            ...scripts.map((s): MenuItem => ({ label: `Run “${s.name}”`, icon: 'play', action: () => void saveWorktreeSetup(opts.repo!, s.command) })),
+            { label: 'Other command…', icon: 'plus', action: () => void promptWorktreeSetup(opts.repo!) },
+            { label: 'None', icon: 'x', action: () => void saveWorktreeSetup(opts.repo!, null) },
+          ],
+        } satisfies MenuItem]
+      : []),
   ];
   ctxMenu.showAt(anchor, items, { align: 'end' });
 }
@@ -204,6 +271,16 @@ export async function runInShell(cwd: string, script: ProjectScript | null): Pro
   }
 }
 
+async function promptWorktreeSetup(repo: Repo): Promise<void> {
+  const command = await confirmer.promptText('Runs in every new worktree of this repo once it is made, e.g. "npm ci". Its output shows while it runs.', {
+    title: 'Worktree setup',
+    confirmLabel: 'Save',
+    placeholder: 'npm ci',
+    validate: (v) => (v.trim() ? null : 'Enter a command'),
+  });
+  if (command) await saveWorktreeSetup(repo, command);
+}
+
 export async function promptNewScript(project: string): Promise<void> {
   const command = await confirmer.promptText(
     'A shell command for this project, e.g. "npm run dev". Running it opens a terminal thread in the project folder.',
@@ -219,12 +296,3 @@ export async function promptNewScript(project: string): Promise<void> {
   threads.addScript(project, { name: cmd.length > 40 ? `${cmd.slice(0, 39)}…` : cmd, command: cmd });
 }
 
-export function showScriptMenu(e: MouseEvent, project: string, script: ProjectScript): void {
-  e.preventDefault();
-  ctxMenu.show(e, [
-    { label: 'Run', icon: 'play', action: () => void runInShell(project, script) },
-    { label: 'Copy command', icon: 'copy', action: () => void copyWithToast(script.command, 'command') },
-    { separator: true },
-    { label: 'Remove script', icon: 'x', action: () => threads.removeScript(project, script.name) },
-  ]);
-}

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
+  import { whenIdle } from '../../lib/lazy-component.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { phoneDevice } from '../../lib/stores/phoneDevice.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -7,13 +8,11 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import Drawer from '../../shell/Drawer.svelte';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
-  import StatusDot from '../../lib/components/StatusDot.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { keyContext } from '../../lib/keys';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toastError } from '../../lib/toastError';
-  import { events } from '../../lib/events.svelte';
   import { loadPaneWidth } from '../../lib/paneResizer';
   import { router } from '../../lib/router.svelte';
   import { openFile } from '../../lib/stores/openfile.svelte';
@@ -24,26 +23,28 @@
   import { keyboard } from '../../lib/stores/keyboard.svelte';
   import { trackComposerFocus, typingChrome } from './threadsTyping'; import { consumeThreadDraftHandoff } from './recapThreadConsumer';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
-  import { sessionState } from '../../lib/status';
-  import NewThreadStage from './NewThreadStage.svelte';
   import ThreadCanvas from './ThreadCanvas.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   const ThreadInspector = lazyComponent(() => import('./ThreadInspector.svelte'));
   import LazyMount from '../../lib/components/LazyMount.svelte';
-  import { ProjectCardView, PullRequestsView, StartRoomView, TerminalDock, ThreadSheetsView } from './threadLazy.svelte';
+  import { DetailsCardView, NewThreadStageView, RelatedListView, PullRequestsView, StartRoomView, TerminalDock, ThreadSheetsView } from './threadLazy.svelte';
   import { threadRepos } from './threadRepos.svelte';
   import { threadsChrome } from './threadsChrome.svelte';
   import ThreadSidebar from './ThreadSidebar.svelte';
   import { buildThreadMenu } from './threadMenu';
   import ThreadParentChip from './runtime/ThreadParentChip.svelte';
-  import RelatedThreadsChip from './RelatedThreadsChip.svelte';
+  import ProjectBadge from './ProjectBadge.svelte';
+  import ThreadPopover from './ThreadPopover.svelte';
+  import { CARD_RESERVE, cardFloats } from './threadDetails';
   import { relatedPopover } from './relatedPopover.svelte';
   import { threadsPageMenu } from './threadsPageMenu';
-  import { fitRightPanel } from './threadsLayout';
+  import { threadPrefs } from './runtime/threadPrefs.svelte';
+  import { MIN_CONVERSATION_BESIDE_SURFACE_W, MIN_CONVERSATION_W, SURFACE_W, fitRightPanel } from './threadsLayout';
   import { prepareDeepLink } from '../../lib/deepLinkOpen';
   import { runtimeThreadMenu } from './runtime/runtimeMenu';
   import { asThreadSession, isRuntimeThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
-  import { isThreadSession, projectNameFromCwd } from './threadsHelpers';
+  import { mcpServersSheet } from './runtime/mcpServersSheet.svelte';
+  import { isThreadSession, projectName } from './threadsHelpers';
   import { threadOrigin } from './threadOrigins';
   import { personalAgentName } from '../../lib/personalAgentBadges';
   import { threads, type ThreadsLayoutMode } from './threadsStore.svelte';
@@ -54,6 +55,10 @@
 
   let sidebarW = $state(loadPaneWidth(SIDEBAR_W_KEY, 272, 240, 380));
   let inspectorW = $state(loadPaneWidth(INSPECTOR_W_KEY, 380, 300, 560));
+  // A surface opens wider, at its own remembered width; "wide" gives it all but the conversation's floor.
+  const SURFACE_W_KEY = 'threads.surfaceW';
+  let surfaceW = $state(loadPaneWidth(SURFACE_W_KEY, SURFACE_W, 300, 1200));
+  const surfaceOpen = $derived(threadsChrome.surfaces.includes(threads.inspectorTab));
   let stageWidth = $state(1280);
   let centerWidth = $state(1000);
   let roomSessionId = $state<string | null>(null);
@@ -70,7 +75,14 @@
   // At 1280 with both panels open the right panel gives way (never below its
   // minimum) so the conversation keeps ~640 px; a manual width comes back
   // whenever there is room for it.
-  const inspectorShownW = $derived(fitRightPanel(inspectorW, stageWidth, !listDrawer && threads.sidebarOpen ? sidebarW : 0));
+  const inspectorShownW = $derived(
+    fitRightPanel(
+      threadsChrome.maximized ? stageWidth : surfaceOpen ? surfaceW : inspectorW,
+      stageWidth,
+      !listDrawer && threads.sidebarOpen ? sidebarW : 0,
+      surfaceOpen ? MIN_CONVERSATION_BESIDE_SURFACE_W : MIN_CONVERSATION_W,
+    ),
+  );
 
   $effect(() => threads.setInspectorCompact(compact));
 
@@ -108,6 +120,17 @@
     if (id) untrack(() => runtimeThreads.markRead(id));
   });
 
+  // ⌘K opens on these threads, what needs you first (threadSwitcherSource;
+  // its own chunk, so the page does not carry it).
+  onMount(() => {
+    let off: (() => void) | null = null;
+    let gone = false;
+    void import('./threadSwitcherSource.svelte').then((m) => (gone ? undefined : (off = m.installThreadSwitcher())));
+    return () => {
+      gone = true;
+      off?.();
+    };
+  });
   // Subscribe to live cross-session messages + MCP DB activity while mounted.
   onMount(() => threads.mountLive());
   // The header's phone button used to learn this at mount; with the handoff
@@ -264,6 +287,9 @@
     };
   });
 
+  // The new-thread stage is its own chunk: fetched while idle, so New thread opens at once.
+  $effect(() => { const t = setTimeout(() => NewThreadStageView.prefetch(), 1500); return () => clearTimeout(t); });
+
   // Register ⌘K commands while Threads is open.
   $effect(() =>
     registry.register('threads', [
@@ -275,6 +301,10 @@
         keywords: 'start create thread claude codex antigravity',
         run: () => threads.startNewThread({ workspaceId: ws.currentId }),
       },
+      // Off the toolbar ⋯ (≤ 9 entries): the card's "MCP · N servers" row and here.
+      ...(focused && runtimeThreads.get(focused.id)
+        ? [{ id: 'threads.mcp-servers', title: 'MCP servers for this thread', group: 'Threads', keywords: 'mcp tools servers missing', run: () => mcpServersSheet.open(focused!.id) }]
+        : []),
       {
         id: 'threads.layout.single',
         title: 'Threads layout: 1-up single view',
@@ -328,19 +358,12 @@
     const rt = runtimeThreads.get(id);
     return ws.getSession(id) ?? (rt ? asThreadSession(rt) : null);
   });
-  const focusedState = $derived(
-    focused
-      ? sessionState(focused, ws.statusMap[focused.id] ?? focused.status, ws.needsYou[focused.id] === true, {
-          stale: events.state !== 'connected',
-        })
-      : null,
-  );
   const crumbProject = $derived.by(() => {
     // A personal agent's thread: its agent's name, never its folder's id.
     const agent = focused ? personalAgentName(focused.meta as Record<string, unknown> | undefined, focused.title) : null;
     if (agent && !showWelcomeStage) return agent;
     const cwd = focused?.cwd ?? (showWelcomeStage ? threads.stageCwd : null) ?? ws.current?.root_path ?? null;
-    return cwd ? projectNameFromCwd(cwd, ws.current?.name ?? 'Workspace') : (ws.current?.name ?? 'Scratch');
+    return cwd ? projectName(cwd, ws.current?.name ?? 'Workspace') : (ws.current?.name ?? 'Scratch');
   });
   const crumbTitle = $derived(showWelcomeStage ? 'New thread' : (focused?.title ?? 'Thread'));
   async function renameFocusedThread(): Promise<void> {
@@ -358,39 +381,27 @@
     focused?.cwd ?? (showWelcomeStage ? threads.stageCwd : null) ?? ws.current?.root_path ?? null,
   );
   const contextRepo = $derived(threadRepos.repoFor(contextCwd, focused?.workspace_id ?? ws.currentId));
-  const maximized = $derived(!compact && threads.inspectorOpen && threadsChrome.maximized);
-  // T3's floating project card: remembered toggle, only where it can't crowd
-  // the column, and out of the way of the terminal drawer and the right panel.
+  // Thread details (ThreadDetailsCard): float top-right beside ONE
+  // conversation while the right panel is closed and a whole reading column
+  // is left over (threadDetails.ts `cardFloats`) — the column then centres in
+  // the space left of it (`--thread-card-reserve` on .th-stage), so the card
+  // never covers a message. Anywhere else the card heads the right panel.
+  // Hidden with its ×, remembered on this device; ⋯ › View brings it back.
   const cardRoom = $derived(
-    !compact && !threads.inspectorOpen && !threadsChrome.terminalOpen && !threadsChrome.stageView && centerWidth >= 1100,
+    cardFloats({
+      centerWidth,
+      compact,
+      rightPanel: threads.inspectorOpen,
+      panes: showWelcomeStage ? 1 : threads.paneIds.length,
+      altView: !!threadsChrome.stageView,
+    }),
   );
-  const showStageCard = $derived(cardRoom && threadsChrome.cardVisible);
-  // Over a conversation the card is T3's header popover (ThreadDetailsCard's
-  // popover mode): opened from the toolbar, closed by an outside click or
-  // Esc, never left pinned over the timeline.
-  let cardOpen = $state(false);
-  const cardPopover = $derived(cardOpen && !compact && !threads.inspectorOpen && !showWelcomeStage && !threadsChrome.stageView);
-  // T3's inline placement: where the column can spare it, the conversation
-  // makes room beside the open card; where it can't, the card docks above
-  // the timeline and pushes it down. It never runs over a message.
-  const cardReserve = $derived(cardPopover && centerWidth >= 840);
-  $effect(() => {
-    if (!cardPopover) return;
-    const onDown = (e: PointerEvent): void => {
-      const t = e.target as Element | null;
-      // Menus and sheets the card opens live outside it.
-      if (!t?.closest('.th-card-pop, [data-testid="threads-thread-menu"], .ctx-menu, [role="dialog"]')) cardOpen = false;
-    };
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape' && !document.querySelector('.ctx-menu, [role="dialog"]')) cardOpen = false;
-    };
-    window.addEventListener('pointerdown', onDown, true);
-    window.addEventListener('keydown', onKey);
-    return () => {
-      window.removeEventListener('pointerdown', onDown, true);
-      window.removeEventListener('keydown', onKey);
-    };
-  });
+  const cardShown = $derived(cardRoom && threadsChrome.cardVisible && !!contextCwd);
+  // The card mounts once the opened thread has painted (its space is already
+  // reserved by the layout rule, so nothing moves when it appears).
+  let cardIdle = $state(false);
+  $effect(() => { void focused?.id; cardIdle = false; return whenIdle(() => (cardIdle = true), 300); });
+  let menuBtn = $state<HTMLButtonElement | null>(null);
 
   // The toolbar's one ⋯: the focused thread's actions, then the view toggles
   // that used to be their own toolbar buttons (threadsPageMenu.ts).
@@ -403,19 +414,24 @@
         threadItems,
         layout: threads.layoutMode,
         terminalOpen: threadsChrome.terminalOpen,
-        cardOn: compact ? null : showWelcomeStage ? threadsChrome.cardVisible : cardPopover,
+        cardOn: cardRoom ? threadsChrome.cardVisible : null,
         threadId: focused?.id ?? null,
-        compact,
+        compact, touch: typeof matchMedia === 'function' && matchMedia('(hover: none) and (pointer: coarse)').matches,
         // A phone on its side is tablet-wide but still the phone: no hand-off to itself.
         phone: viewport.isPhone || viewport.isShort,
         sidebarVisible: !listDrawer && threads.sidebarOpen,
+        midTurn: threadPrefs.midTurn,
+        tools: threadPrefs.tools,
       },
       {
         newThread: () => threads.startNewThread({ workspaceId: ws.currentId }),
         related: (id) => relatedPopover.open(id),
-        toggleCard: () => (showWelcomeStage ? threadsChrome.toggleCard() : (cardOpen = !cardPopover)),
+        toggleCard: () => threadsChrome.toggleCard(),
         layout: pickLayout,
         toggleTerminal: () => threadsChrome.setTerminal(!threadsChrome.terminalOpen),
+        setMidTurn: (m) => threadPrefs.setMidTurn(m),
+        setTools: (t) => threadPrefs.setTools(t),
+        jump: focused && isRuntimeThread(focused) ? () => window.dispatchEvent(new CustomEvent('otto:thread-jump', { detail: { sessionId: focused.id } })) : undefined,
       },
     ));
   }
@@ -483,9 +499,9 @@
 
     {#snippet titleContent()}
       <span class="th-crumbs" data-testid="threads-breadcrumb">
+        <ProjectBadge name={crumbProject} />
         <span class="th-crumb-project ellipsis" dir="auto">{crumbProject}</span>
         <span class="th-crumb-sep" aria-hidden="true">/</span>
-        {#if focusedState}<StatusDot state={focusedState} />{/if}
         {#if focused}
           <button type="button" class="th-crumb-title th-crumb-btn ellipsis" dir="auto" title="{crumbTitle} — double-click to rename" ondblclick={() => void renameFocusedThread()} onkeydown={(e) => { if (e.key === 'F2') { e.preventDefault(); void renameFocusedThread(); } }}>{crumbTitle}</button>
         {:else}
@@ -495,7 +511,7 @@
     {/snippet}
 
     {#snippet badge()}
-      {#if focused}<span class="th-header-chips"><RelatedThreadsChip threadId={focused.id} onstartroom={(sid) => (roomSessionId = sid)} /><ThreadParentChip threadId={focused.id} /></span>{/if}
+      {#if focused}<span class="th-header-chips"><ThreadParentChip threadId={focused.id} /></span>{/if}
     {/snippet}
 
     {#snippet actions()}
@@ -506,7 +522,7 @@
         aria-pressed={rightOpen}
         aria-label="Right panel"
         title={rightOpen ? 'Hide the right panel' : 'Show the right panel: files, changes, pull request, side chat'}
-        data-icon="panel"
+        data-icon="panel" data-keep
         data-testid="threads-toggle-inspector"
         onclick={toggleRightBar}
       >
@@ -518,9 +534,10 @@
         aria-haspopup="menu"
         aria-label="Thread and view actions"
         title="More: thread actions, project card, terminal, layout"
-        data-icon="more"
+        data-icon="more" data-keep
         data-testid="threads-thread-menu"
-        onpointerenter={() => TerminalDock.prefetch()}
+        bind:this={menuBtn}
+        onpointerenter={() => { TerminalDock.prefetch(); RelatedListView.prefetch(); }}
         onclick={openThreadMenu}
       >
         <Icon name="more" size={14} />
@@ -544,22 +561,24 @@
         />
       {/if}
 
-      <div class="th-center-col" class:th-hidden={maximized} bind:clientWidth={centerWidth}>
+      <div class="th-center-col" bind:clientWidth={centerWidth}>
         {#if threadListError && !(liveThreadIds.length === 0 && showWelcomeStage)}
           <LoadState what="threads" variant="compact" error={threadListError} onretry={retryThreads} />
         {/if}
-        <div class="th-stage" class:th-card-reserve={cardReserve}>
+        <div class="th-stage" style:--thread-card-reserve={cardShown ? `${CARD_RESERVE}px` : '0px'}>
           {#if threadListError && liveThreadIds.length === 0 && showWelcomeStage}
             <LoadState what="threads" error={threadListError} empty onretry={retryThreads} />
           {:else if threadsChrome.stageView === 'prs'}
             <LazyMount lazy={PullRequestsView} what="pull requests" variant="panel" props={{ repo: contextRepo }} />
           {:else if showWelcomeStage}
-            <NewThreadStage showCard={showStageCard} />
+            <LazyMount lazy={NewThreadStageView} what="the new thread" variant="panel" props={{}} />
           {:else}
             <ThreadCanvas onstartroom={(sid) => (roomSessionId = sid)} />
-            {#if cardPopover && contextCwd && ProjectCardView.component}
-              <div class="th-card-pop" class:docked={!cardReserve}><ProjectCardView.component floating cwd={contextCwd} /></div>
-            {/if}
+          {/if}
+          {#if cardShown && cardIdle && contextCwd && DetailsCardView.component}
+            <div class="th-card-float">
+              <DetailsCardView.component floating cwd={contextCwd} threadId={focused?.id ?? null} ondismiss={() => threadsChrome.toggleCard()} />
+            </div>
           {/if}
         </div>
         {#if threadsChrome.terminalOpen}
@@ -569,15 +588,15 @@
 
       {#if !compact && threads.inspectorOpen}
         <PaneDivider
-          bind:width={inspectorW}
-          storageKey={INSPECTOR_W_KEY}
+          bind:width={() => (surfaceOpen ? surfaceW : inspectorW), (v) => (surfaceOpen ? (surfaceW = v) : (inspectorW = v))}
+          storageKey={surfaceOpen ? SURFACE_W_KEY : INSPECTOR_W_KEY}
           min={300}
-          max={560}
-          defaultWidth={380}
+          max={surfaceOpen ? 1200 : 560}
+          defaultWidth={surfaceOpen ? SURFACE_W : 380}
           invert
           label="Resize thread inspector"
         />
-        <div class="th-right-col" class:th-max={maximized} style:inline-size={maximized ? null : `${inspectorShownW}px`}>
+        <div class="th-right-col" style:inline-size={`${inspectorShownW}px`}>
           <LazyMount lazy={ThreadInspector} what="the thread details" variant="panel" props={{}} />
         </div>
       {/if}
@@ -592,7 +611,7 @@
       {/if}
       {#if compact}
         <Drawer bind:open={threads.inspectorOverlayOpen} side="right" title="Thread details" width="min(420px, 100vw)">
-          <LazyMount lazy={ThreadInspector} what="the thread details" variant="panel" props={{ showCard: true }} />
+          <LazyMount lazy={ThreadInspector} what="the thread details" variant="panel" props={{}} />
         </Drawer>
       {/if}
     </div>
@@ -601,6 +620,15 @@
 
 {#if threadsChrome.sheet && ThreadSheetsView.component}
   <ThreadSheetsView.component />
+{/if}
+
+<!-- ⋯ › Send to another thread…: message a thread, open one beside, start a
+     room — under the toolbar's ⋯ (the details card lists the subagents). -->
+{#if relatedPopover.openFor && menuBtn && RelatedListView.component}
+  {@const relatedId = relatedPopover.openFor}
+  <ThreadPopover anchor={menuBtn} label="Send to another thread" testid="threads-related-popover" onclose={() => relatedPopover.close()}>
+    <RelatedListView.component threadId={relatedId} onstartroom={(sid: string) => (roomSessionId = sid)} ondone={() => relatedPopover.close()} />
+  </ThreadPopover>
 {/if}
 
 {#if roomSessionId && StartRoomView.component}
@@ -620,11 +648,12 @@
     color: var(--accent-text);
   }
   .th-crumbs {
-    display: inline-flex;
+    display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--sp-4);
     min-width: 0;
-    font-size: var(--fs-m);
+    max-inline-size: 100%;
+    font-size: var(--fs-l);
     font-weight: 400;
   }
   .th-header-chips { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
@@ -635,11 +664,11 @@
   .th-crumb-sep {
     color: var(--text-dim);
   }
-  .th-crumb-title { color: var(--text); font-weight: 500; min-width: 0; }
-  .th-crumb-btn { border: 0; background: none; padding: 0 2px; border-radius: var(--radius-s); font: inherit; font-weight: 500; color: var(--text); cursor: default; }
-  .th-crumb-btn:hover { background: var(--hover); }
+  .th-crumb-title { color: var(--text); font-weight: 600; min-width: 0; }
+  .th-crumb-btn { border: 0; background: none; padding: 0 2px; border-radius: var(--radius-s); font: inherit; font-weight: 600; color: var(--text); cursor: default; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  @media (hover: hover) { .th-crumb-btn:hover { background: var(--hover); } } /* never a "selected" look on touch */
   @media (max-width: 640px), (max-height: 500px) and (pointer: coarse) {
-    .th-crumb-project, .th-crumb-sep { display: none; }
+    .th-crumbs > :global(.pb), .th-crumb-project, .th-crumb-sep { display: none; }
   }
   /* A phone on its side: the one header row is a little lower. */
   @media (max-height: 500px) and (pointer: coarse) {
@@ -669,32 +698,19 @@
     display: flex;
     flex-direction: column;
   }
-  .th-card-pop.docked {
-    position: static;
-    order: -1;
-    flex-shrink: 0;
-    max-block-size: 50%;
-    margin-block: 8px 0;
-    margin-inline: auto 12px;
+  /* While the details card floats, the conversation keeps out of its way. */
+  .th-stage {
+    padding-inline-end: var(--thread-card-reserve, 0px);
   }
-  .th-stage.th-card-reserve {
-    padding-inline-end: 324px;
-  }
-  .th-card-pop {
+  .th-card-float {
     position: absolute;
-    inset-block-start: 8px;
-    inset-inline-end: 12px;
-    inline-size: min(300px, calc(100% - 24px));
-    max-block-size: calc(100% - 16px);
+    inset-block-start: var(--sp-6);
+    inset-inline-end: 16px;
+    inline-size: calc(var(--thread-card-reserve) - 32px);
+    max-block-size: calc(100% - 2 * var(--sp-6));
     overflow-y: auto;
     border-radius: var(--radius-l);
     z-index: var(--z-sticky);
-  }
-  .th-center-col.th-hidden {
-    display: none;
-  }
-  .th-right-col.th-max {
-    flex: 1;
   }
   .th-center-col {
     flex: 1;
@@ -710,6 +726,9 @@
      the composer keeps its size, and the timeline keeps a one-line peek. */
   .th-page :global(.rt-scroll) {
     min-block-size: 22px;
+    /* Opaque like the pane: on Android Chrome the see-through scroller kept a
+       stale copy of the composer after the keyboard closed. */
+    background: var(--bg);
   }
   .th-page :global(.rt-dock) {
     min-block-size: 0;
@@ -768,21 +787,5 @@
   }
   .th-page.kb-dockhead :global(.rt-dock :is(.ad-body, .ad-jump)) {
     display: none;
-  }
-  /* A narrow phone (iPhone SE): the composer's foot stays ONE row — send /
-     stop, attach and the model chip (truncated, never below ~5 letters); the
-     access mode shows as its icon (its name stays in the label and the
-     menu) instead of wrapping both chips onto a row of their own. */
-  @media (pointer: coarse) {
-    @container (max-inline-size: 420px) {
-      .th-page :global(.rt-foot) { flex-wrap: nowrap; }
-      .th-page :global(.rt-foot .rt-grow) { order: 0; flex-basis: auto; flex-wrap: nowrap; }
-      .th-page :global(.rt-foot .rt-agent) { min-inline-size: 72px; }
-      .th-page :global(.rt-foot .ac:not(.static) > .ellipsis) { display: none; }
-    }
-    /* 16px stops iOS zoom-on-focus that leaves the Threads header cut off. */
-    .th-page :global(:is(textarea, select, input:not([type='checkbox'], [type='radio'], [type='range'], [type='file']))) {
-      font-size: 16px !important; /* ui-guards: allow — 16px stops iOS zoom-on-focus */
-    }
   }
 </style>

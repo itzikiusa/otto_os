@@ -15,6 +15,7 @@ const helpers = loadSource(new URL('../src/modules/threads/threadsHelpers.ts', i
   // The file viewer's preview helpers, re-exported from lib/; unused here.
   '../../lib/components/filePreviewKind': {},
   '../../lib/render/previewText': {},
+  './worktreeProjects.svelte': { worktreeProjects: { root: (c: string | null | undefined) => (c ?? '').trim().replace(/\/+$/, ''), of: () => null } },
 });
 
 const s = (id: string, meta: Record<string, unknown> = {}) => ({ id, kind: 'agent', meta });

@@ -21,7 +21,6 @@ use axum::Json;
 use otto_core::api::CreateMcpTokenReq;
 use otto_core::auth::{AuthContext, McpScope};
 use otto_core::domain::WorkspaceRole;
-use otto_core::event::Event;
 use otto_core::{Error, Id};
 use otto_mcp::governance::{self, Approval};
 use otto_mcp::{canonical_hash, InvokeCtx};
@@ -38,7 +37,9 @@ use otto_assistant::personal_agent_admin::approval_detail as admin_detail;
 use otto_assistant::personal_agent_admin::governed_call_is_person_only;
 pub use otto_mcp::outward::*;
 
-const MAX_WAIT_SECS: u64 = 30;
+/// The longest a governed call may wait on a person (a thread's agent waits
+/// this long for the answer given in its attention dock).
+const MAX_WAIT_SECS: u64 = otto_core::mcp_budgets::GOVERNED_WAIT_SECS;
 
 /// Settings key recording which `ui_*` tools existed when the operator last
 /// saved the enabled-tool list (see [`merge_enabled`]).
@@ -859,7 +860,14 @@ impl governance::Stages for OttoStages<'_> {
                         &appr_id,
                     );
                 }
-                match wait_for_decision(ctx, &appr_id, self.wait_seconds).await {
+                match wait_for_decision(
+                    ctx,
+                    &appr_id,
+                    self.wait_seconds,
+                    self.audit.caller_session_id.as_deref(),
+                )
+                .await
+                {
                     Some(true) => {
                         // Single use: two calls waiting on the SAME card (a
                         // shared pending card, parallel tool calls) both wake on
@@ -950,78 +958,57 @@ async fn unresolved_audit(ctx: &ServerCtx, audit: &mut NewCallLog, err: &Error) 
 /// `Some(false)`=denied/expired/cancelled, `None`=still pending after the wait
 /// (caller resubmits later).
 ///
-/// Event-driven: it subscribes to the bus BEFORE the first status read, then
-/// re-reads only when an `mcp_approval_changed` names this approval (or a bulk
-/// expiry, `approval_id: None`) — so a decision resumes the call immediately
-/// instead of up to 1 s late, and a waiting call issues a few reads instead
-/// of one per second. A slow fallback re-read ([`APPROVAL_FALLBACK_TICK`])
-/// covers a writer that bypassed the hook (another process) and a lagged or
-/// closed receiver.
+/// Event-driven: see [`otto_mcp::approval_wait::wait_for_decision`].
 async fn wait_for_decision(
     ctx: &ServerCtx,
     approval_id: &str,
     wait_seconds: Option<u64>,
+    caller_session: Option<&str>,
 ) -> Option<bool> {
-    let budget = Duration::from_secs(wait_seconds.unwrap_or(0).min(MAX_WAIT_SECS));
+    let asked = wait_seconds.unwrap_or(0);
+    // A short ask needs no session lookup (the statement budgets stay put).
+    let cap = match caller_session {
+        Some(id) if asked > otto_mcp::approval_wait::HEADLESS_WAIT_SECS => {
+            session_hold_cap(ctx, id).await
+        }
+        _ => MAX_WAIT_SECS,
+    };
+    let budget = Duration::from_secs(asked.min(cap));
+    let approvals = ctx.mcp.approvals();
+    let wait = otto_mcp::approval_wait::wait_for_decision(
+        &approvals,
+        &ctx.events,
+        approval_id,
+        budget,
+        APPROVAL_FALLBACK_TICK,
+    );
     // Undecided on daemon shutdown: the caller gets its normal "still
-    // pending" answer instead of pinning the HTTP drain for up to 30 s.
+    // pending" answer instead of pinning the HTTP drain.
     tokio::select! {
-        decided = wait_for_decision_within(ctx, approval_id, budget, APPROVAL_FALLBACK_TICK) => decided,
+        decided = wait => decided,
         _ = crate::shutdown::cancelled() => None,
     }
 }
 
+/// A calling session's hold ([`otto_mcp::approval_wait::hold_secs`]; unknown id: short).
+async fn session_hold_cap(ctx: &ServerCtx, id: &str) -> u64 {
+    let id = id.to_string();
+    let (family, session) = match ctx.agent_runtime.get(&id).await {
+        Ok(rt) => (
+            rt.provider.as_str().to_string(),
+            otto_agent_protocol::host::as_agent_session(&rt),
+        ),
+        Err(_) => match ctx.manager.get(&id).await {
+            Ok(s) => (ctx.manager.cli_family(&s.provider), s),
+            Err(_) => return otto_mcp::approval_wait::HEADLESS_WAIT_SECS,
+        },
+    };
+    let interactive = session.is_foreground_agent() && session.meta.get("run_id").is_none();
+    otto_mcp::approval_wait::hold_secs(&family, interactive)
+}
+
 /// Fallback re-read period for [`wait_for_decision`] when no event arrives.
 const APPROVAL_FALLBACK_TICK: Duration = Duration::from_secs(5);
-
-async fn wait_for_decision_within(
-    ctx: &ServerCtx,
-    approval_id: &str,
-    budget: Duration,
-    fallback: Duration,
-) -> Option<bool> {
-    let mut rx = ctx.events.subscribe();
-    let deadline = tokio::time::Instant::now() + budget;
-    let id = approval_id.to_string();
-    loop {
-        if let Ok(a) = ctx.mcp.approvals().get(&id).await {
-            match a.status.as_str() {
-                // `consumed` = a sibling call waiting on the same shared card
-                // already spent the approval. Report it as decided so the
-                // caller's single-use `consume` refuses it ("approval already
-                // used") instead of this call idling to its deadline and then
-                // telling the agent to resubmit a card that can never run.
-                "approved" | "consumed" => return Some(true),
-                "denied" | "expired" | "cancelled" => return Some(false),
-                _ => {}
-            }
-        }
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            return None;
-        }
-        let tick = (now + fallback).min(deadline);
-        // Wait for a relevant change, the fallback tick, or the deadline —
-        // whichever is first — then re-read.
-        loop {
-            tokio::select! {
-                ev = rx.recv() => match ev {
-                    Ok(Event::McpApprovalChanged { approval_id, .. })
-                        if approval_id.as_deref().is_none_or(|a| a == id) => break,
-                    Ok(_) => continue,
-                    // Lagged: a change may have been dropped — re-read now.
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => break,
-                    // Bus gone: plain polling at the fallback period.
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        tokio::time::sleep_until(tick).await;
-                        break;
-                    }
-                },
-                _ = tokio::time::sleep_until(tick) => break,
-            }
-        }
-    }
-}
 
 // ===========================================================================
 // The executor — runs each tool AS the user via an ephemeral self-call.
@@ -1556,7 +1543,7 @@ async fn ask_human_approval(
         })
         .await?;
     let wait = args.get("wait_seconds").and_then(u64_lenient);
-    let decided = wait_for_decision(ctx, &appr.id, wait).await;
+    let decided = wait_for_decision(ctx, &appr.id, wait, None).await;
     Ok(json!({
         "approval_id": appr.id,
         "status": match decided { Some(true) => "approved", Some(false) => "denied", None => "pending" },
@@ -2065,6 +2052,9 @@ pub struct GatewayInvokeReq {
     pub workspace_id: String,
     #[serde(default)]
     pub session_id: Option<String>,
+    /// How long a pending approval holds the call (≤ [`MAX_WAIT_SECS`]).
+    #[serde(default)]
+    pub wait_seconds: Option<u64>,
 }
 
 /// `POST /mcp/gateway/invoke` — run a downstream call through the SAME governance
@@ -2114,20 +2104,37 @@ pub async fn gateway_invoke(
         direction: "outbound".into(),
         caller_session_id: req.session_id.clone(),
     };
-    let outcome = ctx
-        .mcp
-        .invoke(&req.server_id, &req.tool, &req.arguments, &ictx)
-        .await
-        .map_err(ApiError)?;
-    let resp = otto_mcp::outcome_to_resp(outcome);
-    if resp.decision == "pending_approval" {
+    let invoke = || {
+        ctx.mcp
+            .invoke(&req.server_id, &req.tool, &req.arguments, &ictx)
+    };
+    let mut outcome = invoke().await.map_err(ApiError)?;
+    if let otto_mcp::InvokeOutcome::Pending { approval_id, .. } = &outcome {
         let _ = ctx.events.send(otto_core::event::Event::Notice {
             level: "warn".into(),
             title: "MCP approval needed".into(),
             body: format!("A governed MCP tool '{}' is awaiting approval.", req.tool),
         });
+        // A live agent waits (`wait_seconds`) for the answer — given in its
+        // thread — and then runs on that approval: no "resubmit" round trip.
+        outcome = match wait_for_decision(
+            &ctx,
+            &approval_id.clone(),
+            req.wait_seconds,
+            req.session_id.as_deref(),
+        )
+        .await
+        {
+            Some(true) => invoke().await.map_err(ApiError)?,
+            Some(false) => otto_mcp::InvokeOutcome::Denied {
+                reason: "human denied the request".into(),
+            },
+            None => outcome,
+        };
     }
-    Ok(Json(serde_json::to_value(resp).unwrap_or(Value::Null)))
+    Ok(Json(
+        serde_json::to_value(otto_mcp::outcome_to_resp(outcome)).unwrap_or(Value::Null),
+    ))
 }
 
 #[cfg(test)]

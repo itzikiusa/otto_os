@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { reviewNotes } from './reviewNotes.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import Modal from '../../../lib/components/Modal.svelte';
   import type { ComposerContext } from './composerContext';
@@ -18,11 +19,11 @@
       <li class="context-chip" title={item.text}>
         <button type="button" class="btn ghost context-open" aria-label="View context {item.label}" title="View context"
           onclick={() => (selectedId = item.id)}>
-          <Icon name={item.id.startsWith('dir:') ? 'folder' : item.kind === 'diff' ? 'file' : 'comment'} size={12} />
+          <Icon name={item.id.startsWith('dir:') ? 'folder' : item.id.startsWith('terminal:') ? 'terminal' : item.kind === 'diff' ? 'file' : 'comment'} size={12} />
           <span class="ellipsis">{item.label}</span>
         </button>
         <button type="button" class="icon-btn context-remove" aria-label="Remove {item.label}" title="Remove context"
-          onclick={() => { onremove(item.id); onfocus?.(); }}><Icon name="x" size={12} /></button>
+          onclick={() => { onremove(item.id); if (item.id.startsWith('notes:')) reviewNotes.unsend(item.id); onfocus?.(); }}><Icon name="x" size={12} /></button>
       </li>
     {/each}
   </ul>

@@ -1,6 +1,6 @@
 <script lang="ts">
-  // Thread details' "Agents & tasks": every subagent, linked child thread, and
-  // background task of the focused runtime thread (agentTasks.ts) — running
+  // Thread details' "Background tasks": the focused runtime thread's commands
+  // and timers (agentTasks.ts; subagents are not listed here) — running
   // first with live step/log preview and elapsed time, finished folded below.
   // Clicking any row drills down to inspect its prompt/command, live tool steps,
   // streaming stdout/stderr logs, final output, or open its child thread.
@@ -13,18 +13,8 @@
   import { now } from '../../../lib/stores/now.svelte';
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
   import { threads } from '../threadsStore.svelte';
-  import { api } from '../../../lib/api/client';
-  import { pollWhileVisible } from '../../../lib/poll';
-  import type { RuntimeSwarm } from '../../../lib/api/types';
-  import {
-    agentTasks,
-    swarmMemberOf,
-    taskElapsed,
-    withSwarm,
-    type AgentTask,
-    type LinkedChildThreadSummary,
-    type SwarmMemberLite,
-  } from './agentTasks';
+  import { agentTasks, swarmMemberOf, taskElapsed, type AgentTask, type LinkedChildThreadSummary } from './agentTasks';
+  import { isSubagentTask } from './liveStatus';
   import RuntimeSwarmWork from './RuntimeSwarmWork.svelte';
   import RuntimeTaskOutput from './RuntimeTaskOutput.svelte';
   import RuntimeTaskStop from './RuntimeTaskStop.svelte';
@@ -78,41 +68,16 @@
     return out;
   });
 
-  /** An Antigravity thread's swarm, read from agy's own files: members of a
-   *  swarm started before this thread's cards (or before an agent restart)
-   *  still show. Refreshed while the panel is open. */
-  let swarm = $state<SwarmMemberLite[]>([]);
-  const agy = $derived(runtimeThreads.get(sessionId)?.provider === 'agy');
-  $effect(() => {
-    if (!agy) return;
-    const id = sessionId;
-    const poller = pollWhileVisible(async (signal) => {
-      try {
-        const s = await api.bg.get<RuntimeSwarm>(`/runtime-sessions/${encodeURIComponent(id)}/swarm`, signal);
-        if (!signal.aborted) swarm = s.members;
-        return true;
-      } catch {
-        if (!signal.aborted) swarm = [];
-        return false;
-      }
-    }, { ms: 15_000 });
-    return () => {
-      poller.stop();
-      swarm = [];
-    };
-  });
-
-  const tasks = $derived(
-    withSwarm(
-      agentTasks(
-        p?.items ?? [],
-        p?.session?.background_tasks ?? runtimeThreads.get(sessionId)?.background_tasks ?? [],
-        { output: p?.output ?? {}, childThreads },
-      ),
-      swarm,
+  /** Commands and timers only: subagents — threads, the provider's own,
+   *  swarm members — are in the timeline's row and the details' Subagents. */
+  const tasks = $derived.by(() => {
+    const all = agentTasks(
       p?.items ?? [],
-    ),
-  );
+      p?.session?.background_tasks ?? runtimeThreads.get(sessionId)?.background_tasks ?? [],
+      { output: p?.output ?? {}, childThreads },
+    );
+    return { running: all.running.filter((t) => !isSubagentTask(t)), finished: all.finished.filter((t) => !isSubagentTask(t)) };
+  });
   const childrenMap = $derived(subagentChildren(p?.items ?? []));
   const any = $derived(tasks.running.length + tasks.finished.length > 0);
   const nowMs = $derived(tasks.running.length ? now() : Date.now());
@@ -176,6 +141,7 @@
   });
 
   const STATUS: Record<AgentTask['status'], { icon: IconName; label: string }> = {
+    // A subagent that runs says Working (the one subagent vocabulary); a command or timer, Running.
     running: { icon: 'dot', label: 'Running' },
     'needs-you': { icon: 'bell', label: 'Needs you' },
     done: { icon: 'check', label: 'Done' },
@@ -229,7 +195,7 @@
         <Icon name={kindIcon(t.kind)} size={12} />
         <span class="ellipsis" dir="auto" title={t.label}>{t.label}</span>
         <span class="tat-meta">
-          {STATUS[t.status].label}{t.background && t.status === 'running' ? ' · bg' : ''}{e ? ` · ${e}` : ''}
+          {t.kind === 'agent' && t.status === 'running' ? 'Working' : STATUS[t.status].label}{e ? ` · ${e}` : ''}
         </span>
         <span class="tat-chev" aria-hidden="true">
           <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
@@ -355,13 +321,13 @@
   <section
     class="tat"
     style:--tat-max="{maxBlockPx}px"
-    aria-label="Agents and tasks"
+    aria-label="Background tasks"
     data-testid="thread-agents-tasks"
     tabindex="-1"
     bind:this={el}
   >
     <h3 class="tat-head">
-      Agents &amp; tasks
+      Background tasks
       {#if tasks.running.length}<span class="tat-count">{tasks.running.length} running</span>{/if}
     </h3>
     {#if tasks.running.length}

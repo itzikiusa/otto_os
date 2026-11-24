@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import AxeBuilder from '@axe-core/playwright';
-import { expectNoHorizontalOverflow, tourChapter, tourVideoPath } from './helpers';
+import { expectNoHorizontalOverflow, tourChapter, tourVideoPath, withAgentClis } from './helpers';
 
 test.use({ serviceWorkers: 'block' });
 test.setTimeout(60_000);
@@ -264,7 +264,7 @@ test('coach unavailable provider recheck enables launch only after detection', a
   await page.route('**/api/v1/meta', async (r) => {
     const response = await r.fetch();
     const meta = await response.json();
-    await r.fulfill({ json: { ...meta, tools: meta.tools.map((tool: { name: string }) => ['claude', 'codex', 'agy'].includes(tool.name) ? { name: tool.name, found, version: found ? 'Synthetic CLI 1.0' : null } : tool) } });
+    await r.fulfill({ json: withAgentClis(meta, found, 'Synthetic CLI 1.0') });
   });
   await page.goto('/#/agents');
   const coach = page.locator('.coach');

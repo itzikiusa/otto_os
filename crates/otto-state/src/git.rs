@@ -91,6 +91,11 @@ impl GitStore {
         Self { pool }
     }
 
+    /// The pool, for the settings a git route reads (the worktree setup).
+    pub fn pool(&self) -> &DbPool {
+        &self.pool
+    }
+
     // -- accounts ---------------------------------------------------------
 
     pub async fn create_account(&self, a: NewGitAccount) -> Result<GitAccount> {

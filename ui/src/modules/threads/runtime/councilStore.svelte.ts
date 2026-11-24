@@ -102,7 +102,7 @@ class CouncilStore {
       ...(req.images?.length ? { images: req.images } : {}),
     };
     const resp = await api.post<CouncilResp>(`/workspaces/${workspaceId}/runtime-sessions/council`, body);
-    for (const s of resp.seats) runtimeThreads.byId[s.id] = s;
+    for (const s of resp.seats) runtimeThreads.put(s);
     this.on = false;
     this.seats = [];
     const ids = resp.seats.map((x) => x.id);
@@ -120,7 +120,7 @@ class CouncilStore {
   /** Open the council's judge (409 while a seat still works). */
   async synthesize(id: string, req: SynthesizeCouncilReq): Promise<RuntimeSession> {
     const judge = await api.post<RuntimeSession>(`/runtime-sessions/${id}/council/synthesize`, req);
-    runtimeThreads.byId[judge.id] = judge;
+    runtimeThreads.put(judge);
     return judge;
   }
 }
@@ -161,7 +161,7 @@ export async function askEverySeat(id: string): Promise<void> {
   const seats = (membersOf(id)?.seats ?? []).filter((s) => s.status !== 'closed');
   if (!seats.length) return;
   const text = await paneMessage.ask({
-    title: 'Ask every seat',
+    title: 'Ask every model',
     intro: `Send the same message to ${askSeatsText(seats)}, each as its next turn.`,
     confirmLabel: `Ask ${seats.length}`,
     placeholder: 'Follow-up question',
@@ -185,7 +185,7 @@ export async function synthesizeWith(id: string, provider: RuntimeProviderOrSlug
     threads.openGroup(sideBySideIds(c?.seats ?? [], judge));
     threads.focusPane(judge.id);
   } catch (e) {
-    toasts.error('Couldn’t synthesize', councilErrorText(e));
+    toasts.error('Couldn’t compare the answers', councilErrorText(e));
   }
 }
 
@@ -196,7 +196,7 @@ export async function stopSeats(ids: readonly string[]): Promise<void> {
     ids.map((x) => stopThreadWork(x, { turnRunning: busy(runtimeThreads.get(x)?.status), taskIds: (runtimeThreads.get(x)?.background_tasks ?? []).map((b) => b.id) })),
   );
   const failed = r.find((x): x is PromiseRejectedResult => x.status === 'rejected');
-  if (failed) toastError('Couldn’t stop every seat', failed.reason);
+  if (failed) toastError('Couldn’t stop every compared thread', failed.reason);
 }
 
 /** A thread's last answer: from its open conversation, else loaded briefly. */
@@ -270,12 +270,12 @@ export function councilMenuItems(id: string): MenuItem[] {
   if (!c) return [];
   const ids = sideBySideIds(c.seats, c.synthesis);
   const busy = c.seats.filter((s) => s.status === 'working').map((s) => councilOf(s)?.seat);
-  const why = busy.length ? `${pluralNoun(busy.length, 'Seat')} ${busy.join(', ')} still working` : undefined;
+  const why = busy.length ? `${busy.length === 1 ? 'One model is' : `${busy.length} models are`} still working` : undefined;
   return [
-    { label: 'Open council side by side', icon: 'grid', action: () => threads.openGroup(ids) },
-    { label: 'Ask every seat…', icon: 'send', action: () => void askEverySeat(id) },
+    { label: 'Open side by side', icon: 'grid', action: () => threads.openGroup(ids) },
+    { label: 'Ask every model…', icon: 'send', action: () => void askEverySeat(id) },
     {
-      label: 'Synthesize with',
+      label: 'Compare answers with',
       icon: 'sparkle',
       disabled: !!why,
       title: why,

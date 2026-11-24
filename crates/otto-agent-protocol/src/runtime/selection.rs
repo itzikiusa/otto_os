@@ -120,6 +120,23 @@ pub(super) fn set_access(inner: &Inner, live: &Live, st: &mut State, to: Runtime
     );
 }
 
+/// The agent switched its own mode or model: the thread follows (noted
+/// like a person's switch, nothing is sent back).
+pub(super) fn follow_agent(
+    inner: &Inner,
+    live: &Live,
+    st: &mut State,
+    model: Option<String>,
+    access: Option<RuntimeAccessMode>,
+) {
+    if let Some(m) = model.filter(|m| st.session.model.as_ref() != Some(m)) {
+        set_model(inner, live, st, Some(m), false);
+    }
+    if let Some(a) = access.filter(|a| *a != st.session.access_mode) {
+        set_access(inner, live, st, a);
+    }
+}
+
 pub(super) fn set_effort(inner: &Inner, live: &Live, st: &mut State, to: Option<String>) {
     if st.session.effort == to {
         return;
@@ -196,6 +213,7 @@ pub(super) fn drop_proc(inner: &Inner, live: &Live, st: &mut State, grace: Durat
         return false;
     };
     live.proc_ended.notify_waiters();
+    super::client_calls::drop_session(&st.session.id);
     stop_child(p, grace);
     st.switch_from = None;
     settle_background(inner, live, st, TurnItemStatus::Interrupted);
@@ -268,6 +286,36 @@ impl AgentRuntime {
             out.effort = live.lock().session.effort.clone();
         }
         Ok(out)
+    }
+
+    /// Merge a client-owned thread-meta patch (`otto_core::agent_runtime::
+    /// THREAD_META_KEYS`, already validated) into the session's `meta` and
+    /// tell every client through `provider_session.updated` (its `thread`).
+    /// Allowed on a `closed` session too (History, pins).
+    pub async fn update_thread_meta(
+        &self,
+        id: &Id,
+        patch: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<RuntimeSession> {
+        let live = self.live(id).await?;
+        let patch = serde_json::Value::Object(patch);
+        self.inner.repo.patch_meta(id, &patch).await?;
+        let mut st = live.lock();
+        let mut meta = match st.session.meta.take() {
+            Some(serde_json::Value::Object(m)) => m,
+            _ => serde_json::Map::new(),
+        };
+        for (k, v) in patch.as_object().into_iter().flatten() {
+            if v.is_null() {
+                meta.remove(k);
+            } else {
+                meta.insert(k.clone(), v.clone());
+            }
+        }
+        st.session.meta = (!meta.is_empty()).then_some(serde_json::Value::Object(meta));
+        let (status, last_error) = current_status(&st);
+        set_session_status(&self.inner, &live, &mut st, status, last_error);
+        Ok(st.session.clone())
     }
 
     /// Store `effort` as the thread's (create, an opening agent's pick with

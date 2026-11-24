@@ -35,6 +35,8 @@ enum ReqProto {
     /// `item/permissions/requestApproval`.
     Permissions,
     Question,
+    /// `mcpServer/elicitation/request`: an MCP server's form for the person.
+    Elicitation,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -343,6 +345,10 @@ impl CodexDriver {
             return;
         }
         self.mcp_failures.retain(|(n, _)| n != name);
+        step.push(DriverEvent::McpServers {
+            servers: vec![codex_mcp_status(name, params)],
+            spawn: false,
+        });
         if params.get("status").and_then(Value::as_str) != Some("failed") {
             return;
         }
@@ -523,6 +529,7 @@ impl CodexDriver {
         method: &str,
         params: Value,
     ) {
+        tracing::debug!(method, params = %params, "codex server request");
         if method == "item/tool/requestUserInput" {
             match crate::questions::native_questions(&params, false) {
                 Ok(questions) => {
@@ -547,10 +554,115 @@ impl CodexDriver {
                             .get("itemId")
                             .and_then(Value::as_str)
                             .map(|i| self.item_id_for_thread(req_tid, i)),
+                        for_person: false,
                     });
                 }
                 Err(message) => step.write(
                     json!({"id":rpc_id,"error":{"code":-32602,"message":message}}).to_string(),
+                ),
+            }
+            return;
+        }
+        if method == "mcpServer/elicitation/request" {
+            // No fields to fill: a yes/no (Codex asks MCP tool approval this
+            // way, `openai/form` with an empty schema) — an approval.
+            if crate::questions::is_confirmation(&params) {
+                let id = format!("codex-{}", rpc_key(&rpc_id));
+                let s = |p: &str| {
+                    params
+                        .pointer(p)
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                };
+                let server = s("/serverName").unwrap_or_else(|| "An MCP server".into());
+                // An MCP tool call's approval names the tool and its arguments.
+                let tool = s("/_meta/tool_name");
+                let persist: Vec<String> = params
+                    .pointer("/_meta/persist")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut options = crate::questions::confirmation_options();
+                if persist.iter().any(|p| p == "session") {
+                    options.insert(
+                        1,
+                        ApprovalOption {
+                            decision: ApprovalDecision::AcceptForSession,
+                            label: "Allow for this thread".into(),
+                        },
+                    );
+                }
+                if persist.iter().any(|p| p == "always") {
+                    options.insert(
+                        1,
+                        ApprovalOption {
+                            decision: ApprovalDecision::AcceptAlways,
+                            label: "Always allow".into(),
+                        },
+                    );
+                }
+                step.push(DriverEvent::Request {
+                    id: id.clone(),
+                    kind: RequestKind::McpElicitation,
+                    title: Some(match &tool {
+                        Some(t) => format!("{server} · {t}"),
+                        None => server.clone(),
+                    }),
+                    prompt: params
+                        .pointer("/_meta/tool_params")
+                        .map(Value::to_string)
+                        .or_else(|| s("/message")),
+                    reason: tool.and(s("/message")),
+                    options,
+                    tool_item_id: None,
+                });
+                self.pending.insert(
+                    id,
+                    Pending {
+                        rpc_id,
+                        proto: ReqProto::Elicitation,
+                        permissions: params,
+                    },
+                );
+                return;
+            }
+            match crate::questions::mcp_elicitation(&params) {
+                Ok(questions) => {
+                    let id = format!("codex-{}", rpc_key(&rpc_id));
+                    let server = params
+                        .get("serverName")
+                        .and_then(Value::as_str)
+                        .unwrap_or("An MCP server");
+                    let message = params
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("needs your input");
+                    let title = Some(format!("{server}: {message}"));
+                    self.pending.insert(
+                        id.clone(),
+                        Pending {
+                            rpc_id,
+                            proto: ReqProto::Elicitation,
+                            permissions: params,
+                        },
+                    );
+                    step.push(DriverEvent::Question {
+                        id,
+                        title,
+                        questions,
+                        tool_item_id: None,
+                        // An MCP server's elicitation.
+                        for_person: true,
+                    });
+                }
+                Err(why) => step.write(
+                    json!({"id":rpc_id,"result":{"action":"decline","_meta":{"otto_reason":why}}})
+                        .to_string(),
                 ),
             }
             return;
@@ -627,10 +739,11 @@ impl CodexDriver {
     fn answer(p: &Pending, decision: ApprovalDecision) -> String {
         let result = match p.proto {
             ReqProto::Question => json!({"answers": {}}),
+            ReqProto::Elicitation => crate::questions::confirmation_result(decision),
             ReqProto::V2Decision => json!({"decision": match decision {
                 ApprovalDecision::Accept => "accept",
                 ApprovalDecision::AcceptForSession | ApprovalDecision::AcceptAlways => "acceptForSession",
-                ApprovalDecision::Decline => "decline",
+                ApprovalDecision::Decline | ApprovalDecision::DeclineAlways => "decline",
                 ApprovalDecision::Cancel => "cancel",
             }}),
             ReqProto::Permissions => match decision {
@@ -638,7 +751,9 @@ impl CodexDriver {
                 ApprovalDecision::AcceptForSession | ApprovalDecision::AcceptAlways => {
                     json!({"permissions": p.permissions, "scope": "session"})
                 }
-                ApprovalDecision::Decline | ApprovalDecision::Cancel => {
+                ApprovalDecision::Decline
+                | ApprovalDecision::DeclineAlways
+                | ApprovalDecision::Cancel => {
                     json!({"permissions": {}, "scope": "turn"})
                 }
             },
@@ -1257,8 +1372,19 @@ impl StructuredDriver for CodexDriver {
         let p = self
             .pending
             .get(request_id)
-            .filter(|p| p.proto == ReqProto::Question)
+            .filter(|p| matches!(p.proto, ReqProto::Question | ReqProto::Elicitation))
             .ok_or_else(|| DriverError("no such pending question".into()))?;
+        if p.proto == ReqProto::Elicitation {
+            let questions =
+                crate::questions::mcp_elicitation(&p.permissions).map_err(DriverError)?;
+            otto_core::agent_runtime::validate_question_answers(&questions, answers)
+                .map_err(DriverError)?;
+            let result = crate::questions::elicitation_answer(&questions, answers);
+            let mut step = DriverStep::default();
+            step.write(json!({"id":p.rpc_id,"result":result}).to_string());
+            self.pending.remove(request_id);
+            return Ok(step);
+        }
         let questions =
             crate::questions::native_questions(&p.permissions, false).map_err(DriverError)?;
         otto_core::agent_runtime::validate_question_answers(&questions, answers)
@@ -1276,15 +1402,20 @@ impl StructuredDriver for CodexDriver {
     fn dismiss_question(
         &mut self,
         request_id: &str,
-        _action: otto_core::agent_runtime::QuestionDismissAction,
+        action: otto_core::agent_runtime::QuestionDismissAction,
     ) -> Result<DriverStep, DriverError> {
         let p = self
             .pending
             .get(request_id)
-            .filter(|p| p.proto == ReqProto::Question)
+            .filter(|p| matches!(p.proto, ReqProto::Question | ReqProto::Elicitation))
             .ok_or_else(|| DriverError("no such pending question".into()))?;
         let mut step = DriverStep::default();
-        step.write(json!({"id":p.rpc_id,"result":{"answers":{}}}).to_string());
+        let result = if p.proto == ReqProto::Elicitation {
+            json!({ "action": action })
+        } else {
+            json!({"answers":{}})
+        };
+        step.write(json!({"id":p.rpc_id,"result":result}).to_string());
         self.pending.remove(request_id);
         Ok(step)
     }
@@ -1482,6 +1613,37 @@ impl StructuredDriver for CodexDriver {
 
     fn restore_state(&mut self, state: &Value) -> Result<(), DriverError> {
         restore_keeping_program(self, state, |d| &mut d.program)
+    }
+}
+
+/// `mcpServer/startupStatus/updated` as the thread's server list shows it
+/// (`starting` | `ready` | `failed`; an auth failure reads as sign-in).
+fn codex_mcp_status(name: &str, params: &Value) -> otto_core::agent_runtime::McpServerStatus {
+    use otto_core::agent_runtime::{McpServerSource, McpServerState as St, McpServerStatus};
+    let error = params
+        .get("error")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    let auth = ["auth", "401", "login", "oauth"]
+        .iter()
+        .any(|k| error.to_ascii_lowercase().contains(k));
+    let state = match params
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "ready" => St::Connected,
+        "starting" => St::Starting,
+        "failed" if auth => St::NeedsAuth,
+        _ => St::Failed,
+    };
+    let s = McpServerStatus::new(name, McpServerSource::Cli, state);
+    match state {
+        St::NeedsAuth => s.because(format!("Sign in with `codex mcp login {name}`")),
+        St::Failed if !error.is_empty() => s.because(error),
+        St::Failed => s.because("Codex couldn’t start it"),
+        _ => s,
     }
 }
 
@@ -1962,18 +2124,102 @@ mod tests {
 
     /// T3 Code #34771: an MCP server that fails to start is a notice in the
     /// thread (once), whether Codex reports it before or during a turn.
+    /// `mcpServer/elicitation/request` (it was answered -32601) is a question;
+    /// the answer is the elicitation's `{action, content}`.
+    #[test]
+    fn an_mcp_elicitation_is_a_question_and_the_answer_is_its_content() {
+        use otto_core::agent_runtime::{QuestionAnswer, QuestionDismissAction};
+        let mut d = CodexDriver::with_program("codex");
+        ready(&mut d, false);
+        let ask = |id: u64, mode: &str| json!({"id": id, "method": "mcpServer/elicitation/request", "params": {"threadId":"th1","serverName":"probe","message":"Which colour?","mode":mode,"requestedSchema":{"type":"object","properties":{"colour":{"type":"string"}},"required":["colour"]}}});
+        let s = feed(&mut d, ask(70, "form"));
+        let DriverEvent::Question { id, title, .. } = &s.events[0] else {
+            panic!("question missing: {:?}", s.events)
+        };
+        assert_eq!(title.as_deref(), Some("probe: Which colour?"));
+        let r = d
+            .respond_question(
+                id,
+                &[QuestionAnswer::Text {
+                    question_id: "colour".into(),
+                    text: "teal".into(),
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            parse(&r.writes[0]),
+            json!({"id":70,"result":{"action":"accept","content":{"colour":"teal"}}})
+        );
+        // The openai/form spelling is the same form; a skip is its action.
+        let s = feed(&mut d, ask(71, "openai/form"));
+        let DriverEvent::Question { id, .. } = &s.events[0] else {
+            panic!()
+        };
+        let r = d
+            .dismiss_question(id, QuestionDismissAction::Cancel)
+            .unwrap();
+        assert_eq!(
+            parse(&r.writes[0]),
+            json!({"id":71,"result":{"action":"cancel"}})
+        );
+        // No fields to fill (how Codex asks MCP tool approval): an approval.
+        let s = feed(
+            &mut d,
+            json!({"id":73,"method":"mcpServer/elicitation/request","params":{"threadId":"th1","serverName":"probe","message":"Allow probe_echo?","mode":"openai/form","requestedSchema":{"type":"object","properties":{}}}}),
+        );
+        let DriverEvent::Request {
+            id, kind, prompt, ..
+        } = &s.events[0]
+        else {
+            panic!("{:?}", s.events)
+        };
+        assert_eq!(*kind, RequestKind::McpElicitation);
+        assert_eq!(prompt.as_deref(), Some("Allow probe_echo?"));
+        let r = d.respond(id, ApprovalDecision::Accept).unwrap();
+        assert_eq!(
+            parse(&r.writes[0]),
+            json!({"id":73,"result":{"action":"accept","content":{}}})
+        );
+        // URL mode: the shared one-choice question; choosing it accepts.
+        let s = feed(
+            &mut d,
+            json!({"id":72,"method":"mcpServer/elicitation/request","params":{"threadId":"th1","serverName":"probe","message":"Sign in","mode":"url","url":"https://x","elicitationId":"e"}}),
+        );
+        let DriverEvent::Question { id, .. } = &s.events[0] else {
+            panic!("{:?}", s.events)
+        };
+        let r = d
+            .respond_question(
+                id,
+                &[QuestionAnswer::Single {
+                    question_id: crate::questions::URL_QUESTION.into(),
+                    value: "open".into(),
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            parse(&r.writes[0]),
+            json!({"id":72,"result":{"action":"accept"}})
+        );
+    }
+
     #[test]
     fn an_mcp_server_that_fails_to_start_shows_a_notice_once() {
         let mut d = CodexDriver::with_program("codex");
         ready(&mut d, false);
         let status = |name: &str, status: &str, error: Value| json!({"method":"mcpServer/startupStatus/updated","params":{"threadId":"th1","name":name,"status":status,"error":error}});
-        // Before the turn: held until one runs; a recovered server is dropped.
-        assert!(feed(
+        // Before the turn: held until one runs (the server list hears it at
+        // once); a recovered server is dropped.
+        let s = feed(
             &mut d,
-            status("jira", "failed", json!("spawn jira-mcp: ENOENT"))
-        )
-        .events
-        .is_empty());
+            status("jira", "failed", json!("spawn jira-mcp: ENOENT")),
+        );
+        assert!(
+            matches!(&s.events[..], [DriverEvent::McpServers { servers, spawn: false }]
+            if servers[0].name == "jira"
+                && servers[0].state == otto_core::agent_runtime::McpServerState::Failed
+                && servers[0].reason.as_deref() == Some("spawn jira-mcp: ENOENT"))
+        );
         feed(&mut d, status("slack", "failed", Value::Null));
         feed(&mut d, status("slack", "ready", Value::Null));
         // Another thread's report is not this one's.
@@ -2000,7 +2246,7 @@ mod tests {
         );
         // During a turn: shown at once, with a fallback text.
         let s = feed(&mut d, status("slack", "failed", json!("  ")));
-        assert!(matches!(&s.events[0], DriverEvent::TurnItem(i)
+        assert!(matches!(&s.events[1], DriverEvent::TurnItem(i)
             if matches!(&i.kind, TurnItemKind::SystemNotice { message, .. } if message == "MCP server slack failed to start.")));
         // Shown once: the next turn carries nothing.
         feed(

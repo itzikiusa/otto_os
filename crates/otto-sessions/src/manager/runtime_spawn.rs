@@ -373,6 +373,7 @@ impl SessionManager {
     /// is skipped (logged), never fails the spawn.
     async fn protocol_mcp_servers(&self, session: &Session) -> Vec<RuntimeMcpServer> {
         let mut out = Vec::new();
+        let mut skipped = Vec::new();
         if let Some((_token, server)) = self.mint_otto_tools(session).await {
             out.push(RuntimeMcpServer {
                 name: crate::mcp::OTTO_TOOLS_KEY.to_string(),
@@ -381,8 +382,20 @@ impl SessionManager {
                 env: server.env.into_iter().collect(),
             });
         }
+        // A thread opted into the browser tools gets them as a PTY session does.
+        if session.meta.get("browser").and_then(|v| v.as_bool()) == Some(true) {
+            let (program, args) = crate::mcp::browser_command();
+            if let Some(command) = absolute_command(&program) {
+                out.push(RuntimeMcpServer {
+                    name: crate::mcp::SERVER_KEY.to_string(),
+                    command,
+                    args,
+                    env: Vec::new(),
+                });
+            }
+        }
         let (users, lookup_error) = self.resolve_user_mcp_servers(session).await;
-        if let Some(e) = lookup_error {
+        if let Some(e) = &lookup_error {
             tracing::warn!(session = %session.id, "enabled MCP servers unavailable: {e}");
         }
         for s in users.into_iter().flatten() {
@@ -391,6 +404,8 @@ impl SessionManager {
             }
             let Some(command) = absolute_command(&s.command) else {
                 tracing::warn!(session = %session.id, server = %s.name, "MCP server command not found; skipped");
+                let why = format!("its command “{}” isn’t on the daemon’s PATH", s.command);
+                skipped.push(serde_json::json!({ "server": s.name, "reason": why }));
                 continue;
             };
             out.push(RuntimeMcpServer {
@@ -400,7 +415,40 @@ impl SessionManager {
                 env: s.env.into_iter().collect(),
             });
         }
+        let names: Vec<String> = out.iter().map(|s| s.name.clone()).collect();
+        let otto_on = self.otto_mcp_enabled(&session.workspace_id).await;
+        let family = self.cli_family(&session.provider);
+        // A terminal session's project file may hold a tokenless `otto` of
+        // its own: this thread gets Otto's servers here, so it comes out.
+        let (fam, cwd) = (family.clone(), session.cwd.clone());
+        match tokio::task::spawn_blocking(move || crate::mcp::strip_otto_entries(&fam, &cwd)).await
+        {
+            Ok(Err(e)) => {
+                tracing::warn!(session = %session.id, "strip Otto's entries from the project MCP file: {e}")
+            }
+            Err(e) => {
+                tracing::warn!(session = %session.id, "strip Otto's MCP entries task failed: {e}")
+            }
+            Ok(Ok(())) => {}
+        }
+        let status = super::mcp_sync::spawn_mcp_status(
+            &family,
+            otto_on,
+            &names,
+            &skipped,
+            lookup_error.as_deref(),
+        );
+        self.runtime_mcp.insert(session.id.clone(), status);
         out
+    }
+
+    /// A structured thread's MCP servers as its last spawn left them (see
+    /// [`super::mcp_sync::spawn_mcp_status`]); empty before its first spawn.
+    pub fn runtime_mcp_status(&self, id: &str) -> Vec<otto_core::agent_runtime::McpServerStatus> {
+        self.runtime_mcp
+            .get(id)
+            .map(|s| s.clone())
+            .unwrap_or_default()
     }
 
     /// A structured session's process ended (exit, close): revoke its `otto`

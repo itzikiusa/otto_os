@@ -25,6 +25,8 @@ use otto_state::{
 
 use crate::client::{CheckedCallError, McpClient, Transport};
 
+#[path = "service_oauth.rs"]
+pub mod oauth_state;
 #[path = "service_preflight.rs"]
 mod preflight;
 #[path = "service_run_mode.rs"]
@@ -484,7 +486,15 @@ impl McpService {
         if let Ok(mut m) = self.last_use.lock() {
             m.insert(server.id.clone(), Instant::now());
         }
-        let (secret_env, secret_headers) = self.resolve_secrets(server).await?;
+        let (secret_env, mut secret_headers) = self.resolve_secrets(server).await?;
+        let has_auth = |h: &BTreeMap<String, String>| {
+            h.keys().any(|k| k.eq_ignore_ascii_case("authorization"))
+        };
+        if !has_auth(&server.headers) && !has_auth(&secret_headers) {
+            if let Some(bearer) = self.oauth_bearer(server, false).await {
+                secret_headers.insert("Authorization".into(), bearer);
+            }
+        }
         let hash = client_config_hash(server, &secret_env, &secret_headers);
         if let Ok(mut m) = self.clients.lock() {
             m.retain(|_, c| {
@@ -538,12 +548,14 @@ impl McpService {
         secret_headers: BTreeMap<String, String>,
     ) -> McpClient {
         match server.transport.as_str() {
-            "http" => {
+            "http" | "sse" => {
                 let mut headers = server.headers.clone();
                 headers.extend(secret_headers);
-                McpClient::new(Transport::Http {
-                    url: server.url.clone().unwrap_or_default(),
-                    headers,
+                let url = server.url.clone().unwrap_or_default();
+                McpClient::new(if server.transport == "sse" {
+                    Transport::Sse { url, headers }
+                } else {
+                    Transport::Http { url, headers }
                 })
             }
             _ => {
@@ -625,7 +637,14 @@ impl McpService {
                     .await?;
             }
             Err(e) => {
-                let err = redact_text(&e).value;
+                let err = if oauth_state::is_unauthorized(&e) {
+                    format!(
+                        "{}: the server asked for authorization",
+                        oauth_state::NEEDS_SIGN_IN
+                    )
+                } else {
+                    redact_text(&e).value
+                };
                 self.registry()
                     .set_health(&server.id, "unhealthy", Some(latency), Some(&err))
                     .await?;
@@ -697,6 +716,14 @@ impl McpService {
     ) -> Result<()> {
         let (status, err) = match &res {
             Ok(()) => ("healthy", None),
+            // A 401 is not an outage: the server wants a sign-in.
+            Err(e) if oauth_state::is_unauthorized(e) => (
+                "unhealthy",
+                Some(format!(
+                    "{}: the server asked for authorization",
+                    oauth_state::NEEDS_SIGN_IN
+                )),
+            ),
             Err(e) => ("unhealthy", Some(redact_text(e).value)),
         };
         if latency.is_none() && server.health_status == status {
@@ -875,20 +902,26 @@ impl McpService {
         // no outcome.
         let mut pending_row = PendingAuditRow::new(self.call_log(), audit_id.clone());
 
-        let client = self.client_for(&server).await?;
         let start = Instant::now();
         // Recheck at the transport boundary, after queueing and initialize,
         // so credentials/admission waits cannot carry stale authorization.
-        let checked = client
-            .call_tool_checked(tool_name, args, || {
-                self.authorize_before_send(
-                    &server,
-                    tool_name,
-                    ctx,
-                    (approval_id_used.is_some(), preview_used),
-                )
-            })
-            .await;
+        let (server_ref, used) = (&server, (approval_id_used.is_some(), preview_used));
+        let call = |client: Arc<McpClient>| async move {
+            client
+                .call_tool_checked(tool_name, args, || {
+                    self.authorize_before_send(server_ref, tool_name, ctx, used)
+                })
+                .await
+        };
+        let mut checked = call(self.client_for(&server).await?).await;
+        // A 401: refresh a signed-in server's token once and retry (still 401,
+        // or not signed in: `record_health` notes it needs a sign-in).
+        if let Err(CheckedCallError::Transport(e)) = &checked {
+            if oauth_state::is_unauthorized(e) && self.oauth_bearer(&server, true).await.is_some() {
+                self.drop_client(&server.id);
+                checked = call(self.client_for(&server).await?).await;
+            }
+        }
         let res = match checked {
             Err(CheckedCallError::Denied(reason)) => {
                 pending_row.disarm();

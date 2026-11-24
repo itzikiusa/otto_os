@@ -1,22 +1,33 @@
 <script lang="ts">
   // The notices above the composer, in one stack with one order (error > UI
-  // control > plan > queue > notices): at most two show in full, the rest
-  // fold into "2 more: plan, queued message · Show". What the agent waits on
+  // control > plan > queue > notices): one quiet notice shows in full (an
+  // urgent one always does), the rest fold into "2 more: plan, queued message";
+  // with the keyboard up all quiet ones fold. What the agent waits on
   // the person for (approval, question, secret) is the attention dock below
   // this stack, never folded.
   // T3 Code's ComposerBannerStack (docs/internals/web-ui.md).
   import type { Snippet } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { splitBanners, type BannerBlock } from './banners';
+  import { keyboard } from '../../../lib/stores/keyboard.svelte';
+  import type RuntimeUsageLimit from './RuntimeUsageLimit.svelte';
+  import type { ComponentProps } from 'svelte';
+  import { lazyComponent } from '../../../lib/lazy-component.svelte';
+  // Only a thread on its usage limit shows it: loaded then, not with every thread.
+  const UsageLimit = lazyComponent(() => import('./RuntimeUsageLimit.svelte'));
 
   interface Props {
     /** In priority order, highest first. */
     blocks: BannerBlock[];
     block: Snippet<[string]>;
+    /** The usage limit's line (block `limit`), rendered here. */
+    limit?: ComponentProps<typeof RuntimeUsageLimit> | null;
   }
-  let { blocks, block }: Props = $props();
+  let { blocks, block, limit = null }: Props = $props();
   let expanded = $state(false);
-  const split = $derived(splitBanners(blocks));
+  // The on-screen keyboard up leaves a few lines of conversation: every
+  // quiet notice folds into the one "N more" line.
+  const split = $derived(splitBanners(blocks, keyboard.open ? 0 : undefined));
   const shown = $derived(expanded ? blocks : split.shown);
   // A new set of notices starts folded again.
   $effect(() => {
@@ -27,7 +38,7 @@
 {#if blocks.length > 0}
   <div class="bs" data-testid="runtime-banners">
     {#each shown as b (b.key)}
-      <div class="bs-item" data-banner={b.key}>{@render block(b.key)}</div>
+      <div class="bs-item" data-banner={b.key}>{#if b.key === 'limit' && limit}{#if UsageLimit.component}<UsageLimit.component {...limit} />{/if}{:else}{@render block(b.key)}{/if}</div>
     {/each}
     {#if split.folded.length > 0}
       <button
@@ -73,6 +84,18 @@
   .bs-more:hover {
     background: var(--hover);
     color: var(--text);
+  }
+  /* Touch: a notice's own button (Cancel on "Next message continues on …")
+     is a 44 px target, never a 22 px one. */
+  @media (pointer: coarse) {
+    .bs-item :global(.btn) {
+      min-block-size: calc(var(--hit-min) + 8px);
+    }
+    /* …so its hit-slop pseudo (app.css) has nothing to add: it reached past
+       the line and WebKit drew scrollbars around the notice. */
+    .bs-item :global(.btn::after) {
+      inset: 0;
+    }
   }
   .bs-more:focus-visible {
     outline: 2px solid var(--accent-text);

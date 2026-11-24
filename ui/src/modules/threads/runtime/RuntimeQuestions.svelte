@@ -5,7 +5,7 @@
   // its form and Send exist once.
   import type { RuntimeRequest } from '../../../lib/api/types';
   import { questionOutcome } from './questions';
-  import RuntimeQuestionCard from './RuntimeQuestionCard.svelte';
+  import { QuestionCardView } from '../threadLazy.svelte';
   let { requests, sessionId, agent, onanswered }: { requests: RuntimeRequest[]; sessionId: string; agent: string; onanswered: () => void } = $props();
   const settled = $derived(requests.filter((r) => r.kind === 'question' && r.status !== 'pending'));
 </script>
@@ -16,7 +16,7 @@
     <div class="questions">
       {#each settled as request (request.id)}
         <details><summary>{request.questions?.[0]?.header ?? 'Question'} · {questionOutcome(request)}</summary>
-          <RuntimeQuestionCard {request} {sessionId} {agent} {onanswered} />
+          {#if QuestionCardView.component}<QuestionCardView.component {request} {sessionId} {agent} {onanswered} />{/if}
         </details>
       {/each}
     </div>

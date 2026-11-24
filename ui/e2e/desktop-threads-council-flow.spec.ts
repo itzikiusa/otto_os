@@ -99,15 +99,15 @@ test('a council runs from the strip: seat states, Synthesize with its reason, St
   const strip = page.getByTestId('threads-pane-strip');
   await expect(strip).toBeVisible();
   await expect(strip).toHaveAttribute('data-council', /.+/);
-  await expect(strip.getByTestId('pane-strip-title')).toContainText('Council · Cache choice');
+  await expect(strip.getByTestId('pane-strip-title')).toContainText('Compare models · Cache choice');
   for (const [i, id] of seats.entries()) {
     const chip = strip.getByTestId(`pane-chip-${id}`);
-    await expect(chip).toContainText(`Seat ${i + 1}`);
+    await expect(chip).toContainText(`${i + 1} · `);
     await expect(chip).toHaveAttribute('data-state', 'answered', { timeout: 30_000 });
   }
   // Two seats of one agent are told apart in their pane headers.
-  await expect(page.getByTestId(`pane-title-${seats[0]}`)).toHaveText(/^Seat 1 · /);
-  await expect(page.getByTestId(`pane-title-${seats[1]}`)).toHaveText(/^Seat 2 · .*High/);
+  await expect(page.getByTestId(`pane-title-${seats[0]}`)).toHaveText(/^1 · /);
+  await expect(page.getByTestId(`pane-title-${seats[1]}`)).toHaveText(/^2 · .*High/);
   const synth = strip.getByTestId('pane-strip-synthesize');
   await expect(synth).toHaveClass(/primary/);
 
@@ -119,8 +119,8 @@ test('a council runs from the strip: seat states, Synthesize with its reason, St
   await expect(strip.getByTestId(`pane-chip-${seats[0]}`)).toHaveAttribute('data-state', 'working', { timeout: 20_000 });
   await expect(synth).toHaveAttribute('aria-disabled', 'true');
   await expect(synth).not.toHaveClass(/primary/);
-  await expect(synth).toHaveAttribute('title', 'Waiting for seat 1');
-  await expect(strip.getByTestId('pane-strip-why')).toHaveText('Waiting for seat 1');
+  await expect(synth).toHaveAttribute('title', 'Waiting for model 1');
+  await expect(strip.getByTestId('pane-strip-why')).toHaveText('Waiting for model 1');
   await shot(page, 'council-strip-mid-run');
 
   // Stop all stops the working seat.
@@ -133,7 +133,7 @@ test('a council runs from the strip: seat states, Synthesize with its reason, St
   await synth.click();
   const panes = page.getByTestId('threads-canvas').locator('[data-testid^="thread-pane-"]');
   await expect(panes).toHaveCount(4, { timeout: 30_000 });
-  const judgeChip = strip.locator('[data-testid^="pane-chip-"]', { hasText: 'Synthesis' });
+  const judgeChip = strip.locator('[data-testid^="pane-chip-"]', { hasText: 'Compared' });
   await expect(judgeChip).toHaveAttribute('data-state', 'answered', { timeout: 40_000 });
   await expect(page.locator('.toast', { hasText: /conflict/i })).toHaveCount(0);
   const cont = strip.getByTestId('pane-strip-continue');
@@ -166,7 +166,7 @@ test('a council runs from the strip: seat states, Synthesize with its reason, St
   await page.keyboard.press('Escape');
 });
 
-test('three threads in Grid: the pane strip, Message every pane, broadcast, and the add slot', async ({ page }) => {
+test('three threads in Grid: the pane strip, broadcast from ⋯, and the add slot', async ({ page }) => {
   test.setTimeout(150_000);
   const a = await thread('Alpha build');
   const b = await thread('Beta docs');
@@ -186,26 +186,19 @@ test('three threads in Grid: the pane strip, Message every pane, broadcast, and 
   await expect(page.getByTestId(`thread-pane-${b}`)).toHaveAttribute('aria-current', 'true');
   await shot(page, 'pane-strip-three');
 
-  // Message every pane: a paragraph, the count said, each pane receives it.
-  await strip.getByTestId('pane-strip-message').click();
-  const sheet = page.getByTestId('pane-message-sheet');
-  await expect(sheet.getByTestId('pane-message-intro')).toContainText('3 threads will receive it');
-  await sheet.getByTestId('pane-message-input').fill('note from the strip\nsecond line');
-  await page.getByTestId('pane-message-send').click();
-  await expect(page.locator('.toast', { hasText: 'Sent to 3 threads' })).toBeVisible({ timeout: 15_000 });
-  for (const id of [a, b]) await expect(page.getByTestId(`thread-pane-${id}`)).toContainText('echo: note from the strip', { timeout: 20_000 });
-  await expect(page.getByTestId(`thread-pane-${c}`)).toContainText('note from the strip');
+  // The strip has no broadcast button of its own: ⋯ › Send to another thread… does it.
+  await expect(strip.getByTestId('pane-strip-message')).toHaveCount(0);
 
   // Related › Message › All open threads in this project reaches a structured thread.
   await page.getByTestId(`thread-pane-${a}`).getByRole('button', { name: 'More thread actions' }).click();
-  await page.locator('.ctx-menu').first().getByRole('menuitem', { name: 'Related threads…' }).click();
+  await page.locator('.ctx-menu').first().getByRole('menuitem', { name: 'Send to another thread…' }).click();
   await page.getByTestId('related-message-any').click();
   await page.locator('.ctx-menu').first().getByRole('menuitem', { name: /All open threads in this project/ }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByRole('textbox').fill('broadcast check');
   await dialog.getByRole('button', { name: /^Send to \d+$/ }).click();
   await expect(page.locator('.toast', { hasText: /Sent to \d+ threads?/ }).last()).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByTestId(`thread-pane-${b}`)).toContainText('broadcast check', { timeout: 20_000 });
+  for (const id of [b, c]) await expect(page.getByTestId(`thread-pane-${id}`)).toContainText('broadcast check', { timeout: 20_000 });
 
   // The Grid's add slot offers a structured thread not shown yet.
   const d = await thread('Delta review');

@@ -36,6 +36,7 @@
   import { council, councilAgentLabel } from './runtime/councilStore.svelte';
   import { handleSlashMenuKey } from './runtime/runtimeComposer';
   import RuntimeAccessChip from './runtime/RuntimeAccessChip.svelte';
+  import { threadAccessDefault } from './threadAccessDefault.svelte';
   import RuntimeContextChips from './runtime/RuntimeContextChips.svelte';
   import type { PickedAgentMention, PickedFileMention } from './runtime/RuntimeMentionMenu.svelte';
   import { terminalTakesEffort } from '../../lib/providerRegistry';
@@ -60,6 +61,9 @@
     draftKey: string;
     /** A narrow column (an embed): denser, chips shrink to icons. */
     compact?: boolean;
+    /** The Threads stage: the access chip hides for a calm default (a page
+     *  that starts its own kind of agent, e.g. a PR dock, always shows it). */
+    hideCalmAccess?: boolean;
     /** Only agents that run a structured thread and are installed (embeds). */
     runtimeOnly?: boolean;
     /** Ask several agents at once (Threads). */
@@ -86,7 +90,7 @@
     onprefilled?: () => void;
   }
   let {
-    cwd, pickerStart = '', draftKey, compact = false, runtimeOnly = false, allowCouncil = true, defaultProvider, rememberScope,
+    cwd, pickerStart = '', draftKey, compact = false, hideCalmAccess = false, runtimeOnly = false, allowCouncil = true, defaultProvider, rememberScope,
     accessMode = null, onaccess, placeholder, inputLabel = 'Opening prompt for new thread', error = '', onlaunch, onescape, below, prefill = null, onprefilled,
   }: Props = $props();
 
@@ -223,6 +227,16 @@
     const target = anchor ?? agentEl;
     if (!target || !modeSupported) return;
     ctxMenu.showAt(target, buildModeMenu(interactionMode, (m) => (interactionMode = m)), { align: 'end' });
+  }
+
+  /** Send what is in the box again (the host's Retry after a failed start). */
+  export function retry(): Promise<void> {
+    return launch(true);
+  }
+
+  /** The text in the box (the host names a branch from it). */
+  export function draftText(): string {
+    return prompt;
   }
 
   /** Start with a message the host wrote (a suggestion, a menu ask) and the
@@ -414,7 +428,9 @@
   const shownError = $derived(ownError || error);
   // A council's seats are read-only by design, and a terminal agent takes the
   // meta row's mode menu instead.
-  const accessShown = $derived(!!accessMode && runtime && !councilOn);
+  // The same rule as a thread's chip: hidden only for a calm default
+  // (Supervised / Auto-accept edits); Full access always shows, in amber.
+  const accessShown = $derived(!!accessMode && runtime && !councilOn && (!hideCalmAccess || accessMode === 'full-access' || accessMode !== (threadAccessDefault.skipPermissions ? 'full-access' : 'approval-required')));
 </script>
 
 <div class="nt-composer" class:compact class:plan={planShown} bind:this={composerBoxEl} data-testid="start-composer">
@@ -435,7 +451,7 @@
       textareaEl={composerEl}
       anchorEl={composerBoxEl}
       allowAgents={true}
-      agentSectionLabel={councilOn ? 'Add council agent' : 'Switch agent'}
+      agentSectionLabel={councilOn ? 'Add a model to compare' : 'Switch agent'}
       onpickfile={handleMentionFile}
       onpickagent={handleMentionAgent}
       ondrilldir={(nextText) => { prompt = nextText; }}
@@ -586,6 +602,7 @@
     border-radius: var(--radius-l);
     border: 1px solid var(--border);
     background: var(--surface);
+    box-shadow: var(--shadow-card);
   }
   .nt-composer.compact {
     container-type: inline-size;
@@ -609,8 +626,8 @@
     background: transparent;
     color: var(--text);
     font: inherit;
-    font-size: var(--fs-m);
-    line-height: 1.55;
+    font-size: var(--fs-l);
+    line-height: 1.6;
     unicode-bidi: plaintext;
     text-align: start;
     outline: none;

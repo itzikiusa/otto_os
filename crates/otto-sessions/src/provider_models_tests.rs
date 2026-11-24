@@ -174,8 +174,22 @@ async fn unauthenticated_cli_stays_provisional_and_refreshes_after_login() {
     std::fs::write(&state_file, "ok").unwrap();
     invalidate_caches_after_login(None);
 
-    let (after, is_prov_after) = probe_provider_models_cached_with_status(&probe).await;
-    assert!(!is_prov_after);
+    // The post-login read waits MODELS_COLD_BUDGET (250 ms) for the refresh;
+    // on a loaded machine the three probe scripts can take longer, and that
+    // read answers provisionally while the refresh lands in the cache. Read
+    // until the refresh is in, within a bounded window — never a blind retry.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let (after, is_prov_after) = loop {
+        let (models, prov) = probe_provider_models_cached_with_status(&probe).await;
+        if !prov || std::time::Instant::now() >= deadline {
+            break (models, prov);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert!(
+        !is_prov_after,
+        "the post-login refresh never landed within 20 s"
+    );
     assert_eq!(after["agy"][0].id, "gemini-4-live");
     assert_eq!(after["pi"][0].id, "openai/gpt-live");
     assert_eq!(after["grok"][0].id, "grok-live");

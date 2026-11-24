@@ -1717,7 +1717,12 @@ published on the streaming path, never through the internal bus.
 ```
 
 - `event` is a `RuntimeEvent`: `session_id`, `sequence`, `ts` plus one of
-  (`type` tag → payload): `provider_session.updated {provider_session}`,
+  (`type` tag → payload): `provider_session.updated {provider_session}`
+  (`provider_session.thread?`: the session's client-owned thread meta —
+  `{thread_pinned?, thread_history?, thread_seen_at?}` plus an armed
+  `resume_at` (api.md `POST /runtime-sessions/{id}/resume-at`), absent when none is
+  set — so a pin / History / "seen" written on one device reaches every
+  other client at once; api.md `PATCH /runtime-sessions/{id}`),
   `provider_thread.updated {provider_thread}`, `provider_turn.updated
   {provider_turn}`, `turn_item.updated {turn_item}`,
   `runtime_request.updated {runtime_request}`, `plan.updated {plan}`,
@@ -1725,7 +1730,15 @@ published on the streaming path, never through the internal bus.
   description?, hint?}]}` (the agent's own slash commands, whole: Claude
   `initialize.commands`, ACP `available_commands_update`, pi `get_commands`,
   Codex `skills/list`; descriptions one line ≤ 160 chars, ≤ 400 commands;
-  also `RuntimeSnapshot.commands`), `command_output.delta {item_id, chunk}`,
+  also `RuntimeSnapshot.commands`), `mcp_servers.updated {mcp_servers:
+  [{name, source: otto|workspace|cli, state: connected|starting|added|
+  needs_auth|failed|disabled|unsupported, reason?}]}` (the MCP servers the
+  thread's agent has, whole: at each spawn what Otto gave it — `added` — and
+  the enabled control-plane servers it could not take, `unsupported` with
+  why; then refined by name from what the CLI reports — Claude `system
+  init.mcp_servers`, Codex `mcpServer/startupStatus/updated` — which also
+  adds the CLI's own servers as `source: cli`; ≤ 100; persisted; also
+  `RuntimeSnapshot.mcp_servers`), `command_output.delta {item_id, chunk}`,
   `turn.terminal {turn_id, status: completed|interrupted|cancelled|failed,
   failure?, reason?}` (`reason: "stalled"` = the stall watchdog stopped it).
   Entities are sent WHOLE (replace by id); `turn_item.type` ∈ `user_message |
@@ -1733,7 +1746,11 @@ published on the streaming path, never through the internal bus.
   command_execution | dynamic_tool | web_search | approval_request |
   system_notice | session_boundary | subagent | error`. A `session_boundary`
   marks the first accepted turn of an explicit fresh provider conversation in
-  the same Otto thread. It has no additional fields; preceding history remains.
+  the same Otto thread; preceding history remains. After a provider switch it
+  carries `handoff: {from_provider, to_provider, from_model?, to_model?, turns,
+  omitted_turns, images_omitted, text}` (api.md "Continue on another
+  provider"); `provider_session.provider?` / `provider_slug?` name the
+  provider the thread runs on now.
   Request IDs are opaque, scoped to one provider process, and never reused by
   a replacement process. A `subagent`'s own activity items carry
   `parent_item_id` (the card). A `system_notice` whose `title` is `Model`,

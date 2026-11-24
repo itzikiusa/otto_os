@@ -308,3 +308,28 @@ export async function editorSelectAll(page: Page): Promise<string> {
   });
   return apple ? 'Meta+A' : 'Control+A';
 }
+
+/** /meta with every agent CLI's detection set to `found` (version `version`
+ *  when found), so a spec of the setup prompt never depends on what the host
+ *  or the harness's stand-ins put on PATH (gemini/agy/grok fakes, a real pi or
+ *  opencode). A registered agent without a tool row gets one. */
+export function withAgentClis<M extends { providers?: string[]; tools: { name: string }[] }>(meta: M, found: boolean, version: string | null): M {
+  const agents = (meta.providers ?? []).filter((p) => p !== 'shell');
+  const row = (name: string) => ({ name, found, version: found ? version : null });
+  const tools = meta.tools.map((t) => (agents.includes(t.name) ? { ...t, ...row(t.name) } : t));
+  for (const a of agents) if (!tools.some((t) => t.name === a)) tools.push(row(a));
+  return { ...meta, tools };
+}
+
+/** The workspace `.mcp.json` several sessions share never holds a credential:
+ *  the session's token appears nowhere in the file, and the otto entry
+ *  forwards each bridge variable by REFERENCE (`${OTTO_MCP_TOKEN:-}`, which
+ *  each agent CLI expands from its own env) — never a value. */
+export function expectMcpJsonHoldsNoCredential(raw: string, token: string): void {
+  expect(token.length, 'the captured session token is not empty').toBeGreaterThan(0);
+  expect(raw.includes(token), 'the session token is never written into .mcp.json').toBe(false);
+  const env = (JSON.parse(raw) as { mcpServers?: Record<string, { env?: Record<string, string> }> }).mcpServers?.otto?.env ?? {};
+  for (const [name, value] of Object.entries(env)) {
+    expect(value, `${name} is a reference, not a literal`).toMatch(/^\$\{[A-Z][A-Z0-9_]*(:-)?\}$/);
+  }
+}

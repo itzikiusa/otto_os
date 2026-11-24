@@ -619,7 +619,14 @@ this order; the **first** decisive stage wins:
    `mcp_require_approval_dangerous` on, the default), or policy/per-tool requires
    approval, the call needs a **human approval** bound to the exact args (a SHA-256
    `args_hash`). With no usable approval it creates a **pending** `mcp_approvals` row
-   and returns `pending_approval`. A retry of the same call (same tool, args hash,
+   and returns `pending_approval` — unless the caller asked to wait
+   (`wait_seconds`, ≤ 300; the stdio bridge every agent session uses passes
+   300): then the call holds for the decision, and an approval runs that SAME
+   call (a denial answers `denied`). A thread shows the card in its attention
+   dock (Deny · Allow once · "Always allow in this workspace" for reversible
+   `otto.*` tools, which adds a workspace auto-approve rule), so the agent
+   never has to resubmit; `pending_approval` is only the fallback when
+   nobody answers in 5 minutes. A retry of the same call (same tool, args hash,
    workspace and requester) while that row is still pending **reuses it** — the
    same `approval_id` comes back and no duplicate card is filed, however often a
    waiting agent resubmits. An existing approval is **consumed single-use**
@@ -1110,8 +1117,9 @@ migration 0146 and no longer read; auto-approve lives in the
 - Otto sits **in the call path**: every governed MCP call is allowlisted, policed
   (policy-as-code), risk-gated, optionally dry-run, executed, and **audited** with
   derived per-tool stats.
-- Two transports — local `stdio` (spawn-per-op) and remote `http`
-  (Streamable-HTTP with SSE), the latter SSRF-pinned.
+- Three transports — local `stdio`, remote `http` (Streamable HTTP) and the
+  legacy `sse` (HTTP + event stream, protocol 2024-11-05; its message endpoint
+  must stay on the stream's origin) — the remote two SSRF-guarded.
 - Automatic risk + injection labeling (with human override that survives
   rediscovery), background health sweeps, and a single-use, hash-bound, approver≠requester
   approval queue.
@@ -1132,7 +1140,12 @@ migration 0146 and no longer read; auto-approve lives in the
   design.
 - **Per-tool cost in USD is partial** — latency / bytes / errors are metered; true
   per-vendor cost is not (`cost_usd` is nullable/estimated).
-- **No OAuth flows** for remote servers — header/token auth only.
+- **OAuth sign-in for remote servers is per server, by a person at the Mac** (CP6a–c):
+  a server row that answered 401 says "Needs sign-in" with a Sign in action (also in ⋯),
+  which names the server and its authorization host before the system browser opens.
+  The redirect is this Mac's loopback, so a phone can't sign in, and an agent never
+  can. Pending sign-ins live in memory (a daemon restart drops them; sign in again).
+  Native (not governed) servers sign in through their CLI, not Otto.
 - **Dry-run is a pure simulation** — it never calls the downstream tool, so it cannot
   reflect a tool's own validation.
 - **No `mcp_gateway_enabled` toggle** in the shipped code — the gateway surfaces
@@ -1158,9 +1171,18 @@ applies.
 
 **A tool call returns `pending_approval`.** It hit the risk/approval gate (a
 `dangerous` tool with approval on, a `require_approval` policy, or a per-tool
-require-approval). Approve it in **Activity → Approvals** (MCP Admin, and not the
-same user who requested it), then re-invoke — the approval is **single-use** and
-bound to the exact arguments, so changing the args invalidates it.
+require-approval) and nobody answered within 5 minutes. From a thread the card
+waits in the thread's attention dock (and in **Activity → Approvals** / the
+Triage bar); answered in time, the agent's call runs on it. Answered later,
+re-invoke — the approval is **single-use** and bound to the exact arguments, so
+changing the args invalidates it.
+
+**A thread's agent doesn't have a server.** Thread ⋯ → **MCP servers** lists
+every server the agent has — Otto's tools, this workspace's servers, the CLI's
+own config — with a status word and, when it isn't connected, why (not on the
+daemon's PATH, not supported by that provider or mode, needs sign-in, failed to
+start, pi 0.x). A server turned on after the agent started shows "MCP servers
+changed · Restart agent to apply" in the thread.
 
 **An agent says a tool "is not in the MCP profile …".** The session runs under
 an MCP profile that leaves that tool out — the error names the profile. Open the

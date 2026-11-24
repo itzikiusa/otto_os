@@ -15,7 +15,7 @@ let wsId = '';
 let dir = '';
 
 test.beforeAll(async ({}, info) => {
-  if (!/^(iphone|android)/.test(info.project.name)) return;
+  if (!/^(iphone|android-phone)/.test(info.project.name)) return;
   const c = await apiCtx();
   ctx = c.ctx;
   base = c.base;
@@ -36,7 +36,7 @@ test.afterAll(async () => {
 });
 
 test('the council switcher changes seat in one tap and keeps every action in one menu', async ({ page }, info) => {
-  test.skip(!/^(iphone|android)/.test(info.project.name) || info.project.name.includes('landscape'), 'portrait phones only');
+  test.skip(!/^(iphone|android-phone)/.test(info.project.name) || info.project.name.includes('landscape'), 'portrait phones only');
   test.setTimeout(120_000);
   await page.addInitScript((id) => {
     if (sessionStorage.getItem('council-phone-init')) return;
@@ -81,8 +81,8 @@ test('the council switcher changes seat in one tap and keeps every action in one
   // Every council action sits in one menu that fits the phone.
   await strip.getByTestId('pane-strip-council-menu').click();
   const menu = page.locator('.ctx-menu').first();
-  await expect(menu.getByRole('menuitem', { name: 'Ask every seat…' })).toBeVisible();
-  await expect(menu.getByRole('menuitem', { name: /Synthesize with/ })).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: 'Ask every model…' })).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: /Compare answers with/ })).toBeVisible();
   await expect(menu.getByRole('menuitem', { name: 'Continue with this answer' })).toBeVisible();
   await expectFullyInViewport(page, menu, 'Council menu (phone)');
   await shot('council-menu');

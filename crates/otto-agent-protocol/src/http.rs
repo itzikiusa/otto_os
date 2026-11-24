@@ -10,10 +10,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use otto_core::agent_runtime::{
-    AskChildReq, AskChildResp, CouncilResp, CreateCouncilReq, CreateRuntimeSessionBody,
-    OpenPeerReq, PeerInfo, PeerMessageReq, PeerReply, QueuedDeliverReq, RuntimePromptReq,
-    RuntimePromptResp, RuntimeReplay, RuntimeRequestRespondReq, RuntimeSession,
-    SynthesizeCouncilReq, TurnItem, UnqueuePromptResp, UpdateRuntimeSessionReq,
+    validate_thread_meta, AskChildReq, AskChildResp, CouncilResp, CreateCouncilReq,
+    CreateRuntimeSessionBody, FamilyStopReq, FamilyStopResp, OpenPeerReq, PeerInfo, PeerMessageReq,
+    PeerReply, QueuedDeliverReq, RuntimePromptReq, RuntimePromptResp, RuntimeReplay,
+    RuntimeRequestRespondReq, RuntimeSession, SubagentTarget, SynthesizeCouncilReq, TurnItem,
+    UnqueuePromptResp, UpdateRuntimeSessionReq,
 };
 use otto_core::api::Problem;
 use otto_core::auth::{AuthContext, AuthUser};
@@ -105,6 +106,7 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
         )
         .route("/runtime-sessions/{id}/close", post(close::<S>))
         .route("/runtime-sessions/{id}/reopen", post(reopen::<S>))
+        .route("/runtime-sessions/{id}/resume-at", post(resume_at::<S>))
         .route(
             "/runtime-sessions/{id}/queue/{queued_id}",
             post(deliver_queued::<S>).delete(unqueue::<S>),
@@ -138,9 +140,18 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
             "/runtime-sessions/{id}/peers",
             get(peers::<S>).post(open_peer::<S>),
         )
+        .route("/runtime-sessions/{id}/stop-family", post(stop_family::<S>))
+        .route(
+            "/runtime-sessions/{id}/subagent-targets",
+            get(subagent_targets::<S>),
+        )
         .route(
             "/runtime-sessions/{id}/peers/{peer}/message",
             post(message_peer::<S>),
+        )
+        .route(
+            "/runtime-sessions/{id}/peers/{peer}/answer",
+            post(answer_peer::<S>),
         )
         .route(
             "/runtime-sessions/{id}/peers/{peer}/reply",
@@ -207,6 +218,33 @@ async fn peers<S: RuntimeCtx>(
     Ok(Json(ctx.agent_runtime().peers(&id).await?))
 }
 
+/// POST /runtime-sessions/{id}/stop-family — one Stop for it and its subagents.
+async fn stop_family<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Id>,
+    body: Option<Json<FamilyStopReq>>,
+) -> ApiResult<Json<FamilyStopResp>> {
+    require_human(&ctx, &auth)?;
+    authorized(&ctx, &user, &id).await?;
+    let background = body.is_some_and(|b| b.background);
+    Ok(Json(
+        ctx.agent_runtime().stop_family(&id, background).await?,
+    ))
+}
+
+/// GET /runtime-sessions/{id}/subagent-targets — who it may delegate to.
+async fn subagent_targets<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<Vec<SubagentTarget>>> {
+    as_thread(&ctx, &user, &auth, &id).await?;
+    Ok(Json(ctx.agent_runtime().subagent_targets(&id).await?))
+}
+
 /// POST /runtime-sessions/{id}/peers — open a linked thread.
 async fn open_peer<S: RuntimeCtx>(
     State(ctx): State<S>,
@@ -214,17 +252,36 @@ async fn open_peer<S: RuntimeCtx>(
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<Id>,
     Json(req): Json<OpenPeerReq>,
-) -> ApiResult<(StatusCode, Json<RuntimeSession>)> {
+) -> ApiResult<(StatusCode, Json<OpenPeerResp>)> {
     as_thread(&ctx, &user, &auth, &id).await?;
     let by_person = ctx.is_human(&auth);
-    let s = ctx
+    let session = ctx
         .agent_runtime()
         .open_peer_by(&id, req, by_person)
         .await?;
     if by_person {
         ctx.agent_runtime().person_prompted(&id).await;
     }
-    Ok((StatusCode::CREATED, Json(s)))
+    Ok((
+        StatusCode::CREATED,
+        Json(OpenPeerResp {
+            session,
+            next: OPEN_PEER_NEXT,
+        }),
+    ))
+}
+
+/// What the opening agent does next (after T3 Code's `delegate_task` `next`).
+const OPEN_PEER_NEXT: &str =
+    "Completion wakes this thread: its reply arrives here when it finishes. Do not poll it \
+     (otto_thread_read, sleep); do your own work, then end your turn.";
+
+/// The opened thread, plus [`OPEN_PEER_NEXT`].
+#[derive(serde::Serialize)]
+struct OpenPeerResp {
+    #[serde(flatten)]
+    session: RuntimeSession,
+    next: &'static str,
 }
 
 /// POST /runtime-sessions/{id}/peers/{peer}/message — the peer's next turn.
@@ -241,6 +298,29 @@ async fn message_peer<S: RuntimeCtx>(
         .message_peer_by(&id, &peer, &req.text, ctx.is_human(&auth))
         .await?;
     Ok((StatusCode::ACCEPTED, Json(r)))
+}
+
+/// `POST …/peers/{peer}/answer`: the question its subagent asks.
+#[derive(Deserialize)]
+struct PeerAnswerReq {
+    request_id: String,
+    answers: Vec<otto_core::agent_runtime::QuestionAnswer>,
+}
+
+/// POST /runtime-sessions/{id}/peers/{peer}/answer — `{id}` (its person or
+/// its own agent) answers a question its subagent `{peer}` asks.
+async fn answer_peer<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path((id, peer)): Path<(Id, Id)>,
+    Json(req): Json<PeerAnswerReq>,
+) -> ApiResult<StatusCode> {
+    as_thread(&ctx, &user, &auth, &id).await?;
+    ctx.agent_runtime()
+        .answer_child(&id, &peer, &req.request_id, req.answers)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// POST /runtime-sessions/{id}/peers/{peer}/close — close a linked thread.
@@ -452,7 +532,8 @@ async fn prompt<S: RuntimeCtx>(
     require_human(&ctx, &auth)?;
     authorized(&ctx, &user, &id).await?;
     ctx.agent_runtime().person_prompted(&id).await;
-    let r = ctx.agent_runtime().prompt_with(&id, &req).await?;
+    // Runs to its end even if the client goes away mid-handshake.
+    let r = ctx.agent_runtime().prompt_to_end(&id, &req).await?;
     Ok((StatusCode::ACCEPTED, Json(r)))
 }
 
@@ -517,8 +598,27 @@ async fn rename<S: RuntimeCtx>(
     Json(req): Json<UpdateRuntimeSessionReq>,
 ) -> ApiResult<Json<RuntimeSession>> {
     require_human(&ctx, &auth)?;
-    authorized(&ctx, &user, &id).await?;
-    Ok(Json(ctx.agent_runtime().rename(&id, &req.title).await?))
+    let s = authorized(&ctx, &user, &id).await?;
+    if let Some(meta) = &req.meta {
+        // Client-owned thread keys only (pinned / History / seen at); writing
+        // them is an editor's act, like any other change to the session.
+        validate_thread_meta(meta).map_err(|e| ApiErr(Error::Invalid(e)))?;
+        ctx.roles()
+            .check(&user, &s.workspace_id, WorkspaceRole::Editor)
+            .await?;
+    }
+    let renamed = match &req.title {
+        Some(title) => Some(ctx.agent_runtime().rename(&id, title).await?),
+        None => None,
+    };
+    match req.meta {
+        Some(meta) => Ok(Json(
+            ctx.agent_runtime().update_thread_meta(&id, meta).await?,
+        )),
+        None => renamed
+            .map(Json)
+            .ok_or_else(|| ApiErr(Error::Invalid("give a title and/or meta".into()))),
+    }
 }
 
 async fn close<S: RuntimeCtx>(
@@ -543,6 +643,34 @@ async fn reopen<S: RuntimeCtx>(
     require_human(&ctx, &auth)?;
     authorized(&ctx, &user, &id).await?;
     Ok(Json(ctx.agent_runtime().reopen_fast(&id).await?))
+}
+
+/// Body of `POST /runtime-sessions/{id}/resume-at`.
+#[derive(Deserialize)]
+struct ResumeAtReq {
+    /// When the usage limit resets; `null` cancels the armed resume.
+    at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// POST /runtime-sessions/{id}/resume-at — arm the thread's ONE resume when
+/// its provider's usage limit resets (kept in its meta, so a restart keeps
+/// it), or cancel it. At most a week ahead.
+async fn resume_at<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Id>,
+    Json(req): Json<ResumeAtReq>,
+) -> ApiResult<Json<RuntimeSession>> {
+    require_human(&ctx, &auth)?;
+    authorized(&ctx, &user, &id).await?;
+    if req
+        .at
+        .is_some_and(|t| t > chrono::Utc::now() + chrono::Duration::days(7))
+    {
+        return Err(Error::Invalid("a resume can be at most a week ahead".into()).into());
+    }
+    Ok(Json(ctx.agent_runtime().set_resume_at(&id, req.at).await?))
 }
 
 /// DELETE /runtime-sessions/{id} — stop its agent and remove it with its history.
@@ -824,9 +952,370 @@ mod tests {
         fn roles(&self) -> &Arc<dyn RoleChecker> {
             &self.roles
         }
-        fn is_human(&self, _auth: &AuthContext) -> bool {
-            true
+        fn is_human(&self, auth: &AuthContext) -> bool {
+            !auth.is_scoped()
         }
+    }
+
+    /// Editor (or only Viewer) everywhere, never Admin.
+    struct Roles {
+        editor: bool,
+    }
+    impl RoleChecker for Roles {
+        fn check<'a>(
+            &'a self,
+            _user: &'a User,
+            _ws: &'a Id,
+            min_role: WorkspaceRole,
+        ) -> BoxFuture<'a, otto_core::Result<()>> {
+            let ok = match min_role {
+                WorkspaceRole::Admin => false,
+                WorkspaceRole::Editor => self.editor,
+                _ => true,
+            };
+            Box::pin(async move {
+                if ok {
+                    Ok(())
+                } else {
+                    Err(Error::Forbidden("role".into()))
+                }
+            })
+        }
+    }
+
+    /// A host that keeps what the runtime published (the WS fan-out).
+    struct RecHost(String, std::sync::Mutex<Vec<Arc<RuntimeEvent>>>);
+    #[async_trait::async_trait]
+    impl RuntimeHost for RecHost {
+        async fn workspace(&self, id: &Id) -> otto_core::Result<Workspace> {
+            DummyHost(self.0.clone()).workspace(id).await
+        }
+        async fn sandboxed(&self, _s: &RuntimeSession) -> bool {
+            false
+        }
+        async fn prepare_spawn(
+            &self,
+            _ws: &Workspace,
+            _s: &RuntimeSession,
+            _spec: &mut LaunchSpec,
+            _mcp: McpDelivery,
+        ) -> otto_core::Result<Vec<McpServerDef>> {
+            Ok(Vec::new())
+        }
+        fn publish(&self, _s: &RuntimeSession, event: Arc<RuntimeEvent>) {
+            self.1.lock().unwrap().push(event);
+        }
+    }
+
+    fn auth(user: &User, scoped: bool) -> AuthContext {
+        let mut a = AuthContext::automation(user, "test");
+        if scoped {
+            a.scope = Some(otto_core::auth::SessionScope {
+                session_id: "s".into(),
+                role: WorkspaceRole::Editor,
+                otp_pending: false,
+            });
+        }
+        a
+    }
+
+    async fn patch(
+        ctx: &TestRuntimeCtx,
+        user: &User,
+        scoped: bool,
+        id: &Id,
+        body: serde_json::Value,
+    ) -> Result<RuntimeSession, StatusCode> {
+        rename(
+            State(ctx.clone()),
+            Extension(AuthUser(user.clone())),
+            Extension(auth(user, scoped)),
+            Path(id.clone()),
+            Json(serde_json::from_value(body).unwrap()),
+        )
+        .await
+        .map(|Json(s)| s)
+        .map_err(|e| e.into_response().status())
+    }
+
+    #[tokio::test]
+    async fn thread_meta_patch_allow_list_rbac_and_live_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_str().unwrap().to_string();
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true);
+        let raw_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&raw_pool)
+            .await
+            .unwrap();
+        let pool: DbPool = raw_pool.into();
+        let users = UsersRepo::new(pool.clone());
+        let owner = users.create("owner", "Owner", "h", false).await.unwrap();
+        let other = users.create("other", "Other", "h", false).await.unwrap();
+        let ws = WorkspacesRepo::new(pool.clone())
+            .create("ws", &cwd, &owner.id)
+            .await
+            .unwrap();
+        let host = Arc::new(RecHost(cwd.clone(), Default::default()));
+        let drivers: Arc<dyn DriverFactory> = Arc::new(|_| None);
+        let rt = AgentRuntime::new(
+            AgentRuntimeRepo::new(pool.clone()),
+            host.clone(),
+            drivers,
+            RuntimeConfig {
+                attachments_dir: dir.path().join("att"),
+                ..RuntimeConfig::default()
+            },
+        );
+        let s = rt
+            .repo()
+            .create(NewRuntimeSession {
+                id: otto_core::new_id(),
+                workspace_id: ws.id,
+                provider: RuntimeProvider::Claude,
+                title: "t".into(),
+                cwd,
+                model: None,
+                access_mode: RuntimeAccessMode::FullAccess,
+                created_by: owner.id.clone(),
+                parent_id: None,
+                meta: Some(serde_json::json!({"source": "pr-agent"})),
+            })
+            .await
+            .unwrap()
+            .session;
+        let ctx = TestRuntimeCtx {
+            rt,
+            roles: Arc::new(Roles { editor: true }),
+        };
+
+        // Only the client-owned keys, with their types: 400 before anything is written.
+        for bad in [
+            serde_json::json!({"meta": {"source": "connection-diagnose"}}),
+            serde_json::json!({"meta": {"thread_pinned": "yes"}}),
+            serde_json::json!({"meta": {"thread_seen_at": "yesterday"}}),
+            serde_json::json!({"meta": {}}),
+            serde_json::json!({}),
+        ] {
+            assert_eq!(
+                patch(&ctx, &owner, false, &s.id, bad).await.unwrap_err(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        // Not the owner, a share / guest credential, a viewer: no.
+        let pin = serde_json::json!({"meta": {"thread_pinned": true}});
+        assert_eq!(
+            patch(&ctx, &other, false, &s.id, pin.clone())
+                .await
+                .unwrap_err(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            patch(&ctx, &owner, true, &s.id, pin.clone())
+                .await
+                .unwrap_err(),
+            StatusCode::FORBIDDEN
+        );
+        let viewer = TestRuntimeCtx {
+            rt: ctx.rt.clone(),
+            roles: Arc::new(Roles { editor: false }),
+        };
+        assert_eq!(
+            patch(&viewer, &owner, false, &s.id, pin.clone())
+                .await
+                .unwrap_err(),
+            StatusCode::FORBIDDEN
+        );
+        assert!(host.1.lock().unwrap().is_empty());
+
+        // The owner: merged beside the server-owned meta, published live, persisted.
+        let at = "2026-11-23T10:00:00Z";
+        let got = patch(
+            &ctx,
+            &owner,
+            false,
+            &s.id,
+            serde_json::json!({"meta": {"thread_pinned": true, "thread_seen_at": at}}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            got.meta,
+            Some(
+                serde_json::json!({"source": "pr-agent", "thread_pinned": true, "thread_seen_at": at})
+            )
+        );
+        let thread_of = |e: &RuntimeEvent| match &e.body {
+            otto_core::agent_runtime::RuntimeEventBody::ProviderSessionUpdated {
+                provider_session,
+            } => provider_session.thread.clone(),
+            _ => None,
+        };
+        let last = host.1.lock().unwrap().last().cloned().expect("an event");
+        assert_eq!(
+            thread_of(&last),
+            Some(serde_json::json!({"thread_pinned": true, "thread_seen_at": at}))
+        );
+        // null clears a key; a title and meta together both land.
+        let got = patch(&ctx, &owner, false, &s.id, serde_json::json!({"title": "Renamed", "meta": {"thread_pinned": null, "thread_history": true}})).await.unwrap();
+        assert_eq!(got.title, "Renamed");
+        assert_eq!(
+            got.meta,
+            Some(
+                serde_json::json!({"source": "pr-agent", "thread_history": true, "thread_seen_at": at})
+            )
+        );
+        let row = AgentRuntimeRepo::new(pool)
+            .get(&s.id)
+            .await
+            .unwrap()
+            .session;
+        assert_eq!(row.meta, got.meta);
+    }
+
+    #[tokio::test]
+    async fn resume_at_arms_cancels_and_a_restart_re_arms_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_str().unwrap().to_string();
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true);
+        let raw_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&raw_pool)
+            .await
+            .unwrap();
+        let pool: DbPool = raw_pool.into();
+        let users = UsersRepo::new(pool.clone());
+        let owner = users.create("owner", "Owner", "h", false).await.unwrap();
+        let other = users.create("other", "Other", "h", false).await.unwrap();
+        let ws = WorkspacesRepo::new(pool.clone())
+            .create("ws", &cwd, &owner.id)
+            .await
+            .unwrap();
+        let host = Arc::new(RecHost(cwd.clone(), Default::default()));
+        let drivers: Arc<dyn DriverFactory> = Arc::new(|_| None);
+        let rt = AgentRuntime::new(
+            AgentRuntimeRepo::new(pool.clone()),
+            host.clone(),
+            drivers,
+            RuntimeConfig {
+                attachments_dir: dir.path().join("att"),
+                ..RuntimeConfig::default()
+            },
+        );
+        let s = rt
+            .repo()
+            .create(NewRuntimeSession {
+                id: otto_core::new_id(),
+                workspace_id: ws.id,
+                provider: RuntimeProvider::Codex,
+                title: "t".into(),
+                cwd,
+                model: None,
+                access_mode: RuntimeAccessMode::FullAccess,
+                created_by: owner.id.clone(),
+                parent_id: None,
+                meta: None,
+            })
+            .await
+            .unwrap()
+            .session;
+        let ctx = TestRuntimeCtx {
+            rt: rt.clone(),
+            roles: Arc::new(Roles { editor: true }),
+        };
+        let call = |user: &User, at: Option<chrono::DateTime<chrono::Utc>>| {
+            resume_at(
+                State(ctx.clone()),
+                Extension(AuthUser(user.clone())),
+                Extension(auth(user, false)),
+                Path(s.id.clone()),
+                Json(ResumeAtReq { at }),
+            )
+        };
+        let soon = chrono::Utc::now() + chrono::Duration::hours(2);
+        let err = |r: ApiResult<Json<RuntimeSession>>| r.err().map(|e| e.into_response().status());
+        assert_eq!(
+            err(call(&other, Some(soon)).await),
+            Some(StatusCode::FORBIDDEN)
+        );
+        let far = chrono::Utc::now() + chrono::Duration::days(8);
+        assert_eq!(
+            err(call(&owner, Some(far)).await),
+            Some(StatusCode::BAD_REQUEST)
+        );
+
+        // Armed: on the meta, and sent to clients with the thread keys.
+        let Json(got) = call(&owner, Some(soon)).await.ok().unwrap();
+        let stored = got
+            .meta
+            .as_ref()
+            .and_then(|m| m.get(otto_core::agent_runtime::RESUME_AT))
+            .and_then(|v| v.as_str())
+            .map(|v| chrono::DateTime::parse_from_rfc3339(v).unwrap().timestamp());
+        assert_eq!(stored, Some(soon.timestamp()));
+        let last = host.1.lock().unwrap().last().cloned().expect("an event");
+        let thread = match &last.body {
+            otto_core::agent_runtime::RuntimeEventBody::ProviderSessionUpdated {
+                provider_session,
+            } => provider_session.thread.clone(),
+            _ => None,
+        };
+        assert!(thread.and_then(|t| t.get("resume_at").cloned()).is_some());
+        // Cancelled: gone.
+        let Json(got) = call(&owner, None).await.ok().unwrap();
+        assert_eq!(got.meta, None);
+
+        // Stop (a family Stop too) and any new message — a provider switch, a
+        // fresh start — cancel an armed resume; they never fight it.
+        let armed = |rt: &AgentRuntime| {
+            let rt = rt.clone();
+            let id = s.id.clone();
+            async move {
+                let m = rt.get(&id).await.unwrap().meta;
+                m.as_ref().and_then(|m| m.get("resume_at")).is_some()
+            }
+        };
+        let _ = call(&owner, Some(soon)).await.ok().unwrap();
+        assert!(armed(&rt).await);
+        let _ = rt.interrupt(&s.id).await;
+        assert!(!armed(&rt).await, "Stop cancels it");
+        let _ = call(&owner, Some(soon)).await.ok().unwrap();
+        let _ = rt.stop_family(&s.id, false).await;
+        assert!(!armed(&rt).await, "a family Stop cancels it");
+        let _ = call(&owner, Some(soon)).await.ok().unwrap();
+        let mut switch = otto_core::agent_runtime::RuntimePromptReq::of("go on with codex");
+        switch.provider = Some("claude".into());
+        let _ = rt.prompt_with(&s.id, &switch).await;
+        assert!(!armed(&rt).await, "a switch (any new message) cancels it");
+
+        // A resume already due when the daemon starts fires at boot: this
+        // thread's last turn did not end on the limit, so it is just cleared.
+        let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+        rt.repo()
+            .patch_meta(&s.id, &serde_json::json!({ "resume_at": past }))
+            .await
+            .unwrap();
+        rt.recover().await.unwrap();
+        for _ in 0..100 {
+            let meta = rt.repo().get(&s.id).await.unwrap().session.meta;
+            if meta.as_ref().and_then(|m| m.get("resume_at")).is_none() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("the due resume was not re-armed after recover");
     }
 
     #[tokio::test]

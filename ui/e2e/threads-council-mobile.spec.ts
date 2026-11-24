@@ -15,7 +15,7 @@ test.beforeEach(async ({ page }, ti) => {
   });
 });
 
-test('a council on a phone: the Related chip switches seats, the parent chip goes back', async ({ page }, info) => {
+test('a council on a phone: the details drawer switches seats, the parent chip goes back', async ({ page }, info) => {
   test.skip(info.project.name.includes('landscape'), 'portrait phone layout only');
   await page.goto('/');
   await page.waitForFunction(() => typeof (window as unknown as { __mockRuntime?: { seed?: unknown } }).__mockRuntime?.seed === 'function');
@@ -30,11 +30,14 @@ test('a council on a phone: the Related chip switches seats, the parent chip goe
   });
 
   await expect(page.getByTestId('runtime-thread-rt_p1')).toContainText('Seat one says Redis.', { timeout: 15_000 });
-  const chip = page.getByTestId('threads-related-chip');
-  await expect(chip).toHaveText(/1/);
-  await chip.click();
-  const pop = page.getByTestId('threads-related-popover');
-  await expectFullyInViewport(page, pop, 'related popover (phone)');
+  // The details drawer lists the other seat; one tap opens it.
+  await page.getByTestId('threads-toggle-inspector').click();
+  const subs = page.getByTestId('details-subagents');
+  await expect(subs).toBeVisible();
+  // A seat that already answered sits under Previous.
+  if (await subs.getByTestId('details-previous').count()) await subs.getByTestId('details-previous').tap();
+  await expect(subs.getByTestId('details-subagent')).toHaveCount(1);
+  await expectFullyInViewport(page, page.getByTestId('thread-details-card'), 'details card (phone)');
   await expectNoHorizontalOverflow(page);
   await page.screenshot({ path: info.outputPath('council-phone-light.png'), animations: 'disabled' });
   await page.emulateMedia({ colorScheme: 'dark' });
@@ -42,20 +45,20 @@ test('a council on a phone: the Related chip switches seats, the parent chip goe
   await page.emulateMedia({ colorScheme: 'light' });
 
   // One tap: seat 2 as a full thread; its parent chip leads back to seat 1.
-  await pop.getByTestId('related-row-rt_p2').locator('.rl-main').click();
+  await subs.getByTestId('details-subagent').getByRole('button', { name: /Cache plan · codex/ }).tap();
   await expect(page.getByTestId('runtime-thread-rt_p2')).toContainText('Seat two says Memcached.');
-  const back = page.getByTestId('threads-back-to-parent');
-  await expect(back).toContainText('Cache plan · claude');
+  // It opens as a sheet over seat 1 with a fixed line naming seat 1, and Back.
+  await expect(page.getByTestId('runtime-subagent-of').first()).toContainText('Compared with Cache plan · claude');
+  const back = page.getByTestId('threads-back-to-parent').first();
+  await back.tap();
+  await expect(page.getByTestId('runtime-thread-rt_p1')).toBeVisible();
 
-  // The ⋯ council items are reachable on the phone too.
+  // The ⋯ compare items are reachable on the phone too.
   await page.getByTestId('threads-thread-menu').click();
   const menu = page.locator('.ctx-menu').first();
-  await expect(menu.getByRole('menuitem', { name: 'Ask every seat…' })).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: 'Ask every model…' })).toBeVisible();
   await expectFullyInViewport(page, menu, 'thread ⋯ menu (phone)');
   await page.keyboard.press('Escape');
-
-  await back.click();
-  await expect(page.getByTestId('runtime-thread-rt_p1')).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });
 
@@ -85,7 +88,7 @@ test('a council on a phone is not laid side by side: the ⋯ offers no grid', as
   // "Open council side by side".
   await page.getByTestId('threads-thread-menu').click();
   const names = await page.locator('.ctx-menu').first().locator('[role^="menuitem"]').allInnerTexts();
-  expect(names.some((n) => /^Open council side by side/.test(n))).toBe(false);
+  expect(names.some((n) => /^Open side by side/.test(n))).toBe(false);
   await page.keyboard.press('Escape');
   await expectNoHorizontalOverflow(page);
 });

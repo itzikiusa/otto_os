@@ -1,9 +1,9 @@
 <script lang="ts">
   // A pending approval. Its live controls live ONCE, in the attention dock
   // above the composer (`docked`: what it wants to run / change, its reason,
-  // Decline · Approve · More, with keyboard hints on desktop). In the
-  // timeline it is the record (`marker`): "Waiting for your approval ·
-  // Answer", which brings that request up in the dock.
+  // the decision buttons, with keyboard hints on desktop). In the timeline it
+  // is one quiet line, "Waiting for your approval · <command>", that brings
+  // that request up in the dock and focuses it.
   // Ported from T3 Code (MIT, Copyright (c) 2026 T3 Tools Inc.):
   // apps/web/src/components/chat/TimelinePendingApprovalRow.tsx and
   // ComposerPendingApprovalActions.tsx (accept / decline as buttons, every
@@ -13,6 +13,7 @@
   import { ctxMenu } from '../../../lib/contextmenu.svelte';
   import type { ApprovalDecision, ApprovalOption, RequestKind } from '../../../lib/api/types';
   import { keyHint } from './attentionDock';
+  import { approvalButtons, approvalWord } from './approvalOptions';
   import type { PendingApproval } from './timeline';
 
   interface Props {
@@ -36,14 +37,17 @@
     mcp_elicitation: 'App access approval',
   };
   const DEFAULT_OPTIONS: ApprovalOption[] = [
-    { decision: 'decline', label: 'Decline' },
-    { decision: 'accept', label: 'Approve' },
+    { decision: 'decline', label: 'Deny' },
+    { decision: 'accept', label: 'Allow once' },
   ];
+  const word = approvalWord;
 
   let responding = $state(false);
   const options = $derived(approval.options.length > 0 ? approval.options : DEFAULT_OPTIONS);
-  const primary = $derived(options.filter((o) => o.decision === 'decline' || o.decision === 'accept'));
-  const more = $derived(options.filter((o) => o.decision !== 'decline' && o.decision !== 'accept'));
+  /** The same buttons everywhere (approvalOptions.ts); the rest under More. */
+  const buttons = $derived(approvalButtons(options));
+  const primary = $derived(buttons.primary);
+  const more = $derived(buttons.more);
 
   /** Also the dock's keyboard answer (one request in flight at a time). */
   export async function respond(decision: ApprovalDecision): Promise<void> {
@@ -59,7 +63,7 @@
   function openMore(e: MouseEvent): void {
     ctxMenu.show(
       e,
-      more.map((o) => ({ label: o.label, action: () => void respond(o.decision) })),
+      more.map((o) => ({ label: word(o), title: o.label, action: () => void respond(o.decision) })),
     );
   }
 
@@ -71,8 +75,13 @@
 
 {#if docked}
   <div class="ra ra-docked" role="group" aria-label={LABELS[approval.kind]} data-testid="runtime-approval-dock-{approval.requestId}">
-    {#if approval.prompt}<code class="ra-detail" dir="auto" title={approval.prompt}>{approval.prompt}</code>{/if}
-    {#if approval.reason}<p class="ra-reason" dir="auto">{approval.reason}</p>{/if}
+    {#if approval.folded}
+      {#if approval.reason}<p class="ra-reason" dir="auto">{approval.reason}</p>{/if}
+      {#if approval.prompt}<details class="ra-more"><summary>Details</summary><code class="ra-detail" dir="auto">{approval.prompt}</code></details>{/if}
+    {:else}
+      {#if approval.prompt}<code class="ra-detail" dir="auto" title={approval.prompt}>{approval.prompt}</code>{/if}
+      {#if approval.reason}<p class="ra-reason" dir="auto">{approval.reason}</p>{/if}
+    {/if}
     <div class="ra-actions">
       {#if approval.canRespond}
         {#each primary as o (o.decision)}
@@ -82,11 +91,12 @@
             class:primary={o.decision === 'accept'}
             disabled={responding}
             data-testid="runtime-dock-{o.decision}"
-            aria-label={o.label}
-            aria-keyshortcuts={hints ? (o.decision === 'accept' ? 'Meta+Enter' : 'Meta+Backspace') : undefined}
+            aria-label={word(o)}
+            title={o.label !== word(o) ? o.label : undefined}
+            aria-keyshortcuts={hints && (o.decision === 'accept' || o.decision === 'decline') ? (o.decision === 'accept' ? 'Meta+Enter' : 'Meta+Backspace') : undefined}
             onclick={() => void respond(o.decision)}
           >
-            {o.label}{#if hints}<kbd class="ra-kbd">{keyHint(o.decision === 'accept' ? 'accept' : 'decline', mac)}</kbd>{/if}
+            {word(o)}{#if hints && (o.decision === 'accept' || o.decision === 'decline')}<kbd class="ra-kbd">{keyHint(o.decision === 'accept' ? 'accept' : 'decline', mac)}</kbd>{/if}
           </button>
         {/each}
         {#if more.length > 0}
@@ -108,19 +118,17 @@
     </div>
   </div>
 {:else}
-  <div class="ra" class:inline role="group" aria-label={LABELS[approval.kind]} data-testid="runtime-approval-{approval.requestId}">
-    {#if !inline}
-      <div class="ra-head">
-        <Icon name="shield" size={13} />
-        <code class="ra-detail" dir="auto">{approval.prompt || LABELS[approval.kind]}</code>
-      </div>
+  <!-- The timeline's record: one quiet line; the dock above the composer is the one place to answer. -->
+  <div class="ra-line" class:inline role="group" aria-label={LABELS[approval.kind]} data-testid="runtime-approval-{approval.requestId}">
+    {#if approval.canRespond}
+      <button type="button" class="ra-pick" title="Answer it above the composer" data-testid="runtime-approval-answer" onclick={pick}>
+        <Icon name="shield" size={12} />
+        <span class="ra-wait">Waiting for your approval</span>
+        {#if !inline && approval.prompt}<span class="ra-what ellipsis" dir="auto">· {approval.prompt}</span>{/if}
+      </button>
+    {:else}
+      <span class="ra-wait">The agent process is gone. Stop the turn to continue.</span>
     {/if}
-    <div class="ra-actions">
-      <span class="ra-wait">{approval.canRespond ? 'Waiting for your approval' : 'The agent process is gone. Stop the turn to continue.'}</span>
-      {#if approval.canRespond}
-        <button type="button" class="btn small ghost ra-btn" title="Answer it in the bar above the composer" data-testid="runtime-approval-answer" onclick={pick}>Answer</button>
-      {/if}
-    </div>
   </div>
 {/if}
 
@@ -135,14 +143,6 @@
     border-radius: var(--radius-m);
     background: var(--warning-soft);
     font-size: var(--fs-s);
-  }
-  .ra.inline {
-    margin-block: 2px 6px;
-    margin-inline-start: 22px;
-    padding: 4px 8px;
-  }
-  .ra.inline .ra-actions {
-    padding-inline-start: 0;
   }
   .ra-docked {
     flex: 0 1 auto;
@@ -163,13 +163,6 @@
   .ra-docked .ra-actions {
     flex: none;
   }
-  .ra-head {
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-    min-width: 0;
-    color: var(--warning);
-  }
   .ra-detail {
     flex: 1;
     min-width: 0;
@@ -184,7 +177,8 @@
   }
   .ra-docked .ra-detail {
     flex: none;
-    max-block-size: calc(1.5em * 3);
+    /* The full arguments / preview, scrolling inside a capped block. */
+    max-block-size: calc(1.5em * 8);
   }
   /* Phone: approving is the thread's main action — full 44 px tap targets. */
   @media (pointer: coarse) {
@@ -192,6 +186,16 @@
       min-block-size: calc(var(--hit-min) + 8px);
       padding-inline: 14px;
     }
+  }
+  .ra-more summary {
+    cursor: pointer;
+    color: var(--text-dim);
+    font-size: var(--fs-xs);
+  }
+  .ra-more[open] .ra-detail {
+    display: block;
+    max-block-size: 160px;
+    margin-block-start: var(--sp-1);
   }
   .ra-reason {
     margin: 0;
@@ -213,6 +217,47 @@
     margin-inline-end: 4px;
     color: var(--warning);
     font-size: var(--fs-xs);
+  }
+  .ra-line {
+    display: flex;
+    min-inline-size: 0;
+    margin-block: 2px;
+  }
+  .ra-line.inline {
+    margin-inline-start: 22px;
+  }
+  .ra-pick {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-inline-size: 0;
+    max-inline-size: 100%;
+    padding: 2px 6px;
+    border: 0;
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--warning);
+    font: inherit;
+    font-size: var(--fs-s);
+    cursor: pointer;
+  }
+  .ra-pick:hover {
+    background: var(--hover);
+  }
+  .ra-pick:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: -2px;
+  }
+  .ra-what {
+    min-inline-size: 0;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+  }
+  @media (pointer: coarse) {
+    .ra-pick {
+      min-block-size: 44px;
+    }
   }
   .ra-kbd {
     margin-inline-start: 6px;

@@ -6,7 +6,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx } from './seed';
-import { openPage } from './helpers';
+import { expectMcpJsonHoldsNoCredential, openPage } from './helpers';
 
 // API Client through MCP: route contracts, inward/outward catalogs, and the
 // agent source marker in the live History UI. Desktop-browser project only.
@@ -248,14 +248,15 @@ test('inward mcp-tools advertises the API tools and lists the seeded request', a
     const token = readFileSync(tokenFile, 'utf8');
     unlinkSync(tokenFile);
 
-    const mcpDoc = JSON.parse(readFileSync(join(bridgeRoot, '.mcp.json'), 'utf8')) as {
+    const mcpRaw = readFileSync(join(bridgeRoot, '.mcp.json'), 'utf8');
+    const mcpDoc = JSON.parse(mcpRaw) as {
       mcpServers?: Record<string, { command: string; args: string[]; env?: Record<string, string> }>;
     };
     const otto = mcpDoc.mcpServers?.otto;
     expect(otto, '.mcp.json must contain the otto MCP server').toBeTruthy();
-    expect(otto!.env, 'shared config must not persist session credentials').toBeUndefined();
+    expectMcpJsonHoldsNoCredential(mcpRaw, token);
 
-    // `.mcp.json` is deliberately identity-neutral (command/args only — the daemon
+    // `.mcp.json` is deliberately identity-neutral (references only — the daemon
     // never persists a session token into a file several sessions share), so the
     // routing env is ours to supply. Run the binary under test and point it at the
     // isolated e2e daemon with a token/workspace that exist THERE.
@@ -294,24 +295,27 @@ test('inward mcp-tools advertises the API tools and lists the seeded request', a
       ).toBeFalsy();
       expect(McpStdio.rawText(listCall)).toContain('Alpha health');
 
-      const execute = () => mcp.request('tools/call', {
+      // An approval-gated call from an interactive session HOLDS for the
+      // person's decision (otto-mcp approval_wait.rs) and then runs — it no
+      // longer answers `pending_approval` for the agent to resubmit.
+      const executing = mcp.request('tools/call', {
         name: 'otto_api_execute',
         arguments: { name: 'Alpha health', timeout_ms: 2000 },
       });
-      const pendingCall = await execute();
-      expect(McpStdio.isError(pendingCall)).toBe(false);
-      const pending = JSON.parse(McpStdio.rawText(pendingCall)) as { decision: string; executed: boolean; approval_id: string };
-      expect(pending.decision).toBe('pending_approval');
-      expect(pending.executed).toBe(false);
-      expect(pending.approval_id).toBeTruthy();
+      let approvalId = '';
+      await expect.poll(async () => {
+        const list = (await (await ctx.get(`${base}/api/v1/mcp/approvals?status=pending`)).json()) as { id: string; tool: string | null }[];
+        approvalId = list.find((a) => (a.tool ?? '').includes('api_execute'))?.id ?? '';
+        return approvalId;
+      }, { timeout: 15_000 }).not.toBe('');
       expect(transportAttempts, 'approval must precede the HTTP send').toBe(0);
       const historyUrl = `${base}/api/v1/workspaces/${workspace.id}/api-client/history?source=agent`;
       const before = await ctx.get(historyUrl);
       expect(before.ok()).toBeTruthy();
       expect(await before.json()).toEqual([]);
-      const approved = await ctx.post(`${base}/api/v1/mcp/approvals/${pending.approval_id}/decide`, { data: { approved: true } });
+      const approved = await ctx.post(`${base}/api/v1/mcp/approvals/${approvalId}/decide`, { data: { approved: true } });
       expect(approved.ok()).toBeTruthy();
-      const executeCall = await execute();
+      const executeCall = await executing;
       expect(McpStdio.isError(executeCall)).toBe(true);
       expect(transportAttempts, 'MCP approval must not bypass the workspace SSRF guard').toBe(0);
       const executeText = McpStdio.rawText(executeCall);

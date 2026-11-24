@@ -18,8 +18,9 @@
   import { isRuntimeThread } from './runtime/runtimeThreads.svelte';
   import { loadBrowserView } from '../../lib/browserPort';
   import { ws } from '../../lib/stores/workspace.svelte';
-  import ThreadProjectCard from './ThreadProjectCard.svelte';
+  import ThreadDetailsCard from './ThreadDetailsCard.svelte';
   import ThreadAgentsTasks from './runtime/ThreadAgentsTasks.svelte';
+  import RuntimeSubagentPane from './runtime/RuntimeSubagentPane.svelte';
   import { PrSurfaceView, SideChatView } from './threadLazy.svelte';
   import { threadPrs } from './threadPrs.svelte';
   import { threadRepos } from './threadRepos.svelte';
@@ -34,12 +35,6 @@
   // The Browser opens HERE, as an inspector tab — never the shell's Side
   // panel, which Threads hides (it would be a second right column).
   const BrowserTab = lazyComponent(loadBrowserView);
-
-  interface Props {
-    /** Phone / tablet drawer: the project card can't float there, so it heads the panel. */
-    showCard?: boolean;
-  }
-  let { showCard = false }: Props = $props();
 
   // On the new-thread stage the panel follows the draft's folder.
   const focusedSession = $derived.by(() => {
@@ -86,6 +81,7 @@
     side: 'Side chat',
     connections: 'Connections',
     browser: 'Browser',
+    subagent: 'Subagent',
   };
   const launcher = $derived<Surface[]>([
     { id: 'browser', label: 'Browser', key: 'B', icon: 'globe', prefetch: () => BrowserTab.prefetch() },
@@ -105,13 +101,13 @@
   const open = $derived(threadsChrome.surfaces);
   const active = $derived(open.includes(threads.inspectorTab) ? threads.inspectorTab : null);
   const tabs = $derived<TabItem<ThreadsInspectorTab>[]>(
-    open.map((id) => ({ id, label: SURFACE_LABEL[id], testid: `threads-tab-${id}` })),
+    open.map((id) => ({ id, label: id === 'subagent' ? (runtimeThreads.get(threadsChrome.subagentId)?.title ?? 'Subagent') : SURFACE_LABEL[id], testid: `threads-tab-${id}` })),
   );
 
   // No Terminal surface: the drawer is the toolbar ⋯ › Terminal drawer, the
   // pane's own button and /terminal. Connections shows once the thread has
   // touched a database (or its tab is already open); related threads live in
-  // the header's Related threads popover.
+  // ⋯ › Send to another thread… (subagents sit in the details card).
   const dbActive = $derived(
     open.includes('connections') || threads.mcpActivities.some((a) => a.session_id === focusedSession?.id),
   );
@@ -126,6 +122,7 @@
   function closeActive(): void {
     if (!active) return;
     const next = threadsChrome.closeSurface(active);
+    if (active === 'subagent') threadsChrome.subagentId = null;
     if (next) threads.setInspectorTab(next);
     void tick().then(() => {
       const target = next
@@ -170,8 +167,11 @@
 </script>
 
 <aside bind:this={inspectorEl} class="ti" aria-label="Thread panel" data-testid="threads-inspector" use:surfaceKeys>
-  {#if showCard && contextCwd}
-    <div class="ti-card"><ThreadProjectCard cwd={contextCwd} compact={threads.inspectorCompact} /></div>
+  <!-- Thread details head the panel (they float beside the conversation
+       only while this panel is closed). -->
+  <!-- On a phone a subagent's tab is a full-height sheet: the card gives way. -->
+  {#if contextCwd && !(threads.inspectorCompact && active === 'subagent')}
+    <div class="ti-card"><ThreadDetailsCard cwd={contextCwd} threadId={focusedSession?.id ?? null} summary={active !== null} /></div>
   {/if}
   {#if contextThreadId}<ThreadAgentsTasks sessionId={contextThreadId} />{/if}
   <header class="ti-head">
@@ -212,8 +212,8 @@
       class="icon-btn"
       class:ti-on={threadsChrome.maximized}
       aria-pressed={threadsChrome.maximized}
-      aria-label={threadsChrome.maximized ? 'Restore panel' : 'Maximize panel'}
-      title={threadsChrome.maximized ? 'Restore' : 'Maximize'}
+      aria-label={threadsChrome.maximized ? 'Restore panel width' : 'Widen panel'}
+      title={threadsChrome.maximized ? 'Restore width' : 'Widen — the conversation stays beside it'}
       onclick={() => (threadsChrome.maximized = !threadsChrome.maximized)}
     >
       <Icon name={threadsChrome.maximized ? 'minimize' : 'maximize'} size={12} />
@@ -236,6 +236,8 @@
       <LazyMount lazy={SideChatView} what="the side chat" variant="panel" props={{ mainId: focusedSession?.id ?? null }} />
     {:else if active === 'connections'}
       <LazyMount lazy={ConnectionsView} what="connections" variant="panel" props={{ workspaceId, focusedSessionId: threads.focusedSessionId }} />
+    {:else if active === 'subagent' && threadsChrome.subagentId}
+      <RuntimeSubagentPane id={threadsChrome.subagentId} />
     {:else if active === 'browser'}
       <!-- The ask bar submits to the focused terminal thread; a structured
            thread has no PTY to type into, so it gets the unbound hint. -->
@@ -275,9 +277,12 @@
     background: var(--surface);
     border-inline-start: 1px solid var(--border);
   }
+  /* The card never takes more than half the panel: the surface below keeps a usable height. */
   .ti-card {
     padding: 10px 10px 6px;
     flex-shrink: 0;
+    max-block-size: 50%;
+    overflow-y: auto;
   }
   .ti-head {
     display: flex;

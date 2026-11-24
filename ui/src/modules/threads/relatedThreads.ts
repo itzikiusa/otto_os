@@ -21,9 +21,9 @@ export interface RelatedRow extends RelatedSource {
 }
 
 export const RELATED_KIND_LABEL: Record<RelatedKind, string> = {
-  linked: 'Linked',
+  linked: 'Subagent',
   parent: 'Parent',
-  worker: 'Worker',
+  worker: 'Subagent',
   side: 'Side chat',
 };
 
@@ -60,9 +60,9 @@ export function relatedStatus(status: string): { tone: 'live' | 'ask' | 'idle' |
       return { tone: 'ask', text: 'Needs you' };
     case 'idle':
     case 'ready':
-      return { tone: 'idle', text: 'Idle' };
+      return { tone: 'idle', text: 'Done' };
     case 'closed':
-      return { tone: 'off', text: 'Closed' };
+      return { tone: 'off', text: 'Stopped' };
     default:
       return { tone: 'off', text: status ? status.charAt(0).toUpperCase() + status.slice(1).replaceAll('_', ' ') : 'Unknown' };
   }
