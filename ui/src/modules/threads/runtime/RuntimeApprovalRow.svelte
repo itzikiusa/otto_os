@@ -13,6 +13,7 @@
   import { ctxMenu } from '../../../lib/contextmenu.svelte';
   import type { ApprovalDecision, ApprovalOption, RequestKind } from '../../../lib/api/types';
   import { keyHint } from './attentionDock';
+  import { approvalButtons, approvalWord } from './approvalOptions';
   import type { PendingApproval } from './timeline';
 
   interface Props {
@@ -39,26 +40,14 @@
     { decision: 'decline', label: 'Deny' },
     { decision: 'accept', label: 'Allow once' },
   ];
-  /** One vocabulary for every approval — runtime, subagent, MCP, ACP: the
-   *  provider's own label stays as the button's tooltip (its exact scope). */
-  const WORDS: Partial<Record<ApprovalDecision, string>> = {
-    accept: 'Allow once',
-    accept_always: 'Always allow',
-    accept_for_session: 'Always allow',
-    decline: 'Deny',
-    decline_always: 'Always deny',
-    cancel: 'Deny and stop',
-  };
-  const word = (o: ApprovalOption): string => WORDS[o.decision] ?? o.label;
+  const word = approvalWord;
 
   let responding = $state(false);
   const options = $derived(approval.options.length > 0 ? approval.options : DEFAULT_OPTIONS);
-  /** Allow once · Always allow (when offered) · Deny — the same layout everywhere; the rest under More. */
-  const always = $derived(options.find((o) => o.decision === 'accept_always') ?? options.find((o) => o.decision === 'accept_for_session'));
-  const primary = $derived(
-    [options.find((o) => o.decision === 'accept'), always, options.find((o) => o.decision === 'decline')].filter((o): o is ApprovalOption => !!o),
-  );
-  const more = $derived(options.filter((o) => !primary.includes(o)));
+  /** The same buttons everywhere (approvalOptions.ts); the rest under More. */
+  const buttons = $derived(approvalButtons(options));
+  const primary = $derived(buttons.primary);
+  const more = $derived(buttons.more);
 
   /** Also the dock's keyboard answer (one request in flight at a time). */
   export async function respond(decision: ApprovalDecision): Promise<void> {

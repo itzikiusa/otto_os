@@ -111,15 +111,14 @@ test('url elicitation names the URL and opens it once chosen', async ({ page }, 
   await expect(page.evaluate(() => (window as unknown as { __opened: string[] }).__opened)).resolves.toEqual(['https://example.com/login']);
 });
 
-test('“Always reject” is offered and reaches the agent', async ({ page }, info) => {
+test('“Always deny” is offered beside Deny and reaches the agent', async ({ page }, info) => {
   test.skip(!desktop(info.project.name), 'desktop-browser project only');
   test.setTimeout(90_000);
   const thread = await open(page, 'gemini', 'ACP never');
   await say(thread, 'ask-never');
   const dock = thread.getByTestId('runtime-attention');
   await expect(dock).toBeVisible({ timeout: 20_000 });
-  await dock.getByRole('button', { name: 'More approval options' }).click();
-  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Always reject' }).click();
+  await dock.getByRole('button', { name: 'Always deny', exact: true }).click();
   await expect(thread.getByText('answer: never').last()).toBeVisible({ timeout: 20_000 });
 });
 
