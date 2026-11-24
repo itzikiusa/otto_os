@@ -15,13 +15,36 @@
   }
   let { id, items, active, onaccept, onhover }: Props = $props();
   let listEl = $state<HTMLDivElement | null>(null);
+  // A screenful and then some (the list shows ~7 rows): 235 agent commands
+  // are not all drawn on every key. ↓ past the end draws more; "show all" too.
+  const FIRST = 40;
+  let showAll = $state(false);
   $effect(() => {
-    listEl?.querySelector(`#${CSS.escape(`${id}-opt-${active}`)}`)?.scrollIntoView?.({ block: 'nearest' });
+    void items;
+    showAll = false;
+  });
+  const shown = $derived(showAll || items.length <= FIRST ? items : items.slice(0, Math.max(FIRST, active + 20)));
+  // Keep the active row in view inside the list only (scrollIntoView also
+  // scrolled the page and forced a layout on every key). The first row needs
+  // no measuring — typing resets to it.
+  $effect(() => {
+    const list = listEl;
+    if (!list) return;
+    if (active === 0) {
+      if (list.scrollTop) list.scrollTop = 0;
+      return;
+    }
+    const row = list.querySelector<HTMLElement>(`#${CSS.escape(`${id}-opt-${active}`)}`);
+    if (!row) return;
+    const top = row.getBoundingClientRect().top - list.getBoundingClientRect().top + list.scrollTop;
+    const bottom = top + row.offsetHeight;
+    if (top < list.scrollTop) list.scrollTop = top;
+    else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
   });
 </script>
 
 <div class="ssp-pop" id="{id}-list" role="listbox" aria-label="Slash commands" data-slash-pop bind:this={listEl}>
-  {#each items as c, i (`${c.group ?? ''}/${c.name}`)}
+  {#each shown as c, i (`${c.group ?? ''}/${c.name}`)}
     {#if c.group && c.group !== items[i - 1]?.group}
       <div class="ssp-group" role="presentation" data-testid="slash-group">{c.group}</div>
     {/if}
@@ -43,6 +66,11 @@
       <span class="ssp-desc" dir="auto">{c.description}</span>
     </div>
   {/each}
+  {#if shown.length < items.length}
+    <button type="button" class="ssp-more" data-testid="slash-more" onmousedown={(ev) => { ev.preventDefault(); showAll = true; }}>
+      {items.length - shown.length} more — keep typing, or show all
+    </button>
+  {/if}
 </div>
 
 <style>
@@ -56,6 +84,21 @@
     border-radius: var(--radius-m);
     border: 1px solid var(--border);
     background: var(--surface-2);
+  }
+  @media (pointer: coarse) {
+    .ssp-more {
+      min-block-size: var(--hit-min);
+    }
+  }
+  .ssp-more {
+    padding-block: 4px;
+    padding-inline: 8px;
+    border: 0;
+    background: none;
+    color: var(--text-dim);
+    font-size: var(--fs-xs);
+    text-align: start;
+    cursor: pointer;
   }
   .ssp-group {
     padding: 6px 8px 2px;

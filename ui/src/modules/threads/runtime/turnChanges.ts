@@ -4,6 +4,7 @@
 // Claude's Edit / Write, Codex's fileChange, ACP and pi edits). A file whose
 // items carry no text shows its name only. Pure (unit/runtimeTurnChanges.test.ts).
 import type { TurnItem } from '../../../lib/api/types';
+import { sameItems } from './stableMap.ts';
 import { relativeToCwd } from './workLog';
 import { perfCount } from '../../../lib/perfCount.ts';
 
@@ -59,11 +60,17 @@ export function turnChanges(items: readonly TurnItem[], turnId: string, cwd: str
 /** Every finished turn's changes in ONE pass over `items` (the timeline's
  *  changes cards): `turnChanges` per turn rescanned every item for every
  *  turn on each stream event. */
+let lastChanges: { cwd: string | null | undefined; edits: TurnItem[]; out: Map<string, FileDelta[]> } | null = null;
+
 export function turnChangesByTurn(items: readonly TurnItem[], cwd: string | null | undefined): Map<string, FileDelta[]> {
+  // A streamed chunk of the answer changes no file edit: the same edits in,
+  // the same Map (and arrays) out — what reads it stays put.
+  const edits = items.filter((it) => it.type === 'file_change' && !!it.turn_id && !it.parent_item_id && it.status === 'completed' && !it.error);
+  if (lastChanges && lastChanges.cwd === cwd && sameItems(lastChanges.edits, edits)) return lastChanges.out;
   perfCount('turnChangesByTurn');
   const byTurn = new Map<string, Map<string, FileDelta>>();
-  for (const it of items) {
-    if (it.type !== 'file_change' || !it.turn_id || it.parent_item_id || it.status !== 'completed' || it.error) continue;
+  for (const it of edits) {
+    if (it.type !== 'file_change' || !it.turn_id) continue;
     const path = relativeToCwd(it.file_name, cwd);
     const c = diffCounts(it);
     let m = byTurn.get(it.turn_id);
@@ -75,7 +82,9 @@ export function turnChangesByTurn(items: readonly TurnItem[], cwd: string | null
     }
     m.set(path, d);
   }
-  return new Map([...byTurn].map(([t, m]) => [t, [...m.values()]]));
+  const out = new Map([...byTurn].map(([t, m]) => [t, [...m.values()]]));
+  lastChanges = { cwd, edits, out };
+  return out;
 }
 
 /** The card's totals; null counts when no file had numbers. */

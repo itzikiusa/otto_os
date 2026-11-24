@@ -18,6 +18,7 @@
   import RuntimeApprovalRow from './RuntimeApprovalRow.svelte';
   import RuntimeChildGroup from './RuntimeChildGroup.svelte';
   import { memoTurnSubagents } from './childThreads';
+  import { keepIfSame } from './stableMap';
   import RuntimeAttachments from './RuntimeAttachments.svelte';
   import RuntimeSubagentCard from './RuntimeSubagentCard.svelte';
   import RuntimeThreadCallRow from './RuntimeThreadCallRow.svelte';
@@ -101,6 +102,7 @@
   const longBody = (t: string): boolean => t.length > 280 || t.split('\n', 5).length > 3;
   /** The last work stretch of each finished turn carries its token count in
    *  its "Worked for …" line (the latest turn says it on its own status line). */
+  let prevTokens: Map<string, string> | undefined;
   const tokensByRow = $derived.by(() => {
     const lastRow = new Map<string, string>();
     for (const r of rows) {
@@ -115,10 +117,11 @@
       const text = t && t !== latest ? turnUsageText(t) : '';
       if (text) out.set(rowId, text);
     }
-    return out;
+    return (prevTokens = keepIfSame(prevTokens, out));
   });
 
   /** A finished turn that changed files gets its changes card after its last row. */
+  let prevChanges: Map<string, FileDelta[]> | undefined;
   const changesByRow = $derived.by(() => {
     const last = new Map<string, string>();
     for (const r of rows) {
@@ -133,7 +136,7 @@
       const files = all.get(tid);
       if (files?.length) out.set(key, files);
     }
-    return out;
+    return (prevChanges = keepIfSame(prevChanges, out));
   });
 
   const BADGE_ICONS: Record<ParsedContextBadge['kind'], IconName> = {

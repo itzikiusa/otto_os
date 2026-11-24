@@ -54,6 +54,26 @@ async function thread(title: string, provider: 'claude' | 'codex' = 'codex'): Pr
   return (await r.json()).id as string;
 }
 
+/** The end of a stream without charging the page for it: the turn's start
+ *  and end are read from the daemon (Node side), then the last text is
+ *  checked once in the page — a polling locator would walk the whole,
+ *  growing DOM every few ms and count as the app's script time. */
+async function streamed(page: Page, id: string, last: string): Promise<void> {
+  const t0 = Date.now();
+  for (;;) {
+    const s = (await (await ctx.get(base + '/api/v1/runtime-sessions/' + id)).json()) as { status: string };
+    if (s.status !== 'idle') break;
+    if (Date.now() - t0 > 30_000) throw new Error('the turn never started');
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  await idle(id);
+  await page.waitForFunction(
+    ([tid, text]) => document.querySelector(`[data-testid="runtime-thread-${tid}"] [data-runtime-stream]`)?.textContent?.includes(text) ?? false,
+    [id, last] as const,
+    { timeout: 30_000, polling: 100 },
+  );
+}
+
 async function idle(id: string, timeout = 120_000): Promise<void> {
   const t0 = Date.now();
   for (;;) {
@@ -239,8 +259,7 @@ test('c. streaming a long answer after 30 tool calls into the 300-turn thread', 
   await startFrames(page);
   const t0 = Date.now();
   await say(ids.t300, 'stream:4000:3:30');
-  await expect(conv.getByText('c3999', { exact: false }).last()).toBeVisible({ timeout: 120_000 });
-  await idle(ids.t300);
+  await streamed(page, ids.t300, 'c3999');
   const wall = Date.now() - t0;
   if (profile) writeFileSync(process.env.OTTO_THREADS_RT_PERF_PROFILE!, JSON.stringify((await cdp.send('Profiler.stop')).profile));
   const frames = await stopFrames(page);
@@ -265,7 +284,7 @@ test('c2. a long answer streaming while three subagents work (Claude)', async ({
   const s0 = await scriptMs(cdp);
   await startFrames(page);
   await say(ids.c60, 'stream 4000 3');
-  await expect(conv.getByText('c3999', { exact: false }).last()).toBeVisible({ timeout: 120_000 });
+  await streamed(page, ids.c60, 'c3999');
   const frames = await stopFrames(page);
   const script = (await scriptMs(cdp)) - s0;
   const counts = await page.evaluate(() => (window as unknown as { __ottoPerfCounts: Record<string, number> }).__ottoPerfCounts);

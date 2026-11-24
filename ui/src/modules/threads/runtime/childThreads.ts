@@ -201,7 +201,14 @@ export function turnSubagents(items: readonly TurnItem[]): { groups: Map<string,
 /** An item `turnSubagents` reads: a subagent card, a subagent notice, an
  *  agent's thread_open call. Anything else (a streaming reply, a command)
  *  never changes the subagent rows. */
+const subagentItemMemo = new WeakMap<TurnItem, boolean>();
 export function isSubagentItem(i: TurnItem): boolean {
+  let v = subagentItemMemo.get(i);
+  if (v === undefined) subagentItemMemo.set(i, (v = checkSubagentItem(i)));
+  return v;
+}
+
+function checkSubagentItem(i: TurnItem): boolean {
   if (i.parent_item_id) return false;
   if (i.type === 'subagent') return true;
   if (i.type === 'system_notice') return threadNoticeOf(i.message) !== null;
