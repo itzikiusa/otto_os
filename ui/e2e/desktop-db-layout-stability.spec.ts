@@ -111,8 +111,9 @@ test('a wide SQL result opens in the grid — auto-Vertical is MongoDB-only by d
   await expect(page.locator('.view-seg')).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.view-seg .vs.on')).toHaveText('Grid');
   await expect(page.locator('.view-seg')).toHaveAttribute('title', 'engine default');
-  // 12 columns, well past the (Mongo) threshold of 10.
-  await expect(page.locator('.grid thead th:not(.rownum)')).toHaveCount(12);
+  // 12 columns, well past the (Mongo) threshold of 10. Counted by name: the
+  // header also carries a trailing spare-width `th.fill`.
+  await expect(page.locator('.grid thead .th-name')).toHaveCount(12);
 });
 
 test('opting MySQL in re-enables auto-Vertical for wide results', async ({ page }) => {

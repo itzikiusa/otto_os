@@ -20,9 +20,11 @@ let workspaceId = '';
 let clusterId = '';
 // Clusters are GLOBAL (every workspace sees them) and outlive a worker restart,
 // so the name is unique per seed: `.first()` must find THIS run's stubbed id.
-const clusterName = `figures-kafka-${Date.now().toString(36)}`;
+// A timestamp alone collided when two projects seeded in the same millisecond.
+let clusterName = '';
 
 test.beforeAll(async () => {
+  clusterName = `figures-kafka-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
   const r = await ctx.post(`${base}/api/v1/workspaces/${workspaceId}/brokers/clusters`, {

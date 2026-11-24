@@ -119,7 +119,8 @@ test('Network profile refuses invalid TCP ports before submission', async ({page
   await page.goto('/e2e/fixtures/network-profiles.html');
   await page.getByRole('button',{name:'Manage network profiles'}).click();
   await page.getByLabel('Network profile name').fill('Fixture profile');
-  await page.getByLabel('SSH connection').selectOption('ssh');
+  // The select itself (its "Loading SSH connections" status shares the words).
+  await page.getByRole('combobox', {name:'SSH connection'}).selectOption('ssh');
   await page.getByLabel('Endpoint 1 name').fill('Database');
   await page.getByLabel('Endpoint 1 remote host').fill('db.fixture.invalid');
   for (const value of ['-1','65536','1.5','0','']) {
