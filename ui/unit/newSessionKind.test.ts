@@ -104,6 +104,7 @@ test('Chat opens the started thread as a pane here: the stage closes only when i
     cwd: ' ~/repo ',
     model: 'gpt-x',
     provider: 'codex',
+    extraDirs: ['/repos/other'],
     scratchMode: false,
     ws: { currentId: 'w1', scratch: { root_path: '/home/me' } },
     auth: { meta: null },
@@ -119,6 +120,8 @@ test('Chat opens the started thread as a pane here: the stage closes only when i
   await started.startChat();
   assert.equal(closes, 1);
   assert.equal(started.prompt, '');
+  assert.equal(started.extraDirs.length, 0, 'the extra folders (a terminal option) leave nothing to "discard"');
+  assert.equal(failed.extraDirs.length, 1);
   assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), { workspaceId: 'w1', provider: 'codex', cwd: '~/repo', home: '/home/me', title: '', model: 'gpt-x', prompt: 'fix the flaky test', meta: null });
 });
 
