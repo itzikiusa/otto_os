@@ -576,7 +576,7 @@
                 report={selected}
                 {parsed}
                 markdown={markdownOf(selected)}
-                summaryError={s.summaryError[keyOf(selected)] ?? null}
+                summaryError={s.summaryError[keyOf(selected)] ?? null} summaryLoading={s.summaryReads.has(keyOf(selected))}
                 onretrysummary={() => s.retrySummary(selected)}
                 {kpis}
                 compareLabel={prev ? periodShort(prev) : null}

@@ -121,4 +121,6 @@ test('an outage is one notice line with one Retry', async ({ page }) => {
   await page.goto('/#/mcp');
   await expect(page.getByTestId('mcp-outage')).toHaveCount(1, { timeout: 30_000 });
   await expect(page.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(1);
+  // Approvals unknown: no "Nothing waits on you" (nor "No calls were denied") under the notice.
+  await expect(page.getByTestId('mcp-summary')).toHaveCount(0);
 });

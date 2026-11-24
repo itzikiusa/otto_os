@@ -1,8 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
-import { utimesSync } from 'node:fs';
-import { join } from 'node:path';
 import { apiCtx, seedWorkspace } from './seed';
-import { daemonDataDir, seedInsights } from './insightsSeed';
+import { seedInsights } from './insightsSeed';
 
 // Every listed report opens, the oldest as well as the newest: its summary is
 // read through GET /insights/report as the sibling `summary-*.md` (0.5.0
@@ -24,13 +22,8 @@ export function everyReportOpensSpec(project: string): void {
     const { ctx, base } = await apiCtx();
     wsId = await seedWorkspace(ctx, base);
     await ctx.dispose();
+    // The oldest daily has a summary + metrics but no HTML, aged past a run's cap.
     seedInsights();
-    // The oldest daily has a summary + metrics but no HTML: age it past a run's cap.
-    const old = new Date('2026-09-15T08:00:00Z');
-    for (const f of ['summary', 'metrics']) {
-      const ext = f === 'summary' ? 'md' : 'json';
-      utimesSync(join(daemonDataDir(), 'insights', 'daily', `${f}-daily-20260914_20260914.${ext}`), old, old);
-    }
   });
 
   async function openRow(page: Page, row: number, phone: boolean): Promise<void> {

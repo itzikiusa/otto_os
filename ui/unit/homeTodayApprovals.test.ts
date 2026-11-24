@@ -19,6 +19,7 @@ function makeToday(opts: {
   canAdmin?: boolean;
   canApproveServer?: boolean;
   decideImpl?: (id: string, body: { approved: boolean; note?: string }) => Promise<unknown>;
+  get?: (path: string) => Promise<unknown>;
 }) {
   const decidedCalls: Array<{ id: string; body: { approved: boolean; note?: string } }> = [];
   const toastLog: Array<{ kind: string; title: string; body?: string }> = [];
@@ -26,7 +27,7 @@ function makeToday(opts: {
   const mod = loadSource(
     new URL('../src/modules/home/today.svelte.ts', import.meta.url),
     {
-      '../../lib/api/client': { api: { get: async () => [] } },
+      '../../lib/api/client': { api: { get: opts.get ?? (async () => []) } },
       '../../lib/api/design': { listArtifacts: async () => [] },
       '../../lib/api/mcp': {
         mcpCpApi: {
@@ -154,4 +155,16 @@ test('self-requested non-agent approval is blocked from inline decision', async 
   assert.equal(ok, false);
   assert.equal(decidedCalls.length, 0);
   assert.equal(today.approvals.length, 1);
+});
+
+test('a failed poll keeps the approvals already shown (and says a source failed)', async () => {
+  let fail = false;
+  const a = sampleApproval({ id: 'appr-5' });
+  const { today } = makeToday({ get: async () => { if (fail) throw new Error('HTTP 503'); return [a]; } });
+  assert.equal(await today.load(), true);
+  assert.equal(today.approvals.length, 1);
+  fail = true;
+  assert.equal(await today.load(), false);
+  assert.equal(today.failed, true);
+  assert.deepEqual(today.approvals.map((x: StubApproval) => x.id), ['appr-5']);
 });

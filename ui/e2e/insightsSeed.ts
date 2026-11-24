@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 // Seed Insights reports straight into the ISOLATED test daemon's data dir
@@ -102,8 +102,11 @@ export function seedInsights(dataDir = daemonDataDir()): void {
     const stem = `daily-${ymd(d.date)}_${ymd(d.date)}`;
     writeFileSync(join(daily, `summary-${stem}.md`), dailySummary(d, i));
     writeFileSync(join(daily, `metrics-${stem}.json`), JSON.stringify({ combined: { stats: { total_sessions: d.sessions } } }));
-    // The oldest day has no HTML yet (a run still writing) — exercises the fallback.
+    // The oldest day has no HTML, long after its run: "Files missing". Aged
+    // here, not by one spec: every spec seeding this shared dir rewrites the
+    // files, and a fresh mtime would read as a run still writing.
     if (i > 0) writeFileSync(join(daily, `report-${stem}.html`), reportHtml(`Daily insights — ${d.date}`, d));
+    else for (const f of [`summary-${stem}.md`, `metrics-${stem}.json`]) utimesSync(join(daily, f), new Date('2026-09-15T08:00:00Z'), new Date('2026-09-15T08:00:00Z'));
     series.push({
       period_key: `daily:${ymd(d.date)}_${ymd(d.date)}`,
       kind: 'daily',

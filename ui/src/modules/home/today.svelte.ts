@@ -316,12 +316,14 @@ class TodayStore {
       wsId && can('scheduled_tasks') ? settle(scheduledTasksApi.list(wsId), [] as ScheduledTask[]) : { ok: true, v: [] as ScheduledTask[] },
     ]);
     if (mine !== this.seq || ws.currentId !== wsId) return true;
-    this.approvals = appr.v.filter((a) => !a.workspace_id || !wsId || a.workspace_id === wsId);
+    // A source that failed this poll keeps what it showed (the card says a
+    // source failed); only a fresh answer replaces it.
+    if (appr.ok) this.approvals = appr.v.filter((a) => !a.workspace_id || !wsId || a.workspace_id === wsId);
     for (const a of this.approvals) {
       if (a.server_id) void resourceAccess.load('mcp_server', a.server_id, a.tool ?? undefined);
     }
-    this.designs = designs.v;
-    this.scheduled = sched.v;
+    if (designs.ok) this.designs = designs.v;
+    if (sched.ok) this.scheduled = sched.v;
     this.loaded = true;
     this.failed = !(appr.ok && designs.ok && sched.ok);
     return !this.failed;

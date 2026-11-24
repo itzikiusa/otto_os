@@ -140,10 +140,11 @@ test.describe('usage remaining limits (desktop)', () => {
     await routeLimits(page, claudeLimits('failed'));
     await openPage(page, 'usage');
     const row = remaining(page).getByTestId('limits-row-claude:account:acc-max');
-    await expect(row).toContainText('Couldn’t check with Anthropic');
     await expect(row.getByRole('meter')).toHaveCount(0);
     await expect(row).not.toContainText('0%');
-    await expect(row.getByTestId('limits-check-status')).toContainText('Last check failed');
+    // The why is said once, on the check line (not again as the row's reason).
+    await expect(row.getByTestId('limits-check-status')).toContainText('Last check failed: The Claude CLI didn’t answer within 10 s.');
+    await expect(row.getByText(/didn’t answer within 10 s/)).toHaveCount(1);
 
     await page.unroute('**/api/v1/usage/limits');
     // A stale check is not re-run behind the user's back more than once every

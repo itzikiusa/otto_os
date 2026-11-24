@@ -60,7 +60,8 @@
     const parts: string[] = [];
     if (today.needs.length) parts.push(`${today.needs.length} ${today.needs.length === 1 ? 'needs' : 'need'} you`);
     if (today.running.length) parts.push(`${today.running.length} working`);
-    return parts.length ? parts.join(' · ') : 'All quiet';
+    // Not "All quiet" before the approvals/tasks fetch has answered.
+    return parts.length ? parts.join(' · ') : today.loaded ? 'All quiet' : '';
   });
 
   interface Section {
@@ -83,7 +84,7 @@
 <section class="today read-col" aria-label="Today">
   <div class="greet">
     <h2 class="hello">{greeting}{name ? `, ${name}` : ''}</h2>
-    <p class="line">{dateLine} · {summary}</p>
+    <p class="line">{dateLine}{summary ? ` · ${summary}` : ''}</p>
     {#if today.failed}
       <!-- A source failed: say so via LoadState instead of letting an empty
            section read as "nothing here". Retry re-polls every source. -->
@@ -107,7 +108,7 @@
         {#if sec.rows.length}<span class="sec-count">{sec.rows.length}</span>{/if}
       </h3>
       {#if sec.rows.length === 0}
-        <p class="sec-empty">{sec.empty}</p>
+        {#if today.loaded}<p class="sec-empty">{sec.empty}</p>{:else}<LoadState what={sec.title.toLowerCase()} variant="compact" loading empty />{/if}
       {:else}
         <div class="sec-card">
           {#each sec.rows.slice(0, expanded[sec.id] ? undefined : ROWS) as r (r.id)}

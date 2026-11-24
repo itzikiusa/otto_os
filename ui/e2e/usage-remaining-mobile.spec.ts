@@ -55,6 +55,10 @@ test('stale and unknown rows stay legible on a phone', async ({ page }) => {
   await expect(unknown).toContainText('does not write its plan limits');
   await expect(unknown).not.toContainText('Unknown');
   await expectInsideWidth(page, '.acct, .reason');
+  // Refresh stays on the title's row (the subtitle wraps beside it).
+  const title = (await section.getByRole('heading', { name: 'Remaining' }).boundingBox())!;
+  const refresh = (await section.getByRole('button', { name: 'Refresh remaining limits' }).boundingBox())!;
+  expect(Math.abs(refresh.y + refresh.height / 2 - (title.y + title.height / 2))).toBeLessThan(24);
   await expectNoHorizontalOverflow(page);
 });
 
