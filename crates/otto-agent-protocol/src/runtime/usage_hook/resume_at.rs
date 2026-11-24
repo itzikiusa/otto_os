@@ -43,9 +43,15 @@ impl AgentRuntime {
             RESUME_AT.into(),
             at.map_or(Value::Null, |t| Value::String(t.to_rfc3339())),
         );
+        // Under the timers' lock: the old timer goes, and none of them can
+        // check-and-clear between this write and the new arm.
+        let mut timers = self.inner.resume_timers.lock().await;
+        if let Some(old) = timers.remove(id) {
+            old.abort();
+        }
         let s = self.update_thread_meta(id, patch).await?;
         if let Some(t) = at {
-            self.arm_resume(id.clone(), t);
+            timers.insert(id.clone(), self.arm_resume(id.clone(), t));
         }
         Ok(s)
     }
@@ -59,16 +65,34 @@ impl AgentRuntime {
         }
     }
 
-    /// Sleep until `at`, then resume if it is still the armed time.
-    fn arm_resume(&self, id: Id, at: DateTime<Utc>) {
-        let rt = self.clone();
+    /// Drop the thread's armed timer (it closed or was deleted).
+    pub(in crate::runtime) async fn drop_resume_timer(&self, id: &Id) {
+        if let Some(t) = self.inner.resume_timers.lock().await.remove(id) {
+            t.abort();
+        }
+    }
+
+    /// Sleep until `at`, then resume if it is still the armed time. The task
+    /// holds the runtime weakly; the caller keeps its abort handle.
+    fn arm_resume(&self, id: Id, at: DateTime<Utc>) -> tokio::task::AbortHandle {
+        let me = self.inner.me.clone();
         tokio::spawn(async move {
             tokio::time::sleep((at - Utc::now()).to_std().unwrap_or_default()).await;
-            let Ok(rec) = rt.inner.repo.get(&id).await else {
-                return;
-            };
-            if rec.closed || resume_at_of(&rec.session) != Some(at) {
-                return; // cancelled, re-armed for another time, or closed
+            let Some(inner) = me.upgrade() else { return };
+            let rt = AgentRuntime { inner };
+            {
+                let mut timers = rt.inner.resume_timers.lock().await;
+                let Ok(rec) = rt.inner.repo.get(&id).await else {
+                    return;
+                };
+                if rec.closed || resume_at_of(&rec.session) != Some(at) {
+                    return; // cancelled, re-armed for another time, or closed
+                }
+                timers.remove(&id);
+                let clear = serde_json::Map::from_iter([(RESUME_AT.into(), Value::Null)]);
+                if rt.update_thread_meta(&id, clear).await.is_err() {
+                    return;
+                }
             }
             // Only a thread still stopped on its limit (the person may have
             // sent something themselves meanwhile).
@@ -76,10 +100,11 @@ impl AgentRuntime {
                 s.last_error_class.as_deref()
                     == Some(otto_core::agent_runtime::ERROR_CLASS_USAGE_LIMIT)
             });
-            if rt.set_resume_at(&id, None).await.is_ok() && limited {
+            if limited {
                 let _ = rt.prompt(&id, RESUME_TEXT).await;
             }
-        });
+        })
+        .abort_handle()
     }
 
     /// After `recover`: re-arm every stored resume (one already due fires
@@ -93,7 +118,10 @@ impl AgentRuntime {
             for sid in ids {
                 if let Ok(rec) = rt.inner.repo.get(&sid).await {
                     if let (false, Some(at)) = (rec.closed, resume_at_of(&rec.session)) {
-                        rt.arm_resume(sid, at);
+                        let mut timers = rt.inner.resume_timers.lock().await;
+                        if let Some(old) = timers.insert(sid.clone(), rt.arm_resume(sid, at)) {
+                            old.abort();
+                        }
                     }
                 }
             }

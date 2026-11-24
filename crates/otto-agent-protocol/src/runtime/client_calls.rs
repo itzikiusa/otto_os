@@ -61,14 +61,6 @@ pub(super) fn drop_session(sid: &Id) {
     }
 }
 
-/// Every terminal (the daemon is stopping: nothing could reach them after).
-pub(super) fn drop_all() {
-    TERMINALS.retain(|_, terms| {
-        terms.values().for_each(|t| kill(t));
-        false
-    });
-}
-
 fn deliver(
     inner: &Inner,
     live: &Live,
@@ -112,20 +104,24 @@ async fn confined(root: &str, path: &str, must_exist: bool) -> Result<PathBuf, S
 
 /// Write `path` without following a symbolic link at it: a dangling link
 /// inside the folder (only its parent is canonical) must not carry the
-/// write outside it. `O_NOFOLLOW` also closes the check-then-write race.
+/// write outside it. Only a regular file (or a new one) is written: opening
+/// a FIFO blocks until a reader comes. `O_NOFOLLOW` / `O_NONBLOCK` also
+/// close the check-then-open race.
 async fn write_no_follow(path: &Path, content: &str) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
-    if tokio::fs::symlink_metadata(path)
-        .await
-        .is_ok_and(|m| m.file_type().is_symlink())
-    {
-        return Err(std::io::Error::other("is a symbolic link; not followed"));
+    if let Ok(m) = tokio::fs::symlink_metadata(path).await {
+        if m.file_type().is_symlink() {
+            return Err(std::io::Error::other("is a symbolic link; not followed"));
+        }
+        if !m.is_file() {
+            return Err(std::io::Error::other("is not a regular file"));
+        }
     }
     let mut f = tokio::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
         .await?;
     f.write_all(content.as_bytes()).await?;
@@ -142,6 +138,20 @@ async fn old_text(real: &Path) -> Option<String> {
         return None;
     }
     tokio::fs::read_to_string(real).await.ok()
+}
+
+/// A regular file within the read cap (reading a FIFO blocks for good).
+async fn read_capped(real: &Path, path: &str) -> Result<String, String> {
+    let m = tokio::fs::metadata(real).await.map_err(|e| e.to_string())?;
+    if !m.is_file() {
+        return Err(format!("{path} is not a regular file"));
+    }
+    if m.len() > MAX_FILE_BYTES {
+        return Err(format!("{path} is larger than {} MB", MAX_FILE_BYTES >> 20));
+    }
+    tokio::fs::read_to_string(real)
+        .await
+        .map_err(|e| format!("{path}: {e}"))
 }
 
 async fn run(
@@ -165,16 +175,7 @@ async fn run(
             limit,
         } => {
             let real = confined(&root, &path, true).await?;
-            let len = tokio::fs::metadata(&real)
-                .await
-                .map_err(|e| e.to_string())?
-                .len();
-            if len > MAX_FILE_BYTES {
-                return Err(format!("{path} is larger than {} MB", MAX_FILE_BYTES >> 20));
-            }
-            let text = tokio::fs::read_to_string(&real)
-                .await
-                .map_err(|e| format!("{path}: {e}"))?;
+            let text = read_capped(&real, &path).await?;
             let content = match (line, limit) {
                 (None, None) => text,
                 (l, n) => {
@@ -252,6 +253,7 @@ async fn run(
                 if let Some(mut terms) = TERMINALS.get_mut(sid) {
                     terms.remove(&terminal_id);
                 }
+                TERMINALS.remove_if(sid, |_, terms| terms.is_empty());
                 kill(&t);
                 return Err("the session ended".into());
             }
@@ -352,12 +354,16 @@ fn output_limit(asked: Option<u64>) -> usize {
     })
 }
 
-/// No process is left in the group `pgid` (`ESRCH` to a null signal).
+/// No process of ours is left in the group `pgid`: `ESRCH` to a null
+/// signal, or `EPERM` (the id was reused by another user's group).
 fn group_gone(pgid: Option<i32>) -> bool {
     // SAFETY: signal 0 only checks that the group exists.
     pgid.is_some_and(|g| {
         (unsafe { libc::killpg(g, 0) }) == -1
-            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            && matches!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH | libc::EPERM)
+            )
     })
 }
 
@@ -369,6 +375,11 @@ fn kill(t: &Terminal) {
         // SAFETY: a plain signal to the process group this terminal created.
         unsafe {
             libc::killpg(pgid, libc::SIGKILL);
+        }
+        // The shell is reaped and SIGKILL ended the rest of the group: its id
+        // is free for reuse, so it is never signalled again.
+        if t.exit.borrow().is_some() {
+            t.gone.store(true, std::sync::atomic::Ordering::Release);
         }
     }
 }
@@ -404,6 +415,14 @@ mod tests {
         let small = root.path().join("a.txt");
         std::fs::write(&small, "hi").unwrap();
         assert_eq!(old_text(&small).await.as_deref(), Some("hi"));
+        // Round 2: the write and the read themselves refuse it, at once.
+        let quick = std::time::Duration::from_secs(2);
+        let w = tokio::time::timeout(quick, write_no_follow(&fifo, "x")).await;
+        assert!(w.expect("the write blocked on a FIFO").is_err());
+        let r = tokio::time::timeout(quick, read_capped(&fifo, "pipe")).await;
+        assert!(r.expect("the read blocked on a FIFO").is_err());
+        assert!(read_capped(&root.path().join("."), ".").await.is_err());
+        assert_eq!(read_capped(&small, "a.txt").await.as_deref(), Ok("hi"));
     }
 
     /// Review R1-049: a command's group is "gone" only once nothing is left
@@ -425,8 +444,17 @@ mod tests {
             !group_gone(Some(left)),
             "its background child is still in it"
         );
-        // SAFETY: the group this test just made.
-        unsafe { libc::killpg(left, libc::SIGKILL) };
+        // Review R2-006: a kill after the shell exited ends the group and
+        // marks it gone, so a later release never signals its reused id.
+        let (_tx, exit) = watch::channel(Some((Some(0), None)));
+        let t = Terminal {
+            output: Mutex::new((String::new(), false)),
+            exit,
+            pgid: Some(left),
+            gone: Default::default(),
+        };
+        kill(&t);
+        assert!(t.gone.load(std::sync::atomic::Ordering::Acquire));
     }
 
     /// A dangling link in the folder points outside it: the write is

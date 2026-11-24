@@ -5682,6 +5682,19 @@ async fn client_terminals_die_with_the_thread_and_wait_ignores_background_pipes(
     rt.prompt(&s.id, &ticker("close.txt")).await.unwrap();
     host.wait(is_terminal).await;
     assert!(alive("close.txt").await, "the command runs");
+    // Review R2-015: another runtime's shutdown (a test beside this one)
+    // leaves this runtime's terminals alone.
+    let other = AgentRuntime::new(
+        AgentRuntimeRepo::new(pool().await),
+        Arc::clone(&host) as Arc<dyn RuntimeHost>,
+        Arc::new(|_: RuntimeProvider| -> Option<Box<dyn StructuredDriver>> { None }),
+        RuntimeConfig::default(),
+    );
+    other.shutdown().await;
+    assert!(
+        alive("close.txt").await,
+        "another runtime's shutdown killed it"
+    );
     rt.close(&s.id).await.unwrap();
     assert!(!alive("close.txt").await, "closing the thread killed it");
 

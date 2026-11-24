@@ -1549,7 +1549,7 @@ async fn ask_human_approval(
     Ok(json!({
         "approval_id": appr.id,
         "status": match decided { Some(true) => "approved", Some(false) => "denied", None => "pending" },
-        "note": "poll the MCP approvals queue, or pass wait_seconds (≤30) to block briefly",
+        "note": format!("poll the MCP approvals queue, or pass wait_seconds (≤{MAX_WAIT_SECS}) to block briefly"),
     }))
 }
 

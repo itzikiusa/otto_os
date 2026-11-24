@@ -553,6 +553,9 @@ pub(super) struct Inner {
     usage: std::sync::OnceLock<Arc<otto_usage::UsageEngine>>,
     /// Agent-to-agent prompts per linked group since a person's last one.
     loop_guard: loop_guard::LoopGuard,
+    /// The armed "Resume at reset" timer per session; its lock makes a
+    /// timer's check-and-clear atomic against a re-arm or cancel.
+    resume_timers: tokio::sync::Mutex<HashMap<Id, tokio::task::AbortHandle>>,
 }
 
 /// Cheap to clone.
@@ -579,6 +582,7 @@ impl AgentRuntime {
                 loading: otto_core::keyed_lock::KeyedLocks::new(),
                 usage: std::sync::OnceLock::new(),
                 loop_guard: Default::default(),
+                resume_timers: Default::default(),
             }),
         }
     }
@@ -776,7 +780,6 @@ impl AgentRuntime {
     /// stop), then wait for the queued DB writes. The next boot's
     /// [`Self::recover`] settles the turns they leave open.
     pub async fn shutdown(&self) {
-        client_calls::drop_all();
         let lives: Vec<Arc<Live>> = self
             .inner
             .live
@@ -785,7 +788,13 @@ impl AgentRuntime {
             .collect();
         let mut held_shutdowns = Vec::new();
         for live in &lives {
-            if let Some(p) = live.lock().proc.take() {
+            let (proc, sid) = {
+                let mut st = live.lock();
+                (st.proc.take(), st.session.id.clone())
+            };
+            // After the take: a terminal still starting sees its epoch gone.
+            client_calls::drop_session(&sid);
+            if let Some(p) = proc {
                 live.proc_ended.notify_waiters();
                 match p.transport {
                     ProcTransport::Direct { stdin, control } => {
@@ -839,7 +848,6 @@ impl AgentRuntime {
     /// processes first) and reconcile the persisted projection after a
     /// portable state-archive restore.
     pub async fn reset_for_restore(&self) -> Result<usize> {
-        client_calls::drop_all();
         let keys: Vec<Id> = self.inner.live.iter().map(|e| e.key().clone()).collect();
         let mut held_shutdowns = Vec::new();
         for id in keys {
@@ -849,6 +857,7 @@ impl AgentRuntime {
                     st.epoch += 1;
                     st.proc.take()
                 };
+                client_calls::drop_session(&id);
                 if let Some(p) = proc {
                     live.proc_ended.notify_waiters();
                     match p.transport {
@@ -1952,6 +1961,7 @@ impl AgentRuntime {
     /// Close the session: end any turn as interrupted, stop the child, refuse
     /// further prompts. Idempotent.
     pub async fn close(&self, id: &Id) -> Result<RuntimeSession> {
+        self.drop_resume_timer(id).await;
         let s = {
             let live = self.live(id).await?;
             let _prompt = live.prompt_lock.lock().await;

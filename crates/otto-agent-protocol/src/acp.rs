@@ -3990,6 +3990,76 @@ mod tests {
         assert_eq!(p, "make deploy\nin /etc\nenv: AWS_PROFILE");
     }
 
+    /// Review R1-003: the prompt shows env names only, so a key that runs
+    /// code or overrides Otto's own env is dropped — named in the prompt as
+    /// ignored — and the command still runs with the rest; Otto's value wins.
+    #[test]
+    fn a_command_env_that_runs_code_or_overrides_otto_is_dropped() {
+        let mut d = AcpDriver::grok();
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"g"}}"#);
+        d.state.child_env = vec![("OWN_KEY".into(), "otto".into())];
+        let env = json!([
+            {"name":"BASH_ENV","value":"/tmp/pwn.sh"},
+            {"name":"DYLD_INSERT_LIBRARIES","value":"/tmp/pwn.dylib"},
+            {"name":"node_options","value":"--require /tmp/pwn.js"},
+            {"name":"PATH","value":"/tmp/bin"},
+            {"name":"OTTO_TOKEN","value":"x"},
+            {"name":"OWN_KEY","value":"agent"},
+            {"name":"TERM","value":"xterm-256color"},
+            {"name":"LC_ALL","value":"C"},
+            {"name":"APP_MODE","value":"test"}
+        ]);
+        let c = json!({"jsonrpc":"2.0","id":"c1","method":"terminal/create","params":{"sessionId":"g","command":"npm test","env":env}});
+        d.state.access = RuntimeAccessMode::ApprovalRequired;
+        let s = d.on_line(&c.to_string());
+        let prompt = s
+            .events
+            .iter()
+            .find_map(|e| match e {
+                DriverEvent::Request { prompt, .. } => prompt.clone(),
+                _ => None,
+            })
+            .expect("still asks");
+        assert_eq!(
+            prompt,
+            "npm test\nin /w\nenv: TERM, LC_ALL, APP_MODE\nenv ignored: BASH_ENV, DYLD_INSERT_LIBRARIES, node_options, PATH, OTTO_TOKEN, OWN_KEY"
+        );
+        d.state.access = RuntimeAccessMode::FullAccess;
+        let s = d.on_line(&c.to_string());
+        let env = s
+            .events
+            .iter()
+            .find_map(|e| match e {
+                DriverEvent::ClientCall {
+                    op: crate::driver::ClientOp::TerminalCreate { env, .. },
+                    ..
+                } => Some(env.clone()),
+                _ => None,
+            })
+            .expect("the command runs");
+        let got = |k: &str| {
+            env.iter()
+                .filter(|(n, _)| n == k)
+                .map(|(_, v)| v.as_str())
+                .collect::<Vec<_>>()
+        };
+        for k in [
+            "BASH_ENV",
+            "DYLD_INSERT_LIBRARIES",
+            "node_options",
+            "PATH",
+            "OTTO_TOKEN",
+        ] {
+            assert!(got(k).is_empty(), "{k} dropped");
+        }
+        assert_eq!(got("OWN_KEY"), ["otto"], "Otto's value wins");
+        assert_eq!(got("TERM"), ["xterm-256color"]);
+        assert_eq!(got("LC_ALL"), ["C"]);
+        assert_eq!(got("APP_MODE"), ["test"]);
+    }
+
     /// Security 6: a chatty command's row keeps only the tail.
     #[test]
     fn a_client_terminals_row_keeps_a_bounded_tail() {

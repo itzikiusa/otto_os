@@ -757,14 +757,14 @@ pub trait StructuredDriver: Send + 'static {
     }
 
     /// Restore live protocol state captured by [`Self::snapshot_state`].
+    fn restore_state(&mut self, _state: &serde_json::Value) -> Result<(), DriverError> {
+        Ok(())
+    }
+
     /// Right after [`Self::restore_state`] on an adopted process: lines owed
     /// to the agent now (it may print nothing until it gets them).
     fn after_adopt(&mut self) -> DriverStep {
         DriverStep::default()
-    }
-
-    fn restore_state(&mut self, _state: &serde_json::Value) -> Result<(), DriverError> {
-        Ok(())
     }
 }
 
