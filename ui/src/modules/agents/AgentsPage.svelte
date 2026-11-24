@@ -51,8 +51,10 @@
   });
 
   // First-run coach: a guided path from a fresh account to a launched agent.
-  // Shown only on a truly empty Agents view (no agent sessions at all) and only
-  // until the user dismisses it or launches a session (remembered per-machine).
+  // Shown only on a truly empty Agents view — no agent session in this
+  // workspace, under "No workspace" or in another loaded workspace (the inbox
+  // lists those too) — and only until the user dismisses it or launches a
+  // session (remembered per-machine).
   let coachDismissed = $state(
     (() => {
       try {
@@ -62,7 +64,9 @@
       }
     })(),
   );
-  const showCoach = $derived(!coachDismissed && ws.agentSessions.length === 0);
+  const showCoach = $derived(
+    !coachDismissed && ws.agentSessions.length === 0 && ws.scratchSessions.length === 0 && ws.otherWsSessions.length === 0,
+  );
   const preserveCoachDraft = $derived(
     showCoach && ws.currentId === null && !tiled && ws.panes.length === 0,
   );

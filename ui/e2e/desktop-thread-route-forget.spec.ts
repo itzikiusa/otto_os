@@ -169,6 +169,22 @@ test('a link to a session lands on that session: a Threads terminal-dock shell o
   }
 });
 
+test('Agents with no open tab shows no first-run coach to someone who has sessions (here: a "No workspace" one)', async ({ page }) => {
+  const r = await ctx.post(`${base}/api/v1/workspaces/scratch/sessions`, {
+    data: { kind: 'agent', provider: 'shell', title: 'Nesta scratch', cwd: dir, meta: { origin: 'e2e' } },
+  });
+  expect(r.ok(), await r.text()).toBeTruthy();
+  const id = (await r.json()).id as string;
+  try {
+    await page.addInitScript(() => localStorage.removeItem('otto_firstrun_dismissed'));
+    await page.goto('/#/agents');
+    await expect(page.getByTestId(`agents-row-${id}`)).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText('Let’s launch your first agent')).toHaveCount(0);
+  } finally {
+    await ctx.delete(`${base}/api/v1/sessions/${id}`).catch(() => {});
+  }
+});
+
 test('deleting the thread open on Threads reads it no more and leaves nothing behind', async ({ page }) => {
   const id = await thread('Ambrosini chat');
   await page.goto(`/#/threads/${id}`);
