@@ -646,6 +646,26 @@ fn retired_tail_cannot_remove_its_replacement() {
 #[test]
 fn rewindow_reuses_the_charge_of_the_window_it_replaces() {
     use std::io::Write;
+    // It fills the process-wide budget, so it runs alone in a child process:
+    // a tail in a test beside it never sees the budget full (review R2-014).
+    const CHILD: &str = "OTTO_REWINDOW_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "transcript_tail::tests::rewindow_reuses_the_charge_of_the_window_it_replaces",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("rewindow.jsonl");
     let mut f = std::fs::File::create(&path).unwrap();
