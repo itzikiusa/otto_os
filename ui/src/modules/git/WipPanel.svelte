@@ -168,9 +168,7 @@
       body = saved.body;
       draftedAt = saved.draftedAt;
       const stop = watchComposer(repo);
-      // Fields the agent last wrote (or empty ones) stay the agent's: they
-      // catch up on what streamed while away and take its end without asking.
-      const mine = saved.agent || (!subject && !body);
+      const mine = saved.agent || (!subject && !body); // the agent's (or empty) fields catch up on what streamed while away, and take its end without asking
       const parked = takePendingDraft(repo);
       if (parked) { streamed = mine ? { s: subject, b: body } : null; void applyDraft(parked); }
       const running = draftInFlight(repo);
