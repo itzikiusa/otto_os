@@ -441,7 +441,7 @@
       </button>
     {:else if ws.viewMode === 'tiled' && ws.mainSessions.length + ws.threadPanes.length > 1}
       <!-- Tiles → the split tree in their current order (every edge a gutter, panes nestable). -->
-      <button onclick={freeLayout} title="Free layout: every pane edge resizable, panes nestable, presets in the ⋯ menu" aria-label="Free layout" data-testid="tiled-free-layout">
+      <button onclick={freeLayout} title="Free layout: every pane edge resizable, panes nestable, presets under Arrange panes" aria-label="Free layout" data-testid="tiled-free-layout">
         <Icon name="split" size={12} />
       </button>
     {/if}

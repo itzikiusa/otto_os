@@ -406,3 +406,18 @@ test('a failed thread delete brings its draft back as it was, unsaved edits incl
   drafts.forget('A')(true);
   assert.deepEqual(disposed, ['A']);
 });
+
+test('a delete that fails after another identity signed in does not bring the old draft back', async () => {
+  const { importRunes } = await import('./runesHarness.ts');
+  const { RuntimeDrafts } = await importRunes<{ RuntimeDrafts: new () => { for(id: string): any; forget(id: string): (deleted: boolean) => void; configure(fn: unknown): void; setIdentity(id: string): void } }>(new URL('../src/lib/stores/runtimeDrafts.svelte.ts', import.meta.url));
+  const drafts = new RuntimeDrafts();
+  const disposed: string[] = [];
+  drafts.configure((id: string) => ({ dispose: () => void disposed.push(id) }));
+  drafts.setIdentity('u1');
+  drafts.for('A').text = 'u1 secret';
+  const settle = drafts.forget('A');
+  drafts.setIdentity('u2');
+  settle(false); // the DELETE answered 401
+  assert.equal(drafts.for('A').text, '');
+  assert.deepEqual(disposed, ['A'], 'its writer stops');
+});

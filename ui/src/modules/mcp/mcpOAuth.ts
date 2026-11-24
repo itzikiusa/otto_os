@@ -22,6 +22,7 @@ export async function signIn(s: McpServerDetail, signal?: AbortSignal): Promise<
   try {
     started = await mcpCpApi.cpOAuthStart(s.id, {});
   } catch (e) {
+    if (signal?.aborted) return false;
     if (!String((e as Error)?.message ?? e).includes(NO_REGISTRATION)) {
       toastError('Couldn’t start the sign-in', e);
       return false;
@@ -34,26 +35,24 @@ export async function signIn(s: McpServerDetail, signal?: AbortSignal): Promise<
     try {
       started = await mcpCpApi.cpOAuthStart(s.id, { client_id: id, client_secret: secret || undefined });
     } catch (e2) {
-      toastError('Couldn’t start the sign-in', e2);
+      if (!signal?.aborted) toastError('Couldn’t start the sign-in', e2);
       return false;
     }
   }
+  if (signal?.aborted) return false;
   const ok = await confirmer.ask(
     `Sign in to ${s.name} (${started.server_host ?? s.url ?? 'remote server'})? Your browser opens ${started.authorization_host} to sign in. Otto keeps the tokens in the Keychain; agents never see them.`,
     { title: 'Sign in', confirmLabel: 'Open browser', danger: false },
   );
-  if (!ok) return false;
+  if (!ok || signal?.aborted) return false;
   await openExternal(started.authorization_url);
   const until = Date.now() + WINDOW_MS;
   let st: McpOAuthStatus = { signed_in: false, pending: true };
   while (Date.now() < until) {
     await new Promise((r) => setTimeout(r, POLL_MS));
     if (signal?.aborted) return false;
-    try {
-      st = await mcpCpApi.cpOAuthStatus(s.id);
-    } catch {
-      continue;
-    }
+    st = await mcpCpApi.cpOAuthStatus(s.id).catch(() => st);
+    if (signal?.aborted) return false;
     if (!st.pending) break;
   }
   if (st.signed_in && !st.error) {

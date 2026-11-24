@@ -15,6 +15,7 @@ type Modules = [
 export const threadFeeds = $state({ settled: false });
 let mods: Promise<Modules> | null = null;
 let listedFor: string | null | undefined;
+let settledFor: string | null | undefined;
 let listing: Promise<void> | null = null;
 
 export function startThreadFeeds(): Promise<Modules> {
@@ -26,15 +27,20 @@ export function startThreadFeeds(): Promise<Modules> {
     m[0].runtimeThreads.mount();
     m[2].inboxLive.mount();
     return m;
+  }, (e) => {
+    mods = null; // a failed chunk load is retried by the next caller
+    throw e;
   });
   return mods.then((m) => {
     const token = getToken();
     if (listedFor !== token && !listing) {
+      if (settledFor !== token) threadFeeds.settled = false; // another identity: not answered yet
       listing = m[0].runtimeThreads.loadAll().then(
         () => void (listedFor = token),
         () => {},
       ).finally(() => {
         listing = null;
+        settledFor = token;
         threadFeeds.settled = true;
       });
     }

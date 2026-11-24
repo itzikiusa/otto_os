@@ -267,7 +267,7 @@
         >
       </div>
       <!-- Rare actions in ⋯: the view switch and the report share the meta row. -->
-      <button class="icon-btn" aria-label="More report actions" title="More report actions" onclick={(e) => ctxMenu.showAt(e.currentTarget, [
+      <button class="icon-btn" aria-haspopup="menu" aria-label="More report actions" title="More report actions" onclick={(e) => ctxMenu.showAt(e.currentTarget, [
         { label: 'Export .md', icon: 'download', action: onexportmd },
         ...(hasHtml ? [{ label: 'Download HTML report', icon: 'file' as const, action: ondownloadhtml }, { label: 'Open in new window', icon: 'external' as const, action: onopenwindow }] : []),
       ], { align: 'end' })}><Icon name="more" size={14} /></button>

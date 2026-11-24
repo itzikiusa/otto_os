@@ -112,3 +112,26 @@ test('session_removed closes the tab whatever workspace the event names', () => 
   assert.deepEqual([...ws.openTabs], ['other']);
   assert.deepEqual(ws.sessions, []);
 });
+
+test('a workspace switch forgets that the other workspaces were listed; an older answer does not restore it', async () => {
+  const { deferred } = await import('./sourceHarness.ts');
+  const others: ReturnType<typeof deferred<unknown>>[] = [];
+  const { ws } = fixture(async (path) => {
+    if (path.startsWith('/sessions?archived=false')) { const d = deferred<unknown>(); others.push(d); return d.promise; }
+    return [];
+  });
+  ws.workspaces = [{ id: 'w', settings: {} }, { id: 'w2', settings: {} }];
+  ws.allWorkspaces = true;
+  ws.otherWsLoaded = true;
+  const stale = ws.refreshOtherSessions();
+  const switching = ws.select('w2').catch(() => {});
+  assert.equal(ws.otherWsLoaded, false, 'the first-run coach must not read the old answer');
+  others[0].resolve([]);
+  await stale;
+  assert.equal(ws.otherWsLoaded, false, 'the answer for the previous selection');
+  await switching;
+  const fresh = ws.refreshOtherSessions(); // the switch's own read (select ends with it)
+  others.at(-1)!.resolve([]);
+  await fresh;
+  assert.equal(ws.otherWsLoaded, true);
+});
