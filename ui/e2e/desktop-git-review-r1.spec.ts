@@ -278,7 +278,10 @@ test('UX-G1: open repo tabs shrink instead of sitting cut at the header edge; th
     await expect(page.locator('.refs-panel')).toBeVisible({ timeout: 30_000 });
   }
   await page.waitForTimeout(500); // ui-guards: allow — the header's fit runs on the next frame
+  // Tabs that fit are shown whole; a strip too tight turns into the "<repo> ▾" switcher (R2-001).
+  await expect(page.locator('.git-header .git-tablist .git-tab.active:visible, .git-header [data-testid="git-repo-switch"]').first()).toContainText('customer-onboarding-portal-dirty');
   const cut = await page.evaluate(() => {
+    if (document.querySelector('[data-testid="git-repo-switch"]')) return [];
     const list = document.querySelector('.git-tablist')!.getBoundingClientRect();
     const outer = document.querySelector('.git-header .ph-tabs-inline')!.getBoundingClientRect();
     return Array.from(document.querySelectorAll('.git-tablist .git-tab')).flatMap((t) => {
@@ -296,7 +299,7 @@ test('UX-G1: open repo tabs shrink instead of sitting cut at the header edge; th
   await page.screenshot({ path: test.info().outputPath('git-tabs-dark.png') });
 });
 
-test('Git header matrix: Fetch · Pull · Push · Stash · Pop and ⋯ are never clipped (1440/1280/1100 × right panel × 1/4 tabs × a long branch)', async ({ page }) => {
+test('Git header matrix: Fetch · Pull · Push · Stash · Pop, ⋯, Focus, + and the active repo name are never clipped (1440/1280/1100 × right panel × 1/4 tabs × a long branch)', async ({ page }) => {
   test.setTimeout(180_000);
   const repos = [];
   for (const n of ['payments-gateway-service', 'customer-onboarding-portal', 'wallet-ledger-reconciliation', 'bo_common_ui']) repos.push(await seedCardRepo('hdr-' + n));
@@ -320,7 +323,12 @@ test('Git header matrix: Fetch · Pull · Push · Stash · Pop and ⋯ are never
         const actions = page.locator('.git-header .ph-actions-wrap');
         await expect(actions.getByRole('button', { name: /^Fetch/ })).toBeVisible({ timeout: 30_000 });
         await page.waitForTimeout(400); // ui-guards: allow — the header's fit settles over a frame or two
-        const targets = [...verbs.map((v) => actions.getByRole('button', { name: v }).first()), page.locator('.git-header .ph-more')];
+        // The active repo stays named — a tab, or the compact "<repo> ▾" switcher — and Focus and + stay whole (R2-001).
+        const repo = page.locator('.git-header .git-tablist .git-tab.active:visible, .git-header [data-testid="git-repo-switch"]').first();
+        await expect(repo, what + ': the active repo is named').toContainText('hdr-payments-gateway-service');
+        const shown = await repo.evaluate((el) => { const n = el.querySelector<HTMLElement>('.git-tab-name, .git-repo-switch-name')!; return { w: n.clientWidth, full: n.scrollWidth }; });
+        expect(shown.w, what + ': the active repo name is readable (' + shown.w + ' of ' + shown.full + ' px)').toBeGreaterThanOrEqual(Math.min(shown.full, 64));
+        const targets = [...verbs.map((v) => actions.getByRole('button', { name: v }).first()), page.locator('.git-header .ph-more'), page.locator('.git-header .git-focus'), page.locator('.git-header .git-tab-new'), repo];
         for (const t of targets) {
           await expectFullyInViewport(page, t, what + ' · ' + (await t.getAttribute('aria-label') ?? (await t.textContent())?.trim()));
           const hit = await t.evaluate((el) => {
@@ -330,7 +338,7 @@ test('Git header matrix: Fetch · Pull · Push · Stash · Pop and ⋯ are never
           });
           expect(hit, what + ': ' + (await t.textContent())?.trim() + ' is under the pointer, not clipped').toBe(true);
         }
-        if (panel && tabs === 4 && width !== 1440) await page.screenshot({ path: test.info().outputPath('header-' + width + '-open-4tabs.png') });
+        if (panel && tabs === 4) await page.screenshot({ path: test.info().outputPath('header-' + width + '-panel-open-4tabs-light.png') });
       }
     }
   }

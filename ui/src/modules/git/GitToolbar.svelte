@@ -48,12 +48,14 @@
     onbrowsestashes?: () => void;
     /** Header: the repo tabs' floor (PageHeader's tabsMin) — what they can still give up. */
     tabsMin?: number;
+    /** …and never below this many px (the compact repo switcher's room). */
+    tabsFloor?: number;
     /** sync: false while the card beside it already offers Push (its primary). */
     push?: boolean;
     /** Header: rendered between the state words and the verbs (the view switch). */
-    children?: import('svelte').Snippet<[compact: boolean]>;
+    children?: import('svelte').Snippet<[views: 'words' | 'icons' | 'menu']>;
   }
-  let { repoId, status, onstatus, onrefresh, variant = 'row', accent = false, tabsMin = 0.5, push = true, onbrowsestashes, children }: Props = $props();
+  let { repoId, status, onstatus, onrefresh, variant = 'row', accent = false, tabsMin = 0.5, tabsFloor = 0, push = true, onbrowsestashes, children }: Props = $props();
 
   let busy = $state('');
   const header = $derived(variant === 'header');
@@ -319,9 +321,9 @@
   // this order before anything is clipped: the state words (they repeat the
   // ↑/↓ counts) and "Auto-fetch paused" (⋯ has the toggle), then each verb's
   // label (the icon stays, the word is its name and title), then the view
-  // switch turns to icons. Measured against the header's actions wrap on
+  // switch turns to icons, then to one menu button. Measured against the header's actions wrap on
   // every resize and whenever a label or count changes.
-  const SQUEEZE = ['state', 'stash', 'pop', 'fetch', 'pull', 'push', 'views'];
+  const SQUEEZE = ['state', 'stash', 'pop', 'fetch', 'pull', 'push', 'views', 'viewmenu'];
   let squeeze = $state(0);
   const iconOnly = (v: string): boolean => SQUEEZE.indexOf(v) !== -1 && SQUEEZE.indexOf(v) < squeeze;
   let fetchEl = $state<HTMLButtonElement>();
@@ -332,7 +334,11 @@
     // What the repo tabs can still give up (PageHeader shrinks them to their
     // floor before anything scrolls).
     const tabs = row.querySelector<HTMLElement>(':scope > .ph-tabs-inline');
-    const give = tabs ? Math.max(0, tabs.offsetWidth - row.clientWidth * tabsMin) : 0;
+    // Below the floor and cut (the compact repo switcher's name ellipsized),
+    // the tabs are owed room: give goes negative and the verbs give way.
+    const cut = tabs?.querySelector<HTMLElement>('.git-repo-switch-name');
+    const want = tabs ? tabs.offsetWidth + (cut ? cut.scrollWidth - cut.clientWidth : 0) : 0;
+    const give = tabs ? tabs.offsetWidth - Math.max(row.clientWidth * tabsMin, Math.min(tabsFloor, want)) : 0;
     const fits = (): boolean => wrap.scrollWidth - wrap.clientWidth <= give + 1;
     const set = (n: number): void => {
       squeeze = n;
@@ -495,7 +501,7 @@
     <button class="btn small ghost git-autofetch-paused" class:squeezed={iconOnly('state')} data-keep data-testid="git-autofetch-paused" onclick={() => git.setAutoFetch(true)}
       title="Auto-fetch is paused — a repo is still fetched once when you open it. Click to resume.">Auto-fetch paused</button>
   {/if}
-  {@render children?.(iconOnly('views'))}
+  {@render children?.(iconOnly('viewmenu') ? 'menu' : iconOnly('views') ? 'icons' : 'words')}
   {#if showVerbs}{@render verbs()}{/if}
 {:else}
   <div class="verbs" class:phone-row={variant === 'row'} class:sync={variant === 'sync'} role="group" aria-label="Git" data-testid={variant === 'row' ? 'git-verbs-row' : 'git-verbs-sync'}>
@@ -541,6 +547,13 @@
   :global(.ph-actions) .tbtn {
     padding-inline: 8px;
     gap: 4px;
+  }
+  /* The last fit step (the views one menu button): the verbs pack tighter. */
+  :global(.ph-actions:has(.git-views-menu)) .tbtn.icon-only {
+    padding-inline: 4px;
+  }
+  :global(.ph-actions:has(.git-views-menu)) .tbtn.caret {
+    padding-inline: 2px;
   }
   .tbtn:hover:not(:disabled) {
     color: var(--text);
