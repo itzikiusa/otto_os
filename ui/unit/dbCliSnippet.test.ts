@@ -5,7 +5,7 @@ import {
   cliLabelForKind,
   redactUriPassword,
   shQuote,
-} from '../src/modules/database/cliSnippet.ts';
+} from '../src/lib/database/cliSnippet.ts';
 
 test('shQuote leaves safe tokens unquoted and safely escapes shell metacharacters', () => {
   assert.equal(shQuote('db.internal'), 'db.internal');

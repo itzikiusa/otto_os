@@ -1,9 +1,8 @@
 import { test, expect, type Page, type Route } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 
 // Real isolated repository; only errors, races and forge responses are stubbed.
@@ -14,7 +13,7 @@ let secondSha = '';
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
-  const dir = mkdtempSync(join(tmpdir(), 'otto-ux-git-'));
+  const dir = tempDir('otto-ux-git-');
   const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim();
   git('init', '-q', '-b', 'main');
   git('config', 'user.email', 'ux@otto.local');
@@ -95,7 +94,9 @@ test('PR filter change ignores an in-flight page from the old filter', async ({ 
   await openRepo(page, 'prs');
   await page.getByRole('button', { name: 'Load more' }).click();
   await expect.poll(() => !!oldPage).toBe(true);
-  await page.getByRole('button', { name: 'Merged', exact: true }).click();
+  // The state is in Filters now (one tab set fewer on the PR page).
+  await page.getByRole('button', { name: 'Filters' }).click();
+  await page.getByRole('menuitemcheckbox', { name: 'Merged' }).click();
   await expect(page.locator('.prlist')).toContainText('merged request 2');
   await oldPage!.fulfill({ json: { items: [pr(3)], has_more: false } });
   await page.waitForTimeout(100);

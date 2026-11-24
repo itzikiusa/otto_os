@@ -24,6 +24,8 @@
   import { navPending } from '../lib/navPending.svelte';
   import { ui } from '../lib/stores/ui.svelte';
   import { navBadge } from '../lib/navBadge';
+  import { navUsage } from '../lib/stores/navUsage.svelte';
+  import { barOrder } from '../lib/sidebarMore';
   import { auth } from '../lib/stores/auth.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
   import {
@@ -50,11 +52,12 @@
   const modules = $derived.by(() => {
     const available = availableModules((f) => auth.can(f, 'view'), light ? [] : pluginEntries);
     if (light) return LIGHT_MODULES.flatMap((id) => available.filter((m) => m.id === id));
-    return sidebarSections(
-      visibleOrder(resolveOrder(available, ui.sidebarOrder), ui.sidebarHidden),
-      ui.sidebarFavorites,
-      ui.sidebarGroupOrder,
-    ).flatMap((s) => s.modules);
+    // What he uses most first (sidebarMore.ts `barOrder`: pinned, then by use), so the tabs are his; the rest in More.
+    const split = navUsage.split(
+      sidebarSections(visibleOrder(resolveOrder(available, ui.sidebarOrder), ui.sidebarHidden), ui.sidebarFavorites, ui.sidebarGroupOrder),
+      current,
+    );
+    return barOrder([...split.sections.flatMap((s) => s.modules), ...split.more], ui.sidebarFavorites, navUsage.used);
   });
   // The entry the current route highlights (plugin slug, '' → Agents, …).
   const current = $derived(activeNavId(router.parts));
@@ -285,7 +288,7 @@
   /* Light version: "More" is a narrow ⋯ beside the five tabs, not a sixth
      (narrow enough that "Connections" fits its tab at 360 px wide). */
   .bn-btn.bn-compact {
-    flex: 0 0 40px;
+    flex: 0 0 44px;
   }
   .bn-label {
     font-size: var(--fs-xs);

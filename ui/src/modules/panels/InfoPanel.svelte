@@ -6,10 +6,10 @@
   import { toasts } from '../../lib/toast.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import StatusBadge from '../../lib/components/StatusBadge.svelte';
-  import { events } from '../../lib/events.svelte';
-  import { sessionState } from '../../lib/status';
-  import AttachIssue from '../agents/AttachIssue.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  // The issue picker loads when opened (it is SessionView's too, also lazy there).
+  const AttachIssueView = lazyComponent(() => import('../agents/AttachIssue.svelte')); // ui-guards: allow — the one issue picker
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import type { AttachedIssue } from '../../lib/api/types';
   import { allProviders, defaultAgentProvider } from '../../lib/providers';
@@ -21,15 +21,6 @@
   const workspace = $derived(ws.current);
   const attachedIssue = $derived(
     (session?.meta?.issue as AttachedIssue | undefined) ?? null,
-  );
-  // The same live state the tab strip and navigator show (events-fed status,
-  // needs-you flag, reconnecting) — not the row's raw `status` enum.
-  const liveState = $derived(
-    session
-      ? sessionState(session, ws.statusMap[session.id], ws.needsYou[session.id] === true, {
-          stale: events.state !== 'connected',
-        })
-      : null,
   );
 
   // Per-workspace default agent (overrides the global default). '' = inherit.
@@ -157,24 +148,11 @@
     {#if session}
     <section class="section">
       <div class="section-title">Session</div>
-      <div class="info-row">
-        <span class="key">Title</span>
-        <span class="val">{session.title}</span>
-      </div>
+      <!-- Title and status are the pane header's, the folder the details card's: only what they don't say. -->
       <div class="info-row">
         <span class="key">Provider</span>
         <span class="val val-provider"><ProviderIcon provider={session.provider} size={13} />{session.provider}</span>
       </div>
-      <div class="info-row">
-        <span class="key">Status</span>
-        <span class="val">{#if liveState}<StatusBadge status={liveState} variant="text" />{/if}</span>
-      </div>
-      {#if session.cwd}
-        <div class="info-row">
-          <span class="key">Folder</span>
-          <span class="val mono cwd" dir="ltr" title={session.cwd}>{session.cwd}</span>
-        </div>
-      {/if}
       <div class="info-row">
         <span class="key">Created</span>
         <span class="val">{fmt(session.created_at)}</span>
@@ -257,7 +235,7 @@
 {/if}
 
 {#if attachOpen && session}
-  <AttachIssue sessionId={session.id} onclose={() => (attachOpen = false)} />
+  <LazyMount lazy={AttachIssueView} what="the issue picker" quiet onerror={() => (attachOpen = false)} props={{ sessionId: session.id, onclose: () => (attachOpen = false) }} />
 {/if}
 
 {#if folderPickerOpen && session}
@@ -334,13 +312,6 @@
     font-size: var(--fs-xs);
     line-height: 1.4;
     color: var(--text-dim);
-  }
-  .cwd {
-    font-size: var(--fs-xs);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    display: block;
   }
   .issue-card {
     background: var(--surface-2);

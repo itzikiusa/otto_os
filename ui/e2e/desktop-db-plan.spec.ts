@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
+import { expectDbConnected, pickDbMenuItem } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DB Explorer — structured query-plan panel (PlanView).
@@ -41,19 +42,18 @@ test.beforeEach(async ({ page }, testInfo) => {
   }, workspaceId);
 });
 
-// Open the DB page and select a connection by name; leaves the engine chip
-// (capabilities loaded) visible so downstream assertions are stable.
-async function openConn(page: Page, name: string, engine: string): Promise<void> {
+// Open the DB page and select a connection by name; returns once the header
+// says Connected with the server version (capabilities loaded).
+async function openConn(page: Page, name: string, engine: 'MySQL' | 'Redis'): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  const c = page.locator('.conn-list .conn-name', { hasText: name });
+  const c = page.locator('.conn-list .tr-title', { hasText: name });
   await expect(c.first()).toBeVisible({ timeout: 30_000 });
   await c.first().click();
-  await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });
-  // The cap-chip confirms capabilities loaded — the Explain button's visibility
-  // keys off capabilities.explain, so we must wait for that before asserting it.
-  // A sub-900px workbench hides the chip by design: wait for it in the DOM.
-  await expect(page.locator('.cap-chip', { hasText: engine })).toBeAttached({ timeout: 20_000 });
+  await expect(page.getByTestId('db-conn-state')).toBeVisible({ timeout: 20_000 });
+  // The query plan's menu entry keys off capabilities.explain, so wait for
+  // the capabilities before asserting it.
+  await expectDbConnected(page, engine);
 }
 
 async function setEditor(page: Page, sql: string): Promise<void> {
@@ -66,17 +66,16 @@ async function setEditor(page: Page, sql: string): Promise<void> {
   await page.waitForTimeout(200); // let the statement propagate to the store
 }
 
-const explainBtn = (page: Page) => page.locator('.btn.small.ghost', { hasText: 'Explain' });
-
+// The query plan is in the workbench header's ⋯ (the Query group).
 async function clickExplain(page: Page): Promise<void> {
-  await explainBtn(page).first().click();
+  await pickDbMenuItem(page, /^Query plan \(EXPLAIN\)/);
   await expect(page.locator('.plan-panel')).toBeVisible({ timeout: 20_000 });
 }
 
 test.describe('DB Explorer — query-plan panel', () => {
   test('MySQL: unindexed scan → plan tree + full-scan warning; raw toggle + close', async ({ page }) => {
     test.skip(!conn.mysql, 'mysql docker not reachable');
-    await openConn(page, 'e2e-mysql', 'mysql');
+    await openConn(page, 'e2e-mysql', 'MySQL');
     await setEditor(page, 'SELECT * FROM orders WHERE total_cents > 5');
     await clickExplain(page);
 
@@ -102,7 +101,7 @@ test.describe('DB Explorer — query-plan panel', () => {
 
   test('MySQL: primary-key lookup → plan tree with NO warning badge', async ({ page }) => {
     test.skip(!conn.mysql, 'mysql docker not reachable');
-    await openConn(page, 'e2e-mysql', 'mysql');
+    await openConn(page, 'e2e-mysql', 'MySQL');
     await setEditor(page, 'SELECT * FROM orders WHERE id = 1');
     await clickExplain(page);
 
@@ -114,8 +113,15 @@ test.describe('DB Explorer — query-plan panel', () => {
   test('Redis: Explain button is hidden (no query-plan surface)', async ({ page }) => {
     test.skip(!conn.redis, 'redis docker not reachable');
     // e2e-redis-docker is the redis connection name seeded by seedDockerConnection.
-    await openConn(page, 'e2e-redis-docker', 'redis');
-    // capabilities.explain === false for Redis → the Explain button is not rendered.
-    await expect(explainBtn(page)).toHaveCount(0);
+    await openConn(page, 'e2e-redis-docker', 'Redis');
+    // capabilities.explain === false for Redis → the ⋯ has its Query group
+    // (Run on…) but no query plan.
+    const menu = page.getByRole('menu', { name: 'Context menu' });
+    await expect(async () => {
+      if (await menu.isVisible()) await page.keyboard.press('Escape');
+      await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).first().click();
+      await expect(menu.getByRole('menuitem', { name: /^Run on…/ })).toBeVisible({ timeout: 1_000 });
+    }).toPass({ timeout: 20_000 });
+    await expect(menu.getByRole('menuitem', { name: /^Query plan/ })).toHaveCount(0);
   });
 });

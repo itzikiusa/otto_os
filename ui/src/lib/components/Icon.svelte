@@ -176,6 +176,12 @@
     // Editor | Split | Preview (IDE preview control): source lines; lines beside a pane
     editorLines: 'M2.5 3.5h11M2.5 6.5h11M2.5 9.5h11M2.5 12.5h7',
     editorSplit: 'M1.5 3.5h5M1.5 6.5h5M1.5 9.5h5M1.5 12.5h3.5M9.5 2.5h4a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Z',
+    // Markdown formatting row (IDE): lists, checklist, quote, inline code.
+    listBullet: 'M3 4h.01M3 8h.01M3 12h.01M6 4h7.5M6 8h7.5M6 12h7.5',
+    listNumbered: 'M2.5 2.8 3.4 2.3v3.2M2.6 9.4a.9.9 0 1 1 1.4.8l-1.4 1.6h1.6M6.5 4h7M6.5 8h7M6.5 12h7',
+    listCheck: 'M2.5 2.8h3v3h-3Zm0 7.4h3v3h-3Zm.7 1.6.8.7 1.2-1.4M7.5 4.3h6M7.5 11.7h6',
+    quote: 'M3 3.5v9M6 5h7.5M6 8h7.5M6 11h5',
+    code: 'M5.5 4.5 2 8l3.5 3.5M10.5 4.5 14 8l-3.5 3.5',
     step: 'M8 2.5a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11ZM7 6.3 8.4 5.3v5.4',
     // Speaker with sound waves — TTS / Voice Studio & audio playback.
     volume: 'M2.5 6h2.6L8.5 3.2v9.6L5.1 10H2.5V6Zm8.2-.4a3.5 3.5 0 0 1 0 4.8m2-6.8a6 6 0 0 1 0 8.8',

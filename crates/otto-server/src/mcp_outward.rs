@@ -776,10 +776,25 @@ impl governance::Stages for OttoStages<'_> {
                 let appr_id = match pending {
                     Some(id) => id,
                     None => {
-                        // A personal-agent write names exactly what changes.
-                        let detail = match admin_detail(&ctx.pool, tool, self.arguments).await {
-                            Some(d) => d,
-                            None => detail_with_target(&ctx.pool, tool, self.arguments).await,
+                        let detail = match self.repo_label {
+                            // The repo the git-tool resolution already found, by name
+                            // ("repo demo (workspace: ws)"), so the approver isn't
+                            // judging an opaque id — no second lookup.
+                            Some(label) => {
+                                let rid = self.arguments["repo_id"].as_str().unwrap_or_default();
+                                let base = dangerous_detail(tool, self.arguments);
+                                match base
+                                    .replace(&format!("repo '{rid}'"), &format!("repo {label}"))
+                                {
+                                    named if named != base => named,
+                                    _ => format!("{base} — repo {label}"),
+                                }
+                            }
+                            // A personal-agent write names exactly what changes.
+                            None => match admin_detail(&ctx.pool, tool, self.arguments).await {
+                                Some(d) => d,
+                                None => detail_with_target(&ctx.pool, tool, self.arguments).await,
+                            },
                         };
                         // A saved request's id says nothing: name its method and host.
                         let rid = self.arguments.get("request_id").and_then(Value::as_str);
@@ -813,22 +828,9 @@ impl governance::Stages for OttoStages<'_> {
                                 server_name: Some("otto".into()),
                                 tool: Some(tool.to_string()),
                                 title: format!("otto MCP server → {tool}"),
-                                detail: Some({
-                                    let base = match self.repo_label {
-                                        // The resolved repo by name, so the approver isn't
-                                        // judging an opaque id.
-                                        Some(label) => {
-                                            format!(
-                                                "{} — repo {label}",
-                                                dangerous_detail(tool, self.arguments)
-                                            )
-                                        }
-                                        None => detail,
-                                    };
-                                    match self.forced_approval {
-                                        Some((why, _)) => format!("{why}. {base}"),
-                                        None => base,
-                                    }
+                                detail: Some(match self.forced_approval {
+                                    Some((why, _)) => format!("{why}. {detail}"),
+                                    None => detail,
                                 }),
                                 args_redacted_json: self.audit.args_redacted_json.clone(),
                                 args_hash: Some(self.args_hash.to_string()),

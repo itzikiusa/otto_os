@@ -22,7 +22,7 @@ async function setup(page: Page, kind: 'broker' | 'database') {
     await page.route('**/db/capabilities', r => r.fulfill({json:{engine:'mysql',query_language:'sql',version:'8.0',can_write:true,explain:true}}));
     await page.route('**/db/schema**', r => r.fulfill({json:[]}));
     await openPage(page,'database');
-    await page.locator('.conn-list .conn-name', {hasText:`Review SQL ${id}`} ).first().click();
+    await page.locator('.conn-list .tr-title', {hasText:`Review SQL ${id}`} ).first().click();
     await expect(page.getByRole('tablist', {name:'Query tabs'})).toBeVisible();
   }
   return entity;
@@ -128,7 +128,8 @@ test('Database saved and history failures offer retry; tabs follow keyboard focu
   await page.locator('.side-body').getByRole('button',{name:'Retry',exact:true}).click();
   await expect(page.getByText('No query history yet', { exact: true })).toBeVisible();
   await tabs.getByRole('tab',{name:'History',exact:true}).press('Home');
-  await expect(tabs.getByRole('tab',{name:'Connections',exact:true})).toBeFocused();
+  // The connection list is its own page now: Tables is the first view.
+  await expect(tabs.getByRole('tab',{name:'Tables',exact:true})).toBeFocused();
   await page.getByRole('button', {name:'New query tab',exact:true}).click();
   const queries = page.getByRole('tablist',{name:'Query tabs'}).getByRole('tab');
   await queries.last().focus(); await queries.last().press('Home');
@@ -235,9 +236,11 @@ test('Database stages a cell edit for review and discards it without writing', a
 
 test('SSH connection form retains a draft through delayed save failure', async ({page}) => {
   await setup(page,'database');
+  // New connections start from the Connections page (its primary's kind menu).
+  await openPage(page,'connections');
   await page.getByRole('button',{name:'New connection',exact:true}).first().click();
+  await page.getByRole('menuitem',{name:'SSH host…',exact:true}).click();
   const dialog = page.getByRole('dialog');
-  await dialog.getByRole('button',{name:'SSH',exact:true}).click();
   await dialog.getByLabel('Name',{exact:true}).fill('Private bastion draft');
   await dialog.getByLabel('Host',{exact:true}).fill('fixture.invalid');
   let release!: () => void;

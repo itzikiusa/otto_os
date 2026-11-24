@@ -387,7 +387,9 @@ class UsageStore {
     }
   }
 
-  /** Load status + (when available) summary + metrics for the current window. */
+  /** Load status + (when available) the summary for the current window. The
+   *  root-only system metrics load when the page shows System load
+   *  (`loadMetrics`), never on open. */
   async loadAll(): Promise<void> {
     this.loading = true;
     let mine: number | null = null;
@@ -401,17 +403,12 @@ class UsageStore {
       await this.loadStatus();
       if (this.status?.available) {
         mine = ++this.summarySeq;
-        // System CPU/RAM metrics are root-only: a non-root caller never asks.
-        const [summary, metrics] = await Promise.all([
-          api.get<UsageSummary>(`/usage/summary?${this.summaryQuery()}`),
-          this.admin ? api.get<MetricPoint[]>('/usage/metrics?minutes=180') : Promise.resolve<MetricPoint[]>([]),
-        ]);
+        const summary = await api.get<UsageSummary>(`/usage/summary?${this.summaryQuery()}`);
         if (mine === this.summarySeq) {
           this.summary = summary;
           this.summaryError = null;
         }
-        this.metrics = metrics;
-        this.lastMetricsFetch = Date.now();
+        if (this.metricsSubscribers > 0) void this.loadMetrics();
         // Keep an open report in step with the refreshed window.
         if (this.report) void this.loadReport();
       } else if (this.status) {
@@ -425,6 +422,20 @@ class UsageStore {
       await budgets;
     } finally {
       this.loading = false;
+    }
+  }
+
+  /** System CPU/RAM samples (root-only) — loaded by the System load view. */
+  async loadMetrics(): Promise<void> {
+    if (!this.admin || this.metricsFetching) return;
+    this.metricsFetching = true;
+    this.lastMetricsFetch = Date.now();
+    try {
+      this.metrics = await api.get<MetricPoint[]>('/usage/metrics?minutes=180');
+    } catch {
+      /* the view keeps "Collecting samples…"; sparkline lag is benign */
+    } finally {
+      this.metricsFetching = false;
     }
   }
 
@@ -659,6 +670,25 @@ class UsageStore {
         last_active: s.last_active,
       })),
       `otto-usage-sessions-${this.days}d.csv`,
+    );
+  }
+
+  /** Export the by-kind (feature) rollup as CSV. */
+  exportFeaturesCsv(): void {
+    if (!this.summary) return;
+    exportCsv(
+      this.summary.by_kind.map((f) => ({
+        feature: f.feature,
+        sessions: f.sessions,
+        events: f.events,
+        input_tokens: f.input_tokens,
+        output_tokens: f.output_tokens,
+        cache_read_tokens: f.cache_read_tokens,
+        cache_write_tokens: f.cache_write_tokens,
+        total_tokens: f.total_tokens,
+        cost_usd: f.cost_usd,
+      })),
+      `otto-usage-features-${this.days}d.csv`,
     );
   }
 

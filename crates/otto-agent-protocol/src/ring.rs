@@ -120,9 +120,24 @@ impl EventRing {
     }
 }
 
-/// Encoded JSON size of one event (the ring's byte budget unit).
+/// Encoded JSON size of one event (the ring's byte budget unit), counted as
+/// it is written: no buffer is allocated, grown or copied for every event.
 pub fn encoded_len(ev: &RuntimeEvent) -> usize {
-    serde_json::to_vec(ev).map_or(0, |v| v.len())
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 += buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut n = Count(0);
+    match serde_json::to_writer(&mut n, ev) {
+        Ok(()) => n.0,
+        Err(_) => 0,
+    }
 }
 
 #[cfg(test)]
@@ -166,6 +181,14 @@ mod tests {
         );
         assert!(ring.replayable(2, 128, 10).is_none(), "over the byte cap");
         assert!(ring.replayable(5, 0, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn encoded_len_counts_exactly_what_serde_json_writes() {
+        for chunk in ["", "plain", "quotes \" and \\ and \n escapes", "ünïcødé ✓"] {
+            let e = ev(7, chunk);
+            assert_eq!(encoded_len(&e), serde_json::to_vec(&*e).unwrap().len());
+        }
     }
 
     #[test]

@@ -62,12 +62,12 @@ test('PostgreSQL Processes: hidden sessions explained, Cancel and Terminate ask 
   });
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  const c = page.locator('.conn-list .conn-name', { hasText: CONN });
+  const c = page.locator('.conn-list .tr-title', { hasText: CONN });
   await expect(c.first()).toBeVisible({ timeout: 30_000 });
   await c.first().click();
   await expect(page.locator('.query-editor')).toBeVisible({ timeout: 20_000 });
-  // Opening folds the list away; the connection's tab carries the same menu.
-  await page.locator('.conn-tab', { has: page.locator('.conn-tab-main', { hasText: CONN }) }).first().click({ button: 'right' });
+  // The workbench is titled by the connection; its ⋯ carries the connection's menu.
+  await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click();
   await page.getByRole('menuitem', { name: 'Processes…' }).click();
 
   const panel = page.getByRole('dialog', { name: `Processes · ${CONN}` });

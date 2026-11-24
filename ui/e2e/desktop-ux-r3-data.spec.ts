@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
-import { openPage, openApiEditor, expectNoHorizontalOverflow } from './helpers';
+import { openPage, openApiEditor, expectNoHorizontalOverflow, setDbView } from './helpers';
 import { mkdirSync } from 'node:fs';
 test.use({serviceWorkers:'block'});
 test.setTimeout(45000);
@@ -22,7 +22,7 @@ async function setup(page: Page, kind: 'broker' | 'database') {
     await page.route('**/db/capabilities', r => r.fulfill({json:{engine:'mysql',query_language:'sql',version:'8.0',can_write:true,explain:true}}));
     await page.route('**/db/schema**', r => r.fulfill({json:[]}));
     await openPage(page,'database');
-    await page.locator('.conn-list .conn-name', {hasText:`Review SQL ${id}`} ).first().click();
+    await page.locator('.conn-list .tr-title', {hasText:`Review SQL ${id}`} ).first().click();
     await expect(page.getByRole('tablist', {name:'Query tabs'})).toBeVisible();
   }
   return entity;
@@ -34,31 +34,29 @@ test('Database RTL arrows follow the visual order of sidebar, query and main tab
   await setup(page,'database');
   await expect(page.locator('.qe-edit .cm-content')).toHaveCSS('direction','ltr');
   const sidebar = page.getByRole('tablist',{name:'Sidebar view'});
-  await sidebar.getByRole('tab',{name:'Schema',exact:true}).click();
-  await sidebar.getByRole('tab',{name:'Schema',exact:true}).press('ArrowLeft');
+  await sidebar.getByRole('tab',{name:'Tables',exact:true}).click();
+  await sidebar.getByRole('tab',{name:'Tables',exact:true}).press('ArrowLeft');
   await expect(sidebar.getByRole('tab',{name:'Saved',exact:true})).toBeFocused();
   await page.getByRole('button',{name:'New query tab',exact:true}).click();
   await page.getByRole('button',{name:'New query tab',exact:true}).click();
   const queries = page.getByRole('tablist',{name:'Query tabs'}).getByRole('tab');
   await queries.first().click(); await queries.first().press('ArrowLeft');
   await expect(queries.nth(1)).toBeFocused();
-  const main = page.locator('.main-tabs');
-  await main.getByRole('tab',{name:'Query',exact:true}).click();
-  await main.getByRole('tab',{name:'Query',exact:true}).press('ArrowLeft');
-  await expect(main.getByRole('tab',{name:'Structure',exact:true})).toBeFocused();
 });
 
 test('Phone schema selection exposes one keyboard reachable selected tab', async ({page}) => {
   await setup(page,'database');
-  await page.getByRole('tablist',{name:'Sidebar view'}).getByRole('tab',{name:'Connections',exact:true}).click();
   await page.setViewportSize({width:375,height:812});
-  const toggle = page.getByRole('button',{name:'Schema & saved',exact:true});
-  if (await toggle.getAttribute('aria-expanded') === 'false') await toggle.click();
-  const sidebar = page.getByRole('tablist',{name:'Sidebar view'});
-  await expect(sidebar.getByRole('tab',{name:'Schema',exact:true})).toBeVisible();
-  await expect(sidebar.getByRole('tab',{name:'Schema',exact:true})).toHaveAttribute('tabindex','0');
+  // A phone keeps Tables / History in a sheet from the header.
+  // Tables is kept in the phone header. (Branching on isVisible() raced the
+  // header's re-fit after the resize: it read "visible" one frame before the
+  // button folded into the ⋯, and the click then waited on a hidden button.)
+  await page.getByTestId('page-header').getByRole('button',{name:'Tables',exact:true}).click();
+  const sidebar = page.getByRole('dialog',{name:'Tables'}).getByRole('tablist',{name:'Sidebar view'});
+  await expect(sidebar.getByRole('tab',{name:'Tables',exact:true})).toBeVisible();
+  await expect(sidebar.getByRole('tab',{name:'Tables',exact:true})).toHaveAttribute('tabindex','0');
   await expect(sidebar.getByRole('tab', { selected: true })).toHaveCount(1);
-  await expect(sidebar.getByRole('tab',{name:'Schema',exact:true})).toHaveAttribute('aria-selected','true');
+  await expect(sidebar.getByRole('tab',{name:'Tables',exact:true})).toHaveAttribute('aria-selected','true');
   await expect(sidebar.locator('[tabindex="0"]')).toHaveCount(1);
 });
 
@@ -73,7 +71,8 @@ test('Saving a query preserves its original tab when another query becomes activ
   });
   await setup(page,'database');
   await page.locator('.qe-edit .cm-content').fill('SELECT 41');
-  await page.getByRole('button',{name:'Save',exact:true}).click();
+  await page.getByTestId('page-header').getByRole('button',{name:'More actions'}).click();
+  await page.getByRole('menuitem',{name:/^Save query…/}).click();
   await page.getByPlaceholder('Query name').fill('Original query');
   await page.locator('.save-bar').getByRole('button',{name:'Save',exact:true}).click();
   await expect.poll(() => sent).toBe(true);
@@ -120,7 +119,8 @@ test('Network profile refuses invalid TCP ports before submission', async ({page
   await page.goto('/e2e/fixtures/network-profiles.html');
   await page.getByRole('button',{name:'Manage network profiles'}).click();
   await page.getByLabel('Network profile name').fill('Fixture profile');
-  await page.getByLabel('SSH connection').selectOption('ssh');
+  // The select itself (its "Loading SSH connections" status shares the words).
+  await page.getByRole('combobox', {name:'SSH connection'}).selectOption('ssh');
   await page.getByLabel('Endpoint 1 name').fill('Database');
   await page.getByLabel('Endpoint 1 remote host').fill('db.fixture.invalid');
   for (const value of ['-1','65536','1.5','0','']) {
@@ -224,9 +224,9 @@ test('History retry ignores the connection left behind', async ({page}) => {
   const sidebar=page.getByRole('tablist',{name:'Sidebar view'});
   await sidebar.getByRole('tab',{name:'History',exact:true}).click();
   phase='hold'; await page.locator('.side-body').getByRole('button',{name:'Retry',exact:true}).click();
-  await sidebar.getByRole('tab',{name:'Connections',exact:true}).click();
+  await page.getByRole('button',{name:'All connections',exact:true}).click();
   // Every profile was seeded into this disposable daemon by this suite.
-  await page.locator('.conn-list .conn-name').filter({hasText:alternate}).click();
+  await page.locator('.conn-list .tr-title').filter({hasText:alternate}).click();
   await sidebar.getByRole('tab',{name:'History',exact:true}).click();
   await expect(page.locator('.hist-row')).toContainText('SELECT current_connection');
   const done=page.waitForResponse(r=>r.url()===first); release(); await done;
@@ -245,16 +245,16 @@ test('Large schema search opens the matching structure without page overflow', a
   await expect(page.getByRole('tree',{name:'Schema'}).getByRole('treeitem')).toHaveCount(120);
   await page.getByRole('textbox',{name:'Find an object'}).fill('customer_reporting_119');
   await page.locator('.hit').filter({hasText:'customer_reporting_119'}).click();
-  await expect(page.getByRole('tablist',{name:'Workbench view'}).getByRole('tab',{name:'Structure',exact:true})).toHaveAttribute('aria-selected','true');
+  await expect(page.getByTestId('db-conn-state')).toContainText('Structure');
   await expect(page.getByText('customer_reference_identifier',{exact:true})).toBeVisible();
-  await expect(page.getByRole('tablist',{name:'Workbench view'}).getByRole('tab',{name:'Structure',exact:true})).toBeFocused();
+  await expect(page.getByTestId('db-conn-state').getByRole('button',{name:/Back to the query editor/})).toBeFocused();
   expect((await page.locator('.structure').boundingBox())!.width).toBeGreaterThan(500);
   await expectNoHorizontalOverflow(page);
   await page.screenshot({animations:'disabled',path:'/tmp/otto-ux-r3-data-screenshots/schema-tablet.png'});
-  await page.getByRole('button',{name:'Show schema sidebar',exact:true}).click();
+  await page.getByTestId('page-header').getByRole('button',{name:'Tables',exact:true}).click();
   await expect(page.getByRole('textbox',{name:'Find an object'})).toHaveValue('customer_reporting_119');
   await expect(page.locator('.hit').filter({hasText:'customer_reporting_119'})).toBeFocused();
-  await page.getByRole('tablist',{name:'Workbench view'}).getByRole('tab',{name:'Query',exact:true}).click();
+  await setDbView(page,'Query');
   for (const size of [{width:1440,height:900},{width:375,height:812}]) {
     await page.setViewportSize(size);
     await expect(page.locator('.qe-edit .cm-content')).toHaveText('SELECT preserved_tablet_draft');

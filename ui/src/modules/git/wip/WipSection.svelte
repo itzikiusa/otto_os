@@ -23,6 +23,9 @@
     title: string;
     /** Files in the section (the header count; folders excluded). */
     count: number;
+    /** The header carries the section's +/− line totals instead of the count
+     *  (the Changes badge already counts the files). */
+    lines?: boolean;
     rows: Row[];
     lw: ListWindow;
     open: boolean;
@@ -47,7 +50,7 @@
     footer?: Snippet;
   }
   let {
-    section, title, count, rows, lw, open = $bindable(), empty, tree, selected, partial, counts,
+    section, title, count, lines = false, rows, lw, open = $bindable(), empty, tree, selected, partial, counts,
     collapsed, ontoggle, onstage, ondiscard, onselect, onfilemenu, onfoldermenu, all, diffId, footer,
   }: Props = $props();
 
@@ -77,6 +80,17 @@
   };
 
   const fmt = (n: number): string => n.toLocaleString();
+  const lineTotals = $derived.by(() => {
+    if (!lines || !counts) return null;
+    let added = 0;
+    let deleted = 0;
+    for (const p of all) {
+      const v = counts.get(p);
+      added += v?.added ?? 0;
+      deleted += v?.deleted ?? 0;
+    }
+    return added + deleted > 0 ? { added, deleted } : null;
+  });
 </script>
 
 {#snippet kindBadge(kind: FileChange['kind'])}
@@ -94,7 +108,7 @@
     class:selected={sel}
     style:--depth={depth}
   >
-    <input
+    <label class="wp-check-hit"><input
       type="checkbox"
       class="wp-check"
       checked={isStaged}
@@ -102,7 +116,7 @@
       onchange={() => onstage([path], { section, key })}
       title={verb}
       aria-label="{verb} {path}"
-    />
+    /></label>
     <button
       class="wp-name"
       data-wp-nav={key}
@@ -146,7 +160,7 @@
        node.files carries the whole subtree) in one call; the name only folds,
        a name click must never mutate the index. -->
   <div use:rowMenu {@attach contextMenu((e) => onfoldermenu(e, node))} class="wp-folder" style:--depth={depth}>
-    <input
+    <label class="wp-check-hit"><input
       type="checkbox"
       class="wp-check"
       checked={isStaged}
@@ -154,7 +168,7 @@
       onchange={() => onstage(node.files.map((f) => f.path), { section, key })}
       title="{verb} {node.path}/ ({n})"
       aria-label="{verb} folder {node.path}"
-    />
+    /></label>
     <button class="wp-fold-name" data-wp-nav={key} onclick={() => ontoggle(node)} title="{node.path}/ ({n})" aria-expanded={!shut}>
       <Icon name={shut ? 'chevronRight' : 'chevronDown'} size={12} />
       <Icon name="folder" size={12} />
@@ -177,7 +191,14 @@
     <button type="button" class="wp-sec-toggle" data-wp-head={section} onclick={() => (open = !open)} aria-expanded={open}>
       <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
       <span class="wp-sec-title">{title}</span>
-      <span class="wp-sec-count">{fmt(count)}</span>
+      {#if !lines}
+        <span class="wp-sec-count">{fmt(count)}</span>
+      {:else if lineTotals}
+        <span class="wp-stat" data-testid="wip-section-lines" title="{fmt(lineTotals.added)} lines added, {fmt(lineTotals.deleted)} deleted">
+          <span class="wp-add">+{fmt(lineTotals.added)}</span>
+          <span class="wp-del">−{fmt(lineTotals.deleted)}</span>
+        </span>
+      {/if}
     </button>
     {#if all.length > 0}
       <button
@@ -235,7 +256,9 @@
     align-items: center;
     gap: 2px;
     min-height: 30px;
-    padding-inline: 6px 4px;
+    /* End ≥ 6 px: a touch screen's 36 px hit area of the 24 px buttons
+       overhangs them by 6 px; less scrolled the Changes list sideways. */
+    padding-inline: 6px;
     background: var(--surface);
     border-block-end: 1px solid var(--separator);
   }
@@ -315,6 +338,10 @@
   .wp-check {
     flex-shrink: 0;
     margin: 0;
+  }
+  .wp-check-hit {
+    display: inline-flex;
+    flex-shrink: 0;
   }
   .wp-name,
   .wp-fold-name {
@@ -488,6 +515,30 @@
       opacity: 1;
       width: 32px;
       height: 32px;
+    }
+  }
+  /* Touch: 44 px targets — rows, the checkbox's label (its padding is the
+     hit area, the box stays 20 px) and the discard button. */
+  @media (pointer: coarse) {
+    .wp-section {
+      --wp-row-h: 44px;
+    }
+    .wp-sec-btn {
+      inline-size: 44px;
+      block-size: 44px;
+    }
+    .wp-check {
+      width: 20px;
+      height: 20px;
+    }
+    .wp-check-hit {
+      padding: 12px;
+      margin-block: -12px;
+      margin-inline: -12px -6px;
+    }
+    .wp-discard {
+      width: 44px;
+      height: 44px;
     }
   }
   /* A narrow pane drops the directory (the tooltip keeps the full path) and

@@ -27,13 +27,30 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { routeAllowed as sidebarRouteAllowed } from '../../lib/sidebar';
   import { GUIDE_GROUPS, searchSections, splitChord, timeLabel, type GuideSection } from './guide';
-  import { DEFAULT_GUIDE_ID, FILM, GUIDES, guideById } from './sections';
-  import { renderGuideHtml } from './render';
+  import { DEFAULT_GUIDE_ID, FILM, GUIDE_INDEX as GUIDES, guideIndexById as guideById } from './sectionsIndex';
   import TourFilm from './TourFilm.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
 
   const guideIds = new Set(GUIDES.map((g) => g.id));
+  // The guide text is one lazy chunk (./sections.ts); the rail, titles and
+  // ⌘K come from the index already in the page.
+  let texts = $state<Map<string, GuideSection> | null>(null);
+  let textsError = $state<string | null>(null);
+  // The guide renderer (markdown) comes with the text: nothing renders before it.
+  let renderGuideHtml: (body: string) => string = () => '';
+  function loadTexts(): void {
+    textsError = null;
+    Promise.all([import('./sections'), import('./render')]).then(
+      ([m, r]) => {
+        renderGuideHtml = r.renderGuideHtml;
+        texts = new Map(m.GUIDES.map((g) => [g.id, g]));
+      },
+      (e: unknown) => (textsError = e instanceof Error ? e.message : String(e)),
+    );
+  }
+  loadTexts();
   /** Guides rail width — the shared list-pane default/range, remembered. */
   let listW = $state(loadPaneWidth('walkthroughs.listW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
 
@@ -68,11 +85,12 @@
   // ---- rendered body (memoised per guide) ----
   const htmlCache = new Map<string, string>();
   const html = $derived.by(() => {
-    if (!selected) return '';
-    let h = htmlCache.get(selected.id);
+    const full = selected ? texts?.get(selected.id) : undefined;
+    if (!full) return '';
+    let h = htmlCache.get(full.id);
     if (h === undefined) {
-      h = renderGuideHtml(selected.body);
-      htmlCache.set(selected.id, h);
+      h = renderGuideHtml(full.body);
+      htmlCache.set(full.id, h);
     }
     return h;
   });
@@ -104,7 +122,8 @@
   // ---- search ----
   let query = $state('');
   let searchEl: HTMLInputElement | undefined = $state();
-  const hits = $derived(searchSections(GUIDES, query));
+  // Search reads the guide text: until it is in, the count says so.
+  const hits = $derived(texts ? searchSections(GUIDES.map((g) => texts!.get(g.id) ?? g), query) : []);
   const searching = $derived(query.trim().length > 0);
   const grouped = $derived(
     GUIDE_GROUPS.map((group) => ({ group, items: GUIDES.filter((g) => g.group === group) })).filter(
@@ -113,11 +132,12 @@
   );
   /** What the rail's one always-mounted count region says: nothing until a
    *  search starts, then the match count (or that nothing matched). */
-  function searchCountText(q: string, n: number): string {
+  function searchCountText(q: string, n: number, ready = true): string {
     if (!q.trim()) return '';
+    if (!ready) return 'Loading the guides…';
     return n === 0 ? `No guides match “${q.trim()}”` : `${n} ${n === 1 ? 'guide' : 'guides'}`;
   }
-  const countText = $derived(searchCountText(query, hits.length));
+  const countText = $derived(searchCountText(query, hits.length, texts !== null));
   /** The rail's rows in on-screen order (arrow-key navigation walks this). */
   const railOrder = $derived(searching ? hits.map((h) => h.section.id) : GUIDES.map((g) => g.id));
 
@@ -318,7 +338,11 @@
                       </button>
                     {/if}
                   </header>
-                  <div class="md-body guide-body">{@html html}</div>
+                  {#if texts}
+                    <div class="md-body guide-body">{@html html}</div>
+                  {:else}
+                    <LoadState what="the guide" loading={!textsError} error={textsError} empty onretry={loadTexts} />
+                  {/if}
                 </article>
               {:else}
                 <EmptyState

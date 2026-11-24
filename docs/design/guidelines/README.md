@@ -111,7 +111,7 @@ it is a licence to put glass behind list, detail or settings content.
 | [foundations.md](./foundations.md) | pick a colour, font size, spacing, radius, shadow, layer, animation, icon or translucency |
 | [layout.md](./layout.md) | add a page or module, place a header, choose a page archetype, handle phone/tablet |
 | [components.md](./components.md) | need a button, form, tabs, chip, table, dialog, confirm, menu, toast, or an empty/loading/error state |
-| [patterns.md](./patterns.md) | build agent-facing UI (presence, agent-authored content, variants, provenance, approvals), dense data views, destructive actions or keyboard flows |
+| [patterns.md](./patterns.md) | build agent-facing UI (presence, agent-authored content, variants, provenance, approvals), dense data views, destructive actions or keyboard flows, or a page on the shared kit (reading surface 760/1200, InboxRow, status words, DetailsCard — §10) |
 | [content.md](./content.md) | write any user-visible text: labels, errors, empty states, numbers, dates |
 | [accessibility.md](./accessibility.md) | check contrast, focus, keyboard, ARIA, RTL; run axe |
 | [review-checklist.md](./review-checklist.md) | open or review a UI PR (humans and agents both run it) |

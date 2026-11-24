@@ -94,6 +94,7 @@ function setup(opts: { typed?: string | null } = {}) {
         stripJavaStringConcat: (s: string) => s,
         maskQueryPlaceholders: (s: string) => s,
         unmaskQueryPlaceholders: (s: string) => s,
+        isDdl: () => false,
       },
       '../jsonTree/bson': { bsonScalar: (v: unknown) => v },
       '../database/filter-chips': filterChips,

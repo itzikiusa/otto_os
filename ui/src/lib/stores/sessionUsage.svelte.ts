@@ -1,8 +1,9 @@
 // Per-session tokens + cost for the Agents page (review A5): the pane details
-// chip (one session, `GET /sessions/{id}/usage`) and the sidebar's tokens sort
-// / row tooltip (one workspace, `GET /workspaces/{wid}/sessions/usage`). Both
-// reads are throttled to once a minute per key — each one is a ClickHouse
-// query on the daemon (which caches the workspace rollup for 60 s as well).
+// (one session, `GET /sessions/{id}/usage`, read only when someone looks) and
+// the inbox's Tokens sort (one workspace, `GET /workspaces/{wid}/sessions/usage`).
+// Both reads are throttled to once a minute per key — each one is a ClickHouse
+// query on the daemon (which caches the workspace rollup for 60 s as well);
+// `invalidate` (a turn ended) lets the next look read at once.
 // A failed read keeps the last value and stays silent: usage is a nicety,
 // never a reason for an error toast.
 import { api } from '../api/client';
@@ -34,7 +35,12 @@ class SessionUsageStore {
     }
   }
 
-  /** Load the workspace rollup the sidebar sorts by (throttled). */
+  /** The totals moved (a turn ended): the next `loadSession` reads fresh. */
+  invalidate(id: Id): void {
+    this.lastSession.delete(id);
+  }
+
+  /** Load the workspace rollup the inbox sorts by (throttled). */
   async loadWorkspace(wid: Id, force = false): Promise<void> {
     const t = Date.now();
     if (!force && t - (this.lastWorkspace.get(wid) ?? 0) < MIN_INTERVAL_MS) return;

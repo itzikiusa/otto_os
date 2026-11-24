@@ -45,6 +45,13 @@ export interface TelemetryResource {
   timestamp: number; process: string; cpu_percent: number | null;
   rss_mb: number | null; host_load: number | null;
 }
+/** `GET /telemetry/navigation`: navigations to one module from one device class (last 30 days). */
+export interface NavigationCount {
+  module: string;
+  device: 'desktop' | 'phone' | 'tablet';
+  count: number;
+}
+
 export interface TelemetryOverview {
   hours: number; operations: TelemetryOperation[];
   resources: TelemetryResource[]; status: TelemetryStatus;

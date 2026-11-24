@@ -778,6 +778,7 @@ fn summary_from(v: &Value) -> PrSummary {
             })
             .unwrap_or_default(),
         is_mine: false,
+        asks_me: false,
         // The REST row names who is still asked; the verdict itself comes
         // from `overlay_reviews` (one GraphQL read per page).
         review: PrReviewSummary::from_counts(
@@ -789,12 +790,13 @@ fn summary_from(v: &Value) -> PrSummary {
     }
 }
 
-/// [`summary_from`] with `is_mine` set from the author's stable ids.
+/// [`summary_from`] with `is_mine` and `asks_me` set from the stable ids.
 fn summary_for(v: &Value, me: Option<&Me>) -> PrSummary {
     let mut s = summary_from(v);
     s.is_mine = v
         .get("user")
         .is_some_and(|u| identity::is_me(me, &user_keys(u)));
+    s.asks_me = me.is_some_and(|m| reviewers::requested_from(v, m));
     s
 }
 

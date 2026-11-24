@@ -12,7 +12,7 @@ const read = (p: string): string => readFileSync(join(import.meta.dirname, '..',
 const ARCHIVE_ENTRY_POINTS = [
   'src/modules/agents/SessionView.svelte',
   'src/shell/TabBar.svelte',
-  'src/shell/Navigator.svelte',
+  'src/modules/agents/AgentsInbox.svelte',
   'src/shell/App.svelte',
 ];
 
@@ -36,8 +36,8 @@ test('requestArchive confirms a working agent before archiving', () => {
   assert.ok(fn.indexOf('confirmer.ask') < fn.indexOf('this.archiveSession(id)'), 'confirm before the archive');
 });
 
-test('SessionView "Save & restart" runs the restart working-guard first', () => {
-  const src = read('src/modules/agents/SessionView.svelte');
+test('Additional directories "Save & restart" runs the restart working-guard first', () => {
+  const src = read('src/modules/agents/ExtraDirsModal.svelte');
   const fn = src.slice(src.indexOf('  async function saveDirs('));
   // The working-guard runs first inside saveAndRestartChoice (lib/freshRestart),
   // then the can't-resume ask; a cancel leaves before anything is saved.

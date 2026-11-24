@@ -186,15 +186,15 @@ async fn register_and_remove_local_sdk_round_trip_persists_and_surfaces_in_fast_
     assert_eq!(registered.source, "local");
     assert_eq!(registered.version, "1.23.7");
 
-    let t0 = std::time::Instant::now();
+    let requests_before = mgr.catalog_request_count();
     let resp = mgr
         .list_toolchains_with_opts(Some(&db), &targets, &target, None, None, false)
         .await
         .unwrap();
-    let elapsed = t0.elapsed();
-    assert!(
-        elapsed < Duration::from_millis(500),
-        "non-catalog list_toolchains must not make network requests (took {elapsed:?})"
+    assert_eq!(
+        mgr.catalog_request_count(),
+        requests_before,
+        "non-catalog list_toolchains must not make network requests"
     );
     assert_eq!(resp.ecosystems.len(), EcosystemKind::ALL.len());
     assert!(!resp.detected.is_empty());

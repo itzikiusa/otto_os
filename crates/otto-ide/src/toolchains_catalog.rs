@@ -949,6 +949,8 @@ struct CachedPlatformCatalog {
 pub struct CatalogClient {
     http: reqwest::Client,
     cache: Mutex<HashMap<TargetPlatform, CachedPlatformCatalog>>,
+    /// Network requests started (tests assert a path makes none).
+    requests: std::sync::atomic::AtomicUsize,
 }
 
 impl Default for CatalogClient {
@@ -969,7 +971,14 @@ impl CatalogClient {
         Self {
             http,
             cache: Mutex::new(HashMap::new()),
+            requests: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// How many network requests this client has started.
+    #[doc(hidden)]
+    pub fn request_count(&self) -> usize {
+        self.requests.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[doc(hidden)]
@@ -1072,6 +1081,8 @@ impl CatalogClient {
     }
 
     async fn get_text(&self, url: &str) -> Option<String> {
+        self.requests
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         otto_netguard::check_url(url).await.ok()?;
         let resp = self.http.get(url).send().await.ok()?;
         if !resp.status().is_success() {

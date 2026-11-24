@@ -44,7 +44,7 @@ Agents is where your coding agents run. Each session is a real terminal on this 
 - `⌥`-drag selects text in agent CLIs (they capture the mouse); the selection stays while the agent keeps writing, until you copy, click or type. `⌘C` copies it, with or without `⌥` still held. Copy-on-select is a toggle in the pane's ⋯ menu.
 - Paste an image and Otto uploads it, then types the saved file's path into the terminal.
 - `⇧↵` inserts a newline in the agent's prompt instead of submitting.
-- Terminal font size: *Terminal font larger / smaller / Reset* in the pane's ⋯ menu, or the zoom keys while the terminal is focused.
+- Terminal font size: the zoom keys while the terminal is focused, or *Settings → Appearance → Terminal font size*.
 
 **Broadcast**
 - With 2 or more panes open, **↗ broadcast** sends one line to every visible session. `⌘⇧B` opens Ask Otto pre-filled to broadcast to the sessions you name.

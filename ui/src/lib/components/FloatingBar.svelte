@@ -940,7 +940,7 @@
             <span class="fb-chip-label">{modelLabel}</span>
             <Icon name="chevronDown" size={12} />
           </button>
-          <span class="sep" aria-hidden="true"></span>
+          {#if !(inApp && router.module === 'home')}<!-- On Home, Pinned's own tabs switch spaces: one switch (M13). --><span class="sep" aria-hidden="true"></span>
           <div class="spaces" role="radiogroup" aria-label="Spaces (⌃1–⌃4)">
             {#each Array.from({ length: SPACE_COUNT }, (_, i) => i) as i (i)}
               {@const sp = barStore.state.spaces[i]}
@@ -952,7 +952,7 @@
                 onclick={() => selectSpace(i)}
               >{spaceLabel(i)}</button>
             {/each}
-          </div>
+          </div>{/if}
           <button
             class="mic"
             aria-disabled="true"
@@ -1018,7 +1018,7 @@
     display: none;
   }
   .app .surface {
-    width: min(720px, 100%);
+    width: min(var(--read-col), 100%);
     border: 1px solid var(--border);
     box-shadow: var(--glass-shadow);
     /* The raised-glass token, so Settings → Reduce transparency (not only

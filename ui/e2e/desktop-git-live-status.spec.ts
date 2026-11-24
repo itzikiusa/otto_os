@@ -1,9 +1,8 @@
 import { test, expect } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 import { openPage } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -18,7 +17,7 @@ import { openPage } from './helpers';
 const BUDGET_MS = 5_000;
 
 test('an on-disk edit, a new file and a CLI `git add` appear without waiting for auto-fetch', async ({ page }) => {
-  const dir = mkdtempSync(join(tmpdir(), 'otto-e2e-live-'));
+  const dir = tempDir('otto-e2e-live-');
   const git = (...a: string[]) => execFileSync('git', ['-C', dir, ...a], { stdio: 'ignore' });
   git('init', '-q');
   git('config', 'user.email', 'e2e@otto.local');
@@ -42,6 +41,8 @@ test('an on-disk edit, a new file and a CLI `git add` appear without waiting for
   const menu = page.locator('.ctx-menu');
   await menu.locator('.ctx-search-input').fill(name);
   await menu.getByRole('menuitem', { name }).first().click();
+  // A dirty repository opens on Changes; this spec drives the graph's WIP row.
+  await page.locator('.rv-tab', { hasText: 'History' }).click();
   const wipRow = page.locator('.wip-row');
   await expect(wipRow).toBeVisible({ timeout: 15_000 });
   await wipRow.click();

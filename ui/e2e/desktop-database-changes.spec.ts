@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
+import { pickMenuItem } from './helpers';
 import type { DatabaseChange } from '../src/lib/api/types';
 
 // Browser contract checks. Resource authorization and real MySQL/Postgres
@@ -31,9 +32,9 @@ test('database change draft binds validation to selected executor before submiss
   });
   await page.addInitScript(id=>{localStorage.setItem('otto_workspace',id);localStorage.setItem('otto_connhub_filter','all');},workspaceId);
   await page.goto('/#/connections');
-  await page.getByRole('button',{name:/Migration fixture.*mysql/}).first().click();
-  await page.getByTestId('db-conn-actions').click();
-  await page.getByRole('menuitem',{name:'Database changes',exact:true}).click();
+  await page.getByRole('button',{name:/Migration fixture.*mysql/i}).first().click();
+  await expect(page.locator('.query-editor')).toBeVisible();
+  await pickMenuItem(page, () => page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click(), 'Database changes');
   const panel=page.getByTestId('database-changes');
   await panel.getByRole('button',{name:'New change',exact:true}).click();
   await panel.getByLabel('Title',{exact:true}).fill('Add reviewed column');

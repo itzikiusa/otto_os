@@ -41,7 +41,7 @@ function isPhone(page: Page): boolean {
 async function ensureEditorOpen(page: Page): Promise<void> {
   if (!isPhone(page)) return;
   if (!(await page.locator('.qe-edit').isVisible().catch(() => false))) {
-    await page.locator('.qe-acc-head', { hasText: 'Editor' }).click();
+    await page.getByRole('button', { name: 'Edit the query', exact: true }).click();
   }
   await expect(page.locator('.qe-edit')).toBeVisible();
 }
@@ -56,10 +56,10 @@ async function ensureResultsOpen(page: Page): Promise<void> {
 async function openMysql(page: Page): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  const conn = page.locator('.conn-list .conn-name', { hasText: 'e2e-mysql' });
+  const conn = page.locator('.conn-list .tr-title', { hasText: 'e2e-mysql' });
   await expect(conn.first()).toBeVisible({ timeout: 30_000 });
   await conn.first().click();
-  await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('db-conn-state')).toBeVisible({ timeout: 20_000 });
 }
 
 async function runStatement(page: Page, sql: string): Promise<void> {
@@ -79,7 +79,8 @@ async function runStatement(page: Page, sql: string): Promise<void> {
   await page.waitForTimeout(300);
   // Batches execute via "Run all" — the primary Run intentionally narrows to
   // the selection / statement under the cursor.
-  await page.locator('.qe-toolbar .btn', { hasText: 'Run all' }).click();
+  await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click();
+  await page.getByRole('menuitem', { name: /^Run all/ }).click();
   await expect(page.locator('.btn.small.primary', { hasText: 'Run' }).first()).toBeVisible({
     timeout: 20_000,
   });

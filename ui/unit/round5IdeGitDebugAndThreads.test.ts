@@ -9,6 +9,7 @@ import * as cmView from '@codemirror/view';
 import { componentFunctions } from './componentFunctions.ts';
 import { loadSource } from './sourceHarness.ts';
 import * as lineDiff from '../src/lib/lineDiff.ts';
+import * as makefilePath from '../src/lib/components/makefilePath.ts';
 import * as livePaths from '../src/lib/gitLivePaths.ts';
 import * as latest from '../src/lib/latest.ts';
 import {
@@ -48,6 +49,7 @@ const { computeIdeDiffHunks, parseSavedLines } = loadSource(
     '@codemirror/state': cmState,
     '../clipboard': { copyWithToast() {} },
     '../contextmenu.svelte': { ctxMenu: { show() {}, showAt() {} } },
+    './cm-ide-touch-menu': { isCoarsePointer: () => false },
     '../lineDiff.ts': lineDiff,
   },
 );
@@ -67,6 +69,7 @@ const { computeMinimalTextUpdate } = loadSource(
       saveEditorState() {},
     },
     './cm-outside-text.ts': { outsideText: cmState.Annotation.define() },
+    './makefilePath.ts': makefilePath,
   },
 );
 const { detectTextEol, normalizeEditorLf, serializeTabDiskContent } = loadSource(

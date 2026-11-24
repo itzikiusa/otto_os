@@ -1,9 +1,8 @@
 import { test, expect } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 import { expectFullyInViewport, openPage } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -20,16 +19,19 @@ import { expectFullyInViewport, openPage } from './helpers';
 // daemon, so this file's two tests can land in different workers and seed two
 // repos. A fixed name let the second worker open the FIRST worker's repo — a
 // different needle sha — and fail the selection check on a correct selection.
-const REPO_NAME = `e2e-search-repo-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+// Named IN beforeAll, not at module load: a worker that runs the file again
+// (--repeat-each) evaluates the module once but seeds a repo per pass.
+let REPO_NAME = '';
 const NEEDLE = 'feat: needle-xyz lands here';
 let repoDir = '';
 let needleSha = '';
 let wsId = '';
 
 test.beforeAll(async () => {
+  REPO_NAME = `e2e-search-repo-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
   const { ctx, base } = await apiCtx();
   wsId = await seedWorkspace(ctx, base);
-  repoDir = mkdtempSync(join(tmpdir(), 'otto-e2e-search-'));
+  repoDir = tempDir('otto-e2e-search-');
   const git = (...a: string[]) => execFileSync('git', ['-C', repoDir, ...a], { stdio: 'ignore' });
   git('init', '-q');
   git('config', 'user.email', 'e2e@otto.local');
@@ -72,7 +74,7 @@ test('⌘F focuses the search box and a server-side query finds the one match', 
   await openRepo(page);
 
   // ⌘F focuses the box from anywhere on the git page.
-  await page.locator('.rv-head').click();
+  await page.getByTestId('git-state').click();
   await page.keyboard.press(process.platform === 'darwin' ? 'Meta+f' : 'Control+f');
   await expect(page.locator('.gsb-input')).toBeFocused();
 

@@ -8,6 +8,10 @@ import { apiCtx } from './seed';
 import { openPage, expectNoHorizontalOverflow } from './helpers';
 import { cannedLimits, claudeLimits, remaining, routeLimits, seedCodexLimits } from './usage-remaining-fixture';
 
+// WebKit sends a page's fetches through sw.js once it claims the page, and
+// page.route never sees them: the canned-limits tests block the worker.
+test.use({ serviceWorkers: 'block' });
+
 const phone = (page: Page) => page.evaluate(() => window.innerWidth <= 640 || window.innerHeight <= 500);
 
 /** Every element of `sel` inside the section lies within the viewport width. */
@@ -49,6 +53,7 @@ test('stale and unknown rows stay legible on a phone', async ({ page }) => {
   const unknown = section.getByTestId('limits-row-claude:account:acc-max');
   await expect(unknown.getByTestId('limits-unknown')).toBeVisible();
   await expect(unknown).toContainText('does not write its plan limits');
+  await expect(unknown).not.toContainText('Unknown');
   await expectInsideWidth(page, '.acct, .reason');
   await expectNoHorizontalOverflow(page);
 });

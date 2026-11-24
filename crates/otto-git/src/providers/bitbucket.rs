@@ -488,6 +488,7 @@ fn summary_from(v: &Value) -> PrSummary {
         reviewer_warnings: Vec::new(),
         head_sha: super::vstr_opt(v, &["source", "commit", "hash"]),
         is_mine: false,
+        asks_me: false,
         review: review_from(v),
     }
 }
@@ -512,12 +513,20 @@ fn review_from(v: &Value) -> Option<PrReviewSummary> {
     )
 }
 
-/// [`summary_from`] with `is_mine` set from the author's stable ids.
+/// [`summary_from`] with `is_mine` and `asks_me` set from the stable ids.
 fn summary_for(v: &Value, me: Option<&Me>) -> PrSummary {
     let mut s = summary_from(v);
     s.is_mine = v
         .get("author")
         .is_some_and(|a| identity::is_me(me, &user_keys(a)));
+    // A reviewer who has not approved nor requested changes yet.
+    s.asks_me = varr(v, &["participants"]).iter().any(|p| {
+        vstr(p, &["role"]) == "REVIEWER"
+            && !vbool(p, &["approved"]).unwrap_or(false)
+            && vstr(p, &["state"]) != "changes_requested"
+            && p.get("user")
+                .is_some_and(|u| identity::is_me(me, &user_keys(u)))
+    });
     s
 }
 

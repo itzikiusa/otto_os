@@ -16,7 +16,8 @@ export interface DiagnoseFixture {
 export async function seedDiagnose(page: Page): Promise<DiagnoseFixture> {
   const { ctx, base } = await apiCtx();
   const ws = await seedWorkspace(ctx, base);
-  const name = `diag-${Date.now()}`;
+  // Unique per project/worker: the library is global and projects seed in parallel.
+  const name = `diag-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const res = await ctx.post(`${base}/api/v1/workspaces/${ws}/connections`, {
     data: { name, kind: 'ssh', params: { host: 'fixture.invalid', port: 2222, user: 'deploy', identity_file: '~/.ssh/id_fixture' } },
   });

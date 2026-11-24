@@ -704,7 +704,7 @@ Delivery scope: **session-family events** (`session_status`, `session_created`,
 every member with `viewer`+ on the event's `workspace_id` (root receives all);
 **owner-scoped events** (`ui_control_requested`, `secret_request_updated`,
 `notifications_changed`, `ide_fs_changed`) reach only the user named by their `user_id` (not root);
-**broadcast events** (`Notice`, `resource_access_changed`, a workspace-less
+**broadcast events** (`Notice`, `resource_access_changed`, `connections_changed`, a workspace-less
 `mcp_approval_changed`) reach every authenticated client. The sections below
 cover every variant (`Event::type_name()` in
 `crates/otto-core/src/event.rs` is the authoritative list; each `## …`/`### …`
@@ -1952,7 +1952,7 @@ value.
 Emitted by `crates/otto-agent-protocol/src/runtime/secret_request.rs`
 (routes: `crates/otto-server/src/secret_request.rs`).
 
-### `mcp_approval_changed` / `resource_access_changed` / `notifications_changed`
+### `mcp_approval_changed` / `resource_access_changed` / `connections_changed` / `notifications_changed`
 
 Invalidation cues (TRANSPORT_PLAN stage 2) that let the UI drop its pollers:
 each says "the list you cached changed — refetch it"; none carries the data.
@@ -1962,6 +1962,7 @@ each says "the list you cached changed — refetch it"; none carries the data.
 {"type":"mcp_approval_changed","status":"expired"}
 {"type":"resource_access_changed","kind":"connection","resource_id":"01J…"}
 {"type":"resource_access_changed"}
+{"type":"connections_changed"}
 {"type":"notifications_changed","user_id":"01J…"}
 ```
 
@@ -1982,6 +1983,16 @@ each says "the list you cached changed — refetch it"; none carries the data.
   **Scope:** every authenticated client (opaque ids only). Consumer: the UI's
   access-decision cache (`resource-access.svelte.ts`), which re-checks the
   named resource (or all) instead of every resource every 15 s.
+- `connections_changed` — a successful write to the connection library:
+  `POST /workspaces/{id}/connections`, `…/connections/import/create`,
+  `PATCH|DELETE /connections/{id}`, `POST /connections/{id}/duplicate`,
+  `PATCH /connections/{id}/pin`, and any write under
+  `/workspaces/{id}/connection-sections` or `/connection-sections/{id}` (not
+  the per-connection `db/*`, `sftp/*`, `test` or `open` routes). Emitted by
+  the same middleware (`live_events.rs`) after a 2xx. **Scope:** every
+  authenticated client (no data). Consumer: the UI's one connection list
+  (`lib/stores/connectionList.svelte.ts`), read by the Connections page and
+  the DB workbench, which refetches instead of each page fetching on mount.
 - `notifications_changed` — the caller's notice list changed without a new
   notice (`POST /notifications/{id}/read`, `/notifications/read-all`,
   `DELETE /notifications/{id}`, `DELETE /notifications`, and the bulk

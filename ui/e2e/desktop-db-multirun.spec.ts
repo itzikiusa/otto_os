@@ -1,7 +1,7 @@
 import { test, expect, type Page, type Route } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { mockDbRoutes, seedMockDbConnection } from './db-mock';
-import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
+import { expectFullyInViewport, expectNoHorizontalOverflow, pickMenuItem } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DB Explorer — "Run on…" (multi-target / parameterised runs). Two real mock
@@ -130,7 +130,7 @@ async function openStg(page: Page): Promise<void> {
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
   const picker = page.locator('.side-switch [role="tab"]', { hasText: 'Connections' }).first();
   if (await picker.isVisible()) await picker.click();
-  await page.locator('.conn-list .conn-name', { hasText: STG }).first().click();
+  await page.locator('.conn-list .tr-title', { hasText: STG }).first().click();
   await expect(page.locator('.query-editor')).toBeVisible();
   const editor = page.locator('.query-editor .qe-edit .cm-content');
   await editor.click();
@@ -144,8 +144,7 @@ for (const scheme of ['light', 'dark'] as const) {
     const { starts } = await fixture(page);
     await openStg(page);
 
-    await page.getByTestId('qe-more').click();
-    await page.getByRole('menuitem', { name: 'Run on…' }).click();
+    await pickMenuItem(page, () => page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click(), 'Run on…');
     const sheet = page.getByTestId('multi-run');
     await expect(sheet).toBeVisible();
 

@@ -50,7 +50,7 @@ async function overrideQuery(page: Page, match: RegExp, body: (stmt: string) => 
 async function openConn(page: Page): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  const c = page.locator('.conn-list .conn-name', { hasText: CONN });
+  const c = page.locator('.conn-list .tr-title', { hasText: CONN });
   await expect(c.first()).toBeVisible({ timeout: 30_000 });
   await c.first().click();
   await expect(page.locator('.query-editor')).toBeVisible({ timeout: 20_000 });
@@ -65,7 +65,7 @@ async function draft(page: Page, stmt: string): Promise<void> {
 }
 
 async function clickRun(page: Page): Promise<void> {
-  await page.locator('.query-editor .btn.small.primary', { hasText: 'Run' }).first().click();
+  await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
 }
 
 test('a destructive statement asks first; Cancel runs nothing, Run sends it', async ({ page }) => {

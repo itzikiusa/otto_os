@@ -27,12 +27,13 @@ export function totalText(total: number | null | undefined): string {
 
 /** One group row's lag badge: the text and its tooltip. */
 export function lagBadge(lag: number | null | undefined, pending: boolean | undefined, protocolType: string): { text: string; title: string } {
-  if (lag != null) return { text: `lag ${lag.toLocaleString()}`, title: 'Total lag across the group’s committed partitions' };
-  if (pending) return { text: 'lag …', title: 'Computing lag…' };
+  // In words ("1,500 behind", "Caught up"), never a bare "lag N".
+  if (lag != null) return { text: lag > 0 ? `${lag.toLocaleString()} behind` : 'Caught up', title: 'Total lag across the group’s committed partitions' };
+  if (pending) return { text: 'Measuring lag…', title: 'Computing lag…' };
   if (protocolType !== 'consumer' && protocolType !== '') {
-    return { text: 'lag —', title: `Not a consumer group (${protocolType}) — no committed offsets to measure` };
+    return { text: 'No lag to measure', title: `Not a consumer group (${protocolType}) — no committed offsets to measure` };
   }
-  return { text: 'lag —', title: 'Lag unavailable: no committed offsets, or the offsets could not be read. Open the group for details.' };
+  return { text: 'Lag unknown', title: 'Lag unavailable: no committed offsets, or the offsets could not be read. Open the group for details.' };
 }
 
 /** Delay before re-fetching the group list while lags are still computing

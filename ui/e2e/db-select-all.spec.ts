@@ -51,17 +51,17 @@ function isPhone(page: Page): boolean {
 async function openMysql(page: Page): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  const conn = page.locator('.conn-list .conn-name', { hasText: 'e2e-mysql' });
+  const conn = page.locator('.conn-list .tr-title', { hasText: 'e2e-mysql' });
   await expect(conn.first()).toBeVisible({ timeout: 30_000 });
   await conn.first().click();
-  await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('db-conn-state')).toBeVisible({ timeout: 20_000 });
 }
 
 async function ensureEditorOpen(page: Page): Promise<void> {
   if (!isPhone(page)) return;
   const editor = page.locator('.qe-edit');
   if (!(await editor.isVisible().catch(() => false))) {
-    await page.locator('.qe-acc-head', { hasText: 'Editor' }).click();
+    await page.getByRole('button', { name: 'Edit the query', exact: true }).click();
   }
   await expect(editor).toBeVisible();
 }

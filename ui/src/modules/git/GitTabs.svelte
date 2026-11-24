@@ -255,7 +255,7 @@
   {/if}
   <!-- The tablist must contain ONLY role="tab" children (ARIA
        aria-required-children), and it is the only part that scrolls: the
-       auto-fetch toggle and + stay pinned after it, fully visible however
+       + stays pinned after it, fully visible however
        many repos are open. -->
   <div class="git-tablist" role="tablist" aria-label="Open repositories" bind:this={listEl}><!-- ui-guards: allow — closable/draggable repo tabs (dirty dot, branch chip, close ×, drag reorder); keyboard model uses onTabKey -->
   {#each openRepos as r (r.id)}
@@ -297,13 +297,14 @@
           }
         }}
       >
-        <span class="git-tab-dot" class:dirty aria-hidden="true"></span>
         <span class="git-tab-name">{r.name}</span>
         {#if branch}
           <span class="git-tab-branch mono" aria-hidden="true">
             <Icon name="branch" size={12} /><span class="git-tab-branch-name">{branch}</span>
           </span>
         {/if}
+        <!-- A word, not a dot; the open tab's Changes badge already counts them. -->
+        {#if dirty && selectedId !== r.id}<span class="git-tab-word" aria-hidden="true">changed</span>{/if}
       </button>
       <button
         type="button"
@@ -319,23 +320,6 @@
     </div>
   {/each}
   </div>
-  <button
-    class="git-autofetch"
-    class:on={git.autoFetchEnabled}
-    title={git.autoFetchEnabled
-      ? `Auto-fetch on — selected repo every 60s, other recently used repos every ${Math.max(60, git.autoFetchIntervalSec)}s while Git is open and this window is focused. Click to pause.`
-      : 'Auto-fetch paused — a repo is still fetched once when you open it. Click to fetch open repos automatically.'}
-    aria-label="Auto-fetch open repositories"
-    aria-pressed={git.autoFetchEnabled}
-    onclick={() => git.setAutoFetch(!git.autoFetchEnabled)}
-  >
-    <Icon name="fetch" size={14} />
-    <!-- Paused is a lasting, per-device choice: say so in words, not only in
-         the icon's tint (it was paused for weeks without anyone noticing).
-         One short word next to the fetch icon — the full sentence is the
-         tooltip — so it doesn't eat the room the repo tabs' branches need. -->
-    {#if !git.autoFetchEnabled}<span class="git-autofetch-off">Paused</span>{/if}
-  </button>
   <button class="git-tab-new" title="Open a repository" aria-label="Open a repository" onclick={openPicker}>
     <Icon name="plus" size={14} />
   </button>
@@ -417,18 +401,11 @@
   .git-tab.drag-over {
     border-inline-start: 2px solid var(--accent);
   }
-  .git-tab-dot {
+  .git-tab-word {
     flex-shrink: 0;
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--text-dim);
-    opacity: 0.55;
-  }
-  /* Uncommitted changes present → amber dot (a quiet "dirty" beacon). */
-  .git-tab-dot.dirty {
-    background: var(--warning);
-    opacity: 1;
+    font-size: var(--fs-xs);
+    color: var(--warning);
+    font-weight: 600;
   }
   .git-tab-name {
     /* min-width:0 lets this flex item shrink so the ellipsis actually engages
@@ -541,33 +518,6 @@
     background: var(--hover);
     color: var(--accent-text);
   }
-  /* Auto-fetch toggle: dim text when paused, accent when on. No opacity on the
-     paused state: it pushed the icon below 3:1 in the light theme, and
-     aria-pressed plus the accent already tell on from off. */
-  .git-autofetch {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    border: 1px solid transparent;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    padding: 0 8px;
-    border-radius: var(--radius-s);
-    flex-shrink: 0;
-  }
-  .git-autofetch:hover {
-    background: var(--hover);
-    color: var(--text);
-  }
-  .git-autofetch:not(.on) {
-    gap: 4px;
-    color: var(--warning);
-  }
-  .git-autofetch-off {
-    font-size: var(--fs-s);
-    white-space: nowrap;
-  }
   .mono {
     font-family: var(--font-mono);
   }
@@ -594,7 +544,6 @@
     background: var(--surface-2);
     border-color: var(--border);
   }
-  .embedded .git-autofetch,
   .embedded .git-tab-new {
     height: 28px;
     min-width: 28px;
@@ -627,7 +576,6 @@
       min-width: 40px;
       min-height: 40px;
     }
-    .git-autofetch,
     .git-tab-new,
     .git-focus {
       min-width: 40px;

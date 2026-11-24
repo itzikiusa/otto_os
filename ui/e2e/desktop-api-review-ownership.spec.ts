@@ -76,7 +76,7 @@ test('a delayed proto upload cannot replace another request tab', async ({ page 
       };
     }, wid);
     await openApiEditor(page);
-    await page.getByLabel('Request type').selectOption('grpc');
+    await page.getByLabel('HTTP method').selectOption('grpc');
     await page.locator('input[type=file][accept=".proto"]').setInputFiles({name:'late.proto',mimeType:'text/plain',buffer:Buffer.from('placeholder')});
     await page.locator('.req-tab-new').click();
     await page.getByLabel('Request URL').fill('https://b.test');
@@ -105,7 +105,7 @@ test('reflection cannot publish services after its endpoint is edited', async ({
       await route.fulfill({json:{services:[{name:'OldServer',methods:[{name:'Get',full:'/OldServer/Get',input_type:'Input',output_type:'Output',input_schema:'{}',client_streaming:false,server_streaming:false}]}]}});
     });
     await openApiEditor(page);
-    await page.getByLabel('Request type').selectOption('grpc');
+    await page.getByLabel('HTTP method').selectOption('grpc');
     await page.getByLabel('Request URL').fill('https://a.test');
     await page.getByRole('button', {name:'Load from server'}).click();
     await expect.poll(() => started).toBe(true);

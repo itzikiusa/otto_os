@@ -1,9 +1,8 @@
 import { test, expect, type Page, type Route } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 
 // Route fixtures must bypass the mobile service worker.
@@ -19,9 +18,9 @@ let worktreePath = '';
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
-  const dir = mkdtempSync(join(tmpdir(), 'otto-ux-git-'));
+  const dir = tempDir('otto-ux-git-');
   repoDir = dir;
-  worktreePath = join(mkdtempSync(join(tmpdir(), 'otto-ux-linked-')), 'review-worktree');
+  worktreePath = join(tempDir('otto-ux-linked-'), 'review-worktree');
   const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim();
   git('init', '-q', '-b', 'main');
   git('config', 'user.email', 'ux@otto.local');
@@ -86,10 +85,11 @@ test('summary reply survives Code and Timeline subtab round trips', async ({ pag
   const thread = page.locator('.cmt').first();
   await thread.getByRole('button', {name: 'Reply', exact: true}).click();
   await thread.getByPlaceholder('Reply…').fill('Keep this reply while I inspect the diff');
-  await page.getByRole('tab', { name: 'Code', exact: true }).click();
+  await page.getByRole('tab', { name: 'Files', exact: true }).click();
   await expect(page.locator('.prd-code')).toBeVisible();
-  await page.getByRole('tab', {name: 'Timeline', exact: true}).click();
-  await page.getByRole('tab', {name: 'Summary', exact: true}).click();
+  await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
+  await page.getByRole('button', { name: 'Timeline', exact: true }).click();
+  await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
   await expect(thread.getByPlaceholder('Reply…')).toHaveValue('Keep this reply while I inspect the diff');
   await page.evaluate(id => { location.hash = `#/git/${id}/pr/2`; }, repoId);
   await page.getByRole('button', {name: 'Keep editing', exact: true}).click();
@@ -102,8 +102,7 @@ test('graph leading branch chip stays inside its cell at 2048px', async ({ page 
   await openRepo(page);
   const cell = page.locator('.graph-row-head .branch-cell');
   await expect(cell.locator('.head-badge')).toBeVisible();
-  await page.screenshot({path: testInfo.outputPath('head-label-before.png')});
-  const bounds = await cell.evaluate(el => {
+  await page.screenshot({path: testInfo.outputPath('head-label-before.png')});  const bounds = await cell.evaluate(el => {
     const cell = el.getBoundingClientRect();
     return [...el.querySelectorAll('.ref-select, .head-badge')].map(item => ({left: item.getBoundingClientRect().left - cell.left, right: item.getBoundingClientRect().right - cell.right}));
   });
@@ -171,7 +170,8 @@ test('cancelled active PR review cannot be resurrected by an older poll', async 
   await page.route('**/api/v1/repos/*/prs/1/review', r => {poll = r;});
   await page.route('**/api/v1/reviews/review-4/cancel', r => r.fulfill({json: {...active, status: 'cancelled'}}));
   await page.goto(`/#/git/${repoId}/pr/1`);
-  await page.getByRole('tab', {name: 'AI review', exact: true}).click();
+  await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
+  await page.getByRole('button', { name: 'AI review', exact: true }).click();
   await expect(page.locator('.rp-agent').first()).toContainText('Correctness reviewer');
   await expect.poll(() => !!sendEvent).toBe(true);
   sendEvent!(JSON.stringify({type: 'review_changed', workspace_id: workspaceId, review_id: 'review-4', status: 'running'}));
@@ -208,7 +208,8 @@ test('local review finishes and hands only selected findings to a synthetic agen
   await page.getByRole('button', {name: 'Send to agent (1)', exact: true}).click();
   await page.getByRole('menuitem', {name: 'claude', exact: true}).click();
   await expect(page).toHaveURL(/#\/agents\/synthetic-handoff$/);
-  await expect(page.locator('.tab').filter({hasText: 'Selected review fixes'}).first()).toBeVisible();
+  // One session open: no tab strip (it shows with two or more) — its pane header names it.
+  await expect(page.locator('.pane-title').filter({hasText: 'Selected review fixes'}).first()).toBeVisible();
 });
 
 test('creating a branch from a selected commit keeps that SHA while HEAD moves behind the dialog', async ({page}) => {
@@ -261,7 +262,8 @@ test('active PR agent output and progress update without remounting the terminal
   await page.route('**/api/v1/repos/*/prs/1/reviews', r => r.fulfill({json: [active]}));
   await page.route('**/api/v1/repos/*/prs/1/review', r => r.fulfill({json: active}));
   await page.goto(`/#/git/${repoId}/pr/1`);
-  await page.getByRole('tab', {name: 'AI review', exact: true}).click();
+  await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
+  await page.getByRole('button', { name: 'AI review', exact: true }).click();
   await page.locator('.rp-agent').first().getByRole('button', {name: 'Open', exact: true}).click();
   await expect(page.locator('.rp-term')).toContainText('Synthetic live reviewer output');
   active.agents[0].note = 'Verified the delayed response; checking cancellation next';
@@ -277,12 +279,12 @@ test('active PR agent output and progress update without remounting the terminal
 test('inline reply survives switching from Files to Summary and back', async ({page}) => {
   await prFixtures(page, true);
   await page.goto(`/#/git/${repoId}/pr/1`);
-  await page.getByRole('tab', { name: 'Code', exact: true }).click();
+  await page.getByRole('tab', { name: 'Files', exact: true }).click();
   const thread = page.locator('.prd-code .cmt').first();
   await thread.getByRole('button', {name: 'Reply', exact: true}).click();
   await thread.getByPlaceholder('Reply…').fill('Keep the inline review explanation');
-  await page.getByRole('tab', {name: 'Summary', exact: true}).click();
+  await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
   await expect(thread).toBeHidden();
-  await page.getByRole('tab', { name: 'Code', exact: true }).click();
+  await page.getByRole('tab', { name: 'Files', exact: true }).click();
   await expect(thread.getByPlaceholder('Reply…')).toHaveValue('Keep the inline review explanation');
 });

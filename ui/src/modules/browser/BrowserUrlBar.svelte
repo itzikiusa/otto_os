@@ -244,7 +244,9 @@
     onfocus={() => actions.onUrlFocus(true)}
     onblur={() => actions.onUrlFocus(false)}
   />
-  <button class="icon-btn tool go-btn" onclick={actions.go} title="Go" aria-label="Go" disabled={!urlInput.trim()}>
+  <!-- Go keeps the field focused (mousedown): a blur first would re-sync the
+       bar to the tab's URL and Go would reload that instead of the typed one. -->
+  <button class="icon-btn tool go-btn" onmousedown={(e) => e.preventDefault()} onclick={actions.go} title="Go" aria-label="Go" disabled={!urlInput.trim()}>
     <Icon name="chevronRight" size={14} />
   </button>
   {#if browser.activeTab}

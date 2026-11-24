@@ -23,7 +23,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { mcpCpApi } from '../../lib/api/mcp';
-  import { liveQuery } from '../../lib/live';
+  import { liveQuery, EVENT_COMPLETE_SAFETY_MS } from '../../lib/live';
   import { toasts } from '../../lib/toast.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { rel } from '../../lib/stores/now.svelte';
@@ -138,7 +138,7 @@
   // backoff), and immediately whenever the window regains focus.
   $effect(() => {
     void showAll; // re-load when the filter flips
-    const p = liveQuery({ run: () => load(), on: ['mcp_approval_changed'], fallbackMs: 5000 });
+    const p = liveQuery({ run: () => load(), on: ['mcp_approval_changed'], fallbackMs: 5000, safetyMs: EVENT_COMPLETE_SAFETY_MS });
     const onFocus = (): void => p.now();
     window.addEventListener('focus', onFocus);
     return () => {

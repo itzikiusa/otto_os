@@ -21,6 +21,7 @@ import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
 import { loadErrorText } from '../../../lib/loadError';
 import { git } from '../../../lib/stores/git.svelte';
+import { readOverview } from '../../../lib/api/gitOverview';
 import { gitBridge } from '../../../lib/diff/gitBridge.svelte';
 import { graphCache, type GraphSnapshot } from '../graph-cache';
 import { spliceHistory } from '../graph-splice';
@@ -36,18 +37,16 @@ export interface GraphDataHost {
 }
 
 // ── History paging ──────────────────────────────────────────────────────────
-// There is no ceiling on how far back the graph can reach. The page is big
-// enough that essentially every real repo loads its ENTIRE history in one
-// request (6k commits = one page), so clicking a ref never waits on a chain of
-// round-trips. Paging survives only as a backstop for genuinely huge repos —
-// every row renders as real DOM, so an unbounded fetch on a 100k-commit repo
-// would lock the webview on mount.
+// Windowed (perf G6): the first paint asks for FIRST_PAGE commits, scrolling
+// near the end asks for SCROLL_PAGE more, and a jump to an old ref is ONE
+// `until` walk (capped at PAGE) that stops at that commit. The whole history
+// is never read up front (it was: 2k, then the next 10k right after).
 export const PAGE = 10000;
 /** The first page of a cold mount, and what a background reload re-reads
- *  (perf R3): 2k commits paint at once; the next PAGE is prefetched right
- *  after, so a ref click still rarely waits. A reload splices this onto the
- *  held tail (graph-splice.ts). */
-export const FIRST_PAGE = 2000;
+ *  (spliced onto the held tail, graph-splice.ts). */
+export const FIRST_PAGE = 200;
+/** What one scroll to the end adds. */
+export const SCROLL_PAGE = 1000;
 
 export interface GraphFetch {
   gen: number;
@@ -133,7 +132,7 @@ export function createGraphData(h: GraphDataHost) {
    *  `until` (a sha) makes it ONE daemon walk that stops right after that
    *  commit — how a jump to an old ref reaches it, instead of a chain of
    *  10k-commit `--skip` pages that each re-walk everything before them. */
-  function loadMore(until?: string, limit = PAGE): Promise<boolean> {
+  function loadMore(until?: string, limit = until ? PAGE : SCROLL_PAGE): Promise<boolean> {
     if (inflight) return inflight;
     if (!hasMore) return Promise.resolve(false);
     const p = loadPage(until, limit);
@@ -191,6 +190,7 @@ export function createGraphData(h: GraphDataHost) {
   let refRemoved = false;
   const movedRefTips = new Set<string>();
   const newRefTips = new Set<string>();
+  const localTips = (r: RefsResp): string => r.local.map((b) => `${b.name}@${b.sha}`).join('\n');
   function lostRef(prev: RefsResp, next: RefsResp): boolean {
     const entries = (r: RefsResp): [string, string | undefined][] => [
       ...r.local.map((b): [string, string | undefined] => [`l:${b.name}`, b.sha]),
@@ -349,21 +349,35 @@ export function createGraphData(h: GraphDataHost) {
     hasMore = true;
     skipCursor = 0;
 
-    // Stashes / worktrees / submodules are best-effort: a failure (or empty
-    // list) just leaves the section empty; it must never block the graph.
+    // Refs and the stash / worktree / submodule lists come with the repo's
+    // ONE overview read (shared with RepoView's status); a failed overview
+    // falls back to their own routes. Side lists are best-effort: a failure
+    // just leaves a section empty; it must never block the graph.
     stashesKnown = false;
     worktrees = [];
     submodules = [];
-    void reloadSideLists(id, true);
-    const gen = loadGen;
+    const sides = readOverview(id).then(
+      (o) => {
+        if (id !== h.repoId) return;
+        stashes = o.stashes ?? [];
+        stashesKnown = o.stashes !== null;
+        worktrees = o.worktrees ?? [];
+        submodules = o.submodules ?? [];
+        // A list the daemon couldn't read (null, not "none"): its own routes.
+        if (!o.stashes || !o.worktrees || !o.submodules) void reloadSideLists(id, true);
+        if (!o.refs) return loadRefs(id);
+        setRefs(withoutRemoteHeads(o.refs));
+        refsLoading = false;
+      },
+      () => {
+        void reloadSideLists(id, true);
+        return loadRefs(id);
+      },
+    );
     await Promise.all([
-      loadRefs(id),
+      sides,
       loadMore(undefined, FIRST_PAGE).finally(() => {
         commitsLoading = false;
-        // Prefetch the next page once the first one has painted.
-        setTimeout(() => {
-          if (gen === loadGen && id === h.repoId && hasMore) void loadMore();
-        }, 0);
       }),
     ]);
   }
@@ -547,6 +561,17 @@ export function createGraphData(h: GraphDataHost) {
     // `ceil((n + 1) / PAGE)` grew the request by a page per refresh.
     const held = commits;
     const heldMore = hasMore;
+    // Refs a quiet re-sync already read for this reload: when they prove the
+    // splice unsafe (a removed ref, a tip moved from outside the checked
+    // prefix), read the history once in full — not a page, then everything.
+    const pending = sync.pendingRefsFor(id);
+    if (!full && refs && pending && lostRef(refs, pending)) full = true;
+    // …and when they moved only remotes / tags (a fetch), the stash and
+    // worktree lists cannot have changed: read the history alone.
+    const sides = !(refs && pending && refs.local.every((b) => b.sha) && localTips(refs) === localTips(pending));
+    // A full re-read is what the user had paged in (at least a first page),
+    // never the old 10k first page: windowed history holds far less.
+    const fullSize = Math.max(FIRST_PAGE, held.length);
     loadGen++;
     loadingMore = false;
     inflight = null;
@@ -556,14 +581,13 @@ export function createGraphData(h: GraphDataHost) {
         .get<CommitInfo[]>(`/repos/${id}/log?all=true&limit=${limit}`)
         .then((v) => ({ v, e: null as unknown }))
         .catch((e: unknown) => ({ v: null, e }));
-    if (full) refRemoved = false;
     const [c0, st, wt] = await Promise.all([
-      readLog(full ? Math.max(PAGE, held.length) : FIRST_PAGE),
-      api.get<StashInfo[]>(`/repos/${id}/stashes`).catch(() => null),
-      api.get<WorktreeInfo[]>(`/repos/${id}/worktrees`).catch(() => null),
+      readLog(full ? fullSize : FIRST_PAGE),
+      sides ? api.get<StashInfo[]>(`/repos/${id}/stashes`).catch(() => null) : null,
+      sides ? api.get<WorktreeInfo[]>(`/repos/${id}/worktrees`).catch(() => null) : null,
     ]);
     let c = c0;
-    let want = full ? Math.max(PAGE, held.length) : FIRST_PAGE;
+    let want = full ? fullSize : FIRST_PAGE;
     let more: boolean | null = null;
     if (!full && c.v && c.v.length >= FIRST_PAGE && held.length > FIRST_PAGE) {
       const spliced = spliceHistory(held, c.v);
@@ -591,6 +615,8 @@ export function createGraphData(h: GraphDataHost) {
       return;
     }
     if (g.commits) {
+      // Not spliced: no retained tail is left for a removed ref to orphan.
+      if (g.more === null) refRemoved = false;
       movedRefTips.clear();
       newRefTips.clear();
       setCommits(g.commits);

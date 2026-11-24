@@ -28,8 +28,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 test('opt-in settings, defaults, error recovery and responsive light/dark views', async ({ page }, info) => {
-  await page.goto('/#/usage');
-  await page.getByRole('tab', { name: 'Otto usage', exact: true }).click();
+  await page.goto('/#/usage/otto');
   await expect(page.getByLabel('Collect application telemetry on this Mac')).not.toBeChecked();
   await page.getByText('Retention, analysis and profiling', { exact: true }).click();
   await expect(page.getByLabel('Trace retention (days)')).toHaveValue('1');
@@ -43,7 +42,7 @@ test('opt-in settings, defaults, error recovery and responsive light/dark views'
     await info.attach(`telemetry-${scheme}`, { path: info.outputPath(`telemetry-${scheme}.png`), contentType: 'image/png' });
   }
   await page.getByLabel('Trace retention (days)').fill('2');
-  await page.getByRole('tab', { name: 'Report', exact: true }).click();
+  await page.locator('[data-testid="page-header"]').getByRole('button', { name: 'Usage', exact: true }).click();
   await expect(page.getByRole('dialog', { name: 'Discard unsaved changes?' })).toBeVisible();
   await page.getByRole('button', { name: 'Keep editing', exact: true }).click();
   await expect(page.getByLabel('Trace retention (days)')).toHaveValue('2');
@@ -136,8 +135,7 @@ test('actual browser → server → collector → ClickHouse trace and opt-out',
   }, { timeout: 160_000, intervals: [1000, 3000, 5000] }).toBe(true);
   await assertAccepted();
   await info.attach('browser-ingestion', { body: JSON.stringify(ingestions), contentType: 'application/json' });
-  await page.goto('/#/usage');
-  await page.getByRole('tab', { name: 'Otto usage', exact: true }).click();
+  await page.goto('/#/usage/otto');
   await expect(page.getByText('Collecting locally', { exact: true })).toBeVisible();
   await expect.poll(async () => {
     const overview = await (await ctx.get(`${base}/api/v1/telemetry/overview?hours=1`)).json();
@@ -179,8 +177,7 @@ for (const scenario of ['empty', 'retry', 'close-pending'] as const) {
       if (scenario === 'close-pending') await pending;
       await route.fulfill({ json: [{ trace_id: traceId, span_id: 'b'.repeat(16), parent_span_id: null, name: 'http.server', component: 'git', duration_ms: 3, status: 'ok' }] });
     });
-    await page.goto('/#/usage');
-    await page.getByRole('tab', { name: 'Otto usage', exact: true }).click();
+    await page.goto('/#/usage/otto');
     await page.getByRole('button', { name: 'Trace', exact: true }).click();
     const dialog = page.getByRole('dialog', { name: 'Trace detail', exact: true });
     if (scenario === 'empty') {

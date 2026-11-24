@@ -7,7 +7,6 @@
   import Icon from '../lib/components/Icon.svelte';
   import { focusOnMount } from '../lib/focusOnMount';
   import { toastError } from '../lib/toastError';
-  import StatusDot from '../lib/components/StatusDot.svelte';
   import { events } from '../lib/events.svelte';
   import { sessionState, type SessionStateInfo } from '../lib/status';
   import { ws, DB_PANE_ID } from '../lib/stores/workspace.svelte';
@@ -19,6 +18,7 @@
   import { isEmbedded } from '../lib/desktop';
   import PaneControls from '../lib/components/PaneControls.svelte';
   import { ctxMenu } from '../lib/contextmenu.svelte';
+  import { layout, presetItems } from '../lib/stores/splitLayout.svelte';
   import { popoutItems } from '../lib/popoutMenu';
   import { confirmer } from '../lib/confirm.svelte';
   import type { MenuItem } from '../lib/contextmenu.svelte';
@@ -37,14 +37,25 @@
     ws.navigateToSession(id);
   }
 
+  // A thread tab (a chat pane) reads its title from Threads' store, loaded
+  // only once such a tab exists; it has no rename, share or pop-out here.
+  type RuntimeStore = typeof import('../modules/threads/runtime/runtimeThreads.svelte').runtimeThreads;
+  let rt = $state<RuntimeStore | null>(null);
+  $effect(() => {
+    if (!rt && ws.threadPanes.length > 0) void import('../modules/threads/runtime/runtimeThreads.svelte').then((m) => (rt = m.runtimeThreads));
+  });
+  const notSession = (id: string): boolean => id === DB_PANE_ID || ws.threadPanes.includes(id);
+
   function title(id: string): string {
     if (id === DB_PANE_ID) return 'Database';
+    if (ws.threadPanes.includes(id)) return rt?.get(id)?.title ?? 'Thread';
     return ws.getSession(id)?.title ?? '…';
   }
 
   /** Rich hover tooltip: title · provider · cwd (+ suspended note). */
   function tabTooltip(id: string): string {
     if (id === DB_PANE_ID) return 'Database Explorer';
+    if (ws.threadPanes.includes(id)) return `${rt?.get(id)?.title ?? 'Thread'}\nThread`;
     const s = ws.getSession(id);
     if (!s) return 'Double-click to rename';
     // One short line per fact: a single very long line made a native tooltip
@@ -125,15 +136,15 @@
     const leftOk = rtl ? canFwd : canBack;
     const rightOk = rtl ? canBack : canFwd;
     return tidy([
-      ...(id !== DB_PANE_ID && ws.myRole !== 'viewer'
+      ...(!notSession(id) && ws.myRole !== 'viewer'
         ? [{ label: 'Rename', icon: 'edit', action: () => startRename(id) } as MenuItem]
         : []),
-      ...(id !== DB_PANE_ID
+      ...(!notSession(id)
         ? [{ label: 'Share…', icon: 'share', action: () => (shareSessionId = id) } as MenuItem]
         : []),
       ...(id === DB_PANE_ID
         ? popoutItems('database', 'Database')
-        : popoutItems(`agents/${id}`, ws.getSession(id)?.title)),
+        : notSession(id) ? [] : popoutItems(`agents/${id}`, ws.getSession(id)?.title)),
       ...(leftOk || rightOk
         ? [
             { separator: true } as MenuItem,
@@ -167,7 +178,7 @@
       ...(ws.recentlyClosed.length > 0
         ? [{ label: 'Reopen closed tab', icon: 'refresh', action: () => ws.reopenClosedTab() }]
         : []),
-      ...(id !== DB_PANE_ID ? sessionRows(id) : []),
+      ...(!notSession(id) ? sessionRows(id) : []),
       { separator: true },
       { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
       {
@@ -186,17 +197,17 @@
     return sessionState(s, ws.statusMap[id] ?? 'idle', needsYou(id), { stale: events.state !== 'connected' });
   }
   function isResumable(id: string): boolean {
-    return id !== DB_PANE_ID && tabState(id).resumable;
+    return !notSession(id) && tabState(id).resumable;
   }
 
   // A tab "needs you" when its session is blocked on operator input — distinct
   // from idle. Cleared by the store when the session is opened / fed input.
   function needsYou(id: string): boolean {
-    return id !== DB_PANE_ID && ws.needsYou[id] === true;
+    return id !== DB_PANE_ID && (ws.needsYou[id] === true || rt?.get(id)?.status === 'awaiting_permission');
   }
 
   function startRename(id: string): void {
-    if (ws.myRole === 'viewer' || id === DB_PANE_ID) return;
+    if (ws.myRole === 'viewer' || notSession(id)) return;
     renamingId = id;
     draft = title(id);
   }
@@ -315,8 +326,10 @@
   data-tauri-drag-region
   onmousedown={startWindowDrag}
 >
+  <!-- The strip only with two or more tabs in the tabbed view (A3): one tab
+       repeats the pane's own header, and the tiled grid shows every tab. -->
   <div class="tabs" class:overflowing bind:this={tabsEl} onscroll={measureOverflow} role="tablist" aria-label="Session tabs">
-    {#each ws.openTabs as id, tabIdx (id)}
+    {#each ws.viewMode === 'tabs' && ws.openTabs.length > 1 ? ws.openTabs : [] as id, tabIdx (id)}
       <!-- The tab is the main <button role="tab">; the × is its SIBLING (a
            button inside a tab is a nested control screen readers can't
            reach). The wrapper only draws the shared chrome. -->
@@ -331,7 +344,6 @@
         data-tab-id={id}
       >
         {#if renamingId === id}
-          {#if id !== DB_PANE_ID}<StatusDot state={tabState(id)} size={6} />{/if}
           <input dir="auto"
             class="tab-rename"
             bind:value={draft}
@@ -369,23 +381,18 @@
           >
             {#if id === DB_PANE_ID}
               <Icon name="db" size={12} />
-            {:else}
+            {:else if isResumable(id)}
               {@const st = tabState(id)}
-              {#if st.resumable}
-                <span class="susp-dot" role="img" aria-label={st.label} title={st.hint}>
-                  <Icon name="refresh" size={12} />
-                </span>
-              {:else}
-                <StatusDot state={st} size={6} />
-              {/if}
+              <span class="susp-dot" role="img" aria-label={st.label} title={st.hint}>
+                <Icon name="refresh" size={12} />
+              </span>
             {/if}
             <span class="tab-title" title={tabTooltip(id)}>{title(id)}</span>
+            <!-- A word only when the tab wants you (the pane header says the rest; no bare dots). -->
             {#if needsYou(id)}
-              <span class="tab-needs-you" title="Waiting on you" role="img" aria-label="Needs you">
-                <Icon name="bell" size={12} />
-              </span>
-            {:else if ws.unread[id] === true}
-              <span class="tab-unread" title="New activity since you last looked" role="img" aria-label="Unread activity"></span>
+              <span class="tab-word needs" title="Waiting on you">Needs you</span>
+            {:else if ws.unread[id] === true && ws.activeSessionId !== id}
+              <span class="tab-word" title="Finished since you last looked">Done</span>
             {/if}
           </button>
         {/if}
@@ -420,6 +427,12 @@
     >
       <Icon name="grid" size={12} />
     </button>
+    <!-- The free layout's presets act on the whole canvas, so they live with its view control, not in a pane's ⋯. -->
+    {#if ws.viewMode === 'tabs' && layout.panes.length > 1}
+      <button aria-haspopup="menu" onclick={(e) => ctxMenu.showAt(e.currentTarget, presetItems())} title="Arrange the panes: columns, rows, grid…" aria-label="Arrange panes" data-testid="arrange-panes">
+        <Icon name="split" size={12} />
+      </button>
+    {/if}
   </div>
   <button
     class="icon-btn new-tab"
@@ -524,15 +537,14 @@
     border-color: color-mix(in srgb, var(--warning) 45%, transparent);
     color: var(--text);
   }
-  .tab-needs-you {
-    display: grid;
-    place-items: center;
+  .tab-word {
     flex-shrink: 0;
-    width: 14px;
-    height: 14px;
-    border-radius: 999px;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
+  .tab-word.needs {
     color: var(--warning);
-    background: color-mix(in srgb, var(--warning) 18%, transparent);
+    font-weight: 600;
   }
   /* ↻ = suspended, resumes on open: calm/dim — amber is only "needs you". */
   .susp-dot {
@@ -618,15 +630,6 @@
   }
   .tab-close:focus-visible {
     outline: 1px solid var(--accent-text);
-  }
-  /* Unread activity: a quiet accent dot on background tabs whose session
-     finished working (or needs input) since the user last looked. */
-  .tab-unread {
-    flex-shrink: 0;
-    width: 6px;
-    height: 6px;
-    border-radius: 999px;
-    background: var(--accent);
   }
   .tab.unread:not(.active) {
     color: var(--text);

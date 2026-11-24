@@ -1,9 +1,8 @@
 import { test, expect, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 
 // E2E for the two Git features:
 //   1. Auto-fetch — a quiet background `git fetch` when a repo opens, then on
@@ -26,7 +25,7 @@ const git = (dir: string, ...args: string[]) =>
 
 /** Make a fresh local git repo with one commit. Returns its dir. */
 function initRepo(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const dir = tempDir(prefix);
   git(dir, 'init', '-q');
   git(dir, 'config', 'user.email', 'e2e@otto.local');
   git(dir, 'config', 'user.name', 'E2E');
@@ -51,13 +50,13 @@ async function seedUpstreamAheadRepo(): Promise<string> {
     encoding: 'utf8',
   }).trim();
   // 2) A bare remote; push the working repo to it.
-  const bare = mkdtempSync(join(tmpdir(), 'otto-e2e-af-bare-'));
+  const bare = tempDir('otto-e2e-af-bare-');
   git(bare, 'init', '--bare', '-q');
   git(work, 'remote', 'add', 'origin', bare);
   git(work, 'push', '-q', '-u', 'origin', branch);
   // 3) Advance the bare via a throwaway second clone so origin/<branch> is now
   //    ahead of the working repo's (still stale) remote-tracking ref.
-  const pusher = mkdtempSync(join(tmpdir(), 'otto-e2e-af-push-'));
+  const pusher = tempDir('otto-e2e-af-push-');
   execFileSync('git', ['clone', '-q', bare, pusher], { stdio: 'ignore' });
   git(pusher, 'config', 'user.email', 'e2e@otto.local');
   git(pusher, 'config', 'user.name', 'E2E');
@@ -122,24 +121,26 @@ test('auto-fetch: updates the behind chip after the upstream advances', async ({
   await page.goto(`/#/git/${upstreamRepoId}/graph`);
   await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
   // The seeded upstream is 1 commit ahead → once the auto-fetch runs, the
-  // toolbar branch chip shows a "behind" marker (↓) after the initial fetch.
-  await expect(page.locator('.branch-chip .ab.down')).toBeVisible({ timeout: 25_000 });
-  await expect(page.locator('.branch-chip .ab.down')).toHaveText(/↓\s*1/);
+  // header's state words say so ("↓1 to pull") after the initial fetch.
+  await expect(page.getByTestId('git-state')).toContainText('↓1 to pull', { timeout: 25_000 });
 });
 
-test('auto-fetch: toggle is on by default and pausing it persists', async ({ page }) => {
+test('auto-fetch: on by default (a checked ⋯ item); pausing it persists and says so', async ({ page }) => {
   await boot(page);
   await page.goto(`/#/git/${upstreamRepoId}/graph`);
   await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
-  const toggle = page.locator('.git-autofetch');
-  await expect(toggle).toBeVisible({ timeout: 15_000 });
-  await expect(toggle).toHaveClass(/\bon\b/);
-  await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+  // One Fetch control in the header; auto-fetch is not a second glyph beside it.
+  await expect(page.locator('.gitpage').getByRole('button', { name: /Fetch/ })).toHaveCount(1, { timeout: 15_000 });
+  await expect(page.getByTestId('git-autofetch-paused')).toHaveCount(0);
+  await page.locator('.gitpage').getByRole('button', { name: 'More actions', exact: true }).click();
+  const item = page.getByRole('menuitemcheckbox', { name: /Auto-fetch/ });
+  await expect(item).toHaveAttribute('aria-checked', 'true');
 
-  // Pause it → state flips and is persisted to localStorage.
-  await toggle.click();
-  await expect(toggle).not.toHaveClass(/\bon\b/);
-  await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+  // Pause it → state flips, says so in the header, and is persisted to localStorage.
+  await item.click();
+  await expect(page.getByTestId('git-autofetch-paused')).toBeVisible();
+  if (await item.isVisible()) await expect(item).toHaveAttribute('aria-checked', 'false');
+  await page.keyboard.press('Escape');
   const persisted = await page.evaluate(() =>
     JSON.parse(localStorage.getItem('otto_git_auto_fetch') ?? '{}'),
   );
@@ -154,8 +155,7 @@ test('auto-fetch: paused → one fetch on arrival, then no background rounds', a
   });
   await page.goto(`/#/git/${upstreamRepoId}/graph`);
   await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator('.git-autofetch')).not.toHaveClass(/\bon\b/);
-  await expect(page.locator('.git-autofetch')).toContainText('Paused');
+  await expect(page.getByTestId('git-autofetch-paused')).toHaveText('Auto-fetch paused');
   // Paused stops the rounds, not the arrival fetch: opening the page fetches
   // the selected repo once, and the five-second loop ticks add nothing.
   await expect.poll(() => fetches, { timeout: 15_000 }).toBe(1);
@@ -203,9 +203,12 @@ test('dedup: opening an already-open repo keeps a single tab', async ({ page }) 
   await boot(page);
   await page.goto(`/#/git/${upstreamRepoId}/graph`);
   await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator('.git-tab')).toHaveCount(1, { timeout: 15_000 });
+  // A phone shows the repo as the header's title, not a tab strip: count the open tabs the store keeps.
+  const openTabs = (): Promise<number> =>
+    page.evaluate(() => (JSON.parse(localStorage.getItem('otto_git_open_tabs') ?? '{}').openRepoIds ?? []).length);
+  await expect.poll(openTabs, { timeout: 15_000 }).toBe(1);
   // Re-opening the same repo (same hash route) must not mint a second tab.
   await page.goto(`/#/git/${upstreamRepoId}/history`);
   await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator('.git-tab')).toHaveCount(1);
+  await expect.poll(openTabs).toBe(1);
 });

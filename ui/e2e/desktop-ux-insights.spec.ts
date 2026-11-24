@@ -12,6 +12,10 @@ const reports = [
 test('Insights period filter keeps the open report in the visible list', async ({ page }) => {
   let failed = true;
   await page.route('**/api/v1/insights/reports', (route) => route.fulfill(failed ? { status: 503, json: { message: 'Reports temporarily unavailable' } } : { json: reports }));
+  // The summary read (no html_path → report-status) is mocked too: a real
+  // report another spec left on the shared daemon for the same period must
+  // not stand in for this one.
+  await page.route('**/api/v1/insights/report-status?**', (route) => route.fulfill({ json: { report: null } }));
   await page.goto('/#/insights');
   await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible();
   failed = false;
@@ -36,6 +40,8 @@ test('Usage attribution recovers after failure and fits long keys on phone', asy
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/#/usage');
+  // Work items load only when their view opens.
+  await page.getByTestId('usage-where-work').click();
   const panel = page.locator('.attribution-panel');
   await expect(panel.getByRole('button', { name: 'Retry', exact: true })).toBeVisible();
   fail = false;
@@ -43,7 +49,7 @@ test('Usage attribution recovers after failure and fits long keys on phone', asy
   await expect(panel.locator('.attr-row')).toHaveCount(1);
   await expectNoHorizontalOverflow(page);
   const download = page.waitForEvent('download');
-  await panel.getByRole('button', { name: 'Download attribution as CSV' }).click();
+  await page.getByTestId('usage-export').click();
   expect((await download).suggestedFilename()).toBe('otto-attribution-origin-30d.csv');
   await page.screenshot({ path: '/tmp/otto-ux-screenshots/insights-r1-usage-phone-loaded.png' });
 });

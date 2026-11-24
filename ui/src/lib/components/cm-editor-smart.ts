@@ -11,18 +11,17 @@ import {
   clampSelectionToDoc,
   computeMinimalTextUpdate,
   extOf,
+  isMakefilePath,
   langExtOf,
 } from './cm-editor-helpers.ts';
 
 export { clampSelectionToDoc, computeMinimalTextUpdate, extOf, langExtOf };
 
 export function useTabsForLang(filePath: string, hint?: string): boolean {
-  const clean = filePath.split('?')[0];
-  const base = clean.slice(Math.max(clean.lastIndexOf('/'), clean.lastIndexOf('\\')) + 1).toLowerCase();
   const ext = extOf(filePath);
   const lang = (hint ?? '').toLowerCase();
   if (ext === 'go' || lang === 'go' || lang === 'golang') return true;
-  if (base === 'makefile' || base === 'gnumakefile' || ext === 'mk' || lang === 'makefile') return true;
+  if (isMakefilePath(filePath) || lang === 'makefile') return true;
   return false;
 }
 

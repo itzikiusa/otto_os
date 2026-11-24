@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { openFloatingBar } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Settings navigation (desktop-browser only). The sections come from ONE
@@ -78,7 +79,7 @@ test('every nav row opens a page titled with the same label', async ({ page }) =
 
 test('⌘K "Settings: <section>" opens that section', async ({ page }) => {
   await boot(page, 'home');
-  await page.keyboard.press('Meta+k');
+  await openFloatingBar(page);
   // (MCP servers used to be the example; it moved to the MCP Control Plane —
   // desktop-mcp-one-home.spec.ts covers its redirect.)
   await page.keyboard.type('language servers settings');

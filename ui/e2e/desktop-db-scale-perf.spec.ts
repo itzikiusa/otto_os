@@ -1,4 +1,5 @@
 import { test, expect, type Page, type Route } from '@playwright/test';
+import { pickMenuItem, setDbView } from './helpers';
 import { apiCtx, seedWorkspace } from './seed';
 import { mockDbRoutes, seedMockDbConnection } from './db-mock';
 import { budgetMs, gridScrollCosts, isDesktopProject, isWebkitProject, percentile, scrollFrameWork } from './perf';
@@ -109,7 +110,7 @@ async function openConn(page: Page, name = CONN): Promise<void> {
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
   const picker = page.locator('.side-switch [role="tab"]', { hasText: 'Connections' }).first();
   if (await picker.isVisible().catch(() => false)) await picker.click();
-  const c = page.locator('.conn-list .conn-name', { hasText: name });
+  const c = page.locator('.conn-list .tr-title', { hasText: name });
   await expect(c.first()).toBeVisible({ timeout: 30_000 });
   await c.first().click();
   await expect(page.locator('.qe-edit .cm-content')).toBeVisible({ timeout: 20_000 });
@@ -454,11 +455,11 @@ test('Query → Structure → Query with a 100k-row result repaints fast', async
   await run(page, 'SELECT * FROM big');
   const timings: number[] = [];
   for (let i = 0; i < 3; i++) {
-    await page.locator('.main-tabs .mt', { hasText: 'Structure' }).first().click();
-    await expect(page.locator('.main-tabs .mt.active')).toHaveText('Structure');
+    await setDbView(page, 'Structure');
+    await expect(page.getByTestId('db-conn-state')).toContainText('Structure');
     await expect(page.locator('.grid-scroll')).toHaveCount(0);
     const ms = await page.evaluate(async () => {
-      const tab = [...document.querySelectorAll<HTMLElement>('.main-tabs .mt')].find((b) => b.textContent?.trim() === 'Query');
+      const tab = document.querySelector<HTMLElement>('.db-conn-state .chip');
       const t0 = performance.now();
       tab?.click();
       for (let k = 0; k < 600 && !document.querySelector('.grid-scroll tbody td.cell'); k++) {
@@ -520,7 +521,7 @@ test('dashboard of 12 bar widgets × 5,000 rows draws sampled charts', async ({ 
   );
   await openConn(page);
   const t0 = Date.now();
-  await page.locator('.main-tabs .mt', { hasText: 'Dashboards' }).first().click();
+  await setDbView(page, 'Dashboards');
   await expect(page.locator('.widget-card svg.chart-svg')).toHaveCount(N, { timeout: 20_000 });
   const drawnMs = Date.now() - t0;
   const rects = await page.evaluate(() => document.querySelectorAll('.widget-card svg.chart-svg rect').length);
@@ -598,8 +599,7 @@ test('multi-run sheet with 200 runs polls without long frames', async ({ page },
   await content.click();
   await page.keyboard.press('ControlOrMeta+A');
   await page.keyboard.insertText('SELECT * FROM orders WHERE brand_id = :brand');
-  await page.getByTestId('qe-more').click();
-  await page.getByRole('menuitem', { name: 'Run on…' }).click();
+  await pickMenuItem(page, () => page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click(), 'Run on…');
   const sheet = page.getByTestId('multi-run');
   await expect(sheet).toBeVisible();
   await sheet.locator('.mr-conn', { hasText: CONN }).locator('.mr-scope', { hasText: 'shop' }).locator('input').check();

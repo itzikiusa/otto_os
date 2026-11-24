@@ -240,6 +240,16 @@ pub fn content_sha256(content: &str) -> String {
     bytes_sha256(content.as_bytes())
 }
 
+/// SHA-256 (lowercase hex) of a SKILL.md normalised for comparison: CRLF /
+/// CR line endings as LF, trailing whitespace off every line, the edges
+/// trimmed (the Skills Lab drift check's `normalizeBody`). Two copies that
+/// differ only in those read as the same skill.
+pub fn skill_body_hash(body: &str) -> String {
+    let unix = body.replace("\r\n", "\n").replace('\r', "\n");
+    let lines: Vec<&str> = unix.split('\n').map(str::trim_end).collect();
+    content_sha256(lines.join("\n").trim())
+}
+
 /// SHA-256 (lowercase hex) of raw bytes.
 pub fn bytes_sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
@@ -251,6 +261,17 @@ pub fn bytes_sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skill_body_hash_ignores_line_endings_and_trailing_space_only() {
+        let a = skill_body_hash("---\nname: x\n---\n# X\nbody\n");
+        assert_eq!(
+            a,
+            skill_body_hash("\r\n---\r\nname: x  \r\n---\r\n# X\r\nbody\t\r\n\r\n")
+        );
+        assert_ne!(a, skill_body_hash("---\nname: x\n---\n# X\nbody changed\n"));
+        assert_ne!(a, skill_body_hash("---\nname: x\n---\n#  X\nbody\n"));
+    }
 
     #[test]
     fn trim_incomplete_utf8_tail_drops_only_a_cut_code_point() {

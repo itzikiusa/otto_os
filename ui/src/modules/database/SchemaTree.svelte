@@ -9,7 +9,6 @@
   import { tick, untrack } from 'svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
-  import LoadState from '../../lib/components/LoadState.svelte';
   import RedisKeyFilter from './RedisKeyFilter.svelte';
   import { database } from '../../lib/stores/database.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
@@ -95,7 +94,7 @@
     // schema stays mounted, retaining its query and selection for the return.
     if (viewport.isTablet && !database.sidebarCollapsed) {
       database.toggleSidebar();
-      void tick().then(() => page?.querySelector<HTMLButtonElement>('.view-switch [aria-selected="true"]')?.focus());
+      void tick().then(() => page?.closest('.db-root')?.querySelector<HTMLButtonElement>('.db-conn-state .chip')?.focus());
     }
   }
 
@@ -157,7 +156,7 @@
 
   function onClick(node: SchemaNode): void {
     if (OBJECT_KINDS.has(node.kind)) {
-      openStructure(node);
+      if (database.capabilities?.sql === true && (node.kind === 'table' || node.kind === 'view')) void database.objects.previewRows(node); else if (node.kind === 'collection') void database.findRows(node); else openStructure(node); // one click shows rows; structure: right-click / the header ⋯
     } else if (node.kind === 'database') {
       // Clicking a database makes it the active one (queries scope to it, like
       // Workbench's bold default schema) and expands it.
@@ -558,7 +557,8 @@
       Loading schema…
     </div>
   {:else if database.activeConnStatus?.phase === 'error'}
-    <LoadState variant="compact" what="the connection" error={database.activeConnStatus.error} empty={false} onretry={() => database.retryConnection()} />
+    <!-- The header says why and offers Retry; the tree does not repeat it. -->
+    <div class="tree-empty">No tables while it can’t connect.</div>
   {:else if database.schemaRoot.length === 0}
     <div class="tree-empty">No objects. Test the connection or refresh.</div>
   {:else if hits !== null}
@@ -770,7 +770,7 @@
   }
   .node-label {
     display: flex;
-    align-items: baseline;
+    align-items: center; /* not baseline: on a 36 px touch row that sits above the caret and icon */
     gap: 6px;
     min-width: 0;
     flex: 1;

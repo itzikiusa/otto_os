@@ -151,6 +151,7 @@ pub fn router<S: GitCtx>() -> Router<S> {
         )
         // local ops (#37–47)
         .route("/repos/{id}/status", get(repo_status::<S>))
+        .route("/repos/{id}/overview", get(repo_overview::<S>))
         .route("/repos/{id}/file", get(file_routes::repo_file::<S>))
         .route("/repos/{id}/branches", get(repo_branches::<S>))
         .route("/repos/{id}/refs", get(repo_refs::<S>))
@@ -1688,6 +1689,37 @@ async fn repo_status<S: GitCtx>(
     Ok(json_tagged(body, "x-otto-status-cache", cache))
 }
 
+/// `GET /repos/{id}/overview` — what opening a repository reads, in ONE
+/// request instead of five: the status (the same shared memo as `/status`),
+/// the refs (as `/refs`), stashes, worktrees and submodules. Status is the
+/// one that must succeed; a list that fails comes back null (never [], which
+/// is "none") and the client reads it on its own route again.
+async fn repo_overview<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
+    watch_repo(&s, &repo, &git).await;
+    let base = s.cleanup_base_branch(&id).await;
+    let (status, refs, stashes, worktrees, submodules) = tokio::join!(
+        crate::status_cache::status_body(&id, &git),
+        git.refs_with_base(base.as_deref()),
+        git.stash_list_counted(),
+        git.worktree_list_detailed(),
+        git.submodule_list(),
+    );
+    let status: serde_json::Value = serde_json::from_slice(&status?.0)
+        .map_err(|e| Error::Internal(format!("status json: {e}")))?;
+    Ok(Json(serde_json::json!({
+        "status": status,
+        "refs": refs.ok(),
+        "stashes": stashes.ok(),
+        "worktrees": worktrees.ok(),
+        "submodules": submodules.ok(),
+    })))
+}
+
 /// Keep the repo's working-tree watcher armed (see `watch.rs`): the client
 /// asking for status/fetch is what marks a repo as "open". Arming runs off the
 /// request path, so it never delays the response.
@@ -1765,10 +1797,21 @@ async fn repo_set_cleanup_base<S: GitCtx>(
     }))
 }
 
+#[derive(Deserialize, Default)]
+struct FetchQuery {
+    /// The client's auto-fetch: skipped (the current status comes back) while
+    /// a push or another fetch holds the repo's network leg, instead of
+    /// queueing behind it — a hung push held every background fetch for its
+    /// whole 1-2 minutes (the fetch p95 of 3.9 s, single fetches of 31-72 s).
+    #[serde(default)]
+    background: bool,
+}
+
 async fn repo_fetch<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
+    Query(q): Query<FetchQuery>,
 ) -> ApiResult<Json<RepoStatusResp>> {
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     watch_repo(&s, &repo, &git).await;
@@ -1777,6 +1820,9 @@ async fn repo_fetch<S: GitCtx>(
     // so neither dies on "cannot lock ref". The worktree lock is not needed.
     // Concurrent callers share one fetch (see `fetch_coalesced`).
     let lock = remote_lock(&id);
+    if q.background && lock.try_lock().is_err() {
+        return Ok(Json(git.status().await?));
+    }
     let (_g, _ran) =
         fetch_coalesced(&id, &lock, || async { git.fetch(token).await.map(drop) }).await?;
     status_after_release(&git, _g).await
@@ -2159,7 +2205,11 @@ async fn repo_push<S: GitCtx>(
         tracing::info!(repo = %id, user = %user.0.username, branch = ?branch, "force push (with lease)");
         git.push_confirmed(token, target).await?;
     } else {
-        git.push_with(token, branch, false).await?;
+        // A failed push says why in the daemon log too (its message only
+        // reached the toast: the three 93-128 s failures left no trace).
+        git.push_with(token, branch, false)
+            .await
+            .inspect_err(|e| tracing::warn!(repo = %id, error = %e, "push failed"))?;
     }
     // Return the FRESH status so the UI's ahead/behind chip updates after push.
     status_after_release(&git, _g).await

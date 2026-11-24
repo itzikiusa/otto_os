@@ -1,20 +1,20 @@
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
-import { seedMockDbConnection } from './db-mock';
+import { mockDbRoutes, seedMockDbConnection } from './db-mock';
+import { expectFullyInViewport } from './helpers';
 
-// Unified Connections hub — PHONE/responsive usability guard. Runs on every
-// device project (phones + tablets).
-//
-// `#/connections` now renders the DB-workbench page (the unified hub): its
-// sidebar tree lists EVERY profile kind (ssh/custom + DB engines + Kafka
-// clusters) in the shared section tree, with per-kind glyphs, a `kind` tag on
-// each row, and type-filter chips. On a phone the page stacks into accordions;
-// the Connections accordion holds the tree. These tests assert LAYOUT +
-// reachability (rows render, tree fits the viewport width, tags/chips work) —
-// the seeded hosts can't actually connect in CI.
+// Connections list + DB workbench — PHONE/responsive usability guard. Runs on
+// every device project (phones + tablets). The list is the page (one inbox
+// row per profile: name … state word, kind · host · section); one filter
+// menu and a search narrow it; touch targets are finger-sized; the workbench
+// puts the rows on screen with Tables as a sheet that Back closes.
+
+// The PWA service worker would take the engine calls past page.route.
+test.use({ serviceWorkers: 'block' });
 
 let workspaceId = '';
 let prodSectionId = '';
+let globalDbId = '';
 const globalDbName = `mobile-global-db-${Math.random().toString(36).slice(2, 8)}`;
 
 async function seedSection(ctx: APIRequestContext, base: string, wsId: string, name: string): Promise<string> {
@@ -71,7 +71,7 @@ test.beforeAll(async () => {
   // DB profiles are global: a connection created in another workspace must
   // still contribute a type chip and participate in this workspace's filters.
   const otherWorkspace = await seedWorkspace(ctx, base);
-  await seedMockDbConnection(ctx, base, otherWorkspace, globalDbName, 'mysql');
+  globalDbId = await seedMockDbConnection(ctx, base, otherWorkspace, globalDbName, 'mysql');
   await ctx.dispose();
 });
 
@@ -88,96 +88,139 @@ test.beforeEach(async ({ page }) => {
 
 async function gotoPage(page: Page): Promise<void> {
   await page.goto('/#/connections');
-  await expect(page.locator('.db-page')).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator('.conn-row').first()).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('.conn-row').first()).toBeVisible({ timeout: 30_000 });
 }
 
-/** The DOCUMENT must not scroll horizontally, and no element in the page may
- *  extend past the viewport (allow sub-pixel rounding). */
+/** Neither the document nor the page body scrolls sideways (wide grids
+ *  scroll inside their own block). */
 async function assertFitsWidth(page: Page): Promise<void> {
   const r = await page.evaluate(() => {
     const de = document.documentElement;
-    let widest = 0;
-    document.querySelectorAll<HTMLElement>('.db-page *').forEach((el) => {
-      const rect = el.getBoundingClientRect();
-      if (rect.right > widest) widest = rect.right;
-    });
-    return { docScrollW: de.scrollWidth, docClientW: de.clientWidth, vw: window.innerWidth, widest: Math.round(widest) };
+    const body = document.querySelector<HTMLElement>('.page-body');
+    return { docScrollW: de.scrollWidth, docClientW: de.clientWidth, bodyOver: body ? body.scrollWidth - body.clientWidth : 0 };
   });
   expect(r.docScrollW).toBeLessThanOrEqual(r.docClientW + 1);
-  expect(r.docClientW).toBeLessThanOrEqual(r.vw + 1);
-  expect(r.widest).toBeLessThanOrEqual(r.vw + 2);
+  expect(r.bodyOver).toBeLessThanOrEqual(1);
 }
 
-test.describe('connections hub — responsive', () => {
-  test('unified tree renders every seeded profile and fits the viewport', async ({ page }) => {
+const row = (page: Page, name: string) => page.locator('.conn-row', { hasText: name }).first();
+
+test.describe('connections list — responsive', () => {
+  test('every seeded profile renders as a row in words and fits the viewport', async ({ page }) => {
     await gotoPage(page);
-
-    await expect(page.locator('.conn-name', { hasText: 'prod-web-bastion' }).first()).toBeVisible();
-    await expect(page.locator('.conn-name', { hasText: 'ungrouped-host' }).first()).toBeVisible();
-    await expect(page.locator('.conn-name', { hasText: 'my-custom-cli' }).first()).toBeVisible();
-
+    await expect(row(page, 'prod-web-bastion')).toContainText('SSH');
+    await expect(row(page, 'prod-web-bastion')).toContainText('Production');
+    await expect(row(page, 'prod-web-bastion')).toContainText('Not checked');
+    await expect(row(page, 'ungrouped-host')).toBeVisible();
+    await expect(row(page, 'my-custom-cli')).toContainText('read-only');
+    // Under its section's heading a row does not repeat the section's name.
+    await expect(row(page, 'my-custom-cli')).not.toContainText('Production servers');
+    await expect(page.getByRole('region', { name: 'Production servers' }).first()).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Empty staging folder' }).first()).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Ungrouped' })).toBeVisible();
     await assertFitsWidth(page);
   });
 
-  test('section folders + Ungrouped group render', async ({ page }) => {
+  test('the filter menu and the search narrow the list', async ({ page }) => {
     await gotoPage(page);
-    await expect(page.locator('.sec-name', { hasText: /Production servers/i }).first()).toBeVisible();
-    await expect(page.locator('.sec-name', { hasText: /Empty staging folder/i }).first()).toBeVisible();
-    await expect(page.locator('.sec-name', { hasText: /Ungrouped/i }).first()).toBeVisible();
+    await page.getByTestId('conn-filter').click();
+    await page.getByRole('menuitemcheckbox', { name: 'MySQL', exact: true }).click();
+    await expect(row(page, globalDbName)).toBeVisible();
+    await expect(page.locator('.conn-row', { hasText: 'prod-web-bastion' })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Clear the MySQL filter' }).click();
+    await page.getByRole('searchbox', { name: 'Search connections' }).fill('bastion');
+    await expect(row(page, 'prod-web-bastion')).toBeVisible();
+    await expect(page.locator('.conn-row', { hasText: 'my-custom-cli' })).toHaveCount(0);
     await assertFitsWidth(page);
   });
 
-  test('rows identify their kind accessibly and show environment badges', async ({ page }) => {
+  test('touch targets on the list are at least 44 px', async ({ page }, info) => {
+    test.skip(!/iphone|android/.test(info.project.name), 'phone projects');
     await gotoPage(page);
-    const bastion = page.locator('.conn-row', { hasText: 'prod-web-bastion' }).first();
-    await expect(bastion.locator('.conn-item')).toHaveAccessibleName('prod-web-bastion ssh prod');
-    await expect(bastion.locator('.env-badge')).toHaveText('prod');
-    const custom = page.locator('.conn-row', { hasText: 'my-custom-cli' }).first();
-    await expect(custom.locator('.conn-item')).toHaveAccessibleName(/my-custom-cli custom/);
+    const small = await page.evaluate(() =>
+      [...document.querySelectorAll<HTMLElement>('.page-body button, .page-body input, .page-header-bar button')]
+        .filter((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.height < 43.5; })
+        .map((el) => (el.getAttribute('aria-label') ?? el.textContent ?? el.tagName).trim().slice(0, 30)),
+    );
+    expect(small).toEqual([]);
+  });
+
+  test('phone flow: a row opens the workbench, a run puts the rows on screen, Tables is a sheet Back closes', async ({ page }, info) => {
+    test.skip(!/iphone|android/.test(info.project.name), 'phone projects');
+    await mockDbRoutes(page, globalDbId);
+    await gotoPage(page);
+    await row(page, globalDbName).click();
+    await expect(page.getByTestId('db-conn-state')).toBeVisible({ timeout: 20_000 });
+    const editor = page.locator('.qe-edit .cm-content');
+    await editor.click();
+    await page.keyboard.press('ControlOrMeta+A');
+    await page.keyboard.insertText('SELECT * FROM shop.orders LIMIT 12');
+    await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
+    await expect(page.locator('.grid tbody tr').first()).toBeVisible();
+    // The query tabs' + takes a finger (design review 2, H8).
+    const plus = (await page.getByRole('button', { name: 'New query tab' }).boundingBox())!;
+    expect(Math.min(plus.width, plus.height), 'New query tab').toBeGreaterThanOrEqual(44);
+    // Row numbers from 10 up stay whole beside the touch "+" (design review 2, N8: row 10 read "1").
+    const tenth = page.locator('.grid tbody tr:not(.spacer)').nth(9);
+    await expect(tenth.locator('.rownum-n')).toHaveText('10');
+    const [num, dup] = await Promise.all([tenth.locator('.rownum-n').boundingBox(), tenth.locator('.row-dup').boundingBox()]);
+    expect(num!.x + num!.width, 'the number ends before the +').toBeLessThanOrEqual(dup!.x + 0.5);
+    // The editor folds to its one line; the rows are what is on screen.
+    await expect(page.locator('.qe-edit')).toBeHidden();
+    await expect(page.getByRole('button', { name: 'Edit the query' })).toBeVisible();
+    // …down to the bottom bar (only the row count line under them), not a
+    // block that stops halfway with the rest of the screen empty.
+    const [res, body] = await Promise.all([page.locator('.qe-results').boundingBox(), page.locator('.page-body').boundingBox()]);
+    expect(body!.y + body!.height - (res!.y + res!.height)).toBeLessThan(40);
+    // No keyboard hints on touch: not on Run, not in the menus.
+    await expect(page.getByTestId('page-header')).not.toContainText('⌘', { useInnerText: true });
+    // The results toolbar keeps the view switch and the filter; the rest is in
+    // its one ⋯ — every control finger-sized.
+    const bar = page.locator('.grid-toolbar');
+    await expect(bar.getByRole('button', { name: /Export/ })).toHaveCount(0);
+    const small = await bar.evaluate((el) =>
+      [...el.querySelectorAll<HTMLElement>('button, input')].filter((b) => b.getBoundingClientRect().height < 40).map((b) => b.getAttribute('aria-label') ?? b.textContent),
+    );
+    expect(small).toEqual([]);
+    await bar.getByRole('button', { name: 'More result actions' }).click();
+    const menu = page.getByRole('menu');
+    await expect(menu.getByRole('menuitem', { name: /^Download CSV/ })).toBeVisible();
+    await expect(menu.getByText('Filter row', { exact: true })).toBeVisible();
+    await expect(menu).not.toContainText('⌘', { useInnerText: true });
+    await page.keyboard.press('Escape');
+    await expect(menu).toHaveCount(0);
+    // Tables: a sheet over the rows; Back closes it and stays on the workbench.
+    // The header ⋯ sits inside the window (it used to poke 7 px past the edge).
+    await expectFullyInViewport(page, page.getByTestId('page-header').getByRole('button', { name: 'More actions' }), 'the header ⋯');
+    // Tables is kept in the phone header (data-keep): click it, never a
+    // racy "is it visible yet, else the ⋯" branch.
+    await page.getByTestId('page-header').getByRole('button', { name: 'Tables', exact: true }).click();
+    const sheet = page.getByRole('dialog', { name: 'Tables' });
+    await expect(sheet).toBeVisible();
+    await expect(sheet.getByRole('tree', { name: 'Schema' })).toBeVisible();
+    await page.goBack();
+    await expect(sheet).toHaveCount(0);
+    await expect(page.getByTestId('db-conn-state')).toBeVisible();
     await assertFitsWidth(page);
   });
 
-  test('type-filter chips narrow the tree and hide non-matching sections', async ({ page }) => {
+  test('phone: a connection that can\'t connect says so once, with Retry and Edit under the header', async ({ page }, info) => {
+    test.skip(!/iphone|android/.test(info.project.name), 'phone projects');
+    const { ctx, base } = await apiCtx();
+    const name = `refused-phone-${Math.random().toString(36).slice(2, 7)}`;
+    // Port 9 on loopback refuses at once: no host is contacted.
+    const r = await ctx.post(`${base}/api/v1/workspaces/${workspaceId}/connections`, { data: { name, kind: 'redis', params: { host: '127.0.0.1', port: 9, database: '0' } } });
+    expect(r.ok()).toBeTruthy();
+    await ctx.dispose();
     await gotoPage(page);
-    await page.locator('[data-testid="connhub-filter-ssh"]').click();
-    await expect(page.locator('.conn-name', { hasText: 'prod-web-bastion' }).first()).toBeVisible();
-    await expect(page.locator('.conn-name', { hasText: 'my-custom-cli' })).toHaveCount(0);
-    // A truly empty folder has nothing to filter out — it stays visible (a
-    // drop target) under every type filter.
-    await expect(page.locator('.sec-name', { hasText: /Empty staging folder/i }).first()).toBeVisible();
-
-    // DB connections are global, including those seeded in another workspace.
-    // Their chips stay available while a different type is selected.
-    const mysql = page.getByTestId('connhub-filter-mysql');
-    await expect(mysql).toBeVisible();
-    await expect(page.locator('.conn-name', { hasText: globalDbName })).toHaveCount(0);
-    await mysql.click();
-    await expect(page.locator('.conn-name', { hasText: globalDbName }).first()).toBeVisible();
-    await expect(page.locator('.conn-name', { hasText: 'prod-web-bastion' })).toHaveCount(0);
-    await expect(page.locator('.conn-name', { hasText: 'my-custom-cli' })).toHaveCount(0);
-    await expect(page.locator('.sec-name', { hasText: /Production servers/i })).toHaveCount(0);
-
-    await page.locator('[data-testid="connhub-filter-custom"]').click();
-    await expect(page.locator('.conn-name', { hasText: 'my-custom-cli' }).first()).toBeVisible();
-    await expect(page.locator('.conn-name', { hasText: 'prod-web-bastion' })).toHaveCount(0);
-    await expect(page.locator('.conn-name', { hasText: globalDbName })).toHaveCount(0);
-    await expect(page.locator('.sec-name', { hasText: /Empty staging folder/i }).first()).toBeVisible();
-
-    await page.locator('[data-testid="connhub-filter-all"]').click();
-    await expect(page.locator('.conn-name', { hasText: 'prod-web-bastion' }).first()).toBeVisible();
-    await expect(page.locator('.conn-name', { hasText: 'my-custom-cli' }).first()).toBeVisible();
-    await expect(page.locator('.conn-name', { hasText: globalDbName }).first()).toBeVisible();
+    await row(page, name).click();
+    await expect(page.getByTestId('db-conn-state')).toContainText('Can’t connect', { timeout: 30_000 });
+    const banner = page.getByTestId('db-conn-error-banner');
+    await expect(banner).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(1);
+    await banner.getByRole('button', { name: 'Retry', exact: true }).click();
+    await expect(page.getByTestId('db-conn-state')).toContainText('Can’t connect', { timeout: 30_000 });
+    await expectFullyInViewport(page, page.getByTestId('page-header').getByRole('button', { name: 'Tables', exact: true }), 'Tables');
     await assertFitsWidth(page);
-  });
-
-  test('tree search filters to a flat match list and clears back', async ({ page }) => {
-    await gotoPage(page);
-    await page.locator('.tree-search-input').fill('bastion');
-    await expect(page.locator('.conn-name', { hasText: 'prod-web-bastion' }).first()).toBeVisible();
-    await expect(page.locator('.conn-name', { hasText: 'my-custom-cli' })).toHaveCount(0);
-    await assertFitsWidth(page);
-    await page.locator('.tree-search-clear').click();
-    await expect(page.locator('.conn-name', { hasText: 'my-custom-cli' }).first()).toBeVisible();
   });
 });

@@ -10,9 +10,10 @@
   import Icon from '../../lib/components/Icon.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import ContextPreview from './ContextPreview.svelte';
-  import SessionKindHint from './SessionKindHint.svelte';
+  import DirList from './DirList.svelte';
+  import { plural } from '../../lib/plural';
+  import { startChatPane } from './chatPane';
   import McpProfilePicker from './McpProfilePicker.svelte';
-  import { router } from '../../lib/router.svelte';
   import { api } from '../../lib/api/client';
   import { checkFolder } from '../../lib/folderCheck';
   import { radioKey } from '../../lib/radioKey';
@@ -20,6 +21,7 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { allProviders, inferProviderFamily, providerReadiness, providerSubtitle } from '../../lib/providers';
 
   /** Per-provider ceiling on one batch — a typo in the stepper shouldn't be able
@@ -58,7 +60,12 @@
     scratch = on;
   }
 
-  const providers = $derived(allProviders());
+  // Tiles for what is installed and enabled here (or chosen); the rest behind "More providers".
+  let moreOpen = $state(false);
+  const allP = $derived(allProviders());
+  const tile = (p: string): boolean => providerReadiness(p).available || (counts[p] ?? 0) > 0 || p === provider;
+  const providers = $derived(moreOpen ? allP : allP.filter(tile));
+  const hiddenCount = $derived(allP.filter((p) => !tile(p)).length);
   // Effective default agent: this workspace's override, else the global default
   // (a workspace-less session has no workspace setting to consult).
   const wsDefault = $derived(
@@ -194,20 +201,6 @@
   let extraDirs = $state<string[]>([]);
   let dirDraft = $state('');
 
-  function addDir(): void {
-    const path = dirDraft.trim();
-    if (path !== '' && !extraDirs.includes(path)) extraDirs = [...extraDirs, path];
-    dirDraft = '';
-  }
-
-  function removeDir(dir: string): void {
-    extraDirs = extraDirs.filter((d) => d !== dir);
-  }
-
-  function onDirKeydown(e: KeyboardEvent): void {
-    if (e.key === 'Enter') { e.preventDefault(); addDir(); }
-  }
-
   // Provider picker keyboard nav: the cards are an ARIA radiogroup with a roving
   // tabindex, so Tab moves to the next FIELD (Title) while Left/Right (and
   // Up/Down) move the selection between providers — like a native radio group.
@@ -228,12 +221,14 @@
   // modal; arrows switch provider unless they belong to a text field (caret
   // movement) or to the grid itself (its radiogroup handler already ran).
   function onGlobalKeydown(e: KeyboardEvent): void {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+    const t = e.target as HTMLElement | null;
+    // ⌘↩ anywhere; ↩ on a provider tile (not its − / +: that steps the count), in the first message (⇧↩ = new line) or the title.
+    const plainEnter = e.key === 'Enter' && !e.shiftKey && !e.isComposing && !!t && (t.id === 'ns-prompt' || t.id === 'ns-title' || (!!gridEl?.contains(t) && t.getAttribute('role') === 'radio'));
+    if (((e.metaKey || e.ctrlKey) && e.key === 'Enter') || plainEnter) {
       e.preventDefault();
-      if (!busy && total > 0) void create();
+      if (!busy && (total > 0 || kind === 'chat')) void create();
       return;
     }
-    const t = e.target as HTMLElement | null;
     if (t && (t.closest('input, textarea, select, [contenteditable="true"]') || gridEl?.contains(t))) return;
     providerKeys(e, provider);
   }
@@ -315,6 +310,38 @@
   const supportsContext = $derived(providerFamily === 'claude' || providerFamily === 'codex');
   let showPreview = $state(false);
 
+  // The stage (A4): Terminal (here) or Chat (a structured thread in Threads),
+  // an optional first message, Start; the rest behind Options, each changed
+  // choice shown as a chip so a default never costs a row.
+  let kind = $state<'terminal' | 'chat'>('terminal');
+  let optionsOpen = $state(false);
+  /** Always shown (disabled for a plain shell): switching tiles never resizes the sheet. */
+  const noPrompt = $derived(kind === 'terminal' && !chosen.some((p) => p !== 'shell'));
+  const optionChips = $derived(
+    [
+      scratchMode && ws.current ? 'No workspace' : null,
+      model ? `Model: ${model}` : null,
+      kind === 'terminal' && Object.values(accountIds).some(Boolean) ? 'Account chosen' : null,
+      kind === 'terminal' && networkProfileId ? 'Network profile' : null,
+      title.trim() ? `Title: ${title.trim()}` : null,
+      cwd.trim() && cwd.trim() !== (scratchMode ? scratchHome : ws.current?.root_path) ? `Folder: ${cwd.trim()}` : null,
+      kind === 'terminal' && extraDirs.length ? `+${plural(extraDirs.length, 'folder')}` : null,
+      kind === 'terminal' && browser ? 'Browser tools' : null,
+      kind === 'terminal' && mcpProfileIds.length ? 'MCP profile' : null,
+    ].filter((c): c is string => c !== null),
+  );
+  /** Chat: a structured thread, opened as a chat pane here beside the terminals (chatPane.ts). */
+  async function startChat(): Promise<void> {
+    busy = true;
+    const ws_ = scratchMode ? SCRATCH_WORKSPACE_ID : (ws.currentId ?? SCRATCH_WORKSPACE_ID);
+    const ok = await startChatPane({ workspaceId: ws_, provider, cwd: cwd.trim(), home: ws.scratch?.root_path, title: title.trim(), model, prompt: prompt.trim(), meta: auth.meta });
+    busy = false;
+    if (!ok) return;
+    prompt = title = '';
+    extraDirs = []; // a terminal option: nothing left to discard
+    void requestClose();
+  }
+
   $effect(() => {
     if (provider === '' && providers.length > 0) {
       // Preselect the configured default agent when it's still available;
@@ -334,6 +361,7 @@
 
   async function create(): Promise<void> {
     if (busy) return;
+    if (kind === 'chat') return void startChat();
     if (pendingSpawns.length) { await retryFailed(); return; }
     if (total === 0) return;
     const unavailable = chosen.find((p) => !providerReadiness(p).available);
@@ -442,8 +470,111 @@
 
 <svelte:window onkeydown={onGlobalKeydown} />
 
-<Modal title="New session" height={800} onclose={requestClose} dismissable={!busy}>
-  <SessionKindHint onclose={requestClose} />
+<Modal title="New session" onclose={requestClose} dismissable={!busy}>
+  <!-- Terminal (the agent's own CLI, here) or Chat (a structured thread in Threads: ONE, so no batch counts). -->
+  <div class="seg kind-seg" role="radiogroup" aria-label="Session kind" data-testid="ns-kind">
+    {#each [['terminal', 'Terminal'], ['chat', 'Chat']] as [k, label] (k)}
+      <button type="button" class="seg-btn" class:active={kind === k} role="radio" aria-checked={kind === k} tabindex={kind === k ? 0 : -1} onkeydown={radioKey} onclick={() => { kind = k as 'terminal' | 'chat'; if (kind === 'chat') counts = { [provider]: 1 }; }}>{label}</button>
+    {/each}
+  </div>
+  <div class="field">
+    <div id="ns-provider-label" class="provider-label">
+      Provider{#if kind === 'terminal'}{' '}<span class="dim">· use − / + on a card to start several at once</span>{/if}
+    </div>
+    <div
+      bind:this={gridEl}
+      class="provider-grid"
+      role="radiogroup"
+      tabindex="-1"
+      aria-labelledby="ns-provider-label"
+      onkeydown={onProviderKeydown}
+    >
+      {#each providers as p, i (p)}
+        <div class="provider-card" role="none" class:selected={countOf(p) > 0} class:primary={provider === p}>
+          <button
+            bind:this={cardEls[i]}
+            class="card-main"
+            role="radio"
+            aria-checked={provider === p}
+            disabled={!providerReadiness(p).available}
+            title={providerReadiness(p).message}
+            tabindex={provider === p ? 0 : -1}
+            onclick={() => selectProvider(p)}
+          >
+            <span class="provider-name">
+              <ProviderIcon provider={p} size={14} />
+              {p}
+              {#if p === defaultProvider}<span class="default-badge">default</span>{/if}
+            </span>
+            <span class="provider-desc">
+              {providerSubtitle(p)}
+            </span>
+          </button>
+          <div class="count-ctl" role="group" id={`ns-steppers-${i}`} aria-label={`${p} sessions`} style:display={kind === 'chat' ? 'none' : null}>
+            <button
+              type="button"
+              class="cbtn"
+              disabled={countOf(p) === 0}
+              aria-label={`One less ${p} session`}
+              title={`One less ${p} session`}
+              onclick={() => bump(p, -1)}
+            ><Icon name="minus" size={12} /></button>
+            <span class="count" class:zero={countOf(p) === 0} aria-hidden="true">{countOf(p)}</span>
+            <button
+              type="button"
+              class="cbtn"
+              disabled={countOf(p) >= MAX_PER_PROVIDER || !providerReadiness(p).available}
+              aria-label={`One more ${p} session`}
+              title={`One more ${p} session`}
+              onclick={() => bump(p, 1)}
+            ><Icon name="plus" size={12} /></button>
+          </div>
+        </div>
+      {/each}
+    </div>
+    <!-- The radiogroup must own radios only (VoiceOver listed the ± buttons
+         among the choices: "radio group, 12 items"). Each card's stepper stays
+         in the card visually but is reparented here in the accessibility tree,
+         a sibling group outside the radiogroup. -->
+    <div role="group" aria-label="Sessions per provider" aria-owns={providers.map((_, i) => `ns-steppers-${i}`).join(' ')}></div>
+    {#if hiddenCount > 0}<button type="button" class="btn small ghost more-prov" aria-expanded={moreOpen} data-testid="ns-more-providers" onclick={() => (moreOpen = !moreOpen)}>{moreOpen ? 'Fewer providers' : `More providers (${hiddenCount})`} <Icon name={moreOpen ? 'chevronDown' : 'chevronRight'} size={12} /></button>{/if}
+    {#if total > 1}
+      <span class="hint batch">Starting {total} sessions — {batchSummary}</span>
+    {/if}
+    <!-- One always-mounted announcement for the whole batch ("2 codex sessions,
+         1 claude session") instead of a bare number per card. -->
+    <span class="sr-only" role="status">{countAnnounce}</span>
+  </div>
+
+  <div class="field">
+      <label for="ns-prompt">First message <span class="dim">(optional)</span></label>
+      <textarea dir="auto"
+        id="ns-prompt"
+        class="input prompt-input"
+        rows="3"
+        bind:value={prompt}
+        disabled={noPrompt}
+        placeholder={noPrompt ? 'A plain shell takes no first message.' : 'What should the agent start on? Sent once it is ready.'}
+      ></textarea>
+      <span class="hint">
+        {total > 1 ? 'Sent to every agent in this batch. ' : ''}{viewport.isPhone ? '' : `⌘↩ ${total > 1 ? 'creates the sessions' : 'creates the session'}.`}
+      </span>
+    </div>
+
+
+  <!-- Everything else keeps its default until asked for: Options (Terminal's), with a chip
+       for each choice that is not the default (A4) — in Chat, those it still uses. -->
+  {#if kind === 'terminal' || optionChips.length > 0}
+  <div class="opts-row">
+    {#if kind === 'terminal'}<button type="button" class="btn small ghost" aria-expanded={optionsOpen} data-testid="ns-options" onclick={() => (optionsOpen = !optionsOpen)}>
+      <Icon name={optionsOpen ? 'chevronDown' : 'chevronRight'} size={12} /> Options
+    </button>{/if}
+    {#if !optionsOpen || kind === 'chat'}
+      {#each optionChips as chip (chip)}<span class="opt-chip">{chip}</span>{/each}
+    {/if}
+  </div>
+  {/if}
+  {#if kind === 'terminal' && optionsOpen}
   <!-- Workspace: the current one, or none (a workspace-less session in the daemon's hidden scratch workspace); with no workspace only "No workspace", pre-selected. -->
   <div class="field">
     <div id="ns-ws-label" class="provider-label">Workspace</div>
@@ -478,74 +609,6 @@
     {/if}
   </div>
 
-  <div class="field">
-    <div id="ns-provider-label" class="provider-label">
-      Provider <span class="dim">· use − / + on a card to start several at once</span>
-    </div>
-    <div
-      bind:this={gridEl}
-      class="provider-grid"
-      role="radiogroup"
-      tabindex="-1"
-      aria-labelledby="ns-provider-label"
-      onkeydown={onProviderKeydown}
-    >
-      {#each providers as p, i (p)}
-        <div class="provider-card" role="none" class:selected={countOf(p) > 0} class:primary={provider === p}>
-          <button
-            bind:this={cardEls[i]}
-            class="card-main"
-            role="radio"
-            aria-checked={provider === p}
-            disabled={!providerReadiness(p).available}
-            title={providerReadiness(p).message}
-            tabindex={provider === p ? 0 : -1}
-            onclick={() => selectProvider(p)}
-          >
-            <span class="provider-name">
-              <ProviderIcon provider={p} size={14} />
-              {p}
-              {#if p === defaultProvider}<span class="default-badge">default</span>{/if}
-            </span>
-            <span class="provider-desc">
-              {providerSubtitle(p)}
-            </span>
-          </button>
-          <div class="count-ctl" role="group" id={`ns-steppers-${i}`} aria-label={`${p} sessions`}>
-            <button
-              type="button"
-              class="cbtn"
-              disabled={countOf(p) === 0}
-              aria-label={`One less ${p} session`}
-              title={`One less ${p} session`}
-              onclick={() => bump(p, -1)}
-            ><Icon name="minus" size={12} /></button>
-            <span class="count" class:zero={countOf(p) === 0} aria-hidden="true">{countOf(p)}</span>
-            <button
-              type="button"
-              class="cbtn"
-              disabled={countOf(p) >= MAX_PER_PROVIDER || !providerReadiness(p).available}
-              aria-label={`One more ${p} session`}
-              title={`One more ${p} session`}
-              onclick={() => bump(p, 1)}
-            ><Icon name="plus" size={12} /></button>
-          </div>
-        </div>
-      {/each}
-    </div>
-    <!-- The radiogroup must own radios only (VoiceOver listed the ± buttons
-         among the choices: "radio group, 12 items"). Each card's stepper stays
-         in the card visually but is reparented here in the accessibility tree,
-         a sibling group outside the radiogroup. -->
-    <div role="group" aria-label="Sessions per provider" aria-owns={providers.map((_, i) => `ns-steppers-${i}`).join(' ')}></div>
-    {#if total > 1}
-      <span class="hint batch">Starting {total} sessions — {batchSummary}</span>
-    {/if}
-    <!-- One always-mounted announcement for the whole batch ("2 codex sessions,
-         1 claude session") instead of a bare number per card. -->
-    <span class="sr-only" role="status">{countAnnounce}</span>
-  </div>
-
   <!-- Hidden entirely when the provider's spec has no model-flag template, and
        for a mixed batch (model ids are provider-specific). -->
     {#each chosen.filter((p) => p === 'claude' || p === 'codex') as accountProvider (accountProvider)}
@@ -569,22 +632,6 @@
       <span class="hint">Numbered per session — “{title.trim()} 1” … “{title.trim()} {total}”.</span>
     {/if}
   </div>
-
-  {#if chosen.some((p) => p !== 'shell')}
-    <div class="field">
-      <label for="ns-prompt">First message <span class="dim">(optional)</span></label>
-      <textarea dir="auto"
-        id="ns-prompt"
-        class="input prompt-input"
-        rows="3"
-        bind:value={prompt}
-        placeholder="What should the agent start on? Sent once it is ready."
-      ></textarea>
-      <span class="hint">
-        {total > 1 ? 'Sent to every agent in this batch. ' : ''}⌘↩ {total > 1 ? 'creates the sessions' : 'creates the session'}.
-      </span>
-    </div>
-  {/if}
 
   <div class="field">
     <label for="ns-cwd">Working folder</label>
@@ -621,34 +668,7 @@
 
   <div class="field">
     <label for="ns-extra-dir">Additional directories <span class="dim">(optional)</span></label>
-    {#if extraDirs.length > 0}
-      <ul class="dir-list">
-        {#each extraDirs as dir (dir)}
-          <li class="dir-row">
-            <span class="dir-path mono" title={dir}>{dir}</span>
-            <button
-              type="button"
-              class="dir-remove"
-              title="Remove directory"
-              aria-label="Remove {dir}"
-              onclick={() => removeDir(dir)}
-            ><Icon name="x" size={12} /></button>
-          </li>
-        {/each}
-      </ul>
-    {/if}
-    <div class="dir-add">
-      <input dir="ltr"
-        id="ns-extra-dir"
-        class="input mono"
-        bind:value={dirDraft}
-        spellcheck="false"
-        placeholder="/absolute/path/to/repo"
-        onkeydown={onDirKeydown}
-      />
-      <button type="button" class="btn" onclick={() => (browsing = 'extra')}>Browse…</button>
-      <button type="button" class="btn" disabled={dirDraft.trim() === ''} onclick={addDir}>Add</button>
-    </div>
+    <DirList bind:dirs={extraDirs} bind:draft={dirDraft} inputId="ns-extra-dir" onbrowse={() => (browsing = 'extra')} />
     <span class="hint">Extra repos the agent may access (passed as <code>--add-dir</code>).</span>
   </div>
 
@@ -690,6 +710,7 @@
     </div>
   {/if}
 
+  {/if}
   <div role="status"><!-- always mounted: VoiceOver only speaks a live region that exists before its text -->
     {#if batchFailures.length}
       <p>{batchSuccesses.length} started; {pendingSpawns.length} still need to start. Retry uses the submitted settings.</p>
@@ -701,8 +722,8 @@
 
   {#snippet footer()}
     <button class="btn" onclick={requestClose}>Cancel</button>
-    <button class="btn primary" disabled={busy || (pendingSpawns.length === 0 && total === 0)} onclick={create}>
-      {busy ? 'Starting…' : pendingSpawns.length ? `Retry ${pendingSpawns.length} failed` : total > 1 ? `Start ${total} sessions` : 'Start session'}
+    <button class="btn primary" disabled={busy || (kind === 'terminal' && pendingSpawns.length === 0 && total === 0)} onclick={create}>
+      {busy ? 'Starting…' : kind === 'chat' ? 'Start chat' : pendingSpawns.length ? `Retry ${pendingSpawns.length} failed` : total > 1 ? `Start ${total} sessions` : 'Start session'}
     </button>
   {/snippet}
 </Modal>
@@ -723,6 +744,28 @@
 {/if}
 
 <style>
+  .more-prov { align-self: flex-start; margin-block-start: var(--sp-2); }
+  .kind-seg {
+    margin-block-end: var(--sp-5);
+  }
+  .opts-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--sp-2);
+    margin-block: var(--sp-2) var(--sp-4);
+  }
+  .opt-chip {
+    padding: 1px var(--sp-3);
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+    color: var(--text-dim);
+    font-size: var(--fs-s);
+    max-inline-size: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .prompt-input {
     resize: vertical;
     min-height: 64px;
@@ -855,10 +898,11 @@
      per layout.md), whether via coarse pointer or narrow mobile viewport. */
   @media (pointer: coarse), (max-width: 640px) {
     .cbtn {
-      width: var(--hit-min);
-      height: var(--hit-min);
+      width: 44px;
+      height: 44px;
       font-size: var(--fs-l);
     }
+    .kind-seg .seg-btn { min-block-size: 44px; }
   }
   .count {
     min-width: 18px;
@@ -914,50 +958,6 @@
   .toggle-title {
     font-size: var(--fs-m);
     font-weight: 600;
-  }
-  .dir-list {
-    list-style: none;
-    margin: 0 0 6px;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .dir-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-    padding: 4px 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface-2);
-  }
-  .dir-path {
-    flex: 1;
-    min-width: 0;
-    font-size: var(--fs-xs);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--text);
-  }
-  .dir-remove {
-    flex-shrink: 0;
-    display: inline-flex;
-    align-items: center;
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-    padding: 2px 4px;
-    border-radius: var(--radius-s);
-    line-height: 1;
-  }
-  .dir-remove:hover {
-    color: var(--danger);
-    background: color-mix(in srgb, var(--danger) 12%, transparent);
   }
   .dir-add {
     display: flex;

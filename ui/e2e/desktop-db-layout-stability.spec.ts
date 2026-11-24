@@ -41,7 +41,7 @@ test.beforeEach(async ({ page }, testInfo) => {
 async function openMock(page: Page): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  const c = page.locator('.conn-list .conn-name', { hasText: CONN });
+  const c = page.locator('.conn-list .tr-title', { hasText: CONN });
   await expect(c.first()).toBeVisible({ timeout: 30_000 });
   await c.first().click();
   await expect(page.locator('.query-editor')).toBeVisible({ timeout: 20_000 });
@@ -111,8 +111,9 @@ test('a wide SQL result opens in the grid — auto-Vertical is MongoDB-only by d
   await expect(page.locator('.view-seg')).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.view-seg .vs.on')).toHaveText('Grid');
   await expect(page.locator('.view-seg')).toHaveAttribute('title', 'engine default');
-  // 12 columns, well past the (Mongo) threshold of 10.
-  await expect(page.locator('.grid thead th:not(.rownum)')).toHaveCount(12);
+  // 12 columns, well past the (Mongo) threshold of 10. Counted by name: the
+  // header also carries a trailing spare-width `th.fill`.
+  await expect(page.locator('.grid thead .th-name')).toHaveCount(12);
 });
 
 test('opting MySQL in re-enables auto-Vertical for wide results', async ({ page }) => {

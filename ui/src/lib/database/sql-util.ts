@@ -616,3 +616,14 @@ export function stmtPreview(statement: string, max = 300): string {
   const flat = head.replace(/\s+/g, ' ').trim();
   return flat.length > max || head.length < statement.length ? `${flat.slice(0, max)}…` : flat;
 }
+
+/** Whether a statement — or any statement of a script ("Run all") —
+ *  changes the schema (CREATE / ALTER / DROP / RENAME / TRUNCATE, after
+ *  -- / # / block comments): the workbench re-reads the cached schema tree
+ *  after one runs. A false positive (a ";" inside a string) costs one re-read. */
+export function isDdl(sql: string): boolean {
+  // Comments are stripped first: one pattern that also skipped them in place
+  // backtracked exponentially on a long run of block comments.
+  const bare = sql.replace(/\/\*[\s\S]*?\*\/|--[^\n]*|#[^\n]*/g, ' ');
+  return /(?:^|;)\s*(?:create|alter|drop|rename|truncate)\b/i.test(bare);
+}

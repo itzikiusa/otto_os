@@ -3,6 +3,7 @@
 // daemon's `:waiting` notice), lowered as soon as the operator enters or
 // focuses the session, never re-raised by a reload, raised again by the NEXT
 // turn end.
+import * as splitLayoutPure from '../src/lib/stores/splitLayout.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -84,7 +85,7 @@ function store(storage: Map<string, string>, module = 'agents') {
     '../api/client': { api: {}, getToken: () => 'tok' }, './workflowRuns.svelte': { workflowRuns: { list: [], refresh: async () => {}, apply() {}, clear() {} } }, '../api/workspaces': { fetchWorkspace: async () => ({}) },
     '../router.svelte': { router: { module, parts: [module], go() {} } }, '../toast.svelte': { toasts: { info() {}, success() {}, error() {}, push() { return 1; } } }, '../toastError': { toastError: () => {} }, '../plural': { plural: (n: number, w: string) => `${n} ${w}` }, '../confirm.svelte': { confirmer: {} },
     './ui.svelte': { ui: { sessionIsolation: false, closeTabPref: '', setCloseTabPref() {} }, clientId: () => 'test' },
-    '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout: { panes: [], focusedIndex: 0, bindKey() {}, restore() {}, retain() {}, replaceSession() {}, persist() {}, removeSession() {}, closeSession() {} } }, './splitLayout': { MAX_PANES: 15, LS_PANES: 'otto_panes_' },
+    '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout: { panes: [], focusedIndex: 0, bindKey() {}, restore() {}, retain() {}, replaceSession() {}, persist() {}, removeSession() {}, closeSession() {} } }, './splitLayout': { ...splitLayoutPure, LS_PANES: 'otto_panes_' },
     '../storage': { lsGet: (k: string) => storage.get(k) ?? null, lsSet: (k: string, v: string) => void storage.set(k, v), lsRemove: (k: string) => void storage.delete(k) },
     '../desktop': { isEmbedded: false }, './runtimeAttention.svelte': { runtimeFlagged: () => 0 }, './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets,
     '../lazy-component.svelte': { whenIdle: () => () => {} },

@@ -122,8 +122,8 @@
   }
 
   $effect(() => {
-    void loadPrs();
-    void loadAccounts();
+    // Once per mount: loadPrs reads git.allReposLoaded, whose flip re-ran both (a Retry replaced mid-click).
+    untrack(() => { void loadPrs(); void loadAccounts(); });
     return () => {
       prsRevision++;
       prsAbort?.abort();
@@ -890,10 +890,9 @@
     .focus {
       position: relative;
     }
-    .fx-pr {
-      flex-wrap: wrap;
-      row-gap: 2px;
-    }
+    .fx-pr { flex-wrap: wrap; row-gap: 2px; }
+    .fx-pr-title { flex: 1 1 calc(100% - 40px); min-height: 44px; } /* the title owns its line: never "#42 Di…" */
+    .fx-pr-text { white-space: normal; overflow-wrap: anywhere; }
     .fx-issue-main {
       min-height: 38px;
     }

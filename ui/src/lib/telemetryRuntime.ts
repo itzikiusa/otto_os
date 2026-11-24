@@ -118,7 +118,14 @@ export async function flushTelemetry(): Promise<void> {
   }
 }
 
-const attributesAllowed = new Set(['http.request.method', 'http.response.status_code', 'otto.lane', 'otto.phase']);
+const attributesAllowed = new Set(['http.request.method', 'http.response.status_code', 'otto.lane', 'otto.phase', 'otto.device']);
+
+/** The device class a navigation is counted under (desktop / phone / tablet),
+ *  by the same viewport tiers the shell lays out for. Nothing more specific. */
+export function deviceClass(width: number, coarse: boolean): 'desktop' | 'phone' | 'tablet' {
+  if (width <= 640) return 'phone';
+  return coarse && width <= 1366 ? 'tablet' : 'desktop';
+}
 export function startMeasurement(name: string, component: string, kind = 'internal', start = performance.now()): Measurement | null {
   if (!enabled) return null;
   const epoch = generation;
@@ -158,8 +165,9 @@ export function beginNavigation(module: string): (status?: string) => void {
     const [, traceId, spanId] = measure.traceparent.split('-');
     navigation = { traceId, spanId };
   }
+  const device = typeof window === 'undefined' ? 'desktop' : deviceClass(window.innerWidth, window.matchMedia?.('(pointer: coarse)').matches ?? false);
   return (status = 'ok') => {
-    measure?.finish(status);
+    measure?.finish(status, { 'otto.device': device });
     if (seq === navGeneration) navigation = null;
   };
 }

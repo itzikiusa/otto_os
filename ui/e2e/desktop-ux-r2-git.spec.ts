@@ -1,9 +1,8 @@
 import { test, expect, type Page, type Route } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 
 // Route fixtures must bypass the mobile service worker.
@@ -17,7 +16,7 @@ let secondSha = '';
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
-  const dir = mkdtempSync(join(tmpdir(), 'otto-ux-git-'));
+  const dir = tempDir('otto-ux-git-');
   const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim();
   git('init', '-q', '-b', 'main');
   git('config', 'user.email', 'ux@otto.local');
@@ -48,8 +47,10 @@ test.beforeEach(async ({ page }) => {
 });
 async function openRepo(page: Page, tab = 'graph') {
   await page.goto(`/#/git/${repoId}/${tab}`);
-  // Focus is the Git page's own view now (the legacy repo/focus link opens it).
-  if (tab === 'focus') await expect(page.getByRole('button', { name: 'Focus', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  // Focus is the Git page's own view now (the legacy repo/focus link opens it);
+  // a phone names it in the header's repo switcher (one header row).
+  if (tab === 'focus' && page.viewportSize()!.width <= 640) await expect(page.getByTestId('git-phone-repo')).toHaveText('Focus');
+  else if (tab === 'focus') await expect(page.getByRole('button', { name: 'Focus', exact: true })).toHaveAttribute('aria-pressed', 'true');
   else await expect(page.locator('.rv-tabs')).toBeVisible();
 }
 function diff(path: string) {
@@ -66,7 +67,11 @@ function issue(key: string) {
 }
 async function focusFixtures(page: Page) {
   await page.route('**/api/v1/issue/accounts', r => r.fulfill({ json: accounts }));
-  await page.route('**/api/v1/repos/*/prs?*', r => r.fulfill({ json: { items: [pr(1)], has_more: false } }));
+  // Focus lists pull requests only for repositories a git account can read
+  // (prCandidateRepos): a GitHub account, and PRs for this spec's repo alone
+  // (the shared daemon holds other specs' GitHub repos too).
+  await page.route('**/api/v1/git/accounts', r => r.fulfill({ json: [{ id: 'gh', label: 'GitHub', provider: 'github', namespace: 'otto-test', username: 'audit' }] }));
+  await page.route('**/api/v1/repos/*/prs?*', r => r.fulfill({ json: { items: r.request().url().includes(`/repos/${repoId}/`) ? [pr(1)] : [], has_more: false } }));
   await page.route('**/api/v1/issue/my-work?*', r => r.fulfill({ json: [issue('AUDIT-1'), issue('AUDIT-2')] }));
   await page.route('**/api/v1/issue/account-*/*', r => r.fulfill({ json: issue(r.request().url().split('/').at(-1)!) }));
 }
@@ -130,6 +135,8 @@ test('graph multi-ref list is keyboard accessible and returns focus', async ({ p
   await expect(expander).toBeFocused();
 });
 test('stash, stale worktree and submodule actions are accessible by keyboard and tap', async ({ page }) => {
+  // The fixtures replace the side-list routes: skip the one-request overview so the graph reads them.
+  await page.route('**/api/v1/repos/*/overview', r => r.fulfill({ status: 404, json: { code: 'not_found', message: 'fixture' } }));
   await page.route('**/api/v1/repos/*/worktrees', r => r.fulfill({ json: [{ path: '/tmp/stale-audit-tree', sha: firstSha, branch: 'stale-audit', is_main: false, locked: false, prunable: true, dirty: false, dirty_known: true }] }));
   await page.route('**/api/v1/repos/*/submodules', r => r.fulfill({ json: [{ path: 'vendor/audit-submodule', sha: firstSha, url: 'https://example.test/submodule', state: 'uninitialized' }] }));
   await openRepo(page);
@@ -209,7 +216,7 @@ test('switching PR while editing cannot carry the old title into the new PR', as
   await expect(page.locator('.prd-title')).toContainText('PR 2:');
   await expect(page.locator('.prd-title-input')).toHaveCount(0);
 });
-test('PR Decline: confirms which PR and what happens, posts it, then reads Declined', async ({ page }) => {
+test('PR Decline: confirms which PR and what happens, posts it, then reads closed', async ({ page }) => {
   await prFixtures(page);
   let state = 'open';
   const declined: string[] = [];
@@ -226,22 +233,32 @@ test('PR Decline: confirms which PR and what happens, posts it, then reads Decli
     await route.fulfill({ status: 204, body: '' });
   });
   await page.goto(`/#/git/${repoId}/pr/1`);
-  const decline = page.getByTestId('prd-decline');
+  // Close is offered once, in ⋯ (design review 2, H3); Check out once, on the details card.
+  await expect(page.locator('.prd-title')).toBeVisible();
+  const more = page.getByRole('button', { name: 'More pull request actions' });
+  const decline = page.getByRole('menuitem', { name: 'Close pull request…' });
+  await more.click();
+  // GitHub wording (prCloseLabels): "Close", not Bitbucket's "Decline".
   await expect(decline).toBeVisible();
-  await expect(decline).toHaveClass(/danger/);
+  await expect(page.getByRole('menuitem', { name: /^Check out/ })).toHaveCount(0);
+  await expect(page.locator('.prd-body').getByRole('button', { name: /Close PR|Decline/ })).toHaveCount(0);
+  await expect(page.getByTestId('pr-checkout')).toHaveCount(1);
   // Cancel sends nothing.
   await decline.click();
-  const dialog = page.getByRole('dialog', { name: 'Decline PR #1?' });
-  await expect(dialog).toContainText('PR #1');
+  const dialog = page.getByRole('dialog', { name: 'Close pull request #1?' });
+  await expect(dialog).toContainText('#1');
   await expect(dialog).toContainText('without merging');
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect(dialog).toHaveCount(0);
   expect(declined).toEqual([]);
   // Confirm posts once, then the PR reloads as Declined (no actions left).
+  await more.click();
   await decline.click();
-  await page.getByRole('dialog', { name: 'Decline PR #1?' }).getByRole('button', { name: 'Decline PR', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Close pull request #1?' }).getByRole('button', { name: 'Close PR', exact: true }).click();
   await expect.poll(() => declined).toEqual(['POST']);
-  await expect(page.locator('.prd .prd-state', { hasText: 'Declined' }).first()).toBeVisible();
+  await expect(page.getByTestId('pr-status')).toHaveText(/Closed without merging/);
+  await more.click();
+  await expect(page.getByRole('menuitem', { name: 'Copy link' })).toBeVisible();
   await expect(decline).toHaveCount(0);
 });
 
@@ -293,11 +310,12 @@ for (const scenario of [
     await expect(page.locator('.prd-title')).toContainText('PR 1:');
     await expectNoHorizontalOverflow(page);
     await page.screenshot({ path: testInfo.outputPath('pr-summary.png'), fullPage: true });
-    await page.getByRole('tab', { name: 'Code', exact: true }).click();
+    await page.getByRole('tab', { name: 'Files', exact: true }).click();
     await expect(page.locator('.diff-root')).toBeVisible();
     await expectNoHorizontalOverflow(page);
     await page.screenshot({ path: testInfo.outputPath('pr-files.png'), fullPage: true });
-    await page.getByRole('tab', { name: 'AI review', exact: true }).click();
+    await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
+  await page.getByRole('button', { name: 'AI review', exact: true }).click();
     await expect(page.locator('.rp-comment')).toBeVisible();
     await page.getByTestId('rp-post-comment').scrollIntoViewIfNeeded();
     await expectFullyInViewport(page, page.getByTestId('rp-post-comment'));
@@ -336,10 +354,11 @@ test('PR files and review code keep LTR gutters in an RTL interface', async ({ p
   await prFixtures(page);
   await page.goto(`/#/git/${repoId}/pr/1`);
   await page.evaluate(() => { document.documentElement.dir = 'rtl'; });
-  await page.getByRole('tab', { name: 'Code', exact: true }).click();
+  await page.getByRole('tab', { name: 'Files', exact: true }).click();
   await expect(page.locator('.dtable')).toHaveCSS('direction', 'ltr');
   await expect(page.locator('.hunk-header')).toHaveCSS('direction', 'ltr');
-  await page.getByRole('tab', { name: 'AI review', exact: true }).click();
+  await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
+  await page.getByRole('button', { name: 'AI review', exact: true }).click();
   await expect(page.locator('.rp-diff-snippet')).toHaveCSS('direction', 'ltr');
 });
 test('draft review posting previews destination and audience before sending', async ({ page }) => {
@@ -350,7 +369,8 @@ test('draft review posting previews destination and audience before sending', as
     await route.fulfill({ json: { id: 'finding-1', review_id: 'review-1', path: longPath, line: 1, severity: 'bug', body: 'Posted finding', state: 'approved', posted: true, created_at: '2026-09-25T08:00:00Z' } });
   });
   await page.goto(`/#/git/${repoId}/pr/1`);
-  await page.getByRole('tab', { name: 'AI review', exact: true }).click();
+  await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
+  await page.getByRole('button', { name: 'AI review', exact: true }).click();
   await page.getByTestId('rp-post-comment').click();
   const dialog = page.getByRole('dialog', { name: 'Post comment to PR #1?' });
   await expect(dialog).toContainText('Where:');

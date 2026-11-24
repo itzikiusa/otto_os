@@ -2,13 +2,16 @@
 // you, what is running, what is next, what you touched recently. Built from
 // data Otto already has (no new endpoints):
 //
-//   Needs you  pending MCP approvals · sessions and threads waiting on input (one row each) · unread warnings
+//   Needs you  pending MCP approvals · sessions and threads waiting on input (one row each).
+//              Notices (a re-login, a failure) are the bell's Alerts, not needs-you:
+//              they count nowhere as needs-you, so Home, the status bar and the
+//              Agents badge give one number.
 //   Running    working agent sessions and threads · in-flight workflow runs
 //   Up next    scheduled-task runs due in the next 24 h — forward-looking only.
-//              Past notices live in the bell (warnings already surface under Needs you).
+//              Notices live in the bell.
 //   Recent     Design Hall artifacts
 //
-// The live parts (ws, notifications) are derived; the fetched parts poll on a
+// The live parts (ws) are derived; the fetched parts poll on a
 // quiet cadence only while Home is mounted (start/stop are ref-counted).
 
 import { api } from '../../lib/api/client';
@@ -16,12 +19,11 @@ import { listArtifacts } from '../../lib/api/design';
 import { mcpCpApi } from '../../lib/api/mcp';
 import { scheduledTasksApi } from '../../lib/api/scheduledTasks';
 import type { IconName } from '../../lib/components/Icon.svelte';
-import type { DesignArtifact, McpApproval, Notice, ScheduledTask } from '../../lib/api/types';
+import type { DesignArtifact, McpApproval, ScheduledTask } from '../../lib/api/types';
 import { untrack } from 'svelte';
 import { loadErrorText } from '../../lib/loadError';
 import { router } from '../../lib/router.svelte';
 import { auth } from '../../lib/stores/auth.svelte';
-import { notifications } from '../../lib/stores/notifications.svelte';
 import { resourceAccess } from '../../lib/stores/resource-access.svelte';
 import { ws } from '../../lib/stores/workspace.svelte';
 import { toasts } from '../../lib/toast.svelte';
@@ -44,6 +46,12 @@ export interface TodayRow {
   at?: string;
   /** Present on pending MCP approval rows so Home can offer inline Approve / Deny. */
   approval?: McpApproval;
+  /** The row's status word (lib/statusWords.ts); none → it shows the time. */
+  word?: string;
+  /** The project (folder) it works in, for the row's badge; none → `kind`. */
+  project?: string | null;
+  /** What it is when there is no project ("Approval", "Workflow", …). */
+  kind?: string;
   open: () => void;
 }
 
@@ -51,16 +59,13 @@ const POLL_MS = 60_000;
 /** Scheduled runs due within this window show under Up next. */
 const UP_NEXT_MS = 24 * 60 * 60 * 1000;
 
-function timeOfDay(iso: string): string {
-  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+/** A session's folder name, for its row's project badge. */
+function folderName(cwd: string | null | undefined): string | null {
+  return cwd ? cwd.replace(/\/+$/, '').split('/').pop() || null : null;
 }
 
-function sessionIdOf(n: Notice): string | null {
-  if (n.action?.type === 'open_session') return n.action.session_id;
-  // A structured thread's waiting notice opens its route (`threads/<id>`).
-  if (n.action?.type === 'open_route' && n.action.route.startsWith('threads/')) return n.action.route.slice('threads/'.length).split('/')[0] || null;
-  const key = n.source_key ?? '';
-  return key.startsWith('session:') ? (key.split(':')[1] ?? null) : null;
+function timeOfDay(iso: string): string {
+  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
 class TodayStore {
@@ -150,6 +155,8 @@ class TodayStore {
         detail: a.server_name ? `Approval · ${a.server_name}` : 'Approval',
         icon: 'shield',
         tone: 'warning',
+        word: 'Approval',
+        kind: a.server_name ?? 'MCP',
         at: a.created_at,
         approval: a,
         open: () => router.go('mcp/activity'),
@@ -162,6 +169,8 @@ class TodayStore {
         detail: 'Waiting for your input',
         icon: 'terminal',
         tone: 'warning',
+        word: 'Needs you',
+        project: folderName(s.cwd),
         at: s.last_active_at,
         open: () => ws.navigateToSession(s.id),
       });
@@ -173,6 +182,8 @@ class TodayStore {
         detail: 'Thread · waiting for your input',
         icon: 'threads',
         tone: 'warning',
+        word: 'Needs you',
+        project: folderName(s.cwd),
         at: s.last_active_at,
         open: () => router.go(threadRoute(s.id)),
       });
@@ -188,6 +199,8 @@ class TodayStore {
         detail: 'Thread · waiting for your approval or answer',
         icon: 'threads',
         tone: 'warning',
+        word: 'Needs you',
+        kind: 'Thread',
         ...(w.at ? { at: new Date(w.at).toISOString() } : {}),
         open: () => router.go(threadRoute(w.id)),
       });
@@ -201,22 +214,9 @@ class TodayStore {
         detail: 'Threads',
         icon: 'threads',
         tone: 'warning',
+        word: 'Needs you',
+        kind: 'Threads',
         open: () => router.go('threads'),
-      });
-    }
-    const waitingIds = new Set([...this.waiting, ...this.waitingThreads, ...runtime].map((s) => s.id));
-    for (const n of notifications.notices) {
-      if (n.read || n.severity === 'info') continue;
-      const sid = sessionIdOf(n);
-      if (sid && waitingIds.has(sid)) continue;
-      rows.push({
-        id: `notice:${n.id}`,
-        title: n.title,
-        detail: n.body,
-        icon: 'warning',
-        tone: 'warning',
-        at: n.created_at,
-        open: () => void notifications.runAction(n),
       });
     }
     return rows;
@@ -224,24 +224,29 @@ class TodayStore {
 
   running: TodayRow[] = $derived.by(() => {
     const rows: TodayRow[] = ws.foregroundActive
-      .filter((s) => ws.statusMap[s.id] === 'working')
+      // A session that needs you is listed there only (one place per session).
+      .filter((s) => ws.statusMap[s.id] === 'working' && ws.needsYou[s.id] !== true)
       .map((s) => ({
         id: `session:${s.id}`,
         title: s.title,
         detail: s.provider === 'shell' ? 'Terminal' : `Agent · ${s.provider}`,
         icon: 'terminal' as IconName,
         tone: 'working' as const,
+        word: 'Working',
+        project: folderName(s.cwd),
         at: s.last_active_at,
         open: () => ws.navigateToSession(s.id),
       }));
     for (const s of this.threads) {
-      if (ws.statusMap[s.id] !== 'working') continue;
+      if (ws.statusMap[s.id] !== 'working' || ws.needsYou[s.id] === true) continue;
       rows.push({
         id: `thread:${s.id}`,
         title: s.title,
         detail: `Thread · ${s.provider}`,
         icon: 'threads',
         tone: 'working',
+        word: 'Working',
+        project: folderName(s.cwd),
         at: s.last_active_at,
         open: () => router.go(threadRoute(s.id)),
       });
@@ -253,6 +258,8 @@ class TodayStore {
         detail: r.nodes_total ? `Workflow · step ${Math.min(r.nodes_done + 1, r.nodes_total)} of ${r.nodes_total}` : 'Workflow',
         icon: 'split',
         tone: 'working',
+        word: 'Working',
+        kind: 'Workflow',
         at: r.started_at,
         open: () => router.go('workflows'),
       });
@@ -275,6 +282,7 @@ class TodayStore {
         detail: `Scheduled task · ${timeOfDay(t.next_run_at ?? '')}`,
         icon: 'calendar' as IconName,
         tone: 'idle' as const,
+        kind: 'Scheduled task',
         at: t.next_run_at ?? undefined,
         open: () => router.go('scheduled-tasks'),
       }));
@@ -288,6 +296,7 @@ class TodayStore {
       detail: `Design Hall · ${a.studio}${a.head_seq ? ` · v${a.head_seq}` : ''}`,
       icon: 'designHall' as IconName,
       tone: 'accent' as const,
+      kind: 'Design',
       at: a.updated_at,
       open: () => router.go(`design/a/${encodeURIComponent(a.id)}`),
     }));
@@ -318,11 +327,10 @@ class TodayStore {
     return !this.failed;
   }
 
-  /** Home mounted: start polling (and load notices if nothing has yet). */
+  /** Home mounted: start polling. */
   start(): void {
     this.users += 1;
     if (this.users > 1) return;
-    void notifications.ensureLoaded();
     // Event-fed: approvals, designs and scheduled runs each announce changes; a
     // burst (an agent editing a design) is coalesced to at most one reload per
     // ~15 s. POLL_MS only while the event socket is down.

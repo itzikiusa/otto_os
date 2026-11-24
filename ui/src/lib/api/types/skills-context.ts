@@ -119,6 +119,10 @@ export interface LibrarySkill {
   category?: string;
   /** Present on `/library/skills` responses (frontmatter `version:`). */
   version?: number;
+  /** SHA-256 (hex) of the SKILL.md normalised for comparison (line endings,
+   *  trailing whitespace, edges) — equal to a provider copy's `body_hash`
+   *  when the two read the same. */
+  body_hash?: string;
 }
 
 // --- Skills Lab: multi-file skill editor + skill review --------------------
@@ -185,6 +189,9 @@ export interface ProviderSkillInfo {
   name: string;
   category: string;
   description: string;
+  /** Same hash as `LibrarySkill.body_hash`: Skills Lab compares copies by it
+   *  instead of fetching every body. */
+  body_hash?: string;
 }
 
 /** One entry of `GET /sessions/{id}/slash-commands` — what the chat composer completes after `/`. */

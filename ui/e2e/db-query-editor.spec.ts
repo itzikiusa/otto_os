@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { editorSelectAll } from './helpers';
+import { editorSelectAll, pickDbMenuItem } from './helpers';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -50,10 +50,10 @@ function isPhone(page: Page): boolean {
 async function openConn(page: Page, name: string): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  const conn = page.locator('.conn-list .conn-name', { hasText: name });
+  const conn = page.locator('.conn-list .tr-title', { hasText: name });
   await expect(conn.first()).toBeVisible({ timeout: 30_000 });
   await conn.first().click();
-  await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('db-conn-state')).toBeVisible({ timeout: 20_000 });
 }
 const openMysql = (page: Page) => openConn(page, 'e2e-mysql');
 
@@ -61,7 +61,7 @@ async function ensureEditorOpen(page: Page): Promise<void> {
   if (!isPhone(page)) return;
   const editor = page.locator('.qe-edit');
   if (!(await editor.isVisible().catch(() => false))) {
-    await page.locator('.qe-acc-head', { hasText: 'Editor' }).click();
+    await page.getByRole('button', { name: 'Edit the query', exact: true }).click();
   }
   await expect(editor).toBeVisible();
 }
@@ -150,7 +150,7 @@ test.describe('DB Explorer · query editor', () => {
     test.skip(connId == null, 'mysql unavailable');
     await openMysql(page);
     await setEditor(page, 'select 1 as a, 2 as b');
-    await page.getByRole('button', { name: 'Format', exact: true }).click();
+    await pickDbMenuItem(page, /^Format/); // the Query group of the header's ⋯
     // sql-formatter upper-cases keywords + adds newlines.
     await expect
       .poll(async () => ((await page.locator('.qe-edit .cm-content').textContent()) ?? ''))

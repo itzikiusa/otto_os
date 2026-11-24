@@ -1,7 +1,7 @@
 // The project badge (projectBadge.ts): two letters and a stable tone per name.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { projectBadge } from '../src/modules/threads/projectBadge.ts';
+import { projectBadge } from '../src/lib/projectBadge.ts';
 
 test('two words give their initials; one word its first and last letter', () => {
   assert.equal(projectBadge('harbor-api').initials, 'HA');

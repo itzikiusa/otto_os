@@ -1,19 +1,12 @@
 import { test, expect, type Locator } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
+import { pickMenuItem } from './helpers';
 
-// Desktop BROWSER regression for the unified Connections hub (the DB-workbench
-// page serving as the single Connections surface): ONE section tree
-// holds SSH + DB connections AND a Kafka cluster, and the type-filter chips
-// narrow it — hiding non-matching rows AND sections with no matching descendant.
-// Seeds real rows via the API against the isolated throwaway daemon; asserts
-// rendering + filtering only (opens route to other modules and are out of scope).
-//
-// NOTE: the throwaway E2E daemon is the INSTALLED ottod (pre-migration): it may
-// still keep broker sections in a SEPARATE tree, so a cluster's section_id might
-// not land in the shared connection-section tree. We detect that and skip ONLY
-// the cluster-under-HUB-SEC placement assertion; the filter assertions run either
-// way. The file is routed to the desktop-browser project (testMatch on
-// desktop-*.spec.ts) and self-skips on the mobile/tablet device projects.
+// Desktop BROWSER regression for the Connections list page (#/connections):
+// ONE list holds SSH + DB connections AND a Kafka cluster, sections are group
+// headers, each row says its state in words, and ONE filter menu (kind,
+// section) plus a search narrows it. Seeds real rows via the API against the
+// isolated throwaway daemon. Routed to the desktop-browser project.
 
 test.describe('connections hub', () => {
   test.beforeEach(async ({}, info) => {
@@ -124,74 +117,101 @@ test.describe('connections hub', () => {
     const sshRow = page.locator('.conn-row', { hasText: 'hub-ssh' });
     const mysqlRow = page.locator('.conn-row', { hasText: 'hub-mysql' });
     const clusterRow = page.locator('.conn-row', { hasText: 'hub-kafka' });
-    const hubSec = page.locator('.sec-head', { hasText: 'HUB-SEC' });
-    const ungrouped = page.locator('.sec-head.plain', { hasText: 'Ungrouped' });
-    const emptySec = page.locator('.sec-head', { hasText: 'EMPTY-SEC' });
-    const y = async (l: Locator): Promise<number> => (await l.first().boundingBox())!.y;
+    const hubSec = page.getByRole('region', { name: 'HUB-SEC' }).last();
+    const emptySec = page.getByRole('region', { name: 'EMPTY-SEC' }).last();
+    const ungrouped = page.getByRole('region', { name: 'Ungrouped' });
 
-    const ran: string[] = [];
-    const skipped: string[] = [];
-
-    // (1) all three rows visible in one tree.
+    // (1) one list: every kind, sections as group headers, rows in words.
     await expect(sshRow).toBeVisible();
     await expect(mysqlRow).toBeVisible();
     await expect(clusterRow).toBeVisible();
-    await expect(hubSec).toBeVisible();
-    ran.push('all-three-visible');
+    await expect(hubSec.locator('.conn-row', { hasText: 'hub-mysql' })).toBeVisible();
+    await expect(ungrouped.locator('.conn-row', { hasText: 'hub-ssh' })).toBeVisible();
+    if (clusterUnderSection) await expect(hubSec.locator('.conn-row', { hasText: 'hub-kafka' })).toBeVisible();
+    await expect(emptySec).toContainText('No connections in this section.');
+    // Line one: name … the state WORD (never tested just because it rendered);
+    // line two: kind · host · section · last opened.
+    await expect(mysqlRow).toContainText('Not checked');
+    // Under the HUB-SEC heading the row does not repeat the section's name.
+    await expect(mysqlRow).toContainText('MySQL · 127.0.0.1:3306 · never opened');
+    await expect(sshRow).toContainText('SSH · ssh.example.com');
 
-    // mysql sits under HUB-SEC (above the Ungrouped group); ssh is ungrouped.
-    expect(await y(mysqlRow)).toBeGreaterThan(await y(hubSec));
-    expect(await y(mysqlRow)).toBeLessThan(await y(ungrouped));
-    expect(await y(sshRow)).toBeGreaterThan(await y(ungrouped));
-    ran.push('mysql-under-HUB-SEC', 'ssh-ungrouped');
-
-    if (clusterUnderSection) {
-      expect(await y(clusterRow)).toBeGreaterThan(await y(hubSec));
-      expect(await y(clusterRow)).toBeLessThan(await y(ungrouped));
-      ran.push('cluster-under-HUB-SEC');
-    } else {
-      skipped.push('cluster-under-HUB-SEC (needs the new shared-tree daemon)');
-    }
-
-    // (1b) clicking anywhere on a folder header (not just the caret) toggles it.
-    await hubSec.locator('.sec-name').click();
-    await expect(mysqlRow).toHaveCount(0);
-    await hubSec.locator('.sec-name').click();
-    await expect(mysqlRow).toBeVisible();
-    ran.push('header-click-toggles');
-
-    // (2) Kafka chip → only the cluster; ssh + mysql hidden. A section shows only
-    //     if it holds a matching descendant.
-    await page.locator('[data-testid="connhub-filter-kafka"]').click();
+    // (2) ONE filter menu (no chip rows): Kafka → only the cluster; the
+    //     filter shows as one removable chip.
+    await page.getByTestId('conn-filter').click();
+    await page.getByRole('menuitemcheckbox', { name: 'Kafka', exact: true }).click();
     await expect(clusterRow).toBeVisible();
     await expect(sshRow).toHaveCount(0);
     await expect(mysqlRow).toHaveCount(0);
-    if (clusterUnderSection) await expect(hubSec).toBeVisible();
-    else await expect(hubSec).toHaveCount(0);
-    ran.push('kafka-filter');
+    await expect(page.getByRole('region', { name: 'EMPTY-SEC' })).toHaveCount(0);
 
-    // (3) SSH chip → only the ssh row; cluster + mysql hidden, HUB-SEC hidden
-    //     (no ssh under it → zero matching descendants).
-    await page.locator('[data-testid="connhub-filter-ssh"]').click();
+    // (3) SSH → only the ssh row; then the chip clears the filter.
+    await page.getByTestId('conn-filter').click();
+    await page.getByRole('menuitemcheckbox', { name: 'SSH', exact: true }).click();
     await expect(sshRow).toBeVisible();
     await expect(clusterRow).toHaveCount(0);
     await expect(mysqlRow).toHaveCount(0);
-    await expect(hubSec).toHaveCount(0);
-    await expect(emptySec).toBeVisible();
-    ran.push('ssh-filter', 'empty-folder-visible-under-filter');
-
-    // (4) All restores every row.
-    await page.locator('[data-testid="connhub-filter-all"]').click();
-    await expect(sshRow).toBeVisible();
+    await page.getByRole('button', { name: 'Clear the SSH filter' }).click();
     await expect(mysqlRow).toBeVisible();
     await expect(clusterRow).toBeVisible();
-    ran.push('all-restores');
 
-    // eslint-disable-next-line no-console
-    console.log(`[connhub] assertions RAN: ${ran.join(', ')}`);
-    if (skipped.length) {
-      // eslint-disable-next-line no-console
-      console.log(`[connhub] assertions SKIPPED: ${skipped.join(', ')}`);
+    // (4) Search narrows by name / host / section.
+    await page.getByRole('searchbox', { name: 'Search connections' }).fill('hub-my');
+    await expect(mysqlRow).toBeVisible();
+    await expect(sshRow).toHaveCount(0);
+    await page.getByRole('searchbox', { name: 'Search connections' }).fill('');
+
+    // (5) The row ⋯ holds the row actions; Test runs on demand only.
+    await mysqlRow.hover();
+    await page.getByRole('button', { name: 'Actions for hub-mysql' }).click();
+    for (const item of ['Open', 'Test', 'Edit', 'Duplicate without password', 'Delete']) {
+      await expect(page.getByRole('menuitem', { name: item, exact: true })).toBeVisible();
     }
+    await page.keyboard.press('Escape');
+  });
+
+  test('loading is said in words, never "0 saved"', async ({ page }) => {
+    const { ctx, base } = await apiCtx();
+    const wsId = await seedWorkspace(ctx, base);
+    await ctx.dispose();
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    await page.route(/\/workspaces\/[^/]+\/connections$/, async (route) => {
+      await held;
+      await route.continue();
+    });
+    await page.addInitScript((w) => localStorage.setItem('otto_workspace', w as string), wsId);
+    await page.goto('/#/connections');
+    await expect(page.getByRole('status', { name: 'Loading connections' })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText(/\b0 saved\b/)).toHaveCount(0);
+    release();
+    await expect(page.getByText(/\d+ saved/)).toBeVisible();
+  });
+
+  test('Delete hides the row at once and Undo brings it back without deleting', async ({ page }) => {
+    const { ctx, base } = await apiCtx();
+    const wsId = await seedWorkspace(ctx, base);
+    const name = `undo-me-${Date.now()}`;
+    const res = await ctx.post(`${base}/api/v1/workspaces/${wsId}/connections`, {
+      data: { name, kind: 'ssh', params: { host: 'undo.invalid' }, secret: null },
+    });
+    expect(res.ok()).toBeTruthy();
+    const { id } = await res.json();
+    let deletes = 0;
+    page.on('request', (r) => {
+      if (r.method() === 'DELETE' && r.url().endsWith(`/connections/${id}`)) deletes++;
+    });
+    await page.addInitScript((w) => localStorage.setItem('otto_workspace', w as string), wsId);
+    await page.goto('/#/connections');
+    const row = page.locator('.conn-row', { hasText: name });
+    await pickMenuItem(page, () => row.click({ button: 'right' }), 'Delete');
+    await expect(row).toHaveCount(0);
+    await page.getByRole('button', { name: 'Undo', exact: true }).click();
+    await expect(row).toBeVisible();
+    await page.waitForTimeout(7000); // ui-guards: allow — proves NO delete is sent after the toast is gone
+    expect(deletes).toBe(0);
+    const still = await ctx.get(`${base}/api/v1/workspaces/${wsId}/connections`);
+    expect(((await still.json()) as { id: string }[]).some((c) => c.id === id)).toBe(true);
+    await ctx.dispose();
   });
 });

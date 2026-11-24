@@ -56,13 +56,13 @@ function seedModule() {
   return { mod, calls };
 }
 
-test('first-visit seed: Agents always; Kubernetes / DB dashboard only with data', async () => {
+test('first-visit seed: no Agents widget (the inbox lists them); Kubernetes / DB dashboard only with data', async () => {
   const { mod, calls } = seedModule();
   const all = () => true;
   const kinds = (d: unknown) => plain(mod.seedBoxes(all, d)).map((b: { kind: string }) => b.kind);
-  assert.deepEqual(kinds({ clusters: false, dashboardId: null }), ['sessions']);
-  assert.deepEqual(kinds({ clusters: true, dashboardId: null }), ['sessions', 'k8s']);
-  assert.deepEqual(plain(mod.seedBoxes(all, { clusters: false, dashboardId: 'd1' }))[1], { kind: 'db-dashboard', config: { dashboardId: 'd1' } });
+  assert.deepEqual(kinds({ clusters: false, dashboardId: null }), []);
+  assert.deepEqual(kinds({ clusters: true, dashboardId: null }), ['k8s']);
+  assert.deepEqual(plain(mod.seedBoxes(all, { clusters: false, dashboardId: 'd1' }))[0], { kind: 'db-dashboard', config: { dashboardId: 'd1' } });
   // RBAC still gates every kind.
   assert.deepEqual(plain(mod.seedBoxes((f: string) => f === 'database', { clusters: true, dashboardId: 'd1' })).map((b: { kind: string }) => b.kind), ['db-dashboard']);
   // The probe asks only for what the role can see, and picks the first dashboard.

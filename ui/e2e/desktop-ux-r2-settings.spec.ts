@@ -275,7 +275,8 @@ test('MCP delayed attachment save does not overwrite a newly selected workspace'
     await route.fulfill({ json: { workspace_id: a, attached: false } });
   });
   await page.route(`**/api/v1/workspaces/${b}/mcp/session-attach`, route => route.fulfill({ json: { workspace_id: b, attached: true } }));
-  await page.goto('/#/mcp');
+  // MCP opens on its Overview; the attach switch lives with Otto's tools.
+  await page.goto('/#/mcp/otto');
   const toggle = page.getByTestId('mcp-session-attach');
   await expect(toggle).toBeChecked();
   await toggle.uncheck();
@@ -283,7 +284,7 @@ test('MCP delayed attachment save does not overwrite a newly selected workspace'
   await page.keyboard.press('Meta+k');
   await page.getByRole('combobox').fill('Switch to workspace Synthetic Beta');
   await page.keyboard.press('Enter');
-  await expect(page.getByText('Attach to sessions in Synthetic Beta', { exact: true })).toBeVisible();
+  await expect(page.getByText('Give sessions in Synthetic Beta Otto’s read-only tools', { exact: true })).toBeVisible();
   const oldSave = page.waitForResponse(r => r.url().includes(`/workspaces/${a}/mcp/session-attach`) && r.request().method() === 'PATCH');
   release();
   await (await oldSave).finished();
@@ -315,7 +316,7 @@ test('synthetic loaded pages remain readable across five themes and responsive d
     }, v);
     await page.reload();
     for (const surface of ['appearance', 'plugins', 'mcp', 'skills']) {
-      await page.goto(surface === 'mcp' ? '/#/mcp' : surface === 'skills' ? '/#/skills-eval' : `/#/settings/${surface}`);
+      await page.goto(surface === 'mcp' ? '/#/mcp/otto' : surface === 'skills' ? '/#/skills-eval' : `/#/settings/${surface}`);
       if (surface === 'skills') {
         await page.getByRole('searchbox', { name: 'Filter skills' }).fill(name);
         await page.getByTestId('skill-row').click();
@@ -368,10 +369,11 @@ test('MCP catalog error retries and failed exposure update preserves saved state
     if (route.request().method() === 'PATCH') return route.fulfill({ status: 503, json: { code: 'upstream', message: 'Synthetic MCP update unavailable' } });
     return failLoad ? route.fulfill({ status: 503, json: { code: 'upstream', message: 'Synthetic catalog unavailable' } }) : route.continue();
   });
-  await page.goto('/#/mcp');
+  await page.goto('/#/mcp/otto');
   const error = page.getByTestId('load-error');
   await expect(error).toContainText('Synthetic catalog unavailable');
-  await expect(page.getByTestId('mcp-outward-enabled')).toBeDisabled();
+  // An outage is one notice line: the exposure switch is not offered while its state is unknown.
+  await expect(page.getByTestId('mcp-outward-enabled')).toHaveCount(0);
   failLoad = false;
   await error.getByRole('button', { name: 'Retry' }).click();
   const toggle = page.getByTestId('mcp-outward-enabled');

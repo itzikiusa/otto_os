@@ -456,6 +456,27 @@ button.chip:focus-visible {
   outline-offset: 1px;
 }
 
+/* The reading surface (patterns.md "Reading surface"): one centred column —
+   .read-col 760 px for prose, conversations and inboxes, .list-col 1200 px
+   for lists and tables (a narrower pane fills it with --sp-6 sides);
+   .read-prose sets reading type (--fs-l / 1.6). Wide content (tables, code,
+   diffs) scrolls inside the column; it never widens it. */
+.read-col,
+.list-col {
+  box-sizing: border-box;
+  inline-size: 100%;
+  max-inline-size: calc(var(--read-col) + 2 * var(--sp-6));
+  margin-inline: auto;
+  padding-inline: var(--sp-6);
+}
+.list-col {
+  max-inline-size: calc(var(--list-col) + 2 * var(--sp-6));
+}
+.read-prose {
+  font-size: var(--fs-l);
+  line-height: 1.6;
+}
+
 /* One-line truncation for a TEXT span (pair it with a `title` for the full
    value). Several components used the class without defining it. */
 .ellipsis {

@@ -167,7 +167,7 @@
   .mm {
     position: absolute;
     inset-block-start: 50%;
-    inset-inline-end: max(4px, calc((100cqi - 760px - 2 * var(--sp-6)) / 2 - 20px));
+    inset-inline-end: max(4px, calc((100cqi - var(--read-col) - 2 * var(--sp-6)) / 2 - 20px));
     z-index: 2;
     display: flex;
     flex-direction: column;

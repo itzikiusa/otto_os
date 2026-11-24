@@ -76,10 +76,10 @@ test.beforeEach(async ({ page }, testInfo) => {
 async function openMysql(page: Page): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  const conn = page.locator(`.conn-row[data-connection-id="${mysqlConn}"] .conn-name`);
+  const conn = page.locator(`.conn-row[data-connection-id="${mysqlConn}"] .tr-title`);
   await expect(conn).toBeVisible({ timeout: 30_000 });
   await conn.click();
-  await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('db-conn-state')).toBeVisible({ timeout: 20_000 });
   await expect(page.locator('.query-editor')).toBeVisible({ timeout: 15_000 });
 }
 

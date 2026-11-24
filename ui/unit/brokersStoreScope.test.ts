@@ -35,7 +35,7 @@ function setup() {
     d.reject(e);
     await settle();
   };
-  return { brokers, ws, answer, fail };
+  return { brokers, ws, answer, fail, pending };
 }
 
 const clusters = (ws: string) => `/workspaces/${ws}/brokers/clusters`;
@@ -92,4 +92,21 @@ test('a superseded load in the same workspace keeps the newer spinner and list',
   await second;
   assert.deepEqual(h.brokers.clusters.map((c: any) => c.id), ['new']);
   assert.equal(h.brokers.loading, false);
+});
+
+test('ensure reuses the list the page before read; another workspace or a failed read loads again', async () => {
+  const h = setup();
+  const first = h.brokers.load('A', { withSections: false });
+  await h.answer(clusters('A'), [{ id: 'a1' }]);
+  await first;
+  await h.brokers.ensure('A');
+  assert.equal(h.pending.get(clusters('A'))?.length ?? 0, 0, 'no second GET for A');
+  h.ws.currentId = 'B';
+  const b = h.brokers.ensure('B');
+  await h.fail(clusters('B'), new Error('down'));
+  await b;
+  const again = h.brokers.ensure('B');
+  await h.answer(clusters('B'), [{ id: 'b1' }]);
+  await again;
+  assert.deepEqual(h.brokers.clusters.map((c: any) => c.id), ['b1']);
 });

@@ -99,10 +99,11 @@ test('the Triggers panel says whether a trigger has fired', async ({ page }) => 
   const fired = await ctx.post(`${base}${V1}/workflows/${wfId}/webhook/${trigger.spec.token}`, { data: { note: 'e2e' } });
   expect(fired.ok(), await fired.text()).toBeTruthy();
   const row = (await (await ctx.get(`${base}${V1}/workflows/${wfId}/triggers`)).json())[0];
-  expect(row.last_outcome).toBe('started');
+  // Under the run cap (parallel workers) the fired run waits its turn: queued.
+  expect(row.last_outcome).toMatch(/^(started|queued)$/);
   expect(row.last_fired_at).toBeTruthy();
 
   await page.reload();
   await openTriggers(page);
-  await expect(page.getByTestId('trigger-status')).toContainText(/^Last fired .* · started$/);
+  await expect(page.getByTestId('trigger-status')).toContainText(new RegExp(`^Last fired .* · ${row.last_outcome}$`));
 });

@@ -5778,7 +5778,7 @@ impl SessionManager {
             }
         }
         let mut classifier =
-            status_classify::StatusClassifier::new(self, session, Arc::clone(&handle));
+            status_classify::StatusClassifier::new(self, session, Arc::clone(&handle), readopted);
         // Mid-session output scan: subscribe to the PTY broadcast and forward
         // chunks to the scanner. Ends when the PTY closes (broadcast Closed).
         if let Some(scanner) = self.output_scanner.clone() {

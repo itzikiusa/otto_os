@@ -398,13 +398,11 @@ test('ui: vault-docs sessions are hidden from the sidebar Agents group', async (
   await mk(foregroundTitle);
   await ctx.dispose();
 
-  // This test needs the EXPANDED navigator (the shared beforeEach collapses
-  // it to the rail); init scripts run in order, so this later write wins.
-  await page.addInitScript(() => localStorage.setItem('otto_rail_expanded', '1'));
-  await openPage(page, 'vault');
-  const nav = page.locator('nav.navigator');
+  // The session list is the Agents inbox (it left the app navigator).
+  await openPage(page, 'agents');
+  const nav = page.getByTestId('agents-inbox');
   await expect(nav).toBeVisible({ timeout: 15_000 });
-  // The ordinary session shows in the sidebar Agents list…
+  // The ordinary session shows in the Agents list…
   await expect(nav.getByText(foregroundTitle, { exact: true })).toBeVisible({
     timeout: 15_000,
   });

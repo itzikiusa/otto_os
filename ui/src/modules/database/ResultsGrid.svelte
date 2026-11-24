@@ -44,6 +44,8 @@
     type ViewMode,
   } from '../../lib/stores/database.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
+  import { isTouchFirst } from '../../lib/enterSends';
   import { auth } from '../../lib/stores/auth.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -1238,7 +1240,7 @@
     }
     return items;
   }
-  function exportMenu(e: MouseEvent): void {
+  function exportItems(): MenuItem[] {
     const items: MenuItem[] = [
       ...copyItems(),
       { separator: true },
@@ -1264,10 +1266,11 @@
     if (connectionId && (database.capabilities?.sql || database.capabilities?.engine === 'mongodb')) {
       items.push({ separator: true }, { label: 'Import file…', icon: 'arrowUp', action: () => database.openImportDialog() });
     }
-    showMenu(e, items);
+    return items;
   }
-  function moreMenu(e: MouseEvent): void {
-    const items: MenuItem[] = [];
+  const exportMenu = (e: MouseEvent): void => showMenu(e, exportItems());
+  function moreMenu(e: MouseEvent): void { // a phone keeps the view switch + filter in the toolbar, the rest here
+    const items: MenuItem[] = viewport.isPhone ? [...(mode === 'grid' ? [{ label: 'Filter row', icon: 'filter', checked: filterRow, action: toggleFilterRow }, { label: 'Row detail', icon: 'panel', checked: showDetail, action: toggleDetail }] : []), ...(flow.insert.target ? [{ label: engine === 'mongodb' ? 'Insert document' : 'Add row', icon: 'plus', action: () => void flow.insert.open() }] : []), { separator: true }, ...exportItems(), { separator: true }] : [];
     if (engine === 'mongodb' && connectionId) {
       items.push({ label: 'Aggregate pipeline…', icon: 'layers', action: () => (pipelineOpen = true) });
     }
@@ -1447,7 +1450,7 @@
       {@render loadingFrame()}
     {:else}
       <div class="grid-empty idle">
-        <EmptyState icon="grid" title="No results yet" body="Run a query with ⌘↵ — the statement under the cursor, or your selection." />
+        <EmptyState icon="grid" title="No results yet" body={isTouchFirst() ? 'Run a query — the statement under the cursor, or your selection.' : 'Run a query with ⌘↵ — the statement under the cursor, or your selection.'} />
       </div>
     {/if}
   {/if}
@@ -1521,7 +1524,7 @@
             <button class="vs auto" onclick={() => pickView(null)} title={autoTitle}>Auto</button>
           {/if}
         </div>
-        {#if mode === 'grid'}
+        {#if mode === 'grid' && !viewport.isPhone}
           <button
             class="icon-btn tb-toggle"
             class:on={filterRow}
@@ -1540,11 +1543,11 @@
           ><Icon name="panel" size={13} /></button>
         {/if}
         <span class="grow"></span>
-        <AddRowButton {flow} variant="toolbar" />
+        {#if !viewport.isPhone}<AddRowButton {flow} variant="toolbar" />
         <button class="btn small" class:export-nudge={result?.truncated} onclick={exportMenu} title="Copy, download, export all rows, or import a file" aria-haspopup="menu">
           <Icon name="download" size={12} /><span class="tb-label">Export</span><Icon name="chevronDown" size={12} />
-        </button>
-        <button class="icon-btn" onclick={moreMenu} aria-label="More result actions" title="More — find, pipeline, compare, insert, expand JSON, send to agent, examine with AI" aria-haspopup="menu">
+        </button>{/if}
+        <button class="icon-btn rg-more" onclick={moreMenu} aria-label="More result actions" title="More — find, pipeline, compare, insert, expand JSON, send to agent, examine with AI" aria-haspopup="menu">
           <Icon name="more" size={14} />
         </button>
       </div>
@@ -2599,20 +2602,16 @@
       row-gap: 6px;
       height: auto;
     }
-    .grid-toolbar .grow {
-      display: none;
-    }
     .gt-search {
       flex: 1 1 100%;
+      min-height: 44px;
     }
-    /* The grid block must have a definite height so the table scrolls inside it
-       (its parent .qe-results gives it min-height on mobile). */
-    .grid-wrap {
-      height: 100%;
-      min-height: 320px;
-    }
+    .view-seg { height: 48px; }
+    .vs, .rg-more { height: 44px; min-width: 44px; }
+    .rg-more::after { inset: 0; } /* already 44 px; app.css's -6px touch ring overflowed the toolbar */
     .gt-search-input {
       font-size: var(--fs-m);
+      align-self: stretch;
     }
     .grid-empty,
     .grid-error {

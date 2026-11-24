@@ -22,8 +22,7 @@ test('editing retains advanced TLS configuration and duplication omits credentia
   expect(saved.params.custom_option).toBe('preserved');
   expect(saved.params.tls.mode).toBe('required');
   expect(saved.secret_ref).toBe(original.secret_ref);
-  // Saving a DB profile opens its workbench; return to the unified picker.
-  await page.getByRole('tab', { name: 'Connections', exact: true }).click();
+  // Saving an edit keeps the list on screen.
   await page.locator('.conn-row', { hasText: `${name}-edited` }).click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Duplicate without password', exact: true }).click();
   await expect(page.getByLabel('Name', { exact: true })).toHaveValue(`${name}-edited (copy)`);
@@ -67,9 +66,10 @@ test('Mongo URI credentials are normalized by the server and SFTP errors wait fo
 
 test('SSH settings can be tested before saving and a failure says what to fix', async ({ page }) => {
   await openPage(page, 'connections');
-  await page.getByRole('button', { name: 'New connection', exact: true }).first().click();
+  // One primary with the kind menu: SSH host opens straight on its fields.
+  await page.getByRole('button', { name: /New connection/ }).first().click();
+  await page.getByRole('menuitem', { name: 'SSH host…' }).click();
   const dialog = page.getByRole('dialog');
-  await dialog.getByRole('button', { name: 'SSH', exact: true }).click();
   await dialog.getByLabel('Name', { exact: true }).fill(`ssh-test-${Date.now()}`);
   // Real daemon round trip (no ssh is spawned): a profile without a host has
   // nothing to probe and must not report "Connected".

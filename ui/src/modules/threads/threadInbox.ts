@@ -4,27 +4,15 @@
 // needs you (Approval, Question), then Failed, then finished-unread (Done),
 // then the time the thread last came back to you, newest first. A thread's
 // family (a lead and the threads opened from it) always moves together.
-// Pure (unit/threadsInbox.test.ts); states come in from lib/status.ts.
+// Pure (unit/threadsInbox.test.ts); states come in from lib/status.ts, the
+// words from lib/statusWords.ts.
 import type { Session } from '../../lib/api/types';
 import { inboxOrder, type FamilyRow } from './threadFamilies';
 import { perfCount } from '../../lib/perfCount.ts';
-
-/** Where a row belongs, from its derived state key and unread flag. */
-export type InboxClass = 'needs' | 'failed' | 'done' | 'working' | 'rest';
-
-/** `pending`: requests this client knows are waiting on the person for the
- *  thread (its runtime approvals / questions from live events, an MCP
- *  approval card — threadInbox.svelte.ts `kindsOf`) or a subagent of it
- *  that waits: any one makes it "needs you", whatever the row's own status
- *  still says (a provider that keeps running while it waits, an MCP ask). */
-export function inboxClass(key: string | null | undefined, unread: boolean, pending = 0): InboxClass {
-  if (key === 'needs-you' || pending > 0) return 'needs';
-  if (key === 'failed') return 'failed';
-  // `running`: alive but idle — a thread whose agent is done while its
-  // background work runs (taskStop.ts `withBackgroundState`) stays calm, never "Working".
-  if (key === 'working' || key === 'stale') return 'working';
-  return unread ? 'done' : 'rest';
-}
+import type { InboxClass } from '../../lib/statusWords.ts';
+// The words themselves live in the shared vocabulary (lib/statusWords.ts);
+// re-exported so the Threads call sites and specs keep one import.
+export { elapsed, inboxClass, statusWord, subagentWord, waitingWord, type InboxClass } from '../../lib/statusWords.ts';
 
 const RANK: Record<InboxClass, number> = { needs: 0, failed: 1, done: 2, working: 3, rest: 3 };
 
@@ -76,23 +64,6 @@ export function inboxSections(
   };
 }
 
-/** The pending requests' kinds → the word a waiting row shows: Question when
- *  every one is a question (or an MCP form), else Approval. */
-export function waitingWord(kinds: readonly string[]): 'Approval' | 'Question' {
-  return kinds.length > 0 && kinds.every((k) => k === 'question' || k === 'mcp_elicitation') ? 'Question' : 'Approval';
-}
-
-/** The status word of a subagent row (a thread working under another one):
- *  exactly Working · Needs you · Done · Failed · Limited · Stopped (Limited:
- *  a failure on the usage limit — `limited`, the state label lib/status.ts gives it). */
-export function subagentWord(key: string | null | undefined, opts?: { limited?: boolean }): 'Working' | 'Needs you' | 'Done' | 'Failed' | 'Limited' | 'Stopped' {
-  if (key === 'needs-you') return 'Needs you';
-  if (key === 'working' || key === 'running' || key === 'stale') return 'Working';
-  if (key === 'failed') return opts?.limited ? 'Limited' : 'Failed';
-  if (key === 'stopped') return 'Stopped';
-  return 'Done';
-}
-
 /** Finished unread ("Done") across reloads and devices: the last turn ended
  *  after the person last had the thread in front of them (`meta.thread_seen_at`).
  *  A thread never seen on any device counts as read (no flood of "Done"). */
@@ -116,33 +87,3 @@ export function migrationPatches(
   return [...out];
 }
 
-/** "18s", "4m", "1h 5m" for a positive span. */
-export function elapsed(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  const m = Math.floor((s % 3600) / 60);
-  return `${Math.floor(s / 3600)}h${m ? ` ${m}m` : ''}`;
-}
-
-/** The one status word a row shows, or null (it shows the relative time).
- *  The vocabulary is fixed: Approval · Question · Failed · Limited · Done ·
- *  Working. Limited: a failed turn that hit the provider's usage limit
- *  (`limited`, from the row's state label — lib/status.ts). */
-export function statusWord(
-  cls: InboxClass,
-  opts: { kinds?: readonly string[]; workingSince?: number | null; now?: number; limited?: boolean } = {},
-): string | null {
-  switch (cls) {
-    case 'needs':
-      return waitingWord(opts.kinds ?? []);
-    case 'failed':
-      return opts.limited ? 'Limited' : 'Failed';
-    case 'done':
-      return 'Done';
-    case 'working':
-      return opts.workingSince && opts.now ? `Working ${elapsed(opts.now - opts.workingSince)}` : 'Working';
-    default:
-      return null;
-  }
-}

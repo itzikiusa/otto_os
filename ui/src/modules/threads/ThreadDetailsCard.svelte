@@ -12,6 +12,7 @@
   import { api, isAbortError } from '../../lib/api/client';
   import type { DiffResp, Repo } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
+  import DetailsCard from '../../lib/components/DetailsCard.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
   import { router } from '../../lib/router.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -20,6 +21,7 @@
   import { git } from '../../lib/stores/git.svelte';
   import { now } from '../../lib/stores/now.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { sharedAgentTasks, taskElapsed } from './runtime/agentTasks';
@@ -38,7 +40,7 @@
   import { subagentSection, subagentTally, type ChildTone, type SubagentRow, type SubagentWord } from './runtime/childThreads';
   import { delegatedParentId } from './threadsHelpers';
   import { openBranchMenu, openOpenInMenu } from './threadGitMenus';
-  import { threadPrs } from './threadPrs.svelte';
+  import { branchPrs as threadPrs } from '../../lib/stores/branchPrs.svelte';
   import { compactPath, forgeLabel } from './threadsHelpers';
   import { threadRepos } from './threadRepos.svelte';
   import { threads } from './threadsStore.svelte';
@@ -56,8 +58,12 @@
     ondismiss?: () => void;
     /** One summary row that opens on tap (a surface is open below it). */
     summary?: boolean;
+    /** Heading the Agents right panel: facts only (the Git tab's commit card owns
+     *  Commit → Push → PR), Changes opens that tab, a subagent opens as a pane
+     *  here — never the Threads page's inspector. */
+    agents?: boolean;
   }
-  let { cwd, threadId = null, floating = false, ondismiss, summary = false }: Props = $props();
+  let { cwd, threadId = null, floating = false, ondismiss, summary = false, agents = false }: Props = $props();
   // A thread stopped on its provider's usage limit, and when it resumes (RuntimeUsageLimit).
   const limitRow = $derived.by(() => {
     const rt = threadId ? runtimeThreads.get(threadId) : null;
@@ -135,13 +141,16 @@
   // The thread's relatives depend on the thread lists, not on its stream:
   // derived apart, so a streamed delta does not rescan every thread.
   const NO_TASKS = { running: [], finished: [] };
-  const relatives = $derived.by(() => {
+  // The thread list changes on every session row update (a stream bumps its
+  // own row): the same relatives keep the same object, so nothing below wakes.
+  let lastRelatives: { key: string; value: Relatives } | null = null;
+  type Relatives = { children: ReturnType<typeof mapChildThreadSummaries>; parent: { id: string; title: string } | null; delegated: { id: string; title: string; provider: string; status: string; startedAt: string | null }[] };
+  const relatives = $derived.by((): Relatives | null => {
     if (!threadId) return null;
     const rt = runtimeThreads.get(threadId);
-    perfCount('detailsRelatives');
     const all = Object.values(runtimeThreads.byId);
     const parent = anyThread(rt?.parent_id ?? delegatedParentId(ws.getSession(threadId)));
-    return {
+    const value: Relatives = {
       children: rt ? mapChildThreadSummaries(linkedChildren(all, threadId)) : [],
       parent: parent ? { id: parent.id, title: parent.title } : null,
       // Delegated terminal threads, and a council's other seats (peers that
@@ -151,6 +160,11 @@
         ...all.filter((x) => x.parent_id === threadId && councilOf(x)),
       ].map((x) => ({ id: x.id, title: x.title, provider: x.provider, status: ws.statusMap[x.id] ?? x.status, startedAt: ((x.meta as Record<string, unknown> | null | undefined)?.last_turn_started_at as string | undefined) ?? null })),
     };
+    const key = JSON.stringify(value);
+    if (lastRelatives?.key === key) return lastRelatives.value;
+    perfCount('detailsRelatives');
+    lastRelatives = { key, value };
+    return value;
   });
   // The same object the conversation reads (sharedAgentTasks), kept while a
   // streamed chunk changes no task: the section below then does not rerun.
@@ -199,6 +213,11 @@
 
   /** Opens a thread from the card; on a phone the details drawer gives way to it. */
   function openThread(id: string): void {
+    if (agents) {
+      if (runtimeThreads.get(id)) ws.openSession(id, 'thread');
+      ws.navigateToSession(id);
+      return;
+    }
     if (threads.inspectorCompact) threads.setInspectorOpen(false);
     openChildThread(id);
   }
@@ -208,7 +227,7 @@
    *  right panel it heads. */
   function openSubagent(r: SubagentRow): void {
     if (r.threadId) openThread(r.threadId);
-    else threads.setInspectorOpen(true);
+    else if (!agents) threads.setInspectorOpen(true);
   }
 
   // Compact past 10k (T3: "1m", not "1000k") so huge diffs keep the row calm.
@@ -289,7 +308,7 @@
   const ACTION_ICON = { commit: 'commit', push: 'arrowUp', publish: 'arrowUp', 'create-pr': 'pr', pr: 'pr', none: 'pr' } as const;
 </script>
 
-<section class="dc-card" class:floating aria-label="Thread details" data-testid="thread-details-card">
+<DetailsCard label="Thread details" {floating} testid="thread-details-card">
   {#if short}
     <button type="button" class="dc-row dc-summary" aria-expanded={expanded} title={expanded ? 'Fold the thread details' : 'Show the thread details'} data-testid="details-summary" onclick={() => (expanded = !expanded)}>
       <Icon name="folder" size={14} />
@@ -311,7 +330,7 @@
         aria-haspopup="menu"
         title="Open the folder in Files, Git or a terminal; project scripts"
         data-testid="details-open-in"
-        onclick={() => openInEl && openOpenInMenu(openInEl, { cwd: project, repo })}
+        onclick={() => openInEl && openOpenInMenu(openInEl, { cwd: project, repo, files: agents ? () => ui.openRight('files') : undefined })}
       >Open in<Icon name="chevronDown" size={12} /></button>
       {#if ondismiss}
         <button type="button" class="icon-btn dc-x" aria-label="Hide thread details" title="Hide thread details (⋯ › View brings them back)" data-testid="details-dismiss" onclick={ondismiss}>
@@ -328,7 +347,7 @@
         <span class="dc-label mono" dir="ltr">{branch ?? 'Detached HEAD'}</span>
         <Icon name="chevronDown" size={12} />
       </button>
-      {#if action.kind !== 'none'}
+      {#if action.kind !== 'none' && !agents}
       <div class="dc-line">
         <button
           type="button"
@@ -347,7 +366,7 @@
         </button>
       </div>
       {/if}
-      <button type="button" class="dc-row" title="Review the working-tree changes" data-testid="details-changes" onclick={() => threads.setInspectorTab('changes')}>
+      <button type="button" class="dc-row" title="Review the working-tree changes" data-testid="details-changes" onclick={() => (agents ? ui.openRight('git') : threads.setInspectorTab('changes'))}>
         <Icon name="file" size={14} />
         <!-- One source with the git row above: the status's changed files (a binary
              or untracked file adds no lines, yet it is a change to commit). -->
@@ -421,7 +440,7 @@
     </div>
   {/if}
   {/if}
-</section>
+</DetailsCard>
 
 {#snippet subagent(r: SubagentRow)}
   <div class="dc-line" data-testid="details-subagent" data-word={r.word}>
@@ -461,130 +480,12 @@
 {/if}
 
 <style>
-  .dc-card {
-    display: flex;
-    flex-direction: column;
-    min-inline-size: 0;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-l);
-    background: var(--surface);
-    font-size: var(--fs-m);
-    overflow: hidden;
-  }
-  .dc-card.floating {
-    box-shadow: var(--shadow-card);
-  }
-  .dc-group {
-    display: flex;
-    flex-direction: column;
-    padding-block: var(--sp-3);
-  }
-  .dc-group + .dc-group {
-    border-block-start: 1px solid var(--border);
-  }
-  .dc-line {
-    display: flex;
-    align-items: center;
-    min-inline-size: 0;
-  }
-  .dc-row {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-5);
-    min-inline-size: 0;
-    min-block-size: 34px;
-    padding-inline: var(--sp-6);
-    border: 0;
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    text-align: start;
-    cursor: pointer;
-  }
-  .dc-grow {
-    flex: 1;
-  }
-  .dc-row :global(svg) {
-    flex-shrink: 0;
-    color: var(--text-dim);
-  }
-  button.dc-row:hover:not(:disabled) {
-    background: var(--hover);
-  }
-  .dc-row:disabled {
-    cursor: default;
-    color: var(--text-dim);
-  }
-  .dc-static {
-    cursor: default;
-  }
-  .dc-dim {
-    color: var(--text-dim);
-  }
-  .dc-label {
-    flex: 1;
-    min-inline-size: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .dc-end-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--sp-2);
-    flex: none;
-    block-size: 28px;
-    padding-inline: var(--sp-4);
-    margin-inline-end: var(--sp-3);
-    border: 0;
-    border-radius: var(--radius-m);
-    background: transparent;
-    color: var(--text-dim);
-    font: inherit;
-    cursor: pointer;
-  }
-  .dc-end-btn:hover {
-    background: var(--hover);
-    color: var(--text);
-  }
-  .dc-x,
-  .dc-more {
-    flex: none;
-    margin-inline-end: var(--sp-3);
-    color: var(--text-dim);
-  }
-  .dc-end {
-    flex: none;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    font-variant-numeric: tabular-nums;
-  }
-  .dc-warn {
-    color: var(--warning);
-  }
-  .dc-danger {
-    color: var(--danger);
-  }
-  .dc-stat {
-    display: inline-flex;
-    gap: var(--sp-3);
-    font-size: var(--fs-s);
-    font-variant-numeric: tabular-nums;
-  }
+
   .dc-add {
     color: var(--success);
   }
   .dc-del {
     color: var(--danger);
-  }
-  .dc-cap {
-    padding-block: var(--sp-3);
-    padding-inline: var(--sp-6);
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-  }
-  .dc-cap {
-    margin: 0;
   }
   .dc-word {
     flex: none;
@@ -603,25 +504,5 @@
   }
   .dc-word[data-word='Done'] {
     color: var(--success);
-  }
-  .dc-note {
-    margin: 0;
-    padding-block: var(--sp-3);
-    padding-inline: var(--sp-6);
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
-  /* Touch: every control is a full finger-sized target (44 px, Apple's HIG). */
-  @media (pointer: coarse) {
-    .dc-row,
-    .dc-end-btn,
-    .dc-x,
-    .dc-more {
-      min-block-size: 44px;
-    }
-    .dc-x,
-    .dc-more {
-      min-inline-size: 44px;
-    }
   }
 </style>

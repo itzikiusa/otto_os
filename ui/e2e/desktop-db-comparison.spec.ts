@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { mockDbRoutes, seedMockDbConnection } from './db-mock';
-import { expectNoHorizontalOverflow } from './helpers';
+import { expectNoHorizontalOverflow, setDbView } from './helpers';
 
 const suffix = Math.random().toString(36).slice(2, 8);
 const EAST = `comparison-east-${suffix}`;
@@ -87,10 +87,11 @@ async function fixture(page: Page): Promise<{ calls: QueryCall[]; revoke: () => 
 }
 
 async function openConnection(page: Page, name: string): Promise<void> {
-  const picker = page.locator('.side-switch [role="tab"]', { hasText: 'Connections' }).first();
-  if (await picker.isVisible()) await picker.click();
-  await page.locator('.conn-list .conn-name', { hasText: name }).first().click();
-  await expect(page.locator('.conn-tab.active .conn-tab-name')).toHaveText(name);
+  // The list is its own page: from the workbench, go back to it first.
+  await page.locator('.conn-list, .db-root').first().waitFor();
+  if (await page.locator('.db-root').isVisible()) await page.getByRole('button', { name: 'All connections', exact: true }).click();
+  await page.locator('.conn-list .tr-title', { hasText: name }).first().click();
+  await expect(page.getByTestId('page-header').locator('h1')).toHaveText(name);
   await expect(page.locator('.query-editor')).toBeVisible();
 }
 async function draft(page: Page, statement: string): Promise<void> {
@@ -102,16 +103,17 @@ async function draft(page: Page, statement: string): Promise<void> {
 }
 async function run(page: Page, statement: string, marker: string): Promise<void> {
   await draft(page, statement);
-  await page.locator('.query-editor').locator('.btn.small.primary').filter({ hasText: 'Run' }).first().click();
+  await page.locator('.btn.small.primary').filter({ hasText: 'Run' }).first().click();
   await expect(page.locator('.query-editor .grid')).toContainText(marker);
 }
 async function compareTwo(page: Page): Promise<void> {
-  await page.goto('/#/database');
+  await page.goto('/#/connections');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
   await openConnection(page, EAST);
   await run(page, EAST_SQL, 'East customer one');
   await draft(page, EAST_DRAFT);
-  await page.getByRole('button', { name: 'Compare results', exact: true }).click();
+  await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click();
+  await page.getByRole('menuitem', { name: 'Compare results', exact: true }).click();
   await expect(page.getByTestId('connection-comparison')).toContainText('East customer one');
   await openConnection(page, WEST);
   await run(page, WEST_SQL, 'West customer one');
@@ -143,7 +145,7 @@ for (const scheme of ['light', 'dark'] as const) {
     const eastOption = selector.locator('option').filter({ hasText: EAST });
     await selector.selectOption(await eastOption.getAttribute('value') ?? '');
     await comparison.getByRole('button', { name: 'Focus source', exact: true }).click();
-    await expect(page.locator('.conn-tab.active .conn-tab-name')).toHaveText(EAST);
+    await expect(page.getByTestId('page-header').locator('h1')).toHaveText(EAST);
     await expect(page.locator('.query-editor .cm-content')).toHaveText(EAST_DRAFT);
     await comparison.getByRole('button', { name: 'Clear comparison', exact: true }).click();
     await expect(comparison).toHaveCount(0);
@@ -165,7 +167,8 @@ test('source closure and permission revocation remove the comparison and any cel
   await expect(comparison).toHaveCount(0);
   await expect(page.getByRole('dialog', { name: 'Cell value' })).toHaveCount(0);
   await expect(page.locator('.query-editor .cm-content')).toHaveText(WEST_DRAFT);
-  await page.getByRole('button', { name: 'Compare results', exact: true }).click();
+  await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click();
+  await page.getByRole('menuitem', { name: 'Compare results', exact: true }).click();
   await expect(comparison).toContainText('West customer one');
   await page.locator('.conn-tab').filter({ hasText: WEST }).getByRole('button', { name: 'Close connection tab' }).click();
   await expect(comparison).toHaveCount(0);
@@ -210,12 +213,12 @@ test('revocation dismisses the comparison cell menu before it can copy revoked d
 test('the pin survives switching to a connection saved on Structure', async ({ page }) => {
   const { calls } = await fixture(page);
   await compareTwo(page);
-  await page.getByRole('tab', { name: 'Structure', exact: true }).click();
+  await setDbView(page, 'Structure');
   await page.locator('.conn-tab').filter({ hasText: EAST }).locator('.conn-tab-name').click();
   await expect(page.getByTestId('connection-comparison')).toContainText('East customer one');
   await page.locator('.conn-tab').filter({ hasText: WEST }).locator('.conn-tab-name').click();
-  await expect(page.getByRole('tab', { name: 'Structure', exact: true })).toHaveAttribute('aria-selected', 'true');
-  await page.getByRole('tab', { name: 'Query', exact: true }).click();
+  await expect(page.getByTestId('db-conn-state')).toContainText('Structure');
+  await setDbView(page, 'Query');
   await expect(page.getByTestId('connection-comparison')).toContainText('East customer one');
   await expect(page.locator('.query-editor .cm-content')).toHaveText(WEST_DRAFT);
   expect(calls).toHaveLength(2);
@@ -225,7 +228,7 @@ test('the registered comparison command opens Query from Structure', async ({ pa
   const { calls } = await fixture(page);
   await compareTwo(page);
   await page.getByRole('button', { name: 'Clear comparison', exact: true }).click();
-  await page.getByRole('tab', { name: 'Structure', exact: true }).click();
+  await setDbView(page, 'Structure');
   await page.evaluate(async () => {
     const path = '/src/lib/commands.svelte.ts';
     const { registry } = await import(path);
@@ -233,7 +236,7 @@ test('the registered comparison command opens Query from Structure', async ({ pa
     if (!command) throw new Error('Comparison command was not registered');
     await command.run();
   });
-  await expect(page.getByRole('tab', { name: 'Query', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('.query-editor')).toBeVisible();
   await expect(page.getByTestId('connection-comparison')).toContainText('West customer one');
   expect(calls).toHaveLength(2);
 });
@@ -255,7 +258,7 @@ test('a source run completing while parked updates the comparison', async ({ pag
   });
   try {
     await draft(page, updatedSql);
-    await page.locator('.query-editor .btn.small.primary').filter({ hasText: 'Run' }).first().click();
+    await page.locator('.btn.small.primary').filter({ hasText: 'Run' }).first().click();
     await expect.poll(() => requested).toBe(true);
     await page.locator('.conn-tab').filter({ hasText: WEST }).locator('.conn-tab-name').click();
     await expect(page.locator('.query-editor .cm-content')).toHaveText(WEST_DRAFT);

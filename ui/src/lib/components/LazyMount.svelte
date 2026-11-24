@@ -6,6 +6,7 @@
   //   <LazyMount lazy={Structure} what="the structure view" />
   //   <LazyMount lazy={Sftp} what="the SFTP browser" quiet props={{ conn, onclose }} />
   //   <LazyMount lazy={History} what="the story history" variant="panel" />
+  //   <LazyMount lazy={Canvas} what="the canvas">{#snippet children(C)}<C bind:graph />{/snippet}</LazyMount>
   //
   // `quiet` is for modals/overlays: nothing renders while loading (the chunk is
   // a few ms away and a skeleton at the end of the page would flash), and a
@@ -13,8 +14,9 @@
   // `onerror` to reset the overlay's open flag on a failure, so the next open
   // (a click, ⌘N) mounts again and retries; without it the toast offers
   // "Try again". `variant` sizes the inline states: 'page' fills a route,
-  // 'panel' a tab or pane body, 'compact' a card.
-  import { untrack, type Component } from 'svelte';
+  // 'panel' a tab or pane body, 'compact' a card. `children` renders the
+  // loaded component itself, for the two-way `bind:` props cannot carry.
+  import { untrack, type Component, type Snippet } from 'svelte';
   import LoadState from './LoadState.svelte';
   import type { LazyComponent } from '../lazy-component.svelte';
   import { toasts } from '../toast.svelte';
@@ -30,8 +32,10 @@
     variant?: 'page' | 'panel' | 'compact';
     /** `quiet` only: called once when the chunk fails (reset the open flag). */
     onerror?: () => void;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    children?: Snippet<[Component<any>]>;
   }
-  let { lazy, what, props = {}, quiet = false, variant = 'page', onerror }: Props = $props();
+  let { lazy, what, props = {}, quiet = false, variant = 'page', onerror, children }: Props = $props();
 
   // A fresh mount after an earlier failure is a new attempt: clear the stale
   // error and load again (declared before the toast effect, so that effect
@@ -61,7 +65,7 @@
 
 {#if lazy.component}
   {@const C = lazy.component}
-  <C {...props} />
+  {#if children}{@render children(C)}{:else}<C {...props} />{/if}
 {:else if !quiet}
   <LoadState {what} {variant} empty loading={!lazy.error} error={lazy.error} onretry={() => lazy.retry()} />
 {/if}

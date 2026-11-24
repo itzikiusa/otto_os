@@ -30,7 +30,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { chapterAt, timeLabel, type FilmManifest } from './guide';
-  import { BUNDLED_CAPTIONS } from './sections';
+  import { BUNDLED_CAPTIONS } from './sectionsIndex';
 
   interface Props {
     film: FilmManifest | null;

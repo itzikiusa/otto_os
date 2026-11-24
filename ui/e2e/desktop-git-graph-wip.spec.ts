@@ -1,9 +1,8 @@
 import { test, expect } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 import { expectFullyInViewport, openPage } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -22,7 +21,7 @@ let repoDir = '';
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   const wsId = await seedWorkspace(ctx, base);
-  repoDir = mkdtempSync(join(tmpdir(), 'otto-e2e-wip-'));
+  repoDir = tempDir('otto-e2e-wip-');
   const git = (...a: string[]) =>
     execFileSync('git', ['-C', repoDir, ...a], { stdio: 'ignore' });
   git('init', '-q');
@@ -62,17 +61,18 @@ async function openRepo(
     await menu.getByRole('menuitem', { name }).first().click();
   }
   await expect(page.locator('.rv-tabs')).toBeVisible();
+  // A dirty repository opens on Changes; this spec drives the graph.
+  await page.locator('.rv-tab', { hasText: 'History' }).click();
 }
 
 test('WIP row → stage → commit, all on the graph', async ({ page }) => {
   await openRepo(page);
 
-  // There is no Changes/History tab any more; the Graph tab carries the dirty
-  // count badge instead.
+  // The view switch: Changes (with the dirty count) · History · Pull requests.
   const tabs = page.locator('.rv-tab');
-  await expect(tabs.filter({ hasText: 'Graph' })).toBeVisible();
-  await expect(tabs.filter({ hasText: 'Changes' })).toHaveCount(0);
-  await expect(tabs.filter({ hasText: 'History' })).toHaveCount(0);
+  await expect(tabs.filter({ hasText: 'History' })).toBeVisible();
+  await expect(tabs.filter({ hasText: 'Changes' })).toContainText('2');
+  await expect(tabs.filter({ hasText: 'Graph' })).toHaveCount(0);
 
   // The dirty working tree renders as the dashed WIP row above the graph.
   const wipRow = page.locator('.wip-row');
@@ -86,14 +86,15 @@ test('WIP row → stage → commit, all on the graph', async ({ page }) => {
   await expect(panel).toBeVisible();
   await expectFullyInViewport(page, panel, 'WIP staging panel');
 
-  // app.txt sits under Unstaged, notes.txt under Untracked; nothing staged yet. (exact: 'Staged files'
-  // is a substring of 'Unstaged files' for Playwright's default matcher.)
-  await expect(panel.getByText('Unstaged files', { exact: true })).toBeVisible();
-  await expect(panel.getByText('Staged files', { exact: true })).toBeVisible();
-  // The new file sits in its own Untracked section.
-  await expect(panel.getByText('Untracked files', { exact: true })).toBeVisible();
+  // app.txt sits under "Not included", notes.txt under the new files; nothing
+  // is included yet (the graph's WIP row never stages on open — the Changes
+  // view does).
+  await expect(panel.getByText('Not included', { exact: true })).toBeVisible();
+  await expect(panel.getByText('Included', { exact: true })).toBeVisible();
+  // The new file sits in its own section.
+  await expect(panel.getByText('New files, not included', { exact: true })).toBeVisible();
   await expect(panel.locator('.wp-file')).toHaveCount(2);
-  await expect(panel.getByText('Nothing staged yet.')).toBeVisible();
+  await expect(panel.getByText('Nothing included yet — check a file below.')).toBeVisible();
 
   // Clicking a file name opens its working diff inline in the panel.
   await panel.locator('.wp-name', { hasText: 'app.txt' }).click();
@@ -101,12 +102,15 @@ test('WIP row → stage → commit, all on the graph', async ({ page }) => {
   await expect(panel.locator('.wp-diff')).toContainText('app.txt');
   await panel.locator('.wp-diff-head .wp-close').click();
 
-  // "Stage all" moves both files into Staged and arms the commit button.
-  await panel.getByText('Stage all', { exact: true }).click();
-  await expect(panel.getByText('Nothing unstaged.')).toBeVisible({ timeout: 10_000 });
+  // "Include all" moves both files into Included and arms the commit button.
+  await panel.getByText('Include all', { exact: true }).click();
+  await expect(panel.getByText('Not included', { exact: true })).toHaveCount(0, { timeout: 10_000 });
   const commitBtn = panel.locator('.btn.primary');
   await expect(commitBtn).toContainText('Commit (2)');
-  await expect(commitBtn).toBeDisabled(); // no summary yet
+  // The Changes view this repo opened on drafted a message (the composer is
+  // per repo); without a summary Commit is disabled.
+  await panel.locator('.subject-input').fill('');
+  await expect(commitBtn).toBeDisabled(); // no summary
 
   await panel.locator('.subject-input').fill('feat: wip panel e2e commit');
   await expect(commitBtn).toBeEnabled();
@@ -133,7 +137,7 @@ test('selecting a file in a LARGE changeset shows its diff immediately', async (
   // tests in separate workers, each with its own beforeAll seed — sharing
   // REPO_NAME/repoDir would race the commit test's worker.
   const bigName = 'e2e-wip-big-repo';
-  const dir = mkdtempSync(join(tmpdir(), 'otto-e2e-wip-big-'));
+  const dir = tempDir('otto-e2e-wip-big-');
   const git = (...a: string[]) =>
     execFileSync('git', ['-C', dir, ...a], { stdio: 'ignore' });
   git('init', '-q');

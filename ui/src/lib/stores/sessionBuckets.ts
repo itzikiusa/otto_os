@@ -222,15 +222,3 @@ export function visibleWorkingCount(
   }
   return n;
 }
-
-/** A persisted open-tab list (`otto_tabs_<key>`): its string ids, or none
- *  when the payload is corrupt — a bad entry must never block selecting the
- *  workspace (restoreLayout ran an unguarded JSON.parse). */
-export function parseTabIds(raw: string | null): string[] {
-  try {
-    const v: unknown = JSON.parse(raw ?? '[]');
-    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
-  } catch {
-    return [];
-  }
-}

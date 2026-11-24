@@ -2,6 +2,7 @@
 // - which editor actions apply to a file kind (no "previous function" on a CSV or a README),
 // - the IDE status strip's items: problems, language, line ending, language-server state.
 
+import { isMakefilePath } from '../../../lib/components/makefilePath.ts';
 import type { IdeLspLinkDetail } from '../../../lib/components/cm-ide-lsp-reconnect';
 
 export type IdeFileKind = 'code' | 'markup' | 'data' | 'text';
@@ -29,7 +30,7 @@ export function ideFileKind(path: string, language?: string | null): IdeFileKind
   if (CODE_EXT.has(ext)) return 'code';
   if (MARKUP_EXT.has(ext)) return 'markup';
   if (DATA_EXT.has(ext)) return 'data';
-  if (/^(Dockerfile|Makefile|Jenkinsfile)$/i.test(path.split('/').pop() ?? '')) return 'code';
+  if (isMakefilePath(path) || /^(Dockerfile|Jenkinsfile)$/i.test(path.split('/').pop() ?? '')) return 'code';
   return language && CODE_LANGS.has(language.toLowerCase()) ? 'code' : 'text';
 }
 
@@ -59,7 +60,7 @@ const LANG_LABELS: Record<string, string> = {
   go: 'Go', rust: 'Rust', java: 'Java', kotlin: 'Kotlin', typescript: 'TypeScript', javascript: 'JavaScript',
   python: 'Python', markdown: 'Markdown', json: 'JSON', jsonl: 'JSON Lines', csv: 'CSV', tsv: 'TSV', yaml: 'YAML',
   toml: 'TOML', xml: 'XML', html: 'HTML', css: 'CSS', scss: 'SCSS', sql: 'SQL', shell: 'Shell', bash: 'Shell',
-  dockerfile: 'Dockerfile', svelte: 'Svelte', vue: 'Vue', c: 'C', cpp: 'C++', csharp: 'C#', ruby: 'Ruby', php: 'PHP',
+  dockerfile: 'Dockerfile', makefile: 'Makefile', svelte: 'Svelte', vue: 'Vue', c: 'C', cpp: 'C++', csharp: 'C#', ruby: 'Ruby', php: 'PHP',
 };
 const EXT_LANG: Record<string, string> = {
   rs: 'rust', ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript', mjs: 'javascript',
@@ -70,6 +71,7 @@ const EXT_LANG: Record<string, string> = {
 export function ideLanguageLabel(path: string, language?: string | null): string {
   const id = (language ?? '').toLowerCase();
   if (id && id !== 'plaintext' && id !== 'text') return LANG_LABELS[id] ?? id.charAt(0).toUpperCase() + id.slice(1);
+  if (isMakefilePath(path)) return 'Makefile';
   const ext = extOf(path);
   const viaExt = EXT_LANG[ext] ?? ext;
   return LANG_LABELS[viaExt] ?? 'Plain text';

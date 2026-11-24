@@ -31,6 +31,7 @@ import type {
   RunOutcome,
 } from './model';
 import { parseExplicitLimit } from './statement';
+import { isDdl } from '../../database/sql-util';
 import type { DatabaseStore } from '../database.svelte';
 
 /** The DatabaseStore members this part reads and calls (its whole contract with the façade). */
@@ -49,6 +50,7 @@ export type QueryRunsHost = Pick<
   | 'persist'
   | 'planOpen'
   | 'queryPlan'
+  | 'refreshSchema'
   | 'rowLimit'
   | 'selectedConn'
   | 'selectedConnId'
@@ -313,6 +315,8 @@ export class DbQueryRunsStore {
       t.err_statement = null;
       this.clearPending(t);
       void this.db.loadHistory(id);
+      // DDL run from here changed the schema: re-read the (cached) tree.
+      if (isDdl(sql) && this.db.selectedConnId === id) void this.db.refreshSchema();
       if (outcome) outcome.status = 'ok';
       return result;
     } catch (e) {

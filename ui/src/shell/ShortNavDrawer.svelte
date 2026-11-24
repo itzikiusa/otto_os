@@ -12,8 +12,10 @@
   import Navigator from './Navigator.svelte';
 </script>
 
-<!-- The Navigator fills its height (100 %), so it gets a flex slot that leaves
-     the footer on screen instead of pushing it out of the drawer. -->
+<!-- The Navigator scrolls as a whole above the footer: a phone on its side
+     with the browser's bars showing has ~300 px, less than the Navigator's
+     head and foot plus this footer, and a full-height Navigator squeezed its
+     module list to nothing (its foot was then drawn over this footer). -->
 <div class="sne-drawer">
   <div class="sne-nav"><Navigator /></div>
   <div class="sne" data-testid="short-nav-extras">
@@ -51,7 +53,8 @@
 
 <style>
   .sne-drawer { display: flex; flex-direction: column; block-size: 100%; min-block-size: 0; }
-  .sne-nav { flex: 1; min-block-size: 0; display: flex; flex-direction: column; }
+  .sne-nav { flex: 1; min-block-size: 0; overflow-y: auto; }
+  .sne-nav :global(.navigator) { block-size: auto; }
   .sne {
     display: flex;
     flex-direction: column;

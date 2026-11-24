@@ -1,9 +1,8 @@
 import { test, expect, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 import { openPage } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -36,7 +35,7 @@ async function seedRepo(
   files: Record<string, string>,
   dirty: Record<string, string>,
 ): Promise<{ dir: string; repoId: string }> {
-  const dir = mkdtempSync(join(tmpdir(), 'otto-e2e-hunk-'));
+  const dir = tempDir('otto-e2e-hunk-');
   const git = (...a: string[]) => execFileSync('git', ['-C', dir, ...a], { stdio: 'ignore' });
   git('init', '-q');
   git('config', 'user.email', 'e2e@otto.local');
@@ -70,6 +69,8 @@ async function openWipFile(page: Page, name: string, path: string) {
     await menu.getByRole('menuitem', { name }).first().click();
   }
   await expect(page.locator('.rv-tabs')).toBeVisible();
+  // A dirty repository opens on Changes; this spec drives the graph.
+  await page.locator('.rv-tab', { hasText: 'History' }).click();
 
   const wipRow = page.locator('.wip-row');
   await expect(wipRow).toBeVisible({ timeout: 15_000 });

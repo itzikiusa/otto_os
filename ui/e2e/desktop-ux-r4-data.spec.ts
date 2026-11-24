@@ -24,18 +24,18 @@ async function database(page:Page) {
   await page.route('**/db/capabilities',r=>r.fulfill({json:{engine:'mysql',query_language:'sql',can_write:true,explain:true}}));
   await page.route('**/db/schema**',r=>r.fulfill({json:[]}));
   await openPage(page,'database');
-  await page.locator('.conn-list .conn-name',{hasText:rows[0].name}).click();
+  await page.locator('.conn-list .tr-title',{hasText:rows[0].name}).click();
   await expect(page.locator('.qe-edit .cm-content')).toBeVisible();
   return rows;
 }
 
+// The connection list is its own page: the workbench goes back to it.
 async function showConnections(page:Page) {
-  const tab=page.getByRole('tablist',{name:'Sidebar view'}).getByRole('tab',{name:'Connections',exact:true});
-  if(await tab.isVisible()) await tab.click();
-  else {
-    const accordion=page.getByRole('button',{name:/^Connections \d+/});
-    if(await accordion.getAttribute('aria-expanded')==='false') await accordion.click();
-  }
+  await page.getByRole('button',{name:'All connections',exact:true}).click();
+}
+// Save lives in the workbench header's one ⋯.
+async function queryMenu(page:Page) {
+  await page.getByTestId('page-header').getByRole('button',{name:'More actions'}).click();
 }
 
 test('query save ignores repeated keyboard submission while a response is pending',async({page})=>{
@@ -45,7 +45,7 @@ test('query save ignores repeated keyboard submission while a response is pendin
     posts++;await held;return r.fulfill({json:{...r.request().postDataJSON(),id:'saved',created_at:'2026-09-26'}});
   });
   await database(page);await page.locator('.qe-edit .cm-content').fill('SELECT 41');
-  await page.getByRole('button',{name:'Save',exact:true}).click();
+  await queryMenu(page);await page.getByRole('menuitem',{name:/^Save query…/}).click();
   const name=page.getByPlaceholder('Query name');await name.fill('Only once');
   await name.press('Enter');await expect.poll(()=>posts).toBe(1);await name.press('Enter');
   await expect(page.locator('.save-bar').getByRole('button',{name:/Saving|Save/,exact:false}).first()).toBeDisabled();
@@ -54,23 +54,26 @@ test('query save ignores repeated keyboard submission while a response is pendin
 
 test('saved query response stays associated with its original connection after switching away and back',async({page})=>{
   let release!:()=>void;const held=new Promise<void>(r=>release=r);let sent=false;
+  // Like the daemon, the list returns what was saved: reopening the workbench re-reads it.
+  const saved:unknown[]=[];
   await page.route('**/saved-queries',async r=>{
-    if(r.request().method()!=='POST')return r.fulfill({json:[]});
-    sent=true;await held;return r.fulfill({json:{...r.request().postDataJSON(),id:'saved-original',created_at:'2026-09-26'}});
+    if(r.request().method()!=='POST')return r.fulfill({json:saved});
+    sent=true;await held;const row={...r.request().postDataJSON(),id:'saved-original',created_at:'2026-09-26'};saved.push(row);return r.fulfill({json:row});
   });
   const rows=await database(page);await page.locator('.qe-edit .cm-content').fill('SELECT primary_draft');
-  await page.getByRole('button',{name:'Save',exact:true}).click();await page.getByPlaceholder('Query name').fill('Primary saved query');
+  await queryMenu(page);await page.getByRole('menuitem',{name:/^Save query…/}).click();await page.getByPlaceholder('Query name').fill('Primary saved query');
   await page.locator('.save-bar').getByRole('button',{name:'Save',exact:true}).click();await expect.poll(()=>sent).toBe(true);
   await showConnections(page);
-  await page.locator('.conn-list .conn-name',{hasText:rows[1].name}).click();
+  await page.locator('.conn-list .tr-title',{hasText:rows[1].name}).click();
   await page.locator('.qe-edit .cm-content').fill('SELECT alternate_draft');
   const done=page.waitForResponse(r=>r.url().endsWith('/saved-queries')&&r.request().method()==='POST');release();await done;
   await expect(page.locator('.qe-edit .cm-content')).toHaveText('SELECT alternate_draft');
   await showConnections(page);
-  await page.locator('.conn-list .conn-name',{hasText:rows[0].name}).click();
+  await page.locator('.conn-list .tr-title',{hasText:rows[0].name}).click();
   await expect(page.locator('.qe-edit .cm-content')).toHaveText('SELECT primary_draft');
   await expect(page.getByRole('tablist',{name:'Query tabs'}).getByRole('tab',{selected:true})).toContainText('Primary saved query');
-  await expect(page.getByRole('button',{name:'Update',exact:true})).toBeVisible();
+  await queryMenu(page);
+  await expect(page.getByRole('menuitem',{name:/^Update saved query…/})).toBeVisible();
 });
 
 for(const variant of [
@@ -92,6 +95,8 @@ for(const variant of [
   await page.route('**/connections',r=>r.fulfill({json:[{id:'ssh',name:'Reporting bastion',kind:'ssh'}]}));
   await openPage(page,'agents');await page.keyboard.press('Meta+t');
   const sheet=page.getByRole('dialog',{name:'New session',exact:true});await expect(sheet).toBeVisible();
+  // Network profiles sit behind the stage's Options.
+  await sheet.getByTestId('ns-options').click();
   await sheet.getByRole('button',{name:'Manage network profiles'}).click();await sheet.getByRole('button',{name:'Edit Reporting services'}).click();
   mkdirSync(shots,{recursive:true});await sheet.locator('.manager').scrollIntoViewIfNeeded();
   await page.screenshot({animations:'disabled',path:`${shots}/embedded-${variant.name}.png`});
@@ -212,7 +217,7 @@ for(const mode of ['sse','websocket'] as const)test(`API ${mode} connects receiv
   await page.routeWebSocket('**/ws/api-client/stream?*',socket=>{
     socket.onMessage(data=>{const msg=JSON.parse(String(data));if(msg.action==='open') {opened=msg;socket.send(JSON.stringify({type:'open',detail:'Fixture connected'}));socket.send(JSON.stringify(mode==='sse'?{type:'event',event:'customer.updated',data:'Synthetic customer update'}:{type:'message',dir:'in',data:'Synthetic welcome'}));}else if(msg.action==='send'){sent=msg.data;socket.send(JSON.stringify({type:'message',dir:'out',data:msg.data}));}});
   });
-  await openApiEditor(page);await page.getByLabel('Request type').selectOption(mode);await page.getByLabel('Request URL',{exact:true}).fill(mode==='sse'?'https://fixture.invalid/events':'wss://fixture.invalid/messages');
+  await openApiEditor(page);await page.getByLabel('HTTP method').selectOption(mode);await page.getByLabel('Request URL',{exact:true}).fill(mode==='sse'?'https://fixture.invalid/events':'wss://fixture.invalid/messages');
   await page.getByRole('button',{name:'Connect',exact:true}).click();await expect(page.locator('.stream-log')).toContainText(mode==='sse'?'Synthetic customer update':'Synthetic welcome');expect(opened.kind).toBe(mode);
   if(mode==='websocket'){await page.getByLabel('Message to send').fill('Synthetic reply');await page.getByLabel('Message to send').press('Enter');await expect.poll(()=>sent).toBe('Synthetic reply');}
   mkdirSync(shots,{recursive:true});await page.screenshot({animations:'disabled',path:`${shots}/api-${mode}.png`});
@@ -224,7 +229,7 @@ test('API gRPC reflection and invocation recovers after a failed call',async({pa
   const {ctx}=await workspace(page);await ctx.dispose();let fail=true;let body:any;
   await page.route('**/api-client/grpc/reflect',r=>r.fulfill({json:{services:[{name:'customers.CustomerService',methods:[{name:'GetCustomer',full:'customers.CustomerService/GetCustomer',input_schema:'{"id":"fixture"}',server_streaming:false,client_streaming:false}]}]}}));
   await page.route('**/api-client/grpc/invoke',r=>{body=r.request().postDataJSON();return fail?r.fulfill({status:503,json:{code:'upstream',message:'Synthetic service unavailable'}}):r.fulfill({json:{status:200,status_text:'OK',headers:[],body:'{"name":"Synthetic customer"}',duration_ms:3,size_bytes:29,content_type:'application/json',truncated:false,too_large:false,trace:[]}});});
-  await openApiEditor(page);await page.getByLabel('Request type').selectOption('grpc');await page.getByLabel('Request URL',{exact:true}).fill('https://fixture.invalid:443');await page.getByRole('button',{name:'Load from server',exact:true}).click();
+  await openApiEditor(page);await page.getByLabel('HTTP method').selectOption('grpc');await page.getByLabel('Request URL',{exact:true}).fill('https://fixture.invalid:443');await page.getByRole('button',{name:'Load from server',exact:true}).click();
   await expect(page.getByLabel('gRPC method')).toHaveValue('customers.CustomerService/GetCustomer');await page.getByRole('button',{name:'Invoke',exact:true}).click();await expect(page.getByText('Synthetic service unavailable',{exact:true})).toBeVisible();
   fail=false;await page.getByRole('button',{name:'Invoke',exact:true}).click();await expect(page.locator('.viewer')).toContainText('Synthetic customer');expect(body.method).toBe('customers.CustomerService/GetCustomer');expect(JSON.parse(body.body)).toEqual({id:'fixture'});
   await page.locator('.viewer').scrollIntoViewIfNeeded();
@@ -256,7 +261,7 @@ for(const engine of ['redis','mongodb'] as const)test(`${engine} result editing 
   await page.route('**/db/capabilities',r=>r.fulfill({json:{engine,query_language:engine==='redis'?'redis':'mongo',can_write:true,sql:false}}));await page.route('**/db/schema**',r=>r.fulfill({json:[]}));
   const rows=engine==='redis'?{columns:[{name:'value',type_hint:'String'}],rows:[['Original value']]}:{columns:[{name:'_id',type_hint:'ObjectId'},{name:'status',type_hint:'String'},{name:'items',type_hint:'Array'}],rows:[[{ $oid:'507f1f77bcf86cd799439011'},'pending',[{qty:1}]]]};
   let queries=0;await page.route('**/db/query',r=>{queries++;expect(r.request().postDataJSON().statement).toBe(engine==='redis'?'GET synthetic:customer':'db.synthetic_customers.find({})');return r.fulfill({json:{...rows,stats:{duration_ms:2,row_count:1},truncated:false}});});
-  await openPage(page,'database');await page.locator('.conn-list .conn-name',{hasText:conn.name}).click();await page.locator('.qe-edit .cm-content').fill(engine==='redis'?'GET synthetic:customer':'db.synthetic_customers.find({})');await page.getByRole('button',{name:/^Run\s+⌘/}).click();
+  await openPage(page,'database');await page.locator('.conn-list .tr-title',{hasText:conn.name}).click();await page.locator('.qe-edit .cm-content').fill(engine==='redis'?'GET synthetic:customer':'db.synthetic_customers.find({})');await page.getByRole('button',{name:/^Run\s+⌘/}).click();
   await page.getByRole('group',{name:'Result view'}).getByRole('button',{name:'Grid',exact:true}).click();await expect(page.locator('.gt-edit-hint')).toBeVisible();
   if(engine==='redis'){await page.getByText('Original value',{exact:true}).dblclick();await page.locator('.cell-input').fill('Updated value');await page.locator('.cell-input').press('Enter');}
   else {await page.locator('.cell.json').first().click();await page.locator('.cell-viewer').getByRole('button',{name:'Edit',exact:true}).click();await page.locator('.cv-edit').fill('[{"qty":2}]');await page.locator('.cell-viewer').getByRole('button',{name:/^Save/}).click();}

@@ -1,9 +1,8 @@
 import { test, expect, type Route } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 
 // Inline PR comments carry the diff SIDE: a deleted row posts `side: old` with
 // its old number, and a thread on the old side renders under the deleted row
@@ -16,7 +15,7 @@ let workspaceId = '';
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
-  const dir = mkdtempSync(join(tmpdir(), 'otto-pr-side-'));
+  const dir = tempDir('otto-pr-side-');
   const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim();
   git('init', '-q', '-b', 'main');
   git('config', 'user.email', 'side@otto.local');
@@ -66,7 +65,7 @@ test('old-side thread renders once and a deleted-row comment posts side old', as
     void route.fulfill({ json: c });
   });
   await page.goto(`/#/git/${repoId}/pr/1`);
-  await page.getByRole('tab', { name: 'Code', exact: true }).click();
+  await page.getByRole('tab', { name: 'Files', exact: true }).click();
   const diff = page.locator('.prd-code');
   await expect(diff.getByText('Why drop this line?')).toHaveCount(1);
   // The outdated thread is a file-level comment with a chip.

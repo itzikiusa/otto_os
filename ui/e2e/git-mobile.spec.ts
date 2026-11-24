@@ -1,9 +1,8 @@
 import { test, expect, type Page, type TestInfo } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace, seedGitRepo, seedConflictRepo, seedDirtyRepo } from './seed';
+import { apiCtx, seedWorkspace, seedGitRepo, seedConflictRepo, seedDirtyRepo, tempDir } from './seed';
 
 // Durable mobile/tablet-layout coverage for the Git page. Asserts the REAL
 // workflow on a phone AND in the tablet/landscape range: the commit graph/list
@@ -107,6 +106,9 @@ async function expectFitsWidth(page: Page): Promise<void> {
  * and the DiffViewer cells (.code).
  */
 async function expectDiffCodeReachable(page: Page): Promise<void> {
+  // The file block's header paints before its lines (they mount a frame
+  // later, later still under load): wait for a code cell, then measure.
+  await expect(page.locator('.dl-code, td.code, .vrow .code').locator('visible=true').first(), 'diff code cells should be present').toBeVisible({ timeout: 15_000 });
   const m = await page.evaluate(() => {
     const cells = Array.from(
       document.querySelectorAll('.dl-code, td.code, .vrow .code'),
@@ -211,18 +213,21 @@ test('graph: sections are a collapsible accordion at mobile/tablet widths', asyn
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// LEGACY ROUTES — Changes and History were folded into the graph (WIP row +
-// commit detail). Old deep links must still land somewhere useful.
+// DEEP LINKS — #/git/<repo>/changes opens Changes (the commit card), and the
+// legacy #/git/<repo>/history lands on History (the graph).
 // ────────────────────────────────────────────────────────────────────────────
 
-test('legacy changes/history deep links land on the graph', async ({ page }) => {
-  for (const legacy of ['changes', 'history']) {
-    await page.goto(`/#/git/${repoId}/${legacy}`);
-    await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
-    await expect(page.locator('.graph-row').first()).toBeVisible({ timeout: 25_000 });
-    await expect(page.locator('.rv-tabs .rv-tab', { hasText: 'Graph' })).toHaveAttribute('aria-selected', 'true');
-    await expectFitsWidth(page);
-  }
+test('changes/history deep links land on their views', async ({ page }) => {
+  await page.goto(`/#/git/${repoId}/changes`);
+  await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator('.rv-tabs .rv-tab', { hasText: 'Changes' })).toHaveAttribute('aria-selected', 'true', { timeout: 25_000 });
+  // A clean tree: the card says so and offers the next step.
+  await expect(page.getByTestId('commit-card-next')).toContainText('Nothing to commit');
+  await expectFitsWidth(page);
+  await page.goto(`/#/git/${repoId}/history`);
+  await expect(page.locator('.graph-row').first()).toBeVisible({ timeout: 25_000 });
+  await expect(page.locator('.rv-tabs .rv-tab', { hasText: 'History' })).toHaveAttribute('aria-selected', 'true');
+  await expectFitsWidth(page);
 });
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -245,7 +250,7 @@ test.describe('pull requests: review state', () => {
 
   test('pull requests: each open row says where its review stands, and fits', async ({ page }) => {
     // A Bitbucket remote from the start (the forge is read when the repo is added).
-    const dir = mkdtempSync(join(tmpdir(), 'otto-e2e-bb-'));
+    const dir = tempDir('otto-e2e-bb-');
     for (const args of [['init', '-q'], ['remote', 'add', 'origin', 'https://bitbucket.org/acme/app.git'], ['-c', 'user.email=e2e@otto.local', '-c', 'user.name=E2E', 'commit', '-q', '--allow-empty', '-m', 'init']]) {
       execFileSync('git', ['-C', dir, ...args], { stdio: 'ignore' });
     }
@@ -264,21 +269,33 @@ test.describe('pull requests: review state', () => {
         row(2, { status: 'changes_requested', approvals: 1 }),
         row(3, { status: 'waiting', approvals: 0 }),
         row(4, null),
+        { ...row(5, { status: 'waiting', approvals: 0 }), asks_me: true },
       ], has_more: false, page: 1, per_page: 50 } }),
     );
     // Nothing reaches the real forge: per-row reads (diff stats, …) answer 404.
     await page.route(`**/api/v1/repos/${r.repoId}/prs/**`, (route) => route.fulfill({ status: 404, json: { error: 'stub' } }));
     await page.goto(`/#/git/${r.repoId}/prs`);
-    await expect(page.getByTestId('pr-review')).toHaveCount(3, { timeout: 25_000 });
-    const chip = (n: number) => page.locator('.pr-row', { hasText: `#${n}` }).getByTestId('pr-review');
-    await expect(chip(1)).toHaveText('2 approvals');
-    await expect(chip(1)).toHaveAttribute('aria-label', 'Approved — 2 approvals');
-    await expect(chip(2)).toHaveText('Changes requested');
-    await expect(chip(3)).toHaveText('Awaiting review');
-    await expect(chip(4)).toHaveCount(0);
-    await chip(1).scrollIntoViewIfNeeded();
-    await expect(chip(1)).toBeInViewport();
+    await expect(page.getByTestId('pr-word')).toHaveCount(5, { timeout: 25_000 });
+    const word = (n: number) => page.locator(`.pr-row[data-pr="${n}"]`).getByTestId('pr-word');
+    await expect(word(1)).toHaveText('Ready to merge');
+    await expect(word(2)).toHaveText('Changes requested');
+    await expect(word(3)).toHaveText('Waiting for review');
+    await expect(word(4)).toHaveText('Open');
+    await expect(word(5)).toHaveText('Review requested');
+    // The one that asks you leads, under "Needs you".
+    await expect(page.locator('.pr-row').first()).toHaveAttribute('data-pr', '5');
+    await expect(page.getByRole('region', { name: 'Needs you' })).toContainText('Pull request 5');
+    await word(1).scrollIntoViewIfNeeded();
+    await expect(word(1)).toBeInViewport();
     await expectFitsWidth(page);
+    // Chrome before 128 gives a <button> `align-items: flex-start` (UA sheet,
+    // seen on the Android emulator): a long title must still end in an
+    // ellipsis inside its row, not run past it under the select box.
+    await page.addStyleTag({ content: 'button { align-items: flex-start; }' });
+    const pr1 = page.locator('.pr-row[data-pr="1"] .tr-main');
+    const rowBox = (await pr1.boundingBox())!;
+    const titleBox = (await pr1.locator('.tr-title').boundingBox())!;
+    expect(titleBox.x + titleBox.width).toBeLessThanOrEqual(rowBox.x + rowBox.width);
   });
 });
 
@@ -302,10 +319,35 @@ test('diffviewer: a WIP file diff fits and its code is reachable', async ({ page
   await page.locator('.wip-row').click();
   const panel = page.locator('.wip-panel');
   await expect(panel).toBeVisible({ timeout: 15_000 });
+  // The commit card sits above the list: the panel scrolls as a whole, so the
+  // last file is reachable (its own scroller was 50 px tall on a phone).
+  await panel.locator('.wp-name').last().scrollIntoViewIfNeeded();
+  await expect(panel.locator('.wp-name').last()).toBeInViewport();
+  await panel.locator('.wp-name').first().scrollIntoViewIfNeeded();
   await panel.locator('.wp-name').first().click();
-  await expect(panel.locator('.wp-diff')).toBeVisible({ timeout: 15_000 });
+  const diff = page.locator('.wp-diff');
+  await expect(diff).toBeVisible({ timeout: 15_000 });
+  // The diff renders after its fetch: measure once a code row is on screen.
+  await expect(diff.locator('.dl-code, td.code, .vrow .code').first()).toBeVisible({ timeout: 15_000 });
+  const sheet = page.getByTestId('wip-diff-sheet');
+  const phone = page.viewportSize()!.width <= 640;
+  // A phone's sheet slides in from the side: measure once it has landed.
+  if (phone) await expect.poll(async () => Math.round((await diff.boundingBox())!.x)).toBeLessThanOrEqual(1);
   await expectFitsWidth(page);
   await expectDiffCodeReachable(page);
+  if (phone) {
+    // Phone: file → diff is a pushed full-height sheet; the system Back closes
+    // it (lib/backCloses) and leaves you on the Changes list, same URL.
+    await expect(sheet).toBeVisible();
+    expect((await diff.boundingBox())!.height).toBeGreaterThan(page.viewportSize()!.height * 0.6);
+    const url = page.url();
+    await page.goBack();
+    await expect(sheet).toHaveCount(0);
+    await expect(panel.locator('.wp-name').first()).toBeVisible();
+    expect(page.url()).toBe(url);
+  } else {
+    await expect(sheet).toHaveCount(0); // tablets keep it under the list
+  }
 });
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -354,15 +396,22 @@ async function expectElemFits(page: Page, selector: string): Promise<void> {
 test('shell: repo tab strip + new-tab + sub-route nav + toolbar fit', async ({ page }) => {
   await page.goto(`/#/git/${repoId}/graph`);
   await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
-  // Repo tab strip renders; the "+" (open repo) button stays reachable on-screen.
-  await expect(page.locator('.git-tabs')).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator('.git-tab-new')).toBeVisible();
-  await expectElemFits(page, '.git-tab-new');
-  // The per-repo sub-route nav (graph/prs/review; Focus is a page-level view)
-  // renders with all tabs and never overflows the document (it scrolls within
-  // its own strip).
+  if (page.viewportSize()!.width <= 640) {
+    // A phone keeps one header row: the repo is the title, a switcher.
+    await expect(page.getByTestId('git-phone-repo')).toBeVisible({ timeout: 15_000 });
+    await expectElemFits(page, '[data-testid="git-phone-repo"]');
+    await expect(page.locator('.git-tabs')).toHaveCount(0);
+  } else {
+    // Repo tab strip renders; the "+" (open repo) button stays reachable on-screen.
+    await expect(page.locator('.git-tabs')).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('.git-tab-new')).toBeVisible();
+    await expectElemFits(page, '.git-tab-new');
+  }
+  // The ONE view switch (Changes · History · Pull requests · Review; Focus is
+  // a page-level view) renders with all views and never overflows the
+  // document (it scrolls within its own strip).
   await expect(page.locator('.rv-tabs')).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator('.rv-tabs .rv-tab')).toContainText(['Graph', 'Pull requests', 'Review']);
+  await expect(page.locator('.rv-tabs .rv-tab')).toContainText(['Changes', 'History', 'Pull requests', 'Review']);
   // The git verbs (Fetch/Pull/Push/…) live in the page header's actions.
   await expect(page.locator('.ph-actions').first()).toBeVisible();
   await expectFitsWidth(page);
@@ -387,14 +436,25 @@ test('shell: many open repo tabs scroll instead of overflowing the page', async 
   // already visible after the first goto, so waiting on it was a no-op and a
   // fast second hash hop raced the tab registration (S12-304, git-mobile:331).
   const ids = [repoId, dirtyRepoId, conflictRepoId];
+  const phone = page.viewportSize()!.width <= 640;
+  const openCount = (): Promise<number> =>
+    page.evaluate(() => (JSON.parse(localStorage.getItem('otto_git_open_tabs') ?? '{}').openRepoIds ?? []).length);
   for (const [i, id] of ids.entries()) {
     await page.goto(`/#/git/${id}/graph`);
     await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
-    await expect(page.locator('.git-tab')).toHaveCount(i + 1, { timeout: 15_000 });
+    if (phone) await expect.poll(openCount, { timeout: 15_000 }).toBe(i + 1);
+    else await expect(page.locator('.git-tab')).toHaveCount(i + 1, { timeout: 15_000 });
   }
-  await expect(page.locator('.git-tab')).toHaveCount(3, { timeout: 15_000 });
-  // New-tab affordance still reachable even with several tabs open.
-  await expectElemFits(page, '.git-tab-new');
+  if (phone) {
+    // The title's switcher lists every open repo (one header row, no strip).
+    await page.getByTestId('git-phone-repo').click();
+    await expect(page.locator('.ctx-menu').getByRole('menuitem').filter({ hasText: /e2e|repo/ }).first()).toBeVisible();
+    await page.keyboard.press('Escape');
+  } else {
+    await expect(page.locator('.git-tab')).toHaveCount(3, { timeout: 15_000 });
+    // New-tab affordance still reachable even with several tabs open.
+    await expectElemFits(page, '.git-tab-new');
+  }
   await expectFitsWidth(page);
 });
 

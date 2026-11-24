@@ -14,10 +14,6 @@ export function isCompactPrHeaderTab(tab: PrTabId): boolean {
 }
 
 export interface PrCloseLabels {
-  /** Action button in Summary footer ("Close PR…" vs "Decline…"). */
-  button: string;
-  /** In-flight button text ("Closing…" vs "Declining…"). */
-  busy: string;
   /** Confirm modal verb ("Close PR" vs "Decline PR"). */
   verb: string;
   /** Confirm modal title builder. */
@@ -35,8 +31,6 @@ export interface PrCloseLabels {
 export function prCloseLabels(provider: string | null | undefined): PrCloseLabels {
   if (provider === 'bitbucket') {
     return {
-      button: 'Decline…',
-      busy: 'Declining…',
       verb: 'Decline PR',
       title: (n) => `Decline PR #${n}?`,
       menu: 'Decline pull request…',
@@ -45,8 +39,6 @@ export function prCloseLabels(provider: string | null | undefined): PrCloseLabel
     };
   }
   return {
-    button: 'Close PR…',
-    busy: 'Closing…',
     verb: 'Close PR',
     title: (n) => `Close pull request #${n}?`,
     menu: 'Close pull request…',
@@ -192,4 +184,20 @@ export function clampLinePickPos(
     top: Math.max(gap, Math.min(viewport.height - h - gap, top)),
     left: Math.max(gap, Math.min(viewport.width - w - gap, rect.left)),
   };
+}
+
+/** Host of a remote URL for the unsupported-forge message — handles
+ *  https://, ssh:// and scp-like (git@host:path) forms (mirrors the daemon's
+ *  detect.rs split). */
+export function remoteHost(url: string | null): string {
+  if (!url) return 'this remote';
+  const u = url.trim();
+  for (const scheme of ['https://', 'http://', 'ssh://', 'git://']) {
+    if (u.startsWith(scheme)) {
+      const rest = u.slice(scheme.length).replace(/^[^@/]+@/, '');
+      return rest.split('/')[0]?.split(':')[0] || 'this remote';
+    }
+  }
+  const scp = u.match(/^(?:[^@/]+@)?([^:/]+):/);
+  return scp?.[1] ?? 'this remote';
 }

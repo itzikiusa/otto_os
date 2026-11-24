@@ -62,6 +62,8 @@ test('Walkthroughs: the count region is empty until a search, then says the firs
   assert.equal(searchCountText('g', 7), '7 guides');
   assert.equal(searchCountText('git', 1), '1 guide');
   assert.equal(searchCountText(' zzz ', 0), 'No guides match “zzz”');
+  // The guide text (one lazy chunk) is still on its way: the region says so.
+  assert.equal(searchCountText('git', 0, false), 'Loading the guides…');
 });
 
 test('VariantsTray: progress is spoken at the run’s edges, not per card, and not for a finished run', () => {

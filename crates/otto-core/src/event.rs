@@ -686,6 +686,11 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resource_id: Option<Id>,
     },
+    /// The connection library changed: a saved profile was created, edited,
+    /// pinned, duplicated, imported or deleted, or the shared section tree
+    /// changed. A cue only (no data): clients refetch
+    /// `GET /workspaces/{id}/connections` and its sections.
+    ConnectionsChanged {},
     /// The caller's notice list changed without a new notice (mark-read,
     /// read-all, dismiss, clear). Owner-only; clients refetch
     /// `GET /notifications` (the tray's "needs you" glyph).
@@ -809,6 +814,7 @@ impl Event {
             Event::SecretRequestUpdated { .. } => "secret_request_updated",
             Event::McpApprovalChanged { .. } => "mcp_approval_changed",
             Event::ResourceAccessChanged { .. } => "resource_access_changed",
+            Event::ConnectionsChanged { .. } => "connections_changed",
             Event::NotificationsChanged { .. } => "notifications_changed",
             Event::IdeFsChanged { .. } => "ide_fs_changed",
             Event::DbMcpActivity { .. } => "db_mcp_activity",
@@ -928,6 +934,7 @@ mod tests {
             Event::NotificationsChanged {
                 user_id: "u".into(),
             },
+            Event::ConnectionsChanged {},
             Event::IdeFsChanged {
                 user_id: "u".into(),
                 client_id: "c".into(),

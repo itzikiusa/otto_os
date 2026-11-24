@@ -19,7 +19,6 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import CreatePr from './CreatePr.svelte';
   import { LANE_W, NODE_R, type LaneRow } from './graph-lanes';
   import { branchTracking } from './refTracking';
   import { normPath, primaryChip, shouldCollapseRow, stashShortMsg, type RefChip as Chip } from './ref-menus';
@@ -162,6 +161,8 @@
 
   // The "▾ +N" popover (graph/refPopoverState); its view loads on first open.
   const RefPopover = lazyComponent(() => import('./graph/RefPopover.svelte'));
+  // The New pull request sheet loads with its first open (not with the graph).
+  const CreatePrLazy = lazyComponent(() => import('./CreatePr.svelte'));
   const refPop = createRefPopover({
     get refs() { return data.refs; },
     get selectedSha() { return sel.selectedSha; },
@@ -394,15 +395,10 @@
 
   <!-- Create-PR sheet, opened from a branch/commit context menu. -->
   {#if createPrOpen}
-    <CreatePr
-      {repoId}
-      initialSource={createPrSource}
-      onclose={() => (createPrOpen = false)}
-      oncreated={() => {
-        createPrOpen = false;
-        void data.refreshAfter();
-      }}
-    />
+    <LazyMount lazy={CreatePrLazy} what="the New pull request sheet" quiet onerror={() => (createPrOpen = false)} props={{
+      repoId, initialSource: createPrSource, onclose: () => (createPrOpen = false),
+      oncreated: () => { createPrOpen = false; void data.refreshAfter(); },
+    }} />
   {/if}
 
   <!-- ── RIGHT: commit detail + diff / WIP staging panel ─────────────────── -->
@@ -698,7 +694,10 @@
     cursor: pointer;
   }
   .graph-select { flex: 1; height: 100%; }
-  .ref-select { flex-shrink: 1; min-width: auto; } /* floor: the chip's icons + a few letters */
+  /* min-width 0 down the chain (button → chip): an automatic minimum reads
+     the label's full nowrap width as the floor, so a long branch name
+     pushed out of the cell's start. The label keeps its own 3ch floor. */
+  .ref-select { flex-shrink: 1; min-width: 0; }
   .graph-row:has(.graph-select:focus-visible) {
     outline: 2px solid var(--accent-text);
     outline-offset: -2px;
@@ -911,7 +910,7 @@
      overflowed a 156px (or 76px with the detail open) cell and, being
      end-aligned, got clipped at its START — "gin/CS3-15178-goo…" lost both
      ends. The HEAD badge and the +N expander stay rigid. */
-  .branch-cell :global(.ref-chip) { flex-shrink: 1; }
+  .branch-cell :global(.ref-chip) { flex-shrink: 1; min-width: 0; }
 
   /* ── Multi-ref collapse: the "▾ +N" expander + its grouped popover ──────────── */
   .ref-expander {

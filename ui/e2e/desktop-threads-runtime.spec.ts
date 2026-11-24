@@ -824,6 +824,7 @@ test('a 4,000-token stream follows the bottom with at most one layout per frame'
     const tick = (): void => { if (!w.__counting) return; w.__frames++; requestAnimationFrame(tick); };
     requestAnimationFrame(tick);
   });
+  await page.evaluate(() => ((window as unknown as { __ottoPerfCounts: Record<string, number> }).__ottoPerfCounts = {}));
   const l0 = await layouts();
   const sent = await ctx.post(`${base}/api/v1/runtime-sessions/${id}/prompt`, { data: { text: 'stream:4000:3' } });
   expect(sent.ok(), await sent.text()).toBeTruthy();
@@ -833,6 +834,13 @@ test('a 4,000-token stream follows the bottom with at most one layout per frame'
   // A layout per frame is the browser's own; more means something read
   // layout between events (the follow used to, once per streamed event).
   expect(forced, `${forced} layouts over ${frames} frames`).toBeLessThanOrEqual(frames + 10);
+  // A streamed chunk wakes the live turn, not the rest (lib/perfCount.ts):
+  // the details card's sections, the turn changes and the subagent rows
+  // stay put while only the answer grows.
+  const counts = await page.evaluate(() => (window as unknown as { __ottoPerfCounts: Record<string, number> }).__ottoPerfCounts);
+  for (const k of ['detailsSubagents', 'turnChangesByTurn', 'turnSubagents']) {
+    expect(counts[k] ?? 0, `${k} re-ran ${counts[k]} times during one stream`).toBeLessThanOrEqual(20);
+  }
   // Still following: the end of the answer is in view.
   const scroller = thread.locator('.rt-scroll');
   await expect.poll(() => scroller.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeLessThan(40);

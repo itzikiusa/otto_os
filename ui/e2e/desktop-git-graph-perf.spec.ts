@@ -1,9 +1,8 @@
 import { test, expect, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PERF GATE — the commit graph on a 12k-commit, 20-lane history (desktop
@@ -28,10 +27,12 @@ test.skip(({ isMobile, browserName }) => isMobile || browserName !== 'chromium',
 const TOTAL = 12_000;
 const LANES = 20;
 const PAGE = 10_000;
-const FIRST_PAGE = 2_000;
+const FIRST_PAGE = 200;
+const SCROLL_PAGE = 1_000;
 
 let repoId = '';
 let workspaceId = '';
+let repoDir = '';
 
 interface C { sha: string; short_sha: string; author: string; date: string; subject: string; parents: string[]; refs: string[] }
 
@@ -69,7 +70,7 @@ function history(extra: number): C[] {
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
-  const dir = mkdtempSync(join(tmpdir(), 'otto-e2e-graph-perf-'));
+  const dir = (repoDir = tempDir('otto-e2e-graph-perf-'));
   const git = (...a: string[]) => execFileSync('git', ['-C', dir, ...a], { stdio: 'ignore' });
   git('init', '-q', '-b', 'main');
   git('config', 'user.email', 'e2e@otto.local');
@@ -124,9 +125,9 @@ test(`graph of ${TOTAL} commits × ${LANES} lanes: fast first paint, incremental
     }
     await route.fulfill({ json: body });
   });
-  await page.route('**/api/v1/repos/*/refs', async (route) => {
-    const res = await route.fetch();
-    const real = await res.json();
+  // The refs match the synthetic history wherever they are read: `/refs` and
+  // the repository overview the graph's first refs come from.
+  const synthRefs = (real: { local: { sha: string }[] }) => {
     const local = Array.from({ length: LANES }, (_, i) => ({
       name: `branch-${i}`,
       sha: i === 0 && extra > 0 ? `e${String(extra).padStart(39, '0')}` : sha(i),
@@ -134,7 +135,17 @@ test(`graph of ${TOTAL} commits × ${LANES} lanes: fast first paint, incremental
       upstream: null,
       remote: false,
     }));
-    await route.fulfill({ json: { ...real, local: [...real.local, ...local] } });
+    // The real branches (one made by the ref move below) stay on the synthetic tip.
+    return { ...real, local: [...real.local.map((b) => ({ ...b, sha: sha(0) })), ...local] };
+  };
+  await page.route('**/api/v1/repos/*/refs', async (route) => {
+    const res = await route.fetch();
+    await route.fulfill({ json: synthRefs(await res.json()) });
+  });
+  await page.route('**/api/v1/repos/*/overview', async (route) => {
+    const res = await route.fetch();
+    const o = await res.json();
+    await route.fulfill({ json: o.refs ? { ...o, refs: synthRefs(o.refs) } : o });
   });
   // The toolbar Fetch is the "a ref moved" trigger; the repo has no remote,
   // so answer it with the live status (a successful fetch bumps refsRev).
@@ -152,21 +163,17 @@ test(`graph of ${TOTAL} commits × ${LANES} lanes: fast first paint, incremental
   expect(paintMs, 'first page painted within 1 s of arriving').toBeLessThan(1000);
   expect(logLimits[0]).toEqual({ limit: FIRST_PAGE, skip: 0 });
 
-  // The next page is prefetched without any scroll; its layout resumes
-  // (10k appended rows laid out, not 12k).
-  await expect.poll(() => logLimits.length, { timeout: 15_000 }).toBeGreaterThanOrEqual(2);
-  expect(logLimits[1]).toEqual({ limit: PAGE, skip: FIRST_PAGE });
-  await expect.poll(() => layoutRows(page), { timeout: 15_000 }).toBe(TOTAL - FIRST_PAGE);
-  await page.waitForTimeout(300);
-  expect(await maxLongTask(page), 'first layout + 10k prefetch').toBeLessThan(200);
-  // Windowed: 12k commits never mount 12k rows.
+  // Windowed history: nothing more is read until the reader scrolls.
+  await page.waitForTimeout(1_000); // ui-guards: allow — proves no prefetch fires on its own
+  expect(logLimits.length, 'no prefetch of the rest of history').toBe(1);
+  // Windowed rows too: never more than a screenful mounted.
   expect(await page.locator('.graph-row[data-sha]').count()).toBeLessThan(200);
 
-  // Load more: scroll to the bottom → one more request, which finds the root.
+  // Load more: scroll to the bottom → one SCROLL_PAGE more.
   await resetLongTasks(page);
   await page.locator('.graph-panel').evaluate((el) => (el.scrollTop = el.scrollHeight));
-  await expect.poll(() => logLimits.length, { timeout: 15_000 }).toBeGreaterThanOrEqual(3);
-  expect(logLimits[2]).toEqual({ limit: PAGE, skip: TOTAL });
+  await expect.poll(() => logLimits.length, { timeout: 15_000 }).toBeGreaterThanOrEqual(2);
+  expect(logLimits[1]).toEqual({ limit: SCROLL_PAGE, skip: FIRST_PAGE });
   expect(await maxLongTask(page), 'load more + scroll').toBeLessThan(200);
 
   // A ref moves (one new commit on branch-0) → reload reads ONE page and
@@ -174,8 +181,10 @@ test(`graph of ${TOTAL} commits × ${LANES} lanes: fast first paint, incremental
   extra = 1;
   const before = logLimits.length;
   await resetLongTasks(page);
-  await page.getByRole('button', { name: 'Fetch and pull options', exact: true }).click();
-  await page.getByRole('menuitem', { name: 'Fetch', exact: true }).click();
+  // A ref made outside Otto (a terminal, an agent): the repo watcher's live
+  // refresh re-syncs the graph. (It used to click Fetch, which this remote-less
+  // repo disables — the click then waited out the test timeout.)
+  execFileSync('git', ['-C', repoDir, 'branch', '-f', 'ref-move'], { stdio: 'ignore' });
   await expect.poll(() => logLimits.length, { timeout: 15_000 }).toBeGreaterThan(before);
   await page.waitForTimeout(500);
   const reloads = logLimits.slice(before);
@@ -191,5 +200,5 @@ test(`graph of ${TOTAL} commits × ${LANES} lanes: fast first paint, incremental
   await page.locator('.graph-panel').evaluate((el) => (el.scrollTop = 0));
   await expect(page.locator(`.graph-row[data-sha="e${'1'.padStart(39, '0')}"]`)).toBeVisible({ timeout: 10_000 });
   const total = await page.locator('.graph-panel').evaluate((el) => Math.round(el.scrollHeight));
-  expect(total, 'scroll height still covers the whole spliced history').toBeGreaterThan(TOTAL * 20);
+  expect(total, 'scroll height still covers the paged-in history').toBeGreaterThan((FIRST_PAGE + SCROLL_PAGE) * 20);
 });

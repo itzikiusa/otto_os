@@ -66,7 +66,7 @@ Two storage layers cooperate:
 | **Metrics sampler** | `crates/otto-usage/src/metrics.rs` + `crates/otto-server/src/monitor.rs` | Host/process telemetry via `sysinfo`, sampled on a loop. |
 | **Budgets** | `crates/otto-server/src/budget/` (`BudgetGate`) + `crates/otto-usage/src/budget_dedup.rs` | Spend caps, status rows, the admission check, and de-duplicated crossing events. The `/usage/budgets` routes in `routes/usage.rs` are its HTTP faces. |
 | **HTTP routes** | `crates/otto-server/src/routes/usage.rs` | All `/usage/*` endpoints + `/ingest/usage`. |
-| **UI** | `ui/src/modules/usage/` (`UsagePage.svelte`, `AttributionDrilldown.svelte`, `CostForecastChip.svelte`) | The dashboard, attribution drilldown, and forecast chip. |
+| **UI** | `ui/src/modules/usage/` (`UsagePage.svelte` frame, `UsageOverview.svelte`, `DailyChart.svelte`, `WhereItWent.svelte`, `UsageDetails.svelte`, `AttributionDrilldown.svelte`, `CostForecastChip.svelte`) | The first screen in words — what is left per login (`RemainingLimits`), "This month ≈ $X · on track for $Y" (`usageOutlook.ts`), one chart (cost by default), one "Where it went" table switched by Provider · Model · Feature · Session · Work item with one Export — and the details card (budgets, system load, storage). Opening the page requests status, summary, budgets and limits; the forecast, attribution and system metrics load only when their view opens. Report and Diagnostics are reached from ⋯ (Diagnostics also from the link at the bottom). |
 
 The engine is started once at daemon boot
 (`UsageEngine::start(usage_config, data_dir)` in `crates/otto-server/src/boot/build.rs`) and
@@ -206,7 +206,7 @@ sends neither) records nothing. A turn cut off by a daemon restart is not
 recorded.
 
 **Terminal sessions** on gemini, opencode and pi are **not measured**: the
-Usage page's *By provider* panel names those providers (when used or installed)
+Usage page's *Where it went › Provider* view names those providers (when used or installed)
 instead of letting a missing bar read as zero.
 
 ### 3.4 No double-counting, true-time stamping

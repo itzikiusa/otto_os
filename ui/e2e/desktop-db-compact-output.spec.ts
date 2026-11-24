@@ -32,7 +32,7 @@ async function openQuery(page: Page, scheme: 'light' | 'dark'): Promise<void> {
   await page.addInitScript(value => localStorage.setItem('otto_scheme', value), scheme);
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible();
-  await page.locator(`.conn-row[data-connection-id="${connId}"] .conn-name`).click();
+  await page.locator(`.conn-row[data-connection-id="${connId}"] .tr-title`).click();
   const editor = page.locator('.qe-edit .cm-content');
   await expect(editor).toBeVisible();
   await editor.click();
@@ -56,7 +56,8 @@ for (const width of [390, 560]) for (const scheme of ['light', 'dark'] as const)
         columns: [{ name: 'id', type_hint: 'BIGINT' }, { name: 'status', type_hint: 'VARCHAR(20)' }],
         rows: Array.from({ length: 100 }, (_, i) => [offset + i + 1, 'paid']),
         stats: { row_count: 100, duration_ms: 1234, bytes_read: 65536 },
-        truncated: false, auto_limited: 100,
+        // Drivers fetch one row past the page: `truncated` is what says a next page exists.
+        truncated: offset === 0, auto_limited: 100,
       } });
     });
     await openQuery(page, scheme);
@@ -103,7 +104,7 @@ for (const scheme of ['light', 'dark'] as const) {
       } });
     });
     await openQuery(page, scheme);
-    await page.getByTestId('qe-more').click();
+    await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click();
     await page.getByRole('menuitem', { name: 'Query plan (EXPLAIN)' }).click();
     const plan = page.locator('.plan-panel');
     await expect(plan).toBeVisible();

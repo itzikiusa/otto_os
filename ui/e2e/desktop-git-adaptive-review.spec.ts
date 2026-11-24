@@ -1,9 +1,8 @@
 import { test, expect, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 import type { Finding } from '../src/lib/api/types';
 
 // Real isolated app/repository; forge/review/goal responses are fixtures. No agent is launched.
@@ -27,7 +26,7 @@ function review(status = 'done') {
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
-  const dir = mkdtempSync(join(tmpdir(), 'otto-adaptive-review-'));
+  const dir = tempDir('otto-adaptive-review-');
   const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { stdio: 'ignore' });
   git('init', '-q', '-b', 'main'); git('config', 'user.name', 'E2E'); git('config', 'user.email', 'e2e@example.invalid'); git('config', 'commit.gpgsign', 'false');
   writeFileSync(join(dir, 'auth.rs'), 'permission_check();\n'); git('add', '.'); git('commit', '-qm', 'seed');
@@ -62,8 +61,8 @@ async function openReview(page: Page, status = 'done') {
   await page.route('**/api/v1/reviews/review-adaptive/findings', r => r.fulfill({ json: [finding] }));
   await page.route('**/api/v1/reviews/review-adaptive/merge-readiness', r => r.fulfill({ json: { unresolved_total: 1, unresolved_blocker: 1, total: 1, complete: true } }));
   await page.goto(`/#/git/${repoId}/pr/1`);
-  await expect(page.getByRole('tab', { name: 'AI review', exact: true })).toBeVisible();
-  await page.getByRole('tab', { name: 'AI review', exact: true }).click();
+  // The saved view is the AI review: the page reopens on it.
+  await expect(page.getByRole('tab', { name: 'AI review', exact: true })).toHaveAttribute('aria-selected', 'true');
 }
 
 test('scope explains exact lenses and keeps excluded claims out of comments', async ({ page }, info) => {

@@ -109,8 +109,9 @@
 
   // Deduped: split() clones the focused id into the new pane, so a raw pane
   // list can carry the same session twice — the broadcast would hit it twice.
+  // Terminals only: a thread pane has no PTY to type into.
   const broadcastTargets = $derived(
-    [...new Set(ws.panes.filter((id) => id !== DB_PANE_ID))],
+    [...new Set(ws.panes.filter((id) => id !== DB_PANE_ID && !ws.threadPanes.includes(id)))],
   );
 
   // The target sessions determine the workspace, including scratch. Never

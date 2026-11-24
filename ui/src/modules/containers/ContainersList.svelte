@@ -258,6 +258,7 @@
                   <div class="ct-item-main">
                     <div class="ct-item-top">
                       <span class="ct-item-name" title={c.name}>{c.name}</span>
+                      <span class="ct-item-state" data-testid="container-state">{st.label}</span>
                       {#if health}
                         <span class="ct-health ct-health-{health.tone}" title={`Health: ${health.label}`}>
                           {health.label}
@@ -438,6 +439,17 @@
   .ct-item.selected {
     background: var(--accent-soft);
     border-color: var(--accent-line);
+  }
+  /* Phone: the row is the tap target. */
+  @media (pointer: coarse) {
+    .ct-item {
+      min-block-size: 44px;
+    }
+  }
+  .ct-item-state {
+    flex: none;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
   }
   .ct-dot {
     inline-size: 8px;

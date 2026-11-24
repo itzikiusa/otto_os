@@ -177,7 +177,7 @@
       items.push({ label: 'Sign in…', icon: 'key', disabled: !configure, action: () => void oauth(s, signIn) }, { label: 'Sign out…', icon: 'key', disabled: !configure, action: () => void oauth(s, signOut) });
     }
     items.push({
-      label: to === 'governed' ? 'Run through Otto’s gateway…' : 'Run natively…',
+      label: to === 'governed' ? 'Run through Otto…' : 'Run directly…',
       icon: 'server',
       disabled: !configure || blocked != null,
       title: blocked ?? undefined,
@@ -283,7 +283,7 @@
             <span class="runs" data-testid="mcp-server-runs-badge">
               <span class="runs-mode">Runs: {RUNS_LABEL[serverRuns(s)]}</span>
               {#if native}
-                <span class="ungoverned" title={NOT_GOVERNED_NOTE}>Not governed</span>
+                <span class="ungoverned" title={NOT_GOVERNED_NOTE}>No policy or audit</span>
                 <span class="runs-note">{NOT_GOVERNED_NOTE}</span>
               {/if}
             </span>

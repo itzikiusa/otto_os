@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { openFloatingBar } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sidebar sections (desktop-browser only): the Navigator groups its modules
@@ -235,6 +236,11 @@ test('collapsed Rail: section separators, unique glyphs, accent selection', asyn
 });
 
 test('runtime plugins get their own trailing section (Navigator and Rail)', async ({ page }) => {
+  // A plugin in the "used lately" list (else it waits under More: lib/sidebarMore.ts).
+  await page.addInitScript(() => {
+    const used = JSON.parse(localStorage.getItem('otto_sidebar_used') || '[]') as string[];
+    localStorage.setItem('otto_sidebar_used', JSON.stringify([...used, 'plugin/e2e-sidebar-plugin']));
+  });
   await boot(page, 'home', '1', [{ slug: 'e2e-sidebar-plugin', name: 'E2E Sidebar Plugin', icon: 'box', has_ui: true }]);
   await expect(group(page, 'plugins')).toBeVisible();
   const ids = await page
@@ -260,7 +266,7 @@ test('⌘K reaches Vault, Workflows and Rooms (derived from the registry)', asyn
     ['Rooms', 'rooms', 'Work'],
   ] as const) {
     // ⌘K focuses the floating bar — the desktop command surface.
-    await page.keyboard.press('Meta+k');
+    await openFloatingBar(page);
     await page.keyboard.type(`go to ${label}`);
     const item = page.getByTestId('floating-bar').getByRole('option').filter({ hasText: `Go to ${label}` }).first();
     await expect(item).toBeVisible();
@@ -272,7 +278,7 @@ test('⌘K reaches Vault, Workflows and Rooms (derived from the registry)', asyn
     await expect(row(page, label)).toHaveClass(/active/);
   }
   // Tools no longer masquerade as session commands.
-  await page.keyboard.press('Meta+k');
+  await openFloatingBar(page);
   await page.keyboard.type('update all clis');
   await expect(
     page.getByTestId('floating-bar').getByRole('option').filter({ hasText: 'Update all CLIs' }).first().locator('.opt-meta'),

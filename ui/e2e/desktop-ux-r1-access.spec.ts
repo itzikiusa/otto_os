@@ -67,6 +67,8 @@ async function openSession(page: Page) {
   await page.keyboard.press('Meta+t');
   const dialog = page.getByRole('dialog', { name: 'New session', exact: true });
   await expect(dialog).toBeVisible();
+  // The working folder (and its Browse…) lives under the stage's Options.
+  await dialog.getByTestId('ns-options').click();
   return dialog;
 }
 

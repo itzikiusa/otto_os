@@ -2,16 +2,16 @@
 // === '1'` or `localStorage.otto_mock === '1'`. It monkey-patches window.fetch (for /api/v1/*) and
 // window.WebSocket (for /ws/*) so client.ts stays untouched.
 
-import { MOCK_ME, mockBigPrDiff, mockCommitDiff, mockExtraPrs, mockIsMine, mockPrCommits, mockPrExtras, mockPrLive } from './mock-prs';
+import { MOCK_ME, mockBigPrDiff, mockCommitDiff, mockExtraPrs, mockIsMine, mockPrChecks, mockPrCommits, mockPrExtras, mockPrLive } from './mock-prs';
 import { prReviewMockRoutes, type MockPrRef } from './mock-pr-comments';
 import { slackMockRoutes } from './mock-slack';
 import { machineMockRoutes } from './mock-machine';
+import { accessMockRoutes } from './mock-access';
 import { usageLimitsMockRoutes } from './mock-usage-limits';
 import { runtimeMockRoutes } from './mock-runtime';
 import { workflowsMockRoutes } from './mock-workflows';
 import type {
-  AwsAccount, AwsPermissions,
-  MetricUnit,
+  AwsAccount, AwsPermissions, MetricUnit,
   RdsInstance,
   AwsStatus,
   AthenaExecution,
@@ -971,7 +971,7 @@ const k8sRoutes: Route[] = [
 const routes: Route[] = [
   ...k8sRoutes,
   ...slackMockRoutes,
-  ...machineMockRoutes, ...usageLimitsMockRoutes,
+  ...machineMockRoutes, ...usageLimitsMockRoutes, ...accessMockRoutes,
   ...runtimeMockRoutes, ...workflowsMockRoutes,
   ...prReviewMockRoutes((rid, num) => prs.find((p) => p.repo_id === rid && p.summary.number === num)),
   { method: 'GET', re: /^\/health$/, handle: () => ({ json: { ok: true } }) },
@@ -1862,33 +1862,8 @@ const routes: Route[] = [
   // The Git page is workspace-independent and reads every repo from here; the
   // mock had no handler, so a PR deep-link found no repo to render.
   { method: 'GET', re: /^\/git\/repos$/, handle: () => ({ json: repos }) },
-  // Merge-modal fixtures: one passing + one failing check, so the modal's
-  // "CI failing" reason and the "Merge anyway" override are both exercised.
-  {
-    method: 'GET',
-    re: /^\/repos\/([^/]+)\/prs\/(\d+)\/checks$/,
-    handle: () => ({
-      json: {
-        ci: { state: 'failure', total: 2, passed: 1, failed: 1, url: 'https://ci.example.com/run/9' },
-        checks: [
-          {
-            name: 'build',
-            state: 'success',
-            url: 'https://ci.example.com/run/9/build',
-            started_at: ago(30),
-            completed_at: ago(28),
-          },
-          {
-            name: 'lint',
-            state: 'failure',
-            url: 'https://ci.example.com/run/9/lint',
-            started_at: ago(30),
-            completed_at: ago(29),
-          },
-        ],
-      },
-    }),
-  },
+  // Per PR (mock-prs.ts mockPrChecks): failing by default, #50 running, #52 green.
+  { method: 'GET', re: /^\/repos\/([^/]+)\/prs\/(\d+)\/checks$/, handle: (m) => ({ json: mockPrChecks(m[2]) }) },
   {
     method: 'GET',
     re: /^\/repos\/([^/]+)\/prs\/(\d+)\/readiness$/,

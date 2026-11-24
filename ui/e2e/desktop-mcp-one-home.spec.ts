@@ -51,12 +51,12 @@ test('Settings ▸ MCP servers lands on the Control Plane’s Servers page', asy
   await expect(labels.filter({ hasText: /^MCP servers$/ })).toHaveCount(0);
 });
 
-test('a native server shows its mode and the Not governed badge', async ({ page }) => {
+test('a direct server shows its mode and the No policy or audit badge', async ({ page }) => {
   await page.goto('/#/mcp/servers');
   const r = row(page, 'native-fixture');
   await expect(r).toHaveAttribute('data-runs', 'native', { timeout: 30_000 });
-  await expect(r.getByTestId('mcp-server-runs-badge')).toContainText('Runs: Native');
-  await expect(r.getByText('Not governed', { exact: true })).toBeVisible();
+  await expect(r.getByTestId('mcp-server-runs-badge')).toContainText('Runs: Direct');
+  await expect(r.getByText('No policy or audit', { exact: true })).toBeVisible();
   await expect(r).toContainText('no policy, approval or audit applies');
   // Native rows edit (no Discover: Otto never connects to them).
   await expect(r.getByRole('button', { name: 'Discover', exact: true })).toHaveCount(0);
@@ -74,13 +74,13 @@ test('switching to governed confirms the tool-name change, and switching back re
   await expect(r).toHaveAttribute('data-runs', 'native', { timeout: 30_000 });
 
   await r.getByRole('button', { name: 'More actions for native-fixture' }).click();
-  await page.getByRole('menuitem', { name: 'Run through Otto’s gateway…' }).click();
+  await page.getByRole('menuitem', { name: 'Run through Otto…' }).click();
   const confirm = page.getByRole('dialog');
   await expect(confirm).toContainText('mcp__native-fixture__<tool>');
   await expect(confirm).toContainText('skills and prompts that name the native tools must be updated');
-  await confirm.getByRole('button', { name: 'Switch to governed', exact: true }).click();
+  await confirm.getByRole('button', { name: 'Run through Otto', exact: true }).click();
   await expect(r).toHaveAttribute('data-runs', 'governed');
-  await expect(r.getByText('Not governed', { exact: true })).toHaveCount(0);
+  await expect(r.getByText('No policy or audit', { exact: true })).toHaveCount(0);
 
   // The daemon agrees: one row, now managed (governed).
   const { ctx } = await apiCtx();
@@ -90,9 +90,9 @@ test('switching to governed confirms the tool-name change, and switching back re
   expect(mine[0].managed).toBe(true);
 
   await r.getByRole('button', { name: 'More actions for native-fixture' }).click();
-  await page.getByRole('menuitem', { name: 'Run natively…' }).click();
+  await page.getByRole('menuitem', { name: 'Run directly…' }).click();
   await expect(page.getByRole('dialog')).toContainText('No policy, approval or audit applies');
-  await page.getByRole('dialog').getByRole('button', { name: 'Switch to native', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Run directly', exact: true }).click();
   await expect(r).toHaveAttribute('data-runs', 'native');
   const after = await (await ctx.get(`${base}/api/v1/workspaces/${workspace}/mcp/servers`)).json();
   expect((after as { id: string; managed: boolean }[]).find((s) => s.id === nativeId)?.managed).toBe(false);
@@ -105,7 +105,7 @@ test('the merged list fits a phone in light and dark', async ({ page }) => {
     await page.emulateMedia({ colorScheme: scheme });
     await page.goto('/#/mcp/servers');
     const r = row(page, 'native-fixture');
-    await expect(r.getByText('Not governed', { exact: true })).toBeVisible({ timeout: 30_000 });
+    await expect(r.getByText('No policy or audit', { exact: true })).toBeVisible({ timeout: 30_000 });
     await expect(r.getByRole('button', { name: 'Edit', exact: true })).toBeVisible();
     await expectNoHorizontalOverflow(page);
     await page.screenshot({ path: `/tmp/otto-mcp-one-home-phone-${scheme}.png` });

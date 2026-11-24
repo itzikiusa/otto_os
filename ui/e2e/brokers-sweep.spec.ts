@@ -402,12 +402,9 @@ test('schema registry tab renders without error', async ({ page }) => {
   await expect(page.locator('.schema')).toBeVisible({ timeout: 15_000 });
   // Fresh Redpanda registry → no subjects, but the panel must render its
   // empty/list state (not a thrown error / not stuck loading).
-  await expect
-    .poll(async () => (await page.locator('.schema .muted', { hasText: 'Loading' }).count()), {
-      timeout: 15_000,
-      message: 'schema finished loading',
-    })
-    .toBe(0);
+  // Loading is a skeleton (no "Loading" text): wait for the list or the
+  // empty/error pane to replace it.
+  await expect(page.locator('.schema .list, .schema .empty').first(), 'schema finished loading').toBeVisible({ timeout: 15_000 });
   // Either the subject list (with "No subjects registered.") or an error empty
   // state; assert the list container exists OR the empty pane renders.
   const hasList = await page.locator('.schema .list').count();
@@ -437,7 +434,8 @@ test('wide content scrolls internally; page never overflows across all tabs', as
   // is a bounded x-scroller rather than pushing the page wide.
   if (await isPhoneLayout(page)) {
     const tabScroll = await page.evaluate(() => {
-      const el = document.querySelector('.tabs') as HTMLElement | null;
+      // The cluster view's tab strip: the shared Tabs list is the scroller.
+      const el = document.querySelector<HTMLElement>('[role="tablist"][aria-label="Kafka cluster views"]');
       if (!el) return null;
       const c = getComputedStyle(el);
       return { overflowX: c.overflowX, scrollW: el.scrollWidth, clientW: el.clientWidth };

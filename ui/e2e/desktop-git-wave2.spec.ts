@@ -1,9 +1,8 @@
 import { test, expect, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 
 // Git bug hunt 2026-11-16, wave 2 (UI-only regressions):
 // - the header toolbar's "Browse stashes…" opened a 0×0 dialog that PageHeader's
@@ -16,7 +15,7 @@ let workspaceId = '';
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
-  const dir = mkdtempSync(join(tmpdir(), 'otto-e2e-wave2-'));
+  const dir = tempDir('otto-e2e-wave2-');
   const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim();
   git('init', '-q', '-b', 'main');
   git('config', 'user.email', 'e2e@otto.local');
@@ -48,10 +47,11 @@ async function openRepo(page: Page) {
 
 test('the header "Browse stashes…" dialog is visible and leaves Pull in place', async ({ page }) => {
   await openRepo(page);
-  const pull = page.locator('.git-header .ph-actions').getByRole('button', { name: /^Pull/ }).first();
+  // Fetch is the header's one visible verb; branch & stash ride its ⋯.
+  const pull = page.locator('.git-header .ph-actions').getByRole('button', { name: 'Fetch', exact: true });
   await expect(pull).toBeVisible();
-  await page.getByRole('button', { name: 'Branch and stash', exact: true }).click();
-  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Browse stashes…' }).click();
+  await page.locator('.git-header .ph-more').click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: /^Browse stashes/ }).click();
   const dialog = page.getByRole('dialog', { name: 'Stashes' });
   await expect(dialog).toBeVisible();
   const box = await dialog.boundingBox();

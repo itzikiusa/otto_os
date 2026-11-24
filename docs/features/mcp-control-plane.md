@@ -48,7 +48,7 @@ the token kind, and the routes.
 | **Gateway** | `ottod mcp-tools` surfaces governed downstream tools (namespaced `mcp__<server>__<tool>`) and proxies them through the same pipeline. |
 | **Persistence** | SQLite (migration **0077**): augmented `mcp_servers` + `mcp_tools`, `mcp_allowlist`, `mcp_policies`, `mcp_call_log`, `mcp_approvals`. |
 | **RBAC** | `Feature::Mcp` (`mcp`): reads = **View**, mutations/invoke = **Edit**, posture (policy writes/import, outward config, approvals) = **Admin**; stdio registration = **Admin** in-handler. |
-| **UI** | Three sections replace eight tabs: **Otto server** is the default (`#/mcp`), **External servers** (`#/mcp/servers`) holds every MCP server — native and governed (§3.1.1) — with tools/rules, and **Activity** (`#/mcp/activity`) holds approvals, audit, and per-tool stats. Detailed controls use progressive disclosure. |
+| **UI** | **Overview** is the default (`#/mcp`): the approvals waiting for you as inbox rows (who asks, the request, what it will do; **Approve** the one primary, **Deny** beside it; a bottom sheet on a phone), and when nothing waits four sentences — servers connected · tools agents may use · what asks first · recent denials — each with one link. **Tools** (`#/mcp/otto`) is Otto's own server: session attach, external clients, auto-approve rules and the tool catalog (collapsed by category, searchable, windowed; full descriptions behind Details). **External servers** (`#/mcp/servers`) holds every MCP server — *Direct* and *Through Otto* (§3.1.1) — and **Activity** (`#/mcp/activity`) holds the approval history, audit and per-tool stats. An outage is one notice line with one Retry. Approvals refresh on the `mcp_approval_changed` event (every approval write emits it); the poll runs only while the event socket is down. |
 | **Defaults** | Outward server **off**; dangerous-tool approval **on**; health sweep every **300 s**. |
 
 ---
@@ -91,7 +91,7 @@ the token kind, and the routes.
 | **Capability endpoints** | `crates/otto-server/src/mcp_capabilities.rs` | `code-search`, `context-packet`, `proof-pack` (injection-safe). |
 | **stdio binaries** | `crates/ottod/src/{mcp_server,mcp_tools}.rs` | The outward (`ottod mcp-server`) + inward (`ottod mcp-tools`) servers. |
 | **Persistence** | `crates/otto-state/migrations/0077_mcp_control_plane.sql` + `mcp_control.rs` | The six tables + repos. |
-| **UI** | `ui/src/modules/mcp/` | Three-section shell: Otto server home, external servers with embedded tools/rules, and activity with approvals/audit/stats. |
+| **UI** | `ui/src/modules/mcp/` | `McpHome` (Overview: waiting approvals, else the four sentences of `mcpHome.ts`), `OttoServerHome` + `ToolCatalog` (Tools; rows from `toolCatalog.ts`), external servers, profiles, and activity with approvals/audit/stats. |
 
 The **External servers** section is workspace-scoped: with no workspace selected it
 asks you to select one before managing governed servers and tools. The default Otto
@@ -163,8 +163,8 @@ Each row says how it **runs**:
 
 | Runs | Who launches it | Tool names in the agent | Governance |
 |---|---|---|---|
-| **Native** | the agent CLI, from each session's `.mcp.json` (codex `-c`, agy/grok/pi launchers alike) | the server's own (`get_issue`) | none: the row carries a **Not governed** badge — no policy, approval or audit applies |
-| **Governed** | Otto's gateway (stdio child of the daemon, or remote http) | `mcp__<server>__<tool>` | allowlist, per-tool switches, policy, approval, dry-run, audit (§4) |
+| **Direct** (native) | the agent CLI, from each session's `.mcp.json` (codex `-c`, agy/grok/pi launchers alike) | the server's own (`get_issue`) | none: the row says **Runs: Direct** with a **No policy or audit** badge — no policy, approval or audit applies |
+| **Through Otto** (governed) | Otto's gateway (stdio child of the daemon, or remote http) | `mcp__<server>__<tool>` | allowlist, per-tool switches, policy, approval, dry-run, audit (§4) |
 
 There is one table, `mcp_servers`, and its `managed` column **is** the mode
 (`true` governed, `false` native), so a server is never both. A native server is
@@ -174,8 +174,8 @@ session in the workspace reads, so per-person rules can't follow it
 enabled + unmanaged + stdio + not Enforced; the gateway and the invoke gate skip
 an unmanaged Legacy server).
 
-- **Add server** asks **Runs**: *Governed* registers through
-  `POST /workspaces/{wid}/mcp/servers` as before; *Native* (stdio only) goes
+- **Add server** asks **Runs**: *Through Otto* registers through
+  `POST /workspaces/{wid}/mcp/servers` as before; *Direct* (stdio only) goes
   through `POST /workspaces/{wid}/mcp-servers`, the route Settings used. Both are
   owner-only.
 - A native row offers **Edit** (name, command, arguments, env, secret env — a
@@ -199,7 +199,7 @@ an unmanaged Legacy server).
     through the row's `secret_ref`; no value is copied into SQLite or a log.
   - Sessions already running keep what they started with until they restart.
 - The per-workspace `otto` server switch (Settings' "Connections MCP") is
-  **Attach to sessions** on the Otto server page (§3.2); there is one copy.
+  **Give sessions … Otto's read-only tools** on the Tools page (§3.2); there is one copy.
 
 **Upgrading.** Every row used to be `managed`, so a stdio server without an
 Enforced access policy (one added under Settings before access policies) ran
@@ -215,7 +215,7 @@ direct-only.
 At `#/mcp`, use **Attach to sessions in _workspace_** to control whether newly
 started sessions in that workspace receive Otto's built-in MCP server. Toggle
 **Expose to external clients** and choose which `otto.*` tools external clients may
-use from the **External tool catalog**, a filterable checklist grouped by feature
+use from the **Otto tools** catalog on the Tools page — one row per feature category, collapsed, searchable and windowed; each tool says Off · Allowed · Asks first · Runs without asking, grouped by feature
 category with per-group **All/None**.
 
 Session tools come from the inward `ottod mcp-tools` catalog, which **also** offers
@@ -223,8 +223,8 @@ every tool enabled here that it doesn't serve natively (e.g. `otto_create_pr`),
 proxied through the same governed choke point — so the checklist, and the approval
 setting below, apply to Otto sessions as well as external clients.
 
-**Auto-approve — mutating calls without a human approval (opt-in).** Enabling a
-mutating tool makes it *callable*; each call still waits for a human approval by
+**Auto-approve — calls that change things, without a human approval (opt-in).** Turning on a
+tool that can change things (a *mutating* tool) makes it *callable*; each call still waits for a human approval by
 default. An **auto-approve rule** is the explicit, opt-in exception — mainly so agents
 can open PRs (`otto_create_pr`) without someone clicking Approve each time. A rule
 names **what** and **where**:
@@ -234,13 +234,11 @@ names **what** and **where**:
 | **What** | one mutating tool (`create_pr`), or every mutating tool of a catalog **category** (`Git`, `Issues`, `Sessions`, `Message Brokers`, …) — a category rule also covers tools added to it later |
 | **Where** | **Everywhere** (global) · **one workspace** (the workspace the call lands in — for git tools, the repo's workspace) · **one agent session** (calls made with that Otto session's credential; the rule is deleted with the session) |
 
-Manage rules in **MCP → Otto server → Auto-approve** (**New rule**; on/off switch and
+Manage rules in **MCP → Tools → Auto-approve** (**New rule**; on/off switch and
 delete per rule) — MCP Admin, signed in as a person: an agent session's own credential
-(or any MCP token) is refused, so an agent can never auto-approve its own calls. The **External tool catalog** shows the effect: under
-every enabled mutating tool an **Auto-approve everywhere** switch (a global per-tool
-rule) plus a badge for every other rule that covers it, and per category an
-**Auto-approve every _category_ write** switch (a global category rule). The header
-counts the tools some rule auto-approves.
+(or any MCP token) is refused, so an agent can never auto-approve its own calls. The **Otto tools** catalog shows the effect: a tool's state reads **Runs without asking**, and its **Details** carry an **Auto-approve everywhere** switch (a global per-tool
+rule) plus a line for every other rule that covers it; a category's ⋯ carries
+**Auto-approve every _category_ write** (a global category rule).
 
 - **Off by default.** No rule ⇒ the call is gated exactly as before.
 - **Nothing is silent.** An auto-approved call still runs every other gate (per-token
@@ -296,8 +294,8 @@ thereafter. The disclosure includes this install snippet for an external agent's
 `OTTO_MCP_BASE` (defaults to `http://127.0.0.1:<port>`). It is **off by default**
 (`mcp_otto_server_enabled = false`) — nothing is exposed to outside clients until an
 admin enables it. The switch does not apply to Otto's own sessions (threads and agent
-sessions calling with their per-session token): they reach every tool ticked under
-**Otto server**, still through approval, RBAC and agent policy.
+sessions calling with their per-session token): they reach every tool turned on under
+**Tools**, still through approval, RBAC and agent policy.
 
 ### 3.2.1 Reach it over HTTP, not only locally — the Streamable-HTTP transport
 
@@ -349,7 +347,7 @@ shows tools the scope permits (a read-only token never even sees a mutating tool
 *before* the global-enable and approval gates. The scope can never *widen* access — it
 is always intersected with the server's enabled set and the owner's RBAC.
 
-Manage tokens under **Otto server → Connect an external client → Access tokens**, or
+Manage tokens under **Tools → Connect an external client → Access tokens**, or
 over the API (`mcp:admin`):
 
 ```

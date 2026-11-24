@@ -1,23 +1,3 @@
-<script lang="ts" module>
-  // Shared by the pane ⋯ menu (SessionView) and the Database pane's ✕
-  // right-click (below) — one list, so the five rows can't drift apart.
-  import { layout as layoutStore, type Preset as PresetOp } from '../../lib/stores/splitLayout.svelte';
-  import type { MenuItem as PresetMenuItem } from '../../lib/contextmenu.svelte';
-
-  /** The five layout presets as flat ctxMenu rows (the menu has no submenus);
-   *  worded like their ⌘K commands in Splits.svelte ("Use grid layout"). */
-  export function presetItems(): PresetMenuItem[] {
-    const rows: [PresetOp, string][] = [
-      ['cols', 'Use equal-columns layout'],
-      ['rows', 'Use equal-rows layout'],
-      ['one-two-below', 'Use one-above-two layout'],
-      ['one-two-beside', 'Use one-beside-two layout'],
-      ['grid', 'Use grid layout'],
-    ];
-    return rows.map(([p, label]) => ({ label, icon: 'split', action: () => layoutStore.applyPreset(p) }));
-  }
-</script>
-
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { rowMenu } from '../../lib/rowMenu';
@@ -35,6 +15,10 @@
   // makes the split purely proportional; panes clip/scroll their own content.
   import Self from './SplitNode.svelte';
   import SessionView from './SessionView.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  // A thread pane is its own chunk: a split of terminals only never loads it.
+  const ThreadPane = lazyComponent(() => import('./AgentsThreadPane.svelte'));
   // The Database pane is rare; importing DatabasePage statically dragged
   // CodeMirror + the DB views (~1.6 MB) into the Agents route — the default
   // one — before first paint. Load it on demand from the page registry, which
@@ -49,6 +33,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import {
     layout,
+    presetItems,
     MIN_PANE_PX,
     type LayoutNode,
     type Side,
@@ -213,8 +198,8 @@
     <Self node={node.b} depth={depth + 1} />
   </div>
 {:else}
-  <div class="leaf" data-pane-key={node.key} data-session={node.session}>
-    {#if node.session === DB_PANE_ID}
+  <div class="leaf" data-pane-key={node.key} data-session={node.ref.id}>
+    {#if node.ref.id === DB_PANE_ID}
       <div
         class="db-pane"
         role="group"
@@ -253,17 +238,29 @@
           {/key}
         {/if}
       </div>
+    {:else if node.ref.kind === 'thread'}
+      {@const id = node.ref.id}
+      <LazyMount lazy={ThreadPane} what="the thread" variant="panel" props={{
+        threadId: id,
+        focused: ws.focusedPane === idx && paneCount > 1,
+        showClose: paneCount > 1,
+        showGrip: paneCount > 1,
+        dragKey: node.key,
+        ondragpane: (phase: 'start' | 'end') => (layout.dragKey = phase === 'start' ? node.key : null),
+        onfocus: () => ws.focusPane(idx),
+        onclose: () => ws.closeTab(id),
+      }} />
     {:else}
       <SessionView
-        sessionId={node.session}
+        sessionId={node.ref.id}
         focused={ws.focusedPane === idx && paneCount > 1}
         showClose={paneCount > 1}
         showGrip={paneCount > 1}
         dragKey={node.key}
         ondragpane={(phase) => (layout.dragKey = phase === 'start' ? node.key : null)}
         onfocus={() => ws.focusPane(idx)}
-        closeTitle={ws.closeTabTitle(node.session, 'session')}
-        onclosepane={() => void ws.requestCloseTab(node.session)}
+        closeTitle={ws.closeTabTitle(node.ref.id, 'session')}
+        onclosepane={() => void ws.requestCloseTab(node.ref.id)}
       />
     {/if}
     <!-- Drop veil: hit-testable only while a pane drag is in flight, so the

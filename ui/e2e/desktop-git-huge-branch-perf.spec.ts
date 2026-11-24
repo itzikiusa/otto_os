@@ -1,9 +1,7 @@
 import { test, expect, type Page, type Request } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 import { openPage } from './helpers';
 import { heapAfterGC } from './perf';
 
@@ -73,7 +71,7 @@ test.beforeAll(async ({}, testInfo) => {
   const { ctx, base } = await apiCtx();
   const wsId = await seedWorkspace(ctx, base);
 
-  const root = mkdtempSync(join(tmpdir(), 'otto-e2e-huge-'));
+  const root = tempDir('otto-e2e-huge-');
   repoDir = join(root, 'work');
   const origin = join(root, 'origin.git');
   execFileSync('git', ['init', '-q', '-b', 'main', repoDir]);
@@ -242,7 +240,7 @@ test('a Fetch that moves nothing does not re-read history (old branch tip beyond
   const refsReq = page.waitForRequest((r) => /\/repos\/[^/]+\/refs(\?|$)/.test(r.url()) && r.method() === 'GET', {
     timeout: 20_000,
   });
-  await page.getByRole('button', { name: 'Fetch and pull options', exact: true }).click(); await page.getByRole('menuitem', { name: 'Fetch', exact: true }).click();
+  await page.locator('.git-header .ph-actions').getByRole('button', { name: 'Fetch', exact: true }).click();
   await refsReq; // the post-fetch re-sync ran its cheap refs check…
   await page.waitForLoadState('networkidle').catch(() => {});
   await page.waitForTimeout(500);
@@ -264,7 +262,7 @@ test('repeated refreshes do not grow the history request', async ({ page }) => {
     // moved and re-reads the log.
     git(repoDir, 'commit', '-q', '--allow-empty', '-m', `external ${i}`);
     const logReq = page.waitForRequest((r) => /\/log\?/.test(r.url()) && r.method() === 'GET', { timeout: 20_000 });
-    await page.getByRole('button', { name: 'Fetch and pull options', exact: true }).click(); await page.getByRole('menuitem', { name: 'Fetch', exact: true }).click();
+    await page.locator('.git-header .ph-actions').getByRole('button', { name: 'Fetch', exact: true }).click();
     await logReq;
     await page.waitForLoadState('networkidle').catch(() => {});
   }

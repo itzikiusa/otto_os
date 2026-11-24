@@ -1,9 +1,8 @@
 import { test, expect, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 
 test.use({ serviceWorkers: 'block' });
 let workspaceId = '';
@@ -18,7 +17,7 @@ const PAST_ACTIVE_CADENCE_MS = 65_000;
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
-  const dir = mkdtempSync(join(tmpdir(), 'otto-git-fetch-scope-'));
+  const dir = tempDir('otto-git-fetch-scope-');
   const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { stdio: 'ignore' });
   git('init', '-q', '-b', 'main');
   git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@otto.local');
@@ -48,7 +47,7 @@ async function navigate(page: Page, hash: string) {
 test('automatic fetch belongs to Git: inactive boot, leave, and return', async ({ page }, info) => {
   await boot(page);
   let fetches = 0;
-  await page.route('**/api/v1/repos/*/fetch', async route => {
+  await page.route('**/api/v1/repos/*/fetch*', async route => {
     fetches++; await route.fulfill({ json: status });
   });
   await page.goto('/#/agents');
@@ -88,7 +87,7 @@ test('a delayed Git tab bootstrap cannot start automatic fetch after leaving', a
   await page.route('**/api/v1/git/repos', async route => {
     requested = true; await blocked; await route.fulfill({ json: repos });
   });
-  await page.route('**/api/v1/repos/*/fetch', async route => {
+  await page.route('**/api/v1/repos/*/fetch*', async route => {
     fetches++; await route.fulfill({ json: status });
   });
   try {

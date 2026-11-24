@@ -203,6 +203,17 @@ unsafe extern "C" fn on_uncaught(exception: *mut AnyObject) {
     }
 }
 
+/// Tests that touch AppKit / the Objective-C runtime (pasteboard reads,
+/// swizzles, a raised NSException) take this lock: `cargo test` runs tests on
+/// parallel threads, and concurrent AppKit calls off the main thread can
+/// trap the whole test binary (SIGTRAP on the macOS runner).
+#[cfg(test)]
+pub fn appkit_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +229,7 @@ mod tests {
 
     #[test]
     fn an_objc_exception_is_contained_not_propagated() {
+        let _appkit = appkit_test_lock();
         let obj = NSObject::new();
         let this = Retained::as_ptr(&obj) as *mut AnyObject;
         let null = std::ptr::null_mut();
@@ -227,6 +239,7 @@ mod tests {
 
     #[test]
     fn writing_tools_affordance_reports_ineligible() {
+        let _appkit = appkit_test_lock();
         let Some(cls) = AnyClass::get(c"NSCampoLightweightUIController") else {
             return; // macOS without the Campo UI: nothing to disable
         };

@@ -1385,11 +1385,11 @@
       <span class="diff-stats">
         {#if search}
           <span>{matchCount} / {plural(diff.files.length, 'file')}</span>
-        {:else}
+        {:else if diff.files.length !== 1}
           {plural(diff.files.length, 'file')}
         {/if}
-        <span class="add">+{totals.add}</span>
-        <span class="del">−{totals.del}</span>
+        <!-- One file: its own header already names it with its counts. -->
+        {#if diff.files.length !== 1}<span class="add">+{totals.add}</span> <span class="del">−{totals.del}</span>{/if}
         {#if diff.truncated || (lazyCount > 0 && !loadFile)}
           <span class="diff-note" title="The diff is too large to send at once; open a file to load its lines.">
             Large diff — some files load on demand

@@ -660,6 +660,18 @@ export interface SubmoduleInfo {
   branch: string | null;
 }
 
+/** `GET /repos/{id}/overview` — what opening a repository reads, in one
+ *  request: the status (as `/status`), the refs (as `/refs`, null when that
+ *  read failed) and the stash / worktree / submodule lists (empty on failure). */
+export interface RepoOverview {
+  status: RepoStatusResp;
+  refs: RefsResp | null;
+  /** null = that list could not be read (re-read it on its own route); [] = none. */
+  stashes: StashInfo[] | null;
+  worktrees: WorktreeInfo[] | null;
+  submodules: SubmoduleInfo[] | null;
+}
+
 export type LineOrigin = 'context' | 'add' | 'del';
 
 export interface DiffLine {

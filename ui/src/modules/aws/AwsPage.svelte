@@ -28,20 +28,28 @@
   import Icon from '../../lib/components/Icon.svelte';
   import InstallPanel from './InstallPanel.svelte';
   import AccountsOverview from './AccountsOverview.svelte';
-  import AccountWizard from './AccountWizard.svelte';
   import AccountRail from './AccountRail.svelte';
-  import LoginSheet from './LoginSheet.svelte';
-  import S3Browser from './S3Browser.svelte';
-  import SqsView from './SqsView.svelte';
-  import Ec2View from './Ec2View.svelte';
-  import AthenaView from './AthenaView.svelte';
-  import EksView from './EksView.svelte';
-  import RdsView from './RdsView.svelte';
-  import LogsView from './LogsView.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { awsErrorText, logsRoute } from './util';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import type { AwsAccount, AwsService, Feature } from '../../lib/api/types';
+
+  // The page draws the accounts; every service view (and what it drags in: the
+  // database grid for Athena, CodeMirror, the Kubernetes store for EKS), the
+  // wizard and the sign-in sheet load on first open.
+  const VIEWS: Record<AwsService | 'logs', ReturnType<typeof lazyComponent>> = {
+    s3: lazyComponent(() => import('./S3Browser.svelte')),
+    sqs: lazyComponent(() => import('./SqsView.svelte')),
+    ec2: lazyComponent(() => import('./Ec2View.svelte')),
+    athena: lazyComponent(() => import('./AthenaView.svelte')),
+    eks: lazyComponent(() => import('./EksView.svelte')),
+    rds: lazyComponent(() => import('./RdsView.svelte')),
+    logs: lazyComponent(() => import('./LogsView.svelte')),
+  };
+  const WizardLazy = lazyComponent(() => import('./AccountWizard.svelte'));
+  const LoginLazy = lazyComponent(() => import('./LoginSheet.svelte'));
 
   const SERVICES: readonly AwsService[] = ['s3', 'sqs', 'ec2', 'athena', 'eks', 'rds'];
 
@@ -269,7 +277,7 @@
             <EmptyState variant="page" icon="lock" title="No access" body="Reading CloudWatch Logs needs the account’s CloudWatch (metrics) permission. Ask an administrator for a grant." />
           {:else}
             {#key `${account.id}/logs/${aws.accessRevision}`}
-              <LogsView {account} onsignin={() => void signIn(account)} />
+              <LazyMount lazy={VIEWS.logs} what="CloudWatch Logs" props={{ account, onsignin: () => void signIn(account) }} />
             {/key}
           {/if}
         {:else if !routeService}
@@ -283,19 +291,7 @@
           />
         {:else}
           {#key `${account.id}/${routeService}/${aws.accessRevision}`}
-            {#if routeService === 's3'}
-              <S3Browser {account} onsignin={() => void signIn(account)} />
-            {:else if routeService === 'sqs'}
-              <SqsView {account} onsignin={() => void signIn(account)} />
-            {:else if routeService === 'ec2'}
-              <Ec2View {account} onsignin={() => void signIn(account)} />
-            {:else if routeService === 'athena'}
-              <AthenaView {account} onsignin={() => void signIn(account)} />
-            {:else if routeService === 'eks'}
-              <EksView {account} onsignin={() => void signIn(account)} />
-            {:else}
-              <RdsView {account} onsignin={() => void signIn(account)} />
-            {/if}
+            <LazyMount lazy={VIEWS[routeService]} what={`the ${SERVICE_LABEL[routeService]} view`} props={{ account, onsignin: () => void signIn(account) }} />
           {/key}
         {/if}
       </section>
@@ -306,21 +302,28 @@
 </div>
 
 {#if wizardOpen}
-  <AccountWizard
-    account={wizardAccount}
-    onclose={() => (wizardOpen = false)}
-    onsignin={(a) => {
-      wizardOpen = false;
-      void signIn(a);
+  <LazyMount
+    lazy={WizardLazy}
+    what="the account wizard"
+    quiet
+    onerror={() => (wizardOpen = false)}
+    props={{
+      account: wizardAccount,
+      onclose: () => (wizardOpen = false),
+      onsignin: (a: AwsAccount) => {
+        wizardOpen = false;
+        void signIn(a);
+      },
     }}
   />
 {/if}
 
 {#if aws.login}
-  <LoginSheet
-    accountId={aws.login.accountId}
-    sessionId={aws.login.sessionId}
-    onclose={() => aws.endLogin()}
+  <LazyMount
+    lazy={LoginLazy}
+    what="the sign-in sheet"
+    quiet
+    props={{ accountId: aws.login.accountId, sessionId: aws.login.sessionId, onclose: () => aws.endLogin() }}
   />
 {/if}
 
