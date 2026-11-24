@@ -102,7 +102,13 @@ test('Chat starts in Threads only when the sheet closed; a first message rides a
     prompt,
     scratchMode: false,
     ws: { currentId: 'w1' },
+    provider: 'codex',
+    model: 'gpt-x',
+    SCRATCH_WORKSPACE_ID: 'scratch',
+    localStorage: {},
+    writeStartPick: (_s: unknown, scope: string, pick: unknown) => picks.push([scope, pick]),
   });
+  const picks: unknown[] = [];
   const url = new URL('../src/modules/agents/NewSession.svelte', import.meta.url);
   await componentFunctions(url, ['startChat'], ctx(false, '')).startChat();
   assert.deepEqual(went, [], 'the person chose "Keep editing"');
@@ -111,6 +117,8 @@ test('Chat starts in Threads only when the sheet closed; a first message rides a
   await componentFunctions(url, ['startChat'], ctx(true, 'fix the flaky test')).startChat();
   assert.deepEqual(went, ['threads/new', 'threads']);
   assert.equal(JSON.parse(store.get('otto.thread_draft_handoff') ?? '{}').draft, 'fix the flaky test');
+  // One choice, honoured: the tile and model become Threads' start pick for this workspace.
+  assert.equal(JSON.stringify(picks.at(-1)), JSON.stringify(['threads:w1', { provider: 'codex', model: 'gpt-x', effort: null }]));
 });
 
 test('New session requestClose tells the hint whether the sheet closed', async () => {
