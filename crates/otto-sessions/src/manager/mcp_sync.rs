@@ -127,11 +127,13 @@ impl SessionManager {
             let mcp_json_names = match &*provider {
                 "claude" if strict => Vec::new(),
                 "claude" => write_claude_mcp_config(&sid, &cwd, &cfg),
-                "agy" | "gemini" | "grok" | "codex" | "pi" => Vec::new(),
-                _ => crate::mcp::reconcile_managed_servers(&cwd, &cfg).unwrap_or_else(|e| {
-                    tracing::warn!(session = %sid, cwd = %cwd, "reconcile workspace MCP config: {e}");
-                    Vec::new()
-                }),
+                "muse" | "opencode" => crate::mcp::reconcile_managed_servers(&cwd, &cfg)
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(session = %sid, cwd = %cwd, "reconcile workspace MCP config: {e}");
+                        Vec::new()
+                    }),
+                // A shell (a Threads terminal dock too) has no agent CLI to serve.
+                _ => Vec::new(),
             };
             let agy_names = (provider == "agy").then(|| {
                 // agy never reads `.mcp.json` — same managed set, its own file.

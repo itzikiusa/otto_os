@@ -4476,6 +4476,56 @@ async fn sandboxed_muse_session_starts_with_its_own_sandbox_off() {
     manager.remove(&session.id).await.unwrap();
 }
 
+/// Re-sweep NEW-1: a shell session (a Threads terminal dock too) has no agent
+/// CLI to serve, yet its start and every resume (the same MCP sync) wrote
+/// Otto's `.mcp.json` into the repository. Start it, sync again as a resume
+/// does, and do the same for a Claude session: the folder stays empty.
+#[tokio::test]
+async fn shell_and_claude_sessions_leave_the_repo_file_list_untouched() {
+    let (manager, _repo, mut workspace, user) = test_manager().await;
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().canonicalize().unwrap();
+    workspace.root_path = cwd.to_string_lossy().into_owned();
+    let otto = crate::mcp::OttoToolsServer {
+        command: "/usr/bin/true".into(),
+        args: vec![],
+        env: Default::default(),
+    };
+    for provider in ["shell", "claude"] {
+        if provider == "claude" {
+            manager.providers.reload(Some(&serde_json::json!({
+                "claude": { "cmd": "/bin/sh", "args": ["-c", "exec /bin/sleep 60"] }
+            })));
+        }
+        let request = CreateSessionReq {
+            kind: SessionKind::Agent,
+            provider: Some(provider.into()),
+            title: Some("repo stays clean".into()),
+            cwd: Some(workspace.root_path.clone()),
+            connection_id: None,
+            model: None,
+            meta: None,
+        };
+        let session = manager
+            .create(&workspace, &user, request, None)
+            .await
+            .unwrap();
+        manager
+            .sync_workspace_mcp(&session, Some(otto.clone()), false)
+            .await;
+        let left: Vec<_> = std::fs::read_dir(&cwd)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert!(
+            left.is_empty(),
+            "{provider} wrote into the repository: {left:?}"
+        );
+        manager.remove(&session.id).await.unwrap();
+    }
+}
+
 /// R1-002: `<tmp>/otto-mcp` (every session's MCP launcher files: tokens,
 /// Keychain-resolved env) sits under the writable temp root. A confined agent
 /// read another session's file there and could plant one an unconfined spawn
