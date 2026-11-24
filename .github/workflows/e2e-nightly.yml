@@ -308,6 +308,7 @@ jobs:
           e2e/desktop-terminal-park-redraw.spec.ts
           e2e/desktop-terminal-compact-queue-perf.spec.ts
           e2e/desktop-agents-scale-perf.spec.ts
+          e2e/desktop-ide-highlight-perf.spec.ts
 
       - name: Perf gates — DB at scale (desktop-webkit, @ci)
         if: success() || failure()

@@ -3,14 +3,16 @@ import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } fr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { daemonCall } from './ide-polyglot-fixtures';
+import { budgetMs, frameDeltas } from './perf';
 import { apiCtx } from './seed';
 
 // Highlighting speed on real-sized files (owner, 2026-11-24: "the formatting of makefile is
 // very slow … i scroll, and i see the colors slowly added"). For each language: open the
 // file (time until the screen is coloured), then scroll top to bottom and require every
 // line on screen to carry its final token classes in the first frame after it arrives, and
-// no scroll-driven frame over 50 ms. HIGHLIGHT_REPORT_ONLY=1 only prints the numbers (used to compare
-// against an older build).
+// no scroll-driven frame over 50 ms (Chromium: long animation frames; WebKit, which has
+// none: rAF-to-rAF gaps; both scaled by OTTO_PERF_BUDGET_SCALE). HIGHLIGHT_REPORT_ONLY=1
+// only prints the numbers (used to compare against an older build).
 
 const REPORT_ONLY = !!process.env.HIGHLIGHT_REPORT_ONLY;
 const mkSample = join(process.cwd(), 'unit', 'fixtures', 'Makefile.sample');
@@ -137,12 +139,14 @@ async function visibleMarkup(page: Page, top: number | null): Promise<Record<str
 }
 
 for (const [name, f] of Object.entries(BIG_FILES)) {
-  test(`${name}: coloured on open and the moment each line scrolls into view`, async ({ page }) => {
+  test(`${name}: coloured on open and the moment each line scrolls into view`, async ({ page, browserName }) => {
     test.setTimeout(240_000);
     await page.setViewportSize({ width: 1440, height: 900 });
     await boot(page);
     // Long animation frames (Chromium) over 50 ms while the file opens and scrolls.
-    await page.evaluate(() => {
+    const loafOk = await page.evaluate(() => PerformanceObserver.supportedEntryTypes.includes('long-animation-frame'));
+    expect(loafOk, 'Chromium reports long animation frames').toBe(browserName === 'chromium');
+    if (loafOk) await page.evaluate(() => {
       const w = window as unknown as { __loaf: number[] };
       w.__loaf = [];
       new PerformanceObserver((l) => { for (const e of l.getEntries() as (PerformanceEntry & { scripts?: { invoker: string }[] })[]) {
@@ -180,18 +184,19 @@ for (const [name, f] of Object.entries(BIG_FILES)) {
     const height = await page.evaluate(() => document.querySelector('.ide-editor-area .cm-scroller')!.scrollHeight);
     const late: string[] = [];
     let steps = 0;
-    for (let y = 0; y < height; y += 700) {
+    const scroll = async () => { for (let y = 0; y < height; y += 700) {
       const first = await visibleMarkup(page, y);
       await page.waitForTimeout(300); // ui-guards: allow — proves no colour arrives after the first frame
       const settled = await visibleMarkup(page, null);
       steps++;
       for (const [text, cls] of Object.entries(settled)) if (text in first && first[text] !== cls) late.push(`@${y}: ${text.slice(0, 60)} | ${first[text]} -> ${cls}`);
-    }
-    const loaf = await page.evaluate(() => (window as unknown as { __loaf: number[] }).__loaf);
+    } };
+    // WebKit: every frame gap while it scrolls (no attribution to the scroll there).
+    const loaf = loafOk ? (await scroll(), await page.evaluate(() => (window as unknown as { __loaf: number[] }).__loaf)) : [(await frameDeltas(page, scroll)).max];
     if (late.length) console.log(late.slice(0, 4).join('\n'));
     console.log(`HL ${JSON.stringify({ file: name, openMs, settleMs, steps, lateLines: late.length, longFrames: loaf.length, worstFrameMs: Math.max(0, ...loaf) })}`);
     if (REPORT_ONLY) return;
     expect(late, 'lines coloured after they arrived').toEqual([]);
-    expect(loaf.filter((d) => d > 50), 'scroll frames over 50 ms').toEqual([]);
+    expect(loaf.filter((d) => d > budgetMs(50)), `scroll frames over ${budgetMs(50)} ms`).toEqual([]);
   });
 }
