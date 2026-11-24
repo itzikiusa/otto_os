@@ -15,11 +15,9 @@
   import GitAutoFetchToggle from './GitAutoFetchToggle.svelte';
   import { focusPath, parseGitRoute } from './gitRoute';
   import { prWorkspace } from './prWorkspaceStore.svelte';
-  import RepoView from './RepoView.svelte';
   import GitToolbar from './GitToolbar.svelte';
   import { gitBridge } from '../../lib/diff/gitBridge.svelte';
   import { registry } from '../../lib/commands.svelte';
-  import FocusView from './FocusView.svelte';
   import GitLanding from './GitLanding.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
@@ -48,6 +46,11 @@
   ];
   // Header toolbar's stash browser lives here: in PageHeader's actions row the overflow measurer hid it.
   const StashBrowser = lazyComponent(() => import('./StashBrowser.svelte'));
+  // The repository view and Focus load with their first use (perf G6): the
+  // landing's list of repositories doesn't pay for the graph, the diff
+  // viewer and the commit card.
+  const RepoViewLazy = lazyComponent(() => import('./RepoView.svelte'));
+  const FocusViewLazy = lazyComponent(() => import('./FocusView.svelte'));
   // The Add repository sheet loads on first open.
   const AddRepoSheetLazy = lazyComponent(() => import('./AddRepoSheet.svelte'));
   let stashesRepo = $state<string | null>(null);
@@ -227,13 +230,15 @@
     {#if focusView}
       <PageBody fill padded={false}>
         <div class="landing-focus">
-          <FocusView />
+          <LazyMount lazy={FocusViewLazy} what="Focus" />
         </div>
       </PageBody>
     {:else if activeRepo}
       {#key activeRepo.id}
         <PageBody fill padded={false}>
         <div class="gitpage-body">
+          {#if RepoViewLazy.component}
+          {@const RepoView = RepoViewLazy.component}
           <RepoView
             repo={activeRepo}
             tab={git.subTabFor(activeRepo.id)}
@@ -244,6 +249,9 @@
             onopenrepo={openRepo}
             onaddrepo={(mode) => { addMode = mode; addOpen = true; }}
           />
+          {:else}
+            <LoadState what={activeRepo.name} variant="page" loading={!RepoViewLazy.error} error={RepoViewLazy.error} rows={5} onretry={() => RepoViewLazy.retry()} />
+          {/if}
         </div>
         </PageBody>
       {/key}
