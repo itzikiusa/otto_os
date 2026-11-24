@@ -108,10 +108,11 @@ class ConnectionListStore {
     }
   }
 
-  /** The daemon said the library changed: refetch if anyone has read it. */
-  invalidate(): void {
+  /** The daemon said the library changed (`changed`: a change event, which
+   *  may postdate a read on the wire; else a resync): refetch if anyone has read it. */
+  invalidate(changed = false): void {
     this.stale = true;
-    if (this.loaded || this.inflight) void this.refresh();
+    if (this.loaded || (changed && this.inflight)) void this.refresh();
   }
 
   /** Called with the rows after every successful (re)load — the workbench
@@ -166,6 +167,6 @@ class ConnectionListStore {
 export const connectionList = new ConnectionListStore();
 
 if (typeof window !== 'undefined') {
-  appLive.on(['connections_changed', 'resource_access_changed'], () => connectionList.invalidate());
+  appLive.on(['connections_changed', 'resource_access_changed'], () => connectionList.invalidate(true));
   appLive.onResync(() => connectionList.invalidate());
 }

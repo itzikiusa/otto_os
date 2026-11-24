@@ -78,7 +78,9 @@ test('a change announced during the first load is read', async () => {
   const { connectionList, calls } = store();
   const rows = () => calls.filter((c) => c.path.endsWith('/connections'));
   void connectionList.refresh();
-  connectionList.invalidate(); // connections_changed before the first answer
+  connectionList.invalidate(); // a resync (first open) is no change: no second read
+  assert.equal(rows().length, 1);
+  connectionList.invalidate(true); // connections_changed before the first answer
   assert.equal(rows().length, 2, 'the change starts another read');
   calls[0].response.resolve([conn('old')]);
   calls[1].response.resolve([]);
