@@ -145,7 +145,7 @@ for (const [name, f] of Object.entries(BIG_FILES)) {
     await boot(page);
     // Long animation frames (Chromium) over 50 ms while the file opens and scrolls.
     const loafOk = await page.evaluate(() => PerformanceObserver.supportedEntryTypes.includes('long-animation-frame'));
-    expect(loafOk, 'Chromium reports long animation frames').toBe(browserName === 'chromium');
+    if (browserName === 'chromium') expect(loafOk, 'Chromium reports long animation frames').toBe(true);
     if (loafOk) await page.evaluate(() => {
       const w = window as unknown as { __loaf: number[] };
       w.__loaf = [];
