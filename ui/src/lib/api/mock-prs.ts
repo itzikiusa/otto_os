@@ -212,6 +212,7 @@ export const mockExtraPrs: ExtraPr[] = [
       updated_at: ago(60 * 19),
       created_at: ago(60 * 40),
       url: 'https://github.com/dev-otto/otto/pull/50',
+      asks_me: true, // asks you for a review: the list's "Needs you"
       ci_status: 'pending',
       labels: ['feature'],
       head_sha: 'b50aa11',

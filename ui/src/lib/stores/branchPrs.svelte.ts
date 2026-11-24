@@ -20,12 +20,15 @@ class BranchPrs {
   private accountsFetchedAt = 0;
   private accountsInflight: Promise<Set<GitProviderKind>> | null = null;
   private failedAt = new Map<string, number>();
+  /** Bumped when a failed lookup's backoff ends, so `prFor` readers ask again. */
+  private retryTick = $state(0);
 
   /** The open PR from `branch`, null when none (or unknown yet — see `checked`). */
   prFor(repo: Repo | null, branch: string | null): PrSummary | null {
     if (!repo || !branch || !repo.provider || !forgeLabel(repo)) return null;
     const key = `${repo.id}:${branch}`;
     if (key in this.byKey) return this.byKey[key];
+    void this.retryTick;
     // A failed lookup is retried after a short backoff instead of being memoized as "no PR".
     if (Date.now() - (this.failedAt.get(key) ?? -Infinity) < FAILED_RETRY_MS) return null;
     queueMicrotask(() => void this.load(repo, branch, key));
@@ -104,6 +107,7 @@ class BranchPrs {
       }
     } catch {
       this.failedAt.set(key, Date.now());
+      setTimeout(() => this.retryTick++, FAILED_RETRY_MS);
       return;
     } finally {
       this.inflight.delete(key);

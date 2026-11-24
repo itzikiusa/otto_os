@@ -5,7 +5,7 @@
   // Merge), then two views — Conversation (a reading column + one details
   // card) | Files. Paints from the SWR cache; re-read every couple of minutes,
   // but a change only raises an "Updated" pill, never swaps content.
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy, untrack, type Snippet } from 'svelte';
   import { onTabKey } from '../../lib/tabKeys';
   import { api, isAbortError } from '../../lib/api/client';
   import type { DiffResp, MergeStrategy, NewPrCommentReq, PrChecksResp, PrComment, PrCommit, PrDetail, PrSummary } from '../../lib/api/types';
@@ -35,7 +35,6 @@
   import { fileStat } from '../../lib/diff/diff-model';
   import { notePrHead, onPrWhitespaceChange, prDiffFileLoader, prDiffHead, prDiffSummary, prIgnoreWhitespace, repoDiffFileLoader } from '../../lib/diff/diff-load';
   import PrConversation from './PrConversation.svelte';
-  import PrMergeChecks from './PrMergeChecks.svelte';
   import { providePrCommentActions } from './pr-comment-ctx';
   import { createCommentOps } from './pr-comment-ops';
   import { withdrawMyReview } from './pr-review-ops';
@@ -56,15 +55,19 @@
   import { withComment } from './pr-comments';
   import { isCompactPrHeaderTab, prCloseLabels, type PrTabId } from './gitUiHelpers';
   import { createPrAiOverlay } from './prAiOverlay.svelte';
-  import { NEXT_LABEL, prStatusLine } from './prStatus';
+  import { NEXT_LABEL, prStatusLine, reviewPlacement } from './prStatus';
 
   interface Props {
     repoId: string;
     number: number;
     /** Fresher PR data for the list pane (title/state/updated/head). */
     onloaded?: (pr: PrSummary) => void;
+    /** The view on show (the workspace shows its Files tree only beside Files). */
+    onview?: (tab: PrTabId) => void;
+    /** Controls at the header's start (the workspace's list toggle while it has no tab strip). */
+    lead?: Snippet;
   }
-  let { repoId, number, onloaded }: Props = $props();
+  let { repoId, number, onloaded, onview, lead }: Props = $props();
   let disposed = false;
   onDestroy(() => { disposed = true; });
 
@@ -89,6 +92,7 @@
     }
   }
   let activeTab: Tab = $state(untrack(savedTab));
+  $effect(() => onview?.(activeTab));
   let compactInfoOpen = $state(false);
   function selectTab(t: Tab): void {
     activeTab = t;
@@ -416,11 +420,14 @@
   const myName = $derived(myGitHandles.displayName ?? 'You');
   const mine = $derived(pr ? myReview(pr, isMe) : null);
   const status = $derived(pr ? prStatusLine(pr, checks, mine) : null); // the status line + its primary (prStatus.ts)
+  const reviewAt = $derived(pr && status ? reviewPlacement(pr, status, mine) : 'none');
   function runNext(): void {
     if (status?.next === 'fix-checks') openExternal(status.failingUrl ?? pr?.url);
-    else if (status?.next === 'review') selectTab('code');
     else if (status?.next === 'merge') openMerge();
   }
+  let prdEl = $state<HTMLDivElement | null>(null);
+  /** Review ▾ → Comment: the conversation's composer. */
+  const startComment = (): void => { selectTab('summary'); requestAnimationFrame(() => prdEl?.querySelector<HTMLTextAreaElement>('textarea[aria-label="New comment"]')?.focus()); };
   function patchNow(next: PrDetail): void {
     pr = next;
     prDetailCache.set(prKey(repoId, number), next);
@@ -518,15 +525,6 @@
     }
   }
 
-  function checkoutMenu(e: MouseEvent): void {
-    if (!pr) return;
-    ctxMenu.show(e, [
-      { label: `Check out ${pr.source_branch}`, icon: 'branch', disabled: busy !== '', action: () => void checkoutBranch() },
-      { label: 'Copy checkout command', icon: 'copy', action: () => void copyWithToast(checkoutCmd, 'Checkout command') },
-      { label: 'Copy branch name', icon: 'copy', action: () => void copyWithToast(pr?.source_branch ?? '', 'Branch name') },
-    ]);
-  }
-
   // ── The PR's agent thread: opens beside the PR (PrAgentPanel), never a new page ─
   const openAgent = (kind: PrAgentKind): void => prAgentBridge.ask(repoId, number, { kind });
 
@@ -541,10 +539,16 @@
       { label: 'Fix findings with the agent…', icon: 'zap', hint: 'agent', disabled: !open, action: () => openAgent('fix') },
       { label: 'Tell the author on Slack…', icon: 'send', action: () => pr && openReviewDoneSlack(pr, repoSlug) },
       { separator: true },
-      ...(['merge', 'squash', 'rebase'] as const).map((st): MenuItem => ({ label: strategyMenuLabel(prRepo?.provider, st), icon: 'merge', disabled: !open, action: () => openMerge(st) })),
+      ...(['merge', 'squash', 'rebase'] as const).map((st, i): MenuItem => ({
+        label: strategyMenuLabel(prRepo?.provider, st), icon: 'merge', disabled: !open,
+        hint: i === 0 && open ? (status?.blocked ?? undefined) : undefined, title: status?.blocked ?? undefined, action: () => openMerge(st),
+      })),
       { separator: true },
-      { label: 'Approve…', icon: 'check', disabled: !open, action: () => void action('approve') },
-      { label: 'Request changes…', icon: 'warning', disabled: !open, action: openRequestChanges },
+      { label: `Check out ${pr.source_branch}`, icon: 'branch', disabled: busy !== '', action: () => void checkoutBranch() },
+      { label: 'Copy checkout command', icon: 'copy', action: () => void copyWithToast(checkoutCmd, 'Checkout command') },
+      { label: 'Copy branch name', icon: 'copy', action: () => void copyWithToast(pr?.source_branch ?? '', 'Branch name') },
+      ...(previewUrls.length > 0 ? [{ label: 'Preview in Browser', icon: 'globe', action: () => openPreview(e) } as MenuItem] : []),
+      { separator: true },
       { label: 'Edit title and description', icon: 'edit', action: startEdit },
       { separator: true },
       { label: `Open on ${providerName}`, icon: 'external', action: () => openExternal(pr?.url) },
@@ -622,7 +626,7 @@
   {/if}
 {/snippet}
 
-<div class="prd" data-pr={number} data-diff-head={diffHead || null}>
+<div class="prd" bind:this={prdEl} data-pr={number} data-diff-head={diffHead || null}>
   {#if !pr && (loading || prError)}
     <div class="prd-pad">
       <LoadState what="this pull request" variant="page" rows={5} {loading} error={prError} empty onretry={() => void load(repoId, number)} />
@@ -630,6 +634,7 @@
   {:else if pr}
     <header class="prd-head" class:compact={compactHead}>
       <div class="prd-row prd-row-top">
+        {@render lead?.()}
         <button class="prd-repo link" onclick={() => openExternal(pr?.url)} title="Open on {providerName}">
           <span class="prd-slug">{repoSlug}</span>
           <span class="prd-num">#{pr.number}</span>
@@ -648,25 +653,18 @@
               <Icon name="info" size={13} />
             </button>
           {/if}
-          {#if pr.state === 'open'}
-            <PrReviewButtons review={mine} {busy} onapprove={() => void action('approve')} onrequestchanges={openRequestChanges}
-              onwithdraw={(k) => void withdraw(k)} canWithdrawChanges={prRepo?.provider !== 'gitlab'} />
-            {#if status && status.next !== 'none'}
-              <button class="btn small primary" data-testid="pr-primary" data-next={status.next} disabled={busy !== ''} onclick={runNext}
-                title={status.next === 'merge' ? 'Merge this pull request (asks first)' : status.next === 'fix-checks' ? 'Open the failing check' : 'Read the changes'}>
-                <Icon name={status.next === 'merge' ? 'merge' : status.next === 'fix-checks' ? 'external' : 'file'} size={12} /> {NEXT_LABEL[status.next]}
-              </button>
-            {/if}
-            {#if status?.next !== 'merge'}<button class="btn small" disabled={busy !== ''} onclick={() => openMerge()} title="Merge this pull request (asks first)"><Icon name="merge" size={12} /> Merge</button>{/if}
+          <!-- ONE primary that follows state (Fix checks / Review / Merge), at most
+               one secondary (Review ▾), the rest in ⋯ (prStatus.ts). -->
+          {#if reviewAt !== 'none'}
+            <PrReviewButtons primary={reviewAt === 'primary'} review={mine} {busy} onapprove={() => void action('approve')} onrequestchanges={openRequestChanges}
+              oncomment={startComment} onwithdraw={(k) => void withdraw(k)} canWithdrawChanges={prRepo?.provider !== 'gitlab'} />
           {/if}
-          {#if previewUrls.length > 0}
-            <button class="btn small" aria-haspopup={previewUrls.length > 1 ? 'menu' : undefined} onclick={openPreview} title={previewUrls.length === 1 ? `Open ${previewUrls[0].url} in Otto Browser` : `Open one of ${previewUrls.length} preview deployments in Otto Browser`}>
-              <Icon name="globe" size={12} /> Preview in Browser
+          {#if pr.state === 'open' && status && (status.next === 'fix-checks' || status.next === 'merge')}
+            <button class="btn small primary" data-testid="pr-primary" data-next={status.next} disabled={busy !== ''} onclick={runNext}
+              title={status.next === 'merge' ? 'Merge this pull request (asks first)' : 'Open the failing check'}>
+              <Icon name={status.next === 'merge' ? 'merge' : 'external'} size={12} /> {NEXT_LABEL[status.next]}
             </button>
           {/if}
-          <button class="btn small" aria-haspopup="menu" disabled={busy === 'checkout'} onclick={checkoutMenu} title="Check out this pull request locally">
-            <Icon name="branch" size={12} /> {busy === 'checkout' ? 'Checking out…' : 'Check out'} <Icon name="chevronDown" size={12} />
-          </button>
           <button class="btn small ghost icon-only" aria-haspopup="menu" aria-label="More pull request actions" title="More actions" onclick={moreMenu}>
             <Icon name="more" size={14} />
           </button>
@@ -700,7 +698,6 @@
             </span>
           {/if}
         </div>
-        <PrMergeChecks {pr} compact />
       {/if}
 
       <div class="prd-row prd-tabs-row">
@@ -728,7 +725,7 @@
     <div class="prd-body" class:code={activeTab === 'code'}>
       <!-- Summary stays mounted (hidden) so composer drafts survive a tab switch. -->
       <div class="prd-summary" hidden={activeTab !== 'summary'}>
-        <div class="prd-main">
+        <div class="prd-main read-prose">
           <section class="prd-desc card">
             {#if editMode}
               <textarea dir="auto" class="input" rows="10" bind:value={editDesc} aria-label="Pull request description" disabled={busy === 'edit'}></textarea>
@@ -763,7 +760,8 @@
         </div>
 
         <PrSideColumn {pr} {checks} {commits} {providerName} {repoId} where={prWhere()} onreviewerschanged={() => { invalidatePr(repoId, number); void load(repoId, number, true); }}
-          ontimeline={() => selectTab('timeline')} onreview={() => selectTab('review')} />
+          ontimeline={() => selectTab('timeline')} onreview={() => selectTab('review')}
+          checkingOut={busy === 'checkout'} oncheckout={() => void checkoutBranch()} onpreview={previewUrls.length > 0 ? openPreview : undefined} />
       </div>
 
       {#if activeTab === 'timeline'}
@@ -893,8 +891,8 @@
   .prd-commit-pick { max-width: 340px; gap: 4px; font-weight: 550; }
   .prd-commit-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-  /* Summary: content + a details column (stacks under ~900px of pane). */
-  /* The reading column (760 px, reading type) with the details card beside it. */
+  /* The reading column (760 px, reading type) with the details card beside it
+     from 1200 px of content width, under it below. */
   .prd-summary {
     display: grid;
     grid-template-columns: minmax(0, var(--read-col)) 264px;
@@ -903,11 +901,11 @@
     align-items: start;
   }
   .prd-summary[hidden] { display: none; }
-  @container (max-width: 860px) {
-    .prd-summary { grid-template-columns: minmax(0, 1fr); }
+  @container (max-width: 1199px) {
+    .prd-summary { grid-template-columns: minmax(0, var(--read-col)); }
   }
   .prd-body { container-type: inline-size; }
-  .prd-main { min-width: 0; display: flex; flex-direction: column; gap: 12px; font-size: var(--fs-l); line-height: 1.6; }
+  .prd-main { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
   .prd-desc { position: relative; padding: 12px 16px; }
   .prd-desc textarea { width: 100%; }
   .edit-btn {
@@ -940,7 +938,7 @@
     .prd-code :global(.diff) { overflow-y: visible; }
     .prd-head { padding: 10px 12px 0; }
     .prd-actions { flex-wrap: wrap; flex: 1 1 100%; }
-    .prd-actions .btn { height: 34px; }
+    .prd-actions .btn { height: 44px; } /* finger-sized */
     .prd-meta { flex-wrap: wrap; }
     .prd-title-input { height: 38px; font-size: 16px; } /* ui-guards: allow — 16px stops iOS zoom-on-focus */
     .prd-body { padding: 12px; }

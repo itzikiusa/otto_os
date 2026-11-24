@@ -548,7 +548,8 @@ class GitStore {
   /** Lazily load a repo's status once (used by the tab strip). `null` marks an
    *  in-flight / attempted load so we don't refetch on every render. */
   ensureStatus(repoId: string): void {
-    if (repoId in this.statusById || recentOverview(repoId)) return; // an open's overview brings it
+    const ov = repoId in this.statusById ? null : recentOverview(repoId); // an open's overview brings it (failed: the status read)
+    if (repoId in this.statusById || ov) return void ov?.catch(() => this.refreshStatus(repoId));
     this.statusById = { ...this.statusById, [repoId]: null };
     void this.refreshStatus(repoId);
   }

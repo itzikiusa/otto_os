@@ -744,6 +744,12 @@ pub struct PrSummary {
     /// when that identity could not be looked up.
     #[serde(default)]
     pub is_mine: bool,
+    /// The PR asks that same account for a review it has not given yet
+    /// (GitHub `requested_reviewers`; Bitbucket a REVIEWER participant with no
+    /// verdict; GitLab a listed reviewer) — the PR list's "Needs you". From
+    /// the list call itself: no extra request.
+    #[serde(default)]
+    pub asks_me: bool,
     /// The review verdict, from what the provider's list call returns
     /// (GitHub: one GraphQL read per page). Absent when nobody reviews it or
     /// the provider says nothing.

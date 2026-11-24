@@ -36,13 +36,15 @@ test('reactions and the comment menu are touch-sized; the picker stays on screen
   await expectNoHorizontalOverflow(page);
 });
 
-test('the header shows the merge-checks line', async ({ page }) => {
+test('one statement of the checks; merge rules and the open task are in the details card', async ({ page }) => {
   test.skip(!phoneWidth(page), 'the side column is beside the summary at this width');
   await page.goto('/#/git/rep_otto/pr/51');
   await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
-  const line = page.getByTestId('pr-merge-checks-line');
-  await expect(line).toBeVisible();
-  await expect(line).toContainText('1 of 3 checks passed · 1 task open');
+  await expect(page.getByTestId('pr-status')).toHaveText('1 of 2 checks failing');
+  await expect(page.locator('.prd-head')).not.toContainText('task open');
+  const rules = page.getByRole('region', { name: 'Merge rules' });
+  await expect(rules).toContainText('1 of 3 met');
+  await expect(rules.getByTestId('pr-open-tasks')).toHaveText('1 task open');
   await expectNoHorizontalOverflow(page);
 });
 

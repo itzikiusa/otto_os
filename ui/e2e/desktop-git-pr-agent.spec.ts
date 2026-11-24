@@ -116,6 +116,7 @@ test('Fix asks first, names the folder, and runs with edits allowed', async ({ p
 test('Explain a file from the Files panel and lines from the diff', async ({ page }) => {
   await page.goto('/#/git');
   await openPr(page, 51);
+  await page.getByRole('tab', { name: 'Files', exact: true }).click(); // the tree shows beside Files
   const files = page.getByRole('region', { name: 'Files in pull request #51' });
   const first = files.locator('.nav-file').first();
   const path = (await first.getAttribute('title')) ?? '';
@@ -159,7 +160,9 @@ test('at 800 px tall the list, the files and the opened thread all fit the colum
   expect(box.height).toBeGreaterThanOrEqual(200);
   expect(box.y + box.height).toBeLessThanOrEqual(800);
   await expect(page.locator('.prw-list-main')).toBeVisible();
+  await page.getByRole('tab', { name: 'Files', exact: true }).click(); // the tree shows beside Files
   await expect(page.getByRole('region', { name: 'Files in pull request #51' })).toBeVisible();
+  await expect(panel.getByTestId('embedded-runtime-thread')).toBeVisible();
   expect((await page.locator('.prw-list-main').boundingBox())!.height).toBeGreaterThanOrEqual(140);
 });
 

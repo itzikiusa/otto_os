@@ -1,7 +1,7 @@
 <script lang="ts">
   // PR list — the left pane of the PR workspace (also usable on its own).
   // Search takes free text + qualifiers (pr-query.ts), Sort / Filters menus,
-  // "Authored by you" grouping, lazy +/- counts per visible row, multi-select
+  // "Needs you" first (prStatus.needsYou), lazy +/- counts per visible row, multi-select
   // "Open N together", and a quiet background refresh every 2 minutes that
   // never resets scroll, selection or the search.
   import { api, ApiError } from '../../lib/api/client';
@@ -19,6 +19,8 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { invalidatePr, prListCache, prListKey } from './pr-cache';
   import { ciOf, groupPrs, hasClientFilter, isMine, matchesPr, mergeRefreshed, parsePrQuery, sortPrs, SORT_LABEL, type PrGroup } from './pr-query';
+  import { needsYou } from './prStatus';
+  import InboxFold from '../../lib/components/InboxFold.svelte';
   import { PrStatsLoader } from './pr-stats.svelte';
   import PrListRow from './PrListRow.svelte';
   import { CLEARED_FILTERS, DEFAULT_PREFS, activeFilters, authorItems, filterItems, listToken, prListUrl, readPrefs, sortItems, writePrefs, type PrListPrefs } from './pr-list-prefs';
@@ -46,7 +48,7 @@
   const PER_PAGE = 50;
   const REFRESH_MS = 2 * 60_000;
 
-  // ── Per-repo preferences (sort, state, filters, folded groups) ──────────
+  // ── Per-repo preferences (sort, state, filters) ──────────
   let prefs = $state<PrListPrefs>({ ...DEFAULT_PREFS });
   let prefsFor = '';
   $effect.pre(() => {
@@ -74,7 +76,6 @@
   const listTok = $derived(listToken(effState, prefs.review));
 
   // ── Data ─────────────────────────────────────────────────────────────────
-  const states: PrState[] = ['open', 'merged', 'declined', 'all'];
   let prs: PrSummary[] = $state.raw([]);
   /** Rows the last page-1 read returned (a refresh replaces exactly those). */
   let page1Count = 0;
@@ -305,9 +306,9 @@
       return true;
     });
   });
-  const groups: PrGroup[] = $derived(groupPrs(sortPrs(visible, prefs.sort, sizeOf), myHandles));
-  const folded = $derived(new Set(prefs.folded));
-  const flat = $derived(groups.flatMap((g) => (folded.has(g.id) ? [] : g.items)));
+  const needs = (p: PrSummary): boolean => needsYou(p, isMine(p, myHandles));
+  const groups: PrGroup[] = $derived(groupPrs(sortPrs(visible, prefs.sort, sizeOf), needs));
+  const flat = $derived(groups.flatMap((g) => g.items));
   let firstFor = '';
   $effect(() => {
     if (!onfirst || flat.length === 0 || firstFor === repoId) return;
@@ -316,16 +317,8 @@
     untrack(() => onfirst?.(rows));
   });
   const activeFilterCount = $derived(activeFilters(prefs));
-  const STATE_LABEL: Record<PrState, string> = { open: 'Open', merged: 'Merged', declined: 'Declined', all: 'All' };
   const filtering = $derived(hasClientFilter(parsed) || activeFilterCount > 0);
   const openSet = $derived(new Set(openNumbers));
-
-  function toggleGroup(id: string): void {
-    const s = new Set(prefs.folded);
-    if (s.has(id)) s.delete(id);
-    else s.add(id);
-    setPrefs({ folded: [...s] });
-  }
 
   // ── Menus ───────────────────────────────────────────────────────────────
   function sortMenu(e: MouseEvent): void {
@@ -342,7 +335,7 @@
         maxVisible: 40,
         align: 'end',
       });
-    ctxMenu.show(e, filterItems(prefs, { hasHandles: myHandles.size > 0 || prs.some((p) => p.is_mine), authors, pickAuthor }, setPrefs));
+    ctxMenu.show(e, filterItems(prefs, { hasHandles: myHandles.size > 0 || prs.some((p) => p.is_mine), authors, pickAuthor, stateLocked: parsed.state !== null }, setPrefs));
   }
 
   // ── Opening + selection ─────────────────────────────────────────────────
@@ -377,6 +370,11 @@
   }
 
   function onRowClick(e: MouseEvent, pr: PrSummary): void {
+    // While picking several, a click (a tap) adds or removes the row.
+    if (selected.size > 0 && !e.metaKey && !e.ctrlKey) {
+      toggleSelect(pr, e.shiftKey);
+      return;
+    }
     if (e.shiftKey) {
       e.preventDefault();
       selectRange(pr.number);
@@ -401,8 +399,17 @@
     return () => list.removeEventListener('keydown', h);
   }
   function onListKey(e: KeyboardEvent, list: HTMLElement): void {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      const n = Number((e.target as HTMLElement).closest<HTMLElement>('[data-pr]')?.dataset.pr);
+      const pr = flat.find((p) => p.number === n);
+      if (pr) {
+        e.preventDefault();
+        open(pr, true);
+      }
+      return;
+    }
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
-    const btns = [...list.querySelectorAll<HTMLButtonElement>('.pr-open')];
+    const btns = [...list.querySelectorAll<HTMLButtonElement>('.tr-main')];
     const i = btns.indexOf(document.activeElement as HTMLButtonElement);
     const next = btns[Math.max(0, Math.min(btns.length - 1, i < 0 ? 0 : i + (e.key === 'ArrowDown' ? 1 : -1)))];
     if (next) {
@@ -410,13 +417,6 @@
       next.focus();
     }
   }
-  function onOpenKey(e: KeyboardEvent, pr: PrSummary): void {
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault();
-      open(pr, true);
-    }
-  }
-
   function clearSearch(): void {
     query = '';
     parsedSource = '';
@@ -466,25 +466,6 @@
     </div>
   </div>
 
-  <div class="pr-subbar">
-    <div class="segmented pr-states" role="group" aria-label="Pull request state">
-      {#each states as s (s)}
-        <button
-          class:active={effState === s}
-          aria-pressed={effState === s}
-          disabled={parsed.state !== null}
-          title={parsed.state !== null ? 'Set by is: in the search' : undefined}
-          onclick={() => setPrefs({ state: s })}
-        >{STATE_LABEL[s]}</button>
-      {/each}
-    </div>
-    <span class="grow"></span>
-    {#if lastUpdated && !loading}
-      <span class="pr-updated-hint dim" title={new Date(lastUpdated).toLocaleString()}>
-        {refreshing ? 'Refreshing…' : `Updated ${rel(lastUpdated)}`}
-      </span>
-    {/if}
-  </div>
   <!-- Always mounted: a status region inserted with its text is usually silent. -->
   <div class="pr-refresh-err" role="status" class:empty={!refreshError}>{refreshError ? `Couldn’t refresh: ${refreshError}` : ''}</div>
 
@@ -511,38 +492,35 @@
       <EmptyState
         icon="pr"
         title={effState === 'all' ? 'No pull requests' : `No ${effState} pull requests`}
-        body="Open one from your current branch, or pick another state above."
+        body="Open one from your current branch, or pick another state in Filters."
         actionLabel="New pull request"
         actionIcon="pr"
         onaction={() => (createOpen = true)}
       />
     {:else}
       <div class="pr-rows" role="list" aria-label="Pull requests" {@attach arrowKeys}>
+        {#snippet rows(items: PrSummary[], strong: boolean)}
+          {#each items as pr (pr.number)}
+            <PrListRow
+              {pr}
+              stat={stats?.get(pr) ?? null}
+              active={activeNumber === pr.number}
+              selected={selected.has(pr.number)}
+              needs={strong}
+              openTab={openSet.has(pr.number)}
+              observe={stats ? stats.observe(pr) : null}
+              ontoggle={(shift) => toggleSelect(pr, shift)}
+              onrowclick={(e) => onRowClick(e, pr)}
+              onopen={(background) => open(pr, background)}
+            />
+          {/each}
+        {/snippet}
+        <!-- Headings only when something needs you: "Needs you", then the rest. -->
         {#each groups as g (g.id)}
-          {#if g.id !== 'all'}
-            <button class="pr-group" aria-expanded={!folded.has(g.id)} onclick={() => toggleGroup(g.id)}>
-              <Icon name={folded.has(g.id) ? 'chevronRight' : 'chevronDown'} size={12} />
-              <Icon name={g.id === 'mine' ? 'edit' : 'people'} size={12} />
-              <span>{g.label}</span>
-              <span class="pr-group-count">{g.items.length}</span>
-              <span class="pr-group-rule" aria-hidden="true"></span>
-            </button>
-          {/if}
-          {#if !folded.has(g.id)}
-            {#each g.items as pr (pr.number)}
-              <PrListRow
-                {pr}
-                stat={stats?.get(pr) ?? null}
-                active={activeNumber === pr.number}
-                selected={selected.has(pr.number)}
-                selecting={selected.size > 0}
-                openTab={openSet.has(pr.number)}
-                observe={stats ? stats.observe(pr) : null}
-                ontoggle={(shift) => toggleSelect(pr, shift)}
-                onrowclick={(e) => onRowClick(e, pr)}
-                onopen={(background) => open(pr, background)}
-              />
-            {/each}
+          {#if g.id === 'all'}
+            {@render rows(g.items, false)}
+          {:else}
+            <InboxFold label={g.label}>{@render rows(g.items, g.id === 'needs')}</InboxFold>
           {/if}
         {/each}
         {#if visible.length === 0}
@@ -597,7 +575,8 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 10px 12px 6px;
+    padding: 10px 12px 8px;
+    border-block-end: 1px solid var(--border);
   }
   .pr-search-wrap {
     position: relative;
@@ -663,20 +642,6 @@
   .prlist {
     container-type: inline-size;
   }
-  .pr-subbar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 0 12px 8px;
-    border-block-end: 1px solid var(--border);
-  }
-  .pr-states > button:disabled {
-    cursor: default;
-  }
-  .pr-updated-hint {
-    font-size: var(--fs-xs);
-    white-space: nowrap;
-  }
   .pr-refresh-err.empty {
     padding: 0;
   }
@@ -703,30 +668,6 @@
   .pr-rows {
     display: flex;
     flex-direction: column;
-  }
-  .pr-group {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    padding: 10px 8px 4px;
-    border: none;
-    background: none;
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-    cursor: pointer;
-    text-align: start;
-  }
-  .pr-group:hover {
-    color: var(--text);
-  }
-  .pr-group-count {
-    font-variant-numeric: tabular-nums;
-  }
-  .pr-group-rule {
-    flex: 1;
-    height: 1px;
-    background: var(--border);
   }
   .pr-nomatch {
     display: flex;
@@ -767,10 +708,6 @@
     }
     .pr-icon {
       width: 34px;
-    }
-    .pr-states > button {
-      height: 30px;
-      padding: 0 10px;
     }
   }
 </style>

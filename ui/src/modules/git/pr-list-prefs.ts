@@ -31,8 +31,8 @@ export const DEFAULT_PREFS: PrListPrefs = {
   folded: [],
 };
 
-/** The filter fields "Clear filters" resets (sort/state/folds stay). */
-export const CLEARED_FILTERS: Partial<PrListPrefs> = { draft: 'any', ci: null, author: null, mine: false, review: false };
+/** The filter fields "Clear filters" resets (sort/folds stay). */
+export const CLEARED_FILTERS: Partial<PrListPrefs> = { state: 'open', draft: 'any', ci: null, author: null, mine: false, review: false };
 
 const prefsKey = (id: string) => `otto_prlist_prefs_${id}`;
 
@@ -54,7 +54,7 @@ export function writePrefs(id: string, p: PrListPrefs): void {
 }
 
 export const activeFilters = (p: PrListPrefs): number =>
-  (p.draft !== 'any' ? 1 : 0) + (p.ci ? 1 : 0) + (p.author ? 1 : 0) + (p.mine ? 1 : 0) + (p.review ? 1 : 0);
+  (p.state !== 'open' ? 1 : 0) + (p.draft !== 'any' ? 1 : 0) + (p.ci ? 1 : 0) + (p.author ? 1 : 0) + (p.mine ? 1 : 0) + (p.review ? 1 : 0);
 
 /** The list's server query: a state, or `<state>~review` for "review
  *  requested from you" (its own cache key — those rows are another list). */
@@ -79,7 +79,7 @@ export function sortItems(p: PrListPrefs, anyStats: boolean, set: (x: Partial<Pr
 /** The Filters menu; `pickAuthor` opens the (filterable) author sub-menu. */
 export function filterItems(
   p: PrListPrefs,
-  opts: { hasHandles: boolean; authors: string[]; pickAuthor: () => void },
+  opts: { hasHandles: boolean; authors: string[]; pickAuthor: () => void; stateLocked?: boolean },
   set: (x: Partial<PrListPrefs>) => void,
 ): MenuItem[] {
   const ci = (v: CiFilter, label: string): MenuItem => ({
@@ -87,7 +87,12 @@ export function filterItems(
     checked: p.ci === v,
     action: () => set({ ci: p.ci === v ? null : v }),
   });
-  const items: MenuItem[] = [];
+  // The state (was its own segmented row): open is the default, the rest a filter.
+  const STATES: [PrState, string][] = [['open', 'Open'], ['merged', 'Merged'], ['declined', 'Declined'], ['all', 'All']];
+  const items: MenuItem[] = STATES.map(([s, label]) => ({
+    label, checked: p.state === s, disabled: opts.stateLocked, title: opts.stateLocked ? 'Set by is: in the search' : undefined, action: () => set({ state: s }),
+  }));
+  items.push({ separator: true });
   if (opts.hasHandles) items.push({ label: 'Authored by you', icon: 'user', checked: p.mine, action: () => set({ mine: !p.mine }) });
   items.push({ label: 'Review requested from you', icon: 'eye', hint: 'open', checked: p.review, action: () => set({ review: !p.review }) });
   items.push({

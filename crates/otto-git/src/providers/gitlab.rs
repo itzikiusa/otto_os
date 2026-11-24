@@ -308,15 +308,20 @@ fn summary_from(v: &Value) -> PrSummary {
             .unwrap_or_default(),
         url: vstr(v, &["web_url"]),
         is_mine: false,
+        asks_me: false,
     }
 }
 
-/// [`summary_from`] with `is_mine` set from the author's id.
+/// [`summary_from`] with `is_mine` and `asks_me` (a listed reviewer: the
+/// list carries no approvals) set from the stable ids.
 fn summary_for(v: &Value, me: Option<&Me>) -> PrSummary {
     let mut s = summary_from(v);
     s.is_mine = v
         .get("author")
         .is_some_and(|a| identity::is_me(me, &user_keys(a)));
+    s.asks_me = varr(v, &["reviewers"])
+        .iter()
+        .any(|u| identity::is_me(me, &user_keys(u)));
     s
 }
 
