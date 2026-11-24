@@ -9,7 +9,9 @@
 //
 // SQL and Redis stay STATIC on purpose: they power the hot-path DB console.
 import type { Extension } from '@codemirror/state';
-import { foldInside, foldNodeProp, LanguageSupport } from '@codemirror/language';
+import { foldInside, foldNodeProp, forceParsing, LanguageSupport, syntaxTree } from '@codemirror/language';
+import { ViewPlugin, type EditorView } from '@codemirror/view';
+import { startMeasurement } from '../telemetry.ts';
 import { sql } from '@codemirror/lang-sql';
 import { sqlDialect as dialectFor, type SqlDialectName } from '../sql-dialects.ts';
 import { redisLang } from './redis-lang.ts';
@@ -76,6 +78,47 @@ const LOADERS: Record<string, () => Promise<Build>> = {
   makefile: () => import('./cm-lang-makefile.ts').then((m) => () => m.makefileLang()),
 };
 
+/** Colour what scrolls into view in the same frame. CodeMirror leaves the tree past the
+ *  parsed end to its idle worker (100–500 ms after a scroll), and a StreamLanguage (shell,
+ *  TOML, Makefile…) never parses past the viewport, so every scroll used to show plain
+ *  lines first and colours later. When the tree ends before the viewport does, parse up to
+ *  the viewport's end in a microtask: after CodeMirror's update, before the browser paints
+ *  (a 2,000-line Makefile tokenizes in ~4 ms whole; the budget caps a huge file).
+ *  In the IDE, the first time the viewport is coloured is recorded as `ui.highlight`. */
+const eagerParse = ViewPlugin.fromClass(
+  class {
+    queued = false;
+    span: ReturnType<typeof startMeasurement> | null;
+    view: EditorView;
+    constructor(view: EditorView) {
+      this.view = view;
+      this.span = view.dom.closest('.is-ide') ? startMeasurement('ui.highlight', 'ide') : null;
+      this.check();
+    }
+    update(): void {
+      this.check();
+    }
+    check(): void {
+      if (this.queued) return;
+      this.queued = true;
+      queueMicrotask(() => {
+        this.queued = false;
+        const v = this.view, to = v.viewport.to;
+        if (!v.dom.isConnected) return;
+        if (syntaxTree(v.state).length < to) forceParsing(v, to, 15);
+        if (this.span && syntaxTree(v.state).length >= to) {
+          const span = this.span;
+          this.span = null;
+          requestAnimationFrame(() => span.finish());
+        }
+      });
+    }
+    destroy(): void {
+      this.span?.finish('canceled');
+    }
+  },
+);
+
 /** Resolved builders, by extension (module-wide: every editor shares them). */
 const ready = new Map<string, Build>();
 const inflight = new Map<string, Promise<void>>();
@@ -84,7 +127,7 @@ const inflight = new Map<string, Promise<void>>();
  *  already loaded); null for an unknown ext or a pack still loading. */
 export function cmLangNow(ext: string, dialect: SqlDialectName): Extension | null {
   const b = SYNC[ext] ?? ready.get(ext);
-  return b ? b(dialect) : null;
+  return b ? [b(dialect), eagerParse] : null;
 }
 
 /** Whether `ext` has a pack that isn't loaded yet. */

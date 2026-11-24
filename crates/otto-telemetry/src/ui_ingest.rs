@@ -22,6 +22,7 @@ pub fn validate_ui_batch(spans: &[SpanRecord]) -> Result<()> {
                 | "ui.response.decode"
                 | "ui.thread.open"
                 | "ui.thread.send"
+                | "ui.highlight"
         ) || !matches!(span.kind.as_str(), "client" | "internal")
             || !UI_COMPONENTS.contains(&span.component.as_str())
             || span.attributes.contains_key("http.route")
@@ -86,6 +87,7 @@ mod tests {
             SpanRecord::new("ui.navigation", "ide", 9.0),
             SpanRecord::new("ui.thread.open", "threads", 24.0),
             SpanRecord::new("ui.thread.send", "threads", 3.0),
+            SpanRecord::new("ui.highlight", "ide", 4.0),
         ];
         for request in fixture["requests"].as_array().unwrap() {
             let mut span = SpanRecord::new(
