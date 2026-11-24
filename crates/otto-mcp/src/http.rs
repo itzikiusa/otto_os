@@ -650,6 +650,12 @@ async fn oauth_start<S: McpCtx>(
     body: Option<Json<OAuthStartReq>>,
 ) -> ApiResult<Json<Value>> {
     require_person_at_the_mac(&auth)?;
+    // The browser's answer comes back to this Mac's loopback only.
+    if otto_core::auth::request_peer().is_some_and(|p| p.kind != otto_core::peer::PeerKind::Local) {
+        return Err(ApiErr(Error::Forbidden(
+            "Sign in on the Mac: the sign-in answers on this Mac's loopback only".into(),
+        )));
+    }
     let server = ctx.mcp().registry().get(&id).await.map_err(ApiErr)?;
     require_resource(
         &ctx,

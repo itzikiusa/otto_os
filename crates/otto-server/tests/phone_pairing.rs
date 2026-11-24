@@ -243,6 +243,37 @@ async fn device_token_does_normal_app_work_but_not_credentials_or_admin() {
 }
 
 #[tokio::test]
+async fn an_mcp_sign_in_starts_only_on_the_mac_itself() {
+    let d = boot().await;
+    use reqwest::Method as M;
+    let (s, server) = d
+        .send(
+            Via::Mac,
+            M::POST,
+            "/workspaces/ws1/mcp/servers",
+            Some(&d.human),
+            Some(json!({"name": "lan", "transport": "http", "url": "http://10.1.2.3/mcp"})),
+        )
+        .await;
+    assert_eq!(s, 200, "{server}");
+    let path = format!(
+        "/mcp/servers/{}/oauth/start",
+        server["id"].as_str().unwrap()
+    );
+    let path = path.as_str();
+    let (s, v) = d
+        .send(Via::Tailnet, M::POST, path, Some(&d.human), Some(json!({})))
+        .await;
+    assert_eq!(s, 403, "{v}");
+    assert!(v.to_string().contains("Sign in on the Mac"), "{v}");
+    // From the Mac it gets past the peer check (and stops at https).
+    let (s, v) = d
+        .send(Via::Mac, M::POST, path, Some(&d.human), Some(json!({})))
+        .await;
+    assert!(s != 403 && v.to_string().contains("https"), "{s} {v}");
+}
+
+#[tokio::test]
 async fn device_token_only_works_from_the_tailnet_or_this_mac() {
     let d = boot().await;
     let (token, _) = d.paired_phone().await;
