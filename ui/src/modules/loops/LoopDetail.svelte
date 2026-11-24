@@ -31,8 +31,7 @@
   import LoopOpsDrawer from './LoopOpsDrawer.svelte';
   import { tick } from 'svelte';
 
-  // The embedded session (terminal + xterm) shows only after a click on an
-  // agent, so it loads then, not with the loop list.
+  // The embedded session (terminal + xterm) loads on a click on an agent.
   const SessionViewLazy = lazyComponent(() => import('../agents/SessionView.svelte'));
 
   /** ⌘K verbs registered by the detail page (or bound via optional actions prop). */
