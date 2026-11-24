@@ -9,6 +9,7 @@ async function emptyCoach(page: Page) {
   await page.addInitScript(() => localStorage.removeItem('otto_firstrun_dismissed'));
   await page.route('**/api/v1/workspaces', (r) => r.fulfill({ json: [] }));
   await page.route('**/api/v1/workspaces/*/sessions', (r) => r.fulfill({ json: [] }));
+  await page.route('**/api/v1/runtime-sessions', (r) => r.fulfill({ json: [] })); // no threads either: a first-timer
   await page.route('**/api/v1/library/bundled', (r) => r.fulfill({ json: [] }));
 }
 

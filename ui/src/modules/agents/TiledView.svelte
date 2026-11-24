@@ -29,7 +29,7 @@
   import { ui } from '../../lib/stores/ui.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { winKey } from '../../lib/win';
-  import { MAX_PANES, applyTileOrder, sessionRef, threadRef } from '../../lib/stores/splitLayout';
+  import { MAX_PANES, applyTileOrder } from '../../lib/stores/splitLayout';
   import { layout } from '../../lib/stores/splitLayout.svelte';
   import { liveTracks, type Tracks } from './tileTracks';
 
@@ -433,24 +433,6 @@
   </div>
 {:else}
   <div class="tiled-wrap">
-  {#if ordered.length > 1}
-    <!-- Full per-pane control lives in the split tree: hand the tiles over in
-         their current order as an equal grid, then every edge is its own
-         gutter and panes can be nested any way (presets in the pane ⋯ menu).
-         Its own slim bar above the grid — floating it over the first tile hid
-         that pane's header actions (reload / maximize / copy). -->
-    <div class="tiled-bar">
-    <button
-      class="btn small free-layout"
-      onclick={() => {
-        layout.layoutSessions(ordered.map((s) => ('thread' in s ? threadRef : sessionRef)(s.id)), 'grid');
-        ws.setViewMode('tabs');
-      }}
-      title="Turn these tiles into a free layout: every pane edge resizable, panes nestable, presets in the ⋯ menu"
-      data-testid="tiled-free-layout"
-    ><Icon name="split" size={12} /> Free layout</button>
-    </div>
-  {/if}
   <div class="tiled" class:resizing bind:this={gridEl} style={gridStyle}>
     {#each tileRows as tiles, r (r)}
       {#if r > 0}
@@ -578,15 +560,6 @@
     flex-direction: column;
     height: 100%;
     min-height: 0;
-  }
-  .tiled-bar {
-    flex: 0 0 auto;
-    display: flex;
-    justify-content: flex-end;
-    padding: 6px 8px 0;
-  }
-  .free-layout {
-    gap: 4px;
   }
   .tiled {
     display: grid;

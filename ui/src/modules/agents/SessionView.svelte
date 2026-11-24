@@ -505,10 +505,9 @@
     return rows;
   }
 
-  // ⌘K "Redraw terminal" for the pane the keyboard is in (same action as the
-  // ⋯ menu row above).
+  // ⌘K "Redraw terminal" for the terminal the keyboard is in (the ⋯ row's action).
   $effect(() => {
-    if (!kbFocused || viewport.isPhone) return;
+    if (!kbFocused || viewport.isPhone || view !== 'terminal') return;
     return registry.register('session-terminal', [
       {
         id: 'terminal.redraw',
@@ -529,13 +528,13 @@
   function sessionMenuItems(): MenuItem[] {
     const sep = { separator: true } as MenuItem;
     const session_: MenuItem[] = [
-      { label: findLabel, icon: 'search', hint: '⌘F', action: openSessionFind },
+      ...(view === 'terminal' ? [{ label: findLabel, icon: 'search', hint: '⌘F', action: openSessionFind } as MenuItem] : []),
       ...(foldedMinimal && chatOk ? [{ label: view === 'chat' ? 'Show the terminal' : 'Show the chat', icon: view === 'chat' ? 'terminal' : 'threads', action: () => setView(view === 'chat' ? 'terminal' : 'chat') } as MenuItem] : []),
       ...(foldedMinimal && showZoom
         ? [{ label: maximized ? 'Restore tiled view' : 'Zoom in on this session', icon: maximized ? 'minimize' : 'maximize', action: () => ws.toggleMaximize(sessionId) } as MenuItem]
         : []),
       ...(readOnly ? [] : [{ label: 'Rename', icon: 'edit', action: startRename } as MenuItem]),
-      ...(viewport.isPhone ? [] : [{ label: 'Redraw terminal', icon: 'refresh', title: 'Rebuild the screen from the session — fixes a garbled or half-drawn pane', action: () => termRef?.redraw() } as MenuItem]),
+      ...(viewport.isPhone || view !== 'terminal' ? [] : [{ label: 'Redraw terminal', icon: 'refresh', title: 'Rebuild the screen from the session — fixes a garbled or half-drawn pane', action: () => termRef?.redraw() } as MenuItem]),
       ...(!readOnly && isAgent ? [{ label: 'Restart session', icon: 'refresh', title: status === 'working' ? 'Asks first — the agent is working' : undefined, action: () => void restart() } as MenuItem] : []),
       ...(isAgent ? [{ label: 'Copy transcript (Markdown)', icon: 'copy', action: () => void import('./conversation/exportMarkdown').then((m) => m.copySessionTranscriptMarkdown(sessionId, { title: session?.title, provider: session?.provider, cwd: session?.cwd })) } as MenuItem] : []),
       ...(readOnly
@@ -766,7 +765,7 @@
   <div class="pane-body" data-view={view}>
     {#if view === 'chat' && session}
       <div class="pane-chat" data-testid="pane-chat">
-      <LazyMount lazy={ChatView} what="the conversation" variant="panel" props={{ sessionId, workspaceId: session.workspace_id, surface: 'agents', readonly: readOnly, ontoggleterminal: () => setView('terminal') }} />
+      {#key sessionId}<LazyMount lazy={ChatView} what="the conversation" variant="panel" props={{ sessionId, workspaceId: session.workspace_id, surface: 'agents', readonly: readOnly, ontoggleterminal: () => setView('terminal') }} />{/key}
       </div>
     {:else}
     <div class="pane-term">
@@ -1015,6 +1014,7 @@
     font-size: var(--fs-xs);
     cursor: pointer;
   }
+  .pane-head.touch .pane-view button { min-block-size: var(--hit-min); } /* finger-sized on touch */
   .pane-view button.on {
     background: var(--bg);
     color: var(--text);

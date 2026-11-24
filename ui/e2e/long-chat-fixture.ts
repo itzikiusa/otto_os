@@ -67,6 +67,20 @@ export function writeLongChat(minBytes = 60 << 20, minRecords = 20_000): LongCha
   return { dir, path, bytes, records, exchanges: n, lastPrompt };
 }
 
+/** A plain chat of `turns` prompt/answer exchanges (a few screens tall, no tool dumps). */
+export function writeChat(turns = 40): LongChat {
+  const dir = tempDir('otto-chat-');
+  const path = join(dir, `${LONG_SID}.jsonl`);
+  const at = (n: number, k: number) => new Date(Date.UTC(2026, 10, 1) + n * 60_000 + k * 1000).toISOString();
+  const lines: string[] = [];
+  for (let n = 0; n < turns; n++) {
+    lines.push(JSON.stringify({ type: 'user', uuid: `u-${n}`, sessionId: LONG_SID, cwd: dir, timestamp: at(n, 0), message: { role: 'user', content: `prompt ${n}: look at the next failing check` } }));
+    lines.push(JSON.stringify({ type: 'assistant', uuid: `a-${n}`, sessionId: LONG_SID, cwd: dir, timestamp: at(n, 1), requestId: `req-${n}`, message: { id: `msg-${n}`, role: 'assistant', model: 'claude-opus-5-5', content: [{ type: 'text', text: `Step ${n} is fixed.\n\nThe check passes now; the next one is below.` }] } }));
+  }
+  appendFileSync(path, lines.join('\n') + '\n');
+  return { dir, path, bytes: 0, records: lines.length, exchanges: turns, lastPrompt: `prompt ${turns - 1}: look at the next failing check` };
+}
+
 /** Seed a live (inert shell) session whose Chat reads `chat.path`. */
 export async function seedLongChat(ctx: APIRequestContext, base: string, wsId: string, chat: LongChat): Promise<string> {
   const r = await ctx.post(`${base}/api/v1/workspaces/${wsId}/sessions`, {

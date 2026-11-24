@@ -9,6 +9,7 @@ for (const direction of ['ltr', 'rtl']) {
     await page.setViewportSize({ width: 375, height: 812 });
     await page.addInitScript((dir) => localStorage.setItem('otto_direction', dir), direction);
     await page.route('**/api/v1/workspaces', (route) => route.fulfill({ json: [] }));
+    await page.route('**/api/v1/runtime-sessions', (route) => route.fulfill({ json: [] })); // no threads either: a first-timer
     await page.route('**/api/v1/library/bundled', (route) => route.fulfill({ json:
       ['grill', 'correctness-review', 'security-review', 'insights'].map((name) => ({
         name, category: 'Review', version: 1, description: 'Synthetic setup skill',

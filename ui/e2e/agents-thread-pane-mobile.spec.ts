@@ -95,6 +95,9 @@ test('a terminal agent session reaches its chat from the pane ⋯ on a phone', a
     await expect(pane).toBeVisible({ timeout: 30_000 });
     await pane.getByRole('button', { name: /^More…/ }).tap();
     await page.getByRole('menuitem', { name: 'Show the chat' }).tap();
+    // The chat itself is what shows, not only the menu's label.
+    await expect(pane.locator('.conv')).toBeVisible();
+    await expect(pane.locator('.term-host')).toHaveCount(0);
     await pane.getByRole('button', { name: /^More…/ }).tap();
     await expect(page.getByRole('menuitem', { name: 'Show the terminal' })).toBeVisible();
   } finally {

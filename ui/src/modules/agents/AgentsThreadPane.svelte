@@ -52,9 +52,10 @@
   // The side panel's Git / Files follow this pane's folder while it is focused.
   $effect(() => {
     const cwd = s?.cwd;
+    const id = threadId;
     if (!cwd) return;
-    rightPanel.paneFolders.set(threadId, cwd);
-    return () => void rightPanel.paneFolders.delete(threadId);
+    rightPanel.paneFolders.set(id, cwd);
+    return () => void rightPanel.paneFolders.delete(id);
   });
   let paneW = $state(0);
   const gripOn = $derived(showGrip && dragKey != null && !viewport.isPhone);
