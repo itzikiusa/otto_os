@@ -117,17 +117,19 @@ test.describe('database mobile (phone)', () => {
     expect(widest).toBeLessThanOrEqual(vw + 2);
   });
 
-  test('the page scrolls vertically when content overflows', async ({ page }) => {
+  test('the rows fill the screen: the page stays put, the grid scrolls', async ({ page }) => {
     test.skip(redisConnId == null, 'redis-server unavailable');
     await openAndQuery(page);
 
-    const scroll = await page.locator('.db-page').evaluate((el) => ({
-      clientH: el.clientHeight,
-      scrollH: el.scrollHeight,
-    }));
-    // With a connection + query open the stacked sections overflow the viewport,
-    // and .db-page is the (vertical) scroll container.
-    expect(scroll.scrollH).toBeGreaterThan(scroll.clientH + 20);
+    // The workbench fills the height under the header and does not scroll as
+    // a document; the results reach the bottom of it (the grid scrolls inside).
+    const m = await page.evaluate(() => {
+      const box = (s: string) => document.querySelector(s)!.getBoundingClientRect();
+      const pageEl = document.querySelector('.db-page')!;
+      return { over: pageEl.scrollHeight - pageEl.clientHeight, gap: box('.db-main').bottom - box('.qe-results').bottom };
+    });
+    expect(m.over).toBeLessThanOrEqual(1);
+    expect(m.gap).toBeLessThan(40);
   });
 
   test('running a query shows result rows in the grid', async ({ page }) => {
