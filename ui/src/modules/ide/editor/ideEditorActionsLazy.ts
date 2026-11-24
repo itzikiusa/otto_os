@@ -31,6 +31,9 @@ import {
 } from './ideEditorStoreBridge.svelte';
 import { ideParentFolderHint } from './ideCrumbs';
 import { resolveLocalFastDive } from './ideLangAnalyzer';
+import { isMakefilePath } from '../../../lib/components/makefilePath';
+import { findMakefileDefinition, makefileOutline, makefileWordAt } from '../../../lib/components/makefileModel';
+import type { IdeFileReadResp } from '../../../lib/api/types';
 
 export function openIdeTabContextMenu(
   anchor: HTMLElement | MouseEvent,
@@ -116,6 +119,36 @@ function isImportBindingLine(lineText: string): boolean {
   return /^\s*(?:import\b|(?:const|let|var)\s+.*=\s*require\()/.test(lineText);
 }
 
+/** A Makefile's variable / target / define under the cursor: in this file, else in a file
+ *  it includes (resolved against its folder; open buffers first, then the disk). */
+async function resolveMakefileDefinition(
+  fromPath: string,
+  content: string,
+  line: number,
+  col: number,
+): Promise<{ path: string; line: number; column: number } | null> {
+  const name = makefileWordAt(content.split(/\r?\n/)[line - 1] ?? '', col);
+  if (!name) return null;
+  const here = findMakefileDefinition(content, name);
+  if (here) return here.line === line ? null : { path: fromPath, line: here.line, column: here.column };
+  const dir = fromPath.slice(0, fromPath.lastIndexOf('/'));
+  for (const inc of makefileOutline(content).includes) {
+    if (/[$*?[]/.test(inc)) continue;
+    const path = inc.startsWith('/') ? inc : `${dir}/${inc}`.replace(/\/\.\//g, '/');
+    let text = ide.tabs.find((t) => t.path === path)?.content;
+    if (text === undefined) {
+      try {
+        text = (await api.get<IdeFileReadResp>(`/ide/fs/file?${ide.targetQuery({ path })}`)).content;
+      } catch {
+        continue; // `-include` of a file that is not there
+      }
+    }
+    const d = findMakefileDefinition(text, name);
+    if (d) return { path, line: d.line, column: d.column };
+  }
+  return null;
+}
+
 export async function runPerformIdeDive(
   mode: 'definition' | 'implementation',
   fromPath: string,
@@ -135,6 +168,15 @@ export async function runPerformIdeDive(
     } else {
       await ide.openFile(target.path, { line: target.line, col: target.column, preview: false, projectScoped: true });
       pushIdeNavLocation(target.path, target.line, target.column);
+      return;
+    }
+  }
+
+  if (mode === 'definition' && isMakefilePath(fromPath)) {
+    const hit = await resolveMakefileDefinition(fromPath, content, originLine, originCol);
+    if (hit) {
+      await ide.openFile(hit.path, { line: hit.line, col: hit.column, preview: false, projectScoped: true });
+      pushIdeNavLocation(hit.path, hit.line, hit.column);
       return;
     }
   }

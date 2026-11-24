@@ -30,7 +30,7 @@
 
   function symbolTone(kind: string): BadgeTone {
     const k = kind.toLowerCase();
-    if (k.includes('func') || k.includes('method')) return 'info';
+    if (k.includes('func') || k.includes('method') || k === 'target') return 'info';
     if (k.includes('class') || k.includes('struct') || k.includes('interface') || k.includes('type')) {
       return 'accent';
     }
@@ -47,6 +47,8 @@
     if (k.includes('type')) return 'type';
     if (k.includes('const')) return 'const';
     if (k.includes('field') || k.includes('prop') || k.includes('key') || k.includes('col')) return 'prop';
+    if (k === 'target') return 'target';
+    if (k === 'variable') return 'var';
     return kind.slice(0, 5);
   }
 
@@ -72,7 +74,7 @@
       {:else}
         <LoadState what="file outline" variant="compact" loading={ide.symbolsLoading} empty={flatSymbols.length === 0}>
           {#snippet emptyView()}
-            <EmptyState headingLevel={2} icon="layers" title="No outline symbols" body="Symbols appear automatically for Go, TypeScript, Java, Rust, Python, Shell, JSON, and CSV files." />
+            <EmptyState headingLevel={2} icon="layers" title="No outline symbols" body="Symbols appear automatically for Go, TypeScript, Java, Rust, Python, Shell, Makefile, Markdown, JSON, and CSV files." />
           {/snippet}
           <div class="sec-list">
             {#each flatSymbols as item, idx (`${item.sym.name}:${item.sym.line}:${idx}`)}

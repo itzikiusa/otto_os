@@ -11,7 +11,9 @@
 // the function name apart from variable names — are coloured in every kind of line.
 import { StreamLanguage, type StringStream } from '@codemirror/language';
 import type { Extension } from '@codemirror/state';
+import { EditorView, hoverTooltip } from '@codemirror/view';
 import { shellToken, type ShellScanState } from './cm-langs-extra.ts';
+import { findMakefileDefinition, makefileWordAt } from './makefileModel.ts';
 
 const FUNCS = new Set([
   'subst', 'patsubst', 'strip', 'findstring', 'filter', 'filter-out', 'sort', 'word', 'wordlist', 'words',
@@ -232,6 +234,35 @@ export const makefileParser = {
   languageData: { commentTokens: { line: '#' } },
 };
 
+/** Hovering a reference, a prerequisite or a call shows the line that defines it. */
+const definitionHover = hoverTooltip((view, pos) => {
+  const line = view.state.doc.lineAt(pos);
+  const name = makefileWordAt(line.text, pos - line.from + 1);
+  const def = name ? findMakefileDefinition(view.state.doc.toString(), name) : null;
+  if (!def || def.line === line.number) return null;
+  return {
+    pos,
+    above: true,
+    create: () => {
+      const dom = document.createElement('div');
+      dom.className = 'cm-mk-def';
+      dom.dataset.testid = 'makefile-def-hover';
+      const code = document.createElement('code');
+      code.textContent = def.text;
+      const where = document.createElement('span');
+      where.textContent = `${def.kind === 'target' ? 'Target' : 'Variable'} · line ${def.line} · ⌘-click to go there`;
+      dom.append(code, where);
+      return { dom };
+    },
+  };
+});
+
+const hoverTheme = EditorView.baseTheme({
+  '.cm-mk-def': { display: 'flex', flexDirection: 'column', gap: '2px', padding: '6px 8px', maxInlineSize: '640px' },
+  '.cm-mk-def code': { fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-s)', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
+  '.cm-mk-def span': { color: 'var(--text-dim)', fontSize: 'var(--fs-xs)' },
+});
+
 export function makefileLang(): Extension {
-  return StreamLanguage.define(makefileParser);
+  return [StreamLanguage.define(makefileParser), definitionHover, hoverTheme];
 }
