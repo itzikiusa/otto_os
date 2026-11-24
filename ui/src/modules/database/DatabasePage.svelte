@@ -1199,25 +1199,24 @@
   }
 
   /* ───────────────── Phone (≤640px) ─────────────────
-     The results are the screen: the page scrolls as one document (the query
-     tabs, the editor folded to one line after a run, then the rows); Tables
-     and History are a sheet from the header (phoneSide). */
+     The results are the screen: the view fills the height under the header
+     (the query tabs, the editor folded to one line after a run, then the rows
+     down to the bottom bar); a view taller than that (Structure, Builder)
+     scrolls inside it. Tables and History are a sheet from the header. */
   @media (max-width: 640px) {
     .db-page {
       flex-direction: column;
-      overflow-y: auto;
-      -webkit-overflow-scrolling: touch;
+      overflow: hidden;
     }
-    /* Terminal views need a bounded flex height. */
-    .db-page.terminal-active { overflow: hidden; }
-    .terminal-active .db-main { flex: 1; min-height: 0; }
     .db-main {
-      flex: 0 0 auto;
+      flex: 1;
       min-height: 0;
     }
     .main-body {
-      flex: 0 0 auto;
-      padding: 0 0 16px;
+      padding: 0;
+      overflow-x: hidden;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
     }
     /* The assistant drops below the view as a full-width block. */
     .main-split {

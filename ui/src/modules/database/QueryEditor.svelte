@@ -35,6 +35,7 @@
   import { ui } from '../../lib/stores/ui.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
+  import { isTouchFirst } from '../../lib/enterSends';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { editorBar, type EditorBar } from './workbenchBar.svelte';
@@ -1386,7 +1387,7 @@
       }}
       bind:this={codeEditor}
       {sqlDialect}
-      placeholder={lang === 'redis' ? 'Write a command — ⌘↵ to run' : 'Write a query — ⌘↵ to run'}
+      placeholder={(lang === 'redis' ? 'Write a command' : 'Write a query') + (isTouchFirst() ? '' : ' — ⌘↵ to run')}
       completionSource={database.selectedConnId ? completionSource : null}
       autoTriggerGate={(s, pos) => !inInertNode(s, pos)}
       onchange={(v) => database.setStatement(v)}
@@ -1879,10 +1880,6 @@
      Upper bound covers iPad landscape (1194px); desktop (≥1280) keeps one row. */
 
   @media (max-width: 640px) {
-    .query-editor {
-      height: auto;
-      min-height: 0;
-    }
     /* Editor: ignore the persisted desktop drag-height — keep it compact so the
        results sit just below it (the inline style sets height, so override it). */
     .qe-edit {
@@ -1934,14 +1931,11 @@
     .qe-splitter {
       display: none;
     }
-    /* Results: own bounded, internally-scrolling block — always reachable. A
-       small result fits naturally; a large one caps at ~70vh and the grid
-       scrolls inside it (its child .grid-scroll is overflow:auto) so the page
-       doesn't grow unbounded. */
+    /* Results: the rest of the screen, down to the bottom bar (the grid
+       scrolls inside it); with the editor open too, never squeezed under a
+       few rows — the view scrolls instead. */
     .qe-results {
-      flex: 0 0 auto;
-      min-height: 340px;
-      max-height: 78vh;
+      min-height: 240px;
     }
     .qe-tabs {
       scrollbar-width: none;

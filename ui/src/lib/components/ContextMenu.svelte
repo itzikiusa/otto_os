@@ -444,7 +444,7 @@
           {#if itemHasSub}
             <span class="ctx-chevron"><Icon name="chevronRight" size={12} /></span>
           {:else if item.hint}
-            <span class="ctx-hint">{item.hint}</span>
+            <span class="ctx-hint" class:ctx-keys={/^[⌘⇧⌥⌃]/.test(item.hint)}>{item.hint}</span>
           {/if}
         </button>
       {/if}
@@ -493,7 +493,7 @@
             {/if}
             <span class="ctx-label">{subItem.label}</span>
             {#if subItem.icon && subItem.checked}<span class="ctx-icon ctx-check" data-check-end><Icon name="check" size={13} /></span>{/if}
-            {#if subItem.hint}<span class="ctx-hint">{subItem.hint}</span>{/if}
+            {#if subItem.hint}<span class="ctx-hint" class:ctx-keys={/^[⌘⇧⌥⌃]/.test(subItem.hint)}>{subItem.hint}</span>{/if}
           </button>
         {/if}
       {/each}
@@ -610,6 +610,10 @@
     }
   }
   @media (pointer: coarse) {
+    /* No keyboard shortcuts on touch (a path hint stays). */
+    .ctx-keys {
+      display: none;
+    }
     .ctx-item {
       min-height: 40px;
       padding-block: 6px;

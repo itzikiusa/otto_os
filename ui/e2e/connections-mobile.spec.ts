@@ -157,6 +157,27 @@ test.describe('connections list — responsive', () => {
     // The editor folds to its one line; the rows are what is on screen.
     await expect(page.locator('.qe-edit')).toBeHidden();
     await expect(page.getByRole('button', { name: 'Edit the query' })).toBeVisible();
+    // …down to the bottom bar (only the row count line under them), not a
+    // block that stops halfway with the rest of the screen empty.
+    const [res, body] = await Promise.all([page.locator('.qe-results').boundingBox(), page.locator('.page-body').boundingBox()]);
+    expect(body!.y + body!.height - (res!.y + res!.height)).toBeLessThan(40);
+    // No keyboard hints on touch: not on Run, not in the menus.
+    await expect(page.getByTestId('page-header')).not.toContainText('⌘', { useInnerText: true });
+    // The results toolbar keeps the view switch and the filter; the rest is in
+    // its one ⋯ — every control finger-sized.
+    const bar = page.locator('.grid-toolbar');
+    await expect(bar.getByRole('button', { name: /Export/ })).toHaveCount(0);
+    const small = await bar.evaluate((el) =>
+      [...el.querySelectorAll<HTMLElement>('button, input')].filter((b) => b.getBoundingClientRect().height < 40).map((b) => b.getAttribute('aria-label') ?? b.textContent),
+    );
+    expect(small).toEqual([]);
+    await bar.getByRole('button', { name: 'More result actions' }).click();
+    const menu = page.getByRole('menu');
+    await expect(menu.getByRole('menuitem', { name: /^Download CSV/ })).toBeVisible();
+    await expect(menu.getByText('Filter row', { exact: true })).toBeVisible();
+    await expect(menu).not.toContainText('⌘', { useInnerText: true });
+    await page.keyboard.press('Escape');
+    await expect(menu).toHaveCount(0);
     // Tables: a sheet over the rows; Back closes it and stays on the workbench.
     const tables = page.getByTestId('page-header').getByRole('button', { name: 'Tables', exact: true });
     if (await tables.isVisible()) await tables.click();
