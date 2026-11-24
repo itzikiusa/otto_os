@@ -6,6 +6,7 @@
   // toolbar chip that opens it sits inside the page title's <h1>.
   import { onMount, tick, type Snippet } from 'svelte';
   import { placeAnchored } from '../../lib/anchorPlace';
+  import { backCloses } from '../../lib/backCloses';
 
   interface Props {
     anchor: HTMLElement;
@@ -21,6 +22,7 @@
   function place(): void {
     if (panel) pos = placeAnchored(anchor, panel, { prefer: 'below', align: 'start' });
   }
+  onMount(() => backCloses(() => onclose())); // a phone's Back closes it
   onMount(() => {
     void tick().then(() => {
       place();

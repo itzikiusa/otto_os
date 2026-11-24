@@ -726,6 +726,9 @@
      the composer keeps its size, and the timeline keeps a one-line peek. */
   .th-page :global(.rt-scroll) {
     min-block-size: 22px;
+    /* Opaque like the pane: on Android Chrome the see-through scroller kept a
+       stale copy of the composer after the keyboard closed. */
+    background: var(--bg);
   }
   .th-page :global(.rt-dock) {
     min-block-size: 0;

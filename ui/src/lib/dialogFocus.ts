@@ -3,6 +3,8 @@
 // Safari does not focus pointer-clicked buttons. Remember the activating
 // control until focus or another user interaction moves on. File choosers and
 // async reads can open a sheet well after the click's initial render flush.
+// On a touch screen the system Back closes it like Escape (backCloses.ts).
+import { backCloses } from './backCloses';
 let activatingControl: HTMLElement | null = null;
 if (typeof document !== 'undefined') {
   document.addEventListener('pointerdown', () => { activatingControl = null; }, true);
@@ -75,8 +77,10 @@ export function dialogFocus(node: HTMLElement, onEscape: () => void) {
     }
   }
   window.addEventListener('keydown', onKey);
+  const releaseBack = backCloses(onEscape);
   return {
     destroy() {
+      releaseBack();
       cancelAnimationFrame(frame);
       window.removeEventListener('keydown', onKey);
       queueMicrotask(() => {
