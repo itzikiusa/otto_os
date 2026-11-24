@@ -329,7 +329,7 @@ test('gemini (ACP): gated tool calls never fold or hide; ↑ recalls the prompt'
   const dock = thread.getByTestId('runtime-attention');
   for (let i = 0; i < 2; i++) {
     await expect(dock).toBeVisible({ timeout: 20_000 });
-    await dock.getByRole('button', { name: 'Allow', exact: true }).click();
+    await dock.getByRole('button', { name: 'Allow once', exact: true }).click();
   }
   await expect(dock).toHaveCount(0, { timeout: 20_000 });
   await expect(thread.getByTestId('runtime-send')).toHaveAttribute('data-delivery', 'send', { timeout: 20_000 });
