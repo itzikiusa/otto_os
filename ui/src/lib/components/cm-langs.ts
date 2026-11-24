@@ -54,8 +54,7 @@ const LOADERS: Record<string, () => Promise<Build>> = {
   scss: () => import('@codemirror/lang-css').then((m) => () => m.css()),
   less: () => import('@codemirror/lang-css').then((m) => () => m.css()),
   md: () => import('@codemirror/lang-markdown').then((m) => () => m.markdown()),
-  mdx: () => import('@codemirror/lang-markdown').then((m) => () => m.markdown()),
-  java: () => import('@codemirror/lang-java').then((m) => () => m.java()),
+  mdx: () => import('@codemirror/lang-markdown').then((m) => () => m.markdown()),  java: () => import('@codemirror/lang-java').then((m) => () => m.java()),
   class: () => import('@codemirror/lang-java').then((m) => () => m.java()),
   gradle: () => import('@codemirror/lang-java').then((m) => () => m.java()),
   kts: () => import('@codemirror/lang-java').then((m) => () => m.java()),
@@ -69,6 +68,8 @@ const LOADERS: Record<string, () => Promise<Build>> = {
   sum: () => extra().then((m) => () => m.goModLang()),
   work: () => extra().then((m) => () => m.goModLang()),
   toml: () => extra().then((m) => () => m.tomlLang()),
+  // langExtOf maps every Makefile name (Makefile.local, *.mk…) to this key.
+  makefile: () => import('./cm-lang-makefile.ts').then((m) => () => m.makefileLang()),
 };
 
 /** Resolved builders, by extension (module-wide: every editor shares them). */
