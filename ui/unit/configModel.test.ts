@@ -93,3 +93,7 @@ test('YAML parse errors become Problems entries at their line', async () => {
   assert.equal(errs[0].source, 'yaml');
   assert.ok(errs[0].line >= 2, JSON.stringify(errs[0]));
 });
+
+test('YAML: a key that starts with "-" is a key (no TypeError that empties Structure and Problems)', () => {
+  assert.deepEqual(outline(yamlSymbols('-foo: 1\n--port: 8080\nbar:\n  - -x: 2\n')), ['key -foo:1', 'key --port:2', ['key bar:3', ['key -x:4']]]);
+});

@@ -78,7 +78,7 @@ export function yamlSymbols(text: string): IdeSymbolNode[] {
     if (/(?:^|[\s:])[|>][-+]?\d*\s*(?:#.*)?$/.test(raw)) block = indent;
     const m = YAML_KEY.exec(raw);
     if (!m) continue;
-    const keyIndent = m[1].length + (raw.slice(m[1].length).startsWith('-') ? raw.slice(m[1].length).match(/^-\s+/)![0].length : 0);
+    const keyIndent = m[1].length + (/^-\s+/.exec(raw.slice(m[1].length))?.[0].length ?? 0);
     const name = m[2].replace(/^(["'])(.*)\1$/, '$2');
     if (topIndent < 0 || keyIndent <= topIndent) {
       topIndent = keyIndent;
