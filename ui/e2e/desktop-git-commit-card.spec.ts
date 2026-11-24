@@ -32,6 +32,11 @@ test('dirty repo: Changes first → Commit and push → Create pull request', as
   await expectChangesFirst(page);
   const card = page.getByTestId('commit-card');
   await expectFullyInViewport(page, card, 'commit card');
+  // The file count is said by the Changes badge and the card's caption only.
+  await expect(page.getByTestId('git-state')).not.toContainText('files changed');
+  await expect(page.locator('.wip-panel .wp-count')).toHaveCount(0);
+  // Repository tabs carry words, never a bare status dot.
+  await expect(page.locator('.git-tab-dot')).toHaveCount(0);
   // The first file's diff is open beside the list.
   await expect(page.locator('.wip-panel .wp-diff')).toBeVisible();
   // One primary; Commit only is the secondary.
@@ -52,6 +57,17 @@ test('dirty repo: Changes first → Commit and push → Create pull request', as
   await expect(sheet).toBeVisible();
   await sheet.getByRole('button', { name: 'Cancel' }).click();
 
+  // Someone else opens the PR (an agent, the forge) — no reload: back on
+  // Changes the card reads it again and offers it (it used to keep "Create").
+  open = [{ number: 42, title: 'Ship the commit card', state: 'open', source_branch: repo.branch, target_branch: 'main', url: 'https://github.com/acme/x/pull/42' }];
+  await page.locator('.rv-tab', { hasText: 'History' }).click();
+  await page.locator('.rv-tab', { hasText: 'Changes' }).click();
+  await expect(next).toHaveAttribute('data-kind', 'pr', { timeout: 15_000 });
+  // Merged meanwhile: no open PR any more, the card follows.
+  open = [];
+  await page.locator('.rv-tab', { hasText: 'History' }).click();
+  await page.locator('.rv-tab', { hasText: 'Changes' }).click();
+  await expect(next).toHaveAttribute('data-kind', 'create-pr', { timeout: 15_000 });
   // With a PR open for the branch the primary opens it (Pull requests view).
   open = [{ number: 42, title: 'Ship the commit card', state: 'open', source_branch: repo.branch, target_branch: 'main', url: 'https://github.com/acme/x/pull/42' }];
   await page.reload();

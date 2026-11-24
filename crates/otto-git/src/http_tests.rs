@@ -1097,6 +1097,39 @@ async fn overview_bundles_status_refs_and_side_lists() {
     let _ = tokio::fs::remove_dir_all(&dir).await;
 }
 
+/// A side list that can't be read says so (null), unlike "none" ([]), so
+/// the client re-reads it on its own route (contract #37a).
+#[tokio::test]
+async fn overview_says_null_for_a_side_list_it_could_not_read() {
+    let (_pool, ctx, user, ws) = fixture().await;
+    let dir = init_git_repo().await;
+    // A stash ref naming an object that does not exist: `git stash list` fails.
+    tokio::fs::write(dir.join(".git/refs/stash"), format!("{}\n", "1".repeat(40)))
+        .await
+        .unwrap();
+    let repo = ctx
+        .store
+        .create_repo(NewRepo {
+            workspace_id: ws,
+            name: "overview-broken-stash".into(),
+            path: dir.to_string_lossy().into_owned(),
+            remote_url: None,
+            provider: None,
+            git_account_id: None,
+        })
+        .await
+        .unwrap();
+    let Json(body) = repo_overview(State(ctx), Extension(auth(&user, false)), Path(repo.id))
+        .await
+        .unwrap();
+    assert!(
+        body["stashes"].is_null(),
+        "a failed read is not \"no stashes\": {body}"
+    );
+    assert!(body["worktrees"].is_array(), "{body}");
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+}
+
 /// A repo registered before its `origin` existed has no provider to bind
 /// against. PATCH re-reads the remote from disk first, so adding the remote
 /// later is enough — no unregister/re-add dance.

@@ -267,20 +267,24 @@ test.describe('pull requests: review state', () => {
         row(2, { status: 'changes_requested', approvals: 1 }),
         row(3, { status: 'waiting', approvals: 0 }),
         row(4, null),
+        { ...row(5, { status: 'waiting', approvals: 0 }), asks_me: true },
       ], has_more: false, page: 1, per_page: 50 } }),
     );
     // Nothing reaches the real forge: per-row reads (diff stats, …) answer 404.
     await page.route(`**/api/v1/repos/${r.repoId}/prs/**`, (route) => route.fulfill({ status: 404, json: { error: 'stub' } }));
     await page.goto(`/#/git/${r.repoId}/prs`);
-    await expect(page.getByTestId('pr-review')).toHaveCount(3, { timeout: 25_000 });
-    const chip = (n: number) => page.locator('.pr-row', { hasText: `#${n}` }).getByTestId('pr-review');
-    await expect(chip(1)).toHaveText('2 approvals');
-    await expect(chip(1)).toHaveAttribute('aria-label', 'Approved — 2 approvals');
-    await expect(chip(2)).toHaveText('Changes requested');
-    await expect(chip(3)).toHaveText('Awaiting review');
-    await expect(chip(4)).toHaveCount(0);
-    await chip(1).scrollIntoViewIfNeeded();
-    await expect(chip(1)).toBeInViewport();
+    await expect(page.getByTestId('pr-word')).toHaveCount(5, { timeout: 25_000 });
+    const word = (n: number) => page.locator(`.pr-row[data-pr="${n}"]`).getByTestId('pr-word');
+    await expect(word(1)).toHaveText('Approved');
+    await expect(word(2)).toHaveText('Changes requested');
+    await expect(word(3)).toHaveText('Waiting for review');
+    await expect(word(4)).toHaveText('Open');
+    await expect(word(5)).toHaveText('Review requested');
+    // The one that asks you leads, under "Needs you".
+    await expect(page.locator('.pr-row').first()).toHaveAttribute('data-pr', '5');
+    await expect(page.getByRole('region', { name: 'Needs you' })).toContainText('Pull request 5');
+    await word(1).scrollIntoViewIfNeeded();
+    await expect(word(1)).toBeInViewport();
     await expectFitsWidth(page);
   });
 });
@@ -306,11 +310,29 @@ test('diffviewer: a WIP file diff fits and its code is reachable', async ({ page
   const panel = page.locator('.wip-panel');
   await expect(panel).toBeVisible({ timeout: 15_000 });
   await panel.locator('.wp-name').first().click();
-  await expect(panel.locator('.wp-diff')).toBeVisible({ timeout: 15_000 });
+  const diff = page.locator('.wp-diff');
+  await expect(diff).toBeVisible({ timeout: 15_000 });
   // The diff renders after its fetch: measure once a code row is on screen.
-  await expect(panel.locator('.wp-diff').locator('.dl-code, td.code, .vrow .code').first()).toBeVisible({ timeout: 15_000 });
+  await expect(diff.locator('.dl-code, td.code, .vrow .code').first()).toBeVisible({ timeout: 15_000 });
+  const sheet = page.getByTestId('wip-diff-sheet');
+  const phone = page.viewportSize()!.width <= 640;
+  // A phone's sheet slides in from the side: measure once it has landed.
+  if (phone) await expect.poll(async () => Math.round((await diff.boundingBox())!.x)).toBeLessThanOrEqual(1);
   await expectFitsWidth(page);
   await expectDiffCodeReachable(page);
+  if (phone) {
+    // Phone: file → diff is a pushed full-height sheet; the system Back closes
+    // it (lib/backCloses) and leaves you on the Changes list, same URL.
+    await expect(sheet).toBeVisible();
+    expect((await diff.boundingBox())!.height).toBeGreaterThan(page.viewportSize()!.height * 0.6);
+    const url = page.url();
+    await page.goBack();
+    await expect(sheet).toHaveCount(0);
+    await expect(panel.locator('.wp-name').first()).toBeVisible();
+    expect(page.url()).toBe(url);
+  } else {
+    await expect(sheet).toHaveCount(0); // tablets keep it under the list
+  }
 });
 
 // ────────────────────────────────────────────────────────────────────────────

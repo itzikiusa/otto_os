@@ -95,7 +95,9 @@ test('PR filter change ignores an in-flight page from the old filter', async ({ 
   await openRepo(page, 'prs');
   await page.getByRole('button', { name: 'Load more' }).click();
   await expect.poll(() => !!oldPage).toBe(true);
-  await page.getByRole('button', { name: 'Merged', exact: true }).click();
+  // The state is in Filters now (one tab set fewer on the PR page).
+  await page.getByRole('button', { name: 'Filters' }).click();
+  await page.getByRole('menuitemcheckbox', { name: 'Merged' }).click();
   await expect(page.locator('.prlist')).toContainText('merged request 2');
   await oldPage!.fulfill({ json: { items: [pr(3)], has_more: false } });
   await page.waitForTimeout(100);

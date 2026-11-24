@@ -27,11 +27,14 @@ test('PR header: every action is on screen and reachable', async ({ page }) => {
   await page.goto('/#/git/rep_otto/pr/51');
   await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
   const actions = page.locator('.prd-actions');
-  for (const name of ['Request changes', 'Approve', 'Merge', 'Check out']) {
-    const b = actions.getByRole('button', { name, exact: name !== 'Check out' });
-    await expectFullyInViewport(page, b.first(), name);
+  // One primary (the mock's CI fails: Fix checks), one secondary (Review ▾), ⋯ — finger-sized.
+  for (const b of [actions.getByTestId('pr-primary'), actions.getByTestId('pr-review'), actions.getByRole('button', { name: 'More pull request actions' })]) {
+    await expectFullyInViewport(page, b);
+    expect((await b.boundingBox())!.height).toBeGreaterThanOrEqual(44);
   }
-  await expectFullyInViewport(page, actions.getByRole('button', { name: 'More pull request actions' }));
+  await expect(actions.locator('.btn')).toHaveCount(3);
+  // Check out is a visible button on the details card's branch row.
+  await expect(page.getByTestId('pr-checkout')).toBeAttached();
   await expectNoHorizontalOverflow(page);
 });
 

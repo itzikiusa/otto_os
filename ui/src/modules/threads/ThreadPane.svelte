@@ -3,7 +3,6 @@
   import Icon from '../../lib/components/Icon.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
-  import LazyTerminal from '../../lib/components/LazyTerminal.svelte'; // xterm stays out of page:threads until a terminal shows
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { events } from '../../lib/events.svelte';
   import { focusOnMount } from '../../lib/focusOnMount';
@@ -29,6 +28,8 @@
   import { formatTokens, threadTokenTotal } from './runtime/turnUsage';
   // The structured-runtime conversation loads with the first runtime thread.
   const RuntimeThread = lazyComponent(() => import('./runtime/RuntimeThread.svelte'));
+  // A plain shell thread's terminal (and its wrapper) loads with the first one.
+  const ShellTerminal = lazyComponent(() => import('../../lib/components/LazyTerminal.svelte'));
   const LegacyConversation = lazyComponent(() => import('../agents/conversation/ConversationView.svelte')); // ui-guards: allow — experimental threads embeds shared ConversationView
 
   interface Props {
@@ -301,7 +302,7 @@
       {/key}
     {:else if isPlainShellSession(session)}
       <div class="tp-shell-wrap otto-force-dark">
-        <LazyTerminal sessionId={paneId} forceDark autoFocus={focused} resumeOnOpen={focused} />
+        <LazyMount lazy={ShellTerminal} what="the terminal" variant="panel" props={{ sessionId: paneId, forceDark: true, autoFocus: focused, resumeOnOpen: focused }} />
       </div>
     {:else if LegacyConversation.component}
       <LegacyConversation.component

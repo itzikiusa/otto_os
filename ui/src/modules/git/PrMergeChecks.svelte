@@ -1,46 +1,34 @@
 <script lang="ts">
-  // The forge's merge checks and open tasks (`PrDetail.merge_checks`,
-  // `task_count`). Full: the Summary side column's list, pass/fail icon plus
-  // the forge's detail text. Compact: one "2 of 3 checks passed · 1 task open"
-  // line for the PR header wherever the side column has dropped below the
-  // conversation (a phone, or a desktop pane narrowed by the PR list).
+  // The forge's merge rules and open tasks (`PrDetail.merge_checks`,
+  // `task_count`) for the PR's details card: pass/fail icon plus the forge's
+  // detail text. Called "Merge rules", never "checks" — that word is the CI
+  // checks', which the PR's one status line carries.
   import type { PrDetail } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
   import { mergeCheckSummary, openTasksLine } from './pr-merge-checks';
 
   interface Props {
     pr: Pick<PrDetail, 'merge_checks' | 'task_count'>;
-    compact?: boolean;
   }
-  let { pr, compact = false }: Props = $props();
+  let { pr }: Props = $props();
   const checks = $derived(pr.merge_checks ?? []);
   const summary = $derived(mergeCheckSummary(checks));
   const tasks = $derived(openTasksLine(pr.task_count));
-  const failing = $derived(checks.some((c) => !c.passed));
 </script>
 
-{#if compact}
-  {#if summary || tasks}
-    <div class="mc-wrap">
-      <div class="mc-line" class:bad={failing} data-testid="pr-merge-checks-line">
-        <Icon name={failing ? 'warning' : 'check'} size={12} />
-        <span>{[summary, tasks].filter(Boolean).join(' · ')}</span>
-      </div>
-    </div>
-  {/if}
-{:else if summary || tasks}
-  <section aria-label="Merge checks">
-    <h3 class="h">Merge checks {#if summary}<span class="dim">{summary}</span>{/if}</h3>
+{#if summary || tasks}
+  <section aria-label="Merge rules">
+    <h3 class="h">{summary ? 'Merge rules' : 'Tasks'} {#if summary}<span class="dim">{summary}</span>{/if}</h3>
     {#each checks as c (c.key)}
       <div class="mc-row">
         <span class="mc-ic" class:ok={c.passed} class:bad={!c.passed} aria-hidden="true"><Icon name={c.passed ? 'check' : 'x'} size={12} /></span>
         <span class="mc-text">
-          <span>{c.label}<span class="sr-only">{c.passed ? ' — passed' : ' — not passed'}</span></span>
+          <span>{c.label}<span class="sr-only">{c.passed ? ' — met' : ' — not met'}</span></span>
           {#if c.detail}<span class="mc-detail dim">{c.detail}</span>{/if}
         </span>
       </div>
     {/each}
-    {#if tasks}<p class="mc-tasks">{tasks}</p>{/if}
+    {#if tasks}<p class="mc-tasks" data-testid="pr-open-tasks">{tasks}</p>{/if}
   </section>
 {/if}
 
@@ -61,23 +49,4 @@
   .mc-tasks { margin: 4px 0 0; color: var(--warning); font-size: var(--fs-s); }
   .ok { color: var(--success); }
   .bad { color: var(--danger); }
-  .mc-line {
-    display: none;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--fs-s);
-    color: var(--success);
-  }
-  .mc-line.bad { color: var(--danger); }
-  /* Shown whenever the side column (the full list) has dropped below the
-     conversation: a phone, or a desktop pane narrowed by the PR list beside
-     it (PrDetail stacks its Summary under the same 860px; header and body
-     share their side padding). Hidden, the wrapper cancels the header's gap. */
-  .mc-wrap { container-type: inline-size; margin-block-end: -6px; }
-  @container (max-width: 860px) {
-    .mc-line { display: flex; padding-block-end: 6px; }
-  }
-  @media (max-width: 1024px) {
-    .mc-line { display: flex; padding-block-end: 6px; }
-  }
 </style>

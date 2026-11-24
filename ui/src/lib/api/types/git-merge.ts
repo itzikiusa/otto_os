@@ -121,6 +121,9 @@ export interface PrSummary {
    *  Optional: an older daemon omits it — read as `?? false`, then fall back
    *  to matching `author` against the account handles. */
   is_mine?: boolean;
+  /** The PR asks that same account for a review it has not given yet (the
+   *  PR list's "Needs you"). Optional: an older daemon omits it. */
+  asks_me?: boolean;
   /** The review verdict (omitted when nobody is asked and nobody reviewed;
    *  GitLab and older daemons omit it). */
   review?: PrReviewSummary | null;

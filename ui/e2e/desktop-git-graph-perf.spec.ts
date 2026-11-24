@@ -33,6 +33,7 @@ const SCROLL_PAGE = 1_000;
 
 let repoId = '';
 let workspaceId = '';
+let repoDir = '';
 
 interface C { sha: string; short_sha: string; author: string; date: string; subject: string; parents: string[]; refs: string[] }
 
@@ -70,7 +71,7 @@ function history(extra: number): C[] {
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
-  const dir = mkdtempSync(join(tmpdir(), 'otto-e2e-graph-perf-'));
+  const dir = (repoDir = mkdtempSync(join(tmpdir(), 'otto-e2e-graph-perf-')));
   const git = (...a: string[]) => execFileSync('git', ['-C', dir, ...a], { stdio: 'ignore' });
   git('init', '-q', '-b', 'main');
   git('config', 'user.email', 'e2e@otto.local');
@@ -135,7 +136,8 @@ test(`graph of ${TOTAL} commits × ${LANES} lanes: fast first paint, incremental
       upstream: null,
       remote: false,
     }));
-    await route.fulfill({ json: { ...real, local: [...real.local, ...local] } });
+    // The real branch (moved by the ref-move commit below) stays on the synthetic tip.
+    await route.fulfill({ json: { ...real, local: [...real.local.map((b: { sha: string }) => ({ ...b, sha: sha(0) })), ...local] } });
   });
   // The toolbar Fetch is the "a ref moved" trigger; the repo has no remote,
   // so answer it with the live status (a successful fetch bumps refsRev).
@@ -171,7 +173,10 @@ test(`graph of ${TOTAL} commits × ${LANES} lanes: fast first paint, incremental
   extra = 1;
   const before = logLimits.length;
   await resetLongTasks(page);
-  await page.locator('.git-header .ph-actions').getByRole('button', { name: 'Fetch', exact: true }).click();
+  // A ref made outside Otto (a terminal, an agent): the repo watcher's live
+  // refresh re-syncs the graph. (It used to click Fetch, which this remote-less
+  // repo disables — the click then waited out the test timeout.)
+  execFileSync('git', ['-C', repoDir, 'branch', '-f', 'ref-move'], { stdio: 'ignore' });
   await expect.poll(() => logLimits.length, { timeout: 15_000 }).toBeGreaterThan(before);
   await page.waitForTimeout(500);
   const reloads = logLimits.slice(before);
