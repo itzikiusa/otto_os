@@ -331,13 +331,20 @@
     // floor before anything scrolls).
     const tabs = row.querySelector<HTMLElement>(':scope > .ph-tabs-inline');
     const give = tabs ? Math.max(0, tabs.offsetWidth - row.clientWidth * tabsMin) : 0;
-    // Widest first; stop at the first level whose row fits.
-    for (let n = 0; n <= SQUEEZE.length; n++) {
-      if (squeeze !== n) {
-        squeeze = n;
-        flushSync();
-      }
-      if (wrap.scrollWidth - wrap.clientWidth <= give + 1) return;
+    const fits = (): boolean => wrap.scrollWidth - wrap.clientWidth <= give + 1;
+    const set = (n: number): void => {
+      squeeze = n;
+      flushSync();
+    };
+    // From the level it is at (each step is a forced layout): up while the row
+    // overflows, else down while the wider labels still fit.
+    if (!fits()) {
+      while (squeeze < SQUEEZE.length && !fits()) set(squeeze + 1);
+      return;
+    }
+    while (squeeze > 0) {
+      set(squeeze - 1);
+      if (!fits()) return set(squeeze + 1);
     }
   }
   $effect(() => {
