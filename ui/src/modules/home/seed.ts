@@ -1,7 +1,8 @@
 // First-visit seed for Home (home.svelte.ts `ensureDefault`). A new user's
-// first Home must not be a wall of empty widgets: Agents is always seeded (it
-// also lists threads); Kubernetes only when a cluster is registered and a DB
-// dashboard only when one exists — and then pointed at that dashboard.
+// first Home must not be a wall of empty widgets: the inbox above the widgets
+// already lists the agents and threads, so no Agents widget; Kubernetes only
+// when a cluster is registered and a DB dashboard only when one exists — and
+// then pointed at that dashboard.
 
 import { api } from '../../lib/api/client';
 import { k8sApi } from '../../lib/api/k8s';
@@ -23,7 +24,6 @@ export interface SeedBox {
 /** The boxes to seed, given what the user can view and what has data. */
 export function seedBoxes(can: (f: Feature) => boolean, data: SeedData): SeedBox[] {
   const out: SeedBox[] = [];
-  if (can('agents')) out.push({ kind: 'sessions', config: {} });
   if (can('kubernetes') && data.clusters) out.push({ kind: 'k8s', config: {} });
   if (can('database') && data.dashboardId) out.push({ kind: 'db-dashboard', config: { dashboardId: data.dashboardId } });
   return out;

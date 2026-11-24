@@ -680,7 +680,7 @@
   .rt-col,
   .rt-dock {
     inline-size: 100%;
-    max-inline-size: calc(760px + 2 * var(--sp-6));
+    max-inline-size: calc(var(--read-col) + 2 * var(--sp-6));
     margin-inline: auto;
     padding-inline: var(--sp-6);
   }

@@ -178,6 +178,9 @@ impl SpanRecord {
                             | "work"
                     )
                 }),
+                "otto.device" => val
+                    .as_str()
+                    .is_some_and(|s| matches!(s, "desktop" | "phone" | "tablet")),
                 "otto.cpu.percent" | "otto.rss.mb" | "otto.items" => val
                     .as_f64()
                     .is_some_and(|v| v.is_finite() && (0.0..=1e9).contains(&v)),
@@ -262,6 +265,14 @@ pub struct ResourcePoint {
     pub cpu_percent: Option<f64>,
     pub rss_mb: Option<f64>,
     pub host_load: Option<f64>,
+}
+/// Navigations to one module from one device class (`GET /telemetry/navigation`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NavigationCount {
+    pub module: String,
+    /// `desktop`, `phone` or `tablet`.
+    pub device: String,
+    pub count: u64,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelemetryOverview {

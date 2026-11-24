@@ -18,6 +18,7 @@
   import { ideProjects, openProjectInIde } from './ideProjects.svelte';
   import type { OrderedIdeProjectGroup } from './ThreadIdeProjectsSection.svelte';
   import ThreadSidebarRow from './ThreadSidebarRow.svelte';
+  import InboxFold from '../../lib/components/InboxFold.svelte';
   import ThreadSidebarFooter from './ThreadSidebarFooter.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { openAdjacentThread, openNextNeedsYou, THREAD_KEYS, threadNav } from './threadNav.svelte';
@@ -493,8 +494,7 @@
   <div class="th-body" use:listKeys>
   <div class="th-scroll">
     {#if pinnedThreads.length > 0}
-      <section class="th-group" aria-label="Pinned threads">
-        <h2 class="th-label">Pinned</h2>
+      <InboxFold label="Pinned" ariaLabel="Pinned threads">
         <div class="th-list" data-testid="threads-pinned-list">
           {#each pinnedThreads as s (s.id)}
             <ThreadSidebarRow
@@ -507,7 +507,7 @@
             />
           {/each}
         </div>
-      </section>
+      </InboxFold>
     {/if}
 
     {#if grouped ? ideProjectGroups.length === 0 && projectGroups.length === 0 : sections.main.length === 0}
@@ -565,36 +565,14 @@
   </div>
   <div class="th-folds">
     {#if sections.working.length > 0}
-      <section class="th-group" aria-label="Working threads">
-        <button
-          type="button"
-          class="th-fold"
-          aria-expanded={workingExpanded}
-          data-testid="threads-working-toggle"
-          onclick={() => (workingExpanded = !workingExpanded)}
-        >
-          <span>Working</span>
-          <span class="th-count">{sections.working.filter((r) => !r.child).length}</span>
-          <Icon name={workingExpanded ? 'chevronDown' : 'chevronRight'} size={12} />
-        </button>
+      <InboxFold label="Working" ariaLabel="Working threads" count={sections.working.filter((r) => !r.child).length} expanded={workingExpanded} testid="threads-working-toggle" ontoggle={() => (workingExpanded = !workingExpanded)}>
         <div class="th-list" data-testid="threads-working-list">
           {@render familyRows(workingExpanded ? sections.working : sections.working.filter((r) => r.session.id === threads.focusedSessionId))}
         </div>
-      </section>
+      </InboxFold>
     {/if}
 
-    <section class="th-group" aria-label="History and archived threads">
-      <button
-        type="button"
-        class="th-fold"
-        aria-expanded={historyExpanded}
-        data-testid="threads-history-toggle"
-        onclick={() => (historyExpanded = !historyExpanded)}
-      >
-        <span>History</span>
-        {#if historyItems.length > 0}<span class="th-count">{historyItems.length}</span>{/if}
-        <Icon name={historyExpanded ? 'chevronDown' : 'chevronRight'} size={12} />
-      </button>
+    <InboxFold label="History" ariaLabel="History and archived threads" count={historyItems.length} expanded={historyExpanded} testid="threads-history-toggle" ontoggle={() => (historyExpanded = !historyExpanded)}>
       {#if historyExpanded && historyItems.length === 0 && !ws.archivedLoading}
         <p class="th-empty-row">Threads you move to History or close appear here.</p>
       {:else}
@@ -621,7 +599,7 @@
           {/if}
         </div>
       {/if}
-    </section>
+    </InboxFold>
   </div>
   </div>
 
@@ -711,8 +689,7 @@
   .th-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   /* At most ~40 % of the sidebar; an open fold scrolls inside, its header stays. */
   .th-folds { flex-shrink: 0; max-block-size: 40%; display: flex; flex-direction: column; padding: var(--sp-2) var(--sp-4); border-block-start: 1px solid var(--separator); }
-  .th-folds .th-group { flex: 0 1 auto; min-height: 0; }
-  .th-folds .th-fold { flex-shrink: 0; }
+  .th-folds :global(.if-group) { flex: 0 1 auto; }
   .th-folds .th-list { min-height: 0; overflow-y: auto; }
   .th-scroll {
     flex: 1;
@@ -723,55 +700,10 @@
     flex-direction: column;
     gap: var(--sp-5);
   }
-  .th-group {
-    display: flex;
-    flex-direction: column;
-  }
-  .th-label {
-    margin: 0;
-    padding: var(--sp-2) var(--sp-5);
-    font-size: var(--fs-s);
-    font-weight: 500;
-    color: var(--text-dim);
-  }
-  /* "Working N" / "History N": one calm line, the count and chevron at the end. */
-  .th-fold {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-3);
-    block-size: 32px;
-    padding-inline: var(--sp-5);
-    border: 0;
-    border-radius: var(--radius-m);
-    background: transparent;
-    color: var(--text-dim);
-    font: inherit;
-    font-size: var(--fs-m);
-    text-align: start;
-    cursor: pointer;
-  }
-  .th-fold:hover {
-    background: var(--hover);
-    color: var(--text);
-  }
-  .th-fold :global(svg) {
-    flex-shrink: 0;
-  }
-  @media (hover: none), (pointer: coarse) {
-    .th-fold {
-      block-size: 44px;
-    }
-  }
   .th-list {
     display: flex;
     flex-direction: column;
     gap: 1px;
-  }
-  .th-count {
-    margin-inline-start: auto;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    font-variant-numeric: tabular-nums;
   }
   .th-empty { margin: 0; padding: 20px 8px; text-align: center; font-size: var(--fs-s); color: var(--text-dim); display: flex; flex-direction: column; align-items: center; gap: 6px; }
   .th-empty p { margin: 0; }

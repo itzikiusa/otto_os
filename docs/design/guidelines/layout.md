@@ -120,6 +120,14 @@ anywhere else.
   Stored per device in `ui.sidebarFavorites`; `sidebarSections()` builds the
   layout (Navigator, Rail, BottomNav and Settings all use it). Favorites
   reorder by drag at any time (not only while customizing) and with ⌥↑ / ⌥↓.
+- **Show what is used; the rest is under More.** Outside "Customize sidebar"
+  the sections list only the favorites, the modules used in the last 30 days
+  (`GET /telemetry/navigation`, cached per device — before any usage is known:
+  Agents, Git, Connections, Threads, Home, Usage), any module whose badge needs
+  the person, and the current page. Everything else sits under ONE "More" row
+  that expands in place (remembered per device). The Rail and the phone's
+  BottomNav follow the same rule (`lib/sidebarMore.ts`, `stores/navUsage`).
+  Customize sidebar still lists every module; ⌘K "Go to" is unchanged.
 - **Section order** is the user's (`ui.sidebarGroupOrder`, resolved by
   `resolveGroupOrder()`: unknown ids are ignored and new sections append in
   default order). Sections move with the header's context menu ("Move section

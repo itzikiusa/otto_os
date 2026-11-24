@@ -33,7 +33,7 @@
   import ThreadSidebar from './ThreadSidebar.svelte';
   import { buildThreadMenu } from './threadMenu';
   import ThreadParentChip from './runtime/ThreadParentChip.svelte';
-  import ProjectBadge from './ProjectBadge.svelte';
+  import ProjectBadge from '../../lib/components/ProjectBadge.svelte';
   import ThreadPopover from './ThreadPopover.svelte';
   import { CARD_RESERVE, cardFloats } from './threadDetails';
   import { relatedPopover } from './relatedPopover.svelte';
