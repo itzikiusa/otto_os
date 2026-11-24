@@ -87,3 +87,33 @@ test('the window cost is said once', async ({ page }) => {
   await page.getByText('7d', { exact: true }).click();
   await expect(spend.getByText(/Last 7 days/)).toHaveCount(1);
 });
+
+// The headline counts every session of the window (the daemon lists only
+// 50), and a range seen once shows again without a request.
+test('the session count is the window’s and a seen range is not fetched again', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const r = await routeUsage(page);
+  await page.goto('/#/usage');
+  const spend = page.getByTestId('usage-spend');
+  await expect(spend).toContainText('137 sessions');
+  const summaries = () => r.calls.filter((c) => c.endsWith('/usage/summary')).length;
+  await expect.poll(summaries).toBe(1);
+  await page.getByText('7d', { exact: true }).click();
+  await expect(spend.getByText(/Last 7 days/)).toHaveCount(1);
+  await expect.poll(summaries).toBe(2);
+  await page.getByText('30d', { exact: true }).click();
+  await expect(spend).toContainText('Last 30 days');
+  await page.getByText('7d', { exact: true }).click();
+  await expect(spend.getByText(/Last 7 days/)).toHaveCount(1);
+  expect(summaries()).toBe(2);
+});
+
+test('a provider that records thousands of model names renders the biggest 50 rows', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const extraModels = Array.from({ length: 3000 }, (_, i) => ({ provider: 'agy', model: `req_${i}`, events: 1, input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 0, total_tokens: 3000 - i, cost_usd: 0.01 }));
+  await routeUsage(page, { extraModels });
+  await page.goto('/#/usage');
+  await page.getByTestId('usage-where-model').click();
+  await expect(page.getByTestId('usage-models-more')).toContainText('3k smaller models');
+  await expect(page.getByTestId('usage-models').locator('.cost-row')).toHaveCount(50);
+});

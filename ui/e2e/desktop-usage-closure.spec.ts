@@ -24,7 +24,7 @@ for (const scheme of ['light', 'dark']) {
       total_output_tokens: empty ? 0 : 15000, total_cache_read_tokens: 0,
       total_cache_write_tokens: 0, total_tokens: empty ? 0 : 54000, total_cost_usd: empty ? 0 : 37.5,
       providers: empty ? [] : [{ ...counts, provider: 'codex' }], daily: empty ? [] : daily,
-      sessions: [], by_kind: empty ? [] : [{ ...counts, feature: 'agent', sessions: 1 }],
+      sessions: [], session_count: empty ? 0 : 1, by_kind: empty ? [] : [{ ...counts, feature: 'agent', sessions: 1 }],
       models: empty ? [] : [{ ...counts, provider: 'codex', model: 'fixture-model' }],
       daily_models: empty ? [] : daily.map(d => ({ ...d, provider: 'codex', model: 'fixture-model' })), scope: 'all',
     } }));

@@ -26,6 +26,11 @@
 
   const shown = $derived(activeProvider === 'all' ? models : models.filter((m) => m.provider === activeProvider));
   const rows = $derived(costRows(shown, (m) => `${m.provider}\u0000${m.model}`, (m) => m.model));
+  // Rows beyond the biggest 50 stay out of the DOM (a provider can record
+  // thousands of distinct model names — 15k rows froze the page for 1.7 s);
+  // the view's Export still saves every one.
+  const ROW_CAP = 50;
+  const hidden = $derived(rows.slice(ROW_CAP));
   const shownDaily = $derived(
     activeProvider === 'all' ? dailyModels : dailyModels.filter((d) => d.provider === activeProvider),
   );
@@ -51,7 +56,8 @@
         e = { day: d.day, total: 0, cost: 0, parts: new Map() };
         map.set(d.day, e);
       }
-      const key = names.has(label(d)) ? label(d) : 'Other';
+      const name = label(d);
+      const key = names.has(name) ? name : 'Other';
       e.parts.set(key, (e.parts.get(key) ?? 0) + d.total_tokens);
       e.total += d.total_tokens;
       e.cost += d.cost_usd;
@@ -165,11 +171,14 @@
     {/if}
 
     <div class="rows">
-      {#each rows as r (r.key)}
+      {#each rows.slice(0, ROW_CAP) as r (r.key)}
         {@const m = r.item}
         <CostRow label={m.model || 'unknown'} cost={m.cost_usd} share={r.share} title={breakdownTitle(m)}
           sub="{m.provider} · {formatCount(m.total_tokens)} tokens · input {formatCount(m.input_tokens)} · output {formatCount(m.output_tokens)} · cache read {formatCount(m.cache_read_tokens)} · cache write {formatCount(m.cache_write_tokens)}" />
       {/each}
+      {#if hidden.length > 0}
+        <p class="dim small" data-testid="usage-models-more">{formatCount(hidden.length)} smaller models ≈ {formatUsd(hidden.reduce((a, r) => a + r.item.cost_usd, 0))} · Export saves every model</p>
+      {/if}
     </div>
   {/if}
 </section>

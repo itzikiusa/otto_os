@@ -66,7 +66,7 @@
           <!-- Without an outlook the headline already is the window's cost. -->
           {#if outlook}Last {summary.days} days ≈ {formatUsd(summary.total_cost_usd)} ·{/if}
           <span title={breakdownTitle(summaryParts(summary))}>{formatCount(summary.total_tokens)} tokens</span> ·
-          {formatCount(summary.sessions.length)} {pluralNoun(summary.sessions.length, 'session', 'sessions')} ·
+          {formatCount(summary.session_count)} {pluralNoun(summary.session_count, 'session', 'sessions')} ·
           {formatCount(summary.providers.length)} {pluralNoun(summary.providers.length, 'provider', 'providers')}
         </p>
         {#each headsUp as h (h.text)}
