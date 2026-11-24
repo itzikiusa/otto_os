@@ -16,7 +16,9 @@
 //     that ends the press is swallowed so the row doesn't also open.
 //
 // Platforms whose long press already fires a native `contextmenu` (Android)
-// keep theirs; the synthetic one is only sent when none arrived.
+// keep theirs; the synthetic one is only sent when none arrived. On touch the
+// host is not text-selectable (app.css `[data-row-menu]`): Android Chrome
+// otherwise selected the word under the finger along with the menu.
 //
 //   <tr tabindex="0" onclick={open} oncontextmenu={(e) => menu(e, row)} use:rowMenu>
 
@@ -108,6 +110,7 @@ export function rowMenu(node: HTMLElement): { destroy(): void } {
     e.stopPropagation();
   }
 
+  node.dataset.rowMenu = '';
   node.addEventListener('keydown', onKeydown);
   node.addEventListener('pointerdown', onPointerDown);
   node.addEventListener('pointermove', onPointerMove);
