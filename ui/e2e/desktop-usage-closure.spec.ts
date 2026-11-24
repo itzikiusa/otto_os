@@ -16,7 +16,7 @@ for (const scheme of ['light', 'dark']) {
     const counts = { events: 1, input_tokens: 1000, output_tokens: 500, cache_read_tokens: 200, cache_write_tokens: 100, total_tokens: 1800, cost_usd: 1.25 };
     const daily = Array.from({ length: 30 }, (_, i) => ({ ...counts, day: `2026-09-${String(i + 1).padStart(2, '0')}` }));
     let empty = false;
-    await page.route('**/usage/status', r => r.fulfill({ json: { available: true, enabled: true, binary: 'fixture', version: 'fixture', data_dir: '/fixture', retention_days: 90, metrics_interval_secs: 10, usage_rows: 30, metric_rows: 0, disk_bytes: 0 } }));
+    await page.route('**/usage/status', r => r.fulfill({ json: { available: true, enabled: true, binary: 'fixture', version: 'fixture', data_dir: '/fixture', retention_days: 90, metrics_interval_secs: 10, usage_rows: 30, metric_rows: 0, disk_bytes: 0, priced_as_of: 'fixture' } }));
     await page.route('**/usage/metrics?*', r => r.fulfill({ json: [] }));
     await page.route('**/usage/budgets', r => r.fulfill({ json: { config: { enforce: false, block_on_exceed: false, window_days: 30, workspaces: [], providers: [] }, window_days: 30, rows: [] } }));
     await page.route('**/usage/summary?*', r => r.fulfill({ json: {
@@ -73,8 +73,8 @@ for (const scheme of ['light', 'dark']) {
     // Budgets stay reachable in the details card even with nothing to show.
     await expect(page.getByTestId('usage-details')).toContainText('Budgets');
     await page.route('**/usage/report?*', r => r.fulfill({ json: {
-      days: 30, otto_only: true, scope: 'all', priced_as_of: 'fixture',
-      totals: { ...counts, total_tokens: 0 }, daily: [], sessions: [],
+      days: 30, generated_at: '2026-09-30T12:00:00Z', otto_only: true, scope: 'all', priced_as_of: 'fixture',
+      totals: { ...counts, total_tokens: 0 }, daily: [], monthly: [], models: [], daily_models: [], sessions: [],
     } }));
     await page.locator('[data-testid="page-header"] .ph-more').click();
     await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Report…' }).click();

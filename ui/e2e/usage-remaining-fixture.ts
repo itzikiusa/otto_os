@@ -86,11 +86,12 @@ export function cannedLimits(now = Date.now()): unknown {
         plan: 'plus',
         taken_at: iso(now - 5 * HOUR),
         windows: [
-          { id: 'primary', name: '5-hour', window_minutes: 300, used_percent: null, left_percent: null, resets_at: iso(now - HOUR), reset_since_snapshot: true },
-          { id: 'secondary', name: 'Weekly', window_minutes: 10080, used_percent: 92, left_percent: 8, resets_at: iso(now + 30 * HOUR), reset_since_snapshot: false },
+          { id: 'primary', name: '5-hour', window_minutes: 300, used_percent: null, left_percent: null, resets_at: iso(now - HOUR), reset_since_snapshot: true, active: true, severity: null },
+          { id: 'secondary', name: 'Weekly', window_minutes: 10080, used_percent: 92, left_percent: 8, resets_at: iso(now + 30 * HOUR), reset_since_snapshot: false, active: true, severity: null },
         ],
         credits: null,
         limit_reached: null,
+        check: null,
       },
       {
         key: 'claude:account:acc-max',
@@ -105,6 +106,8 @@ export function cannedLimits(now = Date.now()): unknown {
         windows: [],
         credits: null,
         limit_reached: null,
+        // Every Claude row carries its (off by default) check state.
+        check: { enabled: false, checking: false, checked_at: null, error: null },
       },
     ],
   };
