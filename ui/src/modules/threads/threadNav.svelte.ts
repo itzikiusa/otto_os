@@ -12,6 +12,7 @@ import { events } from '../../lib/events.svelte';
 import { keyContext } from '../../lib/keys';
 import { router } from '../../lib/router.svelte';
 import { sessionState, type SessionStateInfo } from '../../lib/status';
+import { inboxClass, type InboxClass } from '../../lib/statusWords';
 import { isRuntimeWaiting, runtimeWaiting } from '../../lib/stores/runtimeAttention.svelte';
 import { ui } from '../../lib/stores/ui.svelte';
 import { viewport } from '../../lib/stores/viewport.svelte';
@@ -20,6 +21,7 @@ import { initialThread, nextNeedsYou, stepThread, threadChord, urgency } from '.
 import { asThreadSession, runtimeThreads } from './runtime/runtimeThreads.svelte';
 import { withBackgroundState } from './runtime/taskStop';
 import { threads } from './threadsStore.svelte';
+import { inboxLive } from './threadInbox.svelte';
 
 /** A thread waits on the person: its runtime row has a pending request, or
  *  the sticky flag is up (a terminal thread's prompt, a live event). */
@@ -34,6 +36,14 @@ export function threadRowState(s: Session): SessionStateInfo {
     sessionState(s, ws.statusMap[s.id] ?? s.status, needs, { stale: events.state !== 'connected' }),
     runtimeThreads.get(s.id)?.background_tasks?.length ?? 0,
   );
+}
+
+/** Where a thread row belongs in an inbox — THE needs-you derivation, shared
+ *  by the Threads sidebar and the Agents inbox: its row state plus the requests
+ *  this client knows wait on the person (a live approval, an MCP card), which
+ *  count even while the provider still says "working". */
+export function threadClass(s: Session, unread: boolean): InboxClass {
+  return inboxClass(threadRowState(s).key, unread, inboxLive.kindsOf(s.id).length);
 }
 
 /** `threadRowState` for a thread known only by id (a family's child); null

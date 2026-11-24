@@ -47,6 +47,9 @@
 
   // The inbox lists the same structured threads as Threads (spec A: one set of sessions, two views).
   type RuntimeStore = typeof import('../threads/runtime/runtimeThreads.svelte').runtimeThreads; // ui-guards: allow — one store
+  // …and read their state the Threads way (threadNav `threadClass`: one needs-you derivation).
+  type ThreadNav = typeof import('../threads/threadNav.svelte'); // ui-guards: allow — one derivation
+  type InboxLive = typeof import('../threads/threadInbox.svelte').inboxLive; // ui-guards: allow — one store
   // The Threads footer's meter (the focused session's agent): after first paint.
   const UsageMeter = lazyComponent(() => import('../threads/ThreadUsageMeter.svelte')); // ui-guards: allow — the Threads footer meter, one implementation
 
@@ -72,23 +75,31 @@
   // Structured threads come from the Threads runtime store — its own chunk,
   // loaded after first paint so the terminal is never behind it.
   let rt = $state<RuntimeStore | null>(null);
+  let nav = $state<ThreadNav | null>(null);
+  let live = $state<InboxLive | null>(null);
   let meterReady = $state(false);
   onMount(() => {
     let gone = false;
-    let off: (() => void) | null = null;
+    const offs: (() => void)[] = [];
     const cancel = whenIdle(() => {
       meterReady = true;
-      void import('../threads/runtime/runtimeThreads.svelte').then((m) => { // ui-guards: allow — see RuntimeStore
+      void Promise.all([
+        import('../threads/runtime/runtimeThreads.svelte'), // ui-guards: allow — see RuntimeStore
+        import('../threads/threadNav.svelte'), // ui-guards: allow — see ThreadNav
+        import('../threads/threadInbox.svelte'), // ui-guards: allow — see InboxLive
+      ]).then(([m, n, i]) => {
         if (gone) return;
         rt = m.runtimeThreads;
-        off = m.runtimeThreads.mount();
+        nav = n;
+        live = i.inboxLive;
+        offs.push(m.runtimeThreads.mount(), i.inboxLive.mount());
         void m.runtimeThreads.loadAll().catch(() => {});
       });
     });
     return () => {
       gone = true;
       cancel();
-      off?.();
+      for (const off of offs) off();
     };
   });
 
@@ -125,10 +136,12 @@
   const threadRows = $derived(rt ? byRecent(rt.rows().filter((s) => isForeground(s) && scope(s))) : []);
 
   function stateOf(s: Session) {
-    return sessionState(s, ws.statusMap[s.id] ?? s.status, ws.needsYou[s.id] === true, { stale });
+    return nav && isThread(s) ? nav.threadRowState(s) : sessionState(s, ws.statusMap[s.id] ?? s.status, ws.needsYou[s.id] === true, { stale });
   }
   const unread = (s: Session): boolean => ws.unread[s.id] === true && ws.activeSessionId !== s.id;
-  const classOf = (s: Session) => inboxClass(stateOf(s).key, unread(s));
+  const classOf = (s: Session) => (nav && isThread(s) ? nav.threadClass(s, unread(s)) : inboxClass(stateOf(s).key, unread(s)));
+  /** A thread's pending requests' kinds (Approval vs Question in its word). */
+  const kindsOf = (s: Session): string[] => (live && isThread(s) ? live.kindsOf(s.id) : []);
   const branchOf = (s: Session): string | null => {
     const m = s.meta as Record<string, unknown> | null | undefined;
     const b = m?.git_branch ?? m?.branch ?? m?.worktree_branch;
@@ -137,7 +150,7 @@
     return repo ? (git.statusById[repo.id]?.branch ?? null) : null;
   };
   const matches = (s: Session): boolean =>
-    (!ws.needsYouFilter || ws.needsYou[s.id] === true) && matchesQuery(s, query, [branchOf(s), wsName(s.workspace_id)]);
+    (!ws.needsYouFilter || classOf(s) === 'needs') && matchesQuery(s, query, [branchOf(s), wsName(s.workspace_id)]);
 
   const inbox = $derived(agentsInbox([...ptyRows, ...threadRows].filter(matches), classOf));
   const historyRows = $derived(
@@ -333,8 +346,8 @@
 {#snippet row(s: Session)}
   {@const thread = isThread(s)}
   {@const st = stateOf(s)}
-  {@const word = s.archived ? { word: 'Stopped', tone: '' as const } : sessionWord(st, { unread: unread(s) })}
-  {@const cls = s.archived ? 'rest' : inboxClass(st.key, unread(s))}
+  {@const word = s.archived ? { word: 'Stopped', tone: '' as const } : sessionWord(st, { unread: unread(s), kinds: kindsOf(s) })}
+  {@const cls = s.archived ? 'rest' : classOf(s)}
   <AgentsInboxRow
     session={s}
     project={wsName(s.workspace_id)}

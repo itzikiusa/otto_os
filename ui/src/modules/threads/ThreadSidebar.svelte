@@ -28,7 +28,7 @@
   import { inboxClass, inboxScore, inboxSections } from './threadInbox';
   import { inboxLive } from './threadInbox.svelte';
   import { threadMeta } from './threadMeta.svelte';
-  import { threadRowState } from './threadNav.svelte';
+  import { threadClass, threadRowState } from './threadNav.svelte';
   import {
     delegatedParentId,
     isThreadSession,
@@ -186,7 +186,7 @@
     const st = threadRowState(s);
     const focused = threads.focusedSessionId === s.id && !threads.newDraftMode;
     const unread = !focused && st.key !== 'needs-you' && threadMeta.unread(s.id, ws.unread[s.id] === true || runtimeThreads.unread[s.id] === true);
-    return inboxClass(st.key, unread, inboxLive.kindsOf(s.id).length);
+    return threadClass(s, unread);
   }
   const score = (s: Session): number => inboxScore(classOf(s));
 
