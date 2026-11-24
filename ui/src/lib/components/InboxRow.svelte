@@ -279,8 +279,8 @@
       background: none;
     }
     .tr-row.on-page .tr-actions :global(.icon-btn) {
-      inline-size: var(--hit-min);
-      block-size: var(--hit-min);
+      inline-size: 44px;
+      block-size: 44px;
     }
     .tr-fold {
       inline-size: var(--hit-min);
