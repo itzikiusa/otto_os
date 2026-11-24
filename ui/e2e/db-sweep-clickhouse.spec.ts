@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { editorSelectAll } from './helpers';
+import { editorSelectAll, expectDbConnected, showDbTables, confirmDestructiveRun } from './helpers';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -78,7 +78,7 @@ async function openConn(page: Page): Promise<void> {
 // is interactable. No-op on tablet+ (the editor is always visible there).
 async function ensureEditorOpen(page: Page): Promise<void> {
   if (!(await isPhoneLayout(page))) return;
-  const editHead = page.locator('.qe-acc-head', { hasText: 'Editor' });
+  const editHead = page.getByRole('button', { name: 'Edit the query', exact: true });
   if (await editHead.isVisible()) {
     // The CodeMirror surface is hidden when collapsed; expand if needed.
     const edit = page.locator('.qe-edit');
@@ -101,7 +101,7 @@ async function ensureResultsOpen(page: Page): Promise<void> {
 // click Run. Selects-all + clears first so each query starts from a clean
 // editor. CodeMirror occasionally drops the first keystroke right after a
 // programmatic clear, so we verify the editor text and retype if it's off.
-async function runSql(page: Page, sql: string): Promise<void> {
+async function runSql(page: Page, sql: string, destructive = false): Promise<void> {
   await ensureEditorOpen(page);
   const editor = page.locator('.qe-edit .cm-content');
   await expect(editor).toBeVisible({ timeout: 15_000 });
@@ -131,6 +131,7 @@ async function runSql(page: Page, sql: string): Promise<void> {
   });
   const run = page.locator('.btn.small.primary', { hasText: 'Run' }).first();
   await run.click();
+  if (destructive) await confirmDestructiveRun(page); // DROP asks first
   const response = await completed;
   expect(response.ok(), `query response for ${sql}`).toBeTruthy();
   expect(await response.finished()).toBeNull();
@@ -215,12 +216,10 @@ test.describe('Database Explorer — ClickHouse sweep (mobile + tablet)', () => 
       'seedDockerConnection(clickhouse) returned null — the ClickHouse driver/daemon could not reach the seeded Docker ClickHouse (investigate the HTTP/TLS handling)',
     ).not.toBeNull();
     await openConn(page);
-    // Capabilities populate the chip even where compact CSS hides it. The
-    // selected connection tab supplies the visible, accessible identity.
-    await expect(page.locator('.cap-chip')).toHaveText('clickhouse', { timeout: 15_000 });
-    const active = page.getByRole('tablist', { name: 'Open connections' }).getByRole('tab', { name: 'e2e-clickhouse', exact: true });
-    await expect(active).toBeVisible();
-    await expect(active).toHaveAttribute('aria-selected', 'true');
+    // Connected with the server version (capabilities loaded), and the
+    // workbench is titled by the open connection.
+    await expectDbConnected(page, 'ClickHouse');
+    await expect(page.getByTestId('page-header').getByRole('heading', { name: 'e2e-clickhouse', exact: true })).toBeVisible();
   });
 
   // ── 2/3. READ: a narrow SELECT and a WIDE many-column SELECT ────────────────
@@ -307,7 +306,7 @@ test.describe('Database Explorer — ClickHouse sweep (mobile + tablet)', () => 
       .toBeTruthy();
 
     // Cleanup — DROP the scratch table (best-effort).
-    await runSql(page, `DROP TABLE ${tbl}`);
+    await runSql(page, `DROP TABLE ${tbl}`, true);
     await expectWriteOk(page);
   });
 
@@ -331,7 +330,7 @@ test.describe('Database Explorer — ClickHouse sweep (mobile + tablet)', () => 
 
     // On a phone, collapse the editor so the results block gets the room.
     if (await isPhoneLayout(page)) {
-      const editHead = page.locator('.qe-acc-head', { hasText: 'Editor' });
+      const editHead = page.getByRole('button', { name: 'Fold the editor', exact: true });
       if (await editHead.isVisible()) await editHead.click();
     }
 
@@ -374,14 +373,8 @@ test.describe('Database Explorer — ClickHouse sweep (mobile + tablet)', () => 
     expect(connId, 'connection must be seeded').not.toBeNull();
     await openConn(page);
 
-    // On a phone the Schema panel sits behind its accordion header — expand it.
-    if (await isPhoneLayout(page)) {
-      const schemaHead = page.locator('.acc-toggle', { hasText: 'Schema' });
-      if (await schemaHead.isVisible()) {
-        const sideBody = page.locator('.side-body');
-        if (!(await sideBody.isVisible())) await schemaHead.click();
-      }
-    }
+    // The tables: the side pane's Tables tab, a sheet on a phone.
+    await showDbTables(page);
 
     // The schema root lists the `analytics` database.
     const analytics = page.locator('.schema-tree .node-label', { hasText: 'analytics' });

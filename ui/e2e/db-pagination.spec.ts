@@ -87,7 +87,7 @@ function isPhone(page: Page): boolean {
 async function ensureEditorOpen(page: Page): Promise<void> {
   if (!isPhone(page)) return;
   if (!(await page.locator('.qe-edit').isVisible().catch(() => false))) {
-    await page.locator('.qe-acc-head', { hasText: 'Editor' }).click();
+    await page.getByRole('button', { name: 'Edit the query', exact: true }).click();
   }
   await expect(page.locator('.qe-edit')).toBeVisible();
 }
