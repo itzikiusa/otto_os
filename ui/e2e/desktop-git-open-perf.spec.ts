@@ -12,8 +12,12 @@ import { openPage } from './helpers';
 // owner pays, not a three-commit fixture's. A clean clone opens on History,
 // a dirty one on Changes.
 //
-// Budget: at most 4 API requests to open either, and the first log page asks
-// for at most 200 commits (more load on scroll).
+// Budget: a dirty clone 3 requests (overview, the opening fetch, the first
+// file's diff); a clean one 4 (overview, fetch, the first log page, and the
+// cheap /refs check the fetch's refs bump asks for — the only way the graph
+// learns what the fetch brought). The overview carries refs, stashes,
+// worktrees and submodules: none is read again. The first log page asks for
+// at most 200 commits (more load on scroll).
 
 const CLEAN = 'e2e-open-perf-clean';
 const DIRTY = 'e2e-open-perf-dirty';
@@ -64,11 +68,13 @@ async function openAndCount(page: Page, name: string): Promise<string[]> {
 }
 
 for (const name of [CLEAN, DIRTY]) {
-  test(`opening a repository (${name === CLEAN ? 'clean → History' : 'dirty → Changes'}): ≤ 4 requests, first log page ≤ 200`, async ({ page }, info) => {
+  const budget = name === CLEAN ? 4 : 3;
+  test(`opening a repository (${name === CLEAN ? 'clean → History' : 'dirty → Changes'}): ≤ ${budget} requests, first log page ≤ 200`, async ({ page }, info) => {
     test.skip(info.project.name !== 'desktop-browser', 'request counts are engine-independent');
     const seen = await openAndCount(page, name);
     const limits = seen.map((s) => /\/log\?.*limit=(\d+)/.exec(s)?.[1]).filter(Boolean).map(Number);
     expect(Math.max(0, ...limits), 'first log page size').toBeLessThanOrEqual(200);
-    expect(seen.length, seen.join('\n')).toBeLessThanOrEqual(4);
+    expect(seen.filter((s) => /\/(stashes|worktrees|submodules)(\?|$)/.test(s)), 'the overview carries the side lists').toEqual([]);
+    expect(seen.length, seen.join('\n')).toBeLessThanOrEqual(budget);
   });
 }

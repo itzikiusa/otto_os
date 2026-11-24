@@ -190,6 +190,7 @@ export function createGraphData(h: GraphDataHost) {
   let refRemoved = false;
   const movedRefTips = new Set<string>();
   const newRefTips = new Set<string>();
+  const localTips = (r: RefsResp): string => r.local.map((b) => `${b.name}@${b.sha}`).join('\n');
   function lostRef(prev: RefsResp, next: RefsResp): boolean {
     const entries = (r: RefsResp): [string, string | undefined][] => [
       ...r.local.map((b): [string, string | undefined] => [`l:${b.name}`, b.sha]),
@@ -565,6 +566,9 @@ export function createGraphData(h: GraphDataHost) {
     // prefix), read the history once in full — not a page, then everything.
     const pending = sync.pendingRefsFor(id);
     if (!full && refs && pending && lostRef(refs, pending)) full = true;
+    // …and when they moved only remotes / tags (a fetch), the stash and
+    // worktree lists cannot have changed: read the history alone.
+    const sides = !(refs && pending && refs.local.every((b) => b.sha) && localTips(refs) === localTips(pending));
     // A full re-read is what the user had paged in (at least a first page),
     // never the old 10k first page: windowed history holds far less.
     const fullSize = Math.max(FIRST_PAGE, held.length);
@@ -579,8 +583,8 @@ export function createGraphData(h: GraphDataHost) {
         .catch((e: unknown) => ({ v: null, e }));
     const [c0, st, wt] = await Promise.all([
       readLog(full ? fullSize : FIRST_PAGE),
-      api.get<StashInfo[]>(`/repos/${id}/stashes`).catch(() => null),
-      api.get<WorktreeInfo[]>(`/repos/${id}/worktrees`).catch(() => null),
+      sides ? api.get<StashInfo[]>(`/repos/${id}/stashes`).catch(() => null) : null,
+      sides ? api.get<WorktreeInfo[]>(`/repos/${id}/worktrees`).catch(() => null) : null,
     ]);
     let c = c0;
     let want = full ? fullSize : FIRST_PAGE;
