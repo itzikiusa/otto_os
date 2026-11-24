@@ -305,6 +305,15 @@ fn remote_endpoints_must_be_https_and_not_local() {
     assert!(checked_endpoint("http://as.example/token", false).is_err());
     assert!(checked_endpoint("https://127.0.0.1/token", false).is_err());
     assert!(checked_endpoint("https://as.example/token", false).is_ok());
+    // IP literals the resolver never sees: metadata, this host, link-local.
+    for raw in [
+        "https://169.254.169.254/x",
+        "https://0.0.0.0:8443/x",
+        "https://[fe80::1]/x",
+        "https://[::]/x",
+    ] {
+        assert!(checked_endpoint(raw, false).is_err(), "{raw}");
+    }
     assert!(checked_endpoint("http://127.0.0.1:9/token", true).is_ok());
     // A local server's metadata still can't send Otto to plain http elsewhere.
     assert!(checked_endpoint("http://as.example/token", true).is_err());

@@ -109,15 +109,21 @@ fn checked_endpoint(raw: &str, local: bool) -> Result<reqwest::Url, String> {
         }
     } else if url.scheme() != "https" {
         return Err("the authorization server named a non-https endpoint; refused".into());
+    } else if !otto_netguard::check_url_literal(&url) {
+        // Link-local / metadata / 0.0.0.0 / NAT64… literals never reach a resolver.
+        return Err("the authorization server named a blocked address; refused".into());
     }
     Ok(url)
 }
 
-fn client_for(target: &reqwest::Url) -> Result<reqwest::Client, String> {
+/// The client for one request: a remote target's host is resolved and
+/// vetted once and those addresses are pinned (no second DNS answer, no
+/// redirect, reaches metadata or a private address).
+async fn client_for(target: &reqwest::Url) -> Result<reqwest::Client, String> {
     let builder = if otto_netguard::is_explicit_local_target(target) {
         reqwest::Client::builder().no_proxy()
     } else {
-        otto_netguard::guarded_client_builder()
+        otto_netguard::pinned_client_builder_for(target.as_str(), false).await?
     };
     builder
         .timeout(REQUEST_TIMEOUT)
@@ -158,6 +164,7 @@ pub(crate) fn well_known(base: &reqwest::Url, name: &str) -> reqwest::Url {
 
 async fn get_json(url: reqwest::Url) -> Option<Value> {
     let resp = client_for(&url)
+        .await
         .ok()?
         .get(url)
         .header("Accept", "application/json")
@@ -178,7 +185,8 @@ pub async fn discover(server_url: &str) -> Result<AuthServer, String> {
     }
     let server = reqwest::Url::parse(server_url).map_err(|e| format!("invalid url: {e}"))?;
     // 1. An unauthenticated request: its 401 may point at the metadata.
-    let probe = client_for(&server)?
+    let probe = client_for(&server)
+        .await?
         .post(server.clone())
         .header("Content-Type", "application/json")
         .header("Accept", "application/json, text/event-stream")
@@ -241,7 +249,8 @@ pub async fn register(
     endpoint: &reqwest::Url,
     redirect_uri: &str,
 ) -> Result<(String, Option<String>), String> {
-    let resp = client_for(endpoint)?
+    let resp = client_for(endpoint)
+        .await?
         .post(endpoint.clone())
         .json(&json!({
             "client_name": "Otto",
@@ -275,7 +284,8 @@ async fn token_request(
     client_id: &str,
 ) -> Result<Value, String> {
     let url = checked_endpoint(endpoint, server_is_local(server_url)?)?;
-    let mut rb = client_for(&url)?
+    let mut rb = client_for(&url)
+        .await?
         .post(url)
         .header("Accept", "application/json");
     if let Some(secret) = client_secret {
