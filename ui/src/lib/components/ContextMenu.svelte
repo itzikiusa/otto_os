@@ -12,9 +12,15 @@
   // filterable menu); ↑/↓ Home/End move, Enter/Space activate, a letter jumps
   // to the next item starting with it, Esc/Tab close. Focus returns to the
   // trigger on close (see ctxMenu.close()).
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import Icon, { asIcon } from './Icon.svelte';
   import { ctxMenu, type MenuItem } from '../contextmenu.svelte';
+  import { backCloses } from '../backCloses';
+
+  // A phone's Back closes the open menu (lib/backCloses.ts).
+  $effect(() => {
+    if (ctxMenu.open) return untrack(() => backCloses(() => ctxMenu.close()));
+  });
 
   const PAD = 8; // viewport margin
   const GAP = 4; // trigger ↔ menu
