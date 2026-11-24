@@ -88,7 +88,8 @@ test('a dirty session folder: the Git tab is Changes + the commit card; Commit a
   const card = page.getByTestId('commit-card');
   await expect(card).toBeVisible({ timeout: 20_000 });
   await expectFullyInViewport(page, card, 'commit card');
-  await expect(card.getByTestId('commit-card-included')).toHaveText('2 files included');
+  await expect(card.getByTestId('commit-card-included')).toHaveText('all files included');
+  await expect(page.locator('[data-wp-section="staged"] .wp-sec-count')).toHaveCount(0);
   await expect(card.locator('.subject-input')).toHaveValue('feat: ship the commit card', { timeout: 15_000 });
   await expect(card.locator('.btn.primary')).toHaveCount(1);
   // Every action sits inside the narrow card (⋯ overflowed it, clipped to a

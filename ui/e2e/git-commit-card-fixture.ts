@@ -66,7 +66,14 @@ export async function expectChangesFirst(page: Page): Promise<void> {
   await expect(page.locator('.rv-tab[aria-selected="true"]')).toContainText('Changes', { timeout: 15_000 });
   const card = page.getByTestId('commit-card');
   await expect(card).toBeVisible();
-  await expect(card.getByTestId('commit-card-included')).toHaveText('2 files included');
+  // The count is said once, on the Changes badge (design review 2, H4): the card
+  // says all is included, the Included header carries the +/− totals, and no
+  // lone "+1 −1" line floats between them.
+  await expect(page.locator('.rv-tab[aria-selected="true"]')).toContainText('2');
+  await expect(card.getByTestId('commit-card-included')).toHaveText('all files included');
+  await expect(page.locator('[data-wp-section="staged"] .wp-sec-count')).toHaveCount(0);
+  await expect(page.getByTestId('wip-section-lines')).toHaveText(/\+1\s*−1/);
+  await expect(page.locator('.wp-totals')).toHaveCount(0);
   // Drafted from the diff (the stubbed drafting agent), ready to send.
   await expect(card.locator('.subject-input')).toHaveValue('feat: ship the commit card', { timeout: 15_000 });
   await expect(card).toContainText('Drafted from the diff');

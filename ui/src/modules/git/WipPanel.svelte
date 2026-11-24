@@ -823,7 +823,7 @@
 </script>
 
 {#snippet section(id: Section, title: string, changes: FileChange[], rows: Row[], lw: ListWindow, empty: string, counts: LineCounts | null)}
-  <WipSection section={id} {title} count={changes.length} {rows} {lw} {empty} tree={treeView} {partial} {counts} {diffId}
+  <WipSection section={id} {title} count={changes.length} lines={includeAll && id === 'staged'} {rows} {lw} {empty} tree={treeView} {partial} {counts} {diffId}
     bind:open={() => sectionOpen[id], (v) => (sectionOpen[id] = v)}
     all={changes.map((c) => c.path)}
     selected={isSelected(id)}
@@ -866,12 +866,12 @@
     onkey={commitKey} ondraft={draftMessage} onstopdraft={stopDraft} oncommit={(push) => void commit(push)}
     onoptions={() => (signCfg || signCfgLoading ? undefined : loadSignCfg(repoId))}
   />
-  <!-- The commit card's caption and the Changes badge already count them; the
-       row holds only what it can do here (never a lone icon). -->
-  {#if !includeAll || totals || inUnstaged.length + inUntracked.length > 0 || folders > 1 || onclose}
+  <!-- The Changes badge counts the files and the Included header carries the
+       +/− totals; the row holds only what it can do here (never a lone icon). -->
+  {#if !includeAll || inUnstaged.length + inUntracked.length > 0 || folders > 1 || onclose}
   <div class="wp-head">
     {#if !includeAll}<span class="wp-count">{plural(status.changes.length, 'file')} changed</span>{/if}
-    {#if totals}
+    {#if totals && !includeAll}
       <span class="wp-totals" title="{totals.added.toLocaleString()} lines added, {totals.deleted.toLocaleString()} deleted">
         <span class="wp-add">+{totals.added.toLocaleString()}</span>
         <span class="wp-del">−{totals.deleted.toLocaleString()}</span>
