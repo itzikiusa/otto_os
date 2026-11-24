@@ -28,7 +28,8 @@ test.skip(({ isMobile, browserName }) => isMobile || browserName !== 'chromium',
 const TOTAL = 12_000;
 const LANES = 20;
 const PAGE = 10_000;
-const FIRST_PAGE = 2_000;
+const FIRST_PAGE = 200;
+const SCROLL_PAGE = 1_000;
 
 let repoId = '';
 let workspaceId = '';
@@ -152,21 +153,17 @@ test(`graph of ${TOTAL} commits × ${LANES} lanes: fast first paint, incremental
   expect(paintMs, 'first page painted within 1 s of arriving').toBeLessThan(1000);
   expect(logLimits[0]).toEqual({ limit: FIRST_PAGE, skip: 0 });
 
-  // The next page is prefetched without any scroll; its layout resumes
-  // (10k appended rows laid out, not 12k).
-  await expect.poll(() => logLimits.length, { timeout: 15_000 }).toBeGreaterThanOrEqual(2);
-  expect(logLimits[1]).toEqual({ limit: PAGE, skip: FIRST_PAGE });
-  await expect.poll(() => layoutRows(page), { timeout: 15_000 }).toBe(TOTAL - FIRST_PAGE);
-  await page.waitForTimeout(300);
-  expect(await maxLongTask(page), 'first layout + 10k prefetch').toBeLessThan(200);
-  // Windowed: 12k commits never mount 12k rows.
+  // Windowed history: nothing more is read until the reader scrolls.
+  await page.waitForTimeout(1_000); // ui-guards: allow — proves no prefetch fires on its own
+  expect(logLimits.length, 'no prefetch of the rest of history').toBe(1);
+  // Windowed rows too: never more than a screenful mounted.
   expect(await page.locator('.graph-row[data-sha]').count()).toBeLessThan(200);
 
-  // Load more: scroll to the bottom → one more request, which finds the root.
+  // Load more: scroll to the bottom → one SCROLL_PAGE more.
   await resetLongTasks(page);
   await page.locator('.graph-panel').evaluate((el) => (el.scrollTop = el.scrollHeight));
-  await expect.poll(() => logLimits.length, { timeout: 15_000 }).toBeGreaterThanOrEqual(3);
-  expect(logLimits[2]).toEqual({ limit: PAGE, skip: TOTAL });
+  await expect.poll(() => logLimits.length, { timeout: 15_000 }).toBeGreaterThanOrEqual(2);
+  expect(logLimits[1]).toEqual({ limit: SCROLL_PAGE, skip: FIRST_PAGE });
   expect(await maxLongTask(page), 'load more + scroll').toBeLessThan(200);
 
   // A ref moves (one new commit on branch-0) → reload reads ONE page and
@@ -174,8 +171,7 @@ test(`graph of ${TOTAL} commits × ${LANES} lanes: fast first paint, incremental
   extra = 1;
   const before = logLimits.length;
   await resetLongTasks(page);
-  await page.getByRole('button', { name: 'Fetch and pull options', exact: true }).click();
-  await page.getByRole('menuitem', { name: 'Fetch', exact: true }).click();
+  await page.locator('.git-header .ph-actions').getByRole('button', { name: 'Fetch', exact: true }).click();
   await expect.poll(() => logLimits.length, { timeout: 15_000 }).toBeGreaterThan(before);
   await page.waitForTimeout(500);
   const reloads = logLimits.slice(before);
@@ -191,5 +187,5 @@ test(`graph of ${TOTAL} commits × ${LANES} lanes: fast first paint, incremental
   await page.locator('.graph-panel').evaluate((el) => (el.scrollTop = 0));
   await expect(page.locator(`.graph-row[data-sha="e${'1'.padStart(39, '0')}"]`)).toBeVisible({ timeout: 10_000 });
   const total = await page.locator('.graph-panel').evaluate((el) => Math.round(el.scrollHeight));
-  expect(total, 'scroll height still covers the whole spliced history').toBeGreaterThan(TOTAL * 20);
+  expect(total, 'scroll height still covers the paged-in history').toBeGreaterThan((FIRST_PAGE + SCROLL_PAGE) * 20);
 });

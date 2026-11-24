@@ -38,8 +38,10 @@
     onopenmany?: (prs: PrSummary[]) => void;
     /** A fresher copy of one PR (the detail pane's read) — merged into its row. */
     patch?: PrSummary | null;
+    /** The rows in list order, once per repo when they first load. */
+    onfirst?: (prs: PrSummary[]) => void;
   }
-  let { repoId, activeNumber = null, openNumbers = [], onopen, onopenmany, patch = null }: Props = $props();
+  let { repoId, activeNumber = null, openNumbers = [], onopen, onopenmany, patch = null, onfirst }: Props = $props();
 
   const PER_PAGE = 50;
   const REFRESH_MS = 2 * 60_000;
@@ -306,6 +308,13 @@
   const groups: PrGroup[] = $derived(groupPrs(sortPrs(visible, prefs.sort, sizeOf), myHandles));
   const folded = $derived(new Set(prefs.folded));
   const flat = $derived(groups.flatMap((g) => (folded.has(g.id) ? [] : g.items)));
+  let firstFor = '';
+  $effect(() => {
+    if (!onfirst || flat.length === 0 || firstFor === repoId) return;
+    firstFor = repoId;
+    const rows = flat;
+    untrack(() => onfirst?.(rows));
+  });
   const activeFilterCount = $derived(activeFilters(prefs));
   const STATE_LABEL: Record<PrState, string> = { open: 'Open', merged: 'Merged', declined: 'Declined', all: 'All' };
   const filtering = $derived(hasClientFilter(parsed) || activeFilterCount > 0);

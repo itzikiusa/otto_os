@@ -21,6 +21,8 @@ test('unknown locked worktree status is visible and never requests force', async
     const repo = await seeded.json();
     const path = `${dir}-unknown`;
     const rows = [{path,head:'abc',branch:'unknown-branch',detached:false,bare:false,is_main:false,locked:true,lock_reason:'fixture',prunable:false,dirty:false,dirty_known:false}];
+    // The fixture replaces /worktrees: skip the one-request overview so the graph reads it.
+    await page.route(`**/api/v1/repos/${repo.id}/overview`, route => route.fulfill({status:404, json:{code:'not_found', message:'fixture'}}));
     await page.route(`**/api/v1/repos/${repo.id}/worktrees`, route => route.fulfill({json:rows}));
     let statusChecks = 0;
     await page.route(`**/api/v1/repos/${repo.id}/worktrees/status?*`, route => {

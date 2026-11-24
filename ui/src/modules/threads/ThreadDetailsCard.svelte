@@ -39,7 +39,7 @@
   import { subagentSection, subagentTally, type ChildTone, type SubagentRow, type SubagentWord } from './runtime/childThreads';
   import { delegatedParentId } from './threadsHelpers';
   import { openBranchMenu, openOpenInMenu } from './threadGitMenus';
-  import { threadPrs } from './threadPrs.svelte';
+  import { branchPrs as threadPrs } from '../../lib/stores/branchPrs.svelte';
   import { compactPath, forgeLabel } from './threadsHelpers';
   import { threadRepos } from './threadRepos.svelte';
   import { threads } from './threadsStore.svelte';

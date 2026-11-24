@@ -38,7 +38,7 @@ test('PR header: every action is on screen and reachable', async ({ page }) => {
 test('Code tab: the toolbar is whole, on top, and stays pinned while scrolling', async ({ page }) => {
   await page.goto('/#/git/rep_otto/pr/51');
   await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
-  await page.getByRole('tab', { name: 'Code', exact: true }).click();
+  await page.getByRole('tab', { name: 'Files', exact: true }).click();
   await expect(page.locator('.dfile-head').first()).toBeVisible();
   const search = page.getByRole('textbox', { name: /search/i }).first();
   await expect(search).toBeVisible();
@@ -88,7 +88,7 @@ async function diffScrollerBottom(inside: Locator): Promise<number> {
 async function openCode(page: Page): Promise<void> {
   await page.goto('/#/git/rep_otto/pr/51');
   await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
-  await page.getByRole('tab', { name: 'Code', exact: true }).click();
+  await page.getByRole('tab', { name: 'Files', exact: true }).click();
   await expect(page.locator('.dfile-head').first()).toBeVisible();
 }
 

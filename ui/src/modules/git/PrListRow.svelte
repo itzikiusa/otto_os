@@ -6,7 +6,8 @@
   import type { PrState, PrSummary } from '../../lib/api/types';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { rel } from '../../lib/stores/now.svelte';
-  import { ciOf, reviewChip } from './pr-query';
+  import { reviewChip } from './pr-query';
+  import { prRowWord } from './prStatus';
   import type { PrStat } from './pr-stats.svelte';
 
   interface Props {
@@ -27,13 +28,8 @@
   let { pr, stat, active, selected, selecting, openTab, observe, ontoggle, onrowclick, onopen }: Props = $props();
 
   const STATE_LABEL: Record<PrState, string> = { open: 'Open', merged: 'Merged', declined: 'Declined', all: 'All' };
-  const ci = $derived.by((): { icon: IconName; cls: string; label: string } | null => {
-    const c = ciOf(pr);
-    if (c === 'passing') return { icon: 'check', cls: 'ok', label: 'CI passing' };
-    if (c === 'failing') return { icon: 'x', cls: 'bad', label: 'CI failing' };
-    if (c === 'pending') return { icon: 'clock', cls: 'warn', label: 'CI running' };
-    return null;
-  });
+  /** What the PR needs, in words (prStatus.ts) — not a glyph. */
+  const word = $derived(prRowWord(pr));
   const review = $derived(reviewChip(pr));
   const REVIEW_ICON: Record<'ok' | 'bad' | 'warn', IconName> = { ok: 'userCheck', bad: 'edit', warn: 'eye' };
   const isDraft = $derived(!!pr.draft && pr.state === 'open');
@@ -79,6 +75,7 @@
       <span class="pr-line1">
         <span class="pr-num mono">#{pr.number}</span>
         <span class="pr-title" dir="auto">{pr.title}</span>
+        <span class="pr-word" data-tone={word.tone} data-testid="pr-word">{word.word}</span>
         {#if openTab && !active}
           <span class="pr-opendot" title="Open in a tab" aria-label="Open in a tab" role="img"></span>
         {/if}
@@ -103,9 +100,6 @@
           <span class="review-chip {review.tone}" title={review.label} role="img" aria-label={review.label} data-testid="pr-review"
             ><Icon name={REVIEW_ICON[review.tone]} size={12} /><span class="review-text">{review.text}</span></span
           >
-        {/if}
-        {#if ci}
-          <span class="ci-chip {ci.cls}" title={ci.label} role="img" aria-label={ci.label}><Icon name={ci.icon} size={12} /></span>
         {/if}
         <span class="grow"></span>
         <span class="pr-updated" title="Updated {new Date(pr.updated_at).toLocaleString()}">{rel(pr.updated_at)}</span>
@@ -286,7 +280,15 @@
     flex: none;
     white-space: nowrap;
   }
-  .ci-chip,
+  .pr-word {
+    flex: none;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .pr-word[data-tone='danger'] { color: var(--danger); }
+  .pr-word[data-tone='warning'] { color: var(--warning); font-weight: 600; }
+  .pr-word[data-tone='success'] { color: var(--success); }
   .review-chip {
     flex: none;
     display: inline-flex;
@@ -296,15 +298,12 @@
     gap: 4px;
     white-space: nowrap;
   }
-  .ci-chip.ok,
   .review-chip.ok {
     color: var(--success);
   }
-  .ci-chip.bad,
   .review-chip.bad {
     color: var(--danger);
   }
-  .ci-chip.warn,
   .review-chip.warn {
     color: var(--warning);
   }
