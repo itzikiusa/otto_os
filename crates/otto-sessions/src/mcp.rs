@@ -2,7 +2,8 @@
 //! user's enabled MCP servers, and its own first-party `otto` tool server into
 //! the config each agent CLI actually reads:
 //!
-//!   - claude:     `<workspace>/.mcp.json`
+//!   - claude:     per-session `--mcp-config <tmp>/otto-mcp/<id>.claude-mcp.json`
+//!   - muse, opencode: `<workspace>/.mcp.json`
 //!   - agy:        `<workspace>/.agents/mcp_config.json` (never `.mcp.json`)
 //!   - grok:       `<workspace>/.grok/config.toml` (never `.mcp.json`)
 //!   - codex:      per-spawn `-c mcp_servers.*` overrides (never `.mcp.json`)
