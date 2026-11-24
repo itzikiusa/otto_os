@@ -62,7 +62,6 @@
   let { onopen, onhide }: Props = $props();
 
   let query = $state('');
-  let workingOpen = $state(true);
   let historyOpen = $state(false);
   let telegramOpen = $state(false);
   let slackOpen = $state(false);
@@ -163,7 +162,7 @@
   // This workspace's rows (and "No workspace"), as the old list's select mode.
   const own = (s: Session): boolean => s.workspace_id === ws.currentId || s.workspace_id === SCRATCH_WORKSPACE_ID;
   const selectable = $derived(
-    [...inbox.main, ...inbox.working, ...(historyOpen ? historyRows : [])].filter((s) => !isThread(s) && own(s) && ws.canEditSession(s)),
+    [...inbox, ...(historyOpen ? historyRows : [])].filter((s) => !isThread(s) && own(s) && ws.canEditSession(s)),
   );
   const selIds = $derived(selectable.filter((s) => sel.has(s.id)).map((s) => s.id));
   const liveSel = $derived(selIds.filter((id) => !ws.archivedAgentSessions.some((a) => a.id === id)));
@@ -410,14 +409,14 @@
   <div class="ai-body">
     <div class="ai-scroll">
       <div class="ai-list" data-testid="agents-list">
-        {#each inbox.main as s (s.id)}
+        {#each inbox as s (s.id)}
           {@render row(s)}
         {:else}
           {#if ws.sessionsLoading && ws.sessions.length === 0}
             <Skeleton rows={3} height={56} label="sessions" />
           {:else if query.trim() || ws.needsYouFilter}
             <p class="ai-empty">No sessions match</p>
-          {:else if inbox.working.length === 0}
+          {:else}
             <div class="ai-empty">
               <p>No sessions yet</p>
               <button type="button" class="btn small ghost" onclick={() => (ui.newSessionOpen = true)}>New session</button>
@@ -433,17 +432,6 @@
       {#if slack.length > 0}
         <InboxFold label="Slack" count={slack.length} expanded={slackOpen} ontoggle={() => (slackOpen = !slackOpen)}>
           {#if slackOpen}{#each slack as s (s.id)}{@render row(s)}{/each}{/if}
-        </InboxFold>
-      {/if}
-    </div>
-    <div class="ai-folds">
-      {#if inbox.working.length > 0}
-        <InboxFold label="Working" ariaLabel="Working sessions" count={inbox.working.length} expanded={workingOpen} testid="agents-working-toggle" ontoggle={() => (workingOpen = !workingOpen)}>
-          <div class="ai-list" data-testid="agents-working-list">
-            {#each workingOpen ? inbox.working : inbox.working.filter((s) => s.id === ws.activeSessionId) as s (s.id)}
-              {@render row(s)}
-            {/each}
-          </div>
         </InboxFold>
       {/if}
       {#if ws.hasArchived || historyRows.length > 0}
@@ -584,21 +572,6 @@
     gap: var(--sp-4);
   }
   /* Working and History stay pinned above the foot (≤ 40 %); an open fold scrolls inside. */
-  .ai-folds {
-    flex-shrink: 0;
-    max-block-size: 40%;
-    display: flex;
-    flex-direction: column;
-    padding: var(--sp-2) var(--sp-4);
-    border-block-start: 1px solid var(--separator);
-  }
-  .ai-folds :global(.if-group) {
-    flex: 0 1 auto;
-  }
-  .ai-folds .ai-list {
-    min-height: 0;
-    overflow-y: auto;
-  }
   .ai-list {
     display: flex;
     flex-direction: column;

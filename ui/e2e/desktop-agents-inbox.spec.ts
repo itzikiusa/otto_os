@@ -280,3 +280,25 @@ test('a thread waiting on an approval or an MCP card needs you, and "Only what n
     for (const id of [asking, carded]) await ctx.post(`${base}/api/v1/runtime-sessions/${id}/close`).catch(() => {});
   }
 });
+
+// With every session working the live sessions ARE the list: no "Working"
+// fold with its own scroll under an empty list (design review B1).
+test('working sessions stay in the one list, needs you first', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/#/agents');
+  await expect(rows(page)).toHaveCount(3, { timeout: 20_000 });
+  await page.evaluate(async (ids) => {
+    const path = '/src/lib/stores/workspace.svelte.ts';
+    const { ws } = await import(/* @vite-ignore */ path);
+    for (const id of ids) ws.statusMap[id] = 'working';
+  }, Object.values(ids));
+  for (const t of TITLES) await expect(page.getByTestId(`agents-status-${ids[t]}`)).toHaveText(/^Working/);
+  await expect(rows(page)).toHaveCount(3);
+  await expect(page.getByTestId('agents-working-toggle')).toHaveCount(0);
+  await page.evaluate(async (id) => {
+    const path = '/src/lib/stores/workspace.svelte.ts';
+    const { ws } = await import(/* @vite-ignore */ path);
+    ws.markNeedsYou(id);
+  }, ids.Pirlo);
+  await expect(rows(page).first()).toContainText('Pirlo');
+});
