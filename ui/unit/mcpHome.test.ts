@@ -34,6 +34,8 @@ const appr = (status: string, decidedDaysAgo: number | null = null) => ({
 test('a request says what it will do from its redacted arguments', () => {
   assert.equal(argsLine({ tool: 'otto.git_push', args_redacted_json: JSON.stringify({ repo: 'otto', branch: 'fx/x', force: false, files: ['a'], body: 'x'.repeat(80) }) }), 'otto.git_push · repo otto · branch fx/x · force false');
   assert.equal(argsLine({ tool: 'otto.create_pr', args_redacted_json: 'not json' }), 'otto.create_pr');
+  // An opaque id is no words (design review 2, M11): the title names the repository.
+  assert.equal(argsLine({ tool: 'otto.create_pr', args_redacted_json: JSON.stringify({ repo_id: '01M86VCZNC85CVYV0HQY0HDKQH', target_branch: 'main' }) }), 'otto.create_pr · target_branch main');
 });
 
 test('pending first; denials counted for the last 7 days only', () => {
