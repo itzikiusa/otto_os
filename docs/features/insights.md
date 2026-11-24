@@ -324,7 +324,7 @@ TypeScript DTOs in `ui/src/lib/api/types.ts` mirror them.
 | `GET /insights/config` | `Insights` · **View** | — | `InsightsConfig` `{daily, weekly, monthly}` (all booleans) |
 | `PUT /insights/config` | `Insights` · **Admin** + handler **root** | `InsightsConfig` | the persisted `InsightsConfig` |
 | `GET /insights/reports` | `Insights` · **View** | — | `ReportView[]` (newest first) |
-| `GET /insights/report` | `Insights` · **View** | query `?path=<absolute html_path>` | the report's HTML |
+| `GET /insights/report` | `Insights` · **View** | query `?path=<absolute html_path>` (or its `summary-*.md` / `metrics-*.json` sibling, or `index.json`) | the artifact's text |
 | `POST /insights/run` | `Insights` · **Edit** + handler **root** | `{ period, offset? }` | `{ started, run_id?, reason? }` |
 
 DTOs:
@@ -442,9 +442,11 @@ to all enabled integrations.
   bypasses all feature checks. Reads are governed by the `Insights` View grant.
 - **Report serving is path-gated.** `GET /insights/report?path=` canonicalizes
   the requested path and rejects (`403 Forbidden`) anything that does not resolve
-  **inside** the insights directory — an authed caller can never read arbitrary
-  files off disk through this endpoint. A missing/unreadable file returns
-  `404 Not Found`.
+  **inside** the insights directory, and anything there but `index.json` and a
+  period's `report-*.html` / `summary-*.md` / `metrics-*.json` (never
+  `config.json`, `.mcp.json`, collectors or index backups) — an authed caller can
+  never read arbitrary files off disk through this endpoint. A missing/unreadable
+  file returns `404 Not Found`.
 - **Auth token.** The webview loads the report HTML with the bearer token
   (`authedBlobUrl`); the daemon listens on **loopback only** by default.
 - **No secrets in reports.** Reports are activity summaries written to the data
