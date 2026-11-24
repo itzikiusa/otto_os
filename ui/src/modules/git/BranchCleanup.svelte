@@ -36,13 +36,15 @@
     inWorktree: Set<string>;
     /** Pre-ticked branch names (local names, or `remote/branch` for remote refs). */
     preselect?: string[];
+    /** The list it opens on (the REMOTE header's trash opens on Remote). */
+    initialTab?: 'local' | 'remote';
     onclose: () => void;
     ondone: (status: RepoStatusResp) => void;
   }
-  let { repoId, refs, currentBranch, inWorktree, preselect = [], onclose, ondone }: Props = $props();
+  let { repoId, refs, currentBranch, inWorktree, preselect = [], initialTab = 'local', onclose, ondone }: Props = $props();
 
   type Tab = 'local' | 'remote';
-  let tab = $state<Tab>('local');
+  let tab = $state<Tab>(untrack(() => initialTab));
   let filter = $state('');
   let alsoRemote = $state(false);
   let picked = $state(untrack(() => new Set<string>(preselect)));
@@ -237,7 +239,7 @@
       </span>
       <button class="btn ghost" onclick={onclose} disabled={busy}>Cancel</button>
       <button class="btn danger" disabled={busy || selected.length === 0} onclick={deleteSelected}>
-        {busy ? 'Deleting…' : `Delete ${plural(selected.length, 'branch', 'branches')}…`}
+        {busy ? `Deleting ${plural(selected.length, 'branch', 'branches')}…` : `Delete ${plural(selected.length, 'branch', 'branches')}…`}
       </button>
     {/if}
   {/snippet}

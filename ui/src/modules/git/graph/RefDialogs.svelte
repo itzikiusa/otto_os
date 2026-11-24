@@ -48,6 +48,7 @@
       currentBranch: status.branch,
       inWorktree: index.worktreeBranches,
       preselect: actions.dialogs.branches,
+      initialTab: actions.dialogs.branchesTab,
       onclose: () => (actions.dialogs.branches = null),
       ondone: (s: RepoStatusResp) => void actions.refreshAfter(s),
     }}

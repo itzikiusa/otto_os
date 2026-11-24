@@ -393,11 +393,12 @@ export function createGraphActions(h: GraphActionsHost) {
 
   // Dialogs the refs sidebar mounts: the stash browser (open on a stash
   // SHA, '' = newest) and the bulk branch delete (pre-ticked names).
-  const dialogs = $state<{ stash: string | null; branches: string[] | null }>({ stash: null, branches: null });
+  const dialogs = $state<{ stash: string | null; branches: string[] | null; branchesTab: 'local' | 'remote' }>({ stash: null, branches: null, branchesTab: 'local' });
   function openStashBrowser(s?: StashInfo): void {
     dialogs.stash = s?.sha ?? '';
   }
-  function openBranchCleanup(preselect: string[] = []): void {
+  function openBranchCleanup(preselect: string[] = [], tab: 'local' | 'remote' = 'local'): void {
+    dialogs.branchesTab = tab;
     dialogs.branches = preselect;
   }
 

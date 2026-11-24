@@ -239,7 +239,7 @@ export function createGraphMenus(h: GraphMenusHost, a: GraphActions) {
           action: () => void deleteLocalBranch(localName, true, remoteName),
         });
       }
-      items.push({ label: 'Delete multiple branches…', icon: 'trash', action: () => openBranchCleanup([b.name]) });
+      items.push({ label: 'Delete multiple branches…', icon: 'trash', action: () => openBranchCleanup([b.name], 'remote') });
       items.push({ separator: true });
       items.push({ label: 'Copy branch name', icon: 'note', action: () => void clip(localName, localName) });
     } else {

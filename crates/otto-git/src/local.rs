@@ -3822,6 +3822,34 @@ impl LocalGit {
         Ok(())
     }
 
+    /// Delete several local branches in ONE `git branch -d|-D a b c` — a bulk
+    /// delete paid a process per branch. git deletes what it can and names
+    /// each one on stdout (read under `LC_ALL=C`); only a branch it didn't
+    /// delete is retried alone, so its own error (unmerged, not found…) comes
+    /// back. Results are in `names` order.
+    pub async fn delete_branches(&self, names: &[String], force: bool) -> Vec<Result<()>> {
+        let mut args = vec![
+            "branch",
+            if force { "-D" } else { "-d" },
+            "--end-of-options",
+        ];
+        args.extend(names.iter().map(String::as_str));
+        let c = [("LC_ALL".to_string(), "C".to_string())];
+        let deleted = match self.run_raw(&args, &c).await {
+            Ok((_, out, ..)) => out,
+            Err(_) => String::new(),
+        };
+        let mut results = Vec::with_capacity(names.len());
+        for name in names {
+            if deleted.contains(&format!("Deleted branch {name} (")) {
+                results.push(Ok(()));
+            } else {
+                results.push(self.delete_branch(name, force).await);
+            }
+        }
+        results
+    }
+
     /// Delete branch `name` on `origin` (`git push origin --delete <name>`).
     /// Returns the combined push output.
     ///
@@ -3867,11 +3895,11 @@ impl LocalGit {
         if !ok {
             return Err(upstream_err(&stderr, &stdout, code));
         }
-        for name in names {
-            let _ = self
-                .run(&["update-ref", "-d", &format!("refs/remotes/{remote}/{name}")])
-                .await;
-        }
+        // Prune the tracking refs in one go too (best-effort: push may have).
+        let tracking: Vec<String> = names.iter().map(|n| format!("{remote}/{n}")).collect();
+        let mut args = vec!["branch", "-r", "-D", "--end-of-options"];
+        args.extend(tracking.iter().map(String::as_str));
+        let _ = self.run_raw(&args, &[]).await;
         Ok(())
     }
 
