@@ -6,9 +6,9 @@
   import { toasts } from '../../lib/toast.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { events } from '../../lib/events.svelte';
   import { sessionState } from '../../lib/status';
+  import { sessionWord } from '../../lib/statusWords';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   // The issue picker loads when opened (it is SessionView's too, also lazy there).
@@ -170,7 +170,8 @@
       </div>
       <div class="info-row">
         <span class="key">Status</span>
-        <span class="val">{#if liveState}<StatusBadge status={liveState} variant="text" />{/if}</span>
+        <!-- The one status vocabulary, in a word (patterns.md §10) — as the pane header says it. -->
+        {#if liveState}{@const w = sessionWord(liveState)}<span class="val word {w.tone}" data-status={liveState.key} title={liveState.hint ?? liveState.label}>{w.word}</span>{/if}
       </div>
       {#if session.cwd}
         <div class="info-row">
@@ -314,6 +315,14 @@
     /* Wrap long tokens (paths, ids) without splitting ordinary words mid-word. */
     overflow-wrap: anywhere;
   }
+  .word.warning,
+  .word.danger,
+  .word.success {
+    font-weight: 600;
+  }
+  .word.warning { color: var(--warning); }
+  .word.danger { color: var(--danger); }
+  .word.success { color: var(--success); }
   .val-provider {
     display: inline-flex;
     align-items: center;

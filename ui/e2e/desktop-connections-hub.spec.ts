@@ -1,5 +1,6 @@
 import { test, expect, type Locator } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
+import { pickMenuItem } from './helpers';
 
 // Desktop BROWSER regression for the Connections list page (#/connections):
 // ONE list holds SSH + DB connections AND a Kafka cluster, sections are group
@@ -203,8 +204,7 @@ test.describe('connections hub', () => {
     await page.addInitScript((w) => localStorage.setItem('otto_workspace', w as string), wsId);
     await page.goto('/#/connections');
     const row = page.locator('.conn-row', { hasText: name });
-    await row.click({ button: 'right' });
-    await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
+    await pickMenuItem(page, () => row.click({ button: 'right' }), 'Delete');
     await expect(row).toHaveCount(0);
     await page.getByRole('button', { name: 'Undo', exact: true }).click();
     await expect(row).toBeVisible();

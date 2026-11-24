@@ -4,10 +4,9 @@
 // repository (`remote.origin.pushurl`) — nothing leaves the machine.
 import { expect, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 
 export interface CardRepo {
   id: string;
@@ -17,7 +16,7 @@ export interface CardRepo {
 }
 
 export async function seedCardRepo(name: string): Promise<CardRepo> {
-  const root = mkdtempSync(join(tmpdir(), 'otto-e2e-card-'));
+  const root = tempDir('otto-e2e-card-');
   const bare = join(root, 'remote.git');
   const dir = join(root, 'work');
   const branch = 'feat/commit-card';

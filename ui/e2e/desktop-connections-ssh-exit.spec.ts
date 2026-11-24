@@ -50,8 +50,11 @@ test('an ended SSH tab says why, is marked, reconnects from the tree and closes 
   // The connection's row (back on the list) reconnects the ended tab instead
   // of focusing it.
   await page.getByRole('button', { name: 'All connections', exact: true }).click();
+  const reopened = page.waitForResponse((r) => r.request().method() === 'POST' && r.url().endsWith(`/connections/${id}/open`));
   await page.locator('.conn-row', { hasText: name }).click();
-  await expect.poll(() => opens).toBe(2);
+  // Until the new session is in, the tab still shows the OLD session's "Ended".
+  await (await reopened).finished();
+  expect(opens).toBe(2);
   await expect(page.getByTestId('ssh-tab')).toHaveCount(1);
 
   // Once it has ended again, closing kills nothing that runs: no question.

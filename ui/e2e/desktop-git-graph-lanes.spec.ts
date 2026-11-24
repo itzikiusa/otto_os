@@ -1,9 +1,8 @@
 import { test, expect } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 import { openPage } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -27,7 +26,7 @@ let repoDir = '';
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   const wsId = await seedWorkspace(ctx, base);
-  repoDir = mkdtempSync(join(tmpdir(), 'otto-e2e-lanes-'));
+  repoDir = tempDir('otto-e2e-lanes-');
   // Every commit gets its own minute. Without this the whole history shares one
   // timestamp and `git log` orders equal-dated commits arbitrarily, so which row
   // is the root stops being deterministic.

@@ -1,9 +1,8 @@
 import { test, expect, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 import { openPage } from './helpers';
 
 // Git page repo tabs: the branch shows inline only while the strip has room
@@ -18,7 +17,7 @@ test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
   for (let i = 0; i < 8; i++) {
-    const dir = mkdtempSync(join(tmpdir(), 'otto-git-tabs-'));
+    const dir = tempDir('otto-git-tabs-');
     const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim();
     const branch = `release/5.02.${40 + i}-long-branch-name`;
     git('init', '-q', '-b', branch);

@@ -113,11 +113,11 @@ test('phone Connections can create and edit a profile and use its terminal', asy
   await page.goto('/#/connections');
   await page.getByRole('button', { name: 'New connection', exact: true }).first().click();
   const form = page.getByRole('dialog', { name: 'New connection', exact: true });
-  // With saved connections the primary opens its kind menu; an empty list's
-  // button opens the form on its kind step. Either way: Custom, then its fields.
-  const customMenu = page.getByRole('menuitem', { name: 'Custom CLI…', exact: true });
-  await expect(customMenu.or(form)).toBeVisible();
-  if (await customMenu.isVisible()) await customMenu.click();
+  // With connections listed the primary offers the kinds (Custom CLI… opens
+  // on its fields); an empty list opens step 1 (a URI or a kind) directly.
+  const custom = page.getByRole('menuitem', { name: 'Custom CLI…', exact: true });
+  await expect(custom.or(form)).toBeVisible();
+  if (await custom.isVisible()) await custom.click();
   else await form.getByRole('button', { name: 'Custom', exact: true }).click();
   await expectFullyInViewport(page, form);
   await form.getByLabel('Name', { exact: true }).fill(name);
@@ -125,6 +125,7 @@ test('phone Connections can create and edit a profile and use its terminal', asy
   await form.getByRole('button', { name: 'Create connection', exact: true }).click();
   await expect(form).toHaveCount(0);
   const row = page.locator('.conn-row', { hasText: name });
+  // A full-page row keeps its ⋯ visible on touch (its long-press menu has the same actions).
   await row.getByRole('button', { name: `Actions for ${name}` }).click();
   await expectFullyInViewport(page, page.getByRole('menu'));
   await page.getByRole('menuitem', { name: 'Edit', exact: true }).click();

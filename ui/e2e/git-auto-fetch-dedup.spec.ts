@@ -1,9 +1,8 @@
 import { test, expect, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 
 // E2E for the two Git features:
 //   1. Auto-fetch — a quiet background `git fetch` when a repo opens, then on
@@ -26,7 +25,7 @@ const git = (dir: string, ...args: string[]) =>
 
 /** Make a fresh local git repo with one commit. Returns its dir. */
 function initRepo(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const dir = tempDir(prefix);
   git(dir, 'init', '-q');
   git(dir, 'config', 'user.email', 'e2e@otto.local');
   git(dir, 'config', 'user.name', 'E2E');
@@ -51,13 +50,13 @@ async function seedUpstreamAheadRepo(): Promise<string> {
     encoding: 'utf8',
   }).trim();
   // 2) A bare remote; push the working repo to it.
-  const bare = mkdtempSync(join(tmpdir(), 'otto-e2e-af-bare-'));
+  const bare = tempDir('otto-e2e-af-bare-');
   git(bare, 'init', '--bare', '-q');
   git(work, 'remote', 'add', 'origin', bare);
   git(work, 'push', '-q', '-u', 'origin', branch);
   // 3) Advance the bare via a throwaway second clone so origin/<branch> is now
   //    ahead of the working repo's (still stale) remote-tracking ref.
-  const pusher = mkdtempSync(join(tmpdir(), 'otto-e2e-af-push-'));
+  const pusher = tempDir('otto-e2e-af-push-');
   execFileSync('git', ['clone', '-q', bare, pusher], { stdio: 'ignore' });
   git(pusher, 'config', 'user.email', 'e2e@otto.local');
   git(pusher, 'config', 'user.name', 'E2E');
