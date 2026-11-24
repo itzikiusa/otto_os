@@ -98,6 +98,9 @@ test('two terminals and a thread tile together; the approval is answered in the 
   await expect(dock).toBeVisible({ timeout: 20_000 });
   await expect(dock).toHaveAttribute('data-kind', 'approval');
   await expect(pane.getByTestId('pane-status')).toHaveText(/Needs you|Approval/);
+  // The tab strip says it in a word — no bare status dots on tabs.
+  await expect(page.locator(`[data-tab-id="${threadId}"]`)).toContainText('Needs you');
+  await expect(page.locator('.tabbar .dot')).toHaveCount(0);
   await shots(page, 'agents-thread-pane-approval');
   await dock.getByTestId('runtime-dock-accept').click();
   await expect(dock).toHaveCount(0, { timeout: 20_000 });
