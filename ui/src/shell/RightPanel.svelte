@@ -97,7 +97,14 @@
   // card (folder, branch, changes with commit → push → PR, context, MCP,
   // subagents). Its own chunk, loaded only once the panel is open.
   const SessionDetails = lazyComponent(() => import('../modules/agents/SessionDetailsCard.svelte'));
-  const detailsSession = $derived((router.module === 'agents' || router.module === '') && rightPanel.session ? ws.getSession(ws.activeSessionId) : null);
+  // A focused chat pane gets the card too (its folder comes from its thread row, read by the card's chunk).
+  const details = $derived.by(() => {
+    if (router.module !== 'agents' && router.module !== '') return null;
+    const id = ws.activeSessionId;
+    if (id && ws.threadPanes.includes(id)) return { threadId: id, cwd: null };
+    const s = rightPanel.session ? ws.getSession(id) : null;
+    return s?.cwd ? { threadId: s.id, cwd: s.cwd } : null;
+  });
 
   // `forceOpen` is set when the panel is hosted inside the mobile right drawer:
   // it then always shows content, fills the drawer width (no fixed width), and
@@ -446,9 +453,9 @@
       {/if}
 
       <div class="rpanel-body">
-        {#if open && !pageTab && detailsSession?.cwd}
+        {#if open && !pageTab && details}
           <div class="rpanel-card" data-testid="agents-details-card">
-            <LazyMount lazy={SessionDetails} what="the session details" variant="compact" props={{ cwd: detailsSession.cwd, threadId: detailsSession.id }} />
+            <LazyMount lazy={SessionDetails} what="the session details" variant="compact" props={details} />
           </div>
         {/if}
         {#if pageTab}

@@ -187,3 +187,16 @@ test('⋯ › Details shows the usage read it just asked for', async ({ page }) 
   await page.getByRole('menuitem', { name: 'Details' }).hover();
   await expect(page.getByRole('menuitem', { name: /^Usage: 12/ })).toBeVisible({ timeout: 5_000 });
 });
+
+// The right panel heads a focused chat pane with its details card too (A5).
+test('a focused chat pane gets the details card in the right panel', async ({ page }) => {
+  await page.goto('/#/agents');
+  await expect(row(page, threadId)).toBeVisible({ timeout: 30_000 });
+  await row(page, threadId).click();
+  await expect(page.getByTestId(`thread-pane-${threadId}`)).toBeVisible({ timeout: 20_000 });
+  await page.locator('.rstrip').getByRole('button', { name: 'Files', exact: true }).click();
+  const card = page.getByTestId('agents-details-card');
+  await expect(card.getByTestId('thread-details-card')).toBeVisible({ timeout: 20_000 });
+  await expect(card.getByTestId('details-folder')).toHaveAttribute('title', new RegExp(`${dir.split('/').pop()}$`));
+  await shots(page, 'agents-thread-pane-details');
+});
