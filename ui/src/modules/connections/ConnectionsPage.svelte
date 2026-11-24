@@ -386,7 +386,7 @@
     const env = i.environment === 'prod' ? 'Production' : i.environment === 'staging' ? 'Staging' : '';
     return [env, i.readOnly ? 'read-only' : ''].filter(Boolean).join(' · ');
   }
-  const subtitle = $derived(connectionList.loaded ? `${allItems.length} saved` : undefined);
+  const subtitle = $derived(connectionList.loaded && allItems.length > 0 ? `${allItems.length} saved` : undefined);
 </script>
 
 <div class="conn-root">

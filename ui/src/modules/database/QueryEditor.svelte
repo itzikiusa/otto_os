@@ -896,7 +896,7 @@
     if (stmtCount > 1 && !isMongoshScript) lead.push({ label: `Run all ${stmtCount} statements`, icon: 'play', hint: '⇧⌘↵', disabled: !canQuery || tab.running, action: runAll });
     const edit: MenuItem[] = [];
     if (database.queryLanguage !== 'redis') edit.push({ label: 'Format', icon: 'format', hint: '⇧⌘F', disabled: !hasStatement || tab.running || isMongoshScript, action: formatNow });
-    if (canEdit) edit.push({ label: savedLinked ? 'Update saved query…' : 'Save query…', icon: 'check', hint: '⌘S', disabled: !hasStatement, action: () => void openSave() });
+    if (canEdit) edit.push({ label: savedLinked ? 'Update saved query…' : 'Save query…', icon: 'file', hint: '⌘S', disabled: !hasStatement, action: () => void openSave() });
     edit.push(
       { label: 'Ask AI', icon: 'sparkle', disabled: !canAssist, title: canAssist ? 'The DB Assistant opens beside the editor' : 'Needs agent access and query permission on this connection', children: aiItems() },
       { label: settingsChanged ? `Query settings · ${settingsSummary}` : 'Query settings', icon: 'gear', children: settingsMenuItems() },

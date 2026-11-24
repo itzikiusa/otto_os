@@ -566,7 +566,7 @@
         {#if connState.tone === 'danger'}
           <!-- Can't connect: this one line says it; the raw error and the ways
                to fix it (Diagnose, Edit connection) are behind Details. -->
-          <button class="chip" disabled={retrying} onclick={() => void retryConn()}>{retrying ? 'Retrying…' : 'Retry'}</button>
+          <button class="chip" disabled={retrying} onclick={() => void retryConn()}>{retrying ? 'Retrying…' : 'Retry'}</button><!-- ui-guards: allow — the header's one "Can't connect" line (no LoadState there) -->
           <button class="chip" aria-expanded={errDetails} onclick={() => (errDetails = !errDetails)}>Details</button>
         {/if}
         {#if database.isGuarded}
@@ -793,15 +793,7 @@
   {#if database.sideTab === 'saved' || database.sideTab === 'history'}
     <DbSavedHistorySidebar mode={database.sideTab} />
   {:else}
-    {@const sc = database.connections.find((c) => c.id === database.selectedConnId)}
-    {#if sc}
-      <!-- Which server this tree is: engine mark, name, environment. -->
-      <div class="schema-conn" title="{sc.name} · {sc.kind}">
-        <span class="conn-glyph {sc.kind}"><Icon name={engineGlyph(sc.kind)} size={12} /></span>
-        <span class="schema-conn-name ellipsis">{sc.name}</span>
-        {#if envBadge(sc)}<EnvBadge env={sc.environment} readOnly={sc.read_only} />{/if}
-      </div>
-    {/if}
+    <!-- The header names the server; the tree starts right away. -->
     <SchemaTree />
   {/if}
 {/snippet}
@@ -971,12 +963,6 @@
     align-items: center;
     gap: 1px;
   }
-  .conn-glyph {
-    display: grid;
-    place-items: center;
-    flex-shrink: 0;
-    color: var(--text-dim);
-  }
   .conn-name {
     flex: 1;
     min-width: 0;
@@ -1018,24 +1004,6 @@
   /* Read-only (non-prod) connection → a softer amber rail. */
   .db-main.guard-rail {
     border-inline-start: 3px solid var(--status-working);
-  }
-  /* Per-row connection-type tag (mysql / ssh / kafka / …) — neutral, so the
-     env badge keeps the color signal. */
-  .schema-conn {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    height: 30px;
-    padding: 0 6px;
-    margin-bottom: 4px;
-    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-    min-width: 0;
-  }
-  .schema-conn-name {
-    flex: 1;
-    min-width: 0;
-    font-size: var(--fs-s);
-    font-weight: 600;
   }
   /* Prod / guarded connection tabs get a tinted edge. */
   .conn-tab.prod {
