@@ -20,6 +20,7 @@
   import { router } from '../../lib/router.svelte';
   import { lsGet, lsRemove, lsSet } from '../../lib/storage';
   import { onDestroy } from 'svelte';
+  import { invalidateFocusPrs } from './focusPrHelpers';
 
   interface Props {
     repoId: string;
@@ -290,6 +291,7 @@
         ...(openAsDraft ? { draft: true } : {}),
         ...(reviewers.length > 0 ? { reviewers } : {}),
       });
+      invalidateFocusPrs();
       // Every entry point gets a way into Otto's PR detail (review / post).
       toasts.push('success', 'Pull request created', `#${pr.number} ${pr.title}`, 8000, {
         action: { label: 'Open PR', run: () => router.go(`git/${repoId}/pr/${pr.number}`) },
