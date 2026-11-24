@@ -319,6 +319,11 @@ test('diffviewer: a WIP file diff fits and its code is reachable', async ({ page
   await page.locator('.wip-row').click();
   const panel = page.locator('.wip-panel');
   await expect(panel).toBeVisible({ timeout: 15_000 });
+  // The commit card sits above the list: the panel scrolls as a whole, so the
+  // last file is reachable (its own scroller was 50 px tall on a phone).
+  await panel.locator('.wp-name').last().scrollIntoViewIfNeeded();
+  await expect(panel.locator('.wp-name').last()).toBeInViewport();
+  await panel.locator('.wp-name').first().scrollIntoViewIfNeeded();
   await panel.locator('.wp-name').first().click();
   const diff = page.locator('.wp-diff');
   await expect(diff).toBeVisible({ timeout: 15_000 });

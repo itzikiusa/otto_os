@@ -1128,10 +1128,14 @@
   .wp-untracked-cap code { font-size: var(--fs-xs); }
 
   /* ≤1024px (accordion): touch-height rows, and the pane scrolls AS A WHOLE —
-     a fixed composer squeezed the list's scroller to nothing on a phone. */
+     the commit card on top left the list's own scroller 50 px in History's
+     WIP section on a phone. A tablet's inline diff keeps a height (a phone's
+     is a sheet). */
   @media (max-width: 1024px) {
     .wp-crow { height: 36px; }
-    .wp-body { overflow-y: auto; overscroll-behavior: contain; }
+    .wip-panel { overflow-y: auto; overscroll-behavior: contain; }
+    .wp-body, .wp-body.has-diff { flex: none; overflow: visible; }
     .wp-scroll, .wp-body.has-diff .wp-scroll { flex: none; max-height: none; overflow: visible; }
+    .wp-body.has-diff :global(.wp-diff:not(.sheet)) { height: min(70vh, 560px); }
   }
 </style>
