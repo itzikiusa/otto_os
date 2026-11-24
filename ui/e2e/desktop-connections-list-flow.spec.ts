@@ -55,6 +55,21 @@ test('list → open → run → rows', async ({ page }) => {
   await expect(page.locator('.conn-row', { hasText: name })).toContainText(/Connected|Can’t connect|Not checked/);
 });
 
+test('opening the list reads the rows\' access rights in one request, never one per row', async ({ page }) => {
+  const { ctx, base } = await apiCtx();
+  const tag = `rights-${Date.now()}`;
+  for (const n of [1, 2, 3]) await seedMockDbConnection(ctx, base, workspaceId, `${tag}-${n}`);
+  await ctx.dispose();
+  const seen: string[] = [];
+  page.on('request', (r) => seen.push(new URL(r.url()).pathname));
+  await page.goto('/#/connections');
+  await expect(page.locator('.conn-row', { hasText: `${tag}-3` })).toBeVisible();
+  await page.waitForTimeout(1500); // ui-guards: allow — proves no late per-row request arrives
+  const rights = seen.filter((p) => p.includes('/access/connection/'));
+  expect(rights.filter((p) => p !== '/api/v1/access/connection/capabilities/batch'), 'no per-row access read').toEqual([]);
+  expect(rights.length, 'one batched access read').toBe(1);
+});
+
 test('New connection: pick a kind, then only its fields; the rest folds under More options', async ({ page }) => {
   await page.goto('/#/connections');
   await page.getByRole('button', { name: /New connection/ }).first().click();
