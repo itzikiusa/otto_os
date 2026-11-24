@@ -74,6 +74,19 @@ test('a failed Kafka cluster read shows inline with Retry (R1-070)', async ({ pa
   await expect(alert).toHaveCount(0);
 });
 
+test('the hover ⋯ never sits over line 3’s text (UX-C1)', async ({ page }) => {
+  const name = `long-${Date.now()}`;
+  await seedSsh(name, `a-very-long-host-name-${'x'.repeat(160)}.internal`);
+  await page.goto('/#/connections');
+  const row = page.locator('.conn-row', { hasText: name });
+  await row.hover();
+  const btn = row.getByRole('button', { name: `Actions for ${name}` });
+  await expect(btn).toBeVisible();
+  const meta = await row.locator('.conn-meta').boundingBox();
+  const act = await row.locator('.tr-actions').boundingBox();
+  expect(meta!.x + meta!.width).toBeLessThanOrEqual(act!.x + 1);
+});
+
 test('a slow deep link that settles last does not pin the URL (R1-048)', async ({ page }) => {
   const { ctx, base } = await apiCtx();
   const aName = `deep-a-${Date.now()}`;

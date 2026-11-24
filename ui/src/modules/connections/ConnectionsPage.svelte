@@ -609,6 +609,13 @@
     margin-inline-start: auto;
     font-variant-numeric: tabular-nums;
   }
+  /* The hover ⋯ (24 px + its inset and lead-in) covers line 3's end: line 3
+     makes room, so its text ends in an ellipsis beside it, not under it. */
+  @media (hover: hover) {
+    .conn-row:is(:hover, :focus-within) :global(.tr-l3) {
+      padding-inline-end: calc(24px + var(--sp-2) + var(--sp-3) - var(--sp-5));
+    }
+  }
   .conn-empty-sec {
     margin: 0;
     padding: var(--sp-2) var(--sp-5);
