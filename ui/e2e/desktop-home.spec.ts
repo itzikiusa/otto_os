@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
-import { expectFullyInViewport } from './helpers';
+import { expectFullyInViewport, openFloatingBar } from './helpers';
 
 // Home: one centred reading column over the ambient backdrop — the greeting,
 // "Needs you" and "Working" as inbox rows with status words, Up next / Recent
@@ -292,7 +292,9 @@ test('zooming a loaded widget reuses it: no second mount, no new request', async
 
 test('Go to Home is one ⌘K away and the page never overflows horizontally', async ({ page }) => {
   await boot(page, 'agents');
-  await page.keyboard.press('Meta+k');
+  // The bar loads lazily and focuses its input a tick after ⌘K: typing before
+  // then lost the first letters (the 1-in-2 flake). Wait for the focus.
+  await openFloatingBar(page);
   await page.keyboard.type('go to home');
   await page.keyboard.press('Enter');
   await expect(page.getByRole('region', { name: 'Home dashboard' })).toBeVisible();
