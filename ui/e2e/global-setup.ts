@@ -5,6 +5,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'no
 import { tmpdir, homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { TelemetryConfig, TelemetryStatus } from '../src/lib/api/types';
+import { SIDEBAR_MODULES } from '../src/lib/sidebar';
 import globalTeardown from './global-teardown.ts';
 
 // Stand up an ISOLATED ottod for the whole E2E run:
@@ -225,6 +226,11 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
               // gates that must measure the real renderer clear it
               // (`useDefaultTerminalRenderer` in perf.ts).
               { name: 'otto.term.renderer', value: 'dom' },
+              // The sidebar lists only what was used lately (lib/sidebarMore.ts);
+              // specs predate that and reach every module by its row, so the
+              // throwaway profile has "used" all of them. The More-row spec
+              // (desktop-sidebar-more / sidebar-more-mobile) clears this.
+              { name: 'otto_sidebar_used', value: JSON.stringify(SIDEBAR_MODULES.map((m) => m.id)) },
             ],
           },
         ],

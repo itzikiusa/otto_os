@@ -105,6 +105,8 @@
     void import('./lib/telemetryBoot').then(({ bootTelemetry }) => {
       if (!disposed) stop = bootTelemetry(module);
     });
+    // The sidebar's "used lately" list (one read per load; lib/sidebarMore.ts).
+    void import('./lib/stores/navUsage.svelte').then(({ navUsage }) => navUsage.load());
     return () => { disposed = true; stop?.(); };
   });
 
