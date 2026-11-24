@@ -226,7 +226,7 @@ impl AcpDriver {
                     ),
                     [] => (program, args),
                 };
-                let extra: Vec<(String, String)> = params
+                let (extra, ignored): (Vec<(String, String)>, Vec<_>) = params
                     .get("env")
                     .and_then(Value::as_array)
                     .into_iter()
@@ -237,16 +237,13 @@ impl AcpDriver {
                             e.get("value")?.as_str()?.to_string(),
                         ))
                     })
-                    .collect();
+                    .partition(|(k, _)| !self.env_key_refused(k));
                 // The prompt shows env names only (values may be secrets), so
-                // a key that runs code or overrides Otto's own env is refused.
-                if let Some((k, _)) = extra.iter().find(|(k, _)| self.env_key_refused(k)) {
-                    step.write(error_line(
-                        &rpc_id,
-                        -32602,
-                        &format!("env {k} is not allowed"),
-                    ));
-                    return;
+                // a key that runs code or overrides Otto's own env is dropped
+                // (the command still runs, with Otto's value where it has one).
+                let ignored: Vec<String> = ignored.into_iter().map(|(k, _)| k).collect();
+                if !ignored.is_empty() {
+                    tracing::debug!(keys = ?ignored, "acp terminal/create: env ignored");
                 }
                 let mut env = self.state.child_env.clone();
                 env.extend(extra.iter().cloned());
@@ -271,6 +268,9 @@ impl AcpDriver {
                                 let names: Vec<&str> =
                                     extra.iter().map(|(k, _)| k.as_str()).collect();
                                 d.push_str(&format!("\nenv: {}", names.join(", ")));
+                            }
+                            if !ignored.is_empty() {
+                                d.push_str(&format!("\nenv ignored: {}", ignored.join(", ")));
                             }
                             d
                         }
