@@ -531,7 +531,7 @@
                     {#if p?.headline}
                       <div class="row-headline">{p.headline}</div>
                     {:else if !r.summary.trim() && !r.html_path}
-                      <div class="row-headline dim">No summary yet — the run may still be writing it.</div>
+                      <div class="row-headline dim">{Date.now() - Date.parse(r.created_at) > 2 * 3600_000 ? 'Files missing — no HTML report was saved.' : 'No summary yet — the run may still be writing it.'}</div>
                     {/if}
                     {#if stats.length > 0}
                       <div class="row-stats">

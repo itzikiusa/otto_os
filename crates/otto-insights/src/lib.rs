@@ -1412,52 +1412,39 @@ struct ReportQuery {
     path: String,
 }
 
-/// Resolve and validate `requested` against indexed HTML report artifacts under
-/// `dir`. Only `<dir>/{daily,weekly,monthly}/report-<word>-<YYYYMMDD>_<YYYYMMDD>.html`
-/// regular files are permitted — never `config.json`, `index.json`,
-/// `schedule-state.json`, `collectors/*.py`, metrics/summary files, or arbitrary
-/// files/symlinks.
-fn resolve_report_html_path(dir: &Path, requested: &str) -> Result<PathBuf, otto_core::Error> {
+/// Resolve and validate `requested` against the report artifacts the UI reads
+/// under `dir`: `<dir>/index.json` and `<dir>/{daily,weekly,monthly}/`
+/// `{report,summary,metrics}-<word>-<YYYYMMDD>_<YYYYMMDD>.{html,md,json}` regular
+/// files. Never `config.json`, `.mcp.json`, `schedule-state.json`, index
+/// backups, completion markers, `collectors/*.py` or arbitrary files/symlinks.
+/// A permitted name that is not on disk is NotFound, not Forbidden.
+fn resolve_report_artifact_path(dir: &Path, requested: &str) -> Result<PathBuf, otto_core::Error> {
+    use std::path::Component::Normal;
     let base = std::fs::canonicalize(dir)
         .map_err(|e| otto_core::Error::Internal(format!("insights dir: {e}")))?;
     let req = std::fs::canonicalize(Path::new(requested))
         .map_err(|_| otto_core::Error::NotFound("report".into()))?;
-    if !req.starts_with(&base) {
+    let Ok(rel) = req.strip_prefix(&base) else {
         return Err(otto_core::Error::Forbidden(
             "path is outside the insights directory".into(),
         ));
-    }
-    let rel = req.strip_prefix(&base).map_err(|_| {
-        otto_core::Error::Forbidden("path is outside the insights directory".into())
-    })?;
+    };
     let mut comps = rel.components();
-    let (
-        Some(std::path::Component::Normal(word_os)),
-        Some(std::path::Component::Normal(file_os)),
-        None,
-    ) = (comps.next(), comps.next(), comps.next())
-    else {
-        return Err(otto_core::Error::Forbidden(
-            "path is not an indexed insights report".into(),
-        ));
+    let allowed = match (comps.next(), comps.next(), comps.next()) {
+        (Some(Normal(f)), None, None) => f == "index.json",
+        (Some(Normal(w)), Some(Normal(f)), None) => match (w.to_str(), f.to_str()) {
+            (Some(word @ ("daily" | "weekly" | "monthly")), Some(name)) => {
+                parse_period_from_filename(name, word).is_some_and(|(s, e)| {
+                    [("report", "html"), ("summary", "md"), ("metrics", "json")]
+                        .iter()
+                        .any(|(pre, ext)| name == format!("{pre}-{word}-{s}_{e}.{ext}"))
+                })
+            }
+            _ => false,
+        },
+        _ => false,
     };
-    let (Some(word), Some(filename)) = (word_os.to_str(), file_os.to_str()) else {
-        return Err(otto_core::Error::Forbidden(
-            "path is not an indexed insights report".into(),
-        ));
-    };
-    if !matches!(word, "daily" | "weekly" | "monthly") {
-        return Err(otto_core::Error::Forbidden(
-            "path is not an indexed insights report".into(),
-        ));
-    }
-    let Some((start, end)) = parse_period_from_filename(filename, word) else {
-        return Err(otto_core::Error::Forbidden(
-            "path is not an indexed insights report".into(),
-        ));
-    };
-    let expected = format!("report-{word}-{start}_{end}.html");
-    if filename != expected || !req.is_file() {
+    if !allowed || !req.is_file() {
         return Err(otto_core::Error::Forbidden(
             "path is not an indexed insights report".into(),
         ));
@@ -1465,9 +1452,9 @@ fn resolve_report_html_path(dir: &Path, requested: &str) -> Result<PathBuf, otto
     Ok(req)
 }
 
-/// Serve an indexed report's HTML by path, gated to root and strictly limited
-/// to indexed `<insights_dir>/<word>/report-<word>-<YYYYMMDD>_<YYYYMMDD>.html`
-/// files. The UI loads this (with the bearer token) into the report iframe.
+/// Serve one report artifact by path (see [`resolve_report_artifact_path`]),
+/// gated to root. The UI loads the HTML (with the bearer token) into the
+/// report iframe and reads the summary, metrics and `index.json` as text.
 async fn get_report<C: InsightsCtx>(
     State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
@@ -1477,7 +1464,7 @@ async fn get_report<C: InsightsCtx>(
     // Canonicalize + validate + read on the blocking pool, not a runtime worker.
     let dir = insights_dir(&ctx);
     let html = tokio::task::spawn_blocking(move || -> Result<String, ApiError> {
-        let req = resolve_report_html_path(&dir, &q.path).map_err(ApiError)?;
+        let req = resolve_report_artifact_path(&dir, &q.path).map_err(ApiError)?;
         std::fs::read_to_string(&req)
             .map_err(|_| ApiError(otto_core::Error::NotFound("report".into())))
     })
@@ -2660,46 +2647,126 @@ mod tests {
         assert!(InFlightGuard::claim(&flag).is_some());
     }
 
+    /// The owner's real archive layout (file NAMES only, from a 0.5.0 data
+    /// dir): rendered reports with their summary + metrics siblings, a report
+    /// whose summary never landed, collector-only periods (metrics, no HTML),
+    /// completion markers, index.json + its dated backups, config, .mcp.json
+    /// and collector scripts. Every artifact the UI reads for a LISTED report
+    /// (its HTML, its `summary-*.md`, the shared `index.json`) must resolve.
     #[test]
-    fn resolve_report_html_path_only_allows_indexed_report_html_files() {
+    fn every_listed_report_opens_its_html_summary_and_the_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        for d in ["daily", "weekly", "monthly", "collectors"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        let files = [
+            "daily/report-daily-20261113_20261113.html",
+            "daily/summary-daily-20261113_20261113.md",
+            "daily/metrics-daily-20261113_20261113.json",
+            "daily/completion-daily-20261113_20261113.json",
+            "daily/report-daily-20260618_20260618.html",
+            "daily/summary-daily-20260618_20260618.md",
+            "daily/metrics-daily-20260618_20260618.json",
+            "daily/report-daily-20260622_20260622.html",
+            "daily/metrics-daily-20260622_20260622.json",
+            "daily/metrics-daily-20260709_20260709.json",
+            "weekly/report-weekly-20261102_20261108.html",
+            "weekly/summary-weekly-20261102_20261108.md",
+            "monthly/report-monthly-20261001_20261031.html",
+            "monthly/summary-monthly-20261001_20261031.md",
+            "index.json",
+            "index.json.bak-20261031-daily-20261030",
+            "config.json",
+            "schedule-state.json",
+            ".mcp.json",
+            "collectors/collect.py",
+        ];
+        for f in files {
+            std::fs::write(dir.join(f), "x").unwrap();
+        }
+        let reports = list_reports(dir);
+        assert_eq!(reports.len(), 6);
+        for r in &reports {
+            let Some(html) = r.html_path.as_deref() else {
+                continue;
+            };
+            resolve_report_artifact_path(dir, html).unwrap();
+            let summary = html
+                .replace("/report-", "/summary-")
+                .replace(".html", ".md");
+            match resolve_report_artifact_path(dir, &summary) {
+                Ok(_) => assert!(Path::new(&summary).is_file()),
+                // A summary that never landed is missing (404), not refused.
+                Err(e) => assert!(
+                    matches!(e, otto_core::Error::NotFound(_)),
+                    "{summary}: {e:?}"
+                ),
+            }
+        }
+        let index = dir.join("index.json");
+        resolve_report_artifact_path(dir, &index.to_string_lossy()).unwrap();
+        for bad in [
+            "config.json",
+            "schedule-state.json",
+            ".mcp.json",
+            "collectors/collect.py",
+            "index.json.bak-20261031-daily-20261030",
+            "daily/completion-daily-20261113_20261113.json",
+        ] {
+            let err =
+                resolve_report_artifact_path(dir, &dir.join(bad).to_string_lossy()).unwrap_err();
+            assert!(
+                matches!(err, otto_core::Error::Forbidden(_)),
+                "{bad}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_report_artifact_path_refuses_everything_but_report_artifacts() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         let daily = dir.join("daily");
         std::fs::create_dir_all(&daily).unwrap();
-        let report = daily.join("report-daily-20260617_20260617.html");
-        let metrics = daily.join("metrics-daily-20260617_20260617.json");
-        let summary = daily.join("summary-daily-20260617_20260617.md");
-        let arbitrary = daily.join("evil.html");
-        let config = dir.join("config.json");
-        let index = dir.join("index.json");
-        for (p, body) in [
-            (&report, "<html>ok</html>"),
-            (&metrics, "{}"),
-            (&summary, "# sum"),
-            (&arbitrary, "<html>bad</html>"),
-            (&config, "{}"),
-            (&index, "{}"),
-        ] {
-            std::fs::write(p, body).unwrap();
+        let ok = [
+            daily.join("report-daily-20260617_20260617.html"),
+            daily.join("metrics-daily-20260617_20260617.json"),
+            daily.join("summary-daily-20260617_20260617.md"),
+            dir.join("index.json"),
+        ];
+        let bad = [
+            daily.join("evil.html"),
+            daily.join("summary-daily-20260617_20260617.html"),
+            daily.join("report-daily-20260617_20260617.md"),
+            dir.join("config.json"),
+        ];
+        for p in ok.iter().chain(&bad) {
+            std::fs::write(p, "x").unwrap();
         }
+        // A report-named symlink to config.json resolves to config.json: refused.
+        let link = daily.join("report-daily-20260618_20260618.html");
+        std::os::unix::fs::symlink(dir.join("config.json"), &link).unwrap();
 
-        // Valid indexed report HTML passes.
-        let resolved = resolve_report_html_path(dir, &report.to_string_lossy()).unwrap();
-        assert_eq!(resolved, std::fs::canonicalize(&report).unwrap());
-
-        // Non-report files inside insights_dir are rejected with Forbidden.
-        for bad in [&metrics, &summary, &arbitrary, &config, &index] {
-            let err = resolve_report_html_path(dir, &bad.to_string_lossy()).unwrap_err();
+        for p in &ok {
+            let resolved = resolve_report_artifact_path(dir, &p.to_string_lossy()).unwrap();
+            assert_eq!(resolved, std::fs::canonicalize(p).unwrap());
+        }
+        for p in bad.iter().chain([&link]) {
+            let err = resolve_report_artifact_path(dir, &p.to_string_lossy()).unwrap_err();
             assert!(
                 matches!(err, otto_core::Error::Forbidden(_)),
                 "expected Forbidden for {}, got {err:?}",
-                bad.display()
+                p.display()
             );
         }
+        let gone = daily.join("summary-daily-20260619_20260619.md");
+        let err = resolve_report_artifact_path(dir, &gone.to_string_lossy()).unwrap_err();
+        assert!(matches!(err, otto_core::Error::NotFound(_)));
 
         // Outside file is rejected with Forbidden.
         let outside = tempfile::NamedTempFile::new().unwrap();
-        let err = resolve_report_html_path(dir, &outside.path().to_string_lossy()).unwrap_err();
+        let err = resolve_report_artifact_path(dir, &outside.path().to_string_lossy()).unwrap_err();
         assert!(matches!(err, otto_core::Error::Forbidden(_)));
     }
 
