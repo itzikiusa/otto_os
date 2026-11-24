@@ -288,6 +288,14 @@ test.describe('pull requests: review state', () => {
     await word(1).scrollIntoViewIfNeeded();
     await expect(word(1)).toBeInViewport();
     await expectFitsWidth(page);
+    // Chrome before 128 gives a <button> `align-items: flex-start` (UA sheet,
+    // seen on the Android emulator): a long title must still end in an
+    // ellipsis inside its row, not run past it under the select box.
+    await page.addStyleTag({ content: 'button { align-items: flex-start; }' });
+    const pr1 = page.locator('.pr-row[data-pr="1"] .tr-main');
+    const rowBox = (await pr1.boundingBox())!;
+    const titleBox = (await pr1.locator('.tr-title').boundingBox())!;
+    expect(titleBox.x + titleBox.width).toBeLessThanOrEqual(rowBox.x + rowBox.width);
   });
 });
 

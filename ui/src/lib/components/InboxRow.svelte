@@ -167,6 +167,10 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
+    /* Chrome before 128 gives a <button> `align-items: flex-start` (UA
+       sheet): the lines then size to their text and a long title overflows
+       the row instead of ending in an ellipsis. */
+    align-items: stretch;
     gap: var(--sp-1);
     min-block-size: 64px;
     padding-block: var(--sp-3);
