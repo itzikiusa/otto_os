@@ -125,6 +125,12 @@ impl ToolchainManager {
         self.allow_test_loopback.load(Ordering::Relaxed)
     }
 
+    /// Network requests the SDK catalog has started (tests: a path makes none).
+    #[doc(hidden)]
+    pub fn catalog_request_count(&self) -> usize {
+        self.catalog.request_count()
+    }
+
     #[doc(hidden)]
     pub fn seed_test_catalog_entry(
         &self,
