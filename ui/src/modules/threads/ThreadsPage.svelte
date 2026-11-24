@@ -208,7 +208,12 @@
         // (a phone QR) switches there instead of opening nothing. A remembered
         // route (the sidebar's resume point, the last route at launch) to a
         // thread deleted since goes quietly to the list.
-        const forget = router.remembered ? () => { if (router.parts[1] === routeSessionId) router.replace('threads'); } : undefined;
+        const forget = router.remembered ? () => {
+          if (router.parts[1] !== routeSessionId) return;
+          router.replace('threads');
+          // The list then opens on the latest thread, as an arrival on #/threads does.
+          if (threads.paneIds.length === 0 && liveThreadIds.length > 0) threads.selectThread(initialThreadId(liveThreadIds) ?? liveThreadIds[0], { syncRoute: false });
+        } : undefined;
         void (async () => {
           if (!runtimeThreads.get(routeSessionId) && !(await prepareDeepLink(ws, routeSessionId, 'thread', forget))) return;
           const s = await ws.ensureSession(routeSessionId);

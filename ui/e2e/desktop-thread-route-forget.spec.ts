@@ -90,6 +90,9 @@ test('Threads: a remembered route to a deleted thread goes to the list quietly; 
   await quietly(page);
   await expect.poll(() => hash(page)).toBe('#/threads');
   expect(await memory(page)).not.toContain(mine);
+  // …and opens on the thread still there, not on an empty composer.
+  await expect(page.locator('[data-testid^="runtime-thread-"]').first()).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByTestId('new-thread-stage')).toHaveCount(0);
 
   // Deleted elsewhere (the API), then a relaunch with the stale id remembered.
   await page.goto(`/#/threads/${later}`);
@@ -131,11 +134,15 @@ test('Agents: a remembered route or saved pane of a deleted thread is dropped qu
   await expect.poll(() => hash(page)).toMatch(/^#\/threads/);
   await remove(also);
   await page.evaluate(() => Object.keys(localStorage).filter((k) => /^otto_(tabs|panes)_/.test(k)).forEach((k) => localStorage.removeItem(k)));
+  const r2 = await ctx.post(`${base}/api/v1/workspaces/${wsId}/sessions`, { data: { kind: 'agent', provider: 'shell', title: 'Pirlo shell', cwd: dir, meta: { origin: 'e2e' } } });
+  const kept2 = (await r2.json()).id as string;
   await page.reload();
   await navTo(page, 'agents');
   await quietly(page);
-  await expect.poll(() => hash(page)).toBe('#/agents');
+  // …and opens the session still there, not "No open tabs".
+  await expect(page.locator(`[data-pane-key][data-session="${kept2}"]`)).toBeVisible({ timeout: 10_000 });
   expect(await memory(page)).not.toContain(also);
+  await ctx.delete(`${base}/api/v1/sessions/${kept2}`);
   // Someone followed a link to it: say why.
   await page.goto(`/#/agents/${gone}`);
   await expect(page.getByText('Couldn’t open this session')).toBeVisible({ timeout: 10_000 });
