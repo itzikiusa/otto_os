@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{optional_token, remote_shares_origin_host, repo_ctx, repo_lock, ApiResult, GitCtx};
 use crate::gitops::err_text;
+use crate::transport::TransportCredential;
 use crate::worktree_ready::{run_setup, Prepared, SETUP_KEY};
 
 #[derive(Deserialize)]
@@ -256,6 +257,7 @@ pub(super) async fn repo_branches_delete<S: GitCtx>(
     let protected = protected_names(&current, default.as_deref());
     // Resolved once, lazily: only a remote delete needs the account token.
     let mut token = None;
+    let mut remote_deletes = Vec::new();
     let mut results = Vec::with_capacity(req.items.len());
     for item in req.items {
         let name = item.name.trim().to_string();
@@ -335,12 +337,41 @@ pub(super) async fn repo_branches_delete<S: GitCtx>(
             } else {
                 None
             };
-            match git.delete_remote_branch_on(&remote, &rb, tok).await {
-                Ok(_) => r.remote_deleted = true,
-                Err(e) => r.error = Some(err_text(&e)),
-            }
+            // Deleted below, one push per remote.
+            remote_deletes.push((results.len(), remote, rb, tok));
         }
         results.push(r);
+    }
+    // One push per remote for all its branches; if that push fails (one ref
+    // already gone, a protected branch…) each is retried on its own, so the
+    // per-item results stay exact.
+    let mut by_remote: Vec<(String, Option<TransportCredential>, Vec<(usize, String)>)> =
+        Vec::new();
+    for (i, remote, rb, tok) in remote_deletes {
+        match by_remote.iter_mut().find(|(r, ..)| *r == remote) {
+            Some((_, _, items)) => items.push((i, rb)),
+            None => by_remote.push((remote, tok, vec![(i, rb)])),
+        }
+    }
+    for (remote, tok, items) in by_remote {
+        let names: Vec<String> = items.iter().map(|(_, n)| n.clone()).collect();
+        if items.len() > 1
+            && git
+                .delete_remote_branches_on(&remote, &names, tok.clone())
+                .await
+                .is_ok()
+        {
+            for (i, _) in &items {
+                results[*i].remote_deleted = true;
+            }
+            continue;
+        }
+        for (i, rb) in items {
+            match git.delete_remote_branch_on(&remote, &rb, tok.clone()).await {
+                Ok(_) => results[i].remote_deleted = true,
+                Err(e) => results[i].error = Some(err_text(&e)),
+            }
+        }
     }
     drop(g);
     Ok(Json(BranchDeleteResp {

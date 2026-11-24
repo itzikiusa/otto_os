@@ -1164,6 +1164,49 @@ async fn delete_remote_branch_prunes_local_tracking_ref() {
     );
 }
 
+/// One push deletes several remote branches (perf G6: a bulk delete paid a
+/// connection per branch) and prunes their tracking refs; a batch with an
+/// already-gone ref fails as a whole so the caller retries one by one.
+#[tokio::test]
+async fn delete_remote_branches_on_deletes_all_in_one_push() {
+    let (_tmp, dir) = fixture();
+    sh_git(&dir, &["add", "-A"]);
+    sh_git(&dir, &["commit", "-m", "tidy"]);
+    let parent = dir.parent().unwrap();
+    sh_git(parent, &["init", "--bare", "origin.git"]);
+    let bare = parent.join("origin.git");
+    sh_git(&dir, &["remote", "add", "origin", bare.to_str().unwrap()]);
+    for b in ["a", "b", "c"] {
+        sh_git(&dir, &["branch", b]);
+    }
+    sh_git(&dir, &["push", "origin", "main", "a", "b", "c"]);
+    sh_git(&dir, &["fetch", "origin"]);
+
+    let git = LocalGit::new(&dir);
+    let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    git.delete_remote_branches_on("origin", &names(&["a", "b"]), None)
+        .await
+        .unwrap();
+    let remote = git.refs().await.unwrap().remote;
+    assert!(!remote
+        .iter()
+        .any(|b| b.name == "origin/a" || b.name == "origin/b"));
+    assert!(
+        remote.iter().any(|b| b.name == "origin/c"),
+        "c is untouched"
+    );
+    // "a" is already gone: the batch reports failure (the route then retries each).
+    assert!(git
+        .delete_remote_branches_on("origin", &names(&["a", "c"]), None)
+        .await
+        .is_err());
+    assert!(matches!(
+        git.delete_remote_branches_on("nope", &names(&["c"]), None)
+            .await,
+        Err(Error::Invalid(_))
+    ));
+}
+
 /// S15-01: a remote-ref row on a NON-origin remote (`upstream/tmp`) must
 /// delete `tmp` on `upstream` — origin's same-named branch is untouched —
 /// and an unknown remote name is refused before any push.
