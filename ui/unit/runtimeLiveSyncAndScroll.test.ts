@@ -1205,3 +1205,53 @@ test('RuntimeViews catch-up: progress resets the backoff and keeps paging at onc
   assert.deepEqual(made.map((t) => t.ms), [250]);
   close();
 });
+
+test('RuntimeViews: a gone thread (404) stops reading; a failed read keeps its backoff, not the 4 s tick', async () => {
+  const h = makeRuntimeHarness();
+  const close = h.views.open('s-gone');
+  h.gets[0].gate.reject(Object.assign(new Error('not found'), { status: 404 }));
+  await flush();
+  assert.ok(h.views.loadError['s-gone']);
+  assert.ok(![...h.timers.values()].some((t) => t.ms === 1_500), 'no retry for a thread that is gone');
+  const liveness = [...h.timers.values()].find((t) => t.ms === 4_000);
+  assert.ok(liveness);
+  for (let i = 0; i < 5; i++) liveness.fn();
+  h.emitWindow('pointerdown');
+  await flush();
+  assert.equal(h.gets.length, 1, 'no /events loop every 4 s for a 404');
+  close();
+
+  const h2 = makeRuntimeHarness();
+  const close2 = h2.views.open('s-500');
+  h2.gets[0].gate.reject(Object.assign(new Error('boom'), { status: 500 }));
+  await flush();
+  const retry = [...h2.timers.values()].find((t) => t.ms === 1_500);
+  assert.ok(retry, 'a server error retries on its backoff');
+  [...h2.timers.values()].find((t) => t.ms === 4_000)!.fn();
+  await flush();
+  assert.equal(h2.gets.length, 1, 'the liveness tick leaves a failed read to its backoff');
+  retry.fn();
+  await flush();
+  assert.equal(h2.gets.length, 2);
+  close2();
+});
+
+test('RuntimeViews: a row read during the first replay does not fetch /events a second time', async () => {
+  const h = makeRuntimeHarness();
+  const close = h.views.open('s-row');
+  h.views.noteSessionSequence('s-row', 2);
+  await flush();
+  assert.equal(h.gets.length, 1);
+  h.gets[0].gate.resolve({ kind: 'events', events: [msgEvent('s-row', 1, 'm-1', 'a'), msgEvent('s-row', 2, 'm-2', 'b')], last_sequence: 2 });
+  await flush();
+  assert.equal(h.gets.length, 1, 'already up to date: no second GET');
+  // Still behind after the replay lands: it catches up at once.
+  h.views.noteSessionSequence('s-row', 3);
+  h.views.noteSessionSequence('s-row', 4);
+  await flush();
+  assert.equal(h.gets.length, 2);
+  h.gets[1].gate.resolve({ kind: 'events', events: [msgEvent('s-row', 3, 'm-3', 'c'), msgEvent('s-row', 4, 'm-4', 'd')], last_sequence: 4 });
+  await flush();
+  assert.equal(h.gets.length, 2);
+  close();
+});
