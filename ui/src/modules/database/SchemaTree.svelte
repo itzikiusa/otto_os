@@ -770,9 +770,7 @@
   }
   .node-label {
     display: flex;
-    /* Centred, not baseline: a touch row is 36 px, and baseline items sit at
-       its top, above the caret and icon beside them. */
-    align-items: center;
+    align-items: center; /* not baseline: on a 36 px touch row that sits above the caret and icon */
     gap: 6px;
     min-width: 0;
     flex: 1;

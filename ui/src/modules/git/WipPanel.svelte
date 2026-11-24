@@ -404,8 +404,7 @@
   async function stagePaths(paths: string[], stage: boolean, origin?: Origin): Promise<void> {
     if (paths.length === 0) return;
     if (virtualAll && !stage) {
-      // Leaving a file out of the virtual "all included" writes the index: the rest get staged.
-      // Read the rows before materializing: `inStaged` derives from it and empties.
+      // Leaving a file out of the virtual "all included" stages the rest (read before materializing empties inStaged).
       paths = inStaged.map((c) => c.path).filter((p) => !paths.includes(p));
       materialized = true;
       stage = true;
@@ -1134,9 +1133,7 @@
     /* The panel itself is the scroller: in History's short WIP pane the composer
        left .wp-body 23 px, under a 45 px sticky section head — no row showed. */
     .wip-panel { overflow-y: auto; overscroll-behavior: contain; }
-    .wp-body, .wp-body.has-diff { flex: none; overflow: visible; }
+    .wp-body, .wp-body.has-diff { flex: none; overflow: visible; } .wp-body.has-diff :global(.wp-diff:not(.sheet)) { height: min(70vh, 560px); } /* a tablet's inline diff (a phone's is a sheet) */
     .wp-scroll, .wp-body.has-diff .wp-scroll { flex: none; max-height: none; overflow: visible; }
-    /* A tablet's inline diff keeps a height (a phone's is a sheet). */
-    .wp-body.has-diff :global(.wp-diff:not(.sheet)) { height: min(70vh, 560px); }
   }
 </style>

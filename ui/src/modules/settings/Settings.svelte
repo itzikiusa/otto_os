@@ -324,7 +324,7 @@
   <div class="settings-body">
     {#if phone}
       <div class="settings-back">
-        <button class="btn ghost small" onclick={backToList} aria-label="Back to Settings" title="Back to Settings">
+        <button class="btn ghost small settings-back-btn" onclick={backToList} aria-label="Back to Settings" title="Back to Settings">
           <Icon name="chevronLeft" size={14} /> Settings
         </button>
       </div>
@@ -635,7 +635,7 @@
       flex-shrink: 0;
       padding: 6px 8px 0;
     }
-    .settings-back .btn {
+    .settings-back-btn {
       min-block-size: 44px;
     }
   }
