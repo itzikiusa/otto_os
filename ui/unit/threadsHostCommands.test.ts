@@ -93,3 +93,21 @@ test('what Otto takes itself depends on the host', () => {
   assert.equal(ottoConsumes('changes', { openDiff: () => {} }), true);
   assert.equal(ottoConsumes('compact', { openDiff: () => {} }), false);
 });
+
+test('the slash list is built once per commands change and narrows as you type', () => {
+  const otto = [{ name: 'diff', description: 'd', source: 'builtin' }] as never[];
+  const agent = Array.from({ length: 235 }, (_, i) => ({ name: `cmd-${i}`, description: '' })) as never[];
+  const a = slashSuggestions('/cmd-1', otto, agent, 'Grok', undefined);
+  assert.equal(a[0].name, 'cmd-1'); // prefix first, then inside, then letters in order
+  assert.equal(a.length, 132);
+  // The same query (a re-render) returns the same array: the popup keeps its rows.
+  assert.equal(slashSuggestions('/cmd-1', otto, agent, 'Grok', undefined), a);
+  // Typing on narrows the matches, best first, grouped as before.
+  const b = slashSuggestions('/cmd-12', otto, agent, 'Grok', undefined);
+  assert.deepEqual(b.slice(0, 2).map((c) => c.name), ['cmd-12', 'cmd-120']);
+  assert.equal(b[0].group, 'Grok commands');
+  // Back to a shorter query: the whole list again.
+  assert.equal(slashSuggestions('/d', otto, agent, 'Grok', undefined)[0].name, 'diff');
+  // New commands (a new array): rebuilt.
+  assert.equal(slashSuggestions('/cmd-1', otto, [...agent], 'Grok', undefined).length, a.length);
+});

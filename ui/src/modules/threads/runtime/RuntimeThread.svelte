@@ -336,6 +336,7 @@
     }
   }
 
+  const NO_COMMANDS: never[] = [];
   const SLASH = $derived(availableSlash(INTERACTIVE_SLASH_COMMANDS, hostCommands));
   const popId = $props.id();
   let cmdIdx = $state(0);
@@ -346,7 +347,7 @@
   );
   const composerStateArg = $derived({ key: `rt:${ownerId}`, hasText: draft.text.length > 0 });
   // Otto's view commands, then the agent's own (`commands.updated`, hostCommands.ts).
-  const suggestions = $derived(cmdDismissed ? [] : slashSuggestions(draft.text, SLASH, p?.commands ?? [], agentName, hostCommands));
+  const suggestions = $derived(cmdDismissed ? [] : slashSuggestions(draft.text, SLASH, p?.commands ?? NO_COMMANDS, agentName, hostCommands));
   $effect(() => {
     void suggestions.length;
     if (untrack(() => cmdIdx) !== 0) cmdIdx = 0;
