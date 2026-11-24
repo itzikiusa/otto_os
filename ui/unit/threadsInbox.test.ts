@@ -80,3 +80,38 @@ test('a family moves together: a working lead with a waiting worker stays in the
   assert.deepEqual(folded.main.map((r) => r.session.id), ['lead']);
   assert.deepEqual(folded.main[0].kids, ['kid']);
 });
+
+// A thread waiting on the person is "Approval" in the main list, never in the
+// Working fold — whichever source says it waits (each pinned on its own).
+test('runtime approval: the row’s awaiting_permission status (runtime_waiting) makes it needs-you', async () => {
+  const { sessionState } = await import('../src/lib/status.ts');
+  const st = sessionState({ kind: 'agent', status: 'working', meta: { runtime: 'structured', runtime_waiting: true } } as never, 'working');
+  assert.equal(st.key, 'needs-you');
+  assert.equal(inboxClass(st.key, false), 'needs');
+  assert.equal(statusWord('needs', { kinds: ['command'] }), 'Approval');
+});
+
+test('a pending request known live lifts a still-"working" row out of Working', () => {
+  assert.equal(inboxClass('working', false, 1), 'needs');
+  assert.equal(inboxClass('working', false, 0), 'working');
+});
+
+test('MCP ask: a waiting approval card counts as a pending permission request → Approval', () => {
+  // threadInbox.svelte.ts kindsOf adds 'permission' for a waiting MCP card.
+  const kinds = ['permission'];
+  assert.equal(inboxClass('working', false, kinds.length), 'needs');
+  assert.equal(waitingWord(kinds), 'Approval');
+});
+
+test('subagent approval: a waiting subagent keeps its family out of Working, its parent needs you', async () => {
+  const { childRollup } = await import('../src/modules/threads/runtime/childThreads.ts');
+  const { subagentWord } = await import('../src/modules/threads/threadInbox.ts');
+  const kid = s('kid', 2, 'lead');
+  const lead = s('lead', 1);
+  const cls: Record<string, string> = { lead: 'working', kid: inboxClass('needs-you', false) };
+  const { main, working } = inboxSections([lead, kid], (x) => cls[x.id] as never, parentOf);
+  assert.deepEqual(working, []);
+  assert.equal(main.map((r) => r.session.id)[0], 'lead');
+  // The parent's own row: its subagents' roll-up says one needs the person.
+  assert.equal(childRollup([{ title: 'kid', word: subagentWord('needs-you') }]).needsYou, 1);
+});

@@ -12,8 +12,13 @@ import { perfCount } from '../../lib/perfCount.ts';
 /** Where a row belongs, from its derived state key and unread flag. */
 export type InboxClass = 'needs' | 'failed' | 'done' | 'working' | 'rest';
 
-export function inboxClass(key: string | null | undefined, unread: boolean): InboxClass {
-  if (key === 'needs-you') return 'needs';
+/** `pending`: requests this client knows are waiting on the person for the
+ *  thread (its runtime approvals / questions from live events, an MCP
+ *  approval card — threadInbox.svelte.ts `kindsOf`) or a subagent of it
+ *  that waits: any one makes it "needs you", whatever the row's own status
+ *  still says (a provider that keeps running while it waits, an MCP ask). */
+export function inboxClass(key: string | null | undefined, unread: boolean, pending = 0): InboxClass {
+  if (key === 'needs-you' || pending > 0) return 'needs';
   if (key === 'failed') return 'failed';
   // `running`: alive but idle — a thread whose agent is done while its
   // background work runs (taskStop.ts `withBackgroundState`) stays calm, never "Working".
