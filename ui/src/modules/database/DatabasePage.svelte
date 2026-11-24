@@ -563,9 +563,10 @@
       <span class="db-conn-state" data-testid="db-conn-state" title={connState.tip}>
         <span class="db-word {connState.tone}">{connState.word}</span>
         {#if connState.detail}<span class="db-sub ellipsis">{connState.tone === 'danger' ? '—' : '·'} {connState.detail}</span>{/if}
-        {#if connState.tone === 'danger'}
+        {#if connState.tone === 'danger' && !viewport.isPhone}
           <!-- Can't connect: this one line says it; the raw error and the ways
-               to fix it (Diagnose, Edit connection) are behind Details. -->
+               to fix it (Diagnose, Edit connection) are behind Details. (A
+               phone's header has no room: the details card shows under it.) -->
           <button class="chip" disabled={retrying} onclick={() => void retryConn()}>{retrying ? 'Retrying…' : 'Retry'}</button><!-- ui-guards: allow — the header's one "Can't connect" line (no LoadState there) -->
           <button class="chip" aria-expanded={errDetails} onclick={() => (errDetails = !errDetails)}>Details</button>
         {/if}
@@ -746,7 +747,7 @@
            agent panel side-by-side, separated by a draggable, persisted divider. -->
       <div class="main-split" class:assist-open={database.assistOpen}>
         <div class="main-body">
-          {#if errDetails}<DbConnErrorBanner onedit={editableConn(database.selectedConn)} />{/if}
+          {#if errDetails || viewport.isPhone}<DbConnErrorBanner onedit={editableConn(database.selectedConn)} onretry={viewport.isPhone ? retryConn : undefined} {retrying} />{/if}
           {#key database.accessRevision}
           <ConnectionComparison enabled={database.mainTab === 'query'}>
           {#if database.mainTab === 'query'}

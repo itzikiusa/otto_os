@@ -195,4 +195,24 @@ test.describe('connections list — responsive', () => {
     await expect(page.getByTestId('db-conn-state')).toBeVisible();
     await assertFitsWidth(page);
   });
+
+  test('phone: a connection that can\'t connect says so once, with Retry and Edit under the header', async ({ page }, info) => {
+    test.skip(!/iphone|android/.test(info.project.name), 'phone projects');
+    const { ctx, base } = await apiCtx();
+    const name = `refused-phone-${Math.random().toString(36).slice(2, 7)}`;
+    // Port 9 on loopback refuses at once: no host is contacted.
+    const r = await ctx.post(`${base}/api/v1/workspaces/${workspaceId}/connections`, { data: { name, kind: 'redis', params: { host: '127.0.0.1', port: 9, database: '0' } } });
+    expect(r.ok()).toBeTruthy();
+    await ctx.dispose();
+    await gotoPage(page);
+    await row(page, name).click();
+    await expect(page.getByTestId('db-conn-state')).toContainText('Can’t connect', { timeout: 30_000 });
+    const banner = page.getByTestId('db-conn-error-banner');
+    await expect(banner).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(1);
+    await banner.getByRole('button', { name: 'Retry', exact: true }).click();
+    await expect(page.getByTestId('db-conn-state')).toContainText('Can’t connect', { timeout: 30_000 });
+    await expectFullyInViewport(page, page.getByTestId('page-header').getByRole('button', { name: 'Tables', exact: true }), 'Tables');
+    await assertFitsWidth(page);
+  });
 });

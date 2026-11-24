@@ -10,8 +10,11 @@
   interface Props {
     /** Absent when the viewer may not edit the selected profile. */
     onedit?: (c: Connection) => void;
+    /** A phone's header has no room for Retry: it sits here. */
+    onretry?: () => void;
+    retrying?: boolean;
   }
-  let { onedit }: Props = $props();
+  let { onedit, onretry, retrying = false }: Props = $props();
 
   const status = $derived(database.activeConnStatus);
   // `hint` is optional and newer than ConnStatus: read it defensively.
@@ -22,6 +25,7 @@
   <div class="conn-error" data-testid="db-conn-error-banner">
     <p class="conn-error-text">{status.error || 'The server gave no reason.'}{hint ? ` ${hint}` : ''}</p>
     <div class="conn-error-actions">
+      {#if onretry}<button class="btn small" disabled={retrying} onclick={onretry}>{retrying ? 'Retrying…' : 'Retry'}</button>{/if}<!-- ui-guards: allow — the phone's one Retry for "Can't connect" (the header has no room) -->
       {#if database.selectedConn}
         <DiagnoseButton conn={database.selectedConn} probe={{ message: status.error ?? '', hint }} />
       {/if}
