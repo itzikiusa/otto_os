@@ -957,7 +957,7 @@
               {diff}
               {repoId}
               loadFile={loadWipFile}
-              wip={selTarget === 'working'
+              wip={selTarget === 'working' || virtualAll
                 ? undefined
                 : {
                     target: selTarget,
