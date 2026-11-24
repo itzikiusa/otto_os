@@ -55,9 +55,22 @@ pub async fn claude_draft(
         .as_ref()
         .map_or("claude", |s| s.cmd.as_str())
         .to_string();
+    // `~` expanded as a session spawn does (`CLAUDE_CONFIG_DIR=~/.claude-work`).
+    let home = otto_transcript::roots::home_dir();
     let env: Vec<(String, String)> = spec
         .as_ref()
-        .map(|s| s.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .map(|s| {
+            s.env
+                .iter()
+                .map(|(k, v)| {
+                    let v = (v == "~" || v.starts_with("~/"))
+                        .then(|| otto_transcript::claude_config::expand_home_path(v, &home))
+                        .flatten()
+                        .map_or_else(|| v.clone(), |p| p.to_string_lossy().into_owned());
+                    (k.clone(), v)
+                })
+                .collect()
+        })
         .unwrap_or_default();
     let (program, args) = if otto_sessions::providers::resolves_on_path(&program) {
         (program, draft_args(model))
@@ -241,6 +254,22 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"fix: a\n\n- b"}'"#,
             .await
             .unwrap_err();
         assert!(e.to_string().contains("unknown option --tools="), "{e}");
+    }
+
+    /// R1-025: `~` in the provider's env is expanded as a session spawn does.
+    #[tokio::test]
+    async fn the_draft_expands_home_in_the_provider_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = fake(
+            dir.path(),
+            r#"printf '{"type":"result","is_error":false,"result":"%s"}\n' "$CLAUDE_CONFIG_DIR""#,
+        );
+        let providers = otto_sessions::ProviderRegistry::new(Some(&json!({
+            "claude": { "cmd": p, "env": { "CLAUDE_CONFIG_DIR": "~/.claude-work" } }
+        })));
+        let reply = claude_draft(&providers, "", "x", |_| {}).await.unwrap();
+        let home = otto_transcript::roots::home_dir();
+        assert_eq!(reply, home.join(".claude-work").to_string_lossy());
     }
 
     #[tokio::test]
