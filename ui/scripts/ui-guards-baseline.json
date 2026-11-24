@@ -151,7 +151,7 @@
     "src/modules/brokers/BrokersPage.svelte": 923,
     "src/modules/brokers/GroupsTab.svelte": 853,
     "src/modules/brokers/TopicDetail.svelte": 1288,
-    "src/modules/browser/BrowserView.svelte": 928,
+    "src/modules/browser/BrowserView.svelte": 922,
     "src/modules/browser/live/RemoteLiveView.svelte": 1188,
     "src/modules/connections/ConnectionForm.svelte": 1121,
     "src/modules/database/DatabasePage.svelte": 2250,
