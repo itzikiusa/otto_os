@@ -8,12 +8,18 @@ import type { RuntimeEvent, RuntimeReplay } from '../../lib/api/types';
 import { onLive } from '../../lib/live';
 import { mcpAsks } from './runtime/mcpAsksStore.svelte';
 
+const MAX_READS = 3;
+
 class InboxLive {
   /** session → pending request id → its kind. */
   kinds = $state<Record<string, Record<string, string>>>({});
   /** session → epoch ms its running turn started. */
   since = $state<Record<string, number>>({});
   private read = new Set<string>();
+  /** Reads waiting their turn: at most `MAX_READS` in flight, so a reload
+   *  with many waiting threads does not fire one request per row at once. */
+  private queue: string[] = [];
+  private inflight = 0;
   private refs = 0;
   private stop: (() => void) | null = null;
 
@@ -53,7 +59,23 @@ class InboxLive {
   ensure(id: string): void {
     if (this.read.has(id) || this.kinds[id] || this.since[id]) return;
     this.read.add(id);
-    void api
+    this.queue.push(id);
+    this.pump();
+  }
+
+  private pump(): void {
+    while (this.inflight < MAX_READS && this.queue.length) {
+      const id = this.queue.shift()!;
+      this.inflight++;
+      void this.readOne(id).finally(() => {
+        this.inflight--;
+        this.pump();
+      });
+    }
+  }
+
+  private readOne(id: string): Promise<void> {
+    return api
       .get<RuntimeReplay>(`/runtime-sessions/${encodeURIComponent(id)}/events?after_sequence=0&tail_turns=1&compact=1`)
       .then((r) => {
         if (r.kind === 'events') for (const ev of r.events) this.fold(ev);

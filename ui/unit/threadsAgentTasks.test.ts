@@ -2,7 +2,7 @@
 // the strip above the composer and Thread details' "Agents & tasks" drill-down.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { agentTasks, backgroundStripText, taskElapsed } from '../src/modules/threads/runtime/agentTasks.ts';
+import { agentTasks, backgroundStripText, sharedAgentTasks, taskElapsed } from '../src/modules/threads/runtime/agentTasks.ts';
 
 const base = { turn_id: 't1', title: null, completed_at: null, updated_at: '2026-11-13T10:00:30Z' };
 const card = (id: string, description: string, status: string, startedAt: string, extra: Record<string, unknown> = {}) =>
@@ -232,4 +232,18 @@ test('a swarm row and a swarm subagent card both name their agy member; other ro
   assert.equal(swarmMemberOf(by('echoer'), items), 'echoer');
   assert.equal(swarmMemberOf(by('dap-lsp'), items), 'dap-lsp');
   assert.equal(swarmMemberOf(by('alpha'), items), null);
+});
+
+test('the conversation and the details card share one computation per change', () => {
+  const items = [card('t1:tool:a', 'alpha probe', 'running', '2026-11-13T10:00:00Z')];
+  const bgs = [bg('ta', 'alpha probe', '2026-11-13T10:00:00Z', 't1:tool:a')];
+  const first = sharedAgentTasks('s1', items, bgs, {});
+  // Same objects, equal children (a fresh array saying the same): the same result.
+  assert.equal(sharedAgentTasks('s1', items, bgs, { childThreads: [] }), first);
+  // A new items array saying the same (the next streamed chunk): the old result.
+  assert.equal(sharedAgentTasks('s1', [...items], bgs, {}), first);
+  // A task that changed: a new result.
+  const done = sharedAgentTasks('s1', [{ ...(items[0] as object), status: 'completed', completed_at: '2026-11-13T10:01:00Z' } as never], [], {});
+  assert.notEqual(done, first);
+  assert.equal(done.running.length, 0);
 });

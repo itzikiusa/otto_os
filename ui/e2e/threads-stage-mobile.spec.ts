@@ -83,7 +83,7 @@ test('phone: ⋯ has no layouts or hand-off; the details drawer is compact', asy
   const card = panel.getByTestId('thread-details-card');
   await expect(card).toBeVisible();
   await expectFullyInViewport(page, card, 'details card (drawer)');
-  await expect(panel.getByRole('button', { name: /Maximize panel|Restore panel/ })).toHaveCount(0);
+  await expect(panel.getByRole('button', { name: /Widen panel|Restore panel width/ })).toHaveCount(0);
   await expect(panel.locator('.ti-key').first()).toBeHidden();
   await expect(panel.getByTestId('threads-surface-changes')).toContainText('Changes');
   await shot(page, 'details-drawer');

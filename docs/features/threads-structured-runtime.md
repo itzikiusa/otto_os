@@ -807,7 +807,15 @@ against claude 2.1.330, codex 0.171.0, agy 1.5.15, grok 1.0.92, muse 1.4.23):
   ("Internal error") on an MCP image result.
 - **Changes mid-thread.** The bridge sends `tools/list_changed` after a call
   when the enabled Otto / governed tools changed; a native server turned on or
-  off shows "MCP servers changed · Restart agent to apply".
+  off shows "MCP servers changed · Restart agent to apply". Live (Claude
+  2.1.330): a tool enabled during a turn was found and called in the same
+  turn, after a daemon restart and resume. A provider switch, `/clear` and a
+  revive each respawn through the same spawn preparation (fake e2e).
+- **Codex persist.** "Allow for this thread" / "Always allow" answer
+  `{action: accept, content: {}, _meta: {persist: "session" | "always"}}` —
+  the values Codex itself offers in the request's `_meta.persist`, read by
+  `parse_mcp_tool_approval_elicitation_response` (codex-rs/core
+  `mcp_tool_call.rs`; the generated schema types `_meta` as free JSON).
 - **Subagents.** Live: a Claude `Task` subagent and a Codex spawned agent both
   called a workspace MCP server; an Otto child thread gets its own spawn
   preparation (its own `otto` credential and the workspace's servers).
@@ -847,7 +855,7 @@ Otto takes the cheapest correct path per provider:
 | Pi | restart with `--session <id>` | the RPC's thinking level | images |
 
 An effort the agent does not take is **dropped with a notice** ("… this turn
-runs at its default effort"), never a refused prompt: an "Ask another agent"
+runs at its default effort"), never a refused prompt: a "Delegate to…"
 create carrying the previous provider's level still starts every child.
 
 When a restart cannot reload the conversation (the agent has no

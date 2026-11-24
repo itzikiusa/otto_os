@@ -1,5 +1,6 @@
 import { api } from '../../lib/api/client';
 import { onLive } from '../../lib/live';
+import { worktreeProjects } from './worktreeProjects.svelte';
 import { router } from '../../lib/router.svelte';
 import { openFile } from '../../lib/stores/openfile.svelte';
 import { ws } from '../../lib/stores/workspace.svelte';
@@ -299,7 +300,7 @@ class ThreadsStore {
       typeof det.sender === 'string' && det.sender.trim() !== ''
         ? det.sender
         : fromId
-          ? (ws.getSession(fromId)?.title ?? 'Peer thread')
+          ? (ws.getSession(fromId)?.title ?? 'Another thread')
           : 'Operator';
     const toTitle = isBroadcast
       ? 'All active threads'
@@ -389,10 +390,10 @@ class ThreadsStore {
 
   /** Once: this browser's old local pins / History onto the threads. */
   async migrateLocal(): Promise<void> {
-    if (!(await threadMeta.migrate(this.legacyPins, this.legacyHistory))) return;
-    if (!this.legacyPins.length && !this.legacyHistory.length) return;
-    this.legacyPins = [];
-    this.legacyHistory = [];
+    const left = await threadMeta.migrate(this.legacyPins, this.legacyHistory);
+    if (!left || (left.pins.length === this.legacyPins.length && left.history.length === this.legacyHistory.length)) return;
+    this.legacyPins = left.pins;
+    this.legacyHistory = left.history;
     this.save();
   }
 
@@ -565,7 +566,7 @@ class ThreadsStore {
   /** Whether a thread folder falls under the active project filter. */
   inProjectFilter(cwd: string | null | undefined): boolean {
     if (this.projectFilters.length === 0) return true;
-    const c = (cwd ?? '').replace(/\/+$/, '');
+    const c = worktreeProjects.root(cwd);
     return this.projectFilters.some((k) => c === k || c.startsWith(`${k}/`));
   }
 
@@ -593,20 +594,21 @@ class ThreadsStore {
   }
 
   scriptsFor(project: string | null): ProjectScript[] {
-    return project ? (this.scriptsByProject[project] ?? []) : [];
+    return project ? (this.scriptsByProject[worktreeProjects.root(project)] ?? []) : [];
   }
 
   addScript(project: string, script: ProjectScript): void {
     const list = this.scriptsFor(project).filter((s) => s.name !== script.name);
-    this.scriptsByProject = { ...this.scriptsByProject, [project]: [...list, script] };
+    this.scriptsByProject = { ...this.scriptsByProject, [worktreeProjects.root(project)]: [...list, script] };
     this.save();
   }
 
   removeScript(project: string, name: string): void {
     const list = this.scriptsFor(project).filter((s) => s.name !== name);
     const next = { ...this.scriptsByProject };
-    if (list.length > 0) next[project] = list;
-    else delete next[project];
+    const key = worktreeProjects.root(project);
+    if (list.length > 0) next[key] = list;
+    else delete next[key];
     this.scriptsByProject = next;
     this.save();
   }

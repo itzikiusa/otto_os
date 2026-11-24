@@ -22,7 +22,7 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
-  import { agentTasks, taskElapsed } from './runtime/agentTasks';
+  import { sharedAgentTasks, taskElapsed } from './runtime/agentTasks';
   import { openChildThread } from './runtime/childNav';
   import { councilOf, linkedChildren } from './runtime/council';
   import { mapChildThreadSummaries } from './runtime/runtimeComposer';
@@ -33,6 +33,7 @@
   import { mcpServerRows, mcpSummary } from './runtime/mcpServers';
   import { mcpServersSheet } from './runtime/mcpServersSheet.svelte';
   import { gitAction } from './threadDetails';
+  import { perfCount } from '../../lib/perfCount';
   import { anyThread } from './threadRelay';
   import { subagentSection, subagentTally, type ChildTone, type SubagentRow, type SubagentWord } from './runtime/childThreads';
   import { delegatedParentId } from './threadsHelpers';
@@ -53,8 +54,10 @@
     floating?: boolean;
     /** Hides the floating card (remembered; ⋯ › View › Thread details brings it back). */
     ondismiss?: () => void;
+    /** One summary row that opens on tap (a surface is open below it). */
+    summary?: boolean;
   }
-  let { cwd, threadId = null, floating = false, ondismiss }: Props = $props();
+  let { cwd, threadId = null, floating = false, ondismiss, summary = false }: Props = $props();
   // A thread stopped on its provider's usage limit, and when it resumes (RuntimeUsageLimit).
   const limitRow = $derived.by(() => {
     const rt = threadId ? runtimeThreads.get(threadId) : null;
@@ -129,35 +132,62 @@
   // Everything working under this thread (runtime/childThreads.ts): a runtime
   // thread's subagents and the threads opened from it, a terminal thread's
   // delegated threads, and the thread it works under itself.
-  const subagents = $derived.by(() => {
+  // The thread's relatives depend on the thread lists, not on its stream:
+  // derived apart, so a streamed delta does not rescan every thread.
+  const NO_TASKS = { running: [], finished: [] };
+  const relatives = $derived.by(() => {
     if (!threadId) return null;
     const rt = runtimeThreads.get(threadId);
-    const p = rt ? (runtimeViews.projections[threadId] ?? null) : null;
-    const tasks = rt
-      ? agentTasks(p?.items ?? [], p?.session?.background_tasks ?? rt.background_tasks ?? [], {
-          childThreads: mapChildThreadSummaries(linkedChildren(Object.values(runtimeThreads.byId), threadId)),
-        })
-      : { running: [], finished: [] };
+    perfCount('detailsRelatives');
+    const all = Object.values(runtimeThreads.byId);
     const parent = anyThread(rt?.parent_id ?? delegatedParentId(ws.getSession(threadId)));
-    const s = subagentSection(tasks, {
+    return {
+      children: rt ? mapChildThreadSummaries(linkedChildren(all, threadId)) : [],
       parent: parent ? { id: parent.id, title: parent.title } : null,
       // Delegated terminal threads, and a council's other seats (peers that
       // linkedChildren leaves out of the task list).
       delegated: [
         ...ws.sessions.filter((x) => !x.archived && delegatedParentId(x) === threadId),
-        ...Object.values(runtimeThreads.byId).filter((x) => x.parent_id === threadId && councilOf(x)),
+        ...all.filter((x) => x.parent_id === threadId && councilOf(x)),
       ].map((x) => ({ id: x.id, title: x.title, provider: x.provider, status: ws.statusMap[x.id] ?? x.status, startedAt: ((x.meta as Record<string, unknown> | null | undefined)?.last_turn_started_at as string | undefined) ?? null })),
+    };
+  });
+  // The same object the conversation reads (sharedAgentTasks), kept while a
+  // streamed chunk changes no task: the section below then does not rerun.
+  const tasks = $derived.by(() => {
+    const rt = threadId ? runtimeThreads.get(threadId) : undefined;
+    if (!rt || !relatives) return NO_TASKS;
+    const p = runtimeViews.projections[rt.id] ?? null;
+    return sharedAgentTasks(rt.id, p?.items ?? [], p?.session?.background_tasks ?? rt.background_tasks ?? [], { output: p?.output, childThreads: relatives.children });
+  });
+  const subagents = $derived.by(() => {
+    const rel = relatives;
+    if (!rel) return null;
+    const s = subagentSection(tasks, {
+      parent: rel.parent,
+      delegated: rel.delegated,
       providerOf: (id) => runtimeThreads.get(id)?.provider ?? null,
     });
     return s.parent || s.running.length || s.previous.length ? s : null;
   });
   /** The header tallies like the timeline row, most urgent first ("1 needs you · 1 working"). */
   const WORD_TONE: Record<SubagentWord, ChildTone> = { Working: 'working', 'Needs you': 'needs-you', Done: 'done', Failed: 'failed', Limited: 'failed', Stopped: 'stopped' };
+  /** "Subagents · 1 needs you · 1 working"; compared threads are counted as
+   *  models, not subagents ("Compared with 2 models"). */
+  function subagentsCap(s: { running: SubagentRow[]; previous: SubagentRow[] }): string {
+    const isCompared = (r: SubagentRow): boolean => !!r.threadId && !!councilOf(runtimeThreads.get(r.threadId));
+    const all = [...s.running, ...s.previous];
+    const models = all.filter(isCompared).length;
+    const working = s.running.filter((r) => !isCompared(r));
+    if (models && models === all.length) return `Compared with ${models} ${models === 1 ? 'model' : 'models'}`;
+    const head = `Subagents${working.length ? ` · ${subagentTally(working.map((r) => WORD_TONE[r.word])).text}` : ''}`;
+    return models ? `${head} · compared with ${models} ${models === 1 ? 'model' : 'models'}` : head;
+  }
   let previousOpen = $state(false);
   // A short screen (a phone on its side): heading the panel, the card is one
   // summary row (folder · branch · changes) that opens on tap, so the
   // surface below (Changes, a diff) keeps its height.
-  const short = $derived(!floating && viewport.isShort);
+  const short = $derived(!floating && (viewport.isShort || summary));
   let expanded = $state(false);
   const nowMs = $derived(subagents?.running.length ? now() : Date.now());
 
@@ -188,9 +218,18 @@
     }
   });
 
-  function commit(r: Repo): void {
-    git.requestWip(r.id);
-    router.go(`git/${encodeURIComponent(r.id)}`);
+  // The commit sheet (Git's changes panel over the thread) loads on first open.
+  const CommitSheetLazy = lazyComponent(() => import('./ThreadCommitSheet.svelte'));
+  let commitOpen = $state(false);
+  $effect(() => {
+    if (commitOpen && CommitSheetLazy.error) {
+      toasts.error('Couldn’t open the commit sheet', CommitSheetLazy.error);
+      commitOpen = false;
+      CommitSheetLazy.retry();
+    }
+  });
+  function commit(_r: Repo): void {
+    commitOpen = true;
   }
 
   function runAction(): void {
@@ -209,7 +248,7 @@
     const dirty = (status?.changes.length ?? 0) > 0;
     const canPush = !!branch && !!r.remote_url && (!status?.upstream || (status?.ahead ?? 0) > 0);
     const items: MenuItem[] = [
-      { label: 'Commit…', icon: 'commit', disabled: !dirty, title: dirty ? 'Open the commit composer in Git' : 'Nothing to commit', action: () => commit(r) },
+      { label: 'Commit…', icon: 'commit', disabled: !dirty, title: dirty ? 'Review the changes and commit' : 'Nothing to commit', action: () => commit(r) },
       {
         label: status?.upstream ? 'Push…' : 'Publish branch…',
         icon: 'arrowUp',
@@ -353,7 +392,7 @@
         </button>
       {/if}
       {#if s.running.length || s.previous.length}
-        <p class="dc-cap" data-testid="details-subagents-cap">Subagents{s.running.length ? ` · ${subagentTally(s.running.map((r) => WORD_TONE[r.word])).text}` : ''}</p>
+        <p class="dc-cap" data-testid="details-subagents-cap">{subagentsCap(s)}</p>
       {/if}
       {#each s.running as r (r.id)}
         {@render subagent(r)}
@@ -391,6 +430,11 @@
     {#if r.task && threadId && runtimeThreads.get(threadId)}<RuntimeTaskStop part="button" sessionId={threadId} task={r.task} />{/if}
   </div>
 {/snippet}
+
+{#if commitOpen && repo && CommitSheetLazy.component}
+  {@const CommitSheet = CommitSheetLazy.component}
+  <CommitSheet {repo} onclose={() => (commitOpen = false)} />
+{/if}
 
 {#if prOpen && repo && CreatePrLazy.component}
   {@const CreatePr = CreatePrLazy.component}

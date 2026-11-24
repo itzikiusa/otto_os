@@ -20,6 +20,8 @@ export interface ReviewNote {
   state: 'draft' | 'sent' | 'resolved';
   /** The noted lines are no longer in the diff (the agent changed them). */
   outdated?: boolean;
+  /** While `sent`: the composer's context chip that carries it (not yet a message). */
+  chip?: string;
 }
 
 const span = (nums: (number | null)[]): string => {

@@ -11,6 +11,7 @@ import { threadCall } from './agentRows';
 import type { AgentTask, AgentTaskStatus } from './agentTasks';
 import type { RuntimeProjection } from './projection';
 import { latestTurn, workLabel } from './timeline';
+import { perfCount } from '../../../lib/perfCount.ts';
 
 export type ChildEvent = 'started' | 'finished' | 'failed' | 'stopped';
 
@@ -164,6 +165,7 @@ export const kidKey = (k: Kid): string => (k.kind === 'thread' ? k.id : k.item.i
  *  settled `otto.thread_open` calls, a person's "Delegate" notice and the
  *  provider's own `subagent` cards. */
 export function turnSubagents(items: readonly TurnItem[]): { groups: Map<string, Kid[]>; skip: Set<string> } {
+  perfCount('turnSubagents');
   const groups = new Map<string, Kid[]>();
   const skip = new Set<string>();
   const anchorOf = new Map<string, string>();
@@ -328,6 +330,7 @@ export function subagentSection(
   tasks: { running: readonly AgentTask[]; finished: readonly AgentTask[] },
   more: { parent?: { id: string; title: string } | null; delegated?: readonly SubagentThread[]; providerOf?: (threadId: string) => string | null },
 ): SubagentSection {
+  perfCount('detailsSubagents');
   const row = (t: AgentTask): SubagentRow => ({
     id: t.id,
     title: t.label,
@@ -376,4 +379,17 @@ export function childRollup(subs: readonly { title: string; word: SubagentWord }
     else if (s.word === 'Failed' || s.word === 'Limited') r.failed++;
   }
   return r;
+}
+
+/** A family's count in words: subagents and compared models apart — a
+ *  compared model is not a subagent ("2 subagents", "Compared with 2
+ *  models", "1 subagent · compared with 2 models"). `compared[i]`: kid i is
+ *  a compared thread (`meta.council`). */
+export function familyCountLabel(compared: readonly boolean[]): string {
+  const models = compared.filter(Boolean).length;
+  const subs = compared.length - models;
+  const s = subs ? `${subs} ${subs === 1 ? 'subagent' : 'subagents'}` : '';
+  const m = models ? `compared with ${models} ${models === 1 ? 'model' : 'models'}` : '';
+  const text = [s, m].filter(Boolean).join(' · ');
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }

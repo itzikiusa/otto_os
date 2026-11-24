@@ -86,3 +86,9 @@ test('a 2,000-token answer streaming in recomputes the subagent rows once, not p
   memo.get([...items, open('b', 't1', K3, 'gemini')]);
   assert.equal(memo.runs(), 2, 'a new subagent rebuilds them');
 });
+
+test('a compared model is counted as a model, not a subagent', () => {
+  assert.equal(ct.familyCountLabel([false, false]), '2 subagents');
+  assert.equal(ct.familyCountLabel([true, true]), 'Compared with 2 models');
+  assert.equal(ct.familyCountLabel([false, true]), '1 subagent · compared with 1 model');
+});

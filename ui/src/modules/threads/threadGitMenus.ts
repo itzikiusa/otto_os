@@ -16,6 +16,7 @@ import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
 import { toasts } from '../../lib/toast.svelte';
 import { toastError } from '../../lib/toastError';
 import { compactPath, projectNameFromCwd } from './threadsHelpers';
+import { worktreeProjects } from './worktreeProjects.svelte';
 import { threads, type ProjectScript } from './threadsStore.svelte';
 
 /** `feature/very-long-name…tail` → keeps both ends readable (T3's ref list). */
@@ -162,7 +163,9 @@ export async function takenBranches(repo: Repo): Promise<{ branches: string[]; b
 /** A new branch in a new worktree beside the repo (`POST /repos/{id}/worktrees`),
  *  given what the main checkout's `.worktreeinclude` names (`prepared`). */
 export function createWorktree(repo: Repo, branch: string, base: string | null): Promise<WorktreeCreated> {
-  return api.post<WorktreeCreated>(`/repos/${encodeURIComponent(repo.id)}/worktrees`, { branch, ...(base ? { base } : {}) } satisfies WorktreeCreateReq);
+  return api
+    .post<WorktreeCreated>(`/repos/${encodeURIComponent(repo.id)}/worktrees`, { branch, ...(base ? { base } : {}) } satisfies WorktreeCreateReq)
+    .then((w) => (worktreeProjects.note(repo, w), w));
 }
 
 /** Run the repo's setup command in its new worktree at `path` (on the

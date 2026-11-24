@@ -29,6 +29,13 @@
   /* The on-screen keyboard's height (lib/viewportFit.ts); 0 when closed. */
   --kb-h: 0px;
 }
+/* Threads (wider than a phone): toasts and Undo notices rise above the
+   composer, never onto its model chip or Send. */
+@media (min-width: 641px) {
+  :root:has(.th-page) {
+    --toast-lift-page: 150px;
+  }
+}
 :root[dir='rtl'] {
   --safe-start: var(--safe-right);
   --safe-end: var(--safe-left);
@@ -1112,4 +1119,10 @@ button.chip:focus-visible {
     outline: 2px solid Highlight;
     outline-offset: 1px;
   }
+}
+
+/* Key hints are LTR glyph runs: an RTL page must not reorder ⌥⌘N. */
+kbd {
+  direction: ltr;
+  unicode-bidi: isolate;
 }

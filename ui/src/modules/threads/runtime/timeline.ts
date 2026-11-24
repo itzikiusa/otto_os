@@ -20,12 +20,15 @@ import type {
 } from '../../../lib/api/types';
 import type { RuntimeProjection } from './projection';
 import { settingsChangeOf, type SettingsChange } from './settingsChange.ts';
+import { perfCount } from '../../../lib/perfCount.ts';
 
 export interface PendingApproval {
   requestId: string;
   kind: RequestKind;
   prompt: string | null;
   reason: string | null;
+  /** `prompt` folds under "Details" (an app's request: the dock's headline already says what it wants). */
+  folded?: boolean;
   options: ApprovalOption[];
   /** False once the provider process is gone (`not_resumable`). */
   canRespond: boolean;
@@ -42,7 +45,8 @@ export function pendingApprovals(p: RuntimeProjection): PendingApproval[] {
       kind: r.kind,
       prompt: approval?.prompt ?? null,
       reason: approval?.reason ?? null,
-      options: approval?.options ?? [],
+      // "Never" arrives as decline + always (rollback-safe); it answers decline_always.
+      options: (approval?.options ?? []).map((o) => (o.always ? { ...o, decision: 'decline_always' as const } : o)),
       canRespond: r.response_capability.type === 'live',
     });
   }
@@ -122,8 +126,18 @@ function groupParallel(entries: WorkEntry[]): WorkPart[] {
 
 const EMPTY_SUBAGENT_CHILDREN: ReadonlyMap<string, TurnItem[]> = new Map();
 
-/** A subagent's own activity (items with `parent_item_id`), by card id. */
+const childrenMemo = new WeakMap<readonly TurnItem[], Map<string, TurnItem[]>>();
+
+/** A subagent's own activity (items with `parent_item_id`), by card id —
+ *  once per items array, shared by the conversation and the tasks list. */
 export function subagentChildren(items: readonly TurnItem[]): Map<string, TurnItem[]> {
+  let hit = childrenMemo.get(items);
+  if (!hit) childrenMemo.set(items, (hit = groupSubagentChildren(items)));
+  return hit;
+}
+
+function groupSubagentChildren(items: readonly TurnItem[]): Map<string, TurnItem[]> {
+  perfCount('subagentChildren');
   let hasParent = false;
   for (let idx = 0; idx < items.length; idx++) {
     if (items[idx].parent_item_id) {
@@ -236,7 +250,7 @@ export function mcpToolName(name: string): { server: string; tool: string } | nu
     /^mcp__([^_]+(?:_[^_]+)*?)__(.+)$/.exec(name) ??
     /^([A-Za-z0-9-]+)__([A-Za-z0-9_-]+)$/.exec(name) ??
     // Not a file name (`README.md` is an ACP tool title, not a server).
-    (/\.(?:md|txt|json|[cm]?[jt]sx?|rs|py|go|toml|ya?ml|lock|html?|css|sh|svelte|java|rb|sql|csv|log|png|jpe?g|pdf)$/i.test(name)
+    (/\.(?:md|txt|json|[cm]?[jt]sx?|rs|py|go|toml|ya?ml|lock|html?|s?css|sh|svelte|vue|java|kt|swift|gradle|properties|xml|php|cs|c|h|cpp|rb|sql|csv|log|png|jpe?g|pdf)$/i.test(name)
       ? null
       : /^([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/.exec(name)) ??
     /^(?:Run )?mcp_([A-Za-z0-9-]+)_([A-Za-z0-9_-]+)$/.exec(name);
@@ -303,6 +317,7 @@ function getOrCreateWorkRow(workId: string, work: WorkEntry[]): WorkTimelineRow 
 }
 
 export function timelineRows(items: readonly TurnItem[], turns: readonly ProviderTurn[] = []): TimelineRow[] {
+  perfCount('timelineRows');
   // A subagent's own items render inside its card, not in the timeline;
   // plumbing tool calls and a lost-conversation error not at all.
   items = items.filter((i) => !i.parent_item_id && !isLostConversation(i) && !(i.type === 'dynamic_tool' && HIDDEN_TOOLS.has(i.tool_name)));

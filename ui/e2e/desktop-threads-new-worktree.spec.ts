@@ -2,7 +2,7 @@ import { test, expect, type APIRequestContext, type Page } from '@playwright/tes
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { apiCtx } from './seed';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 
@@ -107,6 +107,15 @@ test('the first message names the branch and makes the worktree; Claude and Code
     const wtPath = worktrees().split('\n').find((l) => l.includes(`[${branch}]`))!.split(/\s+/)[0];
     expect(row.cwd.replace(/^\/private/, '')).toBe(wtPath.replace(/^\/private/, ''));
     await expect(thread).toContainText(prompt);
+    // A worktree belongs to its main repository: the same project (badge and
+    // name), and the row's line 3 is the worktree icon with the branch.
+    const project = basename(dir);
+    await expect(page.getByTestId('threads-breadcrumb')).toContainText(project);
+    const sideRow = page.getByTestId(`thread-row-${id}`);
+    await expect(sideRow).toContainText(project);
+    await expect(sideRow).toContainText(branch);
+    await expect(sideRow.locator('.tr-branch')).toHaveText(branch);
+    await expect(sideRow.locator('.tr-branch')).toHaveAttribute('data-worktree', '');
   }
 });
 

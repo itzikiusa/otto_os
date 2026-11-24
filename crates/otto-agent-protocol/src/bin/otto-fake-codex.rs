@@ -213,11 +213,20 @@ fn main() {
                 let text = prompt_text(&input);
                 let extras = echo_extras(&params, &input);
                 match text.as_str() {
-                    // `stream:<n>:<ms>`: `c0 `…`c<n-1> `, one delta per <ms>.
+                    // `stream:<n>:<ms>[:<tools>]`: `c0 `…`c<n-1> `, one delta per <ms>,
+                    // with <tools> completed commands spread through it (perf specs).
                     t if t.starts_with("stream:") => {
                         let mut f = t[7..].split(':');
                         let n: usize = f.next().and_then(|v| v.parse().ok()).unwrap_or(0);
                         let ms: u64 = f.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                        let tools: usize = f.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                        for k in 0..tools {
+                            let mut c = command(&thread, &tid, "completed", Some("ok\n"));
+                            c["item"]["id"] = json!(format!("cmd-s{k}"));
+                            c["item"]["command"] = json!(format!("rg step_{k} src"));
+                            notify("item/started", c.clone());
+                            notify("item/completed", c);
+                        }
                         notify(
                             "item/started",
                             json!({"threadId": thread, "turnId": tid, "startedAtMs": 0,

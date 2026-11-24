@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
 
+const appUndo: { fn: unknown } = { fn: null };
 function load(module = 'threads') {
   const shown: { id: number; title: string; ttl: number; run: () => unknown; onClose?: (r: string) => void }[] = [];
   let next = 1;
@@ -25,6 +26,7 @@ function load(module = 'threads') {
   const mod = loadSource(new URL('../src/modules/threads/threadUndo.ts', import.meta.url), {
     '../../lib/router.svelte': { router: { module } },
     '../../lib/toast.svelte': { toasts },
+    '../../lib/undoredo': { setAppUndo: (fn: unknown) => void (appUndo.fn = fn) },
   }) as unknown as typeof import('../src/modules/threads/threadUndo.ts');
   return { ...mod, shown };
 }
@@ -62,4 +64,13 @@ test('⌘Z undoes outside text fields, never inside one or outside Threads', () 
   const other = load('agents');
   other.offerUndo('Pinned', () => {});
   assert.equal(other.onUndoKey(key('z').e, el(false)), false);
+});
+
+test('the desktop menu\'s Edit ▸ Undo runs the notice\'s Undo outside text fields', () => {
+  const t = load();
+  const ran: string[] = [];
+  t.offerUndo('Pinned', () => void ran.push('unpin'));
+  const hook = appUndo.fn as (el: Element | null) => boolean;
+  assert.equal(hook(el(true)), false);
+  assert.equal(hook(el(false)), true);
 });

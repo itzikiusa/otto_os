@@ -17,14 +17,15 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { Session } from '../../lib/api/types';
   import { agentThreadBadge, personalAgentName } from '../../lib/personalAgentBadges';
-  import { baseName, harnessLabel, projectNameFromCwd } from './threadsHelpers';
+  import { baseName, harnessLabel, projectName } from './threadsHelpers';
+  import { worktreeProjects } from './worktreeProjects.svelte';
   import { threads } from './threadsStore.svelte';
   import { isRuntimeThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
   import ProjectBadge from './ProjectBadge.svelte';
   import { councilOf } from './runtime/council';
   import { inboxClass, statusWord, subagentWord } from './threadInbox';
-  import { childRollup } from './runtime/childThreads';
+  import { childRollup, familyCountLabel } from './runtime/childThreads';
   import { inboxLive } from './threadInbox.svelte';
   import { threadMeta } from './threadMeta.svelte';
   import { threadRepos } from './threadRepos.svelte';
@@ -63,7 +64,9 @@
   const cls = $derived(history ? 'rest' : subNeeds ? 'needs' : inboxClass(st.key, unread));
   const runtime = $derived(isRuntimeThread(s));
   $effect(() => {
-    if (runtime && (cls === 'needs' || cls === 'working')) inboxLive.ensure(s.id);
+    // Approval vs Question needs the request's kind (one queued read); a
+    // working row's start comes from the live events ("Working" until then).
+    if (runtime && cls === 'needs') inboxLive.ensure(s.id);
   });
   const word = $derived(
     child ? subagentWord(st.key, { limited: st.label === 'Limited' }) : subNeeds ? 'Needs you' : statusWord(cls, {
@@ -81,12 +84,14 @@
   /** A personal agent's thread is under the agent's name, never its folder's id. */
   const agentName = $derived(personalAgentName(meta, s.title));
   /** (Its folder is `…/personal/<agent id>`: never shown.) */
-  const project = $derived(agentName ?? projectNameFromCwd(s.cwd));
+  const project = $derived(agentName ?? projectName(s.cwd));
   /** A personal agent's thread says what started it (lib/personalAgentBadges.ts). */
   const badge = $derived(agentThreadBadge(meta));
   // The branch: the thread's own (a worktree's), else its repo's checked-out
   // one. History rows ask for nothing.
-  const worktreeBranch = $derived(typeof meta?.worktree_branch === 'string' && meta.worktree_branch.trim() ? meta.worktree_branch.trim() : null);
+  // A worktree (worktreeProjects) says its branch with the worktree icon.
+  const linked = $derived(worktreeProjects.of(s.cwd));
+  const worktreeBranch = $derived(typeof meta?.worktree_branch === 'string' && meta.worktree_branch.trim() ? meta.worktree_branch.trim() : (linked?.branch ?? null));
   const repo = $derived(history || worktreeBranch ? null : threadRepos.repoFor(s.cwd, s.workspace_id));
   $effect(() => {
     if (repo) git.ensureStatus(repo.id);
@@ -137,19 +142,19 @@
         <span class="tr-proj ellipsis" dir="auto">{project}</span>
         {#if badge}<span class="tr-badge tr-badge-{badge.kind} ellipsis" title={badge.title} data-testid="thread-badge-{s.id}">{badge.label}</span>{/if}
         {#if family?.detached}<span class="tr-badge" title="The thread that started it is closed or archived" data-testid="thread-detached-{s.id}">detached</span>{/if}
-        <span class="tr-status {tone}" data-testid="thread-status-{s.id}">{word ?? rel(s.last_active_at)}</span>
+        <span class="tr-status {tone}" dir="auto" data-testid="thread-status-{s.id}">{word ?? rel(s.last_active_at)}</span>
       </span>
     {/if}
     <span class="tr-line tr-l2">
       <span class="tr-title ellipsis" dir="auto">{label}</span>
-      {#if kids.length > 0}<span class="tr-kids" data-testid="thread-family-count-{s.id}">{kids.length} {kids.length === 1 ? 'subagent' : 'subagents'}</span>{/if}
+      {#if kids.length > 0}<span class="tr-kids" dir="auto" data-testid="thread-family-count-{s.id}">{familyCountLabel(kids.map((id) => !!councilOf(runtimeThreads.get(id))))}</span>{/if}
     </span>
     <span class="tr-line tr-l3">
       {#if child}
-        <span class="tr-status {tone}" data-testid="thread-status-{s.id}">{word ?? rel(s.last_active_at)}</span>
+        <span class="tr-status {tone}" dir="auto" data-testid="thread-status-{s.id}">{word ?? rel(s.last_active_at)}</span>
       {:else if branch}
         <Icon name={worktreeBranch ? 'worktree' : 'branch'} size={12} />
-        <span class="tr-branch ellipsis" dir="ltr">{branch}</span>
+        <span class="tr-branch ellipsis" dir="ltr" data-worktree={worktreeBranch ? '' : undefined}>{branch}</span>
       {:else}
         <!-- No branch known: where the thread works, so line 3 always says it. -->
         <Icon name="folder" size={12} />

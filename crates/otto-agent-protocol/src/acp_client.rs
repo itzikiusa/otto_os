@@ -54,14 +54,47 @@ const NOT_SUPPORTED: i64 = -32601;
 /// Output kept per client terminal for a tool row that embeds it late.
 const TERMINAL_KEEP: usize = 256 << 10;
 
+/// What a held write / command shows the person: up to 4 KB of it, and
+/// how much more there is.
+fn preview(text: &str) -> String {
+    const MAX: usize = 4096;
+    if text.len() <= MAX {
+        return text.to_string();
+    }
+    let mut end = MAX;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n… {} more bytes", &text[..end], text.len() - end)
+}
+
+/// Keep the last [`TERMINAL_KEEP`] bytes of `s` (on a char boundary).
+fn tail_cap(s: &mut String) {
+    if s.len() > TERMINAL_KEEP {
+        let mut cut = s.len() - TERMINAL_KEEP;
+        while !s.is_char_boundary(cut) {
+            cut += 1;
+        }
+        s.drain(..cut);
+    }
+}
+
 fn error_line(id: &Value, code: i64, message: &str) -> String {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}}).to_string()
 }
 
 impl AcpDriver {
+    /// `fs/*` is served only for an agent that runs unconfined: under
+    /// Seatbelt the daemon's own write would skip the profile's denials
+    /// (`.git/hooks`, a read-only thread's `.claude/settings.json` …), so a
+    /// confined agent keeps its own file tools, inside the profile.
+    fn serves_fs(&self) -> bool {
+        self.flavor.client_fs && self.state.confine.is_empty()
+    }
+
     /// The client capabilities this flavour advertises in `initialize`.
     pub(super) fn client_capabilities(&self, init: &mut Value) {
-        if self.flavor.client_fs {
+        if self.serves_fs() {
             init["clientCapabilities"]["fs"] = json!({"readTextFile": true, "writeTextFile": true});
         }
         if self.flavor.client_terminal {
@@ -72,7 +105,7 @@ impl AcpDriver {
     /// The prepared spec's sandbox wrapper (`sandbox-exec -p <profile>`) and
     /// env: a client terminal runs exactly as confined as the agent.
     pub(super) fn adopt_confinement(&mut self, spec: &LaunchSpec) {
-        if !self.flavor.client_terminal {
+        if !self.flavor.client_terminal && !self.flavor.client_fs {
             return;
         }
         let wrapped = spec.program.ends_with("sandbox-exec")
@@ -99,7 +132,7 @@ impl AcpDriver {
         params: &Value,
     ) {
         let enabled = if method.starts_with("fs/") {
-            self.flavor.client_fs
+            self.serves_fs()
         } else {
             self.flavor.client_terminal
         };
@@ -137,12 +170,17 @@ impl AcpDriver {
                     content,
                 };
                 if supervised {
+                    let preview = match &op {
+                        ClientOpRepr::Write { content, .. } => preview(content),
+                        ClientOpRepr::Create { .. } => String::new(),
+                    };
                     self.hold(
                         step,
                         rpc_id,
                         op,
                         RequestKind::FileChange,
                         format!("Write {path}"),
+                        format!("Write {path}\n{preview}"),
                     );
                 } else {
                     self.run_held(step, rpc_id, op);
@@ -206,8 +244,27 @@ impl AcpDriver {
                     cwd: s("cwd").unwrap_or(root),
                     byte_limit: params.get("outputByteLimit").and_then(Value::as_u64),
                 };
-                if supervised {
-                    self.hold(step, rpc_id, op, RequestKind::Command, line);
+                // Auto-accept edits covers edits only: a command asks unless
+                // the thread is on Full access.
+                if self.state.access != RuntimeAccessMode::FullAccess {
+                    let detail = match &op {
+                        ClientOpRepr::Create { cwd, .. } => {
+                            let extra: Vec<&str> = params
+                                .get("env")
+                                .and_then(Value::as_array)
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|e| e.get("name")?.as_str())
+                                .collect();
+                            let mut d = format!("{}\nin {cwd}", preview(&line));
+                            if !extra.is_empty() {
+                                d.push_str(&format!("\nenv: {}", extra.join(", ")));
+                            }
+                            d
+                        }
+                        ClientOpRepr::Write { .. } => line.clone(),
+                    };
+                    self.hold(step, rpc_id, op, RequestKind::Command, line, detail);
                 } else {
                     self.run_held(step, rpc_id, op);
                 }
@@ -247,6 +304,7 @@ impl AcpDriver {
         op: ClientOpRepr,
         kind: RequestKind,
         title: String,
+        prompt: String,
     ) {
         self.ensure_autonomous_turn(step);
         self.close_segment(step);
@@ -258,8 +316,8 @@ impl AcpDriver {
         step.push(DriverEvent::Request {
             id: request_id,
             kind,
-            title: Some(title.clone()),
-            prompt: Some(title),
+            title: Some(title),
+            prompt: Some(prompt),
             reason: None,
             options: vec![
                 ApprovalOption {
@@ -316,6 +374,31 @@ impl AcpDriver {
                     byte_limit,
                 },
             ),
+        }
+    }
+
+    /// After a daemon restart (holder adoption): the calls in flight died
+    /// with the old daemon, and its terminals were killed. Each restored wait
+    /// is answered with an error on the next line, so the agent never waits
+    /// for an answer nobody will send (review R5).
+    pub(super) fn orphan_restored_waits(&mut self) {
+        for (_, wait) in self.state.client_waits.drain() {
+            let rpc_id = match wait {
+                ClientWait::Plain { rpc_id }
+                | ClientWait::Write { rpc_id, .. }
+                | ClientWait::Create { rpc_id, .. } => rpc_id,
+            };
+            self.state.client_orphans.push(rpc_id);
+        }
+    }
+
+    pub(super) fn answer_orphans(&mut self, step: &mut DriverStep) {
+        for rpc_id in std::mem::take(&mut self.state.client_orphans) {
+            step.write(error_line(
+                &rpc_id,
+                -32000,
+                "Otto restarted; this call was not completed.",
+            ));
         }
     }
 
@@ -445,13 +528,7 @@ impl AcpDriver {
             .entry(terminal_id.to_string())
             .or_default();
         kept.push_str(chunk);
-        if kept.len() > TERMINAL_KEEP {
-            let mut cut = kept.len() - TERMINAL_KEEP;
-            while !kept.is_char_boundary(cut) {
-                cut += 1;
-            }
-            kept.drain(..cut);
-        }
+        tail_cap(kept);
         if let Some((id, t)) = self
             .state
             .tools
@@ -459,6 +536,8 @@ impl AcpDriver {
             .find(|(_, t)| t.terminal.as_deref() == Some(terminal_id))
         {
             t.output.push_str(chunk);
+            // A long-running command (a dev server): the row keeps the tail.
+            tail_cap(&mut t.output);
             step.push(DriverEvent::CommandOutput {
                 item_id: format!("{turn}:tool:{id}"),
                 chunk: chunk.to_string(),

@@ -149,6 +149,9 @@ pub enum DriverEvent {
         title: Option<String>,
         questions: Vec<otto_core::agent_runtime::RuntimeQuestion>,
         tool_item_id: Option<String>,
+        /// Only the person answers it (an MCP / ACP elicitation), never the
+        /// agent a subagent reports to.
+        for_person: bool,
     },
     /// The provider withdrew or settled an open request itself (Claude
     /// `control_cancel_request`, Codex `serverRequest/resolved`).

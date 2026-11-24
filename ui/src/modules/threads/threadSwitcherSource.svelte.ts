@@ -15,14 +15,16 @@ import { inboxLive } from './threadInbox.svelte';
 import { threadOrigin } from './threadOrigins';
 import { threadNav, threadRowState } from './threadNav.svelte';
 import { switcherOrder, wordTone } from './threadSwitcher';
-import { isThreadSession, projectNameFromCwd } from './threadsHelpers';
+import { isThreadSession, projectName } from './threadsHelpers';
+import { threadMeta } from './threadMeta.svelte';
 import { threads } from './threadsStore.svelte';
 
-/** The class the sidebar gives a row (ThreadSidebar's `classOf`). */
+/** The class the sidebar gives a row (ThreadSidebar's `classOf`, one
+ *  source for "Done": `thread_seen_at` via threadMeta). */
 function classOf(s: Session): InboxClass {
   const st = threadRowState(s);
   const focused = threads.focusedSessionId === s.id && !threads.newDraftMode;
-  const unread = !focused && st.key !== 'needs-you' && (ws.unread[s.id] === true || runtimeThreads.unread[s.id] === true);
+  const unread = !focused && st.key !== 'needs-you' && threadMeta.unread(s.id, ws.unread[s.id] === true || runtimeThreads.unread[s.id] === true);
   return inboxClass(st.key, unread);
 }
 
@@ -42,7 +44,7 @@ export const threadSwitcherSource: PaletteThreadSource = {
           now: cls === 'working' ? now() : 0,
           limited: cls === 'failed' && threadRowState(s).label === 'Limited',
         }) ?? rel(s.last_active_at);
-      return { id: s.id, title: s.title, project: s.cwd ? projectNameFromCwd(s.cwd, '') : '', word, tone: wordTone(word) };
+      return { id: s.id, title: s.title, project: s.cwd ? projectName(s.cwd, '') : '', word, tone: wordTone(word) };
     });
   },
   open(id, beside) {
@@ -53,7 +55,7 @@ export const threadSwitcherSource: PaletteThreadSource = {
     threads.startNewThread({ workspaceId: ws.currentId, draft });
   },
   warm() {
-    for (const { s, cls } of live()) if (isRuntimeThread(s) && (cls === 'needs' || cls === 'working')) inboxLive.ensure(s.id);
+    for (const { s, cls } of live()) if (isRuntimeThread(s) && cls === 'needs') inboxLive.ensure(s.id);
   },
 };
 

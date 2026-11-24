@@ -5,6 +5,7 @@
 // items carry no text shows its name only. Pure (unit/runtimeTurnChanges.test.ts).
 import type { TurnItem } from '../../../lib/api/types';
 import { relativeToCwd } from './workLog';
+import { perfCount } from '../../../lib/perfCount.ts';
 
 export interface FileDelta {
   path: string;
@@ -39,6 +40,7 @@ export function diffCounts(item: { diff_str?: string; old_str?: string; new_str?
 /** The files turn `turnId` changed (completed, top-level file changes), in
  *  first-touched order, paths relative to the thread's folder. */
 export function turnChanges(items: readonly TurnItem[], turnId: string, cwd: string | null | undefined): FileDelta[] {
+  perfCount('turnChanges');
   const byPath = new Map<string, FileDelta>();
   for (const it of items) {
     if (it.type !== 'file_change' || it.turn_id !== turnId || it.parent_item_id || it.status !== 'completed' || it.error) continue;
@@ -52,6 +54,28 @@ export function turnChanges(items: readonly TurnItem[], turnId: string, cwd: str
     byPath.set(path, d);
   }
   return [...byPath.values()];
+}
+
+/** Every finished turn's changes in ONE pass over `items` (the timeline's
+ *  changes cards): `turnChanges` per turn rescanned every item for every
+ *  turn on each stream event. */
+export function turnChangesByTurn(items: readonly TurnItem[], cwd: string | null | undefined): Map<string, FileDelta[]> {
+  perfCount('turnChangesByTurn');
+  const byTurn = new Map<string, Map<string, FileDelta>>();
+  for (const it of items) {
+    if (it.type !== 'file_change' || !it.turn_id || it.parent_item_id || it.status !== 'completed' || it.error) continue;
+    const path = relativeToCwd(it.file_name, cwd);
+    const c = diffCounts(it);
+    let m = byTurn.get(it.turn_id);
+    if (!m) byTurn.set(it.turn_id, (m = new Map()));
+    const d = m.get(path) ?? { path, added: null, removed: null };
+    if (c) {
+      d.added = (d.added ?? 0) + c.added;
+      d.removed = (d.removed ?? 0) + c.removed;
+    }
+    m.set(path, d);
+  }
+  return new Map([...byTurn].map(([t, m]) => [t, [...m.values()]]));
 }
 
 /** The card's totals; null counts when no file had numbers. */

@@ -2,6 +2,7 @@
   // Changes tab: the working tree, or — once the branch is ahead of its
   // upstream — the local commits a Create PR would send (T3 0.1.6 "review
   // local commits in the Diff pane"): all of them as one range, or one commit.
+  import { focusRow, focusSettled } from './changesFocus';
   import { api, isAbortError } from '../../lib/api/client';
   import Badge from '../../lib/components/Badge.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -49,6 +50,8 @@
   let status = $state<RepoStatusResp | null>(null);
   let summaryByPath = $state<Record<string, { added: number; deleted: number }>>({});
   let statusLoading = $state(false);
+  /** The repo whose working-tree status `status` holds. */
+  let statusFor = $state<string | null>(null);
   let statusError = $state<string | null>(null);
   let statusRetry = $state(0);
 
@@ -90,14 +93,16 @@
   const rows = $derived(activeScope === 'commits' ? commitFiles : workingRows);
   const selectedRow = $derived(rows.find((r) => r.path === selectedPath) ?? null);
 
-  // A turn's changes card asked for a file (threads.changesFocus): show it.
+  // A turn's changes card asked for a file (threads.changesFocus): show it;
+  // once THIS repo's list has loaded without it, drop the ask (stale rows
+  // from another repo never consume it).
   $effect(() => {
     const want = threads.changesFocus;
-    const hit = want ? rows.find((r) => want === r.path || want.endsWith(`/${r.path}`)) : null;
-    if (hit) {
-      selectedPath = hit.path;
-      threads.changesFocus = null;
-    }
+    if (!want) return;
+    const hit = focusRow(rows, want);
+    if (hit) selectedPath = hit.path;
+    const loadedFor = activeScope === 'commits' ? null : statusFor;
+    if (focusSettled({ hit: !!hit, loading: statusLoading, loadedFor, repoId: repo?.id ?? null })) threads.changesFocus = null;
   });
   // Keep a valid selection as the list changes.
   $effect(() => {
@@ -127,6 +132,7 @@
       .then(([st, sum]) => {
         if (ctl.signal.aborted) return;
         status = st;
+        statusFor = repoId;
         const map: Record<string, { added: number; deleted: number }> = {};
         for (const f of sum.files) map[f.path] = { added: f.added ?? 0, deleted: f.deleted ?? 0 };
         summaryByPath = map;
@@ -294,7 +300,11 @@
   /** "Add to message": the notes as one context item in the thread's draft, to add a sentence first. */
   function addNotesToDraft(): void {
     const drafts = notes.filter((n) => n.state === 'draft');
-    if (threadId && drafts.length && oncontext) oncontext(notesContext(drafts), threadId);
+    if (!threadId || !drafts.length || !oncontext) return;
+    const chip = `notes:${newId()}`;
+    oncontext({ ...notesContext(drafts), id: chip }, threadId);
+    // Sent while its chip rides the draft; removing the chip takes them back (reviewNotes.unsend).
+    for (const n of drafts) reviewNotes.update(threadId, n.id, { state: 'sent', chip });
   }
   // The agent changed the noted lines since: the note says Outdated (kept, never lost).
   $effect(() => {
@@ -353,7 +363,7 @@
 {#snippet noteCard(n: ReviewNote)}
   <DiffNoteCard
     note={n}
-    onedit={(comment) => threadId && reviewNotes.update(threadId, n.id, { comment })}
+    onedit={(comment) => threadId && reviewNotes.update(threadId, n.id, { comment, state: 'draft', chip: undefined })}
     onresolve={(r) => threadId && reviewNotes.update(threadId, n.id, { state: r ? 'resolved' : 'sent' })}
     ondelete={() => threadId && reviewNotes.remove(threadId, n.id)}
   />
@@ -453,7 +463,7 @@
         ondraft={oncontext ? addNotesToDraft : undefined}
         sending={sendingNotes}
         onclear={() => threadId && reviewNotes.clear(threadId)}
-        onedit={(id, comment) => threadId && reviewNotes.update(threadId, id, { comment })}
+        onedit={(id, comment) => threadId && reviewNotes.update(threadId, id, { comment, state: 'draft', chip: undefined })}
         onresolve={(id, r) => threadId && reviewNotes.update(threadId, id, { state: r ? 'resolved' : 'sent' })}
         ondelete={(id) => threadId && reviewNotes.remove(threadId, id)}
       />

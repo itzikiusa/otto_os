@@ -5,6 +5,7 @@
 //! sandbox wrapper. Terminal output is kept up to its byte limit and also
 //! streamed into the tool row as it arrives.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -17,8 +18,10 @@ use super::{apply_step, Inner, Live, State};
 use crate::driver::ClientOp;
 use otto_core::Id;
 
-/// Open client terminals per session; at most [`MAX_TERMINALS`] each.
-static TERMINALS: LazyLock<DashMap<(Id, String), Arc<Terminal>>> = LazyLock::new(DashMap::new);
+/// Open client terminals, per session (at most [`MAX_TERMINALS`] each): a
+/// session's lookups and its limit never walk another session's terminals.
+static TERMINALS: LazyLock<DashMap<Id, HashMap<String, Arc<Terminal>>>> =
+    LazyLock::new(DashMap::new);
 const MAX_TERMINALS: usize = 16;
 const DEFAULT_BYTE_LIMIT: usize = 1 << 20;
 const MAX_FILE_BYTES: u64 = 8 << 20;
@@ -26,7 +29,9 @@ const MAX_FILE_BYTES: u64 = 8 << 20;
 struct Terminal {
     output: Mutex<(String, bool)>,
     exit: watch::Receiver<Option<(Option<i32>, Option<String>)>>,
-    child: Mutex<Option<tokio::process::Child>>,
+    /// The command's process group (it leads its own): a kill reaches
+    /// everything it started, also after the shell itself exited.
+    pgid: Option<i32>,
 }
 
 /// Start `op` for the session `st` belongs to.
@@ -45,9 +50,20 @@ pub(super) fn start(inner: &Inner, st: &State, id: String, op: ClientOp) {
     });
 }
 
-/// The session's terminals end with it.
+/// The session's terminals end with it, or with its agent process (close,
+/// exit, a replaced process, idle release): their commands are killed.
 pub(super) fn drop_session(sid: &Id) {
-    TERMINALS.retain(|(s, _), _| s != sid);
+    if let Some((_, terms)) = TERMINALS.remove(sid) {
+        terms.values().for_each(|t| kill(t));
+    }
+}
+
+/// Every terminal (the daemon is stopping: nothing could reach them after).
+pub(super) fn drop_all() {
+    TERMINALS.retain(|_, terms| {
+        terms.values().for_each(|t| kill(t));
+        false
+    });
 }
 
 fn deliver(
@@ -91,6 +107,30 @@ async fn confined(root: &str, path: &str, must_exist: bool) -> Result<PathBuf, S
     real.starts_with(&root).then_some(real).ok_or_else(outside)
 }
 
+/// Write `path` without following a symbolic link at it: a dangling link
+/// inside the folder (only its parent is canonical) must not carry the
+/// write outside it. `O_NOFOLLOW` also closes the check-then-write race.
+async fn write_no_follow(path: &Path, content: &str) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    if tokio::fs::symlink_metadata(path)
+        .await
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        return Err(std::io::Error::other("is a symbolic link; not followed"));
+    }
+    let mut f = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .await?;
+    f.write_all(content.as_bytes()).await?;
+    // tokio's File hands the write to a blocking task: without a flush the
+    // answer (and the file's next reader) can come before the bytes land.
+    f.flush().await
+}
+
 async fn run(
     inner: &Arc<Inner>,
     live: &Arc<Live>,
@@ -100,8 +140,8 @@ async fn run(
 ) -> Result<Value, String> {
     let term = |tid: &str| {
         TERMINALS
-            .get(&(sid.clone(), tid.to_string()))
-            .map(|t| Arc::clone(&t))
+            .get(sid)
+            .and_then(|terms| terms.get(tid).cloned())
             .ok_or_else(|| format!("no terminal {tid}"))
     };
     match op {
@@ -139,7 +179,7 @@ async fn run(
         } => {
             let real = confined(&root, &path, false).await?;
             let old = tokio::fs::read_to_string(&real).await.ok();
-            tokio::fs::write(&real, content)
+            write_no_follow(&real, &content)
                 .await
                 .map_err(|e| format!("{path}: {e}"))?;
             Ok(json!({"old": old}))
@@ -152,7 +192,10 @@ async fn run(
             cwd,
             byte_limit,
         } => {
-            if TERMINALS.iter().filter(|e| &e.key().0 == sid).count() >= MAX_TERMINALS {
+            if TERMINALS
+                .get(sid)
+                .is_some_and(|terms| terms.len() >= MAX_TERMINALS)
+            {
                 return Err(format!("at most {MAX_TERMINALS} terminals at once"));
             }
             let mut cmd = tokio::process::Command::new(&program);
@@ -162,6 +205,7 @@ async fn run(
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
+                .process_group(0)
                 .kill_on_drop(true);
             let mut child = cmd
                 .spawn()
@@ -170,9 +214,9 @@ async fn run(
             let t = Arc::new(Terminal {
                 output: Mutex::new((String::new(), false)),
                 exit: rx,
-                child: Mutex::new(None),
+                pgid: child.id().map(|p| p as i32),
             });
-            let limit = byte_limit.map_or(DEFAULT_BYTE_LIMIT, |b| b as usize);
+            let limit = output_limit(byte_limit);
             let pipes = [
                 child
                     .stdout
@@ -183,8 +227,10 @@ async fn run(
                     .take()
                     .map(|p| Box::new(p) as Box<dyn tokio::io::AsyncRead + Send + Unpin>),
             ];
-            *t.child.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
-            TERMINALS.insert((sid.clone(), terminal_id.clone()), Arc::clone(&t));
+            TERMINALS
+                .entry(sid.clone())
+                .or_default()
+                .insert(terminal_id.clone(), Arc::clone(&t));
             let mut readers = Vec::new();
             for mut pipe in pipes.into_iter().flatten() {
                 let (t, inner, live, tid) = (
@@ -216,20 +262,16 @@ async fn run(
                     }
                 }));
             }
-            let waiter = Arc::clone(&t);
             tokio::spawn(async move {
-                for r in readers {
-                    let _ = r.await;
-                }
-                let child = waiter
-                    .child
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .take();
-                let status = match child {
-                    Some(mut c) => c.wait().await.ok(),
-                    None => None,
-                };
+                // The command's own exit decides, not its pipes: a background
+                // process it left (`npm run dev &`) keeps them open.
+                let status = child.wait().await.ok();
+                let _ = tokio::time::timeout(std::time::Duration::from_millis(200), async {
+                    for r in readers {
+                        let _ = r.await;
+                    }
+                })
+                .await;
                 use std::os::unix::process::ExitStatusExt;
                 let _ = tx.send(Some((
                     status.and_then(|s| s.code()),
@@ -263,7 +305,10 @@ async fn run(
             Ok(json!({}))
         }
         ClientOp::TerminalRelease { terminal_id } => {
-            if let Some((_, t)) = TERMINALS.remove(&(sid.clone(), terminal_id)) {
+            let released = TERMINALS
+                .get_mut(sid)
+                .and_then(|mut terms| terms.remove(&terminal_id));
+            if let Some(t) = released {
                 kill(&t);
             }
             Ok(json!({}))
@@ -271,8 +316,66 @@ async fn run(
     }
 }
 
+/// The agent's `outputByteLimit`, never above Otto's own cap.
+fn output_limit(asked: Option<u64>) -> usize {
+    asked.map_or(DEFAULT_BYTE_LIMIT, |b| {
+        usize::try_from(b)
+            .unwrap_or(usize::MAX)
+            .min(DEFAULT_BYTE_LIMIT)
+    })
+}
+
 fn kill(t: &Terminal) {
-    if let Some(c) = t.child.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-        let _ = c.start_kill();
+    if let Some(pgid) = t.pgid {
+        // SAFETY: a plain signal to the process group this terminal created.
+        unsafe {
+            libc::killpg(pgid, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_agents_output_limit_is_clamped_to_otto_s() {
+        assert_eq!(output_limit(Some(u64::MAX)), DEFAULT_BYTE_LIMIT);
+        assert_eq!(output_limit(Some(4096)), 4096);
+        assert_eq!(output_limit(None), DEFAULT_BYTE_LIMIT);
+    }
+
+    /// A dangling link in the folder points outside it: the write is
+    /// refused and nothing lands at the link's target.
+    #[tokio::test]
+    async fn a_write_never_follows_a_dangling_symlink_out_of_the_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("planted.plist");
+        let link = root.path().join("a.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let root_s = root.path().canonicalize().unwrap().display().to_string();
+        let path = format!("{root_s}/a.txt");
+        let real = confined(&root_s, &path, false).await.unwrap();
+        let err = write_no_follow(&real, "x").await.unwrap_err();
+        assert!(err.to_string().contains("symbolic link"), "{err}");
+        assert!(!target.exists(), "nothing written outside the folder");
+        // A plain new file still works.
+        let ok = confined(&root_s, &format!("{root_s}/b.txt"), false)
+            .await
+            .unwrap();
+        write_no_follow(&ok, "hi").await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("b.txt")).unwrap(),
+            "hi"
+        );
+        // The bytes are on disk when the write answers (tokio's File writes in
+        // a blocking task; without a flush this read raced it: 1 run in ~25).
+        let big = "y".repeat(4 << 20);
+        write_no_follow(&ok, &big).await.unwrap();
+        assert_eq!(
+            std::fs::metadata(root.path().join("b.txt")).unwrap().len(),
+            big.len() as u64
+        );
     }
 }

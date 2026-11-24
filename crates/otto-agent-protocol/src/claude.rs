@@ -739,6 +739,7 @@ impl ClaudeDriver {
                 title: None,
                 questions,
                 tool_item_id,
+                for_person: false,
             });
             return;
         }
@@ -807,6 +808,8 @@ impl ClaudeDriver {
                 title,
                 questions,
                 tool_item_id: None,
+                // An MCP server's elicitation.
+                for_person: true,
             });
         }
     }

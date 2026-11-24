@@ -113,9 +113,16 @@ class ThreadMeta {
     const seen = typeof seenRaw === 'string' ? Date.parse(seenRaw) : NaN;
     if (Number.isFinite(seen) && (!ended || Date.parse(ended) <= seen)) return;
     // Never before what was on screen, whatever this device's clock says.
+    // One attempt per (thread, ended turn): a refused or failed write (daemon
+    // down, a viewer) must not loop through the effect that called this.
+    if (this.tried.get(id) === ended) return;
+    this.tried.set(id, ended);
     const at = new Date(Math.max(Date.now(), ended ? Date.parse(ended) + 1 : 0)).toISOString();
     void this.write(id, { thread_seen_at: at }, false);
   }
+
+  /** The last turn end a seen mark was tried for, per thread (not reactive). */
+  private tried = new Map<string, string | null>();
 
   /** Write `patch` on thread `id`; false (rolled back, toast shown) on failure. */
   async write(id: string, patch: ThreadMetaPatch, loud = true): Promise<boolean> {
@@ -143,23 +150,34 @@ class ThreadMeta {
   }
 
   /** Once per browser: this browser's old local pins / History onto the
-   *  threads that still exist (all of the person's structured threads are
-   *  read first). Returns true when done, so the caller stops keeping them. */
-  async migrate(pins: readonly string[], history: readonly string[]): Promise<boolean> {
-    if (typeof localStorage === 'undefined' || localStorage.getItem(MIGRATED)) return true;
+   *  threads that still exist — once the session lists have settled and the
+   *  person's structured and other-workspace threads are read. Returns what
+   *  the caller must still keep (a write that failed: tried again next
+   *  time), or null when it is not time yet. */
+  async migrate(pins: readonly string[], history: readonly string[]): Promise<{ pins: string[]; history: string[] } | null> {
+    const none = { pins: [], history: [] };
+    if (typeof localStorage === 'undefined' || localStorage.getItem(MIGRATED)) return none;
     if (pins.length === 0 && history.length === 0) {
       localStorage.setItem(MIGRATED, '1');
-      return true;
+      return none;
     }
+    // Read in the calling effect: it runs again when the list lands.
+    if (ws.sessionsLoading || !ws.listSettled) return null;
     try {
-      await runtimeThreads.loadAll();
+      await Promise.all([runtimeThreads.loadAll(), ws.refreshOtherSessions()]);
     } catch {
-      return false; // try again next time
+      return null; // try again next time
     }
     const exists = (id: string): boolean => !!runtimeThreads.get(id) || !!this.session(id);
-    await Promise.all(migrationPatches(pins, history, exists).map(([id, patch]) => this.write(id, patch, false)));
-    localStorage.setItem(MIGRATED, '1');
-    return true;
+    const failed = new Set<string>();
+    await Promise.all(
+      migrationPatches(pins, history, exists).map(async ([id, patch]) => {
+        if (!(await this.write(id, patch, false))) failed.add(id);
+      }),
+    );
+    const left = { pins: pins.filter((id) => failed.has(id)), history: history.filter((id) => failed.has(id)) };
+    if (failed.size === 0) localStorage.setItem(MIGRATED, '1');
+    return left;
   }
 }
 

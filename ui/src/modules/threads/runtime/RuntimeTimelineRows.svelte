@@ -40,7 +40,7 @@
     type WorkPart,
   } from './timeline';
   import RuntimeTurnChanges from './RuntimeTurnChanges.svelte';
-  import { turnChanges, type FileDelta } from './turnChanges';
+  import { turnChangesByTurn, type FileDelta } from './turnChanges';
   import { earlierSteps, formatDuration, shouldFold, visibleTools } from './workLog';
   import { threadPrefs } from './threadPrefs.svelte';
   import { turnUsageText } from './turnUsage';
@@ -126,11 +126,12 @@
       if (tid) last.set(tid, r.kind === 'message' ? r.item.id : r.id);
     }
     const out = new Map<string, FileDelta[]>();
+    const all = turnChangesByTurn(projection.items, cwd);
     for (const [tid, key] of last) {
       const t = turnById.get(tid);
       if (!t || t.status === 'running' || t.status === 'pending') continue;
-      const files = turnChanges(projection.items, tid, cwd);
-      if (files.length) out.set(key, files);
+      const files = all.get(tid);
+      if (files?.length) out.set(key, files);
     }
     return out;
   });

@@ -144,7 +144,9 @@ test('the sidebar is an inbox: status words, needs you first, Working and Histor
   const working = side.getByTestId('threads-working-list');
   await expect(main.getByTestId(`thread-row-${ids.working}`)).toHaveCount(0);
   await expect(working.getByTestId(`thread-row-${ids.working}`)).toBeVisible();
-  await expect(word(page, 'working')).toHaveText(/^Working \d+[smh]/, { timeout: 15_000 });
+  // The elapsed time shows once this window has seen the turn start (the inbox
+  // reads only waiting threads after a reload — perf pass, threadInbox.svelte.ts).
+  await expect(word(page, 'working')).toHaveText(/^Working( \d+[smh])?/, { timeout: 15_000 });
   await side.getByTestId('threads-working-toggle').click();
   await expect(working.getByTestId(`thread-row-${ids.working}`)).toHaveCount(0);
   await side.getByTestId('threads-working-toggle').click();
@@ -156,15 +158,44 @@ test('the sidebar is an inbox: status words, needs you first, Working and Histor
   await row(page, 'done').locator('.tr-main').click();
   await expect(word(page, 'done')).toHaveText(/^(now|\d+[smhd])$/);
 
-  // ↑/↓ move between the rows.
-  await row(page, 'done').locator('.tr-main').focus();
+  // ↑/↓ move between the rows (other specs' threads share the daemon: the
+  // row above is whichever the list shows there, not necessarily ours).
+  const doneMain = row(page, 'done').locator('.tr-main');
+  await doneMain.focus();
+  const above = await main.evaluate((list, id) => {
+    const rows = [...list.querySelectorAll<HTMLElement>('.tr-main')];
+    const at = rows.findIndex((r) => r.closest(`[data-testid="thread-row-${id}"]`));
+    return rows[at - 1]?.closest('[data-testid]')?.getAttribute('data-testid') ?? null;
+  }, ids.done);
+  expect(above).not.toBeNull();
   await page.keyboard.press('ArrowUp');
-  await expect(row(page, 'failed').locator('.tr-main')).toBeFocused();
+  await expect(page.getByTestId(above!).locator('.tr-main')).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(doneMain).toBeFocused();
 
   // After a reload (no live event for the turn already running, no read): still
   // its elapsed time, from the row's derived `meta.last_turn_started_at`.
   await page.reload();
   await expect(word(page, 'working')).toHaveText(/^Working \d+[smh]/, { timeout: 15_000 });
+});
+
+test('Working and History stay pinned above the footer while the list scrolls', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, ids.idle);
+  const side = page.getByTestId('threads-sidebar');
+  const fold = side.getByTestId('threads-working-toggle');
+  const history = side.getByTestId('threads-history-toggle');
+  await expect(fold).toBeVisible();
+  // Not part of the scrolling list: they sit between it and the footer.
+  expect(await fold.evaluate((el) => !!el.closest('.th-scroll'))).toBe(false);
+  expect(await history.evaluate((el) => !!el.closest('.th-scroll'))).toBe(false);
+  const foot = (await side.locator('.th-foot').boundingBox())!;
+  const h = (await history.boundingBox())!;
+  expect(foot.y - (h.y + h.height)).toBeLessThan(60);
+  // An open fold takes at most ~40 % of the sidebar and scrolls inside.
+  const sb = (await side.boundingBox())!;
+  const folds = (await side.locator('.th-folds').boundingBox())!;
+  expect(folds.height).toBeLessThanOrEqual(sb.height * 0.42);
 });
 
 test('Group by project brings back the folders and is remembered', async ({ page }) => {

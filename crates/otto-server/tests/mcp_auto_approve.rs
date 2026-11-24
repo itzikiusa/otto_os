@@ -2407,3 +2407,83 @@ async fn a_session_token_skips_only_the_outward_switch() {
         "{env}"
     );
 }
+
+/// A governed call holds long only for a session a person works in: a
+/// headless (background-source) session gets the short wait and
+/// `pending_approval`, while an interactive one is still waiting past it and
+/// then runs on the answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_an_interactive_session_holds_a_governed_call_for_its_person() {
+    let d = Arc::new(boot().await);
+    let bg = SessionsRepo::new(d.pool.clone())
+        .create(NewSession {
+            workspace_id: "ws1".into(),
+            kind: otto_core::domain::SessionKind::Agent,
+            provider: "claude".into(),
+            title: "nightly workflow step".into(),
+            cwd: "/tmp".into(),
+            provider_session_id: None,
+            connection_id: None,
+            created_by: "alice".into(),
+            meta: json!({"source": "workflow"}),
+        })
+        .await
+        .unwrap();
+    let (bg_token, _) = AuthRepo::new(d.pool.clone())
+        .issue_session_api_token(&"alice".to_string(), &bg.id)
+        .await
+        .unwrap();
+    let call = |token: String| {
+        let d = d.clone();
+        tokio::spawn(async move {
+            d.send(
+                "POST",
+                &token,
+                "/mcp/otto-tools/invoke",
+                Some(
+                    json!({"tool": "otto.create_pr", "arguments": pr_args(), "wait_seconds": 300}),
+                ),
+            )
+            .await
+            .1
+        })
+    };
+    let started = tokio::time::Instant::now();
+    let headless = call(bg_token).await.unwrap();
+    assert_eq!(headless["decision"], "pending_approval", "{headless}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(40),
+        "{:?}",
+        started.elapsed()
+    );
+
+    // The interactive session (a claude thread with no background source).
+    let interactive = call(d.agent.clone());
+    tokio::time::sleep(std::time::Duration::from_secs(
+        otto_mcp::approval_wait::HEADLESS_WAIT_SECS + 3,
+    ))
+    .await;
+    assert!(
+        !interactive.is_finished(),
+        "an interactive call gave up at the headless wait"
+    );
+    let id = d
+        .pending_approvals()
+        .await
+        .into_iter()
+        .find(|a| a["requested_by_session_id"] == d.sid.as_str())
+        .and_then(|a| a["id"].as_str().map(str::to_string))
+        .expect("the interactive card");
+    sqlx::query("UPDATE mcp_approvals SET status = 'denied' WHERE id = ?")
+        .bind(&id)
+        .execute(&d.pool)
+        .await
+        .unwrap();
+    let _ = d.events.send(otto_core::event::Event::McpApprovalChanged {
+        approval_id: Some(id),
+        workspace_id: Some("ws1".into()),
+        status: "denied".into(),
+    });
+    let env = interactive.await.unwrap();
+    assert_eq!(env["decision"], "denied", "{env}");
+}

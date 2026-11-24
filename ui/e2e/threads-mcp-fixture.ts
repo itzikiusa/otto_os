@@ -63,7 +63,7 @@ export function mcpThreads(project: string) {
     const dock = thread.getByTestId('runtime-attention');
     await expect(dock).toBeVisible({ timeout: 30_000 });
     await expect(dock).toHaveAttribute('data-kind', 'approval');
-    await expect(dock).toContainText('Claude wants to use otto · broadcast_message');
+    await expect(dock).toContainText('otto · broadcast_message wants to broadcast message');
     await expect(dock).toContainText(`Broadcast a message to live agent sessions: ${text}`);
     return { id, thread, dock };
   }

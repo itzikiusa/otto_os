@@ -213,6 +213,7 @@ pub(super) fn drop_proc(inner: &Inner, live: &Live, st: &mut State, grace: Durat
         return false;
     };
     live.proc_ended.notify_waiters();
+    super::client_calls::drop_session(&st.session.id);
     stop_child(p, grace);
     st.switch_from = None;
     settle_background(inner, live, st, TurnItemStatus::Interrupted);

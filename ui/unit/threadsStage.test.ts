@@ -167,4 +167,8 @@ test('right panel at 1280 gives way to keep the conversation, and the saved widt
   assert.equal(fitRightPanel(380, 1236, 0), 380);
   assert.equal(fitRightPanel(380, 1000, 272), 300);
   assert.equal(fitRightPanel(420, 1680, 272), 420);
+  // Beside an open surface at 1440 with the list open (stage 1396): ≥ 480 for Changes.
+  assert.ok(fitRightPanel(520, 1396, 272, 600) >= 480);
+  // "Wide": everything but the conversation's floor.
+  assert.equal(fitRightPanel(1396, 1396, 272), 1396 - 272 - 640 - 8);
 });

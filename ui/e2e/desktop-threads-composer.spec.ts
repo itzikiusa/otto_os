@@ -410,3 +410,32 @@ test('context meter: claude without a reported window shows no meter', async ({ 
   await send(thread, 'hi');
   await expect(thread.getByTestId('runtime-context-meter')).toHaveCount(0);
 });
+
+test('the dock\'s "Add to chat" forgets a selection made in the terminal tab you left', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.addInitScript(() => localStorage.setItem('otto_threads_chrome_v1', JSON.stringify({ terminalOpen: true })));
+  await open(page, 'codex', 'Dock tab switch');
+  const dock = page.getByTestId('threads-terminal-dock');
+  const screen = dock.locator('.xterm-screen').first();
+  await expect(screen).toBeVisible({ timeout: 30_000 });
+  await dock.getByRole('button', { name: 'New terminal' }).click();
+  const tabs = dock.locator('.ttd-tab');
+  await expect(tabs).toHaveCount(2, { timeout: 30_000 });
+  // Back on terminal 1: select some of its text.
+  await tabs.first().click();
+  await expect(screen).toBeVisible({ timeout: 30_000 });
+  await dock.locator('.xterm').first().click();
+  await page.keyboard.type('echo otto-first-tab\n');
+  const box = (await screen.boundingBox())!;
+  await page.mouse.move(box.x + 2, box.y + 4);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.6, box.y + 60, { steps: 8 });
+  await page.mouse.up();
+  const add = dock.getByTestId('terminal-add-to-chat');
+  await expect(add).toBeVisible();
+  // Switch to terminal 2 from the keyboard: terminal 1's text is not on offer there.
+  await tabs.nth(1).focus();
+  await page.keyboard.press('Enter');
+  await expect(tabs.nth(1)).toHaveClass(/on/);
+  await expect(add).toHaveCount(0);
+});

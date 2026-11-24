@@ -39,11 +39,12 @@
   import { relatedPopover } from './relatedPopover.svelte';
   import { threadsPageMenu } from './threadsPageMenu';
   import { threadPrefs } from './runtime/threadPrefs.svelte';
-  import { fitRightPanel } from './threadsLayout';
+  import { MIN_CONVERSATION_BESIDE_SURFACE_W, MIN_CONVERSATION_W, SURFACE_W, fitRightPanel } from './threadsLayout';
   import { prepareDeepLink } from '../../lib/deepLinkOpen';
   import { runtimeThreadMenu } from './runtime/runtimeMenu';
   import { asThreadSession, isRuntimeThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
-  import { isThreadSession, projectNameFromCwd } from './threadsHelpers';
+  import { mcpServersSheet } from './runtime/mcpServersSheet.svelte';
+  import { isThreadSession, projectName } from './threadsHelpers';
   import { threadOrigin } from './threadOrigins';
   import { personalAgentName } from '../../lib/personalAgentBadges';
   import { threads, type ThreadsLayoutMode } from './threadsStore.svelte';
@@ -54,6 +55,12 @@
 
   let sidebarW = $state(loadPaneWidth(SIDEBAR_W_KEY, 272, 240, 380));
   let inspectorW = $state(loadPaneWidth(INSPECTOR_W_KEY, 380, 300, 560));
+  // A surface (Changes, Files, PR, a subagent, MCP) opens wider, at its own
+  // remembered width; "wide" (Maximize) gives it everything but the
+  // conversation's floor, side by side.
+  const SURFACE_W_KEY = 'threads.surfaceW';
+  let surfaceW = $state(loadPaneWidth(SURFACE_W_KEY, SURFACE_W, 300, 1200));
+  const surfaceOpen = $derived(threadsChrome.surfaces.includes(threads.inspectorTab));
   let stageWidth = $state(1280);
   let centerWidth = $state(1000);
   let roomSessionId = $state<string | null>(null);
@@ -70,7 +77,14 @@
   // At 1280 with both panels open the right panel gives way (never below its
   // minimum) so the conversation keeps ~640 px; a manual width comes back
   // whenever there is room for it.
-  const inspectorShownW = $derived(fitRightPanel(inspectorW, stageWidth, !listDrawer && threads.sidebarOpen ? sidebarW : 0));
+  const inspectorShownW = $derived(
+    fitRightPanel(
+      threadsChrome.maximized ? stageWidth : surfaceOpen ? surfaceW : inspectorW,
+      stageWidth,
+      !listDrawer && threads.sidebarOpen ? sidebarW : 0,
+      surfaceOpen ? MIN_CONVERSATION_BESIDE_SURFACE_W : MIN_CONVERSATION_W,
+    ),
+  );
 
   $effect(() => threads.setInspectorCompact(compact));
 
@@ -286,6 +300,10 @@
         keywords: 'start create thread claude codex antigravity',
         run: () => threads.startNewThread({ workspaceId: ws.currentId }),
       },
+      // Off the toolbar ⋯ (≤ 9 entries): the card's "MCP · N servers" row and here.
+      ...(focused && runtimeThreads.get(focused.id)
+        ? [{ id: 'threads.mcp-servers', title: 'MCP servers for this thread', group: 'Threads', keywords: 'mcp tools servers missing', run: () => mcpServersSheet.open(focused!.id) }]
+        : []),
       {
         id: 'threads.layout.single',
         title: 'Threads layout: 1-up single view',
@@ -344,7 +362,7 @@
     const agent = focused ? personalAgentName(focused.meta as Record<string, unknown> | undefined, focused.title) : null;
     if (agent && !showWelcomeStage) return agent;
     const cwd = focused?.cwd ?? (showWelcomeStage ? threads.stageCwd : null) ?? ws.current?.root_path ?? null;
-    return cwd ? projectNameFromCwd(cwd, ws.current?.name ?? 'Workspace') : (ws.current?.name ?? 'Scratch');
+    return cwd ? projectName(cwd, ws.current?.name ?? 'Workspace') : (ws.current?.name ?? 'Scratch');
   });
   const crumbTitle = $derived(showWelcomeStage ? 'New thread' : (focused?.title ?? 'Thread'));
   async function renameFocusedThread(): Promise<void> {
@@ -362,7 +380,6 @@
     focused?.cwd ?? (showWelcomeStage ? threads.stageCwd : null) ?? ws.current?.root_path ?? null,
   );
   const contextRepo = $derived(threadRepos.repoFor(contextCwd, focused?.workspace_id ?? ws.currentId));
-  const maximized = $derived(!compact && threads.inspectorOpen && threadsChrome.maximized);
   // Thread details (ThreadDetailsCard): float top-right beside ONE
   // conversation while the right panel is closed and a whole reading column
   // is left over (threadDetails.ts `cardFloats`) — the column then centres in
@@ -539,7 +556,7 @@
         />
       {/if}
 
-      <div class="th-center-col" class:th-hidden={maximized} bind:clientWidth={centerWidth}>
+      <div class="th-center-col" bind:clientWidth={centerWidth}>
         {#if threadListError && !(liveThreadIds.length === 0 && showWelcomeStage)}
           <LoadState what="threads" variant="compact" error={threadListError} onretry={retryThreads} />
         {/if}
@@ -566,15 +583,15 @@
 
       {#if !compact && threads.inspectorOpen}
         <PaneDivider
-          bind:width={inspectorW}
-          storageKey={INSPECTOR_W_KEY}
+          bind:width={() => (surfaceOpen ? surfaceW : inspectorW), (v) => (surfaceOpen ? (surfaceW = v) : (inspectorW = v))}
+          storageKey={surfaceOpen ? SURFACE_W_KEY : INSPECTOR_W_KEY}
           min={300}
-          max={560}
-          defaultWidth={380}
+          max={surfaceOpen ? 1200 : 560}
+          defaultWidth={surfaceOpen ? SURFACE_W : 380}
           invert
           label="Resize thread inspector"
         />
-        <div class="th-right-col" class:th-max={maximized} style:inline-size={maximized ? null : `${inspectorShownW}px`}>
+        <div class="th-right-col" style:inline-size={`${inspectorShownW}px`}>
           <LazyMount lazy={ThreadInspector} what="the thread details" variant="panel" props={{}} />
         </div>
       {/if}
@@ -625,8 +642,6 @@
     background: var(--accent-soft);
     color: var(--accent-text);
   }
-  /* Toasts and Undo notices rise above the composer (never on its chip or Send). */
-  @media (min-width: 641px) { :global(:root:has(.th-page)) { --toast-lift-page: 150px; } }
   .th-crumbs {
     display: flex;
     align-items: center;
@@ -691,12 +706,6 @@
     overflow-y: auto;
     border-radius: var(--radius-l);
     z-index: var(--z-sticky);
-  }
-  .th-center-col.th-hidden {
-    display: none;
-  }
-  .th-right-col.th-max {
-    flex: 1;
   }
   .th-center-col {
     flex: 1;

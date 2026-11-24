@@ -532,7 +532,8 @@ async fn prompt<S: RuntimeCtx>(
     require_human(&ctx, &auth)?;
     authorized(&ctx, &user, &id).await?;
     ctx.agent_runtime().person_prompted(&id).await;
-    let r = ctx.agent_runtime().prompt_with(&id, &req).await?;
+    // Runs to its end even if the client goes away mid-handshake.
+    let r = ctx.agent_runtime().prompt_to_end(&id, &req).await?;
     Ok((StatusCode::ACCEPTED, Json(r)))
 }
 

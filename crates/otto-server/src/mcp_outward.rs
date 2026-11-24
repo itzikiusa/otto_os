@@ -860,7 +860,14 @@ impl governance::Stages for OttoStages<'_> {
                         &appr_id,
                     );
                 }
-                match wait_for_decision(ctx, &appr_id, self.wait_seconds).await {
+                match wait_for_decision(
+                    ctx,
+                    &appr_id,
+                    self.wait_seconds,
+                    self.audit.caller_session_id.as_deref(),
+                )
+                .await
+                {
                     Some(true) => {
                         // Single use: two calls waiting on the SAME card (a
                         // shared pending card, parallel tool calls) both wake on
@@ -956,8 +963,17 @@ async fn wait_for_decision(
     ctx: &ServerCtx,
     approval_id: &str,
     wait_seconds: Option<u64>,
+    caller_session: Option<&str>,
 ) -> Option<bool> {
-    let budget = Duration::from_secs(wait_seconds.unwrap_or(0).min(MAX_WAIT_SECS));
+    let asked = wait_seconds.unwrap_or(0);
+    // A short ask needs no session lookup (the statement budgets stay put).
+    let cap = match caller_session {
+        Some(id) if asked > otto_mcp::approval_wait::HEADLESS_WAIT_SECS => {
+            session_hold_cap(ctx, id).await
+        }
+        _ => MAX_WAIT_SECS,
+    };
+    let budget = Duration::from_secs(asked.min(cap));
     let approvals = ctx.mcp.approvals();
     let wait = otto_mcp::approval_wait::wait_for_decision(
         &approvals,
@@ -972,6 +988,23 @@ async fn wait_for_decision(
         decided = wait => decided,
         _ = crate::shutdown::cancelled() => None,
     }
+}
+
+/// A calling session's hold ([`otto_mcp::approval_wait::hold_secs`]; unknown id: short).
+async fn session_hold_cap(ctx: &ServerCtx, id: &str) -> u64 {
+    let id = id.to_string();
+    let (family, session) = match ctx.agent_runtime.get(&id).await {
+        Ok(rt) => (
+            rt.provider.as_str().to_string(),
+            otto_agent_protocol::host::as_agent_session(&rt),
+        ),
+        Err(_) => match ctx.manager.get(&id).await {
+            Ok(s) => (ctx.manager.cli_family(&s.provider), s),
+            Err(_) => return otto_mcp::approval_wait::HEADLESS_WAIT_SECS,
+        },
+    };
+    let interactive = session.is_foreground_agent() && session.meta.get("run_id").is_none();
+    otto_mcp::approval_wait::hold_secs(&family, interactive)
 }
 
 /// Fallback re-read period for [`wait_for_decision`] when no event arrives.
@@ -1510,7 +1543,7 @@ async fn ask_human_approval(
         })
         .await?;
     let wait = args.get("wait_seconds").and_then(u64_lenient);
-    let decided = wait_for_decision(ctx, &appr.id, wait).await;
+    let decided = wait_for_decision(ctx, &appr.id, wait, None).await;
     Ok(json!({
         "approval_id": appr.id,
         "status": match decided { Some(true) => "approved", Some(false) => "denied", None => "pending" },
@@ -2084,7 +2117,14 @@ pub async fn gateway_invoke(
         });
         // A live agent waits (`wait_seconds`) for the answer — given in its
         // thread — and then runs on that approval: no "resubmit" round trip.
-        outcome = match wait_for_decision(&ctx, &approval_id.clone(), req.wait_seconds).await {
+        outcome = match wait_for_decision(
+            &ctx,
+            &approval_id.clone(),
+            req.wait_seconds,
+            req.session_id.as_deref(),
+        )
+        .await
+        {
             Some(true) => invoke().await.map_err(ApiError)?,
             Some(false) => otto_mcp::InvokeOutcome::Denied {
                 reason: "human denied the request".into(),

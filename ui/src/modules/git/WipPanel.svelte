@@ -43,7 +43,7 @@
     onstatus: (s: RepoStatusResp) => void;
     /** Called after a successful commit so the graph can reload its log. */
     oncommitted: () => void;
-    onclose: () => void;
+    onclose?: () => void; // omitted in a sheet with its own close (Threads' commit sheet)
     /** Open the conflict resolver (RepoView's tab) for a conflicted file. */
     onresolve?: () => void;
   }
@@ -886,7 +886,7 @@
       title={treeView ? 'Show as a list' : 'Group by folder'}
       aria-label="Group by folder"
     ><Icon name="folder" size={14} /></button>
-    <button class="icon-btn wp-close" onclick={onclose} title="Close the changes panel" aria-label="Close the changes panel"><Icon name="x" size={14} /></button>
+    {#if onclose}<button class="icon-btn wp-close" onclick={onclose} title="Close the changes panel" aria-label="Close the changes panel"><Icon name="x" size={14} /></button>{/if}
   </div>
 
   <div class="wp-body" class:has-diff={selectedPath !== null}>
