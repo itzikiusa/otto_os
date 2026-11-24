@@ -186,7 +186,7 @@
       pr = next;
       prError = null;
       pending = null;
-      onloaded?.(next);
+      onloaded?.(forRow(next));
       // A push moved the head: re-read the diff under it (the old one stays
       // up until the new one lands).
       const head = next.head_sha ?? '';
@@ -240,9 +240,11 @@
     }
   }
 
-  // CI checks: Summary's side column. Loaded once per open; failure is quiet
-  // (the row just doesn't render) — checks are context, not the page.
+  // CI checks: the status line + side column, loaded once per open (a failure
+  // is quiet). The list row's checks word comes from this SAME read, never the
+  // PR's separate ci_status, and says nothing until it loads (forRow).
   let checksTried = false;
+  const forRow = (p: PrDetail): PrDetail => ({ ...p, ci_status: checks?.ci.state ?? null });
   $effect(() => {
     if (activeTab !== 'summary' || checksTried || !pr) return;
     checksTried = true;
@@ -250,7 +252,7 @@
     const num = number;
     void api
       .get<PrChecksResp>(`/repos/${rid}/prs/${num}/checks`)
-      .then((c) => { if (!disposed && rid === repoId && num === number) checks = c; })
+      .then((c) => { if (!disposed && rid === repoId && num === number) { checks = c; if (pr) onloaded?.(forRow(pr)); } })
       .catch(() => {});
   });
 
@@ -270,7 +272,7 @@
       if (disposed || rid !== repoId || num !== number || !pr) return;
       const { detail: next, ownReviewSettled } = reviewReconciler.reconcileWithMeta(rid, num, raw, isMe, myName);
       prDetailCache.set(prKey(rid, num), next);
-      onloaded?.(next);
+      onloaded?.(forRow(next));
       if (headMoved(pr.head_sha, next.head_sha)) return void followHead(rid, num);
       if (ownReviewSettled && next.state === pr.state && next.comments.length === pr.comments.length) { pr = next; pending = null; return; }
       const moved = next.updated_at !== pr.updated_at || next.state !== pr.state || next.comments.length !== pr.comments.length;
@@ -431,7 +433,7 @@
   function patchNow(next: PrDetail): void {
     pr = next;
     prDetailCache.set(prKey(repoId, number), next);
-    onloaded?.(next);
+    onloaded?.(forRow(next));
   }
   // A sheet over whatever tab you're on (it used to jump to Summary).
   const openRequestChanges = (): void => { showRequestChanges = true; };

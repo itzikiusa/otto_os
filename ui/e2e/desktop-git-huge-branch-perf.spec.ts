@@ -1,9 +1,7 @@
 import { test, expect, type Page, type Request } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 import { openPage } from './helpers';
 import { heapAfterGC } from './perf';
 
@@ -73,7 +71,7 @@ test.beforeAll(async ({}, testInfo) => {
   const { ctx, base } = await apiCtx();
   const wsId = await seedWorkspace(ctx, base);
 
-  const root = mkdtempSync(join(tmpdir(), 'otto-e2e-huge-'));
+  const root = tempDir('otto-e2e-huge-');
   repoDir = join(root, 'work');
   const origin = join(root, 'origin.git');
   execFileSync('git', ['init', '-q', '-b', 'main', repoDir]);

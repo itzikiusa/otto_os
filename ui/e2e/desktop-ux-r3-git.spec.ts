@@ -1,9 +1,8 @@
 import { test, expect, type Page, type Route } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 
 // Route fixtures must bypass the mobile service worker.
@@ -25,7 +24,7 @@ const repoNames = ['promotions-service', 'bo_common_ui', 'cs3-platform', 'koala-
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
-  const dir = mkdtempSync(join(tmpdir(), 'otto-ux-git-'));
+  const dir = tempDir('otto-ux-git-');
   const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim();
   git('init', '-q', '-b', 'main');
   git('config', 'user.email', 'ux@otto.local');
@@ -48,7 +47,7 @@ test.beforeAll(async () => {
   expect(response.ok()).toBeTruthy();
   repoId = (await response.json()).id;
   for (const name of repoNames) {
-    const tabDir = mkdtempSync(join(tmpdir(), 'otto-ux-tab-'));
+    const tabDir = tempDir('otto-ux-tab-');
     execFileSync('git', ['-C', tabDir, 'init', '-q', '-b', 'feature/customer-experience-2026']);
     execFileSync('git', ['-C', tabDir, '-c', 'user.name=UX audit', '-c', 'user.email=ux@otto.local', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-qm', 'Synthetic repository baseline']);
     const result = await ctx.post(`${base}/api/v1/workspaces/${workspaceId}/repos`, { data: { path: tabDir, name } });
@@ -205,22 +204,28 @@ test('failed comment reply stays editable and presents an inline retry error', a
   await expect(thread.getByPlaceholder('Reply…')).toHaveCount(0);
 });
 
-test('request changes composer locks pending content and can retry a failed send', async ({ page }) => {
+test('request changes: the sheet gives way to the confirm, the header says it is sending, a failed send reopens it with the text', async ({ page }) => {
   await prFixtures(page);
   let pending: Route | undefined;
   await page.route('**/api/v1/repos/*/prs/1/request-changes', route => { pending = route; });
   await page.goto(`/#/git/${repoId}/pr/1`);
-  await page.locator('.prd-actions').getByTestId('pr-review').click(); await page.locator('.ctx-menu').getByText('Request changes…', { exact: true }).click();
-  const panel = page.locator('.prd-request-changes');
+  const review = page.locator('.prd-actions').getByTestId('pr-review');
+  await review.click(); await page.locator('.ctx-menu').getByText('Request changes…', { exact: true }).click();
+  // One dialog at a time (PrDetail.requestChanges): the sheet closes for the
+  // outward confirm and stays closed while sending; the draft stays bound.
+  const panel = page.getByRole('dialog', { name: 'Request changes on #1' });
   await panel.getByLabel('What needs to change').fill('Please cover the retry failure');
   await panel.getByRole('button', { name: 'Request changes', exact: true }).click();
   await page.getByRole('dialog', { name: /^Request changes on PR #1/ }).getByRole('button', { name: 'Request changes', exact: true }).click();
   await expect.poll(() => !!pending).toBe(true);
-  await expect(panel.getByLabel('What needs to change')).toBeDisabled();
-  await expect(panel.getByRole('button', { name: 'Cancel', exact: true })).toBeDisabled();
+  await expect(panel).toHaveCount(0);
+  await expect(review).toHaveText(/Requesting…/);
+  await expect(review).toBeDisabled();
   await pending!.fulfill({ status: 503, json: {code: 'upstream', message: 'Forge temporarily unavailable'} });
+  // The failure reopens the sheet with what was typed.
   await expect(panel.getByLabel('What needs to change')).toBeEnabled();
   await expect(panel.getByLabel('What needs to change')).toHaveValue('Please cover the retry failure');
+  await expect(review).toBeEnabled();
   pending = undefined;
   await panel.getByRole('button', { name: 'Request changes', exact: true }).click();
   await page.getByRole('dialog', { name: /^Request changes on PR #1/ }).getByRole('button', { name: 'Request changes', exact: true }).click();

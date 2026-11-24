@@ -57,6 +57,14 @@ export default async function globalTeardown(): Promise<void> {
     if (telemetry) console.warn('[e2e] Telemetry cleanup incomplete; preserving fixture data:', error instanceof Error ? error.message : String(error));
     /* no meta file — nothing to clean up */
   }
+  // The specs' fixture dirs (seed.ts tempDir), now that nothing holds them.
+  const list = join(process.cwd(), 'e2e', `.auth-${SLOT}`, 'tmp-dirs');
+  try {
+    for (const dir of readFileSync(list, 'utf8').split('\n')) if (dir) rmSync(dir, { recursive: true, force: true });
+    rmSync(list, { force: true });
+  } catch {
+    /* none listed */
+  }
 }
 
 /** SIGKILL any clickhouse process whose command line references `dataDir`

@@ -52,8 +52,10 @@ test('create, rename and delete in one window show up in the other without a rel
   await a.getByRole('button', { name: /New connection/ }).first().click();
   await a.getByRole('menuitem', { name: /^Database…/ }).click();
   await a.getByRole('dialog').getByRole('button', { name: 'MySQL', exact: true }).click();
-  await a.getByLabel('Name').fill(name);
-  await a.getByLabel('Host').fill('127.0.0.1');
+  // Scoped to the form: other specs' rows (e.g. "Actions for ungrouped-host") share the words.
+  const form = a.getByRole('dialog');
+  await form.getByLabel('Name', { exact: true }).fill(name);
+  await form.getByLabel('Host', { exact: true }).fill('127.0.0.1');
   await a.getByRole('button', { name: 'Create connection' }).click();
   await expect(rowB(name)).toBeVisible();
   // A new database opens straight into its workbench in A; back to the list.
@@ -68,7 +70,7 @@ test('create, rename and delete in one window show up in the other without a rel
   await a.getByRole('button', { name: `Actions for ${name}`, exact: true }).focus();
   await a.keyboard.press('Enter');
   await a.getByRole('menuitem', { name: 'Edit', exact: true }).click();
-  await a.getByLabel('Name').fill(`${name}-renamed`);
+  await a.getByRole('dialog').getByLabel('Name', { exact: true }).fill(`${name}-renamed`);
   await a.getByRole('button', { name: 'Save changes' }).click();
   await expect(rowB(`${name}-renamed`)).toBeVisible();
   expect(reads()).toBeGreaterThanOrEqual(2);

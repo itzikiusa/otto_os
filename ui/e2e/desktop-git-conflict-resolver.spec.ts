@@ -1,9 +1,8 @@
 import { test, expect } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 import { expectFullyInViewport, openPage } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -25,7 +24,7 @@ let repoDir = '';
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   const wsId = await seedWorkspace(ctx, base);
-  repoDir = mkdtempSync(join(tmpdir(), 'otto-e2e-conflict-'));
+  repoDir = tempDir('otto-e2e-conflict-');
   const git = (...a: string[]) =>
     execFileSync('git', ['-C', repoDir, ...a], { stdio: 'ignore' });
   git('init', '-q', '-b', 'main');

@@ -694,7 +694,10 @@
     cursor: pointer;
   }
   .graph-select { flex: 1; height: 100%; }
-  .ref-select { flex-shrink: 1; min-width: auto; } /* floor: the chip's icons + a few letters */
+  /* min-width 0 down the chain (button → chip): an automatic minimum reads
+     the label's full nowrap width as the floor, so a long branch name
+     pushed out of the cell's start. The label keeps its own 3ch floor. */
+  .ref-select { flex-shrink: 1; min-width: 0; }
   .graph-row:has(.graph-select:focus-visible) {
     outline: 2px solid var(--accent-text);
     outline-offset: -2px;
@@ -907,7 +910,7 @@
      overflowed a 156px (or 76px with the detail open) cell and, being
      end-aligned, got clipped at its START — "gin/CS3-15178-goo…" lost both
      ends. The HEAD badge and the +N expander stay rigid. */
-  .branch-cell :global(.ref-chip) { flex-shrink: 1; }
+  .branch-cell :global(.ref-chip) { flex-shrink: 1; min-width: 0; }
 
   /* ── Multi-ref collapse: the "▾ +N" expander + its grouped popover ──────────── */
   .ref-expander {

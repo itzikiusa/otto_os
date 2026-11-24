@@ -104,3 +104,53 @@ test('two failed background refreshes in a row raise the stale bar; a success cl
   d.noteBackgroundRead(null);
   assert.equal(d.refsStaleError, null);
 });
+
+test('a re-sync whose refs prove the splice unsafe reads the history ONCE, only as much as was held', async () => {
+  // A stale branch (tip far below the first page) deleted outside Otto. It
+  // used to read a first page, then the old 10k "first page" on top of it.
+  const urls: string[] = [];
+  let pending: unknown = { local: [{ name: 'main', sha: 'c0' }], remote: [], tags: [] };
+  const src = loadSource(git('graph/graphData.svelte.ts'), {
+    svelte: { untrack: (fn: () => unknown) => fn() },
+    '../../../lib/api/client': {
+      api: {
+        get: async (url: string) => {
+          urls.push(url);
+          const limit = Number(/limit=(\d+)/.exec(url)?.[1] ?? 0);
+          return url.includes('/log?') ? list(...pad(limit, 'c')) : [];
+        },
+      },
+    },
+    '../../../lib/toast.svelte': { toasts: {} },
+    '../../../lib/toastError': { toastError() {} },
+    '../../../lib/stores/git.svelte': { git: { refsRev: {} } },
+    '../../../lib/api/gitOverview': { readOverview: () => Promise.reject(new Error('no overview in this fixture')) },
+    '../../../lib/diff/gitBridge.svelte': { gitBridge: { stashCount: {} } },
+    '../graph-cache': { graphCache: { get: () => null, set() {} } },
+    '../graph-splice': loadSource(git('graph-splice.ts'), {}),
+    '../ref-menus': loadSource(git('ref-menus.ts'), {}),
+    './graphSync.svelte': {
+      createGraphSync: (h: { setRefs(r: unknown): void }) => ({
+        adoptRefsRev() {},
+        flushResync() {},
+        pendingRefsFor: () => pending,
+        flushPendingRefs() {
+          if (pending) h.setRefs(pending);
+          pending = null;
+        },
+      }),
+    },
+  });
+  const d = src.createGraphData({ repoId: 'r1', onstatus() {}, graphVisible: () => true });
+  d.applyGraph({ gen: 0, want: 1200, more: true, commits: list(...pad(1200, 'c')), error: null, stashes: null, worktrees: null });
+  d.setRefs({ local: [{ name: 'main', sha: 'c0' }, { name: 'stale', sha: 'c900' }], remote: [], tags: [] });
+  await d.reloadGraph();
+  assert.deepEqual(urls.filter((u) => u.includes('/log?')), ['/repos/r1/log?all=true&limit=1200']);
+  assert.equal(d.commits.length, 1200);
+  assert.equal(d.hasMore, true);
+  // The refs landed and the next ordinary move splices one page again.
+  urls.length = 0;
+  pending = { local: [{ name: 'main', sha: 'c0' }], remote: [], tags: [] };
+  await d.reloadGraph();
+  assert.deepEqual(urls.filter((u) => u.includes('/log?')), ['/repos/r1/log?all=true&limit=200']);
+});
