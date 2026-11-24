@@ -1070,18 +1070,11 @@
     /* Default reading measure; Threads overrides it to use its whole pane. */
     --chat-measure: 1440px;
     --prose-measure: 104ch;
-  }
-  /* Threads: one centred 760 px column (messages and composer; type in ThreadPane.svelte). */
-  .conv[data-surface='threads'] {
-    --chat-measure: calc(760px + 2 * var(--sp-6));
-    --prose-measure: none;
-    /* Two speakers: you = blue (accent), the agent = NEUTRAL (patterns §2:
-       agent identity is never a status colour — running is not success green).
-       `--agent` is the neutral tint source; the agent's rule is --border-strong. */
+    /* Two speakers: you = blue (accent), the agent = NEUTRAL (patterns §2: never a status
+       colour). `--agent` is the neutral tint source; the agent's rule is --border-strong. */
     --you: var(--accent);
     --agent: var(--text-dim);
-    /* Code surfaces + an editor-like token palette built from the theme's own
-       tones (text-safe, both schemes; tokens.css has no hex for code). */
+    /* Code surfaces + an editor-like palette from the theme's own tones (no hex for code). */
     --code-bg: color-mix(in srgb, var(--surface-2) 70%, var(--bg));
     --code-kw: color-mix(in srgb, var(--cat-4) 78%, var(--text));
     --code-str: var(--success);
@@ -1103,6 +1096,11 @@
        and 200px wide in a tiled pane, and the window said nothing about that.
        Breakpoints mirror the `@container` blocks below + `narrowHead` above. */
     container-type: inline-size;
+  }
+  /* Threads: one centred 760 px column (messages and composer; type in ThreadPane.svelte). */
+  .conv[data-surface='threads'] {
+    --chat-measure: calc(760px + 2 * var(--sp-6));
+    --prose-measure: none;
   }
   .conv-main {
     flex: 1;
