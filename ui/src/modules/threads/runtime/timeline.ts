@@ -21,6 +21,7 @@ import type {
 import type { RuntimeProjection } from './projection';
 import { settingsChangeOf, type SettingsChange } from './settingsChange.ts';
 import { perfCount } from '../../../lib/perfCount.ts';
+import { keepIfSame, sameItems } from './stableMap.ts';
 
 export interface PendingApproval {
   requestId: string;
@@ -130,9 +131,16 @@ const childrenMemo = new WeakMap<readonly TurnItem[], Map<string, TurnItem[]>>()
 
 /** A subagent's own activity (items with `parent_item_id`), by card id —
  *  once per items array, shared by the conversation and the tasks list. */
+let lastChildren: Map<string, TurnItem[]> | undefined;
 export function subagentChildren(items: readonly TurnItem[]): Map<string, TurnItem[]> {
   let hit = childrenMemo.get(items);
-  if (!hit) childrenMemo.set(items, (hit = groupSubagentChildren(items)));
+  if (!hit) {
+    // The same activity as the last call (a chunk of the answer streamed):
+    // the same Map, so the subagent rows reading it stay put.
+    hit = keepIfSame(lastChildren, groupSubagentChildren(items), sameItems);
+    lastChildren = hit;
+    childrenMemo.set(items, hit);
+  }
   return hit;
 }
 
