@@ -1,13 +1,14 @@
 # Application telemetry and profiling
 
-Otto usage measures the app itself. The existing Usage Overview and Report still
-show coding-agent tokens, model usage and cost.
+Diagnostics (formerly "Otto usage") measures the app itself. The Usage page's
+first screen and its Report still show coding-agent tokens, model usage and cost.
 
 ## Enable local collection
 
-1. Sign in as the root administrator and open **Usage → Otto usage**.
+1. Sign in as the root administrator and open **Usage → Diagnostics** (the
+   link at the bottom of the Usage page, or ⋯ → Diagnostics).
 2. Select **Collect application telemetry on this Mac**, then save.
-3. If ClickHouse is unavailable, install it from Usage → Overview first. Otto
+3. If ClickHouse is unavailable, install it from the Usage page first. Otto
    downloads and verifies its pinned OpenTelemetry Collector automatically.
 4. Wait for **Collecting locally**, then navigate or run an operation. Refresh
    the dashboard after several seconds for the first batch.

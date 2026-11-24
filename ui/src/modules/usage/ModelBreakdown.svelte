@@ -1,8 +1,10 @@
 <script lang="ts">
-  // Model breakdown: tokens per (provider, model) over the window, plus a
-  // per-day stacked chart by model. Tokens lead; cost is a secondary column.
-  // Data comes straight from UsageSummary.models / daily_models.
-  import Icon from '../../lib/components/Icon.svelte';
+  // "Where it went › Model": a per-day stacked chart by model, then one
+  // two-line row per (provider, model), biggest cost first. Data comes
+  // straight from UsageSummary.models / daily_models.
+  import CostRow from './CostRow.svelte';
+  import { costRows } from './usageOutlook';
+  import { breakdownTitle } from './tokenParts';
   import { handleBarChartKey } from './chartKeys';
   import { formatCount, formatUsd } from '../../lib/metric-format';
   import type { ModelUsage, DailyModelUsage } from '../../lib/api/usage.svelte';
@@ -11,12 +13,10 @@
     models,
     dailyModels,
     days,
-    onexport,
   }: {
     models: ModelUsage[];
     dailyModels: DailyModelUsage[];
     days: number;
-    onexport?: () => void;
   } = $props();
 
   let provider = $state<string>('all');
@@ -25,6 +25,7 @@
   const activeProvider = $derived(provider === 'all' || providers.includes(provider) ? provider : 'all');
 
   const shown = $derived(activeProvider === 'all' ? models : models.filter((m) => m.provider === activeProvider));
+  const rows = $derived(costRows(shown, (m) => `${m.provider}\u0000${m.model}`, (m) => m.model));
   const shownDaily = $derived(
     activeProvider === 'all' ? dailyModels : dailyModels.filter((d) => d.provider === activeProvider),
   );
@@ -95,25 +96,17 @@
   }
 </script>
 
-<section class="panel card" aria-labelledby="usage-model-title" data-testid="usage-models">
+<section class="models" aria-label="By model" data-testid="usage-models">
+  {#if providers.length > 1}
   <div class="panel-head">
-    <h3 id="usage-model-title">By model</h3>
-    <div class="head-tools">
-      {#if providers.length > 1}
         <div class="segmented" role="group" aria-label="Provider">
           <button aria-pressed={activeProvider === 'all'} class:active={activeProvider === 'all'} onclick={() => (provider = 'all')}>All</button>
           {#each providers as p (p)}
             <button aria-pressed={activeProvider === p} class:active={activeProvider === p} onclick={() => (provider = p)}>{p}</button>
           {/each}
         </div>
-      {/if}
-      {#if models.length > 0 && onexport}
-        <button class="btn small ghost" onclick={onexport} title="Download models as CSV" aria-label="Download models as CSV">
-          <Icon name="download" size={12} /> CSV
-        </button>
-      {/if}
-    </div>
   </div>
+  {/if}
 
   {#if shown.length === 0}
     <p class="dim small">No usage in this window. Each model appears here with its token counts as agents run.</p>
@@ -171,50 +164,19 @@
       {/if}
     {/if}
 
-    <div class="tbl-scroll">
-      <table class="model-table">
-        <thead>
-          <tr>
-            <th scope="col">Model</th>
-            <th scope="col" class="num">Input</th>
-            <th scope="col" class="num">Output</th>
-            <th scope="col" class="num">Cache write</th>
-            <th scope="col" class="num">Cache read</th>
-            <th scope="col" class="num">Total</th>
-            <th scope="col" class="num">Cost</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each shown as m (m.provider + '\u0000' + m.model)}
-            <tr>
-              <td>
-                <span class="m-name" title={m.model}>{m.model || 'unknown'}</span>
-                <span class="m-prov dim">{m.provider}</span>
-              </td>
-              <td class="num" title={m.input_tokens.toLocaleString()}>{formatCount(m.input_tokens)}</td>
-              <td class="num" title={m.output_tokens.toLocaleString()}>{formatCount(m.output_tokens)}</td>
-              <td class="num" title={m.cache_write_tokens.toLocaleString()}>{formatCount(m.cache_write_tokens)}</td>
-              <td class="num" title={m.cache_read_tokens.toLocaleString()}>{formatCount(m.cache_read_tokens)}</td>
-              <td class="num strong" title={m.total_tokens.toLocaleString()}>{formatCount(m.total_tokens)}</td>
-              <td class="num dim">{formatUsd(m.cost_usd)}</td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
+    <div class="rows">
+      {#each rows as r (r.key)}
+        {@const m = r.item}
+        <CostRow label={m.model || 'unknown'} cost={m.cost_usd} share={r.share} title={breakdownTitle(m)}
+          sub="{m.provider} · {formatCount(m.total_tokens)} tokens · input {formatCount(m.input_tokens)} · output {formatCount(m.output_tokens)} · cache read {formatCount(m.cache_read_tokens)} · cache write {formatCount(m.cache_write_tokens)}" />
+      {/each}
     </div>
   {/if}
 </section>
 
 <style>
-  .panel {
-    padding: 14px 16px;
-    min-width: 0;
-  }
-  .panel h3 {
-    font-size: var(--fs-m);
-    font-weight: 600;
-    margin: 0;
-    color: var(--text);
+  .models {
+    min-inline-size: 0;
   }
   .panel-head {
     display: flex;
@@ -224,13 +186,6 @@
     min-height: 24px;
     margin-bottom: 12px;
     gap: 6px 12px;
-  }
-  .head-tools {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 8px;
-    min-width: 0;
   }
   .segmented {
     flex-wrap: wrap;
@@ -292,44 +247,6 @@
   .model-chart-details p { white-space: pre-line; margin-block: 8px 0; line-height: 1.5; }
   @media (pointer: coarse), (max-width: 640px) {
     .model-chart-details select { min-height: var(--hit-min); }
-  }
-  .tbl-scroll {
-    overflow-x: auto;
-    max-width: 100%;
-  }
-  .model-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: var(--fs-s);
-    font-variant-numeric: tabular-nums;
-  }
-  .model-table th {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    color: var(--text-dim);
-    text-align: start;
-    padding: 4px 8px;
-    border-bottom: 1px solid var(--separator);
-    white-space: nowrap;
-  }
-  .model-table td {
-    padding: 6px 8px;
-    border-bottom: 1px solid var(--separator);
-    white-space: nowrap;
-  }
-  .model-table .num {
-    text-align: end;
-  }
-  .strong {
-    font-weight: 600;
-    color: var(--text);
-  }
-  .m-name {
-    color: var(--text);
-  }
-  .m-prov {
-    margin-inline-start: 6px;
-    font-size: var(--fs-xs);
   }
   .dim {
     color: var(--text-dim);

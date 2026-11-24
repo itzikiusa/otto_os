@@ -4,7 +4,7 @@ import { apiCtx, seedWorkspace } from './seed';
 test.use({ serviceWorkers: 'block' });
 
 for (const scheme of ['light', 'dark']) {
-  test(`Usage phone charts expose day details and keep costs visible — ${scheme}`, async ({ page }) => {
+  test(`Usage phone chart and rows expose day details and keep costs visible — ${scheme}`, async ({ page }) => {
     const { ctx, base } = await apiCtx();
     const ws = await seedWorkspace(ctx, base);
     await ctx.dispose();
@@ -29,7 +29,9 @@ for (const scheme of ['light', 'dark']) {
       daily_models: empty ? [] : daily.map(d => ({ ...d, provider: 'codex', model: 'fixture-model' })), scope: 'all',
     } }));
     await page.goto('/#/usage');
-    const dailySelect = page.getByLabel('Daily tokens day');
+    // Cost per day first, tokens one tap away; the Day picker says the day in words.
+    await expect(page.getByRole('heading', { name: 'Cost per day' })).toBeVisible();
+    const dailySelect = page.getByLabel('Chart day');
     await page.locator('.daily-svg .bar-hit').first().click();
     await expect(dailySelect).toHaveValue('2026-09-01');
     await page.locator('.daily-svg .bar-hit').nth(1).focus();
@@ -38,12 +40,21 @@ for (const scheme of ['light', 'dark']) {
     await dailySelect.selectOption('2026-09-01');
     await expect(page.getByTestId('usage-daily-details').getByRole('status')).toContainText('2026-09-01');
     await expect(page.getByTestId('usage-daily-details').getByRole('status')).toContainText('1,800');
+    await expect(page.getByTestId('usage-daily-details').getByRole('status')).toContainText('$1.25');
+    await page.getByRole('group', { name: 'Chart shows' }).getByRole('button', { name: 'Tokens' }).click();
+    await expect(page.getByRole('heading', { name: 'Tokens per day' })).toBeVisible();
+    await page.getByTestId('usage-where-model').click();
     const modelSelect = page.getByLabel('Model tokens day');
     await modelSelect.selectOption('2026-09-02');
     await expect(page.getByTestId('usage-model-details').getByRole('status')).toContainText('2026-09-02');
     await expect(page.getByTestId('usage-model-details').getByRole('status')).toContainText('fixture-model');
-    for (const cost of await page.locator('.bar-row .bar-cost').all()) await expect(cost).toBeVisible();
-    expect(await page.locator('.bar-row .bar-cost').count()).toBeGreaterThan(0);
+    // Two-line rows: the cost is on line 1 and never scrolls out of its row.
+    for (const cost of await page.locator('.cost-row .bar-cost').all()) {
+      await expect(cost).toBeVisible();
+      const box = (await cost.boundingBox())!;
+      expect(box.x + box.width).toBeLessThanOrEqual(390);
+    }
+    expect(await page.locator('.cost-row .bar-cost').count()).toBeGreaterThan(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     for (const selector of ['.daily-svg', '.model-svg']) {
       const svg = page.locator(selector);
@@ -58,13 +69,15 @@ for (const scheme of ['light', 'dark']) {
     empty = true;
     await page.reload();
     await expect(page.getByText('No usage in this window', { exact: true })).toBeVisible();
-    await expect(page.getByLabel('Daily tokens day')).toHaveCount(0);
-    await expect(page.getByRole('heading', { name: 'Budgets', exact: true })).toBeVisible();
+    await expect(page.getByLabel('Chart day')).toHaveCount(0);
+    // Budgets stay reachable in the details card even with nothing to show.
+    await expect(page.getByTestId('usage-details')).toContainText('Budgets');
     await page.route('**/usage/report?*', r => r.fulfill({ json: {
       days: 30, otto_only: true, scope: 'all', priced_as_of: 'fixture',
       totals: { ...counts, total_tokens: 0 }, daily: [], sessions: [],
     } }));
-    await page.getByRole('tab', { name: 'Report', exact: true }).click();
+    await page.locator('[data-testid="page-header"] .ph-more').click();
+    await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Report…' }).click();
     await expect(page.getByTestId('usage-report')).toBeVisible();
     await expect(page.getByTestId('usage-report').getByText('No usage in this window', { exact: true })).toBeVisible();
   });

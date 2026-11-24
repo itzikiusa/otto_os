@@ -8,6 +8,10 @@ import { apiCtx } from './seed';
 import { openPage, expectNoHorizontalOverflow } from './helpers';
 import { cannedLimits, claudeLimits, remaining, routeLimits, seedCodexLimits } from './usage-remaining-fixture';
 
+// WebKit sends a page's fetches through sw.js once it claims the page, and
+// page.route never sees them: the canned-limits tests block the worker.
+test.use({ serviceWorkers: 'block' });
+
 const phone = (page: Page) => page.evaluate(() => window.innerWidth <= 640 || window.innerHeight <= 500);
 
 /** Every element of `sel` inside the section lies within the viewport width. */

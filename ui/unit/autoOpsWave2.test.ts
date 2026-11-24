@@ -147,15 +147,16 @@ test('S-54: OttoServerHome loadGatewayTools drops superseded A->B->A responses v
   assert.equal(home.gatewayLoading, false);
 });
 
-test('S-56: UsagePage saveBudgets confirms turning block_on_exceed on and names exceeded scopes', async () => {
+test('S-56: BudgetsEditor saveBudgets confirms turning block_on_exceed on and names exceeded scopes', async () => {
   const asks: { msg: string; opts: { danger?: boolean } }[] = [];
   let savedCalls = 0;
   let allow = false;
 
   const page = componentFunctions(
-    new URL('../src/modules/usage/UsagePage.svelte', import.meta.url),
+    new URL('../src/modules/usage/BudgetsEditor.svelte', import.meta.url),
     ['saveBudgets'],
     {
+      onclose: () => {},
       budgetValidation: null,
       budgetsDirty: true,
       budgetCfg: {
