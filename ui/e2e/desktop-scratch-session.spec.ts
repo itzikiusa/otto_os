@@ -46,10 +46,10 @@ test.beforeEach(async ({ page }, testInfo) => {
   }, wsA);
 });
 
-/** The sidebar "No workspace" group label + its nested list right after it. */
+/** The Agents inbox's "No workspace" rows (each row names it on line 1). */
 function scratchGroup(page: Page) {
-  const label = page.locator('.navigator .ws-group-label', { hasText: 'No workspace' });
-  return { label, rows: label.locator('xpath=following-sibling::*[1]').locator('.nested-item') };
+  const rows = page.locator('[data-testid="agents-list"] .ai-row[data-workspace="scratch"] .tr-main');
+  return { label: rows.first(), rows };
 }
 
 async function scratchSessions(): Promise<{ id: string; title: string; workspace_id: string; archived: boolean }[]> {
@@ -105,8 +105,8 @@ test.describe('scratch sessions', () => {
       async () => (await scratchSessions()).find((s) => s.id === created!.id)?.archived,
       { timeout: 15_000 },
     ).toBe(true);
-    await page.getByRole('button', { name: /^Archived/ }).click();
-    await expect(page.locator('.navigator .nested-item.archived', { hasText: TITLE })).toBeVisible();
+    await page.getByTestId('archived-toggle').click();
+    await expect(page.locator('[data-testid="agents-history-list"] [data-state="archived"]', { hasText: TITLE })).toBeVisible();
   });
 
   test('the scratch workspace is hidden from GET /workspaces and system-owned (409 on edit)', async () => {

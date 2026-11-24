@@ -68,20 +68,12 @@ function pin(isolation: boolean) {
   };
 }
 
-/** Open the Navigator drawer on phone viewports (it's behind a hamburger there);
- *  on wider profiles the Navigator is already inline. Then return the locator for
- *  the agent-session rows. */
+/** The Agents inbox rows of the seeded workspace (a phone lands on the list at
+ *  `#/agents`; wider profiles show it beside the canvas). Scratch sessions are
+ *  global to the daemon the workers share, so rows are scoped to the workspace. */
 async function openSessionList(page: import('@playwright/test').Page) {
   await page.goto('/#/agents');
-  const openNav = page.getByRole('button', { name: 'Open navigator' });
-  const list = page.locator('.nested-row .nav-item.nested-item');
-  // isVisible() doesn't wait: settle on the first paint (hamburger on phone,
-  // the inline list elsewhere) before deciding whether to open the drawer.
-  await expect(openNav.or(list).first()).toBeVisible({ timeout: 30_000 });
-  if (await openNav.isVisible()) {
-    await openNav.click();
-  }
-  // The Agents group is the default and should render at least the rows we seeded.
+  const list = page.locator(`.ai-row[data-workspace="${workspaceId}"] .tr-main`);
   await expect.poll(() => list.count(), { timeout: 30_000 }).toBeGreaterThan(0);
   return list;
 }

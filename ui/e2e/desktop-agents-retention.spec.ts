@@ -23,12 +23,10 @@ let wsId = '';
 const NAMES = ['RetainA', 'RetainB'];
 const idByTitle: Record<string, string> = {};
 
-/** The session's ACTIVE sidebar row — archived rows render with an extra
- *  `.archived` class inside the (collapsed by default) Archived section, so
- *  exclude them: "leaves the Agents group" must not be satisfied by a
- *  still-collapsed archive. */
+/** The session's LIVE inbox row — History rows carry `data-state="archived"`,
+ *  so "leaves the list" is never satisfied by an archived row. */
 function row(page: import('@playwright/test').Page, title: string) {
-  return page.locator('.navigator .nested-item:not(.archived)', { hasText: title });
+  return page.locator('[data-testid^="agents-row-"]:not([data-state="archived"])', { hasText: title });
 }
 
 test.beforeEach(async ({ page }, info) => {
@@ -94,7 +92,7 @@ test('sessions persist under Agents after exit + reload; only archive/delete rem
 
   // 6. A final reload: neither resurfaces under Agents.
   await page.reload();
-  await expect(page.locator('.navigator')).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('agents-inbox')).toBeVisible({ timeout: 20_000 });
   await expect(row(page, 'RetainA')).toBeHidden();
   await expect(row(page, 'RetainB')).toBeHidden();
 });

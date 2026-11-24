@@ -43,7 +43,7 @@ test.afterEach(async () => {
 });
 
 test('maximizing a tile fills the body with a live terminal, and restore brings the grid back', async ({ page }) => {
-  await page.locator('.nav-item.nested-item', { hasText: TITLES[0] }).first().click();
+  await page.locator('[data-testid^="agents-row-"] .tr-main', { hasText: TITLES[0] }).first().click();
   await expect(page.locator('[data-pane-key]').first()).toBeVisible({ timeout: 15_000 });
   await page.locator('button[aria-label="Tiled view"]').click();
   await expect(page.locator('[data-tile-id]')).toHaveCount(2, { timeout: 20_000 });

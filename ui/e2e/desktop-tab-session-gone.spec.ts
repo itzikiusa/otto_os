@@ -45,7 +45,7 @@ test.afterEach(async () => {
 const exists = async (id: string): Promise<boolean> => (await ctx.get(`${base}/api/v1/sessions/${id}`)).ok();
 
 async function openTab(page: Page, title: string) {
-  await page.locator('.nav-item.nested-item', { hasText: title }).first().click();
+  await page.locator(`.ai-row[data-workspace="${wsId}"] .tr-main`, { hasText: title }).first().click();
   const tab = page.locator('.tab', { hasText: title });
   await expect(tab).toBeVisible({ timeout: 10_000 });
   return tab;
@@ -61,7 +61,7 @@ test('tab ×: Delete closes the tab and removes the session', async ({ page }) =
 
 test('sidebar row menu: Delete… closes the open tab', async ({ page }) => {
   const tab = await openTab(page, 'Totti');
-  await page.locator('.nav-item.nested-item', { hasText: 'Totti' }).first().click({ button: 'right' });
+  await page.locator(`.ai-row[data-workspace="${wsId}"] .tr-main`, { hasText: 'Totti' }).first().click({ button: 'right' });
   await page.locator('.ctx-item', { hasText: 'Delete…' }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Delete', exact: true }).click();
   await expect(tab).toBeHidden({ timeout: 10_000 });

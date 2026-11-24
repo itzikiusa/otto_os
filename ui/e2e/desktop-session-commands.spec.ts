@@ -85,7 +85,7 @@ test('⌘I: close a session by NAME, then close ALL of a provider', async ({ pag
   });
   expect(sr.ok(), await sr.text()).toBeTruthy();
   const scratchId = (await sr.json()).id as string;
-  await expect(page.locator('.navigator .nested-item', { hasText: scratchTitle })).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('[data-testid^="agents-row-"] .tr-main', { hasText: scratchTitle })).toBeVisible({ timeout: 20_000 });
 
   // "close zlatan" → only that session is archived, without a dialog: one
   // plain shell (its prompt output reads as "working", but a shell is never an

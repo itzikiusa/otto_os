@@ -52,7 +52,7 @@ const runCommand = runBarCommand;
  * columns ≈ 240px and 8 ≈ 115px — the 15-pane cap is never reached here.
  */
 async function columnsUntil(page: Page, maxW: number): Promise<number> {
-  await page.locator('.nav-item.nested-item', { hasText: 'Baresi' }).first().click();
+  await page.locator('[data-testid^="agents-row-"] .tr-main', { hasText: 'Baresi' }).first().click();
   await expect(page.locator('.pane').first()).toBeVisible({ timeout: 15_000 });
   let w = await page.locator('.pane-head').first().evaluate((el) => el.clientWidth);
   for (let i = 0; i < 14 && w > maxW; i++) {

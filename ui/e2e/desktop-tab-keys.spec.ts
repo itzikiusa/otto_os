@@ -42,7 +42,7 @@ test.afterEach(async () => {
 });
 
 async function openTab(page: import('@playwright/test').Page, title: string) {
-  await page.locator('.nav-item.nested-item', { hasText: title }).first().click();
+  await page.locator('[data-testid^="agents-row-"] .tr-main', { hasText: title }).first().click();
   const tab = page.locator('.tab', { hasText: title });
   await expect(tab).toBeVisible({ timeout: 10_000 });
   return tab;

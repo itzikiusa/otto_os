@@ -8,6 +8,10 @@ import { plural } from '../lib/plural';
 import { toasts } from '../lib/toast.svelte';
 import { toastError } from '../lib/toastError';
 import { ws } from '../lib/stores/workspace.svelte';
+import { ui } from '../lib/stores/ui.svelte';
+import { router } from '../lib/router.svelte';
+import { copyText } from '../lib/clipboard';
+import type { MenuItem } from '../lib/contextmenu.svelte';
 
 /** `POST /sessions/bulk` takes at most this many ids per call. */
 const BULK_MAX = 200;
@@ -115,4 +119,54 @@ export async function removeWorkspace(w: WorkspaceWithRole): Promise<void> {
   const failed = await archiveInBulk(live.map((s) => s.id));
   if (failed === 0) toasts.info('Workspace removed', `${w.name} · ${plural(live.length, 'session')} archived`);
   else toasts.error('Workspace removed', `${plural(failed, 'session')} of ${w.name} couldn’t be archived. Restore the workspace to stop them.`);
+}
+
+/** Open the New Session sheet in workspace `id` (switching there first —
+ *  the sheet always targets the current workspace). */
+export async function newSessionIn(id: string): Promise<void> {
+  if (ws.currentId !== id && !(await ws.select(id))) return;
+  ui.newSessionScratch = false;
+  ui.newSessionOpen = true;
+}
+
+/** Open the New Session sheet pre-set to "No workspace". */
+export function newScratchSession(): void {
+  ui.newSessionScratch = true;
+  ui.newSessionOpen = true;
+}
+
+/** Right-click on a workspace folder (the Agents inbox's workspace chip, a
+ *  Workspaces row): start work there first, then manage it. `onremoved`
+ *  opens the Removed workspaces sheet. */
+export function workspaceMenuItems(w: WorkspaceWithRole, onremoved: () => void): MenuItem[] {
+  const items: MenuItem[] = [
+    { label: `New session in “${w.name}”…`, icon: 'plus', action: () => void newSessionIn(w.id) },
+    { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
+    { separator: true },
+  ];
+  if (ws.currentId !== w.id) {
+    items.push({ label: 'Switch to this workspace', icon: 'check', action: () => void ws.select(w.id) });
+  }
+  items.push(
+    {
+      label: 'Copy folder path',
+      icon: 'copy',
+      title: w.root_path,
+      action: async () => {
+        if (await copyText(w.root_path)) toasts.success('Copied', w.root_path);
+        else toasts.error('Couldn’t copy the path', `The clipboard isn’t available here. Select the path and copy it manually: ${w.root_path}`);
+      },
+    },
+    { label: 'Workspace context', icon: 'note', action: async () => { if (await ws.select(w.id)) router.go('settings/context-soul'); } },
+  );
+  if (w.my_role === 'admin') {
+    items.push(
+      { separator: true },
+      { label: 'Rename…', icon: 'edit', action: () => void renameWorkspace(w) },
+      { label: 'Change folder…', icon: 'folder', action: () => void changeWorkspaceDir(w) },
+      { label: 'Remove workspace…', icon: 'trash', danger: true, action: () => void removeWorkspace(w) },
+    );
+  }
+  items.push({ separator: true }, { label: 'Add workspace…', icon: 'plus', action: () => (ui.newWorkspaceOpen = true) }, { label: 'Removed workspaces…', icon: 'archive', action: onremoved });
+  return items;
 }

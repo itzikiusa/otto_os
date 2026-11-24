@@ -1,16 +1,8 @@
 <script lang="ts">
   import LazyMount from '../lib/components/LazyMount.svelte';
-  import { ShareModalChunk } from './overlays.svelte';
   import { rowMenu } from '../lib/rowMenu';
-  import Skeleton from '../lib/components/Skeleton.svelte';
-  import LoadState from '../lib/components/LoadState.svelte';
-  import { focusOnMount } from '../lib/focusOnMount';
-  import { toastError } from '../lib/toastError';
-  import { loadErrorText } from '../lib/loadError';
-  import { closeConfirm } from './closeConfirm';
-  import { changeWorkspaceDir, removeWorkspace, renameWorkspace } from './workspaceActions';
+  import { newScratchSession, workspaceMenuItems as wsMenu } from './workspaceActions';
   import { RemovedWorkspacesChunk } from './lazyDialogs';
-  import { checkOpenTabs } from './openTabsCheck';
   import { LS_WS_RECENT, activityText, parseRecent, switcherItems, workspaceActivity } from './workspaceSwitch';
   import { lsGet } from '../lib/storage';
   // Expanded 240px navigator: modules in foldable macOS source-list sections
@@ -19,30 +11,19 @@
   import { navBadge } from '../lib/navBadge';
   import Icon from '../lib/components/Icon.svelte';
   import NotificationBell from './NotificationBell.svelte';
-  import StatusDot from '../lib/components/StatusDot.svelte';
-  import ProviderIcon, { hasProviderIcon } from '../lib/components/ProviderIcon.svelte';
   import { router } from '../lib/router.svelte';
   import { navPending } from '../lib/navPending.svelte';
   import { ui } from '../lib/stores/ui.svelte';
   import { RAIL_MIN, RAIL_MAX } from '../lib/stores/ui.svelte';
   import { paneResizer, pxWide, RESIZE_TITLE } from '../lib/paneResizer';
   import { startMouseDrag } from '../lib/dragCursor';
-  import { ws, SCRATCH_WORKSPACE_ID } from '../lib/stores/workspace.svelte';
+  import { ws } from '../lib/stores/workspace.svelte';
   import { auth } from '../lib/stores/auth.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
-  import { activity } from '../lib/stores/activity.svelte';
   import { ctxMenu, type MenuItem } from '../lib/contextmenu.svelte';
   import { sidePane, splitMenuItems, navClick, SPLIT_HINT } from '../lib/stores/sidePane.svelte';
-  import { popoutItems } from '../lib/popoutMenu';
-  import { sessionOrder, applyOrder, applyTokenOrder } from '../lib/stores/sessionOrder.svelte';
-  import { sessionUsage } from '../lib/stores/sessionUsage.svelte';
-  import { pollWhileVisible } from '../lib/poll';
-  import { sessionUsageLabel } from '../lib/sessionUsage';
   import { viewport } from '../lib/stores/viewport.svelte';
   import NavLightToggle from './NavLightToggle.svelte';
-  import { confirmer } from '../lib/confirm.svelte';
-  import { toasts } from '../lib/toast.svelte';
-  import { copyText } from '../lib/clipboard';
   import type { WorkspaceWithRole } from '../lib/api/types';
   import { tick, untrack } from 'svelte';
   import {
@@ -60,222 +41,6 @@
     type SidebarPluginEntry,
     type SidebarSection,
   } from '../lib/sidebar';
-  import type { Session } from '../lib/api/types';
-  import { events } from '../lib/events.svelte';
-  import { sessionState, type SessionStateInfo } from '../lib/status';
-
-  // Load the per-session task roll-up for the current workspace (sidebar chips);
-  // it then stays fresh from the events WS (tasks_updated / trail_appended).
-  $effect(() => {
-    const w = ws.currentId;
-    if (w) void activity.loadSummary(w);
-  });
-
-  // One session vocabulary (lib/status.ts): a row's dot, tooltip and resume
-  // affordance all come from `sessionState`. While the events socket is down
-  // the live claims are stale — "Reconnecting…", no pulse (patterns.md §1).
-  const staleEvents = $derived(events.state !== 'connected');
-  /** Session-row tooltip: a long title made one very wide native tooltip that
-   *  WKWebView pinned against the window edge and clipped over the page. Keep
-   *  it short and put the state + secondary signals on their own lines. */
-  function rowTip(title: string, st: SessionStateInfo, tasks: { done: number; total: number; in_progress?: string | null } | null, usage?: string | null): string {
-    const t = title.length > 80 ? `${title.slice(0, 79).trimEnd()}…` : title;
-    const lines = [t, st.hint ?? st.label];
-    if (tasks && tasks.total > 0) {
-      lines.push(tasks.in_progress ? `Now: ${tasks.in_progress} · ${tasks.done}/${tasks.total} tasks` : `${tasks.done}/${tasks.total} tasks done`);
-    }
-    if (usage) lines.push(`${usage} (30 days)`);
-    if (!st.resumable) lines.push('Double-click to rename');
-    return lines.join('\n');
-  }
-
-  let agentsOpen = $state(true);
-  // Channel groups (ticket/chat sessions) start collapsed — at ticketing volume
-  // they can number in the dozens, so the header + count is shown by default and
-  // the user expands on demand.
-  let telegramOpen = $state(false);
-  let slackOpen = $state(false);
-  let archivedOpen = $state(false);
-  // Multi-select in the Archived list: checked ids → one "Delete selected"
-  // confirm instead of N single-row deletes.
-  let archSel = $state<Set<string>>(new Set());
-  // Select mode on the Agents list: header toggle → per-row checkboxes → one
-  // Archive / Delete for the whole selection (delete confirms once).
-  let agentSelMode = $state(false);
-  let agentSel = $state<Set<string>>(new Set());
-  function toggleAgentSel(id: string): void {
-    const next = new Set(agentSel);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    agentSel = next;
-  }
-  function agentSelectAll(): void {
-    agentSel = agentSelIds.length === selectable.length ? new Set() : new Set(selectable.map((s) => s.id));
-  }
-  function setAgentSelMode(on: boolean): void {
-    agentSelMode = on;
-    if (!on) agentSel = new Set();
-  }
-  /** The ⌘K palette's close confirm (closeConfirm.ts): titles + mid-turn warning. */
-  function askClose(ids: string[], permanent: boolean, from: Session[]): Promise<boolean> {
-    const titles = ids.map((id) => from.find((s) => s.id === id)?.title ?? id);
-    const working = ids.filter((id) => ws.isAgentMidTurn(id)).length;
-    const { message, ...opts } = closeConfirm({ titles, working, permanent });
-    return confirmer.ask(message, opts);
-  }
-  async function archiveSelectedAgents(): Promise<void> {
-    const ids = agentSelIds;
-    if (ids.length === 0) return;
-    // Archiving stops a session: ask first when any of them is mid-turn.
-    if (ids.some((id) => ws.isAgentMidTurn(id)) && !(await askClose(ids, false, selectable))) return;
-    await ws.archiveSessions(ids);
-    checkOpenTabs(true);
-    setAgentSelMode(false);
-  }
-  async function deleteSelectedAgents(): Promise<void> {
-    const ids = agentSelIds;
-    if (ids.length === 0 || !(await askClose(ids, true, selectable))) return;
-    await ws.killSessions(ids);
-    checkOpenTabs(true);
-    setAgentSelMode(false);
-  }
-  const archivedIds = $derived(new Set(ws.archivedAgentSessions.map((s) => s.id)));
-  const archSelCount = $derived([...archSel].filter((id) => archivedIds.has(id)).length);
-  /** Expand / fold the Archived section; the first open loads page one. */
-  function toggleArchived(): void {
-    archivedOpen = !archivedOpen;
-    if (archivedOpen && !ws.archivedLoaded) void loadArchivedPage(false);
-  }
-  let archivedError = $state<string | null>(null);
-  async function loadArchivedPage(more: boolean): Promise<void> {
-    archivedError = null;
-    try {
-      await ws.loadArchived(more);
-    } catch (e) {
-      archivedError = loadErrorText(e);
-    }
-  }
-  function toggleArchSel(id: string): void {
-    const next = new Set(archSel);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    archSel = next;
-  }
-  function archSelectAll(): void {
-    archSel = archSelCount === ws.archivedAgentSessions.length ? new Set() : new Set(ws.archivedAgentSessions.map((s) => s.id));
-  }
-  async function deleteSelectedArchived(): Promise<void> {
-    const ids = ws.archivedAgentSessions.filter((s) => archSel.has(s.id)).map((s) => s.id);
-    if (ids.length === 0 || !(await askClose(ids, true, ws.archivedAgentSessions))) return;
-    await ws.killSessions(ids);
-    checkOpenTabs(true);
-    archSel = new Set();
-  }
-  let renamingId: string | null = $state(null);
-  let draft = $state('');
-  /** The session whose Share sheet is open (same sheet as the tab / pane menus). */
-  let shareSessionId = $state<string | null>(null);
-
-  // When a channel group is expanded, show only the most recent N sessions with
-  // a "show more" expander, so a busy day's worth of tickets doesn't flood the
-  // sidebar. Bypassed while searching (the user is actively filtering).
-  const CHANNEL_CAP = 20;
-  let telegramShowAll = $state(false);
-  let slackShowAll = $state(false);
-
-  // Session search: filters every group by title (case-insensitive), plus an
-  // optional "Needs you" filter that narrows to sessions blocked on the operator.
-  let sessionQuery = $state('');
-  const q = $derived(sessionQuery.trim().toLowerCase());
-  const matches = (s: Session): boolean => {
-    if (ws.needsYouFilter && ws.needsYou[s.id] !== true) return false;
-    return q === '' || s.title.toLowerCase().includes(q);
-  };
-  // ── Manual sidebar order (C3b) ───────────────────────────────────────────
-  // "Recent" is the daemon's order, rendered unchanged. "Manual" applies the
-  // persisted id list, with sessions it has never seen on TOP by recency.
-  $effect(() => {
-    sessionOrder.load(ws.currentId ?? SCRATCH_WORKSPACE_ID);
-  });
-  // Per-session tokens (A5): the 30-day workspace rollup feeds the "Tokens"
-  // sort and the row tooltip. Read once a minute at most (store-throttled).
-  const canUsage = $derived(auth.can('usage', 'view'));
-  const usageWs = $derived(ws.currentId ?? SCRATCH_WORKSPACE_ID);
-  // Polled only while the Tokens sort is on (the order must stay current);
-  // otherwise the rollup only feeds row tooltips, so one read per workspace
-  // switch is enough (F4).
-  const tokensMode = $derived(sessionOrder.mode === 'tokens');
-  $effect(() => {
-    if (!canUsage) return;
-    const wid = usageWs;
-    if (!tokensMode) {
-      void sessionUsage.loadWorkspace(wid);
-      return;
-    }
-    const p = pollWhileVisible(() => sessionUsage.loadWorkspace(wid), { ms: 60_000 });
-    return () => p.stop();
-  });
-  const usageRows = $derived(canUsage ? (sessionUsage.byWorkspace[usageWs] ?? {}) : {});
-  const tokensSort = $derived(sessionOrder.mode === 'tokens' && canUsage && sessionUsage.available);
-  const orderedAgents = $derived(
-    sessionOrder.mode === 'manual'
-      ? applyOrder(ws.plainAgentSessions, sessionOrder.order)
-      : tokensSort
-        ? applyTokenOrder(ws.plainAgentSessions, sessionUsage.tokensFor(usageWs))
-        : ws.plainAgentSessions,
-  );
-  const fAgents = $derived(orderedAgents.filter(matches));
-  // Rows drag only in the flat Agents list: never while searching, selecting,
-  // needs-you filtering, or on phones (HTML5 DnD is inert on iOS Safari).
-  const rowsDraggable = $derived(q === '' && !agentSelMode && !ws.needsYouFilter && !viewport.isPhone);
-  let rowDragId = $state<string | null>(null);
-  let rowDragOverId = $state<string | null>(null);
-  function onRowDragStart(e: DragEvent, id: string): void {
-    rowDragId = id;
-    e.dataTransfer?.setData('text/plain', id);
-    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
-  }
-  function onRowDragOver(e: DragEvent, id: string): void {
-    if (!rowDragId || id === rowDragId) return;
-    e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-    rowDragOverId = id;
-  }
-  function onRowDrop(e: DragEvent, id: string): void {
-    e.preventDefault();
-    if (rowDragId && rowDragId !== id) sessionOrder.dragTo(fAgents.map((x) => x.id), rowDragId, id);
-    rowDragId = null;
-    rowDragOverId = null;
-  }
-  function onRowDragEnd(): void {
-    rowDragId = null;
-    rowDragOverId = null;
-  }
-  function openSortMenu(e: MouseEvent): void {
-    ctxMenu.showAt(e.currentTarget as HTMLElement, [
-      { label: 'Sort: Recent', checked: sessionOrder.mode === 'recent', action: () => sessionOrder.setMode('recent') },
-      {
-        label: 'Sort: Manual (drag rows)',
-        checked: sessionOrder.mode === 'manual',
-        action: () => sessionOrder.setMode('manual', fAgents.map((x) => x.id)),
-      },
-      ...(canUsage && sessionUsage.available
-        ? [{ label: 'Sort: Tokens (most first, 30 days)', checked: sessionOrder.mode === 'tokens', action: () => sessionOrder.setMode('tokens') }]
-        : []),
-      { separator: true },
-      { label: 'Reset to recent', icon: 'refresh', disabled: sessionOrder.mode === 'recent', action: () => sessionOrder.reset() },
-    ]);
-  }
-  // Workspace-less sessions (the "No workspace" group below the flat list).
-  const fScratch = $derived(ws.scratchSessions.filter(matches));
-  // Select mode covers the flat list AND the "No workspace" group.
-  const selectable = $derived([...fAgents, ...fScratch]);
-  const agentSelIds = $derived(selectable.filter((s) => agentSel.has(s.id)).map((s) => s.id));
-  const fTelegram = $derived(ws.telegramSessions.filter(matches));
-  const fSlack = $derived(ws.slackSessions.filter(matches));
-  // Capped views (full list when searching or "show all" toggled).
-  const visTelegram = $derived(q || telegramShowAll ? fTelegram : fTelegram.slice(0, CHANNEL_CAP));
-  const visSlack = $derived(q || slackShowAll ? fSlack : fSlack.slice(0, CHANNEL_CAP));
 
   // Drag-to-resize the navigator from its inline-end edge (widens the session area).
   let resizing = $state(false);
@@ -293,22 +58,6 @@
         ui.setRailWidth(ui.railWidth);
       },
     });
-  }
-
-  function openSession(id: string): void {
-    ws.navigateToSession(id);
-  }
-
-  /** Respawn a stuck in-progress agent's PTY (the terminal reconnects itself).
-   *  Asks first when it is working, same as the pane header. */
-  function restartAgent(id: string): Promise<void> {
-    return ws.requestRestart(id);
-  }
-
-  /** Delete = PTY killed, row + full history gone. Asks first unless the
-   *  user chose "Always delete" (see ws.requestDeleteSession). */
-  function deleteSession(id: string): Promise<void> {
-    return ws.requestDeleteSession(id);
   }
 
   // ── Workspace quick filter ──────────────────────────────────────────────────
@@ -357,70 +106,7 @@
   const wsActivity = $derived(workspaceActivity([...ws.foregroundActive, ...ws.otherWsSessions], ws.statusMap, ws.needsYou));
   let removedOpen = $state(false);
 
-  function startRename(id: string, current: string): void {
-    const s = ws.getSession(id);
-    if (!s || !ws.canEditSession(s)) return;
-    renamingId = id;
-    draft = current;
-  }
-
-  /** Open the New Session sheet in workspace `id` (switching there first —
-   *  the sheet always targets the current workspace). */
-  async function newSessionIn(id: string): Promise<void> {
-    if (ws.currentId !== id && !(await ws.select(id))) return;
-    ui.newSessionScratch = false;
-    ui.newSessionOpen = true;
-  }
-
-  /** Right-click on a workspace folder (the Agents chip, an all-workspaces
-   *  group, a Workspaces row): start work there first, then manage it. */
-  function workspaceMenuItems(w: WorkspaceWithRole): MenuItem[] {
-    const items: MenuItem[] = [
-      { label: `New session in “${w.name}”…`, icon: 'plus', action: () => void newSessionIn(w.id) },
-      { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
-      { separator: true },
-    ];
-    if (ws.currentId !== w.id) {
-      items.push({ label: 'Switch to this workspace', icon: 'check', action: () => void ws.select(w.id) });
-    }
-    items.push(
-      {
-        label: 'Copy folder path',
-        icon: 'copy',
-        title: w.root_path,
-        action: async () => {
-          if (await copyText(w.root_path)) toasts.success('Copied', w.root_path);
-          else toasts.error('Couldn’t copy the path', `The clipboard isn’t available here. Select the path and copy it manually: ${w.root_path}`);
-        },
-      },
-      { label: 'Workspace context', icon: 'note', action: async () => { if (await ws.select(w.id)) router.go('settings/context-soul'); } },
-    );
-    if (w.my_role === 'admin') {
-      items.push(
-        { separator: true },
-        { label: 'Rename…', icon: 'edit', action: () => void renameWorkspace(w) },
-        { label: 'Change folder…', icon: 'folder', action: () => void changeWorkspaceDir(w) },
-        { label: 'Remove workspace…', icon: 'trash', danger: true, action: () => void removeWorkspace(w) },
-      );
-    }
-    items.push({ separator: true }, { label: 'Add workspace…', icon: 'plus', action: () => (ui.newWorkspaceOpen = true) }, { label: 'Removed workspaces…', icon: 'archive', action: () => (removedOpen = true) });
-    return items;
-  }
-
-  /** Open the New Session sheet pre-set to "No workspace". */
-  function newScratchSession(): void {
-    ui.newSessionScratch = true;
-    ui.newSessionOpen = true;
-  }
-
-  async function commitRename(): Promise<void> {
-    const id = renamingId;
-    renamingId = null;
-    if (!id) return;
-    const next = draft.trim();
-    // A failed rename leaves the old title (the store only takes the reply) and says why.
-    if (next) await ws.renameSession(id, next).catch((e) => toastError('Couldn’t rename the session', e));
-  }
+  const workspaceMenuItems = (w: WorkspaceWithRole): MenuItem[] => wsMenu(w, () => (removedOpen = true));
 
   // ── Module list (shared registry → RBAC + plugins → user order/visibility) ──
   // `resolved` is the full ordered list (incl. hidden); `visible` drops hidden
@@ -477,8 +163,7 @@
   });
   /** Held open regardless of the saved fold state (so its header can't fold it). */
   function sectionPinned(sec: SidebarSection): boolean {
-    if (ui.sidebarEditMode || sec.group.id === activeGroup) return true;
-    return (q !== '' || ws.needsYouFilter) && sec.modules.some((m) => m.id === 'agents');
+    return ui.sidebarEditMode || sec.group.id === activeGroup;
   }
   function sectionOpen(sec: SidebarSection): boolean {
     return sectionPinned(sec) || !ui.sidebarCollapsedGroups.includes(sec.group.id);
@@ -782,40 +467,19 @@
   </div>
 
   <div class="nav-scroll" bind:this={scrollEl}>
-    <!-- Global session search: filters every group below (Agents / Telegram /
-         Slack). Hidden while editing the sidebar (no session lists shown then). -->
     {#if !ui.sidebarEditMode}
-      <div class="nav-search">
-        <Icon name="search" size={12} />
-        <input dir="ltr"
-          class="nav-search-input"
-          placeholder="Filter sessions…"
-          aria-label="Filter sessions"
-          bind:value={sessionQuery}
-          onkeydown={(e) => {
-            if (e.key !== 'Escape') return;
-            e.preventDefault();
-            e.stopPropagation();
-            if (sessionQuery) sessionQuery = '';
-            else e.currentTarget.blur();
-          }}
-        />
-        {#if sessionQuery}
-          <button class="search-clear" onclick={() => (sessionQuery = '')} aria-label="Clear search" title="Clear search">
-            <Icon name="x" size={12} />
-          </button>
-        {/if}
-      </div>
-
-      <!-- "Needs you" filter: narrows every group to sessions blocked on input.
-           Only shown once at least one session is flagged (or while already on). -->
+      <!-- "Needs you": opens the Agents inbox narrowed to the sessions blocked
+           on input. Only shown once at least one session is flagged (or while on). -->
       {#if ws.needsYouCount > 0 || ws.needsYouFilter}
         <button
           class="needs-you-filter"
           class:active={ws.needsYouFilter}
           aria-pressed={ws.needsYouFilter}
-          onclick={() => (ws.needsYouFilter = !ws.needsYouFilter)}
-          title="Show only sessions waiting on you"
+          onclick={() => {
+            ws.needsYouFilter = !ws.needsYouFilter;
+            if (ws.needsYouFilter && router.module !== 'agents') router.go('agents');
+          }}
+          title="Show only the sessions waiting on you"
         >
           <Icon name="bell" size={12} />
           <span class="grow">Needs you</span>
@@ -1041,11 +705,6 @@
   </div>
 </nav>
 
-{#if shareSessionId}
-  <!-- Loaded on first use: it bundles the QR encoder. -->
-  {@const id = shareSessionId}
-  <LazyMount lazy={ShareModalChunk} what="the share dialog" quiet onerror={() => (shareSessionId = null)} props={{ sessionId: id, onclose: () => (shareSessionId = null) }} />
-{/if}
 {#if removedOpen}<LazyMount lazy={RemovedWorkspacesChunk} what="removed workspaces" quiet onerror={() => (removedOpen = false)} props={{ onclose: () => (removedOpen = false) }} />{/if}
 
 <!-- The module the side-by-side pane shows: a quiet trailing glyph. -->
@@ -1191,420 +850,10 @@
         <span class="count-chip working">{ws.workingCount}</span>
       {/if}
     </button>
-    {#if selectable.some((s) => ws.canEditSession(s))}
-      <button
-        class="icon-btn twisty sel-toggle"
-        class:on={agentSelMode}
-        onclick={() => setAgentSelMode(!agentSelMode)}
-        title={agentSelMode ? 'Done selecting' : 'Select sessions to archive or delete'}
-        aria-label="Select sessions"
-        aria-pressed={agentSelMode}
-        data-testid="agents-select-toggle"
-      >
-        <Icon name={agentSelMode ? 'check' : 'square'} size={12} />
-      </button>
-    {/if}
-    {#if fAgents.length > 1}
-      <button
-        class="icon-btn twisty sort-toggle"
-        class:on={sessionOrder.mode === 'manual' || tokensSort}
-        onclick={openSortMenu}
-        title={sessionOrder.mode === 'manual' ? 'Manual order — click to change' : tokensSort ? 'Sorted by tokens — click to change' : 'Sort sessions'}
-        aria-label="Sort sessions"
-        data-testid="agents-sort-toggle"
-      >
-        <Icon name={sessionOrder.mode === 'manual' ? 'grip' : 'arrowDown'} size={12} />
-      </button>
-    {/if}
-    <button
-      class="icon-btn twisty all-ws-toggle"
-      class:on={ws.allWorkspaces}
-      onclick={() => ws.setAllWorkspaces(!ws.allWorkspaces)}
-      title={ws.allWorkspaces
-        ? 'Showing sessions from all workspaces — click for current only'
-        : 'Show sessions from all workspaces'}
-      aria-label="Toggle all-workspaces session list"
-      aria-pressed={ws.allWorkspaces}
-    >
-      <Icon name="globe" size={12} />
-    </button>
-    <button
-      class="icon-btn twisty"
-      onclick={() => (agentsOpen = !agentsOpen)}
-      aria-label="Toggle session list"
-      aria-expanded={agentsOpen}
-      title={agentsOpen ? 'Hide sessions' : 'Show sessions'}
-    >
-      <Icon name={agentsOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-    </button>
-  </div>
-
-  <!-- Everything Agents owns (its session lists, channel groups, archive)
-       hangs off its row on one outline guide, so it reads as Agents' content
-       rather than more sections. -->
-  <div class="agents-sub">
-    <!-- Which workspace the flat list below belongs to (it was only visible
-         from the terminal or the Workspaces section far below). Click →
-         switch. With no current workspace the "No workspace" group right
-         below already says so, so the chip would only repeat it. -->
-    {#if ws.current}
-      {@const cur = ws.current}
-      <button use:rowMenu
-        class="ws-chip"
-        onclick={openWsSwitcher}
-        oncontextmenu={(e) => ctxMenu.show(e, workspaceMenuItems(cur))}
-        aria-haspopup="menu"
-        title={`${ws.current.name}\n${ws.current.root_path}\nClick to switch workspace`}
-        aria-label={`Current workspace: ${ws.current.name}. Switch workspace`}
-        data-testid="agents-current-ws"
-      >
-        <Icon name="folder" size={13} />
-        <span class="ellipsis">{ws.current.name}</span>
-        <Icon name="chevronDown" size={12} />
-      </button>
-    {/if}
-    {#if q ? fAgents.length > 0 : agentsOpen}
-      <div class="nested" data-testid="agents-list">
-        {#if agentSelMode}
-          <div class="arch-tools" data-testid="agents-select-tools">
-            <label class="arch-all" title="Select all sessions">
-              <input type="checkbox" aria-label="Select all sessions" checked={agentSelIds.length > 0 && agentSelIds.length === selectable.length} indeterminate={agentSelIds.length > 0 && agentSelIds.length < selectable.length} onchange={agentSelectAll} />
-              <span>{agentSelIds.length > 0 ? `${agentSelIds.length} selected` : 'Select all'}</span>
-            </label>
-            <button class="row-action arch-del-sel" disabled={agentSelIds.length === 0} title="Archive selected sessions" aria-label="Archive selected sessions" data-testid="agents-archive-selected" onclick={() => void archiveSelectedAgents()}>
-              <Icon name="archive" size={12} /><span>Archive</span>
-            </button>
-            <button class="row-action danger arch-del-sel" disabled={agentSelIds.length === 0} title="Delete selected sessions" aria-label="Delete selected sessions" data-testid="agents-delete-selected" onclick={() => void deleteSelectedAgents()}>
-              <Icon name="trash" size={12} /><span>Delete</span>
-            </button>
-          </div>
-        {/if}
-        {#each fAgents as s (s.id)}
-          {@render sessionRow(s, undefined, true)}
-        {:else}
-          <div class="nested-empty">No sessions — ⌘T to start one</div>
-        {/each}
-      </div>
-    {/if}
-
-    <!-- Workspace-less sessions (the daemon's hidden scratch workspace): one
-         group in every workspace and with none. Plain `sessionRow`s — they are
-         already in `ws.sessions`, so open / rename / archive work as above. -->
-    {#if q ? fScratch.length > 0 : agentsOpen && (ws.scratchSessions.length > 0 || ws.current === null)}
-      <!-- Right-click is a pointer shortcut (⌘T → “No workspace” is the keyboard path). -->
-      <div use:rowMenu
-        role="presentation"
-        class="ws-group-label"
-        title="Sessions not tied to any workspace"
-        data-testid="scratch-group"
-        oncontextmenu={(e) => ctxMenu.show(e, [
-          { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
-        ])}
-      >
-        <Icon name="home" size={13} />
-        <span class="ellipsis">No workspace</span>
-      </div>
-      <div class="nested">
-        {#each fScratch as s (s.id)}
-          {@render sessionRow(s)}
-        {:else}
-          <div class="nested-empty">No sessions — ⌘T, then “No workspace”</div>
-        {/each}
-      </div>
-    {/if}
-
-    <!-- All-workspaces view: sessions living in OTHER workspaces, grouped by
-         workspace (the current one keeps its flat list above). Clicking a row
-         switches to that workspace and focuses the session. -->
-    {#if ws.allWorkspaces && (agentsOpen || q)}
-      {#each ws.otherWsGroups as g (g.ws.id)}
-        {@const rows = g.sessions.filter(matches)}
-        {#if rows.length > 0}
-          <div use:rowMenu
-            role="presentation"
-            class="ws-group-label"
-            title="Sessions in workspace “{g.ws.name}” — right-click for actions"
-            data-testid="ws-group-{g.ws.id}"
-            oncontextmenu={(e) => ctxMenu.show(e, workspaceMenuItems(g.ws))}
-          >
-            <Icon name="folder" size={13} />
-            <span class="ellipsis">{g.ws.name}</span>
-          </div>
-          <div class="nested">
-            {#each rows as s (s.id)}
-              {@render sessionRow(s, g.ws.id)}
-            {/each}
-          </div>
-        {/if}
-      {/each}
-    {/if}
-
-    {#if q ? fTelegram.length > 0 : ws.telegramSessions.length > 0}
-      <div class="nav-item-row">
-        <button class="nav-item" onclick={() => (telegramOpen = !telegramOpen)} aria-expanded={telegramOpen}>
-          <Icon name="send" size={14} />
-          <span class="grow">Telegram</span>
-          <span class="count-chip">{ws.telegramSessions.length}</span>
-        </button>
-        <button
-          class="icon-btn twisty"
-          onclick={() => (telegramOpen = !telegramOpen)}
-          aria-label="Toggle Telegram list"
-          aria-expanded={telegramOpen}
-          title={telegramOpen ? 'Hide Telegram sessions' : 'Show Telegram sessions'}
-        >
-          <Icon name={telegramOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-        </button>
-      </div>
-      {#if telegramOpen || q}
-        <div class="nested">
-          {#each visTelegram as s (s.id)}
-            {@render sessionRow(s)}
-          {:else}
-            <div class="nested-empty">No matching</div>
-          {/each}
-          {#if !q && fTelegram.length > CHANNEL_CAP}
-            <button class="show-more" onclick={() => (telegramShowAll = !telegramShowAll)}>
-              {telegramShowAll ? 'Show less' : `Show ${fTelegram.length - CHANNEL_CAP} more`}
-            </button>
-          {/if}
-        </div>
-      {/if}
-    {/if}
-
-    {#if q ? fSlack.length > 0 : ws.slackSessions.length > 0}
-      <div class="nav-item-row">
-        <button class="nav-item" onclick={() => (slackOpen = !slackOpen)} aria-expanded={slackOpen}>
-          <Icon name="slack" size={14} />
-          <span class="grow">Slack</span>
-          <span class="count-chip">{ws.slackSessions.length}</span>
-        </button>
-        <button
-          class="icon-btn twisty"
-          onclick={() => (slackOpen = !slackOpen)}
-          aria-label="Toggle Slack list"
-          aria-expanded={slackOpen}
-          title={slackOpen ? 'Hide Slack sessions' : 'Show Slack sessions'}
-        >
-          <Icon name={slackOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-        </button>
-      </div>
-      {#if slackOpen || q}
-        <div class="nested">
-          {#each visSlack as s (s.id)}
-            {@render sessionRow(s)}
-          {:else}
-            <div class="nested-empty">No matching</div>
-          {/each}
-          {#if !q && fSlack.length > CHANNEL_CAP}
-            <button class="show-more" onclick={() => (slackShowAll = !slackShowAll)}>
-              {slackShowAll ? 'Show less' : `Show ${fSlack.length - CHANNEL_CAP} more`}
-            </button>
-          {/if}
-        </div>
-      {/if}
-    {/if}
-
-    <!-- Archived sessions: parked rows under the Agents lists (restore /
-         delete), folded by default. -->
-    {#if ws.hasArchived || ws.archivedAgentSessions.length > 0}
-      <button class="nav-item nested-item arch-toggle" aria-expanded={archivedOpen} data-testid="archived-toggle" onclick={toggleArchived}>
-        <Icon name="archive" size={13} />
-        <span class="grow">Archived</span>
-        {#if ws.archivedLoaded}
-          <span class="count-chip">{ws.archivedAgentSessions.length}{ws.archivedHasMore ? '+' : ''}</span>
-        {/if}
-        <Icon name={archivedOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-      </button>
-      {#if archivedOpen}
-        <div class="nested">
-          {#if ws.myRole !== 'viewer' && ws.archivedAgentSessions.length > 1}
-            <div class="arch-tools">
-              <label class="arch-all" title="Select all archived sessions">
-                <input type="checkbox" aria-label="Select all archived sessions" checked={archSelCount > 0 && archSelCount === ws.archivedAgentSessions.length} indeterminate={archSelCount > 0 && archSelCount < ws.archivedAgentSessions.length} onchange={archSelectAll} />
-                <span>{archSelCount > 0 ? `${archSelCount} selected` : 'Select all'}</span>
-              </label>
-              <button class="row-action danger arch-del-sel" disabled={archSelCount === 0} title="Delete selected sessions" aria-label="Delete selected sessions" data-testid="archived-delete-selected" onclick={() => void deleteSelectedArchived()}>
-                <Icon name="trash" size={12} /><span>Delete{archSelCount > 0 ? ` (${archSelCount})` : ''}</span>
-              </button>
-            </div>
-          {/if}
-          {#each ws.archivedAgentSessions as s (s.id)}
-            <div class="nested-row" class:selected={archSel.has(s.id)}>
-              {#if ws.canEditSession(s)}
-                <input type="checkbox" class="arch-check" checked={archSel.has(s.id)} onchange={() => toggleArchSel(s.id)} aria-label="Select {s.title}" />
-              {/if}
-              <!-- Right-click is a pointer shortcut for the Restore / Delete buttons in the row. -->
-              <div use:rowMenu
-                role="presentation"
-                class="nav-item nested-item archived"
-                title={s.title}
-                oncontextmenu={(e) => ctxMenu.show(e, [
-                  ...(ws.canEditSession(s) ? [
-                    { label: 'Unarchive', icon: 'refresh', action: () => ws.unarchiveSession(s.id) },
-                    { label: 'Delete…', icon: 'trash', danger: true as const, action: () => void deleteSession(s.id) },
-                  ] : []),
-                  { separator: true },
-                  { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
-                  { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
-                ])}
-              >
-                <StatusDot status="exited" />
-                <span class="grow ellipsis">{s.title}</span>
-                {#if hasProviderIcon(s.provider)}
-                  <span class="provider-ico" title={s.provider}><ProviderIcon provider={s.provider} size={13} /></span>
-                {:else}
-                  <span class="provider">{s.provider}</span>
-                {/if}
-              </div>
-              {#if ws.canEditSession(s)}
-                <button class="row-action" title="Restore session" aria-label="Restore session" onclick={() => ws.unarchiveSession(s.id)}>
-                  <Icon name="refresh" size={12} />
-                </button>
-                <button class="row-action danger" title="Delete session" aria-label="Delete session" onclick={() => void deleteSession(s.id)}>
-                  <Icon name="trash" size={12} />
-                </button>
-              {/if}
-            </div>
-          {/each}
-          {#if archivedError}
-            <LoadState what="archived sessions" variant="compact" error="Couldn’t load archived sessions." empty onretry={() => void loadArchivedPage(ws.archivedLoaded)} />
-          {:else if ws.archivedLoading}
-            <div class="arch-state"><Skeleton rows={2} height={22} label="archived sessions" /></div>
-          {:else if ws.archivedLoaded && ws.archivedAgentSessions.length === 0}
-            <div class="arch-state">No archived sessions.</div>
-          {:else if ws.archivedHasMore}
-            <button class="show-more" data-testid="archived-load-more" onclick={() => void loadArchivedPage(true)}>Load more</button>
-          {/if}
-        </div>
-      {/if}
-    {/if}
-  </div>
-{/snippet}
-
-{#snippet sessionRow(s: Session, otherWs?: string, reorderable = false)}
-  {@const status = ws.statusMap[s.id] ?? s.status}
-  {@const sum = activity.summary(s.id)}
-  {@const needsYou = ws.needsYou[s.id] === true}
-  {@const st = sessionState(s, status, needsYou, { stale: staleEvents })}
-  {@const resumable = st.resumable}
-  {@const dnd = rowsDraggable && reorderable}
-  <!-- A drag source/target for reordering sessions (presentation); the row's
-       own button and menu carry every action for the keyboard. -->
-  <div
-    role="presentation"
-    class="nested-row"
-    class:needs-you={st.key === 'needs-you'}
-    class:selected={agentSelMode && agentSel.has(s.id)}
-    class:drag-over={rowDragOverId === s.id}
-    draggable={dnd}
-    ondragstart={dnd ? (e) => onRowDragStart(e, s.id) : undefined}
-    ondragover={dnd ? (e) => onRowDragOver(e, s.id) : undefined}
-    ondragleave={() => { if (rowDragOverId === s.id) rowDragOverId = null; }}
-    ondrop={dnd ? (e) => onRowDrop(e, s.id) : undefined}
-    ondragend={onRowDragEnd}
-  >
-    {#if agentSelMode && !otherWs}
-      <input type="checkbox" class="arch-check" checked={agentSel.has(s.id)} onchange={() => toggleAgentSel(s.id)} aria-label="Select {s.title}" />
-    {/if}
-    {#if renamingId === s.id}
-      <input dir="auto" aria-label="Rename session"
-        class="nav-rename"
-        bind:value={draft}
-        use:focusOnMount
-        onblur={commitRename}
-        onkeydown={(e) => {
-          if (e.key === 'Enter') commitRename();
-          else if (e.key === 'Escape') renamingId = null;
-        }}
-      />
-    {:else}
-      <button use:rowMenu
-        class="nav-item nested-item"
-        class:active={!otherWs && router.module === 'agents' && ws.activeSessionId === s.id}
-        aria-current={!otherWs && router.module === 'agents' && ws.activeSessionId === s.id ? 'true' : undefined}
-        class:resumable
-        onclick={() => (otherWs ? void ws.openInWorkspace(otherWs, s.id) : openSession(s.id))}
-        ondblclick={() => startRename(s.id, s.title)}
-        oncontextmenu={(e) => ctxMenu.show(e, [
-          // Same order as the tab and pane menus: Rename · Share… · Open in
-          // new window, then Restart · Archive · Delete, then New session.
-          ...(ws.canEditSession(s) ? [{ label: 'Rename', icon: 'edit', action: () => startRename(s.id, s.title) }] : []),
-          ...(otherWs ? [] : [{ label: 'Share…', icon: 'share', action: () => (shareSessionId = s.id) }]),
-          ...(otherWs ? [] : popoutItems(`agents/${s.id}`, s.title)),
-          ...(reorderable && fAgents.length > 1
-            ? [{ separator: true }, { label: 'Move to top', icon: 'arrowUp', action: () => { const ids = fAgents.map((x) => x.id); sessionOrder.dragTo(ids, s.id, ids[0]); } }]
-            : []),
-          { separator: true },
-          ...(ws.canEditSession(s) ? [
-            // In-progress agent only: respawn a stuck PTY (provider resume when
-            // possible). Idle/exited/reconnectable sessions have their own paths.
-            ...(s.kind === 'agent' && (status === 'running' || status === 'working')
-              ? [{ label: 'Restart session', icon: 'refresh', action: () => void restartAgent(s.id) }]
-              : []),
-            { label: 'Archive', icon: 'archive', action: () => void ws.requestArchive(s.id).catch((e: unknown) => toastError('Couldn’t archive the session', e)) },
-            { label: 'Delete…', icon: 'trash', danger: true as const, action: () => void deleteSession(s.id) },
-          ] : []),
-          { separator: true },
-          { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
-          { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
-        ])}
-        title={rowTip(s.title, st, sum, sessionUsageLabel(usageRows[s.id]))}
-        data-state={st.key}
-      >
-        <!-- Row = state dot · title · (needs-you bell) · provider. Task and
-             proof roll-ups are secondary: in the tooltip, and revealed on
-             hover / the active row so the list stays scannable. -->
-        {#if resumable}
-          <span class="susp-dot" role="img" aria-label={st.label} title={st.hint}>
-            <Icon name="refresh" size={12} />
-          </span>
-        {:else}
-          <StatusDot state={st} />
-        {/if}
-        <span class="grow ellipsis">{s.title}</span>
-        {#if st.key === 'needs-you'}
-          <span class="needs-you-dot" role="img" title="Waiting on you" aria-label="Needs you">
-            <Icon name="bell" size={12} />
-          </span>
-        {/if}
-        {#if sum && sum.total > 0}
-          <span class="row-secondary">
-            <span
-              class="task-chip"
-              class:done={sum.done === sum.total}
-              class:active={sum.in_progress != null}
-              title={sum.in_progress ? `Now: ${sum.in_progress}` : `${sum.done}/${sum.total} tasks done`}
-            >{sum.done}/{sum.total}</span>
-          </span>
-        {/if}
-        {#if hasProviderIcon(s.provider)}
-          <span class="provider-ico" title={s.provider}><ProviderIcon provider={s.provider} size={13} /></span>
-        {:else}
-          <span class="provider">{s.provider}</span>
-        {/if}
-      </button>
-      {#if ws.canEditSession(s)}
-        <button
-          class="row-action"
-          title={ws.closeTabTitle(s.id, 'session')}
-          aria-label="Close session"
-          onclick={() => void ws.requestCloseTab(s.id)}
-        >
-          <Icon name="x" size={12} />
-        </button>
-      {/if}
-    {/if}
   </div>
 {/snippet}
 
 <style>
-  .nested-row.drag-over {
-    box-shadow: inset 0 2px 0 var(--accent);
-  }
-  .nested-row[draggable='true'] .nested-item {
-    cursor: grab;
-  }
   .navigator { width: 100%; max-width: 100%; min-width: 0; height: 100%; display: flex; flex-direction: column; border-inline-end: 1px solid var(--separator); position: relative; }
   .rail-resize {
     position: absolute;
@@ -2022,168 +1271,6 @@
     opacity: var(--disabled-opacity);
     cursor: default;
   }
-  .nested {
-    margin: 2px 0 6px;
-    padding-inline-start: 10px;
-  }
-  /* Agents' sub-content hangs off one hairline guide under the Agents icon
-     (8px row padding + half the 14px icon), outline-view style. */
-  .agents-sub {
-    margin-inline-start: 14px;
-    padding-inline-start: 4px;
-    border-inline-start: 1px solid color-mix(in srgb, var(--text-dim) 22%, transparent);
-  }
-  /* Agents' sub-list grid: every row — workspace header, session, Archived,
-     select tools — is 26px with its leading glyph (icon / dot / checkbox) in
-     one 8px-inset column, so nothing reads as a stray indent. */
-  /* Current-workspace header: a real group heading (legible, full-contrast
-     name) that is also the switcher — the chevron says so. */
-  .ws-chip {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    max-width: 100%;
-    height: 26px;
-    margin: 2px 0 0;
-    padding: 0 8px;
-    border: none;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text);
-    font-size: var(--fs-s);
-    font-weight: 600;
-    text-align: start;
-    cursor: pointer;
-    min-width: 0;
-  }
-  .ws-chip > :global(svg) {
-    flex-shrink: 0;
-    color: var(--text-dim);
-  }
-  .ws-chip:hover {
-    color: var(--text);
-    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
-  }
-  .ws-chip:focus-visible {
-    outline: 2px solid var(--accent-text);
-    outline-offset: -2px;
-  }
-  .agents-sub .nested {
-    padding-inline-start: 0;
-    margin: 1px 0 4px;
-  }
-  /* A workspace-name sub-heading inside Agents (No workspace / other
-     workspaces). Sentence case, so it never reads as a sidebar section. */
-  .ws-group-label {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    height: 26px;
-    margin-top: 2px;
-    padding: 0 8px;
-    font-size: var(--fs-s);
-    font-weight: 600;
-    color: var(--text);
-    min-width: 0;
-    border-radius: var(--radius-s);
-  }
-  .ws-group-label > :global(svg) {
-    flex-shrink: 0;
-    color: var(--text-dim);
-  }
-  /* Archived: a list row like the sessions above (same height, type and
-     glyph column), set apart by a hairline instead of a bigger font. */
-  .nav-item.arch-toggle {
-    gap: 6px;
-    margin-top: 4px;
-    color: var(--text-dim);
-    border-top: 1px solid color-mix(in srgb, var(--text-dim) 14%, transparent);
-    border-radius: 0 0 var(--radius-s) var(--radius-s);
-  }
-  .nav-item.arch-toggle:hover {
-    color: var(--text);
-  }
-  .all-ws-toggle.on {
-    color: var(--accent-text);
-  }
-  /* Agents' row tools (select / sort / all workspaces) show on hover or
-     keyboard focus, like Finder's row accessories — ON states stay visible,
-     since they change what the list below shows. The fold chevron stays. */
-  .agents-row > .twisty:not(.on):not([aria-expanded]) {
-    opacity: 0;
-    transition: opacity var(--dur-fast) ease-out;
-  }
-  .agents-row:hover > .twisty:not(.on):not([aria-expanded]),
-  .agents-row:focus-within > .twisty:not(.on):not([aria-expanded]) {
-    opacity: 1;
-  }
-  @media (hover: none) {
-    .agents-row > .twisty:not(.on):not([aria-expanded]) {
-      opacity: 1;
-    }
-  }
-
-  .nested-row {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-  }
-  .nested-row .nested-item {
-    flex: 1;
-    min-width: 0;
-  }
-  .nested-item {
-    height: 26px;
-    font-size: var(--fs-s);
-  }
-  .nested-item.archived {
-    opacity: 0.65;
-    cursor: default;
-  }
-  /* Suspended / resumable: parked to save memory, instantly reopenable.
-     Dimmed (calm, not an error) but kept fully listed + clickable. */
-  .nested-item.resumable:not(.active) {
-    opacity: 0.72;
-  }
-  .nested-item.resumable:not(.active):hover {
-    opacity: 1;
-  }
-  /* ↻ = suspended, resumes on open. Calm (dim), never amber — amber is
-     reserved for "needs you". */
-  .susp-dot {
-    display: grid;
-    place-items: center;
-    width: 10px;
-    height: 10px;
-    flex-shrink: 0;
-    color: var(--text-dim);
-  }
-  /* Secondary roll-ups (tasks, proof): revealed on hover / focus / the active
-     row; always summarised in the row tooltip. */
-  .row-secondary {
-    display: none;
-    align-items: center;
-    gap: 4px;
-    flex-shrink: 0;
-  }
-  .nested-item:hover .row-secondary,
-  .nested-item:focus-visible .row-secondary,
-  .nested-item.active .row-secondary {
-    display: inline-flex;
-  }
-  /* Select tools: the select-all box sits in the SAME column as the row
-     boxes below it (8px inset), at the same 13px size; the actions are quiet
-     text buttons, not outlined slabs. */
-  .arch-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; min-height: 26px; padding-inline: 8px 2px; font-size: var(--fs-xs); color: var(--text-dim); }
-  .arch-state { display: flex; align-items: center; gap: 6px; padding: 4px 10px 6px; font-size: var(--fs-xs); color: var(--text-dim); }
-  .arch-state .show-more { width: auto; padding: 0; }
-  .arch-all { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; cursor: pointer; }
-  .arch-all input, .arch-check { width: 13px; height: 13px; margin: 0; accent-color: var(--accent); }
-  .arch-check { flex-shrink: 0; margin-inline-start: 8px; }
-  /* The row after a checkbox drops its own inset — the box is the glyph column. */
-  .nested-row > .arch-check + .nested-item { padding-inline-start: 6px; }
-  .sel-toggle.on { color: var(--accent-text); }
-  .nested-row.selected .nested-item { background: var(--accent-soft); }
   .row-action {
     display: grid;
     place-items: center;
@@ -2197,9 +1284,6 @@
     opacity: 0;
     transition: opacity var(--dur-fast) ease-out;
   }
-  .nested-row:hover .row-action {
-    opacity: 1;
-  }
   /* Hover-revealed, but a keyboard user tabbing onto one must see it (and
      its focus ring) — it was an invisible focused button. */
   .row-action:focus-visible {
@@ -2212,31 +1296,8 @@
   .row-action.danger:hover {
     color: var(--danger);
   }
-  /* Text-bearing toolbar actions (bulk Archive / Delete): declared AFTER
-     .row-action so they beat its fixed 22px grid square — otherwise the label
-     wrapped under the icon and spilled past the sidebar edge. */
-  .arch-tools .row-action {
-    display: inline-flex; align-items: center; gap: 4px; width: auto; height: 22px;
-    padding: 0 6px; flex-shrink: 0; opacity: 1; font-size: var(--fs-xs);
-    border: none; border-radius: var(--radius-s); white-space: nowrap;
-  }
-  .arch-tools .row-action:disabled { opacity: var(--disabled-opacity); cursor: default; }
-  .arch-tools .row-action:not(:disabled) { color: var(--text); }
-  .arch-tools .row-action.danger:not(:disabled) { color: var(--danger); }
   .nav-item.subtle {
     color: var(--text-dim);
-  }
-  .nav-rename {
-    flex: 1;
-    height: 24px;
-    font-size: var(--fs-s);
-    background: var(--surface-2);
-    border: 1px solid var(--accent);
-    border-radius: var(--radius-s);
-    color: var(--text);
-    padding: 0 6px;
-    margin: 1px 0;
-    outline: none;
   }
   .nav-search {
     display: flex;
@@ -2283,66 +1344,6 @@
     padding: 4px 10px 6px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
-  }
-  .show-more {
-    display: block;
-    width: 100%;
-    text-align: start;
-    padding: 4px 10px 6px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    background: none;
-    border: none;
-    cursor: pointer;
-  }
-  .show-more:hover {
-    color: var(--text);
-  }
-  .provider {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .provider-ico {
-    flex-shrink: 0;
-    display: inline-flex;
-    align-items: center;
-  }
-  /* Per-session task roll-up: "done/total". Accent while a task is in progress,
-     green when all complete. */
-  .task-chip {
-    flex-shrink: 0;
-    padding: 0 4px;
-    height: 16px;
-    line-height: 16px;
-    border-radius: 999px;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
-    color: var(--text-dim);
-    background: var(--surface-2);
-  }
-  .task-chip.active {
-    color: var(--accent-text);
-    background: var(--accent-soft);
-  }
-  .task-chip.done {
-    color: var(--success);
-    background: var(--success-soft);
-  }
-  /* "Needs you" — sticky flag for a session blocked on operator input. Amber to
-     stand out from the calmer status colors, without shouting. */
-  .needs-you-dot {
-    display: grid;
-    place-items: center;
-    flex-shrink: 0;
-    width: 14px;
-    height: 14px;
-    border-radius: 999px;
-    color: var(--warning);
-    background: color-mix(in srgb, var(--status-warn) 18%, transparent);
-  }
-  .nested-row.needs-you .nested-item:not(.active) {
-    border-inline-start: 2px solid var(--status-warn);
   }
   .needs-you-filter {
     display: flex;

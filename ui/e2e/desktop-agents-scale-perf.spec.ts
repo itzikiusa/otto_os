@@ -155,9 +155,9 @@ test('2,000 background + 300 archived sessions: list, archive paging, event stor
   expect(lists.some((l) => l.q.get('archived') === 'true' && l.q.get('limit') === '100')).toBe(false);
   await page.getByTestId('archived-toggle').click();
   await expect.poll(() => lists.some((l) => l.q.get('archived') === 'true' && l.q.get('limit') === '100')).toBe(true);
-  await expect(page.locator('.nested-item.archived')).toHaveCount(100);
+  await expect(page.locator('[data-testid="agents-history-list"] [data-state="archived"]')).toHaveCount(100);
   await page.getByTestId('archived-load-more').click();
-  await expect(page.locator('.nested-item.archived')).toHaveCount(200);
+  await expect(page.locator('[data-testid="agents-history-list"] [data-state="archived"]')).toHaveCount(200);
   expect(lists.some((l) => l.q.get('archived') === 'true' && l.q.has('before'))).toBe(true);
   await page.getByTestId('archived-toggle').click();
 

@@ -13,8 +13,11 @@
   import { threadsChrome } from './threadsChrome.svelte';
   import { threads } from './threadsStore.svelte';
 
+  // The Agents inbox passes its focused session's provider and opens the Usage page.
+  let { provider: forProvider, onopen }: { provider?: string | null; onopen?: () => void } = $props();
   $effect(() => limits.mount());
   const provider = $derived.by(() => {
+    if (forProvider !== undefined) return forProvider;
     const id = threads.focusedSessionId;
     if (!id || threads.newDraftMode) return null;
     return runtimeThreads.get(id)?.provider ?? ws.getSession(id)?.provider ?? null;
@@ -30,7 +33,7 @@
     title={[...meter.lines, 'Open Usage'].join('\n')}
     data-testid="threads-open-usage"
     onpointerenter={() => UsageView.prefetch()}
-    onclick={() => (threadsChrome.sheet = 'usage')}
+    onclick={() => (onopen ? onopen() : (threadsChrome.sheet = 'usage'))}
   >
     <span>{meter.short}</span>
     <span class="th-meter-bar" aria-hidden="true"><span class="th-meter-fill" style:inline-size="{Math.min(100, meter.used)}%"></span></span>
@@ -44,7 +47,7 @@
     title="Usage statistics"
     data-testid="threads-open-usage"
     onpointerenter={() => UsageView.prefetch()}
-    onclick={() => (threadsChrome.sheet = 'usage')}
+    onclick={() => (onopen ? onopen() : (threadsChrome.sheet = 'usage'))}
   >
     <Icon name="chart" size={14} />
   </button>
