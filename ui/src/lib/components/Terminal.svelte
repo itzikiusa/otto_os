@@ -233,7 +233,7 @@
   import { viewport } from '../stores/viewport.svelte';
   import { ws } from '../stores/workspace.svelte';
   import { openExternal } from '../external';
-  import { terminalLinksForRow, oscTerminalLink, type TerminalLink } from './terminalLinks';
+  import { terminalLinksForRow, terminalLinkAt, oscTerminalLink, type TerminalLink } from './terminalLinks';
   import { activatePathLink, hoverPathLink, showPathLinkMenu, type PathLinkTarget } from '../pathLinks/open';
   import { keyContext, registerFindOwner } from '../keys';
   import { parkFind, takeFind } from './termFindMemo';
@@ -570,13 +570,7 @@
   /** Whether the on-screen key accessory bar is shown on phone. */
   let keybarVisible = $state(false);
 
-  const touchGesture = createTerminalTouch(() => term, () => readOnly, (col, row) => {
-    const buffer = term?.buffer.active;
-    const hit = buffer && terminalLinksForRow(buffer, row, localFileContext().allowed).find(({ range: r }) =>
-      (row > r.start.y || col >= r.start.x) && (row < r.end.y || col <= r.end.x));
-    if (hit) activateLink(new MouseEvent('click', { button: 0 }), hit);
-    return !!hit;
-  });
+  const touchGesture = createTerminalTouch(() => term, () => readOnly, (col, row) => { const hit = term && terminalLinkAt(term.buffer.active, col, row, localFileContext().allowed); if (hit) activateLink(new MouseEvent('click'), hit); return !!hit; });
 
   // ── Find / ring-search bar ──────────────────────────────────────────────────
   // Two complementary search modes share the single find bar:
