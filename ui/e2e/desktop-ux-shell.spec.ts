@@ -63,8 +63,10 @@ test('⌘K search hits open their page (they used to do nothing)', async ({ page
   await palette.getByPlaceholder('Type a command…').fill('e2e-repo');
   const hit = palette.locator('.pal-hit', { hasText: 'e2e-repo' }).first();
   await expect(hit).toBeVisible({ timeout: 10_000 });
-  // Only actions with a handler are offered (no dead "Review" / "Rerun").
-  await expect(hit.locator('.pal-hit-btn', { hasText: 'Review' })).toHaveCount(0);
+  // Only actions with a handler are offered: a repository's Review opens its
+  // review page (searchHitOpen.ts runHitPowerAction); no dead "Rerun".
+  await expect(hit.locator('.pal-hit-btn', { hasText: 'Review' })).toHaveCount(1);
+  await expect(hit.locator('.pal-hit-btn', { hasText: 'Rerun' })).toHaveCount(0);
   // The pills are a mouse shortcut, hidden from AT (an option holds no
   // interactive children); keyboard users press ⏎ on the selected hit.
   await hit.locator('.pal-hit-btn', { hasText: 'Open' }).click();

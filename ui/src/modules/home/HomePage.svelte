@@ -14,6 +14,7 @@
   import { onTabKey } from '../../lib/tabKeys';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Modal from '../../lib/components/Modal.svelte';
@@ -24,11 +25,16 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { registry } from '../../lib/commands.svelte';
-  import HomeBox from './HomeBox.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import HomeToday from './HomeToday.svelte';
   import { spaces, spaceNumber } from '../../lib/stores/spaces.svelte';
   import { home, MAX_BOXES, MAX_VIEWS, ROTATE_MS, ROW_PX, GAP_PX } from './home.svelte';
   import { HOME_KINDS, type HomeBoxKind } from '../../lib/home/kinds';
+
+  // The Pinned widgets sit below the fold and are empty for most opens: their
+  // frame loads as its own chunk the first time a space has a widget, behind a
+  // placeholder of the box's own grid size (no layout jump).
+  const HomeBoxView = lazyComponent(() => import('./HomeBox.svelte'));
 
   const can = (f: Parameters<typeof auth.can>[0]): boolean => auth.can(f, 'view');
   const kinds = $derived(HOME_KINDS.filter((k) => can(k.feature)));
@@ -303,7 +309,16 @@
             {:else}
               {#each v.boxes as b, i (b.id)}
                 {@const z = on && zoomId === b.id}
-                <HomeBox box={b} viewId={v.id} index={i} count={v.boxes.length} zoomed={z} covered={on && !!zoomId && !z} active={on && (!zoomId || z)} ondragbox={(id) => (dragId = id)} ondropon={dropOn} />
+                {#if HomeBoxView.component}
+                  {@const Box = HomeBoxView.component}
+                  <Box box={b} viewId={v.id} index={i} count={v.boxes.length} zoomed={z} covered={on && !!zoomId && !z} active={on && (!zoomId || z)} ondragbox={(id) => (dragId = id)} ondropon={dropOn} />
+                {:else}
+                  <div class="box-ph" style:grid-column={viewport.isPhone ? null : `span ${b.w}`} style:grid-row="span {b.h}">
+                    {#if HomeBoxView.error}
+                      <LoadState what="the widget" variant="compact" error={HomeBoxView.error} empty={false} onretry={() => HomeBoxView.retry()} />
+                    {/if}
+                  </div>
+                {/if}
               {/each}
             {/if}
           </div>
@@ -449,6 +464,18 @@
   }
   .views {
     display: contents;
+  }
+  /* A widget while its frame's chunk loads: the box's own grid size, calm. */
+  .box-ph {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--sp-4);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-l);
+    background: var(--surface);
+    font-size: var(--fs-m);
+    color: var(--text-dim);
   }
   .today[hidden],
   .pinned-head[hidden] {

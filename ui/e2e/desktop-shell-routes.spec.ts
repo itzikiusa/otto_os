@@ -89,11 +89,12 @@ test('the workspace switcher lists recently used workspaces first', async ({ pag
   const chip = page.getByTestId('agents-current-ws');
   await expect(chip).toBeVisible({ timeout: 20_000 });
   await chip.click();
-  const labels = await page.locator('.ctx-item').allInnerTexts();
-  const ours = labels.map((l) => l.trim()).filter((l) => l.startsWith(`Recent ${run}`));
+  // The menu opens a beat after the click: read it once it lists our workspaces.
+  const ours = async () => (await page.locator('.ctx-item').allInnerTexts()).map((l) => l.trim()).filter((l) => l.startsWith(`Recent ${run}`));
   // The current workspace was just used too, so it leads; then the stored recents.
-  expect(ours.slice(0, 3)).toEqual([`Recent ${run} 0`, `Recent ${run} 4`, `Recent ${run} 2`]);
-  expect(new Set(ours).size).toBe(ours.length);
+  await expect.poll(async () => (await ours()).slice(0, 3)).toEqual([`Recent ${run} 0`, `Recent ${run} 4`, `Recent ${run} 2`]);
+  const all = await ours();
+  expect(new Set(all).size).toBe(all.length);
 });
 
 test('removing a workspace with sessions asks about them; "Removed workspaces" restores it', async ({ page }) => {
