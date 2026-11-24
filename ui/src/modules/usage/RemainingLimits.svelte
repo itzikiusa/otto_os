@@ -71,19 +71,18 @@
               <span class="dim small">{providerName(a.provider)}</span>
               {#if a.plan}<Badge tone="neutral" variant="outline" label={planLabel(a.plan)} />{/if}
               <span class="acct-age small">
-                {#if a.status === 'unknown'}
-                  <Badge tone="neutral" label="Unknown" testid="limits-unknown" />
-                {:else if stale}
+                <!-- No reading: the line below says why, in words (never an "Unknown" pill). -->
+                {#if a.status !== 'unknown' && stale}
                   <Badge tone="warn" label="Stale" testid="limits-stale" title="This reading is older than {Math.round(staleAfter / 60)} min; use since then is not counted" />
                   <span class="dim">read {ageText(a.taken_at, now)}</span>
-                {:else}
+                {:else if a.status !== 'unknown'}
                   <span class="dim">updated {ageText(a.taken_at, now)}</span>
                 {/if}
               </span>
             </div>
 
             {#if a.status === 'unknown'}
-              <p class="reason small dim">{a.reason ?? 'Otto has no reading for this login.'}</p>
+              <p class="reason small dim" data-testid="limits-unknown">{a.reason ?? 'Otto has no reading for this login.'}</p>
             {:else}
               {#if limitReachedShown(a, stale, now)}
                 <p class="reached small"><Icon name="warning" size={12} /> Limit reached — new turns wait for the reset.</p>
