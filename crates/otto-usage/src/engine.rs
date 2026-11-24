@@ -2030,7 +2030,7 @@ impl UsageEngine {
         let total_cache_read_tokens: u64 = providers.iter().map(|p| p.cache_read_tokens).sum();
         let total_cache_write_tokens: u64 = providers.iter().map(|p| p.cache_write_tokens).sum();
         let total_tokens: u64 = providers.iter().map(|p| p.total_tokens).sum();
-        let total_cost_usd: f64 = providers.iter().map(|p| p.cost_usd).sum();
+        let total_cost_usd = round6(providers.iter().map(|p| p.cost_usd).sum());
 
         Ok(UsageSummary {
             days,
@@ -2869,7 +2869,7 @@ struct DayModelRow {
 }
 
 /// Round a summed cost like the SQL `round(sum(cost_usd), 6)` did.
-fn round6(x: f64) -> f64 {
+pub(crate) fn round6(x: f64) -> f64 {
     (x * 1e6).round() / 1e6
 }
 
@@ -2934,6 +2934,10 @@ fn summary_rollups(
         m.cache_write_tokens += r.cache_write_tokens;
         m.total_tokens += r.total_tokens;
         m.cost_usd += r.cost_usd;
+        // A $0 row charts nothing (and may be a provider not listed above).
+        if !has_usage(r.total_tokens, r.cost_usd) {
+            continue;
+        }
         daily_models.push(DailyModelUsage {
             day: r.day,
             provider: r.provider,
@@ -3510,7 +3514,8 @@ mod rollup_tests {
             m,
             vec![("gpt", 1, 500), ("opus", 5, 150), ("sonnet", 1, 50)]
         );
-        assert_eq!(dm.len(), 5);
+        assert_eq!(dm.len(), 4, "the $0 shell row charts nothing: not listed");
+        assert!(dm.iter().all(|d| d.provider != "shell"));
     }
 }
 

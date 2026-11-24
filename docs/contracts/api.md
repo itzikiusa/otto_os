@@ -165,7 +165,9 @@ failure on a read returns an error (500) — never a 200 with zero totals.
   (`{provider, model, events, input_tokens, output_tokens, cache_read_tokens,
   cache_write_tokens, total_tokens, cost_usd}`, biggest first) and **`daily_models:
   DailyModelUsage[]`** (`{day, provider, model, …tokens, cost_usd}`) rollups, plus
-  `scope` (`"all"`|`"own"`).
+  `scope` (`"all"`|`"own"`). Providers, models and `daily_models` list only rows with
+  tokens or cost (the totals are the providers' sums); `daily[].events` counts every
+  event of the day, $0 ones included.
 - GET /usage/report?days=N&otto_only=B&sessions_limit=N&include=daily_models → UsageReport
   `{days, generated_at, priced_as_of,
   scope, otto_only, totals: TokenTotals, daily: DailyUsage[], monthly: MonthlyUsage[]
