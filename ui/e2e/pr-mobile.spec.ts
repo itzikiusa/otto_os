@@ -1,5 +1,5 @@
 import { test, expect, type Locator, type Page } from '@playwright/test';
-import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
+import { expectFingerSized, expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 
 // The PR workspace on phones and tablets (MOCK mode — ui/src/lib/api/mock-prs.ts).
 // A PR must be fully workable on a 6–7" screen: every header action reachable
@@ -36,6 +36,22 @@ test('PR header: every action is on screen and reachable', async ({ page }) => {
   // Check out is a visible button on the details card's branch row.
   await expect(page.getByTestId('pr-checkout')).toBeAttached();
   await expectNoHorizontalOverflow(page);
+  // A phone: everything else on the PR screen takes a finger too (design review 2, H8) —
+  // ‹ back, the agent, a tab's ✕, Conversation · Files, Edit, ⋯ and Post comment.
+  if ((page.viewportSize()?.width ?? 0) <= 640) {
+    const chrome = await page.locator('.prw-icon:visible, .prw-tab-x:visible').all();
+    expect(chrome.length).toBeGreaterThan(0);
+    await expectFingerSized(
+      ...chrome,
+      actions.getByRole('button', { name: 'More pull request actions' }),
+      page.getByRole('tab', { name: 'Conversation', exact: true }),
+      page.getByRole('tab', { name: 'Files', exact: true }),
+      page.getByRole('button', { name: 'Edit the title and description' }),
+    );
+    const post = page.getByRole('button', { name: 'Post comment' });
+    await post.scrollIntoViewIfNeeded();
+    expect(Math.round((await post.boundingBox())!.height), 'Post comment height').toBeGreaterThanOrEqual(44);
+  }
 });
 
 test('Code tab: the toolbar is whole, on top, and stays pinned while scrolling', async ({ page }) => {

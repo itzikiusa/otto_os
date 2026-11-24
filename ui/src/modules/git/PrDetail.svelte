@@ -929,6 +929,8 @@
     .prd-head { padding: 10px 12px 0; }
     .prd-actions { flex-wrap: wrap; flex: 1 1 100%; }
     .prd-actions .btn { height: 44px; } /* finger-sized */
+    .prd-actions .icon-only { min-inline-size: 44px; }
+    .prd-tabs button, .edit-btn { min-block-size: 44px; }
     .prd-meta { flex-wrap: wrap; }
     .prd-title-input { height: 38px; font-size: 16px; } /* ui-guards: allow — 16px stops iOS zoom-on-focus */
     .prd-body { padding: 12px; }

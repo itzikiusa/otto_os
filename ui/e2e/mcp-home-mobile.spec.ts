@@ -3,7 +3,7 @@
 import { test, expect } from '@playwright/test';
 import { apiCtx, seedGitRepo, seedWorkspace } from './seed';
 import { enableMcpFixtureCatalog } from './mcp-catalog-fixture';
-import { expectNoHorizontalOverflow } from './helpers';
+import { expectFingerSized, expectNoHorizontalOverflow } from './helpers';
 
 test.use({ serviceWorkers: 'block' });
 
@@ -23,6 +23,8 @@ test('an approval opens as a bottom sheet with finger-sized actions; Back closes
   const row = page.getByTestId('mcp-home-approval').filter({ hasText: title });
   await expect(row).toBeVisible({ timeout: 30_000 });
   test.skip(!(await page.evaluate(() => window.innerWidth <= 640)), 'phone layouts only');
+  // The section tabs take a finger (design review 2, H8).
+  await expectFingerSized(...(await page.locator('[data-testid^="mcp-nav-"]').all()));
   // On a phone the row is the one target: its inline buttons are not shown.
   await expect(row.getByRole('button', { name: 'Approve', exact: true })).toBeHidden();
   await expectNoHorizontalOverflow(page);

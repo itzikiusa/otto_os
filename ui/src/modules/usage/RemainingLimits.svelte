@@ -145,6 +145,12 @@
   .refresh-btn {
     margin-inline-start: auto;
   }
+  @media (pointer: coarse) {
+    .refresh-btn {
+      min-block-size: 44px;
+      min-inline-size: 44px;
+    }
+  }
   .small {
     font-size: var(--fs-s);
   }

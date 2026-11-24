@@ -157,6 +157,9 @@ test.describe('connections list — responsive', () => {
     await page.keyboard.insertText('SELECT * FROM shop.orders LIMIT 12');
     await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
     await expect(page.locator('.grid tbody tr').first()).toBeVisible();
+    // The query tabs' + takes a finger (design review 2, H8).
+    const plus = (await page.getByRole('button', { name: 'New query tab' }).boundingBox())!;
+    expect(Math.min(plus.width, plus.height), 'New query tab').toBeGreaterThanOrEqual(44);
     // Row numbers from 10 up stay whole beside the touch "+" (design review 2, N8: row 10 read "1").
     const tenth = page.locator('.grid tbody tr:not(.spacer)').nth(9);
     await expect(tenth.locator('.rownum-n')).toHaveText('10');

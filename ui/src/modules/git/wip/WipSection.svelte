@@ -523,6 +523,10 @@
     .wp-section {
       --wp-row-h: 44px;
     }
+    .wp-sec-btn {
+      inline-size: 44px;
+      block-size: 44px;
+    }
     .wp-check {
       width: 20px;
       height: 20px;

@@ -652,6 +652,14 @@
     width: 28px;
     height: 28px;
   }
+  /* Phone: every header control takes a finger (44 px; design review 2, H8). */
+  @media (max-width: 640px) and (pointer: coarse) {
+    .ph-actions :global(:is(.btn, .icon-btn)),
+    .ph-more {
+      min-block-size: 44px;
+      min-inline-size: 44px;
+    }
+  }
   .ph-tabs-below {
     display: flex;
     align-items: center;
