@@ -1039,7 +1039,8 @@
     <!-- Back/Forward: visible whenever there is history to walk. Placed left of
          the title so the thumb can reach them comfortably on phone + tablet. -->
     <NavButtons />
-    <span class="mtop-title">{moduleName === 'agents' ? (ws.activeSession?.title ?? 'Agents') : moduleTitle}</span>
+    <!-- Agents: the pane header (‹ · word · title) names the session; the bar says where you are. -->
+    <span class="mtop-title">{moduleTitle}</span>
     <span class="grow"></span>
     <!-- Desktop + tablet reach the bell in the Navigator/Rail; the phone's
          Navigator is a closed drawer, so the top bar carries it instead. -->
