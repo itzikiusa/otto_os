@@ -237,7 +237,6 @@ fn agy_windows_page_exactly_the_whole_file_fold() {
     windows_match_whole_file(Provider::Agy, &path);
 }
 
-
 /// A window whose base is its first record (the `None => first` case: a
 /// 64 MiB span with one turn) but whose only turn starts after a sidecar
 /// record: paging before that turn must step the cursor back to the base,
@@ -261,4 +260,111 @@ fn a_page_with_no_turn_before_the_cursor_steps_back_to_the_base() {
     let page = folder.page(Some(first), 20, vec![]);
     assert!(page.turns.is_empty() && page.has_earlier);
     assert_eq!(page.cursor, "100");
+}
+
+/// A user prompt record (a turn boundary) and an assistant text record.
+fn prompt_line(i: usize) -> String {
+    format!(r#"{{"type":"user","uuid":"u{i}","message":{{"role":"user","content":"prompt {i}"}}}}"#)
+        + "\n"
+}
+fn answer_line(i: usize, pad: usize) -> String {
+    format!(
+        r#"{{"type":"assistant","uuid":"a{i}","message":{{"id":"m{i}","role":"assistant","content":[{{"type":"text","text":"{}"}}]}}}}"#,
+        "z".repeat(pad)
+    ) + "\n"
+}
+
+#[test]
+fn a_window_with_no_turn_boundary_grows_and_one_record_over_the_max_is_refused() {
+    use otto_transcript::window::MAX_WINDOW_BYTES;
+    use std::io::Write;
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("grow.jsonl");
+    let mut f = std::fs::File::create(&path).unwrap();
+    // Two prompts, then one streamed turn (one request) longer than a window.
+    f.write_all((prompt_line(0) + &answer_line(0, 100) + &prompt_line(1)).as_bytes())
+        .unwrap();
+    for i in 1..=6 {
+        let call = format!(
+            r#"{{"type":"assistant","uuid":"a{i}","requestId":"req-big","message":{{"id":"m{i}","role":"assistant","content":[{{"type":"tool_use","id":"t{i}","name":"Bash","input":{{"command":"ls"}}}}]}}}}"#
+        );
+        let result = format!(
+            r#"{{"type":"user","uuid":"r{i}","message":{{"role":"user","content":[{{"tool_use_id":"t{i}","type":"tool_result","content":"{}"}}]}}}}"#,
+            "z".repeat(1 << 20)
+        );
+        f.write_all(format!("{call}\n{result}\n").as_bytes())
+            .unwrap();
+    }
+    drop(f);
+    let w = fold_window(
+        Provider::Claude,
+        &path,
+        FoldOpts::default(),
+        None,
+        WINDOW_BYTES,
+    )
+    .unwrap();
+    assert!(w.end - w.start > WINDOW_BYTES, "grew past one window");
+    assert_eq!((w.first, w.base), (0, 0), "reached the file's start");
+
+    let big = dir.path().join("big.jsonl");
+    let mut f = std::fs::File::create(&big).unwrap();
+    f.write_all(prompt_line(0).as_bytes()).unwrap();
+    f.write_all(answer_line(1, MAX_WINDOW_BYTES as usize + 1).as_bytes())
+        .unwrap();
+    drop(f);
+    let err = fold_window(
+        Provider::Claude,
+        &big,
+        FoldOpts::default(),
+        None,
+        WINDOW_BYTES,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(err.kind(), std::io::ErrorKind::OutOfMemory);
+}
+
+#[test]
+fn the_line_index_skips_a_partial_last_line_and_rescans_a_replaced_or_shorter_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.jsonl");
+    std::fs::write(&path, "{\"a\":1}\n  \n{\"b\":2}\n{\"c\"").unwrap();
+    let index = line_index(&path).unwrap();
+    assert_eq!(
+        index.starts,
+        vec![0, 11],
+        "blank line skipped, partial line not a record"
+    );
+    assert_eq!(index.end, 19);
+    // The partial line completes: it becomes a record.
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all_at_end(b":3}\n");
+    assert_eq!(line_index(&path).unwrap().starts, vec![0, 11, 19]);
+    // Truncated in place: scanned again from 0.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(8)
+        .unwrap();
+    assert_eq!(line_index(&path).unwrap().starts, vec![0]);
+    // Replaced by a different (longer) file: scanned again, not extended.
+    let other = dir.path().join("other.jsonl");
+    std::fs::write(&other, "{\"x\":1}\n{\"y\":22}\n{\"z\":333}\n").unwrap();
+    std::fs::rename(&other, &path).unwrap();
+    assert_eq!(line_index(&path).unwrap().starts, vec![0, 8, 17]);
+}
+
+trait AppendAll {
+    fn write_all_at_end(self, bytes: &[u8]);
+}
+impl AppendAll for std::fs::File {
+    fn write_all_at_end(mut self, bytes: &[u8]) {
+        std::io::Write::write_all(&mut self, bytes).unwrap();
+    }
 }
