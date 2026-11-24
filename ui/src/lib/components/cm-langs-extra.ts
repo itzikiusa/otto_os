@@ -1,4 +1,4 @@
-// On-demand StreamLanguage grammars for Shell (`sh`/`bash`/`zsh`), `go.mod`/`go.work`, and TOML (`Cargo.toml`/`pyproject.toml`).
+// On-demand StreamLanguage grammars for Shell (`sh`/`bash`/`zsh`) and `go.mod`/`go.work` (TOML moved to cm-langs-config.ts).
 // Kept out of static `cm-langs.ts` so non-IDE CodeEditor bundles (API, Workflows, K8s) stay minimal.
 import { StreamLanguage, type StringStream } from '@codemirror/language';
 import type { Extension } from '@codemirror/state';
@@ -46,7 +46,7 @@ export function shellToken(stream: StringStream, state: ShellScanState): string 
     if (tok === '|' || tok === '||' || tok === '&&' || tok === ';' || tok === '(') state.expectCmd = true;
     return 'operator';
   }
-  if (stream.match(/^[A-Za-z_]\w*(?==)/)) return 'definition';
+  if (stream.match(/^[A-Za-z_]\w*(?==)/)) return 'variableName.definition';
   if (stream.eat('=')) { state.expectCmd = false; return 'operator'; }
   if (stream.match(/^--?[A-Za-z0-9][\w-]*/)) { state.expectCmd = false; return 'attributeName'; }
   if (stream.match(/^[+-]?\d+(?:\.\d+)?\b/)) { state.expectCmd = false; return 'number'; }
@@ -93,19 +93,3 @@ export function goModLang(): Extension {
   });
 }
 
-export function tomlLang(): Extension {
-  return StreamLanguage.define<Record<string, never>>({
-    startState: () => ({}),
-    token(stream) {
-      if (stream.eatSpace()) return null;
-      if (stream.match(/^#.*/)) return 'comment';
-      if (stream.sol() && stream.match(/^\[\[?[^\]]+\]\]?/)) return 'typeName';
-      if (stream.match(/^"(?:[^"\\]|\\.)*"?/) || stream.match(/^'(?:[^'])*'?/)) return 'string';
-      if (stream.match(/^(?:true|false)\b/)) return 'atom';
-      if (stream.match(/^[+-]?\d+(?:\.\d+)?\b/)) return 'number';
-      if (stream.match(/^[A-Za-z0-9_-]+(?=\s*=)/)) return 'propertyName';
-      stream.next();
-      return null;
-    },
-  });
-}

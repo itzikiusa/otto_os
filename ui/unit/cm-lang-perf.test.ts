@@ -10,7 +10,7 @@ import { cmLangNow, loadCmLang } from '../src/lib/components/cm-langs.ts';
 // scroll, and i see the colors slowly added"). Every language the editor loads tokenizes a
 // realistic 2,000-line file start to end in under 30 ms, and an edit re-tokenizes from the
 // changed line, not the whole file. The scroll side (no line painted before its colours)
-// is e2e/desktop-ide-highlight-perf.spec.ts.
+// is e2e/desktop-ide-highlight-perf.spec.ts. Every StreamLanguage of ours is in the table.
 
 const BUDGET_MS = 30;
 const MAKEFILE = readFileSync(new URL('./fixtures/Makefile.sample', import.meta.url), 'utf8');
@@ -27,6 +27,19 @@ const SAMPLES: Record<string, string> = {
   makefile: repeatTo(2000, (i) => `${MAKEFILE.replace(/^(\w[\w-]*):/gm, `$1_${i}:`)}\n${LONG_COMMENT}\nVERSION_${i} := $(shell git describe --tags --always --dirty 2>/dev/null | sed -e 's/^v//' -e 's/-/./g')`),
   sh: repeatTo(2000, (i) => `#!/usr/bin/env bash\nset -euo pipefail\nNAME_${i}="app-${i}"\nif [[ -n "${'$'}{CI:-}" ]]; then\n  echo "building ${'$'}NAME_${i}" | tee -a build.log\n  go build -o "bin/${'$'}NAME_${i}" ./cmd/... && ls -la bin/\nfi\n# ${LONG_COMMENT.slice(2, 200)}`),
   toml: repeatTo(2000, (i) => `[package_${i}]\nname = "otto-${i}"\nversion = "0.${i}.0"\nedition = "2021"\n# comment ${i}\n[dependencies_${i}]\nserde = { version = "1", features = ["derive"] }\nenabled = true\nretries = ${i}`),
+  properties: repeatTo(2000, (i) => 'spring.datasource' + i + '.url=jdbc:mysql://' + '$' + '{DB_HOST:localhost}:3306/games?useSSL=false\n# comment ' + i + '\nfeature' + i + '.flags={"enabled": true, "rollout": [1, 2, 3], "name": "x' + i + '", "nested": {"a": [{"b": null}]}}\nlong' + i + '=' + 'value with \\u0020 escapes and words '.repeat(20) + '\\\n    continued'),
+  yaml: repeatTo(2000, (i) => 'service' + i + ':\n  image: "nginx:1.' + i + '"\n  ports: [80, 443]\n  env: &env' + i + '\n    A: 1\n    B: true\n  other: *env' + i + '\n  script: |\n    echo ' + i + '\n    exit 0\n# comment\n---'),
+  conf: repeatTo(2000, (i) => '[section' + i + ']\nhost = db' + i + '.internal ; comment\nport=5432\nenabled = yes\n127.0.0.1 host' + i),
+  dotenv: repeatTo(2000, (i) => 'export DB_URL_' + i + '=postgres://u@h/db\nAPI_KEY_' + i + '="abc"\n# c'),
+  ignore: repeatTo(2000, (i) => '# c\n/dist' + i + '/\n**/*.log\n!keep' + i + '.log\n*.png binary -diff'),
+  requirements: repeatTo(2000, (i) => 'requests' + i + '[socks]>=2.31,<3 ; python_version < "3.12"\n# pinned\ndjango==5.0.' + i),
+  dockerfile: repeatTo(2000, (i) => 'FROM golang:1.23 AS build' + i + '\nARG VERSION=dev\nENV CGO_ENABLED=0 GOOS=linux\nCOPY --from=build /out/app /app\nRUN go build -o /out/app ./cmd/... && \\\n    echo "built $VERSION"\nENTRYPOINT ["/app", "--port", "8080"]'),
+  nginx: repeatTo(2000, (i) => 'server {\n  listen 44' + i + ' ssl;\n  location ~* \\.php$ {\n    proxy_pass http://$upstream;\n  }\n}'),
+  proto: repeatTo(2000, (i) => 'message Bet' + i + ' {\n  string id = 1; // the id\n  repeated Leg legs = 2;\n}\n/* block\n comment */'),
+  hcl: repeatTo(2000, (i) => 'resource "aws_s3_bucket" "logs' + i + '" {\n  bucket = "logs-' + '$' + '{var.env}"\n  tags   = merge(local.tags, { a = true })\n}'),
+  diff: repeatTo(2000, (i) => 'diff --git a/x' + i + ' b/x\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@ func main\n-old\n+new\n same'),
+  powershell: repeatTo(2000, (i) => 'param([string]$Name' + i + ' = "x")\nif ($Name -eq $null) { Write-Host "hi" -ForegroundColor Green }\n<# c #>'),
+  batch: repeatTo(2000, (i) => '@echo off\nREM build\n:loop' + i + '\nset NAME=%1\nif "%NAME%"=="" goto loop'),
   mod: repeatTo(2000, (i) => `require (\n\tgithub.com/example/pkg${i} v1.${i}.0 // indirect\n\tgolang.org/x/sys v0.${i}.0\n)\nreplace example.com/a${i} => ../a${i}`),
 };
 

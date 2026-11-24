@@ -28,6 +28,8 @@ const js = () => import('@codemirror/lang-javascript');
 const md = (): Promise<Build> =>
   Promise.all([import('@codemirror/lang-markdown'), import('./cm-md-assist.ts')]).then(([m, a]) => () => [m.markdown(), a.markdownAssist()]);
 const extra = () => import('./cm-langs-extra.ts');
+const config = () => import('./cm-langs-config.ts');
+const infra = () => import('./cm-langs-infra.ts');
 
 const LOADERS: Record<string, () => Promise<Build>> = {
   js: () => js().then((m) => () => m.javascript()),
@@ -73,7 +75,25 @@ const LOADERS: Record<string, () => Promise<Build>> = {
   mod: () => extra().then((m) => () => m.goModLang()),
   sum: () => extra().then((m) => () => m.goModLang()),
   work: () => extra().then((m) => () => m.goModLang()),
-  toml: () => extra().then((m) => () => m.tomlLang()),
+  // Configuration and infrastructure files (langForPath.ts maps names and extensions here).
+  toml: () => config().then((m) => m.tomlLang),
+  properties: () => config().then((m) => m.propertiesLang),
+  yaml: () => config().then((m) => m.yamlLang),
+  conf: () => config().then((m) => m.confLang),
+  dotenv: () => config().then((m) => m.dotenvLang),
+  ignore: () => config().then((m) => m.ignoreLang),
+  requirements: () => config().then((m) => m.requirementsLang),
+  dockerfile: () => infra().then((m) => m.dockerfileLang),
+  nginx: () => infra().then((m) => m.nginxLang),
+  proto: () => infra().then((m) => m.protoLang),
+  hcl: () => infra().then((m) => m.hclLang),
+  diff: () => infra().then((m) => m.diffLang),
+  powershell: () => infra().then((m) => m.powershellLang),
+  batch: () => infra().then((m) => m.batchLang),
+  vtt: () => infra().then((m) => m.vttLang),
+  groovy: () => import('@codemirror/lang-java').then((m) => () => m.java()),
+  svelte: () => import('@codemirror/lang-html').then((m) => () => m.html()),
+  vue: () => import('@codemirror/lang-html').then((m) => () => m.html()),
   // langExtOf maps every Makefile name (Makefile.local, *.mk…) to this key.
   makefile: () => import('./cm-lang-makefile.ts').then((m) => () => m.makefileLang()),
 };
