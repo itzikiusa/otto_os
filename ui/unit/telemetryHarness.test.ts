@@ -43,6 +43,8 @@ function teardownFixture({ staleInitially = false, replaceOnConfigRead = false }
       execSync: (...args: unknown[]) => { calls.scans.push(args); return ''; },
     },
     '@playwright/test': { request: { async newContext() { calls.contexts++; return reachableApi; } } },
+    // The run's runtime holders (e2e/holders.ts): none in these fixtures.
+    './holders': { killHoldersFor: () => 0 },
   }, {
     process: { env: { OTTO_E2E_SLOT: 'ownership-regression' }, cwd: () => '/fixture/ui', kill: (...args: unknown[]) => { calls.signals.push(args); } },
     console: { warn: (...args: unknown[]) => { calls.warnings.push(args); }, log() {} },
