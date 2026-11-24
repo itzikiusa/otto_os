@@ -26,6 +26,7 @@ test('threadSessions lists Threads-scope sessions once — delegated children in
     s('gone', { surface: 'threads' }, { archived: true }),
     s('conn', { surface: 'threads' }, { kind: 'connection' }),
     s('back', { surface: 'agents', delegated_by: 't1' }),
+    s('dock', { surface: 'threads', threads_terminal: true }), // a terminal-dock shell opens on Agents
   ];
   const pool = new Map(list.map((x: { id: string }) => [x.id, x]));
   assert.deepEqual(plain(threads.threadSessions(list, pool).map((x: { id: string }) => x.id)), ['t1', 'child']);
