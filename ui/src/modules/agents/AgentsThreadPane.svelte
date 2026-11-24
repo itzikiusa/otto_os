@@ -175,13 +175,18 @@
     flex-shrink: 0;
     margin-inline-start: calc(-1 * var(--sp-3));
   }
+  /* As a terminal pane's word: a calm one gives way before the title (M7). */
   .tpane-word {
-    flex-shrink: 0;
+    flex: 0 100 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     font-size: var(--fs-s);
     color: var(--text-dim);
     white-space: nowrap;
   }
   .tpane-word:is(.warning, .danger, .success) {
+    flex-shrink: 0;
     font-weight: 600;
   }
   .tpane-word.warning {

@@ -116,9 +116,12 @@ test('micro panes keep the title and fold close into ⋯', async ({ page }) => {
   const n = await page.locator('[data-pane-key]').count();
   await expect(page.locator('.pane-head[data-tier="micro"]')).toHaveCount(n);
 
-  // The title never leaves the header.
+  // The title never leaves the header, and it keeps its letters: a calm
+  // status word gives way first (M7 — it read "B…" beside a whole "Working").
   await expect(page.locator('.pane-title')).toHaveCount(n);
   await expect(page.locator('.pane-title').first()).toBeVisible();
+  const cut = await page.locator('.pane-title').evaluateAll((els) => els.map((el) => el.scrollWidth - el.clientWidth));
+  for (const c of cut) expect(c, 'title cut short (px)').toBeLessThanOrEqual(1);
   await expectHeadersFit(page);
 
   await page.locator('button[title="More…"]').first().click();
