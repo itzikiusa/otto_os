@@ -40,6 +40,7 @@ export function startThreadFeeds(): Promise<Modules> {
         () => {},
       ).finally(() => {
         listing = null;
+        if (token !== getToken()) return void startThreadFeeds(); // another identity signed in meanwhile: read for it
         settledFor = token;
         threadFeeds.settled = true;
       });
