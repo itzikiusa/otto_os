@@ -44,6 +44,10 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   Structure, jump to definitions and run a target from the gutter. Markdown
   files get a formatting row, a "/" menu for blocks and table help.
 
+![Agents as one workspace: the inbox beside the canvas, two terminals and a chat thread with an approval tiled together](docs/screenshots/agents-workspace.jpg)
+
+![Git, changes first: the commit card with a drafted message and one Commit and push button above the changed files and the diff](docs/screenshots/git-changes.jpg)
+
 ### What's new in 0.4.0
 
 - **Threads, redesigned.** One centred reading column, a composer with one
