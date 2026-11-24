@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { toastError } from '../../lib/toastError';
   // Git module page. Workspace-INDEPENDENT: shows GitKraken-style top-level repo
   // tabs (one per open repo) above the active repo's RepoView. With no tab open
   // it shows a full-width landing — the repo browser/list + "Add Repository"
@@ -8,13 +7,10 @@
   // #/git/:id/:tab deep-link opens that repo as a tab.
   import { untrack } from 'svelte';
   import { onTabKey } from '../../lib/tabKeys';
-  import { api } from '../../lib/api/client';
-  import { confirmer } from '../../lib/confirm.svelte';
-  import type { GitAccount, GitProviderKind, Repo, RepoStatusResp } from '../../lib/api/types';
+  import type { RepoStatusResp } from '../../lib/api/types';
   import type { MenuItem } from '../../lib/contextmenu.svelte';
   import { router } from '../../lib/router.svelte';
   import { git } from '../../lib/stores/git.svelte';
-  import { toasts } from '../../lib/toast.svelte';
   import GitTabs from './GitTabs.svelte';
   import { focusPath, parseGitRoute } from './gitRoute';
   import { prWorkspace } from './prWorkspaceStore.svelte';
@@ -22,8 +18,8 @@
   import GitToolbar from './GitToolbar.svelte';
   import { gitBridge } from '../../lib/diff/gitBridge.svelte';
   import { registry } from '../../lib/commands.svelte';
-  import { graphCache } from './graph-cache';
   import FocusView from './FocusView.svelte';
+  import GitLanding from './GitLanding.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -77,27 +73,6 @@
       { id: 'git.clone', title: 'Clone a repository…', group: 'Git', keywords: 'remote url github bitbucket gitlab', run: () => { addMode = 'clone'; addOpen = true; } },
     ]),
   );
-  let accounts: GitAccount[] = $state([]);
-
-  /** Display name for the forge chip (the enum is lowercase: "bitbucket"). */
-  const PROVIDER_LABEL: Record<string, string> = {
-    github: 'GitHub',
-    bitbucket: 'Bitbucket',
-    gitlab: 'GitLab',
-  };
-
-  // Landing-hub repo filter: matches name, local path, or remote URL.
-  let repoFilter = $state('');
-  const filteredRepos = $derived.by(() => {
-    const q = repoFilter.trim().toLowerCase();
-    if (q === '') return git.allRepos;
-    return git.allRepos.filter(
-      (r) =>
-        r.name.toLowerCase().includes(q) ||
-        r.path.toLowerCase().includes(q) ||
-        (r.remote_url ?? '').toLowerCase().includes(q),
-    );
-  });
 
   // ── Load the GLOBAL repo list + restore open tabs (once, on mount) ─────────
   // Workspace-independent: the page does NOT re-load when the active workspace
@@ -158,49 +133,6 @@
     if (router.parts[0] === 'git' && router.parts.length > 1) router.go('git');
   }
 
-  // The hosting accounts behind each card's account picker, read once.
-  $effect(() => {
-    const ctl = new AbortController();
-    void api.get<GitAccount[]>('/git/accounts', ctl.signal).then((a) => { if (!ctl.signal.aborted) accounts = a; }).catch(() => {});
-    return () => ctl.abort();
-  });
-  /** Accounts that could serve a repo on `provider` (a token is provider-bound). */
-  function accountsFor(provider: GitProviderKind | null): GitAccount[] {
-    return provider === null ? [] : accounts.filter((a) => a.provider === provider);
-  }
-
-  /** (Re)bind a repo to a hosting account. Registration resolves the account
-   *  once, so a repo added before its account existed needs this — otherwise
-   *  every provider call fails with "repo has no git account". */
-  async function setRepoAccount(r: Repo, accountId: string): Promise<void> {
-    try {
-      const updated = await api.patch<Repo>(`/repos/${r.id}`, {
-        git_account_id: accountId === '' ? null : accountId,
-      });
-      await git.loadAllRepos(true);
-      toasts.success(
-        updated.git_account_id ? 'Account linked' : 'Account unlinked',
-        r.name,
-      );
-    } catch (e) {
-      toastError('Couldn’t link account', e);
-      // Snap the <select> back to the stored binding — the change never landed.
-      await git.loadAllRepos(true);
-    }
-  }
-
-  async function removeRepo(r: Repo): Promise<void> {
-    if (!(await confirmer.ask(`Remove “${r.name}” from Otto? Its tab closes and its saved review findings are deleted. The folder and its git history on disk are not touched, so you can add it again later.`, { title: 'Remove repository', confirmLabel: 'Remove', danger: true }))) return;
-    try {
-      await api.del(`/repos/${r.id}`);
-      git.closeRepoTab(r.id);
-      graphCache.drop(r.id);
-      await git.loadAllRepos(true);
-      toasts.info('Repository removed', r.name);
-    } catch (e) {
-      toastError('Couldn’t remove the repository', e);
-    }
-  }
 </script>
 
   <div class="gitpage">
@@ -303,83 +235,7 @@
               onaction={() => (addOpen = true)}
             />
           {/snippet}
-          <div class="landing-inner">
-            <div class="landing-hint">
-              <span class="section-title landing-count">Repositories · {git.allRepos.length}</span>
-              <span class="dim">Open one to see its graph, pull requests and reviews.</span>
-            </div>
-            <div class="repo-search">
-              <Icon name="search" size={13} />
-              <input dir="ltr"
-                class="repo-search-input"
-                type="search"
-                bind:value={repoFilter}
-                placeholder="Filter repositories by name, path or remote…"
-                aria-label="Filter repositories"
-                spellcheck="false"
-                onkeydown={(e) => {
-                  if (e.key === 'Escape' && repoFilter !== '') {
-                    e.stopPropagation();
-                    repoFilter = '';
-                  }
-                }}
-              />
-              {#if repoFilter.trim() !== ''}
-                <span class="repo-search-count dim">
-                  {filteredRepos.length} / {git.allRepos.length}
-                </span>
-              {/if}
-            </div>
-            {#if filteredRepos.length === 0}
-              <div class="repo-search-empty dim">
-                No repositories match “{repoFilter.trim()}”.
-              </div>
-            {/if}
-            <div class="repo-grid">
-              {#each filteredRepos as r (r.id)}
-              <div class="repo-card card">
-                <button class="repo-main" onclick={() => openRepo(r.id)}>
-                  <div class="repo-name">
-                    <Icon name="branch" size={14} />
-                    <span class="repo-name-text" title={r.name}>{r.name}</span>
-                    {#if r.provider}<span class="chip repo-provider">{PROVIDER_LABEL[r.provider] ?? r.provider}</span>{/if}
-                  </div>
-                  <div class="repo-path mono" title={r.path}>{r.path}</div>
-                  {#if r.remote_url}<div class="repo-remote mono dim" title={r.remote_url}>{r.remote_url}</div>{/if}
-                </button>
-                <div class="repo-actions">
-                  <button class="btn small" onclick={() => git.openRepoTab(r.id, 'prs')} title="Open {r.name} on its pull requests">
-                    <Icon name="pr" size={12} /> Pull requests
-                  </button>
-                  {#if r.provider}
-                    <!-- Which hosting credential this repo talks to. Unbound is a
-                         real failure mode (PRs/reviewers 400), so it reads as a
-                         warning rather than a blank field. -->
-                    <select
-                      class="repo-account"
-                      class:unbound={!r.git_account_id}
-                      title={r.git_account_id
-                        ? 'Git account used for pull requests'
-                        : `No ${PROVIDER_LABEL[r.provider] ?? r.provider} account linked — pull requests will fail`}
-                      aria-label="Git account for {r.name}"
-                      value={r.git_account_id ?? ''}
-                      onchange={(e) => setRepoAccount(r, e.currentTarget.value)}
-                    >
-                      <option value="">No account</option>
-                      {#each accountsFor(r.provider) as a (a.id)}
-                        <option value={a.id}>{a.label}</option>
-                      {/each}
-                    </select>
-                  {/if}
-                  <span class="grow"></span>
-                  <button class="icon-btn" title="Remove {r.name} from Otto" aria-label="Remove {r.name} from Otto" onclick={() => removeRepo(r)}>
-                    <Icon name="trash" size={14} />
-                  </button>
-                </div>
-              </div>
-            {/each}
-            </div>
-          </div>
+          <GitLanding onopen={(id, sub) => { git.openRepoTab(id, sub); if (router.parts[0] === 'git' && router.parts.length > 1) router.go('git'); }} />
         </LoadState>
       </PageBody>
     {/if}
@@ -434,164 +290,5 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
-  }
-  /* The repo hub follows the one page-width rule: full width, left-aligned
-     with the header title. */
-  .landing-inner {
-    width: 100%;
-  }
-  .landing-hint {
-    display: flex;
-    align-items: baseline;
-    flex-wrap: wrap;
-    gap: 4px 10px;
-    font-size: var(--fs-s);
-    margin-bottom: 10px;
-  }
-  .landing-count {
-    margin: 0;
-  }
-  /* Filter row above the repo grid — styled like an input but with an inline
-     leading icon + live match count, so it reads as part of the hub chrome. */
-  .repo-search {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 0 10px;
-    margin-bottom: 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface-2);
-    color: var(--text-dim);
-    transition: border-color var(--dur-fast) ease-out;
-  }
-  .repo-search:focus-within {
-    border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px var(--accent-soft-strong);
-  }
-  .repo-search-input {
-    flex: 1;
-    min-width: 0;
-    height: 34px;
-    border: none;
-    background: transparent;
-    color: var(--text);
-    font-size: var(--fs-s);
-    outline: none;
-  }
-  .repo-search-count {
-    font-size: var(--fs-xs);
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
-  }
-  .repo-search-empty {
-    font-size: var(--fs-s);
-    padding: 18px 4px;
-    text-align: center;
-  }
-  .repo-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-    gap: 12px;
-  }
-  .repo-card {
-    display: flex;
-    flex-direction: column;
-    transition: border-color var(--dur-fast) ease-out;
-  }
-  .repo-card:hover {
-    border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
-  }
-  /* Grows so every card's action row sits on the same baseline, whether or
-     not the repo has a remote line. */
-  .repo-main {
-    flex: 1;
-    text-align: start;
-    border: none;
-    background: transparent;
-    padding: 14px 14px 6px;
-    cursor: pointer;
-    color: var(--text);
-  }
-  .repo-name {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--fs-m);
-    font-weight: 600;
-    min-width: 0;
-  }
-  .repo-name > :global(svg),
-  .repo-provider {
-    flex-shrink: 0;
-  }
-  /* Long repo names clip with an ellipsis instead of widening the card (on the
-     text span: a bare text node in a flex row is cut mid-character). */
-  .repo-name-text {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .repo-path {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    margin-top: 4px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .repo-remote {
-    font-size: var(--fs-xs);
-    margin-top: 2px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .repo-actions {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 10px 10px;
-    padding-inline-start: 14px;
-  }
-
-  /* Account picker sits inline with the card actions; capped so a long label
-     can't stretch the (grid-sized) card. */
-  .repo-account {
-    max-width: 140px;
-    height: 24px;
-    padding: 0 4px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-  }
-
-  .repo-account.unbound {
-    color: var(--warning);
-    border-color: var(--warning);
-    background: var(--warning-soft);
-  }
-
-  /* ── Mobile + tablet (≤1024px): tighten the landing hub so the repo cards +
-     add-flow fit a phone without horizontal overflow — single-column grid,
-     stacked header, lighter padding, and full-width segmented/path rows inside
-     the Add Repository modal. The modal box itself is already viewport-clamped
-     (Modal.svelte: min(width, 100vw-24px)). ── */
-  @media (max-width: 1024px) {
-    /* One column on phone — minmax(320px) would otherwise force a track wider
-       than the content box on a 375px screen. */
-    .repo-grid {
-      grid-template-columns: 1fr;
-    }
-    .repo-search-input {
-      min-height: 38px;
-    }
-    .repo-actions .btn,
-    .repo-actions .icon-btn {
-      min-height: 36px;
-    }
   }
 </style>

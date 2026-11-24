@@ -890,10 +890,9 @@
     .focus {
       position: relative;
     }
-    .fx-pr {
-      flex-wrap: wrap;
-      row-gap: 2px;
-    }
+    .fx-pr { flex-wrap: wrap; row-gap: 2px; }
+    .fx-pr-title { flex: 1 1 calc(100% - 40px); min-height: 44px; } /* the title owns its line: never "#42 Di…" */
+    .fx-pr-text { white-space: normal; overflow-wrap: anywhere; }
     .fx-issue-main {
       min-height: 38px;
     }
