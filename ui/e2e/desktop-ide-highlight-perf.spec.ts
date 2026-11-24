@@ -8,8 +8,8 @@ import { apiCtx } from './seed';
 // Highlighting speed on real-sized files (owner, 2026-11-24: "the formatting of makefile is
 // very slow … i scroll, and i see the colors slowly added"). For each language: open the
 // file (time until the screen is coloured), then scroll top to bottom and require every
-// line on screen to carry its final token classes in the first frame after it arrives, with
-// no long animation frame. HIGHLIGHT_REPORT_ONLY=1 only prints the numbers (used to compare
+// line on screen to carry its final token classes in the first frame after it arrives, and
+// no scroll-driven frame over 50 ms. HIGHLIGHT_REPORT_ONLY=1 only prints the numbers (used to compare
 // against an older build).
 
 const REPORT_ONLY = !!process.env.HIGHLIGHT_REPORT_ONLY;
@@ -27,6 +27,49 @@ export const BIG_FILES: Record<string, { text: string; probe: string }> = {
   'Big.mk': {
     text: repeatTo(2000, (i) => `${MAKEFILE.replace(/^(\w[\w-]*):/gm, `$1_${i}:`)}\n${COMMENT}\nVERSION_${i} := $(shell git describe --tags --always --dirty 2>/dev/null | sed -e 's/^v//')`),
     probe: 'SHELL := /bin/bash',
+  },
+  'application.properties': {
+    text: repeatTo(2000, (i) => 'spring.datasource' + i + '.url=jdbc:mysql://' + '$' + '{DB_HOST:localhost}:3306/games\n# comment ' + i + '\nfeature' + i + '.flags={"enabled": true, "rollout": [1, 2, 3], "nested": {"a": [{"b": null}]}}\nlong' + i + '=' + 'value with words '.repeat(30)),
+    probe: 'spring.datasource0.url=',
+  },
+  'long.properties': {
+    // 5,000 lines of 4 KB (the owner's file: long values, JSON inside them).
+    text: repeatTo(5000, (i) => 'kafka.topic' + i + '.config={' + Array.from({ length: 110 }, (_, k) => '"k' + k + '": ' + (k % 3 ? '"v' + k + '"' : k)).join(', ') + '}'),
+    probe: 'kafka.topic0.config=',
+  },
+  'deploy.yaml': {
+    text: repeatTo(2000, (i) => 'service' + i + ':\n  image: "nginx:1.' + i + '"\n  ports: [80, 443]\n  env: &env' + i + '\n    A: 1\n  other: *env' + i + '\n  script: |\n    echo ' + i + '\n# comment\n---'),
+    probe: 'service0:',
+  },
+  'Cargo.toml': {
+    text: repeatTo(2000, (i) => '[package' + i + ']\nname = "otto-' + i + '"\nversion = "0.' + i + '.0"\n# comment\nserde = { version = "1", features = ["derive"] }'),
+    probe: '[package0]',
+  },
+  'setup.cfg': { text: repeatTo(2000, (i) => '[section' + i + ']\nhost = db' + i + '.internal ; comment\nport=5432\nenabled = yes'), probe: '[section0]' },
+  'requirements.txt': { text: repeatTo(2000, (i) => 'requests' + i + '>=2.31,<3 ; python_version < "3.12"\n# pinned\ndjango==5.0.' + i), probe: 'requests0>=' },
+  'Dockerfile': { text: repeatTo(2000, (i) => 'FROM golang:1.23 AS build' + i + '\nENV CGO_ENABLED=0 GOOS=linux\nRUN go build -o /out/app ./cmd/... && \\\n    echo "built $VERSION"\n# comment'), probe: 'FROM golang:1.23 AS build0' },
+  'nginx.conf': { text: repeatTo(2000, (i) => 'server {\n  listen 44' + i + ' ssl;\n  location /api {\n    proxy_pass http://$upstream;\n  }\n}'), probe: 'server {' },
+  'api.proto': { text: repeatTo(2000, (i) => 'message Bet' + i + ' {\n  string id = 1; // the id\n  repeated Leg legs = 2;\n}'), probe: 'message Bet0 {' },
+  'main.tf': { text: repeatTo(2000, (i) => 'resource "aws_s3_bucket" "logs' + i + '" {\n  bucket = "logs-' + '$' + '{var.env}"\n  tags   = merge(local.tags, { a = true })\n}'), probe: 'resource "aws_s3_bucket" "logs0"' },
+  'fix.diff': { text: repeatTo(2000, (i) => 'diff --git a/x' + i + ' b/x\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@ func main\n-old\n+new\n same'), probe: 'diff --git a/x0' },
+  'build.ps1': { text: repeatTo(2000, (i) => 'param([string]$Name' + i + ' = "x")\nif ($Name -eq $null) { Write-Host "hi" }'), probe: 'param([string]$Name0' },
+  'build.bat': { text: repeatTo(2000, (i) => '@echo off\nREM build\n:loop' + i + '\nset NAME=%1'), probe: '@echo off' },
+  'service.overrides': { text: repeatTo(2000, (i) => '# overrides ' + i + '\nhost' + i + ' = db.internal\nport' + i + ' = 5432'), probe: 'host0 = db.internal' },
+  'App.tsx': {
+    text: "import React, { useEffect, useState } from 'react';\n\n" + repeatTo(800, (i) => 'interface Props' + i + ' { id: string; count?: number }\n/** Row ' + i + '. */\nexport function Row' + i + '({ id, count = 0 }: Props' + i + '): JSX.Element {\n  const [open, setOpen] = useState<boolean>(false);\n  useEffect(() => { if (count > ' + i + ') setOpen(true); }, [count]);\n  return (\n    <div className="row" data-id={id} onClick={() => setOpen(!open)}>\n      {open ? <span>{id}</span> : null}\n    </div>\n  );\n}\n'),
+    probe: "import React, { useEffect, useState } from 'react';",
+  },
+  'service.py': {
+    text: 'import json\nfrom dataclasses import dataclass\n\n' + repeatTo(800, (i) => '@dataclass\nclass Bet' + i + ':\n    """A bet ' + i + '."""\n    amount: float = 0.0\n\n    def payout(self, odds: float) -> float:\n        if odds <= 1:\n            raise ValueError(f"bad odds {odds}")\n        return round(self.amount * odds, 2)  # rounded\n'),
+    probe: 'import json',
+  },
+  'server.js': {
+    text: "const express = require('express');\n\n" + repeatTo(800, (i) => '// route ' + i + '\napp.get("/api/' + i + '", async (req, res) => {\n  const rows = await db.query(\'SELECT * FROM t WHERE id = ?\', [req.params.id]);\n  res.json({ ok: true, rows, n: ' + i + ' });\n});\n'),
+    probe: "const express = require('express');",
+  },
+  'build.mjs': {
+    text: "import { readFile } from 'node:fs/promises';\n\n" + repeatTo(800, (i) => 'export async function step' + i + '(dir) {\n  const text = await readFile(dir + "/' + i + '.json", "utf8");\n  return JSON.parse(text).items.filter((x) => x.n > ' + i + ');\n}\n'),
+    probe: "import { readFile } from 'node:fs/promises';",
   },
   'big.go': {
     text: 'package main\n\nimport (\n\t"fmt"\n\t"strings"\n)\n\n' + repeatTo(2993, (i) => `// Handler${i} formats a greeting for request ${i}.\nfunc Handler${i}(name string, n int) (string, error) {\n\tif n < 0 {\n\t\treturn "", fmt.Errorf("bad count %d for %s", n, name)\n\t}\n\tparts := make([]string, 0, n)\n\tfor j := 0; j < n; j++ {\n\t\tparts = append(parts, strings.Repeat(name, j))\n\t}\n\treturn strings.Join(parts, ","), nil\n}\n`),
@@ -98,11 +141,14 @@ for (const [name, f] of Object.entries(BIG_FILES)) {
     test.setTimeout(240_000);
     await page.setViewportSize({ width: 1440, height: 900 });
     await boot(page);
-    // Long animation frames (Chromium): every frame over 50 ms while the file opens and scrolls.
+    // Long animation frames (Chromium) over 50 ms while the file opens and scrolls.
     await page.evaluate(() => {
       const w = window as unknown as { __loaf: number[] };
       w.__loaf = [];
-      new PerformanceObserver((l) => { for (const e of l.getEntries()) w.__loaf.push(Math.round(e.duration)); })
+      new PerformanceObserver((l) => { for (const e of l.getEntries() as (PerformanceEntry & { scripts?: { invoker: string }[] })[]) {
+          // Only frames the scroll drove (its handlers or the editor's measure frame).
+          if (e.scripts?.some((s) => /onscroll|FrameRequestCallback/i.test(s.invoker))) w.__loaf.push(Math.round(e.duration));
+        } })
         .observe({ type: 'long-animation-frame', buffered: false });
     });
     const item = page.getByTestId('ide-project-tree').locator(`button.tree-item[title="${name}"], button.tree-item[title$="/${name}"]`).first();
@@ -112,29 +158,40 @@ for (const [name, f] of Object.entries(BIG_FILES)) {
     // Time to coloured: the first frame in which the probe line's tokens carry classes.
     const tColoured = await page.waitForFunction((probe) => {
       const l = [...document.querySelectorAll<HTMLElement>('.ide-editor-area .cm-line')].find((e) => e.textContent?.startsWith(probe));
-      return l && l.querySelector('span[class]') ? performance.now() : null;
+      return l && l.querySelector('span[class^="ͼ"]') ? performance.now() : null;
     }, f.probe, { polling: 'raf', timeout: 30_000 }).then((h) => h.jsonValue() as Promise<number>, (e: unknown) => {
       if (REPORT_ONLY) return null; // an older build with no language for this file
       throw e;
     });
     const openMs = tColoured == null ? null : Math.round(tColoured - t0);
-    await page.waitForTimeout(800);
+    // Every class on screen (the semantic layer and a language server refine names later):
+    // when did the markup last change? Reported, not asserted.
+    const settleMs = await page.evaluate((start) => new Promise<number>((resolve) => {
+      const read = () => [...document.querySelectorAll('.ide-editor-area .cm-line')].slice(0, 80).map((l) => l.innerHTML).join('');
+      let last = read(), lastAt = performance.now();
+      const tick = () => {
+        const now = read();
+        if (now !== last) { last = now; lastAt = performance.now(); }
+        if (performance.now() - lastAt > 1500) resolve(Math.round(lastAt - start)); else requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    }), t0);
     await page.evaluate(() => { (window as unknown as { __loaf: number[] }).__loaf = []; });
     const height = await page.evaluate(() => document.querySelector('.ide-editor-area .cm-scroller')!.scrollHeight);
     const late: string[] = [];
     let steps = 0;
     for (let y = 0; y < height; y += 700) {
       const first = await visibleMarkup(page, y);
-      await page.waitForTimeout(300);
+      await page.waitForTimeout(300); // ui-guards: allow — proves no colour arrives after the first frame
       const settled = await visibleMarkup(page, null);
       steps++;
       for (const [text, cls] of Object.entries(settled)) if (text in first && first[text] !== cls) late.push(`@${y}: ${text.slice(0, 60)} | ${first[text]} -> ${cls}`);
     }
     const loaf = await page.evaluate(() => (window as unknown as { __loaf: number[] }).__loaf);
     if (late.length) console.log(late.slice(0, 4).join('\n'));
-    console.log(`HL ${JSON.stringify({ file: name, openMs, steps, lateLines: late.length, longFrames: loaf.length, worstFrameMs: Math.max(0, ...loaf) })}`);
+    console.log(`HL ${JSON.stringify({ file: name, openMs, settleMs, steps, lateLines: late.length, longFrames: loaf.length, worstFrameMs: Math.max(0, ...loaf) })}`);
     if (REPORT_ONLY) return;
     expect(late, 'lines coloured after they arrived').toEqual([]);
-    expect(loaf.filter((d) => d > 100), 'frames over 100 ms while scrolling').toEqual([]);
+    expect(loaf.filter((d) => d > 50), 'scroll frames over 50 ms').toEqual([]);
   });
 }
