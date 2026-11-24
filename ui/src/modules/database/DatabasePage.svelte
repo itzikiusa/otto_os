@@ -553,7 +553,7 @@
   {/snippet}
   {#snippet actions()}
     {#if database.selectedConn && database.activePane === null}
-      <button class="btn small ghost" data-overflow="2" aria-pressed={!database.sidebarCollapsed && database.sideTab !== 'history' && database.sideTab !== 'saved'} onclick={() => showSide('schema')} title="Tables (⌘B)">Tables</button>
+      <button class="btn small ghost" data-keep aria-pressed={!database.sidebarCollapsed && database.sideTab !== 'history' && database.sideTab !== 'saved'} onclick={() => showSide('schema')} title="Tables (⌘B)">Tables</button>
       <button class="btn small ghost" data-overflow="1" aria-pressed={!database.sidebarCollapsed && database.sideTab === 'history'} onclick={() => showSide('history')} title="Query history and saved queries">History</button>
       {#if database.mainTab === 'query' && editorBar.cur}
         {#if editorBar.cur.running}

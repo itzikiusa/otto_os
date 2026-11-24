@@ -47,9 +47,11 @@ test('Database RTL arrows follow the visual order of sidebar, query and main tab
 test('Phone schema selection exposes one keyboard reachable selected tab', async ({page}) => {
   await setup(page,'database');
   await page.setViewportSize({width:375,height:812});
-  const toggle = page.getByRole('button',{name:'Schema & saved',exact:true});
-  if (await toggle.getAttribute('aria-expanded') === 'false') await toggle.click();
-  const sidebar = page.getByRole('tablist',{name:'Sidebar view'});
+  // A phone keeps Tables / History in a sheet from the header.
+  const tables = page.getByTestId('page-header').getByRole('button',{name:'Tables',exact:true});
+  if (await tables.isVisible()) await tables.click();
+  else { await page.getByTestId('page-header').getByRole('button',{name:'More actions'}).click(); await page.getByRole('menuitem',{name:/^Tables/}).click(); }
+  const sidebar = page.getByRole('dialog',{name:'Tables'}).getByRole('tablist',{name:'Sidebar view'});
   await expect(sidebar.getByRole('tab',{name:'Tables',exact:true})).toBeVisible();
   await expect(sidebar.getByRole('tab',{name:'Tables',exact:true})).toHaveAttribute('tabindex','0');
   await expect(sidebar.getByRole('tab', { selected: true })).toHaveCount(1);

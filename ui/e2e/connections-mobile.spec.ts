@@ -162,7 +162,7 @@ test.describe('connections list — responsive', () => {
     if (await tables.isVisible()) await tables.click();
     else {
       await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click();
-      await page.getByRole('menuitem', { name: 'Tables', exact: true }).click();
+      await page.getByRole('menuitem', { name: /^Tables/ }).click();
     }
     const sheet = page.getByRole('dialog', { name: 'Tables' });
     await expect(sheet).toBeVisible();
