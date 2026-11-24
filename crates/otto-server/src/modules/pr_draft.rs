@@ -341,7 +341,7 @@ pub(crate) async fn draft_commit_message(
     Path(repo_id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
-    Json(req): Json<otto_core::api::DraftCommitMessageReq>,
+    body: Option<Json<otto_core::api::DraftCommitMessageReq>>, // none = `{}`
 ) -> crate::error::ApiResult<axum::response::Response> {
     let repo = ctx
         .git_store
@@ -449,7 +449,7 @@ pub(crate) async fn draft_commit_message(
             .await
             .map(|reply| finish(&reply))
     };
-    if !req.stream {
+    if !body.is_some_and(|b| b.stream) {
         let resp = draft(Box::new(|_: &str| {})).await;
         return Ok(Json(resp.map_err(crate::error::ApiError)?).into_response());
     }

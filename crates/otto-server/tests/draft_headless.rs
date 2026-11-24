@@ -206,6 +206,25 @@ async fn one_file_commit_draft_is_headless_and_fast() {
     assert!(!f.repo_dir.join(".claude").exists(), "wrote .claude/");
 }
 
+/// R1-061: the route took no body before `stream` arrived — a caller that
+/// still posts none (no Content-Type) gets the JSON draft, not a 415.
+#[tokio::test]
+async fn a_commit_draft_with_no_body_still_answers() {
+    let f = fixture(ANSWER).await;
+    let resp = reqwest::Client::new()
+        .post(&f.endpoint)
+        .bearer_auth(&f.token)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["message"],
+        "feat(app): greet the world\n\n- say hello world"
+    );
+}
+
 /// The card's live preview: with `stream`, the route answers NDJSON — the
 /// text as the model writes it (subject first, then body), then the draft.
 #[tokio::test]
