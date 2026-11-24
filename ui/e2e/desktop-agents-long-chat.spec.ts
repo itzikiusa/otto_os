@@ -1,5 +1,6 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
+import { budgetMs } from './perf';
 import { exerciseLongChat, seedLongChat, writeLongChat } from './long-chat-fixture';
 
 // Chat on a long, real-shaped session (the 0.5.0 Chat switch answered
@@ -29,6 +30,6 @@ test('a 60 MB session opens in Chat on its newest turns and pages back', async (
   const id = await seedLongChat(ctx, base, wsId, chat);
   const m = await exerciseLongChat(page, id, chat, info.project.name);
   console.log(`[long-chat] ${JSON.stringify(m)}`);
-  expect(m.firstPaintMs, 'Chat paints its first turn fast').toBeLessThan(2_000);
+  expect(m.firstPaintMs, 'Chat paints its first turn fast').toBeLessThan(budgetMs(2_000));
   expect(m.firstPageBytes).toBeLessThan(3 << 20);
 });
