@@ -744,7 +744,9 @@
     const beforeH = el?.scrollHeight ?? 0;
     const beforeTop = el?.scrollTop ?? 0;
     const anchor = captureFirstTurnAnchor(el);
+    const key = conv.key;
     await conv.loadEarlier();
+    if (conv.key !== key) return; // another conversation opened meanwhile
     // Pin the window to the oldest loaded turns so the new page is what shows.
     followTail = false;
     manualStart = 0;

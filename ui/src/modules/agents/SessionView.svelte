@@ -765,7 +765,7 @@
   <div class="pane-body" data-view={view}>
     {#if view === 'chat' && session}
       <div class="pane-chat" data-testid="pane-chat">
-      <LazyMount lazy={ChatView} what="the conversation" variant="panel" props={{ sessionId, workspaceId: session.workspace_id, surface: 'agents', readonly: readOnly, ontoggleterminal: () => setView('terminal') }} />
+      {#key sessionId}<LazyMount lazy={ChatView} what="the conversation" variant="panel" props={{ sessionId, workspaceId: session.workspace_id, surface: 'agents', readonly: readOnly, ontoggleterminal: () => setView('terminal') }} />{/key}
       </div>
     {:else}
     <div class="pane-term">
