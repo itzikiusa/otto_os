@@ -13,8 +13,9 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { skillsLabState } from '../../lib/stores/skillsLabState.svelte';
   import SkillsBrowser from './SkillsBrowser.svelte';
-  import SkillReviewPanel from './SkillReviewPanel.svelte';
-  import SkillsEvalPage from '../skills-eval/SkillsEvalPage.svelte';
+  import type SkillReviewPanel from './SkillReviewPanel.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -95,7 +96,11 @@
   const wsId = $derived(ws.currentId ?? '');
   let browser = $state<ReturnType<typeof SkillsBrowser> | null>(null);
   let reviewPanel = $state<ReturnType<typeof SkillReviewPanel> | null>(null);
-  let evalPage = $state<ReturnType<typeof SkillsEvalPage> | null>(null);
+  // Review and the Evaluator are tabs most visits never open: their chunks
+  // (run detail, matrix, start form) load on first open.
+  const ReviewLazy = lazyComponent(() => import('./SkillReviewPanel.svelte'));
+  const EvalLazy = lazyComponent(() => import('../skills-eval/SkillsEvalPage.svelte'));
+  let evalPage = $state<{ openDefaults(): void; back(): void } | null>(null);
   let canCreate = $state(true);
   let skillsPhoneDetail = $state(false);
   let reviewPhoneDetail = $state(false);
@@ -181,9 +186,9 @@
     {#if tab === 'skills'}
       <SkillsBrowser {listCollapsed} bind:this={browser} onreview={reviewSkill} onevaluate={evaluateSkill} onopenrun={openRun} onempty={(empty) => (canCreate = !empty)} onphonedetail={(o) => (skillsPhoneDetail = o)} onopenreview={openReview} />
     {:else if tab === 'review'}
-      <SkillReviewPanel bind:this={reviewPanel} {wsId} {listCollapsed} initialTarget={reviewTarget} onconsumed={() => (reviewTarget = null)} initialReview={reviewOpen} onreviewconsumed={() => (reviewOpen = null)} onphonedetail={(o) => (reviewPhoneDetail = o)} />
+      {#if ReviewLazy.component}{@const SkillReviewPanel = ReviewLazy.component}<SkillReviewPanel bind:this={reviewPanel} {wsId} {listCollapsed} initialTarget={reviewTarget} onconsumed={() => (reviewTarget = null)} initialReview={reviewOpen} onreviewconsumed={() => (reviewOpen = null)} onphonedetail={(o: boolean) => (reviewPhoneDetail = o)} />{:else}<LoadState what="the review" variant="page" empty loading={!ReviewLazy.error} error={ReviewLazy.error} onretry={() => ReviewLazy.retry()} />{/if}
     {:else}
-      <SkillsEvalPage bind:this={evalPage} initialSkill={evalTarget} onconsumed={() => (evalTarget = null)} initialRun={runTarget} onrunconsumed={() => (runTarget = null)} {listCollapsed} onlistable={(v) => (evalListable = v)} onphonedetail={(o) => (evalPhoneDetail = o)} />
+      {#if EvalLazy.component}{@const SkillsEvalPage = EvalLazy.component}<SkillsEvalPage bind:this={evalPage} initialSkill={evalTarget} onconsumed={() => (evalTarget = null)} initialRun={runTarget} onrunconsumed={() => (runTarget = null)} {listCollapsed} onlistable={(v) => (evalListable = v)} onphonedetail={(o: boolean) => (evalPhoneDetail = o)} />{:else}<LoadState what="the evaluator" variant="page" empty loading={!EvalLazy.error} error={EvalLazy.error} onretry={() => EvalLazy.retry()} />{/if}
     {/if}
   </div>
   </PageBody>

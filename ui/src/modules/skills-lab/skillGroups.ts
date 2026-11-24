@@ -22,6 +22,9 @@ export interface SkillVariant {
   bundledState?: string;
   bundledVersion?: number;
   installedVersion?: number | null;
+  /** Library / provider copies: the daemon's hash of the normalised SKILL.md
+   *  (`body_hash`). Two hashed copies compare without reading either body. */
+  hash?: string;
 }
 
 export type SyncState = 'in_sync' | 'drifted' | 'single' | 'unknown';
@@ -45,6 +48,7 @@ export interface LibraryLike {
   description: string;
   body: string;
   category?: string;
+  body_hash?: string;
 }
 export interface BundledLike {
   name: string;
@@ -59,6 +63,7 @@ export interface ProviderLike {
   name: string;
   category: string;
   description: string;
+  body_hash?: string;
 }
 
 /** Display order of variant badges. */
@@ -149,7 +154,7 @@ export function groupSkills(
   };
   const libBody = new Map<string, string>();
   for (const s of library) {
-    add(s.name, { source: 'library', category: cleanCategory(s.category), description: cleanDescription(s.description) });
+    add(s.name, { source: 'library', category: cleanCategory(s.category), description: cleanDescription(s.description), hash: s.body_hash });
     libBody.set(s.name, s.body);
   }
   for (const b of bundled) {
@@ -163,7 +168,7 @@ export function groupSkills(
     });
   }
   for (const p of provider) {
-    add(p.name, { source: p.provider, category: cleanCategory(p.category), description: cleanDescription(p.description) });
+    add(p.name, { source: p.provider, category: cleanCategory(p.category), description: cleanDescription(p.description), hash: p.body_hash });
   }
 
   const out: SkillGroup[] = [];
@@ -198,10 +203,18 @@ export function groupSkills(
     // Body comparison across the editable/provider copies.
     const comparable = variants.filter((v) => v.source !== 'bundled');
     const reference = comparable[0]?.source ?? variants[0].source;
+    const refHash = comparable[0]?.hash;
     const refBody =
       reference === 'library' ? libBody.get(name) : bodies[bodyKey(reference, name)];
     for (const v of comparable) {
       if (v.source === reference) continue;
+      if (v.hash && refHash) {
+        if (v.hash !== refHash) {
+          drift.push(`${sourceLabel(v.source)} copy differs from ${sourceLabel(reference)}`);
+          driftedSources.push(v.source);
+        }
+        continue;
+      }
       const b = v.source === 'library' ? libBody.get(name) : bodies[bodyKey(v.source, name)];
       if (b == null || refBody == null) {
         unknown = true;
@@ -266,7 +279,8 @@ export function namesNeedingBodies(groups: SkillGroup[], bodies: Record<string, 
   const out: { source: VariantSource; name: string }[] = [];
   for (const g of groups) {
     const comparable = g.variants.filter((v) => v.source !== 'bundled');
-    if (comparable.length < 2) continue;
+    // Every copy hashed by the daemon: compared already, nothing to read.
+    if (comparable.length < 2 || comparable.every((v) => v.hash)) continue;
     for (const v of comparable) {
       if (v.source === 'library') continue;
       if (bodies[bodyKey(v.source, g.name)] == null) out.push({ source: v.source, name: g.name });
