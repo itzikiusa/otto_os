@@ -22,8 +22,8 @@ import {
   type IdeGutterItem, type IdeOpenTab, type IdeProjectRoot, type IdeSymbolNode, type IdeTargetSpec,
 } from './ideTypes';
 
-/** A Makefile (makefilePath.ts): its symbols are read from the buffer here, with no
- *  request. Inlined: the store's unit harness lists every import it allows. */
+/** A Makefile (makefilePath.ts): its symbols and ▶ targets are read from the buffer here,
+ *  with no request. Inlined: the store's unit harness lists every import it allows. */
 const MAKEFILE_PATH = /(?:^|\/)(?:gnu)?makefile(?:\.[\w.-]+)?$|\.(?:mk|make|mak)$/i;
 
 const BUFFER_SYNC_DEBOUNCE_MS = 250;
@@ -386,7 +386,9 @@ export class IdeBufferPerfController {
   }
   scheduleGutter(host: IdeBufferHost, path: string, content?: string): Promise<void> {
     return this.runDebouncedJob(host, this.gutterJobs, path, false,
-      (sig) => api.bg.post<{ items: IdeGutterItem[] }>('/ide/gutter', { target: host.targetPayload, path, content: content ?? this.getBuffer(host, path) }, sig),
+      (sig) => MAKEFILE_PATH.test(path)
+        ? import('../../../lib/components/makefileModel').then((m) => ({ items: m.makefileRunItems(content ?? this.getBuffer(host, path), path) }))
+        : api.bg.post<{ items: IdeGutterItem[] }>('/ide/gutter', { target: host.targetPayload, path, content: content ?? this.getBuffer(host, path) }, sig),
       (resp) => { host.gutterByPath = { ...host.gutterByPath, [path]: resp.items ?? [] }; });
   }
   scheduleSymbols(host: IdeBufferHost, path: string, content?: string): Promise<void> {

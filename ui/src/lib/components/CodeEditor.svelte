@@ -40,7 +40,7 @@
     applyLinePrefixSuffixSync, buildEditorFindProviderSpec,
     buildReadOnlyExtension, clampSelectionToDoc, computeCursorChangeInfo, computeMinimalTextUpdate,
     createCompletionExtension, createCopyRecorder, createEditorStateCache, createIdeColdGutterPlaceholders, createPlainLineWatch,
-    foldMarkerGutter, hasLongLine, langExtOf,
+    foldMarkerGutter, hasLongLine, isMakefilePath, langExtOf,
     lightEditorTheme, parkEditorHistory, placeholderEditorTheme,
     restoreOrCreateEditorState, revealEditorLine,
     splitSelectionIntoLinesSync, type CursorChangeInfo, outsideText,
@@ -462,8 +462,8 @@
     appliedLangReady = langExt != null || !cmLangPending(langExtOf(filePath, language));
 
     const baseExtensions: Extension[] = [
-      ...(minimal ? [] : [lineNumbers(), ideBpCompartment.of(buildIdeBpExtIfLoaded(filePath)), foldMarkerGutter()]),
-      indentOnInput(), indentCompartment.of(indentExt(filePath)), bracketMatching(), lintGutter(),
+      ...(minimal ? [] : [lineNumbers(), ideBpCompartment.of(buildIdeBpExtIfLoaded(filePath)), isMakefilePath(filePath) ? [] : foldMarkerGutter()]),
+      indentOnInput(), indentCompartment.of(indentExt(filePath)), bracketMatching(), isMakefilePath(filePath) ? [] : lintGutter(), // a Makefile neither folds nor gets diagnostics
       ideCompartment.of(buildIdeExtIfLoaded(filePath)),
       ideDepsCompartment.of(ideMode && isIdeManifestPath(filePath) ? coldGutters.deps : []),
       drawSelection(),

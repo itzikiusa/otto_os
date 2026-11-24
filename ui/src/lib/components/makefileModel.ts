@@ -1,7 +1,7 @@
 // What a Makefile defines, read from its text (pure; the IDE's Structure tab, ⌘-click /
 // Go to Definition and hover for Makefiles — no language server). Recipe lines and
 // define…endef bodies are skipped; a trailing backslash joins a line to the next.
-import type { IdeSymbolNode } from '../api/types';
+import type { IdeGutterItem, IdeSymbolNode } from '../api/types';
 
 export interface MakeDef {
   name: string;
@@ -107,6 +107,23 @@ export function makefileSymbols(text: string): IdeSymbolNode[] {
     rows.push({ name: d.name, kind: d.kind, detail: null, line: d.line, end_line: d.endLine });
   }
   return rows;
+}
+
+/** A ▶ per target (pattern rules left out): `make <target>` in the Makefile's folder. */
+export function makefileRunItems(text: string, path: string): IdeGutterItem[] {
+  const cwd = path.slice(0, path.lastIndexOf('/')) || '/';
+  const file = path.slice(path.lastIndexOf('/') + 1);
+  // `-f` only for a file make would not pick by itself (Makefile.local, common.mk…).
+  const pick = /^(?:GNUmakefile|makefile|Makefile)$/.test(file) ? [] : ['-f', file];
+  return makefileOutline(text)
+    .targets.filter((t) => !t.name.includes('%'))
+    .map((t) => ({
+      line: t.line,
+      kind: 'main' as const,
+      label: `make ${t.name}`,
+      language: 'makefile',
+      run_spec: { runner: 'custom', command: 'make', args: [...pick, t.name], cwd, language: 'makefile' },
+    }));
 }
 
 /** The Makefile word at a 1-based column: a variable inside `$(…)` / `${…}`, a target,

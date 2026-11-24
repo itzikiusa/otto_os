@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { findMakefileDefinition, makefileOutline, makefileSymbols, makefileWordAt } from '../src/lib/components/makefileModel.ts';
+import { findMakefileDefinition, makefileOutline, makefileRunItems, makefileSymbols, makefileWordAt } from '../src/lib/components/makefileModel.ts';
 
 // Makefile Structure / Go to Definition / hover, read from the text (no language server).
 
@@ -48,6 +48,14 @@ test('definitions: a variable at its assignment, a target at its rule, export / 
   assert.deepEqual(pick(findMakefileDefinition(SAMPLE, 'banner')), { line: lineOf('define banner'), column: 8, kind: 'variable' });
   assert.equal(findMakefileDefinition(SAMPLE, 'GIT_COMMIT')!.text, 'GIT_COMMIT     := $(shell git rev-parse --short HEAD)');
   assert.equal(findMakefileDefinition(SAMPLE, 'LINT_VERSION'), null, 'defined in the included file only');
+});
+
+test('a ▶ per target runs make <target> in the file\'s folder (-f for a file make would not pick)', () => {
+  const items = makefileRunItems(SAMPLE, '/w/svc/Makefile');
+  assert.deepEqual(items.map((i) => i.label), ['make all', 'make build', 'make test', 'make lint', 'make docker-build', 'make deploy', 'make clean', 'make help']);
+  assert.deepEqual(items[1].run_spec, { runner: 'custom', command: 'make', args: ['build'], cwd: '/w/svc', language: 'makefile' });
+  assert.equal(items[1].line, lineOf('build:'));
+  assert.deepEqual(makefileRunItems('lint:\n\techo\n', '/w/svc/ci.mk')[0].run_spec.args, ['-f', 'ci.mk', 'lint']);
 });
 
 function pick(d: { line: number; column: number; kind: string } | null) {
