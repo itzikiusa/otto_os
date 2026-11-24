@@ -4,6 +4,7 @@
   // provider the picker lists the others ("Continue with another provider"):
   // a model picked there arms a switch for the next message (providerSwitch.ts).
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
+  import { whenIdle } from '../../../lib/lazy-component.svelte';
   import { formatEffortShort, formatModelLabel } from '../../../lib/providerModels';
   import { agentProviders, harnessLabel, isRuntimeProvider, orderThreadHarnesses, providerReadiness } from '../../../lib/providers';
   import { auth } from '../../../lib/stores/auth.svelte';
@@ -45,6 +46,9 @@
     const effort = draft.effort ?? (armed ? null : session?.effort ?? null); // the pick, else what the thread stored
     return effort ? `${name} · ${formatEffortShort(effort)}` : name;
   });
+  // The context meter waits for the thread's first paint (whenIdle).
+  let meterIdle = $state(false);
+  $effect(() => whenIdle(() => (meterIdle = true), 300));
   function pickProvider(p: string): void {
     armSwitch(draft, provider, p);
   }
@@ -52,7 +56,7 @@
   // closes so the "Next message continues on …" line is in sight.
 </script>
 
-{#if view?.thread?.context_usage?.max_tokens && ContextMeter.component}<ContextMeter.component usage={view.thread.context_usage} compact={view.commands.some((c) => c.name === 'compact') ? 'compact' : null} {oncompact} />{/if}
+{#if meterIdle && view?.thread?.context_usage?.max_tokens && ContextMeter.component}<ContextMeter.component usage={view.thread.context_usage} compact={view.commands.some((c) => c.name === 'compact') ? 'compact' : null} {oncompact} />{/if}
 <RuntimeModelChip
   bind:el
   provider={shown}
