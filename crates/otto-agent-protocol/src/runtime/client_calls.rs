@@ -231,6 +231,16 @@ async fn run(
                 .entry(sid.clone())
                 .or_default()
                 .insert(terminal_id.clone(), Arc::clone(&t));
+            // The session closed (or its agent went) while this started: its
+            // drop_session ran before the insert, so nothing else kills it.
+            // Checked after the insert: a drop under the lock after it sees it.
+            if live.lock().proc.as_ref().map(|p| p.epoch) != Some(epoch) {
+                if let Some(mut terms) = TERMINALS.get_mut(sid) {
+                    terms.remove(&terminal_id);
+                }
+                kill(&t);
+                return Err("the session ended".into());
+            }
             let mut readers = Vec::new();
             for mut pipe in pipes.into_iter().flatten() {
                 let (t, inner, live, tid) = (

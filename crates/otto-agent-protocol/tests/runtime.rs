@@ -5672,6 +5672,77 @@ async fn client_terminals_die_with_the_thread_and_wait_ignores_background_pipes(
     rt.close(&s3.id).await.unwrap();
 }
 
+/// Review R1-037: a terminal the person allowed is still starting when the
+/// thread closes; the close must not leave its command running.
+#[tokio::test]
+async fn a_terminal_starting_while_the_thread_closes_is_killed() {
+    use otto_agent_protocol::acp::AcpFlavor;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap().display().to_string();
+    let host = TestHost::new(&root, false);
+    let drivers: Arc<dyn DriverFactory> =
+        Arc::new(|p: RuntimeProvider| -> Option<Box<dyn StructuredDriver>> {
+            Some(Box::new(AcpDriver::with_flavor(
+                p,
+                AcpFlavor {
+                    program: fake_bin!("otto-fake-agent"),
+                    client_terminal: true,
+                    ..AcpFlavor::default()
+                },
+            )))
+        });
+    let rt = AgentRuntime::new(
+        AgentRuntimeRepo::new(pool().await),
+        Arc::clone(&host) as Arc<dyn RuntimeHost>,
+        drivers,
+        RuntimeConfig {
+            attachments_dir: dir.path().join("a"),
+            ..RuntimeConfig::default()
+        },
+    );
+    let s = rt
+        .create(
+            &"u1".into(),
+            &"w1".into(),
+            CreateRuntimeSessionReq {
+                provider: Some(RuntimeProvider::Grok),
+                cwd: Some(root.clone()),
+                access_mode: Some(RuntimeAccessMode::ApprovalRequired),
+                ..CreateRuntimeSessionReq::default()
+            },
+        )
+        .await
+        .unwrap();
+    let tick = dir.path().join("tick.txt");
+    rt.prompt(
+        &s.id,
+        &format!(
+            "term-keep (while true; do echo x >> {}; sleep 0.1; done) & wait",
+            tick.display()
+        ),
+    )
+    .await
+    .unwrap();
+    let req = host
+        .wait(|e| {
+            matches!(&e.body, RuntimeEventBody::RuntimeRequestUpdated { runtime_request }
+            if runtime_request.status == RuntimeRequestStatus::Pending)
+        })
+        .await;
+    let RuntimeEventBody::RuntimeRequestUpdated { runtime_request } = req.body else {
+        unreachable!()
+    };
+    rt.respond(&s.id, &runtime_request.id, ApprovalDecision::Accept)
+        .await
+        .unwrap();
+    rt.close(&s.id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let a = std::fs::metadata(&tick).map(|m| m.len()).unwrap_or(0);
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let b = std::fs::metadata(&tick).map(|m| m.len()).unwrap_or(0);
+    assert_eq!(a, b, "the command outlived the closed thread");
+}
+
 /// Security 3: an elicitation (MCP server / ACP agent asking the person)
 /// inside a subagent never goes to the delegating agent, and
 /// `otto.thread_answer` refuses it; the person still answers it.
