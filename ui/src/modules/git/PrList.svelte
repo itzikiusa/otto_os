@@ -76,7 +76,6 @@
   const listTok = $derived(listToken(effState, prefs.review));
 
   // ── Data ─────────────────────────────────────────────────────────────────
-  const states: PrState[] = ['open', 'merged', 'declined', 'all'];
   let prs: PrSummary[] = $state.raw([]);
   /** Rows the last page-1 read returned (a refresh replaces exactly those). */
   let page1Count = 0;
@@ -318,7 +317,6 @@
     untrack(() => onfirst?.(rows));
   });
   const activeFilterCount = $derived(activeFilters(prefs));
-  const STATE_LABEL: Record<PrState, string> = { open: 'Open', merged: 'Merged', declined: 'Declined', all: 'All' };
   const filtering = $derived(hasClientFilter(parsed) || activeFilterCount > 0);
   const openSet = $derived(new Set(openNumbers));
 
@@ -337,7 +335,7 @@
         maxVisible: 40,
         align: 'end',
       });
-    ctxMenu.show(e, filterItems(prefs, { hasHandles: myHandles.size > 0 || prs.some((p) => p.is_mine), authors, pickAuthor }, setPrefs));
+    ctxMenu.show(e, filterItems(prefs, { hasHandles: myHandles.size > 0 || prs.some((p) => p.is_mine), authors, pickAuthor, stateLocked: parsed.state !== null }, setPrefs));
   }
 
   // ── Opening + selection ─────────────────────────────────────────────────
@@ -468,25 +466,6 @@
     </div>
   </div>
 
-  <div class="pr-subbar">
-    <div class="segmented pr-states" role="group" aria-label="Pull request state">
-      {#each states as s (s)}
-        <button
-          class:active={effState === s}
-          aria-pressed={effState === s}
-          disabled={parsed.state !== null}
-          title={parsed.state !== null ? 'Set by is: in the search' : undefined}
-          onclick={() => setPrefs({ state: s })}
-        >{STATE_LABEL[s]}</button>
-      {/each}
-    </div>
-    <span class="grow"></span>
-    {#if lastUpdated && !loading}
-      <span class="pr-updated-hint dim" title={new Date(lastUpdated).toLocaleString()}>
-        {refreshing ? 'Refreshing…' : `Updated ${rel(lastUpdated)}`}
-      </span>
-    {/if}
-  </div>
   <!-- Always mounted: a status region inserted with its text is usually silent. -->
   <div class="pr-refresh-err" role="status" class:empty={!refreshError}>{refreshError ? `Couldn’t refresh: ${refreshError}` : ''}</div>
 
@@ -513,7 +492,7 @@
       <EmptyState
         icon="pr"
         title={effState === 'all' ? 'No pull requests' : `No ${effState} pull requests`}
-        body="Open one from your current branch, or pick another state above."
+        body="Open one from your current branch, or pick another state in Filters."
         actionLabel="New pull request"
         actionIcon="pr"
         onaction={() => (createOpen = true)}
@@ -596,7 +575,8 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 10px 12px 6px;
+    padding: 10px 12px 8px;
+    border-block-end: 1px solid var(--border);
   }
   .pr-search-wrap {
     position: relative;
@@ -661,20 +641,6 @@
   }
   .prlist {
     container-type: inline-size;
-  }
-  .pr-subbar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 0 12px 8px;
-    border-block-end: 1px solid var(--border);
-  }
-  .pr-states > button:disabled {
-    cursor: default;
-  }
-  .pr-updated-hint {
-    font-size: var(--fs-xs);
-    white-space: nowrap;
   }
   .pr-refresh-err.empty {
     padding: 0;
@@ -742,10 +708,6 @@
     }
     .pr-icon {
       width: 34px;
-    }
-    .pr-states > button {
-      height: 30px;
-      padding: 0 10px;
     }
   }
 </style>

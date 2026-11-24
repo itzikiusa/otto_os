@@ -138,3 +138,16 @@ test('"review requested from you" is its own list: open only, review=me', () => 
   item.action();
   assert.deepEqual(JSON.parse(JSON.stringify(set)), [{ review: true }]);
 });
+
+test('the PR state lives in the Filters menu (one tab set fewer); a non-open state counts as a filter', () => {
+  const prefs = loadSource(new URL('../src/modules/git/pr-list-prefs.ts', import.meta.url), { './pr-query': { SORT_LABEL: {} } });
+  const set: unknown[] = [];
+  const items = prefs.filterItems(prefs.DEFAULT_PREFS, { hasHandles: false, authors: [], pickAuthor: () => {} }, (x: unknown) => set.push(x));
+  const labels = items.map((i: { label?: string }) => i.label);
+  for (const s of ['Open', 'Merged', 'Declined', 'All']) assert.ok(labels.includes(s), s);
+  assert.equal(items.find((i: { label?: string }) => i.label === 'Open').checked, true);
+  items.find((i: { label?: string }) => i.label === 'Merged').action();
+  assert.deepEqual(JSON.parse(JSON.stringify(set)), [{ state: 'merged' }]);
+  assert.equal(prefs.activeFilters({ ...prefs.DEFAULT_PREFS, state: 'merged' }), 1);
+  assert.equal(prefs.CLEARED_FILTERS.state, 'open');
+});
