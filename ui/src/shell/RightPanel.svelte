@@ -96,7 +96,7 @@
   // On Agents the panel opens on the session's details card (A5) — Threads'
   // card (folder, branch, changes with commit → push → PR, context, MCP,
   // subagents). Its own chunk, loaded only once the panel is open.
-  const SessionDetails = lazyComponent(() => import('../modules/threads/ThreadDetailsCard.svelte'));
+  const SessionDetails = lazyComponent(() => import('../modules/agents/SessionDetailsCard.svelte'));
   const detailsSession = $derived((router.module === 'agents' || router.module === '') && rightPanel.session ? ws.getSession(ws.activeSessionId) : null);
 
   // `forceOpen` is set when the panel is hosted inside the mobile right drawer:

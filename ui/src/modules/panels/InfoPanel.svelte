@@ -9,7 +9,10 @@
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { events } from '../../lib/events.svelte';
   import { sessionState } from '../../lib/status';
-  import AttachIssue from '../agents/AttachIssue.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  // The issue picker loads when opened (it is SessionView's too, also lazy there).
+  const AttachIssueView = lazyComponent(() => import('../agents/AttachIssue.svelte')); // ui-guards: allow — the one issue picker
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import type { AttachedIssue } from '../../lib/api/types';
   import { allProviders, defaultAgentProvider } from '../../lib/providers';
@@ -257,7 +260,7 @@
 {/if}
 
 {#if attachOpen && session}
-  <AttachIssue sessionId={session.id} onclose={() => (attachOpen = false)} />
+  <LazyMount lazy={AttachIssueView} what="the issue picker" quiet onerror={() => (attachOpen = false)} props={{ sessionId: session.id, onclose: () => (attachOpen = false) }} />
 {/if}
 
 {#if folderPickerOpen && session}
