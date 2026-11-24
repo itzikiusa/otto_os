@@ -7,11 +7,42 @@ multi-agent code review, Jira/Confluence product workflows, SSH/database
 connections, an HTTP API client, real token-usage tracking, and Slack/Telegram
 bridges so an agent can work a ticket from a chat thread.
 
-**Version 0.4.0** · macOS (Apple Silicon; Intel from source) · actively developed, so
+**Version 0.5.0** · macOS (Apple Silicon; Intel from source) · actively developed, so
 expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
 
 🎬 **[Watch the product tour](https://github.com/itzikiusa/otto_os/releases/download/v0.3.0/otto-tour-20261116.mp4)**
 (also in the app under **Help → Walkthroughs**).
+
+### What's new in 0.5.0
+
+- **Agents is one workspace.** The session list is an inbox beside the canvas:
+  status in words, what needs you first, terminals and chat threads in one
+  list. A thread opens as a pane next to your terminals, in tabs, tiled or
+  free layout, and its approvals are answered there. Each pane has one header
+  line; an agent session switches between Terminal and Chat. New session is
+  one short sheet: pick a provider, Terminal or Chat, an optional first
+  message, Start. The right panel leads with a details card and a commit
+  card. A resize or a shell's first prompt no longer reads as "Done".
+- **Git, changes first.** A repository with changes opens on Changes: the
+  message is drafted, every file is included, and one button moves Commit and
+  push → Push → Create pull request. A pull request is a reading page with its
+  state in words, one primary action that follows it (Fix checks, Review,
+  Merge) and one details card. Opening a repository takes 3 requests instead
+  of 13 and the page's first paint is a fifth of what it was.
+- **Connections and Database.** Connections is a full-page list with each
+  connection's state in words and a two-step New connection. The workbench is
+  titled by the connection, Run is the one primary action, and rows are the
+  screen, on a phone too.
+- **Home, Usage, MCP and the sidebar.** Home is one column: what needs you,
+  what is working. Usage opens on what is left and what the month will cost.
+  The MCP Control Plane opens on what waits for you. The sidebar shows the
+  pages you use and keeps the rest under More.
+- **Lighter pages.** AWS, Kubernetes, Vault, Skills Lab, Goal Loops, Workflows
+  and Product load their heavy views on first use; their first paint is 60 to
+  90 % smaller.
+- **IDE.** Makefiles are highlighted, list their targets and variables in
+  Structure, jump to definitions and run a target from the gutter. Markdown
+  files get a formatting row, a "/" menu for blocks and table help.
 
 ### What's new in 0.4.0
 
@@ -549,7 +580,7 @@ Otto is a Tauri 2 desktop app with a Rust backend daemon and a Svelte 5 frontend
 ## Download (prebuilt DMG)
 
 **Versioned releases:** [Otto 0.3.0](../../releases/tag/v0.3.0) ships
-`Otto_0.3.0_aarch64.dmg` with its `.sha256` and the tour film. 0.4.0 is on
+`Otto_0.3.0_aarch64.dmg` with its `.sha256` and the tour film. 0.5.0 is on
 `main`; until its release is published, build it from source or use the
 rolling `latest` build below.
 
