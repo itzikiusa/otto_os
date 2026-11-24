@@ -101,6 +101,9 @@ test('Home is the first sidebar entry and seeds a default view of live boxes', a
 
 test('spaces: add (max 4), switch with tabs / keys, rename, delete, persist', async ({ page }) => {
   await boot(page);
+  // The first visit seeds "Overview" once auth + workspace are in; adding a
+  // space before that would make it the only one.
+  await expect(current(page)).toHaveAccessibleName('Overview', { timeout: 15_000 });
   await addView(page, 'Second');
   await expect(page.getByRole('tab')).toHaveCount(2);
   await expect(current(page)).toHaveAccessibleName('Second');
