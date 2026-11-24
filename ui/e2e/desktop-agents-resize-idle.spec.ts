@@ -59,31 +59,31 @@ test('a resize redraw is not work: tiled idle shells stay Idle', async ({ page }
     await page.keyboard.type("TRAPWINCH() { clear; seq 1 3; sleep 1; seq 1 40 }; clear\n");
   }
   await expect.poll(() => words(page), { timeout: 45_000 }).toEqual(TITLES.map(() => 'Idle'));
-  await page.waitForTimeout(3_000);
 
   const seen = new Set<string>();
-  const sample = async () => {
-    for (const w of await words(page)) seen.add(w);
-    for (const s of await stored()) seen.add(s);
+  /** Sample every row's word and stored status for `ms`: an absence-proving
+   *  wait — no row may flip to Working (or Done) while it runs. */
+  const watch = async (ms: number) => {
+    for (let t = 0; t < ms; t += 400) {
+      await page.waitForTimeout(400); // ui-guards: allow — absence-proving: nothing may flip
+      for (const w of await words(page)) seen.add(w);
+      for (const s of await stored()) seen.add(s);
+    }
   };
+  await watch(3_000);
   // Tabs ⇄ tiled ⇄ free layout and a window resize: every pane changes
   // size, so every shell gets a SIGWINCH and redraws its prompt.
   const views = ['Tabbed view', 'Tiled view', 'Tabbed view', 'Tiled view'];
   for (const v of views) {
     await page.locator(`button[aria-label="${v}"]`).click();
-    await page.waitForTimeout(1_200);
-    await sample();
+    await watch(1_200);
   }
   for (const [w, h] of [[1000, 700], [1440, 900]] as const) {
     await page.setViewportSize({ width: w, height: h });
-    await page.waitForTimeout(1_200);
-    await sample();
+    await watch(1_200);
   }
   // The status task ticks every 2 s and a flip lasts ≥ 5 s: watch long enough.
-  for (let i = 0; i < 24; i++) {
-    await page.waitForTimeout(500);
-    await sample();
-  }
+  await watch(12_000);
   expect([...seen].filter((w) => /Working|Done|working/.test(w))).toEqual([]);
   expect(await words(page)).toEqual(TITLES.map(() => 'Idle'));
 });
