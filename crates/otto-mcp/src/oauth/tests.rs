@@ -319,3 +319,9 @@ fn remote_endpoints_must_be_https_and_not_local() {
     assert!(checked_endpoint("http://as.example/token", true).is_err());
     assert!(checked_endpoint("https://as.example/token", true).is_ok());
 }
+
+#[tokio::test]
+async fn a_plain_http_server_off_loopback_cannot_sign_in() {
+    let e = start("http://10.1.2.3/mcp", None).await.err().unwrap();
+    assert!(e.contains("https"), "{e}");
+}

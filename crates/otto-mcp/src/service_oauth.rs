@@ -74,6 +74,9 @@ impl McpService {
             return None;
         }
         let mut t = self.oauth_tokens(&server.id).await?;
+        if !bearer_allowed(server.url.as_deref(), &t) {
+            return None;
+        }
         if force || t.needs_refresh(now()) {
             let stale = t.access_token.clone();
             let _guard = self
@@ -182,7 +185,41 @@ impl McpService {
     }
 }
 
+/// Whether `t` may ride on requests to `server_url`: never in cleartext
+/// off this Mac.
+fn bearer_allowed(server_url: Option<&str>, _t: &Tokens) -> bool {
+    server_url.is_some_and(|u| otto_netguard::require_tls_or_loopback(u).is_ok())
+}
+
 /// A transport error that is the server asking for authorization.
 pub(crate) fn is_unauthorized(error: &str) -> bool {
     error.contains("http 401")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tokens(resource: &str) -> Tokens {
+        Tokens {
+            access_token: "at".into(),
+            refresh_token: None,
+            expires_at: None,
+            token_endpoint: String::new(),
+            client_id: String::new(),
+            client_secret: None,
+            resource: resource.into(),
+            auth_host: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_bearer_never_travels_in_cleartext_off_this_mac() {
+        let ok = |u: &str| bearer_allowed(Some(u), &tokens(u));
+        assert!(ok("https://mcp.example/mcp"));
+        assert!(ok("http://127.0.0.1:9/mcp"));
+        assert!(!ok("http://mcp.example/mcp"));
+        assert!(!ok("http://10.1.2.3/mcp"));
+        assert!(!bearer_allowed(None, &tokens("")));
+    }
 }

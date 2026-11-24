@@ -179,6 +179,8 @@ async fn get_json(url: reqwest::Url) -> Option<Value> {
 
 /// Find the authorization server of the MCP server at `server_url`.
 pub async fn discover(server_url: &str) -> Result<AuthServer, String> {
+    // The metadata of a cleartext server could be rewritten on the path.
+    otto_netguard::require_tls_or_loopback(server_url)?;
     let local = server_is_local(server_url)?;
     if !local {
         otto_netguard::check_url(server_url).await?;
