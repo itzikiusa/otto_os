@@ -72,7 +72,7 @@ async function openAndQuery(page: Page): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
 
-  const conn = page.locator(`.conn-row[data-connection-id="${redisConnId}"] .conn-name`);
+  const conn = page.locator(`.conn-row[data-connection-id="${redisConnId}"] .tr-title`);
   await expect(conn).toBeVisible({ timeout: 30_000 });
   await conn.click();
 

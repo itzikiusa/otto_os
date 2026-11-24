@@ -109,7 +109,7 @@ async function openConn(page: Page, name = CONN): Promise<void> {
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
   const picker = page.locator('.side-switch [role="tab"]', { hasText: 'Connections' }).first();
   if (await picker.isVisible().catch(() => false)) await picker.click();
-  const c = page.locator('.conn-list .conn-name', { hasText: name });
+  const c = page.locator('.conn-list .tr-title', { hasText: name });
   await expect(c.first()).toBeVisible({ timeout: 30_000 });
   await c.first().click();
   await expect(page.locator('.qe-edit .cm-content')).toBeVisible({ timeout: 20_000 });

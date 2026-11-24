@@ -13,7 +13,7 @@ import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 // the MySQL sweep (mysql: shopdb→Tables→orders; postgres: public→Tables→orders).
 //
 // Same seven checks as the MySQL sweep, share the same content selectors
-// (`.conn-list .conn-name`, `.main-tabs`, `.qe-edit .cm-content`, `.grid`,
+// (`.conn-list .tr-title`, `.main-tabs`, `.qe-edit .cm-content`, `.grid`,
 // `.grid-scroll`); the phone layout adds accordion headers we expand first.
 // Each project uses a UNIQUE scratch sku (`e2e-scratch-postgres-<project>`) so
 // the write flows never race across the parallel device projects.
@@ -53,7 +53,7 @@ async function openPostgres(page: Page): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
 
-  const conn = page.locator('.conn-list .conn-name', { hasText: 'e2e-postgres' });
+  const conn = page.locator('.conn-list .tr-title', { hasText: 'e2e-postgres' });
   await expect(conn.first()).toBeVisible({ timeout: 30_000 });
   await conn.first().click();
 
@@ -276,7 +276,7 @@ test.describe('DB Explorer · Postgres sweep', () => {
       await page.locator('.side-switch [role="tab"]', { hasText: 'Connections' }).click();
     }
     await expect(page.locator('.conn-list')).toBeVisible();
-    await expect(page.locator('.conn-list .conn-name', { hasText: 'e2e-postgres' }).first()).toBeVisible();
+    await expect(page.locator('.conn-list .tr-title', { hasText: 'e2e-postgres' }).first()).toBeVisible();
 
     if (isPhone(page)) {
       const sideBody = page.locator('.side-body');

@@ -32,7 +32,7 @@ async function openQuery(page: Page, scheme: 'light' | 'dark'): Promise<void> {
   await page.addInitScript(value => localStorage.setItem('otto_scheme', value), scheme);
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible();
-  await page.locator(`.conn-row[data-connection-id="${connId}"] .conn-name`).click();
+  await page.locator(`.conn-row[data-connection-id="${connId}"] .tr-title`).click();
   const editor = page.locator('.qe-edit .cm-content');
   await expect(editor).toBeVisible();
   await editor.click();

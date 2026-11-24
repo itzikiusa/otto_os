@@ -62,7 +62,7 @@ test('PostgreSQL Processes: hidden sessions explained, Cancel and Terminate ask 
   });
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  const c = page.locator('.conn-list .conn-name', { hasText: CONN });
+  const c = page.locator('.conn-list .tr-title', { hasText: CONN });
   await expect(c.first()).toBeVisible({ timeout: 30_000 });
   await c.first().click();
   await expect(page.locator('.query-editor')).toBeVisible({ timeout: 20_000 });

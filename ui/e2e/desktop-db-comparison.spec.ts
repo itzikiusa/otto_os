@@ -87,9 +87,10 @@ async function fixture(page: Page): Promise<{ calls: QueryCall[]; revoke: () => 
 }
 
 async function openConnection(page: Page, name: string): Promise<void> {
-  const picker = page.locator('.side-switch [role="tab"]', { hasText: 'Connections' }).first();
-  if (await picker.isVisible()) await picker.click();
-  await page.locator('.conn-list .conn-name', { hasText: name }).first().click();
+  // The list is its own page: from the workbench, go back to it first.
+  await page.locator('.conn-list, .db-root').first().waitFor();
+  if (await page.locator('.db-root').isVisible()) await page.getByRole('button', { name: 'All connections', exact: true }).click();
+  await page.locator('.conn-list .tr-title', { hasText: name }).first().click();
   await expect(page.locator('.conn-tab.active .conn-tab-name')).toHaveText(name);
   await expect(page.locator('.query-editor')).toBeVisible();
 }
@@ -106,7 +107,7 @@ async function run(page: Page, statement: string, marker: string): Promise<void>
   await expect(page.locator('.query-editor .grid')).toContainText(marker);
 }
 async function compareTwo(page: Page): Promise<void> {
-  await page.goto('/#/database');
+  await page.goto('/#/connections');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
   await openConnection(page, EAST);
   await run(page, EAST_SQL, 'East customer one');

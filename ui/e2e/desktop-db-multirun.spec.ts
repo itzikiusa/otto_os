@@ -130,7 +130,7 @@ async function openStg(page: Page): Promise<void> {
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
   const picker = page.locator('.side-switch [role="tab"]', { hasText: 'Connections' }).first();
   if (await picker.isVisible()) await picker.click();
-  await page.locator('.conn-list .conn-name', { hasText: STG }).first().click();
+  await page.locator('.conn-list .tr-title', { hasText: STG }).first().click();
   await expect(page.locator('.query-editor')).toBeVisible();
   const editor = page.locator('.query-editor .qe-edit .cm-content');
   await editor.click();

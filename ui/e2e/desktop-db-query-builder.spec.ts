@@ -42,7 +42,7 @@ test.beforeEach(async ({ page }, testInfo) => {
 async function openBuilder(page: Page): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  const c = page.locator('.conn-list .conn-name', { hasText: CONN });
+  const c = page.locator('.conn-list .tr-title', { hasText: CONN });
   await expect(c.first()).toBeVisible({ timeout: 30_000 });
   await c.first().click();
   await page.locator('.main-tabs .mt', { hasText: 'Builder' }).click();
@@ -126,7 +126,7 @@ test('a loose column under GROUP BY is flagged, with a one-click fix', async ({ 
 test('round trip: Open in Builder parses a query tab; unsupported SQL is refused inline', async ({ page }) => {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  await page.locator('.conn-list .conn-name', { hasText: CONN }).first().click();
+  await page.locator('.conn-list .tr-title', { hasText: CONN }).first().click();
   await expect(page.locator('.query-editor')).toBeVisible({ timeout: 20_000 });
   const content = page.locator('.qe-edit .cm-content');
   await content.click();

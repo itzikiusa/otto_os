@@ -24,7 +24,7 @@ async function database(page:Page) {
   await page.route('**/db/capabilities',r=>r.fulfill({json:{engine:'mysql',query_language:'sql',can_write:true,explain:true}}));
   await page.route('**/db/schema**',r=>r.fulfill({json:[]}));
   await openPage(page,'database');
-  await page.locator('.conn-list .conn-name',{hasText:rows[0].name}).click();
+  await page.locator('.conn-list .tr-title',{hasText:rows[0].name}).click();
   await expect(page.locator('.qe-edit .cm-content')).toBeVisible();
   return rows;
 }
@@ -62,12 +62,12 @@ test('saved query response stays associated with its original connection after s
   await page.getByRole('button',{name:'Save',exact:true}).click();await page.getByPlaceholder('Query name').fill('Primary saved query');
   await page.locator('.save-bar').getByRole('button',{name:'Save',exact:true}).click();await expect.poll(()=>sent).toBe(true);
   await showConnections(page);
-  await page.locator('.conn-list .conn-name',{hasText:rows[1].name}).click();
+  await page.locator('.conn-list .tr-title',{hasText:rows[1].name}).click();
   await page.locator('.qe-edit .cm-content').fill('SELECT alternate_draft');
   const done=page.waitForResponse(r=>r.url().endsWith('/saved-queries')&&r.request().method()==='POST');release();await done;
   await expect(page.locator('.qe-edit .cm-content')).toHaveText('SELECT alternate_draft');
   await showConnections(page);
-  await page.locator('.conn-list .conn-name',{hasText:rows[0].name}).click();
+  await page.locator('.conn-list .tr-title',{hasText:rows[0].name}).click();
   await expect(page.locator('.qe-edit .cm-content')).toHaveText('SELECT primary_draft');
   await expect(page.getByRole('tablist',{name:'Query tabs'}).getByRole('tab',{selected:true})).toContainText('Primary saved query');
   await expect(page.getByRole('button',{name:'Update',exact:true})).toBeVisible();
@@ -256,7 +256,7 @@ for(const engine of ['redis','mongodb'] as const)test(`${engine} result editing 
   await page.route('**/db/capabilities',r=>r.fulfill({json:{engine,query_language:engine==='redis'?'redis':'mongo',can_write:true,sql:false}}));await page.route('**/db/schema**',r=>r.fulfill({json:[]}));
   const rows=engine==='redis'?{columns:[{name:'value',type_hint:'String'}],rows:[['Original value']]}:{columns:[{name:'_id',type_hint:'ObjectId'},{name:'status',type_hint:'String'},{name:'items',type_hint:'Array'}],rows:[[{ $oid:'507f1f77bcf86cd799439011'},'pending',[{qty:1}]]]};
   let queries=0;await page.route('**/db/query',r=>{queries++;expect(r.request().postDataJSON().statement).toBe(engine==='redis'?'GET synthetic:customer':'db.synthetic_customers.find({})');return r.fulfill({json:{...rows,stats:{duration_ms:2,row_count:1},truncated:false}});});
-  await openPage(page,'database');await page.locator('.conn-list .conn-name',{hasText:conn.name}).click();await page.locator('.qe-edit .cm-content').fill(engine==='redis'?'GET synthetic:customer':'db.synthetic_customers.find({})');await page.getByRole('button',{name:/^Run\s+⌘/}).click();
+  await openPage(page,'database');await page.locator('.conn-list .tr-title',{hasText:conn.name}).click();await page.locator('.qe-edit .cm-content').fill(engine==='redis'?'GET synthetic:customer':'db.synthetic_customers.find({})');await page.getByRole('button',{name:/^Run\s+⌘/}).click();
   await page.getByRole('group',{name:'Result view'}).getByRole('button',{name:'Grid',exact:true}).click();await expect(page.locator('.gt-edit-hint')).toBeVisible();
   if(engine==='redis'){await page.getByText('Original value',{exact:true}).dblclick();await page.locator('.cell-input').fill('Updated value');await page.locator('.cell-input').press('Enter');}
   else {await page.locator('.cell.json').first().click();await page.locator('.cell-viewer').getByRole('button',{name:'Edit',exact:true}).click();await page.locator('.cv-edit').fill('[{"qty":2}]');await page.locator('.cell-viewer').getByRole('button',{name:/^Save/}).click();}

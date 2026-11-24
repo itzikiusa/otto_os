@@ -46,7 +46,7 @@ test.beforeEach(async ({ page }, testInfo) => {
 async function openConn(page: Page, name: string, engine: string): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  const c = page.locator('.conn-list .conn-name', { hasText: name });
+  const c = page.locator('.conn-list .tr-title', { hasText: name });
   await expect(c.first()).toBeVisible({ timeout: 30_000 });
   await c.first().click();
   await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });

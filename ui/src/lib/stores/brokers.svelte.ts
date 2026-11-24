@@ -41,7 +41,9 @@ class BrokersStore {
   private loadedWs: Id | null = null;
   private loadGen = latestOnly();
 
-  async load(wsId: Id): Promise<void> {
+  /** `withSections: false` — the caller reads the section tree from the
+   *  shared connection list (lib/stores/connectionList.svelte.ts) instead. */
+  async load(wsId: Id, { withSections = true }: { withSections?: boolean } = {}): Promise<void> {
     if (this.loadedWs !== wsId) {
       // Entering another workspace: drop the previous one's clusters, tabs and
       // sections so a failed load can't leave them listed under this one.
@@ -72,7 +74,7 @@ class BrokersStore {
       // A superseded load must not clear the spinner of the load that replaced it.
       if (current()) this.loading = false;
     }
-    if (!current()) return;
+    if (!current() || !withSections) return;
     // Sections are best-effort: a failure shouldn't blank the cluster list.
     // Read the ONE global connection-section tree (shared with Connections + DB).
     try {

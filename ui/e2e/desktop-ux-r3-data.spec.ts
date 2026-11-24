@@ -22,7 +22,7 @@ async function setup(page: Page, kind: 'broker' | 'database') {
     await page.route('**/db/capabilities', r => r.fulfill({json:{engine:'mysql',query_language:'sql',version:'8.0',can_write:true,explain:true}}));
     await page.route('**/db/schema**', r => r.fulfill({json:[]}));
     await openPage(page,'database');
-    await page.locator('.conn-list .conn-name', {hasText:`Review SQL ${id}`} ).first().click();
+    await page.locator('.conn-list .tr-title', {hasText:`Review SQL ${id}`} ).first().click();
     await expect(page.getByRole('tablist', {name:'Query tabs'})).toBeVisible();
   }
   return entity;
@@ -226,7 +226,7 @@ test('History retry ignores the connection left behind', async ({page}) => {
   phase='hold'; await page.locator('.side-body').getByRole('button',{name:'Retry',exact:true}).click();
   await sidebar.getByRole('tab',{name:'Connections',exact:true}).click();
   // Every profile was seeded into this disposable daemon by this suite.
-  await page.locator('.conn-list .conn-name').filter({hasText:alternate}).click();
+  await page.locator('.conn-list .tr-title').filter({hasText:alternate}).click();
   await sidebar.getByRole('tab',{name:'History',exact:true}).click();
   await expect(page.locator('.hist-row')).toContainText('SELECT current_connection');
   const done=page.waitForResponse(r=>r.url()===first); release(); await done;

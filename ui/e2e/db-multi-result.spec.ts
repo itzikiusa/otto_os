@@ -56,7 +56,7 @@ async function ensureResultsOpen(page: Page): Promise<void> {
 async function openMysql(page: Page): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  const conn = page.locator('.conn-list .conn-name', { hasText: 'e2e-mysql' });
+  const conn = page.locator('.conn-list .tr-title', { hasText: 'e2e-mysql' });
   await expect(conn.first()).toBeVisible({ timeout: 30_000 });
   await conn.first().click();
   await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });

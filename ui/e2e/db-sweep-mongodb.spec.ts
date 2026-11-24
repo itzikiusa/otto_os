@@ -75,7 +75,7 @@ async function openConn(page: Page): Promise<void> {
 
   // On a phone the Connections accordion is open by default; on wide layouts the
   // conn list is always visible. Either way the row is in `.conn-list`.
-  const conn = page.locator('.conn-list .conn-name', { hasText: 'e2e-mongodb' });
+  const conn = page.locator('.conn-list .tr-title', { hasText: 'e2e-mongodb' });
   await expect(conn.first()).toBeVisible({ timeout: 30_000 });
   await conn.first().click();
 

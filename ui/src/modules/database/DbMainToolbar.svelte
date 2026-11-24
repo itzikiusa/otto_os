@@ -8,7 +8,7 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { copyWithToast } from '../../lib/clipboard';
   import { onTabKey } from '../../lib/tabKeys';
-  import { buildDbCliSnippet, cliLabelForKind } from './cliSnippet';
+  import { buildDbCliSnippet, cliLabelForKind } from '../../lib/database/cliSnippet';
 
   interface Props {
     onopenchanges: () => void;

@@ -123,16 +123,21 @@ function clipCell(v: unknown): unknown {
  * because it shows the Connections module — but `#/brokers` shares that key)
  * and that the connection library has loaded.
  */
-async function ensureExplorer(ctx: UiCommandCtx): Promise<void> {
-  if (router.module !== 'database' && router.module !== 'connections') {
-    router.go('database');
-  }
-  await whenMounted('.db-root', ctx.signal, 15_000);
+async function ensureExplorer(ctx: UiCommandCtx, connKey?: string): Promise<void> {
   if (!ws.currentId) throw new UiCommandError('failed', 'No workspace is open in this Otto window');
   if (!database.connections.length && !database.connectionsLoading) await database.loadConnections();
   await waitFor(() => !database.connectionsLoading, ctx.signal, 15_000, 'the connection list');
   if (database.connectionsError) {
     throw new UiCommandError('failed', `Couldn’t load connections: ${database.connectionsError}`);
+  }
+  // The workbench is `#/database/<connection>` (a bare `#/database` with
+  // nothing open shows the connection list): go to the one being driven.
+  const target = connKey ? resolveConn(connKey).id : database.selectedConnId;
+  if (target) {
+    if (router.module !== 'database' || router.parts[1] !== target) router.go(`database/${target}`);
+    await whenMounted('.db-root', ctx.signal, 15_000);
+  } else if (router.module !== 'database' && router.module !== 'connections') {
+    router.go('connections');
   }
 }
 
@@ -418,7 +423,7 @@ registerUiCommands('connections', {
   },
 
   async db_open_connection(args: Args, ctx) {
-    await ensureExplorer(ctx);
+    await ensureExplorer(ctx, str(args, 'connection_id'));
     const c = resolveConn(str(args, 'connection_id'));
     await openConn(c, ctx, str(args, 'database'));
     ctx.highlight('.query-editor, .db-root');
@@ -434,7 +439,7 @@ registerUiCommands('connections', {
   },
 
   async db_new_tab(args: Args, ctx) {
-    await ensureExplorer(ctx);
+    await ensureExplorer(ctx, str(args, 'connection_id'));
     const c = resolveConn(str(args, 'connection_id'));
     await openConn(c, ctx, str(args, 'database'));
     const t = database.newAgentTab(str(args, 'statement') ?? '', agentOf(ctx));
@@ -455,8 +460,9 @@ registerUiCommands('connections', {
   },
 
   async db_run_query(args: Args, ctx) {
-    await ensureExplorer(ctx);
     const tabId = tabIdOf(args, false);
+    // A tab's own connection is checked below before anything moves.
+    await ensureExplorer(ctx, tabId === undefined ? str(args, 'connection_id') : undefined);
     const statement = str(args, 'statement');
     const dbName = str(args, 'database');
     const rowLimit = int(args, 'row_limit');
@@ -558,7 +564,7 @@ registerUiCommands('connections', {
   },
 
   async db_open_object(args: Args, ctx) {
-    await ensureExplorer(ctx);
+    await ensureExplorer(ctx, str(args, 'connection_id'));
     const c = resolveConn(str(args, 'connection_id'));
     const path = Array.isArray(args.path) ? args.path.filter((p): p is string => typeof p === 'string' && !!p.trim()) : [];
     if (!path.length) throw new UiCommandError('invalid_args', 'Pass `path`, e.g. ["shop", "orders"].');

@@ -82,7 +82,7 @@ test('database: a registered redis connection shows up', async ({ page }) => {
   // .conn-list). Connections load via database.loadConnections() once
   // ws.currentId is set — which the seeded otto_workspace guarantees. Poll for
   // the seeded connection's name to appear.
-  const conn = page.locator('.conn-list .conn-name', { hasText: 'e2e-redis' });
+  const conn = page.locator('.conn-list .tr-title', { hasText: 'e2e-redis' });
   await expect(conn.first()).toBeVisible({ timeout: 30_000 });
 });
 

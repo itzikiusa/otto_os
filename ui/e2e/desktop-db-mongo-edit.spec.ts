@@ -76,7 +76,7 @@ test.beforeEach(async ({ page }, testInfo) => {
 async function openFind(page: Page, coll: string): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  const conn = page.locator('.conn-list .conn-name', { hasText: 'e2e-mongodb' });
+  const conn = page.locator('.conn-list .tr-title', { hasText: 'e2e-mongodb' });
   await expect(conn.first()).toBeVisible({ timeout: 30_000 });
   await conn.first().click();
   await expect(page.locator('.cap-chip', { hasText: 'mongodb' })).toBeAttached({ timeout: 20_000 });

@@ -2,12 +2,12 @@
   import { announce } from '../../lib/announce.svelte';
   import { rowMenu } from '../../lib/rowMenu';
   import { NO_WORKSPACE } from '../../lib/labels';
-  import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
-  // DB Explorer page (mirrors ApiPage): left sidebar = connection picker +
-  // SchemaTree + a Saved/History switch; main = a tab strip (Query / Builder /
-  // Structure / Dashboards) over the active view.
-  import { tick } from 'svelte';
+  // DB workbench (`#/database/<connection>`): open connections as tabs over a
+  // schema / saved / history sidebar and the active view (Query / Builder /
+  // Structure / Diagram / Dashboards). The connection list itself is its own
+  // page (modules/connections/ConnectionsPage.svelte, `#/connections`).
+  import { tick, untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { paneResizer, loadPaneWidth, LIST_PANE } from '../../lib/paneResizer';
@@ -21,12 +21,10 @@
   import QueryEditor from './QueryEditor.svelte';
   import ConnectionComparison from './ConnectionComparison.svelte';
   import Modal from '../../lib/components/Modal.svelte';
-  import DatabaseChanges from './DatabaseChanges.svelte';
-  import ResourceAccess from '../../lib/components/ResourceAccess.svelte';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
-  import ConnectionForm, { type ConnectionPrefill } from '../connections/ConnectionForm.svelte';
-  import ConnectionImportDialog from '../connections/ConnectionImportDialog.svelte';
+  import { connectionList } from '../../lib/stores/connectionList.svelte';
+  import type { ConnectionPrefill } from '../connections/ConnectionForm.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent, whenIdle } from '../../lib/lazy-component.svelte';
   import SshPane from './SshPane.svelte';
@@ -34,12 +32,9 @@
   import DiagnoseAside from './DiagnoseAside.svelte';
   import { connDiagnose } from './diagnose.svelte';
   import { sshTabs } from './ssh-tabs.svelte';
-  import ImportDialog from './ImportDialog.svelte';
-  import ExportDialog from './ExportDialog.svelte';
-  import ProcessList from './ProcessList.svelte';
   import DbSavedHistorySidebar from './DbSavedHistorySidebar.svelte';
   import DbMainToolbar from './DbMainToolbar.svelte';
-  import { buildDbCliSnippet, cliLabelForKind } from './cliSnippet';
+  import { buildDbCliSnippet, cliLabelForKind } from '../../lib/database/cliSnippet';
   import { processEngine } from './process-list';
   import { copyWithToast } from '../../lib/clipboard';
   import { databaseAccessChild } from '../../lib/access-options';
@@ -60,8 +55,6 @@
   import type {
     BrokerCluster,
     Connection,
-    ConnectionKind,
-    ConnectionSection,
   } from '../../lib/api/types';
 
   // Secondary views and the SSH/Kafka/SFTP panes load on first open, not with
@@ -78,6 +71,12 @@
   const SftpLazy = lazyComponent(() => import('../connections/SftpBrowser.svelte'));
   // The assistant embeds a Terminal (xterm) — only loaded when it's opened.
   const AssistantLazy = lazyComponent(() => import('./DbAssistantPanel.svelte'));
+  // Dialogs only ever shown as modals: off the first paint.
+  const ImportDialogLazy = lazyComponent(() => import('./ImportDialog.svelte'));
+  const ExportDialogLazy = lazyComponent(() => import('./ExportDialog.svelte'));
+  const ProcessListLazy = lazyComponent(() => import('./ProcessList.svelte'));
+  const DatabaseChangesLazy = lazyComponent(() => import('./DatabaseChanges.svelte'));
+  const ResourceAccessLazy = lazyComponent(() => import('../../lib/components/ResourceAccess.svelte'));
   $effect(() =>
     whenIdle(() => {
       StructureLazy.prefetch();
@@ -86,31 +85,12 @@
       DiagramLazy.prefetch();
     }, 4000),
   );
-
-  // The unified Connections hub: EVERY profile kind is created/managed in this
-  // tree — DB engines open the workbench, ssh/custom open a terminal session,
-  // Kafka clusters open Message Brokers.
-  const ALL_KINDS: ConnectionKind[] = ['ssh', 'mysql', 'postgres', 'redis', 'mongodb', 'clickhouse', 'custom'];
+  // Edit form, opened from a tab's menu, the connection-error banner or the
+  // SSH pane (lazy: creating connections lives on the Connections page).
+  const ConnectionFormLazy = lazyComponent(() => import('../connections/ConnectionForm.svelte'));
+  const ALL_KINDS: ConnectionPrefill['kind'][] = ['ssh', 'mysql', 'postgres', 'redis', 'mongodb', 'clickhouse', 'custom'];
   let connFormOpen = $state(false);
   let editingConn = $state<Connection | null>(null);
-  let prefillConn = $state<ConnectionPrefill | null>(null);
-  // Consume one-shot connection prefill (e.g. from AWS RDS "Open in Connections…").
-  $effect(() => {
-    if (!ws.currentId) return;
-    let raw: string | null = null;
-    try { raw = sessionStorage.getItem('otto.conn_prefill'); if (raw) sessionStorage.removeItem('otto.conn_prefill'); } catch { return; }
-    if (!raw) return;
-    if (!auth.isRoot) { toasts.info('Connection creation needs admin access', 'Copy the endpoint from AWS Console instead.'); return; }
-    try {
-      const p = JSON.parse(raw) as ConnectionPrefill;
-      if (p && typeof p === 'object' && typeof p.host === 'string' && p.host.trim()) {
-        editingConn = null; prefillConn = p; showConnections(); connFormOpen = true;
-      }
-    } catch { /* ignore malformed prefill */ }
-  });
-  // Import connection profiles from other DB tools (MySQL Workbench / DBeaver /
-  // DataGrip / NoSQLBooster) — the daemon reads each tool's config from disk.
-  let connImportOpen = $state(false);
   // Kafka cluster form (New Cluster / edit a cluster row).
   let clusterFormOpen = $state(false);
   let editingCluster = $state<BrokerCluster | null>(null);
@@ -119,41 +99,12 @@
   // Spinner guard while a terminal session is being spawned for a row.
   let opening = $state<Record<string, boolean>>({});
 
-  // ── Type-filter chips (single-select; 'kafka' matches broker clusters) ─────
-  const FILTER_KEY = 'otto_connhub_filter';
-  const FILTER_CHIPS: { id: string; label: string }[] = [
-    { id: 'all', label: 'All' }, { id: 'ssh', label: 'SSH' }, { id: 'mysql', label: 'MySQL' }, { id: 'postgres', label: 'PostgreSQL' },
-    { id: 'redis', label: 'Redis' }, { id: 'mongodb', label: 'MongoDB' }, { id: 'clickhouse', label: 'ClickHouse' }, { id: 'kafka', label: 'Kafka' }, { id: 'custom', label: 'Custom' },
-  ];
-  // Guarded storage: this runs at mount, so a throwing accessor (blocked
-  // storage) must not take the whole Database page down.
-  let filterKind = $state(lsGet(FILTER_KEY) || 'all');
-  function setFilter(id: string): void {
-    filterKind = id;
-    lsSet(FILTER_KEY, id);
-  }
-  // Only offer kinds that exist (plus the active one, so a remembered filter
-  // can always be cleared). One kind or none → no chip row at all: a filter
-  // that can't narrow anything is noise.
-  const presentKinds = $derived.by(() => {
-    const kinds = new Set<string>([...database.connections, ...database.otherConnections].map((c) => c.kind));
-    if (brokers.clusters.length > 0) kinds.add('kafka');
-    return kinds;
-  });
-  const visibleChips = $derived(
-    FILTER_CHIPS.filter((chip) => chip.id === 'all' || chip.id === filterKind || presentKinds.has(chip.id)),
-  );
-  const filtering = $derived(filterKind !== 'all');
-  const connMatchesKind = (c: Connection): boolean => !filtering || c.kind === filterKind;
-  const clusterMatchesKind = (): boolean => !filtering || filterKind === 'kafka';
-
   // ── Phone accordion ────────────────────────────────────────────────────────
   // On a phone the whole page scrolls and each major section (Connections /
-  // Schema) is a collapsible, independently-scrolling block — tap a header to
-  // expand/minimise so the user keeps only what they need on screen. These
-  // flags are inert on desktop/tablet (the headers only render when isPhone).
-  let connOpen = $state(true), schemaOpen = $state(true);
-  $effect(() => { if (viewport.isPhone && database.selectedConnId) { connOpen = false; schemaOpen = false; } }); // phone: the tab gets the screen
+  // On a phone the schema panel is a collapsible block — tap its header to
+  // expand/minimise. Inert on desktop/tablet (the header only renders there).
+  let schemaOpen = $state(true);
+  $effect(() => { if (viewport.isPhone && database.selectedConnId) schemaOpen = false; }); // phone: the tab gets the screen
 
   // Dock this connection as a pane in the Agents split (beside an agent), with
   // the full DB Explorer. Right-clicked from a connection tab or sidebar row.
@@ -162,40 +113,13 @@
     ws.openInSplit(DB_PANE_ID);
     router.go('agents');
   }
-  // The folder path a connection sits under, e.g. "PLATFORM / STG" — so it's
-  // clear which environment (stg/prod) a connection belongs to.
-  function sectionPath(c: Connection): string {
-    if (!c.section_id) return '';
-    const byId = new Map(sections.map((s) => [s.id, s]));
-    const parts: string[] = [];
-    let cur = byId.get(c.section_id);
-    let guard = 0;
-    while (cur && guard++ < 20) {
-      parts.unshift(cur.name);
-      cur = cur.parent_id ? byId.get(cur.parent_id) : undefined;
-    }
-    return parts.join(' / ');
-  }
-  // The immediate folder (sub-section), e.g. "STG" — compact, for the tab badge.
-  function sectionLeaf(c: Connection): string {
-    if (!c.section_id) return '';
-    return sections.find((s) => s.id === c.section_id)?.name ?? '';
-  }
   $effect(()=>resourceAccess.subscribe(change=>{
-    if(change.type==='reset' && change.identity){connFormOpen=false;connImportOpen=false;editingConn=null;accessFor=null;sftpFor=null;processesFor=null;changesOpen=false;}
+    if(change.type==='reset' && change.identity){connFormOpen=false;editingConn=null;accessFor=null;processesFor=null;changesOpen=false;}
   }));
   let changesOpen = $state(false);
   let accessFor = $state<Connection | null>(null); let processesFor = $state<Connection | null>(null);
   const connectionAccess = (c: Connection, operation: string, capability: 'view'|'edit'|'admin'='edit') => resourceAccess.can('connection',c.id,operation,'connections',capability);
-  $effect(() => { for (const c of [...database.connections,...database.otherConnections]) void resourceAccess.load('connection',c.id); });
-  // The "Open a connection" pane offers the most recently opened ones as a
-  // one-click reopen instead of only pointing at the list.
-  const recentConns = $derived(
-    database.connections
-      .filter((c) => c.last_opened_at)
-      .sort((a, b) => Date.parse(b.last_opened_at!) - Date.parse(a.last_opened_at!))
-      .slice(0, 5),
-  );
+  $effect(() => { for (const id of database.openConnIds) void resourceAccess.load('connection', id); });
   function connMenu(e: MouseEvent, c: Connection): void {
     const isDb = database.connections.some((x) => x.id === c.id);
     const cliCmd = buildDbCliSnippet(c, { activeDb: database.selectedConnId === c.id ? database.activeDb : null });
@@ -218,8 +142,7 @@
       ...(isDb ? popoutItems(`database/${c.id}`, c.name) : []),
       ...(isDb && processEngine(c.kind) ? [{ label: 'Processes…', icon: 'gauge', action: () => (processesFor = c) }] : []),
       { separator: true },
-      ...(connectionAccess(c,'configure','admin') ? [{ label: 'Edit', icon: 'edit', action: () => editConnection(c) }, { label: 'Delete…', icon: 'trash', danger: true, action: () => void deleteConnection(c) }] : []),
-      ...(auth.isRoot && connectionAccess(c,'configure','admin') ? [{ label: 'Duplicate without password', icon: 'copy', action: () => void duplicateConnection(c) }] : []),
+      ...(connectionAccess(c,'configure','admin') ? [{ label: 'Edit…', icon: 'edit', action: () => editConnection(c) }] : []),
       ...(auth.isRoot || connectionAccess(c,'manage_access','admin') ? [{ label: 'Access', icon: 'key', action: () => {accessFor=c;} }] : []),
     ]);
   }
@@ -235,326 +158,6 @@
     ]);
   }
 
-  async function duplicateConnection(c: Connection): Promise<void> {
-    try {
-      const copy = await api.post<Connection>(`/connections/${c.id}/duplicate`, {});
-      await database.loadConnections();
-      editConnection(copy);
-      toasts.info('Configuration duplicated', 'Set a password for the new connection. Access grants were not copied.');
-    } catch (error) { toastError('Couldn’t duplicate connection', error); }
-  }
-
-  // --- Section hierarchy (THE unified tree: every kind + broker clusters) ----
-  interface TreeNode {
-    sec: ConnectionSection;
-    items: Connection[];
-    clusters: BrokerCluster[];
-    children: TreeNode[];
-  }
-  let sections = $state<ConnectionSection[]>([]);
-  let collapsed = $state<Record<string, boolean>>({});
-  let draggedConnId = $state<string | null>(null);
-  let draggedClusterId = $state<string | null>(null);
-  let draggedSectionId = $state<string | null>(null);
-
-  const sortByName = (a: Connection, b: Connection): number => a.name.localeCompare(b.name);
-  const sortClusters = (a: BrokerCluster, b: BrokerCluster): number =>
-    a.name.localeCompare(b.name);
-
-  // Every profile the tree shows (DB kinds + ssh/custom), kind-filtered.
-  const allConns = $derived(
-    [...database.connections, ...database.otherConnections].filter(connMatchesKind),
-  );
-  const treeClusters = $derived(clusterMatchesKind() ? brokers.clusters : []);
-
-  // Build the section tree from the flat list; `parentId = null` is the root.
-  function buildTree(parentId: string | null): TreeNode[] {
-    return sections
-      .filter((s) => (s.parent_id ?? null) === parentId)
-      .sort((a, b) => a.position - b.position || a.name.localeCompare(b.name))
-      .map((sec) => ({
-        sec,
-        items: allConns.filter((c) => c.section_id === sec.id).sort(sortByName),
-        clusters: treeClusters.filter((cl) => cl.section_id === sec.id).sort(sortClusters),
-        children: buildTree(sec.id),
-      }));
-  }
-  const tree = $derived(buildTree(null));
-  // Known folder ids in the (global, shared) tree. A connection whose folder is
-  // not among them falls back to Ungrouped, so connections never vanish.
-  const knownSectionIds = $derived(new Set(sections.map((s) => s.id)));
-  const ungrouped = $derived(
-    allConns.filter((c) => !c.section_id || !knownSectionIds.has(c.section_id)).sort(sortByName),
-  );
-  const ungroupedClusters = $derived(
-    treeClusters
-      .filter((cl) => !cl.section_id || !knownSectionIds.has(cl.section_id))
-      .sort(sortClusters),
-  );
-  /** Matching descendants under a node (drives count chips + hide-when-empty
-   *  while a type filter narrows the tree). */
-  function nodeCount(n: TreeNode): number {
-    return (
-      n.items.length + n.clusters.length + n.children.reduce((sum, c) => sum + nodeCount(c), 0)
-    );
-  }
-  // Sections holding anything at all (any kind, unfiltered), ancestors
-  // included. A truly empty folder isn't "filtered out" — it has nothing to
-  // filter — so it stays visible under a type filter as a drop target.
-  const occupiedSectionIds = $derived.by(() => {
-    const parentOf = new Map(sections.map((s) => [s.id, s.parent_id ?? null]));
-    const occ = new Set<string>();
-    const mark = (id: string | null | undefined): void => {
-      let cur = id ?? null;
-      while (cur && parentOf.has(cur) && !occ.has(cur)) {
-        occ.add(cur);
-        cur = parentOf.get(cur) ?? null;
-      }
-    };
-    for (const c of database.connections) mark(c.section_id);
-    for (const c of database.otherConnections) mark(c.section_id);
-    for (const cl of brokers.clusters) mark(cl.section_id);
-    return occ;
-  });
-  // While anything is being dragged, a type filter reveals every folder so
-  // any section is a reachable drop target. Flipped on a macrotask: mutating
-  // the DOM inside `dragstart` makes WebKit abort the drag.
-  let dragReveal = $state(false);
-  $effect(() => {
-    const dragging = !!(draggedConnId || draggedClusterId || draggedSectionId);
-    if (!dragging) {
-      dragReveal = false;
-      return;
-    }
-    const t = setTimeout(() => (dragReveal = true), 0);
-    return () => clearTimeout(t);
-  });
-  /** Under a type filter a folder shows when it has matches, is empty, has a
-   *  visible sub-folder, or a drag is in progress. */
-  function nodeVisible(n: TreeNode): boolean {
-    return (
-      !filtering ||
-      dragReveal ||
-      nodeCount(n) > 0 ||
-      !occupiedSectionIds.has(n.sec.id) ||
-      n.children.some(nodeVisible)
-    );
-  }
-
-  // --- Connection search / filter --------------------------------------------
-  // A filter box over the connection list (mirrors SchemaTree's "Filter schema").
-  // When it has text we show a flat, name-sorted result list instead of the tree
-  // so a connection is findable instantly even with a hundred of them.
-  let connFilter = $state('');
-  // Compact host/uri descriptor used for matching (and shown on flat results).
-  function connDesc(c: Connection): string {
-    const p = (c.params ?? {}) as Record<string, unknown>;
-    const host = String(p.host ?? p.uri ?? p.url ?? p.path ?? '');
-    const port = p.port != null && p.port !== '' ? `:${String(p.port)}` : '';
-    return `${host}${port}`;
-  }
-  const connMatches = $derived.by(() => {
-    const q = connFilter.trim().toLowerCase();
-    if (!q) return [];
-    return allConns
-      .filter(
-        (c) =>
-          c.name.toLowerCase().includes(q) ||
-          c.kind.toLowerCase().includes(q) ||
-          connDesc(c).toLowerCase().includes(q) ||
-          sectionPath(c).toLowerCase().includes(q),
-      )
-      .sort(sortByName);
-  });
-  const clusterMatches = $derived.by(() => {
-    const q = connFilter.trim().toLowerCase();
-    if (!q) return [];
-    return treeClusters
-      .filter(
-        (cl) =>
-          cl.name.toLowerCase().includes(q) ||
-          'kafka'.includes(q) ||
-          cl.bootstrap_servers.toLowerCase().includes(q),
-      )
-      .sort(sortClusters);
-  });
-
-  async function loadSections(): Promise<void> {
-    const wsId = ws.currentId;
-    if (!wsId) return;
-    try {
-      // One global tree shared with the Connections page.
-      sections = await api.get<ConnectionSection[]>(`/workspaces/${wsId}/connection-sections`);
-    } catch {
-      /* sections are optional — fall back to a flat list */
-    }
-  }
-
-  function toggleCollapse(id: string): void {
-    collapsed[id] = !collapsed[id];
-  }
-
-  async function createSection(parentId: string | null): Promise<void> {
-    if (!ws.currentId) return;
-    const name = await confirmer.promptText(parentId ? 'Sub-section name' : 'Section name', {
-      title: parentId ? 'New sub-section' : 'New section',
-      confirmLabel: 'Create',
-      placeholder: 'e.g. AWS · STG',
-    });
-    if (!name) return;
-    try {
-      const sec = await api.post<ConnectionSection>(
-        `/workspaces/${ws.currentId}/connection-sections`,
-        { name, parent_id: parentId },
-      );
-      sections = [...sections, sec];
-    } catch (e) {
-      toastError('Couldn’t create the section', e);
-    }
-  }
-
-  async function renameSection(sec: ConnectionSection): Promise<void> {
-    const name = await confirmer.promptText('Rename section', {
-      title: 'Rename section',
-      confirmLabel: 'Rename',
-      initial: sec.name,
-    });
-    if (!name || name === sec.name) return;
-    try {
-      const updated = await api.patch<ConnectionSection>(`/connection-sections/${sec.id}`, { name });
-      sections = sections.map((s) => (s.id === sec.id ? updated : s));
-    } catch (e) {
-      toastError('Couldn’t rename', e);
-    }
-  }
-
-  async function deleteSection(sec: ConnectionSection): Promise<void> {
-    if (
-      !(await confirmer.ask(
-        `Delete section “${sec.name}”? Sub-sections are removed too and their connections become ungrouped.`,
-        { title: 'Delete section', confirmLabel: 'Delete', danger: true },
-      ))
-    )
-      return;
-    try {
-      await api.del(`/connection-sections/${sec.id}`);
-      const removed = new Set<string>();
-      const collect = (id: string): void => {
-        removed.add(id);
-        for (const s of sections) if (s.parent_id === id) collect(s.id);
-      };
-      collect(sec.id);
-      sections = sections.filter((s) => !removed.has(s.id));
-      // Locally drop the section_id of anything that fell out (rows never vanish).
-      database.connections = database.connections.map((c) =>
-        c.section_id && removed.has(c.section_id) ? { ...c, section_id: null } : c,
-      );
-      database.otherConnections = database.otherConnections.map((c) =>
-        c.section_id && removed.has(c.section_id) ? { ...c, section_id: null } : c,
-      );
-      brokers.clusters = brokers.clusters.map((cl) =>
-        cl.section_id && removed.has(cl.section_id) ? { ...cl, section_id: null } : cl,
-      );
-    } catch (e) {
-      toastError('Couldn’t delete', e);
-    }
-  }
-
-  // Move a connection into a folder (or null = ungrouped). Connections are
-  // global, so all are assignable. Reuses the PATCH endpoint, updates in place.
-  async function moveConn(c: Connection, sectionId: string | null): Promise<void> {
-    if ((c.section_id ?? null) === sectionId) return;
-    try {
-      const saved = await api.patch<Connection>(`/connections/${c.id}`, {
-        name: c.name,
-        kind: c.kind,
-        params: c.params,
-        first_command: c.first_command,
-        section_id: sectionId,
-        // Preserve the guardrail flags — omitting them would reset to dev/false.
-        environment: c.environment,
-        read_only: c.read_only,
-      });
-      database.connections = database.connections.map((x) => (x.id === c.id ? saved : x));
-      database.otherConnections = database.otherConnections.map((x) =>
-        x.id === c.id ? saved : x,
-      );
-    } catch (e) {
-      toastError('Couldn’t move', e);
-    }
-  }
-
-  function isDescendantOf(nodeId: string, ancestorId: string): boolean {
-    let cur = sections.find((s) => s.id === nodeId);
-    while (cur?.parent_id) {
-      if (cur.parent_id === ancestorId) return true;
-      cur = sections.find((s) => s.id === cur!.parent_id);
-    }
-    return false;
-  }
-
-  async function reparentSection(id: string, parentId: string | null): Promise<void> {
-    const sec = sections.find((s) => s.id === id);
-    if (!sec || (sec.parent_id ?? null) === parentId) return;
-    if (parentId && (parentId === id || isDescendantOf(parentId, id))) {
-      toasts.error('Invalid move', 'Cannot nest a section inside itself');
-      return;
-    }
-    try {
-      const updated = await api.post<ConnectionSection>(`/connection-sections/${id}/move`, {
-        parent_id: parentId,
-      });
-      sections = sections.map((s) => (s.id === id ? updated : s));
-    } catch (e) {
-      toastError('Couldn’t move', e);
-    }
-  }
-
-  // A drop onto a section: a dragged connection/cluster files into it; a
-  // dragged section nests under it. A drop onto the root zone reverses all.
-  function findAnyConn(id: string): Connection | undefined {
-    return (
-      database.connections.find((x) => x.id === id) ??
-      database.otherConnections.find((x) => x.id === id)
-    );
-  }
-  function onSectionDrop(sectionId: string): void {
-    if (draggedConnId) {
-      const c = findAnyConn(draggedConnId);
-      draggedConnId = null;
-      if (c) void moveConn(c, sectionId);
-    } else if (draggedClusterId) {
-      const id = draggedClusterId;
-      draggedClusterId = null;
-      void brokers.moveCluster(id, sectionId);
-    } else if (draggedSectionId) {
-      const src = draggedSectionId;
-      draggedSectionId = null;
-      void reparentSection(src, sectionId);
-    }
-  }
-  function onRootDrop(): void {
-    if (draggedConnId) {
-      const c = findAnyConn(draggedConnId);
-      draggedConnId = null;
-      if (c) void moveConn(c, null);
-    } else if (draggedClusterId) {
-      const id = draggedClusterId;
-      draggedClusterId = null;
-      void brokers.moveCluster(id, null);
-    } else if (draggedSectionId) {
-      const src = draggedSectionId;
-      draggedSectionId = null;
-      void reparentSection(src, null);
-    }
-  }
-
-  function newConnection(): void {
-    if(!auth.isRoot)return;
-    editingConn = null;
-    prefillConn = null;
-    connFormOpen = true;
-  }
   async function showSchemaSidebar(): Promise<void> {
     const page = document.querySelector('.db-page');
     database.toggleSidebar();
@@ -565,42 +168,24 @@
       ?? page?.querySelector<HTMLInputElement>('[aria-label="Find an object"]'))?.focus();
   }
 
-  // Point the user at the connection list from anywhere: make sure the sidebar
-  // rail is actually visible (it may be collapsed) and land on the picker tab.
+  // The connection list is its own page now.
   function showConnections(): void {
-    if (database.sidebarCollapsed) database.toggleSidebar();
-    database.setSideTab('connections');
-  }
-  // The persistent "+" in the side-tab strip: jump to the picker AND open the
-  // new-connection form — the create affordance must not live only inside the
-  // Connections tab body.
-  function newConnectionFromStrip(): void {
-    showConnections();
-    newConnection();
+    router.go('connections');
   }
   function editConnection(c: Connection): void {
-    editingConn = c; prefillConn = null; connFormOpen = true;
+    editingConn = c; connFormOpen = true;
   }
 
-  // ⌘K: the Connections hub's verbs.
   $effect(() =>
     registry.register('connections', [
-      { id: 'conn.new', title: 'New connection…', group: 'Connections', keywords: 'database ssh mysql postgres mongo redis clickhouse kafka add', disabled: !auth.isRoot, run: newConnectionFromStrip },
-      { id: 'conn.import', title: 'Import connections…', group: 'Connections', keywords: 'workbench dbeaver datagrip nosqlbooster', disabled: !auth.isRoot, run: () => (connImportOpen = true) },
       { id: 'conn.list', title: 'Show the connection list', group: 'Connections', keywords: 'picker sidebar profiles', run: showConnections },
       { id: 'conn.sidebar', title: database.sidebarCollapsed ? 'Show the schema sidebar' : 'Hide the schema sidebar', group: 'Connections', shortcut: '⌘B', keywords: 'toggle collapse tree', run: () => (database.sidebarCollapsed ? void showSchemaSidebar() : database.toggleSidebar()) },
     ]),
   );
   async function onConnSaved(c: Connection): Promise<void> {
-    connFormOpen = false; prefillConn = null;
+    connFormOpen = false;
+    connectionList.upsert(c);
     await database.loadConnections();
-    // DB kinds open straight into the workbench; ssh/custom just appear in the
-    // tree (opening them spawns a terminal, which the user does deliberately).
-    if (database.connections.some((x) => x.id === c.id)) void database.openConnection(c.id);
-  }
-  function newCluster(): void {
-    editingCluster = null;
-    clusterFormOpen = true;
   }
   function editCluster(cl: BrokerCluster): void {
     editingCluster = cl;
@@ -644,7 +229,6 @@
     // session). A tab whose session ENDED reconnects instead of focusing it.
     if (!reconnect && sshTabs.action(c.id) === 'focus') {
       database.focusSsh(c.id);
-      if (viewport.isPhone) { connOpen = false; schemaOpen = false; }
       return;
     }
     if (opening[c.id]) return; // a double-click on Reconnect must not spawn two
@@ -658,7 +242,6 @@
     try {
       // In place as a workbench tab (like the DB kinds); ssh-tabs.svelte.ts.
       await sshTabs.open(c, wsId);
-      if (viewport.isPhone) { connOpen = false; schemaOpen = false; }
     } catch (e) {
       toastError('Couldn’t open', e);
     } finally {
@@ -666,80 +249,60 @@
     }
   }
 
-  async function deleteConnection(c: Connection): Promise<void> {
-    if (
-      !(await confirmer.ask(`Delete connection “${c.name}”? Its Keychain secret is removed too.`, {
-        title: 'Delete connection',
-        confirmLabel: 'Delete',
-        danger: true,
-      }))
-    )
-      return;
-    try {
-      await api.del(`/connections/${c.id}`);
-      if (database.openConnIds.includes(c.id)) database.closeConnection(c.id);
-      await database.loadConnections();
-    } catch (e) {
-      toastError('Couldn’t delete', e);
-    }
-  }
-
-  // Load connections + workspace-scoped saved/dashboards when the workspace changes.
-  // The workbench itself is GLOBAL — open connection tabs survive workspace
-  // switches. Restore the persisted workbench (open tabs + focus) ONLY after
-  // loadConnections resolves — the restore filters against the loaded list.
+  // Load connections when the workspace changes. The workbench itself is
+  // GLOBAL — open connection tabs survive workspace switches. Restore the
+  // persisted workbench (open tabs + focus) ONLY after loadConnections
+  // resolves — the restore filters against the loaded list.
   $effect(() => {
     if (ws.currentId) {
       void (async () => {
         await database.loadConnections();
-        connsSettled = true;
         await database.restoreWorkbench();
-        // `#/database/<connId>` (a pop-out window, a link) opens that tab.
-        const deep = router.module === 'database' ? router.parts[1] : undefined;
-        if (deep && database.connections.some((c) => c.id === deep)) await database.openConnection(deep);
+        connsSettled = true;
       })();
-      void loadSections();
-      void brokers.load(ws.currentId); // clusters render in the same tree
+      void brokers.load(ws.currentId, { withSections: false }); // Kafka tabs
       void database.loadSavedQueries();
-      void database.loadDashboards();
     }
   });
+  // Dashboards (and their widgets) load when the Dashboards view opens, not
+  // with every workbench visit.
+  let dashboardsFor: string | null = null;
+  $effect(() => {
+    const wid = ws.currentId;
+    if (database.mainTab !== 'dashboards' || !wid || dashboardsFor === wid) return;
+    dashboardsFor = wid;
+    void database.loadDashboards();
+  });
 
-  /** The first connection load has finished (so "nothing listed" is real, not
-   *  "not fetched yet") — gates the empty-hub layout below. */
+  /** The first connection load + workbench restore has finished, so "no tab
+   *  open" is real, not "not restored yet". */
   let connsSettled = $state(false);
-  /** Nothing to list at all: the list pane is hidden and one page-level
-   *  EmptyState owns the "New connection" CTA (no duplicate link in the list). */
-  const hubEmpty = $derived(
-    connsSettled &&
-      !database.connectionsLoading &&
-      !database.connectionsError &&
-      database.connections.length === 0 &&
-      database.otherConnections.length === 0 &&
-      brokers.clusters.length === 0 &&
-      sections.length === 0,
-  );
 
-  /** Tooltip for the connection health chip: "Connected · <version> · <ms> ms". */
-  function addMenu(e: MouseEvent): void {
-    const owner = auth.isRoot ? undefined : 'Only the owner can create connections';
-    ctxMenu.show(e, [
-      { label: 'New connection…', icon: 'plus', disabled: !auth.isRoot, title: owner ?? 'SSH, database or custom CLI', action: newConnection },
-      { label: 'New Kafka cluster…', icon: 'split', action: newCluster },
-      { label: 'New section…', icon: 'folder', action: () => createSection(null) },
-      { separator: true },
-      { label: 'Import connections…', icon: 'arrowDown', disabled: !auth.isRoot, title: owner ?? 'From MySQL Workbench, DBeaver, DataGrip or NoSQLBooster', action: () => (connImportOpen = true) },
-    ]);
+  // `#/database/<id>` (a row on the Connections page, a pop-out window, a
+  // link) opens that connection: a database's workbench tab, an SSH/custom
+  // terminal tab, or a Kafka cluster tab.
+  const deepId = $derived(router.module === 'database' ? (router.parts[1] ?? '').split('?')[0] : '');
+  $effect(() => {
+    const id = deepId;
+    if (!connsSettled || !id) return;
+    untrack(() => void openDeep(id));
+  });
+  async function openDeep(id: string): Promise<void> {    if (database.connections.some((c) => c.id === id)) {
+      connectionList.stampOpened(id);
+      await database.openConnection(id);
+      return;
+    }
+    const other = database.otherConnections.find((c) => c.id === id);
+    if (other) return void openTerminal(other);
+    const cl = brokers.clusters.find((c) => c.id === id) ?? (ws.currentId ? (await brokers.load(ws.currentId, { withSections: false }), brokers.clusters.find((c) => c.id === id)) : undefined);
+    if (cl) openCluster(cl);
   }
-  // Sidebar views. On a phone the connection list is its own accordion, so
-  // the strip there starts at Schema ("connections" shows as Schema).
+
   const SIDE_TABS: TabItem<DbSideTab>[] = [
-    { id: 'connections', label: 'Connections' },
-    { id: 'schema', label: 'Schema' },
+    { id: 'schema', label: 'Tables' },
     { id: 'saved', label: 'Saved' },
     { id: 'history', label: 'History' },
   ];
-  const MOBILE_SIDE_TABS = SIDE_TABS.slice(1);
   // ── DB Assistant split (resizable, persisted) ────────────────────────────────
   // When open, the DB Assistant panel sits BESIDE the editor/results, separated by
   // a draggable divider so the user can enlarge the agent's shell. Mirrors the
@@ -798,23 +361,10 @@
   const hasAnyTab = $derived(
     openConns.length > 0 || brokers.openClusters.length > 0 || database.sshTabs.length > 0,
   );
-  // No auto-open on arrival: opening a connection connects to the server (it
-  // may be prod), so the empty main pane shows the collection summary instead.
-  // "6 connections · 2 prod · 1 Kafka cluster" — what the empty main pane says.
-  const hubSummary = $derived.by(() => {
-    const dbs = database.connections.length + database.otherConnections.length;
-    const prod = [...database.connections, ...database.otherConnections].filter((c) => c.environment === 'prod').length;
-    const k = brokers.clusters.length;
-    const parts = [`${plural(dbs, 'connection')}`];
-    if (prod > 0) parts.push(`${prod} prod`);
-    if (k > 0) parts.push(plural(k, 'Kafka cluster'));
-    return `${parts.join(' · ')}.`;
-  });
-  // An empty workbench (fresh start, after a restore that found nothing, or the
-  // last tab closed) always surfaces the picker — a schema/saved/history side
-  // tab with no connection behind it is a dead end.
+  // Nothing open (fresh start, a restore that found nothing, the last tab
+  // closed): the workbench has nothing to show — go to the connection list.
   $effect(() => {
-    if (!hasAnyTab && database.sideTab !== 'connections') database.setSideTab('connections');
+    if (connsSettled && !hasAnyTab && !deepId) untrack(() => router.replace('connections'));
   });
   // The cluster / ssh session backing the active non-DB pane (null when a DB tab
   // is focused, or when the backing tab was closed out from under the pane).
@@ -827,6 +377,10 @@
     database.activePane?.kind === 'ssh'
       ? (database.sshTabs.find((t) => t.connId === database.activePane!.id) ?? null)
       : null,
+  );
+  /** The header title: the open database, cluster or terminal. */
+  const workbenchTitle = $derived(
+    activeCluster?.name ?? activeSsh?.name ?? openConns.find((c) => c.id === database.selectedConnId)?.name ?? 'Connections',
   );
   /** The profile behind an SSH/custom tab (null once it was deleted). */
   const sshConn = (id: string): Connection | null => database.otherConnections.find((c) => c.id === id) ?? database.connections.find((c) => c.id === id) ?? null;
@@ -896,11 +450,17 @@
      (it used to be a bare "+" in the side-tab strip); while there is nothing
      to open, the empty state owns that CTA instead. Phone keeps its accordion
      head buttons, so the header stays action-free there. -->
-<PageHeader title="Connections">
-  <!-- The one list-collapse control (same as Canvas / Skills Lab): the header
+<!-- Titled by what is open (the connection, cluster or terminal); the back
+     button goes to the connection list. -->
+<PageHeader title={workbenchTitle}>
+  <!-- Back to the connection list (always visible, phone included), then the
+       one list-collapse control (same as Canvas / Skills Lab): the header
        `sidebar` icon. ⌘B does the same; nothing in the pane duplicates it. -->
   {#snippet leading()}
-    {#if !viewport.isPhone && !hubEmpty}
+    <button class="icon-btn" onclick={showConnections} aria-label="All connections" title="All connections">
+      <Icon name="chevronLeft" size={16} />
+    </button>
+    {#if !viewport.isPhone}
       <button
         class="icon-btn"
         onclick={() => (database.sidebarCollapsed ? void showSchemaSidebar() : database.toggleSidebar())}
@@ -913,43 +473,17 @@
       </button>
     {/if}
   {/snippet}
-  {#snippet actions()}
-    {#if !viewport.isPhone}
-      {#if database.connections.length > 0 || database.otherConnections.length > 0 || brokers.clusters.length > 0}
-        <button class="btn small primary" disabled={!auth.isRoot} onclick={newConnectionFromStrip} title={auth.isRoot ? 'New connection (SSH, database or custom CLI)' : 'Only the owner can create connections'}>
-          <Icon name="plus" size={12} /> New connection
-        </button>
-      {/if}
-    {/if}
-  {/snippet}
 </PageHeader>
 <PageBody fill padded={false}>
 <div class="db-page" class:terminal-active={database.activePane?.kind === 'ssh'}>
   <aside
     id="db-side"
     class="db-side"
-    class:collapsed={!viewport.isPhone && (database.sidebarCollapsed || hubEmpty)}
+    class:collapsed={!viewport.isPhone && database.sidebarCollapsed}
     style={viewport.isPhone || database.sidebarCollapsed ? '' : `width:${sideW}px`}
   >
     {#if viewport.isPhone}
-      <!-- PHONE: collapsible accordions (one section at a time), unchanged layout
-           except the connection list now carries a filter box. -->
-      <div class="conn-head acc-head">
-        <button class="acc-toggle" onclick={() => (connOpen = !connOpen)} aria-expanded={connOpen}>
-          <Icon name={connOpen ? 'chevronDown' : 'chevronRight'} size={14} />
-          <span class="conn-head-title">Connections</span>
-          {#if allConns.length + treeClusters.length > 0}<span class="acc-count">{allConns.length + treeClusters.length}</span>{/if}
-        </button>
-        <div class="head-btns">
-          <button class="icon-btn" onclick={() => createSection(null)} aria-label="New section" title="New section"><Icon name="folder" size={13} /></button>
-          <button class="icon-btn" disabled={!auth.isRoot} onclick={newConnection} aria-label="New connection" title={auth.isRoot ? 'New connection' : 'Only the owner can create connections'}><Icon name="plus" size={13} /></button>
-          <button class="icon-btn" disabled={!auth.isRoot} onclick={() => (connImportOpen = true)} aria-label="Import connections" title={auth.isRoot ? 'Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster' : 'Only the owner can import connections'}><Icon name="arrowDown" size={13} /></button>
-        </div>
-      </div>
-      <div class="conn-list" class:acc-collapsed={!connOpen}>
-        {@render connListBody()}
-      </div>
-
+      <!-- PHONE: the schema panel is a collapsible accordion. -->
       {#if database.selectedConnId}
         <!-- Phone: a tappable accordion header gates the whole schema panel. -->
         <div class="conn-head acc-head">
@@ -964,17 +498,16 @@
           {/if}
         </div>
         <div class="side-switch" class:acc-collapsed={!schemaOpen}>
-          <Tabs label="Sidebar view" tabs={MOBILE_SIDE_TABS} value={database.sideTab === 'connections' ? 'schema' : database.sideTab} onchange={(id) => database.setSideTab(id)} />
+          <Tabs label="Sidebar view" tabs={SIDE_TABS} value={database.sideTab === 'connections' ? 'schema' : database.sideTab} onchange={(id) => database.setSideTab(id)} />
         </div>
         <div class="side-body" class:acc-collapsed={!schemaOpen}>
           {@render schemaSideBody()}
         </div>
       {/if}
     {:else}
-      <!-- TABLET / DESKTOP: one tab strip. "Connections" is the picker tab, so
-           the list takes the full sidebar height instead of a capped section. -->
+      <!-- TABLET / DESKTOP: one tab strip over the schema tree, Saved and History. -->
       <div class="side-switch">
-        <Tabs label="Sidebar view" tabs={SIDE_TABS} value={database.sideTab} onchange={(id) => database.setSideTab(id)}>
+        <Tabs label="Sidebar view" tabs={SIDE_TABS} value={database.sideTab === 'connections' ? 'schema' : database.sideTab} onchange={(id) => database.setSideTab(id)}>
           {#snippet trailing()}
             {#if database.sideTab === 'schema' && database.selectedConnId}
               <button class="icon-btn" onclick={() => database.refreshSchema()} title="Refresh schema" aria-label="Refresh schema"><Icon name="refresh" size={12} /></button>
@@ -983,79 +516,25 @@
         </Tabs>
       </div>
       <div class="side-body">
-        {#if database.sideTab === 'connections'}
-          <div class="conn-list">{@render connListBody()}</div>
-        {:else if database.selectedConnId}
+        {#if database.selectedConnId}
           {@render schemaSideBody()}
         {:else}
-          <!-- Not a dead end: hand the user the two ways forward. -->
           <div class="side-empty">
-            <EmptyState icon="file" title="No connection open" body="Open a connection to browse its schema." />
-            <div class="side-empty-actions">
-              <button class="btn small" onclick={() => database.setSideTab('connections')}>Browse connections</button>
-              <button class="btn small ghost" disabled={!auth.isRoot} onclick={newConnection} title={auth.isRoot ? undefined : 'Only the owner can create connections'}>New connection</button>
-            </div>
+            <EmptyState icon="file" title="No connection open" body="Open a database connection to browse its tables." />
           </div>
         {/if}
       </div>
     {/if}
   </aside>
 
-  {#if !viewport.isPhone && !database.sidebarCollapsed && !hubEmpty}
+  {#if !viewport.isPhone && !database.sidebarCollapsed}
     <PaneDivider bind:width={sideW} storageKey="db.sideW" label="Resize connections sidebar" max={sideMaxW()} defaultWidth={SIDE_DEFAULT} />
   {/if}
 
   <div class="db-main" class:danger-rail={database.isProd} class:guard-rail={database.isGuarded && !database.isProd}>
     {#if !hasAnyTab}
-      <!-- Always actionable: create the first connection, or surface the picker
-           (which may be hidden behind a collapsed rail / another side tab). -->
-      <!-- One CTA, and only when it does something: create the first
-           connection, or reveal a picker that is hidden (collapsed rail /
-           another side tab). With the list already on screen there is no
-           button — "Show connections" next to the visible list was noise. -->
-      {#if database.connections.length === 0 && database.otherConnections.length === 0 && brokers.clusters.length === 0}
-        <EmptyState
-          variant={viewport.isPhone ? 'panel' : 'page'}
-          icon="plug"
-          title="No connections yet"
-          body="Add a database (MySQL, PostgreSQL, Redis, MongoDB, ClickHouse), an SSH host or a custom CLI, then open it here to query, browse its schema or get a terminal."
-          actionLabel={auth.isRoot ? 'New connection' : undefined}
-          actionIcon="plus"
-          onaction={auth.isRoot ? newConnection : undefined}
-        >
-          {#if auth.isRoot}
-            <div class="empty-alt">
-              <button class="btn ghost small" onclick={newCluster}><Icon name={engineGlyph('kafka')} size={12} /> Add a Kafka cluster</button>
-              <button class="btn ghost small" onclick={() => (connImportOpen = true)}><Icon name="arrowDown" size={12} /> Import from another tool…</button>
-            </div>
-          {:else}
-            <p class="empty-note">Only the owner can add connections.</p>
-          {/if}
-        </EmptyState>
-      {:else}
-        <!-- One CTA, and only when it does something: reveal a picker that is
-             hidden (collapsed rail / another side tab). With the list already
-             on screen there is no button. -->
-        <EmptyState
-          variant={viewport.isPhone ? 'panel' : 'page'}
-          icon="db"
-          title="Open a connection"
-          body={`${hubSummary} Choose one ${viewport.isPhone ? 'above' : 'on the left'} to open it here.`}
-          actionLabel={database.sidebarCollapsed || database.sideTab !== 'connections' ? 'Show connections' : undefined}
-          onaction={showConnections}
-        >
-          {#if recentConns.length > 0}
-            <div class="recent-conns" data-testid="db-recent-conns">
-              <p class="empty-note">Recently opened</p>
-              {#each recentConns as c (c.id)}
-                <button class="btn ghost small" onclick={() => void database.openConnection(c.id)} title="Open {c.name}">
-                  <Icon name={engineGlyph(c.kind)} size={12} /> {c.name}
-                </button>
-              {/each}
-            </div>
-          {/if}
-        </EmptyState>
-      {/if}
+      <!-- Restoring the open tabs, or about to go to the connection list. -->
+      <LoadState what="the workbench" loading empty variant="page" />
     {:else}
       <!-- Unified tab strip: DB connections, Kafka clusters, and SSH/custom terminals -->
       <!-- Each tab is the main <button role="tab">; the status glyph, the ⋯ menu
@@ -1068,7 +547,7 @@
           {@const stText = st?.phase === 'connecting' ? 'Connecting…' : st?.phase === 'error' ? (st.error ? `Couldn’t connect: ${st.error}` : 'Couldn’t connect — the server gave no reason') : st?.phase === 'idle' ? 'Not connected yet' : ''}
           <div use:rowMenu class="conn-tab" class:active={on} class:prod={isProdConn(c)} class:guarded={isGuardedConn(c) && !isProdConn(c)} role="presentation" oncontextmenu={(e) => { e.preventDefault(); connMenu(e, c); }}>
             <!-- The status glyphs below are decorative; the tab carries their state as its description. -->
-            <button class="conn-tab-main" role="tab" aria-selected={on} aria-describedby={stText ? `conn-st-${c.id}` : undefined} tabindex={connTabStop(on, `db:${c.id}`)} onclick={() => database.openConnection(c.id)} title="{sectionLeaf(c) ? `${sectionPath(c)} / ` : ''}{c.name} — right-click to open beside agents">
+            <button class="conn-tab-main" role="tab" aria-selected={on} aria-describedby={stText ? `conn-st-${c.id}` : undefined} tabindex={connTabStop(on, `db:${c.id}`)} onclick={() => database.openConnection(c.id)} title="{c.name} — right-click to open beside agents">
               <span class="conn-tab-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={12} /></span>
               <span class="conn-tab-name ellipsis">{c.name}</span>
               {#if envBadge(c)}<EnvBadge env={c.environment} readOnly={c.read_only} />{/if}
@@ -1185,13 +664,7 @@
         {/if}
       </div>
       {:else}
-        <EmptyState
-          icon="db"
-          title="Pick a connection"
-          body={`${hubSummary} Choose one on the left to open it here.`}
-          actionLabel="Show connections"
-          onaction={showConnections}
-        />
+        <EmptyState icon="db" title="Pick a tab" body="Choose an open connection above." />
       {/if}
     {/if}
   </div>
@@ -1199,256 +672,6 @@
 </div>
 </PageBody>
 </div>
-
-{#snippet sectionNode(node: TreeNode, depth: number)}
-  {@const isOpen = !collapsed[node.sec.id]}
-  {#if nodeVisible(node)}
-    <!-- The whole header toggles (the caret button stays the keyboard/AT
-         control); clicks on its own buttons — caret, row actions — don't. -->
-    <!-- The caret button is the keyboard/AT toggle; a click anywhere on the head is a mouse shortcut, so the head itself is presentational. -->
-    <div
-      role="presentation"
-      class="sec-head"
-      onclick={(e) => {
-        if (!(e.target as Element).closest('button')) toggleCollapse(node.sec.id);
-      }}
-      class:drop-target={(draggedSectionId && draggedSectionId !== node.sec.id) ||
-        draggedConnId ||
-        draggedClusterId}
-      style="padding-inline-start: {depth * 14 + 2}px"
-      draggable="true"
-      ondragstart={(e) => {
-        draggedSectionId = node.sec.id;
-        e.stopPropagation();
-      }}
-      ondragend={() => (draggedSectionId = null)}
-      ondragover={(e) => {
-        if (draggedConnId || draggedClusterId || (draggedSectionId && draggedSectionId !== node.sec.id)) e.preventDefault();
-      }}
-      ondrop={(e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        onSectionDrop(node.sec.id);
-      }}
-    >
-      <button
-        class="caret"
-        onclick={() => toggleCollapse(node.sec.id)}
-        aria-label={isOpen ? `Collapse ${node.sec.name}` : `Expand ${node.sec.name}`} title={isOpen ? `Collapse ${node.sec.name}` : `Expand ${node.sec.name}`}
-        aria-expanded={isOpen}
-      >
-        <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-      </button>
-      <Icon name="folder" size={12} />
-      <span class="sec-name grow ellipsis">{node.sec.name}</span>
-      {#if nodeCount(node) > 0}<span class="count">{nodeCount(node)}</span>{/if}
-      <div class="sec-actions">
-        <button class="icon-btn" title="Add sub-section" aria-label="Add sub-section" onclick={() => createSection(node.sec.id)}>
-          <Icon name="plus" size={12} />
-        </button>
-        <button class="icon-btn" title="Rename section" aria-label="Rename section" onclick={() => renameSection(node.sec)}>
-          <Icon name="edit" size={12} />
-        </button>
-        <button class="icon-btn" title="Delete section" aria-label="Delete section" onclick={() => deleteSection(node.sec)}>
-          <Icon name="trash" size={12} />
-        </button>
-      </div>
-    </div>
-    {#if isOpen}
-      {#each node.items as c (c.id)}
-        {@render connRow(c, depth + 1)}
-      {/each}
-      {#each node.clusters as cl (cl.id)}
-        {@render clusterRow(cl, depth + 1)}
-      {/each}
-      {#each node.children as child (child.sec.id)}
-        {@render sectionNode(child, depth + 1)}
-      {/each}
-    {/if}
-  {/if}
-{/snippet}
-
-{#snippet connRow(c: Connection, depth: number)}
-  {@const isDb = database.connections.some((x) => x.id === c.id)}
-  <div use:rowMenu
-    role="group"
-    aria-label={c.name}
-    class="conn-row"
-    data-connection-id={c.id}
-    class:active={database.selectedConnId === c.id}
-    class:open={database.openConnIds.includes(c.id)}
-    class:dragging={draggedConnId === c.id}
-    style="padding-inline-start: {depth * 14}px"
-    draggable="true"
-    ondragstart={(e) => {
-      draggedConnId = c.id;
-      e.stopPropagation();
-    }}
-    ondragend={() => (draggedConnId = null)}
-    oncontextmenu={(e) => { e.preventDefault(); connMenu(e, c); }}
-  >
-    <button
-      class="conn-item"
-      onclick={() => (isDb ? database.openConnection(c.id) : void openTerminal(c))}
-      title="{c.name} · {c.kind}{isProdConn(c) ? ' · PRODUCTION' : c.read_only ? ' · read-only' : ''} — {isDb ? 'opens the workbench; right-click for more' : 'opens a terminal session; right-click for more'}"
-    >
-      <span class="conn-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={12} /></span>
-      <span class="conn-name">{c.name}</span><span class="sr-only"> {c.kind}</span>
-      {#if opening[c.id]}<span class="spinner" style="--spinner-size: 10px" aria-hidden="true" title="Opening…"></span>{/if}
-      {#if envBadge(c)}<EnvBadge env={c.environment} readOnly={c.read_only} />{/if}
-    </button>
-    <div class="conn-actions">
-      <!-- One ⋯ per row (same menu as right-click), like every other list in
-           Infrastructure — not a row of per-action icons. -->
-      <button class="icon-btn" aria-label={`Actions for ${c.name}`} title="Actions" onclick={(e) => connMenu(e, c)}>
-        <Icon name="more" size={14} />
-      </button>
-    </div>
-  </div>
-{/snippet}
-
-{#snippet clusterRow(cl: BrokerCluster, depth: number)}
-  <div use:rowMenu
-    role="group"
-    aria-label={cl.name}
-    class="conn-row"
-    class:dragging={draggedClusterId === cl.id}
-    style="padding-inline-start: {depth * 14}px"
-    draggable="true"
-    ondragstart={(e) => {
-      draggedClusterId = cl.id;
-      e.stopPropagation();
-    }}
-    ondragend={() => (draggedClusterId = null)}
-    oncontextmenu={(e) => { e.preventDefault(); clusterMenu(e, cl); }}
-  >
-    <button
-      class="conn-item"
-      onclick={() => openCluster(cl)}
-      title="{cl.name} · kafka{isProdConn(cl) ? ' · PRODUCTION' : cl.read_only ? ' · read-only' : ''} — opens here"
-    >
-      <span class="conn-glyph kafka"><Icon name={engineGlyph('kafka')} size={12} /></span>
-      <span class="conn-name">{cl.name}</span><span class="sr-only"> kafka</span>
-      {#if envBadge(cl)}<EnvBadge env={cl.environment} readOnly={cl.read_only} />{/if}
-    </button>
-    <div class="conn-actions">
-      <button class="icon-btn" aria-label={`Actions for ${cl.name}`} title="Actions" onclick={(e) => clusterMenu(e, cl)}>
-        <Icon name="more" size={14} />
-      </button>
-    </div>
-  </div>
-{/snippet}
-
-{#snippet connSearchBox()}
-  <div class="tree-search">
-    <Icon name="search" size={12} />
-    <input dir="ltr"
-      class="tree-search-input"
-      type="text"
-      bind:value={connFilter}
-      placeholder="Filter connections…"
-      spellcheck="false"
-      aria-label="Filter connections"
-    />
-    {#if connFilter}
-      <button class="tree-search-clear" onclick={() => (connFilter = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={12} /></button>
-    {/if}
-    {#if !viewport.isPhone}
-      <!-- One "add" menu (the phone keeps its accordion-head buttons); New
-           connection is also the page header's primary. -->
-      <button class="icon-btn" onclick={addMenu} aria-haspopup="menu" aria-label="Add to connections" title="Add — connection, Kafka cluster, section, or import" data-testid="connhub-add"><Icon name="plus" size={12} /></button>
-    {/if}
-  </div>
-  <!-- Type-filter chips: one tree, narrowed by connection type. -->
-  {#if visibleChips.length > 2 || filtering}
-  <div class="type-chips" role="group" aria-label="Filter by connection type">
-    {#each visibleChips as chip (chip.id)}
-      <button
-        class="type-chip"
-        class:on={filterKind === chip.id}
-        aria-pressed={filterKind === chip.id}
-        data-testid="connhub-filter-{chip.id}"
-        onclick={() => setFilter(chip.id)}
-      >{chip.label}</button>
-    {/each}
-  </div>
-  {/if}
-{/snippet}
-
-{#snippet connListBody()}
-  {@render connSearchBox()}
-  {#if database.connectionsError}
-    <!-- A failed load is not "No connections yet" (brokers may still list below). -->
-    <LoadState
-      what="connections"
-      variant="compact"
-      loading={database.connectionsLoading}
-      error={database.connectionsError}
-      empty
-      onretry={() => void database.loadConnections()}
-    />
-  {/if}
-  {#if database.connections.length === 0 && database.otherConnections.length === 0 && brokers.clusters.length === 0 && sections.length === 0 && (database.connectionsError || database.connectionsLoading)}
-    {#if !database.connectionsError}<LoadState what="connections" variant="compact" loading empty />{/if}
-  {:else if database.connections.length === 0 && database.otherConnections.length === 0 && brokers.clusters.length === 0 && sections.length === 0}
-    <div class="conn-empty">
-      No connections yet.
-      <button class="link" disabled={!auth.isRoot} onclick={newConnection}>New connection →</button>
-    </div>
-  {:else if connFilter.trim()}
-    {#if connMatches.length === 0 && clusterMatches.length === 0}
-      <EmptyState icon="search" title="No matches" body={`No connections match “${connFilter.trim()}”.`} actionLabel="Clear filter" actionKind="secondary" onaction={() => (connFilter = '')} />
-    {:else}
-      {#each connMatches as c (c.id)}
-        {@render connRow(c, 0)}
-      {/each}
-      {#each clusterMatches as cl (cl.id)}
-        {@render clusterRow(cl, 0)}
-      {/each}
-    {/if}
-  {:else}
-    {#each tree as node (node.sec.id)}
-      {@render sectionNode(node, 0)}
-    {/each}
-
-    {#if sections.length > 0}
-      {#if !(filtering && !dragReveal && ungrouped.length + ungroupedClusters.length === 0)}
-        <!-- Ungrouped doubles as the root / no-section drop target. -->
-        <div
-          role="group"
-          aria-label="Ungrouped"
-          class="sec-head plain"
-          class:drop-target={draggedConnId || draggedClusterId || draggedSectionId}
-          ondragover={(e) => {
-            if (draggedConnId || draggedClusterId || draggedSectionId) e.preventDefault();
-          }}
-          ondrop={(e) => {
-            e.preventDefault();
-            onRootDrop();
-          }}
-          title="Drop here to remove from a section / make a section top-level"
-        >
-          <span class="caret-spacer"></span>
-          <span class="sec-name grow">Ungrouped</span>
-          {#if ungrouped.length + ungroupedClusters.length > 0}<span class="count">{ungrouped.length + ungroupedClusters.length}</span>{/if}
-        </div>
-        {#each ungrouped as c (c.id)}
-          {@render connRow(c, 1)}
-        {/each}
-        {#each ungroupedClusters as cl (cl.id)}
-          {@render clusterRow(cl, 1)}
-        {/each}
-      {/if}
-    {:else}
-      {#each ungrouped as c (c.id)}
-        {@render connRow(c, 0)}
-      {/each}
-      {#each ungroupedClusters as cl (cl.id)}
-        {@render clusterRow(cl, 0)}
-      {/each}
-    {/if}
-  {/if}
-{/snippet}
 
 {#snippet schemaSideBody()}
   {#if database.sideTab === 'saved' || database.sideTab === 'history'}
@@ -1467,14 +690,17 @@
   {/if}
 {/snippet}
 
-{#if changesOpen && database.selectedConnId}<Modal title="Database changes" width={1040} onclose={() => changesOpen=false}><DatabaseChanges connectionId={database.selectedConnId} node={database.activeDb} /></Modal>{/if}
+{#if changesOpen && database.selectedConnId}<Modal title="Database changes" width={1040} onclose={() => changesOpen=false}><LazyMount lazy={DatabaseChangesLazy} what="database changes" variant="panel" props={{ connectionId: database.selectedConnId, node: database.activeDb }} /></Modal>{/if}
 
-{#if accessFor}<Modal title={`Access · ${accessFor.name}`} width={820} onclose={() => accessFor=null}><ResourceAccess kind="connection" resourceId={accessFor.id} /></Modal>{/if}{#if processesFor}<ProcessList conn={processesFor} onclose={() => (processesFor = null)} />{/if}
+{#if accessFor}<Modal title={`Access · ${accessFor.name}`} width={820} onclose={() => accessFor=null}><LazyMount lazy={ResourceAccessLazy} what="access settings" variant="panel" props={{ kind: 'connection', resourceId: accessFor.id }} /></Modal>{/if}
+{#if processesFor}<LazyMount lazy={ProcessListLazy} what="the process list" quiet onerror={() => (processesFor = null)} props={{ conn: processesFor, onclose: () => (processesFor = null) }} />{/if}
 
-{#if connFormOpen}
-  {#key editingConn?.id ?? (prefillConn ? `prefill:${prefillConn.host}:${prefillConn.port ?? ''}` : 'new')}
-    <ConnectionForm existing={editingConn} prefill={prefillConn} kinds={ALL_KINDS} onclose={() => { connFormOpen = false; prefillConn = null; }} onsaved={onConnSaved}
-      ondiagnose={(p) => { const c = editingConn; connFormOpen = false; prefillConn = null; if (c) connDiagnose.request(c, p); }} />
+{#if connFormOpen && editingConn}
+  {#key editingConn.id}
+    <LazyMount lazy={ConnectionFormLazy} what="the connection form" quiet onerror={() => (connFormOpen = false)} props={{
+      existing: editingConn, kinds: ALL_KINDS, onclose: () => { connFormOpen = false; }, onsaved: onConnSaved,
+      ondiagnose: (p: { message: string; hint?: string | null; detail?: string | null }) => { const c = editingConn; connFormOpen = false; if (c) connDiagnose.request(c, p); },
+    }} />
   {/key}
 {/if}
 
@@ -1482,27 +708,11 @@
   <LazyMount lazy={ClusterFormLazy} what="the cluster form" quiet props={{ cluster: editingCluster, onclose: () => (clusterFormOpen = false) }} />
 {/if}
 
-{#if sftpFor}
-  <LazyMount lazy={SftpLazy} what="the SFTP browser" quiet props={{ conn: sftpFor, onclose: () => (sftpFor = null) }} />
-{/if}
-
-<!-- Import connection profiles from another DB tool (MySQL Workbench / DBeaver /
-     DataGrip / NoSQLBooster). The daemon reads each tool's config from disk. -->
-{#if connImportOpen && ws.currentId}
-  <ConnectionImportDialog
-    wsId={ws.currentId}
-    onclose={() => (connImportOpen = false)}
-    onimported={() => {
-      void database.loadConnections();
-    }}
-  />
-{/if}
-
 <!-- File → table import dialog (launched from the schema-tree "Import into…"
      action or the results-grid toolbar). Keyed so it remounts fresh each open. -->
 {#if database.importDialogOpen && database.selectedConnId}
   {#key database.importTable}
-    <ImportDialog />
+    <LazyMount lazy={ImportDialogLazy} what="the import dialog" quiet onerror={() => (database.importDialogOpen = false)} />
   {/key}
 {/if}
 
@@ -1511,34 +721,25 @@
      reports `exported:false` back to the agent. -->
 {#if database.exportRequest}
   {@const req = database.exportRequest}
-  <ExportDialog
-    statement={req.statement}
-    connectionId={req.connId}
-    node={req.node}
-    canExport={resourceAccess.can('connection', req.connId, 'db_export', 'database', 'view', databaseAccessChild(req.node ?? undefined))}
-    initialFormat={req.format}
-    initialMaxRows={req.maxRows}
-    requestedBy={req.agentLabel}
-    ondone={(r) => {
+  <LazyMount lazy={ExportDialogLazy} what="the export dialog" quiet props={{
+    statement: req.statement,
+    connectionId: req.connId,
+    node: req.node,
+    canExport: resourceAccess.can('connection', req.connId, 'db_export', 'database', 'view', databaseAccessChild(req.node ?? undefined)),
+    initialFormat: req.format,
+    initialMaxRows: req.maxRows,
+    requestedBy: req.agentLabel,
+    ondone: (r: { local_path: string; rows: number; bytes: number }) => {
       req.done({ exported: true, path: r.local_path, rows: r.rows, bytes: r.bytes });
-    }}
-    onclose={() => {
+    },
+    onclose: () => {
       if (database.exportRequest === req) database.exportRequest = null;
       req.done({ exported: false });
-    }}
-  />
+    },
+  }} />
 {/if}
 
 <style>
-  .recent-conns {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    align-items: center;
-    gap: 6px;
-    margin-block-start: 12px;
-  }
-  .recent-conns .empty-note { flex-basis: 100%; margin: 0; text-align: center; }
   .db-root {
     height: 100%;
     display: flex;
@@ -1564,60 +765,12 @@
     flex-direction: column;
     min-height: 0;
   }
-  .conn-list {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    padding: 10px 8px;
-    border-bottom: 1px solid var(--border);
-    overflow-y: auto;
-  }
   /* On tablet/desktop the list lives inside the scrollable .side-body tab, so it
      fills the full sidebar height (no cap) and the side-body owns the scroll. */
   .side-body .conn-list {
     padding: 0;
     border-bottom: none;
     overflow-y: visible;
-  }
-  /* Connection filter box — mirrors SchemaTree's "Filter schema" input. */
-  .tree-search {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 4px 6px 6px;
-    margin-bottom: 2px;
-    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-    color: var(--text-dim);
-    flex-shrink: 0;
-  }
-  .tree-search-input {
-    flex: 1;
-    border: none;
-    background: transparent;
-    color: var(--text);
-    font-size: var(--fs-s);
-    outline: none;
-    min-width: 0;
-  }
-  /* The bare input drops its outline; the search row shows focus instead. */
-  .tree-search:focus-within {
-    box-shadow: inset 0 -2px 0 var(--accent-text);
-  }
-  .tree-search-input::placeholder {
-    color: var(--text-dim);
-  }
-  .tree-search-clear {
-    display: grid;
-    place-items: center;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    padding: 0;
-    flex-shrink: 0;
-  }
-  .tree-search-clear:hover {
-    color: var(--text);
   }
   .conn-empty,
   /* Schema-tab empty state with its way-forward buttons. */
@@ -1627,12 +780,6 @@
     gap: 4px;
     padding: 4px 2px;
   }
-  .side-empty-actions {
-    display: flex;
-    gap: 6px;
-    padding: 0 6px;
-    flex-wrap: wrap;
-  }
   .link {
     border: none;
     background: none;
@@ -1640,29 +787,6 @@
     cursor: pointer;
     font-size: var(--fs-s);
     padding: 0;
-  }
-  .conn-item {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    /* min-height (not a fixed height) so the row grows when a long name wraps. */
-    min-height: 26px;
-    padding: 2px 6px;
-    border: none;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
-    text-align: start;
-  }
-  .conn-item:hover {
-    background: var(--hover);
-  }
-  .conn-row.open:not(.active) .conn-item {
-    background: var(--hover);
-  }
-  .conn-row.active .conn-item {
-    background: var(--accent-soft);
   }
   .conn-head {
     display: flex;
@@ -1682,138 +806,11 @@
     align-items: center;
     gap: 1px;
   }
-  /* --- Section hierarchy rows --- */
-  .sec-head {
-    position: relative;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    height: 24px;
-    padding: 0 6px;
-    border-radius: var(--radius-s);
-    cursor: pointer;
-    user-select: none;
-    color: var(--text-dim);
-  }
-  .sec-head:hover {
-    background: var(--hover);
-  }
-  .sec-head.plain {
-    cursor: default;
-    margin-top: 4px;
-  }
-  .sec-head.drop-target {
-    outline: 1px dashed color-mix(in srgb, var(--accent-text) 55%, transparent);
-    outline-offset: -1px;
-    background: var(--accent-faint);
-  }
-  .sec-name {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    color: var(--text-dim);
-  }
-  .caret {
-    display: grid;
-    place-items: center;
-    width: 16px;
-    height: 16px;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    border-radius: var(--radius-s);
-    cursor: pointer;
-    flex-shrink: 0;
-  }
-  .caret:hover {
-    color: var(--text);
-  }
-  .caret-spacer {
-    width: 16px;
-    flex-shrink: 0;
-  }
-  /* The folder count sits in the same end column as the connection rows'
-     type/env badges: the section's hover actions float over the row end (like
-     .conn-actions) instead of reserving their width, and the count is sized
-     like a badge so the numbers line up with the pills below them. */
-  .count {
-    flex-shrink: 0;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    min-width: 16px;
-    text-align: end;
-    font-variant-numeric: tabular-nums;
-  }
-  .sec-actions {
-    position: absolute;
-    inset-inline-end: 2px;
-    top: 50%;
-    transform: translateY(-50%);
-    display: flex;
-    gap: 0;
-    padding: 1px 2px;
-    border-radius: var(--radius-s);
-    background: var(--surface);
-    box-shadow: 0 0 0 1px var(--border);
-    opacity: 0;
-  }
-  .sec-head:hover .sec-actions,
-  .sec-head:focus-within .sec-actions {
-    opacity: 1;
-  }
-  .conn-row.dragging {
-    opacity: 0.5;
-  }
-  .conn-row {
-    position: relative;
-    display: flex;
-    align-items: center;
-    gap: 2px;
-  }
-  .conn-row .conn-item {
-    flex: 1;
-    min-width: 0;
-  }
-  /* Hover actions float over the row's end instead of reserving their width in
-     every row — that dead space squeezed the name + type/env badges until names
-     broke mid-word. */
-  .conn-actions {
-    position: absolute;
-    inset-inline-end: 2px;
-    top: 50%;
-    transform: translateY(-50%);
-    display: flex;
-    gap: 1px;
-    padding: 1px 2px;
-    border-radius: var(--radius-s);
-    background: var(--surface);
-    box-shadow: 0 0 0 1px var(--border);
-    opacity: 0;
-  }
-  .conn-row:hover .conn-actions,
-  .conn-row:focus-within .conn-actions {
-    opacity: 1;
-  }
-  /* Touch has no hover: keep the ⋯ in the row's flow, always visible. */
-  @media (hover: none) {
-    .conn-actions {
-      position: static;
-      transform: none;
-      background: none;
-      box-shadow: none;
-      opacity: 1;
-    }
-  }
   .conn-glyph {
     display: grid;
     place-items: center;
     flex-shrink: 0;
     color: var(--text-dim);
-  }
-  /* Engine glyphs stay neutral (no per-source hues); the kind tag names it. */
-  .conn-row.active .conn-item .conn-glyph {
-    color: var(--accent-text);
   }
   .conn-name {
     flex: 1;
@@ -1874,31 +871,6 @@
     min-width: 0;
     font-size: var(--fs-s);
     font-weight: 600;
-  }
-  /* Type-filter chips under the tree search. */
-  .type-chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-    padding: 4px 8px 6px;
-    border-bottom: 1px solid var(--border);
-  }
-  .type-chip {
-    font-size: var(--fs-xs);
-    padding: 2px 8px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-  }
-  .type-chip:hover {
-    background: var(--hover);
-  }
-  .type-chip.on {
-    color: var(--accent-text);
-    border-color: var(--accent-line);
-    background: var(--accent-soft);
   }
   /* Prod / guarded connection tabs get a tinted edge. */
   .conn-tab.prod {
@@ -2085,17 +1057,6 @@
   .db-side.collapsed {
     display: none;
   }
-  .empty-alt {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    gap: 6px;
-  }
-  .empty-note {
-    margin: 0;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
 
   /* The DB Assistant pane — fixed (resizable) width, pinned to the right edge. */
   .assist-pane {
@@ -2104,9 +1065,6 @@
     min-height: 0;
     display: flex;
     border-inline-start: 1px solid var(--border);
-  }
-  .grow {
-    flex: 1;
   }
   .ellipsis {
     overflow: hidden;

@@ -207,7 +207,8 @@ test('pageKeyOf: light lands on Threads and gates hidden modules; the full app i
   assert.equal(pages.pageKeyOf([]), 'threads');
   assert.equal(pages.pageKeyOf(['plugin']), 'threads');
   assert.equal(pages.pageKeyOf(['threads', 't1']), 'threads');
-  assert.equal(pages.pageKeyOf(['connections']), 'database');
+  assert.equal(pages.pageKeyOf(['connections']), 'connections');
+  assert.equal(pages.pageKeyOf(['database', 'c1']), 'database');
   assert.equal(pages.pageKeyOf(['brokers', 'c1']), 'brokers');
   assert.equal(pages.pageKeyOf(['settings', 'appearance']), 'settings');
   for (const hidden of [['agents', 's1'], ['home'], ['kubernetes'], ['plugin', 'demo'], ['projects']]) {
