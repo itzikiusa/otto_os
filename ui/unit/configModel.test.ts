@@ -102,3 +102,12 @@ test('TOML / INI: only a """ or \'\'\' right after = opens a multi-line string; 
   assert.deepEqual(outline(tomlSymbols('[a]\nfoo = "x" # """\nbar = 1\n')), [['section a:1', ['key foo:2', 'key bar:3']]]);
   assert.deepEqual(outline(confSymbols('[s]\nk = """\nm = 1\n')), [['section s:1', ['key k:2', 'key m:3']]]);
 });
+
+test('YAML Problems: none for yarn.lock (Yarn v1 is not YAML) or a file too big to parse on the UI thread', async () => {
+  const yarnV1 = '# yarn lockfile v1\n\n\n"@babel/core@^7.0.0":\n  version "7.1.0"\n  resolved "https://registry.yarnpkg.com/x"\n  dependencies:\n    a "^1.0.0"\n';
+  assert.ok((await yamlProblems('/x/a.yml', yarnV1)).length > 0, 'the same text elsewhere is an error');
+  assert.deepEqual(await yamlProblems('/x/yarn.lock', yarnV1), []);
+  assert.deepEqual(await yamlProblems('/x/big.yml', 'a: [1, 2\n' + 'b: 1\n'.repeat(30_000)), []);
+  const [e] = await yamlProblems('/x/a.yml', 'a: 1\nb: [1, 2\nc: 3\n');
+  assert.ok(!e.message.endsWith(':'), e.message);
+});

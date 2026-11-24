@@ -132,13 +132,15 @@ function sectionSymbols(text: string, header: RegExp, key: RegExp, comments: str
 
 /** YAML syntax errors as Problems entries (the yaml package, loaded on first use). */
 export async function yamlProblems(path: string, text: string): Promise<{ path: string; line: number; col: number; severity: 'error'; message: string; source: string }[]> {
+  // Yarn v1 lockfiles are not YAML; past 128 KB the parse blocks the UI thread for 70 ms+ on every pause.
+  if (text.length > 128_000 || /(?:^|\/)yarn\.lock$/.test(path)) return [];
   const { parseAllDocuments } = await import('yaml');
   const out: { path: string; line: number; col: number; severity: 'error'; message: string; source: string }[] = [];
   const docs = parseAllDocuments(text, { prettyErrors: true });
   for (const doc of Array.isArray(docs) ? docs : [docs]) {
     for (const e of doc.errors) {
       const pos = e.linePos?.[0];
-      out.push({ path, line: pos?.line ?? 1, col: pos?.col ?? 1, severity: 'error', message: e.message.split('\n')[0], source: 'yaml' });
+      out.push({ path, line: pos?.line ?? 1, col: pos?.col ?? 1, severity: 'error', message: e.message.split('\n')[0].replace(/:$/, ''), source: 'yaml' });
     }
   }
   return out;
