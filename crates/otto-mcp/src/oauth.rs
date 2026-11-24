@@ -477,6 +477,11 @@ pub async fn start(
     ))
 }
 
+const STATE_MISMATCH: &str = "the sign-in answer didn't match (state); refused";
+/// How long one connection to the loopback listener may take to send its
+/// request line (an idle one must not stall the window).
+const CALLBACK_READ: Duration = Duration::from_secs(5);
+
 /// Constant-time string equality (the state check).
 fn same(a: &str, b: &str) -> bool {
     a.len() == b.len()
@@ -499,7 +504,7 @@ pub(crate) fn callback_code(request_line: &str, state: &str) -> Result<String, S
     }
     let q: std::collections::HashMap<String, String> = url.query_pairs().into_owned().collect();
     if !q.get("state").is_some_and(|s| same(s, state)) {
-        return Err("the sign-in answer didn't match (state); refused".into());
+        return Err(STATE_MISMATCH.into());
     }
     if let Some(e) = q.get("error") {
         let e: String = e
@@ -516,14 +521,18 @@ pub(crate) fn callback_code(request_line: &str, state: &str) -> Result<String, S
 }
 
 /// Wait (≤ [`SIGN_IN_WINDOW`]) for the browser's redirect, answer it with a
-/// short page, then exchange the code. One answer ends the flow either way.
+/// short page, then exchange the code. The answer with this flow's state
+/// ends it (signed in or declined); one with another state is refused.
 pub async fn finish(pending: Pending, now: impl Fn() -> i64) -> Result<Tokens, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let wait = async {
         loop {
             let (mut s, _) = pending.listener.accept().await.map_err(|e| e.to_string())?;
             let mut buf = vec![0u8; 8192];
-            let n = s.read(&mut buf).await.unwrap_or(0);
+            let n = match tokio::time::timeout(CALLBACK_READ, s.read(&mut buf)).await {
+                Ok(Ok(n)) => n,
+                _ => continue,
+            };
             let text = String::from_utf8_lossy(&buf[..n]).to_string();
             let line = text.lines().next().unwrap_or_default().to_string();
             // A favicon or a stray probe: not the answer, keep waiting.
@@ -536,6 +545,14 @@ pub async fn finish(pending: Pending, now: impl Fn() -> i64) -> Result<Tokens, S
                 continue;
             }
             let result = callback_code(&line, &pending.state);
+            // Not this flow's answer (anything local can reach the port):
+            // refuse it and keep waiting for the browser.
+            if result.as_ref().is_err_and(|e| e == STATE_MISMATCH) {
+                let _ = s
+                    .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await;
+                continue;
+            }
             let body = match &result {
                 Ok(_) => "<p>Signed in. You can close this tab and go back to Otto.</p>",
                 Err(_) => "<p>Sign-in failed. Go back to Otto and try again.</p>",

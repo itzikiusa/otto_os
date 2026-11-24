@@ -253,15 +253,38 @@ async fn sign_in_discovers_registers_exchanges_and_refreshes_with_rotation() {
 }
 
 #[tokio::test]
-async fn a_state_mismatch_ends_the_flow_without_an_exchange() {
+async fn a_wrong_state_is_refused_and_the_flow_keeps_waiting() {
     let (base, st, task) = fake_as().await;
     let (auth_url, pending) = start(&format!("{base}/mcp"), None).await.unwrap();
     let done = tokio::spawn(finish(pending, now));
+    // An idle connection doesn't stall the listener.
+    let _idle = tokio::net::TcpStream::connect(redirect_addr(&auth_url))
+        .await
+        .unwrap();
     browser(&auth_url, &st, "good-code", Some("forged")).await;
-    let e = done.await.unwrap().unwrap_err();
-    assert!(e.contains("state"), "{e}");
-    assert_eq!(st.lock().unwrap().tokens_issued, 0);
+    assert_eq!(
+        st.lock().unwrap().tokens_issued,
+        0,
+        "no exchange for a forged answer"
+    );
+    assert!(!done.is_finished());
+    browser(&auth_url, &st, "good-code", None).await;
+    let t = done.await.unwrap().expect("the real answer still signs in");
+    assert_eq!(t.access_token, "at-1");
+    assert_eq!(st.lock().unwrap().tokens_issued, 1);
     task.abort();
+}
+
+fn redirect_addr(auth_url: &str) -> String {
+    let u = reqwest::Url::parse(auth_url).unwrap();
+    let r = u
+        .query_pairs()
+        .find(|(k, _)| k == "redirect_uri")
+        .unwrap()
+        .1
+        .to_string();
+    let r = reqwest::Url::parse(&r).unwrap();
+    format!("127.0.0.1:{}", r.port().unwrap())
 }
 
 #[tokio::test]
