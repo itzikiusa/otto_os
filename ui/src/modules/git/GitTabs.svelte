@@ -297,13 +297,14 @@
           }
         }}
       >
-        <span class="git-tab-dot" class:dirty aria-hidden="true"></span>
         <span class="git-tab-name">{r.name}</span>
         {#if branch}
           <span class="git-tab-branch mono" aria-hidden="true">
             <Icon name="branch" size={12} /><span class="git-tab-branch-name">{branch}</span>
           </span>
         {/if}
+        <!-- A word, not a dot; the open tab's Changes badge already counts them. -->
+        {#if dirty && selectedId !== r.id}<span class="git-tab-word" aria-hidden="true">changed</span>{/if}
       </button>
       <button
         type="button"
@@ -400,18 +401,11 @@
   .git-tab.drag-over {
     border-inline-start: 2px solid var(--accent);
   }
-  .git-tab-dot {
+  .git-tab-word {
     flex-shrink: 0;
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--text-dim);
-    opacity: 0.55;
-  }
-  /* Uncommitted changes present → amber dot (a quiet "dirty" beacon). */
-  .git-tab-dot.dirty {
-    background: var(--warning);
-    opacity: 1;
+    font-size: var(--fs-xs);
+    color: var(--warning);
+    font-weight: 600;
   }
   .git-tab-name {
     /* min-width:0 lets this flex item shrink so the ellipsis actually engages
