@@ -233,12 +233,17 @@ test('PR Decline: confirms which PR and what happens, posts it, then reads close
     await route.fulfill({ status: 204, body: '' });
   });
   await page.goto(`/#/git/${repoId}/pr/1`);
-  const decline = page.getByTestId('prd-decline');
-  await expect(decline).toBeVisible();
-  await expect(decline).toHaveClass(/danger/);
-  // Cancel sends nothing.
+  // Close is offered once, in ⋯ (design review 2, H3); Check out once, on the details card.
+  await expect(page.locator('.prd-title')).toBeVisible();
+  const more = page.getByRole('button', { name: 'More pull request actions' });
+  const decline = page.getByRole('menuitem', { name: 'Close pull request…' });
+  await more.click();
   // GitHub wording (prCloseLabels): "Close", not Bitbucket's "Decline".
-  await expect(decline).toHaveText('Close PR…');
+  await expect(decline).toBeVisible();
+  await expect(page.getByRole('menuitem', { name: /^Check out/ })).toHaveCount(0);
+  await expect(page.locator('.prd-body').getByRole('button', { name: /Close PR|Decline/ })).toHaveCount(0);
+  await expect(page.getByTestId('pr-checkout')).toHaveCount(1);
+  // Cancel sends nothing.
   await decline.click();
   const dialog = page.getByRole('dialog', { name: 'Close pull request #1?' });
   await expect(dialog).toContainText('#1');
@@ -247,10 +252,13 @@ test('PR Decline: confirms which PR and what happens, posts it, then reads close
   await expect(dialog).toHaveCount(0);
   expect(declined).toEqual([]);
   // Confirm posts once, then the PR reloads as Declined (no actions left).
+  await more.click();
   await decline.click();
   await page.getByRole('dialog', { name: 'Close pull request #1?' }).getByRole('button', { name: 'Close PR', exact: true }).click();
   await expect.poll(() => declined).toEqual(['POST']);
   await expect(page.getByTestId('pr-status')).toHaveText(/Closed without merging/);
+  await more.click();
+  await expect(page.getByRole('menuitem', { name: 'Copy link' })).toBeVisible();
   await expect(decline).toHaveCount(0);
 });
 
