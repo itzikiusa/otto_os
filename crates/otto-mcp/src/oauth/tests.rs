@@ -318,9 +318,10 @@ async fn metadata_for_another_issuer_or_resource_is_refused() {
     st.lock().unwrap().wrong_issuer = true;
     let e = start(&format!("{base}/mcp"), None).await.err().unwrap();
     assert!(e.contains("issuer"), "{e}");
-    let mut s = st.lock().unwrap();
-    (s.wrong_issuer, s.wrong_resource) = (false, true);
-    drop(s);
+    {
+        let mut s = st.lock().unwrap();
+        (s.wrong_issuer, s.wrong_resource) = (false, true);
+    }
     let e = start(&format!("{base}/mcp"), None).await.err().unwrap();
     assert!(e.contains("resource"), "{e}");
     task.abort();
