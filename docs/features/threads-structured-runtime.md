@@ -359,7 +359,7 @@ through the driver. It is a plain ACP v1 agent:
 
 ### opencode (`opencode acp`) and pi (`pi --mode rpc`)
 
-Verified live on 2026-11-05 against **opencode 1.19.5** (npm `opencode-ai`)
+Verified live on 2026-11-05 against **opencode 1.19.5** (npm `opencode-ai`; re-verified on 2.3.0 and **2.4.1**, see "Live 2026-11-24")
 and **pi 1.5.0** (npm `@earendil-works/pi-coding-agent`), by speaking each
 protocol from a script.
 
@@ -578,13 +578,37 @@ client-side auto-answering (`clientPolicy.ts:143-200`): whatever the CLI
 still asks reaches a person. Otto's Seatbelt, folder trust and prompt guard
 apply in every mode.
 
+### Live 2026-11-24: opencode 2.4.1 and pi 1.6.0
+
+Updated on the test machine: `opencode upgrade` (2.3.0 → 2.4.1), and pi
+from `@mariozechner/pi-coding-agent@0.65.0` to
+`@earendil-works/pi-coding-agent@1.6.0` (`npm rm -g` the old package, which
+owned the `pi` bin, then `npm i -g`). Runs through an isolated daemon (own
+data dir and port) with a real Codex beside them; gemini CLI and Grok are out
+of scope for live checks (account: the owner's gemini login is not relevant;
+no Grok subscription).
+
+| | opencode 2.4.1 | pi 1.6.0 |
+|---|---|---|
+| A thread starts and answers | yes (live) | starts (`get_state`, commands, live); **no answer: pi has no signed-in provider** (empty `auth.json`, no API key) — the thread now says "pi has no signed-in provider · run `pi` and /login" (unit; the raw pi message was seen live) |
+| Otto MCP tools reach it | yes: `otto_broadcast_message` through its code-mode `execute` (live) | the `otto` server is registered by Otto's `-e` extension (`mcp_servers.updated: otto added`, live); no call without a model |
+| A governed call approved in the thread | yes: the `mcp_approvals` card for `otto.broadcast_message` raised by the thread, approved, the waiting call ran (live) | – (login) |
+| Supervised asks first | yes: command and the MCP `execute` each asked (live, `acp_live`) | pi has no approval round-trip; Supervised is the read-only tool set (code) |
+| Subagent of a Codex parent | yes: Codex opened it with `otto_thread_open`, it answered, the reply woke Codex (live) | – (login) |
+| Parent delegating to Codex | yes: it opened a Codex child (`child_of … by: agent`), which answered (live) | – (login) |
+| Provider switch Codex → it → Codex | yes: the handoff carried the word to it and back (live) | – (login) |
+| Context meter / usage | `usage_update`: 40 918 of 1 048 576 tokens, cost 0 (free model) (live) | context window from `get_state` (0 with no model) |
+| Elicitation | none sent in these runs | – |
+| Cancel, reopen (`session/resume`) | yes (live, `acp_live`) | – |
+| Sign-in failure | "opencode has no signed-in provider for <model> · pick a model from a provider you are signed in to" (unit; not reproduced live: opencode lists only its configured providers' models, all signed in here) | see above |
+
 ### ACP per provider (re-verified live 2026-11-23)
 
 Installed versions and what each advertised: [ACP capabilities](./acp-capabilities.md).
 "live" = an `acp_live` test or a recorded wire run on the installed CLI;
 "fake" = `otto-fake-agent`; "unit" = a driver test on recorded wire lines.
 
-| Feature | gemini 0.43 | agy 1.5.15 | grok 1.0.92 | opencode 2.3.0 | muse 1.4.25 |
+| Feature | gemini 0.43 — account (owner: not relevant) | agy 1.5.15 | grok 1.0.92 — account (owner: no subscription) | opencode 2.3.0 → 2.4.1 | muse 1.4.25 |
 |---|---|---|---|---|---|
 | Starts a session | **no**: the CLI refuses personal accounts ("no longer supported… migrate to Antigravity"); the thread shows that message (live) | yes (live) | yes (live) | yes (live) | yes (live) |
 | Otto MCP tools (`mcpServers` stdio) | – | yes (live) | yes under full access (live) | yes (live) | yes (live) |

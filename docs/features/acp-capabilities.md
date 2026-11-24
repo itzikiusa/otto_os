@@ -10,6 +10,19 @@ prints its capability line) and update this file.
 
 Part of [Threads — structured agent runtime](./threads-structured-runtime.md).
 
+## opencode 2.4.1 (2026-11-24)
+
+Same shape as 2.3.0: `loadSession`, `mcpCapabilities {http}`, images and
+embedded files, `sessionCapabilities` resume / close / delete / fork / list /
+additionalDirectories, auth method `opencode-login`; config options `model`
+(95 values from its configured providers: github-copilot, google, openai,
+opencode — default `opencode/tidepool-alpha-free`), `effort`, `mode`
+(build / plan); 4 slash commands. `acp_live` passed on it (Supervised asked
+for the command and the MCP call; cancel; close + reopen).
+
+gemini CLI and Grok: account (owner — gemini not relevant; no Grok
+subscription); their columns below are the 2026-11-23 record.
+
 ## Summary
 
 | | gemini | agy | grok | opencode | muse |
