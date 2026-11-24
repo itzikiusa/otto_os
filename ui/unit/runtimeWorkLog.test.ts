@@ -181,3 +181,29 @@ test('the thread’s next action (Revive / Reopen) is never folded behind "N mor
   assert.deepEqual(keys(splitBanners(buildRuntimeBanners(base))), [['fresh'], ['plan', 'queue']]);
   assert.deepEqual(keys(splitBanners(buildRuntimeBanners({ ...base, freshContext: false }))), [['plan'], ['queue']]);
 });
+
+test('incremental WS deltas keep a Thinking row under one id, so the person\u2019s open/closed choice (ROW_CHOICES) holds', async () => {
+  const { applyEvents, emptyProjection } = await import('../src/modules/threads/runtime/projection.ts');
+  const { timelineRows } = await import('../src/modules/threads/runtime/timeline.ts');
+  const think = (id: string, s: number, text: string, done: boolean): TurnItem =>
+    ({ id, turn_id: 't1', ordinal: s, status: done ? 'completed' : 'running', title: null, started_at: at(s), completed_at: done ? at(s + 1) : null, updated_at: at(s + 1), type: 'reasoning', text, streaming: !done }) as TurnItem;
+  const ev = (sequence: number, turn_item: TurnItem) => ({ session_id: 's', sequence, ts: at(sequence), type: 'turn_item.updated', turn_item }) as never;
+  const steps: TurnItem[] = [
+    think('r1', 0, 'plan', false), think('r1', 0, 'plan\nmore', false), think('r1', 0, 'plan\nmore\ndone', true),
+    cmd('c1', 2, 3), cmd('c2', 3, 4), think('r2', 4, 'next', false), think('r2', 4, 'next\nstep', false),
+  ];
+  let p = emptyProjection();
+  const kept = new Map<string, boolean>([['r1', true]]); // the person opened r1 while it streamed
+  const keptOpen = (part: { kind: string; entry?: { item: TurnItem } }) => part.kind === 'item' && kept.get(part.entry!.item.id) === true;
+  steps.forEach((item, i) => {
+    p = applyEvents(p, [ev(i + 1, item)]).projection;
+    const work = timelineRows(p.items, [turn('running')]).filter((r) => r.kind === 'work');
+    assert.equal(work.length, 1, `step ${i + 1}: one stretch`);
+    const parts = (work[0] as { parts: { kind: string; entry?: { item: TurnItem } }[] }).parts;
+    assert.equal(parts[0].entry?.item.id, 'r1', `step ${i + 1}: r1 keeps its key`);
+    assert.equal(wl.earlierSteps(parts as never, none, true, keptOpen as never), 0, `step ${i + 1}: an opened row is never folded away`);
+  });
+  assert.equal(p.items.find((x) => x.id === 'r1')?.type === 'reasoning' && (p.items.find((x) => x.id === 'r1') as { text: string }).text, 'plan\nmore\ndone');
+  const last = timelineRows(p.items, [turn('running')]).find((r) => r.kind === 'work');
+  assert.equal(wl.earlierSteps(last?.kind === 'work' ? last.parts : [], none, true), 3, 'untouched, the finished steps before the live one fold');
+});

@@ -91,17 +91,28 @@ export class RuntimeDrafts {
     this.byId = {};
   }
 
-  /** Drop `id`'s draft: its thread is being deleted. The returned undo lets
-   *  the draft load again (the delete failed). */
-  forget(id: string): () => void {
+  /** Drop `id`'s draft: its thread is being deleted. Call the returned
+   *  settle with whether the delete went through: a failed one brings the
+   *  draft back as it was, unsaved edits included. */
+  forget(id: string): (deleted: boolean) => void {
     this.gone.add(id);
     this.live.get(id)?.();
     this.live.delete(id);
-    void this.roots.get(id)?.dispose();
+    const draft = this.byId[id];
+    const root = this.roots.get(id);
     this.roots.delete(id);
     this.idle = this.idle.filter((x) => x !== id);
-    delete this.byId[id];
-    return () => void this.gone.delete(id);
+    delete this.byId[id]; // its writer saves only a draft this store owns
+    return (deleted) => {
+      if (deleted) return void root?.dispose();
+      this.gone.delete(id);
+      if (!draft) return;
+      this.byId[id] = draft;
+      if (root) this.roots.set(id, root);
+      if (this.held(id)) this.startLive(id);
+      else this.touchIdle(id);
+      draft.flushSave();
+    };
   }
 
   /** A view shows `id`'s thread: keep its draft live until the returned release. */

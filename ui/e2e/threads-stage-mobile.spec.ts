@@ -96,3 +96,23 @@ test('a tablet in portrait: the Threads page fits with its thread list reachable
   await expectNoHorizontalOverflow(page);
   await shot(page, 'page');
 });
+
+test('phone: the Full access warning chip reads in full beside the agent picker', async ({ page }, ti) => {
+  test.skip(!/^(iphone|android-phone)/.test(ti.project.name), 'phones only');
+  await page.setViewportSize({ width: 360, height: 760 }); // the narrowest common phone
+  await boot(page, '#/threads/new');
+  const stage = page.getByTestId('new-thread-stage');
+  await expect(stage).toBeVisible({ timeout: 15_000 });
+  await stage.getByTestId('picker-agent').click();
+  await page.getByTestId('model-picker').getByTestId('model-picker-provider-claude').click();
+  await page.keyboard.press('Escape');
+  const chip = stage.getByTestId('runtime-access');
+  await chip.click();
+  await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Full access' }).click();
+  const allow = page.getByRole('dialog').getByRole('button', { name: 'Allow full access' });
+  if (await allow.count()) await allow.click();
+  await expect(chip).toContainText('Full access');
+  const label = chip.locator('.ellipsis');
+  expect(await label.evaluate((el) => el.scrollWidth - el.clientWidth), 'the warning is not cut').toBeLessThanOrEqual(0);
+  await expectFullyInViewport(page, chip, 'full access chip');
+});

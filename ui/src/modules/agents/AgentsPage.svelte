@@ -104,11 +104,14 @@
     if (!ws.layoutReady || ws.sessionsLoading || ws.sessionsError) return;
     const key = ws.currentId;
     if (autoOpenedFor === key) return;
-    autoOpenedFor = key;
     // Read the hash, not the router: it already names the next page (or
     // session) while that hashchange is queued or the page's chunk loads, and
     // opening a session then overwrote it and pulled the person back.
     const target = window.location.hash.replace(/^#\/?/, '').split('/');
+    // A named session not open yet is not the arrival: a remembered one
+    // deleted since is dropped for `#/agents`, which then opens the latest.
+    if (target[1] && router.parts[1] === target[1] && ws.activeSessionId !== target[1]) return;
+    autoOpenedFor = key;
     if (untrack(() => pageKeyOf(target)) !== 'agents' || target[1] || viewport.isPhone) return;
     if (ws.panes.length > 0 || tiled) return;
     const latest = [...ws.mainSessions].sort(

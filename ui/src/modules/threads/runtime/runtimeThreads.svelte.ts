@@ -169,6 +169,9 @@ class RuntimeThreads {
   private embedded = new Map<string, number>();
   /** When `loadOne` last read each row (ms) — see `readRecently`. */
   private readAt = new Map<string, number>();
+  /** In-flight `loadOne` reads (two panes mounting share one) and when `loadLinked` last read. */
+  private reading = new Map<string, Promise<RuntimeSession>>();
+  private linkedAt = new Map<string, number>();
   /** Original composer attachments keyed by `queued_id` so Edit preserves filenames even before server hydration. */
   private queuedAttachments = new Map<string, { name: string; mime: string; data_base64: string }[]>();
   /** The thread each cached `queued_id` belongs to (to release them per thread). */
@@ -254,7 +257,15 @@ class RuntimeThreads {
 
   /** Read one thread's row: an embed needs only its own, never the
    *  workspace's whole list. */
-  async loadOne(id: string): Promise<RuntimeSession> {
+  loadOne(id: string): Promise<RuntimeSession> {
+    const busy = this.reading.get(id);
+    if (busy) return busy;
+    const read = this.readOne(id).finally(() => this.reading.delete(id));
+    this.reading.set(id, read);
+    return read;
+  }
+
+  private async readOne(id: string): Promise<RuntimeSession> {
     const r = keepOutcome(await api.get<RuntimeSession>(`/runtime-sessions/${id}`), this.byId[id]);
     this.byId[r.id] = r;
     this.readAt.set(r.id, Date.now());
@@ -269,9 +280,11 @@ class RuntimeThreads {
     return !!this.byId[id] && at !== undefined && Date.now() - at < ms;
   }
 
-  /** Fetch the rows of `id`'s linked group not held yet (its chips). */
-  async loadLinked(id: string): Promise<void> {
+  /** Fetch the rows of `id`'s linked group not held yet (its chips); none when read in the last `ms`. */
+  async loadLinked(id: string, ms = 0): Promise<void> {
+    if (Date.now() - (this.linkedAt.get(id) ?? -Infinity) < ms) return;
     const peers = await api.get<PeerInfo[]>(`/runtime-sessions/${id}/peers`);
+    this.linkedAt.set(id, Date.now());
     for (const peer of peers) if (!this.byId[peer.id]) this.adopt(peer.id);
   }
 
@@ -614,13 +627,14 @@ class RuntimeThreads {
   /** Stop the agent and remove the thread with its history. */
   async remove(id: string): Promise<void> {
     // The draft first: its live sync would read it back while the agent stops.
-    const undo = runtimeDrafts.forget(id);
+    const settle = runtimeDrafts.forget(id);
     try {
       await api.del(`/runtime-sessions/${id}`);
     } catch (e) {
-      undo();
+      settle(false);
       throw e;
     }
+    settle(true);
     this.releaseQueued(id, null);
     this.markRead(id);
     const next = { ...this.byId };

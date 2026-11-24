@@ -13,7 +13,7 @@ function load(router: { module?: string }, threads: { focusedSessionId?: string 
     '../../../lib/live': { onLive: () => () => {}, appLive: { onResync: () => () => {} } }, '../../../lib/router.svelte': { router },
     '../../../lib/stores/runtimeAttention.svelte': { noteRuntimeWaiting: () => {}, syncRuntimeWaiting: () => {} },
     '../../../lib/stores/uiControl.svelte': { uiControl: { addSource: () => {} } },
-    '../threadsStore.svelte': { threads }, '../../../lib/stores/runtimeDrafts.svelte': { runtimeDrafts: { forget: () => {} } },
+    '../threadsStore.svelte': { threads }, '../../../lib/stores/runtimeDrafts.svelte': { runtimeDrafts: { forget: () => () => {} } },
     '../../../lib/providers': { isRuntimeProvider: (p: string) => ['claude', 'codex', 'agy', 'gemini', 'grok', 'opencode', 'pi'].includes(p), RUNTIME_PROVIDERS: ['claude', 'codex', 'agy', 'gemini', 'grok', 'opencode', 'pi'] },
   });
   return { runtimeThreads, gets };
@@ -52,4 +52,20 @@ test('an embed loads its own row by id, not the workspace list', async () => {
   await runtimeThreads.loadOne('A');
   assert.deepEqual(gets, ['/runtime-sessions/A']);
   assert.equal(runtimeThreads.byId.A.id, 'A');
+});
+
+test('two panes mounting at once share one row read; peers read once per moment when asked to', async () => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => (release = r));
+  const { runtimeThreads, gets } = load({}, {}, async (p) => { await gate; return p.endsWith('/peers') ? [] : row; });
+  const a = runtimeThreads.loadOne('A');
+  const b = runtimeThreads.loadOne('A');
+  release();
+  await Promise.all([a, b]);
+  assert.deepEqual(gets, ['/runtime-sessions/A']);
+  await runtimeThreads.loadLinked('A', 2000);
+  await runtimeThreads.loadLinked('A', 2000);
+  assert.deepEqual(gets, ['/runtime-sessions/A', '/runtime-sessions/A/peers']);
+  await runtimeThreads.loadLinked('A');
+  assert.equal(gets.length, 3, 'an explicit read still reads');
 });

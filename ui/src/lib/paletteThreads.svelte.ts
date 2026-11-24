@@ -7,7 +7,7 @@
 import type { Command } from './commands.svelte';
 import { router } from './router.svelte';
 import { filterThreadRows, frozenOrder } from './threadSwitch';
-import { inThreadsScope } from './stores/sessionBuckets';
+import { opensInThreads } from './stores/sessionBuckets';
 import { runtimeWaiting } from './stores/runtimeAttention.svelte';
 import { ws } from './stores/workspace.svelte';
 
@@ -59,7 +59,7 @@ export const needsYouSource: PaletteThreadSource = {
     const out: PaletteThreadRow[] = runtimeWaiting().map((w) => ({ id: w.id, title: w.title || 'Thread', project: '', word: 'Needs you', tone: 'warning' }));
     const seen = new Set(out.map((r) => r.id));
     for (const s of ws.sessions) {
-      if (s.archived || seen.has(s.id) || ws.needsYou[s.id] !== true || !inThreadsScope(s, ws.sessions)) continue;
+      if (s.archived || seen.has(s.id) || ws.needsYou[s.id] !== true || !opensInThreads(s, ws.sessions)) continue;
       out.push({ id: s.id, title: s.title, project: projectOf(s.cwd), word: 'Needs you', tone: 'warning' });
     }
     return out;

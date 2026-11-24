@@ -389,3 +389,20 @@ test('image-only optimistic send populates immediate preview_url attachments ins
   resolvePrompt({ sequence: 3 });
   await new Promise((r) => setTimeout(r, 0));
 });
+
+test('a failed thread delete brings its draft back as it was, unsaved edits included', async () => {
+  const { importRunes } = await import('./runesHarness.ts');
+  const { RuntimeDrafts } = await importRunes<{ RuntimeDrafts: new () => { for(id: string): any; forget(id: string): (deleted: boolean) => void; configure(fn: unknown): void } }>(new URL('../src/lib/stores/runtimeDrafts.svelte.ts', import.meta.url));
+  const drafts = new RuntimeDrafts();
+  const disposed: string[] = [];
+  drafts.configure((id: string) => ({ dispose: () => void disposed.push(id) }));
+  const typed = drafts.for('A');
+  typed.text = 'not saved yet';
+  const settle = drafts.forget('A');
+  assert.equal(drafts.for('A').text, '', 'hidden while the delete runs');
+  settle(false);
+  assert.equal(drafts.for('A').text, 'not saved yet');
+  assert.deepEqual(disposed, [], 'its writer keeps running');
+  drafts.forget('A')(true);
+  assert.deepEqual(disposed, ['A']);
+});

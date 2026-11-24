@@ -545,7 +545,8 @@ class Router {
     }
     const resume = this.lastByModule.get(id);
     this.resumed = resume ?? null;
-    this.go(resume ?? moduleHome(id));
+    // A leave-guard that keeps the page drops the mark: a link followed to that route later is no memory.
+    void this.goChecked(resume ?? moduleHome(id)).then((ok) => { if (!ok) this.resumed = null; });
   }
 
   /** The route on screen came from memory — a module's resume point, the

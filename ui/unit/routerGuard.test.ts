@@ -261,3 +261,20 @@ test('a phone pairing code is captured tab-scoped and stripped from the URL', as
   resetPairMemory();
   assert.equal(loadPairState(tab3), null);
 });
+
+test('a leave-guard that cancels openModule leaves no resume mark for a link followed later', async () => {
+  const f = fixture('#/home');
+  f.router.go('threads/t-1');
+  await flush();
+  f.router.go('git');
+  await flush();
+  const off = f.router.guard(() => false);
+  f.router.openModule('threads');
+  await flush();
+  assert.equal(f.location.hash, '#/git');
+  off();
+  f.router.go('threads/t-1');
+  await flush();
+  assert.equal(f.location.hash, '#/threads/t-1');
+  assert.equal(f.router.remembered, false, 'a followed link is not a remembered route');
+});

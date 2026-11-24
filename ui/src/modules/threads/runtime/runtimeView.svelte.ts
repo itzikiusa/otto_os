@@ -178,6 +178,7 @@ export class RuntimeViews {
     const view = this.views.get(id);
     if (!view) return;
     if (lastSequence > view.knownSequence) view.knownSequence = lastSequence;
+    if (view.held) return; // the replay in flight checks knownSequence when it lands
     this.flushPendingLive(id, view);
     const applied = this.projections[id]?.lastSequence ?? 0;
     if (lastSequence > applied) void this.replay(id, true);
@@ -282,7 +283,7 @@ export class RuntimeViews {
       if (now - lastInputWakeAt < ACTIVE_LIVENESS_MS) return;
       lastInputWakeAt = now;
       for (const [id, view] of this.views.entries()) {
-        if (!view.held && now - view.lastLiveAt >= ACTIVE_LIVENESS_MS) {
+        if (!view.held && !view.failures && now - view.lastLiveAt >= ACTIVE_LIVENESS_MS) {
           void this.replay(id, true);
         }
       }
@@ -330,7 +331,7 @@ export class RuntimeViews {
     if (typeof document !== 'undefined' && document.hidden) return;
     const now = Date.now();
     for (const [id, view] of this.views.entries()) {
-      if (view.held) continue;
+      if (view.held || view.failures) continue; // a failed read retries on its own backoff
       if (this.isViewActive(id)) {
         if (now - view.lastWsEventAt >= LIVE_WS_FRESH_MS) {
           void this.replay(id, true);
@@ -497,7 +498,9 @@ export class RuntimeViews {
       }
       if (!this.projections[id]) this.loadError = { ...this.loadError, [id]: loadErrorText(e) };
       else this.staleError = { ...this.staleError, [id]: loadErrorText(e) };
-      this.scheduleRetry(id, view);
+      // Gone or forbidden stays so: no retry (focus, a reconnect or Retry still read again).
+      const status = (e as { status?: unknown } | null)?.status;
+      if (status !== 401 && status !== 403 && status !== 404) this.scheduleRetry(id, view);
     }
   }
 

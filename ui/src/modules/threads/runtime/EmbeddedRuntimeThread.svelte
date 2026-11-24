@@ -137,11 +137,11 @@
     if (!id) return;
     untrack(() => {
       // A remount within a moment (a layout switch, a pane moved) keeps the
-      // row the store just read; Retry reads again.
-      if (retry === 0 && runtimeThreads.readRecently(id)) return;
-      rowError = null;
-      runtimeThreads.loadOne(id).then(
-        () => runtimeThreads.loadLinked(id).catch((e: unknown) => console.warn('linked threads unavailable', e)),
+      // row the store just read (and its peers); Retry reads the row again.
+      const fresh = retry === 0 && runtimeThreads.readRecently(id);
+      if (!fresh) rowError = null;
+      (fresh ? Promise.resolve() : runtimeThreads.loadOne(id)).then(
+        () => runtimeThreads.loadLinked(id, 2000).catch((e: unknown) => console.warn('linked threads unavailable', e)),
         (e: unknown) => { if (id === sessionId) rowError = loadErrorText(e); },
       );
     });
