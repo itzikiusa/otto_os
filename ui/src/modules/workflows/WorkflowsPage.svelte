@@ -23,7 +23,8 @@
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import { effectiveRetry, updateRetry, clearRetry } from './retryPolicy';
   import LazyMount from '../../lib/components/LazyMount.svelte';
-  import { ApprovalsLazy, CanvasLazy, ContextLazy, GuideLazy, MonitorLazy, PaletteLazy, ParamsLazy, RunInputLazy, TriggersLazy } from './lazyViews';
+  import AutomateGuide from '../../lib/components/AutomateGuide.svelte';
+  import { ApprovalsLazy, CanvasLazy, ContextLazy, MonitorLazy, PaletteLazy, ParamsLazy, RunInputLazy, TriggersLazy } from './lazyViews';
   import RunRouteSync from './RunRouteSync.svelte';
   import { RunSync } from './runSync.svelte';
   import { InspectorOptions } from './inspector/options.svelte';
@@ -1698,7 +1699,7 @@
           body="Describe an automation in plain words and an agent wires up the steps — or start blank, or from a template, and build it on the canvas."
         >
           {@render generator('page')}
-          <LazyMount lazy={GuideLazy} what="the guide" quiet props={{ current: 'workflows', open: true }} />
+          <AutomateGuide current="workflows" open />
         </EmptyState>
       </div>
     {:else}

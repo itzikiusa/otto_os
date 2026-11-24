@@ -10,5 +10,4 @@ export const TriggersLazy = lazyComponent(() => import('./TriggersPanel.svelte')
 export const MonitorLazy = lazyComponent(() => import('./RunMonitor.svelte'));
 export const RunInputLazy = lazyComponent(() => import('./RunInputPanel.svelte'));
 export const ApprovalsLazy = lazyComponent(() => import('./RunApprovals.svelte'));
-export const GuideLazy = lazyComponent(() => import('../../lib/components/AutomateGuide.svelte'));
 export const ContextLazy = lazyComponent(() => import('./RunContextSidebar.svelte'));
