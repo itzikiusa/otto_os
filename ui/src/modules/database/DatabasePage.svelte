@@ -371,10 +371,7 @@
   // id left in the URL must not hold the page on "restoring" for good.
   let deepTried = $state('');
   let deepSeq = 0;
-  $effect(() => {
-    const id = deepId;
-    if (connsSettled && id) untrack(() => startDeep(id));
-  });
+  $effect(() => { const id = deepId; if (connsSettled && id) untrack(() => startDeep(id)); });
   /** Only the latest open counts: an older, slower one (A → B → A) neither opens nor claims the link. */
   function startDeep(id: string): void {
     const seq = ++deepSeq;
