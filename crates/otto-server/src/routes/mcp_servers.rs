@@ -396,7 +396,7 @@ pub async fn delete(
     repo.delete(&id).await?;
     // Best-effort: drop the server's Keychain blob with it, and the launcher
     // env files that carry its resolved values.
-    let _ = otto_core::secrets::delete_async(&ctx.secrets, &McpService::secret_ref(&id)).await;
+    ctx.mcp.forget_server_secrets(&id).await;
     sweep_env_files(existing.name).await;
     Ok(StatusCode::NO_CONTENT)
 }

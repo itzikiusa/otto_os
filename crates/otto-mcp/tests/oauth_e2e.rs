@@ -351,3 +351,22 @@ async fn a_revoked_grant_and_an_unsigned_server_say_needs_sign_in() {
     assert!(!svc.oauth_status(&server.id).await.signed_in);
     task.abort();
 }
+
+#[tokio::test]
+async fn deleting_a_server_forgets_its_tokens() {
+    let (svc, secrets, server, base, _accept, task) = setup("at-1").await;
+    let store: Arc<dyn SecretStore> = secrets.clone();
+    put_async(
+        &store,
+        &token_key(&server.id),
+        &tokens(&base, "at-1", "rt-1"),
+    )
+    .await
+    .unwrap();
+    svc.forget_server_secrets(&server.id).await;
+    assert!(get_async(&store, &token_key(&server.id))
+        .await
+        .unwrap()
+        .is_none());
+    task.abort();
+}

@@ -584,11 +584,8 @@ async fn delete_server<S: McpCtx>(
         WorkspaceRole::Editor,
     )
     .await?;
-    // Best-effort secret cleanup.
-    if server.has_secret {
-        let _ =
-            otto_core::secrets::delete_async(ctx.mcp_secrets(), &McpService::secret_ref(&id)).await;
-    }
+    // Best-effort secret cleanup (credentials and OAuth tokens).
+    ctx.mcp().forget_server_secrets(&id).await;
     ctx.mcp().evict_client(&id);
     ctx.mcp().registry().delete(&id).await.map_err(ApiErr)?;
     Ok(StatusCode::NO_CONTENT)

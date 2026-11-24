@@ -28,16 +28,31 @@ pub struct OAuthStatus {
     pub auth_host: Option<String>,
 }
 
-fn flows() -> &'static Mutex<HashMap<String, OAuthStatus>> {
-    static FLOWS: OnceLock<Mutex<HashMap<String, OAuthStatus>>> = OnceLock::new();
-    FLOWS.get_or_init(Mutex::default)
+/// A server's last sign-in: its status, and the task still waiting for the
+/// browser (aborted by a new start, a sign-out or a delete).
+#[derive(Default)]
+struct Flow {
+    status: OAuthStatus,
+    task: Option<tokio::task::AbortHandle>,
 }
 
-fn set_flow(id: &str, s: OAuthStatus) {
-    flows()
+fn flows() -> std::sync::MutexGuard<'static, HashMap<String, Flow>> {
+    static FLOWS: OnceLock<Mutex<HashMap<String, Flow>>> = OnceLock::new();
+    FLOWS
+        .get_or_init(Mutex::default)
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(id.to_string(), s);
+}
+
+fn set_status(id: &str, status: OAuthStatus) {
+    flows().entry(id.to_string()).or_default().status = status;
+}
+
+/// Forget `id`'s flow, aborting a sign-in still waiting for the browser.
+fn end_flow(id: &str) {
+    if let Some(task) = flows().remove(id).and_then(|f| f.task) {
+        task.abort();
+    }
 }
 
 fn now() -> i64 {
@@ -128,17 +143,15 @@ impl McpService {
         let url = server.url.clone().unwrap_or_default();
         let (auth_url, pending) = oauth::start(&url, manual).await.map_err(Error::Upstream)?;
         let host = pending.base.auth_host.clone();
-        set_flow(
-            &server.id,
-            OAuthStatus {
-                pending: true,
-                auth_host: Some(host.clone()),
-                ..Default::default()
-            },
-        );
+        // A new start replaces the pending one (its listener closes).
+        end_flow(&server.id);
         let (svc, id) = (self.clone(), server.id.clone());
-        tokio::spawn(async move {
-            let status = match oauth::finish(pending, now).await {
+        let task = tokio::spawn(async move {
+            let done = oauth::finish(pending, now).await;
+            // Saved under the lock sign-out takes: a sign-out that won
+            // already aborted this task.
+            let _guard = svc.secret_locks.lock(&format!("oauth:{id}")).await;
+            let status = match done {
                 Ok(t) => match svc.oauth_save(&id, &t).await {
                     Ok(()) => {
                         let _ = svc.registry().set_health(&id, "unknown", None, None).await;
@@ -159,17 +172,26 @@ impl McpService {
                     ..Default::default()
                 },
             };
-            set_flow(&id, status);
+            set_status(&id, status);
         });
+        flows().insert(
+            server.id.clone(),
+            Flow {
+                status: OAuthStatus {
+                    pending: true,
+                    auth_host: Some(host.clone()),
+                    ..Default::default()
+                },
+                task: Some(task.abort_handle()),
+            },
+        );
         Ok((auth_url, host))
     }
 
     pub async fn oauth_status(&self, id: &str) -> OAuthStatus {
         let mut s = flows()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
             .get(id)
-            .cloned()
+            .map(|f| f.status.clone())
             .unwrap_or_default();
         if let Some(t) = self.oauth_tokens(id).await {
             s.signed_in = true;
@@ -178,12 +200,22 @@ impl McpService {
         s
     }
 
-    /// Sign out: the tokens and the client registration leave the Keychain.
+    /// Sign out: a pending sign-in is aborted, and the tokens and client
+    /// registration leave the Keychain — under the lock a refresh holds, so
+    /// neither can save them back afterwards.
     pub async fn oauth_sign_out(&self, id: &str) -> Result<()> {
+        let _guard = self.secret_locks.lock(&format!("oauth:{id}")).await;
+        end_flow(id);
         otto_core::secrets::delete_async(&self.secrets, &oauth::token_key(id)).await?;
-        flows().lock().unwrap_or_else(|e| e.into_inner()).remove(id);
         self.drop_client(id);
         Ok(())
+    }
+
+    /// A deleted server's Keychain entries: its credentials blob and its
+    /// OAuth tokens (best effort; the row is gone either way).
+    pub async fn forget_server_secrets(&self, id: &str) {
+        let _ = otto_core::secrets::delete_async(&self.secrets, &Self::secret_ref(id)).await;
+        let _ = self.oauth_sign_out(id).await;
     }
 
     /// Forget the pooled client (its headers carried the old token).
