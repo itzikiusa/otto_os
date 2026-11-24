@@ -103,6 +103,10 @@ test('a dirty session folder: the Git tab is Changes + the commit card; Commit a
   await expect.poll(() => remoteSubject(repo), { timeout: 20_000 }).toBe('feat: ship the commit card');
   await expect(page.getByTestId('commit-card-primary')).toHaveAttribute('data-kind', 'create-pr', { timeout: 15_000 });
 
-  await page.getByTestId('git-panel-open').click();
+  // The folder shows once (the details card); its Open in › Git goes to the full page.
+  await expect(page.getByTestId('git-panel-open')).toHaveCount(0);
+  await expect(page.locator('.rpanel-folder')).toHaveCount(0);
+  await page.getByTestId('agents-details-card').getByTestId('details-open-in').click();
+  await page.getByRole('menuitem', { name: 'Git', exact: true }).click();
   await expect.poll(() => page.evaluate(() => location.hash)).toMatch(/^#\/git\//);
 });

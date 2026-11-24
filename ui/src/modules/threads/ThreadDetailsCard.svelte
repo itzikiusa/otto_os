@@ -330,7 +330,7 @@
         aria-haspopup="menu"
         title="Open the folder in Files, Git or a terminal; project scripts"
         data-testid="details-open-in"
-        onclick={() => openInEl && openOpenInMenu(openInEl, { cwd: project, repo })}
+        onclick={() => openInEl && openOpenInMenu(openInEl, { cwd: project, repo, files: agents ? () => ui.openRight('files') : undefined })}
       >Open in<Icon name="chevronDown" size={12} /></button>
       {#if ondismiss}
         <button type="button" class="icon-btn dc-x" aria-label="Hide thread details" title="Hide thread details (⋯ › View brings them back)" data-testid="details-dismiss" onclick={ondismiss}>

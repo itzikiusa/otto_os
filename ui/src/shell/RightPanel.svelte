@@ -426,8 +426,8 @@
         {/if}
       </header>
 
-      {#if shown && FOLDER_TABS.has(shown)}
-        <!-- Which folder Git / Files work in: the session's, or a pickable one. -->
+      {#if shown && FOLDER_TABS.has(shown) && !(open && !pageTab && details)}
+        <!-- Which folder Git / Files work in: the session's (the details card names it), or a pickable one. -->
         <div class="rpanel-folder">
           {#if rightPanel.session}
             <span class="folder-label" title={folder}>
