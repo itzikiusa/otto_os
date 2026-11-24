@@ -106,7 +106,8 @@
       </button>
     </div>
   {/if}
-  {#if phoneList}
+  {#if phoneList && !showCoach}
+    <!-- A fresh account gets the first-run coach here, not an empty list. -->
     <div class="agents-body"><AgentsInbox /></div>
   {:else}
   <div class="agents-body">
