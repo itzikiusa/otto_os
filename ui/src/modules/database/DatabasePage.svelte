@@ -370,15 +370,17 @@
   // The deep id already opened (or found gone): once its tab closes, the
   // id left in the URL must not hold the page on "restoring" for good.
   let deepTried = $state('');
+  let deepSeq = 0;
   $effect(() => {
     const id = deepId;
-    if (!connsSettled || !id) return;
-    untrack(() => {
-      deepTried = '';
-      // Only the link still in the URL: an older, slower open settling last must not claim it.
-      void openDeep(id).finally(() => { if (id === deepId) deepTried = id; });
-    });
+    if (connsSettled && id) untrack(() => startDeep(id));
   });
+  /** Only the latest open counts: an older, slower one (A → B → A) neither opens nor claims the link. */
+  function startDeep(id: string): void {
+    const seq = ++deepSeq;
+    deepTried = '';
+    void openDeep(id, () => seq === deepSeq).finally(() => { if (seq === deepSeq && id === deepId) deepTried = id; });
+  }
   // …and the URL follows the open connection (a tab switch), so a reload or
   // a copied link comes back to it, not to the one the page was opened on.
   $effect(() => {
@@ -386,7 +388,7 @@
     if (!id || !isPage || !connsSettled || id === deepId || (deepId && deepTried !== deepId)) return;
     untrack(() => router.replace(`database/${id}`));
   });
-  async function openDeep(id: string): Promise<void> {
+  async function openDeep(id: string, latest: () => boolean): Promise<void> {
     if (database.connections.some((c) => c.id === id)) {
       connectionList.stampOpened(id);
       await database.openConnection(id);
@@ -395,7 +397,7 @@
     const other = database.otherConnections.find((c) => c.id === id);
     if (other) return openTerminal(other);
     const cl = brokers.clusters.find((c) => c.id === id) ?? (ws.currentId ? (await brokers.load(ws.currentId, { withSections: false }), brokers.clusters.find((c) => c.id === id)) : undefined);
-    if (cl) openCluster(cl);
+    if (cl && latest()) openCluster(cl);
   }
 
   const SIDE_TABS: TabItem<DbSideTab>[] = [
