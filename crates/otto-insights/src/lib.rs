@@ -1420,8 +1420,10 @@ struct ReportQuery {
 /// A permitted name that is not on disk is NotFound, not Forbidden.
 fn resolve_report_artifact_path(dir: &Path, requested: &str) -> Result<PathBuf, otto_core::Error> {
     use std::path::Component::Normal;
-    let base = std::fs::canonicalize(dir)
-        .map_err(|e| otto_core::Error::Internal(format!("insights dir: {e}")))?;
+    let base = std::fs::canonicalize(dir).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => otto_core::Error::NotFound("report".into()),
+        _ => otto_core::Error::Internal(format!("insights dir: {e}")),
+    })?;
     let req = std::fs::canonicalize(Path::new(requested))
         .map_err(|_| otto_core::Error::NotFound("report".into()))?;
     let Ok(rel) = req.strip_prefix(&base) else {
@@ -2768,6 +2770,12 @@ mod tests {
         let outside = tempfile::NamedTempFile::new().unwrap();
         let err = resolve_report_artifact_path(dir, &outside.path().to_string_lossy()).unwrap_err();
         assert!(matches!(err, otto_core::Error::Forbidden(_)));
+
+        // Before the first run the insights dir does not exist: 404, not 500.
+        let fresh = dir.join("no-insights-yet");
+        let err = resolve_report_artifact_path(&fresh, &fresh.join("index.json").to_string_lossy())
+            .unwrap_err();
+        assert!(matches!(err, otto_core::Error::NotFound(_)), "{err:?}");
     }
 
     #[test]
