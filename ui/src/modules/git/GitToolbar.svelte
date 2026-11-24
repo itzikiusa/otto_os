@@ -308,9 +308,11 @@
     ];
   }
   /** The repo's state in words for the header ("3 files changed · ↑2 not pushed"). */
-  const words = $derived(
-    stateWords({ changes: status.changes.length, ahead: status.ahead, behind: status.behind, upstream: status.upstream, branch: detached ? null : status.branch }),
-  );
+  // The file count rides the Changes badge (and the commit card), not this line.
+  const words = $derived.by(() => {
+    const w = stateWords({ changes: 0, ahead: status.ahead, behind: status.behind, upstream: status.upstream, branch: detached ? null : status.branch });
+    return status.changes.length > 0 && w === 'Clean' ? '' : w;
+  });
 </script>
 
 {#snippet items()}
@@ -594,5 +596,8 @@
       padding: 0 10px;
       font-size: var(--fs-m);
     }
+  }
+  @media (pointer: coarse) {
+    .tbtn { min-block-size: 44px; } /* finger-sized (the header sets its height) */
   }
 </style>

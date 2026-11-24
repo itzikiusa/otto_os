@@ -866,7 +866,8 @@
     onoptions={() => (signCfg || signCfgLoading ? undefined : loadSignCfg(repoId))}
   />
   <div class="wp-head">
-    <span class="wp-count">{plural(status.changes.length, 'file')} changed</span>
+    <!-- The commit card's caption and the Changes badge already count them. -->
+    {#if !includeAll}<span class="wp-count">{plural(status.changes.length, 'file')} changed</span>{/if}
     {#if totals}
       <span class="wp-totals" title="{totals.added.toLocaleString()} lines added, {totals.deleted.toLocaleString()} deleted">
         <span class="wp-add">+{totals.added.toLocaleString()}</span>

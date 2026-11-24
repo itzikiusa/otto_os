@@ -32,6 +32,11 @@ test('dirty repo: Changes first → Commit and push → Create pull request', as
   await expectChangesFirst(page);
   const card = page.getByTestId('commit-card');
   await expectFullyInViewport(page, card, 'commit card');
+  // The file count is said by the Changes badge and the card's caption only.
+  await expect(page.getByTestId('git-state')).not.toContainText('files changed');
+  await expect(page.locator('.wip-panel .wp-count')).toHaveCount(0);
+  // Repository tabs carry words, never a bare status dot.
+  await expect(page.locator('.git-tab-dot')).toHaveCount(0);
   // The first file's diff is open beside the list.
   await expect(page.locator('.wip-panel .wp-diff')).toBeVisible();
   // One primary; Commit only is the secondary.
