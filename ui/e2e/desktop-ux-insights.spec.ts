@@ -12,6 +12,10 @@ const reports = [
 test('Insights period filter keeps the open report in the visible list', async ({ page }) => {
   let failed = true;
   await page.route('**/api/v1/insights/reports', (route) => route.fulfill(failed ? { status: 503, json: { message: 'Reports temporarily unavailable' } } : { json: reports }));
+  // The summary read (no html_path → report-status) is mocked too: a real
+  // report another spec left on the shared daemon for the same period must
+  // not stand in for this one.
+  await page.route('**/api/v1/insights/report-status?**', (route) => route.fulfill({ json: { report: null } }));
   await page.goto('/#/insights');
   await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible();
   failed = false;

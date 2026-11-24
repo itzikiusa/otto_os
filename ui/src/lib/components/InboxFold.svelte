@@ -44,10 +44,12 @@
 </section>
 
 <style>
+  /* Never shrinks below its rows: in a page's scrolling column a shrinkable
+     group collapsed under the list after it (Pinned threads went 0 px tall).
+     A host whose folds scroll inside sets min-height: 0 on them itself. */
   .if-group {
     display: flex;
     flex-direction: column;
-    min-height: 0;
   }
   .if-label {
     margin: 0;

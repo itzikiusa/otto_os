@@ -220,12 +220,17 @@ test('custom sidebar auto-discovers Threads, stage pickers + slash menu work, an
 
   // Discovered = placed in the sidebar again. With no usage of it yet it may
   // sit under the one visible "More" row (lib/sidebarMore.ts) — one click.
+  // Both can show at once (Threads in Work AND a More row for the rest), and
+  // the used-lately list lands after first paint and may move Threads under
+  // More, so re-check until the row is on screen.
   const work = page.getByTestId('sidebar-group-work').getByRole('button', { name: 'Threads', exact: true });
   const more = page.locator('.navigator').getByRole('button', { name: /^Show \d+ more modules$/ });
-  await expect(work.or(more)).toBeVisible();
-  if (!(await work.isVisible())) await more.click();
+  await expect(work.or(more).first()).toBeVisible();
   const threadsNav = page.locator('.navigator').getByRole('button', { name: 'Threads', exact: true });
-  await expect(threadsNav).toBeVisible();
+  await expect(async () => {
+    if (!(await threadsNav.isVisible())) await more.click({ timeout: 2_000 });
+    await expect(threadsNav).toBeVisible({ timeout: 2_000 });
+  }).toPass({ timeout: 15_000 });
   await threadsNav.click();
 
   await expect(page.getByTestId('threads-page')).toBeVisible({ timeout: 15_000 });

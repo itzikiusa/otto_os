@@ -168,6 +168,7 @@ test('deleted snip renders the missing state in the editor', async ({ page }) =>
 test('sidebar: Connections is a plain row without an open-connections list', async ({ page }) => {
   await page.goto('/#/agents');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByRole('button', { name: 'Connections' })).toBeVisible();
+  // exact: a workspace row another spec left ("Connections MCP E2E") shares the word.
+  await expect(page.getByRole('button', { name: 'Connections', exact: true })).toBeVisible();
   await expect(page.getByText('No open connections')).toHaveCount(0);
 });

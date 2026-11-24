@@ -402,12 +402,9 @@ test('schema registry tab renders without error', async ({ page }) => {
   await expect(page.locator('.schema')).toBeVisible({ timeout: 15_000 });
   // Fresh Redpanda registry → no subjects, but the panel must render its
   // empty/list state (not a thrown error / not stuck loading).
-  await expect
-    .poll(async () => (await page.locator('.schema .muted', { hasText: 'Loading' }).count()), {
-      timeout: 15_000,
-      message: 'schema finished loading',
-    })
-    .toBe(0);
+  // Loading is a skeleton (no "Loading" text): wait for the list or the
+  // empty/error pane to replace it.
+  await expect(page.locator('.schema .list, .schema .empty').first(), 'schema finished loading').toBeVisible({ timeout: 15_000 });
   // Either the subject list (with "No subjects registered.") or an error empty
   // state; assert the list container exists OR the empty pane renders.
   const hasList = await page.locator('.schema .list').count();
