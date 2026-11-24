@@ -139,8 +139,10 @@ test('archived list: multi-select deletes the checked sessions in one confirm', 
   await page.getByTestId('agents-select-toggle').click();
   await page.getByLabel('Select Kaka').check();
   await page.getByLabel('Select Nesta').check();
+  // The count sits beside select-all (a bare number); Delete carries no "(N)".
+  await expect(page.getByTestId('agents-select-tools').locator('.ai-count')).toHaveText('2');
   const del = page.getByTestId('agents-delete-selected');
-  await expect(del).toContainText('Delete (2)');
+  await expect(del).toBeEnabled();
   await del.click();
   // The shared bulk-close confirm (shell/closeConfirm.ts, ux-design-3-03)
   // names the count and lists the checked sessions.
@@ -237,8 +239,11 @@ test('archived list: bulk toolbar stays inside the sidebar with many long titles
   await page.getByTestId('agents-select-toggle').click();
   // Select the 30 archived rows (the live rows stay unchecked).
   for (const box of await page.getByTestId('agents-history-list').getByRole('checkbox').all()) await box.check();
+  const count = page.getByTestId('agents-select-tools').locator('.ai-count');
+  await expect(count).toHaveText('30');
+  await expectFullyInViewport(page, count, 'selected count');
   const del = page.getByTestId('agents-delete-selected');
-  await expect(del).toContainText('Delete (30)');
+  await expect(del).toBeEnabled();
   await expectFullyInViewport(page, del, 'Delete selected button');
   // No horizontal overflow inside the session list.
   const nav = page.getByTestId('agents-inbox');
