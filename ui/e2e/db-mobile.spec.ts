@@ -132,6 +132,21 @@ test.describe('database mobile (phone)', () => {
     expect(m.gap).toBeLessThan(40);
   });
 
+  // The sticky row numbers cover what scrolls under them: a striped row's
+  // number cell was a 7 % tint, so a wide value read through it.
+  test('a striped row\'s number stays opaque over the cells scrolling under it', async ({ page }) => {
+    test.skip(redisConnId == null, 'redis-server unavailable');
+    await openAndQuery(page);
+    const alphas = await page.locator('.grid tbody tr:not(.spacer) td.rownum').evaluateAll((cells) =>
+      cells.slice(0, 4).map((c) => {
+        const bg = getComputedStyle(c).backgroundColor;
+        const a = /\/\s*([\d.]+)\)|rgba\([^)]*,\s*([\d.]+)\)/.exec(bg);
+        return { bg, image: getComputedStyle(c).backgroundImage, alpha: a ? Number(a[1] ?? a[2]) : 1 };
+      }),
+    );
+    for (const a of alphas) expect(a.alpha === 1 || a.image !== 'none', JSON.stringify(a)).toBe(true);
+  });
+
   test('running a query shows result rows in the grid', async ({ page }) => {
     test.skip(redisConnId == null, 'redis-server unavailable');
     await openAndQuery(page);

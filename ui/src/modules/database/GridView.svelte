@@ -1283,9 +1283,11 @@
     padding-inline: 6px 8px !important;
     font-variant-numeric: tabular-nums;
   }
+  /* --hover is a tint: layer it on the opaque fill, or what scrolls under
+     the sticky number shows through it. */
   .grid tbody tr.odd td.rownum,
   .grid tbody tr:not(.spacer):hover td.rownum {
-    background: var(--hover);
+    background: linear-gradient(var(--hover), var(--hover)), var(--surface-2);
   }
   .grid thead .rownum {
     z-index: 3;
