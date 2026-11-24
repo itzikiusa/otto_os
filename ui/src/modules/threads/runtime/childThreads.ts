@@ -381,15 +381,15 @@ export function childRollup(subs: readonly { title: string; word: SubagentWord }
   return r;
 }
 
-/** A family's count in words: subagents and compared models apart — a
- *  compared model is not a subagent ("2 subagents", "Compared with 2
- *  models", "1 subagent · compared with 2 models"). `compared[i]`: kid i is
- *  a compared thread (`meta.council`). */
+/** A sidebar row's family count, short enough for a narrow sidebar:
+ *  subagents and compared models apart — a compared model is not a subagent
+ *  ("2 subagents", "2 compared", "1 subagent · 2 compared"; the details card
+ *  keeps the full sentence). `compared[i]`: kid i is a compared thread
+ *  (`meta.council`). */
 export function familyCountLabel(compared: readonly boolean[]): string {
   const models = compared.filter(Boolean).length;
   const subs = compared.length - models;
   const s = subs ? `${subs} ${subs === 1 ? 'subagent' : 'subagents'}` : '';
-  const m = models ? `compared with ${models} ${models === 1 ? 'model' : 'models'}` : '';
-  const text = [s, m].filter(Boolean).join(' · ');
-  return text.charAt(0).toUpperCase() + text.slice(1);
+  const m = models ? `${models} compared` : '';
+  return [s, m].filter(Boolean).join(' · ');
 }
