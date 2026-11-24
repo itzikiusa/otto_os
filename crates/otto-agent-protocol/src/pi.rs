@@ -1324,10 +1324,12 @@ impl PiDriver {
                         .pointer("/data/sessionId")
                         .and_then(Value::as_str)
                         .map(str::to_string),
+                    // pi with no model available reports `unknown/unknown`.
                     model: v
                         .pointer("/data/model/provider")
                         .and_then(Value::as_str)
                         .zip(v.pointer("/data/model/id").and_then(Value::as_str))
+                        .filter(|(p, _)| *p != "unknown")
                         .map(|(p, m)| format!("{p}/{m}")),
                 });
             } else {
@@ -1350,11 +1352,21 @@ impl PiDriver {
                     .and_then(Value::as_str)
                     .unwrap_or("pi refused the prompt")
                     .to_string();
+                // pi 1.6 with no login and no API key: "No API key found for
+                // the selected model. Use /login …" (live 2026-11-24).
+                let (class, message) = if message.starts_with("No API key found") {
+                    (
+                        "auth",
+                        "pi has no signed-in provider \u{b7} run `pi` and /login (or set the provider's API key), then send again".to_string(),
+                    )
+                } else {
+                    ("provider_error", message)
+                };
                 self.finish(
                     step,
                     TurnTerminalStatus::Failed,
                     Some(ProviderFailure {
-                        class: "provider_error".into(),
+                        class: class.into(),
                         message,
                         code: None,
                         retryable: None,

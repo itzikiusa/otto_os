@@ -167,6 +167,48 @@ fn a_refused_prompt_fails() {
     );
 }
 
+/// pi 1.6 live, no login and no API key: `get_state` names model
+/// `unknown/unknown` and a prompt is refused "No API key found…". The thread
+/// says to sign in, and no "unknown/unknown" model is adopted.
+#[test]
+fn a_pi_with_no_signed_in_provider_says_so() {
+    let mut d = PiDriver::with_program("pi");
+    let st = sent(&d.start(&ctx(None, RuntimeAccessMode::FullAccess)), 0);
+    let s = d.on_line(&format!(
+        r#"{{"id":"{}","type":"response","command":"get_state","success":true,"data":{{"sessionId":"x","model":{{"id":"unknown","provider":"unknown","contextWindow":0}}}}}}"#,
+        st["id"].as_str().unwrap()
+    ));
+    assert!(s
+        .events
+        .iter()
+        .any(|e| matches!(e, DriverEvent::Ready { model: None, .. })));
+    let s = d.prompt("t1", &RuntimePromptReq::of("hi")).unwrap();
+    let p = (0..s.writes.len())
+        .map(|i| sent(&s, i))
+        .find(|w| w["type"] == "prompt")
+        .expect("a prompt");
+    let s = d.on_line(&format!(
+        r#"{{"id":"{}","type":"response","command":"prompt","success":false,"error":"No API key found for the selected model.\n\nUse /login to log into a provider"}}"#,
+        p["id"].as_str().unwrap()
+    ));
+    let f = s
+        .events
+        .iter()
+        .find_map(|e| match e {
+            DriverEvent::Terminal {
+                failure: Some(f), ..
+            } => Some(f.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(f.class, "auth");
+    assert!(
+        f.message.starts_with("pi has no signed-in provider"),
+        "{}",
+        f.message
+    );
+}
+
 #[test]
 fn autonomous_agent_start_after_ready_emits_turn_started_and_streams_thinking_and_text() {
     let mut d = PiDriver::with_program("pi");
