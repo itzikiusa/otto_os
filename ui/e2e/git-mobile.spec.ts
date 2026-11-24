@@ -277,7 +277,7 @@ test.describe('pull requests: review state', () => {
     await page.goto(`/#/git/${r.repoId}/prs`);
     await expect(page.getByTestId('pr-word')).toHaveCount(5, { timeout: 25_000 });
     const word = (n: number) => page.locator(`.pr-row[data-pr="${n}"]`).getByTestId('pr-word');
-    await expect(word(1)).toHaveText('Approved');
+    await expect(word(1)).toHaveText('Ready to merge');
     await expect(word(2)).toHaveText('Changes requested');
     await expect(word(3)).toHaveText('Waiting for review');
     await expect(word(4)).toHaveText('Open');

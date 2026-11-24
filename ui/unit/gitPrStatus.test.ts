@@ -61,6 +61,9 @@ test('list rows say what the PR needs; the list opens on what needs you', () => 
   assert.deepEqual(prRowWord(pr(1, { asks_me: true, review: { status: 'waiting', approvals: 0 } })), { word: 'Review requested', tone: 'warning' });
   assert.deepEqual(prRowWord(pr(1, { review: { status: 'waiting', approvals: 0 } })), { word: 'Waiting for review', tone: 'calm' });
   assert.equal(prRowWord(pr(1, { state: 'merged' })).word, 'Merged');
+  // The header's word for the same state (design review 2, N7): approved reads "Ready to merge", running checks first.
+  assert.deepEqual(prRowWord(pr(1, { review: { status: 'approved', approvals: 1 } })), { word: 'Ready to merge', tone: 'success' });
+  assert.equal(prRowWord(pr(1, { ci_status: 'pending', review: { status: 'approved', approvals: 1 } })).word, 'Checks running');
   const list = [pr(1, {}), pr(2, { asks_me: true }), pr(3, { ci_status: 'failure', is_mine: true })];
   assert.equal(firstNeedingPr(list, (p) => !!p.is_mine)?.number, 3);
   assert.equal(firstNeedingPr(list.slice(0, 2), (p) => !!p.is_mine)?.number, 2);
