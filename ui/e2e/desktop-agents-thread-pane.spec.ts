@@ -200,3 +200,16 @@ test('a focused chat pane gets the details card in the right panel', async ({ pa
   await expect(card.getByTestId('details-folder')).toHaveAttribute('title', new RegExp(`${dir.split('/').pop()}$`));
   await shots(page, 'agents-thread-pane-details');
 });
+
+// A lone chat tab has no strip ✕: its ⋯ closes it.
+test('a lone chat pane closes from its ⋯', async ({ page }) => {
+  await page.goto('/#/agents');
+  await expect(row(page, threadId)).toBeVisible({ timeout: 30_000 });
+  await row(page, threadId).click();
+  const pane = page.getByTestId(`thread-pane-${threadId}`);
+  await expect(pane).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('[data-pane-key]')).toHaveCount(1);
+  await pane.getByRole('button', { name: /^More…/ }).click();
+  await page.getByRole('menuitem', { name: 'Close pane' }).click();
+  await expect(pane).toHaveCount(0);
+});

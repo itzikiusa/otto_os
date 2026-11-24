@@ -25,7 +25,7 @@
   interface Props {
     threadId: string;
     focused: boolean;
-    /** In a split: ✕ closes the pane (the thread keeps running) and ⋯ has the layout presets. */
+    /** In a split: ✕ closes the pane (the thread keeps running) and ⋯ has the layout presets; ⋯ › Close pane always. */
     showClose: boolean;
     onfocus: () => void;
     onclose: () => void;
@@ -76,7 +76,10 @@
       ctxMenu.show(e, [
         { label: 'Open in Threads', icon: 'threads', action: () => router.go(`threads/${threadId}`) },
         ...own,
-        ...(showClose ? [sep, ...presetItems(), sep, { label: 'Close pane', icon: 'x', title: 'The thread keeps running', action: onclose } as MenuItem] : []),
+        ...(showClose ? [sep, ...presetItems()] : []),
+        // Always: a lone chat tab has no strip ✕ (only ⌘W).
+        sep,
+        { label: 'Close pane', icon: 'x', title: 'The thread keeps running', action: onclose } as MenuItem,
       ]);
     });
   }
