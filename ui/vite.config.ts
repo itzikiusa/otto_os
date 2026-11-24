@@ -1,5 +1,5 @@
 import { defineConfig, type Plugin } from 'vite'
-import { cpSync, createReadStream, existsSync, readFileSync, statSync } from 'node:fs'
+import { cpSync, createReadStream, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, normalize, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
@@ -37,6 +37,35 @@ function d2WorkerReady(): Plugin {
       return patched + '\nexport const ottoD2Assets = async () => ({ source: pf + If, wasm: await Af("./d2.wasm") });\n';
     },
   };
+}
+
+// Help's guide index (modules/help/sectionsIndex.ts): every guide's frontmatter
+// (title, group, route, summary) and its "Keyboard shortcuts" table, without
+// the guide text — the rail and ⌘K need only that; the full text is one lazy
+// chunk (modules/help/sections.ts) loaded when Help opens.
+const HELP_SECTIONS = fileURLToPath(new URL('./src/modules/help/sections', import.meta.url))
+function helpGuideIndex(): Plugin {
+  const ID = 'virtual:help-guide-index'
+  return {
+    name: 'help-guide-index',
+    resolveId(id) {
+      return id === ID ? '\0' + ID : undefined
+    },
+    load(id) {
+      if (id !== '\0' + ID) return
+      this.addWatchFile(HELP_SECTIONS)
+      const out: Record<string, string> = {}
+      for (const name of readdirSync(HELP_SECTIONS).filter((f) => f.endsWith('.md')).sort()) {
+        const path = join(HELP_SECTIONS, name)
+        this.addWatchFile(path)
+        const raw = readFileSync(path, 'utf8').replace(/\r\n?/g, '\n')
+        const fm = /^\uFEFF?---\n[\s\S]*?\n---\n/.exec(raw)?.[0] ?? ''
+        const keys = /^## Keyboard shortcuts\n[\s\S]*?(?=^## |(?![\s\S]))/m.exec(raw)?.[0] ?? ''
+        out['./sections/' + name] = fm + keys
+      }
+      return 'export default ' + JSON.stringify(out)
+    },
+  }
 }
 
 // Excalidraw's hand-drawn fonts, served by Otto itself instead of unpkg.com
@@ -88,7 +117,7 @@ function excalidrawFonts(): Plugin {
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [d2WorkerReady(), excalidrawFonts(), svelte()],
+  plugins: [d2WorkerReady(), excalidrawFonts(), helpGuideIndex(), svelte()],
   // dist/.vite/manifest.json feeds scripts/bundle-budget.mjs (the CI byte
   // budget walks each entry's static-import closure from it).
   build: { manifest: true },

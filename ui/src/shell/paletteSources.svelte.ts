@@ -230,14 +230,13 @@ export function installPaletteSources(deps: PaletteDeps): () => void {
     });
 
     // ---- palette commands: Help guides ----
-    // One "Guide: <title>" per README in modules/help/sections (static, bundled
-    // at build time), so any guide is ⌘K away from anywhere in the app. The
-    // guides (~360 KB of markdown, parsed at import) are their own chunk,
-    // fetched right after the shell mounts rather than in its boot closure.
+    // One "Guide: <title>" per README in modules/help/sections, so any guide is
+    // ⌘K away from anywhere in the app. Only the guide index (titles,
+    // summaries, shortcuts — no guide text) is fetched after the shell mounts.
     $effect(() => {
       let unreg: (() => void) | null = null;
       let stopped = false;
-      void import('../modules/help/sections').then(({ GUIDES }) => {
+      void import('../modules/help/sectionsIndex').then(({ GUIDE_INDEX: GUIDES }) => {
         if (stopped) return;
         unreg = registry.register(
           'guides',
