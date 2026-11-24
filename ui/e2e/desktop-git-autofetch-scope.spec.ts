@@ -48,7 +48,7 @@ async function navigate(page: Page, hash: string) {
 test('automatic fetch belongs to Git: inactive boot, leave, and return', async ({ page }, info) => {
   await boot(page);
   let fetches = 0;
-  await page.route('**/api/v1/repos/*/fetch', async route => {
+  await page.route('**/api/v1/repos/*/fetch*', async route => {
     fetches++; await route.fulfill({ json: status });
   });
   await page.goto('/#/agents');
@@ -88,7 +88,7 @@ test('a delayed Git tab bootstrap cannot start automatic fetch after leaving', a
   await page.route('**/api/v1/git/repos', async route => {
     requested = true; await blocked; await route.fulfill({ json: repos });
   });
-  await page.route('**/api/v1/repos/*/fetch', async route => {
+  await page.route('**/api/v1/repos/*/fetch*', async route => {
     fetches++; await route.fulfill({ json: status });
   });
   try {

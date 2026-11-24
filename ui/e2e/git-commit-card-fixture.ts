@@ -55,7 +55,7 @@ export async function stubForge(page: Page, prs: () => unknown[] = () => []): Pr
   await page.route('**/draft-commit-message', (r) =>
     r.fulfill({ json: { message: 'feat: ship the commit card\n\n- one primary that follows state', from_staged: true } }),
   );
-  await page.route(/\/api\/v1\/repos\/[^/]+\/fetch$/, (r) => r.fulfill({ status: 502, json: { code: 'upstream', message: 'offline in tests' } }));
+  await page.route(/\/api\/v1\/repos\/[^/]+\/fetch(\?|$)/, (r) => r.fulfill({ status: 502, json: { code: 'upstream', message: 'offline in tests' } }));
 }
 
 /** The commit that reached the bare remote's branch. */
