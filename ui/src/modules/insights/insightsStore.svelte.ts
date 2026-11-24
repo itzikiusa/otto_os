@@ -393,13 +393,15 @@ class InsightsStore {
       }
       if (ready) {
         this.pollRunId = null;
+        // Before the reload: its reselect then reads the new summary at once,
+        // and the old read (still in flight) can never land.
+        this.summaryReads.clear();
         await this.load(null, false);
         if (!this.reports.some((r) => periodKey(r) === periodKey(ready!))) {
           this.reports = [...this.reports, ready];
         }
         this.fullMd = {};
         this.summaryError = {};
-        this.summaryReads.clear();
         this.setFilter('all');
         this.selectedKey = periodKey(ready);
         void this.loadIndex();
