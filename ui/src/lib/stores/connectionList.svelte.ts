@@ -53,6 +53,8 @@ class ConnectionListStore {
   private listeners = new Set<(rows: Connection[]) => void>();
   private stale = true;
   private inflight: Promise<void> | null = null;
+  /** A re-read asked for while one is on the wire (whose answer may predate the change). */
+  private queued: Promise<void> | null = null;
 
   /** Load unless the cached list is current for this workspace. */
   ensure(): Promise<void> {
@@ -62,11 +64,11 @@ class ConnectionListStore {
     return this.refresh();
   }
 
-  /** Re-read now (joins a load already in flight for the same workspace). */
+  /** Re-read now; during a read for the same workspace, once more after it. */
   refresh(): Promise<void> {
     const wid = ws.currentId;
     if (!wid) return Promise.resolve();
-    if (this.inflight && this.wsKey === wid) return this.inflight;
+    if (this.inflight && this.wsKey === wid) return (this.queued ??= this.inflight.then(() => ((this.queued = null), this.refresh())));
     if (this.wsKey !== wid) {
       // Another workspace: never show the previous one's rows as this one's.
       this.wsKey = wid;
@@ -90,15 +92,15 @@ class ConnectionListStore {
         // Sections are optional: a failure leaves a flat list, never an error.
         api.get<ConnectionSection[]>(`/workspaces/${wid}/connection-sections`).catch(() => null),
       ]);
-      if (wid !== this.wsKey) return;
+      if (wid !== this.wsKey || this.queued) return;
       this.rows = rows;
       if (sections) this.sections = sections;
       this.error = null;
       this.notify();
     } catch (e) {
-      if (wid === this.wsKey) this.error = loadErrorText(e);
+      if (wid === this.wsKey && !this.queued) this.error = loadErrorText(e);
     } finally {
-      if (wid === this.wsKey) {
+      if (wid === this.wsKey && !this.queued) {
         this.loading = false;
         this.loaded = true;
       }
