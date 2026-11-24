@@ -31,6 +31,19 @@ test('closing the only tab, or a link to a connection that is gone, lands on the
   await expect(page).toHaveURL(/#\/connections$/);
 });
 
+test('the Database pane beside Agents keeps the window on Agents when its last tab closes', async ({ page }) => {
+  await openWorkbench(page);
+  await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click();
+  await page.getByRole('menuitem', { name: /^Open beside agents/ }).click();
+  await expect(page).toHaveURL(/#\/agents/);
+  const pane = page.locator('.db-root');
+  await expect(pane.getByTestId('db-conn-state')).toBeVisible();
+  await pane.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click();
+  await page.getByRole('menuitem', { name: /^Close connection/ }).click();
+  await expect(pane.getByRole('button', { name: 'Open connections' })).toBeVisible();
+  await expect(page).toHaveURL(/#\/agents/);
+});
+
 test('Tables and History: the open pane is the only way; hidden, the header opens it on that tab', async ({ page }) => {
   await openWorkbench(page);
   const header = page.getByTestId('page-header');

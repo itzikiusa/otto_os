@@ -437,9 +437,14 @@
   );
   // Nothing open (fresh start, a restore that found nothing, the last tab
   // closed, a link to a connection that is gone): the workbench has nothing
-  // to show — go to the connection list.
+  // to show — go to the connection list. Only as the page itself: the same
+  // workbench docked beside Agents shows an empty state instead of taking
+  // the window away from Agents.
+  // (While the next page's chunk loads the route still reads "database": a
+  // pending move elsewhere — "Open beside agents" — is not this page.)
+  const isPage = $derived(router.module === 'database' && (router.pendingTarget?.[0] ?? 'database') === 'database');
   $effect(() => {
-    if (connsSettled && !hasAnyTab && (!deepId || deepTried === deepId)) untrack(() => router.replace('connections'));
+    if (connsSettled && isPage && !hasAnyTab && (!deepId || deepTried === deepId)) untrack(() => router.replace('connections'));
   });
   // The cluster / ssh session backing the active non-DB pane (null when a DB tab
   // is focused, or when the backing tab was closed out from under the pane).
@@ -614,7 +619,9 @@
   {/if}
 
   <div class="db-main" class:danger-rail={database.isProd} class:guard-rail={database.isGuarded && !database.isProd}>
-    {#if !hasAnyTab}
+    {#if !hasAnyTab && connsSettled && !isPage}
+      <EmptyState icon="db" title="No connection open" body="Open one from the connection list." actionLabel="Open connections" onaction={showConnections} />
+    {:else if !hasAnyTab}
       <!-- Restoring the open tabs, or about to go to the connection list. -->
       <LoadState what="the workbench" loading empty variant="page" />
     {:else}
