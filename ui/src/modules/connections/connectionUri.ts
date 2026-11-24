@@ -110,7 +110,8 @@ export function parseConnectionUri(raw: string): ParsedUri | { error: string } |
     out.secret = split?.password ?? '';
     out.connString = split ? split.template : s;
   } else {
-    if (url.hostname) out.host = url.hostname;
+    // An IPv6 literal comes back as "[::1]"; the drivers want the bare address.
+    if (url.hostname) out.host = url.hostname.replace(/^\[(.*)\]$/, '$1');
     if (url.port) out.port = url.port;
     if (url.username) out.user = safeDecode(url.username);
     if (url.password) out.secret = safeDecode(url.password);

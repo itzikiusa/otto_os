@@ -386,7 +386,7 @@
     const env = i.environment === 'prod' ? 'Production' : i.environment === 'staging' ? 'Staging' : '';
     return [env, i.readOnly ? 'read-only' : ''].filter(Boolean).join(' · ');
   }
-  const subtitle = $derived(connectionList.loaded ? `${allItems.length} saved` : undefined);
+  const subtitle = $derived(connectionList.loaded && allItems.length > 0 ? `${allItems.length} saved` : undefined);
 </script>
 
 <div class="conn-root">
@@ -495,7 +495,7 @@
         {#snippet line3()}
           <Icon name={engineGlyph(item.kind)} size={12} />
           <span class="conn-meta ellipsis" dir="auto">
-            {KIND_LABEL[item.kind]}{item.host ? ` · ${item.host}` : ''}{env ? ' · ' : ''}<span class:prod={item.environment === 'prod'}>{env}</span>{item.sectionId && connectionList.sections.length ? ` · ${sectionPath(connectionList.sections, item.sectionId)}` : ''} · {w?.reason ?? (item.lastOpened ? `opened ${rel(item.lastOpened)}` : 'never opened')}
+            {KIND_LABEL[item.kind]}{item.host ? ` · ${item.host}` : ''}{env ? ' · ' : ''}<span class:prod={item.environment === 'prod'}>{env}</span> · {w?.reason ?? (item.lastOpened ? `opened ${rel(item.lastOpened)}` : 'never opened')}
           </span>
           {#if w?.latency}<span class="conn-latency">{w.latency}</span>{/if}
         {/snippet}

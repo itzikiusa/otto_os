@@ -157,6 +157,7 @@
       ...VIEWS.filter((v) => v.show()).map((v) => ({ label: v.label, checked: database.mainTab === v.id, action: () => database.setMainTab(v.id) })),
       { separator: true },
       ...query,
+      ...(!viewport.isPhone && !database.sidebarCollapsed ? [{ label: 'Hide tables', icon: 'panel' as const, hint: '⌘B', action: () => database.toggleSidebar() }] : []),
       { label: comparePin.value ? 'Clear comparison' : 'Compare results', icon: 'columns', title: 'Keep loaded results beside the current query', action: toggleCompare },
       { separator: true },
       { label: database.testing ? 'Testing connection…' : 'Test connection', icon: 'plug', disabled: database.testing, action: () => void database.testConnection() },
@@ -167,7 +168,7 @@
     ];
   }
 
-  // Tables / History: the sidebar on that view (again = hide it).
+  // Tables / History: open the hidden side pane on that view.
   // Phone: Tables / History are a sheet over the results (Back closes it).
   let phoneSide = $state<DbSideTab | null>(null);
   let sheetKey = '';
@@ -180,16 +181,10 @@
     });
   });
   function showSide(tab: DbSideTab): void {
-    if (viewport.isPhone) {
-      database.setSideTab(tab);
-      phoneSide = tab;
-      return;
-    }
-    const on = !database.sidebarCollapsed && (database.sideTab === tab || (tab === 'schema' && database.sideTab === 'connections'));
-    if (on) return database.toggleSidebar();
     database.setSideTab(tab);
+    if (viewport.isPhone) phoneSide = tab;
     // Reopening the tables puts focus back on the selected object.
-    if (database.sidebarCollapsed) void showSchemaSidebar();
+    else if (database.sidebarCollapsed) void showSchemaSidebar();
   }
 
   // The state, in words: Connected · MySQL 8.0.36 · 14 ms / Connecting… /
@@ -210,6 +205,16 @@
     if (st?.phase === 'idle') return { word: 'Not connected yet', tone: '', detail: engine, tip: '' };
     return { word: 'Connecting…', tone: '', detail: engine, tip: '' };
   });
+  let retrying = $state(false);
+  let errDetails = $state(false);
+  async function retryConn(): Promise<void> {
+    retrying = true;
+    try {
+      await database.retryConnection();
+    } finally {
+      retrying = false;
+    }
+  }
   function dbMenu(e: MouseEvent): void {
     const items = database.isRedis
       ? database.keyspaces.map((k) => ({ label: k.label, checked: (database.activeDb ?? database.keyspaces[0]?.id) === k.id, action: () => database.setActiveDb(k.id) }))
@@ -332,9 +337,18 @@
         await database.restoreWorkbench();
         connsSettled = true;
       })();
-      void brokers.load(ws.currentId, { withSections: false }); // Kafka tabs
-      void database.loadSavedQueries();
+      void brokers.ensure(ws.currentId); // Kafka tabs (the list page has usually read them)
     }
+  });
+  // Saved queries load when they are shown (the Saved tab) or needed (a tab
+  // opened from one: its Save updates it in place) — not with every open.
+  let savedFor: string | null = null;
+  $effect(() => {
+    const wid = ws.currentId;
+    if (!wid || savedFor === wid) return;
+    if (database.sideTab !== 'saved' && !database.tabs[database.activeTab]?.savedQueryId) return;
+    savedFor = wid;
+    void database.loadSavedQueries();
   });
   // Dashboards (and their widgets) load when the Dashboards view opens, not
   // with every workbench visit.
@@ -354,18 +368,25 @@
   // link) opens that connection: a database's workbench tab, an SSH/custom
   // terminal tab, or a Kafka cluster tab.
   const deepId = $derived(router.module === 'database' ? (router.parts[1] ?? '').split('?')[0] : '');
+  // The deep id already opened (or found gone): once its tab closes, the
+  // id left in the URL must not hold the page on "restoring" for good.
+  let deepTried = $state('');
   $effect(() => {
     const id = deepId;
     if (!connsSettled || !id) return;
-    untrack(() => void openDeep(id));
+    untrack(() => {
+      deepTried = '';
+      void openDeep(id).finally(() => (deepTried = id));
+    });
   });
-  async function openDeep(id: string): Promise<void> {    if (database.connections.some((c) => c.id === id)) {
+  async function openDeep(id: string): Promise<void> {
+    if (database.connections.some((c) => c.id === id)) {
       connectionList.stampOpened(id);
       await database.openConnection(id);
       return;
     }
     const other = database.otherConnections.find((c) => c.id === id);
-    if (other) return void openTerminal(other);
+    if (other) return openTerminal(other);
     const cl = brokers.clusters.find((c) => c.id === id) ?? (ws.currentId ? (await brokers.load(ws.currentId, { withSections: false }), brokers.clusters.find((c) => c.id === id)) : undefined);
     if (cl) openCluster(cl);
   }
@@ -434,9 +455,15 @@
     openConns.length > 0 || brokers.openClusters.length > 0 || database.sshTabs.length > 0,
   );
   // Nothing open (fresh start, a restore that found nothing, the last tab
-  // closed): the workbench has nothing to show — go to the connection list.
+  // closed, a link to a connection that is gone): the workbench has nothing
+  // to show — go to the connection list. Only as the page itself: the same
+  // workbench docked beside Agents shows an empty state instead of taking
+  // the window away from Agents.
+  // (While the next page's chunk loads the route still reads "database": a
+  // pending move elsewhere — "Open beside agents" — is not this page.)
+  const isPage = $derived(router.module === 'database' && (router.pendingTarget?.[0] ?? 'database') === 'database');
   $effect(() => {
-    if (connsSettled && !hasAnyTab && !deepId) untrack(() => router.replace('connections'));
+    if (connsSettled && isPage && !hasAnyTab && (!deepId || deepTried === deepId)) untrack(() => router.replace('connections'));
   });
   // The cluster / ssh session backing the active non-DB pane (null when a DB tab
   // is focused, or when the backing tab was closed out from under the pane).
@@ -535,7 +562,14 @@
     {#if database.selectedConn && database.activePane === null}
       <span class="db-conn-state" data-testid="db-conn-state" title={connState.tip}>
         <span class="db-word {connState.tone}">{connState.word}</span>
-        {#if connState.detail}<span class="db-sub ellipsis">· {connState.detail}</span>{/if}
+        {#if connState.detail}<span class="db-sub ellipsis">{connState.tone === 'danger' ? '—' : '·'} {connState.detail}</span>{/if}
+        {#if connState.tone === 'danger' && !viewport.isPhone}
+          <!-- Can't connect: this one line says it; the raw error and the ways
+               to fix it (Diagnose, Edit connection) are behind Details. (A
+               phone's header has no room: the details card shows under it.) -->
+          <button class="chip" disabled={retrying} onclick={() => void retryConn()}>{retrying ? 'Retrying…' : 'Retry'}</button><!-- ui-guards: allow — the header's one "Can't connect" line (no LoadState there) -->
+          <button class="chip" aria-expanded={errDetails} onclick={() => (errDetails = !errDetails)}>Details</button>
+        {/if}
         {#if database.isGuarded}
           <span class="db-sub" class:db-prod={database.isProd} data-testid="db-guard-chip">· {database.isProd ? 'Production' : 'Read-only'}</span>
         {/if}
@@ -553,8 +587,13 @@
   {/snippet}
   {#snippet actions()}
     {#if database.selectedConn && database.activePane === null}
-      <button class="btn small ghost" data-keep aria-pressed={!database.sidebarCollapsed && database.sideTab !== 'history' && database.sideTab !== 'saved'} onclick={() => showSide('schema')} title="Tables (⌘B)">Tables</button>
-      <button class="btn small ghost" data-overflow="1" aria-pressed={!database.sidebarCollapsed && database.sideTab === 'history'} onclick={() => showSide('history')} title="Query history and saved queries">History</button>
+      <!-- One way to the side pane: while it is open its own tabs are Tables ·
+           Saved · History; while it is hidden (and on a phone, where it is a
+           sheet) these two open it on that tab. -->
+      {#if viewport.isPhone || database.sidebarCollapsed}
+        <button class="btn small ghost" data-keep onclick={() => showSide('schema')} title={viewport.isPhone ? 'Tables' : 'Tables (⌘B)'}>Tables</button>
+        <button class="btn small ghost" data-overflow="1" onclick={() => showSide('history')} title="Query history and saved queries">History</button>
+      {/if}
       {#if database.mainTab === 'query' && editorBar.cur}
         {#if editorBar.cur.running}
           <button class="btn small qe-stop" data-keep onclick={() => editorBar.cur?.stop()} title="Stop the running query (Esc)"><Icon name="stop" size={12} /> Stop</button>
@@ -606,7 +645,9 @@
   {/if}
 
   <div class="db-main" class:danger-rail={database.isProd} class:guard-rail={database.isGuarded && !database.isProd}>
-    {#if !hasAnyTab}
+    {#if !hasAnyTab && connsSettled && !isPage}
+      <EmptyState icon="db" title="No connection open" body="Open one from the connection list." actionLabel="Open connections" onaction={showConnections} />
+    {:else if !hasAnyTab}
       <!-- Restoring the open tabs, or about to go to the connection list. -->
       <LoadState what="the workbench" loading empty variant="page" />
     {:else}
@@ -632,10 +673,9 @@
             {#if stText}<span id="conn-st-{c.id}" class="sr-only">{stText}</span>{/if}
             {#if st?.phase === 'connecting'}
               <span class="conn-tab-spin spinner" style="--spinner-size: 10px" aria-hidden="true" title={database.isWarming(c.id) ? 'Connecting in the background… (right-click to stop)' : 'Connecting…'} data-testid="conn-tab-connecting"></span>
-            {:else if st?.phase === 'error'}
-              <span class="conn-tab-dot" aria-hidden="true" title={st.error}></span>
-            {:else if st?.phase === 'idle'}
-              <span class="conn-tab-idle" aria-hidden="true" title="Not connected yet — opens on click" data-testid="conn-tab-idle"></span>
+            {:else if st?.phase === 'error' && !on}
+              <!-- In words, never a bare dot; the open tab's header says it already. -->
+              <span class="conn-tab-word" aria-hidden="true" title={st.error}>Can’t connect</span>
             {/if}
             <button class="conn-tab-more" onclick={(e) => connMenu(e, c)} aria-haspopup="menu" aria-label="More actions for {c.name}" title="More actions for {c.name}">
               <Icon name="more" size={12} />
@@ -679,7 +719,7 @@
               <span class="conn-tab-name ellipsis">{s.name}</span>
               {#if sc && envBadge(sc)}<EnvBadge env={sc.environment} readOnly={sc.read_only} />{/if}
             </button>
-            {#if ended}<span id="ssh-st-{s.connId}" class="sr-only">Session ended</span><span class="conn-tab-dot" aria-hidden="true" title="Session ended — click the connection or Reconnect to start a new one" data-testid="ssh-tab-ended"></span>{/if}
+            {#if ended}<span id="ssh-st-{s.connId}" class="sr-only">Session ended</span><span class="conn-tab-word" aria-hidden="true" title="Session ended — click the connection or Reconnect to start a new one" data-testid="ssh-tab-ended">Ended</span>{/if}
             <button class="conn-tab-close" onclick={(e) => { e.stopPropagation(); void sshTabs.close(s.connId); }} aria-label="Close terminal tab" title="Close terminal tab">
               <Icon name="x" size={12} />
             </button>
@@ -707,7 +747,7 @@
            agent panel side-by-side, separated by a draggable, persisted divider. -->
       <div class="main-split" class:assist-open={database.assistOpen}>
         <div class="main-body">
-          <DbConnErrorBanner onedit={editableConn(database.selectedConn)} />
+          {#if errDetails || viewport.isPhone}<DbConnErrorBanner onedit={editableConn(database.selectedConn)} onretry={viewport.isPhone ? retryConn : undefined} {retrying} />{/if}
           {#key database.accessRevision}
           <ConnectionComparison enabled={database.mainTab === 'query'}>
           {#if database.mainTab === 'query'}
@@ -754,15 +794,7 @@
   {#if database.sideTab === 'saved' || database.sideTab === 'history'}
     <DbSavedHistorySidebar mode={database.sideTab} />
   {:else}
-    {@const sc = database.connections.find((c) => c.id === database.selectedConnId)}
-    {#if sc}
-      <!-- Which server this tree is: engine mark, name, environment. -->
-      <div class="schema-conn" title="{sc.name} · {sc.kind}">
-        <span class="conn-glyph {sc.kind}"><Icon name={engineGlyph(sc.kind)} size={12} /></span>
-        <span class="schema-conn-name ellipsis">{sc.name}</span>
-        {#if envBadge(sc)}<EnvBadge env={sc.environment} readOnly={sc.read_only} />{/if}
-      </div>
-    {/if}
+    <!-- The header names the server; the tree starts right away. -->
     <SchemaTree />
   {/if}
 {/snippet}
@@ -932,12 +964,6 @@
     align-items: center;
     gap: 1px;
   }
-  .conn-glyph {
-    display: grid;
-    place-items: center;
-    flex-shrink: 0;
-    color: var(--text-dim);
-  }
   .conn-name {
     flex: 1;
     min-width: 0;
@@ -979,24 +1005,6 @@
   /* Read-only (non-prod) connection → a softer amber rail. */
   .db-main.guard-rail {
     border-inline-start: 3px solid var(--status-working);
-  }
-  /* Per-row connection-type tag (mysql / ssh / kafka / …) — neutral, so the
-     env badge keeps the color signal. */
-  .schema-conn {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    height: 30px;
-    padding: 0 6px;
-    margin-bottom: 4px;
-    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-    min-width: 0;
-  }
-  .schema-conn-name {
-    flex: 1;
-    min-width: 0;
-    font-size: var(--fs-s);
-    font-weight: 600;
   }
   /* Prod / guarded connection tabs get a tinted edge. */
   .conn-tab.prod {
@@ -1127,21 +1135,11 @@
     margin-inline-start: 4px;
     flex-shrink: 0;
   }
-  /* Restored but not connected yet: a hollow muted ring (no colour = no claim). */
-  .conn-tab-idle {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    border: 1.5px solid var(--text-dim);
+  .conn-tab-word {
+    color: var(--danger);
+    font-size: var(--fs-xs);
     margin-inline-start: 4px;
-    flex-shrink: 0;
-  }
-  .conn-tab-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--status-exited);
-    margin-inline-start: 4px;
+    white-space: nowrap;
     flex-shrink: 0;
   }
 
@@ -1199,25 +1197,24 @@
   }
 
   /* ───────────────── Phone (≤640px) ─────────────────
-     The results are the screen: the page scrolls as one document (the query
-     tabs, the editor folded to one line after a run, then the rows); Tables
-     and History are a sheet from the header (phoneSide). */
+     The results are the screen: the view fills the height under the header
+     (the query tabs, the editor folded to one line after a run, then the rows
+     down to the bottom bar); a view taller than that (Structure, Builder)
+     scrolls inside it. Tables and History are a sheet from the header. */
   @media (max-width: 640px) {
     .db-page {
       flex-direction: column;
-      overflow-y: auto;
-      -webkit-overflow-scrolling: touch;
+      overflow: hidden;
     }
-    /* Terminal views need a bounded flex height. */
-    .db-page.terminal-active { overflow: hidden; }
-    .terminal-active .db-main { flex: 1; min-height: 0; }
     .db-main {
-      flex: 0 0 auto;
+      flex: 1;
       min-height: 0;
     }
     .main-body {
-      flex: 0 0 auto;
-      padding: 0 0 16px;
+      padding: 0;
+      overflow-x: hidden;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
     }
     /* The assistant drops below the view as a full-width block. */
     .main-split {
