@@ -22,11 +22,9 @@
   import { rightPanel } from '../../lib/stores/rightPanel.svelte';
   import { router } from '../../lib/router.svelte';
   import { registry } from '../../lib/commands.svelte';
-  import DocsAgentsView from './DocsAgentsView.svelte';
   import FileTree from './FileTree.svelte';
-  import FileViewer from './FileViewer.svelte';
-  import GraphView from './GraphView.svelte';
-  import RecoveryView from './RecoveryView.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { DocsAgentsLazy, FileViewerLazy, GraphLazy, RecoveryLazy } from './lazyViews';
   import NewNoteDialog from './NewNoteDialog.svelte';
   import NoteView from './NoteView.svelte';
   import RightPanel from './RightPanel.svelte';
@@ -525,13 +523,13 @@
             </select></label>
             {#if vault.graphLocal}<span class="gs-path" title={vault.notePath ?? ''}>{vault.notePath}</span>{/if}
           </div>
-          <GraphView local={vault.graphLocal} onNewNote={() => openNewNote('')} />
+          <LazyMount lazy={GraphLazy} what="the graph" variant="panel" props={{ local: vault.graphLocal, onNewNote: () => openNewNote('') }} />
         {:else if vault.centerMode === 'trash' || vault.centerMode === 'history'}
-          {#key vault.centerMode}<RecoveryView mode={vault.centerMode} />{/key}
+          {#key vault.centerMode}<LazyMount lazy={RecoveryLazy} what="recovery" variant="panel" props={{ mode: vault.centerMode }} />{/key}
         {:else if vault.centerMode === 'docs-agents'}
-          <DocsAgentsView />
+          <LazyMount lazy={DocsAgentsLazy} what="the docs agent" variant="panel" />
         {:else if vault.centerMode === 'file' && vault.filePath}
-          <FileViewer />
+          <LazyMount lazy={FileViewerLazy} what="the file" variant="panel" />
         {:else if vault.centerMode === 'note' && vault.note}
           <NoteView />
         {:else}
