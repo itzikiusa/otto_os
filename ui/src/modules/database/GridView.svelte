@@ -1285,7 +1285,7 @@
   }
   .grid tbody tr.odd td.rownum,
   .grid tbody tr:not(.spacer):hover td.rownum {
-    background: var(--hover);
+    background: linear-gradient(var(--hover), var(--hover)), var(--surface-2); /* --hover is a tint: on the opaque fill, or what scrolls under shows through */
   }
   .grid thead .rownum {
     z-index: 3;

@@ -86,8 +86,12 @@ export function parseConnectionUri(raw: string): ParsedUri | { error: string } |
   const s = raw.trim();
   if (!s) return null;
   let url: URL;
+  let scheme: string;
   try {
-    url = new URL(s);
+    // Chrome before 130 reads a non-special scheme (mysql:, redis:, …) as an
+    // opaque path — no host, port or user — so the authority is read as http.
+    scheme = new URL(s).protocol.replace(':', '').toLowerCase();
+    url = new URL(`http:${s.slice(scheme.length + 1)}`);
   } catch {
     // The usual cause with credentials: an unencoded `/ ? # @` in the
     // password cuts the authority short (`app:pa/ss@h` → port `pa`).
@@ -97,7 +101,6 @@ export function parseConnectionUri(raw: string): ParsedUri | { error: string } |
         : 'Couldn’t read this connection URL. Start it with a scheme, for example mysql://host:3306/db.',
     };
   }
-  const scheme = url.protocol.replace(':', '').toLowerCase();
   const kind = KIND_OF_SCHEME[scheme];
   if (!kind) {
     return { error: `Couldn’t read this connection URL: “${scheme}://” isn’t a scheme Otto knows. Use mysql, postgres, redis, mongodb, clickhouse or ssh.` };

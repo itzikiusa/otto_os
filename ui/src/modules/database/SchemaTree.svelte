@@ -770,7 +770,7 @@
   }
   .node-label {
     display: flex;
-    align-items: baseline;
+    align-items: center; /* not baseline: on a 36 px touch row that sits above the caret and icon */
     gap: 6px;
     min-width: 0;
     flex: 1;

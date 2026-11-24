@@ -288,7 +288,7 @@
   /* Light version: "More" is a narrow ⋯ beside the five tabs, not a sixth
      (narrow enough that "Connections" fits its tab at 360 px wide). */
   .bn-btn.bn-compact {
-    flex: 0 0 40px;
+    flex: 0 0 44px;
   }
   .bn-label {
     font-size: var(--fs-xs);

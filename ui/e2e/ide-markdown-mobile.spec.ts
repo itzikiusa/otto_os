@@ -56,3 +56,50 @@ test('phone: the Markdown row has 44 px targets, scrolls inside itself, and a ta
   await expectNoHorizontalOverflow(page);
   await writeShot(page, `phone-md-row-${info.project.name}`);
 });
+
+// A long-press in the code is the system's text selection (Copy / Paste, and a
+// selection for Bold): Android's long-press fires `contextmenu`, which used to
+// open the IDE's own menu instead. That menu stays one tap away on the ⋯.
+test('phone: a long-press in the code leaves the system selection alone', async ({ page }, info) => {
+  // iOS Safari fires no contextmenu on a long-press; Android Chrome does.
+  test.skip(info.project.name !== 'android-phone', 'Android phone');
+  test.setTimeout(150_000);
+  await bootWriteIde(page);
+  await openReadmeByTap(page);
+  const line = page.locator('.ide-editor-area .cm-line').first();
+  await expect(line).toBeVisible({ timeout: 15_000 });
+  // The editor's menu is live (it loads after the first paint) and one tap away on ⋯.
+  await expect(async () => {
+    await page.getByTestId('ide-editor-touch-more').tap();
+    await expect(page.locator('.ctx-menu')).toContainText('Find Usages', { timeout: 1_000 });
+  }).toPass({ timeout: 20_000 });
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.ctx-menu')).toHaveCount(0);
+  const box = (await line.boundingBox())!;
+  const prevented = await line.evaluate((el, at) => {
+    const ev = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: at.x, clientY: at.y });
+    el.dispatchEvent(ev);
+    return ev.defaultPrevented;
+  }, { x: box.x + 20, y: box.y + box.height / 2 });
+  expect(prevented).toBe(false);
+  await expect(page.locator('.ctx-menu')).toHaveCount(0);
+});
+
+// A Makefile's ▶ per target shows on a phone too: the compact editor gives the ▶
+// slot's room to the breakpoint dot, and a Makefile has no breakpoints.
+test('phone: a Makefile shows a tappable ▶ per target', async ({ page }, info) => {
+  test.skip(!PHONES.includes(info.project.name), 'phones');
+  test.setTimeout(150_000);
+  await bootWriteIde(page);
+  await page.getByTestId('ide-stack-tab-files').tap();
+  const file = page.getByTestId('ide-project-tree').locator('button.tree-item[title="Makefile"], button.tree-item[title$="/Makefile"]').first();
+  await expect(file).toBeVisible({ timeout: 15_000 });
+  await file.tap();
+  const editorTab = page.getByTestId('ide-stack-tab-editor');
+  if ((await editorTab.getAttribute('aria-pressed')) !== 'true') await editorTab.tap();
+  const run = page.locator('.ide-editor-area [data-gutter-run][aria-label="Run make build"]');
+  await expect(run).toBeVisible({ timeout: 15_000 });
+  expect((await run.boundingBox())!.width).toBeGreaterThanOrEqual(15);
+  await run.tap();
+  await expect(page.locator('.ctx-menu')).toContainText("Run 'make build'");
+});

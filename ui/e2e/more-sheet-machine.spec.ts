@@ -17,7 +17,7 @@ test('the More sheet shows the machine row and opens its details', async ({ page
   await page.goto('/#/home');
   // A phone on its side (short touch screen): no bottom nav and no status
   // bar — the Navigator drawer's footer carries the machine chip.
-  if (info.project.name === 'iphone-landscape') {
+  if (['iphone-landscape', 'android-phone-landscape'].includes(info.project.name)) {
     await page.getByRole('button', { name: 'Open navigator' }).click();
     const chip = page.getByTestId('short-nav-extras').getByTestId('statusbar-machine');
     await expect(chip).toBeVisible({ timeout: 20_000 });
@@ -43,4 +43,22 @@ test('the More sheet shows the machine row and opens its details', async ({ page
   const box = (await row.boundingBox())!;
   await page.mouse.click(box.x + 20, box.y + box.height / 2);
   await expect(page.getByTestId('machine-details')).toBeVisible();
+});
+
+// A phone on its side with the browser's bars showing leaves ~300 px: the
+// drawer scrolls as a whole — every module reachable, its footer never drawn
+// over the extras below it (on the Android emulator the module list got 8 px).
+test('a phone on its side: the navigator drawer scrolls and nothing overlaps', async ({ page }, info) => {
+  test.skip(info.project.name !== 'android-phone-landscape', 'Android phone landscape');
+  await page.setViewportSize({ width: 864, height: 304 });
+  await page.goto('/#/home');
+  await page.getByRole('button', { name: 'Open navigator' }).click();
+  const extras = page.getByTestId('short-nav-extras');
+  await expect(extras).toBeAttached({ timeout: 20_000 });
+  const nav = (await page.locator('.sne-drawer .sne-nav').boundingBox())!;
+  expect(nav.y + nav.height).toBeLessThanOrEqual((await extras.boundingBox())!.y + 1);
+  expect((await page.locator('.sne-drawer .nav-scroll').boundingBox())!.height).toBeGreaterThan(100);
+  const git = page.locator('.sne-drawer .nav-section.modules').getByRole('button', { name: /^Git/ }).first();
+  await git.scrollIntoViewIfNeeded();
+  await expect(git).toBeInViewport();
 });
