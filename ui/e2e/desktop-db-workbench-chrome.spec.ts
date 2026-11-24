@@ -76,3 +76,22 @@ test('375 px: the header ⋯ opens a menu that fits the window and scrolls to it
   await last.scrollIntoViewIfNeeded();
   await expectFullyInViewport(page, last, 'its last row');
 });
+
+test('opening from the list adds only what the workbench needs: no second cluster list, saved queries when shown', async ({ page }) => {
+  await page.addInitScript((w) => { localStorage.setItem('otto_workspace', w as string); localStorage.setItem('otto_firstrun_dismissed', '1'); }, wsId);
+  await mockDbRoutes(page, connId);
+  const seen: string[] = [];
+  page.on('request', (r) => seen.push(new URL(r.url()).pathname));
+  const count = (s: string) => seen.filter((p) => p.endsWith(s)).length;
+  await page.goto('/#/connections');
+  await expect(page.locator(`.conn-row[data-connection-id="${connId}"]`)).toBeVisible();
+  await expect.poll(() => count('/brokers/clusters')).toBe(1);
+  seen.length = 0;
+  await page.locator(`.conn-row[data-connection-id="${connId}"]`).click();
+  await expect(page.getByTestId('db-conn-state')).toContainText('Connected');
+  await page.waitForTimeout(1500); // ui-guards: allow — proves no late request arrives
+  expect(count('/brokers/clusters')).toBe(0);
+  expect(count('/saved-queries')).toBe(0);
+  await page.getByRole('tablist', { name: 'Sidebar view' }).getByRole('tab', { name: 'Saved', exact: true }).click();
+  await expect.poll(() => count('/saved-queries')).toBe(1);
+});

@@ -327,9 +327,18 @@
         await database.restoreWorkbench();
         connsSettled = true;
       })();
-      void brokers.load(ws.currentId, { withSections: false }); // Kafka tabs
-      void database.loadSavedQueries();
+      void brokers.ensure(ws.currentId); // Kafka tabs (the list page has usually read them)
     }
+  });
+  // Saved queries load when they are shown (the Saved tab) or needed (a tab
+  // opened from one: its Save updates it in place) — not with every open.
+  let savedFor: string | null = null;
+  $effect(() => {
+    const wid = ws.currentId;
+    if (!wid || savedFor === wid) return;
+    if (database.sideTab !== 'saved' && !database.tabs[database.activeTab]?.savedQueryId) return;
+    savedFor = wid;
+    void database.loadSavedQueries();
   });
   // Dashboards (and their widgets) load when the Dashboards view opens, not
   // with every workbench visit.
