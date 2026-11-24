@@ -126,9 +126,9 @@ test(`graph of ${TOTAL} commits × ${LANES} lanes: fast first paint, incremental
     }
     await route.fulfill({ json: body });
   });
-  await page.route('**/api/v1/repos/*/refs', async (route) => {
-    const res = await route.fetch();
-    const real = await res.json();
+  // The refs match the synthetic history wherever they are read: `/refs` and
+  // the repository overview the graph's first refs come from.
+  const synthRefs = (real: { local: { sha: string }[] }) => {
     const local = Array.from({ length: LANES }, (_, i) => ({
       name: `branch-${i}`,
       sha: i === 0 && extra > 0 ? `e${String(extra).padStart(39, '0')}` : sha(i),
@@ -136,8 +136,17 @@ test(`graph of ${TOTAL} commits × ${LANES} lanes: fast first paint, incremental
       upstream: null,
       remote: false,
     }));
-    // The real branch (moved by the ref-move commit below) stays on the synthetic tip.
-    await route.fulfill({ json: { ...real, local: [...real.local.map((b: { sha: string }) => ({ ...b, sha: sha(0) })), ...local] } });
+    // The real branches (one made by the ref move below) stay on the synthetic tip.
+    return { ...real, local: [...real.local.map((b) => ({ ...b, sha: sha(0) })), ...local] };
+  };
+  await page.route('**/api/v1/repos/*/refs', async (route) => {
+    const res = await route.fetch();
+    await route.fulfill({ json: synthRefs(await res.json()) });
+  });
+  await page.route('**/api/v1/repos/*/overview', async (route) => {
+    const res = await route.fetch();
+    const o = await res.json();
+    await route.fulfill({ json: o.refs ? { ...o, refs: synthRefs(o.refs) } : o });
   });
   // The toolbar Fetch is the "a ref moved" trigger; the repo has no remote,
   // so answer it with the live status (a successful fetch bumps refsRev).

@@ -126,6 +126,11 @@ export function createGraphSync(h: GraphSyncHost) {
   /** Refs read by {@link resyncRefs} that wait for the history re-read they
    *  triggered, so both land in one layout pass. */
   let pendingRefs: { id: string; refs: RefsResp } | null = null;
+  /** The refs waiting for this repo's reload, if any (graphData decides from
+   *  them whether the reload must read the whole history). */
+  function pendingRefsFor(id: string): RefsResp | null {
+    return pendingRefs?.id === id ? pendingRefs.refs : null;
+  }
   function flushPendingRefs(): void {
     const p = pendingRefs;
     pendingRefs = null;
@@ -169,5 +174,5 @@ export function createGraphSync(h: GraphSyncHost) {
     bgTimer = null;
   });
 
-  return { adoptRefsRev, flushResync, flushPendingRefs, resyncRefs, backgroundReload };
+  return { adoptRefsRev, flushResync, flushPendingRefs, pendingRefsFor, resyncRefs, backgroundReload };
 }
