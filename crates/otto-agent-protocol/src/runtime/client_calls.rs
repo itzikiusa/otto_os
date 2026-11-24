@@ -32,6 +32,9 @@ struct Terminal {
     /// The command's process group (it leads its own): a kill reaches
     /// everything it started, also after the shell itself exited.
     pgid: Option<i32>,
+    /// The group was empty when the command exited: its id may be reused
+    /// by an unrelated group, so it is never signalled again.
+    gone: std::sync::atomic::AtomicBool,
 }
 
 /// Start `op` for the session `st` belongs to.
@@ -225,6 +228,7 @@ async fn run(
                 output: Mutex::new((String::new(), false)),
                 exit: rx,
                 pgid: child.id().map(|p| p as i32),
+                gone: Default::default(),
             });
             let limit = output_limit(byte_limit);
             let pipes = [
@@ -286,6 +290,9 @@ async fn run(
                 // The command's own exit decides, not its pipes: a background
                 // process it left (`npm run dev &`) keeps them open.
                 let status = child.wait().await.ok();
+                if group_gone(t.pgid) {
+                    t.gone.store(true, std::sync::atomic::Ordering::Release);
+                }
                 let _ = tokio::time::timeout(std::time::Duration::from_millis(200), async {
                     for r in readers {
                         let _ = r.await;
@@ -345,7 +352,19 @@ fn output_limit(asked: Option<u64>) -> usize {
     })
 }
 
+/// No process is left in the group `pgid` (`ESRCH` to a null signal).
+fn group_gone(pgid: Option<i32>) -> bool {
+    // SAFETY: signal 0 only checks that the group exists.
+    pgid.is_some_and(|g| {
+        (unsafe { libc::killpg(g, 0) }) == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    })
+}
+
 fn kill(t: &Terminal) {
+    if t.gone.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
     if let Some(pgid) = t.pgid {
         // SAFETY: a plain signal to the process group this terminal created.
         unsafe {
@@ -385,6 +404,29 @@ mod tests {
         let small = root.path().join("a.txt");
         std::fs::write(&small, "hi").unwrap();
         assert_eq!(old_text(&small).await.as_deref(), Some("hi"));
+    }
+
+    /// Review R1-049: a command's group is "gone" only once nothing is left
+    /// in it, so a kill still reaches a background child it left.
+    #[test]
+    fn a_terminals_group_is_gone_only_when_empty() {
+        use std::os::unix::process::CommandExt;
+        let group = |script: &str| {
+            let mut c = std::process::Command::new("/bin/sh");
+            c.args(["-c", script]).process_group(0);
+            let mut child = c.spawn().unwrap();
+            let pgid = child.id() as i32;
+            child.wait().unwrap();
+            pgid
+        };
+        assert!(group_gone(Some(group("exit 0"))));
+        let left = group("sleep 5 >/dev/null 2>&1 & exit 0");
+        assert!(
+            !group_gone(Some(left)),
+            "its background child is still in it"
+        );
+        // SAFETY: the group this test just made.
+        unsafe { libc::killpg(left, libc::SIGKILL) };
     }
 
     /// A dangling link in the folder points outside it: the write is
