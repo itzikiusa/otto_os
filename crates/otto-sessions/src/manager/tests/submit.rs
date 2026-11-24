@@ -382,6 +382,7 @@ echo READY
 /// servers, so its spawn writes no `--mcp-config` file nor any launcher env
 /// file (secrets), and records no "couldn't write" skip for them.
 #[tokio::test]
+#[allow(clippy::disallowed_methods)] // a blocking dir listing in a test
 async fn a_strict_claude_spawn_writes_no_mcp_files_and_skips_nothing() {
     struct Servers;
     impl crate::mcp::McpServerSource for Servers {

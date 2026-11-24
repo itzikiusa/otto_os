@@ -4481,6 +4481,7 @@ async fn sandboxed_muse_session_starts_with_its_own_sandbox_off() {
 /// Otto's `.mcp.json` into the repository. Start it, sync again as a resume
 /// does, and do the same for a Claude session: the folder stays empty.
 #[tokio::test]
+#[allow(clippy::disallowed_methods)] // a blocking dir listing in a test
 async fn shell_and_claude_sessions_leave_the_repo_file_list_untouched() {
     let (manager, _repo, mut workspace, user) = test_manager().await;
     let dir = tempfile::tempdir().unwrap();

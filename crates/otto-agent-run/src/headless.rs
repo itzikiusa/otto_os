@@ -267,6 +267,7 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"fix: a\n\n- b"}'"#,
 
     /// R1-076: dropping the turn (Stop, the client went away) kills the CLI.
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // a blocking `ps` probe in a test
     async fn dropping_the_turn_kills_the_cli() {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("pid");
