@@ -998,6 +998,15 @@ button.chip:focus-visible {
    grow vertically only — they sit 2 px apart). `:where()` keeps it at zero
    specificity, so a module that positions its own button (`position: absolute`
    close buttons, overlay controls) or uses ::after still wins. */
+/* A row whose long press opens its menu (lib/rowMenu.ts) is not text: the
+   press must not also select the word under the finger. */
+@media (pointer: coarse) {
+  [data-row-menu] {
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+}
 @media (pointer: coarse) {
   /* iOS Safari auto-zooms into any text input/textarea/select under 16px on
      focus and leaves the visual viewport zoomed & panned across subsequent

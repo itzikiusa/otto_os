@@ -116,3 +116,26 @@ test('full-screen application gets xterm wheel input, but read-only viewers neve
   assert.equal(wheels.length, 1);
   assert.match(JSON.stringify(wheels[0]), /"deltaY":-60/);
 });
+
+test('a press held still selects instead of tapping; a drag then extends, never scrolls', async () => {
+  const holds: [number, boolean][] = [];
+  const moves: number[][] = [];
+  let taps = 0;
+  const touch = new TerminalTouch({
+    scroll: (dx, dy) => moves.push([dx, dy]), tap: () => taps++, canCoast: () => false,
+    hold: (_x, y, extend) => holds.push([y, extend]),
+  });
+  touch.start({ clientX: 10, clientY: 40, timeStamp: 0, pointerId: 1 });
+  await new Promise((r) => setTimeout(r, 560));
+  touch.move({ clientX: 10, clientY: 90, timeStamp: 600, pointerId: 1 });
+  touch.end({ clientX: 10, clientY: 90, timeStamp: 610, pointerId: 1 });
+  assert.deepEqual(holds, [[40, false], [90, true]]);
+  assert.deepEqual(moves, []);
+  assert.equal(taps, 0);
+  // A quick tap still taps and never holds.
+  touch.start({ clientX: 10, clientY: 40, timeStamp: 700, pointerId: 1 });
+  touch.end({ clientX: 10, clientY: 40, timeStamp: 720, pointerId: 1 });
+  await new Promise((r) => setTimeout(r, 560));
+  assert.equal(taps, 1);
+  assert.equal(holds.length, 2);
+});
