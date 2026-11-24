@@ -184,7 +184,7 @@ async function scriptMs(cdp: CDPSession): Promise<number> {
 const sumR = (xs: number[]): number => Math.round(xs.reduce((a, b) => a + b, 0));
 
 /** (a): open `id` from the warm app; first content, interactive, long tasks. */
-async function openThread(page: Page, id: string, last: string): Promise<Record<string, number>> {
+async function openThread(page: Page, id: string, last: string): Promise<Record<string, unknown>> {
   await page.evaluate((h) => (location.hash = h), '#/threads/' + ids.small);
   await expect(page.getByTestId('runtime-thread-' + ids.small)).toBeVisible();
   await watchLt(page);
