@@ -21,6 +21,7 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { allProviders, inferProviderFamily, providerReadiness, providerSubtitle } from '../../lib/providers';
 
   /** Per-provider ceiling on one batch — a typo in the stepper shouldn't be able
@@ -556,7 +557,7 @@
         placeholder={noPrompt ? 'A plain shell takes no first message.' : 'What should the agent start on? Sent once it is ready.'}
       ></textarea>
       <span class="hint">
-        {total > 1 ? 'Sent to every agent in this batch. ' : ''}⌘↩ {total > 1 ? 'creates the sessions' : 'creates the session'}.
+        {total > 1 ? 'Sent to every agent in this batch. ' : ''}{viewport.isPhone ? '' : `⌘↩ ${total > 1 ? 'creates the sessions' : 'creates the session'}.`}
       </span>
     </div>
 
