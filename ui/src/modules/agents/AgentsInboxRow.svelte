@@ -34,7 +34,9 @@
   }
 
   let { session: s, project, status, strong, kind, branch = null, selected, inPane, tip, stateKey, select = null, drag = null, onclick, onmenu, onrename, close = null }: Props = $props();
-  const provider = $derived(s.provider ? s.provider.charAt(0).toUpperCase() + s.provider.slice(1) : '');
+  // A shell running an agent CLI names the agent (meta.nested_provider).
+  const agent = $derived(typeof s.meta?.nested_provider === 'string' ? s.meta.nested_provider : s.provider);
+  const provider = $derived(agent ? agent.charAt(0).toUpperCase() + agent.slice(1) : '');
   const where = $derived(branch ?? (s.cwd ? s.cwd.replace(/\/+$/, '').split('/').pop() || '~' : '~'));
 </script>
 
@@ -83,7 +85,7 @@
       <Icon name={branch ? 'branch' : 'folder'} size={12} />
       <span class="ellipsis" dir="auto">{where}</span>
       <span class="ai-dim" aria-hidden="true">·</span>
-      {#if hasProviderIcon(s.provider)}<ProviderIcon provider={s.provider} size={12} />{/if}
+      {#if hasProviderIcon(agent)}<ProviderIcon provider={agent} size={12} />{/if}
       <span class="ai-prov">{provider}</span>
       <span class="ai-dim" aria-hidden="true">·</span>
       <span class="ai-kind">{kind === 'chat' ? 'chat' : kind === 'archived' ? 'closed' : 'terminal'}</span>

@@ -25,7 +25,7 @@ for (const viewport of [{ width: 1440, height: 1200 }, { width: 390, height: 844
       expect(await cards.count()).toBeGreaterThan(1);
       // Shell has fewer fields; starting there catches growth as well as shrink.
       await dialog.locator('.provider-card', { hasText: 'shell' }).locator('.card-main').click();
-      await expect(dialog.locator('#ns-prompt')).toHaveCount(0);
+      await expect(dialog.locator('#ns-prompt')).toBeDisabled();
       const initial = await dialog.boundingBox();
       expect(initial).not.toBeNull();
       for (let i = 0; i < await cards.count(); i++) {
