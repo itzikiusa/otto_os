@@ -301,10 +301,24 @@ async fn manual_client_credentials_skip_registration() {
 }
 
 #[test]
+fn local_endpoints_only_for_a_server_as_local() {
+    // A LAN server may name LAN https endpoints, never this Mac's loopback.
+    assert!(checked_endpoint("http://127.0.0.1:9/token", Scope::Local).is_err());
+    assert!(checked_endpoint("https://localhost/token", Scope::Local).is_err());
+    assert!(checked_endpoint("https://10.0.0.5/token", Scope::Local).is_ok());
+    assert!(checked_endpoint("http://10.0.0.5/token", Scope::Local).is_err());
+    assert!(checked_endpoint("https://10.0.0.5/token", Scope::Remote).is_err());
+    assert_eq!(
+        server_scope("http://localhost:3000/mcp").unwrap(),
+        Scope::Loopback
+    );
+}
+
+#[test]
 fn remote_endpoints_must_be_https_and_not_local() {
-    assert!(checked_endpoint("http://as.example/token", false).is_err());
-    assert!(checked_endpoint("https://127.0.0.1/token", false).is_err());
-    assert!(checked_endpoint("https://as.example/token", false).is_ok());
+    assert!(checked_endpoint("http://as.example/token", Scope::Remote).is_err());
+    assert!(checked_endpoint("https://127.0.0.1/token", Scope::Remote).is_err());
+    assert!(checked_endpoint("https://as.example/token", Scope::Remote).is_ok());
     // IP literals the resolver never sees: metadata, this host, link-local.
     for raw in [
         "https://169.254.169.254/x",
@@ -312,12 +326,12 @@ fn remote_endpoints_must_be_https_and_not_local() {
         "https://[fe80::1]/x",
         "https://[::]/x",
     ] {
-        assert!(checked_endpoint(raw, false).is_err(), "{raw}");
+        assert!(checked_endpoint(raw, Scope::Remote).is_err(), "{raw}");
     }
-    assert!(checked_endpoint("http://127.0.0.1:9/token", true).is_ok());
+    assert!(checked_endpoint("http://127.0.0.1:9/token", Scope::Loopback).is_ok());
     // A local server's metadata still can't send Otto to plain http elsewhere.
-    assert!(checked_endpoint("http://as.example/token", true).is_err());
-    assert!(checked_endpoint("https://as.example/token", true).is_ok());
+    assert!(checked_endpoint("http://as.example/token", Scope::Loopback).is_err());
+    assert!(checked_endpoint("https://as.example/token", Scope::Loopback).is_ok());
 }
 
 #[tokio::test]

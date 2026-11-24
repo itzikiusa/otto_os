@@ -90,42 +90,73 @@ pub(crate) fn challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
-/// Whether the server at `server_url` is an owner-named local target (a
-/// local dev server may run its own local authorization server).
-fn server_is_local(server_url: &str) -> Result<bool, String> {
-    let parsed = reqwest::Url::parse(server_url).map_err(|e| format!("invalid url: {e}"))?;
-    Ok(otto_netguard::is_explicit_local_target(&parsed))
+/// Where the server the person registered lives: which local endpoints its
+/// metadata may name.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Scope {
+    /// `localhost` / a loopback literal: a dev server on this Mac.
+    Loopback,
+    /// An owner-named private target (LAN, tailnet).
+    Local,
+    Remote,
 }
 
-/// A URL a sign-in may call, and the client to call it with: a local target
-/// only for a local server (plain client), anything else https through the
-/// SSRF guard — whatever the server's metadata says.
-fn checked_endpoint(raw: &str, local: bool) -> Result<reqwest::Url, String> {
+fn is_loopback(url: &reqwest::Url) -> bool {
+    let host = url.host_str().unwrap_or_default();
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || bare
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+fn scope_of(url: &reqwest::Url) -> Scope {
+    if is_loopback(url) {
+        Scope::Loopback
+    } else if otto_netguard::is_explicit_local_target(url) {
+        Scope::Local
+    } else {
+        Scope::Remote
+    }
+}
+
+fn server_scope(server_url: &str) -> Result<Scope, String> {
+    let parsed = reqwest::Url::parse(server_url).map_err(|e| format!("invalid url: {e}"))?;
+    Ok(scope_of(&parsed))
+}
+
+/// A URL a sign-in may call: a loopback endpoint only for a loopback server,
+/// a private one only for a private (or loopback) server, and everything
+/// but loopback over https past the SSRF guard's literal check — whatever
+/// the server's metadata says.
+fn checked_endpoint(raw: &str, server: Scope) -> Result<reqwest::Url, String> {
     let url = reqwest::Url::parse(raw)
         .map_err(|_| "the authorization server named an invalid URL".to_string())?;
-    if otto_netguard::is_explicit_local_target(&url) {
-        if !local {
-            return Err("the authorization server named a local address; refused".into());
-        }
-    } else if url.scheme() != "https" {
+    let allowed = match scope_of(&url) {
+        Scope::Loopback => server == Scope::Loopback,
+        Scope::Local => server != Scope::Remote,
+        Scope::Remote => true,
+    };
+    if !allowed {
+        return Err("the authorization server named a local address; refused".into());
+    }
+    if scope_of(&url) != Scope::Loopback && url.scheme() != "https" {
         return Err("the authorization server named a non-https endpoint; refused".into());
-    } else if !otto_netguard::check_url_literal(&url) {
+    }
+    if scope_of(&url) == Scope::Remote && !otto_netguard::check_url_literal(&url) {
         // Link-local / metadata / 0.0.0.0 / NAT64… literals never reach a resolver.
         return Err("the authorization server named a blocked address; refused".into());
     }
     Ok(url)
 }
 
-/// The client for one request: a remote target's host is resolved and
-/// vetted once and those addresses are pinned (no second DNS answer, no
-/// redirect, reaches metadata or a private address).
+/// The client for one request: the host is resolved and vetted once and
+/// those addresses are pinned (no second DNS answer, no redirect, reaches
+/// metadata or Otto's own daemon; a remote one no private address either).
 async fn client_for(target: &reqwest::Url) -> Result<reqwest::Client, String> {
-    let builder = if otto_netguard::is_explicit_local_target(target) {
-        reqwest::Client::builder().no_proxy()
-    } else {
-        otto_netguard::pinned_client_builder_for(target.as_str(), false).await?
-    };
-    builder
+    let local = scope_of(target) != Scope::Remote;
+    otto_netguard::pinned_client_builder_for(target.as_str(), local)
+        .await?
         .timeout(REQUEST_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -181,8 +212,8 @@ async fn get_json(url: reqwest::Url) -> Option<Value> {
 pub async fn discover(server_url: &str) -> Result<AuthServer, String> {
     // The metadata of a cleartext server could be rewritten on the path.
     otto_netguard::require_tls_or_loopback(server_url)?;
-    let local = server_is_local(server_url)?;
-    if !local {
+    let local = server_scope(server_url)?;
+    if local == Scope::Remote {
         otto_netguard::check_url(server_url).await?;
     }
     let server = reqwest::Url::parse(server_url).map_err(|e| format!("invalid url: {e}"))?;
@@ -285,7 +316,7 @@ async fn token_request(
     client_secret: Option<&str>,
     client_id: &str,
 ) -> Result<Value, String> {
-    let url = checked_endpoint(endpoint, server_is_local(server_url)?)?;
+    let url = checked_endpoint(endpoint, server_scope(server_url)?)?;
     let mut rb = client_for(&url)
         .await?
         .post(url)
