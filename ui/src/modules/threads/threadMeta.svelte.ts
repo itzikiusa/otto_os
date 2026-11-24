@@ -19,6 +19,8 @@ type Key = keyof ThreadMetaPatch;
 const THREAD_KEYS: readonly Key[] = ['thread_pinned', 'thread_history', 'thread_seen_at'];
 
 const MIGRATED = 'otto_threads_meta_migrated';
+/** markSeen waits this long for the burst to settle before writing. */
+const SEEN_COALESCE_MS = 1500;
 
 class ThreadMeta {
   /** Writes in flight, shown before the daemon answers. */
@@ -104,7 +106,20 @@ class ThreadMeta {
    *  write `thread_seen_at` — once, only when something is new since the
    *  last mark, and only on their own thread. */
   markSeen(id: string | null): void {
-    if (!id || (typeof document !== 'undefined' && document.hidden)) return;
+    if (!id) return;
+    // One write per burst (focus, a turn ending, the window coming back):
+    // trailing, and re-checked then — nothing new, nothing written.
+    clearTimeout(this.seenTimers.get(id));
+    this.seenTimers.set(id, setTimeout(() => {
+      this.seenTimers.delete(id);
+      this.writeSeen(id);
+    }, SEEN_COALESCE_MS));
+  }
+
+  private seenTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  private writeSeen(id: string): void {
+    if (typeof document !== 'undefined' && document.hidden) return;
     const rt = runtimeThreads.get(id);
     const owner = rt?.created_by ?? this.session(id)?.created_by;
     if (!owner || owner !== auth.me?.id) return;

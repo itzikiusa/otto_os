@@ -7,6 +7,9 @@ import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { loadSource } from './sourceHarness.ts';
 
+/** markSeen writes once the burst settles (threadMeta's SEEN_COALESCE_MS). */
+const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 1600));
+
 const hook =
   'export async function resolve(s, c, n) {' +
   "  if (/^\\.{1,2}\\//.test(s) && !/\\.[a-z]+$/i.test(s)) { try { return await n(s + '.ts', c); } catch {} }" +
@@ -75,10 +78,16 @@ test('Done = the last turn ended after thread_seen_at; seeing it writes once', a
   });
   (globalThis as { document?: unknown }).document = { hidden: false };
   assert.equal(t.threadMeta.unread('a', false), true);
+  // A burst (focus + turn end + window back) is one trailing write.
   t.threadMeta.markSeen('a');
+  t.threadMeta.markSeen('a');
+  t.threadMeta.markSeen('a');
+  assert.equal(t.patched.length, 0);
+  await settle();
   assert.equal(t.threadMeta.unread('a', true), false); // seen elsewhere beats this window's flag
-  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(t.patched.length, 1);
   t.threadMeta.markSeen('a'); // nothing new: no second write
+  await settle();
   assert.equal(t.patched.length, 1);
   // Never marked seen anywhere: this window's own flag decides.
   const fresh = load(async () => ({}), { b: { ...row(), id: 'b' } });
@@ -93,14 +102,17 @@ test('a seen mark that fails is tried once per ended turn, not in a loop', async
   });
   (globalThis as { document?: unknown }).document = { hidden: false };
   t.threadMeta.markSeen('a');
-  await new Promise((r) => setTimeout(r, 0));
+  await settle();
   t.threadMeta.markSeen('a');
+  await settle();
   t.threadMeta.markSeen('a');
+  await settle();
   assert.equal(t.patched.length, 1);
   assert.deepEqual(t.toasts, []);
   // A newer turn end is a new attempt.
   (t.rows.a.meta as Record<string, unknown>).last_turn_ended_at = '2026-11-23T10:09:00Z';
   t.threadMeta.markSeen('a');
+  await settle();
   assert.equal(t.patched.length, 2);
 });
 
