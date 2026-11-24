@@ -141,6 +141,50 @@ test('Agents: a remembered route or saved pane of a deleted thread is dropped qu
   await expect(page.getByText('Couldn’t open this session')).toBeVisible({ timeout: 10_000 });
 });
 
+test('a link to a session lands on that session: a Threads terminal-dock shell on Agents, a Threads terminal thread on Threads', async ({ page }) => {
+  const shell = async (title: string, meta: Record<string, unknown>): Promise<string> => {
+    const r = await ctx.post(`${base}/api/v1/workspaces/${wsId}/sessions`, { data: { kind: 'agent', provider: 'shell', title, cwd: dir, meta: { origin: 'e2e', ...meta } } });
+    expect(r.ok(), await r.text()).toBeTruthy();
+    return (await r.json()).id as string;
+  };
+  // A shell the Threads terminal dock started: Threads has no pane for it.
+  const dock = await shell('Baresi dock shell', { surface: 'threads', threads_terminal: true });
+  // A terminal thread (a Threads-scope agent session): Threads shows it.
+  const term = await shell('Maldini terminal thread', { surface: 'threads' });
+  try {
+    for (const cold of [true, false]) {
+      if (cold) await page.goto(`/#/agents/${dock}`);
+      else await page.evaluate((sid) => (location.hash = `#/agents/${sid}`), dock);
+      await expect(page.locator(`[data-pane-key][data-session="${dock}"]`), `dock shell, cold=${cold}`).toBeVisible({ timeout: 30_000 });
+      expect(await hash(page)).toBe(`#/agents/${dock}`);
+      await expect(page.getByTestId('new-thread-stage')).toHaveCount(0);
+
+      await page.evaluate((sid) => (location.hash = `#/agents/${sid}`), term);
+      await expect.poll(() => hash(page), { timeout: 15_000 }).toBe(`#/threads/${term}`);
+      await expect(page.getByTestId(`thread-pane-${term}`), `terminal thread, cold=${cold}`).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByTestId('new-thread-stage')).toHaveCount(0);
+    }
+  } finally {
+    for (const id of [dock, term]) await ctx.delete(`${base}/api/v1/sessions/${id}`).catch(() => {});
+  }
+});
+
+test('Agents with no open tab shows no first-run coach to someone who has sessions (here: a "No workspace" one)', async ({ page }) => {
+  const r = await ctx.post(`${base}/api/v1/workspaces/scratch/sessions`, {
+    data: { kind: 'agent', provider: 'shell', title: 'Nesta scratch', cwd: dir, meta: { origin: 'e2e' } },
+  });
+  expect(r.ok(), await r.text()).toBeTruthy();
+  const id = (await r.json()).id as string;
+  try {
+    await page.addInitScript(() => localStorage.removeItem('otto_firstrun_dismissed'));
+    await page.goto('/#/agents');
+    await expect(page.getByTestId(`agents-row-${id}`)).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText('Let’s launch your first agent')).toHaveCount(0);
+  } finally {
+    await ctx.delete(`${base}/api/v1/sessions/${id}`).catch(() => {});
+  }
+});
+
 test('deleting the thread open on Threads reads it no more and leaves nothing behind', async ({ page }) => {
   const id = await thread('Ambrosini chat');
   await page.goto(`/#/threads/${id}`);

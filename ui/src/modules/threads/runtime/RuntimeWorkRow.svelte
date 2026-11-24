@@ -9,7 +9,8 @@
   // follows the bottom while you do). An approval that gated the call folds
   // into its row: Approve / Decline inline while pending, the outcome after
   // (ComposerPendingApprovalActions.tsx).
-  import { untrack } from 'svelte';
+  import { getContext } from 'svelte';
+  import { SvelteMap } from 'svelte/reactivity';
   import Icon, { type IconName } from '../../../lib/components/Icon.svelte';
   import type { ApprovalDecision, TurnItem } from '../../../lib/api/types';
   import InlineDiff from '../../agents/conversation/InlineDiff.svelte'; // ui-guards: allow — shared chat diff
@@ -24,7 +25,7 @@
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   const RuntimeToolImages = lazyComponent(() => import('./RuntimeToolImages.svelte'));
   import { errorText, openedTarget, runNoticeOf, toolError, type PendingApproval } from './timeline';
-  import { exitText, formatDuration, itemDuration, relativeToCwd, rowLabel } from './workLog';
+  import { exitText, formatDuration, itemDuration, relativeToCwd, ROW_CHOICES, rowLabel } from './workLog';
   import { now } from '../../../lib/stores/now.svelte';
   import { ws } from '../../../lib/stores/workspace.svelte';
   import { threads } from '../threadsStore.svelte';
@@ -52,7 +53,11 @@
   /** Threads opened from this one: their live cards / "finished" line. */
   const childNotice = $derived(item.type === 'system_notice' ? threadNoticeOf(item.message) : null);
 
-  let open = $state(untrack(() => startOpen));
+  // The person's open/closed choice lives with the timeline (ROW_CHOICES), so
+  // it survives this row remounting; nothing automatic ever writes it.
+  const choices: SvelteMap<string, boolean> = getContext(ROW_CHOICES) ?? new SvelteMap();
+  const open = $derived(choices.get(item.id) ?? startOpen);
+  const toggle = (): void => void choices.set(item.id, !open);
   let outEl = $state<HTMLPreElement | null>(null);
   let follow = true;
 
@@ -188,7 +193,7 @@
 {:else}
 <div class="rw" class:failed class:stopped={stopped && !note} data-item-type={item.type} data-testid="runtime-item-{item.id}">
   {#if hasDetail}
-    <button type="button" class="rw-line" aria-expanded={open} onclick={() => (open = !open)}>
+    <button type="button" class="rw-line" aria-expanded={open} onclick={toggle}>
       <Icon name={icon} size={13} />
       <span class="rw-label ellipsis" dir="auto">{label}</span>
       {#if took}<span class="rw-took">{took}</span>{/if}
@@ -207,7 +212,7 @@
     <!-- Clamped to three lines until "More" (a long thought). -->
     <div class="rw-think" class:all={open || !longThought}><Markdown md={thinkingMd} small streaming={running} /></div>
     {#if longThought}
-      <button type="button" class="rw-more" aria-expanded={open} onclick={() => (open = !open)}>{open ? 'Less' : 'More'}</button>
+      <button type="button" class="rw-more" aria-expanded={open} onclick={toggle}>{open ? 'Less' : 'More'}</button>
     {/if}
   {/if}
   {#if target}

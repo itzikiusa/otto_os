@@ -80,3 +80,24 @@ test('‹ steps back to the list; the system Back then leaves Agents', async ({ 
   await expect.poll(() => page.evaluate(() => location.hash)).toMatch(/^#\/settings/);
   await expect(pane).toHaveCount(0);
 });
+
+// A terminal agent session's conversation is reachable on a phone: the
+// Terminal ⇄ Chat switch folds out of the narrow header into its ⋯ menu.
+test('a terminal agent session reaches its chat from the pane ⋯ on a phone', async ({ page }) => {
+  const r = await ctx.post(`${base}/api/v1/workspaces/${wsId}/sessions`, {
+    data: { kind: 'agent', provider: 'shell', title: 'Pirlo agent', cwd: dir, meta: { origin: 'e2e', nested_provider: 'claude' } },
+  });
+  expect(r.ok(), await r.text()).toBeTruthy();
+  const id = (await r.json()).id as string;
+  try {
+    await page.goto(`/#/agents/${id}`);
+    const pane = page.locator(`[data-pane-key][data-session="${id}"]`);
+    await expect(pane).toBeVisible({ timeout: 30_000 });
+    await pane.getByRole('button', { name: /^More…/ }).tap();
+    await page.getByRole('menuitem', { name: 'Show the chat' }).tap();
+    await pane.getByRole('button', { name: /^More…/ }).tap();
+    await expect(page.getByRole('menuitem', { name: 'Show the terminal' })).toBeVisible();
+  } finally {
+    await ctx.delete(`${base}/api/v1/sessions/${id}`).catch(() => {});
+  }
+});

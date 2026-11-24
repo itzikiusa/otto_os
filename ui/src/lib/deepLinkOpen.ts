@@ -6,7 +6,7 @@ import { api } from './api/client';
 import type { Id, Session } from './api/types';
 import { deepLinkErrorText, resolveDeepLink } from './deepLink';
 import { router } from './router.svelte';
-import { inThreadsScope } from './stores/sessionBuckets';
+import { opensInThreads } from './stores/sessionBuckets';
 import { SCRATCH_WORKSPACE_ID } from './stores/sessionScope';
 import { toasts } from './toast.svelte';
 
@@ -66,8 +66,9 @@ export async function openSessionDeepLink(store: DeepLinkStore, id: Id, forget?:
   if (found === 'thread') return store.openSession(id, 'thread');
   // An old or outside link (`agents/<id>` from the tray, the floating bar, a
   // notice written before the session moved) to a session that lives in
-  // Threads opens there, never as a terminal tab over the same conversation.
+  // Threads opens there, never as a terminal tab over the same conversation
+  // (a Threads terminal-dock shell has no pane there: it opens here).
   const s = store.sessionById.get(id);
-  if (s && inThreadsScope(s, store.sessionById)) router.replace(`threads/${id}`);
+  if (s && opensInThreads(s, store.sessionById)) router.replace(`threads/${id}`);
   else store.openSession(id);
 }
