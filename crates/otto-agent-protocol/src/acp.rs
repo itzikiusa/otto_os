@@ -328,9 +328,11 @@ pub(super) struct AcpDriverState {
     /// The agent's sandbox wrapper (`sandbox-exec -p <profile>`), reused for
     /// client terminals; empty when the agent runs unconfined.
     pub(super) confine: Vec<String>,
-    /// The agent's prepared env (a client terminal gets it too). Not in a
-    /// snapshot.
-    #[serde(skip)]
+    /// The agent's prepared env (a client terminal gets it too). In the
+    /// snapshot, which goes only to the runtime holder (memory, never disk)
+    /// that already got this env with the spawn spec: an adopted driver keeps
+    /// it and its override guard (review R3-003).
+    #[serde(default)]
     pub(super) child_env: Vec<(String, String)>,
     pub(super) terminals: u64,
     /// Each open client terminal's output so far (bounded), by terminal id.
@@ -4187,6 +4189,34 @@ mod tests {
         assert_eq!(sent(&s, 0)["error"]["code"], -32000);
         let s = adopted.on_line(r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"g","update":{"sessionUpdate":"usage_update","used":1,"size":2}}}"#);
         assert!(s.writes.is_empty(), "answered once");
+    }
+
+    /// Review R3-003: after a daemon restart the adopted driver still passes
+    /// Otto's env to a client terminal and still refuses an override of it.
+    #[test]
+    fn an_adopted_driver_keeps_ottos_env_for_client_terminals() {
+        let mut d = AcpDriver::grok();
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"g"}}"#);
+        d.state.child_env = vec![("OWN_KEY".into(), "otto".into())];
+        let mut adopted = AcpDriver::grok();
+        adopted.restore_state(&d.snapshot_state()).unwrap();
+        adopted.state.access = RuntimeAccessMode::FullAccess;
+        let c = r#"{"jsonrpc":"2.0","id":"c1","method":"terminal/create","params":{"sessionId":"g","command":"ls","env":[{"name":"own_key","value":"agent"}]}}"#;
+        let env = adopted
+            .on_line(c)
+            .events
+            .into_iter()
+            .find_map(|e| match e {
+                DriverEvent::ClientCall {
+                    op: crate::driver::ClientOp::TerminalCreate { env, .. },
+                    ..
+                } => Some(env),
+                _ => None,
+            })
+            .expect("the command runs");
+        assert_eq!(env, [("OWN_KEY".to_string(), "otto".to_string())]);
     }
 
     /// Finding 1: a confined (Seatbelt) grok gets no `fs` capability and its
