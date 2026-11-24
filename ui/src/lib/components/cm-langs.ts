@@ -22,6 +22,9 @@ const SYNC: Record<string, Build> = {
 };
 
 const js = () => import('@codemirror/lang-javascript');
+// Markdown + the IDE's writing help (cm-md-assist.ts: active in IDE editors only).
+const md = (): Promise<Build> =>
+  Promise.all([import('@codemirror/lang-markdown'), import('./cm-md-assist.ts')]).then(([m, a]) => () => [m.markdown(), a.markdownAssist()]);
 const extra = () => import('./cm-langs-extra.ts');
 
 const LOADERS: Record<string, () => Promise<Build>> = {
@@ -53,8 +56,9 @@ const LOADERS: Record<string, () => Promise<Build>> = {
   css: () => import('@codemirror/lang-css').then((m) => () => m.css()),
   scss: () => import('@codemirror/lang-css').then((m) => () => m.css()),
   less: () => import('@codemirror/lang-css').then((m) => () => m.css()),
-  md: () => import('@codemirror/lang-markdown').then((m) => () => m.markdown()),
-  mdx: () => import('@codemirror/lang-markdown').then((m) => () => m.markdown()),  java: () => import('@codemirror/lang-java').then((m) => () => m.java()),
+  md,
+  mdx: md,
+  markdown: md,  java: () => import('@codemirror/lang-java').then((m) => () => m.java()),
   class: () => import('@codemirror/lang-java').then((m) => () => m.java()),
   gradle: () => import('@codemirror/lang-java').then((m) => () => m.java()),
   kts: () => import('@codemirror/lang-java').then((m) => () => m.java()),
