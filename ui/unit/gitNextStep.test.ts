@@ -13,6 +13,16 @@ test('the primary walks Commit and push → Push (↑N) → Create pull request 
   assert.deepEqual(primaryStep({ ...S, prNumber: 7 }), { kind: 'pr', label: 'Open pull request' });
 });
 
+test('a clean, synced default branch has no next step (no PR from main into main)', () => {
+  for (const branch of ['main', 'master']) {
+    assert.equal(primaryStep({ ...S, branch, upstream: `origin/${branch}` }).kind, 'none');
+    // Work on it still commits and pushes.
+    assert.equal(primaryStep({ ...S, branch, upstream: `origin/${branch}`, ahead: 1 }).kind, 'push');
+  }
+  // Another branch tracking main (a worktree's topic branch) still offers a PR.
+  assert.equal(primaryStep({ ...S, branch: 'feat/x', upstream: 'origin/main' }).kind, 'create-pr');
+});
+
 test('nowhere to push: the primary only commits; unpublished branches publish', () => {
   assert.deepEqual(primaryStep({ ...S, changes: 1, remote: false, upstream: null, forge: false }), { kind: 'commit', label: 'Commit' });
   assert.deepEqual(primaryStep({ ...S, changes: 1, branch: null }), { kind: 'commit', label: 'Commit' });

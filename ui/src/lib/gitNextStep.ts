@@ -25,6 +25,8 @@ export interface GitAction {
   label: string;
 }
 
+const DEFAULT_BRANCHES = new Set(['main', 'master']);
+
 /** The next step for this checkout: work to commit first, then commits to
  *  push, then the pull request (opened, or to create). */
 export function gitAction(s: GitActionState): GitAction {
@@ -32,7 +34,8 @@ export function gitAction(s: GitActionState): GitAction {
   if (s.branch && s.remote && !s.upstream) return { kind: 'publish', label: 'Publish branch' };
   if (s.branch && s.upstream && s.ahead > 0) return { kind: 'push', label: s.ahead === 1 ? 'Push 1 commit' : `Push ${s.ahead} commits` };
   if (s.prNumber != null) return { kind: 'pr', label: `PR #${s.prNumber}` };
-  if (s.branch && s.forge) return { kind: 'create-pr', label: 'Create PR' };
+  // The default branch is what PRs merge INTO: a clean, synced main has no next step.
+  if (s.branch && s.forge && !DEFAULT_BRANCHES.has(s.branch)) return { kind: 'create-pr', label: 'Create PR' };
   return { kind: 'none', label: 'Nothing to commit' };
 }
 
