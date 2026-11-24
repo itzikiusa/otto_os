@@ -3,7 +3,7 @@
   // the canvas (tabbed split panes or the tiled grid). While it is open the
   // app's navigator folds to its icon rail (foldNavWhileMounted), as on
   // Threads. A phone shows the inbox as the page (`#/agents`) and a session
-  // full-height (`#/agents/<id>`); Back returns to the list.
+  // full-height (`#/agents/<id>`, its pane header's ‹ returns to the list).
   import { onMount, untrack } from 'svelte';
   import AgentsInbox from './AgentsInbox.svelte';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
@@ -110,11 +110,6 @@
     <div class="agents-body"><AgentsInbox /></div>
   {:else}
   <div class="agents-body">
-    {#if phone}
-      <button type="button" class="btn small ghost agents-back" data-testid="agents-back-to-list" onclick={() => router.go('agents')}>
-        <Icon name="chevronLeft" size={14} /> Sessions
-      </button>
-    {/if}
   <!-- Scratch-session discovery can begin after the no-workspace coach has
        accepted a draft. Keep that form mounted; real workspace navigation
        and the ordinary empty state still show their loading skeleton. -->
@@ -191,8 +186,5 @@
     flex: 1;
     min-height: 0;
   }
-  .agents-back {
-    align-self: flex-start;
-    min-block-size: var(--hit-min);
-  }
+
 </style>

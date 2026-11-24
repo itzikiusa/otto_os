@@ -550,6 +550,8 @@
           ]),
     ];
     const share: MenuItem[] = [
+      ...(viewport.isPhone ? [{ label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) } as MenuItem] : []),
+      ...(ws.sessions.length > 1 ? [{ label: 'Broadcast to all sessions…', icon: 'send', hint: '⌘⇧B', action: () => ui.openBroadcast() } as MenuItem] : []),
       ...(readOnly ? [] : [{ label: 'Share…', icon: 'share', action: () => void openShare() } as MenuItem]),
       ...(!readOnly && isAgent ? [{ label: 'Hand over to…', icon: 'send', action: openHandover } as MenuItem] : []),
       ...(!readOnly && session?.kind === 'agent' ? [{ label: 'Start room…', icon: 'people', action: () => (roomOpen = true) } as MenuItem] : []),
@@ -619,6 +621,10 @@
       >
         <Icon name="grip" size={12} />
       </button>
+    {/if}
+    {#if viewport.isPhone}
+      <!-- Phone: the session is pushed over the list (#/agents); Back returns. -->
+      <button type="button" class="icon-btn pane-back" aria-label="Back to sessions" title="Back to sessions" data-testid="agents-back-to-list" onclick={() => router.go('agents')}><Icon name="chevronLeft" size={16} /></button>
     {/if}
     <span class="pane-word {word.tone}" data-testid="pane-status" data-state={paneState.key} title={suspendNote ?? paneState.hint ?? paneState.label}>{word.word}</span>
     {#if renaming}
@@ -967,6 +973,17 @@
     text-overflow: ellipsis;
   }
   /* Terminal | Chat. */
+  .pane-back {
+    flex-shrink: 0;
+    margin-inline-start: calc(-1 * var(--sp-3));
+  }
+  /* Touch: the header's Back and ⋯ are finger-sized (44 px). */
+  @media (hover: none), (pointer: coarse) {
+    .pane-head > :is(.pane-back, .pane-more) {
+      inline-size: 44px;
+      block-size: 44px;
+    }
+  }
   .pane-view {
     flex-shrink: 0;
     display: inline-flex;

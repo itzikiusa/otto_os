@@ -253,8 +253,9 @@ test('writing commands: typed command echoes into the terminal', async ({ page }
 test('New Session sheet fits the viewport and Start is reachable', async ({ page }) => {
   await openSession(page, shellA);
 
-  // The "+" new-tab button is in the TabBar on every viewport (Agents view).
-  await page.locator('.tabbar .new-tab').click();
+  // A phone opens New session from the pane's ⋯ (no tab strip on a phone).
+  await page.locator('.pane-head button[title="More…"]').first().click();
+  await page.getByRole('menuitem', { name: 'New session…' }).click();
 
   const sheet = page.locator('.sheet[role="dialog"]');
   await expect(sheet).toBeVisible();
@@ -282,7 +283,8 @@ test('New Session sheet fits the viewport and Start is reachable', async ({ page
 // ── 6. New Session: provider selection adapts (claude/codex extras) ──────────
 test('New Session: selecting claude/codex reveals agent-only options', async ({ page }) => {
   await openSession(page, shellA);
-  await page.locator('.tabbar .new-tab').click();
+  await page.locator('.pane-head button[title="More…"]').first().click();
+  await page.getByRole('menuitem', { name: 'New session…' }).click();
   await expect(page.locator('.sheet[role="dialog"]')).toBeVisible();
 
   const shellCard = page.locator('.provider-card', { hasText: 'shell' });
@@ -309,18 +311,18 @@ test('New Session: selecting claude/codex reveals agent-only options', async ({ 
 // ── 7. Opening a plain shell through the UI actually launches one ─────────────
 test('opening a plain shell from the sheet launches a live terminal', async ({ page }) => {
   await openSession(page, shellA);
-  const before = await page.locator('.tabbar .tab').count();
 
-  await page.locator('.tabbar .new-tab').click();
+  await page.locator('.pane-head button[title="More…"]').first().click();
+  await page.getByRole('menuitem', { name: 'New session…' }).click();
   await expect(page.locator('.sheet[role="dialog"]')).toBeVisible();
   const shellCard = page.locator('.provider-card', { hasText: 'shell' });
   test.skip(!(await shellCard.count()), 'shell provider not advertised by this daemon');
   await shellCard.first().locator('.card-main').click();
   await startSessionBtn(page).click();
 
-  // Sheet closes, a new tab is added, and its terminal mounts with real height.
+  // Sheet closes, the new session is pushed, and its terminal mounts with real height.
   await expect(page.locator('.sheet[role="dialog"]')).toBeHidden({ timeout: 10_000 });
-  await expect.poll(() => page.locator('.tabbar .tab').count()).toBeGreaterThan(before);
+  await expect.poll(() => page.evaluate(() => location.hash)).not.toBe(`#/agents/${shellA}`);
   await expect(page.locator('.term-host').first()).toBeVisible({ timeout: 30_000 });
   const host = await page.locator('.term-host').first().boundingBox();
   expect(host!.height, 'new shell terminal height').toBeGreaterThan(120);
@@ -334,7 +336,8 @@ test('opening a plain shell from the sheet launches a live terminal', async ({ p
 // renders properly on the device.
 test('opening a claude agent renders a correct pane (best-effort)', async ({ page }) => {
   await openSession(page, shellA);
-  await page.locator('.tabbar .new-tab').click();
+  await page.locator('.pane-head button[title="More…"]').first().click();
+  await page.getByRole('menuitem', { name: 'New session…' }).click();
   await expect(page.locator('.sheet[role="dialog"]')).toBeVisible();
   const claudeCard = page.locator('.provider-card', { hasText: 'claude' });
   test.skip(!(await claudeCard.count()), 'claude provider not advertised by this daemon');
@@ -345,30 +348,20 @@ test('opening a claude agent renders a correct pane (best-effort)', async ({ pag
   await expect(page.locator('.term-host').first()).toBeVisible({ timeout: 30_000 });
   const host = await page.locator('.term-host').first().boundingBox();
   expect(host!.height, 'claude terminal height').toBeGreaterThan(120);
-  // The pane header's details chip reflects the agent kind (a phone-width pane
-  // hides the chip; its accessible name still carries the provider).
-  await expect(page.locator('.pane-head [data-testid="pane-details"]').first()).toHaveAttribute('aria-label', /claude/i);
+  // The pane header says its state in a word.
+  await expect(page.locator('.pane-head [data-testid="pane-status"]').first()).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });
 
-// ── 9. Tabs: multiple sessions are reachable + scrollable, no overflow ───────
-test('tab bar: tabs scroll horizontally and switch sessions', async ({ page }) => {
-  // Open BOTH seeded sessions so two tabs exist (a tab is only added when a
-  // session is actually opened/routed to — seeding alone doesn't open a tab).
+// ── 9. Switching sessions on a phone: through the list, no overflow ──────────
+test('switching sessions goes through the list (no tab strip on a phone)', async ({ page }) => {
   await openSession(page, shellB);
-  await openSession(page, shellA);
-  const tabs = page.locator('.tabbar .tab');
-  await expect.poll(() => tabs.count(), { message: 'two open tabs' }).toBeGreaterThanOrEqual(2);
-
-  // The tab strip itself must not overflow the document.
+  await expect(page.locator('.tabbar')).toHaveCount(0);
+  await page.getByTestId('agents-back-to-list').click();
+  await expect(page.getByTestId('agents-inbox')).toBeVisible();
   await expectNoHorizontalOverflow(page);
-
-  // View-mode toggle (tabs/tiled/mission) is reachable.
-  await expectOnScreen(page, await page.locator('.view-toggle').boundingBox(), 'view-mode toggle');
-
-  // Switching tabs swaps the active pane without breaking layout.
-  await tabs.nth(1).click();
-  await expect(page.locator('.term-host').first()).toBeVisible();
+  await page.locator(`[data-testid="agents-row-${shellA}"] .tr-main`).click();
+  await expect(page.locator('.term-host').first()).toBeVisible({ timeout: 30_000 });
   await expectContentHasHeight(page);
   await expectNoHorizontalOverflow(page);
 });
@@ -376,6 +369,8 @@ test('tab bar: tabs scroll horizontally and switch sessions', async ({ page }) =
 // ── 10. Tiled view: all sessions visible at once, no overflow ────────────────
 test('tiled view renders tiles with height and no overflow', async ({ page }) => {
   await openSession(page, shellA);
+  // A phone shows one session at a time (no tab strip, no tiled view).
+  test.skip(await liveIsPhone(page), 'phones show one session at a time');
   // Switch to tiled via the toolbar (grid) button.
   await page.locator('.view-toggle button[aria-label="Tiled view"]').click();
 
@@ -390,8 +385,8 @@ test('tiled view renders tiles with height and no overflow', async ({ page }) =>
   await page.locator('.view-toggle button[aria-label="Tabbed view"]').click();
 });
 
-// ── 11. Phone-only: floating term controls + action bar are on-screen ────────
-test('phone: terminal floating controls + action bar are reachable', async ({ page }) => {
+// ── 11. Phone-only: floating term controls + the one header row ─────────────
+test('phone: terminal floating controls and the one header row are reachable', async ({ page }) => {
   await openSession(page, shellA);
   test.skip(!(await liveIsPhone(page)), 'phone-mode only (≤640px live viewport)');
 
@@ -402,13 +397,15 @@ test('phone: terminal floating controls + action bar are reachable', async ({ pa
   const kbBox = await kbToggle.boundingBox();
   expect(kbBox!.height, 'keyboard toggle tap height').toBeGreaterThanOrEqual(44);
 
-  // The bottom MobileActionBar exposes New/Close/Find/Palette as real tap targets.
-  const actionBar = page.locator('.action-bar[role="toolbar"]');
-  await expect(actionBar).toBeVisible();
-  await expectOnScreen(page, await actionBar.boundingBox(), 'mobile action bar');
-  const newBtn = page.locator('.action-bar .ab-btn', { hasText: 'New' });
-  await expect(newBtn).toBeVisible();
-  expect((await newBtn.boundingBox())!.height, 'action bar tap height').toBeGreaterThanOrEqual(40);
+  // No shortcut bar and no tab strip: the pane's one header row carries Back
+  // and ⋯ (New session, Find, Broadcast, Archive, Delete…) as real tap targets.
+  await expect(page.locator('.action-bar')).toHaveCount(0);
+  await expect(page.locator('.tabbar')).toHaveCount(0);
+  for (const sel of ['[data-testid="agents-back-to-list"]', '.pane-head button[title="More…"]']) {
+    const b = page.locator(sel).first();
+    await expectOnScreen(page, await b.boundingBox(), sel);
+    expect((await b.boundingBox())!.height, `${sel} tap height`).toBeGreaterThanOrEqual(40);
+  }
 
   // Bottom nav is present and on-screen.
   await expectOnScreen(page, await page.locator('.bottomnav').boundingBox(), 'bottom nav');
