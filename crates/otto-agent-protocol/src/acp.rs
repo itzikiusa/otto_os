@@ -1105,6 +1105,35 @@ impl AcpDriver {
         }
     }
 
+    /// An agent error as the thread shows it. opencode's sign-in failure
+    /// names the model and where to pick one that works (opencode only lists
+    /// the models of its configured providers; an expired or missing login
+    /// otherwise reads as a bare "Authentication required").
+    fn failure(&self, class: &str, e: &Value) -> ProviderFailure {
+        let mut f = rpc_failure(class, e);
+        let m = f.message.to_ascii_lowercase();
+        let auth = [
+            "authentication",
+            "api key",
+            "unauthorized",
+            "401",
+            "not logged in",
+            "login",
+            "credential",
+        ]
+        .iter()
+        .any(|k| m.contains(k));
+        if self.provider == RuntimeProvider::Opencode && auth {
+            let model = self.state.model.as_deref().unwrap_or("its default model");
+            f.class = "auth".into();
+            f.message = format!(
+                "opencode has no signed-in provider for {model} \u{b7} pick a model from a provider you are signed in to (`opencode auth list` shows them, e.g. OpenAI or GitHub Copilot). opencode said: {}",
+                f.message
+            );
+        }
+        f
+    }
+
     /// `session/set_mode`, or the agent's mode config option.
     fn set_mode(&mut self, step: &mut DriverStep, sid: &str, mode: &str) {
         let (id, line) = match self.state.mode_config_id.clone() {
@@ -2004,7 +2033,7 @@ impl AcpDriver {
         if let Phase::Authenticating { load } = self.state.phase {
             if id == self.state.auth_id {
                 if let Some(e) = error {
-                    step.push(DriverEvent::Fatal(rpc_failure("auth_required", &e)));
+                    step.push(DriverEvent::Fatal(self.failure("auth_required", &e)));
                     return;
                 }
                 self.create_session(step, load);
@@ -2072,7 +2101,7 @@ impl AcpDriver {
                     self.create_session(step, false);
                     return;
                 }
-                step.push(DriverEvent::Fatal(rpc_failure("handshake_error", &e)));
+                step.push(DriverEvent::Fatal(self.failure("handshake_error", &e)));
                 return;
             }
             if let Some(r) = &result {
@@ -2255,7 +2284,7 @@ impl AcpDriver {
                     } else {
                         TurnTerminalStatus::Failed
                     },
-                    failure: (!was_cancelling).then(|| rpc_failure("provider_error", &e)),
+                    failure: (!was_cancelling).then(|| self.failure("provider_error", &e)),
                     reason: None,
                 },
                 (Some(r), None) => {
@@ -4069,6 +4098,52 @@ mod tests {
             .events
             .iter()
             .any(|e| matches!(e, DriverEvent::ClientCall { .. })));
+    }
+
+    /// opencode's sign-in failure names the model and where to pick one.
+    #[test]
+    fn opencode_says_which_model_has_no_signed_in_provider() {
+        let mut d = AcpDriver::opencode();
+        d.start(&LaunchContext {
+            model: Some("google/gemini-x".into()),
+            ..ctx(None)
+        });
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"o"}}"#);
+        let mut prompt = d.prompt("t1", &RuntimePromptReq::of("hi")).unwrap();
+        let id = (0..prompt.writes.len())
+            .map(|i| sent(&prompt, i))
+            .find(|w| w["method"] == "session/prompt")
+            .unwrap()["id"]
+            .clone();
+        prompt = d.on_line(&json!({"jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":"Authentication required"}}).to_string());
+        let failure = prompt
+            .events
+            .iter()
+            .find_map(|e| match e {
+                DriverEvent::Terminal { failure, .. } => failure.clone(),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(failure.class, "auth");
+        assert!(
+            failure
+                .message
+                .starts_with("opencode has no signed-in provider for google/gemini-x"),
+            "{}",
+            failure.message
+        );
+        assert!(failure.message.ends_with("Authentication required"));
+        // Another agent's error is left as it is.
+        let g = AcpDriver::gemini("gemini");
+        assert_eq!(
+            g.failure(
+                "provider_error",
+                &json!({"message":"Authentication required"})
+            )
+            .class,
+            "provider_error"
+        );
     }
 
     #[test]
