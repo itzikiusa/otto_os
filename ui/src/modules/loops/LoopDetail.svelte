@@ -7,7 +7,8 @@
   import { loadErrorText } from '../../lib/loadError';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
-  import SessionView from '../agents/SessionView.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import IterationRow from './IterationRow.svelte';
   import GoalGraphView from './GoalGraphView.svelte';
   import IterationDiagram from './IterationDiagram.svelte';
@@ -29,6 +30,10 @@
   import LoopSafetyNotes from './LoopSafetyNotes.svelte';
   import LoopOpsDrawer from './LoopOpsDrawer.svelte';
   import { tick } from 'svelte';
+
+  // The embedded session (terminal + xterm) shows only after a click on an
+  // agent, so it loads then, not with the loop list.
+  const SessionViewLazy = lazyComponent(() => import('../agents/SessionView.svelte'));
 
   /** ⌘K verbs registered by the detail page (or bound via optional actions prop). */
   export interface LoopActions {
@@ -436,12 +441,17 @@
           <button type="button" class="btn small" onclick={() => ws.navigateToSession(openSessionId ?? '')}>Open in Agents</button>
         </div>
         <div class="sess-pane">
-          <SessionView
-            sessionId={openSessionId}
-            focused={sessFocused}
-            showClose={true}
-            onfocus={() => (sessFocused = true)}
-            onclosepane={() => { openSessionId = null; sessFocused = false; }}
+          <LazyMount
+            lazy={SessionViewLazy}
+            what="the agent session"
+            variant="panel"
+            props={{
+              sessionId: openSessionId,
+              focused: sessFocused,
+              showClose: true,
+              onfocus: () => (sessFocused = true),
+              onclosepane: () => { openSessionId = null; sessFocused = false; },
+            }}
           />
         </div>
       </section>
