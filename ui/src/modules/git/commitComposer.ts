@@ -71,6 +71,10 @@ export function takePendingDraft(repoId: string): DraftCommitMessageResp | null 
 }
 
 const inflight = new Map<string, Promise<DraftCommitMessageResp>>();
+// What a running draft has streamed so far, and the panels showing its repo:
+// a panel remounted (or opened) mid-stream follows it live, not the dead one.
+const live = new Map<string, string>();
+const sinks = new Map<string, Set<(text: string) => void>>();
 const controllers = new Map<string, AbortController>();
 const watchers = new Map<string, number>();
 
@@ -92,7 +96,7 @@ export function startDraft(
     },
     () => {},
   ).finally(() => {
-    if (inflight.get(repoId) === p) inflight.delete(repoId);
+    if (inflight.get(repoId) === p) { inflight.delete(repoId); live.delete(repoId); }
     if (controllers.get(repoId) === ctl) controllers.delete(repoId);
   });
   return p;
@@ -123,6 +127,23 @@ export function cancelDraft(repoId: string): void {
   controllers.get(repoId)?.abort();
   controllers.delete(repoId);
   inflight.delete(repoId);
+  live.delete(repoId);
+}
+
+/** The running draft for `repoId` streamed `text` so far: every panel showing it hears. */
+export function draftText(repoId: string, text: string): void {
+  live.set(repoId, text);
+  for (const f of sinks.get(repoId) ?? []) f(text);
+}
+
+/** The text the running draft has streamed so far ('' when none). */
+export const liveDraftText = (repoId: string): string => live.get(repoId) ?? '';
+
+/** A panel showing `repoId` hears its draft's text; returns the unsubscribe. */
+export function onDraftText(repoId: string, fn: (text: string) => void): () => void {
+  const set = sinks.get(repoId) ?? new Set();
+  sinks.set(repoId, set.add(fn));
+  return () => void set.delete(fn);
 }
 
 /** The draft still running for `repoId`, if any (a remounted panel resumes
