@@ -24,10 +24,6 @@
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import type { McpServerDetail } from '../../lib/api/types';
   import { mcpUiState } from './mcpUiState.svelte';
-  import ServersTab from './ServersTab.svelte';
-  import ApprovalsTab from './ApprovalsTab.svelte';
-  import AuditTab from './AuditTab.svelte';
-  import OttoServerHome from './OttoServerHome.svelte';
   import McpHome from './McpHome.svelte';
   import { pendingOf } from './mcpHome';
   import type { McpApproval } from '../../lib/api/types';
@@ -37,6 +33,12 @@
   // Profiles is its own section, behind a dynamic import so the editor and
   // tool-group tables don't ride on every MCP page open (bundle budget).
   const ProfilesTab = lazyComponent(() => import('./ProfilesTab.svelte'));
+  // Every section but the landing loads on first open: first paint is the
+  // Overview (what waits on you) only.
+  const OttoServerHome = lazyComponent(() => import('./OttoServerHome.svelte'));
+  const ServersTab = lazyComponent(() => import('./ServersTab.svelte'));
+  const ApprovalsTab = lazyComponent(() => import('./ApprovalsTab.svelte'));
+  const AuditTab = lazyComponent(() => import('./AuditTab.svelte'));
 
   type Section = 'home' | 'otto' | 'profiles' | 'servers' | 'activity';
   const section = $derived<Section>(
@@ -225,7 +227,7 @@
           ondecided={reloadApprovals}
         />
       {:else if section === 'otto'}
-        <OttoServerHome {wsId} />
+        <LazyMount lazy={OttoServerHome} what="Otto’s tools" props={{ wsId }} />
       {:else if section === 'profiles'}
         <LazyMount lazy={ProfilesTab} what="MCP profiles" />
       {:else if section === 'servers'}
@@ -237,21 +239,12 @@
             body="MCP servers that run through Otto, and their tools, belong to a workspace."
           />
         {:else}
-          <ServersTab
-            {wsId}
-            {servers}
-            {loading}
-            error={loadError}
-            selectedServerId={mcpUiState.selectedServerId}
-            onReload={() => loadServers(false)}
-            onPatch={patchServer}
-            onSelect={(id) => (mcpUiState.selectedServerId = id)}
-          />
+          <LazyMount lazy={ServersTab} what="the external servers" props={{ wsId, servers, loading, error: loadError, selectedServerId: mcpUiState.selectedServerId, onReload: () => loadServers(false), onPatch: patchServer, onSelect: (id: string | null) => (mcpUiState.selectedServerId = id) }} />
         {/if}
       {:else}
         <div class="activity">
-          <ApprovalsTab ondecided={reloadApprovals} />
-          <AuditTab {servers} />
+          <LazyMount lazy={ApprovalsTab} what="approvals" variant="panel" props={{ ondecided: reloadApprovals }} />
+          <LazyMount lazy={AuditTab} what="the audit log" variant="panel" props={{ servers }} />
         </div>
       {/if}
     {/key}

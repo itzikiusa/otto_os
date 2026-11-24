@@ -9,11 +9,10 @@
   import { formatCount } from '../../lib/metric-format';
   import { pluralNoun } from '../../lib/plural';
   import { auth } from '../../lib/stores/auth.svelte';
-  import AttributionDrilldown from './AttributionDrilldown.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import CostForecastChip from './CostForecastChip.svelte';
   import CostRow from './CostRow.svelte';
-  import ModelBreakdown from './ModelBreakdown.svelte';
-  import SessionsTable from './SessionsTable.svelte';
   import { unmeasuredTerminalNote, usageProviderLabel } from './providerCoverage';
   import { breakdownTitle, featureLabel } from './tokenParts';
   import { DIM_LABELS, type AttributionDim, type AttributionRow } from './types';
@@ -21,6 +20,11 @@
   import { usageUi, type WhereView } from './usageUiState.svelte';
 
   let { summary }: { summary: UsageSummary } = $props();
+
+  // Views other than Provider and Feature load on first open (first paint).
+  const ModelBreakdown = lazyComponent(() => import('./ModelBreakdown.svelte'));
+  const SessionsTable = lazyComponent(() => import('./SessionsTable.svelte'));
+  const AttributionDrilldown = lazyComponent(() => import('./AttributionDrilldown.svelte'));
 
   const VIEWS: { id: WhereView; label: string }[] = [
     { id: 'provider', label: 'Provider' },
@@ -90,7 +94,7 @@
     {/each}
     {#if unmeasuredTerminalNote(installed)}<p class="dim small note" data-testid="usage-unmeasured-note">{unmeasuredTerminalNote(installed)}</p>{/if}
   {:else if usageUi.where === 'model'}
-    <ModelBreakdown models={summary.models ?? []} dailyModels={summary.daily_models ?? []} days={summary.days} />
+    <LazyMount lazy={ModelBreakdown} what="the models" variant="compact" props={{ models: summary.models ?? [], dailyModels: summary.daily_models ?? [], days: summary.days }} />
   {:else if usageUi.where === 'feature'}
     {#each featureRows as r (r.key)}
       <CostRow label={r.label} cost={r.item.cost_usd} share={r.share} title={breakdownTitle(r.item)} sub="{formatCount(r.item.sessions)} {pluralNoun(r.item.sessions, 'session', 'sessions')} · {formatCount(r.item.total_tokens)} tokens" />
@@ -101,9 +105,9 @@
       <div class="note"><CostForecastChip feature="agent" provider={summary.providers[0].provider} lead="Next agent run on {usageProviderLabel(summary.providers[0].provider)} ≈" /></div>
     {/if}
   {:else if usageUi.where === 'session'}
-    <SessionsTable sessions={summary.sessions} />
+    <LazyMount lazy={SessionsTable} what="the sessions" variant="compact" props={{ sessions: summary.sessions }} />
   {:else}
-    <AttributionDrilldown days={summary.days} bind:rows={attrRows} bind:selectedDim={attrDim} />
+    <LazyMount lazy={AttributionDrilldown} what="the work items" variant="compact" props={{ days: summary.days, onrows: (rows: AttributionRow[], dim: AttributionDim) => { attrRows = rows; attrDim = dim; } }} />
   {/if}
 </section>
 

@@ -11,12 +11,16 @@
   import { usage } from '../../lib/api/usage.svelte';
   import { ws, SCRATCH_WORKSPACE_ID } from '../../lib/stores/workspace.svelte';
   import { computeBudgetForecast } from './budgetForecast';
-  import BudgetsEditor from './BudgetsEditor.svelte';
-  import StorageSettings from './StorageSettings.svelte';
-  import SystemLoad from './SystemLoad.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { usageUi } from './usageUiState.svelte';
 
   let { admin, floating = false }: { admin: boolean; floating?: boolean } = $props();
+
+  // Opened rarely: each loads on first use.
+  const BudgetsEditor = lazyComponent(() => import('./BudgetsEditor.svelte'));
+  const StorageSettings = lazyComponent(() => import('./StorageSettings.svelte'));
+  const SystemLoad = lazyComponent(() => import('./SystemLoad.svelte'));
 
   const wsName = (id: string): string => ws.workspaces.find((w) => w.id === id)?.name ?? (id === SCRATCH_WORKSPACE_ID ? (ws.scratch?.name ?? 'Scratch') : id);
   const budgets = $derived(usage.budgets);
@@ -61,7 +65,7 @@
       <button class="dc-row" aria-expanded={usageUi.systemOpen} data-testid="usage-system-toggle" onclick={() => (usageUi.systemOpen = !usageUi.systemOpen)}>
         <Icon name={usageUi.systemOpen ? 'chevronDown' : 'chevronRight'} size={13} /><span class="dc-label">System load</span>
       </button>
-      {#if usageUi.systemOpen}<SystemLoad intervalSecs={status.metrics_interval_secs} />{/if}
+      {#if usageUi.systemOpen}<LazyMount lazy={SystemLoad} what="system load" variant="compact" props={{ intervalSecs: status.metrics_interval_secs }} />{/if}
     </div>
     <div class="dc-group" aria-label="Storage">
       <button class="dc-row" onclick={() => (usageUi.configOpen = true)} title="Storage and retention settings">
@@ -75,8 +79,8 @@
   {/if}
 </DetailsCard>
 
-{#if usageUi.budgetsOpen && admin}<BudgetsEditor onclose={() => (usageUi.budgetsOpen = false)} />{/if}
-{#if usageUi.configOpen && admin && status}<StorageSettings {status} onclose={() => (usageUi.configOpen = false)} />{/if}
+{#if usageUi.budgetsOpen && admin}<LazyMount lazy={BudgetsEditor} what="the budgets editor" quiet onerror={() => (usageUi.budgetsOpen = false)} props={{ onclose: () => (usageUi.budgetsOpen = false) }} />{/if}
+{#if usageUi.configOpen && admin && status}<LazyMount lazy={StorageSettings} what="storage settings" quiet onerror={() => (usageUi.configOpen = false)} props={{ status, onclose: () => (usageUi.configOpen = false) }} />{/if}
 
 <style>
   .budget .dc-end {

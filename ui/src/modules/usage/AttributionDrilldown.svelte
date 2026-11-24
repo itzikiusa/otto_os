@@ -2,7 +2,7 @@
   // "Where it went › Work item" (B1): "why did this cost so much?" Groups
   // usage_events by a chosen work-graph dimension (repo/branch/PR/…) and shows
   // cost + tokens per group. Loads only while this view is open; the page's
-  // one Export saves the rows shown (they are bound out to the page).
+  // one Export saves the rows shown (handed out through `onrows`).
   import { api } from '../../lib/api/client';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -14,13 +14,12 @@
   import { DIM_LABELS } from './types';
   import { formatCount, formatUsd } from '../../lib/metric-format';
 
-  // The current look-back window; the rows and dimension shown are bound out
-  // so the page's Export saves exactly what is on screen.
-  let {
-    days = 30,
-    rows = $bindable([]),
-    selectedDim = $bindable('origin'),
-  }: { days?: number; rows?: AttributionRow[]; selectedDim?: AttributionDim } = $props();
+  // The current look-back window; `onrows` hands the rows and dimension shown
+  // to the page so its Export saves exactly what is on screen.
+  let { days = 30, onrows }: { days?: number; onrows?: (rows: AttributionRow[], dim: AttributionDim) => void } = $props();
+  let selectedDim: AttributionDim = $state('origin');
+  let rows: AttributionRow[] = $state([]);
+  $effect(() => onrows?.(rows, selectedDim));
 
   const DIMS: AttributionDim[] = [
     'origin',
