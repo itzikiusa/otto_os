@@ -635,5 +635,8 @@
       flex-shrink: 0;
       padding: 6px 8px 0;
     }
+    .settings-back .btn {
+      min-block-size: 44px;
+    }
   }
 </style>
