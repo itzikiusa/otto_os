@@ -5,7 +5,7 @@
   // "Open N together", and a quiet background refresh every 2 minutes that
   // never resets scroll, selection or the search.
   import { api, ApiError } from '../../lib/api/client';
-  import type { PrListResp, PrState, PrSummary } from '../../lib/api/types';
+  import type { GitAccount, PrListResp, PrState, PrSummary } from '../../lib/api/types';
   import { myGitHandles } from './myGitHandles.svelte';
   import { router } from '../../lib/router.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -18,7 +18,7 @@
   import { plural } from '../../lib/plural';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { invalidatePr, prListCache, prListKey } from './pr-cache';
-  import { ciOf, groupPrs, hasClientFilter, isMine, matchesPr, mergeRefreshed, parsePrQuery, sortPrs, SORT_LABEL, type PrGroup } from './pr-query';
+  import { accountCause, ciOf, groupPrs, hasClientFilter, isMine, matchesPr, mergeRefreshed, parsePrQuery, sortPrs, SORT_LABEL, type PrGroup } from './pr-query';
   import { needsYou } from './prStatus';
   import InboxFold from '../../lib/components/InboxFold.svelte';
   import { PrStatsLoader } from './pr-stats.svelte';
@@ -95,12 +95,14 @@
   let lastRetryRev = 0;
 
   function causeOf(e: unknown): string {
-    return e instanceof ApiError && (e.status === 401 || e.status === 403)
+    return accountCause(e instanceof Error ? e.message : '') ?? (e instanceof ApiError && (e.status === 401 || e.status === 403)
       ? 'The provider rejected the credentials.'
       : e instanceof ApiError && e.status === 404
         ? 'The repository wasn’t found on the provider.'
-        : 'The provider is unreachable.';
+        : 'The provider is unreachable.');
   }
+  /** The cause, then git's own words — unless the cause already says it all. */
+  const failText = (cause: string, raw: string): string => (accountCause(raw) ? cause : `${cause} ${raw}`);
 
   $effect(() => {
     const id = repoId;
@@ -152,6 +154,16 @@
         hasMore = false;
         error = e instanceof Error && e.message ? e.message : 'Couldn’t load pull requests.';
         errorCause = causeOf(e);
+        // A missing token: name the account it belongs to.
+        const msg = error;
+        if (/token missing/i.test(msg)) {
+          void api
+            .get<GitAccount[]>('/git/accounts')
+            .then((accs) => {
+              if (active) errorCause = accountCause(msg, (aid) => accs.find((a) => a.id === aid)?.label || undefined) ?? errorCause;
+            })
+            .catch(() => {});
+        }
       })
       .finally(() => {
         if (active) loading = false;
@@ -185,7 +197,7 @@
       if (manual && revision === loadRevision) {
         moreError = '';
         // Keep the rows; say why the refresh failed under the toolbar.
-        refreshError = `${causeOf(e)} ${loadErrorText(e)}`;
+        refreshError = failText(causeOf(e), loadErrorText(e));
       }
     } finally {
       if (revision === loadRevision) refreshing = false;
@@ -484,7 +496,7 @@
     {#if loading}
       <Skeleton rows={6} height={40} />
     {:else if error}
-      <LoadState what="pull requests" error={`${errorCause} ${error}`} empty onretry={() => retryRev++} />
+      <LoadState what="pull requests" error={failText(errorCause, error)} empty onretry={() => retryRev++} />
     {:else if prs.length === 0 && prefs.review}
       <EmptyState icon="eye" title="No reviews requested from you" body="No open pull request asks you for a review right now."
         actionLabel="Show every pull request" actionIcon="pr" onaction={() => setPrefs({ review: false })} />

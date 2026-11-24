@@ -6,7 +6,8 @@ import { componentFunctions } from './componentFunctions.ts';
 import { deferred, loadSource } from './sourceHarness.ts';
 import { agentRowKey, agentRowRetryAction, canStopReviewAgent } from '../src/modules/git/reviewAgentsRow.ts';
 import { pickDefaultBase } from '../src/modules/git/localReviewRefs.ts';
-import { prCandidateRepos } from '../src/modules/git/focusPrHelpers.ts';
+import { freshPrs, prCandidateRepos, savePrs } from '../src/modules/git/focusPrHelpers.ts';
+import { accountCause } from '../src/modules/git/pr-query.ts';
 import { lsGet, lsRemove, lsSet } from '../src/lib/storage.ts';
 import * as gitopsPlan from '../src/modules/git/gitopsPlan.ts';
 
@@ -374,6 +375,8 @@ test('FocusView.loadPrs drops earlier overlapping run when a newer loadPrs start
     myHandles: new Set(),
     git: { allReposLoaded: true, allRepos: [repo], loadAllRepos: async () => {} },
     prCandidateRepos,
+    freshPrs,
+    savePrs,
     api: {
       get: async () => [{ provider: 'github', username: 'alice' }],
       bg: {
@@ -558,4 +561,57 @@ test('GitToolbar.pullMenu refuses to open when noRemote is true', () => {
   s.noRemote = false;
   s.pullMenu({});
   assert.equal(shown, 1);
+});
+
+test('FocusView.loadPrs on 177 repos: only linked ones are asked, 2 at a time, and a revisit inside a minute asks none', async () => {
+  // Real-shaped: 177 registered repos (the owner's), 12 of them linked to a git account.
+  const repos = Array.from({ length: 177 }, (_, i) => ({
+    id: `r${i}`,
+    provider: i % 3 === 0 ? 'bitbucket' : 'github',
+    forge: i % 3 === 0 ? 'bitbucket' : 'github',
+    git_account_id: i % 15 === 0 ? 'acc1' : null,
+  }));
+  const linked = repos.filter((r) => r.git_account_id).length;
+  const asked: string[] = [];
+  const limits: number[] = [];
+  const deps = {
+    AbortController,
+    prsRevision: 0,
+    prsAbort: null,
+    prsLoading: false,
+    prErrors: 0,
+    prRows: [],
+    myHandles: new Set(),
+    git: { allReposLoaded: true, allRepos: repos, loadAllRepos: async () => {} },
+    prCandidateRepos,
+    freshPrs,
+    savePrs,
+    api: {
+      get: async () => [{ provider: 'github', username: 'alice' }],
+      bg: { get: async (url: string) => (asked.push(url), { items: [] }) },
+    },
+    mapLimit: async (items: unknown[], limit: number, fn: (x: unknown) => Promise<unknown>) => {
+      limits.push(limit);
+      const out = [];
+      for (const x of items) out.push(await fn(x));
+      return out;
+    },
+  };
+  const s = componentFunctions(git('FocusView.svelte'), ['loadPrs'], deps);
+  await s.loadPrs(true); // (the module cache may hold an earlier test's read)
+  assert.equal(linked, 12);
+  assert.equal(asked.length, linked, 'one request per LINKED repo, not per registered repo');
+  assert.deepEqual(limits, [2]);
+  await s.loadPrs(); // Focus opened again
+  assert.equal(asked.length, linked, 'no refetch on a revisit inside the cache window');
+  await s.loadPrs(true); // Refresh
+  assert.equal(asked.length, 2 * linked);
+});
+
+test('accountCause: a missing account or token says what is wrong, never "unreachable"', () => {
+  const none = accountCause('invalid: repo has no git account: link a github account to this repo (Git → repo card → Account)');
+  assert.match(none ?? '', /^No git account is linked to this repo\./);
+  assert.match(accountCause('invalid: token missing for git account acc-7', (id) => (id === 'acc-7' ? 'work GitHub' : undefined)) ?? '', /^The token for work GitHub is missing\. Add it again in Settings → Git Accounts\.$/);
+  assert.match(accountCause('invalid: token missing for git account acc-7') ?? '', /this repo’s git account/);
+  assert.equal(accountCause('error sending request: connection refused'), null);
 });
