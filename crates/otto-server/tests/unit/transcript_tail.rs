@@ -674,3 +674,52 @@ fn rewindow_reuses_the_charge_of_the_window_it_replaces() {
         "the fresh window fits in the charge it replaced"
     );
 }
+
+/// An open chat on a growing transcript costs one delta per append, never a
+/// page re-read (RS-1): a sidecar record that touches no turn sends no frame
+/// (an empty delta reads as "did not fit"), and a turn whose prose alone is
+/// over 64 KB still ships whole instead of `turns: []`.
+#[test]
+fn appends_to_a_live_chat_never_force_a_page_reread() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("growing.jsonl");
+    std::fs::write(
+        &path,
+        "{\"type\":\"user\",\"uuid\":\"u0\",\"message\":{\"content\":\"hi\"}}\n",
+    )
+    .unwrap();
+    let mut st = refold_with(Provider::Claude, &path, Default::default()).unwrap();
+    let live = Live {
+        provider: Provider::Claude,
+        path: path.clone(),
+        state: Mutex::new(None),
+        settled: tokio::sync::watch::Sender::new(true),
+    };
+    let mut known = HashSet::new();
+    let mut append = |line: String| {
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(format!("{line}\n").as_bytes()).unwrap();
+        step(
+            &|| Default::default(),
+            &"t".into(),
+            &live,
+            &mut st,
+            &mut known,
+        )
+    };
+    let sidecar = append(r#"{"type":"last-prompt","lastPrompt":"hi","sessionId":"s"}"#.into());
+    assert!(
+        sidecar.is_none(),
+        "no frame for a record that touches no turn"
+    );
+    let prose = "p".repeat(EVENT_CAP + 1024);
+    let out = append(format!(r#"{{"type":"assistant","uuid":"a1","requestId":"r1","message":{{"id":"m1","role":"assistant","content":[{{"type":"text","text":"{prose}"}}]}}}}"#)).unwrap();
+    assert!(
+        !out.oversize && out.turns.len() == 1,
+        "a 65 KB turn ships, no re-read"
+    );
+}
