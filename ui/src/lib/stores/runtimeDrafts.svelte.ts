@@ -95,6 +95,7 @@ export class RuntimeDrafts {
    *  settle with whether the delete went through: a failed one brings the
    *  draft back as it was, unsaved edits included. */
   forget(id: string): (deleted: boolean) => void {
+    const epoch = this.epoch;
     this.gone.add(id);
     this.live.get(id)?.();
     this.live.delete(id);
@@ -104,7 +105,8 @@ export class RuntimeDrafts {
     this.idle = this.idle.filter((x) => x !== id);
     delete this.byId[id]; // its writer saves only a draft this store owns
     return (deleted) => {
-      if (deleted) return void root?.dispose();
+      // Another identity signed in meanwhile: this draft is not theirs.
+      if (deleted || this.epoch !== epoch) return void root?.dispose();
       this.gone.delete(id);
       if (!draft) return;
       this.byId[id] = draft;
