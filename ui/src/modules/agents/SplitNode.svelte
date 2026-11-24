@@ -240,7 +240,8 @@
       </div>
     {:else if node.ref.kind === 'thread'}
       {@const id = node.ref.id}
-      <LazyMount lazy={ThreadPane} what="the thread" variant="panel" props={{
+      <!-- Keyed: another thread in this pane is a fresh pane (its own read, its own "seen"). -->
+      {#key id}<LazyMount lazy={ThreadPane} what="the thread" variant="panel" props={{
         threadId: id,
         focused: ws.focusedPane === idx && paneCount > 1,
         showClose: paneCount > 1,
@@ -249,7 +250,7 @@
         ondragpane: (phase: 'start' | 'end') => (layout.dragKey = phase === 'start' ? node.key : null),
         onfocus: () => ws.focusPane(idx),
         onclose: () => ws.closeTab(id),
-      }} />
+      }} />{/key}
     {:else}
       <SessionView
         sessionId={node.ref.id}
