@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { performance } from 'node:perf_hooks';
 import { test } from 'node:test';
 import {
   applyFallbackManifestVersionUpdate,
@@ -67,10 +66,14 @@ test('Go semantic classifier distinguishes package prefix, struct/pkg fields, fu
     '}',
   ].join('\n');
 
-  const t0 = performance.now();
   const spans = classifySemanticTokens(goCode, 'go');
-  const elapsed = performance.now() - t0;
-  assert.ok(elapsed < 25, `expected fast viewport semantic scan, took ${elapsed.toFixed(2)}ms`);
+  // A viewport scan does the viewport's work only: every span lies inside the
+  // visible range (a count, not a wall clock, so a loaded machine can't flake it).
+  const lastLine = { from: goCode.lastIndexOf('\tapp.InitApp'), to: goCode.length };
+  const visible = classifySemanticTokens(goCode, 'go', [lastLine]);
+  assert.ok(visible.length > 0 && visible.length < spans.length);
+  assert.ok(visible.every((s) => s.from >= lastLine.from && s.to <= lastLine.to));
+  assert.ok(roleMap(goCode, visible).get('InitApp')?.has('func-call'));
 
   const byIdent = roleMap(goCode, spans);
   // Package prefixes must be neutral foreground (`fg`), NEVER coral-red or purple field!

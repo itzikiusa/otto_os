@@ -3,13 +3,14 @@ use crate::{auth::require_root, ApiError, ApiResult, CurrentUser, ServerCtx};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    Json,
+    routing::{get, post},
+    Json, Router,
 };
 use otto_core::Error;
 use otto_state::SettingsRepo;
 use otto_telemetry::{
-    NativeProfile, NavigationCount, SpanRecord, Suggestion, TelemetryConfig, TelemetryOverview,
-    TelemetryService, TelemetryStatus,
+    validate_ui_batch, NativeProfile, NavigationCount, SpanRecord, Suggestion, TelemetryConfig,
+    TelemetryOverview, TelemetryService, TelemetryStatus,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -25,6 +26,24 @@ fn service(ctx: &ServerCtx) -> ApiResult<&Arc<TelemetryService>> {
 }
 fn upstream(e: impl std::fmt::Display) -> ApiError {
     ApiError(Error::Upstream(e.to_string()))
+}
+
+/// The root-only `/telemetry/*` routes (merged into `protected_routes`).
+pub fn routes() -> Router<ServerCtx> {
+    Router::new()
+        .route("/telemetry/config", get(config).put(put_config))
+        .route("/telemetry/status", get(status))
+        .route("/telemetry/overview", get(overview))
+        .route("/telemetry/navigation", get(navigation))
+        .route("/telemetry/suggestions", get(suggestions))
+        .route("/telemetry/analyze", post(analyze))
+        .route("/telemetry/suggestions/{id}/dismiss", post(dismiss))
+        .route("/telemetry/traces/{id}", get(trace))
+        .route("/telemetry/profile", get(latest_profile).post(profile))
+        .route(
+            "/telemetry/ingest",
+            post(ingest).layer(axum::extract::DefaultBodyLimit::max(131_072)),
+        )
 }
 
 pub async fn config(
@@ -143,85 +162,13 @@ pub struct Ingest {
     pub spans: Vec<SpanRecord>,
 }
 
-fn validate_ui(spans: &[SpanRecord]) -> ApiResult<()> {
-    if spans.len() > 100 {
-        return Err(ApiError(Error::Invalid(
-            "A telemetry batch may contain at most 100 spans".into(),
-        )));
-    }
-    for span in spans {
-        span.validate()
-            .map_err(|e| ApiError(Error::Invalid(e.to_string())))?;
-        if !matches!(
-            span.name.as_str(),
-            "ui.navigation"
-                | "ui.chunk"
-                | "ui.render"
-                | "ui.long_task"
-                | "ui.frame_delay"
-                | "http.client"
-                | "ui.request.queue"
-                | "ui.response.decode"
-                | "ui.thread.open"
-                | "ui.thread.send"
-        ) || !matches!(span.kind.as_str(), "client" | "internal")
-            || !UI_COMPONENTS.contains(&span.component.as_str())
-            || span.attributes.contains_key("http.route")
-        {
-            return Err(ApiError(Error::Invalid(
-                "Unsupported UI telemetry operation".into(),
-            )));
-        }
-    }
-    Ok(())
-}
-const UI_COMPONENTS: &[&str] = &[
-    "agents",
-    "threads",
-    "ide",
-    "workbench",
-    "connections",
-    "history",
-    "assistant",
-    "home",
-    "git",
-    "database",
-    "api",
-    "vault",
-    "mission-control",
-    "rooms",
-    "workflows",
-    "scheduled-tasks",
-    "personal-agents",
-    "loops",
-    "swarm",
-    "product",
-    "design",
-    "canvas",
-    "browser",
-    "run-with-otto",
-    "mcp",
-    "brokers",
-    "kubernetes",
-    "aws",
-    "insights",
-    "usage",
-    "skills-eval",
-    "proof",
-    "settings",
-    "walkthroughs",
-    "plugin",
-    "snip",
-    "shell",
-    "other",
-];
 pub async fn ingest(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
     Json(batch): Json<Ingest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_root(&user)?;
-    validate_ui(&batch.spans)?;
+    validate_ui_batch(&batch.spans).map_err(|e| ApiError(Error::Invalid(e.to_string())))?;
     let svc = service(&ctx)?;
     if !svc.enabled() {
         return Ok(Json(serde_json::json!({"accepted":0})));
@@ -232,55 +179,4 @@ pub async fn ingest(
         .map(|span| usize::from(svc.record(span)))
         .sum::<usize>();
     Ok(Json(serde_json::json!({"accepted":accepted})))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn producer_contract_accepts_mixed_batch_and_rejects_private_names() {
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../otto-telemetry/fixtures/ui-ingest.json"
-        ))
-        .unwrap();
-        let mut spans = vec![
-            SpanRecord::new("ui.navigation", "git", 12.0),
-            SpanRecord::new("ui.render", "git", 2.0),
-            SpanRecord::new("ui.navigation", "threads", 8.0),
-            SpanRecord::new("ui.navigation", "ide", 9.0),
-            SpanRecord::new("ui.thread.open", "threads", 24.0),
-            SpanRecord::new("ui.thread.send", "threads", 3.0),
-        ];
-        for request in fixture["requests"].as_array().unwrap() {
-            let mut span = SpanRecord::new(
-                request["name"].as_str().unwrap(),
-                request["component"].as_str().unwrap(),
-                1.0,
-            );
-            span.kind = "client".into();
-            spans.push(span);
-        }
-        assert!(validate_ui(&spans).is_ok());
-        for name in fixture["rejected_names"].as_array().unwrap() {
-            spans.last_mut().unwrap().name = name.as_str().unwrap().into();
-            assert!(validate_ui(&spans).is_err(), "accepted {name}");
-        }
-        spans.last_mut().unwrap().name = "x".repeat(97);
-        assert!(validate_ui(&spans).is_err());
-        spans.last_mut().unwrap().name = "http.client".into();
-        spans.last_mut().unwrap().component = "private-project".into();
-        assert!(validate_ui(&spans).is_err());
-    }
-    #[test]
-    fn ingestion_rejects_dynamic_names_and_routes_atomically() {
-        let mut span = SpanRecord::new("ui.navigation", "agents", 12.0);
-        assert!(validate_ui(&[span.clone()]).is_ok());
-        span.name = "private-project-name".into();
-        assert!(validate_ui(&[span.clone()]).is_err());
-        span.name = "ui.navigation".into();
-        span.attributes
-            .insert("http.route".into(), "/secrets".into());
-        assert!(validate_ui(&[span]).is_err());
-        assert!(validate_ui(&vec![SpanRecord::new("ui.navigation", "agents", 1.0); 101]).is_err());
-    }
 }
