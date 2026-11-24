@@ -2608,6 +2608,9 @@
     }
     .view-seg { height: 48px; }
     .vs, .rg-more { height: 44px; min-width: 44px; }
+    /* Already 44 px: the touch hit-area ring (app.css, inset -6px) would
+       stick out past the toolbar's edge and make it scroll sideways. */
+    .rg-more::after { inset: 0; }
     .gt-search-input {
       font-size: var(--fs-m);
       align-self: stretch;
