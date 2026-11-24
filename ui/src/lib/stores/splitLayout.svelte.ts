@@ -23,11 +23,13 @@ import {
   retain as retainIn,
   applyPreset as buildPreset,
   parseLayout,
+  storeTree,
   reorderIds,
   neighbour,
   type Axis,
   type Leaf,
   type LayoutNode,
+  type PaneRef,
   type Preset,
   type Rect,
   type Side,
@@ -62,13 +64,13 @@ class SplitLayoutStore {
    *  `refreshSessions()` is still in flight). Writes are skipped until then;
    *  what the route opened is re-applied by `restore()` (see `pendingSession`). */
   private hydrated = true;
-  /** The session `setFocusedSession()` was asked for before hydration — folded
+  /** The ref `setFocusedSession()` was asked for before hydration — folded
    *  back on top of the restored tree so a route-opened session is not lost. */
-  private pendingSession: Id | null = null;
+  private pendingSession: PaneRef | null = null;
 
   leaves: Leaf[] = $derived(leavesOf(this.tree));
-  /** Projection read by ws.panes — sessions in leaf (reading) order; duplicates possible. */
-  panes: Id[] = $derived(this.leaves.map((l) => l.session));
+  /** Projection read by ws.panes — the ids in leaf (reading) order; duplicates possible. */
+  panes: Id[] = $derived(this.leaves.map((l) => l.ref.id));
   /** Index of the focused leaf in `leaves`; 0 when focusedKey is null/unknown (never −1). */
   focusedIndex: number = $derived(Math.max(0, this.leaves.findIndex((l) => l.key === this.focusedKey)));
   focusedLeaf: Leaf | null = $derived(this.leaves[this.focusedIndex] ?? null);
@@ -89,7 +91,7 @@ class SplitLayoutStore {
   /** Load the workspace's layout: v2 as-is, a v1 `{panes, axis}` payload through
    *  fromLegacy with the old window fractions at the root (then re-persisted as
    *  v2 — a one-way migration), nothing → a bare leaf of `fallback`. */
-  restore(wsKey: string, valid: (id: Id) => boolean, fallback: Id | null): void {
+  restore(wsKey: string, valid: (ref: PaneRef) => boolean, fallback: PaneRef | null): void {
     this.wsKey = wsKey;
     let raw: string | null = null;
     let tileRaw: string | null = null;
@@ -142,7 +144,7 @@ class SplitLayoutStore {
     try {
       localStorage.setItem(
         winKey(LS_PANES + this.wsKey),
-        JSON.stringify({ v: 2, tree: this.tree, focused: this.focusedKey }),
+        JSON.stringify({ v: 2, tree: storeTree(this.tree), focused: this.focusedKey }),
       );
     } catch {
       /* private mode */
@@ -187,23 +189,23 @@ class SplitLayoutStore {
    *  effect replays that as an open — which used to stamp the fallback over
    *  whatever the (re-focused) first pane was showing, duplicating one session
    *  across two panes and dropping another. */
-  setFocusedSession(id: Id): void {
-    if (!this.hydrated) this.pendingSession = id;
-    const on = this.leaves.find((l) => l.session === id);
+  setFocusedSession(ref: PaneRef): void {
+    if (!this.hydrated) this.pendingSession = ref;
+    const on = this.leaves.find((l) => l.ref.id === ref.id);
     if (on) {
       this.focusedKey = on.key;
       this.persist();
       return;
     }
     if (!this.tree) {
-      const l = leaf(id);
+      const l = leaf(ref);
       this.tree = l;
       this.focusedKey = l.key;
     } else {
       const key = this.focusedLeaf?.key ?? this.leaves[0]?.key;
       if (!key) return;
       const go = (n: LayoutNode): LayoutNode =>
-        n.kind === 'leaf' ? (n.key === key ? { ...n, session: id } : n) : { ...n, a: go(n.a), b: go(n.b) };
+        n.kind === 'leaf' ? (n.key === key ? { ...n, ref } : n) : { ...n, a: go(n.a), b: go(n.b) };
       this.tree = go(this.tree);
       this.focusedKey = key;
     }
@@ -215,7 +217,7 @@ class SplitLayoutStore {
   splitFocused(axis: Axis): boolean {
     const cur = this.focusedLeaf;
     if (!this.tree || !cur || this.leaves.length >= MAX_PANES) return false;
-    const dup = leaf(cur.session);
+    const dup = leaf(cur.ref);
     this.tree = insertBeside(this.tree, cur.key, dup, axis === 'col' ? 'right' : 'down');
     this.focusedKey = dup.key;
     this.persist();
@@ -227,27 +229,27 @@ class SplitLayoutStore {
    *  false is returned (the caller toasts; the pane still appears); (4) insert
    *  beside the focused leaf on the axis ORTHOGONAL to its parent split so
    *  repeated "open beside" builds a grid, not a 15-wide strip. */
-  addBeside(id: Id, opts?: { focus?: boolean }): boolean {
+  addBeside(ref: PaneRef, opts?: { focus?: boolean }): boolean {
     const focus = opts?.focus ?? true;
-    const existing = this.leaves.find((l) => l.session === id);
+    const existing = this.leaves.find((l) => l.ref.id === ref.id);
     if (existing) {
       if (focus) this.focusKey(existing.key);
       return true;
     }
     if (!this.tree) {
-      const l = leaf(id);
+      const l = leaf(ref);
       this.tree = l;
       this.focusedKey = l.key;
       this.persist();
       return true;
     }
     if (this.leaves.length >= MAX_PANES) {
-      this.setFocusedSession(id);
+      this.setFocusedSession(ref);
       return false;
     }
     const cur = this.focusedLeaf ?? this.leaves[0];
     const side: Side = parentOf(this.tree, cur.key)?.axis === 'col' ? 'down' : 'right';
-    const fresh = leaf(id);
+    const fresh = leaf(ref);
     this.tree = insertBeside(this.tree, cur.key, fresh, side);
     if (focus) this.focusedKey = fresh.key;
     this.persist();
@@ -274,7 +276,7 @@ class SplitLayoutStore {
   /** closeTab: every leaf of `from` becomes `to` (dedupe: a replaced leaf whose
    *  target is already on screen vanishes instead); an emptied tree becomes a
    *  bare leaf of `to`. */
-  replaceSession(from: Id, to: Id | null): void {
+  replaceSession(from: Id, to: PaneRef | null): void {
     this.tree = replaceSessionIn(this.tree, from, to);
     if (!this.tree && to) this.tree = leaf(to);
     this.fixFocus();
@@ -289,7 +291,7 @@ class SplitLayoutStore {
    *  layout we are about to come back to. Nothing is lost by skipping it:
    *  restore() re-filters every persisted leaf through `valid` (the tab list,
    *  persisted separately), so a stale leaf can never come back. */
-  retain(keep: (id: Id) => boolean): boolean {
+  retain(keep: (ref: PaneRef) => boolean): boolean {
     const next = retainIn(this.tree, keep);
     if (next === this.tree) return false;
     this.tree = next;
@@ -321,8 +323,8 @@ class SplitLayoutStore {
    *  "Free layout": the tiles, in their on-screen order, become split-tree
    *  leaves the user can then resize edge by edge and nest any way. Caps at
    *  MAX_PANES; focus lands on the first leaf. */
-  layoutSessions(ids: Id[], p: Preset): void {
-    const unique = [...new Set(ids)].slice(0, MAX_PANES);
+  layoutSessions(refs: PaneRef[], p: Preset): void {
+    const unique = refs.filter((r, i) => refs.findIndex((x) => x.id === r.id) === i).slice(0, MAX_PANES);
     if (unique.length === 0) return;
     this.tree = buildPreset(unique, p);
     this.focusedKey = this.leaves[0]?.key ?? null;
@@ -330,10 +332,9 @@ class SplitLayoutStore {
   }
 
   applyPreset(p: Preset): void {
-    const ids = this.panes;
-    const focusedSession = this.focusedLeaf?.session ?? null;
-    this.tree = buildPreset(ids, p);
-    const target = focusedSession != null ? this.leaves.find((l) => l.session === focusedSession) : undefined;
+    const focusedId = this.focusedLeaf?.ref.id ?? null;
+    this.tree = buildPreset(this.leaves.map((l) => l.ref), p);
+    const target = focusedId != null ? this.leaves.find((l) => l.ref.id === focusedId) : undefined;
     this.focusedKey = (target ?? this.leaves[0])?.key ?? null;
     this.persist();
   }

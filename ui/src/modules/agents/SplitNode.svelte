@@ -213,8 +213,8 @@
     <Self node={node.b} depth={depth + 1} />
   </div>
 {:else}
-  <div class="leaf" data-pane-key={node.key} data-session={node.session}>
-    {#if node.session === DB_PANE_ID}
+  <div class="leaf" data-pane-key={node.key} data-session={node.ref.id}>
+    {#if node.ref.id === DB_PANE_ID}
       <div
         class="db-pane"
         role="group"
@@ -255,15 +255,15 @@
       </div>
     {:else}
       <SessionView
-        sessionId={node.session}
+        sessionId={node.ref.id}
         focused={ws.focusedPane === idx && paneCount > 1}
         showClose={paneCount > 1}
         showGrip={paneCount > 1}
         dragKey={node.key}
         ondragpane={(phase) => (layout.dragKey = phase === 'start' ? node.key : null)}
         onfocus={() => ws.focusPane(idx)}
-        closeTitle={ws.closeTabTitle(node.session, 'session')}
-        onclosepane={() => void ws.requestCloseTab(node.session)}
+        closeTitle={ws.closeTabTitle(node.ref.id, 'session')}
+        onclosepane={() => void ws.requestCloseTab(node.ref.id)}
       />
     {/if}
     <!-- Drop veil: hit-testable only while a pane drag is in flight, so the

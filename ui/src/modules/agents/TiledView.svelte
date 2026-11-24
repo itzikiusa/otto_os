@@ -26,7 +26,7 @@
   import { ui } from '../../lib/stores/ui.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { winKey } from '../../lib/win';
-  import { MAX_PANES, applyTileOrder } from '../../lib/stores/splitLayout';
+  import { MAX_PANES, applyTileOrder, sessionRef } from '../../lib/stores/splitLayout';
   import { layout } from '../../lib/stores/splitLayout.svelte';
   import { liveTracks, type Tracks } from './tileTracks';
 
@@ -439,7 +439,7 @@
     <button
       class="btn small free-layout"
       onclick={() => {
-        layout.layoutSessions(ordered.map((s) => s.id), 'grid');
+        layout.layoutSessions(ordered.map((s) => sessionRef(s.id)), 'grid');
         ws.setViewMode('tabs');
       }}
       title="Turn these tiles into a free layout: every pane edge resizable, panes nestable, presets in the ⋯ menu"

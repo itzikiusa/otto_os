@@ -14,6 +14,8 @@ import { toasts } from './toast.svelte';
 export interface DeepLinkStore {
   readonly currentId: Id | null;
   sessionById: ReadonlyMap<Id, Session>;
+  /** Open tabs that are structured threads (their pane is a chat). */
+  readonly threadPanes: readonly Id[];
   select(id: Id): Promise<boolean>;
   openSession(id: Id): void;
 }
@@ -49,8 +51,10 @@ export async function prepareDeepLink(store: DeepLinkStore, id: Id, what: 'sessi
   }
 }
 
-/** The `#/agents/<id>` route → store sync: resolve, switch, then open. */
+/** The `#/agents/<id>` route → store sync: resolve, switch, then open. A
+ *  thread already open as a pane here just takes focus. */
 export async function openSessionDeepLink(store: DeepLinkStore, id: Id): Promise<void> {
+  if (store.threadPanes.includes(id)) return store.openSession(id);
   if (!store.sessionById.has(id) && !id.startsWith('__') && !(await prepareDeepLink(store, id, 'session'))) return;
   // An old or outside link (`agents/<id>` from the tray, the floating bar, a
   // notice written before the session moved) to a session that lives in

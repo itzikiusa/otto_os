@@ -25,13 +25,21 @@ import {
   applyTileOrder,
   reorderIds,
   neighbour,
+  sessionRef,
+  threadRef,
+  storeTree,
+  storeTabs,
+  parseTabRefs,
+  keepPane,
   type LayoutNode,
+  type PaneRef,
   type Leaf,
   type Split,
   type Rect,
 } from '../src/lib/stores/splitLayout.ts';
 
-const sessions = (t: LayoutNode | null): string[] => leaves(t).map((l) => l.session);
+const sessions = (t: LayoutNode | null): string[] => leaves(t).map((l) => l.ref.id);
+const S = sessionRef;
 const asSplit = (t: LayoutNode | null): Split => {
   assert.ok(t && t.kind === 'split', 'expected a split node');
   return t;
@@ -57,14 +65,15 @@ function shares(t: LayoutNode, axis: 'col' | 'row', acc = 1, out = new Map<strin
 }
 const depth = (t: LayoutNode): number => (t.kind === 'leaf' ? 0 : 1 + Math.max(depth(t.a), depth(t.b)));
 const ids = (n: number): string[] => Array.from({ length: n }, (_, i) => `s${i + 1}`);
+const refs = (n: number): PaneRef[] => ids(n).map(S);
 
 test('MAX_PANES is the user decision (15, not 6)', () => {
   assert.equal(MAX_PANES, 15);
 });
 
 test('insertBeside: left/up put node in a, right/down in b, axis col vs row', () => {
-  const A = leaf('A');
-  const B = leaf('B');
+  const A = leaf(S('A'));
+  const B = leaf(S('B'));
   for (const [side, axis, first] of [
     ['left', 'col', 'B'],
     ['right', 'col', 'A'],
@@ -73,7 +82,7 @@ test('insertBeside: left/up put node in a, right/down in b, axis col vs row', ()
   ] as const) {
     const t = asSplit(insertBeside(A, A.key, B, side));
     assert.equal(t.axis, axis, side);
-    assert.equal(asLeaf(t.a).session, first, side);
+    assert.equal(asLeaf(t.a).ref.id, first, side);
     assert.deepEqual(sessions(t).sort(), ['A', 'B']);
   }
   // Unknown target ⇒ unchanged (same object).
@@ -81,9 +90,9 @@ test('insertBeside: left/up put node in a, right/down in b, axis col vs row', ()
 });
 
 test('removeLeaf collapses the parent and keeps the sibling subtree key and frac', () => {
-  const A = leaf('A');
-  const B = leaf('B');
-  const C = leaf('C');
+  const A = leaf(S('A'));
+  const B = leaf(S('B'));
+  const C = leaf(S('C'));
   const inner = split('row', B, C, 0.3);
   const root = split('col', A, inner, 0.6);
   const after = asSplit(removeLeaf(root, A.key));
@@ -100,9 +109,9 @@ test('removeLeaf collapses the parent and keeps the sibling subtree key and frac
 });
 
 test('swapLeaves swaps sessions, not keys', () => {
-  const A = leaf('A');
-  const B = leaf('B');
-  const C = leaf('C');
+  const A = leaf(S('A'));
+  const B = leaf(S('B'));
+  const C = leaf(S('C'));
   const root = split('col', A, split('row', B, C));
   const out = swapLeaves(root, A.key, C.key);
   assert.deepEqual(leaves(out).map((l) => l.key), [A.key, B.key, C.key]);
@@ -112,8 +121,8 @@ test('swapLeaves swaps sessions, not keys', () => {
 });
 
 test('moveLeaf same key / unknown target is identity', () => {
-  const A = leaf('A');
-  const B = leaf('B');
+  const A = leaf(S('A'));
+  const B = leaf(S('B'));
   const root = split('col', A, B);
   assert.equal(moveLeaf(root, A.key, A.key, 'left'), root);
   assert.equal(moveLeaf(root, A.key, 'nope', 'left'), root);
@@ -122,9 +131,9 @@ test('moveLeaf same key / unknown target is identity', () => {
 });
 
 test('moveLeaf removes then inserts (3 leaves stay 3, new position)', () => {
-  const A = leaf('A');
-  const B = leaf('B');
-  const C = leaf('C');
+  const A = leaf(S('A'));
+  const B = leaf(S('B'));
+  const C = leaf(S('C'));
   const root = split('col', A, split('col', B, C));
   const out = moveLeaf(root, A.key, C.key, 'down');
   assert.equal(leaves(out).length, 3);
@@ -135,7 +144,7 @@ test('moveLeaf removes then inserts (3 leaves stay 3, new position)', () => {
 });
 
 test('setFrac clamps to 0.1 and 0.9', () => {
-  const root = split('col', leaf('A'), leaf('B'));
+  const root = split('col', leaf(S('A')), leaf(S('B')));
   assert.equal(asSplit(setFrac(root, root.key, 0)).frac, FRAC_MIN);
   assert.equal(asSplit(setFrac(root, root.key, 1)).frac, FRAC_MAX);
   assert.equal(asSplit(setFrac(root, root.key, 0.42)).frac, 0.42);
@@ -145,7 +154,7 @@ test('setFrac clamps to 0.1 and 0.9', () => {
 
 test('fromLegacy n=1..4 shapes and fractions', () => {
   assert.equal(fromLegacy({ panes: [] }, 0.3, 0.7), null);
-  assert.equal(asLeaf(fromLegacy({ panes: ['A'] }, 0.3, 0.7)).session, 'A');
+  assert.equal(asLeaf(fromLegacy({ panes: ['A'] }, 0.3, 0.7)).ref.id, 'A');
   const two = asSplit(fromLegacy({ panes: ['A', 'B'], axis: 'row' }, 0.3, 0.7));
   assert.equal(two.axis, 'row');
   assert.equal(two.frac, 0.7);
@@ -159,7 +168,7 @@ test('fromLegacy n=1..4 shapes and fractions', () => {
   assert.equal(top.axis, 'col');
   assert.equal(top.frac, 0.3);
   assert.deepEqual(sessions(top), ['A', 'B']);
-  assert.equal(asLeaf(three.b).session, 'C');
+  assert.equal(asLeaf(three.b).ref.id, 'C');
   const four = asSplit(fromLegacy({ panes: ['A', 'B', 'C', 'D', 'E'] }, 0.3, 0.7));
   assert.equal(four.axis, 'row');
   assert.deepEqual(sessions(four.a), ['A', 'B']);
@@ -191,7 +200,7 @@ test('parseLayout: null → null tree; garbage → null', () => {
 });
 
 test('parseLayout: v1 → fromLegacy', () => {
-  const r = parseLayout(JSON.stringify({ panes: ['A', 'B', 'dead', 'C'], axis: 'col' }), (id) => id !== 'dead', 0.3, 0.7);
+  const r = parseLayout(JSON.stringify({ panes: ['A', 'B', 'dead', 'C'], axis: 'col' }), (r) => r.id !== 'dead', 0.3, 0.7);
   const root = asSplit(r.tree);
   assert.equal(root.axis, 'row');
   assert.equal(root.frac, 0.7);
@@ -201,13 +210,13 @@ test('parseLayout: v1 → fromLegacy', () => {
 });
 
 test('parseLayout: v2 with a dead leaf drops it and collapses', () => {
-  const A = leaf('A');
-  const B = leaf('B');
-  const C = leaf('C');
+  const A = leaf(S('A'));
+  const B = leaf(S('B'));
+  const C = leaf(S('C'));
   const inner = split('row', B, C, 0.25);
   const root = split('col', A, inner, 0.6);
-  const raw = JSON.stringify({ v: 2, tree: root, focused: C.key });
-  const r = parseLayout(raw, (id) => id !== 'B', 0.5, 0.5);
+  const raw = JSON.stringify({ v: 2, tree: storeTree(root), focused: C.key });
+  const r = parseLayout(raw, (r) => r.id !== 'B', 0.5, 0.5);
   const t = asSplit(r.tree);
   assert.equal(t.key, root.key);
   assert.equal(t.frac, 0.6);
@@ -222,18 +231,18 @@ test('parseLayout: v2 with a dead leaf drops it and collapses', () => {
 });
 
 test('parseLayout: v2 with a missing focused → null focused', () => {
-  const A = leaf('A');
-  const B = leaf('B');
-  const r = parseLayout(JSON.stringify({ v: 2, tree: split('col', A, B), focused: 'gone' }), () => true, 0.5, 0.5);
+  const A = leaf(S('A'));
+  const B = leaf(S('B'));
+  const r = parseLayout(JSON.stringify({ v: 2, tree: storeTree(split('col', A, B)), focused: 'gone' }), () => true, 0.5, 0.5);
   assert.equal(r.focused, null);
   assert.deepEqual(sessions(r.tree), ['A', 'B']);
-  const r2 = parseLayout(JSON.stringify({ v: 2, tree: split('col', A, B), focused: B.key }), () => true, 0.5, 0.5);
+  const r2 = parseLayout(JSON.stringify({ v: 2, tree: storeTree(split('col', A, B)), focused: B.key }), () => true, 0.5, 0.5);
   assert.equal(r2.focused, B.key);
 });
 
 test('parseLayout: leaves beyond MAX_PANES are trimmed', () => {
-  const tree = applyPreset(ids(MAX_PANES + 3), 'cols');
-  const r = parseLayout(JSON.stringify({ v: 2, tree, focused: null }), () => true, 0.5, 0.5);
+  const tree = applyPreset(refs(MAX_PANES + 3), 'cols');
+  const r = parseLayout(JSON.stringify({ v: 2, tree: storeTree(tree), focused: null }), () => true, 0.5, 0.5);
   assert.equal(leaves(r.tree).length, MAX_PANES);
   assert.deepEqual(sessions(r.tree), ids(MAX_PANES));
 });
@@ -244,7 +253,7 @@ test('applyPreset cols/rows for n=2..15: every leaf share is 1/n and depth ≤ �
       ['cols', 'col'],
       ['rows', 'row'],
     ] as const) {
-      const t = applyPreset(ids(n), preset);
+      const t = applyPreset(refs(n), preset);
       assert.ok(t);
       assert.deepEqual(sessions(t), ids(n), `${preset} n=${n} keeps order`);
       for (const [, share] of shares(t, axis)) assert.ok(Math.abs(share - 1 / n) < 1e-9, `${preset} n=${n} share ${share}`);
@@ -260,17 +269,17 @@ test('applyPreset cols/rows for n=2..15: every leaf share is 1/n and depth ≤ �
     }
   }
   assert.equal(applyPreset([], 'cols'), null);
-  assert.equal(asLeaf(applyPreset(['A'], 'grid')).session, 'A');
+  assert.equal(asLeaf(applyPreset([S('A')], 'grid')).ref.id, 'A');
 });
 
 test('applyPreset one-two-below / one-two-beside shapes', () => {
-  const below = asSplit(applyPreset(ids(3), 'one-two-below'));
+  const below = asSplit(applyPreset(refs(3), 'one-two-below'));
   assert.equal(below.axis, 'row');
-  assert.equal(asLeaf(below.a).session, 's1');
+  assert.equal(asLeaf(below.a).ref.id, 's1');
   assert.equal(asSplit(below.b).axis, 'col');
-  const beside = asSplit(applyPreset(ids(3), 'one-two-beside'));
+  const beside = asSplit(applyPreset(refs(3), 'one-two-beside'));
   assert.equal(beside.axis, 'col');
-  assert.equal(asLeaf(beside.a).session, 's1');
+  assert.equal(asLeaf(beside.a).ref.id, 's1');
   assert.equal(asSplit(beside.b).axis, 'row');
 });
 
@@ -281,31 +290,31 @@ test('applyPreset grid column count 2/3/4 at n=4/9/15', () => {
     while (row.kind === 'split' && row.axis === 'row') row = row.a;
     return leaves(row).length;
   };
-  assert.equal(colsOf(applyPreset(ids(4), 'grid')!), 2);
-  assert.equal(colsOf(applyPreset(ids(9), 'grid')!), 3);
-  assert.equal(colsOf(applyPreset(ids(15), 'grid')!), 4);
-  assert.deepEqual(sessions(applyPreset(ids(15), 'grid')), ids(15));
+  assert.equal(colsOf(applyPreset(refs(4), 'grid')!), 2);
+  assert.equal(colsOf(applyPreset(refs(9), 'grid')!), 3);
+  assert.equal(colsOf(applyPreset(refs(15), 'grid')!), 4);
+  assert.deepEqual(sessions(applyPreset(refs(15), 'grid')), ids(15));
 });
 
 test('replaceSession maps every matching leaf, removes on null, dedupes a replaced leaf whose target already exists', () => {
-  const A1 = leaf('A');
-  const A2 = leaf('A');
-  const B = leaf('B');
+  const A1 = leaf(S('A'));
+  const A2 = leaf(S('A'));
+  const B = leaf(S('B'));
   const root = split('col', A1, split('row', A2, B));
-  assert.deepEqual(sessions(replaceSession(root, 'A', 'C')), ['C', 'B'], 'second replaced leaf dedupes against the first');
-  assert.deepEqual(sessions(replaceSession(root, 'A', 'B')), ['B'], 'target already on screen ⇒ the replaced leaves vanish');
+  assert.deepEqual(sessions(replaceSession(root, 'A', S('C'))), ['C', 'B'], 'second replaced leaf dedupes against the first');
+  assert.deepEqual(sessions(replaceSession(root, 'A', S('B'))), ['B'], 'target already on screen ⇒ the replaced leaves vanish');
   assert.deepEqual(sessions(replaceSession(root, 'A', null)), ['B']);
-  assert.equal(replaceSession(root, 'Z', 'C'), root, 'no match ⇒ identity');
-  assert.equal(replaceSession(null, 'A', 'B'), null);
-  const one = asLeaf(replaceSession(A1, 'A', 'B'));
+  assert.equal(replaceSession(root, 'Z', S('C')), root, 'no match ⇒ identity');
+  assert.equal(replaceSession(null, 'A', S('B')), null);
+  const one = asLeaf(replaceSession(A1, 'A', S('B')));
   assert.equal(one.key, A1.key);
-  assert.equal(one.session, 'B');
+  assert.equal(one.ref.id, 'B');
 });
 
 test('retain returns the same object when nothing changes', () => {
-  const root = split('col', leaf('A'), leaf('B'));
+  const root = split('col', leaf(S('A')), leaf(S('B')));
   assert.equal(retain(root, () => true), root);
-  assert.deepEqual(sessions(retain(root, (id) => id === 'A')), ['A']);
+  assert.deepEqual(sessions(retain(root, (r) => r.id === 'A')), ['A']);
   assert.equal(retain(root, () => false), null);
   assert.equal(retain(null, () => true), null);
 });
@@ -360,4 +369,59 @@ test('neighbour on a 2×2 rect map (right/left/down/up + null at the edge) and c
     ['far-overlap', R(300, 0, 100, 50)],
   ]);
   assert.equal(neighbour(skew, 'src', 'right'), 'far-overlap');
+});
+
+// ── Typed pane refs (a PTY session or a structured thread) ─────────────────
+
+test('migration: a layout and tab list written before typed refs read as sessions', () => {
+  // The exact shapes the previous build wrote: v2 leaves carry `session`, tabs are plain ids.
+  const raw = JSON.stringify({ v: 2, tree: { kind: 'split', key: 'r', axis: 'col', frac: 0.4, a: { kind: 'leaf', key: 'a', session: 'A' }, b: { kind: 'leaf', key: 'b', session: 'B' } }, focused: 'b' });
+  const r = parseLayout(raw, () => true, 0.5, 0.5);
+  assert.deepEqual(leaves(r.tree).map((l) => l.ref), [S('A'), S('B')]);
+  assert.equal(asSplit(r.tree).frac, 0.4);
+  assert.equal(r.focused, 'b');
+  assert.deepEqual(parseTabRefs('["A","B"]'), [S('A'), S('B')]);
+  // v1 `{panes}` ids are sessions too.
+  assert.deepEqual(leaves(parseLayout(JSON.stringify({ panes: ['A'] }), () => true, 0.5, 0.5).tree).map((l) => l.ref), [S('A')]);
+});
+
+test('storeTree / storeTabs round-trip both kinds; sessions keep the old stored shape', () => {
+  const T = threadRef('T');
+  const root = split('col', leaf(S('A')), split('row', leaf(T), leaf(S('B')), 0.3), 0.6);
+  const stored = storeTree(root) as { a: Record<string, unknown>; b: { a: Record<string, unknown> } };
+  assert.deepEqual(stored.a, { kind: 'leaf', key: asLeaf(root.a).key, session: 'A' }, 'a session leaf is stored exactly as before');
+  assert.deepEqual(stored.b.a, { kind: 'leaf', key: leaves(root)[1].key, thread: 'T' });
+  const back = parseLayout(JSON.stringify({ v: 2, tree: stored, focused: null }), () => true, 0.5, 0.5);
+  assert.deepEqual(leaves(back.tree).map((l) => l.ref), [S('A'), T, S('B')]);
+  assert.deepEqual(leaves(back.tree).map((l) => l.key), leaves(root).map((l) => l.key));
+  const tabs = storeTabs([S('A'), T]);
+  assert.equal(tabs, '["A",{"thread":"T"}]');
+  assert.deepEqual(parseTabRefs(tabs), [S('A'), T]);
+  // An older build's parseTabIds keeps only the strings: it never sees the thread.
+  assert.deepEqual((JSON.parse(tabs) as unknown[]).filter((x) => typeof x === 'string'), ['A']);
+  // Duplicates and junk entries are dropped.
+  assert.deepEqual(parseTabRefs('["A",{"thread":"T"},"A",{"thread":""},{"x":1},7]'), [S('A'), T]);
+});
+
+test('pruning: a live thread is never pruned for not being a PTY session; sessions follow the list', () => {
+  const live = new Map<string, boolean>([['A', false], ['Z', true]]); // id → archived
+  const keep = (r: PaneRef) => keepPane(r, (id) => live.get(id));
+  assert.equal(keepPane(threadRef('T'), () => undefined), true, 'a thread is kept though no session row has its id');
+  assert.equal(keepPane(S('T'), () => undefined), false, 'the same id as a session is a phantom tab');
+  assert.equal(keepPane(S('Z'), (id) => live.get(id)), false, 'an archived session is pruned');
+  const root = split('col', leaf(S('A')), split('row', leaf(threadRef('T')), leaf(S('gone'))));
+  const pruned = retain(root, keep);
+  assert.deepEqual(leaves(pruned).map((l) => l.ref), [S('A'), threadRef('T')]);
+  // Restoring a stored layout runs the same predicate.
+  const r = parseLayout(JSON.stringify({ v: 2, tree: storeTree(root), focused: null }), keep, 0.5, 0.5);
+  assert.deepEqual(leaves(r.tree).map((l) => l.ref), [S('A'), threadRef('T')]);
+});
+
+test('replaceSession / swapLeaves carry the ref kind', () => {
+  const A = leaf(S('A'));
+  const T = leaf(threadRef('T'));
+  const root = split('col', A, T);
+  assert.deepEqual(leaves(swapLeaves(root, A.key, T.key)).map((l) => l.ref), [threadRef('T'), S('A')]);
+  assert.deepEqual(leaves(replaceSession(root, 'A', threadRef('U'))).map((l) => l.ref), [threadRef('U'), threadRef('T')]);
+  assert.deepEqual(leaves(replaceSession(root, 'T', null)).map((l) => l.ref), [S('A')]);
 });
