@@ -7,6 +7,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus } from '../../lib/status';
+  import { iterationStatus } from './loopStatus';
   import CriterionEvidence from './CriterionEvidence.svelte';
 
   let {
@@ -94,8 +95,6 @@
     }
   }
 
-  const VERDICT: Record<string, string> = { achieved: 'goal met', continue: 'continuing', blocked: 'blocked' };
-
   // Retry is only valid while the loop is blocked (no live controller); a
   // running loop's controller owns the executor and a second run would race it.
   function canRetry(a: LoopAgentState): boolean {
@@ -107,9 +106,9 @@
   <button class="iter-head" aria-expanded={expanded} onclick={() => (expanded = !expanded)}>
     <span class="chev"><Icon name={expanded ? 'chevronDown' : 'chevronRight'} size={12} /></span>
     <span class="idx">Iteration {iter.idx}</span>
-    <StatusBadge status={runStatus(iter.status)} variant="text" />
+    <StatusBadge status={iterationStatus(runStatus(iter.status), iter.evaluation?.verdict)} variant="text" />
     {#if iter.evaluation}
-      <span class="prog">{iter.evaluation.progress_pct}% · {VERDICT[iter.evaluation.verdict] ?? iter.evaluation.verdict}</span>
+      <span class="prog">{iter.evaluation.progress_pct}% of the goal</span>
     {/if}
   </button>
 

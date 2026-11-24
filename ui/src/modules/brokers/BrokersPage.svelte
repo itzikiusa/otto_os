@@ -39,7 +39,7 @@
   let replayPrefillSeq = 0;
   let formOpen = $state(false);
   let editTarget = $state<BrokerCluster | null>(null);
-  let testing = $state(false);
+  let testing = $state(false), topicOpen = $state(false); // reading a topic: cluster actions move to ⋯
 
   function openReplayFrom(prefill: ReplayPrefill) {
     replayPrefill = { ...prefill, seq: ++replayPrefillSeq };
@@ -339,7 +339,7 @@
 <PageHeader
   class="cluster-head"
   title={selected?.name ?? 'Message Brokers'}
-  subtitle={selected?.bootstrap_servers}
+  subtitle={selected?.bootstrap_servers} more={() => (selected && topicOpen ? [{ label: 'Test connection', action: () => void testConn(selected) }, { label: 'Edit…', action: () => openEdit(selected) }, { label: 'Remove…', icon: 'trash', danger: true, action: () => void removeCluster(selected) }] : [])}
 >
   {#snippet leading()}
     {#if !viewport.isPhone && !isEmpty}
@@ -377,7 +377,7 @@
     {/if}
   {/snippet}
   {#snippet actions()}
-    {#if selected}
+    {#if selected && !topicOpen}
       <button class="btn small danger" data-overflow="-1" onclick={() => removeCluster(selected)} title="Remove this cluster profile from Otto (topics on the broker are untouched)">Remove…</button>
       <button class="btn small" onclick={() => openEdit(selected)}>Edit</button>
       <button class="btn small" data-keep onclick={() => testConn(selected)} disabled={testing}>{testing ? 'Testing…' : 'Test'}</button>
@@ -494,7 +494,7 @@
           {#if tab === 'overview'}
             <OverviewTab clusterId={selected.id} />
           {:else if tab === 'topics'}
-            <TopicsTab cluster={selected} onreplayfrom={openReplayFrom} />
+            <TopicsTab cluster={selected} onreplayfrom={openReplayFrom} ontopic={(open) => (topicOpen = open)} />
           {:else if tab === 'groups'}
             <GroupsTab cluster={selected} />
           {:else if tab === 'schema'}

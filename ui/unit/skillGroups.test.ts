@@ -153,3 +153,25 @@ test('a library copy edited without a version bump drifts from bundled', () => {
   assert.deepEqual(g.driftedSources, ['bundled']);
   assert.match(g.drift[0], /edited since it was installed from bundled v2/);
 });
+
+test('hashed copies compare by hash: no body is read, a differing hash is drift', () => {
+  const lib = [{ name: 'docx', description: 'Word', body: '# docx', category: 'docs', body_hash: 'aaa' }];
+  const prov = [
+    { provider: 'claude', name: 'docx', category: 'provider', description: 'Word', body_hash: 'aaa' },
+    { provider: 'codex', name: 'docx', category: 'provider', description: 'Word', body_hash: 'bbb' },
+  ];
+  const [g] = groupSkills(lib, [], prov, {});
+  assert.equal(g.sync, 'drifted');
+  assert.deepEqual(g.driftedSources, ['codex']);
+  assert.deepEqual(namesNeedingBodies([g], {}), []);
+  const [same] = groupSkills(lib, [], prov.slice(0, 1), {});
+  assert.equal(same.sync, 'in_sync');
+});
+
+test('a copy without a hash (an older daemon) still has its body read', () => {
+  const lib = [{ name: 'docx', description: 'Word', body: '# docx', category: 'docs', body_hash: 'aaa' }];
+  const prov = [{ provider: 'claude', name: 'docx', category: 'provider', description: 'Word' }];
+  const groups = groupSkills(lib, [], prov, {});
+  assert.equal(groups[0].sync, 'unknown');
+  assert.deepEqual(namesNeedingBodies(groups, {}), [{ source: 'claude', name: 'docx' }]);
+});

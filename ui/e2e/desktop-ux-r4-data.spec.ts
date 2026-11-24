@@ -212,7 +212,7 @@ for(const mode of ['sse','websocket'] as const)test(`API ${mode} connects receiv
   await page.routeWebSocket('**/ws/api-client/stream?*',socket=>{
     socket.onMessage(data=>{const msg=JSON.parse(String(data));if(msg.action==='open') {opened=msg;socket.send(JSON.stringify({type:'open',detail:'Fixture connected'}));socket.send(JSON.stringify(mode==='sse'?{type:'event',event:'customer.updated',data:'Synthetic customer update'}:{type:'message',dir:'in',data:'Synthetic welcome'}));}else if(msg.action==='send'){sent=msg.data;socket.send(JSON.stringify({type:'message',dir:'out',data:msg.data}));}});
   });
-  await openApiEditor(page);await page.getByLabel('Request type').selectOption(mode);await page.getByLabel('Request URL',{exact:true}).fill(mode==='sse'?'https://fixture.invalid/events':'wss://fixture.invalid/messages');
+  await openApiEditor(page);await page.getByLabel('HTTP method').selectOption(mode);await page.getByLabel('Request URL',{exact:true}).fill(mode==='sse'?'https://fixture.invalid/events':'wss://fixture.invalid/messages');
   await page.getByRole('button',{name:'Connect',exact:true}).click();await expect(page.locator('.stream-log')).toContainText(mode==='sse'?'Synthetic customer update':'Synthetic welcome');expect(opened.kind).toBe(mode);
   if(mode==='websocket'){await page.getByLabel('Message to send').fill('Synthetic reply');await page.getByLabel('Message to send').press('Enter');await expect.poll(()=>sent).toBe('Synthetic reply');}
   mkdirSync(shots,{recursive:true});await page.screenshot({animations:'disabled',path:`${shots}/api-${mode}.png`});
@@ -224,7 +224,7 @@ test('API gRPC reflection and invocation recovers after a failed call',async({pa
   const {ctx}=await workspace(page);await ctx.dispose();let fail=true;let body:any;
   await page.route('**/api-client/grpc/reflect',r=>r.fulfill({json:{services:[{name:'customers.CustomerService',methods:[{name:'GetCustomer',full:'customers.CustomerService/GetCustomer',input_schema:'{"id":"fixture"}',server_streaming:false,client_streaming:false}]}]}}));
   await page.route('**/api-client/grpc/invoke',r=>{body=r.request().postDataJSON();return fail?r.fulfill({status:503,json:{code:'upstream',message:'Synthetic service unavailable'}}):r.fulfill({json:{status:200,status_text:'OK',headers:[],body:'{"name":"Synthetic customer"}',duration_ms:3,size_bytes:29,content_type:'application/json',truncated:false,too_large:false,trace:[]}});});
-  await openApiEditor(page);await page.getByLabel('Request type').selectOption('grpc');await page.getByLabel('Request URL',{exact:true}).fill('https://fixture.invalid:443');await page.getByRole('button',{name:'Load from server',exact:true}).click();
+  await openApiEditor(page);await page.getByLabel('HTTP method').selectOption('grpc');await page.getByLabel('Request URL',{exact:true}).fill('https://fixture.invalid:443');await page.getByRole('button',{name:'Load from server',exact:true}).click();
   await expect(page.getByLabel('gRPC method')).toHaveValue('customers.CustomerService/GetCustomer');await page.getByRole('button',{name:'Invoke',exact:true}).click();await expect(page.getByText('Synthetic service unavailable',{exact:true})).toBeVisible();
   fail=false;await page.getByRole('button',{name:'Invoke',exact:true}).click();await expect(page.locator('.viewer')).toContainText('Synthetic customer');expect(body.method).toBe('customers.CustomerService/GetCustomer');expect(JSON.parse(body.body)).toEqual({id:'fixture'});
   await page.locator('.viewer').scrollIntoViewIfNeeded();

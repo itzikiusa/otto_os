@@ -252,13 +252,14 @@ test('Otto Server tab lists the new tools, grouped + filterable', async ({ page 
     localStorage.setItem('otto_rail_expanded', '0');
   }, ws);
 
-  await page.goto('/#/mcp');
+  await page.goto('/#/mcp/otto');
   await expect(page.locator('.mcp-page')).toBeVisible({ timeout: 30_000 });
 
-  // The filterable, grouped checklist renders the new feature tools.
+  // The searchable catalog opens collapsed by category; opening one lists its tools.
   const filter = page.locator('.otto .filter');
   await expect(filter).toBeVisible({ timeout: 20_000 });
   await expect(page.locator('.otto .grp-name', { hasText: 'Workflows' })).toBeVisible();
+  await page.locator('.otto .tc-fold', { hasText: 'Workflows' }).click();
   await expect(page.locator('.otto .t-name', { hasText: 'otto.list_workflows' })).toBeVisible();
 
   // Filtering narrows the list to message-broker tools.

@@ -241,6 +241,8 @@ test('local and remote references with the same name retain their own menus', as
   await page.keyboard.press('Escape');
   await page.keyboard.press('Escape');
   // Ref metadata is authoritative even if log decorations are ambiguous.
+  // (The fixture rewrites /refs: skip the one-request overview so the graph reads it.)
+  await page.route('**/api/v1/repos/*/overview', r => r.fulfill({ status: 404, json: { code: 'not_found', message: 'fixture' } }));
   await page.route('**/api/v1/repos/*/refs*', async route => {
     const response = await route.fetch();
     const refs = await response.json();

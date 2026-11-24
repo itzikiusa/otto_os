@@ -21,7 +21,7 @@
   import { sessionState } from '../../lib/status';
   import { api, isAbortError } from '../../lib/api/client';
   import type { Poller } from '../../lib/poll';
-  import { liveQuery } from '../../lib/live';
+  import { liveQuery, EVENT_COMPLETE_SAFETY_MS } from '../../lib/live';
   import { TopicSocket } from '../../lib/topicSocket';
   import type { McpApproval, Notice, Session, WorkspaceWithRole } from '../../lib/api/types';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -249,15 +249,17 @@
     const offConn = sock.registry.onConnection((c) => (sockUp = c));
     // Hidden most of its life, yet its counts drive the menu-bar glyph: with
     // the socket down it keeps the old cadence while hidden (`hidden`).
-    const q = (on: readonly string[], run: (s: AbortSignal) => Promise<boolean>) =>
-      liveQuery({ run, on, fallbackMs: POLL_MS, hidden: POLL_MS }, sock.registry);
+    const q = (on: readonly string[], run: (s: AbortSignal) => Promise<boolean>, safetyMs?: number) =>
+      liveQuery({ run, on, fallbackMs: POLL_MS, hidden: POLL_MS, safetyMs }, sock.registry);
     const ps = [
       q([], part<WorkspaceWithRole[]>('workspaces', '/workspaces', (v) => (workspaces = v))),
       q(
         ['session_status', 'session_created', 'session_removed'],
         part<Session[]>('working', '/sessions?archived=false&status=working', (v) => (working = v)),
       ),
-      q(['mcp_approval_changed'], part<McpApproval[]>('approvals', '/mcp/approvals?status=pending', (v) => (approvals = v))),
+      // Every approval write emits the event: no 5-minute re-read while the
+      // socket is up (it was ~360 GET /mcp/approvals a day with the tray idle).
+      q(['mcp_approval_changed'], part<McpApproval[]>('approvals', '/mcp/approvals?status=pending', (v) => (approvals = v)), EVENT_COMPLETE_SAFETY_MS),
       q(['notification', 'notifications_changed'], part<Notice[]>('notices', '/notifications', (v) => (notices = v))),
     ];
     pollers = ps;

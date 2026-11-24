@@ -45,7 +45,7 @@
   import type { SupportBundle } from './capabilities';
   import { escapeHtml } from '../../lib/html';
   import { METRIC_KEYS, delta, itemStatus, parseSummaryCached,
-    periodKey, reportMetrics, siblingPath, type MetricKey, type ParsedSummary } from './insightsParse';
+    periodKey, reportMetrics, type MetricKey, type ParsedSummary } from './insightsParse';
   import { insightsStore as s, type InsightsFilter } from './insightsStore.svelte';
 
   // ---------------------------------------------------------------------------
@@ -175,20 +175,7 @@
     const r = selected;
     if (!r) return;
     const prev = untrack(() => previousOf(r));
-    const want = [r, ...(prev ? [prev] : [])].filter((x) => untrack(() => s.fullMd[keyOf(x)]) == null);
-    if (!want.length) return;
-    for (const x of want) {
-      const k = keyOf(x);
-      const path = x.html_path ? siblingPath(x.html_path, 'summary') : null;
-      const summary = path ? insightsApi.readText(path) : insightsApi.reportStatus(k, true).then(({ report }) => report?.summary ?? '');
-      void summary
-        .then((text) => {
-          if (text.trim()) s.fullMd = { ...s.fullMd, [k]: text };
-        })
-        .catch(() => {
-          s.fullMd = { ...s.fullMd, [k]: x.summary };
-        });
-    }
+    untrack(() => s.loadSummaries([r, ...(prev ? [prev] : [])]));
   });
 
   // ---------------------------------------------------------------------------
@@ -589,6 +576,8 @@
                 report={selected}
                 {parsed}
                 markdown={markdownOf(selected)}
+                summaryError={s.summaryError[keyOf(selected)] ?? null}
+                onretrysummary={() => s.retrySummary(selected)}
                 {kpis}
                 compareLabel={prev ? periodShort(prev) : null}
                 ledger={s.index.ledger}

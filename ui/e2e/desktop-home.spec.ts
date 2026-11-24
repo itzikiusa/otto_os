@@ -2,9 +2,11 @@ import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { expectFullyInViewport } from './helpers';
 
-// Home: the desktop — a greeting + today's glance cards over the ambient
-// backdrop, and spaces 01–04 (Home's views) of up to 8 live widgets on a
-// 12-column grid, switched by tabs / ←→ / ⌘K with a 30 s cycle, per-widget
+// Home: one centred reading column over the ambient backdrop — the greeting,
+// "Needs you" and "Working" as inbox rows with status words, Up next / Recent
+// only when non-empty, the floating bar docked under it as the one primary —
+// then a "Pinned" section: spaces 01–04 (Home's views) of up to 8 live widgets
+// on a 12-column grid, switched by tabs / ←→ / ⌘K with a 30 s cycle, per-widget
 // resize (grid units) and zoom-to-fill.
 //
 // Layout is per device (localStorage), so every test starts from a clean
@@ -60,24 +62,31 @@ test('Home is the first sidebar entry and seeds a default view of live boxes', a
   const home = page.getByRole('region', { name: 'Home dashboard' });
   await expect(home).toBeVisible();
   // The seed places only widgets with data: the isolated daemon has no
-  // clusters and no DB dashboards, so a first Home is just Agents — never a
-  // wall of empty Kubernetes / DB widgets.
+  // clusters and no DB dashboards, and the inbox already lists the agents, so
+  // a first Home pins nothing — one calm line, never a second primary.
   const boxes = home.locator('section.hbox');
-  await expect(boxes.first()).toHaveAttribute('data-kind', 'sessions');
-  await expect(boxes.first()).toContainText(/open|No open agent sessions/);
-  // The cluster / dashboard probe has settled and added nothing.
-  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('otto_home_views') ?? '[]')[0]?.boxes?.length)).toBe(1);
-  await expect(boxes).toHaveCount(1);
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('otto_home_views') ?? '[]')[0]?.boxes?.length)).toBe(0);
+  await expect(boxes).toHaveCount(0);
+  await expect(home.locator('.stage')).toContainText('This space is empty');
+  await expect(home.locator('.btn.primary')).toHaveCount(0);
   // A single space: no cycling control; one numbered tab.
   await expect(page.getByRole('tab')).toHaveCount(1);
   await expect(current(page)).toHaveAccessibleName('Overview');
   await expect(current(page)).toContainText('01');
   await expect(page.getByRole('button', { name: /Auto-rotate/ })).toHaveCount(0);
-  // Today: the greeting and the four glance cards sit above the widgets.
+  // Today: the greeting, then "Needs you" and "Working" always (a line when
+  // empty); Up next / Recent only with rows (none here). One 760 px column.
   const today = home.getByRole('region', { name: 'Today' });
   await expect(today.locator('.hello')).toContainText(/Good (morning|afternoon|evening)/);
-  await expect(today.locator('.gcard')).toHaveCount(4);
-  await expect(today.locator('.gcard[data-card="needs"]')).toContainText('Needs you');
+  await expect(today.locator('[data-card="needs"]')).toContainText('Needs you');
+  await expect(today.locator('[data-card="running"]')).toContainText('Working');
+  await expect(today.locator('[data-card="next"], [data-card="recent"]')).toHaveCount(0);
+  expect((await today.boundingBox())!.width).toBeLessThanOrEqual(760 + 2 * 16);
+  // A notice that needs you is an inbox row that says so in words.
+  const needsRows = today.locator('[data-card="needs"] [data-testid^="home-row-"]');
+  if ((await needsRows.count()) > 0) await expect(needsRows.first().locator('.tr-status')).toHaveText(/Needs you|Approval|Failed/);
+  // The composer is the floating bar, full (not the status-bar chip) on Home.
+  await expect(page.getByTestId('floating-bar')).toHaveAttribute('data-presence', 'full');
   // Home's spaces are the floating bar's: space 01 takes the view's name.
   const barSpaces = () => page.evaluate(() => JSON.parse(localStorage.getItem('otto_bar_spaces') ?? '{}'));
   await expect.poll(async () => (await barSpaces()).spaces?.[0]?.name).toBe('Overview');
@@ -91,7 +100,7 @@ test('spaces: add (max 4), switch with tabs / keys, rename, delete, persist', as
   await expect(current(page)).toContainText('02');
   // A new space starts empty with the add-widget empty state (+ quick adds).
   await expect(page.locator('.stage')).toContainText('This space is empty');
-  await expect(page.locator('.stage .quick-chip').first()).toBeVisible();
+  await expect(page.locator('.stage .view:not([hidden]) .quick-chip').first()).toBeVisible();
   // Keyboard wraps around.
   await page.locator('.stage').click({ position: { x: 5, y: 5 } });
   await page.keyboard.press('ArrowRight');
@@ -143,7 +152,7 @@ test('spaces: add (max 4), switch with tabs / keys, rename, delete, persist', as
   await expect(rot).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('.progress i')).toBeVisible();
   // Hovering the widgets pauses cycling (the countdown bar goes away).
-  await home.locator('.stage').hover();
+  await home.locator('.view:not([hidden])').hover();
   await expect(page.locator('.progress i')).toHaveCount(0);
   await rot.click();
   await expect(rot).toHaveAttribute('aria-pressed', 'false');
@@ -165,13 +174,16 @@ test('widgets: add from the picker (max 8), resize in grid units, zoom, remove',
   await boot(page);
   const home = page.getByRole('region', { name: 'Home dashboard' });
   const boxes = home.locator('section.hbox');
+  // A first Home pins nothing; a quick-add chip pins Agents.
+  await expect(boxes).toHaveCount(0);
+  await home.locator('.view:not([hidden]) .quick-chip', { hasText: 'Agents' }).click();
   await expect(boxes).toHaveCount(1);
 
   // Add box picker lists every kind for root and adds one.
   await page.getByRole('button', { name: 'Add widget' }).click();
   const sheet = page.getByRole('dialog');
   await expectFullyInViewport(page, sheet, 'add-widget sheet');
-  await expect(sheet.locator('.kind')).toHaveCount(5);
+  await expect(sheet.locator('.kind')).toHaveCount(7);
   await sheet.locator('.kind', { hasText: 'Usage' }).click();
   await expect(boxes).toHaveCount(2);
   await expect(boxes.nth(1)).toHaveAttribute('data-kind', 'usage');
@@ -253,6 +265,7 @@ test('zooming a loaded widget reuses it: no second mount, no new request', async
   page.on('request', (r) => {
     if (r.url().includes('/insights/reports')) reports += 1;
   });
+  await home.locator('.view:not([hidden]) .quick-chip', { hasText: 'Agents' }).click();
   await page.getByRole('button', { name: 'Add widget' }).click();
   await page.getByRole('dialog').locator('.kind', { hasText: 'Insights' }).click();
   const box = home.locator('section.hbox[data-kind="insights"]');

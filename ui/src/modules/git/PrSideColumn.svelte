@@ -1,7 +1,10 @@
 <script lang="ts">
-  // The PR Summary's details column: reviewers, CI checks, labels, facts.
+  // The pull request's ONE details card (lib DetailsCard, patterns.md "Details
+  // card"): branch, the timeline and the review agents (the page's other
+  // views), reviewers, CI checks, merge checks, labels, facts.
   import type { PrChecksResp, PrCommit, PrDetail } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
+  import DetailsCard from '../../lib/components/DetailsCard.svelte';
   import { openExternal } from '../../lib/external';
   import { rel } from '../../lib/stores/now.svelte';
   import PrAvatar from './PrAvatar.svelte';
@@ -19,14 +22,35 @@
     /** The confirm's "Where" line. */
     where?: string;
     onreviewerschanged?: () => void;
+    /** Open the Timeline view (commits and events). */
+    ontimeline?: () => void;
+    /** Open the AI review view ("Send to review agents"). */
+    onreview?: () => void;
   }
-  let { pr, checks, commits, providerName, repoId, where, onreviewerschanged }: Props = $props();
+  let { pr, checks, commits, providerName, repoId, where, onreviewerschanged, ontimeline, onreview }: Props = $props();
   let editing = $state(false);
   const canEdit = $derived(!!repoId && !!onreviewerschanged && pr.state === 'open');
   const glyph = (s: string) => (s === 'success' ? 'check' : s === 'failure' ? 'x' : s === 'pending' ? 'clock' : 'dot') as 'check' | 'x' | 'clock' | 'dot';
 </script>
 
-<aside class="side" aria-label="Pull request details">
+<DetailsCard label="Pull request details" floating testid="pr-details-card">
+<div class="side">
+  <section class="dc-group sc-doors">
+    <div class="dc-row dc-static" title="{pr.source_branch} → {pr.target_branch}">
+      <Icon name="branch" size={14} />
+      <span class="dc-label mono" dir="ltr">{pr.source_branch} → {pr.target_branch}</span>
+    </div>
+    {#if ontimeline}
+      <button type="button" class="dc-row" onclick={ontimeline} aria-label="Timeline" data-testid="pr-open-timeline">
+        <Icon name="clock" size={14} /><span class="dc-label">Timeline{commits ? ` · ${commits.length} ${commits.length === 1 ? 'commit' : 'commits'}` : ''}</span>
+      </button>
+    {/if}
+    {#if onreview}
+      <button type="button" class="dc-row" onclick={onreview} aria-label="AI review" title="Send this pull request to the review agents" data-testid="pr-open-review">
+        <Icon name="sparkle" size={14} /><span class="dc-label">Send to review agents</span>
+      </button>
+    {/if}
+  </section>
   <section>
     <h3 class="h h-row">Reviewers
       {#if canEdit}
@@ -86,7 +110,8 @@
       {#if pr.created_at}<dt>Opened</dt><dd title={new Date(pr.created_at).toLocaleString()}>{rel(pr.created_at)}</dd>{/if}
     </dl>
   </section>
-</aside>
+</div>
+</DetailsCard>
 
 {#if editing && repoId}
   <PrReviewersEdit {repoId} number={pr.number} current={currentReviewers(pr)} where={where ?? `PR #${pr.number}`} {providerName}
@@ -94,7 +119,9 @@
 {/if}
 
 <style>
-  .side { display: flex; flex-direction: column; gap: 18px; font-size: var(--fs-s); min-width: 0; }
+  .side { display: flex; flex-direction: column; gap: 18px; font-size: var(--fs-s); min-width: 0; padding-block-end: 14px; }
+  .side > section:not(.sc-doors) { padding-inline: 14px; }
+  .sc-doors { border-block-end: 1px solid var(--border); }
   .h {
     margin: 0 0 8px;
     font-size: var(--fs-xs);

@@ -643,8 +643,8 @@ class EventsClient {
 
   /** The daemon's boot id from `hello_ack`: a different one than before
    *  means it restarted — re-read /meta so the alias host (and the rest of
-   *  `auth.meta`) reflects the NEW daemon (r3-04-01 / r3-10-09). */
-  private bootId: string | null = null;
+   *  `auth.meta`) reflects the NEW daemon (r3-04-01 / r3-10-09). Reactive: the status bar re-reads the posture on it. */
+  bootId = $state<string | null>(null);
   private noteBoot(boot: string | undefined, restore?: UiHelloAckFrame['boot_restore']): void {
     if (!boot) return;
     const changed = this.bootId !== null && this.bootId !== boot;

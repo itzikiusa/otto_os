@@ -41,11 +41,11 @@ test('Usage rejects an invalid window and guards a newer budget draft on navigat
   await days.fill('-1');
   await days.blur();
   await expect(page.getByRole('button', { name: 'Save budgets', exact: true })).toBeDisabled();
-  await expect(page.getByRole('alert')).toContainText('whole number');
+  await expect(page.getByRole('dialog', { name: 'Budgets' })).toContainText('whole number');
   expect(puts).toBe(0);
   await days.fill('7');
   await page.evaluate(() => { window.location.hash = '#/insights'; });
-  await expect(page.getByRole('dialog')).toContainText('Discard unsaved changes?');
+  await expect(page.getByRole('dialog', { name: 'Discard unsaved changes?' })).toBeVisible();
   await page.getByRole('button', { name: 'Keep editing', exact: true }).click();
   await expect(days).toHaveValue('7');
 });
@@ -125,8 +125,11 @@ test('Usage scope caps add remove and save with enforcement on RTL tablet', asyn
   await page.getByLabel('Enforce budgets: warn prominently when a cap is exceeded').check();
   await page.getByLabel('Block new work in a scope that is over its cap (otherwise warn only)').check();
   await page.getByRole('button', { name: 'Save budgets', exact: true }).click();
+  // Turning hard blocking on says what it will refuse before it saves.
+  await page.getByRole('dialog', { name: 'Enable hard budget blocking?' }).getByRole('button', { name: 'Enable blocking' }).click();
   await expect(page.getByText('Budgets saved', { exact: true })).toBeVisible();
   expect(submitted).toMatchObject({ enforce: true, block_on_exceed: true, providers: [{ provider: 'codex', monthly_usd: 25 }], workspaces: [{ workspace_id: wid, monthly_usd: 50 }] });
-  await expect(page.getByRole('button', { name: 'Save budgets', exact: true })).toBeDisabled();
+  // A clean save closes the sheet.
+  await expect(page.getByRole('dialog', { name: 'Budgets' })).toHaveCount(0);
   await page.screenshot({ path: '/tmp/otto-ux-screenshots/insights-r3-usage-rtl-tablet.png' });
 });

@@ -198,4 +198,4 @@ contract owners.
 
 - [Subscription accounts](subscription-accounts.md) — separate Claude/Codex subscription logins, per-session selection and stable resume identity.
 
-- [Application telemetry and profiling](./application-telemetry.md) — opt-in local OTel collection, Otto usage, CPU/RAM monitoring and daily slow-operation suggestions.
+- [Application telemetry and profiling](./application-telemetry.md) — opt-in local OTel collection, Usage › Diagnostics, CPU/RAM monitoring and daily slow-operation suggestions.

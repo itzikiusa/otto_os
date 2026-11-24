@@ -9,7 +9,6 @@
   import { router } from '../../lib/router.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { browser } from '../../lib/stores/browser.svelte';
-  import { vault } from '../vault/vault.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { isAbortError } from '../../lib/api/client';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
@@ -44,10 +43,11 @@
   import type LiveBrowserStageView from './live/LiveBrowserStage.svelte';
   import type { LiveViewState } from './live/protocol';
   import LiveEngineSetup from './live/LiveEngineSetup.svelte';
-  import SimulatorView from './simulators/SimulatorView.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
   // The live (remote engine) stage loads with the first live tab.
   const LiveBrowserStage = lazyComponent(() => import('./live/LiveBrowserStage.svelte'));
+  const SimulatorView = lazyComponent(() => import('./simulators/SimulatorView.svelte')); // rare: loads on first use
   import {
     DEFAULT_EMULATION_STATE,
     stateForPreset,
@@ -520,7 +520,7 @@
       await browser.navigate(url);
       browser.summary = '';
     } catch (e) {
-      toastError('Couldn’t load page', e);
+      if (!browser.pageError) toastError('Couldn’t load page', e); // else it says so inline, with Retry
     }
   }
 
@@ -591,6 +591,7 @@
 
   async function doVaultSave(e: MouseEvent): Promise<void> {
     if (!browser.activeTab?.url) return;
+    const { vault } = await import('../vault/vault.svelte'); // rare: loads on first use
     if (vault.vaults.length === 0) await vault.load();
     if (vault.vaults.length === 0) {
       toasts.warn('No vault registered', 'Open the Vault module and register one first.');
@@ -798,14 +799,7 @@
     {/if}
 
     {#if mirroredSim}
-      <SimulatorView
-        device={mirroredSim}
-        currentUrl={browser.activeTab?.url ?? ''}
-        split={simSplit}
-        ontogglesplit={() => (simSplit = !simSplit)}
-        ondevicechange={(d) => (mirroredSim = d)}
-        onclose={() => (mirroredSim = null)}
-      />
+      <LazyMount lazy={SimulatorView} what="the simulator view" variant="panel" props={{ device: mirroredSim, currentUrl: browser.activeTab?.url ?? '', split: simSplit, ontogglesplit: () => (simSplit = !simSplit), ondevicechange: (d: SimDevice) => (mirroredSim = d), onclose: () => (mirroredSim = null) }} />
     {/if}
     {#if showMarksRail}
       <div class="notes-wrap mobile-open">

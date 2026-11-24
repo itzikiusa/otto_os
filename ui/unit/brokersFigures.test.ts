@@ -18,10 +18,11 @@ test('a failed metrics load reads "—", a measured zero reads 0', () => {
 });
 
 test('group lag: number, pending, unknown and non-consumer groups', () => {
-  assert.equal(lagBadge(0, false, 'consumer').text, 'lag 0');
-  assert.equal(lagBadge(1500, false, 'consumer').text, `lag ${(1500).toLocaleString()}`);
-  assert.equal(lagBadge(null, true, 'consumer').text, 'lag …');
-  assert.equal(lagBadge(null, false, 'consumer').text, 'lag —');
+  assert.equal(lagBadge(0, false, 'consumer').text, 'Caught up');
+  assert.equal(lagBadge(1500, false, 'consumer').text, `${(1500).toLocaleString()} behind`);
+  assert.equal(lagBadge(null, true, 'consumer').text, 'Measuring lag…');
+  assert.equal(lagBadge(null, false, 'consumer').text, 'Lag unknown');
+  assert.equal(lagBadge(null, false, 'connect').text, 'No lag to measure');
   assert.match(lagBadge(null, false, 'connect').title, /Not a consumer group/);
 });
 

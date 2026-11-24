@@ -126,7 +126,20 @@ export function columnsFor(
     cols.push(ex(k, k.replace(/_/g, ' '), 'minmax(90px, 1fr)'));
   }
   cols.push(kind === 'events' ? { ...AGE, label: 'Last seen', width: '80px' } : AGE);
+  // The health status follows the name (and fits its longest word): with the
+  // drawer open or on a phone the columns past the first few are clipped, and
+  // the one that says what is wrong must not be among them.
+  const at = cols.findIndex((c) => c.width === STATUS.width && c.status);
+  if (at > 0) cols.splice(1, 0, { ...cols.splice(at, 1)[0], width: statusWidth(rows) });
   return cols;
+}
+
+/** The status is the one word that says what is wrong, so it is never cut
+ *  ("CrashLoopBa…"): the column is at least as wide as the longest status in
+ *  the list (≈1ch a letter, plus the pill's dot and padding). */
+export function statusWidth(rows: K8sRow[]): string {
+  const longest = rows.reduce((n, r) => Math.max(n, (r.status ?? '').length), 0);
+  return longest > 9 ? `minmax(calc(${longest}ch + 34px), 0.9fr)` : STATUS.width;
 }
 
 export function gridTemplate(cols: Column[]): string {

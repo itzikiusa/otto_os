@@ -86,6 +86,21 @@ test('runs once, then only on events (coalesced), with the safety net while conn
   q.stop();
 });
 
+test('an event-complete query (approvals) reads once a day while the socket is up, not every 5 minutes', async () => {
+  const { clock, live, q, runs } = setup({ safetyMs: 86_400_000, hidden: 30_000 });
+  assert.equal(live.EVENT_COMPLETE_SAFETY_MS, 86_400_000);
+  await flush();
+  assert.equal(runs(), 1);
+  // 30 hours with the socket up and no event: one backstop read at 24 h (the
+  // tray's 5-minute net made ~360 in the same time).
+  for (let h = 0; h < 30; h++) {
+    clock.advance(3_600_000);
+    await flush();
+  }
+  assert.equal(runs(), 2);
+  q.stop();
+});
+
 test('socket down → catch-up run, then the fallback cadence; resync refetches', async () => {
   const { clock, reg, q, runs } = setup();
   await flush();

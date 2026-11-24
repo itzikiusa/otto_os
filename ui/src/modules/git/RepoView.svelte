@@ -22,6 +22,9 @@
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { toasts } from '../../lib/toast.svelte';
   import { focusAppContent } from '../../lib/announce.svelte';
+  import { untrack } from 'svelte';
+  import { remoteHost } from './gitUiHelpers';
+  import { readOverview } from '../../lib/api/gitOverview';
 
   // Views only some visits open stay out of the Git chunk (perf R7): the PR
   // list (+ CreatePr), the local review, the merge dialog and the conflict
@@ -36,10 +39,11 @@
   const FileHistoryLazy = lazyComponent(() => import('./FileHistoryPanel.svelte'));
   const RemotesLazy = lazyComponent(() => import('./RemotesPanel.svelte'));
   const RecoveryLazy = lazyComponent(() => import('./RecoveryTools.svelte'));
+  const CommitCardLazy = lazyComponent(() => import('./CommitCard.svelte'));
 
   interface Props {
     repo: Repo;
-    tab: string; // graph | prs | review (legacy changes/history render the graph)
+    tab: string; // changes | graph (History) | prs | review (legacy history renders the graph)
     /** Embedded in the agent-mode right panel: switch tabs via `onTab` (local
      *  state) instead of routing, and hide the "← Repos" back button. */
     embedded?: boolean;
@@ -55,11 +59,8 @@
   }
   let { repo, tab, embedded = false, onTab, onopenrepo, onaddrepo, hostActions = false }: Props = $props();
 
-  // Legacy deep links / persisted state may still say 'changes' or 'history';
-  // both render the graph now, and the Graph tab must read as active for them.
-  // Legacy ids are the graph: changes/history, and focus (Focus is a
-  // page-level view of the Git page now, not a repo sub-tab).
-  const effTab = $derived(tab === 'changes' || tab === 'history' || tab === 'focus' ? 'graph' : tab);
+  // Legacy ids render the graph: 'history', and 'focus' (Focus is a page-level view now).
+  const effTab = $derived(tab === 'history' || tab === 'focus' ? 'graph' : tab);
 
   // Status is owned by the git store (single source of truth) so the auto-fetch
   // loop, the tab strip and this toolbar all stay in sync from one fetch.
@@ -98,9 +99,11 @@
   // status at all — once any status exists, a later failure keeps the stale one.
   const statusError = $derived(status ? null : (git.statusErrorById[repo.id] ?? null));
   let statusLoading = $state(false);
-  function loadStatus(id: string): void {
+  /** First read: the repo's ONE overview (shared with the graph); a retry re-reads the status. */
+  function loadStatus(id: string, retry = false): void {
     statusLoading = true;
-    void git.refreshStatus(id).finally(() => {
+    const read = retry ? git.refreshStatus(id) : readOverview(id).then((o) => void git.setStatus(id, o.status), () => git.refreshStatus(id));
+    void read.finally(() => {
       if (id === repo.id) statusLoading = false;
     });
   }
@@ -130,9 +133,16 @@
   // used to be a mount-only effect keyed on repo.id: a mid-session conflict left
   // the incoming files sitting in WIP with no way into the resolver until you
   // navigated away and back.)
+  const opKey = $derived(status?.op_in_progress ?? '');
   $effect(() => {
     const id = repo.id;
     const seen = conflictKey;
+    // Nothing conflicted and no operation in progress: nothing to ask the daemon.
+    if (!seen && !opKey) {
+      merging = false;
+      mergeOp = null;
+      return;
+    }
     void git
       .getMergeStatus(id)
       .then((m) => {
@@ -241,31 +251,46 @@
     gitBridge.fileTool?.repoId === repo.id ? gitBridge.fileTool : null,
   );
 
-  /** Host of a remote URL for the unsupported-forge message — handles
-   *  https://, ssh:// and scp-like (git@host:path) forms (mirrors the daemon's
-   *  detect.rs split). */
-  function remoteHost(url: string | null): string {
-    if (!url) return 'this remote';
-    const u = url.trim();
-    for (const scheme of ['https://', 'http://', 'ssh://', 'git://']) {
-      if (u.startsWith(scheme)) {
-        const rest = u.slice(scheme.length).replace(/^[^@/]+@/, '');
-        return rest.split('/')[0]?.split(':')[0] || 'this remote';
-      }
-    }
-    const scp = u.match(/^(?:[^@/]+@)?([^:/]+):/);
-    return scp?.[1] ?? 'this remote';
-  }
-
   // Per-repo views only. Focus (my PRs + my Jira work) is cross-repo: it is a
   // page-level view of the Git page (GitPage's header), not a sub-tab here.
   const tabs = [
-    { id: 'graph', label: 'Graph' },
+    { id: 'changes', label: 'Changes' },
+    { id: 'graph', label: 'History' },
     { id: 'prs', label: 'Pull requests' },
     { id: 'review', label: 'Review' },
   ];
 
-  function selectTab(id: string): void {
+  // Changes first: a repository with uncommitted changes opens on Changes, a
+  // clean one on History — decided once per open, so the view never jumps
+  // under the reader afterwards.
+  let landedFor = $state('');
+  $effect(() => {
+    const id = repo.id;
+    const s = status;
+    if (!s || landedFor === id) return;
+    landedFor = id;
+    // A deep link that names the view (#/git/<repo>/<view>) wins.
+    if (router.parts[0] === 'git' && router.parts[1] === id && router.parts[2]) return;
+    untrack(() => {
+      const dirty = s.changes.length > 0;
+      if (dirty && effTab === 'graph') selectTab('changes');
+      else if (!dirty && effTab === 'changes') selectTab('graph');
+    });
+  });
+  // An agent asking to show the working tree (git.requestWip) lands on Changes.
+  $effect(() => {
+    if (git.wipRequest?.repoId === repo.id && (status?.changes.length ?? 0) > 0) untrack(() => effTab !== 'changes' && selectTab('changes'));
+  });
+  /** The Git page's header draws the view switch (GitPage): what it shows. */
+  export function viewState(): { tab: string; resolving: boolean; changes: number; conflicts: number; conflictFiles: number } {
+    return { tab: effTab, resolving, changes: status?.changes.length ?? 0, conflicts: conflictedPaths.length, conflictFiles: conflictSeed.files.length };
+  }
+  function openPr(n: number): void {
+    selectTab('prs');
+    void import('./prWorkspaceStore.svelte').then((m) => m.prWorkspace.open(repo.id, n));
+  }
+
+  export function selectTab(id: string): void {
     resolving = false;
     if (embedded) onTab?.(id);
     else router.go(`git/${repo.id}/${id}`);
@@ -340,7 +365,8 @@
        the switcher only shows where there are no tabs (the agent right panel).
        It wraps (never overflows) when a long branch name or a narrow pane
        doesn't leave room. -->
-  <div class="rv-head" class:views={hostActions} role="group" aria-label="{repo.name} toolbar">
+  {#if !hostActions}
+  <div class="rv-head" role="group" aria-label="{repo.name} toolbar">
     {#if !embedded}
       <button class="btn ghost small" onclick={() => router.go('git')}><span class="rv-back-arrow" aria-hidden="true"><Icon name="chevronLeft" size={12} /></span> Repositories</button>
     {/if}
@@ -369,10 +395,10 @@
           onkeydown={onTabKey}
         >
           {t.label}
-          {#if t.id === 'graph' && status && status.changes.length > 0}
-            <span class="count" title="{plural(status.changes.length, 'uncommitted change')} (WIP)">{status.changes.length}</span>
+          {#if t.id === 'changes' && status && status.changes.length > 0}
+            <span class="count" title={plural(status.changes.length, 'uncommitted change')}>{status.changes.length}</span>
           {/if}
-          {#if t.id === 'graph' && conflictedPaths.length > 0}
+          {#if t.id === 'changes' && conflictedPaths.length > 0}
             <span class="count conflict-count" title={plural(conflictedPaths.length, 'conflicted file')}><Icon name="warning" size={12} />{conflictedPaths.length}</span>
           {/if}
         </button>
@@ -405,6 +431,7 @@
       ><Icon name="more" size={16} /></button>
     {/if}
   </div>
+  {/if}
 
   <!-- In-progress merge banner (shown when not already in the resolver). -->
   {#if merging && !resolving}
@@ -464,13 +491,15 @@
           <LazyMount lazy={PrWorkspaceLazy} what="pull requests" props={{ repoId: repo.id }} />
         </div>
       {/if}
+    {:else if effTab === 'changes'}
+      <LazyMount lazy={CommitCardLazy} what="the commit card" props={{ repo, onopenpr: openPr, onhistory: () => selectTab('graph'), onresolve: openResolver }} />
     {:else if effTab === 'review'}
       <div class="rv-tab-scroll">
         <LazyMount lazy={LocalReviewLazy} what="the local review" variant="panel" props={{ repoId: repo.id }} />
       </div>
-    {:else if status}
-      <!-- Graph is the default for 'graph' AND any legacy tab id (changes /
-           history) still living in persisted state or old deep links. -->
+    {:else if status && landedFor === repo.id}
+      <!-- The graph (History) — mounted once the landing view is decided, so
+           a dirty repo opening on Changes never starts the graph's reads. -->
       <div class="rv-graph">
         <GraphSearchBar repoId={repo.id} />
         <div class="rv-graph-body">
@@ -504,7 +533,7 @@
         error={`${statusError} If the folder moved or was deleted, remove the repository from the Git page and add it again.`}
         empty
         loading={statusLoading}
-        onretry={() => loadStatus(repo.id)}
+        onretry={() => loadStatus(repo.id, true)}
       />
     {:else}
       <div style="padding: 16px"><Skeleton rows={5} height={36} /></div>
@@ -559,11 +588,6 @@
     padding: 6px 14px;
     box-sizing: border-box;
     border-bottom: 1px solid var(--border);
-  }
-  /* Verbs live in the PageHeader: this is just the in-pane view switcher. */
-  .rv-head.views {
-    min-height: 0;
-    padding-block: 6px;
   }
   .rv-head :global(.toolbar) {
     margin-inline-start: auto;

@@ -21,7 +21,7 @@ test.beforeEach(async ({ page }, testInfo) => {
 async function openCode(page: import('@playwright/test').Page): Promise<void> {
   await page.goto('/#/git/rep_otto/pr/51');
   await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
-  await page.getByRole('tab', { name: 'Code', exact: true }).click();
+  await page.getByRole('tab', { name: 'Files', exact: true }).click();
   await expect(page.locator('.dfile-head').first()).toBeVisible();
 }
 

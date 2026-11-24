@@ -16,7 +16,6 @@ import type { NodeRunState, WorkflowRun } from '../../lib/api/types';
 import { workflowRunBus } from '../../lib/events.svelte';
 import { liveQuery } from '../../lib/live';
 import { loadErrorText } from '../../lib/loadError';
-import { renderMarkdownGfm } from '../../lib/md';
 import { ui } from '../../lib/stores/ui.svelte';
 import { toasts } from '../../lib/toast.svelte';
 import { toastError } from '../../lib/toastError';
@@ -43,10 +42,11 @@ const FINAL_OUTPUT_CSS = `
   `;
 const FINAL_OUTPUT_TOKENS = ['--text', '--text-dim', '--border', '--border-strong', '--surface-2', '--accent-text', '--font-ui', '--font-mono'];
 /** Markdown → HTML body (stored); the themed document is `finalOutputSrcdoc`. */
-/** Through the shared GFM renderer (lib/md): sanitized on top of the
- *  sandbox, and it never throws (a parse failure falls back to the escaped
- *  tiny renderer). */
-function renderFinalOutputSrcdoc(md: string): string {
+/** Through the shared GFM renderer (lib/md, loaded with the first final
+ *  output, not with the page): sanitized on top of the sandbox, and it never
+ *  throws (a parse failure falls back to the escaped tiny renderer). */
+async function renderFinalOutputSrcdoc(md: string): Promise<string> {
+  const { renderMarkdownGfm } = await import('../../lib/md');
   // `breaks`: final-output.md is an agent report written line by line
   // ("Status: done" / "Files: 3" / "PR: …"), not reflowed prose.
   return renderMarkdownGfm(md, { breaks: true });
@@ -366,8 +366,9 @@ export class RunSync {
       // The run-scoped route (ws Viewer), not /fs/read: that refuses the Otto
       // data dir — where every run's context lives — to everyone but root.
       const data = await readRunContext(runId, 'final-output.md');
+      const html = await renderFinalOutputSrcdoc(data.content);
       if (this.run?.id !== runId) return; // the view moved on while this was in flight
-      this.finalOutputHtml = renderFinalOutputSrcdoc(data.content);
+      this.finalOutputHtml = html;
       this.finalOutputAvailable = true;
     } catch (e) {
       if (this.run?.id !== runId) return;

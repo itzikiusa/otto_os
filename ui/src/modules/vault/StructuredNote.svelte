@@ -11,7 +11,11 @@
   import { sentenceCase } from '../../lib/labels';
   import type { VaultNote } from '../../lib/api/types';
   import { vault } from './vault.svelte';
-  import LiveContext from './LiveContext.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  // Live context reads the git / database / Kubernetes stores: load it with
+  // the first structured note, not with the vault.
+  const LiveContextLazy = lazyComponent(() => import('./LiveContext.svelte'));
   import { linkPreview } from './previewStore.svelte';
   import type { StructuredModel } from './structuredNote';
 
@@ -140,7 +144,7 @@
     </div>
   </div>
 
-  <LiveContext hints={model.hints} wsId={vault.wsId} />
+  <LazyMount lazy={LiveContextLazy} what="live context" variant="compact" props={{ hints: model.hints, wsId: vault.wsId }} />
 </div>
 
 <style>

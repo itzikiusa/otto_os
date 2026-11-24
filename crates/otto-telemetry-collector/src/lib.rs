@@ -581,6 +581,26 @@ impl TelemetryService {
             status: self.status(),
         })
     }
+    /// Navigations per module and device class over the last `days` (1–30),
+    /// from the daily roll-up; empty before telemetry ever ran.
+    pub async fn navigation(&self, days: u32) -> Result<Vec<NavigationCount>> {
+        self.refresh_on_read();
+        let exists = self.usage.query_rows("SELECT count() n FROM system.tables WHERE database='otto_telemetry' AND name='navigation_days'").await;
+        if !exists.is_ok_and(|rows| rows.first().is_some_and(|row| number(row, "n") > 0.0)) {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .usage
+            .query_rows(&schema::navigation(days))
+            .await?
+            .into_iter()
+            .map(|r| NavigationCount {
+                module: string(&r, "module"),
+                device: string(&r, "device"),
+                count: number(&r, "count") as u64,
+            })
+            .collect())
+    }
     async fn operation_rows(&self, hours: u32) -> Result<Vec<OperationSummary>> {
         self.operation_query(&schema::operations(hours)).await
     }

@@ -92,21 +92,33 @@ test('⌃⇧T / ⌃⇧W with no page claim keep their global actions', () => {
   assert.deepEqual(actions, ['newSession', 'closeTab', 'newSession']);
 });
 
-test('"Start a thread" goes to the composer only when the sheet closed (a kept draft stays)', async () => {
+test('Chat starts in Threads only when the sheet closed; a first message rides along as the draft', async () => {
   const went: string[] = [];
-  const router = { go: (r: string) => went.push(r) };
-  const kept = componentFunctions(new URL('../src/modules/agents/SessionKindHint.svelte', import.meta.url), ['startThread'], {
-    router,
-    onclose: async () => false,
+  const store = new Map<string, string>();
+  const ctx = (close: boolean, prompt: string) => ({
+    router: { go: (r: string) => went.push(r) },
+    sessionStorage: { setItem: (k: string, v: string) => store.set(k, v) },
+    requestClose: async () => close,
+    prompt,
+    scratchMode: false,
+    ws: { currentId: 'w1' },
+    provider: 'codex',
+    model: 'gpt-x',
+    SCRATCH_WORKSPACE_ID: 'scratch',
+    localStorage: {},
+    writeStartPick: (_s: unknown, scope: string, pick: unknown) => picks.push([scope, pick]),
   });
-  await kept.startThread();
+  const picks: unknown[] = [];
+  const url = new URL('../src/modules/agents/NewSession.svelte', import.meta.url);
+  await componentFunctions(url, ['startChat'], ctx(false, '')).startChat();
   assert.deepEqual(went, [], 'the person chose "Keep editing"');
-  const closed = componentFunctions(new URL('../src/modules/agents/SessionKindHint.svelte', import.meta.url), ['startThread'], {
-    router,
-    onclose: () => true,
-  });
-  await closed.startThread();
+  await componentFunctions(url, ['startChat'], ctx(true, '')).startChat();
   assert.deepEqual(went, ['threads/new']);
+  await componentFunctions(url, ['startChat'], ctx(true, 'fix the flaky test')).startChat();
+  assert.deepEqual(went, ['threads/new', 'threads']);
+  assert.equal(JSON.parse(store.get('otto.thread_draft_handoff') ?? '{}').draft, 'fix the flaky test');
+  // One choice, honoured: the tile and model become Threads' start pick for this workspace.
+  assert.equal(JSON.stringify(picks.at(-1)), JSON.stringify(['threads:w1', { provider: 'codex', model: 'gpt-x', effort: null }]));
 });
 
 test('New session requestClose tells the hint whether the sheet closed', async () => {

@@ -189,7 +189,9 @@ class AuthStore {
   /** Re-read `/meta` after boot while the cold response arrived before
    *  background shell-alias tool probes or model catalogs settled — the
    *  daemon says so with `provider_models_provisional` (a slow CLI such as
-   *  `muse serve` answers after the first read). At most 10 re-reads. */
+   *  `muse serve` answers after the first read). At most 10 re-reads, 3.5 s
+   *  apart at first and doubling to 30 s (no event says the catalog settled;
+   *  a fixed 3.5 s cadence was 10 reads in the first 35 s of every load). */
   private scheduleProvisionalMetaRefresh(first = true): void {
     this.clearProvisionalMetaRefresh();
     if (first) this.provisionalMetaReads = 0;
@@ -212,7 +214,7 @@ class AuthStore {
           if (ok) this.scheduleProvisionalMetaRefresh(false);
         });
       }
-    }, 3_500);
+    }, Math.min(30_000, 3_500 * 2 ** (this.provisionalMetaReads - 1)));
     (this.provisionalMetaTimer as { unref?: () => void } | null)?.unref?.();
   }
 

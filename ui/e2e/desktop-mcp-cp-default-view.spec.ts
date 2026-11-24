@@ -40,14 +40,22 @@ async function attached(ctx: APIRequestContext, workspaceId: string): Promise<bo
   return ((await response.json()) as { attached: boolean }).attached;
 }
 
-test('landing is the Otto server view', async ({ page }) => {
+test('landing says what waits on you; Tools holds Otto’s server and catalog', async ({ page }) => {
+  // Nothing pending here, whatever another spec left waiting on the shared daemon.
+  await page.route('**/api/v1/mcp/approvals?status=pending', (route) => route.fulfill({ json: [] }));
   await page.goto('/#/mcp');
+  await expect(page.locator('[data-testid="mcp-nav-home"]')).toHaveAttribute('aria-selected', 'true');
+  const summary = page.getByTestId('mcp-summary');
+  await expect(summary).toContainText('Nothing waits on you.', { timeout: 30_000 });
+  await expect(summary.getByTestId('mcp-sum-tools')).toContainText(/Agents may use \d+ of Otto’s \d+ tools; \d+ of them can change things\./);
+  await expect(summary.getByTestId('mcp-sum-denials')).toContainText('denied in the last 7 days');
+  await summary.getByTestId('mcp-sum-tools').getByRole('button', { name: 'Review tools' }).click();
 
   await expect(page.locator('.otto')).toBeVisible({ timeout: 30_000 });
   await expect(page.locator('[data-testid="mcp-nav-otto"]')).toHaveAttribute('aria-selected', 'true');
   await expect(page.locator('input[data-testid="mcp-session-attach"]')).toBeVisible();
   await expect(page.locator('[data-testid="mcp-sessions-panel"]')).toBeVisible();
-  await expect(page.locator('.otto .grp-name', { hasText: 'Workflows' })).toBeVisible();
+  await expect(page.locator('[data-testid="mcp-tool-catalog"] .grp-name', { hasText: 'Workflows' })).toBeVisible();
 
   await expect(page.locator('[data-testid="mcp-expose-panel"]')).toHaveCount(0);
   const expose = page.locator('[data-testid="mcp-expose-toggle"]');
@@ -78,7 +86,7 @@ test('session attach writes the per-workspace map', async ({ page }) => {
     });
     expect(seed.ok(), `seed settings → ${seed.status()} ${await seed.text()}`).toBeTruthy();
 
-    await page.goto('/#/mcp');
+    await page.goto('/#/mcp/otto');
     const toggle = page.locator('input[data-testid="mcp-session-attach"]');
     await expect(toggle).toBeChecked({ timeout: 30_000 });
     await toggle.uncheck();
@@ -108,9 +116,9 @@ test('session attach writes the per-workspace map', async ({ page }) => {
   }
 });
 
-// perf2/10-mcp R7: the badge reads the count route (no 200-row list), and the
-// audit log pages with offset + "Load more".
-test('pending badge uses the count route and the audit log pages', async ({ page }) => {
+// perf2/10-mcp R7: the badge reads only the pending requests (never a list of
+// 200 decided rows), and the audit log pages with offset + "Load more".
+test('pending badge reads the pending requests and the audit log pages', async ({ page }) => {
   const row = (i: number) => ({
     id: `call-${i}`, workspace_id: workspaceA, server_id: null, server_name: 'otto', tool: `otto.tool_${i}`,
     direction: 'inbound', caller_user_id: null, caller_kind: 'agent', args_redacted_json: '{}',
@@ -119,7 +127,11 @@ test('pending badge uses the count route and the audit log pages', async ({ page
     created_at: new Date(Date.now() - i * 1000).toISOString(),
   });
   const offsets: number[] = [];
-  await page.route('**/api/v1/mcp/approvals/count?*', (route) => route.fulfill({ json: { count: 4 } }));
+  const pending = (i: number) => ({ id: `appr-${i}`, workspace_id: workspaceA, server_id: null, server_name: null, kind: 'tool_call', tool: 'otto.git_push', title: `Push ${i}`, detail: null, args_redacted_json: '{}', risk_label: 'write', status: 'pending', requested_by: null, requested_by_kind: 'agent', decided_by: null, decision_note: null, created_at: new Date().toISOString(), decided_at: null, consumed_at: null, expires_at: null });
+  await page.route('**/api/v1/mcp/approvals?*', (route) => {
+    expect(new URL(route.request().url()).searchParams.get('status')).toBe('pending');
+    return route.fulfill({ json: [0, 1, 2, 3].map(pending) });
+  });
   await page.route('**/api/v1/mcp/audit?*', (route) => {
     const params = new URL(route.request().url()).searchParams;
     expect(params.get('paged')).toBe('true');

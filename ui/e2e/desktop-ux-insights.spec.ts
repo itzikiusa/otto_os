@@ -36,6 +36,8 @@ test('Usage attribution recovers after failure and fits long keys on phone', asy
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/#/usage');
+  // Work items load only when their view opens.
+  await page.getByTestId('usage-where-work').click();
   const panel = page.locator('.attribution-panel');
   await expect(panel.getByRole('button', { name: 'Retry', exact: true })).toBeVisible();
   fail = false;
@@ -43,7 +45,7 @@ test('Usage attribution recovers after failure and fits long keys on phone', asy
   await expect(panel.locator('.attr-row')).toHaveCount(1);
   await expectNoHorizontalOverflow(page);
   const download = page.waitForEvent('download');
-  await panel.getByRole('button', { name: 'Download attribution as CSV' }).click();
+  await page.getByTestId('usage-export').click();
   expect((await download).suggestedFilename()).toBe('otto-attribution-origin-30d.csv');
   await page.screenshot({ path: '/tmp/otto-ux-screenshots/insights-r1-usage-phone-loaded.png' });
 });

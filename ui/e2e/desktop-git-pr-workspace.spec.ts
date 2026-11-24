@@ -30,7 +30,8 @@ test('a PR deep link opens in the workspace with header, stats and timeline', as
   // Grouped list: my PRs first.
   await expect(page.locator('.prlist')).toContainText('Authored by you');
 
-  await page.getByRole('tab', { name: 'Timeline', exact: true }).click();
+  await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
+  await page.getByRole('button', { name: 'Timeline', exact: true }).click();
   await expect(page.locator('.tlw')).toContainText('opened this pull request');
   await expect(page.locator('.tlw')).toContainText('pushed 1 commit');
   await expect(page.locator('.prd-code')).toBeHidden();
@@ -40,7 +41,7 @@ test('a PR deep link opens in the workspace with header, stats and timeline', as
 test('Code tab: hide tests, viewed marks persist, tree, one commit', async ({ page }) => {
   await page.goto('/#/git/rep_otto/pr/51');
   await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
-  await page.getByRole('tab', { name: 'Code', exact: true }).click();
+  await page.getByRole('tab', { name: 'Files', exact: true }).click();
   const heads = page.locator('.dfile-head');
   await expect(heads).toHaveCount(23);
   // >5 files: every file starts collapsed, like a reviewable file list.
@@ -56,7 +57,7 @@ test('Code tab: hide tests, viewed marks persist, tree, one commit', async ({ pa
   await viewed.check();
   await expect(page.locator('.diff-root')).toContainText('1 / 17 viewed');
   await page.reload();
-  await page.getByRole('tab', { name: 'Code', exact: true }).click();
+  await page.getByRole('tab', { name: 'Files', exact: true }).click();
   await expect(page.locator('.diff-root')).toContainText('1 / 17 viewed');
 
   // The diff toolbar stays pinned while the PR pane scrolls a long diff.
@@ -96,7 +97,7 @@ test('Files panel under the list: a tree that jumps into Code and shares Viewed 
   const first = panel.locator('.nav-file').first();
   const path = (await first.getAttribute('title')) ?? '';
   await first.locator('.nav-file-open').click();
-  await expect(page.getByRole('tab', { name: 'Code', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tab', { name: 'Files', exact: true })).toHaveAttribute('aria-selected', 'true');
   await expect(page.locator(`.prd-code .dfile-head[title="${path}"], .prd-code .dfile-head:has-text("${path.split('/').pop()}")`).first()).toBeInViewport();
 
   // Ticking in the panel is the diff's Viewed mark (and the other way round).
@@ -113,8 +114,8 @@ test('Approve / Request changes live in the header and update at once', async ({
   await page.goto('/#/git/rep_otto/pr/51');
   await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
   const head = page.locator('.prd-actions');
-  const side = page.getByRole('complementary', { name: 'Pull request details' });
-  const codeTab = page.getByRole('tab', { name: 'Code', exact: true });
+  const side = page.getByRole('region', { name: 'Pull request details' });
+  const codeTab = page.getByRole('tab', { name: 'Files', exact: true });
 
   // Request changes from the Code tab: the composer opens over the diff, and
   // you stay on Code (it used to jump to Summary).
@@ -131,7 +132,7 @@ test('Approve / Request changes live in the header and update at once', async ({
   // Bitbucket shape: username an email, reviewer a display name). After the
   // quiet reload only the daemon's `is_me` says it's you, and the header must
   // keep the status instead of flipping back to a button.
-  await page.getByRole('tab', { name: 'Summary', exact: true }).click();
+  await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
   await expect(side.getByText('Dev Otto')).toBeVisible();
   await expect(side.getByText('Changes requested')).toBeVisible();
   await expect(head.getByText('Changes requested')).toBeVisible();
@@ -194,7 +195,7 @@ test('PR header never overlaps: repo · #n · state stay whole as the window nar
     await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
     const boxes = await page.evaluate(() => {
       const r = (sel: string) => document.querySelector(sel)!.getBoundingClientRect();
-      return { num: r('.prd-num'), state: r('.prd-state'), actions: r('.prd-actions'), slug: r('.prd-slug') };
+      return { num: r('.prd-num'), state: r('.prd-status'), actions: r('.prd-actions'), slug: r('.prd-slug') };
     });
     const overlap = (a: DOMRect, b: DOMRect) => a.left < b.right - 1 && b.left < a.right - 1 && a.top < b.bottom - 1 && b.top < a.bottom - 1;
     expect(overlap(boxes.num, boxes.state), `#n over the state chip at ${width}px`).toBe(false);
@@ -241,7 +242,7 @@ test('your review status withdraws from its own menu', async ({ page }) => {
   await page.goto('/#/git/rep_otto/pr/51');
   await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
   const head = page.locator('.prd-actions');
-  const side = page.getByRole('complementary', { name: 'Pull request details' });
+  const side = page.getByRole('region', { name: 'Pull request details' });
   await head.getByRole('button', { name: 'Approve', exact: true }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Approve PR' }).click();
   // The status is a button now; its menu withdraws (asks first).

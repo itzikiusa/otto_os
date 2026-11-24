@@ -122,9 +122,8 @@ test('auto-fetch: updates the behind chip after the upstream advances', async ({
   await page.goto(`/#/git/${upstreamRepoId}/graph`);
   await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
   // The seeded upstream is 1 commit ahead → once the auto-fetch runs, the
-  // toolbar branch chip shows a "behind" marker (↓) after the initial fetch.
-  await expect(page.locator('.branch-chip .ab.down')).toBeVisible({ timeout: 25_000 });
-  await expect(page.locator('.branch-chip .ab.down')).toHaveText(/↓\s*1/);
+  // header's state words say so ("↓1 to pull") after the initial fetch.
+  await expect(page.getByTestId('git-state')).toContainText('↓1 to pull', { timeout: 25_000 });
 });
 
 test('auto-fetch: toggle is on by default and pausing it persists', async ({ page }) => {
@@ -203,9 +202,12 @@ test('dedup: opening an already-open repo keeps a single tab', async ({ page }) 
   await boot(page);
   await page.goto(`/#/git/${upstreamRepoId}/graph`);
   await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator('.git-tab')).toHaveCount(1, { timeout: 15_000 });
+  // A phone shows the repo as the header's title, not a tab strip: count the open tabs the store keeps.
+  const openTabs = (): Promise<number> =>
+    page.evaluate(() => (JSON.parse(localStorage.getItem('otto_git_open_tabs') ?? '{}').openRepoIds ?? []).length);
+  await expect.poll(openTabs, { timeout: 15_000 }).toBe(1);
   // Re-opening the same repo (same hash route) must not mint a second tab.
   await page.goto(`/#/git/${upstreamRepoId}/history`);
   await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator('.git-tab')).toHaveCount(1);
+  await expect.poll(openTabs).toBe(1);
 });

@@ -84,7 +84,7 @@ test('threadPrs skips gitApi.prs.list when repo has no provider or no configured
 
   const createHarness = () =>
     loadSource(
-      new URL('../src/modules/threads/threadPrs.svelte.ts', import.meta.url),
+      new URL('../src/lib/stores/branchPrs.svelte.ts', import.meta.url),
       {
         'lib/api/client': {
           api: {
@@ -121,7 +121,7 @@ test('threadPrs skips gitApi.prs.list when repo has no provider or no configured
       },
       {},
       { relative: true },
-    ) as typeof import('../src/modules/threads/threadPrs.svelte.ts');
+    ) as typeof import('../src/lib/stores/branchPrs.svelte.ts');
 
   const flushMicrotasks = () => new Promise((r) => setTimeout(r, 15));
 
@@ -137,14 +137,14 @@ test('threadPrs skips gitApi.prs.list when repo has no provider or no configured
   });
 
   // 1. Local-only repo (`provider: null`): never calls `/repos/{id}/prs`.
-  const { threadPrs: prs1 } = createHarness();
+  const { branchPrs: prs1 } = createHarness();
   assert.equal(prs1.prFor(makeRepo({ id: 'repo_local', provider: null, remote_url: null }), 'feat/ide'), null);
   await flushMicrotasks();
   assert.deepEqual(prListCalls, []);
 
   // 2. GitHub remote repo with `git_account_id: null` and zero GitHub accounts configured: skips `/repos/{id}/prs` (prevents 400).
   accountsList = [];
-  const { threadPrs: prs2 } = createHarness();
+  const { branchPrs: prs2 } = createHarness();
   assert.equal(prs2.prFor(makeRepo({ id: 'repo_no_acct', provider: 'github', git_account_id: null }), 'feat/ide'), null);
   await flushMicrotasks();
   assert.deepEqual(prListCalls, []);

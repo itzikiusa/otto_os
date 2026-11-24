@@ -1,39 +1,9 @@
-// The thread details card's pure half (ThreadDetailsCard.svelte): the ONE git
-// action it offers for the checkout's state — Commit → Push → Create PR →
-// "PR #N" — and where the card may float. Import-free (types only),
-// unit-tested in unit/threadsDetails.test.ts.
+// The thread details card's pure half (ThreadDetailsCard.svelte): where the
+// card may float. The ONE git action it offers (Commit → Push → Create PR →
+// "PR #N") is shared with Git's commit card: lib/gitNextStep.ts.
+// Import-free (types only), unit-tested in unit/threadsDetails.test.ts.
 
-export type GitActionKind = 'commit' | 'push' | 'publish' | 'create-pr' | 'pr' | 'none';
-
-export interface GitActionState {
-  /** Uncommitted changes in the checkout. */
-  changes: number;
-  branch: string | null;
-  upstream: string | null;
-  ahead: number;
-  /** The repo has a remote to push to. */
-  remote: boolean;
-  /** A forge Otto can open a pull request on (GitHub, GitLab, Bitbucket). */
-  forge: boolean;
-  /** The branch's open pull request, when there is one. */
-  prNumber: number | null;
-}
-
-export interface GitAction {
-  kind: GitActionKind;
-  label: string;
-}
-
-/** The next step for this checkout: work to commit first, then commits to
- *  push, then the pull request (opened, or to create). */
-export function gitAction(s: GitActionState): GitAction {
-  if (s.changes > 0) return { kind: 'commit', label: 'Commit' };
-  if (s.branch && s.remote && !s.upstream) return { kind: 'publish', label: 'Publish branch' };
-  if (s.branch && s.upstream && s.ahead > 0) return { kind: 'push', label: s.ahead === 1 ? 'Push 1 commit' : `Push ${s.ahead} commits` };
-  if (s.prNumber != null) return { kind: 'pr', label: `PR #${s.prNumber}` };
-  if (s.branch && s.forge) return { kind: 'create-pr', label: 'Create PR' };
-  return { kind: 'none', label: 'Nothing to commit' };
-}
+export { gitAction, type GitAction, type GitActionKind, type GitActionState } from '../../lib/gitNextStep.ts';
 
 /** The card's inline size and the room it takes beside the conversation
  *  (card + a gap on each side): `--thread-card-reserve` while it floats. */

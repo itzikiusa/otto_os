@@ -1,20 +1,25 @@
 <script lang="ts">
-  // Attribution drilldown panel (B1): "why did this cost so much?"
-  // Groups usage_events by a chosen work-graph dimension (repo/branch/PR/…) and
-  // shows cost + tokens per group. Supports CSV and JSON export via exporters.ts.
+  // "Where it went › Work item" (B1): "why did this cost so much?" Groups
+  // usage_events by a chosen work-graph dimension (repo/branch/PR/…) and shows
+  // cost + tokens per group. Loads only while this view is open; the page's
+  // one Export saves the rows shown (handed out through `onrows`).
   import { api } from '../../lib/api/client';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { loadErrorText } from '../../lib/loadError';
-  import { exportCsv, downloadJson, copyAsJson } from '../../lib/components/exporters';
+  import { copyAsJson } from '../../lib/components/exporters';
   import type { AttributionRow, AttributionDim } from './types';
   import { DIM_LABELS } from './types';
   import { formatCount, formatUsd } from '../../lib/metric-format';
 
-  // Injected from the parent (UsagePage) — the current look-back window.
-  let { days = 30 }: { days?: number } = $props();
+  // The current look-back window; `onrows` hands the rows and dimension shown
+  // to the page so its Export saves exactly what is on screen.
+  let { days = 30, onrows }: { days?: number; onrows?: (rows: AttributionRow[], dim: AttributionDim) => void } = $props();
+  let selectedDim: AttributionDim = $state('origin');
+  let rows: AttributionRow[] = $state([]);
+  $effect(() => onrows?.(rows, selectedDim));
 
   const DIMS: AttributionDim[] = [
     'origin',
@@ -33,8 +38,6 @@
   const ATTRIBUTION_EMPTY_BODY =
     'This breakdown fills only for usage tagged with a repo, branch, PR, review or other work item. Usage read from session transcripts carries no such tags yet — it is counted in the tables above.';
 
-  let selectedDim: AttributionDim = $state('origin');
-  let rows: AttributionRow[] = $state([]);
   let loading = $state(false);
   /** Last load failure — shown inline with Retry (an empty table would read
    *  as "nothing attributed", which is not what happened). */
@@ -88,24 +91,6 @@
     return totalCost > 0 ? (cost / totalCost) * 100 : 0;
   }
 
-  function exportRowsCsv(): void {
-    exportCsv(
-      rows.map((r) => ({
-        [DIM_LABELS[selectedDim]]: r.key,
-        cost_usd: r.cost_usd,
-        tokens: r.tokens,
-        sessions: r.sessions,
-      })),
-      `otto-attribution-${selectedDim}-${days}d.csv`,
-    );
-    toasts.success('Exported attribution as CSV', `otto-attribution-${selectedDim}-${days}d.csv`);
-  }
-
-  function exportRowsJson(): void {
-    downloadJson(rows, `otto-attribution-${selectedDim}-${days}d.json`);
-    toasts.success('Exported attribution as JSON', `otto-attribution-${selectedDim}-${days}d.json`);
-  }
-
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
   $effect(() => () => {
     if (copyTimer) {
@@ -132,12 +117,8 @@
   }
 </script>
 
-<section class="card attribution-panel" aria-labelledby="attr-title">
+<section class="attribution-panel" aria-label="Cost by work item">
   <div class="attr-header">
-    <div class="attr-heading">
-      <h3 class="attr-title" id="attr-title">Cost attribution</h3>
-      <span class="attr-subtitle">Where the spend went, grouped by the work it was for</span>
-    </div>
     <div class="attr-controls">
       <label class="dim-label" for="attr-dim-select">Group by</label>
       <select id="attr-dim-select" class="input dim-select" bind:value={selectedDim}>
@@ -145,14 +126,6 @@
           <option value={dim}>{DIM_LABELS[dim]}</option>
         {/each}
       </select>
-      {#if rows.length > 0}
-        <button class="btn small ghost" onclick={exportRowsCsv} title="Download as CSV" aria-label="Download attribution as CSV">
-          <Icon name="download" size={12} /> CSV
-        </button>
-        <button class="btn small ghost" onclick={exportRowsJson} title="Download as JSON" aria-label="Download attribution as JSON">
-          <Icon name="download" size={12} /> JSON
-        </button>
-      {/if}
     </div>
   </div>
 
@@ -227,9 +200,7 @@
 </section>
 
 <style>
-  /* Same card + heading treatment as the other Usage panels (global .card). */
   .attribution-panel {
-    padding: 14px 16px;
     min-width: 0;
   }
 
@@ -240,23 +211,6 @@
     gap: 8px 12px;
     flex-wrap: wrap;
     margin-bottom: 12px;
-  }
-  .attr-heading {
-    display: flex;
-    align-items: baseline;
-    flex-wrap: wrap;
-    gap: 2px 10px;
-    min-width: 0;
-  }
-  .attr-title {
-    margin: 0;
-    font-size: var(--fs-m);
-    font-weight: 600;
-    color: var(--text);
-  }
-  .attr-subtitle {
-    font-size: var(--fs-s);
-    color: var(--text-dim);
   }
   .attr-controls {
     display: flex;

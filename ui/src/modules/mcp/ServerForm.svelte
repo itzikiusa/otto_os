@@ -207,8 +207,8 @@
     <label class="field">
       <span>Runs</span>
       <select bind:value={runs} data-testid="mcp-server-runs" onchange={() => { if (runs === 'native') transport = 'stdio'; }}>
-        <option value="governed">Governed: through Otto’s gateway (policies, approvals, audit)</option>
-        <option value="native">Native: launched by the agent CLI from .mcp.json</option>
+        <option value="governed">Through Otto: its gateway runs it (policies, approvals, audit)</option>
+        <option value="native">Direct: the agent CLI launches it from .mcp.json</option>
       </select>
       {#if runs === 'native'}<span class="env-note">{NOT_GOVERNED_NOTE}</span>{/if}
     </label>

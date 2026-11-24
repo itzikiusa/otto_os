@@ -401,6 +401,15 @@ test.describe('Containers — desktop', () => {
     const detail = page.getByTestId('container-detail');
     await expect(detail.getByRole('heading', { name: 'payments-api' })).toBeVisible();
 
+    // Every row says its state in a word; the detail has one state action
+    // (Stop) and Remove lives in ⋯, never beside Stop.
+    await expect(page.getByTestId('container-state').first()).toHaveText('Running');
+    await expect(detail.getByRole('button', { name: 'Stop' })).toBeVisible();
+    await expect(detail.getByRole('button', { name: 'Remove container' })).toHaveCount(0);
+    await detail.getByTestId('container-more').click();
+    await expect(page.getByRole('menu', { name: 'Context menu' }).getByRole('menuitem', { name: 'Remove container…' })).toBeVisible();
+    await page.keyboard.press('Escape');
+
     // Masked secret reveals on demand via click-to-reveal eye button.
     await expect(detail.getByText('••••••••')).toBeVisible();
     await detail.getByRole('button', { name: 'Reveal DATABASE_PASSWORD' }).click();

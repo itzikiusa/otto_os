@@ -48,8 +48,10 @@ test.beforeEach(async ({ page }) => {
 });
 async function openRepo(page: Page, tab = 'graph') {
   await page.goto(`/#/git/${repoId}/${tab}`);
-  // Focus is the Git page's own view now (the legacy repo/focus link opens it).
-  if (tab === 'focus') await expect(page.getByRole('button', { name: 'Focus', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  // Focus is the Git page's own view now (the legacy repo/focus link opens it);
+  // a phone names it in the header's repo switcher (one header row).
+  if (tab === 'focus' && page.viewportSize()!.width <= 640) await expect(page.getByTestId('git-phone-repo')).toHaveText('Focus');
+  else if (tab === 'focus') await expect(page.getByRole('button', { name: 'Focus', exact: true })).toHaveAttribute('aria-pressed', 'true');
   else await expect(page.locator('.rv-tabs')).toBeVisible();
 }
 function diff(path: string) {
@@ -130,6 +132,8 @@ test('graph multi-ref list is keyboard accessible and returns focus', async ({ p
   await expect(expander).toBeFocused();
 });
 test('stash, stale worktree and submodule actions are accessible by keyboard and tap', async ({ page }) => {
+  // The fixtures replace the side-list routes: skip the one-request overview so the graph reads them.
+  await page.route('**/api/v1/repos/*/overview', r => r.fulfill({ status: 404, json: { code: 'not_found', message: 'fixture' } }));
   await page.route('**/api/v1/repos/*/worktrees', r => r.fulfill({ json: [{ path: '/tmp/stale-audit-tree', sha: firstSha, branch: 'stale-audit', is_main: false, locked: false, prunable: true, dirty: false, dirty_known: true }] }));
   await page.route('**/api/v1/repos/*/submodules', r => r.fulfill({ json: [{ path: 'vendor/audit-submodule', sha: firstSha, url: 'https://example.test/submodule', state: 'uninitialized' }] }));
   await openRepo(page);
@@ -293,11 +297,12 @@ for (const scenario of [
     await expect(page.locator('.prd-title')).toContainText('PR 1:');
     await expectNoHorizontalOverflow(page);
     await page.screenshot({ path: testInfo.outputPath('pr-summary.png'), fullPage: true });
-    await page.getByRole('tab', { name: 'Code', exact: true }).click();
+    await page.getByRole('tab', { name: 'Files', exact: true }).click();
     await expect(page.locator('.diff-root')).toBeVisible();
     await expectNoHorizontalOverflow(page);
     await page.screenshot({ path: testInfo.outputPath('pr-files.png'), fullPage: true });
-    await page.getByRole('tab', { name: 'AI review', exact: true }).click();
+    await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
+  await page.getByRole('button', { name: 'AI review', exact: true }).click();
     await expect(page.locator('.rp-comment')).toBeVisible();
     await page.getByTestId('rp-post-comment').scrollIntoViewIfNeeded();
     await expectFullyInViewport(page, page.getByTestId('rp-post-comment'));
@@ -336,10 +341,11 @@ test('PR files and review code keep LTR gutters in an RTL interface', async ({ p
   await prFixtures(page);
   await page.goto(`/#/git/${repoId}/pr/1`);
   await page.evaluate(() => { document.documentElement.dir = 'rtl'; });
-  await page.getByRole('tab', { name: 'Code', exact: true }).click();
+  await page.getByRole('tab', { name: 'Files', exact: true }).click();
   await expect(page.locator('.dtable')).toHaveCSS('direction', 'ltr');
   await expect(page.locator('.hunk-header')).toHaveCSS('direction', 'ltr');
-  await page.getByRole('tab', { name: 'AI review', exact: true }).click();
+  await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
+  await page.getByRole('button', { name: 'AI review', exact: true }).click();
   await expect(page.locator('.rp-diff-snippet')).toHaveCSS('direction', 'ltr');
 });
 test('draft review posting previews destination and audience before sending', async ({ page }) => {
@@ -350,7 +356,8 @@ test('draft review posting previews destination and audience before sending', as
     await route.fulfill({ json: { id: 'finding-1', review_id: 'review-1', path: longPath, line: 1, severity: 'bug', body: 'Posted finding', state: 'approved', posted: true, created_at: '2026-09-25T08:00:00Z' } });
   });
   await page.goto(`/#/git/${repoId}/pr/1`);
-  await page.getByRole('tab', { name: 'AI review', exact: true }).click();
+  await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
+  await page.getByRole('button', { name: 'AI review', exact: true }).click();
   await page.getByTestId('rp-post-comment').click();
   const dialog = page.getByRole('dialog', { name: 'Post comment to PR #1?' });
   await expect(dialog).toContainText('Where:');

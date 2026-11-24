@@ -18,7 +18,6 @@
   import ShortNavDrawer from './ShortNavDrawer.svelte';
   import Skeleton from '../lib/components/Skeleton.svelte';
   import NavButtons from './NavButtons.svelte';
-  import MobileActionBar from './MobileActionBar.svelte';
   import Icon from '../lib/components/Icon.svelte';
   import LoadState from '../lib/components/LoadState.svelte';
   import LazyMount from '../lib/components/LazyMount.svelte';
@@ -373,27 +372,6 @@
 
   // ---- mobile action bar helpers ----
   // These are the SAME actions the keyboard map calls (App.svelte:187-270).
-  // Exposed as named functions so MobileActionBar can receive them as props
-  // without duplicating any logic.
-  function mobileOpenPalette(): void {
-    if (ui.paletteOpen) ui.paletteOpen = false;
-    else ui.openPalette('commands');
-  }
-  function mobileNewSession(): void {
-    ui.newSessionOpen = true;
-  }
-  function mobileCloseTab(): void {
-    ws.closeActiveTab();
-  }
-  function mobileFind(): void {
-    // A focused component (terminal OR the DB query editor) owns find, then the
-    // active session pane's terminal; else the page-wide find-in-page overlay.
-    routeFind(() => findInPage.show());
-  }
-  function mobileBroadcast(): void {
-    ui.openBroadcast();
-  }
-
   // `?` (no modifier, not while typing) opens the shortcuts cheat-sheet. The
   // global keymap in lib/keys.ts only handles modifier chords, so `?` lives here.
   $effect(() => {
@@ -989,7 +967,8 @@
       <button class="pb-dismiss" onclick={() => serviceHealth.dismiss()} aria-label="Dismiss notice" title="Dismiss notice"><Icon name="x" size={12} /></button>
     </div>
   {/if}
-  {#if moduleName === 'agents'}
+  <!-- A phone shows one session at a time (#/agents is the list): no strip. -->
+  {#if moduleName === 'agents' && !viewport.isPhone}
     <TabBar />
   {/if}
   {#if workspaceLoadError}
@@ -1081,21 +1060,6 @@
     {/if}
   </header>
 
-  <!-- Phone-only quick-action bar: exposes ⌘K/⌘T/⌘W/⌘F/⌘⇧B to touch users
-       who can't produce those chords. Wired to the exact same functions the
-       keyboard map calls; desktop is completely unaffected. Session verbs, so
-       it rides with the Agents page only — elsewhere it was a third chrome row
-       (the palette stays one tap away under BottomNav → More). -->
-  {#if viewport.isPhone && moduleName === 'agents'}
-    <MobileActionBar
-      onpalette={mobileOpenPalette}
-      onnewSession={mobileNewSession}
-      oncloseTab={mobileCloseTab}
-      onfind={mobileFind}
-      showBroadcast={ws.sessions.length > 0}
-      onbroadcast={mobileBroadcast}
-    />
-  {/if}
 
   {/if}
   {#if isPopout && isTauri && !isEmbedded}

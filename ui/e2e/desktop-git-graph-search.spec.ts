@@ -72,7 +72,7 @@ test('⌘F focuses the search box and a server-side query finds the one match', 
   await openRepo(page);
 
   // ⌘F focuses the box from anywhere on the git page.
-  await page.locator('.rv-head').click();
+  await page.getByTestId('git-state').click();
   await page.keyboard.press(process.platform === 'darwin' ? 'Meta+f' : 'Control+f');
   await expect(page.locator('.gsb-input')).toBeFocused();
 

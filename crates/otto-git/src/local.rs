@@ -3842,6 +3842,39 @@ impl LocalGit {
         self.delete_remote_branch_on("origin", name, token).await
     }
 
+    /// Delete several branches on `remote` in ONE push (`git push <remote>
+    /// --delete a b c`): one connection to the remote instead of one per
+    /// branch — a bulk delete of 8 branches spent ~3.7 s per push (31 s).
+    /// An error means at least one ref failed: the caller retries those one
+    /// by one with [`Self::delete_remote_branch_on`], which also treats an
+    /// already-gone ref as done.
+    pub async fn delete_remote_branches_on(
+        &self,
+        remote: &str,
+        names: &[String],
+        token: Option<TransportCredential>,
+    ) -> Result<()> {
+        Self::guard_ref(remote)?;
+        for name in names {
+            Self::guard_ref(name)?;
+        }
+        if !self.remotes().await?.iter().any(|r| r.name == remote) {
+            return Err(Error::Invalid(format!("no remote named '{remote}'")));
+        }
+        let mut args = vec!["push", remote, "--delete"];
+        args.extend(names.iter().map(String::as_str));
+        let (ok, stdout, stderr, code) = self.run_remote_raw(&args, token).await?;
+        if !ok {
+            return Err(upstream_err(&stderr, &stdout, code));
+        }
+        for name in names {
+            let _ = self
+                .run(&["update-ref", "-d", &format!("refs/remotes/{remote}/{name}")])
+                .await;
+        }
+        Ok(())
+    }
+
     /// [`Self::delete_remote_branch`] against the NAMED remote
     /// (`git push <remote> --delete <name>`). The remote-ref row for
     /// `upstream/feature-x` must delete `feature-x` on `upstream` — routing it

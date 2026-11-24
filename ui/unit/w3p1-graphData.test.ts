@@ -20,6 +20,7 @@ function data(firstPage: number) {
     '../../../lib/toast.svelte': { toasts: {} },
     '../../../lib/toastError': { toastError() {} },
     '../../../lib/stores/git.svelte': { git: { refsRev: {} } },
+    '../../../lib/api/gitOverview': { readOverview: () => Promise.reject(new Error('no overview in this fixture')) },
     '../../../lib/diff/gitBridge.svelte': { gitBridge: { stashCount: {} } },
     '../graph-cache': { graphCache: { get: () => null, set() {} } },
     '../graph-splice': { spliceHistory: () => null },
@@ -28,7 +29,7 @@ function data(firstPage: number) {
   });
   // Exercise the rules at a 2-commit "first page".
   const d = src.createGraphData({ repoId: 'r1', onstatus() {}, graphVisible: () => true });
-  assert.equal(src.FIRST_PAGE, 2000);
+  assert.equal(src.FIRST_PAGE, 200);
   const reloads: boolean[] = [];
   d.reloadGraph = async (full = false) => { reloads.push(full); };
   // Seed `commits` the way a reload lands them (gen 0 = the current load).

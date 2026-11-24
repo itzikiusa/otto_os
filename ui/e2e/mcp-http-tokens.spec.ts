@@ -242,7 +242,7 @@ test('Otto Server tab surfaces the HTTP URL + a tokens panel', async ({ page }) 
     localStorage.setItem('otto_rail_expanded', '0');
   }, ws);
 
-  await page.goto('/#/mcp');
+  await page.goto('/#/mcp/otto');
   await expect(page.locator('.mcp-page')).toBeVisible({ timeout: 30_000 });
   await page.locator('[data-testid="mcp-expose-toggle"]').click();
 

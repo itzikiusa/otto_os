@@ -63,8 +63,10 @@ test('⌘K search hits open their page (they used to do nothing)', async ({ page
   await palette.getByPlaceholder('Type a command…').fill('e2e-repo');
   const hit = palette.locator('.pal-hit', { hasText: 'e2e-repo' }).first();
   await expect(hit).toBeVisible({ timeout: 10_000 });
-  // Only actions with a handler are offered (no dead "Review" / "Rerun").
-  await expect(hit.locator('.pal-hit-btn', { hasText: 'Review' })).toHaveCount(0);
+  // Only actions with a handler are offered: a repository's Review opens its
+  // review page (searchHitOpen.ts runHitPowerAction); no dead "Rerun".
+  await expect(hit.locator('.pal-hit-btn', { hasText: 'Review' })).toHaveCount(1);
+  await expect(hit.locator('.pal-hit-btn', { hasText: 'Rerun' })).toHaveCount(0);
   // The pills are a mouse shortcut, hidden from AT (an option holds no
   // interactive children); keyboard users press ⏎ on the selected hit.
   await hit.locator('.pal-hit-btn', { hasText: 'Open' }).click();
@@ -98,16 +100,16 @@ test('Needs you expands every source in place', async ({ page }) => {
   await boot(page);
   const needs = page.locator('[data-card="needs"]');
   // The 5 approvals plus whatever else on the shared e2e daemon needs this
-  // workspace (sessions other specs left waiting): 3 shown, the rest behind
-  // one "N more" that matches the card's own count.
-  await expect(needs.getByRole('button', { name: /^Approval 3/ })).toBeVisible();
+  // workspace (sessions other specs left waiting, notices): 5 rows shown, the
+  // rest behind one "N more" that matches the section's own count.
+  await expect(needs.getByRole('button', { name: /Approval 3/ })).toBeVisible();
   const more = needs.getByRole('button', { name: /^\d+ more$/ });
   await expect(more).toBeVisible();
   const count = async (l: import('@playwright/test').Locator) => Number(((await l.textContent()) ?? '').match(/\d+/)?.[0]);
-  await expect.poll(async () => (await count(more)) + 3 - (await count(needs.locator('.gc-count')))).toBe(0);
-  expect(await count(needs.locator('.gc-count'))).toBeGreaterThanOrEqual(5);
+  await expect.poll(async () => (await count(more)) + 5 - (await count(needs.locator('.sec-count')))).toBe(0);
+  expect(await count(needs.locator('.sec-count'))).toBeGreaterThanOrEqual(6);
   await more.click();
-  await expect(needs.getByRole('button', { name: /^Approval 5/ })).toBeVisible();
+  await expect(needs.getByRole('button', { name: /Approval 5/ })).toBeVisible();
   await expect(page).toHaveURL(/#\/home$/);
 });
 
