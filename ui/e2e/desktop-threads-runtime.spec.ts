@@ -799,3 +799,35 @@ test('threads composer typing and timeline scrolling stay lag-free with clamped 
   });
   expect(scrollOk).toBe(true);
 });
+
+test('a 4,000-token stream follows the bottom with at most one layout per frame', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const created = await ctx.post(`${base}/api/v1/workspaces/${wsId}/runtime-sessions`, { data: { provider: 'codex', cwd: fixtureDir, title: 'Layout per frame' } });
+  expect(created.ok(), await created.text()).toBeTruthy();
+  const { id } = (await created.json()) as { id: string };
+  await page.goto(`/#/threads/${id}`);
+  const thread = page.getByTestId(`runtime-thread-${id}`);
+  await expect(thread.getByTestId('runtime-composer')).toBeVisible({ timeout: 30_000 });
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Performance.enable');
+  const layouts = async (): Promise<number> => (await cdp.send('Performance.getMetrics')).metrics.find((m) => m.name === 'LayoutCount')!.value;
+  await page.evaluate(() => {
+    const w = window as unknown as { __frames: number; __counting: boolean };
+    w.__frames = 0;
+    w.__counting = true;
+    const tick = (): void => { if (!w.__counting) return; w.__frames++; requestAnimationFrame(tick); };
+    requestAnimationFrame(tick);
+  });
+  const l0 = await layouts();
+  const sent = await ctx.post(`${base}/api/v1/runtime-sessions/${id}/prompt`, { data: { text: 'stream:4000:3' } });
+  expect(sent.ok(), await sent.text()).toBeTruthy();
+  await expect(thread.getByText('c3999', { exact: false }).last()).toBeVisible({ timeout: 120_000 });
+  const forced = (await layouts()) - l0;
+  const frames = await page.evaluate(() => { const w = window as unknown as { __frames: number; __counting: boolean }; w.__counting = false; return w.__frames; });
+  // A layout per frame is the browser's own; more means something read
+  // layout between events (the follow used to, once per streamed event).
+  expect(forced, `${forced} layouts over ${frames} frames`).toBeLessThanOrEqual(frames + 10);
+  // Still following: the end of the answer is in view.
+  const scroller = thread.locator('.rt-scroll');
+  await expect.poll(() => scroller.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeLessThan(40);
+});

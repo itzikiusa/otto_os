@@ -45,10 +45,9 @@ export function ottoConsumes(name: string, host: RuntimeHostCommands | undefined
   return !!need && typeof host?.[need] === 'function';
 }
 
-/** How well `q` matches `name`: 0 prefix, 1 inside, 2 letters in order, -1 not at all. */
-function fuzzyRank(name: string, q: string): number {
+/** How well `q` matches `n` (lower case): 0 prefix, 1 inside, 2 letters in order, -1 not at all. */
+function fuzzyRank(n: string, q: string): number {
   if (!q) return 0;
-  const n = name.toLowerCase();
   if (n.startsWith(q)) return 0;
   if (n.includes(q)) return 1;
   let i = 0;
@@ -56,11 +55,40 @@ function fuzzyRank(name: string, q: string): number {
   return i === q.length ? 2 : -1;
 }
 
+type Entry = { c: ComposerSlashCommand; n: string; i: number; ours: boolean };
+type Prepared = { entries: Entry[]; grouped: boolean; last: { q: string; hits: Entry[]; out: ComposerSlashCommand[] } | null };
+/** The merged list (Otto's, then the agent's not taken by Otto, labelled),
+ *  built once per commands change — never per key. */
+const prepared = new WeakMap<object, { otto: readonly ComposerSlashCommand[]; agentName: string; host: RuntimeHostCommands | undefined; p: Prepared }>();
+
+function prepare(otto: readonly ComposerSlashCommand[], agent: readonly ProviderCommand[], agentName: string, host: RuntimeHostCommands | undefined): Prepared {
+  const hit = prepared.get(agent);
+  if (hit && hit.otto === otto && hit.agentName === agentName && hit.host === host) return hit.p;
+  const seen = new Set<string>();
+  const theirs: ComposerSlashCommand[] = [];
+  for (const c of agent) {
+    if (!c.name || seen.has(c.name)) continue;
+    seen.add(c.name);
+    if (ottoConsumes(c.name, host)) continue;
+    theirs.push({ name: c.name, description: c.description ?? '', source: 'agent', ...(c.hint ? { hint: c.hint } : {}) });
+  }
+  const grouped = theirs.length > 0;
+  const entries: Entry[] = [
+    ...otto.map((c, i) => ({ c: grouped ? { ...c, group: 'Otto' } : c, n: c.name.toLowerCase(), i, ours: true })),
+    ...theirs.map((c, i) => ({ c: { ...c, group: `${agentName} commands` }, n: c.name.toLowerCase(), i, ours: false })),
+  ];
+  const p: Prepared = { entries, grouped, last: null };
+  prepared.set(agent, { otto, agentName, host, p });
+  return p;
+}
+
 /** The `/` popup for `text` (T3 Code's ComposerCommandMenu, MIT): Otto's
  *  commands first, then the agent's own (`commands.updated`) under
  *  "<Agent> commands", fuzzy-filtered and best match first in each group.
  *  An agent command Otto would take itself is left out — typing it never
- *  reaches the agent. One group shows no heading. */
+ *  reaches the agent. One group shows no heading. Typing on narrows the last
+ *  matches instead of scanning every command again (235 for Grok), and the
+ *  same matches return the same array (the popup does not redraw). */
 export function slashSuggestions(
   text: string,
   otto: readonly ComposerSlashCommand[],
@@ -70,18 +98,20 @@ export function slashSuggestions(
 ): ComposerSlashCommand[] {
   const q = /^\/([\w:.-]*)$/.exec(text)?.[1].toLowerCase();
   if (q === undefined) return [];
-  const pick = <T extends { name: string }>(list: readonly T[]): T[] =>
-    list.map((c, i) => ({ c, i, r: fuzzyRank(c.name, q) })).filter((x) => x.r >= 0).sort((a, b) => a.r - b.r || a.i - b.i).map((x) => x.c);
-  const ours = pick(otto);
-  const seen = new Set<string>();
-  const theirs: ComposerSlashCommand[] = pick(agent.filter((c) => {
-    const keep = !!c.name && !seen.has(c.name) && !ottoConsumes(c.name, host);
-    seen.add(c.name);
-    return keep;
-  })).map((c) => ({ name: c.name, description: c.description ?? '', source: 'agent', ...(c.hint ? { hint: c.hint } : {}) }));
-  if (!theirs.length) return ours;
-  const label = (g: string) => (c: ComposerSlashCommand): ComposerSlashCommand => ({ ...c, group: g });
-  return [...ours.map(label('Otto')), ...theirs.map(label(`${agentName} commands`))];
+  const p = prepare(otto, agent, agentName, host);
+  if (p.last?.q === q) return p.last.out;
+  const pool = p.last && q.startsWith(p.last.q) ? p.last.hits : p.entries;
+  const ranked: { e: Entry; r: number }[] = [];
+  for (const e of pool) {
+    const r = fuzzyRank(e.n, q);
+    if (r >= 0) ranked.push({ e, r });
+  }
+  ranked.sort((a, b) => Number(b.e.ours) - Number(a.e.ours) || a.r - b.r || a.e.i - b.e.i);
+  const hits = ranked.map((x) => x.e);
+  const out = hits.map((e) => e.c);
+  const prev = p.last?.out;
+  p.last = { q, hits, out: prev && prev.length === out.length && prev.every((c, i) => c === out[i]) ? prev : out };
+  return p.last.out;
 }
 
 /** Hand a host-level intent to the host; `false` when it has no handler (the
