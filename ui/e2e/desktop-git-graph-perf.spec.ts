@@ -174,8 +174,7 @@ test(`graph of ${TOTAL} commits × ${LANES} lanes: fast first paint, incremental
   extra = 1;
   const before = logLimits.length;
   await resetLongTasks(page);
-  await page.getByRole('button', { name: 'Fetch and pull options', exact: true }).click();
-  await page.getByRole('menuitem', { name: 'Fetch', exact: true }).click();
+  await page.locator('.git-header .ph-actions').getByRole('button', { name: 'Fetch', exact: true }).click();
   await expect.poll(() => logLimits.length, { timeout: 15_000 }).toBeGreaterThan(before);
   await page.waitForTimeout(500);
   const reloads = logLimits.slice(before);

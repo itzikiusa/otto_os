@@ -211,18 +211,21 @@ test('graph: sections are a collapsible accordion at mobile/tablet widths', asyn
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// LEGACY ROUTES — Changes and History were folded into the graph (WIP row +
-// commit detail). Old deep links must still land somewhere useful.
+// DEEP LINKS — #/git/<repo>/changes opens Changes (the commit card), and the
+// legacy #/git/<repo>/history lands on History (the graph).
 // ────────────────────────────────────────────────────────────────────────────
 
-test('legacy changes/history deep links land on the graph', async ({ page }) => {
-  for (const legacy of ['changes', 'history']) {
-    await page.goto(`/#/git/${repoId}/${legacy}`);
-    await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
-    await expect(page.locator('.graph-row').first()).toBeVisible({ timeout: 25_000 });
-    await expect(page.locator('.rv-tabs .rv-tab', { hasText: 'Graph' })).toHaveAttribute('aria-selected', 'true');
-    await expectFitsWidth(page);
-  }
+test('changes/history deep links land on their views', async ({ page }) => {
+  await page.goto(`/#/git/${repoId}/changes`);
+  await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator('.rv-tabs .rv-tab', { hasText: 'Changes' })).toHaveAttribute('aria-selected', 'true', { timeout: 25_000 });
+  // A clean tree: the card says so and offers the next step.
+  await expect(page.getByTestId('commit-card-next')).toContainText('Nothing to commit');
+  await expectFitsWidth(page);
+  await page.goto(`/#/git/${repoId}/history`);
+  await expect(page.locator('.graph-row').first()).toBeVisible({ timeout: 25_000 });
+  await expect(page.locator('.rv-tabs .rv-tab', { hasText: 'History' })).toHaveAttribute('aria-selected', 'true');
+  await expectFitsWidth(page);
 });
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -358,11 +361,11 @@ test('shell: repo tab strip + new-tab + sub-route nav + toolbar fit', async ({ p
   await expect(page.locator('.git-tabs')).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.git-tab-new')).toBeVisible();
   await expectElemFits(page, '.git-tab-new');
-  // The per-repo sub-route nav (graph/prs/review; Focus is a page-level view)
-  // renders with all tabs and never overflows the document (it scrolls within
-  // its own strip).
+  // The ONE view switch (Changes · History · Pull requests · Review; Focus is
+  // a page-level view) renders with all views and never overflows the
+  // document (it scrolls within its own strip).
   await expect(page.locator('.rv-tabs')).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator('.rv-tabs .rv-tab')).toContainText(['Graph', 'Pull requests', 'Review']);
+  await expect(page.locator('.rv-tabs .rv-tab')).toContainText(['Changes', 'History', 'Pull requests', 'Review']);
   // The git verbs (Fetch/Pull/Push/…) live in the page header's actions.
   await expect(page.locator('.ph-actions').first()).toBeVisible();
   await expectFitsWidth(page);

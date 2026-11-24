@@ -263,6 +263,8 @@
     const s = status;
     if (!s || landedFor === id) return;
     landedFor = id;
+    // A deep link that names the view (#/git/<repo>/<view>) wins.
+    if (router.parts[0] === 'git' && router.parts[1] === id && router.parts[2]) return;
     untrack(() => {
       const dirty = s.changes.length > 0;
       if (dirty && effTab === 'graph') selectTab('changes');
@@ -273,12 +275,16 @@
   $effect(() => {
     if (git.wipRequest?.repoId === repo.id && (status?.changes.length ?? 0) > 0) untrack(() => effTab !== 'changes' && selectTab('changes'));
   });
+  /** The Git page's header draws the view switch (GitPage): what it shows. */
+  export function viewState(): { tab: string; resolving: boolean; changes: number; conflicts: number; conflictFiles: number } {
+    return { tab: effTab, resolving, changes: status?.changes.length ?? 0, conflicts: conflictedPaths.length, conflictFiles: conflictSeed.files.length };
+  }
   function openPr(n: number): void {
     selectTab('prs');
     prWorkspace.open(repo.id, n);
   }
 
-  function selectTab(id: string): void {
+  export function selectTab(id: string): void {
     resolving = false;
     if (embedded) onTab?.(id);
     else router.go(`git/${repo.id}/${id}`);
@@ -353,7 +359,8 @@
        the switcher only shows where there are no tabs (the agent right panel).
        It wraps (never overflows) when a long branch name or a narrow pane
        doesn't leave room. -->
-  <div class="rv-head" class:views={hostActions} role="group" aria-label="{repo.name} toolbar">
+  {#if !hostActions}
+  <div class="rv-head" role="group" aria-label="{repo.name} toolbar">
     {#if !embedded}
       <button class="btn ghost small" onclick={() => router.go('git')}><span class="rv-back-arrow" aria-hidden="true"><Icon name="chevronLeft" size={12} /></span> Repositories</button>
     {/if}
@@ -418,6 +425,7 @@
       ><Icon name="more" size={16} /></button>
     {/if}
   </div>
+  {/if}
 
   <!-- In-progress merge banner (shown when not already in the resolver). -->
   {#if merging && !resolving}
@@ -574,11 +582,6 @@
     padding: 6px 14px;
     box-sizing: border-box;
     border-bottom: 1px solid var(--border);
-  }
-  /* Verbs live in the PageHeader: this is just the in-pane view switcher. */
-  .rv-head.views {
-    min-height: 0;
-    padding-block: 6px;
   }
   .rv-head :global(.toolbar) {
     margin-inline-start: auto;

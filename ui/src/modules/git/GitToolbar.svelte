@@ -3,8 +3,9 @@
   import { needResolution } from '../../lib/api/git';
   import { toastError } from '../../lib/toastError';
   // Toolbar row: Fetch / Pull / Push / Branch / Stash / Pop + current branch chip.
-  // In the page header Fetch folds into the Pull split menu (≤5 header
-  // controls) and the verbs are also ⌘K commands (group "Git").
+  // In the Git page header it is the repo's state in words + a visible Fetch;
+  // every other verb rides the header's ONE ⋯ (`menuItems`), grouped, and
+  // stays a ⌘K command (group "Git").
   import { git } from '../../lib/stores/git.svelte';
   import { api } from '../../lib/api/client';
   import type { PullMode, PullModeResp, RemoteInfo, RepoStatusResp } from '../../lib/api/types';
@@ -18,6 +19,8 @@
   import { registry } from '../../lib/commands.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
+  import type { MenuItem } from '../../lib/contextmenu.svelte';
+  import { stateWords } from '../../lib/gitNextStep';
   // Code-split: loaded on the first open, not with the toolbar.
   const StashBrowser = lazyComponent(() => import('./StashBrowser.svelte'));
 
@@ -36,8 +39,10 @@
      *  mounted here lands in PageHeader's actions row, whose overflow
      *  measurer hides it (and Pull with it). */
     onbrowsestashes?: () => void;
+    /** Header: rendered between the state words and Fetch (the view switch). */
+    children?: import('svelte').Snippet;
   }
-  let { repoId, status, onstatus, onrefresh, inHeader = false, onbrowsestashes }: Props = $props();
+  let { repoId, status, onstatus, onrefresh, inHeader = false, onbrowsestashes, children }: Props = $props();
 
   let busy = $state('');
 
@@ -147,12 +152,6 @@
   function pullMenu(e: MouseEvent): void {
     if (noRemote) return;
     ctxMenu.show(e, [
-      ...(inHeader
-        ? [
-            { label: busy === 'fetch' ? 'Fetching…' : 'Fetch', icon: 'fetch' as const, disabled: noRemote, title: noRemote ? NO_REMOTE : 'Fetch from remote', action: () => void doFetch() },
-            { separator: true as const },
-          ]
-        : []),
       { label: 'Pull (merge)', icon: 'arrowDown', disabled: detached || noRemote, title: noRemote ? NO_REMOTE : undefined, action: () => void doPull('merge') },
       { label: 'Pull (rebase)', icon: 'arrowDown', disabled: detached || noRemote, title: noRemote ? NO_REMOTE : undefined, action: () => void doPull('rebase') },
       { label: 'Pull (fast-forward only)', icon: 'arrowDown', disabled: detached || noRemote, title: noRemote ? NO_REMOTE : undefined, action: () => void doPull('ff_only') },
@@ -224,34 +223,6 @@
     if (failed) await doCreateBranch(name);
   }
 
-  function branchMenu(e: MouseEvent): void {
-    ctxMenu.show(e, [
-      { label: 'New branch…', icon: 'plus', title: `Create a new branch from ${status.branch} and switch to it`, action: () => void doCreateBranch() },
-      { separator: true },
-      {
-        label: 'Stash changes',
-        icon: 'stash',
-        disabled: status.changes.length === 0,
-        title: status.changes.length === 0 ? 'Nothing to stash — the working tree is clean' : 'Stash working changes (including untracked files)',
-        action: () => void doStash(),
-      },
-      {
-        label: 'Pop stash',
-        icon: 'archive',
-        disabled: nothingToPop,
-        title: nothingToPop ? 'Nothing to pop — there are no stashes' : 'Apply the latest stash and drop it',
-        action: () => void doPop(),
-      },
-      {
-        label: 'Browse stashes…',
-        icon: 'eye',
-        disabled: nothingToPop,
-        title: 'See what each stash holds, then apply, pop or drop it',
-        action: browseStashes,
-      },
-    ]);
-  }
-
   async function doStash(): Promise<void> {
     busy = 'stash';
     try {
@@ -290,6 +261,39 @@
       busy = '';
     }
   }
+
+  /** The header's ⋯ rows for this repo, grouped: sync, then branch & stash. */
+  export function menuItems(): MenuItem[] {
+    const why = detached ? 'HEAD is detached — check out a branch first' : noRemote ? NO_REMOTE : undefined;
+    return [
+      // The three pull modes; the repo's configured one says "default".
+      ...(['merge', 'rebase', 'ff_only'] as const).map((m) => ({
+        label: `Pull (${m === 'ff_only' ? 'fast-forward only' : m})`,
+        icon: 'arrowDown',
+        hint: pullMode === m ? 'default' : undefined,
+        disabled: busy !== '' || detached || noRemote,
+        title: why,
+        action: () => void doPull(m),
+      })),
+      {
+        label: status.upstream ? 'Push' : 'Publish branch',
+        icon: 'arrowUp',
+        hint: status.ahead > 0 ? `↑${status.ahead}` : undefined,
+        disabled: busy !== '' || nothingToPush || detached || noRemote,
+        title: why ?? (nothingToPush ? `Nothing to push — ${status.branch} has no commits that ${status.upstream} doesn’t` : undefined),
+        action: () => void doPush(),
+      },
+      { separator: true },
+      { label: 'New branch…', icon: 'plus', title: `Create a new branch from ${status.branch} and switch to it`, action: () => void doCreateBranch() },
+      { label: 'Stash changes', icon: 'stash', disabled: status.changes.length === 0, title: status.changes.length === 0 ? 'Nothing to stash — the working tree is clean' : undefined, action: () => void doStash() },
+      { label: 'Pop stash', icon: 'archive', disabled: nothingToPop, title: nothingToPop ? 'There are no stashes' : undefined, action: () => void doPop() },
+      { label: stashCount ? `Browse stashes (${stashCount})…` : 'Browse stashes…', icon: 'eye', disabled: nothingToPop, action: browseStashes },
+    ];
+  }
+  /** The repo's state in words for the header ("3 files changed · ↑2 not pushed"). */
+  const words = $derived(
+    stateWords({ changes: status.changes.length, ahead: status.ahead, behind: status.behind, upstream: status.upstream, branch: detached ? null : status.branch }),
+  );
 </script>
 
 {#snippet items()}
@@ -306,15 +310,13 @@
   {#if status.behind > 0}<span class="ab down"><span aria-hidden="true">↓{status.behind}</span><span class="sr-only">{status.behind} behind</span></span>{/if}
 </span>
 
-{#if !inHeader}<span class="divider"></span>{/if}
+<span class="divider"></span>
 
-<!-- Fetch (the header folds it into the Pull ▾ menu) -->
-{#if !inHeader}
+<!-- Fetch -->
 <button class="btn small ghost tbtn" data-overflow="3" data-icon="fetch" data-label="Fetch" disabled={busy !== '' || noRemote} onclick={doFetch} title={noRemote ? NO_REMOTE : 'Fetch from remote'}>
   <Icon name="fetch" size={12} />
   {busy === 'fetch' ? 'Fetching…' : 'Fetch'}
 </button>
-{/if}
 
 <!-- Pull (split button: the repo's configured mode, ▾ overrides it once) -->
 <span class="split">
@@ -336,12 +338,12 @@
   <button
     class="btn small ghost tbtn caret"
     data-icon="chevronDown"
-    data-label={inHeader ? 'Fetch and pull options…' : 'Pull options…'}
-    disabled={busy !== '' || noRemote || (detached && !inHeader)}
+    data-label="Pull options…"
+    disabled={busy !== '' || noRemote || detached}
     aria-haspopup="menu"
     onclick={pullMenu}
-    title={noRemote ? NO_REMOTE : inHeader ? 'Fetch, or pull with a different mode' : 'Pull with a different mode'}
-    aria-label={inHeader ? 'Fetch and pull options' : 'Pull options'}
+    title={noRemote ? NO_REMOTE : 'Pull with a different mode'}
+    aria-label="Pull options"
   ><Icon name="chevronDown" size={12} /></button>
 </span>
 
@@ -369,21 +371,6 @@
   {busy === 'push' ? 'Pushing…' : status.upstream ? 'Push' : 'Publish'}
 </button>
 
-{#if inHeader}
-  <!-- Header: Pull (▾ holds Fetch) / Push stay; Branch / Stash / Pop fold into
-       one menu so the repo's header carries three verbs, not six. -->
-  <button
-    class="btn small ghost tbtn"
-    data-keep
-    data-icon="branch"
-    data-label="Branch & stash"
-    disabled={busy !== ''}
-    aria-haspopup="menu"
-    aria-label="Branch and stash"
-    title="New branch, stash, pop stash"
-    onclick={branchMenu}
-  ><Icon name="stash" size={12} /> <Icon name="chevronDown" size={12} /></button>
-{:else}
 <span class="divider"></span>
 
 <!-- Branch (create) -->
@@ -422,7 +409,6 @@
   <Icon name="archive" size={12} />
   {busy === 'pop' ? 'Popping…' : stashCount ? `Stashes (${stashCount})` : 'Stashes'}
 </button>
-{/if}
 {/snippet}
 
 {#if stashesOpen}
@@ -443,7 +429,16 @@
 {/if}
 
 {#if inHeader}
-  {@render items()}
+  <!-- The repo's state in words (its tab names the repo and branch), then the
+       one visible verb (Fetch); the rest is in the header's ⋯ (menuItems). -->
+  <span class="git-state" data-keep title="{status.branch}{status.upstream ? ` · tracks ${status.upstream}` : ''}" data-testid="git-state">
+    <span class="git-state-words">{words}</span>
+  </span>
+  {@render children?.()}
+  <button class="btn small ghost tbtn" data-keep data-icon="fetch" data-label="Fetch" disabled={busy !== '' || noRemote} onclick={doFetch} title={noRemote ? NO_REMOTE : 'Fetch from remote'}>
+    <Icon name="fetch" size={12} />
+    {busy === 'fetch' ? 'Fetching…' : 'Fetch'}
+  </button>
 {:else}
   <div class="toolbar">
     {@render items()}
@@ -451,6 +446,22 @@
 {/if}
 
 <style>
+  /* Header: "feat/x · 3 files changed · ↑2 not pushed" — shrinks first (ellipsis). */
+  .git-state {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
+    flex: 0 1 auto;
+    overflow: hidden;
+    white-space: nowrap;
+    font-size: var(--fs-m);
+    color: var(--text-dim);
+  }
+  .git-state-words {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .toolbar {
     display: flex;
     align-items: center;

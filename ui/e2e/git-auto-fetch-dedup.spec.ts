@@ -122,9 +122,8 @@ test('auto-fetch: updates the behind chip after the upstream advances', async ({
   await page.goto(`/#/git/${upstreamRepoId}/graph`);
   await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
   // The seeded upstream is 1 commit ahead → once the auto-fetch runs, the
-  // toolbar branch chip shows a "behind" marker (↓) after the initial fetch.
-  await expect(page.locator('.branch-chip .ab.down')).toBeVisible({ timeout: 25_000 });
-  await expect(page.locator('.branch-chip .ab.down')).toHaveText(/↓\s*1/);
+  // header's state words say so ("↓1 to pull") after the initial fetch.
+  await expect(page.getByTestId('git-state')).toContainText('↓1 to pull', { timeout: 25_000 });
 });
 
 test('auto-fetch: toggle is on by default and pausing it persists', async ({ page }) => {

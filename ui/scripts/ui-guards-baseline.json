@@ -175,7 +175,6 @@
     "src/modules/design-hall/studio3d/Studio3D.svelte": 1114,
     "src/modules/git/DiffViewer.svelte": 1905,
     "src/modules/git/FocusView.svelte": 906,
-    "src/modules/git/GitPage.svelte": 914,
     "src/modules/git/GraphView.svelte": 1063,
     "src/modules/git/LocalReviewPanel.svelte": 992,
     "src/modules/git/PrDetail.svelte": 951,
