@@ -14,7 +14,6 @@
   import GitTabs from './GitTabs.svelte';
   import { focusPath, parseGitRoute } from './gitRoute';
   import { prWorkspace } from './prWorkspaceStore.svelte';
-  import GitToolbar from './GitToolbar.svelte';
   import { gitBridge } from '../../lib/diff/gitBridge.svelte';
   import { registry } from '../../lib/commands.svelte';
   import GitLanding from './GitLanding.svelte';
@@ -49,6 +48,11 @@
   // landing's list of repositories doesn't pay for the graph, the diff
   // viewer and the commit card.
   const RepoViewLazy = lazyComponent(() => import('./RepoView.svelte'));
+  // The verbs load with the repo view, not with the landing's list.
+  const GitToolbarLazy = lazyComponent(() => import('./GitToolbar.svelte'));
+  // The repo tabs' floor (share of the header row): below it the verbs'
+  // labels give way instead of the tabs.
+  const TABS_MIN = 0.25;
   const FocusViewLazy = lazyComponent(() => import('./FocusView.svelte'));
   // The Add repository sheet loads on first open.
   const AddRepoSheetLazy = lazyComponent(() => import('./AddRepoSheet.svelte'));
@@ -180,6 +184,7 @@
       title={focusView ? 'Focus' : 'Git'}
       crumbs={focusView ? [{ label: 'Git', onclick: () => setFocus(false) }] : []}
       class="git-header"
+      tabsMin={TABS_MIN}
       more={activeRepo && !focusView ? () => [...(toolbar?.menuItems() ?? []), ...(toolbar ? [{ separator: true }] : []), ...(repoView?.moreMenuItems() ?? [])] : undefined}
     >
       {#snippet titleContent()}
@@ -204,12 +209,15 @@
           {@const repoId = activeRepo.id}
           <!-- The repo's verbs live in the header (not a second toolbar row under
                it); they collapse into ⋯ by data-overflow when the bar is tight. -->
-          {#if activeStatus}
+          {#if activeStatus && GitToolbarLazy.component}
+            {@const GitToolbar = GitToolbarLazy.component}
             <GitToolbar
-              inHeader
+              variant="header"
+              tabsMin={TABS_MIN}
               bind:this={toolbar}
               {repoId}
               status={activeStatus}
+              accent={repoView?.viewState().tab !== 'changes'}
               onstatus={(s) => git.setStatus(repoId, s)}
               onrefresh={() => gitBridge.refreshGraph(repoId)}
               onbrowsestashes={() => (stashesRepo = repoId)}
@@ -220,6 +228,13 @@
         {/if}
       {/snippet}
     </PageHeader>
+
+    <!-- Phone: the everyday verbs are a row of their own under the header (Changes and History). -->
+    {#if viewport.isPhone && activeRepo && !focusView && activeStatus && repoView && GitToolbarLazy.component && ['changes', 'graph'].includes(repoView.viewState().tab) && !repoView.viewState().resolving}
+      {@const repoId = activeRepo.id}
+      {@const GitToolbar = GitToolbarLazy.component}
+      <GitToolbar {repoId} status={activeStatus} onstatus={(s) => git.setStatus(repoId, s)} onrefresh={() => gitBridge.refreshGraph(repoId)} onbrowsestashes={() => (stashesRepo = repoId)} />
+    {/if}
 
     {#if stashesRepo}{@const sid = stashesRepo}
       <LazyMount lazy={StashBrowser} what="the stash browser" quiet onerror={() => (stashesRepo = null)} props={{ repoId: sid, onclose: () => (stashesRepo = null), onchanged: (st: RepoStatusResp) => { git.setStatus(sid, st); gitBridge.refreshGraph(sid); } }} />

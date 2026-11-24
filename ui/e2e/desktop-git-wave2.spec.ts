@@ -47,10 +47,11 @@ async function openRepo(page: Page) {
 
 test('the header "Browse stashes…" dialog is visible and leaves Pull in place', async ({ page }) => {
   await openRepo(page);
-  // Fetch is the header's one visible verb; branch & stash ride its ⋯.
-  const pull = page.locator('.git-header .ph-actions').getByRole('button', { name: 'Fetch', exact: true });
+  // Pull stays visible; the stash list rides Pop's caret.
+  const actions = page.locator('.git-header .ph-actions');
+  const pull = actions.getByRole('button', { name: /^Pull\b/ }).first();
   await expect(pull).toBeVisible();
-  await page.locator('.git-header .ph-more').click();
+  await actions.getByRole('button', { name: 'Stashes', exact: true }).click();
   await page.locator('.ctx-menu').getByRole('menuitem', { name: /^Browse stashes/ }).click();
   const dialog = page.getByRole('dialog', { name: 'Stashes' });
   await expect(dialog).toBeVisible();

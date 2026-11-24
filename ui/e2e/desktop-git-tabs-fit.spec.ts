@@ -57,7 +57,8 @@ const tab = (page: Page, i: number) => page.getByRole('tab', { name: `${repos[i]
 const reEscape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 test('few repos: every tab shows its branch inline', async ({ page }) => {
-  await page.setViewportSize({ width: 1800, height: 800 });
+  // Wide enough for both branches beside the header's always-visible verbs.
+  await page.setViewportSize({ width: 2200, height: 800 });
   await openTabs(page, 2);
   for (const i of [0, 1]) {
     await expect(tab(page, i)).toBeVisible();
@@ -80,7 +81,7 @@ test('many repos: names only (active may keep its branch); a wider window brings
   await page.screenshot({ path: test.info().outputPath('git-tabs-many.png') });
   // Close tabs and widen the window until they fit: branches come back
   // without a reload.
-  await page.setViewportSize({ width: 1800, height: 800 });
+  await page.setViewportSize({ width: 2200, height: 800 });
   // The close button is the tab's sibling, not its child (axe
   // nested-interactive), so it is found in the strip by its own name.
   for (let i = 7; i >= 2; i--) await list.getByRole('button', { name: `Close ${repos[i].name}`, exact: true }).click();

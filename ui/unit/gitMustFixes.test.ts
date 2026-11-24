@@ -548,6 +548,7 @@ test('GitToolbar.pullMenu refuses to open when noRemote is true', () => {
     detached: false,
     NO_REMOTE: 'Add a remote first',
     ctxMenu: { show: () => { shown++; } },
+    pullModeItems: () => [],
     doFetch() {},
     doPull() {},
   });

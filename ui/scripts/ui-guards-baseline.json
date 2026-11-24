@@ -140,7 +140,7 @@
     "src/lib/stores/ui.svelte.ts": 903,
     "src/lib/stores/workspace.svelte.ts": 2122,
     "src/modules/agents/NewSession.svelte": 1011,
-    "src/modules/agents/SessionView.svelte": 1156,
+    "src/modules/agents/SessionView.svelte": 1154,
     "src/modules/agents/conversation/ConversationView.svelte": 1357,
     "src/modules/api/RequestBuilder.svelte": 1914,
     "src/modules/api/ResponseViewer.svelte": 906,

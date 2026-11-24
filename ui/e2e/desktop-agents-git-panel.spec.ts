@@ -96,6 +96,11 @@ test('a dirty session folder: the Git tab is Changes + the commit card; Commit a
   await expect(page.locator('[data-wp-section="staged"] .wp-sec-count')).toHaveCount(0);
   await expect(card.locator('.subject-input')).toHaveValue('feat: ship the commit card', { timeout: 15_000 });
   await expect(card.locator('.btn.primary')).toHaveCount(1);
+  // Pulling (and pushing) without leaving Agents: visible beside the card, plain buttons.
+  const sync = page.getByTestId('git-verbs-sync');
+  await expect(sync.getByRole('button', { name: /^Pull\b/ })).toBeVisible();
+  await expect(sync.getByRole('button', { name: /^Push\b/ })).toBeVisible();
+  await expect(sync.locator('.btn.primary')).toHaveCount(0);
   // Every action sits inside the narrow card (⋯ overflowed it, clipped to a
   // stray dot), and no row holds a lone icon (two files in one folder: no
   // "By folder" toggle, so no header row at all).
