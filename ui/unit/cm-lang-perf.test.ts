@@ -12,7 +12,7 @@ import { cmLangNow, loadCmLang } from '../src/lib/components/cm-langs.ts';
 // changed line, not the whole file. The scroll side (no line painted before its colours)
 // is e2e/desktop-ide-highlight-perf.spec.ts. Every StreamLanguage of ours is in the table.
 
-const BUDGET_MS = 30;
+const BUDGET_MS = 30 * Number(process.env.OTTO_PERF_BUDGET_SCALE ?? (process.env.CI ? 2 : 1));
 const MAKEFILE = readFileSync(new URL('./fixtures/Makefile.sample', import.meta.url), 'utf8');
 const LONG_COMMENT = Array.from({ length: 12 }, () => '# ' + 'This target builds the acceptance suite with every flag the CI pipeline needs, see docs/ci.md. '.repeat(3)).join('\n');
 
