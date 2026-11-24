@@ -310,11 +310,29 @@ test('diffviewer: a WIP file diff fits and its code is reachable', async ({ page
   const panel = page.locator('.wip-panel');
   await expect(panel).toBeVisible({ timeout: 15_000 });
   await panel.locator('.wp-name').first().click();
-  await expect(panel.locator('.wp-diff')).toBeVisible({ timeout: 15_000 });
+  const diff = page.locator('.wp-diff');
+  await expect(diff).toBeVisible({ timeout: 15_000 });
   // The diff renders after its fetch: measure once a code row is on screen.
-  await expect(panel.locator('.wp-diff').locator('.dl-code, td.code, .vrow .code').first()).toBeVisible({ timeout: 15_000 });
+  await expect(diff.locator('.dl-code, td.code, .vrow .code').first()).toBeVisible({ timeout: 15_000 });
+  const sheet = page.getByTestId('wip-diff-sheet');
+  const phone = page.viewportSize()!.width <= 640;
+  // A phone's sheet slides in from the side: measure once it has landed.
+  if (phone) await expect.poll(async () => Math.round((await diff.boundingBox())!.x)).toBeLessThanOrEqual(1);
   await expectFitsWidth(page);
   await expectDiffCodeReachable(page);
+  if (phone) {
+    // Phone: file → diff is a pushed full-height sheet; the system Back closes
+    // it (lib/backCloses) and leaves you on the Changes list, same URL.
+    await expect(sheet).toBeVisible();
+    expect((await diff.boundingBox())!.height).toBeGreaterThan(page.viewportSize()!.height * 0.6);
+    const url = page.url();
+    await page.goBack();
+    await expect(sheet).toHaveCount(0);
+    await expect(panel.locator('.wp-name').first()).toBeVisible();
+    expect(page.url()).toBe(url);
+  } else {
+    await expect(sheet).toHaveCount(0); // tablets keep it under the list
+  }
 });
 
 // ────────────────────────────────────────────────────────────────────────────

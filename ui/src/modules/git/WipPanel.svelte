@@ -16,7 +16,7 @@
   import { toastError } from '../../lib/toastError';
   import { api, isAbortError } from '../../lib/api/client';
   import type {
-    CommitConfig, CommitInfo, DiffResp, DiscardReq, DraftCommitMessageResp, FileChange, HeadRemotesResp, RepoStatusResp,
+    CommitConfig, CommitInfo, DiffResp, DiscardReq, DraftCommitMessageResp, FileChange, HeadRemotesResp, RepoStatusResp, StageHunkResp,
   } from '../../lib/api/types';
   import { amendPublishedAt } from './refTracking';
   import { wipDiffUrl } from './wip/wipDiffUrl';
@@ -24,7 +24,8 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import DiffViewer from './DiffViewer.svelte';
+  import WipDiffPane from './wip/WipDiffPane.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { repoDiffFileLoader } from '../../lib/diff/diff-load';
   import Icon from '../../lib/components/Icon.svelte';
   import { ListWindow } from '../../lib/listWindow.svelte';
@@ -37,7 +38,6 @@
     AUTO_COLLAPSE_FILES, KIND_WORD, buildTree, listRows, splitPath, treeRows,
     type LineCounts, type Row, type TFolder, type WipSection as Section,
   } from './wip/wipTree';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -328,6 +328,12 @@
   });
   /** Over-cap files ("Load anyway") re-fetch through the same target. */
   const loadWipFile = $derived(repoDiffFileLoader(repoId, selTarget));
+  /** A hunk staged / unstaged / discarded from the diff. */
+  function onapplied(r: StageHunkResp): void {
+    onstatus(r.status);
+    diff = r.diff;
+    if (r.backup_stash) toasts.info('Backup stash kept', r.backup_stash.slice(0, 8));
+  }
 
   // Agent UI control (lib/uiCommands/git.ts): a pending WIP request for this
   // repo selects a file's diff and/or prefills the composer — so the user sees
@@ -928,48 +934,9 @@
          changeset). Narrow: its own region under the list. Wide (container
          query): the column beside the list and composer. -->
     {#if selectedPath !== null}
-      {@const parts = splitPath(selectedPath)}
-      <div class="wp-diff" id={diffId}>
-        <div class="wp-diff-head">
-          <Icon name="file" size={12} />
-          <span class="wp-diff-path" title={selectedPath} dir="ltr"><strong>{parts.name}</strong>{#if parts.dir}<span class="wp-diff-dir">{parts.dir}</span>{/if}</span>
-          <span class="grow"></span>
-          {#if partial.has(selectedPath)}
-            <!-- Both sides exist: pick which one the hunk actions operate on. -->
-            <div class="segmented wp-target" role="group" aria-label="Diff side">
-              <button class:active={!stagedView} aria-pressed={!stagedView} onclick={() => (stagedView = false)}>Unstaged</button>
-              <button class:active={stagedView} aria-pressed={stagedView} onclick={() => (stagedView = true)}>Staged</button>
-            </div>
-          {/if}
-          <button class="icon-btn wp-close" onclick={() => (selectedPath = null)} title="Close diff" aria-label="Close diff"><Icon name="x" size={14} /></button>
-        </div>
-        <div class="wp-diff-body">
-          {#if diffLoading && !diff}
-            <div class="wp-diff-skel"><Skeleton rows={5} height={20} /></div>
-          {:else if diff && diff.files.length > 0}
-            <DiffViewer
-              {diff}
-              {repoId}
-              loadFile={loadWipFile}
-              wip={selTarget === 'working' || virtualAll
-                ? undefined
-                : {
-                    target: selTarget,
-                    onapplied: (r) => {
-                      onstatus(r.status);
-                      diff = r.diff;
-                      if (r.backup_stash)
-                        toasts.info('Backup stash kept', r.backup_stash.slice(0, 8));
-                    },
-                  }}
-            />
-          {:else if diffError}
-            <LoadState variant="compact" what="this file’s diff" error={diffError} empty onretry={() => diffRetry++} />
-          {:else}
-            <div class="wp-empty">No textual diff for this file.</div>
-          {/if}
-        </div>
-      </div>
+      <WipDiffPane path={selectedPath} id={diffId} both={partial.has(selectedPath)} bind:stagedView {diff} loading={diffLoading} error={diffError} {repoId}
+        loadFile={loadWipFile} wip={selTarget === 'working' || virtualAll ? undefined : { target: selTarget, onapplied }} sheet={viewport.isPhone}
+        onretry={() => diffRetry++} onclose={() => (selectedPath = null)} />
     {/if}
 
   </div>
@@ -1035,7 +1002,7 @@
   }
   /* With a diff open the list yields (capped, still scrollable) and the diff keeps half the body (the composer squeezed it to a header); the body scrolls. */
   .wp-body.has-diff .wp-scroll { flex: 0 1 auto; max-height: 45%; }
-  .wp-body.has-diff { overflow-y: auto; overscroll-behavior: contain; } .wp-body.has-diff .wp-diff { min-height: 50%; }
+  .wp-body.has-diff { overflow-y: auto; overscroll-behavior: contain; } .wp-body.has-diff :global(.wp-diff) { min-height: 50%; }
   @container wip (min-width: 760px) {
     .wp-body.has-diff {
       display: grid;
@@ -1047,7 +1014,7 @@
       grid-area: list;
       max-height: none;
     }
-    .wp-body.has-diff .wp-diff {
+    .wp-body.has-diff :global(.wp-diff) {
       grid-area: diff;
       border-block-start: none;
       border-inline-start: 1px solid var(--border);
@@ -1059,11 +1026,6 @@
     }
   }
 
-  .wp-empty {
-    padding: 8px 14px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
 
   /* Conflicts: a warning-tinted header and side-pick buttons instead of the
      stage checkbox (staging an unresolved file would bury its markers). */
@@ -1145,45 +1107,6 @@
     color: var(--text-dim);
   }
 
-  .wp-diff {
-    flex: 1;
-    min-height: 0;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    border-block-start: 1px solid var(--border);
-  }
-  .wp-diff-head {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-height: 36px;
-    padding-block: 4px;
-    padding-inline: 12px 8px;
-    background: var(--surface-2);
-    border-block-end: 1px solid var(--border);
-    flex-shrink: 0;
-    min-width: 0;
-  }
-  .wp-diff-head > :global(svg) {
-    flex-shrink: 0;
-    color: var(--text-dim);
-  }
-  .wp-diff-path {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-    min-width: 0;
-    overflow: hidden;
-    white-space: nowrap;
-    font-size: var(--fs-m);
-    unicode-bidi: isolate;
-  }
-  .wp-diff-path > strong { font-weight: 600; flex-shrink: 0; }
-  .wp-diff-dir { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-s); color: var(--text-dim); }
-  .wp-diff-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
-  .wp-diff-skel { padding: 10px; }
-  .wp-target > button { height: 20px; padding: 0 6px; font-size: var(--fs-xs); }
   .wp-untracked-cap {
     display: flex;
     align-items: flex-start;
@@ -1204,6 +1127,5 @@
     .wp-crow { height: 36px; }
     .wp-body { overflow-y: auto; overscroll-behavior: contain; }
     .wp-scroll, .wp-body.has-diff .wp-scroll { flex: none; max-height: none; overflow: visible; }
-    .wp-diff { flex: none; height: min(70vh, 560px); }
   }
 </style>
