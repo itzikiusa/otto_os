@@ -462,6 +462,13 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  /* A phone's one header row is the repo switcher, Fetch and ⋯ (the Changes
+     count rides the view switch under it). */
+  @media (max-width: 640px) {
+    .git-state {
+      display: none;
+    }
+  }
   .toolbar {
     display: flex;
     align-items: center;

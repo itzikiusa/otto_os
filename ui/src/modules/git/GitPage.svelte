@@ -12,6 +12,7 @@
   import { router } from '../../lib/router.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import GitTabs from './GitTabs.svelte';
+  import GitAutoFetchToggle from './GitAutoFetchToggle.svelte';
   import { focusPath, parseGitRoute } from './gitRoute';
   import { prWorkspace } from './prWorkspaceStore.svelte';
   import RepoView from './RepoView.svelte';
@@ -22,6 +23,8 @@
   import GitLanding from './GitLanding.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -127,6 +130,20 @@
     }
   });
 
+  /** Phone: the title's repo switcher — Focus, the open repos, any other, add. */
+  function phoneRepoMenu(e: MouseEvent): void {
+    const open = git.openRepoIds.map((id) => git.allRepos.find((r) => r.id === id)).filter((r) => !!r);
+    const rest = git.allRepos.filter((r) => !git.openRepoIds.includes(r.id));
+    ctxMenu.show(e, [
+      { label: 'Focus', icon: 'zap', checked: focusView, pinned: true, action: () => setFocus(true) },
+      ...open.map((r) => ({ label: r.name, icon: 'branch', checked: !focusView && r.id === git.activeRepoId, pinned: true, action: () => openRepo(r.id) })),
+      { label: 'Close this tab', icon: 'x', pinned: true, disabled: !activeRepo || focusView, action: () => activeRepo && git.closeRepoTab(activeRepo.id) },
+      { label: 'Add or clone a repository…', icon: 'plus', pinned: true, action: () => { addMode = 'register'; addOpen = true; } },
+      ...(rest.length ? [{ separator: true }] : []),
+      ...rest.map((r) => ({ label: r.name, icon: 'branch', action: () => openRepo(r.id) })),
+    ], rest.length > 8 ? { filter: true, filterPlaceholder: 'Open a repository…', maxVisible: 12 } : undefined);
+  }
+
   function openRepo(repoId: string): void {
     git.openRepoTab(repoId);
     // Drop any lingering deep-link route so the tab UI fully owns navigation.
@@ -134,6 +151,24 @@
   }
 
 </script>
+
+{#snippet viewSwitch(name: string)}
+  {#if repoView}
+    {@const v = repoView.viewState()}
+    <div class="rv-tabs segmented git-views" role="tablist" aria-label="{name} views" data-keep>
+      {#each VIEWS as t (t.id)}
+        {@const on = v.tab === t.id && !v.resolving}
+        <button class="rv-tab" role="tab" aria-selected={on} tabindex={on ? 0 : -1} class:active={on} onclick={() => repoView?.selectTab(t.id)} onkeydown={onTabKey}>
+          {t.label}
+          {#if t.id === 'changes' && v.changes > 0}<span class="git-views-count" title="{v.changes} uncommitted {v.changes === 1 ? 'change' : 'changes'}">{v.changes}</span>{/if}
+        </button>
+      {/each}
+      {#if v.resolving}
+        <button class="rv-tab active git-views-conflict" role="tab" aria-selected="true" tabindex="0" onkeydown={onTabKey}>Resolve conflicts{#if v.conflictFiles > 0}&nbsp;· {v.conflictFiles}{/if}</button>
+      {/if}
+    </div>
+  {/if}
+{/snippet}
 
   <div class="gitpage">
     <!-- Unified toolbar: the open-repo tabs sit inline in the page header
@@ -145,14 +180,29 @@
       class="git-header"
       more={activeRepo && !focusView ? () => [...(toolbar?.menuItems() ?? []), ...(toolbar ? [{ separator: true }] : []), ...(repoView?.moreMenuItems() ?? [])] : undefined}
     >
+      {#snippet titleContent()}
+        {#if viewport.isPhone}
+          <!-- Phone: the repo is the title (a switcher), so the header stays one row. -->
+          <button type="button" class="git-phone-repo" aria-haspopup="menu" data-testid="git-phone-repo" onclick={phoneRepoMenu}>
+            <span class="git-phone-repo-name">{focusView ? 'Focus' : (activeRepo?.name ?? 'Git')}</span><Icon name="chevronDown" size={14} />
+          </button>
+        {:else}
+          {focusView ? 'Focus' : 'Git'}
+        {/if}
+      {/snippet}
       {#snippet tabs()}
-        <GitTabs embedded focus={focusView} ontogglefocus={() => setFocus(!focusView)} onopen={openRepo} onadd={(mode) => { addMode = mode; addOpen = true; }} />
+        {#if !viewport.isPhone}
+          <GitTabs embedded focus={focusView} ontogglefocus={() => setFocus(!focusView)} onopen={openRepo} onadd={(mode) => { addMode = mode; addOpen = true; }} />
+        {:else if activeRepo && !focusView && repoView}
+          {@render viewSwitch(activeRepo.name)}
+        {/if}
       {/snippet}
       {#snippet actions()}
         {#if activeRepo && !focusView}
           {@const repoId = activeRepo.id}
           <!-- The repo's verbs live in the header (not a second toolbar row under
                it); they collapse into ⋯ by data-overflow when the bar is tight. -->
+          {#if viewport.isPhone}<GitAutoFetchToggle />{/if}
           {#if activeStatus}
             <GitToolbar
               inHeader
@@ -163,21 +213,7 @@
               onrefresh={() => gitBridge.refreshGraph(repoId)}
               onbrowsestashes={() => (stashesRepo = repoId)}
             >
-              {#if repoView}
-                {@const v = repoView.viewState()}
-                <div class="rv-tabs segmented git-views" role="tablist" aria-label="{activeRepo.name} views" data-keep>
-                  {#each VIEWS as t (t.id)}
-                    {@const on = v.tab === t.id && !v.resolving}
-                    <button class="rv-tab" role="tab" aria-selected={on} tabindex={on ? 0 : -1} class:active={on} onclick={() => repoView?.selectTab(t.id)} onkeydown={onTabKey}>
-                      {t.label}
-                      {#if t.id === 'changes' && v.changes > 0}<span class="git-views-count" title="{v.changes} uncommitted {v.changes === 1 ? 'change' : 'changes'}">{v.changes}</span>{/if}
-                    </button>
-                  {/each}
-                  {#if v.resolving}
-                    <button class="rv-tab active git-views-conflict" role="tab" aria-selected="true" tabindex="0" onkeydown={onTabKey}>Resolve conflicts{#if v.conflictFiles > 0}&nbsp;· {v.conflictFiles}{/if}</button>
-                  {/if}
-                </div>
-              {/if}
+              {#if repoView && !viewport.isPhone}{@render viewSwitch(activeRepo.name)}{/if}
             </GitToolbar>
           {/if}
         {/if}
@@ -277,6 +313,25 @@
   }
   .git-views > .git-views-conflict {
     color: var(--warning);
+  }
+  .git-phone-repo {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    min-height: 44px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+  }
+  .git-phone-repo-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .gitpage-body {
     flex: 1;

@@ -307,6 +307,8 @@ test('diffviewer: a WIP file diff fits and its code is reachable', async ({ page
   await expect(panel).toBeVisible({ timeout: 15_000 });
   await panel.locator('.wp-name').first().click();
   await expect(panel.locator('.wp-diff')).toBeVisible({ timeout: 15_000 });
+  // The diff renders after its fetch: measure once a code row is on screen.
+  await expect(panel.locator('.wp-diff').locator('.dl-code, td.code, .vrow .code').first()).toBeVisible({ timeout: 15_000 });
   await expectFitsWidth(page);
   await expectDiffCodeReachable(page);
 });
@@ -357,10 +359,17 @@ async function expectElemFits(page: Page, selector: string): Promise<void> {
 test('shell: repo tab strip + new-tab + sub-route nav + toolbar fit', async ({ page }) => {
   await page.goto(`/#/git/${repoId}/graph`);
   await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
-  // Repo tab strip renders; the "+" (open repo) button stays reachable on-screen.
-  await expect(page.locator('.git-tabs')).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator('.git-tab-new')).toBeVisible();
-  await expectElemFits(page, '.git-tab-new');
+  if (page.viewportSize()!.width <= 640) {
+    // A phone keeps one header row: the repo is the title, a switcher.
+    await expect(page.getByTestId('git-phone-repo')).toBeVisible({ timeout: 15_000 });
+    await expectElemFits(page, '[data-testid="git-phone-repo"]');
+    await expect(page.locator('.git-tabs')).toHaveCount(0);
+  } else {
+    // Repo tab strip renders; the "+" (open repo) button stays reachable on-screen.
+    await expect(page.locator('.git-tabs')).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('.git-tab-new')).toBeVisible();
+    await expectElemFits(page, '.git-tab-new');
+  }
   // The ONE view switch (Changes · History · Pull requests · Review; Focus is
   // a page-level view) renders with all views and never overflows the
   // document (it scrolls within its own strip).
@@ -390,14 +399,25 @@ test('shell: many open repo tabs scroll instead of overflowing the page', async 
   // already visible after the first goto, so waiting on it was a no-op and a
   // fast second hash hop raced the tab registration (S12-304, git-mobile:331).
   const ids = [repoId, dirtyRepoId, conflictRepoId];
+  const phone = page.viewportSize()!.width <= 640;
+  const openCount = (): Promise<number> =>
+    page.evaluate(() => (JSON.parse(localStorage.getItem('otto_git_open_tabs') ?? '{}').openRepoIds ?? []).length);
   for (const [i, id] of ids.entries()) {
     await page.goto(`/#/git/${id}/graph`);
     await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
-    await expect(page.locator('.git-tab')).toHaveCount(i + 1, { timeout: 15_000 });
+    if (phone) await expect.poll(openCount, { timeout: 15_000 }).toBe(i + 1);
+    else await expect(page.locator('.git-tab')).toHaveCount(i + 1, { timeout: 15_000 });
   }
-  await expect(page.locator('.git-tab')).toHaveCount(3, { timeout: 15_000 });
-  // New-tab affordance still reachable even with several tabs open.
-  await expectElemFits(page, '.git-tab-new');
+  if (phone) {
+    // The title's switcher lists every open repo (one header row, no strip).
+    await page.getByTestId('git-phone-repo').click();
+    await expect(page.locator('.ctx-menu').getByRole('menuitem').filter({ hasText: /e2e|repo/ }).first()).toBeVisible();
+    await page.keyboard.press('Escape');
+  } else {
+    await expect(page.locator('.git-tab')).toHaveCount(3, { timeout: 15_000 });
+    // New-tab affordance still reachable even with several tabs open.
+    await expectElemFits(page, '.git-tab-new');
+  }
   await expectFitsWidth(page);
 });
 

@@ -573,6 +573,8 @@
     const same = isSelected(section)(path);
     stagedView = section === 'staged';
     selectedPath = same ? null : path;
+    // Narrow (the card and the list above it): bring the opened diff into view.
+    if (selectedPath !== null && matchMedia('(max-width: 1024px)').matches) void tick().then(() => panelEl?.querySelector('.wp-diff')?.scrollIntoView({ block: 'start' }));
   }
 
   // +/− line counts per side (wip/wipLineCounts.svelte.ts).

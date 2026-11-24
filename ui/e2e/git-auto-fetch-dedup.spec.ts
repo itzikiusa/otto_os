@@ -202,9 +202,12 @@ test('dedup: opening an already-open repo keeps a single tab', async ({ page }) 
   await boot(page);
   await page.goto(`/#/git/${upstreamRepoId}/graph`);
   await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator('.git-tab')).toHaveCount(1, { timeout: 15_000 });
+  // A phone shows the repo as the header's title, not a tab strip: count the open tabs the store keeps.
+  const openTabs = (): Promise<number> =>
+    page.evaluate(() => (JSON.parse(localStorage.getItem('otto_git_open_tabs') ?? '{}').openRepoIds ?? []).length);
+  await expect.poll(openTabs, { timeout: 15_000 }).toBe(1);
   // Re-opening the same repo (same hash route) must not mint a second tab.
   await page.goto(`/#/git/${upstreamRepoId}/history`);
   await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator('.git-tab')).toHaveCount(1);
+  await expect.poll(openTabs).toBe(1);
 });
