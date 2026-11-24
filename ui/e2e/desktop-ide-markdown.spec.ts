@@ -39,6 +39,9 @@ for (const scheme of ['dark', 'light'] as const) {
     await expect(bar(page)).toHaveCount(0); // code files have no Markdown row
     await openTreeFile(page, 'README.md');
     await expect(bar(page)).toBeVisible();
+    // No breakpoint / lint gutters for Markdown: the text starts next to the fold markers.
+    await expect(editor(page).locator('.cm-gutter-lint')).toHaveCount(0);
+    await expect(editor(page).locator('.cm-ide-bp-gutter')).toBeHidden();
     for (const [id, title] of [['bold', 'Bold (⌘B)'], ['italic', 'Italic'], ['code', 'Code'], ['link', 'Link (paste a URL over text)'], ['check', 'Checklist'], ['table', 'Table (Tab moves between cells)']] as const) {
       await expect(page.getByTestId(`ide-md-${id}`)).toHaveAttribute('title', title);
       await expect(page.getByTestId(`ide-md-${id}`)).toHaveAttribute('aria-label', title);
@@ -101,6 +104,8 @@ for (const scheme of ['dark', 'light'] as const) {
     await expect(md.locator('strong', { hasText: 'Intro' })).toBeVisible();
     await expect(md.locator('em', { hasText: 'paragraph' })).toBeVisible();
     await expect(md.locator('th', { hasText: 'Value' })).toBeVisible();
+    await expect(md.locator('tbody tr')).toHaveCount(2); // the table did not join the list above it
+    await expect(md.locator('p', { hasText: '|' })).toHaveCount(0);
     await expect(md.locator('input[type="checkbox"]')).toHaveCount(2);
     await expect(bar(page)).toBeVisible(); // the row stays in Split
     await writeShot(page, `readme-split-${scheme}`);

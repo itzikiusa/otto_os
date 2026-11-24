@@ -25,7 +25,7 @@ import {
   createIdeGitAndAgentExtensions, selectionOrCurrentLine, setBaselineSourceEffect, setBlameLinesEffect, setSavedContentEffect,
   type IdeDiffBaselineSource, type IdeEditorSelectionRange,
 } from './cm-ide-git-and-agent.ts';
-import { isMakefilePath } from './cm-editor-helpers.ts';
+import { isMakefilePath, isProseOrMakePath } from './cm-editor-helpers.ts';
 import { isBpTargetGutterElement } from './cm-ide-history.ts';
 import { createIdeHoverExtension } from './cm-ide-hover.ts';
 import {
@@ -352,7 +352,9 @@ export function createIdeGutterExtensions(opts: CreateIdeExtensionsOptions): Ext
 
   // A click acts on the lines the person sees, so unreported moves reach the store first.
   // A Makefile has no debugger: its gutter is a narrow column for the ▶ that runs a target.
-  const runOnly = isMakefilePath(opts.filePath ?? '');
+  // Markdown has neither breakpoints nor ▶: no column at all.
+  const runOnly = isProseOrMakePath(opts.filePath ?? '');
+  const hidden = runOnly && !isMakefilePath(opts.filePath ?? '');
   const handleBpClick = (v: EditorView, ln: number, me: MouseEvent): boolean => {
     if (runOnly) return false;
     const cbs = opts.getCallbacks();
@@ -490,9 +492,13 @@ export function createIdeGutterExtensions(opts: CreateIdeExtensionsOptions): Ext
     }
   });
 
-  return [bpField, runFieldInit, bpAndRunGutter, gutterHandlers, runOnly ? runOnlyGutterTheme : []];
+  return [bpField, runFieldInit, bpAndRunGutter, gutterHandlers, hidden ? hiddenGutterTheme : runOnly ? runOnlyGutterTheme : []];
 }
 
+// Zero width, not display: none (CodeMirror pins `.cm-gutter` to `display: flex !important`).
+const hiddenGutterTheme = EditorView.theme({
+  '.cm-ide-bp-gutter, .cm-ide-bp-gutter .cm-gutterElement': { inlineSize: '0', minInlineSize: '0', maxInlineSize: '0', padding: '0' },
+});
 const runOnlyGutterTheme = EditorView.theme({
   '.cm-ide-bp-gutter, .cm-ide-bp-gutter .cm-gutterElement': { inlineSize: '18px', minInlineSize: '18px', maxInlineSize: '18px' },
   '.cm-ide-bp-cell': { inlineSize: '15px', minInlineSize: '15px', maxInlineSize: '15px', gridTemplateColumns: '15px', columnGap: '0' },

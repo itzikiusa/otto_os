@@ -44,6 +44,10 @@ export function extOf(p: string): string {
 
 export { isMakefilePath };
 
+/** Files no debugger, runner or diagnostics serve (Makefiles keep a run column): the
+ *  editor drops their breakpoint and lint gutters. */
+export const isProseOrMakePath = (p: string): boolean => isMakefilePath(p) || /\.(?:md|markdown|mdx)$/i.test(p.split('?')[0]);
+
 export const langExtOf = (filePath: string, hint?: string): string =>
   isMakefilePath(filePath) ? 'makefile' : extOf(filePath) || (hint ?? '');
 

@@ -40,7 +40,7 @@
     applyLinePrefixSuffixSync, buildEditorFindProviderSpec,
     buildReadOnlyExtension, clampSelectionToDoc, computeCursorChangeInfo, computeMinimalTextUpdate,
     createCompletionExtension, createCopyRecorder, createEditorStateCache, createIdeColdGutterPlaceholders, createPlainLineWatch,
-    foldMarkerGutter, hasLongLine, isMakefilePath, langExtOf,
+    foldMarkerGutter, hasLongLine, isMakefilePath, isProseOrMakePath, langExtOf,
     lightEditorTheme, parkEditorHistory, placeholderEditorTheme,
     restoreOrCreateEditorState, revealEditorLine,
     splitSelectionIntoLinesSync, type CursorChangeInfo, outsideText,
@@ -463,7 +463,7 @@
 
     const baseExtensions: Extension[] = [
       ...(minimal ? [] : [lineNumbers(), ideBpCompartment.of(buildIdeBpExtIfLoaded(filePath)), isMakefilePath(filePath) ? [] : foldMarkerGutter()]),
-      indentOnInput(), indentCompartment.of(indentExt(filePath)), bracketMatching(), isMakefilePath(filePath) ? [] : lintGutter(), // a Makefile neither folds nor gets diagnostics
+      indentOnInput(), indentCompartment.of(indentExt(filePath)), bracketMatching(), isProseOrMakePath(filePath) ? [] : lintGutter(), // no diagnostics for Makefiles / Markdown; a Makefile doesn't fold
       ideCompartment.of(buildIdeExtIfLoaded(filePath)),
       ideDepsCompartment.of(ideMode && isIdeManifestPath(filePath) ? coldGutters.deps : []),
       drawSelection(),
