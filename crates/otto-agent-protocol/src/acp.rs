@@ -3990,6 +3990,41 @@ mod tests {
         assert_eq!(p, "make deploy\nin /etc\nenv: AWS_PROFILE");
     }
 
+    /// Review R1-003: the prompt shows env names only, so a key that runs
+    /// code or overrides Otto's own env is refused before anyone is asked.
+    #[test]
+    fn a_command_env_that_runs_code_or_overrides_otto_is_refused() {
+        let mut d = AcpDriver::grok();
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"g"}}"#);
+        d.state.child_env = vec![("OWN_KEY".into(), "x".into())];
+        for access in [
+            RuntimeAccessMode::ApprovalRequired,
+            RuntimeAccessMode::FullAccess,
+        ] {
+            d.state.access = access;
+            for key in [
+                "BASH_ENV",
+                "DYLD_INSERT_LIBRARIES",
+                "node_options",
+                "OTTO_TOKEN",
+                "OWN_KEY",
+            ] {
+                let c = json!({"jsonrpc":"2.0","id":"c1","method":"terminal/create","params":{"sessionId":"g","command":"npm test","env":[{"name":key,"value":"/tmp/pwn.sh"}]}});
+                let s = d.on_line(&c.to_string());
+                assert_eq!(sent(&s, 0)["error"]["code"], -32602, "{key}");
+                assert!(
+                    !s.events.iter().any(|e| matches!(
+                        e,
+                        DriverEvent::Request { .. } | DriverEvent::ClientCall { .. }
+                    )),
+                    "{key}"
+                );
+            }
+        }
+    }
+
     /// Security 6: a chatty command's row keeps only the tail.
     #[test]
     fn a_client_terminals_row_keeps_a_bounded_tail() {

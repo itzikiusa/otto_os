@@ -226,20 +226,30 @@ impl AcpDriver {
                     ),
                     [] => (program, args),
                 };
+                let extra: Vec<(String, String)> = params
+                    .get("env")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| {
+                        Some((
+                            e.get("name")?.as_str()?.to_string(),
+                            e.get("value")?.as_str()?.to_string(),
+                        ))
+                    })
+                    .collect();
+                // The prompt shows env names only (values may be secrets), so
+                // a key that runs code or overrides Otto's own env is refused.
+                if let Some((k, _)) = extra.iter().find(|(k, _)| self.env_key_refused(k)) {
+                    step.write(error_line(
+                        &rpc_id,
+                        -32602,
+                        &format!("env {k} is not allowed"),
+                    ));
+                    return;
+                }
                 let mut env = self.state.child_env.clone();
-                env.extend(
-                    params
-                        .get("env")
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|e| {
-                            Some((
-                                e.get("name")?.as_str()?.to_string(),
-                                e.get("value")?.as_str()?.to_string(),
-                            ))
-                        }),
-                );
+                env.extend(extra.iter().cloned());
                 self.state.terminals += 1;
                 let terminal_id = format!("term-{}", self.state.terminals);
                 self.bind_terminal(&terminal_id, &line);
@@ -256,16 +266,11 @@ impl AcpDriver {
                 if self.state.access != RuntimeAccessMode::FullAccess {
                     let detail = match &op {
                         ClientOpRepr::Create { cwd, .. } => {
-                            let extra: Vec<&str> = params
-                                .get("env")
-                                .and_then(Value::as_array)
-                                .into_iter()
-                                .flatten()
-                                .filter_map(|e| e.get("name")?.as_str())
-                                .collect();
                             let mut d = format!("{}\nin {cwd}", preview(&line));
                             if !extra.is_empty() {
-                                d.push_str(&format!("\nenv: {}", extra.join(", ")));
+                                let names: Vec<&str> =
+                                    extra.iter().map(|(k, _)| k.as_str()).collect();
+                                d.push_str(&format!("\nenv: {}", names.join(", ")));
                             }
                             d
                         }
@@ -294,6 +299,35 @@ impl AcpDriver {
             }
         };
         self.call(step, ClientWait::Plain { rpc_id }, op);
+    }
+
+    /// Review R1-003: an env key a served command may not take — it runs
+    /// code the approval cannot show (loaders, shell rc, interpreter hooks,
+    /// proxies) or overrides a key Otto set for the agent.
+    fn env_key_refused(&self, key: &str) -> bool {
+        const KEYS: [&str; 15] = [
+            "PATH",
+            "BASH_ENV",
+            "ENV",
+            "ZDOTDIR",
+            "NODE_OPTIONS",
+            "PYTHONSTARTUP",
+            "PYTHONPATH",
+            "PERL5OPT",
+            "RUBYOPT",
+            "RUSTC_WRAPPER",
+            "GIT_SSH",
+            "GIT_SSH_COMMAND",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+        ];
+        let k = key.to_ascii_uppercase();
+        KEYS.contains(&k.as_str())
+            || ["DYLD_", "LD_", "OTTO_", "GIT_CONFIG"]
+                .iter()
+                .any(|p| k.starts_with(p))
+            || self.state.child_env.iter().any(|(own, _)| own == key)
     }
 
     fn call(&mut self, step: &mut DriverStep, wait: ClientWait, op: ClientOp) {
