@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { mockDbRoutes, seedMockDbConnection } from './db-mock';
+import { expectFullyInViewport } from './helpers';
 
 // DB workbench chrome (desktop): one way to the side pane, the header ⋯ on a
 // narrow window. Engine calls are the repo's db-mock; the daemon is real.
@@ -59,4 +60,19 @@ test('Tables and History: the open pane is the only way; hidden, the header open
   await header.getByRole('button', { name: 'History', exact: true }).click();
   await expect(side.getByRole('tab', { name: 'History', exact: true })).toHaveAttribute('aria-selected', 'true');
   await expect(header.getByRole('button', { name: 'Tables', exact: true })).toHaveCount(0);
+});
+
+test('375 px: the header ⋯ opens a menu that fits the window and scrolls to its last row', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 667 });
+  await openWorkbench(page);
+  const header = page.getByTestId('page-header');
+  await expect(header.getByRole('button', { name: 'Tables', exact: true })).toBeVisible();
+  const more = header.getByRole('button', { name: 'More actions' });
+  await expectFullyInViewport(page, more, 'the header ⋯');
+  await more.click();
+  const menu = page.getByRole('menu');
+  await expectFullyInViewport(page, menu, 'the workbench ⋯ menu');
+  const last = menu.getByRole('menuitem', { name: /^Close connection/ });
+  await last.scrollIntoViewIfNeeded();
+  await expectFullyInViewport(page, last, 'its last row');
 });

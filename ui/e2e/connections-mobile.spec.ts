@@ -1,6 +1,7 @@
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { mockDbRoutes, seedMockDbConnection } from './db-mock';
+import { expectFullyInViewport } from './helpers';
 
 // Connections list + DB workbench — PHONE/responsive usability guard. Runs on
 // every device project (phones + tablets). The list is the page (one inbox
@@ -179,12 +180,11 @@ test.describe('connections list — responsive', () => {
     await page.keyboard.press('Escape');
     await expect(menu).toHaveCount(0);
     // Tables: a sheet over the rows; Back closes it and stays on the workbench.
-    const tables = page.getByTestId('page-header').getByRole('button', { name: 'Tables', exact: true });
-    if (await tables.isVisible()) await tables.click();
-    else {
-      await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click();
-      await page.getByRole('menuitem', { name: /^Tables/ }).click();
-    }
+    // The header ⋯ sits inside the window (it used to poke 7 px past the edge).
+    await expectFullyInViewport(page, page.getByTestId('page-header').getByRole('button', { name: 'More actions' }), 'the header ⋯');
+    // Tables is kept in the phone header (data-keep): click it, never a
+    // racy "is it visible yet, else the ⋯" branch.
+    await page.getByTestId('page-header').getByRole('button', { name: 'Tables', exact: true }).click();
     const sheet = page.getByRole('dialog', { name: 'Tables' });
     await expect(sheet).toBeVisible();
     await expect(sheet.getByRole('tree', { name: 'Schema' })).toBeVisible();
