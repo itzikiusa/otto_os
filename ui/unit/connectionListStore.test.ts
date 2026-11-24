@@ -40,3 +40,12 @@ test('a refresh asked for during an in-flight read reads again, and the older an
   assert.deepEqual(Array.from(connectionList.rows, (r: { id: string }) => r.id), ['old', 'new']);
   assert.ok(seen.every((ids) => ids.includes('new')), 'no listener ever saw the list without the saved row');
 });
+
+test('a saved edit drops the connection\'s old health verdict; a move keeps it', () => {
+  const { connectionList } = store();
+  connectionList.recordCheck('a', { ok: false, message: 'Access denied' });
+  connectionList.upsert(conn('a'));
+  assert.equal(connectionList.checks.a?.ok, false, 'a move/stamp keeps what is known');
+  connectionList.upsert(conn('a'), true);
+  assert.equal(connectionList.checks.a, undefined);
+});

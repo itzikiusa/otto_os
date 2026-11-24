@@ -149,7 +149,7 @@
   function onSaved(c: Connection): void {
     const wasNew = !form?.existing;
     form = null;
-    connectionList.upsert(c);
+    connectionList.upsert(c, !wasNew);
     void connectionList.refresh();
     // A new database opens straight into the workbench; SSH/custom wait for a click.
     if (wasNew && DB_KINDS.includes(c.kind)) open(fromConnection(c));

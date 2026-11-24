@@ -120,8 +120,14 @@ class ConnectionListStore {
     return () => this.listeners.delete(fn);
   }
 
-  /** Replace one row in place (after a save/move) without a refetch. */
-  upsert(c: Connection): void {
+  /** Replace one row in place (after a save/move) without a refetch; a saved
+   *  `edit` may have fixed (or broken) it, so its old health verdict goes. */
+  upsert(c: Connection, edited = false): void {
+    if (edited) {
+      const { [c.id]: _, ...rest } = this.checks;
+      this.checks = rest;
+      lsSet(CHECKS_KEY, JSON.stringify(rest));
+    }
     const i = this.rows.findIndex((x) => x.id === c.id);
     this.rows = i === -1 ? [...this.rows, c] : this.rows.map((x) => (x.id === c.id ? c : x));
     this.notify();
