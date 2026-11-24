@@ -271,6 +271,12 @@ async fn an_mcp_sign_in_starts_only_on_the_mac_itself() {
         .send(Via::Mac, M::POST, path, Some(&d.human), Some(json!({})))
         .await;
     assert!(s != 403 && v.to_string().contains("https"), "{s} {v}");
+    // Its status reads without a sign-in started.
+    let status = format!("/mcp/servers/{}/oauth", server["id"].as_str().unwrap());
+    let (s, v) = d
+        .send(Via::Mac, M::GET, &status, Some(&d.human), None)
+        .await;
+    assert_eq!((s, v["signed_in"].as_bool()), (200, Some(false)), "{v}");
 }
 
 #[tokio::test]

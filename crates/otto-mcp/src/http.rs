@@ -692,7 +692,15 @@ async fn oauth_status<S: McpCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
 ) -> ApiResult<Json<crate::service::oauth_state::OAuthStatus>> {
     let server = ctx.mcp().registry().get(&id).await.map_err(ApiErr)?;
-    require_resource(&ctx, &user, &server, "view", None, WorkspaceRole::Viewer).await?;
+    require_resource(
+        &ctx,
+        &user,
+        &server,
+        "discover",
+        None,
+        WorkspaceRole::Viewer,
+    )
+    .await?;
     Ok(Json(ctx.mcp().oauth_status(&id).await))
 }
 
