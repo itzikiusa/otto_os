@@ -452,7 +452,7 @@
         </div>
       {/if}
 
-      <div class="rpanel-body">
+      <div class="rpanel-body" class:has-card={open && !pageTab && !!details}>
         {#if open && !pageTab && details}
           <div class="rpanel-card" data-testid="agents-details-card">
             <LazyMount lazy={SessionDetails} what="the session details" variant="compact" props={details} />
@@ -538,6 +538,16 @@
   .rpanel-card {
     flex-shrink: 0;
     padding: var(--sp-3) var(--sp-4) 0;
+  }
+  /* Under the card a panel (most fill the body with height: 100%) gets what
+     is left, so its own scroller and footer stay inside the viewport. */
+  .rpanel-body.has-card {
+    display: flex;
+    flex-direction: column;
+  }
+  .rpanel-body.has-card > :global(:not(.rpanel-card)) {
+    flex: 1 1 auto;
+    min-height: 0;
   }
   .rside {
     height: 100%;
