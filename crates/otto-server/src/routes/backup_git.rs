@@ -121,6 +121,15 @@ impl Snapshot {
             .get_mut("files")
             .and_then(Value::as_array_mut)
             .ok_or_else(|| invalid("Archive files are missing"))?;
+        // A vault's recovery dirs (pre-edit copies, deleted notes) are private
+        // and the vault gitignores them (`*`); copied in, that file made `git
+        // add` refuse the whole snapshot. They stay in the local archive only.
+        documents.retain(|f| {
+            let path = f["path"].as_str().unwrap_or_default();
+            !path
+                .split('/')
+                .any(|s| s == ".otto-history" || s == ".trash")
+        });
         for file in documents {
             let root = file["root"]
                 .as_str()
@@ -1142,6 +1151,28 @@ mod tests {
         export_snapshot(dir.path(), &second, &preview.token)
             .await
             .unwrap();
+    }
+    #[tokio::test]
+    async fn vault_recovery_dirs_stay_out_of_a_git_backup() {
+        // Any edit in a vault writes `.otto-history/.gitignore` (`*`). Copied
+        // into the snapshot it made `git add` refuse every listed path.
+        let dir = repo().await;
+        let mut archive = archive();
+        let files = archive["files"].as_array_mut().unwrap();
+        for (path, body) in [
+            (".otto-history/.gitignore", "*\n"),
+            (".otto-history/r1/meta.json", "{}"),
+            (".trash/old.md", "gone"),
+        ] {
+            files.push(json!({"root":"vault","path":path,"sha256":digest(body.as_bytes()),"content_base64":STANDARD.encode(body)}));
+        }
+        export_commit(dir.path(), archive).await;
+        let tracked = git(dir.path(), &["ls-files", ".otto-sync/files"])
+            .await
+            .unwrap();
+        assert_eq!(tracked.trim(), ".otto-sync/files/vault/note.md");
+        let restored = read_snapshot(dir.path()).unwrap();
+        assert_eq!(restored["files"].as_array().unwrap().len(), 1);
     }
     #[tokio::test]
     async fn malformed_manifest_returns_an_error_instead_of_panicking() {

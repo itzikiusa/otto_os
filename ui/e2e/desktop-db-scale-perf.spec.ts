@@ -1,5 +1,5 @@
 import { test, expect, type Page, type Route } from '@playwright/test';
-import { setDbView } from './helpers';
+import { pickMenuItem, setDbView } from './helpers';
 import { apiCtx, seedWorkspace } from './seed';
 import { mockDbRoutes, seedMockDbConnection } from './db-mock';
 import { budgetMs, gridScrollCosts, isDesktopProject, isWebkitProject, percentile, scrollFrameWork } from './perf';
@@ -599,8 +599,7 @@ test('multi-run sheet with 200 runs polls without long frames', async ({ page },
   await content.click();
   await page.keyboard.press('ControlOrMeta+A');
   await page.keyboard.insertText('SELECT * FROM orders WHERE brand_id = :brand');
-  await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click();
-  await page.getByRole('menuitem', { name: 'Run on…' }).click();
+  await pickMenuItem(page, () => page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click(), 'Run on…');
   const sheet = page.getByTestId('multi-run');
   await expect(sheet).toBeVisible();
   await sheet.locator('.mr-conn', { hasText: CONN }).locator('.mr-scope', { hasText: 'shop' }).locator('input').check();

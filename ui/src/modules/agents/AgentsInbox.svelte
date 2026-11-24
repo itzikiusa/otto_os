@@ -265,7 +265,9 @@
         { label: 'Open in Threads', icon: 'threads', action: () => router.go(`threads/${s.id}`) },
         { separator: true },
       ];
-      void import('../threads/runtime/runtimeMenu').then((m) => ctxMenu.show(e, [...here, ...m.runtimeThreadMenu(s.id).filter((i) => i.label !== 'Open beside')])); // ui-guards: allow — a thread's own menu
+      // Threads' Active / History tidy changes nothing in this list: Close thread is the way to History here.
+      const drop = new Set(['Open beside', 'Move to History', 'Move back to Active']);
+      void import('../threads/runtime/runtimeMenu').then((m) => ctxMenu.show(e, [...here, ...m.runtimeThreadMenu(s.id).filter((i) => !drop.has(i.label ?? ''))])); // ui-guards: allow — a thread's own menu
       return;
     }
     const edit = ws.canEditSession(s);

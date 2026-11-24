@@ -357,6 +357,8 @@ pub(crate) struct Mirror {
     tx: broadcast::Sender<Bytes>,
     epoch: Instant,
     last_output_ms: Arc<AtomicU64>,
+    /// [`PtyHandle::last_resize_at`] as ms since `epoch` plus one (0 = never).
+    last_resize_ms: Arc<AtomicU64>,
     /// Keystroke → first-output clock shared with the writer thread.
     echo: Arc<echo::EchoClock>,
 }
@@ -383,6 +385,7 @@ impl Mirror {
             tx,
             epoch: Instant::now(),
             last_output_ms: Arc::new(AtomicU64::new(0)),
+            last_resize_ms: Arc::new(AtomicU64::new(0)),
             echo: Arc::new(echo::EchoClock::new()),
         }
     }
@@ -867,6 +870,10 @@ impl PtyHandle {
             parser.screen_mut().set_size(rows_nz, cols_nz);
         }
         drop(parser);
+        let since_epoch = self.mirror.epoch.elapsed().as_millis() as u64;
+        self.mirror
+            .last_resize_ms
+            .store(since_epoch + 1, Ordering::Relaxed);
         let res = match &self.backend {
             Backend::Local { master, .. } => lock_unpoisoned(master)
                 .resize(PtySize {
@@ -1159,6 +1166,15 @@ impl PtyHandle {
     /// Time since the PTY was spawned.
     pub fn uptime(&self) -> Duration {
         self.mirror.epoch.elapsed()
+    }
+
+    /// Instant of the most recent real grid change ([`Self::resize`]), if
+    /// any: the redraw a resize provokes is not new output (status tracking).
+    pub fn last_resize_at(&self) -> Option<Instant> {
+        match self.mirror.last_resize_ms.load(Ordering::Relaxed) {
+            0 => None,
+            ms => Some(self.mirror.epoch + Duration::from_millis(ms - 1)),
+        }
     }
 
     /// Instant of the most recent output chunk (spawn time when none yet).

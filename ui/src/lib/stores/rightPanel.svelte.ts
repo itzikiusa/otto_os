@@ -9,6 +9,7 @@
 //     (`register`), so a page with its own details pane (the Vault) folds it
 //     into this one panel instead of showing a second, competing right panel.
 import type { Component } from 'svelte';
+import { SvelteMap } from 'svelte/reactivity';
 import type { IconName } from '../components/Icon.svelte';
 import { contextFolder, parseFolderPicks, prunePicks, shownRightTab, visibleRightTabs, withFolderPick, type PageTabId, type RightTabDef } from '../rightTabs';
 import { lsGet, lsSet } from '../storage';
@@ -45,23 +46,33 @@ class RightPanelStore {
   /** Folder picked per workspace for the panel outside sessions. */
   picks: Record<string, string> = $state(parseFolderPicks(lsGet(LS_PICKS)));
 
+  /** The folder of each chat pane on the Agents canvas, published by the pane
+   *  (AgentsThreadPane) — a thread is no row of `ws.sessions`, and its folder
+   *  (often its own worktree) lives in the Threads store, not here. */
+  readonly paneFolders = new SvelteMap<string, string>();
+
   /** The Agents page (the bare route is Agents too) with an agent session focused. */
   readonly session = $derived(
     (router.module === '' || router.module === 'agents') && ws.activeSession?.kind === 'agent',
   );
   readonly module = $derived(router.module === '' ? 'agents' : router.module);
+  /** A focused chat pane's folder: Git and Files follow it as they follow a terminal. */
+  readonly threadFolder = $derived(
+    this.module === 'agents' && !this.session && ws.activeSessionId ? (this.paneFolders.get(ws.activeSessionId) ?? null) : null,
+  );
 
   /** Folder the Git and Files tabs use. */
   readonly folder = $derived(
-    contextFolder({
-      session: this.session,
-      sessionCwd: ws.activeSession?.cwd,
-      picked: ws.currentId ? this.picks[ws.currentId] : null,
-      workspaceRoot: ws.current?.root_path,
-    }),
+    this.threadFolder ??
+      contextFolder({
+        session: this.session,
+        sessionCwd: ws.activeSession?.cwd,
+        picked: ws.currentId ? this.picks[ws.currentId] : null,
+        workspaceRoot: ws.current?.root_path,
+      }),
   );
   /** The folder is a pick (not the workspace root): show "Use workspace folder". */
-  readonly picked = $derived(!this.session && !!ws.currentId && !!this.picks[ws.currentId]);
+  readonly picked = $derived(!this.session && !this.threadFolder && !!ws.currentId && !!this.picks[ws.currentId]);
 
   readonly shellTabs: RightTabDef[] = $derived(
     visibleRightTabs({ module: this.module, session: this.session, browserVersion: ui.browserPanelVersion }),
