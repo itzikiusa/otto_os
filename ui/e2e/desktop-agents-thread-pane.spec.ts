@@ -115,6 +115,11 @@ test('two terminals and a thread tile together; the approval is answered in the 
   await pane.getByRole('button', { name: /^More…/ }).click();
   await expect(page.getByRole('menuitem', { name: 'Open in Threads' })).toBeVisible();
   await expect(page.getByRole('menuitem', { name: 'Open in New Window' })).toHaveCount(0);
+  // One way to History here (Close thread…): Threads' "Move to History" tidy
+  // changed nothing on Agents (M1); the layout presets live with the canvas (M2).
+  await expect(page.getByRole('menuitem', { name: 'Close thread…' })).toBeVisible();
+  await expect(page.getByRole('menuitem', { name: 'Move to History' })).toHaveCount(0);
+  await expect(page.getByRole('menuitem', { name: /^Use .* layout$/ })).toHaveCount(0);
   await page.keyboard.press('Escape');
 
   await page.reload();

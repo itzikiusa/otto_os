@@ -74,8 +74,10 @@
   });
 
   /** The thread's own menu (Threads' runtimeMenu) without what belongs to
-   *  the Threads page (its pins, its "beside", its terminal drawer). */
-  const THREADS_ONLY = new Set(['Open beside', 'Terminal drawer', 'Pin thread', 'Unpin thread']);
+   *  the Threads page (its pins, its "beside", its terminal drawer, its
+   *  Active / History tidy — Agents' History is Close thread's, so "Move to
+   *  History" beside it was a near-duplicate that changed nothing here). */
+  const THREADS_ONLY = new Set(['Open beside', 'Terminal drawer', 'Pin thread', 'Unpin thread', 'Move to History', 'Move back to Active']);
   function openMenu(e: MouseEvent): void {
     void import('../threads/runtime/runtimeMenu').then((m) => { // ui-guards: allow — a thread's own menu
       const own = m.runtimeThreadMenu(threadId).filter((i) => !THREADS_ONLY.has(i.label ?? ''));
