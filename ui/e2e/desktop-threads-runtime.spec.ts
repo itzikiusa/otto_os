@@ -207,10 +207,16 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   expect(created.ok(), await created.text()).toBeTruthy();
   const bgId = (await created.json()).id as string;
   expect((await ctx.post(`${base}/api/v1/runtime-sessions/${bgId}/prompt`, { data: { text: 'ask' } })).ok()).toBeTruthy();
-  const threadsNav = page.getByRole('button', { name: /^Threads ?, 1 waiting on you/ }).first();
+  // Other specs' threads wait on the same daemon, so the count is theirs too:
+  // the badge shows a count, and its source (the persisted waiting list the
+  // badge counts) holds THIS thread — before and after a reload.
+  const threadsNav = page.getByRole('button', { name: /^Threads ?, [1-9]\d* waiting on you/ }).first();
+  const waitingIds = () => page.evaluate(() => (JSON.parse(localStorage.getItem('otto_runtime_waiting') ?? '[]') as { id: string }[]).map((w) => w.id));
   await expect(threadsNav).toBeVisible({ timeout: 15_000 });
+  await expect.poll(waitingIds, { timeout: 15_000 }).toContain(bgId);
   await page.reload();
   await expect(threadsNav).toBeVisible({ timeout: 30_000 });
+  await expect.poll(waitingIds, { timeout: 30_000 }).toContain(bgId);
   await page.goto('/#/threads');
 
   // Phone width: the timeline and composer fit.

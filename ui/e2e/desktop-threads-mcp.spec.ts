@@ -52,7 +52,8 @@ test('⌘K › MCP servers for this thread lists what the agent has, each with a
   await detailsRow.click();
   const sheet = page.getByTestId('runtime-mcp-servers');
   await expect(sheet).toBeVisible();
-  await page.getByRole('button', { name: 'Done' }).click();
+  // The sheet's own Done (its footer), never a sidebar row that reads "Done".
+  await page.getByRole('dialog').filter({ has: sheet }).getByRole('button', { name: 'Done', exact: true }).click();
   await openMcpServers(page);
   await expect(sheet).toBeVisible();
   const row = (name: string) => sheet.locator(`[data-testid="runtime-mcp-server"][data-name="${name}"]`);
