@@ -22,6 +22,15 @@ async function openWorkbench(page: Page): Promise<void> {
   await expect(page.getByTestId('db-conn-state')).toContainText('Connected');
 }
 
+test('closing the only tab, or a link to a connection that is gone, lands on the connection list', async ({ page }) => {
+  await openWorkbench(page);
+  await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click();
+  await page.getByRole('menuitem', { name: /^Close connection/ }).click();
+  await expect(page).toHaveURL(/#\/connections$/);
+  await page.goto('/#/database/01NOSUCHCONNECTION0000000000');
+  await expect(page).toHaveURL(/#\/connections$/);
+});
+
 test('Tables and History: the open pane is the only way; hidden, the header opens it on that tab', async ({ page }) => {
   await openWorkbench(page);
   const header = page.getByTestId('page-header');

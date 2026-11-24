@@ -349,12 +349,19 @@
   // link) opens that connection: a database's workbench tab, an SSH/custom
   // terminal tab, or a Kafka cluster tab.
   const deepId = $derived(router.module === 'database' ? (router.parts[1] ?? '').split('?')[0] : '');
+  // The deep id already opened (or found gone): once its tab closes, the
+  // id left in the URL must not hold the page on "restoring" for good.
+  let deepTried = $state('');
   $effect(() => {
     const id = deepId;
     if (!connsSettled || !id) return;
-    untrack(() => void openDeep(id));
+    untrack(() => {
+      deepTried = '';
+      void openDeep(id).finally(() => (deepTried = id));
+    });
   });
-  async function openDeep(id: string): Promise<void> {    if (database.connections.some((c) => c.id === id)) {
+  async function openDeep(id: string): Promise<void> {
+    if (database.connections.some((c) => c.id === id)) {
       connectionList.stampOpened(id);
       await database.openConnection(id);
       return;
@@ -429,9 +436,10 @@
     openConns.length > 0 || brokers.openClusters.length > 0 || database.sshTabs.length > 0,
   );
   // Nothing open (fresh start, a restore that found nothing, the last tab
-  // closed): the workbench has nothing to show — go to the connection list.
+  // closed, a link to a connection that is gone): the workbench has nothing
+  // to show — go to the connection list.
   $effect(() => {
-    if (connsSettled && !hasAnyTab && !deepId) untrack(() => router.replace('connections'));
+    if (connsSettled && !hasAnyTab && (!deepId || deepTried === deepId)) untrack(() => router.replace('connections'));
   });
   // The cluster / ssh session backing the active non-DB pane (null when a DB tab
   // is focused, or when the backing tab was closed out from under the pane).
