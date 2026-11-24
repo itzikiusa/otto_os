@@ -579,7 +579,7 @@ class GitStore {
         this.fetchCount++;
         void (async () => {
           try {
-            const status = await api.post<RepoStatusResp>(`/repos/${repoId}/fetch`);
+            const status = await api.post<RepoStatusResp>(`/repos/${repoId}/fetch${this.manualFetches.has(repoId) ? '' : '?background=true'}`); // a background one never queues behind a push
             this.setStatus(repoId, status);
             this.bumpRefs(repoId);
             this.lastFetchAt[repoId] = Date.now();
@@ -771,10 +771,8 @@ class GitStore {
     return s;
   }
 
-  // Post-mutation contract: every push / checkout / pull — the toolbar, the
-  // graph, Create PR or an agent command — stores the fresh status and bumps
-  // `refsRev` HERE, so no call site can skip half of it (architecture-6-04).
-  // `pushFlow.runPush` is the UX wrapper (toasts, rejected-push dialog).
+  // Post-mutation contract: every push / checkout / pull stores the fresh status and bumps
+  // `refsRev` HERE (architecture-6-04); `pushFlow.runPush` is the UX wrapper.
 
   /** Push (or publish) a branch — the checked-out one unless `body.branch`. */
   async push(repoId: Id, body: PushReq = {}): Promise<RepoStatusResp> {

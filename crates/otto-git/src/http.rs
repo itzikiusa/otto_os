@@ -1797,10 +1797,21 @@ async fn repo_set_cleanup_base<S: GitCtx>(
     }))
 }
 
+#[derive(Deserialize, Default)]
+struct FetchQuery {
+    /// The client's auto-fetch: skipped (the current status comes back) while
+    /// a push or another fetch holds the repo's network leg, instead of
+    /// queueing behind it — a hung push held every background fetch for its
+    /// whole 1-2 minutes (the fetch p95 of 3.9 s, single fetches of 31-72 s).
+    #[serde(default)]
+    background: bool,
+}
+
 async fn repo_fetch<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
+    Query(q): Query<FetchQuery>,
 ) -> ApiResult<Json<RepoStatusResp>> {
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     watch_repo(&s, &repo, &git).await;
@@ -1809,6 +1820,9 @@ async fn repo_fetch<S: GitCtx>(
     // so neither dies on "cannot lock ref". The worktree lock is not needed.
     // Concurrent callers share one fetch (see `fetch_coalesced`).
     let lock = remote_lock(&id);
+    if q.background && lock.try_lock().is_err() {
+        return Ok(Json(git.status().await?));
+    }
     let (_g, _ran) =
         fetch_coalesced(&id, &lock, || async { git.fetch(token).await.map(drop) }).await?;
     status_after_release(&git, _g).await
@@ -2191,7 +2205,11 @@ async fn repo_push<S: GitCtx>(
         tracing::info!(repo = %id, user = %user.0.username, branch = ?branch, "force push (with lease)");
         git.push_confirmed(token, target).await?;
     } else {
-        git.push_with(token, branch, false).await?;
+        // A failed push says why in the daemon log too (its message only
+        // reached the toast: the three 93-128 s failures left no trace).
+        git.push_with(token, branch, false)
+            .await
+            .inspect_err(|e| tracing::warn!(repo = %id, error = %e, "push failed"))?;
     }
     // Return the FRESH status so the UI's ahead/behind chip updates after push.
     status_after_release(&git, _g).await

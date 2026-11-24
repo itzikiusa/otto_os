@@ -345,8 +345,8 @@ pub(super) async fn repo_branches_delete<S: GitCtx>(
     // One push per remote for all its branches; if that push fails (one ref
     // already gone, a protected branch…) each is retried on its own, so the
     // per-item results stay exact.
-    let mut by_remote: Vec<(String, Option<TransportCredential>, Vec<(usize, String)>)> =
-        Vec::new();
+    type RemoteBatch = (String, Option<TransportCredential>, Vec<(usize, String)>);
+    let mut by_remote: Vec<RemoteBatch> = Vec::new();
     for (i, remote, rb, tok) in remote_deletes {
         match by_remote.iter_mut().find(|(r, ..)| *r == remote) {
             Some((_, _, items)) => items.push((i, rb)),

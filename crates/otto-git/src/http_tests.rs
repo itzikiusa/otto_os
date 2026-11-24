@@ -1025,6 +1025,41 @@ async fn remote_edit_route_persists_origin_and_force_requires_a_target() {
     let _ = tokio::fs::remove_dir_all(&dir).await;
 }
 
+/// The client's auto-fetch never queues behind a push (perf G6): while the
+/// repo's network leg is held it returns the status at once, without fetching.
+#[tokio::test]
+async fn background_fetch_skips_while_a_push_holds_the_remote_leg() {
+    let (_pool, ctx, user, ws) = fixture().await;
+    let dir = init_git_repo().await;
+    let repo = ctx
+        .store
+        .create_repo(NewRepo {
+            workspace_id: ws,
+            name: "bg-fetch".into(),
+            path: dir.to_string_lossy().into_owned(),
+            remote_url: None,
+            provider: None,
+            git_account_id: None,
+        })
+        .await
+        .unwrap();
+    let lock = remote_lock(&repo.id);
+    let _held = lock.lock().await;
+    let fetched = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        repo_fetch(
+            State(ctx),
+            Extension(auth(&user, false)),
+            Path(repo.id.clone()),
+            Query(FetchQuery { background: true }),
+        ),
+    )
+    .await
+    .expect("a background fetch must not wait for the push");
+    assert!(fetched.is_ok(), "the current status comes back");
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+}
+
 /// Opening a repository reads ONE overview (perf G6): the status, the refs and
 /// the side lists that used to be five requests, shaped as each route's own.
 #[tokio::test]
