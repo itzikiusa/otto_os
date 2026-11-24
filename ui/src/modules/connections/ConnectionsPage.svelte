@@ -422,9 +422,9 @@
     <LoadState
       what="connections"
       variant="page"
-      loading={connectionList.loading || !connectionList.loaded}
+      loading={connectionList.loading || !connectionList.loaded || (allItems.length === 0 && brokers.loading)}
       error={connectionList.error}
-      empty={!connectionList.loaded || isEmpty || (!!connectionList.error && allItems.length === 0)}
+      empty={!connectionList.loaded || isEmpty || allItems.length === 0 && (brokers.loading || !!connectionList.error)}
       onretry={() => void connectionList.refresh()}
     >
       {#snippet emptyView()}

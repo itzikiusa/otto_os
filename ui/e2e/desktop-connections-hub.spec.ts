@@ -188,6 +188,20 @@ test.describe('connections hub', () => {
     await expect(page.getByText(/\d+ saved/)).toBeVisible();
   });
 
+  test('an empty library still waiting on Kafka clusters shows loading, not a blank list (R2-017)', async ({ page }) => {
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    await page.route(/\/workspaces\/[^/]+\/(connections|connection-sections)$/, (r) => r.fulfill({ status: 200, contentType: 'application/json', body: '[]' }));
+    await page.route(/\/brokers\/clusters$/, async (r) => {
+      await held;
+      await r.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
+    });
+    await page.goto('/#/connections');
+    await expect(page.getByRole('status', { name: 'Loading connections' })).toBeVisible({ timeout: 30_000 });
+    release();
+    await expect(page.getByText('No connections yet')).toBeVisible();
+  });
+
   test('Delete… asks first: Cancel keeps the row and sends nothing, Delete removes it (R1-006)', async ({ page }) => {
     const { ctx, base } = await apiCtx();
     const wsId = await seedWorkspace(ctx, base);
