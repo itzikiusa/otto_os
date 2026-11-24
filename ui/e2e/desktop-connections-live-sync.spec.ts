@@ -78,6 +78,10 @@ test('create, rename and delete in one window show up in the other without a rel
   await a.getByRole('button', { name: `Actions for ${name}-renamed`, exact: true }).focus();
   await a.keyboard.press('Enter');
   await a.getByRole('menuitem', { name: 'Delete', exact: true }).click();
+  // The delete lands when its Undo toast goes; dismiss it rather than wait
+  // on a timer that a busy machine stretches.
+  const toast = a.locator('.toast', { hasText: `Deleted “${name}-renamed”` });
+  await toast.getByRole('button', { name: 'Dismiss' }).click();
   await expect(rowB(`${name}-renamed`)).toHaveCount(0, { timeout: 20_000 });
   expect(reads()).toBeGreaterThanOrEqual(3);
   await b.waitForTimeout(3000); // ui-guards: allow — proves no further read without a change
