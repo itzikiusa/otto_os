@@ -117,6 +117,9 @@ pub struct Folded {
     /// Timestamp of the first / last dated record, for the history index.
     pub first_ts: Option<String>,
     pub last_ts: Option<String>,
+    /// A window's first whole turn (`window::Window::base`): pages start
+    /// here and `has_earlier` holds. 0 for a whole-file fold.
+    pub base: usize,
 }
 
 impl Folded {
@@ -133,7 +136,7 @@ impl Folded {
         let eligible: Vec<&FoldedTurn> = self
             .turns
             .iter()
-            .filter(|t| before.is_none_or(|b| t.first < b))
+            .filter(|t| t.first >= self.base && before.is_none_or(|b| t.first < b))
             .collect();
         let start = eligible.len().saturating_sub(limit);
         // Newest first within the window; stop once the byte or ~10k-line budget is spent.
@@ -150,11 +153,13 @@ impl Folded {
             kept += 1;
         }
         start = eligible.len() - kept;
-        let has_earlier = start > 0;
+        let has_earlier = start > 0 || self.base > 0;
         let page = &eligible[start..];
         let cursor = page
             .first()
-            .map(|t| t.first.to_string())
+            .map(|t| t.first)
+            .or((self.base > 0).then_some(self.base))
+            .map(|c| c.to_string())
             .unwrap_or_else(|| before.map(|b| b.to_string()).unwrap_or_else(|| "0".into()));
         Transcript {
             session_id: self.session_id.clone(),
@@ -247,6 +252,8 @@ pub(crate) struct Fold<'a> {
     pub last_ts: Option<String>,
     /// tool call id → location, for `tool_result` attachment.
     pub tool_calls: HashMap<String, BlockRef>,
+    /// Pages start at this record (a window's first whole turn).
+    pub base: usize,
     /// `Agent` tool call id → the `agentId` its result reported (Claude), so a
     /// spawned agent with no `.meta.json` sidecar still gets a `subagent` block.
     pub agent_ids: HashMap<String, String>,
@@ -298,6 +305,7 @@ impl<'a> Fold<'a> {
             cost_usd: 0.0,
             cost_fallback: None,
             pending_usage: None,
+            base: 0,
         }
     }
 
@@ -638,7 +646,8 @@ impl<'a> Fold<'a> {
         let end = self
             .turns
             .partition_point(|t| before.is_none_or(|b| t.first < b));
-        let start = end.saturating_sub(limit.max(1));
+        let lo = self.turns.partition_point(|t| t.first < self.base);
+        let start = end.saturating_sub(limit.max(1)).max(lo);
         let mut turns = Vec::new();
         let mut bytes = 0usize;
         let mut lines = 0usize;
@@ -688,6 +697,7 @@ impl<'a> Fold<'a> {
         meta.first_prompt = self.first_prompt.clone();
         meta.first_ts = self.first_ts.clone();
         meta.last_ts = self.last_ts.clone();
+        meta.base = self.base;
         let mut out = meta.finish(record_count);
         out.turns = turns;
         out
@@ -708,11 +718,12 @@ impl<'a> Fold<'a> {
         }
         let window = self.window(record_count, before, limit, PAGE_BYTES_BUDGET);
         let first_idx = window.turns.first().map(|t| t.first);
-        let has_earlier = first_idx.is_some_and(|first| {
-            self.turns
-                .first()
-                .is_some_and(|oldest| oldest.first < first)
-        });
+        let has_earlier = self.base > 0
+            || first_idx.is_some_and(|first| {
+                self.turns
+                    .first()
+                    .is_some_and(|oldest| oldest.first < first)
+            });
         let cursor = first_idx
             .map(|f| f.to_string())
             .unwrap_or_else(|| before.map(|b| b.to_string()).unwrap_or_else(|| "0".into()));
@@ -822,6 +833,11 @@ impl<'a> Fold<'a> {
         } else {
             self.cost_fallback
         };
+        if self.base > 0 {
+            // A window's totals would read as the conversation's: say none.
+            let s = &mut self.stats;
+            (s.cost_usd, s.input_tokens, s.output_tokens, s.duration_ms) = (None, None, None, None);
+        }
         let subagents = self.opts.subagents;
         Folded {
             provider: self.provider,
@@ -837,6 +853,7 @@ impl<'a> Fold<'a> {
             first_prompt: self.first_prompt,
             first_ts: self.first_ts,
             last_ts: self.last_ts,
+            base: self.base,
         }
     }
 

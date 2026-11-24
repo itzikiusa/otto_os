@@ -37,6 +37,7 @@ pub mod tailer;
 pub mod turn;
 pub mod usage;
 pub mod util;
+pub mod window;
 
 pub use fold::PAGE_BYTES_BUDGET;
 pub use fold::{FoldOpts, Folded, FoldedTurn, PriceFn};
@@ -206,6 +207,37 @@ impl<'a> Folder<'a> {
             Folder::Agy(a) => a.artifacts(),
         }
     }
+
+    pub fn into_folded(self) -> Folded {
+        match self {
+            Folder::Claude(c) => c.into_folded(),
+            Folder::Codex(c) => c.into_folded(),
+            Folder::Agy(a) => a.into_folded(),
+        }
+    }
+
+    /// Number the next pushed record `record` (a window's first record).
+    pub fn start_at(&mut self, record: usize) {
+        *self.parts().1 = record;
+    }
+
+    /// Pages never reach before record `base` (see [`window::Window::base`]).
+    pub fn set_base(&mut self, base: usize) {
+        self.parts().0.base = base;
+    }
+
+    /// First record of turn `i` of this fold.
+    pub fn turn_first(&mut self, i: usize) -> Option<usize> {
+        self.parts().0.turns.get(i).map(|t| t.first)
+    }
+
+    fn parts(&mut self) -> (&mut fold::Fold<'a>, &mut usize) {
+        match self {
+            Folder::Claude(c) => c.parts(),
+            Folder::Codex(c) => c.parts(),
+            Folder::Agy(a) => a.parts(),
+        }
+    }
 }
 
 /// Fold a transcript from its raw bytes — `fold` over
@@ -265,9 +297,7 @@ pub fn fold_file_limited(
     limits: FoldReadLimits,
 ) -> std::io::Result<Folded> {
     use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-    fn exceeded() -> std::io::Error {
-        std::io::Error::new(std::io::ErrorKind::OutOfMemory, "transcript resource limit exceeded; open the provider transcript directly or select a smaller subagent transcript")
-    }
+    let exceeded = limit_exceeded;
     let mut file = std::fs::File::open(path)?;
     let len = file.metadata()?.len();
     if len > limits.input_bytes as u64 {
@@ -311,11 +341,16 @@ pub fn fold_file_limited(
             }
         }
     }
-    Ok(match folder {
-        Folder::Claude(c) => c.into_folded(),
-        Folder::Codex(c) => c.into_folded(),
-        Folder::Agy(a) => a.into_folded(),
-    })
+    Ok(folder.into_folded())
+}
+
+/// The read refused on a resource limit (`OutOfMemory`; the server answers
+/// 413 with this sentence).
+pub(crate) fn limit_exceeded() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::OutOfMemory,
+        "This conversation is too large to show here (transcript resource limit). Open the transcript file directly, or pick a smaller sub-agent conversation.",
+    )
 }
 
 /// Guess the provider from a transcript path: Codex rollouts are named

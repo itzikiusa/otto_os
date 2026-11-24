@@ -87,6 +87,10 @@ impl<'a> ClaudeFolder<'a> {
         self.count
     }
 
+    pub(crate) fn parts(&mut self) -> (&mut Fold<'a>, &mut usize) {
+        (&mut self.st.f, &mut self.count)
+    }
+
     /// Replace the subagent tree used at snapshot time (sidecars appear late).
     pub fn set_subagents(&mut self, subagents: Vec<crate::model::SubagentMeta>) {
         self.st.f.opts.subagents = subagents;

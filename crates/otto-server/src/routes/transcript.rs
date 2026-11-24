@@ -30,8 +30,8 @@ use otto_core::event::Event;
 use otto_core::{Error, Id};
 use otto_state::NewTrail;
 use otto_transcript::{
-    fold_file_limited, read_subagents_limited, subagent_path_for, Artifact, FoldOpts, Folded,
-    Provider, Transcript,
+    fold_file_limited, read_subagents_limited, subagent_path_for, window, Artifact, FoldOpts,
+    Folded, Provider, Transcript,
 };
 use serde::Deserialize;
 
@@ -60,11 +60,13 @@ use crate::transcript::resolve::{effective_provider, resolve_transcript_sync, tr
 /// Fold a transcript file with the server's knobs: images written to the
 /// store, cost priced exactly like the Usage module, subagent tree attached
 /// (and returned, so the caller does not read the sidecars a second time).
+/// A long top-level transcript folds only its window before `before`.
 pub(crate) fn fold_with(
     ctx: &ServerCtx,
     provider: Provider,
     path: &Path,
     sub: Option<&str>,
+    before: Option<usize>,
 ) -> Result<(Folded, Vec<otto_transcript::SubagentMeta>), Error> {
     let store = image_store(ctx, &store_key(provider, path));
     let subagents = if sub.is_none() && provider == Provider::Claude {
@@ -90,16 +92,17 @@ pub(crate) fn fold_with(
         }
     };
     let price: otto_transcript::PriceFn<'_> = &otto_usage::estimate_cost;
-    let folded = fold_file_limited(
-        provider,
-        &target,
-        FoldOpts {
-            images: Some(store),
-            price: Some(price),
-            subagents: subagents.clone(),
-        },
-        Default::default(),
-    )
+    let opts = FoldOpts {
+        images: Some(store),
+        price: Some(price),
+        subagents: subagents.clone(),
+    };
+    let folded = if sub.is_none() && window::is_long(&target) {
+        window::fold_window(provider, &target, opts, before, window::WINDOW_BYTES)
+            .map(|w| w.folder.into_folded())
+    } else {
+        fold_file_limited(provider, &target, opts, Default::default())
+    }
     .map_err(|e| {
         if e.kind() == std::io::ErrorKind::OutOfMemory {
             Error::PayloadTooLarge(e.to_string())
@@ -116,16 +119,26 @@ pub(crate) fn fold_with(
 }
 
 /// Authorization/resolution have already completed before entering the cache.
+/// A long transcript's window (keyed by `before`) is folded fresh: a few MB.
 async fn cached_fold(
     ctx: &ServerCtx,
     provider: Provider,
     path: &Path,
     sub: Option<&str>,
+    before: Option<usize>,
 ) -> ApiResult<std::sync::Arc<crate::transcript_cache::Snapshot>> {
     if let Some(sub) = sub {
         if subagent_path_for(provider, path, sub).is_none() {
             return Err(ApiError(Error::Invalid("bad subagent id".into())));
         }
+    } else if window::is_long(path) {
+        let (cx, path) = (ctx.clone(), path.to_path_buf());
+        let built = crate::offload::blocking(move || fold_with(&cx, provider, &path, None, before));
+        let (folded, subagents) = built.await?;
+        return Ok(std::sync::Arc::new(crate::transcript_cache::Snapshot {
+            folded,
+            subagents,
+        }));
     }
     let key = crate::transcript_cache::CacheKey {
         root: ctx.data_dir.clone(),
@@ -138,7 +151,7 @@ async fn cached_fold(
     let sub = sub.map(str::to_string);
     ctx.transcript_cache
         .get(key, move || {
-            let (folded, subagents) = fold_with(&cx, provider, &path, sub.as_deref())?;
+            let (folded, subagents) = fold_with(&cx, provider, &path, sub.as_deref(), None)?;
             Ok(crate::transcript_cache::Snapshot { folded, subagents })
         })
         .await
@@ -298,7 +311,7 @@ pub(crate) async fn transcript_page(
     let mut t = match live {
         Some(page) => page,
         None => {
-            let snapshot = cached_fold(&ctx, provider, &resolved.path, sub).await?;
+            let snapshot = cached_fold(&ctx, provider, &resolved.path, sub, before).await?;
             crate::offload::blocking(move || {
                 page(
                     &snapshot.folded,
@@ -456,7 +469,7 @@ pub async fn transcript_tool(
     {
         Some(block) => block,
         None => {
-            let snapshot = cached_fold(&ctx, resolved.provider, &resolved.path, None).await?;
+            let snapshot = cached_fold(&ctx, resolved.provider, &resolved.path, None, None).await?;
             crate::offload::blocking(move || {
                 crate::transcript_tail::find_tool_block(&snapshot.folded, &tool_id)
             })
@@ -504,7 +517,7 @@ async fn session_artifacts(ctx: &ServerCtx, session: &Session) -> ApiResult<Vec<
     {
         return Ok(newest_first(&arts));
     }
-    let snapshot = cached_fold(ctx, resolved.provider, &resolved.path, None).await?;
+    let snapshot = cached_fold(ctx, resolved.provider, &resolved.path, None, None).await?;
     Ok(newest_first(&snapshot.folded.artifacts))
 }
 
