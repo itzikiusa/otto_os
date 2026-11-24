@@ -1,3 +1,4 @@
+import * as langForPath from '../src/lib/components/langForPath.ts';
 // IDE round 4, second pass: mixed line endings survive a save (G18), the delete prompt
 // names unsaved tabs (G19), applied agent proposals survive leaving the page (G11), a
 // failed folder load is an inline row with Retry (G17), the tree's keyboard model (G15)
@@ -8,6 +9,7 @@ import { loadSource } from './sourceHarness.ts';
 import { treeFilterMatches, treeNavAction, type TreeNavRow } from '../src/modules/ide/history/ideTreeNav.ts';
 
 const types = loadSource(new URL('../src/modules/ide/store/ideTypes.ts', import.meta.url), {
+    '../../../lib/components/langForPath': langForPath,
   '../../../lib/api/client': { getToken: () => '', laneFetch: () => { throw new Error('unused'); } },
 });
 
