@@ -1,13 +1,12 @@
 import { test, expect, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 import { openPage } from './helpers';
 
 async function fixture(page: Page) {
-  const dir = mkdtempSync(join(tmpdir(), 'otto-e2e-recovery-'));
+  const dir = tempDir('otto-e2e-recovery-');
   const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim();
   git('init', '-b', 'main');
   git('config', 'user.name', 'E2E'); git('config', 'user.email', 'e2e@example.invalid');

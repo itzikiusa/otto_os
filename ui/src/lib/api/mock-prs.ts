@@ -1,7 +1,7 @@
 // Mock fixtures for the PR workspace (split out of mock.ts): a T3-sized PR
 // (#51) with many files across languages (a few of them tests), its commits
 // and per-commit diffs, plus a couple more open PRs for the list pane.
-import type { DiffResp, FileDiff, PrComment, PrDetail, PrSummary } from './types';
+import type { DiffResp, FileDiff, PrCheck, PrChecksResp, PrComment, PrDetail, PrSummary } from './types';
 
 const NOW = Date.now();
 const ago = (mins: number): string => new Date(NOW - mins * 60_000).toISOString();
@@ -165,7 +165,6 @@ export const mockExtraPrs: ExtraPr[] = [
       updated_at: ago(16),
       created_at: ago(60 * 26),
       url: 'https://github.com/dev-otto/otto/pull/51',
-      ci_status: 'passing',
       labels: ['feature', 'vip'],
       head_sha: 'c1fac680',
     },
@@ -213,13 +212,33 @@ export const mockExtraPrs: ExtraPr[] = [
       created_at: ago(60 * 40),
       url: 'https://github.com/dev-otto/otto/pull/50',
       asks_me: true, // asks you for a review: the list's "Needs you"
-      ci_status: 'pending',
       labels: ['feature'],
       head_sha: 'b50aa11',
     },
     description_md: 'Adds the layered chance reward and VIP slot screens.',
     comments: [],
     approved_by: [],
+    mergeable: true,
+  },
+  {
+    // Ready to merge: approved, mergeable, its checks pass (mockPrChecks).
+    repo_id: 'rep_otto',
+    summary: {
+      number: 52,
+      title: 'chore(ci): cache the Go module download',
+      author: 'sam',
+      state: 'open',
+      source_branch: 'chore/ci-cache',
+      target_branch: 'develop',
+      updated_at: ago(60 * 22),
+      created_at: ago(60 * 45),
+      url: 'https://github.com/dev-otto/otto/pull/52',
+      labels: ['ci'],
+      head_sha: 'b52cc33',
+    },
+    description_md: 'Caches `~/go/pkg/mod` between CI runs.',
+    comments: [],
+    approved_by: ['maya'],
     mergeable: true,
   },
   {
@@ -244,6 +263,18 @@ export const mockExtraPrs: ExtraPr[] = [
     mergeable: null,
   },
 ];
+
+/** A PR's CI checks (`GET …/prs/{n}/checks`). The forge's list carries no CI
+ *  state (the daemon leaves `ci_status` empty), so rows learn it from this
+ *  too, through the open PR. #52 passes, #50 is still running, the rest fail
+ *  (build ✓, lint ✗ — the merge modal's "CI failing" + "Merge anyway"). */
+export function mockPrChecks(num: string): PrChecksResp {
+  const run = (name: string, state: PrCheck['state']): PrCheck =>
+    ({ name, state, url: `https://ci.example.com/run/${num}/${name}`, started_at: ago(30), completed_at: state === 'pending' ? null : ago(28) });
+  if (num === '52') return { ci: { state: 'success', total: 2, passed: 2, failed: 0, url: 'https://ci.example.com/run/52' }, checks: [run('build', 'success'), run('lint', 'success')] };
+  if (num === '50') return { ci: { state: 'pending', total: 2, passed: 1, failed: 0, url: 'https://ci.example.com/run/50' }, checks: [run('build', 'success'), run('e2e', 'pending')] };
+  return { ci: { state: 'failure', total: 2, passed: 1, failed: 1, url: 'https://ci.example.com/run/9' }, checks: [run('build', 'success'), run('lint', 'failure')] };
+}
 
 /** PR #51's diff (one file with `path`). */
 export function mockBigPrDiff(path: string | null): DiffResp {

@@ -113,14 +113,20 @@ test('phone Connections can create and edit a profile and use its terminal', asy
   await page.goto('/#/connections');
   await page.getByRole('button', { name: 'New connection', exact: true }).first().click();
   const form = page.getByRole('dialog', { name: 'New connection', exact: true });
+  // With connections listed the primary offers the kinds (Custom CLI… opens
+  // on its fields); an empty list opens step 1 (a URI or a kind) directly.
+  const custom = page.getByRole('menuitem', { name: 'Custom CLI…', exact: true });
+  await expect(custom.or(form)).toBeVisible();
+  if (await custom.isVisible()) await custom.click();
+  else await form.getByRole('button', { name: 'Custom', exact: true }).click();
   await expectFullyInViewport(page, form);
   await form.getByLabel('Name', { exact: true }).fill(name);
-  await form.getByRole('button', { name: 'Custom', exact: true }).click();
   await form.locator('#cf-template').fill('/bin/sh');
   await form.getByRole('button', { name: 'Create connection', exact: true }).click();
   await expect(form).toHaveCount(0);
   const row = page.locator('.conn-row', { hasText: name });
-  await row.getByRole('button', { name: `Actions for ${name}` }).click();
+  // On touch a row's actions live in its long-press menu (InboxRow).
+  await row.locator('.tr-main').click({ button: 'right' });
   await expectFullyInViewport(page, page.getByRole('menu'));
   await page.getByRole('menuitem', { name: 'Edit', exact: true }).click();
   const edit = page.getByRole('dialog', { name: `Edit ${name}`, exact: true });
@@ -129,7 +135,7 @@ test('phone Connections can create and edit a profile and use its terminal', asy
   await edit.getByRole('button', { name: 'Save changes', exact: true }).click();
   await expect(edit).toHaveCount(0);
   const opened = page.waitForResponse(r => r.url().endsWith('/open') && r.request().method() === 'POST' && r.ok());
-  await row.locator('.conn-item').click();
+  await row.locator('.tr-main').click();
   const session = await (await opened).json() as { id: string };
   const terminal = page.locator('.term-pane .term-host');
   await expect(terminal).toBeVisible();
