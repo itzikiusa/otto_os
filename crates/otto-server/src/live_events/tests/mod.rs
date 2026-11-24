@@ -52,6 +52,78 @@ fn classifies_access_writes() {
     assert_eq!(access_change_for(&put_, "/access/connection/x"), None);
 }
 
+#[test]
+fn classifies_connection_library_writes() {
+    let yes = [
+        (Method::POST, "/api/v1/workspaces/w1/connections"),
+        (
+            Method::POST,
+            "/api/v1/workspaces/w1/connections/import/create",
+        ),
+        (Method::PATCH, "/api/v1/connections/c1"),
+        (Method::DELETE, "/api/v1/connections/c1"),
+        (Method::POST, "/api/v1/connections/c1/duplicate"),
+        (Method::PATCH, "/api/v1/connections/c1/pin"),
+        (Method::POST, "/api/v1/workspaces/w1/connection-sections"),
+        (
+            Method::POST,
+            "/api/v1/workspaces/w1/connection-sections/reorder",
+        ),
+        (Method::PATCH, "/api/v1/connection-sections/s1"),
+        (Method::POST, "/api/v1/connection-sections/s1/move"),
+    ];
+    for (m, p) in yes {
+        assert!(connections_change_for(&m, p), "{m} {p}");
+    }
+    let no = [
+        (Method::GET, "/api/v1/workspaces/w1/connections"),
+        (
+            Method::POST,
+            "/api/v1/workspaces/w1/connections/import/scan",
+        ),
+        (Method::POST, "/api/v1/connections/c1/test"),
+        (Method::POST, "/api/v1/connections/c1/open"),
+        (Method::POST, "/api/v1/connections/unsaved/test"),
+        (Method::POST, "/api/v1/connections/c1/db/query"),
+        (Method::POST, "/api/v1/connections/c1/sftp/mkdir"),
+        (Method::PATCH, "/connections/c1"),
+    ];
+    for (m, p) in no {
+        assert!(!connections_change_for(&m, p), "{m} {p}");
+    }
+}
+
+#[tokio::test]
+async fn emits_connections_changed_after_a_successful_library_write() {
+    let (tx, mut rx) = broadcast::channel::<Event>(8);
+    let app = Router::new()
+        .route(
+            "/api/v1/connections/{id}",
+            axum::routing::patch(|| async { StatusCode::OK })
+                .delete(|| async { StatusCode::NOT_FOUND }),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            tx.clone(),
+            notify_access_changes,
+        ));
+    let call = |m: Method| {
+        app.clone().oneshot(
+            Request::builder()
+                .method(m)
+                .uri("/api/v1/connections/c1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+    };
+    call(Method::DELETE).await.unwrap(); // 404 → nothing
+    call(Method::PATCH).await.unwrap();
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        Event::ConnectionsChanged {}
+    ));
+    assert!(rx.try_recv().is_err(), "exactly one event");
+}
+
 #[tokio::test]
 async fn emits_only_after_a_successful_write() {
     let (tx, mut rx) = broadcast::channel::<Event>(8);

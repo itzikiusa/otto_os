@@ -15,7 +15,8 @@
   import { toastError } from '../../lib/toastError';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import { api, importSources, importScan, importCreate } from '../../lib/api/client';
+  import { connectionList } from '../../lib/stores/connectionList.svelte';
+  import { importSources, importScan, importCreate } from '../../lib/api/client';
   import type {
     Connection,
     ConnectionKind,
@@ -117,7 +118,8 @@
     warnings = [];
     scanPath = s.path ?? null;
     try {
-      const [res, saved] = await Promise.all([importScan(wsId, s.source), api.get<Connection[]>(`/workspaces/${wsId}/connections`)]);
+      // A fresh read of the shared list (it may have changed since it loaded).
+      const [res, saved] = await Promise.all([importScan(wsId, s.source), connectionList.refresh().then(() => connectionList.rows)]);
       if (seq !== scanSeq) return;
       existing = saved;
       targets = res.connections.map(c => { const matches = saved.filter(e => e.name === c.name && e.kind === c.kind); return matches.length === 1 ? matches[0].id : ''; });

@@ -22,6 +22,8 @@ import { dbPrefs, type WarmMode } from '../dbPrefs.svelte';
 import { KEEP_ALIVE_MS, WARM_CONCURRENCY, blankTab, isDbKind } from './model';
 import type { ConnPhase, ConnSnapshot, ConnStatus, DbMainTab, SshTab } from './model';
 import type { DatabaseStore } from '../database.svelte';
+import { connectionList } from '../connectionList.svelte';
+import { idleMs } from '../../userIdle';
 
 /**
  * Per-connection open generation — the one stale-response guard every part
@@ -106,6 +108,7 @@ export class DbConnectionsStore {
   private readonly db: ConnectionsHost;
   constructor(db: ConnectionsHost) {
     this.db = db;
+    connectionList.onRefreshed((rows) => this.applyRows(rows)); // an event re-read
   }
 
   /**
@@ -140,35 +143,43 @@ export class DbConnectionsStore {
     if (!wid) return;
     this.db.connectionsLoading = true;
     try {
-      const all = await api.get<Connection[]>(`/workspaces/${wid}/connections`);
+      await connectionList.ensure(); // the ONE shared, event-invalidated list
       if(accessEpoch!==this.db.accessEpoch)return;
-      this.db.connectionsError = null;
-      const next = all.filter((c) => isDbKind(c.kind));
-      this.db.otherConnections = all.filter((c) => !isDbKind(c.kind));
-      this.db.connections = next;
-      // The connection library is GLOBAL (profiles are created workspace-
-      // independent), so the open workbench is global too: a workspace switch
-      // no longer wipes the open tabs/snapshots — open connections stay open
-      // no matter which workspace is active. Every load just prunes tabs /
-      // snapshots / selection whose connection no longer exists (deleted).
-      this.db.openConnIds = this.db.openConnIds.filter((id) => next.some((c) => c.id === id));
-      for (const id of [...this.snapshots.keys()]) {
-        if (!next.some((c) => c.id === id)) this.snapshots.delete(id);
+      if (connectionList.error && connectionList.rows.length === 0) {
+        this.db.connectionsError = connectionList.error;
+        return;
       }
-      if (this.db.selectedConnId && !next.some((c) => c.id === this.db.selectedConnId)) {
-        this.db.selectedConnId = null;
-      }
-      // Start fresh — do NOT auto-open a connection; the user picks one from the
-      // sidebar. Only clear active state when no connections remain.
-      if (this.db.connections.length === 0) {
-        this.db.selectedConnId = null;
-        this.db.capabilities = null;
-        this.db.schemaRoot = [];
-      }
-    } catch (e) {
-      if (accessEpoch === this.db.accessEpoch) this.db.connectionsError = loadErrorText(e);
+      this.applyRows(connectionList.rows);
     } finally {
       this.db.connectionsLoading = false;
+    }
+  }
+
+  /** Take the shared list's rows: DB kinds drive the workbench, the rest are
+   *  terminal profiles; tabs / snapshots of deleted connections are pruned. */
+  applyRows(all: readonly Connection[]): void {
+    this.db.connectionsError = null;
+    const next = all.filter((c) => isDbKind(c.kind));
+    this.db.otherConnections = all.filter((c) => !isDbKind(c.kind));
+    this.db.connections = next;
+    // The connection library is GLOBAL (profiles are created workspace-
+    // independent), so the open workbench is global too: a workspace switch
+    // no longer wipes the open tabs/snapshots — open connections stay open
+    // no matter which workspace is active. Every load just prunes tabs /
+    // snapshots / selection whose connection no longer exists (deleted).
+    this.db.openConnIds = this.db.openConnIds.filter((id) => next.some((c) => c.id === id));
+    for (const id of [...this.snapshots.keys()]) {
+      if (!next.some((c) => c.id === id)) this.snapshots.delete(id);
+    }
+    if (this.db.selectedConnId && !next.some((c) => c.id === this.db.selectedConnId)) {
+      this.db.selectedConnId = null;
+    }
+    // Start fresh — do NOT auto-open a connection; the user picks one from the
+    // sidebar. Only clear active state when no connections remain.
+    if (this.db.connections.length === 0) {
+      this.db.selectedConnId = null;
+      this.db.capabilities = null;
+      this.db.schemaRoot = [];
     }
   }
 
@@ -549,6 +560,9 @@ export class DbConnectionsStore {
    *  A failed ping turns the dot red before the user's next query. */
   async keepAliveTick(): Promise<void> {
     if (!this.keepAlive || this.db.openConnIds.length === 0) return;
+    // Nobody here for half an hour: stop pinging (it ran every 4 min all
+    // night). The next query re-dials; the tab shows the last known state.
+    if (idleMs() > 30 * 60_000) return;
     const ids = this.db.openConnIds.filter((id) => this.db.connStatus.get(id)?.phase === 'ready');
     await mapLimit(ids, 2, async (id) => {
       const epoch = this.db.epochs.of(id);
@@ -706,13 +720,16 @@ export class DbConnectionsStore {
   /** Set a connection's liveness, reassigning the Map for Svelte-5 reactivity. */
   setConnStatus(id: Id, status: ConnStatus): void {
     this.db.connStatus = new Map(this.db.connStatus).set(id, status);
+    connectionList.recordStatus(id, status);
   }
 
   /** Merge a patch into a connection's liveness, preserving fields not set (so a
    *  refresh keeps the health chip's server version while it re-probes latency). */
   mergeConnStatus(id: Id, patch: Partial<ConnStatus>): void {
     const prev = this.db.connStatus.get(id) ?? { phase: 'connecting' as ConnPhase };
-    this.db.connStatus = new Map(this.db.connStatus).set(id, { ...prev, ...patch });
+    const next = { ...prev, ...patch };
+    this.db.connStatus = new Map(this.db.connStatus).set(id, next);
+    connectionList.recordStatus(id, next);
   }
 
   /**
