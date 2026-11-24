@@ -166,7 +166,7 @@ test('policy activation binds preview to exact rules, shows child impact and sav
   // Row actions live in the row's ⋯ menu (same as right-click).
   await page.locator('.conn-row', { hasText: fixtureName }).first().hover();
   await page.getByRole('button', { name: `Actions for ${fixtureName}`, exact: true }).click();
-  await page.getByRole('menuitem', { name: 'Access', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Access…', exact: true }).click(); // opens a dialog, hence the ellipsis
   const editor = page.getByRole('region', { name: 'Resource access' });
   await editor.getByLabel('Access mode').selectOption('enforced');
   await editor.getByRole('button', { name: 'Add rule', exact: true }).click();
