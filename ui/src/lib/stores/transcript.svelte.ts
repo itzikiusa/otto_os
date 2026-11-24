@@ -287,7 +287,7 @@ export class Conversation {
 
   /** Apply a `transcript_appended` delta. A turn whose id we already hold is
    *  REPLACED (the agent's response grew); new ids are appended. Frames the
-   *  server could not fit in 64 KB (empty `turns` with a moved cursor), or a
+   *  server could not fit in 512 KB (empty `turns` with a moved cursor), or a
    *  cursor that went backwards (file replaced), trigger a tail re-fetch. */
   applyDelta(cursor: string, turns: Turn[]): void {
     if (this.transcript == null || this.transcript.unavailable_reason) {
