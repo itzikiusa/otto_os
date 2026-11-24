@@ -51,7 +51,7 @@
     /** sync: false while the card beside it already offers Push (its primary). */
     push?: boolean;
     /** Header: rendered between the state words and the verbs (the view switch). */
-    children?: import('svelte').Snippet<[compact: boolean]>;
+    children?: import('svelte').Snippet<[views: 'words' | 'icons' | 'menu']>;
   }
   let { repoId, status, onstatus, onrefresh, variant = 'row', accent = false, tabsMin = 0.5, push = true, onbrowsestashes, children }: Props = $props();
 
@@ -317,11 +317,12 @@
 
   // ── Header fit: once the repo tabs are at their floor, the row gives way in
   // this order before anything is clipped: the state words (they repeat the
-  // ↑/↓ counts) and "Auto-fetch paused" (⋯ has the toggle), then each verb's
-  // label (the icon stays, the word is its name and title), then the view
-  // switch turns to icons. Measured against the header's actions wrap on
+  // ↑/↓ counts) and "Auto-fetch paused" (⋯ has the toggle), then the view
+  // switch turns to icons, then each verb's label (the icon stays, the word
+  // is its name and title), then the views become one menu button.
+  // Measured against the header's actions wrap on
   // every resize and whenever a label or count changes.
-  const SQUEEZE = ['state', 'stash', 'pop', 'fetch', 'pull', 'push', 'views'];
+  const SQUEEZE = ['state', 'views', 'stash', 'pop', 'fetch', 'pull', 'push', 'viewmenu'];
   let squeeze = $state(0);
   const iconOnly = (v: string): boolean => SQUEEZE.indexOf(v) !== -1 && SQUEEZE.indexOf(v) < squeeze;
   let fetchEl = $state<HTMLButtonElement>();
@@ -332,8 +333,16 @@
     // What the repo tabs can still give up (PageHeader shrinks them to their
     // floor before anything scrolls).
     const tabs = row.querySelector<HTMLElement>(':scope > .ph-tabs-inline');
-    const give = tabs ? Math.max(0, tabs.offsetWidth - row.clientWidth * tabsMin) : 0;
-    const fits = (): boolean => wrap.scrollWidth - wrap.clientWidth <= give + 1;
+    // …and never below the room the repo strip says it needs (GitTabs'
+    // data-floor): below it give goes negative and the verbs give way.
+    // The state words (level 0) also yield to whole tabs with their branches (data-want).
+    const strip = tabs?.querySelector<HTMLElement>('[data-floor]');
+    const floor = Number(strip?.dataset.floor ?? 0);
+    const want = Math.max(floor, Number(strip?.dataset.want ?? 0));
+    const give = (): number => (tabs ? tabs.offsetWidth - Math.max(row.clientWidth * tabsMin, squeeze === 0 ? want : floor) : 0);
+    // Room to spare is the actions' auto start margin (scrollWidth never reads below clientWidth).
+    const actions = wrap.querySelector<HTMLElement>(':scope > .ph-actions');
+    const fits = (): boolean => wrap.scrollWidth - wrap.clientWidth - (actions ? parseFloat(getComputedStyle(actions).marginInlineStart) || 0 : 0) <= give() + 4;
     const set = (n: number): void => {
       squeeze = n;
       flushSync();
@@ -495,7 +504,7 @@
     <button class="btn small ghost git-autofetch-paused" class:squeezed={iconOnly('state')} data-keep data-testid="git-autofetch-paused" onclick={() => git.setAutoFetch(true)}
       title="Auto-fetch is paused — a repo is still fetched once when you open it. Click to resume.">Auto-fetch paused</button>
   {/if}
-  {@render children?.(iconOnly('views'))}
+  {@render children?.(iconOnly('viewmenu') ? 'menu' : iconOnly('views') ? 'icons' : 'words')}
   {#if showVerbs}{@render verbs()}{/if}
 {:else}
   <div class="verbs" class:phone-row={variant === 'row'} class:sync={variant === 'sync'} role="group" aria-label="Git" data-testid={variant === 'row' ? 'git-verbs-row' : 'git-verbs-sync'}>
@@ -541,6 +550,13 @@
   :global(.ph-actions) .tbtn {
     padding-inline: 8px;
     gap: 4px;
+  }
+  /* The last fit step (the views one menu button): the verbs pack tighter. */
+  :global(.ph-actions:has(.git-views-menu)) .tbtn.icon-only {
+    padding-inline: 4px;
+  }
+  :global(.ph-actions:has(.git-views-menu)) .tbtn.caret {
+    padding-inline: 2px;
   }
   .tbtn:hover:not(:disabled) {
     color: var(--text);

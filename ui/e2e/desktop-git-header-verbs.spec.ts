@@ -91,7 +91,7 @@ test('Pull keeps its modes on the caret; Pop lists the stashes', async ({ page }
   await page.keyboard.press('Escape');
 });
 
-test('narrow window: labels turn into icons (Stash, Pop, Fetch first), nothing moves into ⋯', async ({ page }) => {
+test('narrow window: the views, then labels turn into icons (Stash, Pop, Fetch first), nothing moves into ⋯', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   for (const s of VERB_STATES) await open(page, s);
   await open(page, 'behind');
@@ -100,7 +100,7 @@ test('narrow window: labels turn into icons (Stash, Pop, Fetch first), nothing m
     // Where the row can hold the verbs as icons it settles with nothing
     // scrolled off (labels give way first); narrower, the header scrolls.
     if (w >= 1280) await expect.poll(() => page.locator('.git-header .ph-actions-wrap').evaluate((el) => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1);
-    else await expect(verb(page, 'Fetch')).toHaveClass(/icon-only/);
+    else await expect(header(page).locator('.git-views.compact, .git-views-menu').first()).toBeVisible(); // the views give way before the verbs' labels (R2-001)
     for (const v of VERBS) await expect(verb(page, v), `${w}: ${v} visible`).toBeVisible();
     await expect(header(page).locator('[data-ph-hidden]')).toHaveCount(0);
     const labelled = await Promise.all(VERBS.map(async (v) => !/icon-only/.test((await verb(page, v).getAttribute('class')) ?? '')));

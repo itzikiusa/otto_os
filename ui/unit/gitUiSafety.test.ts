@@ -290,6 +290,7 @@ test('a commit draft landing after unmount opens no confirm and writes nothing',
   let asked = 0;
   const s = componentFunctions(git('WipPanel.svelte'), ['followDraft', 'applyDraft'], {
     alive: true,
+    liveDraftText: () => '',
     repoId: 'r1',
     subject: 'typed',
     body: '',

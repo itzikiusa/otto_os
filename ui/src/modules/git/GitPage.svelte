@@ -37,7 +37,8 @@
   let repoView = $state<{ moreMenuItems: () => MenuItem[]; selectTab: (id: string) => void; viewState: () => { tab: string; resolving: boolean; changes: number; conflicts: number; conflictFiles: number } } | undefined>();
   let toolbar = $state<{ menuItems: () => MenuItem[] } | undefined>();
   // The ONE view switch, in the header (RepoView owns the views).
-  // Icons when the header is too tight for the words (GitToolbar's last fit step).
+  // Icons when the header is too tight for the words, then one menu button
+  // (GitToolbar's last fit steps).
   const VIEWS = [
     { id: 'changes', label: 'Changes', icon: 'edit' },
     { id: 'graph', label: 'History', icon: 'clock' },
@@ -186,9 +187,17 @@
 
 </script>
 
-{#snippet viewSwitch(name: string, compact = false)}
+{#snippet viewSwitch(name: string, mode: 'words' | 'icons' | 'menu' = 'words')}
   {#if repoView}
     {@const v = repoView.viewState()}
+    {@const compact = mode !== 'words'}
+    {#if mode === 'menu' && !v.resolving}
+      {@const cur = VIEWS.find((t) => t.id === v.tab) ?? VIEWS[0]}
+      <button class="btn small ghost git-views-menu" aria-haspopup="menu" aria-label="{name} view: {cur.label}" title="View: {cur.label}" data-keep
+        onclick={(e) => ctxMenu.show(e, VIEWS.map((t) => ({ label: t.id === 'changes' && v.changes > 0 ? `${t.label} · ${v.changes}` : t.label, icon: t.icon, checked: t.id === v.tab, action: () => repoView?.selectTab(t.id) })))}>
+        <Icon name={cur.icon} size={12} /><Icon name="chevronDown" size={12} />
+      </button>
+    {:else}
     <div class="rv-tabs segmented git-views" class:compact role="tablist" aria-label="{name} views" data-keep>
       {#each VIEWS as t (t.id)}
         {@const on = v.tab === t.id && !v.resolving}
@@ -201,6 +210,7 @@
         <button class="rv-tab active git-views-conflict" role="tab" aria-selected="true" tabindex="0" onkeydown={onTabKey}>Resolve conflicts{#if v.conflictFiles > 0}&nbsp;· {v.conflictFiles}{/if}</button>
       {/if}
     </div>
+    {/if}
   {/if}
 {/snippet}
 
@@ -227,7 +237,7 @@
       {/snippet}
       {#snippet tabs()}
         {#if !viewport.isPhone}
-          <GitTabs embedded focus={focusView} ontogglefocus={() => setFocus(!focusView)} onopen={openRepo} onadd={(mode) => { addMode = mode; addOpen = true; }} />
+          <GitTabs embedded focus={focusView} ontogglefocus={() => setFocus(!focusView)} onswitch={phoneRepoMenu} onopen={openRepo} onadd={(mode) => { addMode = mode; addOpen = true; }} />
         {:else if activeRepo && !focusView && repoView}
           {@render viewSwitch(activeRepo.name)}
         {/if}
@@ -250,8 +260,8 @@
               onrefresh={() => gitBridge.refreshGraph(repoId)}
               onbrowsestashes={() => (stashesRepo = repoId)}
             >
-              {#snippet children(compact: boolean)}
-                {#if repoView && !viewport.isPhone}{@render viewSwitch(activeRepo.name, compact)}{/if}
+              {#snippet children(views: 'words' | 'icons' | 'menu')}
+                {#if repoView && !viewport.isPhone}{@render viewSwitch(activeRepo.name, views)}{/if}
               {/snippet}
             </GitToolbar>
           {/if}
@@ -380,6 +390,13 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-align: center;
+  }
+  .git-views-menu {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    flex: none;
+    padding-inline: 4px;
   }
   .git-views > .git-views-conflict {
     color: var(--warning);

@@ -53,7 +53,8 @@ test.beforeEach(async ({ page }) => {
 });
 async function openRepo(page: Page, tab = 'graph') {
   await page.goto(`/#/git/${repoId}/${tab}`);
-  await expect(page.locator('.rv-tabs')).toBeVisible();
+  // A tight header turns the views into one menu button (R2-001).
+  await expect(page.locator('.rv-tabs, .git-views-menu').first()).toBeVisible();
 }
 function diff(path: string) {
   return { files: [{ path, old_path: null, is_binary: false, hunks: [{ header: '@@ -0,0 +1 @@', lines: [{ origin: 'add', content: path, old_line: null, new_line: 1 }] }] }] };

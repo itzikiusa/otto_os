@@ -7,7 +7,7 @@
   // trailing + button opens a picker of repos not already open. Styled like
   // ApiPage's `.req-tabs`. Workspace-independent — driven entirely by the git
   // store's open-tabs state, which persists across restarts.
-  import { tick, untrack } from 'svelte';
+  import { flushSync, tick, untrack } from 'svelte';
   import type { Repo } from '../../lib/api/types';
   import { git } from '../../lib/stores/git.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
@@ -27,8 +27,15 @@
     focus?: boolean;
     /** Toggle Focus. Without it the Focus entry isn't rendered. */
     ontogglefocus?: () => void;
+    /** The repo switcher's menu (the phone's): shown when the strip is too
+     *  tight for the tabs. */
+    onswitch?: (e: MouseEvent) => void;
   }
-  let { onopen, onadd, embedded = false, focus = false, ontogglefocus }: Props = $props();
+  let { onopen, onadd, embedded = false, focus = false, ontogglefocus, onswitch }: Props = $props();
+  /** Too tight for the tabs: one "<active repo> ▾" switcher and Focus as its icon. */
+  let compact = $state(false);
+  let stripEl = $state<HTMLDivElement | null>(null);
+
   const selectedId = $derived(focus ? null : git.activeRepoId);
 
   const byId = $derived(new Map(git.allRepos.map((r) => [r.id, r])));
@@ -36,6 +43,7 @@
     git.openRepoIds.map((id) => byId.get(id)).filter((r): r is Repo => r != null),
   );
   const closedRepos = $derived(git.allRepos.filter((r) => !git.openRepoIds.includes(r.id)));
+  const activeName = $derived(byId.get(git.activeRepoId ?? '')?.name ?? openRepos[0]?.name ?? 'Repositories');
 
   // ── Per-repo status (branch + dirty dot) ─────────────────────────────────
   // Status is owned by the git store (shared with RepoView + the auto-fetch
@@ -174,9 +182,19 @@
   // Re-measured when the strip or its header resizes, and when the tabs,
   // their branches or the active tab change.
   const GAP = 2;
+  /** What the header's title, labelled verbs, view icons and ⋯ need: the tabs
+   *  show only beside them, else the strip turns compact. */
+  const TOOLBAR_W = 660;
   function fitBranches(): void {
     const el = listEl;
     if (!el) return;
+    // Measured on the full strip (the tabs shown), then compact if the tabs'
+    // names can't fit beside the labelled verbs — decided from the row,
+    // not from what the verbs take now, so the two never trade back and forth.
+    if (compact && onswitch) {
+      compact = false;
+      flushSync();
+    }
     // Natural widths (tabs shrink to fit otherwise): branches and tabs at full size.
     el.setAttribute('data-branches', 'measure');
     const tabs = Array.from(el.querySelectorAll<HTMLElement>('.git-tab'));
@@ -187,6 +205,23 @@
     const overflowing = el.scrollWidth > el.clientWidth + 0.5;
     const active = tabs.findIndex((t) => t.classList.contains('active'));
     el.setAttribute('data-branches', overflowing ? branchMode(measures, el.clientWidth + GAP, active) : 'all');
+    const row = stripEl?.closest('.ph-tabs-inline')?.parentElement;
+    if (!stripEl || !row || !onswitch) return;
+    // Focus · the active tab by name, the others down to ~120 px · + (and the
+    // focus-ring room around them).
+    const fullW = stripEl.scrollWidth - el.clientWidth + measures.reduce((s, m, i) => s + (i === active ? m.full - m.branch : Math.min(m.full - m.branch, 120)), 0) + 8;
+    const name = el.querySelector<HTMLElement>('.git-tab.active .git-tab-name');
+    const tight = fullW > row.clientWidth - TOOLBAR_W;
+    // The room the strip needs (the compact one: Focus icon, switcher chrome
+    // and + ≈ 96 px, plus up to 96 px of the name): GitToolbar's verbs give
+    // way before the tabs go below it.
+    stripEl.dataset.floor = String(Math.round(tight ? 96 + Math.min(name?.scrollWidth ?? 96, 96) : fullW));
+    // …and, before the repo's state words may stay, every tab whole with its branch.
+    stripEl.dataset.want = String(Math.round(tight ? 0 : fullW + measures.reduce((s, m, i) => s + (i === active ? m.branch : m.full - Math.min(m.full - m.branch, 120)), 0)));
+    if (tight) {
+      compact = true;
+      flushSync();
+    }
   }
   let fitFrame = 0;
   function scheduleFit(): void {
@@ -239,7 +274,7 @@
   });
 </script>
 
-<div class="git-tabs" class:embedded>
+<div class="git-tabs" class:embedded class:compact bind:this={stripEl}>
   {#if ontogglefocus && git.allRepos.length > 0}
     <!-- Focus is cross-repo (my PRs + my Jira work), so it is its own entry
          pinned before the repo tabs, never one of a repo's sub-tabs. -->
@@ -250,9 +285,14 @@
       title={focus ? 'Back to the open repository' : 'Focus: your pull requests and Jira work across repositories'}
       onclick={ontogglefocus}
     >
-      <Icon name="zap" size={13} />Focus
+      <Icon name="zap" size={13} /><span class:sr-only={compact}>Focus</span>
     </button>
     <span class="git-focus-sep" aria-hidden="true"></span>
+  {/if}
+  {#if compact}
+    <button type="button" class="git-repo-switch" class:on={!focus} aria-haspopup="menu" title="Switch repository" data-testid="git-repo-switch" onclick={onswitch}>
+      <span class="git-repo-switch-name">{activeName}</span><Icon name="chevronDown" size={12} />
+    </button>
   {/if}
   <!-- The tablist must contain ONLY role="tab" children (ARIA
        aria-required-children), and it is the only part that scrolls: the
@@ -356,9 +396,10 @@
     gap: 6px;
     /* Natural widths on desktop (a fixed cap truncated identities even when
        the header had hundreds of unused pixels); a row too narrow shrinks
-       them with an ellipsis instead of scrolling one cut at the edge. */
+       the others with an ellipsis down to MIN_TAB, never the active one —
+       below that the strip turns compact (fitBranches). */
     flex-shrink: 1;
-    min-width: 0;
+    min-width: 64px;
     max-width: none;
     padding: 6px 8px;
     padding-inline-start: 10px;
@@ -395,9 +436,49 @@
     border-radius: var(--radius-s);
   }
   .git-tab.active {
+    flex-shrink: 0;
     background: var(--surface-2);
     border-color: var(--border);
     color: var(--text);
+  }
+  /* Compact: the tabs give way to the switcher (kept in the DOM, measured). */
+  .compact .git-tablist,
+  .compact .git-focus-sep {
+    display: none;
+  }
+  .compact .git-focus {
+    padding-inline: 6px;
+  }
+  .git-repo-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    max-width: 18em;
+    padding-block: 4px;
+    padding-inline: 6px 4px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: var(--fs-s);
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .git-repo-switch.on {
+    background: var(--surface-2);
+    border-color: var(--border);
+  }
+  .git-repo-switch:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: -2px;
+  }
+  .git-repo-switch-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   /* Drop target while reordering — faint left beacon (matches TabBar). */
   .git-tab.drag-over {
