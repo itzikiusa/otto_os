@@ -602,21 +602,22 @@ branch/commit context menu, which pre-fills the source branch).
      You review and edit before creating. (If the branch has no changes vs the
      target, drafting returns an error.)
 
-   The turn runs as a **real Otto session** titled `PR draft · <branch>`, so it
-   appears in Agents the moment it spawns: open it in another window to watch it
-   work — or talk to it — while the dialog stays put. The dialog itself shows an
-   elapsed-seconds counter so a slow turn never looks the same as a wedged one.
-
-   It is deliberately a **lean** turn, which is what keeps it quick:
+   The turn runs **headless** (`claude -p`, stream-json) — no terminal UI,
+   so no start-up screen (an MCP-server approval dialog, a login notice) can
+   swallow the prompt — and it is deliberately **lean**, which keeps it to
+   seconds:
    - the model comes from the `pr_draft_model` setting (**Settings ▸ Providers ▸
      PR & commit draft model**), defaulting to `haiku` — drafting is a short,
      mechanical job that blocks a dialog, so it does NOT inherit your default
      agent model. Inheriting a reasoning model is what used to make drafting
      take minutes;
-   - `lean_turn` passes `--strict-mcp-config` (no MCP servers) and denies
-     `Bash`/`Edit`/`Write`/web tools. The diff and the `pull-request` skill are
-     already in the prompt, so servers and tool round trips are pure latency.
-     `Read`/`Grep`/`Glob` stay allowed as an escape hatch for a truncated diff.
+   - no MCP servers, tools, hooks, plugins or settings (`--strict-mcp-config
+     --tools= --setting-sources=`), run in the temp dir with no session file:
+     the diff and the `pull-request` skill are already in the prompt, and
+     nothing is read from or written into the repository;
+   - a 30 s limit: a CLI that has not answered by then fails with a clear error.
+
+   The commit card's **Draft from the diff** runs the same way.
 3. **Create.** On **Create Pull Request**, Otto:
    - **pushes the source branch first** (`POST /repos/{id}/push`,
      `--set-upstream` for a fresh branch) so the provider can see it. A real push

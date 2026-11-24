@@ -1106,10 +1106,8 @@ pub struct DraftPrResp {
     pub description: String,
     pub source_branch: String,
     pub target_branch: String,
-    /// The Otto session that did the drafting. Drafting runs as a REAL session
-    /// (visible in Agents from the moment it spawns, so it can be opened in a
-    /// pane and watched while the modal spins), and this is how the caller links
-    /// to it afterwards. `None` only for callers that draft without a session.
+    /// Always `None` since 0.5.1: drafts run headless (`claude -p`), not as
+    /// a session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<Id>,
 }
@@ -1126,8 +1124,8 @@ pub struct DraftCommitMessageResp {
     /// Whether the message was drafted from the staged diff (`true`) or fell
     /// back to the full working diff because nothing was staged (`false`).
     pub from_staged: bool,
-    /// The Otto session that drafted this (a visible `commit-draft` lean turn
-    /// on the drafting model — same path as `DraftPrResp.session_id`).
+    /// Always `None` since 0.5.1: drafts run headless (`claude -p`), not as
+    /// a session.
     #[serde(default)]
     pub session_id: Option<Id>,
 }
