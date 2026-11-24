@@ -1169,7 +1169,7 @@ async fn delete_remote_branch_prunes_local_tracking_ref() {
 /// their own error, in order, and stay.
 #[tokio::test]
 async fn delete_branches_deletes_all_in_one_call_with_per_branch_errors() {
-    let (_tmp, dir) = fixture();
+    let (tmp, dir) = fixture();
     sh_git(&dir, &["add", "-A"]);
     sh_git(&dir, &["commit", "-m", "tidy"]);
     for b in ["a", "b", "c"] {
@@ -1178,9 +1178,30 @@ async fn delete_branches_deletes_all_in_one_call_with_per_branch_errors() {
     sh_git(&dir, &["checkout", "-b", "wip"]);
     sh_git(&dir, &["commit", "--allow-empty", "-m", "unmerged"]);
     sh_git(&dir, &["checkout", "main"]);
-    let git = LocalGit::new(&dir);
+    // Every `git branch` it runs, logged: one batch, then the refused alone.
+    let log = tmp.path().join("branch-calls");
+    let sh = shim(
+        tmp.path(),
+        "branch-log",
+        &format!(
+            "if [ \"$1\" = branch ]; then echo \"$*\" >> '{}'; fi\nexec git \"$@\"",
+            log.display()
+        ),
+    );
+    let git = LocalGit::new(&dir).with_git_bin(sh);
     let names = ["a", "wip", "b", "nope", "c"].map(String::from);
     let res = git.delete_branches(&names, false).await;
+    assert_eq!(
+        std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        [
+            "branch -d --end-of-options a wip b nope c",
+            "branch -d --end-of-options wip",
+            "branch -d --end-of-options nope",
+        ]
+    );
     assert!(
         res[0].is_ok() && res[2].is_ok() && res[4].is_ok(),
         "{res:?}"

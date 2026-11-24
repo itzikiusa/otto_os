@@ -12,7 +12,9 @@ use otto_core::domain::WorkspaceRole;
 use otto_core::{Error, Id};
 use serde::{Deserialize, Serialize};
 
-use super::{optional_token, remote_shares_origin_host, repo_ctx, repo_lock, ApiResult, GitCtx};
+use super::{
+    optional_token, remote_lock, remote_shares_origin_host, repo_ctx, repo_lock, ApiResult, GitCtx,
+};
 use crate::gitops::err_text;
 use crate::transport::TransportCredential;
 use crate::worktree_ready::{run_setup, Prepared, SETUP_KEY};
@@ -327,6 +329,10 @@ pub(super) async fn repo_branches_delete<S: GitCtx>(
             }
         }
     }
+    // The network leg: off the repo lock, under the remote one (as push).
+    drop(g);
+    let rlock = remote_lock(&id);
+    let _rg = rlock.lock().await;
     // One push per remote for all its branches; if that push fails (one ref
     // already gone, a protected branch…) each is retried on its own, so the
     // per-item results stay exact. A local that wasn't deleted keeps its
@@ -388,7 +394,6 @@ pub(super) async fn repo_branches_delete<S: GitCtx>(
             }
         }
     }
-    drop(g);
     Ok(Json(BranchDeleteResp {
         results,
         status: git.status().await?,
