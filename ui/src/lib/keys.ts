@@ -633,6 +633,24 @@ export const KEYMAP: ShortcutGroup[] = [
     ],
   },
   {
+    category: 'Threads',
+    bindings: [
+      { keys: '⌘T', label: 'New thread (instead of a terminal session)' },
+      { keys: '⌥⌘↓ / ⌥⌘↑', label: 'Next / previous thread in the list' },
+      { keys: '⌥⌘N', label: 'Open the next thread that needs you' },
+      { keys: '⌘K', label: 'Threads first: ↵ opens one, ⌘↵ opens it beside the current one' },
+      { keys: 'F2', label: 'Rename the thread (or double-click its title)' },
+      { keys: '⌘Z', label: 'Undo the last pin, Move to History or side-chat dismiss (outside a text field)' },
+      { keys: '↵ / ⌘↵', label: 'Send; while the agent works, the default delivery (Queue or Steer) / the other one' },
+      { keys: 'Esc / ⌘.', label: 'Stop the agent (Esc twice when the composer has text)' },
+      { keys: '⌘↵ / ⌘⌫', label: 'With an approval waiting and the composer empty: Allow once / Deny' },
+      { keys: '⇧⇥', label: 'Turn Plan mode on or off' },
+      { keys: '↑ / ↓', label: 'In an empty composer: earlier / later prompts you sent in this thread' },
+      { keys: '⌥↑ / ⌥↓', label: 'In a long thread: previous / next message of yours (not while typing)' },
+      { keys: '⌘F', label: 'Find in the thread, older loaded messages included' },
+    ],
+  },
+  {
     category: 'Page shortcuts',
     bindings: [
       { keys: '⌘S', label: 'Save what you are editing: a Vault note, a skill, a Design Hall artifact, a brand kit, an API request or a database query' },
@@ -644,7 +662,6 @@ export const KEYMAP: ShortcutGroup[] = [
       { keys: '⌘R', label: 'In a live browser tab: reload the page instead of Otto' },
       { keys: '⌘↵', label: 'On the API page: send the request' },
       { keys: '⌘T', label: 'On the API page: new request tab instead of a new session' },
-      { keys: '⌘T', label: 'On the Threads page: start a new thread instead of a terminal session' },
       { keys: '⌘D', label: 'On the API page: duplicate the request instead of splitting' },
       { keys: '⌘⌥← / ⌘⌥→', label: 'In a Database pane: previous / next query tab instead of moving the pane' },
       { keys: '?', label: 'In a Kubernetes cluster view: that view\'s own key hints instead of this sheet' },
