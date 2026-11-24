@@ -292,6 +292,9 @@ Rules:
   user will spend minutes in it, it should be a page, a pane or a window.
 - The title names the task ("New scheduled task"), and the primary button
   names the action ("Create task").
+- **Phone decisions** (one Approve / Deny, made with a thumb): `bottom` docks
+  the sheet to the bottom edge on a phone, full width, with 44 px actions. Back
+  closes it like any Modal.
 - **Drawers:** use `shell/Drawer.svelte` (off-canvas slide-over: focus trap via
   `dialogFocus`, Esc, backdrop, `ui.pushModal()`, a 24 px ✕; `title` adds a
   header row, `head` a richer one, `onclose` reports a self-dismiss). Don't

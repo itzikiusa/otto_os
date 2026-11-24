@@ -19,8 +19,11 @@
     footer?: Snippet;
     /** false blocks Esc / backdrop / ✕ close while the form is busy. */
     dismissable?: boolean;
+    /** On a phone the sheet rises from the bottom edge, full width, with
+     *  44 px actions — for one decision made with a thumb (an approval). */
+    bottom?: boolean;
   }
-  let { title, width = 460, height, onclose, children, footer, dismissable = true }: Props = $props();
+  let { title, width = 460, height, onclose, children, footer, dismissable = true, bottom = false }: Props = $props();
   const titleId = $props.id();
 
   // A drag that starts inside the sheet (selecting text) and ends on the
@@ -165,6 +168,7 @@
 
 <div
   class="backdrop"
+  class:bottom
   role="presentation"
   onpointerdown={(e) => {
     downOnBackdrop = e.target === e.currentTarget;
@@ -321,6 +325,24 @@
       align-items: center;
       border-block-start: 0;
       border-inline-start: 1px solid var(--separator);
+    }
+  }
+  /* `bottom`: a phone sheet docked to the bottom edge, full width. */
+  @media (max-width: 640px) {
+    .backdrop.bottom {
+      place-items: end stretch;
+      padding: 0;
+    }
+    .backdrop.bottom .sheet {
+      min-inline-size: 100%;
+      max-inline-size: none;
+      max-block-size: 85%;
+      border-end-start-radius: 0;
+      border-end-end-radius: 0;
+      padding-block-end: var(--safe-bottom);
+    }
+    .backdrop.bottom .sheet :global(.btn) {
+      min-block-size: 44px;
     }
   }
   /* Touch: a dialog's actions are its primary controls, so they get a finger-sized
