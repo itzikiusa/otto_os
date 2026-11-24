@@ -53,6 +53,7 @@ test.beforeEach(async ({ page }, info) => {
   await page.addInitScript((id) => {
     localStorage.setItem('otto_workspace', id as string);
     localStorage.removeItem('otto_close_tab_pref');
+    localStorage.setItem('otto_agents_fold_nav', '1'); // the real Agents width: navigator on its rail
   }, wsId);
   await page.goto('/#/agents');
   await expect(page.getByText('Kaka').first()).toBeVisible({ timeout: 20_000 });

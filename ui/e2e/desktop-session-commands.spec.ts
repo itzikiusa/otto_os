@@ -66,7 +66,10 @@ test.beforeEach(async ({ page }, info) => {
   ctx = c.ctx;
   base = c.base;
   await freshWorkspaceWithShells();
-  await page.addInitScript((id) => localStorage.setItem('otto_workspace', id as string), wsId);
+  await page.addInitScript((id) => {
+    localStorage.setItem('otto_workspace', id as string);
+    localStorage.setItem('otto_agents_fold_nav', '1'); // the real Agents width: navigator on its rail
+  }, wsId);
   await page.goto('/#/agents');
   // Wait until the seeded sessions are loaded into the store (names visible).
   await expect(page.getByText('Zlatan').first()).toBeVisible({ timeout: 20_000 });
