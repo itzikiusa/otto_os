@@ -416,11 +416,9 @@
             <Skeleton rows={3} height={56} label="sessions" />
           {:else if query.trim() || ws.needsYouFilter}
             <p class="ai-empty">No sessions match</p>
-          {:else}
-            <div class="ai-empty">
-              <p>No sessions yet</p>
-              <button type="button" class="btn small ghost" onclick={() => (ui.newSessionOpen = true)}>New session</button>
-            </div>
+          {:else if viewport.isPhone}
+            <!-- The desktop canvas says it (with its New session); the foot has the button. -->
+            <p class="ai-empty">No sessions yet</p>
           {/if}
         {/each}
       </div>
@@ -458,9 +456,10 @@
   </div>
 
   <footer class="ai-foot">
-    <button type="button" class="btn small ghost ai-new" data-testid="agents-inbox-new" aria-keyshortcuts="Meta+T" title="New session (⌘T)" onclick={() => (ui.newSessionOpen = true)}>
+    <!-- On an empty desktop the canvas carries New session (once). -->
+    {#if viewport.isPhone || inbox.length > 0 || query.trim() || ws.needsYouFilter}<button type="button" class="btn small ghost ai-new" data-testid="agents-inbox-new" aria-keyshortcuts="Meta+T" title="New session (⌘T)" onclick={() => (ui.newSessionOpen = true)}>
       <Icon name="plus" size={14} /> New session
-    </button>
+    </button>{/if}
     {#if meterReady}
       <LazyMount lazy={UsageMeter} what="usage" variant="compact" quiet props={{ provider: ws.getSession(ws.activeSessionId)?.provider ?? null, onopen: () => router.go('usage') }} />
     {/if}
@@ -587,9 +586,6 @@
     flex-direction: column;
     align-items: center;
     gap: 6px;
-  }
-  .ai-empty p {
-    margin: 0;
   }
   .ai-more {
     margin: 6px 8px;
