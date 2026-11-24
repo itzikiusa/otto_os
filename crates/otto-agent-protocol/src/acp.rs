@@ -3987,19 +3987,23 @@ mod tests {
         );
         let c = r#"{"jsonrpc":"2.0","id":"c1","method":"terminal/create","params":{"sessionId":"g","command":"make deploy","cwd":"/etc","env":[{"name":"AWS_PROFILE","value":"prod"}]}}"#;
         let p = prompt_of(&d.on_line(c));
-        assert_eq!(p, "make deploy\nin /etc\nenv: AWS_PROFILE");
+        assert_eq!(p, "make deploy\nin /etc\nenv: AWS_PROFILE=prod");
     }
 
-    /// Review R1-003: the prompt shows env names only, so a key that runs
-    /// code or overrides Otto's own env is dropped — named in the prompt as
-    /// ignored — and the command still runs with the rest; Otto's value wins.
+    /// Review R1-003: the prompt shows each applied key with its value (a
+    /// secret-named one "(hidden)"); a key that is not a plain name, runs
+    /// other code, is Otto's own (any case) or has a value the prompt cannot
+    /// show in full is dropped and named; the command runs with the rest.
     #[test]
     fn a_command_env_that_runs_code_or_overrides_otto_is_dropped() {
         let mut d = AcpDriver::grok();
         d.start(&ctx(None));
         d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
         d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"g"}}"#);
-        d.state.child_env = vec![("OWN_KEY".into(), "otto".into())];
+        d.state.child_env = vec![
+            ("OWN_KEY".into(), "otto".into()),
+            ("PATH".into(), "/otto/bin".into()),
+        ];
         let env = json!([
             {"name":"BASH_ENV","value":"/tmp/pwn.sh"},
             {"name":"DYLD_INSERT_LIBRARIES","value":"/tmp/pwn.dylib"},
@@ -4007,9 +4011,17 @@ mod tests {
             {"name":"PATH","value":"/tmp/bin"},
             {"name":"OTTO_TOKEN","value":"x"},
             {"name":"OWN_KEY","value":"agent"},
+            {"name":"SHELLOPTS","value":"xtrace"},
+            {"name":"PS4","value":"$(touch /tmp/pwn)"},
+            {"name":"BASH_FUNC_ls%%","value":"() { touch /tmp/pwn; }"},
+            {"name":"X\nenv: FAKE","value":"1"},
+            {"name":"path","value":"/tmp/bin"},
+            {"name":"own_key","value":"agent"},
+            {"name":"BIG","value":"x".repeat(513)},
             {"name":"TERM","value":"xterm-256color"},
             {"name":"LC_ALL","value":"C"},
-            {"name":"APP_MODE","value":"test"}
+            {"name":"PAGER","value":"cat"},
+            {"name":"MY_API_TOKEN","value":"s3cret"}
         ]);
         let c = json!({"jsonrpc":"2.0","id":"c1","method":"terminal/create","params":{"sessionId":"g","command":"npm test","env":env}});
         d.state.access = RuntimeAccessMode::ApprovalRequired;
@@ -4024,7 +4036,7 @@ mod tests {
             .expect("still asks");
         assert_eq!(
             prompt,
-            "npm test\nin /w\nenv: TERM, LC_ALL, APP_MODE\nenv ignored: BASH_ENV, DYLD_INSERT_LIBRARIES, node_options, PATH, OTTO_TOKEN, OWN_KEY"
+            "npm test\nin /w\nenv: TERM=xterm-256color, LC_ALL=C, PAGER=cat, MY_API_TOKEN=(hidden)\nenv ignored: BASH_ENV (not allowed), DYLD_INSERT_LIBRARIES (not allowed), node_options (not allowed), PATH (not allowed), OTTO_TOKEN (not allowed), OWN_KEY (set by Otto), SHELLOPTS (not allowed), PS4 (not allowed), a key that is not a plain name, a key that is not a plain name, path (not allowed), own_key (set by Otto), BIG (value multi-line or over 512 chars)"
         );
         d.state.access = RuntimeAccessMode::FullAccess;
         let s = d.on_line(&c.to_string());
@@ -4049,15 +4061,23 @@ mod tests {
             "BASH_ENV",
             "DYLD_INSERT_LIBRARIES",
             "node_options",
-            "PATH",
             "OTTO_TOKEN",
+            "SHELLOPTS",
+            "PS4",
+            "BASH_FUNC_ls%%",
+            "X\nenv: FAKE",
+            "path",
+            "own_key",
+            "BIG",
         ] {
             assert!(got(k).is_empty(), "{k} dropped");
         }
+        assert_eq!(got("PATH"), ["/otto/bin"], "Otto's PATH stays");
+        assert_eq!(got("PAGER"), ["cat"]);
+        assert_eq!(got("MY_API_TOKEN"), ["s3cret"]);
         assert_eq!(got("OWN_KEY"), ["otto"], "Otto's value wins");
         assert_eq!(got("TERM"), ["xterm-256color"]);
         assert_eq!(got("LC_ALL"), ["C"]);
-        assert_eq!(got("APP_MODE"), ["test"]);
     }
 
     /// Security 6: a chatty command's row keeps only the tail.
