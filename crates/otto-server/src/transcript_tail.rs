@@ -604,6 +604,7 @@ fn step(
     };
     let needs_refold = delta.restarted || delta.records.iter().any(|r| st.folder.push(r));
     if needs_refold {
+        st.budget = TailBudget::default(); // the fresh fold takes this charge's place
         *st = match refold_with(live.provider, &live.path, opts()) {
             Ok(fresh) => fresh,
             Err(e) => {
