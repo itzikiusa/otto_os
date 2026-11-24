@@ -48,7 +48,10 @@ test('workflow canvas: keyboard selects a step and saved input survives reload',
   const input = page.getByLabel('Message / prompt', { exact: true });
   await expect(input).toBeVisible();
   await input.fill('Review long acceptance checklist before release');
+  // Save is disabled while it is in flight too: reload only once the write landed.
+  const saved = page.waitForResponse(r => r.url().endsWith(`/workflows/${workflow.id}`) && r.request().method() === 'PATCH' && r.ok());
   await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await saved;
   await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
   await page.reload();
   await page.locator('.node-main', { hasText: 'Release input' }).focus(); await page.keyboard.press('Space');

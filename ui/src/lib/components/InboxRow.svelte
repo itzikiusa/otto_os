@@ -9,7 +9,8 @@
   // A `child` row (nested under its lead) is two lines: title, then its word
   // and `line3`. A `twoLine` row (a list with no project, e.g. connections)
   // drops line 1: the title carries the status word at its end, then `line3`. Hover/focus actions (`actions`) sit over line 3's end; on
-  // touch they live in the row's long-press menu (use:rowMenu → oncontextmenu).
+  // touch they live in the row's long-press menu (use:rowMenu → oncontextmenu),
+  // and an `onPage` row keeps them visible at its end as well.
   // Purely presentational: the page derives the words, the state and the
   // handlers. The `tr-*` class names are kept (specs and the sidebar keyboard
   // walk select them).
@@ -263,6 +264,19 @@
   @media (hover: none), (pointer: coarse) {
     .tr-actions {
       display: none;
+    }
+    /* …except on a full-page list (Connections, Git, Home): it has the room,
+       so its ⋯ stays a visible, finger-sized control at the row's end. */
+    .tr-row.on-page .tr-actions {
+      display: flex;
+      position: static;
+      align-self: center;
+      padding: 0;
+      background: none;
+    }
+    .tr-row.on-page .tr-actions :global(.icon-btn) {
+      inline-size: var(--hit-min);
+      block-size: var(--hit-min);
     }
     .tr-fold {
       inline-size: var(--hit-min);
