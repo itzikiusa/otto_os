@@ -154,8 +154,8 @@ fn place(src: &Path, dest: &Path, copy: &[String], clone: &[String]) -> Prepared
     out
 }
 
-/// Copy `from` (a file or a folder) to `to`, within `budget` bytes; links
-/// are skipped. Err: why nothing more was copied.
+/// Copy `from` (a file or a folder) to `to`, within `budget` bytes; links,
+/// FIFOs and sockets are skipped. Err: why nothing more was copied.
 fn copy_tree(
     from: &Path,
     to: &Path,
@@ -163,7 +163,7 @@ fn copy_tree(
     n: &mut u32,
 ) -> std::result::Result<(), String> {
     let meta = from.symlink_metadata().map_err(|e| e.to_string())?;
-    if meta.is_symlink() || to.symlink_metadata().is_ok() {
+    if !(meta.is_dir() || meta.is_file()) || to.symlink_metadata().is_ok() {
         return Ok(());
     }
     if meta.is_dir() {
@@ -365,6 +365,28 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("copy limit"), "{err}");
+    }
+
+    /// A FIFO (or socket) in a copied folder is skipped: opening one to copy
+    /// blocked the worktree's creation until something wrote to it.
+    #[test]
+    fn a_fifo_in_a_copied_folder_is_skipped_not_read() {
+        let (src, dest) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::create_dir_all(src.path().join("conf")).unwrap();
+        let fifo = src.path().join("conf/pipe");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        let (s, d) = (src.path().to_path_buf(), dest.path().to_path_buf());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(place(&s, &d, &["conf/".into()], &[])));
+        let got = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("copying a FIFO hung");
+        assert_eq!((got.copied, got.skipped.len()), (0, 0), "{got:?}");
+        assert!(dest.path().join("conf/pipe").symlink_metadata().is_err());
     }
 
     #[tokio::test]
