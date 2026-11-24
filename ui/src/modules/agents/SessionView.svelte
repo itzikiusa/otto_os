@@ -953,9 +953,7 @@
   /* The status WORD (lib/statusWords.ts): calm, toned only when it needs you,
      failed or finished unread — never a bare dot. */
   .pane-word {
-    /* Whole while the title has room; only in a micro pane (below) does a
-       calm word give way before the title (M7: the title says WHICH session;
-       it shrank to "S…" beside a whole "Working"). */
+    /* Whole; only a micro pane's calm word gives way to the title (M7, below). */
     flex-shrink: 0;
     min-width: 0;
     overflow: hidden;
@@ -1148,10 +1146,7 @@
     .pane-head {
       padding-inline: 6px 2px;
     }
-    /* A word that wants you never shrinks. */
-    .pane-head .pane-word:not(.warning, .danger, .success) {
-      flex-shrink: 100;
-    }
+    .pane-head .pane-word:not(.warning, .danger, .success) { flex-shrink: 100; }
     .pane-head.grip-on {
       padding-inline-start: 14px;
     }
