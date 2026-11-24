@@ -36,6 +36,13 @@ test.afterEach(async () => {
   await ctx?.dispose();
 });
 
+/** Switch the scheme and wait until the app has applied it (a screenshot taken
+ *  before html[data-scheme] flips shows light tokens under dark form controls). */
+async function scheme(page: Page, s: 'light' | 'dark'): Promise<void> {
+  await page.emulateMedia({ colorScheme: s });
+  await expect(page.locator('html')).toHaveAttribute('data-scheme', s);
+}
+
 const rows = (page: Page) => page.locator(`[data-testid="agents-list"] .ai-row[data-workspace="${wsId}"]`);
 
 test('one list with words; needs you first; the navigator folds to its rail and comes back', async ({ page }) => {
@@ -57,9 +64,9 @@ test('one list with words; needs you first; the navigator folds to its rail and 
   await expect(rows(page).first()).toContainText('Pirlo');
   await expect(page.getByTestId(`agents-status-${ids.Pirlo}`)).toHaveText('Needs you');
 
-  for (const scheme of ['light', 'dark'] as const) {
-    await page.emulateMedia({ colorScheme: scheme });
-    if (SHOTS) await page.screenshot({ path: `${SHOTS}/agents-inbox-1440-${scheme}.png` });
+  for (const s of ['light', 'dark'] as const) {
+    await scheme(page, s);
+    if (SHOTS) await page.screenshot({ path: `${SHOTS}/agents-inbox-1440-${s}.png`, animations: 'disabled' });
   }
 
   // Leaving Agents brings the navigator back.
@@ -148,7 +155,7 @@ test('Terminal ⇄ Chat: an agent pane shows its conversation and remembers the 
   await pane.getByTestId('pane-view').getByRole('button', { name: 'Chat' }).click();
   await expect(pane.locator('.pane-body[data-view="chat"]')).toBeVisible();
   await expect(pane.locator('.term-host')).toHaveCount(0);
-  if (SHOTS) await page.screenshot({ path: `${SHOTS}/agents-pane-chat-1440-light.png` });
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/agents-pane-chat-1440-light.png`, animations: 'disabled' });
   await page.reload();
   await expect(page.locator(`[data-pane-key][data-session="${id}"] .pane-body[data-view="chat"]`).first()).toBeVisible({ timeout: 20_000 });
   await page.locator(`[data-pane-key][data-session="${id}"]`).first().getByTestId('pane-view').getByRole('button', { name: 'Terminal' }).click();
@@ -169,10 +176,19 @@ test('New session is a stage: tiles, Terminal | Chat, a first message, Start; th
   // Defaults cost no rows: title, folder, workspace are behind Options.
   await expect(dialog.locator('#ns-title')).toHaveCount(0);
   await expect(dialog.getByRole('radio', { name: 'No workspace' })).toHaveCount(0);
-  for (const scheme of ['light', 'dark'] as const) {
-    await page.emulateMedia({ colorScheme: scheme });
-    if (SHOTS) await page.screenshot({ path: `${SHOTS}/agents-new-session-1440-${scheme}.png` });
+  for (const s of ['light', 'dark'] as const) {
+    await scheme(page, s);
+    if (SHOTS) await page.screenshot({ path: `${SHOTS}/agents-new-session-1440-${s}.png`, animations: 'disabled' });
   }
+  // Dark is really dark: the tiles and Cancel sit on dark surfaces with light text.
+  await scheme(page, 'dark');
+  const lum = (c: string) => { const [r, g, b] = c.match(/\d+/g)!.map(Number); return (r + g + b) / 3; };
+  for (const [sel, el] of [['tile', dialog.locator('.provider-card').first()], ['Cancel', dialog.getByRole('button', { name: 'Cancel' })]] as const) {
+    const c = await el.evaluate((el) => { const s = getComputedStyle(el); return { bg: s.backgroundColor, fg: s.color }; });
+    expect(lum(c.fg), `${sel} text is light in dark`).toBeGreaterThan(180);
+    if (!c.bg.startsWith('rgba(0, 0, 0, 0)')) expect(lum(c.bg), `${sel} surface is dark in dark`).toBeLessThan(90);
+  }
+  await scheme(page, 'light');
   // A changed option shows as a chip once Options folds.
   await dialog.getByTestId('ns-options').click();
   await dialog.locator('#ns-title').fill('Kaladze');
@@ -197,8 +213,8 @@ test('the right panel opens on the session details card; nothing loads while it 
   const card = page.getByTestId('agents-details-card');
   await expect(card).toBeVisible({ timeout: 15_000 });
   await expect(card).toContainText('tmp');
-  for (const scheme of ['light', 'dark'] as const) {
-    await page.emulateMedia({ colorScheme: scheme });
-    if (SHOTS) await page.screenshot({ path: `${SHOTS}/agents-details-card-1440-${scheme}.png` });
+  for (const s of ['light', 'dark'] as const) {
+    await scheme(page, s);
+    if (SHOTS) await page.screenshot({ path: `${SHOTS}/agents-details-card-1440-${s}.png`, animations: 'disabled' });
   }
 });

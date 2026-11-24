@@ -889,9 +889,14 @@
   }
   /* The active pane reads at full contrast; the others step back (dim title,
      quieter controls until hovered) — distinguishable without extra chrome. */
+  /* …but the title stays the strongest text in the header in both themes:
+     a step down from --text, never as dim as the status word beside it. */
   .pane:not(.current) .pane-title {
-    color: var(--text-dim);
+    color: color-mix(in srgb, var(--text) 82%, transparent);
     font-weight: 500;
+  }
+  .pane:not(.current) .pane-word:not(.warning, .danger, .success) {
+    opacity: 0.75;
   }
   .pane:not(.current) .pane-head > :is(.ui-ctl, .pane-view, .pane-zoom, .pane-more, .pane-close) {
     opacity: 0.7;
