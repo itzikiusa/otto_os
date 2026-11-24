@@ -40,6 +40,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { api } from '../../lib/api/client';
+  import { gitBridge } from '../../lib/diff/gitBridge.svelte';
   import type { RepoStatusResp, StashDetail, StashInfo } from '../../lib/api/types';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -77,6 +78,7 @@
     listError = null;
     try {
       stashes = await api.get<StashInfo[]>(`/repos/${repoId}/stashes`);
+      gitBridge.stashCount[repoId] = stashes.length; // the header's Pop follows a pop/drop here
       const want = keep ?? selected ?? initialSha;
       const next = stashes.find((s) => s.sha === want)?.sha ?? stashes[0]?.sha ?? null;
       if (next !== selected || !detail) void select(next);
