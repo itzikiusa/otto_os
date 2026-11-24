@@ -2,13 +2,16 @@
 // you, what is running, what is next, what you touched recently. Built from
 // data Otto already has (no new endpoints):
 //
-//   Needs you  pending MCP approvals · sessions and threads waiting on input (one row each) · unread warnings
+//   Needs you  pending MCP approvals · sessions and threads waiting on input (one row each).
+//              Notices (a re-login, a failure) are the bell's Alerts, not needs-you:
+//              they count nowhere as needs-you, so Home, the status bar and the
+//              Agents badge give one number.
 //   Running    working agent sessions and threads · in-flight workflow runs
 //   Up next    scheduled-task runs due in the next 24 h — forward-looking only.
-//              Past notices live in the bell (warnings already surface under Needs you).
+//              Notices live in the bell.
 //   Recent     Design Hall artifacts
 //
-// The live parts (ws, notifications) are derived; the fetched parts poll on a
+// The live parts (ws) are derived; the fetched parts poll on a
 // quiet cadence only while Home is mounted (start/stop are ref-counted).
 
 import { api } from '../../lib/api/client';
@@ -16,12 +19,11 @@ import { listArtifacts } from '../../lib/api/design';
 import { mcpCpApi } from '../../lib/api/mcp';
 import { scheduledTasksApi } from '../../lib/api/scheduledTasks';
 import type { IconName } from '../../lib/components/Icon.svelte';
-import type { DesignArtifact, McpApproval, Notice, ScheduledTask } from '../../lib/api/types';
+import type { DesignArtifact, McpApproval, ScheduledTask } from '../../lib/api/types';
 import { untrack } from 'svelte';
 import { loadErrorText } from '../../lib/loadError';
 import { router } from '../../lib/router.svelte';
 import { auth } from '../../lib/stores/auth.svelte';
-import { notifications } from '../../lib/stores/notifications.svelte';
 import { resourceAccess } from '../../lib/stores/resource-access.svelte';
 import { ws } from '../../lib/stores/workspace.svelte';
 import { toasts } from '../../lib/toast.svelte';
@@ -64,14 +66,6 @@ function folderName(cwd: string | null | undefined): string | null {
 
 function timeOfDay(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-
-function sessionIdOf(n: Notice): string | null {
-  if (n.action?.type === 'open_session') return n.action.session_id;
-  // A structured thread's waiting notice opens its route (`threads/<id>`).
-  if (n.action?.type === 'open_route' && n.action.route.startsWith('threads/')) return n.action.route.slice('threads/'.length).split('/')[0] || null;
-  const key = n.source_key ?? '';
-  return key.startsWith('session:') ? (key.split(':')[1] ?? null) : null;
 }
 
 class TodayStore {
@@ -225,23 +219,6 @@ class TodayStore {
         open: () => router.go('threads'),
       });
     }
-    const waitingIds = new Set([...this.waiting, ...this.waitingThreads, ...runtime].map((s) => s.id));
-    for (const n of notifications.notices) {
-      if (n.read || n.severity === 'info') continue;
-      const sid = sessionIdOf(n);
-      if (sid && waitingIds.has(sid)) continue;
-      rows.push({
-        id: `notice:${n.id}`,
-        title: n.title,
-        detail: n.body,
-        icon: 'warning',
-        tone: 'warning',
-        word: n.severity === 'error' ? 'Failed' : 'Needs you',
-        kind: 'Notice',
-        at: n.created_at,
-        open: () => void notifications.runAction(n),
-      });
-    }
     return rows;
   });
 
@@ -350,11 +327,10 @@ class TodayStore {
     return !this.failed;
   }
 
-  /** Home mounted: start polling (and load notices if nothing has yet). */
+  /** Home mounted: start polling. */
   start(): void {
     this.users += 1;
     if (this.users > 1) return;
-    void notifications.ensureLoaded();
     // Event-fed: approvals, designs and scheduled runs each announce changes; a
     // burst (an agent editing a design) is coalesced to at most one reload per
     // ~15 s. POLL_MS only while the event socket is down.
