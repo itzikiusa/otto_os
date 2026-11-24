@@ -185,7 +185,7 @@
     const st = threadRowState(s);
     const focused = threads.focusedSessionId === s.id && !threads.newDraftMode;
     const unread = !focused && st.key !== 'needs-you' && threadMeta.unread(s.id, ws.unread[s.id] === true || runtimeThreads.unread[s.id] === true);
-    return inboxClass(st.key, unread);
+    return inboxClass(st.key, unread, inboxLive.kindsOf(s.id).length);
   }
   const score = (s: Session): number => inboxScore(classOf(s));
 

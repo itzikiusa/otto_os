@@ -37,7 +37,7 @@
     output?: string;
     /** The pending approval gating this call (answered inline). */
     pending?: PendingApproval;
-    /** What became of its approval ("Withdrawn by Claude", "Declined"). */
+    /** What became of its approval ("Withdrawn by Claude", "Denied"). */
     note?: string | null;
     onrespond?: (requestId: string, decision: ApprovalDecision) => Promise<void>;
     /** The personal agent whose chat this is: a run-result notice opens its report. */

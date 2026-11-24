@@ -1,8 +1,8 @@
 <!--
   A subagent's approval, answered in its parent (T3 Code's
   ChildThreadApprovals.tsx, MIT, Copyright (c) 2026 T3 Tools Inc.):
-  "Approval needed from <title>" above the composer with the same Approve /
-  Decline as the thread's own, sent through the subagent's own request route.
+  "Approval needed from <title>" above the composer with the same Allow once /
+  Deny as the thread's own, sent through the subagent's own request route.
   A subagent's QUESTION goes to this thread's agent first
   (runtime/child_question.rs); once that agent's turn ended without
   answering it, it shows here as "Question from <title>". Only subagents

@@ -61,7 +61,7 @@
       : childRollup(kids.map((id) => ({ title: ws.getSession(id)?.title ?? runtimeThreads.get(id)?.title ?? '', word: subagentWord(threadStateById(id)?.key, { limited: threadStateById(id)?.label === 'Limited' }) }))),
   );
   const subNeeds = $derived(!history && !!subs && subs.needsYou > 0);
-  const cls = $derived(history ? 'rest' : subNeeds ? 'needs' : inboxClass(st.key, unread));
+  const cls = $derived(history ? 'rest' : subNeeds ? 'needs' : inboxClass(st.key, unread, inboxLive.kindsOf(s.id).length));
   const runtime = $derived(isRuntimeThread(s));
   $effect(() => {
     // Approval vs Question needs the request's kind (one queued read); a

@@ -58,7 +58,7 @@ export function needsEyes(entries: readonly WorkEntry[], pendingRequestIds: Read
       item.status === 'failed' ||
       item.type === 'error' ||
       (item.type === 'approval_request' && pendingRequestIds.has(item.request_id)) ||
-      // A gated call keeps its decision ("Declined", "Withdrawn by Codex") in sight.
+      // A gated call keeps its decision ("Denied", "Withdrawn by Codex") in sight.
       !!approval ||
       ('error' in item && typeof item.error === 'string' && item.error !== ''),
   );

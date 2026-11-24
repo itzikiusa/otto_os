@@ -349,8 +349,12 @@
       {/if}
       <button type="button" class="dc-row" title="Review the working-tree changes" data-testid="details-changes" onclick={() => threads.setInspectorTab('changes')}>
         <Icon name="file" size={14} />
-        <span class="dc-label">{totals && totals.added + totals.deleted === 0 ? 'No changes' : 'Changes'}</span>
-        {#if totals && totals.added + totals.deleted > 0}
+        <!-- One source with the git row above: the status's changed files (a binary
+             or untracked file adds no lines, yet it is a change to commit). -->
+        <span class="dc-label">{status && status.changes.length === 0 ? 'No changes' : 'Changes'}</span>
+        {#if status && status.changes.length > 0 && (!totals || totals.added + totals.deleted === 0)}
+          <span class="dc-stat" data-testid="details-changes-files">{status.changes.length === 1 ? '1 file' : `${status.changes.length} files`}</span>
+        {:else if totals && totals.added + totals.deleted > 0}
           <span class="dc-stat mono" dir="ltr" title="{totals.added.toLocaleString()} added, {totals.deleted.toLocaleString()} deleted">
             <span class="dc-add">+{fmt(totals.added)}</span>
             <span class="dc-del">−{fmt(totals.deleted)}</span>

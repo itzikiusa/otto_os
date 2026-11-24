@@ -25,6 +25,7 @@ You can also press `?` anywhere outside a text field to open the shortcut sheet 
 - **Terminal keys**: new lines in an agent prompt, copy and paste, scrollback search and a per-terminal font size.
 - **Desktop menus**: new windows, quit, hide, minimise and full screen from the macOS menu bar.
 - **System-wide chords**: the desktop app adds chords that work in any app: the Otto bar and snipping.
+- **Threads**: switch threads, stop the agent, answer an approval and step through your messages without the mouse.
 - **Page shortcuts**: a few pages add a chord or reuse a global one for their own action while you're on them. They're listed in the last table below.
 
 ## Keyboard shortcuts
@@ -141,6 +142,24 @@ You can also press `?` anywhere outside a text field to open the shortcut sheet 
 | `⌥Space` | Show or hide the Otto bar over any app |
 | `⌘⌃⇧2` | Take a snip |
 
+**Threads**
+
+| Keys | Action |
+|---|---|
+| `⌘T` | New thread (instead of a terminal session) |
+| `⌥⌘↓` / `⌥⌘↑` | Next / previous thread in the list |
+| `⌥⌘N` | Open the next thread that needs you |
+| `⌘K` | Threads first: `↵` opens one, `⌘↵` opens it beside the current one |
+| `F2` | Rename the thread (or double-click its title) |
+| `⌘Z` | Undo the last pin, Move to History or side-chat dismiss (outside a text field) |
+| `↵` / `⌘↵` | Send; while the agent works, the default delivery (Queue or Steer) / the other one |
+| `Esc` / `⌘.` | Stop the agent (`Esc` twice when the composer has text) |
+| `⌘↵` / `⌘⌫` | With an approval waiting and the composer empty: Allow once / Deny |
+| `⇧⇥` | Turn Plan mode on or off |
+| `↑` / `↓` | In an empty composer: earlier / later prompts you sent in this thread |
+| `⌥↑` / `⌥↓` | In a long thread: previous / next message of yours (not while typing) |
+| `⌘F` | Find in the thread, older loaded messages included |
+
 **Page shortcuts**
 
 | Keys | Action |
@@ -154,7 +173,6 @@ You can also press `?` anywhere outside a text field to open the shortcut sheet 
 | `⌘R` | In a live browser tab: reload the page instead of Otto |
 | `⌘↵` | On the API page: send the request |
 | `⌘T` | On the API page: new request tab instead of a new session |
-| `⌘T` | On the Threads page: start a new thread instead of a terminal session |
 | `⌘D` | On the API page: duplicate the request instead of splitting |
 | `⌘⌥←` / `⌘⌥→` | In a Database pane: previous / next query tab instead of moving the pane |
 | `?` | In a Kubernetes cluster view: that view's own key hints instead of this sheet |
