@@ -3,14 +3,15 @@
 // (`watch()` returns the release), on a calm cadence through the shared
 // poller: paused while the window is hidden, no overlapping requests, backed
 // off after failures. The load average is a one-minute average, so a faster
-// cadence would only re-read the same number.
+// cadence would only re-read the same number. No event carries it, so this
+// is the one poll the shell keeps (30 s; Settings ▸ Machine resources the same).
 import { untrack } from 'svelte';
 import { api } from '../../lib/api/client';
 import { loadErrorText } from '../../lib/loadError';
 import { pollWhileVisible, type Poller } from '../../lib/poll';
 import type { MachineStatus } from '../../lib/api/types/machine';
 
-export const MACHINE_POLL_MS = 10_000;
+export const MACHINE_POLL_MS = 30_000;
 
 class MachineStatusStore {
   status: MachineStatus | null = $state(null);
