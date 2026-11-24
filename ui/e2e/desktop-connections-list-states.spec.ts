@@ -48,3 +48,25 @@ test('a row deleted with Undo stays hidden after leaving the page and coming bac
   await page.getByRole('button', { name: 'Undo', exact: true }).click();
   await expect(row).toBeVisible();
 });
+
+test('a slow deep link that settles last does not pin the URL (R1-048)', async ({ page }) => {
+  const { ctx, base } = await apiCtx();
+  const aName = `deep-a-${Date.now()}`;
+  const a = await seedMockDbConnection(ctx, base, wsId, aName);
+  const bName = `deep-b-${Date.now()}`;
+  const b = await seedMockDbConnection(ctx, base, wsId, bName);
+  await ctx.dispose();
+  await mockDbRoutes(page, a);
+  await mockDbRoutes(page, b);
+  await page.route(new RegExp(`/connections/${a}/db/`), async (r) => {
+    await new Promise((res) => setTimeout(res, 3000));
+    await r.fallback();
+  });
+  await page.goto(`/#/database/${a}`);
+  await expect(page.getByRole('heading', { level: 1, name: aName })).toBeVisible(); // A's open is in flight (delayed 3 s)
+  await page.evaluate((id) => (location.hash = `#/database/${id}`), b);
+  await expect(page.locator('.conn-tab', { hasText: bName })).toBeVisible();
+  await page.waitForTimeout(3500); // ui-guards: allow — A's slow open settles after B's
+  await page.locator('.conn-tab', { hasText: bName }).getByRole('button', { name: 'Close connection tab' }).click();
+  await expect(page).toHaveURL(new RegExp(`#/database/${a}$`));
+});

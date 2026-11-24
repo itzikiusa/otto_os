@@ -375,7 +375,8 @@
     if (!connsSettled || !id) return;
     untrack(() => {
       deepTried = '';
-      void openDeep(id).finally(() => (deepTried = id));
+      // Only the link still in the URL: an older, slower open settling last must not claim it.
+      void openDeep(id).finally(() => { if (id === deepId) deepTried = id; });
     });
   });
   // …and the URL follows the open connection (a tab switch), so a reload or
