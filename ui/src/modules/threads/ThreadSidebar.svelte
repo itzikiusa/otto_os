@@ -692,7 +692,7 @@
   .th-folds { flex-shrink: 0; max-block-size: 40%; display: flex; flex-direction: column; padding: var(--sp-2) var(--sp-4); border-block-start: 1px solid var(--separator); }
   .th-folds.fill { flex: 1 1 auto; max-block-size: none; }
   .th-body:has(.th-folds.fill) .th-scroll { flex: 0 1 auto; }
-  .th-folds :global(.if-group) { flex: 0 1 auto; }
+  .th-folds :global(.if-group) { flex: 0 1 auto; min-height: 0; }
   .th-folds .th-list { min-height: 0; overflow-y: auto; }
   .th-scroll {
     flex: 1;

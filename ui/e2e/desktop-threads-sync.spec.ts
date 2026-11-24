@@ -141,6 +141,14 @@ test('the old local pins move onto the threads once; a refused write rolls back'
     .toBe(true);
   await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('otto_threads_v1') ?? '{}').pinnedIds ?? null)).toBeNull();
 
+  // A list longer than the sidebar never squeezes Pinned to nothing under it
+  // (InboxFold in a scrolling column): its rows stay full height and reachable.
+  await page.setViewportSize({ width: 1440, height: 380 });
+  const pinned = mac.getByTestId('threads-pinned-list');
+  await expect
+    .poll(() => pinned.evaluate((el) => Math.round(el.closest('section')!.getBoundingClientRect().height - el.getBoundingClientRect().height)))
+    .toBeGreaterThanOrEqual(0);
+
   // The daemon refuses: the pin rolls back with the shared error toast.
   await page.route('**/api/v1/runtime-sessions/*', (route) =>
     route.request().method() === 'PATCH' ? route.fulfill({ status: 403, json: { title: 'Forbidden', detail: 'not yours' } }) : route.fallback(),
