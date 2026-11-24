@@ -41,7 +41,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
-  import { cancelDraft, draftInFlight, readComposer, startDraft, streamCommitDraft, takePendingDraft, watchComposer, writeComposer } from './commitComposer';
+  import { cancelDraft, draftInFlight, draftText, liveDraftText, onDraftText, readComposer, startDraft, streamCommitDraft, takePendingDraft, watchComposer, writeComposer } from './commitComposer';
   import { runPush } from './pushFlow';
 
   interface Props {
@@ -171,8 +171,10 @@
       const parked = takePendingDraft(repo);
       if (parked) void applyDraft(parked);
       const running = draftInFlight(repo);
-      if (running && !drafting) void followDraft(running, repo);
-      return stop;
+      // Joined mid-stream: fields holding what streamed so far are the agent's.
+      if (running && !drafting) { const so = split(liveDraftText(repo)); streamed = so.s === subject && so.b === body ? so : null; void followDraft(running, repo); }
+      const unsink = onDraftText(repo, (t) => drafting && showStreamed(t));
+      return () => { stop(); unsink(); };
     });
     return unwatch;
   });
@@ -708,9 +710,10 @@
   async function draftMessage(): Promise<void> {
     if (drafting || committing) return;
     const repo = repoId;
+    if (streamed && subject === streamed.s && body === streamed.b) { subject = ''; body = ''; } // a failed stream's own text: Retry replaces it
     const into = !subject.trim() && !body.trim();
     streamed = into ? { s: '', b: '' } : null;
-    const p = startDraft(repo, (signal) => streamCommitDraft(repo, (t) => alive && repo === repoId && showStreamed(t), signal));
+    const p = startDraft(repo, (signal) => streamCommitDraft(repo, (t) => draftText(repo, t), signal));
     await followDraft(p, repo);
   }
   /** Split "subject\n\nbody" the way the fields hold it. */
@@ -726,9 +729,9 @@
     cancelDraft(repoId);
     if (draftTick !== null) { clearInterval(draftTick); draftTick = null; }
     drafting = false;
-    // Stop keeps what has arrived.
-    if (draftPreview.trim()) { quietDraft = true; void applyDraft({ message: draftPreview, from_staged: true }); }
-    else toasts.info('Draft stopped');
+    // Stop keeps what has arrived in the fields; a preview under typed text goes.
+    if (streamed && subject === streamed.s && body === streamed.b && draftPreview.trim()) { quietDraft = true; void applyDraft({ message: draftPreview, from_staged: true }); }
+    else { previewShown = false; toasts.info('Draft stopped'); }
   }
   async function followDraft(p: Promise<DraftCommitMessageResp>, repo: string): Promise<void> {
     const gen = typeof draftGen === 'number' ? ++draftGen : 0;
@@ -765,10 +768,7 @@
         { title: 'Replace your title and description?', confirmLabel: 'Replace', cancelLabel: 'Keep mine', danger: false },
       );
       if (!alive) return;
-      if (!ok) {
-        draftedAt = null;
-        return;
-      }
+      if (!ok) { draftedAt = null; quietDraft = false; return; }
     }
     draftedAt = Date.now();
     ({ s: subject, b: body } = split(text));

@@ -21,6 +21,7 @@
   import { mergeStrategies } from './pr-merge-strategy';
   import { mergeCheckReasons } from './pr-merge-checks';
   import PrMergeUnseen from './PrMergeUnseen.svelte';
+  import { invalidateFocusPrs } from './focusPrHelpers';
 
   interface Props {
     repoId: string;
@@ -201,6 +202,7 @@
         ...(pinSha ? { expected_head_sha: pinSha } : {}),
       });
       toasts.success('PR merged', `#${mergedNumber}`);
+      invalidateFocusPrs();
       if (!disposed) onmerged();
     } catch (e) {
       // Keep the provider's own words — "Required status check failing" and

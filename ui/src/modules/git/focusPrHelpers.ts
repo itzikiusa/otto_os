@@ -27,8 +27,16 @@ export function groupPrRowsByForge(rows: FocusPrRow[]): [string, FocusPrRow[]][]
 // Focus's PR rows outlive the view for a minute: reopening Focus re-reads
 // nothing inside the window; its Refresh does.
 const PR_CACHE_MS = 60_000;
-const prCache = { at: 0, rows: [] as FocusPrRow[], errors: 0, handles: new Set<string>() };
-/** The last PR read when it is under a minute old, else null. */
-export const freshPrs = (): typeof prCache | null => (Date.now() - prCache.at < PR_CACHE_MS ? prCache : null);
-export const savePrs = (rows: FocusPrRow[], errors: number, handles: Set<string>): void =>
-  void Object.assign(prCache, { at: Date.now(), rows, errors, handles });
+const prCache = { at: 0, key: '', rows: [] as FocusPrRow[], errors: 0, handles: new Set<string>() };
+// Linking / unlinking an account or removing a repo changes the candidates — a miss.
+const keyOf = (candidates: Repo[]): string => candidates.map((r) => `${r.id}:${r.git_account_id}`).join();
+/** The last PR read of these candidate repos when it is under a minute old, else null. */
+export const freshPrs = (candidates: Repo[]): typeof prCache | null =>
+  Date.now() - prCache.at < PR_CACHE_MS && prCache.key === keyOf(candidates) ? prCache : null;
+/** Keep a read — never one where every repo failed (a blip would stick for a minute). */
+export function savePrs(candidates: Repo[], rows: FocusPrRow[], errors: number, handles: Set<string>): void {
+  if (rows.length === 0 && errors > 0) prCache.at = 0;
+  else Object.assign(prCache, { at: Date.now(), key: keyOf(candidates), rows, errors, handles });
+}
+/** A PR was opened or merged: the next Focus visit reads again. */
+export const invalidateFocusPrs = (): void => void (prCache.at = 0);

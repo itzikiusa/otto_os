@@ -266,9 +266,7 @@ export interface DraftPrResp {
   description: string;
   source_branch: string;
   target_branch: string;
-  /** The Otto session that drafted this. Drafting runs as a REAL session —
-   *  it appears in Agents the moment it spawns, so it can be opened in a pane
-   *  and watched (or talked to) while the modal is still spinning. */
+  /** Always absent since 0.5.1 (the daemon skips `None`): drafts run headless, not as a session. */
   session_id?: Id;
 }
 

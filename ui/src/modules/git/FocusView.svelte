@@ -33,7 +33,7 @@
   let prsAbort: AbortController | null = null;
 
   async function loadPrs(force = false): Promise<void> {
-    const hit = !force && freshPrs();
+    const hit = !force && freshPrs(prCandidateRepos(git.allRepos));
     if (hit) return void ({ rows: prRows, errors: prErrors, handles: myHandles } = hit, (prsLoading = false));
     prsAbort?.abort();
     const ctl = new AbortController();
@@ -66,7 +66,7 @@
       rows.sort((a, b) => (b.pr.updated_at ?? '').localeCompare(a.pr.updated_at ?? ''));
       prErrors = errors;
       prRows = rows;
-      savePrs(rows, errors, myHandles);
+      savePrs(candidates, rows, errors, myHandles);
     } finally {
       if (prsAbort === ctl) prsAbort = null;
       if (!stale()) prsLoading = false;
@@ -327,9 +327,9 @@
       {#if prsLoading}
         <div style="padding: 10px"><Skeleton rows={4} height={26} /></div>
       {:else if prGroups.length === 0}
+        {@const linked = prCandidateRepos(git.allRepos).length}
         <div class="fx-empty dim">
-          No open pull requests{prFilter === 'mine' ? ' opened by you' : ''} across
-          {plural(git.allRepos.length, 'registered repository', 'registered repositories')}.
+          {#if linked === 0}No repository is linked to a git account — add one in Settings → Git Accounts.{:else}No open pull requests{prFilter === 'mine' ? ' opened by you' : ''} across {plural(linked, 'linked repository', 'linked repositories')}.{/if}
           {#if prErrors > 0}(couldn’t list {plural(prErrors, 'repo')}){/if}
         </div>
       {:else}

@@ -95,7 +95,10 @@
   let lastRetryRev = 0;
 
   function causeOf(e: unknown): string {
-    return accountCause(e instanceof Error ? e.message : '') ?? (e instanceof ApiError && (e.status === 401 || e.status === 403)
+    const msg = e instanceof Error ? e.message : '';
+    // A forge quota refusal comes back as a 502 "<provider> rate limited — retry in Ns" (otto-git providers/client.rs).
+    if (/\brate limited\b/i.test(msg)) return 'The provider rate-limited this request.';
+    return accountCause(msg) ?? (e instanceof ApiError && (e.status === 401 || e.status === 403)
       ? 'The provider rejected the credentials.'
       : e instanceof ApiError && e.status === 404
         ? 'The repository wasn’t found on the provider.'

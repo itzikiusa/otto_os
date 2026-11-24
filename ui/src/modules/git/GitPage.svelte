@@ -37,12 +37,13 @@
   let repoView = $state<{ moreMenuItems: () => MenuItem[]; selectTab: (id: string) => void; viewState: () => { tab: string; resolving: boolean; changes: number; conflicts: number; conflictFiles: number } } | undefined>();
   let toolbar = $state<{ menuItems: () => MenuItem[] } | undefined>();
   // The ONE view switch, in the header (RepoView owns the views).
+  // Icons when the header is too tight for the words (GitToolbar's last fit step).
   const VIEWS = [
-    { id: 'changes', label: 'Changes' },
-    { id: 'graph', label: 'History' },
-    { id: 'prs', label: 'Pull requests' },
-    { id: 'review', label: 'Review' },
-  ];
+    { id: 'changes', label: 'Changes', icon: 'edit' },
+    { id: 'graph', label: 'History', icon: 'clock' },
+    { id: 'prs', label: 'Pull requests', icon: 'pr' },
+    { id: 'review', label: 'Review', icon: 'eye' },
+  ] as const;
   // Header toolbar's stash browser lives here: in PageHeader's actions row the overflow measurer hid it.
   const StashBrowser = lazyComponent(() => import('./StashBrowser.svelte'));
   // The repository view and Focus load with their first use (perf G6): the
@@ -51,9 +52,9 @@
   const RepoViewLazy = lazyComponent(() => import('./RepoView.svelte'));
   // The verbs load with the repo view, not with the landing's list.
   const GitToolbarLazy = lazyComponent(() => import('./GitToolbar.svelte'));
-  // The repo tabs' floor (share of the header row): below it the verbs'
-  // labels give way instead of the tabs.
-  const TABS_MIN = 0.25;
+  // The repo tabs' floor (share of the header row): they shrink (ellipsis,
+  // then scroll in their strip) down to it before the verbs' labels give way.
+  const TABS_MIN = 0.08;
   const FocusViewLazy = lazyComponent(() => import('./FocusView.svelte'));
   // The Add repository sheet loads on first open.
   const AddRepoSheetLazy = lazyComponent(() => import('./AddRepoSheet.svelte'));
@@ -129,7 +130,7 @@
       });
       return;
     }
-    if (r.repo && !r.pr && known && (r.tab || r.legacyFocus)) {
+    if (r.repo && !r.pr && known) {
       untrack(() => {
         git.openRepoTab(r.repo!, r.tab ?? undefined);
         if (r.legacyFocus) router.replace(focusPath(true));
@@ -143,7 +144,7 @@
   let missingRepo = $state<string | null>(null);
   $effect(() => {
     const r = route;
-    if (!r.repo || r.pr || !git.allReposLoaded || git.allRepos.some((x) => x.id === r.repo)) {
+    if (!r.repo || !git.allReposLoaded || git.allRepos.some((x) => x.id === r.repo)) {
       missingRepo = null;
       return;
     }
@@ -151,8 +152,10 @@
     untrack(() =>
       void api.get<Repo>(`/repos/${id}`).then(
         (dup) => {
+          // The user may have moved on while this was in flight.
+          if (router.parts[0] !== 'git' || router.parts[1] !== id) return;
           const same = git.allRepos.find((x) => x.path === dup.path);
-          if (same) router.replace(`git/${same.id}${r.tab ? `/${r.tab}` : ''}`);
+          if (same) router.replace(['git', same.id, ...router.parts.slice(2)].join('/'));
           else missingRepo = id;
         },
         () => (missingRepo = id),
@@ -183,14 +186,14 @@
 
 </script>
 
-{#snippet viewSwitch(name: string)}
+{#snippet viewSwitch(name: string, compact = false)}
   {#if repoView}
     {@const v = repoView.viewState()}
-    <div class="rv-tabs segmented git-views" role="tablist" aria-label="{name} views" data-keep>
+    <div class="rv-tabs segmented git-views" class:compact role="tablist" aria-label="{name} views" data-keep>
       {#each VIEWS as t (t.id)}
         {@const on = v.tab === t.id && !v.resolving}
-        <button class="rv-tab" role="tab" aria-selected={on} tabindex={on ? 0 : -1} class:active={on} onclick={() => repoView?.selectTab(t.id)} onkeydown={onTabKey}>
-          {t.label}
+        <button class="rv-tab" role="tab" aria-selected={on} tabindex={on ? 0 : -1} class:active={on} title={compact ? t.label : undefined} onclick={() => repoView?.selectTab(t.id)} onkeydown={onTabKey}>
+          {#if compact}<Icon name={t.icon} size={12} /><span class="sr-only">{t.label}</span>{:else}{t.label}{/if}
           {#if t.id === 'changes' && v.changes > 0}<span class="git-views-count" title="{v.changes} uncommitted {v.changes === 1 ? 'change' : 'changes'}">{v.changes}</span>{/if}
         </button>
       {/each}
@@ -247,7 +250,9 @@
               onrefresh={() => gitBridge.refreshGraph(repoId)}
               onbrowsestashes={() => (stashesRepo = repoId)}
             >
-              {#if repoView && !viewport.isPhone}{@render viewSwitch(activeRepo.name)}{/if}
+              {#snippet children(compact: boolean)}
+                {#if repoView && !viewport.isPhone}{@render viewSwitch(activeRepo.name, compact)}{/if}
+              {/snippet}
             </GitToolbar>
           {/if}
         {/if}
@@ -357,6 +362,9 @@
     gap: 6px;
     height: 24px;
     white-space: nowrap;
+  }
+  .git-views.compact > .rv-tab {
+    padding-inline: 6px;
   }
   /* Touch: the view switch and the header's ⋯ are finger-sized (44 px). */
   @media (pointer: coarse) {

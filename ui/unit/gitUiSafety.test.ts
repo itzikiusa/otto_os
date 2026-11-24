@@ -144,9 +144,9 @@ function createPrFixture(reply: Record<string, unknown>) {
     title: '',
     description: '',
     drafting: false,
-    draftSessionId: null,
     draftElapsed: 0,
-    draftStartedAt: null,
+    draftCtl: null,
+    AbortController,
     draftedAt: null,
     alive: true,
     setInterval: () => 0,
@@ -204,45 +204,23 @@ test('Cancel mid-push is inert; mid-draft it asks before discarding', async () =
   assert.equal(closed, 0);
 });
 
-test('confirming "Stop drafting and discard?" stops the drafting session (S20-305)', async () => {
-  const posts: string[] = [];
+test('the draft request is abortable: closing the sheet mid-draft stops the agent (S20-305)', async () => {
+  // The headless agent dies with its request (kill_on_drop); the sheet's unmount aborts it.
+  const f = createPrFixture({ title: 'T', description: 'D', source_branch: 'feature-x' });
+  let signal: AbortSignal | undefined;
+  f.state.api = { post: async (_u: string, _b: unknown, sig: AbortSignal) => ((signal = sig), { title: 'T', description: 'D', source_branch: 'feature-x' }) };
+  const s = componentFunctions(git('CreatePr.svelte'), ['draftWithAgent'], f.state);
+  await s.draftWithAgent();
+  assert.ok(signal && !signal.aborted);
+  s.draftCtl.abort();
+  assert.equal(signal!.aborted, true);
+  // Confirming the discard closes the sheet (Keep editing does not).
   let closed = 0;
-  const base = {
-    busy: false,
-    drafting: true,
-    title: '',
-    description: '',
-    reviewers: [],
-    revQuery: '',
-    liveDraftId: 'sess-draft',
-    onclose: () => closed++,
-    api: { post: async (url: string) => (posts.push(url), {}) },
-  };
-  // Keep editing: nothing is stopped, nothing closes.
-  const keep = componentFunctions(git('CreatePr.svelte'), ['requestClose', 'stopDraftSession'], {
-    ...base,
-    confirmer: { ask: async () => false },
-  });
-  await keep.requestClose();
-  assert.deepEqual(posts, []);
+  const base = { busy: false, drafting: true, title: '', description: '', reviewers: [], revQuery: '', onclose: () => closed++ };
+  await componentFunctions(git('CreatePr.svelte'), ['requestClose'], { ...base, confirmer: { ask: async () => false } }).requestClose();
   assert.equal(closed, 0);
-  // Discard: the agent's PTY is killed (row kept) and the sheet closes.
-  const s = componentFunctions(git('CreatePr.svelte'), ['requestClose', 'stopDraftSession'], {
-    ...base,
-    confirmer: { ask: async () => true },
-  });
-  await s.requestClose();
-  await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual(posts, ['/sessions/sess-draft/kill']);
+  await componentFunctions(git('CreatePr.svelte'), ['requestClose'], { ...base, confirmer: { ask: async () => true } }).requestClose();
   assert.equal(closed, 1);
-  // A failed stop (already exited) still closes and never throws.
-  const failing = componentFunctions(git('CreatePr.svelte'), ['requestClose', 'stopDraftSession'], {
-    ...base,
-    api: { post: async () => { throw new Error('gone'); } },
-    confirmer: { ask: async () => true },
-  });
-  await failing.requestClose();
-  assert.equal(closed, 2);
 });
 
 // ── S15-06 / S15-07 · review comments post exactly what was shown, once ─────

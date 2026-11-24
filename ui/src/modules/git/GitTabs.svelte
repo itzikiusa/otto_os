@@ -177,7 +177,8 @@
   function fitBranches(): void {
     const el = listEl;
     if (!el) return;
-    el.removeAttribute('data-branches');
+    // Natural widths (tabs shrink to fit otherwise): branches and tabs at full size.
+    el.setAttribute('data-branches', 'measure');
     const tabs = Array.from(el.querySelectorAll<HTMLElement>('.git-tab'));
     const measures = tabs.map((t) => {
       const chip = t.querySelector<HTMLElement>('.git-tab-branch');
@@ -335,7 +336,7 @@
     /* The strip itself never scrolls or clips its buttons — only the tablist
        below does (it shrinks first: min-width 0). */
     min-width: 0;
-    flex-shrink: 0;
+    flex-shrink: 1;
   }
   .git-tablist {
     display: flex;
@@ -353,10 +354,11 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    flex-shrink: 0;
-    /* Keep natural widths on desktop: a fixed cap truncated identities even
-       when the header had hundreds of unused pixels. Overflow stays in the
-       tablist, and short identities never stretch just to fill the row. */
+    /* Natural widths on desktop (a fixed cap truncated identities even when
+       the header had hundreds of unused pixels); a row too narrow shrinks
+       them with an ellipsis instead of scrolling one cut at the edge. */
+    flex-shrink: 1;
+    min-width: 0;
     max-width: none;
     padding: 6px 8px;
     padding-inline-start: 10px;
@@ -402,7 +404,9 @@
     border-inline-start: 2px solid var(--accent);
   }
   .git-tab-word {
-    flex-shrink: 0;
+    min-width: 0;
+    overflow: hidden;
+    flex-shrink: 4;
     font-size: var(--fs-xs);
     color: var(--warning);
     font-weight: 600;
@@ -443,6 +447,9 @@
   }
   /* fitBranches(): the row would overflow — name-only tabs (the active one
      keeps its branch when that alone fits). */
+  .git-tablist:global([data-branches='measure']) .git-tab {
+    flex-shrink: 0;
+  }
   .git-tablist:global([data-branches='none']) .git-tab-branch,
   .git-tablist:global([data-branches='active']) .git-tab:not(.active) .git-tab-branch {
     display: none;
