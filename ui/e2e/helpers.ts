@@ -365,12 +365,69 @@ export async function openFloatingBar(page: Page): Promise<void> {
  *  open, and on a busy daemon a decision can still be loading (an item is
  *  missing or disabled until it lands). Reopen until `name` is there and
  *  enabled, then pick it. */
-export async function pickMenuItem(page: Page, open: () => Promise<unknown>, name: string): Promise<void> {
-  const item = page.getByRole('menuitem', { name, exact: true });
+export async function pickMenuItem(page: Page, open: () => Promise<unknown>, name: string | RegExp): Promise<void> {
+  const item = page.getByRole('menuitem', { name, exact: typeof name === 'string' });
   await expect(async () => {
     if (await page.getByRole('menu', { name: 'Context menu' }).isVisible()) await page.keyboard.press('Escape');
     await open();
     await expect(item).toBeEnabled({ timeout: 1_000 });
   }).toPass({ timeout: 20_000 });
   await item.click();
+}
+
+// ── The Database workbench (three rows: header · query tabs · editor) ────────
+
+/** The workbench says it is connected in words, with the server's version
+ *  ("Connected · MongoDB 8.2.1 · 14 ms"). The version comes from the health
+ *  probe, which runs only once the capabilities and the schema root have
+ *  loaded, so this also means the engine's capabilities are in (what the old
+ *  engine chip proved). The detail is hidden on a phone, so read its text. */
+export async function expectDbConnected(page: Page, engine: 'MySQL' | 'PostgreSQL' | 'MongoDB' | 'Redis' | 'ClickHouse'): Promise<void> {
+  await expect(page.getByTestId('db-conn-state')).toContainText(new RegExp(`^\\s*Connected\\s*·\\s*${engine} \\d`), { timeout: 20_000 });
+}
+
+/** Pick `name` from the workbench header's one ⋯ (views, the query's
+ *  Format / Save / Query plan, the connection's actions). */
+export async function pickDbMenuItem(page: Page, name: string | RegExp): Promise<void> {
+  await pickMenuItem(page, () => page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).first().click(), name);
+}
+
+/** One click on a table shows its rows; its structure opens from its menu. */
+export async function openStructureOf(page: Page, label: Locator): Promise<void> {
+  await pickMenuItem(page, () => label.click({ button: 'right' }), 'Open structure');
+}
+
+/** The results toolbar's export menu (copy, download, Export all rows…,
+ *  Import file…): its Export button, which a phone folds into the toolbar's ⋯. */
+export function resultsExportButton(page: Page): Locator {
+  const bar = page.locator('.grid-toolbar');
+  return (page.viewportSize()?.width ?? 0) <= 640
+    ? bar.getByRole('button', { name: 'More result actions', exact: true })
+    : bar.getByTitle('Copy, download, export all rows, or import a file', { exact: true });
+}
+
+/** The connection list is its own page (#/connections); the workbench's back
+ *  button goes there. */
+export async function showConnectionList(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'All connections', exact: true }).click();
+  await expect(page.locator('.conn-list')).toBeVisible({ timeout: 15_000 });
+}
+
+/** The open connection's tables: the side pane's Tables tab, or on a phone the
+ *  sheet the header's Tables button opens (with the same Tables · Saved ·
+ *  History tabs). */
+export async function showDbTables(page: Page): Promise<void> {
+  if ((page.viewportSize()?.width ?? 0) <= 640) {
+    await page.getByTestId('page-header').getByRole('button', { name: 'Tables', exact: true }).click();
+  }
+  await page.getByRole('tablist', { name: 'Sidebar view' }).getByRole('tab', { name: 'Tables', exact: true }).click();
+  await expect(page.locator('.schema-tree')).toBeVisible({ timeout: 15_000 });
+}
+
+/** A statement that removes data without a filter (deleteMany({}), DELETE
+ *  without WHERE, DROP…) asks first on an unguarded connection; say Run. */
+export async function confirmDestructiveRun(page: Page): Promise<void> {
+  const dialog = page.getByRole('dialog').filter({ hasText: /Run (a destructive statement|destructive statements)\?/ });
+  await dialog.getByRole('button', { name: 'Run', exact: true }).click();
+  await expect(dialog).toBeHidden();
 }

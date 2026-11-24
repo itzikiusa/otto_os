@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
-import { ensureGridView, editorSelectAll } from './helpers';
+import { ensureGridView, editorSelectAll, resultsExportButton } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DB Explorer — file→table import dialog (Task 5.1 / Task 9 backend), against the
@@ -124,7 +124,7 @@ function isPhone(page: Page): boolean {
 async function ensureEditorOpen(page: Page): Promise<void> {
   if (!isPhone(page)) return;
   if (!(await page.locator('.qe-edit').isVisible().catch(() => false))) {
-    await page.locator('.qe-acc-head', { hasText: 'Editor' }).click();
+    await page.getByRole('button', { name: 'Edit the query', exact: true }).click();
   }
   await expect(page.locator('.qe-edit')).toBeVisible();
 }
@@ -176,7 +176,7 @@ test('MySQL: import a CSV into a table via the dialog', async ({ page }) => {
   // Run any query so the grid toolbar (with "Import file…") is present.
   await runStatement(page, 'SELECT * FROM customers ORDER BY id');
 
-  await page.locator('.grid-toolbar').getByTitle('Copy, download, export all rows, or import a file', { exact: true }).click();
+  await resultsExportButton(page).click();
   await page.locator('.ctx-item', { hasText: 'Import file' }).click();
   await expect(page.locator('.imp-form')).toBeVisible({ timeout: 10_000 });
   // The file is on the Otto host (root): pick that source first.
@@ -201,7 +201,7 @@ test('MongoDB: restricted import refuses unsupported native scope without writes
   await openConn(page, 'e2e-mongodb');
   // Mongo find to surface the results toolbar (if an import entry existed).
   await runStatement(page, 'db.orders.find({})');
-  const exportBtn = page.locator('.grid-toolbar').getByTitle('Copy, download, export all rows, or import a file', { exact: true });
+  const exportBtn = resultsExportButton(page);
   await expect(exportBtn).toBeVisible({ timeout: 10_000 });
   await exportBtn.click();
   await page.locator('.ctx-item', { hasText: 'Import file' }).click();
