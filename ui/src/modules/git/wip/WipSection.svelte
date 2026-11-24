@@ -235,7 +235,9 @@
     align-items: center;
     gap: 2px;
     min-height: 30px;
-    padding-inline: 6px 4px;
+    /* End ≥ 6 px: a touch screen's 36 px hit area of the 24 px buttons
+       overhangs them by 6 px; less scrolled the Changes list sideways. */
+    padding-inline: 6px;
     background: var(--surface);
     border-block-end: 1px solid var(--separator);
   }
