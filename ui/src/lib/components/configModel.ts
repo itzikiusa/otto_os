@@ -78,7 +78,7 @@ export function yamlSymbols(text: string): IdeSymbolNode[] {
     if (/(?:^|[\s:])[|>][-+]?\d*\s*(?:#.*)?$/.test(raw)) block = indent;
     const m = YAML_KEY.exec(raw);
     if (!m) continue;
-    const keyIndent = m[1].length + (raw.slice(m[1].length).startsWith('-') ? raw.slice(m[1].length).match(/^-\s+/)![0].length : 0);
+    const keyIndent = m[1].length + (/^-\s+/.exec(raw.slice(m[1].length))?.[0].length ?? 0);
     const name = m[2].replace(/^(["'])(.*)\1$/, '$2');
     if (topIndent < 0 || keyIndent <= topIndent) {
       topIndent = keyIndent;
@@ -98,7 +98,7 @@ export function yamlSymbols(text: string): IdeSymbolNode[] {
 
 /** TOML tables ([a.b], [[arr]]) with their keys; keys before the first table at the top. */
 export function tomlSymbols(text: string): IdeSymbolNode[] {
-  return sectionSymbols(text, /^\s*(\[\[?)\s*([^\]#]+?)\s*\]\]?\s*(?:#.*)?$/, /^\s*((?:[A-Za-z0-9_-]+|"[^"]*"|'[^']*')(?:\s*\.\s*(?:[A-Za-z0-9_-]+|"[^"]*"|'[^']*'))*)\s*=/, '#');
+  return sectionSymbols(text, /^\s*(\[\[?)\s*([^\]#]+?)\s*\]\]?\s*(?:#.*)?$/, /^\s*((?:[A-Za-z0-9_-]+|"[^"]*"|'[^']*')(?:\s*\.\s*(?:[A-Za-z0-9_-]+|"[^"]*"|'[^']*'))*)\s*=/, '#', true);
 }
 
 /** INI / conf: [sections] with their keys. */
@@ -106,7 +106,7 @@ export function confSymbols(text: string): IdeSymbolNode[] {
   return sectionSymbols(text, /^\s*(\[)\s*([^\]]+?)\s*\]\s*(?:[#;].*)?$/, /^\s*(?:export\s+)?([^\s=:#;[]+?)\s*[=:]/, '#;');
 }
 
-function sectionSymbols(text: string, header: RegExp, key: RegExp, comments: string): IdeSymbolNode[] {
+function sectionSymbols(text: string, header: RegExp, key: RegExp, comments: string, multiline = false): IdeSymbolNode[] {
   const out: IdeSymbolNode[] = [];
   let section: IdeSymbolNode | null = null;
   let ml = ''; // inside a TOML multi-line string
@@ -122,7 +122,7 @@ function sectionSymbols(text: string, header: RegExp, key: RegExp, comments: str
     if (k) {
       (section ? section.children! : out).push(node(k[1].replace(/\s*\.\s*/g, '.'), 'key', n));
       if (section) section.end_line = n;
-      const open = /("""|''')/.exec(raw.slice(k[0].length));
+      const open = multiline && /^\s*("""|''')/.exec(raw.slice(k[0].length)); // a TOML value that opens one
       if (open && raw.split(open[1]).length === 2) ml = open[1];
     } else if (section) section.end_line = n;
   }
@@ -132,13 +132,15 @@ function sectionSymbols(text: string, header: RegExp, key: RegExp, comments: str
 
 /** YAML syntax errors as Problems entries (the yaml package, loaded on first use). */
 export async function yamlProblems(path: string, text: string): Promise<{ path: string; line: number; col: number; severity: 'error'; message: string; source: string }[]> {
+  // Yarn v1 lockfiles are not YAML; past 128 KB the parse blocks the UI thread for 70 ms+ on every pause.
+  if (text.length > 128_000 || /(?:^|\/)yarn\.lock$/.test(path)) return [];
   const { parseAllDocuments } = await import('yaml');
   const out: { path: string; line: number; col: number; severity: 'error'; message: string; source: string }[] = [];
   const docs = parseAllDocuments(text, { prettyErrors: true });
   for (const doc of Array.isArray(docs) ? docs : [docs]) {
     for (const e of doc.errors) {
       const pos = e.linePos?.[0];
-      out.push({ path, line: pos?.line ?? 1, col: pos?.col ?? 1, severity: 'error', message: e.message.split('\n')[0], source: 'yaml' });
+      out.push({ path, line: pos?.line ?? 1, col: pos?.col ?? 1, severity: 'error', message: e.message.split('\n')[0].replace(/:$/, ''), source: 'yaml' });
     }
   }
   return out;

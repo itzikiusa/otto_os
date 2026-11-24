@@ -188,7 +188,7 @@ function yamlToken(stream: StringStream, s: YamlState): string | null {
     return style;
   }
   if (stream.match(/^[-?](?=\s|$)/)) return 'punctuation';
-  if (stream.match(/^[[{]/)) { s.flow++; return 'punctuation'; }
+  if (stream.match(/^[[{]/)) { s.flow++; s.keyed = false; return 'punctuation'; }
   if (stream.match(/^[\]}]/)) { s.flow = Math.max(0, s.flow - 1); return 'punctuation'; }
   if (stream.match(/^,/)) { s.keyed = false; return 'punctuation'; }
   if (stream.match(/^:(?=\s|$)/) || (s.flow && stream.match(/^:/))) return 'punctuation';

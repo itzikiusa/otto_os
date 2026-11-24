@@ -235,6 +235,28 @@ test.describe('Desktop IDE — the editor tells the truth', () => {
     await expect(banner).toHaveCount(0);
   });
 
+  test('a reloaded extensionless file whose content became Python gets the code gutters', async ({ page }) => {
+    test.setTimeout(120_000);
+    writeFileSync(join(seed.workspaceRoot, 'pyapp', 'deploy'), 'plain notes\n');
+    await bootPolyglotIde(page, seed, 'light');
+    await openPolyglotFile(page, 'pyapp', 'deploy');
+    const content = page.locator('.ide-editor-area .cm-content').first();
+    const ed = page.locator('.ide-editor-area .cm-editor').first();
+    await expect(content).toContainText('plain notes');
+    await expect(ed.locator('.cm-foldGutter'), 'plain text has no fold column').toHaveCount(0);
+    await content.locator('.cm-line').first().click();
+    await page.keyboard.press('End');
+    await page.keyboard.type(' mine');
+    writeFileSync(join(seed.workspaceRoot, 'pyapp', 'deploy'), '#!/usr/bin/env python3\ndef main():\n    return 1\n');
+    const banner = page.getByTestId('ide-disk-changed-banner');
+    await expect(banner).toBeVisible({ timeout: 15_000 });
+    await banner.getByTestId('ide-disk-reload').click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Reload', exact: true }).click();
+    await expect(content).toContainText('def main():');
+    await expect(ed.locator('.cm-foldGutter'), 'Python folds').toHaveCount(1);
+    await expect(ed.locator('.cm-ide-bp-gutter'), 'Python keeps the breakpoint column').toBeVisible();
+  });
+
   test('dark: the banner reads in dark too', async ({ page }) => {
     test.setTimeout(90_000);
     await bootPolyglotIde(page, seed, 'dark');
