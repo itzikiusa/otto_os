@@ -24,6 +24,7 @@
   import { navPending } from '../lib/navPending.svelte';
   import { ui } from '../lib/stores/ui.svelte';
   import { navBadge } from '../lib/navBadge';
+  import { navUsage } from '../lib/stores/navUsage.svelte';
   import { auth } from '../lib/stores/auth.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
   import {
@@ -50,11 +51,12 @@
   const modules = $derived.by(() => {
     const available = availableModules((f) => auth.can(f, 'view'), light ? [] : pluginEntries);
     if (light) return LIGHT_MODULES.flatMap((id) => available.filter((m) => m.id === id));
-    return sidebarSections(
-      visibleOrder(resolveOrder(available, ui.sidebarOrder), ui.sidebarHidden),
-      ui.sidebarFavorites,
-      ui.sidebarGroupOrder,
-    ).flatMap((s) => s.modules);
+    // What he uses first (sidebarMore.ts), so the tabs are his; the rest after, in More.
+    const split = navUsage.split(
+      sidebarSections(visibleOrder(resolveOrder(available, ui.sidebarOrder), ui.sidebarHidden), ui.sidebarFavorites, ui.sidebarGroupOrder),
+      current,
+    );
+    return [...split.sections.flatMap((s) => s.modules), ...split.more];
   });
   // The entry the current route highlights (plugin slug, '' → Agents, …).
   const current = $derived(activeNavId(router.parts));

@@ -98,16 +98,16 @@ test('Needs you expands every source in place', async ({ page }) => {
   await boot(page);
   const needs = page.locator('[data-card="needs"]');
   // The 5 approvals plus whatever else on the shared e2e daemon needs this
-  // workspace (sessions other specs left waiting): 3 shown, the rest behind
-  // one "N more" that matches the card's own count.
-  await expect(needs.getByRole('button', { name: /^Approval 3/ })).toBeVisible();
+  // workspace (sessions other specs left waiting, notices): 5 rows shown, the
+  // rest behind one "N more" that matches the section's own count.
+  await expect(needs.getByRole('button', { name: /Approval 3/ })).toBeVisible();
   const more = needs.getByRole('button', { name: /^\d+ more$/ });
   await expect(more).toBeVisible();
   const count = async (l: import('@playwright/test').Locator) => Number(((await l.textContent()) ?? '').match(/\d+/)?.[0]);
-  await expect.poll(async () => (await count(more)) + 3 - (await count(needs.locator('.gc-count')))).toBe(0);
-  expect(await count(needs.locator('.gc-count'))).toBeGreaterThanOrEqual(5);
+  await expect.poll(async () => (await count(more)) + 5 - (await count(needs.locator('.sec-count')))).toBe(0);
+  expect(await count(needs.locator('.sec-count'))).toBeGreaterThanOrEqual(6);
   await more.click();
-  await expect(needs.getByRole('button', { name: /^Approval 5/ })).toBeVisible();
+  await expect(needs.getByRole('button', { name: /Approval 5/ })).toBeVisible();
   await expect(page).toHaveURL(/#\/home$/);
 });
 

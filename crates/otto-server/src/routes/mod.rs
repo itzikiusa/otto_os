@@ -398,6 +398,7 @@ pub fn protected_routes() -> Router<ServerCtx> {
         )
         .route("/telemetry/status", get(telemetry::status))
         .route("/telemetry/overview", get(telemetry::overview))
+        .route("/telemetry/navigation", get(telemetry::navigation))
         .route("/telemetry/suggestions", get(telemetry::suggestions))
         .route("/telemetry/analyze", post(telemetry::analyze))
         .route(
