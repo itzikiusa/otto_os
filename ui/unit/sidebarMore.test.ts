@@ -1,7 +1,7 @@
 // "Show what he uses" (lib/sidebarMore.ts): pinned + used + badged + current stay; the rest go under More.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_SHOWN, shownModules, splitMore, usedModules } from '../src/lib/sidebarMore.ts';
+import { DEFAULT_SHOWN, barOrder, shownModules, splitMore, usedModules } from '../src/lib/sidebarMore.ts';
 
 const navId = (m: string) => (m === 'database' || m === 'brokers' ? 'connections' : m);
 
@@ -18,6 +18,29 @@ test('used modules: counted ones, mapped onto sidebar entries, once each; shell/
     navId,
   );
   assert.deepEqual(ids, ['agents', 'connections']);
+});
+
+test('used modules rank by phone use, then overall use', () => {
+  const ids = usedModules(
+    [
+      { module: 'threads', count: 9, device: 'desktop' },
+      { module: 'agents', count: 50, device: 'desktop' },
+      { module: 'git', count: 4, device: 'phone' },
+      { module: 'database', count: 2, device: 'phone' },
+      { module: 'connections', count: 3, device: 'phone' },
+      { module: 'rooms', count: 1, device: 'desktop' },
+    ],
+    navId,
+  );
+  assert.deepEqual(ids, ['connections', 'git', 'agents', 'threads', 'rooms']);
+});
+
+test('the phone bar: pinned, then most used, then the rest in sidebar order (not sidebar order first)', () => {
+  const mods = ['home', 'agents', 'threads', 'rooms', 'git', 'connections', 'usage'].map((id) => ({ id }));
+  const ids = (m: { id: string }[]) => m.map((x) => x.id);
+  assert.deepEqual(ids(barOrder(mods, [], ['agents', 'git', 'connections', 'usage', 'home'])).slice(0, 4), ['agents', 'git', 'connections', 'usage']);
+  assert.deepEqual(ids(barOrder(mods, ['rooms'], ['agents', 'git'])).slice(0, 4), ['rooms', 'agents', 'git', 'home']);
+  assert.deepEqual(ids(barOrder(mods, [], null)).slice(0, 4), ['agents', 'git', 'connections', 'threads']);
 });
 
 test('shown: favorites ∪ used ∪ badged ∪ active; no usage yet → the defaults', () => {

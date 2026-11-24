@@ -1,6 +1,7 @@
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { mockDbRoutes, seedMockDbConnection } from './db-mock';
+import { expectFullyInViewport } from './helpers';
 
 // Connections list + DB workbench — PHONE/responsive usability guard. Runs on
 // every device project (phones + tablets). The list is the page (one inbox
@@ -112,6 +113,8 @@ test.describe('connections list — responsive', () => {
     await expect(row(page, 'prod-web-bastion')).toContainText('Not checked');
     await expect(row(page, 'ungrouped-host')).toBeVisible();
     await expect(row(page, 'my-custom-cli')).toContainText('read-only');
+    // Under its section's heading a row does not repeat the section's name.
+    await expect(row(page, 'my-custom-cli')).not.toContainText('Production servers');
     await expect(page.getByRole('region', { name: 'Production servers' }).first()).toBeVisible();
     await expect(page.getByRole('region', { name: 'Empty staging folder' }).first()).toBeVisible();
     await expect(page.getByRole('region', { name: 'Ungrouped' })).toBeVisible();
@@ -157,19 +160,59 @@ test.describe('connections list — responsive', () => {
     // The editor folds to its one line; the rows are what is on screen.
     await expect(page.locator('.qe-edit')).toBeHidden();
     await expect(page.getByRole('button', { name: 'Edit the query' })).toBeVisible();
+    // …down to the bottom bar (only the row count line under them), not a
+    // block that stops halfway with the rest of the screen empty.
+    const [res, body] = await Promise.all([page.locator('.qe-results').boundingBox(), page.locator('.page-body').boundingBox()]);
+    expect(body!.y + body!.height - (res!.y + res!.height)).toBeLessThan(40);
+    // No keyboard hints on touch: not on Run, not in the menus.
+    await expect(page.getByTestId('page-header')).not.toContainText('⌘', { useInnerText: true });
+    // The results toolbar keeps the view switch and the filter; the rest is in
+    // its one ⋯ — every control finger-sized.
+    const bar = page.locator('.grid-toolbar');
+    await expect(bar.getByRole('button', { name: /Export/ })).toHaveCount(0);
+    const small = await bar.evaluate((el) =>
+      [...el.querySelectorAll<HTMLElement>('button, input')].filter((b) => b.getBoundingClientRect().height < 40).map((b) => b.getAttribute('aria-label') ?? b.textContent),
+    );
+    expect(small).toEqual([]);
+    await bar.getByRole('button', { name: 'More result actions' }).click();
+    const menu = page.getByRole('menu');
+    await expect(menu.getByRole('menuitem', { name: /^Download CSV/ })).toBeVisible();
+    await expect(menu.getByText('Filter row', { exact: true })).toBeVisible();
+    await expect(menu).not.toContainText('⌘', { useInnerText: true });
+    await page.keyboard.press('Escape');
+    await expect(menu).toHaveCount(0);
     // Tables: a sheet over the rows; Back closes it and stays on the workbench.
-    const tables = page.getByTestId('page-header').getByRole('button', { name: 'Tables', exact: true });
-    if (await tables.isVisible()) await tables.click();
-    else {
-      await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click();
-      await page.getByRole('menuitem', { name: /^Tables/ }).click();
-    }
+    // The header ⋯ sits inside the window (it used to poke 7 px past the edge).
+    await expectFullyInViewport(page, page.getByTestId('page-header').getByRole('button', { name: 'More actions' }), 'the header ⋯');
+    // Tables is kept in the phone header (data-keep): click it, never a
+    // racy "is it visible yet, else the ⋯" branch.
+    await page.getByTestId('page-header').getByRole('button', { name: 'Tables', exact: true }).click();
     const sheet = page.getByRole('dialog', { name: 'Tables' });
     await expect(sheet).toBeVisible();
     await expect(sheet.getByRole('tree', { name: 'Schema' })).toBeVisible();
     await page.goBack();
     await expect(sheet).toHaveCount(0);
     await expect(page.getByTestId('db-conn-state')).toBeVisible();
+    await assertFitsWidth(page);
+  });
+
+  test('phone: a connection that can\'t connect says so once, with Retry and Edit under the header', async ({ page }, info) => {
+    test.skip(!/iphone|android/.test(info.project.name), 'phone projects');
+    const { ctx, base } = await apiCtx();
+    const name = `refused-phone-${Math.random().toString(36).slice(2, 7)}`;
+    // Port 9 on loopback refuses at once: no host is contacted.
+    const r = await ctx.post(`${base}/api/v1/workspaces/${workspaceId}/connections`, { data: { name, kind: 'redis', params: { host: '127.0.0.1', port: 9, database: '0' } } });
+    expect(r.ok()).toBeTruthy();
+    await ctx.dispose();
+    await gotoPage(page);
+    await row(page, name).click();
+    await expect(page.getByTestId('db-conn-state')).toContainText('Can’t connect', { timeout: 30_000 });
+    const banner = page.getByTestId('db-conn-error-banner');
+    await expect(banner).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(1);
+    await banner.getByRole('button', { name: 'Retry', exact: true }).click();
+    await expect(page.getByTestId('db-conn-state')).toContainText('Can’t connect', { timeout: 30_000 });
+    await expectFullyInViewport(page, page.getByTestId('page-header').getByRole('button', { name: 'Tables', exact: true }), 'Tables');
     await assertFitsWidth(page);
   });
 });

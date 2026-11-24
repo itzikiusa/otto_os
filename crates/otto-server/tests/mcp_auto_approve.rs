@@ -253,6 +253,11 @@ async fn create_pr_without_a_rule_enqueues_an_approval() {
     let pending = d.pending_approvals().await;
     assert_eq!(pending.len(), 1, "{pending:?}");
     assert_eq!(pending[0]["tool"], "otto.create_pr");
+    // The card names the repository, not its id.
+    assert_eq!(
+        pending[0]["detail"],
+        "Open a PR on repo demo (workspace: ws): Fix the report (fix/report → main)"
+    );
     assert_eq!(
         d.last_audit("create_pr").await["decision"],
         "pending_approval"

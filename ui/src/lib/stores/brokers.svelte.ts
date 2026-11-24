@@ -41,6 +41,13 @@ class BrokersStore {
   private loadedWs: Id | null = null;
   private loadGen = latestOnly();
 
+  /** Load unless this workspace's clusters are here already (read, or being
+   *  read, by the page that came before — the Connections list). */
+  ensure(wsId: Id): Promise<void> {
+    if (this.loadedWs === wsId && !this.loadError) return Promise.resolve();
+    return this.load(wsId, { withSections: false });
+  }
+
   /** `withSections: false` — the caller reads the section tree from the
    *  shared connection list (lib/stores/connectionList.svelte.ts) instead. */
   async load(wsId: Id, { withSections = true }: { withSections?: boolean } = {}): Promise<void> {

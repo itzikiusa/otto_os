@@ -17,45 +17,47 @@ export interface DeepLinkStore {
   /** Open tabs that are structured threads (their pane is a chat). */
   readonly threadPanes: readonly Id[];
   select(id: Id): Promise<boolean>;
-  openSession(id: Id): void;
+  openSession(id: Id, kind?: 'thread'): void;
 }
 
 const inflight = new Set<string>();
 
 /**
- * True once `id` is loadable in this window (already listed, or its workspace
- * is now selected); false when it can't be read (a toast says why) or the
- * switch was refused (an unsaved-changes guard). `thread` also looks the id
- * up as a structured runtime thread.
+ * Truthy once `id` is loadable in this window (already listed, or its workspace
+ * is now selected): 'thread' when only the runtime lookup knows it (a chat
+ * pane's id in `#/agents/<id>` is one). False when it can't be read (a toast
+ * says why, in `what`'s words) or the switch was refused (an unsaved-changes guard).
  */
-export async function prepareDeepLink(store: DeepLinkStore, id: Id, what: 'session' | 'thread'): Promise<boolean> {
-  if (store.sessionById.has(id)) return true;
+export async function prepareDeepLink(store: DeepLinkStore, id: Id, what: 'session' | 'thread'): Promise<false | 'session' | 'thread'> {
+  if (store.sessionById.has(id)) return 'session';
   if (inflight.has(id)) return false;
   inflight.add(id);
   try {
+    // The session lookup first; the runtime one answers only for a thread.
+    let found: 'session' | 'thread' = 'session';
     const r = await resolveDeepLink(id, store.currentId, SCRATCH_WORKSPACE_ID, {
       session: (sid) => api.get<Session>(`/sessions/${encodeURIComponent(sid)}`),
-      runtime:
-        what === 'thread'
-          ? (tid) => api.get<{ workspace_id: Id }>(`/runtime-sessions/${encodeURIComponent(tid)}`)
-          : undefined,
+      runtime: (tid) => api.get<{ workspace_id: Id }>(`/runtime-sessions/${encodeURIComponent(tid)}`).then((t) => ((found = 'thread'), t)),
     });
     if (r.kind !== 'ok') {
       toasts.error(`Couldn’t open this ${what}`, deepLinkErrorText(r, what) ?? undefined);
       return false;
     }
-    if (r.switchTo && r.switchTo !== store.currentId) return await store.select(r.switchTo);
-    return true;
+    if (r.switchTo && r.switchTo !== store.currentId && !(await store.select(r.switchTo))) return false;
+    return found;
   } finally {
     inflight.delete(id);
   }
 }
 
 /** The `#/agents/<id>` route → store sync: resolve, switch, then open. A
- *  thread already open as a pane here just takes focus. */
+ *  thread already open as a pane here just takes focus; one the tabs have not
+ *  restored yet (a relaunch, Back onto a closed chat pane) opens as a chat pane. */
 export async function openSessionDeepLink(store: DeepLinkStore, id: Id): Promise<void> {
   if (store.threadPanes.includes(id)) return store.openSession(id);
-  if (!store.sessionById.has(id) && !id.startsWith('__') && !(await prepareDeepLink(store, id, 'session'))) return;
+  const found = store.sessionById.has(id) || id.startsWith('__') ? 'session' : await prepareDeepLink(store, id, 'session');
+  if (!found) return;
+  if (found === 'thread') return store.openSession(id, 'thread');
   // An old or outside link (`agents/<id>` from the tray, the floating bar, a
   // notice written before the session moved) to a session that lives in
   // Threads opens there, never as a terminal tab over the same conversation.

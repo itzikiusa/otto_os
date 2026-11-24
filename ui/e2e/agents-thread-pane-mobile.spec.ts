@@ -61,3 +61,22 @@ test('a thread row pushes the full-height chat; Back returns to the list', async
   await page.goBack();
   await expect(page.getByTestId('agents-inbox')).toBeVisible();
 });
+
+// ‹ returns to the list without a new history entry: the system Back from
+// the list then leaves Agents instead of walking back into the session.
+test('‹ steps back to the list; the system Back then leaves Agents', async ({ page }) => {
+  await page.goto('/#/settings');
+  await expect(page.locator('body')).toBeVisible();
+  await page.evaluate(() => (location.hash = '#/agents'));
+  const row = page.getByTestId(`agents-row-${threadId}`);
+  await expect(row).toBeVisible({ timeout: 30_000 });
+  await row.tap();
+  const pane = page.getByTestId(`thread-pane-${threadId}`);
+  await expect(pane).toBeVisible({ timeout: 30_000 });
+  await page.getByTestId('agents-back-to-list').tap();
+  await expect(page.getByTestId('agents-inbox')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe('#/agents');
+  await page.goBack();
+  await expect.poll(() => page.evaluate(() => location.hash)).toMatch(/^#\/settings/);
+  await expect(pane).toHaveCount(0);
+});

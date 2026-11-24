@@ -54,6 +54,8 @@ test.describe('usage remaining limits (desktop)', () => {
     const claudeRow = section.locator('[data-testid^="limits-row-claude:"]').first();
     await expect(claudeRow.getByTestId('limits-unknown')).toBeVisible();
     await expect(claudeRow).toContainText('does not write its plan limits');
+    // The line says why in words; no "Unknown" pill (patterns.md §10).
+    await expect(claudeRow).not.toContainText('Unknown');
     await expect(claudeRow.getByRole('meter')).toHaveCount(0);
 
     await expectAccessible(page);

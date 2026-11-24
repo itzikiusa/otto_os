@@ -6,7 +6,9 @@
 //! collector, no otto-usage dependency here.
 pub mod context;
 mod types;
+mod ui_ingest;
 pub use types::*;
+pub use ui_ingest::validate_ui_batch;
 
 /// Where a scope's spans are recorded. Implemented by the collector crate's
 /// `TelemetryService`; a scope with a disabled sink records nothing.

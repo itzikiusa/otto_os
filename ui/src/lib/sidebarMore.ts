@@ -9,11 +9,26 @@
 export const DEFAULT_SHOWN: readonly string[] = ['agents', 'git', 'connections', 'threads', 'home', 'usage'];
 
 /** The sidebar ids a navigation-count list says were used (count > 0),
- *  mapped onto sidebar entries (`database` → Connections, …) by `navId`. */
-export function usedModules(counts: readonly { module: string; count: number }[], navId: (module: string) => string): string[] {
-  const out = new Set<string>();
-  for (const c of counts) if (c.count > 0 && c.module !== 'other' && c.module !== 'shell') out.add(navId(c.module));
-  return [...out];
+ *  mapped onto sidebar entries (`database` → Connections, …) by `navId`,
+ *  most used first — on the phone first, then overall (the phone bar's order). */
+export function usedModules(counts: readonly { module: string; count: number; device?: string }[], navId: (module: string) => string): string[] {
+  const tally = new Map<string, { phone: number; all: number }>();
+  for (const c of counts) {
+    if (c.count <= 0 || c.module === 'other' || c.module === 'shell') continue;
+    const t = tally.get(navId(c.module)) ?? { phone: 0, all: 0 };
+    t.all += c.count;
+    if (c.device === 'phone') t.phone += c.count;
+    tally.set(navId(c.module), t);
+  }
+  return [...tally].sort(([, a], [, b]) => b.phone - a.phone || b.all - a.all).map(([id]) => id);
+}
+
+/** The phone bar's order: pinned first, then the most used (`used`, ranked;
+ *  the defaults until there is usage), then the rest in sidebar order. */
+export function barOrder<M extends { id: string }>(modules: readonly M[], favorites: readonly string[], used: readonly string[] | null): M[] {
+  const rank = [...favorites, ...(used && used.length > 0 ? used : DEFAULT_SHOWN)];
+  const pos = (id: string): number => (rank.includes(id) ? rank.indexOf(id) : rank.length);
+  return [...modules].sort((a, b) => pos(a.id) - pos(b.id));
 }
 
 /** Which module ids stay in the sidebar: pinned ∪ (used, else the defaults)

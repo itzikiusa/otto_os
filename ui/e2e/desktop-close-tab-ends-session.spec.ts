@@ -344,8 +344,9 @@ test('"Always delete" set in Settings: working agents delete and close without c
   await expect.poll(() => exists(idByTitle.Kaka), { timeout: 15_000 }).toBe(false);
   await expect(page.getByRole('dialog')).toHaveCount(0);
 
+  // Working (the tab strip carries no status dot; its inbox row says it).
+  await expect(page.locator(`[data-testid="agents-row-${idByTitle.Nesta}"][data-state="working"]`)).toBeVisible();
   const tab = await openTab(page, 'Nesta');
-  await expect(tab.locator('[data-state="working"]')).toBeVisible();
   await tab.locator('.tab-close').click();
   await expect(tab).toBeHidden();
   await expect(page.getByRole('dialog')).toHaveCount(0);

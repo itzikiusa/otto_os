@@ -99,3 +99,9 @@ test('the tunnel jump host is saved as params.ssh.proxy_jump and cleared when em
   c.tunJump = '';
   assert.equal(c.buildParams().ssh.proxy_jump, undefined);
 });
+
+test('a pasted IPv6 URI fills Host without its brackets', () => {
+  const p = parseConnectionUri('postgres://u:p@[::1]:5432/db') as { host?: string; port?: string };
+  assert.equal(p.host, '::1');
+  assert.equal(p.port, '5432');
+});

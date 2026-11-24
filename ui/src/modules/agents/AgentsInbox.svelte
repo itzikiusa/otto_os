@@ -47,6 +47,9 @@
 
   // The inbox lists the same structured threads as Threads (spec A: one set of sessions, two views).
   type RuntimeStore = typeof import('../threads/runtime/runtimeThreads.svelte').runtimeThreads; // ui-guards: allow — one store
+  // …and read their state the Threads way (threadNav `threadClass`: one needs-you derivation).
+  type ThreadNav = typeof import('../threads/threadNav.svelte'); // ui-guards: allow — one derivation
+  type InboxLive = typeof import('../threads/threadInbox.svelte').inboxLive; // ui-guards: allow — one store
   // The Threads footer's meter (the focused session's agent): after first paint.
   const UsageMeter = lazyComponent(() => import('../threads/ThreadUsageMeter.svelte')); // ui-guards: allow — the Threads footer meter, one implementation
 
@@ -59,7 +62,6 @@
   let { onopen, onhide }: Props = $props();
 
   let query = $state('');
-  let workingOpen = $state(true);
   let historyOpen = $state(false);
   let telegramOpen = $state(false);
   let slackOpen = $state(false);
@@ -72,23 +74,31 @@
   // Structured threads come from the Threads runtime store — its own chunk,
   // loaded after first paint so the terminal is never behind it.
   let rt = $state<RuntimeStore | null>(null);
+  let nav = $state<ThreadNav | null>(null);
+  let live = $state<InboxLive | null>(null);
   let meterReady = $state(false);
   onMount(() => {
     let gone = false;
-    let off: (() => void) | null = null;
+    const offs: (() => void)[] = [];
     const cancel = whenIdle(() => {
       meterReady = true;
-      void import('../threads/runtime/runtimeThreads.svelte').then((m) => { // ui-guards: allow — see RuntimeStore
+      void Promise.all([
+        import('../threads/runtime/runtimeThreads.svelte'), // ui-guards: allow — see RuntimeStore
+        import('../threads/threadNav.svelte'), // ui-guards: allow — see ThreadNav
+        import('../threads/threadInbox.svelte'), // ui-guards: allow — see InboxLive
+      ]).then(([m, n, i]) => {
         if (gone) return;
         rt = m.runtimeThreads;
-        off = m.runtimeThreads.mount();
+        nav = n;
+        live = i.inboxLive;
+        offs.push(m.runtimeThreads.mount(), i.inboxLive.mount());
         void m.runtimeThreads.loadAll().catch(() => {});
       });
     });
     return () => {
       gone = true;
       cancel();
-      off?.();
+      for (const off of offs) off();
     };
   });
 
@@ -125,10 +135,12 @@
   const threadRows = $derived(rt ? byRecent(rt.rows().filter((s) => isForeground(s) && scope(s))) : []);
 
   function stateOf(s: Session) {
-    return sessionState(s, ws.statusMap[s.id] ?? s.status, ws.needsYou[s.id] === true, { stale });
+    return nav && isThread(s) ? nav.threadRowState(s) : sessionState(s, ws.statusMap[s.id] ?? s.status, ws.needsYou[s.id] === true, { stale });
   }
   const unread = (s: Session): boolean => ws.unread[s.id] === true && ws.activeSessionId !== s.id;
-  const classOf = (s: Session) => inboxClass(stateOf(s).key, unread(s));
+  const classOf = (s: Session) => (nav && isThread(s) ? nav.threadClass(s, unread(s)) : inboxClass(stateOf(s).key, unread(s)));
+  /** A thread's pending requests' kinds (Approval vs Question in its word). */
+  const kindsOf = (s: Session): string[] => (live && isThread(s) ? live.kindsOf(s.id) : []);
   const branchOf = (s: Session): string | null => {
     const m = s.meta as Record<string, unknown> | null | undefined;
     const b = m?.git_branch ?? m?.branch ?? m?.worktree_branch;
@@ -137,7 +149,7 @@
     return repo ? (git.statusById[repo.id]?.branch ?? null) : null;
   };
   const matches = (s: Session): boolean =>
-    (!ws.needsYouFilter || ws.needsYou[s.id] === true) && matchesQuery(s, query, [branchOf(s), wsName(s.workspace_id)]);
+    (!ws.needsYouFilter || classOf(s) === 'needs') && matchesQuery(s, query, [branchOf(s), wsName(s.workspace_id)]);
 
   const inbox = $derived(agentsInbox([...ptyRows, ...threadRows].filter(matches), classOf));
   const historyRows = $derived(
@@ -150,7 +162,7 @@
   // This workspace's rows (and "No workspace"), as the old list's select mode.
   const own = (s: Session): boolean => s.workspace_id === ws.currentId || s.workspace_id === SCRATCH_WORKSPACE_ID;
   const selectable = $derived(
-    [...inbox.main, ...inbox.working, ...(historyOpen ? historyRows : [])].filter((s) => !isThread(s) && own(s) && ws.canEditSession(s)),
+    [...inbox, ...(historyOpen ? historyRows : [])].filter((s) => !isThread(s) && own(s) && ws.canEditSession(s)),
   );
   const selIds = $derived(selectable.filter((s) => sel.has(s.id)).map((s) => s.id));
   const liveSel = $derived(selIds.filter((id) => !ws.archivedAgentSessions.some((a) => a.id === id)));
@@ -333,8 +345,8 @@
 {#snippet row(s: Session)}
   {@const thread = isThread(s)}
   {@const st = stateOf(s)}
-  {@const word = s.archived ? { word: 'Stopped', tone: '' as const } : sessionWord(st, { unread: unread(s) })}
-  {@const cls = s.archived ? 'rest' : inboxClass(st.key, unread(s))}
+  {@const word = s.archived ? { word: 'Stopped', tone: '' as const } : sessionWord(st, { unread: unread(s), kinds: kindsOf(s) })}
+  {@const cls = s.archived ? 'rest' : classOf(s)}
   <AgentsInboxRow
     session={s}
     project={wsName(s.workspace_id)}
@@ -355,7 +367,7 @@
   />
 {/snippet}
 
-<aside class="ai" aria-label="Sessions" data-testid="agents-inbox">
+<aside class="ai" class:touch={viewport.isPhone} aria-label="Sessions" data-testid="agents-inbox">
   <div class="ai-top">
     <label class="ai-search">
       <Icon name="search" size={14} />
@@ -390,25 +402,23 @@
       </label>
       <button type="button" class="btn small ghost" disabled={liveSel.length < 2} data-testid="agents-tile-selected" onclick={tileSelected}>Tile</button>
       <button type="button" class="btn small ghost" disabled={liveSel.length === 0} data-testid="agents-archive-selected" onclick={() => void archiveSelected()}>Archive</button>
-      <button type="button" class="btn small ghost danger" disabled={selIds.length === 0} data-testid="agents-delete-selected" onclick={() => void deleteSelected()}>Delete{selIds.length > 0 ? ` (${selIds.length})` : ''}</button>
+      <button type="button" class="btn small ghost danger ai-del" disabled={selIds.length === 0} data-testid="agents-delete-selected" onclick={() => void deleteSelected()}>Delete{selIds.length > 0 ? ` (${selIds.length})` : ''}</button>
     </div>
   {/if}
 
   <div class="ai-body">
     <div class="ai-scroll">
       <div class="ai-list" data-testid="agents-list">
-        {#each inbox.main as s (s.id)}
+        {#each inbox as s (s.id)}
           {@render row(s)}
         {:else}
           {#if ws.sessionsLoading && ws.sessions.length === 0}
             <Skeleton rows={3} height={56} label="sessions" />
           {:else if query.trim() || ws.needsYouFilter}
             <p class="ai-empty">No sessions match</p>
-          {:else if inbox.working.length === 0}
-            <div class="ai-empty">
-              <p>No sessions yet</p>
-              <button type="button" class="btn small ghost" onclick={() => (ui.newSessionOpen = true)}>New session</button>
-            </div>
+          {:else if viewport.isPhone}
+            <!-- The desktop canvas says it (with its New session); the foot has the button. -->
+            <p class="ai-empty">No sessions yet</p>
           {/if}
         {/each}
       </div>
@@ -420,17 +430,6 @@
       {#if slack.length > 0}
         <InboxFold label="Slack" count={slack.length} expanded={slackOpen} ontoggle={() => (slackOpen = !slackOpen)}>
           {#if slackOpen}{#each slack as s (s.id)}{@render row(s)}{/each}{/if}
-        </InboxFold>
-      {/if}
-    </div>
-    <div class="ai-folds">
-      {#if inbox.working.length > 0}
-        <InboxFold label="Working" ariaLabel="Working sessions" count={inbox.working.length} expanded={workingOpen} testid="agents-working-toggle" ontoggle={() => (workingOpen = !workingOpen)}>
-          <div class="ai-list" data-testid="agents-working-list">
-            {#each workingOpen ? inbox.working : inbox.working.filter((s) => s.id === ws.activeSessionId) as s (s.id)}
-              {@render row(s)}
-            {/each}
-          </div>
         </InboxFold>
       {/if}
       {#if ws.hasArchived || historyRows.length > 0}
@@ -457,9 +456,10 @@
   </div>
 
   <footer class="ai-foot">
-    <button type="button" class="btn small ghost ai-new" data-testid="agents-inbox-new" aria-keyshortcuts="Meta+T" title="New session (⌘T)" onclick={() => (ui.newSessionOpen = true)}>
+    <!-- On an empty desktop the canvas carries New session (once). -->
+    {#if viewport.isPhone || inbox.length > 0 || query.trim() || ws.needsYouFilter}<button type="button" class="btn small ghost ai-new" data-testid="agents-inbox-new" aria-keyshortcuts="Meta+T" title="New session (⌘T)" onclick={() => (ui.newSessionOpen = true)}>
       <Icon name="plus" size={14} /> New session
-    </button>
+    </button>{/if}
     {#if meterReady}
       <LazyMount lazy={UsageMeter} what="usage" variant="compact" quiet props={{ provider: ws.getSession(ws.activeSessionId)?.provider ?? null, onopen: () => router.go('usage') }} />
     {/if}
@@ -554,6 +554,11 @@
     flex: 1;
     font-size: var(--fs-s);
     color: var(--text-dim);
+    white-space: nowrap;
+  }
+  /* The destructive one stands apart from Tile / Archive. */
+  .ai-del {
+    margin-inline-start: var(--sp-3);
   }
   .ai-body {
     flex: 1;
@@ -571,21 +576,6 @@
     gap: var(--sp-4);
   }
   /* Working and History stay pinned above the foot (≤ 40 %); an open fold scrolls inside. */
-  .ai-folds {
-    flex-shrink: 0;
-    max-block-size: 40%;
-    display: flex;
-    flex-direction: column;
-    padding: var(--sp-2) var(--sp-4);
-    border-block-start: 1px solid var(--separator);
-  }
-  .ai-folds :global(.if-group) {
-    flex: 0 1 auto;
-  }
-  .ai-folds .ai-list {
-    min-height: 0;
-    overflow-y: auto;
-  }
   .ai-list {
     display: flex;
     flex-direction: column;
@@ -602,11 +592,14 @@
     align-items: center;
     gap: 6px;
   }
-  .ai-empty p {
-    margin: 0;
-  }
   .ai-more {
     margin: 6px 8px;
+  }
+  /* Phone: 44 px targets for the list's own controls. */
+  .ai.touch .ai-top :global(.icon-btn),
+  .ai.touch .ai-new {
+    min-inline-size: 44px;
+    min-block-size: 44px;
   }
   .ai-foot {
     display: flex;

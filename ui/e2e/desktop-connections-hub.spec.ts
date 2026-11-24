@@ -131,7 +131,8 @@ test.describe('connections hub', () => {
     // Line one: name … the state WORD (never tested just because it rendered);
     // line two: kind · host · section · last opened.
     await expect(mysqlRow).toContainText('Not checked');
-    await expect(mysqlRow).toContainText('MySQL · 127.0.0.1:3306 · HUB-SEC · never opened');
+    // Under the HUB-SEC heading the row does not repeat the section's name.
+    await expect(mysqlRow).toContainText('MySQL · 127.0.0.1:3306 · never opened');
     await expect(sshRow).toContainText('SSH · ssh.example.com');
 
     // (2) ONE filter menu (no chip rows): Kafka → only the cluster; the

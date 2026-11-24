@@ -197,7 +197,9 @@
       // than the kept controls being clipped off the start of the row.
       const keep = visible.filter((k) => !canCollapse(k));
       let keepW = keep.reduce((s, k) => s + (widthOf.get(k) ?? 0), 0) + GAP * Math.max(0, keep.length - 1);
-      if (more || keep.length < visible.length) keepW += MORE_W + (keep.length ? GAP : 0);
+      // The ⋯ as drawn (44 px on touch), else its desktop width.
+      const moreW = moreEl?.offsetWidth || MORE_W;
+      if (more || keep.length < visible.length) keepW += moreW + (keep.length ? GAP : 0);
       // …but the title block never gives up its title line (h1 + badges).
       // Every layout READ happens before the first style WRITE below.
       let titleMin = 0;
@@ -218,10 +220,16 @@
       const inlineTabs = row?.querySelector<HTMLElement>(':scope > .ph-tabs-inline');
       const pane = row?.querySelector<HTMLElement>(':scope > .pane-controls');
       const rowW = row ? row.clientWidth : 0;
-      const leadW = lead ? lead.offsetWidth + 12 : 0;
-      const tabsW = inlineTabs ? inlineTabs.offsetWidth + 12 : 0;
-      const paneW = pane ? pane.offsetWidth + 12 : 0;
-      const room = row ? rowW - 48 - titleMin - leadW - tabsW - paneW : Infinity;
+      // The row's own padding and gap, as styled (a phone's are smaller than
+      // the desktop 20 + 16 / 12: a constant 48 under-sized the actions there
+      // and pushed the ⋯ past the window edge).
+      const rs = row ? getComputedStyle(row) : null;
+      const gap = rs ? parseFloat(rs.columnGap) || 0 : 12;
+      const chrome = rs ? parseFloat(rs.paddingInlineStart) + parseFloat(rs.paddingInlineEnd) + gap : 48;
+      const leadW = lead ? lead.offsetWidth + gap : 0;
+      const tabsW = inlineTabs ? inlineTabs.offsetWidth + gap : 0;
+      const paneW = pane ? pane.offsetWidth + gap : 0;
+      const room = row ? rowW - chrome - titleMin - leadW - tabsW - paneW : Infinity;
       if (rootEl && titleEl) styles.set(rootEl, rootEl.style, '--ph-title-min', `${titleMin}px`);
       styles.set(wrapEl, wrapEl.style, 'min-width', `${Math.max(0, Math.min(Math.ceil(keepW) + RING * 2, room))}px`);
       let need = visible.reduce((s, k) => s + (widthOf.get(k) ?? 0), 0) + GAP * Math.max(0, visible.length - 1);
@@ -231,7 +239,7 @@
       // "bo_co…" next to an empty half-row (the page's toolbar lives on the
       // row below, so its header has no actions at all).
       if (row && rootEl) {
-        const reserved = 48 + titleMin + leadW + paneW + (visible.length ? need + RING * 2 + 12 : 0);
+        const reserved = chrome + titleMin + leadW + paneW + (visible.length ? need + RING * 2 + gap : 0);
         const tabsCap = Math.max(rowW * 0.5, rowW - reserved);
         styles.set(rootEl, rootEl.style, '--ph-tabs-max', `${Math.floor(tabsCap)}px`);
       }
@@ -239,7 +247,7 @@
       // only one or two actions lets a long title use the room they leave
       // instead of ellipsizing next to an empty stretch of toolbar.
       if (row && rootEl) {
-        const others = 48 + leadW + tabsW + paneW + (visible.length ? need + RING * 2 + 12 : 0);
+        const others = chrome + leadW + tabsW + paneW + (visible.length ? need + RING * 2 + gap : 0);
         const cap = Math.max(rowW * 0.45, rowW - others);
         styles.set(rootEl, rootEl.style, '--ph-title-max', `${Math.floor(cap)}px`);
       }
@@ -248,9 +256,9 @@
       // the wrap's width is flex-basis 0, independent of what it contains.)
       let avail = wrapEl.clientWidth - RING * 2;
       const hidden: HTMLElement[] = [];
-      if (more) avail -= MORE_W + GAP;
+      if (more) avail -= moreW + GAP;
       if (need > avail + 0.5) {
-        if (!more) avail -= MORE_W + GAP;
+        if (!more) avail -= moreW + GAP;
         const order = visible
           .map((el, i) => ({ el, i, p: Number(el.dataset.overflow ?? 0) || 0 }))
           .filter((o) => canCollapse(o.el))

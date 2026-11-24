@@ -48,9 +48,10 @@ test('Phone schema selection exposes one keyboard reachable selected tab', async
   await setup(page,'database');
   await page.setViewportSize({width:375,height:812});
   // A phone keeps Tables / History in a sheet from the header.
-  const tables = page.getByTestId('page-header').getByRole('button',{name:'Tables',exact:true});
-  if (await tables.isVisible()) await tables.click();
-  else { await page.getByTestId('page-header').getByRole('button',{name:'More actions'}).click(); await page.getByRole('menuitem',{name:/^Tables/}).click(); }
+  // Tables is kept in the phone header. (Branching on isVisible() raced the
+  // header's re-fit after the resize: it read "visible" one frame before the
+  // button folded into the ⋯, and the click then waited on a hidden button.)
+  await page.getByTestId('page-header').getByRole('button',{name:'Tables',exact:true}).click();
   const sidebar = page.getByRole('dialog',{name:'Tables'}).getByRole('tablist',{name:'Sidebar view'});
   await expect(sidebar.getByRole('tab',{name:'Tables',exact:true})).toBeVisible();
   await expect(sidebar.getByRole('tab',{name:'Tables',exact:true})).toHaveAttribute('tabindex','0');

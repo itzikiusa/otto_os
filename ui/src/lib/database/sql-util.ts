@@ -617,9 +617,10 @@ export function stmtPreview(statement: string, max = 300): string {
   return flat.length > max || head.length < statement.length ? `${flat.slice(0, max)}…` : flat;
 }
 
-/** Whether a statement changes the schema (CREATE / ALTER / DROP / RENAME /
- *  TRUNCATE, after leading comments) — the workbench re-reads the cached
- *  schema tree after one runs. */
+/** Whether a statement — or any statement of a script ("Run all") —
+ *  changes the schema (CREATE / ALTER / DROP / RENAME / TRUNCATE, after
+ *  -- / # / block comments): the workbench re-reads the cached schema tree
+ *  after one runs. A false positive (a ";" inside a string) costs one re-read. */
 export function isDdl(sql: string): boolean {
-  return /^\s*(?:(?:--[^\n]*\n|\/\*[\s\S]*?\*\/)\s*)*(?:create|alter|drop|rename|truncate)\b/i.test(sql);
+  return /(?:^|;)\s*(?:(?:--[^\n]*\n|#[^\n]*\n|\/\*[\s\S]*?\*\/)\s*)*(?:create|alter|drop|rename|truncate)\b/i.test(sql);
 }
