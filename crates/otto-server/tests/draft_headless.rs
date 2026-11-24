@@ -74,10 +74,13 @@ async fn fixture(headless: &str) -> Fixture {
     let pool = mem_pool().await;
     let ctx = ServerCtx::for_tests(&pool, tmp.path().join("data")).await;
     let bin = tmp.path().join("bin");
-    let claude = fake_claude(&bin, headless);
-    ctx.manager
-        .providers()
-        .reload(Some(&serde_json::json!({ "claude": { "cmd": claude } })));
+    // No stand-in for the one by-hand run against the real CLI.
+    if !headless.is_empty() {
+        let claude = fake_claude(&bin, headless);
+        ctx.manager
+            .providers()
+            .reload(Some(&serde_json::json!({ "claude": { "cmd": claude } })));
+    }
     let owner = otto_state::UsersRepo::new(pool.clone())
         .create("owner", "unused", "Owner", true)
         .await
@@ -301,4 +304,32 @@ async fn a_failed_draft_says_why_at_once() {
         serde_json::json!({ "error": "Claude: Not logged in · Please run /login" })
     );
     assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+/// The same one-file draft against the REAL `claude` (one haiku prompt, on
+/// the signed-in account) — run by hand, never in CI:
+/// `cargo nextest run -p otto-server --test it --run-ignored only -E 'test(/real_claude/)' --no-capture`
+#[tokio::test]
+#[ignore = "spends one real haiku prompt"]
+async fn real_claude_drafts_a_one_file_change_within_five_seconds() {
+    let f = fixture("").await;
+    let started = Instant::now();
+    let resp = reqwest::Client::new()
+        .post(&f.endpoint)
+        .bearer_auth(&f.token)
+        .json(&serde_json::json!({ "stream": true }))
+        .send()
+        .await
+        .unwrap();
+    let mut first = None;
+    let mut body = String::new();
+    let mut resp = resp;
+    while let Some(chunk) = resp.chunk().await.unwrap() {
+        first.get_or_insert_with(|| started.elapsed());
+        body.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    let elapsed = started.elapsed();
+    eprintln!("real claude: first line {first:?}, done {elapsed:?}\n{body}");
+    assert!(body.contains("\"done\""), "{body}");
+    assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
 }
