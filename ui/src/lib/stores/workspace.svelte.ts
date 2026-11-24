@@ -322,7 +322,7 @@ class WorkspaceStore {
     // Only rows the grouped view can show (foreground agents): background
     // engine sessions of every workspace used to ride along. A failure keeps the old groups.
     const rows = await api.get<Session[]>('/sessions?archived=false&foreground=true').catch(() => null);
-    if (token === getToken() && selection === this.selectionGeneration) this.otherWsLoaded = true;
+    if (token === getToken() && selection === this.selectionGeneration && (this.allWorkspaces || this.otherWsWanted)) this.otherWsLoaded = true;
     if (!rows) return;
     if (token !== getToken() || selection !== this.selectionGeneration || (!this.allWorkspaces && !this.otherWsWanted)) return;
     const flat = rows.filter((s) => others.has(s.workspace_id) && !s.archived && visibleOnThisDevice(s));

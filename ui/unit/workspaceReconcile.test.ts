@@ -135,3 +135,16 @@ test('a workspace switch forgets that the other workspaces were listed; an older
   await fresh;
   assert.equal(ws.otherWsLoaded, true);
 });
+
+test('an answer that lands after the grouped view was turned off does not count as listed (R3-009)', async () => {
+  const { deferred } = await import('./sourceHarness.ts');
+  const d = deferred<unknown>();
+  const { ws } = fixture(async (path) => (path.startsWith('/sessions?archived=false') ? d.promise : []));
+  ws.workspaces = [{ id: 'w', settings: {} }, { id: 'w2', settings: {} }];
+  ws.allWorkspaces = true;
+  const read = ws.refreshOtherSessions();
+  ws.allWorkspaces = false;
+  d.resolve([]);
+  await read;
+  assert.equal(ws.otherWsLoaded, false);
+});
