@@ -82,9 +82,16 @@ test('Home is the first sidebar entry and seeds a default view of live boxes', a
   await expect(today.locator('[data-card="running"]')).toContainText('Working');
   await expect(today.locator('[data-card="next"], [data-card="recent"]')).toHaveCount(0);
   expect((await today.boundingBox())!.width).toBeLessThanOrEqual(760 + 2 * 16);
-  // A notice that needs you is an inbox row that says so in words.
+  // A row that needs you says so in words.
   const needsRows = today.locator('[data-card="needs"] [data-testid^="home-row-"]');
-  if ((await needsRows.count()) > 0) await expect(needsRows.first().locator('.tr-status')).toHaveText(/Needs you|Approval|Failed/);
+  if ((await needsRows.count()) > 0) await expect(needsRows.first().locator('.tr-status')).toHaveText(/Needs you|Approval/);
+  // Notices (the fake CLIs' "re-login needed") are the bell's, not needs-you:
+  // Home counts what the status bar counts (design review 2, H6/N4), and the
+  // sidebar carries no second "Needs you" pill.
+  await expect(today.locator('[data-card="needs"]')).not.toContainText('Notice');
+  await expect(page.getByTestId('statusbar-needs-you')).toHaveCount(0);
+  await expect(today.locator('.line')).not.toContainText('need');
+  await expect(page.locator('.needs-you-filter')).toHaveCount(0);
   // The composer is the floating bar, full (not the status-bar chip) on Home.
   await expect(page.getByTestId('floating-bar')).toHaveAttribute('data-presence', 'full');
   // Home's spaces are the floating bar's: space 01 takes the view's name.
@@ -215,7 +222,9 @@ test('widgets: add from the picker (max 8), resize in grid units, zoom, remove',
   for (let i = 0; i < 20; i++) await page.keyboard.press('ArrowLeft');
   expect(await first.evaluate((el) => (el as HTMLElement).style.gridColumn)).toBe('span 3');
 
-  // Pointer resize: drag the corner handle two columns to the right.
+  // Pointer resize: drag the corner handle two columns to the right — from
+  // mid-screen, never from under the docked floating bar.
+  await handle.evaluate((el) => el.scrollIntoView({ block: 'center' }));
   const box = await first.boundingBox();
   const h = await handle.boundingBox();
   if (!box || !h) throw new Error('no box');

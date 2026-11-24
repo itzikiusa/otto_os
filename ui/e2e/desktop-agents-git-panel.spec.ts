@@ -57,9 +57,10 @@ test('the details card on Agents: Changes opens the Git tab, a subagent opens he
   await card.getByTestId('details-changes').click();
   await expect(page.getByTestId('commit-card')).toBeVisible({ timeout: 20_000 });
   await expect(page.locator('.rstrip').getByRole('button', { name: 'Git', exact: true })).toHaveAttribute('aria-pressed', 'true');
-  // The Info tab says the session's state in a word of the one vocabulary (no dot badge).
+  // The Info tab leaves the state to the pane header (one word, design review 2, N3): no Status row, no dot badge.
   await page.locator('.rstrip').getByRole('button', { name: 'Info', exact: true }).click();
-  await expect(page.locator('.info-row', { hasText: 'Status' }).locator('.word')).toHaveText(/^(Idle|Working|Done|Needs you)/, { timeout: 15_000 });
+  await expect(page.locator('.info-row', { hasText: 'Created' })).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.info-row', { hasText: 'Status' })).toHaveCount(0);
   await expect(page.locator('.info-row .sbadge')).toHaveCount(0);
 
   await card.getByTestId('details-subagent').filter({ hasText: 'Rivera helper' }).getByRole('button').first().click();
@@ -88,7 +89,8 @@ test('a dirty session folder: the Git tab is Changes + the commit card; Commit a
   const card = page.getByTestId('commit-card');
   await expect(card).toBeVisible({ timeout: 20_000 });
   await expectFullyInViewport(page, card, 'commit card');
-  await expect(card.getByTestId('commit-card-included')).toHaveText('2 files included');
+  await expect(card.getByTestId('commit-card-included')).toHaveText('all files included');
+  await expect(page.locator('[data-wp-section="staged"] .wp-sec-count')).toHaveCount(0);
   await expect(card.locator('.subject-input')).toHaveValue('feat: ship the commit card', { timeout: 15_000 });
   await expect(card.locator('.btn.primary')).toHaveCount(1);
   // Every action sits inside the narrow card (⋯ overflowed it, clipped to a

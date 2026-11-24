@@ -23,6 +23,9 @@
     title: string;
     /** Files in the section (the header count; folders excluded). */
     count: number;
+    /** The header carries the section's +/− line totals instead of the count
+     *  (the Changes badge already counts the files). */
+    lines?: boolean;
     rows: Row[];
     lw: ListWindow;
     open: boolean;
@@ -47,7 +50,7 @@
     footer?: Snippet;
   }
   let {
-    section, title, count, rows, lw, open = $bindable(), empty, tree, selected, partial, counts,
+    section, title, count, lines = false, rows, lw, open = $bindable(), empty, tree, selected, partial, counts,
     collapsed, ontoggle, onstage, ondiscard, onselect, onfilemenu, onfoldermenu, all, diffId, footer,
   }: Props = $props();
 
@@ -77,6 +80,17 @@
   };
 
   const fmt = (n: number): string => n.toLocaleString();
+  const lineTotals = $derived.by(() => {
+    if (!lines || !counts) return null;
+    let added = 0;
+    let deleted = 0;
+    for (const p of all) {
+      const v = counts.get(p);
+      added += v?.added ?? 0;
+      deleted += v?.deleted ?? 0;
+    }
+    return added + deleted > 0 ? { added, deleted } : null;
+  });
 </script>
 
 {#snippet kindBadge(kind: FileChange['kind'])}
@@ -177,7 +191,14 @@
     <button type="button" class="wp-sec-toggle" data-wp-head={section} onclick={() => (open = !open)} aria-expanded={open}>
       <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
       <span class="wp-sec-title">{title}</span>
-      <span class="wp-sec-count">{fmt(count)}</span>
+      {#if !lines}
+        <span class="wp-sec-count">{fmt(count)}</span>
+      {:else if lineTotals}
+        <span class="wp-stat" data-testid="wip-section-lines" title="{fmt(lineTotals.added)} lines added, {fmt(lineTotals.deleted)} deleted">
+          <span class="wp-add">+{fmt(lineTotals.added)}</span>
+          <span class="wp-del">−{fmt(lineTotals.deleted)}</span>
+        </span>
+      {/if}
     </button>
     {#if all.length > 0}
       <button
@@ -501,6 +522,10 @@
   @media (pointer: coarse) {
     .wp-section {
       --wp-row-h: 44px;
+    }
+    .wp-sec-btn {
+      inline-size: 44px;
+      block-size: 44px;
     }
     .wp-check {
       width: 20px;

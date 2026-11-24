@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { expectNoHorizontalOverflow } from './helpers';
+import { expectFingerSized, expectNoHorizontalOverflow } from './helpers';
 
 // Home on a phone: the same one column above the bottom nav — greeting, the
 // "Ask anything" composer (no in-app floating bar on a phone: it opens the
@@ -18,6 +18,10 @@ test('phone: Home is one column; the composer opens the command sheet; rows are 
     expect((await row.boundingBox())!.height).toBeGreaterThanOrEqual(44);
   }
   await expectNoHorizontalOverflow(page);
+  // Pinned: the space tab, + and ⋯ take a finger (design review 2, H8).
+  const space = page.getByRole('tab', { name: 'Overview' });
+  await space.scrollIntoViewIfNeeded();
+  await expectFingerSized(space, page.getByRole('button', { name: 'Add space' }), page.getByRole('button', { name: 'Space options' }));
   const ask = page.getByTestId('home-ask');
   expect((await ask.boundingBox())!.height).toBeGreaterThanOrEqual(44);
   await ask.tap();

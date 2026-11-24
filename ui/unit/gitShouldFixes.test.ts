@@ -28,8 +28,6 @@ test('isCompactPrHeaderTab collapses PR header only on code and review tabs', ()
 
 test('prCloseLabels uses Close copy on GitHub/GitLab and Decline copy on Bitbucket', () => {
   const gh = helpers.prCloseLabels('github');
-  assert.equal(gh.button, 'Close PR…');
-  assert.equal(gh.busy, 'Closing…');
   assert.equal(gh.verb, 'Close PR');
   assert.equal(gh.title(42), 'Close pull request #42?');
   assert.equal(gh.menu, 'Close pull request…');
@@ -37,15 +35,11 @@ test('prCloseLabels uses Close copy on GitHub/GitLab and Decline copy on Bitbuck
   assert.equal(gh.toastFail, 'Couldn’t close the PR');
 
   const gl = helpers.prCloseLabels('gitlab');
-  assert.equal(gl.button, 'Close PR…');
   assert.equal(gl.verb, 'Close PR');
 
-  const unknown = helpers.prCloseLabels(null);
-  assert.equal(unknown.button, 'Close PR…');
+  assert.equal(helpers.prCloseLabels(null).verb, 'Close PR');
 
   const bb = helpers.prCloseLabels('bitbucket');
-  assert.equal(bb.button, 'Decline…');
-  assert.equal(bb.busy, 'Declining…');
   assert.equal(bb.verb, 'Decline PR');
   assert.equal(bb.title(7), 'Decline PR #7?');
   assert.equal(bb.menu, 'Decline pull request…');

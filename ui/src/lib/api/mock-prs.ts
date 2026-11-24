@@ -235,6 +235,7 @@ export const mockExtraPrs: ExtraPr[] = [
       url: 'https://github.com/dev-otto/otto/pull/52',
       labels: ['ci'],
       head_sha: 'b52cc33',
+      review: { status: 'approved', approvals: 1 },
     },
     description_md: 'Caches `~/go/pkg/mod` between CI runs.',
     comments: [],

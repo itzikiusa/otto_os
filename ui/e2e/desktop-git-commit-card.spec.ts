@@ -39,6 +39,15 @@ test('dirty repo: Changes first → Commit and push → Create pull request', as
   await expect(page.locator('.git-tab-dot')).toHaveCount(0);
   // The first file's diff is open beside the list.
   await expect(page.locator('.wip-panel .wp-diff')).toBeVisible();
+  // A one-file diff: its file header names it with its counts, the toolbar does not repeat them (review 2, N5).
+  await expect(page.locator('.wip-panel .wp-diff .dfile-head').first()).toBeVisible();
+  await expect(page.locator('.wip-panel .wp-diff .diff-stats')).not.toContainText(/file|\+1/);
+  if (process.env.OTTO_E2E_SHOTS) for (const s of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme: s });
+    await expect(page.locator('html')).toHaveAttribute('data-scheme', s);
+    await page.screenshot({ path: `${process.env.OTTO_E2E_SHOTS}/git-changes-1440-${s}.png`, animations: 'disabled' });
+  }
+  await page.emulateMedia({ colorScheme: 'light' });
   // One primary; Commit only is the secondary.
   await expect(card.locator('.btn.primary')).toHaveCount(1);
   await expect(card.locator('.wc-commit')).toHaveText(/Commit and push/);

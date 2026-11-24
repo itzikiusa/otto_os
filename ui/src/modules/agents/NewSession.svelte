@@ -898,10 +898,11 @@
      per layout.md), whether via coarse pointer or narrow mobile viewport. */
   @media (pointer: coarse), (max-width: 640px) {
     .cbtn {
-      width: var(--hit-min);
-      height: var(--hit-min);
+      width: 44px;
+      height: 44px;
       font-size: var(--fs-l);
     }
+    .kind-seg .seg-btn { min-block-size: 44px; }
   }
   .count {
     min-width: 18px;

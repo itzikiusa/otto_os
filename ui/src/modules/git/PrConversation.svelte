@@ -45,7 +45,7 @@
     <textarea dir="auto" class="input" rows="3" bind:value={draft} disabled={posting} aria-label="New comment" placeholder="Leave a comment…" onfocus={scrollIntoViewOnFocus}></textarea>
     <div class="row prd-compose-foot">
       <span class="hint dim pc-hint">Posts to PR #{number} on {repoLabel} · visible to the author and reviewers</span>
-      <button class="btn small" disabled={posting || draft.trim() === ''} onclick={onpost}>
+      <button class="btn small pc-post" disabled={posting || draft.trim() === ''} onclick={onpost}>
         {posting ? 'Posting…' : 'Post comment'}
       </button>
     </div>
@@ -70,5 +70,8 @@
   .pc-hint { flex: 1 1 220px; min-width: 0; font-size: var(--fs-xs); }
   @media (max-width: 1024px) {
     .new-comment textarea { font-size: var(--fs-l); }
+  }
+  @media (pointer: coarse) {
+    .pc-post { min-block-size: 44px; }
   }
 </style>

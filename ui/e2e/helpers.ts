@@ -78,6 +78,18 @@ export async function openNewSessionSheet(page: Page): Promise<Locator> {
   return dialog;
 }
 
+/** Every control takes a finger on a phone: 44 × 44 px (the owner's rule; a
+ *  hit area may exceed the glyph, so this measures the control's own box). */
+export async function expectFingerSized(...targets: Locator[]): Promise<void> {
+  for (const t of targets) {
+    const b = await t.boundingBox();
+    const name = (await t.getAttribute('aria-label')) ?? (await t.innerText()).trim();
+    expect(b, `${name} is on the page`).not.toBeNull();
+    expect(Math.round(b!.height), `${name} height`).toBeGreaterThanOrEqual(44);
+    expect(Math.round(b!.width), `${name} width`).toBeGreaterThanOrEqual(44);
+  }
+}
+
 /**
  * Open the API page and make sure the request editor is showing. A workspace
  * with nothing in it (no saved requests, history or edited tab) opens on the

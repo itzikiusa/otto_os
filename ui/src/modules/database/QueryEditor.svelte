@@ -1890,6 +1890,10 @@
       font-size: var(--fs-m);
       max-width: 60vw;
     }
+    .qe-tab-new {
+      width: 44px;
+      height: 44px;
+    }
     /* Collapsible Editor / Results accordion headers. */
     .qe-acc-head {
       display: flex;

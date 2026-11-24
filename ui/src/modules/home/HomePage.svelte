@@ -367,6 +367,14 @@
     background-size: cover;
     background-position: center;
   }
+  /* Touch: the space tabs, + and ⋯ take a finger (44 px). */
+  @media (pointer: coarse) {
+    .spaces .space,
+    .spaces-bar > :global(.icon-btn) {
+      min-block-size: 44px;
+      min-inline-size: 44px;
+    }
+  }
   .spaces-bar {
     display: flex;
     align-items: center;
