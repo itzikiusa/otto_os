@@ -560,6 +560,7 @@
   }
   .conn-search-input {
     flex: 1;
+    align-self: stretch;
     min-width: 0;
     border: 0;
     outline: none;
@@ -608,13 +609,18 @@
     color: var(--text-dim);
     font-size: var(--fs-s);
   }
+  /* Touch: every control is finger-sized (44 px). */
   @media (hover: none), (pointer: coarse) {
     .conn-search {
-      min-block-size: var(--hit-min);
+      min-block-size: 44px;
     }
     .conn-search :global(.btn),
-    .conn-chips :global(.chip) {
-      min-block-size: var(--hit-min);
+    .conn-chips :global(.chip),
+    .conn-root :global(.page-header-bar .btn),
+    .conn-root :global(.page-header-bar .icon-btn),
+    .conn-list :global(.if-head .icon-btn) {
+      min-block-size: 44px;
+      min-inline-size: 44px;
     }
   }
 </style>

@@ -933,6 +933,11 @@
   // the headers only render when isPhone.
   let editorOpen = $state(true);
   let resultsOpen = $state(true);
+  // Phone: once a query runs the rows take the screen — the editor folds to
+  // its one-line head (tap it to edit again).
+  $effect(() => {
+    if (viewport.isPhone && tab.running) untrack(() => { editorOpen = false; resultsOpen = true; });
+  });
   const hasResult = $derived(!!tab.result || !!tab.error);
   // A first Explain is itself the output. The idle grid's empty-state sizing
   // must not compete with it; real rows/errors/loading still share the pane.
@@ -1359,9 +1364,9 @@
   {/if}
 
   {#if viewport.isPhone}
-    <button class="qe-acc-head" onclick={() => (editorOpen = !editorOpen)} aria-expanded={editorOpen}>
+    <button class="qe-acc-head" onclick={() => (editorOpen = !editorOpen)} aria-expanded={editorOpen} aria-label={editorOpen ? 'Fold the editor' : 'Edit the query'}>
       <Icon name={editorOpen ? 'chevronDown' : 'chevronRight'} size={14} />
-      <span class="qe-acc-title">Editor</span>
+      <span class="qe-acc-title ellipsis">{editorOpen ? 'Editor' : (tab.statement.trim().split('\n')[0] || 'Editor')}</span>
     </button>
   {/if}
   <div class="qe-edit" class:qe-collapsed={viewport.isPhone && !editorOpen} style="height: {editorH}px" bind:this={editHostEl}>
@@ -1884,7 +1889,7 @@
       height: 200px !important;
     }
     .qe-tab {
-      height: 32px;
+      height: 44px;
       font-size: var(--fs-m);
       max-width: 60vw;
     }
@@ -1904,10 +1909,9 @@
       text-align: start;
     }
     .qe-acc-title {
+      min-width: 0;
       font-size: var(--fs-m);
       font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: .06em;
     }
     .qe-acc-count {
       font-size: var(--fs-s);
@@ -1937,7 +1941,7 @@
     .qe-results {
       flex: 0 0 auto;
       min-height: 340px;
-      max-height: 70vh;
+      max-height: 78vh;
     }
     .qe-tabs {
       scrollbar-width: none;

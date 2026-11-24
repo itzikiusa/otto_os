@@ -103,10 +103,6 @@
 
   // ── Phone accordion ────────────────────────────────────────────────────────
   // On a phone the whole page scrolls and each major section (Connections /
-  // On a phone the schema panel is a collapsible block — tap its header to
-  // expand/minimise. Inert on desktop/tablet (the header only renders there).
-  let schemaOpen = $state(true);
-  $effect(() => { if (viewport.isPhone && database.selectedConnId) schemaOpen = false; }); // phone: the tab gets the screen
 
   // Dock this connection as a pane in the Agents split (beside an agent), with
   // the full DB Explorer. Right-clicked from a connection tab or sidebar row.
@@ -172,7 +168,23 @@
   }
 
   // Tables / History: the sidebar on that view (again = hide it).
+  // Phone: Tables / History are a sheet over the results (Back closes it).
+  let phoneSide = $state<DbSideTab | null>(null);
+  let sheetKey = '';
+  $effect(() => {
+    // Opening a table (a new / switched tab) or a view closes the sheet.
+    const k = `${database.activeTab}:${database.tabs.length}:${database.mainTab}:${database.selectedConnId}`;
+    untrack(() => {
+      if (phoneSide && sheetKey && k !== sheetKey) phoneSide = null;
+      sheetKey = k;
+    });
+  });
   function showSide(tab: DbSideTab): void {
+    if (viewport.isPhone) {
+      database.setSideTab(tab);
+      phoneSide = tab;
+      return;
+    }
     const on = !database.sidebarCollapsed && (database.sideTab === tab || (tab === 'schema' && database.sideTab === 'connections'));
     if (on) return database.toggleSidebar();
     database.setSideTab(tab);
@@ -560,35 +572,13 @@
 </PageHeader>
 <PageBody fill padded={false}>
 <div class="db-page" class:terminal-active={database.activePane?.kind === 'ssh'}>
+  {#if !viewport.isPhone}
   <aside
     id="db-side"
     class="db-side"
     class:collapsed={!viewport.isPhone && database.sidebarCollapsed}
     style={viewport.isPhone || database.sidebarCollapsed ? '' : `width:${sideW}px`}
   >
-    {#if viewport.isPhone}
-      <!-- PHONE: the schema panel is a collapsible accordion. -->
-      {#if database.selectedConnId}
-        <!-- Phone: a tappable accordion header gates the whole schema panel. -->
-        <div class="conn-head acc-head">
-          <button class="acc-toggle" onclick={() => (schemaOpen = !schemaOpen)} aria-expanded={schemaOpen}>
-            <Icon name={schemaOpen ? 'chevronDown' : 'chevronRight'} size={14} />
-            <span class="conn-head-title">Schema &amp; saved</span>
-          </button>
-          {#if schemaOpen && database.sideTab === 'schema'}
-            <div class="head-btns">
-              <button class="icon-btn" onclick={() => database.refreshSchema()} title="Refresh schema" aria-label="Refresh schema"><Icon name="refresh" size={13} /></button>
-            </div>
-          {/if}
-        </div>
-        <div class="side-switch" class:acc-collapsed={!schemaOpen}>
-          <Tabs label="Sidebar view" tabs={SIDE_TABS} value={database.sideTab === 'connections' ? 'schema' : database.sideTab} onchange={(id) => database.setSideTab(id)} />
-        </div>
-        <div class="side-body" class:acc-collapsed={!schemaOpen}>
-          {@render schemaSideBody()}
-        </div>
-      {/if}
-    {:else}
       <!-- TABLET / DESKTOP: one tab strip over the schema tree, Saved and History. -->
       <div class="side-switch">
         <Tabs label="Sidebar view" tabs={SIDE_TABS} value={database.sideTab === 'connections' ? 'schema' : database.sideTab} onchange={(id) => database.setSideTab(id)}>
@@ -608,8 +598,8 @@
           </div>
         {/if}
       </div>
-    {/if}
   </aside>
+  {/if}
 
   {#if !viewport.isPhone && !database.sidebarCollapsed}
     <PaneDivider bind:width={sideW} storageKey="db.sideW" label="Resize connections sidebar" max={sideMaxW()} defaultWidth={SIDE_DEFAULT} />
@@ -776,6 +766,15 @@
     <SchemaTree />
   {/if}
 {/snippet}
+
+{#if viewport.isPhone && phoneSide && database.selectedConnId}
+  <Modal title={phoneSide === 'history' ? 'History' : phoneSide === 'saved' ? 'Saved' : 'Tables'} onclose={() => (phoneSide = null)}>
+    <div class="side-switch">
+      <Tabs label="Sidebar view" tabs={SIDE_TABS} value={database.sideTab === 'connections' ? 'schema' : database.sideTab} onchange={(id) => { database.setSideTab(id); phoneSide = id; }} />
+    </div>
+    <div class="phone-side">{@render schemaSideBody()}</div>
+  </Modal>
+{/if}
 
 {#if changesOpen && database.selectedConnId}<Modal title="Database changes" width={1040} onclose={() => changesOpen=false}><LazyMount lazy={DatabaseChangesLazy} what="database changes" variant="panel" props={{ connectionId: database.selectedConnId, node: database.activeDb }} /></Modal>{/if}
 
@@ -1200,111 +1199,27 @@
   }
 
   /* ───────────────── Phone (≤640px) ─────────────────
-     The desktop layout packs the connection tree + schema + query tabs +
-     toolbar + editor + results into ONE fixed viewport height — on a phone
-     that crushes everything to unreadable, unscrollable slivers and the
-     RESULTS fall off the bottom unreachable. On a phone we instead let the
-     whole page scroll as a normal vertical document: stack the sidebar over
-     the main area, give each section an intrinsic (readable) height, and turn
-     the results grid into its own bounded, internally-scrolling block so a
-     query's rows are always reachable. */
+     The results are the screen: the page scrolls as one document (the query
+     tabs, the editor folded to one line after a run, then the rows); Tables
+     and History are a sheet from the header (phoneSide). */
   @media (max-width: 640px) {
-    /* The page itself becomes the scroll container (its parent .content is
-       overflow:hidden and fixed-height — we can't change that from here). */
     .db-page {
       flex-direction: column;
       overflow-y: auto;
       -webkit-overflow-scrolling: touch;
     }
-    /* Terminal views need a bounded flex height; the query workbench below
-       keeps its document scroll. Opening a terminal folds the picker. */
+    /* Terminal views need a bounded flex height. */
     .db-page.terminal-active { overflow: hidden; }
     .terminal-active .db-main { flex: 1; min-height: 0; }
-    /* Sidebar: full-width band on top, no longer fighting for height — the
-       connection list and schema each get their own bounded scroll. */
-    .db-side {
-      width: 100%;
-      flex: 0 0 auto;
-      border-inline-end: none;
-      border-bottom: 1px solid var(--border);
-    }
-    /* Each section's body scrolls INDEPENDENTLY when expanded (own max-height +
-       overflow) so the user scrolls within the panel they care about. */
-    .conn-list {
-      max-height: 34vh;
-      overflow-y: auto;
-      -webkit-overflow-scrolling: touch;
-    }
-    .side-body {
-      flex: 0 0 auto;
-      max-height: 34vh;
-      overflow-y: auto;
-      -webkit-overflow-scrolling: touch;
-    }
-    /* ── Collapsible accordion headers (phone-only) ── */
-    .acc-head {
-      padding: 4px 8px;
-      min-height: 44px;
-      border-top: 1px solid var(--border);
-    }
-    .acc-toggle {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex: 1;
-      min-width: 0;
-      border: none;
-      background: transparent;
-      color: var(--text-dim);
-      cursor: pointer;
-      padding: 8px 2px;
-      text-align: start;
-    }
-    .acc-toggle .conn-head-title {
-      font-size: var(--fs-m);
-    }
-    .acc-count {
-      font-size: var(--fs-xs);
-      color: var(--text-dim);
-      background: var(--surface-2);
-      border-radius: 999px;
-      padding: 1px 8px;
-      font-variant-numeric: tabular-nums;
-    }
-    /* A collapsed section's body is removed from flow entirely. */
-    .acc-collapsed {
-      display: none !important;
-    }
-    /* Larger, legible text for the connection rows + tiny meta on phones. */
-    .conn-name {
-      font-size: var(--fs-l);
-    }
-    .conn-item {
-      min-height: 40px;
-    }
-    .conn-head-title {
-      font-size: var(--fs-s);
-    }
-    .conn-empty,
-    .list-empty {
-      font-size: var(--fs-m);
-    }
-    .count {
-      font-size: var(--fs-s);
-    }
-    /* Main area: let it grow to its natural height so it stacks under the
-       sidebar and the page scrolls — instead of being a clipped flex:1 box. */
     .db-main {
       flex: 0 0 auto;
       min-height: 0;
     }
     .main-body {
       flex: 0 0 auto;
-      padding: 10px 12px 16px;
+      padding: 0 0 16px;
     }
-    /* On a phone the split stacks: the assistant drops BELOW the view as a
-       full-width, fixed-height block; the vertical divider is hidden (there's
-       no side-by-side to drag). */
+    /* The assistant drops below the view as a full-width block. */
     .main-split {
       flex-direction: column;
     }
@@ -1317,9 +1232,35 @@
       border-inline-start: none;
       border-top: 1px solid var(--border);
     }
-    /* Bigger tap targets + readable text for the tab strips. */
-    .conn-tabs { height: 40px; }
-    .conn-name { font-size: var(--fs-l); }
+    .conn-tabs { height: 44px; }
+  }
+  .phone-side {
+    max-height: 60vh;
+    overflow-y: auto;
+  }
+  /* Finger-sized header controls on touch. */
+  @media (hover: none), (pointer: coarse) {
+    .db-link,
+    .db-conn-state :global(.chip),
+    .db-root :global(.page-header-bar .btn),
+    .db-root :global(.page-header-bar .icon-btn) {
+      min-block-size: 44px;
+      min-inline-size: 44px;
+    }
+  }
+  /* No keyboard hints on touch. */
+  @media (hover: none), (pointer: coarse) {
+    .kbd {
+      display: none;
+    }
+  }
+  /* Phone: the title keeps its room; the state is its word (the details are
+     in the error banner / the ⋯). */
+  @media (max-width: 640px) {
+    .db-conn-state .db-sub,
+    .db-conn-state .db-link {
+      display: none;
+    }
   }
   /* Tablet keeps two columns; cap restored sidebar width within viewport. */
   @media (min-width: 641px) and (max-width: 1024px) {
