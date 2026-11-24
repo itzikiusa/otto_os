@@ -627,13 +627,14 @@ class RuntimeThreads {
   /** Stop the agent and remove the thread with its history. */
   async remove(id: string): Promise<void> {
     // The draft first: its live sync would read it back while the agent stops.
-    const undo = runtimeDrafts.forget(id);
+    const settle = runtimeDrafts.forget(id);
     try {
       await api.del(`/runtime-sessions/${id}`);
     } catch (e) {
-      undo();
+      settle(false);
       throw e;
     }
+    settle(true);
     this.releaseQueued(id, null);
     this.markRead(id);
     const next = { ...this.byId };
