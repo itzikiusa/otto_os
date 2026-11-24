@@ -79,6 +79,15 @@ async function firstTimer(page: Page, name: string): Promise<void> {
   await expect(page.getByText(COACH)).toBeVisible({ timeout: 30_000 });
 }
 
+test('a thread chunk that fails to load leaves the page, not a skeleton for good (R3-007)', async ({ page }) => {
+  await page.route(/\/src\/modules\/threads\/threadInbox\.svelte\.ts/, (route) => route.abort());
+  const wsId = await seedWorkspace(ctx, base, 'Coach chunk WS');
+  await page.route(/\/api\/v1\/workspaces\/scratch\/sessions(\?.*)?$/, (route) => route.request().method() === 'GET' ? route.fulfill({ json: [] }) : route.fallback());
+  await freshBrowser(page, wsId, false);
+  await page.goto('/#/agents');
+  await expect(page.getByText('No sessions yet')).toBeVisible({ timeout: 30_000 });
+});
+
 test('a first-timer still gets the coach once the lists answered', async ({ page }) => {
   await firstTimer(page, 'Coach first WS');
 });

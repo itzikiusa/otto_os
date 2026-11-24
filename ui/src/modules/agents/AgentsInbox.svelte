@@ -87,7 +87,7 @@
         rt = m.runtimeThreads;
         nav = n;
         live = i.inboxLive;
-      });
+      }, () => {}); // a failed chunk load is retried by the next visit (threadFeeds)
     });
     return () => {
       gone = true;
