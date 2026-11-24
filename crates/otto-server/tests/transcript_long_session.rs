@@ -152,6 +152,17 @@ async fn a_long_session_opens_on_its_recent_turns_and_pages_back() {
     assert_eq!(status, 200, "the big tool call opens: {block}");
     assert_eq!(block["result"]["truncated"], true);
 
+    // The Outputs panel reads the same transcript: the newest window's
+    // artifacts, never a 500 (it answered 500 on a 134 MB session).
+    let (status, arts) = get(
+        &app,
+        &format!("/api/v1/sessions/{}/artifacts", session.id),
+        &token,
+    )
+    .await;
+    assert_eq!(status, 200, "artifacts open: {arts}");
+    assert!(arts.is_array());
+
     // What is still refused says so in words with its own status, never 500:
     // a sub-agent transcript holding one record over the 16 MiB record cap.
     let subagents = path.with_extension("").join("subagents");
