@@ -33,9 +33,11 @@
 
 {#snippet pane()}
   <div class="wp-diff" class:sheet {id}>
+    <!-- The sheet's title already names the file: its head only picks the side. -->
+    {#if !sheet || both}
     <div class="wp-diff-head">
-      <Icon name="file" size={12} />
-      <span class="wp-diff-path" title={path} dir="ltr"><strong>{parts.name}</strong>{#if parts.dir}<span class="wp-diff-dir">{parts.dir}</span>{/if}</span>
+      {#if !sheet}<Icon name="file" size={12} />
+      <span class="wp-diff-path" title={path} dir="ltr"><strong>{parts.name}</strong>{#if parts.dir}<span class="wp-diff-dir">{parts.dir}</span>{/if}</span>{/if}
       <span class="grow"></span>
       {#if both}
         <div class="segmented wp-target" role="group" aria-label="Diff side">
@@ -45,6 +47,7 @@
       {/if}
       {#if !sheet}<button class="icon-btn wp-close" onclick={onclose} title="Close diff" aria-label="Close diff"><Icon name="x" size={14} /></button>{/if}
     </div>
+    {/if}
     <div class="wp-diff-body">
       {#if loading && !diff}
         <div class="wp-diff-skel"><Skeleton rows={5} height={20} /></div>
