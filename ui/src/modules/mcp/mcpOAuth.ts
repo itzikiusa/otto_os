@@ -15,8 +15,9 @@ const POLL_MS = 2000;
 const WINDOW_MS = 5 * 60 * 1000;
 
 /** Sign in: start → confirm the server and its authorization host → browser →
- *  wait for the flow (≤ 5 min). Resolves true once signed in. */
-export async function signIn(s: McpServerDetail): Promise<boolean> {
+ *  wait for the flow (≤ 5 min). Resolves true once signed in; an aborted
+ *  `signal` (the page went away) stops the wait quietly. */
+export async function signIn(s: McpServerDetail, signal?: AbortSignal): Promise<boolean> {
   let started: { authorization_url: string; authorization_host: string; server_host?: string | null };
   try {
     started = await mcpCpApi.cpOAuthStart(s.id, {});
@@ -47,6 +48,7 @@ export async function signIn(s: McpServerDetail): Promise<boolean> {
   let st: McpOAuthStatus = { signed_in: false, pending: true };
   while (Date.now() < until) {
     await new Promise((r) => setTimeout(r, POLL_MS));
+    if (signal?.aborted) return false;
     try {
       st = await mcpCpApi.cpOAuthStatus(s.id);
     } catch {

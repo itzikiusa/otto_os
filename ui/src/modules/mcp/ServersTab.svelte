@@ -27,6 +27,7 @@
   import ServerForm from './ServerForm.svelte';
   import ToolsTab from './ToolsTab.svelte';
   import { signIn, signOut } from './mcpOAuth';
+  import { onDestroy } from 'svelte';
 
   interface Props {
     wsId: string;
@@ -188,10 +189,13 @@
     ctxMenu.show(e, items);
   }
 
-  async function oauth(s: McpServerDetail, run: (s: McpServerDetail) => Promise<boolean>): Promise<void> {
+  // Leaving the tab ends a sign-in's status poll (no late toast elsewhere).
+  const gone = new AbortController();
+  onDestroy(() => gone.abort());
+  async function oauth(s: McpServerDetail, run: (s: McpServerDetail, signal: AbortSignal) => Promise<boolean>): Promise<void> {
     setBusy(s.id, 'oauth');
     try {
-      if (await run(s)) await onReload();
+      if (await run(s, gone.signal)) await onReload();
     } finally {
       setBusy(s.id, null);
     }
