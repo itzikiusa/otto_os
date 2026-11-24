@@ -87,6 +87,13 @@ test('a dirty session folder: the Git tab is Changes + the commit card; Commit a
   await expect(card.getByTestId('commit-card-included')).toHaveText('2 files included');
   await expect(card.locator('.subject-input')).toHaveValue('feat: ship the commit card', { timeout: 15_000 });
   await expect(card.locator('.btn.primary')).toHaveCount(1);
+  // Every action sits inside the narrow card (⋯ overflowed it, clipped to a
+  // stray dot), and no row holds a lone icon (two files in one folder: no
+  // "By folder" toggle, so no header row at all).
+  const [cb, mb] = [(await card.boundingBox())!, (await card.getByRole('button', { name: 'Commit options' }).boundingBox())!];
+  expect(mb.x).toBeGreaterThanOrEqual(cb.x);
+  expect(mb.x + mb.width).toBeLessThanOrEqual(cb.x + cb.width);
+  await expect(page.locator('.wip-panel .wp-head')).toHaveCount(0);
   // The whole Git page is gone from the panel: no graph / PR tab set.
   await expect(page.locator('.rv-tab')).toHaveCount(0);
   if (SHOTS) for (const s of ['light', 'dark'] as const) {
