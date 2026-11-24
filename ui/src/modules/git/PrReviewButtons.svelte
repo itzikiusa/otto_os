@@ -54,4 +54,5 @@
   .rv { gap: 4px; white-space: nowrap; }
   .rv-approved { color: var(--success); border-color: var(--success); background: var(--success-soft); }
   .rv-changes { color: var(--warning); border-color: var(--warning); background: var(--warning-soft); }
+  @media (max-width: 1024px) { .rv { height: 44px; } } /* finger-sized, like the header's other actions */
 </style>
