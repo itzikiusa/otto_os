@@ -211,6 +211,16 @@ pub async fn run_setup(
     cwd: &Path,
     progress: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> Result<SetupResult> {
+    run_setup_within(name, command, cwd, progress, SETUP_TIMEOUT).await
+}
+
+async fn run_setup_within(
+    name: &str,
+    command: &str,
+    cwd: &Path,
+    progress: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    timeout: Duration,
+) -> Result<SetupResult> {
     use tokio::io::{AsyncBufReadExt, BufReader};
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let mut child = tokio::process::Command::new(shell)
@@ -221,6 +231,9 @@ pub async fn run_setup(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
+        // Its own process group: a timeout stops what the shell started too
+        // (`npm ci && npm run build`), not just the shell.
+        .process_group(0)
         .spawn()
         .map_err(|e| Error::Internal(format!("couldn't start the setup: {e}")))?;
     // Both pipes, line by line, into one channel (closed when both end).
@@ -243,7 +256,7 @@ pub async fn run_setup(
     let mut tail = String::new();
     let (mut pending, mut sent_at) = (None::<String>, None::<std::time::Instant>);
     let mut tick = tokio::time::interval(PROGRESS_EVERY);
-    let deadline = tokio::time::sleep(SETUP_TIMEOUT);
+    let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
     let mut timed_out = false;
     loop {
@@ -275,6 +288,10 @@ pub async fn run_setup(
             }
             _ = &mut deadline => {
                 timed_out = true;
+                if let Some(pid) = child.id() {
+                    // SAFETY: plain syscall on the group this spawn created.
+                    unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
+                }
                 let _ = child.kill().await;
                 break;
             }
@@ -286,10 +303,7 @@ pub async fn run_setup(
         child.wait().await.ok()
     };
     if timed_out {
-        tail.push_str(&format!(
-            "timed out after {} min",
-            SETUP_TIMEOUT.as_secs() / 60
-        ));
+        tail.push_str(&format!("timed out after {} min", timeout.as_secs() / 60));
     }
     let start = tail.len().saturating_sub(OUTPUT_TAIL);
     let start = (start..tail.len())
@@ -365,6 +379,25 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("copy limit"), "{err}");
+    }
+
+    /// R1-038: a timed-out setup stops what its shell started, not only the
+    /// shell (`sleep` here would otherwise run on and write its marker).
+    #[tokio::test]
+    async fn a_timed_out_setup_stops_its_whole_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = run_setup_within(
+            "slow",
+            "sh -c 'sleep 2; touch left-running'; true",
+            dir.path(),
+            None,
+            Duration::from_millis(300),
+        )
+        .await
+        .unwrap();
+        assert!(!r.ok);
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(!dir.path().join("left-running").exists());
     }
 
     #[tokio::test]
