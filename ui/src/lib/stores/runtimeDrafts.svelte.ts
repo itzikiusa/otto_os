@@ -88,6 +88,7 @@ export class RuntimeDrafts {
     this.roots.clear();
     this.idle = [];
     this.settling.clear();
+    this.gone.clear();
     this.byId = {};
   }
 

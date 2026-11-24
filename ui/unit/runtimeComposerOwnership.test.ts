@@ -419,5 +419,6 @@ test('a delete that fails after another identity signed in does not bring the ol
   drafts.setIdentity('u2');
   settle(false); // the DELETE answered 401
   assert.equal(drafts.for('A').text, '');
+  assert.ok(drafts.owns('A', drafts.for('A')), 'the thread still exists: u2 gets a real draft, not a throwaway (R2-010)');
   assert.deepEqual(disposed, ['A'], 'its writer stops');
 });
