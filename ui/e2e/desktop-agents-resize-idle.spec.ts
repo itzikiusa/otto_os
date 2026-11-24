@@ -1,6 +1,11 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 
+// Start-up: a new shell's banner and first prompt are not work either — the
+// row stays Idle until its first input (six started at once were six false
+// unread "Done" rows), while input (a typed command, a first message) still
+// makes it Working.
+//
 // M5 (design review p2): a pane / window resize makes every shell redraw its
 // prompt, and that redraw used to read as output — each tiled shell flipped to
 // "Working" and then "Done" (unread, sorted first) after a mere resize. Four
@@ -86,4 +91,33 @@ test('a resize redraw is not work: tiled idle shells stay Idle', async ({ page }
   await watch(12_000);
   expect([...seen].filter((w) => /Working|Done|working/.test(w))).toEqual([]);
   expect(await words(page)).toEqual(TITLES.map(() => 'Idle'));
+});
+
+test('a new shell is Idle from its first prompt until its first input', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/#/agents');
+  await expect(page.locator(`.ai-row[data-workspace="${wsId}"]`)).toHaveCount(4, { timeout: 30_000 });
+  // Four more started while the page watches (the seeded four started before it loaded).
+  const fresh: string[] = [];
+  for (const title of ['Ancelotti', 'Sacchi', 'Capello', 'Zaccheroni']) {
+    const r = await ctx.post(`${base}/api/v1/workspaces/${wsId}/sessions`, {
+      data: { kind: 'agent', provider: 'shell', title, cwd: '/tmp', meta: { origin: 'e2e' } },
+    });
+    expect(r.ok(), await r.text()).toBeTruthy();
+    fresh.push((await r.json()).id as string);
+  }
+  await expect(page.locator(`.ai-row[data-workspace="${wsId}"]`)).toHaveCount(8, { timeout: 30_000 });
+  const seen = new Set<string>();
+  for (let t = 0; t < 8_000; t += 400) {
+    await page.waitForTimeout(400); // ui-guards: allow — absence-proving: no row may flip
+    for (const w of await words(page)) seen.add(w);
+    for (const st of await stored()) seen.add(st);
+  }
+  expect([...seen].filter((w) => /Working|Done|working/.test(w))).toEqual([]);
+  expect(await words(page)).toEqual(Array.from({ length: 8 }, () => 'Idle'));
+
+  // Its first input is work: a command that prints makes the row Working.
+  await ctx.post(`${base}/api/v1/sessions/${fresh[0]}/input`, { data: { text: 'for i in 1 2 3 4 5 6; do seq 1 30; sleep 1; done', submit: true } });
+  await expect(page.getByTestId(`agents-row-${fresh[0]}`).locator('.tr-status')).toHaveText(/^Working/, { timeout: 20_000 });
 });
