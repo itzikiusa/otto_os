@@ -611,7 +611,10 @@ fn scope_of(event: &Event) -> Scope<'_> {
         Event::McpApprovalChanged {
             workspace_id: None, ..
         }
-        | Event::ResourceAccessChanged { .. } => Scope::Everyone,
+        | Event::ResourceAccessChanged { .. }
+        // The connection-library cue carries no data; the list route applies
+        // visibility on the refetch.
+        | Event::ConnectionsChanged { .. } => Scope::Everyone,
         // Agent UI control asks ONLY the session's owner (the one person who
         // can grant it) — not workspace admins, not root.
         Event::UiControlRequested { user_id, .. }

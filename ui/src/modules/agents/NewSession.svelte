@@ -12,9 +12,8 @@
   import ContextPreview from './ContextPreview.svelte';
   import DirList from './DirList.svelte';
   import { plural } from '../../lib/plural';
-  import { writeStartPick } from '../../lib/startPick';
+  import { startChatPane } from './chatPane';
   import McpProfilePicker from './McpProfilePicker.svelte';
-  import { router } from '../../lib/router.svelte';
   import { api } from '../../lib/api/client';
   import { checkFolder } from '../../lib/folderCheck';
   import { radioKey } from '../../lib/radioKey';
@@ -330,16 +329,15 @@
       mcpProfileIds.length ? 'MCP profile' : null,
     ].filter((c): c is string => c !== null),
   );
-  /** Chat: Threads' own stage takes over, with the first message as its draft
-   *  (the one-shot handoff ThreadsPage reads, threads/recapThreadConsumer). */
+  /** Chat: a structured thread, opened as a chat pane here beside the terminals (chatPane.ts). */
   async function startChat(): Promise<void> {
-    const draft = prompt.trim();
-    if (draft) sessionStorage.setItem('otto.thread_draft_handoff', JSON.stringify({ draft, workspaceId: scratchMode ? null : ws.currentId, ts: Date.now() }));
-    // One choice, honoured: the tile (and the model, when set) is the pick
-    // Threads' stage restores for this workspace (lib/startPick).
-    if (provider && provider !== 'shell') writeStartPick(localStorage, `threads:${scratchMode ? SCRATCH_WORKSPACE_ID : (ws.currentId ?? SCRATCH_WORKSPACE_ID)}`, { provider, model: model || null, effort: null });
-    prompt = '';
-    if (await requestClose()) router.go(draft ? 'threads' : 'threads/new');
+    busy = true;
+    const ws_ = scratchMode ? SCRATCH_WORKSPACE_ID : (ws.currentId ?? SCRATCH_WORKSPACE_ID);
+    const ok = await startChatPane({ workspaceId: ws_, provider, cwd: cwd.trim(), home: ws.scratch?.root_path, title: title.trim(), model, prompt: prompt.trim(), meta: auth.meta });
+    busy = false;
+    if (!ok) return;
+    prompt = title = '';
+    void requestClose();
   }
 
   $effect(() => {

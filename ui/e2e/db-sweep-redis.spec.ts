@@ -44,7 +44,7 @@ function projNs(projectName: string): string {
 //   • desktop (≥1025px): ipad-landscape (1194) — the full 3-pane shell.
 // The helpers below therefore avoid phone-only selectors except where guarded by
 // the actual viewport width, and assert against selectors common to all layouts:
-//   .conn-list .conn-name · .main-tabs · .qe-edit .cm-content · Run · .grid-scroll
+//   .conn-list .tr-title · .main-tabs · .qe-edit .cm-content · Run · .grid-scroll
 //   · .grid tbody tr:not(.spacer).
 //
 // Each project uses a unique scratch-key namespace so the write/scroll steps are
@@ -88,12 +88,12 @@ async function openConnection(page: Page): Promise<void> {
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
 
   // CHECK 7 (part 1): the connection list is visible + usable in this orientation.
-  const conn = page.locator(`.conn-row[data-connection-id="${redisConnId}"] .conn-name`);
+  const conn = page.locator(`.conn-row[data-connection-id="${redisConnId}"] .tr-title`);
   await expect(conn.first()).toBeVisible({ timeout: 30_000 });
   await conn.first().click();
 
   // The main tab strip appears once a connection is open.
-  await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('db-conn-state')).toBeVisible({ timeout: 20_000 });
   // Make sure the Query tab is the active main view (it is by default).
   await expect(page.locator('.qe-edit')).toBeAttached({ timeout: 20_000 });
 }

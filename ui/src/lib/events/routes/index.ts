@@ -47,6 +47,7 @@ export const LIVE_ONLY_EVENTS: readonly EventType[] = [
   'browser_live_session_updated',
   'mcp_approval_changed',
   'resource_access_changed',
+  'connections_changed',
   'notifications_changed',
   'ide_fs_changed',
 ];

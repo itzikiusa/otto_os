@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { setDbView } from './helpers';
 import { apiCtx, seedWorkspace } from './seed';
 import { mockDbRoutes, seedMockDbConnection } from './db-mock';
 
@@ -39,7 +40,7 @@ async function openEditor(page: Page): Promise<void> {
   await mockDbRoutes(page, connId);
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  const c = page.locator('.conn-list .conn-name', { hasText: CONN });
+  const c = page.locator('.conn-list .tr-title', { hasText: CONN });
   await expect(c.first()).toBeVisible({ timeout: 30_000 });
   await c.first().click();
   await expect(page.locator('.qe-edit .cm-content')).toBeVisible({ timeout: 20_000 });
@@ -78,9 +79,9 @@ async function undo(page: Page): Promise<void> {
 test('undo survives a Query → Structure → Query round trip', async ({ page }) => {
   await openEditor(page);
   await typeTwoEdits(page);
-  await page.locator('.view-switch button', { hasText: 'Structure' }).click();
+  await setDbView(page, 'Structure');
   await expect(page.locator('.qe-edit .cm-content')).toHaveCount(0);
-  await page.locator('.view-switch button', { hasText: 'Query' }).click();
+  await setDbView(page, 'Query');
   await expect(page.locator('.qe-edit .cm-content')).toBeVisible();
   await expect.poll(() => text(page)).toBe('SELECT 1 + 2');
   await undo(page);

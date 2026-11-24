@@ -3,6 +3,7 @@
 // the refresh. A successful `?ids=` answer that omits a tab still prunes it.
 // error-handling-3-01: a failed list load reads as loadErrorText, not raw text.
 // ui-correctness-3-06: a workspace switch clears the old workspace's runs.
+import * as splitLayoutPure from '../src/lib/stores/splitLayout.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
@@ -24,8 +25,8 @@ function fixture(get: (path: string) => Promise<unknown>) {
     '../router.svelte': { router: { mayChangeWorkspace: () => true } }, '../toast.svelte': { toasts: {} }, '../toastError': { toastError() {} },
     '../plural': { plural() {} }, '../confirm.svelte': { confirmer: {} },
     './ui.svelte': { ui: {}, clientId: () => 'test' }, '../win': { winKey: (k: string) => k },
-    './splitLayout.svelte': { layout: { panes, focusedIndex: 0, retain: (keep: (t: string) => boolean) => retained.push(panes.filter(keep)), setFocusedSession() {} } },
-    './splitLayout': { MAX_PANES: 15, LS_PANES: 'panes' },
+    './splitLayout.svelte': { layout: { panes, focusedIndex: 0, retain: (keep: (r: { kind: string; id: string }) => boolean) => retained.push(panes.filter((id) => keep({ kind: 'session', id }))), setFocusedSession() {} } },
+    './splitLayout': { ...splitLayoutPure, LS_PANES: 'panes' },
     '../storage': { lsGet: () => null, lsSet() {} }, '../desktop': { isEmbedded: false },
     './runtimeAttention.svelte': { runtimeFlagged: () => 0 }, './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets,
     '../lazy-component.svelte': { whenIdle: () => () => {} },
@@ -43,7 +44,7 @@ test('a failed by-id chunk keeps its tabs, panes and last known rows', async () 
     return [];
   });
   ws.sessions = [row('bg')];
-  ws.openTabs = ['bg'];
+  ws.tabRefs = ['bg'].map((id: string) => ({ kind: 'session', id }));
   panes.push('bg');
   await ws.refreshSessions();
   assert.deepEqual([...ws.openTabs], ['bg']);
@@ -54,7 +55,7 @@ test('a failed by-id chunk keeps its tabs, panes and last known rows', async () 
 test('a successful by-id answer that omits a tab still prunes the phantom', async () => {
   const { ws, retained } = fixture(async (path) => (path.startsWith('/sessions?ids=') ? [row('live')] : []));
   ws.sessions = [row('gone'), row('live')];
-  ws.openTabs = ['gone', 'live'];
+  ws.tabRefs = ['gone', 'live'].map((id: string) => ({ kind: 'session', id }));
   await ws.refreshSessions();
   assert.deepEqual([...ws.openTabs], ['live']);
   assert.ok(retained.length > 0);
@@ -97,16 +98,16 @@ test('a late runs response for the old workspace is dropped after clear(new id)'
 test('an archived by-id row prunes its tab like a missing one', async () => {
   const { ws } = fixture(async (path) => (path.startsWith('/sessions?ids=') ? [{ ...row('arch'), archived: true }, row('live')] : []));
   ws.sessions = [row('arch'), row('live')];
-  ws.openTabs = ['arch', 'live'];
+  ws.tabRefs = ['arch', 'live'].map((id: string) => ({ kind: 'session', id }));
   await ws.refreshSessions();
   assert.deepEqual([...ws.openTabs], ['live']);
 });
 
 test('session_removed closes the tab whatever workspace the event names', () => {
   const { ws } = fixture(async () => []);
-  ws.closeTab = (id: string) => { ws.openTabs = ws.openTabs.filter((t: string) => t !== id); };
+  ws.closeTab = (id: string) => { ws.tabRefs = ws.tabRefs.filter((t: { id: string }) => t.id !== id); };
   ws.sessions = [row('s')];
-  ws.openTabs = ['s', 'other'];
+  ws.tabRefs = ['s', 'other'].map((id: string) => ({ kind: 'session', id }));
   ws.applyEvent({ type: 'session_removed', session_id: 's', workspace_id: 'elsewhere' });
   assert.deepEqual([...ws.openTabs], ['other']);
   assert.deepEqual(ws.sessions, []);

@@ -98,7 +98,7 @@ async function openEditor(page: Page, seen: CompletionReq[]): Promise<void> {
   });
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  const c = page.locator('.conn-list .conn-name', { hasText: CONN });
+  const c = page.locator('.conn-list .tr-title', { hasText: CONN });
   await expect(c.first()).toBeVisible({ timeout: 30_000 });
   await c.first().click();
   await expect(page.locator('.qe-edit .cm-content')).toBeVisible({ timeout: 20_000 });
@@ -175,7 +175,12 @@ test('200 pasted INSERTs: wrapped, responsive, completion scoped to the statemen
   expect(pasteMs, `paste → first frame ${pasteMs.toFixed(0)} ms`).toBeLessThan(400);
 
   // "Run all" appears once the (idle-debounced) analysis settles.
-  await expect(page.getByRole('button', { name: 'Run all' })).toBeVisible({ timeout: 5_000 });
+  await expect.poll(async () => {
+    await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click();
+    const n = await page.getByRole('menuitem', { name: /^Run all/ }).count();
+    await page.keyboard.press('Escape');
+    return n;
+  }, { timeout: 5_000 }).toBe(1);
 
   // Type inside a VALUES string literal near the top: pure data entry — no
   // completion request may fire (it used to on every word and after every `, `).
@@ -235,7 +240,7 @@ test('Wrap toggle turns wrapping off live and is remembered', async ({ page }) =
   await expect(wrapped).toHaveCount(1);
   // Wrap lives in the editor's ⋯ menu (a checkable row).
   const toggleWrap = async () => {
-    await page.getByTestId('qe-more').click();
+    await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click();
     await page.getByRole('menuitemcheckbox', { name: 'Wrap long lines' }).click();
   };
   await toggleWrap();

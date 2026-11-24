@@ -2,7 +2,7 @@
 // Emits copy-pasteable `psql`, `mysql`, `mongosh`, `redis-cli`, `clickhouse-client`,
 // or `ssh` commands using POSIX single-quoting and NEVER embeds real passwords or
 // Keychain secrets (credentials use safe env-var or prompt placeholders).
-import type { ConnectionKind } from '../../lib/api/types';
+import type { ConnectionKind } from '../api/types';
 
 export interface CliConnLike {
   name?: string;

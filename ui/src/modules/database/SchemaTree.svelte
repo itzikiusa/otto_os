@@ -95,7 +95,7 @@
     // schema stays mounted, retaining its query and selection for the return.
     if (viewport.isTablet && !database.sidebarCollapsed) {
       database.toggleSidebar();
-      void tick().then(() => page?.querySelector<HTMLButtonElement>('.view-switch [aria-selected="true"]')?.focus());
+      void tick().then(() => page?.closest('.db-root')?.querySelector<HTMLButtonElement>('.db-conn-state .chip')?.focus());
     }
   }
 
@@ -157,7 +157,7 @@
 
   function onClick(node: SchemaNode): void {
     if (OBJECT_KINDS.has(node.kind)) {
-      openStructure(node);
+      if (database.capabilities?.sql === true && (node.kind === 'table' || node.kind === 'view')) void database.objects.previewRows(node); else if (node.kind === 'collection') void database.findRows(node); else openStructure(node); // one click shows rows; structure: right-click / the header ⋯
     } else if (node.kind === 'database') {
       // Clicking a database makes it the active one (queries scope to it, like
       // Workbench's bold default schema) and expands it.

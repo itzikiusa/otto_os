@@ -32,7 +32,7 @@ async function openQuery(page: Page, scheme: 'light' | 'dark'): Promise<void> {
   await page.addInitScript(value => localStorage.setItem('otto_scheme', value), scheme);
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible();
-  await page.locator(`.conn-row[data-connection-id="${connId}"] .conn-name`).click();
+  await page.locator(`.conn-row[data-connection-id="${connId}"] .tr-title`).click();
   const editor = page.locator('.qe-edit .cm-content');
   await expect(editor).toBeVisible();
   await editor.click();
@@ -103,7 +103,7 @@ for (const scheme of ['light', 'dark'] as const) {
       } });
     });
     await openQuery(page, scheme);
-    await page.getByTestId('qe-more').click();
+    await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click();
     await page.getByRole('menuitem', { name: 'Query plan (EXPLAIN)' }).click();
     const plan = page.locator('.plan-panel');
     await expect(plan).toBeVisible();

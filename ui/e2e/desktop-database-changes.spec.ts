@@ -31,8 +31,8 @@ test('database change draft binds validation to selected executor before submiss
   });
   await page.addInitScript(id=>{localStorage.setItem('otto_workspace',id);localStorage.setItem('otto_connhub_filter','all');},workspaceId);
   await page.goto('/#/connections');
-  await page.getByRole('button',{name:/Migration fixture.*mysql/}).first().click();
-  await page.getByTestId('db-conn-actions').click();
+  await page.getByRole('button',{name:/Migration fixture.*mysql/i}).first().click();
+  await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click();
   await page.getByRole('menuitem',{name:'Database changes',exact:true}).click();
   const panel=page.getByTestId('database-changes');
   await panel.getByRole('button',{name:'New change',exact:true}).click();

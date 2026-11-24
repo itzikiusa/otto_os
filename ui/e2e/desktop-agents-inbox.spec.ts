@@ -230,14 +230,19 @@ test('the right panel opens on the session details card; nothing loads while it 
   }
 });
 
-test('Chat from the stage carries the chosen provider into the thread it starts (R2)', async ({ page }) => {
+test('Chat from the stage starts the chosen provider as a chat pane here (R2, A2)', async ({ page }) => {
   await page.goto('/#/agents');
   await expect(rows(page)).toHaveCount(3, { timeout: 20_000 });
   await page.getByTestId('agents-inbox-new').click();
   const dialog = page.getByRole('dialog', { name: 'New session' });
   await dialog.getByTestId('ns-kind').getByRole('radio', { name: 'Chat' }).click();
   await dialog.locator('.provider-card', { hasText: 'codex' }).locator('.card-main').click();
+  await dialog.locator('#ns-prompt').fill('hello there');
   await dialog.getByRole('button', { name: 'Start chat' }).click();
-  await expect(page.getByTestId('new-thread-stage')).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByTestId('picker-agent')).toContainText(/codex/i);
+  const pane = page.locator('[data-testid^="thread-pane-"]');
+  await expect(pane).toBeVisible({ timeout: 20_000 });
+  await expect(pane.getByText('echo: hello there')).toBeVisible({ timeout: 30_000 });
+  const started = (await (await ctx.get(`${base}/api/v1/workspaces/${wsId}/runtime-sessions`)).json()) as { id: string; provider: string }[];
+  expect(started.map((r) => r.provider)).toContain('codex');
+  for (const r of started) await ctx.post(`${base}/api/v1/runtime-sessions/${r.id}/close`).catch(() => {});
 });

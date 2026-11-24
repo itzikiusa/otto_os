@@ -88,7 +88,7 @@ test.beforeEach(async ({ page }, testInfo) => {
 async function openMongo(page: Page): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  const conn = page.locator('.conn-list .conn-name', { hasText: 'e2e-mongodb' });
+  const conn = page.locator('.conn-list .tr-title', { hasText: 'e2e-mongodb' });
   await expect(conn.first()).toBeVisible({ timeout: 30_000 });
   await conn.first().click();
   // The engine chip renders once capabilities load; a sub-900px workbench

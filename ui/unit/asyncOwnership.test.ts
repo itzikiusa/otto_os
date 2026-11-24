@@ -1,3 +1,4 @@
+import * as splitLayoutPure from '../src/lib/stores/splitLayout.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deferred, loadSource } from './sourceHarness.ts';
@@ -28,7 +29,7 @@ function workspace(mayChangeWorkspace: () => boolean | Promise<boolean> = () => 
     '../api/client': { api }, './workflowRuns.svelte': { workflowRuns: { list: [], refresh: async () => {}, apply() {}, clear() {} } }, '../api/workspaces': { fetchWorkspace: async () => ({}) },
     '../router.svelte': { router: { mayChangeWorkspace } }, '../toast.svelte': { toasts: {} }, '../toastError': { toastError: () => {} }, '../plural': { plural: (n: number, w: string) => `${n} ${w}` }, '../confirm.svelte': { confirmer: {} },
     './ui.svelte': { ui: { sessionIsolation: false }, clientId: () => 'test' },
-    '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { MAX_PANES: 15, LS_PANES: 'otto_panes_' },
+    '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { ...splitLayoutPure, LS_PANES: 'otto_panes_' },
     '../storage': { lsGet: () => null, lsSet() {}, lsRemove() {} },
     '../desktop': { isEmbedded: false }, './runtimeAttention.svelte': { runtimeFlagged: () => 0 }, './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets, '../lazy-component.svelte': lazyComponent,
   });
@@ -60,7 +61,7 @@ function bootWorkspace(saved: string, list: { id: string }[], archivedIn: string
     '../api/client': { api, getToken: () => 'tok' }, './workflowRuns.svelte': { workflowRuns: { list: [], refresh: async () => {}, apply() {}, clear() {} } }, '../api/workspaces': { fetchWorkspace: async () => ({}) },
     '../router.svelte': { router: {} }, '../toast.svelte': { toasts: {} }, '../toastError': { toastError: () => {} }, '../plural': { plural: (n: number, w: string) => `${n} ${w}` }, '../confirm.svelte': { confirmer: {} },
     './ui.svelte': { ui: { sessionIsolation: false }, clientId: () => 'test' },
-    '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { MAX_PANES: 15, LS_PANES: 'otto_panes_' },
+    '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { ...splitLayoutPure, LS_PANES: 'otto_panes_' },
     '../storage': { lsGet: (k: string) => (k === 'otto_workspace' ? saved : null), lsSet() {}, lsRemove() {} },
     '../desktop': { isEmbedded: false }, './runtimeAttention.svelte': { runtimeFlagged: () => 0 }, './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets, '../lazy-component.svelte': lazyComponent,
   });
@@ -200,7 +201,7 @@ test('archive events synchronize membership in two independent windows', () => {
 test('workspace changes ask before identity, tabs or persistence are replaced', async () => {
   const answer=deferred<boolean>();
   const {ws}=workspace(()=>answer.promise);
-  ws.currentId='A';ws.sessions=[{id:'kept'}];ws.openTabs=['kept'];ws.layoutReady=true;
+  ws.currentId='A';ws.sessions=[{id:'kept'}];ws.tabRefs = ['kept'].map((id: string) => ({ kind: 'session', id }));ws.layoutReady=true;
   const changing=ws.select('B');
   assert.equal(ws.currentId,'A');assert.deepEqual([...ws.openTabs],['kept']);
   answer.resolve(false);await changing;

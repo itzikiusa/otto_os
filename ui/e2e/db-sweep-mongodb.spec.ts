@@ -75,12 +75,12 @@ async function openConn(page: Page): Promise<void> {
 
   // On a phone the Connections accordion is open by default; on wide layouts the
   // conn list is always visible. Either way the row is in `.conn-list`.
-  const conn = page.locator('.conn-list .conn-name', { hasText: 'e2e-mongodb' });
+  const conn = page.locator('.conn-list .tr-title', { hasText: 'e2e-mongodb' });
   await expect(conn.first()).toBeVisible({ timeout: 30_000 });
   await conn.first().click();
 
   // The main tab strip appears once a connection is open.
-  await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('db-conn-state')).toBeVisible({ timeout: 20_000 });
   // The compact layout hides the redundant engine chip; its content still
   // proves capabilities loaded, while the selected connection remains accessible.
   await expect(page.locator('.cap-chip')).toHaveText('mongodb', { timeout: 20_000 });

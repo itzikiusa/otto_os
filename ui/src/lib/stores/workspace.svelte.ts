@@ -12,12 +12,12 @@ import { ui, clientId } from './ui.svelte';
 import { winKey } from '../win';
 import { lsGet, lsSet } from '../storage';
 import { layout, type Axis } from './splitLayout.svelte';
-import { MAX_PANES, LS_PANES } from './splitLayout';
+import { MAX_PANES, LS_PANES, keepPane, parseTabRefs, sessionRef, storeTabs, type PaneKind, type PaneRef } from './splitLayout';
 import { isEmbedded } from '../desktop';
 import { SCRATCH_WORKSPACE_ID, sessionVerbsApply } from './sessionScope';
 import { runtimeFlagged } from './runtimeAttention.svelte';
 import { applyStatusPatches, canDropExited, patchSessionIn, staleStatusIds, type StatusPatch } from './sessionPatch';
-import { bucketSessions, idChunks, inThreadsScope, isForeground, isShownKind, isThreadSurfaceSession, parseTabIds, sessionRoute, shownListQuery, visibleWorkingCount } from './sessionBuckets';
+import { bucketSessions, idChunks, inThreadsScope, isForeground, isShownKind, isThreadSurfaceSession, sessionRoute, shownListQuery, visibleWorkingCount } from './sessionBuckets';
 import { whenIdle } from '../lazy-component.svelte';
 import { toastError } from '../toastError';
 import { loadErrorText } from '../loadError';
@@ -159,8 +159,11 @@ class WorkspaceStore {
   /** In tiled view, a session id to show maximized (zoomed) on its own. */
   maximizedId: Id | null = $state(null);
 
-  /** open session tabs (ids), in tab-bar order */
-  openTabs: Id[] = $state([]);
+  /** Open tabs in tab-bar order as typed refs (a PTY session, or a structured thread shown as a chat
+   *  pane); `openTabs` are their ids, `threadPanes` the threads'. Persisted by {@link persistTabs}. */
+  private tabRefs: PaneRef[] = $state.raw([]);
+  get openTabs(): Id[] { return this.tabRefs.map((r) => r.id); }
+  get threadPanes(): Id[] { return this.tabRefs.filter((r) => r.kind === 'thread').map((r) => r.id); }
   /** Split panes — projections of the layout tree (leaf order; duplicates legal).
    *  Mutate via `layout` or the methods below. */
   get panes(): Id[] {
@@ -611,7 +614,7 @@ class WorkspaceStore {
     if (this.currentId !== id) {
       this.sessions = [];
       this.otherWsSessions = [];
-      this.openTabs = [];
+      this.tabRefs = [];
       // The previous workspace's runs must not show under this one while its
       // sessions load (or forever, if that load fails); a late refresh for
       // the old id is dropped against this new target.
@@ -695,32 +698,31 @@ class WorkspaceStore {
     // `persistTabs()` in between (a `session_removed` event → `closeTab`) would
     // otherwise write the OLD workspace's tabs under the NEW id.
     this.tabsKey = key;
-    // restore tabs for this workspace
-    const ids: Id[] = parseTabIds(lsGet(winKey(LS_TABS + key)));
-    // Keep live sessions + the DB-Explorer pane sentinel (it has no session row).
-    const valid = ids.filter((t) => this.tabbable(t));
+    const refs = parseTabRefs(lsGet(winKey(LS_TABS + key)));
+    // Keep live sessions, threads and the DB-Explorer pane sentinel (it has no session row).
+    const valid = refs.filter((t) => this.tabbable(t));
     // Tabs opened while this key was still un-hydrated (see {@link bindTabsKey})
     // are appended — the route→store effect's session must survive the restore.
-    const pendingAll = this.pendingTabs.filter((t) => !valid.includes(t));
+    const pendingAll = this.pendingTabs.filter((t) => !valid.some((v) => v.id === t.id));
     const pending = pendingAll.filter((t) => this.tabbable(t));
     // A route-opened session the shown list doesn't carry (a background
     // agent's `#/agents/<id>`): fetch it by id, then open it.
-    for (const t of pendingAll) if (!pending.includes(t)) this.openWhenLoaded(t);
+    for (const t of pendingAll) if (!pending.includes(t)) this.openWhenLoaded(t.id);
     this.pendingTabs = [];
     this.tabsHydrated = true;
-    this.openTabs = [...valid, ...pending];
+    this.tabRefs = [...valid, ...pending];
     if (pending.length > 0) this.persistTabs();
     // Restore the split layout persisted alongside the tabs (v2 tree, or a v1
     // {panes, axis} payload migrated through the old window fractions).
-    const open = this.openTabs;
-    layout.restore(key, (sid) => open.includes(sid), open[0] ?? null);
+    const open = new Set(this.openTabs);
+    layout.restore(key, (ref) => open.has(ref.id), this.tabRefs[0] ?? null);
     this.layoutReady = true;
   }
 
-  /** A tab may show `t`: the DB pane, or a loaded session that isn't archived
-   *  (a by-id fetch returns archived rows too; archiving closes the tab). */
-  private tabbable(t: Id): boolean {
-    return t === DB_PANE_ID || this.sessionById.get(t)?.archived === false;
+  /** A tab may show `t`: the DB pane, a thread, or a loaded session that isn't archived (keepPane; a
+   *  by-id fetch returns archived rows too; archiving closes the tab). */
+  private tabbable(t: PaneRef): boolean {
+    return t.id === DB_PANE_ID || keepPane(t, (id) => this.sessionById.get(id)?.archived);
   }
 
   /** Whether a session with this workspace id belongs in `sessions`: the
@@ -867,10 +869,7 @@ class WorkspaceStore {
    *  agent being watched) — so a refresh never drops what is on screen. */
   private pinnedIds(): Id[] {
     const ids = new Set<Id>();
-    for (const t of parseTabIds(lsGet(winKey(LS_TABS + this.tabsKey)))) ids.add(t);
-    for (const t of this.openTabs) ids.add(t);
-    for (const t of this.pendingTabs) ids.add(t);
-    for (const t of layout.panes) ids.add(t);
+    for (const t of [...parseTabRefs(lsGet(winKey(LS_TABS + this.tabsKey))), ...this.tabRefs, ...this.pendingTabs, ...layout.panes.map(sessionRef)]) if (t.kind === 'session' && !this.threadPanes.includes(t.id)) ids.add(t.id);
     const live = this.sessions
       .filter(
         (s) =>
@@ -1007,10 +1006,10 @@ class WorkspaceStore {
    *  sentinel pane, which has no session row. Ids in `unknown` (their by-id
    *  fetch failed this refresh) are kept: absence there is not evidence. */
   private reconcileTabs(unknown: ReadonlySet<Id> = new Set()): void {
-    const exists = (t: Id): boolean => this.tabbable(t) || unknown.has(t);
-    const tabs = this.openTabs.filter(exists);
-    if (tabs.length !== this.openTabs.length) {
-      this.openTabs = tabs;
+    const exists = (t: PaneRef): boolean => this.tabbable(t) || unknown.has(t.id);
+    const tabs = this.tabRefs.filter(exists);
+    if (tabs.length !== this.tabRefs.length) {
+      this.tabRefs = tabs;
       this.persistTabs();
     }
     layout.retain(exists);
@@ -1030,11 +1029,11 @@ class WorkspaceStore {
    *  a page can tell "no panes yet" apart from "nothing open". */
   layoutReady = $state(false);
   /** Tabs opened during that window, replayed by {@link restoreLayout}. */
-  private pendingTabs: Id[] = [];
+  private pendingTabs: PaneRef[] = [];
 
   private persistTabs(): void {
     if (!this.tabsHydrated) return;
-    lsSet(winKey(LS_TABS + this.tabsKey), JSON.stringify(this.openTabs));
+    lsSet(winKey(LS_TABS + this.tabsKey), storeTabs(this.tabRefs));
   }
 
   /** Is `key` (a `storage` event key) this workspace's persisted tabs or
@@ -1067,12 +1066,13 @@ class WorkspaceStore {
    * To navigate AND open a session from a user action, call
    * {@link navigateToSession} instead.
    */
-  openSession(id: Id): void {
+  openSession(id: Id, kind?: PaneKind): void {
+    const ref: PaneRef = { kind: kind ?? this.tabRefs.find((r) => r.id === id)?.kind ?? 'session', id };
     // Don't open a tab for a session that's known not to exist — e.g. a stale id
     // left in the `#/agents/<id>` route hash after the session was reaped (the
     // cause of an undismissable "phantom" tab). Allowed while sessions are still
     // loading; reconcileTabs() prunes any that turn out invalid once loaded.
-    if (!this.sessionsLoading && !this.tabbable(id)) {
+    if (!this.sessionsLoading && !this.tabbable(ref)) {
       // Not in the shown list — maybe a background agent opened from its
       // panel (the list no longer carries those): fetch it by id and open it
       // if it exists. A reaped id stays closed (no phantom tab).
@@ -1082,11 +1082,11 @@ class WorkspaceStore {
     // Opening a session counts as attending to it — drop any "needs you" flag.
     this.clearNeedsYou(id);
     if (!this.openTabs.includes(id)) {
-      this.openTabs = [...this.openTabs, id];
-      if (!this.tabsHydrated) this.pendingTabs = [...this.pendingTabs, id];
+      this.tabRefs = [...this.tabRefs, ref];
+      if (!this.tabsHydrated) this.pendingTabs = [...this.pendingTabs, ref];
       this.persistTabs();
     }
-    layout.setFocusedSession(id);
+    layout.setFocusedSession(ref);
     this.persistPanes();
     // Activating a tab clears its unread-activity dot.
     if (this.unread[id]) {
@@ -1263,7 +1263,7 @@ class WorkspaceStore {
    *  live-session confirm / archive-instead flow in front of this. */
   closeTab(id: Id): void {
     const closedIdx = this.openTabs.indexOf(id);
-    this.openTabs = this.openTabs.filter((t) => t !== id);
+    this.tabRefs = this.tabRefs.filter((t) => t.id !== id);
     this.persistTabs();
     // Remember for ⌘⇧T "reopen closed tab" (close is non-destructive).
     this.recentlyClosed = [...this.recentlyClosed.filter((t) => t !== id), id].slice(-10);
@@ -1272,8 +1272,8 @@ class WorkspaceStore {
     // jumping to the far end of the strip.
     const fallback =
       closedIdx >= 0
-        ? this.openTabs[Math.min(closedIdx, this.openTabs.length - 1)] ?? null
-        : this.openTabs[this.openTabs.length - 1] ?? null;
+        ? this.tabRefs[Math.min(closedIdx, this.tabRefs.length - 1)] ?? null
+        : this.tabRefs[this.tabRefs.length - 1] ?? null;
     layout.replaceSession(id, fallback);
     this.persistPanes();
     // Keep the route in step: if the hash still points at the closed session,
@@ -1281,7 +1281,7 @@ class WorkspaceStore {
     // module return (openSession only refuses ids that DON'T exist). Navigate
     // to the fallback (or bare agents) so the closed id leaves the URL.
     if (router.module === 'agents' && router.parts[1] === id) {
-      router.go(fallback ? `agents/${fallback}` : 'agents');
+      router.go(fallback ? `agents/${fallback.id}` : 'agents');
     }
   }
 
@@ -1468,10 +1468,10 @@ class WorkspaceStore {
   reorderTab(id: Id, targetIndex: number): void {
     const from = this.openTabs.indexOf(id);
     if (from < 0 || from === targetIndex) return;
-    const tabs = [...this.openTabs];
-    tabs.splice(from, 1);
-    tabs.splice(Math.max(0, Math.min(targetIndex, tabs.length)), 0, id);
-    this.openTabs = tabs;
+    const tabs = [...this.tabRefs];
+    const [moved] = tabs.splice(from, 1);
+    tabs.splice(Math.max(0, Math.min(targetIndex, tabs.length)), 0, moved);
+    this.tabRefs = tabs;
     this.persistTabs();
   }
 
@@ -1517,10 +1517,10 @@ class WorkspaceStore {
    * caller can surface a toast). Unlike `openSession`, this never replaces the
    * focused pane — except when at the cap, where the focused pane is reused.
    */
-  openInSplit(id: Id): boolean {
+  openInSplit(id: Id, kind: PaneKind = 'session'): boolean {
     // Keep tab bookkeeping consistent (same as openSession).
     if (!this.openTabs.includes(id)) {
-      this.openTabs = [...this.openTabs, id];
+      this.tabRefs = [...this.tabRefs, { kind, id }];
       this.persistTabs();
     }
     // Panes only render side by side in the split (tabs) view; tiled view shows
@@ -1528,7 +1528,7 @@ class WorkspaceStore {
     if (this.viewMode !== 'tabs') this.setViewMode('tabs');
     this.maximizedId = null;
 
-    const ok = layout.addBeside(id); // existing leaf → focus; at MAX_PANES → focused leaf reused + false
+    const ok = layout.addBeside({ kind, id }); // existing leaf → focus; at MAX_PANES → focused leaf reused + false
     this.persistPanes();
     return ok;
   }
@@ -1565,7 +1565,7 @@ class WorkspaceStore {
   tileSessions(ids: Id[]): void {
     const fresh = ids.filter((id) => !this.openTabs.includes(id));
     if (fresh.length > 0) {
-      this.openTabs = [...this.openTabs, ...fresh];
+      this.tabRefs = [...this.tabRefs, ...fresh.map(sessionRef)];
       this.persistTabs();
     }
     // Lay them out as side-by-side panes (the grid shows them all in tiled
@@ -1575,7 +1575,7 @@ class WorkspaceStore {
     // persist it. The tiled grid still shows every id.
     for (const id of ids) {
       if (layout.panes.length >= MAX_PANES) break;
-      if (!layout.panes.includes(id)) layout.addBeside(id, { focus: false });
+      if (!layout.panes.includes(id)) layout.addBeside(sessionRef(id), { focus: false });
     }
     this.persistPanes();
     this.maximizedId = null;
@@ -1894,7 +1894,7 @@ class WorkspaceStore {
   dropExitedBackground(id: Id): void {
     const s = this.sessionById.get(id);
     if (!s || isShownKind(s) || (this.statusMap[id] ?? s.status) !== 'exited') return;
-    const held = { tabs: [...this.openTabs, ...this.pendingTabs], panes: layout.panes, ensuring: new Set(this.ensuring.keys()) };
+    const held = { tabs: [...this.openTabs, ...this.pendingTabs.map((t) => t.id)], panes: layout.panes, ensuring: new Set(this.ensuring.keys()) };
     if (!canDropExited(id, held)) return;
     this.sessions = this.sessions.filter((x) => x.id !== id);
     this.pendingStatus.delete(id);

@@ -46,10 +46,10 @@ test.beforeEach(async ({ page }) => {
 async function openConn(page: Page): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  const conn = page.locator(`.conn-row[data-connection-id="${mongoConnId}"] .conn-name`);
+  const conn = page.locator(`.conn-row[data-connection-id="${mongoConnId}"] .tr-title`);
   await expect(conn.first()).toBeVisible({ timeout: 30_000 });
   await conn.first().click();
-  await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('db-conn-state')).toBeVisible({ timeout: 20_000 });
   // The engine chip renders once capabilities load; a sub-900px workbench
   // (1280px viewport + 300px sidebar) hides it by design, so wait for it in
   // the DOM rather than on screen.

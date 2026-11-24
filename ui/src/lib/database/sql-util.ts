@@ -616,3 +616,10 @@ export function stmtPreview(statement: string, max = 300): string {
   const flat = head.replace(/\s+/g, ' ').trim();
   return flat.length > max || head.length < statement.length ? `${flat.slice(0, max)}…` : flat;
 }
+
+/** Whether a statement changes the schema (CREATE / ALTER / DROP / RENAME /
+ *  TRUNCATE, after leading comments) — the workbench re-reads the cached
+ *  schema tree after one runs. */
+export function isDdl(sql: string): boolean {
+  return /^\s*(?:(?:--[^\n]*\n|\/\*[\s\S]*?\*\/)\s*)*(?:create|alter|drop|rename|truncate)\b/i.test(sql);
+}

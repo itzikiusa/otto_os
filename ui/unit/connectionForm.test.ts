@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { parseConnectionUri } from '../src/modules/connections/connectionUri.ts';
 function form(overrides: Record<string, unknown> = {}) {
   const text = readFileSync(new URL('../src/modules/connections/ConnectionForm.svelte', import.meta.url), 'utf8');
-  const functions = text.slice(text.indexOf('  function buildParams()'), text.indexOf('  let showDsnInput'));
+  const functions = text.slice(text.indexOf('  function buildParams()'), text.indexOf("  let dsnValue"));
   const ctx: Record<string, any> = {
     existing: null, kind: 'mysql', fHost: 'db', fPort: '', fUser: '', fDb: '', fTimezone: 'UTC', fConnString: '',
     fTemplate: '', fJump: '', fIdentity: '', sshEnabled: false, tlsMode: 'disabled', tlsVerify: true,
@@ -14,7 +15,7 @@ function form(overrides: Record<string, unknown> = {}) {
     hasDatabaseField: new Set(['mysql','postgres','redis','mongodb','clickhouse']),
     tzKinds: new Set(['mysql','postgres','clickhouse']), tlsKinds: new Set(['mysql','postgres','redis','mongodb','clickhouse']),
     kindLabels: { ssh: 'SSH', mysql: 'MySQL', postgres: 'PostgreSQL', redis: 'Redis', mongodb: 'MongoDB', clickhouse: 'ClickHouse', custom: 'Custom' },
-    URL, toasts: { error: () => {}, success: () => {} }, ...overrides,
+    URL, parseConnectionUri, toasts: { error: () => {}, success: () => {}, warn: () => {} }, ...overrides,
   };
   ctx.setKind = (kind: string) => { ctx.kind = kind; };
   runInNewContext(ts.transpileModule(functions, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, ctx);

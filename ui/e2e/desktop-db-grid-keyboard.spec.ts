@@ -20,7 +20,7 @@ test('Enter commits a cell draft once and Escape cancels a later edit', async ({
     localStorage.setItem('otto_rail_expanded', '0');
   }, workspaceId);
   await page.goto('/#/database');
-  await page.locator('.conn-list .conn-name', { hasText: name }).click();
+  await page.locator('.conn-list .tr-title', { hasText: name }).click();
   const editor = page.locator('.qe-edit .cm-content');
   await expect(editor).toBeVisible();
   await editor.click();
@@ -84,7 +84,7 @@ test('rerunning the same result columns preserves the grid scroll position', asy
     localStorage.setItem('otto_rail_expanded', '0');
   }, workspaceId);
   await page.goto('/#/database');
-  await page.locator(`.conn-row[data-connection-id="${connId}"] .conn-name`).click();
+  await page.locator(`.conn-row[data-connection-id="${connId}"] .tr-title`).click();
   const editor = page.locator('.qe-edit .cm-content');
   await expect(editor).toBeVisible();
   await editor.click();

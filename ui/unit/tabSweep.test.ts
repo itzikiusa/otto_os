@@ -24,6 +24,10 @@ test('sweepIds: tabs + panes once each, without the DB-Explorer sentinel', () =>
   assert.deepEqual(sweepIds(['a', '__db_explorer__', 'b'], ['b', 'c']), ['a', 'b', 'c']);
 });
 
+test('sweepIds: a thread tab is never asked about (no session row would prove it gone)', () => {
+  assert.deepEqual(sweepIds(['a', 't1'], ['t1', 'b'], ['t1']), ['a', 'b']);
+});
+
 test('sweepDue: at most once per throttle window unless forced', () => {
   assert.equal(sweepDue(1000, 0), false);
   assert.equal(sweepDue(TAB_SWEEP_THROTTLE_MS, 0), true);
@@ -34,6 +38,7 @@ function host(tabs: string[], panes: string[] = []) {
   const h = {
     openTabs: tabs,
     panes,
+    threadPanes: [] as string[],
     currentId: 'w1' as string | null,
     closed: [] as string[],
     statusMap: { a: 'idle', gone: 'working' } as Record<string, string>,
@@ -82,11 +87,12 @@ test('sweepTabs: a pane-only id is checked too; nothing open asks nothing', asyn
   assert.equal(called, false);
 });
 
-test('parseTabIds: a corrupt saved tab list means no tabs, never a throw', async () => {
-  const { parseTabIds } = await import('../src/lib/stores/sessionBuckets.ts');
-  assert.deepEqual(parseTabIds('["a","b"]'), ['a', 'b']);
-  assert.deepEqual(parseTabIds('{not json'), []);
-  assert.deepEqual(parseTabIds('{"a":1}'), []);
-  assert.deepEqual(parseTabIds('["a",3,null]'), ['a']);
-  assert.deepEqual(parseTabIds(null), []);
+test('parseTabRefs: a corrupt saved tab list means no tabs, never a throw', async () => {
+  const { parseTabRefs } = await import('../src/lib/stores/splitLayout.ts');
+  const ids = (raw: string | null) => parseTabRefs(raw).map((r) => r.id);
+  assert.deepEqual(ids('["a","b"]'), ['a', 'b']);
+  assert.deepEqual(ids('{not json'), []);
+  assert.deepEqual(ids('{"a":1}'), []);
+  assert.deepEqual(ids('["a",3,null]'), ['a']);
+  assert.deepEqual(ids(null), []);
 });

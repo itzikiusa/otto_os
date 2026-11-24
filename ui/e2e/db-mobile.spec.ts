@@ -72,11 +72,11 @@ async function openAndQuery(page: Page): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
 
-  const conn = page.locator(`.conn-row[data-connection-id="${redisConnId}"] .conn-name`);
+  const conn = page.locator(`.conn-row[data-connection-id="${redisConnId}"] .tr-title`);
   await expect(conn).toBeVisible({ timeout: 30_000 });
   await conn.click();
 
-  await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('db-conn-state')).toBeVisible({ timeout: 20_000 });
 
   const editor = page.locator('.qe-edit .cm-content');
   await editor.click();
@@ -138,34 +138,23 @@ test.describe('database mobile (phone)', () => {
     expect(rows).toBeGreaterThanOrEqual(1);
   });
 
-  test('sections are collapsible accordions', async ({ page }) => {
+  test('after a run the editor folds to one line and toggles back', async ({ page }) => {
     test.skip(redisConnId == null, 'redis-server unavailable');
     await openAndQuery(page);
-
-    // Editor is visible while expanded; collapsing its accordion hides it.
-    await expect(page.locator('.qe-edit')).toBeVisible();
-    await page.locator('.qe-acc-head', { hasText: 'Editor' }).click();
+    // The rows get the screen: the editor folded to its head on Run.
     await expect(page.locator('.qe-edit')).toBeHidden();
-    // Expand again.
-    await page.locator('.qe-acc-head', { hasText: 'Editor' }).click();
+    await page.getByRole('button', { name: 'Edit the query' }).click();
     await expect(page.locator('.qe-edit')).toBeVisible();
-
-    // The connection list collapsed once the tab opened (its pane gets the
-    // screen); it toggles open and closed.
-    await expect(page.locator('.conn-list')).toBeHidden();
-    await page.locator('.acc-toggle', { hasText: 'Connections' }).click();
-    await expect(page.locator('.conn-list')).toBeVisible();
-    await page.locator('.acc-toggle', { hasText: 'Connections' }).click();
-    await expect(page.locator('.conn-list')).toBeHidden();
+    await page.getByRole('button', { name: 'Fold the editor' }).click();
+    await expect(page.locator('.qe-edit')).toBeHidden();
   });
 
   test('the results block scrolls internally when rows overflow', async ({ page }) => {
     test.skip(redisConnId == null, 'redis-server unavailable');
     await openAndQuery(page);
 
-    // Collapse the editor so the results block gets the room, then confirm its
-    // scroll container caps (clientH) below its content (scrollH).
-    await page.locator('.qe-acc-head', { hasText: 'Editor' }).click();
+    // The editor folded on Run; confirm the results' scroll container caps
+    // (clientH) below its content (scrollH).
     await page.locator('.grid-scroll').scrollIntoViewIfNeeded();
     const info = await page.locator('.grid-scroll').evaluate((el) => ({
       clientH: el.clientHeight,

@@ -61,16 +61,17 @@ test('⌘T on Threads opens the new-thread stage, not the New session sheet', as
   expect(await page.evaluate(() => location.hash)).toMatch(/^#\/threads/);
 });
 
-test('the New session stage: Chat with no message goes to the Threads stage (A4)', async ({ page }) => {
+test('the New session stage: Chat with no message opens an empty chat pane here (A2, A4)', async ({ page }) => {
   await page.goto('/#/agents');
-  await expect(page.locator('.navigator')).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId('agents-inbox')).toBeVisible({ timeout: 30_000 });
   const dialog = await openNewSessionSheet(page);
   const kind = dialog.getByTestId('ns-kind');
   await expectFullyInViewport(page, kind);
   await kind.getByRole('radio', { name: 'Chat' }).click();
+  await dialog.locator('.provider-card', { hasText: 'codex' }).locator('.card-main').click();
   await dialog.getByRole('button', { name: 'Start chat' }).click();
   await expect(sheet(page)).toHaveCount(0);
-  await expect(page.getByTestId('new-thread-stage')).toBeVisible({ timeout: 15_000 });
-  // `threads/new` is a one-shot route: it is replaced by `threads`.
-  await expect.poll(() => page.evaluate(() => location.hash)).toBe('#/threads');
+  await expect(page.locator('[data-testid^="thread-pane-"]')).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('[data-testid^="thread-pane-"] [data-testid="runtime-composer"]')).toBeVisible({ timeout: 20_000 });
+  await expect.poll(() => page.evaluate(() => location.hash)).toMatch(/^#\/agents\//);
 });
