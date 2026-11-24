@@ -940,9 +940,7 @@
             <span class="fb-chip-label">{modelLabel}</span>
             <Icon name="chevronDown" size={12} />
           </button>
-          <!-- On Home its Pinned header switches the spaces, by name: no second switch (M13). -->
-          {#if !(inApp && router.module === 'home')}
-          <span class="sep" aria-hidden="true"></span>
+          {#if !(inApp && router.module === 'home')}<!-- On Home, Pinned's own tabs switch spaces: one switch (M13). --><span class="sep" aria-hidden="true"></span>
           <div class="spaces" role="radiogroup" aria-label="Spaces (⌃1–⌃4)">
             {#each Array.from({ length: SPACE_COUNT }, (_, i) => i) as i (i)}
               {@const sp = barStore.state.spaces[i]}
@@ -954,8 +952,7 @@
                 onclick={() => selectSpace(i)}
               >{spaceLabel(i)}</button>
             {/each}
-          </div>
-          {/if}
+          </div>{/if}
           <button
             class="mic"
             aria-disabled="true"
