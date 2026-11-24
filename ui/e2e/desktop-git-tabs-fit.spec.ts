@@ -68,16 +68,14 @@ test('few repos: every tab shows its branch inline', async ({ page }) => {
   await expect(page.locator('.git-tablist')).toHaveAttribute('data-branches', 'all');
 });
 
-test('many repos: names only (active may keep its branch); a wider window brings branches back', async ({ page }) => {
+test('many repos: one "<repo> ▾" switcher names the active repo; a wider window brings the tabs and branches back', async ({ page }) => {
   await page.setViewportSize({ width: 1100, height: 800 });
   await openTabs(page, 8);
   const list = page.locator('.git-tablist');
-  await expect(list).toHaveAttribute('data-branches', /^(active|none)$/);
-  for (let i = 1; i < 8; i++) await expect(tab(page, i).locator('.git-tab-branch')).toBeHidden();
-  // Still named by branch for AT + tooltip.
-  await expect(tab(page, 3)).toHaveAttribute('aria-label', `${repos[3].name} — ${repos[3].branch}`);
-  const mode = await list.getAttribute('data-branches');
-  if (mode === 'active') await expect(tab(page, 0).locator('.git-tab-branch')).toBeVisible();
+  // Eight names don't fit beside the verbs: the strip turns into the switcher (R2-001).
+  const sw = page.getByTestId('git-repo-switch');
+  await expect(sw).toBeVisible();
+  await expect(sw).toContainText(await page.locator('.git-tab.active .git-tab-name').textContent() ?? '');
   await page.screenshot({ path: test.info().outputPath('git-tabs-many.png') });
   // Close tabs and widen the window until they fit: branches come back
   // without a reload.

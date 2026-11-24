@@ -34,6 +34,7 @@
   let { onopen, onadd, embedded = false, focus = false, ontogglefocus, onswitch }: Props = $props();
   /** Too tight for the tabs: one "<active repo> ▾" switcher and Focus as its icon. */
   let compact = $state(false);
+  let stripEl = $state<HTMLDivElement | null>(null);
 
   const selectedId = $derived(focus ? null : git.activeRepoId);
 
@@ -181,13 +182,15 @@
   // Re-measured when the strip or its header resizes, and when the tabs,
   // their branches or the active tab change.
   const GAP = 2;
-  /** The narrowest an inactive tab gets (CSS .git-tab min-width) before the strip turns compact. */
-  const MIN_TAB = 64;
+  /** What the header's title, labelled verbs, view icons and ⋯ need: the tabs
+   *  show only beside them, else the strip turns compact. */
+  const TOOLBAR_W = 660;
   function fitBranches(): void {
     const el = listEl;
     if (!el) return;
-    // Measured on the full strip (the tabs shown), then compact if the active
-    // tab at full width and every other at its floor don't fit.
+    // Measured on the full strip (the tabs shown), then compact if the tabs'
+    // names can't fit beside the labelled verbs — decided from the row,
+    // not from what the verbs take now, so the two never trade back and forth.
     if (compact && onswitch) {
       compact = false;
       flushSync();
@@ -202,8 +205,20 @@
     const overflowing = el.scrollWidth > el.clientWidth + 0.5;
     const active = tabs.findIndex((t) => t.classList.contains('active'));
     el.setAttribute('data-branches', overflowing ? branchMode(measures, el.clientWidth + GAP, active) : 'all');
-    const need = measures.reduce((s, m, i) => s + (i === active ? m.full - m.branch : Math.min(m.full - m.branch, MIN_TAB + GAP)), 0);
-    if (onswitch && overflowing && need > el.clientWidth + GAP + 0.5) {
+    const row = stripEl?.closest('.ph-tabs-inline')?.parentElement;
+    if (!stripEl || !row || !onswitch) return;
+    // Focus · the active tab by name, the others down to ~120 px · + (and the
+    // focus-ring room around them).
+    const fullW = stripEl.scrollWidth - el.clientWidth + measures.reduce((s, m, i) => s + (i === active ? m.full - m.branch : Math.min(m.full - m.branch, 120)), 0) + 8;
+    const name = el.querySelector<HTMLElement>('.git-tab.active .git-tab-name');
+    const tight = fullW > row.clientWidth - TOOLBAR_W;
+    // The room the strip needs (the compact one: Focus icon, switcher chrome
+    // and + ≈ 96 px, plus up to 96 px of the name): GitToolbar's verbs give
+    // way before the tabs go below it.
+    stripEl.dataset.floor = String(Math.round(tight ? 96 + Math.min(name?.scrollWidth ?? 96, 96) : fullW));
+    // …and, before the repo's state words may stay, every tab whole with its branch.
+    stripEl.dataset.want = String(Math.round(tight ? 0 : fullW + measures.reduce((s, m, i) => s + (i === active ? m.branch : m.full - Math.min(m.full - m.branch, 120)), 0)));
+    if (tight) {
       compact = true;
       flushSync();
     }
@@ -259,7 +274,7 @@
   });
 </script>
 
-<div class="git-tabs" class:embedded class:compact>
+<div class="git-tabs" class:embedded class:compact bind:this={stripEl}>
   {#if ontogglefocus && git.allRepos.length > 0}
     <!-- Focus is cross-repo (my PRs + my Jira work), so it is its own entry
          pinned before the repo tabs, never one of a repo's sub-tabs. -->

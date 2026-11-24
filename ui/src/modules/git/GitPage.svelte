@@ -56,9 +56,6 @@
   // The repo tabs' floor (share of the header row): they shrink (ellipsis,
   // then scroll in their strip) down to it before the verbs' labels give way.
   const TABS_MIN = 0.08;
-  // …and the room the compact repo switcher (Focus · <repo> ▾ · +) keeps: the
-  // verbs' labels and the view words give way before the repo name does.
-  const TABS_FLOOR = 220;
   const FocusViewLazy = lazyComponent(() => import('./FocusView.svelte'));
   // The Add repository sheet loads on first open.
   const AddRepoSheetLazy = lazyComponent(() => import('./AddRepoSheet.svelte'));
@@ -255,7 +252,6 @@
             <GitToolbar
               variant="header"
               tabsMin={TABS_MIN}
-              tabsFloor={TABS_FLOOR}
               bind:this={toolbar}
               {repoId}
               status={activeStatus}
