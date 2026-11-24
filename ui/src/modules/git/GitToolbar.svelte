@@ -51,7 +51,7 @@
     /** sync: false while the card beside it already offers Push (its primary). */
     push?: boolean;
     /** Header: rendered between the state words and the verbs (the view switch). */
-    children?: import('svelte').Snippet;
+    children?: import('svelte').Snippet<[compact: boolean]>;
   }
   let { repoId, status, onstatus, onrefresh, variant = 'row', accent = false, tabsMin = 0.5, push = true, onbrowsestashes, children }: Props = $props();
 
@@ -315,11 +315,13 @@
     return status.changes.length > 0 && w === 'Clean' ? '' : w;
   });
 
-  // ── Header fit: labels give way to icons, in this order, before the row
-  // would scroll (Pull and Push keep theirs; the state words, which repeat
-  // the ↑/↓ counts, go last). Measured against the header's actions wrap on
+  // ── Header fit: once the repo tabs are at their floor, the row gives way in
+  // this order before anything is clipped: the state words (they repeat the
+  // ↑/↓ counts) and "Auto-fetch paused" (⋯ has the toggle), then each verb's
+  // label (the icon stays, the word is its name and title), then the view
+  // switch turns to icons. Measured against the header's actions wrap on
   // every resize and whenever a label or count changes.
-  const SQUEEZE = ['stash', 'pop', 'fetch', 'state'];
+  const SQUEEZE = ['state', 'stash', 'pop', 'fetch', 'pull', 'push', 'views'];
   let squeeze = $state(0);
   const iconOnly = (v: string): boolean => SQUEEZE.indexOf(v) !== -1 && SQUEEZE.indexOf(v) < squeeze;
   let fetchEl = $state<HTMLButtonElement>();
@@ -396,10 +398,11 @@
   <span class="split" data-keep>
     <button
       class="btn small ghost tbtn"
+      class:icon-only={iconOnly('pull')}
       disabled={busy !== '' || !!syncWhy}
       onclick={() => void doPull()}
       title={syncWhy ?? (status.behind > 0 ? `Pull ${plural(status.behind, 'commit')} from ${status.upstream}` : 'Pull from upstream using the repo’s configured mode')}
-    >{@render glyph('pull', 'arrowDown')}{@render label(busy === 'pull' ? 'Pulling…' : 'Pull', status.behind > 0 ? `↓${status.behind}` : null)}</button>
+    >{@render glyph('pull', 'arrowDown')}{@render label(busy === 'pull' ? 'Pulling…' : 'Pull', status.behind > 0 ? `↓${status.behind}` : null, iconOnly('pull'))}</button>
     {#if header}
       <button
         class="btn small ghost tbtn caret"
@@ -417,6 +420,7 @@
     class="btn small tbtn"
     class:ghost={!pushPrimary}
     class:primary={pushPrimary}
+    class:icon-only={iconOnly('push')}
     data-keep
     disabled={busy !== '' || nothingToPush || !!syncWhy}
     onclick={() => void doPush()}
@@ -426,7 +430,7 @@
           ? `Push ${plural(status.ahead, 'commit')} to ${status.upstream}`
           : `Nothing to push — ${status.branch} has no commits that ${status.upstream} doesn’t`
         : `Publish ${status.branch} to origin`)}
-  >{@render glyph('push', 'arrowUp')}{@render label(busy === 'push' ? (status.upstream ? 'Pushing…' : 'Publishing…') : status.upstream ? 'Push' : 'Publish', status.ahead > 0 && status.upstream ? `↑${status.ahead}` : null)}</button>
+  >{@render glyph('push', 'arrowUp')}{@render label(busy === 'push' ? (status.upstream ? 'Pushing…' : 'Publishing…') : status.upstream ? 'Push' : 'Publish', status.ahead > 0 && status.upstream ? `↑${status.ahead}` : null, iconOnly('push'))}</button>
   {/if}
 
   {#if variant !== 'sync'}
@@ -488,10 +492,10 @@
   </span>
   <!-- Auto-fetch lives in ⋯; paused is a lasting choice, so it says so here. -->
   {#if !git.autoFetchEnabled}
-    <button class="btn small ghost git-autofetch-paused" data-keep data-testid="git-autofetch-paused" onclick={() => git.setAutoFetch(true)}
+    <button class="btn small ghost git-autofetch-paused" class:squeezed={iconOnly('state')} data-keep data-testid="git-autofetch-paused" onclick={() => git.setAutoFetch(true)}
       title="Auto-fetch is paused — a repo is still fetched once when you open it. Click to resume.">Auto-fetch paused</button>
   {/if}
-  {@render children?.()}
+  {@render children?.(iconOnly('views'))}
   {#if showVerbs}{@render verbs()}{/if}
 {:else}
   <div class="verbs" class:phone-row={variant === 'row'} class:sync={variant === 'sync'} role="group" aria-label="Git" data-testid={variant === 'row' ? 'git-verbs-row' : 'git-verbs-sync'}>
@@ -516,7 +520,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .git-state.squeezed {
+  .squeezed {
     display: none;
   }
   .git-autofetch-paused {

@@ -89,10 +89,11 @@ test('+ stays fully visible when many repo tabs are open', async ({ page }) => {
   }
   // ≥ 8: the previous test's opened tab may persist.
   await expect.poll(() => page.locator('.git-tab').count(), { timeout: 10_000 }).toBeGreaterThanOrEqual(8);
-  // The tab row really does overflow (otherwise this proves nothing)…
+  // The tab row really is crowded — it scrolls, or its tabs have shrunk to
+  // ellipsized names (otherwise this proves nothing)…
   const overflows = await page
     .locator('.git-tablist')
-    .evaluate((el) => el.scrollWidth > el.clientWidth + 1);
+    .evaluate((el) => el.scrollWidth > el.clientWidth + 1 || Array.from(el.querySelectorAll('.git-tab-name')).some((n) => n.scrollWidth > n.clientWidth + 1));
   expect(overflows).toBe(true);
   // …yet + sits wholly inside the header's inline-tabs slot.
   const within = await page.locator('.git-tab-new').evaluate((btn) => {
