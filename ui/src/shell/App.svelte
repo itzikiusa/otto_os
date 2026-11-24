@@ -1039,7 +1039,8 @@
     <!-- Back/Forward: visible whenever there is history to walk. Placed left of
          the title so the thumb can reach them comfortably on phone + tablet. -->
     <NavButtons />
-    <span class="mtop-title">{moduleName === 'agents' ? (ws.activeSession?.title ?? 'Agents') : moduleTitle}</span>
+    <!-- Agents: the pane header (‹ · word · title) names the session; the bar says where you are. -->
+    <span class="mtop-title">{moduleTitle}</span>
     <span class="grow"></span>
     <!-- Desktop + tablet reach the bell in the Navigator/Rail; the phone's
          Navigator is a closed drawer, so the top bar carries it instead. -->
@@ -1346,6 +1347,17 @@
     border-radius: var(--radius-s);
     cursor: pointer;
     flex-shrink: 0;
+  }
+  /* Phone: every app-bar control (menu, back/forward, bell, side panel) is a
+     44 px target; on a 38 px titled bar they overhang it a little. */
+  .shell.bnav .mtopbar :global(button) {
+    min-inline-size: 44px;
+    min-block-size: 44px;
+  }
+  /* …and the bell's count stays on the icon, inside the bar. */
+  .shell.bnav .mtopbar :global(.count-bubble) {
+    top: 6px;
+    inset-inline-end: 4px;
   }
   .mtop-btn:hover {
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);

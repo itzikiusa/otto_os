@@ -1,30 +1,22 @@
 // The Agents inbox (patterns.md §10, the Threads concept): PTY sessions and
 // structured threads in ONE list — needs you first, then Failed, then
-// finished unread (Done), then the order the sort mode hands over (recent,
-// manual or tokens); working sessions leave the list for the pinned
-// "Working" fold. Pure (unit/agentsInbox.test.ts): the page passes in each
-// row's class (lib/statusWords.ts `inboxClass`).
+// finished unread (Done), then the working ones, then the rest in the order
+// the sort mode hands over (recent, manual or tokens) — all in the one list:
+// with six agents running the live sessions ARE the list, never a cramped
+// fold under an empty one. Pure (unit/agentsInbox.test.ts): the page passes
+// in each row's class (lib/statusWords.ts `inboxClass`).
 import type { Session } from '../../lib/api/types';
 import type { InboxClass } from '../../lib/statusWords';
 
-const RANK: Record<InboxClass, number> = { needs: 0, failed: 1, done: 2, working: 3, rest: 3 };
+const RANK: Record<InboxClass, number> = { needs: 0, failed: 1, done: 2, working: 3, rest: 4 };
 
-/** The main list and the Working fold. `list` comes in the sort mode's
- *  order ('recent' = newest activity first); urgency moves a row up, the
- *  incoming order breaks ties (stable). */
-export function agentsInbox(
-  list: readonly Session[],
-  classOf: (s: Session) => InboxClass,
-): { main: Session[]; working: Session[] } {
-  const main: { s: Session; r: number; i: number }[] = [];
-  const working: Session[] = [];
-  list.forEach((s, i) => {
-    const c = classOf(s);
-    if (c === 'working') working.push(s);
-    else main.push({ s, r: RANK[c], i });
-  });
-  main.sort((a, b) => a.r - b.r || a.i - b.i);
-  return { main: main.map((x) => x.s), working };
+/** The inbox list. `list` comes in the sort mode's order ('recent' = newest
+ *  activity first); urgency moves a row up, the incoming order breaks ties (stable). */
+export function agentsInbox(list: readonly Session[], classOf: (s: Session) => InboxClass): Session[] {
+  return list
+    .map((s, i) => ({ s, r: RANK[classOf(s)], i }))
+    .sort((a, b) => a.r - b.r || a.i - b.i)
+    .map((x) => x.s);
 }
 
 /** Newest activity first (the 'recent' sort; ISO strings compare as text). */

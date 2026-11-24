@@ -75,3 +75,54 @@ test('the New session stage: Chat with no message opens an empty chat pane here 
   await expect(page.locator('[data-testid^="thread-pane-"] [data-testid="runtime-composer"]')).toBeVisible({ timeout: 20_000 });
   await expect.poll(() => page.evaluate(() => location.hash)).toMatch(/^#\/agents\//);
 });
+
+// Chat starts ONE thread: the batch steppers and the "Starting N sessions"
+// line go with Terminal, and the count resets to the one provider.
+test('Chat hides the batch steppers and starts one thread', async ({ page }) => {
+  await page.goto('/#/agents');
+  await expect(page.getByTestId('agents-inbox')).toBeVisible({ timeout: 30_000 });
+  const dialog = await openNewSessionSheet(page);
+  const codex = dialog.locator('.provider-card', { hasText: 'codex' });
+  await codex.locator('.card-main').click();
+  await codex.getByRole('button', { name: 'One more codex session' }).click();
+  await expect(dialog.locator('.hint.batch')).toContainText('Starting 2 sessions');
+  await dialog.getByTestId('ns-kind').getByRole('radio', { name: 'Chat' }).click();
+  await expect(dialog.locator('.count-ctl:visible')).toHaveCount(0);
+  await expect(dialog.locator('.hint.batch')).toHaveCount(0);
+  await dialog.getByTestId('ns-kind').getByRole('radio', { name: 'Terminal' }).click();
+  await expect(dialog.locator('.hint.batch')).toHaveCount(0);
+  await page.keyboard.press('Escape');
+});
+
+// Enter on a − / + steps the count; only ⌘↩ (or Enter on a tile) starts.
+test('Enter on a provider\'s + steps the count instead of starting', async ({ page }) => {
+  await page.goto('/#/agents');
+  await expect(page.getByTestId('agents-inbox')).toBeVisible({ timeout: 30_000 });
+  const dialog = await openNewSessionSheet(page);
+  const shell = dialog.locator('.provider-card', { hasText: 'shell' });
+  await shell.locator('.card-main').click();
+  await shell.getByRole('button', { name: 'One more shell session' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(dialog.locator('.hint.batch')).toContainText('Starting 2 sessions');
+  await expect(sheet(page)).toBeVisible();
+  await page.keyboard.press('Escape');
+});
+
+// A chat that started never asks to discard what it was given (the extra
+// folders are a terminal option), and its chips say what Chat still uses.
+test('a started chat closes without a discard prompt; Chat shows the chips it uses', async ({ page }) => {
+  await page.goto('/#/agents');
+  await expect(page.getByTestId('agents-inbox')).toBeVisible({ timeout: 30_000 });
+  const dialog = await openNewSessionSheet(page);
+  await dialog.getByTestId('ns-options').click();
+  await dialog.locator('#ns-title').fill('Kaka');
+  await dialog.locator('#ns-extra-dir').fill(dir);
+  await dialog.locator('#ns-extra-dir').press('Enter');
+  await dialog.getByTestId('ns-options').click();
+  await dialog.getByTestId('ns-kind').getByRole('radio', { name: 'Chat' }).click();
+  await expect(dialog.locator('.opt-chip')).toHaveText(['Title: Kaka']);
+  await dialog.locator('.provider-card', { hasText: 'codex' }).locator('.card-main').click();
+  await dialog.getByRole('button', { name: 'Start chat' }).click();
+  await expect(sheet(page)).toHaveCount(0, { timeout: 20_000 });
+  await expect(page.locator('[data-testid^="thread-pane-"]')).toBeVisible({ timeout: 20_000 });
+});

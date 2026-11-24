@@ -28,7 +28,7 @@
   import { inboxClass, inboxScore, inboxSections } from './threadInbox';
   import { inboxLive } from './threadInbox.svelte';
   import { threadMeta } from './threadMeta.svelte';
-  import { threadRowState } from './threadNav.svelte';
+  import { threadClass, threadRowState } from './threadNav.svelte';
   import {
     delegatedParentId,
     isThreadSession,
@@ -186,7 +186,7 @@
     const st = threadRowState(s);
     const focused = threads.focusedSessionId === s.id && !threads.newDraftMode;
     const unread = !focused && st.key !== 'needs-you' && threadMeta.unread(s.id, ws.unread[s.id] === true || runtimeThreads.unread[s.id] === true);
-    return inboxClass(st.key, unread, inboxLive.kindsOf(s.id).length);
+    return threadClass(s, unread);
   }
   const score = (s: Session): number => inboxScore(classOf(s));
 
@@ -563,7 +563,8 @@
     {/if}
 
   </div>
-  <div class="th-folds">
+  <!-- Nothing above (every live thread is working): the fold takes the room, no cramped inner scroll. -->
+  <div class="th-folds" class:fill={sections.working.length > 0 && mainPool.length === 0 && pinnedThreads.length === 0}>
     {#if sections.working.length > 0}
       <InboxFold label="Working" ariaLabel="Working threads" count={sections.working.filter((r) => !r.child).length} expanded={workingExpanded} testid="threads-working-toggle" ontoggle={() => (workingExpanded = !workingExpanded)}>
         <div class="th-list" data-testid="threads-working-list">
@@ -689,6 +690,8 @@
   .th-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   /* At most ~40 % of the sidebar; an open fold scrolls inside, its header stays. */
   .th-folds { flex-shrink: 0; max-block-size: 40%; display: flex; flex-direction: column; padding: var(--sp-2) var(--sp-4); border-block-start: 1px solid var(--separator); }
+  .th-folds.fill { flex: 1 1 auto; max-block-size: none; }
+  .th-body:has(.th-folds.fill) .th-scroll { flex: 0 1 auto; }
   .th-folds :global(.if-group) { flex: 0 1 auto; }
   .th-folds .th-list { min-height: 0; overflow-y: auto; }
   .th-scroll {

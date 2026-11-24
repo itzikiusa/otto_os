@@ -98,6 +98,9 @@ test('two terminals and a thread tile together; the approval is answered in the 
   await expect(dock).toBeVisible({ timeout: 20_000 });
   await expect(dock).toHaveAttribute('data-kind', 'approval');
   await expect(pane.getByTestId('pane-status')).toHaveText(/Needs you|Approval/);
+  // The tab strip says it in a word — no bare status dots on tabs.
+  await expect(page.locator(`[data-tab-id="${threadId}"]`)).toContainText('Needs you');
+  await expect(page.locator('.tabbar .dot')).toHaveCount(0);
   await shots(page, 'agents-thread-pane-approval');
   await dock.getByTestId('runtime-dock-accept').click();
   await expect(dock).toHaveCount(0, { timeout: 20_000 });
@@ -138,4 +141,78 @@ test('a plain click on a thread row opens its pane here; ⌘-click goes to Threa
   await expect.poll(() => page.evaluate(() => location.hash)).toBe(`#/agents/${threadId}`);
   await row(page, threadId).click({ modifiers: ['ControlOrMeta'] });
   await expect.poll(() => page.evaluate(() => location.hash)).toBe(`#/threads/${threadId}`);
+});
+
+// A focused chat pane is the route (`#/agents/<threadId>`): a reload must not
+// call it gone (it was looked up as a terminal session only).
+test('a reload with a chat pane focused restores it without a false "gone" toast', async ({ page }) => {
+  await page.goto('/#/agents');
+  await expect(row(page, threadId)).toBeVisible({ timeout: 30_000 });
+  await row(page, threadId).click();
+  const pane = page.getByTestId(`thread-pane-${threadId}`);
+  await expect(pane).toBeVisible({ timeout: 20_000 });
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe(`#/agents/${threadId}`);
+  await page.reload();
+  await expect(pane).toBeVisible({ timeout: 30_000 });
+  // The route's lookup runs at mount, before the pane shows: give a late toast its chance.
+  await page.waitForTimeout(1500); // ui-guards: allow — proves an absence (no toast)
+  await expect(page.locator('.toast.error')).toHaveCount(0);
+});
+
+// ⌘⇧T reopens a closed chat pane (not an older terminal tab).
+test('⌘⇧T reopens a closed chat pane', async ({ page }) => {
+  await page.goto(`/#/agents/${ids.Baresi}`);
+  await expect(paneOf(page, ids.Baresi)).toBeVisible({ timeout: 30_000 });
+  await expect(row(page, threadId)).toBeVisible({ timeout: 20_000 });
+  await row(page, threadId).click();
+  const pane = page.getByTestId(`thread-pane-${threadId}`);
+  await expect(pane).toBeVisible({ timeout: 20_000 });
+  await pane.locator('.tpane-title').click();
+  await page.keyboard.press('ControlOrMeta+w');
+  await expect(page.locator(`[data-tab-id="${threadId}"]`)).toHaveCount(0);
+  await page.keyboard.press('ControlOrMeta+Shift+t');
+  await expect(pane).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator(`[data-tab-id="${threadId}"]`)).toHaveCount(1);
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe(`#/agents/${threadId}`);
+});
+
+// ⋯ › Details reads the session's usage on demand: the open menu shows the
+// figure once the read lands, not on the next open.
+test('⋯ › Details shows the usage read it just asked for', async ({ page }) => {
+  await page.route('**/api/v1/sessions/*/usage', async (r) => {
+    await new Promise((f) => setTimeout(f, 400));
+    await r.fulfill({ json: { session_id: ids.Baresi, total_tokens: 12_345, cost_usd: 0.42, input_tokens: 10_000, output_tokens: 2_345 } });
+  });
+  await page.goto(`/#/agents/${ids.Baresi}`);
+  const pane = paneOf(page, ids.Baresi);
+  await expect(pane).toBeVisible({ timeout: 30_000 });
+  await pane.getByRole('button', { name: /^More…/ }).click();
+  await page.getByRole('menuitem', { name: 'Details' }).hover();
+  await expect(page.getByRole('menuitem', { name: /^Usage: 12/ })).toBeVisible({ timeout: 5_000 });
+});
+
+// The right panel heads a focused chat pane with its details card too (A5).
+test('a focused chat pane gets the details card in the right panel', async ({ page }) => {
+  await page.goto('/#/agents');
+  await expect(row(page, threadId)).toBeVisible({ timeout: 30_000 });
+  await row(page, threadId).click();
+  await expect(page.getByTestId(`thread-pane-${threadId}`)).toBeVisible({ timeout: 20_000 });
+  await page.locator('.rstrip').getByRole('button', { name: 'Files', exact: true }).click();
+  const card = page.getByTestId('agents-details-card');
+  await expect(card.getByTestId('thread-details-card')).toBeVisible({ timeout: 20_000 });
+  await expect(card.getByTestId('details-folder')).toHaveAttribute('title', new RegExp(`${dir.split('/').pop()}$`));
+  await shots(page, 'agents-thread-pane-details');
+});
+
+// A lone chat tab has no strip ✕: its ⋯ closes it.
+test('a lone chat pane closes from its ⋯', async ({ page }) => {
+  await page.goto('/#/agents');
+  await expect(row(page, threadId)).toBeVisible({ timeout: 30_000 });
+  await row(page, threadId).click();
+  const pane = page.getByTestId(`thread-pane-${threadId}`);
+  await expect(pane).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('[data-pane-key]')).toHaveCount(1);
+  await pane.getByRole('button', { name: /^More…/ }).click();
+  await page.getByRole('menuitem', { name: 'Close pane' }).click();
+  await expect(pane).toHaveCount(0);
 });

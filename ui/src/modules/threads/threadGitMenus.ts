@@ -211,10 +211,11 @@ export const BRANCH_NAME_OK = (v: string): string | null =>
  *  itself can open a folder: the Files inspector, the Git page, a terminal
  *  thread — plus copying the path for any outside editor, and the folder's
  *  project scripts (run one in a terminal thread, or add one). */
-export function openOpenInMenu(anchor: Element, opts: { cwd: string; repo: Repo | null }): void {
+export function openOpenInMenu(anchor: Element, opts: { cwd: string; repo: Repo | null; files?: () => void }): void {
   const scripts = threads.scriptsFor(opts.cwd);
   const items: MenuItem[] = [
-    { label: 'Files', icon: 'file', hint: 'Inspector', action: () => threads.setInspectorTab('files') },
+    // `files`: where Files is on a page other than Threads (the Agents right panel's tab).
+    { label: 'Files', icon: 'file', hint: opts.files ? 'Side panel' : 'Inspector', action: opts.files ?? (() => threads.setInspectorTab('files')) },
     ...(opts.repo
       ? [{ label: 'Git', icon: 'branch', action: () => router.go(`git/${encodeURIComponent(opts.repo!.id)}`) }]
       : []),

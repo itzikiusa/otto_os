@@ -29,3 +29,13 @@ test('phone: the tabs are what he used; the rest is in More', async ({ page }) =
   await sheet.getByRole('button', { name: 'Git', exact: true }).tap();
   await expect.poll(() => page.evaluate(() => location.hash)).toMatch(/^#\/git/);
 });
+
+// The bar's four are the most used (ranked), not the first four in sidebar
+// order: Git and Connections, used most, are tabs ahead of Agents (design H9).
+test('phone: the tabs follow how much he uses them, not the sidebar order', async ({ page }) => {
+  await boot(page, 'home', ['git', 'connections', 'agents', 'vault', 'home']);
+  test.skip(!(await page.evaluate(() => window.innerWidth <= 640)), 'phone only');
+  const bar = page.locator('nav.bottomnav');
+  const tabs = await bar.locator('.bn-btn[data-nav-id]').evaluateAll((els) => els.map((e) => e.getAttribute('data-nav-id')));
+  expect(tabs).toEqual(['git', 'connections', 'agents', 'vault']);
+});

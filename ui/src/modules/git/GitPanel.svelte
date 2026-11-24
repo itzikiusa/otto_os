@@ -55,10 +55,13 @@
       <!-- Keyed like GitPage: switching the focused session to another repo
            must remount, or repo A's in-flight merge status, commit draft and
            selection land on repo B. -->
+      <!-- In a session the details card above names the folder and has Open in › Git. -->
+      {#if !rightPanel.session}
       <div class="gp-head">
         <span class="ellipsis" title={primary.path}>{primary.name}</span>
         <button type="button" class="btn small ghost" data-testid="git-panel-open" onclick={() => router.go(repoRoute(primary.id))}>Open in Git</button>
       </div>
+      {/if}
       {#key primary.id}
         <LazyMount lazy={CommitCard} what="the changes" variant="panel" props={{ repo: primary, layout: 'sheet', onopenpr: (n: number) => router.go(`${repoRoute(primary.id)}/pr/${n}`), onresolve: () => router.go(repoRoute(primary.id)) }} />
       {/key}
