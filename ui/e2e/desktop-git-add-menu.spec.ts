@@ -1,9 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 import { expectFullyInViewport, openPage } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -31,7 +28,7 @@ test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   const wsId = await seedWorkspace(ctx, base);
   for (let i = 0; i < REPO_COUNT; i++) {
-    const dir = mkdtempSync(join(tmpdir(), 'otto-e2e-menu-'));
+    const dir = tempDir('otto-e2e-menu-');
     const git = (...a: string[]) => execFileSync('git', ['-C', dir, ...a], { stdio: 'ignore' });
     git('init', '-q');
     git('config', 'user.email', 'e2e@otto.local');

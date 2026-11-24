@@ -1,9 +1,8 @@
 import { test, expect, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PERF GATE — the commit graph on a 12k-commit, 20-lane history (desktop
@@ -71,7 +70,7 @@ function history(extra: number): C[] {
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
-  const dir = (repoDir = mkdtempSync(join(tmpdir(), 'otto-e2e-graph-perf-')));
+  const dir = (repoDir = tempDir('otto-e2e-graph-perf-'));
   const git = (...a: string[]) => execFileSync('git', ['-C', dir, ...a], { stdio: 'ignore' });
   git('init', '-q', '-b', 'main');
   git('config', 'user.email', 'e2e@otto.local');

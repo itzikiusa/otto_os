@@ -1,9 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 import { openPage } from './helpers';
 import { domCount, isDesktopProject } from './perf';
 
@@ -23,7 +21,7 @@ test.beforeAll(async ({}, testInfo) => {
   test.skip(!isDesktopProject(testInfo.project.name), 'desktop projects only');
   const { ctx, base } = await apiCtx();
   const wsId = await seedWorkspace(ctx, base);
-  const dir = join(mkdtempSync(join(tmpdir(), 'otto-e2e-sidebar-')), 'work');
+  const dir = join(tempDir('otto-e2e-sidebar-'), 'work');
   const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim();
   execFileSync('git', ['init', '-q', '-b', 'main', dir]);
   git('config', 'user.email', 'e2e@otto.local');

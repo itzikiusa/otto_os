@@ -1,9 +1,8 @@
 import { test, expect, type Page, type Route } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 
 // Route fixtures must bypass the mobile service worker.
@@ -25,7 +24,7 @@ const repoNames = ['promotions-service', 'bo_common_ui', 'cs3-platform', 'koala-
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
-  const dir = mkdtempSync(join(tmpdir(), 'otto-ux-git-'));
+  const dir = tempDir('otto-ux-git-');
   const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim();
   git('init', '-q', '-b', 'main');
   git('config', 'user.email', 'ux@otto.local');
@@ -48,7 +47,7 @@ test.beforeAll(async () => {
   expect(response.ok()).toBeTruthy();
   repoId = (await response.json()).id;
   for (const name of repoNames) {
-    const tabDir = mkdtempSync(join(tmpdir(), 'otto-ux-tab-'));
+    const tabDir = tempDir('otto-ux-tab-');
     execFileSync('git', ['-C', tabDir, 'init', '-q', '-b', 'feature/customer-experience-2026']);
     execFileSync('git', ['-C', tabDir, '-c', 'user.name=UX audit', '-c', 'user.email=ux@otto.local', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-qm', 'Synthetic repository baseline']);
     const result = await ctx.post(`${base}/api/v1/workspaces/${workspaceId}/repos`, { data: { path: tabDir, name } });

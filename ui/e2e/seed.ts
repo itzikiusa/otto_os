@@ -1,6 +1,6 @@
 import { request, type APIRequestContext } from '@playwright/test';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -25,6 +25,15 @@ export function daemonInfo(): DaemonInfo {
   const token =
     state.origins[0]?.localStorage.find((l) => l.name === 'otto_token')?.value ?? '';
   return { base: `http://127.0.0.1:${meta.port}`, token };
+}
+
+/** A temp dir for a spec's fixture (a repo, a vault). It is listed for the
+ *  run and global-teardown removes it once the daemon is gone. A spec that
+ *  never cleaned up left one per run in $TMPDIR. */
+export function tempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  appendFileSync(join(process.cwd(), 'e2e', `.auth-${process.env.OTTO_E2E_SLOT ?? '0'}`, 'tmp-dirs'), `${dir}\n`);
+  return dir;
 }
 
 export async function apiCtx(): Promise<{ ctx: APIRequestContext; base: string; token: string }> {

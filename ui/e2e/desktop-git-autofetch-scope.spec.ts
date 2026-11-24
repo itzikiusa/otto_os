@@ -1,9 +1,8 @@
 import { test, expect, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 
 test.use({ serviceWorkers: 'block' });
 let workspaceId = '';
@@ -18,7 +17,7 @@ const PAST_ACTIVE_CADENCE_MS = 65_000;
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
-  const dir = mkdtempSync(join(tmpdir(), 'otto-git-fetch-scope-'));
+  const dir = tempDir('otto-git-fetch-scope-');
   const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { stdio: 'ignore' });
   git('init', '-q', '-b', 'main');
   git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@otto.local');

@@ -1,9 +1,8 @@
 import { test, expect } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 import { expectFullyInViewport, openPage } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -32,7 +31,7 @@ test.beforeAll(async () => {
   REPO_NAME = `e2e-search-repo-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
   const { ctx, base } = await apiCtx();
   wsId = await seedWorkspace(ctx, base);
-  repoDir = mkdtempSync(join(tmpdir(), 'otto-e2e-search-'));
+  repoDir = tempDir('otto-e2e-search-');
   const git = (...a: string[]) => execFileSync('git', ['-C', repoDir, ...a], { stdio: 'ignore' });
   git('init', '-q');
   git('config', 'user.email', 'e2e@otto.local');
