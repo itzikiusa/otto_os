@@ -210,7 +210,7 @@ test('request changes composer locks pending content and can retry a failed send
   let pending: Route | undefined;
   await page.route('**/api/v1/repos/*/prs/1/request-changes', route => { pending = route; });
   await page.goto(`/#/git/${repoId}/pr/1`);
-  await page.locator('.prd-actions').getByRole('button', { name: 'Request changes', exact: true }).click();
+  await page.locator('.prd-actions').getByTestId('pr-review').click(); await page.locator('.ctx-menu').getByText('Request changes…', { exact: true }).click();
   const panel = page.locator('.prd-request-changes');
   await panel.getByLabel('What needs to change').fill('Please cover the retry failure');
   await panel.getByRole('button', { name: 'Request changes', exact: true }).click();
@@ -270,7 +270,7 @@ test('pending merge completion after dismissing and navigating keeps the new PR 
   let pending: Route | undefined;
   await page.route('**/api/v1/repos/*/prs/1/merge', route => { pending = route; });
   await page.goto(`/#/git/${repoId}/pr/1`);
-  await page.locator('.prd-actions').getByRole('button', {name: 'Merge', exact: true}).click();
+  await page.getByRole('button', { name: 'More pull request actions' }).click(); await page.locator('.ctx-menu').getByText('Merge', { exact: true }).click();
   await page.getByRole('dialog').getByRole('button', {name: 'Merge pull request', exact: true}).click();
   await expect.poll(() => !!pending).toBe(true);
   await page.keyboard.press('Escape');
@@ -305,7 +305,7 @@ test('phone RTL merge failure preserves strategy and retries the mocked publicat
   });
   await page.goto(`/#/git/${repoId}/pr/1`);
   await page.evaluate(() => { document.documentElement.dir = 'rtl'; });
-  await page.locator('.prd-actions').getByRole('button', {name: 'Merge', exact: true}).click();
+  await page.getByRole('button', { name: 'More pull request actions' }).click(); await page.locator('.ctx-menu').getByText('Merge', { exact: true }).click();
   const modal = page.getByRole('dialog', {name: 'Merge pull request'});
   await modal.getByLabel('Strategy').selectOption('squash');
   await modal.getByLabel('Delete source branch after merge').check();

@@ -119,18 +119,6 @@ export function ciOf(pr: PrSummary): CiFilter | null {
 
 /** The row's review chip: approved (with the count), changes requested, or
  *  waiting on a reviewer; `null` when the provider says nothing. */
-export function reviewChip(pr: PrSummary): { tone: 'ok' | 'bad' | 'warn'; text: string; label: string } | null {
-  const r = pr.review;
-  // A merged or declined PR is past review: only open rows say where it stands.
-  if (!r || pr.state !== 'open') return null;
-  if (r.status === 'changes_requested') return { tone: 'bad', text: 'Changes requested', label: 'Changes requested' };
-  if (r.status === 'approved') {
-    const text = `${r.approvals} ${r.approvals === 1 ? 'approval' : 'approvals'}`;
-    return { tone: 'ok', text, label: `Approved — ${text}` };
-  }
-  if (r.status === 'waiting') return { tone: 'warn', text: 'Awaiting review', label: 'Awaiting review' };
-  return null;
-}
 
 /** Authored by the forge account in use: the daemon's `is_mine` (a stable-id
  *  match — a Bitbucket author is a display name, the username an email, so a
@@ -211,22 +199,20 @@ export function sortPrs(
 }
 
 export interface PrGroup {
-  id: 'mine' | 'others' | 'all';
+  id: 'needs' | 'rest' | 'all';
   label: string;
   items: PrSummary[];
 }
 
-/** "Authored by you" first, then everyone else; one flat group when nothing
- *  can say who you are (no handles and no PR flagged `is_mine`). */
-export function groupPrs(prs: readonly PrSummary[], handles: ReadonlySet<string>): PrGroup[] {
-  if (handles.size === 0 && !prs.some((p) => p.is_mine)) return [{ id: 'all', label: 'Pull requests', items: prs.slice() }];
-  const mine: PrSummary[] = [];
-  const others: PrSummary[] = [];
-  for (const p of prs) (isMine(p, handles) ? mine : others).push(p);
-  const out: PrGroup[] = [];
-  if (mine.length > 0) out.push({ id: 'mine', label: 'Authored by you', items: mine });
-  if (others.length > 0) out.push({ id: mine.length > 0 ? 'others' : 'all', label: mine.length > 0 ? 'Others' : 'Pull requests', items: others });
-  return out;
+/** "Needs you" first (prStatus.needsYou), then everything else, each in the
+ *  sort order; one flat group (no headings) when nothing needs you. */
+export function groupPrs(prs: readonly PrSummary[], needs: (pr: PrSummary) => boolean): PrGroup[] {
+  const first = prs.filter(needs);
+  if (first.length === 0) return [{ id: 'all', label: 'Pull requests', items: prs.slice() }];
+  const rest = prs.filter((p) => !first.includes(p));
+  return rest.length > 0
+    ? [{ id: 'needs', label: 'Needs you', items: first }, { id: 'rest', label: 'Everything else', items: rest }]
+    : [{ id: 'needs', label: 'Needs you', items: first }];
 }
 
 /** Merge a refreshed page 1 over the rows already on screen: the fresh page

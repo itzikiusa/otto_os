@@ -358,10 +358,12 @@ export function createGraphData(h: GraphDataHost) {
     const sides = readOverview(id).then(
       (o) => {
         if (id !== h.repoId) return;
-        stashes = o.stashes;
-        stashesKnown = true;
-        worktrees = o.worktrees;
-        submodules = o.submodules;
+        stashes = o.stashes ?? [];
+        stashesKnown = o.stashes !== null;
+        worktrees = o.worktrees ?? [];
+        submodules = o.submodules ?? [];
+        // A list the daemon couldn't read (null, not "none"): its own routes.
+        if (!o.stashes || !o.worktrees || !o.submodules) void reloadSideLists(id, true);
         if (!o.refs) return loadRefs(id);
         setRefs(withoutRemoteHeads(o.refs));
         refsLoading = false;

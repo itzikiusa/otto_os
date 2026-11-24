@@ -26,6 +26,19 @@ test('phone: Changes first → one tap commits and pushes', async ({ page }, inf
   const box = (await primary.boundingBox())!;
   expect(box.height).toBeGreaterThanOrEqual(44);
   await expectNoHorizontalOverflow(page);
+  // …and nothing inside scrolls sideways either (the Changes list did, by the
+  // 2 px a touch hit area overhung its section head: a scrollbar over the nav).
+  const sideways = await page.locator('.gitpage-body').evaluate((root) =>
+    [root, ...root.querySelectorAll<HTMLElement>('*')]
+      .filter((el) => /(auto|scroll)/.test(getComputedStyle(el).overflowX) && el.scrollWidth > el.clientWidth + 1)
+      .map((el) => `${el.className} ${el.scrollWidth}>${el.clientWidth}`),
+  );
+  expect(sideways, 'inner horizontal scrollers').toEqual([]);
+  // Finger-sized (44 px): the view switch, Fetch, ⋯ and a file's include box.
+  for (const t of [page.locator('.git-views .rv-tab').first(), page.locator('.gitpage').getByRole('button', { name: /Fetch/ }), page.locator('.gitpage').getByRole('button', { name: 'More actions', exact: true }), page.locator('.wp-check-hit').first()]) {
+    const b = (await t.boundingBox())!;
+    expect(Math.min(b.width, b.height), await t.evaluate((el) => el.className)).toBeGreaterThanOrEqual(44);
+  }
   await primary.tap();
   await expect.poll(() => remoteSubject(repo), { timeout: 20_000 }).toBe('feat: ship the commit card');
   await expect(page.getByTestId('commit-card-primary')).toHaveAttribute('data-kind', 'create-pr', { timeout: 15_000 });

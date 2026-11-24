@@ -1,12 +1,16 @@
 <script lang="ts">
-  // One PR list row (PrList): state glyph, #N, title, lazy +/- counts, author,
-  // branches, labels, CI, relative time. A hover/selection checkbox sits over
-  // the glyph; the rest of the row is one button (⌘-click = background tab,
-  // shift-click = select a range, middle-click = background tab).
-  import type { PrState, PrSummary } from '../../lib/api/types';
-  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
+  // One PR list row (PrList) on the kit's InboxRow (patterns.md §10):
+  //   1. #N (+ lazy +/- counts) … what the PR needs, in words (prStatus);
+  //   2. the title at --fs-l (bold when it needs you);
+  //   3. branch → base · author · time.
+  // The row is one button (⌘-click / middle-click = background tab, shift-
+  // click = select a range). "Select" is the hover action on line 3 and the
+  // row's right-click / long-press menu, so several can open together.
+  import type { PrSummary } from '../../lib/api/types';
+  import InboxRow from '../../lib/components/InboxRow.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { rel } from '../../lib/stores/now.svelte';
-  import { reviewChip } from './pr-query';
+  import type { WordTone } from '../../lib/statusWords';
   import { prRowWord } from './prStatus';
   import type { PrStat } from './pr-stats.svelte';
 
@@ -15,9 +19,9 @@
     stat: PrStat | null;
     active: boolean;
     selected: boolean;
-    /** Anything in the list is selected: every checkbox stays visible. */
-    selecting: boolean;
-    /** The PR has an open tab (and isn't the active one): a dot. */
+    /** It needs you (prStatus.needsYou): the title goes bold. */
+    needs: boolean;
+    /** The PR has an open tab (and isn't the active one): a faint tint. */
     openTab: boolean;
     /** Attachment that counts the row's +/- once it scrolls into view. */
     observe: ((el: Element) => void | (() => void)) | null;
@@ -25,324 +29,52 @@
     onrowclick: (e: MouseEvent) => void;
     onopen: (background: boolean) => void;
   }
-  let { pr, stat, active, selected, selecting, openTab, observe, ontoggle, onrowclick, onopen }: Props = $props();
+  let { pr, stat, active, selected, needs, openTab, observe, ontoggle, onrowclick, onopen }: Props = $props();
 
-  const STATE_LABEL: Record<PrState, string> = { open: 'Open', merged: 'Merged', declined: 'Declined', all: 'All' };
-  /** What the PR needs, in words (prStatus.ts) — not a glyph. */
   const word = $derived(prRowWord(pr));
-  const review = $derived(reviewChip(pr));
-  const REVIEW_ICON: Record<'ok' | 'bad' | 'warn', IconName> = { ok: 'userCheck', bad: 'edit', warn: 'eye' };
-  const isDraft = $derived(!!pr.draft && pr.state === 'open');
-  const tone = $derived(isDraft ? 'draft' : pr.state === 'merged' ? 'merged' : pr.state === 'declined' ? 'declined' : 'open');
-  const toneLabel = $derived(isDraft ? 'Draft' : (STATE_LABEL[pr.state] ?? pr.state));
-  const labels = $derived(pr.labels ?? []);
-  const initial = $derived((pr.author.trim().charAt(0) || '?').toUpperCase());
+  const tone = $derived<WordTone>(word.tone === 'calm' ? '' : word.tone);
   const compact = (n: number): string => (n >= 10_000 ? `${Math.round(n / 1000)}k` : n.toLocaleString());
   const noop = () => {};
+  /** Middle-click anywhere on the row: a background tab. */
+  function middleClick(el: HTMLElement): () => void {
+    const h = (e: MouseEvent): void => { if (e.button === 1) { e.preventDefault(); onopen(true); } };
+    el.addEventListener('auxclick', h);
+    return () => el.removeEventListener('auxclick', h);
+  }
+  function menu(e: MouseEvent): void {
+    ctxMenu.show(e, [
+      { label: 'Open in a background tab', icon: 'external', action: () => onopen(true) },
+      { label: selected ? 'Deselect' : 'Select', icon: 'check', action: () => ontoggle(false) },
+    ]);
+  }
 </script>
 
-<div class="pr-row" role="listitem" class:active class:selected class:selecting {@attach observe ?? noop}>
-  <input
-    type="checkbox"
-    class="pr-check"
-    checked={selected}
-    aria-label="Select #{pr.number}"
-    title="Select to open several together (shift-click for a range)"
-    onclick={(e) => ontoggle(e.shiftKey)}
-  />
-  <button
-    class="pr-open"
-    aria-current={active ? 'true' : undefined}
-    title="Open #{pr.number} · ⌘-click opens it in a background tab"
-    onclick={onrowclick}
-    onauxclick={(e) => {
-      if (e.button === 1) {
-        e.preventDefault();
-        onopen(true);
-      }
-    }}
-    onkeydown={(e) => {
-      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-        e.preventDefault();
-        onopen(true);
-      }
-    }}
-  >
-    <span class="pr-glyph {tone}" role="img" aria-label={toneLabel} title={toneLabel}>
-      <Icon name={pr.state === 'merged' ? 'merge' : 'pr'} size={14} />
-    </span>
-    <span class="pr-body">
-      <span class="pr-line1">
-        <span class="pr-num mono">#{pr.number}</span>
-        <span class="pr-title" dir="auto">{pr.title}</span>
-        <span class="pr-word" data-tone={word.tone} data-testid="pr-word">{word.word}</span>
-        {#if openTab && !active}
-          <span class="pr-opendot" title="Open in a tab" aria-label="Open in a tab" role="img"></span>
-        {/if}
-        {#if stat}
-          <span class="pr-stat mono" title="{stat.files} files · +{stat.add} −{stat.del}">
-            <span class="add">+{compact(stat.add)}</span>
-            <span class="del">−{compact(stat.del)}</span>
-          </span>
-        {/if}
-      </span>
-      <span class="pr-line2">
-        <span class="pr-avatar" aria-hidden="true">{initial}</span>
-        <span class="pr-author">{pr.author}</span>
-        <span class="pr-branches mono" title="{pr.source_branch} → {pr.target_branch}"
-          >{pr.source_branch} <span class="dir-arrow">→</span> {pr.target_branch}</span
-        >
-        {#each labels.slice(0, 2) as l (l)}
-          <span class="pr-label">{l}</span>
-        {/each}
-        {#if labels.length > 2}<span class="pr-label" title={labels.slice(2).join(', ')}>+{labels.length - 2}</span>{/if}
-        {#if review}
-          <span class="review-chip {review.tone}" title={review.label} role="img" aria-label={review.label} data-testid="pr-review"
-            ><Icon name={REVIEW_ICON[review.tone]} size={12} /><span class="review-text">{review.text}</span></span
-          >
-        {/if}
-        <span class="grow"></span>
-        <span class="pr-updated" title="Updated {new Date(pr.updated_at).toLocaleString()}">{rel(pr.updated_at)}</span>
-      </span>
-    </span>
-  </button>
+<div class="pr-row" role="listitem" data-pr={pr.number} class:picked={selected} {@attach observe ?? noop} {@attach middleClick}>
+  <InboxRow title={pr.title} word={word.word} {tone} strong={needs} selected={active} inPane={openTab && !active} onPage
+    tip="Open #{pr.number} · ⌘-click opens it in a background tab" statusTestid="pr-word" onclick={onrowclick} oncontextmenu={menu}>
+    {#snippet context()}
+      <span class="pr-num">#{pr.number}</span>
+      {#if stat}<span class="pr-stat" title="{stat.files} files · +{stat.add} −{stat.del}"><span class="add">+{compact(stat.add)}</span> <span class="del">−{compact(stat.del)}</span></span>{/if}
+    {/snippet}
+    {#snippet line3()}
+      <span class="pr-branches mono" dir="ltr" title="{pr.source_branch} → {pr.target_branch}">{pr.source_branch} → {pr.target_branch}</span>
+      <span class="pr-meta">· {pr.author} · <span title="Updated {new Date(pr.updated_at).toLocaleString()}">{rel(pr.updated_at)}</span></span>
+    {/snippet}
+    {#snippet actions()}
+      <input type="checkbox" class="pr-check" checked={selected} aria-label="Select #{pr.number}"
+        title="Select to open several together (shift-click for a range)" onclick={(e) => ontoggle(e.shiftKey)} />
+    {/snippet}
+  </InboxRow>
 </div>
 
 <style>
-  .pr-row {
-    position: relative;
-    display: flex;
-    align-items: stretch;
-    border-radius: var(--radius-s);
-  }
-  .pr-row:hover,
-  .pr-row:focus-within {
-    background: var(--surface-2);
-  }
-  .pr-row.active {
-    background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
-  }
-  .pr-row.selected {
-    background: var(--accent-soft);
-  }
-  /* The select checkbox sits over the glyph and appears on hover/focus or
-     while anything is selected. */
-  .pr-check {
-    position: absolute;
-    inset-inline-start: 9px;
-    top: 10px;
-    width: 14px;
-    height: 14px;
-    margin: 0;
-    opacity: 0;
-    z-index: 1;
-    cursor: pointer;
-  }
-  .pr-row:hover .pr-check,
-  .pr-check:focus-visible,
-  .pr-row.selecting .pr-check {
-    opacity: 1;
-  }
-  .pr-row:hover .pr-glyph,
-  .pr-row:has(.pr-check:focus-visible) .pr-glyph,
-  .pr-row.selecting .pr-glyph {
-    visibility: hidden;
-  }
-  .pr-open {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-    padding: 8px;
-    border: none;
-    background: none;
-    color: var(--text);
-    text-align: start;
-    cursor: pointer;
-    border-radius: var(--radius-s);
-  }
-  .pr-open:focus-visible {
-    outline: 2px solid var(--accent-text);
-    outline-offset: -2px;
-  }
-  .pr-glyph {
-    flex: none;
-    display: inline-flex;
-    width: 16px;
-    margin-top: 1px;
-  }
-  .pr-glyph.open {
-    color: var(--success);
-  }
-  .pr-glyph.merged {
-    color: var(--accent-text);
-  }
-  .pr-glyph.declined {
-    color: var(--danger);
-  }
-  .pr-glyph.draft {
-    color: var(--text-dim);
-  }
-  .pr-body {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .pr-line1,
-  .pr-line2 {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-  }
-  .pr-line1 {
-    font-size: var(--fs-m);
-  }
-  .pr-num {
-    flex: none;
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-  }
-  .pr-title {
-    min-width: 0;
-    flex: 1 1 auto;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .pr-opendot {
-    flex: none;
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--accent);
-  }
-  .pr-stat {
-    flex: none;
-    display: inline-flex;
-    gap: 4px;
-    font-size: var(--fs-xs);
-  }
-  .add {
-    color: var(--success);
-  }
-  .del {
-    color: var(--danger);
-  }
-  .pr-line2 {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .pr-avatar {
-    flex: none;
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    background: var(--accent-soft);
-    color: var(--accent-text);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    line-height: 1;
-  }
-  .pr-author {
-    flex: none;
-    max-width: 40%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .pr-branches {
-    min-width: 0;
-    flex: 0 1 auto;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .pr-label {
-    flex: none;
-    max-width: 90px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    padding: 0 6px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    font-size: var(--fs-xs);
-    line-height: 15px;
-  }
-  .pr-updated {
-    flex: none;
-    white-space: nowrap;
-  }
-  .pr-word {
-    flex: none;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    white-space: nowrap;
-  }
-  .pr-word[data-tone='danger'] { color: var(--danger); }
-  .pr-word[data-tone='warning'] { color: var(--warning); font-weight: 600; }
-  .pr-word[data-tone='success'] { color: var(--success); }
-  .review-chip {
-    flex: none;
-    display: inline-flex;
-    align-items: center;
-  }
-  .review-chip {
-    gap: 4px;
-    white-space: nowrap;
-  }
-  .review-chip.ok {
-    color: var(--success);
-  }
-  .review-chip.bad {
-    color: var(--danger);
-  }
-  .review-chip.warn {
-    color: var(--warning);
-  }
-  /* source→target separator mirrors in place under RTL. */
-  .dir-arrow {
-    display: inline-block;
-  }
-  :global([dir='rtl']) .dir-arrow {
-    transform: scaleX(-1);
-  }
-
-  /* ≤1024px: no hover, so the checkbox is always there (at touch size) and
-     the meta line wraps instead of clipping. */
-  @media (max-width: 1024px) {
-    .pr-open {
-      padding: 10px 8px;
-    }
-    .pr-check {
-      opacity: 1;
-      width: 18px;
-      height: 18px;
-      top: 12px;
-    }
-    .pr-glyph {
-      visibility: hidden;
-    }
-    .pr-line1 {
-      font-size: var(--fs-l);
-    }
-    .pr-line2 {
-      flex-wrap: wrap;
-      font-size: var(--fs-s);
-    }
-    .pr-line2 .grow {
-      display: none;
-    }
-    .pr-branches {
-      white-space: normal;
-      overflow-wrap: anywhere;
-    }
-  }
+  .pr-row { min-width: 0; }
+  .pr-row.picked :global(.tr-row) { --tr-tint: var(--accent-soft); }
+  .pr-num { flex: none; font-variant-numeric: tabular-nums; }
+  .pr-stat { flex: none; font-variant-numeric: tabular-nums; }
+  .add { color: var(--success); }
+  .del { color: var(--danger); }
+  .pr-branches { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pr-meta { flex: none; white-space: nowrap; }
+  .pr-check { margin: 0 var(--sp-2); inline-size: 14px; block-size: 14px; cursor: pointer; }
 </style>

@@ -298,12 +298,21 @@
       { label: 'Stash changes', icon: 'stash', disabled: status.changes.length === 0, title: status.changes.length === 0 ? 'Nothing to stash — the working tree is clean' : undefined, action: () => void doStash() },
       { label: 'Pop stash', icon: 'archive', disabled: nothingToPop, title: nothingToPop ? 'There are no stashes' : undefined, action: () => void doPop() },
       { label: stashCount ? `Browse stashes (${stashCount})…` : 'Browse stashes…', icon: 'eye', disabled: nothingToPop, action: browseStashes },
+      { separator: true },
+      {
+        label: 'Auto-fetch', checked: git.autoFetchEnabled, action: () => git.setAutoFetch(!git.autoFetchEnabled),
+        title: git.autoFetchEnabled
+          ? `On — the selected repo every 60s, other recently used repos every ${Math.max(60, git.autoFetchIntervalSec)}s while Git is open and the window is focused`
+          : 'Paused — a repo is still fetched once when you open it',
+      },
     ];
   }
   /** The repo's state in words for the header ("3 files changed · ↑2 not pushed"). */
-  const words = $derived(
-    stateWords({ changes: status.changes.length, ahead: status.ahead, behind: status.behind, upstream: status.upstream, branch: detached ? null : status.branch }),
-  );
+  // The file count rides the Changes badge (and the commit card), not this line.
+  const words = $derived.by(() => {
+    const w = stateWords({ changes: 0, ahead: status.ahead, behind: status.behind, upstream: status.upstream, branch: detached ? null : status.branch });
+    return status.changes.length > 0 && w === 'Clean' ? '' : w;
+  });
 </script>
 
 {#snippet items()}
@@ -444,6 +453,11 @@
   <span class="git-state" data-keep title="{status.branch}{status.upstream ? ` · tracks ${status.upstream}` : ''}" data-testid="git-state">
     <span class="git-state-words">{words}</span>
   </span>
+  <!-- Auto-fetch lives in ⋯; paused is a lasting choice, so it says so here. -->
+  {#if !git.autoFetchEnabled}
+    <button class="btn small ghost git-autofetch-paused" data-keep data-testid="git-autofetch-paused" onclick={() => git.setAutoFetch(true)}
+      title="Auto-fetch is paused — a repo is still fetched once when you open it. Click to resume.">Auto-fetch paused</button>
+  {/if}
   {@render children?.()}
   <button class="btn small ghost tbtn" data-keep data-icon="fetch" data-label="Fetch" disabled={busy !== '' || noRemote} onclick={doFetch} title={noRemote ? NO_REMOTE : 'Fetch from remote'}>
     <Icon name="fetch" size={12} />
@@ -471,6 +485,11 @@
   .git-state-words {
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .git-autofetch-paused {
+    flex: none;
+    color: var(--warning);
+    white-space: nowrap;
   }
   /* A phone's one header row is the repo switcher, Fetch and ⋯ (the Changes
      count rides the view switch under it). */
@@ -577,5 +596,8 @@
       padding: 0 10px;
       font-size: var(--fs-m);
     }
+  }
+  @media (pointer: coarse) {
+    .tbtn { min-block-size: 44px; } /* finger-sized (the header sets its height) */
   }
 </style>

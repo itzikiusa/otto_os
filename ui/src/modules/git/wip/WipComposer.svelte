@@ -120,6 +120,16 @@
           <button type="button" class="wc-link draft-btn" onclick={ondraft} disabled={committing}><Icon name="sparkle" size={12} /> Draft from the diff</button>
         {/if}
       </p>
+      <!-- The description belongs to the message: under it, before the actions. -->
+      <textarea dir="auto"
+        class="input body-input"
+        rows="2"
+        bind:value={body}
+        placeholder="Description (optional) — why this change"
+        aria-label="Commit description (optional)"
+        spellcheck="false"
+        onkeydown={onkey}
+      ></textarea>
     </div>
     <div class="wc-actions">
       <button type="button" class="icon-btn wc-more" aria-haspopup="menu" aria-label="Commit options" title="Amend, sign, draft the message" onclick={(e) => void moreMenu(e)}>
@@ -146,15 +156,6 @@
       </button>
     </div>
   </div>
-  <textarea dir="auto"
-    class="input body-input"
-    rows="2"
-    bind:value={body}
-    placeholder="Description (optional) — why this change"
-    aria-label="Commit description (optional)"
-    spellcheck="false"
-    onkeydown={onkey}
-  ></textarea>
   {#if liveDraftId && showDraftTerm}
     <div class="draft-term">
       <LazyTerminal sessionId={liveDraftId} preferDom showToolbar={false} />

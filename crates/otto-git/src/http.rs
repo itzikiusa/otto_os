@@ -1692,8 +1692,8 @@ async fn repo_status<S: GitCtx>(
 /// `GET /repos/{id}/overview` — what opening a repository reads, in ONE
 /// request instead of five: the status (the same shared memo as `/status`),
 /// the refs (as `/refs`), stashes, worktrees and submodules. Status is the
-/// one that must succeed; a side list that fails comes back empty (refs:
-/// null) and the client reads it on its own again.
+/// one that must succeed; a list that fails comes back null (never [], which
+/// is "none") and the client reads it on its own route again.
 async fn repo_overview<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
@@ -1714,9 +1714,9 @@ async fn repo_overview<S: GitCtx>(
     Ok(Json(serde_json::json!({
         "status": status,
         "refs": refs.ok(),
-        "stashes": stashes.unwrap_or_default(),
-        "worktrees": worktrees.unwrap_or_default(),
-        "submodules": submodules.unwrap_or_default(),
+        "stashes": stashes.ok(),
+        "worktrees": worktrees.ok(),
+        "submodules": submodules.ok(),
     })))
 }
 

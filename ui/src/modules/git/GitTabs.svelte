@@ -14,7 +14,6 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { onTabKey } from '../../lib/tabKeys';
   import { branchMode, repoTabLabel } from './repoTabFit';
-  import GitAutoFetchToggle from './GitAutoFetchToggle.svelte';
 
   interface Props {
     /** Open a repo as a tab (parent loads/wires the active RepoView). */
@@ -256,7 +255,7 @@
   {/if}
   <!-- The tablist must contain ONLY role="tab" children (ARIA
        aria-required-children), and it is the only part that scrolls: the
-       auto-fetch toggle and + stay pinned after it, fully visible however
+       + stays pinned after it, fully visible however
        many repos are open. -->
   <div class="git-tablist" role="tablist" aria-label="Open repositories" bind:this={listEl}><!-- ui-guards: allow — closable/draggable repo tabs (dirty dot, branch chip, close ×, drag reorder); keyboard model uses onTabKey -->
   {#each openRepos as r (r.id)}
@@ -298,13 +297,14 @@
           }
         }}
       >
-        <span class="git-tab-dot" class:dirty aria-hidden="true"></span>
         <span class="git-tab-name">{r.name}</span>
         {#if branch}
           <span class="git-tab-branch mono" aria-hidden="true">
             <Icon name="branch" size={12} /><span class="git-tab-branch-name">{branch}</span>
           </span>
         {/if}
+        <!-- A word, not a dot; the open tab's Changes badge already counts them. -->
+        {#if dirty && selectedId !== r.id}<span class="git-tab-word" aria-hidden="true">changed</span>{/if}
       </button>
       <button
         type="button"
@@ -320,7 +320,6 @@
     </div>
   {/each}
   </div>
-  <GitAutoFetchToggle />
   <button class="git-tab-new" title="Open a repository" aria-label="Open a repository" onclick={openPicker}>
     <Icon name="plus" size={14} />
   </button>
@@ -402,18 +401,11 @@
   .git-tab.drag-over {
     border-inline-start: 2px solid var(--accent);
   }
-  .git-tab-dot {
+  .git-tab-word {
     flex-shrink: 0;
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--text-dim);
-    opacity: 0.55;
-  }
-  /* Uncommitted changes present → amber dot (a quiet "dirty" beacon). */
-  .git-tab-dot.dirty {
-    background: var(--warning);
-    opacity: 1;
+    font-size: var(--fs-xs);
+    color: var(--warning);
+    font-weight: 600;
   }
   .git-tab-name {
     /* min-width:0 lets this flex item shrink so the ellipsis actually engages
@@ -552,8 +544,7 @@
     background: var(--surface-2);
     border-color: var(--border);
   }
-  .embedded .git-tab-new,
-  .embedded :global(.git-autofetch) {
+  .embedded .git-tab-new {
     height: 28px;
     min-width: 28px;
   }
