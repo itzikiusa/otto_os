@@ -233,7 +233,8 @@
   const HttpLazy = lazyComponent(() => import('./PodHttpPanel.svelte'));
   let toYaml = $state.raw<((v: unknown, o: { lineWidth: number }) => string) | null>(null);
   $effect(() => {
-    if (tab === 'manifest' && !toYaml) void import('yaml').then((m) => (toYaml = m.stringify));
+    // A chunk that won't load (offline, a deploy replaced it) shows JSON — valid YAML too — not an endless skeleton.
+    if (tab === 'manifest' && !toYaml) void import('yaml').then((m) => (toYaml = m.stringify), () => (toYaml = (v) => JSON.stringify(v, null, 2)));
   });
 
   function manifestText(manifest: unknown): string {
