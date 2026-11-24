@@ -140,7 +140,7 @@ fn checked_endpoint(raw: &str, server: Scope) -> Result<reqwest::Url, String> {
     if !allowed {
         return Err("the authorization server named a local address; refused".into());
     }
-    if scope_of(&url) != Scope::Loopback && url.scheme() != "https" {
+    if url.scheme() != "https" && !(scope_of(&url) == Scope::Loopback && url.scheme() == "http") {
         return Err("the authorization server named a non-https endpoint; refused".into());
     }
     if scope_of(&url) == Scope::Remote && !otto_netguard::check_url_literal(&url) {

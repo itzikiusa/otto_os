@@ -393,6 +393,14 @@ fn remote_endpoints_must_be_https_and_not_local() {
     // A local server's metadata still can't send Otto to plain http elsewhere.
     assert!(checked_endpoint("http://as.example/token", Scope::Loopback).is_err());
     assert!(checked_endpoint("https://as.example/token", Scope::Loopback).is_ok());
+    // Nor to another scheme (the browser hands it to whatever app owns it).
+    for raw in [
+        "ssh://localhost/x",
+        "smb://127.0.0.1/share",
+        "file:///etc/hosts",
+    ] {
+        assert!(checked_endpoint(raw, Scope::Loopback).is_err(), "{raw}");
+    }
 }
 
 #[tokio::test]
