@@ -75,6 +75,15 @@ impl McpService {
         }
         let mut t = self.oauth_tokens(&server.id).await?;
         if !bearer_allowed(server.url.as_deref(), &t) {
+            let _ = self
+                .record_health(
+                    server,
+                    Err(format!(
+                        "{NEEDS_SIGN_IN}: the server's URL changed since sign-in"
+                    )),
+                    None,
+                )
+                .await;
             return None;
         }
         if force || t.needs_refresh(now()) {
@@ -185,10 +194,11 @@ impl McpService {
     }
 }
 
-/// Whether `t` may ride on requests to `server_url`: never in cleartext
-/// off this Mac.
-fn bearer_allowed(server_url: Option<&str>, _t: &Tokens) -> bool {
-    server_url.is_some_and(|u| otto_netguard::require_tls_or_loopback(u).is_ok())
+/// Whether `t` may ride on requests to `server_url`: only to the URL it
+/// was issued for (a re-pointed server needs a new sign-in), and never in
+/// cleartext off this Mac.
+fn bearer_allowed(server_url: Option<&str>, t: &Tokens) -> bool {
+    server_url.is_some_and(|u| u == t.resource && otto_netguard::require_tls_or_loopback(u).is_ok())
 }
 
 /// A transport error that is the server asking for authorization.
@@ -221,5 +231,10 @@ mod tests {
         assert!(!ok("http://mcp.example/mcp"));
         assert!(!ok("http://10.1.2.3/mcp"));
         assert!(!bearer_allowed(None, &tokens("")));
+        // Issued for another URL: the re-pointed server gets no bearer.
+        assert!(!bearer_allowed(
+            Some("https://new.example/mcp"),
+            &tokens("https://old.example/mcp")
+        ));
     }
 }
