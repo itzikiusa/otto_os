@@ -666,9 +666,10 @@ export interface SubmoduleInfo {
 export interface RepoOverview {
   status: RepoStatusResp;
   refs: RefsResp | null;
-  stashes: StashInfo[];
-  worktrees: WorktreeInfo[];
-  submodules: SubmoduleInfo[];
+  /** null = that list could not be read (re-read it on its own route); [] = none. */
+  stashes: StashInfo[] | null;
+  worktrees: WorktreeInfo[] | null;
+  submodules: SubmoduleInfo[] | null;
 }
 
 export type LineOrigin = 'context' | 'add' | 'del';
