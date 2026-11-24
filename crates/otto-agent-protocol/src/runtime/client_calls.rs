@@ -361,12 +361,16 @@ fn output_limit(asked: Option<u64>) -> usize {
     })
 }
 
-/// No process is left in the group `pgid` (`ESRCH` to a null signal).
+/// No process of ours is left in the group `pgid`: `ESRCH` to a null
+/// signal, or `EPERM` (the id was reused by another user's group).
 fn group_gone(pgid: Option<i32>) -> bool {
     // SAFETY: signal 0 only checks that the group exists.
     pgid.is_some_and(|g| {
         (unsafe { libc::killpg(g, 0) }) == -1
-            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            && matches!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH | libc::EPERM)
+            )
     })
 }
 
@@ -378,6 +382,11 @@ fn kill(t: &Terminal) {
         // SAFETY: a plain signal to the process group this terminal created.
         unsafe {
             libc::killpg(pgid, libc::SIGKILL);
+        }
+        // The shell is reaped and SIGKILL ended the rest of the group: its id
+        // is free for reuse, so it is never signalled again.
+        if t.exit.borrow().is_some() {
+            t.gone.store(true, std::sync::atomic::Ordering::Release);
         }
     }
 }
@@ -442,8 +451,17 @@ mod tests {
             !group_gone(Some(left)),
             "its background child is still in it"
         );
-        // SAFETY: the group this test just made.
-        unsafe { libc::killpg(left, libc::SIGKILL) };
+        // Review R2-006: a kill after the shell exited ends the group and
+        // marks it gone, so a later release never signals its reused id.
+        let (_tx, exit) = watch::channel(Some((Some(0), None)));
+        let t = Terminal {
+            output: Mutex::new((String::new(), false)),
+            exit,
+            pgid: Some(left),
+            gone: Default::default(),
+        };
+        kill(&t);
+        assert!(t.gone.load(std::sync::atomic::Ordering::Acquire));
     }
 
     /// A dangling link in the folder points outside it: the write is
