@@ -12,7 +12,6 @@
   import { router } from '../../lib/router.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import GitTabs from './GitTabs.svelte';
-  import GitAutoFetchToggle from './GitAutoFetchToggle.svelte';
   import { focusPath, parseGitRoute } from './gitRoute';
   import { prWorkspace } from './prWorkspaceStore.svelte';
   import GitToolbar from './GitToolbar.svelte';
@@ -205,7 +204,6 @@
           {@const repoId = activeRepo.id}
           <!-- The repo's verbs live in the header (not a second toolbar row under
                it); they collapse into ⋯ by data-overflow when the bar is tight. -->
-          {#if viewport.isPhone}<GitAutoFetchToggle />{/if}
           {#if activeStatus}
             <GitToolbar
               inHeader

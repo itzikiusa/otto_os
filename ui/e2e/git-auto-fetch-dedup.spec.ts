@@ -126,19 +126,22 @@ test('auto-fetch: updates the behind chip after the upstream advances', async ({
   await expect(page.getByTestId('git-state')).toContainText('↓1 to pull', { timeout: 25_000 });
 });
 
-test('auto-fetch: toggle is on by default and pausing it persists', async ({ page }) => {
+test('auto-fetch: on by default (a checked ⋯ item); pausing it persists and says so', async ({ page }) => {
   await boot(page);
   await page.goto(`/#/git/${upstreamRepoId}/graph`);
   await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
-  const toggle = page.locator('.git-autofetch');
-  await expect(toggle).toBeVisible({ timeout: 15_000 });
-  await expect(toggle).toHaveClass(/\bon\b/);
-  await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+  // One Fetch control in the header; auto-fetch is not a second glyph beside it.
+  await expect(page.locator('.gitpage').getByRole('button', { name: /Fetch/ })).toHaveCount(1, { timeout: 15_000 });
+  await expect(page.getByTestId('git-autofetch-paused')).toHaveCount(0);
+  await page.locator('.gitpage').getByRole('button', { name: 'More actions', exact: true }).click();
+  const item = page.getByRole('menuitemcheckbox', { name: /Auto-fetch/ });
+  await expect(item).toHaveAttribute('aria-checked', 'true');
 
-  // Pause it → state flips and is persisted to localStorage.
-  await toggle.click();
-  await expect(toggle).not.toHaveClass(/\bon\b/);
-  await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+  // Pause it → state flips, says so in the header, and is persisted to localStorage.
+  await item.click();
+  await expect(page.getByTestId('git-autofetch-paused')).toBeVisible();
+  if (await item.isVisible()) await expect(item).toHaveAttribute('aria-checked', 'false');
+  await page.keyboard.press('Escape');
   const persisted = await page.evaluate(() =>
     JSON.parse(localStorage.getItem('otto_git_auto_fetch') ?? '{}'),
   );
@@ -153,8 +156,7 @@ test('auto-fetch: paused → one fetch on arrival, then no background rounds', a
   });
   await page.goto(`/#/git/${upstreamRepoId}/graph`);
   await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator('.git-autofetch')).not.toHaveClass(/\bon\b/);
-  await expect(page.locator('.git-autofetch')).toContainText('Paused');
+  await expect(page.getByTestId('git-autofetch-paused')).toHaveText('Auto-fetch paused');
   // Paused stops the rounds, not the arrival fetch: opening the page fetches
   // the selected repo once, and the five-second loop ticks add nothing.
   await expect.poll(() => fetches, { timeout: 15_000 }).toBe(1);
