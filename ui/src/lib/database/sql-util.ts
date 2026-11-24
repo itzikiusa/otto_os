@@ -622,5 +622,8 @@ export function stmtPreview(statement: string, max = 300): string {
  *  -- / # / block comments): the workbench re-reads the cached schema tree
  *  after one runs. A false positive (a ";" inside a string) costs one re-read. */
 export function isDdl(sql: string): boolean {
-  return /(?:^|;)\s*(?:(?:--[^\n]*\n|#[^\n]*\n|\/\*[\s\S]*?\*\/)\s*)*(?:create|alter|drop|rename|truncate)\b/i.test(sql);
+  // Comments are stripped first: one pattern that also skipped them in place
+  // backtracked exponentially on a long run of block comments.
+  const bare = sql.replace(/\/\*[\s\S]*?\*\/|--[^\n]*|#[^\n]*/g, ' ');
+  return /(?:^|;)\s*(?:create|alter|drop|rename|truncate)\b/i.test(bare);
 }
