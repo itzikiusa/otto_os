@@ -85,6 +85,8 @@ test('the first letter typed into a thread just opened stays first', async ({ pa
   // A message went out: the composer is empty again (its saved caret {0,0}).
   await send(thread, 'hello from the phone');
   await expect(thread.getByTestId('runtime-composer')).toHaveValue('');
+  // Tapping Send keeps the caret in the composer (a phone keyboard stays up).
+  await expect(thread.getByTestId('runtime-composer')).toBeFocused();
   // Another thread, then back: the composer is new and the page focuses it.
   await page.goto(`/#/threads/${b}`);
   await expect(page.getByTestId(`runtime-thread-${b}`)).toBeVisible();
