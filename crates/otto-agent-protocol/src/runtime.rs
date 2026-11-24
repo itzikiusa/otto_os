@@ -553,6 +553,9 @@ pub(super) struct Inner {
     usage: std::sync::OnceLock<Arc<otto_usage::UsageEngine>>,
     /// Agent-to-agent prompts per linked group since a person's last one.
     loop_guard: loop_guard::LoopGuard,
+    /// The armed "Resume at reset" timer per session; its lock makes a
+    /// timer's check-and-clear atomic against a re-arm or cancel.
+    resume_timers: tokio::sync::Mutex<HashMap<Id, tokio::task::AbortHandle>>,
 }
 
 /// Cheap to clone.
@@ -579,6 +582,7 @@ impl AgentRuntime {
                 loading: otto_core::keyed_lock::KeyedLocks::new(),
                 usage: std::sync::OnceLock::new(),
                 loop_guard: Default::default(),
+                resume_timers: Default::default(),
             }),
         }
     }
@@ -1957,6 +1961,7 @@ impl AgentRuntime {
     /// Close the session: end any turn as interrupted, stop the child, refuse
     /// further prompts. Idempotent.
     pub async fn close(&self, id: &Id) -> Result<RuntimeSession> {
+        self.drop_resume_timer(id).await;
         let s = {
             let live = self.live(id).await?;
             let _prompt = live.prompt_lock.lock().await;

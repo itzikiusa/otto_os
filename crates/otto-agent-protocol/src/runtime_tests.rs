@@ -1088,3 +1088,77 @@ async fn prompt_validates_attachment_magic_bytes_and_rejects_dash_prefixed_model
 
     rt.close(&s.id).await.unwrap();
 }
+
+/// Review R1-039: a re-arm or cancel ends the earlier "Resume at reset"
+/// timer (it no longer sleeps on for days), close drops it, and no timer
+/// keeps the runtime alive.
+#[tokio::test]
+async fn a_resume_re_arm_cancel_or_close_ends_the_earlier_timer() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap().to_string();
+    let host = Arc::new(LibTestHost {
+        root: cwd.clone(),
+        events: Mutex::new(Vec::new()),
+        notify: tokio::sync::Notify::new(),
+    });
+    let drivers: Arc<dyn DriverFactory> =
+        Arc::new(|_| -> Option<Box<dyn StructuredDriver>> { None });
+    let rt = AgentRuntime::new(
+        AgentRuntimeRepo::new(test_pool().await),
+        Arc::clone(&host) as Arc<dyn RuntimeHost>,
+        drivers,
+        RuntimeConfig {
+            attachments_dir: dir.path().join("att"),
+            ..RuntimeConfig::default()
+        },
+    );
+    let sid: Id = "resume-timer-test".into();
+    rt.inner
+        .repo
+        .create(otto_state::NewRuntimeSession {
+            id: sid.clone(),
+            workspace_id: "w1".into(),
+            provider: RuntimeProvider::Codex,
+            title: "T".into(),
+            cwd,
+            model: None,
+            access_mode: RuntimeAccessMode::FullAccess,
+            created_by: "u1".into(),
+            parent_id: None,
+            meta: None,
+        })
+        .await
+        .unwrap();
+    rt.live(&sid).await.unwrap();
+    let (strong, weak) = (Arc::strong_count(&rt.inner), Arc::weak_count(&rt.inner));
+    // The timer tasks alive: each holds one weak reference.
+    let timers = |n: usize| {
+        let inner = Arc::clone(&rt.inner);
+        async move {
+            for _ in 0..100 {
+                if Arc::weak_count(&inner) == weak + n {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            false
+        }
+    };
+    let at = Utc::now() + chrono::Duration::hours(2);
+    rt.set_resume_at(&sid, Some(at)).await.unwrap();
+    rt.set_resume_at(&sid, Some(at + chrono::Duration::minutes(1)))
+        .await
+        .unwrap();
+    assert!(timers(1).await, "the re-armed timer replaced the first");
+    assert_eq!(
+        Arc::strong_count(&rt.inner),
+        strong,
+        "no timer holds the runtime"
+    );
+    rt.set_resume_at(&sid, None).await.unwrap();
+    assert!(timers(0).await, "a cancel ends the timer");
+    rt.set_resume_at(&sid, Some(at)).await.unwrap();
+    assert!(timers(1).await);
+    rt.close(&sid).await.unwrap();
+    assert!(timers(0).await, "a close ends the timer");
+}
