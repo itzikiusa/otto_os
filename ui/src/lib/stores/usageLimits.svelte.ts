@@ -7,6 +7,8 @@ import type { LimitsResp } from '../api/types/usage-limits';
 import { loadErrorText } from '../loadError';
 import { pollWhileVisible, type Poller } from '../poll';
 
+const LIMITS_MS = 60_000;
+
 class LimitsStore {
   data = $state<LimitsResp | null>(null);
   error = $state<string | null>(null);
@@ -16,9 +18,11 @@ class LimitsStore {
   private poller: Poller | null = null;
   private refs = 0;
 
-  /** Keep polling while mounted; returns the release. */
+  /** Keep polling while mounted; returns the release. An answer younger than
+   *  the cadence is not re-read on mount (the Agents meter remounts per visit). */
   mount(): () => void {
     if (this.refs++ === 0) {
+      const fresh = this.data !== null && this.error === null && Date.now() - this.now < LIMITS_MS;
       this.poller = pollWhileVisible(
         async (signal) => {
           try {
@@ -33,7 +37,7 @@ class LimitsStore {
             this.now = Date.now();
           }
         },
-        { ms: 60_000 },
+        { ms: LIMITS_MS, immediate: !fresh },
       );
     }
     return () => {

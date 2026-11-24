@@ -47,7 +47,7 @@
   // The per-session task roll-up (row tooltips, pane header); live from events after.
   $effect(() => {
     const w = ws.currentId;
-    if (w) void activity.loadSummary(w);
+    if (w) activity.ensureSummary(w);
   });
 
   // First-run coach: a guided path from a fresh account to a launched agent.

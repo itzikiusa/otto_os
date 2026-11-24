@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Page, type Request } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 
 // The Agents inbox (spec A1): every session in one list beside the canvas —
@@ -154,6 +154,37 @@ test('per-session usage is read only when someone looks (perf A7a)', async ({ pa
   // Looking at the details (⋯) reads once.
   await page.locator(`[data-pane-key][data-session="${ids.Seedorf}"]`).first().locator('button[title="More…"]').click();
   await expect.poll(() => usageReads.length).toBe(1);
+});
+
+test('a revisit reads no more than 0.4.0 did: Agents → Git → Agents is ≤ 3 requests (perf p2)', async ({ page }) => {
+  // The inbox's stores (threads, MCP asks, the usage meter, the task roll-up)
+  // are read on the first visit and kept by events after; a revisit asks for
+  // none of them again (the review measured 6 here, 0.4.0 3).
+  const go = (to: string) => page.evaluate(async (m) => {
+    const path = '/src/lib/router.svelte.ts';
+    const { router } = await import(/* @vite-ignore */ path);
+    router.go(m);
+  }, to);
+  await page.goto('/#/agents');
+  await expect(rows(page)).toHaveCount(3, { timeout: 20_000 });
+  await page.waitForLoadState('networkidle');
+  await page.waitForTimeout(3_000); // ui-guards: allow — the first visit's idle-time reads land
+  await go('git');
+  await expect(page.locator('.navigator')).toBeVisible({ timeout: 15_000 });
+  await page.waitForLoadState('networkidle');
+  const seen: string[] = [];
+  const onReq = (r: Request): void => {
+    const u = new URL(r.url());
+    if (u.pathname.startsWith('/api/v1/')) seen.push(`${r.method()} ${u.pathname}${u.search}`);
+  };
+  page.on('request', onReq);
+  await go('agents');
+  await expect(rows(page)).toHaveCount(3, { timeout: 20_000 });
+  await page.waitForTimeout(6_000); // ui-guards: allow — a fixed window counts everything the arrival fires
+  page.off('request', onReq);
+  // eslint-disable-next-line no-console
+  console.log(`[agents-revisit] ${seen.length} requests:\n  ${seen.join('\n  ')}`);
+  expect(seen.length, seen.join('\n')).toBeLessThanOrEqual(3);
 });
 
 test('Terminal ⇄ Chat: an agent pane shows its conversation and remembers the choice (A2)', async ({ page }) => {
