@@ -6,8 +6,8 @@ import { openPage } from './helpers';
 import { apiCtx } from './seed';
 
 // All-workspaces sidebar view + workspace management:
-//  - the Agents section's globe toggle lists sessions from OTHER workspaces,
-//    grouped by workspace name; clicking a row switches workspace + opens it
+//  - the Agents inbox's "All workspaces" scope lists sessions from OTHER
+//    workspaces (each row names its workspace); clicking one switches + opens it
 //  - workspace rows gain Rename… / Change folder… / Delete… context actions.
 // Desktop-only: the expanded Navigator is the desktop surface.
 
@@ -49,27 +49,31 @@ test.describe('all-workspaces sidebar + workspace management', () => {
       expect(r.ok(), `create session → ${r.status()}`).toBeTruthy();
     }
 
-    await openPage(page, 'agents');
-    await page.evaluate(
+    // Before the first load: a boot still resolving its workspace must not
+    // write its own choice over A's.
+    await page.addInitScript(
       ([a]) => {
+        if (sessionStorage.getItem('e2e_seeded')) return;
+        sessionStorage.setItem('e2e_seeded', '1');
         localStorage.setItem('otto_rail_expanded', '1');
+        localStorage.setItem('otto_agents_fold_nav', '0'); // the Workspaces rows live in the expanded navigator
         localStorage.setItem('otto_workspace', a); // sit on workspace A
         localStorage.removeItem('otto_nav_all_ws'); // default = all workspaces ON
       },
       [wsAId],
     );
-    await page.reload();
+    await openPage(page, 'agents');
     await expect(page.locator('.navigator')).toBeVisible({ timeout: 15_000 });
   });
 
-  test('sessions from other workspaces show grouped; click switches + opens', async ({ page }) => {
+  test('sessions from other workspaces show in the inbox; click switches + opens', async ({ page }) => {
     const nav = page.locator('.navigator');
+    const inbox = page.getByTestId('agents-inbox');
 
-    // Group label with workspace B's name, with the session nested under it.
-    const groupLabel = nav.locator('.ws-group-label', { hasText: WS_B });
-    await expect(groupLabel).toBeVisible({ timeout: 15_000 });
-    const row = nav.getByRole('button', { name: new RegExp(SESS_B) });
-    await expect(row).toBeVisible();
+    // The row names workspace B on its first line.
+    const row = inbox.locator('[data-testid^="agents-row-"] .tr-main', { hasText: SESS_B });
+    await expect(row).toBeVisible({ timeout: 15_000 });
+    await expect(row).toContainText(WS_B);
 
     // Clicking the foreign row switches the workspace and focuses the session.
     await row.click();
@@ -77,37 +81,32 @@ test.describe('all-workspaces sidebar + workspace management', () => {
     await expect(
       nav.locator('.nav-item.active-ws', { hasText: WS_B }),
     ).toBeVisible({ timeout: 15_000 });
-    // … and the session is the active tab (flat Agents list row is active).
-    await expect(
-      nav.locator('.nested-item.active', { hasText: SESS_B }),
-    ).toBeVisible({ timeout: 15_000 });
+    // … and the session is the active row.
+    await expect(inbox.locator('[data-testid^="agents-row-"].selected', { hasText: SESS_B })).toBeVisible({ timeout: 15_000 });
 
-    // Toggle OFF → foreign groups disappear and the choice persists. The
-    // "No workspace" group shares the `.ws-group-label` markup but is NOT a
-    // workspace group: scratch sessions are global to the daemon (and this
-    // suite's 4 workers share one), so it is excluded rather than counted.
-    await nav.getByRole('button', { name: 'Toggle all-workspaces session list' }).click();
-    await expect(
-      nav.locator('.ws-group-label').filter({ hasNotText: 'No workspace' }),
-    ).toHaveCount(0);
+    // "This workspace" → workspace A's rows only, and the choice persists.
+    await page.getByTestId('agents-sort-toggle').click();
+    await page.locator('.ctx-item', { hasText: 'This workspace' }).click();
+    await page.getByRole('button', { name: /Current workspace/ }).click();
+    await page.locator('.ctx-item', { hasText: WS_A }).first().click();
+    await expect(inbox.locator('[data-testid^="agents-row-"]', { hasText: SESS_B })).toHaveCount(0);
     expect(await page.evaluate(() => localStorage.getItem('otto_nav_all_ws'))).toBe('0');
   });
 
-  test('right-click a workspace folder under Agents → new session there', async ({ page }) => {
-    const nav = page.locator('.navigator');
-    // The current-workspace header offers it too, for the workspace it names.
-    await nav.getByTestId('agents-current-ws').click({ button: 'right' });
+  test('right-click a workspace under Agents → new session there', async ({ page }) => {
+    // The current-workspace chip offers it, for the workspace it names.
+    await page.getByTestId('agents-current-ws').click({ button: 'right' });
     await expect(page.getByRole('menuitem', { name: `New session in “${WS_A}”…` })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Copy folder path' })).toBeVisible();
     await page.keyboard.press('Escape');
 
-    // An other-workspace group: switch there and open the New session sheet.
-    const groupLabel = nav.locator('.ws-group-label', { hasText: WS_B });
-    await expect(groupLabel).toBeVisible({ timeout: 15_000 });
-    await groupLabel.click({ button: 'right' });
-    await expect(page.getByRole('menuitem', { name: 'Copy folder path' })).toBeVisible();
+    // An other workspace's row: switch there and open the New session sheet.
+    const row = page.locator('[data-testid^="agents-row-"] .tr-main', { hasText: SESS_B });
+    await expect(row).toBeVisible({ timeout: 15_000 });
+    await row.click({ button: 'right' });
     await page.getByRole('menuitem', { name: new RegExp(`^New session in “${WS_B}`) }).click();
     await expect(page.getByRole('dialog', { name: 'New session' })).toBeVisible({ timeout: 15_000 });
-    await expect(nav.getByTestId('agents-current-ws')).toContainText(WS_B);
+    await expect(page.getByTestId('agents-current-ws')).toContainText(WS_B);
   });
 
   test('workspace context menu: rename and delete', async ({ page }) => {

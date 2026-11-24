@@ -10,7 +10,8 @@
   import Icon from '../../lib/components/Icon.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import ContextPreview from './ContextPreview.svelte';
-  import SessionKindHint from './SessionKindHint.svelte';
+  import DirList from './DirList.svelte';
+  import { plural } from '../../lib/plural';
   import McpProfilePicker from './McpProfilePicker.svelte';
   import { router } from '../../lib/router.svelte';
   import { api } from '../../lib/api/client';
@@ -194,20 +195,6 @@
   let extraDirs = $state<string[]>([]);
   let dirDraft = $state('');
 
-  function addDir(): void {
-    const path = dirDraft.trim();
-    if (path !== '' && !extraDirs.includes(path)) extraDirs = [...extraDirs, path];
-    dirDraft = '';
-  }
-
-  function removeDir(dir: string): void {
-    extraDirs = extraDirs.filter((d) => d !== dir);
-  }
-
-  function onDirKeydown(e: KeyboardEvent): void {
-    if (e.key === 'Enter') { e.preventDefault(); addDir(); }
-  }
-
   // Provider picker keyboard nav: the cards are an ARIA radiogroup with a roving
   // tabindex, so Tab moves to the next FIELD (Title) while Left/Right (and
   // Up/Down) move the selection between providers — like a native radio group.
@@ -228,12 +215,14 @@
   // modal; arrows switch provider unless they belong to a text field (caret
   // movement) or to the grid itself (its radiogroup handler already ran).
   function onGlobalKeydown(e: KeyboardEvent): void {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+    const t = e.target as HTMLElement | null;
+    // ⌘↩ anywhere; ↩ on a provider tile, in the first message (⇧↩ = new line) or the title.
+    const plainEnter = e.key === 'Enter' && !e.shiftKey && !e.isComposing && !!t && (t.id === 'ns-prompt' || t.id === 'ns-title' || !!gridEl?.contains(t));
+    if (((e.metaKey || e.ctrlKey) && e.key === 'Enter') || plainEnter) {
       e.preventDefault();
-      if (!busy && total > 0) void create();
+      if (!busy && (total > 0 || kind === 'chat')) void create();
       return;
     }
-    const t = e.target as HTMLElement | null;
     if (t && (t.closest('input, textarea, select, [contenteditable="true"]') || gridEl?.contains(t))) return;
     providerKeys(e, provider);
   }
@@ -315,6 +304,33 @@
   const supportsContext = $derived(providerFamily === 'claude' || providerFamily === 'codex');
   let showPreview = $state(false);
 
+  // The stage (A4): Terminal (here) or Chat (a structured thread in Threads),
+  // an optional first message, Start; the rest behind Options, each changed
+  // choice shown as a chip so a default never costs a row.
+  let kind = $state<'terminal' | 'chat'>('terminal');
+  let optionsOpen = $state(false);
+  const optionChips = $derived(
+    [
+      scratchMode && ws.current ? 'No workspace' : null,
+      model ? `Model: ${model}` : null,
+      Object.values(accountIds).some(Boolean) ? 'Account chosen' : null,
+      networkProfileId ? 'Network profile' : null,
+      title.trim() ? `Title: ${title.trim()}` : null,
+      cwd.trim() && cwd.trim() !== (scratchMode ? scratchHome : ws.current?.root_path) ? `Folder: ${cwd.trim()}` : null,
+      extraDirs.length ? `+${plural(extraDirs.length, 'folder')}` : null,
+      browser ? 'Browser tools' : null,
+      mcpProfileIds.length ? 'MCP profile' : null,
+    ].filter((c): c is string => c !== null),
+  );
+  /** Chat: Threads' own stage takes over, with the first message as its draft
+   *  (the one-shot handoff ThreadsPage reads, threads/recapThreadConsumer). */
+  async function startChat(): Promise<void> {
+    const draft = prompt.trim();
+    if (draft) sessionStorage.setItem('otto.thread_draft_handoff', JSON.stringify({ draft, workspaceId: scratchMode ? null : ws.currentId, ts: Date.now() }));
+    prompt = '';
+    if (await requestClose()) router.go(draft ? 'threads' : 'threads/new');
+  }
+
   $effect(() => {
     if (provider === '' && providers.length > 0) {
       // Preselect the configured default agent when it's still available;
@@ -334,6 +350,7 @@
 
   async function create(): Promise<void> {
     if (busy) return;
+    if (kind === 'chat') return void startChat();
     if (pendingSpawns.length) { await retryFailed(); return; }
     if (total === 0) return;
     const unavailable = chosen.find((p) => !providerReadiness(p).available);
@@ -442,42 +459,13 @@
 
 <svelte:window onkeydown={onGlobalKeydown} />
 
-<Modal title="New session" height={800} onclose={requestClose} dismissable={!busy}>
-  <SessionKindHint onclose={requestClose} />
-  <!-- Workspace: the current one, or none (a workspace-less session in the daemon's hidden scratch workspace); with no workspace only "No workspace", pre-selected. -->
-  <div class="field">
-    <div id="ns-ws-label" class="provider-label">Workspace</div>
-    <div class="seg" role="radiogroup" aria-labelledby="ns-ws-label">
-      {#if ws.current}
-        <button
-          type="button"
-          class="seg-btn"
-          class:active={!scratchMode}
-          role="radio" aria-checked={!scratchMode} tabindex={scratchMode ? -1 : 0} onkeydown={radioKey}
-          title={ws.current.root_path}
-          onclick={() => setScratch(false)}
-        >
-          {ws.current.name}
-        </button>
-      {/if}
-      <button
-        type="button"
-        class="seg-btn"
-        class:active={scratchMode}
-        role="radio" aria-checked={scratchMode} tabindex={scratchMode || !ws.current ? 0 : -1} onkeydown={radioKey}
-        title="Not tied to any workspace — starts in your home folder by default"
-        onclick={() => setScratch(true)}
-      >
-        No workspace
-      </button>
-    </div>
-    {#if scratchMode}
-      <span class="hint">
-        Listed under “No workspace” in the sidebar; archive, resume and hand over like any other session.
-      </span>
-    {/if}
+<Modal title="New session" height={640} onclose={requestClose} dismissable={!busy}>
+  <!-- Terminal (the agent's own CLI, here) or Chat (a structured thread in Threads). -->
+  <div class="seg kind-seg" role="radiogroup" aria-label="Session kind" data-testid="ns-kind">
+    {#each [['terminal', 'Terminal'], ['chat', 'Chat']] as [k, label] (k)}
+      <button type="button" class="seg-btn" class:active={kind === k} role="radio" aria-checked={kind === k} tabindex={kind === k ? 0 : -1} onkeydown={radioKey} onclick={() => (kind = k as 'terminal' | 'chat')}>{label}</button>
+    {/each}
   </div>
-
   <div class="field">
     <div id="ns-provider-label" class="provider-label">
       Provider <span class="dim">· use − / + on a card to start several at once</span>
@@ -546,6 +534,69 @@
     <span class="sr-only" role="status">{countAnnounce}</span>
   </div>
 
+  {#if kind === 'chat' || chosen.some((p) => p !== 'shell')}
+    <div class="field">
+      <label for="ns-prompt">First message <span class="dim">(optional)</span></label>
+      <textarea dir="auto"
+        id="ns-prompt"
+        class="input prompt-input"
+        rows="3"
+        bind:value={prompt}
+        placeholder="What should the agent start on? Sent once it is ready."
+      ></textarea>
+      <span class="hint">
+        {total > 1 ? 'Sent to every agent in this batch. ' : ''}⌘↩ {total > 1 ? 'creates the sessions' : 'creates the session'}.
+      </span>
+    </div>
+  {/if}
+
+
+  <!-- Everything else keeps its default until asked for: Options, with a chip
+       for each choice that is not the default (A4). -->
+  {#if kind === 'terminal'}
+  <div class="opts-row">
+    <button type="button" class="btn small ghost" aria-expanded={optionsOpen} data-testid="ns-options" onclick={() => (optionsOpen = !optionsOpen)}>
+      <Icon name={optionsOpen ? 'chevronDown' : 'chevronRight'} size={12} /> Options
+    </button>
+    {#if !optionsOpen}
+      {#each optionChips as chip (chip)}<span class="opt-chip">{chip}</span>{/each}
+    {/if}
+  </div>
+  {#if optionsOpen}
+  <!-- Workspace: the current one, or none (a workspace-less session in the daemon's hidden scratch workspace); with no workspace only "No workspace", pre-selected. -->
+  <div class="field">
+    <div id="ns-ws-label" class="provider-label">Workspace</div>
+    <div class="seg" role="radiogroup" aria-labelledby="ns-ws-label">
+      {#if ws.current}
+        <button
+          type="button"
+          class="seg-btn"
+          class:active={!scratchMode}
+          role="radio" aria-checked={!scratchMode} tabindex={scratchMode ? -1 : 0} onkeydown={radioKey}
+          title={ws.current.root_path}
+          onclick={() => setScratch(false)}
+        >
+          {ws.current.name}
+        </button>
+      {/if}
+      <button
+        type="button"
+        class="seg-btn"
+        class:active={scratchMode}
+        role="radio" aria-checked={scratchMode} tabindex={scratchMode || !ws.current ? 0 : -1} onkeydown={radioKey}
+        title="Not tied to any workspace — starts in your home folder by default"
+        onclick={() => setScratch(true)}
+      >
+        No workspace
+      </button>
+    </div>
+    {#if scratchMode}
+      <span class="hint">
+        Listed under “No workspace” in the sidebar; archive, resume and hand over like any other session.
+      </span>
+    {/if}
+  </div>
+
   <!-- Hidden entirely when the provider's spec has no model-flag template, and
        for a mixed batch (model ids are provider-specific). -->
     {#each chosen.filter((p) => p === 'claude' || p === 'codex') as accountProvider (accountProvider)}
@@ -569,22 +620,6 @@
       <span class="hint">Numbered per session — “{title.trim()} 1” … “{title.trim()} {total}”.</span>
     {/if}
   </div>
-
-  {#if chosen.some((p) => p !== 'shell')}
-    <div class="field">
-      <label for="ns-prompt">First message <span class="dim">(optional)</span></label>
-      <textarea dir="auto"
-        id="ns-prompt"
-        class="input prompt-input"
-        rows="3"
-        bind:value={prompt}
-        placeholder="What should the agent start on? Sent once it is ready."
-      ></textarea>
-      <span class="hint">
-        {total > 1 ? 'Sent to every agent in this batch. ' : ''}⌘↩ {total > 1 ? 'creates the sessions' : 'creates the session'}.
-      </span>
-    </div>
-  {/if}
 
   <div class="field">
     <label for="ns-cwd">Working folder</label>
@@ -621,34 +656,7 @@
 
   <div class="field">
     <label for="ns-extra-dir">Additional directories <span class="dim">(optional)</span></label>
-    {#if extraDirs.length > 0}
-      <ul class="dir-list">
-        {#each extraDirs as dir (dir)}
-          <li class="dir-row">
-            <span class="dir-path mono" title={dir}>{dir}</span>
-            <button
-              type="button"
-              class="dir-remove"
-              title="Remove directory"
-              aria-label="Remove {dir}"
-              onclick={() => removeDir(dir)}
-            ><Icon name="x" size={12} /></button>
-          </li>
-        {/each}
-      </ul>
-    {/if}
-    <div class="dir-add">
-      <input dir="ltr"
-        id="ns-extra-dir"
-        class="input mono"
-        bind:value={dirDraft}
-        spellcheck="false"
-        placeholder="/absolute/path/to/repo"
-        onkeydown={onDirKeydown}
-      />
-      <button type="button" class="btn" onclick={() => (browsing = 'extra')}>Browse…</button>
-      <button type="button" class="btn" disabled={dirDraft.trim() === ''} onclick={addDir}>Add</button>
-    </div>
+    <DirList bind:dirs={extraDirs} bind:draft={dirDraft} inputId="ns-extra-dir" onbrowse={() => (browsing = 'extra')} />
     <span class="hint">Extra repos the agent may access (passed as <code>--add-dir</code>).</span>
   </div>
 
@@ -690,6 +698,8 @@
     </div>
   {/if}
 
+  {/if}
+  {/if}
   <div role="status"><!-- always mounted: VoiceOver only speaks a live region that exists before its text -->
     {#if batchFailures.length}
       <p>{batchSuccesses.length} started; {pendingSpawns.length} still need to start. Retry uses the submitted settings.</p>
@@ -701,8 +711,8 @@
 
   {#snippet footer()}
     <button class="btn" onclick={requestClose}>Cancel</button>
-    <button class="btn primary" disabled={busy || (pendingSpawns.length === 0 && total === 0)} onclick={create}>
-      {busy ? 'Starting…' : pendingSpawns.length ? `Retry ${pendingSpawns.length} failed` : total > 1 ? `Start ${total} sessions` : 'Start session'}
+    <button class="btn primary" disabled={busy || (kind === 'terminal' && pendingSpawns.length === 0 && total === 0)} onclick={create}>
+      {busy ? 'Starting…' : kind === 'chat' ? 'Start chat' : pendingSpawns.length ? `Retry ${pendingSpawns.length} failed` : total > 1 ? `Start ${total} sessions` : 'Start session'}
     </button>
   {/snippet}
 </Modal>
@@ -723,6 +733,27 @@
 {/if}
 
 <style>
+  .kind-seg {
+    margin-block-end: var(--sp-5);
+  }
+  .opts-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--sp-2);
+    margin-block: var(--sp-2) var(--sp-4);
+  }
+  .opt-chip {
+    padding: 1px var(--sp-3);
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+    color: var(--text-dim);
+    font-size: var(--fs-s);
+    max-inline-size: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .prompt-input {
     resize: vertical;
     min-height: 64px;
@@ -914,50 +945,6 @@
   .toggle-title {
     font-size: var(--fs-m);
     font-weight: 600;
-  }
-  .dir-list {
-    list-style: none;
-    margin: 0 0 6px;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .dir-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-    padding: 4px 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface-2);
-  }
-  .dir-path {
-    flex: 1;
-    min-width: 0;
-    font-size: var(--fs-xs);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--text);
-  }
-  .dir-remove {
-    flex-shrink: 0;
-    display: inline-flex;
-    align-items: center;
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-    padding: 2px 4px;
-    border-radius: var(--radius-s);
-    line-height: 1;
-  }
-  .dir-remove:hover {
-    color: var(--danger);
-    background: color-mix(in srgb, var(--danger) 12%, transparent);
   }
   .dir-add {
     display: flex;

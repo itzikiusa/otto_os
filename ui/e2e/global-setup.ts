@@ -232,6 +232,11 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
               // gates that must measure the real renderer clear it
               // (`useDefaultTerminalRenderer` in perf.ts).
               { name: 'otto.term.renderer', value: 'dom' },
+              // Agents folds the app navigator to its icon rail while open
+              // (foldNavWhileMounted). Specs written against the expanded
+              // navigator keep it; the fold itself, and specs that need the
+              // terminal's full width, set this to '1'.
+              { name: 'otto_agents_fold_nav', value: '0' },
               // The sidebar lists only what was used lately (lib/sidebarMore.ts);
               // specs predate that and reach every module by its row, so the
               // throwaway profile has "used" all of them. The More-row spec

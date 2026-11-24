@@ -24,6 +24,7 @@ test('shared folder picker navigates ancestors and history while retaining searc
     await openPage(page, 'agents');
     await page.getByTitle('New session', { exact: true }).click();
     const dialog = page.getByRole('dialog', { name: 'New session', exact: true });
+    await dialog.getByTestId('ns-options').click();
     await dialog.locator('#ns-cwd').fill(leaf);
     await dialog.getByRole('button', { name: 'Browse…' }).first().click();
     const picker = page.getByRole('dialog', { name: 'Choose working folder', exact: true });
@@ -72,6 +73,7 @@ test('shared folder picker navigates ancestors and history while retaining searc
     await other.goto('/#/agents');
     await other.getByTitle('New session', { exact: true }).click();
     const otherDialog = other.getByRole('dialog', { name: 'New session', exact: true });
+    await otherDialog.getByTestId('ns-options').click();
     await otherDialog.locator('#ns-cwd').fill(leaf);
     await otherDialog.getByRole('button', { name: 'Browse…' }).first().click();
     const otherPicker = other.getByRole('dialog', { name: 'Choose working folder', exact: true });
@@ -90,6 +92,7 @@ test('shared folder picker navigates ancestors and history while retaining searc
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.reload();
     await page.getByTitle('New session', { exact: true }).click();
+    await dialog.getByTestId('ns-options').click();
     await dialog.getByRole('button', { name: 'Browse…' }).first().click();
     const favorites = picker.getByRole('region', { name: 'Favorites', exact: true });
     await favorites.getByRole('button', { name: 'Itzik Lavon', exact: true }).click();
@@ -117,6 +120,7 @@ test('large folder listing stays bounded and fully keyboard reachable', async ({
     await openPage(page,'agents');
     await page.getByTitle('New session', { exact: true }).click();
     const dialog=page.getByRole('dialog',{name: 'New session',exact:true});
+    await dialog.getByTestId('ns-options').click();
     await dialog.locator('#ns-cwd').fill(root);
     await dialog.getByRole('button',{name:'Browse…'}).first().click();
     const picker=page.getByRole('dialog',{name:'Choose working folder',exact:true});
@@ -158,6 +162,7 @@ test('closing a slow folder picker aborts its browse request', async ({page},inf
     });
     await openPage(page,'agents');await page.getByTitle('New session', { exact: true }).click();
     const dialog=page.getByRole('dialog',{name: 'New session',exact:true});
+    await dialog.getByTestId('ns-options').click();
     await dialog.locator('#ns-cwd').fill('/slow-fixture');await dialog.getByRole('button',{name:'Browse…'}).first().click();
     const picker=page.getByRole('dialog',{name:'Choose working folder',exact:true});
     await expect.poll(()=>requested).toBe(true);await picker.getByRole('button',{name:'Cancel',exact:true}).click();

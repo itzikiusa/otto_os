@@ -419,7 +419,7 @@ test.describe('tiled scrollback budget', () => {
     }, wsId);
     await page.setViewportSize({ width: 1800, height: 1200 });
     await page.goto('/#/agents');
-    await page.locator('.nav-item.nested-item', { hasText: titles[0] }).first().click();
+    await page.locator('[data-testid^="agents-row-"] .tr-main', { hasText: titles[0] }).first().click();
     await expect(page.locator('[data-pane-key]').first()).toBeVisible({ timeout: 20_000 });
     await page.locator('button[aria-label="Tiled view"]').click();
     await expect(page.locator('[data-tile-id]')).toHaveCount(15, { timeout: 30_000 });

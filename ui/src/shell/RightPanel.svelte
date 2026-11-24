@@ -90,6 +90,14 @@
   import { loadErrorText } from '../lib/loadError';
   import { onDestroy, untrack } from 'svelte';
   import { reloadForStaleChunk } from '../lib/staleChunk';
+  import LazyMount from '../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../lib/lazy-component.svelte';
+  import { router } from '../lib/router.svelte';
+  // On Agents the panel opens on the session's details card (A5) — Threads'
+  // card (folder, branch, changes with commit → push → PR, context, MCP,
+  // subagents). Its own chunk, loaded only once the panel is open.
+  const SessionDetails = lazyComponent(() => import('../modules/threads/ThreadDetailsCard.svelte'));
+  const detailsSession = $derived((router.module === 'agents' || router.module === '') && rightPanel.session ? ws.getSession(ws.activeSessionId) : null);
 
   // `forceOpen` is set when the panel is hosted inside the mobile right drawer:
   // it then always shows content, fills the drawer width (no fixed width), and
@@ -438,6 +446,11 @@
       {/if}
 
       <div class="rpanel-body">
+        {#if open && !pageTab && detailsSession?.cwd}
+          <div class="rpanel-card" data-testid="agents-details-card">
+            <LazyMount lazy={SessionDetails} what="the session details" variant="compact" props={{ cwd: detailsSession.cwd, threadId: detailsSession.id }} />
+          </div>
+        {/if}
         {#if pageTab}
           {@const PagePanel = pageTab.component}
           <PagePanel {...pageTab.props ?? {}} />
@@ -515,6 +528,10 @@
 {/if}
 
 <style>
+  .rpanel-card {
+    flex-shrink: 0;
+    padding: var(--sp-3) var(--sp-4) 0;
+  }
   .rside {
     height: 100%;
     display: flex;

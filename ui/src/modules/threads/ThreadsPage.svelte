@@ -17,6 +17,7 @@
   import { router } from '../../lib/router.svelte';
   import { openFile } from '../../lib/stores/openfile.svelte';
   import { pageChrome } from '../../lib/stores/pageChrome.svelte';
+  import { foldNavWhileMounted } from '../../lib/foldNavWhileMounted.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { lightMode } from '../../lib/lightMode.svelte';
@@ -169,34 +170,8 @@
     };
   });
 
-  // One sidebar, like T3: while Threads is open Otto's navigator folds to its
-  // icon rail (not persisted — the shell's own preference is untouched), and
-  // comes back on leaving. Expanding it here is remembered as "don't fold".
-  onMount(() => {
-    if (viewport.isPhone) return;
-    let folded = false;
-    if (threads.collapseNav && ui.railExpanded) {
-      ui.railExpanded = false;
-      folded = true;
-    }
-    const stop = $effect.root(() => {
-      $effect(() => {
-        const expanded = ui.railExpanded;
-        untrack(() => {
-          if (expanded && folded) {
-            folded = false;
-            threads.setCollapseNav(false);
-          } else if (!expanded && !folded && !threads.collapseNav) {
-            threads.setCollapseNav(true);
-          }
-        });
-      });
-    });
-    return () => {
-      stop();
-      if (folded && !ui.railExpanded) ui.railExpanded = true;
-    };
-  });
+  // One sidebar, like T3: Otto's navigator folds to its icon rail while Threads is open.
+  onMount(() => foldNavWhileMounted({ get: () => threads.collapseNav, set: (on) => threads.setCollapseNav(on) }));
 
   // Seed recent cross-session messages from workspace trail.
   $effect(() => {
