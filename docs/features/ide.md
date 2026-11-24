@@ -660,6 +660,8 @@ IDE and `⌘K` opens the app's command bar, so a `⌘K V` chord can't exist.
   Heading ▾ (H1–H3), Bold (⌘B), Italic, Code, Link, Bulleted / Numbered list,
   Checklist, Quote, Table, and ⋯ (Format table, Code block, Divider, Callout).
   It hides in Preview; on a phone it scrolls inside itself with 44 px buttons.
+  Markdown has no breakpoint or lint column, so its text starts next to the
+  fold markers.
   ⌘I, ⌘E and ⌘K keep their IDE meanings (Edit with AI, Recent files, the command
   bar).
 - Typing help: Enter continues a list, checklist or quote (an empty item ends
