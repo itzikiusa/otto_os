@@ -228,8 +228,12 @@
   // ── Row actions ────────────────────────────────────────────────────────
   function open(e: MouseEvent, s: Session): void {
     if (selectMode && !isThread(s)) return toggleSel(s.id);
-    if (isThread(s)) router.go(`threads/${s.id}`);
-    else if (s.archived) void ws.unarchiveAndOpen(s.id).catch((err) => toastError('Couldn’t reopen the session', err));
+    // A thread opens (or focuses) as a chat pane here; ⌘-click takes it to Threads.
+    if (isThread(s) && (e.metaKey || e.ctrlKey)) return router.go(`threads/${s.id}`);
+    if (isThread(s)) {
+      ws.openSession(s.id, 'thread');
+      ws.navigateToSession(s.id);
+    } else if (s.archived) void ws.unarchiveAndOpen(s.id).catch((err) => toastError('Couldn’t reopen the session', err));
     else if (s.workspace_id !== ws.currentId && s.workspace_id !== SCRATCH_WORKSPACE_ID) void ws.openInWorkspace(s.workspace_id, s.id);
     else if (e.metaKey || e.ctrlKey) ws.openInSplit(s.id);
     else ws.navigateToSession(s.id);
@@ -243,7 +247,13 @@
   function rowMenu(e: MouseEvent, s: Session): void {
     e.preventDefault();
     if (isThread(s)) {
-      void import('../threads/runtime/runtimeMenu').then((m) => ctxMenu.show(e, m.runtimeThreadMenu(s.id))); // ui-guards: allow — a thread's own menu
+      // Here first (open beside the terminals), then Threads; the rest is the thread's own menu.
+      const here: MenuItem[] = [
+        { label: 'Open beside', icon: 'split', action: () => void ws.openInSplit(s.id, 'thread') },
+        { label: 'Open in Threads', icon: 'threads', action: () => router.go(`threads/${s.id}`) },
+        { separator: true },
+      ];
+      void import('../threads/runtime/runtimeMenu').then((m) => ctxMenu.show(e, [...here, ...m.runtimeThreadMenu(s.id).filter((i) => i.label !== 'Open beside')])); // ui-guards: allow — a thread's own menu
       return;
     }
     const edit = ws.canEditSession(s);
@@ -332,8 +342,8 @@
     strong={cls === 'needs' || cls === 'done'}
     kind={s.archived ? 'archived' : thread ? 'chat' : 'terminal'}
     branch={s.archived ? null : branchOf(s)}
-    selected={!thread && ws.activeSessionId === s.id && router.module !== 'threads'}
-    inPane={!thread && ws.panes.includes(s.id)}
+    selected={ws.activeSessionId === s.id && router.module !== 'threads'}
+    inPane={ws.panes.includes(s.id)}
     tip={[s.title, st.hint ?? st.label, s.cwd].filter(Boolean).join('\n')}
     stateKey={s.archived ? 'archived' : st.key}
     select={selectMode && !thread && own(s) && ws.canEditSession(s) ? { on: true, checked: sel.has(s.id), ontoggle: () => toggleSel(s.id) } : null}

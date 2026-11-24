@@ -35,6 +35,10 @@
   // makes the split purely proportional; panes clip/scroll their own content.
   import Self from './SplitNode.svelte';
   import SessionView from './SessionView.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  // A thread pane is its own chunk: a split of terminals only never loads it.
+  const ThreadPane = lazyComponent(() => import('./AgentsThreadPane.svelte'));
   // The Database pane is rare; importing DatabasePage statically dragged
   // CodeMirror + the DB views (~1.6 MB) into the Agents route — the default
   // one — before first paint. Load it on demand from the page registry, which
@@ -253,6 +257,18 @@
           {/key}
         {/if}
       </div>
+    {:else if node.ref.kind === 'thread'}
+      {@const id = node.ref.id}
+      <LazyMount lazy={ThreadPane} what="the thread" variant="panel" props={{
+        threadId: id,
+        focused: ws.focusedPane === idx && paneCount > 1,
+        showClose: paneCount > 1,
+        showGrip: paneCount > 1,
+        dragKey: node.key,
+        ondragpane: (phase: 'start' | 'end') => (layout.dragKey = phase === 'start' ? node.key : null),
+        onfocus: () => ws.focusPane(idx),
+        onclose: () => ws.closeTab(id),
+      }} />
     {:else}
       <SessionView
         sessionId={node.ref.id}
