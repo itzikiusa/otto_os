@@ -33,6 +33,7 @@ test.beforeEach(async ({ page }, info) => {
     localStorage.setItem('otto_workspace', id as string);
     localStorage.setItem('otto_firstrun_dismissed', '1');
     localStorage.setItem('otto_nav_all_ws', '0');
+    localStorage.setItem('otto_agents_fold_nav', '1'); // the real Agents width: navigator on its rail
   }, wsId);
   await page.goto('/#/agents');
   await expect(page.getByText(TITLES[0]).first()).toBeVisible({ timeout: 20_000 });

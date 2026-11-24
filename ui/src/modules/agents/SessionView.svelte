@@ -603,7 +603,7 @@
        pane` rules below (full ≥720 · compact 420–719 · minimal 200–419 ·
        micro <200). The word, the title and ⋯ never go; everything else is in
        ⋯. `data-tier` mirrors the script's twin of the breakpoints for tests. -->
-  <header style:height={!viewport.isDesktop ? 'var(--mobile-topbar-h)' : undefined} class="pane-head" class:grip-on={gripOn} data-tier={tier} bind:clientWidth={headW}>
+  <header style:height={!viewport.isDesktop ? 'var(--mobile-topbar-h)' : undefined} class="pane-head" class:touch={!viewport.isDesktop} class:grip-on={gripOn} data-tier={tier} bind:clientWidth={headW}>
     {#if gripOn}
       <!-- C3a: drag this pane onto another to swap (centre) or move (edge). It
            sits in the header's leading padding and only shows on hover/focus;
@@ -977,12 +977,10 @@
     flex-shrink: 0;
     margin-inline-start: calc(-1 * var(--sp-3));
   }
-  /* Touch: the header's Back and ⋯ are finger-sized (44 px). */
-  @media (hover: none), (pointer: coarse) {
-    .pane-head > :is(.pane-back, .pane-more) {
-      inline-size: 44px;
-      block-size: 44px;
-    }
+  /* Phone / tablet header: Back and ⋯ are finger-sized (44 px). */
+  .pane-head.touch > :is(.pane-back, .pane-more) {
+    inline-size: 44px;
+    block-size: 44px;
   }
   .pane-view {
     flex-shrink: 0;
