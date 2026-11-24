@@ -286,6 +286,23 @@ pub(super) async fn repo_branches_delete<S: GitCtx>(
             results.push(r);
             continue;
         }
+        // A qualified ref (refs/heads/main, tags/v1) would slip past the
+        // protected names and reach the default branch or a tag on the remote.
+        let qualified = |n: &str| {
+            ["refs/", "heads/", "tags/", "remotes/"]
+                .iter()
+                .any(|p| n.starts_with(p))
+        };
+        if qualified(&name)
+            || item
+                .remote_branch
+                .as_deref()
+                .is_some_and(|b| qualified(b.trim()))
+        {
+            r.error = Some("give a branch name, not a ref".into());
+            results.push(r);
+            continue;
+        }
         if want_local {
             if protected.contains(&name) {
                 r.error = Some(if name == current {

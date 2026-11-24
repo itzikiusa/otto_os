@@ -1828,6 +1828,37 @@ async fn bulk_branch_delete_reports_per_branch_outcomes() {
     assert!(git(&repo_dir, &["branch", "--list", "wip"])
         .trim()
         .is_empty());
+
+    // Review R1-005: a qualified ref never slips past the protected names
+    // to the default branch or a tag on the remote.
+    git(&repo_dir, &["tag", "v1"]);
+    git(&repo_dir, &["push", "-q", "origin", "v1"]);
+    let remote_only = |name: &str, rb: Option<&str>| BranchDeleteItem {
+        name: name.into(),
+        local: Some(false),
+        remote: Some("origin".into()),
+        remote_branch: rb.map(str::to_string),
+        force: None,
+    };
+    let Json(resp) = call(vec![
+        remote_only("refs/heads/main", None),
+        remote_only("x", Some("tags/v1")),
+        remote_only("heads/main", None),
+    ])
+    .await
+    .unwrap();
+    assert!(
+        resp.results
+            .iter()
+            .all(|r| !r.remote_deleted && r.error.is_some()),
+        "{:?}",
+        resp.results
+    );
+    let refs = git(&origin, &["for-each-ref", "--format=%(refname)"]);
+    assert!(
+        refs.contains("refs/heads/main") && refs.contains("refs/tags/v1"),
+        "{refs}"
+    );
 }
 
 #[tokio::test]
