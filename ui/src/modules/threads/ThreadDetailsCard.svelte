@@ -12,6 +12,7 @@
   import { api, isAbortError } from '../../lib/api/client';
   import type { DiffResp, Repo } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
+  import DetailsCard from '../../lib/components/DetailsCard.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
   import { router } from '../../lib/router.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -297,7 +298,7 @@
   const ACTION_ICON = { commit: 'commit', push: 'arrowUp', publish: 'arrowUp', 'create-pr': 'pr', pr: 'pr', none: 'pr' } as const;
 </script>
 
-<section class="dc-card" class:floating aria-label="Thread details" data-testid="thread-details-card">
+<DetailsCard label="Thread details" {floating} testid="thread-details-card">
   {#if short}
     <button type="button" class="dc-row dc-summary" aria-expanded={expanded} title={expanded ? 'Fold the thread details' : 'Show the thread details'} data-testid="details-summary" onclick={() => (expanded = !expanded)}>
       <Icon name="folder" size={14} />
@@ -429,7 +430,7 @@
     </div>
   {/if}
   {/if}
-</section>
+</DetailsCard>
 
 {#snippet subagent(r: SubagentRow)}
   <div class="dc-line" data-testid="details-subagent" data-word={r.word}>
@@ -469,130 +470,12 @@
 {/if}
 
 <style>
-  .dc-card {
-    display: flex;
-    flex-direction: column;
-    min-inline-size: 0;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-l);
-    background: var(--surface);
-    font-size: var(--fs-m);
-    overflow: hidden;
-  }
-  .dc-card.floating {
-    box-shadow: var(--shadow-card);
-  }
-  .dc-group {
-    display: flex;
-    flex-direction: column;
-    padding-block: var(--sp-3);
-  }
-  .dc-group + .dc-group {
-    border-block-start: 1px solid var(--border);
-  }
-  .dc-line {
-    display: flex;
-    align-items: center;
-    min-inline-size: 0;
-  }
-  .dc-row {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-5);
-    min-inline-size: 0;
-    min-block-size: 34px;
-    padding-inline: var(--sp-6);
-    border: 0;
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    text-align: start;
-    cursor: pointer;
-  }
-  .dc-grow {
-    flex: 1;
-  }
-  .dc-row :global(svg) {
-    flex-shrink: 0;
-    color: var(--text-dim);
-  }
-  button.dc-row:hover:not(:disabled) {
-    background: var(--hover);
-  }
-  .dc-row:disabled {
-    cursor: default;
-    color: var(--text-dim);
-  }
-  .dc-static {
-    cursor: default;
-  }
-  .dc-dim {
-    color: var(--text-dim);
-  }
-  .dc-label {
-    flex: 1;
-    min-inline-size: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .dc-end-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--sp-2);
-    flex: none;
-    block-size: 28px;
-    padding-inline: var(--sp-4);
-    margin-inline-end: var(--sp-3);
-    border: 0;
-    border-radius: var(--radius-m);
-    background: transparent;
-    color: var(--text-dim);
-    font: inherit;
-    cursor: pointer;
-  }
-  .dc-end-btn:hover {
-    background: var(--hover);
-    color: var(--text);
-  }
-  .dc-x,
-  .dc-more {
-    flex: none;
-    margin-inline-end: var(--sp-3);
-    color: var(--text-dim);
-  }
-  .dc-end {
-    flex: none;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    font-variant-numeric: tabular-nums;
-  }
-  .dc-warn {
-    color: var(--warning);
-  }
-  .dc-danger {
-    color: var(--danger);
-  }
-  .dc-stat {
-    display: inline-flex;
-    gap: var(--sp-3);
-    font-size: var(--fs-s);
-    font-variant-numeric: tabular-nums;
-  }
+
   .dc-add {
     color: var(--success);
   }
   .dc-del {
     color: var(--danger);
-  }
-  .dc-cap {
-    padding-block: var(--sp-3);
-    padding-inline: var(--sp-6);
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-  }
-  .dc-cap {
-    margin: 0;
   }
   .dc-word {
     flex: none;
@@ -611,25 +494,5 @@
   }
   .dc-word[data-word='Done'] {
     color: var(--success);
-  }
-  .dc-note {
-    margin: 0;
-    padding-block: var(--sp-3);
-    padding-inline: var(--sp-6);
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
-  /* Touch: every control is a full finger-sized target (44 px, Apple's HIG). */
-  @media (pointer: coarse) {
-    .dc-row,
-    .dc-end-btn,
-    .dc-x,
-    .dc-more {
-      min-block-size: 44px;
-    }
-    .dc-x,
-    .dc-more {
-      min-inline-size: 44px;
-    }
   }
 </style>

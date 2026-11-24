@@ -58,6 +58,12 @@
   /* Readable column for chat / prose surfaces (Assistant, conversation) —
      narrower than PageBody's --page-readable (1200px), which is for whole pages of cards/forms. */
   --prose-readable: 820px;
+  /* The shared reading surface (patterns.md "Reading surface"): prose and
+     conversations sit in a 760 px column, lists and tables in a 1200 px one;
+     tools (terminals, editors, grids) fill. Used through app.css .read-col /
+     .list-col. */
+  --read-col: 760px;
+  --list-col: 1200px;
 
   /* Layers (docs/design/guidelines/foundations.md §6). Floating UI picks one
      of these instead of inventing a number; scripts/ui-guards.mjs ratchets

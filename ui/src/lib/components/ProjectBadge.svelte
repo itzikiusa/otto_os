@@ -1,7 +1,7 @@
 <script lang="ts">
   // A project's two-letter tile (projectBadge.ts): decoration beside the
   // project's name, so it is hidden from assistive tech.
-  import { projectBadge } from './projectBadge';
+  import { projectBadge } from '../projectBadge';
 
   let { name }: { name: string } = $props();
   const b = $derived(projectBadge(name));

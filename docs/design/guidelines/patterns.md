@@ -367,3 +367,80 @@ group.
 delete (which still confirms). Arrow-key navigation inside
 `role="menu"`/`tablist` is expected; see
 [accessibility.md](./accessibility.md#3-keyboard).
+
+---
+
+## 10. The shared kit: reading surface, inbox rows, status words, details card
+
+Pages built on the Threads concept share these pieces — there is **one**
+implementation of each, under `ui/src/lib`. Do not fork them into a module;
+extend the shared piece instead.
+
+### Reading surface
+
+- `.read-col` (app.css): one centred column, `max-inline-size: var(--read-col)`
+  = **760 px** (+ `--sp-6` sides). For prose, conversations, inboxes and
+  Home. Add `.read-prose` for reading type: `--fs-l` (15 px), line-height 1.6.
+- `.list-col`: the same at `var(--list-col)` = **1200 px**, for lists and
+  tables. Tools (terminals, editors, result grids) fill the pane and use neither.
+- A pane narrower than the column fills it with `--sp-6` sides. Wide content
+  (tables, code, diffs, images) scrolls inside the column; it never widens it.
+
+**Do:** `<div class="read-col read-prose">`. **Don't:** `max-width: 760px` in a
+module style, a new font size for "reading", a column wider than 760 px for
+text.
+
+### Inbox rows — `InboxRow` + `InboxFold`
+
+`lib/components/InboxRow.svelte`: three lines, the whole row one button
+(min 64 px; a nested `child` row is two lines, 46 px).
+
+1. `ProjectBadge` + context (`--fs-s`, dim) … the status **word**, else the time;
+2. the title at `--fs-l` (bold when `strong`: needs you / finished unread);
+3. a dim third line (`line3` snippet: branch, folder, kind · host …).
+
+Hover actions go in the `actions` snippet (over line 3's end); on touch they
+live in the row's long-press menu (`use:rowMenu` → `oncontextmenu`), so give
+every row an `oncontextmenu` that opens the same actions with `ctxMenu`.
+`onPage` when the row sits on `--bg` instead of the sidebar.
+`lib/components/InboxFold.svelte` is a section around rows: a calm heading
+("Pinned"), or a fold line ("Working 3 ›", "History 12 ›") when it has
+`ontoggle`. Order every list the same way: needs you first, then Failed,
+then finished unread (Done), then most recent; running and finished items go
+to Working / History folds.
+
+**Don't:** a one-line row with a bare dot; a row that is several small
+buttons; a per-row request to fill line 3 (read it from the list you have).
+
+### Status words — `lib/statusWords.ts`
+
+One vocabulary on top of `lib/status.ts` (§1); **never a bare dot, never
+colour alone**:
+
+| For | Words | Function |
+|---|---|---|
+| Threads sidebar | Approval · Question · Failed · Limited · Working 18s · Done (calm rows show the time) | `statusWord` |
+| Session rows elsewhere (Home, Agents) | Needs you / Approval / Question · Failed · Limited · Working 18s · Done · Idle · Stopped | `sessionWord` |
+| Subagents | Working · Needs you · Done · Failed · Limited · Stopped | `subagentWord` |
+| Resources (connections, accounts, clusters) | Connected · Can’t connect · Needs sign-in · Not checked | `resourceWord` |
+
+`wordTone(word)` gives the one tone: `--warning` (Approval, Question, Needs
+you, Limited, Needs sign-in), `--danger` (Failed, Can’t connect),
+`--success` (Done, Connected), calm `--text-dim` for everything else
+(Working is calm: it moves, it does not need you). "Unknown" is never shown —
+say "Not checked".
+
+### Details card — `DetailsCard`
+
+`lib/components/DetailsCard.svelte`: ONE card of facts and the next action for
+the open object. It floats beside a reading column when there is room
+(`floating`, never covering text) and heads the right panel otherwise; a phone
+gets it from ⋯ / the right panel. Content uses the shell's row vocabulary:
+`.dc-group` sections, `.dc-row` facts/doors (a `<button>` when it opens
+something, `.dc-static` when not), `.dc-line` + `.dc-end-btn` / `.dc-more`
+for a row with an end control, `.dc-label`, `.dc-stat`, `.dc-cap`,
+`.dc-note`. The `action` snippet is the card's **one** primary and follows
+state (Commit → Push → Create PR → "PR #12"). Rows are 34 px, 44 px on touch.
+
+**Don't:** a second card for the same object; a row that only repeats the
+title; more than one primary in the card.
