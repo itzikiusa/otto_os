@@ -66,7 +66,10 @@ test.beforeEach(async ({ page }, info) => {
   ctx = c.ctx;
   base = c.base;
   await freshWorkspaceWithShells();
-  await page.addInitScript((id) => localStorage.setItem('otto_workspace', id as string), wsId);
+  await page.addInitScript((id) => {
+    localStorage.setItem('otto_workspace', id as string);
+    localStorage.setItem('otto_agents_fold_nav', '1'); // the real Agents width: navigator on its rail
+  }, wsId);
   await page.goto('/#/agents');
   // Wait until the seeded sessions are loaded into the store (names visible).
   await expect(page.getByText('Zlatan').first()).toBeVisible({ timeout: 20_000 });
@@ -85,7 +88,7 @@ test('⌘I: close a session by NAME, then close ALL of a provider', async ({ pag
   });
   expect(sr.ok(), await sr.text()).toBeTruthy();
   const scratchId = (await sr.json()).id as string;
-  await expect(page.locator('.navigator .nested-item', { hasText: scratchTitle })).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('[data-testid^="agents-row-"] .tr-main', { hasText: scratchTitle })).toBeVisible({ timeout: 20_000 });
 
   // "close zlatan" → only that session is archived, without a dialog: one
   // plain shell (its prompt output reads as "working", but a shell is never an
@@ -195,17 +198,20 @@ test('⌘T: arrow keys switch provider, Tab moves to the next field', async ({ p
   void before;
 
   // Tab leaves the radio set (roving tabindex: no other provider radio is a
-  // Tab stop) and walks forward to the Title field. The selected card's batch
-  // −/+ buttons and the account/model/network pickers sit in between, so walk
+  // Tab stop) and walks forward to the Title field (behind Options, A4).
+  await page.getByTestId('ns-options').click();
+  await checked.focus();
+  // The selected card's batch −/+ buttons, the first message and the
+  // workspace / account / model / network pickers sit in between, so walk
   // the Tab order instead of assuming Title is the very next stop.
   let reachedTitle = false;
   for (let i = 0; i < 20 && !reachedTitle; i++) {
     await page.keyboard.press('Tab');
     const stop = await page.evaluate(() => {
       const el = document.activeElement as HTMLElement | null;
-      return { id: el?.id ?? '', role: el?.getAttribute('role') ?? '' };
+      return { id: el?.id ?? '', provider: el?.getAttribute('role') === 'radio' && el.closest('[role="radiogroup"]')?.getAttribute('aria-labelledby') === 'ns-provider-label' };
     });
-    expect(stop.role, 'Tab must not land on another provider radio').not.toBe('radio');
+    expect(stop.provider, 'Tab must not land on another provider radio').toBe(false);
     reachedTitle = stop.id === 'ns-title';
   }
   await expect(page.locator('#ns-title')).toBeFocused();

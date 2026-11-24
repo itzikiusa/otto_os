@@ -21,6 +21,7 @@
   let { wsId, tasks, onopentask }: Props = $props();
 
   let pausingAll = $state(false);
+  let showAll = $state(false);
 
   $effect(() => {
     const id = wsId;
@@ -66,7 +67,8 @@
     <div class="radar-head">
       <Icon name="clock" size={13} />
       <h3>Fires next</h3>
-      <span class="radar-count">{upcoming.length ? `${upcoming.length} upcoming` : 'No upcoming runs scheduled'}</span>
+      <!-- The tasks are listed right below: say what fires first, fold the rest. -->
+      <span class="radar-count" dir="auto">{#if upcoming.length}{upcoming[0].title} · <RelTime iso={upcoming[0].nextAt} />{:else}No upcoming runs scheduled{/if}</span>
       <span class="grow"></span>
       {#if active.total > 0}
         <button
@@ -81,7 +83,10 @@
         </button>
       {/if}
     </div>
-    {#if upcoming.length > 0}
+    {#if upcoming.length > 1}
+      <button type="button" class="radar-more" aria-expanded={showAll} onclick={() => (showAll = !showAll)}>{showAll ? 'Hide upcoming' : `All ${upcoming.length} upcoming`}</button>
+    {/if}
+    {#if showAll && upcoming.length > 1}
       <ul class="radar-list">
         {#each upcoming as item (item.id)}
           <li>
@@ -123,6 +128,15 @@
     gap: 8px;
     flex-wrap: wrap;
     color: var(--text-dim);
+  }
+  .radar-more {
+    align-self: flex-start;
+    padding: 0;
+    border: 0;
+    background: none;
+    cursor: pointer;
+    font-size: var(--fs-s);
+    color: var(--accent-text);
   }
   .radar-head h3 {
     margin: 0;

@@ -111,7 +111,7 @@
 </script>
 
 <section class="otto-usage" aria-label="Otto application usage">
-  <p class="intro">Application performance on this Mac: page rendering, server operations, CPU and memory. Agent tokens and cost remain in Overview and Report.</p>
+  <p class="intro">Application performance on this Mac: page rendering, server operations, CPU and memory. Agent tokens and cost stay on the Usage page and its Report.</p>
   <LoadState what="application telemetry" loading={t.loading} empty={!t.config} error={t.loadError} onretry={() => void t.load(true)}>
     {#if t.config}
       <form class="settings" onsubmit={(event) => { event.preventDefault(); void t.save(); }}>

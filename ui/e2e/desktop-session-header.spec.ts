@@ -14,7 +14,7 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 // pane is always its terminal since the Chat view moved to Threads.) This spec pins that down:
 //   • the title shows at least TITLE_CHARS characters untruncated,
 //   • no header overflows, wraps or changes height,
-//   • ⋯ holds the moved actions (font, copy-on-select, restart).
+//   • ⋯ holds the moved actions (Terminal settings…, redraw, restart, details).
 // Light + dark screenshots at each count go to $OTTO_HEADER_SHOTS_DIR when set
 // (else the test output dir).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -125,10 +125,11 @@ for (const scheme of ['light', 'dark'] as const) {
         expect(fit.have, `title ${i} width ${fit.have}px vs ${fit.need}px for ${TITLE_CHARS} chars`).toBeGreaterThanOrEqual(fit.need - 0.5);
         // The title's tooltip carries the whole text.
         await expect(page.locator('.pane-title').nth(i)).toHaveAttribute('title', new RegExp(`^${TITLE.slice(0, 20)}`));
-        // Status + title + ⋯ are always there; no Terminal · Chat switch.
-        await expect(head.locator('[role="img"]').first()).toBeVisible();
+        // Status word + title + ⋯ are always there; a plain shell has no
+        // Terminal | Chat switch.
+        await expect(head.getByTestId('pane-status')).toBeVisible();
         await expect(head.locator('button[title="More…"]')).toBeVisible();
-        await expect(head.locator('[role="tablist"][aria-label="Session view"], [data-view-toggle]')).toHaveCount(0);
+        await expect(head.getByTestId('pane-view')).toHaveCount(0);
         const buttons = head.locator('button:visible');
         const nb = await buttons.count();
         // Chrome stays lean: at most details + zoom + ⋯ (+ grip, find, UI control).
@@ -167,34 +168,27 @@ for (const scheme of ['light', 'dark'] as const) {
       const menu = page.locator('.ctx-menu');
       await expect(menu).toBeVisible();
       await expectFullyInViewport(page, menu, 'pane ⋯ menu');
-      await expect(menu.getByRole('menuitem', { name: /^Terminal font larger/ })).toBeVisible();
-      await expect(menu.getByRole('menuitem', { name: /^Terminal font smaller/ })).toBeVisible();
-      await expect(menu.getByRole('menuitem', { name: /^Reset terminal font/ })).toBeVisible();
-      await expect(menu.getByRole('menuitemcheckbox', { name: /^Copy on select/ })).toBeVisible();
+      // The terminal font and copy-on-select live in Settings, one row away.
+      await expect(menu.getByRole('menuitem', { name: 'Terminal settings…' })).toBeVisible();
+      await expect(menu.getByRole('menuitem', { name: 'Redraw terminal' })).toBeVisible();
       await expect(menu.getByRole('menuitem', { name: 'Restart session' })).toBeVisible();
+      await expect(menu.getByRole('menuitem', { name: /^Terminal font/ })).toHaveCount(0);
       if (count === 1) {
         await page.screenshot({ path: SHOTS ? `${SHOTS}/1-pane-menu-${scheme}.png` : info.outputPath(`1-pane-menu-${scheme}.png`), animations: 'disabled' });
       }
       await page.keyboard.press('Escape');
       await expect(menu).toBeHidden();
 
-      // The details chip opens the details as a menu (provider + folder). It
-      // renders unconditionally and only the `< 420px` (minimal) container rule
-      // hides it, so the tier decides: never guard on `isVisible()` (that turns
-      // a dropped chip into a pass).
-      const chip = heads.first().locator('[data-testid="pane-details"]');
-      if (tiers[0] === 'full' || tiers[0] === 'compact') {
-        await expect(chip).toBeVisible();
-        await expect(chip).toHaveAttribute('title', /Agent: shell/);
-        await chip.click();
-        await expect(menu.getByRole('menuitem', { name: /^Folder: \/tmp/ })).toBeDisabled();
-        await expect(menu.getByRole('menuitem', { name: 'Copy folder path' })).toBeVisible();
-        await page.keyboard.press('Escape');
-      } else {
-        await expect(chip).toBeHidden();
-      }
-      // Counts 1 and 2 must land on a chip-bearing tier (asserted above), so
-      // the visible branch always runs for them.
+      // One header line: a status WORD (no dot, no ticking "6s idle"), the
+      // title, the folder dim; the details sit under ⋯ › Details.
+      await expect(heads.first().getByTestId('pane-status')).toHaveText(/^(Idle|Working.*|Needs you|Stopped)$/);
+      await expect(heads.first().locator('.dot')).toHaveCount(0);
+      if (tiers[0] === 'full' || tiers[0] === 'compact') await expect(heads.first().locator('.pane-where')).toHaveText('tmp');
+      await heads.first().locator('button[title="More…"]').click();
+      await menu.getByRole('menuitem', { name: 'Details' }).hover();
+      await expect(page.getByRole('menuitem', { name: /^Folder: \/tmp/ })).toBeDisabled();
+      await page.keyboard.press('Escape');
+      await page.keyboard.press('Escape');
       if (count <= 2) expect(['full', 'compact']).toContain(tiers[0]);
     });
   }

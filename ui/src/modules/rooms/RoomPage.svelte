@@ -125,7 +125,9 @@
   onMount(() => {
     if (recallRoom(roomId)) attach();
     else if (guest && roomInvite(roomId)) { needsName = true; connection = 'disconnected'; }
-    else { ended = 'This room credential is no longer available in this window. Ask the host for a new invitation.'; connection = 'ended'; }
+    // The host's credential lives only in the window that started the room; a
+    // guest's comes from the invitation. Only the guest is told to ask the host.
+    else { ended = guest ? 'This room credential is no longer available in this window. Ask the host for a new invitation.' : 'This room is open in the window where you started it. Switch to that window, or open it from Rooms there.'; connection = 'ended'; }
     const unguard = router.guard(async (to) => {
       if (to === `${guest ? 'room' : 'rooms'}/${roomId}` || connection === 'ended' || needsName) return true;
       return confirmer.ask('You will disconnect from this room. The underlying session keeps running.', {title: 'Leave this room view?', confirmLabel: 'Leave view'});
@@ -242,7 +244,7 @@
       <form onsubmit={(event) => { event.preventDefault(); void join(); }}><label>Your display name <input dir="auto" bind:value={name} maxlength="80" autocomplete="nickname" /></label>
         {#if error}<p class="alert-text">{error}</p>{/if}<button class="btn primary" disabled={joining || !name.trim()}>{joining ? 'Requesting entry…' : 'Request entry'}</button>
       </form></div>
-    {:else if ended}<EmptyState variant="page" icon="people" title="Room closed" body={ended} />
+    {:else if ended}<EmptyState variant="page" icon="people" title={guest ? 'Room closed' : 'Open in another window'} body={ended} actionLabel={guest ? undefined : 'Back to Rooms'} onaction={guest ? undefined : () => router.go('rooms')} />
     {:else if !room}{#if error}<p class="error">{error}</p>{/if}
       {#if connection === 'connecting'}<div><EmptyState variant="page" icon="people" title="Connecting to the room…" body="Joining the host’s session. This usually takes a few seconds." /></div>
       {:else}<EmptyState variant="page" icon="people" tone="error" title="Connection interrupted" body="Terminal access is paused until your room connection is restored." actionLabel="Retry" onaction={() => client?.connect()} />{/if}

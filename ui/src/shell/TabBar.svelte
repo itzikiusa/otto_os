@@ -315,8 +315,10 @@
   data-tauri-drag-region
   onmousedown={startWindowDrag}
 >
+  <!-- The strip only with two or more tabs in the tabbed view (A3): one tab
+       repeats the pane's own header, and the tiled grid shows every tab. -->
   <div class="tabs" class:overflowing bind:this={tabsEl} onscroll={measureOverflow} role="tablist" aria-label="Session tabs">
-    {#each ws.openTabs as id, tabIdx (id)}
+    {#each ws.viewMode === 'tabs' && ws.openTabs.length > 1 ? ws.openTabs : [] as id, tabIdx (id)}
       <!-- The tab is the main <button role="tab">; the × is its SIBLING (a
            button inside a tab is a nested control screen readers can't
            reach). The wrapper only draws the shared chrome. -->

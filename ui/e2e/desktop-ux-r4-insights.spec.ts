@@ -34,7 +34,7 @@ test('Usage duplicate scope caps are explained before saving', async ({ page }) 
     await page.getByLabel('Cap in US dollars').nth(i).blur();
   }
   await expect(page.getByRole('button', { name: 'Save budgets', exact: true })).toBeDisabled();
-  await expect(page.getByRole('alert')).toContainText('one cap per provider');
+  await expect(page.getByRole('dialog', { name: 'Budgets' })).toContainText('one cap per provider');
   await page.getByRole('button', { name: 'Remove this provider cap' }).last().click();
   await expect(page.getByRole('button', { name: 'Save budgets', exact: true })).toBeEnabled();
 });
@@ -65,9 +65,10 @@ test('Usage auto-refresh cannot restore an old budget after save completes', asy
     return r.fulfill({ json: { config: snapshot, window_days: snapshot.window_days, rows: [] } });
   });
   await page.goto('/#/usage');
-  await page.getByRole('button', { name: 'Edit budgets', exact: true }).click();
   await page.clock.install();
-  await page.getByRole('button', { name: 'Auto-refresh', exact: true }).click();
+  await page.locator('[data-testid="page-header"] .ph-more').click();
+  await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Refresh every minute' }).click();
+  await page.getByRole('button', { name: 'Edit budgets', exact: true }).click();
   const days = page.getByLabel('Compare spend over the last'); await days.fill('7');
   await page.getByRole('button', { name: 'Save budgets', exact: true }).click();
   await expect.poll(() => !!releasePut).toBe(true);
@@ -75,6 +76,8 @@ test('Usage auto-refresh cannot restore an old budget after save completes', asy
   await expect.poll(() => !!releaseGet).toBe(true);
   releasePut(); await expect(page.getByText('Budgets saved', { exact: true })).toBeVisible();
   releaseGet(); await page.waitForTimeout(150);
+  // The sheet closed on the clean save; reopened, it holds the saved value.
+  await page.getByRole('button', { name: 'Edit budgets', exact: true }).click();
   await expect(days).toHaveValue('7');
 });
 

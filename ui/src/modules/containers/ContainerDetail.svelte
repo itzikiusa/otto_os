@@ -14,6 +14,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import { toastError } from '../../lib/toastError';
   import { copyWithToast } from '../../lib/clipboard';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import type { ContainerDetail, ContainerSummary } from '../../lib/api/types/containers';
   import {
     containerHealthInfo,
@@ -132,6 +133,19 @@
   const healthBadge = $derived(containerHealthInfo(detail?.health ?? container.health));
   const isRunning = $derived((detail?.state ?? container.state).toLowerCase() === 'running');
   const isPaused = $derived((detail?.state ?? container.state).toLowerCase() === 'paused');
+  /** One action follows the state (Resume / Stop / Start); the rest — and
+   *  Remove, never beside Stop — sit in ⋯. */
+  function moreMenu(e: MouseEvent): void {
+    const items: MenuItem[] = isRunning
+      ? [
+          { label: 'Restart', icon: 'refresh', disabled: busy, action: () => onaction(container, 'restart') },
+          { label: 'Pause', icon: 'pause', disabled: busy, action: () => onaction(container, 'pause') },
+          { separator: true },
+        ]
+      : [];
+    items.push({ label: 'Remove container…', icon: 'trash', danger: true, disabled: busy, action: () => onaction(container, 'remove') });
+    ctxMenu.show(e, items);
+  }
 </script>
 
 <section class="ct-detail" aria-label={`Container ${container.name}`} data-testid="container-detail">
@@ -170,19 +184,6 @@
           <Icon name="play" size={12} /> Resume
         </button>
       {:else if isRunning}
-        <button type="button" class="btn small" disabled={busy} onclick={() => onaction(container, 'restart')}>
-          <Icon name="refresh" size={12} /> Restart
-        </button>
-        <button
-          type="button"
-          class="icon-btn"
-          disabled={busy}
-          aria-label="Pause container"
-          title="Pause container"
-          onclick={() => onaction(container, 'pause')}
-        >
-          <Icon name="pause" size={13} />
-        </button>
         <button type="button" class="btn small" disabled={busy} onclick={() => onaction(container, 'stop')}>
           <Icon name="stop" size={12} /> Stop
         </button>
@@ -191,15 +192,8 @@
           <Icon name="play" size={12} /> Start
         </button>
       {/if}
-      <button
-        type="button"
-        class="icon-btn ct-danger-icon"
-        disabled={busy}
-        aria-label="Remove container"
-        title="Remove container"
-        onclick={() => onaction(container, 'remove')}
-      >
-        <Icon name="trash" size={14} />
+      <button type="button" class="icon-btn" aria-label="More container actions" title="More container actions" aria-haspopup="menu" data-testid="container-more" onclick={moreMenu}>
+        <Icon name="more" size={14} />
       </button>
     </div>
   </div>
@@ -330,10 +324,6 @@
     align-items: center;
     gap: 6px;
     flex-shrink: 0;
-  }
-  .ct-danger-icon:hover {
-    color: var(--danger);
-    background: var(--danger-soft);
   }
   .ct-detail-panel {
     flex: 1;

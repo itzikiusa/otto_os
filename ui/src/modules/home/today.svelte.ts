@@ -44,12 +44,23 @@ export interface TodayRow {
   at?: string;
   /** Present on pending MCP approval rows so Home can offer inline Approve / Deny. */
   approval?: McpApproval;
+  /** The row's status word (lib/statusWords.ts); none → it shows the time. */
+  word?: string;
+  /** The project (folder) it works in, for the row's badge; none → `kind`. */
+  project?: string | null;
+  /** What it is when there is no project ("Approval", "Workflow", …). */
+  kind?: string;
   open: () => void;
 }
 
 const POLL_MS = 60_000;
 /** Scheduled runs due within this window show under Up next. */
 const UP_NEXT_MS = 24 * 60 * 60 * 1000;
+
+/** A session's folder name, for its row's project badge. */
+function folderName(cwd: string | null | undefined): string | null {
+  return cwd ? cwd.replace(/\/+$/, '').split('/').pop() || null : null;
+}
 
 function timeOfDay(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -150,6 +161,8 @@ class TodayStore {
         detail: a.server_name ? `Approval · ${a.server_name}` : 'Approval',
         icon: 'shield',
         tone: 'warning',
+        word: 'Approval',
+        kind: a.server_name ?? 'MCP',
         at: a.created_at,
         approval: a,
         open: () => router.go('mcp/activity'),
@@ -162,6 +175,8 @@ class TodayStore {
         detail: 'Waiting for your input',
         icon: 'terminal',
         tone: 'warning',
+        word: 'Needs you',
+        project: folderName(s.cwd),
         at: s.last_active_at,
         open: () => ws.navigateToSession(s.id),
       });
@@ -173,6 +188,8 @@ class TodayStore {
         detail: 'Thread · waiting for your input',
         icon: 'threads',
         tone: 'warning',
+        word: 'Needs you',
+        project: folderName(s.cwd),
         at: s.last_active_at,
         open: () => router.go(threadRoute(s.id)),
       });
@@ -188,6 +205,8 @@ class TodayStore {
         detail: 'Thread · waiting for your approval or answer',
         icon: 'threads',
         tone: 'warning',
+        word: 'Needs you',
+        kind: 'Thread',
         ...(w.at ? { at: new Date(w.at).toISOString() } : {}),
         open: () => router.go(threadRoute(w.id)),
       });
@@ -201,6 +220,8 @@ class TodayStore {
         detail: 'Threads',
         icon: 'threads',
         tone: 'warning',
+        word: 'Needs you',
+        kind: 'Threads',
         open: () => router.go('threads'),
       });
     }
@@ -215,6 +236,8 @@ class TodayStore {
         detail: n.body,
         icon: 'warning',
         tone: 'warning',
+        word: n.severity === 'error' ? 'Failed' : 'Needs you',
+        kind: 'Notice',
         at: n.created_at,
         open: () => void notifications.runAction(n),
       });
@@ -231,6 +254,8 @@ class TodayStore {
         detail: s.provider === 'shell' ? 'Terminal' : `Agent · ${s.provider}`,
         icon: 'terminal' as IconName,
         tone: 'working' as const,
+        word: 'Working',
+        project: folderName(s.cwd),
         at: s.last_active_at,
         open: () => ws.navigateToSession(s.id),
       }));
@@ -242,6 +267,8 @@ class TodayStore {
         detail: `Thread · ${s.provider}`,
         icon: 'threads',
         tone: 'working',
+        word: 'Working',
+        project: folderName(s.cwd),
         at: s.last_active_at,
         open: () => router.go(threadRoute(s.id)),
       });
@@ -253,6 +280,8 @@ class TodayStore {
         detail: r.nodes_total ? `Workflow · step ${Math.min(r.nodes_done + 1, r.nodes_total)} of ${r.nodes_total}` : 'Workflow',
         icon: 'split',
         tone: 'working',
+        word: 'Working',
+        kind: 'Workflow',
         at: r.started_at,
         open: () => router.go('workflows'),
       });
@@ -275,6 +304,7 @@ class TodayStore {
         detail: `Scheduled task · ${timeOfDay(t.next_run_at ?? '')}`,
         icon: 'calendar' as IconName,
         tone: 'idle' as const,
+        kind: 'Scheduled task',
         at: t.next_run_at ?? undefined,
         open: () => router.go('scheduled-tasks'),
       }));
@@ -288,6 +318,7 @@ class TodayStore {
       detail: `Design Hall · ${a.studio}${a.head_seq ? ` · v${a.head_seq}` : ''}`,
       icon: 'designHall' as IconName,
       tone: 'accent' as const,
+      kind: 'Design',
       at: a.updated_at,
       open: () => router.go(`design/a/${encodeURIComponent(a.id)}`),
     }));

@@ -427,7 +427,9 @@ export function barPresence(i: PresenceInput): BarPresence {
   if (i.open) return 'full';
   if (i.pref === 'docked') return 'dock';
   if (i.pref === 'pinned') return i.workFocus ? 'rest' : 'full';
-  if (i.scrolling || i.workFocus) return 'dock';
+  // Home docks it under its reading column as the page's composer: it stays
+  // put while the column scrolls (it only steps aside for typing elsewhere).
+  if (i.workFocus || (i.scrolling && !i.surface)) return 'dock';
   // Auto floats the pill only on Home (the bar's surface). On every other page
   // a floating pill covers working content (API responses, result grids,
   // diffs), so it docks as the status-bar chip; ⌘K still opens it in full.

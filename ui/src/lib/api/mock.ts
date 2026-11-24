@@ -6,12 +6,12 @@ import { MOCK_ME, mockBigPrDiff, mockCommitDiff, mockExtraPrs, mockIsMine, mockP
 import { prReviewMockRoutes, type MockPrRef } from './mock-pr-comments';
 import { slackMockRoutes } from './mock-slack';
 import { machineMockRoutes } from './mock-machine';
+import { accessMockRoutes } from './mock-access';
 import { usageLimitsMockRoutes } from './mock-usage-limits';
 import { runtimeMockRoutes } from './mock-runtime';
 import { workflowsMockRoutes } from './mock-workflows';
 import type {
-  AwsAccount, AwsPermissions,
-  MetricUnit,
+  AwsAccount, AwsPermissions, MetricUnit,
   RdsInstance,
   AwsStatus,
   AthenaExecution,
@@ -971,7 +971,7 @@ const k8sRoutes: Route[] = [
 const routes: Route[] = [
   ...k8sRoutes,
   ...slackMockRoutes,
-  ...machineMockRoutes, ...usageLimitsMockRoutes,
+  ...machineMockRoutes, ...usageLimitsMockRoutes, ...accessMockRoutes,
   ...runtimeMockRoutes, ...workflowsMockRoutes,
   ...prReviewMockRoutes((rid, num) => prs.find((p) => p.repo_id === rid && p.summary.number === num)),
   { method: 'GET', re: /^\/health$/, handle: () => ({ json: { ok: true } }) },

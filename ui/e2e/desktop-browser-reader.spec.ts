@@ -191,3 +191,36 @@ test('switching between reader tabs does not refetch the page', async ({ page })
   await expect(page.locator('.reader .page-title')).toHaveText('Fixture Page');
   expect(pageFetches).toBe(2);
 });
+
+
+test('the reader reads at the reading surface: 15 px in the 760 px column', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openFixture(page);
+  const body = page.locator('.reader .page p').first();
+  await expect(body).toHaveCSS('font-size', '15px');
+  const width = await page.locator('.reader .page').evaluate((el) => el.getBoundingClientRect().width);
+  expect(width).toBeLessThanOrEqual(760);
+  expect(width).toBeGreaterThan(600);
+});
+
+test('a page that cannot load says so once, inline — no second toast', async ({ page }) => {
+  const BAD = 'https://no-such-host.invalid/page';
+  // The reader fetch fails and so does saving the tab's new URL (the daemon
+  // resolves it): the inline error with Retry is the one place that says so.
+  await page.route((u) => u.pathname.endsWith('/browser/page') && u.search.includes('no-such-host'), (route) =>
+    route.fulfill({ status: 502, contentType: 'application/json', body: JSON.stringify({ code: 'upstream', message: 'dns resolution failed' }) }),
+  );
+  await openFixture(page);
+  await page.route('**/api/v1/browser/tabs/*', (route) =>
+    route.request().method() === 'PATCH'
+      ? route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ code: 'invalid', message: 'invalid: dns resolution failed' }) })
+      : route.fallback(),
+  );
+  // Typed into a tab that already shows a page, then Go clicked with the mouse.
+  await page.getByPlaceholder('e.g. https://example.com').fill(BAD);
+  await page.getByRole('button', { name: 'Go', exact: true }).click();
+  await expect(page.getByTestId('load-error')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible();
+  await page.waitForTimeout(500); // ui-guards: allow — proves no toast follows the inline error
+  await expect(page.locator('.toasts .toast')).toHaveCount(0);
+});

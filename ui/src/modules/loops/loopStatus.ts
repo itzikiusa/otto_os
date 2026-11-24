@@ -16,6 +16,17 @@ const LOOP_STATUS: Record<string, Omit<StatusInfo, 'key'>> = {
   stopped: { label: 'Stopped', tone: 'neutral', hint: 'Stopped by a person' },
 };
 
+/** An iteration's status once evaluated is what the evaluation decided: the
+ *  run finishing is not the goal being met ("Succeeded · 55% · continuing"
+ *  read as a win next to criteria that read "Not met"). Before an
+ *  evaluation it is the run's own status. */
+export function iterationStatus(run: StatusInfo, verdict: string | null | undefined): StatusInfo {
+  if (verdict === 'achieved') return { key: 'met', label: 'Goal met', tone: 'success' };
+  if (verdict === 'continue') return { key: 'continuing', label: 'Continuing', tone: 'neutral', hint: 'The goal is not met yet; the next iteration carries on' };
+  if (verdict === 'blocked') return { key: 'blocked', label: 'Blocked', tone: 'warning', hint: 'Needs you: answer the open decision, then Resume' };
+  return run;
+}
+
 export function loopStatus(raw: string | null | undefined): StatusInfo {
   const k = (raw ?? '').trim().toLowerCase();
   const info = LOOP_STATUS[k];

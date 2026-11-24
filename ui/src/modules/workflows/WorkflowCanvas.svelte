@@ -248,7 +248,11 @@
   }
 
   function endDrag(e: PointerEvent): void {
-    if (drag?.mode === 'node') onchange?.(graph);
+    // A click selects; only a node that moved is an edit (a click used to
+    // mark the workflow Unsaved and trip the leave guard).
+    const moved = drag?.mode === 'node' ? drag : null;
+    const n = moved ? graph.nodes.find((x) => x.id === moved.id) : null;
+    if (moved && n && (n.x !== moved.nx || n.y !== moved.ny)) onchange?.(graph);
     if (drag?.mode === 'connect') {
       // Hit-test for an input port under the pointer.
       const d = drag;

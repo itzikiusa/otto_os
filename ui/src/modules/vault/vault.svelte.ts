@@ -343,13 +343,12 @@ class VaultStore {
     // flight, paused while the window is hidden.
     this.poller = pollWhileVisible(async () => {
       if (!this.current) return;
-      await Promise.all([
-        this.refreshStatus(),
-        // Keep the runs list fresh even when the Docs agent view isn't
-        // mounted — the topbar chip is the always-visible signal that
-        // agents are writing into this vault right now.
-        this.refreshDocsRuns(),
-      ]);
+      // One request a tick when idle: the runs list (the topbar chip that says
+      // agents are writing here) is re-read only while a run is active or the
+      // index moved, which is what an agent writing into the vault does.
+      const before = this.status;
+      await this.refreshStatus();
+      if (this.activeDocsRuns.length || this.status !== before) await this.refreshDocsRuns();
     }, { ms: 5000, immediate: false });
     if (typeof window !== 'undefined') window.addEventListener('pagehide', this.onPageHide);
   }

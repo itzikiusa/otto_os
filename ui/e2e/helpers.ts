@@ -333,3 +333,11 @@ export function expectMcpJsonHoldsNoCredential(raw: string, token: string): void
     expect(value, `${name} is a reference, not a literal`).toMatch(/^\$\{[A-Z][A-Z0-9_]*(:-)?\}$/);
   }
 }
+
+/** ⌘K, then wait until the floating bar's input has focus: the bar is a lazy
+ *  chunk, so on a busy machine ⌘K right after load can land before it is
+ *  mounted, and keys typed meanwhile go to the page (chords), not the bar. */
+export async function openFloatingBar(page: Page): Promise<void> {
+  await page.keyboard.press('Meta+k');
+  await expect(page.getByRole('combobox', { name: 'Ask Otto or search commands' })).toBeFocused();
+}

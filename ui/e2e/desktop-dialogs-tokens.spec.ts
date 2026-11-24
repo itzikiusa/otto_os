@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
+import { routeUsage } from './usage-page-fixture';
 import { openPage } from './helpers';
 
 // Design-token + dialog correctness (UI redesign, tokens layer).
@@ -141,7 +142,7 @@ for (const scheme of ['light', 'dark'] as const) {
   });
 }
 
-test('light: Usage "Cost Attribution" heading + Group-by select are readable', async ({ page }) => {
+test('light: Usage "Where it went" heading + work-item Group-by select are readable', async ({ page }) => {
   const { ctx, base } = await apiCtx();
   let available = false;
   for (let i = 0; i < 60 && !available; i++) {
@@ -154,12 +155,15 @@ test('light: Usage "Cost Attribution" heading + Group-by select are readable', a
 
   test.setTimeout(240_000);
   await page.addInitScript(() => localStorage.setItem('otto_scheme', 'light'));
+  // Canned spend so "Where it went" renders (a fresh daemon has none).
+  await routeUsage(page);
   // Not openPage(): the Usage page polls, so "networkidle" can take minutes on
   // a loaded host.
   await page.goto('/#/usage');
-  const title = page.locator('.attr-title');
-  await expect(title).toHaveText('Cost attribution', { timeout: 30_000 });
-  expect(await contrastOf(page, '.attr-title')).toBeGreaterThanOrEqual(4.5);
+  const title = page.locator('#usage-where-title');
+  await expect(title).toHaveText('Where it went', { timeout: 30_000 });
+  expect(await contrastOf(page, '#usage-where-title')).toBeGreaterThanOrEqual(4.5);
+  await page.getByTestId('usage-where-work').click();
   // The select was a solid black box (#0d1117 fallback) in light mode.
   expect(await contrastOf(page, '#attr-dim-select')).toBeGreaterThanOrEqual(4.5);
   const selectBg = await page

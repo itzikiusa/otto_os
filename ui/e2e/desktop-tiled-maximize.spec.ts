@@ -33,6 +33,7 @@ test.beforeEach(async ({ page }, info) => {
     localStorage.setItem('otto_workspace', id as string);
     localStorage.setItem('otto_firstrun_dismissed', '1');
     localStorage.setItem('otto_nav_all_ws', '0');
+    localStorage.setItem('otto_agents_fold_nav', '1'); // the real Agents width: navigator on its rail
   }, wsId);
   await page.goto('/#/agents');
   await expect(page.getByText(TITLES[0]).first()).toBeVisible({ timeout: 20_000 });
@@ -43,7 +44,7 @@ test.afterEach(async () => {
 });
 
 test('maximizing a tile fills the body with a live terminal, and restore brings the grid back', async ({ page }) => {
-  await page.locator('.nav-item.nested-item', { hasText: TITLES[0] }).first().click();
+  await page.locator('[data-testid^="agents-row-"] .tr-main', { hasText: TITLES[0] }).first().click();
   await expect(page.locator('[data-pane-key]').first()).toBeVisible({ timeout: 15_000 });
   await page.locator('button[aria-label="Tiled view"]').click();
   await expect(page.locator('[data-tile-id]')).toHaveCount(2, { timeout: 20_000 });

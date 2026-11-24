@@ -27,6 +27,26 @@ fn span_rejects_content_and_invalid_numbers() {
     assert!(s.validate().is_err());
 }
 #[test]
+fn navigation_device_class_is_a_closed_set() {
+    let mut s = SpanRecord::new("ui.navigation", "git", 3.0);
+    for device in ["desktop", "phone", "tablet"] {
+        s.attributes.insert("otto.device".into(), json!(device));
+        assert!(s.validate().is_ok(), "{device}");
+    }
+    for bad in [json!("watch"), json!("iPhone 15 Pro"), json!(1)] {
+        s.attributes.insert("otto.device".into(), bad);
+        assert!(s.validate().is_err());
+    }
+}
+#[test]
+fn navigation_reads_the_daily_rollup_within_thirty_days() {
+    let sql = schema::navigation(90);
+    assert!(sql.contains("FROM otto_telemetry.navigation_days"));
+    assert!(sql.contains("today()-30"));
+    assert!(schema::navigation(0).contains("today()-1"));
+    assert!(sql.contains("GROUP BY module,device"));
+}
+#[test]
 fn nanoseconds_accept_decimal_string() {
     let mut value = serde_json::to_value(SpanRecord::new("http.server", "server", 1.0)).unwrap();
     value["start_unix_nano"] = json!(now_nanos().to_string());

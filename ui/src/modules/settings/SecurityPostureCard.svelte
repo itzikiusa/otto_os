@@ -31,6 +31,10 @@
   const hasChecksField = $derived(Array.isArray(posture?.checks));
   const counts = $derived(summarizeChecks(checks));
   const groups = $derived(groupChecksByCategory(checks));
+  /** Passed checks fold to one "N checks passed" line per category; what needs
+   *  attention stays open. */
+  let showPassed = $state(false);
+  const shownGroups = $derived(showPassed ? groups : groups.filter((g) => g.counts.pass < g.counts.total));
   const overall = $derived(overallPostureInfo(posture?.overall, checks));
   const summaryText = $derived(postureSummaryLine(counts));
 
@@ -130,7 +134,7 @@
       {/snippet}
 
       <div class="sp-groups">
-        {#each groups as group (group.category)}
+        {#each shownGroups as group (group.category)}
           <div class="sp-group">
             <div class="sp-group-head">
               <h3 class="sp-group-title">{group.label}</h3>
@@ -142,7 +146,7 @@
             </div>
 
             <ul class="sp-list">
-              {#each group.checks as check (check.id)}
+              {#each group.checks.filter((c) => c.status === 'fail' || c.status === 'warn' || showPassed) as check (check.id)}
                 {@const info = checkStatusInfo(check.status)}
                 {@const remediable = hasRemediation(check)}
                 {@const open = remediable && isRemediationOpen(check)}
@@ -179,12 +183,35 @@
             </ul>
           </div>
         {/each}
+        {#if counts.pass > 0}
+          <button type="button" class="sp-passed-toggle" aria-expanded={showPassed} onclick={() => (showPassed = !showPassed)}>
+            <Icon name={showPassed ? 'chevronDown' : 'chevronRight'} size={12} />
+            {showPassed ? 'Hide passed checks' : `${counts.pass} ${counts.pass === 1 ? 'check' : 'checks'} passed`}
+          </button>
+        {/if}
       </div>
     </LoadState>
   </div>
 </section>
 
 <style>
+  .sp-passed-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-block-start: 4px;
+    padding: 4px 0;
+    border: 0;
+    background: none;
+    color: var(--text-dim);
+    font-size: var(--fs-s);
+    cursor: pointer;
+  }
+  @media (pointer: coarse) {
+    .sp-passed-toggle {
+      min-block-size: 44px;
+    }
+  }
   .sp-card {
     margin-block-start: 12px;
     background: var(--surface);

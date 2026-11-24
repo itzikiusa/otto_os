@@ -145,13 +145,11 @@ test.describe('usage (persistent clickhouse server)', () => {
     await expect(page.getByRole('heading', { name: /Usage/i }).first()).toBeVisible({
       timeout: 30_000,
     });
-    // The engine is up (asserted above), so the view tabs MUST render once the
-    // async status lands (`usage.status?.available || admin`) — wait for them
-    // instead of an instantaneous isVisible() that skipped the whole check
-    // whenever the status arrived after the heading.
-    const reportBtn = page.getByTestId('usage-view-report');
-    await expect(reportBtn).toBeVisible({ timeout: 30_000 });
-    await reportBtn.click();
+    // The engine is up (asserted above), so the overview MUST render once the
+    // async status lands; the Report is one visible click away in ⋯.
+    await expect(page.getByTestId('usage-export')).toBeVisible({ timeout: 30_000 });
+    await page.locator('[data-testid="page-header"] .ph-more').click();
+    await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Report…' }).click();
     await expect(page.getByTestId('usage-report')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByRole('button', { name: /Download HTML/ })).toBeVisible();
   });

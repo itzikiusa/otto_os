@@ -1018,7 +1018,7 @@
     display: none;
   }
   .app .surface {
-    width: min(720px, 100%);
+    width: min(var(--read-col), 100%);
     border: 1px solid var(--border);
     box-shadow: var(--glass-shadow);
     /* The raised-glass token, so Settings → Reduce transparency (not only

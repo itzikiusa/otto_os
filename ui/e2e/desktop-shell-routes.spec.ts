@@ -69,7 +69,7 @@ test('a module missing from the saved order comes back beside its neighbour', as
   await boot(page, ws, {
     otto_sidebar_order: JSON.stringify(['home', 'agents', 'threads', 'rooms', ...infra]),
     otto_sidebar_known_modules: JSON.stringify(['home', 'agents', 'threads', 'rooms', ...infra]),
-    otto_rail_expanded: '1',
+    otto_rail_expanded: '1', otto_agents_fold_nav: '0',
   });
   await expect(page.locator('[data-nav-id="kubernetes"]').first()).toBeVisible({ timeout: 20_000 });
   const order = await page.$$eval('.nav-item[data-nav-id]', (els) => els.map((e) => e.getAttribute('data-nav-id')));
@@ -85,15 +85,16 @@ test('a module missing from the saved order comes back beside its neighbour', as
 test('the workspace switcher lists recently used workspaces first', async ({ page }) => {
   const ids: string[] = [];
   for (let i = 0; i < 6; i++) ids.push(await seedWorkspace(ctx, base, `Recent ${run} ${i}`));
-  await boot(page, ids[0], { otto_ws_recent: JSON.stringify([ids[4], ids[2]]), otto_rail_expanded: '1' });
+  await boot(page, ids[0], { otto_ws_recent: JSON.stringify([ids[4], ids[2]]), otto_rail_expanded: '1', otto_agents_fold_nav: '0' });
   const chip = page.getByTestId('agents-current-ws');
   await expect(chip).toBeVisible({ timeout: 20_000 });
   await chip.click();
-  const labels = await page.locator('.ctx-item').allInnerTexts();
-  const ours = labels.map((l) => l.trim()).filter((l) => l.startsWith(`Recent ${run}`));
+  // The menu opens a beat after the click: read it once it lists our workspaces.
+  const ours = async () => (await page.locator('.ctx-item').allInnerTexts()).map((l) => l.trim()).filter((l) => l.startsWith(`Recent ${run}`));
   // The current workspace was just used too, so it leads; then the stored recents.
-  expect(ours.slice(0, 3)).toEqual([`Recent ${run} 0`, `Recent ${run} 4`, `Recent ${run} 2`]);
-  expect(new Set(ours).size).toBe(ours.length);
+  await expect.poll(async () => (await ours()).slice(0, 3)).toEqual([`Recent ${run} 0`, `Recent ${run} 4`, `Recent ${run} 2`]);
+  const all = await ours();
+  expect(new Set(all).size).toBe(all.length);
 });
 
 test('removing a workspace with sessions asks about them; "Removed workspaces" restores it', async ({ page }) => {
@@ -104,7 +105,7 @@ test('removing a workspace with sessions asks about them; "Removed workspaces" r
   });
   expect(r.ok()).toBeTruthy();
   const sessionId = (await r.json()).id as string;
-  await boot(page, home, { otto_rail_expanded: '1' });
+  await boot(page, home, { otto_rail_expanded: '1', otto_agents_fold_nav: '0' });
   const row = workspacesSection(page).locator('.nav-item', { hasText: `Doomed ${run}` });
   await expect(row).toBeVisible({ timeout: 20_000 });
   await row.click({ button: 'right' });

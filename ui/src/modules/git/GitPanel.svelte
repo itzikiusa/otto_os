@@ -29,6 +29,8 @@
 <div class="gpanel">
   {#if git.detecting && !git.primary}
     <div class="gp-pad"><Skeleton rows={4} height={26} /></div>
+  {:else if !git.primary && git.notARepo && rightPanel.session}
+    <!-- The session's details card above already says "Not a git repository": one line, no button. -->
   {:else if !git.primary}
     <div class="gp-empty">
       {#if git.reposError}

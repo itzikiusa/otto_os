@@ -15,8 +15,9 @@
   }
   let { kind, value, small = false }: Props = $props();
 
-  // Sentence case ("Pending approval"), like every other status badge.
-  const label = $derived(sentenceCase(value ?? 'unknown'));
+  // Sentence case ("Pending approval"), like every other status badge; a
+  // server whose health was never checked says so (never "Unknown").
+  const label = $derived(kind === 'health' && (value ?? 'unknown') === 'unknown' ? 'Not checked' : sentenceCase(value ?? 'unknown'));
 
   type Tone = 'ok' | 'warn' | 'bad' | 'neutral' | 'info';
   const tone: Tone = $derived.by((): Tone => {

@@ -6,6 +6,7 @@
   import Icon, { asIcon } from '../../lib/components/Icon.svelte';
   import type { NodeTypeSpec } from '../../lib/api/types';
   import { groupNodeTypes } from './nodePalette';
+  import { focusOnMount } from '../../lib/focusOnMount';
 
   interface Props {
     types: NodeTypeSpec[];
@@ -35,6 +36,7 @@
     dir="auto"
     placeholder="Filter nodes…"
     aria-label="Filter nodes"
+    use:focusOnMount
     bind:value={query}
     onkeydown={onKey}
   />

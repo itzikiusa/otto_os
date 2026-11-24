@@ -32,6 +32,11 @@ async function seedSessions(): Promise<void> {
     if (!r.ok()) throw new Error(`seed ${title} → ${r.status()} ${await r.text()}`);
     idByTitle[title] = (await r.json()).id as string;
   }
+  // openTab's companion: the tab strip shows from the second tab on.
+  const c = await ctx.post(`${base}/api/v1/workspaces/${wsId}/sessions`, {
+    data: { kind: 'agent', provider: 'shell', title: 'Ancelotti', cwd: '/tmp', meta: { origin: 'e2e' } },
+  });
+  idByTitle.Ancelotti = (await c.json()).id as string;
 }
 
 async function isArchived(id: string): Promise<boolean> {
@@ -53,6 +58,7 @@ test.beforeEach(async ({ page }, info) => {
   await page.addInitScript((id) => {
     localStorage.setItem('otto_workspace', id as string);
     localStorage.removeItem('otto_close_tab_pref');
+    localStorage.setItem('otto_agents_fold_nav', '1'); // the real Agents width: navigator on its rail
   }, wsId);
   await page.goto('/#/agents');
   await expect(page.getByText('Kaka').first()).toBeVisible({ timeout: 20_000 });
@@ -62,9 +68,17 @@ test.afterEach(async () => {
   await ctx?.dispose();
 });
 
-/** Open a session from the sidebar and return its tab-bar tab. */
+/** Open a session from the inbox and return its tab-bar tab. The strip shows
+ *  from two tabs on, so a lone tab gets a companion (Ancelotti) beside it. */
 async function openTab(page: import('@playwright/test').Page, title: string) {
-  await page.locator('.nav-item.nested-item', { hasText: title }).first().click();
+  // By id: earlier tests in this worker leave rows with the same titles.
+  const open = (t: string) => page.locator(`[data-testid="agents-row-${idByTitle[t]}"] .tr-main`).click();
+  await open(title);
+  await expect(page.locator(`[data-pane-key][data-session="${idByTitle[title]}"]`).first()).toBeVisible({ timeout: 10_000 });
+  if ((await page.locator('.tab').count()) === 0) {
+    await open('Ancelotti');
+    await open(title);
+  }
   const tab = page.locator('.tab', { hasText: title });
   await expect(tab).toBeVisible({ timeout: 10_000 });
   return tab;
@@ -106,9 +120,9 @@ test('remembered choice applies to later closes without a dialog (tab × and sid
   expect(await page.evaluate(() => localStorage.getItem('otto_close_tab_pref'))).toBe('archive');
 
   // Sidebar × on another session: no dialog, archived straight away.
-  const row = page.locator('.nav-item.nested-item', { hasText: 'Gattuso' }).first();
+  const row = page.locator(`.ai-row[data-workspace="${wsId}"] .tr-main`, { hasText: 'Gattuso' }).first();
   await row.hover();
-  await page.locator('.nested-row', { hasText: 'Gattuso' }).first().locator('button[aria-label="Close session"]').click();
+  await page.locator(`.ai-row[data-workspace="${wsId}"]`, { hasText: 'Gattuso' }).first().locator('button[aria-label="Close session"]').click();
   await expect(page.locator('.cf-msg')).toHaveCount(0);
   await expect.poll(() => isArchived(idByTitle.Gattuso), { timeout: 15_000 }).toBe(true);
 });
@@ -121,10 +135,11 @@ test('archived list: multi-select deletes the checked sessions in one confirm', 
   }
   await page.reload();
   await expect(page.getByText('Maldini').first()).toBeVisible({ timeout: 20_000 });
-  await page.getByRole('button', { name: /^Archived/ }).click();
+  await page.getByTestId('archived-toggle').click();
+  await page.getByTestId('agents-select-toggle').click();
   await page.getByLabel('Select Kaka').check();
   await page.getByLabel('Select Nesta').check();
-  const del = page.getByTestId('archived-delete-selected');
+  const del = page.getByTestId('agents-delete-selected');
   await expect(del).toContainText('Delete (2)');
   await del.click();
   // The shared bulk-close confirm (shell/closeConfirm.ts, ux-design-3-03)
@@ -178,8 +193,9 @@ test('"Always archive" pref: Close others still confirms once, naming the count'
   const tab = page.locator('.tab', { hasText: 'Maldini' });
   await tab.click({ button: 'right' });
   await page.locator('.ctx-item', { hasText: 'Close others' }).click();
-  await expect(page.locator('.cf-msg')).toContainText('archives 2 sessions');
-  await page.getByRole('dialog').getByRole('button', { name: 'Archive 2 sessions' }).click();
+  // Nesta, Gattuso and openTab's companion (Ancelotti, opened beside Kaka).
+  await expect(page.locator('.cf-msg')).toContainText('archives 3 sessions');
+  await page.getByRole('dialog').getByRole('button', { name: 'Archive 3 sessions' }).click();
   await expect.poll(() => isArchived(idByTitle.Nesta), { timeout: 15_000 }).toBe(true);
   await expect.poll(() => isArchived(idByTitle.Gattuso), { timeout: 15_000 }).toBe(true);
   expect(await isArchived(idByTitle.Maldini)).toBe(false);
@@ -217,18 +233,20 @@ test('archived list: bulk toolbar stays inside the sidebar with many long titles
   for (const id of ids) await ctx.post(`${base}/api/v1/sessions/${id}/archive`);
   await page.reload();
   await expect(page.getByText('Kaka').first()).toBeVisible({ timeout: 20_000 });
-  await page.getByRole('button', { name: /^Archived/ }).click();
-  await page.getByLabel('Select all archived sessions').check();
-  const del = page.getByTestId('archived-delete-selected');
+  await page.getByTestId('archived-toggle').click();
+  await page.getByTestId('agents-select-toggle').click();
+  // Select the 30 archived rows (the live rows stay unchecked).
+  for (const box of await page.getByTestId('agents-history-list').getByRole('checkbox').all()) await box.check();
+  const del = page.getByTestId('agents-delete-selected');
   await expect(del).toContainText('Delete (30)');
   await expectFullyInViewport(page, del, 'Delete selected button');
-  // No horizontal overflow inside the navigator.
-  const nav = page.getByRole('navigation', { name: 'Navigator' });
+  // No horizontal overflow inside the session list.
+  const nav = page.getByTestId('agents-inbox');
   const overflow = await nav.evaluate((el) => {
     const right = el.getBoundingClientRect().right;
     const bad: string[] = [];
     // The rail's own resize handle deliberately straddles the edge — skip it.
-    el.querySelectorAll('.nested *').forEach((n) => {
+    el.querySelectorAll('.ai-body *').forEach((n) => {
       const r = n.getBoundingClientRect();
       if (r.width > 0 && r.right > right + 1) bad.push(`${n.tagName.toLowerCase()}.${(n as HTMLElement).className.toString().split(' ').join('.')} right=${Math.round(r.right)} nav=${Math.round(right)}`);
     });
@@ -263,7 +281,7 @@ test('"Always delete" set in Settings: Delete from the tab menu, pane ⋯ and si
   await expect(page.getByRole('dialog')).toHaveCount(0);
 
   // 3. Sidebar row → Delete.
-  await page.locator('.nav-item.nested-item', { hasText: 'Maldini' }).first().click({ button: 'right' });
+  await page.locator(`.ai-row[data-workspace="${wsId}"] .tr-main`, { hasText: 'Maldini' }).first().click({ button: 'right' });
   await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Delete…', exact: true }).click();
   await expect.poll(() => exists(idByTitle.Maldini), { timeout: 15_000 }).toBe(false);
   await expect(page.getByRole('dialog')).toHaveCount(0);
@@ -319,8 +337,8 @@ test('"Always delete" set in Settings: working agents delete and close without c
   await captureSchemes('setting');
   await page.goto('/#/agents');
 
-  const row = page.locator('.nav-item.nested-item', { hasText: 'Kaka' }).first();
-  await expect(row.locator('[data-state="working"]')).toBeVisible();
+  const row = page.locator(`[data-testid="agents-row-${idByTitle.Kaka}"] .tr-main`);
+  await expect(page.locator(`[data-testid="agents-row-${idByTitle.Kaka}"][data-state="working"]`)).toBeVisible();
   await row.click({ button: 'right' });
   await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Delete…', exact: true }).click();
   await expect.poll(() => exists(idByTitle.Kaka), { timeout: 15_000 }).toBe(false);

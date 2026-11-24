@@ -1,10 +1,12 @@
 <script lang="ts">
   import { rowMenu } from '../../lib/rowMenu';
   import { plural } from '../../lib/plural';
-  // Home: Otto's one "desktop". The ambient backdrop fills the page; on it sit
-  // a greeting + today's glance cards (HomeToday) and the active space's
-  // widgets — up to 8 live boxes (Agents, DB dashboards, Kubernetes,
-  // Insights, Usage) on a 12-column grid. Spaces 01–04 are Home's
+  // Home: one centred reading column on the ambient backdrop — the greeting,
+  // "Needs you", "Working", then Up next / Recent when they hold something
+  // (HomeToday), with the floating bar docked under it as the one primary.
+  // Below, a "Pinned" section holds the active space's widgets — up to 8 live
+  // boxes (Agents, DB dashboards, Kubernetes, Insights, Usage) on a 12-column
+  // grid — with the spaces, Add widget and cycling in its header. Spaces 01–04 are Home's
   // views, shared with the floating bar through lib/stores/spaces.svelte.ts;
   // they slide (tabs, ←/→, swipe, ⌘K) and can cycle every 30 s. Any widget
   // zooms to fill the page. Layout is per device (see home.svelte.ts).
@@ -12,6 +14,7 @@
   import { onTabKey } from '../../lib/tabKeys';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Modal from '../../lib/components/Modal.svelte';
@@ -22,11 +25,16 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { registry } from '../../lib/commands.svelte';
-  import HomeBox from './HomeBox.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import HomeToday from './HomeToday.svelte';
   import { spaces, spaceNumber } from '../../lib/stores/spaces.svelte';
   import { home, MAX_BOXES, MAX_VIEWS, ROTATE_MS, ROW_PX, GAP_PX } from './home.svelte';
   import { HOME_KINDS, type HomeBoxKind } from '../../lib/home/kinds';
+
+  // The Pinned widgets sit below the fold and are empty for most opens: their
+  // frame loads as its own chunk the first time a space has a widget, behind a
+  // placeholder of the box's own grid size (no layout jump).
+  const HomeBoxView = lazyComponent(() => import('./HomeBox.svelte'));
 
   const can = (f: Parameters<typeof auth.can>[0]): boolean => auth.can(f, 'view');
   const kinds = $derived(HOME_KINDS.filter((k) => can(k.feature)));
@@ -187,64 +195,7 @@
 <!-- Touch swipe between spaces is a touch shortcut (the Spaces tabs and ←/→
      are the other paths); a named region takes touch handlers without a lint. -->
 <div class="home" role="region" aria-label="Home dashboard" ontouchstart={onTouchStart} ontouchend={onTouchEnd}>
-  <PageHeader title="Home">
-    {#snippet tabs()}
-      <div class="spaces-bar">
-        <div class="spaces segmented" role="tablist" aria-label="Spaces">
-          {#each home.views as v, i (v.id)}
-            <button use:rowMenu
-              class="space"
-              onkeydown={onTabKey}
-              class:active={i === home.activeIndex}
-              role="tab"
-              aria-selected={i === home.activeIndex}
-              tabindex={i === home.activeIndex ? 0 : -1}
-              aria-label={v.name}
-              title="Space {spaceNumber(i)} · {v.name}"
-              onclick={() => home.goTo(i)}
-              oncontextmenu={(e) => {
-                home.goTo(i);
-                viewMenu(e);
-              }}
-            >
-              <span class="num">{spaceNumber(i)}</span>
-              {#if i === home.activeIndex}<span class="sname">{v.name}</span>{/if}
-            </button>
-          {/each}
-        </div>
-        {#if home.views.length < MAX_VIEWS}
-          <!-- Outside the tablist: a tablist may only contain tabs (axe aria-required-children). -->
-          <button class="icon-btn" onclick={addView} title="Add space" aria-label="Add space"><Icon name="plus" size={14} /></button>
-        {/if}
-        {#if home.active}
-          <button class="icon-btn" onclick={viewMenu} title="Space options" aria-label="Space options" aria-haspopup="menu"><Icon name="more" size={14} /></button>
-        {/if}
-      </div>
-    {/snippet}
-    {#snippet actions()}
-      {#if home.views.length > 1}
-        <button
-          class="btn small ghost rot"
-          class:on={home.autoRotate}
-          onclick={() => home.setAutoRotate(!home.autoRotate)}
-          title={home.autoRotate ? 'Cycling spaces every 30 s — click to pause' : 'Space cycling is paused — click to resume'}
-          aria-pressed={home.autoRotate}
-          aria-label="Auto-rotate spaces"
-          data-label={home.autoRotate ? 'Pause cycling spaces' : 'Cycle spaces every 30 s'}
-          data-icon={home.autoRotate ? 'refresh' : 'play'}
-        >
-          <Icon name={home.autoRotate ? 'refresh' : 'play'} size={12} />
-          {home.autoRotate ? '30s' : 'Paused'}
-        </button>
-      {/if}
-      <!-- One primary per page: an empty space’s EmptyState owns "Add widget". -->
-      {#if home.active && home.active.boxes.length > 0}
-        <button class="btn small primary" onclick={() => (picking = true)} disabled={full} title={full ? `A space holds at most ${MAX_BOXES} widgets` : 'Add a widget to this space'}>
-          <Icon name="plus" size={12} />Add widget
-        </button>
-      {/if}
-    {/snippet}
-  </PageHeader>
+  <PageHeader title="Home" />
   <PageBody padded={false} fill>
   {#if rotating}
     {#key home.rotationEpoch}
@@ -252,18 +203,7 @@
     {/key}
   {/if}
 
-  <!-- Hovering or focusing a widget pauses cycling (the user is reading). -->
-  <div
-    class="stage"
-    role="group"
-    aria-label="Home widgets"
-    onpointerenter={() => (hovering = true)}
-    onpointerleave={() => (hovering = false)}
-    onfocusin={() => (focusInside = true)}
-    onfocusout={(e) => {
-      if (!(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node | null)) focusInside = false;
-    }}
-  >
+  <div class="stage" role="group" aria-label="Home widgets">
     <!-- Every space stays mounted (review 06 F3): switching only toggles
          `hidden` + `inert`, and the off-screen boxes pause their pollers but
          keep their data — a slide no longer remounts and re-fetches every
@@ -272,11 +212,81 @@
          inert and paused — no second copy, no re-fetch. -->
     <div class="desk" class:phone={viewport.isPhone} class:zooming={!!zoomId}>
       <div class="today" hidden={!!zoomId} inert={!!zoomId}><HomeToday /></div>
+      <div class="pinned-head read-col" hidden={!!zoomId} inert={!!zoomId}>
+        <h2 class="pinned-title">Pinned</h2>
+        <div class="spaces-bar">
+          <div class="spaces segmented" role="tablist" aria-label="Spaces">
+            {#each home.views as v, i (v.id)}
+              <button use:rowMenu
+                class="space"
+                onkeydown={onTabKey}
+                class:active={i === home.activeIndex}
+                role="tab"
+                aria-selected={i === home.activeIndex}
+                tabindex={i === home.activeIndex ? 0 : -1}
+                aria-label={v.name}
+                title="Space {spaceNumber(i)} · {v.name}"
+                onclick={() => home.goTo(i)}
+                oncontextmenu={(e) => {
+                  home.goTo(i);
+                  viewMenu(e);
+                }}
+              >
+                <span class="num">{spaceNumber(i)}</span>
+                {#if i === home.activeIndex}<span class="sname">{v.name}</span>{/if}
+              </button>
+            {/each}
+          </div>
+          {#if home.views.length < MAX_VIEWS}
+            <!-- Outside the tablist: a tablist may only contain tabs (axe aria-required-children). -->
+            <button class="icon-btn" onclick={addView} title="Add space" aria-label="Add space"><Icon name="plus" size={14} /></button>
+          {/if}
+          {#if home.active}
+            <button class="icon-btn" onclick={viewMenu} title="Space options" aria-label="Space options" aria-haspopup="menu"><Icon name="more" size={14} /></button>
+          {/if}
+        </div>
+        <span class="pinned-grow"></span>
+        {#if home.views.length > 1}
+          <button
+            class="btn small ghost rot"
+            class:on={home.autoRotate}
+            onclick={() => home.setAutoRotate(!home.autoRotate)}
+            title={home.autoRotate ? 'Cycling spaces every 30 s — click to pause' : 'Space cycling is paused — click to resume'}
+            aria-pressed={home.autoRotate}
+            aria-label="Auto-rotate spaces"
+            data-label={home.autoRotate ? 'Pause cycling spaces' : 'Cycle spaces every 30 s'}
+            data-icon={home.autoRotate ? 'refresh' : 'play'}
+          >
+            <Icon name={home.autoRotate ? 'refresh' : 'play'} size={12} />
+            {home.autoRotate ? '30s' : 'Paused'}
+          </button>
+        {/if}
+        <!-- Not the primary: the composer is Home's one primary. -->
+        {#if home.active && home.active.boxes.length > 0}
+          <button class="btn small ghost" onclick={() => (picking = true)} disabled={full} title={full ? `A space holds at most ${MAX_BOXES} widgets` : 'Add a widget to this space'}>
+            <Icon name="plus" size={12} />Add widget
+          </button>
+        {/if}
+      </div>
+      <!-- Hovering or focusing a widget pauses cycling (the user is reading) —
+           the widgets only, never the inbox or the Pinned controls above. -->
+      <div
+        class="views"
+        role="presentation"
+        onpointerover={() => (hovering = true)}
+        onpointerout={(e) => {
+          if (!(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node | null)) hovering = false;
+        }}
+        onfocusin={() => (focusInside = true)}
+        onfocusout={(e) => {
+          if (!(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node | null)) focusInside = false;
+        }}
+      >
       {#if home.active}
         {#each home.views as v, vi (v.id)}
           {@const on = v.id === home.active.id}
           <div
-            class="view"
+            class="view read-col"
             class:phone={viewport.isPhone}
             hidden={!on}
             inert={!on}
@@ -286,29 +296,29 @@
             aria-label="Space {spaceNumber(vi)} · {v.name}"
           >
             {#if v.boxes.length === 0}
+              <!-- Calm: one line, never a second primary beside the composer. -->
               <div class="empty">
-                <EmptyState
-                  variant="page"
-                  icon="grid"
-                  title="This space is empty"
-                  body="Pin live widgets here: your agents, usage, insights, clusters or a database dashboard. Resize from the corner, drag the grip to reorder."
-                  actionLabel="Add widget"
-                  actionIcon="plus"
-                  onaction={() => (picking = true)}
-                >
-                  {#if kinds.length}
-                    <div class="quick" aria-label="Quick add">
-                      {#each kinds.slice(0, 4) as k (k.kind)}
-                        <button class="chip quick-chip" onclick={() => addBox(k.kind)}><Icon name={k.icon} size={12} />{k.label}</button>
-                      {/each}
-                    </div>
-                  {/if}
-                </EmptyState>
+                <p class="empty-line">This space is empty — pin live widgets here.</p>
+                <div class="quick" aria-label="Quick add">
+                  {#each kinds.slice(0, 4) as k (k.kind)}
+                    <button class="chip quick-chip" onclick={() => addBox(k.kind)}><Icon name={k.icon} size={12} />{k.label}</button>
+                  {/each}
+                  <button class="chip quick-chip" onclick={() => (picking = true)}><Icon name="plus" size={12} />Add widget</button>
+                </div>
               </div>
             {:else}
               {#each v.boxes as b, i (b.id)}
                 {@const z = on && zoomId === b.id}
-                <HomeBox box={b} viewId={v.id} index={i} count={v.boxes.length} zoomed={z} covered={on && !!zoomId && !z} active={on && (!zoomId || z)} ondragbox={(id) => (dragId = id)} ondropon={dropOn} />
+                {#if HomeBoxView.component}
+                  {@const Box = HomeBoxView.component}
+                  <Box box={b} viewId={v.id} index={i} count={v.boxes.length} zoomed={z} covered={on && !!zoomId && !z} active={on && (!zoomId || z)} ondragbox={(id) => (dragId = id)} ondropon={dropOn} />
+                {:else}
+                  <div class="box-ph" style:grid-column={viewport.isPhone ? null : `span ${b.w}`} style:grid-row="span {b.h}">
+                    {#if HomeBoxView.error}
+                      <LoadState what="the widget" variant="compact" error={HomeBoxView.error} empty={false} onretry={() => HomeBoxView.retry()} />
+                    {/if}
+                  </div>
+                {/if}
               {/each}
             {/if}
           </div>
@@ -318,6 +328,7 @@
           <EmptyState variant="page" icon="grid" title="No spaces yet" body="Create a space, then pin widgets to it." actionLabel="Add space" actionIcon="plus" onaction={addView} />
         </div>
       {/if}
+      </div>
     </div>
   </div>
   </PageBody>
@@ -428,14 +439,14 @@
     overflow-y: auto;
     /* Edges line up with the toolbar title (20px inset); the bottom clears
        the floating bar when it overlays the page (--fb-clearance). */
-    padding: 22px 20px max(28px, var(--fb-clearance, 0px));
+    padding: var(--sp-9) 0 max(28px, var(--fb-clearance, 0px));
     display: flex;
     flex-direction: column;
-    gap: 22px;
+    gap: var(--sp-6);
   }
   .desk.phone {
-    padding: 16px 14px max(24px, var(--fb-clearance, 0px));
-    gap: 16px;
+    padding: var(--sp-6) 0 max(24px, var(--fb-clearance, 0px));
+    gap: var(--sp-6);
   }
   /* Zoomed: the desk is the zoomed box's containing block. Everything else in
      it is hidden, so nothing scrolls and the box sits over the whole stage. */
@@ -451,11 +462,41 @@
   .desk.zooming .view {
     animation: none;
   }
-  .today {
+  .views {
     display: contents;
   }
-  .today[hidden] {
+  /* A widget while its frame's chunk loads: the box's own grid size, calm. */
+  .box-ph {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--sp-4);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-l);
+    background: var(--surface);
+    font-size: var(--fs-m);
+    color: var(--text-dim);
+  }
+  .today[hidden],
+  .pinned-head[hidden] {
     display: none;
+  }
+  /* "Pinned": the widgets' section, its controls in one calm row. */
+  .pinned-head {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--sp-4);
+    margin-block-start: var(--sp-6);
+  }
+  .pinned-title {
+    margin: 0;
+    font-size: var(--fs-m);
+    font-weight: 600;
+    color: var(--text);
+  }
+  .pinned-grow {
+    flex: 1;
   }
   .view {
     display: grid;
@@ -488,19 +529,20 @@
   }
   .empty {
     grid-column: 1 / -1;
-    grid-row: span 5;
-    display: grid;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-l);
-    box-shadow: var(--shadow-card);
+    grid-row: span 1;
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-4);
+  }
+  .empty-line {
+    margin: 0;
+    font-size: var(--fs-m);
+    color: var(--text);
   }
   .quick {
     display: flex;
     flex-wrap: wrap;
-    justify-content: center;
-    gap: 6px;
-    margin-top: 12px;
+    gap: var(--sp-3);
   }
   .quick-chip {
     height: 24px;

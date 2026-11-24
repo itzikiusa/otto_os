@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { componentFunctions } from './componentFunctions.ts';
 
 for (const [file, name, width] of [
-  ['UsagePage', 'showXLabel', 'SVG_W'],
+  ['DailyChart', 'showX', 'SVG_W'],
   ['ModelBreakdown', 'showX', 'W'],
 ] as const) {
   test(`${file} date labels stay at least 52 rendered pixels apart`, () => {

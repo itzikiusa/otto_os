@@ -72,6 +72,16 @@
      `.list > :global(.st + .st)`, see InsightsSettings) — sibling instances
      are separate component scopes, and a global `.st + .st` would leak into
      other modules that use a `.st` class. */
+  /* Phone: the whole row is the toggle, at least a finger tall. */
+  @media (pointer: coarse) {
+    .st {
+      min-block-size: 44px;
+    }
+    .st input {
+      width: 20px;
+      height: 20px;
+    }
+  }
   .st.disabled {
     cursor: default;
   }

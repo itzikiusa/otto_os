@@ -17,6 +17,8 @@
   import { parseRoomInvite } from './room-state';
   import { recallRoom } from './room-access';
   import { openHostedRoom } from './room-window';
+  import StartRoomModal from './StartRoomModal.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
   import type { RoomSnapshot } from '../../lib/api/room-types';
   let settingsOpen = $state(false);
   let rooms = $state<RoomSnapshot[]>([]);
@@ -31,6 +33,15 @@
     finally { opening = ''; }
   }
   onMount(() => { void load(); });
+  /** Start a room on a running session: pick one (up to 8, newest first). */
+  let startFor = $state('');
+  async function startRoom() {
+    const live = ws.sessions.filter((s) => s.status !== 'exited').slice(0, 8);
+    if (!live.length) { toasts.info('No running session', 'Start a session in Agents, then start a room on it.'); router.go('agents'); return; }
+    if (live.length === 1) { startFor = live[0].id; return; }
+    const { value } = await confirmer.choose('Which session do you want to share?', { title: 'Start a room', options: live.map((s) => ({ label: s.title, value: s.id })) });
+    if (value) startFor = value;
+  }
   // ⌘K verbs while the lobby is open.
   $effect(() =>
     registry.register('rooms', [
@@ -71,16 +82,17 @@
   </PageHeader>
   <PageBody>
     <LoadState what="rooms" variant="page" {loading} {error} empty={!rooms.length} onretry={load}>
-    {#snippet emptyView()}<EmptyState variant="page" icon="people" title="Bring someone into your session" body="Open a running session’s More menu and choose Start room. You control admission and terminal access." />{/snippet}
+    {#snippet emptyView()}<EmptyState variant="page" icon="people" title="Bring someone into your session" body="Share a running session. You control admission and terminal access." actionLabel="Start a room" onaction={() => void startRoom()} />{/snippet}
     <div class="room-list">{#each rooms as room (room.room_id)}
       <article><h2>{room.session_title ?? 'Session room'}</h2><p>{room.members?.filter(m => m.admission === 'admitted').length ?? 1} of 4 people</p>
         {#if recallRoom(room.room_id)}<button class="btn" disabled={!!opening} onclick={() => openRoom(room.room_id)}>{opening === room.room_id ? 'Opening…' : 'Open room'}</button>
-        {:else}<p>Open in the window where you started the room.</p>{/if}
+        {:else}<p>Its window is where you started the room.</p>{#if room.session_id}<button class="btn" onclick={() => ws.navigateToSession(room.session_id ?? '')}>Open session</button>{/if}{/if}
       </article>
     {/each}</div>
     </LoadState>
   </PageBody>
 </div>
+{#if startFor}<StartRoomModal sessionId={startFor} onclose={() => { startFor = ''; void load(); }} />{/if}
 {#if settingsOpen}<RoomSettingsModal onclose={() => settingsOpen = false} />{/if}
 {#if joinOpen}<Modal title="Join a room" onclose={() => joinOpen = false}>
   <label>Invitation link <input dir="ltr" type="url" bind:value={link} placeholder="https://host/#/room/…" autocomplete="off" spellcheck="false" /></label>

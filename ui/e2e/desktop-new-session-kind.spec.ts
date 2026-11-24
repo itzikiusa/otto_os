@@ -61,15 +61,14 @@ test('⌘T on Threads opens the new-thread stage, not the New session sheet', as
   expect(await page.evaluate(() => location.hash)).toMatch(/^#\/threads/);
 });
 
-test('the New session sheet says what a terminal is and "Start a thread" goes to the Threads stage', async ({ page }) => {
+test('the New session stage: Chat with no message goes to the Threads stage (A4)', async ({ page }) => {
   await page.goto('/#/agents');
   await expect(page.locator('.navigator')).toBeVisible({ timeout: 30_000 });
   const dialog = await openNewSessionSheet(page);
-  const hint = dialog.getByTestId('session-kind-hint');
-  await expect(hint).toContainText('terminal');
-  await expectFullyInViewport(page, hint);
-
-  await hint.getByRole('button', { name: 'Start a thread' }).click();
+  const kind = dialog.getByTestId('ns-kind');
+  await expectFullyInViewport(page, kind);
+  await kind.getByRole('radio', { name: 'Chat' }).click();
+  await dialog.getByRole('button', { name: 'Start chat' }).click();
   await expect(sheet(page)).toHaveCount(0);
   await expect(page.getByTestId('new-thread-stage')).toBeVisible({ timeout: 15_000 });
   // `threads/new` is a one-shot route: it is replaced by `threads`.

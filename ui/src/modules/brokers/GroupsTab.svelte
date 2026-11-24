@@ -618,8 +618,6 @@
   }
   .state {
     font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: .06em;
     padding: 1px 6px;
     border-radius: var(--radius-s);
   }

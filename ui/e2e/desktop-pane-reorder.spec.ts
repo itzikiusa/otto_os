@@ -56,7 +56,7 @@ test.afterEach(async () => {
  *  route→store hop is still in flight, and the next ⌘D would clone the pane the
  *  PREVIOUS session still holds — leaving two slots on one session. */
 async function openSession(page: Page, title: string): Promise<void> {
-  await page.locator('.nav-item.nested-item', { hasText: title }).first().click();
+  await page.locator('[data-testid^="agents-row-"] .tr-main', { hasText: title }).first().click();
   await expect(
     page.locator(`[data-pane-key][data-session="${idByTitle[title]}"]`).first(),
   ).toBeVisible({ timeout: 15_000 });
@@ -150,7 +150,7 @@ test('⌘⌥→ moves the focused pane', async ({ page }) => {
   // The route followed the pane: the navigator still highlights its session.
   const focused = (await sessionOrderOf(page)).find((id) => id === before[0]);
   expect(focused).toBe(before[0]);
-  await expect(page.locator('.nav-item.nested-item.active')).toHaveCount(1);
+  await expect(page.locator('[data-testid^="agents-row-"].selected')).toHaveCount(1);
 });
 
 test('⌘⌥S swaps the focused pane with the next', async ({ page }) => {
@@ -273,21 +273,20 @@ test('tiled view: drag a tile onto another reorders and a reload keeps it', asyn
 });
 
 test('sidebar: drag a row onto another switches to manual and persists', async ({ page }) => {
-  // Only the flat Agents list: the "No workspace" group renders `.nested-row`s
-  // too, and scratch sessions are global to the daemon every worker shares.
-  const rows = page.getByTestId('agents-list').locator('.nested-row');
+  // The inbox (this workspace only — pinned in beforeEach).
+  const rows = page.getByTestId('agents-list').locator(`.ai-row[data-workspace="${wsId}"]`);
   await expect(rows).toHaveCount(3, { timeout: 20_000 });
-  const before = await rows.locator('.nested-item .ellipsis').allInnerTexts();
+  const before = await rows.locator('.tr-title').allInnerTexts();
 
   await dragOnto(
     page,
-    '[data-testid="agents-list"] .nested-row >> nth=2 >> .nested-item',
-    '[data-testid="agents-list"] .nested-row >> nth=0',
+    `[data-testid="agents-list"] .ai-row[data-workspace="${wsId}"] >> nth=2`,
+    `[data-testid="agents-list"] .ai-row[data-workspace="${wsId}"] >> nth=0`,
     { x: 0.5, y: 0.5 },
   );
 
   const expected = [before[2], before[0], before[1]];
-  await expect.poll(() => rows.locator('.nested-item .ellipsis').allInnerTexts()).toEqual(expected);
+  await expect.poll(() => rows.locator('.tr-title').allInnerTexts()).toEqual(expected);
   // The first drag implies Manual — the header control says so.
   const sort = page.getByTestId('agents-sort-toggle');
   await expect(sort).toHaveAttribute('title', /Manual order/);
@@ -296,21 +295,19 @@ test('sidebar: drag a row onto another switches to manual and persists', async (
 
   await page.reload();
   await expect(rows).toHaveCount(3, { timeout: 20_000 });
-  await expect.poll(() => rows.locator('.nested-item .ellipsis').allInnerTexts()).toEqual(expected);
+  await expect.poll(() => rows.locator('.tr-title').allInnerTexts()).toEqual(expected);
 
   // …and "Reset to recent" hands the list back to the daemon's order.
   await sort.click();
   await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Reset to recent' }).click();
-  await expect.poll(() => rows.locator('.nested-item .ellipsis').allInnerTexts()).toEqual(before);
+  await expect.poll(() => rows.locator('.tr-title').allInnerTexts()).toEqual(before);
 });
 
 test('sidebar rows are not draggable while searching', async ({ page }) => {
-  const rows = page.getByTestId('agents-list').locator('.nested-row');
+  const rows = page.getByTestId('agents-list').locator(`.ai-row[data-workspace="${wsId}"]`);
   await expect(rows).toHaveCount(3, { timeout: 20_000 });
-  await expect(page.locator("[data-testid='agents-list'] .nested-row[draggable='true']")).toHaveCount(3);
-  // Not `.nav-search-input`: once enough workspaces exist the sidebar also
-  // shows a "Filter workspaces" field with the same class.
-  await page.getByRole('textbox', { name: 'Filter sessions' }).fill('Boban');
+  await expect(page.locator(`[data-testid='agents-list'] .ai-row[data-workspace="${wsId}"][draggable='true']`)).toHaveCount(3);
+  await page.getByTestId('agents-search').fill('Boban');
   await expect(rows).toHaveCount(1);
-  await expect(page.locator("[data-testid='agents-list'] .nested-row[draggable='true']")).toHaveCount(0);
+  await expect(page.locator(`[data-testid='agents-list'] .ai-row[data-workspace="${wsId}"][draggable='true']`)).toHaveCount(0);
 });

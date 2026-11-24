@@ -82,7 +82,7 @@ test('rotating one token leaves every other scoped token working', async ({ page
     });
     cleanupIds.add(b1.info.id);
 
-    await page.goto('/#/mcp');
+    await page.goto('/#/mcp/otto');
     await expect(page.locator('.otto')).toBeVisible({ timeout: 30_000 });
     await page.locator('[data-testid="mcp-expose-toggle"]').click();
     await expect(page.locator('[data-testid="mcp-tokens"]')).toBeVisible();

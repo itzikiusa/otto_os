@@ -286,7 +286,7 @@ test('strict Threads vs Agents isolation, single pane header, interactive slash 
 }) => {
   // 1. Classic Agents surface shows `Classic Agent Session` and hides `Alpha Architect`.
   await page.goto('/#/agents');
-  const nav = page.locator('.navigator');
+  const nav = page.getByTestId('agents-list');
   await expect(nav).toBeVisible({ timeout: 30_000 });
   await expect(nav.getByText('Classic Agent Session').first()).toBeVisible();
   await expect(nav.getByText('Alpha Architect')).toHaveCount(0);
@@ -425,12 +425,14 @@ test('phone handoff opens the same live agent in Threads and returns to Terminal
     if (req.method() === 'POST' && /\/(?:runtime-)?sessions$/.test(new URL(req.url()).pathname)) spawned.push(req.url());
   });
   await page.goto(`/#/agents/${agentOnlySession}`);
-  const handoff = page.locator('.pane-head').getByRole('button', { name: 'Threads', exact: true });
-  await expect(handoff).toBeVisible();
-  expect((await handoff.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  // The pane's one header row: ⋯ (44 px on touch) › Open in Threads.
+  const more = page.locator('.pane-head button[title="More…"]').first();
+  await expect(more).toBeVisible();
+  expect((await more.boundingBox())!.height).toBeGreaterThanOrEqual(44);
   expect((await page.locator('.pane-head').boundingBox())!.height).toBeGreaterThanOrEqual(44);
   await page.screenshot({ path: info.outputPath('mobile-handoff-agents.png') });
-  await handoff.click();
+  await more.click();
+  await page.getByRole('menuitem', { name: 'Open in Threads' }).click();
   await expect(page).toHaveURL(new RegExp(`#/threads/${agentOnlySession}$`));
   await expect(page.getByText('Classic agent prompt', { exact: true })).toBeVisible();
   await expectNoHorizontalOverflow(page);

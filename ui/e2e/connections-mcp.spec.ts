@@ -273,12 +273,12 @@ test('Connections MCP: real otto MCP server queries a live DB read-only', async 
   // ---- (5) the UI shows the toggle -----------------------------------------
   // Settings ▸ MCP servers moved to the MCP Control Plane: the old link lands
   // on its Servers page, and the per-workspace `otto` toggle is "Attach to
-  // sessions" on the Otto server page (one copy).
+  // sessions" on the Tools page (one copy).
   await page.goto('/#/settings/mcp-servers');
   await expect.poll(() => page.evaluate(() => location.hash), { timeout: 30_000 }).toBe('#/mcp/servers');
   // The page reopens on the section last used (another spec may have left it
-  // on External servers), so open the Otto server section first.
+  // on External servers), so open the Tools section first.
   await page.goto('/#/mcp');
-  await page.getByRole('tablist', { name: 'MCP sections' }).getByRole('tab', { name: 'Otto server' }).click();
+  await page.getByRole('tablist', { name: 'MCP sections' }).getByRole('tab', { name: 'Tools' }).click();
   await expect(page.locator('input[data-testid="mcp-session-attach"]')).toBeVisible({ timeout: 30_000 });
 });
