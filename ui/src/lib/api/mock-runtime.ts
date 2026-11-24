@@ -58,6 +58,15 @@ function emit(sid: string, body: Record<string, unknown>): void {
   appLive.dispatch({ type: 'agent_runtime_event', event: { session_id: sid, sequence: bump(sid), ts: now(), ...body } });
 }
 
+/** A request opened on `sid`: what the daemon publishes then — the request
+ *  and the provider session `waiting` — so every client (rows, inbox) hears
+ *  it as it would from a real agent. */
+function announceWaiting(sid: string): void {
+  const t = threads.find((x) => x.id === sid);
+  for (const r of requests.get(sid) ?? []) emit(sid, { type: 'runtime_request.updated', runtime_request: r });
+  emit(sid, { type: 'provider_session.updated', provider_session: { status: 'waiting', cwd: t?.cwd ?? '/', model: null, updated_at: now(), last_error: null } });
+}
+
 // e2e hooks (mock mode only — this module never loads otherwise).
 Object.assign(log(), {
   /** Add a thread row as the daemon would list it (meta and all). */
@@ -237,6 +246,7 @@ Object.assign(log(), {
     if (t) t.status = 'awaiting_permission';
     requests.set(sid, [{ id: `req_q_${sid}`, turn_id: `trn_${sid}`, kind: 'question', status: 'pending', response_capability: { type: 'live' }, created_at: now(), resolved_at: null,
       questions: [{ id: 'db', header: 'Database', prompt, kind: 'single', required: true, allow_free_text: false, options: [{ value: 'pg', label: 'Postgres' }, { value: 'my', label: 'MySQL' }] }] } as unknown as RuntimeRequest]);
+    announceWaiting(sid);
   },
   /** Subagent `sid` asks the person to approve running `command`. */
   approval: (sid: string, command: string): void => {
@@ -245,6 +255,7 @@ Object.assign(log(), {
     const id = `req_${sid}`;
     requests.set(sid, [{ id, turn_id: `trn_${sid}`, kind: 'command', status: 'pending', response_capability: { type: 'live' }, created_at: now(), resolved_at: null } as RuntimeRequest]);
     item(sid, { type: 'approval_request', request_id: id, request_kind: 'command', prompt: command, options: [] });
+    announceWaiting(sid);
   },
   /** Child `sid`'s turn ended: the thread it was asked from hears it. */
   childDone: (sid: string, line: string): void => {

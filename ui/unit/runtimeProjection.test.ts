@@ -291,7 +291,7 @@ test('approval outcome: withdrawn by the agent, interrupt, closed, declined; app
   };
   assert.equal(approvalOutcome(narrow(ask('a', 1, 'f')), req, 'Codex'), 'Withdrawn by Codex');
   const done = narrow(ask('a', 1, 'f', { status: 'completed' } as Partial<TurnItem>));
-  assert.equal(approvalOutcome(done, { ...req, status: 'resolved', decision: 'decline', cancel_reason: undefined }, 'Claude'), 'Declined');
+  assert.equal(approvalOutcome(done, { ...req, status: 'resolved', decision: 'decline', cancel_reason: undefined }, 'Claude'), 'Denied');
   assert.equal(approvalOutcome(done, { ...req, status: 'resolved', decision: 'accept', cancel_reason: undefined }, 'Claude'), null);
 });
 

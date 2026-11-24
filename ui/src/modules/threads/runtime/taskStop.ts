@@ -74,7 +74,7 @@ export function stopSummary(r: { stopping: number; asked: number; failed: number
     return {
       ok: false,
       title: `Couldn’t stop ${plural(r.failed, 'background task')}`,
-      body: parts.length ? `${parts.join(' · ')}. The rest are listed in Agents & tasks with the reason.` : 'Agents & tasks lists each one with the reason and Retry.',
+      body: parts.length ? `${parts.join(' · ')}. The rest are listed in Background tasks with the reason.` : 'Background tasks lists each one with the reason and Retry.',
     };
   }
   return { ok: true, title: parts.join(' · ') || 'Nothing was running' };
