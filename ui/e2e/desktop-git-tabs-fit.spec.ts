@@ -76,6 +76,8 @@ test('many repos: one "<repo> ▾" switcher names the active repo; a wider windo
   const sw = page.getByTestId('git-repo-switch');
   await expect(sw).toBeVisible();
   await expect(sw).toContainText(await page.locator('.git-tab.active .git-tab-name').textContent() ?? '');
+  // An ellipsized name is whole in the tooltip, with its branch (R3-005).
+  await expect(sw).toHaveAttribute('title', new RegExp(`^${reEscape(repos[0].name)} — ${reEscape(repos[0].branch)}`));
   await page.screenshot({ path: test.info().outputPath('git-tabs-many.png') });
   // Close tabs and widen the window until they fit: branches come back
   // without a reload.
@@ -97,6 +99,15 @@ test('the compact switcher keeps keyboard focus across fit passes (R3-004)', asy
   await page.waitForTimeout(300); // ui-guards: allow — the fit runs on the next frame
   await expect(sw).toBeVisible();
   await expect(sw).toBeFocused();
+});
+
+test('no open repo on a narrow header: no switcher (R3-005)', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('otto_right_open', '1'));
+  await page.setViewportSize({ width: 1100, height: 800 });
+  await openTabs(page, 0);
+  await expect(page.locator('.git-tab-new')).toBeVisible();
+  await page.waitForTimeout(300); // ui-guards: allow — proves an absence after the fit's frame
+  await expect(page.getByTestId('git-repo-switch')).toBeHidden();
 });
 
 test('Focus is a page-level view, not a repo sub-tab', async ({ page }) => {
