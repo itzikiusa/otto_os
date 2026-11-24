@@ -147,6 +147,18 @@ test.describe('database mobile (phone)', () => {
     for (const a of alphas) expect(a.alpha === 1 || a.image !== 'none', JSON.stringify(a)).toBe(true);
   });
 
+  // A tree row is 36 px on touch: its name sits level with the icon beside it
+  // (baseline alignment put it at the row's top, above the icon).
+  test('the Tables sheet: a name sits level with its icon', async ({ page }) => {
+    test.skip(redisConnId == null, 'redis-server unavailable');
+    await openAndQuery(page);
+    await page.getByRole('button', { name: 'Tables', exact: true }).first().tap();
+    const node = page.locator('.schema-tree .node').filter({ has: page.locator('.node-icon') }).first();
+    await expect(node).toBeVisible({ timeout: 15_000 });
+    const mid = async (s: string) => { const b = (await node.locator(s).first().boundingBox())!; return b.y + b.height / 2; };
+    expect(Math.abs((await mid('.nl-text')) - (await mid('.node-icon')))).toBeLessThanOrEqual(2);
+  });
+
   test('running a query shows result rows in the grid', async ({ page }) => {
     test.skip(redisConnId == null, 'redis-server unavailable');
     await openAndQuery(page);
