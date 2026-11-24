@@ -688,7 +688,7 @@
       <!-- Terminal ⇄ Chat (A2): the transcript view of this session. -->
       <div class="pane-view" role="group" aria-label="View" data-testid="pane-view">
         <button type="button" class:on={view === 'terminal'} aria-pressed={view === 'terminal'} onmousedown={(e) => e.stopPropagation()} onclick={() => setView('terminal')}>Terminal</button>
-        <button type="button" class:on={view === 'chat'} aria-pressed={view === 'chat'} onmousedown={(e) => e.stopPropagation()} onclick={() => setView('chat')}>Chat</button>
+        <button type="button" class:on={view === 'chat'} aria-pressed={view === 'chat'} onpointerenter={() => ChatView.prefetch()} onmousedown={(e) => e.stopPropagation()} onclick={() => setView('chat')}>Chat</button>
       </div>
     {/if}
     {#if uiToggleInline}
@@ -761,7 +761,9 @@
   {#if session?.meta?.handover}<HandoverDeliveryPanel {session} readonly={readOnly} />{/if}
   <div class="pane-body" data-view={view}>
     {#if view === 'chat' && session}
+      <div class="pane-chat" data-testid="pane-chat">
       <LazyMount lazy={ChatView} what="the conversation" variant="panel" props={{ sessionId, workspaceId: session.workspace_id, surface: 'agents', readonly: readOnly, ontoggleterminal: () => setView('terminal') }} />
+      </div>
     {:else}
     <div class="pane-term">
       <Terminal bind:this={termRef} {sessionId} {readOnly} {resumable} restartable={isAgent} onrestart={restart} restartNonce={ws.restartNonces[sessionId] ?? 0} onstatus={onTermStatus} showToolbar={false} autoFocus={kbFocused} {findRank} preferDom={isAgent} claimOnAttach={!readOnly} keepAlive={true} {scrollback} {resumeOnOpen} />
@@ -1080,6 +1082,17 @@
     display: flex;
     flex-direction: row;
     min-width: 0;
+  }
+  .pane-chat {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .pane-chat > :global(*) {
+    flex: 1;
+    min-height: 0;
   }
   .pane-term {
     flex: 1;

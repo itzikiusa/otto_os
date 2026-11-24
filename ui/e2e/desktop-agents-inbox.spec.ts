@@ -155,6 +155,9 @@ test('Terminal ⇄ Chat: an agent pane shows its conversation and remembers the 
   await pane.getByTestId('pane-view').getByRole('button', { name: 'Chat' }).click();
   await expect(pane.locator('.pane-body[data-view="chat"]')).toBeVisible();
   await expect(pane.locator('.term-host')).toHaveCount(0);
+  // Never a blank pane: the conversation (or its own empty line) shows.
+  await expect(pane.locator('.conv[data-loaded="true"]')).toBeVisible({ timeout: 15_000 });
+  await expect(pane.locator('.conv')).toContainText(/\S/);
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/agents-pane-chat-1440-light.png`, animations: 'disabled' });
   await page.reload();
   await expect(page.locator(`[data-pane-key][data-session="${id}"] .pane-body[data-view="chat"]`).first()).toBeVisible({ timeout: 20_000 });
