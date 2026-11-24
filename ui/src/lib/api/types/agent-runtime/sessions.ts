@@ -39,6 +39,9 @@ export interface RuntimeSession {
     origin?: EmbeddedOrigin;
     council?: CouncilMeta;
     provider_slug?: string;
+    /** Derived, never stored (RFC 3339): when the latest turn ended / started (kept while it runs). */
+    last_turn_ended_at?: string;
+    last_turn_started_at?: string;
   }) | null;
   /** Background work still pending (live; absent = none). */
   background_tasks?: BackgroundTask[];
@@ -133,7 +136,7 @@ export interface AskChildTarget {
   effort?: string;
 }
 
-/** Body of `POST /runtime-sessions/{id}/children` ("Ask another agent"; 1–4
+/** Body of `POST /runtime-sessions/{id}/children` ("Delegate to…"; 1–4
  *  targets, all or none). Access: omitted = the parent's; wider is a 400. */
 export interface AskChildReq {
   prompt: string;

@@ -6,7 +6,7 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 // "Pull requests", and a thread opens from a group (the drawer closes).
 
 test.beforeEach(async ({ page }, ti) => {
-  test.skip(!/^(iphone|android)/.test(ti.project.name), 'phones only');
+  test.skip(!/^(iphone|android-phone)/.test(ti.project.name), 'phones only');
   await page.addInitScript(() => {
     localStorage.setItem('otto_mock', '1');
     localStorage.setItem('otto_workspace', 'wsp_otto');

@@ -130,7 +130,8 @@ export const workflowsMockRoutes: MockRoute[] = [
   { method: 'GET', re: /^\/k8s\/monitor\/overview$/, handle: (_m, _b, q) => ({ json: k8sMonitorOverview(q.get('window') ?? '24h') }) },
   // Home's "Today" strip reads these three on every load; unmocked they made
   // it say "Some items couldn't load". Nothing pending / no designs / no tasks.
-  { method: 'GET', re: /^\/mcp\/approvals$/, handle: () => ({ json: [] }) },
+  // e2e may seed pending cards (`window.__mockMcpAsks`) for a thread's dock.
+  { method: 'GET', re: /^\/mcp\/approvals$/, handle: () => ({ json: (globalThis as { __mockMcpAsks?: unknown[] }).__mockMcpAsks ?? [] }) },
   { method: 'GET', re: /^\/design\/artifacts$/, handle: () => ({ json: [] }) },
   { method: 'GET', re: /^\/workspaces\/([^/]+)\/scheduled-tasks$/, handle: () => ({ json: [] }) },
   // Home's Usage box: the embedded ClickHouse engine does not run in mock mode.

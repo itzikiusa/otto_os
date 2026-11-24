@@ -25,7 +25,6 @@
   import { ui } from '../../../lib/stores/ui.svelte';
   import { uiControl } from '../../../lib/stores/uiControl.svelte';
   import { toastError } from '../../../lib/toastError';
-  import StageSlashPopup from '../StageSlashPopup.svelte';
   import { EmojiAssistView } from '../../../lib/components/emojiAssistLazy.svelte';
   import { sharedAgentTasks } from './agentTasks';
   import { askFromComposer, askTargets } from './askTargets.svelte';
@@ -40,14 +39,15 @@
   import { mcpAsks, RuntimeMcpChanged } from './mcpAsks.svelte';
   import RuntimeComposerActions from './RuntimeComposerActions.svelte';
   import RuntimeComposerPlus from './RuntimeComposerPlus.svelte';
-  import RuntimeMinimap from './RuntimeMinimap.svelte';
+  import { MinimapView, QuestionCardView, StageSlashView } from '../threadLazy.svelte';
   import { threadAccessDefault } from '../threadAccessDefault.svelte';
   import { isAltSend, midTurnDelivery, primaryAction } from './composerSend';
   import { threadPrefs } from './threadPrefs.svelte';
   import { recallPrompt, sentPrompts, type HistoryState } from './promptHistory';
   import { dropAttachments, fileDrop } from './composerDrop';
   import RuntimeModelControl from './RuntimeModelControl.svelte';
-  import { armedSwitchLine, switchPromptFields } from './providerSwitch';
+  import { switchPromptFields } from './providerSwitch';
+  import RuntimeNextLine from './RuntimeNextLine.svelte';
   import RuntimeBannerStack from './RuntimeBannerStack.svelte';
   import {
     appendDraftAttachments, buildOptimisticUserMessage, buildRuntimeBanners, collectMessageIds,
@@ -147,6 +147,8 @@
   const dormant = $derived(session?.status === 'dormant');
   const needsRevive = $derived(closed || dormant);
   const childThreads = $derived(mapChildThreadSummaries(linkedChildren(Object.values(runtimeThreads.byId), sessionId)));
+  // What the composer opens on demand (slash list, a question) loads while idle.
+  $effect(() => { const t = setTimeout(() => { StageSlashView.prefetch(); QuestionCardView.prefetch(); }, 1200); return () => clearTimeout(t); });
   // Shared with the details card (sharedAgentTasks): computed once per change.
   const tasks = $derived(
     sharedAgentTasks(sessionId, p?.items ?? [], p?.session?.background_tasks ?? session?.background_tasks ?? [], { output: p?.output, childThreads }),
@@ -160,6 +162,7 @@
   $effect(() => void secretRequests.load());
   // What the agent waits on the person for: answered in the attention dock.
   const attention = $derived(attentionItems(p?.requests ?? [], secretAsk, mcpAsks.pending(sessionId)));
+  const composerFolded = $derived(attention.length > 0 && !draft.text.trim() && draft.images.length === 0); // the dock answers: one row until they type
 
   let scroller = $state<HTMLDivElement | null>(null);
   let streamEl = $state<HTMLDivElement | null>(null);
@@ -182,20 +185,19 @@
   const provider = $derived(session ? sessionProviderSlug(session) : '');
   const agentName = $derived(harnessLabel(provider).replace(/ Code$/, ''));
 
-  // A failed turn is ONE block (RuntimeTurnStatus): its error row and the
-  // dormant "Agent stopped" line would only repeat it.
+  // A failed turn is ONE block (RuntimeTurnStatus): its error row and the dormant "Agent stopped" line would only repeat it.
   const failedError = $derived(outcome?.kind === 'failed' && p ? turnErrorItem(p.items, turn?.id) : null);
   const lastError = $derived(p?.session?.last_error ? { class: '', message: p.session.last_error } : null);
   const failure = $derived(outcome?.kind === 'failed' ? failureView(failedError?.failure ?? lastError, harnessLabel(provider)) : null);
   const failedQuiet = $derived(!!failure && dormant);
   const queueShown = $derived((background.length > 0 && !closed) || (p?.queued.length ?? 0) > 0 || (needsRevive && !failedQuiet));
   const banners = $derived(buildRuntimeBanners({
-    sessionError, uiAsk, queueShown, needsRevive, freshContext: draft.freshContext, switchTo: draft.provider,
+    sessionError, uiAsk, queueShown, needsRevive, freshContext: draft.freshContext, switchTo: draft.provider, limited: failure?.cause === 'usage_limit' && !closed,
     hasQuestions: Boolean(p?.requests.some((r) => r.kind === 'question' && r.status !== 'pending')),
     hasPlan: Boolean(plan),
   }));
   const accessMode = $derived(accessModeOverride ?? draft.pickedMode ?? session?.access_mode ?? 'approval-required');
-  // The access chip shows only off the person's default (threadAccessDefault: Full access when prompts are skipped).
+  // The access chip hides only for a calm default (Supervised / Auto-accept edits); Full access always shows (threadAccessDefault).
   const defaultAccess = $derived(threadAccessDefault.skipPermissions ? 'full-access' : 'approval-required');
   $effect(() => threadAccessDefault.ensure());
   const pickAccess = (m: RuntimeAccessMode): void => { draft.pickedMode = m; onaccessmodechange?.(m); };
@@ -506,12 +508,12 @@
       </div>
     </div>
   </div>
-  <RuntimeMinimap {sessionId} {focused} items={p?.items ?? []} turns={p?.turns ?? []} {messageIds} {scroller} onexpand={() => { rowCap = Math.max(rowCap, rows.length); followRef?.releaseBottom(); }} />
+  {#if MinimapView.component}<MinimapView.component {sessionId} {focused} items={p?.items ?? []} turns={p?.turns ?? []} {messageIds} {scroller} onexpand={() => { rowCap = Math.max(rowCap, rows.length); followRef?.releaseBottom(); }} />{/if}
   <RuntimeFollow bind:this={followRef} {scroller} seq={p?.lastSequence} {messageIds} needs={attentionPillText(attention)} firstRow={visibleRows[0] ? timelineRowKey(visibleRows[0]) : null} bind:holdFrom />
   <RuntimeStreamTools root={streamEl} {rows} bind:rowCap bind:text={draft.text} composer={composerEl} />
 
   <div class="rt-dock">
-    <RuntimeBannerStack blocks={banners}>
+    <RuntimeBannerStack blocks={banners} limit={failure?.cause === 'usage_limit' ? { sessionId, provider, detail: failure.detail, draft, onfocus: focusComposer, retryText: outcome?.retryText ?? '', retryAttachments: outcome?.retryAttachments } : null}>
       {#snippet block(key: string)}
         {#if key === 'error' && sessionError}
           <p class="rt-banner" dir="auto" use:announceShown={{ text: sessionError, assertive: true }}><Icon name="warning" size={13} />{sessionError}</p>
@@ -536,16 +538,8 @@
             onreopen={() => void reopen()}
             onedit={(t, restoredAtts, editedSessionId) => restorePoppedQueuedMessageToDraft({ activeSessionId: sessionId, editedSessionId, text: t, restoredAtts, transformText: transformRestoredQueuedText, focusComposer })}
           />
-        {:else if key === 'switch' && draft.provider}
-          <div class="rt-fresh" data-testid="runtime-switch-notice" use:announceShown={armedSwitchLine(draft.provider)}>
-            <span>{armedSwitchLine(draft.provider)}</span>
-            <button type="button" class="btn small ghost" onclick={() => { draft.provider = null; draft.model = undefined; draft.effort = null; focusComposer(); }}>Cancel</button>
-          </div>
-        {:else if key === 'fresh'}
-          <div class="rt-fresh" data-testid="runtime-fresh-notice" use:announceShown={'Next message starts fresh'}>
-            <span>Next message starts fresh</span>
-            <button type="button" class="btn small ghost" onclick={() => { draft.freshContext = false; focusComposer(); }}>Cancel</button>
-          </div>
+        {:else if (key === 'switch' && draft.provider) || key === 'fresh'}
+          <RuntimeNextLine kind={key === 'switch' ? 'switch' : 'fresh'} {draft} onfocus={focusComposer} />
         {/if}
       {/snippet}
     </RuntimeBannerStack>
@@ -567,9 +561,9 @@
     <RuntimeChildApprovals {sessionId} />{#if p && session && !closed}<RuntimeMcpChanged {sessionId} workspaceId={session?.workspace_id} idle={!running} />{/if}
     {#if composerTopSlot}{@render composerTopSlot({ focusComposer })}{/if}
 
-    <div class="rt-composer" style:border-color={planOn ? 'color-mix(in srgb, var(--warning) 42%, var(--border))' : undefined} bind:this={composerBoxEl}>
-      {#if suggestions.length > 0}
-        <StageSlashPopup id={popId} items={suggestions} active={cmdIdx} onaccept={acceptCmd} onhover={(i) => (cmdIdx = i)} />
+    <div class="rt-composer" class:rt-folded={composerFolded} style:border-color={planOn ? 'color-mix(in srgb, var(--warning) 42%, var(--border))' : undefined} bind:this={composerBoxEl}>
+      {#if suggestions.length > 0 && StageSlashView.component}
+        <StageSlashView.component id={popId} items={suggestions} active={cmdIdx} onaccept={acceptCmd} onhover={(i) => (cmdIdx = i)} />
       {/if}
       {#if EmojiAssistView.component}<EmojiAssistView.component bind:this={emojiEl} textareaEl={composerEl} />{/if}
       <RuntimeContextChips context={draft.context} onremove={(id) => { draft.context = draft.context.filter((c) => c.id !== id); }} onfocus={focusComposer} />
@@ -593,7 +587,7 @@
         bind:value={draft.text}
         use:composerViewState={composerStateArg}
         dir="auto"
-        rows={2}
+        rows={composerFolded ? 1 : 2}
         spellcheck="false"
         {...{ autocorrect: 'off' }}
         autocapitalize="off"
@@ -631,12 +625,12 @@
         {#if !agentChat}<RuntimeAskAgent part="button" {sessionId} {provider} access={accessMode} disabled={closed || !session} />{/if}
         <RuntimeDraftStatus {draft} />
         {#if planOn}<RuntimePlanToggle id={ownerId} on={planOn} disabled={closed || !session} />{/if}
-        {#if !agentChat && (session?.meta?.read_only || accessModeOverride || accessMode !== defaultAccess)}
+        {#if !agentChat && (session?.meta?.read_only || accessModeOverride || accessMode !== defaultAccess || accessMode === 'full-access')}
           <RuntimeAccessChip readOnly={!!session?.meta?.read_only} mode={accessMode} agent={harnessLabel(provider)} cwd={effectiveCwd ?? 'this folder'} disabled={closed || !session} onpick={pickAccess} />
         {/if}
         <span class="rt-grow"></span>
         {#if !agentChat}
-          <RuntimeModelControl {provider} {session} {draft} efforts={caps.efforts ?? []} disabled={closed || !session} testId={testIds?.model ?? 'runtime-model'} />
+          <RuntimeModelControl {provider} {session} {draft} efforts={caps.efforts ?? []} disabled={closed || !session} testId={testIds?.model ?? 'runtime-model'} oncompact={(c) => { draft.text = `/${c}`; focusComposer(); }} />
         {/if}
         <RuntimeComposerActions
           action={primaryAction({ running, canSend: canSendOrQueue, pref: threadPrefs.midTurn, canSteer: !!caps.steer })}
@@ -722,14 +716,6 @@
     font-size: var(--fs-s);
     overflow-wrap: anywhere;
   }
-  .rt-fresh {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-  }
   /* The composer: one card in the reading column, reading-size input two
      rows tall that grows to 40 % of the pane; its bottom row holds "+",
      only the non-default chips, the model and the one primary button. */
@@ -746,6 +732,8 @@
     box-shadow: var(--shadow-card);
     flex-shrink: 0;
   }
+  .rt-composer.rt-folded { flex-direction: row; align-items: center; padding-block: var(--sp-2); } /* waiting on the person: one row */
+  .rt-composer.rt-folded textarea { flex: 1; min-inline-size: 0; } .rt-folded .rt-foot > :global(:not(:first-child):not(:last-child)) { display: none; }
   /* Files dragged over the pane (composerDrop.ts): a calm ring, no overlay. */
   .rt-composer:global([data-drop]) { border-color: var(--accent-line-strong); background: var(--accent-faint); }
   /* A visible focus ring (the shared accent line), not just a border shade. */
@@ -770,11 +758,10 @@
     outline: none;
     field-sizing: content;
   }
-  /* A short pane (a phone on its side with the keyboard up): one row, so the
-     conversation keeps its lines. */
+  /* A short pane (a phone on its side with the keyboard up): one row, so the conversation keeps its lines. */
   @container (max-block-size: 420px) {
     .rt-composer { gap: var(--sp-1); padding-block: var(--sp-2) var(--sp-1); }
-    .rt-composer textarea { min-block-size: 1lh; }
+    .rt-composer textarea { min-block-size: 1lh; } .rt-composer textarea:placeholder-shown { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .rt-dock { padding-block-end: var(--sp-2); }
   }
   .rt-foot {
@@ -784,10 +771,7 @@
     min-inline-size: 0;
     margin-inline-start: calc(-1 * var(--sp-2));
   }
-  .rt-grow {
-    flex: 1;
-    min-inline-size: 0;
-  }
+  .rt-grow { flex: 1; min-inline-size: 0; }
   /* A-9: a narrow embed (PR dock, 280–360 px) keeps its chips readable: the
      row wraps rather than cutting a chip to "…". */
   @container (max-inline-size: 380px) {

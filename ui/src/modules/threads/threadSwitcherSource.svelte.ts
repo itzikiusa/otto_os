@@ -40,8 +40,9 @@ export const threadSwitcherSource: PaletteThreadSource = {
       const word =
         statusWord(cls, {
           kinds: inboxLive.kindsOf(s.id),
-          workingSince: cls === 'working' ? (inboxLive.since[s.id] ?? null) : null,
+          workingSince: cls === 'working' ? inboxLive.workingSince(s.id, s.meta as Record<string, unknown> | null) : null,
           now: cls === 'working' ? now() : 0,
+          limited: cls === 'failed' && threadRowState(s).label === 'Limited',
         }) ?? rel(s.last_active_at);
       return { id: s.id, title: s.title, project: s.cwd ? projectName(s.cwd, '') : '', word, tone: wordTone(word) };
     });
@@ -54,7 +55,7 @@ export const threadSwitcherSource: PaletteThreadSource = {
     threads.startNewThread({ workspaceId: ws.currentId, draft });
   },
   warm() {
-    for (const { s, cls } of live()) if (isRuntimeThread(s) && cls === 'needs') inboxLive.ensure(s.id);
+    for (const { s, cls } of live()) if (isRuntimeThread(s) && (cls === 'needs' || cls === 'working')) inboxLive.ensure(s.id);
   },
 };
 

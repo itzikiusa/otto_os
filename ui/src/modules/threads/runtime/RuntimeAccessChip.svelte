@@ -34,7 +34,7 @@
     class="ac static"
     role="note"
     aria-label="Read-only thread"
-    title="Council seats and their judges only read. Start a new thread to change files."
+    title="Compared threads only read. Start a new thread to change files."
     data-testid="runtime-access"
     data-readonly="true"
   >

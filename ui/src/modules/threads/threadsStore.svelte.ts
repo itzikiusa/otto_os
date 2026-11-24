@@ -300,7 +300,7 @@ class ThreadsStore {
       typeof det.sender === 'string' && det.sender.trim() !== ''
         ? det.sender
         : fromId
-          ? (ws.getSession(fromId)?.title ?? 'Peer thread')
+          ? (ws.getSession(fromId)?.title ?? 'Another thread')
           : 'Operator';
     const toTitle = isBroadcast
       ? 'All active threads'

@@ -10,10 +10,11 @@ use otto_core::api::{
 use otto_core::auth::AuthUser;
 use otto_core::domain::WorkspaceRole;
 use otto_core::{Error, Id};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::{optional_token, remote_shares_origin_host, repo_ctx, repo_lock, ApiResult, GitCtx};
 use crate::gitops::err_text;
+use crate::worktree_ready::{run_setup, Prepared, SETUP_KEY};
 
 #[derive(Deserialize)]
 pub(super) struct WorktreeRemoveReq {
@@ -55,21 +56,126 @@ pub(super) struct WorktreeCreateReq {
     pub(super) base: Option<String>,
 }
 
+/// A new worktree and what it got ([`crate::worktree_ready`]).
+#[derive(Serialize)]
+pub(super) struct WorktreeCreated {
+    #[serde(flatten)]
+    info: WorktreeInfo,
+    prepared: Prepared,
+}
+
 /// `POST /repos/{id}/worktrees` — new branch + new worktree beside the repo
-/// (see [`crate::LocalGit::worktree_create`]). Returns the new worktree.
+/// (see [`crate::LocalGit::worktree_create`]), given what the main
+/// checkout's `.worktreeinclude` names. Returns the new worktree.
 pub(super) async fn repo_worktree_create<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
     Json(req): Json<WorktreeCreateReq>,
-) -> ApiResult<Json<WorktreeInfo>> {
+) -> ApiResult<Json<WorktreeCreated>> {
     let lock = repo_lock(&id);
     let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    Ok(Json(
-        git.worktree_create(&req.branch, req.base.as_deref())
-            .await?,
-    ))
+    let info = git
+        .worktree_create(&req.branch, req.base.as_deref())
+        .await?;
+    // From the MAIN checkout (its real .env / node_modules), even when the
+    // new worktree is made from another worktree's repo.
+    let main = main_checkout(&git).await;
+    let mut prepared = crate::LocalGit::new(&main)
+        .prepare_worktree(std::path::Path::new(&info.path))
+        .await;
+    prepared.setup = setup_of(&s, &main).await.map(|(name, _)| name);
+    Ok(Json(WorktreeCreated { info, prepared }))
+}
+
+/// The main checkout of `git`'s repository (itself when it is the main one).
+async fn main_checkout(git: &crate::LocalGit) -> std::path::PathBuf {
+    let main = git
+        .worktree_list()
+        .await
+        .ok()
+        .and_then(|l| l.into_iter().find(|w| w.is_main));
+    main.map_or_else(|| git.path().to_path_buf(), |w| w.path.into())
+}
+
+/// The worktree setup command (`(name, command)`) of the repository whose
+/// main checkout is `main`, if set.
+async fn setup_of<S: GitCtx>(s: &S, main: &std::path::Path) -> Option<(String, String)> {
+    let all = otto_state::SettingsRepo::new(s.store().pool().clone())
+        .get(SETUP_KEY)
+        .await
+        .ok()??;
+    let e = all.get(main.to_str()?)?;
+    let command = e.get("command")?.as_str()?.trim().to_string();
+    let name = e
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&command)
+        .to_string();
+    (!command.is_empty()).then_some((name, command))
+}
+
+#[derive(Deserialize)]
+pub(super) struct WorktreeSetupReq {
+    /// The new worktree (absolute, as GET …/worktrees lists it; not the main checkout).
+    path: String,
+}
+
+/// `POST /repos/{id}/worktrees/setup` — run the repo's setup command in one
+/// of its worktrees (a person's request only: it runs a shell command).
+/// Streams NDJSON: `{"line": …}` with its latest output line while it runs
+/// (at most every second), then `{"result": SetupResult}` (or `{"error": …}`).
+/// It runs to its end even when the caller goes away.
+pub(super) async fn repo_worktree_setup<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<WorktreeSetupReq>,
+) -> ApiResult<axum::response::Response> {
+    if !otto_core::auth::request_is_person() {
+        return Err(Error::Forbidden("only a person can run a worktree's setup".into()).into());
+    }
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let want = std::fs::canonicalize(&req.path).map_err(|_| Error::NotFound("worktree".into()))?;
+    let found = git.worktree_list().await?.into_iter().any(|w| {
+        !w.is_main && std::fs::canonicalize(&w.path).ok().as_deref() == Some(want.as_path())
+    });
+    if !found {
+        return Err(Error::NotFound("worktree".into()).into());
+    }
+    let (name, command) = setup_of(&s, &main_checkout(&git).await)
+        .await
+        .ok_or_else(|| Error::NotFound("worktree setup".into()))?;
+    let (tx, lines) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (done_tx, done) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let _ = done_tx.send(run_setup(&name, &command, &want, Some(tx)).await);
+    });
+    let ndjson = |v: serde_json::Value| axum::body::Bytes::from(format!("{v}\n"));
+    // Every progress line, then (once the sender is gone) the result.
+    let body =
+        futures_util::stream::unfold((lines, Some(done)), move |(mut lines, done)| async move {
+            if let Some(l) = lines.recv().await {
+                return Some((
+                    Ok::<_, std::convert::Infallible>(ndjson(serde_json::json!({ "line": l }))),
+                    (lines, done),
+                ));
+            }
+            let last = match done?.await {
+                Ok(Ok(r)) => serde_json::json!({ "result": r }),
+                Ok(Err(e)) => serde_json::json!({ "error": e.to_string() }),
+                Err(_) => serde_json::json!({ "error": "the setup stopped unexpectedly" }),
+            };
+            Some((Ok(ndjson(last)), (lines, None)))
+        });
+    Ok(axum::response::Response::builder()
+        .header(
+            axum::http::header::CONTENT_TYPE,
+            "application/x-ndjson; charset=utf-8",
+        )
+        .body(axum::body::Body::from_stream(body))
+        .map_err(|e| Error::Internal(e.to_string()))?)
 }
 
 #[derive(Deserialize)]

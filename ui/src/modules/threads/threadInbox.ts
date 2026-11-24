@@ -78,11 +78,12 @@ export function waitingWord(kinds: readonly string[]): 'Approval' | 'Question' {
 }
 
 /** The status word of a subagent row (a thread working under another one):
- *  exactly Working · Needs you · Done · Failed · Stopped. */
-export function subagentWord(key: string | null | undefined): 'Working' | 'Needs you' | 'Done' | 'Failed' | 'Stopped' {
+ *  exactly Working · Needs you · Done · Failed · Limited · Stopped (Limited:
+ *  a failure on the usage limit — `limited`, the state label lib/status.ts gives it). */
+export function subagentWord(key: string | null | undefined, opts?: { limited?: boolean }): 'Working' | 'Needs you' | 'Done' | 'Failed' | 'Limited' | 'Stopped' {
   if (key === 'needs-you') return 'Needs you';
   if (key === 'working' || key === 'running' || key === 'stale') return 'Working';
-  if (key === 'failed') return 'Failed';
+  if (key === 'failed') return opts?.limited ? 'Limited' : 'Failed';
   if (key === 'stopped') return 'Stopped';
   return 'Done';
 }
@@ -120,16 +121,18 @@ export function elapsed(ms: number): string {
 }
 
 /** The one status word a row shows, or null (it shows the relative time).
- *  The vocabulary is fixed: Approval · Question · Failed · Done · Working. */
+ *  The vocabulary is fixed: Approval · Question · Failed · Limited · Done ·
+ *  Working. Limited: a failed turn that hit the provider's usage limit
+ *  (`limited`, from the row's state label — lib/status.ts). */
 export function statusWord(
   cls: InboxClass,
-  opts: { kinds?: readonly string[]; workingSince?: number | null; now?: number } = {},
+  opts: { kinds?: readonly string[]; workingSince?: number | null; now?: number; limited?: boolean } = {},
 ): string | null {
   switch (cls) {
     case 'needs':
       return waitingWord(opts.kinds ?? []);
     case 'failed':
-      return 'Failed';
+      return opts.limited ? 'Limited' : 'Failed';
     case 'done':
       return 'Done';
     case 'working':

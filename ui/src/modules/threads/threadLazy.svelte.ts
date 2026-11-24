@@ -21,4 +21,7 @@ export const ThreadSheetsView = lazyComponent(() => import('./ThreadSheets.svelt
 export const IdeProjectsSectionView = lazyComponent(() => import('./ThreadIdeProjectsSection.svelte'));
 export const OriginGroupsView = lazyComponent(() => import('./ThreadOriginGroups.svelte'));
 export const UsageMeterView = lazyComponent(() => import('./ThreadUsageMeter.svelte'));
+export const MinimapView = lazyComponent(() => import('./runtime/RuntimeMinimap.svelte'));
+export const QuestionCardView = lazyComponent(() => import('./runtime/RuntimeQuestionCard.svelte'));
+export const NewThreadStageView = lazyComponent(() => import('./NewThreadStage.svelte'));
 export const ProjectGroupsView = lazyComponent(() => import('./ThreadProjectGroups.svelte'));

@@ -28,8 +28,9 @@ export interface ProviderSession {
    *  own): a provider switch changes them. */
   provider?: RuntimeProvider;
   provider_slug?: string;
-  /** The client-owned thread meta (`ThreadMetaPatch` keys); absent = none set. */
-  thread?: ThreadMetaPatch;
+  /** The client-owned thread meta (`ThreadMetaPatch` keys) and an armed
+   *  `resume_at`; absent = none set. */
+  thread?: ThreadMetaPatch & { resume_at?: string };
 }
 
 /** What a provider switch handed the new provider (`session_boundary.handoff`):

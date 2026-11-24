@@ -1,5 +1,5 @@
 <!--
-  "Ask another agent" + unified `@` file/folder & agent mention menu in a
+  "Delegate to…" + unified `@` file/folder & agent mention menu in a
   runtime thread's composer. `part="button"` (in the composer's foot) opens
   the agent menu: each model picked becomes a chip, so one is "Ask another
   agent" and 2–4 are "Ask several". `part="chips"` mounts `RuntimeMentionMenu`
@@ -17,7 +17,8 @@
   import { ASK_MAX_TARGETS, askableProviders, clampEffort } from './askAgents';
   import { askTargets } from './askTargets.svelte';
   import { fileMentionContext, type ComposerContext } from './composerContext';
-  import RuntimeMentionMenu, { type PickedAgentMention, type PickedFileMention } from './RuntimeMentionMenu.svelte';
+  import type { PickedAgentMention, PickedFileMention } from './RuntimeMentionMenu.svelte';
+  import { MentionMenuView } from '../threadLazy.svelte';
 
   interface Props {
     part: 'button' | 'chips';
@@ -125,7 +126,7 @@
     <Icon name="people" size={14} />
   </button>
 {:else}
-  <RuntimeMentionMenu
+  {#if MentionMenuView.component}<MentionMenuView.component
     bind:this={mentionMenuEl}
     {text}
     {cwd}
@@ -135,7 +136,7 @@
     onpickfile={handlePickFile}
     onpickagent={handlePickAgent}
     ondrilldir={(nextText) => onreplace?.(nextText)}
-  />
+  />{/if}
   {#if targets.length > 0 && allowAgents}
     <div class="aa-chips" role="group" aria-label="Agents this message goes to" data-testid="runtime-ask-targets">
       <span class="aa-lead">{targets.length > 1 ? `Delegate to ${targets.length}` : 'Delegate to'}</span>

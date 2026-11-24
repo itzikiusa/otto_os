@@ -2,7 +2,7 @@
 // the armed line, what a send adds, the divider's words and the row change.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
+import { armSwitch,
   armedSwitchLine,
   handoffSummary,
   handoffTitle,
@@ -46,4 +46,12 @@ test('the divider names both providers and what was handed over, in words', () =
   assert.equal(handoffSummary(h), '3 turns handed over.');
   assert.equal(handoffSummary({ ...h, turns: 1, omitted_turns: 4, images_omitted: 2 }), '1 turn handed over · 4 earlier turns left out (still readable above) · 2 images not handed over.');
   assert.equal(handoffSummary({ ...h, turns: 0 }), 'Nothing to hand over yet: the thread had no messages.');
+});
+
+test('armSwitch: the one way to arm a switch (model picker and a usage limit’s Continue with)', () => {
+  const d = { provider: null as string | null, model: 'opus' as string | null | undefined, effort: 'high' as unknown };
+  armSwitch(d, 'claude', 'codex');
+  assert.deepEqual(d, { provider: 'codex', model: null, effort: null });
+  armSwitch(d, 'claude', 'claude');
+  assert.deepEqual(d, { provider: null, model: undefined, effort: null });
 });

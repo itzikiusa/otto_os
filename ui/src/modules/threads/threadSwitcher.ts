@@ -24,7 +24,7 @@ export function switcherOrder<T extends { id: string; cls: InboxClass; lastActiv
 
 /** The tone of a status word (the sidebar row colours them the same way). */
 export function wordTone(word: string): PaletteThreadTone {
-  if (word === 'Approval' || word === 'Question' || word === 'Needs you') return 'warning';
+  if (word === 'Approval' || word === 'Question' || word === 'Needs you' || word === 'Limited') return 'warning';
   if (word === 'Failed') return 'danger';
   if (word === 'Done') return 'success';
   return null;

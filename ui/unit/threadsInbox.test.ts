@@ -34,6 +34,7 @@ test('the status word vocabulary', () => {
   assert.equal(statusWord('needs', { kinds: ['question'] }), 'Question');
   assert.equal(statusWord('needs', {}), 'Approval');
   assert.equal(statusWord('failed'), 'Failed');
+  assert.equal(statusWord('failed', { limited: true }), 'Limited');
   assert.equal(statusWord('done'), 'Done');
   assert.equal(statusWord('working'), 'Working');
   assert.equal(statusWord('working', { workingSince: 1000, now: 19_500 }), 'Working 18s');
@@ -56,10 +57,16 @@ test('subagents: their own words and the roll-up the parent shows', async () => 
   const { subagentWord } = await import('../src/modules/threads/threadInbox.ts');
   const { childRollup } = await import('../src/modules/threads/runtime/childThreads.ts');
   const subagentRollup = (subs: { title: string; key: string }[]) => childRollup(subs.map((s) => ({ title: s.title, word: subagentWord(s.key) })));
-  assert.deepEqual(['needs-you', 'working', 'running', 'failed', 'stopped', 'idle'].map(subagentWord), ['Needs you', 'Working', 'Working', 'Failed', 'Stopped', 'Done']);
+  assert.deepEqual(['needs-you', 'working', 'running', 'failed', 'stopped', 'idle'].map((k) => subagentWord(k)), ['Needs you', 'Working', 'Working', 'Failed', 'Stopped', 'Done']);
   assert.deepEqual(
     subagentRollup([{ title: 'tests', key: 'working' }, { title: 'api', key: 'needs-you' }, { title: 'docs', key: 'failed' }, { title: 'lint', key: 'idle' }]),
     { total: 4, working: 1, needsYou: 1, failed: 1, needing: 'api' },
+  );
+  // A subagent stopped on its usage limit says Limited and rolls up like Failed.
+  assert.equal(subagentWord('failed', { limited: true }), 'Limited');
+  assert.deepEqual(
+    childRollup([{ title: 'docs', word: 'Limited' }, { title: 'lint', word: 'Failed' }]),
+    { total: 2, working: 0, needsYou: 0, failed: 2, needing: null },
   );
 });
 

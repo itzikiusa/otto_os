@@ -70,11 +70,11 @@ test('thread drafts, attachments and permissions stay with their owner; mobile c
   await alpha.getByTestId('runtime-composer').fill('Alpha private draft');
   await alpha.locator('input[type=file]').setInputFiles({ name: 'alpha.png', mimeType: 'image/png', buffer: Buffer.from('image fixture') });
   await expect(alpha.getByTestId('runtime-images').getByRole('img', { name: 'alpha.png' })).toBeVisible();
-  // The access chip shows only off the default (Full access here), so pick it from "+".
+  // Pick Full access from "+": it always shows its amber chip (the default or not).
   await alpha.getByTestId('runtime-plus').click();
   await page.getByRole('menuitemcheckbox', { name: 'Access: Full access', exact: true }).click();
   await page.getByRole('button', { name: 'Allow full access', exact: true }).click();
-  await expect(alpha.getByTestId('runtime-access')).toHaveCount(0);
+  await expect(alpha.getByTestId('runtime-access')).toContainText('Full access');
   await expectAccess(page, alpha, 'Full access');
 
   await page.getByTestId('threads-sidebar').getByText('Beta thread', { exact: true }).click();

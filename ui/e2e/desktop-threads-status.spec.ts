@@ -11,7 +11,7 @@ import { expectNoHorizontalOverflow } from './helpers';
 // you (round 5, T-ATTENTION):
 //   • every sidebar row's dot + label come from the row itself: a pending
 //     request is "Needs you" (after a reload too), a failed last turn is
-//     "Failed" / "Usage limit", never idle; a parent speaks for its children
+//     "Failed" / "Limited", never idle; a parent speaks for its children
 //     and its family sorts by its most urgent member;
 //   • a folded project header says "N need you";
 //   • "Next that needs you" (chip and ⌥⌘N), ↑/↓ + Enter in the list;
@@ -75,7 +75,7 @@ test.describe('mock rows', () => {
     await expect(state('rt_fail')).toHaveAttribute('data-state', 'failed');
     await expect(state('rt_done')).toHaveAttribute('data-state', 'idle');
     // Never colour alone: the row says it in a word; the tooltip says why.
-    await expect(side.getByTestId('thread-status-rt_fail')).toHaveText('Failed');
+    await expect(side.getByTestId('thread-status-rt_fail')).toHaveText('Limited'); // a usage limit is its own word
     await expect(state('rt_fail').locator('.tr-main')).toHaveAttribute('title', /usage limit/);
     await expect(side.getByTestId('thread-status-rt_wait')).toHaveText('Approval');
     // The parent (idle itself) says its subagent needs you and rises with it;

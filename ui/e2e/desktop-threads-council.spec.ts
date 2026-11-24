@@ -118,7 +118,8 @@ test('a council is a group of threads: nested rows, side by side, synthesize and
 
   // The seats nest under seat 1 like any child thread, each named by its agent.
   const sidebar = page.getByTestId('threads-sidebar');
-  await expect(sidebar.getByTestId('thread-family-count-rt_s1')).toHaveText('2 subagents');
+  // Compared models are counted as models, not subagents.
+  await expect(sidebar.getByTestId('thread-family-count-rt_s1')).toHaveText('Compared with 2 models');
   await sidebar.getByTestId('thread-family-fold-rt_s1').click();
   await expect(sidebar.getByTestId('thread-row-rt_s2')).toHaveText(/codex/);
   await expect(sidebar.getByTestId('thread-row-rt_s2')).not.toHaveText(/Cache plan/);

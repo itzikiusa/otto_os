@@ -49,6 +49,43 @@ export function noteWhere(n: Pick<ReviewNote, 'oldLines' | 'newLines'>): string 
 }
 
 /** The one message the agent gets for `notes`. */
+/** The header a sent review carries in the message (composerContext.ts
+ *  `notes:` context): "--- Review notes on the diff: Review · 2 notes ---". */
+export const REVIEW_HEADER = '--- Review notes on the diff: ';
+
+/** One note as a sent message carries it (the inverse of {@link reviewMessage}). */
+export interface SentReviewNote {
+  path: string;
+  where: string;
+  quote: string[];
+  comment: string;
+}
+
+/** A sent review in a user message: the person's own words before it and its
+ *  notes — or null when the message carries none. Plain text to every agent;
+ *  only the timeline reads it back (a compact "Review · N notes" block). */
+export function sentReview(text: string): { prose: string; label: string; notes: SentReviewNote[] } | null {
+  const at = text.indexOf(REVIEW_HEADER);
+  if (at < 0) return null;
+  const nl = text.indexOf('\n', at);
+  const head = text.slice(at + REVIEW_HEADER.length, nl < 0 ? undefined : nl).replace(/ ---\s*$/, '');
+  // The block runs to the next context section, if any.
+  const rest = nl < 0 ? '' : text.slice(nl + 1);
+  const next = rest.search(/\n--- [^\n]+ ---\n/);
+  const body = next < 0 ? rest : rest.slice(0, next);
+  const notes: SentReviewNote[] = [];
+  for (const chunk of body.split(/\n\s*\n/)) {
+    const lines = chunk.split('\n');
+    const m = /^\d+\. (.+?) \((.*)\)$/.exec(lines[0]?.trim() ?? '');
+    if (!m) continue;
+    const quote = lines.filter((l) => l.startsWith('   > ')).map((l) => l.slice(5));
+    const comment = lines.slice(1).filter((l) => !l.startsWith('   > ')).map((l) => l.trim()).join('\n').trim();
+    notes.push({ path: m[1], where: m[2], quote, comment });
+  }
+  if (!notes.length) return null;
+  return { prose: text.slice(0, at).trim(), label: head, notes };
+}
+
 export function reviewMessage(notes: readonly ReviewNote[]): string {
   return notes
     .map((n, i) => [`${i + 1}. ${n.path} (${noteWhere(n) || 'file'})`, ...n.quote.split('\n').map((l) => `   > ${l}`), `   ${n.comment.trim()}`].join('\n'))

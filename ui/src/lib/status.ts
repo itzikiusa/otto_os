@@ -76,7 +76,7 @@ export function turnOutcomeState(
   const base = { resumable: false, inactive: false };
   if (outcome === 'failed') {
     if (errorClass === 'usage_limit') {
-      return { ...base, key: 'failed', label: 'Usage limit', tone: 'danger', hint: 'The last turn hit the agent’s usage limit' };
+      return { ...base, key: 'failed', label: 'Limited', tone: 'warning', hint: 'The last turn hit the agent’s usage limit' };
     }
     if (errorClass === 'auth') {
       return { ...base, key: 'failed', label: 'Not signed in', tone: 'danger', hint: 'The last turn failed: the agent isn’t signed in' };

@@ -82,7 +82,7 @@ class ThreadMeta {
         const row = runtimeThreads.byId[ev.session_id];
         if (!row) return;
         const meta: Record<string, unknown> = { ...(row.meta ?? {}) };
-        for (const k of THREAD_KEYS) delete meta[k];
+        for (const k of [...THREAD_KEYS, 'resume_at']) delete meta[k]; // resume_at: "Resume at reset"
         runtimeThreads.byId[ev.session_id] = { ...row, meta: { ...meta, ...(ev.provider_session.thread ?? {}) } };
       }
     });

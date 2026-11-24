@@ -93,15 +93,15 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   await expect(approval).toContainText('Codex wants to run');
   await expect(approval).toContainText('make clean');
   await expect(thread.locator('[data-item-type="command_execution"]').getByText('Waiting for your approval')).toBeVisible();
-  await expect(thread.getByRole('button', { name: 'Approve', exact: true })).toHaveCount(1);
+  await expect(thread.getByRole('button', { name: 'Allow once', exact: true })).toHaveCount(1);
   await page.screenshot({ path: info.outputPath('runtime-approval-light.png'), animations: 'disabled' });
   // Dark: the secondary actions are dark buttons (once the theme transition settles).
   await page.emulateMedia({ colorScheme: 'dark' });
-  const decline = approval.getByRole('button', { name: 'Decline', exact: true });
+  const decline = approval.getByRole('button', { name: 'Deny', exact: true });
   await expect.poll(() => bgLuminance(decline)).toBeLessThan(0.35);
   await page.screenshot({ path: info.outputPath('runtime-approval-dark.png'), animations: 'disabled' });
   await page.emulateMedia({ colorScheme: 'light' });
-  await approval.getByRole('button', { name: 'Approve', exact: true }).click();
+  await approval.getByRole('button', { name: 'Allow once', exact: true }).click();
   await expect(approval).toHaveCount(0);
   const command = thread.locator('[data-item-type="command_execution"]').last();
   await expect(command).toBeVisible();
@@ -516,24 +516,29 @@ test('runtime polish: RTL, details card, grouped tools, folded approvals, access
   await thread.getByTestId('runtime-item-c2').getByTestId('runtime-approval-answer').click();
   await expect(dock.getByTestId('runtime-attention-count')).toHaveText('2 of 2');
   await expect(dock).toContainText('git log -1');
-  await dock.getByRole('button', { name: 'Approve', exact: true }).click();
+  await dock.getByRole('button', { name: 'Allow once', exact: true }).click();
   await thread.getByTestId('runtime-item-c1').getByTestId('runtime-approval-answer').click();
   await expect(dock).toContainText('git status');
-  await dock.getByRole('button', { name: 'Decline', exact: true }).click();
+  await dock.getByRole('button', { name: 'Deny', exact: true }).click();
   await expect.poll(() => answered.sort()).toEqual(['r4', 'r5']);
   await page.screenshot({ path: info.outputPath('runtime-polish-work-light.png'), animations: 'disabled' });
   await page.emulateMedia({ colorScheme: 'dark' });
   await page.screenshot({ path: info.outputPath('runtime-polish-work-dark.png'), animations: 'disabled' });
   await page.emulateMedia({ colorScheme: 'light' });
 
-  // Access: Full access asks once and rides the next prompt. The chip shows
-  // only off the person's default (Full access when agent_skip_permissions is
-  // on, the default), so Supervised shows it and Full access hides it; "+"
-  // always offers the choice.
+  // (The mocked answers leave the requests pending: type first, so the
+  // composer unfolds from its one-row waiting state.)
+  await thread.getByTestId('runtime-composer').fill('שלום');
+  // Access: Full access asks once and rides the next prompt. The chip hides
+  // only for a calm default (Supervised / Auto-accept edits); Full access
+  // always shows it, in amber; "+" always offers the choice.
   const chip = thread.getByTestId('runtime-access');
   if ((await chip.count()) === 0) {
     await thread.getByTestId('runtime-plus').click();
     await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Access: Supervised' }).click();
+  } else if (!(await chip.textContent())?.includes('Supervised')) {
+    await chip.click();
+    await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Supervised' }).click();
   }
   await expect(chip).toContainText('Supervised');
   await chip.click();
@@ -541,7 +546,7 @@ test('runtime polish: RTL, details card, grouped tools, folded approvals, access
   const dlg = page.getByRole('dialog');
   await expect(dlg).toContainText('without asking');
   await dlg.getByRole('button', { name: 'Allow full access' }).click();
-  await expect(chip).toHaveCount(0);
+  await expect(chip).toContainText('Full access');
   const sent = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith(`/runtime-sessions/${id}/prompt`));
   await page.route(`**/api/v1/runtime-sessions/${id}/prompt`, (r) => r.fulfill({ json: { turn_id: 't2', sequence: 1 } }));
   const composer = thread.getByTestId('runtime-composer');

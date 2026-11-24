@@ -53,6 +53,7 @@
   <button
     type="button"
     class="rt-send"
+    class:worded={action !== 'send'}
     aria-label={named.label}
     title={named.title}
     data-testid={sendTestId}
@@ -61,6 +62,8 @@
     onclick={onsend}
   >
     <Icon name={ICON[action]} size={action === 'send' ? 16 : 14} />
+    <!-- Queue / Steer say their word (a narrow phone keeps the icon + its label). -->
+    {#if action !== 'send'}<span class="rt-word" aria-hidden="true">{action === 'queue' ? 'Queue' : 'Steer'}</span>{/if}
   </button>
 {/if}
 
@@ -76,6 +79,18 @@
     background: var(--accent-solid);
     color: var(--accent-contrast);
     cursor: pointer;
+  }
+  /* Queue / Steer: a pill with the word beside the icon. */
+  .rt-send.worded {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    inline-size: auto;
+    padding-inline: 10px 12px;
+    border-radius: 999px;
+    font: inherit;
+    font-size: var(--fs-s);
+    font-weight: 600;
   }
   .rt-send.stop {
     background: var(--text);
@@ -108,9 +123,23 @@
       inline-size: calc(var(--hit-min) + 8px);
       block-size: calc(var(--hit-min) + 8px);
     }
+    .rt-send.worded {
+      inline-size: auto;
+      min-inline-size: calc(var(--hit-min) + 8px);
+    }
     .rt-send.small {
       inline-size: calc(var(--hit-min) + 8px);
       block-size: calc(var(--hit-min) + 8px);
+    }
+  }
+  /* A phone: icon only (the button's label still names it). */
+  @media (max-width: 640px) {
+    .rt-word {
+      display: none;
+    }
+    .rt-send.worded {
+      justify-content: center;
+      padding-inline: 0;
     }
   }
 </style>

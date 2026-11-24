@@ -595,6 +595,70 @@ a match in an older message widens the mounted window to show it. History
 not loaded yet (above "Load older") is not searched. A focused terminal or
 editor keeps its own ⌘F (T3 Code #10439).
 
+## Context window, usage limits and ready worktrees
+
+- **Context meter** (`RuntimeContextMeter.svelte`, `contextMeter.ts`): a
+  small ring beside the model chip once the provider has reported how full
+  the context window is (`ProviderThread.context_usage`, pushed with
+  `provider_thread.updated`, no polling). It shows the percent from 80 %
+  (`--warning`) and turns `--danger` at 95 %. Its menu names the tokens and,
+  when the agent publishes a `compact` command, offers **Compact the
+  conversation** (types `/compact` into the composer; nothing is sent). The
+  details card has the same **Context** row. Providers that report a window:
+  Claude Code (the result frame's `modelUsage[model].contextWindow`), Codex
+  (`thread/tokenUsage/updated` `modelContextWindow`), ACP agents (Gemini,
+  agy, Grok, opencode, Muse) when they send `usage_update`, pi
+  (`context_window`). Until one does, there is no meter.
+
+- **Usage limit as a state** (`usageLimit.ts`, `RuntimeUsageLimit.svelte`,
+  `runtime/usage_hook/resume_at.rs`): a turn that failed on the provider's
+  usage limit reads **Limited** (sidebar, ⌘K switcher, details card; it ranks
+  with Failed) and the composer has ONE line, *"Codex limit reached · resets
+  14:00"*, with **Resume at reset** and **Continue with <other provider>**
+  (arms the provider switch). The reset time comes from the provider's own
+  words (Claude's `…limit reached|<epoch>` / "resets 3pm", Codex "try again
+  in 2 hours", Gemini "retry in 41s", an ISO time) or else the Usage meter's
+  limits snapshot (the shared 60 s visible-only poller, mounted only while
+  the line shows and the error does not say); unknown → the line says
+  *reset time unknown* and offers only the switch. **Resume at reset** calls
+  `POST /runtime-sessions/{id}/resume-at`: the daemon keeps the time in the
+  thread's `meta.resume_at` (every client sees *"resumes at 14:00 · Cancel"*
+  live), sleeps until then and sends one short continue, unless it was
+  cancelled, the thread was closed or its last turn no longer ended on the
+  limit. Stop (a family Stop too) and any new message — a provider switch,
+  a fresh start — cancel it. A daemon restart re-arms it (`recover`). Detection: Codex's
+  structured `usageLimitExceeded`, and for Claude, Gemini / ACP agents and pi
+  their limit text ("usage limit", "rate limit", "quota", "429",
+  `RESOURCE_EXHAUSTED`), the same lists the daemon's `error_class` uses.
+
+- **Ready-to-work worktree** (`otto-git/src/worktree_ready.rs`,
+  `worktreeReady.ts`): a `.worktreeinclude` at the repo root names, in
+  gitignore patterns, the untracked or ignored files a new worktree gets.
+  They are copied from the MAIN checkout (`.env`, local config; at most
+  100 MB in all, the rest is named in a toast with why); the patterns after a
+  `[clone]` line (dependency folders) are cloned copy-on-write (`cp -c`,
+  APFS clonefile) or, only when the disk cannot clone, symlinked to the main
+  checkout (the toast says which). Git itself matches the patterns
+  (`ls-files --others --ignored --directory`), so nothing outside the
+  checkout and no symlink is ever followed. Example:
+
+  ```
+  .env
+  config/local.json
+  [clone]
+  node_modules/
+  ```
+
+  A repository's **worktree setup** (Details › Open in › **Worktree setup**:
+  one of the project's scripts or another command) is kept on the daemon
+  (setting `worktree_setup`, by main checkout), so a worktree made from the
+  phone runs it too. After the worktree is made the progress line reads
+  *Setting up: npm ci · <its latest output line>* (streamed, at most once a
+  second); a failure shows inline (*Setup "npm ci" failed (exit
+  1): …*) with **Retry** (runs only the setup again) and **Start without
+  setup**; the message is never lost. It runs before any provider starts, so
+  it is the same for every agent.
+
 ## API & WebSocket Surface
 
 - `GET /api/v1/sessions/{id}/transcript` (`?sub=<subagentId>` supported for

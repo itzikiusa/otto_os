@@ -3,6 +3,8 @@
 // and a child-thread card read it. The words live in taskStop.ts.
 import { api } from '../../../lib/api/client';
 import type { FamilyStopResp, RuntimeInterruptResp, RuntimeTaskStopResp, RuntimeTasksStopResp } from '../../../lib/api/types';
+import { runtimeThreads } from './runtimeThreads.svelte';
+import { childOf } from './childThreads';
 import { toasts } from '../../../lib/toast.svelte';
 import { stopFailure, stopStateOf, stopSummary, type StopState } from './taskStop';
 
@@ -114,7 +116,12 @@ export async function stopThreadWork(id: string, work: { turnRunning: boolean; t
  *  Stop uses it; a Stop that found nothing running says so. */
 export async function stopFamily(id: string, background = false): Promise<void> {
   const r = await api.post<FamilyStopResp | undefined>(`/runtime-sessions/${encodeURIComponent(id)}/stop-family`, { background });
-  if (r && r.turns === 0 && r.tasks === 0) toasts.info('Nothing was running');
+  // Nothing ran: whatever still said "working" here was stale — re-read the
+  // family's rows (the line goes with them) instead of a puzzling toast.
+  if (r && r.turns === 0 && r.tasks === 0) {
+    const family = [id, ...Object.values(runtimeThreads.byId).filter((s) => s.status !== 'closed' && (childOf(s)?.id === id || s.parent_id === id)).map((s) => s.id)];
+    await Promise.allSettled(family.map((f) => runtimeThreads.loadOne(f)));
+  }
 }
 
 /** The composer's Stop. */

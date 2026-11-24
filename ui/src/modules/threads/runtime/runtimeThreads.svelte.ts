@@ -69,6 +69,8 @@ const ROW_META_KEYS = [
   'read_only',
   'delegated_by_agent',
   'delegated_by_name',
+  // Derived turn times: "Working 4m" on a row after a reload, without a read.
+  'last_turn_started_at',
 ] as const;
 
 const threadSessionRowCache = new WeakMap<RuntimeSession, Session>();
@@ -506,12 +508,15 @@ class RuntimeThreads {
     return hit;
   }
 
-  /** "Ask another agent" (or several): new threads linked to `parentId`,
+  /** "Delegate to…" (or several): new threads linked to `parentId`,
    *  each sent `req.prompt`; all or none. Their rows land before this resolves. */
   async askChildren(parentId: string, req: AskChildReq): Promise<RuntimeSession[]> {
     const { children } = await api.post<AskChildResp>(`/runtime-sessions/${parentId}/children`, req);
     for (const c of children) {
-      this.byId[c.id] = c;
+      // A fast subagent's turn can end before this answer lands: keep the
+      // newer live status its events already brought (`put`), never a stale
+      // "working" that would keep "Waiting on …" up until a reload.
+      this.put(c);
       this.emitSequence(c.id, c.last_sequence);
     }
     return children;

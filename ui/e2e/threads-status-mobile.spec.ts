@@ -11,7 +11,7 @@ import { expectNoHorizontalOverflow } from './helpers';
 // Screenshots: OTTO_E2E_SHOTS/fix-T-ATTENTION/ light and dark.
 
 test.beforeEach(async ({ page }, ti) => {
-  test.skip(!/^(iphone|android)/.test(ti.project.name), 'phones only');
+  test.skip(!/^(iphone|android-phone)/.test(ti.project.name), 'phones only');
   await page.addInitScript(() => {
     localStorage.setItem('otto_mock', '1');
     localStorage.setItem('otto_workspace', 'wsp_otto');
@@ -58,7 +58,7 @@ test('phone rows: two lines, ≥ 44 px, the state in words, one tap target; Next
   }
   await expect(side.getByTestId('thread-status-rt_wait')).toHaveText('Approval');
   await expect(side.getByTestId('thread-status-rt_work')).toHaveText(/^Working/);
-  await expect(side.getByTestId('thread-status-rt_fail')).toHaveText('Failed');
+  await expect(side.getByTestId('thread-status-rt_fail')).toHaveText('Limited');
   await expect(side.getByTestId('thread-status-rt_done')).not.toHaveText(/Idle/);
   // The waiting thread ranks first.
   const first = await side.locator('[data-testid^="thread-row-"]').first().getAttribute('data-testid');

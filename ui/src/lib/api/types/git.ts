@@ -605,6 +605,7 @@ export interface WorktreeCreateReq {
   base?: string | null;
 }
 
+
 /** One `git worktree list --porcelain` entry (first = main worktree). Fed by
  *  GET /repos/{id}/worktrees; POST …/worktrees/remove `{path, force?}` and
  *  POST …/worktrees/prune both return the refreshed list. */

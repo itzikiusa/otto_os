@@ -12,6 +12,16 @@ export function switchTargets(home: string, all: readonly string[], switchable: 
   return [home, ...all.filter((p) => p !== home && switchable(p))];
 }
 
+/** Arm (or, for the thread's own provider, disarm) a switch on the draft —
+ *  the one way the model picker and a usage limit's "Continue with" do it.
+ *  The other provider starts on its default model until one is picked. */
+export function armSwitch(draft: { provider: string | null; model: string | null | undefined; effort: unknown }, home: string, to: string): void {
+  const away = to !== home;
+  draft.provider = away ? to : null;
+  draft.model = away ? null : undefined;
+  draft.effort = null;
+}
+
 /** The quiet line above the composer while a switch is armed. */
 export function armedSwitchLine(to: string): string {
   return `Next message continues on ${harnessLabel(to)}`;

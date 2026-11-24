@@ -77,3 +77,10 @@ export interface LimitsResp {
   /** A snapshot older than this is `stale`. */
   stale_after_secs: number;
 }
+
+/** `POST /runtime-sessions/{id}/resume-at` → `RuntimeSession` (its
+ *  `meta.resume_at`): arm the one "Resume at reset", or cancel it (`null`). */
+export interface ResumeAtReq {
+  /** RFC 3339, at most a week ahead; `null` cancels. */
+  at: string | null;
+}

@@ -25,7 +25,7 @@
   import ProjectBadge from './ProjectBadge.svelte';
   import { councilOf } from './runtime/council';
   import { inboxClass, statusWord, subagentWord } from './threadInbox';
-  import { childRollup } from './runtime/childThreads';
+  import { childRollup, familyCountLabel } from './runtime/childThreads';
   import { inboxLive } from './threadInbox.svelte';
   import { threadMeta } from './threadMeta.svelte';
   import { threadRepos } from './threadRepos.svelte';
@@ -58,25 +58,26 @@
   const subs = $derived(
     kids.length === 0
       ? null
-      : childRollup(kids.map((id) => ({ title: ws.getSession(id)?.title ?? runtimeThreads.get(id)?.title ?? '', word: subagentWord(threadStateById(id)?.key) }))),
+      : childRollup(kids.map((id) => ({ title: ws.getSession(id)?.title ?? runtimeThreads.get(id)?.title ?? '', word: subagentWord(threadStateById(id)?.key, { limited: threadStateById(id)?.label === 'Limited' }) }))),
   );
   const subNeeds = $derived(!history && !!subs && subs.needsYou > 0);
   const cls = $derived(history ? 'rest' : subNeeds ? 'needs' : inboxClass(st.key, unread));
   const runtime = $derived(isRuntimeThread(s));
   $effect(() => {
     // Approval vs Question needs the request's kind (one queued read); a
-    // working row's start comes from the live events ("Working" until then).
-    if (runtime && cls === 'needs') inboxLive.ensure(s.id);
+    // working row's start (one queued read; live events keep it after that).
+    if (runtime && (cls === 'needs' || cls === 'working')) inboxLive.ensure(s.id);
   });
   const word = $derived(
-    child ? subagentWord(st.key) : subNeeds ? 'Needs you' : statusWord(cls, {
+    child ? subagentWord(st.key, { limited: st.label === 'Limited' }) : subNeeds ? 'Needs you' : statusWord(cls, {
       kinds: inboxLive.kindsOf(s.id),
-      workingSince: cls === 'working' ? (inboxLive.since[s.id] ?? null) : null,
+      workingSince: cls === 'working' ? inboxLive.workingSince(s.id, s.meta as Record<string, unknown> | null) : null,
       now: cls === 'working' ? now() : 0,
+      limited: st.label === 'Limited',
     }),
   );
   const tone = $derived(
-    word === 'Approval' || word === 'Question' || word === 'Needs you' ? 'warning' : word === 'Failed' ? 'danger' : word === 'Done' ? 'success' : '',
+    word === 'Approval' || word === 'Question' || word === 'Needs you' || word === 'Limited' ? 'warning' : word === 'Failed' ? 'danger' : word === 'Done' ? 'success' : '',
   );
 
   const meta = $derived(s.meta as Record<string, unknown> | undefined);
@@ -146,7 +147,7 @@
     {/if}
     <span class="tr-line tr-l2">
       <span class="tr-title ellipsis" dir="auto">{label}</span>
-      {#if kids.length > 0}<span class="tr-kids" dir="auto" data-testid="thread-family-count-{s.id}">{kids.length} {kids.length === 1 ? 'subagent' : 'subagents'}</span>{/if}
+      {#if kids.length > 0}<span class="tr-kids" dir="auto" data-testid="thread-family-count-{s.id}">{familyCountLabel(kids.map((id) => !!councilOf(runtimeThreads.get(id))))}</span>{/if}
     </span>
     <span class="tr-line tr-l3">
       {#if child}
