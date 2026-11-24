@@ -127,7 +127,10 @@ anywhere else.
   the person, and the current page. Everything else sits under ONE "More" row
   that expands in place (remembered per device). The Rail and the phone's
   BottomNav follow the same rule (`lib/sidebarMore.ts`, `stores/navUsage`).
-  Customize sidebar still lists every module; ⌘K "Go to" is unchanged.
+  Customize sidebar still lists every module; ⌘K "Go to" is unchanged. Only
+  the root user reads the usage (the telemetry routes are root-only and the
+  counts machine-wide); everyone else keeps the defaults
+  (docs/features/application-telemetry.md).
 - **Section order** is the user's (`ui.sidebarGroupOrder`, resolved by
   `resolveGroupOrder()`: unknown ids are ignored and new sections append in
   default order). Sections move with the header's context menu ("Move section

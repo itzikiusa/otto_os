@@ -68,6 +68,31 @@ percentiles or scan all raw traces. Raw traces remain available for bounded
 trace-ID drill-down. Suggested actions are evidence for investigation; they do
 not change code, start agents, or publish messages automatically.
 
+## Navigation counts (the sidebar's "used lately")
+
+Every `ui.navigation` span carries a device class — `desktop`, `phone` or
+`tablet`, nothing more specific. The owned roll-up
+`otto_telemetry.navigation_days` (a materialized view over the spans) counts
+them per day, module and device class and keeps **30 days**, whatever the raw
+trace retention; a fresh table is seeded once from the spans still retained. A
+navigation cut short by the next one before its page painted is cancelled and
+never counted. `GET /telemetry/navigation?days=30` reads it back
+(`{module, device, count}[]`); spans reach ClickHouse on the normal export
+cadence (5 min, pulled forward by a read at most every 2 min).
+
+The sidebar reads this once per load for the **root** user and caches it per
+device (`ui/src/lib/stores/navUsage.svelte.ts`): the Navigator, the Rail and
+the phone's bottom nav then show the favorites, the modules used in those 30
+days, anything with a badge and the current page, with the rest under one
+"More" row. **Other users see the built-in defaults** (Agents, Git,
+Connections, Threads, Home, Usage) plus their favorites, badges and the
+current page — on purpose: like every telemetry route this one is root-only,
+because telemetry is an administrator opt-in and the counts are machine-wide
+(every user's navigations together), not one person's. With telemetry off the
+root user also keeps the defaults (or the last cached list).
+`e2e/desktop-telemetry-navigation.spec.ts` (run with `OTTO_E2E_TELEMETRY=1`)
+drives a desktop and a phone page and reads the rows back.
+
 ## Troubleshooting
 
 **Collector starting or unavailable:** check ClickHouse in Usage → Overview.
