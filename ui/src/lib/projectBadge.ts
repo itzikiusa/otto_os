@@ -1,5 +1,6 @@
 // A project's badge: two letters and a stable categorical tone (--cat-1…6),
-// the same for a name everywhere it shows (the Threads top bar, sidebar rows).
+// the same for a name everywhere it shows (the Threads top bar, inbox rows on
+// every page — lib/components/InboxRow.svelte).
 // Pure, import-free (unit/threadsProjectBadge.test.ts).
 
 export interface ProjectBadgeInfo {

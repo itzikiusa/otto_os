@@ -1,5 +1,6 @@
 <script lang="ts">
-  // One inbox row (T3 Code / Orca): three lines, the whole row one button —
+  // One inbox row (T3 Code / Orca) on the shared lib/components/InboxRow:
+  // three lines, the whole row one button —
   //   1. the project's badge and name … the status WORD, else the time;
   //   2. the title, bold while it needs you or finished unread;
   //   3. the branch (worktree icon in a worktree) … the agent's glyph.
@@ -11,8 +12,7 @@
   // Pin / beside / ⋯ appear on hover or focus over line 3's end; on touch they
   // live in the row's long-press menu (use:rowMenu).
   import Icon from '../../lib/components/Icon.svelte';
-  import { rowMenu } from '../../lib/rowMenu';
-  import { git } from '../../lib/stores/git.svelte';
+    import { git } from '../../lib/stores/git.svelte';
   import { now, rel } from '../../lib/stores/now.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { Session } from '../../lib/api/types';
@@ -22,9 +22,10 @@
   import { threads } from './threadsStore.svelte';
   import { isRuntimeThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
-  import ProjectBadge from './ProjectBadge.svelte';
+  import InboxRow from '../../lib/components/InboxRow.svelte';
   import { councilOf } from './runtime/council';
   import { inboxClass, statusWord, subagentWord } from './threadInbox';
+  import { wordTone } from '../../lib/statusWords';
   import { childRollup, familyCountLabel } from './runtime/childThreads';
   import { inboxLive } from './threadInbox.svelte';
   import { threadMeta } from './threadMeta.svelte';
@@ -76,9 +77,7 @@
       limited: st.label === 'Limited',
     }),
   );
-  const tone = $derived(
-    word === 'Approval' || word === 'Question' || word === 'Needs you' || word === 'Limited' ? 'warning' : word === 'Failed' ? 'danger' : word === 'Done' ? 'success' : '',
-  );
+  const tone = $derived(wordTone(word));
 
   const meta = $derived(s.meta as Record<string, unknown> | undefined);
   /** A personal agent's thread is under the agent's name, never its folder's id. */
@@ -111,63 +110,50 @@
   );
 </script>
 
-<div
-  class="tr-row reveal-host"
-  class:child
-  class:tr-family={kids.length > 0}
-  class:strong={cls === 'needs' || cls === 'done'}
-  class:selected
-  class:in-pane={inPane && !selected}
-  data-testid={testid}
-  data-state={history ? 'history' : st.key}
-  data-class={cls}
+<InboxRow
+  title={label}
+  project={child ? null : project}
+  {word}
+  {tone}
+  time={rel(s.last_active_at)}
+  {tip}
+  {child}
+  strong={cls === 'needs' || cls === 'done'}
+  {selected}
+  {inPane}
+  {testid}
+  statusTestid="thread-status-{s.id}"
+  state={history ? 'history' : st.key}
+  {cls}
+  fold={kids.length > 0 && family ? { folded: family.folded, label: `the subagents of ${s.title}`, testid: `thread-family-fold-${s.id}`, ontoggle: family.ontoggle } : undefined}
+  onclick={(e) => (history ? onreopen(s, e.metaKey || e.ctrlKey) : onrowclick(e, s))}
+  oncontextmenu={(e) => onmenu(e, s)}
 >
-  {#if kids.length > 0 && family}
-    <button type="button" class="icon-btn tr-fold" aria-expanded={!family.folded} aria-label="{family.folded ? 'Show' : 'Fold'} the subagents of {s.title}" title={family.folded ? 'Show its subagents' : 'Fold its subagents'} data-testid="thread-family-fold-{s.id}" onclick={family.ontoggle}>
-      <Icon name={family.folded ? 'chevronRight' : 'chevronDown'} size={12} />
-    </button>
-  {/if}
-  <button
-    type="button"
-    class="tr-main"
-    title={tip}
-    aria-current={selected ? 'true' : undefined}
-    onclick={(e) => (history ? onreopen(s, e.metaKey || e.ctrlKey) : onrowclick(e, s))}
-    oncontextmenu={(e) => onmenu(e, s)}
-    use:rowMenu
-  >
-    {#if !child}
-      <span class="tr-line tr-l1">
-        <ProjectBadge name={project} />
-        <span class="tr-proj ellipsis" dir="auto">{project}</span>
-        {#if badge}<span class="tr-badge tr-badge-{badge.kind} ellipsis" title={badge.title} data-testid="thread-badge-{s.id}">{badge.label}</span>{/if}
-        {#if family?.detached}<span class="tr-badge" title="The thread that started it is closed or archived" data-testid="thread-detached-{s.id}">detached</span>{/if}
-        <span class="tr-status {tone}" dir="auto" data-testid="thread-status-{s.id}">{word ?? rel(s.last_active_at)}</span>
-      </span>
+  {#snippet context()}
+    {#if badge}<span class="tr-badge tr-badge-{badge.kind} ellipsis" title={badge.title} data-testid="thread-badge-{s.id}">{badge.label}</span>{/if}
+    {#if family?.detached}<span class="tr-badge" title="The thread that started it is closed or archived" data-testid="thread-detached-{s.id}">detached</span>{/if}
+  {/snippet}
+  {#snippet titleEnd()}
+    {#if kids.length > 0}<span class="tr-kids" dir="auto" data-testid="thread-family-count-{s.id}">{familyCountLabel(kids.map((id) => !!councilOf(runtimeThreads.get(id))))}</span>{/if}
+  {/snippet}
+  {#snippet line3()}
+    {#if child}
+      <!-- (the word leads a child row's line 3: InboxRow) -->
+    {:else if branch}
+      <Icon name={worktreeBranch ? 'worktree' : 'branch'} size={12} />
+      <span class="tr-branch ellipsis" dir="ltr" data-worktree={worktreeBranch ? '' : undefined}>{branch}</span>
+    {:else}
+      <!-- No branch known: where the thread works, so line 3 always says it. -->
+      <Icon name="folder" size={12} />
+      <span class="tr-branch ellipsis" dir="auto">{history ? 'Closed · ' : ''}{agentName ?? (baseName(s.cwd ?? '') || '~')}</span>
     {/if}
-    <span class="tr-line tr-l2">
-      <span class="tr-title ellipsis" dir="auto">{label}</span>
-      {#if kids.length > 0}<span class="tr-kids" dir="auto" data-testid="thread-family-count-{s.id}">{familyCountLabel(kids.map((id) => !!councilOf(runtimeThreads.get(id))))}</span>{/if}
-    </span>
-    <span class="tr-line tr-l3">
-      {#if child}
-        <span class="tr-status {tone}" dir="auto" data-testid="thread-status-{s.id}">{word ?? rel(s.last_active_at)}</span>
-      {:else if branch}
-        <Icon name={worktreeBranch ? 'worktree' : 'branch'} size={12} />
-        <span class="tr-branch ellipsis" dir="ltr" data-worktree={worktreeBranch ? '' : undefined}>{branch}</span>
-      {:else}
-        <!-- No branch known: where the thread works, so line 3 always says it. -->
-        <Icon name="folder" size={12} />
-        <span class="tr-branch ellipsis" dir="auto">{history ? 'Closed · ' : ''}{agentName ?? (baseName(s.cwd ?? '') || '~')}</span>
-      {/if}
-      {#if hasProviderIcon(s.provider)}<span class="tr-prov" title={harnessLabel(s.provider)}><ProviderIcon provider={s.provider} size={12} /></span>{:else}<span class="tr-prov tr-prov-name">{harnessLabel(s.provider)}</span>{/if}
-    </span>
-  </button>
-  <div class="tr-actions reveal-on-hover">
+    {#if hasProviderIcon(s.provider)}<span class="tr-prov" title={harnessLabel(s.provider)}><ProviderIcon provider={s.provider} size={12} /></span>{:else}<span class="tr-prov tr-prov-name">{harnessLabel(s.provider)}</span>{/if}
+  {/snippet}
+  {#snippet actions()}
     {#if variant !== 'pinned'}
       <button
         type="button"
-        class="icon-btn tr-act"
+        class="icon-btn"
         class:tr-pin-on={pinned}
         aria-label="{pinned ? 'Unpin' : 'Pin'} {s.title}"
         title={pinned ? 'Unpin thread' : 'Pin thread'}
@@ -179,7 +165,7 @@
     {/if}
     <button
       type="button"
-      class="icon-btn tr-act"
+      class="icon-btn"
       aria-label="Open {s.title} beside"
       title="Open beside (Split)"
       data-testid="thread-split-{s.id}"
@@ -195,7 +181,7 @@
     </button>
     <button
       type="button"
-      class="icon-btn tr-act"
+      class="icon-btn"
       aria-label="More actions for {s.title}"
       title="More actions"
       aria-haspopup="menu"
@@ -203,104 +189,12 @@
     >
       <Icon name="more" size={12} />
     </button>
-  </div>
-</div>
+  {/snippet}
+</InboxRow>
 
 <style>
-  .tr-row {
-    --tr-tint: transparent;
-    position: relative;
-    display: flex;
-    align-items: flex-start;
-    min-width: 0;
-    border-radius: var(--radius-m);
-    background: var(--tr-tint);
-  }
-  .tr-row:hover {
-    --tr-tint: var(--hover);
-  }
-  .tr-row.in-pane {
-    --tr-tint: var(--accent-faint);
-  }
-  /* Stronger than hover in light and dark alike. */
-  .tr-row.selected {
-    --tr-tint: color-mix(in srgb, var(--text) 12%, transparent);
-  }
-  .tr-row.child {
-    margin-inline-start: var(--sp-6);
-  }
-  .tr-main {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: var(--sp-1);
-    min-block-size: 64px;
-    padding-block: var(--sp-3);
-    padding-inline: var(--sp-5);
-    border: 0;
-    border-radius: var(--radius-m);
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    text-align: start;
-    cursor: pointer;
-  }
-  .tr-row.child .tr-main {
-    min-block-size: 46px;
-  }
-  .tr-line {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-3);
-    min-width: 0;
-    block-size: 18px;
-  }
-  .tr-l1,
-  .tr-l3 {
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
-  .tr-l2 {
-    block-size: 22px;
-  }
-  .tr-l3 :global(svg) {
-    flex-shrink: 0;
-  }
-  .tr-proj,
   .tr-branch {
     min-width: 0;
-  }
-  .tr-title {
-    flex: 1;
-    min-width: 0;
-    font-size: var(--fs-l);
-    font-weight: 500;
-  }
-  .tr-row.strong .tr-title {
-    font-weight: 600;
-  }
-  .tr-status {
-    flex-shrink: 0;
-    margin-inline-start: auto;
-    font-variant-numeric: tabular-nums;
-  }
-  .tr-row.child .tr-status {
-    margin-inline-start: 0;
-  }
-  .tr-status.warning,
-  .tr-status.danger,
-  .tr-status.success {
-    font-weight: 600;
-  }
-  .tr-status.warning {
-    color: var(--warning);
-  }
-  .tr-status.danger {
-    color: var(--danger);
-  }
-  .tr-status.success {
-    color: var(--success);
   }
   .tr-prov {
     display: inline-flex;
@@ -334,44 +228,10 @@
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
-  /* Pin / beside / ⋯ over line 3's end (the branch and glyph), never over
-     the status word or the title. Opaque so the line never shows through. */
-  .tr-actions {
-    position: absolute;
-    inset-block-end: var(--sp-2);
-    inset-inline-end: var(--sp-2);
-    display: flex;
-    align-items: center;
-    padding-inline-start: var(--sp-3);
-    border-radius: var(--radius-m);
-    background: linear-gradient(var(--tr-tint), var(--tr-tint)), var(--bg-sidebar);
-  }
-  /* Line 3's height, so they never reach the title above it. */
-  .tr-act {
-    block-size: 20px;
-    min-block-size: 20px;
-  }
-  .tr-fold {
-    flex: none;
-    margin-block-start: var(--sp-6);
-    margin-inline-end: calc(-1 * var(--sp-4));
-  }
   .tr-pin-on {
     color: var(--warning);
   }
   .tr-pin-on :global(svg path) {
     fill: currentColor;
-  }
-  /* Touch: the row is one tap target; pin / beside / ⋯ live in its
-     long-press menu (use:rowMenu); the subagents chevron is finger-sized. */
-  @media (hover: none), (pointer: coarse) {
-    .tr-actions {
-      display: none;
-    }
-    .tr-fold {
-      inline-size: var(--hit-min);
-      block-size: var(--hit-min);
-      margin-block-start: var(--sp-5);
-    }
   }
 </style>
