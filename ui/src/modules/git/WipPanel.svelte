@@ -1130,7 +1130,10 @@
      a fixed composer squeezed the list's scroller to nothing on a phone. */
   @media (max-width: 1024px) {
     .wp-crow { height: 36px; }
-    .wp-body { overflow-y: auto; overscroll-behavior: contain; }
+    /* The panel itself is the scroller: in History's short WIP pane the composer
+       left .wp-body 23 px, under a 45 px sticky section head — no row showed. */
+    .wip-panel { overflow-y: auto; overscroll-behavior: contain; }
+    .wp-body { flex: none; overflow: visible; }
     .wp-scroll, .wp-body.has-diff .wp-scroll { flex: none; max-height: none; overflow: visible; }
   }
 </style>
