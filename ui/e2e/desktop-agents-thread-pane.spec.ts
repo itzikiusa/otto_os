@@ -172,3 +172,18 @@ test('⌘⇧T reopens a closed chat pane', async ({ page }) => {
   await expect(page.locator(`[data-tab-id="${threadId}"]`)).toHaveCount(1);
   await expect.poll(() => page.evaluate(() => location.hash)).toBe(`#/agents/${threadId}`);
 });
+
+// ⋯ › Details reads the session's usage on demand: the open menu shows the
+// figure once the read lands, not on the next open.
+test('⋯ › Details shows the usage read it just asked for', async ({ page }) => {
+  await page.route('**/api/v1/sessions/*/usage', async (r) => {
+    await new Promise((f) => setTimeout(f, 400));
+    await r.fulfill({ json: { session_id: ids.Baresi, total_tokens: 12_345, cost_usd: 0.42, input_tokens: 10_000, output_tokens: 2_345 } });
+  });
+  await page.goto(`/#/agents/${ids.Baresi}`);
+  const pane = paneOf(page, ids.Baresi);
+  await expect(pane).toBeVisible({ timeout: 30_000 });
+  await pane.getByRole('button', { name: /^More…/ }).click();
+  await page.getByRole('menuitem', { name: 'Details' }).hover();
+  await expect(page.getByRole('menuitem', { name: /^Usage: 12/ })).toBeVisible({ timeout: 5_000 });
+});

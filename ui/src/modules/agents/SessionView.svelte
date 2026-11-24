@@ -581,9 +581,15 @@
     ];
   }
   function openPaneMenu(e: MouseEvent | KeyboardEvent): void {
-    // Usage shows under Details: read it now (once a minute at most, A7a).
-    if (isAgent && canUsage) void sessionUsage.loadSession(sessionId);
+    // Usage shows under Details: read it now (once a minute at most, A7a),
+    // and put the figure in the menu that is open when the read lands.
+    const before = usageLabel;
+    const read = isAgent && canUsage ? sessionUsage.loadSession(sessionId) : null;
     ctxMenu.show(e, sessionMenuItems());
+    const seq = ctxMenu.seq;
+    void read?.then(() => {
+      if (ctxMenu.open && ctxMenu.seq === seq && usageLabel !== before) ctxMenu.items = sessionMenuItems();
+    });
   }
   function attendPane(node: HTMLElement): { destroy(): void } {
     const onDown = () => { ws.clearNeedsYou(sessionId); onfocus(); };
