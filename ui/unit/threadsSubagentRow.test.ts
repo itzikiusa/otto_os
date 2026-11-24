@@ -89,6 +89,6 @@ test('a 2,000-token answer streaming in recomputes the subagent rows once, not p
 
 test('a compared model is counted as a model, not a subagent', () => {
   assert.equal(ct.familyCountLabel([false, false]), '2 subagents');
-  assert.equal(ct.familyCountLabel([true, true]), 'Compared with 2 models');
-  assert.equal(ct.familyCountLabel([false, true]), '1 subagent · compared with 1 model');
+  assert.equal(ct.familyCountLabel([true, true]), '2 compared');
+  assert.equal(ct.familyCountLabel([false, true]), '1 subagent · 1 compared');
 });

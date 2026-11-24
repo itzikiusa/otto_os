@@ -660,7 +660,7 @@
     color: var(--text-dim);
   }
   .th-crumb-title { color: var(--text); font-weight: 600; min-width: 0; }
-  .th-crumb-btn { border: 0; background: none; padding: 0 2px; border-radius: var(--radius-s); font: inherit; font-weight: 600; color: var(--text); cursor: default; }
+  .th-crumb-btn { border: 0; background: none; padding: 0 2px; border-radius: var(--radius-s); font: inherit; font-weight: 600; color: var(--text); cursor: default; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
   @media (hover: hover) { .th-crumb-btn:hover { background: var(--hover); } } /* never a "selected" look on touch */
   @media (max-width: 640px), (max-height: 500px) and (pointer: coarse) {
     .th-crumbs > :global(.pb), .th-crumb-project, .th-crumb-sep { display: none; }

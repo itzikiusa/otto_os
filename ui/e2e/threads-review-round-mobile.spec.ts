@@ -71,6 +71,10 @@ test('touch: model picker (a "Model" sheet on a phone), the armed switch line, t
   await expect(page.getByTestId('threads-toggle-inspector')).toBeVisible();
   const crumb = page.locator('.th-crumb-title').first();
   expect(await crumb.evaluate((el) => getComputedStyle(el).textOverflow)).toBe('ellipsis');
+  // A tap never leaves it looking selected (no text selection on the title).
+  expect(await crumb.evaluate((el) => getComputedStyle(el).userSelect || getComputedStyle(el).getPropertyValue('-webkit-user-select'))).toBe('none');
+  await crumb.tap();
+  expect(await page.evaluate(() => String(getSelection() ?? ''))).toBe('');
   expect(await crumb.evaluate((el) => el.getBoundingClientRect().right)).toBeLessThanOrEqual((await page.getByTestId('threads-toggle-inspector').boundingBox())!.x + 1);
 
   await thread.getByTestId('runtime-model').tap();
