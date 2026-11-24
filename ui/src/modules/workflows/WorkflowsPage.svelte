@@ -17,21 +17,16 @@
   import PageBody from '../../lib/components/PageBody.svelte';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import AutomateGuide from '../../lib/components/AutomateGuide.svelte';
   import AutomateGuideButton from '../../lib/components/AutomateGuideButton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import { effectiveRetry, updateRetry, clearRetry } from './retryPolicy';
-  import WorkflowCanvas from './WorkflowCanvas.svelte';
-  import RunMonitor from './RunMonitor.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import AutomateGuide from '../../lib/components/AutomateGuide.svelte';
+  import { ApprovalsLazy, CanvasLazy, ContextLazy, MonitorLazy, PaletteLazy, ParamsLazy, RunInputLazy, TriggersLazy } from './lazyViews';
   import RunRouteSync from './RunRouteSync.svelte';
-  import RunApprovals from './RunApprovals.svelte';
-  import NodePalette from './NodePalette.svelte';
-  import RunContextSidebar from './RunContextSidebar.svelte';
   import { RunSync } from './runSync.svelte';
-  import TriggersPanel from './TriggersPanel.svelte';
-  import NodeParams from './inspector/NodeParams.svelte';
   import { InspectorOptions } from './inspector/options.svelte';
   import { jsonValue, paramJson, withParam } from './inspector/util';
   import { ui } from '../../lib/stores/ui.svelte';
@@ -51,7 +46,6 @@
   import { registry } from '../../lib/commands.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { RunInputForm } from './runInputForm.svelte';
-  import RunInputPanel from './RunInputPanel.svelte';
   import { workflowsUi } from './workflowsUiState.svelte';
   import type {
     Workflow,
@@ -1420,7 +1414,7 @@
     {#if current}
       <!-- Popovers for the header's Node / Runs buttons (see anchorPop). -->
       {#if paletteOpen}
-        <NodePalette {types} right={popRight} onpick={addNode} />
+        <LazyMount lazy={PaletteLazy} what="the node list" quiet onerror={() => (paletteOpen = false)} props={{ types, right: popRight, onpick: addNode }} />
       {/if}
       {#if runsOpen}
         <div class="palette runs-pop wf-pop" role="dialog" aria-label="Runs" style:inset-inline-end="{popRight}px">
@@ -1448,11 +1442,11 @@
 
       <!-- Manual-run input editor (RunInputPanel). -->
       {#if runForm.open}
-        <RunInputPanel form={runForm} {graph} wsId={ws.currentId ?? ''} {pickers} {running} onrun={() => void confirmRun()} />
+        <LazyMount lazy={RunInputLazy} what="the run form" quiet props={{ form: runForm, graph, wsId: ws.currentId ?? '', pickers, running, onrun: () => void confirmRun() }} />
       {/if}
 
       <!-- The run's approval gate (RunApprovals): resumed note, preview, Approve / Deny. -->
-      <RunApprovals {mon} {graph} {nodeName} />
+      <LazyMount lazy={ApprovalsLazy} what="the approval" quiet props={{ mon, graph, nodeName }} />
 
       {#if validationIssues.length}
         <div class="preflight" use:announceShown={{ text: `Resolve these issues before saving or running: ${validationIssues.map((i) => i.message).join('; ')}`, assertive: true }}><strong>Resolve these issues before saving or running</strong>
@@ -1465,17 +1459,17 @@
         <div class="preflight">This run uses version {run.workflow_version}; retries retain that definition. The editor shows version {current.version}. Review it and choose Run to start a new run with these changes.</div>
       {/if}
       <div class="canvas-wrap">
-        <WorkflowCanvas
+        <LazyMount lazy={CanvasLazy} what="the canvas" variant="panel">{#snippet children(WorkflowCanvas)}<WorkflowCanvas
           bind:graph {types} {runStates}
           dbConnections={pickers.dbConnections.rows(ws.currentId ?? '') ?? []}
           invalidNodes={validationIssues.flatMap((i) => i.node_id ? [i.node_id] : [])}
           invalidEdges={validationIssues.flatMap((i) => i.edge_id ? [i.edge_id] : [])}
           {selectedId}
           {selectedEdgeId}
-          onselect={(id) => { selectedId = id; selectedEdgeId = null; }}
-          onedgeselect={(id) => { selectedEdgeId = id; if (id) selectedId = null; }}
+          onselect={(id: string | null) => { selectedId = id; selectedEdgeId = null; }}
+          onedgeselect={(id: string | null) => { selectedEdgeId = id; if (id) selectedId = null; }}
           onchange={() => (dirty = true)}
-        />
+        />{/snippet}</LazyMount>
       </div>
 
       {#if workflowsUi.instructionsOpen && current}
@@ -1516,12 +1510,7 @@
       {#if workflowsUi.triggersOpen && current}
         {#key current.id}
         <div class="triggers-wrap">
-          <TriggersPanel
-            workflowId={current.id}
-            workflowName={current.name}
-            bind:triggers
-            ontriggers={(ts) => (triggers = ts)}
-          />
+          <LazyMount lazy={TriggersLazy} what="triggers" variant="panel" props={{ workflowId: current.id, workflowName: current.name, triggers, ontriggers: (ts: WorkflowTrigger[]) => (triggers = ts) }} />
         </div>
         {/key}
       {/if}
@@ -1598,7 +1587,7 @@
             </div>
           {/if}
           <!-- The run on screen: run bar, timeline, steps (RunMonitor). -->
-          <RunMonitor {mon} {nodeName} bind:selectedId bind:runDetailMax onOpenSession={openSessionInline} />
+          <LazyMount lazy={MonitorLazy} what="the run" variant="panel">{#snippet children(RunMonitor)}<RunMonitor {mon} {nodeName} bind:selectedId bind:runDetailMax onOpenSession={openSessionInline} />{/snippet}</LazyMount>
 
           {#if selectedNode}
             <div class="insp-h">
@@ -1610,15 +1599,15 @@
               <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, false)} title="Run this node and everything downstream"><Icon name="play" size={12} /> From here</button>
               <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, true)} title="Run only this node">Only this</button>
             </div>
-            <NodeParams
+            <LazyMount lazy={ParamsLazy} what="the step settings" variant="compact">{#snippet children(NodeParams)}<NodeParams
               node={selectedNode}
               set={onParam}
-              setParams={(params) => { if (selectedNode) { selectedNode.params = params; graph = graph; dirty = true; } }}
+              setParams={(params: unknown) => { if (selectedNode) { selectedNode.params = params; graph = graph; dirty = true; } }}
               wsId={current?.workspace_id ?? ws.currentId ?? ''}
               {pickers}
               workflowName={current?.name}
-              onzoom={(field, label) => (jsonZoom = { field, label })}
-            />
+              onzoom={(field: string, label: string) => (jsonZoom = { field, label })}
+            />{/snippet}</LazyMount>
 
             <!-- Retry policy (any node): extra attempts with exponential backoff. -->
             {#if selectedNode.kind !== 'manual_trigger'}
@@ -1728,7 +1717,7 @@
 
   {#if viewport.isDesktop && run && run.context_dir && ui.wfCtxOpen}
     <!-- Desktop: the run's Files / Agents sidebar (RunContextSidebar). -->
-    <RunContextSidebar {mon} {run} contextDir={run.context_dir} {nodeName} focusSid={agentsFocusSid} />
+    <LazyMount lazy={ContextLazy} what="the run’s files" variant="panel" props={{ mon, run, contextDir: run.context_dir, nodeName, focusSid: agentsFocusSid }} />
   {/if}
 </div>
 </PageBody>

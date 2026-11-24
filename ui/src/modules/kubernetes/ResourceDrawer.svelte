@@ -16,13 +16,14 @@
   // Detail + container list are fetched once per selection (aborted when the
   // selection moves on).
   import { untrack } from 'svelte';
-  import { stringify as toYaml } from 'yaml';
   import Icon from '../../lib/components/Icon.svelte';
   import Tabs from '../../lib/components/Tabs.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
-  import CodeEditor from '../../lib/components/CodeEditor.svelte';
+  import LazyCodeEditor from '../../lib/components/LazyCodeEditor.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { copyText, copyWithToast } from '../../lib/clipboard';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -34,11 +35,6 @@
   import { actionsFor } from './actions';
   import { clusterContext, kubectlDescribeCmd, kubectlExecCmd, kubectlGetCmd, kubectlLogsCmd } from './cliSnippet';
   import { clipLongScalars, formatAge, formatBytes, formatMillicores, healthTone, kindDef, podContainers, rowAge } from './k8s-util';
-  import LogsView from './LogsView.svelte';
-  import ExecView from './ExecView.svelte';
-  import MetricsView from './MetricsView.svelte';
-  import WorkloadPods from './WorkloadPods.svelte';
-  import PodHttpPanel from './PodHttpPanel.svelte';
   import { workloadKindFor } from './podHttp';
 
   interface Props {
@@ -227,7 +223,21 @@
     };
   });
 
+  // The tabs past Overview / Describe / Events (and the yaml serializer) load on
+  // first open, so the cluster page does not carry logs, exec, metrics, the HTTP
+  // client and CodeMirror until a drawer asks for them.
+  const LogsLazy = lazyComponent(() => import('./LogsView.svelte'));
+  const ExecLazy = lazyComponent(() => import('./ExecView.svelte'));
+  const MetricsLazy = lazyComponent(() => import('./MetricsView.svelte'));
+  const PodsLazy = lazyComponent(() => import('./WorkloadPods.svelte'));
+  const HttpLazy = lazyComponent(() => import('./PodHttpPanel.svelte'));
+  let toYaml = $state.raw<((v: unknown, o: { lineWidth: number }) => string) | null>(null);
+  $effect(() => {
+    if (tab === 'manifest' && !toYaml) void import('yaml').then((m) => (toYaml = m.stringify));
+  });
+
   function manifestText(manifest: unknown): string {
+    if (!toYaml) return '';
     try {
       return toYaml(manifest, { lineWidth: 0 });
     } catch {
@@ -403,7 +413,7 @@
         {/if}
       </div>
     {:else if tab === 'manifest'}
-      {#if detailLoading}<div class="pad"><Skeleton rows={8} height={16} /></div>
+      {#if detailLoading || !toYaml}<div class="pad"><Skeleton rows={8} height={16} /></div>
       {:else if detailError}<div class="pad"><LoadState what="this object" variant="compact" error={detailError} empty={true} onretry={retry} /></div>
       {:else}
         <div class="code-tools">
@@ -412,7 +422,7 @@
         </div>
         <div class="code">
           {#key `${clusterId}/${kind}/${ns}/${name}`}
-            <CodeEditor path="manifest.yaml" root="" content={yaml} readOnly minimal wrap />
+            <LazyCodeEditor path="manifest.yaml" root="" content={yaml} readOnly minimal wrap />
           {/key}
         </div>
       {/if}
@@ -447,19 +457,19 @@
         </table>
       {/if}
     {:else if tab === 'pods'}
-      <WorkloadPods {clusterId} {ns} {selector} canEdit={canExec} onopenpod={(pod, t) => onopenpod?.(ns, pod, t)} />
+      <LazyMount lazy={PodsLazy} what="the pods" variant="panel" props={{ clusterId, ns, selector, canEdit: canExec, onopenpod: (pod: string, t?: K8sDrawerTab) => onopenpod?.(ns, pod, t) }} />
     {:else if tab === 'logs' && !isPod && canLogs}
-      <LogsView {clusterId} {ns} {selector} title={name} containers={templateContainers} onopenpod={(pod) => onopenpod?.(ns, pod, 'logs')} />
+      <LazyMount lazy={LogsLazy} what="the logs" variant="panel" props={{ clusterId, ns, selector, title: name, containers: templateContainers, onopenpod: (pod: string) => onopenpod?.(ns, pod, 'logs') }} />
     {:else if tab === 'logs' && canLogs}
-      <LogsView {clusterId} {ns} pod={name} {containers} />
+      <LazyMount lazy={LogsLazy} what="the logs" variant="panel" props={{ clusterId, ns, pod: name, containers }} />
     {:else if tab === 'terminal' && canExec}
-      <ExecView {clusterId} {ns} pod={name} {containers} autoOpen={autoExec} onautoopened={onautoexec} />
+      <LazyMount lazy={ExecLazy} what="the terminal" variant="panel" props={{ clusterId, ns, pod: name, containers, autoOpen: autoExec, onautoopened: onautoexec }} />
     {:else if tab === 'metrics' && canOperation('metrics')}
-      <MetricsView {clusterId} {ns} pod={name} workload={httpWorkload?.name ?? ''} />
+      <LazyMount lazy={MetricsLazy} what="the metrics" variant="panel" props={{ clusterId, ns, pod: name, workload: httpWorkload?.name ?? '' }} />
     {:else if tab === 'http' && canHttp}
       {#if detailLoading && !detail}<div class="pad"><Skeleton rows={4} height={22} /></div>
       {:else}
-        <PodHttpPanel {clusterId} {ns} pod={isPod ? name : undefined} workload={httpWorkload} manifest={detail?.manifest ?? null} canMutate={canEdit && canExec} />
+        <LazyMount lazy={HttpLazy} what="the HTTP panel" variant="panel" props={{ clusterId, ns, pod: isPod ? name : undefined, workload: httpWorkload, manifest: detail?.manifest ?? null, canMutate: canEdit && canExec }} />
       {/if}
     {/if}
   </div>

@@ -425,6 +425,7 @@ impl Library {
             category,
             version,
             description,
+            body_hash: otto_core::text::skill_body_hash(&body),
             body,
         };
 
@@ -989,10 +990,12 @@ mod tests {
         assert_eq!(got.category, "review");
         assert_eq!(got.version, 4);
         assert_eq!(got.body, body);
+        assert_eq!(got.body_hash, otto_core::text::skill_body_hash(body));
 
         let listed = lib.list_skills();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, "support-triage");
+        assert_eq!(listed[0].body_hash, got.body_hash);
 
         lib.delete_skill("support-triage").unwrap();
         assert!(lib.get_skill("support-triage").is_none());

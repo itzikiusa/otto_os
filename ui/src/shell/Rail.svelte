@@ -21,7 +21,11 @@
     resolveOrder,
     sidebarSections,
     visibleOrder,
+    groupLabel,
+    type SidebarModule,
   } from '../lib/sidebar';
+  import SidebarMore from './SidebarMore.svelte';
+  import { navUsage } from '../lib/stores/navUsage.svelte';
 
   // The collapsed rail mirrors the same resolved module list as the Navigator
   // (shared registry → RBAC filter + plugins → user's saved order, minus hidden
@@ -65,6 +69,8 @@
   function isActive(id: string): boolean {
     return activeId === id;
   }
+  // What he uses stays; the rest folds under one More button (sidebarMore.ts).
+  const split = $derived(navUsage.split(sections, activeId));
 
   // Same row menu as the Navigator (minus in-section moves): the side-by-side
   // entries, Favorites, and a way into Customize — which lives in the
@@ -108,6 +114,31 @@
   }
 </script>
 
+{#snippet railRow(m: SidebarModule)}
+  {@const inSide = sidePane.active && sidePane.key === m.id}
+  <button use:rowMenu
+    class="rail-btn"
+    class:active={isActive(m.id)}
+    aria-current={isActive(m.id) ? 'page' : undefined}
+    class:side={inSide}
+    onclick={(e) => navClick(e, m.id, m.label)}
+    oncontextmenu={(e) => moduleMenu(e, m.id, m.label)}
+    title={`${m.label} · ${groupLabel(m.group)}${inSide ? ' · in the side pane' : sidePane.supported ? ` — ${SPLIT_HINT}` : ''}`}
+    aria-label={`${m.label}${inSide ? ' (in the side pane)' : ''}${navBadge(m.id)?.spoken ?? ''}`}
+    data-testid={`rail-${m.id}`}
+    data-nav-id={m.id}
+    aria-busy={navPending.id === m.id || undefined}
+  >
+    <Icon name={m.icon} />
+    <!-- A session waiting on you outranks "working": the expanded sidebar
+         shows it as the Needs-you pill, the rail as a warning badge. -->
+    {#if navBadge(m.id)}
+      {@const b = navBadge(m.id)!}
+      <span class="rail-badge" class:needs={b.tone === 'needs'} title={b.title}>{b.count}</span>
+    {/if}
+  </button>
+{/snippet}
+
 <nav class="rail sidebar-material" aria-label="Modules">
   <button
     class="rail-btn"
@@ -145,35 +176,15 @@
   <NotificationBell />
 
   <div class="rail-modules" bind:this={listEl}>
-    {#each sections as sec, si (sec.group.id)}
+    {#each split.sections as sec, si (sec.group.id)}
       {#if si > 0}
         <div class="rail-sep" role="separator" aria-label={sec.group.label} data-testid="rail-sep"></div>
       {/if}
       {#each sec.modules as m (m.id)}
-        {@const inSide = sidePane.active && sidePane.key === m.id}
-        <button use:rowMenu
-          class="rail-btn"
-          class:active={isActive(m.id)}
-          aria-current={isActive(m.id) ? 'page' : undefined}
-          class:side={inSide}
-          onclick={(e) => navClick(e, m.id, m.label)}
-          oncontextmenu={(e) => moduleMenu(e, m.id, m.label)}
-          title={`${m.label} · ${sec.group.label}${inSide ? ' · in the side pane' : sidePane.supported ? ` — ${SPLIT_HINT}` : ''}`}
-          aria-label={`${m.label}${inSide ? ' (in the side pane)' : ''}${navBadge(m.id)?.spoken ?? ''}`}
-          data-testid={`rail-${m.id}`}
-          data-nav-id={m.id}
-          aria-busy={navPending.id === m.id || undefined}
-        >
-          <Icon name={m.icon} />
-          <!-- A session waiting on you outranks "working": the expanded sidebar
-               shows it as the Needs-you pill, the rail as a warning badge. -->
-          {#if navBadge(m.id)}
-            {@const b = navBadge(m.id)!}
-            <span class="rail-badge" class:needs={b.tone === 'needs'} title={b.title}>{b.count}</span>
-          {/if}
-        </button>
+        {@render railRow(m)}
       {/each}
     {/each}
+    <SidebarMore modules={split.more} row={railRow} rail />
   </div>
 
   <div class="rail-bottom">

@@ -5,7 +5,7 @@ import { loadErrorText } from '../../lib/loadError';
 import { toasts } from '../../lib/toast.svelte';
 import { toastError } from '../../lib/toastError';
 import { capabilitiesApi, type ModuleCapability } from './capabilities';
-import { indexPathFrom, parseIndex, periodKey, type InsightsIndex } from './insightsParse';
+import { indexPathFrom, parseIndex, periodKey, siblingPath, type InsightsIndex } from './insightsParse';
 import { runPollDelay } from './runPoll';
 
 export type InsightsFilter = 'all' | InsightKind;
@@ -95,6 +95,9 @@ class InsightsStore {
   olderError: string | null = $state(null);
   index: InsightsIndex = $state({ series: [], ledger: new Map() });
   fullMd: Record<string, string> = $state({});
+  /** Why a report's summary file could not be read, by report key: the reader
+   *  says so with Retry instead of showing a blank preview. */
+  summaryError: Record<string, string> = $state({});
   schedule = $state<InsightsConfig | null>(null);
 
   filter: InsightsFilter = $state('all');
@@ -195,6 +198,39 @@ class InsightsStore {
     } finally {
       this.loadingMore = false;
     }
+  }
+
+  /** Read the full summary markdown of these reports (once each). A failed
+   *  read keeps the listed excerpt and records why, for an inline Retry. */
+  loadSummaries(reports: InsightReport[]): void {
+    for (const x of reports) {
+      const k = periodKey(x);
+      if (this.fullMd[k] != null) continue;
+      const path = x.html_path ? siblingPath(x.html_path, 'summary') : null;
+      const read = path ? insightsApi.readText(path) : insightsApi.reportStatus(k, true).then(({ report }) => report?.summary ?? '');
+      void read.then(
+        (text) => {
+          if (k in this.summaryError) {
+            const rest = { ...this.summaryError };
+            delete rest[k];
+            this.summaryError = rest;
+          }
+          this.fullMd = { ...this.fullMd, [k]: text.trim() ? text : x.summary };
+        },
+        (e: unknown) => {
+          this.summaryError = { ...this.summaryError, [k]: loadErrorText(e) };
+          this.fullMd = { ...this.fullMd, [k]: x.summary };
+        },
+      );
+    }
+  }
+
+  /** Retry a failed summary read. */
+  retrySummary(r: InsightReport): void {
+    const rest = { ...this.fullMd };
+    delete rest[periodKey(r)];
+    this.fullMd = rest;
+    this.loadSummaries([r]);
   }
 
   async loadIndex(): Promise<void> {
@@ -353,6 +389,7 @@ class InsightsStore {
           this.reports = [...this.reports, ready];
         }
         this.fullMd = {};
+        this.summaryError = {};
         this.setFilter('all');
         this.selectedKey = periodKey(ready);
         void this.loadIndex();
@@ -379,6 +416,7 @@ class InsightsStore {
     this.olderError = null;
     this.index = { series: [], ledger: new Map() };
     this.fullMd = {};
+    this.summaryError = {};
     this.schedule = null;
     this.filter = 'all';
     this.selectedKey = null;

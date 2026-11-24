@@ -29,11 +29,15 @@
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
-  import DiffView from '../../lib/components/DiffView.svelte';
-  import SkillEditor from './SkillEditor.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import SkillActivity from './SkillActivity.svelte';
-  import SyncProvidersModal from './SyncProvidersModal.svelte';
   import { metaList, parseFrontmatter, sourceLabel, type SkillGroup, type VariantSource } from './skillGroups';
+
+  // The editor (CodeMirror), the diff and the sync dialog load when opened.
+  const EditorLazy = lazyComponent(() => import('./SkillEditor.svelte'));
+  const DiffLazy = lazyComponent(() => import('../../lib/components/DiffView.svelte'));
+  const SyncLazy = lazyComponent(() => import('./SyncProvidersModal.svelte'));
   import { deleteQuestion, installedNote, noteKeptCopies, noteUserOwned, replaceQuestion } from './bundledActions';
 
   interface Props {
@@ -386,7 +390,7 @@
         {:else if compareBefore == null || compareAfter == null}
           <LoadState what="both copies" loading empty />
         {:else}
-          <DiffView before={compareBefore} after={compareAfter} mode="word" contextLines={3} />
+          <LazyMount lazy={DiffLazy} what="the diff" variant="panel" props={{ before: compareBefore, after: compareAfter, mode: 'word', contextLines: 3 }} />
         {/if}
       </section>
     {/if}
@@ -450,23 +454,18 @@
         </div>
       {/if}
     {:else if tab === 'edit'}
-      <SkillEditor
-        name={group.name}
-        source={variant.source}
-        {files}
-        skillMd={body}
-        initialFile={editorFile}
-        onsaved={(next, md) => {
-          files = next;
-          if (md != null) {
-            body = md;
-            onchanged();
-          }
+      <LazyMount lazy={EditorLazy} what="the editor" variant="panel"
+        props={{
+          name: group.name, source: variant.source, files, skillMd: body, initialFile: editorFile,
+          onsaved: (next: SkillFileEntry[], md: string | null | undefined) => {
+            files = next;
+            if (md != null) {
+              body = md;
+              onchanged();
+            }
+          },
+          oninstall: install, oncopytolibrary: hasLibrary ? undefined : copyToLibrary, onevaluate, ondirty: setDirty,
         }}
-        oninstall={install}
-        oncopytolibrary={hasLibrary ? undefined : copyToLibrary}
-        {onevaluate}
-        ondirty={setDirty}
       />
     {:else}
       <SkillActivity {group} view={tab} {wsId} {onevaluate} {onreview} {onopenrun} {onopenreview} onview={(v) => ontab(v)} />
@@ -475,7 +474,7 @@
 </div>
 
 {#if syncOpen && driftedProviders.length > 0}
-  <SyncProvidersModal name={group.name} providers={driftedProviders} onclose={() => (syncOpen = false)} onsynced={onchanged} />
+  <LazyMount lazy={SyncLazy} what="the sync dialog" quiet onerror={() => (syncOpen = false)} props={{ name: group.name, providers: driftedProviders, onclose: () => (syncOpen = false), onsynced: onchanged }} />
 {/if}
 
 <style>

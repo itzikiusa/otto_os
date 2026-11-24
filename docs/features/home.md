@@ -1,9 +1,21 @@
 # Home — the personal dashboard
 
 > **Route:** `#/home` · **Sidebar:** first entry (ungated) · **Code:** `ui/src/modules/home/`
-> _Last verified against the codebase: **2026-10-05**._
+> _Last verified against the codebase: **2026-11-24**._
 
-Home is a **general dashboard** that fronts the rest of the app: up to **4 views**,
+Home opens on **one centred reading column** (760 px): the greeting and
+today's line, then **Needs you** and **Working** as inbox rows that say their
+state in words (Approval · Needs you · Failed · Working — approvals are answered
+in the row), then **Up next** and **Recent** only when they hold something. The
+floating bar is the page's one primary, docked under the column (it stays put
+while the column scrolls); a phone or tablet, which has no in-app bar, gets the
+same **Ask anything** entry at the top of the column, opening the command
+sheet. Below the inbox, a **Pinned** section holds the widgets, with the
+spaces, *Add widget* and cycling in its header row. A first visit pins nothing
+— the inbox already lists the agents — so the section is one calm line with
+quick-add chips.
+
+The Pinned widgets are a **general dashboard** that fronts the rest of the app: up to **4 views**,
 each a **12-column grid of up to 8 live boxes** (Agents, Mission Control, a DB
 dashboard, Kubernetes, Insights, Usage, Classrooms). Views **slide** — arrows, dots, `←`/`→`,
 swipe — and can **auto-rotate every 30 seconds** (opt-in); every box can be **resized** in
@@ -13,8 +25,9 @@ grid units and **zoomed** to fill the page. The layout is a per-device preferenc
 ## Setup
 
 None. Home is visible to every authenticated member. On first visit it seeds one
-view ("Overview") with the box kinds the current role may view — Agents, Mission
-Control, Kubernetes, DB dashboard — so the page is never blank. Each **box kind**
+view ("Overview") with only the widgets that have data — Kubernetes when a
+cluster is registered, a DB dashboard when one exists; the inbox above covers
+agents and threads. Each **box kind**
 is gated by the same RBAC feature as the module it fronts (see the table below);
 the "Add box" picker only offers kinds the user can view.
 

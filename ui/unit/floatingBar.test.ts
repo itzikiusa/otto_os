@@ -310,6 +310,8 @@ test('presence: auto docks off Home and while working, is full when open or on H
   assert.equal(barPresence(base), 'dock');
   assert.equal(barPresence({ ...base, surface: true }), 'full');
   assert.equal(barPresence({ ...base, scrolling: true }), 'dock');
+  assert.equal(barPresence({ ...base, surface: true, scrolling: true }), 'full', 'Home keeps its composer while the column scrolls');
+  assert.equal(barPresence({ ...base, surface: true, workFocus: true }), 'dock');
   assert.equal(barPresence({ ...base, workFocus: true }), 'dock');
   assert.equal(barPresence({ ...base, workFocus: true, surface: true }), 'dock');
   assert.equal(barPresence({ ...base, open: true, workFocus: true }), 'full');

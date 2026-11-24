@@ -9,6 +9,8 @@
   // (Agents with its nested session lists in Work), workspaces section,
   // user/settings at the bottom.
   import { navBadge } from '../lib/navBadge';
+  import SidebarMore from './SidebarMore.svelte';
+  import { navUsage } from '../lib/stores/navUsage.svelte';
   import Icon from '../lib/components/Icon.svelte';
   import NotificationBell from './NotificationBell.svelte';
   import { router } from '../lib/router.svelte';
@@ -108,10 +110,8 @@
 
   const workspaceMenuItems = (w: WorkspaceWithRole): MenuItem[] => wsMenu(w, () => (removedOpen = true));
 
-  // ── Module list (shared registry → RBAC + plugins → user order/visibility) ──
-  // `resolved` is the full ordered list (incl. hidden); `visible` drops hidden
-  // modules; `navList` is what we actually render — everything while editing (so
-  // hidden rows can be toggled back on), only the visible ones otherwise.
+  // ── Module list: `resolved` = full order (incl. hidden), `visible` drops hidden;
+  // `navList` renders everything while editing (to re-show), else only visible.
   const pluginEntries = $derived(
     plugins.list
       .filter((p) => auth.canPlugin(p.slug, 'view'))
@@ -122,10 +122,8 @@
   );
   const visible = $derived(visibleOrder(resolved, ui.sidebarHidden));
   const navList = $derived(ui.sidebarEditMode ? resolved : visible);
-  // Sections: Favorites first (only while it holds something), then Work /
-  // Automate / Build / … in the user's section order; the saved module order
-  // applies within each. A favorited module shows ONLY under Favorites. A
-  // section whose modules are all hidden (or all favorited) drops out.
+  // Sections: Favorites first (when non-empty), then the user's section order;
+  // a favorite shows ONLY under Favorites; an emptied section drops out.
   const sections = $derived(sidebarSections(navList, ui.sidebarFavorites, ui.sidebarGroupOrder));
   /** The favorites as rendered right now (RBAC-filtered; hidden ones only
    *  while editing), in order — what the move/drag bounds are measured on. */
@@ -134,12 +132,13 @@
     return favIds.includes(id);
   }
 
-  // The sidebar id the current route highlights (plugin slug / default route /
-  // database+brokers → Connections are resolved in activeNavId).
+  // The sidebar id the current route highlights (see activeNavId).
   const activeId = $derived(activeNavId(router.parts));
   function isActive(id: string): boolean {
     return activeId === id;
   }
+  // What he uses stays; the rest folds under one More row (sidebarMore.ts) — never while customizing.
+  const split = $derived(ui.sidebarEditMode ? { sections, more: [] } : navUsage.split(sections, activeId));
   // The section holding the current page — Favorites when it's favorited.
   const activeGroup = $derived(
     ui.sidebarFavorites.includes(activeId) && resolved.some((m) => m.id === activeId)
@@ -503,7 +502,7 @@
            nested session list) and plain rows render normally. Connections is a
            plain row — open connections live as tabs on the Agents view, so the
            sidebar doesn't repeat them. -->
-      {#each sections as sec (sec.group.id)}
+      {#each split.sections as sec (sec.group.id)}
         {@const open = sectionOpen(sec)}
         {@const pinned = sectionPinned(sec)}
         {@const fav = sec.group.id === FAVORITES_ID}
@@ -586,6 +585,7 @@
           {/if}
         </div>
       {/each}
+      <SidebarMore modules={split.more} row={simpleRow} />
     </div>
 
     <div class="nav-section">

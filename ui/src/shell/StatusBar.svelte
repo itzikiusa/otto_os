@@ -26,15 +26,16 @@
   }
 
   // Root-only daemon facts, read once and never polled (daemonStatus): the
-  // secret store's mode, and what the network listener is BOUND to. `/meta`
-  // is re-read on boot, on a daemon restart (new boot id) and after a Daemon
-  // save, so re-reading the posture with it is what clears "after restart".
+  // secret store's mode, and what the network listener is BOUND to. The
+  // posture is read once the events socket says which daemon this is and again
+  // only when it restarts (a new boot id) — that clears "after restart"; a
+  // Daemon save re-reads it itself. Never on a /meta re-read: boot re-reads
+  // /meta up to 10 times while model catalogs settle.
   $effect(() => {
     daemonStatus.ensureSecrets(auth.me?.id, auth.isRoot);
   });
   $effect(() => {
-    void auth.meta;
-    daemonStatus.refreshPosture(auth.isRoot);
+    if (events.bootId !== null) daemonStatus.refreshPosture(auth.isRoot);
   });
   const listener = $derived(listenerIndicator(auth.meta?.network_listener, daemonStatus.posture));
 

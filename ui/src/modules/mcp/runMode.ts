@@ -17,13 +17,13 @@ export function serverRuns(s: { managed: boolean }): McpRunMode {
 }
 
 export const RUNS_LABEL: Record<McpRunMode, string> = {
-  native: 'Native',
-  governed: 'Governed',
+  native: 'Direct',
+  governed: 'Through Otto',
 };
 
 /** The badge's one-line explanation (a native row's tooltip and form note). */
 export const NOT_GOVERNED_NOTE =
-  'Not governed: the agent CLI runs it directly, so no policy, approval or audit applies.';
+  'Direct: the agent CLI runs it itself, so no policy, approval or audit applies.';
 
 /** Where Settings ▸ MCP servers (`#/settings/mcp-servers`) lands now. */
 export const SERVERS_ROUTE = 'mcp/servers';
@@ -40,8 +40,8 @@ export function switchBlocked(s: { transport: string; managed: boolean }, to: Mc
 export function switchConfirm(name: string, to: McpRunMode): { title: string; message: string; confirmLabel: string } {
   if (to === 'governed') {
     return {
-      title: 'Run through Otto’s gateway',
-      confirmLabel: 'Switch to governed',
+      title: 'Run through Otto',
+      confirmLabel: 'Run through Otto',
       message:
         `“${name}” stops being written into each session’s .mcp.json. Otto’s gateway runs it instead, under your policies, approvals and audit. ` +
         `Agents then see its tools under different names (mcp__${name}__<tool>), so skills and prompts that name the native tools must be updated. ` +
@@ -49,8 +49,8 @@ export function switchConfirm(name: string, to: McpRunMode): { title: string; me
     };
   }
   return {
-    title: 'Run natively',
-    confirmLabel: 'Switch to native',
+    title: 'Run directly',
+    confirmLabel: 'Run directly',
     message:
       `“${name}” is written into each new session’s .mcp.json and launched by the agent CLI under its own tool names. ` +
       'No policy, approval or audit applies to it, and every agent session in this workspace gets it: its per-person access rules are kept but not enforced until you switch back. ' +

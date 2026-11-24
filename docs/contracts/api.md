@@ -2574,7 +2574,7 @@ are root; per-workspace context selection is workspace-scoped.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /library/skills | member (Skills View) | — | `LibrarySkill[]` |
+| GET /library/skills | member (Skills View) | — | `LibrarySkill[]` (every `LibrarySkill` carries `body_hash`: SHA-256 hex of its SKILL.md normalised for comparison — CRLF/CR as LF, trailing whitespace off each line, edges trimmed) |
 | POST /library/skills | root | CreateLibrarySkillReq (`name`, `category?`, `description?`, `body?`) | LibrarySkill (new; 409 if it exists) |
 | POST /library/skills/import | root | raw `.zip` body, `?name=` override | LibrarySkill (imported; zip-slip + size guarded) plus `kept_copies?: [{copy, kept_at}]` (Otto-owned provider copies the person had edited, moved to `<library>/provider-skills-backup/` before the refresh — see Bundled skills) |
 | GET /library/skills/{name} | member (Skills View) | — | `LibrarySkill` |
@@ -2584,7 +2584,7 @@ are root; per-workspace context selection is workspace-scoped.
 | GET /library/skills/{name}/file | member (Skills View) | `?path=<rel>` | SkillFileContentResp (one file's text) plus `hash`: SHA-256 (hex) of the file's bytes on disk |
 | PUT /library/skills/{name}/file | root | WriteSkillFileReq (`path`, `content`, `create_only?` — default false; true → **409** when `path` already exists instead of overwriting, used by "New file"; `if_hash?` — the SHA-256 the editor read: when the file on disk no longer matches, nothing is written and the reply is **409** `{code: "conflict", message, current_hash}` (`current_hash` null when the file is gone); `report?` — default false; true → the reply is `{files: SkillFileEntry[], kept_copies?}` instead of the bare list) | `SkillFileEntry[]` (refreshed tree; evicts cache). After the write the skill is re-copied into each provider skill folder (`~/.claude/skills`, `$CODEX_HOME/skills`, `~/.gemini/skills`) whose `.otto-managed.json` owns it — never into a folder where Otto does not own the copy, and a removed copy is not recreated. An owned copy the person edited in place is moved to `<library>/provider-skills-backup/` first and listed in `kept_copies` (with `report: true`) |
 | DELETE /library/skills/{name}/file | root | `?path=<rel>` | 204, or 200 `{kept_copies}` when an edited provider copy was moved aside (SKILL.md cannot be deleted; Otto-owned provider copies are refreshed) |
-| GET /library/provider-skills | member (Skills View) | — | `ProviderSkillInfo[]` (on-disk `~/.claude|.codex|.agy/skills`, read-only) |
+| GET /library/provider-skills | member (Skills View) | — | `ProviderSkillInfo[]` (on-disk `~/.claude|.codex|.agy/skills`, read-only); each carries `body_hash`, the same hash as `LibrarySkill.body_hash`, so Skills Lab tells a copy that differs without fetching every body |
 | GET /library/provider-skills/{provider}/{name} | member (Skills View) | — | ProviderSkillContent (body + file list) |
 | GET /library/provider-skills/{provider}/{name}/file | member (Skills View) | `?path=<rel>` | SkillFileContentResp |
 | GET /library/souls | member (Skills View) | — | `LibrarySoul[]` |
@@ -6759,6 +6759,7 @@ stops the owned collector. Existing history expires under its configured TTL.
 | PUT | `/telemetry/config` | Full `TelemetryConfig`; validates, persists and applies live; returns config |
 | GET | `/telemetry/status` | `TelemetryStatus`: readiness, queue/dropped/exported counts, last error, analysis schedule, profile support |
 | POST | `/telemetry/ingest` | `{spans: TelemetrySpan[]}` → `{accepted: number}`; max 100 spans / 128 KiB; zero accepted while off |
+| GET | `/telemetry/navigation?days=30` | `NavigationCount[]` — `{module, device: "desktop" \| "phone" \| "tablet", count}` per module and device class, from a daily roll-up of `ui.navigation` spans kept 30 days (days clamped 1–30; empty before telemetry ever ran). No content: the module is the span's allowlisted component. Feeds the sidebar's "used lately" list |
 | GET | `/telemetry/overview?hours=24` | `TelemetryOverview`: operation percentiles/count/errors and CPU/RSS time series, from minute materialized views; hours clamped 1–720 |
 | GET | `/telemetry/suggestions` | `TelemetrySuggestion[]`, open deduplicated performance recommendations |
 | POST | `/telemetry/analyze` | Run bounded analysis now; returns current recommendations |
@@ -6784,7 +6785,8 @@ nullable `parent_span_id`, safe static `name`, `component`, `kind`,
 `start_unix_nano` (integer or decimal string on ingest), `duration_ms`, `status`,
 `attributes`. Browser spans accept only known module names and the operations
 `ui.navigation`, `ui.chunk`, `ui.render`, `ui.long_task`, `ui.frame_delay`, `http.client`,
-`ui.request.queue`, `ui.response.decode`. Browser client spans remain exactly
+`ui.request.queue`, `ui.response.decode`. A `ui.navigation` span may carry
+`otto.device` = `desktop` | `phone` | `tablet` (the device class, nothing more). Browser client spans remain exactly
 `http.client`; arbitrary endpoint-derived browser names and raw route/URL
 attributes reject the entire batch atomically. Endpoint attribution remains in
 linked server spans, whose names use matched route templates. While telemetry

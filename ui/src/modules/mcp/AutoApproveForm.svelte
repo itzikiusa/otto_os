@@ -112,7 +112,7 @@
       <div class="seg">
         <label class="check">
           <input type="radio" name="aa-kind" value="category" bind:group={kind} />
-          <span>Every mutating tool in a category</span>
+          <span>Every tool in a category that can change things</span>
         </label>
         <label class="check">
           <input type="radio" name="aa-kind" value="tool" bind:group={kind} />
@@ -139,7 +139,7 @@
         {/if}
       {:else}
         <select bind:value={tool} aria-label="Tool" data-testid="mcp-auto-approve-tool">
-          <option value="" disabled>Choose a mutating tool…</option>
+          <option value="" disabled>Choose a tool that can change things…</option>
           {#each catalog as group (group.category)}
             <optgroup label={group.category}>
               {#each group.tools as t (t.name)}

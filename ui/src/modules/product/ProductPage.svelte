@@ -22,17 +22,8 @@
   import { product, buildTree, type TreeNode } from '../../lib/stores/product.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
-  import OverviewTab from './OverviewTab.svelte';
-  import AnalysisTab from './AnalysisTab.svelte';
-  import QuestionsTab from './QuestionsTab.svelte';
-  import NotesTab from './NotesTab.svelte';
-  import RewriteTab from './RewriteTab.svelte';
-  import TestCasesTab from './TestCasesTab.svelte';
-  import PlanTab from './PlanTab.svelte';
-  import MockupsTab from './MockupsTab.svelte';
   import { canonicalProductTab } from './chatActions';
   import { nextStoryAfterDelete } from './storySelection';
-  import ChatTab from './ChatTab.svelte';
   import ProductModeTabs, { type ProductMode } from '../../lib/components/ProductModeTabs.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
@@ -49,6 +40,15 @@
   const HistoryLazy = lazyComponent(() => import('./HistoryTab.svelte'));
   const InjectLazy = lazyComponent(() => import('./InjectTab.svelte'));
   const ImportLazy = lazyComponent(() => import('./ImportDialog.svelte'));
+  const OverviewTabLazy = lazyComponent(() => import('./OverviewTab.svelte'));
+  const AnalysisTabLazy = lazyComponent(() => import('./AnalysisTab.svelte'));
+  const QuestionsTabLazy = lazyComponent(() => import('./QuestionsTab.svelte'));
+  const NotesTabLazy = lazyComponent(() => import('./NotesTab.svelte'));
+  const RewriteTabLazy = lazyComponent(() => import('./RewriteTab.svelte'));
+  const TestCasesTabLazy = lazyComponent(() => import('./TestCasesTab.svelte'));
+  const PlanTabLazy = lazyComponent(() => import('./PlanTab.svelte'));
+  const MockupsTabLazy = lazyComponent(() => import('./MockupsTab.svelte'));
+  const ChatTabLazy = lazyComponent(() => import('./ChatTab.svelte'));
 
   let importOpen = $state(false);
   let draftCreating = $state(false);
@@ -889,28 +889,28 @@
         <!-- Keyed by story: inline editors, Jira loaders and their in-flight
              state are per story, so A's editor/transitions can never write to B. -->
         {#key product.selectedId}
-          <OverviewTab />
+          <LazyMount lazy={OverviewTabLazy} what="the overview" variant="panel" />
         {/key}
       {:else if product.tab === 'chat'}
-        <ChatTab />
+        <LazyMount lazy={ChatTabLazy} what="the chat" variant="panel" />
       {:else if product.tab === 'analysis'}
-        <AnalysisTab />
+        <LazyMount lazy={AnalysisTabLazy} what="the analysis" variant="panel" />
       {:else if product.tab === 'questions'}
-        <QuestionsTab />
+        <LazyMount lazy={QuestionsTabLazy} what="the questions" variant="panel" />
       {:else if product.tab === 'notes'}
-        <NotesTab />
+        <LazyMount lazy={NotesTabLazy} what="the notes" variant="panel" />
       {:else if product.tab === 'rewrite'}
-        {#key product.selectedId}<RewriteTab />{/key}
+        {#key product.selectedId}<LazyMount lazy={RewriteTabLazy} what="the rewrite" variant="panel" />{/key}
       {:else if product.tab === 'testcases'}
-        <TestCasesTab />
+        <LazyMount lazy={TestCasesTabLazy} what="the test cases" variant="panel" />
       {:else if product.tab === 'plan'}
-        {#key product.selectedId}<PlanTab />{/key}
+        {#key product.selectedId}<LazyMount lazy={PlanTabLazy} what="the plan" variant="panel" />{/key}
       {:else if product.tab === 'history'}
         <LazyMount lazy={HistoryLazy} what="the story history" variant="panel" />
       {:else if product.tab === 'inject'}
         <LazyMount lazy={InjectLazy} what="the inject tab" variant="panel" />
       {:else if product.tab === 'mockups'}
-        <MockupsTab />
+        <LazyMount lazy={MockupsTabLazy} what="the mockups" variant="panel" />
       {/if}
     </div>
   </div>

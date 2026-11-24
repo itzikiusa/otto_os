@@ -8,8 +8,8 @@ use axum::{
 use otto_core::Error;
 use otto_state::SettingsRepo;
 use otto_telemetry::{
-    NativeProfile, SpanRecord, Suggestion, TelemetryConfig, TelemetryOverview, TelemetryService,
-    TelemetryStatus,
+    NativeProfile, NavigationCount, SpanRecord, Suggestion, TelemetryConfig, TelemetryOverview,
+    TelemetryService, TelemetryStatus,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -70,6 +70,24 @@ pub async fn overview(
     Ok(Json(
         service(&ctx)?
             .overview(q.hours.unwrap_or(24).clamp(1, 720))
+            .await
+            .map_err(upstream)?,
+    ))
+}
+#[derive(Deserialize)]
+pub struct Days {
+    pub days: Option<u32>,
+}
+/// Navigations per module and device class (the sidebar's "used lately").
+pub async fn navigation(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Query(q): Query<Days>,
+) -> ApiResult<Json<Vec<NavigationCount>>> {
+    require_root(&user)?;
+    Ok(Json(
+        service(&ctx)?
+            .navigation(q.days.unwrap_or(30))
             .await
             .map_err(upstream)?,
     ))

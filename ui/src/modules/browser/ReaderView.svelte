@@ -342,7 +342,7 @@
     position: relative;
   }
   .degraded {
-    max-width: 72ch;
+    max-inline-size: var(--read-col);
     margin: 0 auto 12px;
     background: var(--warning-soft);
     color: var(--text);
@@ -355,7 +355,7 @@
     align-items: center;
     justify-content: flex-end;
     gap: 8px;
-    max-width: 72ch;
+    max-inline-size: var(--read-col);
     margin: 0 auto 8px;
   }
   .mark-hint {
@@ -367,10 +367,12 @@
     color: var(--accent-text);
     border-color: var(--accent);
   }
+  /* The reading surface (patterns.md §10): --fs-l at 1.6 in the 760 px column. */
   .page {
-    max-width: 72ch;
+    max-inline-size: var(--read-col);
     margin: 0 auto;
     color: var(--text);
+    font-size: var(--fs-l);
     line-height: 1.6;
     overflow-wrap: anywhere;
   }
@@ -399,7 +401,7 @@
   .mark-composer {
     position: sticky;
     bottom: 0;
-    max-width: 72ch;
+    max-inline-size: var(--read-col);
     margin: 12px auto 0;
     padding: 10px 12px;
     border: 1px solid var(--accent);

@@ -1258,8 +1258,7 @@
                   {/if}
                 </div>
                 <div class="meta">
-                  <span>{cadenceLabel(t.schedule, t.timezone, { cronExpr: false })}</span>
-                  {#if (t.schedule?.cadence as string) === 'cron'}<code class="cron">{t.schedule?.expr as string}</code><span>{t.timezone || 'UTC'}</span>{/if}
+                  <span title={(t.schedule?.cadence as string) === 'cron' ? `cron ${t.schedule?.expr as string}` : undefined}>{cadenceLabel(t.schedule, t.timezone, { cronWords: true })}</span>
                   <span aria-hidden="true">·</span>
                   <span class="dest" title={destTitle(t)}>{destLabel(t)}</span>
                   <!-- When it fires next (ticks via RelTime; exact time on hover). -->
@@ -1401,7 +1400,6 @@
   .name { font-size: var(--fs-m); font-weight: 600; color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; color: var(--text-dim); font-size: var(--fs-s); min-width: 0; }
   .dest { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 36ch; }
-  .cron { font-family: var(--font-mono); font-size: var(--fs-xs); padding: 0 4px; border-radius: var(--radius-s); background: var(--surface-2); color: var(--text); direction: ltr; }
   .task-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
   .runs { margin-block-start: 10px; border-block-start: 1px solid var(--border); padding-block-start: 8px; display: flex; flex-direction: column; gap: 6px; }
   .run { display: flex; align-items: center; gap: 8px; font-size: var(--fs-s); flex-wrap: wrap; color: var(--text); min-height: 26px; }
