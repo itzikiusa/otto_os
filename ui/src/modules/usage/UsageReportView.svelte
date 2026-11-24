@@ -26,7 +26,9 @@
   });
 
   const report = $derived(usage.report);
-  const sessions = $derived(report ? report.sessions.slice(0, sessionLimit) : []);
+  // A slim report (a range switch after "Show more") shows the first page again.
+  const limit = $derived(usage.reportFull ? sessionLimit : SESSION_PAGE);
+  const sessions = $derived(report ? report.sessions.slice(0, limit) : []);
 
   async function download(): Promise<void> {
     // The page holds the slim report; the export needs every session and the
@@ -42,8 +44,9 @@
   }
 
   async function showMore(): Promise<void> {
-    if (!usage.reportFull) await usage.fullReport();
-    sessionLimit += SESSION_PAGE * 4;
+    const from = limit;
+    if (!usage.reportFull && !(await usage.fullReport())) return;
+    sessionLimit = from + SESSION_PAGE * 4;
   }
 
   function scopeLabel(): string {
@@ -134,10 +137,10 @@
         r: s,
       })),
     )}
-    {#if report.sessions.length > sessionLimit}
+    {#if report.sessions.length > limit}
       <div class="more">
         <button class="btn small" disabled={usage.reportLoading} onclick={() => void showMore()}>
-          {#if usage.reportFull}Show more sessions ({report.sessions.length - sessionLimit} hidden){:else}Show more sessions{/if}
+          {#if usage.reportFull}Show more sessions ({report.sessions.length - limit} hidden){:else}Show more sessions{/if}
         </button>
       </div>
     {/if}

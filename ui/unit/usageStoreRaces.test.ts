@@ -4,6 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadSource, deferred } from './sourceHarness.ts';
+import { componentFunctions } from './componentFunctions.ts';
 
 type Get = (path: string) => Promise<unknown>;
 function store(get: Get, extra: { put?: (p: string, b: unknown) => Promise<unknown>; files?: string[] } = {}) {
@@ -62,4 +63,21 @@ test('an export is named after the window its rows are from', () => {
   usage.exportProvidersCsv();
   usage.exportSummaryJson();
   assert.deepEqual(files, ['otto-usage-providers-7d.csv', 'otto-usage-summary-7d.json']);
+});
+
+test('after an export, the page report reloads slim (no day×model table, 1000 sessions)', async () => {
+  const paths: string[] = [];
+  const usage = store(async (p) => { paths.push(p); return { days: 30, otto_only: true }; });
+  usage.reportFull = true; // an earlier Download HTML / Show more
+  await usage.loadReport();
+  assert.doesNotMatch(paths[0], /include=daily_models/);
+  assert.equal(usage.reportFull, false);
+});
+
+test('Show more that fails to load the full report shows no more rows', async () => {
+  const view = componentFunctions(new URL('../src/modules/usage/UsageReportView.svelte', import.meta.url), ['showMore'], {
+    usage: { reportFull: false, fullReport: async () => null }, SESSION_PAGE: 100, sessionLimit: 100, limit: 100,
+  });
+  await view.showMore();
+  assert.equal(view.sessionLimit, 100);
 });

@@ -501,8 +501,8 @@ class UsageStore {
 
   /** Load the ccusage-style report for the current window + scope. Slim by
    *  default (the page renders ≤100 sessions and never the day×model table);
-   *  `full` (or an already-full report) asks for the export's shape. */
-  async loadReport(full = this.reportFull): Promise<void> {
+   *  `full` (export / "Show more", via `fullReport`) asks for the export's shape. */
+  async loadReport(full = false): Promise<void> {
     const mine = ++this.reportSeq;
     this.reportLoading = true;
     const shape = full ? `sessions_limit=${REPORT_FULL_SESSIONS}&include=daily_models` : `sessions_limit=${REPORT_PAGE_SESSIONS}`;
