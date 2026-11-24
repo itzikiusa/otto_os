@@ -75,3 +75,15 @@ test('Report and Diagnostics stay one visible click away', async ({ page }) => {
   await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Report…' }).click();
   await expect(page.getByTestId('usage-report')).toBeVisible();
 });
+
+// The window's cost is said once (design review 2, N9): without a month
+// outlook (a 7-day window past the 7th) the headline is that figure, and the
+// line under it does not repeat it.
+test('the window cost is said once', async ({ page }) => {
+  await routeUsage(page);
+  await page.goto('/#/usage');
+  const spend = page.getByTestId('usage-spend');
+  await expect(spend).toBeVisible();
+  await page.getByText('7d', { exact: true }).click();
+  await expect(spend.getByText(/Last 7 days/)).toHaveCount(1);
+});
