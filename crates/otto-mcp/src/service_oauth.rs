@@ -239,9 +239,18 @@ fn bearer_allowed(server_url: Option<&str>, t: &Tokens) -> bool {
     server_url.is_some_and(|u| u == t.resource && otto_netguard::require_tls_or_loopback(u).is_ok())
 }
 
-/// A transport error that is the server asking for authorization.
+/// A transport error that is the server asking for authorization: the
+/// status leads the error (after the client's own step prefixes), so a body
+/// that merely says "http 401" never forces a refresh and a re-sent call.
 pub(crate) fn is_unauthorized(error: &str) -> bool {
-    error.contains("http 401")
+    let mut e = error;
+    while let Some(rest) = ["initialize: ", "op: ", "post: ", "open event stream: "]
+        .iter()
+        .find_map(|p| e.strip_prefix(p))
+    {
+        e = rest;
+    }
+    e.starts_with("http 401 ")
 }
 
 #[cfg(test)]
@@ -259,6 +268,20 @@ mod tests {
             resource: resource.into(),
             auth_host: String::new(),
         }
+    }
+
+    #[test]
+    fn a_401_is_read_from_the_status_not_the_body() {
+        assert!(is_unauthorized("http 401 Unauthorized: {}"));
+        assert!(is_unauthorized("initialize: http 401 Unauthorized: x"));
+        assert!(is_unauthorized("post: http 401 Unauthorized"));
+        assert!(is_unauthorized(
+            "open event stream: http 401 Unauthorized (text/html)"
+        ));
+        assert!(!is_unauthorized(
+            "http 500 Internal Server Error: http 401 Unauthorized"
+        ));
+        assert!(!is_unauthorized("server error: http 401 Unauthorized"));
     }
 
     #[test]
