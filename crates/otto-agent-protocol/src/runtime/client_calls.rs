@@ -32,8 +32,8 @@ struct Terminal {
     /// The command's process group (it leads its own): a kill reaches
     /// everything it started, also after the shell itself exited.
     pgid: Option<i32>,
-    /// The group was empty when the command exited: its id may be reused
-    /// by an unrelated group, so it is never signalled again.
+    /// The group was empty when the command exited, or was killed: its id
+    /// may be reused by an unrelated group, so it is never signalled again.
     gone: std::sync::atomic::AtomicBool,
 }
 
@@ -376,11 +376,10 @@ fn kill(t: &Terminal) {
         unsafe {
             libc::killpg(pgid, libc::SIGKILL);
         }
-        // The shell is reaped and SIGKILL ended the rest of the group: its id
-        // is free for reuse, so it is never signalled again.
-        if t.exit.borrow().is_some() {
-            t.gone.store(true, std::sync::atomic::Ordering::Release);
-        }
+        // SIGKILL ended every process in the group and none can join it
+        // again: once the shell is reaped its id is free for reuse, so it is
+        // never signalled again.
+        t.gone.store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -444,9 +443,10 @@ mod tests {
             !group_gone(Some(left)),
             "its background child is still in it"
         );
-        // Review R2-006: a kill after the shell exited ends the group and
-        // marks it gone, so a later release never signals its reused id.
-        let (_tx, exit) = watch::channel(Some((Some(0), None)));
+        // Review R2-006 / R3-002: a kill ends the group and marks it gone,
+        // also while the reaped shell's exit is not published yet (the pipe
+        // drain), so a later release never signals its reused id.
+        let (_tx, exit) = watch::channel(None);
         let t = Terminal {
             output: Mutex::new((String::new(), false)),
             exit,
