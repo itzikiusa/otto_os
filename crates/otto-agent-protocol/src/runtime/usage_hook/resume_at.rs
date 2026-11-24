@@ -116,9 +116,10 @@ impl AgentRuntime {
                 return;
             };
             for sid in ids {
+                // Read under the lock: a resume set meanwhile is not replaced.
+                let mut timers = rt.inner.resume_timers.lock().await;
                 if let Ok(rec) = rt.inner.repo.get(&sid).await {
                     if let (false, Some(at)) = (rec.closed, resume_at_of(&rec.session)) {
-                        let mut timers = rt.inner.resume_timers.lock().await;
                         if let Some(old) = timers.insert(sid.clone(), rt.arm_resume(sid, at)) {
                             old.abort();
                         }
