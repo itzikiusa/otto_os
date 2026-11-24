@@ -953,10 +953,10 @@
   /* The status WORD (lib/statusWords.ts): calm, toned only when it needs you,
      failed or finished unread — never a bare dot. */
   .pane-word {
-    /* A calm word gives way before the title in a narrow pane (M7: the title
-       says WHICH session; it shrank to "S…" beside a whole "Working"). A
-       word that wants you never shrinks. The folder goes first (1000). */
-    flex: 0 100 auto;
+    /* Whole while the title has room; only in a micro pane (below) does a
+       calm word give way before the title (M7: the title says WHICH session;
+       it shrank to "S…" beside a whole "Working"). */
+    flex-shrink: 0;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -968,7 +968,6 @@
   .pane-word.warning,
   .pane-word.danger,
   .pane-word.success {
-    flex-shrink: 0;
     font-weight: 600;
   }
   .pane-word.warning {
@@ -1148,6 +1147,10 @@
   @container pane (width < 200px) {
     .pane-head {
       padding-inline: 6px 2px;
+    }
+    /* A word that wants you never shrinks. */
+    .pane-head .pane-word:not(.warning, .danger, .success) {
+      flex-shrink: 100;
     }
     .pane-head.grip-on {
       padding-inline-start: 14px;
