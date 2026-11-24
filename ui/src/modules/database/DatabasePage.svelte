@@ -205,6 +205,16 @@
     if (st?.phase === 'idle') return { word: 'Not connected yet', tone: '', detail: engine, tip: '' };
     return { word: 'Connecting…', tone: '', detail: engine, tip: '' };
   });
+  let retrying = $state(false);
+  let errDetails = $state(false);
+  async function retryConn(): Promise<void> {
+    retrying = true;
+    try {
+      await database.retryConnection();
+    } finally {
+      retrying = false;
+    }
+  }
   function dbMenu(e: MouseEvent): void {
     const items = database.isRedis
       ? database.keyspaces.map((k) => ({ label: k.label, checked: (database.activeDb ?? database.keyspaces[0]?.id) === k.id, action: () => database.setActiveDb(k.id) }))
@@ -552,7 +562,13 @@
     {#if database.selectedConn && database.activePane === null}
       <span class="db-conn-state" data-testid="db-conn-state" title={connState.tip}>
         <span class="db-word {connState.tone}">{connState.word}</span>
-        {#if connState.detail}<span class="db-sub ellipsis">· {connState.detail}</span>{/if}
+        {#if connState.detail}<span class="db-sub ellipsis">{connState.tone === 'danger' ? '—' : '·'} {connState.detail}</span>{/if}
+        {#if connState.tone === 'danger'}
+          <!-- Can't connect: this one line says it; the raw error and the ways
+               to fix it (Diagnose, Edit connection) are behind Details. -->
+          <button class="chip" disabled={retrying} onclick={() => void retryConn()}>{retrying ? 'Retrying…' : 'Retry'}</button>
+          <button class="chip" aria-expanded={errDetails} onclick={() => (errDetails = !errDetails)}>Details</button>
+        {/if}
         {#if database.isGuarded}
           <span class="db-sub" class:db-prod={database.isProd} data-testid="db-guard-chip">· {database.isProd ? 'Production' : 'Read-only'}</span>
         {/if}
@@ -731,7 +747,7 @@
            agent panel side-by-side, separated by a draggable, persisted divider. -->
       <div class="main-split" class:assist-open={database.assistOpen}>
         <div class="main-body">
-          <DbConnErrorBanner onedit={editableConn(database.selectedConn)} />
+          {#if errDetails}<DbConnErrorBanner onedit={editableConn(database.selectedConn)} />{/if}
           {#key database.accessRevision}
           <ConnectionComparison enabled={database.mainTab === 'query'}>
           {#if database.mainTab === 'query'}

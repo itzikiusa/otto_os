@@ -9,7 +9,6 @@
   import { tick, untrack } from 'svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
-  import LoadState from '../../lib/components/LoadState.svelte';
   import RedisKeyFilter from './RedisKeyFilter.svelte';
   import { database } from '../../lib/stores/database.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
@@ -558,7 +557,8 @@
       Loading schema…
     </div>
   {:else if database.activeConnStatus?.phase === 'error'}
-    <LoadState variant="compact" what="the connection" error={database.activeConnStatus.error} empty={false} onretry={() => database.retryConnection()} />
+    <!-- The header says why and offers Retry; the tree does not repeat it. -->
+    <div class="tree-empty">No tables while it can’t connect.</div>
   {:else if database.schemaRoot.length === 0}
     <div class="tree-empty">No objects. Test the connection or refresh.</div>
   {:else if hits !== null}

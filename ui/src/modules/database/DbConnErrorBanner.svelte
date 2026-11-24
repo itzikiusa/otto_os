@@ -1,11 +1,8 @@
 <script lang="ts">
-  // Inline "couldn't connect" banner over the DB workbench. The failure used
-  // to live only in tooltips (the tab's red dot, the header "Disconnected"
-  // chip) and in the schema tree, which is collapsed on phones — so the main
-  // area just showed an editor that could not run anything. A failed load
-  // shows inline with Retry (design guidelines), plus the way to fix it.
+  // The details of "Can't connect" (the workbench header's one line carries the
+  // word, a short reason and Retry; its Details shows this): the server's full
+  // reason with its hint, and the ways to fix it.
   import Icon from '../../lib/components/Icon.svelte';
-  import LoadState from '../../lib/components/LoadState.svelte';
   import { database } from '../../lib/stores/database.svelte';
   import type { Connection } from '../../lib/api/types';
   import DiagnoseButton from './DiagnoseButton.svelte';
@@ -19,54 +16,47 @@
   const status = $derived(database.activeConnStatus);
   // `hint` is optional and newer than ConnStatus: read it defensively.
   const hint = $derived(status && 'hint' in status && typeof status.hint === 'string' ? status.hint : null);
-  const detail = $derived(
-    status?.phase === 'error' ? `${status.error || 'The server gave no reason.'}${hint ? ` ${hint}` : ''}` : null,
-  );
-  let retrying = $state(false);
-
-  async function retry(): Promise<void> {
-    retrying = true;
-    try {
-      await database.retryConnection();
-    } finally {
-      retrying = false;
-    }
-  }
 </script>
 
-{#if detail}
+{#if status?.phase === 'error'}
   <div class="conn-error" data-testid="db-conn-error-banner">
-    <LoadState
-      what="the connection"
-      errorTitle={database.selectedConn ? `Couldn’t connect to ${database.selectedConn.name}` : 'Couldn’t connect'}
-      error={detail}
-      loading={retrying}
-      empty
-      onretry={() => void retry()}
-      variant="compact"
-    >
-      {#snippet errorActions()}
-        {#if database.selectedConn && status?.phase === 'error'}
-          <DiagnoseButton conn={database.selectedConn} probe={{ message: status.error ?? '', hint }} />
-        {/if}
-        {#if onedit && database.selectedConn}
-          {@const c = database.selectedConn}
-          <button class="btn small" onclick={() => onedit(c)}>
-            <Icon name="edit" size={12} />Edit connection
-          </button>
-        {/if}
-      {/snippet}
-    </LoadState>
+    <p class="conn-error-text">{status.error || 'The server gave no reason.'}{hint ? ` ${hint}` : ''}</p>
+    <div class="conn-error-actions">
+      {#if database.selectedConn}
+        <DiagnoseButton conn={database.selectedConn} probe={{ message: status.error ?? '', hint }} />
+      {/if}
+      {#if onedit && database.selectedConn}
+        {@const c = database.selectedConn}
+        <button class="btn small" onclick={() => onedit(c)}>
+          <Icon name="edit" size={12} />Edit connection
+        </button>
+      {/if}
+    </div>
   </div>
 {/if}
 
 <style>
   .conn-error {
     flex: none;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
     margin-block-end: 10px;
-    border: 1px solid var(--danger);
+    padding: 10px 12px;
+    border: 1px solid var(--border);
     border-radius: var(--radius-m);
-    background: var(--danger-soft);
+    background: var(--surface-2);
     overflow-wrap: anywhere;
+  }
+  .conn-error-text {
+    margin: 0;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+    user-select: text;
+  }
+  .conn-error-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
   }
 </style>
