@@ -56,6 +56,8 @@ test('full app by default; one tap to the light version and one tap back', async
   await expect(page.getByTestId('threads-page')).toBeVisible();
   await expect.poll(() => navIds(page)).toEqual(LIGHT);
   await expect(more(page)).not.toContainText('More');
+  // Compact, still a 44 px target.
+  expect(Math.round((await more(page).boundingBox())!.width)).toBeGreaterThanOrEqual(44);
   expect(await page.evaluate(() => localStorage.getItem('otto_phone_light'))).toBe('1');
   await expectNoHorizontalOverflow(page);
 
