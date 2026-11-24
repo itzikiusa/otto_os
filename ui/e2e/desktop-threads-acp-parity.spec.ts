@@ -119,7 +119,7 @@ test('“Always reject” is offered and reaches the agent', async ({ page }, in
   const dock = thread.getByTestId('runtime-attention');
   await expect(dock).toBeVisible({ timeout: 20_000 });
   await dock.getByRole('button', { name: 'More approval options' }).click();
-  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Always reject' }).click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Always deny' }).click(); // (ACP reject_always)
   await expect(thread.getByText('answer: never').last()).toBeVisible({ timeout: 20_000 });
 });
 

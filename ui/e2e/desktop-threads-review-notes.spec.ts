@@ -80,12 +80,12 @@ test('desktop: a note put in the composer goes back to Draft when its chip is re
   const note = tab.getByTestId('diff-note');
   const bar = tab.getByTestId('diff-review-bar');
   const chips = page.getByTestId('runtime-thread-notes-alpha').getByTestId('runtime-context-chips');
-  await bar.getByTestId('diff-review-send').click();
+  await bar.getByTestId('diff-review-draft').click(); // "Add to message"
   await expect(note.getByTestId('diff-note-state')).toHaveText('Sent');
   // Only a chip was added: removing it takes the note back to Draft.
   await chips.getByRole('button', { name: 'Remove Review · 1 note' }).click();
   await expect(note.getByTestId('diff-note-state')).toHaveText('Draft');
-  await bar.getByTestId('diff-review-send').click();
+  await bar.getByTestId('diff-review-draft').click();
   await expect(note.getByTestId('diff-note-state')).toHaveText('Sent');
   // An edited note needs sending again.
   await note.getByRole('button', { name: /^Edit note on/ }).click();
