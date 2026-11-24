@@ -193,10 +193,11 @@ test('New session is a stage: tiles, Terminal | Chat, a first message, Start; th
   // Dark is really dark: the tiles and Cancel sit on dark surfaces with light text.
   await scheme(page, 'dark');
   const lum = (c: string) => { const [r, g, b] = c.match(/\d+/g)!.map(Number); return (r + g + b) / 3; };
+  // Polled: the surfaces ease into the new scheme (150 ms transitions).
   for (const [sel, el] of [['tile', dialog.locator('.provider-card').first()], ['Cancel', dialog.getByRole('button', { name: 'Cancel' })]] as const) {
-    const c = await el.evaluate((el) => { const s = getComputedStyle(el); return { bg: s.backgroundColor, fg: s.color }; });
-    expect(lum(c.fg), `${sel} text is light in dark`).toBeGreaterThan(180);
-    if (!c.bg.startsWith('rgba(0, 0, 0, 0)')) expect(lum(c.bg), `${sel} surface is dark in dark`).toBeLessThan(90);
+    const read = () => el.evaluate((n) => { const s = getComputedStyle(n); return { bg: s.backgroundColor, fg: s.color }; });
+    await expect.poll(async () => lum((await read()).fg), { message: `${sel} text is light in dark` }).toBeGreaterThan(180);
+    await expect.poll(async () => { const c = await read(); return c.bg.startsWith('rgba(0, 0, 0, 0)') ? 0 : lum(c.bg); }, { message: `${sel} surface is dark in dark` }).toBeLessThan(90);
   }
   await scheme(page, 'light');
   // A changed option shows as a chip once Options folds.
