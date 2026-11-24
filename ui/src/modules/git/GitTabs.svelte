@@ -43,7 +43,8 @@
     git.openRepoIds.map((id) => byId.get(id)).filter((r): r is Repo => r != null),
   );
   const closedRepos = $derived(git.allRepos.filter((r) => !git.openRepoIds.includes(r.id)));
-  const activeName = $derived(byId.get(git.activeRepoId ?? '')?.name ?? openRepos[0]?.name ?? 'Repositories');
+  const activeRepo = $derived(byId.get(git.activeRepoId ?? '') ?? openRepos[0]);
+  const activeName = $derived(activeRepo?.name ?? 'Repositories');
 
   // ── Per-repo status (branch + dirty dot) ─────────────────────────────────
   // Status is owned by the git store (shared with RepoView + the auto-fetch
@@ -211,7 +212,7 @@
     // focus-ring room around them).
     const fullW = stripEl.scrollWidth - el.clientWidth + measures.reduce((s, m, i) => s + (i === active ? m.full - m.branch : Math.min(m.full - m.branch, 120)), 0) + 8;
     const name = el.querySelector<HTMLElement>('.git-tab.active .git-tab-name');
-    const tight = fullW > row.clientWidth - TOOLBAR_W;
+    const tight = openRepos.length > 0 && fullW > row.clientWidth - TOOLBAR_W;
     // The room the strip needs (the compact one: Focus icon, switcher chrome
     // and + ≈ 96 px, plus up to 96 px of the name): GitToolbar's verbs give
     // way before the tabs go below it.
@@ -289,8 +290,9 @@
     </button>
     <span class="git-focus-sep" aria-hidden="true"></span>
   {/if}
-  {#if compact}
-    <button type="button" class="git-repo-switch" class:on={!focus} aria-haspopup="menu" title="Switch repository" data-testid="git-repo-switch" onclick={onswitch}>
+  {#if onswitch}
+    <!-- Kept mounted (CSS hides it): a fit pass flips `compact` to measure, and a remount would drop focus. -->
+    <button type="button" class="git-repo-switch" class:on={!focus} aria-haspopup="menu" title={activeRepo ? `${repoTabLabel(activeRepo.name, branchOf(activeRepo.id))} — switch repository` : 'Switch repository'} data-testid="git-repo-switch" onclick={onswitch}>
       <span class="git-repo-switch-name">{activeName}</span><Icon name="chevronDown" size={12} />
     </button>
   {/if}
@@ -448,6 +450,9 @@
   }
   .compact .git-focus {
     padding-inline: 6px;
+  }
+  .git-tabs:not(.compact) .git-repo-switch {
+    display: none;
   }
   .git-repo-switch {
     display: inline-flex;

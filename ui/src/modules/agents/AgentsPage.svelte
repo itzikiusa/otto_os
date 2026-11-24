@@ -77,10 +77,11 @@
     ws.layoutReady && (ws.otherWsLoaded || !ws.allWorkspaces || ws.workspaces.every((w) => w.id === ws.currentId)),
   );
   let rt = $state<{ byId: Record<string, unknown> } | null>(null);
+  let rtFailed = $state(false); // its chunk didn't load: no coach, but never a skeleton for good
   $effect(() => {
-    if (coachMaybe && ptyKnown && !rt) void startThreadFeeds().then(([m]) => (rt = m.runtimeThreads));
+    if (coachMaybe && ptyKnown && !rt) void startThreadFeeds().then(([m]) => (rt = m.runtimeThreads), () => (rtFailed = true));
   });
-  const coachKnown = $derived(ptyKnown && threadFeeds.settled && !!rt);
+  const coachKnown = $derived(ptyKnown && ((threadFeeds.settled && !!rt) || rtFailed));
   const coachReady = $derived(coachMaybe && coachKnown && !!rt && Object.keys(rt.byId).length === 0);
   let coachLatched = $state(false);
   $effect(() => {

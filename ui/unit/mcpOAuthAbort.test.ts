@@ -41,3 +41,27 @@ test('leaving while the sign-in starts or its status answers stays quiet and ask
     assert.deepEqual(seen, at === 'start' ? [] : ['ask', 'browser'], at);
   }
 });
+
+test('leaving while the manual client prompts are open asks nothing more and starts nothing (R3-008)', { timeout: 3000 }, async () => {
+  for (const at of [1, 2]) {
+    const ctl = new AbortController();
+    const seen: string[] = [];
+    let prompts = 0;
+    const { signIn } = loadSource(new URL('../src/modules/mcp/mcpOAuth.ts', import.meta.url), {
+      '../../lib/api/mcp': { mcpCpApi: { cpOAuthStart: async (_id: string, body: { client_id?: string }) => {
+        seen.push('start');
+        if (!body.client_id) throw new Error('enter a client id');
+        return { authorization_url: 'https://auth.example/authorize', authorization_host: 'auth.example' };
+      } } },
+      '../../lib/confirm.svelte': { confirmer: {
+        promptText: async () => { if (++prompts === at) ctl.abort(); seen.push('prompt'); return 'x'; },
+        ask: async () => { seen.push('ask'); return true; },
+      } },
+      '../../lib/external': { openExternal: async () => void seen.push('browser') },
+      '../../lib/toast.svelte': { toasts: { success: (t: string) => seen.push(t), warn: (t: string) => seen.push(t) } },
+      '../../lib/toastError': { toastError: (t: string) => seen.push(t) },
+    }, { setTimeout: (fn: () => void) => setImmediate(fn) });
+    assert.equal(await signIn({ id: 's1', name: 'Remote', url: 'https://mcp.example' }, ctl.signal), false);
+    assert.deepEqual(seen, ['start', ...Array(at).fill('prompt')], String(at));
+  }
+});

@@ -59,3 +59,26 @@ test('a failed chunk load is retried; another identity is not "settled" until it
   await settle();
   assert.equal(threadFeeds.settled, true);
 });
+
+test('an identity change while the list is read reads for the new identity; the old answer settles nothing (R3-006)', async () => {
+  let token = 't1';
+  const reads: ReturnType<typeof deferred<void>>[] = [];
+  const runtimeThreads = { mount() {}, loadAll: () => { const d = deferred<void>(); reads.push(d); return d.promise; } };
+  const { startThreadFeeds, threadFeeds } = loadSource(new URL('../src/modules/agents/threadFeeds.svelte.ts', import.meta.url), {
+    '../../lib/api/client': { getToken: () => token },
+    '../threads/runtime/runtimeThreads.svelte': { runtimeThreads },
+    '../threads/threadNav.svelte': {},
+    '../threads/threadInbox.svelte': { inboxLive: { mount() {} } },
+  });
+  const settle = () => new Promise((r) => setImmediate(r));
+  await startThreadFeeds();
+  token = 't2';
+  await startThreadFeeds(); // t1's read is still in flight
+  reads[0].resolve();
+  await settle();
+  assert.equal(reads.length, 2, 't2 is read once t1 answers');
+  assert.equal(threadFeeds.settled, false, "t1's answer does not settle t2");
+  reads[1].resolve();
+  await settle();
+  assert.equal(threadFeeds.settled, true);
+});
