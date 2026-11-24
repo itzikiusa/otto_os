@@ -10,7 +10,7 @@
 // SQL and Redis stay STATIC on purpose: they power the hot-path DB console.
 import type { Extension } from '@codemirror/state';
 import { foldInside, foldNodeProp, forceParsing, LanguageSupport, syntaxTree } from '@codemirror/language';
-import { ViewPlugin, type EditorView } from '@codemirror/view';
+import { ViewPlugin, type EditorView, type ViewUpdate } from '@codemirror/view';
 import { startMeasurement } from '../telemetry.ts';
 import { sql } from '@codemirror/lang-sql';
 import { sqlDialect as dialectFor, type SqlDialectName } from '../sql-dialects.ts';
@@ -108,6 +108,7 @@ const LOADERS: Record<string, () => Promise<Build>> = {
 const eagerParse = ViewPlugin.fromClass(
   class {
     queued = false;
+    parsing = false; // our own forceParsing dispatch, which must not queue another round
     span: ReturnType<typeof startMeasurement> | null;
     view: EditorView;
     constructor(view: EditorView) {
@@ -115,8 +116,8 @@ const eagerParse = ViewPlugin.fromClass(
       this.span = view.dom.closest('.is-ide') ? startMeasurement('ui.highlight', 'ide') : null;
       this.check();
     }
-    update(): void {
-      this.check();
+    update(u: ViewUpdate): void {
+      if (!this.parsing && (u.viewportChanged || u.docChanged || this.span)) this.check();
     }
     check(): void {
       if (this.queued) return;
@@ -125,7 +126,8 @@ const eagerParse = ViewPlugin.fromClass(
         this.queued = false;
         const v = this.view, to = v.viewport.to;
         if (!v.dom.isConnected) return;
-        if (syntaxTree(v.state).length < to) forceParsing(v, to, 15);
+        // One 15 ms slice per update: past it CodeMirror's idle worker parses on, with yields.
+        if (syntaxTree(v.state).length < to) { this.parsing = true; try { forceParsing(v, to, 15); } finally { this.parsing = false; } }
         if (this.span && syntaxTree(v.state).length >= to) {
           const span = this.span;
           this.span = null;
