@@ -113,6 +113,9 @@ test('New connection: a pasted URI fills the fields and names the profile', asyn
 });
 
 test('Re-pasting a verify-full URI after an allow-invalid-certificates one verifies again (R2-004)', async ({ page }) => {
+  const { ctx, base } = await apiCtx(); // one row, so the header carries the New connection menu
+  expect((await ctx.post(`${base}/api/v1/workspaces/${workspaceId}/connections`, { data: { name: `tls-paste-${Date.now()}`, kind: 'ssh', params: { host: 'paste.invalid' }, secret: null } })).ok()).toBeTruthy();
+  await ctx.dispose();
   await page.goto('/#/connections');
   await page.getByRole('button', { name: /New connection/ }).first().click();
   await page.getByRole('menuitem', { name: /^Database…/ }).click();
