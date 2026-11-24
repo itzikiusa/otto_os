@@ -141,17 +141,28 @@ async fn old_text(real: &Path) -> Option<String> {
 }
 
 /// A regular file within the read cap (reading a FIFO blocks for good).
+/// Checked on the opened file and read through a cap: a swap after a check
+/// can't block it or read past the cap (review R3-010).
 async fn read_capped(real: &Path, path: &str) -> Result<String, String> {
-    let m = tokio::fs::metadata(real).await.map_err(|e| e.to_string())?;
-    if !m.is_file() {
+    let err = |e: std::io::Error| format!("{path}: {e}");
+    let f = tokio::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(real)
+        .await
+        .map_err(err)?;
+    if !f.metadata().await.map_err(err)?.is_file() {
         return Err(format!("{path} is not a regular file"));
     }
-    if m.len() > MAX_FILE_BYTES {
+    let mut s = String::new();
+    f.take(MAX_FILE_BYTES + 1)
+        .read_to_string(&mut s)
+        .await
+        .map_err(err)?;
+    if s.len() as u64 > MAX_FILE_BYTES {
         return Err(format!("{path} is larger than {} MB", MAX_FILE_BYTES >> 20));
     }
-    tokio::fs::read_to_string(real)
-        .await
-        .map_err(|e| format!("{path}: {e}"))
+    Ok(s)
 }
 
 async fn run(
@@ -421,6 +432,7 @@ mod tests {
         let r = tokio::time::timeout(quick, read_capped(&fifo, "pipe")).await;
         assert!(r.expect("the read blocked on a FIFO").is_err());
         assert!(read_capped(&root.path().join("."), ".").await.is_err());
+        assert!(read_capped(&big, "big.log").await.is_err(), "over the cap");
         assert_eq!(read_capped(&small, "a.txt").await.as_deref(), Ok("hi"));
     }
 
