@@ -86,6 +86,10 @@
     background: var(--warning-soft);
     color: var(--warning);
   }
+  /* The safety warning never truncates: the chips beside it give way first. */
+  .ac.full {
+    flex-shrink: 0;
+  }
   .ac:focus-visible {
     outline: 2px solid var(--accent-text);
     outline-offset: -2px;
