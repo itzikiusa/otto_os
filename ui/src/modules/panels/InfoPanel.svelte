@@ -6,9 +6,6 @@
   import { toasts } from '../../lib/toast.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import { events } from '../../lib/events.svelte';
-  import { sessionState } from '../../lib/status';
-  import { sessionWord } from '../../lib/statusWords';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   // The issue picker loads when opened (it is SessionView's too, also lazy there).
@@ -24,15 +21,6 @@
   const workspace = $derived(ws.current);
   const attachedIssue = $derived(
     (session?.meta?.issue as AttachedIssue | undefined) ?? null,
-  );
-  // The same live state the tab strip and navigator show (events-fed status,
-  // needs-you flag, reconnecting) — not the row's raw `status` enum.
-  const liveState = $derived(
-    session
-      ? sessionState(session, ws.statusMap[session.id], ws.needsYou[session.id] === true, {
-          stale: events.state !== 'connected',
-        })
-      : null,
   );
 
   // Per-workspace default agent (overrides the global default). '' = inherit.
@@ -160,25 +148,11 @@
     {#if session}
     <section class="section">
       <div class="section-title">Session</div>
-      <div class="info-row">
-        <span class="key">Title</span>
-        <span class="val">{session.title}</span>
-      </div>
+      <!-- Title and status are the pane header's, the folder the details card's: only what they don't say. -->
       <div class="info-row">
         <span class="key">Provider</span>
         <span class="val val-provider"><ProviderIcon provider={session.provider} size={13} />{session.provider}</span>
       </div>
-      <div class="info-row">
-        <span class="key">Status</span>
-        <!-- The one status vocabulary, in a word (patterns.md §10) — as the pane header says it. -->
-        {#if liveState}{@const w = sessionWord(liveState)}<span class="val word {w.tone}" data-status={liveState.key} title={liveState.hint ?? liveState.label}>{w.word}</span>{/if}
-      </div>
-      {#if session.cwd}
-        <div class="info-row">
-          <span class="key">Folder</span>
-          <span class="val mono cwd" dir="ltr" title={session.cwd}>{session.cwd}</span>
-        </div>
-      {/if}
       <div class="info-row">
         <span class="key">Created</span>
         <span class="val">{fmt(session.created_at)}</span>
@@ -315,14 +289,6 @@
     /* Wrap long tokens (paths, ids) without splitting ordinary words mid-word. */
     overflow-wrap: anywhere;
   }
-  .word.warning,
-  .word.danger,
-  .word.success {
-    font-weight: 600;
-  }
-  .word.warning { color: var(--warning); }
-  .word.danger { color: var(--danger); }
-  .word.success { color: var(--success); }
   .val-provider {
     display: inline-flex;
     align-items: center;
@@ -346,13 +312,6 @@
     font-size: var(--fs-xs);
     line-height: 1.4;
     color: var(--text-dim);
-  }
-  .cwd {
-    font-size: var(--fs-xs);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    display: block;
   }
   .issue-card {
     background: var(--surface-2);
