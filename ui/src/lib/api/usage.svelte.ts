@@ -102,7 +102,10 @@ export interface UsageSummary {
   total_cost_usd: number;
   providers: ProviderUsage[];
   daily: DailyUsage[];
+  /** The biggest 50 sessions of the window. */
   sessions: SessionUsage[];
+  /** Sessions with usage (tokens or cost) in the window and scope. */
+  session_count: number;
   /** Per-feature (by-kind) rollup — review / product / channel / agent / … */
   by_kind: FeatureUsage[];
   /** Per-(provider, model) token rollup over the window, biggest first. */
@@ -298,7 +301,9 @@ const METRICS_REFRESH_THROTTLE_MS = 10_000;
 
 class UsageStore {
   status: UsageStatus | null = $state(null);
-  summary: UsageSummary | null = $state(null);
+  /** Replaced wholesale on every load — `$state.raw`: no deep proxy over
+   *  thousands of model rows (it cost the Model view a 1.5 s frame). */
+  summary: UsageSummary | null = $state.raw(null);
   /** Server payload, replaced wholesale on every fetch — `$state.raw`, no
    *  deep proxy over 180 points (X2). */
   metrics: MetricPoint[] = $state.raw([]);
@@ -353,6 +358,10 @@ class UsageStore {
    *  the slower 90-day response land last under the "7d" label (or into a
    *  `-7d` CSV export). Every summary load bumps it; only the newest writes. */
   private summarySeq = 0;
+  /** Summaries already loaded, by window + scope: a range click back to one
+   *  shows it at once with no request. Emptied by `loadAll` (open, Refresh,
+   *  auto-refresh), which reloads the current one. */
+  private summaries = new Map<string, UsageSummary>();
 
   // --- Metrics-tick throttle -----------------------------------------------
   private lastMetricsFetch = 0;
@@ -403,7 +412,10 @@ class UsageStore {
       await this.loadStatus();
       if (this.status?.available) {
         mine = ++this.summarySeq;
-        const summary = await api.get<UsageSummary>(`/usage/summary?${this.summaryQuery()}`);
+        this.summaries.clear();
+        const key = this.summaryQuery();
+        const summary = await api.get<UsageSummary>(`/usage/summary?${key}`);
+        this.summaries.set(key, summary);
         if (mine === this.summarySeq) {
           this.summary = summary;
           this.summaryError = null;
@@ -599,8 +611,16 @@ class UsageStore {
   private async refreshSummary(): Promise<void> {
     if (!this.status?.available) return;
     const mine = ++this.summarySeq;
+    const key = this.summaryQuery();
+    const known = this.summaries.get(key);
+    if (known) {
+      this.summary = known;
+      this.summaryError = null;
+      return;
+    }
     try {
-      const summary = await api.get<UsageSummary>(`/usage/summary?${this.summaryQuery()}`);
+      const summary = await api.get<UsageSummary>(`/usage/summary?${key}`);
+      this.summaries.set(key, summary);
       if (mine === this.summarySeq) {
         this.summary = summary;
         this.summaryError = null;

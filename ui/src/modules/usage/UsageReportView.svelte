@@ -17,6 +17,8 @@
   let { admin }: { admin: boolean } = $props();
 
   const SESSION_PAGE = 100;
+  /** Model rows rendered (a provider can record thousands of model names). */
+  const MODEL_CAP = 50;
   let sessionLimit = $state(SESSION_PAGE);
 
   onMount(() => {
@@ -112,9 +114,12 @@
     {@render tokenTable(
       'By model',
       ['Model', 'Provider'],
-      report.models.map((m) => ({ key: m.provider + '\u0000' + m.model, lead: [m.model || 'unknown', m.provider], r: m })),
+      report.models.slice(0, MODEL_CAP).map((m) => ({ key: m.provider + '\u0000' + m.model, lead: [m.model || 'unknown', m.provider], r: m })),
       report.totals,
     )}
+    {#if report.models.length > MODEL_CAP}
+      <p class="dim small" data-testid="usage-report-models-more">{report.models.length - MODEL_CAP} smaller models are in the total · Download HTML lists every one</p>
+    {/if}
     {@render tokenTable(
       'By session',
       ['Session', 'Workspace', 'Model', 'Last active'],

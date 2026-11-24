@@ -160,7 +160,8 @@ failure on a read returns an error (500) — never a 200 with zero totals.
   and runs off the async runtime).
 - GET /usage/summary?days=N&otto_only=B → UsageSummary. `days` 1–3650 (default 30),
   `otto_only` (default true) excludes externally-recorded sessions. Carries provider,
-  daily, session, **`by_kind`** (per-feature), **`models: ModelUsage[]`**
+  daily, session (the biggest 50, plus **`session_count`**: every session with tokens or cost in
+  the window and scope), **`by_kind`** (per-feature), **`models: ModelUsage[]`**
   (`{provider, model, events, input_tokens, output_tokens, cache_read_tokens,
   cache_write_tokens, total_tokens, cost_usd}`, biggest first) and **`daily_models:
   DailyModelUsage[]`** (`{day, provider, model, …tokens, cost_usd}`) rollups, plus
@@ -3525,7 +3526,7 @@ Workspace-independent: one Mac, one daemon. `busy` = a background agent arriving
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /usage/status | Usage:View (paths redacted for non-root) | — | engine status (installed/available); optional `tailer?: {state: "running"\|"retrying"\|"stopped", cause?: string\|null}` — the transcript tailer's state (absent when unknown). `stopped` only for a corrupt checkpoint (the tailer could not restore its position and halted; `cause` says why) |
-| GET /usage/summary | Usage:View (non-root: own sessions) | `?days=N&otto_only=B` | token-first breakdown (input/output + cache read/write, per provider/day/session/model; canonicalizes `claude-work`/`claude:<dir>` onto its matching custom provider slug and hides disabled/orphan external providers when `otto_only=false`) |
+| GET /usage/summary | Usage:View (non-root: own sessions) | `?days=N&otto_only=B` | token-first breakdown (input/output + cache read/write, per provider/day/session/model; canonicalizes `claude-work`/`claude:<dir>` onto its matching custom provider slug; hides nothing, so `otto_only=false` ⊇ `otto_only=true`; a provider, model or session with no tokens and no cost in the window is not listed or counted; `session_count` = every session with usage, `sessions` the biggest 50) |
 | GET /usage/report | Usage:View (non-root: own sessions) | `sessions_limit` (1–1000, default 100), `include=daily_models` | UsageReport (daily/monthly/model/session tables; `daily_models` only when included) |
 | POST /usage/ccusage-check | root | `{days?}` | CcusageCheck (opt-in `npx ccusage` cross-check) |
 | GET /usage/metrics | root | — | system CPU/RAM metrics |
