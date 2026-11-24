@@ -31,13 +31,8 @@ pub(crate) struct SseSession {
     headers: BTreeMap<String, String>,
     pending: Pending,
     closed: Arc<AtomicBool>,
-    reader: tokio::task::JoinHandle<()>,
-}
-
-impl Drop for SseSession {
-    fn drop(&mut self) {
-        self.reader.abort();
-    }
+    /// The reader task, aborted on drop (also when `open` fails or is cancelled).
+    _reader: tokio::task::JoinSet<()>,
 }
 
 /// Why a request failed — the caller decides whether a fresh retry is safe.
@@ -80,7 +75,8 @@ impl SseSession {
         let pending: Pending = Arc::default();
         let closed = Arc::new(AtomicBool::new(false));
         let (endpoint_tx, endpoint_rx) = oneshot::channel::<String>();
-        let reader = tokio::spawn(read_stream(
+        let mut reader = tokio::task::JoinSet::new();
+        reader.spawn(read_stream(
             resp,
             client.clone(),
             base.clone(),
@@ -99,7 +95,7 @@ impl SseSession {
             headers: headers.clone(),
             pending,
             closed,
-            reader,
+            _reader: reader,
         })
     }
 
@@ -151,13 +147,15 @@ async fn post(
             SseError::Failed(format!("post: {e}"))
         }
     })?;
-    if resp.status().is_success() {
+    let status = resp.status();
+    if status.is_success() {
         Ok(())
+    } else if status.is_client_error() {
+        // Refused (an expired session…): the message was not run.
+        Err(SseError::NotDelivered(format!("post: http {status}")))
     } else {
-        Err(SseError::NotDelivered(format!(
-            "post: http {}",
-            resp.status()
-        )))
+        // A 5xx may come after the server ran it: never re-sent.
+        Err(SseError::Failed(format!("post: http {status}")))
     }
 }
 
@@ -334,5 +332,61 @@ mod tests {
         assert!(endpoint_url(&base, "https://evil.example.net/m").is_err());
         assert!(endpoint_url(&base, "http://mcp.example.com/m").is_err());
         assert!(endpoint_url(&base, "https://mcp.example.com:8443/m").is_err());
+    }
+
+    /// A one-connection-at-a-time server answering every request `head`.
+    async fn answering(head: String) -> (tokio::task::JoinHandle<Option<usize>>, String) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/sse", l.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut s, _) = l.accept().await.ok()?;
+            let mut buf = [0u8; 4096];
+            s.read(&mut buf).await.ok()?;
+            s.write_all(head.as_bytes()).await.ok()?;
+            // What the client does next: 0 once it closes the connection.
+            tokio::time::timeout(Duration::from_secs(5), s.read(&mut buf))
+                .await
+                .ok()?
+                .ok()
+        });
+        (server, url)
+    }
+
+    /// Only a refused POST (4xx: an expired session) may be re-sent on a
+    /// fresh session; after a 5xx the server may have run a mutating call.
+    #[tokio::test]
+    async fn a_server_error_on_post_is_not_retried_as_undelivered() {
+        for (status, undelivered) in [(404, true), (400, true), (500, false), (502, false)] {
+            let head =
+                format!("HTTP/1.1 {status} X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let (_server, url) = answering(head).await;
+            let url = reqwest::Url::parse(&url).unwrap();
+            let r = post(
+                &reqwest::Client::new(),
+                &url,
+                &BTreeMap::new(),
+                &Value::Null,
+            )
+            .await;
+            assert_eq!(
+                matches!(r, Err(SseError::NotDelivered(_))),
+                undelivered,
+                "{status}"
+            );
+        }
+    }
+
+    /// A refused open (an endpoint on another origin) lets its stream go
+    /// instead of reading it for a day.
+    #[tokio::test]
+    async fn a_refused_open_closes_its_event_stream() {
+        let (server, url) = answering("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\nevent: endpoint\ndata: http://evil.example/m\n\n".into()).await;
+        let err = SseSession::open(reqwest::Client::new(), &url, &BTreeMap::new())
+            .await
+            .err()
+            .unwrap();
+        assert!(err.contains("another origin"), "{err}");
+        assert_eq!(server.await.unwrap(), Some(0), "the stream stayed open");
     }
 }
