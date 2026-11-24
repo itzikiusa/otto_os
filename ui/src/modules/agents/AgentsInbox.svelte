@@ -402,7 +402,7 @@
       </label>
       <button type="button" class="btn small ghost" disabled={liveSel.length < 2} data-testid="agents-tile-selected" onclick={tileSelected}>Tile</button>
       <button type="button" class="btn small ghost" disabled={liveSel.length === 0} data-testid="agents-archive-selected" onclick={() => void archiveSelected()}>Archive</button>
-      <button type="button" class="btn small ghost danger" disabled={selIds.length === 0} data-testid="agents-delete-selected" onclick={() => void deleteSelected()}>Delete{selIds.length > 0 ? ` (${selIds.length})` : ''}</button>
+      <button type="button" class="btn small ghost danger ai-del" disabled={selIds.length === 0} data-testid="agents-delete-selected" onclick={() => void deleteSelected()}>Delete{selIds.length > 0 ? ` (${selIds.length})` : ''}</button>
     </div>
   {/if}
 
@@ -554,6 +554,11 @@
     flex: 1;
     font-size: var(--fs-s);
     color: var(--text-dim);
+    white-space: nowrap;
+  }
+  /* The destructive one stands apart from Tile / Archive. */
+  .ai-del {
+    margin-inline-start: var(--sp-3);
   }
   .ai-body {
     flex: 1;
