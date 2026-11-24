@@ -271,11 +271,11 @@
       secret = r.secret ?? '';
       fConnString = r.connString;
     } else {
-      if (r.host) fHost = r.host;
-      if (r.port) fPort = r.port;
-      if (r.user) fUser = r.user;
-      if (r.secret) secret = r.secret;
-      if (r.db) fDb = r.db;
+      fHost = r.host ?? '';
+      fPort = r.port ?? '';
+      fUser = r.user ?? '';
+      secret = r.secret ?? '';
+      fDb = r.db ?? '';
     }
     if (r.tlsMode) tlsMode = r.tlsMode;
     if (r.tlsVerify === false) tlsVerify = false;

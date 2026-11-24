@@ -141,3 +141,15 @@ test('a pasted URI fills the fields where URL leaves non-special schemes opaque'
     globalThis.URL = Real;
   }
 });
+
+test('re-pasting a URI replaces every field the first one filled (R1-007)', () => {
+  const c = form();
+  c.parseDsn('mysql://admin:prod-secret@prod.internal:3307/billing');
+  assert.equal(c.secret, 'prod-secret');
+  c.parseDsn('mysql://staging.internal/test');
+  assert.equal(c.fHost, 'staging.internal');
+  assert.equal(c.secret, '');
+  assert.equal(c.fUser, '');
+  assert.equal(c.fPort, '');
+  assert.equal(c.fDb, 'test');
+});
