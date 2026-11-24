@@ -114,3 +114,22 @@ test('the rarely used dialogs load on demand from the pane ⋯', async ({ page }
     await expect(page.getByRole('dialog')).toHaveCount(0);
   }
 });
+
+test('per-session usage is read only when someone looks (perf A7a)', async ({ page }) => {
+  const usageReads: string[] = [];
+  page.on('request', (r) => {
+    if (/\/api\/v1\/sessions\/[^/]+\/usage/.test(new URL(r.url()).pathname)) usageReads.push(r.url());
+  });
+  await page.goto(`/#/agents/${ids.Seedorf}`);
+  await expect(page.locator(`[data-pane-key][data-session="${ids.Seedorf}"]`).first()).toBeVisible({ timeout: 15_000 });
+  // Switching sessions (each focus used to read) reads nothing.
+  for (const t of ['Pirlo', 'Inzaghi', 'Seedorf']) {
+    await page.locator(`[data-testid="agents-row-${ids[t]}"] .tr-main`).click();
+    await expect(page.locator(`[data-pane-key][data-session="${ids[t]}"]`).first()).toBeVisible({ timeout: 15_000 });
+  }
+  await page.waitForLoadState('networkidle');
+  expect(usageReads).toEqual([]);
+  // Looking at the details reads once.
+  await page.locator(`[data-pane-key][data-session="${ids.Seedorf}"]`).first().getByTestId('pane-details').click();
+  await expect.poll(() => usageReads.length).toBe(1);
+});

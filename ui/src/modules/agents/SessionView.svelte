@@ -27,7 +27,6 @@
   import { popoutItems } from '../../lib/popoutMenu';
   import { now, nowMinute, rel } from '../../lib/stores/now.svelte';
   import { sessionUsage } from '../../lib/stores/sessionUsage.svelte';
-  import { pollWhileVisible } from '../../lib/poll';
   import { sessionUsageLabel } from '../../lib/sessionUsage';
   import { suspendedNote } from '../../lib/status';
   import { idleSuspend } from '../../lib/stores/idleSuspend.svelte';
@@ -402,34 +401,19 @@
     }
   }
 
-  // Per-session tokens + cost (A5), event-driven (perf R5): loaded when the
-  // pane gains focus (the store throttles to once a minute), again when a
-  // turn ENDS (working → idle/exited — that is when the totals move), and
-  // whenever the details open. A slow safety tick runs only while the agent
-  // is working; an idle focused pane used to re-fetch every 60 s regardless.
+  // Per-session tokens + cost: read only when someone looks (the details
+  // menu, openDetails), at most once a minute (store-throttled). A turn that
+  // ENDS is when the totals move: it marks them stale, so the next look reads
+  // fresh numbers. Reading on every pane focus, every turn end and a 5-minute
+  // working tick cost 402 reads in 30 h that nobody saw (perf A7a).
   const canUsage = $derived(auth.can('usage', 'view'));
   const usageLabel = $derived(canUsage ? sessionUsageLabel(sessionUsage.bySession[sessionId]) : null);
-  const usageLive = $derived(isAgent && focused && canUsage);
-  $effect(() => {
-    if (!usageLive) return;
-    const id = sessionId;
-    untrack(() => void sessionUsage.loadSession(id));
-  });
   let usagePrevStatus: SessionStatus | null = null;
   $effect(() => {
     const st = status;
     const prev = usagePrevStatus;
     usagePrevStatus = st;
-    if (usageLive && prev === 'working' && (st === 'idle' || st === 'exited')) {
-      const id = sessionId;
-      untrack(() => void sessionUsage.loadSession(id, true));
-    }
-  });
-  $effect(() => {
-    if (!usageLive || status !== 'working') return;
-    const id = sessionId;
-    const p = pollWhileVisible(() => sessionUsage.loadSession(id), { ms: 300_000, immediate: false });
-    return () => p.stop();
+    if (prev === 'working' && st !== 'working') untrack(() => sessionUsage.invalidate(sessionId));
   });
 
   /** Why + when a dormant session was suspended (A4) — "Suspended 3h ago ·
