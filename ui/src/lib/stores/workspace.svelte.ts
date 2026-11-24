@@ -215,6 +215,7 @@ class WorkspaceStore {
    *  Close is non-destructive (the session lives on), so reopening is just
    *  re-adding the tab. Capped; ids whose session vanished are skipped. */
   recentlyClosed: Id[] = $state([]);
+  private closedThreads = new Set<Id>(); // those that were chat panes (no /sessions row: reopened as a thread)
 
   current: WorkspaceWithRole | null = $derived(
     this.workspaces.find((w) => w.id === this.currentId) ?? null,
@@ -1263,6 +1264,7 @@ class WorkspaceStore {
    *  live-session confirm / archive-instead flow in front of this. */
   closeTab(id: Id): void {
     const closedIdx = this.openTabs.indexOf(id);
+    if (this.threadPanes.includes(id)) this.closedThreads.add(id);
     this.tabRefs = this.tabRefs.filter((t) => t.id !== id);
     this.persistTabs();
     // Remember for ⌘⇧T "reopen closed tab" (close is non-destructive).
@@ -1437,7 +1439,8 @@ class WorkspaceStore {
     while (this.recentlyClosed.length > 0) {
       const id = this.recentlyClosed[this.recentlyClosed.length - 1];
       this.recentlyClosed = this.recentlyClosed.slice(0, -1);
-      if (id === DB_PANE_ID || this.sessionById.has(id)) {
+      if (this.closedThreads.delete(id)) this.openSession(id, 'thread');
+      if (id === DB_PANE_ID || this.sessionById.has(id) || this.threadPanes.includes(id)) {
         this.navigateToSession(id);
         return;
       }
@@ -1445,11 +1448,8 @@ class WorkspaceStore {
       if (!row) continue; // deleted (or no longer visible) — try the next one
       try {
         if (row.archived) await this.unarchiveSession(id);
-        if (row.workspace_id !== this.currentId && !this.belongsHere(row.workspace_id)) {
-          await this.openInWorkspace(row.workspace_id, id);
-        } else {
-          this.navigateToSession(id);
-        }
+        if (row.workspace_id !== this.currentId && !this.belongsHere(row.workspace_id)) await this.openInWorkspace(row.workspace_id, id);
+        else this.navigateToSession(id);
         return;
       } catch (e) {
         toastError('Couldn’t reopen the session', e);

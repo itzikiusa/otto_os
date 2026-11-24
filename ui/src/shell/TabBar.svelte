@@ -7,7 +7,6 @@
   import Icon from '../lib/components/Icon.svelte';
   import { focusOnMount } from '../lib/focusOnMount';
   import { toastError } from '../lib/toastError';
-  import StatusDot from '../lib/components/StatusDot.svelte';
   import { events } from '../lib/events.svelte';
   import { sessionState, type SessionStateInfo } from '../lib/status';
   import { ws, DB_PANE_ID } from '../lib/stores/workspace.svelte';
@@ -38,7 +37,7 @@
   }
 
   // A thread tab (a chat pane) reads its title from Threads' store, loaded
-  // only once such a tab exists; it has no rename, share, pop-out or dot here.
+  // only once such a tab exists; it has no rename, share or pop-out here.
   type RuntimeStore = typeof import('../modules/threads/runtime/runtimeThreads.svelte').runtimeThreads;
   let rt = $state<RuntimeStore | null>(null);
   $effect(() => {
@@ -203,7 +202,7 @@
   // A tab "needs you" when its session is blocked on operator input — distinct
   // from idle. Cleared by the store when the session is opened / fed input.
   function needsYou(id: string): boolean {
-    return !notSession(id) && ws.needsYou[id] === true;
+    return id !== DB_PANE_ID && (ws.needsYou[id] === true || rt?.get(id)?.status === 'awaiting_permission');
   }
 
   function startRename(id: string): void {
@@ -344,7 +343,6 @@
         data-tab-id={id}
       >
         {#if renamingId === id}
-          {#if !notSession(id)}<StatusDot state={tabState(id)} size={6} />{/if}
           <input dir="auto"
             class="tab-rename"
             bind:value={draft}
@@ -382,23 +380,18 @@
           >
             {#if id === DB_PANE_ID}
               <Icon name="db" size={12} />
-            {:else}
+            {:else if isResumable(id)}
               {@const st = tabState(id)}
-              {#if st.resumable}
-                <span class="susp-dot" role="img" aria-label={st.label} title={st.hint}>
-                  <Icon name="refresh" size={12} />
-                </span>
-              {:else}
-                <StatusDot state={st} size={6} />
-              {/if}
+              <span class="susp-dot" role="img" aria-label={st.label} title={st.hint}>
+                <Icon name="refresh" size={12} />
+              </span>
             {/if}
             <span class="tab-title" title={tabTooltip(id)}>{title(id)}</span>
+            <!-- A word only when the tab wants you (the pane header says the rest; no bare dots). -->
             {#if needsYou(id)}
-              <span class="tab-needs-you" title="Waiting on you" role="img" aria-label="Needs you">
-                <Icon name="bell" size={12} />
-              </span>
-            {:else if ws.unread[id] === true}
-              <span class="tab-unread" title="New activity since you last looked" role="img" aria-label="Unread activity"></span>
+              <span class="tab-word needs" title="Waiting on you">Needs you</span>
+            {:else if ws.unread[id] === true && ws.activeSessionId !== id}
+              <span class="tab-word" title="Finished since you last looked">Done</span>
             {/if}
           </button>
         {/if}
@@ -537,15 +530,14 @@
     border-color: color-mix(in srgb, var(--warning) 45%, transparent);
     color: var(--text);
   }
-  .tab-needs-you {
-    display: grid;
-    place-items: center;
+  .tab-word {
     flex-shrink: 0;
-    width: 14px;
-    height: 14px;
-    border-radius: 999px;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
+  .tab-word.needs {
     color: var(--warning);
-    background: color-mix(in srgb, var(--warning) 18%, transparent);
+    font-weight: 600;
   }
   /* ↻ = suspended, resumes on open: calm/dim — amber is only "needs you". */
   .susp-dot {
@@ -631,15 +623,6 @@
   }
   .tab-close:focus-visible {
     outline: 1px solid var(--accent-text);
-  }
-  /* Unread activity: a quiet accent dot on background tabs whose session
-     finished working (or needs input) since the user last looked. */
-  .tab-unread {
-    flex-shrink: 0;
-    width: 6px;
-    height: 6px;
-    border-radius: 999px;
-    background: var(--accent);
   }
   .tab.unread:not(.active) {
     color: var(--text);

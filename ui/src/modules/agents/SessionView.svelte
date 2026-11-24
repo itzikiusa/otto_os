@@ -581,9 +581,15 @@
     ];
   }
   function openPaneMenu(e: MouseEvent | KeyboardEvent): void {
-    // Usage shows under Details: read it now (once a minute at most, A7a).
-    if (isAgent && canUsage) void sessionUsage.loadSession(sessionId);
+    // Usage shows under Details: read it now (once a minute at most, A7a),
+    // and put the figure in the menu that is open when the read lands.
+    const before = usageLabel;
+    const read = isAgent && canUsage ? sessionUsage.loadSession(sessionId) : null;
     ctxMenu.show(e, sessionMenuItems());
+    const seq = ctxMenu.seq;
+    void read?.then(() => {
+      if (ctxMenu.open && ctxMenu.seq === seq && usageLabel !== before) ctxMenu.items = sessionMenuItems();
+    });
   }
   function attendPane(node: HTMLElement): { destroy(): void } {
     const onDown = () => { ws.clearNeedsYou(sessionId); onfocus(); };
@@ -624,7 +630,7 @@
     {/if}
     {#if viewport.isPhone}
       <!-- Phone: the session is pushed over the list (#/agents); Back returns. -->
-      <button type="button" class="icon-btn pane-back" aria-label="Back to sessions" title="Back to sessions" data-testid="agents-back-to-list" onclick={() => router.go('agents')}><Icon name="chevronLeft" size={16} /></button>
+      <button type="button" class="icon-btn pane-back" aria-label="Back to sessions" title="Back to sessions" data-testid="agents-back-to-list" onclick={() => router.backTo('agents')}><Icon name="chevronLeft" size={16} /></button>
     {/if}
     <span class="pane-word {word.tone}" data-testid="pane-status" data-state={paneState.key} title={suspendNote ?? paneState.hint ?? paneState.label}>{word.word}</span>
     {#if renaming}

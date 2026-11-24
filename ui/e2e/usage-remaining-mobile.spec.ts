@@ -53,6 +53,7 @@ test('stale and unknown rows stay legible on a phone', async ({ page }) => {
   const unknown = section.getByTestId('limits-row-claude:account:acc-max');
   await expect(unknown.getByTestId('limits-unknown')).toBeVisible();
   await expect(unknown).toContainText('does not write its plan limits');
+  await expect(unknown).not.toContainText('Unknown');
   await expectInsideWidth(page, '.acct, .reason');
   await expectNoHorizontalOverflow(page);
 });

@@ -21,6 +21,7 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { allProviders, inferProviderFamily, providerReadiness, providerSubtitle } from '../../lib/providers';
 
   /** Per-provider ceiling on one batch — a typo in the stepper shouldn't be able
@@ -221,8 +222,8 @@
   // movement) or to the grid itself (its radiogroup handler already ran).
   function onGlobalKeydown(e: KeyboardEvent): void {
     const t = e.target as HTMLElement | null;
-    // ⌘↩ anywhere; ↩ on a provider tile, in the first message (⇧↩ = new line) or the title.
-    const plainEnter = e.key === 'Enter' && !e.shiftKey && !e.isComposing && !!t && (t.id === 'ns-prompt' || t.id === 'ns-title' || !!gridEl?.contains(t));
+    // ⌘↩ anywhere; ↩ on a provider tile (not its − / +: that steps the count), in the first message (⇧↩ = new line) or the title.
+    const plainEnter = e.key === 'Enter' && !e.shiftKey && !e.isComposing && !!t && (t.id === 'ns-prompt' || t.id === 'ns-title' || (!!gridEl?.contains(t) && t.getAttribute('role') === 'radio'));
     if (((e.metaKey || e.ctrlKey) && e.key === 'Enter') || plainEnter) {
       e.preventDefault();
       if (!busy && (total > 0 || kind === 'chat')) void create();
@@ -320,13 +321,13 @@
     [
       scratchMode && ws.current ? 'No workspace' : null,
       model ? `Model: ${model}` : null,
-      Object.values(accountIds).some(Boolean) ? 'Account chosen' : null,
-      networkProfileId ? 'Network profile' : null,
+      kind === 'terminal' && Object.values(accountIds).some(Boolean) ? 'Account chosen' : null,
+      kind === 'terminal' && networkProfileId ? 'Network profile' : null,
       title.trim() ? `Title: ${title.trim()}` : null,
       cwd.trim() && cwd.trim() !== (scratchMode ? scratchHome : ws.current?.root_path) ? `Folder: ${cwd.trim()}` : null,
-      extraDirs.length ? `+${plural(extraDirs.length, 'folder')}` : null,
-      browser ? 'Browser tools' : null,
-      mcpProfileIds.length ? 'MCP profile' : null,
+      kind === 'terminal' && extraDirs.length ? `+${plural(extraDirs.length, 'folder')}` : null,
+      kind === 'terminal' && browser ? 'Browser tools' : null,
+      kind === 'terminal' && mcpProfileIds.length ? 'MCP profile' : null,
     ].filter((c): c is string => c !== null),
   );
   /** Chat: a structured thread, opened as a chat pane here beside the terminals (chatPane.ts). */
@@ -337,6 +338,7 @@
     busy = false;
     if (!ok) return;
     prompt = title = '';
+    extraDirs = []; // a terminal option: nothing left to discard
     void requestClose();
   }
 
@@ -469,15 +471,15 @@
 <svelte:window onkeydown={onGlobalKeydown} />
 
 <Modal title="New session" onclose={requestClose} dismissable={!busy}>
-  <!-- Terminal (the agent's own CLI, here) or Chat (a structured thread in Threads). -->
+  <!-- Terminal (the agent's own CLI, here) or Chat (a structured thread in Threads: ONE, so no batch counts). -->
   <div class="seg kind-seg" role="radiogroup" aria-label="Session kind" data-testid="ns-kind">
     {#each [['terminal', 'Terminal'], ['chat', 'Chat']] as [k, label] (k)}
-      <button type="button" class="seg-btn" class:active={kind === k} role="radio" aria-checked={kind === k} tabindex={kind === k ? 0 : -1} onkeydown={radioKey} onclick={() => (kind = k as 'terminal' | 'chat')}>{label}</button>
+      <button type="button" class="seg-btn" class:active={kind === k} role="radio" aria-checked={kind === k} tabindex={kind === k ? 0 : -1} onkeydown={radioKey} onclick={() => { kind = k as 'terminal' | 'chat'; if (kind === 'chat') counts = { [provider]: 1 }; }}>{label}</button>
     {/each}
   </div>
   <div class="field">
     <div id="ns-provider-label" class="provider-label">
-      Provider <span class="dim">· use − / + on a card to start several at once</span>
+      Provider{#if kind === 'terminal'}{' '}<span class="dim">· use − / + on a card to start several at once</span>{/if}
     </div>
     <div
       bind:this={gridEl}
@@ -508,7 +510,7 @@
               {providerSubtitle(p)}
             </span>
           </button>
-          <div class="count-ctl" role="group" id={`ns-steppers-${i}`} aria-label={`${p} sessions`}>
+          <div class="count-ctl" role="group" id={`ns-steppers-${i}`} aria-label={`${p} sessions`} style:display={kind === 'chat' ? 'none' : null}>
             <button
               type="button"
               class="cbtn"
@@ -555,23 +557,24 @@
         placeholder={noPrompt ? 'A plain shell takes no first message.' : 'What should the agent start on? Sent once it is ready.'}
       ></textarea>
       <span class="hint">
-        {total > 1 ? 'Sent to every agent in this batch. ' : ''}⌘↩ {total > 1 ? 'creates the sessions' : 'creates the session'}.
+        {total > 1 ? 'Sent to every agent in this batch. ' : ''}{viewport.isPhone ? '' : `⌘↩ ${total > 1 ? 'creates the sessions' : 'creates the session'}.`}
       </span>
     </div>
 
 
-  <!-- Everything else keeps its default until asked for: Options, with a chip
-       for each choice that is not the default (A4). -->
-  {#if kind === 'terminal'}
+  <!-- Everything else keeps its default until asked for: Options (Terminal's), with a chip
+       for each choice that is not the default (A4) — in Chat, those it still uses. -->
+  {#if kind === 'terminal' || optionChips.length > 0}
   <div class="opts-row">
-    <button type="button" class="btn small ghost" aria-expanded={optionsOpen} data-testid="ns-options" onclick={() => (optionsOpen = !optionsOpen)}>
+    {#if kind === 'terminal'}<button type="button" class="btn small ghost" aria-expanded={optionsOpen} data-testid="ns-options" onclick={() => (optionsOpen = !optionsOpen)}>
       <Icon name={optionsOpen ? 'chevronDown' : 'chevronRight'} size={12} /> Options
-    </button>
-    {#if !optionsOpen}
+    </button>{/if}
+    {#if !optionsOpen || kind === 'chat'}
       {#each optionChips as chip (chip)}<span class="opt-chip">{chip}</span>{/each}
     {/if}
   </div>
-  {#if optionsOpen}
+  {/if}
+  {#if kind === 'terminal' && optionsOpen}
   <!-- Workspace: the current one, or none (a workspace-less session in the daemon's hidden scratch workspace); with no workspace only "No workspace", pre-selected. -->
   <div class="field">
     <div id="ns-ws-label" class="provider-label">Workspace</div>
@@ -707,7 +710,6 @@
     </div>
   {/if}
 
-  {/if}
   {/if}
   <div role="status"><!-- always mounted: VoiceOver only speaks a live region that exists before its text -->
     {#if batchFailures.length}

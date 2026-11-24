@@ -246,3 +246,59 @@ test('Chat from the stage starts the chosen provider as a chat pane here (R2, A2
   expect(started.map((r) => r.provider)).toContain('codex');
   for (const r of started) await ctx.post(`${base}/api/v1/runtime-sessions/${r.id}/close`).catch(() => {});
 });
+
+// Threads that need you are needs-you here exactly as on Threads: a pending
+// approval survives "Only what needs you", and an Otto MCP approval card on a
+// thread makes its row say Approval (threadNav `threadClass`, one derivation).
+test('a thread waiting on an approval or an MCP card needs you, and "Only what needs you" keeps it', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const mk = async (title: string): Promise<string> => {
+    const t = await ctx.post(`${base}/api/v1/workspaces/${wsId}/runtime-sessions`, { data: { provider: 'codex', cwd: '/tmp', title } });
+    expect(t.ok(), await t.text()).toBeTruthy();
+    return (await t.json()).id as string;
+  };
+  const asking = await mk('Gattuso asks');
+  const carded = await mk('Nesta card');
+  await page.route('**/api/v1/mcp/approvals?status=pending*', (r) => r.fulfill({ json: [{
+    id: 'apr_e2e', workspace_id: wsId, kind: 'tool_call', server_id: null, server_name: 'otto', tool: 'otto.create_pr',
+    title: 'otto MCP server → create_pr', detail: 'Opens a pull request.', args_redacted_json: '{}', risk_label: 'dangerous',
+    status: 'pending', requested_by: 'u1', requested_by_kind: 'mcp_server', requested_by_session_id: carded,
+    decided_by: null, decision_note: null, created_at: '2026-11-23T10:00:00Z', decided_at: null, consumed_at: null, expires_at: null,
+  }] }));
+  try {
+    const p = await ctx.post(`${base}/api/v1/runtime-sessions/${asking}/prompt`, { data: { text: 'ask' } });
+    expect(p.ok(), await p.text()).toBeTruthy();
+    await page.goto('/#/agents');
+    await expect(page.getByTestId(`agents-status-${asking}`)).toHaveText(/Needs you|Approval/, { timeout: 30_000 });
+    await expect(page.getByTestId(`agents-status-${carded}`)).toHaveText(/Needs you|Approval/, { timeout: 20_000 });
+    await page.getByTestId('agents-sort-toggle').click();
+    await page.getByRole('menuitemcheckbox', { name: 'Only what needs you' }).click();
+    await expect(page.getByTestId(`agents-row-${asking}`)).toBeVisible();
+    await expect(page.getByTestId(`agents-row-${carded}`)).toBeVisible();
+    await expect(rows(page)).toHaveCount(2);
+  } finally {
+    for (const id of [asking, carded]) await ctx.post(`${base}/api/v1/runtime-sessions/${id}/close`).catch(() => {});
+  }
+});
+
+// With every session working the live sessions ARE the list: no "Working"
+// fold with its own scroll under an empty list (design review B1).
+test('working sessions stay in the one list, needs you first', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/#/agents');
+  await expect(rows(page)).toHaveCount(3, { timeout: 20_000 });
+  await page.evaluate(async (ids) => {
+    const path = '/src/lib/stores/workspace.svelte.ts';
+    const { ws } = await import(/* @vite-ignore */ path);
+    for (const id of ids) ws.statusMap[id] = 'working';
+  }, Object.values(ids));
+  for (const t of TITLES) await expect(page.getByTestId(`agents-status-${ids[t]}`)).toHaveText(/^Working/);
+  await expect(rows(page)).toHaveCount(3);
+  await expect(page.getByTestId('agents-working-toggle')).toHaveCount(0);
+  await page.evaluate(async (id) => {
+    const path = '/src/lib/stores/workspace.svelte.ts';
+    const { ws } = await import(/* @vite-ignore */ path);
+    ws.markNeedsYou(id);
+  }, ids.Pirlo);
+  await expect(rows(page).first()).toContainText('Pirlo');
+});

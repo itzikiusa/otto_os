@@ -160,8 +160,9 @@ test('agent session: the session tabs join the rail and Files/Git follow the ses
   for (const name of ['Activity', 'Outputs', 'Canvas', 'Info']) await expect(railBtn(page, name)).toBeVisible();
   await railBtn(page, 'Files').click();
   const panel = page.locator('.rpanel');
-  await expect(panel.locator('.folder-label')).toContainText('session');
-  await expect(panel.locator('.folder-label')).toContainText('tmp');
+  // The session's folder shows once, in the details card heading the panel.
+  await expect(panel.getByTestId('details-folder')).toContainText('tmp', { timeout: 15_000 });
+  await expect(panel.locator('.rpanel-folder')).toHaveCount(0);
   await railBtn(page, 'Activity').click();
   await expect(panel.locator('.rpanel-title')).toHaveText('Activity');
   // Leaving the session keeps the choice but shows a tab that exists there.

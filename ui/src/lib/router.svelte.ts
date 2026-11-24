@@ -557,6 +557,17 @@ class Router {
     this.step(i);
   }
 
+  /** Back to `path` without adding an entry (a pushed view's ‹, e.g. a phone
+   *  session → its list): step back when `path` is the entry before, else
+   *  replace this one — so the system Back never walks into the view again. */
+  backTo(path: string): void {
+    // The browser's own Back (the router's back() pushes a new entry); this
+    // entry's stamp says the one before it is ours.
+    const here = (history.state as { ottoIdx?: unknown } | null)?.ottoIdx === this.index;
+    if (here && this.index > 0 && this.stack[this.index - 1] === this.toHash(path)) history.back();
+    else this.replace(path);
+  }
+
   forward(): void {
     let i = this.index + 1;
     while (i < this.stack.length && this.claimed(this.stack[i])) i += 1;
