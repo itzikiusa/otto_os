@@ -83,7 +83,20 @@ test('navigation and request spans share W3C context, and arbitrary fields never
   assert.equal(t.apiComponent('/ide/projects'), 'ide');
   assert.equal(t.apiComponent('/api-client/requests'), 'api');
   assert.equal(t.apiComponent('/private-name'), 'other');
+  // The navigation counts toward the sidebar's "used lately" by device class only.
+  assert.equal(spans[1].name, 'ui.navigation');
+  assert.deepEqual(Object.entries(spans[1].attributes), [['otto.device', 'desktop']]);
   t.configureTelemetry(false);
+});
+
+test('device class: phone ≤ 640 px, a touch screen up to 1366 px is a tablet, else desktop', () => {
+  const t = load();
+  assert.equal(t.deviceClass(390, true), 'phone');
+  assert.equal(t.deviceClass(640, false), 'phone');
+  assert.equal(t.deviceClass(834, true), 'tablet');
+  assert.equal(t.deviceClass(1366, true), 'tablet');
+  assert.equal(t.deviceClass(834, false), 'desktop');
+  assert.equal(t.deviceClass(1440, false), 'desktop');
 });
 
 test('one flush at a time; consent revocation aborts delivery and invalidates old spans', async () => {

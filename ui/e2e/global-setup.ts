@@ -1,11 +1,18 @@
 import { request, type FullConfig } from '@playwright/test';
 import { execFileSync, execSync, spawn } from 'node:child_process';
 import { orphanHolders } from './holders';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
-import { tmpdir, homedir } from 'node:os';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';import { tmpdir, homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { TelemetryConfig, TelemetryStatus } from '../src/lib/api/types';
 import globalTeardown from './global-teardown.ts';
+
+/** Every built-in sidebar module id, read from the registry's source
+ *  (lib/sidebar.ts imports Svelte types the e2e tsconfig cannot load). */
+function sidebarModuleIds(): string[] {
+  const src = readFileSync(new URL('../src/lib/sidebar.ts', import.meta.url), 'utf8');
+  const block = src.slice(src.indexOf('export const SIDEBAR_MODULES'), src.indexOf('];', src.indexOf('export const SIDEBAR_MODULES')));
+  return [...block.matchAll(/^\s*(?:\{ )?id: '([a-z-]+)'/gm)].map((m) => m[1]);
+}
 
 // Stand up an ISOLATED ottod for the whole E2E run:
 //   - fresh temp data dir  -> fresh SQLite, no real sessions/DBs touched
@@ -225,6 +232,11 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
               // gates that must measure the real renderer clear it
               // (`useDefaultTerminalRenderer` in perf.ts).
               { name: 'otto.term.renderer', value: 'dom' },
+              // The sidebar lists only what was used lately (lib/sidebarMore.ts);
+              // specs predate that and reach every module by its row, so the
+              // throwaway profile has "used" all of them. The More-row spec
+              // (desktop-sidebar-more / sidebar-more-mobile) clears this.
+              { name: 'otto_sidebar_used', value: JSON.stringify(sidebarModuleIds()) },
             ],
           },
         ],

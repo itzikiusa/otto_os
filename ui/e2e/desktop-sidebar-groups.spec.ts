@@ -235,6 +235,11 @@ test('collapsed Rail: section separators, unique glyphs, accent selection', asyn
 });
 
 test('runtime plugins get their own trailing section (Navigator and Rail)', async ({ page }) => {
+  // A plugin in the "used lately" list (else it waits under More: lib/sidebarMore.ts).
+  await page.addInitScript(() => {
+    const used = JSON.parse(localStorage.getItem('otto_sidebar_used') || '[]') as string[];
+    localStorage.setItem('otto_sidebar_used', JSON.stringify([...used, 'plugin/e2e-sidebar-plugin']));
+  });
   await boot(page, 'home', '1', [{ slug: 'e2e-sidebar-plugin', name: 'E2E Sidebar Plugin', icon: 'box', has_ui: true }]);
   await expect(group(page, 'plugins')).toBeVisible();
   const ids = await page

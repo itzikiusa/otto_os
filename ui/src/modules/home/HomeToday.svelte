@@ -1,21 +1,29 @@
 <script lang="ts">
-  // The top of the Home desktop: a greeting + today's line, then four glance
-  // cards — Needs you · Running · Up next · Recent (data: today.svelte.ts).
-  // Text that sits straight on the ambient backdrop is --text only (AA over
-  // any backdrop pixel — unit/ambient.test.ts); dim text lives on the cards.
+  // The top of Home: one centred reading column (app.css .read-col) — the
+  // greeting and today's line, then "Needs you" and "Working" as inbox rows
+  // (lib/components/InboxRow, status words from lib/statusWords.ts), then
+  // "Up next" and "Recent" only when they hold something (data:
+  // today.svelte.ts). Approvals stay answerable in their row. The composer is
+  // the floating bar, docked under this column on desktop; a phone or tablet
+  // (no in-app bar) gets the same "Ask anything" entry here, opening the
+  // command sheet. Text that sits straight on the ambient backdrop is --text
+  // only (AA over any backdrop pixel — unit/ambient.test.ts); dim text lives on
+  // the cards.
   import { untrack } from 'svelte';
   import { announceShown } from '../../lib/announce.svelte';
   import ApprovalActions from '../../lib/components/ApprovalActions.svelte';
-  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
-  import LiveWorkingDot from '../../lib/components/LiveWorkingDot.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import InboxRow from '../../lib/components/InboxRow.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import { wordTone } from '../../lib/statusWords';
   import { auth } from '../../lib/stores/auth.svelte';
+  import { barStore } from '../../lib/stores/bar.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { now, rel } from '../../lib/stores/now.svelte';
   import { today, type TodayRow } from './today.svelte';
 
-  const ROWS = 3;
+  const ROWS = 5;
   let expanded = $state<Record<string, boolean>>({});
 
   // untrack: start() runs the first load synchronously, and that load reads
@@ -55,369 +63,217 @@
     return parts.length ? parts.join(' · ') : 'All quiet';
   });
 
-  /** "3m ago" for past rows, "in 2h" for what's coming (Up next): the
-   *  shared `rel()` handles both directions. */
-  const when = (iso: string): string => rel(iso);
-
-  interface Card {
+  interface Section {
     id: string;
     title: string;
-    icon: IconName;
     rows: TodayRow[];
-    empty: string;
-    /** Rows come from a fetch (skeleton until it settles). */
-    fetched?: boolean;
+    /** Shown even when empty (with this line); else only with rows. */
+    empty?: string;
   }
-  const cards: Card[] = $derived([
-    { id: 'needs', title: 'Needs you', icon: 'bell', rows: today.needs, empty: 'Nothing needs you right now.' },
-    { id: 'running', title: 'Working', icon: 'play', rows: today.running, empty: 'No agent or workflow is working right now.' },
-    {
-      id: 'next',
-      title: 'Up next',
-      icon: 'calendar',
-      rows: today.upNext,
-      empty: 'Nothing due in the next 24 hours. Scheduled tasks land here.',
-      fetched: true,
-    },
-    { id: 'recent', title: 'Recent', icon: 'clock', rows: today.recent, empty: 'Designs you touch show up here.', fetched: true },
-  ]);
+  const sections: Section[] = $derived(
+    [
+      { id: 'needs', title: 'Needs you', rows: today.needs, empty: 'Nothing needs you right now.' },
+      { id: 'running', title: 'Working', rows: today.running, empty: 'Nothing is working right now.' },
+      { id: 'next', title: 'Up next', rows: today.upNext },
+      { id: 'recent', title: 'Recent', rows: today.recent },
+    ].filter((s) => s.empty || s.rows.length > 0),
+  );
 </script>
 
-<section class="today" aria-label="Today">
+<section class="today read-col" aria-label="Today">
   <div class="greet">
     <h2 class="hello">{greeting}{name ? `, ${name}` : ''}</h2>
     <p class="line">{dateLine} · {summary}</p>
     {#if today.failed}
-      <!-- A source failed: say so via LoadState instead of letting an empty card
-           read as "nothing here". Retry re-polls every source at once. -->
+      <!-- A source failed: say so via LoadState instead of letting an empty
+           section read as "nothing here". Retry re-polls every source. -->
       <div class="today-err">
-        <LoadState
-          what="some Today items"
-          variant="compact"
-          error="One or more sources didn’t answer."
-          empty={false}
-          onretry={() => today.refresh()}
-        />
+        <LoadState what="some Today items" variant="compact" error="One or more sources didn’t answer." empty={false} onretry={() => today.refresh()} />
       </div>
     {/if}
   </div>
 
-  <div class="glance">
-    {#each cards as c (c.id)}
-      <article class="gcard" data-card={c.id} aria-labelledby="today-{c.id}">
-        <header class="gc-head">
-          <span class="gc-icon" class:warn={c.id === 'needs' && c.rows.length > 0}><Icon name={c.icon} size={13} /></span>
-          <h3 id="today-{c.id}">{c.title}</h3>
-          {#if c.rows.length}<span class="gc-count" class:warn={c.id === 'needs'}>{c.rows.length}</span>{/if}
-        </header>
-        {#if c.fetched && !today.loaded}
-          <div class="gc-skel"><Skeleton rows={2} height={20} /></div>
-        {:else if c.rows.length === 0}
-          <div class="gc-empty">
-            <span class="gc-empty-mark"><Icon name={c.id === 'needs' ? 'check' : c.icon} size={14} /></span>
-            <p>{c.empty}</p>
-          </div>
-        {:else}
-          <ul class="gc-rows">
-            {#each c.rows.slice(0, expanded[c.id] ? undefined : ROWS) as r (r.id)}
-              <li class:gc-approval-item={!!r.approval}>
-                <button class="gc-row" onclick={r.open} title={r.title}>
-                  <span class="gc-mark">
-                    {#if r.tone === 'working'}
-                      <LiveWorkingDot size={7} />
-                    {:else}
-                      <span class="gc-dot {r.tone}"></span>
-                    {/if}
-                  </span>
-                  <span class="gc-text">
-                    <span class="gc-title">{r.title}</span>
-                    <span class="gc-sub" title={r.detail}>{r.detail}{#if r.at && when(r.at)}{` · ${when(r.at)}`}{/if}</span>
-                  </span>
-                </button>
-                {#if r.approval}
-                  {@const appr = r.approval}
-                  {@const err = today.decideErrors[appr.id]}
-                  <div class="gc-row-actions">
-                    <ApprovalActions
-                      size="small"
-                      busy={today.deciding[appr.id] ?? null}
-                      disabled={!today.canDecideApproval(appr)}
-                      disabledReason={today.decideBlockedReason(appr)}
-                      denyTarget={appr.title}
-                      denyTitle="Deny approval request"
-                      testid={`home-approval-${appr.id}`}
-                      onapprove={() => void today.decideApproval(appr, true)}
-                      ondeny={(reason) => void today.decideApproval(appr, false, reason)}
-                    />
-                  </div>
-                  {#if err}
-                    <p class="gc-row-err" use:announceShown={{ text: err, assertive: true }}>{err}</p>
-                  {/if}
+  {#if !barStore.mounted}
+    <button type="button" class="ask" data-testid="home-ask" onclick={() => ui.openPalette('english')}>
+      <Icon name="sparkle" size={16} />
+      <span>Ask anything, or run a command</span>
+    </button>
+  {/if}
+
+  {#each sections as sec (sec.id)}
+    <section class="sec" data-card={sec.id} aria-labelledby="today-{sec.id}">
+      <h3 class="sec-title" id="today-{sec.id}">
+        {sec.title}
+        {#if sec.rows.length}<span class="sec-count">{sec.rows.length}</span>{/if}
+      </h3>
+      {#if sec.rows.length === 0}
+        <p class="sec-empty">{sec.empty}</p>
+      {:else}
+        <div class="sec-card">
+          {#each sec.rows.slice(0, expanded[sec.id] ? undefined : ROWS) as r (r.id)}
+            <div class="sec-row" class:has-actions={!!r.approval}>
+              <InboxRow
+                title={r.title}
+                project={r.project ?? null}
+                word={r.word ?? null}
+                tone={wordTone(r.word)}
+                time={r.at ? rel(r.at) : ''}
+                tip={r.title}
+                strong={sec.id === 'needs'}
+                onPage
+                testid="home-row-{r.id}"
+                state={sec.id}
+                onclick={r.open}
+              >
+                {#snippet context()}
+                  {#if !r.project && r.kind}<span class="sec-kind ellipsis">{r.kind}</span>{/if}
+                {/snippet}
+                {#snippet line3()}
+                  <span class="sec-detail ellipsis" title={r.detail}>{r.detail}</span>
+                {/snippet}
+              </InboxRow>
+              {#if r.approval}
+                {@const appr = r.approval}
+                {@const err = today.decideErrors[appr.id]}
+                <div class="sec-actions">
+                  <ApprovalActions
+                    size="small"
+                    busy={today.deciding[appr.id] ?? null}
+                    disabled={!today.canDecideApproval(appr)}
+                    disabledReason={today.decideBlockedReason(appr)}
+                    denyTarget={appr.title}
+                    denyTitle="Deny approval request"
+                    testid={`home-approval-${appr.id}`}
+                    onapprove={() => void today.decideApproval(appr, true)}
+                    ondeny={(reason) => void today.decideApproval(appr, false, reason)}
+                  />
+                </div>
+                {#if err}
+                  <p class="sec-err" use:announceShown={{ text: err, assertive: true }}>{err}</p>
                 {/if}
-              </li>
-            {/each}
-          </ul>
-          {#if c.rows.length > ROWS}
-            <button class="gc-more" aria-expanded={!!expanded[c.id]} onclick={() => (expanded[c.id] = !expanded[c.id])}>{expanded[c.id] ? 'Show less' : `${c.rows.length - ROWS} more`}</button>
+              {/if}
+            </div>
+          {/each}
+          {#if sec.rows.length > ROWS}
+            <button type="button" class="sec-more" aria-expanded={!!expanded[sec.id]} onclick={() => (expanded[sec.id] = !expanded[sec.id])}>
+              {expanded[sec.id] ? 'Show less' : `${sec.rows.length - ROWS} more`}
+            </button>
           {/if}
-        {/if}
-      </article>
-    {/each}
-  </div>
+        </div>
+      {/if}
+    </section>
+  {/each}
 </section>
 
 <style>
   .today {
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: var(--sp-8);
   }
-  .greet {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    padding-inline: 2px;
-  }
-  /* Straight on the backdrop: --text only (see the header comment). */
   .hello {
     margin: 0;
-    font-size: var(--fs-xl);
+    font-size: var(--fs-2xl);
     font-weight: 600;
     letter-spacing: -0.01em;
     color: var(--text);
   }
   .line {
-    margin: 0;
-    font-size: var(--fs-m);
+    margin: var(--sp-2) 0 0;
+    font-size: var(--fs-l);
     color: var(--text);
-    opacity: 1;
   }
   .today-err {
-    margin-top: 6px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    overflow: hidden;
+    margin-block-start: var(--sp-4);
   }
-  .glance {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 12px;
-  }
-  @media (max-width: 1024px) {
-    .glance {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-  }
-  .gcard {
+  /* The phone / tablet composer: the same "Ask" entry the desktop bar is. */
+  .ask {
     display: flex;
-    flex-direction: column;
-    gap: 6px;
-    min-width: 0;
-    min-height: 148px;
-    padding: 12px 12px 10px;
-    background: var(--surface);
+    align-items: center;
+    gap: var(--sp-5);
+    inline-size: 100%;
+    min-block-size: 52px;
+    padding-inline: var(--sp-6);
     border: 1px solid var(--border);
     border-radius: var(--radius-l);
+    background: var(--surface);
+    box-shadow: var(--shadow-card);
+    color: var(--text-dim);
+    font: inherit;
+    font-size: var(--fs-l);
+    text-align: start;
+    cursor: text;
+  }
+  .ask :global(svg) {
+    color: var(--accent-text);
+  }
+  .sec {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-4);
+  }
+  .sec-title {
+    display: flex;
+    align-items: baseline;
+    gap: var(--sp-4);
+    margin: 0;
+    font-size: var(--fs-m);
+    font-weight: 600;
+    color: var(--text);
+  }
+  .sec-count {
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .sec-empty {
+    margin: 0;
+    font-size: var(--fs-m);
+    color: var(--text);
+  }
+  .sec-card {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: var(--sp-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-l);
+    background: var(--surface);
     box-shadow: var(--shadow-card);
   }
-  .gc-head {
+  .sec-row {
     display: flex;
-    align-items: center;
-    gap: 8px;
+    flex-direction: column;
+  }
+  .sec-row.has-actions {
+    padding-block-end: var(--sp-3);
+  }
+  .sec-kind,
+  .sec-detail {
     min-width: 0;
   }
-  .gc-icon {
-    display: grid;
-    place-items: center;
-    width: 22px;
-    height: 22px;
-    flex: none;
-    border-radius: var(--radius-s);
-    background: var(--surface-2);
-    color: var(--text-dim);
+  .sec-actions {
+    padding-inline: var(--sp-5);
   }
-  .gc-icon.warn {
-    background: var(--warning-soft);
-    color: var(--warning);
-  }
-  h3 {
-    flex: 1;
-    min-width: 0;
-    margin: 0;
+  .sec-err {
+    margin: var(--sp-2) 0 0;
+    padding-inline: var(--sp-5);
     font-size: var(--fs-s);
-    font-weight: 600;
-    color: var(--text);
-  }
-  .gc-count {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
-    min-width: 20px;
-    height: 18px;
-    padding: 0 6px;
-    display: inline-grid;
-    place-items: center;
-    border-radius: 999px;
-    background: var(--surface-2);
-    color: var(--text-dim);
-  }
-  .gc-count.warn {
-    background: var(--warning-soft);
-    color: var(--warning);
-  }
-  /* A calm, centred "nothing here" — never a blank card. */
-  .gc-empty {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    padding: 4px 8px 8px;
-    text-align: center;
-  }
-  .gc-empty p {
-    margin: 0;
-    max-width: 30ch;
-    font-size: var(--fs-s);
-    line-height: 1.45;
-    color: var(--text-dim);
-  }
-  .gc-empty-mark {
-    display: grid;
-    place-items: center;
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
-    background: var(--surface-2);
-    color: var(--text-dim);
-  }
-  .gcard[data-card='needs'] .gc-empty-mark {
-    background: var(--success-soft);
-    color: var(--success);
-  }
-  .gc-skel {
-    padding-top: 4px;
-  }
-  .gc-rows {
-    list-style: none;
-    margin: 0 -6px;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-  }
-  .gc-row {
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-    width: 100%;
-    padding: 4px 6px;
-    border: none;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    text-align: start;
-    cursor: pointer;
-    transition: background var(--dur-fast) ease-out;
-  }
-  .gc-row:hover {
-    background: var(--hover);
-  }
-  .gc-mark {
-    flex: none;
-    display: inline-grid;
-    place-items: center;
-    width: 10px;
-    height: 18px;
-  }
-  .gc-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--status-idle);
-  }
-  .gc-dot.warning {
-    background: var(--status-warn);
-  }
-  .gc-dot.accent {
-    background: var(--accent);
-  }
-  .gc-text {
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-  }
-  .gc-title,
-  .gc-sub {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .gc-title {
-    font-size: var(--fs-m);
-    font-weight: 500;
-  }
-  .gc-sub {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .gc-approval-item {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding-bottom: 4px;
-  }
-  .gc-row-actions {
-    padding-inline: 24px 6px;
-    display: flex;
-    justify-content: flex-start;
-  }
-  .gc-row-err {
-    margin: 0;
-    padding-inline: 24px 6px;
-    font-size: var(--fs-xs);
     color: var(--danger);
   }
-  .gc-more {
+  .sec-more {
     align-self: flex-start;
-    margin-top: auto;
-    padding: 2px 0;
-    border: none;
+    margin: var(--sp-2) var(--sp-5) var(--sp-3);
+    padding: 0;
+    border: 0;
     background: none;
     color: var(--accent-text);
     font: inherit;
     font-size: var(--fs-s);
     cursor: pointer;
   }
-  .gc-more:hover {
-    text-decoration: underline;
-  }
-  /* Phone: one column, and a card with nothing in it is a single calm line
-     so the widgets stay within reach. */
-  @media (max-width: 640px) {
-    .glance {
-      grid-template-columns: minmax(0, 1fr);
-      gap: 8px;
-    }
-    .gcard {
-      min-height: 0;
-    }
-    .gcard:has(.gc-empty) {
-      flex-direction: row;
-      align-items: center;
-    }
-    .gcard:has(.gc-empty) .gc-head {
-      flex: none;
-    }
-    .gc-empty {
-      flex-direction: row;
-      justify-content: flex-start;
-      padding: 0;
-      text-align: start;
-    }
-    .gc-empty-mark {
-      display: none;
+  @media (pointer: coarse) {
+    .sec-more {
+      min-block-size: var(--hit-min);
     }
   }
 </style>
