@@ -227,3 +227,15 @@ export function mergeRefreshed(
   const seen = new Set(fresh.map((p) => p.number));
   return [...fresh, ...prev.slice(page1Count).filter((p) => !seen.has(p.number))];
 }
+
+/** A PR list failure that is about the repo's git account, not the network:
+ *  what is wrong and how to fix it (null for anything else). `label` names
+ *  an account by id once the accounts are known. */
+export function accountCause(message: string, label?: (id: string) => string | undefined): string | null {
+  if (/repo has no git account/i.test(message)) {
+    return 'No git account is linked to this repo. Link one on the repo card (Account), or add one in Settings → Git Accounts.';
+  }
+  const id = /token missing for git account (\S+)/i.exec(message)?.[1];
+  if (id) return `The token for ${label?.(id) ?? 'this repo’s git account'} is missing. Add it again in Settings → Git Accounts.`;
+  return null;
+}

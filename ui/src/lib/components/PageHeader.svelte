@@ -74,6 +74,9 @@
     /** Segmented control / tab row. */
     tabs?: Snippet;
     tabsPlacement?: 'inline' | 'start' | 'below';
+    /** The inline tabs' floor (share of the row) when the actions need room:
+     *  half by default; Git lowers it so its always-visible verbs fit. */
+    tabsMin?: number;
     /** Extra class on the root (page-specific tweaks). */
     class?: string;
   }
@@ -90,6 +93,7 @@
     more,
     tabs,
     tabsPlacement = 'inline',
+    tabsMin = 0.5,
     class: klass = '',
   }: Props = $props();
 
@@ -233,14 +237,15 @@
       if (rootEl && titleEl) styles.set(rootEl, rootEl.style, '--ph-title-min', `${titleMin}px`);
       styles.set(wrapEl, wrapEl.style, 'min-width', `${Math.max(0, Math.min(Math.ceil(keepW) + RING * 2, room))}px`);
       let need = visible.reduce((s, k) => s + (widthOf.get(k) ?? 0), 0) + GAP * Math.max(0, visible.length - 1);
-      // The inline tabs' cap: never less than half the row (a header with
+      // The inline tabs' cap: never less than tabsMin (half) of the row (a header with
       // many actions keeps today's split), but when the actions leave room
       // the tabs take it — a fixed 50% left the Git repo tabs squeezed to
       // "bo_co…" next to an empty half-row (the page's toolbar lives on the
       // row below, so its header has no actions at all).
       if (row && rootEl) {
-        const reserved = chrome + titleMin + leadW + paneW + (visible.length ? need + RING * 2 + gap : 0);
-        const tabsCap = Math.max(rowW * 0.5, rowW - reserved);
+        // (+ the page's ⋯, which sits in the same wrap.)
+        const reserved = chrome + titleMin + leadW + paneW + (visible.length ? need + RING * 2 + gap : 0) + (more ? moreW + GAP : 0);
+        const tabsCap = Math.max(rowW * tabsMin, rowW - reserved);
         styles.set(rootEl, rootEl.style, '--ph-tabs-max', `${Math.floor(tabsCap)}px`);
       }
       // The title block's cap: 45% of the row by default, but a header with
@@ -323,7 +328,8 @@
     // this observer ignores, so it can't loop). A mutation that leaves every
     // action's signature as it was is dropped by the gate in measure().
     const mo = new MutationObserver(schedule);
-    if (actionsEl) mo.observe(actionsEl, { childList: true, subtree: true, characterData: true });
+    // (A class flip resizes too: Git's verbs turn labels into icons by class.)
+    if (actionsEl) mo.observe(actionsEl, { childList: true, subtree: true, characterData: true, attributeFilter: ['class'] });
     // A retitled page (another item selected) changes the title's minimum.
     const line = titleEl?.parentElement;
     if (line) mo.observe(line, { childList: true, subtree: true, characterData: true });

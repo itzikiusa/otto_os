@@ -412,8 +412,9 @@ test('shell: repo tab strip + new-tab + sub-route nav + toolbar fit', async ({ p
   // document (it scrolls within its own strip).
   await expect(page.locator('.rv-tabs')).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.rv-tabs .rv-tab')).toContainText(['Changes', 'History', 'Pull requests', 'Review']);
-  // The git verbs (Fetch/Pull/Push/…) live in the page header's actions.
-  await expect(page.locator('.ph-actions').first()).toBeVisible();
+  // The git verbs (Fetch/Pull/Push/Stash/Pop): a row of their own on a phone,
+  // the page header's actions on a tablet.
+  await expect(page.getByTestId('git-verbs-row').or(page.locator('.git-header .ph-actions .tbtn')).first()).toBeVisible();
   await expectFitsWidth(page);
 });
 

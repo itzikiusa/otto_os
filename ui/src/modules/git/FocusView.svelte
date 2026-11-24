@@ -21,7 +21,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import { groupPrRowsByForge, prCandidateRepos, type FocusPrRow as PrRow } from './focusPrHelpers';
+  import { freshPrs, groupPrRowsByForge, prCandidateRepos, savePrs, type FocusPrRow as PrRow } from './focusPrHelpers';
 
   let prRows = $state<PrRow[]>([]);
   let prsLoading = $state(true);
@@ -32,7 +32,9 @@
   let prsRevision = 0;
   let prsAbort: AbortController | null = null;
 
-  async function loadPrs(): Promise<void> {
+  async function loadPrs(force = false): Promise<void> {
+    const hit = !force && freshPrs();
+    if (hit) return void ({ rows: prRows, errors: prErrors, handles: myHandles } = hit, (prsLoading = false));
     prsAbort?.abort();
     const ctl = new AbortController();
     prsAbort = ctl;
@@ -46,7 +48,7 @@
       const accs = await api.get<GitAccount[]>('/git/accounts', ctl.signal).catch(() => null);
       if (stale()) return;
       if (accs) myHandles = new Set(accs.map((a) => a.username.toLowerCase()).filter(Boolean));
-      const candidates = prCandidateRepos(git.allRepos, accs);
+      const candidates = prCandidateRepos(git.allRepos); // linked repos only: 177 registered ≠ 177 requests
       // At most 2 provider calls at a time on the background lane (r3-04-05).
       const settled = await mapLimit(candidates, 2, async (repo): Promise<PromiseSettledResult<PrRow[]>> => {
         if (stale()) return { status: 'fulfilled', value: [] };
@@ -60,13 +62,11 @@
       if (stale()) return;
       const rows: PrRow[] = [];
       let errors = 0;
-      for (const s of settled) {
-        if (s.status === 'fulfilled') rows.push(...s.value);
-        else errors++;
-      }
+      for (const s of settled) s.status === 'fulfilled' ? rows.push(...s.value) : errors++;
       rows.sort((a, b) => (b.pr.updated_at ?? '').localeCompare(a.pr.updated_at ?? ''));
       prErrors = errors;
       prRows = rows;
+      savePrs(rows, errors, myHandles);
     } finally {
       if (prsAbort === ctl) prsAbort = null;
       if (!stale()) prsLoading = false;
@@ -319,7 +319,7 @@
             <button aria-pressed={prFilter === 'mine'} class:active={prFilter === 'mine'} onclick={() => (prFilter = 'mine')}>Opened by me</button>
           </div>
         {/if}
-        <button class="icon-btn" onclick={() => void loadPrs()} title="Refresh pull requests" aria-label="Refresh pull requests">
+        <button class="icon-btn" onclick={() => void loadPrs(true)} title="Refresh pull requests" aria-label="Refresh pull requests">
           <Icon name="refresh" size={14} />
         </button>
       </header>

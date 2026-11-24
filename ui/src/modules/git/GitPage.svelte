@@ -7,14 +7,14 @@
   // #/git/:id/:tab deep-link opens that repo as a tab.
   import { untrack } from 'svelte';
   import { onTabKey } from '../../lib/tabKeys';
-  import type { RepoStatusResp } from '../../lib/api/types';
+  import type { Repo, RepoStatusResp } from '../../lib/api/types';
+  import { api } from '../../lib/api/client';
   import type { MenuItem } from '../../lib/contextmenu.svelte';
   import { router } from '../../lib/router.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import GitTabs from './GitTabs.svelte';
   import { focusPath, parseGitRoute } from './gitRoute';
   import { prWorkspace } from './prWorkspaceStore.svelte';
-  import GitToolbar from './GitToolbar.svelte';
   import { gitBridge } from '../../lib/diff/gitBridge.svelte';
   import { registry } from '../../lib/commands.svelte';
   import GitLanding from './GitLanding.svelte';
@@ -49,6 +49,11 @@
   // landing's list of repositories doesn't pay for the graph, the diff
   // viewer and the commit card.
   const RepoViewLazy = lazyComponent(() => import('./RepoView.svelte'));
+  // The verbs load with the repo view, not with the landing's list.
+  const GitToolbarLazy = lazyComponent(() => import('./GitToolbar.svelte'));
+  // The repo tabs' floor (share of the header row): below it the verbs'
+  // labels give way instead of the tabs.
+  const TABS_MIN = 0.25;
   const FocusViewLazy = lazyComponent(() => import('./FocusView.svelte'));
   // The Add repository sheet loads on first open.
   const AddRepoSheetLazy = lazyComponent(() => import('./AddRepoSheet.svelte'));
@@ -132,6 +137,30 @@
     }
   });
 
+  // A deep link to an id /git/repos doesn't list (a duplicate row it
+  // dropped, a removed repo): open the registered repo at the same path,
+  // else say so — never leave the previous repo on screen under that URL.
+  let missingRepo = $state<string | null>(null);
+  $effect(() => {
+    const r = route;
+    if (!r.repo || r.pr || !git.allReposLoaded || git.allRepos.some((x) => x.id === r.repo)) {
+      missingRepo = null;
+      return;
+    }
+    const id = r.repo;
+    untrack(() =>
+      void api.get<Repo>(`/repos/${id}`).then(
+        (dup) => {
+          const same = git.allRepos.find((x) => x.path === dup.path);
+          if (same) router.replace(`git/${same.id}${r.tab ? `/${r.tab}` : ''}`);
+          else missingRepo = id;
+        },
+        () => (missingRepo = id),
+      ),
+    );
+  });
+  const notFound = $derived(missingRepo !== null && route.repo === missingRepo);
+
   /** Phone: the title's repo switcher — Focus, the open repos, any other, add. */
   function phoneRepoMenu(e: MouseEvent): void {
     const open = git.openRepoIds.map((id) => git.allRepos.find((r) => r.id === id)).filter((r) => !!r);
@@ -180,7 +209,8 @@
       title={focusView ? 'Focus' : 'Git'}
       crumbs={focusView ? [{ label: 'Git', onclick: () => setFocus(false) }] : []}
       class="git-header"
-      more={activeRepo && !focusView ? () => [...(toolbar?.menuItems() ?? []), ...(toolbar ? [{ separator: true }] : []), ...(repoView?.moreMenuItems() ?? [])] : undefined}
+      tabsMin={TABS_MIN}
+      more={activeRepo && !focusView && !notFound ? () => [...(toolbar?.menuItems() ?? []), ...(toolbar ? [{ separator: true }] : []), ...(repoView?.moreMenuItems() ?? [])] : undefined}
     >
       {#snippet titleContent()}
         {#if viewport.isPhone}
@@ -200,16 +230,19 @@
         {/if}
       {/snippet}
       {#snippet actions()}
-        {#if activeRepo && !focusView}
+        {#if activeRepo && !focusView && !notFound}
           {@const repoId = activeRepo.id}
           <!-- The repo's verbs live in the header (not a second toolbar row under
                it); they collapse into ⋯ by data-overflow when the bar is tight. -->
-          {#if activeStatus}
+          {#if activeStatus && GitToolbarLazy.component}
+            {@const GitToolbar = GitToolbarLazy.component}
             <GitToolbar
-              inHeader
+              variant="header"
+              tabsMin={TABS_MIN}
               bind:this={toolbar}
               {repoId}
               status={activeStatus}
+              accent={repoView?.viewState().tab !== 'changes'}
               onstatus={(s) => git.setStatus(repoId, s)}
               onrefresh={() => gitBridge.refreshGraph(repoId)}
               onbrowsestashes={() => (stashesRepo = repoId)}
@@ -221,11 +254,29 @@
       {/snippet}
     </PageHeader>
 
+    <!-- Phone: the everyday verbs are a row of their own under the header (Changes and History). -->
+    {#if viewport.isPhone && activeRepo && !focusView && !notFound && activeStatus && repoView && GitToolbarLazy.component && ['changes', 'graph'].includes(repoView.viewState().tab) && !repoView.viewState().resolving}
+      {@const repoId = activeRepo.id}
+      {@const GitToolbar = GitToolbarLazy.component}
+      <GitToolbar {repoId} status={activeStatus} onstatus={(s) => git.setStatus(repoId, s)} onrefresh={() => gitBridge.refreshGraph(repoId)} onbrowsestashes={() => (stashesRepo = repoId)} />
+    {/if}
+
     {#if stashesRepo}{@const sid = stashesRepo}
       <LazyMount lazy={StashBrowser} what="the stash browser" quiet onerror={() => (stashesRepo = null)} props={{ repoId: sid, onclose: () => (stashesRepo = null), onchanged: (st: RepoStatusResp) => { git.setStatus(sid, st); gitBridge.refreshGraph(sid); } }} />
     {/if}
 
-    {#if focusView}
+    {#if notFound}
+      <PageBody>
+        <EmptyState
+          variant="page"
+          icon="branch"
+          title="Repository not found"
+          body="This link names a repository that isn’t registered — it may have been removed."
+          actionLabel="Show repositories"
+          onaction={() => router.go('git')}
+        />
+      </PageBody>
+    {:else if focusView}
       <PageBody fill padded={false}>
         <div class="landing-focus">
           <LazyMount lazy={FocusViewLazy} what="Focus" />

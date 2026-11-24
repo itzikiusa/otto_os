@@ -1164,6 +1164,48 @@ async fn delete_remote_branch_prunes_local_tracking_ref() {
     );
 }
 
+/// One `git branch -d` deletes several locals (a bulk delete paid a process
+/// per branch); the ones git refuses — unmerged, not found — come back with
+/// their own error, in order, and stay.
+#[tokio::test]
+async fn delete_branches_deletes_all_in_one_call_with_per_branch_errors() {
+    let (_tmp, dir) = fixture();
+    sh_git(&dir, &["add", "-A"]);
+    sh_git(&dir, &["commit", "-m", "tidy"]);
+    for b in ["a", "b", "c"] {
+        sh_git(&dir, &["branch", b]);
+    }
+    sh_git(&dir, &["checkout", "-b", "wip"]);
+    sh_git(&dir, &["commit", "--allow-empty", "-m", "unmerged"]);
+    sh_git(&dir, &["checkout", "main"]);
+    let git = LocalGit::new(&dir);
+    let names = ["a", "wip", "b", "nope", "c"].map(String::from);
+    let res = git.delete_branches(&names, false).await;
+    assert!(
+        res[0].is_ok() && res[2].is_ok() && res[4].is_ok(),
+        "{res:?}"
+    );
+    assert!(
+        matches!(&res[1], Err(e) if e.to_string().contains("not fully merged")),
+        "{res:?}"
+    );
+    assert!(
+        res[3].is_err(),
+        "a branch that doesn't exist is not reported deleted"
+    );
+    let left: Vec<String> = git
+        .refs()
+        .await
+        .unwrap()
+        .local
+        .into_iter()
+        .map(|b| b.name)
+        .collect();
+    assert_eq!(left, ["main", "wip"]);
+    // Forced, the unmerged one goes too.
+    assert!(git.delete_branches(&names[1..2], true).await[0].is_ok());
+}
+
 /// One push deletes several remote branches (perf G6: a bulk delete paid a
 /// connection per branch) and prunes their tracking refs; a batch with an
 /// already-gone ref fails as a whole so the caller retries one by one.

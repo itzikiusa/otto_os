@@ -264,6 +264,12 @@ test('PR Decline: confirms which PR and what happens, posts it, then reads close
 
 test('Focus: the URL drives it — toggle, repo link inside Focus, Back and reload', async ({ page }) => {
   await focusFixtures(page);
+  // Focus asks only repos linked to a git account: this one is.
+  await page.route('**/api/v1/git/repos', async (r) => {
+    const res = await r.fetch();
+    const repos = (await res.json()) as { id: string; git_account_id: string | null }[];
+    await r.fulfill({ response: res, json: repos.map((x) => (x.id === repoId ? { ...x, git_account_id: 'gh' } : x)) });
+  });
   await openRepo(page, 'graph');
   const focus = page.getByRole('button', { name: 'Focus', exact: true });
   await expect(focus).toHaveAttribute('aria-pressed', 'false');

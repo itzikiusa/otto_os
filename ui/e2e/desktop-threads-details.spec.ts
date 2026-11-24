@@ -158,6 +158,8 @@ test('the details card floats beside a Claude thread, heads the right panel, and
   await expect(sheet).toBeVisible();
   await expect(page.getByRole('dialog')).toContainText('Commit to feat/offline-sync');
   await expect(sheet.getByText('Nothing staged yet.')).toHaveCount(0);
+  // Pull from the sheet, without leaving the thread (no remote here: disabled, says why).
+  await expect(sheet.getByTestId('git-verbs-sync').getByRole('button', { name: /^Pull\b/ })).toBeVisible();
   await expect(conv).toBeAttached();
   await shots(page, 'details-commit-sheet');
   await sheet.getByLabel('Commit summary').fill('Queue offline edits');
