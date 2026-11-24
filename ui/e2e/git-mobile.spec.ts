@@ -288,6 +288,14 @@ test.describe('pull requests: review state', () => {
     await word(1).scrollIntoViewIfNeeded();
     await expect(word(1)).toBeInViewport();
     await expectFitsWidth(page);
+    // Chrome before 128 gives a <button> `align-items: flex-start` (UA sheet,
+    // seen on the Android emulator): a long title must still end in an
+    // ellipsis inside its row, not run past it under the select box.
+    await page.addStyleTag({ content: 'button { align-items: flex-start; }' });
+    const pr1 = page.locator('.pr-row[data-pr="1"] .tr-main');
+    const rowBox = (await pr1.boundingBox())!;
+    const titleBox = (await pr1.locator('.tr-title').boundingBox())!;
+    expect(titleBox.x + titleBox.width).toBeLessThanOrEqual(rowBox.x + rowBox.width);
   });
 });
 
@@ -311,6 +319,11 @@ test('diffviewer: a WIP file diff fits and its code is reachable', async ({ page
   await page.locator('.wip-row').click();
   const panel = page.locator('.wip-panel');
   await expect(panel).toBeVisible({ timeout: 15_000 });
+  // The commit card sits above the list: the panel scrolls as a whole, so the
+  // last file is reachable (its own scroller was 50 px tall on a phone).
+  await panel.locator('.wp-name').last().scrollIntoViewIfNeeded();
+  await expect(panel.locator('.wp-name').last()).toBeInViewport();
+  await panel.locator('.wp-name').first().scrollIntoViewIfNeeded();
   await panel.locator('.wp-name').first().click();
   const diff = page.locator('.wp-diff');
   await expect(diff).toBeVisible({ timeout: 15_000 });

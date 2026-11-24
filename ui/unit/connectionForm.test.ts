@@ -105,3 +105,39 @@ test('a pasted IPv6 URI fills Host without its brackets', () => {
   assert.equal(p.host, '::1');
   assert.equal(p.port, '5432');
 });
+
+// Chrome before 130 (the Android emulator's Chrome 124) parses a non-special
+// scheme such as mysql: or redis: as an opaque path: no host, port or user.
+// A pasted URI must still fill the fields there.
+test('a pasted URI fills the fields where URL leaves non-special schemes opaque', () => {
+  const Real = URL;
+  const special = new Set(['http:', 'https:', 'ws:', 'wss:', 'ftp:', 'file:']);
+  class OpaqueURL extends Real {
+    #opaque: boolean;
+    #path: string;
+    constructor(s: string | URL, base?: string | URL) {
+      super(s, base);
+      this.#opaque = !special.has(super.protocol);
+      this.#path = String(s).slice(super.protocol.length).split(/[?#]/)[0];
+    }
+    get hostname() { return this.#opaque ? '' : super.hostname; }
+    get port() { return this.#opaque ? '' : super.port; }
+    get username() { return this.#opaque ? '' : super.username; }
+    get password() { return this.#opaque ? '' : super.password; }
+    get pathname() { return this.#opaque ? this.#path : super.pathname; }
+  }
+  globalThis.URL = OpaqueURL as typeof URL;
+  try {
+    const p = parseConnectionUri('clickhouse://default:pw@127.0.0.1:8399/shop?tls=true') as Record<string, unknown>;
+    assert.equal(p.kind, 'clickhouse');
+    assert.equal(p.host, '127.0.0.1');
+    assert.equal(p.port, '8399');
+    assert.equal(p.user, 'default');
+    assert.equal(p.secret, 'pw');
+    assert.equal(p.db, 'shop');
+    assert.equal(p.tlsMode, 'required');
+    assert.equal(p.name, '127.0.0.1/shop');
+  } finally {
+    globalThis.URL = Real;
+  }
+});

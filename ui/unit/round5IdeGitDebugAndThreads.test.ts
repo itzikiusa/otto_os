@@ -49,6 +49,7 @@ const { computeIdeDiffHunks, parseSavedLines } = loadSource(
     '@codemirror/state': cmState,
     '../clipboard': { copyWithToast() {} },
     '../contextmenu.svelte': { ctxMenu: { show() {}, showAt() {} } },
+    './cm-ide-touch-menu': { isCoarsePointer: () => false },
     '../lineDiff.ts': lineDiff,
   },
 );

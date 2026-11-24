@@ -29,5 +29,8 @@ test('landing: repositories are rows that say where they stand', async ({ page }
   await expect(rows.first()).toBeVisible({ timeout: 20_000 });
   const box = (await rows.first().boundingBox())!;
   expect(box.height).toBeGreaterThanOrEqual(44);
+  // The row's ⋯ is a finger-sized 44 px target, like the rest of the phone UI.
+  const more = (await rows.first().getByRole('button', { name: /^More for / }).boundingBox())!;
+  expect(Math.min(more.width, more.height)).toBeGreaterThanOrEqual(44);
   await expectNoHorizontalOverflow(page);
 });

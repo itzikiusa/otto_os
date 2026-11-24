@@ -40,6 +40,8 @@ test('list → filter → section → back, and deep links open the section', as
   await expect(back(page)).toBeVisible();
   await expect(nav(page)).toBeHidden();
   await expectNoHorizontalOverflow(page);
+  // The way back is a finger-sized (44 px) target.
+  expect(Math.round((await back(page).boundingBox())!.height)).toBeGreaterThanOrEqual(44);
 
   await back(page).click();
   await expect.poll(() => page.evaluate(() => location.hash)).toBe('#/settings');

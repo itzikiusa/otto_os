@@ -132,6 +132,33 @@ test.describe('database mobile (phone)', () => {
     expect(m.gap).toBeLessThan(40);
   });
 
+  // The sticky row numbers cover what scrolls under them: a striped row's
+  // number cell was a 7 % tint, so a wide value read through it.
+  test('a striped row\'s number stays opaque over the cells scrolling under it', async ({ page }) => {
+    test.skip(redisConnId == null, 'redis-server unavailable');
+    await openAndQuery(page);
+    const alphas = await page.locator('.grid tbody tr:not(.spacer) td.rownum').evaluateAll((cells) =>
+      cells.slice(0, 4).map((c) => {
+        const bg = getComputedStyle(c).backgroundColor;
+        const a = /\/\s*([\d.]+)\)|rgba\([^)]*,\s*([\d.]+)\)/.exec(bg);
+        return { bg, image: getComputedStyle(c).backgroundImage, alpha: a ? Number(a[1] ?? a[2]) : 1 };
+      }),
+    );
+    for (const a of alphas) expect(a.alpha === 1 || a.image !== 'none', JSON.stringify(a)).toBe(true);
+  });
+
+  // A tree row is 36 px on touch: its name sits level with the icon beside it
+  // (baseline alignment put it at the row's top, above the icon).
+  test('the Tables sheet: a name sits level with its icon', async ({ page }) => {
+    test.skip(redisConnId == null, 'redis-server unavailable');
+    await openAndQuery(page);
+    await page.getByRole('button', { name: 'Tables', exact: true }).first().tap();
+    const node = page.locator('.schema-tree .node').filter({ has: page.locator('.node-icon') }).first();
+    await expect(node).toBeVisible({ timeout: 15_000 });
+    const mid = async (s: string) => { const b = (await node.locator(s).first().boundingBox())!; return b.y + b.height / 2; };
+    expect(Math.abs((await mid('.nl-text')) - (await mid('.node-icon')))).toBeLessThanOrEqual(2);
+  });
+
   test('running a query shows result rows in the grid', async ({ page }) => {
     test.skip(redisConnId == null, 'redis-server unavailable');
     await openAndQuery(page);

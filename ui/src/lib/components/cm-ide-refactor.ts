@@ -689,6 +689,9 @@ export function createIdeRefactorExtensions(opts: {
     Prec.highest(EditorView.domEventHandlers({
       contextmenu(event, view) {
         if (event.target instanceof Element && event.target.closest('.cm-gutters')) return false;
+        // Touch: a long-press (Android fires contextmenu) is the system's text
+        // selection; this menu is on the phone tab row's ⋯ (ideEditorTouchMenu.ts).
+        if (isCoarsePointer()) return false;
         event.preventDefault();
         openMenu(event, view);
         return true;

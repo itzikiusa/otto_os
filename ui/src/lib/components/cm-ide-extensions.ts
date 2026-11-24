@@ -499,10 +499,13 @@ export function createIdeGutterExtensions(opts: CreateIdeExtensionsOptions): Ext
 const hiddenGutterTheme = EditorView.theme({
   '.cm-ide-bp-gutter, .cm-ide-bp-gutter .cm-gutterElement': { inlineSize: '0', minInlineSize: '0', maxInlineSize: '0', padding: '0' },
 });
+// Scoped one level deeper than the phone's compact theme (cm-ide-compact.ts), which
+// gives the ▶ slot's room to the breakpoint dot: a Makefile has only the ▶.
 const runOnlyGutterTheme = EditorView.theme({
   '.cm-ide-bp-gutter, .cm-ide-bp-gutter .cm-gutterElement': { inlineSize: '18px', minInlineSize: '18px', maxInlineSize: '18px' },
-  '.cm-ide-bp-cell': { inlineSize: '15px', minInlineSize: '15px', maxInlineSize: '15px', gridTemplateColumns: '15px', columnGap: '0' },
+  '.cm-ide-bp-gutter .cm-ide-bp-cell': { inlineSize: '15px', minInlineSize: '15px', maxInlineSize: '15px', gridTemplateColumns: '15px', columnGap: '0' },
   '.cm-ide-bp-slot': { display: 'none' },
+  '.cm-ide-bp-cell .cm-ide-act-slot': { display: 'inline-flex' },
 });
 
 class InlineGhostValuesWidget extends WidgetType {
