@@ -49,6 +49,20 @@ test('a row deleted with Undo stays hidden after leaving the page and coming bac
   await expect(row).toBeVisible();
 });
 
+test('a section holding only sub-sections does not say it is empty (R1-091)', async ({ page }) => {
+  const { ctx, base } = await apiCtx();
+  const tag = `P${Date.now()}`;
+  const post = async (data: object) => (await (await ctx.post(`${base}/api/v1/workspaces/${wsId}/connection-sections`, { data })).json()).id as string;
+  const parent = await post({ name: tag });
+  const child = await post({ name: 'Child', parent_id: parent });
+  await ctx.dispose();
+  await seedSsh(`${tag}-row`, 'child.invalid', child);
+  await page.goto('/#/connections');
+  await expect(page.locator('.conn-row', { hasText: `${tag}-row` })).toBeVisible();
+  await expect(page.getByRole('region', { name: tag, exact: true })).toBeVisible();
+  await expect(page.getByRole('region', { name: tag, exact: true }).getByText('No connections in this section.')).toHaveCount(0);
+});
+
 test('a failed Kafka cluster read shows inline with Retry (R1-070)', async ({ page }) => {
   await seedSsh(`kafka-err-${Date.now()}`);
   await page.route(/\/brokers\/clusters$/, (r) => r.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"brokers down"}' }));

@@ -480,7 +480,7 @@
                 {#snippet actions()}
                   <button class="icon-btn" aria-label="Section actions for {sec.name}" title="Section actions" onclick={(e) => sectionMenu(e, sec)}><Icon name="more" size={14} /></button>
                 {/snippet}
-                {#if g.items.length === 0}<p class="conn-empty-sec">No connections in this section.</p>{/if}
+                {#if g.items.length === 0 && !connectionList.sections.some((s) => s.parent_id === sec.id)}<p class="conn-empty-sec">No connections in this section.</p>{/if}
                 {@render rows(g.items)}
               </InboxFold>
             {:else}
