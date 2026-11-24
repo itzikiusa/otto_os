@@ -4,6 +4,29 @@
 
 use super::*;
 
+/// Write the managed set to this session's `claude --mcp-config` file
+/// (`<tmp>/otto-mcp/<id>.claude-mcp.json`, 0600 — removed with the session's
+/// other per-session files) and return its names; nothing is written under
+/// `cwd`. Empty (and no file) when nothing is managed or the write failed.
+fn write_claude_mcp_config(sid: &Id, cwd: &str, cfg: &crate::mcp::ManagedMcpConfig) -> Vec<String> {
+    let path = super::runtime_spawn::claude_mcp_config_path(sid);
+    let (Some(doc), names) = crate::mcp::claude_mcp_config(cwd, cfg) else {
+        let _ = std::fs::remove_file(&path);
+        return Vec::new();
+    };
+    // Reuse the private 0600 writer, then replace its body.
+    let written = crate::mcp::write_env_file(&path, &Default::default()).and_then(|()| {
+        std::fs::write(&path, doc).map_err(|e| format!("write {}: {e}", path.display()))
+    });
+    match written {
+        Ok(()) => names,
+        Err(e) => {
+            tracing::warn!(session = %sid, "claude --mcp-config: {e}");
+            Vec::new()
+        }
+    }
+}
+
 impl SessionManager {
     /// Apply everything Otto manages in this session's cwd MCP launcher
     /// configs — the browser opt-in, the workspace's *enabled* user servers,
@@ -92,12 +115,18 @@ impl SessionManager {
                 let this_cwd = canon(&cwd);
                 cfg.browser = browser_cwds.iter().any(|c| canon(c) == this_cwd);
             }
-            let mcp_json_names = match crate::mcp::reconcile_managed_servers(&cwd, &cfg) {
-                Ok(names) => names,
-                Err(e) => {
+            // Only the CLIs that read the project `.mcp.json` (Muse, opencode)
+            // get it written. Claude takes the same set per spawn from a
+            // `--mcp-config` file in `<tmp>/otto-mcp`, and the rest have their
+            // own channel below — so opening, resuming or viewing their
+            // sessions writes nothing into the repository for them.
+            let mcp_json_names = match &*provider {
+                "claude" => write_claude_mcp_config(&sid, &cwd, &cfg),
+                "agy" | "gemini" | "grok" | "codex" | "pi" => Vec::new(),
+                _ => crate::mcp::reconcile_managed_servers(&cwd, &cfg).unwrap_or_else(|e| {
                     tracing::warn!(session = %sid, cwd = %cwd, "reconcile workspace MCP config: {e}");
                     Vec::new()
-                }
+                }),
             };
             let agy_names = (provider == "agy").then(|| {
                 // agy never reads `.mcp.json` — same managed set, its own file.
@@ -218,20 +247,26 @@ impl SessionManager {
                     }
                 }
             }
-            // A project `.mcp.json` server Claude Code has not been told to
-            // use stops its TUI on "New MCP server found in this project"
-            // (bypass and `--strict-mcp-config` skip it): approve exactly
-            // Otto's entries for this spawn — unless the provider brings its
-            // own `--settings`, which a second one would replace.
+            // Claude: the set from `--mcp-config` (outside the repository) —
+            // except for a terminal with `--strict-mcp-config` (a lean turn, an
+            // untrusted read-only session), which takes no servers.
             "claude" => {
-                let own = self.providers.get(&session.provider).is_some_and(|p| {
-                    p.cmd.contains("--settings")
-                        || p.args.iter().any(|a| a.starts_with("--settings"))
-                });
-                if !own && !mcp_json_names.is_empty() {
-                    launch_args.extend(crate::mcp::claude_approve_args(&mcp_json_names));
+                let flag = |k: &str| session.meta.get(k).and_then(|v| v.as_bool());
+                let strict = session.meta.get("runtime").and_then(|v| v.as_str())
+                    != Some("structured")
+                    && (flag("lean_turn") == Some(true)
+                        || (flag("read_only") == Some(true)
+                            && flag("project_settings") == Some(false)));
+                if strict || mcp_json_names.is_empty() {
+                    Vec::new()
+                } else {
+                    let path = super::runtime_spawn::claude_mcp_config_path(&session.id);
+                    launch_args.extend([
+                        "--mcp-config".to_string(),
+                        path.to_string_lossy().into_owned(),
+                    ]);
+                    mcp_json_names
                 }
-                mcp_json_names
             }
             _ => mcp_json_names,
         };
