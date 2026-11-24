@@ -4803,6 +4803,39 @@ async fn idle_agent_processes_are_released_and_the_next_prompt_resumes() {
     rt.close(&child.id).await.unwrap();
 }
 
+/// Review R1-040: a thread closed again while reopen_fast's background
+/// watch waits for the agent stays closed; it is not turned into an error.
+#[tokio::test]
+async fn closing_right_after_reopen_fast_leaves_no_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create(&rt, cwd).await;
+    host.wait(is_ready).await;
+    rt.prompt(&s.id, "hello").await.unwrap();
+    host.wait(is_terminal).await;
+    assert!(rt.get(&s.id).await.unwrap().native_thread_id.is_some());
+    rt.close(&s.id).await.unwrap();
+    let seen = host.all().len();
+    rt.reopen_fast(&s.id).await.unwrap();
+    rt.close(&s.id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let errors = host.all()[seen..]
+        .iter()
+        .filter(|e| {
+            matches!(&e.body, RuntimeEventBody::ProviderSessionUpdated { provider_session }
+            if provider_session.status == ProviderSessionStatus::Error)
+        })
+        .count();
+    assert_eq!(errors, 0, "{:#?}", &host.all()[seen..]);
+    assert_eq!(
+        rt.get(&s.id).await.unwrap().status,
+        RuntimeSessionStatus::Closed
+    );
+}
+
 /// A revive is activity: the idle release (every 60 s) must not stop a
 /// thread just reopened because its last message is old.
 #[tokio::test]
