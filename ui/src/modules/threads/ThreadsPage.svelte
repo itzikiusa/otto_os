@@ -22,12 +22,11 @@
   import { keyboard } from '../../lib/stores/keyboard.svelte';
   import { trackComposerFocus, typingChrome } from './threadsTyping'; import { consumeThreadDraftHandoff } from './recapThreadConsumer';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
-  import NewThreadStage from './NewThreadStage.svelte';
   import ThreadCanvas from './ThreadCanvas.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   const ThreadInspector = lazyComponent(() => import('./ThreadInspector.svelte'));
   import LazyMount from '../../lib/components/LazyMount.svelte';
-  import { DetailsCardView, RelatedListView, PullRequestsView, StartRoomView, TerminalDock, ThreadSheetsView } from './threadLazy.svelte';
+  import { DetailsCardView, NewThreadStageView, RelatedListView, PullRequestsView, StartRoomView, TerminalDock, ThreadSheetsView } from './threadLazy.svelte';
   import { threadRepos } from './threadRepos.svelte';
   import { threadsChrome } from './threadsChrome.svelte';
   import ThreadSidebar from './ThreadSidebar.svelte';
@@ -55,9 +54,7 @@
 
   let sidebarW = $state(loadPaneWidth(SIDEBAR_W_KEY, 272, 240, 380));
   let inspectorW = $state(loadPaneWidth(INSPECTOR_W_KEY, 380, 300, 560));
-  // A surface (Changes, Files, PR, a subagent, MCP) opens wider, at its own
-  // remembered width; "wide" (Maximize) gives it everything but the
-  // conversation's floor, side by side.
+  // A surface opens wider, at its own remembered width; "wide" gives it all but the conversation's floor.
   const SURFACE_W_KEY = 'threads.surfaceW';
   let surfaceW = $state(loadPaneWidth(SURFACE_W_KEY, SURFACE_W, 300, 1200));
   const surfaceOpen = $derived(threadsChrome.surfaces.includes(threads.inspectorTab));
@@ -288,6 +285,9 @@
       if (keyContext.pageChords === claim) keyContext.pageChords = null;
     };
   });
+
+  // The new-thread stage is its own chunk: fetched while idle, so New thread opens at once.
+  $effect(() => { const t = setTimeout(() => NewThreadStageView.prefetch(), 1500); return () => clearTimeout(t); });
 
   // Register ⌘K commands while Threads is open.
   $effect(() =>
@@ -566,7 +566,7 @@
           {:else if threadsChrome.stageView === 'prs'}
             <LazyMount lazy={PullRequestsView} what="pull requests" variant="panel" props={{ repo: contextRepo }} />
           {:else if showWelcomeStage}
-            <NewThreadStage />
+            <LazyMount lazy={NewThreadStageView} what="the new thread" variant="panel" props={{}} />
           {:else}
             <ThreadCanvas onstartroom={(sid) => (roomSessionId = sid)} />
           {/if}
