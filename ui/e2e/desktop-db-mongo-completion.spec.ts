@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
+import { expectDbConnected, pickDbMenuItem } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DB Explorer — MongoDB smart autocompletion (the reported gaps).
@@ -55,10 +56,8 @@ async function openMongo(page: Page): Promise<void> {
   await expect(conn.first()).toBeVisible({ timeout: 30_000 });
   await conn.first().click();
   await expect(page.getByTestId('db-conn-state')).toBeVisible({ timeout: 20_000 });
-  // The engine chip renders once capabilities load; a sub-900px workbench
-  // (1280px viewport + 300px sidebar) hides it by design, so wait for it in
-  // the DOM rather than on screen.
-  await expect(page.locator('.cap-chip', { hasText: 'mongodb' })).toBeAttached({ timeout: 20_000 });
+  // Connected, in words, with the server version: the capabilities are in.
+  await expectDbConnected(page, 'MongoDB');
 }
 
 // Type `text` into the editor (replacing any prior content), force-open the
@@ -137,7 +136,7 @@ test('Format beautifies a Mongo query (no SQL-formatter error)', async ({ page }
   await page.keyboard.press('Delete');
   await content.pressSequentially('db.customers.find({email:"a@b.com",country:"GB"})', { delay: 4 });
   await page.keyboard.press('Escape'); // dismiss any autocomplete popup
-  await page.getByRole('button', { name: /Format/ }).click();
+  await pickDbMenuItem(page, /^Format/); // the Query group of the header's ⋯
   // The SQL formatter used to throw "Format failed" on Mongo — it must NOT now.
   await expect(page.locator('.toast', { hasText: 'Format failed' })).toHaveCount(0);
   // The one-liner is reflowed onto multiple lines (object entries each on a line).

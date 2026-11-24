@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
-import { ensureGridView, editorSelectAll } from './helpers';
+import { ensureGridView, editorSelectAll, expectDbConnected, showDbTables, confirmDestructiveRun } from './helpers';
 
 // ── DB Explorer sweep — MongoDB engine, mobile + tablet, both orientations ──────
 //
@@ -81,19 +81,17 @@ async function openConn(page: Page): Promise<void> {
 
   // The main tab strip appears once a connection is open.
   await expect(page.getByTestId('db-conn-state')).toBeVisible({ timeout: 20_000 });
-  // The compact layout hides the redundant engine chip; its content still
-  // proves capabilities loaded, while the selected connection remains accessible.
-  await expect(page.locator('.cap-chip')).toHaveText('mongodb', { timeout: 20_000 });
-  const active = page.getByRole('tablist', { name: 'Open connections' }).getByRole('tab', { name: 'e2e-mongodb', exact: true });
-  await expect(active).toBeVisible();
-  await expect(active).toHaveAttribute('aria-selected', 'true');
+  // Connected with the server version (capabilities loaded), and the
+  // workbench is titled by the open connection.
+  await expectDbConnected(page, 'MongoDB');
+  await expect(page.getByTestId('page-header').getByRole('heading', { name: 'e2e-mongodb', exact: true })).toBeVisible();
 }
 
 // On a phone the Editor block is an accordion — make sure it's expanded so the
 // CodeMirror surface is interactable. No-op on wide layouts (always visible).
 async function ensureEditorOpen(page: Page): Promise<void> {
   if (!isPhone(page)) return;
-  const editHead = page.locator('.qe-acc-head', { hasText: 'Editor' });
+  const editHead = page.getByRole('button', { name: 'Edit the query', exact: true });
   const editor = page.locator('.qe-edit');
   if (await editor.isHidden().catch(() => false)) {
     await editHead.click();
@@ -223,6 +221,7 @@ test.describe('DB Explorer — MongoDB sweep', () => {
 
     // Start clean (a prior aborted run may have left a doc behind).
     await runStatement(page, `db.${coll}.deleteMany({})`);
+    await confirmDestructiveRun(page); // deleteMany({}) asks first
     await ensureResultsOpen(page);
     await ensureGridView(page);
     await expect(
@@ -259,6 +258,7 @@ test.describe('DB Explorer — MongoDB sweep', () => {
     // Cleanup — deleteMany (drop() is not in the shorthand parser's vocabulary;
     // deleteMany({}) is the documented fallback and IS supported).
     await runStatement(page, `db.${coll}.deleteMany({})`);
+    await confirmDestructiveRun(page); // deleteMany({}) asks first
     await ensureResultsOpen(page);
     await ensureGridView(page);
     await expect(
@@ -309,6 +309,7 @@ test.describe('DB Explorer — MongoDB sweep', () => {
     // a tall result (vertical scroll) and a wide one (horizontal scroll). Write
     // ops render their status as a single-cell grid row (see test 4).
     await runStatement(page, `db.${coll}.deleteMany({})`);
+    await confirmDestructiveRun(page); // deleteMany({}) asks first
     await ensureResultsOpen(page);
     await ensureGridView(page);
     await expect(
@@ -361,6 +362,7 @@ test.describe('DB Explorer — MongoDB sweep', () => {
 
     // Cleanup.
     await runStatement(page, `db.${coll}.deleteMany({})`);
+    await confirmDestructiveRun(page); // deleteMany({}) asks first
     await ensureResultsOpen(page);
     await ensureGridView(page);
     await expect(
@@ -373,25 +375,15 @@ test.describe('DB Explorer — MongoDB sweep', () => {
     requireConn();
     await openConn(page);
 
-    // On a phone the Schema accordion is open by default; ensure it (the side
-    // panel only renders once a connection is selected).
-    if (isPhone(page)) {
-      const schemaHead = page.locator('.acc-toggle', { hasText: /Schema/ });
-      const sideBody = page.locator('.side-body');
-      if (await sideBody.isHidden().catch(() => false)) {
-        await schemaHead.first().click();
-      }
-    }
-    // The Schema side-tab is the default; the SchemaTree mounts inside .side-body.
-    await expect(page.locator('.side-body')).toBeVisible({ timeout: 20_000 });
+    // The tables: the side pane's Tables tab, a sheet on a phone.
+    await showDbTables(page);
+    const tree = page.locator('.schema-tree');
 
     // The database node `shopdb` should be listed at the schema root.
-    const shopdb = page.locator('.side-body').getByText('shopdb', { exact: true });
+    const shopdb = tree.getByText('shopdb', { exact: true });
     await expect(shopdb.first()).toBeVisible({ timeout: 20_000 });
     // Expand it → the customers collection becomes visible (databases → collections).
     await shopdb.first().click();
-    await expect(
-      page.locator('.side-body').getByText('customers', { exact: true }).first(),
-    ).toBeVisible({ timeout: 20_000 });
+    await expect(tree.getByText('customers', { exact: true }).first()).toBeVisible({ timeout: 20_000 });
   });
 });

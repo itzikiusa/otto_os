@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
+import { expectDbConnected } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DB Explorer — MongoDB keyset pagination over the live Docker Mongo.
@@ -97,10 +98,8 @@ async function openMongo(page: Page): Promise<void> {
   const conn = page.locator('.conn-list .tr-title', { hasText: 'e2e-mongodb' });
   await expect(conn.first()).toBeVisible({ timeout: 30_000 });
   await conn.first().click();
-  // The engine chip renders once capabilities load; a sub-900px workbench
-  // (1280px viewport + 300px sidebar) hides it by design, so wait for it in
-  // the DOM rather than on screen.
-  await expect(page.locator('.cap-chip', { hasText: 'mongodb' })).toBeAttached({ timeout: 20_000 });
+  // Connected, in words, with the server version: the capabilities are in.
+  await expectDbConnected(page, 'MongoDB');
 }
 
 /** Run a statement and wait for the footer pager (an auto-limited find). */

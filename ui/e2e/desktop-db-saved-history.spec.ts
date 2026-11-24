@@ -1,5 +1,6 @@
 import { test, expect, type Page, type Locator } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
+import { pickDbMenuItem } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DB Explorer — Saved queries v2 + History usability (Task 7), driven against the
@@ -96,14 +97,15 @@ async function runStatement(page: Page, sql: string): Promise<void> {
   });
 }
 
-const toolbarSaveBtn = (page: Page): Locator =>
-  page.locator('.qe-toolbar').getByRole('button', { name: /^(Save|Update)$/ });
+// Save lives in the Query group of the workbench header's ⋯: "Save query…",
+// or "Update saved query…" on a tab linked to a saved query.
+const SAVE_ITEM = /^(Save query…|Update saved query…)/;
 const saveBar = (page: Page): Locator => page.locator('.save-bar');
 const exactRe = (s: string) => new RegExp(`^${s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
 
 /** Open the save bar, set a name, click the primary Save/Update. */
 async function saveWith(page: Page, name: string | null): Promise<void> {
-  await toolbarSaveBtn(page).click();
+  await pickDbMenuItem(page, SAVE_ITEM);
   await expect(saveBar(page)).toBeVisible();
   if (name !== null) await saveBar(page).locator('input').fill(name);
   await saveBar(page).getByRole('button', { name: /^(Save|Update)$/ }).click();
@@ -112,7 +114,7 @@ async function saveWith(page: Page, name: string | null): Promise<void> {
 
 /** Open the save bar and click "Save as new" (creates a fresh saved query). */
 async function saveAsNew(page: Page, name: string): Promise<void> {
-  await toolbarSaveBtn(page).click();
+  await pickDbMenuItem(page, SAVE_ITEM);
   await expect(saveBar(page)).toBeVisible();
   await saveBar(page).locator('input').fill(name);
   await saveBar(page).getByRole('button', { name: 'Save as new' }).click();
@@ -142,9 +144,16 @@ test('saved queries v2: save → update in place → save as new → rename → 
   await expect(savedRows(page)).toHaveCount(1);
   await expect(savedRow(page, 'Alpha')).toBeVisible();
 
-  // 2) Reopen from the Saved list → the tab is LINKED; the button reads "Update".
+  // 2) Reopen from the Saved list → the tab is LINKED; the ⋯ offers "Update".
   await savedRow(page, 'Alpha').locator('.saved-open').click();
-  await expect(toolbarSaveBtn(page)).toHaveText(/Update/);
+  const menu = page.getByRole('menu', { name: 'Context menu' });
+  await expect(async () => {
+    if (await menu.isVisible()) await page.keyboard.press('Escape');
+    await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).first().click();
+    await expect(menu.getByRole('menuitem', { name: /^Update saved query…/ })).toBeVisible({ timeout: 1_000 });
+  }).toPass({ timeout: 20_000 });
+  await expect(menu.getByRole('menuitem', { name: /^Save query…/ })).toHaveCount(0);
+  await page.keyboard.press('Escape');
 
   // 3) Edit the statement + Update in place → still ONE row (no duplicate).
   await typeStatement(page, 'SELECT 222 AS alpha_col_v2');

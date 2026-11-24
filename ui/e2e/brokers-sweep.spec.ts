@@ -437,7 +437,8 @@ test('wide content scrolls internally; page never overflows across all tabs', as
   // is a bounded x-scroller rather than pushing the page wide.
   if (await isPhoneLayout(page)) {
     const tabScroll = await page.evaluate(() => {
-      const el = document.querySelector('.tabs') as HTMLElement | null;
+      // The cluster view's tab strip: the shared Tabs list is the scroller.
+      const el = document.querySelector<HTMLElement>('[role="tablist"][aria-label="Kafka cluster views"]');
       if (!el) return null;
       const c = getComputedStyle(el);
       return { overflowX: c.overflowX, scrollW: el.scrollWidth, clientW: el.clientWidth };

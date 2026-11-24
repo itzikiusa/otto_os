@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { editorSelectAll } from './helpers';
+import { editorSelectAll, showConnectionList, showDbTables } from './helpers';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -64,7 +64,7 @@ async function ensureEditorOpen(page: Page): Promise<void> {
   if (!isPhone(page)) return;
   const editor = page.locator('.qe-edit');
   if (!(await editor.isVisible().catch(() => false))) {
-    await page.locator('.qe-acc-head', { hasText: 'Editor' }).click();
+    await page.getByRole('button', { name: 'Edit the query', exact: true }).click();
   }
   await expect(editor).toBeVisible();
 }
@@ -265,29 +265,15 @@ test.describe('DB Explorer · Postgres sweep', () => {
     test.skip(connId == null, 'postgres connection unavailable');
     await openPostgres(page);
 
-    // Reveal the connection list, then the schema view (phone: accordions;
-    // tablet/desktop: sidebar tabs) — same affordances as the MySQL sweep.
-    if (isPhone(page)) {
-      const list = page.locator('.conn-list');
-      if (!(await list.isVisible().catch(() => false))) {
-        await page.locator('.acc-toggle', { hasText: 'Connections' }).click();
-      }
-    } else {
-      await page.locator('.side-switch [role="tab"]', { hasText: 'Connections' }).click();
-    }
-    await expect(page.locator('.conn-list')).toBeVisible();
-    await expect(page.locator('.conn-list .tr-title', { hasText: 'e2e-postgres' }).first()).toBeVisible();
-
-    if (isPhone(page)) {
-      const sideBody = page.locator('.side-body');
-      if (!(await sideBody.isVisible().catch(() => false))) {
-        await page.locator('.acc-toggle', { hasText: 'Schema' }).click();
-      }
-    } else {
-      await page.locator('.side-switch [role="tab"]', { hasText: 'Schema' }).click();
-    }
-    await expect(page.locator('.side-switch')).toBeVisible({ timeout: 15_000 });
-    await expect(page.locator('.schema-tree')).toBeVisible({ timeout: 15_000 });
+    // The connection list is its own page: the workbench's back button goes
+    // there, and the connection's row opens it again; then its tables (the
+    // side pane's Tables tab, a sheet on a phone).
+    await showConnectionList(page);
+    const row = page.locator('.conn-list .tr-title', { hasText: 'e2e-postgres' }).first();
+    await expect(row).toBeVisible();
+    await row.click();
+    await expect(page.getByTestId('db-conn-state')).toBeVisible({ timeout: 20_000 });
+    await showDbTables(page);
 
     // Postgres browses by schema: the top level is `public` (not a database), then
     // Tables → orders → its columns include customer_id.
