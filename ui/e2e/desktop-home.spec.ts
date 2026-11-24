@@ -346,3 +346,19 @@ test('a working session that needs you shows once, under Needs you', async ({ pa
   await expect(page.locator('[data-card="needs"]').getByTestId(`home-row-session:${sid}`)).toBeVisible();
   await expect(page.locator('[data-card="running"]').getByTestId(`home-row-session:${sid}`)).toHaveCount(0);
 });
+
+test('Today says nothing waits only once its sources have answered', async ({ page }) => {
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  await page.route(/\/api\/v1\/mcp\/approvals\?status=pending/, async (route) => {
+    await held;
+    await route.fulfill({ json: [] });
+  });
+  await boot(page);
+  const needs = page.locator('[data-card="needs"]');
+  await expect(needs).toBeVisible();
+  await expect(needs.getByText('Nothing needs you right now.')).toHaveCount(0);
+  await expect(page.locator('.today .line')).not.toContainText('All quiet');
+  release();
+  await expect(needs.locator('.sec-empty, .sec-card').first()).toBeVisible();
+});
