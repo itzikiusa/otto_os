@@ -129,7 +129,7 @@
       });
       return;
     }
-    if (r.repo && !r.pr && known && (r.tab || r.legacyFocus)) {
+    if (r.repo && !r.pr && known) {
       untrack(() => {
         git.openRepoTab(r.repo!, r.tab ?? undefined);
         if (r.legacyFocus) router.replace(focusPath(true));
@@ -143,7 +143,7 @@
   let missingRepo = $state<string | null>(null);
   $effect(() => {
     const r = route;
-    if (!r.repo || r.pr || !git.allReposLoaded || git.allRepos.some((x) => x.id === r.repo)) {
+    if (!r.repo || !git.allReposLoaded || git.allRepos.some((x) => x.id === r.repo)) {
       missingRepo = null;
       return;
     }
@@ -151,8 +151,10 @@
     untrack(() =>
       void api.get<Repo>(`/repos/${id}`).then(
         (dup) => {
+          // The user may have moved on while this was in flight.
+          if (router.parts[0] !== 'git' || router.parts[1] !== id) return;
           const same = git.allRepos.find((x) => x.path === dup.path);
-          if (same) router.replace(`git/${same.id}${r.tab ? `/${r.tab}` : ''}`);
+          if (same) router.replace(['git', same.id, ...router.parts.slice(2)].join('/'));
           else missingRepo = id;
         },
         () => (missingRepo = id),
