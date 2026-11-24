@@ -279,9 +279,9 @@ test('UX-G1: open repo tabs shrink instead of sitting cut at the header edge; th
   }
   await page.waitForTimeout(500); // ui-guards: allow — the header's fit runs on the next frame
   // Tabs that fit are shown whole; a strip too tight turns into the "<repo> ▾" switcher (R2-001).
-  await expect(page.locator('.git-header .git-tablist .git-tab.active:visible, .git-header [data-testid="git-repo-switch"]').first()).toContainText('customer-onboarding-portal-dirty');
+  await expect(page.locator('.git-header .git-tablist .git-tab.active:visible, .git-header [data-testid="git-repo-switch"]:visible').first()).toContainText('customer-onboarding-portal-dirty');
   const cut = await page.evaluate(() => {
-    if (document.querySelector('[data-testid="git-repo-switch"]')) return [];
+    if (document.querySelector('.git-tabs.compact')) return [];
     const list = document.querySelector('.git-tablist')!.getBoundingClientRect();
     const outer = document.querySelector('.git-header .ph-tabs-inline')!.getBoundingClientRect();
     return Array.from(document.querySelectorAll('.git-tablist .git-tab')).flatMap((t) => {
@@ -324,7 +324,7 @@ test('Git header matrix: Fetch · Pull · Push · Stash · Pop, ⋯, Focus, + an
         await expect(actions.getByRole('button', { name: /^Fetch/ })).toBeVisible({ timeout: 30_000 });
         await page.waitForTimeout(400); // ui-guards: allow — the header's fit settles over a frame or two
         // The active repo stays named — a tab, or the compact "<repo> ▾" switcher — and Focus and + stay whole (R2-001).
-        const repo = page.locator('.git-header .git-tablist .git-tab.active:visible, .git-header [data-testid="git-repo-switch"]').first();
+        const repo = page.locator('.git-header .git-tablist .git-tab.active:visible, .git-header [data-testid="git-repo-switch"]:visible').first();
         await expect(repo, what + ': the active repo is named').toContainText('hdr-payments-gateway-service');
         const shown = await repo.evaluate((el) => { const n = el.querySelector<HTMLElement>('.git-tab-name, .git-repo-switch-name')!; return { w: n.clientWidth, full: n.scrollWidth }; });
         expect(shown.w, what + ': the active repo name is readable (' + shown.w + ' of ' + shown.full + ' px)').toBeGreaterThanOrEqual(Math.min(shown.full, 64));

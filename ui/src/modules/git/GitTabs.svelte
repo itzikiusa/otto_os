@@ -289,7 +289,8 @@
     </button>
     <span class="git-focus-sep" aria-hidden="true"></span>
   {/if}
-  {#if compact}
+  {#if onswitch}
+    <!-- Kept mounted (CSS hides it): a fit pass flips `compact` to measure, and a remount would drop focus. -->
     <button type="button" class="git-repo-switch" class:on={!focus} aria-haspopup="menu" title="Switch repository" data-testid="git-repo-switch" onclick={onswitch}>
       <span class="git-repo-switch-name">{activeName}</span><Icon name="chevronDown" size={12} />
     </button>
@@ -448,6 +449,9 @@
   }
   .compact .git-focus {
     padding-inline: 6px;
+  }
+  .git-tabs:not(.compact) .git-repo-switch {
+    display: none;
   }
   .git-repo-switch {
     display: inline-flex;

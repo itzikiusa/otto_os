@@ -87,6 +87,18 @@ test('many repos: one "<repo> ▾" switcher names the active repo; a wider windo
   await expect(tab(page, 1).locator('.git-tab-branch')).toBeVisible();
 });
 
+test('the compact switcher keeps keyboard focus across fit passes (R3-004)', async ({ page }) => {
+  await page.setViewportSize({ width: 1100, height: 800 });
+  await openTabs(page, 8);
+  const sw = page.getByTestId('git-repo-switch');
+  await expect(sw).toBeVisible();
+  await sw.focus();
+  await page.setViewportSize({ width: 1080, height: 800 }); // a resize re-runs the fit, still compact
+  await page.waitForTimeout(300); // ui-guards: allow — the fit runs on the next frame
+  await expect(sw).toBeVisible();
+  await expect(sw).toBeFocused();
+});
+
 test('Focus is a page-level view, not a repo sub-tab', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 800 });
   await openTabs(page, 2);
