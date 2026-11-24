@@ -29,13 +29,14 @@ test('create, rename and delete in one window show up in the other without a rel
   const a = await (await browser.newContext({ storageState: test.info().project.use.storageState as string })).newPage();
   const b = await ctxB.newPage();
   await openList(a);
-  // Reads of the list in B, and the connections_changed events B received
+  // Reads of the list in B, and the events that invalidate it that B received
+  // (connections_changed, resource_access_changed)
   // (profiles are global: another spec on this daemon may change one too, so
   // the bar is "every read follows an event", not a fixed count).
   let listReads = 0;
   let events = 0;
   b.on('request', (r) => { if (new URL(r.url()).pathname.endsWith(`/workspaces/${wsId}/connections`) && r.method() === 'GET') listReads += 1; });
-  b.on('websocket', (s) => s.on('framereceived', (f) => { if (String(f.payload).includes('connections_changed')) events += 1; }));
+  b.on('websocket', (s) => s.on('framereceived', (f) => { const p = String(f.payload); if (p.includes('connections_changed') || p.includes('resource_access_changed')) events += 1; }));
   await openList(b);
   // From here on, every list read in B must follow an event.
   const base = { reads: listReads, events };
@@ -55,11 +56,17 @@ test('create, rename and delete in one window show up in the other without a rel
   await a.getByLabel('Host').fill('127.0.0.1');
   await a.getByRole('button', { name: 'Create connection' }).click();
   await expect(rowB(name)).toBeVisible();
+  // A new database opens straight into its workbench in A; back to the list.
+  await a.goto('/#/connections');
+  await expect(a.locator('.conn-row', { hasText: name })).toBeVisible();
   expect(reads()).toBeGreaterThanOrEqual(1);
   expect(reads()).toBeLessThanOrEqual(evs());
 
   // Rename in A.
-  await a.locator('.conn-row', { hasText: name }).getByRole('button', { name: `Actions for ${name}` }).click();
+  // Keyboard, not a pointer: other specs on this daemon add connections, and a
+  // row inserted above moves this one under the pointer between aim and click.
+  await a.getByRole('button', { name: `Actions for ${name}`, exact: true }).focus();
+  await a.keyboard.press('Enter');
   await a.getByRole('menuitem', { name: 'Edit', exact: true }).click();
   await a.getByLabel('Name').fill(`${name}-renamed`);
   await a.getByRole('button', { name: 'Save changes' }).click();
@@ -68,7 +75,8 @@ test('create, rename and delete in one window show up in the other without a rel
   expect(reads()).toBeLessThanOrEqual(evs());
 
   // Delete in A (the row goes when its Undo toast does).
-  await a.locator('.conn-row', { hasText: `${name}-renamed` }).getByRole('button', { name: `Actions for ${name}-renamed` }).click();
+  await a.getByRole('button', { name: `Actions for ${name}-renamed`, exact: true }).focus();
+  await a.keyboard.press('Enter');
   await a.getByRole('menuitem', { name: 'Delete', exact: true }).click();
   await expect(rowB(`${name}-renamed`)).toHaveCount(0, { timeout: 20_000 });
   expect(reads()).toBeGreaterThanOrEqual(3);
