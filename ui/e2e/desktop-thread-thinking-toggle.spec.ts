@@ -127,7 +127,8 @@ async function scripted(page: Page, title: string) {
       const read = page.waitForResponse((res) => res.url().includes(`/runtime-sessions/${id}/events`));
       await page.evaluate(() => window.dispatchEvent(new Event('focus')));
       await read;
-      await page.waitForTimeout(60); // ui-guards: allow — one delta's render before the next
+      // One delta painted before the next (the read lands, Svelte flushes, two frames).
+      await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
     }
     step = k;
   };
@@ -203,6 +204,14 @@ for (const host of ['threads', 'agents'] as const) {
     await expect(think(thread, 'r1')).toBeHidden();
     await t.to(21, thread);
     await expect(thread.getByTestId('runtime-fold-r1')).toBeVisible();
+    await expect(think(thread, 'r2')).toHaveCount(0);
+    // Opening a step inside the finished fold keeps the fold's line to close it.
+    const fold = thread.getByTestId('runtime-fold-r1');
+    await fold.locator('summary').click();
+    await more(think(thread, 'r2')).click();
+    await expect(more(think(thread, 'r2'))).toHaveAttribute('aria-expanded', 'true');
+    await expect(fold).toBeVisible();
+    await fold.locator('summary').first().click();
     await expect(think(thread, 'r2')).toHaveCount(0);
   });
 }
