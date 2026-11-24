@@ -108,7 +108,7 @@ test('Usage ignores stale initial summary errors after changing window and scope
   await page.getByRole('group', { name: 'Sessions to count' }).getByRole('button', { name: 'All', exact: true }).click();
   release();
   await expect(page.getByText('Stale thirty-day failure', { exact: false })).toHaveCount(0);
-  await expect(page.locator('.bar-name').filter({ hasText: 'codex' })).toBeVisible();
+  await expect(page.getByTestId('usage-where').getByText('Codex', { exact: true })).toBeVisible();
   await page.screenshot({ path: '/tmp/otto-ux-screenshots/insights-r2-usage.png' });
 });
 

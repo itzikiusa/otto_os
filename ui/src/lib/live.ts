@@ -157,6 +157,13 @@ export interface LiveQueryOptions {
 
 export const LIVE_SAFETY_MS = 300_000;
 
+/** The safety net for a query whose event the daemon emits on EVERY write
+ *  (`mcp_approval_changed`: created, decided, consumed, expiry sweep): a
+ *  reconnect / lag resync already refetches, so while the socket is up the
+ *  query waits a day instead of re-reading every 5 minutes (the tray's
+ *  approvals query alone was ~360 reads a day). */
+export const EVENT_COMPLETE_SAFETY_MS = 86_400_000;
+
 /** An event-driven query; see the module comment. `source` defaults to this
  *  document's {@link appLive}; `null` makes it a plain poll at `fallbackMs`. */
 export function liveQuery(opts: LiveQueryOptions, source: LiveSource | null = appLive): Poller {

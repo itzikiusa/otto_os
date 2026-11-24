@@ -18,9 +18,11 @@
      * directly rather than from historical averages.
      */
     estTokens?: number;
+    /** The words before the amount (default "· next run ≈", after a figure). */
+    lead?: string;
   }
 
-  let { feature, provider, estTokens }: Props = $props();
+  let { feature, provider, estTokens, lead = '· next run ≈' }: Props = $props();
 
   let resp: ForecastResp | null = $state(null);
   let loading = $state(false);
@@ -63,7 +65,7 @@
      project from — "no data" next to a KPI was noise. -->
 {#if !loading && resp && resp.projected_cost_usd > 0}
   <span class="forecast" title="Estimated cost of the next {feature === 'agent' ? 'agent run' : `${feature} run`} on {provider}. {resp.basis}">
-    · next run ≈ {formatUsd(resp.projected_cost_usd)}
+    {lead} {formatUsd(resp.projected_cost_usd)}
   </span>
 {/if}
 

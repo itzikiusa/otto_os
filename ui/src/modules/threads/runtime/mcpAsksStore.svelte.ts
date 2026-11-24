@@ -5,7 +5,7 @@
 import { api } from '../../../lib/api/client';
 import { mcpCpApi } from '../../../lib/api/mcp';
 import type { ApprovalDecision, McpApproval, McpAutoApproveList } from '../../../lib/api/types';
-import { liveQuery } from '../../../lib/live';
+import { liveQuery, EVENT_COMPLETE_SAFETY_MS } from '../../../lib/live';
 import type { Poller } from '../../../lib/poll';
 import { auth } from '../../../lib/stores/auth.svelte';
 import { resourceAccess } from '../../../lib/stores/resource-access.svelte';
@@ -26,7 +26,7 @@ class McpAsks {
   /** Keep the list live while the caller (a thread view's `$effect`) shows. */
   hold(): () => void {
     if (this.users++ === 0 && auth.can('mcp', 'view')) {
-      this.poller = liveQuery({ run: (signal) => this.load(signal), on: ['mcp_approval_changed'], fallbackMs: 10_000 });
+      this.poller = liveQuery({ run: (signal) => this.load(signal), on: ['mcp_approval_changed'], fallbackMs: 10_000, safetyMs: EVENT_COMPLETE_SAFETY_MS });
       if (auth.can('mcp', 'admin')) {
         void api.get<McpAutoApproveList>('/mcp/auto-approve').then(
           (l) => (this.irreversible = new Set(l.categories.flatMap((c) => c.tools.filter((t) => t.irreversible).map((t) => t.name.replace(/^otto\./, ''))))),
