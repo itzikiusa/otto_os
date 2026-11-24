@@ -198,17 +198,20 @@ test('⌘T: arrow keys switch provider, Tab moves to the next field', async ({ p
   void before;
 
   // Tab leaves the radio set (roving tabindex: no other provider radio is a
-  // Tab stop) and walks forward to the Title field. The selected card's batch
-  // −/+ buttons and the account/model/network pickers sit in between, so walk
+  // Tab stop) and walks forward to the Title field (behind Options, A4).
+  await page.getByTestId('ns-options').click();
+  await checked.focus();
+  // The selected card's batch −/+ buttons, the first message and the
+  // workspace / account / model / network pickers sit in between, so walk
   // the Tab order instead of assuming Title is the very next stop.
   let reachedTitle = false;
   for (let i = 0; i < 20 && !reachedTitle; i++) {
     await page.keyboard.press('Tab');
     const stop = await page.evaluate(() => {
       const el = document.activeElement as HTMLElement | null;
-      return { id: el?.id ?? '', role: el?.getAttribute('role') ?? '' };
+      return { id: el?.id ?? '', provider: el?.getAttribute('role') === 'radio' && el.closest('[role="radiogroup"]')?.getAttribute('aria-labelledby') === 'ns-provider-label' };
     });
-    expect(stop.role, 'Tab must not land on another provider radio').not.toBe('radio');
+    expect(stop.provider, 'Tab must not land on another provider radio').toBe(false);
     reachedTitle = stop.id === 'ns-title';
   }
   await expect(page.locator('#ns-title')).toBeFocused();

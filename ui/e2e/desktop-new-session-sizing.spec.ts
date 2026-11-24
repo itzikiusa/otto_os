@@ -46,6 +46,7 @@ for (const viewport of [{ width: 1440, height: 1200 }, { width: 390, height: 844
           }
         }
       }
+      await dialog.getByTestId('ns-options').click();
       await dialog.locator('#ns-extra-dir').scrollIntoViewIfNeeded();
       await expect(dialog.locator('#ns-extra-dir')).toBeInViewport();
       await testInfo.attach(`new-session-${viewport.width}-${scheme}`, { body: await page.screenshot(), contentType: 'image/png' });

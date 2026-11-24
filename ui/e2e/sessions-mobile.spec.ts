@@ -296,6 +296,7 @@ test('New Session: selecting claude/codex reveals agent-only options', async ({ 
   // claude selected → Browser-tools toggle + context preview appear.
   if (await claudeCard.count()) {
     await claudeCard.first().locator('.card-main').click();
+    await page.getByTestId('ns-options').click();
     await expect(page.locator('.toggle-row')).toBeVisible();
     await expect(page.locator('.preview-toggle')).toBeVisible();
     // Still fits — the extra fields must not blow out the layout.

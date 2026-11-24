@@ -65,7 +65,8 @@ test.describe('scratch sessions', () => {
     // Open the sheet via ⌘T (falls back to the TabBar + button).
     const dialog = await openNewSessionSheet(page);
 
-    // The Workspace switch: current workspace vs no workspace.
+    // The Workspace switch (under Options): current workspace vs no workspace.
+    await dialog.getByTestId('ns-options').click();
     const noWs = dialog.getByRole('radio', { name: 'No workspace' });
     await expect(noWs).toHaveAttribute('aria-checked', 'false');
     await noWs.click();

@@ -82,6 +82,7 @@ test.describe('new-session batch', () => {
     const dialog = await openSheet(page);
 
     // `~` is outside the workspace root — the point of the field.
+    await dialog.getByTestId('ns-options').click();
     await dialog.locator('#ns-cwd').fill('~');
     await dialog.getByRole('button', { name: 'Browse…' }).first().click();
 

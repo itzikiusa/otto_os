@@ -33,10 +33,11 @@ test('mixed session batch retains submitted settings and retries only its failed
     return route.continue();
   });
   await page.goto(`/#/agents/${sessionId}`);
-  await page.getByRole('button', {name: 'New session', exact: true}).click();
+  await page.locator('.tabbar .new-tab').click();
   const dialog = page.getByRole('dialog', {name: 'New session', exact: true});
   await dialog.locator('.provider-card', {hasText: 'shell'}).locator('.card-main').click();
   await dialog.getByLabel('One more shell session').click();
+  await dialog.getByTestId('ns-options').click();
   await dialog.locator('#ns-title').fill('Recovery batch');
   await dialog.locator('#ns-cwd').fill('/tmp');
   await dialog.getByRole('button', {name: 'Start 2 sessions', exact: true}).click();

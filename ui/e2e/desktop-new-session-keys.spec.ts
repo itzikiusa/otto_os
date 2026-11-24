@@ -58,6 +58,7 @@ test.describe('new-session keyboard flow', () => {
     // Pick the plain shell (no external CLI needed in the throwaway daemon)
     // and launch with ⌘Enter from a text field — the sheet-level shortcut.
     await dialog.locator('.provider-card', { hasText: 'shell' }).locator('.card-main').click();
+    await dialog.getByTestId('ns-options').click();
     await dialog.locator('#ns-title').fill('e2e keys');
     await page.keyboard.press('Meta+Enter');
 

@@ -158,3 +158,29 @@ test('Terminal ⇄ Chat: an agent pane shows its conversation and remembers the 
   await expect(page.locator(`[data-pane-key][data-session="${ids.Pirlo}"] .term-host`).first()).toBeVisible({ timeout: 30_000 });
   await expect(page.locator(`[data-pane-key][data-session="${ids.Pirlo}"]`).first().getByTestId('pane-view')).toHaveCount(0);
 });
+
+test('New session is a stage: tiles, Terminal | Chat, a first message, Start; the rest behind Options (A4)', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/#/agents');
+  await expect(rows(page)).toHaveCount(3, { timeout: 20_000 });
+  await page.keyboard.press('Meta+t');
+  const dialog = page.getByRole('dialog', { name: 'New session' });
+  await expect(dialog.getByTestId('ns-kind')).toBeVisible({ timeout: 10_000 });
+  // Defaults cost no rows: title, folder, workspace are behind Options.
+  await expect(dialog.locator('#ns-title')).toHaveCount(0);
+  await expect(dialog.getByRole('radio', { name: 'No workspace' })).toHaveCount(0);
+  for (const scheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    if (SHOTS) await page.screenshot({ path: `${SHOTS}/agents-new-session-1440-${scheme}.png` });
+  }
+  // A changed option shows as a chip once Options folds.
+  await dialog.getByTestId('ns-options').click();
+  await dialog.locator('#ns-title').fill('Kaladze');
+  await dialog.getByTestId('ns-options').click();
+  await expect(dialog.locator('.opt-chip', { hasText: 'Title: Kaladze' })).toBeVisible();
+  // Enter on the shell tile starts it.
+  await dialog.locator('.provider-card', { hasText: 'shell' }).locator('.card-main').click();
+  await page.keyboard.press('Enter');
+  await expect(dialog).toHaveCount(0, { timeout: 10_000 });
+  await expect(page.locator('[data-testid^="agents-row-"]', { hasText: 'Kaladze' })).toBeVisible({ timeout: 15_000 });
+});
