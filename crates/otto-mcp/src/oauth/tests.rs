@@ -355,6 +355,26 @@ fn local_endpoints_only_for_a_server_as_local() {
 }
 
 #[test]
+fn a_huge_expires_in_saturates_instead_of_overflowing() {
+    let base = Tokens {
+        access_token: String::new(),
+        refresh_token: None,
+        expires_at: None,
+        token_endpoint: String::new(),
+        client_id: String::new(),
+        client_secret: None,
+        resource: String::new(),
+        auth_host: String::new(),
+    };
+    let t = tokens_from(
+        &json!({"access_token": "a", "expires_in": i64::MAX}),
+        &base,
+        1_000,
+    );
+    assert_eq!(t.expires_at, Some(i64::MAX));
+}
+
+#[test]
 fn remote_endpoints_must_be_https_and_not_local() {
     assert!(checked_endpoint("http://as.example/token", Scope::Remote).is_err());
     assert!(checked_endpoint("https://127.0.0.1/token", Scope::Remote).is_err());

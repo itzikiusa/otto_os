@@ -23,6 +23,8 @@
         aria-label={confirmer.message || confirmer.title}
         aria-invalid={confirmer.inputError ? 'true' : undefined}
         aria-describedby={confirmer.inputError ? 'cf-input-error' : undefined}
+        type={confirmer.secret ? 'password' : 'text'}
+        autocomplete={confirmer.secret ? 'off' : undefined}
         bind:value={confirmer.inputValue}
         oninput={() => (confirmer.inputError = '')}
         placeholder={confirmer.placeholder}

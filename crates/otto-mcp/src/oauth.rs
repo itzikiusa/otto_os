@@ -375,7 +375,7 @@ fn tokens_from(v: &Value, base: &Tokens, now: i64) -> Tokens {
             .as_str()
             .map(str::to_string)
             .or_else(|| base.refresh_token.clone()),
-        expires_at: v["expires_in"].as_i64().map(|s| now + s),
+        expires_at: v["expires_in"].as_i64().map(|s| now.saturating_add(s)),
         ..base.clone()
     }
 }

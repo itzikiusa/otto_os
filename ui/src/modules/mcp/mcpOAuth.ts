@@ -28,7 +28,7 @@ export async function signIn(s: McpServerDetail): Promise<boolean> {
     // No dynamic registration: the person names Otto’s client at that server.
     const id = await confirmer.promptText(`${s.name}’s authorization server doesn’t register apps itself. Enter the client ID you created for Otto there.`, { title: 'Client ID', placeholder: 'client id' });
     if (!id) return false;
-    const secret = await confirmer.promptText('Client secret, if the app has one. Leave empty for a public app.', { title: 'Client secret', allowEmpty: true });
+    const secret = await confirmer.promptText('Client secret, if the app has one. Leave empty for a public app.', { title: 'Client secret', allowEmpty: true, secret: true });
     if (secret === null) return false;
     try {
       started = await mcpCpApi.cpOAuthStart(s.id, { client_id: id, client_secret: secret || undefined });
