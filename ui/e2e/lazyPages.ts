@@ -74,4 +74,12 @@ export const LAZY_CASES: Record<string, (act: Act) => LazyCase> = {
     placeholder: 'Loading the S3 view',
     ready: (p) => p.locator('.vt-title', { hasText: 'S3' }),
   }),
+  kubernetes: (act) => ({
+    overview: '#/kubernetes/k8s_dev/pods/payments/payments-api-7d9f8b6c4-x2kqp',
+    painted: (p) => p.getByRole('tab', { name: /^Logs/ }),
+    module: '/src/modules/kubernetes/LogsView.svelte',
+    open: (p) => act(p.getByRole('tab', { name: /^Logs/ })),
+    placeholder: 'Loading the logs',
+    ready: (p) => p.getByTestId('k8s-logs-copy-kubectl'),
+  }),
 };
