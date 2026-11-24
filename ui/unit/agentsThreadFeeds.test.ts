@@ -33,3 +33,29 @@ test('a failed thread list is read again on the next visit; a new identity reads
   assert.equal(reads.length, 3);
   assert.equal(mounts, 2, 'the live feeds start once');
 });
+
+test('a failed chunk load is retried; another identity is not "settled" until its own read answers', async () => {
+  let token = 't1';
+  let navFails = 1;
+  const reads: ReturnType<typeof deferred<void>>[] = [];
+  const runtimeThreads = { mount() {}, loadAll: () => { const d = deferred<void>(); reads.push(d); return d.promise; } };
+  const imports: Record<string, unknown> = {
+    '../../lib/api/client': { getToken: () => token },
+    '../threads/runtime/runtimeThreads.svelte': { runtimeThreads },
+    '../threads/threadInbox.svelte': { inboxLive: { mount() {} } },
+  };
+  Object.defineProperty(imports, '../threads/threadNav.svelte', { enumerable: true, get: () => { if (navFails-- > 0) throw new Error('chunk failed'); return {}; } });
+  const { startThreadFeeds, threadFeeds } = loadSource(new URL('../src/modules/agents/threadFeeds.svelte.ts', import.meta.url), imports);
+  const settle = () => new Promise((r) => setImmediate(r));
+  await assert.rejects(startThreadFeeds(), /chunk failed/);
+  await startThreadFeeds(); // the next caller loads the chunk again
+  reads[0].resolve();
+  await settle();
+  assert.equal(threadFeeds.settled, true);
+  token = 't2';
+  await startThreadFeeds();
+  assert.equal(threadFeeds.settled, false, 't2 has not been answered yet');
+  reads[1].resolve();
+  await settle();
+  assert.equal(threadFeeds.settled, true);
+});
