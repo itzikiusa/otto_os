@@ -110,7 +110,7 @@ can open: admin-only panes are hidden rather than shown disabled.
 - Every MCP server now lives on the MCP Control Plane's Servers page, native
   (written into `.mcp.json` for the agent CLI, not governed) or governed
   (through Otto's gateway). The old Settings link opens it there; the
-  Connections MCP switch is "Attach to sessions" on its Otto server page.
+  Connections MCP switch is "Give sessions … Otto's read-only tools" on its Tools page.
 
 **Language Servers**
 - Shows which language servers (Go, Python, TypeScript, JavaScript, Rust, JSON,

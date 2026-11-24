@@ -3,8 +3,13 @@
   import Badge from '../../lib/components/Badge.svelte';
   import { NO_WORKSPACE } from '../../lib/labels';
   import { plural } from '../../lib/plural';
-  // MCP Control Plane — three focused sections: Otto's built-in server,
-  // governed external servers, and approval/audit activity.
+  // MCP Control Plane. It opens on what needs a person (McpHome: waiting
+  // approvals, else four sentences); Tools is Otto's own server and its
+  // catalog; then Profiles, External servers and Activity (approvals history +
+  // audit). Approvals are ONE event-fed list for the page (the badge and the
+  // landing read it): `mcp_approval_changed` fires on every approval write —
+  // created, decided, consumed, expiry sweep — so no poll runs while the event
+  // socket is up; the fallback poll is visible-only and runs only while it is down.
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { onTabKey } from '../../lib/tabKeys';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -23,17 +28,21 @@
   import ApprovalsTab from './ApprovalsTab.svelte';
   import AuditTab from './AuditTab.svelte';
   import OttoServerHome from './OttoServerHome.svelte';
+  import McpHome from './McpHome.svelte';
+  import { pendingOf } from './mcpHome';
+  import type { McpApproval } from '../../lib/api/types';
+  import { EVENT_COMPLETE_SAFETY_MS } from '../../lib/live';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   // Profiles is its own section, behind a dynamic import so the editor and
   // tool-group tables don't ride on every MCP page open (bundle budget).
   const ProfilesTab = lazyComponent(() => import('./ProfilesTab.svelte'));
 
-  type Section = 'otto' | 'profiles' | 'servers' | 'activity';
+  type Section = 'home' | 'otto' | 'profiles' | 'servers' | 'activity';
   const section = $derived<Section>(
-    (['otto', 'profiles', 'servers', 'activity'] as const).includes(router.parts[1] as Section)
+    (['otto', 'profiles', 'servers', 'activity'] as const).includes(router.parts[1] as Exclude<Section, 'home'>)
       ? (router.parts[1] as Section)
-      : 'otto',
+      : 'home',
   );
   const wsId = $derived(ws.currentId);
 
@@ -69,7 +78,11 @@
   let loading = $state(false);
   /** Failed server-list load — ServersTab renders it inline with Retry. */
   let loadError = $state<string | null>(null);
-  let pending = $state(0);
+  /** The pending requests (only those, never 200 decided rows): the badge
+   *  and the landing's rows read this one list. */
+  let approvals = $state<McpApproval[] | null>(null);
+  let approvalsError = $state<string | null>(null);
+  const pending = $derived(pendingOf(approvals ?? []).length);
 
   async function loadServers(background = false): Promise<void> {
     const generation = ++loadGeneration;
@@ -99,13 +112,15 @@
     if (mcpUiState.selectedServerId) rememberSelection('mcp-servers', mcpUiState.selectedServerId);
   });
 
-  async function loadPending(): Promise<void> {
+  async function loadApprovals(): Promise<boolean> {
     try {
-      // The count route, not 200 whole rows just to take their length.
-      pending = (await mcpCpApi.cpApprovalsCount('pending')).count;
-    } catch {
-      // Keep the last known pending count on transient failures rather than
-      // clearing the approval badge while items may still be waiting.
+      approvals = await mcpCpApi.cpApprovals('pending');
+      approvalsError = null;
+      return true;
+    } catch (e) {
+      // Keep the last list on a transient failure; the landing says why.
+      approvalsError = loadErrorText(e);
+      return false;
     }
   }
 
@@ -127,12 +142,15 @@
     void loadServers(false);
   });
 
-  // Pending-approvals badge: event-fed (`mcp_approval_changed`); the 15 s
-  // poll chain only while the event socket is down.
+  // Event-fed (`mcp_approval_changed`, every approval write); the 15 s poll
+  // only while the event socket is down, paused while the page is hidden.
+  let approvalsQuery: ReturnType<typeof liveQuery> | null = null;
   $effect(() => {
-    const p = liveQuery({ run: () => loadPending(), on: ['mcp_approval_changed'], fallbackMs: 15_000 });
+    const p = liveQuery({ run: () => loadApprovals(), on: ['mcp_approval_changed'], fallbackMs: 15_000, safetyMs: EVENT_COMPLETE_SAFETY_MS });
+    approvalsQuery = p;
     return () => p.stop();
   });
+  const reloadApprovals = (): void => approvalsQuery?.now();
 
   function patchServer(updated: McpServerDetail): void {
     servers = servers.map((server) => (server.id === updated.id ? updated : server));
@@ -140,11 +158,12 @@
   }
 
   function go(id: Section): void {
-    router.go('mcp/' + id);
+    router.go(id === 'home' ? 'mcp' : 'mcp/' + id);
   }
 
   const SECTIONS: { id: Section; label: string }[] = [
-    { id: 'otto', label: 'Otto server' },
+    { id: 'home', label: 'Overview' },
+    { id: 'otto', label: 'Tools' },
     { id: 'profiles', label: 'Profiles' },
     { id: 'servers', label: 'External servers' },
     { id: 'activity', label: 'Activity' },
@@ -153,7 +172,8 @@
   // ⌘K: the page's verbs.
   $effect(() =>
     registry.register('mcp', [
-      { id: 'mcp.otto', title: 'Show the Otto MCP server', group: 'MCP', keywords: 'built-in gateway tools expose attach sessions token', run: () => go('otto') },
+      { id: 'mcp.home', title: 'Show what waits on you in MCP', group: 'MCP', keywords: 'overview approvals pending summary', run: () => go('home') },
+      { id: 'mcp.otto', title: 'Show Otto’s MCP tools', group: 'MCP', keywords: 'built-in gateway tools catalog expose attach sessions token', run: () => go('otto') },
       { id: 'mcp.profiles', title: 'Show MCP profiles', group: 'MCP', keywords: 'profile tool set subset database issues default session connection', run: () => go('profiles') },
       { id: 'mcp.servers', title: 'Show external MCP servers', group: 'MCP', keywords: 'governed servers tools discover allowlist policy', run: () => go('servers') },
       { id: 'mcp.activity', title: 'Show MCP approvals and audit', group: 'MCP', keywords: 'activity pending approve deny audit log', run: () => go('activity') },
@@ -181,7 +201,7 @@
           >
             {s.label}
             {#if s.id === 'servers' && wsId && !loading && !loadError}<span class="count">{servers.length}</span>{/if}
-            {#if s.id === 'activity' && pending > 0}<Badge tone="warn" testid="mcp-pending-badge" title="{plural(pending, 'approval')} waiting for you" label={String(pending)} />{/if}
+            {#if s.id === 'home' && pending > 0}<Badge tone="warn" testid="mcp-pending-badge" title="{plural(pending, 'approval')} waiting for you" label={String(pending)} />{/if}
           </button>
         {/each}
       </div>
@@ -193,7 +213,18 @@
        toolbars span the pane, so they manage their edges themselves. -->
   <PageBody padded={section === 'otto' || section === 'profiles'}>
     {#key accessRevision}
-      {#if section === 'otto'}
+      {#if section === 'home'}
+        <McpHome
+          {wsId}
+          {approvals}
+          {approvalsError}
+          {servers}
+          serversLoaded={mcpUiState.loaded}
+          serversError={loadError}
+          onretry={() => { reloadApprovals(); void loadServers(false); }}
+          ondecided={reloadApprovals}
+        />
+      {:else if section === 'otto'}
         <OttoServerHome {wsId} />
       {:else if section === 'profiles'}
         <LazyMount lazy={ProfilesTab} what="MCP profiles" />
@@ -203,7 +234,7 @@
             variant="page"
             icon="plug"
             title={NO_WORKSPACE}
-            body="Governed MCP servers and their tools belong to a workspace."
+            body="MCP servers that run through Otto, and their tools, belong to a workspace."
           />
         {:else}
           <ServersTab
@@ -219,7 +250,7 @@
         {/if}
       {:else}
         <div class="activity">
-          <ApprovalsTab ondecided={() => void loadPending()} />
+          <ApprovalsTab ondecided={reloadApprovals} />
           <AuditTab {servers} />
         </div>
       {/if}

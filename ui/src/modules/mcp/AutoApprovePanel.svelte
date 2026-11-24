@@ -124,12 +124,11 @@
     </button>
   </div>
   <p class="muted small intro">
-    Mutating tools ask a person before each call. A rule lets one tool — or every mutating tool in a
-    category — run without asking, everywhere, in one workspace, or for one agent session. Off by
-    default; every auto-approved call is still in <em>Activity → Audit</em> as “Auto approved”, naming
-    the rule. Irreversible tools (merging a PR, cluster actions, producing to a live queue or topic,
-    arbitrary HTTP requests, hard deletes) are never covered by a category and need a second
-    confirmation per tool.
+    Tools that can change things ask a person before each call. A rule lets one tool — or every such tool
+    in a category — run without asking, everywhere, in one workspace or for one agent session. Every
+    auto-approved call is still in <em>Activity → Audit</em> as “Auto approved”. Irreversible tools (merging
+    a PR, cluster actions, producing to a live queue, arbitrary HTTP, hard deletes) are never covered by a
+    category and need a second confirmation.
   </p>
 
   <LoadState what="auto-approve rules" {loading} error={loadError} empty={!!data && rules.length === 0} rows={2} onretry={() => void load()}>
@@ -137,7 +136,7 @@
       <EmptyState
         icon="shield"
         title="No auto-approve rules"
-        body="Every mutating call asks a person first."
+        body="Every call that can change things asks a person first."
       />
     {/snippet}
     <ul class="rules">

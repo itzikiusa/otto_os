@@ -11,7 +11,7 @@
   import LoadState from '../lib/components/LoadState.svelte';
   import Modal from '../lib/components/Modal.svelte';
   import ProviderIcon from '../lib/components/ProviderIcon.svelte';
-  import { liveQuery } from '../lib/live';
+  import { liveQuery, EVENT_COMPLETE_SAFETY_MS } from '../lib/live';
   import { plural } from '../lib/plural';
   import { rel } from '../lib/stores/now.svelte';
   import type { McpApproval } from '../lib/api/types';
@@ -35,6 +35,7 @@
       run: () => triage.refresh(),
       on: ['mcp_approval_changed'],
       fallbackMs: 15_000,
+      safetyMs: EVENT_COMPLETE_SAFETY_MS,
     });
     window.addEventListener('keydown', onKeydown);
     return () => {

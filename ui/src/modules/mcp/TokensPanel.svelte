@@ -248,7 +248,7 @@
       </div>
       <label class="chk">
         <input type="checkbox" bind:checked={fAllowWrites} />
-        Allow mutating (write) tools — otherwise the token is read-only
+        Allow tools that can change things — otherwise the token is read-only
       </label>
       <label class="chk">
         <input type="checkbox" bind:checked={fRestrictTools} />
@@ -266,7 +266,7 @@
                     checked={fTools.has(bare(tool.name))}
                     onchange={() => toggleFormTool(tool.name)}
                   />
-                  <span class="mono">{bare(tool.name)}</span>{#if tool.mutating}<span class="mut">mutating</span>{/if}
+                  <span class="mono">{bare(tool.name)}</span>{#if tool.mutating}<span class="mut">can change things</span>{/if}
                 </label>
               {/each}
             </div>

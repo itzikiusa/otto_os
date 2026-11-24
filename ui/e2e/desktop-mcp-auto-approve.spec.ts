@@ -2,7 +2,7 @@ import { test, expect, type APIRequestContext } from '@playwright/test';
 import { apiCtx, seedGitRepo, seedWorkspace } from './seed';
 import { enableMcpFixtureCatalog } from './mcp-catalog-fixture';
 
-// MCP → Otto server → Auto-approve: the opt-in rules that let a mutating
+// MCP → Tools → Auto-approve: the opt-in rules that let a mutating
 // otto.* tool (create_pr) run without a per-call approval. Pins the catalog
 // switch (confirm → a global per-tool rule shown in the panel), the panel's
 // delete, and the irreversible guardrail in the New-rule form (merge_pr can't
@@ -49,16 +49,22 @@ test.beforeEach(async ({ page }) => {
 });
 
 test('catalog switch auto-approves create_pr and the panel lists + deletes it', async ({ page }) => {
-  await page.goto('/#/mcp');
+  await page.goto('/#/mcp/otto');
   const panel = page.locator('[data-testid="mcp-auto-approve-panel"]');
   await expect(panel).toBeVisible({ timeout: 30_000 });
   await expect(panel.getByText('No auto-approve rules')).toBeVisible();
 
+  // The per-tool switch sits behind the tool's Details (the catalog row stays one line).
+  await page.locator('.otto .filter').fill('create_pr');
+  const details = page.getByTestId('mcp-tool-details-otto.create_pr');
+  await details.click();
   const toggle = page.locator('input[data-testid="mcp-auto-otto.create_pr"]');
   await expect(toggle).not.toBeChecked();
   await toggle.click();
-  await page.getByRole('dialog').getByRole('button', { name: 'Auto-approve', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Auto-approve', exact: true }).getByRole('button', { name: 'Auto-approve', exact: true }).click();
   await expect(toggle).toBeChecked();
+  await page.keyboard.press('Escape');
+  await expect(toggle).toHaveCount(0);
   const row = panel.locator('[data-testid="mcp-auto-approve-rule-create_pr"]');
   await expect(row).toBeVisible();
   await expect(row).toContainText('Everywhere');
@@ -66,11 +72,12 @@ test('catalog switch auto-approves create_pr and the panel lists + deletes it', 
   await row.getByRole('button', { name: /^Delete / }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Delete', exact: true }).click();
   await expect(row).toHaveCount(0);
+  await details.click();
   await expect(toggle).not.toBeChecked();
 });
 
 test('an irreversible tool needs the second toggle in the New-rule form', async ({ page }) => {
-  await page.goto('/#/mcp');
+  await page.goto('/#/mcp/otto');
   await page.locator('[data-testid="mcp-auto-approve-new"]').click();
   const form = page.locator('[data-testid="mcp-auto-approve-form"]');
   await expect(form).toBeVisible();
