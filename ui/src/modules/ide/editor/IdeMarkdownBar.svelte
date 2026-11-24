@@ -116,9 +116,11 @@
     cursor: pointer;
     flex-shrink: 0;
   }
-  .md-btn:hover {
-    background: var(--hover);
-    color: var(--text);
+  @media (hover: hover) {
+    .md-btn:hover {
+      background: var(--hover);
+      color: var(--text);
+    }
   }
   .md-btn:focus-visible {
     outline: 2px solid var(--accent-text);

@@ -50,6 +50,9 @@ test('phone: the Markdown row has 44 px targets, scrolls inside itself, and a ta
   await page.getByTestId('ide-md-check').scrollIntoViewIfNeeded();
   await page.getByTestId('ide-md-check').tap();
   await expect.poll(async () => (await page.locator('.ide-editor-area .cm-line').allTextContents()).some((t) => t.startsWith('- [ ] '))).toBe(true);
+  // The cursor sits after the marker, so typing fills the item.
+  await page.keyboard.type('ship it');
+  await expect.poll(async () => (await page.locator('.ide-editor-area .cm-line').allTextContents()).includes('- [ ] ship it')).toBe(true);
   await expectNoHorizontalOverflow(page);
   await writeShot(page, `phone-md-row-${info.project.name}`);
 });

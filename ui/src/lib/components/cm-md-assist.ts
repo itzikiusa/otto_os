@@ -89,9 +89,15 @@ export function toggleLinePrefix(kind: LineKind): Command {
       const prefix = off ? '' : kind === 'bullet' ? '- ' : kind === 'number' ? `${++i}. ` : kind === 'check' ? '- [ ] ' : '> ';
       return { from: l.from + indent.length, to: l.from + m[0].length, insert: prefix };
     });
-    view.dispatch({ changes, scrollIntoView: true, userEvent: 'input' });
+    dispatchAfterMarkers(view, changes);
     return true;
   };
+}
+
+/** Apply line-marker edits with a cursor at a marker landing after it (where you type). */
+function dispatchAfterMarkers(view: EditorView, changes: ChangeSpec[]): void {
+  const set = view.state.changes(changes);
+  view.dispatch({ changes: set, selection: view.state.selection.map(set, 1), scrollIntoView: true, userEvent: 'input' });
 }
 
 /** `#`…`###` on the cursor's lines (the same level again removes it). */
@@ -104,7 +110,7 @@ export function setHeading(level: number): Command {
       const same = m && m[1].length === level;
       return { from: l.from, to: l.from + (m ? m[0].length : 0), insert: same ? '' : `${'#'.repeat(level)} ` };
     });
-    view.dispatch({ changes, scrollIntoView: true, userEvent: 'input' });
+    dispatchAfterMarkers(view, changes);
     return true;
   };
 }
@@ -133,8 +139,11 @@ export const BLOCKS: BlockSnippet[] = [
   { label: 'Callout', detail: '> [!NOTE]', text: '> [!NOTE]\n> ', select: [12, 12] },
 ];
 
+/** Blocks that may continue the line above (a checklist under a list, a quote under a quote). */
+const INLINE_BLOCKS = new Set(['Checklist', 'Quote']);
+
 /** Put a block on the cursor's line: in place of an empty line (or of `/`+query), else
- *  on a new line below with a blank line between. */
+ *  on a new line below with a blank line between; a blank line above when it needs one. */
 export function insertBlock(view: EditorView, b: BlockSnippet, from?: number, to?: number): void {
   const { state } = view;
   const line = state.doc.lineAt(state.selection.main.head);
@@ -144,6 +153,10 @@ export function insertBlock(view: EditorView, b: BlockSnippet, from?: number, to
   if (from === undefined && line.text.trim()) {
     at = end = line.to;
     lead = '\n\n';
+  } else if (!INLINE_BLOCKS.has(b.label) && line.number > 1 && state.doc.line(line.number - 1).text.trim()) {
+    // A table, fence or divider right under a list item or paragraph would join it
+    // (or turn `---` into a heading underline): a blank line first.
+    lead = '\n';
   }
   const base = at + lead.length;
   view.dispatch({

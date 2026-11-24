@@ -77,6 +77,9 @@ test('Lists, checklists and quotes over several lines; switching kinds; toggling
   assert.equal(v.state.doc.toString(), '- [ ] one\n- [ ] two\n- [ ] three');
   toggleLinePrefix('check')(v);
   assert.equal(v.state.doc.toString(), 'one\ntwo\nthree');
+  const empty = fakeView('', 0);
+  toggleLinePrefix('check')(empty);
+  assert.equal(empty.state.selection.main.head, 6, 'the cursor lands after the new marker, where you type');
   const q = fakeView('  - item', 4);
   toggleLinePrefix('quote')(q);
   assert.equal(q.state.doc.toString(), '  > item', 'indentation kept');
@@ -113,12 +116,18 @@ test('Slash menu: only at the start of an empty line; Table inserts a 3×3 table
   }
   const v = fakeView('intro\n/ta', 9);
   insertBlock(v, BLOCKS.find((b) => b.label === 'Table')!, 6, 9);
-  assert.equal(v.state.doc.toString(), 'intro\n| Column 1 | Column 2 | Column 3 |\n| --- | --- | --- |\n|  |  |  |\n|  |  |  |');
+  assert.equal(v.state.doc.toString(), 'intro\n\n| Column 1 | Column 2 | Column 3 |\n| --- | --- | --- |\n|  |  |  |\n|  |  |  |', 'a blank line keeps the table out of the paragraph');
   assert.equal(sel(v), 'Column 1');
   const c = fakeView('/code', 5);
   insertBlock(c, BLOCKS.find((b) => b.label === 'Code block')!, 0, 5);
   assert.equal(c.state.doc.toString(), '```\n\n```');
   assert.equal(c.state.doc.lineAt(c.state.selection.main.head).number, 2, 'cursor inside the fence');
+  const after = fakeView('- [ ] done\n/', 12);
+  insertBlock(after, BLOCKS.find((b) => b.label === 'Checklist')!, 11, 12);
+  assert.equal(after.state.doc.toString(), '- [ ] done\n- [ ] ', 'a checklist item continues the list');
+  const div = fakeView('para\n/', 6);
+  insertBlock(div, BLOCKS.find((b) => b.label === 'Divider')!, 5, 6);
+  assert.equal(div.state.doc.toString(), 'para\n\n---\n', 'not a setext heading');
   const callout = fakeView('/', 1);
   insertBlock(callout, BLOCKS.find((b) => b.label === 'Callout')!, 0, 1);
   assert.equal(callout.state.doc.toString(), '> [!NOTE]\n> ');
