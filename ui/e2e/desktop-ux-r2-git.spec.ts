@@ -1,9 +1,8 @@
 import { test, expect, type Page, type Route } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 
 // Route fixtures must bypass the mobile service worker.
@@ -17,7 +16,7 @@ let secondSha = '';
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
-  const dir = mkdtempSync(join(tmpdir(), 'otto-ux-git-'));
+  const dir = tempDir('otto-ux-git-');
   const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim();
   git('init', '-q', '-b', 'main');
   git('config', 'user.email', 'ux@otto.local');
@@ -68,7 +67,11 @@ function issue(key: string) {
 }
 async function focusFixtures(page: Page) {
   await page.route('**/api/v1/issue/accounts', r => r.fulfill({ json: accounts }));
-  await page.route('**/api/v1/repos/*/prs?*', r => r.fulfill({ json: { items: [pr(1)], has_more: false } }));
+  // Focus lists pull requests only for repositories a git account can read
+  // (prCandidateRepos): a GitHub account, and PRs for this spec's repo alone
+  // (the shared daemon holds other specs' GitHub repos too).
+  await page.route('**/api/v1/git/accounts', r => r.fulfill({ json: [{ id: 'gh', label: 'GitHub', provider: 'github', namespace: 'otto-test', username: 'audit' }] }));
+  await page.route('**/api/v1/repos/*/prs?*', r => r.fulfill({ json: { items: r.request().url().includes(`/repos/${repoId}/`) ? [pr(1)] : [], has_more: false } }));
   await page.route('**/api/v1/issue/my-work?*', r => r.fulfill({ json: [issue('AUDIT-1'), issue('AUDIT-2')] }));
   await page.route('**/api/v1/issue/account-*/*', r => r.fulfill({ json: issue(r.request().url().split('/').at(-1)!) }));
 }
@@ -213,7 +216,7 @@ test('switching PR while editing cannot carry the old title into the new PR', as
   await expect(page.locator('.prd-title')).toContainText('PR 2:');
   await expect(page.locator('.prd-title-input')).toHaveCount(0);
 });
-test('PR Decline: confirms which PR and what happens, posts it, then reads Declined', async ({ page }) => {
+test('PR Decline: confirms which PR and what happens, posts it, then reads closed', async ({ page }) => {
   await prFixtures(page);
   let state = 'open';
   const declined: string[] = [];
@@ -234,18 +237,20 @@ test('PR Decline: confirms which PR and what happens, posts it, then reads Decli
   await expect(decline).toBeVisible();
   await expect(decline).toHaveClass(/danger/);
   // Cancel sends nothing.
+  // GitHub wording (prCloseLabels): "Close", not Bitbucket's "Decline".
+  await expect(decline).toHaveText('Close PR…');
   await decline.click();
-  const dialog = page.getByRole('dialog', { name: 'Decline PR #1?' });
-  await expect(dialog).toContainText('PR #1');
+  const dialog = page.getByRole('dialog', { name: 'Close pull request #1?' });
+  await expect(dialog).toContainText('#1');
   await expect(dialog).toContainText('without merging');
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect(dialog).toHaveCount(0);
   expect(declined).toEqual([]);
   // Confirm posts once, then the PR reloads as Declined (no actions left).
   await decline.click();
-  await page.getByRole('dialog', { name: 'Decline PR #1?' }).getByRole('button', { name: 'Decline PR', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Close pull request #1?' }).getByRole('button', { name: 'Close PR', exact: true }).click();
   await expect.poll(() => declined).toEqual(['POST']);
-  await expect(page.locator('.prd .prd-state', { hasText: 'Declined' }).first()).toBeVisible();
+  await expect(page.getByTestId('pr-status')).toHaveText(/Closed without merging/);
   await expect(decline).toHaveCount(0);
 });
 

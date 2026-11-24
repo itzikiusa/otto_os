@@ -56,7 +56,8 @@ for (const width of [390, 560]) for (const scheme of ['light', 'dark'] as const)
         columns: [{ name: 'id', type_hint: 'BIGINT' }, { name: 'status', type_hint: 'VARCHAR(20)' }],
         rows: Array.from({ length: 100 }, (_, i) => [offset + i + 1, 'paid']),
         stats: { row_count: 100, duration_ms: 1234, bytes_read: 65536 },
-        truncated: false, auto_limited: 100,
+        // Drivers fetch one row past the page: `truncated` is what says a next page exists.
+        truncated: offset === 0, auto_limited: 100,
       } });
     });
     await openQuery(page, scheme);

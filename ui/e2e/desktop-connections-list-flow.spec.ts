@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { mockDbRoutes, seedMockDbConnection } from './db-mock';
+import { pickMenuItem } from './helpers';
 
 // The redesigned Connections flows on the desktop: the list → open → run →
 // rows path, and New connection in two steps (paste a URI or pick a kind,
@@ -103,8 +104,7 @@ test('Editing a profile that uses TLS opens More options by itself', async ({ pa
   expect(res.ok()).toBeTruthy();
   await ctx.dispose();
   await page.goto('/#/connections');
-  await page.locator('.conn-row', { hasText: name }).click({ button: 'right' });
-  await page.getByRole('menuitem', { name: 'Edit', exact: true }).click();
+  await pickMenuItem(page, () => page.locator('.conn-row', { hasText: name }).click({ button: 'right' }), 'Edit');
   const dialog = page.getByRole('dialog');
   await expect(dialog.getByLabel('TLS / SSL')).toHaveValue('required');
   await expect(dialog.getByRole('button', { name: /More options/ })).toHaveAttribute('aria-expanded', 'true');

@@ -560,6 +560,14 @@ export function createGraphData(h: GraphDataHost) {
     // `ceil((n + 1) / PAGE)` grew the request by a page per refresh.
     const held = commits;
     const heldMore = hasMore;
+    // Refs a quiet re-sync already read for this reload: when they prove the
+    // splice unsafe (a removed ref, a tip moved from outside the checked
+    // prefix), read the history once in full — not a page, then everything.
+    const pending = sync.pendingRefsFor(id);
+    if (!full && refs && pending && lostRef(refs, pending)) full = true;
+    // A full re-read is what the user had paged in (at least a first page),
+    // never the old 10k first page: windowed history holds far less.
+    const fullSize = Math.max(FIRST_PAGE, held.length);
     loadGen++;
     loadingMore = false;
     inflight = null;
@@ -569,14 +577,13 @@ export function createGraphData(h: GraphDataHost) {
         .get<CommitInfo[]>(`/repos/${id}/log?all=true&limit=${limit}`)
         .then((v) => ({ v, e: null as unknown }))
         .catch((e: unknown) => ({ v: null, e }));
-    if (full) refRemoved = false;
     const [c0, st, wt] = await Promise.all([
-      readLog(full ? Math.max(PAGE, held.length) : FIRST_PAGE),
+      readLog(full ? fullSize : FIRST_PAGE),
       api.get<StashInfo[]>(`/repos/${id}/stashes`).catch(() => null),
       api.get<WorktreeInfo[]>(`/repos/${id}/worktrees`).catch(() => null),
     ]);
     let c = c0;
-    let want = full ? Math.max(PAGE, held.length) : FIRST_PAGE;
+    let want = full ? fullSize : FIRST_PAGE;
     let more: boolean | null = null;
     if (!full && c.v && c.v.length >= FIRST_PAGE && held.length > FIRST_PAGE) {
       const spliced = spliceHistory(held, c.v);
@@ -604,6 +611,8 @@ export function createGraphData(h: GraphDataHost) {
       return;
     }
     if (g.commits) {
+      // Not spliced: no retained tail is left for a removed ref to orphan.
+      if (g.more === null) refRemoved = false;
       movedRefTips.clear();
       newRefTips.clear();
       setCommits(g.commits);

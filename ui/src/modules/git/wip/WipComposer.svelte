@@ -289,18 +289,22 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  /* A narrow card (the graph's detail pane, a phone): the actions take their
-     own full-width row under the message. */
+  /* A narrow card (the side panel, the graph's detail pane, a phone): the
+     primary takes its own full-width row under the message, ⋯ and "Commit
+     only" the row under it — on one row they overflowed the card and clipped
+     ⋯ to a stray dot. */
   @container wc (max-width: 520px) {
     .wc-row {
       flex-direction: column;
       align-items: stretch;
     }
     .wc-actions {
+      flex-wrap: wrap;
       justify-content: flex-end;
     }
     .wc-commit {
-      flex: 1;
+      flex: 1 1 100%;
+      order: -1;
       justify-content: center;
     }
   }

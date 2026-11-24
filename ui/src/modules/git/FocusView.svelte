@@ -122,8 +122,8 @@
   }
 
   $effect(() => {
-    void loadPrs();
-    void loadAccounts();
+    // Once per mount: loadPrs reads git.allReposLoaded, whose flip re-ran both (a Retry replaced mid-click).
+    untrack(() => { void loadPrs(); void loadAccounts(); });
     return () => {
       prsRevision++;
       prsAbort?.abort();

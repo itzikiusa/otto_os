@@ -1,9 +1,8 @@
 import { test, expect } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedWorkspace, tempDir } from './seed';
 
 test.use({ serviceWorkers: 'block' });
 let repoId = '';
@@ -12,7 +11,7 @@ let workspaceId = '';
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base, 'PR draft ownership');
-  const dir = mkdtempSync(join(tmpdir(), 'otto-pr-draft-ownership-'));
+  const dir = tempDir('otto-pr-draft-ownership-');
   const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args]);
   git('init', '-q', '-b', 'main');
   git('config', 'user.email', 'draft@otto.local');
