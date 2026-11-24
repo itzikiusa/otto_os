@@ -210,7 +210,11 @@ async fn browser(auth_url: &str, st: &Arc<Mutex<As>>, code: &str, state_override
     let q: std::collections::HashMap<String, String> = u.query_pairs().into_owned().collect();
     assert_eq!(q["code_challenge_method"], "S256");
     assert!(q["resource"].ends_with("/mcp"));
-    st.lock().unwrap().challenge = Some(q["code_challenge"].clone());
+    // (Unless a test set another first.)
+    st.lock()
+        .unwrap()
+        .challenge
+        .get_or_insert_with(|| q["code_challenge"].clone());
     let state = state_override.unwrap_or(&q["state"]);
     let cb = format!("{}?code={code}&state={state}", q["redirect_uri"]);
     let _ = reqwest::get(cb).await;
@@ -294,10 +298,11 @@ fn redirect_addr(auth_url: &str) -> String {
 async fn a_pkce_mismatch_is_refused_by_the_token_endpoint() {
     let (base, st, task) = fake_as().await;
     let (auth_url, pending) = start(&format!("{base}/mcp"), None).await.unwrap();
+    // The AS saw another challenge than the verifier's (set before the
+    // callback: the exchange starts as soon as it is answered).
+    st.lock().unwrap().challenge = Some("not-the-challenge".into());
     let done = tokio::spawn(finish(pending, now));
     browser(&auth_url, &st, "good-code", None).await;
-    // (The AS saw another challenge than the verifier's.)
-    st.lock().unwrap().challenge = Some("not-the-challenge".into());
     let e = done.await.unwrap().unwrap_err();
     assert!(e.contains("invalid_grant") && !e.contains("leak"), "{e}");
     task.abort();
