@@ -79,7 +79,7 @@ async function openMysql(page: Page): Promise<void> {
   const conn = page.locator(`.conn-row[data-connection-id="${mysqlConn}"] .tr-title`);
   await expect(conn).toBeVisible({ timeout: 30_000 });
   await conn.click();
-  await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('db-conn-state')).toBeVisible({ timeout: 20_000 });
   await expect(page.locator('.query-editor')).toBeVisible({ timeout: 15_000 });
 }
 

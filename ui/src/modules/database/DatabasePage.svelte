@@ -33,12 +33,15 @@
   import { connDiagnose } from './diagnose.svelte';
   import { sshTabs } from './ssh-tabs.svelte';
   import DbSavedHistorySidebar from './DbSavedHistorySidebar.svelte';
-  import DbMainToolbar from './DbMainToolbar.svelte';
+  import { editorBar } from './workbenchBar.svelte';
+  import { comparePin, toggleCompare } from './comparePin.svelte';
+  import { KIND_LABEL, type KindWithLabel } from '../../lib/database/kindLabel';
+  import type { MenuItem } from '../../lib/contextmenu.svelte';
   import { buildDbCliSnippet, cliLabelForKind } from '../../lib/database/cliSnippet';
   import { processEngine } from './process-list';
   import { copyWithToast } from '../../lib/clipboard';
   import { databaseAccessChild } from '../../lib/access-options';
-  import { database, engineGlyph, type DbSideTab } from '../../lib/stores/database.svelte';
+  import { database, engineGlyph, type DbMainTab, type DbSideTab } from '../../lib/stores/database.svelte';
   import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
   import { brokers } from '../../lib/stores/brokers.svelte';
   import { ws, DB_PANE_ID } from '../../lib/stores/workspace.svelte';
@@ -95,7 +98,6 @@
   let clusterFormOpen = $state(false);
   let editingCluster = $state<BrokerCluster | null>(null);
   // SFTP file browser over an ssh profile's row action.
-  let sftpFor = $state<Connection | null>(null);
   // Spinner guard while a terminal session is being spawned for a row.
   let opening = $state<Record<string, boolean>>({});
 
@@ -120,32 +122,90 @@
   let accessFor = $state<Connection | null>(null); let processesFor = $state<Connection | null>(null);
   const connectionAccess = (c: Connection, operation: string, capability: 'view'|'edit'|'admin'='edit') => resourceAccess.can('connection',c.id,operation,'connections',capability);
   $effect(() => { for (const id of database.openConnIds) void resourceAccess.load('connection', id); });
-  function connMenu(e: MouseEvent, c: Connection): void {
-    const isDb = database.connections.some((x) => x.id === c.id);
+  /** A database connection's actions: its tab's ⋯ / right-click and the
+   *  Connection group of the header's ⋯. */
+  function connItems(c: Connection): MenuItem[] {
     const cliCmd = buildDbCliSnippet(c, { activeDb: database.selectedConnId === c.id ? database.activeDb : null });
     const cliName = cliLabelForKind(c.kind);
-    ctxMenu.show(e, [
-      // Per-kind primary/secondary opens: DB kinds live in the workbench but
-      // keep their CLI client; ssh adds the SFTP file browser.
-      ...(isDb
-        ? [
-            { label: 'Open beside agents (split)', icon: 'split', action: () => openConnInAgents(c) },
-            ...(connectionAccess(c,'shell') ? [{ label: 'Open terminal client', icon: 'terminal', action: () => void openTerminal(c) }] : []),
-          ]
-        : connectionAccess(c,'shell') ? [{ label: 'Open terminal session', icon: 'terminal', action: () => void openTerminal(c) }] : []),
+    return [
+      { label: 'Open beside agents (split)', icon: 'split', action: () => openConnInAgents(c) },
+      ...(connectionAccess(c,'shell') ? [{ label: 'Open terminal client', icon: 'terminal', action: () => void openTerminal(c) }] : []),
       ...(cliCmd && cliName ? [{ label: `Copy as ${cliName}`, icon: 'copy', action: () => void copyWithToast(cliCmd, `${cliName} command`) }] : []),
-      ...(c.kind === 'ssh' && connectionAccess(c,'sftp_read','view')
-        ? [{ label: 'Browse files (SFTP)', icon: 'folder', action: () => (sftpFor = c) }]
-        : []),
-      ...(isDb && database.isWarming(c.id) ? [{ label: 'Stop connecting', icon: 'stop', action: () => database.stopConnecting(c.id) }] : []),
-      ...(isDb && database.connStatus.get(c.id)?.phase === 'idle' && database.selectedConnId !== c.id ? [{ label: 'Connect in background', icon: 'refresh', action: () => void database.warm(c.id) }] : []),
-      ...(isDb ? popoutItems(`database/${c.id}`, c.name) : []),
-      ...(isDb && processEngine(c.kind) ? [{ label: 'Processes…', icon: 'gauge', action: () => (processesFor = c) }] : []),
+      ...(database.isWarming(c.id) ? [{ label: 'Stop connecting', icon: 'stop', action: () => database.stopConnecting(c.id) }] : []),
+      ...(database.connStatus.get(c.id)?.phase === 'idle' && database.selectedConnId !== c.id ? [{ label: 'Connect in background', icon: 'refresh', action: () => void database.warm(c.id) }] : []),
+      ...popoutItems(`database/${c.id}`, c.name),
+      ...(processEngine(c.kind) ? [{ label: 'Processes…', icon: 'gauge', action: () => (processesFor = c) }] : []),
       { separator: true },
       ...(connectionAccess(c,'configure','admin') ? [{ label: 'Edit…', icon: 'edit', action: () => editConnection(c) }] : []),
       ...(auth.isRoot || connectionAccess(c,'manage_access','admin') ? [{ label: 'Access', icon: 'key', action: () => {accessFor=c;} }] : []),
-    ]);
+    ];
   }
+  function connMenu(e: MouseEvent, c: Connection): void {
+    ctxMenu.show(e, connItems(c));
+  }
+
+  // ── The header's one ⋯ (grouped): view, query, connection, sidebar ───────
+  const VIEWS: { id: DbMainTab; label: string; show: () => boolean }[] = [
+    { id: 'query', label: 'Query', show: () => true },
+    { id: 'builder', label: 'Builder', show: () => database.supportsBuilder },
+    { id: 'structure', label: 'Structure', show: () => true },
+    { id: 'diagram', label: 'Diagram', show: () => database.capabilities?.engine !== 'redis' },
+    { id: 'dashboards', label: 'Dashboards', show: () => true },
+  ];
+  const viewLabel = $derived(VIEWS.find((v) => v.id === database.mainTab)?.label ?? 'Query');
+  function headerMenu(): MenuItem[] {
+    const c = database.selectedConn;
+    if (!c || database.activePane !== null) return [];
+    const query = database.mainTab === 'query' ? (editorBar.cur?.menu(null) ?? []) : [];
+    return [
+      ...VIEWS.filter((v) => v.show()).map((v) => ({ label: v.label, checked: database.mainTab === v.id, action: () => database.setMainTab(v.id) })),
+      { separator: true },
+      ...query,
+      { label: comparePin.value ? 'Clear comparison' : 'Compare results', icon: 'columns', title: 'Keep loaded results beside the current query', action: toggleCompare },
+      { separator: true },
+      { label: database.testing ? 'Testing connection…' : 'Test connection', icon: 'plug', disabled: database.testing, action: () => void database.testConnection() },
+      ...(['mysql', 'postgres'].includes(c.kind) ? [{ label: 'Database changes', icon: 'branch', title: 'Reviewed database changes for this connection', action: () => (changesOpen = true) }] : []),
+      ...connItems(c),
+      { separator: true },
+      { label: 'Close connection', icon: 'x', title: 'Close this connection (its query tabs come back when you open it again)', action: () => database.closeConnection(c.id) },
+    ];
+  }
+
+  // Tables / History: the sidebar on that view (again = hide it).
+  function showSide(tab: DbSideTab): void {
+    const on = !database.sidebarCollapsed && (database.sideTab === tab || (tab === 'schema' && database.sideTab === 'connections'));
+    if (on) return database.toggleSidebar();
+    database.setSideTab(tab);
+    // Reopening the tables puts focus back on the selected object.
+    if (database.sidebarCollapsed) void showSchemaSidebar();
+  }
+
+  // The state, in words: Connected · MySQL 8.0.36 · 14 ms / Connecting… /
+  // Can't connect — reason. Never a bare dot, never a spinner beside a Run
+  // that cannot work.
+  const connState = $derived.by(() => {
+    const st = database.activeConnStatus;
+    const c = database.selectedConn;
+    const engine = c ? (KIND_LABEL[c.kind as KindWithLabel] ?? c.kind) : '';
+    if (st?.phase === 'error') {
+      const reason = (st.error ?? '').replace(/\s+/g, ' ').trim();
+      return { word: 'Can’t connect', tone: 'danger', detail: reason.length > 70 ? `${reason.slice(0, 67)}…` : reason, tip: st.error ?? '' };
+    }
+    if (st?.phase === 'ready') {
+      const detail = [st.serverVersion ? `${engine} ${st.serverVersion}` : engine, st.latencyMs != null ? `${Math.round(st.latencyMs)} ms` : ''].filter(Boolean).join(' · ');
+      return { word: 'Connected', tone: 'success', detail, tip: detail };
+    }
+    if (st?.phase === 'idle') return { word: 'Not connected yet', tone: '', detail: engine, tip: '' };
+    return { word: 'Connecting…', tone: '', detail: engine, tip: '' };
+  });
+  function dbMenu(e: MouseEvent): void {
+    const items = database.isRedis
+      ? database.keyspaces.map((k) => ({ label: k.label, checked: (database.activeDb ?? database.keyspaces[0]?.id) === k.id, action: () => database.setActiveDb(k.id) }))
+      : [{ label: 'Default database', checked: !database.activeDb, action: () => database.setActiveDb(null) }, ...database.databaseNames.map((n) => ({ label: n, checked: database.activeDb === n, action: () => database.setActiveDb(n) }))];
+    ctxMenu.show(e, items, { filter: items.length > 12, filterPlaceholder: 'Find a database' });
+  }
+  const dbChoice = $derived(database.isRedis ? database.keyspaces.length > 0 : !!database.capabilities?.sql && database.databaseNames.length > 0);
+  const activeDbLabel = $derived(database.isRedis ? (database.keyspaces.find((k) => k.id === database.activeDb)?.label ?? database.keyspaces[0]?.label ?? '') : (database.activeDb ?? 'default database'));
 
   /** A Kafka cluster's menu — its sidebar row and its open tab (right-click or ⋯). */
   function clusterMenu(e: MouseEvent, cl: BrokerCluster): void {
@@ -450,27 +510,51 @@
      (it used to be a bare "+" in the side-tab strip); while there is nothing
      to open, the empty state owns that CTA instead. Phone keeps its accordion
      head buttons, so the header stays action-free there. -->
-<!-- Titled by what is open (the connection, cluster or terminal); the back
-     button goes to the connection list. -->
-<PageHeader title={workbenchTitle}>
-  <!-- Back to the connection list (always visible, phone included), then the
-       one list-collapse control (same as Canvas / Skills Lab): the header
-       `sidebar` icon. ⌘B does the same; nothing in the pane duplicates it. -->
+<!-- Three rows of chrome: this header (what is open · its state in words ·
+     Tables · History · ⋯ · Run), the query tabs, the editor; then the
+     results. The back button goes to the connection list. -->
+<PageHeader title={workbenchTitle} more={headerMenu}>
   {#snippet leading()}
     <button class="icon-btn" onclick={showConnections} aria-label="All connections" title="All connections">
       <Icon name="chevronLeft" size={16} />
     </button>
-    {#if !viewport.isPhone}
-      <button
-        class="icon-btn"
-        onclick={() => (database.sidebarCollapsed ? void showSchemaSidebar() : database.toggleSidebar())}
-        aria-label={database.sidebarCollapsed ? 'Show schema sidebar' : 'Hide sidebar'}
-        title={database.sidebarCollapsed ? 'Show sidebar (⌘B)' : 'Hide sidebar (⌘B)'}
-        aria-expanded={!database.sidebarCollapsed}
-        aria-controls="db-side"
-      >
-        <Icon name="sidebar" size={16} />
-      </button>
+  {/snippet}
+  {#snippet badge()}
+    {#if database.selectedConn && database.activePane === null}
+      <span class="db-conn-state" data-testid="db-conn-state" title={connState.tip}>
+        <span class="db-word {connState.tone}">{connState.word}</span>
+        {#if connState.detail}<span class="db-sub ellipsis">· {connState.detail}</span>{/if}
+        {#if database.isGuarded}
+          <span class="db-sub" class:db-prod={database.isProd} data-testid="db-guard-chip">· {database.isProd ? 'Production' : 'Read-only'}</span>
+        {/if}
+        {#if dbChoice}
+          <button class="db-link" onclick={dbMenu} aria-haspopup="menu" title="Active database — queries run scoped to it">· {activeDbLabel}</button>
+        {/if}
+        {#if database.mainTab !== 'query'}
+          <button class="chip" onclick={() => database.setMainTab('query')} aria-label="Back to the query editor (showing {viewLabel})">{viewLabel} <Icon name="x" size={12} /></button>
+        {/if}
+        {#if editorBar.cur?.masked}
+          <button class="chip" onclick={() => editorBar.cur?.unmask()} aria-label="Masked results — turn masking off">Masked <Icon name="x" size={12} /></button>
+        {/if}
+      </span>
+    {/if}
+  {/snippet}
+  {#snippet actions()}
+    {#if database.selectedConn && database.activePane === null}
+      <button class="btn small ghost" data-overflow="2" aria-pressed={!database.sidebarCollapsed && database.sideTab !== 'history' && database.sideTab !== 'saved'} onclick={() => showSide('schema')} title="Tables (⌘B)">Tables</button>
+      <button class="btn small ghost" data-overflow="1" aria-pressed={!database.sidebarCollapsed && database.sideTab === 'history'} onclick={() => showSide('history')} title="Query history and saved queries">History</button>
+      {#if database.mainTab === 'query' && editorBar.cur}
+        {#if editorBar.cur.running}
+          <button class="btn small qe-stop" data-keep onclick={() => editorBar.cur?.stop()} title="Stop the running query (Esc)"><Icon name="stop" size={12} /> Stop</button>
+        {:else}
+          <button
+            class="btn small primary"
+            disabled={!editorBar.cur.canRun || database.activeConnStatus?.phase === 'error'}
+            title={database.activeConnStatus?.phase === 'error' ? `Can’t connect — ${connState.detail || 'see the error below'}` : editorBar.cur.runTitle}
+            onclick={() => editorBar.cur?.run()}
+          ><Icon name="play" size={12} /> Run <span class="kbd">⌘↵</span></button>
+        {/if}
+      {/if}
     {/if}
   {/snippet}
 </PageHeader>
@@ -540,6 +624,9 @@
       <!-- Each tab is the main <button role="tab">; the status glyph, the ⋯ menu
            (the right-click menu, reachable without a mouse) and the close button
            are its siblings inside a presentational wrapper. -->
+      <!-- One open database: no strip (the header names it; ⋯ closes it). A
+           terminal or Kafka tab keeps its strip (its ended mark, its close). -->
+      {#if openConns.length + brokers.openClusters.length + database.sshTabs.length > 1 || openConns.length === 0}
       <div class="conn-tabs" role="tablist" aria-label="Open connections" tabindex="-1" onkeydown={onTabKey} bind:this={connTabsEl}><!-- ui-guards: allow — closable document tabs (status glyph, ⋯ menu, close per tab): <Tabs> has no slot for per-tab controls -->
         {#each openConns as c (c.id)}
           {@const st = database.connStatus.get(c.id)}
@@ -609,6 +696,7 @@
           </div>
         {/each}
       </div>
+      {/if}
 
       {#if database.activePane?.kind === 'kafka'}
         {#if activeCluster}
@@ -624,7 +712,6 @@
           <EmptyState icon="terminal" title="Session closed" body="This terminal tab is no longer open." />
         {/if}
       {:else if database.selectedConnId}
-      <DbMainToolbar onopenchanges={() => (changesOpen = true)} />
 
       <!-- The active view (editor/results/…) and, when open, the DB Assistant
            agent panel side-by-side, separated by a draggable, persisted divider. -->
@@ -740,6 +827,46 @@
 {/if}
 
 <style>
+  .db-conn-state {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-2);
+    min-width: 0;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
+  .db-word {
+    font-weight: 600;
+  }
+  .db-word.success {
+    color: var(--success);
+  }
+  .db-word.danger {
+    color: var(--danger);
+  }
+  .db-sub {
+    min-width: 0;
+  }
+  .db-prod {
+    color: var(--danger);
+    font-weight: 600;
+  }
+  .kbd {
+    font-size: var(--fs-xs);
+    opacity: 0.7;
+    font-variant-numeric: tabular-nums;
+  }
+  .qe-stop {
+    font-weight: 600;
+  }
+  .db-link {
+    border: 0;
+    padding: 0;
+    background: none;
+    color: var(--accent-text);
+    font: inherit;
+    cursor: pointer;
+  }
   .db-root {
     height: 100%;
     display: flex;

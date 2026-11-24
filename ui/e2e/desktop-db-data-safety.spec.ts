@@ -65,7 +65,7 @@ async function draft(page: Page, stmt: string): Promise<void> {
 }
 
 async function clickRun(page: Page): Promise<void> {
-  await page.locator('.query-editor .btn.small.primary', { hasText: 'Run' }).first().click();
+  await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
 }
 
 test('a destructive statement asks first; Cancel runs nothing, Run sends it', async ({ page }) => {

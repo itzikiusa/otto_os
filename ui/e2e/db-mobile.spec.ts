@@ -76,7 +76,7 @@ async function openAndQuery(page: Page): Promise<void> {
   await expect(conn).toBeVisible({ timeout: 30_000 });
   await conn.click();
 
-  await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('db-conn-state')).toBeVisible({ timeout: 20_000 });
 
   const editor = page.locator('.qe-edit .cm-content');
   await editor.click();

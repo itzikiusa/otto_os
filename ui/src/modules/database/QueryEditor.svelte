@@ -16,7 +16,10 @@
   import ResultsGrid from './ResultsGrid.svelte';
   import PlanView from './PlanView.svelte';
   import VarsPrompt from './VarsPrompt.svelte';
-  import MultiRunDialog from './MultiRunDialog.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  // "Run on…" is a dialog: off the workbench's first paint.
+  const MultiRunLazy = lazyComponent(() => import('./MultiRunDialog.svelte'));
   import { dbHandoff, prefillVarType } from './handoff.svelte';
   import { databaseAccessChild } from '../../lib/access-options';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
@@ -34,6 +37,7 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { editorBar, type EditorBar } from './workbenchBar.svelte';
   import { confirmRun, settingsMenuItems, settingsSummary as querySettingsSummary, setMask } from './query-settings';
   import { clipHistory } from '../../lib/stores/clipHistory.svelte';
   import { parkedEditCount } from '../../lib/database/grid-tab-state';
@@ -829,9 +833,9 @@
     if (!q) return;
     database.openAssist('investigate', `Statement:\n${q}\n\n${task}`);
   }
-  function openAiMenu(e: MouseEvent): void {
+  function aiItems(): MenuItem[] {
     const noQuery = !editorQuery();
-    ctxMenu.show(e, [
+    return [
       { label: 'Write a query from plain English…', icon: 'comment', action: () => database.openAssist('nl') },
       { label: 'Ask about this database…', icon: 'sparkle', action: () => database.openAssist('ask') },
       { separator: true },
@@ -849,19 +853,18 @@
         title: noQuery ? 'Write a query first' : 'Check the plan and indexes and propose a faster equivalent',
         action: () => assistOnQuery('Find why this query could be slow (check its plan and the indexes) and propose a faster equivalent query.'),
       },
-    ]);
+    ];
   }
   // Query settings gear (query-settings.ts): a dot marks a non-default value.
   const settingsSummary = $derived(querySettingsSummary(database.rowLimit, tab));
   const settingsChanged = $derived(settingsSummary !== '');
-  const openSettingsMenu = (e: MouseEvent): void => ctxMenu.show(e, settingsMenuItems());
   function formatNow(): void {
     void database.formatStatement();
     editorSel = { text: '', cursor: 0 };
   }
-  /** ⋯ — the editor's less frequent actions (each keeps its shortcut). */
-  function openMoreMenu(e: MouseEvent): void {
-    const trigger = e.currentTarget as HTMLElement | null;
+  /** The Query group of the workbench header's ⋯ (workbenchBar.svelte.ts):
+   *  everything the old editor toolbar held besides Run. */
+  function queryMenu(trigger: HTMLElement | null): MenuItem[] {
     const runOnTitle = !canQuery ? noQueryReason : !hasStatement ? 'Write a query first' : undefined;
     const items: MenuItem[] = [
       {
@@ -888,8 +891,40 @@
       { separator: true },
       { label: 'Keyboard shortcuts', icon: 'command', action: () => (shortcutsOpen = true) },
     );
-    ctxMenu.show(e, items);
+    const lead: MenuItem[] = [];
+    if (stmtCount > 1 && !isMongoshScript) lead.push({ label: `Run all ${stmtCount} statements`, icon: 'play', hint: '⇧⌘↵', disabled: !canQuery || tab.running, action: runAll });
+    const edit: MenuItem[] = [];
+    if (database.queryLanguage !== 'redis') edit.push({ label: 'Format', icon: 'format', hint: '⇧⌘F', disabled: !hasStatement || tab.running || isMongoshScript, action: formatNow });
+    if (canEdit) edit.push({ label: savedLinked ? 'Update saved query…' : 'Save query…', icon: 'check', hint: '⌘S', disabled: !hasStatement, action: () => void openSave() });
+    edit.push(
+      { label: 'Ask AI', icon: 'sparkle', disabled: !canAssist, title: canAssist ? 'The DB Assistant opens beside the editor' : 'Needs agent access and query permission on this connection', children: aiItems() },
+      { label: settingsChanged ? `Query settings · ${settingsSummary}` : 'Query settings', icon: 'gear', children: settingsMenuItems() },
+    );
+    return [...lead, ...items.slice(0, -5), { separator: true }, ...edit, ...items.slice(-5)];
   }
+  // The workbench header carries Run (the one primary) and this ⋯: a plain
+  // snapshot, re-published when it changes and withdrawn on unmount, so the
+  // header never reads this component's state after it is gone.
+  $effect(() => {
+    const bar: EditorBar = {
+      canRun: canQuery,
+      runTitle: !canQuery ? noQueryReason
+        : isMongoshScript ? 'Run the WHOLE script through mongosh — a script is indivisible, so Run never sends a single ;-delimited fragment (⌘↵)'
+        : 'Run the selection, else the statement under the cursor (⌘↵)',
+      running: tab.running,
+      stmtCount,
+      masked: !!tab.mask,
+      run,
+      runAll,
+      stop: () => database.abortQuery(undefined, { report: true }),
+      unmask: () => setMask(false),
+      menu: queryMenu,
+    };
+    editorBar.cur = bar;
+    return () => {
+      if (editorBar.cur === bar) editorBar.cur = null;
+    };
+  });
 
   // ── Phone accordion ────────────────────────────────────────────────────────
   // On a phone the editor and the results are each collapsible, independently
@@ -1202,149 +1237,21 @@
     </button>
   </div>
 
-  <div class="qe-toolbar">
-    <div class="qe-actions">
-    {#if tab.running}
-      <button class="btn small qe-stop" onclick={() => database.abortQuery(undefined, { report: true })} title="Stop the running query">
-        <Icon name="stop" size={12} />
-        Stop
-      </button>
-    {:else}
-      <button
-        class="btn small primary"
-        onclick={run}
-        disabled={!canQuery}
-        title={!canQuery
-          ? noQueryReason
-          : isMongoshScript
-          ? 'Run the WHOLE script through mongosh — a script is indivisible, so Run never sends a single ;-delimited fragment (⌘↵)'
-          : 'Run the selection, else the statement under the cursor (⌘↵)'}
-      >
-        <Icon name="play" size={12} />
-        Run
-        <span class="kbd">⌘↵</span>
-      </button>
-      {#if stmtCount > 1 && !isMongoshScript}
-        <button
-          class="btn small"
-          onclick={runAll}
-          disabled={!canQuery}
-          title={!canQuery ? noQueryReason : `Run all ${stmtCount} statements as one batch — one result set per statement (⇧⌘↵)`}
-        >
-          <Icon name="play" size={12} />
-          Run all
-        </button>
-      {/if}
-    {/if}
-    <span class="qe-sep" aria-hidden="true"></span>
-    {#if canEdit}
-      <button
-        class="btn small ghost"
-        onclick={openSave}
-        disabled={!hasStatement}
-        title={savedLinked ? 'Update the saved query (or Save as new)' : 'Save this query'}
-      >
-        <Icon name="check" size={12} />{savedLinked ? 'Update' : 'Save'}
-      </button>
-    {/if}
-    <button
-      class="btn small ghost"
-      class:on={database.assistOpen}
-      aria-expanded={database.assistOpen}
-      aria-haspopup="menu"
-      onclick={openAiMenu}
-      disabled={!canAssist}
-      title={canAssist ? 'Ask AI — write a query from plain English, ask about the schema or data, or explain / optimize this query. The DB Assistant opens beside the editor.' : 'Needs agent access and query permission on this connection'}
-      aria-label="Ask AI"
-      data-testid="db-ask-ai"
-    >
-      <Icon name="sparkle" size={12} /><span class="btn-label">Ask AI</span><Icon name="chevronDown" size={12} />
-    </button>
-    {#if database.queryLanguage !== 'redis'}
-      <button
-        class="icon-btn"
-        onclick={formatNow}
-        disabled={!hasStatement || tab.running || isMongoshScript}
-        title={isMongoshScript
-          ? 'Format is disabled for mongosh scripts — reflowing real JavaScript breaks its statement boundaries'
-          : 'Format / beautify the SQL (⇧⌘F)'}
-        aria-label="Format"
-      >
-        <Icon name="format" size={13} />
-      </button>
-    {/if}
+  {#if shortcutsOpen}
+    <!-- Opened from the header's ⋯ (Keyboard shortcuts): a reference card,
+         not a menu, pinned to the editor's top end. -->
     <div class="qe-kbd" bind:this={kbdWrapEl}>
-      <button
-        class="icon-btn"
-        class:on={shortcutsOpen}
-        onclick={openMoreMenu}
-        title="More — Run on…, query plan, line wrap, clipboard history, keyboard shortcuts"
-        aria-label="More editor actions"
-        aria-haspopup="menu"
-        data-testid="qe-more"
-      ><Icon name="more" size={14} /></button>
-      {#if shortcutsOpen}
-        <!-- A reference card, not a menu (no actionable items): a non-modal dialog. -->
-        <div class="qe-kbd-pop" role="dialog" aria-labelledby="qe-kbd-title" bind:this={kbdPopEl}>
-          <h3 class="qe-kbd-title" id="qe-kbd-title">Keyboard shortcuts</h3>
-          {#each SHORTCUTS as s (s.label)}
-            <div class="qe-kbd-row">
-              <span class="qe-kbd-label">{s.label}</span>
-              <kbd class="qe-kbd-keys">{s.keys}</kbd>
-            </div>
-          {/each}
-        </div>
-      {/if}
+      <div class="qe-kbd-pop" role="dialog" aria-labelledby="qe-kbd-title" bind:this={kbdPopEl}>
+        <h3 class="qe-kbd-title" id="qe-kbd-title">Keyboard shortcuts</h3>
+        {#each SHORTCUTS as s (s.label)}
+          <div class="qe-kbd-row">
+            <span class="qe-kbd-label">{s.label}</span>
+            <kbd class="qe-kbd-keys">{s.keys}</kbd>
+          </div>
+        {/each}
+      </div>
     </div>
-    </div>
-    <div class="qe-settings">
-    {#if database.capabilities?.sql && database.databaseNames.length > 0}
-      <label class="qe-db" title="Active database — queries run scoped to it, so you don’t need a db. prefix">
-        <Icon name="db" size={12} />
-        <select
-          class="input"
-          value={database.activeDb ?? ''}
-          onchange={(e) => database.setActiveDb((e.currentTarget as HTMLSelectElement).value || null)}
-        >
-          <option value="">{profileDb ? `Default (${profileDb})` : 'No active DB'}</option>
-          {#each database.databaseNames as db (db)}
-            <option value={db}>{db}</option>
-          {/each}
-        </select>
-      </label>
-    {:else if database.isRedis && database.keyspaces.length > 0}
-      <label class="qe-db" title="Active Redis database — commands (GET, HGETALL, …) run against this DB">
-        <Icon name="db" size={12} />
-        <select
-          class="input"
-          value={database.activeDb ?? database.keyspaces[0]?.id ?? ''}
-          onchange={(e) => database.setActiveDb((e.currentTarget as HTMLSelectElement).value || null)}
-        >
-          {#each database.keyspaces as ks (ks.id)}
-            <option value={ks.id}>{ks.label}</option>
-          {/each}
-        </select>
-      </label>
-    {/if}
-    {#if tab.mask}
-      <button class="qe-chip active" type="button" onclick={() => setMask(false)} title="Masked — the server redacts sensitive values (emails, tokens, keys). Click to stop masking." aria-label="Masked results — turn masking off">
-        <Icon name="lock" size={12} /><span>Masked</span>
-      </button>
-    {/if}
-    <button
-      class="icon-btn qe-settings-btn"
-      class:on={settingsChanged}
-      onclick={openSettingsMenu}
-      aria-haspopup="menu"
-      aria-label="Query settings{settingsChanged ? ` (${settingsSummary})` : ''}"
-      title="Query settings — row limit, statement timeout, masking{settingsChanged ? ` · now: ${settingsSummary}` : ''}"
-      data-testid="qe-settings"
-    >
-      <Icon name="gear" size={13} />
-      {#if settingsChanged}<span class="qe-settings-dot" aria-hidden="true"></span>{/if}
-    </button>
-    </div>
-  </div>
+  {/if}
 
   {#if queryVars.length > 0}
     <div class="qe-vars" bind:this={varsBarEl}>
@@ -1535,7 +1442,7 @@
 </div>
 
 {#if multiRun}
-  <MultiRunDialog statement={multiRun.statement} onclose={() => (multiRun = null)} />
+  <LazyMount lazy={MultiRunLazy} what="Run on…" quiet onerror={() => (multiRun = null)} props={{ statement: multiRun.statement, onclose: () => (multiRun = null) }} />
 {/if}
 
 {#if varsPrompt}
@@ -1729,47 +1636,11 @@
     border-color: var(--border);
     color: var(--accent-text);
   }
-  /* Two groups: the verbs (left) keep their LABELS at every desktop width —
-     icon-only buttons were unreadable guesses — and the run settings (right)
-     drop to a second row as one unit when the pane is too narrow for both.
-     Only a phone-width pane sheds the labels. */
-  .qe-toolbar {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 6px 12px;
-    padding: 0 0 8px;
-  }
-  .qe-actions,
-  .qe-settings {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-  }
-  .qe-settings {
-    margin-inline-start: auto;
-    gap: 8px;
-  }
-  .qe-sep {
-    width: 1px;
-    height: 16px;
-    background: var(--border);
-    margin: 0 2px;
-  }
-  @container qe (max-width: 560px) {
-    .btn-label {
-      display: none;
-    }
-  }
+
   /* Too narrow for actions + settings on one row: the settings wrap to a
      second row that starts at the leading edge (a right-floated half row
      read as orphaned). */
-  @container qe (max-width: 1010px) {
-    .qe-settings {
-      margin-inline-start: 0;
-    }
-  }
+
   /* Query-level variables bar — shown only when the statement references
      :name / {name}. One labelled input per variable, values remembered per tab. */
   .qe-vars {
@@ -1869,22 +1740,15 @@
     letter-spacing: .06em;
     cursor: pointer;
   }
-  /* Toggle highlight for a toolbar button (Ask AI) when its DB
-     Assistant panel is open in that mode. */
-  .btn.small.ghost.on {
-    color: var(--accent-text);
-    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-    background: var(--accent-soft);
-  }
   /* ⌨ shortcuts popover */
   .qe-kbd {
-    position: relative;
-    display: inline-flex;
+    position: absolute;
+    top: 6px;
+    inset-inline-end: 12px;
+    z-index: var(--z-popover);
   }
   .qe-kbd-pop {
-    position: absolute;
-    top: calc(100% + 6px);
-    inset-inline-start: 0;
+    position: relative;
     z-index: var(--z-popover);
     min-width: 220px;
     /* Never off-screen: the JS clamp below caps both sides against
@@ -1927,69 +1791,6 @@
     border-radius: var(--radius-s);
     padding: 1px 6px;
     white-space: nowrap;
-  }
-  /* The one control that matters mid-run: the shared danger button, weighted. */
-  .qe-stop {
-    font-weight: 600;
-  }
-  .kbd {
-    font-size: var(--fs-xs);
-    opacity: 0.7;
-    font-variant-numeric: tabular-nums;
-  }
-  .qe-db {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .qe-db select {
-    height: 24px;
-    padding: 0 4px;
-    font-size: var(--fs-xs);
-    width: auto;
-    max-width: 160px;
-  }
-  .qe-settings-btn {
-    position: relative;
-  }
-  /* A non-default query setting (limit / timeout / masking). */
-  .qe-settings-dot {
-    position: absolute;
-    top: 3px;
-    inset-inline-end: 3px;
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--accent-solid);
-  }
-  /* The Masked state chip — a small button that turns masking off. */
-  .qe-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    height: 24px;
-    padding: 0 6px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    cursor: pointer;
-    user-select: none;
-    background: transparent;
-    font: inherit;
-    font-size: var(--fs-xs);
-    transition: background var(--dur-fast), color var(--dur-fast), border-color var(--dur-fast);
-  }
-  .qe-chip:hover {
-    color: var(--text);
-    border-color: var(--accent);
-  }
-  .qe-chip.active {
-    background: var(--accent-soft);
-    border-color: var(--accent);
-    color: var(--accent-text);
   }
   .save-bar {
     display: flex;
@@ -2081,28 +1882,6 @@
        results sit just below it (the inline style sets height, so override it). */
     .qe-edit {
       height: 200px !important;
-    }
-    /* Dense toolbar → wrap onto multiple rows so nothing runs off the edge. */
-    .qe-toolbar {
-      flex-wrap: wrap;
-      gap: 6px;
-      row-gap: 6px;
-    }
-    .qe-actions,
-    .qe-settings {
-      flex-wrap: wrap;
-    }
-    .qe-settings {
-      margin-inline-start: 0;
-    }
-    /* Bigger tap targets / readable controls. */
-    .qe-db select,
-    .qe-chip {
-      height: 32px;
-      font-size: var(--fs-m);
-    }
-    .qe-db {
-      font-size: var(--fs-m);
     }
     .qe-tab {
       height: 32px;

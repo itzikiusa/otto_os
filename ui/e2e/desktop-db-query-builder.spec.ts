@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { setDbView } from './helpers';
 import { apiCtx, seedWorkspace } from './seed';
 import { mockDbRoutes, seedMockDbConnection } from './db-mock';
 
@@ -45,7 +46,7 @@ async function openBuilder(page: Page): Promise<void> {
   const c = page.locator('.conn-list .tr-title', { hasText: CONN });
   await expect(c.first()).toBeVisible({ timeout: 30_000 });
   await c.first().click();
-  await page.locator('.main-tabs .mt', { hasText: 'Builder' }).click();
+  await setDbView(page, 'Builder');
   await expect(page.locator('.builder')).toBeVisible({ timeout: 15_000 });
   await expect(page.getByTitle('Add orders to the canvas', { exact: true })).toBeVisible({ timeout: 15_000 });
 }
@@ -145,7 +146,7 @@ test('round trip: Open in Builder parses a query tab; unsupported SQL is refused
   await expect(sqlText(page)).toContainText('ORDER BY `n` DESC');
 
   // Something the builder can't hold: refused with a reason, canvas untouched.
-  await page.locator('.main-tabs .mt', { hasText: 'Query' }).click();
+  await setDbView(page, 'Query');
   await content.click();
   await page.keyboard.press('ControlOrMeta+A');
   await page.keyboard.insertText('SELECT * FROM shop.orders UNION SELECT * FROM shop.orders');

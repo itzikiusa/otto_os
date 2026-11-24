@@ -67,7 +67,7 @@ async function draft(page: Page, stmt: string): Promise<void> {
 }
 
 async function clickRun(page: Page): Promise<void> {
-  await page.locator('.query-editor .btn.small.primary', { hasText: 'Run' }).first().click();
+  await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
 }
 
 const TS_RESULT = {
@@ -152,7 +152,7 @@ test('Processes lists read-only and Kill asks first, naming the query', async ({
   await openConn(page);
   // Opening a connection folds the connection list away; its open tab in the
   // strip carries the same connection menu (right-click).
-  await page.locator('.conn-tab', { has: page.locator('.conn-tab-main', { hasText: CONN }) }).first().click({ button: 'right' });
+  await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click();
   await page.getByRole('menuitem', { name: 'Processes…' }).click();
 
   const panel = page.getByRole('dialog', { name: `Processes · ${CONN}` });

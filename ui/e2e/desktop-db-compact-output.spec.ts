@@ -103,7 +103,7 @@ for (const scheme of ['light', 'dark'] as const) {
       } });
     });
     await openQuery(page, scheme);
-    await page.getByTestId('qe-more').click();
+    await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click();
     await page.getByRole('menuitem', { name: 'Query plan (EXPLAIN)' }).click();
     const plan = page.locator('.plan-panel');
     await expect(plan).toBeVisible();

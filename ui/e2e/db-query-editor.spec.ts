@@ -53,7 +53,7 @@ async function openConn(page: Page, name: string): Promise<void> {
   const conn = page.locator('.conn-list .tr-title', { hasText: name });
   await expect(conn.first()).toBeVisible({ timeout: 30_000 });
   await conn.first().click();
-  await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('db-conn-state')).toBeVisible({ timeout: 20_000 });
 }
 const openMysql = (page: Page) => openConn(page, 'e2e-mysql');
 

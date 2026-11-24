@@ -6,19 +6,11 @@
 import type { BrokerCluster, Connection, ConnectionSection, Id } from '../../lib/api/types';
 import type { ConnCheck } from '../../lib/stores/connectionList.svelte';
 import { resourceWord, type StatusWord } from '../../lib/statusWords.ts';
+import { KIND_LABEL } from '../../lib/database/kindLabel.ts';
+
+export { KIND_LABEL };
 
 export type RowKind = Connection['kind'] | 'kafka';
-
-export const KIND_LABEL: Record<RowKind, string> = {
-  ssh: 'SSH',
-  mysql: 'MySQL',
-  postgres: 'PostgreSQL',
-  redis: 'Redis',
-  mongodb: 'MongoDB',
-  clickhouse: 'ClickHouse',
-  custom: 'Custom',
-  kafka: 'Kafka',
-};
 
 /** The filter menu's kind order. */
 export const KIND_ORDER: RowKind[] = ['mysql', 'postgres', 'clickhouse', 'mongodb', 'redis', 'ssh', 'kafka', 'custom'];

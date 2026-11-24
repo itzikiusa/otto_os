@@ -30,7 +30,9 @@ export type ObjectOpsHost = Pick<
   | 'selectedObjectPath'
   | 'setActiveDb'
   | 'setMainTab'
+  | 'switchTab'
   | 'tab'
+  | 'tabs'
 >;
 
 export class DbObjectOpsStore {
@@ -202,6 +204,22 @@ export class DbObjectOpsStore {
     const r = this.tableRefFromNode(node);
     if (!r) return;
     await this.openInNewTab(`SELECT * FROM ${r.ref}`, { run: true, name: r.table });
+  }
+
+  /** One click on a table in the tree: its rows — in the tab that already
+   *  shows them, else a new tab that runs `SELECT * FROM <table>`. */
+  async previewRows(node: SchemaNode): Promise<void> {
+    const r = this.tableRefFromNode(node);
+    if (!r) return;
+    const sql = `SELECT * FROM ${r.ref}`;
+    const i = this.db.tabs.findIndex((t) => t.statement === sql);
+    if (i >= 0) {
+      this.db.setMainTab('query');
+      this.db.switchTab(i);
+      return;
+    }
+    this.db.setMainTab('query');
+    await this.openInNewTab(sql, { run: true, name: r.table });
   }
 
   /** New tab: `SELECT * FROM <table>` without running (Send to SQL Editor). */

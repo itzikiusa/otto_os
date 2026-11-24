@@ -45,6 +45,13 @@ export const PAGES = [
 export type PageId = (typeof PAGES)[number];
 
 /** Navigate to a hash route and wait for the shell + content to settle. */
+/** The DB workbench's view (Query / Builder / Structure / Diagram / Dashboards)
+ *  lives in the header's ⋯ (a non-Query view shows as a chip that returns). */
+export async function setDbView(page: Page, view: string): Promise<void> {
+  await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click();
+  await page.getByRole('menuitemcheckbox', { name: view, exact: true }).click();
+}
+
 export async function openPage(page: Page, id: string): Promise<void> {
   await page.goto(`/#/${id}`);
   // The app shell is always present once booted.

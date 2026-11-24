@@ -78,7 +78,7 @@ async function openMysql(page: Page): Promise<void> {
   await expect(conn.first()).toBeVisible({ timeout: 30_000 });
   await conn.first().click();
 
-  await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('db-conn-state')).toBeVisible({ timeout: 20_000 });
 }
 
 /** On a phone the Editor block is gated behind a collapsible accordion header —

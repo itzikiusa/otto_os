@@ -93,7 +93,7 @@ async function openConnection(page: Page): Promise<void> {
   await conn.first().click();
 
   // The main tab strip appears once a connection is open.
-  await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('db-conn-state')).toBeVisible({ timeout: 20_000 });
   // Make sure the Query tab is the active main view (it is by default).
   await expect(page.locator('.qe-edit')).toBeAttached({ timeout: 20_000 });
 }

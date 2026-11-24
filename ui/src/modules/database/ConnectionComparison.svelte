@@ -7,33 +7,24 @@
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { database } from '../../lib/stores/database.svelte';
-  import { auth } from '../../lib/stores/auth.svelte';
-  import { ws } from '../../lib/stores/workspace.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import ResultsGrid from './ResultsGrid.svelte';
-  import { comparePin } from './comparePin.svelte';
+  import { comparePin, compareScope, toggleCompare } from './comparePin.svelte';
 
   let { children, enabled = true }: { children: Snippet; enabled?: boolean } = $props();
-  const scope = $derived(JSON.stringify([ws.currentId, auth.me?.id, database.accessRevision]));
+  const scope = $derived(compareScope());
   const tabs = $derived(database.openQueryTabs());
   const source = $derived(comparePin.value?.scope === scope
     ? tabs.find(({ connId, tab }) => connId === comparePin.value?.connId && tab.id === comparePin.value?.tabId) ?? null
     : null);
   const connection = $derived(source ? database.connections.find((c) => c.id === source.connId) : null);
   const submitted = $derived(source?.tab.error ? source.tab.err_statement : source?.tab.ran_statement);
-  const active = $derived(tabs.find(({ connId, tab }) => connId === database.selectedConnId && tab.id === database.tab?.id));
 
   // Closure or access/identity changes remove both the reference and any modal
   // the grid had opened. Reopening an identically named tab never re-pins it.
   $effect(() => { if (comparePin.value && !source) comparePin.value = null; });
 
-  function pinActive(): void {
-    if (active) {
-      database.setMainTab('query');
-      comparePin.value = { connId: active.connId, tabId: active.tab.id, scope };
-    }
-  }
   function selectSource(value: string): void {
     const next = tabs.find(({ connId, tab }) => `${connId}:${tab.id}` === value);
     comparePin.value = next ? { connId: next.connId, tabId: next.tab.id, scope } : null;
@@ -48,20 +39,12 @@
     return `${connectionName} · ${name || 'Query'}`;
   }
   $effect(() => registry.register('database-comparison', [
-    { id: 'db.compare-results', title: source ? 'Clear comparison' : 'Compare results', group: 'Database', keywords: 'compare connection query results side by side', run: () => { if (source) comparePin.value = null; else pinActive(); } },
+    { id: 'db.compare-results', title: source ? 'Clear comparison' : 'Compare results', group: 'Database', keywords: 'compare connection query results side by side', run: toggleCompare },
     ...(source ? [{ id: 'db.comparison-focus', title: 'Focus comparison source', group: 'Database', keywords: 'compare connection query edit', run: focusSource }] : []),
   ]));
 </script>
 
 <div class="comparison-workbench" class:comparing={enabled && source !== null}>
-  {#if enabled}
-  <div class="comparison-tools">
-    <button class="btn small ghost" aria-pressed={source !== null} disabled={!active} onclick={() => source ? (comparePin.value = null) : pinActive()} title="Keep loaded results beside the current query">
-      <Icon name="columns" size={13} />Compare results
-    </button>
-    {#if source}<span class="comparison-note">Loaded results · read-only comparison</span>{/if}
-  </div>
-  {/if}
   <div class="comparison-content">
     <div class="comparison-editor">{@render children()}</div>
     {#if enabled && source && connection}
@@ -108,14 +91,6 @@
     min-height: 0;
     container: comparison / inline-size;
   }
-  .comparison-tools {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-shrink: 0;
-    padding-block-end: 8px;
-  }
-  .comparison-note { color: var(--text-dim); font-size: var(--fs-xs); }
   .comparison-content { display: flex; flex: 1; gap: 12px; min-width: 0; min-height: 0; }
   .comparison-editor { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
   .comparison-reference {
@@ -142,7 +117,6 @@
     .comparing .comparison-content { flex-direction: column; overflow: auto; }
     .comparing .comparison-editor { flex: 0 0 420px; }
     .comparison-reference { flex: 0 0 360px; }
-    .comparison-note { display: none; }
   }
   /* QueryEditor uses a natural-height accordion on phones (including a 340px
      results block). Let it size this stack instead of overflowing a desktop
