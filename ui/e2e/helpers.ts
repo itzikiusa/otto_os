@@ -348,3 +348,17 @@ export async function openFloatingBar(page: Page): Promise<void> {
   await page.keyboard.press('Meta+k');
   await expect(page.getByRole('combobox', { name: 'Ask Otto or search commands' })).toBeFocused();
 }
+
+/** Menus list what the connection's access decisions allow at the moment they
+ *  open, and on a busy daemon a decision can still be loading (an item is
+ *  missing or disabled until it lands). Reopen until `name` is there and
+ *  enabled, then pick it. */
+export async function pickMenuItem(page: Page, open: () => Promise<unknown>, name: string): Promise<void> {
+  const item = page.getByRole('menuitem', { name, exact: true });
+  await expect(async () => {
+    if (await page.getByRole('menu', { name: 'Context menu' }).isVisible()) await page.keyboard.press('Escape');
+    await open();
+    await expect(item).toBeEnabled({ timeout: 1_000 });
+  }).toPass({ timeout: 20_000 });
+  await item.click();
+}

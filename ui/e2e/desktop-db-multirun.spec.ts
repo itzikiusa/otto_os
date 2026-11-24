@@ -1,7 +1,7 @@
 import { test, expect, type Page, type Route } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { mockDbRoutes, seedMockDbConnection } from './db-mock';
-import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
+import { expectFullyInViewport, expectNoHorizontalOverflow, pickMenuItem } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DB Explorer — "Run on…" (multi-target / parameterised runs). Two real mock
@@ -144,8 +144,7 @@ for (const scheme of ['light', 'dark'] as const) {
     const { starts } = await fixture(page);
     await openStg(page);
 
-    await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click();
-    await page.getByRole('menuitem', { name: 'Run on…' }).click();
+    await pickMenuItem(page, () => page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click(), 'Run on…');
     const sheet = page.getByTestId('multi-run');
     await expect(sheet).toBeVisible();
 
