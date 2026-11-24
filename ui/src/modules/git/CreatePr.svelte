@@ -4,10 +4,8 @@
   // is pushed automatically (with --set-upstream) right before the PR is opened.
   import Modal from '../../lib/components/Modal.svelte';
   import { toastError } from '../../lib/toastError';
-  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import { api } from '../../lib/api/client';
-  import { ws } from '../../lib/stores/workspace.svelte';
-  import type { BranchInfo, Collaborator, DraftPrResp, Id, PrSummary } from '../../lib/api/types';
+  import type { BranchInfo, Collaborator, DraftPrResp, PrSummary } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import AgentByline from '../../lib/components/AgentByline.svelte';
@@ -46,6 +44,8 @@
     alive = false;
     clearTimeout(revTimer);
     clearDraftTick();
+    // Closing mid-draft must not let the agent finish a turn nobody reads (S20-305).
+    draftCtl?.abort();
   });
 
   let branches: BranchInfo[] = $state([]);
@@ -64,37 +64,13 @@
   let description = $state('');
   let busy = $state(false);
   let drafting = $state(false);
-  /** Session that drafted (or is drafting). Drafting runs as a REAL Otto
-   *  session, so it shows up in Agents the moment it spawns and can be opened
-   *  in another window/tab and watched while this dialog stays put. */
-  let draftSessionId = $state<Id | null>(null);
+  /** Aborts the running draft (the headless agent dies with the request). */
+  let draftCtl: AbortController | null = null;
   /** When the agent's draft landed — drives the byline next to the fields. */
   let draftedAt = $state<number | null>(null);
   /** Seconds since the draft started — the whole point is that a long turn
    *  should never look indistinguishable from a wedged one. */
   let draftElapsed = $state(0);
-  /** When the current draft started (RFC3339), to recognize its session among
-   *  ws.sessions the moment its `session_created` event lands — the blocking
-   *  POST only returns the id at the END of the turn. */
-  let draftStartedAt = $state<string | null>(null);
-  /** Embedded live draft terminal, collapsed by default. */
-  let showDraftTerm = $state(false);
-
-  /** The draft session to embed: the id from the finished POST, else (while
-   *  drafting) the freshest pr-draft session created since the draft began —
-   *  its `session_created` event adds it to ws.sessions long before the POST
-   *  resolves. pr-draft is a background source, so it appears nowhere else. */
-  const liveDraftId: Id | null = $derived.by(() => {
-    if (draftSessionId) return draftSessionId;
-    if (!drafting || !draftStartedAt) return null;
-    const candidates = ws.sessions.filter(
-      (s) =>
-        (s.meta as { source?: string } | null)?.source === 'pr-draft' &&
-        !s.archived &&
-        s.created_at >= draftStartedAt!,
-    );
-    return candidates.length > 0 ? candidates[candidates.length - 1].id : null;
-  });
   // What the Create button is doing, for the label.
   let phase: '' | 'pushing' | 'creating' = $state('');
 
@@ -209,17 +185,15 @@
     // daemon used to diff the checked-out branch and the UI adopted it).
     const head = source;
     drafting = true;
-    draftSessionId = null;
     draftElapsed = 0;
-    // Slight backdate so a session created in the same second still matches.
-    draftStartedAt = new Date(Date.now() - 2000).toISOString();
+    const ctl = (draftCtl = new AbortController());
     const tick = setInterval(() => (draftElapsed += 1), 1000);
     if (typeof draftTick !== 'undefined') {
       if (draftTick !== null) clearInterval(draftTick);
       draftTick = tick;
     }
     try {
-      const d = await api.post<DraftPrResp>(`/repos/${repoId}/pr/draft`, { base: target, head: head || undefined });
+      const d = await api.post<DraftPrResp>(`/repos/${repoId}/pr/draft`, { base: target, head: head || undefined }, ctl.signal);
       if (!alive) return;
       // A daemon that drafted another branch (or a Source changed mid-draft):
       // say so instead of silently swapping the PR's head.
@@ -238,7 +212,6 @@
         );
         if (!alive) return;
         if (!ok) {
-          draftSessionId = d.session_id ?? null;
           draftedAt = null;
           return;
         }
@@ -246,7 +219,6 @@
       title = d.title;
       description = d.description;
       draftedAt = Date.now();
-      draftSessionId = d.session_id ?? null;
       toasts.info('Draft ready', 'Review and edit before creating.');
     } catch (e) {
       if (alive) toastError('Couldn’t draft the description', e);
@@ -308,15 +280,6 @@
     }
   }
 
-  /** Stop the drafting agent's session (kill the PTY, keep the row). */
-  async function stopDraftSession(id: Id): Promise<void> {
-    try {
-      await api.post(`/sessions/${id}/kill`, {});
-    } catch {
-      // Already exited / gone: nothing left to stop.
-    }
-  }
-
   /** Esc / backdrop / ✕: a stray key must not throw away a typed (or agent-
    *  drafted) title, description or reviewer list — ask first. */
   async function requestClose(): Promise<void> {
@@ -330,13 +293,7 @@
         danger: true,
       });
       if (!ok) return;
-      // The draft runs as a real Otto session: closing alone would let it
-      // finish the turn and spend tokens nobody will read (S20-305). Stop its
-      // PTY (the row stays, so Agents still shows what it did). Best-effort —
-      // it may have spawned too recently to be known, or just finished.
-      const sid = liveDraftId;
-      if (sid) void stopDraftSession(sid);
-      onclose();
+      onclose(); // unmounting aborts the draft
       return;
     }
     const edited = title.trim() !== '' || description.trim() !== '' || reviewers.length > 0 || revQuery.trim() !== '';
@@ -429,29 +386,15 @@
     </button>
     {#if drafting}
       <span class="dim draft-hint">
-        {draftElapsed}s · drafting from your branch diff{liveDraftId ? '' : '…'}
+        {draftElapsed}s · drafting from your branch diff…
       </span>
-    {:else if draftSessionId}
-      {#if draftedAt}<AgentByline label="Draft" at={draftedAt} />{/if}
+    {:else if draftedAt}
+      <AgentByline label="Draft" at={draftedAt} />
       <span class="dim draft-hint">Review and edit before creating.</span>
     {:else}
       <span class="dim draft-hint">Generates the title + description from your branch diff vs {target || 'target'}.</span>
     {/if}
-    {#if liveDraftId}
-      <button class="btn small ghost" onclick={() => (showDraftTerm = !showDraftTerm)}>
-        <Icon name={showDraftTerm ? 'chevronUp' : 'terminal'} size={12} />
-        {showDraftTerm ? 'Hide agent' : 'Watch agent'}
-      </button>
-    {/if}
   </div>
-
-  {#if liveDraftId && showDraftTerm}
-    <!-- Live draft terminal, embedded right here in the git flow (the pr-draft
-         session is a background source — it no longer appears under Agents). -->
-    <div class="draft-term">
-      <LazyTerminal sessionId={liveDraftId} preferDom showToolbar={false} />
-    </div>
-  {/if}
 
   <div class="field">
     <label for="pr-title">Title</label>
@@ -597,13 +540,6 @@
   }
   .draft-hint {
     font-size: var(--fs-xs);
-  }
-  .draft-term {
-    height: 220px;
-    margin-bottom: 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    overflow: hidden;
   }
 
   /* ── Mobile + tablet (≤1024px): stack the branch selectors so each gets full
