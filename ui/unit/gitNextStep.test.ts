@@ -23,6 +23,13 @@ test('a clean, synced default branch has no next step (no PR from main into main
   assert.equal(primaryStep({ ...S, branch: 'feat/x', upstream: 'origin/main' }).kind, 'create-pr');
 });
 
+test('no "Create pull request" until the branch’s PR lookup has answered', () => {
+  assert.equal(primaryStep({ ...S, prChecked: false }).kind, 'none');
+  assert.equal(primaryStep({ ...S, prChecked: true }).kind, 'create-pr');
+  // Commit and push never wait for it.
+  assert.equal(primaryStep({ ...S, prChecked: false, ahead: 1 }).kind, 'push');
+});
+
 test('nowhere to push: the primary only commits; unpublished branches publish', () => {
   assert.deepEqual(primaryStep({ ...S, changes: 1, remote: false, upstream: null, forge: false }), { kind: 'commit', label: 'Commit' });
   assert.deepEqual(primaryStep({ ...S, changes: 1, branch: null }), { kind: 'commit', label: 'Commit' });

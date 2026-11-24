@@ -18,6 +18,8 @@ export interface GitActionState {
   forge: boolean;
   /** The branch's open pull request, when there is one. */
   prNumber: number | null;
+  /** False while that lookup has not answered: no "Create PR" yet. */
+  prChecked?: boolean;
 }
 
 export interface GitAction {
@@ -35,7 +37,7 @@ export function gitAction(s: GitActionState): GitAction {
   if (s.branch && s.upstream && s.ahead > 0) return { kind: 'push', label: s.ahead === 1 ? 'Push 1 commit' : `Push ${s.ahead} commits` };
   if (s.prNumber != null) return { kind: 'pr', label: `PR #${s.prNumber}` };
   // The default branch is what PRs merge INTO: a clean, synced main has no next step.
-  if (s.branch && s.forge && !DEFAULT_BRANCHES.has(s.branch)) return { kind: 'create-pr', label: 'Create PR' };
+  if (s.branch && s.forge && s.prChecked !== false && !DEFAULT_BRANCHES.has(s.branch)) return { kind: 'create-pr', label: 'Create PR' };
   return { kind: 'none', label: 'Nothing to commit' };
 }
 

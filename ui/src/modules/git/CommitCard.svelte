@@ -70,8 +70,19 @@
       remote: !!repo.remote_url,
       forge: !!forge,
       prNumber: pr?.number ?? null,
+      prChecked: dirty || branchPrs.checked(repo, branch),
     }),
   );
+  // The branch's PR changes outside this card too (an agent or the forge
+  // opens it, someone merges it): re-read it when the card mounts and
+  // whenever the branch's push state moves.
+  $effect(() => {
+    void status?.ahead;
+    void status?.upstream;
+    const b = branch;
+    untrack(() => branchPrs.forget(repo, b));
+  });
+  const checking = $derived(!dirty && next.kind === 'none' && !branchPrs.checked(repo, branch));
   const CLEAN_TITLE: Record<string, string> = {
     none: 'Nothing to commit',
     push: 'Ready to push',
@@ -127,7 +138,7 @@
     <div class="cc-clean">
       <div class="cc-card" data-testid="commit-card-next">
         <div class="cc-text">
-          <p class="cc-title">{CLEAN_TITLE[next.kind]}</p>
+          <p class="cc-title">{checking ? 'Checking for a pull request…' : CLEAN_TITLE[next.kind]}</p>
           <p class="cc-sub">
             {#if branch}<span class="mono" dir="ltr">{branch}</span> · {/if}{stateWords({ changes: 0, ahead: status.ahead, behind: status.behind, upstream: status.upstream, branch })}{#if pr}<span> · pull request #{pr.number} is open</span>{/if}
           </p>
