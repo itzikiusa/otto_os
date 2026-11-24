@@ -221,8 +221,8 @@
   // movement) or to the grid itself (its radiogroup handler already ran).
   function onGlobalKeydown(e: KeyboardEvent): void {
     const t = e.target as HTMLElement | null;
-    // ⌘↩ anywhere; ↩ on a provider tile, in the first message (⇧↩ = new line) or the title.
-    const plainEnter = e.key === 'Enter' && !e.shiftKey && !e.isComposing && !!t && (t.id === 'ns-prompt' || t.id === 'ns-title' || !!gridEl?.contains(t));
+    // ⌘↩ anywhere; ↩ on a provider tile (not its − / +: that steps the count), in the first message (⇧↩ = new line) or the title.
+    const plainEnter = e.key === 'Enter' && !e.shiftKey && !e.isComposing && !!t && (t.id === 'ns-prompt' || t.id === 'ns-title' || (!!gridEl?.contains(t) && t.getAttribute('role') === 'radio'));
     if (((e.metaKey || e.ctrlKey) && e.key === 'Enter') || plainEnter) {
       e.preventDefault();
       if (!busy && (total > 0 || kind === 'chat')) void create();
@@ -469,15 +469,15 @@
 <svelte:window onkeydown={onGlobalKeydown} />
 
 <Modal title="New session" onclose={requestClose} dismissable={!busy}>
-  <!-- Terminal (the agent's own CLI, here) or Chat (a structured thread in Threads). -->
+  <!-- Terminal (the agent's own CLI, here) or Chat (a structured thread in Threads: ONE, so no batch counts). -->
   <div class="seg kind-seg" role="radiogroup" aria-label="Session kind" data-testid="ns-kind">
     {#each [['terminal', 'Terminal'], ['chat', 'Chat']] as [k, label] (k)}
-      <button type="button" class="seg-btn" class:active={kind === k} role="radio" aria-checked={kind === k} tabindex={kind === k ? 0 : -1} onkeydown={radioKey} onclick={() => (kind = k as 'terminal' | 'chat')}>{label}</button>
+      <button type="button" class="seg-btn" class:active={kind === k} role="radio" aria-checked={kind === k} tabindex={kind === k ? 0 : -1} onkeydown={radioKey} onclick={() => { kind = k as 'terminal' | 'chat'; if (kind === 'chat') counts = { [provider]: 1 }; }}>{label}</button>
     {/each}
   </div>
   <div class="field">
     <div id="ns-provider-label" class="provider-label">
-      Provider <span class="dim">· use − / + on a card to start several at once</span>
+      Provider{#if kind === 'terminal'} <span class="dim">· use − / + on a card to start several at once</span>{/if}
     </div>
     <div
       bind:this={gridEl}
@@ -508,7 +508,7 @@
               {providerSubtitle(p)}
             </span>
           </button>
-          <div class="count-ctl" role="group" id={`ns-steppers-${i}`} aria-label={`${p} sessions`}>
+          <div class="count-ctl" role="group" id={`ns-steppers-${i}`} aria-label={`${p} sessions`} style:display={kind === 'chat' ? 'none' : null}>
             <button
               type="button"
               class="cbtn"
