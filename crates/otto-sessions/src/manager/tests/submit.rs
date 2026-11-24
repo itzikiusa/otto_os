@@ -277,6 +277,86 @@ async fn sync_workspace_mcp_delivers_otto_to_agy_through_its_own_file() {
     }
 }
 
+/// 0.5.1 hotfix: a plain (non-bypass) Claude terminal in a repository whose
+/// `.mcp.json` carries Otto's `otto` entry stopped on Claude Code 2.1.331's
+/// "New MCP server found in this project" dialog on every new session. The
+/// stand-in CLI gates exactly as the real one does (bypass,
+/// `--strict-mcp-config` or a `--settings` approval pass; anything else shows
+/// the dialog); with the spawn's args it starts, without them it blocks.
+#[tokio::test]
+async fn claude_spawn_approves_ottos_own_mcp_entries_so_no_dialog_blocks() {
+    let (mgr, repo, ws, user) = test_manager().await;
+    let cwd = tempfile::tempdir().unwrap();
+    let session = repo
+        .create(NewSession {
+            workspace_id: ws.id.clone(),
+            kind: SessionKind::Agent,
+            provider: "claude".into(),
+            title: "plain claude".into(),
+            cwd: cwd.path().to_string_lossy().into_owned(),
+            provider_session_id: None,
+            connection_id: None,
+            created_by: user.clone(),
+            meta: serde_json::json!({ "interaction_mode": "accept-edits" }),
+        })
+        .await
+        .unwrap();
+    let otto = crate::mcp::OttoToolsServer {
+        command: "/usr/bin/true".into(),
+        args: vec![],
+        env: Default::default(),
+    };
+    let args = mgr.sync_workspace_mcp(&session, Some(otto), false).await;
+    let fake = cwd.path().join("claude");
+    std::fs::write(
+        &fake,
+        r#"#!/bin/sh
+approved=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dangerously-skip-permissions|--strict-mcp-config) echo READY; exit 0 ;;
+    --settings) approved="$2"; shift ;;
+  esac
+  shift
+done
+for name in $(sed -n 's/^    "\([^"]*\)": {$/\1/p' .mcp.json); do
+  case "$approved" in
+    *"\"$name\""*) ;;
+    *) echo "New MCP server found in this project: $name"; exit 3 ;;
+  esac
+done
+echo READY
+"#,
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let run = |args: Vec<String>| {
+        let mut cmd = tokio::process::Command::new(&fake);
+        cmd.args(args).current_dir(cwd.path());
+        async move {
+            String::from_utf8_lossy(&cmd.output().await.unwrap().stdout)
+                .trim()
+                .to_string()
+        }
+    };
+    assert_eq!(
+        run(vec![]).await,
+        "New MCP server found in this project: otto",
+        "the stand-in must block like the real CLI"
+    );
+    assert_eq!(run(args.clone()).await, "READY", "spawn args: {args:?}");
+    assert_eq!(
+        args,
+        ["--settings", r#"{"enabledMcpjsonServers":["otto"]}"#],
+        "exactly Otto's own entry, nothing of the person's"
+    );
+    assert!(
+        !cwd.path().join(".claude").exists(),
+        "nothing written for the approval"
+    );
+}
+
 /// error-handling-6-06: an enabled user server the launcher could not attach
 /// lands in the session meta as `mcp_skipped` (`{server, reason}`) for the
 /// session's MCP menu — and a later spawn where everything attached clears it.

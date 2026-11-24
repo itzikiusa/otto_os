@@ -120,6 +120,17 @@ fn discover_loom_browser() -> Option<String> {
     None
 }
 
+/// `--settings` approving exactly `names` from the project `.mcp.json` for
+/// one Claude Code process (a flag settings source: nothing is written to the
+/// repository or the person's settings, and their own servers keep their own
+/// approval).
+pub fn claude_approve_args(names: &[String]) -> Vec<String> {
+    vec![
+        "--settings".to_string(),
+        json!({ "enabledMcpjsonServers": names }).to_string(),
+    ]
+}
+
 fn mcp_path(workspace_root: &str) -> PathBuf {
     Path::new(workspace_root).join(".mcp.json")
 }

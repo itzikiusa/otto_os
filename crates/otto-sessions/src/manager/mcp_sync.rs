@@ -218,6 +218,21 @@ impl SessionManager {
                     }
                 }
             }
+            // A project `.mcp.json` server Claude Code has not been told to
+            // use stops its TUI on "New MCP server found in this project"
+            // (bypass and `--strict-mcp-config` skip it): approve exactly
+            // Otto's entries for this spawn — unless the provider brings its
+            // own `--settings`, which a second one would replace.
+            "claude" => {
+                let own = self.providers.get(&session.provider).is_some_and(|p| {
+                    p.cmd.contains("--settings")
+                        || p.args.iter().any(|a| a.starts_with("--settings"))
+                });
+                if !own && !mcp_json_names.is_empty() {
+                    launch_args.extend(crate::mcp::claude_approve_args(&mcp_json_names));
+                }
+                mcp_json_names
+            }
             _ => mcp_json_names,
         };
         // The enabled user servers this provider was NOT given, with why
