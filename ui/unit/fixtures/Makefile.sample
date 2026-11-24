@@ -1,0 +1,70 @@
+# go_acceptance_tests — build, lint and run the acceptance suite.
+SHELL := /bin/bash
+
+APP_NAME       := go_acceptance_tests
+GIT_COMMIT     := $(shell git rev-parse --short HEAD)
+GIT_BRANCH     ?= $(shell git rev-parse --abbrev-ref HEAD)
+BUILD_TIME     := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+GO_BUILD_FLAGS  = -ldflags "-X main.commit=$(GIT_COMMIT) -X main.branch=$(GIT_BRANCH)"
+TAGS           += integration
+VERSION        != cat VERSION 2>/dev/null || echo dev
+
+export GOFLAGS := -mod=mod
+export CGO_ENABLED = 0
+override ENV ?= staging
+
+include common.mk
+-include local.mk
+
+.PHONY: all build test lint clean docker-build deploy help
+.DEFAULT_GOAL := help
+
+all: lint test build ## Lint, test and build
+
+build: ## Build the binary
+	@echo "Building $(APP_NAME) $(GIT_COMMIT)"
+	go build $(GO_BUILD_FLAGS) -o bin/$(APP_NAME) ./cmd/...
+
+test: build
+	@echo "Running tests on $(ENV)"
+	go test -tags=$(TAGS) ./... \
+		-count=1 \
+		-timeout 10m
+
+lint:
+	golangci-lint run --version $(LINT_VERSION) ./...
+
+docker-build: build
+	docker build \
+		--build-arg COMMIT=$(GIT_COMMIT) \
+		-t $(APP_NAME):$(VERSION) .
+
+ifeq ($(ENV),production)
+DEPLOY_TARGET := prod-cluster
+else ifneq ($(ENV),staging)
+DEPLOY_TARGET := dev-cluster
+else
+DEPLOY_TARGET := staging-cluster
+endif
+
+ifdef CI
+TEST_FLAGS := -race
+endif
+
+define banner
+	@echo "=== $(1) ==="
+endef
+
+deploy: docker-build
+	$(call banner,Deploying to $(DEPLOY_TARGET))
+	-kubectl apply -f k8s/ --context $(DEPLOY_TARGET)
+
+%.o: %.c
+	$(CC) -c $< -o $@
+
+clean:
+	rm -rf bin/ $(wildcard *.out)
+	@for f in $$(ls tmp); do echo $$f; done
+
+help: ## Show this help
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "%-20s %s\n", $$1, $$2}'
