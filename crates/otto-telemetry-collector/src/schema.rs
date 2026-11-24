@@ -9,6 +9,24 @@ pub(crate) async fn ensure(ch: &ClickHouse, c: &TelemetryConfig) -> Result<()> {
     ch.exec("CREATE MATERIALIZED VIEW IF NOT EXISTS otto_telemetry.resource_minutes_mv TO otto_telemetry.resource_minutes AS SELECT toStartOfMinute(TimeUnix) minute, Attributes['otto.process'] process, MetricName metric, maxState(Value) value FROM otto_telemetry.otel_metrics_gauge GROUP BY minute,process,metric").await?;
     ch.exec(&format!("CREATE TABLE IF NOT EXISTS otto_telemetry.spike_minutes (minute DateTime, process LowCardinality(String), calls AggregateFunction(count), cpu AggregateFunction(max, Float64), rss AggregateFunction(max, Float64)) ENGINE=AggregatingMergeTree ORDER BY (process,minute) PARTITION BY toDate(minute) TTL minute + INTERVAL {} DAY",c.logs_days)).await?;
     ch.exec("CREATE MATERIALIZED VIEW IF NOT EXISTS otto_telemetry.spike_minutes_mv TO otto_telemetry.spike_minutes AS SELECT toStartOfMinute(Timestamp) minute, LogAttributes['otto.process'] process,countState() calls,maxState(toFloat64OrZero(LogAttributes['otto.cpu.percent'])) cpu,maxState(toFloat64OrZero(LogAttributes['otto.rss.mb'])) rss FROM otto_telemetry.otel_logs WHERE Body='resource.spike' GROUP BY minute,process").await?;
+    // Page views per module and device class, one row a day, kept 30 days
+    // whatever the raw-trace retention (the sidebar's "used lately" list). No
+    // content: the module is the span's allowlisted component. A fresh table is
+    // seeded once from the raw spans still retained.
+    let fresh = ch
+        .query_rows("SELECT count() n FROM system.tables WHERE database='otto_telemetry' AND name='navigation_days'")
+        .await?
+        .first()
+        .and_then(|r| r["n"].as_u64().or_else(|| r["n"].as_str()?.parse().ok()))
+        == Some(0);
+    ch.exec("CREATE TABLE IF NOT EXISTS otto_telemetry.navigation_days (day Date, module LowCardinality(String), device LowCardinality(String), views UInt64) ENGINE=SummingMergeTree ORDER BY (module,device,day) TTL day + INTERVAL 30 DAY").await?;
+    if fresh {
+        ch.exec(&format!(
+            "INSERT INTO otto_telemetry.navigation_days {NAVIGATION_DAYS}"
+        ))
+        .await?;
+    }
+    ch.exec(&format!("CREATE MATERIALIZED VIEW IF NOT EXISTS otto_telemetry.navigation_days_mv TO otto_telemetry.navigation_days AS {NAVIGATION_DAYS}")).await?;
     for (table, column, days) in [
         ("otel_traces", "Timestamp", c.traces_days),
         ("otel_traces_trace_id_ts", "Start", c.traces_days),
@@ -30,6 +48,14 @@ pub(crate) async fn ensure(ch: &ClickHouse, c: &TelemetryConfig) -> Result<()> {
         ch.exec(&format!("ALTER TABLE otto_telemetry.{table} MODIFY TTL toDateTime({column}) + INTERVAL {days} DAY SETTINGS materialize_ttl_after_modify=0")).await?;
     }
     Ok(())
+}
+/// `ui.navigation` spans rolled up per day, module and device class (a span
+/// without `otto.device` — an older UI — counts as desktop).
+const NAVIGATION_DAYS: &str = "SELECT toDate(Timestamp) day, SpanAttributes['otto.component'] module, if(SpanAttributes['otto.device'] IN ('phone','tablet'), SpanAttributes['otto.device'], 'desktop') device, count() views FROM otto_telemetry.otel_traces WHERE SpanName='ui.navigation' GROUP BY day,module,device";
+/// Navigations per module and device class over the last `days` (1–30).
+pub(crate) fn navigation(days: u32) -> String {
+    let days = days.clamp(1, 30);
+    format!("SELECT module,device,sum(views) count FROM otto_telemetry.navigation_days WHERE day > today()-{days} GROUP BY module,device ORDER BY count DESC LIMIT 1000 SETTINGS max_execution_time=5,max_memory_usage=67108864")
 }
 pub(crate) fn operations(hours: u32) -> String {
     format!("SELECT component,name,countMerge(calls) count,sumMerge(errors) errors,sumMerge(duration) total_ms,maxMerge(maximum) max_ms,quantilesTDigestMerge(0.5,0.95)(quantiles)[1] p50_ms,quantilesTDigestMerge(0.5,0.95)(quantiles)[2] p95_ms,argMaxMerge(trace) trace_id FROM otto_telemetry.operation_minutes WHERE minute >= now()-INTERVAL {hours} HOUR GROUP BY component,name ORDER BY total_ms DESC LIMIT 1000 SETTINGS max_execution_time=5,max_memory_usage=134217728")
