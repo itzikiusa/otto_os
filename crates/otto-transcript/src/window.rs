@@ -130,6 +130,29 @@ pub fn fold_recent<'a>(
     fold_window(provider, path, opts, None, span)
 }
 
+/// The first value `found` yields walking `path`'s windows from the newest
+/// back to the file's start, one window in memory at a time: a lookup of
+/// something an older page showed (an artifact opened after "Load earlier").
+pub fn find_back<T>(
+    provider: Provider,
+    path: &Path,
+    opts: FoldOpts<'_>,
+    mut found: impl FnMut(crate::Folded) -> Option<T>,
+) -> std::io::Result<Option<T>> {
+    let mut before = None;
+    loop {
+        let w = fold_window(provider, path, opts.clone(), before, WINDOW_BYTES)?;
+        let (first, base) = (w.first, w.base);
+        if let Some(t) = found(w.folder.into_folded()) {
+            return Ok(Some(t));
+        }
+        if first == 0 {
+            return Ok(None);
+        }
+        before = Some(base);
+    }
+}
+
 /// A fold of the newest records before a cursor.
 pub struct Window<'a> {
     pub folder: Folder<'a>,

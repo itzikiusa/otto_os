@@ -154,14 +154,37 @@ async fn a_long_session_opens_on_its_recent_turns_and_pages_back() {
 
     // The Outputs panel reads the same transcript: the newest window's
     // artifacts, never a 500 (it answered 500 on a 134 MB session).
-    let (status, arts) = get(
-        &app,
-        &format!("/api/v1/sessions/{}/artifacts", session.id),
-        &token,
-    )
-    .await;
+    let arts_url = format!("/api/v1/sessions/{}/artifacts", session.id);
+    let (status, arts) = get(&app, &arts_url, &token).await;
     assert_eq!(status, 200, "artifacts open: {arts}");
-    assert!(arts.is_array());
+    let file_id = |p: &std::path::Path| {
+        otto_transcript::Artifact::id_for(otto_transcript::ArtifactKind::File, p.to_str().unwrap())
+    };
+    let listed: Vec<&str> = arts
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a["id"].as_str())
+        .collect();
+    assert!(
+        listed.contains(&file_id(&long.late_file).as_str()),
+        "{arts}"
+    );
+    // An artifact of an early turn (paged in by "Load earlier") opens too,
+    // though the newest window does not hold it.
+    for (p, body) in [(&long.late_file, "late"), (&long.early_file, "early")] {
+        let req = Request::builder()
+            .uri(format!("{arts_url}/{}", file_id(p)))
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200, "{}", p.display());
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..], body.as_bytes());
+    }
 
     // What is still refused says so in words with its own status, never 500:
     // a sub-agent transcript holding one record over the 16 MiB record cap.

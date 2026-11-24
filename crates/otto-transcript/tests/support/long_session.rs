@@ -22,6 +22,10 @@ pub struct LongSession {
     pub last_prompt: String,
     /// The tool call of that turn whose result is the 2 MB dump.
     pub big_tool_id: String,
+    /// Files a `Write` produced (on disk beside `path`): one in an early
+    /// exchange, far outside the newest window, and one in the final turn.
+    pub early_file: std::path::PathBuf,
+    pub late_file: std::path::PathBuf,
 }
 
 const SID: &str = "5e55e55e-0000-4000-8000-000000000001";
@@ -39,6 +43,13 @@ pub fn write_long_claude_session(path: &Path, min_bytes: u64, min_records: usize
     let dump = "lorem ipsum dolor sit amet 0123456789 ".repeat(8 * 1024); // ~300 KB
     let small = "ok: line of tool output\\n".repeat(80); // ~2 KB
     let png = "iVBORw0KGgo".repeat(14 * 1024); // ~150 KB of base64
+    let (early_file, late_file) = (
+        path.with_file_name("early.txt"),
+        path.with_file_name("late.txt"),
+    );
+    std::fs::write(&early_file, "early").unwrap();
+    std::fs::write(&late_file, "late").unwrap();
+    let write_input = |p: &Path| format!(r#"{{"file_path":"{}","content":"x"}}"#, p.display());
     let mut n = 0usize;
     let ts = |n: usize, k: usize| {
         format!(
@@ -69,7 +80,9 @@ pub fn write_long_claude_session(path: &Path, min_bytes: u64, min_records: usize
             let rid = format!("req-{n}-{k}");
             let m = meta(n, k + 1);
             let agent = n % 40 == 7 && k == 0;
-            let (name, input) = if agent {
+            let (name, input) = if n == 1 && k == 1 {
+                ("Write", write_input(&early_file))
+            } else if agent {
                 ("Agent", r#"{"description":"scan the module","prompt":"read the module and report","subagent_type":"Explore"}"#.to_string())
             } else {
                 (
@@ -122,7 +135,15 @@ pub fn write_long_claude_session(path: &Path, min_bytes: u64, min_records: usize
             format!("toolu-{n}-r{k}")
         };
         let m = meta(n, k);
-        out.put(format!(r#"{{"type":"assistant","uuid":"a-{n}-r{k}",{m},"requestId":"req-{n}-r{k}","message":{{"id":"msg-{n}-r{k}","role":"assistant","model":"claude-opus-5-5","content":[{{"type":"tool_use","id":"{id}","name":"Read","input":{{"file_path":"/work/repo/src/file_{k}.rs"}}}}],"usage":{{"input_tokens":2,"output_tokens":30,"cache_read_input_tokens":93000}}}}}}"#));
+        let (name, input) = if k == 119 {
+            ("Write", write_input(&late_file))
+        } else {
+            (
+                "Read",
+                format!(r#"{{"file_path":"/work/repo/src/file_{k}.rs"}}"#),
+            )
+        };
+        out.put(format!(r#"{{"type":"assistant","uuid":"a-{n}-r{k}",{m},"requestId":"req-{n}-r{k}","message":{{"id":"msg-{n}-r{k}","role":"assistant","model":"claude-opus-5-5","content":[{{"type":"tool_use","id":"{id}","name":"{name}","input":{input}}}],"usage":{{"input_tokens":2,"output_tokens":30,"cache_read_input_tokens":93000}}}}}}"#));
         let text = if k == 60 {
             dump.repeat(7)
         } else {
@@ -137,6 +158,8 @@ pub fn write_long_claude_session(path: &Path, min_bytes: u64, min_records: usize
         exchanges: n,
         last_prompt,
         big_tool_id,
+        early_file,
+        late_file,
     }
 }
 
