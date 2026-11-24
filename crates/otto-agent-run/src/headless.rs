@@ -82,7 +82,8 @@ pub async fn claude_draft(
 
 /// Run `program args` as one stream-json turn: send `prompt` as the user
 /// message, forward text deltas to `on_text`, return the reply. Dropping the
-/// future kills the CLI (Stop).
+/// future kills the CLI and everything it started (Stop): a login-shell
+/// wrapper that runs a shell function or an EXIT trap doesn't exec into it.
 pub async fn text_turn(
     program: &str,
     args: &[String],
@@ -99,19 +100,28 @@ pub async fn text_turn(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
+        .process_group(0)
         .spawn()
         .map_err(|e| Error::Upstream(format!("couldn’t start the Claude CLI ({program}): {e}")))?;
+    // Declared after `child`, so it drops first: the leader is not reaped
+    // yet, so its pid still names this group.
+    let _group = KillGroup(child.id());
     let (Some(mut stdin), Some(stdout), Some(mut stderr)) =
         (child.stdin.take(), child.stdout.take(), child.stderr.take())
     else {
         return Err(Error::Internal("the Claude CLI has no stdio".into()));
     };
     // Drained alongside stdout: a CLI blocked on a full stderr pipe would
-    // never finish its stdout.
-    let stderr = tokio::spawn(async move {
-        let mut err = Vec::new();
-        let _ = stderr.read_to_end(&mut err).await;
-        String::from_utf8_lossy(&err).into_owned()
+    // never finish its stdout. Only its tail is kept (the error is its last
+    // line); the set aborts the drain when the turn ends.
+    let mut drain = tokio::task::JoinSet::new();
+    drain.spawn(async move {
+        let (mut tail, mut chunk) = (Vec::new(), [0u8; 8192]);
+        while let Ok(n @ 1..) = stderr.read(&mut chunk).await {
+            tail.extend_from_slice(&chunk[..n]);
+            tail.drain(..tail.len().saturating_sub(16 * 1024));
+        }
+        String::from_utf8_lossy(&tail).into_owned()
     });
     let turn = async {
         let user = json!({
@@ -126,7 +136,13 @@ pub async fn text_turn(
         let mut streamed = String::new();
         // Bytes, not `lines()`: one non-UTF-8 byte must not end the read.
         let (mut out, mut buf) = (BufReader::new(stdout), Vec::new());
-        while out.read_until(b'\n', &mut buf).await.is_ok_and(|n| n > 0) {
+        // A line is capped: past it, the rest reads as junk lines and is skipped.
+        while (&mut out)
+            .take(MAX_LINE)
+            .read_until(b'\n', &mut buf)
+            .await
+            .is_ok_and(|n| n > 0)
+        {
             let msg = serde_json::from_str::<Value>(&String::from_utf8_lossy(&buf));
             buf.clear();
             let Ok(msg) = msg else {
@@ -161,7 +177,11 @@ pub async fn text_turn(
                 _ => {}
             }
         }
-        let err = stderr.await.unwrap_or_default();
+        let err = drain
+            .join_next()
+            .await
+            .and_then(|r| r.ok())
+            .unwrap_or_default();
         let why = err
             .lines()
             .rev()
@@ -178,6 +198,21 @@ pub async fn text_turn(
             "Claude didn’t answer within {} s",
             timeout.as_secs()
         ))),
+    }
+}
+
+/// The longest stdout line read whole (a reply line carries the draft).
+const MAX_LINE: u64 = 4 << 20;
+
+/// SIGKILLs the CLI's process group on drop.
+struct KillGroup(Option<u32>);
+
+impl Drop for KillGroup {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            // SAFETY: plain syscall; a group that is already gone is ESRCH.
+            unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
+        }
     }
 }
 
@@ -306,6 +341,68 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"fix: a\n\n- b"}'"#,
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("the CLI (pid {pid}) outlived its dropped turn");
+    }
+
+    /// R1-038: a login-shell wrapper that doesn't exec (a shell function, an
+    /// EXIT trap) leaves the CLI a grandchild; dropping the turn kills it too.
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // a blocking `ps` probe in a test
+    async fn dropping_the_turn_kills_the_clis_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let p = fake(
+            dir.path(),
+            &format!(
+                "trap 'true' EXIT; sleep 30 & echo $! > '{}'; wait",
+                pid_file.display()
+            ),
+        );
+        let turn = text_turn(&p, &[], &[], "x", DRAFT_TIMEOUT, |_| {});
+        let wait_pid = async {
+            loop {
+                if let Some(pid) = std::fs::read_to_string(&pid_file)
+                    .ok()
+                    .filter(|s| s.ends_with('\n'))
+                {
+                    break pid.trim().to_string();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        let pid = tokio::select! {
+            _ = turn => panic!("the turn ended on its own"),
+            pid = wait_pid => pid,
+        };
+        for _ in 0..200 {
+            let out = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid])
+                .output()
+                .unwrap();
+            let stat = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if stat.is_empty() || stat.starts_with('Z') {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid])
+            .status();
+        panic!("the CLI's child (pid {pid}) outlived its dropped turn");
+    }
+
+    /// R2-009: the stderr drain keeps only the tail, which still ends with the
+    /// CLI's last line.
+    #[tokio::test]
+    async fn a_dead_clis_error_is_the_tail_of_a_huge_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = fake(
+            dir.path(),
+            "head -c 300000 /dev/zero | tr '\\0' x >&2; echo >&2; echo 'error: last words' >&2; exit 1",
+        );
+        let e = text_turn(&p, &[], &[], "x", Duration::from_secs(5), |_| {})
+            .await
+            .unwrap_err();
+        assert!(e.to_string().ends_with("error: last words"), "{e}");
     }
 
     /// R1-038: a CLI that writes more than a pipe holds (64 KiB) to stderr
