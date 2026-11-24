@@ -3,6 +3,7 @@ import { readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { request } from '@playwright/test';
 import type { TelemetryConfig, TelemetryStatus } from '../src/lib/api/types';
+import { killHoldersFor } from './holders';
 
 // Kill the throwaway daemon launched in global-setup and remove its temp data
 // dir. Best-effort: never throw from teardown.
@@ -44,6 +45,7 @@ export default async function globalTeardown(): Promise<void> {
     }
     if (meta.dataDir) {
       killClickhouseFor(meta.dataDir);
+      killHoldersFor(meta.dataDir);
       try {
         rmSync(meta.dataDir, { recursive: true, force: true });
         rmSync(`${meta.dataDir}-scratches`, { recursive: true, force: true });

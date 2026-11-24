@@ -1,5 +1,6 @@
 import { request, type FullConfig } from '@playwright/test';
 import { execFileSync, execSync, spawn } from 'node:child_process';
+import { orphanHolders } from './holders';
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -44,6 +45,12 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
   }
   if (!existsSync(OTTOD)) {
     throw new Error(`[e2e] ottod binary not found at ${OTTOD} (set OTTO_E2E_BIN or install Otto)`);
+  }
+  // Holders an earlier run left behind (its teardown never ran): say so.
+  const leftovers = orphanHolders(OTTOD);
+  if (leftovers.length) {
+    // eslint-disable-next-line no-console
+    console.warn(`[e2e] WARNING: ${leftovers.length} orphaned runtime-holder process(es) from an earlier run (pids ${leftovers.map((p) => p.pid).join(', ')}). They run agent CLIs until killed.`);
   }
   const dataDir = mkdtempSync(join(tmpdir(), 'otto-e2e-'));
   // Harmless stand-ins for the agent CLIs, first on the test daemon's PATH.
