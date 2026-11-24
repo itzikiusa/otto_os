@@ -24,7 +24,8 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import WipDiffPane from './wip/WipDiffPane.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { repoDiffFileLoader } from '../../lib/diff/diff-load';
   import Icon from '../../lib/components/Icon.svelte';
@@ -328,6 +329,8 @@
   });
   /** Over-cap files ("Load anyway") re-fetch through the same target. */
   const loadWipFile = $derived(repoDiffFileLoader(repoId, selTarget));
+  // A file's diff (and its phone sheet) loads with the first file opened.
+  const DiffPane = lazyComponent(() => import('./wip/WipDiffPane.svelte'));
   /** A hunk staged / unstaged / discarded from the diff. */
   function onapplied(r: StageHunkResp): void {
     onstatus(r.status);
@@ -934,9 +937,12 @@
          changeset). Narrow: its own region under the list. Wide (container
          query): the column beside the list and composer. -->
     {#if selectedPath !== null}
-      <WipDiffPane path={selectedPath} id={diffId} both={partial.has(selectedPath)} bind:stagedView {diff} loading={diffLoading} error={diffError} {repoId}
-        loadFile={loadWipFile} wip={selTarget === 'working' || virtualAll ? undefined : { target: selTarget, onapplied }} sheet={viewport.isPhone}
-        onretry={() => diffRetry++} onclose={() => (selectedPath = null)} />
+      {@const path = selectedPath}
+      <LazyMount lazy={DiffPane} what="the diff" variant="panel">{#snippet children(Pane)}
+        <Pane {path} id={diffId} both={partial.has(path)} bind:stagedView {diff} loading={diffLoading} error={diffError} {repoId}
+          loadFile={loadWipFile} wip={selTarget === 'working' || virtualAll ? undefined : { target: selTarget, onapplied }} sheet={viewport.isPhone}
+          onretry={() => diffRetry++} onclose={() => (selectedPath = null)} />
+      {/snippet}</LazyMount>
     {/if}
 
   </div>
