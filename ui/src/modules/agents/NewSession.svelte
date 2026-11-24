@@ -479,7 +479,7 @@
   </div>
   <div class="field">
     <div id="ns-provider-label" class="provider-label">
-      Provider{#if kind === 'terminal'} <span class="dim">· use − / + on a card to start several at once</span>{/if}
+      Provider{#if kind === 'terminal'}{' '}<span class="dim">· use − / + on a card to start several at once</span>{/if}
     </div>
     <div
       bind:this={gridEl}
