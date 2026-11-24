@@ -5,8 +5,8 @@
   // clickable badges so user bubbles stay clean in every surface.
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   import { REVIEW_HEADER, sentReview } from './reviewNotes';
-  import type { Snippet } from 'svelte';
-  import { SvelteSet } from 'svelte/reactivity';
+  import { setContext, type Snippet } from 'svelte';
+  import { SvelteMap, SvelteSet } from 'svelte/reactivity';
   import { copyWithToast } from '../../../lib/clipboard';
   import type { ApprovalDecision, ProviderTurn, RuntimeRequest, TurnItem } from '../../../lib/api/types';
   import Icon, { type IconName } from '../../../lib/components/Icon.svelte';
@@ -42,7 +42,7 @@
   } from './timeline';
   import RuntimeTurnChanges from './RuntimeTurnChanges.svelte';
   import { turnChangesByTurn, type FileDelta } from './turnChanges';
-  import { earlierSteps, formatDuration, shouldFold, visibleTools } from './workLog';
+  import { earlierSteps, formatDuration, ROW_CHOICES, shouldFold, stretchDone, visibleTools } from './workLog';
   import { threadPrefs } from './threadPrefs.svelte';
   import { turnUsageText } from './turnUsage';
   import { handoffSummary, handoffTitle } from './providerSwitch';
@@ -97,6 +97,11 @@
     }
     return null;
   });
+  /** What the person opened or closed (ROW_CHOICES): their click wins over
+   *  every automatic fold for as long as this timeline is on screen. */
+  const choices = setContext(ROW_CHOICES, new SvelteMap<string, boolean>());
+  const keptOpen = (p: WorkPart): boolean =>
+    p.kind === 'item' ? choices.get(p.entry.item.id) === true : choices.get(p.id) === true || p.entries.some((e) => choices.get(e.item.id) === true);
   /** "From …" rows the reader opened past their first three lines. */
   const openedFrom = new SvelteSet<string>();
   const longBody = (t: string): boolean => t.length > 280 || t.split('\n', 5).length > 3;
@@ -347,8 +352,8 @@
     </div>
   {:else if row.kind === 'work'}
     {@const flat = workRowEntries(row)}
-    {@const fold = shouldFold(flat, turns, pendingIds, turnById)}
-    {@const earlier = fold ? 0 : earlierSteps(row.parts, pendingIds)}
+    {@const fold = shouldFold(flat, turns, pendingIds, turnById) && !row.parts.some(keptOpen)}
+    {@const earlier = fold ? 0 : earlierSteps(row.parts, pendingIds, !stretchDone(flat, turns, turnById), keptOpen)}
     <div class="rt-work">
       <RuntimeWorkFold id={row.id} entries={flat} {fold} tokens={tokensByRow.get(row.id) ?? ''}>
         {#if earlier}

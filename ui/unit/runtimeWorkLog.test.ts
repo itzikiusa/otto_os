@@ -137,12 +137,15 @@ test('tool-call visibility: hide successful keeps failures, gated and running ca
 test('a running stretch folds its finished steps before the live one; a failure stops the fold', () => {
   const part = (item: TurnItem) => ({ kind: 'item' as const, entry: { item } });
   const done = [cmd('a', 0, 1), cmd('b', 1, 2), cmd('c', 2, 3)].map(part);
-  assert.equal(wl.earlierSteps([...done, part(cmd('live', 3, null))], none), 3);
-  assert.equal(wl.earlierSteps(done, none), 0, 'nothing runs: the finished fold handles it');
-  assert.equal(wl.earlierSteps([done[0], part(cmd('live', 3, null))], none), 0, 'one earlier step stays as is');
+  assert.equal(wl.earlierSteps([...done, part(cmd('live', 3, null))], none, true), 3);
+  assert.equal(wl.earlierSteps(done, none, false), 0, 'the stretch is over: the finished fold handles it');
+  assert.equal(wl.earlierSteps(done, none, true), 2, 'a pause between steps (nothing live, turn running) keeps the fold');
+  assert.equal(wl.earlierSteps([done[0], part(cmd('live', 3, null))], none, true), 0, 'one earlier step stays as is');
   const bad = part(cmd('bad', 1, 2, { status: 'failed', error: 'Exit code 1' }));
-  assert.equal(wl.earlierSteps([done[0], done[1], bad, done[2], part(cmd('live', 3, null))], none), 2);
-  assert.equal(wl.earlierSteps([bad, done[0], done[1], part(cmd('live', 3, null))], none), 0);
+  assert.equal(wl.earlierSteps([done[0], done[1], bad, done[2], part(cmd('live', 3, null))], none, true), 2);
+  assert.equal(wl.earlierSteps([bad, done[0], done[1], part(cmd('live', 3, null))], none, true), 0);
+  const opened = (p: (typeof done)[number]) => p === done[2];
+  assert.equal(wl.earlierSteps([...done, part(cmd('live', 3, null))], none, true, opened as never), 2, 'a step the person opened stays in sight');
 });
 
 test('a short screen (or the keyboard up) folds every quiet notice; urgent ones still show', () => {

@@ -4,10 +4,11 @@
   // the live call instead — "npm test +2 more" (workLog.ts liveSummary).
   // Ported from T3 Code (MIT, Copyright (c) 2026 T3 Tools Inc.):
   // apps/web/src/components/chat/TimelineWorkGroupRows.tsx (the work-toggle row).
-  import type { Snippet } from 'svelte';
+  import { getContext, type Snippet } from 'svelte';
+  import { SvelteMap } from 'svelte/reactivity';
   import Icon from '../../../lib/components/Icon.svelte';
   import { groupSummary, type WorkEntry } from './timeline';
-  import { liveSummary } from './workLog';
+  import { liveSummary, ROW_CHOICES } from './workLog';
 
   interface Props {
     id: string;
@@ -20,8 +21,9 @@
   }
   let { id, entries, open, cwd = null, children }: Props = $props();
 
-  let toggledOpen = $state(false);
-  const expanded = $derived(open || toggledOpen);
+  // The person's choice lives with the timeline (ROW_CHOICES): it survives a remount.
+  const choices: SvelteMap<string, boolean> = getContext(ROW_CHOICES) ?? new SvelteMap();
+  const expanded = $derived(open || choices.get(id) === true);
   const live = $derived(entries.filter((e) => e.item.status === 'running' || e.item.status === 'pending').length);
   const failed = $derived(entries.some((e) => e.item.status === 'failed'));
 </script>
@@ -31,7 +33,7 @@
   open={expanded || undefined}
   ontoggle={(e) => {
     const nowOpen = (e.currentTarget as HTMLDetailsElement).open;
-    if (!open) toggledOpen = nowOpen;
+    if (!open && nowOpen !== (choices.get(id) === true)) choices.set(id, nowOpen);
   }}
   data-testid="runtime-group-{id}"
 >

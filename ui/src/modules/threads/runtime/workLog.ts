@@ -165,21 +165,35 @@ export function visibleTools(rows: readonly TimelineRow[], v: ToolVisibility): T
   return out;
 }
 
-/** While a stretch runs, how many of its leading steps fold into "N
- *  earlier steps" (T3's live work log): the finished ones before the live
- *  step, up to the first that needs a person (a failure, an approval) —
- *  that one and everything after it stays in sight. Fewer than two: none. */
-export function earlierSteps(parts: readonly WorkPart[], pendingRequestIds: ReadonlySet<string>): number {
+/** While a stretch runs (`running`: !stretchDone — also in the pause
+ *  between two steps, so the fold never pops open and shut on its own), how
+ *  many of its leading steps fold into "N earlier steps" (T3's live work
+ *  log): the finished ones before the live (or latest) step, up to the first
+ *  that needs a person (a failure, an approval) or that the person opened
+ *  (`kept`) — that one and everything after it stays in sight. Fewer than
+ *  two: none. */
+export function earlierSteps(
+  parts: readonly WorkPart[],
+  pendingRequestIds: ReadonlySet<string>,
+  running: boolean,
+  kept: (p: WorkPart) => boolean = () => false,
+): number {
   const entriesOf = (p: WorkPart): WorkEntry[] => (p.kind === 'item' ? [p.entry] : p.entries);
-  if (!parts.some((p) => entriesOf(p).some((e) => isLive(e.item)))) return 0;
+  if (!running) return 0;
   let n = 0;
   while (n < parts.length - 1) {
     const es = entriesOf(parts[n]);
-    if (es.some((e) => isLive(e.item)) || needsEyes(es, pendingRequestIds) || !es.every((e) => FOLDABLE.has(e.item.type))) break;
+    if (es.some((e) => isLive(e.item)) || needsEyes(es, pendingRequestIds) || !es.every((e) => FOLDABLE.has(e.item.type)) || kept(parts[n])) break;
     n++;
   }
   return n >= 2 ? n : 0;
 }
+
+/** The context key of a timeline's open/closed choices (RuntimeTimelineRows
+ *  sets a SvelteMap<id, open>): a row or group the person toggled keeps it
+ *  for as long as the thread is on screen, even when it remounts (folding
+ *  into "N earlier steps" or "Worked for …"). Untouched rows have no entry. */
+export const ROW_CHOICES = Symbol('runtime row choices');
 
 /** A running group's line: its live call by name, then "+N more". Null
  *  when nothing in it runs (the group keeps its summary sentence). */
