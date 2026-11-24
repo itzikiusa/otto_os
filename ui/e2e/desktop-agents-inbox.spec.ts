@@ -129,7 +129,32 @@ test('per-session usage is read only when someone looks (perf A7a)', async ({ pa
   }
   await page.waitForLoadState('networkidle');
   expect(usageReads).toEqual([]);
-  // Looking at the details reads once.
-  await page.locator(`[data-pane-key][data-session="${ids.Seedorf}"]`).first().getByTestId('pane-details').click();
+  // Looking at the details (⋯) reads once.
+  await page.locator(`[data-pane-key][data-session="${ids.Seedorf}"]`).first().locator('button[title="More…"]').click();
   await expect.poll(() => usageReads.length).toBe(1);
+});
+
+test('Terminal ⇄ Chat: an agent pane shows its conversation and remembers the choice (A2)', async ({ page }) => {
+  const r = await ctx.post(`${base}/api/v1/workspaces/${wsId}/sessions`, {
+    data: {
+      kind: 'agent', provider: 'shell', title: 'Shevchenko', cwd: '/tmp',
+      meta: { origin: 'e2e', nested_provider: 'claude', e2e_transcript_path: `${process.cwd()}/../crates/otto-transcript/fixtures/claude/01-basic-tools.jsonl` },
+    },
+  });
+  const id = (await r.json()).id as string;
+  await page.goto(`/#/agents/${id}`);
+  const pane = page.locator(`[data-pane-key][data-session="${id}"]`).first();
+  await expect(pane.locator('.term-host')).toBeVisible({ timeout: 30_000 });
+  await pane.getByTestId('pane-view').getByRole('button', { name: 'Chat' }).click();
+  await expect(pane.locator('.pane-body[data-view="chat"]')).toBeVisible();
+  await expect(pane.locator('.term-host')).toHaveCount(0);
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/agents-pane-chat-1440-light.png` });
+  await page.reload();
+  await expect(page.locator(`[data-pane-key][data-session="${id}"] .pane-body[data-view="chat"]`).first()).toBeVisible({ timeout: 20_000 });
+  await page.locator(`[data-pane-key][data-session="${id}"]`).first().getByTestId('pane-view').getByRole('button', { name: 'Terminal' }).click();
+  await expect(page.locator(`[data-pane-key][data-session="${id}"] .term-host`).first()).toBeVisible({ timeout: 20_000 });
+  // A plain shell has no chat.
+  await page.goto(`/#/agents/${ids.Pirlo}`);
+  await expect(page.locator(`[data-pane-key][data-session="${ids.Pirlo}"] .term-host`).first()).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator(`[data-pane-key][data-session="${ids.Pirlo}"]`).first().getByTestId('pane-view')).toHaveCount(0);
 });

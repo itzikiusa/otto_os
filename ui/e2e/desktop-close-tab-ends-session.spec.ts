@@ -32,6 +32,11 @@ async function seedSessions(): Promise<void> {
     if (!r.ok()) throw new Error(`seed ${title} → ${r.status()} ${await r.text()}`);
     idByTitle[title] = (await r.json()).id as string;
   }
+  // openTab's companion: the tab strip shows from the second tab on.
+  const c = await ctx.post(`${base}/api/v1/workspaces/${wsId}/sessions`, {
+    data: { kind: 'agent', provider: 'shell', title: 'Ancelotti', cwd: '/tmp', meta: { origin: 'e2e' } },
+  });
+  idByTitle.Ancelotti = (await c.json()).id as string;
 }
 
 async function isArchived(id: string): Promise<boolean> {
@@ -63,10 +68,17 @@ test.afterEach(async () => {
   await ctx?.dispose();
 });
 
-/** Open a session from the sidebar and return its tab-bar tab. */
+/** Open a session from the inbox and return its tab-bar tab. The strip shows
+ *  from two tabs on, so a lone tab gets a companion (Ancelotti) beside it. */
 async function openTab(page: import('@playwright/test').Page, title: string) {
   // By id: earlier tests in this worker leave rows with the same titles.
-  await page.locator(idByTitle[title] ? `[data-testid="agents-row-${idByTitle[title]}"] .tr-main` : `.ai-row[data-workspace="${wsId}"] .tr-main`).filter({ hasText: title }).first().click();
+  const open = (t: string) => page.locator(`[data-testid="agents-row-${idByTitle[t]}"] .tr-main`).click();
+  await open(title);
+  await expect(page.locator(`[data-pane-key][data-session="${idByTitle[title]}"]`).first()).toBeVisible({ timeout: 10_000 });
+  if ((await page.locator('.tab').count()) === 0) {
+    await open('Ancelotti');
+    await open(title);
+  }
   const tab = page.locator('.tab', { hasText: title });
   await expect(tab).toBeVisible({ timeout: 10_000 });
   return tab;
@@ -181,8 +193,9 @@ test('"Always archive" pref: Close others still confirms once, naming the count'
   const tab = page.locator('.tab', { hasText: 'Maldini' });
   await tab.click({ button: 'right' });
   await page.locator('.ctx-item', { hasText: 'Close others' }).click();
-  await expect(page.locator('.cf-msg')).toContainText('archives 2 sessions');
-  await page.getByRole('dialog').getByRole('button', { name: 'Archive 2 sessions' }).click();
+  // Nesta, Gattuso and openTab's companion (Ancelotti, opened beside Kaka).
+  await expect(page.locator('.cf-msg')).toContainText('archives 3 sessions');
+  await page.getByRole('dialog').getByRole('button', { name: 'Archive 3 sessions' }).click();
   await expect.poll(() => isArchived(idByTitle.Nesta), { timeout: 15_000 }).toBe(true);
   await expect.poll(() => isArchived(idByTitle.Gattuso), { timeout: 15_000 }).toBe(true);
   expect(await isArchived(idByTitle.Maldini)).toBe(false);

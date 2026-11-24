@@ -78,15 +78,14 @@ async function expectHeadersFit(page: Page): Promise<void> {
 /** Only what is actually rendered — tiers hide controls with `display: none`. */
 const visibleHeaderButtons = (page: Page) => page.locator('.pane-head button:visible');
 
-test('minimal panes keep dot + title + ⋯ and every button in the viewport', async ({ page }) => {
+test('minimal panes keep word + title + ⋯ and every button in the viewport', async ({ page }) => {
   test.slow();
   await columnsUntil(page, 400);
   const n = await page.locator('[data-pane-key]').count();
   await expect(page.locator('.pane-head[data-tier="minimal"]')).toHaveCount(n);
 
-  // A session pane is always its terminal: no Terminal · Chat switch at all.
-  await expect(page.getByRole('tablist', { name: 'Session view' })).toHaveCount(0);
-  await expect(page.locator('[data-view-toggle]')).toHaveCount(0);
+  // A plain shell has no Terminal | Chat switch.
+  await expect(page.getByTestId('pane-view')).toHaveCount(0);
   await expect(page.locator('button[title="More…"]:visible')).toHaveCount(n);
   // The title stays readable — it is the one thing that gets the space.
   const titleW = await page.locator('.pane-title').first().evaluate((el) => el.getBoundingClientRect().width);
@@ -99,7 +98,9 @@ test('minimal panes keep dot + title + ⋯ and every button in the viewport', as
   await expectFullyInViewport(page, menu, 'pane overflow menu');
   await expect(menu.getByRole('menuitem', { name: 'Restart session' })).toBeVisible();
   await expect(menu.getByRole('menuitem', { name: 'Close session' })).toBeVisible();
-  await expect(menu.getByRole('menuitem', { name: /^Agent: shell/ })).toBeDisabled();
+  await menu.getByRole('menuitem', { name: 'Details' }).hover();
+  await expect(page.getByRole('menuitem', { name: /^Agent: shell/ })).toBeDisabled();
+  await page.keyboard.press('Escape');
   await page.keyboard.press('Escape');
 
   // Nothing in any header is clipped or off-screen.

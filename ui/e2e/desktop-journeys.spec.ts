@@ -41,9 +41,10 @@ async function openShareFor(page: Page, title: string): Promise<void> {
   expect(r.ok()).toBeTruthy();
   const id = ((await r.json()) as { id: string }).id;
   await page.goto(`/#/agents/${id}`);
-  const tab = page.locator('.tab', { hasText: title });
-  await expect(tab).toBeVisible({ timeout: 15_000 });
-  await tab.click({ button: 'right' });
+  // One tab shows no strip: Share from the pane's ⋯.
+  const pane = page.locator(`[data-pane-key][data-session="${id}"]`).first();
+  await expect(pane).toBeVisible({ timeout: 15_000 });
+  await pane.locator('button[title="More…"]').click();
   await page.locator('.ctx-item', { hasText: 'Share…' }).click();
   await expect(page.getByRole('button', { name: 'Generate link' })).toBeVisible({ timeout: 10_000 });
 }

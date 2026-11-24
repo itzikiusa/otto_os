@@ -41,9 +41,11 @@ test.afterEach(async () => {
   await ctx?.dispose();
 });
 
+/** Open a session from the inbox. The tab strip shows from the second tab on. */
 async function openTab(page: import('@playwright/test').Page, title: string) {
   await page.locator('[data-testid^="agents-row-"] .tr-main', { hasText: title }).first().click();
   const tab = page.locator('.tab', { hasText: title });
+  if ((await page.locator('[data-pane-key]').count()) > 0 && (await page.locator('.tab').count()) === 0) return tab;
   await expect(tab).toBeVisible({ timeout: 10_000 });
   return tab;
 }
