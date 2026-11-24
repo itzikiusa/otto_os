@@ -158,7 +158,7 @@
       onprovider?.(p);
     }
     // Drop an effort the new pick can't take BEFORE the model lands: a host
-    // that acts on `onmodel` at once (Ask another agent adds its chip there)
+    // that acts on `onmodel` at once (Delegate to… adds its chip there)
     // must not send the previous provider's level.
     if (effort !== null && oneffort) {
       const nextEfforts = supportsEffortSelection(p, meta) ? effortsForModel(p, id, meta) : [];

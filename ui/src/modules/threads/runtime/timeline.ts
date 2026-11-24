@@ -27,6 +27,8 @@ export interface PendingApproval {
   kind: RequestKind;
   prompt: string | null;
   reason: string | null;
+  /** `prompt` folds under "Details" (an app's request: the dock's headline already says what it wants). */
+  folded?: boolean;
   options: ApprovalOption[];
   /** False once the provider process is gone (`not_resumable`). */
   canRespond: boolean;
@@ -248,7 +250,7 @@ export function mcpToolName(name: string): { server: string; tool: string } | nu
     /^mcp__([^_]+(?:_[^_]+)*?)__(.+)$/.exec(name) ??
     /^([A-Za-z0-9-]+)__([A-Za-z0-9_-]+)$/.exec(name) ??
     // Not a file name (`README.md` is an ACP tool title, not a server).
-    (/\.(?:md|txt|json|[cm]?[jt]sx?|rs|py|go|toml|ya?ml|lock|html?|css|sh|svelte|java|rb|sql|csv|log|png|jpe?g|pdf)$/i.test(name)
+    (/\.(?:md|txt|json|[cm]?[jt]sx?|rs|py|go|toml|ya?ml|lock|html?|s?css|sh|svelte|vue|java|kt|swift|gradle|properties|xml|php|cs|c|h|cpp|rb|sql|csv|log|png|jpe?g|pdf)$/i.test(name)
       ? null
       : /^([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/.exec(name)) ??
     /^(?:Run )?mcp_([A-Za-z0-9-]+)_([A-Za-z0-9_-]+)$/.exec(name);

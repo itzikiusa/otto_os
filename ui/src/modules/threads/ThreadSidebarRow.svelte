@@ -25,7 +25,7 @@
   import ProjectBadge from './ProjectBadge.svelte';
   import { councilOf } from './runtime/council';
   import { inboxClass, statusWord, subagentWord } from './threadInbox';
-  import { childRollup } from './runtime/childThreads';
+  import { childRollup, familyCountLabel } from './runtime/childThreads';
   import { inboxLive } from './threadInbox.svelte';
   import { threadMeta } from './threadMeta.svelte';
   import { threadRepos } from './threadRepos.svelte';
@@ -141,16 +141,16 @@
         <span class="tr-proj ellipsis" dir="auto">{project}</span>
         {#if badge}<span class="tr-badge tr-badge-{badge.kind} ellipsis" title={badge.title} data-testid="thread-badge-{s.id}">{badge.label}</span>{/if}
         {#if family?.detached}<span class="tr-badge" title="The thread that started it is closed or archived" data-testid="thread-detached-{s.id}">detached</span>{/if}
-        <span class="tr-status {tone}" data-testid="thread-status-{s.id}">{word ?? rel(s.last_active_at)}</span>
+        <span class="tr-status {tone}" dir="auto" data-testid="thread-status-{s.id}">{word ?? rel(s.last_active_at)}</span>
       </span>
     {/if}
     <span class="tr-line tr-l2">
       <span class="tr-title ellipsis" dir="auto">{label}</span>
-      {#if kids.length > 0}<span class="tr-kids" data-testid="thread-family-count-{s.id}">{kids.length} {kids.length === 1 ? 'subagent' : 'subagents'}</span>{/if}
+      {#if kids.length > 0}<span class="tr-kids" dir="auto" data-testid="thread-family-count-{s.id}">{familyCountLabel(kids.map((id) => !!councilOf(runtimeThreads.get(id))))}</span>{/if}
     </span>
     <span class="tr-line tr-l3">
       {#if child}
-        <span class="tr-status {tone}" data-testid="thread-status-{s.id}">{word ?? rel(s.last_active_at)}</span>
+        <span class="tr-status {tone}" dir="auto" data-testid="thread-status-{s.id}">{word ?? rel(s.last_active_at)}</span>
       {:else if branch}
         <Icon name={worktreeBranch ? 'worktree' : 'branch'} size={12} />
         <span class="tr-branch ellipsis" dir="ltr" data-worktree={worktreeBranch ? '' : undefined}>{branch}</span>

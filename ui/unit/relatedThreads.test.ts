@@ -21,7 +21,7 @@ test('related threads: parent first, each thread once, closed linked ones left o
 test('related status words and tones', () => {
   assert.deepEqual(relatedStatus('working'), { tone: 'live', text: 'Working' });
   assert.deepEqual(relatedStatus('awaiting_permission'), { tone: 'ask', text: 'Needs you' });
-  assert.deepEqual(relatedStatus('idle'), { tone: 'idle', text: 'Idle' });
+  assert.deepEqual(relatedStatus('idle'), { tone: 'idle', text: 'Done' });
   assert.deepEqual(relatedStatus('dormant'), { tone: 'off', text: 'Dormant' });
 });
 

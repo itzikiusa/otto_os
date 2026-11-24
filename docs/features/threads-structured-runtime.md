@@ -855,7 +855,7 @@ Otto takes the cheapest correct path per provider:
 | Pi | restart with `--session <id>` | the RPC's thinking level | images |
 
 An effort the agent does not take is **dropped with a notice** ("… this turn
-runs at its default effort"), never a refused prompt: an "Ask another agent"
+runs at its default effort"), never a refused prompt: a "Delegate to…"
 create carrying the previous provider's level still starts every child.
 
 When a restart cannot reload the conversation (the agent has no

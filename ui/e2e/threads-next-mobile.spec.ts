@@ -148,11 +148,14 @@ test('phone pending question survives reconnect and returns typed answers', asyn
   await page.reload();
   const card = thread.getByTestId('runtime-question-card');
   await expect(card).toBeVisible({ timeout: 30_000 });
-  await expect(thread.getByTestId('runtime-composer')).toHaveAttribute('placeholder', 'Answer the question above');
+  await expect(thread.getByTestId('runtime-composer')).toHaveAttribute('placeholder', 'Answer above, or type to send a message instead');
   await expect(thread.getByTestId('runtime-working')).toHaveCount(0);
   await card.getByLabel('Careful', { exact: false }).check();
   await card.getByLabel('Your answer').fill('Keep the public API unchanged');
   await expectNoHorizontalOverflow(page);
+  // The form gets the room above the one-row composer: no inner scroll on the phone.
+  const dockBox = thread.getByTestId('runtime-attention');
+  expect(await dockBox.evaluate((el) => el.scrollHeight <= el.clientHeight + 1)).toBe(true);
   await page.screenshot({ path: info.outputPath('question-phone-light.png'), animations: 'disabled' });
   await page.emulateMedia({ colorScheme: 'dark' });
   await page.screenshot({ path: info.outputPath('question-phone-dark.png'), animations: 'disabled' });

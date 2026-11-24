@@ -460,11 +460,8 @@ export function composerPlaceholderText(
   steer = false,
 ): string {
   if (closed) return 'Send a message to reopen this thread';
-  if (approvals.size > 0) {
-    return Array.from(approvals.values()).some((r) => r.kind === 'question')
-      ? 'Answer the question above'
-      : 'Waiting for your approval above';
-  }
+  // The dock above is the one place to answer; typing here still sends.
+  if (approvals.size > 0) return 'Answer above, or type to send a message instead';
   if (plan) return 'Plan mode: the agent researches and proposes, and changes nothing. ⇧⇥ leaves Plan';
   if (running) return steer ? 'Steer: the agent reads this at its next step' : 'Queue a follow-up for when this turn ends';
   return agentChat ? `Message ${agentChat}…` : 'Ask anything. @ files or agents, / commands';
