@@ -66,7 +66,7 @@ test('old-side thread renders once and a deleted-row comment posts side old', as
     void route.fulfill({ json: c });
   });
   await page.goto(`/#/git/${repoId}/pr/1`);
-  await page.getByRole('tab', { name: 'Code', exact: true }).click();
+  await page.getByRole('tab', { name: 'Files', exact: true }).click();
   const diff = page.locator('.prd-code');
   await expect(diff.getByText('Why drop this line?')).toHaveCount(1);
   // The outdated thread is a file-level comment with a chip.

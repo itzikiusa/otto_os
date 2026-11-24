@@ -45,7 +45,7 @@ test('Changes since your review: offered after a push, shows only the range', as
   });
   await page.goto('/#/git/rep_otto/pr/51');
   await expect(page.locator('.prd')).toHaveAttribute('data-diff-head', /^c7e57a11/, { timeout: 15_000 });
-  await page.getByRole('tab', { name: 'Code', exact: true }).click();
+  await page.getByRole('tab', { name: 'Files', exact: true }).click();
   const since = page.getByTestId('pr-since-review');
   await expect(since).toBeVisible();
   await since.click();
@@ -71,7 +71,7 @@ test('approving records the head you reviewed at; nothing is offered until a pus
   await expect
     .poll(() => page.evaluate(() => localStorage.getItem('otto_pr_reviewed_head:rep_otto#51')))
     .toMatch(/^c1fac680/);
-  await page.getByRole('tab', { name: 'Code', exact: true }).click();
+  await page.getByRole('tab', { name: 'Files', exact: true }).click();
   await expect(page.getByTestId('pr-since-review')).toHaveCount(0);
 });
 
@@ -100,7 +100,7 @@ test('Review requested from you lists only PRs that ask you, with its own empty 
 test('Edit reviewers asks first, naming who is added and who is removed', async ({ page }) => {
   await page.goto('/#/git/rep_otto/pr/51');
   await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
-  const side = page.getByRole('complementary', { name: 'Pull request details' });
+  const side = page.getByRole('region', { name: 'Pull request details' });
   await expect(side.getByText('maya')).toBeVisible();
   await side.getByTestId('pr-reviewers-edit').click();
 
@@ -125,7 +125,7 @@ test('Edit reviewers asks first, naming who is added and who is removed', async 
 test('Edit reviewers: cancelling the confirm sends nothing', async ({ page }) => {
   await page.goto('/#/git/rep_otto/pr/51');
   await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
-  const side = page.getByRole('complementary', { name: 'Pull request details' });
+  const side = page.getByRole('region', { name: 'Pull request details' });
   await side.getByTestId('pr-reviewers-edit').click();
   const sheet = page.getByRole('dialog', { name: 'Reviewers of #51' });
   await sheet.getByRole('button', { name: 'Remove maya' }).click();
@@ -137,5 +137,5 @@ test('Edit reviewers: cancelling the confirm sends nothing', async ({ page }) =>
   await expect(sheet.getByRole('button', { name: 'Keep maya' })).toBeVisible();
   await sheet.getByRole('button', { name: 'Cancel' }).click();
   await page.reload();
-  await expect(page.getByRole('complementary', { name: 'Pull request details' }).getByText('maya')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('region', { name: 'Pull request details' }).getByText('maya')).toBeVisible({ timeout: 15_000 });
 });

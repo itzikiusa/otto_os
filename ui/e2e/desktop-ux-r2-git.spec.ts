@@ -293,11 +293,12 @@ for (const scenario of [
     await expect(page.locator('.prd-title')).toContainText('PR 1:');
     await expectNoHorizontalOverflow(page);
     await page.screenshot({ path: testInfo.outputPath('pr-summary.png'), fullPage: true });
-    await page.getByRole('tab', { name: 'Code', exact: true }).click();
+    await page.getByRole('tab', { name: 'Files', exact: true }).click();
     await expect(page.locator('.diff-root')).toBeVisible();
     await expectNoHorizontalOverflow(page);
     await page.screenshot({ path: testInfo.outputPath('pr-files.png'), fullPage: true });
-    await page.getByRole('tab', { name: 'AI review', exact: true }).click();
+    await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
+  await page.getByRole('button', { name: 'AI review', exact: true }).click();
     await expect(page.locator('.rp-comment')).toBeVisible();
     await page.getByTestId('rp-post-comment').scrollIntoViewIfNeeded();
     await expectFullyInViewport(page, page.getByTestId('rp-post-comment'));
@@ -336,10 +337,11 @@ test('PR files and review code keep LTR gutters in an RTL interface', async ({ p
   await prFixtures(page);
   await page.goto(`/#/git/${repoId}/pr/1`);
   await page.evaluate(() => { document.documentElement.dir = 'rtl'; });
-  await page.getByRole('tab', { name: 'Code', exact: true }).click();
+  await page.getByRole('tab', { name: 'Files', exact: true }).click();
   await expect(page.locator('.dtable')).toHaveCSS('direction', 'ltr');
   await expect(page.locator('.hunk-header')).toHaveCSS('direction', 'ltr');
-  await page.getByRole('tab', { name: 'AI review', exact: true }).click();
+  await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
+  await page.getByRole('button', { name: 'AI review', exact: true }).click();
   await expect(page.locator('.rp-diff-snippet')).toHaveCSS('direction', 'ltr');
 });
 test('draft review posting previews destination and audience before sending', async ({ page }) => {
@@ -350,7 +352,8 @@ test('draft review posting previews destination and audience before sending', as
     await route.fulfill({ json: { id: 'finding-1', review_id: 'review-1', path: longPath, line: 1, severity: 'bug', body: 'Posted finding', state: 'approved', posted: true, created_at: '2026-09-25T08:00:00Z' } });
   });
   await page.goto(`/#/git/${repoId}/pr/1`);
-  await page.getByRole('tab', { name: 'AI review', exact: true }).click();
+  await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
+  await page.getByRole('button', { name: 'AI review', exact: true }).click();
   await page.getByTestId('rp-post-comment').click();
   const dialog = page.getByRole('dialog', { name: 'Post comment to PR #1?' });
   await expect(dialog).toContainText('Where:');

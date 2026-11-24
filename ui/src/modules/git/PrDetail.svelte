@@ -1,18 +1,10 @@
 <script lang="ts">
-  // One pull request inside the PR workspace (the right-hand pane of a repo's
-  // Pull requests tab; the tab strip above it lives in PrWorkspace). Same
-  // layout for GitHub, Bitbucket and GitLab — every action goes through the
-  // provider-neutral /repos/{id}/prs/* routes.
-  //
-  //   header   repo #N · state · Merge · Check out ▾ · ⋯
-  //            title, author · opened/updated · checkout command
-  //            target ← source                       N files +a −d
-  //   tabs     Summary | Timeline | Code | Review (AI agents)
-  //
-  // Data: the detail paints from the SWR cache; commits + the diff summary
-  // load once (header stats, Timeline, the Code tab's commit picker). While a
-  // PR is open it is re-read every couple of minutes, but nothing on screen is
-  // swapped under the reader: a change only raises an "Updated" pill.
+  // One pull request in the PR workspace (GitHub, Bitbucket, GitLab — every
+  // action through the provider-neutral /repos/{id}/prs/* routes): the status
+  // in words with the ONE primary that follows it (Fix checks / Review /
+  // Merge), then two views — Conversation (a reading column + one details
+  // card) | Files. Paints from the SWR cache; re-read every couple of minutes,
+  // but a change only raises an "Updated" pill, never swaps content.
   import { onDestroy, untrack } from 'svelte';
   import { onTabKey } from '../../lib/tabKeys';
   import { api, isAbortError } from '../../lib/api/client';
@@ -64,6 +56,7 @@
   import { withComment } from './pr-comments';
   import { isCompactPrHeaderTab, prCloseLabels, type PrTabId } from './gitUiHelpers';
   import { createPrAiOverlay } from './prAiOverlay.svelte';
+  import { NEXT_LABEL, prStatusLine } from './prStatus';
 
   interface Props {
     repoId: string;
@@ -76,10 +69,12 @@
   onDestroy(() => { disposed = true; });
 
   type Tab = PrTabId;
+  // Two views of one page: the conversation (a reading column) and its files.
+  // Timeline and the AI review open from the details card.
   const TABS: { id: Tab; label: string }[] = [
-    { id: 'summary', label: 'Summary' },
+    { id: 'summary', label: 'Conversation' },
     { id: 'timeline', label: 'Timeline' },
-    { id: 'code', label: 'Code' },
+    { id: 'code', label: 'Files' },
     { id: 'review', label: 'AI review' },
   ];
   const tabKey = (): string => `otto_pr_tab_${repoId}_${number}`;
@@ -299,7 +294,6 @@
   }
 
   // ── Labels / provider wording ────────────────────────────────────────────
-  const PR_STATE_LABEL: Record<string, string> = { open: 'Open', merged: 'Merged', declined: 'Declined' };
   const PROVIDER_LABEL: Record<string, string> = { github: 'GitHub', bitbucket: 'Bitbucket', gitlab: 'GitLab' };
   const prRepo = $derived(git.allRepos.find((r) => r.id === repoId) ?? git.repos.find((r) => r.id === repoId) ?? null);
   const providerName = $derived(prRepo?.provider ? (PROVIDER_LABEL[prRepo.provider] ?? prRepo.provider) : 'the provider');
@@ -421,6 +415,12 @@
   const isMe = (name: string): boolean => myGitHandles.isMe(name);
   const myName = $derived(myGitHandles.displayName ?? 'You');
   const mine = $derived(pr ? myReview(pr, isMe) : null);
+  const status = $derived(pr ? prStatusLine(pr, checks, mine) : null); // the status line + its primary (prStatus.ts)
+  function runNext(): void {
+    if (status?.next === 'fix-checks') openExternal(status.failingUrl ?? pr?.url);
+    else if (status?.next === 'review') selectTab('code');
+    else if (status?.next === 'merge') openMerge();
+  }
   function patchNow(next: PrDetail): void {
     pr = next;
     prDetailCache.set(prKey(repoId, number), next);
@@ -635,11 +635,7 @@
           <span class="prd-num">#{pr.number}</span>
           <Icon name="external" size={12} />
         </button>
-        <span class="prd-state st-{pr.draft && pr.state === 'open' ? 'draft' : pr.state}">
-          <Icon name={stateGlyph(pr.state)} size={12} />
-          {pr.draft && pr.state === 'open' ? 'Draft' : (PR_STATE_LABEL[pr.state] ?? pr.state)}
-        </span>
-        {#if pr.mergeable === false}<span class="prd-state st-declined"><Icon name="warning" size={12} /> Conflicts</span>{/if}
+        {#if status}<span class="prd-status" data-tone={status.tone} data-testid="pr-status"><Icon name={stateGlyph(pr.state)} size={12} /> {status.words}</span>{/if}
         {#if compactHead}
           <h2 class="prd-title-inline" dir="auto" title={pr.title || `Pull request #${pr.number}`}>{pr.title || `Pull request #${pr.number}`}</h2>
         {:else}
@@ -655,9 +651,13 @@
           {#if pr.state === 'open'}
             <PrReviewButtons review={mine} {busy} onapprove={() => void action('approve')} onrequestchanges={openRequestChanges}
               onwithdraw={(k) => void withdraw(k)} canWithdrawChanges={prRepo?.provider !== 'gitlab'} />
-            <button class="btn small primary" disabled={busy !== ''} onclick={() => openMerge()} title="Merge this pull request (asks first)">
-              <Icon name="merge" size={12} /> Merge
-            </button>
+            {#if status && status.next !== 'none'}
+              <button class="btn small primary" data-testid="pr-primary" data-next={status.next} disabled={busy !== ''} onclick={runNext}
+                title={status.next === 'merge' ? 'Merge this pull request (asks first)' : status.next === 'fix-checks' ? 'Open the failing check' : 'Read the changes'}>
+                <Icon name={status.next === 'merge' ? 'merge' : status.next === 'fix-checks' ? 'external' : 'file'} size={12} /> {NEXT_LABEL[status.next]}
+              </button>
+            {/if}
+            {#if status?.next !== 'merge'}<button class="btn small" disabled={busy !== ''} onclick={() => openMerge()} title="Merge this pull request (asks first)"><Icon name="merge" size={12} /> Merge</button>{/if}
           {/if}
           {#if previewUrls.length > 0}
             <button class="btn small" aria-haspopup={previewUrls.length > 1 ? 'menu' : undefined} onclick={openPreview} title={previewUrls.length === 1 ? `Open ${previewUrls[0].url} in Otto Browser` : `Open one of ${previewUrls.length} preview deployments in Otto Browser`}>
@@ -686,7 +686,6 @@
           <span class="dim" title={new Date(pr.updated_at).toLocaleString()}>
             {pr.created_at ? `opened ${rel(pr.created_at)} · ` : ''}updated {rel(pr.updated_at)}
           </span>
-          <button class="prd-cmd mono" onclick={() => void copyWithToast(checkoutCmd, 'Checkout command')} title="Copy: {checkoutCmd}">{checkoutCmd}</button>
         </div>
         <div class="prd-row prd-branches">
           <span class="mono dim prd-branch" title="{pr.source_branch} → {pr.target_branch}">
@@ -706,11 +705,12 @@
 
       <div class="prd-row prd-tabs-row">
         <div class="segmented prd-tabs" role="tablist" aria-label="Pull request views" tabindex="-1" onkeydown={onTabKey}>
-          {#each TABS as t (t.id)}
+          {#each TABS.filter((t) => t.id === 'summary' || t.id === 'code' || t.id === activeTab) as t (t.id)}
             <button role="tab" aria-label={t.label} aria-selected={activeTab === t.id} tabindex={activeTab === t.id ? 0 : -1}
               class:active={activeTab === t.id} onclick={() => selectTab(t.id)}>
               {t.label}
               {#if t.id === 'summary' && generalComments.length > 0}<span class="prd-tab-count" aria-hidden="true">{generalComments.length}</span>{/if}
+              {#if t.id === 'code' && stats}<span class="prd-tab-count" aria-hidden="true">{stats.files} <span class="add">+{stats.add.toLocaleString()}</span> <span class="del">−{stats.del.toLocaleString()}</span></span>{/if}
             </button>
           {/each}
         </div>
@@ -762,7 +762,8 @@
             onreply={(parentId, body) => postComment(body, undefined, undefined, parentId)} />
         </div>
 
-        <PrSideColumn {pr} {checks} {commits} {providerName} {repoId} where={prWhere()} onreviewerschanged={() => { invalidatePr(repoId, number); void load(repoId, number, true); }} />
+        <PrSideColumn {pr} {checks} {commits} {providerName} {repoId} where={prWhere()} onreviewerschanged={() => { invalidatePr(repoId, number); void load(repoId, number, true); }}
+          ontimeline={() => selectTab('timeline')} onreview={() => selectTab('review')} />
       </div>
 
       {#if activeTab === 'timeline'}
@@ -856,11 +857,11 @@
   .prd-repo { display: inline-flex; align-items: center; gap: 4px; min-width: min(14ch, 100%); overflow: hidden; font-size: var(--fs-s); color: var(--text-dim); }
   .prd-slug { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .prd-num { color: var(--success); font-variant-numeric: tabular-nums; }
-  .prd-state { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; font-size: var(--fs-xs); font-weight: 600; white-space: nowrap; }
-  .st-open { color: var(--success); background: var(--success-soft); }
-  .st-merged { color: var(--accent-text); background: var(--accent-soft); }
-  .st-declined { color: var(--danger); background: var(--danger-soft); }
-  .st-draft { color: var(--text-dim); background: var(--surface-2); }
+  /* The status in words: the tone carries meaning, never colour alone. */
+  .prd-status { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-m); font-weight: 600; white-space: nowrap; color: var(--text-dim); }
+  .prd-status[data-tone='danger'] { color: var(--danger); }
+  .prd-status[data-tone='warning'] { color: var(--warning); }
+  .prd-status[data-tone='success'] { color: var(--success); }
   .prd-actions { display: inline-flex; align-items: center; gap: 6px; flex: none; margin-inline-start: auto; }
   .icon-only { padding-inline: 6px; }
   .prd-title { margin: 2px 0 0; font-size: var(--fs-xl); font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
@@ -869,8 +870,6 @@
   .prd-meta { font-size: var(--fs-s); }
   .prd-author { font-weight: 550; white-space: nowrap; }
   .prd-meta .dim { white-space: nowrap; }
-  .prd-cmd { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: start; font-size: var(--fs-xs); color: var(--text-dim); background: none; border: none; padding: 0; cursor: copy; }
-  .prd-cmd:hover { color: var(--text); }
   .prd-branches { font-size: var(--fs-s); }
   .prd-branch { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .prd-stats { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--text-dim); }
@@ -895,10 +894,12 @@
   .prd-commit-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* Summary: content + a details column (stacks under ~900px of pane). */
+  /* The reading column (760 px, reading type) with the details card beside it. */
   .prd-summary {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 240px;
-    gap: 20px;
+    grid-template-columns: minmax(0, var(--read-col)) 264px;
+    justify-content: center;
+    gap: 24px;
     align-items: start;
   }
   .prd-summary[hidden] { display: none; }
@@ -906,7 +907,7 @@
     .prd-summary { grid-template-columns: minmax(0, 1fr); }
   }
   .prd-body { container-type: inline-size; }
-  .prd-main { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+  .prd-main { min-width: 0; display: flex; flex-direction: column; gap: 12px; font-size: var(--fs-l); line-height: 1.6; }
   .prd-desc { position: relative; padding: 12px 16px; }
   .prd-desc textarea { width: 100%; }
   .edit-btn {
@@ -941,7 +942,6 @@
     .prd-actions { flex-wrap: wrap; flex: 1 1 100%; }
     .prd-actions .btn { height: 34px; }
     .prd-meta { flex-wrap: wrap; }
-    .prd-cmd { flex-basis: 100%; }
     .prd-title-input { height: 38px; font-size: 16px; } /* ui-guards: allow — 16px stops iOS zoom-on-focus */
     .prd-body { padding: 12px; }
     .prd-summary { grid-template-columns: minmax(0, 1fr); }
