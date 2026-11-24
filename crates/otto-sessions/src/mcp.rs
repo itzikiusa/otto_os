@@ -599,12 +599,15 @@ pub fn sweep_launcher_env_files(server: &str) -> usize {
 
 /// [`write_env_file`] to a temp sibling, then rename: a CLI starting from
 /// another session in the same cwd reads the old or the new env, never a
-/// half-written one.
+/// half-written one. The sibling's name is unique per write, so two spawns
+/// in that cwd (no lock held here) never share one.
 fn write_env_file_atomic(
     path: &Path,
     env: &std::collections::BTreeMap<String, String>,
 ) -> Result<(), String> {
-    let tmp = path.with_extension(format!("env.{}.tmp", std::process::id()));
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("env.{}.{n}.tmp", std::process::id()));
     write_env_file(&tmp, env)?;
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
@@ -2460,5 +2463,36 @@ mod tests {
         assert!(!env_path.exists() && !other_path.exists());
         assert!(keep.exists(), "another server's env file is left alone");
         let _ = std::fs::remove_file(&keep);
+    }
+
+    /// R2-002: concurrent spawns in one cwd write the same launcher env file;
+    /// each write uses its own temp sibling, so none fails or leaves a torn
+    /// file (they shared `env.<pid>.tmp` and lost each other's rename).
+    #[test]
+    fn concurrent_env_writes_in_one_cwd_all_land_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("launch-x.srv.env");
+        let env: std::collections::BTreeMap<String, String> =
+            [("TOKEN".to_string(), "v".repeat(64 * 1024))].into();
+        let failed: usize = std::thread::scope(|s| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| {
+                    s.spawn(|| {
+                        (0..50)
+                            .filter(|_| write_env_file_atomic(&path, &env).is_err())
+                            .count()
+                    })
+                })
+                .collect();
+            workers.into_iter().map(|w| w.join().unwrap()).sum()
+        });
+        assert_eq!(failed, 0);
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(body.len(), "TOKEN=''\n".len() + 64 * 1024);
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "no temp file left"
+        );
     }
 }
