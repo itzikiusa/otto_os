@@ -22,8 +22,10 @@
   interface Props {
     cluster: BrokerCluster;
     onreplayfrom?: (prefill: ReplayPrefill) => void;
+    /** A topic opened / closed (the page moves its cluster actions to ⋯). */
+    ontopic?: (open: boolean) => void;
   }
-  let { cluster, onreplayfrom }: Props = $props();
+  let { cluster, onreplayfrom, ontopic }: Props = $props();
 
   const PAGE_SIZE = 50;
   const STATS_CONCURRENCY = 4;
@@ -40,6 +42,10 @@
   let cleanupFilter = $state('');
   let page = $state(1);
   let selected = $state<string | null>(null);
+  $effect(() => {
+    ontopic?.(!!selected);
+    return () => ontopic?.(false);
+  });
   // Agent UI control (lib/uiCommands/brokers.ts) opens a topic here.
   $effect(() => brokersTopicsPort.bind({ clusterId: cluster.id, open: (name) => (selected = name) }));
 
