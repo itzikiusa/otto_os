@@ -32,6 +32,10 @@ export const DESKTOP_GATE_SPECS = [
   'desktop-channels-rooms-health.spec.ts',
   'desktop-connections-hub.spec.ts',
   'desktop-design-artifact.spec.ts',
+  'desktop-git-bulk-delete.spec.ts',
+  'desktop-git-header-verbs.spec.ts',
+  'desktop-ide-config-langs.spec.ts',
+  'desktop-insights-every-report-opens.spec.ts',
   'desktop-personal-autonomy.spec.ts',
   'desktop-personal-documents.spec.ts',
   'desktop-platform-settings-recovery.spec.ts',
@@ -44,20 +48,31 @@ export const DESKTOP_GATE_SPECS = [
   'desktop-scheduled-tasks.spec.ts',
   'desktop-session-menu.spec.ts',
   'desktop-settings-run-history.spec.ts',
-  'desktop-shell.spec.ts',
   'desktop-shell-reopen.spec.ts',
+  'desktop-shell.spec.ts',
   'desktop-skills-lab.spec.ts',
-  'desktop-threads.spec.ts',
+  'desktop-thread-route-forget.spec.ts',
+  'desktop-thread-thinking-toggle.spec.ts',
   'desktop-threads-clean.spec.ts',
   'desktop-threads-council.spec.ts',
+  'desktop-threads.spec.ts',
   'desktop-tiled-maximize.spec.ts',
   'desktop-token-cleanup.spec.ts',
   'desktop-transcript-cache-live.spec.ts',
+  'desktop-usage-page.spec.ts',
   'desktop-ux-git.spec.ts',
 ] as const;
 
 /** Mobile specs run at iPhone portrait (WebKit). */
-export const MOBILE_GATE_SPECS = ['design-lobby-mobile.spec.ts', 'theme.spec.ts', 'vault-mobile.spec.ts'] as const;
+export const MOBILE_GATE_SPECS = [
+  'design-lobby-mobile.spec.ts',
+  'git-header-verbs-mobile.spec.ts',
+  'ide-config-langs-mobile.spec.ts',
+  'insights-every-report-opens.spec.ts',
+  'theme.spec.ts',
+  'usage-page-mobile.spec.ts',
+  'vault-mobile.spec.ts',
+] as const;
 
 /** The projects the gate runs a spec on (desktop list / mobile list). */
 export const DESKTOP_GATE_PROJECT = 'desktop-browser';
@@ -75,7 +90,11 @@ export const MOBILE_GATE_PROJECT = 'iphone-portrait';
 // it drove is retired, so it only skips) + 5 desktop-design-artifact (the
 // Hall's versions/restore replace it) + 5 desktop-threads-clean + 2
 // desktop-threads-council (both mock mode) + 2 design-lobby-mobile = 134.
-export const GATE_MIN_EXPECTED = 134;
+// 2026-11-24 R3 regressions: the list had grown to 141 under the old floor;
+// + 33 desktop (bulk delete 4, header verbs 3, config languages 8, every
+// report opens 1, route forget 5, Thinking toggle 6, usage page 6) + 7 iPhone
+// (header verbs 4, config languages 1, every report opens 1, usage page 1) = 181.
+export const GATE_MIN_EXPECTED = 181;
 
 /** Exact-file matcher for a Playwright project's `testMatch`. */
 export function gateMatcher(files: readonly string[]): RegExp {
