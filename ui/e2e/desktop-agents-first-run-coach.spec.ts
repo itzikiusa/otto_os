@@ -8,6 +8,9 @@ import { apiCtx, seedWorkspace, tempDir } from './seed';
 let ctx: APIRequestContext;
 let base = '';
 const COACH = 'Let’s launch your first agent';
+// In order, one worker: the threads-only test's thread reaches every page's
+// live feed and would end a first-timer's coach mid-test.
+test.describe.configure({ mode: 'default' });
 
 test.beforeEach(async ({}, info) => {
   test.skip(info.project.name !== 'desktop-browser', 'desktop-browser project only');
@@ -66,12 +69,31 @@ test('someone with structured threads only gets no coach', async ({ page }) => {
   }
 });
 
-test('a first-timer still gets the coach once the lists answered', async ({ page }) => {
-  const wsId = await seedWorkspace(ctx, base, 'Coach first WS');
+async function firstTimer(page: Page, name: string): Promise<void> {
+  const wsId = await seedWorkspace(ctx, base, name);
   // No sessions or threads anywhere for this person (other specs' rows are not theirs).
   await page.route(/\/api\/v1\/runtime-sessions$/, (route) => route.request().method() === 'GET' ? route.fulfill({ json: [] }) : route.fallback());
   await page.route(/\/api\/v1\/workspaces\/scratch\/sessions(\?.*)?$/, (route) => route.request().method() === 'GET' ? route.fulfill({ json: [] }) : route.fallback());
   await freshBrowser(page, wsId, false);
   await page.goto('/#/agents');
   await expect(page.getByText(COACH)).toBeVisible({ timeout: 30_000 });
+}
+
+test('a first-timer still gets the coach once the lists answered', async ({ page }) => {
+  await firstTimer(page, 'Coach first WS');
+});
+
+test('a revisit shows the coach straight away, never the empty state first', async ({ page }) => {
+  await firstTimer(page, 'Coach revisit WS');
+  await page.evaluate(() => (location.hash = '#/settings'));
+  await expect(page.getByText(COACH)).toHaveCount(0, { timeout: 15_000 });
+  await page.evaluate(() => {
+    const w = window as unknown as { emptySeen?: boolean };
+    new MutationObserver(() => {
+      if (document.body.innerText.includes('No sessions yet')) w.emptySeen = true;
+    }).observe(document, { childList: true, subtree: true, characterData: true });
+    location.hash = '#/agents';
+  });
+  await expect(page.getByText(COACH)).toBeVisible({ timeout: 15_000 });
+  expect(await page.evaluate(() => (window as unknown as { emptySeen?: boolean }).emptySeen === true), 'the empty state flashed').toBe(false);
 });

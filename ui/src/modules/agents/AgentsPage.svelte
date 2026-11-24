@@ -80,7 +80,7 @@
   $effect(() => {
     if (coachMaybe && ptyKnown && !rt) void startThreadFeeds().then(([m]) => (rt = m.runtimeThreads));
   });
-  const coachKnown = $derived(ptyKnown && threadFeeds.settled);
+  const coachKnown = $derived(ptyKnown && threadFeeds.settled && !!rt);
   const coachReady = $derived(coachMaybe && coachKnown && !!rt && Object.keys(rt.byId).length === 0);
   let coachLatched = $state(false);
   $effect(() => {
