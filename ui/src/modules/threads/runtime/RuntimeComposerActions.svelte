@@ -5,7 +5,8 @@
   // and label), and Stop steps back to a small quiet control beside it.
   // While the agent waits on the person (the attention dock), Stop is quiet
   // too, so the dock's answer is the one primary action. Stop's keys (Esc /
-  // ⌘.) are stopKeys.ts.
+  // ⌘.) are stopKeys.ts. A press on it keeps the caret in the composer, so
+  // a phone's keyboard stays up for the next message.
   import Icon, { type IconName } from '../../../lib/components/Icon.svelte';
   import { isMacPlatform } from '../../../lib/keys';
   import { primaryLabel, type PrimaryAction } from './composerSend';
@@ -59,6 +60,7 @@
     data-testid={sendTestId}
     data-delivery={action}
     disabled={sendDisabled}
+    onmousedown={(e) => e.preventDefault()}
     onclick={onsend}
   >
     <Icon name={ICON[action]} size={action === 'send' ? 16 : 14} />

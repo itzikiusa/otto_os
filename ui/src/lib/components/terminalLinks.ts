@@ -277,3 +277,9 @@ export function terminalLinksForRow(buffer: Buffer, row: number, allowFiles: boo
     (link.range.start.y < row || link.range.start.x <= h.range.end.x)
     && (link.range.end.y > row || link.range.end.x >= h.range.start.x)))];
 }
+
+/** The link under a cell (1-based column and row, as the ranges): a touch tap's target. */
+export function terminalLinkAt(buffer: Buffer, col: number, row: number, allowFiles: boolean): TerminalBufferLink | undefined {
+  return terminalLinksForRow(buffer, row, allowFiles).find(({ range: r }) =>
+    (row > r.start.y || col >= r.start.x) && (row < r.end.y || col <= r.end.x));
+}
