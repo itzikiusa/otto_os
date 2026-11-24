@@ -80,6 +80,14 @@ test('select mode: Tile lays the checked sessions out side by side', async ({ pa
   await page.getByTestId('agents-select-toggle').click();
   await page.getByLabel('Select Pirlo').check();
   await page.getByLabel('Select Seedorf').check();
+  // The count never runs under Tile (design review 2, M3), and is said once.
+  const tools = page.getByTestId('agents-select-tools');
+  const count = (await tools.locator('.ai-count span').boundingBox())!;
+  const tile = (await page.getByTestId('agents-tile-selected').boundingBox())!;
+  expect(count.x + count.width).toBeLessThanOrEqual(tile.x + 0.5);
+  await expect(tools.locator('.ai-count span')).toHaveText('2');
+  await expect(page.getByTestId('agents-delete-selected')).toHaveText('Delete');
+  if (SHOTS) for (const s of ['light', 'dark'] as const) { await scheme(page, s); await page.screenshot({ path: `${SHOTS}/agents-select-mode-1440-${s}.png`, animations: 'disabled' }); }
   await page.getByTestId('agents-tile-selected').click();
   await expect(page.locator(`[data-tile-id="${ids.Pirlo}"]`)).toBeVisible({ timeout: 15_000 });
   await expect(page.locator(`[data-tile-id="${ids.Seedorf}"]`)).toBeVisible();

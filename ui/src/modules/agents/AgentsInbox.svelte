@@ -400,11 +400,11 @@
     <div class="ai-tools" data-testid="agents-select-tools">
       <label class="ai-count">
         <input type="checkbox" aria-label="Select all sessions" checked={selIds.length > 0 && selIds.length === selectable.length} indeterminate={selIds.length > 0 && selIds.length < selectable.length} onchange={() => (sel = selIds.length === selectable.length ? new Set() : new Set(selectable.map((s) => s.id)))} />
-        <span>{selIds.length > 0 ? `${selIds.length} selected` : 'Select all'}</span>
+        <span class="ellipsis" title={selIds.length > 0 ? `${selIds.length} selected` : 'Select all'}>{selIds.length > 0 ? selIds.length : 'All'}</span>
       </label>
       <button type="button" class="btn small ghost" disabled={liveSel.length < 2} data-testid="agents-tile-selected" onclick={tileSelected}>Tile</button>
       <button type="button" class="btn small ghost" disabled={liveSel.length === 0} data-testid="agents-archive-selected" onclick={() => void archiveSelected()}>Archive</button>
-      <button type="button" class="btn small ghost danger ai-del" disabled={selIds.length === 0} data-testid="agents-delete-selected" onclick={() => void deleteSelected()}>Delete{selIds.length > 0 ? ` (${selIds.length})` : ''}</button>
+      <button type="button" class="btn small ghost danger ai-del" disabled={selIds.length === 0} data-testid="agents-delete-selected" onclick={() => void deleteSelected()}>Delete</button>
     </div>
   {/if}
 
@@ -557,6 +557,14 @@
     font-size: var(--fs-s);
     color: var(--text-dim);
     white-space: nowrap;
+  }
+  /* Just the count beside the box (its title says "N selected"), said once —
+     Delete has no "(N)" — and never under Tile. */
+  .ai-count span {
+    min-width: 0;
+  }
+  .ai-tools :global(.btn) {
+    flex: none;
   }
   /* The destructive one stands apart from Tile / Archive. */
   .ai-del {
