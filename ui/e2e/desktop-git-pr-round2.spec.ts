@@ -65,7 +65,7 @@ test('approving records the head you reviewed at; nothing is offered until a pus
   await page.goto('/#/git/rep_otto/pr/51');
   await expect(page.locator('.prd')).toHaveAttribute('data-diff-head', /^c1fac680/, { timeout: 15_000 });
   const head = page.locator('.prd-actions');
-  await head.getByRole('button', { name: 'Approve', exact: true }).click();
+  await page.locator('.prd-actions').getByTestId('pr-review').click(); await page.locator('.ctx-menu').getByText('Approve…', { exact: true }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Approve PR' }).click();
   await expect(head.getByText('Approved', { exact: true })).toBeVisible();
   await expect

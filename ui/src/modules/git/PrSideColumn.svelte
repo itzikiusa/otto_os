@@ -26,8 +26,13 @@
     ontimeline?: () => void;
     /** Open the AI review view ("Send to review agents"). */
     onreview?: () => void;
+    /** The branch row's visible "Check out" (fetch, switch, verify). */
+    oncheckout?: () => void;
+    checkingOut?: boolean;
+    /** Preview deployments found in the checks: open one in Otto Browser. */
+    onpreview?: (e: MouseEvent) => void;
   }
-  let { pr, checks, commits, providerName, repoId, where, onreviewerschanged, ontimeline, onreview }: Props = $props();
+  let { pr, checks, commits, providerName, repoId, where, onreviewerschanged, ontimeline, onreview, oncheckout, checkingOut = false, onpreview }: Props = $props();
   let editing = $state(false);
   const canEdit = $derived(!!repoId && !!onreviewerschanged && pr.state === 'open');
   const glyph = (s: string) => (s === 'success' ? 'check' : s === 'failure' ? 'x' : s === 'pending' ? 'clock' : 'dot') as 'check' | 'x' | 'clock' | 'dot';
@@ -36,10 +41,22 @@
 <DetailsCard label="Pull request details" floating testid="pr-details-card">
 <div class="side">
   <section class="dc-group sc-doors">
-    <div class="dc-row dc-static" title="{pr.source_branch} → {pr.target_branch}">
-      <Icon name="branch" size={14} />
-      <span class="dc-label mono" dir="ltr">{pr.source_branch} → {pr.target_branch}</span>
+    <div class="dc-line">
+      <div class="dc-row dc-static dc-grow" title="{pr.source_branch} → {pr.target_branch}">
+        <Icon name="branch" size={14} />
+        <span class="dc-label mono" dir="ltr">{pr.source_branch} → {pr.target_branch}</span>
+      </div>
+      {#if oncheckout}
+        <button type="button" class="dc-end-btn" data-testid="pr-checkout" disabled={checkingOut} onclick={oncheckout} title="Check out {pr.source_branch} locally (fetches first)">
+          {checkingOut ? 'Checking out…' : 'Check out'}
+        </button>
+      {/if}
     </div>
+    {#if onpreview}
+      <button type="button" class="dc-row" onclick={onpreview} title="Open the preview deployment in Otto Browser">
+        <Icon name="globe" size={14} /><span class="dc-label">Preview in Browser</span>
+      </button>
+    {/if}
     {#if ontimeline}
       <button type="button" class="dc-row" onclick={ontimeline} aria-label="Timeline" data-testid="pr-open-timeline">
         <Icon name="clock" size={14} /><span class="dc-label">Timeline{commits ? ` · ${commits.length} ${commits.length === 1 ? 'commit' : 'commits'}` : ''}</span>

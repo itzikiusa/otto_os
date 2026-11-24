@@ -29,7 +29,7 @@ test('merge modal blocks on failing CI + blockers, then merges with "Merge anywa
   await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });
 
   // Merge no longer posts straight from the action row — it opens the modal.
-  await page.locator('.prd-actions').getByRole('button', { name: 'Merge' }).click();
+  await page.getByRole('button', { name: 'More pull request actions' }).click(); await page.locator('.ctx-menu').getByText('Merge', { exact: true }).click();
   const modal = page.getByRole('dialog', { name: 'Merge pull request' });
   await expect(modal).toBeVisible();
 

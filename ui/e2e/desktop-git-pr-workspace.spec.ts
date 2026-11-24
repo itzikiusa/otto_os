@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { expectNoHorizontalOverflow } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -18,6 +18,17 @@ test.beforeEach(async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1600, height: 950 });
 });
 
+/** The header's one review control (Review ▾ / Approved ▾ …) → one of its items. */
+async function reviewMenu(page: Page, item: string): Promise<void> {
+  await page.locator('.prd-actions').getByTestId('pr-review').click();
+  await page.locator('.ctx-menu').getByText(item, { exact: true }).click();
+}
+/** Merge sits in ⋯ (with why it is blocked) unless the PR can merge. */
+async function mergeFromMore(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'More pull request actions' }).click();
+  await page.locator('.ctx-menu').getByText('Merge', { exact: true }).click();
+}
+
 test('a PR deep link opens in the workspace with header, stats and timeline', async ({ page }) => {
   await page.goto('/#/git/rep_otto/pr/51');
   await expect(page.locator('.prw')).toBeVisible({ timeout: 15_000 });
@@ -26,7 +37,11 @@ test('a PR deep link opens in the workspace with header, stats and timeline', as
   await expect.poll(() => page.evaluate(() => location.hash)).toBe('#/git');
   await expect(page.locator('.prw-tab')).toHaveCount(1);
   await expect(page.locator('.prd-stats')).toContainText('23 files');
-  await expect(page.locator('.prd-actions').getByRole('button', { name: 'Merge', exact: true })).toBeVisible();
+  // One primary that follows state (the mock's CI fails), one secondary, ⋯ — Merge waits in ⋯.
+  await expect(page.getByTestId('pr-primary')).toHaveText('Fix checks');
+  await expect(page.locator('.prd-actions').getByTestId('pr-review')).toHaveText(/Review/);
+  await expect(page.locator('.prd-actions .btn')).toHaveCount(3);
+  await expect(page.locator('.prd-actions').getByRole('button', { name: 'Merge', exact: true })).toHaveCount(0);
   // Grouped list: my PRs first.
   await expect(page.locator('.prlist')).toContainText('Authored by you');
 
@@ -120,7 +135,7 @@ test('Approve / Request changes live in the header and update at once', async ({
   // Request changes from the Code tab: the composer opens over the diff, and
   // you stay on Code (it used to jump to Summary).
   await codeTab.click();
-  await head.getByRole('button', { name: 'Request changes' }).click();
+  await reviewMenu(page, 'Request changes…');
   const composer = page.getByRole('dialog', { name: 'Request changes on #51' });
   await composer.getByRole('textbox', { name: 'What needs to change' }).fill('Cap the retry loop.');
   await composer.getByRole('button', { name: 'Request changes' }).click();
@@ -138,7 +153,7 @@ test('Approve / Request changes live in the header and update at once', async ({
   await expect(head.getByText('Changes requested')).toBeVisible();
 
   // Approve flips your opinion — on the same reviewer row, never a duplicate.
-  await head.getByRole('button', { name: 'Approve', exact: true }).click();
+  await reviewMenu(page, 'Approve…');
   await page.getByRole('dialog').getByRole('button', { name: 'Approve PR' }).click();
   await expect(head.getByText('Approved', { exact: true })).toBeVisible();
   await expect(head.getByText('Changes requested')).toHaveCount(0);
@@ -163,7 +178,7 @@ test('Merge after a push you have not read asks first; Reload the diff clears it
   // Someone pushes while you're still on the page.
   await page.evaluate(() => localStorage.setItem('otto_mock_pr_pushed', '51'));
 
-  await page.locator('.prd-actions').getByRole('button', { name: 'Merge', exact: true }).click();
+  await mergeFromMore(page);
   const modal = page.getByRole('dialog', { name: 'Merge pull request' });
   const warn = modal.getByTestId('pr-merge-unseen');
   await expect(warn).toContainText('1 new commit since you opened this diff');
@@ -182,7 +197,7 @@ test('Merge after a push you have not read asks first; Reload the diff clears it
   await expect(prd).toHaveAttribute('data-diff-head', /^c7e57a11/);
   // …so Merge no longer warns: "Merge anyway" (for the failing CI) is enough
   // once the dialog has read the live head.
-  await page.locator('.prd-actions').getByRole('button', { name: 'Merge', exact: true }).click();
+  await mergeFromMore(page);
   await modal.getByText('Merge anyway').click();
   await expect(mergeBtn).toBeEnabled();
   await expect(modal.getByTestId('pr-merge-unseen')).toHaveCount(0);
@@ -201,8 +216,8 @@ test('PR header never overlaps: repo · #n · state stay whole as the window nar
     expect(overlap(boxes.num, boxes.state), `#n over the state chip at ${width}px`).toBe(false);
     expect(overlap(boxes.state, boxes.actions), `state chip under the actions at ${width}px`).toBe(false);
     expect(boxes.slug.width, `repo name visible at ${width}px`).toBeGreaterThan(40);
-    for (const name of ['Request changes', 'Approve', 'Merge']) {
-      await expect(page.locator('.prd-actions').getByRole('button', { name, exact: true })).toBeInViewport({ ratio: 1 });
+    for (const b of [page.getByTestId('pr-review'), page.getByTestId('pr-primary'), page.getByRole('button', { name: 'More pull request actions' })]) {
+      await expect(b).toBeInViewport({ ratio: 1 });
     }
   }
 });
@@ -243,14 +258,14 @@ test('your review status withdraws from its own menu', async ({ page }) => {
   await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
   const head = page.locator('.prd-actions');
   const side = page.getByRole('region', { name: 'Pull request details' });
-  await head.getByRole('button', { name: 'Approve', exact: true }).click();
+  await reviewMenu(page, 'Approve…');
   await page.getByRole('dialog').getByRole('button', { name: 'Approve PR' }).click();
-  // The status is a button now; its menu withdraws (asks first).
-  await head.getByRole('button', { name: /^Approved/ }).click();
-  await page.locator('.ctx-menu').getByText('Withdraw approval…').click();
+  // The review control now names your verdict; its menu withdraws (asks first).
+  await expect(head.getByTestId('pr-review')).toHaveText(/Approved/);
+  await reviewMenu(page, 'Withdraw approval…');
   const dlg = page.getByRole('dialog', { name: 'Withdraw your approval of PR #51?' });
   await dlg.getByRole('button', { name: 'Withdraw approval' }).click();
-  await expect(head.getByRole('button', { name: 'Approve', exact: true })).toBeVisible();
+  await expect(head.getByTestId('pr-review')).toHaveText(/Review/);
   await expect(page.locator('.toast-title').filter({ hasText: 'Approval withdrawn' })).toBeVisible();
   // The quiet reload agrees: no approval of yours in the reviewer list.
   await expect(side.locator('.sc-row').filter({ hasText: 'Dev Otto' }).getByText('Approved')).toHaveCount(0);
@@ -333,7 +348,7 @@ test('merge checks and open tasks show in the side column and as merge reasons',
   await expect(line).toHaveText('1 of 3 checks passed · 1 task open');
   await page.setViewportSize({ width: 1600, height: 950 });
 
-  await page.locator('.prd-actions').getByRole('button', { name: 'Merge', exact: true }).click();
+  await mergeFromMore(page);
   const reasons = page.getByRole('dialog', { name: 'Merge pull request' }).locator('.reasons');
   await expect(reasons).toContainText('At least 2 approvals');
   await expect(reasons).toContainText('1 task open');

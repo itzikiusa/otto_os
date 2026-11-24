@@ -19,7 +19,7 @@ export function openTasksLine(t: PrDetail['task_count']): string | null {
 }
 
 /** A check about CI / builds — the merge dialog's CI row already covers it. */
-const isCiCheck = (c: PrMergeCheck): boolean => /\b(ci|build|builds|status|statuses|check[_ -]?runs?)\b/i.test(c.key.replace(/[_-]/g, ' '));
+export const isCiCheck = (c: PrMergeCheck): boolean => /\b(ci|build|builds|status|statuses|check[_ -]?runs?)\b/i.test(c.key.replace(/[_-]/g, ' '));
 
 /** Merge-dialog reasons from failing forge checks (CI ones left out) and open
  *  tasks (unless a failing check already says so). */
