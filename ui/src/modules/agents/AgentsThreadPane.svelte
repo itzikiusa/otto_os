@@ -100,7 +100,7 @@
 >
   <header class="tpane-head" class:touch={!viewport.isDesktop}>
     {#if viewport.isPhone}
-      <button type="button" class="icon-btn tpane-back" aria-label="Back to sessions" title="Back to sessions" data-testid="agents-back-to-list" onclick={() => router.go('agents')}><Icon name="chevronLeft" size={16} /></button>
+      <button type="button" class="icon-btn tpane-back" aria-label="Back to sessions" title="Back to sessions" data-testid="agents-back-to-list" onclick={() => router.backTo('agents')}><Icon name="chevronLeft" size={16} /></button>
     {/if}
     <span class="tpane-word {word.tone}" data-testid="pane-status" data-state={st.key} title={st.hint ?? st.label}>{word.word}</span>
     <button

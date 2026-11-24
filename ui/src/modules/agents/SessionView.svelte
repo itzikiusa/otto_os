@@ -630,7 +630,7 @@
     {/if}
     {#if viewport.isPhone}
       <!-- Phone: the session is pushed over the list (#/agents); Back returns. -->
-      <button type="button" class="icon-btn pane-back" aria-label="Back to sessions" title="Back to sessions" data-testid="agents-back-to-list" onclick={() => router.go('agents')}><Icon name="chevronLeft" size={16} /></button>
+      <button type="button" class="icon-btn pane-back" aria-label="Back to sessions" title="Back to sessions" data-testid="agents-back-to-list" onclick={() => router.backTo('agents')}><Icon name="chevronLeft" size={16} /></button>
     {/if}
     <span class="pane-word {word.tone}" data-testid="pane-status" data-state={paneState.key} title={suspendNote ?? paneState.hint ?? paneState.label}>{word.word}</span>
     {#if renaming}

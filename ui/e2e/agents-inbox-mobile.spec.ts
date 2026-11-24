@@ -50,3 +50,18 @@ test('the list is the page; a tap pushes the terminal; Back returns', async ({ p
   await page.goBack();
   await expect(page.getByTestId('agents-inbox')).toBeVisible();
 });
+
+// The terminal's ‹ steps back too: the system Back from the list leaves Agents.
+test('a terminal\'s ‹ steps back to the list; the system Back then leaves Agents', async ({ page }) => {
+  await page.goto('/#/settings');
+  await page.evaluate(() => (location.hash = '#/agents'));
+  const row = page.locator(`.ai-row[data-workspace="${wsId}"] .tr-main`, { hasText: 'Gullit' });
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  await row.tap();
+  await expect(page.locator('.term-host').first()).toBeVisible({ timeout: 30_000 });
+  await page.getByTestId('agents-back-to-list').tap();
+  await expect(page.getByTestId('agents-inbox')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe('#/agents');
+  await page.goBack();
+  await expect.poll(() => page.evaluate(() => location.hash)).toMatch(/^#\/settings/);
+});
