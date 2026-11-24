@@ -265,7 +265,10 @@ mod tests {
     #[test]
     fn skill_body_hash_ignores_line_endings_and_trailing_space_only() {
         let a = skill_body_hash("---\nname: x\n---\n# X\nbody\n");
-        assert_eq!(a, skill_body_hash("\r\n---\r\nname: x  \r\n---\r\n# X\r\nbody\t\r\n\r\n"));
+        assert_eq!(
+            a,
+            skill_body_hash("\r\n---\r\nname: x  \r\n---\r\n# X\r\nbody\t\r\n\r\n")
+        );
         assert_ne!(a, skill_body_hash("---\nname: x\n---\n# X\nbody changed\n"));
         assert_ne!(a, skill_body_hash("---\nname: x\n---\n#  X\nbody\n"));
     }

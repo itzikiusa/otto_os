@@ -69,7 +69,11 @@ pub fn skill_dir(provider: &str, name: &str) -> Option<PathBuf> {
 
 /// Every provider skill across all providers, sorted by `(provider, name)`.
 pub fn list() -> Vec<ProviderSkillInfo> {
-    list_from(PROVIDERS.iter().filter_map(|p| Some((*p, provider_root(p)?))))
+    list_from(
+        PROVIDERS
+            .iter()
+            .filter_map(|p| Some((*p, provider_root(p)?))),
+    )
 }
 
 /// [`list`] over explicit `(provider, skills root)` pairs.
@@ -208,11 +212,18 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let skill = tmp.path().join("my-skill");
         std::fs::create_dir_all(&skill).unwrap();
-        std::fs::write(skill.join("SKILL.md"), "---\r\ndescription: d  \r\n---\r\n# Body\r\n").unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\r\ndescription: d  \r\n---\r\n# Body\r\n",
+        )
+        .unwrap();
         let listed = list_from([("claude", tmp.path().to_path_buf())].into_iter());
         assert_eq!(listed.len(), 1);
         // The same text as the library holds it (LF, no trailing space).
-        assert_eq!(listed[0].body_hash, otto_core::text::skill_body_hash("---\ndescription: d\n---\n# Body\n"));
+        assert_eq!(
+            listed[0].body_hash,
+            otto_core::text::skill_body_hash("---\ndescription: d\n---\n# Body\n")
+        );
     }
 
     #[test]
