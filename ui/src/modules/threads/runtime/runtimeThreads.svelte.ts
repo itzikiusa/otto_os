@@ -167,6 +167,8 @@ class RuntimeThreads {
   unread = $state<Record<string, true>>({});
   /** Threads shown by an embed outside Threads (a turn ending there is seen). */
   private embedded = new Map<string, number>();
+  /** When `loadOne` last read each row (ms) — see `readRecently`. */
+  private readAt = new Map<string, number>();
   /** Original composer attachments keyed by `queued_id` so Edit preserves filenames even before server hydration. */
   private queuedAttachments = new Map<string, { name: string; mime: string; data_base64: string }[]>();
   /** The thread each cached `queued_id` belongs to (to release them per thread). */
@@ -255,9 +257,16 @@ class RuntimeThreads {
   async loadOne(id: string): Promise<RuntimeSession> {
     const r = keepOutcome(await api.get<RuntimeSession>(`/runtime-sessions/${id}`), this.byId[id]);
     this.byId[r.id] = r;
+    this.readAt.set(r.id, Date.now());
     noteRuntimeWaiting(r.id, r.status === 'awaiting_permission', r.title);
     this.emitSequence(r.id, r.last_sequence);
     return r;
+  }
+
+  /** `id`'s row is held and `loadOne` read it in the last `ms` (events keep it live since). */
+  readRecently(id: string, ms = 2000): boolean {
+    const at = this.readAt.get(id);
+    return !!this.byId[id] && at !== undefined && Date.now() - at < ms;
   }
 
   /** Fetch the rows of `id`'s linked group not held yet (its chips). */
