@@ -74,6 +74,17 @@ test('after an export, the page report reloads slim (no day×model table, 1000 s
   assert.equal(usage.reportFull, false);
 });
 
+test('saveConfig resolves false when the daemon refuses, and the sheet stays open', async () => {
+  const usage = store(async () => ({}), { put: async () => { throw new Error('400 bad path'); } });
+  assert.equal(await usage.saveConfig({ enabled: true, retention_days: 30, metrics_interval_secs: 60, clickhouse_path: '' }), false);
+  let closed = 0;
+  const sheet = componentFunctions(new URL('../src/modules/usage/StorageSettings.svelte', import.meta.url), ['save'], {
+    usage, onclose: () => closed++, retention: 30, interval: 60, chPath: '/bad',
+  });
+  await sheet.save();
+  assert.equal(closed, 0);
+});
+
 test('Show more that fails to load the full report shows no more rows', async () => {
   const view = componentFunctions(new URL('../src/modules/usage/UsageReportView.svelte', import.meta.url), ['showMore'], {
     usage: { reportFull: false, fullReport: async () => null }, SESSION_PAGE: 100, sessionLimit: 100, limit: 100,

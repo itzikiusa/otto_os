@@ -745,14 +745,17 @@ class UsageStore {
     }
   }
 
-  async saveConfig(req: UsageConfigReq): Promise<void> {
+  /** False when the daemon refused (the sheet stays open with the edits). */
+  async saveConfig(req: UsageConfigReq): Promise<boolean> {
     this.saving = true;
     try {
       this.status = await api.put<UsageStatus>('/usage/config', req);
       toasts.success('Usage settings saved');
       await this.loadAll();
+      return true;
     } catch (e) {
       toasts.error('Couldn’t save', loadErrorText(e));
+      return false;
     } finally {
       this.saving = false;
     }
