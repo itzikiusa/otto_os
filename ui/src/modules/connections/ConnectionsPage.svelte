@@ -98,7 +98,8 @@
   const narrowed = $derived(!!q.trim() || kind !== 'all' || section !== null);
   const shown = $derived(allItems.filter((i) => matches(i, { q, kind, section }, connectionList.sections)));
   const groups = $derived(groupItems(shown, connectionList.sections, narrowed));
-  const isEmpty = $derived(connectionList.loaded && !connectionList.error && allItems.length === 0 && connectionList.sections.length === 0);
+  // Kafka clusters are rows too: not "No connections yet" while they load or failed to.
+  const isEmpty = $derived(connectionList.loaded && !connectionList.error && !brokers.loading && !brokers.loadError && allItems.length === 0 && connectionList.sections.length === 0);
 
   function filterMenu(e: MouseEvent): void {
     const items: MenuItem[] = [
@@ -434,6 +435,10 @@
       {/if}
     {/if}
 
+    {#if brokers.loadError}
+      <LoadState what="Kafka clusters" variant="compact" error={brokers.loadError} loading={brokers.loading} empty={brokers.clusters.length === 0}
+        onretry={() => ws.currentId && void brokers.load(ws.currentId, { withSections: false })} />
+    {/if}
     <LoadState
       what="connections"
       variant="page"

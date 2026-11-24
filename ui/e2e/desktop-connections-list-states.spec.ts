@@ -49,6 +49,17 @@ test('a row deleted with Undo stays hidden after leaving the page and coming bac
   await expect(row).toBeVisible();
 });
 
+test('a failed Kafka cluster read shows inline with Retry (R1-070)', async ({ page }) => {
+  await seedSsh(`kafka-err-${Date.now()}`);
+  await page.route(/\/brokers\/clusters$/, (r) => r.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"brokers down"}' }));
+  await page.goto('/#/connections');
+  const alert = page.getByRole('alert').filter({ hasText: 'Couldn’t load Kafka clusters' });
+  await expect(alert).toBeVisible();
+  await page.unroute(/\/brokers\/clusters$/);
+  await alert.getByRole('button', { name: 'Retry' }).click();
+  await expect(alert).toHaveCount(0);
+});
+
 test('a slow deep link that settles last does not pin the URL (R1-048)', async ({ page }) => {
   const { ctx, base } = await apiCtx();
   const aName = `deep-a-${Date.now()}`;
