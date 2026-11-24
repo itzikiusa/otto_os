@@ -29,13 +29,13 @@ async function database(page:Page) {
   return rows;
 }
 
+// The connection list is its own page: the workbench goes back to it.
 async function showConnections(page:Page) {
-  const tab=page.getByRole('tablist',{name:'Sidebar view'}).getByRole('tab',{name:'Connections',exact:true});
-  if(await tab.isVisible()) await tab.click();
-  else {
-    const accordion=page.getByRole('button',{name:/^Connections \d+/});
-    if(await accordion.getAttribute('aria-expanded')==='false') await accordion.click();
-  }
+  await page.getByRole('button',{name:'All connections',exact:true}).click();
+}
+// Save lives in the workbench header's one ⋯.
+async function queryMenu(page:Page) {
+  await page.getByTestId('page-header').getByRole('button',{name:'More actions'}).click();
 }
 
 test('query save ignores repeated keyboard submission while a response is pending',async({page})=>{
@@ -45,7 +45,7 @@ test('query save ignores repeated keyboard submission while a response is pendin
     posts++;await held;return r.fulfill({json:{...r.request().postDataJSON(),id:'saved',created_at:'2026-09-26'}});
   });
   await database(page);await page.locator('.qe-edit .cm-content').fill('SELECT 41');
-  await page.getByRole('button',{name:'Save',exact:true}).click();
+  await queryMenu(page);await page.getByRole('menuitem',{name:/^Save query…/}).click();
   const name=page.getByPlaceholder('Query name');await name.fill('Only once');
   await name.press('Enter');await expect.poll(()=>posts).toBe(1);await name.press('Enter');
   await expect(page.locator('.save-bar').getByRole('button',{name:/Saving|Save/,exact:false}).first()).toBeDisabled();
@@ -54,12 +54,14 @@ test('query save ignores repeated keyboard submission while a response is pendin
 
 test('saved query response stays associated with its original connection after switching away and back',async({page})=>{
   let release!:()=>void;const held=new Promise<void>(r=>release=r);let sent=false;
+  // Like the daemon, the list returns what was saved: reopening the workbench re-reads it.
+  const saved:unknown[]=[];
   await page.route('**/saved-queries',async r=>{
-    if(r.request().method()!=='POST')return r.fulfill({json:[]});
-    sent=true;await held;return r.fulfill({json:{...r.request().postDataJSON(),id:'saved-original',created_at:'2026-09-26'}});
+    if(r.request().method()!=='POST')return r.fulfill({json:saved});
+    sent=true;await held;const row={...r.request().postDataJSON(),id:'saved-original',created_at:'2026-09-26'};saved.push(row);return r.fulfill({json:row});
   });
   const rows=await database(page);await page.locator('.qe-edit .cm-content').fill('SELECT primary_draft');
-  await page.getByRole('button',{name:'Save',exact:true}).click();await page.getByPlaceholder('Query name').fill('Primary saved query');
+  await queryMenu(page);await page.getByRole('menuitem',{name:/^Save query…/}).click();await page.getByPlaceholder('Query name').fill('Primary saved query');
   await page.locator('.save-bar').getByRole('button',{name:'Save',exact:true}).click();await expect.poll(()=>sent).toBe(true);
   await showConnections(page);
   await page.locator('.conn-list .tr-title',{hasText:rows[1].name}).click();
@@ -70,7 +72,8 @@ test('saved query response stays associated with its original connection after s
   await page.locator('.conn-list .tr-title',{hasText:rows[0].name}).click();
   await expect(page.locator('.qe-edit .cm-content')).toHaveText('SELECT primary_draft');
   await expect(page.getByRole('tablist',{name:'Query tabs'}).getByRole('tab',{selected:true})).toContainText('Primary saved query');
-  await expect(page.getByRole('button',{name:'Update',exact:true})).toBeVisible();
+  await queryMenu(page);
+  await expect(page.getByRole('menuitem',{name:/^Update saved query…/})).toBeVisible();
 });
 
 for(const variant of [
@@ -92,6 +95,8 @@ for(const variant of [
   await page.route('**/connections',r=>r.fulfill({json:[{id:'ssh',name:'Reporting bastion',kind:'ssh'}]}));
   await openPage(page,'agents');await page.keyboard.press('Meta+t');
   const sheet=page.getByRole('dialog',{name:'New session',exact:true});await expect(sheet).toBeVisible();
+  // Network profiles sit behind the stage's Options.
+  await sheet.getByTestId('ns-options').click();
   await sheet.getByRole('button',{name:'Manage network profiles'}).click();await sheet.getByRole('button',{name:'Edit Reporting services'}).click();
   mkdirSync(shots,{recursive:true});await sheet.locator('.manager').scrollIntoViewIfNeeded();
   await page.screenshot({animations:'disabled',path:`${shots}/embedded-${variant.name}.png`});
