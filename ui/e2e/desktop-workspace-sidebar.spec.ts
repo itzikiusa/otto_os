@@ -124,11 +124,13 @@ test.describe('all-workspaces sidebar + workspace management', () => {
     await page.getByRole('button', { name: 'Rename' }).click();
     await expect(nav.locator('.nav-item', { hasText: `${WS_B} renamed` })).toBeVisible();
 
-    // Remove (archive — the folder is untouched) via the context menu → confirm dialog.
+    // Remove (archive — the folder is untouched) via the context menu. B still
+    // has its seeded session, so the dialog asks what happens to it
+    // (workspaceActions.ts removeWorkspace): stop and archive it.
     await nav.locator('.nav-item', { hasText: `${WS_B} renamed` }).first()
       .click({ button: 'right' });
     await page.getByRole('menuitem', { name: 'Remove workspace…' }).click();
-    await page.getByRole('button', { name: 'Remove', exact: true }).click();
+    await page.getByRole('button', { name: 'Stop and archive its sessions' }).click();
     await expect(nav.locator('.nav-item', { hasText: `${WS_B} renamed` })).toHaveCount(0);
   });
 });
