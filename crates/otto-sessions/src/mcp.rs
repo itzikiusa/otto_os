@@ -523,14 +523,20 @@ fn launch_via_env_file(workspace_root: &str, s: &UserMcpServer) -> Option<(Strin
 /// deleted or disabled. A user server name is arbitrary text, so it is reduced
 /// to a safe segment.
 fn launcher_env_path(workspace_root: &str, server: &str) -> PathBuf {
+    std::env::temp_dir().join("otto-mcp").join(format!(
+        "{}{}",
+        launcher_env_prefix(workspace_root),
+        launcher_env_suffix(server)
+    ))
+}
+
+/// `launch-<cwd hash>.`: the name prefix every one of a cwd's launcher env
+/// files shares (a sandboxed session there may read exactly those).
+pub(crate) fn launcher_env_prefix(workspace_root: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     workspace_root.hash(&mut h);
-    std::env::temp_dir().join("otto-mcp").join(format!(
-        "launch-{:016x}.{}",
-        h.finish(),
-        launcher_env_suffix(server)
-    ))
+    format!("launch-{:016x}.", h.finish())
 }
 
 /// `<safe name>-<name hash>.env`, the server-specific tail of every

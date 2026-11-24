@@ -55,9 +55,22 @@ pub async fn claude_draft(
         .as_ref()
         .map_or("claude", |s| s.cmd.as_str())
         .to_string();
+    // `~` expanded as a session spawn does (`CLAUDE_CONFIG_DIR=~/.claude-work`).
+    let home = otto_transcript::roots::home_dir();
     let env: Vec<(String, String)> = spec
         .as_ref()
-        .map(|s| s.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .map(|s| {
+            s.env
+                .iter()
+                .map(|(k, v)| {
+                    let v = (v == "~" || v.starts_with("~/"))
+                        .then(|| otto_transcript::claude_config::expand_home_path(v, &home))
+                        .flatten()
+                        .map_or_else(|| v.clone(), |p| p.to_string_lossy().into_owned());
+                    (k.clone(), v)
+                })
+                .collect()
+        })
         .unwrap_or_default();
     let (program, args) = if otto_sessions::providers::resolves_on_path(&program) {
         (program, draft_args(model))
@@ -93,6 +106,13 @@ pub async fn text_turn(
     else {
         return Err(Error::Internal("the Claude CLI has no stdio".into()));
     };
+    // Drained alongside stdout: a CLI blocked on a full stderr pipe would
+    // never finish its stdout.
+    let stderr = tokio::spawn(async move {
+        let mut err = Vec::new();
+        let _ = stderr.read_to_end(&mut err).await;
+        String::from_utf8_lossy(&err).into_owned()
+    });
     let turn = async {
         let user = json!({
             "type": "user",
@@ -104,9 +124,12 @@ pub async fn text_turn(
         let _ = stdin.write_all(format!("{user}\n").as_bytes()).await;
         let _ = stdin.flush().await;
         let mut streamed = String::new();
-        let mut lines = BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let Ok(msg) = serde_json::from_str::<Value>(&line) else {
+        // Bytes, not `lines()`: one non-UTF-8 byte must not end the read.
+        let (mut out, mut buf) = (BufReader::new(stdout), Vec::new());
+        while out.read_until(b'\n', &mut buf).await.is_ok_and(|n| n > 0) {
+            let msg = serde_json::from_str::<Value>(&String::from_utf8_lossy(&buf));
+            buf.clear();
+            let Ok(msg) = msg else {
                 continue;
             };
             match msg.get("type").and_then(Value::as_str) {
@@ -138,8 +161,7 @@ pub async fn text_turn(
                 _ => {}
             }
         }
-        let mut err = String::new();
-        let _ = stderr.read_to_string(&mut err).await;
+        let err = stderr.await.unwrap_or_default();
         let why = err
             .lines()
             .rev()
@@ -241,6 +263,83 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"fix: a\n\n- b"}'"#,
             .await
             .unwrap_err();
         assert!(e.to_string().contains("unknown option --tools="), "{e}");
+    }
+
+    /// R1-076: dropping the turn (Stop, the client went away) kills the CLI.
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // a blocking `ps` probe in a test
+    async fn dropping_the_turn_kills_the_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let p = fake(
+            dir.path(),
+            &format!("echo $$ > '{}'; exec sleep 30", pid_file.display()),
+        );
+        let turn = text_turn(&p, &[], &[], "x", DRAFT_TIMEOUT, |_| {});
+        let wait_pid = async {
+            loop {
+                if let Some(pid) = std::fs::read_to_string(&pid_file)
+                    .ok()
+                    .filter(|s| s.ends_with('\n'))
+                {
+                    break pid.trim().to_string();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        let pid = tokio::select! {
+            _ = turn => panic!("the turn ended on its own"),
+            pid = wait_pid => pid,
+        };
+        let alive = || {
+            let out = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid])
+                .output()
+                .unwrap();
+            let stat = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            !stat.is_empty() && !stat.starts_with('Z')
+        };
+        for _ in 0..200 {
+            if !alive() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the CLI (pid {pid}) outlived its dropped turn");
+    }
+
+    /// R1-038: a CLI that writes more than a pipe holds (64 KiB) to stderr
+    /// before its reply no longer deadlocks the turn, and a non-UTF-8 byte on
+    /// stdout no longer drops the reply.
+    #[tokio::test]
+    async fn a_loud_stderr_or_a_non_utf8_line_still_returns_the_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = fake(
+            dir.path(),
+            r#"head -c 200000 /dev/zero | tr '\0' x >&2
+printf '\377\n'
+printf '%s\n' '{"type":"result","is_error":false,"result":"fix: a"}'"#,
+        );
+        let reply = text_turn(&p, &[], &[], "x", Duration::from_secs(5), |_| {})
+            .await
+            .unwrap();
+        assert_eq!(reply, "fix: a");
+    }
+
+    /// R1-025: `~` in the provider's env is expanded as a session spawn does.
+    #[tokio::test]
+    async fn the_draft_expands_home_in_the_provider_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = fake(
+            dir.path(),
+            r#"printf '{"type":"result","is_error":false,"result":"%s"}\n' "$CLAUDE_CONFIG_DIR""#,
+        );
+        let providers = otto_sessions::ProviderRegistry::new(Some(&json!({
+            "claude": { "cmd": p, "env": { "CLAUDE_CONFIG_DIR": "~/.claude-work" } }
+        })));
+        let reply = claude_draft(&providers, "", "x", |_| {}).await.unwrap();
+        let home = otto_transcript::roots::home_dir();
+        assert_eq!(reply, home.join(".claude-work").to_string_lossy());
     }
 
     #[tokio::test]

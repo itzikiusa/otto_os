@@ -14,11 +14,7 @@ fn write_claude_mcp_config(sid: &Id, cwd: &str, cfg: &crate::mcp::ManagedMcpConf
         let _ = std::fs::remove_file(&path);
         return Vec::new();
     };
-    // Reuse the private 0600 writer, then replace its body.
-    let written = crate::mcp::write_env_file(&path, &Default::default()).and_then(|()| {
-        std::fs::write(&path, doc).map_err(|e| format!("write {}: {e}", path.display()))
-    });
-    match written {
+    match crate::mcp::write_private_file(&path, doc.as_bytes()) {
         Ok(()) => names,
         Err(e) => {
             tracing::warn!(session = %sid, "claude --mcp-config: {e}");
@@ -93,6 +89,14 @@ impl SessionManager {
             .providers
             .model_family_for(&session.provider)
             .unwrap_or_else(|| session.provider.clone());
+        // A Claude terminal with `--strict-mcp-config` (a lean turn, an
+        // untrusted read-only session) takes no servers: nothing is written
+        // for it, and nothing is "skipped".
+        let flag = |k: &str| session.meta.get(k).and_then(|v| v.as_bool());
+        let strict = cli_family == "claude"
+            && session.meta.get("runtime").and_then(|v| v.as_str()) != Some("structured")
+            && (flag("lean_turn") == Some(true)
+                || (flag("read_only") == Some(true) && flag("project_settings") == Some(false)));
         let has_otto = otto_tools.is_some();
         let pi_otto = otto_tools.clone().filter(|_| cli_family == "pi");
         let cfg = crate::mcp::ManagedMcpConfig {
@@ -121,12 +125,15 @@ impl SessionManager {
             // own channel below — so opening, resuming or viewing their
             // sessions writes nothing into the repository for them.
             let mcp_json_names = match &*provider {
+                "claude" if strict => Vec::new(),
                 "claude" => write_claude_mcp_config(&sid, &cwd, &cfg),
-                "agy" | "gemini" | "grok" | "codex" | "pi" => Vec::new(),
-                _ => crate::mcp::reconcile_managed_servers(&cwd, &cfg).unwrap_or_else(|e| {
-                    tracing::warn!(session = %sid, cwd = %cwd, "reconcile workspace MCP config: {e}");
-                    Vec::new()
-                }),
+                "muse" | "opencode" => crate::mcp::reconcile_managed_servers(&cwd, &cfg)
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(session = %sid, cwd = %cwd, "reconcile workspace MCP config: {e}");
+                        Vec::new()
+                    }),
+                // A shell (a Threads terminal dock too) has no agent CLI to serve.
+                _ => Vec::new(),
             };
             let agy_names = (provider == "agy").then(|| {
                 // agy never reads `.mcp.json` — same managed set, its own file.
@@ -247,17 +254,9 @@ impl SessionManager {
                     }
                 }
             }
-            // Claude: the set from `--mcp-config` (outside the repository) —
-            // except for a terminal with `--strict-mcp-config` (a lean turn, an
-            // untrusted read-only session), which takes no servers.
+            // Claude: the set from `--mcp-config` (outside the repository).
             "claude" => {
-                let flag = |k: &str| session.meta.get(k).and_then(|v| v.as_bool());
-                let strict = session.meta.get("runtime").and_then(|v| v.as_str())
-                    != Some("structured")
-                    && (flag("lean_turn") == Some(true)
-                        || (flag("read_only") == Some(true)
-                            && flag("project_settings") == Some(false)));
-                if strict || mcp_json_names.is_empty() {
+                if mcp_json_names.is_empty() {
                     Vec::new()
                 } else {
                     let path = super::runtime_spawn::claude_mcp_config_path(&session.id);
@@ -276,7 +275,7 @@ impl SessionManager {
         let skipped = user_servers
             .as_deref()
             .map(|users| crate::mcp::skipped_servers(&cli_family, users, &delivered))
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty() && !strict);
         // Snapshot-at-spawn: what this provider was actually given, what it
         // was not, plus the lookup fault if any (json_patch: a null clears a
         // stale error / skip list).

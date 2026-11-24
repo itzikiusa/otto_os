@@ -4475,3 +4475,128 @@ async fn sandboxed_muse_session_starts_with_its_own_sandbox_off() {
     assert!(argv.lines().any(|a| a == "--disable-sandbox"), "{argv}");
     manager.remove(&session.id).await.unwrap();
 }
+
+/// Re-sweep NEW-1: a shell session (a Threads terminal dock too) has no agent
+/// CLI to serve, yet its start and every resume (the same MCP sync) wrote
+/// Otto's `.mcp.json` into the repository. Start it, sync again as a resume
+/// does, and do the same for a Claude session: the folder stays empty.
+#[tokio::test]
+#[allow(clippy::disallowed_methods)] // a blocking dir listing in a test
+async fn shell_and_claude_sessions_leave_the_repo_file_list_untouched() {
+    let (manager, _repo, mut workspace, user) = test_manager().await;
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().canonicalize().unwrap();
+    workspace.root_path = cwd.to_string_lossy().into_owned();
+    let otto = crate::mcp::OttoToolsServer {
+        command: "/usr/bin/true".into(),
+        args: vec![],
+        env: Default::default(),
+    };
+    for provider in ["shell", "claude"] {
+        if provider == "claude" {
+            manager.providers.reload(Some(&serde_json::json!({
+                "claude": { "cmd": "/bin/sh", "args": ["-c", "exec /bin/sleep 60"] }
+            })));
+        }
+        let request = CreateSessionReq {
+            kind: SessionKind::Agent,
+            provider: Some(provider.into()),
+            title: Some("repo stays clean".into()),
+            cwd: Some(workspace.root_path.clone()),
+            connection_id: None,
+            model: None,
+            meta: None,
+        };
+        let session = manager
+            .create(&workspace, &user, request, None)
+            .await
+            .unwrap();
+        manager
+            .sync_workspace_mcp(&session, Some(otto.clone()), false)
+            .await;
+        let left: Vec<_> = std::fs::read_dir(&cwd)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert!(
+            left.is_empty(),
+            "{provider} wrote into the repository: {left:?}"
+        );
+        manager.remove(&session.id).await.unwrap();
+    }
+}
+
+/// R1-002: `<tmp>/otto-mcp` (every session's MCP launcher files: tokens,
+/// Keychain-resolved env) sits under the writable temp root. A confined agent
+/// read another session's file there and could plant one an unconfined spawn
+/// then runs; now it reads only its own cwd's launcher env and writes nothing.
+#[tokio::test]
+async fn a_sandboxed_session_cannot_read_or_plant_other_sessions_mcp_files() {
+    if !otto_sandbox::is_supported() {
+        return;
+    }
+    let (mgr0, repo, mut workspace, user) = test_manager().await;
+    let settings = otto_state::SettingsRepo::new(repo.pool());
+    settings
+        .put("process_sandbox", &serde_json::json!({"enabled": true}))
+        .await
+        .unwrap();
+    let manager = Arc::new(
+        Arc::try_unwrap(mgr0)
+            .ok()
+            .expect("sole owner")
+            .with_settings_repo(settings),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().canonicalize().unwrap();
+    workspace.root_path = cwd.to_string_lossy().into_owned();
+    let mcp = std::env::temp_dir().join("otto-mcp");
+    std::fs::create_dir_all(&mcp).unwrap();
+    let tag = uuid::Uuid::new_v4().simple().to_string();
+    let other = mcp.join(format!("{tag}.claude-mcp.json"));
+    std::fs::write(&other, "OTHER-SECRET").unwrap();
+    let own = mcp.join(format!(
+        "{}{tag}.env",
+        crate::mcp::launcher_env_prefix(&workspace.root_path)
+    ));
+    std::fs::write(&own, "OWN-ENV").unwrap();
+    let planted = mcp.join(format!("{tag}.pi-mcp.js"));
+    let script = format!(
+        "cat '{}' > other; cat '{}' > own; echo x > '{}'; echo done > fin; exec /bin/sleep 60",
+        other.display(),
+        own.display(),
+        planted.display()
+    );
+    manager.providers.reload(Some(&serde_json::json!({
+        "muse": { "cmd": "/bin/sh", "args": ["-c", script, "fake-muse"] }
+    })));
+    let request = CreateSessionReq {
+        kind: SessionKind::Agent,
+        provider: Some("muse".into()),
+        title: Some("Sandboxed MCP-dir probe".into()),
+        cwd: Some(workspace.root_path.clone()),
+        connection_id: None,
+        model: None,
+        meta: None,
+    };
+    let session = manager
+        .create(&workspace, &user, request, None)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !cwd.join("fin").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let read = |f: &str| std::fs::read_to_string(cwd.join(f)).unwrap_or_default();
+    assert_eq!(read("other"), "", "read another session's file");
+    assert_eq!(read("own"), "OWN-ENV", "its own cwd's launcher env");
+    assert!(!planted.exists(), "planted a file in <tmp>/otto-mcp");
+    manager.remove(&session.id).await.unwrap();
+    for f in [&other, &own, &planted] {
+        let _ = std::fs::remove_file(f);
+    }
+}

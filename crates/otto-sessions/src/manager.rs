@@ -1888,6 +1888,14 @@ impl SessionManager {
         // Package managers / build tools cache into a private per-session dir
         // (under temp, which is writable): the user's shared caches hold code
         // unsandboxed programs run later, so they are not writable roots.
+        // Every session's MCP launcher files (tokens, Keychain-resolved env)
+        // live in `<tmp>/otto-mcp`: this one reads only its own and its cwd's
+        // launcher env files there, and writes none of them.
+        let own = [
+            format!("{}.", session.id),
+            crate::mcp::launcher_env_prefix(&session.cwd),
+        ];
+        policy = policy.private_dir(&std::env::temp_dir().join("otto-mcp"), &own);
         let cache = agent_cache_dir(&session.id);
         otto_sandbox::seed_agent_cache(&cache, &home, |k| std::env::var(k).ok());
         spec.env.extend(otto_sandbox::agent_cache_env(&cache));
