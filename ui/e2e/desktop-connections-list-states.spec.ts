@@ -108,3 +108,24 @@ test('a slow deep link that settles last does not pin the URL (R1-048)', async (
   await page.locator('.conn-tab', { hasText: bName }).getByRole('button', { name: 'Close connection tab' }).click();
   await expect(page).toHaveURL(new RegExp(`#/database/${a}$`));
 });
+
+test('saving an edit to a connection that could not connect connects again (R1-034)', async ({ page }) => {
+  const { ctx, base } = await apiCtx();
+  const name = `fixme-${Date.now()}`;
+  const id = await seedMockDbConnection(ctx, base, wsId, name);
+  await ctx.dispose();
+  await mockDbRoutes(page, id);
+  let fail = true;
+  await page.route(new RegExp(`/connections/${id}/db/`), (r) =>
+    fail ? r.fulfill({ status: 502, contentType: 'application/json', body: '{"error":"Access denied for user"}' }) : r.fallback());
+  await page.goto(`/#/database/${id}`);
+  const state = page.getByTestId('db-conn-state');
+  await expect(state).toContainText(/Can’t connect|Needs sign-in/);
+  fail = false; // the edit below is the fix
+  await state.getByRole('button', { name: 'Details', exact: true }).click();
+  await page.getByTestId('db-conn-error-banner').getByRole('button', { name: 'Edit connection', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Save changes' }).click();
+  await expect(state).toContainText('Connected');
+  await page.getByRole('button', { name: 'All connections', exact: true }).click();
+  await expect(page.locator('.conn-row', { hasText: name })).not.toContainText(/Can’t connect|Needs sign-in/);
+});
