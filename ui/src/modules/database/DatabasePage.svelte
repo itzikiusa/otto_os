@@ -379,6 +379,13 @@
       void openDeep(id).finally(() => (deepTried = id));
     });
   });
+  // …and the URL follows the open connection (a tab switch), so a reload or
+  // a copied link comes back to it, not to the one the page was opened on.
+  $effect(() => {
+    const id = database.activePane === null ? database.selectedConnId : null;
+    if (!id || !isPage || !connsSettled || id === deepId || (deepId && deepTried !== deepId)) return;
+    untrack(() => router.replace(`database/${id}`));
+  });
   async function openDeep(id: string): Promise<void> {
     if (database.connections.some((c) => c.id === id)) {
       connectionList.stampOpened(id);

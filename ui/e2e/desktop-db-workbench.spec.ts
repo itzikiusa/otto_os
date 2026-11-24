@@ -39,19 +39,19 @@ test.beforeEach(async ({ page }, testInfo) => {
   }, workspaceId);
 });
 
-/** Open a connection from the sidebar picker. Opening the first connection flips
- *  the sidebar to the schema view, so re-show the "Connections" tab first. */
+/** Open a connection from the connection list (its own page, #/connections;
+ *  the workbench's back button goes there). The workbench is titled by the
+ *  connection it opened. */
 async function openConnFromList(page: Page, name: string): Promise<void> {
-  const connTab = page.locator('.side-switch [role="tab"]', { hasText: 'Connections' });
-  if (await connTab.first().isVisible().catch(() => false)) await connTab.first().click();
+  if (await page.getByTestId('db-conn-state').isVisible()) {
+    await page.getByRole('button', { name: 'All connections', exact: true }).click();
+  }
   const id = name === 'e2e-mysql' ? conn.mysql : conn.redis;
   const c = page.locator(`.conn-row[data-connection-id="${id}"] .tr-title`, { hasText: name });
   await expect(c.first()).toBeVisible({ timeout: 30_000 });
   await c.first().click();
   await expect(page.getByTestId('db-conn-state')).toBeVisible({ timeout: 20_000 });
-  await expect(
-    page.locator('.conn-tab.active .conn-tab-name', { hasText: name }),
-  ).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('page-header').getByRole('heading', { name, exact: true })).toBeVisible({ timeout: 20_000 });
 }
 
 test('workbench restores open tabs + selection + per-connection view on reload', async ({
