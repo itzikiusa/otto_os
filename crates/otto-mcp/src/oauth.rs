@@ -340,9 +340,15 @@ async fn token_request(
         .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
         .take(40)
         .collect();
-    Err(format!(
-        "the authorization server refused the token request ({code})"
-    ))
+    Err(format!("{REFUSED} ({code})"))
+}
+
+const REFUSED: &str = "the authorization server refused the token request";
+
+/// The token endpoint answered and said no (the grant is gone), as opposed
+/// to not being reachable.
+pub fn is_refusal(error: &str) -> bool {
+    error.starts_with(REFUSED)
 }
 
 fn tokens_from(v: &Value, base: &Tokens, now: i64) -> Tokens {

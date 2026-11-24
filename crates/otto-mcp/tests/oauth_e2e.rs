@@ -342,6 +342,15 @@ async fn a_revoked_grant_and_an_unsigned_server_say_needs_sign_in() {
         "{:?}",
         row.health_error
     );
+    // The refused grant's refresh token is dropped (no more token posts).
+    let left: Tokens = serde_json::from_str(
+        &get_async(&store, &token_key(&server.id))
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(left.refresh_token.is_none());
     // Sign-out deletes the tokens.
     svc.oauth_sign_out(&server.id).await.unwrap();
     assert!(get_async(&store, &token_key(&server.id))

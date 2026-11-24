@@ -116,6 +116,12 @@ impl McpService {
                         t = fresh;
                     }
                     Err(e) => {
+                        // A refused grant is dead: drop its refresh token so
+                        // later calls don't post to the token endpoint again.
+                        if oauth::is_refusal(&e) {
+                            t.refresh_token = None;
+                            let _ = self.oauth_save(&server.id, &t).await;
+                        }
                         let _ = self
                             .record_health(server, Err(format!("{NEEDS_SIGN_IN}: {e}")), None)
                             .await;
