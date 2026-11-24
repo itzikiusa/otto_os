@@ -672,10 +672,9 @@
             {#if stText}<span id="conn-st-{c.id}" class="sr-only">{stText}</span>{/if}
             {#if st?.phase === 'connecting'}
               <span class="conn-tab-spin spinner" style="--spinner-size: 10px" aria-hidden="true" title={database.isWarming(c.id) ? 'Connecting in the background… (right-click to stop)' : 'Connecting…'} data-testid="conn-tab-connecting"></span>
-            {:else if st?.phase === 'error'}
-              <span class="conn-tab-dot" aria-hidden="true" title={st.error}></span>
-            {:else if st?.phase === 'idle'}
-              <span class="conn-tab-idle" aria-hidden="true" title="Not connected yet — opens on click" data-testid="conn-tab-idle"></span>
+            {:else if st?.phase === 'error' && !on}
+              <!-- In words, never a bare dot; the open tab's header says it already. -->
+              <span class="conn-tab-word" aria-hidden="true" title={st.error}>Can’t connect</span>
             {/if}
             <button class="conn-tab-more" onclick={(e) => connMenu(e, c)} aria-haspopup="menu" aria-label="More actions for {c.name}" title="More actions for {c.name}">
               <Icon name="more" size={12} />
@@ -719,7 +718,7 @@
               <span class="conn-tab-name ellipsis">{s.name}</span>
               {#if sc && envBadge(sc)}<EnvBadge env={sc.environment} readOnly={sc.read_only} />{/if}
             </button>
-            {#if ended}<span id="ssh-st-{s.connId}" class="sr-only">Session ended</span><span class="conn-tab-dot" aria-hidden="true" title="Session ended — click the connection or Reconnect to start a new one" data-testid="ssh-tab-ended"></span>{/if}
+            {#if ended}<span id="ssh-st-{s.connId}" class="sr-only">Session ended</span><span class="conn-tab-word" aria-hidden="true" title="Session ended — click the connection or Reconnect to start a new one" data-testid="ssh-tab-ended">Ended</span>{/if}
             <button class="conn-tab-close" onclick={(e) => { e.stopPropagation(); void sshTabs.close(s.connId); }} aria-label="Close terminal tab" title="Close terminal tab">
               <Icon name="x" size={12} />
             </button>
@@ -1167,21 +1166,11 @@
     margin-inline-start: 4px;
     flex-shrink: 0;
   }
-  /* Restored but not connected yet: a hollow muted ring (no colour = no claim). */
-  .conn-tab-idle {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    border: 1.5px solid var(--text-dim);
+  .conn-tab-word {
+    color: var(--danger);
+    font-size: var(--fs-xs);
     margin-inline-start: 4px;
-    flex-shrink: 0;
-  }
-  .conn-tab-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--status-exited);
-    margin-inline-start: 4px;
+    white-space: nowrap;
     flex-shrink: 0;
   }
 

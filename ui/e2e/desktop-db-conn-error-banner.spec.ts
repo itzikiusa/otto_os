@@ -35,3 +35,26 @@ test('an unreachable database says it once in the header, with Retry and Details
   await expect(page.getByRole('dialog').getByLabel('Name', { exact: true })).toHaveValue(name);
   await ctx.dispose();
 });
+
+// A tab's state is a word, never a bare dot — and only on a tab that is not
+// open (the header already says it for the open one).
+test('a background tab that can\'t connect says so in words', async ({ page }) => {
+  const { ctx, base } = await apiCtx();
+  const ws = await seedWorkspace(ctx, base);
+  const names = [`refused-a-${Date.now()}`, `refused-b-${Date.now()}`];
+  for (const name of names) {
+    // Port 9 on loopback refuses at once: no host is contacted.
+    const r = await ctx.post(`${base}/api/v1/workspaces/${ws}/connections`, { data: { name, kind: 'redis', params: { host: '127.0.0.1', port: 9, database: '0' } } });
+    expect(r.ok()).toBeTruthy();
+  }
+  await openPage(page, 'connections');
+  await page.locator('.conn-row', { hasText: names[0] }).click();
+  await expect(page.getByTestId('db-conn-state')).toContainText('Can’t connect', { timeout: 30_000 });
+  await page.getByRole('button', { name: 'All connections' }).click();
+  await page.locator('.conn-row', { hasText: names[1] }).click();
+  await expect(page.getByTestId('db-conn-state')).toContainText('Can’t connect', { timeout: 30_000 });
+  const tabs = page.getByRole('tablist', { name: 'Open connections' });
+  await expect(tabs.locator('.conn-tab', { hasText: names[0] })).toContainText('Can’t connect');
+  await expect(tabs.locator('.conn-tab.active')).not.toContainText('Can’t connect');
+  await ctx.dispose();
+});
