@@ -21,6 +21,7 @@
   import { git } from '../../lib/stores/git.svelte';
   import { now } from '../../lib/stores/now.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { sharedAgentTasks, taskElapsed } from './runtime/agentTasks';
@@ -57,8 +58,12 @@
     ondismiss?: () => void;
     /** One summary row that opens on tap (a surface is open below it). */
     summary?: boolean;
+    /** Heading the Agents right panel: facts only (the Git tab's commit card owns
+     *  Commit → Push → PR), Changes opens that tab, a subagent opens as a pane
+     *  here — never the Threads page's inspector. */
+    agents?: boolean;
   }
-  let { cwd, threadId = null, floating = false, ondismiss, summary = false }: Props = $props();
+  let { cwd, threadId = null, floating = false, ondismiss, summary = false, agents = false }: Props = $props();
   // A thread stopped on its provider's usage limit, and when it resumes (RuntimeUsageLimit).
   const limitRow = $derived.by(() => {
     const rt = threadId ? runtimeThreads.get(threadId) : null;
@@ -208,6 +213,11 @@
 
   /** Opens a thread from the card; on a phone the details drawer gives way to it. */
   function openThread(id: string): void {
+    if (agents) {
+      if (runtimeThreads.get(id)) ws.openSession(id, 'thread');
+      ws.navigateToSession(id);
+      return;
+    }
     if (threads.inspectorCompact) threads.setInspectorOpen(false);
     openChildThread(id);
   }
@@ -217,7 +227,7 @@
    *  right panel it heads. */
   function openSubagent(r: SubagentRow): void {
     if (r.threadId) openThread(r.threadId);
-    else threads.setInspectorOpen(true);
+    else if (!agents) threads.setInspectorOpen(true);
   }
 
   // Compact past 10k (T3: "1m", not "1000k") so huge diffs keep the row calm.
@@ -337,7 +347,7 @@
         <span class="dc-label mono" dir="ltr">{branch ?? 'Detached HEAD'}</span>
         <Icon name="chevronDown" size={12} />
       </button>
-      {#if action.kind !== 'none'}
+      {#if action.kind !== 'none' && !agents}
       <div class="dc-line">
         <button
           type="button"
@@ -356,7 +366,7 @@
         </button>
       </div>
       {/if}
-      <button type="button" class="dc-row" title="Review the working-tree changes" data-testid="details-changes" onclick={() => threads.setInspectorTab('changes')}>
+      <button type="button" class="dc-row" title="Review the working-tree changes" data-testid="details-changes" onclick={() => (agents ? ui.openRight('git') : threads.setInspectorTab('changes'))}>
         <Icon name="file" size={14} />
         <!-- One source with the git row above: the status's changed files (a binary
              or untracked file adds no lines, yet it is a change to commit). -->

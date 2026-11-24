@@ -10,4 +10,4 @@
   const Card = lazyComponent(() => import('../threads/ThreadDetailsCard.svelte')); // ui-guards: allow — one details card for both pages
 </script>
 
-<LazyMount lazy={Card} what="the session details" variant="compact" props={{ cwd, threadId }} />
+<LazyMount lazy={Card} what="the session details" variant="compact" props={{ cwd, threadId, agents: true }} />

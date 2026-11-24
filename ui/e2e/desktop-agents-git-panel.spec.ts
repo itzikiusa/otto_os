@@ -14,6 +14,7 @@ const SHOTS = process.env.OTTO_E2E_SHOTS;
 let repo: CardRepo;
 let wsId = '';
 let sid = '';
+let helperId = '';
 
 test.beforeAll(async () => {
   repo = await seedCardRepo('e2e-agents-git-panel');
@@ -24,7 +25,43 @@ test.beforeAll(async () => {
   const s = await ctx.post(`${base}/api/v1/workspaces/${wsId}/sessions`, { data: { kind: 'agent', provider: 'shell', title: 'Rivera', cwd: repo.dir, meta: { origin: 'e2e' } } });
   expect(s.ok(), await s.text()).toBeTruthy();
   sid = (await s.json()).id as string;
+  // A session working under Rivera: the details card lists it as a subagent.
+  const h = await ctx.post(`${base}/api/v1/workspaces/${wsId}/sessions`, { data: { kind: 'agent', provider: 'shell', title: 'Rivera helper', cwd: repo.dir, meta: { origin: 'e2e', parent_session_id: sid } } });
+  expect(h.ok(), await h.text()).toBeTruthy();
+  helperId = (await h.json()).id as string;
   await ctx.dispose();
+});
+
+// The details card heading the panel is facts + doors on Agents: no Commit row
+// over the commit card, Changes opens the panel's Git tab, a subagent opens
+// as a pane here — and none of it touches the Threads page's saved inspector.
+test('the details card on Agents: Changes opens the Git tab, a subagent opens here, no second Commit', async ({ page }, info) => {
+  test.skip(info.project.name !== 'desktop-browser', 'desktop-browser project only');
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await stubForge(page);
+  await page.addInitScript((id) => {
+    localStorage.setItem('otto_workspace', id as string);
+    localStorage.setItem('otto_firstrun_dismissed', '1');
+    localStorage.setItem('otto_nav_all_ws', '0');
+  }, wsId);
+  await page.goto(`/#/agents/${sid}`);
+  await expect(page.locator(`[data-pane-key][data-session="${sid}"]`)).toBeVisible({ timeout: 30_000 });
+  await page.locator('.rstrip').getByRole('button', { name: 'Files', exact: true }).click();
+  const card = page.getByTestId('agents-details-card');
+  await expect(card.getByTestId('details-changes')).toBeVisible({ timeout: 20_000 });
+  await expect(card.getByTestId('details-branch')).toBeVisible();
+  await expect(card.getByTestId('details-changes-files').or(card.locator('.dc-add'))).toBeVisible({ timeout: 15_000 });
+  // The commit card owns Commit → Push → PR: the details card has no second one.
+  await expect(card.getByTestId('details-git-action')).toHaveCount(0);
+  await expect(card.getByTestId('details-git-menu')).toHaveCount(0);
+  await card.getByTestId('details-changes').click();
+  await expect(page.getByTestId('commit-card')).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('.rstrip').getByRole('button', { name: 'Git', exact: true })).toHaveAttribute('aria-pressed', 'true');
+
+  await card.getByTestId('details-subagent').filter({ hasText: 'Rivera helper' }).getByRole('button').first().click();
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe(`#/agents/${helperId}`);
+  await expect(page.locator(`[data-pane-key][data-session="${helperId}"]`)).toBeVisible({ timeout: 20_000 });
+  expect(await page.evaluate(() => localStorage.getItem('otto_threads_v1')), 'the Threads inspector state is untouched').toBeNull();
 });
 
 test('a dirty session folder: the Git tab is Changes + the commit card; Commit and push from it', async ({ page }, info) => {
