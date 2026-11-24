@@ -2470,6 +2470,7 @@ mod tests {
     /// each write uses its own temp sibling, so none fails or leaves a torn
     /// file (they shared `env.<pid>.tmp` and lost each other's rename).
     #[test]
+    #[allow(clippy::disallowed_methods)] // a blocking dir listing in a test
     fn concurrent_env_writes_in_one_cwd_all_land_whole() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("launch-x.srv.env");
