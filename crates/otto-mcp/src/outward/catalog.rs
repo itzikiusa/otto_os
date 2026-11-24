@@ -2089,12 +2089,6 @@ pub async fn detail_with_target(pool: &otto_state::DbPool, tool: &str, args: &Va
             | "update_confluence_page"
             | "comment_confluence_page"
     );
-    // A PR write names its repository by id: say its name ("repo 'otto'").
-    if let Some(rid) = id("repo_id") {
-        if let Ok(r) = otto_state::GitStore::new(pool.clone()).get_repo(&rid).await {
-            return detail.replace(&format!("repo '{rid}'"), &format!("repo '{}'", r.name));
-        }
-    }
     if let Some(acct) = id("account_id").filter(|_| issue_write) {
         if let Ok(a) = otto_state::IssuesRepo::new(pool.clone())
             .get_account(&acct)
