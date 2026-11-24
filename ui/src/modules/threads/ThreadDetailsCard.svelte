@@ -160,15 +160,21 @@
     const p = runtimeViews.projections[rt.id] ?? null;
     return sharedAgentTasks(rt.id, p?.items ?? [], p?.session?.background_tasks ?? rt.background_tasks ?? [], { output: p?.output, childThreads: relatives.children });
   });
+  // Recomputed only when the tasks or the relatives are new objects (a
+  // streamed chunk that changes neither keeps the same section).
+  let lastSection: { tasks: unknown; rel: unknown; value: ReturnType<typeof subagentSection> | null } | null = null;
   const subagents = $derived.by(() => {
     const rel = relatives;
     if (!rel) return null;
+    if (lastSection && lastSection.tasks === tasks && lastSection.rel === rel) return lastSection.value;
     const s = subagentSection(tasks, {
       parent: rel.parent,
       delegated: rel.delegated,
       providerOf: (id) => runtimeThreads.get(id)?.provider ?? null,
     });
-    return s.parent || s.running.length || s.previous.length ? s : null;
+    const value = s.parent || s.running.length || s.previous.length ? s : null;
+    lastSection = { tasks, rel, value };
+    return value;
   });
   /** The header tallies like the timeline row, most urgent first ("1 needs you · 1 working"). */
   const WORD_TONE: Record<SubagentWord, ChildTone> = { Working: 'working', 'Needs you': 'needs-you', Done: 'done', Failed: 'failed', Limited: 'failed', Stopped: 'stopped' };
