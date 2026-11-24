@@ -139,3 +139,19 @@ test('a plain click on a thread row opens its pane here; ⌘-click goes to Threa
   await row(page, threadId).click({ modifiers: ['ControlOrMeta'] });
   await expect.poll(() => page.evaluate(() => location.hash)).toBe(`#/threads/${threadId}`);
 });
+
+// A focused chat pane is the route (`#/agents/<threadId>`): a reload must not
+// call it gone (it was looked up as a terminal session only).
+test('a reload with a chat pane focused restores it without a false "gone" toast', async ({ page }) => {
+  await page.goto('/#/agents');
+  await expect(row(page, threadId)).toBeVisible({ timeout: 30_000 });
+  await row(page, threadId).click();
+  const pane = page.getByTestId(`thread-pane-${threadId}`);
+  await expect(pane).toBeVisible({ timeout: 20_000 });
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe(`#/agents/${threadId}`);
+  await page.reload();
+  await expect(pane).toBeVisible({ timeout: 30_000 });
+  // The route's lookup runs at mount, before the pane shows: give a late toast its chance.
+  await page.waitForTimeout(1500); // ui-guards: allow — proves an absence (no toast)
+  await expect(page.locator('.toast.error')).toHaveCount(0);
+});
