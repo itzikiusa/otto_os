@@ -42,7 +42,6 @@
     tierAtMost,
     type PaneTier,
   } from '../../lib/paneHeader';
-  import { presetItems } from './SplitNode.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   const AttachIssueView = lazyComponent(() => import('./AttachIssue.svelte'));
@@ -572,9 +571,8 @@
       ...(showClose && foldedMinimal ? [{ label: closeTitle.split(' (')[0], icon: 'x', action: onclosepane } as MenuItem] : []),
       ...(readOnly ? [] : [{ label: 'Archive', icon: 'archive', action: () => void archive() } as MenuItem, { label: 'Delete…', icon: 'trash', danger: true, action: () => void del() } as MenuItem]),
     ];
-    // The layout presets only with a split to re-arrange (shared with the DB pane's ✕).
-    const presets: MenuItem[] = showClose ? presetItems() : [];
-    const groups = [session_, share, attach, [{ label: 'Details', icon: 'info', children: detailItems() } as MenuItem], presets, danger].filter((g) => g.length > 0);
+    // The layout presets act on the canvas, not this pane: the tab bar's Arrange control has them.
+    const groups = [session_, share, attach, [{ label: 'Details', icon: 'info', children: detailItems() } as MenuItem], danger].filter((g) => g.length > 0);
     return [
       ...groups.flatMap((g, i) => (i === 0 ? g : [sep, ...g])),
       ...(viewport.isPhone ? [] : [sep, { label: 'Terminal settings…', icon: 'gear', title: 'Font, size and copy on select (⌘+ ⌘− ⌘0 in the terminal)', action: () => router.go('settings/appearance') } as MenuItem]),

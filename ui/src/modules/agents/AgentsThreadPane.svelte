@@ -21,12 +21,11 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { rightPanel } from '../../lib/stores/rightPanel.svelte';
   import { asThreadSession, runtimeThreads } from '../threads/runtime/runtimeThreads.svelte'; // ui-guards: allow — the thread's own row (one store with Threads)
-  import { presetItems } from './SplitNode.svelte';
 
   interface Props {
     threadId: string;
     focused: boolean;
-    /** In a split: ✕ closes the pane (the thread keeps running) and ⋯ has the layout presets; ⋯ › Close pane always. */
+    /** In a split: ✕ closes the pane (the thread keeps running); ⋯ › Close pane always. */
     showClose: boolean;
     onfocus: () => void;
     onclose: () => void;
@@ -84,7 +83,6 @@
       ctxMenu.show(e, [
         { label: 'Open in Threads', icon: 'threads', action: () => router.go(`threads/${threadId}`) },
         ...own,
-        ...(showClose ? [sep, ...presetItems()] : []),
         // Always: a lone chat tab has no strip ✕ (only ⌘W).
         sep,
         { label: 'Close pane', icon: 'x', title: 'The thread keeps running', action: onclose } as MenuItem,
