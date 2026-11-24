@@ -49,6 +49,18 @@ impl SessionManager {
         otto_tools: Option<crate::mcp::OttoToolsServer>,
         codex_otto: bool,
     ) -> Vec<String> {
+        let cli_family = self
+            .providers
+            .model_family_for(&session.provider)
+            .unwrap_or_else(|| session.provider.clone());
+        // A shell (a Threads terminal dock too) or a CLI Otto doesn't know
+        // takes no servers: nothing to resolve, write, or report as skipped.
+        let takes_mcp = [
+            "claude", "muse", "opencode", "agy", "gemini", "grok", "codex", "pi",
+        ];
+        if !takes_mcp.contains(&cli_family.as_str()) {
+            return Vec::new();
+        }
         let (user_servers, lookup_error) = self.resolve_user_mcp_servers(session).await;
         let session_browser = session
             .meta
@@ -85,10 +97,6 @@ impl SessionManager {
                     })
             }
         };
-        let cli_family = self
-            .providers
-            .model_family_for(&session.provider)
-            .unwrap_or_else(|| session.provider.clone());
         // A Claude terminal with `--strict-mcp-config` (a lean turn, an
         // untrusted read-only session) takes no servers: nothing is written
         // for it, and nothing is "skipped".
@@ -132,7 +140,6 @@ impl SessionManager {
                         tracing::warn!(session = %sid, cwd = %cwd, "reconcile workspace MCP config: {e}");
                         Vec::new()
                     }),
-                // A shell (a Threads terminal dock too) has no agent CLI to serve.
                 _ => Vec::new(),
             };
             let agy_names = (provider == "agy").then(|| {

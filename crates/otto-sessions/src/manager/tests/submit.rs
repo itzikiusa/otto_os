@@ -380,7 +380,8 @@ echo READY
 
 /// R1-089: a `--strict-mcp-config` Claude terminal (lean turn) takes no
 /// servers, so its spawn writes no `--mcp-config` file nor any launcher env
-/// file (secrets), and records no "couldn't write" skip for them.
+/// file (secrets), and records no "couldn't write" skip for them. R2-003: nor
+/// does a shell session, which serves no MCP at all.
 #[tokio::test]
 #[allow(clippy::disallowed_methods)] // a blocking dir listing in a test
 async fn a_strict_claude_spawn_writes_no_mcp_files_and_skips_nothing() {
@@ -400,39 +401,44 @@ async fn a_strict_claude_spawn_writes_no_mcp_files_and_skips_nothing() {
     }
     let (mut mgr, repo, ws, user) = test_manager().await;
     Arc::get_mut(&mut mgr).unwrap().mcp_servers = Some(Arc::new(Servers));
-    let cwd = tempfile::tempdir().unwrap();
-    let cwd_str = cwd.path().to_string_lossy().into_owned();
-    let session = repo
-        .create(NewSession {
-            workspace_id: ws.id.clone(),
-            kind: SessionKind::Agent,
-            provider: "claude".into(),
-            title: "lean claude".into(),
-            cwd: cwd_str.clone(),
-            provider_session_id: None,
-            connection_id: None,
-            created_by: user.clone(),
-            meta: serde_json::json!({ "lean_turn": true }),
-        })
-        .await
-        .unwrap();
-    let args = mgr.sync_workspace_mcp(&session, None, false).await;
-    assert!(args.is_empty(), "{args:?}");
-    assert!(!super::super::runtime_spawn::claude_mcp_config_path(&session.id).exists());
-    let prefix = crate::mcp::launcher_env_prefix(&cwd_str);
-    let env_files = std::fs::read_dir(std::env::temp_dir().join("otto-mcp"))
-        .map(|d| {
-            d.flatten()
-                .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
-                .count()
-        })
-        .unwrap_or(0);
-    assert_eq!(env_files, 0, "wrote a launcher env file");
-    let meta = repo.get(&session.id).await.unwrap().meta;
-    assert!(
-        meta.get("mcp_skipped").is_none_or(|v| v.is_null()),
-        "{meta}"
-    );
+    for (provider, meta) in [
+        ("claude", serde_json::json!({ "lean_turn": true })),
+        ("shell", serde_json::json!({})),
+    ] {
+        let cwd = tempfile::tempdir().unwrap();
+        let cwd_str = cwd.path().to_string_lossy().into_owned();
+        let session = repo
+            .create(NewSession {
+                workspace_id: ws.id.clone(),
+                kind: SessionKind::Agent,
+                provider: provider.into(),
+                title: "no servers".into(),
+                cwd: cwd_str.clone(),
+                provider_session_id: None,
+                connection_id: None,
+                created_by: user.clone(),
+                meta,
+            })
+            .await
+            .unwrap();
+        let args = mgr.sync_workspace_mcp(&session, None, false).await;
+        assert!(args.is_empty(), "{args:?}");
+        assert!(!super::super::runtime_spawn::claude_mcp_config_path(&session.id).exists());
+        let prefix = crate::mcp::launcher_env_prefix(&cwd_str);
+        let env_files = std::fs::read_dir(std::env::temp_dir().join("otto-mcp"))
+            .map(|d| {
+                d.flatten()
+                    .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+                    .count()
+            })
+            .unwrap_or(0);
+        assert_eq!(env_files, 0, "wrote a launcher env file");
+        let meta = repo.get(&session.id).await.unwrap().meta;
+        assert!(
+            meta.get("mcp_skipped").is_none_or(|v| v.is_null()),
+            "{provider}: {meta}"
+        );
+    }
 }
 
 /// Opening an agy session no longer writes the shared `.mcp.json` (agy
