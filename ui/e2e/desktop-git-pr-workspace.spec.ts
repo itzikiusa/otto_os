@@ -45,7 +45,10 @@ test('a PR deep link opens in the workspace with header, stats and timeline', as
   await expect(page.locator('.prd-actions .btn')).toHaveCount(3);
   await expect(page.locator('.prd-actions').getByRole('button', { name: 'Merge', exact: true })).toHaveCount(0);
   // Grouped list: my PRs first.
-  await expect(page.locator('.prlist')).toContainText('Authored by you');
+  // Needs you first: #50 asks you for a review; then everything else.
+  await expect(page.getByRole('region', { name: 'Needs you' }).locator('.pr-row')).toHaveCount(1);
+  await expect(page.locator('.pr-row').first()).toHaveAttribute('data-pr', '50');
+  await expect(page.locator('.pr-row[data-pr="50"]').getByTestId('pr-word')).toHaveText('Review requested');
 
   await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
   await page.getByRole('button', { name: 'Timeline', exact: true }).click();
@@ -259,9 +262,10 @@ test('select several PRs in the list and open them together as tabs', async ({ p
   await page.getByRole('checkbox', { name: 'Select #50' }).check();
   await page.getByRole('button', { name: /Open 2 together/ }).click();
   await expect(page.locator('.prw-tab')).toHaveCount(3);
-  await expect(page.locator('.prw-tab.active')).toContainText('#42');
+  // The first picked in list order comes forward: #50 asks you (Needs you leads).
+  await expect(page.locator('.prw-tab.active')).toContainText('#50');
   // Close the front tab: the neighbour comes forward.
-  await page.getByRole('button', { name: 'Close #42' }).click();
+  await page.getByRole('button', { name: 'Close #50' }).click();
   await expect(page.locator('.prw-tab')).toHaveCount(2);
   // Down to one: the strip goes; the list toggle moves into the PR header.
   await page.getByRole('button', { name: /^Close #/ }).first().click();

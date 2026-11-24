@@ -267,20 +267,24 @@ test.describe('pull requests: review state', () => {
         row(2, { status: 'changes_requested', approvals: 1 }),
         row(3, { status: 'waiting', approvals: 0 }),
         row(4, null),
+        { ...row(5, { status: 'waiting', approvals: 0 }), asks_me: true },
       ], has_more: false, page: 1, per_page: 50 } }),
     );
     // Nothing reaches the real forge: per-row reads (diff stats, …) answer 404.
     await page.route(`**/api/v1/repos/${r.repoId}/prs/**`, (route) => route.fulfill({ status: 404, json: { error: 'stub' } }));
     await page.goto(`/#/git/${r.repoId}/prs`);
-    await expect(page.getByTestId('pr-review')).toHaveCount(3, { timeout: 25_000 });
-    const chip = (n: number) => page.locator('.pr-row', { hasText: `#${n}` }).getByTestId('pr-review');
-    await expect(chip(1)).toHaveText('2 approvals');
-    await expect(chip(1)).toHaveAttribute('aria-label', 'Approved — 2 approvals');
-    await expect(chip(2)).toHaveText('Changes requested');
-    await expect(chip(3)).toHaveText('Awaiting review');
-    await expect(chip(4)).toHaveCount(0);
-    await chip(1).scrollIntoViewIfNeeded();
-    await expect(chip(1)).toBeInViewport();
+    await expect(page.getByTestId('pr-word')).toHaveCount(5, { timeout: 25_000 });
+    const word = (n: number) => page.locator(`.pr-row[data-pr="${n}"]`).getByTestId('pr-word');
+    await expect(word(1)).toHaveText('Approved');
+    await expect(word(2)).toHaveText('Changes requested');
+    await expect(word(3)).toHaveText('Waiting for review');
+    await expect(word(4)).toHaveText('Open');
+    await expect(word(5)).toHaveText('Review requested');
+    // The one that asks you leads, under "Needs you".
+    await expect(page.locator('.pr-row').first()).toHaveAttribute('data-pr', '5');
+    await expect(page.getByRole('region', { name: 'Needs you' })).toContainText('Pull request 5');
+    await word(1).scrollIntoViewIfNeeded();
+    await expect(word(1)).toBeInViewport();
     await expectFitsWidth(page);
   });
 });

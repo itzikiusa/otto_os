@@ -2,7 +2,7 @@
 // next step, the list row's word and the PR the list opens on.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { firstNeedingPr, prRowWord, prStatusLine, reviewPlacement } from '../src/modules/git/prStatus.ts';
+import { firstNeedingPr, needsYou, prRowWord, prStatusLine, reviewPlacement } from '../src/modules/git/prStatus.ts';
 import type { PrChecksResp, PrDetail, PrSummary } from '../src/lib/api/types';
 
 const base = {
@@ -57,11 +57,25 @@ test('Review is the primary only while it is your next step; otherwise one secon
 test('list rows say what the PR needs; the list opens on what needs you', () => {
   const pr = (n: number, extra: Partial<PrSummary>): PrSummary => ({ ...(base as PrSummary), number: n, ...extra });
   assert.equal(prRowWord(pr(1, { ci_status: 'failure' })).word, 'Checks failing');
-  assert.equal(prRowWord(pr(1, { review: { status: 'waiting', approvals: 0 } })).word, 'Review requested');
+  // "Review requested" only when it asks YOU; someone else's pending review is calm.
+  assert.deepEqual(prRowWord(pr(1, { asks_me: true, review: { status: 'waiting', approvals: 0 } })), { word: 'Review requested', tone: 'warning' });
+  assert.deepEqual(prRowWord(pr(1, { review: { status: 'waiting', approvals: 0 } })), { word: 'Waiting for review', tone: 'calm' });
   assert.equal(prRowWord(pr(1, { state: 'merged' })).word, 'Merged');
-  const list = [pr(1, {}), pr(2, { review: { status: 'waiting', approvals: 0 } }), pr(3, { ci_status: 'failure', is_mine: true })];
+  const list = [pr(1, {}), pr(2, { asks_me: true }), pr(3, { ci_status: 'failure', is_mine: true })];
   assert.equal(firstNeedingPr(list, (p) => !!p.is_mine)?.number, 3);
   assert.equal(firstNeedingPr(list.slice(0, 2), (p) => !!p.is_mine)?.number, 2);
+  // Waiting on someone else's review does not need you.
+  assert.equal(firstNeedingPr([pr(1, {}), pr(2, { review: { status: 'waiting', approvals: 0 } })], () => false)?.number, 1);
   assert.equal(firstNeedingPr([pr(9, {})], () => false)?.number, 9);
   assert.equal(firstNeedingPr([], () => false), null);
+});
+
+test('needs you: a review asked of you, or your PR with failing checks or changes requested', () => {
+  const pr = (extra: Partial<PrSummary>): PrSummary => ({ ...(base as PrSummary), ...extra });
+  assert.equal(needsYou(pr({ asks_me: true }), false), true);
+  assert.equal(needsYou(pr({ ci_status: 'failing' }), true), true);
+  assert.equal(needsYou(pr({ review: { status: 'changes_requested', approvals: 0 } }), true), true);
+  assert.equal(needsYou(pr({ ci_status: 'failing' }), false), false, "someone else's failing CI");
+  assert.equal(needsYou(pr({ review: { status: 'waiting', approvals: 0 } }), false), false);
+  assert.equal(needsYou(pr({ asks_me: true, state: 'merged' }), false), false, 'closed PRs need nobody');
 });

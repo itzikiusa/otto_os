@@ -67,22 +67,25 @@ export function prRowWord(pr: PrSummary): { word: string; tone: PrTone } {
   if (ci === 'failing' || ci === 'failure') return { word: 'Checks failing', tone: 'danger' };
   if (pr.review?.status === 'changes_requested') return { word: 'Changes requested', tone: 'warning' };
   if (pr.draft) return { word: 'Draft', tone: 'calm' };
+  if (pr.asks_me) return { word: 'Review requested', tone: 'warning' };
   if (pr.review?.status === 'approved') return { word: 'Approved', tone: 'success' };
-  if (pr.review?.status === 'waiting') return { word: 'Review requested', tone: 'warning' };
+  if (pr.review?.status === 'waiting') return { word: 'Waiting for review', tone: 'calm' };
   if (ci === 'pending') return { word: 'Checks running', tone: 'calm' };
   return { word: 'Open', tone: 'calm' };
 }
 
-/** The pull request the list opens on (never "pick one"): what needs you
- *  first — your PR with failing checks or changes requested, then one
- *  waiting for a review — else the first row. */
+/** The PR needs YOU: it asks you for a review (`asks_me`, from the list call),
+ *  or it is yours and its checks fail or changes were requested. */
+export function needsYou(pr: PrSummary, mine: boolean): boolean {
+  if (pr.state !== 'open') return false;
+  if (!mine) return !!pr.asks_me;
+  const w = prRowWord(pr).word;
+  return w === 'Checks failing' || w === 'Changes requested';
+}
+
+/** The pull request the list opens on (never "pick one"): the first one
+ *  that needs you (yours to fix first, then a review asked of you), else the
+ *  first row. */
 export function firstNeedingPr(prs: readonly PrSummary[], isMine: (pr: PrSummary) => boolean): PrSummary | null {
-  const open = prs.filter((p) => p.state === 'open');
-  const word = (p: PrSummary): string => prRowWord(p).word;
-  return (
-    open.find((p) => isMine(p) && (word(p) === 'Checks failing' || word(p) === 'Changes requested')) ??
-    open.find((p) => !isMine(p) && word(p) === 'Review requested') ??
-    prs[0] ??
-    null
-  );
+  return prs.find((p) => isMine(p) && needsYou(p, true)) ?? prs.find((p) => needsYou(p, isMine(p))) ?? prs[0] ?? null;
 }

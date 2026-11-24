@@ -118,6 +118,10 @@ mod bitbucket {
             "commenter dropped, approver kept, `you` by uuid"
         );
         assert!(d.summary.is_mine, "author uuid matches (case-insensitive)");
+        assert!(
+            !d.summary.asks_me,
+            "you approved: nothing asks you any more"
+        );
         let edit: Vec<_> = d
             .comments
             .iter()
@@ -125,6 +129,17 @@ mod bitbucket {
             .collect();
         // Comment 2's author shares the display name, not the uuid.
         assert_eq!(edit, [("1", true), ("2", false)]);
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_with_no_verdict_is_asked() {
+        let server = MockServer::start().await;
+        mount_pr(&server).await;
+        ok_json(&server, "GET", "/user", json!({ "uuid": "{U-2}" })).await;
+        let bb = Bitbucket::with_base("me@example.com".into(), "tok".into(), server.uri());
+        let d = bb.get_pr(&rr(), 7).await.unwrap();
+        assert!(d.summary.asks_me, "a REVIEWER with no verdict, by uuid");
+        assert!(!d.summary.is_mine);
     }
 
     #[tokio::test]
@@ -411,6 +426,7 @@ mod github {
             "login matched case-insensitively; a requested-but-silent reviewer is listed"
         );
         assert!(!d.summary.is_mine);
+        assert!(d.summary.asks_me, "still in requested_reviewers (by id)");
     }
 
     #[tokio::test]
@@ -690,7 +706,8 @@ mod gitlab {
             "GET",
             MR,
             json!({ "iid": 7, "title": "MR", "state": "opened",
-                    "author": { "id": 5, "name": "Display Name" } }),
+                    "author": { "id": 5, "name": "Display Name" },
+                    "reviewers": [{ "id": 6 }, { "id": 5 }] }),
         )
         .await;
         ok_json(
@@ -718,6 +735,7 @@ mod gitlab {
         let gl = Gitlab::new("tok".into(), Some(server.uri()));
         let d = gl.get_pr(&rr(), 7).await.unwrap();
         assert!(d.summary.is_mine);
+        assert!(d.summary.asks_me, "a listed reviewer, by id");
         let me: Vec<bool> = d.reviewers.iter().map(|r| r.is_me).collect();
         assert_eq!(me, [true, false], "same name, different id");
         assert!(d.comments[0].can_edit);
