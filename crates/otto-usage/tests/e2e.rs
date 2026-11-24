@@ -672,6 +672,82 @@ async fn summary_and_report_query_budget() {
     engine.shutdown().await;
 }
 
+/// Real-shaped summary (U1/U2): 300 sessions over six providers, half of
+/// them outside Otto, muse with tokens but no cost and shell with neither.
+/// The count is every session with usage (not the 50 listed), a provider
+/// with no tokens and no cost is not listed, the totals are the providers'
+/// sums, and "All" holds every provider "Otto" has, each at least as large.
+#[tokio::test]
+async fn summary_counts_every_session_and_all_contains_otto() {
+    if ClickHouse::locate(None).is_none() {
+        eprintln!("SKIP: no `clickhouse` binary found on this machine");
+        return;
+    }
+    let _serial = serial().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let engine = UsageEngine::start(test_config(), tmp.path().to_path_buf()).await;
+    assert!(engine.wait_ready(Duration::from_secs(30)).await);
+    // Session k (0..300): k < 20 are shell (no tokens, no cost); the rest
+    // cycle claude, codex, agy, grok, muse (muse: tokens, no cost). Even k
+    // ran outside Otto.
+    engine
+        .exec_sql(
+            "INSERT INTO usage_events (ts, workspace_id, session_id, provider, model, kind, \
+             input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, duration_ms) \
+             SELECT now64(3) - toIntervalDay(number % 10), if(number % 300 % 2 = 0, 'external', 'ws1'), \
+             concat('s', toString(number % 300)), p, 'm', 'completion', if(p = 'shell', 0, 100), 0, 0, 0, \
+             if(p IN ('shell', 'muse'), 0, 0.01), 0 FROM numbers(3000) \
+             ARRAY JOIN [if(number % 300 < 20, 'shell', \
+               ['claude', 'codex', 'agy', 'grok', 'muse'][number % 300 % 5 + 1])] AS p",
+        )
+        .await
+        .expect("seed rows");
+
+    let all = engine.summary(30, false).await.expect("all");
+    let otto = engine.summary(30, true).await.expect("otto");
+    assert_eq!(
+        all.session_count, 280,
+        "every session with usage, not the 50 listed"
+    );
+    assert_eq!(otto.session_count, 140);
+    assert_eq!(all.sessions.len(), 50);
+    for s in [&all, &otto] {
+        let names: Vec<&str> = s.providers.iter().map(|p| p.provider.as_str()).collect();
+        assert!(
+            !names.contains(&"shell"),
+            "no tokens, no cost: not listed ({names:?})"
+        );
+        assert!(names.contains(&"muse"), "tokens without cost still count");
+        assert_eq!(s.providers.len(), 5);
+        let tokens: u64 = s.providers.iter().map(|p| p.total_tokens).sum();
+        let cost: f64 = s.providers.iter().map(|p| p.cost_usd).sum();
+        assert_eq!(s.total_tokens, tokens);
+        assert!((s.total_cost_usd - cost).abs() < 1e-9);
+    }
+    for p in &otto.providers {
+        let a = all
+            .providers
+            .iter()
+            .find(|a| a.provider == p.provider)
+            .unwrap_or_else(|| panic!("{} missing from All", p.provider));
+        assert!(a.total_tokens >= p.total_tokens && a.cost_usd >= p.cost_usd);
+    }
+
+    // A scoped (non-root) read counts its own sessions the same way.
+    let own: Vec<String> = (0..60).map(|k| format!("s{k}")).collect();
+    let scoped = engine
+        .summary_scoped(30, false, UsageScope::Sessions(&own))
+        .await
+        .expect("scoped");
+    assert_eq!(scoped.session_count, 40, "s20..s59 have usage");
+    assert_eq!(
+        scoped.sessions.len(),
+        40,
+        "a session with no usage is not listed"
+    );
+    engine.shutdown().await;
+}
+
 /// R1d: an idle server is stopped (no process, no threads) and transparently
 /// restarted by the next query or insert, data intact; while parked it
 /// counts as alive (no self-heal reinit).
