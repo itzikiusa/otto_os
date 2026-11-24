@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
+  import { whenIdle } from '../../lib/lazy-component.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { phoneDevice } from '../../lib/stores/phoneDevice.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -396,6 +397,10 @@
     }),
   );
   const cardShown = $derived(cardRoom && threadsChrome.cardVisible && !!contextCwd);
+  // The card mounts once the opened thread has painted (its space is already
+  // reserved by the layout rule, so nothing moves when it appears).
+  let cardIdle = $state(false);
+  $effect(() => { void focused?.id; cardIdle = false; return whenIdle(() => (cardIdle = true), 300); });
   let menuBtn = $state<HTMLButtonElement | null>(null);
 
   // The toolbar's one ⋯: the focused thread's actions, then the view toggles
@@ -570,7 +575,7 @@
           {:else}
             <ThreadCanvas onstartroom={(sid) => (roomSessionId = sid)} />
           {/if}
-          {#if cardShown && contextCwd && DetailsCardView.component}
+          {#if cardShown && cardIdle && contextCwd && DetailsCardView.component}
             <div class="th-card-float">
               <DetailsCardView.component floating cwd={contextCwd} threadId={focused?.id ?? null} ondismiss={() => threadsChrome.toggleCard()} />
             </div>

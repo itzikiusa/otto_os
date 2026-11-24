@@ -233,6 +233,7 @@ test('c. streaming a long answer after 30 tool calls into the 300-turn thread', 
   await cdp.send('Performance.enable');
   await page.evaluate(() => ((window as unknown as { __ottoPerfCounts: Record<string, number> }).__ottoPerfCounts = {}));
   const s0 = await scriptMs(cdp);
+  const l0 = (await cdp.send('Performance.getMetrics')).metrics.find((m) => m.name === 'LayoutCount')!.value;
   const profile = !!process.env.OTTO_THREADS_RT_PERF_PROFILE;
   if (profile) await cdp.send('Profiler.enable').then(() => cdp.send('Profiler.start'));
   await startFrames(page);
@@ -244,8 +245,9 @@ test('c. streaming a long answer after 30 tool calls into the 300-turn thread', 
   if (profile) writeFileSync(process.env.OTTO_THREADS_RT_PERF_PROFILE!, JSON.stringify((await cdp.send('Profiler.stop')).profile));
   const frames = await stopFrames(page);
   const script = (await scriptMs(cdp)) - s0;
+  const layouts = (await cdp.send('Performance.getMetrics')).metrics.find((m) => m.name === 'LayoutCount')!.value - l0;
   const counts = await page.evaluate(() => (window as unknown as { __ottoPerfCounts: Record<string, number> }).__ottoPerfCounts);
-  record('stream300', { wallMs: wall, frames: frames.length, framesOver50: frames.filter((d) => d > 50).length, worstFrameMs: Math.round(Math.max(0, ...frames)), scriptMs: script, counts });
+  record('stream300', { layouts, wallMs: wall, frames: frames.length, framesOver50: frames.filter((d) => d > 50).length, worstFrameMs: Math.round(Math.max(0, ...frames)), scriptMs: script, counts });
 });
 
 test('c2. a long answer streaming while three subagents work (Claude)', async ({ page }) => {

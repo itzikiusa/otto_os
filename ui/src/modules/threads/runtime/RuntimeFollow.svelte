@@ -7,7 +7,7 @@
   // composer, in the flow: it takes its own short row at the timeline's
   // bottom edge instead of floating over the text it would cover. A request
   // waiting on the person names itself ("Approval needed").
-  import { tick, untrack } from 'svelte';
+  import { untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { didScrollUpByUser, END_BAND, followAfterScroll, followPillText, unreadSince } from './follow';
 
@@ -52,6 +52,18 @@
   function pin(): void {
     if (scroller) scroller.scrollTop = scroller.scrollHeight;
   }
+  // A stream lands many events per frame: follow once per frame, from the
+  // frame callback (the layout the browser does anyway), never per event —
+  // reading scrollHeight after each event forced a layout every time.
+  let pinFrame = 0;
+  function pinNextFrame(): void {
+    if (pinFrame) return;
+    pinFrame = requestAnimationFrame(() => {
+      pinFrame = 0;
+      if (untrack(() => atBottom)) pin();
+    });
+  }
+  $effect(() => () => cancelAnimationFrame(pinFrame));
 
   $effect(() => {
     const el = scroller;
@@ -115,7 +127,7 @@
   // (read untracked — `unseen += 1` here would re-trigger this effect).
   $effect(() => {
     void seq;
-    if (untrack(() => atBottom)) void tick().then(pin);
+    if (untrack(() => atBottom)) pinNextFrame();
     else unseen = untrack(() => unseen) + 1;
   });
 
