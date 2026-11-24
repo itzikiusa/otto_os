@@ -307,6 +307,11 @@
     height: 24px;
     white-space: nowrap;
   }
+  /* Touch: the view switch and the header's ⋯ are finger-sized (44 px). */
+  @media (pointer: coarse) {
+    .git-views > .rv-tab { height: 44px; }
+    .gitpage :global(.ph-more) { min-inline-size: 44px; min-block-size: 44px; }
+  }
   .git-views-count {
     min-width: 16px;
     padding: 0 4px;

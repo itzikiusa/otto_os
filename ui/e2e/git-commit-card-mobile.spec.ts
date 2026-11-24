@@ -34,6 +34,11 @@ test('phone: Changes first → one tap commits and pushes', async ({ page }, inf
       .map((el) => `${el.className} ${el.scrollWidth}>${el.clientWidth}`),
   );
   expect(sideways, 'inner horizontal scrollers').toEqual([]);
+  // Finger-sized (44 px): the view switch, Fetch, ⋯ and a file's include box.
+  for (const t of [page.locator('.git-views .rv-tab').first(), page.locator('.gitpage').getByRole('button', { name: /Fetch/ }), page.locator('.gitpage').getByRole('button', { name: 'More actions', exact: true }), page.locator('.wp-check-hit').first()]) {
+    const b = (await t.boundingBox())!;
+    expect(Math.min(b.width, b.height), await t.evaluate((el) => el.className)).toBeGreaterThanOrEqual(44);
+  }
   await primary.tap();
   await expect.poll(() => remoteSubject(repo), { timeout: 20_000 }).toBe('feat: ship the commit card');
   await expect(page.getByTestId('commit-card-primary')).toHaveAttribute('data-kind', 'create-pr', { timeout: 15_000 });

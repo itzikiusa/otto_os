@@ -94,7 +94,7 @@
     class:selected={sel}
     style:--depth={depth}
   >
-    <input
+    <label class="wp-check-hit"><input
       type="checkbox"
       class="wp-check"
       checked={isStaged}
@@ -102,7 +102,7 @@
       onchange={() => onstage([path], { section, key })}
       title={verb}
       aria-label="{verb} {path}"
-    />
+    /></label>
     <button
       class="wp-name"
       data-wp-nav={key}
@@ -146,7 +146,7 @@
        node.files carries the whole subtree) in one call; the name only folds,
        a name click must never mutate the index. -->
   <div use:rowMenu {@attach contextMenu((e) => onfoldermenu(e, node))} class="wp-folder" style:--depth={depth}>
-    <input
+    <label class="wp-check-hit"><input
       type="checkbox"
       class="wp-check"
       checked={isStaged}
@@ -154,7 +154,7 @@
       onchange={() => onstage(node.files.map((f) => f.path), { section, key })}
       title="{verb} {node.path}/ ({n})"
       aria-label="{verb} folder {node.path}"
-    />
+    /></label>
     <button class="wp-fold-name" data-wp-nav={key} onclick={() => ontoggle(node)} title="{node.path}/ ({n})" aria-expanded={!shut}>
       <Icon name={shut ? 'chevronRight' : 'chevronDown'} size={12} />
       <Icon name="folder" size={12} />
@@ -317,6 +317,10 @@
   .wp-check {
     flex-shrink: 0;
     margin: 0;
+  }
+  .wp-check-hit {
+    display: inline-flex;
+    flex-shrink: 0;
   }
   .wp-name,
   .wp-fold-name {
@@ -490,6 +494,26 @@
       opacity: 1;
       width: 32px;
       height: 32px;
+    }
+  }
+  /* Touch: 44 px targets — rows, the checkbox's label (its padding is the
+     hit area, the box stays 20 px) and the discard button. */
+  @media (pointer: coarse) {
+    .wp-section {
+      --wp-row-h: 44px;
+    }
+    .wp-check {
+      width: 20px;
+      height: 20px;
+    }
+    .wp-check-hit {
+      padding: 12px;
+      margin-block: -12px;
+      margin-inline: -12px -6px;
+    }
+    .wp-discard {
+      width: 44px;
+      height: 44px;
     }
   }
   /* A narrow pane drops the directory (the tooltip keeps the full path) and
