@@ -10,6 +10,7 @@
 // is in flight are held and folded after it.
 
 import { api } from '../../../lib/api/client';
+import { perfCount } from '../../../lib/perfCount';
 import { inLane } from '../../../lib/api/lane';
 import { appLive, onLive } from '../../../lib/live';
 import { loadErrorText } from '../../../lib/loadError';
@@ -93,9 +94,58 @@ interface View {
   openSpan: Measurement | null;
 }
 
+class ProjectionBox {
+  v = $state.raw<RuntimeProjection | undefined>(undefined);
+}
+
+/** `Record<id, projection>` over one raw signal per thread. */
+function projectionRecord(): Record<string, RuntimeProjection> {
+  const boxes = new Map<string, ProjectionBox>();
+  // A thread's box is made by the first write, never by a read: a signal made
+  // inside a reader (a $derived) would not be one of its dependencies. A
+  // reader of a thread with no box yet waits on `added` instead.
+  const added = new ProjectionBox();
+  let n = 0;
+  const box = (id: string): ProjectionBox => {
+    let b = boxes.get(id);
+    if (!b) {
+      boxes.set(id, (b = new ProjectionBox()));
+      added.v = { n: ++n } as unknown as RuntimeProjection;
+    }
+    return b;
+  };
+  const live = (k: string | symbol): k is string => typeof k === 'string' && boxes.get(k)?.v !== undefined;
+  return new Proxy({} as Record<string, RuntimeProjection>, {
+    get: (_t, k) => {
+      if (typeof k !== 'string') return undefined;
+      const b = boxes.get(k);
+      if (!b) {
+        perfCount('projectionMissingRead');
+        void added.v;
+        return undefined;
+      }
+      return b.v;
+    },
+    set: (_t, k, v: RuntimeProjection | undefined) => {
+      if (typeof k === 'string') box(k).v = v;
+      return true;
+    },
+    deleteProperty: (_t, k) => {
+      if (typeof k === 'string' && boxes.has(k)) box(k).v = undefined;
+      return true;
+    },
+    has: (_t, k) => live(k),
+    ownKeys: () => [...boxes.keys()].filter(live),
+    getOwnPropertyDescriptor: (_t, k) => (live(k) ? { enumerable: true, configurable: true, writable: true, value: boxes.get(k)!.v } : undefined),
+  });
+}
+
 export class RuntimeViews {
-  /** Open threads' projections, by session id. */
-  projections = $state<Record<string, RuntimeProjection>>({});
+  /** Open threads' projections, by session id. Each thread's projection is
+   *  its own raw signal (ProjectionBox): a streamed chunk wakes only what
+   *  reads THAT thread, and no deep proxy wraps every item a reader touches
+   *  (projections are replaced, never mutated in place — projection.ts). */
+  projections: Record<string, RuntimeProjection> = projectionRecord();
   /** A failed first load of an open thread, by session id. */
   loadError = $state<Record<string, string>>({});
   /** A failed later resync (after a reconnect or a gap): the projection
@@ -173,8 +223,7 @@ export class RuntimeViews {
       if (v.liveFlushTimer) clearTimeout(v.liveFlushTimer);
       v.pendingLive.length = 0;
       this.views.delete(id);
-      const { [id]: _drop, ...rest } = this.projections;
-      this.projections = rest;
+      delete this.projections[id];
       if (this.loadError[id]) {
         const { [id]: _err, ...errs } = this.loadError;
         this.loadError = errs;

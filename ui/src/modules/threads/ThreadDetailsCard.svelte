@@ -135,13 +135,16 @@
   // The thread's relatives depend on the thread lists, not on its stream:
   // derived apart, so a streamed delta does not rescan every thread.
   const NO_TASKS = { running: [], finished: [] };
-  const relatives = $derived.by(() => {
+  // The thread list changes on every session row update (a stream bumps its
+  // own row): the same relatives keep the same object, so nothing below wakes.
+  let lastRelatives: { key: string; value: Relatives } | null = null;
+  type Relatives = { children: ReturnType<typeof mapChildThreadSummaries>; parent: { id: string; title: string } | null; delegated: { id: string; title: string; provider: string; status: string; startedAt: string | null }[] };
+  const relatives = $derived.by((): Relatives | null => {
     if (!threadId) return null;
     const rt = runtimeThreads.get(threadId);
-    perfCount('detailsRelatives');
     const all = Object.values(runtimeThreads.byId);
     const parent = anyThread(rt?.parent_id ?? delegatedParentId(ws.getSession(threadId)));
-    return {
+    const value: Relatives = {
       children: rt ? mapChildThreadSummaries(linkedChildren(all, threadId)) : [],
       parent: parent ? { id: parent.id, title: parent.title } : null,
       // Delegated terminal threads, and a council's other seats (peers that
@@ -151,6 +154,11 @@
         ...all.filter((x) => x.parent_id === threadId && councilOf(x)),
       ].map((x) => ({ id: x.id, title: x.title, provider: x.provider, status: ws.statusMap[x.id] ?? x.status, startedAt: ((x.meta as Record<string, unknown> | null | undefined)?.last_turn_started_at as string | undefined) ?? null })),
     };
+    const key = JSON.stringify(value);
+    if (lastRelatives?.key === key) return lastRelatives.value;
+    perfCount('detailsRelatives');
+    lastRelatives = { key, value };
+    return value;
   });
   // The same object the conversation reads (sharedAgentTasks), kept while a
   // streamed chunk changes no task: the section below then does not rerun.
