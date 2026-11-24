@@ -63,6 +63,9 @@ test('the details card on Agents: Changes opens the Git tab, a subagent opens he
   await expect(page.locator('.info-row', { hasText: 'Status' })).toHaveCount(0);
   await expect(page.locator('.info-row .sbadge')).toHaveCount(0);
 
+  // An idle subagent sits under the card's "Previous · N" fold (only running ones
+  // show unfolded): one visible click, then the row opens that thread here as a pane.
+  await card.getByTestId('details-previous').click();
   await card.getByTestId('details-subagent').filter({ hasText: 'Rivera helper' }).getByRole('button').first().click();
   await expect.poll(() => page.evaluate(() => location.hash)).toBe(`#/agents/${helperId}`);
   await expect(page.locator(`[data-pane-key][data-session="${helperId}"]`)).toBeVisible({ timeout: 20_000 });
