@@ -97,3 +97,20 @@ test('a row opens its session; rename from the row menu; hide and show the list'
   await page.getByTestId('agents-inbox-show').click();
   await expect(page.getByTestId('agents-inbox')).toBeVisible();
 });
+
+test('the rarely used dialogs load on demand from the pane ⋯', async ({ page }) => {
+  await page.goto(`/#/agents/${ids.Seedorf}`);
+  const pane = page.locator(`[data-pane-key][data-session="${ids.Seedorf}"]`).first();
+  await expect(pane).toBeVisible({ timeout: 15_000 });
+  for (const [item, dialog] of [
+    ['Additional directories…', 'Additional directories'],
+    ['Hand over to…', /Hand over/],
+    ['Attach issue…', /issue/i],
+  ] as const) {
+    await pane.locator('button[title="More…"]').click();
+    await page.getByRole('menuitem', { name: item }).click();
+    await expect(page.getByRole('dialog', { name: dialog })).toBeVisible({ timeout: 10_000 });
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+  }
+});
