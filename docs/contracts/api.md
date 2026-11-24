@@ -835,15 +835,31 @@ current assistant turn, or on the next one when none is open yet.
 `stats.output_tokens`; a resumed Codex rollout's stats include the earlier
 thread's tokens, its turns only this file's calls.
 
-Interactive transcript reads (session and history routes) return **413
-`payload_too_large`** with an explicit `transcript resource limit` message when
-source input exceeds 128 MiB, one JSONL record exceeds 16 MiB, estimated fold
-charge exceeds 256 MiB, or subagent metadata exceeds its separate 8 MiB charge
-budget (one sidecar may be at most 1 MiB). Parsing is streamed; limits are
-checked before accepting additional records. No transcript is deleted or
-silently truncated. The user can open the provider file directly or select a
-smaller subagent transcript. Live folds have stricter admission bounds and use
-coalesced file-change invalidations plus this read path when not admitted.
+**Long transcripts open on a window.** A transcript over 8 MiB is never
+folded whole for a page: the read folds only the newest ~4 MiB of records
+before the cursor (`otto_transcript::window`), starting on a turn boundary,
+so a 60–150 MB daily session opens in tens of milliseconds and older turns
+page in by `before` exactly as for a short file. Record indices — the
+cursor, Codex `r<idx>` turn ids, `transcript_appended.cursor` — stay
+absolute (a per-file line index maps record → byte offset with one streamed
+newline scan, extended as the file grows), so pages of a window and of a
+whole-file fold are interchangeable. A windowed page has `has_earlier: true`
+while records precede it, and its `stats.cost_usd` / `input_tokens` /
+`output_tokens` / `duration_ms` are `null` (a window's sums are not the
+conversation's). The live tail of a long transcript folds the same window and
+follows appends; when the appended output outgrows its budget it starts again
+on a fresh window and sends an empty-`turns` delta (the client re-reads the
+page). A window that holds no turn boundary grows ×4 up to 64 MiB.
+
+What is still refused answers **413 `payload_too_large`** with a sentence the
+UI shows as is ("This conversation is too large to show here (transcript
+resource limit). …"): a short (≤ 8 MiB) or subagent transcript whose fold
+charge exceeds 256 MiB or one of whose records exceeds 16 MiB, a single record
+over 64 MiB in a long one, or subagent metadata over its separate 8 MiB charge
+budget (one sidecar may be at most 1 MiB). A transcript file that vanished
+between resolution and read is **404**. None of these is ever reported as 500
+(the fold cache used to re-wrap every fold error as `internal`). No transcript is deleted or silently truncated; per-item caps (64 KB per
+tool result, images by reference) keep any one turn small.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|

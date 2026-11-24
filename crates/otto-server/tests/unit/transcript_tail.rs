@@ -121,17 +121,52 @@ fn copy_dir(from: &Path, to: &Path) {
 /// a one-shot fold of the finished file does — every record once, the
 /// partial line carried, the delta cursor contiguous, sub-agent sidecars
 /// attached — without re-reading the file.
+/// A transcript past the live budget is tailed from its newest window (it
+/// used to be refused, leaving a long session without a live chat), with
+/// absolute record numbers, and keeps following appends.
 #[test]
-fn oversized_initial_fold_is_rejected_before_reading_its_body() {
+fn a_long_transcript_tails_its_newest_window_and_follows_appends() {
+    use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("oversized.jsonl");
-    std::fs::File::create(&path)
-        .unwrap()
-        .set_len(TAIL_INPUT_CAP as u64 + 1)
-        .unwrap();
-    assert!(
-        matches!(refold_with(Provider::Claude, &path, Default::default()), Err(e) if e.kind() == std::io::ErrorKind::OutOfMemory)
+    let path = dir.path().join("long.jsonl");
+    let prompt = |i: usize| {
+        format!(
+            "{{\"type\":\"user\",\"uuid\":\"u{i}\",\"message\":{{\"content\":\"{i} {}\"}}}}\n",
+            "x".repeat(1000)
+        )
+    };
+    let n = (TAIL_INPUT_CAP + (2 << 20)) / prompt(0).len();
+    let mut f = std::fs::File::create(&path).unwrap();
+    for i in 0..n {
+        f.write_all(prompt(i).as_bytes()).unwrap();
+    }
+    let mut st = refold_with(Provider::Claude, &path, Default::default()).unwrap();
+    let len = Tailer::current_len(&path);
+    assert!(st.first > 0 && st.base > st.first, "a window, not the file");
+    assert!(len - st.start <= otto_transcript::window::WINDOW_BYTES);
+    assert_eq!(
+        st.folder.record_count(),
+        n,
+        "records keep their absolute index"
     );
+    f.write_all(prompt(n).as_bytes()).unwrap();
+    let live = Live {
+        provider: Provider::Claude,
+        path: path.clone(),
+        state: Mutex::new(None),
+        settled: tokio::sync::watch::Sender::new(true),
+    };
+    let out = step(
+        &|| Default::default(),
+        &"t".into(),
+        &live,
+        &mut st,
+        &mut HashSet::new(),
+    )
+    .unwrap();
+    assert_eq!(out.cursor, n.to_string());
+    assert_eq!(out.turns.len(), 1);
+    assert_eq!(out.turns[0]["id"], format!("u{n}"));
 }
 
 #[test]

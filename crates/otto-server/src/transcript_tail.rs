@@ -20,7 +20,6 @@
 //! a lost wake-up.
 
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -63,6 +62,20 @@ struct TailState {
     budget: TailBudget,
     retired: bool,
     sidecar_charge: usize,
+    /// The fold starts at record `first` (byte `start`) and pages from
+    /// `base` — a long transcript's window (`otto_transcript::window`).
+    first: usize,
+    start: u64,
+    base: usize,
+}
+
+impl TailState {
+    /// Budget charge of the folded span up to byte `end` plus `extra` records.
+    fn charge(&self, end: u64, extra: usize) -> usize {
+        let records = self.folder.record_count() - self.first + extra;
+        fold_charge(end.saturating_sub(self.start) as usize, records)
+            .saturating_add(self.sidecar_charge)
+    }
 }
 
 const TAIL_INPUT_CAP: usize = 8 * 1024 * 1024;
@@ -302,6 +315,10 @@ async fn page_of(live: Arc<Live>, before: Option<usize>, limit: usize) -> Option
     blocking(move || {
         let mut guard = live.lock();
         let st = guard.as_mut()?;
+        // Older than this tail's window: the caller folds that window from disk.
+        if before.is_some_and(|b| b <= st.base) {
+            return None;
+        }
         if refresh_subagents(live.provider, &live.path, st).is_err() {
             *guard = None;
             return None;
@@ -380,43 +397,53 @@ fn refold_with(
     path: &Path,
     opts: otto_transcript::FoldOpts<'static>,
 ) -> std::io::Result<TailState> {
-    let file = std::fs::File::open(path)?;
-    if file.metadata()?.len() > TAIL_INPUT_CAP as u64 {
+    let w = otto_transcript::window::fold_recent(provider, path, opts)?;
+    if w.folder.record_count() - w.first > TAIL_RECORD_CAP {
         return Err(budget_error());
     }
-    let mut bytes = Vec::new();
-    file.take(TAIL_INPUT_CAP as u64 + 1)
-        .read_to_end(&mut bytes)?;
-    let records = bytes.iter().filter(|b| **b == b'\n').count();
-    if bytes.len() > TAIL_INPUT_CAP || records > TAIL_RECORD_CAP {
-        return Err(budget_error());
-    }
-    let mut budget = TailBudget::default();
-    let sidecar_charge = if provider == Provider::Claude {
-        otto_transcript::subagent_charge(path)?
-    } else {
-        0
-    };
-    budget.reserve(fold_charge(bytes.len(), records).saturating_add(sidecar_charge))?;
-    let mut folder = Folder::new(provider, opts);
-    let mut subagents = SubagentScanner::new();
-    if provider == Provider::Claude {
-        subagents.refresh(path);
-        folder.set_subagents(subagents.tree().to_vec());
-    }
-    folder.seed_bytes(&bytes);
-    let mut tailer = Tailer::at(path, bytes.len() as u64);
-    tailer.partial_line = match bytes.iter().rposition(|b| *b == b'\n') {
-        Some(nl) => bytes[nl + 1..].to_vec(),
-        None => bytes,
-    };
-    Ok(TailState {
-        folder,
-        tailer,
-        subagents,
-        budget,
+    let mut st = TailState {
+        folder: w.folder,
+        tailer: Tailer::at(path, w.end),
+        subagents: SubagentScanner::new(),
+        budget: TailBudget::default(),
         retired: false,
-        sidecar_charge,
+        sidecar_charge: (provider == Provider::Claude)
+            .then(|| otto_transcript::subagent_charge(path))
+            .transpose()?
+            .unwrap_or(0),
+        first: w.first,
+        start: w.start,
+        base: w.base,
+    };
+    st.budget.reserve(st.charge(w.end, 0))?;
+    if provider == Provider::Claude {
+        st.subagents.refresh(path);
+        st.folder.set_subagents(st.subagents.tree().to_vec());
+    }
+    Ok(st)
+}
+
+/// Over budget (a long run outgrew its window): fold a fresh window of the
+/// newest records — indices stay absolute, so the client's cursor holds — and
+/// have the client re-read the page. Retire only when even that fails.
+fn rewindow(
+    opts: &dyn Fn() -> otto_transcript::FoldOpts<'static>,
+    live: &Live,
+    st: &mut TailState,
+) -> Option<Step> {
+    // Retire when a fresh window would not leave room to grow (one huge line).
+    let len = Tailer::current_len(&live.path);
+    match refold_with(live.provider, &live.path, opts()) {
+        Ok(fresh) if len.saturating_sub(fresh.start) <= TAIL_INPUT_CAP as u64 * 3 / 4 => {
+            *st = fresh
+        }
+        _ => st.retired = true,
+    }
+    Some(Step {
+        turns: vec![],
+        cursor: st.folder.record_count().to_string(),
+        oversize: true,
+        new_artifacts: vec![],
     })
 }
 
@@ -426,10 +453,8 @@ fn refresh_subagents(provider: Provider, path: &Path, st: &mut TailState) -> std
         return Ok(());
     }
     let charge = otto_transcript::subagent_charge(path)?;
-    st.budget.reserve(
-        fold_charge(st.tailer.offset as usize, st.folder.record_count()).saturating_add(charge),
-    )?;
     st.sidecar_charge = charge;
+    st.budget.reserve(st.charge(st.tailer.offset, 0))?;
     if st.subagents.refresh(path) {
         st.folder.set_subagents(st.subagents.tree().to_vec());
     }
@@ -539,37 +564,17 @@ fn step(
     };
     // Reserve the incoming source footprint before Tailer allocates/parses
     // the burst. Its prefix read leaves growth after this stat for next time.
-    if source_len > TAIL_INPUT_CAP as u64
-        || st
-            .budget
-            .reserve(
-                fold_charge(source_len as usize, st.folder.record_count())
-                    .saturating_add(st.sidecar_charge),
-            )
-            .is_err()
+    if source_len.saturating_sub(st.start) > TAIL_INPUT_CAP as u64
+        || st.budget.reserve(st.charge(source_len, 0)).is_err()
     {
-        st.retired = true;
-        return Some(Step {
-            turns: vec![],
-            cursor: st.folder.record_count().to_string(),
-            oversize: true,
-            new_artifacts: vec![],
-        });
+        return rewindow(opts, live, st);
     }
     let delta = match st.tailer.poll_up_to(
         source_len,
-        TAIL_RECORD_CAP.saturating_sub(st.folder.record_count()),
+        TAIL_RECORD_CAP.saturating_sub(st.folder.record_count() - st.first),
     ) {
         Ok(d) => d,
-        Err(e) if e.kind() == std::io::ErrorKind::OutOfMemory => {
-            st.retired = true;
-            return Some(Step {
-                turns: vec![],
-                cursor: st.folder.record_count().to_string(),
-                oversize: true,
-                new_artifacts: vec![],
-            });
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::OutOfMemory => return rewindow(opts, live, st),
         Err(e) => {
             tracing::debug!(session = %sid, "transcript tail: poll failed: {e}");
             return None;
@@ -580,22 +585,10 @@ fn step(
     }
     if st
         .budget
-        .reserve(
-            fold_charge(
-                st.tailer.offset as usize,
-                st.folder.record_count().saturating_add(delta.records.len()),
-            )
-            .saturating_add(st.sidecar_charge),
-        )
+        .reserve(st.charge(st.tailer.offset, delta.records.len()))
         .is_err()
     {
-        st.retired = true;
-        return Some(Step {
-            turns: vec![],
-            cursor: st.folder.record_count().to_string(),
-            oversize: true,
-            new_artifacts: vec![],
-        });
+        return rewindow(opts, live, st);
     }
     let prev_count = if delta.restarted {
         0
@@ -618,13 +611,7 @@ fn step(
             }
         };
     } else if refresh_subagents(live.provider, &live.path, st).is_err() {
-        st.retired = true;
-        return Some(Step {
-            turns: vec![],
-            cursor: st.folder.record_count().to_string(),
-            oversize: true,
-            new_artifacts: vec![],
-        });
+        return rewindow(opts, live, st);
     }
     let mut turns: Vec<serde_json::Value> = st
         .folder

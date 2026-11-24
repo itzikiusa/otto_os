@@ -26,6 +26,8 @@ export function loadErrorText(e: unknown): string {
       return why && why.toLowerCase() !== 'forbidden' ? `You don’t have access to this: ${why}` : 'You don’t have access to this.';
     }
     if (e.status === 404) return 'It no longer exists, or this daemon doesn’t serve it.';
+    // A size limit's sentence is the cause ("This conversation is too large…").
+    if (e.status === 413) return (e.message ?? '').replace(/^payload too large:\s*/i, '') || 'It is too large to show here.';
     return e.message ? e.message : `The daemon answered ${e.status}.`;
   }
   // `fetch` rejects with a TypeError when the daemon is unreachable.

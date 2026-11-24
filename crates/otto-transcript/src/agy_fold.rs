@@ -54,6 +54,10 @@ impl<'a> AgyFolder<'a> {
         self.count
     }
 
+    pub(crate) fn parts(&mut self) -> (&mut Fold<'a>, &mut usize) {
+        (&mut self.st.f, &mut self.count)
+    }
+
     pub fn set_subagents(&mut self, subagents: Vec<SubagentMeta>) {
         self.st.f.opts.subagents = subagents;
     }

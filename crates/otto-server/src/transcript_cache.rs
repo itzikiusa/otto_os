@@ -202,7 +202,7 @@ impl Snapshot {
     }
 }
 
-type Outcome = std::result::Result<Arc<Snapshot>, Arc<str>>;
+type Outcome = Result<Arc<Snapshot>>;
 enum Entry {
     Ready {
         stamp: Stamp,
@@ -376,7 +376,7 @@ impl TranscriptCache {
                                     }
                                     Ok(value)
                                 }
-                                Err(e) => Err(Arc::<str>::from(e.to_string())),
+                                Err(e) => Err(e),
                             }
                         };
                         let _ = sender.send(Some(outcome));
@@ -386,14 +386,9 @@ impl TranscriptCache {
             }
         };
         loop {
+            // The fold's own error (a 413 limit, a 404, busy) — never a 500.
             if let Some(outcome) = receiver.borrow().clone() {
-                return outcome.map_err(|e| {
-                    if e.contains("transcript busy") {
-                        busy()
-                    } else {
-                        Error::Internal(e.to_string())
-                    }
-                });
+                return outcome;
             }
             receiver
                 .changed()
@@ -458,6 +453,24 @@ mod tests {
             })
         }
     }
+    /// A fold refused on a limit reaches the caller as that limit (413 with
+    /// its sentence); the cache used to re-wrap every failure as a 500.
+    #[tokio::test]
+    async fn a_refused_fold_keeps_its_own_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key(&dir, "a.jsonl");
+        let refused = TranscriptCache::default()
+            .get(key, || {
+                Err(Error::PayloadTooLarge("too large to show".into()))
+            })
+            .await;
+        assert!(
+            matches!(&refused, Err(Error::PayloadTooLarge(m)) if m == "too large to show"),
+            "{:?}",
+            refused.err()
+        );
+    }
+
     #[tokio::test]
     async fn sweep_releases_idle_folds_without_another_read() {
         let dir = tempfile::tempdir().unwrap();

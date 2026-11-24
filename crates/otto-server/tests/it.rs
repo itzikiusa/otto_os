@@ -98,6 +98,8 @@ mod share_scope_guard;
 mod simulators_api;
 #[path = "slack_as_me.rs"]
 mod slack_as_me;
+#[path = "transcript_long_session.rs"]
+mod transcript_long_session;
 #[path = "ui_control.rs"]
 mod ui_control;
 #[path = "workflow_run_files.rs"]
