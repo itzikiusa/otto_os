@@ -265,6 +265,48 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"fix: a\n\n- b"}'"#,
         assert!(e.to_string().contains("unknown option --tools="), "{e}");
     }
 
+    /// R1-076: dropping the turn (Stop, the client went away) kills the CLI.
+    #[tokio::test]
+    async fn dropping_the_turn_kills_the_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let p = fake(
+            dir.path(),
+            &format!("echo $$ > '{}'; exec sleep 30", pid_file.display()),
+        );
+        let turn = text_turn(&p, &[], &[], "x", DRAFT_TIMEOUT, |_| {});
+        let wait_pid = async {
+            loop {
+                if let Some(pid) = std::fs::read_to_string(&pid_file)
+                    .ok()
+                    .filter(|s| s.ends_with('\n'))
+                {
+                    break pid.trim().to_string();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        let pid = tokio::select! {
+            _ = turn => panic!("the turn ended on its own"),
+            pid = wait_pid => pid,
+        };
+        let alive = || {
+            let out = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid])
+                .output()
+                .unwrap();
+            let stat = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            !stat.is_empty() && !stat.starts_with('Z')
+        };
+        for _ in 0..200 {
+            if !alive() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the CLI (pid {pid}) outlived its dropped turn");
+    }
+
     /// R1-038: a CLI that writes more than a pipe holds (64 KiB) to stderr
     /// before its reply no longer deadlocks the turn, and a non-UTF-8 byte on
     /// stdout no longer drops the reply.

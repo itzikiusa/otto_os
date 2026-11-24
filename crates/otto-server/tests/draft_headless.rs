@@ -225,6 +225,95 @@ async fn a_commit_draft_with_no_body_still_answers() {
     );
 }
 
+/// R1-076: the PR draft runs the same headless turn — its reply becomes the
+/// title + description, and the branch's Jira key lands in the title.
+#[tokio::test]
+async fn the_pr_draft_is_headless_and_carries_the_branch_jira_key() {
+    let f = fixture(
+        r#"    printf '%s\n' '{"type":"result","is_error":false,"result":"{\"title\":\"greet the world\",\"description\":\"say hello world\"}"}'
+    exit 0"#,
+    )
+    .await;
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&f.repo_dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+    };
+    git(&["checkout", "-q", "-b", "feat/ABC-12-greet"]);
+    git(&["commit", "-qam", "greet"]);
+    let resp = reqwest::Client::new()
+        .post(f.endpoint.replace("draft-commit-message", "pr/draft"))
+        .bearer_auth(&f.token)
+        .json(&serde_json::json!({ "base": "main" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["title"], "ABC-12 greet the world", "{body}");
+    assert_eq!(body["description"], "say hello world");
+    assert_eq!(body["source_branch"], "feat/ABC-12-greet");
+    let log = std::fs::read_to_string(f.bin.join("claude.log")).unwrap();
+    assert!(log.lines().any(|l| l == "-p"), "{log}");
+}
+
+/// R1-076: a CLI that dies mid-stream ends the NDJSON with its own words,
+/// after what it already wrote; a staged change is drafted `from_staged`.
+#[tokio::test]
+async fn a_streamed_draft_that_dies_says_why_and_staged_drafts_say_so() {
+    let f = fixture(
+        r#"    printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"feat(app)"}}}'
+    echo 'boom: the API went away' >&2
+    exit 1"#,
+    )
+    .await;
+    let http = reqwest::Client::new();
+    let text = http
+        .post(&f.endpoint)
+        .bearer_auth(&f.token)
+        .json(&serde_json::json!({ "stream": true }))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            serde_json::json!({ "delta": "feat(app)" }),
+            serde_json::json!({ "error": "the Claude CLI stopped: boom: the API went away" }),
+        ]
+    );
+    let f = fixture(ANSWER).await;
+    let staged = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&f.repo_dir)
+        .args(["add", "app.go"])
+        .status()
+        .unwrap();
+    assert!(staged.success());
+    let body: serde_json::Value = http
+        .post(&f.endpoint)
+        .bearer_auth(&f.token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["from_staged"], true, "{body}");
+}
+
 /// The card's live preview: with `stream`, the route answers NDJSON — the
 /// text as the model writes it (subject first, then body), then the draft.
 #[tokio::test]
