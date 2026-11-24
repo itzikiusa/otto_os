@@ -156,6 +156,7 @@ const LAZY_ONLY = {
     'kubernetes',
     'aws',
     'skills-eval',
+    'loops',
   ],
   'src/lib/components/CodeEditor.svelte': ['settings'],
 };

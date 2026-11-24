@@ -420,7 +420,7 @@
     }
   }
 
-  // ── request kind (HTTP / SSE / WebSocket / gRPC) ────────────────────────────
+  // ── request kind: HTTP is the default, so its select shows only for SSE / WebSocket / gRPC (picked from the method menu's Protocol group)
   const REQUEST_KINDS: { id: ApiRequestKind; label: string; title: string }[] = [
     { id: 'http', label: 'HTTP', title: 'A normal HTTP request (REST, GraphQL)' },
     { id: 'sse', label: 'SSE', title: 'Server-sent events: keep the connection open and stream events' },
@@ -761,13 +761,13 @@
 
   <!-- type + method + URL + Send -->
   <div class="urlbar">
-    <select class="kind" value={draft.kind} aria-label="Request type" title={REQUEST_KINDS.find((k) => k.id === draft.kind)?.title}
+    {#if draft.kind !== 'http'}<select class="kind" value={draft.kind} aria-label="Request type" title={REQUEST_KINDS.find((k) => k.id === draft.kind)?.title}
       onchange={(e) => setKind((e.currentTarget as HTMLSelectElement).value as ApiRequestKind)}>
       {#each REQUEST_KINDS as k (k.id)}<option value={k.id} title={k.title}>{k.label}</option>{/each}
-    </select>
+    </select>{/if}
     {#if draft.kind === 'http' || draft.kind === 'sse'}
-      <select class="method" value={draft.method} aria-label="HTTP method" onchange={(e) => setField('method', (e.currentTarget as HTMLSelectElement).value)}>
-        {#each HTTP_METHODS as m (m)}<option value={m}>{m}</option>{/each}
+      <select class="method" value={draft.method} aria-label="HTTP method" onchange={(e) => { const v = (e.currentTarget as HTMLSelectElement).value; if (REQUEST_KINDS.some((k) => k.id === v)) setKind(v as ApiRequestKind); else setField('method', v); }}>
+        {#each HTTP_METHODS as m (m)}<option value={m}>{m}</option>{/each}{#if draft.kind === 'http'}<optgroup label="Protocol">{#each REQUEST_KINDS.slice(1) as k (k.id)}<option value={k.id} title={k.title}>{k.label}</option>{/each}</optgroup>{/if}
       </select>
     {/if}
     <div class="url-wrap">
@@ -855,7 +855,7 @@
     {#if tab === 'params'}
       <p class="tab-help">Added to the URL as <code>?key=value</code>. Untick a row to skip it.</p>
       {@render kvEditor('query', draft.query)}
-      {#if draft.url.trim()}
+      {#if draft.url.trim() && sentUrl !== draft.url.trim()}
         <div class="full-url">
           <div class="full-url-head">
             <span class="full-url-label" id="api-full-url-label">Full URL</span>

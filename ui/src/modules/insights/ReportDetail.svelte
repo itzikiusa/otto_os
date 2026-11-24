@@ -67,6 +67,9 @@
     parsed: ParsedSummary;
     /** The summary markdown (full file when it could be read, else the listed excerpt). */
     markdown: string;
+    /** The summary file could not be read: say so with Retry, not a blank preview. */
+    summaryError?: string | null;
+    onretrysummary?: () => void;
     kpis: Kpi[];
     /** Label of the report the deltas compare against ("Tue 22 Sep"), if any. */
     compareLabel: string | null;
@@ -77,7 +80,7 @@
     onexportmd: () => void;
     ondownloadhtml: () => void;
   }
-  let { report, parsed, markdown, kpis, compareLabel, ledger, mode, onmode, onopenwindow, onexportmd, ondownloadhtml }: Props =
+  let { report, parsed, markdown, summaryError = null, onretrysummary, kpis, compareLabel, ledger, mode, onmode, onopenwindow, onexportmd, ondownloadhtml }: Props =
     $props();
 
   const hasHtml = $derived(!!report.html_path);
@@ -305,6 +308,9 @@
     <pre class="r-source" dir="ltr" data-testid="report-markdown">{markdown}</pre>
   {:else}
     <div class="r-scroll">
+      {#if summaryError}
+        <LoadState what="this report’s summary" variant="compact" error={summaryError} empty onretry={onretrysummary} />
+      {/if}
       {#if kpis.length > 0}
         <section class="r-section" aria-labelledby="kf-title">
           <div class="r-section-head">

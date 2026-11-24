@@ -751,9 +751,8 @@
     border-radius: var(--radius-s);
     overflow: auto;
   }
-  .resp-editor {
-    overflow: hidden;
-  }
+  .resp-editor { overflow: hidden; }
+  .resp-editor :global(.code-editor-wrap .cm-editor) { font-size: var(--fs-s); } /* the response reads at 12 px */
   .html-preview {
     flex: 1;
     min-height: 240px;

@@ -22,11 +22,6 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import Lobby from './Lobby.svelte';
-  import ArtifactView from './ArtifactView.svelte';
-  import CollectionView from './CollectionView.svelte';
-  import BrandKitPage from './BrandKitPage.svelte';
-  import LearnedPage from './LearnedPage.svelte';
-  import NewDesignModal from './NewDesignModal.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { parseDesignRoute, studioInfo } from './model';
@@ -36,6 +31,14 @@
 
   const TtsStudioPage = lazyComponent(() => import('./tts/TtsStudioPage.svelte'));
   const CreatePage = lazyComponent(() => import('./create/CreatePage.svelte'));
+  // The lobby is the first paint; an artifact (export menu, CodeMirror), a
+  // collection, the brand kit, the rules and the new-design sheet (exporters,
+  // 3D viewport, game helpers) load when opened.
+  const ArtifactViewLazy = lazyComponent(() => import('./ArtifactView.svelte'));
+  const CollectionLazy = lazyComponent(() => import('./CollectionView.svelte'));
+  const BrandKitLazy = lazyComponent(() => import('./BrandKitPage.svelte'));
+  const LearnedLazy = lazyComponent(() => import('./LearnedPage.svelte'));
+  const NewDesignLazy = lazyComponent(() => import('./NewDesignModal.svelte'));
   const route = $derived(parseDesignRoute(router.parts));
   const inCreate = $derived(router.parts[1] === 'create');
   // Leaving the Design Hall: hand back the cached 3D model blobs (each pins
@@ -179,20 +182,20 @@
   {:else if route.view === 'artifact'}
     {@const artifactId = route.id.split('?')[0]}
     {#key artifactId}
-      <ArtifactView id={artifactId} />
+      <LazyMount lazy={ArtifactViewLazy} what="the design" props={{ id: artifactId }} />
     {/key}
   {:else if route.view === 'project'}
-    <CollectionView scope={{ kind: 'project', id: route.id }} onnew={openNew} />
+    <LazyMount lazy={CollectionLazy} what="the project" props={{ scope: { kind: 'project', id: route.id }, onnew: openNew }} />
   {:else if route.view === 'studio'}
-    <CollectionView scope={{ kind: 'studio', id: route.id }} onnew={openNew} />
+    <LazyMount lazy={CollectionLazy} what="the studio" props={{ scope: { kind: 'studio', id: route.id }, onnew: openNew }} />
   {:else if route.view === 'story'}
-    <CollectionView scope={{ kind: 'story', id: route.id }} onnew={openNew} />
+    <LazyMount lazy={CollectionLazy} what="the story’s designs" props={{ scope: { kind: 'story', id: route.id }, onnew: openNew }} />
   {:else if route.view === 'brand'}
-    <BrandKitPage />
+    <LazyMount lazy={BrandKitLazy} what="the brand kit" />
   {:else if route.view === 'tts'}
     <LazyMount lazy={TtsStudioPage} what="Voice Studio" />
   {:else if route.view === 'learned'}
-    <LearnedPage tab={route.tab} />
+    <LazyMount lazy={LearnedLazy} what="the team rules" props={{ tab: route.tab }} />
   {/if}
 </div>
 
@@ -208,14 +211,12 @@
 />
 
 {#if newInit}
-  <NewDesignModal
-    studio={newInit.studio}
-    format={newInit.format}
-    templateId={newInit.templateId}
-    projectId={newInit.projectId}
-    storyId={newInit.storyId}
-    onclose={() => (newInit = null)}
-    oncreated={created}
+  <LazyMount
+    lazy={NewDesignLazy}
+    what="the new design sheet"
+    quiet
+    onerror={() => (newInit = null)}
+    props={{ ...newInit, onclose: () => (newInit = null), oncreated: created }}
   />
 {/if}
 

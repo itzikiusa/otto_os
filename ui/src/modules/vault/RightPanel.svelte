@@ -5,7 +5,10 @@
   import { scrollBehavior } from '../../lib/motion';
   import { confirmer } from '../../lib/confirm.svelte';
   import { vault } from './vault.svelte';
-  import PropertiesEditor from './PropertiesEditor.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  // The properties form (and the yaml parser it needs) loads when Properties opens.
+  const PropertiesLazy = lazyComponent(() => import('./PropertiesEditor.svelte'));
   import KnowledgeMetadata from './KnowledgeMetadata.svelte';
   import { slugifyHeading } from '../../lib/render/markdown';
   import Icon from '../../lib/components/Icon.svelte';
@@ -156,7 +159,7 @@
       {#if vault.note?.meta.parse_error}
         <div class="none warn">Frontmatter is not parseable YAML</div>
       {/if}
-      {#key vault.notePath}<PropertiesEditor />{/key}
+      {#key vault.notePath}<LazyMount lazy={PropertiesLazy} what="the properties" variant="compact" />{/key}
       <table class="props">
         <tbody>
           {#each props as [k, v] (k)}

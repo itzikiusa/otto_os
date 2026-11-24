@@ -39,7 +39,9 @@
   import { untrack } from 'svelte';
   import { announceShown } from '../../lib/announce.svelte';
   import type { Completion, CompletionContext, CompletionResult } from '@codemirror/autocomplete';
-  import CodeEditor from '../../lib/components/CodeEditor.svelte';
+  import LazyCodeEditor from '../../lib/components/LazyCodeEditor.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { vaultNote } from '../../lib/api/vault';
   import { router } from '../../lib/router.svelte';
@@ -51,7 +53,6 @@
   import { renderNote, resolverFrom, slugifyHeading, stripFrontmatter } from '../../lib/render/markdown';
   import { plainPreview, rendersOffThread } from './noteRenderPlan';
   import { renderNoteOffThread } from './noteRenderAsync';
-  import RefineDrawer from './RefineDrawer.svelte';
   import StructuredNote from './StructuredNote.svelte';
   import LinkPreview from './LinkPreview.svelte';
   import AttachmentBar from './AttachmentBar.svelte';
@@ -379,8 +380,11 @@
     }
   });
 
+  // Refine (an agent terminal) opens on request: its chunk loads then.
+  const RefineLazy = lazyComponent(() => import('./RefineDrawer.svelte'));
+
   // -- editor: paste / drop files → vault attachment + embed at the cursor --------
-  let editor = $state<ReturnType<typeof CodeEditor> | null>(null);
+  let editor = $state<ReturnType<typeof LazyCodeEditor> | null>(null);
   let attach = $state<ReturnType<typeof AttachmentBar> | null>(null);
   function insertAttachment(text: string, forNote: string | null): boolean {
     if (!vault.editing || !editor || vault.notePath !== forNote) return false;
@@ -497,7 +501,7 @@
     {#if vault.editing}
       <AttachmentBar bind:this={attach} note={vault.notePath} insert={insertAttachment} />
       <div class="editor-wrap" use:fileTarget={(files, source) => attach?.add(files, source)}>
-        <CodeEditor
+        <LazyCodeEditor
           bind:this={editor}
           path={vault.notePath ?? 'note.md'}
           content={vault.draft}
@@ -533,7 +537,7 @@
            the agent’s edit keeps the drawer + terminal mounted; opening a
            different note resets the drawer to that note’s refine session. -->
       {#key `${vault.wsId}:${vault.current?.id}:${vault.notePath}`}
-        <RefineDrawer path={vault.notePath} />
+        <LazyMount lazy={RefineLazy} what="refine" variant="panel" props={{ path: vault.notePath }} />
       {/key}
     {/if}
   </div>

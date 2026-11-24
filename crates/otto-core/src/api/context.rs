@@ -16,6 +16,11 @@ pub struct LibrarySkill {
     pub version: u32,
     pub description: String,
     pub body: String,
+    /// SHA-256 (hex) of `body` normalised for comparison
+    /// (`text::skill_body_hash`): equal to a provider copy's `body_hash` when
+    /// the two read the same, so Skills Lab compares copies without their bodies.
+    #[serde(default)]
+    pub body_hash: String,
 }
 
 /// A soul (persona) entry in the Otto library.
@@ -106,6 +111,9 @@ pub struct ProviderSkillInfo {
     pub name: String,
     pub category: String,
     pub description: String,
+    /// Same hash as `LibrarySkill::body_hash`, of this copy's `SKILL.md`.
+    #[serde(default)]
+    pub body_hash: String,
 }
 
 /// `GET /library/provider-skills/{provider}/{name}` — a provider skill's content.

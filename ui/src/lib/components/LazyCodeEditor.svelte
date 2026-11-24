@@ -25,6 +25,7 @@
   let pendingFocus = false;
   let pendingOpenSearch = false;
   let pendingGoToLine: { line: number; col?: number } | null = null;
+  let pendingInsert = '';
 
   onMount(() => {
     untrack(() => {
@@ -45,6 +46,10 @@
         pendingOpenSearch = false;
         inst.openSearch();
       }
+      if (pendingInsert) {
+        inst.insertText(pendingInsert);
+        pendingInsert = '';
+      }
       if (pendingFocus) {
         pendingFocus = false;
         inst.focus();
@@ -59,6 +64,10 @@
   export function openSearch(): void {
     if (inner) inner.openSearch();
     else pendingOpenSearch = true;
+  }
+  export function insertText(text: string): void {
+    if (inner) inner.insertText(text);
+    else pendingInsert += text;
   }
   export function goToLine(line: number, col?: number): void {
     if (inner) inner.goToLine(line, col);
