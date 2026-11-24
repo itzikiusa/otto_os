@@ -7,11 +7,11 @@ import { mergeCheckReasons, mergeCheckSummary, openTasksLine } from '../src/modu
 
 const ck = (key: string, passed: boolean, label = key) => ({ key, label, passed });
 
-test('summary line counts passed checks', () => {
-  assert.equal(mergeCheckSummary([ck('a', true), ck('b', false), ck('c', true)]), '2 of 3 checks passed');
-  assert.equal(mergeCheckSummary([ck('a', false)]), '0 of 1 check passed');
-  assert.equal(mergeCheckSummary([ck('a', true), ck('b', true)]), 'All 2 checks passed');
-  assert.equal(mergeCheckSummary([ck('a', true)]), 'Check passed');
+test('summary counts the merge rules met (never "checks": that word is CI’s)', () => {
+  assert.equal(mergeCheckSummary([ck('a', true), ck('b', false), ck('c', true)]), '2 of 3 met');
+  assert.equal(mergeCheckSummary([ck('a', false)]), '0 of 1 met');
+  assert.equal(mergeCheckSummary([ck('a', true), ck('b', true)]), 'All 2 met');
+  assert.equal(mergeCheckSummary([ck('a', true)]), 'Met');
   assert.equal(mergeCheckSummary([]), null);
   assert.equal(mergeCheckSummary(undefined), null);
 });

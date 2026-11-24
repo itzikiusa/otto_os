@@ -35,7 +35,6 @@
   import { fileStat } from '../../lib/diff/diff-model';
   import { notePrHead, onPrWhitespaceChange, prDiffFileLoader, prDiffHead, prDiffSummary, prIgnoreWhitespace, repoDiffFileLoader } from '../../lib/diff/diff-load';
   import PrConversation from './PrConversation.svelte';
-  import PrMergeChecks from './PrMergeChecks.svelte';
   import { providePrCommentActions } from './pr-comment-ctx';
   import { createCommentOps } from './pr-comment-ops';
   import { withdrawMyReview } from './pr-review-ops';
@@ -693,7 +692,6 @@
             </span>
           {/if}
         </div>
-        <PrMergeChecks {pr} compact />
       {/if}
 
       <div class="prd-row prd-tabs-row">

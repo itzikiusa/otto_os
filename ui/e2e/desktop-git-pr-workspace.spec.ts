@@ -328,24 +328,22 @@ test('reactions toggle, review summaries wear their verdict, replies name who th
   await expect(review.getByRole('button', { name: 'Add a reaction' })).toHaveCount(0);
 });
 
-test('merge checks and open tasks show in the side column and as merge reasons', async ({ page }) => {
+test('one statement of the checks: the status line; merge rules and tasks in the details card', async ({ page }) => {
   await page.goto('/#/git/rep_otto/pr/51');
   await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
-  const checks = page.getByRole('region', { name: 'Merge checks' });
-  await expect(checks).toContainText('1 of 3 checks passed');
-  await expect(checks).toContainText('At least 2 approvals');
-  await expect(checks).toContainText('1 of 2 approvals');
-  await expect(checks).toContainText('1 task open');
-  // The compact header line stands in for the side column only where that
-  // column has dropped below the conversation (a pane under 860px).
-  const line = page.getByTestId('pr-merge-checks-line');
-  const paneWidth = (): Promise<number> => page.locator('.prd-head').evaluate((el) => el.clientWidth - 32);
-  await page.setViewportSize({ width: 2200, height: 950 });
-  await expect.poll(paneWidth).toBeGreaterThan(860);
-  await expect(line).toBeHidden();
-  await page.setViewportSize({ width: 1300, height: 950 });
-  await expect.poll(paneWidth).toBeLessThan(860);
-  await expect(line).toHaveText('1 of 3 checks passed · 1 task open');
+  // CI checks (build ✓, lint ✗) are said once, in the status line…
+  await expect(page.getByTestId('pr-status')).toHaveText('1 of 2 checks failing');
+  await expect(page.locator('.prd-head')).not.toContainText('checks passed');
+  await expect(page.locator('.prd-head')).not.toContainText('task open');
+  // …the forge's merge rules and the open task live in the details card.
+  const rules = page.getByRole('region', { name: 'Merge rules' });
+  await expect(rules).toContainText('1 of 3 met');
+  await expect(rules).toContainText('At least 2 approvals');
+  await expect(rules).toContainText('1 of 2 approvals');
+  await expect(rules.getByTestId('pr-open-tasks')).toHaveText('1 task open');
+  // Narrow pane: the card drops under the conversation; still no second line.
+  await page.setViewportSize({ width: 1100, height: 950 });
+  await expect(page.locator('.prd-head')).not.toContainText('task open');
   await page.setViewportSize({ width: 1600, height: 950 });
 
   await mergeFromMore(page);
