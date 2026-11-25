@@ -1127,3 +1127,65 @@ async fn clickhouse_native_reads_reuse_connections() {
         "USE leaked into a reused connection"
     );
 }
+
+/// A relay to `upstream`; `drop_all()` closes every connection it carries
+/// (what a proxy, load balancer or bounced tunnel does to an idle socket).
+async fn dropping_proxy(upstream: u16) -> (u16, impl Fn()) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let relays = std::sync::Arc::new(std::sync::Mutex::new(
+        Vec::<tokio::task::JoinHandle<()>>::new(),
+    ));
+    let held = relays.clone();
+    tokio::spawn(async move {
+        while let Ok((mut client, _)) = listener.accept().await {
+            held.lock().unwrap().push(tokio::spawn(async move {
+                let mut server = tokio::net::TcpStream::connect(("127.0.0.1", upstream))
+                    .await
+                    .unwrap();
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+            }));
+        }
+    });
+    let drop_all = move || {
+        relays
+            .lock()
+            .unwrap()
+            .drain(..)
+            .for_each(|relay| relay.abort())
+    };
+    (port, drop_all)
+}
+
+/// Parked native connections a proxy dropped while idle are not handed to the
+/// next read as a dead socket: the read (and the keep-alive) still answers,
+/// even when the drop came a moment before the read.
+#[tokio::test]
+#[ignore]
+async fn clickhouse_native_read_survives_dropped_parked_connections() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let native_port = std::env::var("OTTO_CH_NATIVE_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(19000);
+    let (port, drop_all) = dropping_proxy(native_port).await;
+    let cfg = ResolvedConfig {
+        port,
+        params: json!({ "transport": "native" }),
+        ..cfg()
+    };
+    let d = ClickhouseDriver::default();
+    let path = NodePath::parse("db:analytics/table:events");
+    d.object_detail(&cfg, &path).await.unwrap(); // parks several connections
+    // Right after the drop klickhouse may not have seen the sockets close
+    // yet (the race a retry covers); many rounds make that case certain.
+    for round in 0..20 {
+        drop_all();
+        let test = d.test(&cfg).await.unwrap();
+        assert!(test.ok, "round {round}, right after a drop: {}", test.message);
+        d.object_detail(&cfg, &path).await.unwrap();
+        d.run(&cfg, &query("SELECT count() FROM events")).await.unwrap();
+    }
+}

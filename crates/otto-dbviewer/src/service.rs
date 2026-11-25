@@ -723,14 +723,44 @@ struct Resolved {
     _tunnel: Option<Arc<SshTunnel>>,
 }
 
+/// sqlx's text for an I/O failure on an open session (`Error::Io`): a proxy,
+/// load balancer or restarted server dropped a pooled session that was handed
+/// out without a ping (the MySQL/Postgres drivers' `PING_IF_IDLE_FOR`).
+fn dead_session(message: &str) -> bool {
+    message.contains("error communicating with database")
+}
+
 impl Resolved {
+    /// Run driver work under the connection's lifecycle. A dead pooled session
+    /// drops this profile's pool: the sessions idle beside it died with it, and
+    /// each would otherwise fail one more request.
     async fn with_lifecycle<T>(
         &self,
         work: impl std::future::Future<Output = Result<T>>,
     ) -> Result<T> {
-        match self.config.lifecycle.as_ref() {
+        let result = match self.config.lifecycle.as_ref() {
             Some(token) => token.run(work).await,
             None => work.await,
+        };
+        if result.as_ref().is_err_and(|e| dead_session(&e.to_string())) {
+            self.drop_sessions();
+        }
+        result
+    }
+
+    fn drop_sessions(&self) {
+        drop(self.driver.detach(&self.config.cache_key()));
+    }
+
+    /// [`Self::with_lifecycle`] for an idempotent read (tree, object detail,
+    /// search): a dead pooled session is retried once, on fresh sessions.
+    async fn read<T, F: std::future::Future<Output = Result<T>>>(
+        &self,
+        work: impl Fn() -> F,
+    ) -> Result<T> {
+        match self.with_lifecycle(work()).await {
+            Err(e) if dead_session(&e.to_string()) => self.with_lifecycle(work()).await,
+            other => other,
         }
     }
 }
@@ -1790,6 +1820,12 @@ impl DbViewerService {
         let r = self
             .resolve(conn_id, user_id, child.as_deref(), "configure")
             .await?;
+        let first = r.with_lifecycle(r.driver.test(&r.config)).await?;
+        if first.ok || !dead_session(&first.message) {
+            return Ok(first);
+        }
+        // test() reports a failure as `ok: false`, not an error.
+        r.drop_sessions();
         r.with_lifecycle(r.driver.test(&r.config)).await
     }
 
@@ -1905,7 +1941,7 @@ impl DbViewerService {
         let r = self
             .resolve(conn_id, user_id, child.as_deref(), "discover")
             .await?;
-        let nodes = r.with_lifecycle(r.driver.schema_root(&r.config)).await?;
+        let nodes = r.read(|| r.driver.schema_root(&r.config)).await?;
         // One snapshot + one membership load for every root, not 2+ state
         // reads per database (500 databases used to cost ~1,000 reads).
         let snap = self.access_snapshot(conn_id).await?;
@@ -1953,10 +1989,10 @@ impl DbViewerService {
         // An empty/whitespace filter is treated as "no filter".
         let filter = filter.map(str::trim).filter(|s| !s.is_empty());
         let result = r
-            .with_lifecycle(
+            .read(|| {
                 r.driver
-                    .schema_children_with_counts(&r.config, &node, filter, counts),
-            )
+                    .schema_children_with_counts(&r.config, &node, filter, counts)
+            })
             .await?;
         self.authorize(conn_id, user_id, Some(path), "db_browse")
             .await?;
@@ -1981,9 +2017,7 @@ impl DbViewerService {
         let r = self
             .resolve(conn_id, user_id, child.as_deref(), "discover")
             .await?;
-        let mut result = r
-            .with_lifecycle(r.driver.search_objects(&r.config, req))
-            .await?;
+        let mut result = r.read(|| r.driver.search_objects(&r.config, req)).await?;
         let snap = self.access_snapshot(conn_id).await?;
         let schemas: Vec<&str> = result.hits.iter().map(|h| h.schema.as_str()).collect();
         let allowed = self
@@ -2023,10 +2057,10 @@ impl DbViewerService {
             .await?;
         let node = NodePath::parse(path);
         let mut result = r
-            .with_lifecycle(
+            .read(|| {
                 r.driver
-                    .object_detail_with_opts(&r.config, &node, approx_row_count),
-            )
+                    .object_detail_with_opts(&r.config, &node, approx_row_count)
+            })
             .await?;
         let snap = self.access_snapshot(conn_id).await?;
         if snap.enforced() {

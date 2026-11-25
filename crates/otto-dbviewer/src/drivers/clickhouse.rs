@@ -690,8 +690,6 @@ impl ClickhouseDriver {
         row_cap: Option<usize>,
         active_db: Option<&str>,
     ) -> Result<RawRows> {
-        use futures_util::StreamExt;
-
         // A selected database must not mutate the cached profile connection:
         // another tab may concurrently query a different database. Scoped
         // connections are operation-owned, so close/eviction cannot orphan them.
@@ -705,7 +703,8 @@ impl ClickhouseDriver {
         // Only an explicit sequential batch owns/reuses one session connection.
         let standalone = cfg.param_str("__ch_session").is_none();
         let mut owned = None;
-        let client = if readonly
+        let mut from_idle = false;
+        let mut client = if readonly
             || standalone
             || active_db.is_some_and(|db| Some(db) != cfg.database.as_deref())
         {
@@ -714,91 +713,34 @@ impl ClickhouseDriver {
                 .map(str::to_string)
                 .or_else(|| cfg.database.clone());
             let client = match self.take_idle_native(cfg, scoped.database.as_deref(), readonly) {
-                Some(client) => client,
+                Some(client) => {
+                    from_idle = true;
+                    client
+                }
                 None => Arc::new(native_connect(&scoped).await?),
             };
-            owned = Some(scoped.database);
+            owned = Some(scoped);
             client
         } else {
             self.native_client(cfg).await?
         };
-        let mut stream = client.query_raw(sql, None).await.map_err(native_err)?;
-
-        let mut meta: Vec<(String, String)> = Vec::new();
-        let mut data: Vec<Vec<Value>> = Vec::new();
-        let mut budget = types::ByteBudget::default();
-        let mut cells_truncated = false;
-        let mut truncated_bytes = false;
-        let mut partial = false;
-        while let Some(block) = stream.next().await {
-            let block = block.map_err(native_err)?;
-            // The first non-empty block establishes the column order/types; the
-            // header block (rows == 0) still carries column_types, so we capture
-            // metadata from whichever block first exposes columns.
-            if meta.is_empty() && !block.column_types.is_empty() {
-                meta = block
-                    .column_types
-                    .iter()
-                    .map(|(name, ty)| (name.clone(), ty.to_string()))
-                    .collect();
+        let rows = match (native_rows(&client, sql, row_cap).await, &owned) {
+            // A parked socket a proxy or server dropped moments ago, before
+            // klickhouse saw it close: the idle ones beside it went too, and a
+            // read is safe to send once more on a fresh connection.
+            (Err(_), Some(scoped)) if from_idle && client.is_closed() && returns_rows(sql) => {
+                self.drop_idle_native(&cfg.cache_key());
+                client = Arc::new(native_connect(scoped).await?);
+                native_rows(&client, sql, row_cap).await?
             }
-            if block.rows == 0 {
-                continue;
-            }
-            if row_cap.is_some_and(|cap| data.len() >= cap) {
-                partial = true;
-                break;
-            }
-            let take = row_cap.map_or(usize::MAX, |cap| cap - data.len());
-            let cells = (block.rows as usize).saturating_mul(block.column_types.len());
-            let rows = if cells >= NATIVE_OFF_RUNTIME_CELLS {
-                tokio::task::spawn_blocking(move || decode_native_block(&block, take))
-                    .await
-                    .map_err(|e| types::upstream(format!("clickhouse: decode task failed: {e}")))?
-            } else {
-                decode_native_block(&block, take)
-            };
-            if row_cap.is_none() {
-                data.extend(rows);
-                continue;
-            }
-            for row in rows {
-                let row: Vec<_> = row
-                    .into_iter()
-                    .map(|v| types::cap_cell_tracked(v, &mut cells_truncated))
-                    .collect();
-                let bytes = row.iter().map(|v| types::approx_json_len(v) + 1).sum();
-                if !budget.charge(bytes) && !data.is_empty() {
-                    truncated_bytes = true;
-                    partial = true;
-                    break;
-                }
-                data.push(row);
-            }
-            if partial {
-                break;
-            }
-        }
-
-        // klickhouse drops its row channel on a protocol/type decode failure
-        // without forwarding that error. Never present that as an empty result.
-        if !partial && client.is_closed() {
-            return Err(native_closed_error());
-        }
+            (rows, _) => rows?,
+        };
         // Only a fully read result of a read statement leaves the session as
         // it was set up (a write/session statement may `USE` or `SET`).
-        if let Some(database) = owned.filter(|_| !partial && returns_rows(sql)) {
-            self.park_idle_native(cfg, database, readonly, client);
+        if let Some(scoped) = owned.filter(|_| !rows.partial && returns_rows(sql)) {
+            self.park_idle_native(cfg, scoped.database, readonly, client);
         }
-        Ok(RawRows {
-            meta,
-            data,
-            prepared: row_cap.is_some(),
-            cells_truncated,
-            truncated_bytes,
-            partial,
-            ..RawRows::default()
-        })
+        Ok(rows)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1567,6 +1509,87 @@ impl Conn {
         }
         Ok(resp)
     }
+}
+
+/// Read one native result within the interactive row/byte budgets.
+async fn native_rows(
+    client: &klickhouse::Client,
+    sql: &str,
+    row_cap: Option<usize>,
+) -> Result<RawRows> {
+    use futures_util::StreamExt;
+    let mut stream = client.query_raw(sql, None).await.map_err(native_err)?;
+
+    let mut meta: Vec<(String, String)> = Vec::new();
+    let mut data: Vec<Vec<Value>> = Vec::new();
+    let mut budget = types::ByteBudget::default();
+    let mut cells_truncated = false;
+    let mut truncated_bytes = false;
+    let mut partial = false;
+    while let Some(block) = stream.next().await {
+        let block = block.map_err(native_err)?;
+        // The first non-empty block establishes the column order/types; the
+        // header block (rows == 0) still carries column_types, so we capture
+        // metadata from whichever block first exposes columns.
+        if meta.is_empty() && !block.column_types.is_empty() {
+            meta = block
+                .column_types
+                .iter()
+                .map(|(name, ty)| (name.clone(), ty.to_string()))
+                .collect();
+        }
+        if block.rows == 0 {
+            continue;
+        }
+        if row_cap.is_some_and(|cap| data.len() >= cap) {
+            partial = true;
+            break;
+        }
+        let take = row_cap.map_or(usize::MAX, |cap| cap - data.len());
+        let cells = (block.rows as usize).saturating_mul(block.column_types.len());
+        let rows = if cells >= NATIVE_OFF_RUNTIME_CELLS {
+            tokio::task::spawn_blocking(move || decode_native_block(&block, take))
+                .await
+                .map_err(|e| types::upstream(format!("clickhouse: decode task failed: {e}")))?
+        } else {
+            decode_native_block(&block, take)
+        };
+        if row_cap.is_none() {
+            data.extend(rows);
+            continue;
+        }
+        for row in rows {
+            let row: Vec<_> = row
+                .into_iter()
+                .map(|v| types::cap_cell_tracked(v, &mut cells_truncated))
+                .collect();
+            let bytes = row.iter().map(|v| types::approx_json_len(v) + 1).sum();
+            if !budget.charge(bytes) && !data.is_empty() {
+                truncated_bytes = true;
+                partial = true;
+                break;
+            }
+            data.push(row);
+        }
+        if partial {
+            break;
+        }
+    }
+
+    // klickhouse drops its row channel on a protocol/type decode failure
+    // without forwarding that error. Never present that as an empty result.
+    if !partial && client.is_closed() {
+        return Err(native_closed_error());
+    }
+    Ok(RawRows {
+        meta,
+        data,
+        prepared: row_cap.is_some(),
+        cells_truncated,
+        truncated_bytes,
+        partial,
+        ..RawRows::default()
+    })
 }
 
 // --- Native connection / TLS ------------------------------------------------

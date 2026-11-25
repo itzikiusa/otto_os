@@ -680,3 +680,115 @@ async fn forget_secret_evicts_completions_cached_copy() {
     );
     assert_eq!(secrets.reads.load(Ordering::SeqCst), 2);
 }
+
+/// A driver whose pooled sessions were all dropped while idle: each call's
+/// first attempt hits a dead socket (sqlx's `Error::Io` text) until the
+/// service drops the pool.
+#[derive(Default)]
+struct DeadSessions {
+    dead: std::sync::atomic::AtomicBool,
+    calls: AtomicUsize,
+    detached: AtomicUsize,
+}
+const DEAD: &str =
+    "mysql: error communicating with database: expected to read 4 bytes, got 0 bytes at EOF";
+impl DeadSessions {
+    fn attempt(&self) -> Result<()> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.dead.load(Ordering::SeqCst) {
+            return Err(Error::Upstream(DEAD.into()));
+        }
+        Ok(())
+    }
+}
+#[async_trait::async_trait]
+impl Driver for DeadSessions {
+    fn engine(&self) -> Engine {
+        Engine::Mysql
+    }
+    fn capabilities(&self) -> Capabilities {
+        unreachable!()
+    }
+    async fn test(&self, _: &ResolvedConfig) -> Result<TestResult> {
+        let ok = self.attempt().is_ok();
+        Ok(TestResult {
+            ok,
+            latency_ms: None,
+            message: if ok { "ok".into() } else { DEAD.into() },
+            server_version: None,
+        })
+    }
+    async fn schema_root(&self, _: &ResolvedConfig) -> Result<Vec<SchemaNode>> {
+        self.attempt().map(|_| Vec::new())
+    }
+    async fn schema_children(
+        &self,
+        _: &ResolvedConfig,
+        _: &crate::types::NodePath,
+        _: Option<&str>,
+    ) -> Result<Vec<SchemaNode>> {
+        self.attempt().map(|_| Vec::new())
+    }
+    async fn object_detail(
+        &self,
+        _: &ResolvedConfig,
+        _: &crate::types::NodePath,
+    ) -> Result<ObjectDetail> {
+        unreachable!()
+    }
+    async fn run(&self, _: &ResolvedConfig, _: &QueryRequest) -> Result<QueryResult> {
+        unreachable!()
+    }
+    async fn completion(
+        &self,
+        _: &ResolvedConfig,
+        _: &crate::types::CompletionContext,
+    ) -> Result<CompletionResponse> {
+        unreachable!()
+    }
+    fn detach(&self, _: &str) -> Option<Arc<dyn Driver>> {
+        // Dropping the pool drops its dead idle sessions.
+        self.detached.fetch_add(1, Ordering::SeqCst);
+        self.dead.store(false, Ordering::SeqCst);
+        None
+    }
+}
+
+/// A read or keep-alive that meets a pooled session a proxy dropped while it
+/// idled (no ping in front: `PING_IF_IDLE_FOR`) answers anyway: the pool is
+/// dropped with its dead sessions and the read runs once more on a fresh one.
+#[tokio::test]
+async fn dead_pooled_sessions_are_dropped_and_an_idempotent_read_retried() {
+    let (mut service, conn, user) = fixture().await;
+    let driver = Arc::new(DeadSessions::default());
+    service.registry.set_for_test(Engine::Mysql, driver.clone());
+    for step in 0..3 {
+        driver.dead.store(true, Ordering::SeqCst);
+        let calls = driver.calls.load(Ordering::SeqCst);
+        match step {
+            0 => assert!(service.test(&conn, &user).await.unwrap().ok),
+            1 => {
+                service.schema_root(&conn, &user).await.unwrap();
+            }
+            _ => {
+                service
+                    .schema_children(&conn, &user, "db:shopdb", None)
+                    .await
+                    .unwrap();
+            }
+        }
+        assert_eq!(
+            driver.calls.load(Ordering::SeqCst) - calls,
+            2,
+            "step {step}: one retry"
+        );
+        assert_eq!(
+            driver.detached.load(Ordering::SeqCst),
+            step + 1,
+            "step {step}: pool dropped"
+        );
+    }
+    // A live session is never retried or dropped.
+    service.schema_root(&conn, &user).await.unwrap();
+    assert_eq!(driver.detached.load(Ordering::SeqCst), 3);
+}
