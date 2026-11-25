@@ -12,15 +12,18 @@ const BLUR_GRACE_MS = 5_000;
 
 const infinite = (a: Animation): boolean => a.effect?.getComputedTiming().iterations === Infinity;
 
-export function installAppInactive(doc: Document = document, win: Window = window): void {
+/** `embedded`: the side pane — an iframe, or the native child webview whose
+ *  `window.parent` is itself (lib/desktop.ts `isEmbedded`). */
+export function installAppInactive(doc: Document = document, win: Window = window, embedded = win.parent !== win): void {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let inactive = false;
-  let paused: Animation[] = [];
+  // Weak: an animation whose element left the DOM while away is not kept alive.
+  let paused = new WeakSet<Animation>();
   const pause = (list: Animation[]): void => {
     for (const a of list) {
       if (a.playState !== 'running' || !infinite(a)) continue;
       a.pause();
-      paused.push(a);
+      paused.add(a);
     }
   };
   const onStart = (e: Event): void => pause((e.target as Element).getAnimations?.() ?? []);
@@ -33,11 +36,10 @@ export function installAppInactive(doc: Document = document, win: Window = windo
       return;
     }
     doc.removeEventListener('animationstart', onStart, true);
-    // Only what is still paused: a dot removed meanwhile is gone for good.
-    for (const a of paused) if (a.playState === 'paused') a.play();
-    paused = [];
+    // Only what is still on the page and paused: a dot removed meanwhile is gone for good.
+    for (const a of doc.getAnimations()) if (paused.has(a) && a.playState === 'paused') a.play();
+    paused = new WeakSet();
   };
-  const embedded = win.parent !== win;
   const away = (): boolean => doc.hidden || (!embedded && !doc.hasFocus());
   const update = (): void => {
     clearTimeout(timer);
