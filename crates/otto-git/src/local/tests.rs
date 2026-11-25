@@ -1228,8 +1228,8 @@ async fn delete_branches_deletes_all_in_one_call_with_per_branch_errors() {
 }
 
 /// One push deletes several remote branches (perf G6: a bulk delete paid a
-/// connection per branch) and prunes their tracking refs; a batch with an
-/// already-gone ref fails as a whole so the caller retries one by one.
+/// connection per branch) and prunes their tracking refs; a ref already gone
+/// on the remote is dropped and the rest still go in one more push.
 #[tokio::test]
 async fn delete_remote_branches_on_deletes_all_in_one_push() {
     let (_tmp, dir) = fixture();
@@ -1258,11 +1258,12 @@ async fn delete_remote_branches_on_deletes_all_in_one_push() {
         remote.iter().any(|b| b.name == "origin/c"),
         "c is untouched"
     );
-    // "a" is already gone: the batch reports failure (the route then retries each).
-    assert!(git
-        .delete_remote_branches_on("origin", &names(&["a", "c"]), None)
+    // "a" is already gone: its end state holds, and "c" is still deleted.
+    git.delete_remote_branches_on("origin", &names(&["a", "c"]), None)
         .await
-        .is_err());
+        .unwrap();
+    let remote = git.refs().await.unwrap().remote;
+    assert!(!remote.iter().any(|b| b.name == "origin/c"), "{remote:?}");
     assert!(matches!(
         git.delete_remote_branches_on("nope", &names(&["c"]), None)
             .await,
