@@ -16,6 +16,7 @@ import {
   pickAutoTarget,
   recordFields,
   rowPreview,
+  unverifiedNames,
 } from '../src/modules/ide/dbwatch/ideDbWatchModel.ts';
 import type {
   IdeDbWatch,
@@ -312,4 +313,40 @@ test('switching the IDE target drops in-flight reads; failures read as people te
   h.store.follow({ root: '/r' });
   await flush(); await flush(); await flush();
   assert.equal(h.store.error, 'Your session expired. Sign in again, then retry.');
+});
+
+// ── Code review round 1 ────────────────────────────────────────────────────
+
+test('C1-018: "Show current rows" keys a composite primary key by the whole tuple, and repeated keys never collide', async () => {
+  const { currentAsDiffs, rowKeys } = await import('../src/modules/ide/dbwatch/ideDbWatchModel.ts');
+  const cur = { columns: ['game_id', 'account_id', 'gp_session'], rows: [[1, 77, 'a'], [1, 78, 'b'], [2, 77, 'c']] };
+  const rows = currentAsDiffs(cur, ['game_id', 'account_id']);
+  assert.deepEqual(rows.map((r) => r.key), ['1, 77', '1, 78', '2, 77']);
+  const keys = rowKeys([...rows, { key: '1, 77', kind: 'added', row: [], changes: [] }, { key: 'x', kind: 'added', row: [], changes: [] }, { key: 'x', kind: 'added', row: [], changes: [] }]);
+  assert.equal(new Set(keys).size, keys.length, 'each-block keys must be unique');
+  assert.deepEqual(currentAsDiffs({ columns: ['v'], rows: [[null], [null]] }, []).map((r) => r.key), ['1', '2'], 'no key column: the row number');
+});
+
+test('C1-035: names detected as SQL (guessed mysql) count on any SQL target once the target verified them', () => {
+  const d = [det('orders', 'mysql', true), det('GetAllConfigs', 'mysql', false), det('session:*', 'redis', null)];
+  assert.deepEqual(pickAutoItems(d, 'postgres', true), [{ object: 'orders' }]);
+  assert.deepEqual(unverifiedNames(d, 'postgres'), ['GetAllConfigs']);
+  assert.deepEqual(pickAutoItems(d, 'clickhouse', true), [{ object: 'orders' }]);
+  assert.deepEqual(pickAutoItems(d, 'redis', true), [{ object: 'session:*' }], 'SQL names never land on Redis');
+  assert.deepEqual(pickAutoItems([det('orders', 'mysql', null)], 'postgres', true), [], 'unverified cross-engine guesses stay out');
+});
+
+test('C1-036: a new debug session never re-binds a production watch silently: it asks the typed confirm and sends confirm_production', async () => {
+  for (const answer of [null, 'pr_bo prod']) {
+    const w = watchOf({ bind: { debug_session_id: 'd1' }, target: { kind: 'saved', connection_id: 'p', engine: 'mysql', label: 'pr_bo prod', environment: 'production', local: false } });
+    const h = harness({ prompt: () => answer, routes: (c) => (c.url.startsWith('/ide/db-watch/watches?root=') ? { watches: [w] } : c.method === 'PATCH' ? w : c.url.startsWith('/ide/db-watch/watches/w1') ? readOf(w) : undefined) });
+    h.store.follow({ root: '/r' });
+    await flush(); await flush();
+    h.store.follow({ root: '/r', debug: { id: 'd2', state: 'running', stop_seq: 0 } });
+    for (let i = 0; i < 6; i++) await flush();
+    const patches = h.calls.filter((c) => c.method === 'PATCH');
+    assert.match(h.prompts[0] ?? '', /PRODUCTION/);
+    assert.equal(patches.length, answer ? 1 : 0);
+    if (answer) assert.deepEqual(plain(patches[0].body), { bind: { debug_session_id: 'd2' }, confirm_production: true });
+  }
 });
