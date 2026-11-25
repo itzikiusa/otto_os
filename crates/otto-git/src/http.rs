@@ -3134,20 +3134,19 @@ async fn pr_diff<S: GitCtx>(
                         .run(&nk, || {
                             let nk = nk.clone();
                             async move {
-                                let got = async {
-                                    match path.as_deref().filter(|p| !p.is_empty()) {
-                                        Some(p) => {
-                                            let old = old_path.as_deref();
-                                            provider.get_pr_file_diff(&remote, number, p, old).await
-                                        }
-                                        None => provider.get_pr_diff_summary(&remote, number).await,
+                                let got = match path.as_deref().filter(|p| !p.is_empty()) {
+                                    Some(p) => {
+                                        let old = old_path.as_deref();
+                                        provider.get_pr_file_diff(&remote, number, p, old).await?
                                     }
+                                    None => provider.get_pr_diff_summary(&remote, number).await?,
                                 };
-                                // The TTL is a second forge read: side by side.
-                                let ttl = ttl_for(&*provider, &remote, number, &rev);
-                                let (got, ttl) = tokio::join!(got, ttl);
-                                let got = got?;
-                                Ok(got.map(|mut d| {
+                                // No narrow API (`None`, at once): the whole-diff
+                                // path reads the TTL. Bitbucket, the one forge with
+                                // narrow APIs, answers the TTL without a request.
+                                let Some(mut d) = got else { return Ok(None) };
+                                let ttl = ttl_for(&*provider, &remote, number, &rev).await;
+                                Ok(Some({
                                     for f in &mut d.files {
                                         crate::parse::fill_counts(f);
                                     }

@@ -2029,6 +2029,8 @@ async fn pr_detail_fresh_query_bypasses_provider_get_cache() {
 /// P1-027: a pinned PR diff (`rev` = the head) also reads the PR's head from
 /// the forge to pick the memo lifetime. That read ran AFTER the diff, so a
 /// cold open paid two forge round trips in series; it now runs beside it.
+/// P3-014: the UI's `?summary=true` on a forge with no summary API (GitHub,
+/// GitLab) falls back to the whole diff: one head read, one round trip.
 #[tokio::test]
 async fn pr_diff_reads_the_memo_lifetime_beside_the_diff() {
     use serde_json::json;
@@ -2037,12 +2039,12 @@ async fn pr_diff_reads_the_memo_lifetime_beside_the_diff() {
 
     let server = MockServer::start().await;
     let rtt = std::time::Duration::from_millis(300);
-    let mr = "/api/v4/projects/acme%2Fapp/merge_requests/102";
     let head = json!({"diff_refs": {"base_sha": "0123456789ab", "head_sha": "abc1234def01"}});
-    for (p, body) in [
-        (mr.to_string(), head),
-        (format!("{mr}/changes"), json!({"changes": []})),
-    ] {
+    let mr = |n: u64| format!("/api/v4/projects/acme%2Fapp/merge_requests/{n}");
+    for (p, body) in [102, 103].into_iter().flat_map(|n| {
+        let changes = (format!("{}/changes", mr(n)), json!({"changes": []}));
+        [(mr(n), head.clone()), changes]
+    }) {
         Mock::given(method("GET"))
             .and(path(p))
             .respond_with(
@@ -2094,31 +2096,31 @@ async fn pr_diff_reads_the_memo_lifetime_beside_the_diff() {
         roles: Arc::new(AllowAll),
         events: tokio::sync::broadcast::channel(8).0,
     };
-    let started = std::time::Instant::now();
-    let resp = pr_diff(
-        State(ctx),
-        Extension(auth(&user, false)),
-        Path((repo.id, 102)),
-        Query(PrDiffQuery {
-            summary: None,
-            path: None,
-            old_path: None,
-            full: None,
-            rev: Some("abc1234def01".into()),
-            ignore_whitespace: false,
-        }),
-    )
-    .await
-    .unwrap();
-    let took = started.elapsed();
-    assert!(resp.status().is_success());
-    let reads = server.received_requests().await.unwrap();
-    let reads: Vec<_> = reads.iter().map(|r| r.url.path()).collect();
-    assert!(reads.contains(&mr), "the head is still read: {reads:?}");
-    assert!(
-        took < 2 * rtt - std::time::Duration::from_millis(50),
-        "{took:?}"
-    );
+    for (number, summary) in [(102, None), (103, Some(true))] {
+        let started = std::time::Instant::now();
+        let resp = pr_diff(
+            State(ctx.clone()),
+            Extension(auth(&user, false)),
+            Path((repo.id.clone(), number)),
+            Query(PrDiffQuery {
+                summary,
+                path: None,
+                old_path: None,
+                full: None,
+                rev: Some("abc1234def01".into()),
+                ignore_whitespace: false,
+            }),
+        )
+        .await
+        .unwrap();
+        let took = started.elapsed();
+        assert!(resp.status().is_success());
+        let reads = server.received_requests().await.unwrap();
+        let heads = reads.iter().filter(|r| r.url.path() == mr(number)).count();
+        assert_eq!(heads, 1, "PR {number}: the head is read once");
+        let slow = 2 * rtt - std::time::Duration::from_millis(50);
+        assert!(took < slow, "PR {number}: {took:?}");
+    }
     let _ = tokio::fs::remove_dir_all(&repo_dir).await;
 }
 
