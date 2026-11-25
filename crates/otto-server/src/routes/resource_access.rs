@@ -101,7 +101,7 @@ use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use otto_core::access::{
-    operations_for, AccessActor, AccessDecision, AccessMode, ResourceKind, ResourceRef,
+    feature_for, operations_for, AccessActor, AccessDecision, AccessMode, ResourceKind, ResourceRef,
 };
 use otto_core::auth::AuthContext;
 use otto_core::domain::{Capability, Feature, WorkspaceRole};
@@ -249,28 +249,6 @@ async fn workspace(pool: &DbPool, kind: ResourceKind, id: &Id) -> Result<Option<
             K8sClustersRepo::new(pool.clone()).get(id).await?;
             Ok(None)
         }
-    }
-}
-
-fn feature_for(kind: ResourceKind, operation: &str) -> Feature {
-    match kind {
-        ResourceKind::Connection
-            if operation.starts_with("db_") || operation.starts_with("change_") =>
-        {
-            Feature::Database
-        }
-        ResourceKind::Connection => Feature::Connections,
-        ResourceKind::McpServer => Feature::Mcp,
-        ResourceKind::K8sCluster => Feature::Kubernetes,
-        ResourceKind::AwsAccount => match operation.split('_').next().unwrap_or("") {
-            "s3" => Feature::AwsS3,
-            "sqs" => Feature::AwsSqs,
-            "ec2" => Feature::AwsEc2,
-            "athena" => Feature::AwsAthena,
-            "eks" => Feature::AwsEks,
-            "rds" => Feature::AwsRds,
-            _ => Feature::Aws,
-        },
     }
 }
 
@@ -468,7 +446,8 @@ async fn decisions(
         .remove(0))
 }
 
-/// Membership and page/legacy ceilings are invariant across a catalogue.
+/// Membership and page/legacy ceilings are invariant across a catalogue; the
+/// page gate runs once per FEATURE (2 for a connection, not one per operation).
 /// Child-specific deny precedence remains in the same pure policy evaluator.
 async fn decisions_batch(
     pool: &DbPool,
@@ -478,14 +457,20 @@ async fn decisions_batch(
     groups: &[Id],
 ) -> Result<Vec<EffectiveAccess>> {
     let mut ceilings = BTreeMap::new();
+    let mut pages: Vec<(Feature, Option<String>)> = Vec::new();
     for op in operations_for(policy.kind) {
-        let mut reason = page_access(pool, user, policy.kind, &policy.resource_id, op)
-            .await
-            .err()
-            .map(|e| e.to_string());
+        let feature = feature_for(policy.kind, op);
+        let mut reason = match pages.iter().find(|(f, _)| *f == feature) {
+            Some((_, page)) => page.clone(),
+            None => page_access(pool, user, policy.kind, &policy.resource_id, op)
+                .await
+                .err()
+                .map(|e| e.to_string()),
+        };
+        pages.push((feature, reason.clone()));
         if reason.is_none() && policy.mode == AccessMode::Legacy && !user.is_root {
             let cap = GrantsRepo::new(pool.clone())
-                .capability_of(user, feature_for(policy.kind, op))
+                .capability_of(user, feature)
                 .await?;
             let need = legacy_capability(op);
             if cap < need {
