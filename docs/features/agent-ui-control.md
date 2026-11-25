@@ -143,7 +143,7 @@ secrets from results before the agent sees them.
 | Command | Risk | What it does |
 |---------|------|--------------|
 | `state` | read | What each open Otto document shows (main pane / side pane, route, module, focus) plus the current module's view state. Works with no window (headless). |
-| `open` | navigate | Open a module / route, in the side pane by default (`placement: side|main|window` — `window` detaches the pane into its own desktop window). |
+| `open` | navigate | Open a module / route, in the side pane by default (`placement: side|main|window` — `window` shows it in its own desktop window: a new one, or the side pane already showing it detaches; it returns that window's `window_id`; `fallback: side` uses the side pane where windows aren't available). |
 | `focus` | navigate | Bring the window forward and focus a pane. |
 
 ### Database Explorer, API client, Git, Browser

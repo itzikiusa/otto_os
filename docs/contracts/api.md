@@ -4951,8 +4951,11 @@ audit — then through the UI bridge (`crates/otto-server/src/ui_bridge.rs`):
    `open {module, route, placement}` to that device's main document and
    waits ≤ 10 s for the module's document of that window to report. `placement`
    is the entry's `open_placement` (default `side`); a `window` entry
-   (`ide_debug_start`) also never targets a document with `visible:false` — a
-   hidden IDE pane is passed over and the IDE opens in its own window.
+   (`ide_debug_start`) is opened with `{…, placement:"window", fallback:"side"}`
+   (the side pane where the window can't open native windows), waits for the
+   document of the `window_id` the open result names (a new pop-out window) or
+   else of the opener's window, and never targets a document with
+   `visible:false` — a hidden IDE pane is passed over.
 5. **Delivered + awaited.** A per-connection `ui_command` frame goes to that
    document only (`ws.md` §2); the window runs the action **with the user's own
    login token** (so the endpoint's native RBAC runs again) and reports back on

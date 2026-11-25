@@ -1016,15 +1016,21 @@ pub async fn run(
     ) {
         Pick::Direct(conn) => Some(conn),
         Pick::Open { via, window_id } => {
-            let placement = if window { "window" } else { "side" };
-            let open_args =
-                json!({"module": spec.module, "route": spec.route, "placement": placement});
+            let open_args = if window {
+                json!({"module": spec.module, "route": spec.route, "placement": "window", "fallback": "side"})
+            } else {
+                json!({"module": spec.module, "route": spec.route, "placement": "side"})
+            };
             let open_budget = ui_commands::get("open")
                 .map(|o| Duration::from_millis(o.timeout_ms))
                 .unwrap_or(Duration::from_secs(15));
-            bridge
+            let opened = bridge
                 .dispatch(&via, &session, "open", &open_args, open_budget)
                 .await?;
+            // A new pop-out window reports its own id (not the opener's).
+            let window_id = opened["window_id"]
+                .as_str()
+                .map_or(window_id, str::to_string);
             let (user, module, command) = (
                 session.created_by.clone(),
                 spec.module.clone(),

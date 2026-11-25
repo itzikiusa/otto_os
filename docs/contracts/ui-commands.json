@@ -7,11 +7,12 @@
       "description": "Describe what the user's Otto window shows right now: each open document (main pane / side pane), its route and module, whether it is focused/visible, and the current module's own view state. Use it before driving a module. With no Otto window open it returns the daemon's view (`ui_visible:false`).",
       "input_schema": { "type": "object", "properties": {}, "additionalProperties": false } },
     { "name": "open", "module": "shell", "route": "", "risk": "navigate", "timeout_ms": 15000,
-      "description": "Open an Otto module (or a specific route inside it) where the user can see it. `placement: side` (default) opens it in the side pane next to your session or thread; `main` navigates the main pane; `window` (desktop app) opens it beside you and detaches that pane into its own window, keeping its tabs and results. Returns the route and pane it now shows in.",
+      "description": "Open an Otto module (or a specific route inside it) where the user can see it. `placement: side` (default) opens it in the side pane next to your session or thread; `main` navigates the main pane; `window` (desktop app) shows it in its own Otto window (a new one, or the side pane already showing it detaches, keeping its tabs and results). Returns the route and pane it now shows in, and for `window` the new window's `window_id`.",
       "input_schema": { "type": "object", "properties": {
         "module": { "type": "string", "description": "Sidebar module id, e.g. `connections`, `git`, `ide` (`workbench` = the IDE on the Scratches project), `threads`, `api`, `browser`, `kubernetes`, `aws`, `vault`, `workflows`." },
         "route": { "type": "string", "description": "Optional hash route inside the module (e.g. `database`, `git/<repo_id>`). Defaults to the module's home route." },
-        "placement": { "type": "string", "enum": ["side", "main", "window"], "description": "Where to show it. Default `side`." } },
+        "placement": { "type": "string", "enum": ["side", "main", "window"], "description": "Where to show it. Default `side`." },
+        "fallback": { "type": "string", "enum": ["side"], "description": "With `window`: use the side pane where this Otto window can't open windows (web, phone). Default: refuse." } },
         "additionalProperties": false } },
     { "name": "focus", "module": "shell", "route": "", "risk": "navigate", "timeout_ms": 5000,
       "description": "Bring the Otto window to the front and focus a pane (`side` or `main`, default the pane showing the most recently driven module).",
@@ -672,7 +673,7 @@
         "clear_mine": { "type": "boolean", "description": "Remove every breakpoint you set (the user's stay)." } },
         "additionalProperties": false } },
     { "name": "ide_debug_inspect", "module": "ide", "route": "ide", "risk": "read", "timeout_ms": 15000,
-      "description": "Read values in the paused debug session you started, without running code: variables by path (\"req.Header\", \"cfg.DB.Host\"), keyed by the last path segment; children of a structured value in pages (`ref` from a Stop, `start`/`count` ≤ 100); or the thread list. Values ≤ 2 KB each; secret-looking names and values come back redacted.",
+      "description": "Read values in the paused debug session you started, without running code: variables by path (\"req.Header\", \"cfg.DB.Host\"), keyed by path; children of a structured value in pages (`ref` from a Stop, `start`/`count` ≤ 100); or the thread list. Values ≤ 2 KB each; secret-looking names and values come back redacted.",
       "input_schema": { "type": "object", "properties": {
         "paths": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 1, "maxLength": 300 } },
         "ref": { "type": "integer", "minimum": 1, "description": "A variable's `ref` from a Stop or an earlier inspect: list its children." },
