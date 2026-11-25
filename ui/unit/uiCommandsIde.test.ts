@@ -442,6 +442,33 @@ test('db_watch on start: the container the launch names (its DSN port) for the c
   eq(asked[0].target, { kind: 'ephemeral', ephemeral_id: 'tc:mine:2222' });
 });
 
+test('db watch without a launch hint: the engine the code uses, even when a newer container of another engine runs', async () => {
+  const { handlers, ide, dbPort } = load({
+    detected_objects: [{ engine: 'mysql', object_name: 'orders' }],
+    saved_connections: [],
+    ephemeral_targets: [
+      { ephemeral_id: 'c:redis:3333', engine: 'redis', port: 3333, source: 'container' },
+      { ephemeral_id: 'c:maria:2222', engine: 'mysql', port: 2222, source: 'container' },
+    ],
+  });
+  const c = ctx();
+  const run = handlers.ide_debug_start({ target: { kind: 'main', file: 'main.go' }, wait_ms: 5_000 }, c);
+  later(() => ide.emit(paused(1, 5)));
+  await run;
+  const asked: any[] = [];
+  dbPort.ideDbWatchPort.bind({
+    watch: null,
+    error: null,
+    async start(req: unknown) { asked.push(req); return { id: 'w', target: { label: 'maria', local: true, engine: 'mysql' }, bind: null, busy: false }; },
+    async stop() {},
+    async diffSince() { return null; },
+  });
+  const out = await handlers.ide_debug_db({ action: 'watch' }, c);
+  assert.equal(out.watching, true);
+  eq(asked[0].target, { kind: 'auto', engine: 'mysql' });
+  eq(asked[0].items, [{ object: 'orders' }]);
+});
+
 test('db: without the IDE’s DB Watch bound it says so; with it, a stop carries the masked diff of the bound watch', async () => {
   const { handlers, ide, dbPort } = load();
   const c = ctx();

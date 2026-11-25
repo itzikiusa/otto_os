@@ -193,15 +193,16 @@ async function armDbWatch(
     engine = c.engine;
     local = c.local;
   } else {
-    // The run's own local database, never a saved one: a container whose port
-    // the launch names (a DSN in env / args), of the engine the code uses
-    // first; else the newest local one.
+    // The run's own local database, never a saved one, of the engine the code
+    // uses first: a container whose port the launch names (a DSN in env /
+    // args), else the newest local one of that engine (`auto`).
     const ports = det.ephemeral_targets.filter((x) => new RegExp(`[:=]${x.port}(?!\\d)`).test(launchText));
-    const named = det.detected_objects.map((o) => ports.find((x) => x.engine === o.engine)).find(Boolean) ?? ports[0];
-    const t = named ?? det.ephemeral_targets.find((x) => x.source !== 'container') ?? det.ephemeral_targets[0];
+    const own = det.ephemeral_targets.filter((x) => x.source !== 'container');
+    const pool = ports.length ? ports : own.length ? own : det.ephemeral_targets;
+    const t = det.detected_objects.map((o) => pool.find((x) => x.engine === o.engine)).find(Boolean) ?? pool[0];
     const e = t?.engine ?? det.detected_objects[0]?.engine;
     if (!e) throw new UiCommandError('not_found', 'No local database found for this run — pass `connection_id` (a saved connection).');
-    target = named ? { kind: 'ephemeral', ephemeral_id: named.ephemeral_id } : { kind: 'auto', engine: e };
+    target = t && ports.includes(t) ? { kind: 'ephemeral', ephemeral_id: t.ephemeral_id } : { kind: 'auto', engine: e };
     engine = e;
   }
   const items = args.objects?.length
