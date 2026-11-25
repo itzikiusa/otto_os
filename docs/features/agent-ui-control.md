@@ -105,7 +105,7 @@ Every command has a fixed `risk` in the catalog:
 | `navigate` | open a workspace, select a row, switch a tab | Runs once granted. |
 | `local_write` | k8s restart / scale, Kafka produce, save a vault note, pause a scheduled task, run a swarm task, start a goal loop, add a Home box, git commit | An **attributed confirm** every time. It has an **"Allow writes on ‹target› for this session"** checkbox, and once you tick it, later writes to the same target in the same session don't ask again. |
 | `outward` | SQS send, run a workflow, API send, git push | **Always** confirms (where it goes, what is sent, who sees it). It is **never remembered**. |
-| `execute` | start a debug run, evaluate an expression in the paused program | Runs code on your Mac as you, **outside the agent's sandbox**. **Always** confirms, showing exactly what runs (the command line, or the expression). It is **never remembered**: a restart asks again. |
+| `execute` | start a debug session, evaluate an expression in the debugger | It runs code on your Mac, as you, outside the agent's sandbox. **Always** confirms, showing exactly what runs (the command line, folder, build tags, extra environment, or the expression). It is **never remembered**. |
 
 On top of the tiers, some targets always ask regardless of the checkbox:
 
@@ -143,7 +143,7 @@ secrets from results before the agent sees them.
 | Command | Risk | What it does |
 |---------|------|--------------|
 | `state` | read | What each open Otto document shows (main pane / side pane, route, module, focus) plus the current module's view state. Works with no window (headless). |
-| `open` | navigate | Open a module / route, in the side pane by default (`placement: side|main|window` — `window` detaches the pane into its own desktop window). |
+| `open` | navigate | Open a module / route, in the side pane by default (`placement: side|main|window` — `window` shows it in its own desktop window: a new one, or the side pane already showing it detaches; it returns that window's `window_id`; `fallback: side` uses the side pane where windows aren't available). |
 | `focus` | navigate | Bring the window forward and focus a pane. |
 
 ### Database Explorer, API client, Git, Browser
@@ -282,10 +282,10 @@ dock nothing new opens. See [IDE → Debugging with an agent](./ide.md#debugging
 
 | Command | Risk | Args | What you see |
 |---------|------|------|--------------|
-| `ide_debug_start` | execute | `target` (`test` file + name, `main` file, or a run `config`), `root?` (default: the session's folder; only it or a folder inside it), `build_tags?`, `args?`, `env?`, `breakpoints?`, `ready_pattern?` / `ready_port?`, `db_watch?`, `wait_ms?`, `say?` | The project opens, a confirm shows the command line, working directory, build flags, extra env and the breakpoint count. After **Debug**, the agent's breakpoints appear in the gutter and the Debug tab runs. Returns at the first stop, as soon as the app is ready (the output contains `ready_pattern`, or `ready_port` accepts connections), or near the call's deadline with `state: running`. Every result lists the agent's breakpoints with `verified` and the bound line. |
-| `ide_debug_control` | navigate | `action` (`continue`/`step_over`/`step_into`/`step_out`/`pause`/`run_to_line`/`wait`/`status`/`stop`), `file?`/`line?`, `wait_ms?`, `keep_breakpoints?`, `say?` | The debugger moves; returns the next stop. `stop` ends the session and removes the agent's breakpoints. |
+| `ide_debug_start` | execute | `target` (`test` file + name, `main` file, or a run `config`), `root?` (default: the session's folder; only it or a folder inside it), `build_tags?`, `args?`, `env?`, `breakpoints?`, `break_on_exceptions?`, `ready_pattern?` / `ready_port?`, `db_watch?`, `wait_ms?`, `say?` | The project opens, a confirm shows the command line, working directory, build flags, extra env and the breakpoint count. After **Debug**, the agent's breakpoints appear in the gutter and the Debug tab runs. Returns at the first stop, as soon as the app is ready (the output contains `ready_pattern`, or `ready_port` accepts connections), or near the call's deadline with `state: running`. Every result lists the agent's breakpoints with `verified` and the bound line. |
+| `ide_debug_control` | navigate | `action` (`continue`/`step_over`/`step_into`/`step_out`/`pause`/`run_to_line`/`wait`/`status`/`stop`), `file?`/`line?`, `thread_id?`, `frame_id?`, `wait_ms?`, `keep_breakpoints?`, `say?` | The debugger moves; returns the next stop. `stop` ends the session and removes the agent's breakpoints. |
 | `ide_debug_breakpoints` | navigate | `set?`, `clear?`, `clear_mine?` | Red dots appear or go, marked as the agent's. Yours are never touched. |
-| `ide_debug_inspect` | read | `paths?` (`req.Header`, `cfg.DB.Host`), `ref?` + `start?`/`count?`, `frame_id?`, `threads?` | Nothing changes (a `frame_id` selects that frame). Reads values without running code. |
+| `ide_debug_inspect` | read | `paths?` (`req.Header`, `cfg.DB.Host`), `ref?` + `start?`/`count?`, `frame_id?`, `thread_id?`, `threads?` | Nothing changes (a `frame_id` selects that frame). Reads values without running code. |
 | `ide_debug_evaluate` | execute | `expression`, `frame_id?` | A confirm shows the exact expression, every time. The result shows in the Debug console. |
 | `ide_debug_request` | local_write | `method?`, `url` (localhost / 127.0.0.1 / [::1] only), `headers?`, `body?`, `wait_ms?` | A confirm (you may allow that host for the session); the console shows `→ POST localhost:8080/orders (Claude)`. Returns when the debugger stops or the response arrives, whichever is first; a response that arrives while the app is paused comes with the next result. |
 | `ide_debug_db` | read | `action` (`watch`/`unwatch`/`diff`), `objects?`, `connection_id?`, `since?` | DB Watch shows the watched tables; each later stop carries what changed. A production connection always asks. |
@@ -293,9 +293,12 @@ dock nothing new opens. See [IDE → Debugging with an agent](./ide.md#debugging
 **A stop** returns `{debug_id, state, stop_seq, reason, user_moved, location,
 source (±6 lines), frames (≤ 10), locals ({name: value}, ≤ 40, values ≤ 200
 chars), refs, changed, threads, output_tail (new lines, ≤ 40), breakpoints,
-breakpoints_hit, db?, request?}`, at most 16 KB. Locals and inspected values are
-keyed by **name**, so a `password`, `token` or `dsn` comes back redacted;
-you see the real values in the IDE.
+breakpoints_hit, db?, request?}`, at most 16 KB. Locals are keyed by **name** and
+inspected values by **path**, so a `password`, `token` or `dsn` comes back
+redacted, as do secret-looking values, DB cells and response secrets; you see the
+real values in the IDE. The daemon refuses an `env` that names a loader, shell or
+toolchain variable (`PATH`, `LD_*`, `DYLD_*`, `GOFLAGS`, `NODE_OPTIONS`,
+`PYTHONPATH`, `JAVA_TOOL_OPTIONS`, …) and any request that leaves this Mac.
 
 **Scope.** The commands act only on the debug session that agent session
 started. If you step, continue or restart yourself, the agent's next result says

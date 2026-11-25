@@ -756,20 +756,21 @@ async fn debug_start_opens_the_ide_in_a_window_past_a_hidden_one() {
     let call = d.invoke("ui_ide_debug_start", json!({"target": target}));
     let open = next_of(&mut main, "ui_command").await;
     assert_eq!(open["command"], "open");
-    assert_eq!(
-        open["args"],
-        json!({"module":"ide","route":"ide","placement":"window"})
-    );
+    assert_eq!(open["args"]["placement"], "window");
     assert_eq!(open["agent"]["cwd"], "/tmp");
     assert_eq!(open["agent"]["runtime"], "pty");
-    // The detached pane keeps its host window id, so it is found.
+    assert_eq!(
+        open["args"]["fallback"], "side",
+        "web / phone: the side pane instead"
+    );
+    // A NEW pop-out window (its own window id, a main document) runs it.
     let mut win = d.ws(&d.human).await;
-    let win_conn = hello(&mut win, "w1", "side", "ide", &["ide_debug_start"]).await;
+    let win_conn = hello(&mut win, "pop-1", "main", "ide", &["ide_debug_start"]).await;
     let (st, _) = d
         .post(
             &d.human,
             &format!("/ui/commands/{}/result", open["id"].as_str().unwrap()),
-            json!({"ok": true, "result": {"pane": "window"}}),
+            json!({"ok": true, "result": {"pane": "window", "window_id": "pop-1"}}),
             Some(&main_conn),
         )
         .await;
