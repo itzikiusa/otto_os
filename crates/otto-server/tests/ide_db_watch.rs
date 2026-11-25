@@ -970,6 +970,29 @@ async fn listing_a_remote_saved_target_needs_the_persons_confirm_first() {
             "{route}: a loopback saved target lists without a confirm: {e}"
         );
     }
+    // C3-006: starting a watch on it dials it too — the same rule, before any dial.
+    let url = format!("{}/api/v1/ide/db-watch/watches", env.base);
+    let body = json!({"root": root, "target": target(&remote.id), "items": [{"object": "k:"}]});
+    let started = std::time::Instant::now();
+    let (s, e) = call(
+        reqwest::Method::POST,
+        url.clone(),
+        &env.root_tok,
+        Some(body),
+    )
+    .await;
+    assert_eq!(s, 403, "start: {e}");
+    assert!(e.to_string().contains("confirm connecting"), "start: {e}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "start: refused before dialing"
+    );
+    let body = json!({"root": root, "target": target(&local.id), "items": [{"object": "k:"}]});
+    let (s, e) = call(reqwest::Method::POST, url, &env.root_tok, Some(body)).await;
+    assert_eq!(
+        s, 200,
+        "start: a loopback saved target watches without a confirm: {e}"
+    );
 }
 
 /// Real engines (OTTO_DBW_E2E=1, containers from the dbw-engine report):
