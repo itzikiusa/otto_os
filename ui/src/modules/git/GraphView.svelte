@@ -608,7 +608,7 @@
   /* When detail is open, the commit list becomes a fixed-width column and the
      detail panel flexes to fill the rest of the page (see .detail-visible). */
   .graph-panel.panel-shrunk {
-    --branch-col-w: 108px;
+    --branch-col-w: 112px; /* fits ▾+N and HEAD side by side (History opens on HEAD) */
     flex: 0 0 420px; /* basis overridden by the inline ui.gitGraphListWidth */
     width: auto;
     min-width: 300px;
@@ -697,7 +697,7 @@
   /* min-width 0 down the chain (button → chip): an automatic minimum reads
      the label's full nowrap width as the floor, so a long branch name
      pushed out of the cell's start. The label keeps its own 3ch floor. */
-  .ref-select { flex-shrink: 1; min-width: 0; }
+  .ref-select { flex-shrink: 1; min-width: 0; overflow: hidden; }
   .graph-row:has(.graph-select:focus-visible) {
     outline: 2px solid var(--accent-text);
     outline-offset: -2px;

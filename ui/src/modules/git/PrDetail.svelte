@@ -72,11 +72,11 @@
   onDestroy(() => { disposed = true; });
 
   type Tab = PrTabId;
-  // Two views of one page: the conversation (a reading column) and its files.
-  // Timeline and the AI review open from the details card.
+  // The conversation (a reading column), its commits (the timeline) and its
+  // files, always in the strip; the AI review opens from the details card.
   const TABS: { id: Tab; label: string }[] = [
     { id: 'summary', label: 'Conversation' },
-    { id: 'timeline', label: 'Timeline' },
+    { id: 'timeline', label: 'Commits' },
     { id: 'code', label: 'Files' },
     { id: 'review', label: 'AI review' },
   ];
@@ -703,11 +703,11 @@
 
       <div class="prd-row prd-tabs-row">
         <div class="segmented prd-tabs" role="tablist" aria-label="Pull request views" tabindex="-1" onkeydown={onTabKey}>
-          {#each TABS.filter((t) => t.id === 'summary' || t.id === 'code' || t.id === activeTab) as t (t.id)}
+          {#each TABS.filter((t) => t.id !== 'review' || t.id === activeTab) as t (t.id)}
             <button role="tab" aria-label={t.label} aria-selected={activeTab === t.id} tabindex={activeTab === t.id ? 0 : -1}
               class:active={activeTab === t.id} onclick={() => selectTab(t.id)}>
               {t.label}
-              {#if t.id === 'summary' && generalComments.length > 0}<span class="prd-tab-count" aria-hidden="true">{generalComments.length}</span>{/if}
+              {#if t.id === 'summary' && generalComments.length > 0}<span class="prd-tab-count" aria-hidden="true">{generalComments.length}</span>{:else if t.id === 'timeline' && commits}<span class="prd-tab-count" aria-hidden="true">{commits.length}</span>{/if}
               {#if t.id === 'code' && stats}<span class="prd-tab-count" aria-hidden="true">{stats.files} <span class="add">+{stats.add.toLocaleString()}</span> <span class="del">−{stats.del.toLocaleString()}</span></span>{/if}
             </button>
           {/each}
@@ -738,11 +738,11 @@
                 </button>
               </div>
             {:else}
+              <button class="btn small ghost edit-btn" aria-label="Edit the title and description" onclick={startEdit} title="Edit the title and description on {providerName}"><Icon name="edit" size={12} /> Edit</button>
               <div class="md-body">
                 <!-- renderPrMarkdown (lib/md renderMarkdownGfm) sanitizes output via allowlist -->
                 {@html renderPrMarkdown(pr.description_md || '_No description._')}
               </div>
-              <button class="btn small ghost edit-btn" aria-label="Edit the title and description" onclick={startEdit} title="Edit the title and description on {providerName}"><Icon name="edit" size={12} /> Edit</button>
             {/if}
           </section>
 
@@ -900,10 +900,10 @@
   .prd-main { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
   .prd-desc { position: relative; padding: 12px 16px; }
   .prd-desc textarea { width: 100%; }
-  .edit-btn {
-    position: absolute;
-    top: 8px;
-    inset-inline-end: 8px;
+  .edit-btn { /* floats in the corner: the text wraps around it, never under it */
+    float: inline-end;
+    margin-block-start: -4px;
+    margin-inline: 8px -8px;
     opacity: 0;
     transition: opacity var(--dur-fast) ease-out;
   }
@@ -929,7 +929,7 @@
     .prd-head { padding: 10px 12px 0; }
     .prd-actions { flex-wrap: wrap; flex: 1 1 100%; }
     .prd-actions .btn { height: 44px; } /* finger-sized */
-    .prd-actions .icon-only { min-inline-size: 44px; }
+    .prd-actions .icon-only { min-inline-size: 44px; } .prd-actions > :global(.btn:not(.icon-only)) { flex: 1 1 0; max-inline-size: 260px; justify-content: center; } /* one even row */
     .prd-tabs button, .edit-btn { min-block-size: 44px; }
     .prd-meta { flex-wrap: wrap; }
     .prd-title-input { height: 38px; font-size: 16px; } /* ui-guards: allow — 16px stops iOS zoom-on-focus */

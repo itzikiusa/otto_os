@@ -258,7 +258,10 @@ export const mockExtraPrs: ExtraPr[] = [
       labels: ['bug'],
       head_sha: 'b49bb22',
     },
-    description_md: 'Work in progress.',
+    // A hostile description (pr-description-mobile spec): headings, nested and
+    // task lists, a wide table and code line, long URL / identifier, an
+    // image, a quote, <details>, RTL text.
+    description_md: 'Work in progress: the rounding fix for bonus balances in the wallet service, ready for a first look.\n\n## Why\n\nBonus balances were converted **before** rounding, so a player with `0.005 EUR` of bonus saw `-0.01` after the nightly sweep. Reported in https://support.example.com/tickets/VIP-ROUNDING-2026-11-24-player-12345678901234567890-wallet-gateway-bonus-balance-conversion-negative-after-sweep\n\n### Changes\n\n- Round in the wallet service, not the UI\n  - `RoundHalfEven` for EUR, GBP, USD\n  - `RoundDown` for crypto\n    - BTC keeps 8 decimals\n- Remove the client-side `toFixed(2)` calls\n\n### Checklist\n\n- [x] Unit tests for every currency\n- [ ] Staging verification with a real VIP player\n- [ ] Release note\n\n| Currency | Before | After | Rule |\n|---|---|---|---|\n| EUR | -0.01 | 0.00 | RoundHalfEven to 2 decimals after conversion through the wallet gateway |\n| BTC | 0.000000005 | 0.00000000 | RoundDown to 8 decimals |\n| JPY | 0.4 | 0 | RoundHalfEven to 0 decimals |\n\n```go\nfunc convert(amount decimal.Decimal, from, to Currency, rates RateTable) (decimal.Decimal, error) { return rates.Convert(amount, from, to).RoundBank(to.Decimals()), nil } // a deliberately long line that must scroll inside the code box\n```\n\n> Note: the sweep runs at 02:00 UTC; players online at that time may see the old value until the next balance refresh.\n\n<details><summary>Full log of the failing sweep</summary>\n\nplayer=12345678901234567890 bonus_before=0.005 bonus_after=-0.01 currency=EUR sweep_id=sw_01HZZZZZZZZZZZZZZZZZZZZZZ\n\n</details>\n\n![Balance before and after](https://example.com/screens/vip-balance-before-after.png)\n\nשלום — הסכום מעוגל עכשיו בשירות הארנק ולא בממשק.\n\nVeryLongIdentifierWithoutBreaks_WalletGatewayBonusBalanceConversionRoundingServiceFactoryProviderImplementation',
     comments: [],
     approved_by: [],
     mergeable: null,
