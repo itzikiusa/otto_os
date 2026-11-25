@@ -46,3 +46,22 @@ test('a turn’s files: one row per file, relative paths, failed and other turns
   assert.deepEqual(changeTotals(files), { added: 3, removed: 2 });
   assert.deepEqual(changeTotals([{ path: 'x', added: null, removed: null }]), { added: null, removed: null });
 });
+
+test('two threads streaming side by side keep their own changes Map (P1-017)', () => {
+  const msg = (id: string) => ({ id, turn_id: 't9', ordinal: 0, status: 'completed', title: null, started_at: null, completed_at: null, updated_at: '', type: 'assistant_message', text: id }) as never;
+  const a = [fc('a1', '/repo/a.ts', { diff_str: '+1' }), msg('am')];
+  const b = [fc('b1', '/repo/b.ts', { diff_str: '+1\n+2' }), msg('bm')];
+  const outA = turnChangesByTurn(a, '/repo');
+  const outB = turnChangesByTurn(b, '/repo');
+  // Each flush hands a new items array with the same edits: the same Map comes back.
+  assert.equal(turnChangesByTurn([...a, msg('am2')], '/repo'), outA);
+  assert.equal(turnChangesByTurn([...b, msg('bm2')], '/repo'), outB);
+  assert.notEqual(outA, outB);
+});
+
+test('a thread without finished edits (an empty one too) always gets the same empty Map', () => {
+  assert.equal(turnChangesByTurn([], '/repo'), turnChangesByTurn([], '/repo'));
+  const msg = { id: 'm', turn_id: 't1', ordinal: 0, status: 'completed', title: null, started_at: null, completed_at: null, updated_at: '', type: 'assistant_message', text: 'x' } as never;
+  assert.equal(turnChangesByTurn([msg], '/repo'), turnChangesByTurn([], '/repo'));
+  assert.equal(turnChangesByTurn([], '/repo').size, 0);
+});

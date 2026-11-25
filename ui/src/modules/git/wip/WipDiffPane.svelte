@@ -1,5 +1,5 @@
 <script lang="ts">
-  // The Changes view's per-file diff (WipPanel). Inline beside or under the
+  // The WIP panel's per-file diff (WipPanel). Inline beside or under the
   // file list — or, on a phone, a pushed full-height sheet (DockedDrawer →
   // the shell Drawer: ✕, Esc and the system Back close it, lib/backCloses).
   import type { ComponentProps } from 'svelte';
@@ -26,8 +26,11 @@
     sheet: boolean;
     onretry: () => void;
     onclose: () => void;
+    /** Every change only virtually included (no hunk tools yet): leave them
+     *  all out so single hunks can be staged. */
+    onpickhunks?: () => void;
   }
-  let { path, id, both, stagedView = $bindable(), diff, loading, error, repoId, loadFile, wip, sheet, onretry, onclose }: Props = $props();
+  let { path, id, both, stagedView = $bindable(), diff, loading, error, repoId, loadFile, wip, sheet, onretry, onclose, onpickhunks }: Props = $props();
   const parts = $derived(splitPath(path));
 </script>
 
@@ -47,6 +50,9 @@
       {/if}
       {#if !sheet}<button class="icon-btn wp-close" onclick={onclose} title="Close diff" aria-label="Close diff"><Icon name="x" size={14} /></button>{/if}
     </div>
+    {/if}
+    {#if onpickhunks}
+      <p class="wp-hunks-hint">Every file is included. <button type="button" class="btn small ghost" onclick={onpickhunks}>Pick hunks</button> to commit only parts of a file.</p>
     {/if}
     <div class="wp-diff-body">
       {#if loading && !diff}
@@ -113,6 +119,19 @@
   .wp-diff-empty { padding: 8px 14px; font-size: var(--fs-s); color: var(--text-dim); }
   .wp-target > button { height: 20px; padding: 0 6px; font-size: var(--fs-xs); }
   .wp-close { flex-shrink: 0; }
+  /* A narrow pane wraps the diff's toolbar instead of clipping its layout switch. */
+  .wp-diff :global(.diff-toolbar) {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+  .wp-hunks-hint {
+    margin: 0;
+    padding-block: 4px;
+    padding-inline: 12px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+    border-block-end: 1px solid var(--border);
+  }
   .grow { flex: 1; }
   @media (max-width: 1024px) {
     .wp-diff:not(.sheet) { flex: none; height: min(70vh, 560px); }

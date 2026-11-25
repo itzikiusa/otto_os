@@ -94,7 +94,7 @@ async fn require_resource<S: McpCtx>(
     } else {
         WorkspaceRole::Viewer
     };
-    require_ws(ctx, user, &server.workspace_id, min).await?;
+    require_reach(ctx, user, server, operation, min).await?;
     if !ctx
         .mcp()
         .resource_allowed(server, user, "discover", child)
@@ -112,6 +112,63 @@ async fn require_resource<S: McpCtx>(
         )));
     }
     Ok(())
+}
+
+/// `min` role in a workspace that reaches `server`. Its settings
+/// (`configure`) stay with its home workspace; using it is open to a member
+/// of any workspace it is shared with (`otto_state::mcp_scope`: never
+/// Scratch or an archived workspace).
+async fn require_reach<S: McpCtx>(
+    ctx: &S,
+    user: &User,
+    server: &McpServerDetail,
+    operation: &str,
+    min: WorkspaceRole,
+) -> Result<(), ApiErr> {
+    let home = require_ws(ctx, user, &server.workspace_id, min).await;
+    if home.is_ok() || operation == "configure" || !server.is_shared() {
+        return home;
+    }
+    for ws in ctx
+        .mcp()
+        .registry()
+        .reach_workspaces(&server.id, &user.id)
+        .await?
+    {
+        if require_ws(ctx, user, &ws, min).await.is_ok() {
+            return Ok(());
+        }
+    }
+    home
+}
+
+/// [`require_resource`] for a call made FROM workspace `ws` (its allowlist,
+/// policies and audit apply): the server must be available there and the
+/// caller hold the same role there.
+async fn require_resource_in<S: McpCtx>(
+    ctx: &S,
+    user: &User,
+    server: &McpServerDetail,
+    ws: &Id,
+    operation: &str,
+    child: Option<&str>,
+    legacy: WorkspaceRole,
+) -> Result<(), ApiErr> {
+    require_resource(ctx, user, server, operation, child, legacy).await?;
+    if *ws != server.workspace_id && !ctx.mcp().registry().is_available(&server.id, ws).await? {
+        return Err(ApiErr(Error::Forbidden(
+            "this MCP server is not available in that workspace".into(),
+        )));
+    }
+    let policy = otto_state::ResourceAccessRepo::new(ctx.mcp_pool().clone())
+        .get_policy(otto_core::access::ResourceKind::McpServer, &server.id)
+        .await?;
+    let min = if policy.mode == otto_core::access::AccessMode::Legacy {
+        legacy
+    } else {
+        WorkspaceRole::Viewer
+    };
+    require_ws(ctx, user, ws, min).await
 }
 
 async fn public_server<S: McpCtx>(
@@ -135,11 +192,18 @@ async fn public_server_with<S: McpCtx>(
     policy: &otto_core::access::AccessPolicy,
     access: &mut crate::service::CallerAccess,
 ) -> Result<McpServerDetail, ApiErr> {
-    if !ctx
+    // A member of a workspace the server was only shared with sees that it
+    // exists and its tools, never its configuration (`require_reach`).
+    let configurer = ctx
         .mcp()
-        .resource_allowed_with(access, policy, &server, user, &[("configure", None)])
-        .await?[0]
-    {
+        .member_of(access, user, &server.workspace_id)
+        .await?
+        && ctx
+            .mcp()
+            .resource_allowed_with(access, policy, &server, user, &[("configure", None)])
+            .await?[0];
+    if !configurer {
+        server.shared_workspace_ids.clear();
         server.command.clear();
         server.args.clear();
         server.env.clear();
@@ -396,6 +460,19 @@ async fn create_server<S: McpCtx>(
         })
         .await
         .map_err(ApiErr)?;
+    // Where else it is available (the owner check above covers sharing):
+    // a bad workspace id leaves no half-created server behind.
+    if req.all_workspaces || !req.shared_workspace_ids.is_empty() {
+        let scoped = ctx
+            .mcp()
+            .registry()
+            .set_scope(&server.id, req.all_workspaces, &req.shared_workspace_ids)
+            .await;
+        if let Err(e) = scoped {
+            let _ = ctx.mcp().registry().delete(&server.id).await;
+            return Err(ApiErr(e));
+        }
+    }
     // Persist secret values to the keychain (never to the row).
     if !req.secret_env.is_empty() || !req.secret_headers.is_empty() {
         let blob = json!({ "env": req.secret_env, "headers": req.secret_headers }).to_string();
@@ -499,23 +576,52 @@ async fn update_server<S: McpCtx>(
     }
     // Native ⇄ governed: one row, one mode (`service_run_mode.rs`). Owner
     // only: either way the server's command runs on this Mac.
-    if let Some(mode) = req.runs.filter(|m| *m != crate::RunMode::of(&server)) {
-        if !otto_core::auth::root_authority(&user) {
-            return Err(ApiErr(Error::Forbidden(
-                "only the owner can change how an MCP server runs".into(),
-            )));
-        }
+    let runs = req.runs.filter(|m| *m != crate::RunMode::of(&server));
+    if runs.is_some() && !otto_core::auth::root_authority(&user) {
+        return Err(ApiErr(Error::Forbidden(
+            "only the owner can change how an MCP server runs".into(),
+        )));
+    }
+    // Sharing hands the use of the server's credentials to other workspaces'
+    // members: owner only, like the credentials themselves. "All" clears the
+    // chosen workspaces.
+    let all = req.all_workspaces.unwrap_or(server.all_workspaces);
+    let mut shared = req
+        .shared_workspace_ids
+        .clone()
+        .unwrap_or_else(|| server.shared_workspace_ids.clone());
+    shared.retain(|w| !all && *w != server.workspace_id);
+    shared.sort();
+    shared.dedup();
+    let rescope = all != server.all_workspaces || shared != server.shared_workspace_ids;
+    if rescope && !otto_core::auth::root_authority(&user) {
+        return Err(ApiErr(Error::Forbidden(
+            "only the owner can change where an MCP server is available".into(),
+        )));
+    }
+    // Only a governed server is shared (`otto_state::mcp_scope`).
+    let governed = runs.map_or(server.managed, |m| m == crate::RunMode::Governed);
+    if rescope && (all || !shared.is_empty()) && !governed {
+        return Err(ApiErr(Error::Invalid(
+            "a server that runs directly stays in its home workspace: run it through Otto first to share it".into(),
+        )));
+    }
+    if rescope {
+        ctx.mcp().registry().check_scope(&shared).await?;
+    }
+    // Only the maps this save supplies are checked: a stored key is never a
+    // reason to refuse an unrelated edit. Everything is validated before the
+    // first write.
+    let supplied_env = req.env.iter().chain(req.secret_env.iter());
+    if let Some(msg) = crate::service::env_key_error(supplied_env.flat_map(|m| m.keys())) {
+        return Err(ApiErr(Error::Invalid(msg)));
+    }
+    if let Some(mode) = runs {
         let actor = otto_core::access::AccessActor {
             real_user_id: user.id.clone(),
             effective_user_id: None,
         };
         ctx.mcp().set_run_mode(&id, mode, &actor).await?;
-    }
-    // Only the maps this save supplies are checked: a stored key is never a
-    // reason to refuse an unrelated edit.
-    let supplied_env = req.env.iter().chain(req.secret_env.iter());
-    if let Some(msg) = crate::service::env_key_error(supplied_env.flat_map(|m| m.keys())) {
-        return Err(ApiErr(Error::Invalid(msg)));
     }
     // Each supplied map replaces that map; omitted maps retain their secrets.
     // Replacing both maps is also the recovery path for a missing/corrupt blob.
@@ -549,7 +655,8 @@ async fn update_server<S: McpCtx>(
     }
     // Any edit (config, secrets, enabled) retires the pooled session.
     ctx.mcp().evict_client(&id);
-    ctx.mcp()
+    let updated = ctx
+        .mcp()
         .registry()
         .update(
             &id,
@@ -565,8 +672,14 @@ async fn update_server<S: McpCtx>(
             req.enabled,
         )
         .await
-        .map(Json)
-        .map_err(ApiErr)
+        .map_err(ApiErr)?;
+    // After the fields (a name clash refuses both); the scope is validated.
+    if rescope {
+        return Ok(Json(
+            ctx.mcp().registry().set_scope(&id, all, &shared).await?,
+        ));
+    }
+    Ok(Json(updated))
 }
 
 async fn delete_server<S: McpCtx>(
@@ -701,7 +814,20 @@ async fn oauth_status<S: McpCtx>(
         WorkspaceRole::Viewer,
     )
     .await?;
-    Ok(Json(ctx.mcp().oauth_status(&id).await))
+    let mut status = ctx.mcp().oauth_status(&id).await;
+    // Like `public_server_with`: only a configurer sees where and why.
+    let configurer = require_ws(&ctx, &user, &server.workspace_id, WorkspaceRole::Viewer)
+        .await
+        .is_ok()
+        && ctx
+            .mcp()
+            .resource_allowed(&server, &user, "configure", None)
+            .await?;
+    if !configurer {
+        status.auth_host = None;
+        status.error = None;
+    }
+    Ok(Json(status))
 }
 
 async fn oauth_sign_out<S: McpCtx>(
@@ -817,17 +943,24 @@ async fn invoke_tool<S: McpCtx>(
     Json(req): Json<InvokeReq>,
 ) -> ApiResult<Json<InvokeResp>> {
     let server = ctx.mcp().registry().get(&id).await.map_err(ApiErr)?;
-    require_resource(
+    // Runs in the workspace the caller names (its allowlist, policies and
+    // audit), which must reach the server; the home by default.
+    let ws = req
+        .workspace_id
+        .clone()
+        .unwrap_or_else(|| server.workspace_id.clone());
+    require_resource_in(
         &ctx,
         &user,
         &server,
+        &ws,
         "invoke",
         Some(&name),
         WorkspaceRole::Editor,
     )
     .await?;
     let ictx = InvokeCtx {
-        workspace_id: Some(server.workspace_id.clone()),
+        workspace_id: Some(ws),
         dry_run: req.dry_run,
         caller_user_id: Some(user.id.clone()),
         caller_kind: "ui".into(),
@@ -930,9 +1063,14 @@ async fn set_allowlist<S: McpCtx>(
             .get(&e.server_id)
             .await
             .map_err(ApiErr)?;
-        if s.workspace_id != wid {
+        if !ctx.mcp().registry().is_available(&s.id, &wid).await?
+            || !ctx
+                .mcp()
+                .resource_allowed(&s, &user, "discover", e.tool_name.as_deref())
+                .await?
+        {
             return Err(ApiErr(Error::Invalid(format!(
-                "server {} is not in this workspace",
+                "server {} is not available in this workspace",
                 e.server_id
             ))));
         }
@@ -1235,7 +1373,18 @@ async fn evaluate_policy<S: McpCtx>(
         .get(&req.server_id)
         .await
         .map_err(ApiErr)?;
-    require_ws(&ctx, &user, &server.workspace_id, WorkspaceRole::Viewer).await?;
+    require_resource(
+        &ctx,
+        &user,
+        &server,
+        "discover",
+        None,
+        WorkspaceRole::Viewer,
+    )
+    .await?;
+    if let Some(ws) = &req.workspace_id {
+        require_ws(&ctx, &user, ws, WorkspaceRole::Viewer).await?;
+    }
     ctx.mcp()
         .evaluate_preview(&req.server_id, &req.tool, req.workspace_id.as_deref())
         .await
@@ -1368,23 +1517,28 @@ async fn decide_approval<S: McpCtx>(
             Error::Forbidden("requester cannot approve through impersonation".into()).into(),
         );
     }
-    // IDOR: the decider must have a role in the approval's workspace.
-    if appr.server_id.is_none() {
-        if let Some(ws) = &appr.workspace_id {
-            require_ws(&ctx, &user, ws, WorkspaceRole::Editor).await?;
+    // IDOR: the decider must have a role in the approval's workspace. For a
+    // server-bound one that is the role `approve` needs THERE (an Enforced
+    // grant suffices for a viewer, as in 0.5.1) — a shared server reaches
+    // other workspaces, so reaching it from elsewhere isn't enough.
+    match (&appr.server_id, &appr.workspace_id) {
+        (Some(server_id), ws) => {
+            let server = ctx.mcp().registry().get(server_id).await?;
+            let ws = ws.clone().unwrap_or_else(|| server.workspace_id.clone());
+            let tool = appr.tool.as_deref();
+            require_resource_in(
+                &ctx,
+                &user,
+                &server,
+                &ws,
+                "approve",
+                tool,
+                WorkspaceRole::Editor,
+            )
+            .await?;
         }
-    }
-    if let Some(server_id) = &appr.server_id {
-        let server = ctx.mcp().registry().get(server_id).await?;
-        require_resource(
-            &ctx,
-            &user,
-            &server,
-            "approve",
-            appr.tool.as_deref(),
-            WorkspaceRole::Editor,
-        )
-        .await?;
+        (None, Some(ws)) => require_ws(&ctx, &user, ws, WorkspaceRole::Editor).await?,
+        (None, None) => {}
     }
     // Repo enforces approver != requester (separation of duties).
     ctx.mcp()

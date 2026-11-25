@@ -8,14 +8,22 @@ import { ideProjectRecents, sameRootKey } from '../shell/ideProjectRecents.svelt
 import { ideProjectHealth } from './ideProjectHealth.svelte';
 import { ideWindowTitle } from './ideWindowTitle.svelte';
 import { adoptParkedRun, parkRun, resumeParkedRunWatch, setParkedRunCurrentKey, type RunHost } from './ideParkedRuns';
-import { enterProject, expandedToRemember, leaveProject, recallDurable, rememberDurable } from './ideProjectMemory';
-import { ideBasename, ideTargetKey, type IdeNamedProject } from './ideTypes';
+import { enterProject, expandedToRemember, leaveProject, recallDurable, recallVolatile, rememberDurable, stashVolatile } from './ideProjectMemory';
+import { ideBasename, ideTargetKey, type IdeFsEntry, type IdeNamedProject } from './ideTypes';
 
 export interface ProjectSwitchHost extends RunHost {
   readonly projectRoots: readonly { path: string }[];
   expandedDirs: Record<string, boolean>;
+  treeRootEntries: IdeFsEntry[];
+  childrenByDir: Record<string, IdeFsEntry[]>;
   loadTree(dirPath?: string): Promise<void>;
 }
+
+/** The tree's scroll offset: `top` follows the tree as it scrolls; `pending` is the offset
+ *  the tree goes back to once its rows are there (a project entered, the tree remounted). */
+export const treeScroll: { top: number; pending: number | null } = { top: 0, pending: null };
+
+interface HeldTree { root: IdeFsEntry[]; children: Record<string, IdeFsEntry[]> }
 
 type WithNamed = { namedProjects?: readonly IdeNamedProject[] };
 
@@ -47,7 +55,7 @@ export function reachableExpanded(saved: readonly string[], roots: readonly stri
 let lastHost: ProjectSwitchHost | null = null;
 
 function saveTree(host: ProjectSwitchHost, key: string): void {
-  rememberDurable(key, { expanded: expandedToRemember(host.expandedDirs, host.projectRoots.map((r) => r.path)) });
+  rememberDurable(key, { expanded: expandedToRemember(host.expandedDirs, host.projectRoots.map((r) => r.path)), scroll: treeScroll.top });
 }
 
 export function leaveIdeTarget(host: ProjectSwitchHost): void {
@@ -55,6 +63,8 @@ export function leaveIdeTarget(host: ProjectSwitchHost): void {
   if (!t.root) return;
   const key = ideTargetKey(t);
   saveTree(host, key);
+  // This page keeps the listings: coming back paints them at once, then the root load revalidates.
+  stashVolatile(key, 'tree', { root: host.treeRootEntries, children: host.childrenByDir } satisfies HeldTree);
   parkRun(host, key, projectLabelFor(host), {
     kind: t.kind, root: t.root, connection_id: t.connection_id ?? null, connection_name: t.connection_name ?? null,
     workspace_id: t.workspace_id ?? null, project_id: namedFor(host, t.root)?.id ?? null,
@@ -71,14 +81,20 @@ export function enterIdeTarget(host: ProjectSwitchHost): void {
   const key = ideTargetKey(t);
   ideProjectRecents.record(t);
   const roots = host.projectRoots.map((r) => r.path);
-  const saved = recallDurable(key)?.expanded ?? [];
-  // Opened only: the tree lists each one as it comes on screen (IdeProjectTree).
-  const restore = reachableExpanded(saved, roots);
+  const memory = recallDurable(key);
+  // The root load lists these with it (one request); attached roots' as they come on screen.
+  const restore = reachableExpanded(memory?.expanded ?? [], roots);
   if (restore.length > 0) {
     const next = { ...host.expandedDirs };
     for (const p of restore) next[p] = true;
     host.expandedDirs = next;
   }
+  const held = recallVolatile<HeldTree>(key, 'tree');
+  if (held) {
+    host.treeRootEntries = held.root;
+    host.childrenByDir = held.children;
+  }
+  treeScroll.pending = memory?.scroll ?? 0;
   enterProject(key);
   void adoptParkedRun(host, key).finally(() => resumeParkedRunWatch());
 }

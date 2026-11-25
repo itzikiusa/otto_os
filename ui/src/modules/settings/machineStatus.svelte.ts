@@ -12,13 +12,24 @@ import { pollWhileVisible, type Poller } from '../../lib/poll';
 import type { MachineStatus } from '../../lib/api/types/machine';
 
 export const MACHINE_POLL_MS = 30_000;
+/** A window left open behind other apps still draws the chip, but nobody
+ *  reads it every 30 s (it was 125 reads an hour all night): unfocused, the
+ *  answer is re-read once it is this old. */
+const UNFOCUSED_MS = 120_000;
+
+const unfocused = (): boolean => typeof document !== 'undefined' && !document.hasFocus();
 
 class MachineStatusStore {
   status: MachineStatus | null = $state(null);
   /** The last read failed (an older daemon without the route, or offline). */
   error = $state('');
+  private readAt = 0;
   private poller: Poller | null = null;
   private watchers = 0;
+  /** Back in front after the slow unfocused pace: read now if past the cadence. */
+  private onFocus = (): void => {
+    if (Date.now() - this.readAt >= MACHINE_POLL_MS) this.poller?.now({ background: true });
+  };
 
   /** Keep the status fresh while the caller is mounted. Use as
    *  `$effect(() => machineStatus.watch())` — the release is the cleanup. */
@@ -28,8 +39,10 @@ class MachineStatusStore {
       this.watchers += 1;
       this.poller ??= pollWhileVisible(
         async (signal) => {
+          if (this.status && !this.error && unfocused() && Date.now() - this.readAt < UNFOCUSED_MS) return;
           try {
             this.status = await api.get<MachineStatus>('/machine/status', signal);
+            this.readAt = Date.now();
             this.error = '';
           } catch (e) {
             if (signal.aborted) return;
@@ -39,6 +52,7 @@ class MachineStatusStore {
         },
         { ms: MACHINE_POLL_MS },
       );
+      if (this.watchers === 1 && typeof window !== 'undefined') window.addEventListener('focus', this.onFocus);
       let released = false;
       return () => {
         if (released) return;
@@ -47,6 +61,7 @@ class MachineStatusStore {
         if (this.watchers > 0) return;
         this.poller?.stop();
         this.poller = null;
+        if (typeof window !== 'undefined') window.removeEventListener('focus', this.onFocus);
       };
     });
   }

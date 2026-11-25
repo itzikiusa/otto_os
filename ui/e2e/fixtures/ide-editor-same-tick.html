@@ -1,0 +1,9 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>IDE editor same-tick fixture</title></head><body style="margin:0;padding:12px;background:var(--bg);color:var(--text)"><script type="module">
+import { mount } from 'svelte';
+import '../../src/lib/tokens.css';
+import '../../src/app.css';
+import { ui } from '../../src/lib/stores/ui.svelte';
+ui.applyTheme();
+import Fixture from './IdeEditorSameTickFixture.svelte';
+mount(Fixture, { target: document.body });
+</script></body></html>

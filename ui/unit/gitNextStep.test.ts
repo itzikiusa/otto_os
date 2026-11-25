@@ -2,7 +2,7 @@
 // checkout's state, and the state in words for the repository header.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { forgeLabel, primaryStep, stateWords, type GitActionState } from '../src/lib/gitNextStep.ts';
+import { forgeLabel, prStepPossible, primaryStep, stateWords, type GitActionState } from '../src/lib/gitNextStep.ts';
 
 const S: GitActionState = { changes: 0, branch: 'feat/x', upstream: 'origin/feat/x', ahead: 0, remote: true, forge: true, prNumber: null };
 
@@ -51,4 +51,18 @@ test('forge names: only the forges Otto opens pull requests on', () => {
   assert.equal(forgeLabel({ forge: 'unrecognized', provider: 'bitbucket' } as never), 'Bitbucket');
   assert.equal(forgeLabel({ forge: null, provider: null } as never), null);
   assert.equal(forgeLabel(null), null);
+});
+
+// History's step card (Create / Open pull request over the checked-out
+// commit) mounts only where a PR step can exist: each mount asks the forge
+// (accounts + open PRs), so a clean default branch or a forge-less repo
+// must not mount it.
+test('a pull request step is possible only on a clean, pushed, non-default branch of a forge repo', () => {
+  assert.equal(prStepPossible(S), true);
+  assert.equal(prStepPossible({ ...S, branch: 'main', upstream: 'origin/main' }), false);
+  assert.equal(prStepPossible({ ...S, branch: 'master', upstream: 'origin/master' }), false);
+  assert.equal(prStepPossible({ ...S, forge: false }), false);
+  assert.equal(prStepPossible({ ...S, changes: 1 }), false);
+  assert.equal(prStepPossible({ ...S, ahead: 1 }), false);
+  assert.equal(prStepPossible({ ...S, upstream: null }), false);
 });

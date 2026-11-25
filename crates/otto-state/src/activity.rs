@@ -142,7 +142,19 @@ impl ActivityRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("append trail"))?;
-        self.get_trail(&id).await
+        // Built from what was just written, not read back (a second query on
+        // every Claude hook post; `ts` goes through the same parse).
+        Ok(TrailEvent {
+            id,
+            session_id: n.session_id,
+            workspace_id: n.workspace_id,
+            ts: ts(&now)?,
+            source: n.source,
+            kind: n.kind,
+            level: n.level,
+            summary: n.summary,
+            detail: n.detail,
+        })
     }
 
     pub async fn get_trail(&self, id: &Id) -> Result<TrailEvent> {
@@ -751,6 +763,33 @@ pub(crate) fn summary_trail_sql(owner_scoped: bool) -> String {
 mod tests {
     use super::*;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    /// The entry append_trail returns (no longer read back) is the stored row.
+    #[tokio::test]
+    async fn append_trail_returns_the_stored_row() {
+        let pool = mk_pool().await;
+        seed_user(&pool, "u").await;
+        seed_workspace(&pool, "w").await;
+        let sid = seed_session(&pool, "w", "u").await;
+        let repo = ActivityRepo::new(pool);
+        let made = repo
+            .append_trail(NewTrail {
+                session_id: sid,
+                workspace_id: "w".into(),
+                source: TrailSource::Agent,
+                kind: TrailKind::Tool,
+                level: TrailLevel::Warn,
+                summary: "$ cargo build".into(),
+                detail: Some(serde_json::json!({"cmd": "cargo build"})),
+            })
+            .await
+            .unwrap();
+        let stored = repo.get_trail(&made.id).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&made).unwrap(),
+            serde_json::to_value(&stored).unwrap()
+        );
+    }
 
     async fn mk_pool() -> DbPool {
         let opts = SqliteConnectOptions::new()

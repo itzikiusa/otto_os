@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { loadSource } from './sourceHarness.ts';
 
 function client() {
@@ -36,4 +37,63 @@ test('a DB schema load or object open (both can dial) uses the long lane', () =>
   // Neighbours that merely share a prefix stay interactive.
   assert.equal(isLongPath('/connections/c1/db/objects-pinned'), false);
   assert.equal(isLongPath('/connections/c1/db/schemas'), false);
+});
+
+test('the DB keep-alive ping rides the long lane, not a background slot', () => {
+  // A db/test over a tunnel takes ~1 s (up to 10 s in the field); two of them
+  // on `api.bg` held both of the window's background slots each round, so
+  // every poll behind them queued (ui.request.queue max 751 ms).
+  const src = readFileSync(new URL('../src/lib/stores/database/connections.svelte.ts', import.meta.url), 'utf8');
+  const start = src.indexOf('async keepAliveTick');
+  const tick = src.slice(start, src.indexOf('\n  }\n', start));
+  assert.match(tick, /api\.long\.post<DbTestResult>\(`\$\{this\.db\.connBase\(id\)\}\/test`/);
+  assert.doesNotMatch(tick, /api\.bg\./);
+});
+
+test('a slow background read on a long path never holds the fast polls\' two slots', async () => {
+  // A poll tick inherits the bg lane; a long path in it (a usage summary, a
+  // k8s / Kafka read, repo status) took ~1 s and held one of the two slots.
+  const lane = loadSource(new URL('../src/lib/api/lane.ts', import.meta.url), {});
+  const fetched: string[] = [];
+  const c = loadSource(new URL('../src/lib/api/client.ts', import.meta.url), {
+    '../stores/serviceHealth.svelte': { serviceHealth: { report() {} } },
+    './lane': lane,
+  }, {
+    location: { port: '7700', origin: 'http://localhost:7700' },
+    fetch: (url: string) => {
+      fetched.push(String(url));
+      return /\/usage\//.test(String(url)) ? new Promise(() => {}) : Promise.resolve(new Response('{}'));
+    },
+  });
+  lane.inLane('bg', () => {
+    void c.api.get('/usage/summary?days=7').catch(() => {});
+    void c.api.get('/usage/status').catch(() => {});
+  });
+  const fast = lane.inLane('bg', () => c.api.get('/notifications'));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(fetched.some((u) => u.includes('/notifications')), 'the fast poll went out: ' + fetched.join(' '));
+  await fast;
+});
+
+test('a slow background read still takes an app-wide slot and keeps the read deadline', async () => {
+  const lane = loadSource(new URL('../src/lib/api/lane.ts', import.meta.url), {});
+  const locks: string[] = [];
+  const timers: { ms: number; fn: () => void }[] = [];
+  const c = loadSource(new URL('../src/lib/api/client.ts', import.meta.url), {
+    '../stores/serviceHealth.svelte': { serviceHealth: { report() {} } },
+    './lane': lane,
+  }, {
+    location: { port: '7700', origin: 'http://localhost:7700' },
+    navigator: { locks: { request: (name: string, _o: unknown, cb: (l: unknown) => unknown) => { locks.push(name); return Promise.resolve(cb({})); } } },
+    setTimeout: (fn: () => void, ms: number) => (timers.push({ ms, fn }), timers.length),
+    clearTimeout: () => {},
+    fetch: (_u: string, init: { signal?: AbortSignal }) => new Promise((_r, reject) => init.signal?.addEventListener('abort', () => reject(init.signal!.reason))),
+  });
+  const slow = lane.inLane('bg', () => c.api.get('/usage/summary?days=7'));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(locks.some((n) => n.startsWith('otto-bg-')), 'took an app-wide bg lock: ' + locks.join(','));
+  const deadline = timers.find((t) => t.ms === c.READ_DEADLINE_MS);
+  assert.ok(deadline, 'a signal-less slow read has the read deadline');
+  deadline!.fn();
+  await assert.rejects(slow);
 });

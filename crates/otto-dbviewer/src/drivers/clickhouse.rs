@@ -52,6 +52,12 @@ pub struct ClickhouseDriver {
     clients: ResourceCache<reqwest::Client>,
     map_arrays: ResourceCache<bool>,
     native: ResourceCache<Arc<klickhouse::Client>>,
+    /// Idle native connections for standalone reads, under the profile's
+    /// [`ResolvedConfig::cache_key`]. A read checks one out for itself (no
+    /// shared queue: a cancelled read must never run later) and only a read
+    /// that finished cleanly puts it back, so each read skips the TCP/TLS,
+    /// hello and session setup round trips (~4 of 5 on a remote server).
+    native_idle: std::sync::Mutex<HashMap<String, Vec<IdleNative>>>,
     /// Per-connection schema snapshot cache backing smart completion.
     completions: crate::complete::CompletionCache,
     /// Per-cache-key "this server refuses `readonly=2`" memo (DB-02). A user
@@ -60,6 +66,21 @@ pub struct ClickhouseDriver {
     /// request skips the param instead of paying a failed round trip first.
     readonly_refused: std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
+
+/// A parked native connection and the session it was set up for.
+struct IdleNative {
+    database: Option<String>,
+    readonly: bool,
+    client: Arc<klickhouse::Client>,
+    at: Instant,
+}
+
+/// Idle native connections kept per profile; more concurrent reads than this
+/// just open (and then drop) their own.
+const NATIVE_IDLE_MAX: usize = 4;
+/// A parked connection older than this is dropped rather than reused, so a
+/// socket that died quietly (VPN drop, server idle timeout) is not handed out.
+const NATIVE_IDLE_TTL: Duration = Duration::from_secs(5 * 60);
 
 // --- Transport selection ----------------------------------------------------
 
@@ -616,6 +637,51 @@ impl ClickhouseDriver {
             .await
     }
 
+    /// A parked connection for this profile + session, if one is still fresh.
+    fn take_idle_native(
+        &self,
+        cfg: &ResolvedConfig,
+        database: Option<&str>,
+        readonly: bool,
+    ) -> Option<Arc<klickhouse::Client>> {
+        let mut idle = self.native_idle.lock().unwrap_or_else(|e| e.into_inner());
+        let list = idle.get_mut(&cfg.cache_key())?;
+        list.retain(|c| c.at.elapsed() < NATIVE_IDLE_TTL && !c.client.is_closed());
+        let at = list
+            .iter()
+            .rposition(|c| c.readonly == readonly && c.database.as_deref() == database)?;
+        Some(list.swap_remove(at).client)
+    }
+
+    fn drop_idle_native(&self, cache_key: &str) {
+        self.native_idle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(cache_key);
+    }
+
+    fn park_idle_native(
+        &self,
+        cfg: &ResolvedConfig,
+        database: Option<String>,
+        readonly: bool,
+        client: Arc<klickhouse::Client>,
+    ) {
+        if cfg.lifecycle.as_ref().is_some_and(|l| l.check().is_err()) {
+            return;
+        }
+        let mut idle = self.native_idle.lock().unwrap_or_else(|e| e.into_inner());
+        let list = idle.entry(cfg.cache_key()).or_default();
+        if list.len() < NATIVE_IDLE_MAX {
+            list.push(IdleNative {
+                database,
+                readonly,
+                client,
+                at: Instant::now(),
+            });
+        }
+    }
+
     /// Decode native blocks within interactive row/byte budgets.
     async fn native_query_scoped(
         &self,
@@ -624,8 +690,6 @@ impl ClickhouseDriver {
         row_cap: Option<usize>,
         active_db: Option<&str>,
     ) -> Result<RawRows> {
-        use futures_util::StreamExt;
-
         // A selected database must not mutate the cached profile connection:
         // another tab may concurrently query a different database. Scoped
         // connections are operation-owned, so close/eviction cannot orphan them.
@@ -638,7 +702,9 @@ impl ClickhouseDriver {
         // cancelled while queued could otherwise execute after its caller exits.
         // Only an explicit sequential batch owns/reuses one session connection.
         let standalone = cfg.param_str("__ch_session").is_none();
-        let client = if readonly
+        let mut owned = None;
+        let mut from_idle = false;
+        let mut client = if readonly
             || standalone
             || active_db.is_some_and(|db| Some(db) != cfg.database.as_deref())
         {
@@ -646,82 +712,40 @@ impl ClickhouseDriver {
             scoped.database = active_db
                 .map(str::to_string)
                 .or_else(|| cfg.database.clone());
-            Arc::new(native_connect(&scoped).await?)
+            let client = match self.take_idle_native(cfg, scoped.database.as_deref(), readonly) {
+                Some(client) => {
+                    from_idle = true;
+                    client
+                }
+                None => Arc::new(native_connect(&scoped).await?),
+            };
+            owned = Some(scoped);
+            client
         } else {
             self.native_client(cfg).await?
         };
-        let mut stream = client.query_raw(sql, None).await.map_err(native_err)?;
-
-        let mut meta: Vec<(String, String)> = Vec::new();
-        let mut data: Vec<Vec<Value>> = Vec::new();
-        let mut budget = types::ByteBudget::default();
-        let mut cells_truncated = false;
-        let mut truncated_bytes = false;
-        let mut partial = false;
-        while let Some(block) = stream.next().await {
-            let block = block.map_err(native_err)?;
-            // The first non-empty block establishes the column order/types; the
-            // header block (rows == 0) still carries column_types, so we capture
-            // metadata from whichever block first exposes columns.
-            if meta.is_empty() && !block.column_types.is_empty() {
-                meta = block
-                    .column_types
-                    .iter()
-                    .map(|(name, ty)| (name.clone(), ty.to_string()))
-                    .collect();
+        let mut received = false;
+        let rows = match (
+            native_rows(&client, sql, row_cap, &mut received).await,
+            &owned,
+        ) {
+            // A parked socket a proxy or server dropped moments ago, before
+            // klickhouse saw it close: the idle ones beside it went too.
+            (Err(_), Some(scoped))
+                if from_idle && retry_on_fresh_connection(client.is_closed(), received, sql) =>
+            {
+                self.drop_idle_native(&cfg.cache_key());
+                client = Arc::new(native_connect(scoped).await?);
+                native_rows(&client, sql, row_cap, &mut received).await?
             }
-            if block.rows == 0 {
-                continue;
-            }
-            if row_cap.is_some_and(|cap| data.len() >= cap) {
-                partial = true;
-                break;
-            }
-            let take = row_cap.map_or(usize::MAX, |cap| cap - data.len());
-            let cells = (block.rows as usize).saturating_mul(block.column_types.len());
-            let rows = if cells >= NATIVE_OFF_RUNTIME_CELLS {
-                tokio::task::spawn_blocking(move || decode_native_block(&block, take))
-                    .await
-                    .map_err(|e| types::upstream(format!("clickhouse: decode task failed: {e}")))?
-            } else {
-                decode_native_block(&block, take)
-            };
-            if row_cap.is_none() {
-                data.extend(rows);
-                continue;
-            }
-            for row in rows {
-                let row: Vec<_> = row
-                    .into_iter()
-                    .map(|v| types::cap_cell_tracked(v, &mut cells_truncated))
-                    .collect();
-                let bytes = row.iter().map(|v| types::approx_json_len(v) + 1).sum();
-                if !budget.charge(bytes) && !data.is_empty() {
-                    truncated_bytes = true;
-                    partial = true;
-                    break;
-                }
-                data.push(row);
-            }
-            if partial {
-                break;
-            }
+            (rows, _) => rows?,
+        };
+        // Only a fully read result of a read statement leaves the session as
+        // it was set up (a write/session statement may `USE` or `SET`).
+        if let Some(scoped) = owned.filter(|_| !rows.partial && returns_rows(sql)) {
+            self.park_idle_native(cfg, scoped.database, readonly, client);
         }
-
-        // klickhouse drops its row channel on a protocol/type decode failure
-        // without forwarding that error. Never present that as an empty result.
-        if !partial && client.is_closed() {
-            return Err(native_closed_error());
-        }
-        Ok(RawRows {
-            meta,
-            data,
-            prepared: row_cap.is_some(),
-            cells_truncated,
-            truncated_bytes,
-            partial,
-            ..RawRows::default()
-        })
+        Ok(rows)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1490,6 +1514,103 @@ impl Conn {
         }
         Ok(resp)
     }
+}
+
+/// May a read that failed on a parked connection run once more on a fresh
+/// one? Only when the socket turned out closed before any block arrived, and
+/// only for a statement that provably just reads: `KILL`, `BACKUP`,
+/// `RESTORE` (and `WITH`, `CHECK`) take the row path too but must never be
+/// sent twice.
+fn retry_on_fresh_connection(closed: bool, received_block: bool, sql: &str) -> bool {
+    closed
+        && !received_block
+        && matches!(
+            crate::sql_class::clickhouse_first_word(sql).as_deref(),
+            Some("SELECT" | "SHOW" | "DESC" | "DESCRIBE" | "EXISTS" | "EXPLAIN")
+        )
+}
+
+/// Read one native result within the interactive row/byte budgets.
+async fn native_rows(
+    client: &klickhouse::Client,
+    sql: &str,
+    row_cap: Option<usize>,
+    received: &mut bool,
+) -> Result<RawRows> {
+    use futures_util::StreamExt;
+    let mut stream = client.query_raw(sql, None).await.map_err(native_err)?;
+
+    let mut meta: Vec<(String, String)> = Vec::new();
+    let mut data: Vec<Vec<Value>> = Vec::new();
+    let mut budget = types::ByteBudget::default();
+    let mut cells_truncated = false;
+    let mut truncated_bytes = false;
+    let mut partial = false;
+    while let Some(block) = stream.next().await {
+        let block = block.map_err(native_err)?;
+        *received = true;
+        // The first non-empty block establishes the column order/types; the
+        // header block (rows == 0) still carries column_types, so we capture
+        // metadata from whichever block first exposes columns.
+        if meta.is_empty() && !block.column_types.is_empty() {
+            meta = block
+                .column_types
+                .iter()
+                .map(|(name, ty)| (name.clone(), ty.to_string()))
+                .collect();
+        }
+        if block.rows == 0 {
+            continue;
+        }
+        if row_cap.is_some_and(|cap| data.len() >= cap) {
+            partial = true;
+            break;
+        }
+        let take = row_cap.map_or(usize::MAX, |cap| cap - data.len());
+        let cells = (block.rows as usize).saturating_mul(block.column_types.len());
+        let rows = if cells >= NATIVE_OFF_RUNTIME_CELLS {
+            tokio::task::spawn_blocking(move || decode_native_block(&block, take))
+                .await
+                .map_err(|e| types::upstream(format!("clickhouse: decode task failed: {e}")))?
+        } else {
+            decode_native_block(&block, take)
+        };
+        if row_cap.is_none() {
+            data.extend(rows);
+            continue;
+        }
+        for row in rows {
+            let row: Vec<_> = row
+                .into_iter()
+                .map(|v| types::cap_cell_tracked(v, &mut cells_truncated))
+                .collect();
+            let bytes = row.iter().map(|v| types::approx_json_len(v) + 1).sum();
+            if !budget.charge(bytes) && !data.is_empty() {
+                truncated_bytes = true;
+                partial = true;
+                break;
+            }
+            data.push(row);
+        }
+        if partial {
+            break;
+        }
+    }
+
+    // klickhouse drops its row channel on a protocol/type decode failure
+    // without forwarding that error. Never present that as an empty result.
+    if !partial && client.is_closed() {
+        return Err(native_closed_error());
+    }
+    Ok(RawRows {
+        meta,
+        data,
+        prepared: row_cap.is_some(),
+        cells_truncated,
+        truncated_bytes,
+        partial,
+        ..RawRows::default()
+    })
 }
 
 // --- Native connection / TLS ------------------------------------------------
@@ -2820,6 +2941,7 @@ impl Driver for ClickhouseDriver {
         for (key, value) in self.native.take_where(|key| key == cache_key) {
             captured.native.insert_ready(key, value);
         }
+        self.drop_idle_native(cache_key);
         self.map_arrays.remove(cache_key);
         self.completions.invalidate(cache_key);
         Some(std::sync::Arc::new(captured))
@@ -2829,6 +2951,7 @@ impl Driver for ClickhouseDriver {
         self.clients.remove(cache_key);
         self.map_arrays.remove(cache_key);
         self.native.remove(cache_key);
+        self.drop_idle_native(cache_key);
         self.completions.invalidate(cache_key);
         self.readonly_refused
             .lock()
@@ -2844,6 +2967,13 @@ impl Driver for ClickhouseDriver {
         self.completions.sweep();
         let http = self.clients.take_idle(idle);
         let native = self.native.take_idle(idle);
+        self.native_idle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, list| {
+                list.retain(|c| c.at.elapsed() < NATIVE_IDLE_TTL);
+                !list.is_empty()
+            });
         let mut memo = self
             .readonly_refused
             .lock()

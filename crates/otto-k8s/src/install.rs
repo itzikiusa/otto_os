@@ -564,11 +564,36 @@ pub fn parse_k9s_version(stdout: &str) -> Option<String> {
     (first.starts_with('v') && first.len() < 32).then(|| first.to_string())
 }
 
+/// [`verify`], remembered per binary (symlinks resolved) + mtime: the
+/// Kubernetes page shows a skeleton until `/k8s/status` answers, and its two
+/// version spawns cost ~135 ms of that on every visit. An install / upgrade
+/// changes the mtime or, for a Homebrew / Nix symlink (Nix store files all
+/// carry the same mtime), the resolved path.
+async fn cached_verify(tool: Tool, path: &Path) -> Option<String> {
+    type Seen = Mutex<HashMap<(PathBuf, std::time::SystemTime), String>>;
+    static SEEN: OnceLock<Seen> = OnceLock::new();
+    let seen = SEEN.get_or_init(Default::default);
+    // Keyed on the RESOLVED path: a Nix upgrade swaps the profile symlink to
+    // a new store path whose files all carry the same epoch mtime.
+    let key = std::fs::canonicalize(path)
+        .and_then(|p| Ok((std::fs::metadata(&p)?.modified()?, p)))
+        .ok()
+        .map(|(t, p)| (p, t));
+    if let Some(v) = key.as_ref().and_then(|k| seen.lock().ok()?.get(k).cloned()) {
+        return Some(v);
+    }
+    let v = verify(tool, path).await;
+    if let (Some(k), Some(v), Ok(mut m)) = (key, v.as_ref(), seen.lock()) {
+        m.insert(k, v.clone());
+    }
+    v
+}
+
 /// `ToolStatus` for `tool`: located path + version (or `installed: false`).
 pub async fn tool_status(tool: Tool, data_dir: &Path) -> ToolStatus {
     match locate(tool, data_dir) {
         Some(p) => {
-            let version = verify(tool, &p).await;
+            let version = cached_verify(tool, &p).await;
             ToolStatus {
                 installed: version.is_some(),
                 version,
@@ -586,6 +611,79 @@ pub async fn tool_status(tool: Tool, data_dir: &Path) -> ToolStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P1-033: `/k8s/status` spawns the version command once per binary
+    /// (path + mtime), not on every page visit; a changed binary re-probes.
+    #[tokio::test]
+    async fn status_version_is_probed_once_per_binary() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("kubectl");
+        let log = dir.path().join("calls");
+        let script = |v: &str| {
+            format!(
+                "#!/bin/sh\necho x >> '{}'\necho '{{\"clientVersion\":{{\"gitVersion\":\"{v}\"}}}}'\n",
+                log.display()
+            )
+        };
+        std::fs::write(&bin, script("v1.30.0")).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let calls = || {
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .count()
+        };
+        for _ in 0..3 {
+            assert_eq!(
+                cached_verify(Tool::Kubectl, &bin).await.as_deref(),
+                Some("v1.30.0")
+            );
+        }
+        assert_eq!(calls(), 1, "probed once");
+        std::fs::write(&bin, script("v1.31.0")).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&bin)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(
+            cached_verify(Tool::Kubectl, &bin).await.as_deref(),
+            Some("v1.31.0"),
+            "an upgraded binary re-probes"
+        );
+        assert_eq!(calls(), 2);
+        // A Nix-style upgrade: the profile symlink moves to a new store file
+        // with the SAME mtime.
+        let store = |v: &str| {
+            let d = dir.path().join(format!("store-{v}"));
+            std::fs::create_dir_all(&d).unwrap();
+            let f = d.join("kubectl");
+            std::fs::write(&f, script(v)).unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&f)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1))
+                .unwrap();
+            f
+        };
+        let link = dir.path().join("profile-kubectl");
+        std::os::unix::fs::symlink(store("v1.32.0"), &link).unwrap();
+        assert_eq!(
+            cached_verify(Tool::Kubectl, &link).await.as_deref(),
+            Some("v1.32.0")
+        );
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(store("v1.33.0"), &link).unwrap();
+        assert_eq!(
+            cached_verify(Tool::Kubectl, &link).await.as_deref(),
+            Some("v1.33.0"),
+            "a relinked binary with the same mtime re-probes"
+        );
+    }
 
     /// S6-17: downloads are verified against the published digest.
     #[test]
@@ -702,5 +800,35 @@ mod tests {
         assert!(matches!(ev, Event::K8sInstallUpdated { state, .. } if state == "done"));
         assert_eq!(inst.job(Tool::Kubectl).state, InstallState::Done);
         assert_eq!(serde_json::to_value(&first).unwrap()["tool"], "kubectl");
+    }
+
+    /// A Nix upgrade swaps the profile symlink to a new store path whose
+    /// files all carry the same epoch mtime: the cache must see the new binary.
+    #[tokio::test]
+    async fn cached_verify_follows_a_symlink_swap_with_equal_mtimes() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        for (dir, v) in [("a", "v0.1.0"), ("b", "v0.2.0")] {
+            let bin = tmp.path().join(dir).join("k9s");
+            std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+            std::fs::write(&bin, format!("#!/bin/sh\necho 'Version {v}'\n")).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let epoch = std::fs::File::options().write(true).open(&bin).unwrap();
+            epoch
+                .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1))
+                .unwrap();
+        }
+        let link = tmp.path().join("k9s");
+        std::os::unix::fs::symlink(tmp.path().join("a/k9s"), &link).unwrap();
+        assert_eq!(
+            cached_verify(Tool::K9s, &link).await.as_deref(),
+            Some("v0.1.0")
+        );
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("b/k9s"), &link).unwrap();
+        assert_eq!(
+            cached_verify(Tool::K9s, &link).await.as_deref(),
+            Some("v0.2.0")
+        );
     }
 }

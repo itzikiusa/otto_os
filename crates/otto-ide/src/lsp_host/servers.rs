@@ -374,8 +374,39 @@ fn which_in(executable: &str, extra_dirs: &[PathBuf]) -> Option<String> {
 /// `~/.cargo/bin/rust-analyzer` is a rustup proxy that exists even when the
 /// component is not installed; only a successful `--version` means it runs.
 /// Callers reach this through the 60 s detect cache (or a blocking task).
-#[allow(clippy::disallowed_methods)]
 fn runs_version(cmd: &str) -> bool {
+    let rustup_home = std::env::var_os("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".rustup")));
+    runs_version_in(cmd, rustup_home.as_deref())
+}
+
+/// A rustup proxy (the same file as the `rustup` beside it) runs only when a
+/// toolchain holds the component: without one, answer `false` without spawning
+/// rustup (~200 ms on every detect-cache miss, whatever language connects).
+#[allow(clippy::disallowed_methods)]
+fn runs_version_in(cmd: &str, rustup_home: Option<&Path>) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let path = Path::new(cmd);
+    let same_as_rustup = match (
+        std::fs::metadata(path),
+        std::fs::metadata(path.with_file_name("rustup")),
+    ) {
+        (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
+        _ => false,
+    };
+    if same_as_rustup {
+        let name = path.file_name().unwrap_or_default();
+        let installed = rustup_home
+            .and_then(|h| std::fs::read_dir(h.join("toolchains")).ok())
+            .is_some_and(|rd| {
+                rd.flatten()
+                    .any(|tc| tc.path().join("bin").join(name).is_file())
+            });
+        if !installed {
+            return false;
+        }
+    }
     std::process::Command::new(cmd)
         .arg("--version")
         .stdin(std::process::Stdio::null())
@@ -638,5 +669,37 @@ mod probe_tests {
         let real = probe("#!/bin/sh\necho rust-analyzer 1.0\n");
         assert!(real.available);
         assert_eq!(real.command, bin.to_string_lossy());
+    }
+
+    /// A rustup proxy is refused without spawning rustup while no toolchain holds
+    /// the component, and probed once one does.
+    #[test]
+    fn rustup_proxy_is_not_spawned_until_a_toolchain_holds_the_component() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let (bin, home) = (tmp.path().join("bin"), tmp.path().join("rustup"));
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(home.join("toolchains/stable/bin")).unwrap();
+        let marker = tmp.path().join("spawned");
+        let rustup = bin.join("rustup");
+        std::fs::write(
+            &rustup,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&rustup, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let proxy = bin.join("rust-analyzer");
+        std::os::unix::fs::symlink(&rustup, &proxy).unwrap();
+        let cmd = proxy.to_string_lossy();
+
+        assert!(!runs_version_in(&cmd, Some(&home)));
+        assert!(
+            !marker.exists(),
+            "rustup was spawned for a missing component"
+        );
+
+        std::fs::write(home.join("toolchains/stable/bin/rust-analyzer"), "").unwrap();
+        assert!(runs_version_in(&cmd, Some(&home)));
+        assert!(marker.exists());
     }
 }

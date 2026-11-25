@@ -28,13 +28,13 @@ import type {
   RepoStatusResp,
 } from '../api/types';
 
-/** Sub-tab inside an open repo: Changes, History ('graph'), Pull requests, Review. */
-export type GitSubTab = 'changes' | 'graph' | 'prs' | 'review';
+/** Sub-tab inside an open repo: History ('graph'), Pull requests, Review. */
+export type GitSubTab = 'graph' | 'prs' | 'review';
 
-/** Map a persisted/legacy sub-tab value onto the current tab set (Focus is
- *  a page-level view now, no longer a repo sub-tab). */
+/** Map a persisted/legacy sub-tab value onto the current tab set: Focus is a
+ *  page-level view now, and Changes is History's WIP row (it lands there). */
 function normSubTab(sub: string | null | undefined): string {
-  return sub == null || sub === 'history' || sub === 'focus' ? DEFAULT_SUB : sub;
+  return sub == null || sub === 'history' || sub === 'focus' || sub === 'changes' ? DEFAULT_SUB : sub;
 }
 
 /** Shape of the global open-tabs persistence blob. */
@@ -262,9 +262,9 @@ class GitStore {
     this.persistOpenTabs();
   }
 
-  /** Set the active sub-tab for a repo (changes/graph/prs/review). */
+  /** Set the active sub-tab for a repo (graph/prs/review). */
   setSubTab(repoId: string, sub: string): void {
-    this.subTab = { ...this.subTab, [repoId]: sub };
+    this.subTab = { ...this.subTab, [repoId]: normSubTab(sub) };
     this.persistOpenTabs();
   }
 

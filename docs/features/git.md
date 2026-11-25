@@ -38,16 +38,21 @@ it shows a landing page — a repo list plus the **Add Repository** flow. Open
 repos and the active tab **persist across app restarts** (stored in the UI's git
 store via `localStorage`).
 
-Each repo tab has its own sub-tabs: **Graph**, **Changes**, **History**,
-**Pull Requests**, and **Review**. A conflicted merge surfaces a temporary
-**Conflict** tab.
+Each repo tab has three views: **History** (the commit graph — always where a
+repo opens), **Pull requests** and **Review**. There is no separate Changes
+view: the working tree is History's **WIP** row. A repo with uncommitted
+changes opens on History with the WIP row selected (the stage / commit panel
+in the right pane); a clean one opens on its checked-out commit (on a phone,
+on the commit list). A remembered "changes" view, a `#/git/<repo>/changes`
+link or an agent's "show the working tree" request all land there. A
+conflicted merge surfaces a temporary **Resolve conflicts** view.
 
 ### Where everything lives
 
 | Thing | Location |
 |---|---|
 | Git page (repo tabs + landing) | `ui/src/modules/git/GitPage.svelte`, `GitTabs.svelte` |
-| One repo (toolbar + Graph/Changes/History/PRs/Review tabs) | `ui/src/modules/git/RepoView.svelte` |
+| One repo (History / Pull requests / Review) | `ui/src/modules/git/RepoView.svelte` |
 | Stage/commit/discard panel | `ui/src/modules/git/WipPanel.svelte` |
 | Commit graph + branch chips + context menus | `ui/src/modules/git/GraphView.svelte` (the shell: wiring and the windowed commit rows); `ui/src/modules/git/graph/RefSidebar.svelte` + `RefSideLists.svelte` (refs tree: branches, tags, stashes, worktrees, submodules, drag-to-merge via `refDrag.svelte.ts`); `graph/CommitDetailPane.svelte` (commit header + diff, or the WIP panel); `graph/RefPopover.svelte` + `refPopoverState.svelte.ts` (the "▾ +N" ref popover, viewport-clamped); `graph/RefChip.svelte` (one ref chip); `graph/graphData.svelte.ts` (refs, paged history, side lists, refresh) + `graphSync.svelte.ts` (auto-fetch re-sync, throttled background reload); `graph/graphRefIndex.svelte.ts` (chip classification, HEAD, lane names, landed marks); `graph/graphViewport.svelte.ts` (lane layout, row window, jump-to-commit); `graph/graphSelection.svelte.ts` (selection, deferred diff, reveal, deep link); `graph/graphActions.svelte.ts` (checkout, branch / tag / stash / worktree / submodule actions, pull, rebase); `graph/graphMenus.ts` (the commit / branch / tag / stash / worktree / submodule menus) |
 | Diff rendering | `ui/src/modules/git/DiffViewer.svelte` |
@@ -271,7 +276,7 @@ The watcher spaces its events by twice the repo's last status duration (at
 least 400 ms, at most 5 s), so a tree whose status takes a second is not
 re-walked back-to-back while a build writes non-ignored files. A response
 carries at most 5,000 untracked rows (`untracked_truncated` /
-`untracked_total` past that) — the Changes list says how many more there are.
+`untracked_total` past that) — the WIP list says how many more there are.
 `OTTO_GIT_FSMONITOR=1` adds `-c core.fsmonitor=true -c core.untrackedCache=true`
 to status reads of repos whose index is over ~6 MB (never written to the repo
 config; skipped when the config already names an fsmonitor or git is older
@@ -424,8 +429,14 @@ repository path share the header's single **⋯** menu.
 
 ## 5. Stage / commit / discard / diff
 
-The graph’s **WIP** panel ("Changes") is the working-tree view, backed by
-`git status`. It lists **Conflicts** (only when present), **Unstaged files**
+The graph’s **WIP** panel is the working-tree view, backed by `git status`;
+History opens on it when the tree is dirty, with every change counted as
+included (the index is untouched until you leave a file out or commit), the
+message drafted from the diff and the first file's diff open. One primary
+follows the checkout: **Commit and push** (Commit only beside it), then — on
+the new commit, which History selects — **Create pull request** or **Open pull
+request** (Push and Publish are the header's verbs). Hunk tools need the index
+written: leave a file out, or use the Included header's **−** (unstage all). It lists **Conflicts** (only when present), **Unstaged files**
 (tracked), **Untracked files** (only when present) and **Staged files**, each
 a collapsible section with a count. Rows show the status letter (M/A/D/R/U),
 the file name with its directory dimmed beside it, and `+/−` line counts (one

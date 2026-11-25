@@ -369,6 +369,51 @@ function nearestGutterRunItem(runMap: Map<number, IdeGutterItem> | undefined, cu
   return best ?? [...runMap.values()][0] ?? null;
 }
 
+const ideRefactorTheme = EditorView.baseTheme({
+  '.cm-ide-col-select-mode .cm-content': { cursor: 'crosshair' },
+  '.cm-ide-codevision-row': {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 'var(--sp-3)',
+    paddingBlock: '1px',
+    lineHeight: '1.25',
+    userSelect: 'none',
+  },
+  '.cm-ide-codevision-pill': {
+    appearance: 'none',
+    border: '1px solid transparent',
+    background: 'transparent',
+    color: 'var(--text-dim)',
+    fontFamily: 'var(--font-ui)',
+    fontSize: 'var(--fs-xs)',
+    fontWeight: '500',
+    lineHeight: '1.25',
+    paddingBlock: '1px',
+    paddingInline: '6px',
+    borderRadius: 'var(--radius-s)',
+    cursor: 'pointer',
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '4px',
+  },
+  '.cm-ide-codevision-pill.is-rename-usages': {
+    color: 'var(--accent-text)',
+    background: 'var(--accent-soft)',
+    borderColor: 'color-mix(in srgb, var(--accent-text) 28%, transparent)',
+  },
+  '.cm-ide-codevision-pill:hover, .cm-ide-codevision-pill:focus-visible': {
+    color: 'var(--accent-text)',
+    background: 'var(--accent-soft)',
+    borderColor: 'color-mix(in srgb, var(--accent-text) 40%, transparent)',
+    outline: 'none',
+  },
+  '.cm-ide-cv-badge': {
+    fontFamily: 'var(--font-mono)',
+    fontWeight: '700',
+    color: 'var(--accent-text)',
+  },
+});
+
 export function createIdeRefactorExtensions(opts: {
   filePath: string;
   language?: string;
@@ -702,51 +747,6 @@ export function createIdeRefactorExtensions(opts: {
       return { destroy: () => ideTouchMenus.delete(view) };
     }),
   ];
-
-  const ideRefactorTheme = EditorView.baseTheme({
-    '.cm-ide-col-select-mode .cm-content': { cursor: 'crosshair' },
-    '.cm-ide-codevision-row': {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 'var(--sp-3)',
-      paddingBlock: '1px',
-      lineHeight: '1.25',
-      userSelect: 'none',
-    },
-    '.cm-ide-codevision-pill': {
-      appearance: 'none',
-      border: '1px solid transparent',
-      background: 'transparent',
-      color: 'var(--text-dim)',
-      fontFamily: 'var(--font-ui)',
-      fontSize: 'var(--fs-xs)',
-      fontWeight: '500',
-      lineHeight: '1.25',
-      paddingBlock: '1px',
-      paddingInline: '6px',
-      borderRadius: 'var(--radius-s)',
-      cursor: 'pointer',
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: '4px',
-    },
-    '.cm-ide-codevision-pill.is-rename-usages': {
-      color: 'var(--accent-text)',
-      background: 'var(--accent-soft)',
-      borderColor: 'color-mix(in srgb, var(--accent-text) 28%, transparent)',
-    },
-    '.cm-ide-codevision-pill:hover, .cm-ide-codevision-pill:focus-visible': {
-      color: 'var(--accent-text)',
-      background: 'var(--accent-soft)',
-      borderColor: 'color-mix(in srgb, var(--accent-text) 40%, transparent)',
-      outline: 'none',
-    },
-    '.cm-ide-cv-badge': {
-      fontFamily: 'var(--font-mono)',
-      fontWeight: '700',
-      color: 'var(--accent-text)',
-    },
-  });
 
   return [
     ideRefactorTheme,

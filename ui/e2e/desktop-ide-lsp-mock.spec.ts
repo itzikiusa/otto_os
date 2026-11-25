@@ -20,6 +20,8 @@ class MockLsp {
   definitionUri?: string;
   pauseInitialize = false;
   acceptInitialize?: () => void;
+  /** When set, code-action answers wait here until the test runs them. */
+  heldCodeActions?: Array<() => void>;
   docs = new Map<string, string>();
   /** Extra publishes (uri → message) sent right after each `didOpen`. */
   ghosts: Array<{ uri: (openUri: string) => string; message: string }> = [];
@@ -81,10 +83,12 @@ class MockLsp {
         return;
       case 'textDocument/codeAction': {
         const line = m.params.range.start.line;
-        this.reply(c, m.id!, [
+        const answer = () => this.reply(c, m.id!, [
           { title: 'Mock: refactor (never a fix)', kind: 'refactor.move', edit: { changes: { [uri!]: [{ range: m.params.range, newText: '' }] } } },
           { title: 'Mock: fix BAD', kind: 'quickfix', isPreferred: true, edit: { changes: { [uri!]: [{ range: { start: { line, character: 0 }, end: { line, character: 3 } }, newText: 'OK_' }] } } },
         ]);
+        if (this.heldCodeActions) this.heldCodeActions.push(answer);
+        else answer();
         return;
       }
       default:
@@ -226,6 +230,20 @@ test('⌥⏎ lists the server’s quick fix first (no refactors) and applies it;
   await expect(usages).toContainText('2 references', { timeout: 10_000 });
   await expect(usages.getByTestId('ide-usages-text-match')).toHaveCount(0);
   expect(textRefs).toEqual([]);
+});
+
+test('hovering a word asks the server for its definition while its quick fixes are still pending', async ({ page }) => {
+  const lsp = await openIde(page);
+  await openFile(page, lsp, 'lsp-mock-a.ts');
+  lsp.heldCodeActions = [];
+  const defsBefore = lsp.count('textDocument/definition');
+  await page.mouse.move(0, 0);
+  await editor(page, 'console.log(x)').locator('.cm-line', { hasText: 'console.log' }).hover({ position: { x: 14, y: 6 } });
+  await expect.poll(() => lsp.heldCodeActions!.length, { timeout: 10_000 }).toBeGreaterThan(0);
+  // The hover's definition lookup is in flight before any code action is answered.
+  await expect.poll(() => lsp.count('textDocument/definition'), { timeout: 5_000 }).toBeGreaterThan(defsBefore);
+  for (const answer of lsp.heldCodeActions!.splice(0)) answer();
+  lsp.heldCodeActions = undefined;
 });
 
 test('the lint tooltip lists only quick fixes, as themed buttons in light and dark', async ({ page }) => {

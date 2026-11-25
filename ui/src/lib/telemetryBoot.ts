@@ -10,6 +10,15 @@ export function bootTelemetry(module: string): () => void {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let channel: BroadcastChannel | null = null;
   const controller = new AbortController();
+  const hidden = (): boolean => typeof document !== 'undefined' && document.hidden;
+  const unwait = (): void => { if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', recheck); };
+  // A re-check that comes due while the window is hidden (the always-alive
+  // tray, a minimized window) waits until it shows instead of polling all night.
+  function recheck(): void {
+    if (stopped) return;
+    if (hidden()) document.addEventListener('visibilitychange', recheck, { once: true });
+    else void update();
+  }
   const update = async (): Promise<void> => {
     if (stopped) return;
     const seq = ++generation;
@@ -33,18 +42,19 @@ export function bootTelemetry(module: string): () => void {
       if (config.enabled) {
         // Administrative changes outside this webview are noticed within 30 s;
         // server collection and ingestion stop immediately when disabled.
-        timer = setTimeout(() => void update(), 30000);
+        timer = setTimeout(recheck, 30000);
       }
     } catch {
       if (!stopped && seq === generation) {
         configureTelemetry(false);
-        timer = setTimeout(() => void update(), retryMs);
+        timer = setTimeout(recheck, retryMs);
         retryMs = Math.min(60000, retryMs * 2);
       }
     }
   };
   const refresh = (): void => {
     if (timer) clearTimeout(timer);
+    unwait();
     void update();
   };
   try {
@@ -62,6 +72,7 @@ export function bootTelemetry(module: string): () => void {
     stopped = true;
     controller.abort();
     if (timer) clearTimeout(timer);
+    unwait();
     channel?.close();
     window.removeEventListener('otto:telemetry-settings', refresh);
     configureTelemetry(false);

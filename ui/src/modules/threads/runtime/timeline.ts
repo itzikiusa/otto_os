@@ -130,15 +130,17 @@ const EMPTY_SUBAGENT_CHILDREN: ReadonlyMap<string, TurnItem[]> = new Map();
 const childrenMemo = new WeakMap<readonly TurnItem[], Map<string, TurnItem[]>>();
 
 /** A subagent's own activity (items with `parent_item_id`), by card id —
- *  once per items array, shared by the conversation and the tasks list. */
-let lastChildren: Map<string, TurnItem[]> | undefined;
+ *  once per items array, shared by the conversation and the tasks list. The
+ *  last Map is kept per thread (keyed by its first item), not in one slot
+ *  two streaming threads would trade on every flush. */
+const lastChildren = new WeakMap<TurnItem, Map<string, TurnItem[]>>();
 export function subagentChildren(items: readonly TurnItem[]): Map<string, TurnItem[]> {
   let hit = childrenMemo.get(items);
   if (!hit) {
     // The same activity as the last call (a chunk of the answer streamed):
     // the same Map, so the subagent rows reading it stay put.
-    hit = keepIfSame(lastChildren, groupSubagentChildren(items), sameItems);
-    lastChildren = hit;
+    hit = keepIfSame(items[0] && lastChildren.get(items[0]), groupSubagentChildren(items), sameItems);
+    if (items[0]) lastChildren.set(items[0], hit);
     childrenMemo.set(items, hit);
   }
   return hit;

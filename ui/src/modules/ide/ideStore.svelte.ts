@@ -19,10 +19,10 @@ import {
 } from './shell/ideProjectHelpers';
 import {
   applyFallbackPrefixSuffix, computeFallbackSelection, IdeBufferPerfController, nextTabAccessStamp,
-  performAgentEdit, performCloseTab, performOpenFile, performSaveFile, saveWorkspaceOpenTabs,
+  performAgentEdit, performCloseTab, performOpenFile, performSaveFile, saveWorkspaceOpenTabs, type IdeOpenFileOpts,
 } from './store/ideBufferPerf';
 import {
-  computeIdeProjectRoots, fetchIdeWorkspaceTree, loadIdeWorkspaceTree, toggledExpansion, IdeCollabState, IdeDebugState, IdeTargetEnvState,
+  computeIdeProjectRoots, fetchIdeWorkspaceTree, loadIdeWorkspaceTree, relistIdeTreeDir, toggledExpansion, IdeCollabState, IdeDebugState, IdeTargetEnvState,
   normalizePathDiagnostics, onIdeTargetReset, performCloseTabBatch, resetTargetLifecycleState, syncAdditionalRootsFromEnvState,
   type IdeDebugLaunchMemo, type IdeRunLaunchMemo, type IncomingIdeDiagnostic,
 } from './store/ideStateSlices.svelte';
@@ -255,8 +255,8 @@ class IdeStore {
     }
     this.bufPerf.cancelHiddenLoads(this);
     if (next && !this.collabIsGuest) {
-      const tab = this.tabs.find((t) => t.path === next);
-      if (tab && !tab.loading && !tab.error) {
+      const tab = this.tabs.find((t) => t.path === next); // a restored tab not read yet is read now:
+      if (tab?.deferred) void this.openFile(next, { background: true }); else if (tab && !tab.loading && !tab.error) {
         if (this.gutterByPath[next] === undefined) void this.loadGutter(next, this.getBuffer(next));
         if (this.symbolsByPath[next] === undefined) void this.loadSymbols(next, this.getBuffer(next));
       }
@@ -387,7 +387,7 @@ class IdeStore {
   flushAutoSave(path?: string): Promise<void> { return this.bufPerf.flushDirtyAutoSave(this, path); }
   clearLiveBuffer(path: string): void { this.bufPerf.liveBuffers.delete(this.resolvePath(path)); }
   loadTree(dirPath?: string): Promise<void> { return loadIdeWorkspaceTree(this, dirPath, () => void loadProjMod().then((m) => m.probeWorkspaceBuildTool(this))); }
-  relistDir(dirPath: string): Promise<void> { return fetchIdeWorkspaceTree(this, dirPath, () => {}, { listingOnly: true }); }
+  relistDir(dirPath: string): Promise<void> { return relistIdeTreeDir(this, dirPath); }
   async toggleDir(dirPath: string): Promise<void> {
     const clean = normalizeRootPath(dirPath); const next = !this.expandedDirs[clean];
     this.expandedDirs = toggledExpansion(this.expandedDirs, clean, next);
@@ -438,7 +438,7 @@ class IdeStore {
       this.sharedBuffers = Object.fromEntries(Object.entries(this.sharedBuffers).filter(([k]) => !set.has(k)));
     }
   }
-  async openFile(rawPath: string, opts: { line?: number; col?: number; preview?: boolean; inSplit?: boolean; reload?: boolean; background?: boolean; projectScoped?: boolean } = {}): Promise<void> {
+  async openFile(rawPath: string, opts: IdeOpenFileOpts = {}): Promise<void> {
     await performOpenFile(this, this.bufPerf, this.isNavigatingHistory, rawPath, opts);
     saveWorkspaceOpenTabs(this.target.root, this.tabs, this._activePath, this.splitPath);
     this.syncWorkspacePort();
@@ -467,7 +467,7 @@ class IdeStore {
     this.bufPerf.flushAll(this);
     const tab = this.tabs.find((t) => t.path === path);
     if (tab) tab.lastAccessedAt = nextTabAccessStamp();
-    this.splitPath = path; this.splitDirection = dir;
+    this.splitPath = path; this.splitDirection = dir; if (tab?.deferred && !this.collabIsGuest) void this.openFile(path, { background: true });
   }
   closeSplit(): void { this.bufPerf.flushAll(this); this.splitPath = null; this.splitDirection = null; this.bufPerf.cancelHiddenLoads(this); }
   jumpTo(path: string, line: number, col = 1): void { this.jumpSeq += 1; this.jumpRequest = { path, line, col, seq: this.jumpSeq }; }

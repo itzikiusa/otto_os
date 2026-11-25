@@ -892,3 +892,50 @@ fn export_zstd_expansion_uses_bounded_windows() {
         .unwrap();
     assert_eq!(total, 70 * 1024 * 1024);
 }
+
+/// A read that failed on a dropped parked connection is sent again only when
+/// re-sending cannot repeat an effect: a statement that provably only reads
+/// (KILL, BACKUP, RESTORE, SYSTEM… return rows too, but act), and only before
+/// any block arrived (a stream that broke after its first block is not
+/// replayed).
+#[test]
+fn only_a_provable_read_that_got_no_block_is_retried_on_a_fresh_connection() {
+    let marked = |sql: &str| format!("/* otto-query:q1 */\n{sql}");
+    for sql in [
+        "SELECT 1",
+        "select count() from events",
+        "SHOW TABLES",
+        "DESCRIBE TABLE events",
+        "DESC events",
+        "EXISTS TABLE events",
+        "EXPLAIN SELECT 1",
+    ] {
+        assert!(
+            retry_on_fresh_connection(true, false, &marked(sql)),
+            "{sql}"
+        );
+        assert!(
+            !retry_on_fresh_connection(true, true, &marked(sql)),
+            "{sql}: after a block"
+        );
+        assert!(
+            !retry_on_fresh_connection(false, false, &marked(sql)),
+            "{sql}: live socket"
+        );
+    }
+    for sql in [
+        "KILL QUERY WHERE query_id = 'x'",
+        "BACKUP TABLE events TO Disk('backups', 'e.zip')",
+        "RESTORE TABLE events FROM Disk('backups', 'e.zip')",
+        "SYSTEM DROP DNS CACHE",
+        "CHECK TABLE events",
+        "WITH 1 AS x SELECT x",
+        "INSERT INTO events SELECT * FROM events",
+        "USE system",
+    ] {
+        assert!(
+            !retry_on_fresh_connection(true, false, &marked(sql)),
+            "{sql}"
+        );
+    }
+}

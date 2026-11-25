@@ -17,6 +17,12 @@
 //! as a Close stops it, but the thread stays open: its next message respawns
 //! the agent, resuming the provider's conversation. The same guards hold,
 //! plus nothing starting or queued.
+//!
+//! The same minute drops every loaded thread nothing holds any more: what
+//! [`super::evictable`] lets go (no read drops one: a write it queued could
+//! land after the next load), and any thread with no agent process quiet for
+//! a minute (never spawned in this daemon life, or its agent exited
+//! cleanly), its pending DB writes flushed first.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -127,6 +133,15 @@ impl AgentRuntime {
         released
     }
 
+    /// Evict every loaded thread [`super::evictable`] lets go, and
+    /// every one with no agent process that emitted nothing for `quiet`.
+    pub async fn evict_dead(&self, quiet: Duration) {
+        let ids: Vec<Id> = self.inner.live.iter().map(|e| e.key().clone()).collect();
+        for id in ids {
+            super::evict_after_flush(&self.inner, &id, Some(quiet)).await;
+        }
+    }
+
     /// One auto-close pass: close every open embedded thread idle for
     /// `hours` as of `now` (injected, so tests need no clock), at most
     /// [`AUTO_CLOSE_MAX_PER_PASS`]. Returns the ids it closed.
@@ -188,8 +203,6 @@ impl AgentRuntime {
         };
         if closed {
             super::evict_if_dead_after_flush(&self.inner, id).await;
-        } else {
-            super::try_evict_dead(&self.inner, id);
         }
         Ok(closed)
     }
@@ -211,6 +224,7 @@ impl AgentRuntime {
                     }
                     Err(e) => tracing::warn!("idle release: settings unreadable: {e}"),
                 }
+                rt.evict_dead(RELEASE_EVERY).await;
             }
         });
         let rt = self.clone();

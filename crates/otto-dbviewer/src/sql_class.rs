@@ -178,7 +178,7 @@ impl ReadClass {
 /// ClickHouse: the first unquoted word token (uppercased), skipping whitespace
 /// and `(` — comments are whitespace tokens to sqlparser. `None` when the text
 /// doesn't tokenize; an empty string when the first token isn't such a word.
-fn clickhouse_first_word(sql: &str) -> Option<String> {
+pub(crate) fn clickhouse_first_word(sql: &str) -> Option<String> {
     use sqlparser::{
         dialect::ClickHouseDialect,
         tokenizer::{Token, Tokenizer},

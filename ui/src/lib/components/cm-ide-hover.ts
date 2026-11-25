@@ -648,7 +648,7 @@ export function createIdeHoverExtension(opts: CreateIdeHoverOptions): Extension 
           enclosingFuncDeclLine: null,
           inferredTargetType: null,
         };
-    const lineFixes = getIdeQuickFixesAtLine(view.state, lineNo);
+    const pooledHover = word ? queryPooledLspHover(view, pos) : null, lineFixes = getIdeQuickFixesAtLine(view.state, lineNo); // hover in flight with the code actions
     const detFixes = computeDeterministicQuickFixes(docText, opts.filePath, opts.language, lineNo, word || undefined);
     const lspFixes = ((await queryPooledLspCodeActions(view, lineNo)) ?? []).filter((f) => f.edits.every((e) => e.path === f.edits[0].path)); // the server's one-file fixes lead
     const primaryLspFix = lspFixes.find((f) => f.isPreferred) ?? lspFixes[0] ?? null, primaryLineFix = lineFixes[0] ?? null;
@@ -657,7 +657,7 @@ export function createIdeHoverExtension(opts: CreateIdeHoverOptions): Extension 
     let parsed: ParsedQuickDoc | null = null;
     let authoritativeDef: { path: string; line: number } | null = null;
     if (word) {
-      const pooled = await queryPooledLspHover(view, pos);
+      const pooled = await pooledHover;
       if (pooled?.definedIn) authoritativeDef = { path: pooled.definedIn.path, line: pooled.definedIn.line };
       if (pooled?.markdown) {
         parsed = sanitizeAndSplitHoverDoc({

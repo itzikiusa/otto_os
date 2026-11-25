@@ -34,13 +34,12 @@
   // The active repo is driven by the tab store, not the route.
   const activeRepo = $derived(git.allRepos.find((r) => r.id === git.activeRepoId) ?? null);
   const activeStatus = $derived(activeRepo ? (git.statusById[activeRepo.id] ?? null) : null);
-  let repoView = $state<{ moreMenuItems: () => MenuItem[]; selectTab: (id: string) => void; viewState: () => { tab: string; resolving: boolean; changes: number; conflicts: number; conflictFiles: number } } | undefined>();
+  let repoView = $state<{ moreMenuItems: () => MenuItem[]; selectTab: (id: string) => void; viewState: () => { tab: string; resolving: boolean; conflictFiles: number } } | undefined>();
   let toolbar = $state<{ menuItems: () => MenuItem[] } | undefined>();
   // The ONE view switch, in the header (RepoView owns the views).
   // Icons when the header is too tight for the words, then one menu button
   // (GitToolbar's last fit steps).
   const VIEWS = [
-    { id: 'changes', label: 'Changes', icon: 'edit' },
     { id: 'graph', label: 'History', icon: 'clock' },
     { id: 'prs', label: 'Pull requests', icon: 'pr' },
     { id: 'review', label: 'Review', icon: 'eye' },
@@ -194,7 +193,7 @@
     {#if mode === 'menu' && !v.resolving}
       {@const cur = VIEWS.find((t) => t.id === v.tab) ?? VIEWS[0]}
       <button class="btn small ghost git-views-menu" aria-haspopup="menu" aria-label="{name} view: {cur.label}" title="View: {cur.label}" data-keep
-        onclick={(e) => ctxMenu.show(e, VIEWS.map((t) => ({ label: t.id === 'changes' && v.changes > 0 ? `${t.label} · ${v.changes}` : t.label, icon: t.icon, checked: t.id === v.tab, action: () => repoView?.selectTab(t.id) })))}>
+        onclick={(e) => ctxMenu.show(e, VIEWS.map((t) => ({ label: t.label, icon: t.icon, checked: t.id === v.tab, action: () => repoView?.selectTab(t.id) })))}>
         <Icon name={cur.icon} size={12} /><Icon name="chevronDown" size={12} />
       </button>
     {:else}
@@ -203,7 +202,6 @@
         {@const on = v.tab === t.id && !v.resolving}
         <button class="rv-tab" role="tab" aria-selected={on} tabindex={on ? 0 : -1} class:active={on} title={compact ? t.label : undefined} onclick={() => repoView?.selectTab(t.id)} onkeydown={onTabKey}>
           {#if compact}<Icon name={t.icon} size={12} /><span class="sr-only">{t.label}</span>{:else}{t.label}{/if}
-          {#if t.id === 'changes' && v.changes > 0}<span class="git-views-count" title="{v.changes} uncommitted {v.changes === 1 ? 'change' : 'changes'}">{v.changes}</span>{/if}
         </button>
       {/each}
       {#if v.resolving}
@@ -255,7 +253,7 @@
               bind:this={toolbar}
               {repoId}
               status={activeStatus}
-              accent={repoView?.viewState().tab !== 'changes'}
+              accent
               onstatus={(s) => git.setStatus(repoId, s)}
               onrefresh={() => gitBridge.refreshGraph(repoId)}
               onbrowsestashes={() => (stashesRepo = repoId)}
@@ -269,8 +267,8 @@
       {/snippet}
     </PageHeader>
 
-    <!-- Phone: the everyday verbs are a row of their own under the header (Changes and History). -->
-    {#if viewport.isPhone && activeRepo && !focusView && !notFound && activeStatus && repoView && GitToolbarLazy.component && ['changes', 'graph'].includes(repoView.viewState().tab) && !repoView.viewState().resolving}
+    <!-- Phone: the everyday verbs are a row of their own under the header (History). -->
+    {#if viewport.isPhone && activeRepo && !focusView && !notFound && activeStatus && repoView && GitToolbarLazy.component && repoView.viewState().tab === 'graph' && !repoView.viewState().resolving}
       {@const repoId = activeRepo.id}
       {@const GitToolbar = GitToolbarLazy.component}
       <GitToolbar {repoId} status={activeStatus} onstatus={(s) => git.setStatus(repoId, s)} onrefresh={() => gitBridge.refreshGraph(repoId)} onbrowsestashes={() => (stashesRepo = repoId)} />
@@ -306,12 +304,8 @@
           <RepoView
             repo={activeRepo}
             tab={git.subTabFor(activeRepo.id)}
-            embedded
-            hostActions
             bind:this={repoView}
             onTab={(t) => git.setSubTab(activeRepo.id, t)}
-            onopenrepo={openRepo}
-            onaddrepo={(mode) => { addMode = mode; addOpen = true; }}
           />
           {:else}
             <LoadState what={activeRepo.name} variant="page" loading={!RepoViewLazy.error} error={RepoViewLazy.error} rows={5} onretry={() => RepoViewLazy.retry()} />
@@ -362,7 +356,7 @@
     height: 100%;
     min-height: 0;
   }
-  /* The header's view switch (Changes · History · Pull requests · Review). */
+  /* The header's view switch (History · Pull requests · Review). */
   .git-views {
     flex-shrink: 0;
   }
@@ -380,16 +374,6 @@
   @media (pointer: coarse) {
     .git-views > .rv-tab { height: 44px; }
     .gitpage :global(.ph-more) { min-inline-size: 44px; min-block-size: 44px; }
-  }
-  .git-views-count {
-    min-width: 16px;
-    padding: 0 4px;
-    border-radius: 999px;
-    background: var(--accent-soft-strong);
-    color: var(--accent-text);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-align: center;
   }
   .git-views-menu {
     display: inline-flex;

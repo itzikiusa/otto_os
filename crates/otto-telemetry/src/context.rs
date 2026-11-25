@@ -26,10 +26,11 @@ pub async fn scope<T>(
 }
 
 fn child(name: &'static str) -> Option<(Context, SpanRecord)> {
+    // Checked before the clone: telemetry off costs no allocation.
     let ctx = CURRENT
-        .try_with(Clone::clone)
+        .try_with(|c| c.service.enabled().then(|| c.clone()))
         .ok()
-        .filter(|c| c.service.enabled())?;
+        .flatten()?;
     let mut span = SpanRecord::new(name, &ctx.component, 0.0);
     span.trace_id = ctx.trace_id.clone();
     span.parent_span_id = Some(ctx.span_id.clone());
@@ -71,6 +72,24 @@ pub async fn measure_result<T, E>(
     span.status = if result.is_ok() { "ok" } else { "error" }.into();
     ctx.service.record(span);
     result
+}
+
+/// Test helper: run `work` under an enabled in-memory sink and return the
+/// names of the spans it recorded, in completion order.
+pub async fn capture<T>(work: impl Future<Output = T>) -> (T, Vec<String>) {
+    struct Names(std::sync::Mutex<Vec<String>>);
+    impl SpanSink for Names {
+        fn enabled(&self) -> bool {
+            true
+        }
+        fn record(&self, span: SpanRecord) {
+            self.0.lock().unwrap().push(span.name);
+        }
+    }
+    let sink = Arc::new(Names(Default::default()));
+    let out = scope(sink.clone(), &SpanRecord::new("test", "test", 0.0), work).await;
+    let names = std::mem::take(&mut *sink.0.lock().unwrap());
+    (out, names)
 }
 
 #[cfg(test)]

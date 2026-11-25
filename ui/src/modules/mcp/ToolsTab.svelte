@@ -22,6 +22,9 @@
   } from '../../lib/api/types';
   import McpPill from './McpPill.svelte';
   import ToolReviewBadge from './ToolReviewBadge.svelte';
+  import { homeMember } from './serverScope';
+  import { auth } from '../../lib/stores/auth.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
 
   interface Props {
     wsId: string;
@@ -35,7 +38,8 @@
   let { wsId, servers, selectedServerId, onSelect, embedded = false, ondiscovered }: Props = $props();
   const NO_CONFIGURE = 'You need configure access to this server';
 
-  const can = (operation:string, child?:string) => !!selectedServerId && resourceAccess.can('mcp_server',selectedServerId,operation,'mcp',operation==='invoke'?'edit':'admin',child);
+  // Settings stay with a shared server's home workspace (serverScope.ts).
+  const can = (operation:string, child?:string) => !!selectedServerId && (operation !== 'configure' || (!!server && homeMember(server, wsId, auth.isRoot, ws.workspaces))) && resourceAccess.can('mcp_server',selectedServerId,operation,'mcp',operation==='invoke'?'edit':'admin',child);
   let tools = $state<McpToolView[]>([]);
   let loading = $state(false);
   /** Failed load — inline with Retry, never the empty state. */

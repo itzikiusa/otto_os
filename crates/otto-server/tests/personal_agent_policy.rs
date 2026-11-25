@@ -457,6 +457,59 @@ async fn agent_token_broadcast_and_relay_never_reach_a_sibling() {
     let _ = d.ctx.manager.remove(&sibling.id).await;
 }
 
+/// P1-018: broadcast and relay submit to every target at once. Each paste
+/// waits 200 ms before its Enter; four targets in series took >= 800 ms.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn broadcast_and_relay_pause_once_not_per_target() {
+    let d = boot(&[]).await;
+    let ws = d.ctx.workspaces.get(&"ws1".to_string()).await.unwrap();
+    let mut ids = Vec::new();
+    for n in 0..4 {
+        let req = otto_core::api::CreateSessionReq {
+            kind: otto_core::domain::SessionKind::Agent,
+            provider: Some("shell".into()),
+            title: Some(format!("W{n}")),
+            cwd: None,
+            connection_id: None,
+            meta: None,
+            model: None,
+        };
+        let spec = otto_pty::CommandSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            cwd: Some(d._tmp.path().to_string_lossy().into()),
+            env: vec![],
+        };
+        let alice = "alice".to_string();
+        let s = d.ctx.manager.create(&ws, &alice, req, Some(spec)).await;
+        ids.push(s.unwrap().id);
+    }
+    for (path, body) in [
+        (
+            "/workspaces/ws1/broadcast",
+            json!({"text": "hi", "session_ids": ids}),
+        ),
+        ("/workspaces/ws1/relay", json!({"text": "all: hi"})),
+    ] {
+        let started = std::time::Instant::now();
+        let (st, body) = d.send("POST", &d.human, path, Some(body)).await;
+        let took = started.elapsed();
+        assert_eq!(st, 200, "{path}: {body}");
+        let mut got: Vec<String> = serde_json::from_value(body["session_ids"].clone()).unwrap();
+        got.sort();
+        let mut want = ids.clone();
+        want.sort();
+        assert_eq!(got, want, "{path}: every target takes the message");
+        assert!(
+            took < std::time::Duration::from_millis(600),
+            "{path} took {took:?}"
+        );
+    }
+    for id in &ids {
+        let _ = d.ctx.manager.remove(id).await;
+    }
+}
+
 fn pr_args(title: &str) -> Value {
     json!({"repo_id": "repo1", "title": title, "description": "Body",
            "source_branch": "fix/report", "target_branch": "main"})

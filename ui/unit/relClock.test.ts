@@ -16,7 +16,7 @@ let tick: (() => void) | null = null;
 const realNow = Date.now;
 const realSetInterval = globalThis.setInterval;
 const g = globalThis as Record<string, unknown>;
-g.window = {};
+g.window = { addEventListener() {} };
 g.document = { hidden: false, addEventListener() {} };
 globalThis.setInterval = ((fn: () => void) => {
   tick = fn;

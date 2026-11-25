@@ -2125,6 +2125,15 @@ impl LocalGit {
     /// `git submodule status` → parsed entries enriched with `.gitmodules`
     /// url/branch. Empty list when the repo has no submodules.
     pub async fn submodule_list(&self) -> Result<Vec<SubmoduleInfo>> {
+        // `git submodule` is a shell script (~80 ms of sh and helper spawns
+        // per call, the slowest read of a repo open); with no `.gitmodules`
+        // it can only print nothing or fail on an unmapped gitlink.
+        if !tokio::fs::try_exists(self.path().join(".gitmodules"))
+            .await
+            .unwrap_or(true)
+        {
+            return Ok(Vec::new());
+        }
         let out = self.run_read(&["submodule", "status"]).await?;
         let mut subs = crate::parse::parse_submodule_status(&out);
         if subs.is_empty() {
@@ -3889,11 +3898,26 @@ impl LocalGit {
         if !self.remotes().await?.iter().any(|r| r.name == remote) {
             return Err(Error::Invalid(format!("no remote named '{remote}'")));
         }
-        let mut args = vec!["push", remote, "--delete"];
-        args.extend(names.iter().map(String::as_str));
-        let (ok, stdout, stderr, code) = self.run_remote_raw(&args, token).await?;
-        if !ok {
-            return Err(upstream_err(&stderr, &stdout, code));
+        // A ref already gone on the remote fails the WHOLE push before any
+        // delete is sent, and the caller's fallback then paid one ~3 s push
+        // per branch (23 s). git names every absent ref: drop them (the end
+        // state already holds) and push the rest once more.
+        let mut left: Vec<&str> = names.iter().map(String::as_str).collect();
+        for retry in [false, true] {
+            let mut args = vec!["push", remote, "--delete"];
+            args.extend(&left);
+            let (ok, stdout, stderr, code) = self.run_remote_raw(&args, token.clone()).await?;
+            if ok {
+                break;
+            }
+            let gone: Vec<&str> = stderr.lines().filter_map(absent_delete_ref).collect();
+            if retry || gone.is_empty() {
+                return Err(upstream_err(&stderr, &stdout, code));
+            }
+            left.retain(|n| !gone.contains(n));
+            if left.is_empty() {
+                break;
+            }
         }
         // Prune the tracking refs in one go too (best-effort: push may have).
         let tracking: Vec<String> = names.iter().map(|n| format!("{remote}/{n}")).collect();
@@ -5049,6 +5073,13 @@ fn combine_push_output(stdout: &str, stderr: &str) -> String {
 /// success (the branch is absent either way) rather than a hard error.
 fn remote_ref_absent(stderr: &str) -> bool {
     stderr.contains("remote ref does not exist")
+}
+
+/// The branch an `error: unable to delete '<name>': remote ref does not
+/// exist` line of `git push --delete` names.
+fn absent_delete_ref(line: &str) -> Option<&str> {
+    line.strip_prefix("error: unable to delete '")?
+        .strip_suffix("': remote ref does not exist")
 }
 
 /// The private ref [`LocalGit::fetch_pr_head`] fetches a PR head into:

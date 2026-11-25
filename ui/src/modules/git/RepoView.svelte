@@ -1,15 +1,10 @@
 <script lang="ts">
-  import { rowMenu } from '../../lib/rowMenu';
-  import { plural } from '../../lib/plural';
-  // One repo: toolbar header + tabs (Graph / Pull Requests / Review). Staging
-  // and history both live on the graph now (WIP row + detail panel), so there
-  // are no separate Changes/History tabs.
+  // One repo: History / Pull requests / Review. Staging and history both
+  // live on History's graph (WIP row + detail panel): there is no separate
+  // Changes view.
   import type { GitOpInProgress, MergeResult, Repo, RepoStatusResp } from '../../lib/api/types';
-  import { onTabKey } from '../../lib/tabKeys';
-  import { router } from '../../lib/router.svelte';
   import { git } from '../../lib/stores/git.svelte';
-  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
-  import GitToolbar from './GitToolbar.svelte';
+  import type { MenuItem } from '../../lib/contextmenu.svelte';
   import GraphView from './GraphView.svelte';
   import GraphSearchBar from './GraphSearchBar.svelte';
   import { gitBridge } from '../../lib/diff/gitBridge.svelte';
@@ -22,9 +17,10 @@
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { toasts } from '../../lib/toast.svelte';
   import { focusAppContent } from '../../lib/announce.svelte';
-  import { untrack } from 'svelte';
   import { remoteHost } from './gitUiHelpers';
   import { readOverview } from '../../lib/api/gitOverview';
+  import { prefetchFirstPage } from './graph/graphData.svelte';
+  import { untrack } from 'svelte';
 
   // Views only some visits open stay out of the Git chunk (perf R7): the PR
   // list (+ CreatePr), the local review, the merge dialog and the conflict
@@ -39,28 +35,18 @@
   const FileHistoryLazy = lazyComponent(() => import('./FileHistoryPanel.svelte'));
   const RemotesLazy = lazyComponent(() => import('./RemotesPanel.svelte'));
   const RecoveryLazy = lazyComponent(() => import('./RecoveryTools.svelte'));
-  const CommitCardLazy = lazyComponent(() => import('./CommitCard.svelte'));
 
   interface Props {
     repo: Repo;
-    tab: string; // changes | graph (History) | prs | review (legacy history renders the graph)
-    /** Embedded in the agent-mode right panel: switch tabs via `onTab` (local
-     *  state) instead of routing, and hide the "← Repos" back button. */
-    embedded?: boolean;
-    onTab?: (tab: string) => void;
-    /** Git page (tab-store owned navigation): open another repo as a tab. The
-     *  route-based fallback below is a no-op there once the route is `#/git`. */
-    onopenrepo?: (repoId: string) => void;
-    /** Git page: open its Add Repository sheet in the given mode. */
-    onaddrepo?: (mode: 'register' | 'clone' | 'browse') => void;
-    /** Git page: the verbs (Fetch…Pop) and ⋯ live in the page's PageHeader, so
-     *  this row is only the in-pane view switcher. */
-    hostActions?: boolean;
+    tab: string; // graph (History) | prs | review (legacy changes / history render the graph)
+    /** The Git page owns the view switch (its header) and the tab store. */
+    onTab: (tab: string) => void;
   }
-  let { repo, tab, embedded = false, onTab, onopenrepo, onaddrepo, hostActions = false }: Props = $props();
+  let { repo, tab, onTab }: Props = $props();
 
-  // Legacy ids render the graph: 'history', and 'focus' (Focus is a page-level view now).
-  const effTab = $derived(tab === 'history' || tab === 'focus' ? 'graph' : tab);
+  // Legacy ids render the graph: 'changes' (its WIP row is the working tree),
+  // 'history', and 'focus' (Focus is a page-level view now).
+  const effTab = $derived(tab === 'changes' || tab === 'history' || tab === 'focus' ? 'graph' : tab);
 
   // Status is owned by the git store (single source of truth) so the auto-fetch
   // loop, the tab strip and this toolbar all stay in sync from one fetch.
@@ -117,6 +103,9 @@
     // Status lives in the store; (re)load it for this repo. The auto-fetch loop
     // keeps it fresh thereafter, and the tab strip shares the same value.
     loadStatus(id);
+    // History mounts once the status is in: its first log page starts now,
+    // beside the overview (a known status mounts the graph at once).
+    if (untrack(() => effTab === 'graph' && !git.statusById[id])) prefetchFirstPage(id);
   });
 
   // Unmerged paths as the status reports them. A merge in progress ALWAYS shows
@@ -221,8 +210,6 @@
   // per-branch one).
   let remotesOpen = $state(false);
 
-  /** ⋯ in the toolbar row: the repo-level tools that don't earn a permanent
-   *  button (remotes are a setting; recovery is rare and deliberate). */
   /** The repo's own overflow rows (Remotes, Recovery, Copy path). In the Git
    *  page header they ride PageHeader's single ⋯ (`more`). */
   export function moreMenuItems(): MenuItem[] {
@@ -240,10 +227,6 @@
       },
     ];
   }
-  function openMoreMenu(e: MouseEvent): void {
-    ctxMenu.show(e, moreMenuItems());
-  }
-
   // History / blame open as a right-side drawer over the graph. The request
   // comes through `gitBridge` from whichever diff header asked for it, so a
   // stale request for ANOTHER repo never renders here.
@@ -251,84 +234,16 @@
     gitBridge.fileTool?.repoId === repo.id ? gitBridge.fileTool : null,
   );
 
-  // Per-repo views only. Focus (my PRs + my Jira work) is cross-repo: it is a
-  // page-level view of the Git page (GitPage's header), not a sub-tab here.
-  const tabs = [
-    { id: 'changes', label: 'Changes' },
-    { id: 'graph', label: 'History' },
-    { id: 'prs', label: 'Pull requests' },
-    { id: 'review', label: 'Review' },
-  ];
-
-  // Changes first: a repository with uncommitted changes opens on Changes, a
-  // clean one on History — decided once per open, so the view never jumps
-  // under the reader afterwards.
-  let landedFor = $state('');
-  $effect(() => {
-    const id = repo.id;
-    const s = status;
-    if (!s || landedFor === id) return;
-    landedFor = id;
-    // A deep link that names the view (#/git/<repo>/<view>) wins.
-    if (router.parts[0] === 'git' && router.parts[1] === id && router.parts[2]) return;
-    untrack(() => {
-      const dirty = s.changes.length > 0;
-      if (dirty && effTab === 'graph') selectTab('changes');
-      else if (!dirty && effTab === 'changes') selectTab('graph');
-    });
-  });
-  // An agent asking to show the working tree (git.requestWip) lands on Changes.
-  $effect(() => {
-    if (git.wipRequest?.repoId === repo.id && (status?.changes.length ?? 0) > 0) untrack(() => effTab !== 'changes' && selectTab('changes'));
-  });
   /** The Git page's header draws the view switch (GitPage): what it shows. */
-  export function viewState(): { tab: string; resolving: boolean; changes: number; conflicts: number; conflictFiles: number } {
-    return { tab: effTab, resolving, changes: status?.changes.length ?? 0, conflicts: conflictedPaths.length, conflictFiles: conflictSeed.files.length };
+  export function viewState(): { tab: string; resolving: boolean; conflictFiles: number } {
+    return { tab: effTab, resolving, conflictFiles: conflictSeed.files.length };
   }
-  function openPr(n: number): void {
-    selectTab('prs');
-    void import('./prWorkspaceStore.svelte').then((m) => m.prWorkspace.open(repo.id, n));
-  }
-
   export function selectTab(id: string): void {
     resolving = false;
-    if (embedded) onTab?.(id);
-    else router.go(`git/${repo.id}/${id}`);
+    onTab(id);
   }
 
 
-  // Repo switcher: jump between repositories without going back to the list.
-  // Prefer the workspace-independent global list (Git page); fall back to the
-  // per-workspace list when embedded in the agent right panel (global not loaded).
-  const repoPool = $derived(git.allRepos.length ? git.allRepos : git.repos);
-  function openRepoSwitcher(e: MouseEvent): void {
-    const others = repoPool.filter((r) => r.id !== repo.id);
-    // On the Git page the tab store owns navigation, so `router.go('git')` is a
-    // no-op there (the route already IS `#/git`) — "Add repository…" / "All
-    // repositories…" used to do nothing. Use the page's own callbacks when given.
-    const tail = onaddrepo
-      ? [
-          { label: 'Clone a repository…', icon: 'download', pinned: true, action: () => onaddrepo('clone') },
-          { label: 'Add a local repository…', icon: 'folder', pinned: true, action: () => onaddrepo('register') },
-        ]
-      : [
-          { label: 'Add repository…', icon: 'plus', action: () => router.go('git') },
-          { label: 'All repositories…', icon: 'folder', action: () => router.go('git') },
-        ];
-    ctxMenu.show(
-      e,
-      [
-        ...others.map((r) => ({
-          label: r.name,
-          icon: 'branch',
-          action: () => (onopenrepo ? onopenrepo(r.id) : router.go(`git/${r.id}/${tab}`)),
-        })),
-        ...(others.length > 0 ? [{ separator: true }] : []),
-        ...tail,
-      ],
-      others.length > 8 ? { filter: true, filterPlaceholder: 'Filter repositories…', maxVisible: 12 } : undefined,
-    );
-  }
   let repoViewEl = $state<HTMLDivElement | null>(null);
   /** Move focus into the History/Blame drawer on open and restore it to the
    *  opener (or an in-view control) on close so focus never drops to <body>. */
@@ -342,9 +257,7 @@
         if (prev?.isConnected) {
           prev.focus({ preventScroll: true });
         } else {
-          const fallback = repoViewEl?.querySelector<HTMLElement>('.rv-tab[aria-selected="true"], .rv-tab');
-          if (fallback) fallback.focus({ preventScroll: true });
-          else void focusAppContent();
+          void focusAppContent();
         }
       });
     };
@@ -360,79 +273,6 @@
 />
 
 <div class="repoview" bind:this={repoViewEl}>
-  <!-- ONE toolbar row: the view switcher, then the git verbs, then ⋯ for the
-       repo-level tools. On the Git page the repo tab already names the repo, so
-       the switcher only shows where there are no tabs (the agent right panel).
-       It wraps (never overflows) when a long branch name or a narrow pane
-       doesn't leave room. -->
-  {#if !hostActions}
-  <div class="rv-head" role="group" aria-label="{repo.name} toolbar">
-    {#if !embedded}
-      <button class="btn ghost small" onclick={() => router.go('git')}><span class="rv-back-arrow" aria-hidden="true"><Icon name="chevronLeft" size={12} /></span> Repositories</button>
-    {/if}
-    {#if !onopenrepo}
-      <button use:rowMenu
-        class="rv-name rv-switch"
-        title="{repo.name} · {repo.path} — switch repository{repoPool.length > 1 ? ` (${repoPool.length} registered)` : ''}"
-        onclick={openRepoSwitcher}
-        oncontextmenu={openRepoSwitcher}
-      >
-        <Icon name="branch" size={14} />
-        <span class="rv-name-text">{repo.name}</span>
-        {#if repoPool.length > 1}<span class="rv-count">{repoPool.length}</span>{/if}
-        <Icon name="chevronDown" size={12} />
-      </button>
-    {/if}
-    <div class="rv-tabs segmented" role="tablist" aria-label="{repo.name} views">
-      {#each tabs as t (t.id)}
-        <button
-          class="rv-tab"
-          role="tab"
-          aria-selected={effTab === t.id && !resolving}
-          tabindex={effTab === t.id && !resolving ? 0 : -1}
-          class:active={effTab === t.id && !resolving}
-          onclick={() => selectTab(t.id)}
-          onkeydown={onTabKey}
-        >
-          {t.label}
-          {#if t.id === 'changes' && status && status.changes.length > 0}
-            <span class="count" title={plural(status.changes.length, 'uncommitted change')}>{status.changes.length}</span>
-          {/if}
-          {#if t.id === 'changes' && conflictedPaths.length > 0}
-            <span class="count conflict-count" title={plural(conflictedPaths.length, 'conflicted file')}><Icon name="warning" size={12} />{conflictedPaths.length}</span>
-          {/if}
-        </button>
-      {/each}
-      <!-- The resolver is a view of its own while it's open (the banner below is
-           the way in), so it only takes a tab slot then. -->
-      {#if resolving}
-        <button class="rv-tab conflict-tab active" role="tab" aria-selected="true" tabindex="0" onkeydown={onTabKey}>
-          <Icon name="merge" size={12} />
-          Resolve conflicts
-          {#if conflictSeed.files.length > 0}
-            <span class="count conflict-count">{conflictSeed.files.length}</span>
-          {/if}
-        </button>
-      {/if}
-    </div>
-    {#if !hostActions}
-      <span class="grow"></span>
-      {#if status}
-        <GitToolbar repoId={repo.id} {status} onstatus={setStatus} onrefresh={() => gitBridge.refreshGraph(repo.id)} />
-      {:else if !statusError}
-        <div class="toolbar-skeleton"><Skeleton rows={1} height={26} label="repository status" /></div>
-      {/if}
-      <button
-        class="icon-btn rv-more"
-        title="More repository actions"
-        aria-label="More repository actions"
-        aria-haspopup="menu"
-        onclick={openMoreMenu}
-      ><Icon name="more" size={16} /></button>
-    {/if}
-  </div>
-  {/if}
-
   <!-- In-progress merge banner (shown when not already in the resolver). -->
   {#if merging && !resolving}
     <div class="merge-banner">
@@ -491,15 +331,12 @@
           <LazyMount lazy={PrWorkspaceLazy} what="pull requests" props={{ repoId: repo.id }} />
         </div>
       {/if}
-    {:else if effTab === 'changes'}
-      <LazyMount lazy={CommitCardLazy} what="the commit card" props={{ repo, onopenpr: openPr, onhistory: () => selectTab('graph'), onresolve: openResolver }} />
     {:else if effTab === 'review'}
       <div class="rv-tab-scroll">
         <LazyMount lazy={LocalReviewLazy} what="the local review" variant="panel" props={{ repoId: repo.id }} />
       </div>
-    {:else if status && landedFor === repo.id}
-      <!-- The graph (History) — mounted once the landing view is decided, so
-           a dirty repo opening on Changes never starts the graph's reads. -->
+    {:else if status}
+      <!-- The graph (History): it lands on the WIP row or the HEAD commit. -->
       <div class="rv-graph">
         <GraphSearchBar repoId={repo.id} />
         <div class="rv-graph-body">
@@ -570,112 +407,12 @@
 {/if}
 
 <style>
+
   .repoview {
     display: flex;
     flex-direction: column;
     height: 100%;
     min-height: 0;
-  }
-  /* The one toolbar row under the page header. Wraps rather than overflowing:
-     on a narrow window (or a long branch name) the verbs drop to a second line
-     that keeps to the trailing edge, instead of Stash / Pop running off-screen. */
-  .rv-head {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 8px 10px;
-    min-height: 46px;
-    padding: 6px 14px;
-    box-sizing: border-box;
-    border-bottom: 1px solid var(--border);
-  }
-  .rv-head :global(.toolbar) {
-    margin-inline-start: auto;
-    min-width: 0;
-  }
-  .rv-more {
-    flex-shrink: 0;
-  }
-  .rv-name {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-    max-width: 320px;
-    font-size: var(--fs-m);
-    font-weight: 600;
-  }
-  .rv-name > :global(svg),
-  .rv-name .rv-count {
-    flex-shrink: 0;
-  }
-  .rv-name-text {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .rv-switch {
-    border: 1px solid transparent;
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
-    padding: 2px 6px;
-    border-radius: var(--radius-s);
-  }
-  .rv-switch:hover {
-    background: var(--hover);
-    border-color: var(--border);
-  }
-  .rv-count {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 0 4px;
-    border-radius: var(--radius-m);
-    background: var(--surface-2);
-    color: var(--text-dim);
-  }
-  /* View switcher: the shared segmented control (app.css), sized for the
-     toolbar row. */
-  .rv-tabs {
-    flex-shrink: 0;
-    max-width: 100%;
-  }
-  .rv-tabs > .rv-tab {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: 24px;
-    white-space: nowrap;
-  }
-  .rv-tabs > .rv-tab:hover:not(.active) {
-    color: var(--text);
-  }
-  .rv-tabs > .rv-tab.active {
-    font-weight: 500;
-  }
-  .count {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    min-width: 16px;
-    height: 15px;
-    padding: 0 4px;
-    border-radius: 999px;
-    background: var(--accent-soft-strong);
-    color: var(--accent-text);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 2px;
-  }
-  .rv-tabs > .conflict-tab,
-  .rv-tabs > .conflict-tab.active {
-    color: var(--warning);
-    gap: 4px;
-  }
-  .conflict-count {
-    background: var(--warning-soft);
-    color: var(--warning);
   }
   .merge-banner {
     display: flex;
@@ -730,10 +467,6 @@
     background: var(--surface);
     box-shadow: var(--glass-shadow);
   }
-  /* The back chevron mirrors under RTL via Icon's DIRECTIONAL set. */
-  .rv-back-arrow {
-    display: inline-flex;
-  }
   .rv-tab-scroll {
     height: 100%;
     overflow-y: auto;
@@ -741,49 +474,6 @@
     -webkit-overflow-scrolling: touch;
     padding: 0 14px;
     box-sizing: border-box;
-  }
-  .toolbar-skeleton {
-    width: 300px;
-  }
-
-  /* ── Mobile + tablet (≤1024px): keep the header + toolbar + tabs usable on a
-     narrow / short screen — the toolbar scrolls horizontally instead of
-     overflowing the page, the tab strip scrolls, and tab labels stay legible.
-     Matched to the body breakpoint (1024) so the tablet/landscape range gets the
-     same scroll-don't-overflow header treatment. ── */
-  @media (max-width: 1024px) {
-    .rv-head {
-      gap: 8px;
-      padding: 8px 10px;
-    }
-    .rv-name { font-size: var(--fs-l); flex-shrink: 0; }
-    /* The view switcher gets its own full-width line (scrolling if it must);
-       the toolbar + ⋯ share the next line, the toolbar scrolling
-       horizontally so it never forces the page wider than the viewport. */
-    .rv-tabs {
-      flex: 1 1 100%;
-      overflow-x: auto;
-      scrollbar-width: none;
-    }
-    .rv-tabs::-webkit-scrollbar { display: none; }
-    .rv-tabs > .rv-tab {
-      flex: 1 0 auto;
-      justify-content: center;
-      height: 34px;
-      font-size: var(--fs-m);
-    }
-    .rv-head .grow { display: none; }
-    .rv-head :global(.toolbar) {
-      flex: 1 1 0;
-      margin-inline-start: 0;
-      overflow-x: auto;
-      scrollbar-width: none;
-    }
-    .rv-head :global(.toolbar)::-webkit-scrollbar { display: none; }
-    .rv-more {
-      min-width: 36px;
-      min-height: 36px;
-    }
   }
 </style>
 

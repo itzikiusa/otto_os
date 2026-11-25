@@ -45,16 +45,17 @@ export function inboxSections(
       cur = next;
     }
   };
+  const cls = new Map(list.map((s) => [s.id, classOf(s)] as const));
   const fam = new Map<string, InboxClass[]>();
   for (const s of list) {
     const r = rootOf(s);
-    fam.set(r, [...(fam.get(r) ?? []), classOf(s)]);
+    fam.set(r, [...(fam.get(r) ?? []), cls.get(s.id)!]);
   }
   const working = (root: string): boolean => {
     const cls = fam.get(root) ?? [];
     return cls.includes('working') && cls.every((c) => c === 'working' || c === 'rest');
   };
-  const score = (s: Session): number => RANK[classOf(s)];
+  const score = (s: Session): number => RANK[cls.get(s.id)!];
   const mainList: Session[] = [];
   const workList: Session[] = [];
   for (const s of list) (working(rootOf(s)) ? workList : mainList).push(s);

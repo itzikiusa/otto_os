@@ -210,6 +210,78 @@ written to `.mcp.json` and stay governed. Rolling back is safe: the previous
 build reads the same rows and already treats an unmanaged Legacy server as
 direct-only.
 
+### 3.1.2 Available in — one server for several workspaces, or all
+
+A server belongs to one **home** workspace (where it was added, and where its
+settings live), and a **governed** (*Through Otto*) server can also be available
+elsewhere. The add form and **⋯ → Available in…** (owner only) offer:
+
+| Available in | Where it is | Stored as |
+|---|---|---|
+| **This workspace** (default; every server from before) | its home only | — |
+| **Selected workspaces…** | its home + the ticked workspaces (at least one) | `mcp_server_workspaces` rows |
+| **All workspaces** | every workspace except Scratch, **also every workspace added later** | `mcp_servers.all_workspaces = 1`, read at query time; the chosen links are cleared |
+
+It stays ONE row: one place to edit it, one Keychain secret blob (`mcp-{id}`),
+one OAuth token set, one health state — never a copy per workspace. A wider
+scope confirms first: members of those workspaces can use its tools, which Otto
+calls with the credentials and sign-in it holds for the server; they can't read
+or change them. A server shared into the workspace you are in shows a
+**Shared from <home>** badge; one of yours shared out shows **All workspaces** /
+**Shared with …**.
+
+- **Only governed servers are shared.** A direct (native) server's command, env
+  and secrets are written into agent config files, so it stays in its home: the
+  control shows *This workspace* with "A direct server stays in its home
+  workspace. Run it through Otto to share it." (and the dialog offers **Run
+  through Otto…**); the API refuses a scope on a native server (**400**) and a
+  switch to native while the server is shared (**400**).
+- **Scratch and archived workspaces.** Scratch gives every user an implicit
+  role, so it is never part of "all" and can't be picked (**400**). An archived
+  workspace isn't reached while archived (its link is kept and counts again when
+  it is restored) and is never offered in the picker.
+- **One query.** Every "which servers does workspace W have / may W use server
+  S" read goes through `otto_state::mcp_scope::available_in`: the Servers list
+  and the gateway's tool list for a session (`McpRegistryRepo::list_for_ws`),
+  the per-call check (`is_available`: gateway and UI invoke — re-checked inside
+  the governed pipeline, so a call approved after the scope was narrowed is
+  refused — and allowlists) and who may use it from elsewhere
+  (`reach_workspaces`). A session in a workspace the server is shared to gets
+  its tools exactly like a home-workspace session (Enabled, per-workspace
+  allowlist, Enforced-policy rules all apply). Narrowing takes it out of the
+  next tool list there.
+- **Name clash.** Agents key gateway tools by server name
+  (`mcp__<server>__*`): a workspace's own server wins over a same-named shared
+  one, then the oldest shared one; the others are not available there.
+- **Access.**
+  - only the owner (root authority, the same rule as attaching credentials or
+    commands) changes where a server is available (**403** "only the owner can
+    change where an MCP server is available");
+  - its settings — edit, enable, health, discover, sign-in, delete, tool
+    switches, managing its access — stay with members of its home workspace
+    who may `configure` it; elsewhere the row is read-only ("Shared from …:
+    only its members can change it");
+  - using it (`discover` / `invoke` / `approve`) needs the same role, by real
+    membership, in a workspace it is shared with (Legacy: viewer to see, editor
+    to invoke); a user in none of them can't see it, even when its access
+    policy names them; an approval also needs an editor role in the workspace
+    the call came from;
+  - a call runs in a named workspace (the UI test-invoke's `workspace_id`,
+    default the home; the gateway's session workspace): its allowlist,
+    policies and audit apply, and the caller needs the role there;
+  - an Enforced access policy still decides who may use it;
+  - a member of a workspace it was shared into sees that it exists and its
+    tools, never its command, env, URL, headers, secret key names, OAuth host
+    or error, or where else it is shared.
+- **Deleting a workspace.** Workspaces are archived, not deleted, so nothing
+  disappears. A direct `DELETE` of the home workspace row is refused while the
+  server is shared (it would cascade the server away); deleting another
+  workspace drops only its link.
+- **Archive / restore.** The links are access data (like the allowlist) and are
+  not archived; a restored server is home-only.
+- **Rollback.** The previous build ignores the new column and table: every server
+  is simply in its home workspace again.
+
 ### 3.2 Enable the outward Otto MCP server
 
 At `#/mcp`, use **Attach to sessions in _workspace_** to control whether newly
@@ -1049,7 +1121,7 @@ the workspace role.
 | `GET /workspaces/{wid}/mcp/servers` | List a workspace's servers (`McpServerDetail[]`) | View |
 | `POST /workspaces/{wid}/mcp/servers` | Register a server | Edit (stdio → **Admin**) |
 | `GET /mcp/servers/{id}` | Server + its tools | View |
-| `PATCH /mcp/servers/{id}` | Update server config; `runs: "native" \| "governed"` switches the run mode (§3.1.1) | Edit (stdio command → Admin; `runs` → owner) |
+| `PATCH /mcp/servers/{id}` | Update server config; `runs: "native" \| "governed"` switches the run mode (§3.1.1); `all_workspaces` / `shared_workspace_ids` set where it is available (§3.1.2) | Edit (stdio command → Admin; `runs`, scope → owner) |
 | `DELETE /mcp/servers/{id}` | Delete a server (+ keychain secret) | Edit |
 | `POST /mcp/servers/{id}/health` | Probe health now | Edit |
 | `POST /mcp/servers/{id}/discover` | Re-discover the tool catalog | Edit |

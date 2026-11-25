@@ -7,7 +7,8 @@
   import { ensureHljs } from '../../../lib/hl';
   import { createMdCache } from './mdCache';
   import { renderChatMarkdown } from './chatMarkdown';
-  import { splitStreamingMarkdown } from './streamingMd';
+  import { streamingBlocksRenderer, type StreamingBlocksRenderer } from './streamingMd';
+  import { assetUrls } from './assetUrls';
 
   // Shared across every mounted block: a re-derived block with an unchanged
   // string is a Map lookup, not marked + hljs + DOMParser (mdCache.ts).
@@ -31,6 +32,9 @@
   // output is not cached, and the block re-renders once when hljs arrives
   // (this used to ride on the next live delta re-rendering everything).
   let hlLoaded = false;
+  // Drawn diagrams by kind + scheme + source: a re-created block (the open tail
+  // of a stream, a remount) shows its SVG at once instead of drawing again.
+  const svgs = new Map<string, string>();
   const FENCE = /```|~~~/;
   let diagramSeq = 0;
 </script>
@@ -85,19 +89,31 @@
       hlReady = true;
     });
   }
-  const html = $derived.by(() => {
+  // Streaming: one {@html} per settled block, each rendered once; only the open
+  // tail re-renders per delta, so a settled block keeps its DOM (a drawn
+  // diagram, a loaded image, a toggled code block) until the answer ends.
+  let streamRender: StreamingBlocksRenderer | null = null;
+  let streamKey = '';
+  const parts = $derived.by((): string[] => {
     const fenced = FENCE.test(md);
     const cacheable = !fenced || hlReady;
     const withEmoji = emoji && agentEmojiFor(md);
-    const c = withEmoji ? emojiCache : cache;
+    const key = `${withEmoji} ${cacheable}`;
     if (streaming) {
-      const { settled, tail } = splitStreamingMarkdown(md);
-      const settledHtml = settled ? c.get(settled, cacheable) : '';
-      const tailHtml = tail ? renderChatMarkdown(tail, withEmoji) : '';
-      return settledHtml + tailHtml;
+      if (!streamRender || key !== streamKey) {
+        streamKey = key;
+        streamRender = streamingBlocksRenderer((b) => renderChatMarkdown(b, withEmoji));
+      }
+      return streamRender(md);
     }
     // Read hlReady only when it matters, so fence-free blocks never re-render.
-    return c.get(md, cacheable);
+    const whole = (withEmoji ? emojiCache : cache).get(md, cacheable);
+    // The answer just finished: when its blocks put together are the very same
+    // html, keep them, so its DOM (drawn diagrams, loaded images, an expanded
+    // code block) stays as it streamed.
+    const done = streamRender && key === streamKey ? streamRender.finish(md, whole) : [whole];
+    streamRender = null;
+    return done;
   });
 
   // Mermaid / D2 fences render as diagrams (lazy libs, like the vault's reading
@@ -105,10 +121,9 @@
   // whose html has one pay for the DOM query.
   let rootEl = $state<HTMLDivElement | null>(null);
   $effect(() => {
-    const h = html;
     const host = rootEl;
     const scheme = ui.resolvedScheme;
-    if (!host || !h.includes('diagram-block')) return;
+    if (!host || !parts.some((p) => p.includes('diagram-block'))) return;
     const dark = scheme === 'dark';
     for (const el of Array.from(host.querySelectorAll<HTMLElement>('div.diagram-block'))) {
       if (el.dataset.renderedScheme === scheme) continue;
@@ -117,8 +132,15 @@
       }
       const src = el.dataset.diagramSrc;
       const kind = el.dataset.diagram;
-      const gen = String(++diagramSeq);
+      const svgKey = `${kind} ${scheme} ${src}`;
+      const drawn = svgs.get(svgKey);
       el.dataset.renderedScheme = scheme;
+      if (drawn) {
+        el.innerHTML = drawn;
+        el.classList.add('diagram-ok');
+        continue;
+      }
+      const gen = String(++diagramSeq);
       el.dataset.renderGen = gen;
       const id = `chat-diag-${gen}`;
       const isStale = () => !el.isConnected || el.dataset.renderGen !== gen;
@@ -126,6 +148,10 @@
         ? import('../../canvas/d2').then((m) => m.renderD2(id, src, { dark, isStale }))
         : import('../../../lib/render/mermaid').then((m) => m.renderMermaid(id, src, { dark, isStale }))
       ).then(({ svg, error, stale }: { svg?: string; error?: string; stale?: boolean }) => {
+        if (svg) {
+          svgs.set(svgKey, svg);
+          if (svgs.size > 64) svgs.delete(svgs.keys().next().value as string);
+        }
         if (isStale() || stale) return;
         if (svg) {
           el.innerHTML = svg;
@@ -143,36 +169,28 @@
 
   let lightboxImg = $state<{ src: string; alt: string; path: string | null } | null>(null);
 
-  // Hydrate inline `file://` / local workspace `<img data-asset="...">` thumbnails via `/fs/raw`.
+  // Hydrate inline `file://` / local workspace `<img data-asset="...">` thumbnails via `/fs/raw`:
+  // one fetch and one Blob URL per path for the block's lifetime (assetUrls.ts).
+  const assets = assetUrls((path) => authedBlobUrl(`/fs/raw?path=${encodeURIComponent(path)}`));
+  $effect(() => () => assets.revokeAll());
   $effect(() => {
-    const h = html;
     const host = rootEl;
-    if (!host || !h.includes('data-asset')) return;
-    let alive = true;
-    const blobs: string[] = [];
+    if (!host || !parts.some((p) => p.includes('data-asset'))) return;
     for (const img of Array.from(host.querySelectorAll<HTMLImageElement>('img[data-asset]:not([data-hydrated])'))) {
       img.setAttribute('data-hydrated', '1');
       const raw = img.getAttribute('data-asset') ?? '';
       const resolved = resolvePath(raw, ctx?.cwd ?? null);
       if (!resolved) continue;
       img.dataset.resolvedPath = resolved;
-      void authedBlobUrl(`/fs/raw?path=${encodeURIComponent(resolved)}`)
+      void assets
+        .get(resolved)
         .then((u) => {
-          if (!alive || !img.isConnected) {
-            URL.revokeObjectURL(u);
-            return;
-          }
-          blobs.push(u);
-          img.src = u;
+          if (img.isConnected) img.src = u;
         })
         .catch(() => {
-          if (alive && img.isConnected) img.classList.add('asset-missing');
+          if (img.isConnected) img.classList.add('asset-missing');
         });
     }
-    return () => {
-      alive = false;
-      for (const u of blobs) URL.revokeObjectURL(u);
-    };
   });
 
   const host: CodeActionHost = {
@@ -271,7 +289,7 @@
 <!-- Code-block buttons are real <button>s inside the html; one delegated
      handler drives them (keyboard activation bubbles as a click too). File
      references / issue chips are `a[tabindex][role=link]` (⏎ opens them). -->
-<div class="md md-body" class:small bind:this={rootEl} use:bindMdSurface>{@html html}</div>
+<div class="md md-body" class:small bind:this={rootEl} use:bindMdSurface>{#each parts as part}{@html part}{/each}</div>
 {#if lightboxImg}
   <Lightbox src={lightboxImg.src} alt={lightboxImg.alt} path={lightboxImg.path} onclose={() => (lightboxImg = null)} />
 {/if}

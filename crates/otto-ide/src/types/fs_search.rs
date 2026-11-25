@@ -22,6 +22,10 @@ pub struct IdeFsTreeQuery {
     pub connection_id: Option<Id>,
     #[serde(default)]
     pub path: Option<String>,
+    /// More folders to list in the same call, as a JSON array of paths (the tree's open
+    /// folders restored in one request); each answers in `listings`, a failing one is left out.
+    #[serde(default)]
+    pub paths: Option<String>,
     #[serde(default)]
     pub show_hidden: bool,
 }
@@ -70,6 +74,16 @@ pub struct IdeFsTreeResp {
     pub parent: Option<String>,
     pub target_os: String,
     pub target_arch: String,
+    pub entries: Vec<IdeFsEntry>,
+    /// The listings of `IdeFsTreeQuery::paths`, in request order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub listings: Vec<IdeFsTreeListing>,
+}
+
+/// One extra folder listing of a batched tree read; `path` echoes the requested path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeFsTreeListing {
+    pub path: String,
     pub entries: Vec<IdeFsEntry>,
 }
 

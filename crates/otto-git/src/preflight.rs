@@ -15,7 +15,7 @@ use otto_core::redact::redact_text;
 use otto_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::local::{LocalGit, SpawnClass};
+use crate::local::{GitCmd, LocalGit, SpawnClass};
 
 /// Blobs strictly larger than 5 MiB trigger a `large_blobs` preflight warning.
 pub const LARGE_BLOB_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024;
@@ -325,6 +325,9 @@ impl LocalGit {
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .collect();
+        if commits.is_empty() {
+            return Ok(PushPreflightResp::empty()); // a bare `git show` would read HEAD
+        }
 
         let mut secrets = Vec::new();
         let mut secret_seen = HashSet::new();
@@ -333,70 +336,83 @@ impl LocalGit {
         let mut blob_candidates: Vec<(String, String, String)> = Vec::new(); // (oid, path, short_sha)
         let mut blob_oids_seen = HashSet::new();
 
+        // Two spawns for the whole range, not two per commit (a 64-commit
+        // push ran 133 git processes in a row, preflight p95 1 s):
+        // `diff-tree --stdin` prints each commit's sha ahead of its entries,
+        // and `git show` over every commit starts each patch with a `\x1e`
+        // line, which no diff line can start with.
+        let revs: String = commits.iter().map(|s| format!("{s}\n")).collect();
+        let raw_cmd = GitCmd::read(&["diff-tree", "--stdin", "--root", "-r", "--raw", "-z"]);
+        let (dt_ok, dt_out, dt_err, code) = self.exec(&raw_cmd, Some(revs.as_bytes())).await?;
+        let dt_out = String::from_utf8_lossy(&dt_out);
+        if !dt_ok {
+            return Err(crate::local::upstream_err(&dt_err, &dt_out, code));
+        }
+        let mut raw_by_commit: HashMap<String, Vec<(String, String, String)>> = HashMap::new();
+        for (commit, status, dst_oid, path) in parse_raw_diff_tree_z(&dt_out) {
+            raw_by_commit
+                .entry(commit)
+                .or_default()
+                .push((status, dst_oid, path));
+        }
+        // `--no-show-signature`: a user's `log.showSignature=true` prints the
+        // signature check ahead of a signed commit's record, which hid every
+        // patch from the scan. A record we cannot read fails the preflight
+        // instead of passing it unscanned.
+        let mut show = vec!["show", "--no-show-signature", "--format=%x1e%H"];
+        show.extend([
+            "--unified=0",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+        ]);
+        show.extend(commits.iter().map(String::as_str));
+        let show_out = self.run_read(&show).await?;
+        let patches: HashMap<&str, &str> = show_out
+            .strip_prefix('\u{1e}')
+            .unwrap_or("")
+            .split("\n\u{1e}")
+            // An empty commit's record is its sha alone: when it is not the
+            // last one, the split took its only newline.
+            .map(|c| c.split_once('\n').unwrap_or((c, "")))
+            .collect();
+        if commits.iter().any(|c| !patches.contains_key(c.as_str())) {
+            return Err(Error::Upstream(
+                "push preflight could not read the outgoing commits' patches".into(),
+            ));
+        }
+
         for sha in &commits {
             let short = &sha[..sha.len().min(7)];
 
-            // 1. Inspect touched files and new blob OIDs via diff-tree --raw -z.
-            let (dt_ok, dt_out, _, _) = self
-                .run_raw_class(
-                    &[
-                        "diff-tree",
-                        "--no-commit-id",
-                        "--root",
-                        "-r",
-                        "--raw",
-                        "-z",
-                        sha,
-                    ],
-                    &[],
-                    SpawnClass::LocalRead,
-                )
-                .await?;
-            if dt_ok {
-                for (status, dst_oid, path) in parse_raw_diff_tree_z(&dt_out) {
-                    if status == "D" {
-                        continue;
-                    }
-                    if control_paths.len() < MAX_FINDINGS_PER_BUCKET {
-                        if let Some(reason) = classify_control_path(&path) {
-                            if control_seen.insert(path.clone()) {
-                                control_paths.push(PreflightFinding {
-                                    kind: "control_path".into(),
-                                    path: path.clone(),
-                                    detail: reason.into(),
-                                    commit: Some(short.to_string()),
-                                    line: None,
-                                    bytes: None,
-                                });
-                            }
+            // 1. Touched files and new blob OIDs (diff-tree --raw -z).
+            for (status, dst_oid, path) in raw_by_commit.remove(sha).unwrap_or_default() {
+                if status == "D" {
+                    continue;
+                }
+                if control_paths.len() < MAX_FINDINGS_PER_BUCKET {
+                    if let Some(reason) = classify_control_path(&path) {
+                        if control_seen.insert(path.clone()) {
+                            control_paths.push(PreflightFinding {
+                                kind: "control_path".into(),
+                                path: path.clone(),
+                                detail: reason.into(),
+                                commit: Some(short.to_string()),
+                                line: None,
+                                bytes: None,
+                            });
                         }
                     }
-                    if !dst_oid.chars().all(|c| c == '0') && blob_oids_seen.insert(dst_oid.clone())
-                    {
-                        blob_candidates.push((dst_oid, path, short.to_string()));
-                    }
+                }
+                if !dst_oid.chars().all(|c| c == '0') && blob_oids_seen.insert(dst_oid.clone()) {
+                    blob_candidates.push((dst_oid, path, short.to_string()));
                 }
             }
 
             // 2. Scan added diff lines for secrets.
-            if secrets.len() < MAX_FINDINGS_PER_BUCKET {
-                let (show_ok, patch, _, _) = self
-                    .run_raw_class(
-                        &[
-                            "show",
-                            "--format=",
-                            "--unified=0",
-                            "--no-color",
-                            "--no-ext-diff",
-                            "--no-textconv",
-                            sha,
-                        ],
-                        &[],
-                        SpawnClass::LocalRead,
-                    )
-                    .await?;
-                if show_ok {
-                    scan_patch_for_secrets(&patch, Some(short), &mut secrets, &mut secret_seen);
+            if let Some(patch) = patches.get(sha.as_str()) {
+                if secrets.len() < MAX_FINDINGS_PER_BUCKET {
+                    scan_patch_for_secrets(patch, Some(short), &mut secrets, &mut secret_seen);
                 }
             }
         }
@@ -535,13 +551,17 @@ impl LocalGit {
     }
 }
 
-/// Parse `git diff-tree --raw -z` NUL-delimited output into `(status_code, dst_oid, path)`.
-fn parse_raw_diff_tree_z(raw: &str) -> Vec<(String, String, String)> {
+/// Parse `git diff-tree --stdin --raw -z` NUL-delimited output into
+/// `(commit, status_code, dst_oid, path)`: a token in meta position that is
+/// not a `:` entry is the sha of the commit whose entries follow.
+fn parse_raw_diff_tree_z(raw: &str) -> Vec<(String, String, String, String)> {
     let mut out = Vec::new();
+    let mut commit = String::new();
     let mut parts = raw.split('\0').peekable();
     while let Some(meta) = parts.next() {
         let meta = meta.trim_start_matches('\n');
         if !meta.starts_with(':') {
+            commit = meta.to_string();
             continue;
         }
         // Format: `:oldmode newmode oldoid newoid status`
@@ -560,7 +580,7 @@ fn parse_raw_diff_tree_z(raw: &str) -> Vec<(String, String, String)> {
         };
         if let Some(p) = path {
             if !p.is_empty() && Path::new(p).components().next().is_some() {
-                out.push((code, dst_oid, p.to_string()));
+                out.push((commit.clone(), code, dst_oid, p.to_string()));
             }
         }
     }
@@ -684,5 +704,96 @@ mod tests {
         assert_eq!(resp.large_blobs.len(), 1, "{resp:?}");
         assert_eq!(resp.large_blobs[0].path, "big.bin");
         assert!(resp.large_blobs[0].bytes.unwrap() > LARGE_BLOB_THRESHOLD_BYTES);
+    }
+
+    /// `log.showSignature=true` prints the signature check ahead of a signed
+    /// commit's `git show` record: the scan must still see every patch.
+    #[tokio::test]
+    async fn push_preflight_scans_signed_commits_under_show_signature() {
+        let td = tempfile::tempdir().unwrap();
+        let bare = td.path().join("remote.git");
+        let work = td.path().join("work");
+        std::fs::create_dir_all(&bare).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        run_git(&bare, &["init", "--bare", "-b", "main"]);
+        run_git(&work, &["init", "-b", "main"]);
+        run_git(&work, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        std::fs::write(work.join("README.md"), "# demo\n").unwrap();
+        run_git(&work, &["add", "README.md"]);
+        run_git(&work, &["commit", "-m", "initial"]);
+        run_git(&work, &["push", "-u", "origin", "main"]);
+        let key = td.path().join("sigkey");
+        let made = Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(&key)
+            .output();
+        if !made.is_ok_and(|o| o.status.success()) {
+            eprintln!("ssh-keygen unavailable — skipping");
+            return;
+        }
+        run_git(&work, &["config", "gpg.format", "ssh"]);
+        run_git(&work, &["config", "user.signingkey", key.to_str().unwrap()]);
+        let tok = format!("ghp_{}", "D".repeat(36));
+        std::fs::write(work.join("a.txt"), format!("token={tok}\n")).unwrap();
+        run_git(&work, &["add", "."]);
+        run_git(&work, &["commit", "-S", "-m", "signed with a secret"]);
+        std::fs::write(work.join("b.txt"), "plain\n").unwrap();
+        run_git(&work, &["add", "."]);
+        run_git(&work, &["commit", "-S", "-m", "signed"]);
+        run_git(&work, &["config", "log.showSignature", "true"]);
+
+        let resp = LocalGit::new(&work)
+            .push_preflight(&PushPreflightReq::default())
+            .await
+            .unwrap();
+        assert_eq!(resp.commits_ahead, 2);
+        assert_eq!(resp.secrets.len(), 1, "{resp:?}");
+        assert_eq!(resp.secrets[0].path, "a.txt");
+    }
+
+    /// An empty commit's `git show` record is its sha line alone: one that is
+    /// not the last record must not read as missing (every push with an
+    /// `--allow-empty` commit ahead of another failed).
+    #[tokio::test]
+    async fn push_preflight_reads_ranges_with_empty_commits() {
+        let td = tempfile::tempdir().unwrap();
+        let bare = td.path().join("remote.git");
+        let work = td.path().join("work");
+        std::fs::create_dir_all(&bare).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        run_git(&bare, &["init", "--bare", "-b", "main"]);
+        run_git(&work, &["init", "-b", "main"]);
+        run_git(&work, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        std::fs::write(work.join("README.md"), "# demo\n").unwrap();
+        run_git(&work, &["add", "README.md"]);
+        run_git(&work, &["commit", "-m", "initial"]);
+        run_git(&work, &["push", "-u", "origin", "main"]);
+        let git = LocalGit::new(&work);
+
+        // Only empty commits.
+        run_git(&work, &["commit", "--allow-empty", "-m", "e1"]);
+        run_git(&work, &["commit", "--allow-empty", "-m", "e2"]);
+        let only = git
+            .push_preflight(&PushPreflightReq::default())
+            .await
+            .unwrap();
+        assert_eq!((only.commits_ahead, only.ok), (2, true), "{only:?}");
+
+        // An empty commit between two real ones, the secret in the oldest.
+        let tok = format!("ghp_{}", "E".repeat(36));
+        std::fs::write(work.join("a.txt"), format!("token={tok}\n")).unwrap();
+        run_git(&work, &["add", "."]);
+        run_git(&work, &["commit", "-m", "secret"]);
+        run_git(&work, &["commit", "--allow-empty", "-m", "e3"]);
+        std::fs::write(work.join("b.txt"), "plain\n").unwrap();
+        run_git(&work, &["add", "."]);
+        run_git(&work, &["commit", "-m", "plain"]);
+        let mixed = git
+            .push_preflight(&PushPreflightReq::default())
+            .await
+            .unwrap();
+        assert_eq!(mixed.commits_ahead, 5);
+        assert_eq!(mixed.secrets.len(), 1, "{mixed:?}");
+        assert_eq!(mixed.secrets[0].path, "a.txt");
     }
 }

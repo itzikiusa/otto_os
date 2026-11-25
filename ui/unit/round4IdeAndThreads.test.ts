@@ -63,26 +63,26 @@ describe('Round 4 — Antigravity model catalog & Orchestrator entries', () => {
 describe('Round 4 — Incremental streaming markdown splitter', () => {
   it('splits completed paragraphs from active streaming tail without breaking open code fences or reference links', () => {
     const shortMd = 'Short paragraph still under threshold.\n\nTail words';
-    assert.deepEqual(splitStreamingMarkdown(shortMd), { settled: '', tail: shortMd });
+    assert.deepEqual(splitStreamingMarkdown(shortMd), { blocks: [], tail: shortMd });
 
     const p1 = `${'First completed paragraph with prose and details. '.repeat(8).trim()}\n\n`;
     const p2 = '```rust\nfn demo() -> i32 { 42 }\n```\n\n';
     const tail = 'Currently streaming trailing sentence...';
     const combined = `${p1}${p2}${tail}`;
     const split = splitStreamingMarkdown(combined);
-    assert.equal(split.settled, `${p1}${p2}`);
+    assert.deepEqual(split.blocks, [p1, p2]);
     assert.equal(split.tail, tail);
-    assert.equal(split.settled + split.tail, combined);
+    assert.equal(split.blocks.join('') + split.tail, combined);
 
     // Unclosed trailing code fence must stay inside `tail` so the fence never renders torn across passes.
     const unclosedFence = `${p1}\`\`\`go\nfunc partial() {\n\n  stillInsideFence := 1`;
     const fenceSplit = splitStreamingMarkdown(unclosedFence);
-    assert.equal(fenceSplit.settled, p1);
+    assert.deepEqual(fenceSplit.blocks, [p1]);
     assert.equal(fenceSplit.tail, '```go\nfunc partial() {\n\n  stillInsideFence := 1');
 
     // Reference-style link definitions fall back to single-pass rendering.
     const withRefDef = `${p1}See [guide][g].\n\n[g]: https://example.com`;
-    assert.deepEqual(splitStreamingMarkdown(withRefDef), { settled: '', tail: withRefDef });
+    assert.deepEqual(splitStreamingMarkdown(withRefDef), { blocks: [], tail: withRefDef });
   });
 });
 

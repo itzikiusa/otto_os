@@ -194,7 +194,9 @@ impl DbPool {
     /// use [`Self::begin_read`] instead and never hold the write lock.
     pub async fn begin(&self) -> sqlx::Result<Transaction<'static, Sqlite>> {
         self.tick();
-        self.write.begin_with("BEGIN IMMEDIATE").await
+        // The wait for the writer + the write lock: its own span.
+        let begin = self.write.begin_with("BEGIN IMMEDIATE");
+        otto_telemetry::context::measure_result("sqlite.writer", begin).await
     }
 
     /// Begin a READ-ONLY snapshot transaction on the READER pool (`BEGIN`,
@@ -219,7 +221,7 @@ impl DbPool {
     /// A raw connection from the WRITER: whatever runs on it may write.
     pub async fn acquire(&self) -> sqlx::Result<sqlx::pool::PoolConnection<Sqlite>> {
         self.tick();
-        self.write.acquire().await
+        otto_telemetry::context::measure_result("sqlite.writer", self.write.acquire()).await
     }
 
     /// Close both pools.
@@ -706,5 +708,18 @@ mod tests {
             .await
             .is_err());
         r.rollback().await.unwrap();
+    }
+
+    /// P1-043: the wait for the writer is its own span.
+    #[tokio::test]
+    async fn writer_waits_are_spans() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = crate::open(&dir.path().join("t.db")).await.unwrap();
+        let (_, names) = otto_telemetry::context::capture(async {
+            drop(pool.begin().await.unwrap());
+            drop(pool.acquire().await.unwrap());
+        })
+        .await;
+        assert_eq!(names, ["sqlite.writer", "sqlite.writer"]);
     }
 }

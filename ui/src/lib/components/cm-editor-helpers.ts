@@ -115,6 +115,10 @@ export const lightEditorTheme = EditorView.theme(
 
 export const placeholderEditorTheme = EditorView.theme({
   '.cm-placeholder': { color: 'var(--text-dim)', fontStyle: 'normal' },
+  // Row flex already stretches each gutter to the full content height. CodeMirror's extra
+  // `min-height: 100%` of that ~80k px box made WebKit re-lay out every gutter column on ANY
+  // layout of the page (a typed character, the status bar's "Ln, Col"): 17 -> 4 ms per layout.
+  '.cm-gutter': { minHeight: '0' },
   // The gutter itself is CodeMirror's flex COLUMN of line elements: only its width is set
   // here. Centring belongs to each line element — centring the column floats a short file's
   // fold chevron into the middle of the empty gutter.

@@ -115,3 +115,16 @@ test('subagent approval: a waiting subagent keeps its family out of Working, its
   // The parent's own row: its subagents' roll-up says one needs the person.
   assert.equal(childRollup([{ title: 'kid', word: subagentWord('needs-you') }]).needsYou, 1);
 });
+
+test('each thread is classed and dated once per pass, not once per sort comparison', () => {
+  // The sidebar's classOf walks a row's whole state (threadRowState); with a
+  // few hundred threads the sort's n·log n comparator calls dominated a switch.
+  const list = Array.from({ length: 300 }, (_, i) => s('t' + i, i % 24, i % 7 === 0 && i > 0 ? 't' + (i - 7) : undefined));
+  const kinds = ['needs', 'working', 'failed', 'done', 'rest'];
+  let classed = 0;
+  let dated = 0;
+  const { main, working } = inboxSections(list, (x) => (classed++, kinds[Number(x.id.slice(1)) % kinds.length]) as never, parentOf, undefined, (x) => (dated++, x.last_active_at));
+  assert.equal(main.length + working.length, list.length);
+  assert.ok(classed <= list.length, `classOf ran ${classed} times for ${list.length} threads`);
+  assert.ok(dated <= list.length, `at ran ${dated} times for ${list.length} threads`);
+});

@@ -587,25 +587,6 @@ impl AgentRuntime {
         }
     }
 
-    /// Pre-hydrate the `limit` most recently active open sessions in the
-    /// background at daemon boot so opening an active thread on phone/desktop
-    /// never blocks on a cold SQLite projection load.
-    pub async fn warm_recent(&self, limit: usize) {
-        if limit == 0 {
-            return;
-        }
-        let Ok(records) = self.inner.repo.list_all(None).await else {
-            return;
-        };
-        for rec in records
-            .into_iter()
-            .filter(|r| r.session.status != RuntimeSessionStatus::Closed)
-            .take(limit)
-        {
-            let _ = self.live(&rec.session.id).await;
-        }
-    }
-
     pub fn repo(&self) -> &AgentRuntimeRepo {
         &self.inner.repo
     }
@@ -1751,7 +1732,6 @@ impl AgentRuntime {
             });
             found
         };
-        try_evict_dead(&self.inner, id);
         let mime = mime.ok_or_else(|| Error::NotFound("no such attachment".into()))?;
         let bytes = tokio::fs::read(self.attachments(id).join(attachment_id))
             .await
@@ -1985,7 +1965,6 @@ impl AgentRuntime {
                 .ok_or_else(|| Error::NotFound(format!("turn item '{item_id}' not found")))
         })
         .await;
-        try_evict_dead(&self.inner, id);
         res
     }
 
@@ -2146,7 +2125,6 @@ impl AgentRuntime {
                 },
             }
         };
-        try_evict_dead(&self.inner, id);
         Ok(out)
     }
 
@@ -3581,12 +3559,19 @@ pub(super) fn dispatch_child_stdout(
     apply_step_opts(inner, live, st, step, false, sync_checkpoint);
 }
 
-pub(super) fn is_evictable_dead(st: &State) -> bool {
+/// Whether a loaded thread may leave memory: nothing runs, starts, waits on
+/// the person, streams or is queued, no secret is masked, and it is closed,
+/// released or failed — or, with `quiet` (the minute's sweep), any entry
+/// with no agent process that emitted nothing for that long: one no process
+/// ran for in this daemon life (a read or a rename after a restart) or whose
+/// agent exited cleanly. Never one holding a secret to mask.
+fn evictable(st: &State, quiet: Option<Duration>) -> bool {
     if st.proc.is_some()
         || st.turn.is_some()
         || st.starting > 0
         || !st.held.is_empty()
         || has_pending(st)
+        || !st.secrets.is_empty()
     {
         return false;
     }
@@ -3595,32 +3580,45 @@ pub(super) fn is_evictable_dead(st: &State) -> bool {
     }
     st.proj.queue.is_empty()
         && (st.released
+            || quiet.is_some_and(|q| st.last_activity.elapsed() >= q)
             || st.proj.session.as_ref().is_some_and(|p| {
                 p.status == ProviderSessionStatus::Error
                     || (p.status == ProviderSessionStatus::Stopped && p.last_error.is_some())
             }))
 }
 
-pub(super) fn try_evict_dead(inner: &Inner, id: &Id) {
-    inner.live.remove_if(id, |_, l| {
-        Arc::strong_count(l) == 1 && is_evictable_dead(&l.lock())
-    });
+pub(super) async fn evict_if_dead_after_flush(inner: &Arc<Inner>, id: &Id) {
+    evict_after_flush(inner, id, None).await;
 }
 
-pub(super) async fn evict_if_dead_after_flush(inner: &Arc<Inner>, id: &Id) {
-    let maybe_persist = inner.live.get(id).and_then(|entry| {
-        let l = entry.value();
-        is_evictable_dead(&l.lock()).then(|| l.persist.clone())
-    });
-    let Some(persist) = maybe_persist else {
+/// Drop `id` when [`evictable`] and nothing else holds it (so nothing can
+/// queue a write after the check), then wait for its queued DB writes under
+/// its load lock: nobody loads it again (with a second DB writer) before
+/// they landed. The one way an entry leaves the live map.
+pub(super) async fn evict_after_flush(inner: &Arc<Inner>, id: &Id, quiet: Option<Duration>) {
+    async fn flush(persist: &mpsc::UnboundedSender<PersistOp>) {
+        let (tx, rx) = oneshot::channel();
+        if persist.send(PersistOp::Flush(tx)).is_ok() {
+            let _ = rx.await;
+        }
+    }
+    // Flushed first even when a holder keeps it loaded: a list reads the DB
+    // row once another evictor (the pump's end) dropped the entry, so a Close
+    // must have landed by the time it returns.
+    let Some(persist) = inner.live.get(id).and_then(|e| {
+        let l = e.value();
+        evictable(&l.lock(), quiet).then(|| l.persist.clone())
+    }) else {
         return;
     };
-    let (tx, rx) = oneshot::channel();
-    if persist.send(PersistOp::Flush(tx)).is_ok() {
-        let _ = rx.await;
-    }
+    flush(&persist).await;
     drop(persist);
-    try_evict_dead(inner, id);
+    let _loading = inner.loading.lock(id).await;
+    if let Some((_, live)) = inner.live.remove_if(id, |_, l| {
+        Arc::strong_count(l) == 1 && evictable(&l.lock(), quiet)
+    }) {
+        flush(&live.persist).await; // what was queued since
+    }
 }
 
 /// Feed one child's messages to its driver until it exits.

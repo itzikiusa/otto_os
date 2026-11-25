@@ -6,6 +6,11 @@
   // section; GraphView owns the selection (graphSelection.svelte.ts).
   import type { CommitInfo, RepoStatusResp } from '../../../lib/api/types';
   import { rel } from '../../../lib/stores/now.svelte';
+  import { git } from '../../../lib/stores/git.svelte';
+  import { forgeLabel, prStepPossible } from '../../../lib/gitNextStep';
+  import { router } from '../../../lib/router.svelte';
+  import LazyMount from '../../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../../lib/lazy-component.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import WipPanel from '../WipPanel.svelte';
   import GraphCommitDiff from '../graph-commit-diff.svelte';
@@ -34,7 +39,7 @@
     onfiletools: (e: MouseEvent, path: string) => void;
     fileCount?: number | null;
     onclose: () => void;
-    oncommitted: () => void;
+    oncommitted: (sha: string) => void;
   }
   let {
     repoId,
@@ -58,6 +63,15 @@
     oncommitted,
   }: Props = $props();
 
+  const repo = $derived(git.allRepos.find((r) => r.id === repoId) ?? git.repos.find((r) => r.id === repoId) ?? null);
+  // A pushed, clean HEAD: the commit card's next step (Create / Open pull
+  // request) above its detail. Push and Publish are the header's verbs.
+  const CommitCardLazy = lazyComponent(() => import('../CommitCard.svelte'));
+  const showStep = $derived(!!repo && chips.some((c) => c.current) && prStepPossible({
+    changes: status.changes.length, branch: status.branch, upstream: status.upstream, ahead: status.ahead,
+    remote: !!repo.remote_url, forge: !!forgeLabel(repo), prNumber: null,
+  }));
+
   /** The shared relative-time label (content.md §7), compact for dense rows. */
   function fmtDate(iso: string): string {
     return rel(iso, { compact: true });
@@ -75,13 +89,19 @@
   class:mob-hidden={isMobile && !open}
 >
   {#if wipSelected}
-    <WipPanel {repoId} {status} {onstatus} {oncommitted} {onclose} {onresolve} />
+    <!-- Every change counts as included, the message drafts itself, the first
+         file's diff opens beside the list (desktop). -->
+    <!-- A phone closes it from the section header above (one ✕). -->
+    <WipPanel {repoId} {status} {onstatus} {oncommitted} onclose={isMobile ? undefined : onclose} {onresolve} remote={!!repo?.remote_url} selectFirst={!isMobile} autoDraft includeAll />
   {:else if selectedSha === null}
     <div class="detail-empty">
       <span class="detail-empty-label">COMMIT</span>
       <span class="dim detail-empty-hint">select a commit</span>
     </div>
   {:else if selectedCommit !== null}
+    {#if showStep && repo}
+      <LazyMount lazy={CommitCardLazy} what="the next step" quiet props={{ repo, layout: 'step', onopenpr: (n: number) => router.go(`git/${repoId}/pr/${n}`) }} />
+    {/if}
     <div class="detail-header">
       <div class="detail-header-main">
         <!-- One line that never wraps: sha, the refs (each ellipsizes its own
@@ -101,9 +121,11 @@
               />
             {/each}
           </span>
-          <button class="icon-btn detail-close" onclick={onclose} title="Close commit detail" aria-label="Close commit detail">
-            <Icon name="x" size={14} />
-          </button>
+          {#if !isMobile}
+            <button class="icon-btn detail-close" onclick={onclose} title="Close commit detail" aria-label="Close commit detail">
+              <Icon name="x" size={14} />
+            </button>
+          {/if}
         </div>
         <div class="detail-subject">{selectedCommit.subject}</div>
         <div class="detail-meta">
@@ -259,6 +281,57 @@
     font-family: var(--font-mono);
   }
 
+  /* A narrow desktop pane (a 1100 px window with the right panel open) has no
+     room for refs + list + detail: while the detail is open the refs step
+     aside and the list and the detail share the width. */
+  :global(.graphview) {
+    container: graph / inline-size;
+    position: relative;
+  }
+  :global(.refs-peek) {
+    display: none;
+  }
+  @container graph (max-width: 900px) {
+    /* …and peek over the list from the branch button (the refs header's spot). */
+    :global(.graphview:has(> .detail-visible) > .refs-peek) {
+      display: inline-flex;
+      position: absolute;
+      inset-block-start: 2px;
+      inset-inline-start: 4px;
+      z-index: 7;
+    }
+    /* The button sits in the column heading's leading corner: the heading
+       and the peeked list's first section start after / below it. */
+    :global(.graphview:has(> .detail-visible) .graph-head .gh-branch) {
+      padding-inline-start: 32px;
+    }
+    :global(.graphview.peek:has(> .detail-visible) > .refs-panel) {
+      padding-block-start: 32px;
+      display: block;
+      position: absolute;
+      inset-block: 0;
+      inset-inline-start: 0;
+      width: min(260px, 70%);
+      z-index: 6;
+      background: var(--surface);
+      box-shadow: var(--glass-shadow);
+    }
+    :global(.graphview.peek:has(> .detail-visible) > .refs-peek) {
+      color: var(--accent-text);
+    }
+    :global(.graphview:has(> .detail-visible) > .refs-panel),
+    :global(.graphview:has(> .detail-visible) > .refs-resizer) {
+      display: none;
+    }
+    :global(.graphview:has(> .detail-visible) > .graph-panel) {
+      flex-basis: 45% !important;
+      min-width: 0;
+    }
+    .detail-panel.detail-visible {
+      min-width: 0;
+    }
+  }
+
   /* ── Mobile + tablet (≤1024px): the accordion's diff section ── */
   @media (max-width: 1024px) {
     /* Diff/detail pane: the prominent section once a commit is open. */
@@ -277,16 +350,6 @@
     /* No commit selected → drop the empty diff pane so the list fills the view. */
     .detail-panel.mob-hidden {
       display: none !important;
-    }
-    /* Close (✕) for the open commit detail — bump to a ≥40px touch target. */
-    .mob-visible .detail-close {
-      min-width: 40px;
-      min-height: 40px;
-      font-size: var(--fs-xl);
-      padding: 8px;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
     }
     .mob-visible .detail-subject { font-size: var(--fs-l); }
     .mob-visible .detail-sha { font-size: var(--fs-s); }

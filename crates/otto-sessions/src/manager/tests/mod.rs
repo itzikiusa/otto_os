@@ -4587,6 +4587,154 @@ async fn confined_profiles_enforce_the_mcp_launcher_dir_live() {
     assert_eq!(got, "own=no other=no launch=no write=no");
 }
 
+/// P2-019, live: Otto's own OpenSSH ControlMaster sockets (IDE remote
+/// targets `/tmp/oi-<pid>-<n>/c.s`, SFTP `<tmp>/otto-sftp-<token>/ctl.sock`)
+/// are unreachable from EVERY confined profile — an ordinary session, a
+/// read-only one and a scheduled task — while an unrelated Unix socket stays
+/// reachable (the probe works and nothing else is closed). A mux client on one
+/// rides the master's authenticated login without any credential of its own.
+/// Nor through a new name (P3-005): the session can write in the temp roots,
+/// but can't move a socket dir, hard-link a socket or connect via a symlink.
+#[tokio::test]
+#[allow(clippy::disallowed_methods)] // blocking listeners + probe processes in a test
+async fn confined_profiles_cannot_reach_otto_ssh_control_sockets_live() {
+    if !otto_sandbox::is_supported() {
+        return;
+    }
+    let (mgr0, repo, ws, user) = test_manager().await;
+    let settings = otto_state::SettingsRepo::new(repo.pool());
+    settings
+        .put("process_sandbox", &serde_json::json!({"enabled": true}))
+        .await
+        .unwrap();
+    let mgr = Arc::try_unwrap(mgr0)
+        .ok()
+        .expect("sole owner")
+        .with_settings_repo(settings);
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().canonicalize().unwrap();
+    let cwd_s = cwd.to_string_lossy().into_owned();
+    // Where Otto puts them (otto-ide `SshControlSocket::new`, otto-ssh
+    // `SftpSession::with_program`), plus a control dir no rule names. Fresh
+    // per run: a probe that gets through may have moved one.
+    let tmp = std::env::temp_dir().canonicalize().unwrap();
+    let mut made: Vec<std::path::PathBuf> = Vec::new();
+    let mut fresh = || {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
+        let oi = std::path::PathBuf::from(format!("/tmp/oi-{}-{nanos}", std::process::id()));
+        let sftp = tmp.join(format!("otto-sftp-{}", new_id()));
+        let other = tmp.join(format!("otto-sockprobe-{}", new_id()));
+        for (d, s) in [(&oi, "c.s"), (&sftp, "ctl.sock"), (&other, "c.s")] {
+            std::fs::create_dir_all(d).unwrap();
+            let l = std::os::unix::net::UnixListener::bind(d.join(s)).unwrap();
+            std::thread::spawn(move || l.incoming().for_each(drop));
+        }
+        let (moved, hard, sym) = (
+            tmp.join(format!("mv-{}", new_id())),
+            tmp.join(format!("hl-{}.s", new_id())),
+            tmp.join(format!("sl-{}", new_id())),
+        );
+        made.extend([
+            oi.clone(),
+            sftp.clone(),
+            other.clone(),
+            moved.clone(),
+            hard.clone(),
+            sym.clone(),
+        ]);
+        let c = |name: &str, p: std::path::PathBuf| {
+            format!("nc -U '{}' </dev/null >/dev/null 2>&1 && printf '{name}=ok ' || printf '{name}=no '; ", p.display())
+        };
+        [
+            c("oi", oi.join("c.s")),
+            c("sftp", sftp.join("ctl.sock")),
+            c("other", other.join("c.s")),
+            format!("mv '{}' '{}' 2>/dev/null; ", oi.display(), moved.display()),
+            c("mv", moved.join("c.s")),
+            format!(
+                "ln '{}' '{}' 2>/dev/null; ",
+                sftp.join("ctl.sock").display(),
+                hard.display()
+            ),
+            c("link", hard),
+            format!(
+                "ln -s '{}' '{}' 2>/dev/null; ",
+                sftp.display(),
+                sym.display()
+            ),
+            c("sym", sym.join("ctl.sock")),
+        ]
+        .concat()
+    };
+    let run = |(program, args): (String, Vec<String>)| {
+        let out = std::process::Command::new(program)
+            .args(args)
+            .current_dir(&cwd)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    // Unconfined, every path answers.
+    let mut got = vec![(
+        "unconfined".to_string(),
+        run(("/bin/sh".into(), vec!["-c".into(), fresh()])),
+    )];
+    for read_only in [false, true] {
+        let session = repo
+            .create(NewSession {
+                workspace_id: ws.id.clone(),
+                kind: SessionKind::Agent,
+                provider: "claude".into(),
+                title: "ssh socket probe".into(),
+                cwd: cwd_s.clone(),
+                provider_session_id: None,
+                connection_id: None,
+                created_by: user.clone(),
+                meta: serde_json::json!({ "read_only": read_only }),
+            })
+            .await
+            .unwrap();
+        let mut spec = CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), fresh()],
+            cwd: Some(cwd_s.clone()),
+            env: Vec::new(),
+        };
+        mgr.apply_sandbox(&mut spec, &session).await;
+        assert_eq!(spec.program, "/usr/bin/sandbox-exec");
+        got.push((
+            format!("read_only={read_only}"),
+            run((spec.program, spec.args)),
+        ));
+    }
+    let task = mgr
+        .process_sandbox_policy("shell", &cwd)
+        .await
+        .expect("confined");
+    got.push((
+        "task".into(),
+        run(task.wrap("/bin/sh", &["-c".to_string(), fresh()])),
+    ));
+    for p in &made {
+        let _ = std::fs::remove_dir_all(p);
+        let _ = std::fs::remove_file(p);
+    }
+    let confined = "oi=no sftp=no other=ok mv=no link=no sym=no";
+    let want: Vec<(String, String)> = [
+        ("unconfined", "oi=ok sftp=ok other=ok mv=ok link=ok sym=ok"),
+        ("read_only=false", confined),
+        ("read_only=true", confined),
+        ("task", confined),
+    ]
+    .into_iter()
+    .map(|(who, w)| (who.to_string(), w.to_string()))
+    .collect();
+    assert_eq!(got, want);
+}
+
 /// Re-sweep NEW-1: a shell session (a Threads terminal dock too) has no agent
 /// CLI to serve, yet its start and every resume (the same MCP sync) wrote
 /// Otto's `.mcp.json` into the repository. Start it, sync again as a resume

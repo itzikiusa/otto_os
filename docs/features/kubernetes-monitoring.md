@@ -66,7 +66,10 @@ collector keeps the last value of every counter series per cluster. A drop in
 value means the counter was reset, and then the new value is the increment
 (Prometheus `increase()` semantics). A series seen for the first time adds 0.
 After a daemon restart the last values are read back once from `k8s_latest`,
-so a restart doesn't lose an interval. Memory is the most authoritative gauge
+so a restart doesn't lose an interval of requests, 5xx or latency sum/count.
+The histogram is the exception: its first cycle after a restart adds no
+counts, because histogram `_bucket` series are never written per series (see
+below). Memory is the most authoritative gauge
 the pod has (`mem_working_set_bytes` → `mem_sys_bytes` →
 `jvm_memory_used_bytes`), **summed** over its series. metrics-server reports
 per container, and the collector writes the pod total (`container = ""`), so a
@@ -103,7 +106,10 @@ the upgrade.
 into tiers keyed by series (`cluster, namespace, workload, metric, pod,
 labels`) that store `min / max / sum / count / last` per bucket. The generic
 `/monitor/series?metric=<anything>` chart and Fleet → Requests (per path)
-read them:
+read them. Prometheus histogram `_bucket` series are **not** written here.
+They only feed the wide row's histogram. Written per series (one row per `le`
+per label set), they were about 84 % of all raw rows on a live two-cluster
+install (≈ 2 M rows an hour), and no chart reads them from these tables.
 
 | table | what | kept |
 |---|---|---|
@@ -185,7 +191,7 @@ back to `kubectl`.
 | `format` | `json` (field mappings), `prometheus` (text format), `health` (records `up` = 1 on 2xx) |
 | `mappings` (json) | `field` is a dotted path (`memory_stats.sys`, `items.0.x`); `metric` emits a sample, `label` attaches a pod-level label (e.g. `build_info.version → version`, used for **version drift**) |
 | `unit` | `number`, `bytes`, `bytes_human` (`"27 MB"`, `512Mi`, `1.5GiB` — all binary multiples), `duration_human` (`1m30s`, `250ms`), `percent` |
-| `include` / `exclude` (prometheus) | series-name globs (`http_*`, `*_bucket`); empty include = everything |
+| `include` / `exclude` (prometheus) | series-name globs (`http_*`, `*_bucket`); empty include = everything. Excluding `*_bucket` also drops p95 (latency falls back to avg) |
 | labels kept (prometheus) | only `code` / `status` / `status_code` / `le` survive ingest; every other label (`path`, `method`, `handler`…) is folded away and values summed. A gateway with hundreds of paths shrinks from ~1500 rows per pod per cycle to a few dozen, which is what keeps the dashboard queries fast |
 | `timeout_ms` | 100..30000, default 3000 |
 

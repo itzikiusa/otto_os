@@ -48,6 +48,29 @@ export const FIRST_PAGE = 200;
 /** What one scroll to the end adds. */
 export const SCROLL_PAGE = 1000;
 
+/** A cold mount's first page, asked for while the repo's overview (which the
+ *  graph waits on to mount) is still in flight: log and overview in parallel,
+ *  not one after the other. Taken once, within 3 s; a failed read is dropped,
+ *  one nobody took is aborted. `moved`: refs were bumped (a fetch, a commit)
+ *  since it was asked for, so the graph re-checks its refs right after. */
+const FIRST_PAGE_TTL_MS = 3000;
+const firstPages = new Map<string, { p: Promise<CommitInfo[]>; at: number; rev: number }>();
+export function prefetchFirstPage(repoId: string): void {
+  if (graphCache.get(repoId) || firstPages.has(repoId)) return;
+  const ctl = new AbortController();
+  const p = api.get<CommitInfo[]>(`/repos/${repoId}/log?all=true&limit=${FIRST_PAGE}&skip=0`, ctl.signal);
+  const hit = { p, at: Date.now(), rev: git.refsRev[repoId] ?? 0 };
+  firstPages.set(repoId, hit);
+  const drop = (): boolean => firstPages.get(repoId) === hit && firstPages.delete(repoId);
+  p.catch(drop);
+  setTimeout(() => drop() && ctl.abort(), FIRST_PAGE_TTL_MS);
+}
+export function takeFirstPage(repoId: string): { page: Promise<CommitInfo[]>; moved: boolean } | null {
+  const hit = firstPages.get(repoId);
+  firstPages.delete(repoId);
+  return hit && Date.now() - hit.at < FIRST_PAGE_TTL_MS ? { page: hit.p, moved: hit.rev !== (git.refsRev[repoId] ?? 0) } : null;
+}
+
 export interface GraphFetch {
   gen: number;
   want: number;
@@ -254,9 +277,9 @@ export function createGraphData(h: GraphDataHost) {
     try {
       // Only a sha is a valid target (the daemon 400s anything else).
       const to = until && /^[0-9a-f]{4,64}$/i.test(until) ? `&until=${until}` : '';
-      const page = await api.get<CommitInfo[]>(
-        `/repos/${h.repoId}/log?all=true&limit=${limit}&skip=${skipCursor}${to}`,
-      );
+      const pre = skipCursor === 0 && !to && limit === FIRST_PAGE ? takeFirstPage(h.repoId) : null;
+      const page = await (pre?.page ?? api.get<CommitInfo[]>(`/repos/${h.repoId}/log?all=true&limit=${limit}&skip=${skipCursor}${to}`));
+      if (pre?.moved) void sync.resyncRefs().catch(noteBackgroundRead);
       if (gen !== loadGen) return false; // repo changed under us — drop it
       commitsError = null;
       skipCursor += page.length;

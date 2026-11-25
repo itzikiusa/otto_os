@@ -93,6 +93,8 @@ export interface IdeFsEntry {
 export interface IdeFsTreeResp {
   root: string; path: string; parent?: string | null;
   target_os?: string; target_arch?: string; entries: IdeFsEntry[];
+  /** The listings of the request's `paths` (its open folders, read in the same call). */
+  listings?: { path: string; entries: IdeFsEntry[] }[];
 }
 
 export interface IdeFileReadResp {
@@ -114,6 +116,8 @@ export interface IdeOpenTab {
   /** Opened from a project definition. Keep external source reads on that project target. */
   projectScoped?: boolean;
   lastAccessedAt?: number;
+  /** Restored into the tab strip but not read yet: activating (or opening) it reads it. */
+  deferred?: boolean;
 }
 
 /** Dominant line ending (mirrors Rust `text_pos::detect_eol`): one stray CRLF must not turn an LF file CRLF on save. */

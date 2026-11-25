@@ -272,6 +272,30 @@ pub fn operations_for(kind: ResourceKind) -> &'static [&'static str] {
     }
 }
 
+/// The product feature whose page gates `operation` on a `kind` resource.
+pub fn feature_for(kind: ResourceKind, operation: &str) -> crate::domain::Feature {
+    use crate::domain::Feature;
+    match kind {
+        ResourceKind::Connection
+            if operation.starts_with("db_") || operation.starts_with("change_") =>
+        {
+            Feature::Database
+        }
+        ResourceKind::Connection => Feature::Connections,
+        ResourceKind::McpServer => Feature::Mcp,
+        ResourceKind::K8sCluster => Feature::Kubernetes,
+        ResourceKind::AwsAccount => match operation.split('_').next().unwrap_or("") {
+            "s3" => Feature::AwsS3,
+            "sqs" => Feature::AwsSqs,
+            "ec2" => Feature::AwsEc2,
+            "athena" => Feature::AwsAthena,
+            "eks" => Feature::AwsEks,
+            "rds" => Feature::AwsRds,
+            _ => Feature::Aws,
+        },
+    }
+}
+
 pub fn validate_operation(kind: ResourceKind, operation: &str) -> Result<()> {
     if operations_for(kind).contains(&operation) {
         Ok(())

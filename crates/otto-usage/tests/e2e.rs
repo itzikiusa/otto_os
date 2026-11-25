@@ -672,6 +672,39 @@ async fn summary_and_report_query_budget() {
     engine.shutdown().await;
 }
 
+/// P1-037: a usage read flushes the rows recorded before it and waits for
+/// that insert. ClickHouse 26 makes inserts async by default, and each one
+/// waited out the server's >= 50 ms busy timeout (a session meter read took
+/// 88 ms instead of 32 ms). Synchronous inserts: the fastest of five reads
+/// stays far below that floor.
+#[tokio::test]
+async fn a_read_after_a_recorded_event_does_not_wait_out_an_insert_buffer() {
+    if ClickHouse::locate(None).is_none() {
+        eprintln!("SKIP: no `clickhouse` binary found on this machine");
+        return;
+    }
+    let _serial = serial().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ch_dir = tmp.path().join("clickhouse");
+    std::fs::create_dir_all(&ch_dir).expect("clickhouse dir");
+    std::fs::write(ch_dir.join(".usage_compacted_v2"), "ok").expect("compaction marker");
+    let engine = UsageEngine::start(test_config(), tmp.path().to_path_buf()).await;
+    assert!(engine.wait_ready(Duration::from_secs(30)).await);
+    let mut fastest = Duration::MAX;
+    for n in 1..=5 {
+        engine.record(event("claude", "s1", "m", "completion", 10, 5, 0.01));
+        let started = std::time::Instant::now();
+        let totals = engine.session_totals_for("s1", None).await.expect("totals");
+        fastest = fastest.min(started.elapsed());
+        assert_eq!(totals.events, n, "the read sees the row recorded before it");
+    }
+    assert!(
+        fastest < Duration::from_millis(40),
+        "fastest read {fastest:?}"
+    );
+    engine.shutdown().await;
+}
+
 /// Real-shaped summary (U1/U2): 300 sessions over six providers, half of
 /// them outside Otto, muse with tokens but no cost and shell with neither.
 /// The count is every session with usage (not the 50 listed), a provider
@@ -1076,7 +1109,7 @@ async fn durable_replay_and_parked_budget_include_pending_spend() {
     assert!(ch.is_parked());
     engine
         .commit_ingestion(
-            &serde_json::json!({"version":1,"offset":123}),
+            serde_json::json!({"version":1,"offset":123}),
             &[event("codex", "s", "gpt", "completion", 100, 0, 2.0)],
         )
         .await
@@ -1108,7 +1141,7 @@ async fn durable_replay_and_parked_budget_include_pending_spend() {
         .execute(&journal).await.unwrap();
     engine
         .commit_ingestion(
-            &serde_json::json!({"version":1,"offset":456}),
+            serde_json::json!({"version":1,"offset":456}),
             &[event("codex", "s", "gpt", "completion", 200, 0, 3.0)],
         )
         .await

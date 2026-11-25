@@ -143,8 +143,8 @@ impl LocalGit {
 
     /// The pull mode the repo's OWN config asks for (`pull.rebase`, then
     /// `pull.ff`), so Otto's pull button stops silently overriding it. Read on
-    /// every call — the config can change under us and two local `git config`
-    /// spawns are cheaper than a stale policy.
+    /// every call — the config can change under us and one local `git config`
+    /// spawn is cheaper than a stale policy.
     ///
     /// Git's own precedence: `branch.<current>.rebase` over `pull.rebase`, then
     /// `pull.ff`. A rebase value is any git boolean-true spelling (`yes`, `on`,
@@ -152,20 +152,41 @@ impl LocalGit {
     /// [`PullMode::Rebase`] pulls with a plain `--rebase`, so `merges` still
     /// linearises merge commits.
     pub async fn pull_mode_default(&self) -> PullMode {
-        let branch_rebase = match self.current_branch().await {
-            Ok(b) if b != "HEAD" && !b.is_empty() => {
-                self.config_get(&format!("branch.{b}.rebase")).await
-            }
+        // The three keys in ONE config read, beside the branch lookup (it was
+        // four spawns in a row). `--get-regexp` prints `key value`; the
+        // last value wins, as with `--get`.
+        let args = [
+            "config",
+            "--get-regexp",
+            r"^(branch\..*\.rebase|pull\.rebase|pull\.ff)$",
+        ];
+        let (branch, cfg) = tokio::join!(
+            self.current_branch(),
+            self.run_raw_class(&args, &[], SpawnClass::LocalRead),
+        );
+        let cfg = match cfg {
+            Ok((true, out, ..)) => out,
+            _ => String::new(),
+        };
+        let get = |key: &str| {
+            cfg.lines()
+                .rev()
+                .find_map(|l| match l.split_once(' ') {
+                    Some((k, v)) => (k == key).then_some(v.trim()),
+                    None => (l == key).then_some(""),
+                })
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+        };
+        let branch_rebase = match branch {
+            Ok(b) if b != "HEAD" && !b.is_empty() => get(&format!("branch.{b}.rebase")),
             _ => None,
         };
-        let rebase = match branch_rebase {
-            Some(v) => Some(v),
-            None => self.config_get("pull.rebase").await,
-        };
+        let rebase = branch_rebase.or_else(|| get("pull.rebase"));
         if rebase.as_deref().is_some_and(is_rebase_value) {
             return PullMode::Rebase;
         }
-        if self.config_get("pull.ff").await.as_deref() == Some("only") {
+        if get("pull.ff").as_deref() == Some("only") {
             return PullMode::FfOnly;
         }
         PullMode::Merge

@@ -112,6 +112,11 @@ export interface McpServerDetail {
   created_by: Id;
   created_at: string;
   updated_at: string;
+  /** Available in every workspace, including ones added later. */
+  all_workspaces: boolean;
+  /** The other workspaces (besides the home `workspace_id`) it was shared
+   *  with, sorted. Empty for a caller who may not configure the server. */
+  shared_workspace_ids: Id[];
 }
 
 /** A discovered tool + its governance metadata (`McpTool` in Rust). */
@@ -162,6 +167,10 @@ export interface CreateMcpControlServerReq {
   injection_risk?: McpInjectionRisk;
   default_tool_access?: McpToolAccess;
   enabled?: boolean;
+  /** Where else it is available (owner only): every workspace, including
+   *  ones added later, or these other workspaces. Default: home only. */
+  all_workspaces?: boolean;
+  shared_workspace_ids?: Id[];
 }
 
 /** `PATCH /mcp/servers/{id}` — all fields optional; absent = keep current. */
@@ -183,6 +192,10 @@ export interface UpdateMcpControlServerReq {
   /** Native ⇄ governed (owner only). `native` needs a stdio server. The
    *  response's `managed` is the new mode (`false` = native). */
   runs?: 'native' | 'governed';
+  /** Where it is available (owner only; see create). Either one replaces
+   *  the scope; the omitted one keeps its value. */
+  all_workspaces?: boolean;
+  shared_workspace_ids?: Id[];
 }
 
 /** `PATCH /mcp/tools/{toolId}` — per-tool permission + risk override. */

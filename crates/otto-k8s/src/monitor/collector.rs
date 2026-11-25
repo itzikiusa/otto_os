@@ -70,6 +70,17 @@ async fn parse_off_runtime<T: Send + 'static>(
         .map_err(|e| Error::Internal(format!("k8s monitor parse task: {e}")))?
 }
 
+/// One namespace's pod list reduced to its snapshot on the blocking pool,
+/// typed to the fields the snapshot reads (no whole-list `Value`).
+async fn pod_snapshot_off_runtime(stdout: String) -> otto_core::Result<Snapshot> {
+    tokio::task::spawn_blocking(move || {
+        classify::snapshot_from_pod_json(&stdout)
+            .map_err(|e| Error::Upstream(format!("kubectl returned invalid JSON: {e}")))
+    })
+    .await
+    .map_err(|e| Error::Internal(format!("k8s monitor parse task: {e}")))?
+}
+
 /// Persist a cycle's status, rewriting the (large) snapshot column only when
 /// `cur` (this cycle's typed snapshot; `None` = the cycle never got one, keep
 /// what is stored) differs from `baseline` — what this loop last stored. The
@@ -197,15 +208,15 @@ fn ts(t: DateTime<Utc>) -> String {
 }
 
 /// One NDJSON line per sample for `k8s_samples`.
-pub fn samples_ndjson(
+pub fn samples_ndjson<'a>(
     cluster_id: &str,
     at: DateTime<Utc>,
     pod: &PodSnap,
     container: &str,
-    samples: &[Sample],
+    samples: impl IntoIterator<Item = &'a Sample>,
     extra_labels: &BTreeMap<String, String>,
 ) -> String {
-    let mut out = String::with_capacity(samples.len() * 160);
+    let mut out = String::new();
     let at = ts(at);
     for smp in samples {
         let mut labels = extra_labels.clone();
@@ -510,13 +521,19 @@ async fn scrape_pod(
         }
     }
     let container = pod.containers.keys().next().cloned().unwrap_or_default();
+    // Histogram buckets go to the wide row's `hist` only (`samples` below):
+    // one row per `le` per label set, they were ~84 % of every raw and
+    // per-series tier row, and nothing reads them there.
     for (_, parsed) in &per_probe {
         ndjson.push_str(&samples_ndjson(
             cluster_id,
             now,
             pod,
             &container,
-            &parsed.samples,
+            parsed
+                .samples
+                .iter()
+                .filter(|s| !s.metric.ends_with("_bucket")),
             &pod_labels,
         ));
     }
@@ -774,7 +791,8 @@ pub async fn run_cycle_with<S: K8sCtx>(
 
     // 1. Sweep. Up to SWEEP_CONCURRENCY namespaces at once (was one at a
     // time); each pod list — tens of MB of JSON on a big namespace — is parsed
-    // and reduced to its snapshot on the blocking pool, not a runtime worker.
+    // and reduced to its snapshot on the blocking pool, not a runtime worker,
+    // typed to the fields the snapshot reads (no whole-list `Value`).
     let swept: Vec<(String, otto_core::Result<Snapshot>)> =
         stream::iter(namespaces.iter().cloned())
             .map(|ns| {
@@ -784,12 +802,7 @@ pub async fn run_cycle_with<S: K8sCtx>(
                         .run(["get", "pods", "-n", ns.as_str(), "-o", "json"])
                         .await
                     {
-                        Ok(out) => {
-                            parse_off_runtime(out.stdout, |list| {
-                                classify::snapshot_from_pod_list(&list)
-                            })
-                            .await
-                        }
+                        Ok(out) => pod_snapshot_off_runtime(out.stdout).await,
                         Err(e) => Err(e),
                     };
                     (ns, res)

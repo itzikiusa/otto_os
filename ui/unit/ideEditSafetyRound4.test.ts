@@ -203,12 +203,19 @@ test('G8: a slow search that answers after a newer one cannot replace its result
 test('G9: restoring saved tabs stops once the project switched', async () => {
   const { buf, helpers } = bufModules({});
   buf.saveWorkspaceOpenTabs('/old', ['/old/a.ts', '/old/b.ts', '/old/c.ts'], null, null);
-  const opened: string[] = [];
+  const reads: string[] = [];
   const h = {
-    target: { kind: 'local', root: '/old', connection_id: null }, collabIsGuest: false, tabs: [] as unknown[], hasClosedAllTabs: false, activePath: null,
+    target: { kind: 'local', root: '/old', connection_id: null }, collabIsGuest: false, tabs: [] as { path: string; deferred?: boolean }[], hasClosedAllTabs: false, activePath: null,
     treeRootEntries: [], childrenByDir: {}, toggleDir: async () => {}, openInSplit: () => {},
-    openFile: async (p: string) => { opened.push(p); h.target = { kind: 'local', root: '/new', connection_id: null }; },
+    openFile: async (p: string, o: { defer?: boolean } = {}) => {
+      if (o.defer) { h.tabs.push({ path: p, deferred: true }); return; }
+      reads.push(p);
+      const t = h.tabs.find((x) => x.path === p);
+      if (t) t.deferred = false;
+      h.target = { kind: 'local', root: '/new', connection_id: null }; // the switch lands during the first read
+    },
   };
   await helpers.restoreWorkspaceTabsOrInitial(h);
-  assert.deepEqual(opened, ['/old/a.ts'], 'the old project\'s other tabs are not opened into the new one');
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(reads, ['/old/a.ts'], 'the old project\'s other tabs are not read into the new one');
 });

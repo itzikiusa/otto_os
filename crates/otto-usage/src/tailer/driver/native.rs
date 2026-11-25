@@ -173,8 +173,10 @@ impl NativeState {
         {
             return None;
         }
-        // Only a baseline that grew moves to the back of the FIFO (it is
-        // committed with the owed event anyway, so no extra checkpoint churn).
+        // Only a baseline that grew moves to the back of the FIFO. It must
+        // commit with the owed event: the journal stores `native` only when
+        // it is dirty.
+        self.dirty = true;
         self.next_seq += 1;
         old.seq = self.next_seq;
         Some((delta, cost_delta))

@@ -62,9 +62,8 @@
     onresolveconflicts,
   }: Props = $props();
 
-  // Which phone accordion sections are expanded. The refs (branches) tree
-  // starts collapsed — the commit graph is what users want first — and the
-  // diff opens on select.
+  // Phone accordion sections (refs start collapsed, the diff opens on select);
+  // `secRefsOpen` also peeks the refs over a narrow desktop pane.
   let secRefsOpen = $state(false);
   let secCommitsOpen = $state(true);
 
@@ -115,6 +114,7 @@
     branchTipCommit: (b) => index.branchTipCommit(b),
     scrollToCommit: (sha) => vp.scrollToCommit(sha),
     focusRow: (sha) => void vp.focusRow(sha),
+    isHeadCommit: (c) => index.isHeadCommit(c),
   });
 
   // ── Actions and context menus (graph/graphActions, graph/graphMenus) ──────
@@ -176,8 +176,7 @@
     tagMenu: (e, t) => menus.tagMenu(e, t),
   });
 
-  // ── Create-PR sheet (opened from branch / commit menus with a pre-filled
-  //    source). Reuses CreatePr.svelte; `initialSource` defaults the dropdown. ──
+  // ── Create-PR sheet (branch / commit menus; `initialSource` pre-fills it). ──
   let createPrOpen = $state(false);
   let createPrSource = $state<string | undefined>(undefined);
   function openCreatePr(source: string): void {
@@ -236,7 +235,7 @@
   />
 {/snippet}
 
-<div class="graphview" class:mobile={vp.isMobile}>
+<div class="graphview" class:mobile={vp.isMobile} class:peek={secRefsOpen && !vp.isMobile}>
   <!-- ── LEFT: refs tree ───────────────────────────────────────────────────── -->
   {#if vp.isMobile}
     <!-- Mobile accordion header for the branches/refs tree. -->
@@ -252,6 +251,7 @@
       <span class="grow"></span>
       {#if data.refs}<span class="mob-sec-count">{data.refs.local.length + data.refs.remote.length + data.refs.tags.length}</span>{/if}
     </button>
+  {:else if sel.detailOpen}<button class="icon-btn refs-peek" aria-pressed={secRefsOpen} title="Branches & tags" aria-label="Branches & tags" onclick={() => (secRefsOpen = !secRefsOpen)}><Icon name="branch" size={13} /></button>
   {/if}
   <RefSidebar {repoId}
     refs={data.refs}
@@ -453,7 +453,7 @@
     onfiletools={fileToolsMenu}
     bind:fileCount={sel.diffFileCount}
     onclose={sel.closeDetail}
-    oncommitted={() => void data.refreshAfter()}
+    oncommitted={(sha) => { sel.selectWhenLoaded(sha); void data.refreshAfter(); }}
   />
 </div>
 
@@ -608,7 +608,7 @@
   /* When detail is open, the commit list becomes a fixed-width column and the
      detail panel flexes to fill the rest of the page (see .detail-visible). */
   .graph-panel.panel-shrunk {
-    --branch-col-w: 108px;
+    --branch-col-w: 112px; /* fits ▾+N and HEAD side by side (History opens on HEAD) */
     flex: 0 0 420px; /* basis overridden by the inline ui.gitGraphListWidth */
     width: auto;
     min-width: 300px;
@@ -697,7 +697,7 @@
   /* min-width 0 down the chain (button → chip): an automatic minimum reads
      the label's full nowrap width as the floor, so a long branch name
      pushed out of the cell's start. The label keeps its own 3ch floor. */
-  .ref-select { flex-shrink: 1; min-width: 0; }
+  .ref-select { flex-shrink: 1; min-width: 0; overflow: hidden; }
   .graph-row:has(.graph-select:focus-visible) {
     outline: 2px solid var(--accent-text);
     outline-offset: -2px;

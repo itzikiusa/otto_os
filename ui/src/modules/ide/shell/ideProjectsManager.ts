@@ -36,7 +36,9 @@ import {
   loadBuildToolPrefsLocal,
   loadNamedProjectsLocal,
   normalizeRootPath,
+  prefetchSavedTabs,
   type ProjectHelperHost,
+  reopenSavedTabs,
   restoreWorkspaceTabsOrInitial,
   saveActiveProjectIdLocal,
   saveAdditionalRootsLocal,
@@ -246,21 +248,8 @@ export async function activateNamedProject(host: NamedProjectsHost, projectId: s
     discardConfirmed: true,
   });
   if (hasSavedTabs) {
-    const activeFirst = savedTabs?.activePath && boundedPaths.includes(savedTabs.activePath)
-      ? savedTabs.activePath
-      : boundedPaths[0];
-    if (activeFirst) {
-      await host.openFile(activeFirst, { preview: false });
-      const activeTab = host.tabs.find((t) => t.path === host.resolvePath(activeFirst));
-      if (activeTab && pinnedSet.has(activeTab.path)) activeTab.pinned = true;
-    }
-    const rest = boundedPaths.filter((p) => p !== activeFirst).slice(0, cap - 1);
-    for (let i = 0; i < rest.length; i++) {
-      void host.openFile(rest[i], { preview: false, background: true });
-      const bgTab = host.tabs.find((t) => t.path === host.resolvePath(rest[i]));
-      if (bgTab && pinnedSet.has(bgTab.path)) bgTab.pinned = true;
-    }
-    if (activeFirst) host.activePath = host.resolvePath(activeFirst);
+    await reopenSavedTabs(host, boundedPaths, { activePath: savedTabs?.activePath, pinned: pinnedSet });
+    void prefetchSavedTabs(host);
   }
 }
 

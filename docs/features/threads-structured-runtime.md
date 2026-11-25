@@ -1257,8 +1257,13 @@ secret question forms are refused instead of being collected into history.
   `session/load`, …). Never while a turn, background work, an approval or
   question, a starting prompt or a queued message is pending. A held child's
   holder exits with it, so a daemon restart adopts nothing for it.
-  (`runtime/auto_close.rs`; evicting the in-memory projection itself
-  remains a follow-up.)
+  The same minute drops from memory (projection, replay ring, DB writer)
+  every loaded thread that no longer needs it: released, closed or failed,
+  and any thread with no agent process quiet for a minute (never spawned in
+  this daemon life, or its agent exited cleanly), its queued DB writes
+  flushed before anyone loads it again. A thread masking a secret from a
+  private request stays. A client that missed events then resumes from the
+  snapshot. (`runtime/auto_close.rs`)
 - **Keeping the Mac awake** (T3 Code #34128): while any thread's turn runs
   or starts, or any terminal agent session is `working`, the daemon holds one
   `caffeinate -i -w <ottod pid>` and releases it 60 s after the last one ends

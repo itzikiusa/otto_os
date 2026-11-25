@@ -65,6 +65,18 @@ pub async fn run_raw(
     timeout: Duration,
     stdin: Option<&[u8]>,
 ) -> Result<CliOutput> {
+    // A spawn + its run (kubectl, k9s, aws): its own span, no argv.
+    let run = run_raw_untraced(program, args, env, timeout, stdin);
+    otto_telemetry::context::measure_result("k8s.cli.exec", run).await
+}
+
+async fn run_raw_untraced(
+    program: &str,
+    args: &[String],
+    env: &[(String, String)],
+    timeout: Duration,
+    stdin: Option<&[u8]>,
+) -> Result<CliOutput> {
     let started = Instant::now();
     let mut cmd = Command::new(program);
     otto_core::aws_env::apply_aws_env(
@@ -932,5 +944,20 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, Error::Upstream(ref m) if m.contains("exceeded 4096")));
+    }
+
+    /// P1-043: a CLI run is its own span.
+    #[tokio::test]
+    async fn a_cli_run_is_a_span() {
+        let (out, names) = otto_telemetry::context::capture(run_raw(
+            "sh",
+            &["-c".into(), "echo hi".into()],
+            &[],
+            Duration::from_secs(10),
+            None,
+        ))
+        .await;
+        assert_eq!(out.unwrap().stdout.trim(), "hi");
+        assert_eq!(names, ["k8s.cli.exec"]);
     }
 }

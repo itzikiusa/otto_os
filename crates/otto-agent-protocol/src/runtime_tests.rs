@@ -80,6 +80,7 @@ impl StructuredDriver for TimedShellDriver {
         let script = r#"
 echo "READY"
 while IFS= read -r _line; do
+  case "$_line" in *bye*) exit 0;; esac
   echo "THINK:first "
   sleep 0.03
   echo "THINK:second "
@@ -877,9 +878,10 @@ async fn closed_and_failed_sessions_evict_from_live_map_after_persistence() {
     .expect("closed session must be evicted from AgentRuntime::live");
 
     let _ = rt.replay(&s_closed.id, 0).await.unwrap();
+    rt.evict_dead(Duration::from_secs(60)).await;
     assert!(
         !rt.inner.live.contains_key(&s_closed.id),
-        "reading closed session history must not re-pin it in AgentRuntime::live"
+        "reading closed session history must not re-pin it past the sweep"
     );
 
     // 2. Failed session whose child exits non-zero evicts once persisted and tasks exit.
@@ -989,6 +991,358 @@ async fn released_sessions_leave_the_live_map_once_their_process_exits() {
         otto_core::agent_runtime::RuntimeSessionStatus::Dormant,
         "released, not closed"
     );
+}
+
+/// A thread with a finished turn whose idle release stopped its process and
+/// evicted it: what a restart leaves too (nothing of it loaded, no process).
+async fn dormant_thread() -> (
+    tempfile::TempDir,
+    Arc<LibTestHost>,
+    AgentRuntime,
+    RuntimeSession,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap().to_string();
+    let host = Arc::new(LibTestHost {
+        root: cwd.clone(),
+        events: Mutex::new(Vec::new()),
+        notify: tokio::sync::Notify::new(),
+    });
+    let drivers: Arc<dyn DriverFactory> = Arc::new(|_| -> Option<Box<dyn StructuredDriver>> {
+        Some(Box::new(TimedShellDriver {
+            turn_id: None,
+            thought_text: String::new(),
+            msg_text: String::new(),
+        }))
+    });
+    let rt = AgentRuntime::new(
+        AgentRuntimeRepo::new(test_pool().await),
+        Arc::clone(&host) as Arc<dyn RuntimeHost>,
+        drivers,
+        RuntimeConfig {
+            close_grace: Duration::from_millis(20),
+            attachments_dir: dir.path().join("att"),
+            ..RuntimeConfig::default()
+        },
+    );
+    let s = rt
+        .create(
+            &"u1".into(),
+            &"w1".into(),
+            CreateRuntimeSessionReq {
+                title_auto: false,
+                provider: Some(RuntimeProvider::Claude),
+                cwd: Some(cwd),
+                title: None,
+                model: None,
+                access_mode: Some(RuntimeAccessMode::FullAccess),
+                meta: None,
+            },
+        )
+        .await
+        .unwrap();
+    rt.prompt(&s.id, "hi").await.unwrap();
+    wait_terminals(&host, 1).await;
+    let later = Utc::now() + chrono::TimeDelta::minutes(31);
+    assert_eq!(
+        rt.release_idle_processes(30, later).await,
+        vec![s.id.clone()]
+    );
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while rt.inner.live.contains_key(&s.id) {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    })
+    .await
+    .expect("the released thread leaves the live map");
+    (dir, host, rt, s)
+}
+
+async fn wait_terminals(host: &LibTestHost, n: usize) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while host
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e.body, RuntimeEventBody::TurnTerminal { .. }))
+            .count()
+            < n
+        {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    })
+    .await
+    .expect("the turn ends");
+}
+
+/// A thread loaded with no agent process of this daemon life (the inbox's
+/// or the pane's read after a restart, or after an idle release evicted it)
+/// stays loaded for the reads that follow (a page, an item, an attachment)
+/// and leaves on the minute's sweep, its writes (here an effort pick)
+/// flushed first. Loaded again it reads the same, a client that missed
+/// events gets the snapshot, and sequences carry on above it.
+#[tokio::test]
+async fn threads_loaded_without_a_process_do_not_stay_in_the_live_map() {
+    use otto_core::agent_runtime::RuntimeReplay;
+    let (_dir, host, rt, s) = dormant_thread().await;
+    // The inbox's read: `?after_sequence=0&tail_turns=1&compact=1`.
+    let read = |after| rt.replay_paged_opts(&s.id, after, Some(1), None, None, true, None);
+    let first = read(0).await.unwrap();
+    assert!(
+        rt.inner.live.contains_key(&s.id),
+        "a read does not drop it: the next one would load it all again"
+    );
+    rt.evict_dead(Duration::ZERO).await;
+    assert!(
+        !rt.inner.live.contains_key(&s.id),
+        "the sweep lets go of a thread with no process"
+    );
+    assert_eq!(
+        read(0).await.unwrap(),
+        first,
+        "loaded again, the same snapshot"
+    );
+    let RuntimeReplay::Snapshot {
+        snapshot_sequence: last,
+        ..
+    } = first
+    else {
+        panic!("a cold read is a snapshot");
+    };
+    assert_eq!(
+        read(last).await.unwrap(),
+        RuntimeReplay::Events {
+            events: Vec::new(),
+            last_sequence: last
+        },
+        "a client up to date gets nothing"
+    );
+    assert!(
+        matches!(read(last - 1).await.unwrap(),
+            RuntimeReplay::Snapshot { snapshot_sequence, .. } if snapshot_sequence == last),
+        "a client that missed an event resumes from the snapshot"
+    );
+
+    rt.set_effort(&s.id, Some("high")).await.unwrap();
+    assert!(rt.inner.live.contains_key(&s.id));
+    rt.evict_dead(Duration::from_secs(3600)).await;
+    assert!(
+        rt.inner.live.contains_key(&s.id),
+        "not before it was quiet for the sweep's while"
+    );
+    rt.evict_dead(Duration::ZERO).await;
+    assert!(!rt.inner.live.contains_key(&s.id));
+    assert_eq!(
+        rt.repo()
+            .get(&s.id)
+            .await
+            .unwrap()
+            .session
+            .effort
+            .as_deref(),
+        Some("high"),
+        "its write landed before it left"
+    );
+
+    let seen = host.events.lock().unwrap().len();
+    rt.prompt(&s.id, "again").await.unwrap();
+    wait_terminals(&host, 2).await;
+    let events = host.events.lock().unwrap();
+    assert!(events[seen..].iter().all(|e| e.sequence > last));
+}
+
+/// The sweep never drops a thread something still needs: a live process,
+/// a holder of its entry (an in-flight request, a pump, a watcher), a
+/// running or starting turn, held streaming upserts, a pending approval or
+/// question, a queued message. WebSocket clients do not hold the entry (each
+/// event goes out through `RuntimeHost::publish`), so they need no guard.
+#[tokio::test]
+async fn the_sweep_keeps_threads_still_in_use() {
+    use otto_core::agent_runtime::{
+        RequestKind, ResponseCapability, RuntimeRequest, RuntimeRequestStatus, TurnOrigin,
+    };
+    let (_dir, host, rt, s) = dormant_thread().await;
+    let stays = |why: &str| assert!(rt.inner.live.contains_key(&s.id), "{why} keeps it");
+    let with = |f: &dyn Fn(&mut super::State)| {
+        let live = Arc::clone(rt.inner.live.get(&s.id).unwrap().value());
+        f(&mut live.lock());
+    };
+    rt.prompt(&s.id, "again").await.unwrap();
+    wait_terminals(&host, 2).await;
+    rt.evict_dead(Duration::ZERO).await;
+    stays("a live process");
+
+    let later = Utc::now() + chrono::TimeDelta::minutes(31);
+    assert_eq!(rt.release_idle_processes(30, later).await.len(), 1);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while rt.inner.live.contains_key(&s.id) {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    rt.set_effort(&s.id, Some("high")).await.unwrap(); // loaded, no process
+    let held = Arc::clone(rt.inner.live.get(&s.id).unwrap().value());
+    rt.evict_dead(Duration::ZERO).await;
+    stays("a holder of the entry");
+    drop(held);
+
+    type Set = fn(&mut super::State);
+    let reasons: [(&str, Set); 5] = [
+        ("a running turn", |st| {
+            st.turn = Some(super::ActiveTurn {
+                id: "t".into(),
+                origin: TurnOrigin::User,
+                interrupting: false,
+                stalled: false,
+            });
+        }),
+        ("a starting turn", |st| st.starting = 1),
+        ("a held streaming upsert", |st| {
+            st.held.push(item(
+                "i".into(),
+                TurnItemStatus::Running,
+                None,
+                TurnItemKind::Reasoning {
+                    text: "…".into(),
+                    streaming: true,
+                },
+            ));
+        }),
+        ("a pending request", |st| {
+            st.proj.requests.insert(
+                "r".into(),
+                RuntimeRequest {
+                    id: "r".into(),
+                    turn_id: None,
+                    kind: RequestKind::Command,
+                    status: RuntimeRequestStatus::Pending,
+                    response_capability: ResponseCapability::Live,
+                    created_at: Utc::now(),
+                    resolved_at: None,
+                    decision: None,
+                    cancel_reason: None,
+                    questions: Vec::new(),
+                    question_title: None,
+                    answers: None,
+                    for_person: false,
+                },
+            );
+        }),
+        ("a queued message", |st| {
+            st.proj.queue.push(super::QueuedRecord {
+                id: "q".into(),
+                created_at: Utc::now(),
+                req: Arc::new(RuntimePromptReq::of("later")),
+                wake: None,
+                error: None,
+            });
+        }),
+    ];
+    for (why, set) in reasons {
+        with(&set);
+        rt.evict_dead(Duration::ZERO).await;
+        stays(why);
+        with(&|st| {
+            st.turn = None;
+            st.starting = 0;
+            st.held.clear();
+            st.proj.requests.remove("r");
+            st.proj.queue.clear();
+        });
+    }
+    rt.evict_dead(Duration::ZERO).await;
+    assert!(!rt.inner.live.contains_key(&s.id), "nothing left: it goes");
+}
+
+/// Writes queued on a thread with no process (an effort pick) land before
+/// it leaves, however a read and the sweep interleave with them: one DB
+/// writer per session at a time, so a reload never reads a stale row.
+#[tokio::test]
+async fn evictions_never_lose_a_queued_write() {
+    let (_dir, _host, rt, s) = dormant_thread().await;
+    for i in 0..40 {
+        let effort = if i % 2 == 0 { "high" } else { "low" };
+        rt.set_effort(&s.id, Some(effort)).await.unwrap();
+        let (r, ()) = tokio::join!(
+            rt.replay_paged_opts(&s.id, 0, Some(1), None, None, true, None),
+            rt.evict_dead(Duration::ZERO),
+        );
+        r.unwrap();
+        rt.evict_dead(Duration::ZERO).await;
+        assert!(!rt.inner.live.contains_key(&s.id));
+        assert_eq!(
+            rt.repo()
+                .get(&s.id)
+                .await
+                .unwrap()
+                .session
+                .effort
+                .as_deref(),
+            Some(effort),
+            "round {i}"
+        );
+    }
+}
+
+/// The same for a closed thread, which every rule lets go: no read drops it
+/// before its queued writes landed.
+#[tokio::test]
+async fn reads_of_a_closed_thread_never_lose_a_queued_write() {
+    let (_dir, _host, rt, s) = dormant_thread().await;
+    rt.close(&s.id).await.unwrap();
+    for i in 0..40 {
+        let effort = if i % 2 == 0 { "high" } else { "low" };
+        rt.set_effort(&s.id, Some(effort)).await.unwrap();
+        rt.replay_paged_opts(&s.id, 0, Some(1), None, None, true, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            rt.get(&s.id).await.unwrap().effort.as_deref(),
+            Some(effort),
+            "round {i}"
+        );
+    }
+    rt.evict_dead(Duration::ZERO).await;
+    assert!(!rt.inner.live.contains_key(&s.id), "the sweep lets it go");
+}
+
+/// A value given through a private secret request is masked only while its
+/// thread is loaded, so a thread holding one never leaves.
+#[tokio::test]
+async fn a_thread_masking_a_secret_stays_loaded() {
+    let (_dir, _host, rt, s) = dormant_thread().await;
+    rt.redact_value(&s.id, "hunter2-secret").await.unwrap();
+    rt.evict_dead(Duration::ZERO).await;
+    rt.replay(&s.id, 0).await.unwrap();
+    assert!(rt.inner.live.contains_key(&s.id));
+}
+
+/// An agent that exits cleanly (code 0) leaves a thread with no process and
+/// no error, which no read lets go: the sweep does.
+#[tokio::test]
+async fn a_thread_whose_agent_exited_cleanly_leaves_on_the_sweep() {
+    let (_dir, host, rt, s) = dormant_thread().await;
+    rt.prompt(&s.id, "bye").await.unwrap();
+    wait_terminals(&host, 2).await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while rt
+            .inner
+            .live
+            .get(&s.id)
+            .is_some_and(|l| l.lock().proc.is_some())
+        {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    })
+    .await
+    .expect("the agent exits");
+    rt.replay(&s.id, 0).await.unwrap();
+    assert!(rt.inner.live.contains_key(&s.id), "no read lets it go");
+    rt.evict_dead(Duration::ZERO).await;
+    assert!(!rt.inner.live.contains_key(&s.id));
 }
 
 #[tokio::test]

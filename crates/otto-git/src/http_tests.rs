@@ -2026,6 +2026,104 @@ async fn pr_detail_fresh_query_bypasses_provider_get_cache() {
     let _ = tokio::fs::remove_dir_all(&repo_dir).await;
 }
 
+/// P1-027: a pinned PR diff (`rev` = the head) also reads the PR's head from
+/// the forge to pick the memo lifetime. That read ran AFTER the diff, so a
+/// cold open paid two forge round trips in series; it now runs beside it.
+/// P3-014: the UI's `?summary=true` on a forge with no summary API (GitHub,
+/// GitLab) falls back to the whole diff: one head read, one round trip.
+#[tokio::test]
+async fn pr_diff_reads_the_memo_lifetime_beside_the_diff() {
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let rtt = std::time::Duration::from_millis(300);
+    let head = json!({"diff_refs": {"base_sha": "0123456789ab", "head_sha": "abc1234def01"}});
+    let mr = |n: u64| format!("/api/v4/projects/acme%2Fapp/merge_requests/{n}");
+    for (p, body) in [102, 103].into_iter().flat_map(|n| {
+        let changes = (format!("{}/changes", mr(n)), json!({"changes": []}));
+        [(mr(n), head.clone()), changes]
+    }) {
+        Mock::given(method("GET"))
+            .and(path(p))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(body)
+                    .set_delay(rtt),
+            )
+            .mount(&server)
+            .await;
+    }
+    let pool = mem_pool().await;
+    let user = seed_user(&pool, "itzik").await;
+    let ws = seed_workspace(&pool).await;
+    let repo_dir = init_git_repo().await;
+    let remote = "ssh://git@gitlab.ssh.example/acme/app.git";
+    LocalGit::new(&repo_dir)
+        .remote_op(crate::ops::RemoteOp::Add, "origin", Some(remote))
+        .await
+        .unwrap();
+    let store = GitStore::new(pool.clone());
+    let account = store
+        .create_account(NewGitAccount {
+            user_id: user.clone(),
+            provider: GitProviderKind::Gitlab,
+            label: "gl".into(),
+            username: "itzik".into(),
+            token_ref: "gl-1".into(),
+            api_base_url: Some(server.uri()),
+            namespace: Some("acme".into()),
+            token_expires_at: None,
+        })
+        .await
+        .unwrap();
+    let repo = store
+        .create_repo(NewRepo {
+            workspace_id: ws,
+            name: "app".into(),
+            path: repo_dir.to_string_lossy().into_owned(),
+            remote_url: Some(remote.into()),
+            provider: Some(GitProviderKind::Gitlab),
+            git_account_id: Some(account.id),
+        })
+        .await
+        .unwrap();
+    let ctx = TestCtx {
+        store,
+        workspaces: WorkspacesRepo::new(pool),
+        secrets: Arc::new(FixedSecret),
+        roles: Arc::new(AllowAll),
+        events: tokio::sync::broadcast::channel(8).0,
+    };
+    for (number, summary) in [(102, None), (103, Some(true))] {
+        let started = std::time::Instant::now();
+        let resp = pr_diff(
+            State(ctx.clone()),
+            Extension(auth(&user, false)),
+            Path((repo.id.clone(), number)),
+            Query(PrDiffQuery {
+                summary,
+                path: None,
+                old_path: None,
+                full: None,
+                rev: Some("abc1234def01".into()),
+                ignore_whitespace: false,
+            }),
+        )
+        .await
+        .unwrap();
+        let took = started.elapsed();
+        assert!(resp.status().is_success());
+        let reads = server.received_requests().await.unwrap();
+        let heads = reads.iter().filter(|r| r.url.path() == mr(number)).count();
+        assert_eq!(heads, 1, "PR {number}: the head is read once");
+        let slow = 2 * rtt - std::time::Duration::from_millis(50);
+        assert!(took < slow, "PR {number}: {took:?}");
+    }
+    let _ = tokio::fs::remove_dir_all(&repo_dir).await;
+}
+
 #[test]
 fn clone_repo_name_validation_requires_single_safe_normal_segment() {
     for good in ["otto", "my-repo_1.0", "repo name"] {

@@ -97,6 +97,11 @@ pub(super) fn find_definitions_with_matcher(
             continue;
         }
         let mask = code_mask_for_line(lang, line, &mut in_block);
+        // Go tracks `const (`/`var (` groups on every line; elsewhere a line without
+        // the symbol cannot define it, so skip building its masked copy.
+        if lang != "go" && !line.contains(symbol) {
+            continue;
+        }
         let masked_code: String = line
             .char_indices()
             .map(|(bi, ch)| {

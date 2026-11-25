@@ -1091,3 +1091,127 @@ async fn idle_change_snapshot_of_just_saved_bytes_is_not_a_second_entry() {
         "the idle Change duplicates the save; a user label on the same bytes is kept: {labels:?}"
     );
 }
+
+/// The project list keeps the order projects were added: re-saving one (a rename, a
+/// folder added, which bumps `updated_at`) or restarting the daemon never moves it.
+#[tokio::test]
+async fn project_list_keeps_added_order_after_a_project_is_touched_and_a_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().join("otto-data");
+    let db_path = tmp.path().join("state.db");
+    let mut roots = Vec::new();
+    for name in ["alpha", "beta", "gamma"] {
+        let dir = tmp.path().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        roots.push(dir.to_string_lossy().into_owned());
+    }
+    let (_ctx, app) = build_test_app(data_dir.clone(), &db_path).await;
+    let mut ids = Vec::new();
+    for (name, root) in ["Alpha", "Beta", "Gamma"].iter().zip(&roots) {
+        let (st, body) = send_json(
+            &app,
+            Method::POST,
+            "/ide/projects",
+            Some(json!({ "name": name, "primary_root": root, "folders": [root] })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        ids.push(body["project"]["id"].as_str().unwrap().to_string());
+    }
+    let names = |body: &serde_json::Value| -> Vec<String> {
+        body["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    // Touch the first project: renamed, with a folder attached.
+    let (st, body) = send_json(&app, Method::POST, "/ide/projects", Some(json!({ "id": ids[0], "name": "Alpha 2", "primary_root": roots[0], "folders": [roots[0], roots[1]] }))).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let (_, list) = send_json(&app, Method::GET, "/ide/projects", None).await;
+    assert_eq!(names(&list), ["Alpha 2", "Beta", "Gamma"]);
+
+    // A daemon restart reads the same order back from the database.
+    drop(app);
+    let (_ctx2, app2) = build_test_app(data_dir, &db_path).await;
+    let (_, list) = send_json(&app2, Method::GET, "/ide/projects", None).await;
+    assert_eq!(names(&list), ["Alpha 2", "Beta", "Gamma"]);
+}
+
+/// The tree restores its open folders in one call: `paths` lists each one alongside the
+/// root listing, in request order, and a folder that is gone is left out.
+#[tokio::test]
+async fn fs_tree_lists_the_requested_folders_in_one_call() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(ws.join("a/b")).unwrap();
+    std::fs::write(ws.join("a/b/deep.ts"), "x").unwrap();
+    std::fs::write(ws.join("top.md"), "x").unwrap();
+    let (_ctx, app) =
+        build_test_app(tmp.path().join("otto-data"), &tmp.path().join("state.db")).await;
+    let ws_str = ws.to_string_lossy().into_owned();
+    let (a, b, gone) = (
+        format!("{ws_str}/a"),
+        format!("{ws_str}/a/b"),
+        format!("{ws_str}/gone"),
+    );
+    let paths = serde_json::to_string(&[&a, &gone, &b]).unwrap();
+    let uri = format!(
+        "/ide/fs/tree?root={}&path=&paths={}",
+        urlencode(&ws_str),
+        urlencode(&paths)
+    );
+    let (st, body) = send_json(&app, Method::GET, &uri, None).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let names = |v: &serde_json::Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(names(&body["entries"]), ["a", "top.md"]);
+    let listings = body["listings"].as_array().unwrap();
+    assert_eq!(listings.len(), 2, "{listings:?}");
+    assert_eq!(listings[0]["path"], a.as_str());
+    assert_eq!(names(&listings[0]["entries"]), ["b"]);
+    assert_eq!(listings[1]["path"], b.as_str());
+    assert_eq!(names(&listings[1]["entries"]), ["deep.ts"]);
+    // Without `paths` the response is the single listing it always was.
+    let (_, one) = send_json(
+        &app,
+        Method::GET,
+        &format!("/ide/fs/tree?root={}", urlencode(&ws_str)),
+        None,
+    )
+    .await;
+    assert!(one.get("listings").is_none());
+
+    // Relative paths work too, and a repeated folder is listed once.
+    let rel = serde_json::to_string(&["a", "a", "a/b"]).unwrap();
+    let uri = format!(
+        "/ide/fs/tree?root={}&path=&paths={}",
+        urlencode(&ws_str),
+        urlencode(&rel)
+    );
+    let (st, body) = send_json(&app, Method::GET, &uri, None).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let got: Vec<&str> = body["listings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(got, ["a", "a/b"]);
+
+    // Past the cap the call is refused (the UI splits a bigger restore), never run.
+    let many: Vec<String> = (0..201).map(|i| format!("d{i}")).collect();
+    let uri = format!(
+        "/ide/fs/tree?root={}&path=&paths={}",
+        urlencode(&ws_str),
+        urlencode(&serde_json::to_string(&many).unwrap())
+    );
+    let (st, body) = send_json(&app, Method::GET, &uri, None).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+}

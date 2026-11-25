@@ -1994,12 +1994,7 @@ pub async fn gateway_tools(
     Query(q): Query<GatewayToolsQuery>,
 ) -> ApiResult<Json<Value>> {
     crate::auth::require_ws_role(&ctx, &user, &q.workspace_id, WorkspaceRole::Viewer).await?;
-    let servers = ctx
-        .mcp
-        .registry()
-        .list_for_ws(&q.workspace_id)
-        .await
-        .map_err(ApiError)?;
+    let servers = ctx.mcp.registry().list_for_ws(&q.workspace_id).await?;
     let mut tools: Vec<Value> = Vec::new();
     // The caller's capability / groups / membership: read once for every
     // server below, not once per server (perf2/10-mcp R1).
@@ -2069,9 +2064,6 @@ pub async fn gateway_invoke(
     Json(req): Json<GatewayInvokeReq>,
 ) -> ApiResult<Json<Value>> {
     let server = ctx.mcp.registry().get(&req.server_id).await?;
-    if server.workspace_id != req.workspace_id {
-        return Err(Error::Forbidden("MCP workspace mismatch".into()).into());
-    }
     let policy = otto_state::ResourceAccessRepo::new(ctx.pool.clone())
         .get_policy(otto_core::access::ResourceKind::McpServer, &server.id)
         .await?;
@@ -2080,7 +2072,7 @@ pub async fn gateway_invoke(
     } else {
         WorkspaceRole::Viewer
     };
-    crate::auth::require_ws_role(&ctx, &user, &server.workspace_id, role).await?;
+    crate::auth::require_ws_role(&ctx, &user, &req.workspace_id, role).await?;
     if policy.mode == otto_core::access::AccessMode::Legacy {
         otto_state::GrantsRepo::new(ctx.pool.clone())
             .check_global(

@@ -1196,3 +1196,144 @@ async fn mysql_text_collated_varbinary_decodes_as_text() {
     let binary: Vec<_> = res.columns.iter().map(|c| c.binary).collect();
     assert_eq!(binary, vec![false, true]);
 }
+
+/// A relay to `upstream` that counts the client's `COM_PING` packets.
+async fn ping_counting_proxy(
+    upstream: u16,
+) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let writes = std::sync::Arc::new(AtomicUsize::new(0));
+    let seen = writes.clone();
+    tokio::spawn(async move {
+        while let Ok((client, _)) = listener.accept().await {
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                let server = tokio::net::TcpStream::connect(("127.0.0.1", upstream))
+                    .await
+                    .unwrap();
+                let (mut cr, mut cw) = client.into_split();
+                let (mut sr, mut sw) = server.into_split();
+                let up = async move {
+                    let mut buf = vec![0u8; 64 * 1024];
+                    while let Ok(n) = cr.read(&mut buf).await {
+                        if n == 0 || sw.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                        // 1-byte payload, sequence 0, command 0x0e.
+                        if buf[..n].windows(5).any(|p| p == [1, 0, 0, 0, 0x0e]) {
+                            seen.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                };
+                let down = async move {
+                    let _ = tokio::io::copy(&mut sr, &mut cw).await;
+                };
+                tokio::join!(up, down);
+            });
+        }
+    });
+    (port, writes)
+}
+
+/// A pooled connection used moments ago goes straight to work: no `COM_PING`
+/// round trip in front of every keep-alive `test()` and every query. (sqlx
+/// still pings once on release, in the background after the answer, so a
+/// warm op sends at most that one.)
+#[tokio::test]
+#[ignore]
+async fn mysql_warm_pool_skips_the_acquire_ping() {
+    use std::sync::atomic::Ordering;
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let upstream = std::env::var("OTTO_MYSQL_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(13306);
+    let (port, pings) = ping_counting_proxy(upstream).await;
+    let cfg = ResolvedConfig { port, ..cfg() };
+    let d = MysqlDriver::default();
+    for _ in 0..8 {
+        assert!(d.test(&cfg).await.unwrap().ok); // open + settle the pool
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let before = pings.load(Ordering::SeqCst);
+    for _ in 0..5 {
+        assert!(d.test(&cfg).await.unwrap().ok);
+        d.schema_root(&cfg).await.unwrap();
+    }
+    let pings = pings.load(Ordering::SeqCst) - before;
+    assert!(
+        pings <= 10,
+        "10 warm ops sent {pings} pings: one goes in front of each"
+    );
+}
+
+/// A relay to `upstream`; `drop_all()` closes every connection it carries
+/// (what a proxy, load balancer or bounced tunnel does to an idle socket).
+async fn dropping_proxy(upstream: u16) -> (u16, impl Fn()) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let relays = std::sync::Arc::new(std::sync::Mutex::new(
+        Vec::<tokio::task::JoinHandle<()>>::new(),
+    ));
+    let held = relays.clone();
+    tokio::spawn(async move {
+        while let Ok((mut client, _)) = listener.accept().await {
+            held.lock().unwrap().push(tokio::spawn(async move {
+                let mut server = tokio::net::TcpStream::connect(("127.0.0.1", upstream))
+                    .await
+                    .unwrap();
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+            }));
+        }
+    });
+    let drop_all = move || {
+        relays
+            .lock()
+            .unwrap()
+            .drain(..)
+            .for_each(|relay| relay.abort())
+    };
+    (port, drop_all)
+}
+
+/// What the service's dead-session handling relies on, against real sockets:
+/// a pooled session a proxy dropped moments ago fails with sqlx's I/O text
+/// (`error communicating with database`, what `service::dead_session`
+/// matches), and once the pool is dropped (`detach`) the reads answer again.
+#[tokio::test]
+#[ignore]
+async fn mysql_dropped_sessions_fail_as_io_and_a_fresh_pool_answers() {
+    use otto_dbviewer::driver::Driver as _;
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let upstream = std::env::var("OTTO_MYSQL_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(13306);
+    let (port, drop_all) = dropping_proxy(upstream).await;
+    let cfg = ResolvedConfig { port, ..cfg() };
+    let d = MysqlDriver::default();
+    let path = NodePath::parse("db:shopdb/table:orders");
+    d.object_detail(&cfg, &path).await.unwrap(); // several pooled sessions
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    drop_all();
+    let test = d.test(&cfg).await.unwrap();
+    assert!(!test.ok, "a dead session is handed out unpinged");
+    assert!(
+        test.message.contains("error communicating with database"),
+        "{}",
+        test.message
+    );
+    drop(d.detach(&cfg.cache_key()));
+    for _ in 0..3 {
+        assert!(d.test(&cfg).await.unwrap().ok);
+        d.schema_root(&cfg).await.unwrap();
+        d.object_detail(&cfg, &path).await.unwrap();
+    }
+}

@@ -59,14 +59,20 @@ export function turnChanges(items: readonly TurnItem[], turnId: string, cwd: str
 
 /** Every finished turn's changes in ONE pass over `items` (the timeline's
  *  changes cards): `turnChanges` per turn rescanned every item for every
- *  turn on each stream event. */
-let lastChanges: { cwd: string | null | undefined; edits: TurnItem[]; out: Map<string, FileDelta[]> } | null = null;
+ *  turn on each stream event. The last result is kept per thread (keyed by
+ *  its first item): one slot for all made two streaming threads evict each
+ *  other on every flush. */
+const lastChanges = new WeakMap<TurnItem, { cwd: string | null | undefined; edits: TurnItem[]; out: Map<string, FileDelta[]> }>();
+/** No finished edit (most threads, and an empty one): always this one Map. */
+const NO_CHANGES: Map<string, FileDelta[]> = new Map();
 
 export function turnChangesByTurn(items: readonly TurnItem[], cwd: string | null | undefined): Map<string, FileDelta[]> {
   // A streamed chunk of the answer changes no file edit: the same edits in,
   // the same Map (and arrays) out — what reads it stays put.
   const edits = items.filter((it) => it.type === 'file_change' && !!it.turn_id && !it.parent_item_id && it.status === 'completed' && !it.error);
-  if (lastChanges && lastChanges.cwd === cwd && sameItems(lastChanges.edits, edits)) return lastChanges.out;
+  if (!edits.length) return NO_CHANGES;
+  const prev = items[0] && lastChanges.get(items[0]);
+  if (prev && prev.cwd === cwd && sameItems(prev.edits, edits)) return prev.out;
   perfCount('turnChangesByTurn');
   const byTurn = new Map<string, Map<string, FileDelta>>();
   for (const it of edits) {
@@ -83,7 +89,7 @@ export function turnChangesByTurn(items: readonly TurnItem[], cwd: string | null
     m.set(path, d);
   }
   const out = new Map([...byTurn].map(([t, m]) => [t, [...m.values()]]));
-  lastChanges = { cwd, edits, out };
+  if (items[0]) lastChanges.set(items[0], { cwd, edits, out });
   return out;
 }
 

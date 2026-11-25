@@ -1,12 +1,20 @@
-// Incremental streaming splitter for `Markdown.svelte`: separates completed
-// top-level blocks (`settled`, cached once per paragraph/fence in `mdCache`)
-// from the active trailing paragraph or open code fence (`tail`, rendered
-// without polluting `mdCache` on every intermediate token delta).
+// Incremental streaming splitter for `Markdown.svelte`: cuts the completed
+// top-level blocks (`blocks`, each rendered once while the answer streams)
+// from the active trailing paragraph or open code fence (`tail`, re-rendered
+// on every delta). `blocks.join('') + tail === md`.
 
 const REF_DEF_OR_FOOTNOTE_RE = /(?:^\s*\[[^\]^]+\]:|\[\^[^\]]+\])/m;
+// A fence is indented 0–3 spaces (4 is an indented code block), and a backtick
+// fence's info string holds no backtick (``` ```foo``` ``` is inline code).
+const FENCE_RE = /^ {0,3}(```+|~~~+)(.*)$/;
+// Container HTML blocks a person writes across blank lines (<details>, <div>…):
+// opened on lines that start with a tag (so a `<div>` in prose never counts; a
+// self-closing `<div />` opens nothing), closed by a closing tag anywhere on a line.
+const HTML_OPEN_RE = /<(?:details|div|section|table|blockquote|figure|dl)\b[^>]*(?<!\/)>/gi;
+const HTML_CLOSE_RE = /<\/(?:details|div|section|table|blockquote|figure|dl)\s*>/gi;
 
 export interface StreamingMdSplit {
-  settled: string;
+  blocks: string[];
   tail: string;
 }
 
@@ -14,11 +22,13 @@ export function splitStreamingMarkdown(md: string): StreamingMdSplit {
   // Short blocks or documents using reference-style links/footnotes render in
   // one pass so cross-paragraph link definitions always resolve.
   if (md.length < 320 || REF_DEF_OR_FOOTNOTE_RE.test(md)) {
-    return { settled: '', tail: md };
+    return { blocks: [], tail: md };
   }
 
+  const blocks: string[] = [];
   let openFence: string | null = null;
-  let lastSafeSplit = -1;
+  let htmlDepth = 0;
+  let lastCut = 0;
   let pos = 0;
 
   while (pos < md.length) {
@@ -27,29 +37,26 @@ export function splitStreamingMarkdown(md: string): StreamingMdSplit {
     const rawLine = md.slice(pos, lineEnd);
     const trimmed = rawLine.trimStart();
 
-    const fenceMatch = /^(```+|~~~+)/.exec(trimmed);
-    if (fenceMatch) {
-      const marker = fenceMatch[1];
+    const fence = FENCE_RE.exec(rawLine);
+    if (fence && !(fence[1][0] === '`' && fence[2].includes('`'))) {
+      const marker = fence[1];
       if (!openFence) {
         openFence = marker;
-      } else if (
-        marker[0] === openFence[0] &&
-        marker.length >= openFence.length &&
-        trimmed.slice(marker.length).trim() === ''
-      ) {
+      } else if (marker[0] === openFence[0] && marker.length >= openFence.length && fence[2].trim() === '') {
         openFence = null;
       }
-    } else if (!openFence && trimmed === '' && pos > 0) {
-      // Blank line outside any open fence: check that the next line isn't
-      // indented continuation inside a list item (`  ...`) or a table row (`|`).
+    } else if (!openFence && (htmlDepth > 0 || /^ {0,3}</.test(rawLine))) {
+      const opens = /^ {0,3}</.test(rawLine) ? (rawLine.match(HTML_OPEN_RE)?.length ?? 0) : 0;
+      htmlDepth = Math.max(0, htmlDepth + opens - (rawLine.match(HTML_CLOSE_RE)?.length ?? 0));
+    } else if (!openFence && !htmlDepth && trimmed === '' && pos > 0) {
+      // Blank line outside any open fence: no cut when the next line continues
+      // a list (an indented line, or the next item of a loose list) or a table.
       const nextStart = nl === -1 ? md.length : nl + 1;
       const nextNl = md.indexOf('\n', nextStart);
       const nextLine = md.slice(nextStart, nextNl === -1 ? md.length : nextNl);
-      if (
-        nextLine.length > 0 &&
-        !/^(?: {2,}|\t|\|)/.test(nextLine)
-      ) {
-        lastSafeSplit = nextStart;
+      if (nextLine.length > 0 && !/^(?: {2,}|\t|\||(?:[-*+]|\d+[.)])\s)/.test(nextLine)) {
+        blocks.push(md.slice(lastCut, nextStart));
+        lastCut = nextStart;
       }
     }
 
@@ -57,11 +64,35 @@ export function splitStreamingMarkdown(md: string): StreamingMdSplit {
     pos = nl + 1;
   }
 
-  if (lastSafeSplit <= 0 || lastSafeSplit >= md.length) {
-    return { settled: '', tail: md };
-  }
-  return {
-    settled: md.slice(0, lastSafeSplit),
-    tail: md.slice(lastSafeSplit),
+  return { blocks, tail: md.slice(lastCut) };
+}
+
+export interface StreamingBlocksRenderer {
+  (md: string): string[];
+  /** The answer is done: its streamed blocks when together they are `whole`
+   *  (so their DOM stays), else `[whole]`. The memo is let go either way. */
+  finish(md: string, whole: string): string[];
+}
+
+/** Per-block html for one streaming answer: a settled block renders once (and
+ *  keeps the same html string while its source is unchanged), the open tail
+ *  on every call. */
+export function streamingBlocksRenderer(render: (md: string) => string): StreamingBlocksRenderer {
+  let memo: { md: string; html: string }[] = [];
+  const next = ((md: string): string[] => {
+    const { blocks, tail } = splitStreamingMarkdown(md);
+    const out = blocks.map((b, i) => {
+      if (memo[i]?.md !== b) memo[i] = { md: b, html: render(b) };
+      return memo[i].html;
+    });
+    memo = memo.slice(0, blocks.length);
+    if (tail) out.push(render(tail));
+    return out;
+  }) as StreamingBlocksRenderer;
+  next.finish = (md, whole) => {
+    const parts = next(md);
+    memo = [];
+    return parts.join('') === whole ? parts : [whole];
   };
+  return next;
 }

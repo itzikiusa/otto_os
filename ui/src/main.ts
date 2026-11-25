@@ -15,8 +15,10 @@ import { installMacFunctionKeyGuard } from './lib/macFunctionKeyGuard';
 import { fitToVisualViewport } from './lib/viewportFit';
 import { holdTouchScroll } from './lib/holdTouchScroll';
 import { composerTraceOn } from './lib/composerTrace';
+import { installAppInactive } from './lib/appInactive';
 
 installMacFunctionKeyGuard(document);
+installAppInactive(document, window, isEmbedded);
 // The composer trace, when this device switched it on (lib/composerTrace.ts).
 if (composerTraceOn()) void import('./lib/composerTraceRecorder').then((m) => m.startComposerTrace());
 // Touch devices (phones, tablets, and hybrid tablets with an attached keyboard):

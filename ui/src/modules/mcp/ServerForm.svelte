@@ -20,6 +20,10 @@
     McpTransport,
   } from '../../lib/api/types';
   import { MCP_SERVER_TEMPLATES, type McpServerTemplate } from './templates';
+  import AvailableIn from './AvailableIn.svelte';
+  import { scopeBody, scopeConfirm, widens, type Scope, type ScopeMode } from './serverScope';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
 
   interface Props {
     wsId: string;
@@ -48,6 +52,12 @@
   let defaultToolAccess = $state<McpToolAccess>('allow');
   let enabled = $state(false);
   let advancedOpen = $state(false);
+  let scope = $state<Scope>({ all: false, shared: [] });
+  let scopeMode = $state<ScopeMode>('this');
+  // A direct server is never shared; "Selected" needs a pick.
+  const shareable = $derived(runs === 'governed');
+  const scopeIncomplete = $derived(shareable && scopeMode === 'selected' && scope.shared.length === 0);
+  const wsName = (id: string) => ws.workspaces.find((w) => w.id === id)?.name ?? id;
 
   let saving = $state(false);
 
@@ -140,6 +150,10 @@
       announce(invalid, { assertive: true });
       return;
     }
+    if (shareable && widens({ all: false, shared: [] }, scope)) {
+      const c = scopeConfirm(name.trim(), scope, wsName);
+      if (!(await confirmer.ask(c.message, { title: c.title, confirmLabel: c.confirmLabel }))) return;
+    }
     if (runs === 'native') return saveNative();
     const body: CreateMcpControlServerReq = {
       name: name.trim(),
@@ -148,6 +162,7 @@
       injection_risk: injectionRisk,
       default_tool_access: defaultToolAccess,
       enabled,
+      ...scopeBody(scope),
     };
     if (transport === 'stdio') {
       body.command = command.trim();
@@ -304,6 +319,8 @@
     {/if}
     {/if}
 
+    <AvailableIn home={wsId} bind:scope bind:mode={scopeMode} native={!shareable} />
+
     <label class="check">
       <input type="checkbox" bind:checked={enabled} />
       <span>{runs === 'native' ? 'Enable now (written to .mcp.json for new sessions)' : 'Enable now (governed by the control plane)'}</span>
@@ -312,7 +329,7 @@
 
   {#snippet footer()}
     <button class="btn" onclick={onclose} disabled={saving}>Cancel</button>
-    <button class="btn primary" onclick={save} disabled={saving}>
+    <button class="btn primary" onclick={save} disabled={saving || scopeIncomplete} title={scopeIncomplete ? 'Pick at least one workspace' : undefined}>
       {saving ? 'Adding…' : 'Add server'}
     </button>
   {/snippet}

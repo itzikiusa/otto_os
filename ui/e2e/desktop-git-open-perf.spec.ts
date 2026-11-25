@@ -9,15 +9,17 @@ import { openPage } from './helpers';
 // Opening a repository on the Git page (perf G6): what the daemon is asked
 // for in the first seconds. The repos are local clones of THIS repository
 // (thousands of commits, a real refs list), so the numbers are the ones the
-// owner pays, not a three-commit fixture's. A clean clone opens on History,
-// a dirty one on Changes.
+// owner pays, not a three-commit fixture's. Both open on History: a clean
+// clone on its checked-out commit, a dirty one on its WIP row.
 //
-// Budget: a dirty clone 3 requests (overview, the opening fetch, the first
-// file's diff); a clean one 4 (overview, fetch, the first log page, and the
-// cheap /refs check the fetch's refs bump asks for — the only way the graph
-// learns what the fetch brought). The overview carries refs, stashes,
-// worktrees and submodules: none is read again. The first log page asks for
-// at most 200 commits (more load on scroll).
+// Budget: 7 requests for either — the overview, the opening fetch, the first
+// log page (asked beside the overview, not after it), what the landing shows
+// (a dirty clone's first WIP file diff, a clean one's HEAD commit summary and,
+// for a small commit, its patch),
+// the pull mode, and the cheap /refs check a fetch's refs bump asks for (the
+// only way the graph learns what the fetch brought). The overview carries
+// refs, stashes, worktrees and submodules: none is read again. The first log
+// page asks for at most 200 commits (more load on scroll).
 
 const CLEAN = 'e2e-open-perf-clean';
 const DIRTY = 'e2e-open-perf-dirty';
@@ -68,8 +70,8 @@ async function openAndCount(page: Page, name: string): Promise<string[]> {
 }
 
 for (const name of [CLEAN, DIRTY]) {
-  const budget = name === CLEAN ? 4 : 3;
-  test(`opening a repository (${name === CLEAN ? 'clean → History' : 'dirty → Changes'}): ≤ ${budget} requests, first log page ≤ 200`, async ({ page }, info) => {
+  const budget = 7;
+  test(`opening a repository (${name === CLEAN ? 'clean → History, HEAD' : 'dirty → History, WIP'}): ≤ ${budget} requests, first log page ≤ 200`, async ({ page }, info) => {
     test.skip(info.project.name !== 'desktop-browser', 'request counts are engine-independent');
     const seen = await openAndCount(page, name);
     const limits = seen.map((s) => /\/log\?.*limit=(\d+)/.exec(s)?.[1]).filter(Boolean).map(Number);

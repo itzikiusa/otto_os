@@ -365,7 +365,7 @@ self-heal queues a part-rewriting mutation; background TTL merges apply the wind
 time it is inserted), so a deferred row still lands in the right day, budget window
 and swarm turn. The writer flushes buffered events every **90 s** (or at 2,000 events,
 before any usage read — the read waits up to 2 s for that flush, so it sees every
-row recorded before it — and on shutdown, which waits for that final flush), with server-side `async_insert=1&wait_for_async_insert=1`, and both
+row recorded before it — and on shutdown, which waits for that final flush), as synchronous inserts (`async_insert=0`: with one writer per table the server's async buffer merged nothing and made every insert, and so every read, wait ≥ 50 ms), and both
 tables use `old_parts_lifetime = 60`. Each flush is one part that is later merged into
 the month's partition, so the coarse cadence keeps merge I/O low (at 15 s a month's
 partition was rewritten ~1,300 times in three days). Usage flushes are **background**

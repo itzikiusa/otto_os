@@ -548,11 +548,31 @@ export function agentTasks(
 const shared = new Map<string, { items: readonly TurnItem[]; background: readonly BackgroundTask[]; output: unknown; kids: string; json: string; value: AgentTasks }>();
 const SHARED_MAX = 16;
 
+/** `b` is `a` with only a top-level answer / thinking item's text grown (a
+ *  streamed chunk): nothing `agentTasks` reads changed — not the items it
+ *  folds, nor their start times (latest activity). */
+function onlyTextGrew(a: readonly TurnItem[], b: readonly TurnItem[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i];
+    const y = b[i];
+    if (x === y) continue;
+    if ((x.type !== 'assistant_message' && x.type !== 'reasoning') || x.type !== y.type || x.id !== y.id || x.parent_item_id || !x.started_at || x.started_at !== y.started_at) return false;
+  }
+  return true;
+}
+
 export function sharedAgentTasks(key: string, items: readonly TurnItem[], background: readonly BackgroundTask[], opts: AgentTasksOptions = {}): AgentTasks {
   const kids = (opts.childThreads ?? []).map((c) => `${c.id}\u0001${c.status}\u0001${c.lastTurnStatus ?? ''}\u0001${c.title}\u0001${c.stepSummary ?? ''}`).join('\u0002');
   const output = opts.output ?? null;
   const hit = shared.get(key);
-  if (hit && hit.items === items && hit.background === background && hit.output === output && hit.kids === kids) return hit.value;
+  // (No background tasks is often a fresh `[]` per call.)
+  const sameBackground = hit && (hit.background === background || (!hit.background.length && !background.length));
+  if (hit && sameBackground && hit.output === output && hit.kids === kids && (hit.items === items || onlyTextGrew(hit.items, items))) {
+    hit.items = items;
+    hit.background = background;
+    return hit.value;
+  }
   // A streamed chunk of the answer is a new items array but rarely a new
   // task: an equal result keeps the old object, so what reads it stays put.
   const fresh = agentTasks(items, background, opts);

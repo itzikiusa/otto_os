@@ -7,6 +7,7 @@
   let coreThemeMod: typeof CmIdeThemeType | null = null;
   let coreHistMod: typeof CmIdeHistType | null = null;
   let coreSmartMod: typeof CmEditorSmartType | null = null;
+  let loadedIdeMod: typeof import('./cm-ide-extensions') | null = null; // once loaded, every new editor builds its IDE extensions in its FIRST state
   export function registerIdeEditorCore(
     themeMod: typeof CmIdeThemeType,
     histMod?: typeof CmIdeHistType | null,
@@ -141,13 +142,11 @@
       () => langExtOf(forPath ?? (livePath || path), language),
     );
 
-  let ideMod: typeof CmIdeMod | null = null;
-  let ideModPromise: Promise<typeof CmIdeMod> | null = null;
+  let ideMod: typeof CmIdeMod | null = loadedIdeMod, ideModPromise: Promise<typeof CmIdeMod> | null = null;
   let ideMounted = false, appliedIdePath = '', appliedManifestDepsPath = '';
   let appliedKeymapPreset: 'jetbrains' | 'standard' = 'jetbrains';
 
-  const ensureIdeMod = (): Promise<typeof CmIdeMod> =>
-    ideMod ? Promise.resolve(ideMod) : (ideModPromise ??= import('./cm-ide-extensions').then((m) => ((ideMod = m), m)));
+  const ensureIdeMod = (): Promise<typeof CmIdeMod> => ideMod ? Promise.resolve(ideMod) : (ideModPromise ??= import('./cm-ide-extensions').then((m) => ((ideMod = loadedIdeMod = m), m)));
 
   function isIdeActive(): boolean {
     return Boolean(
@@ -223,7 +222,8 @@
         })
       : [];
 
-  let appliedPlain = false;
+  let appliedPlain = false, appliedThemeKey = '', ideSent: Record<string, unknown[]> | null = null; // ideSent: per prop effect, the values the state holds (set by createState and by each effect run)
+  const idePropVals = (): Record<string, unknown[]> => ({ base: [savedContent, gitBaseContent], blame: [blameByLine], bp: [breakpoints, breakpointsMuted], gutter: [gutterItems], debug: [effectivePausedLine, selectedFrameLine, inlineValues], peers: [peerCursors] });
   const plainWatcher = createPlainLineWatch({
     getLimit: () => highlightLineLimit,
     isPlain: () => appliedPlain,
@@ -457,7 +457,7 @@
     const hk = readOnly ? null : (historyKey?.(filePath) ?? null), limit = highlightLineLimit;
     const doc = limit > 0 ? Text.of(fileContent.split(/\r\n?|\n/)) : null;
     appliedPlain = !!doc && hasLongLine(doc, limit);
-    appliedLanguage = language;
+    appliedLanguage = language; appliedThemeKey = untrack(() => `${ui.resolvedScheme}|${effectiveIdeScheme}`);
     const langExt = cmLangFor(filePath, language);
     appliedLangReady = langExt != null || !cmLangPending(langExtOf(filePath, language));
 
@@ -487,6 +487,7 @@
       ...(hk || (ideMode && !readOnly) ? [historySaver] : []),
       ...(oncopy || ideMode ? [copyRecorder] : []),
     ];
+    ideSent = ideMounted ? untrack(idePropVals) : null;
 
     const restored = restoreOrCreateEditorState({
       filePath, fileContent, doc, savedContent, baseExtensions, ideMode, readOnly, hk, coreHistMod,
@@ -704,14 +705,13 @@
     return () => window.removeEventListener('otto:ide-prefs-changed', onPrefs);
   });
 
-  function syncIdeEffect(
-    needMount: boolean,
-    makeEffect: (m: typeof CmIdeMod) => StateEffect<unknown> | StateEffect<unknown>[],
-  ): void {
+  function syncIdeEffect(key: string, needMount: boolean, makeEffect: (m: typeof CmIdeMod) => StateEffect<unknown> | StateEffect<unknown>[]): void {
+    const vals = untrack(idePropVals)[key], held = ideSent?.[key]; // the caller's own reads are what it tracks
     untrack(() => {
       if (!view) return;
+      if (ideSent) ideSent[key] = vals;
       if (!ideMounted && needMount) mountIdeExtensions(view);
-      else if (ideMod && ideMounted) view.dispatch({ effects: makeEffect(ideMod) });
+      else if (ideMod && ideMounted && !held?.every((v, i) => v === vals[i])) view.dispatch({ effects: makeEffect(ideMod) });
     });
   }
   $effect(() => {
@@ -719,7 +719,7 @@
     const diffBase = gitBaseContent !== undefined ? gitBaseContent : diskSaved;
     const baseSrc: 'git' | 'saved' = gitBaseContent !== undefined ? 'git' : 'saved';
     if (livePath === path) liveSavedContent = diskSaved;
-    syncIdeEffect(
+    syncIdeEffect('base',
       diffBase != null || diskSaved != null,
       (m) => [
         m.setSavedContentEffect.of(diffBase),
@@ -728,18 +728,18 @@
       ],
     );
   });
-  $effect(() => { const v = blameByLine; syncIdeEffect(v != null, (m) => m.setBlameLinesEffect.of(v)); });
-  $effect(() => { const b = breakpoints, mu = breakpointsMuted; syncIdeEffect(b.length > 0 || !!onToggleBreakpoint, (m) => m.setBreakpointsEffect.of({ breakpoints: b, muted: mu })); });
-  $effect(() => { const v = gutterItems; syncIdeEffect(v.length > 0, (m) => m.setGutterItemsEffect.of(v)); });
+  $effect(() => { const v = blameByLine; syncIdeEffect('blame', v != null, (m) => m.setBlameLinesEffect.of(v)); });
+  $effect(() => { const b = breakpoints, mu = breakpointsMuted; syncIdeEffect('bp', b.length > 0 || !!onToggleBreakpoint, (m) => m.setBreakpointsEffect.of({ breakpoints: b, muted: mu })); });
+  $effect(() => { const v = gutterItems; syncIdeEffect('gutter', v.length > 0, (m) => m.setGutterItemsEffect.of(v)); });
   $effect(() => {
     const p = effectivePausedLine, sf = selectedFrameLine, iv = inlineValues, curPath = path;
-    syncIdeEffect(p != null || sf != null || iv.length > 0, (m) => m.setDebugDecorationsEffect.of({ pausedLine: p, selectedLine: sf, inlineValues: iv }));
+    syncIdeEffect('debug', p != null || sf != null || iv.length > 0, (m) => m.setDebugDecorationsEffect.of({ pausedLine: p, selectedLine: sf, inlineValues: iv }));
     const execKey = p != null && p >= 1 ? `${curPath}:${p}` : '';
     if (!execKey) { prevScrolledExecKey = ''; return; }
     if (execKey === prevScrolledExecKey) return;
     untrack(() => { if (view && livePath === curPath) scrollToPausedLineIfNeeded(curPath); });
   });
-  $effect(() => { const v = peerCursors; syncIdeEffect(v.length > 0, (m) => m.setPeerCursorsEffect.of(v)); });
+  $effect(() => { const v = peerCursors; syncIdeEffect('peers', v.length > 0, (m) => m.setPeerCursorsEffect.of(v)); });
   $effect(() => {
     const preset = keymapPreset;
     if (!view || !ideMod || !ideMounted || preset === appliedKeymapPreset) return;
@@ -800,8 +800,8 @@
     appliedPlaceholder = text; view.dispatch({ effects: placeholderCompartment.reconfigure(placeholderExt(text)) });
   });
   $effect(() => {
-    const scheme = ui.resolvedScheme, _eff = effectiveIdeScheme; void _eff;
-    if (view) view.dispatch({ effects: themeCompartment.reconfigure(themeExt(scheme, appliedPlain)) });
+    const scheme = ui.resolvedScheme, key = `${scheme}|${effectiveIdeScheme}`; // a new view's first state has this theme
+    if (view && key !== appliedThemeKey) { appliedThemeKey = key; view.dispatch({ effects: themeCompartment.reconfigure(themeExt(scheme, appliedPlain)) }); }
   });
   let prevGoto: string | null = null;
   $effect(() => {

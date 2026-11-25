@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
 use crate::convert::{dberr, dberr_unique, fmt, json};
+use crate::mcp_scope::available_in;
 
 // ===========================================================================
 // Wire / domain structs
@@ -56,6 +57,14 @@ pub struct McpServerDetail {
     pub created_by: Id,
     pub created_at: String,
     pub updated_at: String,
+    /// Available in every workspace, including ones created later
+    /// ([`crate::mcp_scope`]).
+    #[serde(default)]
+    pub all_workspaces: bool,
+    /// The other workspaces (besides the home `workspace_id`) it was shared
+    /// with, sorted. Cleared for a caller who may not configure the server.
+    #[serde(default)]
+    pub shared_workspace_ids: Vec<Id>,
 }
 
 /// Fields to create a control-plane server. Secret values are handed to the
@@ -365,12 +374,22 @@ fn row_to_detail(r: &sqlx::sqlite::SqliteRow) -> McpServerDetail {
         created_by: r.get("created_by"),
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),
+        all_workspaces: r.get::<i64, _>("all_workspaces") != 0,
+        shared_workspace_ids: {
+            let mut ids = parse_vec(&r.get::<String, _>("shared_json"));
+            ids.sort();
+            ids
+        },
     }
 }
 
+/// Every registry read: the row plus the workspaces it was shared with.
+pub(crate) const DETAIL_SELECT: &str = "SELECT s.*, (SELECT json_group_array(l.workspace_id) \
+     FROM mcp_server_workspaces l WHERE l.server_id = s.id) AS shared_json FROM mcp_servers s";
+
 #[derive(Clone)]
 pub struct McpRegistryRepo {
-    pool: DbPool,
+    pub(crate) pool: DbPool,
 }
 
 impl McpRegistryRepo {
@@ -423,16 +442,24 @@ impl McpRegistryRepo {
     }
 
     pub async fn get(&self, id: &Id) -> Result<McpServerDetail> {
-        let r = sqlx::query("SELECT * FROM mcp_servers WHERE id = ?")
-            .bind(id)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(dberr("mcp server"))?;
+        let r = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "{DETAIL_SELECT} WHERE s.id = ?"
+        )))
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(dberr("mcp server"))?;
         Ok(row_to_detail(&r))
     }
 
+    /// The servers workspace `ws` has: its own and the ones shared with it
+    /// ([`crate::mcp_scope::available_in`]).
     pub async fn list_for_ws(&self, ws: &Id) -> Result<Vec<McpServerDetail>> {
-        let rows = sqlx::query("SELECT * FROM mcp_servers WHERE workspace_id = ? ORDER BY name")
+        let sql = format!(
+            "{DETAIL_SELECT} WHERE {} ORDER BY s.name",
+            available_in("?1")
+        );
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(ws)
             .fetch_all(&self.pool)
             .await
@@ -442,10 +469,12 @@ impl McpRegistryRepo {
 
     /// All managed servers across all workspaces (for the background health sweep).
     pub async fn list_all_managed(&self) -> Result<Vec<McpServerDetail>> {
-        let rows = sqlx::query("SELECT * FROM mcp_servers WHERE managed = 1 ORDER BY name")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(dberr("mcp servers"))?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "{DETAIL_SELECT} WHERE s.managed = 1 ORDER BY s.name"
+        )))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("mcp servers"))?;
         Ok(rows.iter().map(row_to_detail).collect())
     }
 
@@ -467,20 +496,22 @@ impl McpRegistryRepo {
     /// A workspace's enabled NATIVE servers: the set written into each
     /// session's `.mcp.json`. Native = unmanaged stdio, and never a server
     /// under an Enforced access policy: its per-user rules can't follow raw
-    /// credentials into a file every session in the workspace reads.
+    /// credentials into a file every session in the workspace reads. Never
+    /// shared (`crate::mcp_scope`): always the workspace's own.
     pub async fn list_native_enabled(&self, ws: &Id) -> Result<Vec<McpServerDetail>> {
-        let rows = sqlx::query(
-            "SELECT * FROM mcp_servers WHERE workspace_id = ? AND enabled = 1 AND managed = 0
-               AND transport = 'stdio'
+        let sql = format!(
+            "{DETAIL_SELECT} WHERE s.workspace_id = ?1 AND s.enabled = 1 AND s.managed = 0
+               AND s.transport = 'stdio'
                AND NOT EXISTS (SELECT 1 FROM resource_access_policies p
-                 WHERE p.resource_kind = 'mcp_server' AND p.resource_id = mcp_servers.id
+                 WHERE p.resource_kind = 'mcp_server' AND p.resource_id = s.id
                    AND p.mode = 'enforced')
-             ORDER BY name",
-        )
-        .bind(ws)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("mcp servers"))?;
+             ORDER BY s.name"
+        );
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(ws)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("mcp servers"))?;
         Ok(rows.iter().map(row_to_detail).collect())
     }
 

@@ -346,7 +346,7 @@
             <Icon name="branch" size={12} /><span class="git-tab-branch-name">{branch}</span>
           </span>
         {/if}
-        <!-- A word, not a dot; the open tab's Changes badge already counts them. -->
+        <!-- A word, not a dot; the open tab's WIP row counts them. -->
         {#if dirty && selectedId !== r.id}<span class="git-tab-word" aria-hidden="true">changed</span>{/if}
       </button>
       <button

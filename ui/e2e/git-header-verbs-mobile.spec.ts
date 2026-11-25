@@ -3,8 +3,8 @@ import { EXPECT, VERBS, seedVerbRepos, type VerbState } from './git-header-verbs
 import { expectFingerSized, expectNoHorizontalOverflow } from './helpers';
 
 // Phone: the five everyday verbs are a second row of finger-sized buttons
-// under the header (icon + short label, counts shown) on Changes and History;
-// the view switch stays where it is.
+// under the header (icon + short label, counts shown) on History — also
+// through the legacy Changes link; the view switch stays where it is.
 
 test.use({ serviceWorkers: 'block' });
 const SHOTS = process.env.OTTO_E2E_SHOTS;

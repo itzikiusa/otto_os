@@ -756,7 +756,7 @@ impl UsageEngine {
     /// in the journal transaction; neither source nor ClickHouse advances first.
     pub async fn commit_ingestion(
         &self,
-        checkpoint: &serde_json::Value,
+        checkpoint: serde_json::Value,
         events: &[UsageEvent],
     ) -> Result<()> {
         let mut accepted = if self.config().enabled {
@@ -3262,7 +3262,7 @@ mod scope_tests {
         assert_eq!(st.journal_fill, None);
         assert_eq!(st.outage_since, None, "disabled is not an outage");
         engine
-            .commit_ingestion(&serde_json::json!({"offset": 1}), &[])
+            .commit_ingestion(serde_json::json!({"offset": 1}), &[])
             .await
             .unwrap();
         assert_eq!(engine.status().await.journal_fill, Some(0.0));
@@ -3740,7 +3740,7 @@ mod writer_policy_tests {
         let engine = test_engine_with_ch(tmp.path().to_path_buf(), Arc::clone(&ch));
 
         engine
-            .commit_ingestion(&serde_json::json!({"offset": 1}), &[UsageEvent::default()])
+            .commit_ingestion(serde_json::json!({"offset": 1}), &[UsageEvent::default()])
             .await
             .unwrap();
 
@@ -3782,7 +3782,7 @@ mod writer_policy_tests {
         let engine = test_engine_with_ch(tmp.path().to_path_buf(), ch);
 
         engine
-            .commit_ingestion(&serde_json::json!({"offset": 2}), &[UsageEvent::default()])
+            .commit_ingestion(serde_json::json!({"offset": 2}), &[UsageEvent::default()])
             .await
             .unwrap();
 

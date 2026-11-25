@@ -335,7 +335,9 @@ read/write the **daemon host's real local disk**.
 - **Warm multiplexed connection.** Each browse session owns a private
   `ControlMaster` socket (`ControlPersist=60s`) under a unique temp dir, removed
   on drop — so the many small `sftp` invocations a browse session makes reuse one
-  multiplexed connection, fast even through a bastion.
+  multiplexed connection, fast even through a bastion. Confined agent and shell
+  sessions can't `connect()` to it (or to the IDE's `/tmp/oi-*` remote-target
+  sockets), so they can't ride the logged-in connection.
 - **Survives sleep / network changes.** The master sends keep-alives
   (`ServerAliveInterval=15`, `ServerAliveCountMax=2`) so a dead path makes it
   exit within ~30s instead of TCP's ~2h; metadata ops (`pwd`/`ls`/`mkdir`/`rm`/

@@ -33,6 +33,7 @@ export interface GraphSelectionHost {
   scrollToCommit(sha: string): void;
   /** Focus the commit row for `sha` (null: the WIP row) once it renders. */
   focusRow(sha: string | null): void;
+  isHeadCommit(c: CommitInfo): boolean;
 }
 
 export type GraphSelection = ReturnType<typeof createGraphSelection>;
@@ -57,16 +58,16 @@ export function createGraphSelection(h: GraphSelectionHost) {
   // ── WIP (working tree) row selection ──────────────────────────────────────
   // GitKraken-style: a dirty working tree renders as a dashed row pinned above
   // the graph; selecting it opens the staging/commit panel in the detail pane
-  // (this replaced the separate "Changes" tab).
+  // (this replaced the separate "Changes" view).
   let wipSelected = $state(false);
   /** The detail pane is open for EITHER a commit or the WIP row. */
   const detailOpen = $derived(selectedSha !== null || wipSelected);
 
   function selectWip(): void {
-    if (wipSelected) {
-      clearSelection();
-      return;
-    }
+    if (wipSelected) clearSelection();
+    else openWip();
+  }
+  function openWip(): void {
     wipSelected = true;
     selectedSha = null;
     selectedCommit = null;
@@ -89,7 +90,40 @@ export function createGraphSelection(h: GraphSelectionHost) {
     const r = git.wipRequest;
     if (!r || r.repoId !== h.repoId || h.status.changes.length === 0) return;
     untrack(() => {
-      if (!wipSelected) selectWip();
+      if (!wipSelected) openWip();
+    });
+  });
+
+  /** Select the checked-out commit (HEAD; the newest loaded one without it). */
+  function selectHead(): void {
+    const head = h.commits.find((c) => h.isHeadCommit(c)) ?? h.commits[0];
+    if (head && selectedSha !== head.sha) selectCommit(head);
+  }
+
+  // After a commit from the WIP panel: select it once the graph has it (the
+  // next step — Create pull request — sits on the checked-out commit).
+  let committedSha = $state<string | null>(null);
+  $effect(() => {
+    const c = committedSha ? h.bySha.get(committedSha) : undefined;
+    if (!c) return;
+    committedSha = null;
+    untrack(() => selectedSha !== c.sha && selectCommit(c));
+  });
+
+  // Landing: History opens on the work — the WIP row with uncommitted
+  // changes, else (desktop) the checked-out commit, so the detail pane is
+  // never an empty "select a commit". A phone keeps its commit list open.
+  // Once per mount; a branch deep link or a reveal request then moves it.
+  let landed = false;
+  $effect(() => {
+    if (landed) return;
+    const dirty = h.status.changes.length > 0;
+    if (!dirty && (h.commitsLoading || h.commits.length === 0)) return;
+    landed = true;
+    untrack(() => {
+      if (wipSelected || selectedSha) return;
+      if (dirty) openWip();
+      else if (!h.isMobile) selectHead();
     });
   });
 
@@ -330,6 +364,8 @@ export function createGraphSelection(h: GraphSelectionHost) {
     get selectedBranch() { return selectedBranch; },
     get revealBusy() { return revealBusy; },
     selectWip,
+    /** A commit just made: select it once the graph has loaded it. */
+    selectWhenLoaded(sha: string) { committedSha = sha; },
     selectCommit,
     scheduleDiff,
     holdDiff,

@@ -27,6 +27,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
+use futures_util::StreamExt;
 use otto_core::api::Problem;
 use otto_core::auth::AuthUser;
 use otto_core::{Error, Result};
@@ -59,9 +60,9 @@ use self::toolchains_env::{
 };
 use crate::types::{
     IdeFileQuery, IdeFileReadResp, IdeFileWriteReq, IdeFileWriteResp, IdeFsEntryKind,
-    IdeFsMutateReq, IdeFsMutateResp, IdeFsTreeQuery, IdeFsTreeResp, IdeGitBaseQuery,
-    IdeGitBaseResp, IdeGutterReq, IdeGutterResp, IdeReplaceReq, IdeReplaceResp, IdeSearchReq,
-    IdeSearchResp,
+    IdeFsMutateReq, IdeFsMutateResp, IdeFsTreeListing, IdeFsTreeQuery, IdeFsTreeResp,
+    IdeGitBaseQuery, IdeGitBaseResp, IdeGutterReq, IdeGutterResp, IdeReplaceReq, IdeReplaceResp,
+    IdeSearchReq, IdeSearchResp,
 };
 use crate::IdeCtx;
 
@@ -284,6 +285,17 @@ pub fn public_router<S: IdeCtx>() -> Router<S> {
         )
 }
 
+/// One `paths` folder of a tree read: its listing, or nothing when it failed (any error).
+fn extra_listing(path: String, listing: Result<IdeFsTreeResp>) -> Option<IdeFsTreeListing> {
+    listing.ok().map(|l| IdeFsTreeListing {
+        path,
+        entries: l.entries,
+    })
+}
+
+/// Most folders one tree read lists (`paths`); the UI sends at most this many per call.
+const MAX_TREE_PATHS: usize = 200;
+
 async fn fs_tree<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -292,12 +304,45 @@ async fn fs_tree<S: IdeCtx>(
     otto_telemetry::context::measure_result("ide.fs.tree", async {
         let spec = q.target_spec()?;
         let resolved = ctx.ide().targets.resolve(&ctx, &user, &spec).await?;
-        let mut resp = ctx
-            .ide()
-            .targets
+        let targets = &ctx.ide().targets;
+        let mut resp = targets
             .list_tree(&resolved, q.path.as_deref(), q.show_hidden)
             .await?;
-        for entry in &mut resp.entries {
+        let mut more: Vec<String> = match q.paths.as_deref() {
+            Some(raw) => serde_json::from_str(raw)
+                .map_err(|e| Error::Invalid(format!("paths: not a JSON array of strings: {e}")))?,
+            None => Vec::new(),
+        };
+        let mut seen = std::collections::HashSet::new();
+        more.retain(|p| seen.insert(p.clone()));
+        if more.len() > MAX_TREE_PATHS {
+            Err(Error::Invalid(format!(
+                "paths: at most {MAX_TREE_PATHS} folders per call, got {}",
+                more.len()
+            )))?;
+        }
+        // The root listing above succeeded, so the target is up: a folder that fails here (gone,
+        // not a folder, unreadable; over SSH all of these come back as Upstream) is left out, and
+        // the UI reads it on its own and shows its own error row.
+        resp.listings = futures_util::stream::iter(more)
+            .map(|path| {
+                let resolved = &resolved;
+                async move {
+                    let listing = targets
+                        .list_tree(resolved, Some(&path), q.show_hidden)
+                        .await;
+                    extra_listing(path, listing)
+                }
+            })
+            .buffered(8)
+            .filter_map(std::future::ready)
+            .collect()
+            .await;
+        let entries = resp
+            .entries
+            .iter_mut()
+            .chain(resp.listings.iter_mut().flat_map(|l| l.entries.iter_mut()));
+        for entry in entries {
             if entry.kind == IdeFsEntryKind::File && entry.language.is_none() {
                 if let Some(plugin_lang) = ctx.ide().plugins.detect_language_for_path(&entry.path) {
                     entry.language = Some(plugin_lang.id);
@@ -554,5 +599,18 @@ mod tests {
                 .status(),
             StatusCode::BAD_REQUEST
         );
+    }
+
+    /// A sub-folder that fails after the root listing succeeded is left out, whatever the
+    /// error: over SSH a deleted or unreadable folder comes back as Upstream from SFTP.
+    #[test]
+    fn a_failing_extra_folder_is_left_out_even_as_upstream() {
+        for err in [
+            Error::Upstream("sftp: No such file".into()),
+            Error::NotFound("gone".into()),
+            Error::Forbidden("denied".into()),
+        ] {
+            assert!(super::extra_listing("a".into(), Err(err)).is_none());
+        }
     }
 }
