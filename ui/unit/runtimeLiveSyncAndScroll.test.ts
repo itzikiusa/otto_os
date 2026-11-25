@@ -119,6 +119,7 @@ function makeRuntimeHarness(extraGlobals: Record<string, unknown> = {}) {
       'modules/threads/runtime/runtimeThreads.svelte': {
         runtimeThreads: {
           isActiveOrWaiting: () => false,
+          removed: () => false,
           onSequence: () => () => {},
         },
       },

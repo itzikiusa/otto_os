@@ -189,6 +189,13 @@ class RuntimeThreads {
     for (const fn of this.seqListeners) fn(id, seq);
   }
 
+  /** Threads being deleted, or deleted, in this window: never read again. */
+  private gone = new Set<string>();
+
+  removed(id: string): boolean {
+    return this.gone.has(id);
+  }
+
   isActiveOrWaiting(id: string): boolean {
     const s = this.byId[id];
     if (!s || s.status === 'closed') return false;
@@ -626,11 +633,14 @@ class RuntimeThreads {
 
   /** Stop the agent and remove the thread with its history. */
   async remove(id: string): Promise<void> {
-    // The draft first: its live sync would read it back while the agent stops.
+    // Stop its reads first (the draft's live sync, the view's replays): the
+    // agent stopping sends turn events while the DELETE is on the wire.
     const settle = runtimeDrafts.forget(id);
+    this.gone.add(id);
     try {
       await api.del(`/runtime-sessions/${id}`);
     } catch (e) {
+      this.gone.delete(id);
       settle(false);
       throw e;
     }

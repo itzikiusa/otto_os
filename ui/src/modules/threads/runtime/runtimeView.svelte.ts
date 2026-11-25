@@ -424,7 +424,7 @@ export class RuntimeViews {
 
   private async replay(id: string, bg = false): Promise<void> {
     const view = this.views.get(id);
-    if (!view) return;
+    if (!view || runtimeThreads.removed(id)) return;
     if (view.retryTimer) {
       clearTimeout(view.retryTimer);
       view.retryTimer = null;

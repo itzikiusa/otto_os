@@ -214,3 +214,39 @@ test('deleting the thread open on Threads reads it no more and leaves nothing be
   expect(after, 'reads after the delete').toEqual([]);
   expect(await memory(page)).not.toContain(id);
 });
+
+test('a thread being deleted is not read while its DELETE is on the wire', async ({ page }) => {
+  const id = await thread('Seedorf chat');
+  await page.goto(`/#/threads/${id}`);
+  const view = page.getByTestId(`runtime-thread-${id}`).first();
+  await expect(view).toBeVisible({ timeout: 30_000 });
+  // The daemon deletes at once (its agent stopping sends its events over the
+  // WS) but the answer lands late: a liveness tick and a focus wake pass first.
+  let answered: () => void = () => {};
+  const late = new Promise<void>((done) => (answered = done));
+  await page.route(`**/api/v1/runtime-sessions/${id}`, async (route) => {
+    if (route.request().method() !== 'DELETE') return route.fallback();
+    const res = await route.fetch();
+    await late;
+    await route.fulfill({ response: res });
+  });
+  const during: string[] = [];
+  let deleted = false;
+  page.on('request', (r) => {
+    const p = new URL(r.url()).pathname;
+    if (!p.includes(id)) return;
+    if (r.method() === 'DELETE') deleted = true;
+    else if (deleted) during.push(`${r.method()} ${p}`);
+  });
+  await page.getByTestId('threads-thread-menu').click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Delete thread…' }).click();
+  await page.getByRole('dialog').getByRole('button', { name: /^Delete/ }).click();
+  await expect.poll(() => deleted).toBe(true);
+  await page.waitForTimeout(4500); // ui-guards: allow — a liveness tick (4 s) passes with the DELETE pending
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await page.waitForTimeout(500); // ui-guards: allow — proves an absence (no read)
+  answered();
+  await expect(view).toHaveCount(0, { timeout: 10_000 });
+  await quietly(page);
+  expect(during, 'reads while and after the delete').toEqual([]);
+});
