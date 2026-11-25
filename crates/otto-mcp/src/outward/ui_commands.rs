@@ -334,6 +334,10 @@ fn invisible(c: char) -> bool {
 /// The catalog command's own rules on top of its schema: an `env` argument
 /// carries no loader / toolchain variable ([`DENIED_ENV`]), and
 /// `ide_debug_request` only reaches this Mac (loopback http/https). Pure.
+/// Longest agent-written text a confirm shows in one place (a start's args +
+/// env, a request's body): longer is refused, never clipped.
+const MAX_SHOWN_TEXT: usize = 8 * 1024;
+
 pub fn validate_command(spec: &UiCommandSpec, args: &Value) -> Result<(), String> {
     validate_args(&spec.input_schema, args)?;
     for tag in args
@@ -390,6 +394,30 @@ pub fn validate_command(spec: &UiCommandSpec, args: &Value) -> Result<(), String
             }
         }
     }
+    // What the person reads in a confirm stays whole AND readable: one budget
+    // for a start's arguments + environment, and for a request's body.
+    let strs = |k: &str| -> usize {
+        let list = args.get(k).and_then(Value::as_array).into_iter().flatten();
+        list.filter_map(Value::as_str).map(str::len).sum()
+    };
+    let env_len: usize = (args
+        .get("env")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten())
+    .map(|(k, v)| k.len() + v.as_str().map_or(0, str::len))
+    .sum();
+    if strs("args") + env_len > MAX_SHOWN_TEXT {
+        return Err(format!(
+            "args and env together exceed {MAX_SHOWN_TEXT} characters — too much for the user to read in the confirm"
+        ));
+    }
+    let body = args.get("body").and_then(Value::as_str).unwrap_or_default();
+    if spec.name == "ide_debug_request" && body.len() > MAX_SHOWN_TEXT {
+        return Err(format!(
+            "the body exceeds {MAX_SHOWN_TEXT} characters — too much for the user to read in the confirm"
+        ));
+    }
     if spec.name == "ide_debug_request" {
         let url = args.get("url").and_then(Value::as_str).unwrap_or_default();
         if !is_loopback_url(url) {
@@ -404,21 +432,30 @@ pub fn validate_command(spec: &UiCommandSpec, args: &Value) -> Result<(), String
 
 /// Keep an `ide_debug_*` command inside the agent session's folder `cwd`:
 /// `ide_debug_start`'s `root` (default `cwd`) is resolved through symlinks
-/// and must lie in the resolved `cwd` — the canonical root is what the IDE
-/// gets —, and every file argument (`target.file`, `breakpoints`, `set`,
-/// `clear`, `file`) must be relative, without `..`, and (when it exists)
-/// resolve inside that root. Other commands pass through.
-pub fn confine_paths(spec: &UiCommandSpec, mut args: Value, cwd: &str) -> Result<Value, String> {
+/// and must lie in the resolved `cwd`; it is handed on as the session spells
+/// its folder. Every file argument of every command (`target.file`,
+/// `breakpoints` / `set` / `clear` `[].file`, `file`) must be a plain
+/// relative path — no `:` (so no `file:` URI in any spelling), `\\`, NUL or
+/// control character, `~`, absolute path or `..` — and must resolve, through
+/// symlinks (its deepest existing ancestor when it does not exist), inside the
+/// project: the start's root, else `debug_root` (the root of the session's
+/// last start), else `cwd`. Other commands pass through.
+pub fn confine_paths(
+    spec: &UiCommandSpec,
+    mut args: Value,
+    cwd: &str,
+    debug_root: Option<&str>,
+) -> Result<Value, String> {
+    use std::path::{Component, Path, PathBuf};
     if spec.module != "ide" {
         return Ok(args);
     }
-    let canon =
-        |p: &std::path::Path| std::fs::canonicalize(p).map_err(|e| format!("{}: {e}", p.display()));
-    let home = canon(std::path::Path::new(cwd))
-        .map_err(|e| format!("your session's folder is unknown ({e})"))?;
-    let root = if spec.name == "ide_debug_start" {
+    let canon = |p: &Path| std::fs::canonicalize(p).map_err(|e| format!("{}: {e}", p.display()));
+    let home =
+        canon(Path::new(cwd)).map_err(|e| format!("your session's folder is unknown ({e})"))?;
+    let base: PathBuf = if spec.name == "ide_debug_start" {
         let asked = args.get("root").and_then(Value::as_str).unwrap_or(cwd);
-        let root = canon(std::path::Path::new(asked))?;
+        let root = canon(Path::new(asked))?;
         if !root.starts_with(&home) {
             return Err(format!(
                 "'{asked}' is outside your session's folder {}",
@@ -427,12 +464,15 @@ pub fn confine_paths(spec: &UiCommandSpec, mut args: Value, cwd: &str) -> Result
         }
         // Checked canonically, handed on as the session spells its folder: the
         // IDE showing `/var/…` must not ask to "open" `/private/var/…`.
-        let inside = root.strip_prefix(&home).unwrap_or(std::path::Path::new(""));
-        let shown = std::path::Path::new(cwd.trim_end_matches('/')).join(inside);
+        let inside = root.strip_prefix(&home).unwrap_or(Path::new(""));
+        let shown = Path::new(cwd.trim_end_matches('/')).join(inside);
         args["root"] = json!(shown.to_string_lossy().trim_end_matches('/'));
-        Some(root)
+        root
     } else {
-        None
+        match debug_root.map(|r| canon(Path::new(r))) {
+            Some(Ok(r)) if r.starts_with(&home) => r,
+            _ => home.clone(),
+        }
     };
     let mut files: Vec<&str> = Vec::new();
     files.extend(args.pointer("/target/file").and_then(Value::as_str));
@@ -448,24 +488,30 @@ pub fn confine_paths(spec: &UiCommandSpec, mut args: Value, cwd: &str) -> Result
         }
     }
     for f in files {
-        let rel = std::path::Path::new(f);
-        if rel.is_absolute()
-            || f.contains("://")
-            || f.starts_with('~')
-            || rel
+        let rel = Path::new(f);
+        let plain = !f.is_empty()
+            && !f.starts_with('~')
+            && !f.chars().any(|c| c == ':' || c == '\\' || c.is_control())
+            && rel
                 .components()
-                .any(|c| c == std::path::Component::ParentDir)
-        {
+                .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
+        if !plain {
             return Err(format!(
-                "'{f}' must be a path inside the project, relative to it"
+                "'{f}' must be a plain path inside the project, relative to it"
             ));
         }
-        if let Some(root) = &root {
-            if let Ok(real) = std::fs::canonicalize(root.join(rel)) {
-                if !real.starts_with(root) {
-                    return Err(format!("'{f}' resolves outside the project"));
-                }
+        // The deepest part that exists decides where it really points.
+        let mut probe = base.join(rel);
+        let real = loop {
+            if let Ok(real) = std::fs::canonicalize(&probe) {
+                break real;
             }
+            if !probe.pop() {
+                break PathBuf::new();
+            }
+        };
+        if !real.starts_with(&base) {
+            return Err(format!("'{f}' resolves outside the project"));
         }
     }
     Ok(args)
@@ -956,7 +1002,7 @@ mod tests {
         assert_eq!(risk("ide_debug_start"), Risk::Execute);
         assert_eq!(risk("ide_debug_evaluate"), Risk::Execute);
         assert_eq!(risk("ide_debug_control"), Risk::Navigate);
-        assert_eq!(risk("ide_debug_breakpoints"), Risk::Navigate);
+        assert_eq!(risk("ide_debug_breakpoints"), Risk::LocalWrite);
         assert_eq!(risk("ide_debug_inspect"), Risk::Read);
         assert_eq!(risk("ide_debug_request"), Risk::LocalWrite);
         assert_eq!(risk("ide_debug_db"), Risk::Read);
@@ -1207,53 +1253,128 @@ mod tests {
         std::fs::create_dir_all(home.join("svc")).unwrap();
         std::fs::create_dir_all(&other).unwrap();
         std::fs::write(other.join("evil.go"), "package main").unwrap();
+        std::fs::write(home.join("svc/main.go"), "package main").unwrap();
         std::os::unix::fs::symlink(&other, home.join("link")).unwrap();
         std::os::unix::fs::symlink(other.join("evil.go"), home.join("svc/evil.go")).unwrap();
         let cwd = home.to_string_lossy().into_owned();
+        let sub = home.join("svc").to_string_lossy().into_owned();
         let start = get("ide_debug_start").unwrap();
-        assert_ne!(
-            std::fs::canonicalize(&home).unwrap(),
-            home,
-            "macOS: /var is /private/var"
-        );
-        let run = |args: Value| confine_paths(start, args, &cwd);
-        // Default root = the session folder, spelled as the session (and the
-        // IDE showing it) spells it, though checked canonically; a sub-folder is fine.
-        let ok = run(json!({"target": {"kind": "main", "file": "main.go"}})).unwrap();
+        // Default root = the session folder, as the session spells it.
+        let ok = confine_paths(
+            start,
+            json!({"target": {"kind": "main", "file": "main.go"}}),
+            &cwd,
+            None,
+        )
+        .unwrap();
         assert_eq!(ok["root"], json!(cwd));
-        let canon_sub = std::fs::canonicalize(home.join("svc")).unwrap();
-        let sub =
-            run(json!({"root": canon_sub, "target": {"kind": "main", "file": "main.go"}})).unwrap();
-        assert_eq!(sub["root"], json!(home.join("svc").to_string_lossy()));
-        // A symlinked root, another folder, absolute / .. / symlinked-out files: refused.
-        for bad in [
-            json!({"root": home.join("link"), "target": {"kind": "main", "file": "main.go"}}),
-            json!({"root": other, "target": {"kind": "main", "file": "main.go"}}),
-            json!({"target": {"kind": "main", "file": other.join("evil.go")}}),
-            json!({"target": {"kind": "main", "file": "../other/evil.go"}}),
-            json!({"target": {"kind": "main", "file": "svc/evil.go"}}),
-            json!({"target": {"kind": "main", "file": "main.go"}, "breakpoints": [{"file": "/etc/hosts", "line": 1}]}),
-        ] {
-            assert!(run(bad.clone()).is_err(), "{bad}");
+        let file_uri = format!("file:{}", other.join("evil.go").display());
+        let file_uri2 = format!("file://{}", other.join("evil.go").display());
+        let abs = other.join("evil.go").to_string_lossy().into_owned();
+        // (command, args, the start's root for later commands, allowed)
+        let start_main = |file: &str| json!({"target": {"kind": "main", "file": file}});
+        let bp = |file: &str| json!({"set": [{"file": file, "line": 1}]});
+        let clear = |file: &str| json!({"clear": [{"file": file, "line": 1}]});
+        let to_line = |file: &str| json!({"action": "run_to_line", "file": file, "line": 1});
+        let table: Vec<(&str, Value, Option<&str>, bool)> = vec![
+            ("ide_debug_start", start_main("main.go"), None, true),
+            (
+                "ide_debug_start",
+                json!({"root": sub, "target": {"kind": "main", "file": "main.go"}}),
+                None,
+                true,
+            ),
+            (
+                "ide_debug_start",
+                json!({"root": home.join("link"), "target": {"kind": "main", "file": "x.go"}}),
+                None,
+                false,
+            ),
+            (
+                "ide_debug_start",
+                json!({"root": other, "target": {"kind": "main", "file": "x.go"}}),
+                None,
+                false,
+            ),
+            ("ide_debug_start", start_main(&abs), None, false),
+            ("ide_debug_start", start_main(&file_uri), None, false),
+            ("ide_debug_start", start_main(&file_uri2), None, false),
+            (
+                "ide_debug_start",
+                start_main("../other/evil.go"),
+                None,
+                false,
+            ),
+            ("ide_debug_start", start_main("svc/evil.go"), None, false),
+            (
+                "ide_debug_start",
+                start_main("link/new_file.go"),
+                None,
+                false,
+            ),
+            (
+                "ide_debug_start",
+                start_main("svc\\..\\..\\other"),
+                None,
+                false,
+            ),
+            ("ide_debug_start", start_main("~/x.go"), None, false),
+            ("ide_debug_start", start_main("a\u{0}b.go"), None, false),
+            ("ide_debug_start", start_main("SVC/main.go"), None, true),
+            (
+                "ide_debug_start",
+                json!({"target": {"kind": "main", "file": "main.go"}, "breakpoints": [{"file": "/etc/hosts", "line": 1}]}),
+                None,
+                false,
+            ),
+            ("ide_debug_breakpoints", bp("svc/main.go"), None, true),
+            (
+                "ide_debug_breakpoints",
+                bp("main.go"),
+                Some(sub.as_str()),
+                true,
+            ),
+            (
+                "ide_debug_breakpoints",
+                bp("evil.go"),
+                Some(sub.as_str()),
+                false,
+            ),
+            ("ide_debug_breakpoints", bp("link/evil.go"), None, false),
+            ("ide_debug_breakpoints", bp(&file_uri), None, false),
+            ("ide_debug_breakpoints", bp("/etc/hosts"), None, false),
+            ("ide_debug_breakpoints", clear("link/evil.go"), None, false),
+            ("ide_debug_control", to_line("svc/evil.go"), None, false),
+            ("ide_debug_control", to_line("../x.go"), None, false),
+            ("ide_debug_control", to_line("svc/main.go"), None, true),
+        ];
+        for (name, args, last_root, allowed) in table {
+            let got = confine_paths(get(name).unwrap(), args.clone(), &cwd, last_root);
+            assert_eq!(
+                got.is_ok(),
+                allowed,
+                "{name} {args} (root {last_root:?}): {got:?}"
+            );
         }
-        // Later commands: relative paths only.
-        let bps = get("ide_debug_breakpoints").unwrap();
-        assert!(confine_paths(bps, json!({"set": [{"file": "a.go", "line": 1}]}), &cwd).is_ok());
-        assert!(confine_paths(
-            bps,
-            json!({"set": [{"file": "/etc/hosts", "line": 1}]}),
-            &cwd
-        )
-        .is_err());
-        let control = get("ide_debug_control").unwrap();
-        assert!(confine_paths(
-            control,
-            json!({"action": "run_to_line", "file": "../x.go", "line": 1}),
-            &cwd
-        )
-        .is_err());
         // Other modules pass through untouched.
         let other_cmd = get("db_run_query").unwrap();
-        assert!(confine_paths(other_cmd, json!({"x": "/etc"}), "/nonexistent").is_ok());
+        assert!(confine_paths(other_cmd, json!({"x": "/etc"}), "/nonexistent", None).is_ok());
+    }
+
+    #[test]
+    fn confirm_text_budget_refuses_instead_of_clipping() {
+        let start = get("ide_debug_start").unwrap();
+        let target = json!({"kind": "main", "file": "main.go"});
+        let args: Vec<String> = (0..10).map(|_| "a".repeat(900)).collect();
+        assert!(validate_command(start, &json!({"target": target, "args": args})).is_err());
+        let env: serde_json::Map<String, Value> = (0..3)
+            .map(|i| (format!("K{i}"), json!("v".repeat(3000))))
+            .collect();
+        assert!(validate_command(start, &json!({"target": target, "env": env})).is_err());
+        assert!(validate_command(start, &json!({"target": target, "args": ["-v"]})).is_ok());
+        let req = get("ide_debug_request").unwrap();
+        let url = "http://localhost:8080/x";
+        assert!(validate_command(req, &json!({"url": url, "body": "b".repeat(9000)})).is_err());
+        assert!(validate_command(req, &json!({"url": url, "body": "{}"})).is_ok());
     }
 }

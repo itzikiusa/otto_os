@@ -149,9 +149,8 @@ pub struct UiBridge {
     presence_changed: Notify,
     grant_changed: Notify,
     last_request: Mutex<HashMap<Id, Instant>>,
-    /// Session → the document its last `ide_debug_start` ran in: the rest of
-    /// its debug commands follow it there.
-    debug_doc: Mutex<HashMap<Id, String>>,
+    /// Session → (its last `ide_debug_start`'s document, that start's root).
+    debug_doc: Mutex<HashMap<Id, (String, String)>>,
     seq: AtomicU64,
 }
 
@@ -544,6 +543,9 @@ impl UiBridge {
         self.presence_changed.notify_waiters();
     }
 
+    fn debug_pin(&self, session_id: &Id) -> Option<(String, String)> {
+        self.debug_doc.lock().unwrap().get(session_id).cloned()
+    }
     /// Snapshot of the registered (hello'd) documents.
     pub fn docs(&self) -> Vec<DocInfo> {
         self.docs
@@ -960,8 +962,7 @@ pub async fn store_grant(ctx: &ServerCtx, id: &Id, record: Value) -> otto_core::
         .set_ui_control(id, grant)
         .await?
         .into_session();
-    // Every Otto window learns of it (a revoke from the Threads window must
-    // clear the driving bar and the write memory in the IDE window too).
+    // Every window hears it (a Threads revoke clears the IDE window's bar too).
     ctx.manager.announce_meta(&session);
     Ok(session)
 }
@@ -1007,7 +1008,9 @@ pub async fn run(
         args.clone()
     };
     ui_commands::validate_command(spec, &args).map_err(|m| UiError::new("invalid_args", m))?;
-    let args = ui_commands::confine_paths(spec, args, &session.cwd)
+    let last = ctx.ui_bridge.debug_pin(&session.id); // its files stay in that start's root
+    let root = last.as_ref().map(|l| l.1.as_str());
+    let args = ui_commands::confine_paths(spec, args, &session.cwd, root)
         .map_err(|m| UiError::new("forbidden", m))?;
 
     let session = ensure_grant(ctx, session, spec).await?;
@@ -1023,7 +1026,7 @@ pub async fn run(
     let window = spec.open_placement.as_deref() == Some("window");
     let mut docs = bridge.docs(); // a `window` command is for the person to watch: no hidden doc
     let pinned = (spec.module == "ide" && spec.name != "ide_debug_start")
-        .then(|| bridge.debug_doc.lock().unwrap().get(&session.id).cloned())
+        .then(|| last.map(|l| l.0))
         .flatten()
         .filter(|c| {
             let ok = |d: &DocInfo| &d.conn_id == c && d.user_id == session.created_by;
@@ -1083,8 +1086,9 @@ pub async fn run(
                 .dispatch(&conn, &session, &spec.name, &args, budget)
                 .await?;
             if spec.name == "ide_debug_start" {
+                let root = args["root"].as_str().unwrap_or(&session.cwd).to_string();
                 let mut pins = bridge.debug_doc.lock().unwrap();
-                pins.insert(session.id.clone(), conn);
+                pins.insert(session.id.clone(), (conn, root));
             }
             Ok(with_visibility(shape_result(v, spec.module == "ide"), true))
         }
