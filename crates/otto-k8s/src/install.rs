@@ -564,17 +564,19 @@ pub fn parse_k9s_version(stdout: &str) -> Option<String> {
     (first.starts_with('v') && first.len() < 32).then(|| first.to_string())
 }
 
-/// [`verify`], remembered per binary path + mtime: the Kubernetes page shows
-/// a skeleton until `/k8s/status` answers, and its two version spawns cost
-/// ~135 ms of that on every visit. An install / upgrade changes the mtime.
+/// [`verify`], remembered per binary (symlinks resolved) + mtime: the
+/// Kubernetes page shows a skeleton until `/k8s/status` answers, and its two
+/// version spawns cost ~135 ms of that on every visit. An install / upgrade
+/// changes the mtime or, for a Homebrew / Nix symlink (Nix store files all
+/// carry the same mtime), the resolved path.
 async fn cached_verify(tool: Tool, path: &Path) -> Option<String> {
     type Seen = Mutex<HashMap<(PathBuf, std::time::SystemTime), String>>;
     static SEEN: OnceLock<Seen> = OnceLock::new();
     let seen = SEEN.get_or_init(Default::default);
-    let key = std::fs::metadata(path)
-        .and_then(|m| m.modified())
+    let key = std::fs::canonicalize(path)
+        .and_then(|real| Ok((std::fs::metadata(&real)?.modified()?, real)))
         .ok()
-        .map(|t| (path.to_path_buf(), t));
+        .map(|(t, real)| (real, t));
     if let Some(v) = key.as_ref().and_then(|k| seen.lock().ok()?.get(k).cloned()) {
         return Some(v);
     }
@@ -650,6 +652,35 @@ mod tests {
             "an upgraded binary re-probes"
         );
         assert_eq!(calls(), 2);
+        // A Nix-style upgrade: the profile symlink moves to a new store file
+        // with the SAME mtime.
+        let store = |v: &str| {
+            let d = dir.path().join(format!("store-{v}"));
+            std::fs::create_dir_all(&d).unwrap();
+            let f = d.join("kubectl");
+            std::fs::write(&f, script(v)).unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&f)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1))
+                .unwrap();
+            f
+        };
+        let link = dir.path().join("profile-kubectl");
+        std::os::unix::fs::symlink(store("v1.32.0"), &link).unwrap();
+        assert_eq!(
+            cached_verify(Tool::Kubectl, &link).await.as_deref(),
+            Some("v1.32.0")
+        );
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(store("v1.33.0"), &link).unwrap();
+        assert_eq!(
+            cached_verify(Tool::Kubectl, &link).await.as_deref(),
+            Some("v1.33.0"),
+            "a relinked binary with the same mtime re-probes"
+        );
     }
 
     /// S6-17: downloads are verified against the published digest.
