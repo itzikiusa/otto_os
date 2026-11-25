@@ -243,6 +243,36 @@ test.describe('DB Watch is readable at the dock’s real heights', () => {
     await page.screenshot({ path: info.outputPath('dbwatch-after-remote-waiting-light.png') });
   });
 
+  for (const scheme of ['light', 'dark'] as const) {
+    test(`a picked target that cannot be reached shows its error with Retry: ${scheme}`, async ({ page }, info) => {
+      test.skip(info.project.name !== 'desktop-browser', 'desktop dock');
+      await mockWatch(page, root, 'mysql');
+      const named: string[] = [];
+      await page.route('**/api/v1/ide/db-watch/**', async (r) => {
+        const url = r.request().url();
+        if (url.includes('/watches?')) return r.fulfill({ json: { watches: [] } });
+        if (url.includes('/detect') && (r.request().postDataJSON() as { target?: unknown })?.target) {
+          named.push(url);
+          return r.fulfill({ status: 502, json: { code: 'upstream', message: 'upstream: error communicating with database: dial tcp 10.0.4.12:3306: i/o timeout' } });
+        }
+        return r.fallback();
+      });
+      await openIde(page, root, wsId, { height: 400, scheme, tab: 'dbwatch' });
+      await page.getByTestId('ide-dbw-target').click();
+      await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: /pr_bo staging/ }).click();
+      const panel = page.getByTestId('ide-dbwatch-panel');
+      await expect(panel).toContainText('Can’t reach pr_bo staging');
+      await expect(panel).toContainText('error communicating with database: dial tcp 10.0.4.12:3306: i/o timeout');
+      await expect(page.getByTestId('ide-dbw-tables')).toBeDisabled();
+      await expect(panel.getByTestId('ide-dbw-other-target')).toBeVisible();
+      expect(named.length).toBe(1);
+      await page.mouse.move(0, 0);
+      await page.screenshot({ path: info.outputPath(`dbwatch-target-error-${scheme}.png`) });
+      await panel.getByRole('button', { name: 'Retry' }).click();
+      await expect.poll(() => named.length).toBe(2);
+    });
+  }
+
   test('Target ▾ and Tables ▾ stay in the viewport with 60 entries', async ({ page }, info) => {
     test.skip(info.project.name !== 'desktop-browser', 'desktop dock');
     await mockWatch(page, root, 'mysql');

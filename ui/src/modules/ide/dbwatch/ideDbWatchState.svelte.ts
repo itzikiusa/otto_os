@@ -42,8 +42,10 @@ import {
   parseMemory,
   pickAutoItems,
   pickAutoTarget,
+  targetErrorOf,
   targetRefOf,
   type DbWatchMemory,
+  type DbWatchTargetError,
 } from './ideDbWatchModel';
 
 const W = '/ide/db-watch/watches';
@@ -114,6 +116,8 @@ class IdeDbWatchController {
   prodWaiting = $state<{ bind: IdeDbWatchBind; start?: Omit<IdeDbWatchStartReq, 'root'>; label: string } | null>(null);
   /** The tables picked for `pendingTarget`: read only once the person presses Start watching. */
   pendingItems = $state<IdeDbWatchItemSpec[]>([]);
+  /** The picked target could not be listed (unreachable / no default database). */
+  targetError = $state<DbWatchTargetError | null>(null);
 
   private gen = 0;
   private readSeq = 0;
@@ -159,6 +163,7 @@ class IdeDbWatchController {
     this.liveWatch = false;
     this.prodWaiting = null;
     this.pendingItems = [];
+    this.targetError = null;
     this.liveBind = null;
     this.seenDebug = '';
     this.stoppedDebug = '';
@@ -286,8 +291,9 @@ class IdeDbWatchController {
 
   /** Targets + ranked objects in code; with `target`, each object is verified
    *  against that target's real tables. */
-  async discover(opts: { debugSessionId?: string | null; target?: IdeDbWatchTarget | IdeDbWatchTargetRef | null; database?: string | null } = {}): Promise<void> {
-    if (!this.root) return;
+  /** Resolves the failure (null when it answered). */
+  async discover(opts: { debugSessionId?: string | null; target?: IdeDbWatchTarget | IdeDbWatchTargetRef | null; database?: string | null } = {}): Promise<unknown> {
+    if (!this.root) return null;
     const gen = this.gen;
     this.detectLoading = true;
     this.detectError = null;
@@ -310,8 +316,10 @@ class IdeDbWatchController {
       this.detected = resp.detected_objects ?? [];
       this.savedConnections = resp.saved_connections ?? [];
       this.ephemeralTargets = resp.ephemeral_targets ?? [];
+      return null;
     } catch (e) {
       if (gen === this.gen) this.detectError = loadErrorText(e);
+      return e;
     } finally {
       if (gen === this.gen) this.detectLoading = false;
     }
@@ -403,6 +411,7 @@ class IdeDbWatchController {
       this.read = null;
       this.pendingTarget = null;
       this.pendingItems = [];
+      this.targetError = null;
       this.prodWaiting = null;
       this.liveWatch = false; // never carried over to another target
       if (opts.persist !== false) this.remember(w);
@@ -425,7 +434,29 @@ class IdeDbWatchController {
     this.pendingItems = this.pendingTarget ? this.pendingItems : this.specs();
     this.pendingTarget = known;
     this.error = null;
-    await this.discover({ target: ref });
+    await this.listPending();
+  }
+
+  /** List the picked target's tables (a detect naming it); a failure is the target's error. */
+  private async listPending(): Promise<void> {
+    const t = this.pendingTarget;
+    if (!t) return;
+    this.targetError = null;
+    const err = await this.discover({ target: t });
+    if (err && this.pendingTarget === t) this.targetError = targetErrorOf((err as { status?: number }).status, (err as Error).message ?? '');
+  }
+
+  /** Retry listing the picked target — the person's click. */
+  async retryTarget(): Promise<void> {
+    await this.listPending();
+  }
+
+  /** The database to list for a picked connection that has no default one. */
+  async setPendingDatabase(database: string): Promise<void> {
+    const t = this.pendingTarget;
+    if (!t || !database.trim()) return;
+    this.pendingTarget = { ...t, database: database.trim() };
+    await this.listPending();
   }
 
   /** Start watching the picked target with the picked tables (the primary action). */
