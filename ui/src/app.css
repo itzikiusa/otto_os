@@ -857,13 +857,6 @@ button.chip:focus-visible {
     transform: rotate(360deg);
   }
 }
-/* Nobody is looking (lib/appInactive.ts): no animation keeps the compositor busy. */
-html.app-inactive *,
-html.app-inactive *::before,
-html.app-inactive *::after {
-  animation-play-state: paused !important;
-}
-
 @keyframes otto-pulse {
   0%,
   100% {

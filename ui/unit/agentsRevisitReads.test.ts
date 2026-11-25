@@ -72,3 +72,30 @@ test('an unfocused window re-reads usage limits and machine status at a slow pac
   focused = true;
   for (const p of [lim, mac]) { await p.tick(); assert.equal(p.calls(), 2, 'focused: the normal cadence'); }
 });
+
+test('an explicit refresh while unfocused reads (no stuck loading); focus after the slow pace reads at once', async () => {
+  let focused = false;
+  let onFocus: (() => void) | null = null;
+  const nows: unknown[] = [];
+  let run: ((s: AbortSignal) => Promise<unknown>) | null = null;
+  let calls = 0;
+  const { limits } = loadSource(new URL('../src/lib/stores/usageLimits.svelte.ts', import.meta.url), {
+    '../api/client': { api: { get: async () => (calls++, { accounts: [], stale_after_secs: 600 }) } },
+    '../loadError': { loadErrorText: String },
+    '../poll': { pollWhileVisible: (fn: typeof run) => { run = fn; return { stop() {}, now: (o: unknown) => nows.push(o) }; } },
+  }, {
+    document: { hasFocus: () => focused },
+    window: { addEventListener: (t: string, fn: () => void) => { if (t === 'focus') onFocus = fn; }, removeEventListener() {} },
+  });
+  limits.mount();
+  await run!(new AbortController().signal);
+  assert.equal(calls, 1);
+  limits.refresh();
+  assert.equal(limits.loading, true);
+  await run!(new AbortController().signal); // the refresh's run
+  assert.equal(calls, 2, 'the explicit refresh read');
+  assert.equal(limits.loading, false, 'loading cleared');
+  limits.now = Date.now() - 10 * 60_000; // ten minutes behind other apps
+  focused = true; onFocus!();
+  assert.equal(nows.length, 2, 'focus asked for a read at once');
+});

@@ -522,8 +522,8 @@ const BG_MAX = 2;
 const BG_GLOBAL = 3;
 const BG_GLOBAL_WAIT_MS = 5_000;
 const bgPool = { active: 0, waiters: [] as (() => void)[] };
-// bg on a LONG path (polled usage summary, k8s/AWS/Kafka read, repo status): own
-// BG_MAX slots + long lane (no 20 s deadline), never holding the fast polls' two.
+// bg on a LONG path (polled usage summary, k8s/AWS/Kafka read, repo status): its
+// own BG_MAX slots here, never the fast polls' two; still inside BG_GLOBAL.
 const slowBgPool = { active: 0, waiters: [] as (() => void)[] };
 
 function abortError(): DOMException {
@@ -618,7 +618,7 @@ async function withBgSlot<T>(run: () => Promise<T>, signal?: AbortSignal, pool =
   }
   let releaseGlobal = noop;
   try {
-    if (pool === bgPool) releaseGlobal = await globalBgSlot(signal);
+    releaseGlobal = await globalBgSlot(signal);
     return await run();
   } finally {
     releaseGlobal();
@@ -634,7 +634,7 @@ function send<T>(method: string, path: string, body: unknown, signal: AbortSigna
   const eff = resolveLane(path, signal, lane);
   if (eff === 'bg') {
     const slow = isLongPath(path), queued = !path.startsWith('/telemetry') ? startMeasurement('ui.request.queue', apiComponent(path)) : null;
-    return withBgSlot(() => { queued?.finish(); return request<T>(method, path, body, signal, slow ? 'long' : 'bg'); }, signal, slow ? slowBgPool : bgPool).catch((error: unknown) => { queued?.finish('error'); throw error; });
+    return withBgSlot(() => { queued?.finish(); return request<T>(method, path, body, signal, 'bg'); }, signal, slow ? slowBgPool : bgPool).catch((error: unknown) => { queued?.finish('error'); throw error; });
   }
   return request<T>(method, path, body, signal, eff);
 }
@@ -660,7 +660,7 @@ export type Conditional<T> =
 function sendConditional<T>(path: string, ifNoneMatch: string | null | undefined, signal: AbortSignal | undefined, lane?: Lane): Promise<Conditional<T>> {
   const eff = resolveLane(path, signal, lane);
   const cond: ConditionalOpts = { ifNoneMatch };
-  const slow = eff === 'bg' && isLongPath(path), run = (): Promise<T> => request<T>('GET', path, undefined, signal, slow ? 'long' : eff, cond);
+  const slow = eff === 'bg' && isLongPath(path), run = (): Promise<T> => request<T>('GET', path, undefined, signal, eff, cond);
   return (eff === 'bg' ? withBgSlot(run, signal, slow ? slowBgPool : bgPool) : run()).then((data) =>
     cond.status === 304
       ? { notModified: true as const, etag: cond.etag ?? ifNoneMatch ?? null }

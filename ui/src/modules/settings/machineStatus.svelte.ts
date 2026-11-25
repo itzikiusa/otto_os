@@ -26,6 +26,10 @@ class MachineStatusStore {
   private readAt = 0;
   private poller: Poller | null = null;
   private watchers = 0;
+  /** Back in front after the slow unfocused pace: read now if past the cadence. */
+  private onFocus = (): void => {
+    if (Date.now() - this.readAt >= MACHINE_POLL_MS) this.poller?.now({ background: true });
+  };
 
   /** Keep the status fresh while the caller is mounted. Use as
    *  `$effect(() => machineStatus.watch())` — the release is the cleanup. */
@@ -48,6 +52,7 @@ class MachineStatusStore {
         },
         { ms: MACHINE_POLL_MS },
       );
+      if (this.watchers === 1 && typeof window !== 'undefined') window.addEventListener('focus', this.onFocus);
       let released = false;
       return () => {
         if (released) return;
@@ -56,6 +61,7 @@ class MachineStatusStore {
         if (this.watchers > 0) return;
         this.poller?.stop();
         this.poller = null;
+        if (typeof window !== 'undefined') window.removeEventListener('focus', this.onFocus);
       };
     });
   }

@@ -74,3 +74,26 @@ test('a slow background read on a long path never holds the fast polls\' two slo
   assert.ok(fetched.some((u) => u.includes('/notifications')), 'the fast poll went out: ' + fetched.join(' '));
   await fast;
 });
+
+test('a slow background read still takes an app-wide slot and keeps the read deadline', async () => {
+  const lane = loadSource(new URL('../src/lib/api/lane.ts', import.meta.url), {});
+  const locks: string[] = [];
+  const timers: { ms: number; fn: () => void }[] = [];
+  const c = loadSource(new URL('../src/lib/api/client.ts', import.meta.url), {
+    '../stores/serviceHealth.svelte': { serviceHealth: { report() {} } },
+    './lane': lane,
+  }, {
+    location: { port: '7700', origin: 'http://localhost:7700' },
+    navigator: { locks: { request: (name: string, _o: unknown, cb: (l: unknown) => unknown) => { locks.push(name); return Promise.resolve(cb({})); } } },
+    setTimeout: (fn: () => void, ms: number) => (timers.push({ ms, fn }), timers.length),
+    clearTimeout: () => {},
+    fetch: (_u: string, init: { signal?: AbortSignal }) => new Promise((_r, reject) => init.signal?.addEventListener('abort', () => reject(init.signal!.reason))),
+  });
+  const slow = lane.inLane('bg', () => c.api.get('/usage/summary?days=7'));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(locks.some((n) => n.startsWith('otto-bg-')), 'took an app-wide bg lock: ' + locks.join(','));
+  const deadline = timers.find((t) => t.ms === c.READ_DEADLINE_MS);
+  assert.ok(deadline, 'a signal-less slow read has the read deadline');
+  deadline!.fn();
+  await assert.rejects(slow);
+});
