@@ -32,8 +32,6 @@ const INSTALL_PATH: &str = "/Applications/Otto.app";
 const META_URL: &str = "http://127.0.0.1:7700/api/v1/meta";
 const FIRST_CHECK: Duration = Duration::from_secs(60);
 const EVERY: Duration = Duration::from_secs(6 * 3600);
-/// The manifest's platform key (all releases are Apple-silicon builds).
-const TARGET: &str = "darwin-aarch64";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -280,7 +278,6 @@ async fn find_update<R: Runtime>(
     })?;
     let update = app
         .updater_builder()
-        .target(TARGET)
         .build()
         .and_then(|u| u.restore_update(json))
         .map_err(|e| {
@@ -462,7 +459,10 @@ async fn check(app: &AppHandle, manual: bool) {
                     .map(String::from);
                 i.state.size = u
                     .raw_json
-                    .pointer(&format!("/platforms/{TARGET}/size"))
+                    .pointer(&format!(
+                        "/platforms/{}/size",
+                        tauri_plugin_updater::target().unwrap_or_default()
+                    ))
                     .and_then(|v| v.as_u64());
                 i.state.received = 0;
                 i.state.release_url = release_url(&url, &u.version);
