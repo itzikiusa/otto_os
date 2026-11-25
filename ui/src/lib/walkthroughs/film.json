@@ -1,8 +1,8 @@
 {
-  "file": "otto-tour-20261116.mp4",
-  "poster": "otto-tour-20261116-poster.jpg",
-  "captions": "otto-tour-20261116.vtt",
-  "duration": 172.01,
+  "file": "otto-tour-20261125.mp4",
+  "poster": "otto-tour-20261125-poster.jpg",
+  "captions": "otto-tour-20261125.vtt",
+  "duration": 180.01,
   "chapters": [
     {
       "id": "intro",
@@ -30,70 +30,77 @@
       "section": "agents",
       "title": "Agents",
       "start": 22,
-      "duration": 6
+      "duration": 12
     },
     {
       "id": "threads",
       "section": "threads",
       "title": "Threads",
-      "start": 28,
-      "duration": 12
-    },
-    {
-      "id": "council",
-      "section": "threads",
-      "title": "Council",
-      "start": 40,
-      "duration": 8
+      "start": 34,
+      "duration": 14
     },
     {
       "id": "loops",
       "section": "loops",
       "title": "Goal Loops",
       "start": 48,
-      "duration": 8
+      "duration": 6
     },
     {
       "id": "workflows",
       "section": "workflows",
       "title": "Workflows and Scheduled Tasks",
-      "start": 56,
-      "duration": 8
+      "start": 54,
+      "duration": 6
     },
     {
       "id": "personal-agents",
       "section": "personal-agents",
       "title": "Personal Agents",
-      "start": 64,
-      "duration": 8
+      "start": 60,
+      "duration": 4
     },
     {
       "id": "ide",
       "section": "ide",
       "title": "IDE (Beta)",
-      "start": 72,
-      "duration": 16
+      "start": 64,
+      "duration": 12
+    },
+    {
+      "id": "agent-debug",
+      "section": "ide",
+      "title": "Debug with an agent",
+      "start": 76,
+      "duration": 12
+    },
+    {
+      "id": "dbwatch",
+      "section": "ide",
+      "title": "DB Watch",
+      "start": 88,
+      "duration": 4
     },
     {
       "id": "git",
       "section": "git",
       "title": "Git and AI review",
-      "start": 88,
+      "start": 92,
       "duration": 8
     },
     {
       "id": "product",
       "section": "product",
       "title": "Product and Design Hall",
-      "start": 96,
-      "duration": 10
+      "start": 100,
+      "duration": 8
     },
     {
       "id": "vault",
       "section": "vault",
       "title": "Vault and Skills Lab",
-      "start": 106,
-      "duration": 6
+      "start": 108,
+      "duration": 4
     },
     {
       "id": "database",
@@ -131,10 +138,17 @@
       "duration": 8
     },
     {
+      "id": "updates",
+      "section": "desktop-app",
+      "title": "Updates",
+      "start": 160,
+      "duration": 8
+    },
+    {
       "id": "outro",
       "section": "channels",
       "title": "Everywhere",
-      "start": 160,
+      "start": 168,
       "duration": 12
     }
   ]

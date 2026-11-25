@@ -4,13 +4,17 @@
 // callouts `b`/`until`) are beats from the shot's cut.
 // Coordinates are normalized to the captured page (1600×900 CSS px @2x):
 // x 0..1 left→right, y 0..1 top→bottom.
-// Stills/clips come from scripts/capture.mjs → public/capture/ and the Rooms
-// clips from scripts/capture-rooms.mjs (or scripts/reuse-rooms.mjs: the same
-// footage, cropped clear of the published movie's caption band — hence the
-// Rooms coordinates below are in that crop) → public/capture/rooms/.
+// Stills/clips come from scripts/capture.mjs → public/capture/, the agent-debug
+// and DB Watch stills from scripts/capture-agent-debug.mjs → public/capture/dbg/
+// (the IDE opens beside the agent's session, so those shots frame the right
+// half), and the Rooms clips from scripts/capture-rooms.mjs (or
+// scripts/reuse-rooms.mjs: the same footage, cropped clear of the published
+// movie's caption band — hence the Rooms coordinates below are in that crop)
+// → public/capture/rooms/.
 import type { ChapterSpec } from './types';
 
 const cap = (f: string) => `capture/${f}`;
+const dbg = (f: string) => `capture/dbg/${f}`;
 const room = (f: string) => `capture/rooms/${f}`;
 
 export const SCENES: Record<string, ChapterSpec> = {
@@ -90,29 +94,35 @@ export const SCENES: Record<string, ChapterSpec> = {
     ],
   },
 
-  // 3 bars = 12 beats
+  // 6 bars = 24 beats — Agents is one workspace: the inbox beside the canvas,
+  // a session in its Chat view, tiled with the terminals, broadcast
   agents: {
     id: 'agents',
     group: 'Work',
     title: 'Agents',
-    kicker: 'Claude Code, Codex, Antigravity and shells as real sessions',
+    kicker: 'One workspace: an inbox of sessions beside the canvas',
     shots: [
       {
         kind: 'screen',
-        src: cap('agents-tab.jpg'),
-        beats: 4,
+        src: cap('agents-chat.jpg'),
+        beats: 10,
+        label: 'A session in its Chat view',
         cam: [
           { b: 0, x: 0.5, y: 0.5, z: 1 },
-          { b: 1, x: 0.4, y: 0.4, z: 1.25 },
+          { b: 2, x: 0.16, y: 0.36, z: 1.6 },
+          { b: 5, x: 0.5, y: 0.38, z: 1.4 },
         ],
-        callouts: [{ b: 1, x: 0.07, y: 0.24, label: 'Every session, live', side: 'right' }],
+        callouts: [
+          { b: 2.5, until: 4.75, x: 0.2, y: 0.17, label: 'Status in words, what needs you first', side: 'right' },
+          { b: 5.5, x: 0.94, y: 0.07, label: 'Terminal or Chat', side: 'left' },
+        ],
       },
       {
         kind: 'screen',
         src: cap('agents-tiled.jpg'),
-        beats: 4,
+        beats: 7,
         transition: 'push',
-        label: 'Tiled: see every agent at once',
+        label: 'Tile chat threads and terminals together',
         cam: [
           { b: 0, x: 0.5, y: 0.5, z: 1.2 },
           { b: 1.5, x: 0.55, y: 0.5, z: 1 },
@@ -121,7 +131,7 @@ export const SCENES: Record<string, ChapterSpec> = {
       {
         kind: 'screen',
         src: cap('agents-broadcast.jpg'),
-        beats: 4,
+        beats: 7,
         transition: 'whip',
         label: 'Broadcast one prompt to many agents',
         cam: [
@@ -132,10 +142,9 @@ export const SCENES: Record<string, ChapterSpec> = {
     ],
   },
 
-  // 6 bars = 24 beats — Threads on the structured runtime: the picker lists
+  // 7 bars = 28 beats — Threads on the structured runtime: the picker lists
   // every structured agent (stand-ins in scripts/lib/stack.mjs), a Codex
-  // thread driven by the capture's scripted app-server (scripts/lib/demo-codex.mjs),
-  // and the Claude it asks (scripts/lib/demo-claude.mjs)
+  // thread driven by the capture's scripted app-server (scripts/lib/demo-codex.mjs)
   threads: {
     id: 'threads',
     group: 'Work',
@@ -145,127 +154,54 @@ export const SCENES: Record<string, ChapterSpec> = {
       {
         kind: 'screen',
         src: cap('threads-picker.jpg'),
-        beats: 4,
+        beats: 5,
         label: 'Every structured agent, one picker',
         cam: [
-          { b: 0, x: 0.55, y: 0.45, z: 1.2 },
-          { b: 1, x: 0.56, y: 0.42, z: 1.75 },
+          { b: 0, x: 0.5, y: 0.45, z: 1.15 },
+          { b: 1, x: 0.42, y: 0.42, z: 1.7 },
         ],
-        callouts: [{ b: 1.5, x: 0.44, y: 0.42, label: 'Claude, Codex, Antigravity, OpenCode, pi, Gemini, Grok, Muse', side: 'left' }],
+        callouts: [{ b: 1.5, x: 0.255, y: 0.45, label: 'Claude, Codex, Antigravity, OpenCode, pi, Gemini, Grok, Muse', side: 'right' }],
       },
       {
         kind: 'screen',
-        src: cap('threads-runtime.mp4'),
-        from: 9.5,
-        rate: 1.8,
-        beats: 6,
+        src: cap('threads-runtime.jpg'),
+        beats: 8,
         transition: 'push',
-        label: 'Start a Codex thread and watch it work',
+        label: 'A Codex thread: plan, commands and edits, streamed',
         cam: [
-          { b: 0, x: 0.5, y: 0.45, z: 1.5 },
-          { b: 2, x: 0.55, y: 0.3, z: 1.5 },
+          { b: 0, x: 0.5, y: 0.5, z: 1.05 },
+          { b: 2, x: 0.5, y: 0.3, z: 1.55 },
         ],
-        callouts: [{ b: 2.5, until: 5.5, x: 0.31, y: 0.17, label: 'Plan · commands · edits, streamed', side: 'right' }],
+        callouts: [{ b: 2.5, until: 7.5, x: 0.28, y: 0.27, label: 'Tasks, commands, the edit and the test run', side: 'right' }],
       },
       {
         kind: 'screen',
         src: cap('threads-approval.jpg'),
-        beats: 4,
+        beats: 7,
         transition: 'push',
         label: 'It asks before anything outward-facing',
         cam: [
-          { b: 0, x: 0.6, y: 0.45, z: 1.2 },
-          { b: 1, x: 0.5, y: 0.52, z: 1.65 },
+          { b: 0, x: 0.6, y: 0.6, z: 1.15 },
+          { b: 1, x: 0.75, y: 0.86, z: 1.8 },
         ],
-        callouts: [{ b: 1.5, x: 0.335, y: 0.55, label: 'Approve inline', side: 'bottom' }],
+        callouts: [{ b: 2, x: 0.86, y: 0.955, label: 'Allow once, inline', side: 'top' }],
       },
-      {
-        kind: 'screen',
-        src: cap('threads-ask-chip.jpg'),
-        beats: 4,
-        transition: 'whip',
-        label: 'Ask another agent from inside the thread',
-        cam: [
-          { b: 0, x: 0.6, y: 0.7, z: 1.2 },
-          { b: 1, x: 0.45, y: 0.86, z: 1.7 },
-        ],
-        callouts: [{ b: 1.5, x: 0.27, y: 0.87, label: 'Ask Claude Opus', side: 'top' }],
-      },
-      {
-        kind: 'screen',
-        src: cap('threads-ask.jpg'),
-        beats: 6,
-        transition: 'push',
-        label: 'Its answer arrives as a live card, and nests under the thread',
-        cam: [
-          { b: 0, x: 0.55, y: 0.5, z: 1.1 },
-          { b: 1, x: 0.5, y: 0.5, z: 1.5 },
-          { b: 3.5, x: 0.22, y: 0.2, z: 1.7 },
-        ],
-        callouts: [
-          { b: 1.5, until: 3.5, x: 0.45, y: 0.566, label: 'A child thread on Claude', side: 'top' },
-          { b: 4, x: 0.19, y: 0.187, label: 'Nested in the sidebar', side: 'right' },
-        ],
-      },
-    ],
-  },
-
-  // 4 bars = 16 beats — Council: one prompt, two seats, then a judge
-  council: {
-    id: 'council',
-    group: 'Work',
-    title: 'Council',
-    kicker: 'One prompt to several agents, then a judge',
-    shots: [
       {
         kind: 'screen',
         src: cap('council-stage.jpg'),
-        beats: 3,
-        label: 'Ask several: Claude Opus and GPT side by side',
-        cam: [
-          { b: 0, x: 0.5, y: 0.5, z: 1.6 },
-          { b: 1, x: 0.5, y: 0.52, z: 2 },
-        ],
-        callouts: [{ b: 1, x: 0.43, y: 0.548, label: 'Two seats', side: 'bottom' }],
-      },
-      {
-        kind: 'screen',
-        src: cap('council.jpg'),
-        beats: 4,
-        transition: 'push',
-        label: 'Each seat answers in its own column',
-        cam: [
-          { b: 0, x: 0.58, y: 0.4, z: 1.05 },
-          { b: 1.5, x: 0.58, y: 0.3, z: 1.2 },
-        ],
-      },
-      {
-        kind: 'screen',
-        src: cap('council-synthesis.jpg'),
-        beats: 4,
+        beats: 8,
         transition: 'whip',
-        label: 'The judge: agreement, disagreement, a pick',
+        label: 'Compare models: one prompt, several agents side by side',
         cam: [
-          { b: 0, x: 0.6, y: 0.6, z: 1.1 },
-          { b: 1, x: 0.5, y: 0.6, z: 1.5 },
+          { b: 0, x: 0.5, y: 0.5, z: 1.3 },
+          { b: 1, x: 0.5, y: 0.5, z: 1.9 },
         ],
-      },
-      {
-        kind: 'screen',
-        src: cap('council-round2.jpg'),
-        beats: 5,
-        transition: 'push',
-        label: 'A follow-up goes to every seat as round 2',
-        cam: [
-          { b: 0, x: 0.5, y: 0.3, z: 1.2 },
-          { b: 1.5, x: 0.38, y: 0.25, z: 1.6 },
-        ],
-        callouts: [{ b: 2, x: 0.36, y: 0.185, label: 'Round 2: every seat answered', side: 'right' }],
+        callouts: [{ b: 2, x: 0.3, y: 0.535, label: 'Claude Opus and GPT', side: 'bottom' }],
       },
     ],
   },
 
-  // 4 bars = 16 beats — verse
+  // 3 bars = 12 beats — verse
   loops: {
     id: 'loops',
     group: 'Automate',
@@ -275,22 +211,22 @@ export const SCENES: Record<string, ChapterSpec> = {
       {
         kind: 'screen',
         src: cap('loops.jpg'),
-        beats: 16,
+        beats: 12,
         label: 'Goal Loops: autonomous iterations with hard budgets',
         cam: [
           { b: 0, x: 0.5, y: 0.45, z: 1.05 },
-          { b: 2.5, x: 0.45, y: 0.3, z: 1.45 },
-          { b: 8, x: 0.32, y: 0.74, z: 1.45 },
+          { b: 2, x: 0.45, y: 0.3, z: 1.45 },
+          { b: 6.5, x: 0.32, y: 0.74, z: 1.45 },
         ],
         callouts: [
-          { b: 1.5, until: 7, x: 0.53, y: 0.24, label: 'Plan → execute → evaluate', side: 'bottom' },
-          { b: 9, x: 0.31, y: 0.71, label: 'Machine-checked acceptance criteria', side: 'right' },
+          { b: 1.5, until: 6, x: 0.53, y: 0.24, label: 'Plan → execute → evaluate', side: 'bottom' },
+          { b: 7.5, x: 0.17, y: 0.85, label: 'Machine-checked acceptance criteria', side: 'right' },
         ],
       },
     ],
   },
 
-  // 4 bars = 16 beats
+  // 3 bars = 12 beats
   workflows: {
     id: 'workflows',
     group: 'Automate',
@@ -300,28 +236,28 @@ export const SCENES: Record<string, ChapterSpec> = {
       {
         kind: 'screen',
         src: cap('workflows.jpg'),
-        beats: 8,
+        beats: 6,
+        label: 'Workflows chain agents, approvals and tools',
         cam: [
           { b: 0, x: 0.5, y: 0.5, z: 1 },
-          { b: 1.5, x: 0.42, y: 0.3, z: 1.3 },
+          { b: 1.5, x: 0.62, y: 0.3, z: 1.35 },
         ],
-        callouts: [{ b: 2, x: 0.31, y: 0.36, label: 'Paused for your approval', side: 'right' }],
       },
       {
         kind: 'screen',
         src: cap('scheduled-tasks.jpg'),
-        beats: 8,
+        beats: 6,
         transition: 'push',
         label: 'Scheduled tasks run agents on a cadence and report back',
         cam: [
           { b: 0, x: 0.5, y: 0.4, z: 1.08 },
-          { b: 1.5, x: 0.45, y: 0.22, z: 1.45 },
+          { b: 1.5, x: 0.5, y: 0.22, z: 1.45 },
         ],
       },
     ],
   },
 
-  // 4 bars = 16 beats — a personal agent's Chat tab is a runtime thread
+  // 2 bars = 8 beats — a personal agent's Chat is a runtime thread
   'personal-agents': {
     id: 'personal-agents',
     group: 'Automate',
@@ -331,35 +267,21 @@ export const SCENES: Record<string, ChapterSpec> = {
       {
         kind: 'screen',
         src: cap('pa-chat.mp4'),
-        from: 0.2,
-        rate: 1.15,
-        beats: 12,
+        from: 1,
+        rate: 1.6,
+        beats: 8,
         label: 'Chat with your agent: a thread on the structured runtime',
         cam: [
-          { b: 0, x: 0.53, y: 0.78, z: 1.4 },
-          { b: 2.5, x: 0.5, y: 0.45, z: 1.42 },
-        ],
-        callouts: [
-          { b: 10.5, until: 12, x: 0.25, y: 0.165, label: 'Its work folds to one line', side: 'right' },
-        ],
-      },
-      {
-        kind: 'screen',
-        src: cap('personal-agents.jpg'),
-        beats: 4,
-        transition: 'whip',
-        label: 'Each agent keeps its routines and history',
-        cam: [
-          { b: 0, x: 0.5, y: 0.4, z: 1.1 },
-          { b: 1, x: 0.48, y: 0.22, z: 1.45 },
+          { b: 0, x: 0.45, y: 0.78, z: 1.4 },
+          { b: 2.5, x: 0.4, y: 0.42, z: 1.42 },
         ],
       },
     ],
   },
 
-  // 8 bars = 32 beats — chorus 2: IDE (Beta) on the fictional acme-ledger
-  // project (scripts/lib/demo-ledger.mjs): gutter, hover, a TypeScript
-  // diagnostic, a pytest run, a breakpoint hit, the agent dock.
+  // 6 bars = 24 beats — chorus 2: IDE (Beta) on the fictional acme-ledger
+  // project (scripts/lib/demo-ledger.mjs): projects in the order added, tabs
+  // back after a restart, typing, a pytest run, a breakpoint hit, the agent dock.
   ide: {
     id: 'ide',
     group: 'Build',
@@ -368,108 +290,195 @@ export const SCENES: Record<string, ChapterSpec> = {
     shots: [
       {
         kind: 'screen',
-        src: cap('ide-file.jpg'),
-        beats: 6,
-        label: 'A multi-language project: Python, Go and TypeScript',
+        src: cap('ide-projects.jpg'),
+        beats: 4,
+        label: 'Your projects, in the order you added them',
         cam: [
           { b: 0, x: 0.5, y: 0.5, z: 1 },
-          { b: 2, x: 0.38, y: 0.42, z: 1.35 },
-        ],
-        callouts: [
-          { b: 0.75, until: 2.5, x: 0.11, y: 0.3, label: 'The project tree', side: 'right' },
-          { b: 3, x: 0.255, y: 0.438, label: 'Git gutter: your changes', side: 'right' },
+          { b: 1, x: 0.21, y: 0.22, z: 2 },
         ],
       },
       {
         kind: 'screen',
-        src: cap('ide-hover.jpg'),
+        src: cap('ide-restored.jpg'),
         beats: 4,
         transition: 'push',
-        label: 'Docs on hover, from the language server',
+        label: 'After a restart, every tab comes back',
         cam: [
-          { b: 0, x: 0.45, y: 0.55, z: 1.2 },
-          { b: 1, x: 0.44, y: 0.58, z: 1.75 },
+          { b: 0, x: 0.5, y: 0.4, z: 1.2 },
+          { b: 1, x: 0.4, y: 0.25, z: 1.6 },
         ],
+        callouts: [{ b: 1.5, x: 0.36, y: 0.07, label: 'The same tabs, the same active file', side: 'bottom' }],
       },
       {
         kind: 'screen',
-        src: cap('ide-diagnostic.jpg'),
+        src: cap('ide-typing.jpg'),
         beats: 4,
         transition: 'whip',
-        label: 'Type errors as you read',
+        label: 'Type with the language server beside you',
         cam: [
-          { b: 0, x: 0.45, y: 0.45, z: 1.2 },
-          { b: 1, x: 0.48, y: 0.43, z: 1.7 },
+          { b: 0, x: 0.45, y: 0.4, z: 1.3 },
+          { b: 1, x: 0.4, y: 0.33, z: 1.85 },
         ],
       },
       {
         kind: 'screen',
         src: cap('ide-run.jpg'),
-        beats: 6,
+        beats: 4,
         transition: 'push',
         label: 'Run configurations: live output and a test tree',
         cam: [
-          { b: 0, x: 0.55, y: 0.45, z: 1.05 },
-          { b: 1.5, x: 0.45, y: 0.78, z: 1.45 },
+          { b: 0, x: 0.55, y: 0.5, z: 1.05 },
+          { b: 1, x: 0.4, y: 0.8, z: 1.5 },
         ],
-        callouts: [{ b: 2.5, x: 0.3, y: 0.735, label: '4 tests passed', side: 'right' }],
       },
       {
         kind: 'screen',
         src: cap('ide-debug.jpg'),
-        beats: 6,
+        beats: 4,
         transition: 'whip',
         label: 'A breakpoint hit: frames, variables, evaluate',
         cam: [
-          { b: 0, x: 0.5, y: 0.45, z: 1.1 },
-          { b: 1.5, x: 0.48, y: 0.72, z: 1.4 },
+          { b: 0, x: 0.5, y: 0.5, z: 1.1 },
+          { b: 1, x: 0.5, y: 0.72, z: 1.45 },
         ],
-        callouts: [{ b: 2, x: 0.462, y: 0.694, label: 'Paused at the breakpoint', side: 'top' }],
       },
       {
         kind: 'screen',
         src: cap('ide-agent.jpg'),
-        beats: 3,
+        beats: 4,
         transition: 'push',
-        label: 'Ask the agent about the selected code',
+        label: 'Ask the agent about the selected code, then apply its diff',
         cam: [
-          { b: 0, x: 0.7, y: 0.4, z: 1.2 },
-          { b: 1, x: 0.86, y: 0.36, z: 1.75 },
-        ],
-      },
-      {
-        kind: 'screen',
-        src: cap('ide-agent-applied.jpg'),
-        beats: 3,
-        transition: 'whip',
-        label: 'Apply its diff, or undo it',
-        cam: [
-          { b: 0, x: 0.55, y: 0.45, z: 1.2 },
-          { b: 1, x: 0.5, y: 0.5, z: 1.45 },
+          { b: 0, x: 0.7, y: 0.45, z: 1.2 },
+          { b: 1, x: 0.86, y: 0.4, z: 1.75 },
         ],
       },
     ],
   },
 
-  // 4 bars = 16 beats
+  // 6 bars = 24 beats — an agent debugs a real Go service with real delve
+  // and a real MariaDB (the e2e fixture ui/e2e/fixtures/go-orders); the IDE
+  // opens beside the agent's session, so every shot frames the right half.
+  'agent-debug': {
+    id: 'agent-debug',
+    group: 'Build',
+    title: 'Debug with an agent',
+    kicker: 'It drives the debugger; you watch, and you decide',
+    shots: [
+      {
+        kind: 'screen',
+        src: dbg('dbg-start-confirm.jpg'),
+        beats: 5,
+        label: 'Before anything runs: exactly what will start',
+        cam: [
+          { b: 0, x: 0.6, y: 0.5, z: 1.1 },
+          { b: 1, x: 0.76, y: 0.48, z: 2.1 },
+        ],
+      },
+      {
+        kind: 'screen',
+        src: dbg('dbg-running.jpg'),
+        beats: 4,
+        transition: 'push',
+        label: 'The agent says what it is doing',
+        cam: [
+          { b: 0, x: 0.75, y: 0.4, z: 1.9 },
+          { b: 1.5, x: 0.76, y: 0.2, z: 2.2 },
+        ],
+        callouts: [{ b: 1.5, x: 0.83, y: 0.08, label: 'Driving the IDE, in its own words', side: 'bottom' }],
+      },
+      {
+        kind: 'screen',
+        src: dbg('dbg-stop.jpg'),
+        beats: 5,
+        transition: 'whip',
+        label: 'Stopped at its breakpoint in the handler',
+        cam: [
+          { b: 0, x: 0.75, y: 0.45, z: 1.9 },
+          { b: 1.5, x: 0.72, y: 0.35, z: 2.2 },
+        ],
+        callouts: [{ b: 2, x: 0.535, y: 0.385, label: 'The agent’s breakpoint', side: 'right' }],
+      },
+      {
+        kind: 'screen',
+        src: dbg('dbg-step-added.jpg'),
+        beats: 5,
+        transition: 'push',
+        label: 'At every stop it explains, and waits',
+        cam: [
+          { b: 0, x: 0.75, y: 0.4, z: 1.9 },
+          { b: 1.5, x: 0.76, y: 0.6, z: 2 },
+        ],
+        callouts: [{ b: 2, x: 0.535, y: 0.7, label: 'DB: the row it just wrote', side: 'top' }],
+      },
+      {
+        kind: 'screen',
+        src: dbg('dbg-proceed.jpg'),
+        beats: 5,
+        transition: 'whip',
+        label: 'Press Proceed, or take over the debugger yourself',
+        cam: [
+          { b: 0, x: 0.75, y: 0.4, z: 1.9 },
+          { b: 1, x: 0.84, y: 0.2, z: 2.4 },
+        ],
+        callouts: [{ b: 1.5, x: 0.924, y: 0.075, label: 'Proceed', side: 'bottom' }],
+      },
+    ],
+  },
+
+  // 2 bars = 8 beats — DB Watch on the same run's MariaDB container
+  dbwatch: {
+    id: 'dbwatch',
+    group: 'Build',
+    title: 'DB Watch',
+    kicker: 'The rows your code wrote, at every stop',
+    shots: [
+      {
+        kind: 'screen',
+        src: dbg('dbw-last.jpg'),
+        beats: 4,
+        label: 'Since the last stop: only the changed cell',
+        cam: [
+          { b: 0, x: 0.75, y: 0.6, z: 1.9 },
+          { b: 1, x: 0.72, y: 0.7, z: 2.6 },
+        ],
+        callouts: [{ b: 1.5, x: 0.61, y: 0.728, label: 'status: new → paid', side: 'bottom' }],
+      },
+      {
+        kind: 'screen',
+        src: dbg('dbg-done.jpg'),
+        beats: 4,
+        transition: 'push',
+        label: 'Since start: the row the request added',
+        cam: [
+          { b: 0, x: 0.75, y: 0.5, z: 1.9 },
+          { b: 1, x: 0.75, y: 0.62, z: 2.3 },
+        ],
+        callouts: [{ b: 1.5, x: 0.8, y: 0.075, label: 'Answered 201: done', side: 'bottom' }],
+      },
+    ],
+  },
+
+  // 4 bars = 16 beats — Git lands on History; uncommitted changes are its top row
   git: {
     id: 'git',
     group: 'Build',
     title: 'Git and AI review',
-    kicker: 'Commit graph, work in progress, PRs and multi-lens review',
+    kicker: 'History first, your changes on top, multi-lens review',
     shots: [
       {
         kind: 'screen',
         src: cap('git.jpg'),
         beats: 6,
-        label: 'A commit graph with your work in progress',
+        label: 'Git opens on History',
         cam: [
           { b: 0, x: 0.5, y: 0.5, z: 1 },
-          { b: 1.5, x: 0.4, y: 0.38, z: 1.3 },
+          { b: 1.5, x: 0.38, y: 0.3, z: 1.4 },
         ],
         callouts: [
-          { b: 1.5, x: 0.44, y: 0.18, label: 'Work in progress', side: 'right' },
-          { b: 3.5, x: 0.21, y: 0.43, label: 'Branches, stashes and worktrees', side: 'right' },
+          { b: 1.5, x: 0.42, y: 0.12, label: 'Uncommitted changes: the top row', side: 'right' },
+          { b: 3.5, x: 0.08, y: 0.32, label: 'Branches, stashes and worktrees', side: 'right' },
         ],
       },
       {
@@ -477,10 +486,10 @@ export const SCENES: Record<string, ChapterSpec> = {
         src: cap('git-wip.jpg'),
         beats: 4,
         transition: 'push',
-        label: 'Stage, commit and draft the PR description with AI',
+        label: 'Stage, commit and draft the message with AI',
         cam: [
           { b: 0, x: 0.7, y: 0.4, z: 1.15 },
-          { b: 1, x: 0.76, y: 0.35, z: 1.45 },
+          { b: 1, x: 0.78, y: 0.3, z: 1.6 },
         ],
       },
       {
@@ -488,16 +497,15 @@ export const SCENES: Record<string, ChapterSpec> = {
         src: cap('git-review.jpg'),
         beats: 6,
         transition: 'whip',
-        label: 'Multi-agent AI review with tracked findings and proof',
+        label: 'Multi-agent AI review with tracked findings',
         cam: [
           { b: 0, x: 0.5, y: 0.45, z: 1.05 },
-          { b: 1.5, x: 0.5, y: 0.35, z: 1.35 },
+          { b: 1.5, x: 0.55, y: 0.25, z: 1.5 },
         ],
       },
     ],
   },
 
-  // 5 bars = 20 beats — Design Hall, the one home for designs
   product: {
     id: 'product',
     group: 'Build',
@@ -507,7 +515,7 @@ export const SCENES: Record<string, ChapterSpec> = {
       {
         kind: 'screen',
         src: cap('product-design.jpg'),
-        beats: 4,
+        beats: 3,
         label: "A story's Design tab lists its designs",
         cam: [
           { b: 0, x: 0.55, y: 0.4, z: 1.08 },
@@ -517,7 +525,7 @@ export const SCENES: Record<string, ChapterSpec> = {
       {
         kind: 'screen',
         src: cap('design-lobby.jpg'),
-        beats: 5,
+        beats: 4,
         transition: 'push',
         label: 'Design Hall: one prompt, every design',
         cam: [
@@ -532,7 +540,7 @@ export const SCENES: Record<string, ChapterSpec> = {
       {
         kind: 'screen',
         src: cap('design-versions.jpg'),
-        beats: 4,
+        beats: 3,
         transition: 'whip',
         label: 'Autosaved, with every version kept',
         cam: [
@@ -543,7 +551,7 @@ export const SCENES: Record<string, ChapterSpec> = {
       {
         kind: 'screen',
         src: cap('design-compare.jpg'),
-        beats: 4,
+        beats: 3,
         transition: 'push',
         label: 'Compare two versions, then restore or approve',
         cam: [
@@ -566,7 +574,7 @@ export const SCENES: Record<string, ChapterSpec> = {
     ],
   },
 
-  // 3 bars = 12 beats
+  // 2 bars = 8 beats
   vault: {
     id: 'vault',
     group: 'Build',
@@ -576,18 +584,17 @@ export const SCENES: Record<string, ChapterSpec> = {
       {
         kind: 'screen',
         src: cap('vault.jpg'),
-        beats: 6,
+        beats: 4,
         label: 'Vault: linked notes, backlinks and live context',
         cam: [
           { b: 0, x: 0.5, y: 0.4, z: 1.2 },
-          { b: 1.5, x: 0.55, y: 0.3, z: 1.4 },
+          { b: 1, x: 0.55, y: 0.3, z: 1.4 },
         ],
-        callouts: [{ b: 2, x: 0.62, y: 0.31, label: 'Links and backlinks', side: 'right' }],
       },
       {
         kind: 'screen',
         src: cap('skills-eval.jpg'),
-        beats: 6,
+        beats: 4,
         transition: 'push',
         label: 'Skills Lab: review, evaluate and edit your skills',
         cam: [
@@ -608,44 +615,33 @@ export const SCENES: Record<string, ChapterSpec> = {
       {
         kind: 'screen',
         src: cap('db-query.jpg'),
-        beats: 5,
+        beats: 6,
         label: 'Query and read the results in a grid',
         cam: [
-          { b: 0, x: 0.55, y: 0.4, z: 1.1 },
-          { b: 1.5, x: 0.6, y: 0.55, z: 1.35 },
+          { b: 0, x: 0.5, y: 0.45, z: 1.1 },
+          { b: 1.5, x: 0.38, y: 0.28, z: 1.6 },
         ],
       },
       {
         kind: 'screen',
         src: cap('db-readonly.jpg'),
-        beats: 4,
+        beats: 5,
         transition: 'push',
         label: 'A read-only connection refuses writes',
         cam: [
-          { b: 0, x: 0.6, y: 0.4, z: 1.15 },
-          { b: 1, x: 0.64, y: 0.45, z: 1.6 },
+          { b: 0, x: 0.55, y: 0.35, z: 1.2 },
+          { b: 1, x: 0.6, y: 0.3, z: 1.75 },
         ],
       },
       {
         kind: 'screen',
         src: cap('db-history.jpg'),
-        beats: 4,
+        beats: 5,
         transition: 'whip',
         label: 'History across every connection',
         cam: [
           { b: 0, x: 0.4, y: 0.3, z: 1.3 },
-          { b: 1, x: 0.24, y: 0.2, z: 2 },
-        ],
-      },
-      {
-        kind: 'screen',
-        src: cap('db-processes.jpg'),
-        beats: 3,
-        transition: 'push',
-        label: 'What is running, in the process list',
-        cam: [
-          { b: 0, x: 0.5, y: 0.5, z: 1.25 },
-          { b: 1, x: 0.5, y: 0.5, z: 1.7 },
+          { b: 1, x: 0.2, y: 0.14, z: 2.3 },
         ],
       },
     ],
@@ -656,31 +652,35 @@ export const SCENES: Record<string, ChapterSpec> = {
     id: 'infra',
     group: 'Infrastructure',
     title: 'Connections and cloud',
-    kicker: 'SSH, AWS, Kubernetes, APIs and the web',
+    kicker: 'SSH, AWS, Kubernetes, APIs, the web and MCP',
     shots: [
-      { kind: 'screen', src: cap('connections.jpg'), beats: 3, card: { title: 'Connections', sub: 'SSH, databases, sections' }, cam: [{ b: 0, x: 0.2, y: 0.3, z: 1.9 }, { b: 1, x: 0.18, y: 0.26, z: 2.1 }] },
+      { kind: 'screen', src: cap('connections.jpg'), beats: 2, card: { title: 'Connections', sub: 'SSH, databases, brokers' }, cam: [{ b: 0, x: 0.3, y: 0.3, z: 1.6 }, { b: 1, x: 0.3, y: 0.28, z: 1.75 }] },
       { kind: 'screen', src: cap('aws.jpg'), beats: 2, transition: 'whip', card: { title: 'AWS', sub: 'S3 · SQS · EC2 · Athena · EKS' }, cam: [{ b: 0, x: 0.22, y: 0.2, z: 1.8 }] },
       { kind: 'screen', src: cap('kubernetes.jpg'), beats: 2, transition: 'whip', card: { title: 'Kubernetes', sub: 'Clusters, workloads, logs' }, cam: [{ b: 0, x: 0.3, y: 0.2, z: 1.45 }] },
       { kind: 'screen', src: cap('api.jpg'), beats: 2, transition: 'whip', card: { title: 'API client', sub: 'Requests, environments, history' }, cam: [{ b: 0, x: 0.5, y: 0.3, z: 1.2 }] },
       { kind: 'screen', src: cap('browser.jpg'), beats: 2, transition: 'whip', card: { title: 'Browser', sub: 'Reader and live tabs for agents' }, cam: [{ b: 0, x: 0.6, y: 0.4, z: 1.15 }] },
       {
         kind: 'screen',
-        src: cap('mcp.jpg'),
+        src: cap('mcp-scope.jpg'),
         beats: 3,
         transition: 'push',
-        label: 'MCP servers run native or governed',
+        label: 'An MCP server, available in every workspace',
         cam: [
-          { b: 0, x: 0.5, y: 0.3, z: 1.1 },
-          { b: 1, x: 0.3, y: 0.2, z: 1.9 },
+          { b: 0, x: 0.5, y: 0.45, z: 1.2 },
+          { b: 1, x: 0.5, y: 0.47, z: 2 },
         ],
       },
       {
         kind: 'screen',
-        src: cap('mcp-activity.jpg'),
-        beats: 2,
+        src: cap('mcp-scope-shared.jpg'),
+        beats: 3,
         transition: 'whip',
-        label: 'A dangerous tool call waits for a person',
-        cam: [{ b: 0, x: 0.45, y: 0.22, z: 1.6 }],
+        label: 'Another workspace has it, with the same credentials',
+        cam: [
+          { b: 0, x: 0.4, y: 0.25, z: 1.5 },
+          { b: 1, x: 0.3, y: 0.22, z: 2 },
+        ],
+        callouts: [{ b: 1.5, x: 0.27, y: 0.215, label: 'Shared from Acme Storefront', side: 'bottom' }],
       },
     ],
   },
@@ -819,6 +819,51 @@ export const SCENES: Record<string, ChapterSpec> = {
       },
       { kind: 'custom', id: 'phone-pair', beats: 5, label: 'The same thread, on your phone' },
       { kind: 'custom', id: 'phone-light', beats: 5, label: 'Or the light version: five tabs' },
+    ],
+  },
+
+  // 4 bars = 16 beats — Check for Updates; the desktop shell's update
+  // commands are mocked as in ui/e2e/desktop-updates.spec.ts, the restart
+  // impact is the capture daemon's real count.
+  updates: {
+    id: 'updates',
+    group: 'Everywhere',
+    title: 'Updates',
+    kicker: 'Check for Updates…, then restart when you choose',
+    shots: [
+      {
+        kind: 'screen',
+        src: cap('update-checking.jpg'),
+        beats: 4,
+        label: 'Otto ▸ Check for Updates…',
+        cam: [
+          { b: 0, x: 0.5, y: 0.5, z: 1.2 },
+          { b: 1, x: 0.5, y: 0.5, z: 2.2 },
+        ],
+      },
+      {
+        kind: 'screen',
+        src: cap('update-available.jpg'),
+        beats: 6,
+        transition: 'push',
+        label: 'What is new, then download',
+        cam: [
+          { b: 0, x: 0.5, y: 0.5, z: 1.6 },
+          { b: 1, x: 0.5, y: 0.5, z: 2.4 },
+        ],
+      },
+      {
+        kind: 'screen',
+        src: cap('update-staged.jpg'),
+        beats: 6,
+        transition: 'whip',
+        label: 'Restart to finish: what keeps running comes first',
+        cam: [
+          { b: 0, x: 0.5, y: 0.5, z: 1.6 },
+          { b: 1, x: 0.5, y: 0.48, z: 2.4 },
+        ],
+        callouts: [{ b: 2, x: 0.62, y: 0.65, label: 'Restart now', side: 'bottom' }],
+      },
     ],
   },
 

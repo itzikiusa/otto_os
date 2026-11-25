@@ -139,10 +139,14 @@ export const SHOTS = {
     }
   },
   // ── Work ──────────────────────────────────────────────────────────────────
+  // Agents is one workspace: the inbox beside the canvas, a Claude session
+  // in its Chat (conversation) view, then tiled with the terminals.
   agents: async (c) => {
     const [s0] = c.meta.ids.sessions;
-    const { context, page } = await open(c, `agents/${s0}`, { settle: 5000 });
-    await still(page, c, 'agents-tab');
+    const { context, page } = await open(c, `agents/${s0}`, { settle: 5000, extra: [{ name: `otto_pane_view:${s0}`, value: 'chat' }] });
+    await page.locator('.conv-list article.turn').last().waitFor({ timeout: 20_000 }).catch(() => console.log('  (no chat turns)'));
+    await wait(1200);
+    await still(page, c, 'agents-chat');
     const rec = await record(page);
     await wait(600);
     await glide(page, page.getByRole('button', { name: 'Tiled view' }));
@@ -311,12 +315,12 @@ export const SHOTS = {
     await composer.click();
     await typeSlow(page, 'Yes, open a draft PR', 50);
     await page.keyboard.press('Enter');
-    const approval = thread.locator('[data-testid^="runtime-approval-"]');
+    const approval = thread.locator('[data-testid^="runtime-approval-"]').first();
     await approval.waitFor({ timeout: 20_000 });
     await wait(1400);
     await still(page, c, 'threads-approval');
-    await glide(page, approval.getByRole('button', { name: 'Approve', exact: true }));
-    await thread.getByText('Draft PR', { exact: false }).last().waitFor({ timeout: 20_000 });
+    await glide(page, approval.getByRole('button', { name: /^(Approve|Allow once)/ }).first());
+    await thread.getByText('Draft PR', { exact: false }).last().waitFor({ timeout: 20_000 }).catch(() => console.log('  (no draft PR yet)'));
     await wait(2200);
     await still(page, c, 'threads-pr');
     await rec.stop(join(c.out, 'threads-runtime.mp4'));
@@ -464,11 +468,14 @@ export const SHOTS = {
   },
   // ── Build ─────────────────────────────────────────────────────────────────
   git: async (c) => {
-    const { context, page } = await open(c, `git/${c.meta.ids.repo}/graph`, { settle: 4500 });
+    // Git lands on History; uncommitted changes are its top row.
+    const { context, page } = await open(c, `git/${c.meta.ids.repo}`, { settle: 4500 });
+    await page.locator('.wip-row').first().waitFor({ timeout: 20_000 }).catch(() => console.log('  (no wip row)'));
+    await wait(800);
     await still(page, c, 'git');
     const rec = await record(page);
     await wait(500);
-    await glide(page, page.getByText('// WIP').first());
+    await glide(page, page.locator('.wip-row').first());
     await wait(2200);
     await still(page, c, 'git-wip');
     await glide(page, page.getByText('Review', { exact: true }).first());
@@ -692,6 +699,106 @@ export const SHOTS = {
     await still(page, c, 'browser');
     await context.close();
   },
+  // One governed MCP server made available in every workspace: the
+  // "Available in…" dialog, the share confirm, then the server as another
+  // workspace sees it.
+  'mcp-scope': async (c) => {
+    const { mkdirSync } = await import('node:fs');
+    const dir = join(c.meta.home, 'Code', 'acme-mobile');
+    mkdirSync(dir, { recursive: true });
+    const other = await api(c, 'POST', '/workspaces', { name: 'Acme Mobile', root_path: dir });
+    const { context, page } = await open(c, 'mcp/servers', { settle: 3500 });
+    const row = page.getByTestId('mcp-server-row').filter({ hasText: 'inventory' }).first();
+    await row.waitFor({ timeout: 20_000 });
+    await glide(page, row.getByRole('button', { name: 'More actions for inventory' }));
+    await wait(600);
+    await glide(page, page.getByRole('menuitem', { name: 'Available in…' }));
+    const dlg = page.getByRole('dialog').filter({ hasText: 'is available' });
+    await dlg.getByLabel('Available in').selectOption('all');
+    await wait(900);
+    await still(page, c, 'mcp-scope');
+    await glide(page, dlg.getByTestId('mcp-scope-save'));
+    const confirm = page.getByRole('dialog').filter({ hasText: 'Share MCP server' });
+    if (await confirm.isVisible({ timeout: 8000 }).catch(() => false)) {
+      await wait(900);
+      await still(page, c, 'mcp-scope-confirm');
+      await glide(page, confirm.getByRole('button', { name: 'Share', exact: true }));
+    }
+    await row.getByTestId('mcp-server-scope').filter({ hasText: 'All workspaces' }).waitFor({ timeout: 20_000 }).catch(() => {});
+    await wait(1200);
+    await still(page, c, 'mcp-scope-all');
+    await context.close();
+    if (other?.id) {
+      const o = await c.newContext({ extra: [{ name: 'otto_workspace', value: other.id }] });
+      const p = await o.newPage();
+      await p.goto(`${UI}/#/mcp/servers`);
+      await p.getByTestId('mcp-server-row').filter({ hasText: 'inventory' }).first().waitFor({ timeout: 30_000 }).catch(() => {});
+      await wait(2000);
+      await still(p, c, 'mcp-scope-shared');
+      await o.close();
+    }
+  },
+  // Check for Updates: the desktop shell is mocked exactly as
+  // ui/e2e/desktop-updates.spec.ts does (invoke + the otto://update and
+  // otto://menu events); the restart impact is the daemon's real count.
+  updates: async (c) => {
+    const notes = ['### What’s new', '- Fixes and smaller improvements from the first week of 0.6.0'].join('\n');
+    const AVAILABLE = { phase: 'available', current: '0.6.0', version: '0.6.1', channel: 'release', notes, date: '2026-12-02T09:00:00Z', size: 131_000_000, received: 0, last_check: 1_795_600_000, auto_install: false, skipped: null, release_url: 'https://example.com/releases/0.6.1' };
+    const context = await c.newContext({});
+    await context.addInitScript((init) => {
+      const callbacks = new Map();
+      const listeners = new Map();
+      let id = 0;
+      const fx = { calls: [], state: init, emit(event, payload) { for (const h of listeners.get(event) ?? []) callbacks.get(h)?.({ event, id: 0, payload }); } };
+      Object.assign(window, {
+        __upd: fx,
+        __OTTO_WIN__: 'main',
+        __TAURI_EVENT_PLUGIN_INTERNALS__: { unregisterListener() {} },
+        __TAURI_INTERNALS__: {
+          metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
+          transformCallback(cb) { callbacks.set(++id, cb); return id; },
+          unregisterCallback(key) { callbacks.delete(key); },
+          convertFileSrc: (p) => p,
+          async invoke(command, args = {}) {
+            fx.calls.push({ command, args });
+            if (command === 'plugin:event|listen') { const ev = String(args.event); listeners.set(ev, [...(listeners.get(ev) ?? []), Number(args.handler)]); return ++id; }
+            if (command === 'windows_registry') return ['main'];
+            if (command === 'update_state' || command === 'update_download' || command === 'update_check') return fx.state;
+            return null;
+          },
+        },
+      });
+    }, { phase: 'up_to_date', current: '0.6.0', channel: 'release', last_check: 1_795_600_000 });
+    const page = await context.newPage();
+    await page.goto(`${UI}/#/agents/${c.meta.ids.sessions[0]}`);
+    await page.locator('.navigator').first().waitFor({ timeout: 60_000 }).catch(() => {});
+    await wait(3500);
+    const emit = (ev, p) => page.evaluate(([e, x]) => window.__upd.emit(e, x), [ev, p]);
+    // Otto ▸ Check for Updates… : the shell starts the check and tells the window.
+    await emit('otto://update', { phase: 'checking', current: '0.6.0', channel: 'release' });
+    await emit('otto://menu', 'check-updates');
+    await wait(1200);
+    await still(page, c, 'update-checking');
+    await page.evaluate((s) => { window.__upd.state = s; }, AVAILABLE);
+    await emit('otto://update', AVAILABLE);
+    await page.getByTestId('update-dialog').waitFor({ timeout: 10_000 }).catch(() => {});
+    await wait(1500);
+    await still(page, c, 'update-available');
+    const rec = await record(page);
+    await wait(400);
+    await glide(page, page.getByTestId('update-primary'));
+    await wait(500);
+    await emit('otto://update', { ...AVAILABLE, phase: 'downloading', received: 55_020_000 });
+    await wait(1400);
+    await emit('otto://update', { ...AVAILABLE, phase: 'downloading', received: 118_000_000 });
+    await wait(900);
+    await emit('otto://update', { ...AVAILABLE, phase: 'staged' });
+    await page.getByTestId('restart-impact').waitFor({ timeout: 15_000 }).catch(() => console.log('  (no restart impact)'));
+    await wait(1800);
+    await still(page, c, 'update-staged');
+    await rec.stop(join(c.out, 'updates.mp4'));
+    await context.close();
+  },
   mcp: async (c) => {
     const { context, page } = await open(c, 'mcp/servers', { settle: 3500 });
     await still(page, c, 'mcp');
@@ -837,12 +944,12 @@ export const SHOTS = {
       extra: [
         { name: 'otto_rail_expanded', value: '0' },
         { name: 'otto.ide.agent.provider', value: 'claude' },
-        { name: 'otto.ide.namedProjects.v1', value: JSON.stringify([{ id: 'proj-ledger', name: 'acme-ledger', primaryRoot: root, folders: [root], updatedAt: Date.now() }]) },
+        { name: 'otto.ide.namedProjects.v1', value: JSON.stringify([{ id: 'proj-ledger', name: 'acme-ledger', primaryRoot: root, folders: [root], updatedAt: Date.now() }, ...(c.meta.ids.repoDir ? [{ id: 'proj-checkout', name: 'acme-checkout', primaryRoot: c.meta.ids.repoDir, folders: [c.meta.ids.repoDir], updatedAt: Date.now() - 1000 }] : [])]) },
         { name: 'otto.ide.activeProjectId.v1', value: 'proj-ledger' },
       ],
     });
     // The project root's subtitle is the capture's temp path: keep it off camera.
-    await page.addStyleTag({ content: '.tree-root-sub{display:none!important}' });
+    await page.addStyleTag({ content: '.tree-root-sub,.ws-item-sub,.ws-path{display:none!important}' });
     const editor = page.locator('.ide-editor-area .cm-editor .cm-content').first();
     const lineNo = (n) => page.locator('.ide-editor-area .cm-lineNumbers .cm-gutterElement').filter({ hasText: new RegExp(`^\\s*${n}\\s*$`) }).first();
     await page.getByTestId('ide-project-tree').waitFor({ timeout: 30_000 });
@@ -852,6 +959,13 @@ export const SHOTS = {
     await editor.getByText('MIN_FEE_CENTS = 30').waitFor({ timeout: 15_000 });
     await wait(2500);
     await still(page, c, 'ide-file');
+    // The project list keeps the order projects were added in.
+    if (await tryClick(page.getByTestId('ide-target-switcher'), 'project switcher')) {
+      await wait(1200);
+      await still(page, c, 'ide-projects');
+      await page.keyboard.press('Escape');
+      await wait(500);
+    }
     // Hover: the quick-doc of platform_fee, from its call site.
     const call = editor.locator('.cm-line').filter({ hasText: 'fee = max(' }).first();
     const callBox = await call.boundingBox();
@@ -872,6 +986,12 @@ export const SHOTS = {
     } else console.log('  (no diagnostic underline)');
     await page.screenshot({ path: join(c.out, 'ide-diagnostic.jpg'), type: 'jpeg', quality: 90 });
     console.log('  still ide-diagnostic.jpg');
+    // A restart: the named project comes back with its tabs.
+    await page.reload();
+    await page.addStyleTag({ content: '.tree-root-sub,.ws-item-sub,.ws-path{display:none!important}' });
+    await page.locator('.ide-tab').filter({ hasText: 'settlement.py' }).first().waitFor({ timeout: 30_000 }).catch(() => console.log('  (tabs did not come back)'));
+    await wait(3500);
+    await still(page, c, 'ide-restored');
     // Run the pytest configuration: output and the test tree in the dock.
     await page.locator('.ide-tab').filter({ hasText: 'settlement.py' }).first().click();
     await wait(800);
@@ -912,6 +1032,15 @@ export const SHOTS = {
     // Stop the debug session before the agent part.
     await page.getByTestId('ide-stop-btn').click({ timeout: 4000 }).catch(() => {});
     await wait(1200);
+    // Typing: a new constant under MIN_FEE_CENTS (then undone).
+    await editor.locator('.cm-line').filter({ hasText: 'MIN_FEE_CENTS = 30' }).first().click({ timeout: 8000 }).catch(() => {});
+    await page.keyboard.press('End');
+    await page.keyboard.press('Enter');
+    await typeSlow(page, 'MAX_FEE_CENTS = 2_500  # cap per payout', 45);
+    await wait(900);
+    await still(page, c, 'ide-typing');
+    for (let i = 0; i < 6; i++) await page.keyboard.press('Meta+z');
+    await wait(600);
     // Agent: select platform_fee, add it to the agent, ask for a change.
     await page.getByRole('button', { name: 'Collapse bottom dock' }).click({ timeout: 4000 }).catch(() => console.log('  (skip: collapse dock)'));
     await wait(800);
