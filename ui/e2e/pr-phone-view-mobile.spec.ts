@@ -70,9 +70,12 @@ test('the PR actions fill one row of finger-sized buttons', async ({ page }) => 
   const ys = await Promise.all(btns.map(async (x) => Math.round((await x.boundingBox())!.y)));
   expect(new Set(ys).size, 'one row').toBe(1);
   // The row spans the header: the last button ends at the row's end, not mid-screen.
-  const row = (await actions.boundingBox())!;
-  const lastBtn = (await btns[btns.length - 1].boundingBox())!;
-  expect(row.x + row.width - (lastBtn.x + lastBtn.width)).toBeLessThan(2);
+  // (Polled: the header settles once the PR's checks and review state land.)
+  await expect.poll(async () => {
+    const row = (await actions.boundingBox())!;
+    const last = (await actions.locator('.btn:visible').last().boundingBox())!;
+    return Math.round(row.x + row.width - (last.x + last.width));
+  }).toBeLessThan(2);
 });
 
 test("the PR's commits are one tap away, and a commit shows its changes", async ({ page }) => {
@@ -88,4 +91,32 @@ test("the PR's commits are one tap away, and a commit shows its changes", async 
   await expect(page.getByRole('tab', { name: 'Files', exact: true })).toHaveAttribute('aria-selected', 'true');
   await expect(page.locator('.prd-commit-pick').first()).toContainText('active pins page');
   await expectNoHorizontalOverflow(page);
+});
+
+// A short description: the floated Edit (44 px on a touch screen) stays in
+// the card — the card contains its float — for one line, for none, and for a
+// PR template whose only content is an HTML comment (it renders nothing).
+// (.prd-desc is a flex item of .prd-main, so it contains the float itself.)
+test('a one-line, an empty and a comment-only description keep Edit inside the card', async ({ page }) => {
+  const inside = async (): Promise<void> => {
+    const card = (await page.locator('.prd-desc').boundingBox())!;
+    const edit = (await page.getByRole('button', { name: 'Edit the title and description' }).boundingBox())!;
+    expect(edit.y + edit.height, 'Edit bottom vs card bottom').toBeLessThanOrEqual(card.y + card.height + 0.5);
+    expect(edit.y).toBeGreaterThanOrEqual(card.y - 0.5);
+  };
+  await page.goto('/#/git/rep_otto/pr/52');
+  await expect(page.locator('.prd-desc .md-body')).toContainText('Caches', { timeout: 15_000 });
+  await inside();
+  await page.getByRole('button', { name: 'Edit the title and description' }).click();
+  await page.getByRole('textbox', { name: 'Pull request description' }).fill('');
+  await page.getByRole('button', { name: /^Save to / }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Update PR' }).click();
+  await expect(page.locator('.prd-desc .md-body')).toContainText('No description', { timeout: 15_000 });
+  await inside();
+  await page.getByRole('button', { name: 'Edit the title and description' }).click();
+  await page.getByRole('textbox', { name: 'Pull request description' }).fill('<!-- Describe your change. Link the ticket. -->');
+  await page.getByRole('button', { name: /^Save to / }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Update PR' }).click();
+  await expect(page.locator('.prd-desc .md-body')).not.toContainText('No description', { timeout: 15_000 });
+  await inside();
 });
