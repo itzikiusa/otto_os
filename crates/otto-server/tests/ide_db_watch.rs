@@ -127,15 +127,39 @@ async fn spawn_mini_resp_server(store: Arc<Mutex<BTreeMap<String, String>>>) -> 
                             }
                             out
                         }
-                        "TYPE" => {
-                            let exists = args
+                        // Keys `h:*` are hashes (`f=v,g=w`), `l:*` lists (`a,b`),
+                        // the rest strings. Like miniredis, no MEMORY command.
+                        "TYPE" => match args.get(1) {
+                            Some(k) if store.lock().unwrap().contains_key(k) => {
+                                match k.split(':').next() {
+                                    Some("h") => "+hash\r\n".into(),
+                                    Some("l") => "+list\r\n".into(),
+                                    _ => "+string\r\n".into(),
+                                }
+                            }
+                            _ => "+none\r\n".into(),
+                        },
+                        "HSCAN" | "LRANGE" => {
+                            let raw = args
                                 .get(1)
-                                .map(|k| store.lock().unwrap().contains_key(k))
-                                .unwrap_or(false);
-                            if exists {
-                                "+string\r\n".into()
+                                .and_then(|k| store.lock().unwrap().get(k).cloned())
+                                .unwrap_or_default();
+                            let items: Vec<String> = if cmd == "HSCAN" {
+                                raw.split(',')
+                                    .filter_map(|p| p.split_once('='))
+                                    .flat_map(|(f, v)| [f.to_string(), v.to_string()])
+                                    .collect()
                             } else {
-                                "+none\r\n".into()
+                                raw.split(',').map(str::to_string).collect()
+                            };
+                            let mut out = format!("*{}\r\n", items.len());
+                            for i in &items {
+                                out.push_str(&resp_bulk(i));
+                            }
+                            if cmd == "HSCAN" {
+                                format!("*2\r\n$1\r\n0\r\n{out}")
+                            } else {
+                                out
                             }
                         }
                         "TTL" => ":-1\r\n".into(),
@@ -1251,4 +1275,126 @@ async fn real_redis_glob_items_and_pipelined_values() {
     );
     let h = by_key("big:h")[2].as_str().unwrap().to_string();
     assert!(h.ends_with("bytes, too large to preview)"), "{h}");
+}
+
+/// Without `MEMORY USAGE` (miniredis, an ACL user, an old server) a hash or
+/// a list still gets its element-bounded preview, so its change shows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn redis_hashes_and_lists_diff_without_the_memory_command() {
+    let data = Arc::new(Mutex::new(BTreeMap::from([
+        ("h:session:1".to_string(), "status=open,game=7".to_string()),
+        ("l:queue".to_string(), "a,b".to_string()),
+    ])));
+    let port = spawn_mini_resp_server(Arc::clone(&data)).await;
+    let env = watch_env(port).await;
+    let root = env
+        .root_dir
+        .path()
+        .join("proj")
+        .to_string_lossy()
+        .to_string();
+    let url = |p: &str| format!("{}/api/v1/ide/db-watch{p}", env.base);
+    let (s, w) = call(
+        reqwest::Method::POST,
+        url("/watches"),
+        &env.root_tok,
+        Some(json!({
+            "root": root,
+            "target": {"kind": "ephemeral", "ephemeral_id": "miniredis:test"},
+            "items": [{"object": "h:"}, {"object": "l:"}],
+        })),
+    )
+    .await;
+    assert_eq!(s, 200, "{w}");
+    let id = w["id"].as_str().unwrap().to_string();
+    let (_, r) = call(
+        reqwest::Method::GET,
+        url(&format!("/watches/{id}?rows=1")),
+        &env.root_tok,
+        None,
+    )
+    .await;
+    assert_eq!(
+        r["items"][0]["current"]["rows"][0][2],
+        json!({"status": "open", "game": "7"}),
+        "{r}"
+    );
+    assert_eq!(
+        r["items"][1]["current"]["rows"][0][2],
+        json!(["a", "b"]),
+        "{r}"
+    );
+    data.lock()
+        .unwrap()
+        .insert("h:session:1".into(), "status=closed,game=7".into());
+    data.lock()
+        .unwrap()
+        .insert("l:queue".into(), "a,b,c".into());
+    let (_, r) = call(
+        reqwest::Method::POST,
+        url(&format!("/watches/{id}/snapshot")),
+        &env.root_tok,
+        Some(json!({})),
+    )
+    .await;
+    let hash = &r["items"][0]["diffs"][0]["changes"][0];
+    assert_eq!(
+        (
+            hash["before"]["status"].clone(),
+            hash["after"]["status"].clone()
+        ),
+        (json!("open"), json!("closed")),
+        "{r}"
+    );
+    assert_eq!(r["items"][1]["modified_count"], 1, "{r}");
+}
+
+/// Real Redis (OTTO_DBW_E2E=1, redis:8.8 on 26379) with an ACL user that may
+/// not run MEMORY: hashes and lists still preview and diff.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore]
+async fn real_redis_acl_user_without_memory_still_previews() {
+    if std::env::var("OTTO_DBW_E2E").is_err() {
+        return;
+    }
+    let env = watch_env(1).await;
+    env.ctx_ide.db_watch.register_loopback_target(
+        "e:acl",
+        "redis-acl",
+        IdeDbEngine::Redis,
+        26379,
+        Some("watcher".into()),
+        Some("watchpw".into()),
+        Some("0".into()),
+    );
+    let root = env
+        .root_dir
+        .path()
+        .join("proj")
+        .to_string_lossy()
+        .to_string();
+    let url = |p: &str| format!("{}/api/v1/ide/db-watch{p}", env.base);
+    let (s, w) = call(
+        reqwest::Method::POST,
+        url("/watches"),
+        &env.root_tok,
+        Some(json!({
+            "root": root,
+            "target": {"kind": "ephemeral", "ephemeral_id": "e:acl"},
+            "items": [{"object": "acl:"}],
+        })),
+    )
+    .await;
+    assert_eq!(s, 200, "{w}");
+    let (_, r) = call(
+        reqwest::Method::GET,
+        url(&format!("/watches/{}?rows=1", w["id"].as_str().unwrap())),
+        &env.root_tok,
+        None,
+    )
+    .await;
+    let rows = r["items"][0]["current"]["rows"].as_array().unwrap();
+    let by_key = |k: &str| rows.iter().find(|row| row[0] == k).unwrap().clone();
+    assert_eq!(by_key("acl:h")[2], json!({"status": "open"}), "{r}");
+    assert_eq!(by_key("acl:l")[2], json!(["a", "b"]), "{r}");
 }

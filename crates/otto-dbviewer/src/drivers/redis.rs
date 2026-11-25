@@ -305,12 +305,20 @@ impl Driver for RedisDriver {
         for (i, row) in rows.iter().enumerate() {
             let key = &row.key;
             // Range commands bound the element COUNT, not the element size:
-            // a value over the byte gate shows its size instead.
-            let bounded = row.ty == "string" || row.bytes.is_some_and(|b| b <= WATCH_VALUE_BYTES);
+            // a value over the byte gate shows its size instead. Without a
+            // size (MEMORY USAGE unknown: miniredis, an ACL user, an old
+            // server) the element-bounded reads still run; only a JSON
+            // document, which has no bounded read, is not fetched.
+            let bounded = match row.bytes {
+                _ if row.ty == "string" => true,
+                Some(b) => b <= WATCH_VALUE_BYTES,
+                None => row.ty != "ReJSON-RL",
+            };
             if !bounded {
-                if let Some(b) = row.bytes {
-                    previews[i] = json!(format!("({b} bytes, too large to preview)"));
-                }
+                previews[i] = json!(match row.bytes {
+                    Some(b) => format!("({b} bytes, too large to preview)"),
+                    None => "(size unknown, not previewed)".to_string(),
+                });
                 continue;
             }
             match row.ty.as_str() {
