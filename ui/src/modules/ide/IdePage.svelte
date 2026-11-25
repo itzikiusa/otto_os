@@ -41,6 +41,7 @@
     readQuickSchemePrefs,
   } from './shell/ideShellCommands';
   import { ideAgent } from './store/ideAgentController.svelte';
+  import { bindIdeAgentPort } from './agentDebug/ideAgentPort.svelte';
 
   const loadShellMenus = () => import('./shell/ideShellMenus');
 
@@ -296,6 +297,8 @@
   // Know the Scratches folder up front: the switcher names it "Scratches"
   // (a reload may restore it as the last project).
   loadScratchesRoot().catch(() => {});
+  // Agent debugging (`otto.ui_ide_debug_*`) drives this IDE through the port.
+  $effect(() => bindIdeAgentPort());
 
   let lastHandledQuery = '';
   $effect(() => {

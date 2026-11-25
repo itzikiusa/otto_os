@@ -350,7 +350,12 @@ export interface IdeBreakpoint {
   path: string; line: number; enabled: boolean;
   condition?: string | null; hit_condition?: string | null; log_message?: string | null;
   verified?: boolean; message?: string | null;
+  /** Set by an agent through UI control (UI only; the daemon ignores it). */
+  agent?: IdeBreakpointAgentTag;
 }
+
+/** Who set a breakpoint, and its id for that agent (stable across line moves). */
+export interface IdeBreakpointAgentTag { session_id: string; name: string; id: string; line: number }
 
 export interface IdeThread { id: number; name: string }
 export interface IdeStackFrame { id: number; name: string; path?: string | null; line: number; column?: number }

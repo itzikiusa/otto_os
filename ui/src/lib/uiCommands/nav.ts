@@ -6,11 +6,12 @@
 import { auth } from '../stores/auth.svelte';
 import { sidePane } from '../stores/sidePane.svelte';
 import { router } from '../router.svelte';
-import { isEmbedded, isTauri, isNativePane } from '../desktop';
+import { isEmbedded, isTauri, isNativePane, openPopout } from '../desktop';
 import { nativePane, nativePaneSnapshot } from '../nativePane';
 import { hostPrimaryKey, postToHost } from '../embedGuest';
 import { paneKey, restorableRoute, routeOf } from '../sidePane';
 import { availableModules, moduleLabel } from '../sidebar';
+import { windowOpenPlan } from './windowPlacement';
 import {
   UiCommandError,
   describeDocument,
@@ -98,9 +99,13 @@ interface OpenArgs {
   module?: unknown;
   route?: unknown;
   placement?: unknown;
+  /** The daemon's own auto-open for a command that wants a window (`"side"`):
+   *  where there are no native windows (web), the side pane instead. */
+  fallback?: unknown;
 }
 
-async function open(args: OpenArgs, ctx: UiCommandCtx): Promise<unknown> {
+/** The module, route, pane key and label `open` was asked for (validated). */
+function openTarget(args: OpenArgs): { route: string; key: string; label: string } {
   const module = typeof args.module === 'string' ? args.module.trim() : '';
   if (!module) throw new UiCommandError('invalid_args', '`module` is required');
   if (!openableModules().has(module)) {
@@ -112,14 +117,12 @@ async function open(args: OpenArgs, ctx: UiCommandCtx): Promise<unknown> {
   if (key !== paneKey(module)) {
     throw new UiCommandError('invalid_args', `Route ${route} isn’t part of ${module}`);
   }
+  return { route, key, label: labelFor(route) };
+}
+
+async function open(args: OpenArgs, ctx: UiCommandCtx): Promise<unknown> {
+  const { route, key, label } = openTarget(args);
   const placement = args.placement === 'main' ? 'main' : 'side';
-  const label = labelFor(route);
-  if (args.placement === 'window' && !(isTauri && nativePaneSnapshot())) {
-    throw new UiCommandError(
-      'failed',
-      `This Otto window can’t detach panes into their own window (that needs the desktop app). Use placement: side.`,
-    );
-  }
   const done = (pane: 'main' | 'side', extra: Record<string, unknown> = {}) => ({
     ui_visible: true,
     pane,
@@ -255,15 +258,40 @@ async function state(): Promise<unknown> {
   return out;
 }
 
-/** `placement: window` — show it in the side pane, then detach that pane into
- *  its own desktop window (the same document: its tabs, drafts and results
- *  move with it). Already detached → it stays where it is. */
+/** `placement: window` — the module in its own desktop window. Already in
+ *  this window's side pane: that pane detaches (the same document: its tabs,
+ *  drafts and results move with it). Otherwise a NEW pop-out window opens on
+ *  the route, so the person's side pane keeps what it shows and a narrow
+ *  window is no obstacle. `window_id` names the pop-out: the daemon waits for
+ *  that document. */
 async function openInWindow(args: OpenArgs, ctx: UiCommandCtx): Promise<unknown> {
+  const { route, key, label } = openTarget(args);
+  const plan = windowOpenPlan({
+    tauri: isTauri,
+    embedded: isEmbedded,
+    detachable: nativePaneSnapshot() !== null,
+    sideShows: !isEmbedded && sidePane.active && sidePane.key === key,
+    mainShows: !isEmbedded && sidePane.primaryKey === key,
+    fallback: args.fallback === 'side',
+  });
+  if (plan === 'main') return { ui_visible: true, pane: 'main', route, module: key, label, already_open: true };
+  if (plan === 'side') return open({ ...args, placement: 'side' }, ctx);
+  if (plan === 'refuse') {
+    throw new UiCommandError(
+      'failed',
+      `This Otto window can’t open ${label} in its own window (that needs the desktop app). Use placement: side.`,
+    );
+  }
+  if (plan === 'popout') {
+    ctx.progress(`Opening ${label} in its own window`);
+    const windowId = await openPopout(route, label);
+    return { ui_visible: true, pane: 'window', route, module: key, label, ...(windowId ? { window_id: windowId } : {}) };
+  }
   const shown = (await open({ ...args, placement: 'side' }, ctx)) as Record<string, unknown>;
   if (shown.pane !== 'side') return shown;
   const pane = nativePaneSnapshot();
   if (pane && pane.mode === 'attached') {
-    ctx.progress(`Detaching ${String(shown.label)} into its own window`);
+    ctx.progress(`Detaching ${label} into its own window`);
     await nativePane.detach('side');
   }
   return { ...shown, pane: 'window' };

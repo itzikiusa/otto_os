@@ -28,6 +28,7 @@
   import { ideChordLabel, ideKeymapPresetOf, ideShortcutChords, type IdeShortcutId } from './shell/ideShortcuts';
   import IdeConsoleView, { type ConsoleLineInput } from './debug/IdeConsoleView.svelte';
   import IdeDebugErrorCard from './debug/IdeDebugErrorCard.svelte';
+  import IdeAgentStoppedDriving from './agentDebug/IdeAgentStoppedDriving.svelte';
   import IdeDebuggerInspector from './debug/IdeDebuggerInspector.svelte';
   import { openBreakpointsList } from './debug/ideBreakpointsNav.svelte';
   import { lastOutputSeq, OutputSeqTracker, stitchOutput } from './debug/ideConsoleModel';
@@ -310,6 +311,7 @@
   {#if errorCard}
     <IdeDebugErrorCard card={errorCard} onshowoutput={showConsole} ondismiss={dismissError} onretry={retryLaunch} />
   {/if}
+  <IdeAgentStoppedDriving />
 
   {#if !dbg}
     {#if !errorCard}
