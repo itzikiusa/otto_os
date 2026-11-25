@@ -12,6 +12,8 @@ export interface IdeDetectedDbAccess {
   database_hint?: string | null;
   source_file: string;
   line: number;
+  /** Rank input: 100 paused frame's file, 60 other stack file, 40 the paused file's folder, 30 active file, 10 elsewhere. */
+  score: number;
 }
 
 export interface IdeSavedDbTarget {

@@ -68,6 +68,7 @@ pub(super) async fn db_watch_detect<S: IdeCtx>(
                     &root,
                     &additional_roots,
                     active_file.as_deref(),
+                    &[],
                     default_sql,
                 )
             })
