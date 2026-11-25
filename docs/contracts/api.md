@@ -4926,7 +4926,7 @@ audit — then through the UI bridge (`crates/otto-server/src/ui_bridge.rs`):
    **default-enabled** (a saved tool list gains UI tools that did not exist when
    it was saved, tracked in `mcp_otto_server_ui_tools_known`; one the operator
    unticked stays off), never `DANGEROUS` (no per-call approval), and
-   `local_write` / `outward` ones count as mutating for a read-only token scope.
+   `local_write` / `outward` / `execute` ones count as mutating for a read-only token scope.
 2. **Granted per session.** `session.meta.ui_control.enabled` must be `true`.
    Otherwise the daemon emits the owner-scoped `ui_control_requested` event (see
    `ws.md`; at most once per 10 s per session), waits up to 15 s for the grant,
@@ -4935,7 +4935,11 @@ audit — then through the UI bridge (`crates/otto-server/src/ui_bridge.rs`):
    Stop within the last 60 s answers `pending_grant` without asking again; with
    no Otto window open it answers at once.
 3. **Validated + pre-checked.** Arguments are validated against the entry's
-   `input_schema` (`invalid_args`); a `connection_id` (id OR name) is resolved
+   `input_schema` (`invalid_args`), plus the catalog's own rules
+   (`ui_commands::validate_command`): an `env` argument may not name a loader,
+   shell or toolchain variable (`PATH`, `LD_*`, `DYLD_*`, `GOFLAGS`,
+   `NODE_OPTIONS`, `PYTHON*`, `JAVA_TOOL_OPTIONS`, …) and its values are strings;
+   `ide_debug_request`'s `url` must be http(s) on localhost / 127.0.0.0/8 / ::1; a `connection_id` (id OR name) is resolved
    as the owner — a connection they cannot list is `not_found` / `forbidden`.
 4. **One window.** The target is the owner's document that implements the
    command (`hello.capabilities`), on the device that started the session
@@ -4944,8 +4948,11 @@ audit — then through the UI bridge (`crates/otto-server/src/ui_bridge.rs`):
    window at all, and then only a document already showing the module and
    focused), preferring a document showing the module (paneKey), then
    focused > visible > most recent. When none shows it, the daemon first sends
-   `open {module, route, placement:"side"}` to that device's main document and
-   waits ≤ 10 s for the module's document of that window to report.
+   `open {module, route, placement}` to that device's main document and
+   waits ≤ 10 s for the module's document of that window to report. `placement`
+   is the entry's `open_placement` (default `side`); a `window` entry
+   (`ide_debug_start`) also never targets a document with `visible:false` — a
+   hidden IDE pane is passed over and the IDE opens in its own window.
 5. **Delivered + awaited.** A per-connection `ui_command` frame goes to that
    document only (`ws.md` §2); the window runs the action **with the user's own
    login token** (so the endpoint's native RBAC runs again) and reports back on
@@ -4988,10 +4995,12 @@ control. Only a human credential's `/ws/events` socket may register as a window
 (`hello`). Error `code`s a window may report: `cancelled_by_user`,
 `invalid_args`, `not_found`, `forbidden`, `failed` (anything else → `failed`).
 
-`UiCommandSpec` = `{name, module, route, risk:"read"|"navigate"|"local_write"|"outward",
-timeout_ms, headless?, description, input_schema, $comment?}` — `module` is the
+`UiCommandSpec` = `{name, module, route, risk:"read"|"navigate"|"local_write"|"outward"|"execute",
+timeout_ms, headless?, open_placement?:"side"|"window", description, input_schema, $comment?}` — `module` is the
 paneKey of the document that runs it (`shell` = any document), `route` the hash
-route opened when no document shows it. Phase 1: `state`, `open`, `focus`,
+route opened when no document shows it. `execute` = runs code on the user's Mac
+outside the agent's sandbox (`ide_debug_start`, `ide_debug_evaluate`): the UI
+confirms every call and never offers "allow for this session". Phase 1: `state`, `open`, `focus`,
 `db_list_connections`, `db_open_connection`, `db_new_tab`, `db_set_statement`,
 `db_run_query`, `db_get_result`, `db_page`, `db_set_view`, `db_open_object`,
 `db_explain`, `db_stop`, `db_export`; later phases add entries per module.
