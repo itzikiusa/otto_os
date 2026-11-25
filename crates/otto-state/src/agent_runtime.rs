@@ -905,6 +905,33 @@ mod tests {
             .is_empty());
     }
 
+    /// The latest-turn columns every list and get reads per row seek
+    /// `idx_agent_runtime_entities_seq` (migration 0231) instead of sorting
+    /// each session's turns: only the outer ORDER BY sorts.
+    #[tokio::test]
+    async fn the_latest_turn_columns_seek_an_index() {
+        let pool = mem_pool().await;
+        let plan: Vec<String> = sqlx::query(concat!(
+            "EXPLAIN QUERY PLAN SELECT ",
+            session_cols!(),
+            " FROM agent_runtime_sessions WHERE workspace_id = 'w' \
+             ORDER BY last_active_at DESC LIMIT 500"
+        ))
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get::<String, _>("detail"))
+        .collect();
+        let sorts = plan.iter().filter(|d| d.contains("TEMP B-TREE")).count();
+        assert_eq!(sorts, 1, "{plan:?}");
+        assert!(
+            plan.iter()
+                .any(|d| d.contains("idx_agent_runtime_entities_seq")),
+            "{plan:?}"
+        );
+    }
+
     /// "Default model" must store NULL (the next spawn runs the provider's
     /// default), and the effort is session state every respawn re-applies.
     #[tokio::test]
