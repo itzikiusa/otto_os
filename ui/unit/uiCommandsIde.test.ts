@@ -417,12 +417,13 @@ test('say: a move without one clears the last stop’s narration; a status witho
   eq(says(), ['Paused before the write', '', 'The row is written', ''], 'a request moves the program too');
 });
 
-test('db_watch on start: the container the launch names (its DSN port) is watched, not just the newest one', async () => {
+test('db_watch on start: the container the launch names (its DSN port) for the code’s engine is watched, not just the newest one', async () => {
   const { handlers, ide, dbPort } = load({
     detected_objects: [{ engine: 'mysql', object_name: 'orders' }],
     saved_connections: [],
     ephemeral_targets: [
       { ephemeral_id: 'tc:new:1111', engine: 'mysql', port: 1111, source: 'testcontainers' },
+      { ephemeral_id: 'tc:redis:3333', engine: 'redis', port: 3333, source: 'container' },
       { ephemeral_id: 'tc:mine:2222', engine: 'mysql', port: 2222, source: 'container' },
     ],
   });
@@ -434,7 +435,7 @@ test('db_watch on start: the container the launch names (its DSN port) is watche
     async stop() {},
     async diffSince() { return null; },
   });
-  const run = handlers.ide_debug_start({ target: { kind: 'main', file: 'main.go' }, env: { ORDERS_DSN: 'root:pw@tcp(127.0.0.1:2222)/shop' }, db_watch: true, wait_ms: 5_000 }, ctx());
+  const run = handlers.ide_debug_start({ target: { kind: 'main', file: 'main.go' }, env: { ORDERS_DSN: 'root:pw@tcp(127.0.0.1:2222)/shop', ORDERS_REDIS: '127.0.0.1:3333' }, db_watch: true, wait_ms: 5_000 }, ctx());
   later(() => ide.emit(paused(1, 5)));
   const r = await run;
   assert.equal(r.db.watching, true);

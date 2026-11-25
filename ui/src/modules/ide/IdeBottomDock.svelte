@@ -12,6 +12,7 @@
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { startMouseDrag } from '../../lib/dragCursor';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
+  import { ideDbWatchPort } from '../../lib/uiCommands/ideDbWatchPort';
   import {
     loadPaneWidth,
     paneResizer,
@@ -78,6 +79,9 @@
     void ide.projectRoots.length;
     untrack(() => ideGit.syncVisibleRoots({ probeAll: false }));
   });
+
+  // The agent-debug `db` command and every Stop read this same watch.
+  $effect(() => ideDbWatchPort.bind(ideDbWatch));
 
   // DB Watch arms and follows debug sessions / runs from here (the dock is always
   // mounted), so it works while the Debug tab is the one showing.

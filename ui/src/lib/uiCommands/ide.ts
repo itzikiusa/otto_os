@@ -193,9 +193,11 @@ async function armDbWatch(
     engine = c.engine;
     local = c.local;
   } else {
-    // The run's own local database, never a saved one: the container whose port
-    // the launch names (a DSN in env / args), else the newest local one.
-    const named = det.ephemeral_targets.find((x) => new RegExp(`[:=]${x.port}(?!\\d)`).test(launchText));
+    // The run's own local database, never a saved one: a container whose port
+    // the launch names (a DSN in env / args), of the engine the code uses
+    // first; else the newest local one.
+    const ports = det.ephemeral_targets.filter((x) => new RegExp(`[:=]${x.port}(?!\\d)`).test(launchText));
+    const named = det.detected_objects.map((o) => ports.find((x) => x.engine === o.engine)).find(Boolean) ?? ports[0];
     const t = named ?? det.ephemeral_targets.find((x) => x.source !== 'container') ?? det.ephemeral_targets[0];
     const e = t?.engine ?? det.detected_objects[0]?.engine;
     if (!e) throw new UiCommandError('not_found', 'No local database found for this run — pass `connection_id` (a saved connection).');
