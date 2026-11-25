@@ -1861,8 +1861,22 @@ mod tests {
         assert_eq!(f["session_id"], "s1");
         assert_eq!(
             f["agent"],
-            json!({"session_id":"s1","title":"Fix the report","provider":"claude"})
+            json!({"session_id":"s1","title":"Fix the report","provider":"claude",
+                   "cwd":"/tmp","runtime":"pty"})
         );
+        // A Threads conversation says so: Proceed then queues a runtime prompt.
+        let mut thread = session("s2", "u");
+        thread.meta = json!({"runtime": "structured"});
+        let _ = b
+            .send_command(
+                &conn,
+                &thread,
+                "db_run_query",
+                &json!({}),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        assert_eq!(next_frame(&mut rx)["agent"]["runtime"], "structured");
         assert_eq!(f["command"], "db_run_query");
         assert_eq!(f["args"], json!({"tab_id":"t"}));
         assert_eq!(f["deadline_ms"], 5000);
