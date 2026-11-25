@@ -205,6 +205,67 @@ pub fn snapshot_pod(item: &Value) -> PodSnap {
     }
 }
 
+/// `kubectl get pods -o json` TEXT → snapshot, deserializing only the parts
+/// of `spec` that [`snapshot_pod`] reads (serde skips env, volumes, probes…
+/// without building them). As one `Value` a 100-pod list is ~0.7 MB of JSON
+/// but a ~7.8 MB DOM, and the sweep parses up to 4 namespaces at once.
+pub fn snapshot_from_pod_json(text: &str) -> serde_json::Result<Snapshot> {
+    #[derive(Deserialize)]
+    struct List {
+        #[serde(default)]
+        items: Vec<Item>,
+    }
+    #[derive(Deserialize)]
+    struct Item {
+        #[serde(default)]
+        metadata: Value,
+        #[serde(default)]
+        spec: Spec,
+        #[serde(default)]
+        status: Value,
+    }
+    #[derive(Deserialize, Default)]
+    #[serde(rename_all = "camelCase")]
+    struct Spec {
+        #[serde(default)]
+        node_name: Value,
+        #[serde(default)]
+        containers: Vec<Container>,
+    }
+    #[derive(Deserialize)]
+    struct Container {
+        #[serde(default)]
+        image: Value,
+        #[serde(default)]
+        ports: Value,
+        #[serde(default)]
+        resources: Value,
+    }
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(Snapshot::new());
+    }
+    let list: List = serde_json::from_str(text)?;
+    Ok(list
+        .items
+        .into_iter()
+        .map(|p| {
+            let containers: Vec<Value> = p
+                .spec
+                .containers
+                .into_iter()
+                .map(|c| serde_json::json!({"image": c.image, "ports": c.ports, "resources": c.resources}))
+                .collect();
+            snapshot_pod(&serde_json::json!({
+                "metadata": p.metadata,
+                "spec": {"nodeName": p.spec.node_name, "containers": containers},
+                "status": p.status,
+            }))
+        })
+        .map(|p| (snap_key(&p.namespace, &p.name), p))
+        .collect())
+}
+
 /// `kubectl get pods -o json` → snapshot (walks `/items`).
 pub fn snapshot_from_pod_list(list: &Value) -> Snapshot {
     arr(list, "/items")
@@ -801,6 +862,18 @@ mod tests {
                         "lastState":{"terminated":{"reason":"OOMKilled","exitCode":137,"finishedAt":"2026-09-04T10:00:00Z"}}}]}
         }]});
         let snap = snapshot_from_pod_list(&list);
+        // The sweep's typed parse reads exactly the same snapshot.
+        assert_eq!(
+            super::snapshot_from_pod_json(&list.to_string()).unwrap(),
+            snap
+        );
+        assert_eq!(
+            super::snapshot_from_pod_json(include_str!("../../testdata/pods.json")).unwrap(),
+            snapshot_from_pod_list(
+                &serde_json::from_str(include_str!("../../testdata/pods.json")).unwrap()
+            )
+        );
+        assert!(super::snapshot_from_pod_json(" \n").unwrap().is_empty());
         let p = &snap["mscasino/frb-769767cc74-s4ckn"];
         assert_eq!(p.workload, "frb");
         assert_eq!(p.workload_kind, "deployment");
