@@ -630,9 +630,9 @@
           "kind": { "type": "string", "enum": ["test", "main", "config"] },
           "file": { "type": "string", "maxLength": 4096, "description": "Project-relative path." },
           "name": { "type": "string", "maxLength": 500 } } },
-        "build_tags": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 1, "maxLength": 100 }, "description": "Go build tags, e.g. [\"component\"]." },
+        "build_tags": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 1, "maxLength": 100 }, "description": "Go build tag names, e.g. [\"component\"] (letters, digits, _ and . only — no build flags)." },
         "args": { "type": "array", "maxItems": 50, "items": { "type": "string", "maxLength": 1000 } },
-        "env": { "type": "object", "description": "Extra environment, shown to the user in the confirm. Loader and toolchain variables (PATH, LD_*, DYLD_*, GOFLAGS, NODE_OPTIONS, PYTHONPATH, JAVA_TOOL_OPTIONS, …) are refused. Secrets belong in the project environment." },
+        "env": { "type": "object", "description": "Extra environment (≤ 50 plain names, values ≤ 4096 chars, no control or invisible characters), shown in full in the confirm. Variables that make a loader, toolchain or tool run other code or trust another server are refused (PATH, HOME, LD_*, DYLD_*, GOFLAGS, GO_*, DLV_*, OTTO_*, NODE_OPTIONS, PYTHON*, JAVA_TOOL_OPTIONS, DOCKER_*, KUBECONFIG, AWS_CONFIG_FILE, *_PROXY, …). Secrets belong in the project environment." },
         "breakpoints": { "type": "array", "maxItems": 50, "items": { "type": "object", "required": ["file", "line"], "additionalProperties": false, "properties": {
           "file": { "type": "string", "maxLength": 4096 },
           "line": { "type": "integer", "minimum": 1 },

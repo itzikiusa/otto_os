@@ -226,7 +226,7 @@ class IdeDbWatchController {
     await this.restoring;
     const w = this.watch;
     if (w) {
-      if (w.target.kind === 'saved' && !sameBind(w.bind, bind)) await this.bind(bind);
+      if (w.target.kind === 'saved' && !sameBind(w.bind, bind)) await this.bind(bind, { asker: 'Otto, for the debug session that just started' });
       return;
     }
     const mem = this.memory();
@@ -406,8 +406,9 @@ class IdeDbWatchController {
     if (!w) return false;
     const gen = this.gen;
     const req: Record<string, unknown> = { ...body };
-    if (body.items && isProdTarget(w.target)) {
-      if (!(await this.confirmProd(w.target.label, body.items, opts.asker ?? 'You'))) return false;
+    // Prod: every PATCH (items or a new session's bind) needs the person's typed confirm.
+    if (isProdTarget(w.target)) {
+      if (!(await this.confirmProd(w.target.label, body.items ?? this.specs(), opts.asker ?? 'You'))) return false;
       req.confirm_production = true;
     }
     this.refreshing = true;
@@ -459,8 +460,8 @@ class IdeDbWatchController {
     this.pendingTarget = target;
   }
 
-  async bind(b: IdeDbWatchBind): Promise<void> {
-    await this.patch({ bind: b });
+  async bind(b: IdeDbWatchBind, opts: DbWatchStartOpts = {}): Promise<void> {
+    await this.patch({ bind: b }, opts);
   }
 
   async snapshotNow(label?: string | null): Promise<IdeDbWatchReadResp | null> {

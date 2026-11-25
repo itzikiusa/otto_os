@@ -20,8 +20,6 @@ pub use self::containers::DbWatchRegistry;
 
 /// Maximum rows/documents/keys returned in a single IDE DB Watch snapshot.
 pub const MAX_DB_WATCH_LIMIT: usize = 150;
-/// Default rows/documents/keys returned when `limit` is omitted.
-pub const DEFAULT_DB_WATCH_LIMIT: usize = 100;
 
 /// Database engines supported by the IDE Database Watcher (mirrors `otto-dbviewer`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -162,27 +160,6 @@ pub struct IdeDbWatchSnapshotItem {
     pub rows: Vec<Vec<Value>>,
 }
 
-/// `POST /api/v1/ide/db-watch/snapshot` request body.
-#[derive(Debug, Clone, Deserialize)]
-pub struct IdeDbWatchSnapshotReq {
-    pub root: String,
-    pub target_kind: String,
-    #[serde(default)]
-    pub connection_id: Option<String>,
-    #[serde(default)]
-    pub ephemeral_id: Option<String>,
-    pub engine: IdeDbEngine,
-    #[serde(default)]
-    pub database: Option<String>,
-    pub object_name: String,
-    #[serde(default)]
-    pub custom_query: Option<String>,
-    #[serde(default)]
-    pub limit: Option<usize>,
-    #[serde(default)]
-    pub previous: Option<IdeDbWatchSnapshotItem>,
-}
-
 /// Single changed column/field within a modified row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IdeDbFieldChange {
@@ -203,7 +180,7 @@ pub enum IdeDbDiffKind {
     Removed,
 }
 
-/// Structured diff row emitted by [`diff::compute_snapshot_diff`].
+/// Structured diff row emitted by [`diff::diff_snapshots`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IdeDbRowDiff {
     pub key: String,
@@ -225,20 +202,6 @@ pub struct IdeDbWatchDiffSummary {
     pub removed_count: usize,
     pub unchanged_count: usize,
     pub diffs: Vec<IdeDbRowDiff>,
-}
-
-/// `POST /api/v1/ide/db-watch/snapshot` response body.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IdeDbWatchSnapshotResp {
-    pub engine: IdeDbEngine,
-    pub target_label: String,
-    pub object_name: String,
-    pub executed_query: String,
-    pub captured_at_ms: i64,
-    pub duration_ms: u64,
-    pub snapshot: IdeDbWatchSnapshotItem,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diff: Option<IdeDbWatchDiffSummary>,
 }
 
 /// Internal target resolved by `otto-ide` and handed to `IdeCtx::execute_db_watch_query`.
@@ -281,7 +244,6 @@ pub struct DbWatchQueryExec {
     pub database: Option<String>,
     pub object_name: String,
     pub statement: String,
-    pub is_custom_query: bool,
     pub limit: usize,
     #[serde(default)]
     pub op: DbWatchOp,
@@ -302,11 +264,6 @@ pub struct DbWatchExecOutcome {
     pub primary_key: Vec<String>,
     #[serde(default)]
     pub row_estimate: Option<i64>,
-}
-
-pub fn clamp_watch_limit(raw: Option<usize>) -> usize {
-    raw.unwrap_or(DEFAULT_DB_WATCH_LIMIT)
-        .clamp(1, MAX_DB_WATCH_LIMIT)
 }
 
 fn is_safe_db_ident(raw: &str) -> bool {

@@ -12,6 +12,7 @@ import type {
   IdeDbWatchFilter,
   IdeDbWatchItemDiff,
   IdeDbWatchItemSpec,
+  IdeDbWatchSnapshotItem,
   IdeDbWatchTarget,
   IdeDbWatchTargetInfo,
   IdeDbWatchTargetRef,
@@ -130,13 +131,21 @@ export function pickAutoTarget(
   return own[0];
 }
 
+const SQL_ENGINES: ReadonlySet<IdeDbEngine> = new Set(['mysql', 'postgres', 'clickhouse']);
+
+/** Detection names any SQL string `mysql`; on a SQL target the target's own
+ *  verification (`verified` set) decides, whatever SQL engine it is. */
+export function matchesEngine(d: IdeDetectedDbAccess, engine: IdeDbEngine): boolean {
+  return d.engine === engine || (SQL_ENGINES.has(d.engine) && SQL_ENGINES.has(engine) && d.verified != null);
+}
+
 /** Ranked objects of one engine that exist on the target (`verified` false =
  *  a name in code the target does not have), deduplicated, capped. */
 export function pickAutoItems(detected: readonly IdeDetectedDbAccess[], engine: IdeDbEngine, local: boolean): IdeDbWatchItemSpec[] {
   const seen = new Set<string>();
   const out: IdeDbWatchItemSpec[] = [];
   for (const d of detected) {
-    if (d.engine !== engine || d.verified === false || seen.has(d.object_name)) continue;
+    if (!matchesEngine(d, engine) || d.verified === false || seen.has(d.object_name)) continue;
     seen.add(d.object_name);
     out.push({ object: d.object_name });
   }
@@ -145,7 +154,7 @@ export function pickAutoItems(detected: readonly IdeDetectedDbAccess[], engine: 
 
 /** Names in code the target does not have (the Tables ▾ footer). */
 export function unverifiedNames(detected: readonly IdeDetectedDbAccess[], engine: IdeDbEngine): string[] {
-  return [...new Set(detected.filter((d) => d.engine === engine && d.verified === false).map((d) => d.object_name))];
+  return [...new Set(detected.filter((d) => matchesEngine(d, engine) && d.verified === false).map((d) => d.object_name))];
 }
 
 // ── Filters: `column = value` only (no free text in v1) ──────────────────
@@ -237,6 +246,30 @@ export function cellChanges(changes: readonly IdeDbFieldChange[]): CellChange[] 
     for (const [p, r] of R) if (!L.has(p)) out.push({ path: p, before: '—', after: formatDbCellValue(r), hidden: false });
   }
   return out;
+}
+
+/** "Show current rows" as plain rows keyed by the WHOLE primary key (a
+ *  composite one too); no key column → the row number. */
+export function currentAsDiffs(current: IdeDbWatchSnapshotItem, primaryKey: readonly string[]): IdeDbRowDiff[] {
+  const idx = primaryKey.map((c) => current.columns.indexOf(c)).filter((i) => i >= 0);
+  return current.rows.map((r, i) => ({
+    key: idx.length > 0 ? idx.map((j) => formatDbCellValue(r[j])).join(', ') : String(i + 1),
+    kind: 'added',
+    row: r,
+    changes: [],
+  }));
+}
+
+/** Unique {#each} keys: `kind:key`, a repeat gets `#n` (rows of a table with
+ *  no primary key can be identical). */
+export function rowKeys(list: readonly Pick<IdeDbRowDiff, 'kind' | 'key'>[]): string[] {
+  const seen = new Map<string, number>();
+  return list.map((d) => {
+    const k = `${d.kind}:${d.key}`;
+    const n = seen.get(k) ?? 0;
+    seen.set(k, n + 1);
+    return n === 0 ? k : `${k}#${n}`;
+  });
 }
 
 /** An added / removed row in one line: its first non-empty cells after the

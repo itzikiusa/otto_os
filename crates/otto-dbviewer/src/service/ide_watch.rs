@@ -82,7 +82,6 @@ pub struct WatchExecReq {
     pub database: Option<String>,
     pub object_name: String,
     pub statement: String,
-    pub is_custom_query: bool,
     pub limit: usize,
     #[serde(default)]
     pub op: WatchOp,
@@ -340,7 +339,8 @@ impl DbViewerService {
         limit: usize,
     ) -> Result<WatchExecOutcome> {
         ensure_read_only(req.engine, &req.statement)?;
-        if req.engine == Engine::Redis && !req.is_custom_query {
+        // Redis items read by key pattern (the statement is only the label).
+        if req.engine == Engine::Redis {
             let node = redis_node(database.as_deref());
             let (columns, rows) = match via {
                 Via::Saved { id, user } => {
@@ -351,8 +351,13 @@ impl DbViewerService {
                         .resolve(id, user, child.as_deref(), "db_browse")
                         .await?;
                     force_read_only_execution(&mut r.config.params);
-                    enrich_redis_prefix(&*r.driver, &r.config, &node, &req.object_name, limit)
-                        .await?
+                    // Values are data: the native privilege ceiling applies,
+                    // and a dead pooled session is retried like other reads.
+                    self.verify_native(id, user, &r).await?;
+                    r.read(|| {
+                        enrich_redis_prefix(&*r.driver, &r.config, &node, &req.object_name, limit)
+                    })
+                    .await?
                 }
                 Via::Direct(driver, cfg) => {
                     enrich_redis_prefix(&**driver, cfg, &node, &req.object_name, limit).await?
@@ -364,10 +369,7 @@ impl DbViewerService {
                 ..Default::default()
             });
         }
-        let node = match req.engine {
-            Engine::Redis => Some(redis_node(database.as_deref())),
-            _ => database.map(|d| format!("db:{d}")),
-        };
+        let node = database.map(|d| format!("db:{d}"));
         let qreq = QueryRequest {
             statement: req.statement.clone(),
             max_rows: Some(limit),
@@ -541,6 +543,8 @@ impl DbViewerService {
     }
 }
 
+/// Rows `key, type, value, ttl` of the keys matching `object` (a prefix or
+/// a glob), pipelined by the driver.
 async fn enrich_redis_prefix(
     driver: &dyn Driver,
     cfg: &ResolvedConfig,
@@ -548,38 +552,10 @@ async fn enrich_redis_prefix(
     object_name: &str,
     limit: usize,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
-    let cleaned = object_name.trim().trim_end_matches('*');
-    let parent = NodePath::parse(redis_node);
-    let nodes = driver.schema_children(cfg, &parent, Some(cleaned)).await?;
     let cap = limit.min(REDIS_WATCH_ENRICH_CAP);
-    let mut rows = Vec::new();
-    for node in nodes
-        .into_iter()
-        .filter(|n| n.kind == NodeKind::Key)
-        .take(cap)
-    {
-        let key_path = NodePath::parse(&node.id);
-        match driver.object_detail(cfg, &key_path).await {
-            Ok(detail) => {
-                let ty = detail
-                    .extra
-                    .get("type")
-                    .cloned()
-                    .unwrap_or_else(|| Value::String(node.detail.unwrap_or_default()));
-                let preview = detail.extra.get("preview").cloned().unwrap_or(Value::Null);
-                let ttl = detail.extra.get("ttl").cloned().unwrap_or(Value::Null);
-                rows.push(vec![Value::String(node.label), ty, preview, ttl]);
-            }
-            Err(_) => {
-                rows.push(vec![
-                    Value::String(node.label),
-                    Value::String(node.detail.unwrap_or_else(|| "unknown".into())),
-                    Value::Null,
-                    Value::Null,
-                ]);
-            }
-        }
-    }
+    let rows = driver
+        .watch_keys(cfg, &NodePath::parse(redis_node), object_name, cap)
+        .await?;
     Ok((
         vec!["key".into(), "type".into(), "value".into(), "ttl".into()],
         rows,
@@ -635,7 +611,7 @@ mod tests {
         let req: WatchExecReq = serde_json::from_value(serde_json::json!({
             "target": {"ephemeral_loopback": {"port": 1, "user": null, "password": null, "database": null}},
             "engine": "mysql", "database": null, "object_name": "t", "statement": "SELECT 1",
-            "is_custom_query": false, "limit": 5, "op": "describe"
+            "limit": 5, "op": "describe"
         }))
         .unwrap();
         assert_eq!(req.op, WatchOp::Describe);

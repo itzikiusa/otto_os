@@ -26,6 +26,10 @@ impl ApiClientCtx for ServerCtx {
         &self.secrets
     }
 
+    fn live_debug_session(&self, user: &User, debug_id: &str) -> bool {
+        self.ide.live_debug_session(user, debug_id)
+    }
+
     async fn workspace_settings(&self, wid: &Id) -> Option<Value> {
         self.workspaces.get(wid).await.ok().map(|ws| ws.settings)
     }

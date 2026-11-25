@@ -60,6 +60,24 @@ impl ImpactItem {
         Self::new(keeps, kind, labels, n, names)
     }
 
+    /// The daemon's own in-memory jobs (`(name, running)` per kind): a
+    /// restart stops them mid-way; `detail` names the kinds that run.
+    pub fn jobs(parts: &[(&str, usize)]) -> Self {
+        let count = parts.iter().map(|(_, n)| n).sum();
+        let names = parts
+            .iter()
+            .filter(|(_, n)| *n > 0)
+            .map(|(name, n)| format!("{name} × {n}"))
+            .collect();
+        Self::new(
+            false,
+            "daemon_jobs",
+            ("job Otto runs itself", "jobs Otto runs itself"),
+            count,
+            names,
+        )
+    }
+
     /// A PTY or structured session, by the sidebar's buckets.
     pub fn session(keeps: bool, connection: bool, background: bool, title: String) -> Self {
         let (kind, labels) = if connection {
@@ -164,6 +182,18 @@ mod tests {
         assert_eq!(
             (merged.ends[0].count, merged.ends[0].detail.len()),
             (18, DETAIL_MAX)
+        );
+    }
+
+    #[test]
+    fn daemon_jobs_sum_their_kinds_and_name_the_running_ones() {
+        let it = ImpactItem::jobs(&[("Goal Loop", 2), ("Blender render", 0), ("docs run", 1)]);
+        assert_eq!((it.kind, it.count), ("daemon_jobs", 3));
+        assert_eq!(it.detail, ["Goal Loop × 2", "docs run × 1"]);
+        assert!(
+            RestartImpact::from(vec![ImpactItem::jobs(&[("Goal Loop", 0)])])
+                .ends
+                .is_empty()
         );
     }
 }

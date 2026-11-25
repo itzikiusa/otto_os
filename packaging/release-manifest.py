@@ -4,9 +4,11 @@
   check-version <tag>            tag v<semver> must equal the three version files; prints it
   notes <version>                the README's "### What's new in <version>" body
   latest-json <v> <sig> <url>    the updater manifest (tauri-plugin-updater format)
+  check-release-config           refuse the TEST signing identity / TEST update key
   identity                       the release signing identity name
   requirement <identifier>       codesign -R requirement: identifier + accepted leaf certs
 """
+import base64
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -19,6 +21,11 @@ DESKTOP = Path("apps/desktop/src-tauri")
 SEMVER = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?")
 # The hosts a release asset URL may point at (the app checks the same list).
 ASSET_HOSTS = {"github.com"}
+
+
+# The throwaway update key the repo carries until the owner's real one replaces
+# it (minisign key id, from the line "untrusted comment: minisign public key: <id>").
+TEST_UPDATE_KEY_IDS = {"287DEA2ED05D88F2"}
 
 
 def fail(msg):
@@ -61,6 +68,17 @@ def latest_json(version, sig_file, url):
     }, indent=2)
 
 
+def check_release_config():
+    if identity().get("test") is not False:
+        fail(f"{DESKTOP}/release-identity.json is the TEST identity (\"test\": true): "
+             "put the release certificate there first (docs/RELEASE.md)")
+    pubkey = json.loads((DESKTOP / "tauri.conf.json").read_text())["plugins"]["updater"]["pubkey"]
+    key_id = base64.b64decode(pubkey).decode().split("\n")[0].rsplit(" ", 1)[-1]
+    if key_id in TEST_UPDATE_KEY_IDS:
+        fail(f"{DESKTOP}/tauri.conf.json carries the TEST update key ({key_id}): "
+             "put the release key's .pub there first (docs/RELEASE.md)")
+
+
 def identity():
     return json.loads((DESKTOP / "release-identity.json").read_text())
 
@@ -78,6 +96,8 @@ def main(argv):
         sys.stdout.write(notes(args[0]))
     elif cmd == "latest-json" and len(args) == 3:
         print(latest_json(*args))
+    elif cmd == "check-release-config" and not args:
+        check_release_config()
     elif cmd == "identity" and not args:
         print(identity()["signingIdentity"])
     elif cmd == "requirement" and len(args) == 1:

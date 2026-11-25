@@ -262,6 +262,126 @@ impl Driver for RedisDriver {
         }
     }
 
+    async fn watch_keys(
+        &self,
+        cfg: &ResolvedConfig,
+        keyspace: &NodePath,
+        object: &str,
+        cap: usize,
+    ) -> Result<Vec<Vec<JsonValue>>> {
+        let db = keyspace
+            .get("kdb")
+            .and_then(parse_db_index)
+            .ok_or_else(|| types::invalid("redis: expected a keyspace node (kdb:<n>)"))?;
+        let mut conn = self.connect(cfg, db).await?;
+        let keys = scan_keys(&mut conn, Some(&watch_pattern(object)), cap)
+            .await?
+            .keys;
+        // Trip 2: TYPE + TTL of every key. Trip 3: every preview.
+        let mut pipe = redis::pipe();
+        pipe.ignore_errors();
+        for key in &keys {
+            pipe.cmd("TYPE").arg(key).cmd("TTL").arg(key);
+        }
+        let header: Vec<RedisValue> = if keys.is_empty() {
+            Vec::new()
+        } else {
+            pipe.query_async(&mut conn).await.map_err(types::upstream)?
+        };
+        let mut header = header.into_iter();
+        let mut rows: Vec<(String, String, i64)> = Vec::with_capacity(keys.len());
+        for key in keys {
+            let ty = header
+                .next()
+                .and_then(|v| redis::from_redis_value::<String>(v).ok())
+                .unwrap_or_else(|| "unknown".into());
+            let ttl = header
+                .next()
+                .and_then(|v| redis::from_redis_value::<i64>(v).ok())
+                .unwrap_or(-2);
+            rows.push((key, ty, ttl));
+        }
+        let mut pipe = redis::pipe();
+        pipe.ignore_errors();
+        let mut previewed = Vec::new();
+        for (i, (key, ty, _)) in rows.iter().enumerate() {
+            match ty.as_str() {
+                "string" => {
+                    pipe.cmd("GETRANGE")
+                        .arg(key)
+                        .arg(0)
+                        .arg(PREVIEW_STRING_BYTES);
+                }
+                "list" => {
+                    pipe.cmd("LRANGE").arg(key).arg(0).arg(PREVIEW_LIMIT);
+                }
+                "zset" => {
+                    pipe.cmd("ZRANGE")
+                        .arg(key)
+                        .arg(0)
+                        .arg(PREVIEW_LIMIT)
+                        .arg("WITHSCORES");
+                }
+                "stream" => {
+                    pipe.cmd("XRANGE")
+                        .arg(key)
+                        .arg("-")
+                        .arg("+")
+                        .arg("COUNT")
+                        .arg(PREVIEW_LIMIT);
+                }
+                // One cursor page: the first members, never the whole value.
+                "hash" => {
+                    pipe.cmd("HSCAN")
+                        .arg(key)
+                        .arg(0)
+                        .arg("COUNT")
+                        .arg(PREVIEW_LIMIT);
+                }
+                "set" => {
+                    pipe.cmd("SSCAN")
+                        .arg(key)
+                        .arg(0)
+                        .arg("COUNT")
+                        .arg(PREVIEW_LIMIT);
+                }
+                "ReJSON-RL" => {
+                    pipe.cmd("JSON.GET").arg(key);
+                }
+                "TSDB-TYPE" => {
+                    pipe.cmd("TS.GET").arg(key);
+                }
+                _ => continue,
+            }
+            previewed.push(i);
+        }
+        let mut previews = vec![JsonValue::Null; rows.len()];
+        if !previewed.is_empty() {
+            let replies: Vec<RedisValue> =
+                pipe.query_async(&mut conn).await.map_err(types::upstream)?;
+            for (i, reply) in previewed.into_iter().zip(replies) {
+                previews[i] = match rows[i].1.as_str() {
+                    "hash" | "set" => match reply {
+                        RedisValue::Array(mut parts) if parts.len() == 2 => match parts.pop() {
+                            Some(RedisValue::Array(items)) => {
+                                items_preview(items, rows[i].1 == "hash")
+                            }
+                            _ => JsonValue::Null,
+                        },
+                        _ => JsonValue::Null,
+                    },
+                    "ReJSON-RL" => types::cap_cell(value_to_json(reply)),
+                    _ => value_to_json(reply),
+                };
+            }
+        }
+        Ok(rows
+            .into_iter()
+            .zip(previews)
+            .map(|((key, ty, ttl), preview)| vec![json!(key), json!(ty), preview, json!(ttl)])
+            .collect())
+    }
+
     async fn object_detail(&self, cfg: &ResolvedConfig, path: &NodePath) -> Result<ObjectDetail> {
         let db = path
             .get("kdb")
@@ -674,6 +794,17 @@ fn truncation_hint(db: i64, msg: &str) -> SchemaNode {
     )
 }
 
+/// The `SCAN MATCH` pattern of a DB Watch item: a glob (`session:*:route`)
+/// as typed, a plain prefix (`session:`) escaped with a trailing `*`.
+fn watch_pattern(object: &str) -> String {
+    let object = object.trim();
+    if object.contains(['*', '?', '[']) {
+        object.to_string()
+    } else {
+        format!("{}*", glob_escape(object))
+    }
+}
+
 /// Escape Redis glob metacharacters (`* ? [ ] \`) so a user-typed prefix is
 /// matched literally before the trailing `*` is appended.
 fn glob_escape(s: &str) -> String {
@@ -931,6 +1062,12 @@ async fn scan_preview(
             break;
         }
     }
+    items_preview(items, pairs)
+}
+
+/// The preview of `HSCAN` (field/value pairs → an object) or `SSCAN` items.
+fn items_preview(mut items: Vec<RedisValue>, pairs: bool) -> JsonValue {
+    let cap = PREVIEW_LIMIT as usize;
     if pairs {
         let mut obj = serde_json::Map::new();
         for chunk in items.chunks(2).take(cap) {
@@ -2337,6 +2474,14 @@ mod tests {
 #[cfg(test)]
 mod perf_tests {
     use super::*;
+
+    #[test]
+    fn a_watch_item_is_a_prefix_or_a_glob() {
+        assert_eq!(watch_pattern("session:"), "session:*");
+        assert_eq!(watch_pattern("session:*:route"), "session:*:route");
+        assert_eq!(watch_pattern("user:?"), "user:?");
+        assert_eq!(watch_pattern("a\\b"), "a\\\\b*");
+    }
 
     /// DB-07: a huge `KEYS`/`LRANGE 0 -1`-shaped reply is sliced to the row cap
     /// before conversion and charged against the response byte budget.

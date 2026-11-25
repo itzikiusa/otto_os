@@ -143,10 +143,11 @@ pub fn is_agent_credential(auth: &AuthContext) -> bool {
         || auth.mcp_session_id.is_some()
 }
 
-/// `url` targets this Mac: `localhost`, 127.0.0.0/8 or [::1].
+/// `url` is http(s) to this Mac: `localhost`, 127.0.0.0/8 or [::1].
 pub fn is_loopback_url(url: &str) -> bool {
     let Some(host) = reqwest::Url::parse(url)
         .ok()
+        .filter(|u| matches!(u.scheme(), "http" | "https"))
         .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
     else {
         return false;

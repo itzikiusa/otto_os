@@ -99,6 +99,11 @@ pub trait ApiClientCtx: Clone + Send + Sync + 'static {
     /// Park a response body in the bounded download cache for `(wid, user)`;
     /// returns its `body_id`.
     fn park_body(&self, wid: &Id, user: &Id, content_type: Option<String>, raw: Vec<u8>) -> Id;
+    /// `debug_id` is a live IDE debug session `user` may drive (an agent's
+    /// debug request rides on it). Hosts without an IDE: none.
+    fn live_debug_session(&self, _user: &User, _debug_id: &str) -> bool {
+        false
+    }
 }
 
 /// An engine failure. Each variant maps onto the same-named

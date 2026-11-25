@@ -35,7 +35,11 @@ pub fn machine_routes() -> axum::Router<ServerCtx> {
 /// update / restart dialog).
 pub async fn restart_impact(
     State(ctx): State<ServerCtx>,
-) -> Json<otto_core::restart::RestartImpact> {
+    crate::auth::CurrentAuthContext(auth): crate::auth::CurrentAuthContext,
+) -> ApiResult<Json<otto_core::restart::RestartImpact>> {
+    // Session titles, phones and rooms of every user: root's own person only.
+    crate::auth::require_root(&auth.effective_user)?;
+    crate::auth::require_human(&auth)?;
     let mut items = ctx.manager.restart_impact().await;
     items.extend(ctx.agent_runtime.restart_impact().await);
     items.extend(ctx.ide.restart_impact());
@@ -45,7 +49,17 @@ pub async fn restart_impact(
     let live = ctx.browser.live_if_started();
     items.extend(live.map(|l| l.restart_impact()).unwrap_or_default());
     items.extend(otto_phone::restart_impact(&ctx.pool).await);
-    Json(items.into())
+    items.extend(ctx.db_explorer.restart_impact());
+    let docs = ctx.vault_docs_runs.lock().map_or(0, |r| {
+        r.values().filter(|e| e.run.finished_at.is_none()).count()
+    });
+    let renders = crate::design_blender::running_jobs(&ctx.design_jobs);
+    items.push(otto_core::restart::ImpactItem::jobs(&[
+        ("Goal Loop", ctx.goal_loops.lock().map_or(0, |h| h.len())),
+        ("Blender render", renders),
+        ("docs run", docs),
+    ]));
+    Ok(Json(items.into()))
 }
 
 /// Whether the request carries a bearer that verifies as a full (unscoped,
@@ -295,11 +309,35 @@ mod walkthrough_tests {
         let pool = crate::test_support::mem_pool().await;
         let tmp = tempfile::tempdir().unwrap();
         let ctx = ServerCtx::for_tests(&pool, tmp.path()).await;
-        let Json(impact) = restart_impact(State(ctx)).await;
+        let user = |is_root| otto_core::domain::User {
+            id: "u".into(),
+            username: "u".into(),
+            display_name: "U".into(),
+            is_root,
+            disabled: false,
+            created_at: chrono::Utc::now(),
+        };
+        let person = otto_core::auth::AuthContext::automation(&user(true), "test");
+        let auth = |a: &otto_core::auth::AuthContext| crate::auth::CurrentAuthContext(a.clone());
+        let Json(impact) = restart_impact(State(ctx.clone()), auth(&person))
+            .await
+            .unwrap();
         assert_eq!(
             serde_json::to_value(impact).unwrap(),
             json!({"keeps": [], "ends": []})
         );
+        // C1-015: a non-root user, and root's own agent / MCP credentials,
+        // are refused — the answer lists every user's sessions and phones.
+        let non_root = otto_core::auth::AuthContext::automation(&user(false), "test");
+        let mut agent = person.clone();
+        agent.managed_session_id = Some("s1".into());
+        let mut mcp = person.clone();
+        mcp.mcp_only = true;
+        for who in [non_root, agent, mcp] {
+            assert!(restart_impact(State(ctx.clone()), auth(&who))
+                .await
+                .is_err());
+        }
     }
 
     #[tokio::test]

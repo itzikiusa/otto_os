@@ -162,14 +162,6 @@ pub struct DiffOpts {
     pub previous_full: bool,
 }
 
-/// Compute structured row & cell differences between `previous` and `current`.
-pub fn compute_snapshot_diff(
-    previous: &IdeDbWatchSnapshotItem,
-    current: &IdeDbWatchSnapshotItem,
-) -> IdeDbWatchDiffSummary {
-    diff_snapshots(previous, current, &DiffOpts::default())
-}
-
 /// A Redis `ttl` counts down on its own: only a TTL that appears, goes away
 /// or goes UP (re-set) is a change (`-1` / `-2` / null = no TTL).
 fn ttl_changed(before: &Value, after: &Value) -> bool {
@@ -189,14 +181,32 @@ fn cell_changed(ttl_col: Option<usize>, i: usize, before: &Value, after: &Value)
 }
 
 /// Order two key values: numbers numerically, everything else as text.
+/// Order two key values: integers exactly (64-bit ids), other numbers as
+/// f64, everything else as text.
 fn cmp_key(a: &Value, b: &Value) -> std::cmp::Ordering {
+    if let (Some(x), Some(y)) = (a.as_i64(), b.as_i64()) {
+        return x.cmp(&y);
+    }
+    if let (Some(x), Some(y)) = (a.as_u64(), b.as_u64()) {
+        return x.cmp(&y);
+    }
     match (a.as_f64(), b.as_f64()) {
         (Some(x), Some(y)) => x.total_cmp(&y),
         _ => compact_value_key(a).cmp(&compact_value_key(b)),
     }
 }
 
-/// [`compute_snapshot_diff`] with the watch's real primary key and window.
+/// Order two key tuples column by column (`ORDER BY c1 DESC, c2 DESC`).
+fn cmp_tuple(a: &[Value], b: &[Value]) -> std::cmp::Ordering {
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| cmp_key(x, y))
+        .find(|o| o.is_ne())
+        .unwrap_or(std::cmp::Ordering::Equal)
+}
+
+/// Structured row & cell differences between `previous` and `current`,
+/// keyed by the real primary key when given.
 pub fn diff_snapshots(
     previous: &IdeDbWatchSnapshotItem,
     current: &IdeDbWatchSnapshotItem,
@@ -212,8 +222,9 @@ pub fn diff_snapshots(
         .iter()
         .filter_map(|k| columns.iter().position(|c| c == k))
         .collect();
-    let key_indices = if !pk.is_empty() && pk.len() == opts.primary_key.len() {
-        pk
+    let pk_ok = !pk.is_empty() && pk.len() == opts.primary_key.len();
+    let key_indices = if pk_ok {
+        pk.clone()
     } else {
         choose_key_columns(columns, &previous.rows, &current.rows)
     };
@@ -226,32 +237,38 @@ pub fn diff_snapshots(
                 .enumerate()
                 .all(|(i, (x, y))| !cell_changed(ttl_col, i, x, y))
     };
-    // The oldest key still inside a full window (first pk column).
-    let window_floor = (opts.window_full && !opts.primary_key.is_empty())
+    // The oldest key tuple still inside a full `ORDER BY pk DESC` window.
+    // Only with the real primary key: a guessed key or a Redis SCAN has no order.
+    let pk_tuple = |r: &[Value]| -> Vec<Value> {
+        pk.iter()
+            .map(|&i| r.get(i).cloned().unwrap_or(Value::Null))
+            .collect()
+    };
+    let window_floor = (opts.window_full && !is_redis && pk_ok)
         .then(|| {
             current
                 .rows
                 .iter()
-                .filter_map(|r| r.get(key_indices[0]))
-                .min_by(|a, b| cmp_key(a, b))
+                .map(|r| pk_tuple(r))
+                .min_by(|a, b| cmp_tuple(a, b))
         })
         .flatten();
 
-    // Redis reads are SCANs, not ordered windows: a key below the oldest is new.
-    let prev_floor = (opts.previous_full && !opts.primary_key.is_empty() && !is_redis)
+    // The same for the previous read: a row older than ITS oldest key entered
+    // the window (a newer row was deleted), it was not added.
+    let prev_floor = (opts.previous_full && !is_redis && pk_ok)
         .then(|| {
             previous
                 .rows
                 .iter()
-                .filter_map(|r| r.get(key_indices[0]))
-                .min_by(|a, b| cmp_key(a, b))
+                .map(|r| pk_tuple(r))
+                .min_by(|a, b| cmp_tuple(a, b))
         })
         .flatten();
     let entered_window = |row: &[Value]| {
-        prev_floor.is_some_and(|floor| {
-            row.get(key_indices[0])
-                .is_some_and(|v| cmp_key(v, floor).is_lt())
-        })
+        prev_floor
+            .as_ref()
+            .is_some_and(|floor| cmp_tuple(&pk_tuple(row), floor).is_lt())
     };
 
     let mut prev_occ = BTreeMap::new();
@@ -326,11 +343,9 @@ pub fn diff_snapshots(
     let mut removed_count = 0usize;
     for (k, prev_row) in prev_map {
         if !curr_keys_seen.contains(&k) {
-            let left_window = window_floor.is_some_and(|floor| {
-                prev_row
-                    .get(key_indices[0])
-                    .is_some_and(|v| cmp_key(v, floor).is_lt())
-            });
+            let left_window = window_floor
+                .as_ref()
+                .is_some_and(|floor| cmp_tuple(&pk_tuple(&prev_row), floor).is_lt());
             if left_window {
                 continue;
             }
@@ -379,7 +394,7 @@ mod tests {
                 vec![json!(3), json!("10.00"), json!("active")],
             ],
         };
-        let diff = compute_snapshot_diff(&prev, &curr);
+        let diff = diff_snapshots(&prev, &curr, &DiffOpts::default());
         assert_eq!(diff.added_count, 1);
         assert_eq!(diff.modified_count, 1);
         assert_eq!(diff.removed_count, 1);
@@ -562,5 +577,66 @@ mod tests {
         assert_eq!(d.diffs[0].key, "game_id=1, account_id=7");
         assert_eq!(d.diffs[0].changes.len(), 1);
         assert_eq!(d.diffs[0].changes[0].column, "status");
+    }
+
+    #[test]
+    fn a_primary_key_missing_from_the_columns_does_not_panic_a_full_window() {
+        let prev = snap(&["ID", "v"], vec![vec![json!(1), json!("a")]]);
+        let curr = snap(&["ID", "v"], vec![vec![json!(2), json!("b")]]);
+        let opts = DiffOpts {
+            primary_key: vec!["id".into()],
+            window_full: true,
+            previous_full: true,
+        };
+        let d = diff_snapshots(&prev, &curr, &opts);
+        assert_eq!(d.added_count + d.removed_count, 2);
+    }
+
+    #[test]
+    fn a_deleted_redis_key_is_a_delete_even_in_a_full_scan_window() {
+        let cols = ["key", "type", "value", "ttl"];
+        let row = |k: &str| vec![json!(k), json!("string"), json!("v"), json!(-1)];
+        let prev = snap(&cols, vec![row("s:1"), row("s:5"), row("s:9")]);
+        let curr = snap(&cols, vec![row("s:5"), row("s:9")]);
+        let opts = DiffOpts {
+            primary_key: vec!["key".into()],
+            window_full: true,
+            previous_full: true,
+        };
+        assert_eq!(
+            diff_snapshots(&prev, &curr, &opts).removed_count,
+            1,
+            "SCAN has no order"
+        );
+    }
+
+    #[test]
+    fn a_composite_key_row_pushed_out_of_the_window_is_not_a_delete() {
+        // ORDER BY game_id DESC, account_id DESC LIMIT 3; INSERT (1, 10).
+        let r = |a: i64| vec![json!(1), json!(a)];
+        let prev = snap(&["game_id", "account_id"], vec![r(9), r(8), r(7)]);
+        let curr = snap(&["game_id", "account_id"], vec![r(10), r(9), r(8)]);
+        let opts = DiffOpts {
+            primary_key: vec!["game_id".into(), "account_id".into()],
+            window_full: true,
+            previous_full: true,
+        };
+        let d = diff_snapshots(&prev, &curr, &opts);
+        assert_eq!((d.added_count, d.removed_count), (1, 0));
+    }
+
+    #[test]
+    fn sixty_four_bit_keys_compare_exactly() {
+        // 2^53 and 2^53 + 1 are the same f64.
+        let (lo, hi) = (9_007_199_254_740_992_i64, 9_007_199_254_740_993_i64);
+        let prev = snap(&["id"], vec![vec![json!(hi)], vec![json!(lo)]]);
+        let curr = snap(&["id"], vec![vec![json!(hi + 1)], vec![json!(hi)]]);
+        let opts = DiffOpts {
+            primary_key: vec!["id".into()],
+            window_full: true,
+            previous_full: true,
+        };
+        let d = diff_snapshots(&prev, &curr, &opts);
+        assert_eq!((d.added_count, d.removed_count), (1, 0), "{:?}", d.diffs);
     }
 }

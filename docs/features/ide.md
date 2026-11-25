@@ -466,9 +466,10 @@ asks to drive Otto (one **Allow** for the session), then:
 2. **One confirm per start**, attributed to the agent: the exact command line,
    working directory, build flags (tags merged as the gutter does), extra
    environment and how many breakpoints. It runs on your Mac as you, outside
-   the agent's sandbox, so it asks every time — a restart asks again. Loader and
-   toolchain variables (`PATH`, `DYLD_*`, `GOFLAGS`, `NODE_OPTIONS`, …) are
-   refused; secrets belong in the project environment, which the daemon applies.
+   the agent's sandbox, so it asks every time — a restart asks again. Extra
+   variables are shown in full and quoted. Loader, toolchain, proxy and
+   credential-file variables (`PATH`, `DYLD_*`, `GOFLAGS`, `GO_BUILD_FLAGS`,
+   `OTTO_*`, `NODE_OPTIONS`, `DOCKER_HOST`, `KUBECONFIG`, …) are refused; secrets belong in the project environment, which the daemon applies.
    A production network bridge or SSH target also asks for the typed confirm.
 3. **The agent's breakpoints** appear in the gutter, marked as its own. A test
    (including a testify suite method or a Go test behind `//go:build component`)
@@ -485,7 +486,8 @@ asks to drive Otto (one **Allow** for the session), then:
    its control; the session stays yours.
 
 Evaluating an expression can run code in the program, so each one asks, showing
-the exact expression. Reading a variable by path never asks. Values the agent
+the exact expression; so does a breakpoint condition, hit count or log message
+(the start confirm lists them, and setting one later asks again). Reading a variable by path never asks. Values the agent
 reads (locals, inspected paths, responses, DB rows) are redacted by name and
 shape before they reach it; what you see in the IDE is never redacted.
 Everything the agent reads goes to its model provider, as with any agent read.
@@ -840,8 +842,7 @@ Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api
   code), `POST /ide/db-watch/objects` (the target's real tables),
   `POST|GET /ide/db-watch/watches`, `GET|PATCH|DELETE /ide/db-watch/watches/{id}`,
   `POST /ide/db-watch/watches/{id}/snapshot`, and the `ide_db_watch_checkpoint`
-  event; the stateless `POST /ide/db-watch/snapshot` is deprecated (no longer
-  used by the UI). Read-only on MySQL, PostgreSQL, MongoDB, Redis and ClickHouse.
+  event (the old stateless `POST /ide/db-watch/snapshot` is gone). Read-only on MySQL, PostgreSQL, MongoDB, Redis and ClickHouse.
 
 ## Troubleshooting
 

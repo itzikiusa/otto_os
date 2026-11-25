@@ -40,6 +40,9 @@ export interface DebugMemory {
   expectMove: boolean;
   /** A debug request's response that arrived after that call returned. */
   late?: Record<string, unknown> | null;
+  /** The variable refs this agent was shown at the current stop (not under a
+   *  secret-looking name): the only ones `inspect {ref}` expands. */
+  refs?: number[];
 }
 
 export function newMemory(debugId: string, root: string, outSeq = 0): DebugMemory {
@@ -254,23 +257,81 @@ export function shapeResponse(resp: ApiResponse): Record<string, unknown> {
   };
 }
 
-/** The start confirm's text: exactly what will run. */
+/** Text the person reads in a confirm: no control or bidi characters (a
+ *  newline or an RLO could disguise what runs), and a cut that says so. */
+export function confirmSafe(s: string, max: number): string {
+  const t = s.replace(/[\u0000-\u001f\u007f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '�');
+  return t.length > max ? `${t.slice(0, max)}… (+${t.length - max} more characters)` : t;
+}
+
+export interface BreakpointCode {
+  file: string;
+  line: number;
+  condition?: string | null;
+  hit_condition?: string | null;
+  log_message?: string | null;
+}
+
+/** Breakpoints whose condition / hit count / log message the debugger
+ *  evaluates in the program — code, so the person sees each one verbatim,
+ *  whole (never clipped) and with nothing invisible in it. */
+export function breakpointCode(bps: readonly BreakpointCode[]): string[] {
+  const out: string[] = [];
+  for (const b of bps) {
+    const parts = [
+      b.condition ? `condition ${spelledOut(b.condition)}` : '',
+      b.hit_condition ? `hit count ${spelledOut(b.hit_condition)}` : '',
+      b.log_message ? `logs ${spelledOut(b.log_message)}` : '',
+    ].filter(Boolean);
+    if (parts.length) out.push(`• ${spelledOut(b.file)}:${b.line} — ${parts.join(' · ')}`);
+  }
+  return out;
+}
+
+const INVISIBLE = /[\u0000-\u001f\u007f\u061c\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/g;
+
+/** What an agent wrote, as the person must see it before approving a run:
+ *  control, BiDi and zero-width characters spelled out (`\n`, `\u202E`), so
+ *  nothing reorders or hides the text. Never clipped: a cut could hide the
+ *  payload (the daemon already caps every argument). */
+export function spelledOut(s: string): string {
+  return s.replace(INVISIBLE, (c) => (c === '\n' ? '\\n' : `\\u${c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`));
+}
+
+/** A value: quoted (so leading / trailing spaces show) and spelled out. */
+export function visibleValue(v: string): string {
+  return spelledOut(JSON.stringify(v));
+}
+
+/** The start confirm's text: exactly what will run, the warning first so no
+ *  long value can push it out of view; every agent-written part whole. */
 export function startConfirmText(p: {
   label: string; command: string; cwd: string; build_flags: readonly string[];
-  env: Record<string, string>; breakpoints: number; root: string;
+  env: Record<string, string>; breakpoints: readonly BreakpointCode[]; root: string;
 }): string {
   const env = Object.entries(p.env);
+  const code = breakpointCode(p.breakpoints);
   return [
-    `Debug ${p.label}`,
-    `Command: ${p.command}`,
-    `Working directory: ${relPath(p.root, p.cwd) || '.'}`,
-    p.build_flags.length ? `Build flags: ${p.build_flags.join(' ')}` : '',
-    env.length ? `Extra environment: ${env.map(([k, v]) => `${k}=${clip(v, 80)}`).join(', ')}` : 'Environment: the project environment',
-    `Breakpoints: ${p.breakpoints}`,
+    `Debug ${spelledOut(p.label)}`,
     'It runs on your Mac as you, outside the agent’s sandbox.',
+    `Command: ${spelledOut(p.command)}`,
+    `Working directory: ${spelledOut(relPath(p.root, p.cwd) || '.')}`,
+    p.build_flags.length ? `Build flags: ${spelledOut(p.build_flags.join(' '))}` : '',
+    ...(env.length
+      ? ['Extra environment:', ...env.map(([k, v]) => `  ${spelledOut(k)}=${visibleValue(v)}`)]
+      : ['Environment: the project environment']),
+    `Breakpoints: ${p.breakpoints.length}`,
+    ...(code.length ? ['Code the debugger runs at these breakpoints:', ...code] : []),
   ]
     .filter(Boolean)
     .join('\n');
+}
+
+/** A name a secret is kept under (mirrors `otto_core::redact::sensitive_name_kind`). */
+export function sensitiveName(name: string): boolean {
+  const compact = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (/password|passwd|passphrase|apikey|accesskey|privatekey|signingkey|secret|authorization|credential|cookie|token|authcode|connectionstring|connstr/.test(compact)) return true;
+  return name.split(/[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])/).some((seg) => ['pwd', 'pass', 'dsn', 'salt'].includes(seg.toLowerCase()));
 }
 
 /** DB Watch rows for the agent: per object the counts and ≤ `maxRows` rows,

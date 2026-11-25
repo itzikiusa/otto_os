@@ -125,6 +125,15 @@ impl<V> Drop for Lease<'_, V> {
     }
 }
 impl<V: Clone> ResourceCache<V> {
+    /// Entries that currently hold a value (the restart dialog's count).
+    pub(crate) fn live_len(&self) -> usize {
+        let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        slots
+            .values()
+            .filter(|s| s.value.lock().unwrap_or_else(|e| e.into_inner()).is_some())
+            .count()
+    }
+
     pub(crate) async fn get_or_try_init(
         &self,
         key: String,
@@ -270,6 +279,18 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::oneshot;
+
+    /// C1-031: the restart dialog counts only entries holding a value.
+    #[test]
+    fn live_len_counts_ready_entries() {
+        let cache: ResourceCache<u32> = ResourceCache::default();
+        assert_eq!(cache.live_len(), 0);
+        cache.insert_ready("a".into(), 1);
+        cache.insert_ready("b".into(), 2);
+        assert_eq!(cache.live_len(), 2);
+        cache.remove("a");
+        assert_eq!(cache.live_len(), 1);
+    }
 
     #[tokio::test]
     async fn resource_cache_warm_key_is_independent_of_blocked_initialization() {

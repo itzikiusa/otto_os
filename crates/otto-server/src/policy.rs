@@ -1567,6 +1567,10 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
     ) {
         return Some(S);
     }
+    // An agent debug start's `ready_port`: a loopback port probe, people only.
+    if p == "/ide/debug/sessions/{id}/port" {
+        return Some(A);
+    }
     // Minting: a PAT (a laundered human credential), MCP tokens, share links
     // (a share token passes `agent_attach_rule` on /ws/term — S1-02; an IDE
     // collab room share token grants guest read/write on the workspace root).

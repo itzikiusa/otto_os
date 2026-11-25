@@ -396,10 +396,17 @@ pub async fn execute_service<C: ApiClientCtx>(
     // each `$secret` marker is bound (see `record_person_bindings`).
     // An IDE debug request: this Mac only, and it counts as the agent's send.
     let debug = req.debug_session_id.clone();
-    if debug.is_some() && !is_loopback_url(&substitute(&req.url, &vars)) {
-        return Err(EngineError::Invalid(
-            "a debug request goes to this Mac only (localhost, 127.0.0.1, [::1])".into(),
-        ));
+    if let Some(debug_id) = &debug {
+        if !is_loopback_url(&substitute(&req.url, &vars)) || req.ssh_connection_id.is_some() {
+            return Err(EngineError::Invalid(
+                "a debug request goes to this Mac only (http(s) to localhost, 127.0.0.1 or [::1], no tunnel)".into(),
+            ));
+        }
+        if !ctx.live_debug_session(user, debug_id) {
+            return Err(EngineError::Invalid(format!(
+                "no live debug session '{debug_id}' of yours"
+            )));
+        }
     }
     let agent = is_agent_caller(headers, auth) || debug.is_some();
     let secret_keys: &[String] = environment
@@ -435,9 +442,9 @@ pub async fn execute_service<C: ApiClientCtx>(
     // Snapshot of the request as executed. Secret auth members are REDACTED —
     // history must never become the plaintext copy that defeats the Keychain.
     let (source, session_id) = match &debug {
-        Some(sid) => (
-            json!({"kind": "agent", "session_id": sid, "via": "ide_debug"}),
-            Some(sid.clone()),
+        Some(debug_id) => (
+            json!({"kind": "agent", "session_id": null, "via": "ide_debug", "debug_session_id": debug_id}),
+            None,
         ),
         None => caller_source(headers),
     };
@@ -479,7 +486,10 @@ pub async fn execute_service<C: ApiClientCtx>(
             return Err(EngineError::Invalid(msg));
         }
     };
-    let exec_req = exec_req.expect("checked above");
+    let mut exec_req = exec_req.expect("checked above");
+    if debug.is_some() {
+        exec_req.follow_redirects = Some(false); // a hop could leave this Mac
+    }
 
     // Resolve the optional SSH tunnel first; a resolution failure flows through
     // the same error/history path as a network failure below.

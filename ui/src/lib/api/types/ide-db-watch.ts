@@ -1,5 +1,5 @@
 // TS mirror of crates/otto-ide/src/db_watch (POST /api/v1/ide/db-watch/detect,
-// the deprecated stateless POST /api/v1/ide/db-watch/snapshot and the watch engine): live database access detection,
+// and the watch engine): live database access detection,
 // saved + ephemeral Testcontainers target matching, and before/after row diffs.
 
 export type IdeDbEngine = 'mysql' | 'postgres' | 'mongodb' | 'redis' | 'clickhouse';
@@ -73,19 +73,6 @@ export interface IdeDbWatchSnapshotItem {
   rows: unknown[][];
 }
 
-export interface IdeDbWatchSnapshotReq {
-  root: string;
-  target_kind: 'saved' | 'ephemeral';
-  connection_id?: string | null;
-  ephemeral_id?: string | null;
-  engine: IdeDbEngine;
-  database?: string | null;
-  object_name: string;
-  custom_query?: string | null;
-  limit?: number;
-  previous?: IdeDbWatchSnapshotItem | null;
-}
-
 export interface IdeDbFieldChange {
   column: string;
   before: unknown;
@@ -112,16 +99,6 @@ export interface IdeDbWatchDiffSummary {
   diffs: IdeDbRowDiff[];
 }
 
-export interface IdeDbWatchSnapshotResp {
-  engine: IdeDbEngine;
-  target_label: string;
-  object_name: string;
-  executed_query: string;
-  captured_at_ms: number;
-  duration_ms: number;
-  snapshot: IdeDbWatchSnapshotItem;
-  diff?: IdeDbWatchDiffSummary | null;
-}
 
 // ── Watch engine (daemon-owned; /api/v1/ide/db-watch/watches) ─────────────
 // The daemon keeps checkpoint 0 (the baseline), the previous and the latest

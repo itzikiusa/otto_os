@@ -34,7 +34,7 @@ function fixture(root: string, scenario: Scenario) {
       ? { kind: 'ephemeral', ephemeral_id: 'mr1', engine: 'redis', label: 'miniredis :61234', local: true }
       : { kind: 'saved', connection_id: 'mongo-stg', engine: 'mongodb', label: 'audit staging', environment: 'staging', local: false };
   const items = scenario === 'mysql'
-    ? [{ object: 'session_info', kind: 'table', primary_key: ['id'], row_estimate: 1240 }, { object: 'session_route', kind: 'table', primary_key: ['id'], row_estimate: 37 }, { object: 'player_session_info', kind: 'table', primary_key: ['id'], row_estimate: 12 }]
+    ? [{ object: 'session_info', kind: 'table', primary_key: ['id'], row_estimate: 1240 }, { object: 'session_route', kind: 'table', primary_key: ['session_id', 'node'], row_estimate: 37 }, { object: 'player_session_info', kind: 'table', primary_key: ['id'], row_estimate: 12 }]
     : scenario === 'redis'
       ? [{ object: 'session:*', kind: 'key_prefix', primary_key: ['key'] }]
       : [{ object: 'audit_events', kind: 'collection', primary_key: ['_id'], row_estimate: 5400 }];
@@ -97,6 +97,11 @@ async function mockWatch(page: Page, root: string, scenario: Scenario): Promise<
     if (url.includes('/detect')) return r.fulfill({ json: f.detect });
     if (url.includes('/objects')) return r.fulfill({ json: { target: f.watch.target, objects: Array.from({ length: 60 }, (_, i) => ({ name: `table_${i}`, kind: 'table' })), truncated: false } });
     if (url.includes('/watches?')) return r.fulfill({ json: { watches: [f.watch] } });
+    if (url.includes('rows=1')) {
+      // Composite key (session_id, node): rows share session_id (C1-018 crashed the panel here).
+      const current = { columns: SESSION_ROUTE_COLUMNS, rows: [sessionRouteRow(1, { session_id: 400 }), sessionRouteRow(2, { session_id: 400, node: 'gs-node-5' }), sessionRouteRow(3, { session_id: 401 })] };
+      return r.fulfill({ json: { ...f.read, items: (f.read.items as { object: string }[]).map((i) => (i.object === 'session_route' ? { ...i, current } : i)) } });
+    }
     return r.fulfill({ json: f.read });
   });
   // A paused debug session of this project, so the Debug panel shows its DB line.
@@ -210,6 +215,20 @@ test.describe('DB Watch is readable at the dock’s real heights', () => {
       await expect(page.getByTestId('ide-dbwatch-panel')).toBeVisible();
     });
   }
+
+  test('Show current rows on a composite primary key lists every row', async ({ page }, info) => {
+    test.skip(info.project.name !== 'desktop-browser', 'desktop dock');
+    const errors: string[] = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    await mockWatch(page, root, 'mysql');
+    await openIde(page, root, wsId, { height: 400, scheme: 'light', tab: 'dbwatch' });
+    const route = page.locator('[data-testid="ide-dbw-table"][data-object="session_route"]');
+    await route.getByRole('button', { name: 'session_route options' }).click();
+    await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Show current rows' }).click();
+    await expect(route.getByTestId('ide-dbw-diff-row')).toHaveCount(3);
+    await expect(route.getByTestId('ide-dbw-diff-row').nth(1)).toContainText('400, gs-node-5');
+    expect(errors).toEqual([]);
+  });
 
   test('Target ▾ and Tables ▾ stay in the viewport with 60 entries', async ({ page }, info) => {
     test.skip(info.project.name !== 'desktop-browser', 'desktop dock');

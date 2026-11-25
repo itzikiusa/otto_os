@@ -38,7 +38,9 @@ impl SessionManager {
         for (id, kept) in live {
             if let Ok(s) = self.repo.get(&id).await {
                 let connection = s.kind == SessionKind::Connection;
-                let background = !connection && !s.is_foreground_agent();
+                // Engine-owned: a background `meta.source` or a non-manual
+                // `meta.work.origin` (the same rule as `is_user_started`).
+                let background = !connection && !is_user_started(&s);
                 out.push(otto_core::restart::ImpactItem::session(
                     kept, connection, background, s.title,
                 ));

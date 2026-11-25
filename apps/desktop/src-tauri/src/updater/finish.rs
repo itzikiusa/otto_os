@@ -67,6 +67,16 @@ pub fn plist(job: &Job, script: &Path, log: &Path) -> String {
         ("OTTO_TO", job.to.to_string()),
         ("OTTO_APP_PID", job.app_pid.to_string()),
         ("OTTO_META_URL", job.meta_url.to_string()),
+        // The real app: LaunchServices opens it, and its executable is what
+        // the finisher waits for. Tests run the script with stubs for both.
+        ("OTTO_OPEN", "/usr/bin/open".to_string()),
+        (
+            "OTTO_APP_EXE",
+            job.app
+                .join("Contents/MacOS/otto-desktop")
+                .to_string_lossy()
+                .into_owned(),
+        ),
         ("OTTO_LOG", log.to_string_lossy().into_owned()),
         ("PATH", "/usr/bin:/bin:/usr/sbin:/sbin".to_string()),
     ];
@@ -98,14 +108,16 @@ fn pid_alive(pid: u32) -> bool {
 }
 
 /// The journal: (finisher pid, phase, from, to).
-fn read_journal(updates: &Path) -> Option<(u32, String, String, String)> {
+/// The journal: (finisher pid, phase, from, to, log path — may hold spaces).
+fn read_journal(updates: &Path) -> Option<(u32, String, String, String, String)> {
     let text = fs::read_to_string(journal_path(updates)).ok()?;
-    let mut it = text.split_whitespace();
+    let mut it = text.trim_end_matches('\n').splitn(5, ' ');
     Some((
         it.next()?.parse().ok()?,
         it.next()?.into(),
         it.next()?.into(),
         it.next()?.into(),
+        it.next().unwrap_or("").into(),
     ))
 }
 
@@ -132,6 +144,13 @@ pub fn launch(job: &Job) -> Result<PathBuf, String> {
         .and_then(|_| write(&plist_path, &plist(job, &script, &log), 0o600))
         .map_err(|e| format!("could not write the installer: {e}"))?;
     let domain = format!("gui/{}", unsafe { libc::getuid() });
+    // Never boot out a finisher that is running (its journal may not exist yet).
+    let running = Command::new("/bin/launchctl")
+        .args(["print", &format!("{domain}/{LABEL}")])
+        .output();
+    if running.is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("state = running")) {
+        return Err("an update is already being installed".into());
+    }
     // A previous run leaves the exited job registered; bootstrap would then
     // refuse and RunAtLoad never fire.
     let _ = Command::new("/bin/launchctl")
@@ -193,54 +212,61 @@ pub fn clear_result(updates: &Path) {
 }
 
 /// At launch: finish what a finisher killed mid-run left behind. The swap is
-/// atomic, so the app path always holds a whole app; the journal says which
-/// one. A live finisher is left alone (it opened THIS app and is verifying
-/// it). Returns whether one is in flight.
+/// atomic, so the app path always holds a whole app; the journal and the
+/// version THIS app runs say which one. The other copy (old or failed) is in
+/// the slot unless it was already moved to `previous` — never lose the
+/// rollback copy. A live finisher is left alone (it opened THIS app and is
+/// verifying it). Returns whether one is in flight.
 pub fn recover(updates: &Path, slot: &Path, previous: &Path, running_version: &str) -> bool {
-    let Some((pid, phase, from, to)) = read_journal(updates) else {
+    let Some((pid, phase, from, to, log)) = read_journal(updates) else {
         return false;
     };
     if pid_alive(pid) {
         return true;
     }
     let done = read_result(updates).is_some_and(|r| r.to == to);
+    let new_runs = running_version == to;
+    let old_runs = running_version == from;
     let mut r = LastResult {
         ok: false,
         skip: false,
         from,
         to,
         reason: String::new(),
-        log: String::new(),
+        log,
     };
     match phase.as_str() {
+        // The new version runs, so the swap happened (even if the journal
+        // still said "waiting"): keep it; the slot holds the old app.
+        "waiting" | "swapped" if new_runs => {
+            if slot.exists() {
+                let _ = fs::remove_dir_all(previous);
+                if let Some(p) = previous.parent() {
+                    let _ = fs::create_dir_all(p);
+                }
+                let _ = fs::rename(slot, previous);
+            }
+            r.ok = true;
+            r.reason = format!("Updated to {}.", r.to);
+        }
         // Killed before the swap: the old app is still installed.
         "waiting" => {
             let _ = fs::remove_dir_all(slot);
             r.reason =
                 "The update was interrupted before Otto was replaced. Nothing changed.".into();
         }
-        // Killed while verifying: the new app is installed and, if it is the
-        // one running now, it came up — keep it (the old one is the rollback copy).
-        "swapped" if running_version == r.to => {
-            let _ = fs::remove_dir_all(previous);
-            if let Some(p) = previous.parent() {
-                let _ = fs::create_dir_all(p);
-            }
-            let _ = fs::rename(slot, previous);
-            r.ok = true;
-            r.reason = format!("Updated to {}.", r.to);
+        // Swapped back (or the swap-back finished before the journal said
+        // so): the old app runs, the slot holds the failed one.
+        "rolled_back" | "swapped" if old_runs || phase == "rolled_back" => {
+            let _ = fs::remove_dir_all(slot);
+            r.skip = true;
+            r.reason = format!("The update to {} failed and was undone.", r.to);
         }
-        "swapped" => {
+        _ => {
             r.reason = format!(
                 "The update to {} was interrupted while it was being checked.",
                 r.to
             );
-        }
-        // Killed after swapping back: the old app is installed again.
-        _ => {
-            let _ = fs::remove_dir_all(slot);
-            r.skip = true;
-            r.reason = format!("The update to {} failed and was undone.", r.to);
         }
     }
     if !done {
@@ -274,15 +300,16 @@ pub fn prune_logs(updates: &Path) {
 mod tests {
     use super::*;
     use crate::updater::stage::bundle_version;
+    use crate::updater::stage::BUNDLE;
     use crate::updater::testkit::{temp_dir, waiter, Kit, Server};
 
     #[test]
     fn the_plist_is_a_one_shot_that_carries_the_job() {
         let job = Job {
             updates: Path::new("/u/Otto & co/updates"),
-            app: Path::new("/Applications/Otto.app"),
-            slot: Path::new("/u/s/Otto.app"),
-            previous: Path::new("/u/p/Otto.app"),
+            app: Path::new("/Applications/X.app"),
+            slot: Path::new("/u/s/X.app"),
+            previous: Path::new("/u/p/X.app"),
             from: "0.5.4",
             to: "0.5.5",
             app_pid: 42,
@@ -303,19 +330,27 @@ mod tests {
             "escaped: {p}"
         );
         assert!(
-            !p.contains("OTTO_OPEN"),
-            "the release job never overrides open"
+            p.contains("<key>OTTO_OPEN</key><string>/usr/bin/open</string>"),
+            "only the real job opens through LaunchServices"
         );
+        assert!(p.contains(
+            "<key>OTTO_APP_EXE</key><string>/Applications/X.app/Contents/MacOS/otto-desktop</string>"
+        ));
         assert!(chrono_stamp().len() == 15);
     }
 
-    /// One finisher run against throwaway bundles: `APP` (installed, FROM)
-    /// and `SLOT` (staged, TO) in a temp dir, a fake `open` that starts the
-    /// bundle's executable (a 60 s waiter) and a fake daemon answering
-    /// /api/v1/meta with `daemon_version`.
+    /// One finisher run against throwaway INERT bundles (no executable, not
+    /// Otto's name or id — testkit::Kit::plain_bundle): `APP` (installed,
+    /// FROM) and `SLOT` (staged, TO) in a temp dir. Nothing goes through
+    /// LaunchServices or launchd: the script runs under /bin/sh directly,
+    /// `OTTO_OPEN` is a stub that execs a 60 s waiter OUTSIDE any bundle
+    /// (`OTTO_APP_EXE`), and a fake daemon answers /api/v1/meta with
+    /// `daemon_version`. (osascript runs only the in-process JXA
+    /// `renamex_np` swap of the two temp dirs.)
     struct Run {
         dir: PathBuf,
         app: PathBuf,
+        exe: PathBuf,
         slot: PathBuf,
         prev: PathBuf,
         updates: PathBuf,
@@ -325,29 +360,42 @@ mod tests {
 
     impl Run {
         fn new(tag: &str, daemon_version: &str, open_starts_app: bool) -> Run {
+            let body = format!(r#"{{"version":"{daemon_version}","x":1}}"#);
+            Self::with_meta(tag, &body, open_starts_app)
+        }
+
+        fn with_meta(tag: &str, meta_body: &str, open_starts_app: bool) -> Run {
             let dir = temp_dir(&format!("finish-{tag}"));
-            let app = Kit::plain_bundle(&dir.join("Applications"), "1.0.0", waiter(), false);
-            let slot = Kit::plain_bundle(&dir.join("updates/staging"), "1.0.1", waiter(), false);
+            let app = Kit::plain_bundle(&dir.join("installed"), "1.0.0", false, false);
+            let slot = Kit::plain_bundle(&dir.join("updates/staging"), "1.0.1", false, false);
             let updates = dir.join("updates");
-            let prev = updates.join("previous/Otto.app");
+            let prev = updates.join("previous").join(BUNDLE);
+            // ≤ 15 chars: pgrep -x matches the kernel's 16-byte process name.
+            let exe = dir.join("bin/otto-upd-fake");
+            fs::create_dir_all(exe.parent().unwrap()).unwrap();
+            fs::copy(waiter(), &exe).unwrap();
             let srv = Server::start(vec![(
                 "/api/v1/meta",
                 200,
-                format!(r#"{{"version":"{daemon_version}","x":1}}"#).into_bytes(),
+                meta_body.as_bytes().to_vec(),
                 None,
             )]);
             let meta = srv.url("/api/v1/meta").to_string();
             let opener = dir.join("open.sh");
-            let body = if open_starts_app {
-                "#!/bin/sh\n\"$1/Contents/MacOS/otto-desktop\" </dev/null >/dev/null 2>&1 &\necho \"$1\" >> \"$(dirname \"$0\")/opened\"\n"
+            let start = if open_starts_app {
+                format!("'{}' </dev/null >/dev/null 2>&1 &\n", exe.display())
             } else {
-                "#!/bin/sh\necho \"$1\" >> \"$(dirname \"$0\")/opened\"\n"
+                String::new()
             };
+            // Each open is logged with whether the outcome was already
+            // recorded at that moment (C1-012: always before a reopen).
+            let body = format!("#!/bin/sh\n{start}d=\"$(dirname \"$0\")\"\nif [ -f \"$d/updates/last-result.json\" ]; then r=result; else r=none; fi\necho \"$1 $r\" >> \"$d/opened\"\n");
             fs::write(&opener, body).unwrap();
             fs::set_permissions(&opener, fs::Permissions::from_mode(0o700)).unwrap();
             Run {
                 dir,
                 app,
+                exe,
                 slot,
                 prev,
                 updates,
@@ -358,11 +406,17 @@ mod tests {
 
         /// Run the script with `old_app_pid`; returns its exit code.
         fn finish(&self, old_app_pid: u32, verify_secs: u32) -> i32 {
+            self.finish_with(old_app_pid, verify_secs, &[])
+        }
+
+        fn finish_with(&self, old_app_pid: u32, verify_secs: u32, extra: &[(&str, &str)]) -> i32 {
             let script = self.updates.join("finish.sh");
+            fs::create_dir_all(&self.updates).unwrap();
             fs::write(&script, SCRIPT).unwrap();
             let out = Command::new("/bin/sh")
                 .arg(&script)
                 .env_clear()
+                .envs(extra.iter().copied())
                 .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
                 .env("OTTO_APP", &self.app)
                 .env("OTTO_SLOT", &self.slot)
@@ -373,6 +427,7 @@ mod tests {
                 .env("OTTO_APP_PID", old_app_pid.to_string())
                 .env("OTTO_META_URL", &self.meta)
                 .env("OTTO_OPEN", self.dir.join("open.sh"))
+                .env("OTTO_APP_EXE", &self.exe)
                 .env("OTTO_QUIT_SECS", "2")
                 .env("OTTO_VERIFY_SECS", verify_secs.to_string())
                 .env("OTTO_LOG", self.dir.join("finish.log"))
@@ -391,20 +446,18 @@ mod tests {
                 .args(["-axo", "comm="])
                 .output()
                 .unwrap();
-            String::from_utf8_lossy(&ps.stdout).lines().any(|l| {
-                l.trim()
-                    == self
-                        .app
-                        .join("Contents/MacOS/otto-desktop")
-                        .to_string_lossy()
-            })
+            String::from_utf8_lossy(&ps.stdout)
+                .lines()
+                .any(|l| l.trim() == self.exe.to_string_lossy())
         }
     }
 
     impl Drop for Run {
         fn drop(&mut self) {
-            let exe = self.app.join("Contents/MacOS/otto-desktop");
-            let _ = Command::new("/usr/bin/pkill").arg("-f").arg(exe).output();
+            let _ = Command::new("/usr/bin/pkill")
+                .arg("-f")
+                .arg(&self.exe)
+                .output();
             let _ = fs::remove_dir_all(&self.dir);
         }
     }
@@ -470,6 +523,116 @@ mod tests {
         );
     }
 
+    /// C1-012: the reopened old app finds the outcome already recorded (so it
+    /// skips the failed version); C1-027: the reason survives quotes,
+    /// backslashes and a newline as real JSON.
+    #[test]
+    fn a_rollback_records_its_outcome_as_json_before_reopening() {
+        let run = Run::with_meta("json", r#"{"version":"1.0.0 \"beta\" \\ x\ny"}"#, true);
+        assert_eq!(run.finish(quitting_app(), 3), 1);
+        let opened = fs::read_to_string(run.dir.join("opened")).unwrap();
+        let lines: Vec<_> = opened.lines().collect();
+        assert_eq!(lines.len(), 2, "{opened}");
+        assert!(
+            lines[0].ends_with(" none") && lines[1].ends_with(" result"),
+            "{opened}"
+        );
+        let r = run.result();
+        assert!(!r.ok && r.skip, "{r:?}");
+        assert!(
+            r.reason.contains(r#"1.0.0 "beta" \ x"#) && r.reason.contains('\n'),
+            "{}",
+            r.reason
+        );
+    }
+
+    /// C1-027: `version` is read as JSON, not by the last "version" in the
+    /// text (a tool's version after it used to win).
+    #[test]
+    fn the_daemon_version_is_parsed_not_grepped() {
+        let body = r#"{"version":"1.0.1","tools":[{"name":"git","version":"2.47.0"}]}"#;
+        let run = Run::with_meta("tools", body, true);
+        assert_eq!(run.finish(quitting_app(), 10), 0);
+        assert!(run.result().ok);
+    }
+
+    /// C1-011: osascript warnings on stderr (here: the ObjC runtime's help
+    /// text) never turn a swap that happened into "Nothing changed".
+    #[test]
+    fn stderr_noise_from_osascript_does_not_fail_a_swap() {
+        let run = Run::new("noise", "1.0.1", true);
+        assert_eq!(
+            run.finish_with(quitting_app(), 10, &[("OBJC_HELP", "1")]),
+            0
+        );
+        assert_eq!(bundle_version(&run.app).unwrap(), "1.0.1");
+        assert!(run.result().ok);
+    }
+
+    /// C1-026: when the swap itself fails, the old app is reopened.
+    #[test]
+    fn a_failed_swap_reopens_the_old_app() {
+        let run = Run::new("noswap", "1.0.1", true);
+        fs::remove_dir_all(&run.slot).unwrap();
+        assert_eq!(run.finish(quitting_app(), 3), 1);
+        assert_eq!(bundle_version(&run.app).unwrap(), "1.0.0");
+        let opened = fs::read_to_string(run.dir.join("opened")).unwrap();
+        assert!(
+            opened.starts_with(&run.app.to_string_lossy().into_owned()),
+            "{opened}"
+        );
+        assert!(run.result().reason.contains("Nothing changed"));
+    }
+
+    /// The finisher as a state machine: killed at every crash point (power
+    /// loss is the same), then the next launch — the app at APP — recovers.
+    /// Always: APP is a whole app, the rollback copy of the OLD app is never
+    /// lost while the new one is installed, the journal is gone and the
+    /// outcome is recorded; a failed version is skipped.
+    #[test]
+    fn every_crash_point_recovers_without_losing_an_app() {
+        let points = [
+            ("after_swap", "1.0.1"),
+            ("after_journal", "1.0.1"),
+            ("after_open", "1.0.1"),
+            ("after_keep", "1.0.1"),
+            ("before_swap_back", "1.0.0"),
+            ("after_swap_back", "1.0.0"),
+            ("after_rolled_back", "1.0.0"),
+        ];
+        for (point, daemon) in points {
+            let run = Run::new(&format!("crash-{point}"), daemon, true);
+            let code = run.finish_with(quitting_app(), 2, &[("OTTO_FINISH_DIE_AT", point)]);
+            assert_ne!(code, 0, "{point}: killed");
+            let installed = bundle_version(&run.app).unwrap();
+            assert!(
+                installed == "1.0.0" || installed == "1.0.1",
+                "{point}: {installed}"
+            );
+            assert!(
+                !recover(&run.updates, &run.slot, &run.prev, &installed),
+                "{point}"
+            );
+            assert!(!journal_path(&run.updates).exists(), "{point}");
+            let r = run.result();
+            if installed == "1.0.1" {
+                assert!(r.ok, "{point}: {r:?}");
+                assert_eq!(
+                    bundle_version(&run.prev).unwrap(),
+                    "1.0.0",
+                    "{point}: rollback copy kept"
+                );
+            } else {
+                assert!(!r.ok && r.skip, "{point}: {r:?}");
+                assert!(!run.slot.exists(), "{point}: failed copy removed");
+            }
+            assert_eq!(
+                r.log,
+                run.dir.join("finish.log").to_string_lossy(),
+                "{point}: log kept"
+            );
+        }
+    }
     #[test]
     fn a_new_app_that_never_starts_rolls_back() {
         let run = Run::new("crash", "1.0.1", false);
@@ -527,8 +690,8 @@ mod tests {
     fn recovery_finishes_an_interrupted_run_by_its_phase() {
         let dir = temp_dir("recover");
         let updates = dir.join("updates");
-        let slot = updates.join("staging/Otto.app");
-        let prev = updates.join("previous/Otto.app");
+        let slot = updates.join("staging").join(BUNDLE);
+        let prev = updates.join("previous").join(BUNDLE);
 
         // A live finisher (it opened us): hands off.
         let mut live = Command::new("/bin/sleep").arg("5").spawn().unwrap();

@@ -149,6 +149,9 @@ pub struct UiBridge {
     presence_changed: Notify,
     grant_changed: Notify,
     last_request: Mutex<HashMap<Id, Instant>>,
+    /// Session → the document its last `ide_debug_start` ran in: the rest of
+    /// its debug commands follow it there.
+    debug_doc: Mutex<HashMap<Id, String>>,
     seq: AtomicU64,
 }
 
@@ -160,6 +163,7 @@ impl Default for UiBridge {
             presence_changed: Notify::new(),
             grant_changed: Notify::new(),
             last_request: Mutex::new(HashMap::new()),
+            debug_doc: Mutex::new(HashMap::new()),
             seq: AtomicU64::new(1),
         }
     }
@@ -951,11 +955,15 @@ pub async fn store_grant(ctx: &ServerCtx, id: &Id, record: Value) -> otto_core::
         return ctx.manager.update_meta(id, record).await;
     }
     let grant = record.get(META_KEY).cloned().unwrap_or(Value::Null);
-    Ok(ctx
+    let session = ctx
         .agent_runtime
         .set_ui_control(id, grant)
         .await?
-        .into_session())
+        .into_session();
+    // Every Otto window learns of it (a revoke from the Threads window must
+    // clear the driving bar and the write memory in the IDE window too).
+    ctx.manager.announce_meta(&session);
+    Ok(session)
 }
 
 /// The message the agent gets while the user has not allowed UI control.
@@ -999,6 +1007,8 @@ pub async fn run(
         args.clone()
     };
     ui_commands::validate_command(spec, &args).map_err(|m| UiError::new("invalid_args", m))?;
+    let args = ui_commands::confine_paths(spec, args, &session.cwd)
+        .map_err(|m| UiError::new("forbidden", m))?;
 
     let session = ensure_grant(ctx, session, spec).await?;
     let args = resolve_refs(ctx, auth, &session, args).await?;
@@ -1012,6 +1022,13 @@ pub async fn run(
     let budget = deadline_for(spec, &args);
     let window = spec.open_placement.as_deref() == Some("window");
     let mut docs = bridge.docs(); // a `window` command is for the person to watch: no hidden doc
+    let pinned = (spec.module == "ide" && spec.name != "ide_debug_start")
+        .then(|| bridge.debug_doc.lock().unwrap().get(&session.id).cloned())
+        .flatten()
+        .filter(|c| {
+            let ok = |d: &DocInfo| &d.conn_id == c && d.user_id == session.created_by;
+            docs.iter().any(|d| ok(d) && d.module == spec.module)
+        });
     docs.retain(|d| !window || d.visible || d.module != spec.module);
     let target = match pick(
         &docs,
@@ -1060,11 +1077,15 @@ pub async fn run(
         }
         Pick::None => None,
     };
-    match target {
+    match pinned.or(target) {
         Some(conn) => {
             let v = bridge
                 .dispatch(&conn, &session, &spec.name, &args, budget)
                 .await?;
+            if spec.name == "ide_debug_start" {
+                let mut pins = bridge.debug_doc.lock().unwrap();
+                pins.insert(session.id.clone(), conn);
+            }
             Ok(with_visibility(shape_result(v, spec.module == "ide"), true))
         }
         None => match spec.headless.as_deref() {

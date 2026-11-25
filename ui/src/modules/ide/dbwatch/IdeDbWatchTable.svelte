@@ -9,8 +9,10 @@
   import type { IdeDbRowDiff, IdeDbWatchItemDiff, IdeDbWatchItemInfo, IdeDbWatchSnapshotItem } from '../../../lib/api/types/ide-db-watch';
   import {
     cellChanges,
+    currentAsDiffs,
     filterText,
     recordFields,
+    rowKeys,
     rowPreview,
     ROWS_SHOWN,
   } from './ideDbWatchModel';
@@ -37,11 +39,7 @@
   const changed = $derived(item.added_count + item.modified_count + item.removed_count);
   const rows = $derived(showAll ? item.diffs : item.diffs.slice(0, ROWS_SHOWN));
   const hiddenCount = $derived(item.diffs.length - rows.length + item.more_count);
-  const currentRows = $derived<IdeDbRowDiff[]>(
-    current
-      ? current.rows.map((r, i) => ({ key: String(r[current.columns.indexOf(info?.primary_key?.[0] ?? '')] ?? i + 1), kind: 'added', row: r, changes: [] }))
-      : [],
-  );
+  const currentRows = $derived<IdeDbRowDiff[]>(current ? currentAsDiffs(current, info?.primary_key ?? []) : []);
 
   function sign(kind: IdeDbRowDiff['kind']): string {
     return kind === 'added' ? '+' : kind === 'removed' ? '−' : '~';
@@ -49,22 +47,20 @@
   function kindWord(kind: IdeDbRowDiff['kind']): string {
     return kind === 'added' ? 'Added' : kind === 'removed' ? 'Removed' : 'Changed';
   }
-  function rowId(d: IdeDbRowDiff): string {
-    return `${d.kind}:${d.key}`;
-  }
 </script>
 
 {#snippet rowList(list: IdeDbRowDiff[], plain: boolean)}
+  {@const keys = rowKeys(list)}
   <ul class="dbt-rows" role="list">
-    {#each list as d (rowId(d))}
-      {@const open = expanded === rowId(d)}
+    {#each list as d, i (keys[i])}
+      {@const open = expanded === keys[i]}
       <li class="dbt-li">
         <button
           type="button"
           class="dbt-row is-{plain ? 'plain' : d.kind}"
           aria-expanded={open}
           title={plain ? `${keyCol} = ${d.key}` : `${kindWord(d.kind)} row ${keyCol} = ${d.key}`}
-          onclick={() => (expanded = open ? null : rowId(d))}
+          onclick={() => (expanded = open ? null : keys[i])}
           data-testid="ide-dbw-diff-row"
           data-kind={d.kind}
         >

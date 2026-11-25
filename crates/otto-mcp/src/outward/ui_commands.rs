@@ -267,6 +267,28 @@ const DENIED_ENV: &[&str] = &[
     "GRADLE_OPTS",
     "JAVA_HOME",
     "CLASSPATH",
+    // C1-019: files / endpoints a tool the program runs reads as code,
+    // credentials or a server to trust (credential_process, exec plugins,
+    // Testcontainers' Docker, proxies, CA bundles, the user's dotfiles).
+    "AWS_CONFIG_FILE",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "KUBECONFIG",
+    "VIRTUAL_ENV",
+    "GOCACHE",
+    "GOMODCACHE",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "CURL_CA_BUNDLE",
+    "REQUESTS_CA_BUNDLE",
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "SHELLOPTS",
+    "BASHOPTS",
+    "FPATH",
+    "MAKEFLAGS",
 ];
 /// Prefixes of the same (`LD_PRELOAD`, `PYTHONSTARTUP`, `JAVA_TOOL_OPTIONS`, …).
 const DENIED_ENV_PREFIXES: &[&str] = &[
@@ -284,15 +306,66 @@ const DENIED_ENV_PREFIXES: &[&str] = &[
     "GIT_",
     "BUN_",
     "DENO_",
+    // C1-002: the Go adapter splits GO_BUILD_FLAGS / DLV_BUILD_FLAGS into
+    // `go build` flags (`-toolexec=…`); OTTO_* switch Otto's own adapters.
+    "GO_",
+    "OTTO_",
+    "DOCKER_",
+    "TESTCONTAINERS_",
+    "RUSTUP_",
+    "BASH_FUNC_",
+    "DOTNET_",
+    "CORECLR_",
+    "COMPLUS_",
 ];
+
+/// Most `env` entries one launch takes, and the longest value: the confirm
+/// shows every entry in full, so it must stay readable.
+const MAX_ENV: usize = 50;
+const MAX_ENV_VALUE: usize = 4096;
+
+/// A character the confirm would not show for what it is: a control
+/// character, a BiDi override / isolate / mark, or a zero-width one.
+fn invisible(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{061c}' | '\u{feff}')
+}
 
 /// The catalog command's own rules on top of its schema: an `env` argument
 /// carries no loader / toolchain variable ([`DENIED_ENV`]), and
 /// `ide_debug_request` only reaches this Mac (loopback http/https). Pure.
 pub fn validate_command(spec: &UiCommandSpec, args: &Value) -> Result<(), String> {
     validate_args(&spec.input_schema, args)?;
+    for tag in args
+        .get("build_tags")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let t = tag.as_str().unwrap_or_default();
+        if t.is_empty()
+            || !t
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+        {
+            return Err(format!(
+                "build tag {t:?} is not a plain build tag name (letters, digits, _ and . only)"
+            ));
+        }
+    }
     if let Some(env) = args.get("env").and_then(Value::as_object) {
+        if env.len() > MAX_ENV {
+            return Err(format!("env takes at most {MAX_ENV} entries"));
+        }
         for (k, v) in env {
+            let plain = (1..=128).contains(&k.len())
+                && k.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !plain {
+                return Err(format!(
+                    "env {k:?} is not a plain name ([A-Za-z_][A-Za-z0-9_]*, ≤ 128)"
+                ));
+            }
             let up = k.to_ascii_uppercase();
             if DENIED_ENV.contains(&up.as_str())
                 || DENIED_ENV_PREFIXES.iter().any(|p| up.starts_with(p))
@@ -302,8 +375,18 @@ pub fn validate_command(spec: &UiCommandSpec, args: &Value) -> Result<(), String
                      runs. Set it in the project's run configuration if the user wants it"
                 ));
             }
-            if !v.is_string() {
+            let Some(v) = v.as_str() else {
                 return Err(format!("env '{k}' must be a string"));
+            };
+            if v.chars().count() > MAX_ENV_VALUE {
+                return Err(format!(
+                    "env '{k}' is longer than {MAX_ENV_VALUE} characters"
+                ));
+            }
+            if v.chars().any(invisible) {
+                return Err(format!(
+                    "env '{k}' holds invisible or control characters the user could not see in the confirm"
+                ));
             }
         }
     }
@@ -317,6 +400,71 @@ pub fn validate_command(spec: &UiCommandSpec, args: &Value) -> Result<(), String
         }
     }
     Ok(())
+}
+
+/// Keep an `ide_debug_*` command inside the agent session's folder `cwd`:
+/// `ide_debug_start`'s `root` (default `cwd`) is resolved through symlinks
+/// and must lie in the resolved `cwd` — the canonical root is what the IDE
+/// gets —, and every file argument (`target.file`, `breakpoints`, `set`,
+/// `clear`, `file`) must be relative, without `..`, and (when it exists)
+/// resolve inside that root. Other commands pass through.
+pub fn confine_paths(spec: &UiCommandSpec, mut args: Value, cwd: &str) -> Result<Value, String> {
+    if spec.module != "ide" {
+        return Ok(args);
+    }
+    let canon =
+        |p: &std::path::Path| std::fs::canonicalize(p).map_err(|e| format!("{}: {e}", p.display()));
+    let home = canon(std::path::Path::new(cwd))
+        .map_err(|e| format!("your session's folder is unknown ({e})"))?;
+    let root = if spec.name == "ide_debug_start" {
+        let asked = args.get("root").and_then(Value::as_str).unwrap_or(cwd);
+        let root = canon(std::path::Path::new(asked))?;
+        if !root.starts_with(&home) {
+            return Err(format!(
+                "'{asked}' is outside your session's folder {}",
+                home.display()
+            ));
+        }
+        args["root"] = json!(root.to_string_lossy());
+        Some(root)
+    } else {
+        None
+    };
+    let mut files: Vec<&str> = Vec::new();
+    files.extend(args.pointer("/target/file").and_then(Value::as_str));
+    files.extend(args.get("file").and_then(Value::as_str));
+    for list in ["breakpoints", "set", "clear"] {
+        for b in args
+            .get(list)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            files.extend(b.get("file").and_then(Value::as_str));
+        }
+    }
+    for f in files {
+        let rel = std::path::Path::new(f);
+        if rel.is_absolute()
+            || f.contains("://")
+            || f.starts_with('~')
+            || rel
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+        {
+            return Err(format!(
+                "'{f}' must be a path inside the project, relative to it"
+            ));
+        }
+        if let Some(root) = &root {
+            if let Ok(real) = std::fs::canonicalize(root.join(rel)) {
+                if !real.starts_with(root) {
+                    return Err(format!("'{f}' resolves outside the project"));
+                }
+            }
+        }
+    }
+    Ok(args)
 }
 
 fn is_loopback_url(url: &str) -> bool {
@@ -368,10 +516,14 @@ fn type_ok(ty: &str, v: &Value) -> bool {
 }
 
 fn check(schema: &Value, v: &Value, at: &str) -> Result<(), String> {
-    if let Some(ty) = schema.get("type").and_then(Value::as_str) {
-        if !type_ok(ty, v) {
-            return Err(format!("{at} must be of type {ty}"));
-        }
+    // `type` is one name or a list of them (`["string", "number"]`).
+    let types: Vec<&str> = match schema.get("type") {
+        Some(Value::String(t)) => vec![t.as_str()],
+        Some(Value::Array(list)) => list.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    };
+    if !types.is_empty() && !types.iter().any(|t| type_ok(t, v)) {
+        return Err(format!("{at} must be of type {}", types.join("|")));
     }
     if let Some(allowed) = schema.get("enum").and_then(Value::as_array) {
         if !allowed.iter().any(|a| a == v) {
@@ -892,6 +1044,128 @@ mod tests {
     }
 
     #[test]
+    fn array_types_are_validated() {
+        // C1-038: `"type": [..]` was skipped, so any value passed.
+        let s = json!({"type": "object", "additionalProperties": false, "properties": {
+            "v": {"type": ["string", "number", "boolean"]}}});
+        for ok in [json!("a"), json!(1), json!(1.5), json!(true)] {
+            assert_eq!(validate_args(&s, &json!({"v": ok})), Ok(()), "{ok}");
+        }
+        for bad in [json!({}), json!([1]), json!(null)] {
+            let e = validate_args(&s, &json!({"v": bad})).unwrap_err();
+            assert!(e.contains("v must be of type string|number|boolean"), "{e}");
+        }
+        // The real catalog entry that uses it.
+        let db = &get("ide_debug_db").unwrap().input_schema;
+        let args = json!({"action": "watch", "objects": [{"object": "orders",
+            "filter": {"column": "id", "value": {"$gt": 1}}}]});
+        assert!(validate_args(db, &args).is_err());
+    }
+
+    #[test]
+    fn debug_start_refuses_build_flag_and_hijack_env() {
+        // C1-002 / C1-019: variables the launch code or the tools it runs read
+        // as code, credentials or endpoints.
+        let start = get("ide_debug_start").unwrap();
+        let with_env = |k: &str, v: &str| json!({"target": {"kind": "main", "file": "main.go"}, "env": {k: v}});
+        for bad in [
+            "GO_BUILD_FLAGS",
+            "OTTO_JS_ADAPTER",
+            "OTTO_JAVA_DEBUG_DAP_PORT",
+            "AWS_CONFIG_FILE",
+            "AWS_SHARED_CREDENTIALS_FILE",
+            "KUBECONFIG",
+            "DOCKER_HOST",
+            "DOCKER_CONFIG",
+            "TESTCONTAINERS_HOST_OVERRIDE",
+            "RUSTUP_TOOLCHAIN",
+            "RUSTUP_HOME",
+            "VIRTUAL_ENV",
+            "GOCACHE",
+            "GOMODCACHE",
+            "HTTP_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "CURL_CA_BUNDLE",
+            "REQUESTS_CA_BUNDLE",
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "SHELLOPTS",
+            "BASHOPTS",
+            "BASH_FUNC_ls%%",
+            "FPATH",
+            "DOTNET_STARTUP_HOOKS",
+            "CORECLR_PROFILER",
+            "COMPLUS_X",
+            "MAKEFLAGS",
+        ] {
+            let e = validate_command(start, &with_env(bad, "x")).unwrap_err();
+            assert!(
+                e.contains("is refused") || e.contains("not a plain name"),
+                "{bad}: {e}"
+            );
+        }
+        // Key syntax, value size and invisible characters.
+        for bad_key in ["A B", "1A", "A=B", "", "A-B", &"A".repeat(129)] {
+            let e = validate_command(start, &with_env(bad_key, "x")).unwrap_err();
+            assert!(e.contains("not a plain name"), "{bad_key:?}: {e}");
+        }
+        for bad_val in [
+            "a\nb",
+            "a\u{0}b",
+            "x\u{202e}gpj.exe",
+            "a\u{2066}b",
+            "a\u{200b}b",
+            "\u{feff}x",
+        ] {
+            let e = validate_command(start, &with_env("APP", bad_val)).unwrap_err();
+            assert!(e.contains("invisible or control"), "{bad_val:?}: {e}");
+        }
+        let e = validate_command(start, &with_env("APP", &"x".repeat(4097))).unwrap_err();
+        assert!(e.contains("4096"), "{e}");
+        assert_eq!(
+            validate_command(start, &with_env("APP", &"x".repeat(4096))),
+            Ok(())
+        );
+        let many: serde_json::Map<String, Value> =
+            (0..51).map(|i| (format!("V{i}"), json!("x"))).collect();
+        let e =
+            validate_command(start, &json!({"target": {"kind": "main"}, "env": many})).unwrap_err();
+        assert!(e.contains("at most 50"), "{e}");
+        // Ordinary app settings still pass (GOOGLE_* is not GO_*).
+        let ok = json!({"target": {"kind": "main"}, "env": {"LOG_LEVEL": "debug",
+            "GOOGLE_CLOUD_PROJECT": "p", "DB_HOST": "127.0.0.1", "_X": "a b"}});
+        assert_eq!(validate_command(start, &ok), Ok(()));
+    }
+
+    #[test]
+    fn build_tags_are_plain_tag_names() {
+        // C1-002: a build tag is the only build input an agent gives; it must
+        // not smuggle a flag (`-toolexec=…`) or a list separator.
+        let start = get("ide_debug_start").unwrap();
+        let tags =
+            |t: Value| json!({"target": {"kind": "test", "file": "a_test.go"}, "build_tags": t});
+        assert_eq!(
+            validate_command(start, &tags(json!(["component", "go1.22", "linux_amd64"]))),
+            Ok(())
+        );
+        for bad in [
+            "-toolexec=/bin/sh",
+            "a b",
+            "a,b",
+            "x\u{202e}",
+            "a=b",
+            "!a",
+            "a/b",
+        ] {
+            let e = validate_command(start, &tags(json!([bad]))).unwrap_err();
+            assert!(e.contains("build tag"), "{bad:?}: {e}");
+        }
+    }
+
+    #[test]
     fn debug_request_only_reaches_this_mac() {
         let req = get("ide_debug_request").unwrap();
         for ok in [
@@ -919,5 +1193,58 @@ mod tests {
         // Other commands are untouched by the URL rule.
         let send = get("api_send").unwrap();
         assert_eq!(validate_command(send, &json!({})), Ok(()));
+    }
+
+    #[test]
+    fn ide_paths_stay_inside_the_sessions_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("app");
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(home.join("svc")).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("evil.go"), "package main").unwrap();
+        std::os::unix::fs::symlink(&other, home.join("link")).unwrap();
+        std::os::unix::fs::symlink(other.join("evil.go"), home.join("svc/evil.go")).unwrap();
+        let cwd = home.to_string_lossy().into_owned();
+        let start = get("ide_debug_start").unwrap();
+        let canon = std::fs::canonicalize(&home).unwrap();
+        let run = |args: Value| confine_paths(start, args, &cwd);
+        // Default root = the canonical session folder; a sub-folder is fine.
+        let ok = run(json!({"target": {"kind": "main", "file": "main.go"}})).unwrap();
+        assert_eq!(ok["root"], json!(canon.to_string_lossy()));
+        let sub =
+            run(json!({"root": home.join("svc"), "target": {"kind": "main", "file": "main.go"}}))
+                .unwrap();
+        assert_eq!(sub["root"], json!(canon.join("svc").to_string_lossy()));
+        // A symlinked root, another folder, absolute / .. / symlinked-out files: refused.
+        for bad in [
+            json!({"root": home.join("link"), "target": {"kind": "main", "file": "main.go"}}),
+            json!({"root": other, "target": {"kind": "main", "file": "main.go"}}),
+            json!({"target": {"kind": "main", "file": other.join("evil.go")}}),
+            json!({"target": {"kind": "main", "file": "../other/evil.go"}}),
+            json!({"target": {"kind": "main", "file": "svc/evil.go"}}),
+            json!({"target": {"kind": "main", "file": "main.go"}, "breakpoints": [{"file": "/etc/hosts", "line": 1}]}),
+        ] {
+            assert!(run(bad.clone()).is_err(), "{bad}");
+        }
+        // Later commands: relative paths only.
+        let bps = get("ide_debug_breakpoints").unwrap();
+        assert!(confine_paths(bps, json!({"set": [{"file": "a.go", "line": 1}]}), &cwd).is_ok());
+        assert!(confine_paths(
+            bps,
+            json!({"set": [{"file": "/etc/hosts", "line": 1}]}),
+            &cwd
+        )
+        .is_err());
+        let control = get("ide_debug_control").unwrap();
+        assert!(confine_paths(
+            control,
+            json!({"action": "run_to_line", "file": "../x.go", "line": 1}),
+            &cwd
+        )
+        .is_err());
+        // Other modules pass through untouched.
+        let other_cmd = get("db_run_query").unwrap();
+        assert!(confine_paths(other_cmd, json!({"x": "/etc"}), "/nonexistent").is_ok());
     }
 }
