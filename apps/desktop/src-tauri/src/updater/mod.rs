@@ -144,7 +144,7 @@ static INNER: OnceLock<Mutex<Inner>> = OnceLock::new();
 /// release identity, never counts.
 pub fn channel() -> Channel {
     release_channel(
-        cfg!(debug_assertions) || test_identity(RELEASE_IDENTITY),
+        cfg!(debug_assertions) || test_config(RELEASE_IDENTITY, TAURI_CONF),
         option_env!("OTTO_UPDATE_CHANNEL"),
     )
 }
@@ -293,10 +293,38 @@ fn endpoint(cfg: &serde_json::Value) -> Option<reqwest::Url> {
 /// one for at least one release.
 const RELEASE_IDENTITY: &str = include_str!("../../release-identity.json");
 
-/// `"test": false` is the only way out of TEST (as release-manifest.py checks).
-fn test_identity(identity: &str) -> bool {
+const TAURI_CONF: &str = include_str!("../../tauri.conf.json");
+
+/// The throwaway TEST certificate leaf and update key the repo carries until
+/// the owner's real ones replace them (packaging/release-manifest.py refuses
+/// the same values).
+const TEST_LEAF: &str = "e2fd4736e55446f39c4151e258a6f260b1ae40cc";
+const TEST_UPDATE_KEY: &str = "RWTyiF3QLup9KFyJGN8hznaMtX/zcuCEU/GZgVSIqZ5XDDir1/SNLm8G";
+
+/// A build from the TEST release config: no `"test": false` marker, the TEST
+/// certificate among the accepted leaves, or the TEST update key (the key
+/// line itself, whatever the comment line says).
+fn test_config(identity: &str, tauri_conf: &str) -> bool {
+    use base64::Engine as _;
     let v: serde_json::Value = serde_json::from_str(identity).unwrap_or_default();
-    v.get("test").and_then(|t| t.as_bool()) != Some(false)
+    let leaves = v.get("acceptedLeaves").and_then(|a| a.as_array());
+    let test_leaf = leaves.is_some_and(|a| {
+        a.iter().any(|l| {
+            l.as_str()
+                .is_some_and(|s| s.eq_ignore_ascii_case(TEST_LEAF))
+        })
+    });
+    let conf: serde_json::Value = serde_json::from_str(tauri_conf).unwrap_or_default();
+    let pubkey = conf["plugins"]["updater"]["pubkey"]
+        .as_str()
+        .unwrap_or_default();
+    let key = base64::engine::general_purpose::STANDARD
+        .decode(pubkey.trim())
+        .unwrap_or_default();
+    let test_key = String::from_utf8_lossy(&key)
+        .lines()
+        .any(|l| l.trim() == TEST_UPDATE_KEY);
+    v.get("test").and_then(|t| t.as_bool()) != Some(false) || test_leaf || test_key
 }
 
 fn signers(identity: &str) -> Vec<String> {
@@ -765,13 +793,36 @@ mod tests {
 
     #[test]
     fn the_test_identity_is_never_the_release_channel() {
-        assert!(test_identity(r#"{"test": true, "acceptedLeaves": []}"#));
-        assert!(test_identity("{}"), "no marker counts as TEST");
-        assert!(!test_identity(r#"{"test": false}"#));
-        // The repo carries the TEST identity until the owner's replaces it.
-        assert!(test_identity(RELEASE_IDENTITY));
+        use base64::Engine as _;
+        let real_conf = r#"{"plugins": {"updater": {"pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IHJlYWwKUldRUkVBTEtFWQo="}}}"#;
+        let real =
+            r#"{"test": false, "acceptedLeaves": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}"#;
+        assert!(!test_config(real, real_conf));
+        assert!(test_config(
+            r#"{"test": true, "acceptedLeaves": []}"#,
+            real_conf
+        ));
+        assert!(test_config("{}", real_conf), "no marker counts as TEST");
+        // The TEST certificate, even marked not-test (any case).
+        assert!(test_config(
+            r#"{"test": false, "acceptedLeaves": ["E2FD4736E55446F39C4151E258A6F260B1AE40CC"]}"#,
+            real_conf
+        ));
+        // The TEST update key, under any comment line and stray whitespace.
+        let test_key = "untrusted comment: my key\r\n RWTyiF3QLup9KFyJGN8hznaMtX/zcuCEU/GZgVSIqZ5XDDir1/SNLm8G \r\n";
+        let conf = format!(
+            r#"{{"plugins": {{"updater": {{"pubkey": "{}"}}}}}}"#,
+            base64::engine::general_purpose::STANDARD.encode(test_key)
+        );
+        assert!(test_config(real, &conf));
+        // The repo carries the TEST identity and key until the owner's replace them.
+        assert!(test_config(RELEASE_IDENTITY, TAURI_CONF));
+        assert!(
+            test_config(real, TAURI_CONF),
+            "the repo's TEST pubkey alone"
+        );
         assert_eq!(
-            release_channel(test_identity(RELEASE_IDENTITY), Some("release")),
+            release_channel(test_config(RELEASE_IDENTITY, TAURI_CONF), Some("release")),
             Channel::Source
         );
     }

@@ -185,6 +185,41 @@ class ReleaseManifest(unittest.TestCase):
             self.assertNotEqual(r.returncode, 0)
             self.assertIn("TEST update key", r.stderr)
 
+    def test_the_test_update_key_payload_is_refused_under_any_comment(self):
+        import base64
+        payload = "RWTyiF3QLup9KFyJGN8hznaMtX/zcuCEU/GZgVSIqZ5XDDir1/SNLm8G"
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            self.tree(root)
+            for text in (f"untrusted comment: minisign public key: 0123456789ABCDEF\n{payload}\n",
+                         f"untrusted comment: my release key\r\n {payload} \r\n"):
+                self.release_config(root)
+                conf = root / "apps/desktop/src-tauri/tauri.conf.json"
+                c = json.loads(conf.read_text())
+                c["plugins"]["updater"]["pubkey"] = base64.b64encode(text.encode()).decode()
+                conf.write_text(json.dumps(c))
+                r = run("check-release-config", cwd=d)
+                self.assertNotEqual(r.returncode, 0, text)
+                self.assertIn("TEST update key", r.stderr)
+
+    def test_the_test_key_id_is_refused_with_stray_whitespace(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.tree(Path(d))
+            self.release_config(Path(d), pubkey_id="287DEA2ED05D88F2 \r")
+            self.assertNotEqual(run("check-release-config", cwd=d).returncode, 0)
+
+    def test_the_test_leaf_is_refused_even_when_marked_not_test(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            self.tree(root)
+            self.release_config(root)
+            (root / "apps/desktop/src-tauri/release-identity.json").write_text(json.dumps(
+                {"test": False, "signingIdentity": "Otto Release Signing",
+                 "acceptedLeaves": ["aa" * 20, "E2FD4736E55446F39C4151E258A6F260B1AE40CC"]}))
+            r = run("check-release-config", cwd=d)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("TEST certificate", r.stderr)
+
     def test_the_repo_config_today_is_refused(self):
         # Until the owner's real identity and key replace the TEST ones.
         r = run("check-release-config", cwd=REPO)

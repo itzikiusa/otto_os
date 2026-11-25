@@ -2669,6 +2669,7 @@ dependencies = [
 name = "otto-desktop"
 version = "0.5.3"
 dependencies = [
+ "base64 0.23.1",
  "dirs",
  "flate2",
  "libc",
