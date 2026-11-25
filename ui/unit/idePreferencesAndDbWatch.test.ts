@@ -15,7 +15,7 @@ import {
 import {
   formatDbCellValue,
   IDE_DB_ENGINES,
-  pickPreferredDbTarget,
+  pickAutoTarget,
   targetKeyOf,
 } from '../src/modules/ide/dbwatch/ideDbWatchModel.ts';
 import type {
@@ -169,6 +169,7 @@ describe('IDE Live DB Watch target prioritization and cell formatting', () => {
     port: 3306,
     environment: 'dev',
     database: 'pr_bo_1',
+    local: true,
   };
   const ephemeralMysql: IdeEphemeralDbTarget = {
     target_kind: 'ephemeral',
@@ -182,30 +183,17 @@ describe('IDE Live DB Watch target prioritization and cell formatting', () => {
     container_image: 'mysql:8.0',
   };
 
-  it('prefers live ephemeral Testcontainers over saved connections for matching engine', () => {
+  it('auto-picks only the run’s own Testcontainer, never a saved connection', () => {
     assert.equal(IDE_DB_ENGINES.length, 5);
-    const chosen = pickPreferredDbTarget('mysql', [savedMysql], [ephemeralMysql]);
+    const chosen = pickAutoTarget([], [ephemeralMysql]);
     assert.ok(chosen);
     assert.equal(targetKeyOf(chosen), 'ephemeral:docker:abc123def456:3306');
+    void savedMysql; // saved connections are not even an input: the person picks them
   });
 
-  it('prefers a saved connection over an unlabelled container from another project', () => {
+  it('never auto-picks an unlabelled container that may belong to another project', () => {
     const other: IdeEphemeralDbTarget = { ...ephemeralMysql, ephemeral_id: 'tc:112233445566:13306', source: 'container' };
-    const chosen = pickPreferredDbTarget('mysql', [savedMysql], [other]);
-    assert.ok(chosen);
-    assert.equal(targetKeyOf(chosen), 'saved:conn-dev-mysql');
-    assert.equal(pickPreferredDbTarget('mysql', [], [other])?.target_kind, 'ephemeral', 'still offered with nothing saved');
-  });
-
-  it('preserves explicit user target selection when engine still matches', () => {
-    const chosen = pickPreferredDbTarget(
-      'mysql',
-      [savedMysql],
-      [ephemeralMysql],
-      'saved:conn-dev-mysql',
-    );
-    assert.ok(chosen);
-    assert.equal(targetKeyOf(chosen), 'saved:conn-dev-mysql');
+    assert.equal(pickAutoTarget([], [other]), null);
   });
 
   it('formats null, undefined, scalar, and structured database cell values cleanly', () => {

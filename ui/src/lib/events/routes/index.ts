@@ -50,4 +50,5 @@ export const LIVE_ONLY_EVENTS: readonly EventType[] = [
   'connections_changed',
   'notifications_changed',
   'ide_fs_changed',
+  'ide_db_watch_checkpoint',
 ];

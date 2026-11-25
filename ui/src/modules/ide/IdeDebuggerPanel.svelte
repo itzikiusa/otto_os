@@ -34,6 +34,8 @@
   import { chordAria, debugErrorCard, pickReattachSession, withKeyHint } from './debug/ideDebugPanelModel';
   import { ideDockPrefs } from './debug/ideDockPrefs.svelte';
   import { ideCollabNotices } from './store/ideCollabNotices.svelte';
+  import { ideDbWatch } from './dbwatch/ideDbWatchState.svelte';
+  import IdeDbWatchStrip from './dbwatch/IdeDbWatchStrip.svelte';
 
   let activeSubTab = $state<'debugger' | 'console'>('debugger');
   let replInput = $state('');
@@ -306,6 +308,8 @@
       <Icon name="more" size={13} />
     </button>
   </header>
+
+  {#if dbg && ideDbWatch.watch}<IdeDbWatchStrip />{/if}
 
   {#if errorCard}
     <IdeDebugErrorCard card={errorCard} onshowoutput={showConsole} ondismiss={dismissError} onretry={retryLaunch} />

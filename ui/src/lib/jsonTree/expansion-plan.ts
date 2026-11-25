@@ -2,7 +2,7 @@
 // Nothing here is Svelte — ResultsGrid owns the `$state`, the views derive a
 // per-record plan from it, and the pure path helpers below are shared with the
 // edit flow (dotted-path patches, the replaceOne diff).
-import { bsonScalar } from './bson';
+import { bsonScalar } from './bson.ts';
 
 /** The nested-field editor's value kinds (Vertical view). Lives here, beside
  *  {@link valueKind}, so the shared JSON tree needs nothing from
