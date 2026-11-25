@@ -840,8 +840,7 @@ Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api
   code), `POST /ide/db-watch/objects` (the target's real tables),
   `POST|GET /ide/db-watch/watches`, `GET|PATCH|DELETE /ide/db-watch/watches/{id}`,
   `POST /ide/db-watch/watches/{id}/snapshot`, and the `ide_db_watch_checkpoint`
-  event; the stateless `POST /ide/db-watch/snapshot` is deprecated (no longer
-  used by the UI). Read-only on MySQL, PostgreSQL, MongoDB, Redis and ClickHouse.
+  event (the old stateless `POST /ide/db-watch/snapshot` is gone). Read-only on MySQL, PostgreSQL, MongoDB, Redis and ClickHouse.
 
 ## Troubleshooting
 
