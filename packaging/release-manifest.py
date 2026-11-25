@@ -23,9 +23,12 @@ SEMVER = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?")
 ASSET_HOSTS = {"github.com"}
 
 
-# The throwaway update key the repo carries until the owner's real one replaces
-# it (minisign key id, from the line "untrusted comment: minisign public key: <id>").
+# The throwaway TEST values the repo carries until the owner's real ones
+# replace them (updater/mod.rs refuses the same): the update key by its key id
+# and by its key itself (the line after the comment), and the certificate leaf.
 TEST_UPDATE_KEY_IDS = {"287DEA2ED05D88F2"}
+TEST_UPDATE_KEYS = {"RWTyiF3QLup9KFyJGN8hznaMtX/zcuCEU/GZgVSIqZ5XDDir1/SNLm8G"}
+TEST_LEAVES = {"e2fd4736e55446f39c4151e258a6f260b1ae40cc"}
 
 
 def fail(msg):
@@ -72,10 +75,14 @@ def check_release_config():
     if identity().get("test") is not False:
         fail(f"{DESKTOP}/release-identity.json is the TEST identity (\"test\": true): "
              "put the release certificate there first (docs/RELEASE.md)")
+    if any(leaf.lower() in TEST_LEAVES for leaf in identity()["acceptedLeaves"]):
+        fail(f"{DESKTOP}/release-identity.json accepts the TEST certificate: "
+             "list only the release certificate's leaf (docs/RELEASE.md)")
     pubkey = json.loads((DESKTOP / "tauri.conf.json").read_text())["plugins"]["updater"]["pubkey"]
-    key_id = base64.b64decode(pubkey).decode().split("\n")[0].rsplit(" ", 1)[-1]
-    if key_id in TEST_UPDATE_KEY_IDS:
-        fail(f"{DESKTOP}/tauri.conf.json carries the TEST update key ({key_id}): "
+    lines = [ln.strip() for ln in base64.b64decode(pubkey).decode().splitlines() if ln.strip()]
+    key_id = lines[0].rsplit(" ", 1)[-1] if lines else ""
+    if key_id in TEST_UPDATE_KEY_IDS or any(ln in TEST_UPDATE_KEYS for ln in lines[1:]):
+        fail(f"{DESKTOP}/tauri.conf.json carries the TEST update key: "
              "put the release key's .pub there first (docs/RELEASE.md)")
 
 
