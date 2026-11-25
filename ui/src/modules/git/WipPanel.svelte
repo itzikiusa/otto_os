@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  /** Change sets the Changes card already asked the drafting agent about. */
+  /** Change sets the WIP panel already asked the drafting agent about. */
   const autoDrafted = new Set<string>();
 </script>
 
@@ -11,7 +11,7 @@
   // sections (wip/WipSection.svelte: list or folder tree, stage checkboxes,
   // discard, +/− counts), the selected file's working diff — BESIDE the list
   // when the pane is wide, below it when narrow — and the commit composer
-  // (wip/WipComposer.svelte). Replaces the old separate "Changes" tab.
+  // (wip/WipComposer.svelte). Replaces the old separate "Changes" view.
   import { onDestroy, tick, untrack } from 'svelte';
   import { toastError } from '../../lib/toastError';
   import { api, isAbortError } from '../../lib/api/client';
@@ -48,19 +48,19 @@
     repoId: string;
     status: RepoStatusResp;
     onstatus: (s: RepoStatusResp) => void;
-    /** Called after a successful commit so the graph can reload its log. */
-    oncommitted: () => void;
+    /** Called after a successful commit (its sha) so the graph can reload its log. */
+    oncommitted: (sha: string) => void;
     onclose?: () => void; // omitted in a sheet with its own close (Threads' commit sheet)
     /** Open the conflict resolver (RepoView's tab) for a conflicted file. */
     onresolve?: () => void;
     /** The repo has a remote: an unpublished branch can still "Commit and
      *  push" (publish). Unknown/false → only a branch with an upstream does. */
     remote?: boolean;
-    /** Open the first file's diff on mount (the Changes page, wide enough to
-     *  show it beside the list). */
+    /** Open the first file's diff on mount (History on a desktop, wide
+     *  enough to show it beside the list). */
     selectFirst?: boolean;
     /** Ask the drafting agent for a message on mount when the card is empty
-     *  (the Changes page / commit sheet). A failure stays quiet: the empty
+     *  (History's WIP row / commit sheet). A failure stays quiet: the empty
      *  message field has focus instead. */
     autoDraft?: boolean;
     /** Every change counts as included while nothing is staged — without
@@ -681,7 +681,7 @@
     !status.branch || status.branch === '(detached)' ? null : (status.upstream ?? (remote ? `origin/${status.branch}` : null)),
   );
 
-  // The Changes page opens on the first file's diff (once per mount).
+  // History opens the WIP panel on the first file's diff (once per mount).
   let firstPicked = false;
   $effect(() => {
     if (!selectFirst || firstPicked) return;
@@ -801,7 +801,7 @@
       onstatus(r.status);
       selectedPath = null;
       if (push && r.status.branch) pushed = { branch: r.status.branch, upstream: r.status.upstream };
-      oncommitted();
+      oncommitted(r.sha);
     } catch (e) {
       toastError('Couldn’t commit the changes', e);
     } finally {

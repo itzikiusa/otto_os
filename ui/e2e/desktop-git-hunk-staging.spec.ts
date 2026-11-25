@@ -69,16 +69,17 @@ async function openWipFile(page: Page, name: string, path: string) {
     await menu.getByRole('menuitem', { name }).first().click();
   }
   await expect(page.locator('.rv-tabs')).toBeVisible();
-  // A dirty repository opens on Changes; this spec drives the graph.
-  await page.locator('.rv-tab', { hasText: 'History' }).click();
-
+  // A dirty repository opens on History with its WIP row selected and every
+  // change virtually included; hunk tools need the index written, so leave
+  // them all out first (the Included header's Unstage all).
   const wipRow = page.locator('.wip-row');
-  await expect(wipRow).toBeVisible({ timeout: 15_000 });
-  await wipRow.click();
+  await expect(wipRow).toHaveAttribute('aria-pressed', 'true', { timeout: 15_000 });
   const panel = page.locator('.wip-panel');
   await expect(panel).toBeVisible();
-  await panel.locator('.wp-name', { hasText: path }).first().click();
-  await expect(panel.locator('.wp-diff')).toBeVisible();
+  await panel.locator('[data-wp-section="staged"]').getByRole('button', { name: /^Unstage / }).click();
+  await expect(panel.getByTestId('commit-card-included')).toHaveText(/^0 of /);
+  // The first file's diff opened with the panel (each seed has one file).
+  await expect(panel.locator('.wp-diff')).toContainText(path);
   return panel;
 }
 

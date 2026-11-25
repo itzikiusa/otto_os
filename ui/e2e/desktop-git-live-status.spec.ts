@@ -41,14 +41,12 @@ test('an on-disk edit, a new file and a CLI `git add` appear without waiting for
   const menu = page.locator('.ctx-menu');
   await menu.locator('.ctx-search-input').fill(name);
   await menu.getByRole('menuitem', { name }).first().click();
-  // A dirty repository opens on Changes; this spec drives the graph's WIP row.
-  await page.locator('.rv-tab', { hasText: 'History' }).click();
+  // A dirty repository opens on History with its WIP row selected.
   const wipRow = page.locator('.wip-row');
-  await expect(wipRow).toBeVisible({ timeout: 15_000 });
-  await wipRow.click();
+  await expect(wipRow).toHaveAttribute('aria-pressed', 'true', { timeout: 15_000 });
   const panel = page.locator('.wip-panel');
-  await expect(panel.locator('.wp-count')).toHaveText('1 file changed');
-  await panel.locator('.wp-name', { hasText: 'a.ts' }).first().click();
+  await expect(wipRow).toContainText('1 file changed');
+  // a.ts's diff opened with the panel (its first file).
   await expect(panel.locator('.wp-diff')).toContainText('export const a = 2;');
   // Let the watcher arm (the status read that opened the repo arms it).
   await page.waitForTimeout(800);
@@ -56,7 +54,7 @@ test('an on-disk edit, a new file and a CLI `git add` appear without waiting for
   // 1. A new file saved in an editor.
   let t0 = Date.now();
   writeFileSync(join(dir, 'b.ts'), 'export const b = 1;\n');
-  await expect(panel.locator('.wp-count')).toHaveText('2 files changed', { timeout: BUDGET_MS });
+  await expect(wipRow).toContainText('2 files changed', { timeout: BUDGET_MS });
   const newFileMs = Date.now() - t0;
 
   // 2. Editing the already-modified, open file: the list is unchanged, the
@@ -66,18 +64,19 @@ test('an on-disk edit, a new file and a CLI `git add` appear without waiting for
   await expect(panel.locator('.wp-diff')).toContainText('export const a = 3;', { timeout: BUDGET_MS });
   const openDiffMs = Date.now() - t0;
 
-  // 3. Staging from a terminal (only `.git/index` changes): b.ts moves to the
-  //    staged section — its row's checkbox reads "Unstage".
+  // 3. Staging from a terminal (only `.git/index` changes): b.ts is the one
+  //    staged file now — a.ts leaves "everything included" and reads "Stage".
   t0 = Date.now();
   git('add', 'b.ts');
-  await expect(panel.getByRole('checkbox', { name: 'Unstage b.ts' })).toBeVisible({ timeout: BUDGET_MS });
+  await expect(panel.getByRole('checkbox', { name: 'Stage a.ts' })).toBeVisible({ timeout: BUDGET_MS });
+  await expect(panel.getByRole('checkbox', { name: 'Unstage b.ts' })).toBeVisible();
   const cliAddMs = Date.now() - t0;
 
   // 4. Churn in an ignored directory never changes the list.
   execFileSync('mkdir', ['-p', join(dir, 'target')]);
   writeFileSync(join(dir, 'target', 'out.o'), 'x');
   await page.waitForTimeout(1_500);
-  await expect(panel.locator('.wp-count')).toHaveText('2 files changed');
+  await expect(wipRow).toContainText('2 files changed');
 
   console.log(`live status: new file ${newFileMs} ms · open diff ${openDiffMs} ms · CLI add ${cliAddMs} ms`);
 });

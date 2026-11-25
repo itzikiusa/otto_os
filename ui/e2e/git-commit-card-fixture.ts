@@ -63,14 +63,18 @@ export function remoteSubject(repo: CardRepo): string {
   return execFileSync('git', ['--git-dir', repo.bare, 'log', '-1', '--format=%s', repo.branch]).toString().trim();
 }
 
-export async function expectChangesFirst(page: Page): Promise<void> {
-  await expect(page.locator('.rv-tab[aria-selected="true"]')).toContainText('Changes', { timeout: 15_000 });
+/** A dirty repository opens on History with its WIP row selected: the commit
+ *  card over every change, included, the message drafted. */
+export async function expectWipFirst(page: Page): Promise<void> {
+  await expect(page.locator('.rv-tab[aria-selected="true"]')).toHaveText('History', { timeout: 15_000 });
+  const wip = page.locator('.wip-row');
+  await expect(wip).toHaveAttribute('aria-pressed', 'true', { timeout: 15_000 });
   const card = page.getByTestId('commit-card');
   await expect(card).toBeVisible();
-  // The count is said once, on the Changes badge (design review 2, H4): the card
+  // The count is said once, on the WIP row (design review 2, H4): the card
   // says all is included, the Included header carries the +/− totals, and no
   // lone "+1 −1" line floats between them.
-  await expect(page.locator('.rv-tab[aria-selected="true"]')).toContainText('2');
+  await expect(wip).toContainText('2 files changed');
   await expect(card.getByTestId('commit-card-included')).toHaveText('all files included');
   await expect(page.locator('[data-wp-section="staged"] .wp-sec-count')).toHaveCount(0);
   await expect(page.getByTestId('wip-section-lines')).toHaveText(/\+1\s*−1/);

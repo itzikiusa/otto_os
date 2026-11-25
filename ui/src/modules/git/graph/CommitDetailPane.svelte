@@ -6,6 +6,10 @@
   // section; GraphView owns the selection (graphSelection.svelte.ts).
   import type { CommitInfo, RepoStatusResp } from '../../../lib/api/types';
   import { rel } from '../../../lib/stores/now.svelte';
+  import { git } from '../../../lib/stores/git.svelte';
+  import { router } from '../../../lib/router.svelte';
+  import LazyMount from '../../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../../lib/lazy-component.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import WipPanel from '../WipPanel.svelte';
   import GraphCommitDiff from '../graph-commit-diff.svelte';
@@ -34,7 +38,7 @@
     onfiletools: (e: MouseEvent, path: string) => void;
     fileCount?: number | null;
     onclose: () => void;
-    oncommitted: () => void;
+    oncommitted: (sha: string) => void;
   }
   let {
     repoId,
@@ -58,6 +62,12 @@
     oncommitted,
   }: Props = $props();
 
+  const repo = $derived(git.allRepos.find((r) => r.id === repoId) ?? git.repos.find((r) => r.id === repoId) ?? null);
+  // A pushed, clean HEAD: the commit card's next step (Create / Open pull
+  // request) above its detail. Push and Publish are the header's verbs.
+  const CommitCardLazy = lazyComponent(() => import('../CommitCard.svelte'));
+  const showStep = $derived(chips.some((c) => c.current) && !!repo && status.changes.length === 0 && !!status.upstream && status.ahead === 0);
+
   /** The shared relative-time label (content.md §7), compact for dense rows. */
   function fmtDate(iso: string): string {
     return rel(iso, { compact: true });
@@ -75,13 +85,18 @@
   class:mob-hidden={isMobile && !open}
 >
   {#if wipSelected}
-    <WipPanel {repoId} {status} {onstatus} {oncommitted} {onclose} {onresolve} />
+    <!-- Every change counts as included, the message drafts itself, the first
+         file's diff opens beside the list (desktop). -->
+    <WipPanel {repoId} {status} {onstatus} {oncommitted} {onclose} {onresolve} remote={!!repo?.remote_url} selectFirst={!isMobile} autoDraft includeAll />
   {:else if selectedSha === null}
     <div class="detail-empty">
       <span class="detail-empty-label">COMMIT</span>
       <span class="dim detail-empty-hint">select a commit</span>
     </div>
   {:else if selectedCommit !== null}
+    {#if showStep && repo}
+      <LazyMount lazy={CommitCardLazy} what="the next step" quiet props={{ repo, layout: 'step', onopenpr: (n: number) => router.go(`git/${repoId}/pr/${n}`) }} />
+    {/if}
     <div class="detail-header">
       <div class="detail-header-main">
         <!-- One line that never wraps: sha, the refs (each ellipsizes its own
@@ -257,6 +272,26 @@
   }
   .mono {
     font-family: var(--font-mono);
+  }
+
+  /* A narrow desktop pane (a 1100 px window with the right panel open) has no
+     room for refs + list + detail: while the detail is open the refs step
+     aside and the list and the detail share the width. */
+  :global(.graphview) {
+    container: graph / inline-size;
+  }
+  @container graph (max-width: 900px) {
+    :global(.graphview:has(> .detail-visible) > .refs-panel),
+    :global(.graphview:has(> .detail-visible) > .refs-resizer) {
+      display: none;
+    }
+    :global(.graphview:has(> .detail-visible) > .graph-panel) {
+      flex-basis: 45% !important;
+      min-width: 0;
+    }
+    .detail-panel.detail-visible {
+      min-width: 0;
+    }
   }
 
   /* ── Mobile + tablet (≤1024px): the accordion's diff section ── */

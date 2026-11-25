@@ -23,6 +23,7 @@
   import { runPull } from './pullFlow';
   import { runPush } from './pushFlow';
   import { gitBridge } from '../../lib/diff/gitBridge.svelte';
+  import { recentOverview } from '../../lib/api/gitOverview';
   import { registry } from '../../lib/commands.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
@@ -102,7 +103,7 @@
   const pushPrimary = $derived(header && accent && clean && status.upstream != null && status.ahead > 0 && !detached);
 
   // The stash list: the graph reports its count (gitBridge); where the graph
-  // isn't loaded (Changes) the toolbar reads it once, and after its own ops.
+  // isn't loaded (Pull requests, Review) the toolbar reads it once, and after its own ops.
   const stashCount = $derived(gitBridge.stashCount[repoId]);
   const nothingToPop = $derived(stashCount === 0);
   let stashes: StashInfo[] = [];
@@ -116,7 +117,15 @@
   }
   $effect(() => {
     const id = repoId;
-    if (variant !== 'sync' && showVerbs && gitBridge.stashCount[id] === undefined) untrack(() => void loadStashes(id).catch(() => {}));
+    if (variant !== 'sync' && showVerbs && gitBridge.stashCount[id] === undefined) {
+      // Opening a repo reads its overview, which carries the stash list.
+      untrack(() => void (recentOverview(id)?.then((o) => o.stashes) ?? Promise.resolve(null)).then((list) => {
+        if (!list) return loadStashes(id);
+        if (id !== repoId) return;
+        stashes = list;
+        gitBridge.stashCount[id] = list.length;
+      }).catch(() => {}));
+    }
   });
   /** The stash browser is open (files + patch, Apply / Pop / Drop). */
   let stashesOpen = $state(false);
@@ -309,7 +318,7 @@
     ];
   }
   /** The repo's state in words for the header ("↑2 not pushed · ↓1 to pull"). */
-  // The file count rides the Changes badge (and the commit card), not this line.
+  // The file count rides the WIP row (and the commit card), not this line.
   const words = $derived.by(() => {
     const w = stateWords({ changes: 0, ahead: status.ahead, behind: status.behind, upstream: status.upstream, branch: detached ? null : status.branch });
     return status.changes.length > 0 && w === 'Clean' ? '' : w;

@@ -1,9 +1,9 @@
 import { test, expect } from '@playwright/test';
 import { expectNoHorizontalOverflow, openPage } from './helpers';
-import { expectChangesFirst, remoteSubject, seedCardRepo, stubForge, type CardRepo } from './git-commit-card-fixture';
+import { expectWipFirst, remoteSubject, seedCardRepo, stubForge, type CardRepo } from './git-commit-card-fixture';
 
-// The commit card on a phone (G1/G5): a dirty repository opens on Changes,
-// the card sits on top with 44 px targets, one tap commits and pushes.
+// The commit card on a phone (G1/G5): a dirty repository opens on History's
+// WIP row, the card sits on top with 44 px targets, one tap commits and pushes.
 
 // The forge is stubbed with page.route: keep the app's service worker out
 // of the way (on WebKit its fetches bypass the routes).
@@ -24,22 +24,22 @@ test('phone: leaving one file out keeps the others included', async ({ page }, i
   const r = await seedCardRepo(`e2e-card-out-${info.project.name}`);
   await stubForge(page);
   await openPage(page, `git/${r.id}`);
-  await expectChangesFirst(page);
+  await expectWipFirst(page);
   await page.getByRole('checkbox', { name: /app\.txt$/ }).tap();
-  await expect(page.getByTestId('commit-card-included')).toHaveText('1 of 2 files included');
+  await expect(page.getByTestId('commit-card-included')).toHaveText('1 of 2 included');
   await expect(page.getByRole('checkbox', { name: /notes\.txt$/ })).toBeChecked();
 });
 
-test('phone: Changes first → one tap commits and pushes', async ({ page }, info) => {
+test('phone: WIP first → one tap commits and pushes', async ({ page }, info) => {
   test.skip(!PHONES.includes(info.project.name), 'phone projects only');
   await stubForge(page);
   await openPage(page, `git/${repo.id}`);
-  await expectChangesFirst(page);
+  await expectWipFirst(page);
   const primary = page.getByTestId('commit-card').locator('.wc-commit');
   const box = (await primary.boundingBox())!;
   expect(box.height).toBeGreaterThanOrEqual(44);
   await expectNoHorizontalOverflow(page);
-  // …and nothing inside scrolls sideways either (the Changes list did, by the
+  // …and nothing inside scrolls sideways either (the WIP list did, by the
   // 2 px a touch hit area overhung its section head: a scrollbar over the nav).
   const sideways = await page.locator('.gitpage-body').evaluate((root) =>
     [root, ...root.querySelectorAll<HTMLElement>('*')]

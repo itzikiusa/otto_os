@@ -44,6 +44,13 @@ async function openRepo(page: Page, tab = 'graph') {
   // A tight header turns the views into one menu button (R2-001).
   await expect(page.locator('.rv-tabs, .git-views-menu').first()).toBeVisible();
 }
+/** Show the HEAD commit (secondSha): a desktop History lands on it, a
+ *  narrower one (the stacked accordion) keeps its list and needs the tap. */
+async function showHead(page: Page) {
+  const row = page.locator(`.graph-row[data-sha="${secondSha}"]`);
+  if (page.viewportSize()!.width > 1024) await expect(row).toHaveClass(/graph-row-selected/);
+  else await row.click();
+}
 function diff(path: string) {
   return { files: [{ path, old_path: null, is_binary: false, hunks: [{ header: '@@ -0,0 +1 @@', lines: [{ origin: 'add', content: path, old_line: null, new_line: 1 }] }] }] };
 }
@@ -75,7 +82,7 @@ test('failed commit diff shows inline Retry instead of no changes', async ({ pag
     ? route.fulfill({ status: 503, json: { code: 'unavailable', message: 'Diff temporarily unavailable' } })
     : route.fulfill({ json: diff('second.txt') }));
   await openRepo(page);
-  await page.locator(`.graph-row[data-sha="${secondSha}"]`).click();
+  await showHead(page);
   const panel = page.locator('.detail-diff');
   await expect(panel.getByRole('button', { name: 'Retry' })).toBeVisible();
   await expect(panel).not.toContainText('No file changes.');
@@ -123,7 +130,7 @@ test('Focus account failure offers Retry instead of account setup', async ({ pag
 test('graph diff stays LTR inside an RTL UI', async ({ page }) => {
   await openRepo(page);
   await page.evaluate(() => { document.documentElement.dir = 'rtl'; });
-  await page.locator(`.graph-row[data-sha="${secondSha}"]`).click();
+  await showHead(page);
   await expect(page.locator('.dl-table')).toBeVisible();
   await expect(page.locator('.dl-table')).toHaveCSS('direction', 'ltr');
 });
@@ -158,7 +165,7 @@ for (const scenario of [
     }, scenario);
     await openRepo(page);
     if (scenario.rtl) await page.evaluate(() => { document.documentElement.dir = 'rtl'; });
-    await page.locator(`.graph-row[data-sha="${secondSha}"]`).click();
+    await showHead(page);
     await expect(page.locator('.dl-table')).toBeVisible();
     await expectNoHorizontalOverflow(page);
     await expect(page.locator('.dl-table')).toHaveCSS('direction', 'ltr');

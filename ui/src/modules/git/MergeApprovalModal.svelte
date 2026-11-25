@@ -111,7 +111,7 @@
       }
       // A squash merge reports status 'merged' but commit === null: the changes
       // are STAGED, not committed. Don't imply it's done — tell the user to
-      // review & commit in Changes.
+      // review & commit from the WIP row.
       if (result.status === 'merged' && result.commit === null) {
         toasts.success('Squash merge staged', 'Review and commit it from the WIP row at the top of the graph');
       } else {

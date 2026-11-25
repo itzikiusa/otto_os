@@ -1,5 +1,5 @@
 <script lang="ts">
-  // The Side panel's Git tab: the Changes view with the commit card on top
+  // The Side panel's Git tab: the working tree with the commit card on top
   // (CommitCard — the changed files, a diff on click, ONE primary: Commit and
   // push → Push → Create pull request → Open pull request), not the whole Git
   // page squeezed into 300 px; "Open in Git" goes to the full page. Auto-detects
