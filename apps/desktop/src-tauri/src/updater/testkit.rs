@@ -11,6 +11,8 @@ use std::sync::{Arc, Mutex};
 
 use reqwest::Url;
 
+use super::stage::{APP_ID, BUNDLE};
+
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 pub fn temp_dir(tag: &str) -> PathBuf {
@@ -24,8 +26,9 @@ pub fn temp_dir(tag: &str) -> PathBuf {
     d
 }
 
-/// A tiny native program that sleeps for 60 s: the stand-in app executable
-/// for finisher tests (a copied system binary is killed at launch).
+/// A tiny native program that sleeps for 60 s: the stand-in app process for
+/// finisher tests. It lives OUTSIDE any bundle and is exec'd directly, never
+/// through LaunchServices (a copied system binary is killed at launch).
 pub fn waiter() -> &'static str {
     static EXE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     EXE.get_or_init(|| {
@@ -297,43 +300,46 @@ impl Kit {
         run(cmd.arg(path));
     }
 
-    /// An unsigned bundle `<dir>/<tag>/Otto.app` at `version`, with
-    /// `otto-desktop` = a copy of `exe`.
-    pub fn plain_bundle(dir: &Path, version: &str, exe: &str, with_kiri: bool) -> PathBuf {
-        let app = dir.join("Otto.app");
+    /// An unsigned, INERT test bundle `<dir>/<BUNDLE>` at `version`: never
+    /// Otto's name or bundle id, package type `BNDL` (not an app),
+    /// background-only, never launched. With `binaries`, `Contents/MacOS`
+    /// holds `otto-desktop` + `ottod` (+ `kiri`) copies of /usr/bin/true for
+    /// codesign to seal; without, there is nothing executable in it at all.
+    pub fn plain_bundle(dir: &Path, version: &str, binaries: bool, with_kiri: bool) -> PathBuf {
+        let app = dir.join(BUNDLE);
         let _ = std::fs::remove_dir_all(&app);
         std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
         std::fs::create_dir_all(app.join("Contents/Resources")).unwrap();
         std::fs::write(app.join("Contents/Resources/notes.txt"), version).unwrap();
+        let exe = if binaries {
+            "<key>CFBundleExecutable</key><string>otto-desktop</string>\n"
+        } else {
+            ""
+        };
         std::fs::write(
             app.join("Contents/Info.plist"),
             format!(r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>com.otto.app</string>
-<key>CFBundleExecutable</key><string>otto-desktop</string>
-<key>CFBundleName</key><string>Otto</string>
-<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleIdentifier</key><string>{APP_ID}</string>
+{exe}<key>CFBundleName</key><string>OttoUpdateTest</string>
+<key>CFBundlePackageType</key><string>BNDL</string>
+<key>LSBackgroundOnly</key><true/>
+<key>LSUIElement</key><true/>
 <key>CFBundleShortVersionString</key><string>{version}</string>
 <key>CFBundleVersion</key><string>{version}</string>
 </dict></plist>
 "#),
         )
         .unwrap();
-        let mut bins = vec!["otto-desktop", "ottod"];
-        if with_kiri {
-            bins.push("kiri");
-        }
-        for b in bins {
-            std::fs::copy(
-                if b == "otto-desktop" {
-                    exe
-                } else {
-                    "/usr/bin/true"
-                },
-                app.join("Contents/MacOS").join(b),
-            )
-            .unwrap();
+        if binaries {
+            let mut bins = vec!["otto-desktop", "ottod"];
+            if with_kiri {
+                bins.push("kiri");
+            }
+            for b in bins {
+                std::fs::copy("/usr/bin/true", app.join("Contents/MacOS").join(b)).unwrap();
+            }
         }
         app
     }
@@ -358,7 +364,7 @@ impl Kit {
         sidecar_cn: &str,
         with_kiri: bool,
     ) -> PathBuf {
-        let app = Self::plain_bundle(&self.dir.join(tag), version, "/usr/bin/true", with_kiri);
+        let app = Self::plain_bundle(&self.dir.join(tag), version, true, with_kiri);
         let macos = app.join("Contents/MacOS");
         self.sign(&macos.join("ottod"), sidecar_cn, false);
         if with_kiri {
@@ -368,13 +374,13 @@ impl Kit {
         app
     }
 
-    /// The release archive of `app` (its parent holds only `Otto.app`).
+    /// The release-style archive of `app` (its parent holds only it).
     pub fn archive(&self, app: &Path) -> Vec<u8> {
         let mut child = Command::new("/usr/bin/tar")
             .env("COPYFILE_DISABLE", "1")
             .args(["--no-mac-metadata", "--no-xattrs", "-czf", "-", "-C"])
             .arg(app.parent().unwrap())
-            .arg("Otto.app")
+            .arg(BUNDLE)
             .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
@@ -415,8 +421,8 @@ impl Minisign {
     pub fn sign(&self, data: &[u8], version: Option<&str>) -> String {
         use base64_engine::encode;
         let trusted = match version {
-            Some(v) => format!("timestamp:1\tfile:Otto.app.tar.gz\tversion:{v}"),
-            None => "timestamp:1\tfile:Otto.app.tar.gz".to_string(),
+            Some(v) => format!("timestamp:1\tfile:update.tar.gz\tversion:{v}"),
+            None => "timestamp:1\tfile:update.tar.gz".to_string(),
         };
         let sig = minisign::sign(
             Some(&self.kp.pk),
@@ -448,5 +454,51 @@ mod base64_engine {
             }
         }
         out
+    }
+}
+
+/// No fixture may pass for Otto (a test bundle named like the app, opened
+/// through LaunchServices, once showed the owner "Otto is damaged"): not its
+/// name, not its bundle id, never an app or a launchable bundle — and no
+/// updater test source spells either.
+#[test]
+fn no_test_fixture_can_pass_for_otto() {
+    let (name, id) = (concat!("Otto", ".app"), concat!("com.otto", ".app"));
+    assert_ne!(BUNDLE, name);
+    assert_ne!(APP_ID, id);
+    let dir = temp_dir("guard");
+    for binaries in [false, true] {
+        let b = Kit::plain_bundle(&dir, "1.0.0", binaries, true);
+        assert_eq!(b.file_name().unwrap().to_str().unwrap(), BUNDLE);
+        let plist = std::fs::read_to_string(b.join("Contents/Info.plist")).unwrap();
+        assert!(plist.contains(&format!("<string>{APP_ID}</string>")) && !plist.contains(id));
+        assert!(
+            plist.contains("<key>CFBundlePackageType</key><string>BNDL</string>"),
+            "never an app"
+        );
+        assert!(plist.contains("<key>LSBackgroundOnly</key><true/>"));
+        assert_eq!(
+            plist.contains("CFBundleExecutable"),
+            binaries,
+            "inert unless codesign needs one"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let sources = [
+        ("testkit.rs", include_str!("testkit.rs")),
+        ("fetch.rs", include_str!("fetch.rs")),
+        ("stage.rs", include_str!("stage.rs")),
+        ("finish.rs", include_str!("finish.rs")),
+        ("mod.rs", include_str!("mod.rs")),
+    ];
+    for (file, src) in sources {
+        let tests = match file {
+            "testkit.rs" => src,
+            _ => &src[src.find("#[cfg(test)]\nmod tests").expect(file)..],
+        };
+        assert!(
+            !tests.contains(name) && !tests.contains(id),
+            "{file}'s tests name Otto's real bundle or id"
+        );
     }
 }

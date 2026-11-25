@@ -125,7 +125,7 @@ impl Paths {
         stage::staged_app(&self.updates())
     }
     fn previous(&self) -> PathBuf {
-        self.updates().join("previous/Otto.app")
+        self.updates().join("previous").join(stage::BUNDLE)
     }
 }
 
@@ -705,11 +705,11 @@ mod tests {
     #[test]
     fn a_copy_outside_applications_or_without_write_access_is_blocked() {
         let dir = temp_dir("blocker");
-        let apps = dir.join("Applications");
-        let app = apps.join("Otto.app");
+        let apps = dir.join("apps");
+        let app = apps.join("X.app");
         std::fs::create_dir_all(&app).unwrap();
         assert_eq!(install_blocker(&app, &app), None);
-        let elsewhere = dir.join("Downloads/Otto.app");
+        let elsewhere = dir.join("Downloads/X.app");
         assert!(install_blocker(&elsewhere, &app)
             .unwrap()
             .contains("Move Otto to the Applications folder"));
@@ -792,8 +792,8 @@ mod tests {
         let leaf = kit.identity("Otto Updater TEST E2E");
         let signers = vec![format!("certificate leaf = H\"{leaf}\"")];
         let archive = kit.archive(&kit.bundle("v123", "1.2.3", "Otto Updater TEST E2E", false));
-        let srv = Server::start(vec![("/Otto.app.tar.gz", 200, archive.clone(), None)]);
-        let archive_url = srv.url("/Otto.app.tar.gz").to_string();
+        let srv = Server::start(vec![("/update.tar.gz", 200, archive.clone(), None)]);
+        let archive_url = srv.url("/update.tar.gz").to_string();
         let app = mock_app(&keys.pubkey(), "1.2.2");
         let handle = app.handle().clone();
         let latest = srv.url("/latest.json");
@@ -872,7 +872,7 @@ mod tests {
         let mut bad = archive.clone();
         let mid = bad.len() / 2;
         bad[mid] ^= 0xff;
-        srv.set("/Otto.app.tar.gz", 200, bad);
+        srv.set("/update.tar.gz", 200, bad);
         srv.set(
             "/latest.json",
             200,
@@ -892,7 +892,7 @@ mod tests {
             200,
             manifest(
                 "1.2.3",
-                "https://evil.example/Otto.app.tar.gz",
+                "https://evil.example/update.tar.gz",
                 &keys.sign(&archive, Some("1.2.3")),
             ),
         );
@@ -914,54 +914,6 @@ mod tests {
             panic!("huge manifest parsed")
         };
         assert!(msg.contains("larger"), "{msg}");
-        let _ = std::fs::remove_dir_all(&updates);
-    }
-
-    /// Interop with the real release pipeline: the archive, .sig and
-    /// latest.json that packaging/release-artifacts.sh made (TEST update key,
-    /// TEST release certificate), checked with the pubkey in tauri.conf.json
-    /// and the signers in release-identity.json. Not committed fixtures:
-    /// `OTTO_UPDATE_FIXTURE_DIR=<its dist dir> cargo test -- --ignored release_artifacts`.
-    #[tokio::test]
-    #[ignore]
-    async fn release_artifacts_from_the_pipeline_verify_and_stage() {
-        let dir = PathBuf::from(
-            std::env::var("OTTO_UPDATE_FIXTURE_DIR").expect("set OTTO_UPDATE_FIXTURE_DIR"),
-        );
-        let mut manifest: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(dir.join("latest.json")).unwrap()).unwrap();
-        let version = manifest["version"].as_str().unwrap().to_string();
-        let url = manifest["platforms"]["darwin-aarch64"]["url"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        assert!(
-            fetch::allowed(&url.parse().unwrap()),
-            "the pipeline's URL is an allowed host: {url}"
-        );
-        let archive = std::fs::read(dir.join(url.rsplit('/').next().unwrap())).unwrap();
-        let srv = Server::start(vec![("/a.tar.gz", 200, archive, None)]);
-        manifest["platforms"]["darwin-aarch64"]["url"] = srv.url("/a.tar.gz").to_string().into();
-        srv.set("/latest.json", 200, serde_json::to_vec(&manifest).unwrap());
-        let conf: serde_json::Value =
-            serde_json::from_str(include_str!("../../tauri.conf.json")).unwrap();
-        let app = mock_app(
-            conf["plugins"]["updater"]["pubkey"].as_str().unwrap(),
-            "0.0.1",
-        );
-        let u = find_update(app.handle(), &srv.url("/latest.json"))
-            .await
-            .ok()
-            .unwrap()
-            .expect("newer");
-        assert_eq!(u.version, version);
-        let updates = temp_dir("interop");
-        let staged =
-            download_and_stage(&u, updates.clone(), signers(RELEASE_IDENTITY), |_, _| {}).await;
-        let staged = staged
-            .map_err(|Fail(_, m)| m)
-            .expect("the real release artifact stages");
-        assert_eq!(stage::bundle_version(&staged).unwrap(), version);
         let _ = std::fs::remove_dir_all(&updates);
     }
 }

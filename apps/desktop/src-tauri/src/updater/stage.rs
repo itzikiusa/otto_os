@@ -8,8 +8,17 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-/// Bundle identifier of the app itself.
+/// The bundle the release archive carries, and its identifier. Tests use an
+/// inert name and id, so nothing they build can be mistaken for Otto (or
+/// open `otto://` links): see `testkit`.
+#[cfg(not(test))]
+pub const BUNDLE: &str = "Otto.app";
+#[cfg(not(test))]
 const APP_ID: &str = "com.otto.app";
+#[cfg(test)]
+pub const BUNDLE: &str = "OttoUpdateTest.app";
+#[cfg(test)]
+pub const APP_ID: &str = "com.otto.updatetest";
 /// The bundle's other signed binaries: (identifier, path, required).
 const BINARIES: [(&str, &str, bool); 2] = [
     ("ottod", "Contents/MacOS/ottod", true),
@@ -22,9 +31,9 @@ const ENTRIES_MAX: usize = 50_000;
 /// Headroom on top of the measured need.
 const DISK_MARGIN: u64 = 256 * 1024 * 1024;
 
-/// `<updates>/staging/Otto.app`, ready for the finisher's swap.
+/// `<updates>/staging/<BUNDLE>`, ready for the finisher's swap.
 pub fn staged_app(updates: &Path) -> PathBuf {
-    updates.join("staging/Otto.app")
+    updates.join("staging").join(BUNDLE)
 }
 
 /// Create `dir` (and parents) and make it 0700.
@@ -36,7 +45,7 @@ pub fn private_dir(dir: &Path) -> std::io::Result<()> {
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
 }
 
-/// Unpack `archive` (gzip tar, one top-level `Otto.app`) into a fresh
+/// Unpack `archive` (gzip tar, one top-level [`BUNDLE`]) into a fresh
 /// staging dir and verify it. Leaves nothing behind on failure.
 pub fn stage(
     archive: &[u8],
@@ -54,7 +63,7 @@ pub fn stage(
         if app.is_dir() {
             verify(&app, version, signers)
         } else {
-            Err("the archive has no Otto.app at its top".into())
+            Err(format!("the archive has no {BUNDLE} at its top"))
         }
     });
     match res {
@@ -67,7 +76,7 @@ pub fn stage(
 }
 
 /// Unpack every entry under `dest`, refusing absolute paths, `..`, hard
-/// links, devices, anything outside `Otto.app/` and symlinks whose target
+/// links, devices, anything outside the bundle and symlinks whose target
 /// leaves the bundle. No xattrs are written (so no quarantine either), and
 /// setuid/setgid bits are dropped.
 pub fn extract(archive: &[u8], dest: &Path) -> Result<(), String> {
@@ -88,7 +97,7 @@ pub fn extract(archive: &[u8], dest: &Path) -> Result<(), String> {
         }
         if !inside_bundle(&path) {
             return Err(format!(
-                "the archive has an entry outside Otto.app: {}",
+                "the archive has an entry outside {BUNDLE}: {}",
                 path.display()
             ));
         }
@@ -99,7 +108,7 @@ pub fn extract(archive: &[u8], dest: &Path) -> Result<(), String> {
                 .ok_or_else(|| format!("link without a target: {}", path.display()))?;
             if !link_stays_inside(&path, &target) {
                 return Err(format!(
-                    "the archive has a link leaving Otto.app: {} -> {}",
+                    "the archive has a link leaving {BUNDLE}: {} -> {}",
                     path.display(),
                     target.display()
                 ));
@@ -124,17 +133,17 @@ pub fn extract(archive: &[u8], dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// A relative path made of plain names whose first one is `Otto.app`.
+/// A relative path made of plain names whose first one is [`BUNDLE`].
 fn inside_bundle(path: &Path) -> bool {
     let mut parts = path
         .components()
         .filter(|c| !matches!(c, Component::CurDir));
-    parts.next() == Some(Component::Normal("Otto.app".as_ref()))
+    parts.next() == Some(Component::Normal(BUNDLE.as_ref()))
         && parts.all(|c| matches!(c, Component::Normal(_)))
 }
 
 /// A relative link target that, resolved from the link's own directory,
-/// never climbs out of `Otto.app`.
+/// never climbs out of the bundle.
 fn link_stays_inside(link: &Path, target: &Path) -> bool {
     if target.is_absolute() {
         return false;
@@ -258,18 +267,23 @@ mod tests {
 
     #[test]
     fn paths_must_stay_in_the_bundle() {
-        assert!(inside_bundle(Path::new("Otto.app")));
-        assert!(inside_bundle(Path::new("./Otto.app/Contents/MacOS/ottod")));
+        assert!(inside_bundle(Path::new("OttoUpdateTest.app")));
+        assert!(inside_bundle(Path::new(
+            "./OttoUpdateTest.app/Contents/MacOS/ottod"
+        )));
         assert!(!inside_bundle(Path::new("Other.app/x")));
-        assert!(!inside_bundle(Path::new("/Otto.app/x")));
-        assert!(!inside_bundle(Path::new("Otto.app/../x")));
+        assert!(!inside_bundle(Path::new("/OttoUpdateTest.app/x")));
+        assert!(!inside_bundle(Path::new("OttoUpdateTest.app/../x")));
         assert!(!inside_bundle(Path::new("x")));
-        let l = Path::new("Otto.app/Contents/Frameworks/A.framework/A");
+        let l = Path::new("OttoUpdateTest.app/Contents/Frameworks/A.framework/A");
         assert!(link_stays_inside(l, Path::new("Versions/Current/A")));
         assert!(link_stays_inside(l, Path::new("../../MacOS/ottod")));
         assert!(!link_stays_inside(l, Path::new("../../../../etc/passwd")));
         assert!(!link_stays_inside(l, Path::new("/etc/passwd")));
-        assert!(!link_stays_inside(Path::new("Otto.app/l"), Path::new("..")));
+        assert!(!link_stays_inside(
+            Path::new("OttoUpdateTest.app/l"),
+            Path::new("..")
+        ));
     }
 
     fn tmp(tag: &str) -> PathBuf {
@@ -284,35 +298,38 @@ mod tests {
         let cases: Vec<(&str, Vec<TarEntry>, &str)> = vec![
             (
                 "dotdot",
-                vec![TarEntry::file("Otto.app/../../evil", b"x")],
-                "outside Otto.app",
+                vec![TarEntry::file("OttoUpdateTest.app/../../evil", b"x")],
+                "outside OttoUpdateTest.app",
             ),
             (
                 "abs",
                 vec![TarEntry::file("/tmp/evil", b"x")],
-                "outside Otto.app",
+                "outside OttoUpdateTest.app",
             ),
             (
                 "sibling",
                 vec![TarEntry::file("Evil.app/x", b"x")],
-                "outside Otto.app",
+                "outside OttoUpdateTest.app",
             ),
             (
                 "link-out",
                 vec![
-                    TarEntry::dir("Otto.app"),
-                    TarEntry::link("Otto.app/l", "../../../etc"),
+                    TarEntry::dir("OttoUpdateTest.app"),
+                    TarEntry::link("OttoUpdateTest.app/l", "../../../etc"),
                 ],
                 "link leaving",
             ),
             (
                 "link-abs",
-                vec![TarEntry::link("Otto.app/l", "/etc")],
+                vec![TarEntry::link("OttoUpdateTest.app/l", "/etc")],
                 "link leaving",
             ),
             (
                 "hardlink",
-                vec![TarEntry::hard("Otto.app/h", "Otto.app/x")],
+                vec![TarEntry::hard(
+                    "OttoUpdateTest.app/h",
+                    "OttoUpdateTest.app/x",
+                )],
                 "unsupported",
             ),
         ];
@@ -330,7 +347,7 @@ mod tests {
     fn the_staging_dir_is_private() {
         let dir = tmp("mode");
         let _ = stage(
-            &tar_gz(&[TarEntry::file("Otto.app/x", b"x")]),
+            &tar_gz(&[TarEntry::file("OttoUpdateTest.app/x", b"x")]),
             &dir,
             "1.0.0",
             &["x".into()],
