@@ -28,7 +28,7 @@
   import ToolsTab from './ToolsTab.svelte';
   import { signIn, signOut } from './mcpOAuth';
   import AvailableIn from './AvailableIn.svelte';
-  import { scopeBadge, scopeBody, scopeConfirm, scopeMode, scopeOf, widens, type Scope, type ScopeMode } from './serverScope';
+  import { homeMember as isHomeMember, scopeBadge, scopeBody, scopeConfirm, scopeMode, scopeOf, widens, type Scope, type ScopeMode } from './serverScope';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { onDestroy } from 'svelte';
 
@@ -50,7 +50,7 @@
   // A server shared from another workspace keeps its settings there: only
   // that workspace's members change it (the daemon's `require_reach`).
   const wsName = (id: string) => ws.workspaces.find((w) => w.id === id)?.name ?? 'another workspace';
-  const homeMember = (s: McpServerDetail) => auth.isRoot || s.workspace_id === wsId || ws.workspaces.some((w) => w.id === s.workspace_id);
+  const homeMember = (s: McpServerDetail) => isHomeMember(s, wsId, auth.isRoot, ws.workspaces);
   const configurable = (s: McpServerDetail) => homeMember(s) && can(s.id, 'configure');
   const noConfigure = (s: McpServerDetail) => (homeMember(s) ? NO_CONFIGURE : `Shared from ${wsName(s.workspace_id)}: only its members can change it`);
   const loadedAccessIds = new Set<string>();
@@ -204,7 +204,7 @@
         scoping = s;
       },
     });
-    if (auth.isRoot || can(s.id, 'manage_access')) items.push({ label: 'Manage access…', icon: 'key', action: () => (accessId = s.id) });
+    if (auth.isRoot || (homeMember(s) && can(s.id, 'manage_access'))) items.push({ label: 'Manage access…', icon: 'key', action: () => (accessId = s.id) });
     items.push({ separator: true }, { label: 'Delete…', icon: 'trash', danger: true, disabled: !configure, action: () => void remove(s) });
     ctxMenu.show(e, items);
   }

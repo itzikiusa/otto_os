@@ -790,3 +790,39 @@ async fn a_scope_patch_is_all_or_nothing_and_never_shares_a_native_server() {
     assert_eq!(st, 400, "{body}");
     assert!(body.to_string().contains("run it through Otto"), "{body}");
 }
+
+/// ND-001: an Enforced policy that grants `approve` lets a home-workspace
+/// VIEWER decide a server-bound approval (as in 0.5.1); the editor role is
+/// only required for approvals with no server.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_enforced_approve_grant_lets_a_home_viewer_decide() {
+    let d = boot().await;
+    let p = people(&d).await;
+    let vic = d.user("vic", false, &[("wa", "viewer")]).await;
+    let id = create_shared(&d, &p, json!({})).await;
+    d.enforce(&id, &[("vic", &["discover", "approve"])]).await;
+    let card = otto_state::McpApprovalRepo::new(d.pool.clone())
+        .create(otto_state::NewApproval {
+            workspace_id: Some("wa".into()),
+            kind: "tool_call".into(),
+            server_id: Some(id.clone()),
+            server_name: Some("gh".into()),
+            tool: Some("t".into()),
+            title: "Call t".into(),
+            detail: None,
+            args_redacted_json: "{}".into(),
+            args_hash: None,
+            risk_label: None,
+            requested_by: Some("alice".into()),
+            requested_by_kind: Some("user".into()),
+            requested_by_session_id: None,
+            expires_at: None,
+        })
+        .await
+        .unwrap();
+    let path = format!("/mcp/approvals/{}/decide", card.id);
+    let (st, body) = d
+        .send("POST", &vic, &path, Some(json!({"approved": true})))
+        .await;
+    assert_eq!(st, 200, "{body}");
+}
