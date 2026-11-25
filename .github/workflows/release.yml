@@ -126,6 +126,10 @@ jobs:
       # App only: the sign job signs it and makes the DMG from the signed app.
       - name: Build desktop app (Tauri)
         working-directory: apps/desktop/src-tauri
+        # Bakes in the release channel (updater/mod.rs `channel()`): only a
+        # build made here installs updates; deploy.sh and source builds never do.
+        env:
+          OTTO_UPDATE_CHANNEL: release
         run: npx --yes @tauri-apps/cli@2.12.6 build --bundles app
 
       # A tarball keeps the bundle's modes and symlinks through the artifact store.

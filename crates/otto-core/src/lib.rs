@@ -30,6 +30,7 @@ pub mod phone;
 pub mod provider;
 pub mod provider_accounts;
 pub mod redact;
+pub mod restart;
 pub mod runtime_drafts;
 pub mod secret_paths;
 pub mod secrets;

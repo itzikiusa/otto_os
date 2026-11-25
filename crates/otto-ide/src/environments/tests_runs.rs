@@ -1237,3 +1237,36 @@ async fn a_program_missing_from_the_path_says_how_to_fix_it() {
         "{out}"
     );
 }
+
+/// D-016: the restart dialog lists the runs a restart stops — running ones only.
+#[test]
+fn running_titles_lists_only_runs_still_running() {
+    let mgr = EnvironmentManager::new(PathBuf::from("/tmp/otto-ide-test"));
+    for (id, title, done) in [("r1", "dev server", false), ("r2", "unit tests", true)] {
+        let (stop_tx, _) = watch::channel(false);
+        let (events_tx, _) = broadcast::channel(4);
+        let handle = Arc::new(ActiveRunHandle {
+            seq: 1,
+            owner_user_id: String::new(),
+            state: Mutex::new(RunStateInner::new(
+                id.into(),
+                title.into(),
+                IdeRunnerKind::Custom,
+                "2026-01-01T00:00:00Z".into(),
+            )),
+            stop_tx,
+            events_tx,
+        });
+        if done {
+            finish_run(
+                &handle,
+                IdeRunStatus::Passed,
+                Some(0),
+                Duration::from_millis(1),
+                None,
+            );
+        }
+        mgr.runs.insert(id.into(), handle);
+    }
+    assert_eq!(mgr.running_titles(), ["dev server"]);
+}

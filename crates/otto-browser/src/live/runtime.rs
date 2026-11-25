@@ -305,6 +305,18 @@ impl LiveRuntime {
             .unwrap_or_default()
     }
 
+    /// Live sessions a daemon restart closes (the restart dialog).
+    pub fn restart_impact(&self) -> Vec<otto_core::restart::ImpactItem> {
+        let labels = ("live browser session", "live browser sessions");
+        vec![otto_core::restart::ImpactItem::new(
+            false,
+            "live_browser",
+            labels,
+            self.live_session_count(),
+            vec![],
+        )]
+    }
+
     fn live_session_count(&self) -> usize {
         self.sessions
             .lock()

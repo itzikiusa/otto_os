@@ -52,6 +52,17 @@ pub fn on_signal(app_ready: bool, already_quitting: bool) -> OnSignal {
     }
 }
 
+/// Quit the whole app the way menu Quit does: arm the deadline, mark the
+/// window set as quitting (so per-window close bookkeeping doesn't forget
+/// open windows) and snapshot it BEFORE exiting.
+pub fn quit_app(app: &tauri::AppHandle, reason: &str) {
+    crate::lifecycle::durable(&format!("exit: {reason}"));
+    arm(reason);
+    crate::windows::mark_quitting();
+    crate::windows::snapshot_all(app);
+    app.exit(0);
+}
+
 /// Start the one-shot quit deadline (later calls are no-ops).
 pub fn arm(reason: &str) {
     let reason = reason.to_string();

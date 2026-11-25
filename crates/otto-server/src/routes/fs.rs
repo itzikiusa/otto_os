@@ -262,7 +262,7 @@ pub async fn browse(
     .map(Json)
 }
 
-#[allow(dead_code)] // called directly by unit tests
+#[cfg(test)]
 #[allow(clippy::disallowed_methods)] // sync helper: browse runs it via filesystem_work (blocking pool)
 fn browse_sync(
     params: BrowseParams,
@@ -398,7 +398,7 @@ pub async fn stat(
     .map(Json)
 }
 
-#[allow(dead_code)] // called directly by unit tests
+#[cfg(test)]
 #[allow(clippy::disallowed_methods)] // sync helper: stat runs it via filesystem_work (blocking pool)
 fn stat_sync(raw: &str) -> ApiResult<FsStat> {
     stat_sync_with(raw, None)

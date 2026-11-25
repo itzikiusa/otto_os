@@ -291,6 +291,24 @@ impl ContainersService {
         res
     }
 
+    /// What a daemon restart ends here (the restart dialog): Otto's own
+    /// container runtime, and with it its containers. A Docker daemon Otto
+    /// did not start keeps running.
+    pub async fn restart_impact(&self) -> Vec<otto_core::restart::ImpactItem> {
+        let s = self.runtime_status(None).await;
+        let labels = (
+            "Otto container runtime (its containers stop)",
+            "Otto container runtimes (their containers stop)",
+        );
+        vec![otto_core::restart::ImpactItem::new(
+            false,
+            "container_runtime",
+            labels,
+            usize::from(s.running && s.managed_by_otto),
+            vec![],
+        )]
+    }
+
     /// Gracefully stop every Otto-managed Kiri daemon owned by this service.
     /// Invoked during `ottod` teardown so child daemons are never orphaned.
     pub async fn shutdown(&self) {
