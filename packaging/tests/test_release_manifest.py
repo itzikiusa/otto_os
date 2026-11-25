@@ -115,9 +115,15 @@ class ReleaseManifest(unittest.TestCase):
                              'identifier "ottod" and (certificate leaf = H"aa11" or certificate leaf = H"bb22")')
             self.assertEqual(run("identity", cwd=d).stdout.strip(), "Otto Release Signing")
 
-    def test_sign_job_runs_no_fetched_code_and_pins_actions(self):
+    def jobs(self):
+        """release.yml's jobs by name (the text of each job block)."""
         wf = (REPO / ".github/workflows/release.yml").read_text()
-        sign = wf.split("\n  sign:\n")[1]
+        parts = re.split(r"^  ([a-z][a-z-]*):\n", wf.split("\njobs:\n", 1)[1], flags=re.M)
+        return wf, dict(zip(parts[1::2], parts[2::2]))
+
+    def test_sign_job_runs_no_fetched_code_and_pins_actions(self):
+        wf, jobs = self.jobs()
+        sign = jobs["sign"]
         self.assertNotIn("npx", sign)
         self.assertNotIn("setup-node", sign)
         self.assertNotIn("npx", (REPO / "packaging/release-artifacts.sh").read_text())
@@ -129,12 +135,11 @@ class ReleaseManifest(unittest.TestCase):
         self.assertTrue(all("integrity" in p for k, p in lock["packages"].items() if k))
 
     def test_release_workflow_gates_tag_ci_and_cleans_secrets(self):
-        wf = (REPO / ".github/workflows/release.yml").read_text()
-        gate, rest = wf.split("\n  build:\n")
+        _, jobs = self.jobs()
+        gate, build, sign = jobs["ci-gate"], jobs["build"], jobs["sign"]
         self.assertIn("--branch main --event push", gate)
         self.assertIn("git/ref/tags/$TAG", gate)
         self.assertIn(r"^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$", gate)
-        build, sign = rest.split("\n  sign:\n")
         self.assertIn("check-release-config", build)
         self.assertIn("check-release-config", sign)
         self.assertIn("umask 077", sign)
@@ -144,15 +149,40 @@ class ReleaseManifest(unittest.TestCase):
         self.assertLess(sign.index("delete-keychain"), sign.index("TAURI_SIGNING_PRIVATE_KEY"))
 
     def test_release_workflow_keeps_secrets_in_the_approved_sign_job(self):
-        wf = (REPO / ".github/workflows/release.yml").read_text()
-        before, sign = wf.split("\n  sign:\n")
-        self.assertNotIn("secrets.", before, "the build job runs npm/cargo code: no secrets there")
-        self.assertIn("environment: release", sign)
-        self.assertNotIn("environment:", before)
+        wf, jobs = self.jobs()
+        for name, job in jobs.items():
+            if name != "sign":
+                self.assertNotIn("secrets.", job, f"{name}: secrets only in the sign job")
+                self.assertNotIn("environment:", job, name)
+        self.assertIn("environment: release", jobs["sign"])
         # One Tauri CLI, pinned exactly in packaging/signer (--app-version needs >= 2.12).
         self.assertNotIn("@tauri-apps/cli@", wf)
         pkg = json.loads((REPO / "packaging/signer/package.json").read_text())
         self.assertRegex(pkg["dependencies"]["@tauri-apps/cli"], r"^2\.(1[2-9]|[2-9]\d)\.\d+$")
+
+    def test_release_workflow_builds_only_the_pushed_tag_and_writes_no_cache(self):
+        # CodeQL actions/cache-poisoning: a run on a chosen ref must not be able
+        # to run that ref's code where it could write a cache trusted runs read.
+        wf, jobs = self.jobs()
+        on = wf.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+        self.assertEqual(re.findall(r"^  (\w+):", on, flags=re.M), ["push"], "tag push is the only trigger")
+        self.assertNotIn("inputs.", wf)
+        for cache in ("actions/cache", "rust-cache", "cache:", "cache-dependency-path"):
+            self.assertNotIn(cache, wf, cache)
+        checkouts = re.findall(r"uses: actions/checkout@\S+.*\n((?:        .*\n)*)", wf)
+        self.assertEqual(len(checkouts), len(re.findall(r"uses: actions/checkout@", wf)))
+        for block in checkouts:
+            self.assertIn("persist-credentials: false", block)
+            self.assertNotIn("ref:", block, "check out the pushed tag itself, never a chosen ref")
+
+    def test_release_workflow_permissions_are_minimal(self):
+        wf, jobs = self.jobs()
+        self.assertIn("\npermissions:\n  contents: read\n", wf)
+        writers = [n for n, j in jobs.items() if "contents: write" in j]
+        self.assertEqual(writers, ["publish"])
+        self.assertIn("contents: read", jobs["build"])
+        self.assertIn("contents: read", jobs["sign"])
+        self.assertNotIn("actions/checkout", jobs["publish"], "the publishing job runs no repo code")
 
     def release_config(self, root, test=False, pubkey_id="0123456789ABCDEF"):
         import base64

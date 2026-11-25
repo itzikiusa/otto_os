@@ -1,16 +1,19 @@
 name: Release
 
-# Push a tag v<version> (or run on demand with an existing tag) to build a signed
-# Otto release as a DRAFT GitHub Release:
+# Push a tag v<version> to build a signed Otto release as a DRAFT GitHub
+# Release. The pushed tag is the only trigger and every job checks out exactly
+# that commit: no input picks a ref, and no job reads or writes a cache.
 #
-#   ci-gate  the tagged commit is on main and its CI run succeeded
+#   ci-gate  the tagged commit is on main and its CI push run succeeded
 #   build    tag == the three version files → UI → ottod (embed-ui) → Otto.app
 #            (unsigned; no secrets in this job — it runs the npm/cargo build)
-#   sign     environment `release` (owner approval; the only job with secrets):
-#            sign with the release identity from a temporary keychain, then
-#            packaging/release-artifacts.sh writes the updater archive + its
-#            minisign signature, the DMG + sha256, latest.json and the notes
-#            (README "### What's new in <version>"), and the draft is created.
+#   sign     environment `release` (owner approval; the only job with secrets,
+#            read-only token): sign with the release identity from a temporary
+#            keychain, then packaging/release-artifacts.sh writes the updater
+#            archive + its minisign signature, the DMG + sha256, latest.json
+#            and the notes (README "### What's new in <version>")
+#   publish  the only job with a write token, and no secrets and no checkout:
+#            creates the draft from the sign job's files
 #
 # Nothing reaches users until the owner publishes the draft: the in-app updater
 # reads https://github.com/<repo>/releases/latest/download/latest.json, which
@@ -27,21 +30,16 @@ name: Release
 on:
   push:
     tags: ['v[0-9]+.[0-9]+.[0-9]+*']
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing tag to release (e.g. v0.5.4 or v0.5.4-rc.1)
-        required: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ inputs.tag || github.ref_name }}
+  group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
 env:
-  TAG: ${{ inputs.tag || github.ref_name }}
+  TAG: ${{ github.ref_name }}
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -52,11 +50,8 @@ jobs:
     permissions:
       actions: read
       contents: read
-    outputs:
-      sha: ${{ steps.sha.outputs.sha }}
     steps:
-      - name: Resolve the tag
-        id: sha
+      - name: The tag is v<semver> and its commit is on main
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -64,18 +59,16 @@ jobs:
             || { echo "::error::'$TAG' is not a v<semver> tag"; exit 1; }
           gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .ref > /dev/null \
             || { echo "::error::no tag $TAG"; exit 1; }
-          sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)
-          on_main=$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$sha" --jq .status)
+          on_main=$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$GITHUB_SHA" --jq .status)
           case "$on_main" in
             identical|behind) ;;
-            *) echo "::error::$TAG ($sha) is not on main ($on_main)"; exit 1 ;;
+            *) echo "::error::$TAG ($GITHUB_SHA) is not on main ($on_main)"; exit 1 ;;
           esac
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
       # The push run on main ran every gate; a PR run may have skipped jobs.
       - name: Require a successful CI run for the tagged commit
         env:
           GH_TOKEN: ${{ github.token }}
-          SHA: ${{ steps.sha.outputs.sha }}
+          SHA: ${{ github.sha }}
         run: |
           for i in $(seq 1 60); do
             state=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow=ci.yml \
@@ -97,12 +90,14 @@ jobs:
     needs: ci-gate
     runs-on: macos-latest # Apple Silicon
     timeout-minutes: 120
+    permissions:
+      contents: read
     outputs:
       version: ${{ steps.ver.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.ci-gate.outputs.sha }}
+          persist-credentials: false
 
       - name: Release config is not the TEST one
         run: python3 packaging/release-manifest.py check-release-config
@@ -162,19 +157,19 @@ jobs:
           retention-days: 1
 
   sign:
-    name: Sign, package, draft release
-    needs: [ci-gate, build]
+    name: Sign and package
+    needs: build
     runs-on: macos-latest
     timeout-minutes: 30
     environment: release
     permissions:
-      contents: write
+      contents: read
     env:
       VERSION: ${{ needs.build.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.ci-gate.outputs.sha }}
+          persist-credentials: false
 
       - name: Release config is not the TEST one
         run: python3 packaging/release-manifest.py check-release-config
@@ -230,6 +225,27 @@ jobs:
         run: |
           packaging/release-artifacts.sh update "$VERSION" "$RUNNER_TEMP/dist" \
             "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: otto-release
+          path: ${{ runner.temp }}/dist
+          retention-days: 1
+
+  publish:
+    name: Draft release
+    needs: [build, sign]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: otto-release
+          path: ${{ runner.temp }}/dist
 
       - name: Create the draft release
         env:

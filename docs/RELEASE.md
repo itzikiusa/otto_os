@@ -15,6 +15,9 @@ Two ways to make an Otto build (macOS only; there is no Makefile):
 
 ### What the workflow does
 
+Only a pushed `v*` tag starts it. Every job checks out exactly the tagged
+commit, and nothing reads or writes a cache.
+
 1. **ci-gate.** The tag must be `v<semver>` and exist. Its commit must be on
    `main`, with a green `ci.yml` push run there.
 2. **build** (no secrets in this job: it runs the npm and cargo build).
@@ -27,7 +30,7 @@ Two ways to make an Otto build (macOS only; there is no Makefile):
    - The Tauri CLI comes from `packaging/signer`'s committed lockfile
      (`npm ci --ignore-scripts`), here and in the sign job.
 3. **sign** runs in the GitHub Environment `release`. It waits for your approval
-   and is the only job that sees the secrets.
+   and is the only job that sees the secrets. Its token is read-only.
    - It installs the signer before any secret is on the runner. It imports the
      release `.p12` into a throwaway keychain.
    - `release-artifacts.sh bundle`
@@ -43,8 +46,9 @@ Two ways to make an Otto build (macOS only; there is no Makefile):
    - `release-artifacts.sh update` signs the archive with the update key,
      bound to `<v>`, and writes `latest.json`. The two private keys are never
      on the runner at the same time.
-   - It creates a **draft** release with those five files. A `-rc` version
-     becomes a prerelease draft.
+4. **publish** creates a **draft** release with those five files. It is the
+   only job with a write token, and it has no secrets and no checkout. A `-rc`
+   version becomes a prerelease draft.
 
 Nothing reaches anyone until you **publish** the draft. Installed apps read
 `https://github.com/itzikiusa/otto_os/releases/latest/download/latest.json`,
@@ -101,7 +105,6 @@ Run these on your Mac. The private files never go into the repository.
     "deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}
    JSON
    gh api -X POST repos/$R/environments/release/deployment-branch-policies -f name='v*' -f type=tag
-   gh api -X POST repos/$R/environments/release/deployment-branch-policies -f name=main -f type=branch
    base64 -i ~/otto-release/"Otto Release Signing.p12" | gh secret set OTTO_SIGN_P12_BASE64 --repo $R --env release
    gh secret set OTTO_SIGN_P12_PASSWORD --repo $R --env release            # paste the .p12 password
    gh secret set TAURI_SIGNING_PRIVATE_KEY --repo $R --env release < ~/otto-release/otto-update.key
@@ -115,8 +118,6 @@ Run these on your Mac. The private files never go into the repository.
    JSON
    ```
 
-   - The `main` policy is for re-runs started from the Actions tab: those run
-     on `main`, with the tag as input.
    - The rolling `latest` prerelease from the retired monthly workflow is no
      longer updated. Delete it when you like:
      `gh release delete latest --repo $R --cleanup-tag`.
@@ -151,7 +152,12 @@ Run these on your Mac. The private files never go into the repository.
 A failed or wrong draft:
 - `gh release delete v0.5.4 --repo itzikiusa/otto_os --yes` deletes the draft
   and keeps the tag.
-- Fix the problem, then **Actions ▸ Release ▸ Run workflow** with tag `v0.5.4`.
+- A flaky failure: **Re-run all jobs** on that run. This builds the same commit.
+- A fix in the code needs a new commit, and therefore a new tag. Tag the next
+  version, or move the tag as admin:
+  `git push origin :refs/tags/v0.5.4`, then tag the fixed commit and push.
+  There is no manual "Run workflow". A run always builds the commit the tag
+  points to.
 
 The first release that contains the updater is 0.5.4. The first real update is
 therefore 0.5.4 → 0.5.5.
