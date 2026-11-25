@@ -43,6 +43,10 @@ const POOL_MAX_CONNECTIONS: u32 = 6;
 /// Drop idle pooled connections after this long so a long-lived cached pool
 /// doesn't pin server-side connections forever.
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// A pooled connection used this recently is handed out as is; one idle longer
+/// is pinged first (sqlx's default pings EVERY acquire: one extra round trip
+/// in front of each query, keep-alive and tree read on a remote server).
+const PING_IF_IDLE_FOR: Duration = Duration::from_secs(30);
 /// How long a request waits for a pooled session before failing with a clear
 /// "connection busy" error instead of sqlx's silent 30 s default.
 const POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1812,6 +1816,15 @@ async fn build_pool(cfg: &ResolvedConfig) -> Result<sqlx::MySqlPool> {
         .max_connections(POOL_MAX_CONNECTIONS)
         .idle_timeout(POOL_IDLE_TIMEOUT)
         .acquire_timeout(POOL_ACQUIRE_TIMEOUT)
+        .test_before_acquire(false)
+        .before_acquire(|conn, meta| {
+            Box::pin(async move {
+                if meta.idle_for > PING_IF_IDLE_FOR {
+                    sqlx::Connection::ping(conn).await?;
+                }
+                Ok(true)
+            })
+        })
         .after_connect(move |conn, _meta| {
             let setup = connect_setup_sql(&tz);
             let fallback = connect_setup_fallback_sql(&tz);
