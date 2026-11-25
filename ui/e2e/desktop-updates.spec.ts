@@ -3,7 +3,7 @@
 // `otto://update` / `otto://menu` events are faked here, the daemon's
 // restart-impact count is routed. Light and dark.
 import { test, expect, type Page } from '@playwright/test';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedShellSession, seedWorkspace } from './seed';
 
 // Review screenshots land in the test's output folder (update-<state>-<scheme>.png).
 const shot = async (page: Page, name: string) => {
@@ -258,4 +258,21 @@ test('outside the desktop app there is no update UI at all', async ({ page }) =>
   await expect(page.locator('.navigator')).toBeVisible({ timeout: 30_000 });
   await expect(page.getByTestId('updates-settings')).toHaveCount(0);
   await expect(page.getByTestId('update-row')).toHaveCount(0);
+});
+
+test('the restart step reads the daemon’s real count (restart-impact, not routed)', async ({ page }) => {
+  const { ctx, base } = await apiCtx();
+  await seedShellSession(ctx, base, await seedWorkspace(ctx, base, 'Restart impact'));
+  await ctx.dispose();
+  await shell(page, { state: { ...AVAILABLE, phase: 'staged' }, scheme: 'light' });
+  const real = page.waitForResponse((r) => r.url().endsWith('/api/v1/system/restart-impact'));
+  await page.goto('/#/agents');
+  await page.locator('.navigator [data-testid="update-row"]').click();
+  const impact = (await (await real).json()) as { keeps: { count: number; label: string }[]; ends: { count: number; label: string }[] };
+  const sessions = impact.keeps.find((k) => /session/.test(k.label));
+  expect(sessions?.count, JSON.stringify(impact)).toBeGreaterThanOrEqual(1);
+  await expect(page.getByTestId('restart-impact')).toContainText(`${sessions!.count} ${sessions!.label}`);
+  const ends = impact.ends.reduce((n, l) => n + l.count, 0);
+  await expect(page.getByTestId('update-primary')).toHaveText(ends ? `Restart and end ${ends}` : 'Restart now');
+  await shot(page, 'staged-real-impact-light');
 });
