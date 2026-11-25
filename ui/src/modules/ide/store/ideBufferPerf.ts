@@ -139,7 +139,7 @@ export class IdeBufferPerfController {
   readonly conflictedPaths = new Set<string>();
   /** The save or buffer-format op in flight per path: a second save or format waits
    *  for it, so saves send the fresh sha256 and formatting never races autosave. */
-  readonly savesInFlight = new Map<string, Promise<boolean>>();
+  readonly savesInFlight = new Map<string, Promise<boolean>>(); readonly reads = new Map<string, Promise<void>>(); // tab reads in flight (a save waits)
   enqueuePathOp<T>(key: string, op: () => Promise<T>): Promise<T> {
     const prior = this.savesInFlight.get(key) ?? Promise.resolve(false);
     const run = prior.catch(() => false).then(() => op());
@@ -527,8 +527,8 @@ export async function performOpenFile(
     }
     return `/ide/fs/file?${host.targetQuery({ path: fullPath })}`;
   };
-  // Read the tab from disk, with the unsaved draft a page reload left behind (unless reloading).
-  const readTab = async (): Promise<void> => {
+  const readTab = (): Promise<void> => { const p = read().finally(() => { if (perf.reads.get(fullPath) === p) perf.reads.delete(fullPath); }); perf.reads.set(fullPath, p); return p; };
+  const read = async (): Promise<void> => { // the file, with the unsaved draft a page reload left behind (unless reloading)
     try {
       const res = await (opts.lane === 'bg' ? api.bg : api).get<IdeFileReadResp>(readFileUrl());
       const eol = detectTextEol(res.content);
@@ -629,7 +629,7 @@ async function saveFileNow(
   opts: { silent?: boolean },
 ): Promise<boolean> {
   const targetPath = path ? host.resolvePath(path) : host.activePath;
-  if (targetPath && host.tabs.find((t) => t.path === targetPath)?.deferred) await host.openFile(targetPath, { background: true }); // unread (may hold a draft): read, then save
+  if (targetPath && host.tabs.find((t) => t.path === targetPath)?.deferred) await host.openFile(targetPath, { background: true }); await perf.reads.get(targetPath ?? ''); // read it (it may hold a draft), then save
   const tab = targetPath ? host.tabs.find((t) => t.path === targetPath) : null;
   // A tab still loading (or whose read failed) holds a placeholder, not the file: saving it
   // would write an empty file over the real one. Checked before the flush, which would
