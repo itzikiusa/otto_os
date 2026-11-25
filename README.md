@@ -13,6 +13,36 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
 🎬 **[Watch the product tour](https://github.com/itzikiusa/otto_os/releases/download/v0.3.0/otto-tour-20261116.mp4)**
 (also in the app under **Help → Walkthroughs**).
 
+### What's new in 0.5.1
+
+Fixes from the first day of real use of 0.5.0, then three independent review
+rounds over the last three releases.
+
+- **Chat on long sessions.** A session with a 100 MB+ transcript opens on its
+  newest turns in a fraction of a second and pages older ones in; the Outputs
+  panel opens too. The Agents Chat view scrolls and keeps the composer in
+  place. A chat pane reads its thread once, not in a loop, and a deleted
+  thread no longer raises a toast on every visit.
+- **Commit and pull-request drafts in seconds.** Drafts run headless and
+  stream into the card as they are written, with Stop and Retry. They no
+  longer depend on an interactive session's start-up screens.
+- **Git.** Fetch, Pull, Push, Stash and Pop are always in the header, at any
+  width and with the right panel open; a tight header folds the repo tabs
+  into one switcher. Deleting several branches is one push. Focus asks only
+  repositories with a linked account.
+- **IDE.** Colours arrive with the first paint while scrolling. Properties,
+  YAML, TOML, INI, Dockerfile, HCL, proto and other config files are
+  highlighted, with Structure and YAML Problems.
+- **Usage and Insights.** Real session counts, "All" covers every provider,
+  a range click answers in about half a second, and every listed Insights
+  report opens again.
+- **Repositories stay clean.** Opening a Claude session or a shell writes
+  nothing into the repository. A repository's own `.mcp.json` can never be
+  approved by name.
+- **Safer by default.** Deleting a connection asks first. A sandboxed session
+  cannot read another session's MCP files. An agent's terminal command shows
+  its environment values in the approval prompt.
+
 ### What's new in 0.5.0
 
 - **Agents is one workspace.** The session list is an inbox beside the canvas:
