@@ -196,7 +196,7 @@
   function tabHasContent(id: DockTab): boolean {
     if (id === 'debug') return Boolean(ide.activeDebug);
     if (id === 'usages') return ide.usages.length > 0 || ide.usagesLoading;
-    if (id === 'dbwatch') return Boolean(ideDbWatch.watch || ideDbWatch.pendingTarget);
+    if (id === 'dbwatch') return Boolean(ideDbWatch.watch || ideDbWatch.pendingTarget || ideDbWatch.prodWaiting);
     if (id === 'devices') return ideDevices.hasMobileContext;
     return true;
   }

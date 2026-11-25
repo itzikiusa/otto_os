@@ -310,7 +310,7 @@
     </button>
   </header>
 
-  {#if dbg && ideDbWatch.watch}<IdeDbWatchStrip />{/if}
+  {#if dbg && (ideDbWatch.watch || ideDbWatch.prodWaiting)}<IdeDbWatchStrip />{/if}
 
   {#if errorCard}
     <IdeDebugErrorCard card={errorCard} onshowoutput={showConsole} ondismiss={dismissError} onretry={retryLaunch} />
