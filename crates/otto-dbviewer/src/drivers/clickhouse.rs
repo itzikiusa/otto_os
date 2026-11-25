@@ -724,14 +724,19 @@ impl ClickhouseDriver {
         } else {
             self.native_client(cfg).await?
         };
-        let rows = match (native_rows(&client, sql, row_cap).await, &owned) {
+        let mut received = false;
+        let rows = match (
+            native_rows(&client, sql, row_cap, &mut received).await,
+            &owned,
+        ) {
             // A parked socket a proxy or server dropped moments ago, before
-            // klickhouse saw it close: the idle ones beside it went too, and a
-            // read is safe to send once more on a fresh connection.
-            (Err(_), Some(scoped)) if from_idle && client.is_closed() && returns_rows(sql) => {
+            // klickhouse saw it close: the idle ones beside it went too.
+            (Err(_), Some(scoped))
+                if from_idle && retry_on_fresh_connection(client.is_closed(), received, sql) =>
+            {
                 self.drop_idle_native(&cfg.cache_key());
                 client = Arc::new(native_connect(scoped).await?);
-                native_rows(&client, sql, row_cap).await?
+                native_rows(&client, sql, row_cap, &mut received).await?
             }
             (rows, _) => rows?,
         };
@@ -1511,11 +1516,26 @@ impl Conn {
     }
 }
 
+/// May a read that failed on a parked connection run once more on a fresh
+/// one? Only when the socket turned out closed before any block arrived, and
+/// only for a statement that provably just reads: `KILL`, `BACKUP`,
+/// `RESTORE` (and `WITH`, `CHECK`) take the row path too but must never be
+/// sent twice.
+fn retry_on_fresh_connection(closed: bool, received_block: bool, sql: &str) -> bool {
+    closed
+        && !received_block
+        && matches!(
+            crate::sql_class::clickhouse_first_word(sql).as_deref(),
+            Some("SELECT" | "SHOW" | "DESC" | "DESCRIBE" | "EXISTS" | "EXPLAIN")
+        )
+}
+
 /// Read one native result within the interactive row/byte budgets.
 async fn native_rows(
     client: &klickhouse::Client,
     sql: &str,
     row_cap: Option<usize>,
+    received: &mut bool,
 ) -> Result<RawRows> {
     use futures_util::StreamExt;
     let mut stream = client.query_raw(sql, None).await.map_err(native_err)?;
@@ -1528,6 +1548,7 @@ async fn native_rows(
     let mut partial = false;
     while let Some(block) = stream.next().await {
         let block = block.map_err(native_err)?;
+        *received = true;
         // The first non-empty block establishes the column order/types; the
         // header block (rows == 0) still carries column_types, so we capture
         // metadata from whichever block first exposes columns.
