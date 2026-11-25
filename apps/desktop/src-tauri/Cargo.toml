@@ -15,6 +15,10 @@ tauri = { version = "2.12.5", features = ["macos-private-api", "tray-icon", "uns
 tauri-plugin-notification = "2.8.0"
 tauri-plugin-opener = "2.7.2"
 tauri-plugin-global-shortcut = "2.4.1"
+# Check + download + minisign verify only (Otto installs the bundle itself).
+# No default features: TLS comes from this crate's own reqwest (rustls), no
+# second crypto provider, no zip (Windows only).
+tauri-plugin-updater = { version = "2.14.1", default-features = false }
 window-vibrancy = "0.8.1"
 # Opens the browser's Web Inspector DETACHED via the private WKWebView
 # `_inspector` API, and (with `exception`) catches AppKit's Objective-C
@@ -31,7 +35,17 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPasteboard", "NSPasteboardItem", "NSWorkspace", "NSRunningApplication", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSAttributedString"] }
 # desktop.log: SIGTERM / SIGINT / SIGHUP via a self-pipe (lifecycle.rs).
 signal-hook = { version = "0.4.6", default-features = false, features = ["iterator"] }
+# Updates (updater/): unpack the verified .app.tar.gz into the 0700 staging
+# dir (the same tar/flate2 the updater plugin already builds), statfs for the
+# free-disk check.
+tar = "0.4.46"
+flate2 = "1.1.10"
+libc = "0.2.191"
 
 [dev-dependencies]
+# updater tests: a mock Tauri app hosting the updater plugin, and TEST
+# minisign signatures made in the test itself.
+tauri = { version = "2.12.5", features = ["test"] }
+minisign = "0.10.0"
 # Isolated native probes compare child bounds to actual AppKit content bounds.
 objc2-foundation = "0.3.2"
