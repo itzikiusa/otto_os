@@ -54,14 +54,16 @@ describe('agent debug target', () => {
 
   it('previews the command the person approves', () => {
     assert.equal(
-      launchPreview({ language: 'go', program: '/ws/svc/test/flow/flow_component_test.go', cwd: '/ws/svc', test_name: 'TestFlowComponent', build_flags: ['-tags=component'] }),
+      launchPreview({ language: 'go', program: '/ws/svc/test/flow/flow_component_test.go', root: '/ws/svc', test_name: 'TestFlowComponent', build_flags: ['-tags=component'] }),
       'go test -tags=component -run ^TestFlowComponent$ ./test/flow',
     );
     assert.equal(
-      launchPreview({ language: 'go', program: '/ws/svc/orders/orders_test.go', cwd: '/ws/svc', test_name: 'TestOrdersSuite/TestCreate' }),
+      launchPreview({ language: 'go', program: '/ws/svc/orders/orders_test.go', root: '/ws/svc', test_name: 'TestOrdersSuite/TestCreate' }),
       'go test -run ^TestOrdersSuite$/^TestCreate$ ./orders',
     );
-    assert.equal(launchPreview({ language: 'go', program: '/ws/svc/cmd/api/main.go', cwd: '/ws/svc', args: ['-port', '8080'] }), 'go run ./cmd/api -port 8080');
-    assert.equal(launchPreview({ language: 'python', program: '/ws/p/tests/test_a.py', cwd: '/ws/p', test_name: 'test_one' }), 'pytest tests/test_a.py::test_one');
+    // The gutter's own test name comes anchored already.
+    assert.equal(launchPreview({ language: 'go', program: '/ws/svc/a/a_test.go', root: '/ws/svc', test_name: '^TestA$' }), 'go test -run ^TestA$ ./a');
+    assert.equal(launchPreview({ language: 'go', program: '/ws/svc/cmd/api/main.go', root: '/ws/svc', args: ['-port', '8080'] }), 'go run ./cmd/api -port 8080');
+    assert.equal(launchPreview({ language: 'python', program: '/ws/p/tests/test_a.py', root: '/ws/p', test_name: 'test_one' }), 'pytest tests/test_a.py::test_one');
   });
 });

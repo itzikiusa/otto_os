@@ -55,6 +55,12 @@ test('the bar outlives the one-minute linger while the agent’s debuggee lives,
   assert.equal(uiControl.visible(later), false);
 });
 
+test('the bar names IDE debug commands without the module prefix', () => {
+  const { commandLabel } = loadSource(new URL('../src/lib/uiCommands/frames.ts', import.meta.url), {});
+  assert.equal(commandLabel('ide_debug_start'), 'Debug start');
+  assert.equal(commandLabel('otto_ui_ide_debug_control'), 'Debug control');
+});
+
 test('Proceed shows only while paused and idle, sends once per stop (terminal session: typed in)', async () => {
   const { uiControl, posts } = store();
   uiControl.begin('c1', claude, 'ide_debug_start', 'ide');

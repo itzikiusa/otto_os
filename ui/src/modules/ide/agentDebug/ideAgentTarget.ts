@@ -85,14 +85,15 @@ function rel(path: string, root: string): string {
 
 /** `^A$/^B$` — what `go test -run` gets for `A/B` (the adapter does the same). */
 function goRunPattern(name: string): string {
-  return name.split('/').map((p) => `^${p}$`).join('/');
+  return name.split('/').map((p) => `^${p.replace(/^\^/, '').replace(/\$$/, '')}$`).join('/');
 }
 
-/** The command line the start confirm shows (a readable preview, not argv). */
+/** The command line the start confirm shows (a readable preview, not argv;
+ *  paths relative to the project `root` — the confirm names the cwd apart). */
 export function launchPreview(l: {
   language: string;
   program: string;
-  cwd: string;
+  root: string;
   test_name?: string;
   build_flags?: readonly string[];
   args?: readonly string[];
@@ -100,7 +101,7 @@ export function launchPreview(l: {
   const flags = (l.build_flags ?? []).join(' ');
   const args = (l.args ?? []).join(' ');
   const parts: string[] = [];
-  const prog = rel(l.program, l.cwd);
+  const prog = rel(l.program, l.root);
   if (l.language === 'go') {
     const pkg = prog.endsWith('.go') ? prog.slice(0, Math.max(0, prog.lastIndexOf('/'))) || '.' : prog;
     const where = pkg === '.' || pkg.startsWith('./') || pkg.startsWith('/') ? pkg : `./${pkg}`;
