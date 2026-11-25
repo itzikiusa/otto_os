@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
 import {
   changedNames, childNamed, confirmSafe, outputTail, pathSegments, shapeDbRead, shapeResponse, shapeResult, newMemory,
-  startConfirmText, STOP_MAX_CHARS, userMoved,
+  sensitiveName, startConfirmText, STOP_MAX_CHARS, userMoved,
 } from '../src/lib/uiCommands/ideShape.ts';
 
 // IDE agent debugging (`otto.ui_ide_debug_*`, lib/uiCommands/ide.ts): the
@@ -33,6 +33,13 @@ function paused(seq: number, line: number, vars: [string, string, number?][] = [
 }
 
 // ── shapes ─────────────────────────────────────────────────────────────────
+
+test('sensitiveName: acronym humps and any path component keep a secret ref closed (C2-004)', () => {
+  for (const n of ['DBPass', 'DBPwd', 'DBSalt', 'SQLDsn', 'APIKey', 'cfg.DBPass.Value', 'cfg.user_pass.Value', 'items[0].db_pass.v', 'password']) {
+    assert.ok(sensitiveName(n), n);
+  }
+  for (const n of ['DBHost', 'cfg.passenger.Name', 'bypass', 'Value']) assert.ok(!sensitiveName(n), n);
+});
 
 test('shape: a Stop keys locals by name, marks the source line, tracks changes and the new output', () => {
   const mem = { ...newMemory('dbg1', '/w/app'), stopSeq: 1, state: 'paused', expectMove: true, outSeq: 1, locals: { total: '0', items: '[]int len: 3' } };
