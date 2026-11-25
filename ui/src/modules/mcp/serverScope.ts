@@ -37,20 +37,25 @@ export function widens(prev: Scope, next: Scope): boolean {
   return !prev.all && next.shared.some((w) => !prev.shared.includes(w));
 }
 
-/** The confirm for a wider scope: what is shared, and who can use it. */
+/** The confirm for a wider scope: exactly what is shared (the server's tools,
+ *  called with the credentials Otto holds for it) and who can use it. */
 export function scopeConfirm(name: string, next: Scope, names: (id: string) => string): { title: string; message: string; confirmLabel: string } {
   const where = next.all
-    ? 'every workspace, including ones added later'
+    ? 'every workspace except Scratch — also ones added later —'
     : next.shared.map((w) => `“${names(w)}”`).join(', ');
   return {
     title: 'Share MCP server',
     confirmLabel: 'Share',
     message:
-      `“${name}” becomes available in ${where}. Their members’ agent sessions can use it with its saved credentials and sign-in; ` +
-      'they see that it exists and its tools, never its credentials or settings, which stay in this workspace. ' +
+      `Members of ${where} can use “${name}”’s tools in their agent sessions. Otto calls them with the credentials and sign-in it holds for this server; ` +
+      'those members can’t read or change them, or its settings, which stay in its home workspace. ' +
       'Its access rules still decide who may use it.',
   };
 }
+
+/** Why a direct (native) server can't be shared: its command and secrets are
+ *  written into agent config files. */
+export const NATIVE_SCOPE_HINT = 'A direct server stays in its home workspace. Run it through Otto to share it.';
 
 /** The row badge: where a server comes from / is shared, or null for a
  *  home-only server of this workspace. */

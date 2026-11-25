@@ -30,8 +30,10 @@ test('only a wider scope asks first', () => {
 
 test('the confirm says where it goes, who can use it, and what stays private', () => {
   const all = scopeConfirm('gh', { all: true, shared: [] }, names);
-  assert.match(all.message, /every workspace, including ones added later/);
-  assert.match(all.message, /never its credentials or settings/);
+  assert.match(all.message, /every workspace except Scratch — also ones added later —/);
+  assert.match(all.message, /tools/);
+  assert.match(all.message, /credentials and sign-in it holds/);
+  assert.match(all.message, /can’t read or change them, or its settings/);
   assert.match(all.message, /access rules still decide/);
   assert.match(scopeConfirm('gh', { all: false, shared: ['b', 'c'] }, names).message, /“Beta”, “Gamma”/);
 });

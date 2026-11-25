@@ -1,20 +1,27 @@
 <script lang="ts">
   // "Available in": this workspace · selected workspaces · all workspaces
-  // (serverScope.ts). The multi-select lists the other workspaces the user can
-  // see; the list is capped and scrolls, so many workspaces stay reachable.
+  // (serverScope.ts). The multi-select lists the other live workspaces the
+  // user can see — never Scratch or an archived one; a link to an archived
+  // workspace is kept, unseen, for when it is restored. The list is capped
+  // and scrolls, so many workspaces stay reachable.
   import { ws } from '../../lib/stores/workspace.svelte';
-  import { scopeMode, type Scope, type ScopeMode } from './serverScope';
+  import { SCRATCH_WORKSPACE_ID } from '../../lib/stores/sessionScope';
+  import { NATIVE_SCOPE_HINT, type Scope, type ScopeMode } from './serverScope';
 
   interface Props {
     /** The server's home workspace (always included). */
     home: string;
     scope: Scope;
+    /** The picked mode ("selected" may still have nothing picked). */
+    mode: ScopeMode;
+    /** A direct server: shown as home-only with why. */
+    native?: boolean;
     disabled?: boolean;
   }
-  let { home, scope = $bindable(), disabled = false }: Props = $props();
+  let { home, scope = $bindable(), mode = $bindable(), native = false, disabled = false }: Props = $props();
 
-  let mode = $state<ScopeMode>(scopeMode(scope));
-  const others = $derived(ws.workspaces.filter((w) => w.id !== home && !w.archived));
+  const uid = $props.id();
+  const others = $derived(ws.workspaces.filter((w) => w.id !== home && w.id !== SCRATCH_WORKSPACE_ID && !w.archived));
   // Opened from a workspace the server was shared into: name its home.
   const homeName = $derived(home === ws.currentId ? null : (ws.workspaces.find((w) => w.id === home)?.name ?? 'its home workspace'));
 
@@ -29,14 +36,16 @@
 </script>
 
 <div class="field" data-testid="mcp-available-in">
-  <label class="lbl" for="mcp-available-in">Available in</label>
-  <select id="mcp-available-in" value={mode} {disabled} onchange={(e) => setMode(e.currentTarget.value as ScopeMode)}>
+  <label class="lbl" for={`${uid}-available-in`}>Available in</label>
+  <select id={`${uid}-available-in`} value={native ? 'this' : mode} disabled={disabled || native} onchange={(e) => setMode(e.currentTarget.value as ScopeMode)}>
     <option value="this">{homeName ? `Only ${homeName}` : 'This workspace'}</option>
     <option value="selected" disabled={others.length === 0}>Selected workspaces…</option>
     <option value="all">All workspaces</option>
   </select>
-  {#if mode === 'all'}
-    <span class="note">Also every workspace added later.</span>
+  {#if native}
+    <span class="note">{NATIVE_SCOPE_HINT}</span>
+  {:else if mode === 'all'}
+    <span class="note">Also every workspace added later (not Scratch).</span>
   {:else if mode === 'selected'}
     <div class="picks" role="group" aria-label="Workspaces to share with">
       {#each others as w (w.id)}
@@ -46,7 +55,7 @@
         </label>
       {/each}
     </div>
-    <span class="note">Plus {homeName ?? 'this workspace'}, its home.</span>
+    <span class="note">{scope.shared.some((w) => others.some((o) => o.id === w)) ? `Plus ${homeName ?? 'this workspace'}, its home.` : 'Pick at least one workspace.'}</span>
   {/if}
 </div>
 
@@ -87,6 +96,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    min-block-size: 32px;
     font-size: var(--fs-m);
     color: var(--text);
   }

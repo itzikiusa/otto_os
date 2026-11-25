@@ -493,20 +493,19 @@ impl McpRegistryRepo {
         self.get(id).await
     }
 
-    /// A workspace's enabled NATIVE servers (its own and shared ones): the
-    /// set written into each session's `.mcp.json`. Native = unmanaged
-    /// stdio, and never a server under an Enforced access policy: its per-user
-    /// rules can't follow raw credentials into a file every session in the
-    /// workspace reads.
+    /// A workspace's enabled NATIVE servers: the set written into each
+    /// session's `.mcp.json`. Native = unmanaged stdio, and never a server
+    /// under an Enforced access policy: its per-user rules can't follow raw
+    /// credentials into a file every session in the workspace reads. Never
+    /// shared (`crate::mcp_scope`): always the workspace's own.
     pub async fn list_native_enabled(&self, ws: &Id) -> Result<Vec<McpServerDetail>> {
         let sql = format!(
-            "{DETAIL_SELECT} WHERE {} AND s.enabled = 1 AND s.managed = 0
+            "{DETAIL_SELECT} WHERE s.workspace_id = ?1 AND s.enabled = 1 AND s.managed = 0
                AND s.transport = 'stdio'
                AND NOT EXISTS (SELECT 1 FROM resource_access_policies p
                  WHERE p.resource_kind = 'mcp_server' AND p.resource_id = s.id
                    AND p.mode = 'enforced')
-             ORDER BY s.name",
-            available_in("?1")
+             ORDER BY s.name"
         );
         let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(ws)

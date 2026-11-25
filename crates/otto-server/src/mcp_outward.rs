@@ -2064,9 +2064,6 @@ pub async fn gateway_invoke(
     Json(req): Json<GatewayInvokeReq>,
 ) -> ApiResult<Json<Value>> {
     let server = ctx.mcp.registry().get(&req.server_id).await?;
-    if !server.is_available_in(&req.workspace_id) {
-        return Err(Error::Forbidden("MCP workspace mismatch".into()).into());
-    }
     let policy = otto_state::ResourceAccessRepo::new(ctx.pool.clone())
         .get_policy(otto_core::access::ResourceKind::McpServer, &server.id)
         .await?;

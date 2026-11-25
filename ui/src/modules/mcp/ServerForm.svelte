@@ -21,7 +21,7 @@
   } from '../../lib/api/types';
   import { MCP_SERVER_TEMPLATES, type McpServerTemplate } from './templates';
   import AvailableIn from './AvailableIn.svelte';
-  import { scopeBody, scopeConfirm, widens, type Scope } from './serverScope';
+  import { scopeBody, scopeConfirm, widens, type Scope, type ScopeMode } from './serverScope';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
 
@@ -53,6 +53,10 @@
   let enabled = $state(false);
   let advancedOpen = $state(false);
   let scope = $state<Scope>({ all: false, shared: [] });
+  let scopeMode = $state<ScopeMode>('this');
+  // A direct server is never shared; "Selected" needs a pick.
+  const shareable = $derived(runs === 'governed');
+  const scopeIncomplete = $derived(shareable && scopeMode === 'selected' && scope.shared.length === 0);
   const wsName = (id: string) => ws.workspaces.find((w) => w.id === id)?.name ?? id;
 
   let saving = $state(false);
@@ -117,9 +121,7 @@
     saving = true;
     try {
       const body = { name: name.trim(), command: command.trim(), args: parseLines(argsText), env: parseKv(envText), secret_env, enabled };
-      const created = await mcpApi.create(wsId, body);
-      // The native-config route has no scope: the shared row takes it here.
-      if (widens({ all: false, shared: [] }, scope)) await mcpCpApi.cpUpdate(created.id, scopeBody(scope));
+      await mcpApi.create(wsId, body);
       toasts.success('Native MCP server added', name.trim());
       onsaved();
       onclose();
@@ -148,7 +150,7 @@
       announce(invalid, { assertive: true });
       return;
     }
-    if (widens({ all: false, shared: [] }, scope)) {
+    if (shareable && widens({ all: false, shared: [] }, scope)) {
       const c = scopeConfirm(name.trim(), scope, wsName);
       if (!(await confirmer.ask(c.message, { title: c.title, confirmLabel: c.confirmLabel }))) return;
     }
@@ -317,7 +319,7 @@
     {/if}
     {/if}
 
-    <AvailableIn home={wsId} bind:scope />
+    <AvailableIn home={wsId} bind:scope bind:mode={scopeMode} native={!shareable} />
 
     <label class="check">
       <input type="checkbox" bind:checked={enabled} />
@@ -327,7 +329,7 @@
 
   {#snippet footer()}
     <button class="btn" onclick={onclose} disabled={saving}>Cancel</button>
-    <button class="btn primary" onclick={save} disabled={saving}>
+    <button class="btn primary" onclick={save} disabled={saving || scopeIncomplete} title={scopeIncomplete ? 'Pick at least one workspace' : undefined}>
       {saving ? 'Adding…' : 'Add server'}
     </button>
   {/snippet}

@@ -88,6 +88,8 @@ pub struct CallerAccess {
     capability: Option<otto_core::domain::Capability>,
     groups: Option<Vec<otto_core::Id>>,
     member_of: HashMap<String, bool>,
+    /// Per server: reached through a workspace it was shared with.
+    reach: HashMap<String, bool>,
 }
 
 struct PooledClient {
@@ -355,23 +357,30 @@ impl McpService {
     }
 
     /// Whether `user` is a member of a workspace `server` is available in
-    /// (`otto_state::mcp_scope`): its home, one it was shared with, or any
-    /// for an all-workspaces server (Scratch, open to everyone, is one).
+    /// (`otto_state::mcp_scope`): its home, or by real membership one it is
+    /// shared with (never Scratch or an archived workspace).
     pub async fn reaches(
         &self,
         access: &mut CallerAccess,
         user: &otto_core::domain::User,
         server: &otto_state::McpServerDetail,
     ) -> Result<bool> {
-        if server.all_workspaces || self.member_of(access, user, &server.workspace_id).await? {
+        if self.member_of(access, user, &server.workspace_id).await? {
             return Ok(true);
         }
-        for ws in &server.shared_workspace_ids {
-            if self.member_of(access, user, ws).await? {
-                return Ok(true);
-            }
+        if !server.is_shared() {
+            return Ok(false);
         }
-        Ok(false)
+        if let Some(r) = access.reach.get(&server.id) {
+            return Ok(*r);
+        }
+        let r = !self
+            .registry()
+            .reach_workspaces(&server.id, &user.id)
+            .await?
+            .is_empty();
+        access.reach.insert(server.id.clone(), r);
+        Ok(r)
     }
 
     pub async fn visible_tools(
@@ -773,6 +782,19 @@ impl McpService {
         ctx: &InvokeCtx,
     ) -> Result<InvokeOutcome> {
         let server = self.registry().get(&server_id.to_string()).await?;
+        // Called for a workspace the server doesn't (or no longer) reach —
+        // e.g. narrowed while an approval was pending: refused, every time.
+        if let Some(ws) = ctx
+            .workspace_id
+            .as_deref()
+            .filter(|w| *w != server.workspace_id)
+        {
+            if !self.registry().is_available(&server.id, ws).await? {
+                return Err(Error::Forbidden(
+                    "this MCP server is not available in this workspace".into(),
+                ));
+            }
+        }
         // Tool metadata (must be discovered to be governed).
         let tool = self.tools().get_by_name(&server.id, tool_name).await.ok();
         let (risk_label, injection_risk, mutating, tool_enabled, tool_require_approval) =
