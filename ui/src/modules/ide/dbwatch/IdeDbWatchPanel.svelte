@@ -27,6 +27,7 @@
     filterText,
     isDbWatchPanelVisible,
     isProdTarget,
+    matchesEngine,
     MAX_WATCH_ITEMS,
     parseFilter,
     pickAutoItems,
@@ -132,7 +133,7 @@
     const ranked = pickAutoItems(ideDbWatch.detected, engine, true);
     const extra = [...watched].filter((o) => !ranked.some((r) => r.object === o)).map((object) => ({ object }));
     const rows: MenuItem[] = [...ranked, ...extra].map(({ object }) => {
-      const d = ideDbWatch.detected.find((x) => x.object_name === object && x.engine === engine);
+      const d = ideDbWatch.detected.find((x) => x.object_name === object && matchesEngine(x, engine));
       const on = watched.has(object);
       return {
         label: object,
