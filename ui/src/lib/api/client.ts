@@ -512,19 +512,19 @@ async function requestOnce<T>(
 // caps, so background work can never take a whole six-socket pool:
 //  - BG_MAX per document (JS queue below), and
 //  - BG_GLOBAL across EVERY document (main window, side pane, popouts, tray),
-//    via Web Locks (one lock name per slot). The old comment claimed "three
-//    windows × BG_MAX still < 6" — per-document budgets add up (main + pane +
-//    2 popouts + tray = 10 > 6). Now at most 3 bg sockets are open app-wide:
+//    via Web Locks (one lock name per slot): per-document budgets add up (main +
+//    pane + 2 popouts + tray = 10 > 6), so at most 3 bg sockets app-wide:
 //    on the alias host that leaves 3 for `long` calls; without an alias, 3
-//    for interactive ones. No Web Locks (or a lock wait over
-//    BG_GLOBAL_WAIT_MS — a frozen document holding a slot) → the per-document
-//    cap alone, as before.
+//    for interactive ones. No Web Locks (or a wait over BG_GLOBAL_WAIT_MS — a
+//    frozen document holding a slot) → the per-document cap alone.
 // Interactive calls (`api.get` & co.) never wait on this lane.
 const BG_MAX = 2;
 const BG_GLOBAL = 3;
 const BG_GLOBAL_WAIT_MS = 5_000;
-let bgActive = 0;
-const bgWaiters: (() => void)[] = [];
+const bgPool = { active: 0, waiters: [] as (() => void)[] };
+// bg on a LONG path (polled usage summary, k8s/AWS/Kafka read, repo status): own
+// BG_MAX slots + long lane (no 20 s deadline), never holding the fast polls' two.
+const slowBgPool = { active: 0, waiters: [] as (() => void)[] };
 
 function abortError(): DOMException {
   return new DOMException('The operation was aborted.', 'AbortError');
@@ -595,10 +595,10 @@ async function globalBgSlot(signal?: AbortSignal): Promise<() => void> {
   }
 }
 
-async function withBgSlot<T>(run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+async function withBgSlot<T>(run: () => Promise<T>, signal?: AbortSignal, pool = bgPool): Promise<T> {
   if (signal?.aborted) throw abortError();
-  if (bgActive < BG_MAX) {
-    bgActive += 1;
+  if (pool.active < BG_MAX) {
+    pool.active += 1;
   } else {
     // Wait for a finishing request to hand its slot over (no re-count, so a
     // newcomer can never slip in between the release and this resume).
@@ -608,23 +608,23 @@ async function withBgSlot<T>(run: () => Promise<T>, signal?: AbortSignal): Promi
         resolve();
       };
       const onAbort = (): void => {
-        const i = bgWaiters.indexOf(go);
-        if (i >= 0) bgWaiters.splice(i, 1);
+        const i = pool.waiters.indexOf(go);
+        if (i >= 0) pool.waiters.splice(i, 1);
         reject(abortError());
       };
       signal?.addEventListener('abort', onAbort, { once: true });
-      bgWaiters.push(go);
+      pool.waiters.push(go);
     });
   }
   let releaseGlobal = noop;
   try {
-    releaseGlobal = await globalBgSlot(signal);
+    if (pool === bgPool) releaseGlobal = await globalBgSlot(signal);
     return await run();
   } finally {
     releaseGlobal();
-    const next = bgWaiters.shift();
+    const next = pool.waiters.shift();
     if (next) next();
-    else bgActive -= 1;
+    else pool.active -= 1;
   }
 }
 
@@ -633,8 +633,8 @@ async function withBgSlot<T>(run: () => Promise<T>, signal?: AbortSignal): Promi
 function send<T>(method: string, path: string, body: unknown, signal: AbortSignal | undefined, lane?: Lane): Promise<T> {
   const eff = resolveLane(path, signal, lane);
   if (eff === 'bg') {
-    const queued = !path.startsWith('/telemetry') ? startMeasurement('ui.request.queue', apiComponent(path)) : null;
-    return withBgSlot(() => { queued?.finish(); return request<T>(method, path, body, signal, 'bg'); }, signal).catch((error: unknown) => { queued?.finish('error'); throw error; });
+    const slow = isLongPath(path), queued = !path.startsWith('/telemetry') ? startMeasurement('ui.request.queue', apiComponent(path)) : null;
+    return withBgSlot(() => { queued?.finish(); return request<T>(method, path, body, signal, slow ? 'long' : 'bg'); }, signal, slow ? slowBgPool : bgPool).catch((error: unknown) => { queued?.finish('error'); throw error; });
   }
   return request<T>(method, path, body, signal, eff);
 }
@@ -660,8 +660,8 @@ export type Conditional<T> =
 function sendConditional<T>(path: string, ifNoneMatch: string | null | undefined, signal: AbortSignal | undefined, lane?: Lane): Promise<Conditional<T>> {
   const eff = resolveLane(path, signal, lane);
   const cond: ConditionalOpts = { ifNoneMatch };
-  const run = (): Promise<T> => request<T>('GET', path, undefined, signal, eff, cond);
-  return (eff === 'bg' ? withBgSlot(run, signal) : run()).then((data) =>
+  const slow = eff === 'bg' && isLongPath(path), run = (): Promise<T> => request<T>('GET', path, undefined, signal, slow ? 'long' : eff, cond);
+  return (eff === 'bg' ? withBgSlot(run, signal, slow ? slowBgPool : bgPool) : run()).then((data) =>
     cond.status === 304
       ? { notModified: true as const, etag: cond.etag ?? ifNoneMatch ?? null }
       : { notModified: false as const, etag: cond.etag ?? null, data },
