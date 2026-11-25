@@ -138,7 +138,7 @@ function fakeIde() {
       calls.push(['resolve', target, opts]);
       return { root: '/w/app', label: 'TestFlow', language: 'go', command: 'go test -run ^TestFlow$ ./flow', cwd: '/w/app/flow', build_flags: [], env: opts?.env ?? {}, plan: {} };
     },
-    async launch() { calls.push(['launch']); ide.mine = 'dbg1'; ide.emit(snap({ state: 'starting' })); return { debug_id: 'dbg1' }; },
+    async launch(_a: unknown, _p: unknown, opts: unknown) { calls.push(['launch', opts]); ide.mine = 'dbg1'; ide.emit(snap({ state: 'starting' })); return { debug_id: 'dbg1' }; },
     async command(action: string, extra: unknown) { calls.push(['command', action, extra]); return ide.debug; },
     onSnapshot(fn: (s: Snap) => void) { listeners.add(fn); return () => listeners.delete(fn); },
     emit(s: Snap) { ide.debug = s; for (const fn of [...listeners]) fn(s); },
@@ -225,11 +225,12 @@ test('start: the agent’s own folder only; every start confirms what runs, neve
 test('start: returns at the first stop with the breakpoints it bound', async () => {
   const { handlers, ide } = load();
   const c = ctx();
-  const run = handlers.ide_debug_start({ target: { kind: 'test', file: 'flow/flow_test.go', name: 'TestFlow' }, breakpoints: [{ file: 'flow/flow.go', line: 21 }], wait_ms: 5_000 }, c);
+  const run = handlers.ide_debug_start({ target: { kind: 'test', file: 'flow/flow_test.go', name: 'TestFlow' }, breakpoints: [{ file: 'flow/flow.go', line: 21 }], break_on_exceptions: true, wait_ms: 5_000 }, c);
   later(() => ide.emit(paused(1, 21, [['total', '6']])));
   const r = await run;
   assert.equal(r.state, 'paused');
   assert.equal(r.debug_id, 'dbg1');
+  eq(ide.calls.find((x: unknown[]) => x[0] === 'launch')?.[1], { break_on_exceptions: true }, 'the flag reaches the IDE launch');
   eq(r.locals, { total: '6' });
   eq(r.breakpoints, [{ file: 'flow/flow.go', line: 21, verified: true }]);
   assert.ok(ide.calls.some((x: unknown[]) => x[0] === 'note' && String(x[1]).includes('(Claude)')), 'the console says who launched it');

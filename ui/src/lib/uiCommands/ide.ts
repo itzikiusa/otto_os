@@ -261,7 +261,7 @@ registerUiCommands('ide', {
     }
     if (bps.length) await ide.setAgentBreakpoints(ctx.agent, bps);
     ctx.progress(`Debugging ${plan.label}`);
-    const { debug_id } = await ide.launch(ctx.agent, plan).catch(async (e: unknown) => {
+    const { debug_id } = await ide.launch(ctx.agent, plan, { break_on_exceptions: args.break_on_exceptions }).catch(async (e: unknown) => {
       if (bps.length) await ide.clearAgentBreakpoints(ctx.agent, 'all').catch(() => 0); // nothing ran: leave no red dots
       throw e;
     });
