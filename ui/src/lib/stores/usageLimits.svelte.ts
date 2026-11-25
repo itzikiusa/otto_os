@@ -22,6 +22,10 @@ class LimitsStore {
   now = $state(Date.now());
   private poller: Poller | null = null;
   private refs = 0;
+  /** Back in front after the slow unfocused pace: read now if past the cadence. */
+  private onFocus = (): void => {
+    if (Date.now() - this.now >= LIMITS_MS) this.poller?.now({ background: true });
+  };
 
   /** Keep polling while mounted; returns the release. An answer younger than
    *  the cadence is not re-read on mount (the Agents meter remounts per visit). */
@@ -30,7 +34,8 @@ class LimitsStore {
       const fresh = this.data !== null && this.error === null && Date.now() - this.now < LIMITS_MS;
       this.poller = pollWhileVisible(
         async (signal) => {
-          if (this.data && this.error === null && unfocused() && Date.now() - this.now < UNFOCUSED_MS) return;
+          // Skipped only on a tick: an explicit refresh() (loading) always reads.
+          if (!this.loading && this.data && this.error === null && unfocused() && Date.now() - this.now < UNFOCUSED_MS) return;
           try {
             this.data = await api.get<LimitsResp>('/usage/limits', signal);
             this.error = null;
@@ -45,11 +50,13 @@ class LimitsStore {
         },
         { ms: LIMITS_MS, immediate: !fresh },
       );
+      if (typeof window !== 'undefined') window.addEventListener('focus', this.onFocus);
     }
     return () => {
       if (--this.refs === 0) {
         this.poller?.stop();
         this.poller = null;
+        if (typeof window !== 'undefined') window.removeEventListener('focus', this.onFocus);
       }
     };
   }
