@@ -3563,22 +3563,29 @@ pub(super) fn dispatch_child_stdout(
 }
 
 pub(super) fn is_evictable_dead(st: &State) -> bool {
+    evictable(st, None)
+}
+
+/// [`is_evictable_dead`]; with `quiet` (the minute's sweep) also any entry
+/// with no agent process that emitted nothing for that long: one no process
+/// ran for in this daemon life (a read or a rename after a restart) or whose
+/// agent exited cleanly. Never one holding a secret to mask.
+fn evictable(st: &State, quiet: Option<Duration>) -> bool {
     if st.proc.is_some()
         || st.turn.is_some()
         || st.starting > 0
         || !st.held.is_empty()
         || has_pending(st)
+        || !st.secrets.is_empty()
     {
         return false;
     }
     if st.session.status == RuntimeSessionStatus::Closed {
         return true;
     }
-    // `epoch == 0`: no agent process ran in this daemon life, so the entry
-    // holds nothing the DB does not (a read or a rename after a restart).
     st.proj.queue.is_empty()
         && (st.released
-            || st.epoch == 0
+            || quiet.is_some_and(|q| st.last_activity.elapsed() >= q)
             || st.proj.session.as_ref().is_some_and(|p| {
                 p.status == ProviderSessionStatus::Error
                     || (p.status == ProviderSessionStatus::Stopped && p.last_error.is_some())
@@ -3592,19 +3599,36 @@ pub(super) fn try_evict_dead(inner: &Inner, id: &Id) {
 }
 
 pub(super) async fn evict_if_dead_after_flush(inner: &Arc<Inner>, id: &Id) {
-    let maybe_persist = inner.live.get(id).and_then(|entry| {
-        let l = entry.value();
-        is_evictable_dead(&l.lock()).then(|| l.persist.clone())
-    });
-    let Some(persist) = maybe_persist else {
+    evict_after_flush(inner, id, None).await;
+}
+
+/// Drop `id` when [`evictable`] and nothing else holds it (so nothing can
+/// queue a write after the check), then wait for its queued DB writes under
+/// its load lock: nobody loads it again (with a second DB writer) before
+/// they landed.
+pub(super) async fn evict_after_flush(inner: &Arc<Inner>, id: &Id, quiet: Option<Duration>) {
+    async fn flush(persist: &mpsc::UnboundedSender<PersistOp>) {
+        let (tx, rx) = oneshot::channel();
+        if persist.send(PersistOp::Flush(tx)).is_ok() {
+            let _ = rx.await;
+        }
+    }
+    // Flushed first even when a holder keeps it loaded: a later read's
+    // `try_evict_dead` drops it without waiting.
+    let Some(persist) = inner.live.get(id).and_then(|e| {
+        let l = e.value();
+        evictable(&l.lock(), quiet).then(|| l.persist.clone())
+    }) else {
         return;
     };
-    let (tx, rx) = oneshot::channel();
-    if persist.send(PersistOp::Flush(tx)).is_ok() {
-        let _ = rx.await;
-    }
+    flush(&persist).await;
     drop(persist);
-    try_evict_dead(inner, id);
+    let _loading = inner.loading.lock(id).await;
+    if let Some((_, live)) = inner.live.remove_if(id, |_, l| {
+        Arc::strong_count(l) == 1 && evictable(&l.lock(), quiet)
+    }) {
+        flush(&live.persist).await; // what was queued since
+    }
 }
 
 /// Feed one child's messages to its driver until it exits.

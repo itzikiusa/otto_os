@@ -80,6 +80,7 @@ impl StructuredDriver for TimedShellDriver {
         let script = r#"
 echo "READY"
 while IFS= read -r _line; do
+  case "$_line" in *bye*) exit 0;; esac
   echo "THINK:first "
   sleep 0.03
   echo "THINK:second "
@@ -1076,10 +1077,10 @@ async fn wait_terminals(host: &LibTestHost, n: usize) {
 
 /// A thread loaded with no agent process of this daemon life (the inbox's
 /// or the pane's read after a restart, or after an idle release evicted it)
-/// holds only what the DB does: the read lets it go again, and the minute's
-/// sweep lets go of a load that does not evict (here an effort pick), its
-/// write flushed first. Loaded again it reads the same, a client that
-/// missed events gets the snapshot, and sequences carry on above it.
+/// stays loaded for the reads that follow (a page, an item, an attachment)
+/// and leaves on the minute's sweep, its writes (here an effort pick)
+/// flushed first. Loaded again it reads the same, a client that missed
+/// events gets the snapshot, and sequences carry on above it.
 #[tokio::test]
 async fn threads_loaded_without_a_process_do_not_stay_in_the_live_map() {
     use otto_core::agent_runtime::RuntimeReplay;
@@ -1088,8 +1089,13 @@ async fn threads_loaded_without_a_process_do_not_stay_in_the_live_map() {
     let read = |after| rt.replay_paged_opts(&s.id, after, Some(1), None, None, true, None);
     let first = read(0).await.unwrap();
     assert!(
+        rt.inner.live.contains_key(&s.id),
+        "a read does not drop it: the next one would load it all again"
+    );
+    rt.evict_dead(Duration::ZERO).await;
+    assert!(
         !rt.inner.live.contains_key(&s.id),
-        "a read of a thread with no process must not pin it"
+        "the sweep lets go of a thread with no process"
     );
     assert_eq!(
         read(0).await.unwrap(),
@@ -1119,12 +1125,24 @@ async fn threads_loaded_without_a_process_do_not_stay_in_the_live_map() {
 
     rt.set_effort(&s.id, Some("high")).await.unwrap();
     assert!(rt.inner.live.contains_key(&s.id));
-    rt.evict_dead().await;
+    rt.evict_dead(Duration::from_secs(3600)).await;
     assert!(
-        !rt.inner.live.contains_key(&s.id),
-        "the sweep lets go of a load that does not evict"
+        rt.inner.live.contains_key(&s.id),
+        "not before it was quiet for the sweep's while"
     );
-    assert_eq!(rt.get(&s.id).await.unwrap().effort.as_deref(), Some("high"));
+    rt.evict_dead(Duration::ZERO).await;
+    assert!(!rt.inner.live.contains_key(&s.id));
+    assert_eq!(
+        rt.repo()
+            .get(&s.id)
+            .await
+            .unwrap()
+            .session
+            .effort
+            .as_deref(),
+        Some("high"),
+        "its write landed before it left"
+    );
 
     let seen = host.events.lock().unwrap().len();
     rt.prompt(&s.id, "again").await.unwrap();
@@ -1151,7 +1169,7 @@ async fn the_sweep_keeps_threads_still_in_use() {
     };
     rt.prompt(&s.id, "again").await.unwrap();
     wait_terminals(&host, 2).await;
-    rt.evict_dead().await;
+    rt.evict_dead(Duration::ZERO).await;
     stays("a live process");
 
     let later = Utc::now() + chrono::TimeDelta::minutes(31);
@@ -1166,7 +1184,7 @@ async fn the_sweep_keeps_threads_still_in_use() {
 
     rt.set_effort(&s.id, Some("high")).await.unwrap(); // loaded, no process
     let held = Arc::clone(rt.inner.live.get(&s.id).unwrap().value());
-    rt.evict_dead().await;
+    rt.evict_dead(Duration::ZERO).await;
     stays("a holder of the entry");
     drop(held);
 
@@ -1224,7 +1242,7 @@ async fn the_sweep_keeps_threads_still_in_use() {
     ];
     for (why, set) in reasons {
         with(&set);
-        rt.evict_dead().await;
+        rt.evict_dead(Duration::ZERO).await;
         stays(why);
         with(&|st| {
             st.turn = None;
@@ -1234,8 +1252,74 @@ async fn the_sweep_keeps_threads_still_in_use() {
             st.proj.queue.clear();
         });
     }
-    rt.evict_dead().await;
+    rt.evict_dead(Duration::ZERO).await;
     assert!(!rt.inner.live.contains_key(&s.id), "nothing left: it goes");
+}
+
+/// Writes queued on a thread with no process (an effort pick) land before
+/// it leaves, however a read and the sweep interleave with them: one DB
+/// writer per session at a time, so a reload never reads a stale row.
+#[tokio::test]
+async fn evictions_never_lose_a_queued_write() {
+    let (_dir, _host, rt, s) = dormant_thread().await;
+    for i in 0..40 {
+        let effort = if i % 2 == 0 { "high" } else { "low" };
+        rt.set_effort(&s.id, Some(effort)).await.unwrap();
+        let (r, ()) = tokio::join!(
+            rt.replay_paged_opts(&s.id, 0, Some(1), None, None, true, None),
+            rt.evict_dead(Duration::ZERO),
+        );
+        r.unwrap();
+        rt.evict_dead(Duration::ZERO).await;
+        assert!(!rt.inner.live.contains_key(&s.id));
+        assert_eq!(
+            rt.repo()
+                .get(&s.id)
+                .await
+                .unwrap()
+                .session
+                .effort
+                .as_deref(),
+            Some(effort),
+            "round {i}"
+        );
+    }
+}
+
+/// A value given through a private secret request is masked only while its
+/// thread is loaded, so a thread holding one never leaves.
+#[tokio::test]
+async fn a_thread_masking_a_secret_stays_loaded() {
+    let (_dir, _host, rt, s) = dormant_thread().await;
+    rt.redact_value(&s.id, "hunter2-secret").await.unwrap();
+    rt.evict_dead(Duration::ZERO).await;
+    rt.replay(&s.id, 0).await.unwrap();
+    assert!(rt.inner.live.contains_key(&s.id));
+}
+
+/// An agent that exits cleanly (code 0) leaves a thread with no process and
+/// no error, which no read lets go: the sweep does.
+#[tokio::test]
+async fn a_thread_whose_agent_exited_cleanly_leaves_on_the_sweep() {
+    let (_dir, host, rt, s) = dormant_thread().await;
+    rt.prompt(&s.id, "bye").await.unwrap();
+    wait_terminals(&host, 2).await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while rt
+            .inner
+            .live
+            .get(&s.id)
+            .is_some_and(|l| l.lock().proc.is_some())
+        {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    })
+    .await
+    .expect("the agent exits");
+    rt.replay(&s.id, 0).await.unwrap();
+    assert!(rt.inner.live.contains_key(&s.id), "no read lets it go");
+    rt.evict_dead(Duration::ZERO).await;
+    assert!(!rt.inner.live.contains_key(&s.id));
 }
 
 #[tokio::test]
