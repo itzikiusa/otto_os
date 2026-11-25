@@ -70,9 +70,12 @@ test('the PR actions fill one row of finger-sized buttons', async ({ page }) => 
   const ys = await Promise.all(btns.map(async (x) => Math.round((await x.boundingBox())!.y)));
   expect(new Set(ys).size, 'one row').toBe(1);
   // The row spans the header: the last button ends at the row's end, not mid-screen.
-  const row = (await actions.boundingBox())!;
-  const lastBtn = (await btns[btns.length - 1].boundingBox())!;
-  expect(row.x + row.width - (lastBtn.x + lastBtn.width)).toBeLessThan(2);
+  // (Polled: the header settles once the PR's checks and review state land.)
+  await expect.poll(async () => {
+    const row = (await actions.boundingBox())!;
+    const last = (await actions.locator('.btn:visible').last().boundingBox())!;
+    return Math.round(row.x + row.width - (last.x + last.width));
+  }).toBeLessThan(2);
 });
 
 test("the PR's commits are one tap away, and a commit shows its changes", async ({ page }) => {
