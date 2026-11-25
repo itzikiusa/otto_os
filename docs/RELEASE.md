@@ -160,8 +160,23 @@ therefore 0.5.4 → 0.5.5.
 
 The updater's unit tests run on throwaway bundles in temp folders; these steps
 need a Mac (or a macOS VM) that has never had Otto, under a normal user
-account. Use two consecutive release candidates built by the workflow, e.g.
-`0.5.4-rc.1` and `0.5.4-rc.2`, published as pre-releases.
+account. Use release candidates built by the workflow, e.g. `0.5.4-rc.1`,
+`0.5.4-rc.2` and `0.5.4-rc.3`.
+
+Installed apps look only at `/releases/latest`, and GitHub never counts a
+pre-release as "latest". So publish each candidate as the **Latest release**,
+not as a pre-release. The workflow drafts `-rc` versions as pre-releases, so
+change that when you publish:
+`gh release edit v0.5.4-rc.2 --repo itzikiusa/otto_os --draft=false --prerelease=false --latest`.
+
+This is safe only **before 0.5.4 itself is published**. No installed copy has
+the updater until then, so only the test Mac ever sees a candidate.
+Afterwards:
+- delete the candidates: `gh release delete v0.5.4-rc.N --repo itzikiusa/otto_os --yes`;
+- publish 0.5.4. The test Mac then updates to it, since 0.5.4 > 0.5.4-rc.N.
+
+Once 0.5.4 is out, never mark a candidate Latest again; every installed copy
+would update to it.
 
 1. Download the rc.1 DMG with Safari, drag Otto to /Applications, open it:
    Privacy & Security ▸ **Open Anyway** must be the only Gatekeeper step.
@@ -169,8 +184,8 @@ account. Use two consecutive release candidates built by the workflow, e.g.
    (Accessibility), take a snip (Screen Recording), dictate (Microphone), save a
    secret (one Keychain "Always Allow" for `ottod`).
 3. Start a shell session, a Threads conversation mid-turn and an SSH terminal.
-4. Publish rc.2. Within 6 h (or Otto ▸ Check for Updates…) the sidebar shows
-   the update. Download it; the restart dialog must list the SSH terminal as
+4. Publish rc.2 as Latest (above). Within 6 h (or Otto ▸ Check for
+   Updates…) the sidebar shows the update. Download it; the restart dialog must list the SSH terminal as
    ending and the shell and thread as kept.
 5. Restart to update. Check:
    - no "Background Items Added" banner blocks it, and no App Management
@@ -181,8 +196,8 @@ account. Use two consecutive release candidates built by the workflow, e.g.
      the release certificate was trusted);
    - `~/Library/Application Support/Otto/updates/previous/Otto.app` is rc.1 and
      `xattr -l /Applications/Otto.app` shows no `com.apple.quarantine`.
-6. Failure path: publish an rc.3 whose daemon exits at start. The update must
-   roll back to rc.2 by itself, say "failed and was undone", and not offer
+6. Failure path: publish, as Latest, an rc.3 whose daemon exits at start.
+   The update must roll back to rc.2 by itself, say "failed and was undone", and not offer
    rc.3 again.
 7. A standard (non-admin) account: the update row says the account can't
    replace apps in /Applications and offers the DMG; nothing is downloaded.

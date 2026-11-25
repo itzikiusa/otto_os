@@ -48,6 +48,11 @@ impl WatchHost for Fake {
             self.max_in_flight.fetch_max(now, Ordering::SeqCst);
             tokio::time::sleep(self.latency).await;
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            if exec.op == DbWatchOp::Describe && exec.object_name == "dsn_fail" {
+                return Err(Error::Upstream(
+                    "connect mysql://root:hunter2@10.0.0.5:3306/app refused".into(),
+                ));
+            }
             if exec.op == DbWatchOp::Read && exec.object_name == "broken" {
                 return Err(Error::Upstream(
                     "dial mysql://root:hunter2@10.0.0.5:3306/app failed".into(),
@@ -58,7 +63,12 @@ impl WatchHost for Fake {
                 table.ok_or_else(|| Error::NotFound(format!("table {}", exec.object_name)))?;
             Ok(match exec.op {
                 DbWatchOp::Describe => DbWatchExecOutcome {
-                    primary_key: vec![columns[0].clone()],
+                    // `nopk_*`: a table without a primary key.
+                    primary_key: if exec.object_name.starts_with("nopk_") {
+                        Vec::new()
+                    } else {
+                        vec![columns[0].clone()]
+                    },
                     row_estimate: Some(rows.len() as i64),
                     ..Default::default()
                 },
@@ -700,4 +710,55 @@ async fn stopping_a_binding_mid_checkpoint_does_not_leave_the_watch_busy() {
     w.set_binding(None, None); // aborts the binder mid-read
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!w.view().busy);
+}
+
+#[tokio::test]
+async fn an_agent_never_reads_a_secret_in_a_describe_error_or_a_whole_row_key() {
+    let fake = Arc::new(Fake::default());
+    // No primary key, no unique column: the diff keys rows by the whole row.
+    let rows = |pw: &str| {
+        vec![
+            vec![json!("x"), json!(pw)],
+            vec![json!("x"), json!("other")],
+        ]
+    };
+    fake.set("nopk_users", &["note", "password"], rows("s\"ecret-one"));
+    let host = as_host(&fake);
+    let w = Watch::new(
+        &user("u"),
+        "/p",
+        target(true),
+        Some("db".into()),
+        items(&["nopk_users", "dsn_fail"]),
+    )
+    .unwrap();
+    w.checkpoint(
+        &host,
+        Checkpoint::new(IdeDbWatchCheckpointReason::Start),
+        true,
+    )
+    .await;
+    fake.set("nopk_users", &["note", "password"], rows("s\"ecret-two"));
+    w.checkpoint(
+        &host,
+        Checkpoint::new(IdeDbWatchCheckpointReason::Stop),
+        true,
+    )
+    .await;
+
+    let person = w.read(IdeDbWatchCompare::PreviousStop, false, false);
+    assert!(
+        person.watch.items[1]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("hunter2"),
+        "a person reads raw"
+    );
+    assert!(!person.items[0].diffs.is_empty());
+
+    let agent = w.read(IdeDbWatchCompare::PreviousStop, false, true);
+    let text = serde_json::to_string(&agent).unwrap();
+    assert!(!text.contains("hunter2"), "{text}");
+    assert!(!text.contains("ecret-"), "{text}");
 }

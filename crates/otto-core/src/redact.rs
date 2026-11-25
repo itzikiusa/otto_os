@@ -174,13 +174,12 @@ fn data_name_kind(name: &str, value: &Value) -> Option<&'static str> {
     }
 }
 
-/// `pwd`, `dsn` or `salt` as a whole segment of `name`, or `pass` as its
-/// LAST segment; split at non-alphanumerics and camel-case humps (`dbPWD`,
-/// `DBPass` → `PWD`, `Pass`).
+/// `pwd`, `dsn` or `salt` as a whole segment of `name`, or `pass` as the
+/// last segment of a path component (`user_pass`, `cfg.DBPass.Value`); split
+/// at non-alphanumerics and camel-case humps (`dbPWD`, `DBPass` → `PWD`, `Pass`).
 fn name_segment(name: &str) -> Option<&'static str> {
     let b = name.as_bytes();
     let mut start: Option<usize> = None;
-    let mut last = "";
     for i in 0..=b.len() {
         let alnum = i < b.len() && b[i].is_ascii_alphanumeric();
         let hump = alnum
@@ -192,12 +191,17 @@ fn name_segment(name: &str) -> Option<&'static str> {
                     && b.get(i + 1).is_some_and(u8::is_ascii_lowercase)));
         if !alnum || hump {
             if let Some(s) = start.take() {
-                last = &name[s..i];
+                let seg = &name[s..i];
                 if let Some(w) = ["pwd", "dsn", "salt"]
                     .into_iter()
-                    .find(|w| last.eq_ignore_ascii_case(w))
+                    .find(|w| seg.eq_ignore_ascii_case(w))
                 {
                     return Some(w);
+                }
+                // `pass` ending a path component: `user_pass`, `cfg.user_pass.Value`.
+                let component_end = i == b.len() || matches!(b[i], b'.' | b'[' | b']');
+                if component_end && seg.eq_ignore_ascii_case("pass") {
+                    return Some("pass");
                 }
             }
         }
@@ -205,7 +209,7 @@ fn name_segment(name: &str) -> Option<&'static str> {
             start = Some(i);
         }
     }
-    last.eq_ignore_ascii_case("pass").then_some("pass")
+    None
 }
 
 /// Trim a small set of surrounding punctuation that commonly wraps tokens in
@@ -572,8 +576,55 @@ fn redact_data_text_into(input: &str, tally: &mut Tally) -> String {
     if let Some(json) = redact_embedded_json(input, tally) {
         return json;
     }
-    let shaped = redact_text_into(input, tally);
+    let decoded = redact_quoted_literals(input, tally);
+    let shaped = redact_text_into(decoded.as_deref().unwrap_or(input), tally);
     mask_assignments(&shaped, tally).unwrap_or(shaped)
+}
+
+/// A double-quoted literal that holds escaped quotes (a Go / JSON string
+/// carrying JSON or `key: "value"` text, escaped any number of times) is
+/// PARSED with the JSON string grammar, its content redacted as data
+/// (recursively: each level is shorter), and re-encoded when something was
+/// masked — so no escaped quote inside it can end a value early. One that does
+/// not parse (a Go `\x00` escape) is left to the scan.
+fn redact_quoted_literals(s: &str, tally: &mut Tally) -> Option<String> {
+    let b = s.as_bytes();
+    let mut out: Option<String> = None;
+    let (mut copied, mut i) = (0, 0);
+    while let Some(off) = b[i..].iter().position(|&c| c == b'"') {
+        let start = i + off;
+        let mut k = start + 1;
+        let mut nested = false;
+        while k < b.len() && b[k] != b'"' && b[k] != b'\n' {
+            if b[k] == b'\\' {
+                nested |= b.get(k + 1) == Some(&b'"');
+                k += 1;
+            }
+            k += 1;
+        }
+        if b.get(k) != Some(&b'"') {
+            i = k.min(b.len());
+            continue;
+        }
+        i = k + 1;
+        let Some(decoded) = nested
+            .then(|| serde_json::from_str::<String>(&s[start..i]).ok())
+            .flatten()
+        else {
+            continue;
+        };
+        let before = tally.total();
+        let clean = redact_data_text_into(&decoded, tally);
+        if tally.total() > before {
+            let o = out.get_or_insert_with(|| String::with_capacity(s.len()));
+            o.push_str(&s[copied..start]);
+            o.push_str(&Value::String(clean).to_string());
+            copied = i;
+        }
+    }
+    let mut o = out?;
+    o.push_str(&s[copied..]);
+    Some(o)
 }
 
 /// Text that IS a JSON document or JSON string literal (a JSON column, a
@@ -690,13 +741,20 @@ fn value_after(b: &[u8], from: usize) -> Option<(usize, usize)> {
     let j = skip_spaces(from);
     let first = *b.get(j)?;
     // An escaped quote opens it (`\"hunter2\"`: JSON inside a rendered
-    // string, at any escape depth): up to the same escaped quote.
+    // string that did not parse, at any escape depth): it ends only at the same
+    // quote behind a run of exactly as many backslashes (`\\\"` inside is an
+    // escaped quote of the inner string, not the end).
     let escapes = b[j..].iter().take_while(|&&c| c == b'\\').count();
     if escapes > 0 && matches!(b.get(j + escapes), Some(b'"' | b'\'')) {
-        let delim = &b[j..=j + escapes];
+        let q = b[j + escapes];
         let vs = j + escapes + 1;
         let mut k = vs;
-        while k < b.len() && b[k] != b'\n' && !b[k..].starts_with(delim) {
+        let mut run = 0;
+        while k < b.len() && b[k] != b'\n' {
+            if b[k] == q && run == escapes {
+                return Some((vs, k - escapes));
+            }
+            run = if b[k] == b'\\' { run + 1 } else { 0 };
             k += 1;
         }
         return Some((vs, k));
@@ -1336,6 +1394,88 @@ mod tests {
         );
         assert_eq!(vars["env"], json!(["PATH=/bin", "DB_PASSWORD=[redacted]"]));
         assert_eq!(vars["n"], json!("42"));
+    }
+
+    #[test]
+    fn data_names_split_acronyms_and_check_every_path_component() {
+        // C2-004: acronym CamelCase, and a sensitive PARENT in a path masks the leaf.
+        for n in [
+            "DBPass",
+            "DBPwd",
+            "DBSalt",
+            "SQLDsn",
+            "APIKey",
+            "cfg.DBPass",
+            "cfg.DBPass.Value",
+            "cfg.user_pass.Value",
+            "items[0].db_pass.v",
+            "cfg.SQLDsn.Host",
+        ] {
+            assert!(is_sensitive_name(n), "{n} should be sensitive");
+        }
+        for n in [
+            "pass_rate.value",
+            "cfg.passenger.Name",
+            "DBHost",
+            "cfg.bypass.Value",
+        ] {
+            assert!(!is_sensitive_name(n), "{n} should not be sensitive");
+        }
+        let r = redact_data_json(&json!({"cfg.user_pass.Value": {"value": "\"hunter2\""}}));
+        assert!(!r.value.to_string().contains("hunter2"));
+        // Existing callers keep 0.5.3.
+        assert_eq!(
+            redact_json(&json!({"DBPass": "x"})).value,
+            json!({"DBPass": "x"})
+        );
+    }
+
+    /// C2-013 / C1-007: a secret inside JSON that is escaped 0–3 times, in
+    /// every wrapper a debugger or a log prints it in, with quotes,
+    /// backslashes, spaces and non-ASCII inside the secret itself.
+    #[test]
+    fn escaped_json_secrets_never_leak_at_any_depth() {
+        let secrets = [
+            "S3CR3T",
+            "a\"S3CR3T\"b",
+            "x\\S3CR3T",
+            "S3CR3T w\"rd",
+            "ü\"S3CR3T\\",
+            "\\\"S3CR3T",
+            "S3CR3T\\",
+        ];
+        for secret in secrets {
+            for key in ["password", "api_key", "token"] {
+                let mut s = json!({ key: secret, "user": "bob" }).to_string();
+                for depth in 0..=3 {
+                    for text in [
+                        s.clone(),
+                        format!("body: {s}, n: 1"),
+                        format!("main.Req {{Body: {s}, Id: 7}}"),
+                        format!("log {s} done"),
+                        format!("[{s}]"),
+                    ] {
+                        let out = data(&text);
+                        assert!(
+                            !out.contains("S3CR3T"),
+                            "leak at depth {depth} for {secret:?} under {key}: {text}\n→ {out}"
+                        );
+                        assert!(out.contains("bob"), "over-masked at depth {depth}: {out}");
+                    }
+                    s = serde_json::to_string(&s).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn escaped_value_that_does_not_parse_still_ends_at_its_own_quote() {
+        // A Go `%q` escape (`\x00`) is not JSON: the scan fallback must not end
+        // at an inner escaped quote (`\\\"`), only at its own `\"`.
+        let text = r#"body: "{\"password\":\"a\\\"S3CR3T\", \x00 \"user\":\"bob\"}""#;
+        let out = data(text);
+        assert!(!out.contains("S3CR3T"), "{out}");
+        assert!(out.contains("bob"), "{out}");
     }
 
     /// Runs per debug stop on up to 150 rows × N tables: 4 tables × 150 rows

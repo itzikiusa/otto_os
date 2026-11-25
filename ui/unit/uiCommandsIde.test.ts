@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
 import {
-  autoItems, changedNames, childNamed, outputTail, sensitiveName, pathSegments, shapeDbRead, shapeResponse, shapeResult, newMemory,
+  changedNames, childNamed, outputTail, sensitiveName, pathSegments, shapeDbRead, shapeResponse, shapeResult, newMemory,
   startConfirmText, STOP_MAX_CHARS, userMoved,
 } from '../src/lib/uiCommands/ideShape.ts';
 
@@ -33,6 +33,13 @@ function paused(seq: number, line: number, vars: [string, string, number?][] = [
 }
 
 // ── shapes ─────────────────────────────────────────────────────────────────
+
+test('sensitiveName: acronym humps and any path component keep a secret ref closed (C2-004)', () => {
+  for (const n of ['DBPass', 'DBPwd', 'DBSalt', 'SQLDsn', 'APIKey', 'cfg.DBPass.Value', 'cfg.user_pass.Value', 'items[0].db_pass.v', 'password']) {
+    assert.ok(sensitiveName(n), n);
+  }
+  for (const n of ['DBHost', 'cfg.passenger.Name', 'bypass', 'Value']) assert.ok(!sensitiveName(n), n);
+});
 
 test('shape: a Stop keys locals by name, marks the source line, tracks changes and the new output', () => {
   const mem = { ...newMemory('dbg1', '/w/app'), stopSeq: 1, state: 'paused', expectMove: true, outSeq: 1, locals: { total: '0', items: '[]int len: 3' } };
@@ -192,7 +199,7 @@ function load(detect: unknown = { detected_objects: [], saved_connections: [], e
   const detects: any[] = [];
   const api = {
     get: async (path: string) => { gets.push(path); return { open: true }; },
-    post: async (_path: string, body: any) => (detects.push(body), detectFor?.(body) ?? detect),
+    post: async (_path: string, body: any) => (detects.push(body), detectFor?.(body) ?? (typeof detect === 'function' ? detect(body) : detect)),
     long: { post: (path: string, body: any, signal?: AbortSignal) => new Promise((resolve, reject) => {
       posts.push({ path, body, resolve, signal });
       signal?.addEventListener('abort', () => reject(new Error('aborted')));
@@ -200,6 +207,7 @@ function load(detect: unknown = { detected_objects: [], saved_connections: [], e
   };
   loadSource(new URL('../src/lib/uiCommands/ide.ts', import.meta.url), {
     '../api/client': { api },
+    '../dbWatchMatch': loadSource(new URL('../src/lib/dbWatchMatch.ts', import.meta.url), {}),
     '../stores/uiControl.svelte': { agentName: (a: { provider: string }) => (a.provider === 'claude' ? 'Claude' : a.provider) },
     '../stores/workspace.svelte': { ws: { currentId: 'w1' } },
     '../status': loadSource(new URL('../src/lib/status.ts', import.meta.url), {}),
@@ -211,7 +219,7 @@ function load(detect: unknown = { detected_objects: [], saved_connections: [], e
   });
   const ide = fakeIde();
   idePort.idePort.bind(ide);
-  return { handlers, ide, posts, gets, dbPort, detects };
+  return { handlers, ide, posts, gets, dbPort, detects, detectCalls: detects };
 }
 
 function ctx(answer = true) {
@@ -705,5 +713,32 @@ test('C2-008: tables are the code’s names the chosen target really has (any SQ
   eq(started[0].target, { kind: 'ephemeral', ephemeral_id: 'tc:pg:54321' }, 'the container the launch’s DATABASE_URL names');
   eq(detects.at(-1).target, { kind: 'ephemeral', ephemeral_id: 'tc:pg:54321' }, 'detect checked the names against it');
   eq(started[0].items, [{ object: 'orders' }], 'SQL names on a Postgres target, verified, once; ghost and redis prefixes dropped');
-  eq(autoItems([{ engine: 'mysql', object_name: 'a', verified: null }], 'postgres', true), [], 'unverified cross-engine names stay out');
+});
+
+test('C1-035: on a Postgres container the agent watches the code’s SQL tables the TARGET verified (detection names SQL mysql), once each', async () => {
+  const pg = { ephemeral_id: 'tc:pg:5432', engine: 'postgres', port: 5432, source: 'testcontainers' };
+  const { handlers, ide, dbPort, detectCalls } = load((body: any) => ({
+    detected_objects: body.target
+      ? [{ engine: 'mysql', object_name: 'orders', verified: true }, { engine: 'mysql', object_name: 'orders', verified: true }, { engine: 'mysql', object_name: 'GetAllConfigs', verified: false }, { engine: 'mysql', object_name: 'guess', verified: null }]
+      : [{ engine: 'mysql', object_name: 'orders' }, { engine: 'mysql', object_name: 'GetAllConfigs' }],
+    saved_connections: [],
+    ephemeral_targets: [pg],
+  }));
+  const c = ctx();
+  const run = handlers.ide_debug_start({ target: { kind: 'main', file: 'main.go' }, wait_ms: 5_000 }, c);
+  later(() => ide.emit(paused(1, 5)));
+  await run;
+  const asked: any[] = [];
+  dbPort.ideDbWatchPort.bind({
+    watch: null,
+    error: null,
+    async start(req: unknown) { asked.push(req); return { id: 'w', target: { label: 'pg', local: true, engine: 'postgres' }, bind: null, busy: false }; },
+    async stop() {},
+    async diffSince() { return null; },
+  });
+  const out = await handlers.ide_debug_db({ action: 'watch' }, c);
+  assert.equal(out.watching, true);
+  eq(asked[0].target, { kind: 'auto', engine: 'postgres' });
+  eq(asked[0].items, [{ object: 'orders' }]);
+  eq(detectCalls.at(-1).target, { kind: 'auto', engine: 'postgres' }, 'the names are verified against the chosen target');
 });

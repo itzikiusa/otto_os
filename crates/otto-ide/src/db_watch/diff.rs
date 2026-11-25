@@ -255,8 +255,24 @@ pub fn diff_snapshots(
         .flatten();
 
     // The same for the previous read: a row older than ITS oldest key entered
-    // the window (a newer row was deleted), it was not added.
-    let prev_floor = (opts.previous_full && !is_redis && pk_ok)
+    // the window (a newer row was deleted), it was not added. Only when that
+    // is the one reading: an integer key (ids grow, so an insert is never
+    // older), the two reads overlap (not a TRUNCATE + reload) and a row of
+    // the previous read is gone. Otherwise the row shows as added.
+    let pk_text = |r: &[Value]| compact_value_key(r.get(pk[0]).unwrap_or(&Value::Null));
+    let integer_key = pk_ok
+        && pk.len() == 1
+        && previous
+            .rows
+            .iter()
+            .chain(&current.rows)
+            .all(|r| r.get(pk[0]).is_some_and(|v| v.is_i64() || v.is_u64()));
+    let pulled_in = integer_key && {
+        let now: HashSet<String> = current.rows.iter().map(|r| pk_text(r)).collect();
+        let before: HashSet<String> = previous.rows.iter().map(|r| pk_text(r)).collect();
+        !now.is_disjoint(&before) && !before.is_subset(&now)
+    };
+    let prev_floor = (opts.previous_full && !is_redis && pulled_in)
         .then(|| {
             previous
                 .rows
@@ -638,5 +654,29 @@ mod tests {
         };
         let d = diff_snapshots(&prev, &curr, &opts);
         assert_eq!((d.added_count, d.removed_count), (1, 0), "{:?}", d.diffs);
+    }
+
+    fn full(prev: bool) -> DiffOpts {
+        DiffOpts {
+            primary_key: vec!["id".into()],
+            window_full: true,
+            previous_full: prev,
+        }
+    }
+
+    #[test]
+    fn rows_after_a_truncate_are_inserts_not_rows_that_entered_the_window() {
+        let ids = |v: &[i64]| snap(&["id"], v.iter().map(|i| vec![json!(i)]).collect());
+        let d = diff_snapshots(&ids(&[103, 102, 101]), &ids(&[3, 2, 1]), &full(true));
+        assert_eq!((d.added_count, d.removed_count), (3, 3));
+    }
+
+    #[test]
+    fn a_new_row_under_a_non_monotonic_key_is_shown_as_added() {
+        // UUID-like keys: a delete and an insert below the old floor look the
+        // same as an older row entering the window — show it.
+        let ids = |v: &[&str]| snap(&["id"], v.iter().map(|i| vec![json!(i)]).collect());
+        let d = diff_snapshots(&ids(&["m", "k", "f"]), &ids(&["m", "f", "a"]), &full(true));
+        assert_eq!((d.added_count, d.removed_count), (1, 1));
     }
 }

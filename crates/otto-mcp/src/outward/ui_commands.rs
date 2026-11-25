@@ -289,7 +289,25 @@ const DENIED_ENV: &[&str] = &[
     "BASHOPTS",
     "FPATH",
     "MAKEFLAGS",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "SUDO_ASKPASS",
+    "NO_PROXY",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    // Read by the IDE engine (every_env_name_the_ide_reads_is_decided): Xcode /
+    // Flutter toolchain roots, the cache owner and the shell's directory.
+    "DEVELOPER_DIR",
+    "FLUTTER_ROOT",
+    "USER",
+    "LOGNAME",
+    "PWD",
 ];
+
+/// Whether an agent may not set the env name `up` (upper-cased).
+fn env_denied(up: &str) -> bool {
+    DENIED_ENV.contains(&up) || DENIED_ENV_PREFIXES.iter().any(|p| up.starts_with(p))
+}
 /// Prefixes of the same (`LD_PRELOAD`, `PYTHONSTARTUP`, `JAVA_TOOL_OPTIONS`, …).
 const DENIED_ENV_PREFIXES: &[&str] = &[
     "LD_",
@@ -317,6 +335,17 @@ const DENIED_ENV_PREFIXES: &[&str] = &[
     "DOTNET_",
     "CORECLR_",
     "COMPLUS_",
+    // C2-003: Otto's Java / Maven builders read MAVEN_REPO_LOCAL / M2_REPO as
+    // the repository they load jars and plugins from; cargo runs
+    // RUSTC_WORKSPACE_WRAPPER; OpenSSL loads engines / modules from its
+    // config; AWS_* pick credentials and endpoints; SSH_* askpass / agent.
+    "MAVEN_",
+    "M2_",
+    "GRADLE_",
+    "RUSTC_",
+    "OPENSSL_",
+    "AWS_",
+    "SSH_",
 ];
 
 /// Most `env` entries one launch takes, and the longest value: the confirm
@@ -371,9 +400,7 @@ pub fn validate_command(spec: &UiCommandSpec, args: &Value) -> Result<(), String
                 ));
             }
             let up = k.to_ascii_uppercase();
-            if DENIED_ENV.contains(&up.as_str())
-                || DENIED_ENV_PREFIXES.iter().any(|p| up.starts_with(p))
-            {
+            if env_denied(&up) {
                 return Err(format!(
                     "env '{k}' is refused: it changes which code the loader, shell or toolchain \
                      runs. Set it in the project's run configuration if the user wants it"
@@ -1188,6 +1215,137 @@ mod tests {
         let ok = json!({"target": {"kind": "main"}, "env": {"LOG_LEVEL": "debug",
             "GOOGLE_CLOUD_PROJECT": "p", "DB_HOST": "127.0.0.1", "_X": "a b"}});
         assert_eq!(validate_command(start, &ok), Ok(()));
+    }
+
+    #[test]
+    fn debug_start_refuses_build_tool_env() {
+        // C2-003: names Otto's Java / Rust / Maven builders or the tools they
+        // run read as a repository, a wrapper, a config or credentials.
+        let start = get("ide_debug_start").unwrap();
+        for bad in [
+            "MAVEN_REPO_LOCAL",
+            "M2_REPO",
+            "MAVEN_ARGS",
+            "GRADLE_USER_HOME",
+            "RUSTC_WORKSPACE_WRAPPER",
+            "OPENSSL_CONF",
+            "OPENSSL_ENGINES",
+            "OPENSSL_MODULES",
+            "AWS_PROFILE",
+            "AWS_ENDPOINT_URL",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "SSH_ASKPASS",
+            "SUDO_ASKPASS",
+            "NO_PROXY",
+            "TMPDIR",
+            "SSH_AUTH_SOCK",
+            "DEVELOPER_DIR",
+            "FLUTTER_ROOT",
+            "USER",
+            "LOGNAME",
+            "PWD",
+        ] {
+            let args = json!({"target": {"kind": "main", "file": "Main.java"}, "env": {bad: "x"}});
+            let e = validate_command(start, &args).unwrap_err();
+            assert!(e.contains("is refused"), "{bad}: {e}");
+        }
+    }
+
+    /// Env names the IDE engine reads that an agent may still set: each one
+    /// was looked at and changes no code, repository, endpoint or credential.
+    const REVIEWED_ENV_READS: &[&str] = &[
+        // Database containers' own variables (DB Watch reads them from a container).
+        "CLICKHOUSE_DB",
+        "CLICKHOUSE_PASSWORD",
+        "CLICKHOUSE_USER",
+        "MARIADB_DATABASE",
+        "MARIADB_PASSWORD",
+        "MARIADB_ROOT_PASSWORD",
+        "MARIADB_USER",
+        "MONGO_INITDB_DATABASE",
+        "MONGO_INITDB_ROOT_PASSWORD",
+        "MONGO_INITDB_ROOT_USERNAME",
+        "MONGODB_DATABASE",
+        "MYSQL_DATABASE",
+        "MYSQL_PASSWORD",
+        "MYSQL_ROOT_PASSWORD",
+        "MYSQL_USER",
+        "POSTGRES_DB",
+        "POSTGRES_PASSWORD",
+        "POSTGRES_USER",
+        "REDIS_PASSWORD",
+        // Runtime tuning and app settings.
+        "GOGC",
+        "GOMEMLIMIT",
+        "RA_LRU_CAP",
+        "SHLVL",
+        "SPRING_PROFILES_ACTIVE",
+        // Fixture names inside the shell-env probe's tests.
+        "FAKE_VAR",
+        "GO_DEBUGGING_PRODAMS",
+        "MULTILINE_CERT",
+        "TRAILING",
+    ];
+
+    /// Every env name the IDE engine (launch, builders, adapters, toolchains)
+    /// looks up by literal is either refused to an agent or reviewed above —
+    /// a new lookup fails here until someone decides (C2-003).
+    #[test]
+    #[allow(clippy::disallowed_methods)] // a sync test walking source files
+    fn every_env_name_the_ide_reads_is_decided() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs")
+                    && !p.to_string_lossy().contains("test")
+                {
+                    out.push(p);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../otto-ide/src");
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+        assert!(files.len() > 50, "otto-ide sources not found at {root:?}");
+        let mut undecided = std::collections::BTreeSet::new();
+        let mut seen = 0;
+        for f in &files {
+            let text = std::fs::read_to_string(f).unwrap();
+            for call in ["get(", "var(", "var_os(", "contains_key(", "remove("] {
+                for (i, _) in text.match_indices(call) {
+                    let rest = text[i + call.len()..].trim_start();
+                    let Some(rest) = rest.strip_prefix('"') else {
+                        continue;
+                    };
+                    let name: String = rest.chars().take_while(|c| *c != '"').collect();
+                    let env_like = name.len() >= 3
+                        && name.starts_with(|c: char| c.is_ascii_uppercase())
+                        && name
+                            .chars()
+                            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+                    if !env_like {
+                        continue;
+                    }
+                    seen += 1;
+                    if !env_denied(&name) && !REVIEWED_ENV_READS.contains(&name.as_str()) {
+                        undecided.insert(format!(
+                            "{name} ({})",
+                            f.strip_prefix(&root).unwrap().display()
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            seen > 30,
+            "the scan found only {seen} env reads — is it still looking?"
+        );
+        assert!(
+            undecided.is_empty(),
+            "decide (deny, or add to REVIEWED_ENV_READS): {undecided:#?}"
+        );
     }
 
     #[test]

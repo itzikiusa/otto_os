@@ -286,6 +286,9 @@
     </button>
   </header>
 
+  {#if ideDbWatch.prodWaiting}
+    <button type="button" class="dbw-prod" onclick={() => void ideDbWatch.watchProd()} data-testid="ide-dbw-prod-waiting">Production target — click to watch</button>
+  {/if}
   <div class="dbw-body" bind:this={bodyEl}>
     <LoadState
       what="the database watch"
@@ -356,6 +359,8 @@
   .dbw-body { flex: 1; min-block-size: 0; min-inline-size: 0; overflow: auto; }
   .dbw-note { margin: 0; padding-block: var(--sp-3); padding-inline: var(--sp-4); color: var(--text-dim); font-size: var(--fs-xs); border-block-end: 1px solid var(--separator); }
   .dbw-quiet { border-block-end: 0; }
+  .dbw-prod { flex-shrink: 0; padding-block: var(--sp-2); padding-inline: var(--sp-4); border: 0; border-block-end: 1px solid var(--separator); background: var(--danger-soft); color: var(--danger); font-size: var(--fs-xs); text-align: start; cursor: pointer; }
+  .dbw-prod:hover { text-decoration: underline; }
   @container (max-width: 620px) { .dbw-caption { display: none; } }
   @container (max-width: 480px) { .dbw-seg { display: none; } }
 </style>

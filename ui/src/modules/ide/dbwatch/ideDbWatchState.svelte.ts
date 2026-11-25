@@ -104,6 +104,9 @@ class IdeDbWatchController {
   /** The strip asked to show this table (the panel scrolls to it). */
   focusObject = $state('');
   liveWatch = $state(false);
+  /** A launch found a production target: nothing is armed or asked on its own;
+   *  the panel / strip offer "Production target — click to watch". */
+  prodWaiting = $state<{ bind: IdeDbWatchBind; start?: Omit<IdeDbWatchStartReq, 'root'> } | null>(null);
 
   private gen = 0;
   private readSeq = 0;
@@ -147,6 +150,7 @@ class IdeDbWatchController {
     this.pendingTarget = null;
     this.focusObject = '';
     this.liveWatch = false;
+    this.prodWaiting = null;
     this.liveBind = null;
     this.seenDebug = '';
     this.stoppedDebug = '';
@@ -228,7 +232,10 @@ class IdeDbWatchController {
     await this.restoring;
     const w = this.watch;
     if (w) {
-      if (w.target.kind === 'saved' && !sameBind(w.bind, bind)) await this.bind(bind, { asker: 'Otto, for the debug session that just started' });
+      if (w.target.kind !== 'saved' || sameBind(w.bind, bind)) return;
+      // Never a modal on a launch: a prod watch waits for the person's click.
+      if (isProdTarget(w.target)) this.prodWaiting = { bind };
+      else await this.bind(bind);
       return;
     }
     const mem = this.memory();
@@ -236,8 +243,10 @@ class IdeDbWatchController {
     const id = mem.target.connection_id;
     await this.discover();
     const conn = this.savedConnections.find((c) => c.connection_id === id);
-    if (!conn || isProdTarget(conn)) return;
-    await this.start({ target: mem.target, database: mem.database, items: mem.items, bind }, { auto: true });
+    if (!conn) return;
+    const req = { target: mem.target, database: mem.database, items: mem.items, bind };
+    if (isProdTarget(conn)) this.prodWaiting = { bind, start: req };
+    else await this.start(req, { auto: true });
   }
 
   /** The first stop (or a run's start): arm on the run's own database. */
@@ -408,9 +417,12 @@ class IdeDbWatchController {
     if (!w) return false;
     const gen = this.gen;
     const req: Record<string, unknown> = { ...body };
-    // Prod: every PATCH (items or a new session's bind) needs the person's typed confirm.
+    // Prod: every PATCH needs the person's confirm; removing tables (it reads
+    // less) is that click itself, anything else asks for the typed name.
     if (isProdTarget(w.target)) {
-      if (!(await this.confirmProd(w.target.label, body.items ?? this.specs(), opts.asker ?? 'You'))) return false;
+      const cur = new Set(this.specs().map((i) => JSON.stringify(i)));
+      const shrink = !body.bind && !!body.items && body.items.length < cur.size && body.items.every((i) => cur.has(JSON.stringify(i)));
+      if (!shrink && !(await this.confirmProd(w.target.label, body.items ?? this.specs(), opts.asker ?? 'You'))) return false;
       req.confirm_production = true;
     }
     this.refreshing = true;
@@ -460,6 +472,14 @@ class IdeDbWatchController {
     const target = this.targetOf(refOfWatch(w));
     await this.stop();
     this.pendingTarget = target;
+  }
+
+  /** "Production target — click to watch": the person's click, through the typed confirm. */
+  async watchProd(): Promise<void> {
+    const p = this.prodWaiting;
+    if (!p) return;
+    const ok = p.start ? Boolean(await this.start(p.start)) : await this.patch({ bind: p.bind });
+    if (ok && this.prodWaiting === p) this.prodWaiting = null;
   }
 
   async bind(b: IdeDbWatchBind, opts: DbWatchStartOpts = {}): Promise<void> {

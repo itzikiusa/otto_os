@@ -22,6 +22,9 @@ import type {
 import { bsonScalar } from '../../../lib/jsonTree/bson.ts';
 import { flattenPaths } from '../../../lib/jsonTree/expansion-plan.ts';
 import { envTone } from '../../../lib/status.ts';
+import { matchesEngine } from '../../../lib/dbWatchMatch.ts';
+
+export { matchesEngine };
 
 export const IDE_DB_ENGINES: readonly { id: IdeDbEngine; label: string }[] = [
   { id: 'mysql', label: 'MySQL' },
@@ -129,14 +132,6 @@ export function pickAutoTarget(
     if (hit) return hit;
   }
   return own[0];
-}
-
-const SQL_ENGINES: ReadonlySet<IdeDbEngine> = new Set(['mysql', 'postgres', 'clickhouse']);
-
-/** Detection names any SQL string `mysql`; on a SQL target the target's own
- *  verification (`verified` set) decides, whatever SQL engine it is. */
-export function matchesEngine(d: IdeDetectedDbAccess, engine: IdeDbEngine): boolean {
-  return d.engine === engine || (SQL_ENGINES.has(d.engine) && SQL_ENGINES.has(engine) && d.verified != null);
 }
 
 /** Ranked objects of one engine that exist on the target (`verified` false =

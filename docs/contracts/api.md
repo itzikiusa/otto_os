@@ -4949,8 +4949,10 @@ audit — then through the UI bridge (`crates/otto-server/src/ui_bridge.rs`):
    without control / BiDi / zero-width characters, and may not name a loader,
    shell, toolchain, proxy or credential-file variable (`PATH`, `HOME`, `LD_*`,
    `DYLD_*`, `GOFLAGS`, `GO_*` incl. `GO_BUILD_FLAGS`, `DLV_*`, `OTTO_*`,
-   `NODE_OPTIONS`, `PYTHON*`, `JAVA_TOOL_OPTIONS`, `DOCKER_*`, `KUBECONFIG`,
-   `AWS_CONFIG_FILE`, `*_PROXY`, `SSL_CERT_*`, …); `build_tags` are plain tag
+   `NODE_OPTIONS`, `PYTHON*`, `JAVA_TOOL_OPTIONS`, `MAVEN_*`, `M2_*`, `GRADLE_*`,
+   `RUSTC_*`, `DOCKER_*`, `KUBECONFIG`, `AWS_*`, `SSH_*`, `OPENSSL_*`, `*_PROXY`,
+   `SSL_CERT_*`, `TMPDIR`, …; a test fails when the IDE engine starts reading a
+   new env name nobody classified); `build_tags` are plain tag
    names (`[A-Za-z0-9_.]`);
    `ide_debug_request`'s `url` must be http(s) on localhost / 127.0.0.0/8 / ::1; a `connection_id` (id OR name) is resolved
    as the owner — a connection they cannot list is `not_found` / `forbidden`.

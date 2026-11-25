@@ -17,7 +17,8 @@
 // name, capped) and redacted by the bridge before the agent sees them.
 
 import { api } from '../api/client';
-import type { ApiResponse, IdeDbWatchDetectResp, IdeDebugPortResp, IdeDebugSessionSnapshot, IdeVariable } from '../api/types';
+import { matchesEngine } from '../dbWatchMatch';
+import type { ApiResponse, IdeDbWatchDetectResp, IdeDetectedDbAccess, IdeDebugPortResp, IdeDebugSessionSnapshot, IdeVariable } from '../api/types';
 import { envTone } from '../status';
 import { agentName } from '../stores/uiControl.svelte';
 import { ws } from '../stores/workspace.svelte';
@@ -26,7 +27,7 @@ import type { IdeDbWatch, IdeDbWatchTargetRef } from '../api/types/ide-db-watch'
 import { ideDbWatchPort, type IdeDbWatchAgentOps } from './ideDbWatchPort';
 import { idePort, type IdeAgentBreakpointSpec, type IdeDebugCommand, type IdeDebugTarget, type IdePort } from './idePort';
 import {
-  autoItems, breakpointCode, childNamed, childPath, clip, EVAL_MAX, sensitiveName, spelledOut, visibleValue, newMemory, pathSegments, relPath, shapeBreakpoints, shapeDbRead,
+  breakpointCode, childNamed, childPath, clip, EVAL_MAX, sensitiveName, spelledOut, visibleValue, newMemory, pathSegments, relPath, shapeBreakpoints, shapeDbRead,
   shapeResponse, shapeResult, shapeVariable, SOURCE_RADIUS, startConfirmText, uniqueKey, userMoved, type DebugMemory,
 } from './ideShape';
 import { errText } from './pagePort';
@@ -171,6 +172,24 @@ async function stopDb(debugId: string): Promise<unknown> {
   } catch (e) {
     return { error: errText(e) };
   }
+}
+
+/** The tables to watch on a target of `engine`: the code's names that the
+ *  target has (`verified` false = it does not), deduplicated, capped — by
+ *  the panel's own engine rule (`matchesEngine`, lib/dbWatchMatch.ts). */
+function autoItems(
+  detected: readonly IdeDetectedDbAccess[],
+  engine: string,
+  local: boolean,
+): { object: string }[] {
+  const seen = new Set<string>();
+  const out: { object: string }[] = [];
+  for (const d of detected) {
+    if (!matchesEngine(d, engine) || d.verified === false || seen.has(d.object_name)) continue;
+    seen.add(d.object_name);
+    out.push({ object: d.object_name });
+  }
+  return out.slice(0, local ? 8 : 3);
 }
 
 /** Start (or replace) the project's DB Watch for the agent's session. With

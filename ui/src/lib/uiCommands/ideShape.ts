@@ -342,27 +342,6 @@ export function childPath(parent: string, name: string): string {
   return name.startsWith('[') ? `${parent}${name}` : `${parent}.${name}`;
 }
 
-const SQL_ENGINES = new Set(['mysql', 'postgres', 'clickhouse']);
-
-/** The tables to watch on a target of `engine`: the code's names that the
- *  target has (`verified` false = it does not), deduplicated, capped — the
- *  rule the DB Watch panel uses (modules/ide/dbwatch `pickAutoItems`); SQL
- *  strings name tables of any SQL engine once the target verified them. */
-export function autoItems(
-  detected: readonly { engine: string; object_name: string; verified?: boolean | null }[],
-  engine: string,
-  local: boolean,
-): { object: string }[] {
-  const seen = new Set<string>();
-  const out: { object: string }[] = [];
-  for (const d of detected) {
-    const same = d.engine === engine || (SQL_ENGINES.has(d.engine) && SQL_ENGINES.has(engine) && d.verified != null);
-    if (!same || d.verified === false || seen.has(d.object_name)) continue;
-    seen.add(d.object_name);
-    out.push({ object: d.object_name });
-  }
-  return out.slice(0, local ? 8 : 3);
-}
 
 /** DB Watch rows for the agent: per object the counts and ≤ `maxRows` rows,
  *  each row an object keyed by COLUMN (so it masks by name) — a changed row
