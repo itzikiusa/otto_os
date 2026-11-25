@@ -545,3 +545,590 @@ func load(ctx context.Context) {
     );
     assert_eq!(saved_snap["snapshot"]["rows"].as_array().unwrap().len(), 2);
 }
+
+// ── Watch engine (`/ide/db-watch/watches`) ────────────────────────────────
+
+struct WatchEnv {
+    base: String,
+    pool: DbPool,
+    root_tok: String,
+    editor_tok: String,
+    events: tokio::sync::broadcast::Receiver<otto_core::event::Event>,
+    root_dir: tempfile::TempDir,
+    ctx_ide: Arc<otto_ide::IdeEngine>,
+    db: Arc<otto_dbviewer::DbViewerService>,
+}
+
+async fn watch_env(redis_port: u16) -> WatchEnv {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("proj")).unwrap();
+    let pool = otto_server::test_support::mem_pool().await;
+    let root = seed_user(&pool, "root", true).await;
+    let editor = seed_user(&pool, "editor", false).await;
+    seed_workspace(&pool, "ws1", &tmp.path().join("proj")).await;
+    add_member(&pool, "ws1", &editor.id, "editor").await;
+    GrantsRepo::new(pool.clone())
+        .set_grants(
+            &editor.id,
+            &[
+                (Feature::Agents, Capability::Edit),
+                (Feature::Database, Capability::View),
+            ],
+        )
+        .await
+        .unwrap();
+    let auth = AuthRepo::new(pool.clone());
+    let root_tok = auth
+        .issue_api_token(&root.id, Some("root"))
+        .await
+        .unwrap()
+        .0;
+    let editor_tok = auth
+        .issue_api_token(&editor.id, Some("ed"))
+        .await
+        .unwrap()
+        .0;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let mut ctx = ServerCtx::for_tests(&pool, tmp.path().join("data")).await;
+    ctx.base_url = base.clone();
+    ctx.ide.db_watch.register_loopback_target(
+        "miniredis:test",
+        "miniredis",
+        IdeDbEngine::Redis,
+        redis_port,
+        None,
+        None,
+        Some("0".into()),
+    );
+    let events = ctx.events.subscribe();
+    let ctx_ide = Arc::clone(&ctx.ide);
+    let db = Arc::clone(&ctx.db_explorer);
+    let (api_extras, root_extras) = otto_server::modules::module_routers(&ctx);
+    let app = otto_server::build_router(ctx, api_extras, root_extras);
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    WatchEnv {
+        base,
+        pool,
+        root_tok,
+        editor_tok,
+        events,
+        root_dir: tmp,
+        ctx_ide,
+        db,
+    }
+}
+
+async fn call(
+    method: reqwest::Method,
+    url: String,
+    tok: &str,
+    body: Option<Value>,
+) -> (u16, Value) {
+    let mut req = reqwest::Client::new().request(method, url).bearer_auth(tok);
+    if let Some(b) = body {
+        req = req.json(&b);
+    }
+    let res = req.send().await.unwrap();
+    let status = res.status().as_u16();
+    (status, res.json().await.unwrap_or(Value::Null))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_watch_checkpoints_diffs_masks_for_agents_and_belongs_to_its_owner() {
+    let data = Arc::new(Mutex::new(BTreeMap::from([
+        ("wallet:bal:1".to_string(), "100.00".to_string()),
+        ("auth:token:1".to_string(), "hunter2".to_string()),
+    ])));
+    let port = spawn_mini_resp_server(Arc::clone(&data)).await;
+    let mut env = watch_env(port).await;
+    let root = env
+        .root_dir
+        .path()
+        .join("proj")
+        .to_string_lossy()
+        .to_string();
+    let url = |p: &str| format!("{}/api/v1/ide/db-watch{p}", env.base);
+    let start = json!({
+        "root": root,
+        "target": {"kind": "ephemeral", "ephemeral_id": "miniredis:test"},
+        "items": [{"object": "wallet:"}, {"object": "auth:"}],
+    });
+
+    // Ephemeral targets are root-only.
+    let (s, _) = call(
+        reqwest::Method::POST,
+        url("/watches"),
+        &env.editor_tok,
+        Some(start.clone()),
+    )
+    .await;
+    assert_eq!(s, 403);
+
+    let (s, w) = call(
+        reqwest::Method::POST,
+        url("/watches"),
+        &env.root_tok,
+        Some(start),
+    )
+    .await;
+    assert_eq!(s, 200, "{w}");
+    let id = w["id"].as_str().unwrap().to_string();
+    assert_eq!(w["checkpoint_count"], 1);
+    assert_eq!(w["latest"]["reason"], "start");
+    assert_eq!(w["target"]["local"], true);
+    assert_eq!(w["items"][0]["primary_key"], json!(["key"]));
+    let ev = env.events.recv().await.unwrap();
+    assert!(
+        matches!(
+            ev,
+            otto_core::event::Event::IdeDbWatchCheckpoint { seq: 0, .. }
+        ),
+        "{ev:?}"
+    );
+
+    data.lock()
+        .unwrap()
+        .insert("wallet:bal:1".into(), "175.50".into());
+    data.lock()
+        .unwrap()
+        .insert("auth:token:1".into(), "hunter3".into());
+    let (s, r) = call(
+        reqwest::Method::POST,
+        url(&format!("/watches/{id}/snapshot")),
+        &env.root_tok,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(s, 200, "{r}");
+    assert_eq!(
+        (r["from_seq"].clone(), r["to_seq"].clone()),
+        (json!(0), json!(1))
+    );
+    let wallet = &r["items"][0];
+    assert_eq!(wallet["modified_count"], 1, "{wallet}");
+    let change = &wallet["diffs"][0]["changes"][0];
+    assert_eq!(
+        (change["before"].clone(), change["after"].clone()),
+        (json!("100.00"), json!("175.50"))
+    );
+    assert_eq!(
+        r["items"][1]["diffs"][0]["changes"][0]["after"], "hunter3",
+        "a person reads raw values"
+    );
+
+    // What an agent reads is masked; the change still shows.
+    let (s, a) = call(
+        reqwest::Method::GET,
+        url(&format!("/watches/{id}?for_agent=1")),
+        &env.root_tok,
+        None,
+    )
+    .await;
+    assert_eq!(s, 200);
+    let token = &a["items"][1]["diffs"][0];
+    assert_eq!(token["masked"], true, "{token}");
+    assert_eq!(token["changes"][0]["masked"], true);
+    assert!(!a.to_string().contains("hunter"), "{a}");
+
+    // Owner only.
+    let (s, _) = call(
+        reqwest::Method::GET,
+        url(&format!("/watches/{id}")),
+        &env.editor_tok,
+        None,
+    )
+    .await;
+    assert_eq!(s, 404);
+    let (s, l) = call(
+        reqwest::Method::GET,
+        url(&format!("/watches?root={root}")),
+        &env.editor_tok,
+        None,
+    )
+    .await;
+    assert_eq!((s, l["watches"].as_array().unwrap().len()), (200, 0));
+    let (_, l) = call(
+        reqwest::Method::GET,
+        url(&format!("/watches?root={root}")),
+        &env.root_tok,
+        None,
+    )
+    .await;
+    assert_eq!(l["watches"].as_array().unwrap().len(), 1);
+
+    // Objects of the target.
+    let (s, o) = call(
+        reqwest::Method::POST,
+        url("/objects"),
+        &env.root_tok,
+        Some(json!({
+            "root": root, "target": {"kind": "ephemeral", "ephemeral_id": "miniredis:test"}
+        })),
+    )
+    .await;
+    assert_eq!(s, 200, "{o}");
+
+    let (s, _) = call(
+        reqwest::Method::DELETE,
+        url(&format!("/watches/{id}")),
+        &env.root_tok,
+        None,
+    )
+    .await;
+    assert_eq!(s, 200);
+    let (s, _) = call(
+        reqwest::Method::GET,
+        url(&format!("/watches/{id}")),
+        &env.root_tok,
+        None,
+    )
+    .await;
+    assert_eq!(s, 404);
+    drop(env.ctx_ide);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_production_target_needs_a_person_confirm_and_never_a_remembered_one() {
+    let data = Arc::new(Mutex::new(BTreeMap::from([(
+        "k:1".to_string(),
+        "v".to_string(),
+    )])));
+    let port = spawn_mini_resp_server(data).await;
+    let env = watch_env(port).await;
+    let root_user = UsersRepo::new(env.pool.clone())
+        .get(&"root".to_string())
+        .await
+        .unwrap();
+    let prod = ConnectionsRepo::new(env.pool.clone())
+        .create(NewConnection {
+            workspace_id: Some("ws1".into()),
+            name: "Prod Redis".into(),
+            kind: ConnectionKind::Redis,
+            params: json!({"host": "127.0.0.1", "port": port}),
+            secret_ref: None,
+            first_command: None,
+            section_id: None,
+            environment: Environment::Prod,
+            read_only: false,
+            created_by: root_user.id.clone(),
+        })
+        .await
+        .unwrap();
+    let root = env
+        .root_dir
+        .path()
+        .join("proj")
+        .to_string_lossy()
+        .to_string();
+    let url = format!("{}/api/v1/ide/db-watch/watches", env.base);
+    let mut body = json!({
+        "root": root,
+        "target": {"kind": "saved", "connection_id": prod.id},
+        "items": [{"object": "k:"}],
+    });
+    let (s, e) = call(
+        reqwest::Method::POST,
+        url.clone(),
+        &env.root_tok,
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(s, 403, "{e}");
+    assert!(e.to_string().contains("production"), "{e}");
+    body["confirm_production"] = json!(true);
+    let (s, w) = call(
+        reqwest::Method::POST,
+        url.clone(),
+        &env.root_tok,
+        Some(body),
+    )
+    .await;
+    assert_eq!(s, 200, "{w}");
+    assert_eq!(w["target"]["environment"], "prod");
+    assert_eq!(w["target"]["local"], true);
+    // Changing it again needs the confirm again.
+    let id = w["id"].as_str().unwrap();
+    let (s, _) = call(
+        reqwest::Method::PATCH,
+        format!("{url}/{id}"),
+        &env.root_tok,
+        Some(json!({"items": [{"object": "k:"}, {"object": "x:"}]})),
+    )
+    .await;
+    assert_eq!(s, 403);
+}
+
+/// Real engines (OTTO_DBW_E2E=1, containers from the dbw-engine report):
+/// MariaDB 23306 (user nopw, db pr_bo_1), Postgres 25432, Mongo 27717,
+/// ClickHouse 28123, Redis 26379.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn real_engines_list_describe_and_survive_rapid_stepping() {
+    if std::env::var("OTTO_DBW_E2E").is_err() {
+        return;
+    }
+    let env = watch_env(1).await;
+    let root_user = UsersRepo::new(env.pool.clone())
+        .get(&"root".to_string())
+        .await
+        .unwrap();
+    let root = env
+        .root_dir
+        .path()
+        .join("proj")
+        .to_string_lossy()
+        .to_string();
+    let url = |p: &str| format!("{}/api/v1/ide/db-watch{p}", env.base);
+    let reg = &env.ctx_ide.db_watch;
+    reg.register_loopback_target(
+        "e:pg",
+        "pg",
+        IdeDbEngine::Postgres,
+        25432,
+        Some("otto".into()),
+        Some("ottopw".into()),
+        Some("shopdb".into()),
+    );
+    reg.register_loopback_target(
+        "e:mongo",
+        "mongo",
+        IdeDbEngine::Mongodb,
+        27717,
+        Some("otto".into()),
+        Some("ottopw".into()),
+        Some("shopdb".into()),
+    );
+    reg.register_loopback_target(
+        "e:ch",
+        "ch",
+        IdeDbEngine::Clickhouse,
+        28123,
+        Some("otto".into()),
+        Some("ottopw".into()),
+        Some("shopdb".into()),
+    );
+    reg.register_loopback_target(
+        "e:redis",
+        "redis",
+        IdeDbEngine::Redis,
+        26379,
+        None,
+        None,
+        Some("0".into()),
+    );
+    reg.register_loopback_target(
+        "e:maria",
+        "maria",
+        IdeDbEngine::Mysql,
+        23306,
+        Some("nopw".into()),
+        None,
+        Some("pr_bo_1".into()),
+    );
+
+    // Spike 2: list + describe on every engine.
+    for (eph, expect, pk) in [
+        ("e:maria", "session_route", json!(["game_id", "account_id"])),
+        ("e:pg", "users", json!(["id"])),
+        ("e:mongo", "orders", json!(["_id"])),
+        ("e:ch", "events", json!(["id"])),
+        ("e:redis", "cart:", json!(["key"])),
+    ] {
+        let target = json!({"kind": "ephemeral", "ephemeral_id": eph});
+        let (s, o) = call(
+            reqwest::Method::POST,
+            url("/objects"),
+            &env.root_tok,
+            Some(json!({"root": root, "target": target})),
+        )
+        .await;
+        assert_eq!(s, 200, "{eph}: {o}");
+        let names: Vec<&str> = o["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|x| x["name"].as_str())
+            .collect();
+        assert!(names.contains(&expect), "{eph}: {names:?}");
+        let eng_root = format!("{root}/{}", eph.replace(':', "_"));
+        std::fs::create_dir_all(&eng_root).unwrap();
+        let (s, w) = call(
+            reqwest::Method::POST,
+            url("/watches"),
+            &env.root_tok,
+            Some(json!({
+                "root": eng_root, "target": target, "items": [{"object": expect}]
+            })),
+        )
+        .await;
+        assert_eq!(s, 200, "{eph}: {w}");
+        assert_eq!(w["items"][0]["primary_key"], pk, "{eph}: {w}");
+        assert!(w["items"][0]["error"].is_null(), "{eph}: {w}");
+        let (_, r) = call(
+            reqwest::Method::GET,
+            url(&format!("/watches/{}?rows=1", w["id"].as_str().unwrap())),
+            &env.root_tok,
+            None,
+        )
+        .await;
+        eprintln!(
+            "{eph}: estimate {} · {} · {}",
+            w["items"][0]["row_estimate"],
+            r["items"][0]["window_note"],
+            r["items"][0]["executed_query"]
+        );
+        assert!(r["items"][0]["error"].is_null(), "{eph}: {r}");
+    }
+
+    // A saved MariaDB connection (shared pool): an INSERT on a 400-row table
+    // shows; 20 stops in 2 s with a 500 ms item; no history rows.
+    let saved = ConnectionsRepo::new(env.pool.clone())
+        .create(NewConnection {
+            workspace_id: None,
+            name: "maria".into(),
+            kind: ConnectionKind::Mysql,
+            params: json!({"host": "127.0.0.1", "port": 23306, "user": "nopw", "db": "pr_bo_1"}),
+            secret_ref: None,
+            first_command: None,
+            section_id: None,
+            environment: Environment::Dev,
+            read_only: false,
+            created_by: root_user.id.clone(),
+        })
+        .await
+        .unwrap();
+    let (s, w) = call(reqwest::Method::POST, url("/watches"), &env.root_tok, Some(json!({
+        "root": root,
+        "target": {"kind": "saved", "connection_id": saved.id},
+        "items": [{"object": "session_info"}, {"object": "session_route"}, {"object": "slow_v"}],
+    }))).await;
+    assert_eq!(s, 200, "{w}");
+    assert_eq!(w["target"]["local"], true);
+    let id = w["id"].as_str().unwrap().to_string();
+    let conns_before = maria_connections();
+    let mysql = |sql: &str| {
+        let out = std::process::Command::new("docker")
+            .args([
+                "exec",
+                "nx-dbw-maria",
+                "mariadb",
+                "-uotto",
+                "-pottopw",
+                "pr_bo_1",
+                "-e",
+                sql,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    mysql("INSERT INTO session_info (account_id, status) VALUES (9001, 'new')");
+    let started = std::time::Instant::now();
+    let mut tasks = Vec::new();
+    for i in 0..20 {
+        let (u, tok) = (
+            url(&format!("/watches/{id}/snapshot")),
+            env.root_tok.clone(),
+        );
+        tasks.push(tokio::spawn(async move {
+            let (s, r) = call(
+                reqwest::Method::POST,
+                u,
+                &tok,
+                Some(json!({"label": format!("stop {i}")})),
+            )
+            .await;
+            (s, r)
+        }));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let mut seqs = Vec::new();
+    for t in tasks {
+        let (s, r) = t.await.unwrap();
+        assert_eq!(s, 200, "{r}");
+        for it in r["items"].as_array().unwrap() {
+            assert!(it["error"].is_null(), "no pool timeouts: {it}");
+        }
+        seqs.push(r["to_seq"].as_u64().unwrap_or(0));
+    }
+    let took = started.elapsed();
+    let conns_after = maria_connections();
+    let (_, r) = call(
+        reqwest::Method::GET,
+        url(&format!("/watches/{id}?compare=start")),
+        &env.root_tok,
+        None,
+    )
+    .await;
+    let info = &r["items"][0];
+    assert_eq!(
+        info["added_count"], 1,
+        "the INSERT on a 400-row table shows: {info}"
+    );
+    assert_eq!(
+        info["removed_count"], 0,
+        "the row pushed out of the window is not a delete: {info}"
+    );
+    let checkpoints = r["watch"]["checkpoint_count"].as_u64().unwrap();
+    eprintln!(
+        "rapid: 20 requests in {took:?} -> {checkpoints} checkpoints; MariaDB connections +{}; window: {}",
+        conns_after - conns_before,
+        info["window_note"]
+    );
+    assert!(checkpoints < 21, "coalesced");
+    let history = otto_state::DbExplorerRepo::new(env.pool.clone())
+        .list_history(&saved.id, 100)
+        .await
+        .unwrap();
+    assert!(
+        history.is_empty(),
+        "no DB Explorer history rows: {}",
+        history.len()
+    );
+
+    // Spike 1 baseline: the old path (`run_read_only`, a client deadline)
+    // retires the pooled MySQL session after every read.
+    let before = maria_connections();
+    for _ in 0..10 {
+        let q = otto_dbviewer::types::QueryRequest {
+            statement: "SELECT * FROM session_route LIMIT 150".into(),
+            timeout_ms: Some(10_000),
+            ..Default::default()
+        };
+        env.db
+            .run_read_only(&saved.id, &root_user.id, &q)
+            .await
+            .unwrap();
+    }
+    eprintln!(
+        "old path: 10 reads -> MariaDB connections +{}",
+        maria_connections() - before
+    );
+}
+
+fn maria_connections() -> i64 {
+    let out = std::process::Command::new("docker")
+        .args([
+            "exec",
+            "nx-dbw-maria",
+            "mariadb",
+            "-uroot",
+            "-prootpw",
+            "-N",
+            "-e",
+            "SHOW GLOBAL STATUS LIKE 'Connections'",
+        ])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap()
+}

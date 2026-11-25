@@ -504,7 +504,8 @@ impl Driver for PostgresDriver {
         };
         let pool = self.pool(cfg).await?;
         let est: Option<f64> = sqlx::query_scalar(
-            "SELECT c.reltuples FROM pg_catalog.pg_class c \
+            // `reltuples` is a `real`: as f64 it would never decode.
+            "SELECT c.reltuples::float8 FROM pg_catalog.pg_class c \
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = $1 AND c.relname = $2",
         )

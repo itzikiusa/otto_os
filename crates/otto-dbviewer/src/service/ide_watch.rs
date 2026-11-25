@@ -278,9 +278,11 @@ impl DbViewerService {
                 )
             }
         };
+        // Postgres: `database` is a schema (default `public`), never the
+        // connection's own database name.
         let database = trimmed(req.database.as_deref())
             .map(str::to_string)
-            .or(default_db);
+            .or(default_db.filter(|_| req.engine != Engine::Postgres));
         let mut out = match req.op {
             WatchOp::ListObjects => {
                 let (db, objects) = self.watch_list(&via, req.engine, database).await?;
@@ -434,7 +436,11 @@ impl DbViewerService {
             .into_iter()
             .filter_map(|n| match n.kind {
                 NodeKind::Table | NodeKind::Collection => Some(n.label),
-                NodeKind::KeyNamespace => Some(format!("{}:", n.label)),
+                // The namespace node reads `auth:*`; a watch item is the prefix.
+                NodeKind::KeyNamespace => Some(format!(
+                    "{}:",
+                    n.label.trim_end_matches('*').trim_end_matches(':')
+                )),
                 _ => None,
             })
             .collect();
