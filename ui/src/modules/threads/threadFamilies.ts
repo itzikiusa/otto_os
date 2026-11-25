@@ -25,7 +25,11 @@ export function inboxOrder(
   /** Recency (ISO time, newest first): last activity unless the caller knows better. */
   at: (s: Session) => string = (s) => s.last_active_at,
 ): FamilyRow[] {
-  const sorted = [...list].sort((a, b) => score(a) - score(b) || at(b).localeCompare(at(a)));
+  // Each key once per thread, not per comparison: the sidebar's `score` walks
+  // the row's whole state, and a sort calls its comparator ~n·log n times.
+  const scoreOf = new Map(list.map((s) => [s.id, score(s)] as const));
+  const atOf = new Map(list.map((s) => [s.id, at(s)] as const));
+  const sorted = [...list].sort((a, b) => scoreOf.get(a.id)! - scoreOf.get(b.id)! || atOf.get(b.id)!.localeCompare(atOf.get(a.id)!));
   const present = new Set(sorted.map((s) => s.id));
   const childrenOf = new Map<string, Session[]>();
   const roots: { s: Session; detached: boolean }[] = [];
@@ -37,7 +41,6 @@ export function inboxOrder(
   }
   // A family sorts by its most urgent member: a parent whose child waits on
   // you rises with it (ties keep the order above — urgency, then recency).
-  const scoreOf = new Map(sorted.map((s) => [s.id, score(s)] as const));
   const famScore = (id: string, seen = new Set<string>()): number => {
     if (seen.has(id)) return Number.POSITIVE_INFINITY;
     seen.add(id);
