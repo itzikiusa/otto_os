@@ -10,6 +10,8 @@ otto-core = { workspace = true }
 otto-state = { workspace = true }
 otto-netguard = { workspace = true }
 tokio = { workspace = true }
+# A human approval wait is an `mcp.approval_wait` span.
+otto-telemetry = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -35,10 +35,14 @@ pub async fn get_async(store: &Arc<dyn SecretStore>, key: &str) -> Result<Option
     }
     let store = store.clone();
     let key = key.to_string();
-    match tokio::task::spawn_blocking(move || store.get(&key)).await {
-        Ok(r) => r,
-        Err(e) => Err(crate::Error::Internal(format!("secret read task: {e}"))),
-    }
+    // An XPC round trip (or a prompt): its own span, never the key.
+    otto_telemetry::context::measure_result("keychain.read", async move {
+        match tokio::task::spawn_blocking(move || store.get(&key)).await {
+            Ok(r) => r,
+            Err(e) => Err(crate::Error::Internal(format!("secret read task: {e}"))),
+        }
+    })
+    .await
 }
 
 /// Async-friendly [`SecretStore::put`]: the backend write runs on tokio's
@@ -123,6 +127,38 @@ mod tests {
                 n >= 20,
                 "runtime worker was parked: only {n} ticks in {elapsed:?}"
             );
+        });
+    }
+
+    /// P1-043: a backend (Keychain) read is its own span; a cache hit is not.
+    #[test]
+    fn a_backend_read_is_a_keychain_span() {
+        struct Hit;
+        impl SecretStore for Hit {
+            fn put(&self, _: &str, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn get(&self, _: &str) -> Result<Option<String>> {
+                Ok(None)
+            }
+            fn delete(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn get_cached(&self, _: &str) -> Option<Option<String>> {
+                Some(None)
+            }
+        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (miss, hit): (Arc<dyn SecretStore>, Arc<dyn SecretStore>) =
+            (Arc::new(Slow::default()), Arc::new(Hit));
+        rt.block_on(async {
+            let (_, names) = otto_telemetry::context::capture(get_async(&miss, "k")).await;
+            assert_eq!(names, ["keychain.read"]);
+            let (_, names) = otto_telemetry::context::capture(get_async(&hit, "k")).await;
+            assert!(names.is_empty(), "{names:?}");
         });
     }
 }

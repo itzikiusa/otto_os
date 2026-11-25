@@ -58,6 +58,19 @@ pub async fn wait_for_decision(
     budget: Duration,
     fallback: Duration,
 ) -> Option<bool> {
+    // A person's think time, not latency: its own span, so the call's
+    // operation time is the parent minus it.
+    let wait = wait_inner(approvals, events, approval_id, budget, fallback);
+    otto_telemetry::context::measure("mcp.approval_wait", wait).await
+}
+
+async fn wait_inner(
+    approvals: &McpApprovalRepo,
+    events: &broadcast::Sender<Event>,
+    approval_id: &str,
+    budget: Duration,
+    fallback: Duration,
+) -> Option<bool> {
     let mut rx = events.subscribe();
     let deadline = tokio::time::Instant::now() + budget;
     let id = approval_id.to_string();
@@ -151,9 +164,18 @@ mod tests {
         let slow = Duration::from_secs(60);
 
         let id = pending(&repo).await;
+        // P1-043: the wait is its own span (think time, not latency).
+        let (undecided, names) = otto_telemetry::context::capture(wait_for_decision(
+            &repo,
+            &tx,
+            &id,
+            Duration::ZERO,
+            slow,
+        ))
+        .await;
         assert_eq!(
-            wait_for_decision(&repo, &tx, &id, Duration::ZERO, slow).await,
-            None
+            (undecided, names),
+            (None, vec!["mcp.approval_wait".to_string()])
         );
 
         let (r2, tx2, id2) = (repo.clone(), tx.clone(), id.clone());
