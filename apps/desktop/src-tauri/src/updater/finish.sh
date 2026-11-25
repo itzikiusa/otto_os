@@ -24,7 +24,10 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*"; }
 die_at() { [ "${OTTO_FINISH_DIE_AT:-}" = "$1" ] && kill -9 $$; }
 journal() { printf '%s %s %s %s %s\n' "$$" "$1" "$FROM" "$TO" "$LOGF" > "$STATE.tmp" && mv -f "$STATE.tmp" "$STATE"; }
 # JavaScript for Automation (always present, unlike python3): JSON in and out.
-jxa() { /usr/bin/osascript -l JavaScript -e "$@"; }
+# Script text is ONLY the fixed first argument; every value after `--` is
+# argv (osascript would otherwise read a value starting with "-e" as more
+# script — a daemon answer could run code here).
+jxa() { _s="$1"; shift; /usr/bin/osascript -l JavaScript -e "$_s" -- "$@"; }
 # result <ok> <skip> <reason>: the outcome the next launch shows; ends the journal.
 result() {
     jxa 'function run(a){return JSON.stringify({ok:a[0]==="true",skip:a[1]==="true",from:a[2],to:a[3],reason:a[4],log:a[5]})}' \

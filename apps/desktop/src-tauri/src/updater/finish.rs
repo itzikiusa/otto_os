@@ -129,28 +129,18 @@ pub fn in_flight(updates: &Path) -> bool {
 /// Write the script and the agent, then bootstrap it. The caller quits the
 /// app right after; the script waits for `job.app_pid` to exit.
 pub fn launch(job: &Job) -> Result<PathBuf, String> {
-    if in_flight(job.updates) {
-        return Err("an update is already being installed".into());
-    }
-    let script = job.updates.join("finish.sh");
-    let plist_path = job.updates.join(format!("{LABEL}.plist"));
-    let stamp = chrono_stamp();
-    let log = job.updates.join(format!("finish-{stamp}.log"));
-    let write = |p: &Path, s: &str, mode: u32| -> std::io::Result<()> {
-        fs::write(p, s)?;
-        fs::set_permissions(p, fs::Permissions::from_mode(mode))
-    };
-    write(&script, SCRIPT, 0o700)
-        .and_then(|_| write(&plist_path, &plist(job, &script, &log), 0o600))
-        .map_err(|e| format!("could not write the installer: {e}"))?;
     let domain = format!("gui/{}", unsafe { libc::getuid() });
-    // Never boot out a finisher that is running (its journal may not exist yet).
+    // Never touch a running finisher's script, plist or job (its journal may
+    // not exist yet): check BEFORE writing anything.
     let running = Command::new("/bin/launchctl")
         .args(["print", &format!("{domain}/{LABEL}")])
         .output();
-    if running.is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("state = running")) {
+    if in_flight(job.updates)
+        || running.is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("state = running"))
+    {
         return Err("an update is already being installed".into());
     }
+    let plist_path = write_job(job)?;
     // A previous run leaves the exited job registered; bootstrap would then
     // refuse and RunAtLoad never fire.
     let _ = Command::new("/bin/launchctl")
@@ -158,7 +148,7 @@ pub fn launch(job: &Job) -> Result<PathBuf, String> {
         .output();
     let out = Command::new("/bin/launchctl")
         .args(["bootstrap", &domain])
-        .arg(&plist_path)
+        .arg(&plist_path.0)
         .output()
         .map_err(|e| format!("could not run launchctl: {e}"))?;
     if !out.status.success() {
@@ -167,7 +157,37 @@ pub fn launch(job: &Job) -> Result<PathBuf, String> {
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    Ok(log)
+    Ok(plist_path.1)
+}
+
+/// A new run: forget the previous run's outcome (a stale result must never
+/// stand in for this one's), then write the script and the agent. Returns
+/// (plist, log).
+fn write_job(job: &Job) -> Result<(PathBuf, PathBuf), String> {
+    clear_result(job.updates);
+    let script = job.updates.join("finish.sh");
+    let plist_path = job.updates.join(format!("{LABEL}.plist"));
+    let log = job.updates.join(format!("finish-{}.log", chrono_stamp()));
+    let write = |p: &Path, s: &str, mode: u32| -> std::io::Result<()> {
+        fs::write(p, s)?;
+        fs::set_permissions(p, fs::Permissions::from_mode(mode))
+    };
+    write(&script, SCRIPT, 0o700)
+        .and_then(|_| write(&plist_path, &plist(job, &script, &log), 0o600))
+        .map_err(|e| format!("could not write the installer: {e}"))?;
+    Ok((plist_path, log))
+}
+
+/// The in-flight finisher this app waited for has ended: finish whatever it
+/// left (always — a result file may be a stale one) and return its outcome.
+pub fn settle(
+    updates: &Path,
+    slot: &Path,
+    previous: &Path,
+    running_version: &str,
+) -> Option<LastResult> {
+    recover(updates, slot, previous, running_version);
+    read_result(updates)
 }
 
 /// `YYYYmmdd-HHMMSS` (UTC) without a date crate.
@@ -364,11 +384,26 @@ mod tests {
             Self::with_meta(tag, &body, open_starts_app)
         }
 
+        /// A healthy run whose bundles and updates dir sit under a folder
+        /// named with quotes, spaces, a newline and "-e".
+        fn with_odd_dirs(tag: &str) -> Run {
+            Self::build(tag, r#"{"version":"1.0.1"}"#, true, "we'ird \"q\" -e x\nnl")
+        }
+
         fn with_meta(tag: &str, meta_body: &str, open_starts_app: bool) -> Run {
+            Self::build(tag, meta_body, open_starts_app, "")
+        }
+
+        fn build(tag: &str, meta_body: &str, open_starts_app: bool, odd: &str) -> Run {
             let dir = temp_dir(&format!("finish-{tag}"));
-            let app = Kit::plain_bundle(&dir.join("installed"), "1.0.0", false, false);
-            let slot = Kit::plain_bundle(&dir.join("updates/staging"), "1.0.1", false, false);
-            let updates = dir.join("updates");
+            let base = if odd.is_empty() {
+                dir.clone()
+            } else {
+                dir.join(odd)
+            };
+            let app = Kit::plain_bundle(&base.join("installed"), "1.0.0", false, false);
+            let slot = Kit::plain_bundle(&base.join("updates/staging"), "1.0.1", false, false);
+            let updates = base.join("updates");
             let prev = updates.join("previous").join(BUNDLE);
             // ≤ 15 chars: pgrep -x matches the kernel's 16-byte process name.
             let exe = dir.join("bin/otto-upd-fake");
@@ -582,6 +617,89 @@ mod tests {
             "{opened}"
         );
         assert!(run.result().reason.contains("Nothing changed"));
+    }
+
+    /// C2-001: a daemon answer starting with "-e" is argv, never more
+    /// script for osascript (it used to run as JXA inside the finisher).
+    #[test]
+    fn a_hostile_daemon_answer_cannot_run_code_in_the_finisher() {
+        let marker = std::env::temp_dir().join(format!("otto-upd-pwned-{}", std::process::id()));
+        let _ = fs::remove_file(&marker);
+        let body = format!(
+            r#"-eObjC.import("Foundation");$.NSString.stringWithString("x").writeToFileAtomicallyEncodingError("{}",true,4,null);"1.0.1""#,
+            marker.display()
+        );
+        let run = Run::with_meta("inject", &body, true);
+        assert_eq!(
+            run.finish(quitting_app(), 3),
+            1,
+            "not a JSON answer: rolled back"
+        );
+        assert!(!marker.exists(), "the answer ran as code");
+        assert!(!run.result().ok);
+    }
+
+    /// C2-001: paths with quotes, spaces, a newline and a "-e" run through
+    /// every osascript call (swap, result) as plain argv.
+    #[test]
+    fn odd_paths_are_only_ever_arguments() {
+        let run = Run::with_odd_dirs("odd");
+        assert_eq!(run.finish(quitting_app(), 10), 0);
+        assert_eq!(bundle_version(&run.app).unwrap(), "1.0.1");
+        assert_eq!(bundle_version(&run.prev).unwrap(), "1.0.0");
+        let r = run.result();
+        assert!(r.ok, "{r:?}");
+    }
+
+    /// C2-011: a new run starts without the previous run's outcome, and the
+    /// poller recovers before trusting a result file.
+    #[test]
+    fn a_stale_result_never_stands_in_for_a_new_run() {
+        let dir = temp_dir("stale");
+        let updates = dir.join("updates");
+        fs::create_dir_all(&updates).unwrap();
+        let old = LastResult {
+            ok: true,
+            skip: false,
+            from: "0.9.0".into(),
+            to: "1.0.0".into(),
+            reason: "Updated to 1.0.0.".into(),
+            log: String::new(),
+        };
+        write_result(&updates, &old);
+        let job = Job {
+            updates: &updates,
+            app: &dir.join("X.app"),
+            slot: &dir.join("s/X.app"),
+            previous: &dir.join("p/X.app"),
+            from: "1.0.0",
+            to: "1.0.1",
+            app_pid: 1,
+            meta_url: "http://127.0.0.1:9/api/v1/meta",
+        };
+        write_job(&job).unwrap();
+        assert_eq!(
+            read_result(&updates),
+            None,
+            "the new run forgets the old outcome"
+        );
+        // A finisher that died while waiting, with an old result still there.
+        write_result(&updates, &old);
+        journal(&updates, dead_pid(), "rolled_back");
+        let r = settle(
+            &updates,
+            &dir.join("s/X.app"),
+            &dir.join("p/X.app"),
+            "1.0.0",
+        )
+        .unwrap();
+        assert_eq!(
+            (r.to.as_str(), r.ok, r.skip),
+            ("1.0.1", false, true),
+            "{r:?}"
+        );
+        assert!(!journal_path(&updates).exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The finisher as a state machine: killed at every crash point (power

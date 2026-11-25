@@ -465,7 +465,12 @@ pub fn init(app: &AppHandle) {
     }
     let mut prefs = load_prefs(&paths.prefs());
     let mut state = UpdateState::default();
-    if apply_result(&mut state, &mut prefs, finish::read_result(&updates)) {
+    // While a finisher is in flight its result is not written yet: the
+    // poller below applies it when the run ends.
+    let landed = (!in_flight)
+        .then(|| finish::read_result(&updates))
+        .flatten();
+    if apply_result(&mut state, &mut prefs, landed) {
         save_prefs(&paths.prefs(), &prefs);
     }
     let channel = channel();
@@ -500,15 +505,13 @@ pub fn init(app: &AppHandle) {
             for _ in 0..120 {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 if !finish::in_flight(&updates) {
-                    // A finisher that died here left only its journal.
-                    if finish::read_result(&updates).is_none() {
-                        let (slot, prev) = (
-                            updates.join("staging").join(stage::BUNDLE),
-                            updates.join("previous").join(stage::BUNDLE),
-                        );
-                        finish::recover(&updates, &slot, &prev, &current);
-                    }
-                    let r = finish::read_result(&updates);
+                    // Always settle first: the finisher may have died with
+                    // only its journal, next to an older run's result.
+                    let (slot, prev) = (
+                        updates.join("staging").join(stage::BUNDLE),
+                        updates.join("previous").join(stage::BUNDLE),
+                    );
+                    let r = finish::settle(&updates, &slot, &prev, &current);
                     with(|i| {
                         if apply_result(&mut i.state, &mut i.prefs, r) {
                             save_prefs(&i.paths.prefs(), &i.prefs);
