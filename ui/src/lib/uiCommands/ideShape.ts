@@ -331,7 +331,8 @@ export function startConfirmText(p: {
 export function sensitiveName(name: string): boolean {
   const compact = name.toLowerCase().replace(/[^a-z0-9]/g, '');
   if (/password|passwd|passphrase|apikey|accesskey|privatekey|signingkey|secret|authorization|credential|cookie|token|authcode|connectionstring|connstr/.test(compact)) return true;
-  return name.split(/[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])/).some((seg) => ['pwd', 'pass', 'dsn', 'salt'].includes(seg.toLowerCase()));
+  // Humps as in Rust, acronyms too (`DBPass`, `SQLDsn`); any segment of any path component (fail closed).
+  return name.split(/[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/).some((seg) => ['pwd', 'pass', 'dsn', 'salt'].includes(seg.toLowerCase()));
 }
 
 /** DB Watch rows for the agent: per object the counts and ≤ `maxRows` rows,
