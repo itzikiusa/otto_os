@@ -1,13 +1,14 @@
 <script lang="ts">
   // The commit card — ONE component wherever a checkout's work is committed:
-  // Git's Changes view, Threads' commit sheet and (later) the Agents details
-  // card. Every change is included on open (staged when nothing is yet —
-  // uncheck a file to leave it out), the message is drafted from the diff,
-  // and ONE primary follows the checkout's state (lib/gitNextStep.ts):
-  // Commit and push → Push (↑N) → Create pull request → Open pull request.
-  // A clean tree shows just that next step.
+  // the side panel's Git tab and Threads' commit sheet. Every change is
+  // included on open (staged when nothing is yet — uncheck a file to leave
+  // it out), the message is drafted from the diff, and ONE primary follows
+  // the checkout's state (lib/gitNextStep.ts): Commit and push → Push (↑N) →
+  // Create pull request → Open pull request. A clean tree shows just that
+  // next step; on Git's History (layout 'step', a pushed HEAD) only the pull
+  // request one — the header carries Push.
   import { untrack } from 'svelte';
-  import type { Repo } from '../../lib/api/types';
+  import type { Repo, RepoStatusResp } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
@@ -15,7 +16,6 @@
   import { forgeLabel, primaryStep, stateWords } from '../../lib/gitNextStep';
   import { branchPrs } from '../../lib/stores/branchPrs.svelte';
   import { git } from '../../lib/stores/git.svelte';
-  import { viewport } from '../../lib/stores/viewport.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import WipPanel from './WipPanel.svelte';
   import { runPush } from './pushFlow';
@@ -26,19 +26,17 @@
 
   interface Props {
     repo: Repo;
-    /** 'page': Git's Changes view (the first diff opens beside the list).
-     *  'sheet': a dialog over another page (Threads). */
-    layout?: 'page' | 'sheet';
+    /** 'sheet': the side panel / a dialog over another page (Threads).
+     *  'step': Git's History, over the checked-out commit's detail. */
+    layout?: 'step' | 'sheet';
     /** After a commit (the sheet closes on it). */
     oncommitted?: () => void;
     /** Open the branch's pull request (Git: its PR view; else the PR route). */
     onopenpr?: (n: number) => void;
-    /** A clean tree's secondary: back to the history. */
-    onhistory?: () => void;
     /** Open the conflict resolver. */
     onresolve?: () => void;
   }
-  let { repo, layout = 'page', oncommitted, onopenpr, onhistory, onresolve }: Props = $props();
+  let { repo, layout = 'sheet', oncommitted, onopenpr, onresolve }: Props = $props();
 
   const status = $derived(git.statusById[repo.id] ?? null);
   let error = $state<string | null>(null);
@@ -121,7 +119,34 @@
   });
 </script>
 
-<div class="commit-card-host" class:sheet={layout === 'sheet'} data-testid="commit-card-host">
+{#snippet nextCard(s: RepoStatusResp)}
+  <div class="cc-card" data-testid="commit-card-next">
+    <div class="cc-text">
+      <p class="cc-title">{checking ? 'Checking for a pull request…' : CLEAN_TITLE[next.kind]}</p>
+      <p class="cc-sub">
+        {#if branch}<span class="mono" dir="ltr">{branch}</span> · {/if}{stateWords({ changes: 0, ahead: s.ahead, behind: s.behind, upstream: s.upstream, branch })}{#if pr}<span> · pull request #{pr.number} is open</span>{/if}
+      </p>
+    </div>
+    <div class="cc-actions">
+      {#if next.kind !== 'none'}
+        <button
+          type="button"
+          class="btn primary cc-btn"
+          data-testid="commit-card-primary"
+          data-kind={next.kind}
+          disabled={busy}
+          onpointerenter={() => next.kind === 'create-pr' && CreatePrLazy.prefetch()}
+          onclick={() => void runNext()}
+        >
+          <Icon name={next.kind === 'push' || next.kind === 'publish' ? 'arrowUp' : 'pr'} size={14} />
+          {busy ? 'Pushing…' : next.label}
+        </button>
+      {/if}
+    </div>
+  </div>
+{/snippet}
+
+<div class="commit-card-host" class:sheet={layout === 'sheet'} class:step={layout === 'step'} data-testid="commit-card-host">
   {#if layout === 'sheet' && status}
     <!-- Over another page (Agents' Git tab, Threads): pulling and pushing
          without leaving it. Push hides while the card's primary is Push. -->
@@ -134,41 +159,20 @@
       repoId={repo.id}
       {status}
       remote={!!repo.remote_url}
-      selectFirst={layout === 'page' && !viewport.isPhone}
       autoDraft
       includeAll
       onstatus={(st) => git.setStatus(repo.id, st)}
       oncommitted={() => oncommitted?.()}
       {onresolve}
     />
+  {:else if layout === 'step' && status && (next.kind === 'create-pr' || next.kind === 'pr')}
+    <div class="cc-step">{@render nextCard(status)}</div>
+  {:else if layout === 'step'}
+    <!-- Nothing for History to add: no PR step, or still looking. -->
   {:else if status && !dirty}
     <!-- A clean tree: just the next step, in words. -->
     <div class="cc-clean">
-      <div class="cc-card" data-testid="commit-card-next">
-        <div class="cc-text">
-          <p class="cc-title">{checking ? 'Checking for a pull request…' : CLEAN_TITLE[next.kind]}</p>
-          <p class="cc-sub">
-            {#if branch}<span class="mono" dir="ltr">{branch}</span> · {/if}{stateWords({ changes: 0, ahead: status.ahead, behind: status.behind, upstream: status.upstream, branch })}{#if pr}<span> · pull request #{pr.number} is open</span>{/if}
-          </p>
-        </div>
-        <div class="cc-actions">
-          {#if onhistory}<button type="button" class="btn cc-btn" onclick={onhistory}>History</button>{/if}
-          {#if next.kind !== 'none'}
-            <button
-              type="button"
-              class="btn primary cc-btn"
-              data-testid="commit-card-primary"
-              data-kind={next.kind}
-              disabled={busy}
-              onpointerenter={() => next.kind === 'create-pr' && CreatePrLazy.prefetch()}
-              onclick={() => void runNext()}
-            >
-              <Icon name={next.kind === 'push' || next.kind === 'publish' ? 'arrowUp' : 'pr'} size={14} />
-              {busy ? 'Pushing…' : next.label}
-            </button>
-          {/if}
-        </div>
-      </div>
+      {@render nextCard(status)}
     </div>
   {:else}
     <LoadState loading={!error} {error} what="changes" onretry={() => void load()} />
@@ -202,6 +206,18 @@
   }
   .cc-clean {
     padding: 12px;
+  }
+  .commit-card-host.step {
+    height: auto;
+    flex-shrink: 0;
+  }
+  .cc-step {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .cc-step .cc-card {
+    max-inline-size: none;
+    padding: 10px 12px;
   }
   .cc-sync {
     flex-shrink: 0;

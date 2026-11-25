@@ -115,6 +115,7 @@
     branchTipCommit: (b) => index.branchTipCommit(b),
     scrollToCommit: (sha) => vp.scrollToCommit(sha),
     focusRow: (sha) => void vp.focusRow(sha),
+    isHeadCommit: (c) => index.isHeadCommit(c),
   });
 
   // ── Actions and context menus (graph/graphActions, graph/graphMenus) ──────
@@ -176,8 +177,7 @@
     tagMenu: (e, t) => menus.tagMenu(e, t),
   });
 
-  // ── Create-PR sheet (opened from branch / commit menus with a pre-filled
-  //    source). Reuses CreatePr.svelte; `initialSource` defaults the dropdown. ──
+  // ── Create-PR sheet (branch / commit menus; `initialSource` pre-fills it). ──
   let createPrOpen = $state(false);
   let createPrSource = $state<string | undefined>(undefined);
   function openCreatePr(source: string): void {
@@ -453,7 +453,7 @@
     onfiletools={fileToolsMenu}
     bind:fileCount={sel.diffFileCount}
     onclose={sel.closeDetail}
-    oncommitted={() => void data.refreshAfter()}
+    oncommitted={(sha) => { sel.selectWhenLoaded(sha); void data.refreshAfter(); }}
   />
 </div>
 

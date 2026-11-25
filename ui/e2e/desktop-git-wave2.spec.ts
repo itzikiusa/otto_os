@@ -63,7 +63,8 @@ test('the header "Browse stashes…" dialog is visible and leaves Pull in place'
 
 test('Escape closes the History drawer', async ({ page }) => {
   await openRepo(page);
-  await page.locator('.graph-row').filter({ has: page.getByText('Add notes', { exact: true }) }).first().click();
+  // History opens on the checked-out commit (Add notes).
+  await expect(page.locator('.graph-row').filter({ has: page.getByText('Add notes', { exact: true }) }).first()).toHaveClass(/graph-row-selected/);
   await page.getByRole('button', { name: 'File actions', exact: true }).first().click();
   await page.locator('.ctx-menu').getByRole('menuitem', { name: 'History' }).click();
   const drawer = page.locator('.rv-drawer');

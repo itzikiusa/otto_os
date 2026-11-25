@@ -1,5 +1,5 @@
 <script lang="ts">
-  // The Changes view's per-file diff (WipPanel). Inline beside or under the
+  // The WIP panel's per-file diff (WipPanel). Inline beside or under the
   // file list — or, on a phone, a pushed full-height sheet (DockedDrawer →
   // the shell Drawer: ✕, Esc and the system Back close it, lib/backCloses).
   import type { ComponentProps } from 'svelte';

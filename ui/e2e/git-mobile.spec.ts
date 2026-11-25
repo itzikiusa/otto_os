@@ -41,7 +41,7 @@ let workspaceId = '';
 let repoId = '';
 // A repo left mid-merge with a real conflict → drives the Conflict Resolver.
 let conflictRepoId = '';
-// A repo with a dirty working tree → drives the Changes staging/commit flow.
+// A repo with a dirty working tree → drives the WIP staging/commit flow.
 let dirtyRepoId = '';
 
 test.beforeAll(async () => {
@@ -213,16 +213,17 @@ test('graph: sections are a collapsible accordion at mobile/tablet widths', asyn
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// DEEP LINKS — #/git/<repo>/changes opens Changes (the commit card), and the
-// legacy #/git/<repo>/history lands on History (the graph).
+// DEEP LINKS — the legacy #/git/<repo>/changes and #/git/<repo>/history both
+// land on History (the graph); there is no Changes view any more.
 // ────────────────────────────────────────────────────────────────────────────
 
 test('changes/history deep links land on their views', async ({ page }) => {
   await page.goto(`/#/git/${repoId}/changes`);
   await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator('.rv-tabs .rv-tab', { hasText: 'Changes' })).toHaveAttribute('aria-selected', 'true', { timeout: 25_000 });
-  // A clean tree: the card says so and offers the next step.
-  await expect(page.getByTestId('commit-card-next')).toContainText('Nothing to commit');
+  await expect(page.locator('.rv-tabs .rv-tab', { hasText: 'History' })).toHaveAttribute('aria-selected', 'true', { timeout: 25_000 });
+  await expect(page.locator('.rv-tabs .rv-tab', { hasText: 'Changes' })).toHaveCount(0);
+  // A clean tree on a phone: the commit list, nothing selected.
+  await expect(page.locator('.graph-row').first()).toBeVisible({ timeout: 25_000 });
   await expectFitsWidth(page);
   await page.goto(`/#/git/${repoId}/history`);
   await expect(page.locator('.graph-row').first()).toBeVisible({ timeout: 25_000 });
@@ -315,8 +316,8 @@ test('pull requests: detail route renders without overflow', async ({ page }) =>
 
 test('diffviewer: a WIP file diff fits and its code is reachable', async ({ page }) => {
   await page.goto(`/#/git/${dirtyRepoId}/graph`);
-  await expect(page.locator('.wip-row')).toBeVisible({ timeout: 25_000 });
-  await page.locator('.wip-row').click();
+  // History opens on the WIP row of a dirty tree.
+  await expect(page.locator('.wip-row')).toHaveAttribute('aria-pressed', 'true', { timeout: 25_000 });
   const panel = page.locator('.wip-panel');
   await expect(panel).toBeVisible({ timeout: 15_000 });
   // The commit card sits above the list: the panel scrolls as a whole, so the
@@ -337,7 +338,7 @@ test('diffviewer: a WIP file diff fits and its code is reachable', async ({ page
   await expectDiffCodeReachable(page);
   if (phone) {
     // Phone: file → diff is a pushed full-height sheet; the system Back closes
-    // it (lib/backCloses) and leaves you on the Changes list, same URL.
+    // it (lib/backCloses) and leaves you on the WIP file list, same URL.
     await expect(sheet).toBeVisible();
     expect((await diff.boundingBox())!.height).toBeGreaterThan(page.viewportSize()!.height * 0.6);
     const url = page.url();
@@ -407,11 +408,11 @@ test('shell: repo tab strip + new-tab + sub-route nav + toolbar fit', async ({ p
     await expect(page.locator('.git-tab-new')).toBeVisible();
     await expectElemFits(page, '.git-tab-new');
   }
-  // The ONE view switch (Changes · History · Pull requests · Review; Focus is
+  // The ONE view switch (History · Pull requests · Review; Focus is
   // a page-level view) renders with all views and never overflows the
   // document (it scrolls within its own strip).
   await expect(page.locator('.rv-tabs')).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator('.rv-tabs .rv-tab')).toContainText(['Changes', 'History', 'Pull requests', 'Review']);
+  await expect(page.locator('.rv-tabs .rv-tab')).toHaveText(['History', 'Pull requests', 'Review']);
   // The git verbs (Fetch/Pull/Push/Stash/Pop): a row of their own on a phone,
   // the page header's actions on a tablet.
   await expect(page.getByTestId('git-verbs-row').or(page.locator('.git-header .ph-actions .tbtn')).first()).toBeVisible();
@@ -460,13 +461,13 @@ test('shell: many open repo tabs scroll instead of overflowing the page', async 
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// CHANGES — staging / commit flow on a dirty working tree
+// WIP — staging / commit flow on a dirty working tree (History's WIP row)
 // ────────────────────────────────────────────────────────────────────────────
 
 test('WIP: dirty tree shows file rows + a touch-friendly commit composer', async ({ page }) => {
   await page.goto(`/#/git/${dirtyRepoId}/graph`);
-  await expect(page.locator('.wip-row')).toBeVisible({ timeout: 25_000 });
-  await page.locator('.wip-row').click();
+  // History opens on the WIP row of a dirty tree.
+  await expect(page.locator('.wip-row')).toHaveAttribute('aria-pressed', 'true', { timeout: 25_000 });
   const panel = page.locator('.wip-panel');
   await expect(panel).toBeVisible({ timeout: 15_000 });
   // The seeded dirty tree (1 modified + 1 untracked) yields real change rows.
@@ -584,8 +585,8 @@ test('320px: every core view fits with no horizontal overflow', async ({ page })
 
   // WIP panel (dirty tree → real rows).
   await page.goto(`/#/git/${dirtyRepoId}/graph`);
-  await expect(page.locator('.wip-row')).toBeVisible({ timeout: 25_000 });
-  await page.locator('.wip-row').click();
+  // History opens on the WIP row of a dirty tree.
+  await expect(page.locator('.wip-row')).toHaveAttribute('aria-pressed', 'true', { timeout: 25_000 });
   await expect(page.locator('.wip-panel .wp-name').first()).toBeVisible({ timeout: 15_000 });
   await expectFitsWidth(page);
 

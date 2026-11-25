@@ -267,8 +267,8 @@ right edge. Two mechanisms:
   independent scroll container** (`overflow-y: auto`). For example, in Git
   (`ui/src/modules/git/*`): the graph view is a collapsible accordion
   (`.graph-panel.mob-collapsed`), tapping a commit auto-collapses the commit list
-  and opens the diff, and the Changes view's file list collapses
-  (`.changes-side.mob-files-collapsed`). The diff area is its own scroll container
+  and opens the diff, and a dirty tree's WIP panel is the open section. The
+  diff area is its own scroll container
   (`overflow-y: auto`) so long diffs are always reachable. This pattern repeats
   across Database, Brokers, Product, Connections, Swarm, Vault, etc.
 

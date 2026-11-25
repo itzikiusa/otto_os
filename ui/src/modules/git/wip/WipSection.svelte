@@ -24,7 +24,7 @@
     /** Files in the section (the header count; folders excluded). */
     count: number;
     /** The header carries the section's +/− line totals instead of the count
-     *  (the Changes badge already counts the files). */
+     *  (the WIP row already counts the files). */
     lines?: boolean;
     rows: Row[];
     lw: ListWindow;

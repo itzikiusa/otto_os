@@ -102,7 +102,7 @@
   const pushPrimary = $derived(header && accent && clean && status.upstream != null && status.ahead > 0 && !detached);
 
   // The stash list: the graph reports its count (gitBridge); where the graph
-  // isn't loaded (Changes) the toolbar reads it once, and after its own ops.
+  // isn't loaded (Pull requests, Review) the toolbar reads it once, and after its own ops.
   const stashCount = $derived(gitBridge.stashCount[repoId]);
   const nothingToPop = $derived(stashCount === 0);
   let stashes: StashInfo[] = [];
@@ -309,7 +309,7 @@
     ];
   }
   /** The repo's state in words for the header ("↑2 not pushed · ↓1 to pull"). */
-  // The file count rides the Changes badge (and the commit card), not this line.
+  // The file count rides the WIP row (and the commit card), not this line.
   const words = $derived.by(() => {
     const w = stateWords({ changes: 0, ahead: status.ahead, behind: status.behind, upstream: status.upstream, branch: detached ? null : status.branch });
     return status.changes.length > 0 && w === 'Clean' ? '' : w;
