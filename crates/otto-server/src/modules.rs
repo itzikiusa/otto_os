@@ -417,19 +417,11 @@ async fn workspace_relay(
         })
         .collect();
     let resolved = otto_sessions::names::resolve_address(text, &addressable);
-    let mut session_ids = Vec::new();
-    for id in &resolved.targets {
-        // Targets resolve only against the already-authorized candidates.
-        let Some(session) = candidates.iter().find(|s| s.id == *id) else {
-            continue;
-        };
-        if submit_session_text(&ctx, who, session, resolved.text.trim())
-            .await
-            .is_ok()
-        {
-            session_ids.push(id.clone());
-        }
-    }
+    // Targets resolve only against the already-authorized candidates.
+    let picked = candidates
+        .iter()
+        .filter(|s| resolved.targets.contains(&s.id));
+    let session_ids = submit_all(&ctx, who, picked, resolved.text.trim()).await;
     Ok(Json(otto_core::api::RelayResp {
         session_ids,
         broadcast: resolved.broadcast,
