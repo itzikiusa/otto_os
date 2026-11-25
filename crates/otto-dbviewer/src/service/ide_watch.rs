@@ -112,7 +112,7 @@ const WATCH_LIST_CAP: usize = 500;
 /// tunnel, access checks) or straight on a driver (a local ephemeral target).
 enum Via<'a> {
     Saved { id: &'a Id, user: &'a Id },
-    Direct(Arc<dyn Driver>, ResolvedConfig),
+    Direct(Arc<dyn Driver>, Box<ResolvedConfig>),
 }
 
 impl DbViewerService {
@@ -272,7 +272,7 @@ impl DbViewerService {
                 let label = format!("{}@127.0.0.1:{port}", req.engine.as_str());
                 let default_db = database.clone();
                 (
-                    Via::Direct(self.registry.get(req.engine), cfg),
+                    Via::Direct(self.registry.get(req.engine), Box::new(cfg)),
                     label,
                     default_db,
                 )

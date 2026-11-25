@@ -15,9 +15,12 @@ use tokio::sync::watch;
 use super::*;
 use crate::db_watch::{DbWatchExecOutcome, DbWatchOp, DbWatchQueryExec};
 
+/// columns + rows of one fake table.
+type Table = (Vec<String>, Vec<Vec<Value>>);
+
 #[derive(Default)]
 struct Fake {
-    tables: Mutex<HashMap<String, (Vec<String>, Vec<Vec<Value>>)>>,
+    tables: Mutex<HashMap<String, Table>>,
     latency: Duration,
     in_flight: AtomicUsize,
     max_in_flight: AtomicUsize,
