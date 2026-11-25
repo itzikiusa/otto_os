@@ -30,9 +30,9 @@ use super::diff::{diff_snapshots, DiffOpts};
 use super::{
     build_watch_query, DbWatchExecOutcome, DbWatchOp, DbWatchQueryExec, DbWatchQueryTarget,
     IdeDbEngine, IdeDbFieldChange, IdeDbRowDiff, IdeDbWatch, IdeDbWatchBind,
-    IdeDbWatchCheckpointInfo, IdeDbWatchCheckpointReason, IdeDbWatchCompare, IdeDbWatchItemDiff,
-    IdeDbWatchItemInfo, IdeDbWatchItemSpec, IdeDbWatchReadResp, IdeDbWatchSnapshotItem,
-    IdeDbWatchTargetInfo, MAX_DB_WATCH_LIMIT,
+    IdeDbWatchCheckpointInfo, IdeDbWatchCheckpointReason, IdeDbWatchCompare, IdeDbWatchFilter,
+    IdeDbWatchItemDiff, IdeDbWatchItemInfo, IdeDbWatchItemSpec, IdeDbWatchReadResp,
+    IdeDbWatchSnapshotItem, IdeDbWatchTargetInfo, MAX_DB_WATCH_LIMIT,
 };
 use crate::dap::DapStopSignal;
 use crate::types::{IdeRunState, IdeRunStatus};
@@ -458,7 +458,12 @@ impl Watch {
         rows: bool,
         for_agent: bool,
     ) -> IdeDbWatchReadResp {
-        let watch = self.view();
+        let mut watch = self.view();
+        if for_agent {
+            for f in watch.items.iter_mut().filter_map(|i| i.filter.as_mut()) {
+                f.value = mask_cell(&f.column, &f.value).0;
+            }
+        }
         let (engine, items) = {
             let mut st = lock(&self.state);
             st.last_used = Instant::now();
@@ -726,7 +731,7 @@ fn item_diff(
         out.current = latest.map(|l| (*l.data).clone());
     }
     if for_agent {
-        mask_for_agent(&mut out);
+        mask_for_agent(&mut out, info.filter.as_ref());
     }
     out
 }
@@ -752,21 +757,32 @@ fn mask_cell(name: &str, v: &Value) -> (Value, bool) {
     (r.value, hit)
 }
 
-fn mask_row(columns: &[String], row: &[Value]) -> (Vec<Value>, bool) {
-    let mut any = false;
-    let out = row
-        .iter()
+/// The masked row and, per cell, whether it was masked.
+fn mask_row(columns: &[String], row: &[Value]) -> (Vec<Value>, Vec<bool>) {
+    row.iter()
         .enumerate()
-        .map(|(i, v)| {
-            let (m, hit) = mask_cell(cell_name(columns, row, i), v);
-            any |= hit;
-            m
-        })
-        .collect();
-    (out, any)
+        .map(|(i, v)| mask_cell(cell_name(columns, row, i), v))
+        .unzip()
 }
 
-fn mask_for_agent(out: &mut IdeDbWatchItemDiff) {
+/// A value as it reads inside a key or a statement (`42`, not `"42"`).
+fn plain(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// `text` with every `secrets` occurrence and every secret-shaped part masked.
+fn scrub(text: &str, secrets: &[String]) -> String {
+    let mut out = text.to_string();
+    for s in secrets.iter().filter(|s| !s.is_empty()) {
+        out = out.replace(s.as_str(), "[redacted]");
+    }
+    otto_core::redact::redact_data_text(&out).value
+}
+
+fn mask_for_agent(out: &mut IdeDbWatchItemDiff, filter: Option<&IdeDbWatchFilter>) {
     let columns = out.columns.clone();
     for d in &mut out.diffs {
         mask_diff(&columns, d);
@@ -776,14 +792,35 @@ fn mask_for_agent(out: &mut IdeDbWatchItemDiff) {
             *row = mask_row(&columns, row).0;
         }
     }
+    // A filter on a sensitive column carries its value in the statement.
+    let secrets: Vec<String> = filter
+        .filter(|f| mask_cell(&f.column, &f.value).1)
+        .map(|f| plain(&f.value))
+        .into_iter()
+        .collect();
+    out.executed_query = scrub(&out.executed_query, &secrets);
+    out.error = out.error.as_deref().map(|e| scrub(e, &secrets));
 }
 
 fn mask_diff(columns: &[String], d: &mut IdeDbRowDiff) {
     let raw = d.row.clone();
-    let (row, mut any) = mask_row(columns, &d.row);
+    // Raw values that get masked, so the row key (built from key cells) can
+    // be masked by them too.
+    let mut secrets = Vec::new();
+    let mut take = |row: &[Value]| {
+        let (masked, hits) = mask_row(columns, row);
+        secrets.extend(
+            row.iter()
+                .zip(&hits)
+                .filter(|(_, h)| **h)
+                .map(|(v, _)| plain(v)),
+        );
+        (masked, hits.contains(&true))
+    };
+    let (row, mut any) = take(&d.row);
     d.row = row;
-    if let Some(prev) = &d.previous_row {
-        let (p, hit) = mask_row(columns, prev);
+    if let Some(prev) = d.previous_row.clone() {
+        let (p, hit) = take(&prev);
         any |= hit;
         d.previous_row = Some(p);
     }
@@ -806,7 +843,7 @@ fn mask_diff(columns: &[String], d: &mut IdeDbRowDiff) {
         *before = b;
         *after = a;
     }
-    d.key = otto_core::redact::redact_text(&d.key).value;
+    d.key = scrub(&d.key, &secrets);
     d.masked = any;
 }
 

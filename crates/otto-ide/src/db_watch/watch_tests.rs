@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use tokio::sync::watch;
 
 use super::*;
-use crate::db_watch::{DbWatchExecOutcome, DbWatchOp, DbWatchQueryExec};
+use crate::db_watch::{DbWatchExecOutcome, DbWatchOp, DbWatchQueryExec, IdeDbWatchFilter};
 
 /// columns + rows of one fake table.
 type Table = (Vec<String>, Vec<Vec<Value>>);
@@ -48,6 +48,11 @@ impl WatchHost for Fake {
             self.max_in_flight.fetch_max(now, Ordering::SeqCst);
             tokio::time::sleep(self.latency).await;
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            if exec.op == DbWatchOp::Read && exec.object_name == "broken" {
+                return Err(Error::Upstream(
+                    "dial mysql://root:hunter2@10.0.0.5:3306/app failed".into(),
+                ));
+            }
             let table = lock(&self.tables).get(&exec.object_name).cloned();
             let (columns, rows) =
                 table.ok_or_else(|| Error::NotFound(format!("table {}", exec.object_name)))?;
@@ -318,7 +323,7 @@ fn a_redis_value_under_a_secret_key_is_masked() {
             json!(30),
         ],
     );
-    assert!(hit);
+    assert!(hit[2]);
     assert_eq!(row[2], json!("[redacted]"));
     let (row, hit) = mask_row(
         &cols,
@@ -329,7 +334,7 @@ fn a_redis_value_under_a_secret_key_is_masked() {
             json!(30),
         ],
     );
-    assert!(!hit);
+    assert!(!hit.contains(&true));
     assert_eq!(row[2], json!("3 items"));
 }
 
@@ -576,5 +581,65 @@ async fn binding_a_session_that_already_ended_takes_its_last_checkpoint() {
     assert_eq!(
         w.view().latest.unwrap().reason,
         IdeDbWatchCheckpointReason::SessionEnd
+    );
+}
+
+#[tokio::test]
+async fn an_agent_never_reads_a_secret_through_a_row_key_a_filter_or_an_error() {
+    let fake = Arc::new(Fake::default());
+    fake.set(
+        "session_tokens",
+        &["token", "user_id"],
+        vec![vec![json!("tok_live_9f8e7d6c5b4a"), json!(1)]],
+    );
+    fake.set("broken", &["id"], vec![]);
+    let host = as_host(&fake);
+    let mut specs = items(&["session_tokens", "broken"]);
+    specs[0].filter = Some(IdeDbWatchFilter {
+        column: "token".into(),
+        value: json!("tok_live_9f8e7d6c5b4a"),
+    });
+    let w = Watch::new(&user("u"), "/p", target(true), Some("db".into()), specs).unwrap();
+    w.checkpoint(
+        &host,
+        Checkpoint::new(IdeDbWatchCheckpointReason::Start),
+        true,
+    )
+    .await;
+    fake.set(
+        "session_tokens",
+        &["token", "user_id"],
+        vec![vec![json!("tok_live_9f8e7d6c5b4a"), json!(2)]],
+    );
+    w.checkpoint(
+        &host,
+        Checkpoint::new(IdeDbWatchCheckpointReason::Stop),
+        true,
+    )
+    .await;
+
+    let person = w.read(IdeDbWatchCompare::PreviousStop, true, false);
+    assert_eq!(
+        person.items[0].diffs[0].key, "tok_live_9f8e7d6c5b4a",
+        "a person reads raw"
+    );
+    assert!(person.items[1]
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("hunter2"));
+
+    let agent = w.read(IdeDbWatchCompare::PreviousStop, true, true);
+    let text = serde_json::to_string(&agent).unwrap();
+    assert!(!text.contains("tok_live_9f8e7d6c5b4a"), "{text}");
+    assert!(!text.contains("hunter2"), "{text}");
+    assert_eq!(
+        agent.items[0].diffs[0].changes[0].after,
+        json!(2),
+        "the change still shows"
+    );
+    assert_eq!(
+        agent.watch.items[0].filter.as_ref().unwrap().value,
+        json!("[redacted]")
     );
 }
