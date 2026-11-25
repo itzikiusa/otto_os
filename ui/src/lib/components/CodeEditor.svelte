@@ -222,7 +222,8 @@
         })
       : [];
 
-  let appliedPlain = false, appliedThemeKey = '', freshIdeState = false;
+  let appliedPlain = false, appliedThemeKey = '', ideSent: Record<string, unknown[]> | null = null; // ideSent: per prop effect, the values the state holds (set by createState and by each effect run)
+  const idePropVals = (): Record<string, unknown[]> => ({ base: [savedContent, gitBaseContent], blame: [blameByLine], bp: [breakpoints, breakpointsMuted], gutter: [gutterItems], debug: [effectivePausedLine, selectedFrameLine, inlineValues], peers: [peerCursors] });
   const plainWatcher = createPlainLineWatch({
     getLimit: () => highlightLineLimit,
     isPlain: () => appliedPlain,
@@ -486,7 +487,7 @@
       ...(hk || (ideMode && !readOnly) ? [historySaver] : []),
       ...(oncopy || ideMode ? [copyRecorder] : []),
     ];
-    if (ideMounted && !freshIdeState) { freshIdeState = true; queueMicrotask(() => { freshIdeState = false; }); } // built from the current props: this flush's prop effects would only re-send them
+    ideSent = ideMounted ? untrack(idePropVals) : null;
 
     const restored = restoreOrCreateEditorState({
       filePath, fileContent, doc, savedContent, baseExtensions, ideMode, readOnly, hk, coreHistMod,
@@ -704,14 +705,13 @@
     return () => window.removeEventListener('otto:ide-prefs-changed', onPrefs);
   });
 
-  function syncIdeEffect(
-    needMount: boolean,
-    makeEffect: (m: typeof CmIdeMod) => StateEffect<unknown> | StateEffect<unknown>[],
-  ): void {
+  function syncIdeEffect(key: string, needMount: boolean, makeEffect: (m: typeof CmIdeMod) => StateEffect<unknown> | StateEffect<unknown>[]): void {
+    const vals = untrack(idePropVals)[key], held = ideSent?.[key]; // the caller's own reads are what it tracks
     untrack(() => {
       if (!view) return;
+      if (ideSent) ideSent[key] = vals;
       if (!ideMounted && needMount) mountIdeExtensions(view);
-      else if (ideMod && ideMounted && !freshIdeState) view.dispatch({ effects: makeEffect(ideMod) });
+      else if (ideMod && ideMounted && !held?.every((v, i) => v === vals[i])) view.dispatch({ effects: makeEffect(ideMod) });
     });
   }
   $effect(() => {
@@ -719,7 +719,7 @@
     const diffBase = gitBaseContent !== undefined ? gitBaseContent : diskSaved;
     const baseSrc: 'git' | 'saved' = gitBaseContent !== undefined ? 'git' : 'saved';
     if (livePath === path) liveSavedContent = diskSaved;
-    syncIdeEffect(
+    syncIdeEffect('base',
       diffBase != null || diskSaved != null,
       (m) => [
         m.setSavedContentEffect.of(diffBase),
@@ -728,18 +728,18 @@
       ],
     );
   });
-  $effect(() => { const v = blameByLine; syncIdeEffect(v != null, (m) => m.setBlameLinesEffect.of(v)); });
-  $effect(() => { const b = breakpoints, mu = breakpointsMuted; syncIdeEffect(b.length > 0 || !!onToggleBreakpoint, (m) => m.setBreakpointsEffect.of({ breakpoints: b, muted: mu })); });
-  $effect(() => { const v = gutterItems; syncIdeEffect(v.length > 0, (m) => m.setGutterItemsEffect.of(v)); });
+  $effect(() => { const v = blameByLine; syncIdeEffect('blame', v != null, (m) => m.setBlameLinesEffect.of(v)); });
+  $effect(() => { const b = breakpoints, mu = breakpointsMuted; syncIdeEffect('bp', b.length > 0 || !!onToggleBreakpoint, (m) => m.setBreakpointsEffect.of({ breakpoints: b, muted: mu })); });
+  $effect(() => { const v = gutterItems; syncIdeEffect('gutter', v.length > 0, (m) => m.setGutterItemsEffect.of(v)); });
   $effect(() => {
     const p = effectivePausedLine, sf = selectedFrameLine, iv = inlineValues, curPath = path;
-    syncIdeEffect(p != null || sf != null || iv.length > 0, (m) => m.setDebugDecorationsEffect.of({ pausedLine: p, selectedLine: sf, inlineValues: iv }));
+    syncIdeEffect('debug', p != null || sf != null || iv.length > 0, (m) => m.setDebugDecorationsEffect.of({ pausedLine: p, selectedLine: sf, inlineValues: iv }));
     const execKey = p != null && p >= 1 ? `${curPath}:${p}` : '';
     if (!execKey) { prevScrolledExecKey = ''; return; }
     if (execKey === prevScrolledExecKey) return;
     untrack(() => { if (view && livePath === curPath) scrollToPausedLineIfNeeded(curPath); });
   });
-  $effect(() => { const v = peerCursors; syncIdeEffect(v.length > 0, (m) => m.setPeerCursorsEffect.of(v)); });
+  $effect(() => { const v = peerCursors; syncIdeEffect('peers', v.length > 0, (m) => m.setPeerCursorsEffect.of(v)); });
   $effect(() => {
     const preset = keymapPreset;
     if (!view || !ideMod || !ideMounted || preset === appliedKeymapPreset) return;
