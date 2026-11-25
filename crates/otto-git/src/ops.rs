@@ -170,11 +170,11 @@ impl LocalGit {
         };
         let get = |key: &str| {
             cfg.lines()
-                .filter_map(|l| match l.split_once(' ') {
+                .rev()
+                .find_map(|l| match l.split_once(' ') {
                     Some((k, v)) => (k == key).then_some(v.trim()),
                     None => (l == key).then_some(""),
                 })
-                .last()
                 .filter(|v| !v.is_empty())
                 .map(str::to_string)
         };
