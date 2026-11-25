@@ -88,6 +88,22 @@ async fn read_table() -> Vec<Row> {
     }
 }
 
+/// [`read_table`] for a poll, shared by every busy session: each ran its own
+/// `ps -A` every second (~20 ms, ~10 ms CPU over ~1,100 processes), so four
+/// busy threads ran four a second. A table younger than [`POLL`] is reused;
+/// the read before a kill is always fresh.
+async fn polled_table() -> Arc<Vec<Row>> {
+    type Last = std::sync::Mutex<Option<(std::time::Instant, Arc<Vec<Row>>)>>;
+    static LAST: Last = std::sync::Mutex::new(None);
+    let last = || LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, rows)) = last().as_ref().filter(|(at, _)| at.elapsed() < POLL) {
+        return Arc::clone(rows);
+    }
+    let rows = Arc::new(read_table().await);
+    *last() = Some((std::time::Instant::now(), Arc::clone(&rows)));
+    rows
+}
+
 /// The CLI's recorded tree.
 #[derive(Default)]
 pub(super) struct Tracker {
@@ -181,7 +197,7 @@ pub(super) fn watch(
                 // Busy, or anything happened since the last tick (a turn that
                 // started and ended between two ticks may have left a job).
                 if busy || last_seq != Some(seq) {
-                    tracker.refresh(&read_table().await, pid);
+                    tracker.refresh(&polled_table().await, pid);
                 }
                 last_seq = Some(seq);
             }
@@ -207,6 +223,21 @@ pub(super) fn watch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Busy sessions polling within one POLL share one `ps`.
+    #[tokio::test]
+    async fn polls_within_a_tick_share_one_ps() {
+        let a = polled_table().await;
+        let b = polled_table().await;
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "a second poll within POLL ran its own ps"
+        );
+        assert!(
+            a.iter().any(|r| r.pid == std::process::id()),
+            "the table lists this test"
+        );
+    }
 
     const TABLE: &str = "\
       1     0     1 Thu Nov 12 09:00:00 2026
