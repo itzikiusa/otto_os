@@ -87,13 +87,9 @@ impl ProjectStore {
                 .into_iter()
                 .map(|(owner, proj)| build_stored_project(owner, proj))
                 .collect();
-            out.sort_by(|a, b| {
-                b.project
-                    .pinned
-                    .cmp(&a.project.pinned)
-                    .then_with(|| b.project.updated_at.cmp(&a.project.updated_at))
-                    .then_with(|| a.project.name.cmp(&b.project.name))
-            });
+            // Pinned first, then the order projects were added (rows come by rowid): never
+            // recency, so opening, renaming or re-saving a project does not move it.
+            out.sort_by_key(|p| std::cmp::Reverse(p.project.pinned));
             out
         })
         .await
@@ -120,7 +116,6 @@ impl ProjectStore {
                 items.push(proj);
             }
         }
-        sort_projects(&mut items);
         Ok(items)
     }
 
@@ -153,7 +148,6 @@ impl ProjectStore {
                 items.push(proj);
             }
         }
-        sort_projects(&mut items);
         Ok(items)
     }
 
@@ -478,15 +472,6 @@ fn project_for_caller(entry: &StoredProject, is_root: bool) -> Option<IdeNamedPr
     } else {
         entry.non_root_project.clone()
     }
-}
-
-fn sort_projects(items: &mut [IdeNamedProject]) {
-    items.sort_by(|a, b| {
-        b.pinned
-            .cmp(&a.pinned)
-            .then_with(|| b.updated_at.cmp(&a.updated_at))
-            .then_with(|| a.name.cmp(&b.name))
-    });
 }
 
 #[cfg(test)]

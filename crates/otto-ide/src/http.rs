@@ -27,6 +27,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
+use futures_util::StreamExt;
 use otto_core::api::Problem;
 use otto_core::auth::AuthUser;
 use otto_core::{Error, Result};
@@ -59,9 +60,9 @@ use self::toolchains_env::{
 };
 use crate::types::{
     IdeFileQuery, IdeFileReadResp, IdeFileWriteReq, IdeFileWriteResp, IdeFsEntryKind,
-    IdeFsMutateReq, IdeFsMutateResp, IdeFsTreeQuery, IdeFsTreeResp, IdeGitBaseQuery,
-    IdeGitBaseResp, IdeGutterReq, IdeGutterResp, IdeReplaceReq, IdeReplaceResp, IdeSearchReq,
-    IdeSearchResp,
+    IdeFsMutateReq, IdeFsMutateResp, IdeFsTreeListing, IdeFsTreeQuery, IdeFsTreeResp,
+    IdeGitBaseQuery, IdeGitBaseResp, IdeGutterReq, IdeGutterResp, IdeReplaceReq, IdeReplaceResp,
+    IdeSearchReq, IdeSearchResp,
 };
 use crate::IdeCtx;
 
@@ -292,12 +293,37 @@ async fn fs_tree<S: IdeCtx>(
     otto_telemetry::context::measure_result("ide.fs.tree", async {
         let spec = q.target_spec()?;
         let resolved = ctx.ide().targets.resolve(&ctx, &user, &spec).await?;
-        let mut resp = ctx
-            .ide()
-            .targets
+        let targets = &ctx.ide().targets;
+        let mut resp = targets
             .list_tree(&resolved, q.path.as_deref(), q.show_hidden)
             .await?;
-        for entry in &mut resp.entries {
+        let more: Vec<String> = match q.paths.as_deref() {
+            Some(raw) => serde_json::from_str(raw)
+                .map_err(|e| Error::Invalid(format!("paths: not a JSON array of strings: {e}")))?,
+            None => Vec::new(),
+        };
+        resp.listings = futures_util::stream::iter(more)
+            .map(|path| {
+                let resolved = &resolved;
+                async move {
+                    let listing = targets
+                        .list_tree(resolved, Some(&path), q.show_hidden)
+                        .await;
+                    listing.ok().map(|l| IdeFsTreeListing {
+                        path,
+                        entries: l.entries,
+                    })
+                }
+            })
+            .buffered(8)
+            .filter_map(std::future::ready)
+            .collect()
+            .await;
+        let entries = resp
+            .entries
+            .iter_mut()
+            .chain(resp.listings.iter_mut().flat_map(|l| l.entries.iter_mut()));
+        for entry in entries {
             if entry.kind == IdeFsEntryKind::File && entry.language.is_none() {
                 if let Some(plugin_lang) = ctx.ide().plugins.detect_language_for_path(&entry.path) {
                     entry.language = Some(plugin_lang.id);

@@ -32,7 +32,8 @@ test('I3-05: a folder opened by path is recorded and listed in the switcher afte
   const r = mod.ideProjectRecents;
   r.record({ kind: 'local', root: '/w/loose-folder/', workspace_id: null });
   r.record({ kind: 'local', root: '/w/alpha', workspace_id: 'ws_alpha' });
-  assert.deepEqual([...r.list.map((x: { root: string }) => x.root)], ['/w/alpha', '/w/loose-folder'], 'MRU first, trailing slash dropped');
+  r.record({ kind: 'local', root: '/w/alpha', workspace_id: 'ws_alpha' });
+  assert.deepEqual([...r.list.map((x: { root: string }) => x.root)], ['/w/loose-folder', '/w/alpha'], 'in the order first opened: opening one again never moves it; trailing slash dropped');
   const rows = mod.ideSwitcherFolders([{ id: 'ws_alpha', name: 'alpha', root_path: '/w/alpha' }], r.list);
   assert.deepEqual([...rows.map((x: { name: string }) => x.name)], ['alpha', 'loose-folder']);
   assert.equal(mod.realWorkspaceId(rows[1].id), null, 'a recent folder has no shell workspace behind it');

@@ -22,7 +22,7 @@ import {
   performAgentEdit, performCloseTab, performOpenFile, performSaveFile, saveWorkspaceOpenTabs,
 } from './store/ideBufferPerf';
 import {
-  computeIdeProjectRoots, fetchIdeWorkspaceTree, loadIdeWorkspaceTree, toggledExpansion, IdeCollabState, IdeDebugState, IdeTargetEnvState,
+  computeIdeProjectRoots, fetchIdeWorkspaceTree, loadIdeWorkspaceTree, relistIdeTreeDir, toggledExpansion, IdeCollabState, IdeDebugState, IdeTargetEnvState,
   normalizePathDiagnostics, onIdeTargetReset, performCloseTabBatch, resetTargetLifecycleState, syncAdditionalRootsFromEnvState,
   type IdeDebugLaunchMemo, type IdeRunLaunchMemo, type IncomingIdeDiagnostic,
 } from './store/ideStateSlices.svelte';
@@ -387,7 +387,7 @@ class IdeStore {
   flushAutoSave(path?: string): Promise<void> { return this.bufPerf.flushDirtyAutoSave(this, path); }
   clearLiveBuffer(path: string): void { this.bufPerf.liveBuffers.delete(this.resolvePath(path)); }
   loadTree(dirPath?: string): Promise<void> { return loadIdeWorkspaceTree(this, dirPath, () => void loadProjMod().then((m) => m.probeWorkspaceBuildTool(this))); }
-  relistDir(dirPath: string): Promise<void> { return fetchIdeWorkspaceTree(this, dirPath, () => {}, { listingOnly: true }); }
+  relistDir(dirPath: string): Promise<void> { return relistIdeTreeDir(this, dirPath); }
   async toggleDir(dirPath: string): Promise<void> {
     const clean = normalizeRootPath(dirPath); const next = !this.expandedDirs[clean];
     this.expandedDirs = toggledExpansion(this.expandedDirs, clean, next);

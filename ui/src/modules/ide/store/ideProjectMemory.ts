@@ -21,6 +21,8 @@ export const MAX_EXPANDED_DIRS = 200;
 
 export interface IdeProjectDurableMemory {
   expanded?: string[];
+  /** The tree's scroll offset (px). */
+  scroll?: number;
   agentSessionId?: string | null;
   at: number;
 }

@@ -31,6 +31,7 @@
   import { newScratchFile, onScratches } from './shell/ideScratches.svelte';
   import { ideTabRestore } from './shell/ideProjectHelpers';
   import { IdeTreeLive, LEASE_HEARTBEAT_MS } from './store/ideTreeLive';
+  import { treeScroll } from './store/ideProjectSwitch';
   import { pollWhileVisible } from '../../lib/poll';
   import { appLive } from '../../lib/live';
 
@@ -69,6 +70,8 @@
   $effect(() => { const seq = ideBreakpointsNav.seq; if (seq !== seenBpSeq) { seenBpSeq = seq; activeTab = 'breakpoints'; } });
   let treeScrollEl = $state<HTMLDivElement | undefined>(undefined);
   let scrollTop = $state(0);
+  // Back to the IDE (a remount): the tree goes back to where it was scrolled.
+  treeScroll.pending ??= treeScroll.top;
   let clientHeight = $state(720);
   let addFolderPickerOpen = $state(false);
   let selectedDirPath = $state<string | null>(null);
@@ -166,6 +169,23 @@
     const enabled = ideDockPrefs.gitStatusInTree;
     const g = liveGit;
     if (enabled && g) untrack(() => g.syncVisibleRoots({ probeAll: false }));
+  });
+
+  // Scroll back once the rows are there: at once from listings the store holds (a remount, a
+  // project switched back to), else when the root load (open folders included) lands.
+  $effect(() => {
+    const el = treeScrollEl;
+    void visibleNodes.length;
+    const loading = ide.treeLoading;
+    untrack(() => {
+      const want = treeScroll.pending;
+      if (!el || want === null) return;
+      const room = el.scrollHeight - el.clientHeight;
+      if (room < want && loading) return;
+      treeScroll.pending = null;
+      el.scrollTop = Math.min(want, Math.max(0, room));
+      scrollTop = el.scrollTop;
+    });
   });
 
   $effect(() => {
@@ -486,7 +506,7 @@
         </button>
       </div>
 
-      <div class="tree-scroll" bind:this={treeScrollEl} onscroll={(e) => { const el = e.currentTarget as HTMLDivElement; scrollTop = el.scrollTop; clientHeight = el.clientHeight || 720; }}>
+      <div class="tree-scroll" bind:this={treeScrollEl} onscroll={(e) => { const el = e.currentTarget as HTMLDivElement; scrollTop = el.scrollTop; treeScroll.top = el.scrollTop; clientHeight = el.clientHeight || 720; }}>
         {#if ideProjectHealth.issue && ide.treeError}<IdeProjectMissingState issue={ideProjectHealth.issue} />{:else}
         <LoadState what="project files" variant="compact" loading={ide.treeLoading} error={ide.treeError} empty={visibleNodes.length === 0} onretry={() => void ide.loadTree()}>
           {#snippet emptyView()}
