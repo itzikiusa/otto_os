@@ -300,7 +300,13 @@
       inset-inline-start: 4px;
       z-index: 7;
     }
+    /* The button sits in the column heading's leading corner: the heading
+       and the peeked list's first section start after / below it. */
+    :global(.graphview:has(> .detail-visible) .graph-head .gh-branch) {
+      padding-inline-start: 32px;
+    }
     :global(.graphview.peek:has(> .detail-visible) > .refs-panel) {
+      padding-block-start: 32px;
       display: block;
       position: absolute;
       inset-block: 0;

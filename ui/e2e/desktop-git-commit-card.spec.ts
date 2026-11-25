@@ -13,14 +13,11 @@ const NAME = 'e2e-commit-card';
 // of the way (on WebKit its fetches bypass the routes).
 test.use({ serviceWorkers: 'block' });
 
-let repo: CardRepo;
-
-test.beforeAll(async () => {
-  repo = await seedCardRepo(NAME);
-});
-
 test('dirty repo: History on the WIP row → Commit and push → Create pull request', async ({ page }, info) => {
   test.skip(info.project.name !== 'desktop-browser', 'desktop-browser project only');
+  // Seeded here, not in beforeAll: every worker of this file runs beforeAll,
+  // and a second repo under the same name made the picker open the wrong one.
+  const repo: CardRepo = await seedCardRepo(NAME);
   await page.setViewportSize({ width: 1440, height: 900 });
   let open: unknown[] = [];
   await stubForge(page, () => open);
@@ -135,7 +132,21 @@ test('narrow pane: the diff toolbar fits and the branches peek in', async ({ pag
   await expect(page.locator('.wp-diff')).toBeVisible({ timeout: 15_000 });
   await expectFullyInViewport(page, page.locator('.wp-diff').getByRole('button', { name: 'Side by side' }), 'diff layout switch');
   await expect(page.locator('.refs-panel')).toBeHidden();
-  await page.getByRole('button', { name: 'Branches & tags' }).click();
+  // The branch button sits clear of the column heading and, once open, of the
+  // refs list's first heading (it overlapped "BRANCH / TAG" and "LOCAL").
+  const peek = page.getByRole('button', { name: 'Branches & tags' });
+  const textBox = (sel: string, text: string) => page.evaluate(([s, t]) => {
+    const el = [...document.querySelectorAll(s)].find((e) => e.textContent?.trim().startsWith(t))!;
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    let n: Node | null; while ((n = walker.nextNode()) && !n.textContent?.trim()) { /* first text */ }
+    const r = document.createRange(); r.selectNodeContents(n!); const b = r.getBoundingClientRect();
+    return { x: b.x, y: b.y, width: b.width, height: b.height };
+  }, [sel, text] as const);
+  const apart = (a: { x: number; y: number; width: number; height: number }, b: typeof a) =>
+    a.x + a.width <= b.x || b.x + b.width <= a.x || a.y + a.height <= b.y || b.y + b.height <= a.y;
+  expect(apart((await peek.boundingBox())!, await textBox('.gh-branch', 'BRANCH')), 'peek vs BRANCH / TAG').toBe(true);
+  await peek.click();
   await expect(page.locator('.refs-panel')).toBeVisible();
+  expect(apart((await peek.boundingBox())!, await textBox('.refs-panel *', 'LOCAL')), 'peek vs LOCAL').toBe(true);
   await expect(page.locator('.refs-panel')).toContainText(r.branch.split('/').pop()!);
 });
