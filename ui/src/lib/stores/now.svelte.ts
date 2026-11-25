@@ -6,6 +6,8 @@
 
 import { untrack } from 'svelte';
 
+const UNFOCUSED_TICK_MS = 15_000;
+
 class Clock {
   ms = $state(Date.now());
   /** Changes once a minute (A3): readers of minute-grain labels ("4h idle")
@@ -22,10 +24,13 @@ class Clock {
     if (typeof window !== 'undefined') {
       // A hidden window paints nothing, so its labels needn't tick: skip the
       // write (every reader's re-run) and catch up once on becoming visible.
+      // Unfocused (behind other apps all night) the labels still show, but a
+      // per-second re-run of every "5s ago" nobody reads is waste: 15 s steps.
       setInterval(() => {
-        if (typeof document !== 'undefined' && document.hidden) return;
+        if (typeof document !== 'undefined' && (document.hidden || (!document.hasFocus() && Date.now() - this.ms < UNFOCUSED_TICK_MS))) return;
         this.tick();
       }, 1000);
+      window.addEventListener('focus', () => this.tick());
       if (typeof document !== 'undefined') {
         document.addEventListener('visibilitychange', () => {
           if (!document.hidden) this.tick();
