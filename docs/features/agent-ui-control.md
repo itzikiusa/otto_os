@@ -296,9 +296,13 @@ chars), refs, changed, threads, output_tail (new lines, ≤ 40), breakpoints,
 breakpoints_hit, db?, request?}`, at most 16 KB. Locals are keyed by **name** and
 inspected values by **path**, so a `password`, `token` or `dsn` comes back
 redacted, as do secret-looking values, DB cells and response secrets; you see the
-real values in the IDE. The daemon refuses an `env` that names a loader, shell or
-toolchain variable (`PATH`, `LD_*`, `DYLD_*`, `GOFLAGS`, `NODE_OPTIONS`,
-`PYTHONPATH`, `JAVA_TOOL_OPTIONS`, …) and any request that leaves this Mac.
+real values in the IDE. The daemon refuses an `env` that names a loader, shell,
+toolchain, proxy or credential-file variable (`PATH`, `HOME`, `LD_*`, `DYLD_*`,
+`GOFLAGS`, `GO_BUILD_FLAGS`, `OTTO_*`, `NODE_OPTIONS`, `PYTHONPATH`,
+`JAVA_TOOL_OPTIONS`, `DOCKER_HOST`, `KUBECONFIG`, `AWS_CONFIG_FILE`, `*_PROXY`, …),
+a value with control or invisible characters, a build tag that is not a plain
+name, and any request that leaves this Mac. The confirm shows every extra
+variable in full, quoted.
 
 **Scope.** The commands act only on the debug session that agent session
 started. If you step, continue or restart yourself, the agent's next result says
