@@ -155,3 +155,24 @@ test('Save on a tab not read yet that has a draft reads it first, then writes th
   assert.deepEqual(puts.map((p) => p.content), ['mine']);
   assert.equal(h.tabs[0].dirty, false);
 });
+
+test('Save on a tab whose background read is in flight waits for the read, then writes the draft', async () => {
+  const puts: string[] = [];
+  const hidden = deferred<ReturnType<typeof fileResp>>();
+  const { buf, helpers } = modules(
+    { get: async () => fileResp('A'), bg: { get: () => hidden.promise }, put: async (_u: string, body: { content: string }) => { puts.push(body.content); return { sha256: 's' }; } },
+    { '/repo/b.ts': { savedContent: 'disk', draftContent: 'mine' } },
+  );
+  buf.saveWorkspaceOpenTabs('/repo', ['/repo/a.ts', '/repo/b.ts'], '/repo/a.ts', null);
+  const { h, perf } = storeHost(buf);
+  (h as Record<string, unknown>).saveFile = (p?: string, f?: boolean, o?: { silent?: boolean }) => buf.performSaveFile(h, perf, p, f, o);
+  (h as Record<string, unknown>).updateBuffer = () => {};
+  await helpers.restoreWorkspaceTabsOrInitial(h);
+  const b = h.tabs.find((x) => x.path === '/repo/b.ts')!;
+  assert.equal(b.deferred, false, 'the prefetch has started reading it');
+  assert.equal(b.loading, true);
+  const saved = buf.performSaveFile(h, perf, '/repo/b.ts', false, { silent: true });
+  hidden.resolve(fileResp('disk'));
+  assert.equal(await saved, true);
+  assert.deepEqual(puts, ['mine']);
+});
