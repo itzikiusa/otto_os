@@ -7105,7 +7105,7 @@ Full multi-language IDE over Local (`kind: "local"`) and Remote SSH (`kind: "ssh
 | POST /ide/toolchains/python-venv | human + Agents: Edit | `IdeToolchainPythonVenvReq` (`target?`, `root?`, `path?` [alias `venv_dir`], `base_python?`) | `IdeToolchainPythonVenvResp` (`ok`, `venv`, `interpreter_path`) |
 | GET /ide/shell-env?kind=&root=&connection_id= | human + Agents: Edit + root | query `IdeShellEnvQuery` | `IdeShellEnvResp` (cached login+interactive `$SHELL -lic` snapshot: `status`, `shell`, `vars`, `var_count`, `loaded_at`, `duration_ms`) |
 | POST /ide/shell-env/reload | human + Agents: Edit + root | `IdeReloadShellEnvReq?` | `IdeShellEnvResp` (invalidates and re-captures the cached `$SHELL -lic` snapshot once) |
-| GET /ide/projects | Agents: Edit | — | `IdeProjectsResp` (`projects`: named multi-repo IDE projects) |
+| GET /ide/projects | Agents: Edit | — | `IdeProjectsResp` (`projects`: named multi-repo IDE projects, pinned first, then in the order they were added; re-saving a project never moves it) |
 | POST /ide/projects | Agents: Edit | `IdeUpsertProjectReq` (`id?`, `name`, `primary_root`, `folders?`) | `IdeUpsertProjectResp` (`project`) |
 | DELETE /ide/projects/{id} | Agents: Edit | — | `IdeOkResp` |
 | POST /ide/projects/scan-repos | Agents: Edit | `IdeScanReposReq` (`parent_path`) | `IdeScanReposResp` (`repos` child git/manifest directories for bulk import) |

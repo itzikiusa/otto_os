@@ -1091,3 +1091,50 @@ async fn idle_change_snapshot_of_just_saved_bytes_is_not_a_second_entry() {
         "the idle Change duplicates the save; a user label on the same bytes is kept: {labels:?}"
     );
 }
+
+/// The project list keeps the order projects were added: re-saving one (a rename, a
+/// folder added, which bumps `updated_at`) or restarting the daemon never moves it.
+#[tokio::test]
+async fn project_list_keeps_added_order_after_a_project_is_touched_and_a_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().join("otto-data");
+    let db_path = tmp.path().join("state.db");
+    let mut roots = Vec::new();
+    for name in ["alpha", "beta", "gamma"] {
+        let dir = tmp.path().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        roots.push(dir.to_string_lossy().into_owned());
+    }
+    let (_ctx, app) = build_test_app(data_dir.clone(), &db_path).await;
+    let mut ids = Vec::new();
+    for (name, root) in ["Alpha", "Beta", "Gamma"].iter().zip(&roots) {
+        let (st, body) = send_json(
+            &app,
+            Method::POST,
+            "/ide/projects",
+            Some(json!({ "name": name, "primary_root": root, "folders": [root] })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        ids.push(body["project"]["id"].as_str().unwrap().to_string());
+    }
+    let names = |body: &serde_json::Value| -> Vec<String> {
+        body["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    // Touch the first project: renamed, with a folder attached.
+    let (st, body) = send_json(&app, Method::POST, "/ide/projects", Some(json!({ "id": ids[0], "name": "Alpha 2", "primary_root": roots[0], "folders": [roots[0], roots[1]] }))).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let (_, list) = send_json(&app, Method::GET, "/ide/projects", None).await;
+    assert_eq!(names(&list), ["Alpha 2", "Beta", "Gamma"]);
+
+    // A daemon restart reads the same order back from the database.
+    drop(app);
+    let (_ctx2, app2) = build_test_app(data_dir, &db_path).await;
+    let (_, list) = send_json(&app2, Method::GET, "/ide/projects", None).await;
+    assert_eq!(names(&list), ["Alpha 2", "Beta", "Gamma"]);
+}

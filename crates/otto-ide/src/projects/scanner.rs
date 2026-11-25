@@ -128,7 +128,7 @@ pub(super) async fn migrate_legacy_projects_atomic(
 pub(super) async fn load_projects_from_db(pool: &DbPool) -> Result<Vec<(String, IdeNamedProject)>> {
     let rows = sqlx::query(
         "SELECT id, owner_user_id, name, primary_root, folders_json, pinned, updated_at
-         FROM ide_named_projects",
+         FROM ide_named_projects ORDER BY rowid",
     )
     .fetch_all(pool)
     .await
