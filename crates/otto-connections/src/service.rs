@@ -364,7 +364,7 @@ impl ConnectionsService {
         {
             return Ok(crate::access::redact(conn));
         }
-        self.get(&conn.id).await
+        self.finish_listed(conn).await
     }
 
     /// Ids of the connections under an `Enforced` access policy — ONE query
@@ -415,10 +415,13 @@ impl ConnectionsService {
         let user = otto_state::UsersRepo::new(self.repo.pool())
             .get(user_id)
             .await?;
-        let enforced = self.enforced_ids().await?;
+        let enforced = otto_state::resource_access::ResourceAccessRepo::new(self.repo.pool())
+            .enforced_policies(otto_core::access::ResourceKind::Connection)
+            .await?;
+        let mut access = None;
         let mut visible = Vec::new();
         for conn in self.repo.list_visible(ws).await? {
-            if !enforced.contains(&conn.id) {
+            let Some(policy) = enforced.get(&conn.id) else {
                 if private && !user.is_root && conn.created_by != *user_id {
                     continue;
                 }
@@ -428,11 +431,21 @@ impl ConnectionsService {
                     Err(error) => return Err(error),
                 }
                 continue;
-            }
-            match self.visible_connection(conn, user_id).await {
-                Ok(conn) => visible.push(conn),
-                Err(Error::Forbidden(_) | Error::NotFound(_)) => {}
-                Err(error) => return Err(error),
+            };
+            let access = match &mut access {
+                Some(access) => access,
+                None => access.insert(
+                    crate::access::ListAccess::load(&self.repo.pool(), user.clone()).await?,
+                ),
+            };
+            match access.decide(&self.repo.pool(), &conn, policy).await? {
+                None => {}
+                Some(false) => visible.push(crate::access::redact(conn)),
+                Some(true) => match self.finish_listed(conn).await {
+                    Ok(conn) => visible.push(conn),
+                    Err(Error::NotFound(_)) => {}
+                    Err(error) => return Err(error),
+                },
             }
         }
         Ok(visible)
@@ -1601,5 +1614,100 @@ mod tests {
         )
         .await;
         assert!(matches!(opened, Err(Error::Internal(ref msg)) if msg == "recorded spawn"));
+    }
+
+    /// A list of Enforced profiles is decided from the caller context and
+    /// policies loaded once, not two full `access::check`s (~16 state reads)
+    /// plus a re-read per row — and it shows exactly what those checks did.
+    #[tokio::test]
+    async fn list_for_decides_enforced_rows_without_a_check_per_row() {
+        use otto_core::access::*;
+        let f = fixture().await;
+        let pool = f.repo.pool();
+        otto_state::GrantsRepo::new(pool.clone())
+            .set_grants(
+                &f.member,
+                &[(
+                    otto_core::domain::Feature::Connections,
+                    otto_core::domain::Capability::View,
+                )],
+            )
+            .await
+            .unwrap();
+        let repo = otto_state::resource_access::ResourceAccessRepo::new(pool.clone());
+        let mut ids = Vec::new();
+        for ops in [vec!["discover"], vec!["discover", "configure"], vec![]] {
+            let id =
+                create_conn(&f, ConnectionKind::Mysql, serde_json::json!({"host": "db"})).await;
+            let current = repo
+                .get_policy(ResourceKind::Connection, &id)
+                .await
+                .unwrap();
+            assert_eq!(current.mode, AccessMode::Enforced, "new rows are enforced");
+            let rules = (!ops.is_empty())
+                .then(|| AccessRule {
+                    id: "member".into(),
+                    subject_kind: SubjectKind::User,
+                    subject_id: f.member.clone(),
+                    effect: RuleEffect::Allow,
+                    operations: ops.iter().map(|op| op.to_string()).collect(),
+                    children: None,
+                    grantable_operations: vec![],
+                    credential_connection_id: None,
+                })
+                .into_iter()
+                .collect();
+            let policy = AccessPolicy {
+                rules,
+                ..current.clone()
+            };
+            let actor = AccessActor {
+                real_user_id: f.root.clone(),
+                effective_user_id: None,
+            };
+            repo.put_policy(&policy, current.revision, &actor)
+                .await
+                .unwrap();
+            ids.push(id);
+        }
+        let ws: Id = "workspace".into();
+        for user in [&f.root, &f.member] {
+            crate::access::CHECKS.with(|n| n.set(0));
+            let listed = f.svc.list_for(&ws, user).await.unwrap();
+            assert_eq!(
+                crate::access::CHECKS.with(|n| n.get()),
+                0,
+                "no per-row check"
+            );
+            let mut expected = Vec::new();
+            for conn in f.repo.list_visible(&ws).await.unwrap() {
+                if let Ok(conn) = f.svc.visible_connection(conn, user).await {
+                    expected.push(conn);
+                }
+            }
+            let shape = |rows: &[Connection]| -> Vec<(Id, serde_json::Value)> {
+                rows.iter()
+                    .map(|c| (c.id.clone(), c.params.clone()))
+                    .collect()
+            };
+            assert_eq!(
+                shape(&listed),
+                shape(&expected),
+                "same rows, same redaction"
+            );
+        }
+        let member = f.svc.list_for(&ws, &f.member).await.unwrap();
+        let shown: Vec<_> = member
+            .iter()
+            .map(|c| (c.id.clone(), c.params.clone()))
+            .collect();
+        assert_eq!(
+            shown,
+            vec![
+                (ids[0].clone(), serde_json::json!({})),
+                (ids[1].clone(), serde_json::json!({"host": "db"}))
+            ],
+            "discover-only is redacted, configure is whole, no rule is hidden"
+        );
     }
 }

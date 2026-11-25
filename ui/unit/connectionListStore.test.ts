@@ -91,3 +91,16 @@ test('a change announced during the first load is read', async () => {
   await tick();
   assert.deepEqual(Array.from(connectionList.rows, (r: { id: string }) => r.id), ['old', 'new']);
 });
+
+test('only an access change that can touch connections re-reads the list', () => {
+  const { changesConnectionList } = loadSource(new URL('../src/lib/stores/connectionList.svelte.ts', import.meta.url), {
+    '../api/client': { api: { get() {} } },
+    './workspace.svelte': { ws: { currentId: 'w1' } },
+    '../live': { appLive: { on() {}, onResync() {} } },
+    '../storage': { lsGet: () => null, lsSet() {} },
+  });
+  assert.equal(changesConnectionList({ type: 'connections_changed' }), true);
+  assert.equal(changesConnectionList({ type: 'resource_access_changed', kind: 'connection', resource_id: 'c1' }), true);
+  assert.equal(changesConnectionList({ type: 'resource_access_changed' }), true, 'a group/role/grant change');
+  assert.equal(changesConnectionList({ type: 'resource_access_changed', kind: 'mcp_server', resource_id: 'm1' }), false);
+});

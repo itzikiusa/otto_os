@@ -6,6 +6,12 @@ use otto_core::{Error, Id, Result};
 use otto_rbac::resource_access::ResourceAccess;
 use otto_state::{DbPool, GrantsRepo, UsersRepo, WorkspacesRepo};
 
+#[cfg(test)]
+thread_local! {
+    /// [`check`] calls on this thread — list tests pin the per-row cost.
+    pub(crate) static CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) async fn enforced(pool: &DbPool, id: &Id) -> Result<bool> {
     Ok(
         otto_state::resource_access::ResourceAccessRepo::new(pool.clone())
@@ -22,6 +28,8 @@ pub(crate) async fn check(
     user_id: &Id,
     operation: &str,
 ) -> Result<()> {
+    #[cfg(test)]
+    CHECKS.with(|n| n.set(n.get() + 1));
     if !enforced(pool, &conn.id).await? {
         return Ok(());
     }
@@ -56,6 +64,86 @@ pub(crate) async fn check(
         return Err(Error::NotFound("connection".into()));
     }
     access.check(&user, &resource, operation).await
+}
+
+/// [`check`]'s caller half (account, feature grant, groups, workspace
+/// memberships) loaded once for a whole list, so each Enforced row costs only
+/// the pure policy evaluation — it used to be two full checks (~16 state
+/// reads) per row.
+pub(crate) struct ListAccess {
+    user: otto_core::domain::User,
+    feature: bool,
+    groups: Vec<Id>,
+    member_of: std::collections::HashMap<Id, bool>,
+}
+
+impl ListAccess {
+    pub(crate) async fn load(pool: &DbPool, user: otto_core::domain::User) -> Result<Self> {
+        let feature = !user.disabled
+            && GrantsRepo::new(pool.clone())
+                .capability_of(&user, Feature::Connections)
+                .await?
+                >= Capability::View;
+        let groups = otto_state::ResourceAccessRepo::new(pool.clone())
+            .groups_for_user(&user.id)
+            .await?;
+        Ok(Self {
+            user,
+            feature,
+            groups,
+            member_of: Default::default(),
+        })
+    }
+
+    /// `None`: hidden (`check(.., "discover")` fails); otherwise whether
+    /// `check(.., "configure")` passes, i.e. the row is shown unredacted.
+    pub(crate) async fn decide(
+        &mut self,
+        pool: &DbPool,
+        conn: &Connection,
+        policy: &otto_core::access::AccessPolicy,
+    ) -> Result<Option<bool>> {
+        if !self.feature {
+            return Ok(None);
+        }
+        if let Some(ws) = &conn.workspace_id {
+            let member = match self.member_of.get(ws) {
+                Some(member) => *member,
+                None => {
+                    let member = WorkspacesRepo::new(pool.clone())
+                        .role_of(&self.user, ws)
+                        .await?
+                        .is_some();
+                    self.member_of.insert(ws.clone(), member);
+                    member
+                }
+            };
+            if !member {
+                return Ok(None);
+            }
+        }
+        let resource = ResourceRef {
+            kind: ResourceKind::Connection,
+            id: conn.id.clone(),
+            child: None,
+        };
+        let allowed = |operation| {
+            ResourceAccess::evaluate_policy(
+                &self.user.id,
+                self.user.is_root,
+                self.user.disabled,
+                &self.groups,
+                policy,
+                &resource,
+                operation,
+            )
+            .map(|decision| decision.allowed)
+        };
+        if !allowed("discover")? {
+            return Ok(None);
+        }
+        Ok(Some(allowed("configure")?))
+    }
 }
 
 /// Read-only and Production are the guards an agent's writes run into (the DB

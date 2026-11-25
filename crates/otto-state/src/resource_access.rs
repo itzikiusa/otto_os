@@ -477,6 +477,15 @@ impl ResourceAccessRepo {
     /// round-trips) per row. A resource without a policy row is Legacy, so it
     /// is simply absent.
     pub async fn enforced_ids(&self, kind: ResourceKind) -> Result<std::collections::HashSet<Id>> {
+        Ok(self.enforced_policies(kind).await?.into_keys().collect())
+    }
+
+    /// [`Self::enforced_ids`] with each resource's current policy, so a list
+    /// can evaluate every row without a policy read per row.
+    pub async fn enforced_policies(
+        &self,
+        kind: ResourceKind,
+    ) -> Result<std::collections::HashMap<Id, AccessPolicy>> {
         let rows = sqlx::query(
             "SELECT p.resource_id, v.policy_json
                FROM resource_access_policies p
@@ -490,14 +499,14 @@ impl ResourceAccessRepo {
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("enforced resource policies"))?;
-        let mut out = std::collections::HashSet::new();
+        let mut out = std::collections::HashMap::new();
         for row in rows {
             let json: String = row.get("policy_json");
             let policy: AccessPolicy = serde_json::from_str(&json).map_err(|error| {
                 Error::Internal(format!("decode resource access policy: {error}"))
             })?;
             if policy.mode == AccessMode::Enforced {
-                out.insert(row.get::<String, _>("resource_id"));
+                out.insert(row.get::<String, _>("resource_id"), policy);
             }
         }
         Ok(out)
