@@ -587,25 +587,6 @@ impl AgentRuntime {
         }
     }
 
-    /// Pre-hydrate the `limit` most recently active open sessions in the
-    /// background at daemon boot so opening an active thread on phone/desktop
-    /// never blocks on a cold SQLite projection load.
-    pub async fn warm_recent(&self, limit: usize) {
-        if limit == 0 {
-            return;
-        }
-        let Ok(records) = self.inner.repo.list_all(None).await else {
-            return;
-        };
-        for rec in records
-            .into_iter()
-            .filter(|r| r.session.status != RuntimeSessionStatus::Closed)
-            .take(limit)
-        {
-            let _ = self.live(&rec.session.id).await;
-        }
-    }
-
     pub fn repo(&self) -> &AgentRuntimeRepo {
         &self.inner.repo
     }
@@ -3593,8 +3574,11 @@ pub(super) fn is_evictable_dead(st: &State) -> bool {
     if st.session.status == RuntimeSessionStatus::Closed {
         return true;
     }
+    // `epoch == 0`: no agent process ran in this daemon life, so the entry
+    // holds nothing the DB does not (a read or a rename after a restart).
     st.proj.queue.is_empty()
         && (st.released
+            || st.epoch == 0
             || st.proj.session.as_ref().is_some_and(|p| {
                 p.status == ProviderSessionStatus::Error
                     || (p.status == ProviderSessionStatus::Stopped && p.last_error.is_some())

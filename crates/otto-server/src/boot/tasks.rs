@@ -178,26 +178,14 @@ fn spawn_memory_fts_warmup(ctx: &ServerCtx) -> tokio::task::JoinHandle<()> {
     })
 }
 
-/// Pre-hydrate recent structured runtime threads + cold CLI probes (`/meta`,
-/// `/usage/limits`) off the request path right after boot so the very first
-/// mobile/desktop navigation hits warm RAM instead of cold SQLite/CLI forks.
+/// Cold CLI probes (`/meta`, `/usage/limits`) off the request path right
+/// after boot so the very first mobile/desktop navigation skips the CLI forks.
 fn spawn_boot_warmups(ctx: &ServerCtx) -> Vec<tokio::task::JoinHandle<()>> {
-    let mut handles = Vec::with_capacity(2);
-    let runtime = ctx.agent_runtime.clone();
-    handles.push(tokio::spawn(async move {
-        let t = std::time::Instant::now();
-        runtime.warm_recent(5).await;
-        tracing::debug!(
-            ms = t.elapsed().as_millis() as u64,
-            "agent-runtime: recent threads pre-warmed"
-        );
-    }));
-
     if std::env::var("OTTO_E2E_FAST_TIMERS").is_ok() {
-        return handles;
+        return Vec::new();
     }
     let manager = Arc::clone(&ctx.manager);
-    handles.push(tokio::spawn(async move {
+    vec![tokio::spawn(async move {
         let providers = manager.providers().names();
         let specs = otto_sessions::tool_probe::tool_specs(
             providers
@@ -212,8 +200,7 @@ fn spawn_boot_warmups(ctx: &ServerCtx) -> Vec<tokio::task::JoinHandle<()>> {
                 .providers()
                 .resolved_family_program(p)),
         );
-    }));
-    handles
+    })]
 }
 
 // -- Idle-connection reapers ----------------------------------------------

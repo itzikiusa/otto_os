@@ -17,6 +17,10 @@
 //! as a Close stops it, but the thread stays open: its next message respawns
 //! the agent, resuming the provider's conversation. The same guards hold,
 //! plus nothing starting or queued.
+//!
+//! The same minute drops every loaded thread nothing holds any more
+//! ([`super::is_evictable_dead`]: a rename or a selection change loads one
+//! without evicting it after), its pending DB writes flushed first.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -127,6 +131,14 @@ impl AgentRuntime {
         released
     }
 
+    /// Evict every loaded thread [`super::is_evictable_dead`] lets go.
+    pub async fn evict_dead(&self) {
+        let ids: Vec<Id> = self.inner.live.iter().map(|e| e.key().clone()).collect();
+        for id in ids {
+            super::evict_if_dead_after_flush(&self.inner, &id).await;
+        }
+    }
+
     /// One auto-close pass: close every open embedded thread idle for
     /// `hours` as of `now` (injected, so tests need no clock), at most
     /// [`AUTO_CLOSE_MAX_PER_PASS`]. Returns the ids it closed.
@@ -211,6 +223,7 @@ impl AgentRuntime {
                     }
                     Err(e) => tracing::warn!("idle release: settings unreadable: {e}"),
                 }
+                rt.evict_dead().await;
             }
         });
         let rt = self.clone();
