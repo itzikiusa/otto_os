@@ -8,6 +8,11 @@ import { loadErrorText } from '../loadError';
 import { pollWhileVisible, type Poller } from '../poll';
 
 const LIMITS_MS = 60_000;
+/** Unfocused (the window behind other apps, the meter still drawn), the
+ *  5-hour / 7-day windows are re-read once the answer is this old, not every
+ *  minute all night. */
+const UNFOCUSED_MS = 300_000;
+const unfocused = (): boolean => typeof document !== 'undefined' && !document.hasFocus();
 
 class LimitsStore {
   data = $state<LimitsResp | null>(null);
@@ -25,6 +30,7 @@ class LimitsStore {
       const fresh = this.data !== null && this.error === null && Date.now() - this.now < LIMITS_MS;
       this.poller = pollWhileVisible(
         async (signal) => {
+          if (this.data && this.error === null && unfocused() && Date.now() - this.now < UNFOCUSED_MS) return;
           try {
             this.data = await api.get<LimitsResp>('/usage/limits', signal);
             this.error = null;
