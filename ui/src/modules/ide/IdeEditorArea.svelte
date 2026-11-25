@@ -128,7 +128,14 @@
     const filePath = tab.path;
     if (!filePath || filePath.startsWith('untitled:') || filePath.startsWith('jdt://')) return;
     const digest = liveGit ? liveGit.fileStatusDigest(filePath) : 'pending';
-    if (!force && getPersistedIdeGitBaseDigest(filePath) === digest && filePath in gitBaseByPath) return;
+    const prev = getPersistedIdeGitBaseDigest(filePath);
+    // The git state finishing its first load (pending → no status yet → known) does not move
+    // HEAD: keep the base already read (or being read) and only record the new digest.
+    const settling = prev === undefined || prev === 'pending' || prev.startsWith('norepo:') || prev.includes(':nostatus:');
+    if (!force && (filePath in gitBaseByPath || gitBaseCtlByPath.has(filePath)) && (prev === digest || settling)) {
+      if (prev !== digest && filePath in gitBaseByPath) setPersistedIdeGitBase(filePath, gitBaseByPath[filePath], digest);
+      return;
+    }
     gitBaseCtlByPath.get(filePath)?.abort();
     const ctl = new AbortController();
     gitBaseCtlByPath.set(filePath, ctl);
@@ -140,7 +147,8 @@
           gitBaseByPath = { ...gitBaseByPath, [filePath]: base };
         }
       })
-      .catch(() => { /* ignore aborted or non-git paths */ });
+      .catch(() => { /* ignore aborted or non-git paths */ })
+      .finally(() => { if (gitBaseCtlByPath.get(filePath) === ctl) gitBaseCtlByPath.delete(filePath); });
   }
 
   /** A dependency action wrote the manifest itself: take the file from disk (an
