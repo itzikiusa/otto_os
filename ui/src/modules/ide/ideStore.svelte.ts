@@ -226,7 +226,7 @@ class IdeStore {
     });
     if (typeof window !== 'undefined') {
       window.addEventListener('otto:ide-storage-cleared', () => {
-        this.namedProjects = []; this.activeProjectId = null; this.closedTabPaths = []; this.recentPaths = []; this.clearTarget();
+        this.namedProjects = []; this.activeProjectId = null; this.closedTabPaths = []; this.recentPaths = []; this.tabs = []; this.hasClosedAllTabs = false; this.clearTarget(); // nothing written back
       });
     }
   }
@@ -261,7 +261,7 @@ class IdeStore {
         if (this.symbolsByPath[next] === undefined) void this.loadSymbols(next, this.getBuffer(next));
       }
     }
-    this.syncWorkspacePort();
+    saveWorkspaceOpenTabs(this); this.syncWorkspacePort();
   }
 
   get targetPayload(): IdeTargetSpec {
@@ -440,7 +440,7 @@ class IdeStore {
   }
   async openFile(rawPath: string, opts: IdeOpenFileOpts = {}): Promise<void> {
     await performOpenFile(this, this.bufPerf, this.isNavigatingHistory, rawPath, opts);
-    saveWorkspaceOpenTabs(this.target.root, this.tabs, this._activePath, this.splitPath);
+    saveWorkspaceOpenTabs(this);
     this.syncWorkspacePort();
   }
   pushNavLocation(path: string, line: number, col = 1): void {
@@ -461,21 +461,21 @@ class IdeStore {
     this.isNavigatingHistory = true;
     try { await this.openFile(loc.path, { line: loc.line, col: loc.col }); } finally { this.isNavigatingHistory = false; }
   }
-  pinTab(path: string): void { const tab = this.tabs.find((t) => t.path === path); if (tab) { tab.preview = false; tab.pinned = true; } }
-  togglePinTab(path: string): void { const tab = this.tabs.find((t) => t.path === path); if (tab) { tab.preview = false; tab.pinned = !tab.pinned; } }
+  pinTab(path: string): void { const tab = this.tabs.find((t) => t.path === path); if (tab) { tab.preview = false; tab.pinned = true; saveWorkspaceOpenTabs(this); } }
+  togglePinTab(path: string): void { const tab = this.tabs.find((t) => t.path === path); if (tab) { tab.preview = false; tab.pinned = !tab.pinned; saveWorkspaceOpenTabs(this); } }
   openInSplit(path: string, dir: 'right' | 'down' = 'right'): void {
     this.bufPerf.flushAll(this);
     const tab = this.tabs.find((t) => t.path === path);
     if (tab) tab.lastAccessedAt = nextTabAccessStamp();
-    this.splitPath = path; this.splitDirection = dir; if (tab?.deferred && !this.collabIsGuest) void this.openFile(path, { background: true });
+    this.splitPath = path; this.splitDirection = dir; saveWorkspaceOpenTabs(this); if (tab?.deferred && !this.collabIsGuest) void this.openFile(path, { background: true });
   }
-  closeSplit(): void { this.bufPerf.flushAll(this); this.splitPath = null; this.splitDirection = null; this.bufPerf.cancelHiddenLoads(this); }
+  closeSplit(): void { this.bufPerf.flushAll(this); this.splitPath = null; this.splitDirection = null; saveWorkspaceOpenTabs(this); this.bufPerf.cancelHiddenLoads(this); }
   jumpTo(path: string, line: number, col = 1): void { this.jumpSeq += 1; this.jumpRequest = { path, line, col, seq: this.jumpSeq }; }
   async closeTab(path: string): Promise<void> {
     await performCloseTab(this, this.bufPerf, path);
     if (!this.tabs.some((t) => t.path === path)) {
       this.forgetClosedTabs([path]);
-      saveWorkspaceOpenTabs(this.target.root, this.tabs, this._activePath, this.splitPath);
+      saveWorkspaceOpenTabs(this);
     }
     this.syncWorkspacePort();
   }
@@ -491,7 +491,7 @@ class IdeStore {
 
   async closeAllTabs(opts?: { force?: boolean }): Promise<void> {
     await performCloseAllTabs(this, this.bufPerf, (paths) => this.forgetClosedTabs(paths), (p) => this.saveFile(p, false, { silent: true }), opts);
-    saveWorkspaceOpenTabs(this.target.root, this.tabs, this._activePath, this.splitPath);
+    saveWorkspaceOpenTabs(this);
     this.syncWorkspacePort();
   }
 

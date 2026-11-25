@@ -64,6 +64,14 @@ const tab = (page: Page, name: string) => tabs(page).filter({ has: page.getByTex
 const editor = (page: Page) => page.locator('.ide-editor-area .cm-content').first();
 const firstLine = (rel: string) => readFileSync(join(root, rel), 'utf8').split('\n').find((l) => l.trim().length > 8)!.trim().slice(0, 30);
 
+/** The saved strip as it is in storage right now (no page leave needed). */
+const saved = (page: Page) => page.evaluate(() => {
+  const key = Object.keys(localStorage).find((k) => k.startsWith('otto.ide.openTabs.v1:') && k.endsWith('/otto'));
+  const s = key ? JSON.parse(localStorage.getItem(key) || 'null') : null;
+  const base = (p: string | null) => p?.split('/').pop() ?? null;
+  return s && { active: base(s.activePath), split: base(s.splitPath), pinned: (s.pinned ?? []).map(base) };
+});
+
 interface Strip { labels: string[]; active: string; pinned: string[]; dirty: string[] }
 async function strip(page: Page): Promise<Strip> {
   return tabs(page).evaluateAll((els) => {
@@ -108,6 +116,7 @@ test('a named project gets its tabs back after a reload and a restart', async ({
   // Pin one, leave an unsaved draft in another, split a third, end on a tab that is not the first.
   await tab(page, 'AGENTS.md').click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Pin tab' }).click();
+  await expect.poll(() => saved(page).then((s) => s?.pinned)).toEqual(['AGENTS.md']); // saved at once, not on page leave
   await tab(page, 'Cargo.toml').getByRole('tab').click();
   await expect(editor(page)).toContainText('[workspace]');
   await editor(page).click();
@@ -118,8 +127,10 @@ test('a named project gets its tabs back after a reload and a restart', async ({
   await expect(editor(page)).toContainText(firstLine('ui/package.json'));
   await page.getByTestId('ide-split-right-btn').click();
   await expect(page.getByTestId('ide-split-pane')).toContainText(firstLine('ui/package.json'));
+  await expect.poll(() => saved(page).then((s) => s?.split)).toBe('package.json');
   await tab(page, 'main.rs').getByRole('tab').click();
   await expect(editor(page)).toContainText(firstLine('crates/ottod/src/main.rs'));
+  await expect.poll(() => saved(page).then((s) => s?.active)).toBe('main.rs');
   await page.waitForTimeout(2_500); // ui-guards: allow — the draft's idle persist
   const want = await strip(page);
   expect(want.labels).toHaveLength(FILES.length + 1);

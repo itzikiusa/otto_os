@@ -52,19 +52,23 @@ export function nextTabAccessStamp(): number {
   return lruAccessClock;
 }
 
-export function saveWorkspaceOpenTabs(root: string, tabs: readonly (string | Pick<IdeOpenTab, 'path' | 'projectScoped' | 'pinned'>)[], activePath: string | null, splitPath: string | null): void {
-  if (!root) return;
+/** True while a restore reads a project's saved strip back (it also keeps the tree from
+ *  auto-revealing the restored tab, and the stacked layout on the pane the person picked). */
+export const ideTabRestore = { active: false };
+
+/** Save a root's tab strip — the one rule for when it may be written: never while a restore is
+ *  reading it back, and never empty unless the person closed every tab (a switch, reset or page
+ *  leave before the restore ran would save the not-yet-restored strip over it). Past the cap it
+ *  keeps only the tabs that must come back: pinned, active, split. */
+export function saveWorkspaceOpenTabs(host: { target: { root: string }; tabs: readonly Pick<IdeOpenTab, 'path' | 'projectScoped' | 'pinned'>[]; activePath: string | null; splitPath: string | null; hasClosedAllTabs: boolean }): void {
+  const { target: { root }, tabs, activePath, splitPath } = host;
+  if (!root || ideTabRestore.active || (tabs.length === 0 && !host.hasClosedAllTabs) || typeof localStorage === 'undefined') return;
+  const cap = Math.max(15, Math.min(40, readIdePreferences().maxOpenTabs || 20));
+  const open = tabs.filter((t, i) => i < cap || t.pinned || t.path === activePath || t.path === splitPath);
+  const where = (keep: (t: (typeof open)[number]) => unknown): string[] => open.flatMap((t) => (keep(t) ? [t.path] : []));
   try {
-    if (typeof localStorage === 'undefined') return;
-    const cap = Math.max(15, Math.min(40, readIdePreferences().maxOpenTabs || 20));
-    const open = tabs.slice(0, cap);
-    const paths = open.map((tab) => typeof tab === 'string' ? tab : tab.path);
-    const projectScoped = open.flatMap((tab) => typeof tab !== 'string' && tab.projectScoped ? [tab.path] : []);
-    localStorage.setItem(
-      `${OPEN_TABS_KEY_PREFIX}${root}`,
-      JSON.stringify({ paths, activePath, splitPath, projectScoped, pinned: open.flatMap((tab) => typeof tab !== 'string' && tab.pinned ? [tab.path] : []) }),
-    );
-  } catch { /* ignore */ }
+    localStorage.setItem(`${OPEN_TABS_KEY_PREFIX}${root}`, JSON.stringify({ paths: where(() => true), activePath, splitPath, projectScoped: where((t) => t.projectScoped), pinned: where((t) => t.pinned) }));
+  } catch { /* quota */ }
 }
 
 export function loadWorkspaceOpenTabs(root: string): { paths: string[]; activePath: string | null; splitPath: string | null; projectScoped: string[]; pinned: string[] } | null {
@@ -308,18 +312,14 @@ export class IdeBufferPerfController {
       // A tab not read yet holds a placeholder: writing it would erase its saved draft.
       if (!t.loading) writeIdeUndoDraftImmediate(t.path, t.savedContent, t.content);
     }
-    if (host.target.root) {
-      saveWorkspaceOpenTabs(host.target.root, host.tabs, host.activePath, host.splitPath);
-    }
+    saveWorkspaceOpenTabs(host);
   }
   private discardAllDrafts(host: IdeBufferHost): void {
     this.flushHistorySnapshot(host);
     for (const t of this.draftTimers.values()) clearTimeout(t);
     this.draftTimers.clear();
     for (let i = 0; i < host.tabs.length; i++) removeIdeUndoDraft(host.tabs[i].path);
-    if (host.target.root) {
-      saveWorkspaceOpenTabs(host.target.root, host.tabs, host.activePath, host.splitPath);
-    }
+    saveWorkspaceOpenTabs(host);
   }
   markClean(tab: IdeOpenTab, content: string, sha256?: string): void {
     this.clearSync(tab.path); this.clearAutoSaveTimer(tab.path); this.clearDraftTimer(tab.path);
@@ -559,7 +559,7 @@ export async function performOpenFile(
         tab.binary = Boolean(res.binary);
         tab.readOnly = isReadOnly;
         tab.loading = false;
-        if (host.target.root) saveWorkspaceOpenTabs(host.target.root, host.tabs, host.activePath, host.splitPath);
+        saveWorkspaceOpenTabs(host);
       }
       if (host.activePath === fullPath || host.splitPath === fullPath) {
         void host.loadGutter(fullPath, normContent);

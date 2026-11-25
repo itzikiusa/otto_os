@@ -179,18 +179,22 @@ export function leaveProjectForSsh(host: NamedProjectsHost, ssh: SavedSshTarget)
   saveLastSshTarget(ssh);
 }
 
-let activating: { id: string; done: Promise<void> } | null = null;
-/** One activation per project at a time. The IDE page asks again on every workspace-list
- *  change while a boot activation is still loading; a second run reset the target under the
- *  first, saving its empty strip over the saved one (a reload came back as README only). */
+let queue: Promise<void> = Promise.resolve();
+let latest = { seq: 0, id: '' };
+/** Activations run one at a time and only the newest counts: asking again for the project
+ *  being activated joins it (the IDE page asks on every workspace-list change while a boot
+ *  activation loads), and one superseded by another pick stops before it switches. */
 export function activateNamedProject(host: NamedProjectsHost, projectId: string): Promise<void> {
-  if (activating?.id === projectId) return activating.done;
-  const done = activateNow(host, projectId).finally(() => { if (activating?.done === done) activating = null; });
-  activating = { id: projectId, done };
-  return done;
+  if (latest.id === projectId) return queue;
+  const seq = latest.seq + 1;
+  latest = { seq, id: projectId };
+  const superseded = (): boolean => latest.seq !== seq;
+  const run = queue.then(() => (superseded() ? undefined : activateNow(host, projectId, superseded)));
+  queue = run.catch(() => {}).finally(() => { if (!superseded()) latest = { seq, id: '' }; });
+  return run;
 }
 
-async function activateNow(host: NamedProjectsHost, projectId: string): Promise<void> {
+async function activateNow(host: NamedProjectsHost, projectId: string, superseded: () => boolean): Promise<void> {
   const proj = host.namedProjects.find((p) => p.id === projectId);
   if (!proj) return;
   const primaryKey = canonicalRootKey(proj.primary_root);
@@ -204,7 +208,7 @@ async function activateNow(host: NamedProjectsHost, projectId: string): Promise<
   ) {
     return;
   }
-  if (!(await host.confirmDiscardUnsaved())) return;
+  if (!(await host.confirmDiscardUnsaved()) || superseded()) return;
   void import('../../../lib/components/cm-ide-lsp')
     .then((m) => m.disposePooledLspClients({ forceAll: true }))
     .catch(() => {});
