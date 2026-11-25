@@ -51,7 +51,7 @@ function batchedGet(urls: string[]) {
     urls.push(url);
     const q = new URLSearchParams(url.split('?')[1]);
     const paths = JSON.parse(q.get('paths') ?? '[]') as string[];
-    return { root: '/repo', path: q.get('path'), entries: listing[q.get('path') ?? ''], listings: paths.map((p) => ({ path: p, entries: listing[p] })) };
+    return { root: '/repo', path: q.get('path'), entries: listing[q.get('path') ?? ''], listings: paths.map((p) => ({ path: p, entries: listing[`/repo/${p}`] })) };
   };
 }
 
@@ -62,7 +62,7 @@ test('a root load reads the open folders in the same request and commits them in
   await slices.fetchIdeWorkspaceTree(host, undefined, () => {}, { deferTabRestore: true });
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(urls.length, 1, 'one request, not one per folder level');
-  assert.deepEqual(JSON.parse(new URLSearchParams(urls[0].split('?')[1]).get('paths')!).sort(), ['/repo/src', '/repo/src/deep']);
+  assert.deepEqual(JSON.parse(new URLSearchParams(urls[0].split('?')[1]).get('paths')!).sort(), ['src', 'src/deep'], 'relative to the root: a short URL');
   assert.equal(host.assigned, 1, 'the whole tree lands at once');
   assert.equal(host.childrenByDir['/repo/src/deep'].length, 1);
   // A refresh that finds nothing new keeps every listing as it is: nothing repaints.
@@ -79,6 +79,28 @@ test('live re-reads asked for in the same tick go out as one request', async () 
   assert.equal(urls.length, 1);
   assert.equal(host.childrenByDir['/repo/src'].length, 2);
   assert.equal(host.childrenByDir['/repo/src/deep'].length, 1);
+});
+
+test('an older daemon (no listings) still gets every live re-read, one folder at a time', async () => {
+  const urls: string[] = [];
+  const slices = slicesWith(async (url: string) => {
+    urls.push(url);
+    const path = new URLSearchParams(url.split('?')[1]).get('path') ?? '';
+    return { root: '/repo', path, entries: listing[path] };
+  });
+  const host = treeHost(['/repo/src', '/repo/src/deep']);
+  await Promise.all(['/repo', '/repo/src', '/repo/src/deep'].map((d) => slices.relistIdeTreeDir(host, d)));
+  assert.equal(urls.length, 3, 'the batch, then the two folders it did not answer');
+  assert.equal(host.childrenByDir['/repo/src'].length, 2);
+  assert.equal(host.childrenByDir['/repo/src/deep'].length, 1);
+});
+
+test('a restore past the cap sends MAX_TREE_PATHS folders; the rest are read on their own', async () => {
+  const urls: string[] = [];
+  const slices = slicesWith(batchedGet(urls));
+  const many = Array.from({ length: slices.MAX_TREE_PATHS + 5 }, (_, i) => `/repo/d${i}`);
+  await slices.fetchIdeWorkspaceTree(treeHost(many), undefined, () => {}, { deferTabRestore: true });
+  assert.equal(JSON.parse(new URLSearchParams(urls[0].split('?')[1]).get('paths')!).length, slices.MAX_TREE_PATHS);
 });
 
 test('a project switched back to paints its held listings at the old scroll offset at once', () => {

@@ -384,6 +384,9 @@ export function syncAdditionalRootsFromEnvState(
   onChanged();
 }
 
+/** Most folders one tree read lists (`paths`), as the daemon caps it. */
+export const MAX_TREE_PATHS = 200;
+
 /** Same entries in the same order: a live re-read that found nothing new changes nothing. */
 function sameListing(a: readonly IdeFsEntry[] | undefined, b: readonly IdeFsEntry[]): boolean {
   return a !== undefined && a.length === b.length && JSON.stringify(a) === JSON.stringify(b);
@@ -419,6 +422,9 @@ export async function fetchIdeWorkspaceTree(
   // A root load reads the open folders of the primary root in the same call: the tree comes
   // back whole in one paint, not level by level.
   const open = !isRoot ? [] : live ? (opts.paths ?? []) : Object.keys(host.expandedDirs).filter((d) => host.expandedDirs[d] && d.startsWith(`${primary}/`));
+  // Sent relative to the root (a short URL) and at most MAX_TREE_PATHS: the rest is read on its own.
+  const sent = open.slice(0, MAX_TREE_PATHS);
+  const abs = (rel: string): string => `${primary}/${rel}`;
   const canon = (raw: IdeFsEntry[] = []): IdeFsEntry[] =>
     host.target.kind === 'local' ? raw.map((e) => ({ ...e, path: canonicalizeLocalProjectPath(e.path, host.projectRoots) })) : raw;
   // An unchanged listing keeps its array: a refresh of what is shown repaints nothing.
@@ -428,7 +434,7 @@ export async function fetchIdeWorkspaceTree(
       attachedParent && !attachedParent.isPrimary && host.target.kind === 'local'
         ? new URLSearchParams({ kind: 'local', root: attachedParent.path, path: normDir, show_hidden: String(host.showHidden) }).toString()
         : host.targetQuery({ path: isRoot ? '' : normDir, show_hidden: host.showHidden });
-    if (open.length > 0) query += `&paths=${encodeURIComponent(JSON.stringify(open))}`;
+    if (sent.length > 0) query += `&paths=${encodeURIComponent(JSON.stringify(sent.map((d) => d.slice(primary.length + 1))))}`;
     const resp = await api.get<IdeFsTreeResp>(`/ide/fs/tree?${query}`);
     if (stale()) return;
     if (resp.target_os) host.targetOs = resp.target_os;
@@ -443,15 +449,18 @@ export async function fetchIdeWorkspaceTree(
       host.treeRootEntries = same(host.treeRootEntries, entries);
       if (live) {
         const next = { ...host.childrenByDir, [rootKey]: host.treeRootEntries };
-        for (const l of resp.listings ?? []) next[l.path] = same(next[l.path], canon(l.entries));
+        for (const l of resp.listings ?? []) next[abs(l.path)] = same(next[abs(l.path)], canon(l.entries));
         if (Object.keys(next).some((d) => next[d] !== host.childrenByDir[d])) host.childrenByDir = next;
+        // Folders the call did not answer (an older daemon, past the cap, one that failed) are read on their own.
+        const answered = new Set((resp.listings ?? []).map((l) => abs(l.path)));
+        await Promise.all(open.filter((d) => !answered.has(d)).map((d) => fetchIdeWorkspaceTree(host, d, () => {}, { listingOnly: true })));
         return;
       }
       ideProjectHealth.clear();
       // A root load is a refresh: expanded folders refetch (the primary root's came with it),
       // and collapsed ones drop their cached listing so the next expand reads the disk.
       const kept: typeof host.childrenByDir = { [rootKey]: host.treeRootEntries };
-      for (const l of resp.listings ?? []) kept[l.path] = same(host.childrenByDir[l.path], canon(l.entries));
+      for (const l of resp.listings ?? []) kept[abs(l.path)] = same(host.childrenByDir[abs(l.path)], canon(l.entries));
       for (const [dir, children] of Object.entries(host.childrenByDir)) {
         if (dir === rootKey || !host.expandedDirs[dir] || kept[dir]) continue;
         kept[dir] = children;

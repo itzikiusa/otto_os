@@ -173,6 +173,15 @@
 
   // Scroll back once the rows are there: at once from listings the store holds (a remount, a
   // project switched back to), else when the root load (open folders included) lands.
+  // The person scrolling (wheel, touch, scrollbar, keys) wins over a scroll-back still waiting.
+  $effect(() => {
+    const el = treeScrollEl;
+    if (!el) return;
+    const cancel = (): void => { treeScroll.pending = null; };
+    const kinds = ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const;
+    for (const k of kinds) el.addEventListener(k, cancel, { passive: true });
+    return () => { for (const k of kinds) el.removeEventListener(k, cancel); };
+  });
   $effect(() => {
     const el = treeScrollEl;
     void visibleNodes.length;
