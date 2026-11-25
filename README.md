@@ -13,6 +13,18 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
 🎬 **[Watch the product tour](https://github.com/itzikiusa/otto_os/releases/download/v0.3.0/otto-tour-20261116.mp4)**
 (also in the app under **Help → Walkthroughs**).
 
+### What's new in 0.5.3
+
+- **IDE tabs survive a restart.** A named project comes back with the tabs it
+  had: same order, same active file, pinned and split tabs, and unsaved
+  drafts. They used to come back as one file after a reload. Pins, splits and
+  the active tab are saved when they change, not only when the window closes,
+  and switching projects quickly follows the last one you picked. The file
+  tree also keeps its scroll position when you switch back to a project.
+- **Dependencies.** The motion engine moves to torch 2.13.0, transformers
+  5.10.1 and peft 0.19.1, checked by generating the same clip before and
+  after; `rsa` 0.10.0 closes the last open Rust advisory.
+
 ### What's new in 0.5.2
 
 A performance pass driven by real telemetry and three independent review
