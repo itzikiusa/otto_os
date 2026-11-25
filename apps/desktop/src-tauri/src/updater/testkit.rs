@@ -182,11 +182,35 @@ fn run(cmd: &mut Command) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// stdout + stderr of a diagnostic command (never fails).
+fn probe(args: &[&str]) -> String {
+    match Command::new(args[0]).args(&args[1..]).output() {
+        Ok(o) => format!(
+            "$ {}\n{}{}",
+            args.join(" "),
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        ),
+        Err(e) => format!("$ {}: {e}\n", args.join(" ")),
+    }
+}
+
+/// The macOS OpenSSL (LibreSSL), the same on every Mac and runner — never
+/// whichever `openssl` PATH finds first.
+const OPENSSL: &str = "/usr/bin/openssl";
+
+/// Serializes the CI-only search-list fallback in [`Kit::sign`].
+static SEARCH_LIST: Mutex<()> = Mutex::new(());
+
 /// TEST code-signing identities in a temp keychain file + bundles signed by
 /// them, laid out like the real app (bundle + `ottod` + optional `kiri`).
+/// The keychain is passed explicitly to every command; it is never added to
+/// the keychain search list (except the loud, CI-only fallback in `sign`).
 pub struct Kit {
     pub dir: PathBuf,
     keychain: PathBuf,
+    /// CN → leaf SHA-1: codesign signs by hash, not by a name match.
+    ids: Mutex<std::collections::HashMap<String, String>>,
 }
 
 const KC_PW: &str = "otto-updater-test-only";
@@ -196,10 +220,34 @@ impl Kit {
         let dir = temp_dir(&format!("kit-{tag}"));
         let keychain = dir.join("TEST.keychain-db");
         let kc = keychain.to_str().unwrap();
-        run(Command::new("security").args(["create-keychain", "-p", KC_PW, kc]));
-        run(Command::new("security").args(["set-keychain-settings", kc]));
-        run(Command::new("security").args(["unlock-keychain", "-p", KC_PW, kc]));
-        Kit { dir, keychain }
+        run(Command::new("/usr/bin/security").args(["create-keychain", "-p", KC_PW, kc]));
+        run(Command::new("/usr/bin/security").args(["set-keychain-settings", kc]));
+        run(Command::new("/usr/bin/security").args(["unlock-keychain", "-p", KC_PW, kc]));
+        Kit {
+            dir,
+            keychain,
+            ids: Mutex::new(Default::default()),
+        }
+    }
+
+    /// Everything that explains a signing failure on a runner.
+    fn diagnostics(&self) -> String {
+        let kc = self.keychain.to_str().unwrap();
+        [
+            probe(&["/usr/bin/sw_vers", "-productVersion"]),
+            probe(&[OPENSSL, "version"]),
+            probe(&[
+                "/usr/bin/security",
+                "find-identity",
+                "-p",
+                "codesigning",
+                kc,
+            ]),
+            probe(&["/usr/bin/security", "show-keychain-info", kc]),
+            probe(&["/usr/bin/security", "list-keychains", "-d", "user"]),
+            probe(&["/usr/bin/security", "default-keychain", "-d", "user"]),
+        ]
+        .concat()
     }
 
     /// A self-signed code-signing identity; returns its leaf SHA-1 (hex).
@@ -211,7 +259,7 @@ impl Kit {
             format!("[ req ]\ndistinguished_name = dn\nx509_extensions = ext\nprompt = no\n[ dn ]\nCN = {cn}\n[ ext ]\nkeyUsage = critical, digitalSignature\nextendedKeyUsage = critical, codeSigning\nbasicConstraints = critical, CA:false\n"),
         )
         .unwrap();
-        run(Command::new("openssl").current_dir(&d).args([
+        run(Command::new(OPENSSL).current_dir(&d).args([
             "req",
             "-x509",
             "-newkey",
@@ -226,37 +274,28 @@ impl Kit {
             "-config",
             "cert.conf",
         ]));
-        // The legacy PKCS#12 algorithms: `security import` refuses OpenSSL 3's default.
-        let legacy = Command::new("openssl")
-            .current_dir(&d)
-            .args([
-                "pkcs12",
-                "-export",
-                "-inkey",
-                "key.pem",
-                "-in",
-                "cert.pem",
-                "-out",
-                "cert.p12",
-                "-passout",
-                "pass:p12",
-                "-keypbe",
-                "PBE-SHA1-3DES",
-                "-certpbe",
-                "PBE-SHA1-3DES",
-                "-macalg",
-                "sha1",
-            ])
-            .output()
-            .unwrap();
-        if !legacy.status.success() {
-            run(Command::new("openssl").current_dir(&d).args([
-                "pkcs12", "-export", "-inkey", "key.pem", "-in", "cert.pem", "-out", "cert.p12",
-                "-passout", "pass:p12",
-            ]));
-        }
+        // SHA1/3DES PKCS#12: what every macOS `security import` reads
+        // (packaging/make-cert.sh --export uses the same).
+        run(Command::new(OPENSSL).current_dir(&d).args([
+            "pkcs12",
+            "-export",
+            "-inkey",
+            "key.pem",
+            "-in",
+            "cert.pem",
+            "-out",
+            "cert.p12",
+            "-passout",
+            "pass:p12",
+            "-keypbe",
+            "PBE-SHA1-3DES",
+            "-certpbe",
+            "PBE-SHA1-3DES",
+            "-macalg",
+            "sha1",
+        ]));
         let kc = self.keychain.to_str().unwrap();
-        run(Command::new("security").args([
+        run(Command::new("/usr/bin/security").args([
             "import",
             d.join("cert.p12").to_str().unwrap(),
             "-k",
@@ -268,7 +307,7 @@ impl Kit {
             "-f",
             "pkcs12",
         ]));
-        run(Command::new("security").args([
+        run(Command::new("/usr/bin/security").args([
             "set-key-partition-list",
             "-S",
             "apple-tool:,apple:,codesign:",
@@ -277,27 +316,94 @@ impl Kit {
             KC_PW,
             kc,
         ]));
-        let der = run(Command::new("/bin/sh")
-            .current_dir(&d)
-            .args(["-c", "openssl x509 -in cert.pem -outform der | shasum -a 1"]));
-        der.split_whitespace().next().unwrap().to_string()
+        let der = run(Command::new("/bin/sh").current_dir(&d).args([
+            "-c",
+            &format!("{OPENSSL} x509 -in cert.pem -outform der | /usr/bin/shasum -a 1"),
+        ]));
+        let hash = der.split_whitespace().next().unwrap().to_string();
+        // The identity (cert + private key) must be in the keychain file now.
+        let found = probe(&[
+            "/usr/bin/security",
+            "find-identity",
+            "-p",
+            "codesigning",
+            kc,
+        ]);
+        assert!(
+            found.to_uppercase().contains(&hash.to_uppercase()),
+            "testkit: the TEST identity {cn} ({hash}) is not in its keychain after import\n{}",
+            self.diagnostics()
+        );
+        self.ids
+            .lock()
+            .unwrap()
+            .insert(cn.to_string(), hash.clone());
+        hash
     }
 
     fn sign(&self, path: &Path, cn: &str, deep: bool) {
-        let mut cmd = Command::new("/usr/bin/codesign");
-        cmd.args([
-            "--force",
-            "--options",
-            "runtime",
-            "--timestamp=none",
-            "--keychain",
-        ])
-        .arg(&self.keychain)
-        .args(["-s", cn]);
-        if deep {
-            cmd.arg("--deep");
+        let hash = self
+            .ids
+            .lock()
+            .unwrap()
+            .get(cn)
+            .cloned()
+            .expect("identity() first");
+        let attempt = || {
+            let mut cmd = Command::new("/usr/bin/codesign");
+            cmd.args([
+                "--force",
+                "--options",
+                "runtime",
+                "--timestamp=none",
+                "--keychain",
+            ])
+            .arg(&self.keychain)
+            .args(["-s", &hash]);
+            if deep {
+                cmd.arg("--deep");
+            }
+            cmd.arg(path).output().expect("spawn codesign")
+        };
+        let mut out = attempt();
+        let stderr = |o: &std::process::Output| String::from_utf8_lossy(&o.stderr).into_owned();
+        // Some codesign builds only find an identity in a keychain that is on
+        // the search list, even with --keychain. On CI only (an ephemeral
+        // runner), retry with the temp keychain added to it, then restore
+        // the exact previous list. A developer's Mac is never touched.
+        if !out.status.success()
+            && stderr(&out).contains("no identity found")
+            && std::env::var_os("GITHUB_ACTIONS").is_some()
+        {
+            let _one = SEARCH_LIST.lock().unwrap_or_else(|p| p.into_inner());
+            let listed =
+                run(Command::new("/usr/bin/security").args(["list-keychains", "-d", "user"]));
+            let before: Vec<String> = listed
+                .lines()
+                .map(|l| l.trim().trim_matches('"').to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+            eprintln!(
+                "testkit: codesign found no identity in {} — CI only: retrying with it on the user search list (restored after)",
+                self.keychain.display()
+            );
+            let mut with_kc = before.clone();
+            with_kc.push(self.keychain.to_string_lossy().into_owned());
+            run(Command::new("/usr/bin/security")
+                .args(["list-keychains", "-d", "user", "-s"])
+                .args(&with_kc));
+            out = attempt();
+            run(Command::new("/usr/bin/security")
+                .args(["list-keychains", "-d", "user", "-s"])
+                .args(&before));
         }
-        run(cmd.arg(path));
+        assert!(
+            out.status.success(),
+            "testkit: codesign -s {hash} ({cn}) {} failed: {}\n{}",
+            path.display(),
+            stderr(&out),
+            self.diagnostics()
+        );
     }
 
     /// An unsigned, INERT test bundle `<dir>/<BUNDLE>` at `version`: never
@@ -393,7 +499,7 @@ impl Kit {
 
 impl Drop for Kit {
     fn drop(&mut self) {
-        let _ = Command::new("security")
+        let _ = Command::new("/usr/bin/security")
             .arg("delete-keychain")
             .arg(&self.keychain)
             .output();
