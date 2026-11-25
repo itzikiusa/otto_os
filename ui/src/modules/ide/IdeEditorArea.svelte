@@ -28,6 +28,7 @@
   import { ideAgent } from './store/ideAgentController.svelte';
   import { ideEditorDebugProps } from './editor/ideEditorDebugBridge';
   import { computeSplitRatioFromKey } from './editor/ideEditorHelpers';
+  import { needsGitBaseRead, settledGitBaseDigest } from './editor/ideGitBaseDigest';
   import { attachIdeEditorWindowEvents } from './editor/ideEditorWindowEvents';
   import { subscribeIdeBufferEvictions, subscribeIdeFileSaved } from './store/ideBufferPerf';
   import IdeTabBar from './editor/IdeTabBar.svelte';
@@ -127,12 +128,9 @@
   function refreshGitBaseForTab(tab: IdeOpenTab, force = false): void {
     const filePath = tab.path;
     if (!filePath || filePath.startsWith('untitled:') || filePath.startsWith('jdt://')) return;
-    const digest = liveGit ? liveGit.fileStatusDigest(filePath) : 'pending';
-    const prev = getPersistedIdeGitBaseDigest(filePath);
-    // The git state finishing its first load (pending → no status yet → known) does not move
-    // HEAD: keep the base already read (or being read) and only record the new digest.
-    const settling = prev === undefined || prev === 'pending' || prev.startsWith('norepo:') || prev.includes(':nostatus:');
-    if (!force && (filePath in gitBaseByPath || gitBaseCtlByPath.has(filePath)) && (prev === digest || settling)) {
+    const digestNow = (): string => (liveGit ? liveGit.fileStatusDigest(filePath) : 'pending');
+    const digest = digestNow(), prev = getPersistedIdeGitBaseDigest(filePath);
+    if (!force && !needsGitBaseRead(prev, digest, filePath in gitBaseByPath || gitBaseCtlByPath.has(filePath))) {
       if (prev !== digest && filePath in gitBaseByPath) setPersistedIdeGitBase(filePath, gitBaseByPath[filePath], digest);
       return;
     }
@@ -142,10 +140,12 @@
     void resolveIdeGitBaseContent(filePath, tab.savedContent, ctl.signal)
       .then((base) => {
         if (ctl.signal.aborted) return;
-        setPersistedIdeGitBase(filePath, base, digest);
+        const now = digestNow(), settled = settledGitBaseDigest(digest, now);
+        setPersistedIdeGitBase(filePath, base, settled);
         if (gitBaseByPath[filePath] !== base || !(filePath in gitBaseByPath)) {
           gitBaseByPath = { ...gitBaseByPath, [filePath]: base };
         }
+        if (settled !== now) refreshGitBaseForTab(tab); // HEAD moved while this read was in flight
       })
       .catch(() => { /* ignore aborted or non-git paths */ })
       .finally(() => { if (gitBaseCtlByPath.get(filePath) === ctl) gitBaseCtlByPath.delete(filePath); });
