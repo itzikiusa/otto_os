@@ -694,7 +694,7 @@
       "input_schema": { "type": "object", "required": ["url"], "properties": {
         "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"], "description": "Default GET." },
         "url": { "type": "string", "minLength": 1, "maxLength": 8192, "description": "http(s)://localhost:<port>/… (or 127.0.0.1 / [::1])." },
-        "headers": { "type": "object", "description": "Header name → value." },
+        "headers": { "type": "object", "maxProperties": 50, "description": "Header name → value (≤ 50; names, values and body together ≤ 8 KB)." },
         "body": { "type": "string", "maxLength": 1000000 },
         "wait_ms": { "type": "integer", "minimum": 1000, "maximum": 100000, "description": "Longest wait for a stop or the response. Default 60000." } },
         "additionalProperties": false } },

@@ -388,6 +388,10 @@ pub enum IdeDbWatchCompare {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct IdeDbWatchStartReq {
+    /// As on detect: required (from a person) for a saved target that is not
+    /// on this Mac — starting a watch dials it.
+    #[serde(default)]
+    pub confirm_target: bool,
     pub root: String,
     pub target: IdeDbWatchTargetRef,
     #[serde(default)]

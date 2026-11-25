@@ -372,6 +372,8 @@ class IdeDbWatchController {
       root,
       items: req.items.slice(0, MAX_WATCH_ITEMS),
       bind: req.bind === undefined ? this.liveBind : req.bind,
+      // A saved target here is the person's pick, their remembered pick, or an agent's after its confirm.
+      ...(req.target.kind === 'saved' ? { confirm_target: true } : {}),
     };
     // An agent can name a saved connection the panel never listed: look it up, so prod still confirms.
     if (req.target.kind === 'saved' && !this.targetOf(req.target)) await this.discover();

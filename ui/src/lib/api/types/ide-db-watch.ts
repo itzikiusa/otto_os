@@ -145,6 +145,8 @@ export interface IdeDbWatchStartReq {
   bind?: IdeDbWatchBind | null;
   /** Required (from a person, never an agent credential) for a prod-tagged target; never remembered. */
   confirm_production?: boolean;
+  /** Required (from a person) for a saved target that is not on this Mac: starting a watch dials it. */
+  confirm_target?: boolean;
 }
 
 /** PATCH /ide/db-watch/watches/{id} — every field optional. */

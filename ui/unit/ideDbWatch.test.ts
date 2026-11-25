@@ -250,6 +250,8 @@ test('prod: start asks the typed confirm with who asks and what runs; cancel sen
     assert.match(h.prompts[0], /session_info/);
     assert.equal(starts.length, answer ? 1 : 0);
     if (answer) assert.equal((starts[0].body as { confirm_production?: boolean }).confirm_production, true);
+    // C3-006: a saved target is only started as the person's (or a confirmed agent's) pick.
+    if (answer) assert.equal((starts[0].body as { confirm_target?: boolean }).confirm_target, true);
     assert.equal(h.ls.has(memoryKey('/r')), false, 'a prod target is never remembered');
   }
 });

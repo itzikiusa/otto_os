@@ -387,6 +387,7 @@ pub(super) async fn db_watch_start<S: IdeCtx>(
 ) -> ApiResult<Json<IdeDbWatch>> {
     authorize_root(&ctx, &user, &req.root).await?;
     let target = resolve_watch_target(&ctx, &user, &req.target).await?;
+    check_contact(&target, req.confirm_target)?;
     check_production(&target, req.confirm_production)?;
     let watch = Watch::new(&user, &req.root, target, req.database, req.items)?;
     ctx.ide().watches.insert(Arc::clone(&watch));

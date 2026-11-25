@@ -440,9 +440,16 @@ pub fn validate_command(spec: &UiCommandSpec, args: &Value) -> Result<(), String
         ));
     }
     let body = args.get("body").and_then(Value::as_str).unwrap_or_default();
-    if spec.name == "ide_debug_request" && body.len() > MAX_SHOWN_TEXT {
+    let headers_len: usize = (args
+        .get("headers")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten())
+    .map(|(k, v)| k.len() + v.as_str().map_or_else(|| v.to_string().len(), str::len))
+    .sum();
+    if spec.name == "ide_debug_request" && body.len() + headers_len > MAX_SHOWN_TEXT {
         return Err(format!(
-            "the body exceeds {MAX_SHOWN_TEXT} characters — too much for the user to read in the confirm"
+            "the headers and body exceed {MAX_SHOWN_TEXT} characters — too much for the user to read in the confirm"
         ));
     }
     if spec.name == "ide_debug_request" {
@@ -573,7 +580,7 @@ pub fn deadline_for(spec: &UiCommandSpec, args: &Value) -> std::time::Duration {
 /// Validate `args` against a catalog `input_schema`. Supports what the catalog
 /// uses: `type` (object/string/integer/number/boolean/array), `required`,
 /// `properties`, `additionalProperties: false`, `enum`, `minimum`/`maximum`,
-/// `minLength`/`maxLength`, `minItems`/`maxItems`, `items`. Returns the first
+/// `minLength`/`maxLength`, `minItems`/`maxItems`, `maxProperties`, `items`. Returns the first
 /// problem as a message the agent can act on. Pure.
 pub fn validate_args(schema: &Value, args: &Value) -> Result<(), String> {
     check(schema, args, "arguments")
@@ -656,6 +663,11 @@ fn check(schema: &Value, v: &Value, at: &str) -> Result<(), String> {
         }
     }
     if let Some(obj) = v.as_object() {
+        if let Some(max) = schema.get("maxProperties").and_then(Value::as_u64) {
+            if obj.len() as u64 > max {
+                return Err(format!("{at} takes at most {max} entries"));
+            }
+        }
         let props = schema.get("properties").and_then(Value::as_object);
         if let Some(req) = schema.get("required").and_then(Value::as_array) {
             for k in req.iter().filter_map(Value::as_str) {
@@ -1534,5 +1546,23 @@ mod tests {
         let url = "http://localhost:8080/x";
         assert!(validate_command(req, &json!({"url": url, "body": "b".repeat(9000)})).is_err());
         assert!(validate_command(req, &json!({"url": url, "body": "{}"})).is_ok());
+        // C3-004: header names + values count with the body (refused, not cut)…
+        let big: serde_json::Map<String, Value> = (0..3)
+            .map(|i| (format!("X-H{i}"), json!("v".repeat(3000))))
+            .collect();
+        let r = validate_command(req, &json!({"url": url, "headers": big, "body": "{}"}));
+        assert!(r.unwrap_err().contains("headers"));
+        let half = json!({"X-A": "v".repeat(4000)});
+        assert!(validate_command(
+            req,
+            &json!({"url": url, "headers": half, "body": "b".repeat(4500)})
+        )
+        .is_err());
+        // …and there are at most 50 of them.
+        let many: serde_json::Map<String, Value> =
+            (0..51).map(|i| (format!("X-{i}"), json!("1"))).collect();
+        assert!(validate_command(req, &json!({"url": url, "headers": many})).is_err());
+        let few = json!({"Content-Type": "application/json", "Authorization": "Bearer t"});
+        assert!(validate_command(req, &json!({"url": url, "headers": few, "body": "{}"})).is_ok());
     }
 }
