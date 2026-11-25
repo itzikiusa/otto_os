@@ -27,7 +27,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::StreamExt;
 use otto_core::api::Problem;
 use otto_core::auth::AuthUser;
 use otto_core::{Error, Result};
@@ -285,6 +285,14 @@ pub fn public_router<S: IdeCtx>() -> Router<S> {
         )
 }
 
+/// One `paths` folder of a tree read: its listing, or nothing when it failed (any error).
+fn extra_listing(path: String, listing: Result<IdeFsTreeResp>) -> Option<IdeFsTreeListing> {
+    listing.ok().map(|l| IdeFsTreeListing {
+        path,
+        entries: l.entries,
+    })
+}
+
 /// Most folders one tree read lists (`paths`); the UI sends at most this many per call.
 const MAX_TREE_PATHS: usize = 200;
 
@@ -313,32 +321,23 @@ async fn fs_tree<S: IdeCtx>(
                 more.len()
             )))?;
         }
+        // The root listing above succeeded, so the target is up: a folder that fails here (gone,
+        // not a folder, unreadable; over SSH all of these come back as Upstream) is left out, and
+        // the UI reads it on its own and shows its own error row.
         resp.listings = futures_util::stream::iter(more)
             .map(|path| {
                 let resolved = &resolved;
                 async move {
-                    match targets
+                    let listing = targets
                         .list_tree(resolved, Some(&path), q.show_hidden)
-                        .await
-                    {
-                        Ok(l) => Ok(Some(IdeFsTreeListing {
-                            path,
-                            entries: l.entries,
-                        })),
-                        // This folder is gone, no longer a folder or not readable: left out (the
-                        // UI reads it on its own and shows why). The target failing (an SSH
-                        // drop) fails the call: it is not "every folder deleted".
-                        Err(Error::NotFound(_) | Error::Invalid(_) | Error::Forbidden(_)) => {
-                            Ok(None)
-                        }
-                        Err(e) => Err(e),
-                    }
+                        .await;
+                    extra_listing(path, listing)
                 }
             })
             .buffered(8)
-            .try_filter_map(|l| std::future::ready(Ok(l)))
-            .try_collect()
-            .await?;
+            .filter_map(std::future::ready)
+            .collect()
+            .await;
         let entries = resp
             .entries
             .iter_mut()
@@ -600,5 +599,18 @@ mod tests {
                 .status(),
             StatusCode::BAD_REQUEST
         );
+    }
+
+    /// A sub-folder that fails after the root listing succeeded is left out, whatever the
+    /// error: over SSH a deleted or unreadable folder comes back as Upstream from SFTP.
+    #[test]
+    fn a_failing_extra_folder_is_left_out_even_as_upstream() {
+        for err in [
+            Error::Upstream("sftp: No such file".into()),
+            Error::NotFound("gone".into()),
+            Error::Forbidden("denied".into()),
+        ] {
+            assert!(super::extra_listing("a".into(), Err(err)).is_none());
+        }
     }
 }
