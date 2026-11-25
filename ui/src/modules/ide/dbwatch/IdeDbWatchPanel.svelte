@@ -187,7 +187,7 @@
       initial: filterText(info?.filter),
       placeholder: "status = 'open'",
       allowEmpty: true,
-      validate: (s) => (s === '' || parseFilter(s) ? null : 'Write it as column = value, e.g. account_id = 77017'),
+      validate: (s) => (s === '' || parseFilter(s) ? null : 'Write it as column = value, e.g. account_id = 77017 (text: letters, digits and _ . : @ -)'),
     });
     if (v === null) return;
     await ideDbWatch.replaceItem(object, v === '' ? { object } : { object, filter: parseFilter(v) });

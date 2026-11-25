@@ -76,6 +76,9 @@ test('filters are column = value only, typed like the literal', () => {
   assert.deepEqual(parseFilter('closed_at = NULL'), { column: 'closed_at', value: null });
   assert.deepEqual(parseFilter('code = "007"'), { column: 'code', value: '007' });
   assert.equal(parseFilter('1=1 OR 1'), null);
+  assert.equal(parseFilter("name = 'a b'"), null, 'the daemon only takes letters, digits and _ . : @ -');
+  assert.equal(parseFilter("status = 'x'' OR 1=1 --'"), null);
+  assert.deepEqual(parseFilter('email = ava@x.io'), { column: 'email', value: 'ava@x.io' });
   assert.equal(parseFilter('status'), null);
 });
 

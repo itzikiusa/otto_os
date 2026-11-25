@@ -150,7 +150,11 @@ export function unverifiedNames(detected: readonly IdeDetectedDbAccess[], engine
 
 // ── Filters: `column = value` only (no free text in v1) ──────────────────
 
-/** "status = open", "id = 42", "deleted_at = NULL", "name = 'a b'". */
+/** The daemon writes the value into the statement itself, so text is limited
+ *  to this charset (anything else is a 400 there). */
+const FILTER_TEXT = /^[A-Za-z0-9_.:@-]{1,128}$/;
+
+/** "status = open", "id = 42", "deleted_at = NULL", "code = '007'". */
 export function parseFilter(text: string): IdeDbWatchFilter | null {
   const m = /^\s*([A-Za-z_][\w.]*)\s*=\s*(.+?)\s*$/.exec(text);
   if (!m) return null;
@@ -162,6 +166,7 @@ export function parseFilter(text: string): IdeDbWatchFilter | null {
   else if (/^(true|false)$/i.test(raw)) value = raw.toLowerCase() === 'true';
   else if (/^-?\d+(\.\d+)?$/.test(raw) && raw.length < 16) value = Number(raw);
   else value = raw;
+  if (typeof value === 'string' && !FILTER_TEXT.test(value)) return null;
   return { column: m[1], value };
 }
 
