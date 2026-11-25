@@ -202,12 +202,11 @@ pub async fn workspace_summary(
 // Provider ingest (unauthenticated, per-session token gated)
 // ---------------------------------------------------------------------------
 
-/// `POST /ingest/claude` — receives a Claude Code hook payload (raw JSON on the
-/// body) and normalizes it into the session's trail + task tracker, raising
-/// task-transition lines and milestone/blocked notifications. Identity is the
-/// `X-Otto-Session` + `X-Otto-Token` headers, verified against the
-/// SessionManager's per-session token. Always returns 204 (fire-and-forget for
-/// the agent's hook), even on unknown payloads.
+/// `POST /ingest/claude` — a Claude Code hook payload (raw JSON body) normalized
+/// into the session's trail + task tracker (task-transition lines, milestone and
+/// blocked notifications). Identity: `X-Otto-Session` + `X-Otto-Token`, checked
+/// against the per-session token. Always 204, even on unknown payloads; a post
+/// with nothing to record (Read/Glob/Grep/LS) answers before the session read.
 pub async fn claude_ingest(
     State(ctx): State<ServerCtx>,
     headers: HeaderMap,
@@ -225,11 +224,6 @@ pub async fn claude_ingest(
         // Wrong/absent token — silently ignore (never surface to the agent).
         return StatusCode::NO_CONTENT;
     }
-    let session = match ctx.manager.get(&sid).await {
-        Ok(s) => s,
-        Err(_) => return StatusCode::NO_CONTENT,
-    };
-    let wid = session.workspace_id.clone();
     let event_name = payload
         .get("hook_event_name")
         .and_then(|v| v.as_str())
@@ -237,8 +231,14 @@ pub async fn claude_ingest(
         .to_string();
     // Turn boundaries feed the sidebar's working / idle (status_classify).
     ctx.manager.note_claude_hook(&sid, &event_name);
-
     let norm = normalize_claude(&payload);
+    if norm.tasks.is_none() && norm.task_op.is_none() && norm.trail.is_none() {
+        return StatusCode::NO_CONTENT;
+    }
+    let Ok(session) = ctx.manager.get(&sid).await else {
+        return StatusCode::NO_CONTENT;
+    };
+    let wid = session.workspace_id.clone();
     let activity = ctx.activity();
 
     // Task sync + transition trail + "all done" milestone.
@@ -1153,6 +1153,13 @@ mod tests {
         let n = normalize_claude(&p);
         assert!(n.trail.is_none());
         assert!(n.tasks.is_none());
+        assert!(
+            n.task_op.is_none(),
+            "quiet: the ingest answers before the session read"
+        );
+        // The ingest's early return must never swallow a blocked notification.
+        let note = json!({ "hook_event_name": "Notification", "message": "needs approval" });
+        assert!(normalize_claude(&note).trail.is_some());
     }
 
     #[test]
