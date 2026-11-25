@@ -34,7 +34,7 @@ show_plan() {
     selected gameready && echo 'Game-ready: CoACD and xatlas arm64 wheels for Blender Python 3.13 (~4 MB).'
     selected animlib && echo 'Animation library: packaged catalog and scripts; uses Blender and Python.'
     selected voice && echo 'Voice: CPython 3.11, MLX Audio and English language frontend packages.'
-    selected motion && echo 'Motion: NVIDIA Kimodo @ e1c219c (no MotionCorrection build on arm64), CPython 3.11 with torch 2.9.1 and transformers 5.1.0.'
+    selected motion && echo 'Motion: NVIDIA Kimodo @ e1c219c (no MotionCorrection build on arm64), CPython 3.11 with torch 2.13.0, transformers 5.10.1 and peft 0.19.1.'
     selected audio && echo "Audio: ACE-Step 1.5 @ ${ace_commit%"${ace_commit#???????}"} with its frozen CPython 3.11 environment (torch, MLX), MOSS-SoundEffect MLX port @ ${moss_commit%"${moss_commit#???????}"}."
     if [ "$models" = yes ]; then
         echo 'Requested downloads (decimal sizes for an empty cache):'
