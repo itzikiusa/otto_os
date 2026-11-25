@@ -6,7 +6,7 @@ import { api } from './api/client';
 import type { Id, Session } from './api/types';
 import { deepLinkErrorText, resolveDeepLink } from './deepLink';
 import { router } from './router.svelte';
-import { inThreadsScope } from './stores/sessionBuckets';
+import { opensInThreads } from './stores/sessionBuckets';
 import { SCRATCH_WORKSPACE_ID } from './stores/sessionScope';
 import { toasts } from './toast.svelte';
 
@@ -27,8 +27,10 @@ const inflight = new Set<string>();
  * is now selected): 'thread' when only the runtime lookup knows it (a chat
  * pane's id in `#/agents/<id>` is one). False when it can't be read (a toast
  * says why, in `what`'s words) or the switch was refused (an unsaved-changes guard).
+ * `forget`: the id came from memory (router.remembered), not a link someone
+ * followed — when it no longer exists, `forget` drops it instead of a toast.
  */
-export async function prepareDeepLink(store: DeepLinkStore, id: Id, what: 'session' | 'thread'): Promise<false | 'session' | 'thread'> {
+export async function prepareDeepLink(store: DeepLinkStore, id: Id, what: 'session' | 'thread', forget?: () => void): Promise<false | 'session' | 'thread'> {
   if (store.sessionById.has(id)) return 'session';
   if (inflight.has(id)) return false;
   inflight.add(id);
@@ -39,6 +41,10 @@ export async function prepareDeepLink(store: DeepLinkStore, id: Id, what: 'sessi
       session: (sid) => api.get<Session>(`/sessions/${encodeURIComponent(sid)}`),
       runtime: (tid) => api.get<{ workspace_id: Id }>(`/runtime-sessions/${encodeURIComponent(tid)}`).then((t) => ((found = 'thread'), t)),
     });
+    if (r.kind === 'missing' && forget) {
+      forget();
+      return false;
+    }
     if (r.kind !== 'ok') {
       toasts.error(`Couldn’t open this ${what}`, deepLinkErrorText(r, what) ?? undefined);
       return false;
@@ -53,15 +59,16 @@ export async function prepareDeepLink(store: DeepLinkStore, id: Id, what: 'sessi
 /** The `#/agents/<id>` route → store sync: resolve, switch, then open. A
  *  thread already open as a pane here just takes focus; one the tabs have not
  *  restored yet (a relaunch, Back onto a closed chat pane) opens as a chat pane. */
-export async function openSessionDeepLink(store: DeepLinkStore, id: Id): Promise<void> {
+export async function openSessionDeepLink(store: DeepLinkStore, id: Id, forget?: () => void): Promise<void> {
   if (store.threadPanes.includes(id)) return store.openSession(id);
-  const found = store.sessionById.has(id) || id.startsWith('__') ? 'session' : await prepareDeepLink(store, id, 'session');
+  const found = store.sessionById.has(id) || id.startsWith('__') ? 'session' : await prepareDeepLink(store, id, 'session', forget);
   if (!found) return;
   if (found === 'thread') return store.openSession(id, 'thread');
   // An old or outside link (`agents/<id>` from the tray, the floating bar, a
   // notice written before the session moved) to a session that lives in
-  // Threads opens there, never as a terminal tab over the same conversation.
+  // Threads opens there, never as a terminal tab over the same conversation
+  // (a Threads terminal-dock shell has no pane there: it opens here).
   const s = store.sessionById.get(id);
-  if (s && inThreadsScope(s, store.sessionById)) router.replace(`threads/${id}`);
+  if (s && opensInThreads(s, store.sessionById)) router.replace(`threads/${id}`);
   else store.openSession(id);
 }

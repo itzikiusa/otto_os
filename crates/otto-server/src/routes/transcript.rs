@@ -30,8 +30,8 @@ use otto_core::event::Event;
 use otto_core::{Error, Id};
 use otto_state::NewTrail;
 use otto_transcript::{
-    fold_file_limited, read_subagents_limited, subagent_path_for, Artifact, FoldOpts, Folded,
-    Provider, Transcript,
+    fold_file_limited, read_subagents_limited, subagent_path_for, window, Artifact, FoldOpts,
+    Folded, Provider, Transcript,
 };
 use serde::Deserialize;
 
@@ -60,21 +60,17 @@ use crate::transcript::resolve::{effective_provider, resolve_transcript_sync, tr
 /// Fold a transcript file with the server's knobs: images written to the
 /// store, cost priced exactly like the Usage module, subagent tree attached
 /// (and returned, so the caller does not read the sidecars a second time).
+/// A long top-level transcript folds only its window before `before`.
 pub(crate) fn fold_with(
     ctx: &ServerCtx,
     provider: Provider,
     path: &Path,
     sub: Option<&str>,
+    before: Option<usize>,
 ) -> Result<(Folded, Vec<otto_transcript::SubagentMeta>), Error> {
     let store = image_store(ctx, &store_key(provider, path));
     let subagents = if sub.is_none() && provider == Provider::Claude {
-        read_subagents_limited(path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::OutOfMemory {
-                Error::PayloadTooLarge(e.to_string())
-            } else {
-                Error::Internal(format!("read subagent metadata: {e}"))
-            }
-        })?
+        read_subagents_limited(path).map_err(|e| read_error(e, "subagent metadata"))?
     } else {
         Vec::new()
     };
@@ -90,23 +86,18 @@ pub(crate) fn fold_with(
         }
     };
     let price: otto_transcript::PriceFn<'_> = &otto_usage::estimate_cost;
-    let folded = fold_file_limited(
-        provider,
-        &target,
-        FoldOpts {
-            images: Some(store),
-            price: Some(price),
-            subagents: subagents.clone(),
-        },
-        Default::default(),
-    )
-    .map_err(|e| {
-        if e.kind() == std::io::ErrorKind::OutOfMemory {
-            Error::PayloadTooLarge(e.to_string())
-        } else {
-            Error::Internal(format!("read transcript: {e}"))
-        }
-    })?;
+    let opts = FoldOpts {
+        images: Some(store),
+        price: Some(price),
+        subagents: subagents.clone(),
+    };
+    let folded = if sub.is_none() && window::is_long(&target) {
+        window::fold_window(provider, &target, opts, before, window::WINDOW_BYTES)
+            .map(|w| w.folder.into_folded())
+    } else {
+        fold_file_limited(provider, &target, opts, Default::default())
+    }
+    .map_err(|e| read_error(e, "transcript"))?;
     let subagents = if sub.is_none() && provider == Provider::Agy {
         folded.subagents.clone()
     } else {
@@ -115,17 +106,44 @@ pub(crate) fn fold_with(
     Ok((folded, subagents))
 }
 
+/// A transcript read's IO error as what it is: a resource limit (413, its
+/// sentence shown as is), a file gone since it was resolved (404).
+fn read_error(e: std::io::Error, what: &str) -> Error {
+    match e.kind() {
+        std::io::ErrorKind::OutOfMemory => Error::PayloadTooLarge(e.to_string()),
+        std::io::ErrorKind::NotFound => Error::NotFound(format!("the {what} file is gone")),
+        _ => Error::Internal(format!("read {what}: {e}")),
+    }
+}
+
 /// Authorization/resolution have already completed before entering the cache.
+/// A long transcript's newest window is cached like a whole fold; an older
+/// window (`before`) is folded fresh — a few MB — under the fold permits.
 async fn cached_fold(
     ctx: &ServerCtx,
     provider: Provider,
     path: &Path,
     sub: Option<&str>,
+    before: Option<usize>,
 ) -> ApiResult<std::sync::Arc<crate::transcript_cache::Snapshot>> {
     if let Some(sub) = sub {
         if subagent_path_for(provider, path, sub).is_none() {
             return Err(ApiError(Error::Invalid("bad subagent id".into())));
         }
+    } else if before.is_some() && window::is_long(path) {
+        let (cx, path) = (ctx.clone(), path.to_path_buf());
+        let permit = crate::transcript_cache::fold_workers()
+            .acquire_owned()
+            .await;
+        let built = crate::offload::blocking(move || {
+            let _permit = permit;
+            fold_with(&cx, provider, &path, None, before)
+        });
+        let (folded, subagents) = built.await?;
+        return Ok(std::sync::Arc::new(crate::transcript_cache::Snapshot {
+            folded,
+            subagents,
+        }));
     }
     let key = crate::transcript_cache::CacheKey {
         root: ctx.data_dir.clone(),
@@ -138,7 +156,7 @@ async fn cached_fold(
     let sub = sub.map(str::to_string);
     ctx.transcript_cache
         .get(key, move || {
-            let (folded, subagents) = fold_with(&cx, provider, &path, sub.as_deref())?;
+            let (folded, subagents) = fold_with(&cx, provider, &path, sub.as_deref(), None)?;
             Ok(crate::transcript_cache::Snapshot { folded, subagents })
         })
         .await
@@ -298,7 +316,7 @@ pub(crate) async fn transcript_page(
     let mut t = match live {
         Some(page) => page,
         None => {
-            let snapshot = cached_fold(&ctx, provider, &resolved.path, sub).await?;
+            let snapshot = cached_fold(&ctx, provider, &resolved.path, sub, before).await?;
             crate::offload::blocking(move || {
                 page(
                     &snapshot.folded,
@@ -456,7 +474,7 @@ pub async fn transcript_tool(
     {
         Some(block) => block,
         None => {
-            let snapshot = cached_fold(&ctx, resolved.provider, &resolved.path, None).await?;
+            let snapshot = cached_fold(&ctx, resolved.provider, &resolved.path, None, None).await?;
             crate::offload::blocking(move || {
                 crate::transcript_tail::find_tool_block(&snapshot.folded, &tool_id)
             })
@@ -504,8 +522,38 @@ async fn session_artifacts(ctx: &ServerCtx, session: &Session) -> ApiResult<Vec<
     {
         return Ok(newest_first(&arts));
     }
-    let snapshot = cached_fold(ctx, resolved.provider, &resolved.path, None).await?;
+    let snapshot = cached_fold(ctx, resolved.provider, &resolved.path, None, None).await?;
     Ok(newest_first(&snapshot.folded.artifacts))
+}
+
+/// An artifact of a long transcript's older turns (outside the newest window
+/// [`session_artifacts`] reads): walk the windows back until one holds it.
+async fn earlier_artifact(
+    ctx: &ServerCtx,
+    session: &Session,
+    id: String,
+) -> ApiResult<Option<Artifact>> {
+    let Ok(r) = resolve_transcript(ctx, session).await else {
+        return Ok(None);
+    };
+    if !window::is_long(&r.path) {
+        return Ok(None);
+    }
+    let (cx, permit) = (
+        ctx.clone(),
+        crate::transcript_cache::fold_workers()
+            .acquire_owned()
+            .await,
+    );
+    crate::offload::blocking(move || {
+        let _permit = permit;
+        let opts = crate::transcript::fold::fold_opts(&cx, r.provider, &r.path);
+        window::find_back(r.provider, &r.path, opts, |f| {
+            f.artifacts.into_iter().find(|a| a.id == id)
+        })
+    })
+    .await
+    .map_err(|e| ApiError(read_error(e, "transcript")))
 }
 
 /// `GET /sessions/{id}/artifacts` — everything the agent produced (design §4.7).
@@ -596,10 +644,12 @@ pub async fn get_artifact(
     let session = session_gate(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
     let owner = user.is_root && crate::ui_bridge::is_human(&auth);
     let arts = session_artifacts(&ctx, &session).await?;
-    let art = arts
-        .into_iter()
-        .find(|a| a.id == artifact_id)
-        .ok_or_else(|| ApiError(Error::NotFound("artifact not found".into())))?;
+    let art = match arts.into_iter().find(|a| a.id == artifact_id) {
+        Some(art) => art,
+        None => earlier_artifact(&ctx, &session, artifact_id)
+            .await?
+            .ok_or_else(|| ApiError(Error::NotFound("artifact not found".into())))?,
+    };
     let Some(path) = art.path.as_deref() else {
         return Err(ApiError(Error::Invalid(
             "artifact has no local file (a link)".into(),

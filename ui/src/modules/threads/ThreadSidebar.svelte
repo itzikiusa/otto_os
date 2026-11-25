@@ -41,7 +41,7 @@
   import { threadsChrome } from './threadsChrome.svelte';
   import { buildSidebarLegacyThreadMenu, reviveLegacyThread } from './threadMenu';
   import { runtimeThreadMenu } from './runtime/runtimeMenu';
-  import { isRuntimeThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
+  import { asThreadSession, isRuntimeThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
   import { threads } from './threadsStore.svelte';
 
   interface Props {
@@ -173,10 +173,12 @@
   /** The focused thread's parents: their subagents open, so it stays in view. */
   const focusedParents = $derived.by(() => {
     const out = new Set<string>();
-    let cur = threads.focusedSessionId ? allPool.get(threads.focusedSessionId) ?? runtimeThreads.rows().find((r) => r.id === threads.focusedSessionId) : undefined;
+    // One row by id (`rows()` sorts every thread per call).
+    const live = (id: string) => { const r = runtimeThreads.get(id); return r && r.status !== 'closed' ? asThreadSession(r) : undefined; };
+    let cur = threads.focusedSessionId ? allPool.get(threads.focusedSessionId) ?? live(threads.focusedSessionId) : undefined;
     for (let p = cur ? delegatedParentId(cur) : null; p && !out.has(p); p = cur ? delegatedParentId(cur) : null) {
       out.add(p);
-      cur = allPool.get(p) ?? runtimeThreads.rows().find((r) => r.id === p);
+      cur = allPool.get(p) ?? live(p);
     }
     return out;
   });

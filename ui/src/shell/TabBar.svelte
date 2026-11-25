@@ -19,6 +19,7 @@
   import PaneControls from '../lib/components/PaneControls.svelte';
   import { ctxMenu } from '../lib/contextmenu.svelte';
   import { layout, presetItems } from '../lib/stores/splitLayout.svelte';
+  import { applyTileOrder, sessionRef, threadRef } from '../lib/stores/splitLayout';
   import { popoutItems } from '../lib/popoutMenu';
   import { confirmer } from '../lib/confirm.svelte';
   import type { MenuItem } from '../lib/contextmenu.svelte';
@@ -313,6 +314,12 @@
   $effect(() => (barEl ? embedChrome.claim(barEl) : undefined));
   const hostsPrimaryPane = $derived(!isEmbedded && isTauri && sidePane.active && !!barEl && embedChrome.owner === barEl);
   const hostsPane = $derived(isEmbedded && !!barEl && embedChrome.owner === barEl);
+  /** Tiled → the free layout: the tiles in their current order as an equal grid. */
+  function freeLayout(): void {
+    const tiles = applyTileOrder([...ws.mainSessions, ...ws.threadPanes.map((id) => ({ id, thread: true as const }))], layout.tileOrder);
+    layout.layoutSessions(tiles.map((s) => ('thread' in s ? threadRef : sessionRef)(s.id)), 'grid');
+    ws.setViewMode('tabs');
+  }
 </script>
 
 <!-- The bar's empty space is a pointer-only window-drag region (presentation);
@@ -430,6 +437,11 @@
     <!-- The free layout's presets act on the whole canvas, so they live with its view control, not in a pane's ⋯. -->
     {#if ws.viewMode === 'tabs' && layout.panes.length > 1}
       <button aria-haspopup="menu" onclick={(e) => ctxMenu.showAt(e.currentTarget, presetItems())} title="Arrange the panes: columns, rows, grid…" aria-label="Arrange panes" data-testid="arrange-panes">
+        <Icon name="split" size={12} />
+      </button>
+    {:else if ws.viewMode === 'tiled' && ws.mainSessions.length + ws.threadPanes.length > 1}
+      <!-- Tiles → the split tree in their current order (every edge a gutter, panes nestable). -->
+      <button onclick={freeLayout} title="Free layout: every pane edge resizable, panes nestable, presets under Arrange panes" aria-label="Free layout" data-testid="tiled-free-layout">
         <Icon name="split" size={12} />
       </button>
     {/if}

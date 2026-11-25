@@ -21,7 +21,6 @@
   import { amendPublishedAt } from './refTracking';
   import { wipDiffUrl } from './wip/wipDiffUrl';
   import { toasts } from '../../lib/toast.svelte';
-  import { ws } from '../../lib/stores/workspace.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
@@ -42,7 +41,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
-  import { cancelDraft, draftInFlight, readComposer, startDraft, takePendingDraft, watchComposer, writeComposer } from './commitComposer';
+  import { cancelDraft, draftInFlight, draftText, liveDraftText, onDraftText, readComposer, startDraft, streamCommitDraft, takePendingDraft, watchComposer, writeComposer } from './commitComposer';
   import { runPush } from './pushFlow';
 
   interface Props {
@@ -138,25 +137,16 @@
   let signCfg = $state<CommitConfig | null>(null);
   let committing = $state(false);
   let drafting = $state(false);
-  /** Same watch-the-agent affordance as the PR dialog: drafting runs as a REAL
-   *  `commit-draft` session (a background source — not listed under Agents),
-   *  so it can be embedded here and watched while the spinner runs. The id
-   *  arrives with the POST at the END of the turn; until then the freshest
-   *  commit-draft session created since the draft began is the live one. */
-  let draftSessionId = $state<string | null>(null);
   /** When the agent's message landed — drives the byline above the fields. */
   let draftedAt = $state<number | null>(null);
-  let draftStartedAt = $state<string | null>(null);
   let draftElapsed = $state(0);
-  let showDraftTerm = $state(false);
-  const liveDraftId: string | null = $derived.by(() => {
-    if (draftSessionId) return draftSessionId;
-    if (!drafting || !draftStartedAt) return null;
-    const c = ws.sessions.filter(
-      (s) => (s.meta as { source?: string } | null)?.source === 'commit-draft' && !s.archived && s.created_at >= draftStartedAt!,
-    );
-    return c.length > 0 ? c[c.length - 1].id : null;
-  });
+  /** The draft streams in: into empty fields directly (`streamed` = what we
+   *  wrote, so an edit stops it), else as a preview under them. */
+  let draftPreview = $state('');
+  let streamed = $state.raw<{ s: string; b: string } | null>(null);
+  let previewShown = $state(false);
+  /** Why the last draft failed, in one line (shown with Retry). */
+  let draftError = $state<string | null>(null);
 
   // The composer outlives the panel (commitComposer.ts): restore this repo's
   // summary / description, adopt a draft that finished while we were away,
@@ -178,16 +168,18 @@
       body = saved.body;
       draftedAt = saved.draftedAt;
       const stop = watchComposer(repo);
+      const mine = saved.agent || (!subject && !body); // the agent's (or empty) fields catch up on what streamed while away, and take its end without asking
       const parked = takePendingDraft(repo);
-      if (parked) void applyDraft(parked);
+      if (parked) { streamed = mine ? { s: subject, b: body } : null; void applyDraft(parked); }
       const running = draftInFlight(repo);
-      if (running && !drafting) void followDraft(running, repo);
-      return stop;
+      if (running && !drafting) { streamed = mine ? split(liveDraftText(repo)) : null; if (streamed) ({ s: subject, b: body } = streamed); void followDraft(running, repo); }
+      const unsink = onDraftText(repo, (t) => drafting && showStreamed(t));
+      return () => { stop(); unsink(); };
     });
     return unwatch;
   });
   $effect(() => {
-    const text = { subject, body, draftedAt };
+    const text = { subject, body, draftedAt, agent: streamed !== null && subject === streamed.s && body === streamed.b };
     untrack(() => {
       if (composerRepo) writeComposer(composerRepo, text);
     });
@@ -718,23 +710,33 @@
   async function draftMessage(): Promise<void> {
     if (drafting || committing) return;
     const repo = repoId;
-    const p = startDraft(repo, (signal) => api.post<DraftCommitMessageResp>(`/repos/${repo}/draft-commit-message`, {}, signal));
+    if (streamed && subject === streamed.s && body === streamed.b) { subject = ''; body = ''; } // a failed stream's own text: Retry replaces it
+    const into = !subject.trim() && !body.trim();
+    streamed = into ? { s: '', b: '' } : null;
+    const p = startDraft(repo, (signal) => streamCommitDraft(repo, (t) => draftText(repo, t), signal));
     await followDraft(p, repo);
   }
+  /** Split "subject\n\nbody" the way the fields hold it. */
+  function split(t: string): { s: string; b: string } { const nl = t.indexOf('\n'); return nl === -1 ? { s: t.trim(), b: '' } : { s: t.slice(0, nl).trim(), b: t.slice(nl + 1).replace(/^\s*\n/, '').trimEnd() }; }
+  function showStreamed(t: string): void {
+    draftPreview = t;
+    if (!streamed || subject !== streamed.s || body !== streamed.b) { streamed = null; previewShown = true; return; }
+    streamed = split(t);
+    ({ s: subject, b: body } = streamed);
+  }
   function stopDraft(): void {
-    const sid = liveDraftId;
     draftGen++;
     cancelDraft(repoId);
     if (draftTick !== null) { clearInterval(draftTick); draftTick = null; }
-    drafting = false; showDraftTerm = false;
-    if (sid) void api.post(`/sessions/${sid}/kill`, {}).catch(() => {});
-    toasts.info('Draft stopped');
+    drafting = false;
+    // Stop keeps what has arrived in the fields; a preview under typed text goes.
+    if (streamed && subject === streamed.s && body === streamed.b && draftPreview.trim()) { quietDraft = true; void applyDraft({ message: draftPreview, from_staged: true }); }
+    else { previewShown = false; toasts.info('Draft stopped'); }
   }
   async function followDraft(p: Promise<DraftCommitMessageResp>, repo: string): Promise<void> {
     const gen = typeof draftGen === 'number' ? ++draftGen : 0;
     const current = () => typeof draftGen !== 'number' || gen === draftGen;
-    drafting = true; draftSessionId = null; draftElapsed = 0;
-    draftStartedAt = new Date(Date.now() - 2000).toISOString();
+    drafting = true; draftElapsed = 0; draftPreview = liveDraftText(repo); draftError = null; previewShown = false;
     const tick = setInterval(() => (draftElapsed += 1), 1000);
     if (typeof draftTick !== 'undefined') { if (draftTick !== null) clearInterval(draftTick); draftTick = tick; }
     try {
@@ -743,10 +745,7 @@
       await applyDraft(d);
     } catch (e) {
       const aborted = typeof isAbortError === 'function' && isAbortError(e);
-      if (alive && repo === repoId && current() && !aborted) {
-        if (quietDraft) panelEl?.querySelector<HTMLInputElement>('.subject-input')?.focus();
-        else toastError('Couldn’t draft the message', e);
-      }
+      if (alive && repo === repoId && current() && !aborted) draftError = loadErrorText(e);
       quietDraft = false;
     } finally {
       clearInterval(tick);
@@ -759,29 +758,20 @@
   async function applyDraft(d: DraftCommitMessageResp): Promise<void> {
     if (!alive) return;
     const text = d.message.trim();
-    // Never overwrite what the person already typed without asking.
-    if (subject.trim() || body.trim()) {
+    // Never overwrite what the person already typed without asking (the
+    // fields holding exactly what streamed in are the agent's, not theirs).
+    const ours = streamed !== null && subject === streamed.s && body === streamed.b;
+    streamed = null;
+    if (!ours && (subject.trim() || body.trim())) {
       const ok = await confirmer.ask(
         'The agent’s message will replace the summary and description you have typed.',
         { title: 'Replace your title and description?', confirmLabel: 'Replace', cancelLabel: 'Keep mine', danger: false },
       );
       if (!alive) return;
-      if (!ok) {
-        draftSessionId = d.session_id ?? null;
-        draftedAt = null;
-        return;
-      }
+      if (!ok) { draftedAt = null; quietDraft = false; return; }
     }
     draftedAt = Date.now();
-    const nl = text.indexOf('\n');
-    if (nl === -1) {
-      subject = text;
-      body = '';
-    } else {
-      subject = text.slice(0, nl).trim();
-      body = text.slice(nl + 1).replace(/^\s*\n/, '').trimEnd();
-    }
-    draftSessionId = d.session_id ?? null;
+    ({ s: subject, b: body } = split(text));
     if (quietDraft) {
       quietDraft = false;
       return;
@@ -860,8 +850,8 @@
   <div class="sr-only" role="status" aria-live="polite">{announcement}</div>
   <!-- The commit card first: what you are about to commit, one primary. -->
   <WipComposer
-    bind:subject bind:body bind:amend bind:signOn bind:showDraftTerm
-    {amendSubject} {amendPublished} {drafting} {draftElapsed} {draftable} {draftedAt} {liveDraftId}
+    bind:subject bind:body bind:amend bind:signOn
+    {amendSubject} {amendPublished} {drafting} {draftElapsed} {draftable} {draftedAt} draftPreview={previewShown ? draftPreview : ''} {draftError}
     {committing} {canCommit} {commitHint} stagedCount={inStaged.length} totalCount={status.changes.length} {pushTo} {signCfg} {signError}
     onkey={commitKey} ondraft={draftMessage} onstopdraft={stopDraft} oncommit={(push) => void commit(push)}
     onoptions={() => (signCfg || signCfgLoading ? undefined : loadSignCfg(repoId))}

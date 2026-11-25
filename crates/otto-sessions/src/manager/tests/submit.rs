@@ -277,6 +277,199 @@ async fn sync_workspace_mcp_delivers_otto_to_agy_through_its_own_file() {
     }
 }
 
+/// 0.5.1 hotfix: spawning — or merely opening, resuming or viewing — a
+/// Claude session wrote Otto's `otto` entry into the repository's
+/// `.mcp.json`, and a plain (non-bypass) Claude terminal then stopped on
+/// Claude Code 2.1.331's "New MCP server found in this project" dialog. Now
+/// the set rides a per-session `--mcp-config` file outside the repository and
+/// nothing under the cwd is touched. The stand-in CLI gates as the real one
+/// does (bypass, `--strict-mcp-config` or an approval pass; any unapproved
+/// project `.mcp.json` server shows the dialog): it blocks on the file the
+/// old spawn wrote and starts with today's.
+#[tokio::test]
+async fn claude_spawn_writes_nothing_into_the_repo_and_no_dialog_blocks() {
+    let (mgr, repo, ws, user) = test_manager().await;
+    let cwd = tempfile::tempdir().unwrap();
+    let session = repo
+        .create(NewSession {
+            workspace_id: ws.id.clone(),
+            kind: SessionKind::Agent,
+            provider: "claude".into(),
+            title: "plain claude".into(),
+            cwd: cwd.path().to_string_lossy().into_owned(),
+            provider_session_id: None,
+            connection_id: None,
+            created_by: user.clone(),
+            meta: serde_json::json!({ "interaction_mode": "accept-edits" }),
+        })
+        .await
+        .unwrap();
+    let otto = crate::mcp::OttoToolsServer {
+        command: "/usr/bin/true".into(),
+        args: vec![],
+        env: Default::default(),
+    };
+    let cfg = crate::mcp::ManagedMcpConfig {
+        otto_tools: Some(otto.clone()),
+        ..Default::default()
+    };
+    let args = mgr.sync_workspace_mcp(&session, Some(otto), false).await;
+    let left = tokio::fs::read_dir(cwd.path())
+        .await
+        .unwrap()
+        .next_entry()
+        .await
+        .unwrap();
+    assert!(left.is_none(), "wrote into the repository: {left:?}");
+    assert_eq!(args.len(), 2, "{args:?}");
+    assert_eq!(args[0], "--mcp-config");
+    let config = std::path::Path::new(&args[1]);
+    assert!(!config.starts_with(cwd.path()), "{config:?}");
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(config).unwrap()).unwrap();
+    assert!(
+        doc["mcpServers"].get(crate::mcp::OTTO_TOOLS_KEY).is_some(),
+        "{doc}"
+    );
+    let bin = tempfile::tempdir().unwrap();
+    let fake = bin.path().join("claude");
+    std::fs::write(
+        &fake,
+        r#"#!/bin/sh
+[ -f .mcp.json ] || { echo READY; exit 0; }
+for a in "$@"; do
+  case "$a" in --dangerously-skip-permissions|--strict-mcp-config) echo READY; exit 0 ;; esac
+done
+name=$(sed -n 's/^    "\([^"]*\)": {$/\1/p' .mcp.json | head -1)
+[ -n "$name" ] && { echo "New MCP server found in this project: $name"; exit 3; }
+echo READY
+"#,
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let run = |dir: std::path::PathBuf, args: Vec<String>| {
+        let mut cmd = tokio::process::Command::new(&fake);
+        cmd.args(args).current_dir(dir);
+        async move {
+            String::from_utf8_lossy(&cmd.output().await.unwrap().stdout)
+                .trim()
+                .to_string()
+        }
+    };
+    assert_eq!(
+        run(cwd.path().into(), args.clone()).await,
+        "READY",
+        "spawn args: {args:?}"
+    );
+    // What the old spawn did to the repository: the stand-in blocks on it.
+    let old = tempfile::tempdir().unwrap();
+    let old_dir = old.path().to_string_lossy().into_owned();
+    crate::mcp::reconcile_managed_servers(&old_dir, &cfg).unwrap();
+    assert_eq!(
+        run(old.path().into(), vec![]).await,
+        "New MCP server found in this project: otto"
+    );
+    assert_eq!(
+        std::fs::metadata(config).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    mgr.retire_credentials(&session).await;
+    assert!(!config.exists(), "removed with the session's credentials");
+}
+
+/// R1-089: a `--strict-mcp-config` Claude terminal (lean turn) takes no
+/// servers, so its spawn writes no `--mcp-config` file nor any launcher env
+/// file (secrets), and records no "couldn't write" skip for them. R2-003: nor
+/// does a shell session, which serves no MCP at all.
+#[tokio::test]
+#[allow(clippy::disallowed_methods)] // a blocking dir listing in a test
+async fn a_strict_claude_spawn_writes_no_mcp_files_and_skips_nothing() {
+    struct Servers;
+    impl crate::mcp::McpServerSource for Servers {
+        fn enabled_servers(
+            &self,
+            _ws: &str,
+        ) -> std::result::Result<Vec<otto_core::hooks::McpServerSpec>, String> {
+            Ok(vec![otto_core::hooks::McpServerSpec {
+                name: "jira".into(),
+                command: "node".into(),
+                args: vec![],
+                env: [("TOKEN".to_string(), "secret".to_string())].into(),
+            }])
+        }
+    }
+    let (mut mgr, repo, ws, user) = test_manager().await;
+    Arc::get_mut(&mut mgr).unwrap().mcp_servers = Some(Arc::new(Servers));
+    for (provider, meta) in [
+        ("claude", serde_json::json!({ "lean_turn": true })),
+        ("shell", serde_json::json!({})),
+    ] {
+        let cwd = tempfile::tempdir().unwrap();
+        let cwd_str = cwd.path().to_string_lossy().into_owned();
+        let session = repo
+            .create(NewSession {
+                workspace_id: ws.id.clone(),
+                kind: SessionKind::Agent,
+                provider: provider.into(),
+                title: "no servers".into(),
+                cwd: cwd_str.clone(),
+                provider_session_id: None,
+                connection_id: None,
+                created_by: user.clone(),
+                meta,
+            })
+            .await
+            .unwrap();
+        let args = mgr.sync_workspace_mcp(&session, None, false).await;
+        assert!(args.is_empty(), "{args:?}");
+        assert!(!super::super::runtime_spawn::claude_mcp_config_path(&session.id).exists());
+        let prefix = crate::mcp::launcher_env_prefix(&cwd_str);
+        let env_files = std::fs::read_dir(std::env::temp_dir().join("otto-mcp"))
+            .map(|d| {
+                d.flatten()
+                    .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+                    .count()
+            })
+            .unwrap_or(0);
+        assert_eq!(env_files, 0, "wrote a launcher env file");
+        let meta = repo.get(&session.id).await.unwrap().meta;
+        assert!(
+            meta.get("mcp_skipped").is_none_or(|v| v.is_null()),
+            "{provider}: {meta}"
+        );
+    }
+}
+
+/// Opening an agy session no longer writes the shared `.mcp.json` (agy
+/// reads only its own `.agents/mcp_config.json`).
+#[tokio::test]
+async fn an_agy_spawn_writes_no_mcp_json() {
+    let (mgr, repo, ws, user) = test_manager().await;
+    let cwd = tempfile::tempdir().unwrap();
+    let session = repo
+        .create(NewSession {
+            workspace_id: ws.id.clone(),
+            kind: SessionKind::Agent,
+            provider: "agy".into(),
+            title: "agy".into(),
+            cwd: cwd.path().to_string_lossy().into_owned(),
+            provider_session_id: None,
+            connection_id: None,
+            created_by: user.clone(),
+            meta: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    let otto = crate::mcp::OttoToolsServer {
+        command: "/usr/bin/true".into(),
+        args: vec![],
+        env: Default::default(),
+    };
+    mgr.sync_workspace_mcp(&session, Some(otto), false).await;
+    assert!(!cwd.path().join(".mcp.json").exists());
+}
+
 /// error-handling-6-06: an enabled user server the launcher could not attach
 /// lands in the session meta as `mcp_skipped` (`{server, reason}`) for the
 /// session's MCP menu — and a later spawn where everything attached clears it.

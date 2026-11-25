@@ -19,6 +19,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import WipPanel from './WipPanel.svelte';
   import { runPush } from './pushFlow';
+  import GitToolbar from './GitToolbar.svelte';
 
   // The Create-PR sheet (it confirms where the PR goes) loads on first use.
   const CreatePrLazy = lazyComponent(() => import('./CreatePr.svelte'));
@@ -121,6 +122,13 @@
 </script>
 
 <div class="commit-card-host" class:sheet={layout === 'sheet'} data-testid="commit-card-host">
+  {#if layout === 'sheet' && status}
+    <!-- Over another page (Agents' Git tab, Threads): pulling and pushing
+         without leaving it. Push hides while the card's primary is Push. -->
+    <div class="cc-sync">
+      <GitToolbar variant="sync" repoId={repo.id} {status} push={dirty || (next.kind !== 'push' && next.kind !== 'publish')} onstatus={(st) => git.setStatus(repo.id, st)} />
+    </div>
+  {/if}
   {#if status && dirty}
     <WipPanel
       repoId={repo.id}
@@ -194,6 +202,11 @@
   }
   .cc-clean {
     padding: 12px;
+  }
+  .cc-sync {
+    flex-shrink: 0;
+    padding-block: 6px 0;
+    padding-inline: 12px;
   }
   .cc-card {
     display: flex;

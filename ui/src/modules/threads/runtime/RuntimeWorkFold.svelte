@@ -15,12 +15,17 @@
     fold: boolean;
     /** The turn's token use ("12.4k tokens") on its last stretch, or ''. */
     tokens?: string;
+    /** A step in it the person opened: the fold opens (and keeps its line to close it). */
+    keepOpen?: boolean;
     children: Snippet;
   }
-  let { id, entries, fold, tokens = '', children }: Props = $props();
+  let { id, entries, fold, tokens = '', keepOpen = false, children }: Props = $props();
 
   let anchorEl = $state<HTMLDivElement | null>(null);
   let userOpen = $state(false);
+  $effect.pre(() => {
+    if (keepOpen) userOpen = true;
+  });
   let prevFold: boolean | null = null;
 
   // When a running work block auto-collapses (`false -> true`) while the reader

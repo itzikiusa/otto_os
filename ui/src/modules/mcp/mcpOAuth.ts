@@ -15,43 +15,44 @@ const POLL_MS = 2000;
 const WINDOW_MS = 5 * 60 * 1000;
 
 /** Sign in: start → confirm the server and its authorization host → browser →
- *  wait for the flow (≤ 5 min). Resolves true once signed in. */
-export async function signIn(s: McpServerDetail): Promise<boolean> {
+ *  wait for the flow (≤ 5 min). Resolves true once signed in; an aborted
+ *  `signal` (the page went away) stops the wait quietly. */
+export async function signIn(s: McpServerDetail, signal?: AbortSignal): Promise<boolean> {
   let started: { authorization_url: string; authorization_host: string; server_host?: string | null };
   try {
     started = await mcpCpApi.cpOAuthStart(s.id, {});
   } catch (e) {
+    if (signal?.aborted) return false;
     if (!String((e as Error)?.message ?? e).includes(NO_REGISTRATION)) {
       toastError('Couldn’t start the sign-in', e);
       return false;
     }
     // No dynamic registration: the person names Otto’s client at that server.
     const id = await confirmer.promptText(`${s.name}’s authorization server doesn’t register apps itself. Enter the client ID you created for Otto there.`, { title: 'Client ID', placeholder: 'client id' });
-    if (!id) return false;
+    if (!id || signal?.aborted) return false;
     const secret = await confirmer.promptText('Client secret, if the app has one. Leave empty for a public app.', { title: 'Client secret', allowEmpty: true, secret: true });
-    if (secret === null) return false;
+    if (secret === null || signal?.aborted) return false;
     try {
       started = await mcpCpApi.cpOAuthStart(s.id, { client_id: id, client_secret: secret || undefined });
     } catch (e2) {
-      toastError('Couldn’t start the sign-in', e2);
+      if (!signal?.aborted) toastError('Couldn’t start the sign-in', e2);
       return false;
     }
   }
+  if (signal?.aborted) return false;
   const ok = await confirmer.ask(
     `Sign in to ${s.name} (${started.server_host ?? s.url ?? 'remote server'})? Your browser opens ${started.authorization_host} to sign in. Otto keeps the tokens in the Keychain; agents never see them.`,
     { title: 'Sign in', confirmLabel: 'Open browser', danger: false },
   );
-  if (!ok) return false;
+  if (!ok || signal?.aborted) return false;
   await openExternal(started.authorization_url);
   const until = Date.now() + WINDOW_MS;
   let st: McpOAuthStatus = { signed_in: false, pending: true };
   while (Date.now() < until) {
     await new Promise((r) => setTimeout(r, POLL_MS));
-    try {
-      st = await mcpCpApi.cpOAuthStatus(s.id);
-    } catch {
-      continue;
-    }
+    if (signal?.aborted) return false;
+    st = await mcpCpApi.cpOAuthStatus(s.id).catch(() => st);
+    if (signal?.aborted) return false;
     if (!st.pending) break;
   }
   if (st.signed_in && !st.error) {

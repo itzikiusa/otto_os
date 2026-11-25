@@ -1,7 +1,7 @@
 //! Unified error type. otto-server maps each variant to an HTTP status.
 
 /// Workspace-wide error enum; crates converge their failures into this type.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum Error {
     /// Entity does not exist (HTTP 404).
     #[error("not found: {0}")]

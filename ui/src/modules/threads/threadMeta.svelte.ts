@@ -119,7 +119,7 @@ class ThreadMeta {
   private seenTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   private writeSeen(id: string): void {
-    if (typeof document !== 'undefined' && document.hidden) return;
+    if ((typeof document !== 'undefined' && document.hidden) || runtimeThreads.removed(id)) return;
     const rt = runtimeThreads.get(id);
     const owner = rt?.created_by ?? this.session(id)?.created_by;
     if (!owner || owner !== auth.me?.id) return;

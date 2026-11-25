@@ -1684,9 +1684,10 @@ poll).
   tool results' `text` (then `patch`) are cut to 4 KB (then 1 KB, 256 B, 0)
   and flagged `result.elided: true` — fetch the whole block with
   `GET …/transcript/tool/{tool_id}` when the step is expanded (`bytes` /
-  `truncated` still describe the stored result). Only a delta that is still
-  over 64 KB after that (prose/inputs alone) is sent with `turns: []`:
-  re-fetch `GET …/transcript`. Session-family scoped
+  `truncated` still describe the stored result). A delta still over 64 KB
+  after that (prose/inputs alone) ships as is up to 512 KB; only one over
+  512 KB is sent with `turns: []`: re-fetch `GET …/transcript`.
+  Records that touch no turn (sidecar lines) send no frame. Session-family scoped
   (owner / workspace admin / root, viewer-gated) — transcript prose and tool
   output never reach other users.
 - `transcript_live` — the agent's in-progress response as currently drawn on

@@ -1,3 +1,33 @@
+<script lang="ts" module>
+  import type { MenuItem } from '../../lib/contextmenu.svelte';
+  import type { StashInfo as Stash } from '../../lib/api/types';
+  import { confirmer as ask } from '../../lib/confirm.svelte';
+  import { stashTitle as title } from './gitopsPlan';
+  /** The Git header's Pop caret: every stash (pop / apply / drop — a drop
+   *  confirms), then this browser. Here, not in the header's chunk: it loads
+   *  with the first click. */
+  export function stashMenuItems(list: Stash[], run: (op: 'pop' | 'apply' | 'drop', s: Stash) => void, browse: () => void): MenuItem[] {
+    const drop = async (s: Stash): Promise<void> => {
+      const what = `Drop ${s.ref} — “${title(s.message)}”? Its changes are discarded and cannot be recovered from Otto.`;
+      if (await ask.ask(what, { title: 'Drop stash', confirmLabel: 'Drop', danger: true })) run('drop', s);
+    };
+    return [
+      ...list.map((s) => ({
+        label: title(s.message),
+        hint: s.ref,
+        icon: 'archive',
+        children: [
+          { label: 'Pop', icon: 'archive', action: () => run('pop', s) },
+          { label: 'Apply', icon: 'check', action: () => run('apply', s) },
+          { label: 'Drop…', icon: 'trash', danger: true, action: () => void drop(s) },
+        ],
+      })),
+      ...(list.length ? [{ separator: true }] : []),
+      { label: 'Browse stashes…', icon: 'eye', title: 'See what each stash holds', action: browse },
+    ];
+  }
+</script>
+
 <script lang="ts">
   import { untrack } from 'svelte';
   // Stash browser: every stash with its message, branch, age and file count;
@@ -10,6 +40,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { api } from '../../lib/api/client';
+  import { gitBridge } from '../../lib/diff/gitBridge.svelte';
   import type { RepoStatusResp, StashDetail, StashInfo } from '../../lib/api/types';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -47,6 +78,7 @@
     listError = null;
     try {
       stashes = await api.get<StashInfo[]>(`/repos/${repoId}/stashes`);
+      gitBridge.stashCount[repoId] = stashes.length; // the header's Pop follows a pop/drop here
       const want = keep ?? selected ?? initialSha;
       const next = stashes.find((s) => s.sha === want)?.sha ?? stashes[0]?.sha ?? null;
       if (next !== selected || !detail) void select(next);

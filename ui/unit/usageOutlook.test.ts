@@ -60,3 +60,12 @@ test('cost rows put the biggest cost first and size bars against it', () => {
   const rows = costRows([{ ...t(5, 900), id: 'a' }, { ...t(20, 100), id: 'b' }, { ...t(5, 1000), id: 'c' }], (x) => x.id, (x) => x.id.toUpperCase());
   assert.deepEqual(rows.map((r) => [r.key, r.label, r.share]), [['b', 'B', 100], ['c', 'C', 25], ['a', 'A', 25]]);
 });
+
+test('costRows takes a provider with hundreds of thousands of model names (no spread into Math.max)', () => {
+  // WebKit throws RangeError past ~65k spread arguments; V8 a little later.
+  const items = Array.from({ length: 300_000 }, (_, i) => ({ input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, total_tokens: i, cost_usd: i % 1000 }));
+  const rows = costRows(items, (t) => String(t.total_tokens), (t) => String(t.total_tokens));
+  assert.equal(rows.length, 300_000);
+  assert.equal(rows[0].share, 100);
+  assert.equal(rows[0].item.cost_usd, 999);
+});

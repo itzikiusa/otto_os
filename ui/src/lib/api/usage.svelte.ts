@@ -102,7 +102,10 @@ export interface UsageSummary {
   total_cost_usd: number;
   providers: ProviderUsage[];
   daily: DailyUsage[];
+  /** The biggest 50 sessions of the window. */
   sessions: SessionUsage[];
+  /** Sessions with usage (tokens or cost) in the window and scope. */
+  session_count: number;
   /** Per-feature (by-kind) rollup — review / product / channel / agent / … */
   by_kind: FeatureUsage[];
   /** Per-(provider, model) token rollup over the window, biggest first. */
@@ -298,7 +301,9 @@ const METRICS_REFRESH_THROTTLE_MS = 10_000;
 
 class UsageStore {
   status: UsageStatus | null = $state(null);
-  summary: UsageSummary | null = $state(null);
+  /** Replaced wholesale on every load — `$state.raw`: no deep proxy over
+   *  thousands of model rows (it cost the Model view a 1.5 s frame). */
+  summary: UsageSummary | null = $state.raw(null);
   /** Server payload, replaced wholesale on every fetch — `$state.raw`, no
    *  deep proxy over 180 points (X2). */
   metrics: MetricPoint[] = $state.raw([]);
@@ -353,6 +358,10 @@ class UsageStore {
    *  the slower 90-day response land last under the "7d" label (or into a
    *  `-7d` CSV export). Every summary load bumps it; only the newest writes. */
   private summarySeq = 0;
+  /** Summaries already loaded, by window + scope: a range click back to one
+   *  shows it at once with no request. Emptied by `loadAll` (open, Refresh,
+   *  auto-refresh), which reloads the current one. */
+  private summaries = new Map<string, UsageSummary>();
 
   // --- Metrics-tick throttle -----------------------------------------------
   private lastMetricsFetch = 0;
@@ -403,7 +412,12 @@ class UsageStore {
       await this.loadStatus();
       if (this.status?.available) {
         mine = ++this.summarySeq;
-        const summary = await api.get<UsageSummary>(`/usage/summary?${this.summaryQuery()}`);
+        // A new map, not clear(): a response begun before this refresh still
+        // writes into the old one and never back into the refreshed cache.
+        const cache = (this.summaries = new Map());
+        const key = this.summaryQuery();
+        const summary = await api.get<UsageSummary>(`/usage/summary?${key}`);
+        cache.set(key, summary);
         if (mine === this.summarySeq) {
           this.summary = summary;
           this.summaryError = null;
@@ -487,8 +501,8 @@ class UsageStore {
 
   /** Load the ccusage-style report for the current window + scope. Slim by
    *  default (the page renders ≤100 sessions and never the day×model table);
-   *  `full` (or an already-full report) asks for the export's shape. */
-  async loadReport(full = this.reportFull): Promise<void> {
+   *  `full` (export / "Show more", via `fullReport`) asks for the export's shape. */
+  async loadReport(full = false): Promise<void> {
     const mine = ++this.reportSeq;
     this.reportLoading = true;
     const shape = full ? `sessions_limit=${REPORT_FULL_SESSIONS}&include=daily_models` : `sessions_limit=${REPORT_PAGE_SESSIONS}`;
@@ -548,7 +562,7 @@ class UsageStore {
         total_tokens: m.total_tokens,
         cost_usd: m.cost_usd,
       })),
-      `otto-usage-models-${this.days}d.csv`,
+      `otto-usage-models-${this.summary?.days}d.csv`,
     );
   }
 
@@ -599,14 +613,27 @@ class UsageStore {
   private async refreshSummary(): Promise<void> {
     if (!this.status?.available) return;
     const mine = ++this.summarySeq;
+    const key = this.summaryQuery();
+    const known = this.summaries.get(key);
+    if (known) {
+      this.summary = known;
+      this.summaryError = null;
+      this.loading = false;
+      return;
+    }
+    const cache = this.summaries;
+    this.loading = true;
     try {
-      const summary = await api.get<UsageSummary>(`/usage/summary?${this.summaryQuery()}`);
+      const summary = await api.get<UsageSummary>(`/usage/summary?${key}`);
+      cache.set(key, summary);
       if (mine === this.summarySeq) {
         this.summary = summary;
         this.summaryError = null;
       }
     } catch (e) {
       if (mine === this.summarySeq) this.summaryError = loadErrorText(e);
+    } finally {
+      if (mine === this.summarySeq) this.loading = false;
     }
   }
 
@@ -626,7 +653,7 @@ class UsageStore {
         total_tokens: p.total_tokens,
         cost_usd: p.cost_usd,
       })),
-      `otto-usage-providers-${this.days}d.csv`,
+      `otto-usage-providers-${this.summary.days}d.csv`,
     );
   }
 
@@ -644,7 +671,7 @@ class UsageStore {
         total_tokens: d.total_tokens,
         cost_usd: d.cost_usd,
       })),
-      `otto-usage-daily-${this.days}d.csv`,
+      `otto-usage-daily-${this.summary.days}d.csv`,
     );
   }
 
@@ -669,7 +696,7 @@ class UsageStore {
         fallback_priced: s.fallback_priced ? 'yes' : 'no',
         last_active: s.last_active,
       })),
-      `otto-usage-sessions-${this.days}d.csv`,
+      `otto-usage-sessions-${this.summary.days}d.csv`,
     );
   }
 
@@ -688,14 +715,14 @@ class UsageStore {
         total_tokens: f.total_tokens,
         cost_usd: f.cost_usd,
       })),
-      `otto-usage-features-${this.days}d.csv`,
+      `otto-usage-features-${this.summary.days}d.csv`,
     );
   }
 
   /** Export the full summary payload as JSON (for programmatic consumption). */
   exportSummaryJson(): void {
     if (!this.summary) return;
-    downloadJson(this.summary, `otto-usage-summary-${this.days}d.json`);
+    downloadJson(this.summary, `otto-usage-summary-${this.summary.days}d.json`);
   }
 
   /** Install/update ClickHouse via the official installer (large download). */
@@ -718,14 +745,17 @@ class UsageStore {
     }
   }
 
-  async saveConfig(req: UsageConfigReq): Promise<void> {
+  /** False when the daemon refused (the sheet stays open with the edits). */
+  async saveConfig(req: UsageConfigReq): Promise<boolean> {
     this.saving = true;
     try {
       this.status = await api.put<UsageStatus>('/usage/config', req);
       toasts.success('Usage settings saved');
       await this.loadAll();
+      return true;
     } catch (e) {
       toasts.error('Couldn’t save', loadErrorText(e));
+      return false;
     } finally {
       this.saving = false;
     }

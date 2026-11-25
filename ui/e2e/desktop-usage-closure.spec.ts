@@ -16,7 +16,7 @@ for (const scheme of ['light', 'dark']) {
     const counts = { events: 1, input_tokens: 1000, output_tokens: 500, cache_read_tokens: 200, cache_write_tokens: 100, total_tokens: 1800, cost_usd: 1.25 };
     const daily = Array.from({ length: 30 }, (_, i) => ({ ...counts, day: `2026-09-${String(i + 1).padStart(2, '0')}` }));
     let empty = false;
-    await page.route('**/usage/status', r => r.fulfill({ json: { available: true, enabled: true, binary: 'fixture', version: 'fixture', data_dir: '/fixture', retention_days: 90, metrics_interval_secs: 10, usage_rows: 30, metric_rows: 0, disk_bytes: 0 } }));
+    await page.route('**/usage/status', r => r.fulfill({ json: { available: true, enabled: true, binary: 'fixture', version: 'fixture', data_dir: '/fixture', retention_days: 90, metrics_interval_secs: 10, usage_rows: 30, metric_rows: 0, disk_bytes: 0, priced_as_of: 'fixture' } }));
     await page.route('**/usage/metrics?*', r => r.fulfill({ json: [] }));
     await page.route('**/usage/budgets', r => r.fulfill({ json: { config: { enforce: false, block_on_exceed: false, window_days: 30, workspaces: [], providers: [] }, window_days: 30, rows: [] } }));
     await page.route('**/usage/summary?*', r => r.fulfill({ json: {
@@ -24,7 +24,7 @@ for (const scheme of ['light', 'dark']) {
       total_output_tokens: empty ? 0 : 15000, total_cache_read_tokens: 0,
       total_cache_write_tokens: 0, total_tokens: empty ? 0 : 54000, total_cost_usd: empty ? 0 : 37.5,
       providers: empty ? [] : [{ ...counts, provider: 'codex' }], daily: empty ? [] : daily,
-      sessions: [], by_kind: empty ? [] : [{ ...counts, feature: 'agent', sessions: 1 }],
+      sessions: [], session_count: empty ? 0 : 1, by_kind: empty ? [] : [{ ...counts, feature: 'agent', sessions: 1 }],
       models: empty ? [] : [{ ...counts, provider: 'codex', model: 'fixture-model' }],
       daily_models: empty ? [] : daily.map(d => ({ ...d, provider: 'codex', model: 'fixture-model' })), scope: 'all',
     } }));
@@ -73,8 +73,8 @@ for (const scheme of ['light', 'dark']) {
     // Budgets stay reachable in the details card even with nothing to show.
     await expect(page.getByTestId('usage-details')).toContainText('Budgets');
     await page.route('**/usage/report?*', r => r.fulfill({ json: {
-      days: 30, otto_only: true, scope: 'all', priced_as_of: 'fixture',
-      totals: { ...counts, total_tokens: 0 }, daily: [], sessions: [],
+      days: 30, generated_at: '2026-09-30T12:00:00Z', otto_only: true, scope: 'all', priced_as_of: 'fixture',
+      totals: { ...counts, total_tokens: 0 }, daily: [], monthly: [], models: [], daily_models: [], sessions: [],
     } }));
     await page.locator('[data-testid="page-header"] .ph-more').click();
     await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Report…' }).click();

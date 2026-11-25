@@ -18,6 +18,7 @@
   import Splits from './Splits.svelte';
   import TiledView from './TiledView.svelte';
   import FirstRunCoach from './FirstRunCoach.svelte';
+  import { startThreadFeeds, threadFeeds } from './threadFeeds.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -51,8 +52,10 @@
   });
 
   // First-run coach: a guided path from a fresh account to a launched agent.
-  // Shown only on a truly empty Agents view (no agent sessions at all) and only
-  // until the user dismisses it or launches a session (remembered per-machine).
+  // Shown only on a truly empty Agents view — no agent session in this
+  // workspace, under "No workspace" or in another loaded workspace (the inbox
+  // lists those too) — and only until the user dismisses it or launches a
+  // session (remembered per-machine).
   let coachDismissed = $state(
     (() => {
       try {
@@ -62,7 +65,30 @@
       }
     })(),
   );
-  const showCoach = $derived(!coachDismissed && ws.agentSessions.length === 0);
+  const coachMaybe = $derived(
+    !coachDismissed && ws.agentSessions.length === 0 && ws.scratchSessions.length === 0 && ws.otherWsSessions.length === 0,
+  );
+  // …decided only once every list it rests on has answered — on a cold boot
+  // they are all empty first: this workspace's sessions, the other
+  // workspaces' (the inbox lists them) and the structured threads (someone
+  // with threads only is no first-timer). Once shown it stays while the
+  // coach's own "create workspace" re-selects (its draft is kept).
+  const ptyKnown = $derived(
+    ws.layoutReady && (ws.otherWsLoaded || !ws.allWorkspaces || ws.workspaces.every((w) => w.id === ws.currentId)),
+  );
+  let rt = $state<{ byId: Record<string, unknown> } | null>(null);
+  let rtFailed = $state(false); // its chunk didn't load: no coach, but never a skeleton for good
+  $effect(() => {
+    if (coachMaybe && ptyKnown && !rt) void startThreadFeeds().then(([m]) => (rt = m.runtimeThreads), () => (rtFailed = true));
+  });
+  const coachKnown = $derived(ptyKnown && ((threadFeeds.settled && !!rt) || rtFailed));
+  const coachReady = $derived(coachMaybe && coachKnown && !!rt && Object.keys(rt.byId).length === 0);
+  let coachLatched = $state(false);
+  $effect(() => {
+    if (coachReady) coachLatched = true;
+  });
+  const showCoach = $derived(coachMaybe && (coachReady || coachLatched));
+  const coachPending = $derived(coachMaybe && !coachKnown && !coachLatched);
   const preserveCoachDraft = $derived(
     showCoach && ws.currentId === null && !tiled && ws.panes.length === 0,
   );
@@ -79,11 +105,14 @@
     if (!ws.layoutReady || ws.sessionsLoading || ws.sessionsError) return;
     const key = ws.currentId;
     if (autoOpenedFor === key) return;
-    autoOpenedFor = key;
     // Read the hash, not the router: it already names the next page (or
     // session) while that hashchange is queued or the page's chunk loads, and
     // opening a session then overwrote it and pulled the person back.
     const target = window.location.hash.replace(/^#\/?/, '').split('/');
+    // A named session not open yet is not the arrival: a remembered one
+    // deleted since is dropped for `#/agents`, which then opens the latest.
+    if (target[1] && router.parts[1] === target[1] && ws.activeSessionId !== target[1]) return;
+    autoOpenedFor = key;
     if (untrack(() => pageKeyOf(target)) !== 'agents' || target[1] || viewport.isPhone) return;
     if (ws.panes.length > 0 || tiled) return;
     const latest = [...ws.mainSessions].sort(
@@ -106,7 +135,7 @@
       </button>
     </div>
   {/if}
-  {#if phoneList && !showCoach}
+  {#if phoneList && !showCoach && !coachPending}
     <!-- A fresh account gets the first-run coach here, not an empty list. -->
     <div class="agents-body"><AgentsInbox /></div>
   {:else}
@@ -128,6 +157,8 @@
   {:else if ws.panes.length === 0}
     {#if showCoach}
       <FirstRunCoach ondismiss={() => (coachDismissed = true)} />
+    {:else if coachPending}
+      <div style="padding: 16px"><Skeleton rows={3} height={48} /></div>
     {:else if ws.activeSessions.length === 0}
       <EmptyState
         icon="terminal"

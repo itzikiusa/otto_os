@@ -40,7 +40,7 @@
 <section class="card limits" aria-labelledby="usage-limits-title" data-testid="usage-remaining">
   <div class="limits-head">
     <h3 id="usage-limits-title">Remaining</h3>
-    <span class="dim small">Plan limits per login, from the CLIs’ own files</span>
+    <span class="dim small sub">Plan limits per login, from the CLIs’ own files</span>
     <button
       class="icon-btn refresh-btn"
       aria-label="Refresh remaining limits"
@@ -82,7 +82,8 @@
             </div>
 
             {#if a.status === 'unknown'}
-              <p class="reason small dim" data-testid="limits-unknown">{a.reason ?? 'Otto has no reading for this login.'}</p>
+              <!-- A failed check: the check line below says why (once). -->
+              {#if !(a.check?.enabled && a.check.error)}<p class="reason small dim" data-testid="limits-unknown">{a.reason ?? 'Otto has no reading for this login.'}</p>{/if}
             {:else}
               {#if limitReachedShown(a, stale, now)}
                 <p class="reached small"><Icon name="warning" size={12} /> Limit reached — new turns wait for the reset.</p>
@@ -142,8 +143,10 @@
     margin: 0;
     color: var(--text);
   }
-  .refresh-btn {
-    margin-inline-start: auto;
+  /* The subtitle wraps in place, so Refresh stays on the title's row on a phone. */
+  .sub {
+    flex: 1 1 0;
+    min-inline-size: 0;
   }
   @media (pointer: coarse) {
     .refresh-btn {

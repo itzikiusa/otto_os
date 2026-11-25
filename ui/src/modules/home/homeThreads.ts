@@ -7,14 +7,14 @@
 // one row that opens Threads. Pure: `node --test` loads it directly.
 
 import type { Session } from '../../lib/api/types';
-import { inThreadsScope, isForeground } from '../../lib/stores/sessionBuckets';
+import { isForeground, opensInThreads } from '../../lib/stores/sessionBuckets';
 
-/** Live Threads-scope sessions, in input order — the same rule the store's
- *  threads bucket uses (non-archived, foreground, not a connection). */
+/** Live Threads-scope sessions Threads shows, in input order (non-archived,
+ *  foreground, not a connection, not a terminal-dock shell). */
 export function threadSessions(sessions: readonly Session[] | undefined, pool: ReadonlyMap<string, Session> | undefined): Session[] {
   if (!sessions) return [];
   const byId = pool ?? new Map(sessions.map((s) => [s.id, s] as const));
-  return sessions.filter((s) => !s.archived && s.kind !== 'connection' && isForeground(s) && inThreadsScope(s, byId));
+  return sessions.filter((s) => !s.archived && s.kind !== 'connection' && isForeground(s) && opensInThreads(s, byId));
 }
 
 /** Route a thread opens on. */

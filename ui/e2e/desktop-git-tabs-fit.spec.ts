@@ -57,7 +57,8 @@ const tab = (page: Page, i: number) => page.getByRole('tab', { name: `${repos[i]
 const reEscape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 test('few repos: every tab shows its branch inline', async ({ page }) => {
-  await page.setViewportSize({ width: 1800, height: 800 });
+  // Wide enough for both branches beside the header's always-visible verbs.
+  await page.setViewportSize({ width: 2200, height: 800 });
   await openTabs(page, 2);
   for (const i of [0, 1]) {
     await expect(tab(page, i)).toBeVisible();
@@ -67,25 +68,46 @@ test('few repos: every tab shows its branch inline', async ({ page }) => {
   await expect(page.locator('.git-tablist')).toHaveAttribute('data-branches', 'all');
 });
 
-test('many repos: names only (active may keep its branch); a wider window brings branches back', async ({ page }) => {
+test('many repos: one "<repo> ▾" switcher names the active repo; a wider window brings the tabs and branches back', async ({ page }) => {
   await page.setViewportSize({ width: 1100, height: 800 });
   await openTabs(page, 8);
   const list = page.locator('.git-tablist');
-  await expect(list).toHaveAttribute('data-branches', /^(active|none)$/);
-  for (let i = 1; i < 8; i++) await expect(tab(page, i).locator('.git-tab-branch')).toBeHidden();
-  // Still named by branch for AT + tooltip.
-  await expect(tab(page, 3)).toHaveAttribute('aria-label', `${repos[3].name} — ${repos[3].branch}`);
-  const mode = await list.getAttribute('data-branches');
-  if (mode === 'active') await expect(tab(page, 0).locator('.git-tab-branch')).toBeVisible();
+  // Eight names don't fit beside the verbs: the strip turns into the switcher (R2-001).
+  const sw = page.getByTestId('git-repo-switch');
+  await expect(sw).toBeVisible();
+  await expect(sw).toContainText(await page.locator('.git-tab.active .git-tab-name').textContent() ?? '');
+  // An ellipsized name is whole in the tooltip, with its branch (R3-005).
+  await expect(sw).toHaveAttribute('title', new RegExp(`^${reEscape(repos[0].name)} — ${reEscape(repos[0].branch)}`));
   await page.screenshot({ path: test.info().outputPath('git-tabs-many.png') });
   // Close tabs and widen the window until they fit: branches come back
   // without a reload.
-  await page.setViewportSize({ width: 1800, height: 800 });
+  await page.setViewportSize({ width: 2200, height: 800 });
   // The close button is the tab's sibling, not its child (axe
   // nested-interactive), so it is found in the strip by its own name.
   for (let i = 7; i >= 2; i--) await list.getByRole('button', { name: `Close ${repos[i].name}`, exact: true }).click();
   await expect(list).toHaveAttribute('data-branches', 'all');
   await expect(tab(page, 1).locator('.git-tab-branch')).toBeVisible();
+});
+
+test('the compact switcher keeps keyboard focus across fit passes (R3-004)', async ({ page }) => {
+  await page.setViewportSize({ width: 1100, height: 800 });
+  await openTabs(page, 8);
+  const sw = page.getByTestId('git-repo-switch');
+  await expect(sw).toBeVisible();
+  await sw.focus();
+  await page.setViewportSize({ width: 1080, height: 800 }); // a resize re-runs the fit, still compact
+  await page.waitForTimeout(300); // ui-guards: allow — the fit runs on the next frame
+  await expect(sw).toBeVisible();
+  await expect(sw).toBeFocused();
+});
+
+test('no open repo on a narrow header: no switcher (R3-005)', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('otto_right_open', '1'));
+  await page.setViewportSize({ width: 1100, height: 800 });
+  await openTabs(page, 0);
+  await expect(page.locator('.git-tab-new')).toBeVisible();
+  await page.waitForTimeout(300); // ui-guards: allow — proves an absence after the fit's frame
+  await expect(page.getByTestId('git-repo-switch')).toBeHidden();
 });
 
 test('Focus is a page-level view, not a repo sub-tab', async ({ page }) => {

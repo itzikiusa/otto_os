@@ -4,6 +4,25 @@
 
 use super::*;
 
+/// Write the managed set to this session's `claude --mcp-config` file
+/// (`<tmp>/otto-mcp/<id>.claude-mcp.json`, 0600 — removed with the session's
+/// other per-session files) and return its names; nothing is written under
+/// `cwd`. Empty (and no file) when nothing is managed or the write failed.
+fn write_claude_mcp_config(sid: &Id, cwd: &str, cfg: &crate::mcp::ManagedMcpConfig) -> Vec<String> {
+    let path = super::runtime_spawn::claude_mcp_config_path(sid);
+    let (Some(doc), names) = crate::mcp::claude_mcp_config(cwd, cfg) else {
+        let _ = std::fs::remove_file(&path);
+        return Vec::new();
+    };
+    match crate::mcp::write_private_file(&path, doc.as_bytes()) {
+        Ok(()) => names,
+        Err(e) => {
+            tracing::warn!(session = %sid, "claude --mcp-config: {e}");
+            Vec::new()
+        }
+    }
+}
+
 impl SessionManager {
     /// Apply everything Otto manages in this session's cwd MCP launcher
     /// configs — the browser opt-in, the workspace's *enabled* user servers,
@@ -30,6 +49,18 @@ impl SessionManager {
         otto_tools: Option<crate::mcp::OttoToolsServer>,
         codex_otto: bool,
     ) -> Vec<String> {
+        let cli_family = self
+            .providers
+            .model_family_for(&session.provider)
+            .unwrap_or_else(|| session.provider.clone());
+        // A shell (a Threads terminal dock too) or a CLI Otto doesn't know
+        // takes no servers: nothing to resolve, write, or report as skipped.
+        let takes_mcp = [
+            "claude", "muse", "opencode", "agy", "gemini", "grok", "codex", "pi",
+        ];
+        if !takes_mcp.contains(&cli_family.as_str()) {
+            return Vec::new();
+        }
         let (user_servers, lookup_error) = self.resolve_user_mcp_servers(session).await;
         let session_browser = session
             .meta
@@ -66,10 +97,14 @@ impl SessionManager {
                     })
             }
         };
-        let cli_family = self
-            .providers
-            .model_family_for(&session.provider)
-            .unwrap_or_else(|| session.provider.clone());
+        // A Claude terminal with `--strict-mcp-config` (a lean turn, an
+        // untrusted read-only session) takes no servers: nothing is written
+        // for it, and nothing is "skipped".
+        let flag = |k: &str| session.meta.get(k).and_then(|v| v.as_bool());
+        let strict = cli_family == "claude"
+            && session.meta.get("runtime").and_then(|v| v.as_str()) != Some("structured")
+            && (flag("lean_turn") == Some(true)
+                || (flag("read_only") == Some(true) && flag("project_settings") == Some(false)));
         let has_otto = otto_tools.is_some();
         let pi_otto = otto_tools.clone().filter(|_| cli_family == "pi");
         let cfg = crate::mcp::ManagedMcpConfig {
@@ -92,12 +127,20 @@ impl SessionManager {
                 let this_cwd = canon(&cwd);
                 cfg.browser = browser_cwds.iter().any(|c| canon(c) == this_cwd);
             }
-            let mcp_json_names = match crate::mcp::reconcile_managed_servers(&cwd, &cfg) {
-                Ok(names) => names,
-                Err(e) => {
-                    tracing::warn!(session = %sid, cwd = %cwd, "reconcile workspace MCP config: {e}");
-                    Vec::new()
-                }
+            // Only the CLIs that read the project `.mcp.json` (Muse, opencode)
+            // get it written. Claude takes the same set per spawn from a
+            // `--mcp-config` file in `<tmp>/otto-mcp`, and the rest have their
+            // own channel below — so opening, resuming or viewing their
+            // sessions writes nothing into the repository for them.
+            let mcp_json_names = match &*provider {
+                "claude" if strict => Vec::new(),
+                "claude" => write_claude_mcp_config(&sid, &cwd, &cfg),
+                "muse" | "opencode" => crate::mcp::reconcile_managed_servers(&cwd, &cfg)
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(session = %sid, cwd = %cwd, "reconcile workspace MCP config: {e}");
+                        Vec::new()
+                    }),
+                _ => Vec::new(),
             };
             let agy_names = (provider == "agy").then(|| {
                 // agy never reads `.mcp.json` — same managed set, its own file.
@@ -218,6 +261,19 @@ impl SessionManager {
                     }
                 }
             }
+            // Claude: the set from `--mcp-config` (outside the repository).
+            "claude" => {
+                if mcp_json_names.is_empty() {
+                    Vec::new()
+                } else {
+                    let path = super::runtime_spawn::claude_mcp_config_path(&session.id);
+                    launch_args.extend([
+                        "--mcp-config".to_string(),
+                        path.to_string_lossy().into_owned(),
+                    ]);
+                    mcp_json_names
+                }
+            }
             _ => mcp_json_names,
         };
         // The enabled user servers this provider was NOT given, with why
@@ -226,7 +282,7 @@ impl SessionManager {
         let skipped = user_servers
             .as_deref()
             .map(|users| crate::mcp::skipped_servers(&cli_family, users, &delivered))
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty() && !strict);
         // Snapshot-at-spawn: what this provider was actually given, what it
         // was not, plus the lookup fault if any (json_patch: a null clears a
         // stale error / skip list).

@@ -187,7 +187,7 @@ pub async fn summary(
         (all, own, otto_only, summary)
     };
     let mut summary = summary.map_err(ApiError)?;
-    active_limit_providers(&ctx.manager).canonicalize_summary(&mut summary, !otto_only);
+    active_limit_providers(&ctx.manager).canonicalize_summary(&mut summary);
     enrich_sessions(&ctx, &mut summary.sessions, &all_sessions).await;
     summary.by_kind =
         by_kind_rollup_with(&ctx, days, otto_only, &all_sessions, own.as_deref()).await;

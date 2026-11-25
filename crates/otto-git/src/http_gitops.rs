@@ -12,7 +12,9 @@ use otto_core::domain::WorkspaceRole;
 use otto_core::{Error, Id};
 use serde::{Deserialize, Serialize};
 
-use super::{optional_token, remote_shares_origin_host, repo_ctx, repo_lock, ApiResult, GitCtx};
+use super::{
+    optional_token, remote_lock, remote_shares_origin_host, repo_ctx, repo_lock, ApiResult, GitCtx,
+};
 use crate::gitops::err_text;
 use crate::transport::TransportCredential;
 use crate::worktree_ready::{run_setup, Prepared, SETUP_KEY};
@@ -257,8 +259,11 @@ pub(super) async fn repo_branches_delete<S: GitCtx>(
     let protected = protected_names(&current, default.as_deref());
     // Resolved once, lazily: only a remote delete needs the account token.
     let mut token = None;
-    let mut remote_deletes = Vec::new();
     let mut results = Vec::with_capacity(req.items.len());
+    // Locals go in one `git branch -d` (and one `-D` for forced ones); the
+    // remotes after them, one push per remote.
+    let mut locals: [Vec<(usize, String)>; 2] = [Vec::new(), Vec::new()];
+    let mut remote_wants = Vec::new();
     for item in req.items {
         let name = item.name.trim().to_string();
         let remote = item
@@ -281,6 +286,23 @@ pub(super) async fn repo_branches_delete<S: GitCtx>(
             results.push(r);
             continue;
         }
+        // A qualified ref (refs/heads/main, tags/v1) would slip past the
+        // protected names and reach the default branch or a tag on the remote.
+        let qualified = |n: &str| {
+            ["refs/", "heads/", "tags/", "remotes/"]
+                .iter()
+                .any(|p| n.starts_with(p))
+        };
+        if qualified(&name)
+            || item
+                .remote_branch
+                .as_deref()
+                .is_some_and(|b| qualified(b.trim()))
+        {
+            r.error = Some("give a branch name, not a ref".into());
+            results.push(r);
+            continue;
+        }
         if want_local {
             if protected.contains(&name) {
                 r.error = Some(if name == current {
@@ -291,16 +313,7 @@ pub(super) async fn repo_branches_delete<S: GitCtx>(
                 results.push(r);
                 continue;
             }
-            match git.delete_branch(&name, item.force.unwrap_or(false)).await {
-                Ok(()) => r.local_deleted = true,
-                Err(e) => {
-                    let msg = err_text(&e);
-                    r.needs_force = msg.contains("not fully merged");
-                    r.error = Some(msg);
-                    results.push(r);
-                    continue;
-                }
-            }
+            locals[usize::from(item.force.unwrap_or(false))].push((results.len(), name.clone()));
         }
         if let Some(remote) = remote {
             let rb = item
@@ -310,48 +323,73 @@ pub(super) async fn repo_branches_delete<S: GitCtx>(
                 .filter(|b| !b.is_empty())
                 .unwrap_or(&name)
                 .to_string();
-            if protected_names("", default.as_deref()).contains(&rb) {
-                r.error = Some(format!("{remote}/{rb} is a protected default branch"));
-                results.push(r);
-                continue;
-            }
-            // The bound account's token belongs to origin's host: offer it
-            // only to a remote on the same host (as the single delete does).
-            let tok = if remote == "origin" || remote_shares_origin_host(&git, &remote).await {
-                if token.is_none() {
-                    token = Some(
-                        optional_token(&s, &user, &repo)
-                            .await
-                            .map_err(|e| err_text(&e)),
-                    );
-                }
-                match token.clone() {
-                    Some(Ok(t)) => t,
-                    Some(Err(msg)) => {
-                        r.error = Some(msg);
-                        results.push(r);
-                        continue;
-                    }
-                    None => None,
-                }
-            } else {
-                None
-            };
-            // Deleted below, one push per remote.
-            remote_deletes.push((results.len(), remote, rb, tok));
+            remote_wants.push((results.len(), remote, rb));
         }
         results.push(r);
     }
+    for (force, batch) in locals.iter().enumerate() {
+        if batch.is_empty() {
+            continue;
+        }
+        let names: Vec<String> = batch.iter().map(|(_, n)| n.clone()).collect();
+        for ((i, _), res) in batch
+            .iter()
+            .zip(git.delete_branches(&names, force == 1).await)
+        {
+            match res {
+                Ok(()) => results[*i].local_deleted = true,
+                Err(e) => {
+                    let msg = err_text(&e);
+                    results[*i].needs_force = msg.contains("not fully merged");
+                    results[*i].error = Some(msg);
+                }
+            }
+        }
+    }
+    // The network leg: off the repo lock, under the remote one (as push).
+    drop(g);
+    let rlock = remote_lock(&id);
+    let _rg = rlock.lock().await;
     // One push per remote for all its branches; if that push fails (one ref
     // already gone, a protected branch…) each is retried on its own, so the
-    // per-item results stay exact.
+    // per-item results stay exact. A local that wasn't deleted keeps its
+    // remote copy.
     type RemoteBatch = (String, Option<TransportCredential>, Vec<(usize, String)>);
     let mut by_remote: Vec<RemoteBatch> = Vec::new();
-    for (i, remote, rb, tok) in remote_deletes {
-        match by_remote.iter_mut().find(|(r, ..)| *r == remote) {
-            Some((_, _, items)) => items.push((i, rb)),
-            None => by_remote.push((remote, tok, vec![(i, rb)])),
+    for (i, remote, rb) in remote_wants {
+        if results[i].error.is_some() {
+            continue;
         }
+        if protected_names("", default.as_deref()).contains(&rb) {
+            results[i].error = Some(format!("{remote}/{rb} is a protected default branch"));
+            continue;
+        }
+        if let Some((.., items)) = by_remote.iter_mut().find(|(r, ..)| *r == remote) {
+            items.push((i, rb));
+            continue;
+        }
+        // The bound account's token belongs to origin's host: offer it
+        // only to a remote on the same host (as the single delete does).
+        let tok = if remote == "origin" || remote_shares_origin_host(&git, &remote).await {
+            if token.is_none() {
+                token = Some(
+                    optional_token(&s, &user, &repo)
+                        .await
+                        .map_err(|e| err_text(&e)),
+                );
+            }
+            match token.clone() {
+                Some(Ok(t)) => t,
+                Some(Err(msg)) => {
+                    results[i].error = Some(msg);
+                    continue;
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        by_remote.push((remote, tok, vec![(i, rb)]));
     }
     for (remote, tok, items) in by_remote {
         let names: Vec<String> = items.iter().map(|(_, n)| n.clone()).collect();
@@ -373,7 +411,6 @@ pub(super) async fn repo_branches_delete<S: GitCtx>(
             }
         }
     }
-    drop(g);
     Ok(Json(BranchDeleteResp {
         results,
         status: git.status().await?,

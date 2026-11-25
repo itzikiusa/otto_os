@@ -22,6 +22,10 @@ otto-transcript.workspace = true
 # (`session_turn::resume`); already a dependency of otto-sessions.
 otto-state.workspace = true
 chrono.workspace = true
+# The streamed draft's NDJSON lines (`headless::ndjson_lines`).
+futures-util.workspace = true
+# Stop kills the headless draft's whole process group (`headless::text_turn`).
+libc = "0.2.191"
 serde_json.workspace = true
 # Per-turn reply directories (`session_turn::reply`).
 tempfile.workspace = true

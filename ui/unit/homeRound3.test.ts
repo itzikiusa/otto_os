@@ -26,6 +26,7 @@ test('threadSessions lists Threads-scope sessions once — delegated children in
     s('gone', { surface: 'threads' }, { archived: true }),
     s('conn', { surface: 'threads' }, { kind: 'connection' }),
     s('back', { surface: 'agents', delegated_by: 't1' }),
+    s('dock', { surface: 'threads', threads_terminal: true }), // a terminal-dock shell opens on Agents
   ];
   const pool = new Map(list.map((x: { id: string }) => [x.id, x]));
   assert.deepEqual(plain(threads.threadSessions(list, pool).map((x: { id: string }) => x.id)), ['t1', 'child']);
@@ -39,12 +40,34 @@ test('a thread opens on #/threads/<id>; unlisted runtime waits never go negative
   assert.equal(threads.unlistedWaiting(undefined, 0), 0);
 });
 
-test('Today builds on the thread list (labelled, routed to Threads)', () => {
-  const today = read('modules/home/today.svelte.ts');
-  assert.match(today, /threadSessions\(ws\.activeSessions, ws\.sessionById\)/);
-  assert.match(today, /detail: 'Thread · waiting for your input'/);
-  assert.match(today, /open: \(\) => router\.go\(threadRoute\(s\.id\)\)/);
-  assert.match(today, /unlistedWaiting\(ws\.threadsNeedsYouCount/);
+test('Today lists a waiting thread (labelled, opening Threads) and counts the unlisted ones', () => {
+  const routes: string[] = [];
+  const t1 = s('t1', { surface: 'threads' }, { cwd: '/p/app', last_active_at: '2026-11-20T10:00:00Z' });
+  const ws = {
+    currentId: 'w', listSettled: true, foregroundActive: [], activeSessions: [t1], sessionById: new Map([['t1', t1]]),
+    needsYou: { t1: true }, statusMap: {}, activeWorkflowRuns: [], threadsNeedsYouCount: 3,
+  };
+  const { today } = loadSource(src('modules/home/today.svelte.ts'), {
+    '../../lib/api/client': { api: {} }, '../../lib/api/design': {}, '../../lib/api/mcp': {}, '../../lib/api/scheduledTasks': {},
+    svelte: { untrack: <T>(fn: () => T) => fn() },
+    '../../lib/router.svelte': { router: { go: (r: string) => routes.push(r) } },
+    '../../lib/stores/auth.svelte': { auth: {} },
+    '../../lib/stores/notifications.svelte': { notifications: { notices: [] } },
+    '../../lib/stores/resource-access.svelte': { resourceAccess: {} },
+    '../../lib/stores/workspace.svelte': { ws },
+    '../../lib/toast.svelte': { toasts: {} },
+    '../../lib/plural': { plural: (n: number, w: string) => `${n} ${w}s` },
+    '../../lib/stores/runtimeAttention.svelte': { runtimeWaiting: () => [] },
+    './homeThreads': threads,
+    './boxes/poll': { livePoll: () => ({}) },
+  });
+  const rows = today.needs.filter((r: { id: string }) => r.id.startsWith('thread'));
+  assert.deepEqual(plain(rows.map((r: { id: string; detail: string; title: string }) => [r.id, r.detail, r.title])), [
+    ['thread:t1', 'Thread · waiting for your input', 't1'],
+    ['threads:waiting', 'Threads', '2 threads waiting on you'],
+  ]);
+  rows[0].open();
+  assert.deepEqual(routes, ['threads/t1']);
 });
 
 function seedModule() {

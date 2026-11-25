@@ -266,19 +266,25 @@ export interface DraftPrResp {
   description: string;
   source_branch: string;
   target_branch: string;
-  /** The Otto session that drafted this. Drafting runs as a REAL session —
-   *  it appears in Agents the moment it spawns, so it can be opened in a pane
-   *  and watched (or talked to) while the modal is still spinning. */
+  /** Always absent since 0.5.1 (the daemon skips `None`): drafts run headless, not as a session. */
   session_id?: Id;
+}
+
+export interface DraftCommitMessageReq {
+  /** Answer as NDJSON {@link DraftCommitStreamLine}s while the model writes. */
+  stream?: boolean;
 }
 
 export interface DraftCommitMessageResp {
   message: string;
   /** True when drafted from the staged diff; false when it fell back to the working diff. */
   from_staged: boolean;
-  /** The `commit-draft` session that drafted this (same path as `DraftPrResp.session_id`). */
+  /** Always null since 0.5.1: drafts run headless, not as a session. */
   session_id?: Id | null;
 }
+
+/** One line of a streamed commit draft: text as it is written, then the draft or why it failed. */
+export type DraftCommitStreamLine = { delta: string } | { done: DraftCommitMessageResp } | { error: string };
 
 export interface UpdatePrReq {
   title?: string | null;

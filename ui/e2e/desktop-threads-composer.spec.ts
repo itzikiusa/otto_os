@@ -371,6 +371,48 @@ test('the Threads terminal dock: a selection → “Add to chat” goes to the f
   await expect(thread.getByTestId('runtime-context-chips')).toContainText(/Terminal · \d+ lines?/);
   await expect(composer).toHaveValue('dock draft stays');
   await expect(thread.locator('.rt-user')).toHaveCount(0);
+  // A selection left in one terminal is not offered over the next one.
+  await page.mouse.move(box.x + 2, box.y + 4);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.6, box.y + 60, { steps: 8 });
+  await page.mouse.up();
+  await expect(add).toBeVisible();
+  await dock.getByRole('button', { name: 'New terminal' }).click();
+  await expect(dock.locator('.ttd-tabs button')).toHaveCount(2, { timeout: 15_000 });
+  await expect(add).toHaveCount(0);
+  // …nor after switching back to it, or killing the one it was made in.
+  await dock.getByRole('button', { name: 'Terminal 1' }).click();
+  await expect(dock.locator('.xterm-screen').first()).toBeVisible({ timeout: 30_000 });
+  const box1 = (await dock.locator('.xterm-screen').first().boundingBox())!;
+  for (const leave of ['Terminal 2', 'Kill the active terminal']) {
+    await dock.locator('.xterm').first().click();
+    await page.keyboard.type('echo otto-dock-again\n');
+    await page.mouse.move(box1.x + 2, box1.y + 4);
+    await page.mouse.down();
+    await page.mouse.move(box1.x + box1.width * 0.6, box1.y + 60, { steps: 8 });
+    await page.mouse.up();
+    await expect(add).toBeVisible();
+    await dock.getByRole('button', { name: leave }).click();
+    await expect(add, leave).toHaveCount(0);
+    if (leave === 'Terminal 2') await dock.getByRole('button', { name: 'Terminal 1' }).click();
+  }
+  // …nor after its terminal is removed elsewhere (another window, the API):
+  // no click here blurs xterm, so only the dock itself can drop the selection.
+  await expect(dock.locator('.xterm-screen').first()).toBeVisible({ timeout: 30_000 });
+  const box2 = (await dock.locator('.xterm-screen').first().boundingBox())!;
+  await dock.locator('.xterm').first().click();
+  await page.keyboard.type('echo otto-dock-remote\n');
+  await page.mouse.move(box2.x + 2, box2.y + 4);
+  await page.mouse.down();
+  await page.mouse.move(box2.x + box2.width * 0.6, box2.y + 60, { steps: 8 });
+  await page.mouse.up();
+  await expect(add).toBeVisible();
+  const rows = (await (await ctx.get(`${base}/api/v1/workspaces/${wsId}/sessions`)).json()) as { id: string; archived?: boolean; meta?: { threads_terminal?: boolean } }[];
+  const left = rows.filter((s) => s.meta?.threads_terminal && !s.archived);
+  expect(left).toHaveLength(1);
+  expect((await ctx.delete(`${base}/api/v1/sessions/${left[0].id}`)).ok()).toBeTruthy();
+  await expect(dock.locator('.ttd-tabs button')).toHaveCount(0, { timeout: 15_000 });
+  await expect(add, 'removed elsewhere').toHaveCount(0);
 });
 
 test('context meter: codex reports its window (fake: 7 of 1000 → 1 %); the details card has the same row', async ({ page }) => {

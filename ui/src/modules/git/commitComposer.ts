@@ -8,13 +8,17 @@
 // Kept apart from the git store on purpose: this is composer state, not
 // repo/fetch state.
 
-import type { DraftCommitMessageResp } from '../../lib/api/types';
+import { postNdjsonStream } from '../../lib/api/client';
+import type { DraftCommitMessageResp, DraftCommitStreamLine } from '../../lib/api/types';
 
 export interface ComposerText {
   subject: string;
   body: string;
   /** When the agent's message landed (the byline), null when hand-written. */
   draftedAt: number | null;
+  /** The fields hold what the running draft streamed, untouched by hand — a
+   *  panel remounted mid-stream (or after it ended) keeps them the agent's. */
+  agent?: boolean;
 }
 
 interface Stored extends ComposerText {
@@ -34,6 +38,7 @@ function read(repoId: string): Stored {
       subject: typeof v.subject === 'string' ? v.subject : '',
       body: typeof v.body === 'string' ? v.body : '',
       draftedAt: typeof v.draftedAt === 'number' ? v.draftedAt : null,
+      agent: v.agent === true,
       pending: v.pending && typeof v.pending.message === 'string' ? v.pending : null,
     };
   } catch {
@@ -52,8 +57,8 @@ function write(repoId: string, s: Stored): void {
 
 /** The saved summary / description for `repoId` (empty when none). */
 export function readComposer(repoId: string): ComposerText {
-  const { subject, body, draftedAt } = read(repoId);
-  return { subject, body, draftedAt };
+  const { subject, body, draftedAt, agent } = read(repoId);
+  return { subject, body, draftedAt, agent };
 }
 
 /** Save what the composer shows now (empty text clears the entry). */
@@ -70,6 +75,10 @@ export function takePendingDraft(repoId: string): DraftCommitMessageResp | null 
 }
 
 const inflight = new Map<string, Promise<DraftCommitMessageResp>>();
+// What a running draft has streamed so far, and the panels showing its repo:
+// a panel remounted (or opened) mid-stream follows it live, not the dead one.
+const live = new Map<string, string>();
+const sinks = new Map<string, Set<(text: string) => void>>();
 const controllers = new Map<string, AbortController>();
 const watchers = new Map<string, number>();
 
@@ -91,10 +100,30 @@ export function startDraft(
     },
     () => {},
   ).finally(() => {
-    if (inflight.get(repoId) === p) inflight.delete(repoId);
+    if (inflight.get(repoId) === p) { inflight.delete(repoId); live.delete(repoId); }
     if (controllers.get(repoId) === ctl) controllers.delete(repoId);
   });
   return p;
+}
+
+/** Draft from the diff, streamed: `onText` gets the message so far (subject
+ *  first, then body) as the model writes it. A plain JSON answer (an older
+ *  daemon) is the draft itself. */
+export async function streamCommitDraft(
+  repoId: string,
+  onText: (text: string) => void,
+  signal: AbortSignal,
+): Promise<DraftCommitMessageResp> {
+  let text = '';
+  let done: DraftCommitMessageResp | null = null;
+  await postNdjsonStream(`/repos/${repoId}/draft-commit-message`, { stream: true }, (raw) => {
+    const line = raw as DraftCommitStreamLine | DraftCommitMessageResp;
+    if ('delta' in line) onText((text += line.delta));
+    else if ('error' in line) throw new Error(line.error);
+    else done = 'done' in line ? line.done : line;
+  }, signal);
+  if (!done) throw new Error('the draft ended before the message did');
+  return done;
 }
 
 /** Abort and forget any in-flight agent draft for `repoId`. */
@@ -102,6 +131,25 @@ export function cancelDraft(repoId: string): void {
   controllers.get(repoId)?.abort();
   controllers.delete(repoId);
   inflight.delete(repoId);
+  live.delete(repoId);
+}
+
+/** The running draft for `repoId` streamed `text` so far: every panel showing it hears. */
+export function draftText(repoId: string, text: string): void {
+  live.set(repoId, text);
+  for (const f of sinks.get(repoId) ?? []) f(text);
+}
+
+/** The text the running draft has streamed so far ('' when none). */
+export const liveDraftText = (repoId: string): string => live.get(repoId) ?? '';
+
+/** A panel showing `repoId` hears its draft's text; returns the unsubscribe. */
+export function onDraftText(repoId: string, fn: (text: string) => void): () => void {
+  const set = sinks.get(repoId) ?? new Set();
+  sinks.set(repoId, set.add(fn));
+  return () => {
+    if (set.delete(fn) && !set.size) sinks.delete(repoId);
+  };
 }
 
 /** The draft still running for `repoId`, if any (a remounted panel resumes

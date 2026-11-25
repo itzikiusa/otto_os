@@ -4,14 +4,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
 
-function composer() {
+function composer(client: Record<string, unknown> = {}) {
   const store = new Map<string, string>();
   const sessionStorage = {
     getItem: (k: string) => store.get(k) ?? null,
     setItem: (k: string, v: string) => void store.set(k, v),
     removeItem: (k: string) => void store.delete(k),
   };
-  return loadSource(new URL('../src/modules/git/commitComposer.ts', import.meta.url), {}, { sessionStorage });
+  return loadSource(new URL('../src/modules/git/commitComposer.ts', import.meta.url), { '../../lib/api/client': client }, { sessionStorage });
 }
 
 test('typed text is kept per repo and cleared when emptied', () => {
@@ -42,4 +42,29 @@ test('a watched repo gets the reply directly (nothing parked)', async () => {
   await new Promise((r) => setImmediate(r));
   assert.equal(c.takePendingDraft('r1'), null);
   stop();
+});
+
+// 0.5.1: the draft streams — the text so far after each piece, then the draft;
+// an error line rejects with its words; an older daemon's plain JSON still works.
+test('streamCommitDraft reports the text so far, then resolves with the draft', async () => {
+  const lines: unknown[][] = [
+    [{ delta: 'feat: a' }, { delta: '\n\n- b' }, { done: { message: 'feat: a\n\n- b', from_staged: true } }],
+    [{ delta: 'feat' }, { error: 'Claude: Not logged in' }],
+    [{ message: 'plain', from_staged: false }],
+  ];
+  let call = 0;
+  const posted: unknown[] = [];
+  const c = composer({
+    postNdjsonStream: async (path: string, body: unknown, onLine: (l: unknown) => void) => {
+      posted.push([path, body]);
+      for (const l of lines[call++]) onLine(l);
+    },
+  });
+  const seen: string[] = [];
+  const d = await c.streamCommitDraft('r1', (t: string) => seen.push(t), new AbortController().signal);
+  assert.deepEqual(seen, ['feat: a', 'feat: a\n\n- b']);
+  assert.equal(d.message, 'feat: a\n\n- b');
+  assert.equal(JSON.stringify(posted[0]), JSON.stringify(['/repos/r1/draft-commit-message', { stream: true }]));
+  await assert.rejects(c.streamCommitDraft('r1', () => {}, new AbortController().signal), /Not logged in/);
+  assert.equal((await c.streamCommitDraft('r1', () => {}, new AbortController().signal)).message, 'plain');
 });

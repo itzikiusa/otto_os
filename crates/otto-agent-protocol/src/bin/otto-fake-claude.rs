@@ -29,6 +29,9 @@
 //! * (every start) `system init` lists `mcp_servers`: the `--mcp-config`
 //!   servers ("connected" when the command exists, else "failed") and
 //!   `own-docs` ("needs-auth", as if from Claude Code's own config).
+//! * Otto's commit-draft prompt — `feat(app): greet the world` + a body line,
+//!   streamed in four pieces (1.5 s apart with `fake-draft: slow` in the
+//!   diff; `fake-draft: fail` answers a "Not logged in" error result).
 //! * anything else — `echo: <text>` as stream events + `assistant`.
 //!
 //! An `interrupt` control request ends the running turn as interrupted; a
@@ -80,6 +83,46 @@ fn text_message(id: &str, text: &str) {
     out(
         json!({"type":"assistant","message":{"id":id,"content":[{"type":"text","text":text}]},"parent_tool_use_id":null}),
     );
+}
+
+/// Otto's commit draft (`claude -p`): a Conventional Commits message in
+/// pieces; `fake-draft: slow` / `fake-draft: fail` in the diff steer it (Stop
+/// mid-stream, a failed draft). False for any other prompt.
+fn fake_draft(mid: &str, text: &str) -> bool {
+    if !text.contains("You are writing a git commit message") {
+        return false;
+    }
+    if text.contains("fake-draft: fail") {
+        out(
+            json!({"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login"}),
+        );
+        return true;
+    }
+    let gap = Duration::from_millis(if text.contains("fake-draft: slow") {
+        1500
+    } else {
+        40
+    });
+    out(
+        json!({"type":"stream_event","event":{"type":"message_start","message":{"id":mid}},"parent_tool_use_id":null}),
+    );
+    out(
+        json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},"parent_tool_use_id":null}),
+    );
+    for piece in [
+        "feat(app): ",
+        "greet the world",
+        "\n\n- say hello",
+        " world",
+    ] {
+        stream_delta(0, piece);
+        std::thread::sleep(gap);
+    }
+    out(
+        json!({"type":"stream_event","event":{"type":"content_block_stop","index":0},"parent_tool_use_id":null}),
+    );
+    result_ok();
+    true
 }
 
 fn result_ok() {
@@ -428,6 +471,9 @@ fn main() {
                     if steerable {
                         text_message(&mid, &format!("steered: {text}"));
                     }
+                    continue;
+                }
+                if fake_draft(&mid, &text) {
                     continue;
                 }
                 if let Some(gate_dir) = text.strip_prefix("gated ").map(str::trim) {

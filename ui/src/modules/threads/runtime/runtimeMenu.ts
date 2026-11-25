@@ -93,9 +93,12 @@ export async function deleteThread(id: string): Promise<void> {
     );
     if (!ok) return;
   }
+  // Read before the delete: once the row is gone Threads prunes the pane
+  // itself, without moving the route off the deleted id.
+  const shown = threads.paneIds.includes(id);
   try {
     await runtimeThreads.remove(id);
-    if (threads.paneIds.includes(id)) threads.closePane(id);
+    if (shown) threads.closePane(id);
   } catch (e) {
     toastError('Couldn’t delete thread', e);
   }

@@ -1,3 +1,4 @@
+import * as langForPath from '../src/lib/components/langForPath.ts';
 // IDE round 4: draft storage stays inside a bounded slice of the shared localStorage
 // (G12), bare ⌃ shortcuts stay out of text fields and ⌘L / ⌘G mean one thing each
 // (G6/G7), language-server sockets reattach after they drop (G10), and a git-triggered
@@ -263,6 +264,7 @@ function compareModule(opts: { tab?: Record<string, unknown> | null; live?: stri
     openFile: async () => {},
   };
   const types = loadSource(new URL('../src/modules/ide/store/ideTypes.ts', import.meta.url), {
+    '../../../lib/components/langForPath': langForPath,
     '../../../lib/api/client': { getToken: () => '', laneFetch: () => { throw new Error('unused'); } },
   }, { TextEncoder });
   const mod = loadSource(new URL('../src/modules/ide/history/ideComparisonLoader.ts', import.meta.url), {

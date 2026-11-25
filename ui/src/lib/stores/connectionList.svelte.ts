@@ -53,20 +53,23 @@ class ConnectionListStore {
   private listeners = new Set<(rows: Connection[]) => void>();
   private stale = true;
   private inflight: Promise<void> | null = null;
+  /** Bumped per read: only the newest read's answer is applied — an older one
+   *  may predate a change, or belong to the previous workspace. */
+  private seq = 0;
 
   /** Load unless the cached list is current for this workspace. */
   ensure(): Promise<void> {
     const wid = ws.currentId;
     if (!wid) return Promise.resolve();
+    if (wid === this.wsKey && this.inflight) return this.inflight;
     if (wid === this.wsKey && !this.stale && this.loaded) return Promise.resolve();
     return this.refresh();
   }
 
-  /** Re-read now (joins a load already in flight for the same workspace). */
+  /** Re-read now; a read already on the wire is superseded, not waited on. */
   refresh(): Promise<void> {
     const wid = ws.currentId;
     if (!wid) return Promise.resolve();
-    if (this.inflight && this.wsKey === wid) return this.inflight;
     if (this.wsKey !== wid) {
       // Another workspace: never show the previous one's rows as this one's.
       this.wsKey = wid;
@@ -75,14 +78,14 @@ class ConnectionListStore {
       this.sections = [];
     }
     this.stale = false;
-    const p = this.fetch(wid).finally(() => {
+    const p = this.fetch(wid, ++this.seq).finally(() => {
       if (this.inflight === p) this.inflight = null;
     });
     this.inflight = p;
     return p;
   }
 
-  private async fetch(wid: Id): Promise<void> {
+  private async fetch(wid: Id, seq: number): Promise<void> {
     this.loading = true;
     try {
       const [rows, sections] = await Promise.all([
@@ -90,25 +93,26 @@ class ConnectionListStore {
         // Sections are optional: a failure leaves a flat list, never an error.
         api.get<ConnectionSection[]>(`/workspaces/${wid}/connection-sections`).catch(() => null),
       ]);
-      if (wid !== this.wsKey) return;
+      if (seq !== this.seq) return;
       this.rows = rows;
       if (sections) this.sections = sections;
       this.error = null;
       this.notify();
     } catch (e) {
-      if (wid === this.wsKey) this.error = loadErrorText(e);
+      if (seq === this.seq) this.error = loadErrorText(e);
     } finally {
-      if (wid === this.wsKey) {
+      if (seq === this.seq) {
         this.loading = false;
         this.loaded = true;
       }
     }
   }
 
-  /** The daemon said the library changed: refetch if anyone has read it. */
-  invalidate(): void {
+  /** The daemon said the library changed (`changed`: a change event, which
+   *  may postdate a read on the wire; else a resync): refetch if anyone has read it. */
+  invalidate(changed = false): void {
     this.stale = true;
-    if (this.loaded) void this.refresh();
+    if (this.loaded || (changed && this.inflight)) void this.refresh();
   }
 
   /** Called with the rows after every successful (re)load — the workbench
@@ -118,8 +122,14 @@ class ConnectionListStore {
     return () => this.listeners.delete(fn);
   }
 
-  /** Replace one row in place (after a save/move) without a refetch. */
-  upsert(c: Connection): void {
+  /** Replace one row in place (after a save/move) without a refetch; a saved
+   *  `edit` may have fixed (or broken) it, so its old health verdict goes. */
+  upsert(c: Connection, edited = false): void {
+    if (edited) {
+      const { [c.id]: _, ...rest } = this.checks;
+      this.checks = rest;
+      lsSet(CHECKS_KEY, JSON.stringify(rest));
+    }
     const i = this.rows.findIndex((x) => x.id === c.id);
     this.rows = i === -1 ? [...this.rows, c] : this.rows.map((x) => (x.id === c.id ? c : x));
     this.notify();
@@ -157,6 +167,6 @@ class ConnectionListStore {
 export const connectionList = new ConnectionListStore();
 
 if (typeof window !== 'undefined') {
-  appLive.on(['connections_changed', 'resource_access_changed'], () => connectionList.invalidate());
+  appLive.on(['connections_changed', 'resource_access_changed'], () => connectionList.invalidate(true));
   appLive.onResync(() => connectionList.invalidate());
 }

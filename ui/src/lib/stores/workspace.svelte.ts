@@ -292,6 +292,7 @@ class WorkspaceStore {
    *  RBAC holds — each per-workspace list is the same one the user would see
    *  after switching there. */
   otherWsSessions: Session[] = $state.raw([]);
+  otherWsLoaded = $state(false); // refreshOtherSessions answered once (either way) for this identity
   /** Open views needing them whatever the toggle says (Threads: same threads on desktop and phone). */
   otherWsWanted = 0;
 
@@ -318,14 +319,11 @@ class WorkspaceStore {
     const token = getToken();
     const selection = this.selectionGeneration;
     const others = new Set(this.workspaces.filter((w) => w.id !== this.currentId).map((w) => w.id));
-    let rows: Session[];
-    try {
-      // Only rows the grouped view can show (foreground agents): background
-      // engine sessions of every workspace used to ride along.
-      rows = await api.get<Session[]>('/sessions?archived=false&foreground=true');
-    } catch {
-      return;
-    }
+    // Only rows the grouped view can show (foreground agents): background
+    // engine sessions of every workspace used to ride along. A failure keeps the old groups.
+    const rows = await api.get<Session[]>('/sessions?archived=false&foreground=true').catch(() => null);
+    if (token === getToken() && selection === this.selectionGeneration && (this.allWorkspaces || this.otherWsWanted)) this.otherWsLoaded = true;
+    if (!rows) return;
     if (token !== getToken() || selection !== this.selectionGeneration || (!this.allWorkspaces && !this.otherWsWanted)) return;
     const flat = rows.filter((s) => others.has(s.workspace_id) && !s.archived && visibleOnThisDevice(s));
     this.otherWsSessions = flat;
@@ -518,6 +516,7 @@ class WorkspaceStore {
       this.scratch = null;
       this.sessions = [];
       this.otherWsSessions = [];
+      this.otherWsLoaded = false;
       workflowRuns.clear();
       this.resetArchived();
     }
@@ -615,6 +614,7 @@ class WorkspaceStore {
     if (this.currentId !== id) {
       this.sessions = [];
       this.otherWsSessions = [];
+      this.otherWsLoaded = false;
       this.tabRefs = [];
       // The previous workspace's runs must not show under this one while its
       // sessions load (or forever, if that load fails); a late refresh for

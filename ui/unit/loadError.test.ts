@@ -18,6 +18,12 @@ test('maps auth / missing statuses to human causes', () => {
   assert.match(loadErrorText(new FakeApiError(404, 'not found')), /no longer exists/);
 });
 
+test('a size limit reads as its own sentence, without the code prefix', () => {
+  const msg = 'payload too large: This conversation is too large to show here (transcript resource limit).';
+  assert.equal(loadErrorText(new FakeApiError(413, msg)), 'This conversation is too large to show here (transcript resource limit).');
+  assert.equal(loadErrorText(new FakeApiError(413, '')), 'It is too large to show here.');
+});
+
 test('keeps the daemon message for other statuses, falls back to the code', () => {
   assert.equal(loadErrorText(new FakeApiError(500, 'clickhouse is down')), 'clickhouse is down');
   assert.equal(loadErrorText(new FakeApiError(502, '')), 'The daemon answered 502.');

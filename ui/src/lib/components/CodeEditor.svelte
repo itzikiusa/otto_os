@@ -40,7 +40,7 @@
     applyLinePrefixSuffixSync, buildEditorFindProviderSpec,
     buildReadOnlyExtension, clampSelectionToDoc, computeCursorChangeInfo, computeMinimalTextUpdate,
     createCompletionExtension, createCopyRecorder, createEditorStateCache, createIdeColdGutterPlaceholders, createPlainLineWatch,
-    foldMarkerGutter, hasLongLine, isMakefilePath, isProseOrMakePath, langExtOf,
+    foldMarkerGutter, hasLongLine, langExtOf, langGutters,
     lightEditorTheme, parkEditorHistory, placeholderEditorTheme,
     restoreOrCreateEditorState, revealEditorLine,
     splitSelectionIntoLinesSync, type CursorChangeInfo, outsideText,
@@ -178,8 +178,8 @@
   });
 
   const coldGutters = createIdeColdGutterPlaceholders();
-  const buildIdeBpExtIfLoaded = (forPath?: string): Extension =>
-    !isIdeActive() ? [] : ideMod ? ideMod.createIdeGutterExtensions(buildIdeOpts(forPath)) : coldGutters.bp;
+  const buildIdeBpExtIfLoaded = (forPath?: string, g = langGutters(forPath ?? (livePath || path), language)): Extension => [minimal ? [] : [
+    !isIdeActive() ? [] : ideMod ? ideMod.createIdeGutterExtensions(buildIdeOpts(forPath)) : coldGutters.bp, ideMode && !g.fold ? [] : foldMarkerGutter()], ideMode && !g.lint ? [] : lintGutter()];
 
   function buildIdeExtIfLoaded(forPath?: string): Extension {
     if (!isIdeActive()) { ideMounted = false; return []; }
@@ -462,8 +462,8 @@
     appliedLangReady = langExt != null || !cmLangPending(langExtOf(filePath, language));
 
     const baseExtensions: Extension[] = [
-      ...(minimal ? [] : [lineNumbers(), ideBpCompartment.of(buildIdeBpExtIfLoaded(filePath)), isMakefilePath(filePath) ? [] : foldMarkerGutter()]),
-      indentOnInput(), indentCompartment.of(indentExt(filePath)), bracketMatching(), isProseOrMakePath(filePath) ? [] : lintGutter(), // no diagnostics for Makefiles / Markdown; a Makefile doesn't fold
+      ...(minimal ? [] : [lineNumbers()]), ideBpCompartment.of(buildIdeBpExtIfLoaded(filePath)), // an IDE file keeps the gutters its language uses
+      indentOnInput(), indentCompartment.of(indentExt(filePath)), bracketMatching(),
       ideCompartment.of(buildIdeExtIfLoaded(filePath)),
       ideDepsCompartment.of(ideMode && isIdeManifestPath(filePath) ? coldGutters.deps : []),
       drawSelection(),
@@ -790,7 +790,7 @@
       appliedLanguage = l;
       const langExt = cmLangFor(livePath, l);
       appliedLangReady = langExt != null || !cmLangPending(langExtOf(livePath, l));
-      view.dispatch({ effects: [langCompartment.reconfigure(langExt ?? []), indentCompartment.reconfigure(indentExt(livePath))] });
+      view.dispatch({ effects: [langCompartment.reconfigure(langExt ?? []), indentCompartment.reconfigure(indentExt(livePath)), ideBpCompartment.reconfigure(buildIdeBpExtIfLoaded(livePath))] });
       ensureLang(livePath);
     });
   });

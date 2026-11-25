@@ -62,8 +62,9 @@ export function fetchTranscript(
 export const WARM_MS = 45_000;
 /** First page size — the app-style "last N turns, then Load earlier". */
 export const PAGE_TURNS = 60;
-/** A WS delta above this is not trusted to be complete — re-fetch the tail. */
-const DELTA_CAP_BYTES = 64 * 1024;
+/** A WS delta above this is not trusted to be complete — re-fetch the tail
+ *  (the daemon's `DELTA_MAX`: a turn over 64 KB even trimmed still ships). */
+const DELTA_CAP_BYTES = 512 * 1024;
 /** One lazily fetched subagent body (`?sub=<agent_id>`). */
 export interface SubagentBody {
   turns: Turn[];
@@ -286,7 +287,7 @@ export class Conversation {
 
   /** Apply a `transcript_appended` delta. A turn whose id we already hold is
    *  REPLACED (the agent's response grew); new ids are appended. Frames the
-   *  server could not fit in 64 KB (empty `turns` with a moved cursor), or a
+   *  server could not fit in 512 KB (empty `turns` with a moved cursor), or a
    *  cursor that went backwards (file replaced), trigger a tail re-fetch. */
   applyDelta(cursor: string, turns: Turn[]): void {
     if (this.transcript == null || this.transcript.unavailable_reason) {

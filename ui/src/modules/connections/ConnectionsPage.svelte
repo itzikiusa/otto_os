@@ -79,8 +79,6 @@
     lsSet(FILTER_KEY, k);
   }
 
-  /** Rows hidden while their Delete can still be undone. */
-  let deleting = $state<Record<string, true>>({});
   /** Rows with a Test in flight. */
   let testing = $state<Record<string, true>>({});
   // Minute-grain: a check's freshness and "opened 4m ago" change per minute.
@@ -89,12 +87,13 @@
   const allItems = $derived([
     ...connectionList.rows.map(fromConnection),
     ...brokers.clusters.map(fromCluster),
-  ].filter((i) => !deleting[i.id]));
+  ]);
   const presentKinds = $derived(KIND_ORDER.filter((k) => allItems.some((i) => i.kind === k)));
   const narrowed = $derived(!!q.trim() || kind !== 'all' || section !== null);
   const shown = $derived(allItems.filter((i) => matches(i, { q, kind, section }, connectionList.sections)));
   const groups = $derived(groupItems(shown, connectionList.sections, narrowed));
-  const isEmpty = $derived(connectionList.loaded && !connectionList.error && allItems.length === 0 && connectionList.sections.length === 0);
+  // Kafka clusters are rows too: not "No connections yet" while they load or failed to.
+  const isEmpty = $derived(connectionList.loaded && !connectionList.error && !brokers.loading && !brokers.loadError && allItems.length === 0 && connectionList.sections.length === 0);
 
   function filterMenu(e: MouseEvent): void {
     const items: MenuItem[] = [
@@ -149,7 +148,7 @@
   function onSaved(c: Connection): void {
     const wasNew = !form?.existing;
     form = null;
-    connectionList.upsert(c);
+    connectionList.upsert(c, !wasNew);
     void connectionList.refresh();
     // A new database opens straight into the workbench; SSH/custom wait for a click.
     if (wasNew && DB_KINDS.includes(c.kind)) open(fromConnection(c));
@@ -240,30 +239,17 @@
     }
   }
 
-  /** Delete with undo: the row hides now; the profile (and its Keychain
-   *  secret) is deleted when the toast goes away without Undo. */
-  function remove(c: Connection): void {
-    deleting = { ...deleting, [c.id]: true };
-    const restore = (): void => {
-      const { [c.id]: _, ...rest } = deleting;
-      deleting = rest;
-    };
-    toasts.push('info', `Deleted “${c.name}”`, 'Its saved password is removed too.', 6000, {
-      action: { label: 'Undo', run: restore },
-      onClose: (reason) => {
-        if (reason === 'action') return;
-        void api.del(`/connections/${c.id}`).then(
-          () => {
-            connectionList.remove(c.id);
-            restore();
-          },
-          (e: unknown) => {
-            restore();
-            toastError(`Couldn’t delete ${c.name}`, e);
-          },
-        );
-      },
-    });
+  /** Delete asks first (patterns.md §5): it destroys the saved password in
+   *  the Keychain too, so there is nothing to undo. */
+  async function remove(c: Connection): Promise<void> {
+    const ok = await confirmer.ask(`Delete “${c.name}”? The connection profile and its saved password are removed from Otto.`, { title: 'Delete connection', confirmLabel: 'Delete', danger: true });
+    if (!ok) return;
+    try {
+      await api.del(`/connections/${c.id}`);
+      connectionList.remove(c.id);
+    } catch (e) {
+      toastError(`Couldn’t delete ${c.name}`, e);
+    }
   }
 
   async function moveTo(c: Connection, sectionId: string | null): Promise<void> {
@@ -303,8 +289,7 @@
       ...(admin && auth.isRoot ? [{ label: 'Duplicate without password', icon: 'copy', action: () => void duplicate(c) }] : []),
       ...(admin && connectionList.sections.length > 0 ? [{ label: 'Move to section', icon: 'folder', children: moveItems(c.section_id, (id) => void moveTo(c, id)) }] : []),
       ...(auth.isRoot || can(c, 'manage_access', 'admin') ? [{ label: 'Access…', icon: 'key', action: () => (accessFor = c) }] : []),
-      // Undo, not a confirm: the label has no "…".
-      ...(admin ? [{ separator: true }, { label: 'Delete', icon: 'trash', danger: true, action: () => remove(c) }] : []), // ui-guards: allow — deletes with Undo, no confirm
+      ...(admin ? [{ separator: true }, { label: 'Delete…', icon: 'trash', danger: true, action: () => void remove(c) }] : []),
     ]);
   }
 
@@ -430,12 +415,16 @@
       {/if}
     {/if}
 
+    {#if brokers.loadError}
+      <LoadState what="Kafka clusters" variant="compact" error={brokers.loadError} loading={brokers.loading} empty={brokers.clusters.length === 0}
+        onretry={() => ws.currentId && void brokers.load(ws.currentId, { withSections: false })} />
+    {/if}
     <LoadState
       what="connections"
       variant="page"
-      loading={connectionList.loading || !connectionList.loaded}
+      loading={connectionList.loading || !connectionList.loaded || (allItems.length === 0 && brokers.loading)}
       error={connectionList.error}
-      empty={!connectionList.loaded || isEmpty || (!!connectionList.error && allItems.length === 0)}
+      empty={!connectionList.loaded || isEmpty || allItems.length === 0 && (brokers.loading || !!connectionList.error)}
       onretry={() => void connectionList.refresh()}
     >
       {#snippet emptyView()}
@@ -471,7 +460,7 @@
                 {#snippet actions()}
                   <button class="icon-btn" aria-label="Section actions for {sec.name}" title="Section actions" onclick={(e) => sectionMenu(e, sec)}><Icon name="more" size={14} /></button>
                 {/snippet}
-                {#if g.items.length === 0}<p class="conn-empty-sec">No connections in this section.</p>{/if}
+                {#if g.items.length === 0 && !connectionList.sections.some((s) => s.parent_id === sec.id)}<p class="conn-empty-sec">No connections in this section.</p>{/if}
                 {@render rows(g.items)}
               </InboxFold>
             {:else}
@@ -599,6 +588,13 @@
     flex-shrink: 0;
     margin-inline-start: auto;
     font-variant-numeric: tabular-nums;
+  }
+  /* The hover ⋯ (24 px + its inset and lead-in) covers line 3's end: line 3
+     makes room, so its text ends in an ellipsis beside it, not under it. */
+  @media (hover: hover) {
+    .conn-row:is(:hover, :focus-within) :global(.tr-l3) {
+      padding-inline-end: calc(24px + var(--sp-2) + var(--sp-3) - var(--sp-5));
+    }
   }
   .conn-empty-sec {
     margin: 0;

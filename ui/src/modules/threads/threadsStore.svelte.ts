@@ -208,7 +208,7 @@ class ThreadsStore {
     ws.activeThreadId = this.focusedSessionId;
   }
 
-  private save(): void {
+  save(): void {
     ws.activeThreadId = this.newDraftMode ? null : this.focusedSessionId;
     if (typeof localStorage === 'undefined') return;
     try {

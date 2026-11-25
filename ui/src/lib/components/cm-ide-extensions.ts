@@ -25,7 +25,7 @@ import {
   createIdeGitAndAgentExtensions, selectionOrCurrentLine, setBaselineSourceEffect, setBlameLinesEffect, setSavedContentEffect,
   type IdeDiffBaselineSource, type IdeEditorSelectionRange,
 } from './cm-ide-git-and-agent.ts';
-import { isMakefilePath, isProseOrMakePath } from './cm-editor-helpers.ts';
+import { langGutters } from './cm-editor-helpers.ts';
 import { isBpTargetGutterElement } from './cm-ide-history.ts';
 import { createIdeHoverExtension } from './cm-ide-hover.ts';
 import {
@@ -351,10 +351,11 @@ export function createIdeGutterExtensions(opts: CreateIdeExtensionsOptions): Ext
   });
 
   // A click acts on the lines the person sees, so unreported moves reach the store first.
-  // A Makefile has no debugger: its gutter is a narrow column for the ▶ that runs a target.
-  // Markdown has neither breakpoints nor ▶: no column at all.
-  const runOnly = isProseOrMakePath(opts.filePath ?? '');
-  const hidden = runOnly && !isMakefilePath(opts.filePath ?? '');
+  // Only a language with a debugger or runner keeps this column (langForPath.ts): a
+  // Makefile's is a narrow one for the ▶ that runs a target; config, data and prose have none.
+  const g = langGutters(opts.filePath ?? '', opts.language);
+  const runOnly = !g.breakpoints;
+  const hidden = runOnly && !g.runOnly;
   const handleBpClick = (v: EditorView, ln: number, me: MouseEvent): boolean => {
     if (runOnly) return false;
     const cbs = opts.getCallbacks();

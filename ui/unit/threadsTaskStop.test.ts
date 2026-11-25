@@ -134,7 +134,7 @@ function harness(get: (p: string) => Promise<unknown>, post = async (_p: string,
     '../../../lib/stores/runtimeAttention.svelte': { noteRuntimeWaiting: () => {} },
     '../../../lib/stores/uiControl.svelte': { uiControl: { addSource: () => {} } },
     '../threadsStore.svelte': { threads: {} },
-    '../../../lib/stores/runtimeDrafts.svelte': { runtimeDrafts: { forget: () => {} } },
+    '../../../lib/stores/runtimeDrafts.svelte': { runtimeDrafts: { forget: () => () => {} } },
     '../../../lib/providers': { isRuntimeProvider: () => true, RUNTIME_PROVIDERS: ['claude'], sessionProviderSlug: (r: { provider: string }) => r.provider },
   };
 }

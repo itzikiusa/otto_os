@@ -36,20 +36,23 @@
     inWorktree: Set<string>;
     /** Pre-ticked branch names (local names, or `remote/branch` for remote refs). */
     preselect?: string[];
+    /** The list it opens on (the REMOTE header's trash opens on Remote). */
+    initialTab?: 'local' | 'remote';
     onclose: () => void;
     ondone: (status: RepoStatusResp) => void;
   }
-  let { repoId, refs, currentBranch, inWorktree, preselect = [], onclose, ondone }: Props = $props();
+  let { repoId, refs, currentBranch, inWorktree, preselect = [], initialTab = 'local', onclose, ondone }: Props = $props();
 
   type Tab = 'local' | 'remote';
-  let tab = $state<Tab>('local');
+  let tab = $state<Tab>(untrack(() => initialTab));
   let filter = $state('');
   let alsoRemote = $state(false);
   let picked = $state(untrack(() => new Set<string>(preselect)));
   let busy = $state(false);
   let results = $state<BranchDeleteResult[] | null>(null);
-  /** The items last sent, by name — a "force" follow-up re-sends them. */
-  let lastItems = new Map<string, BranchDeleteItem>();
+  /** What each row of `results` sent (the daemon answers in item order) — a
+   *  "force" follow-up re-sends those rows; a name alone can be local AND remote. */
+  let sent = $state.raw<BranchDeleteItem[]>([]);
 
   const ctx = $derived<ProtectContext>({ current: currentBranch, base: refs.base_branch ?? null, inWorktree });
   const rows = $derived(tab === 'local' ? refs.local : refs.remote);
@@ -89,7 +92,6 @@
     try {
       const resp = await api.post<BranchDeleteResp>(`/repos/${repoId}/branches/delete`, { items });
       ondone(resp.status);
-      for (const i of items) lastItems.set(i.name, i);
       return resp.results;
     } catch (e) {
       toastError('Couldn’t delete the branches', e);
@@ -138,24 +140,28 @@
     }
     const rs = await send(plan.items);
     if (!rs) return;
+    sent = plan.items;
     results = rs;
     report(rs);
   }
 
   async function forceRetry(): Promise<void> {
-    if (!results) return;
-    const names = summarizeDelete(results).needForce;
+    const prev = results;
+    if (!prev) return;
+    const idx = prev.flatMap((r, i) => (r.error && r.needs_force ? [i] : []));
+    const names = idx.map((i) => prev[i].name);
     if (names.length === 0) return;
     const ok = await confirmer.ask(
       `Git refused to delete ${names.length === 1 ? 'this branch' : 'these branches'} because ${names.length === 1 ? 'it isn’t' : 'they aren’t'} fully merged:\n\n${names.map((n) => `• ${n}`).join('\n')}\n\nForce-delete and drop the unmerged commits? This cannot be undone.`,
       { title: 'Force-delete unmerged branches', confirmLabel: `Force delete ${names.length}`, danger: true },
     );
     if (!ok) return;
-    const items = names.map((n) => ({ ...(lastItems.get(n) ?? { name: n }), force: true }));
+    const items = idx.map((i) => ({ ...sent[i], force: true }));
     const rs = await send(items);
     if (!rs) return;
-    const byName = new Map(rs.map((r) => [r.name, r]));
-    results = results.map((r) => byName.get(r.name) ?? r);
+    const next = [...prev];
+    idx.forEach((i, k) => { next[i] = rs[k]; sent[i] = items[k]; });
+    results = next;
     report(rs);
   }
 
@@ -170,10 +176,10 @@
 <Modal title="Delete branches" width={620} height={640} {onclose} dismissable={!busy}>
   {#if results}
     <div class="results" role="list" aria-label="Delete results">
-      {#each results as r (r.name + (r.remote ?? ''))}
+      {#each results as r, i (i)}
         <div class="res" role="listitem" class:fail={!!r.error}>
           <Icon name={r.error ? 'warning' : 'check'} size={12} />
-          <span class="mono name">{r.local_deleted || !r.remote ? r.name : `${r.remote}/${r.name}`}</span>
+          <span class="mono name">{sent[i]?.local === false ? `${r.remote}/${r.name}` : r.name}</span>
           <span class="dim line">{resultLine(r)}</span>
         </div>
       {/each}
@@ -237,7 +243,7 @@
       </span>
       <button class="btn ghost" onclick={onclose} disabled={busy}>Cancel</button>
       <button class="btn danger" disabled={busy || selected.length === 0} onclick={deleteSelected}>
-        {busy ? 'Deleting…' : `Delete ${plural(selected.length, 'branch', 'branches')}…`}
+        {busy ? `Deleting ${plural(selected.length, 'branch', 'branches')}…` : `Delete ${plural(selected.length, 'branch', 'branches')}…`}
       </button>
     {/if}
   {/snippet}

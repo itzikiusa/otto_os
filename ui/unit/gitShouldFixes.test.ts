@@ -160,7 +160,7 @@ test('commitComposer.cancelDraft aborts signal, clears in-flight entry, and bloc
   };
   const c = loadSource(
     new URL('../src/modules/git/commitComposer.ts', import.meta.url),
-    {},
+    { '../../lib/api/client': {} },
     { sessionStorage },
   );
 

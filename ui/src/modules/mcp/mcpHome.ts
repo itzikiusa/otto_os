@@ -68,7 +68,7 @@ export function summarySentences(input: {
   tools: readonly ToolLike[] | null;
   rules: number | null;
   approvalsOn: boolean;
-  approvals: readonly ApprovalLike[];
+  approvals: readonly ApprovalLike[] | null;
   now: number;
 }): Sentence[] {
   const out: Sentence[] = [];
@@ -106,12 +106,14 @@ export function summarySentences(input: {
       testid: 'mcp-sum-rules',
     });
   }
-  const denied = recentDenials(input.approvals, input.now);
-  out.push({
-    text: denied === 0 ? 'No calls were denied in the last 7 days.' : `${n(denied, 'call')} denied in the last 7 days.`,
-    link: 'Open activity',
-    to: 'mcp/activity',
-    testid: 'mcp-sum-denials',
-  });
+  if (input.approvals) {
+    const denied = recentDenials(input.approvals, input.now);
+    out.push({
+      text: denied === 0 ? 'No calls were denied in the last 7 days.' : `${n(denied, 'call')} denied in the last 7 days.`,
+      link: 'Open activity',
+      to: 'mcp/activity',
+      testid: 'mcp-sum-denials',
+    });
+  }
   return out;
 }

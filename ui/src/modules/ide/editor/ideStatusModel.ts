@@ -2,6 +2,7 @@
 // - which editor actions apply to a file kind (no "previous function" on a CSV or a README),
 // - the IDE status strip's items: problems, language, line ending, language-server state.
 
+import { langKeyFor } from '../../../lib/components/langForPath.ts';
 import { isMakefilePath } from '../../../lib/components/makefilePath.ts';
 import type { IdeLspLinkDetail } from '../../../lib/components/cm-ide-lsp-reconnect';
 
@@ -61,6 +62,9 @@ const LANG_LABELS: Record<string, string> = {
   python: 'Python', markdown: 'Markdown', json: 'JSON', jsonl: 'JSON Lines', csv: 'CSV', tsv: 'TSV', yaml: 'YAML',
   toml: 'TOML', xml: 'XML', html: 'HTML', css: 'CSS', scss: 'SCSS', sql: 'SQL', shell: 'Shell', bash: 'Shell',
   dockerfile: 'Dockerfile', makefile: 'Makefile', svelte: 'Svelte', vue: 'Vue', c: 'C', cpp: 'C++', csharp: 'C#', ruby: 'Ruby', php: 'PHP',
+  properties: 'Properties', conf: 'Config', ini: 'INI', dotenv: '.env', ignore: 'Ignore file', requirements: 'pip requirements',
+  nginx: 'nginx', proto: 'Protocol Buffers', protobuf: 'Protocol Buffers', hcl: 'HCL', diff: 'Diff', powershell: 'PowerShell',
+  batch: 'Batch', vtt: 'WebVTT', groovy: 'Groovy', mod: 'Go module', sum: 'Go checksums', work: 'Go workspace',
 };
 const EXT_LANG: Record<string, string> = {
   rs: 'rust', ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript', mjs: 'javascript',
@@ -71,9 +75,8 @@ const EXT_LANG: Record<string, string> = {
 export function ideLanguageLabel(path: string, language?: string | null): string {
   const id = (language ?? '').toLowerCase();
   if (id && id !== 'plaintext' && id !== 'text') return LANG_LABELS[id] ?? id.charAt(0).toUpperCase() + id.slice(1);
-  if (isMakefilePath(path)) return 'Makefile';
-  const ext = extOf(path);
-  const viaExt = EXT_LANG[ext] ?? ext;
+  const key = langKeyFor(path);
+  const viaExt = EXT_LANG[key] ?? key;
   return LANG_LABELS[viaExt] ?? 'Plain text';
 }
 

@@ -1598,7 +1598,7 @@ fn session_totals_sql(days: u32, otto_only: bool) -> String {
                     sum(cache_write_tokens) AS cache_write_tokens,
                     sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
                     round(sum(cost_usd), 6) AS cost_usd,
-                    topK(1)(model)[1] AS model,
+                    anyHeavy(model) AS model,
                     toString(max(ts)) AS last_active
              FROM usage_accounted
              WHERE event_date >= today() - {since} {ws}
@@ -1954,58 +1954,6 @@ impl UsageEngine {
 
         let ws = format!("{} {}", ws_filter(otto_only), scope.filter());
         let since = since(days);
-        let limit = SESSION_LIMIT.max(1);
-
-        let q_sessions = format!(
-            "SELECT session_id,
-                    any(workspace_id) AS workspace_id,
-                    any(provider) AS provider,
-                    any(model) AS model,
-                    count() AS events,
-                    sum(input_tokens) AS input_tokens,
-                    sum(output_tokens) AS output_tokens,
-                    sum(cache_read_tokens) AS cache_read_tokens,
-                    sum(cache_write_tokens) AS cache_write_tokens,
-                    sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
-                    round(sum(cost_usd), 6) AS cost_usd,
-                    toString(max(ts)) AS last_active
-             FROM usage_accounted
-             WHERE event_date >= today() - {since} {ws}
-             GROUP BY session_id
-             ORDER BY total_tokens DESC, events DESC
-             LIMIT {limit}"
-        );
-
-        // ONE grouped scan (day × provider × model, with event counts) feeds
-        // the provider, daily, model and day×model rollups — they are pure
-        // re-aggregations of it, done in Rust (`summary_rollups`). With the
-        // top-sessions query that is 2 scans per summary instead of 5.
-        let q_daily_models = grouped_sql(&format!("event_date >= today() - {since} {ws}"));
-
-        // All-or-nothing: a failed read is an error, never zero totals (U1).
-        // Root scope (R4): the top sessions are the head of the memoised,
-        // single-flight `session_totals` rollup — the same scan the by-kind
-        // breakdown and budgets reuse — so a summary is 2 scans in total.
-        let mut batches = if matches!(scope, UsageScope::All) {
-            let (totals, grouped) = tokio::join!(
-                self.session_totals_shared(days, otto_only),
-                ch.query_rows(&q_daily_models)
-            );
-            totals.and_then(|t| {
-                let top = serde_json::to_value(top_sessions(&t, limit as usize))
-                    .ok()
-                    .and_then(|v| v.as_array().cloned())
-                    .unwrap_or_default();
-                Ok(vec![top, grouped?])
-            })
-        } else {
-            ch.query_batch(&[q_sessions, q_daily_models]).await
-        }
-        .map_err(|e| {
-            tracing::warn!("usage: summary batch failed: {e}");
-            e
-        })?;
-
         // Deserialize each result set into its typed Vec (same decoding as `rows()`).
         fn decode<T: serde::de::DeserializeOwned>(raw: Vec<serde_json::Value>) -> Vec<T> {
             raw.into_iter()
@@ -2019,8 +1967,61 @@ impl UsageEngine {
                 .collect()
         }
 
-        let grouped: Vec<DayModelRow> = decode(batches.pop().unwrap_or_default());
-        let sessions: Vec<SessionUsage> = decode(batches.pop().unwrap_or_default());
+        // Every session of a scoped (non-root) read: its own sessions only, so
+        // the list is bounded; the count and the top sessions come from it.
+        let q_sessions = format!(
+            "SELECT session_id,
+                    any(workspace_id) AS workspace_id,
+                    any(provider) AS provider,
+                    anyHeavy(model) AS model,
+                    count() AS events,
+                    sum(input_tokens) AS input_tokens,
+                    sum(output_tokens) AS output_tokens,
+                    sum(cache_read_tokens) AS cache_read_tokens,
+                    sum(cache_write_tokens) AS cache_write_tokens,
+                    sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
+                    round(sum(cost_usd), 6) AS cost_usd,
+                    toString(max(ts)) AS last_active
+             FROM usage_accounted
+             WHERE event_date >= today() - {since} {ws}
+             GROUP BY session_id"
+        );
+
+        // ONE grouped scan (day × provider × model, with event counts) feeds
+        // the provider, daily, model and day×model rollups — they are pure
+        // re-aggregations of it, done in Rust (`summary_rollups`). With the
+        // per-session totals that is 2 scans per summary instead of 5.
+        let q_daily_models = grouped_sql(&format!("event_date >= today() - {since} {ws}"));
+
+        // All-or-nothing: a failed read is an error, never zero totals (U1).
+        // Root scope (R4): the per-session totals are the memoised,
+        // single-flight `session_totals` rollup — the same scan the by-kind
+        // breakdown and budgets reuse — so a summary is 2 scans in total.
+        let (totals, grouped) = if matches!(scope, UsageScope::All) {
+            let (totals, grouped) = tokio::join!(
+                self.session_totals_shared(days, otto_only),
+                ch.query_rows(&q_daily_models)
+            );
+            totals.and_then(|t| Ok((t, grouped?)))
+        } else {
+            ch.query_batch(&[q_sessions, q_daily_models])
+                .await
+                .map(|mut b| {
+                    let grouped = b.pop().unwrap_or_default();
+                    (Arc::new(decode(b.pop().unwrap_or_default())), grouped)
+                })
+        }
+        .map_err(|e| {
+            tracing::warn!("usage: summary batch failed: {e}");
+            e
+        })?;
+
+        let grouped: Vec<DayModelRow> = decode(grouped);
+        let sessions = top_sessions(&totals, SESSION_LIMIT as usize);
+        let session_count = totals
+            .iter()
+            .filter(|t| has_usage(t.total_tokens, t.cost_usd))
+            .count() as u64;
         let (providers, daily, models, daily_models) = summary_rollups(grouped);
 
         let total_events: u64 = providers.iter().map(|p| p.events).sum();
@@ -2029,7 +2030,7 @@ impl UsageEngine {
         let total_cache_read_tokens: u64 = providers.iter().map(|p| p.cache_read_tokens).sum();
         let total_cache_write_tokens: u64 = providers.iter().map(|p| p.cache_write_tokens).sum();
         let total_tokens: u64 = providers.iter().map(|p| p.total_tokens).sum();
-        let total_cost_usd: f64 = providers.iter().map(|p| p.cost_usd).sum();
+        let total_cost_usd = round6(providers.iter().map(|p| p.cost_usd).sum());
 
         Ok(UsageSummary {
             days,
@@ -2043,6 +2044,7 @@ impl UsageEngine {
             providers,
             daily,
             sessions,
+            session_count,
             // Per-feature rollup needs SQLite session metadata to classify, so
             // the server fills this in (via `feature_usage`) after `summary`.
             by_kind: Vec::new(),
@@ -2822,7 +2824,10 @@ fn monthly_rollup(rows: &[DayModelRow]) -> Vec<MonthlyUsage> {
 /// The summary's top-`limit` session rows from the full per-session rollup,
 /// ordered like the old `ORDER BY total_tokens DESC, events DESC LIMIT n`.
 fn top_sessions(totals: &[SessionTotals], limit: usize) -> Vec<SessionUsage> {
-    let mut idx: Vec<&SessionTotals> = totals.iter().collect();
+    let mut idx: Vec<&SessionTotals> = totals
+        .iter()
+        .filter(|t| has_usage(t.total_tokens, t.cost_usd))
+        .collect();
     idx.sort_by(|a, b| {
         b.total_tokens
             .cmp(&a.total_tokens)
@@ -2864,8 +2869,13 @@ struct DayModelRow {
 }
 
 /// Round a summed cost like the SQL `round(sum(cost_usd), 6)` did.
-fn round6(x: f64) -> f64 {
+pub(crate) fn round6(x: f64) -> f64 {
     (x * 1e6).round() / 1e6
+}
+
+/// Whether a rollup row carries any usage (see [`summary_rollups`]).
+fn has_usage(total_tokens: u64, cost_usd: f64) -> bool {
+    total_tokens > 0 || cost_usd > 0.0
 }
 
 /// Derive the summary's provider / daily / model / day×model rollups from the
@@ -2924,6 +2934,10 @@ fn summary_rollups(
         m.cache_write_tokens += r.cache_write_tokens;
         m.total_tokens += r.total_tokens;
         m.cost_usd += r.cost_usd;
+        // A $0 row charts nothing (and may be a provider not listed above).
+        if !has_usage(r.total_tokens, r.cost_usd) {
+            continue;
+        }
         daily_models.push(DailyModelUsage {
             day: r.day,
             provider: r.provider,
@@ -2937,7 +2951,12 @@ fn summary_rollups(
         });
     }
     let by_total = |a: (u64, u64), b: (u64, u64)| b.0.cmp(&a.0).then(b.1.cmp(&a.1));
-    let mut providers: Vec<ProviderUsage> = providers.into_values().collect();
+    // The one $0 rule: a provider or model with no tokens and no cost in the
+    // window is neither listed nor counted (the totals are their sums).
+    let mut providers: Vec<ProviderUsage> = providers
+        .into_values()
+        .filter(|p| has_usage(p.total_tokens, p.cost_usd))
+        .collect();
     for p in &mut providers {
         p.cost_usd = round6(p.cost_usd);
     }
@@ -2946,7 +2965,10 @@ fn summary_rollups(
     for d in &mut daily {
         d.cost_usd = round6(d.cost_usd);
     }
-    let mut models: Vec<ModelUsage> = models.into_values().collect();
+    let mut models: Vec<ModelUsage> = models
+        .into_values()
+        .filter(|m| has_usage(m.total_tokens, m.cost_usd))
+        .collect();
     for m in &mut models {
         m.cost_usd = round6(m.cost_usd);
     }
@@ -3195,7 +3217,13 @@ mod scope_tests {
             last_active: "2026-10-03 10:00:00.000".into(),
             ..Default::default()
         };
-        let rows = vec![t("a", 10, 1), t("b", 30, 1), t("c", 10, 5), t("d", 1, 1)];
+        let rows = vec![
+            t("z", 0, 9),
+            t("a", 10, 1),
+            t("b", 30, 1),
+            t("c", 10, 5),
+            t("d", 1, 1),
+        ];
         let top = top_sessions(&rows, 3);
         let ids: Vec<&str> = top.iter().map(|s| s.session_id.as_str()).collect();
         assert_eq!(ids, ["b", "c", "a"]);
@@ -3463,6 +3491,8 @@ mod rollup_tests {
             row("2026-10-01", "codex", "gpt", 1, 500, 0.0000004),
             row("2026-10-02", "claude", "opus", 3, 50, 0.2),
             row("2026-10-02", "claude", "sonnet", 1, 50, 0.05),
+            // No tokens and no cost: not a provider or model of the window.
+            row("2026-10-02", "shell", "", 4, 0, 0.0),
         ]);
         let p: Vec<_> = providers
             .iter()
@@ -3475,7 +3505,7 @@ mod rollup_tests {
             .iter()
             .map(|d| (d.day.as_str(), d.events, d.total_tokens))
             .collect();
-        assert_eq!(d, vec![("2026-10-01", 3, 600), ("2026-10-02", 4, 100)]);
+        assert_eq!(d, vec![("2026-10-01", 3, 600), ("2026-10-02", 8, 100)]);
         let m: Vec<_> = models
             .iter()
             .map(|m| (m.model.as_str(), m.events, m.total_tokens))
@@ -3484,7 +3514,8 @@ mod rollup_tests {
             m,
             vec![("gpt", 1, 500), ("opus", 5, 150), ("sonnet", 1, 50)]
         );
-        assert_eq!(dm.len(), 4);
+        assert_eq!(dm.len(), 4, "the $0 shell row charts nothing: not listed");
+        assert!(dm.iter().all(|d| d.provider != "shell"));
     }
 }
 

@@ -56,6 +56,8 @@ export class RuntimeDrafts {
   private idle: string[] = [];
   /** Evicted drafts still saving: a re-open loads after the save lands. */
   private settling = new Map<string, Promise<void>>();
+  /** Threads deleted in this window (`forget`). */
+  private gone = new Set<string>();
   configure(initialize: (id: string, draft: RuntimeComposerDraft, after?: Promise<void>) => DraftRoot | (() => void)): void {
     this.initialize = initialize;
   }
@@ -86,16 +88,34 @@ export class RuntimeDrafts {
     this.roots.clear();
     this.idle = [];
     this.settling.clear();
+    this.gone.clear();
     this.byId = {};
   }
 
-  forget(id: string): void {
+  /** Drop `id`'s draft: its thread is being deleted. Call the returned
+   *  settle with whether the delete went through: a failed one brings the
+   *  draft back as it was, unsaved edits included. */
+  forget(id: string): (deleted: boolean) => void {
+    const epoch = this.epoch;
+    this.gone.add(id);
     this.live.get(id)?.();
     this.live.delete(id);
-    void this.roots.get(id)?.dispose();
+    const draft = this.byId[id];
+    const root = this.roots.get(id);
     this.roots.delete(id);
     this.idle = this.idle.filter((x) => x !== id);
-    delete this.byId[id];
+    delete this.byId[id]; // its writer saves only a draft this store owns
+    return (deleted) => {
+      // Another identity signed in meanwhile: this draft is not theirs.
+      if (deleted || this.epoch !== epoch) return void root?.dispose();
+      this.gone.delete(id);
+      if (!draft) return;
+      this.byId[id] = draft;
+      if (root) this.roots.set(id, root);
+      if (this.held(id)) this.startLive(id);
+      else this.touchIdle(id);
+      draft.flushSave();
+    };
   }
 
   /** A view shows `id`'s thread: keep its draft live until the returned release. */
@@ -159,11 +179,14 @@ export class RuntimeDrafts {
 
   for(id: string): RuntimeComposerDraft {
     if (this.byId[id]) return this.byId[id];
-    this.byId[id] = {
+    const blank: RuntimeComposerDraft = {
       freshContext: false, provider: null, context: [], recovered: false, saveStatus: 'loading', saveError: null, attachError: null, retrySave: () => {}, flushSave: () => {},
       text: '', images: [], model: undefined, effort: null, pickedMode: null,
       sending: false, reopening: false, stopping: false, awaitSeq: null, startError: null,
     };
+    // A deleted thread's view, still on screen for a frame, never reads its draft back.
+    if (this.gone.has(id)) return blank;
+    this.byId[id] = blank;
     const root = this.initialize?.(id, this.byId[id], this.settling.get(id));
     if (root) this.roots.set(id, typeof root === 'function' ? { dispose: root } : root);
     if (this.held(id)) this.startLive(id);

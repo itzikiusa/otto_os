@@ -17,6 +17,8 @@
   let { admin }: { admin: boolean } = $props();
 
   const SESSION_PAGE = 100;
+  /** Model rows rendered (a provider can record thousands of model names). */
+  const MODEL_CAP = 50;
   let sessionLimit = $state(SESSION_PAGE);
 
   onMount(() => {
@@ -24,7 +26,9 @@
   });
 
   const report = $derived(usage.report);
-  const sessions = $derived(report ? report.sessions.slice(0, sessionLimit) : []);
+  // A slim report (a range switch after "Show more") shows the first page again.
+  const limit = $derived(usage.reportFull ? sessionLimit : SESSION_PAGE);
+  const sessions = $derived(report ? report.sessions.slice(0, limit) : []);
 
   async function download(): Promise<void> {
     // The page holds the slim report; the export needs every session and the
@@ -40,8 +44,9 @@
   }
 
   async function showMore(): Promise<void> {
-    if (!usage.reportFull) await usage.fullReport();
-    sessionLimit += SESSION_PAGE * 4;
+    const from = limit;
+    if (!usage.reportFull && !(await usage.fullReport())) return;
+    sessionLimit = from + SESSION_PAGE * 4;
   }
 
   function scopeLabel(): string {
@@ -112,9 +117,12 @@
     {@render tokenTable(
       'By model',
       ['Model', 'Provider'],
-      report.models.map((m) => ({ key: m.provider + '\u0000' + m.model, lead: [m.model || 'unknown', m.provider], r: m })),
+      report.models.slice(0, MODEL_CAP).map((m) => ({ key: m.provider + '\u0000' + m.model, lead: [m.model || 'unknown', m.provider], r: m })),
       report.totals,
     )}
+    {#if report.models.length > MODEL_CAP}
+      <p class="dim small" data-testid="usage-report-models-more">{report.models.length - MODEL_CAP} smaller models are in the total · Download HTML lists every one</p>
+    {/if}
     {@render tokenTable(
       'By session',
       ['Session', 'Workspace', 'Model', 'Last active'],
@@ -129,10 +137,10 @@
         r: s,
       })),
     )}
-    {#if report.sessions.length > sessionLimit}
+    {#if report.sessions.length > limit}
       <div class="more">
         <button class="btn small" disabled={usage.reportLoading} onclick={() => void showMore()}>
-          {#if usage.reportFull}Show more sessions ({report.sessions.length - sessionLimit} hidden){:else}Show more sessions{/if}
+          {#if usage.reportFull}Show more sessions ({report.sessions.length - limit} hidden){:else}Show more sessions{/if}
         </button>
       </div>
     {/if}

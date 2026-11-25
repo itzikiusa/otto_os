@@ -39,8 +39,9 @@ const LS_LAST_ROUTE = 'otto_last_route';
 // the window's last route: its own route lives in the host's side-pane state.
 const IS_TAURI = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window && !isEmbedded;
 
-function restoreLastRoute(): void {
-  if (!IS_TAURI) return;
+/** Returns the hash restored from the saved last route, or null. */
+function restoreLastRoute(): string | null {
+  if (!IS_TAURI) return null;
   // A freshly-minted window may carry an injected initial route (e.g. the snip
   // editor window: windows.rs adds `window.__OTTO_ROUTE__='snip/<id>'` to the
   // init script). Consume-once — delete before applying — so a later hard
@@ -49,15 +50,17 @@ function restoreLastRoute(): void {
   delete (window as { __OTTO_ROUTE__?: unknown }).__OTTO_ROUTE__;
   if (typeof injected === 'string' && /^[A-Za-z0-9/_-]+$/.test(injected)) {
     history.replaceState(null, '', '#/' + injected);
-    return;
+    return null;
   }
   const h = window.location.hash;
-  if (h !== '' && h !== '#/' && h !== '#') return; // explicit route wins
+  if (h !== '' && h !== '#/' && h !== '#') return null; // explicit route wins
   const saved = lsGet(winKey(LS_LAST_ROUTE));
   // Never restore into a share route (`#/s/…` is one-time-view by design).
   if (saved && saved.startsWith('#/') && !ephemeralRoute(saved) && knownHash(saved)) {
     history.replaceState(null, '', saved);
+    return saved;
   }
+  return null;
 }
 
 function persistLastRoute(hash: string): void {
@@ -174,13 +177,15 @@ class Router {
    *  before the window knows which workspace its points belong to. */
   private resumeScoped = false;
   private lastByModule = loadLastByModule('');
+  /** The hash on screen when it came from memory (see {@link remembered}). */
+  private resumed: string | null = null;
 
   canBack = $derived(this.index > 0);
   canForward = $derived(this.index < this.stack.length - 1);
 
   constructor() {
     if (typeof window !== 'undefined') {
-      restoreLastRoute();
+      this.resumed = restoreLastRoute();
       this.parse();
       this.stack = [this.currentHash()];
       this.index = 0;
@@ -205,6 +210,7 @@ class Router {
 
   /** Read the hash and make it the current route (once its page is ready). */
   private parse(): void {
+    if (this.resumed !== this.currentHash()) this.resumed = null;
     const next = this.read();
     const seq = ++this.commitSeq;
     const finish = beginNavigation(next[0] ?? 'agents');
@@ -537,7 +543,17 @@ class Router {
       this.go(moduleHome(id));
       return;
     }
-    this.go(this.lastByModule.get(id) ?? moduleHome(id));
+    const resume = this.lastByModule.get(id);
+    this.resumed = resume ?? null;
+    // A leave-guard that keeps the page drops the mark: a link followed to that route later is no memory.
+    void this.goChecked(resume ?? moduleHome(id)).then((ok) => { if (!ok) this.resumed = null; });
+  }
+
+  /** The route on screen came from memory — a module's resume point, the
+   *  window's last route at launch — not from a link someone followed. A
+   *  page drops such a route quietly when what it names is gone. */
+  get remembered(): boolean {
+    return this.resumed !== null && this.resumed === this.currentHash();
   }
 
   /** Whether {@link back} has an entry to step to. `history.length` is not a

@@ -34,6 +34,14 @@
     threadsChrome.terminalSplit ? (terms.find((t) => t.id !== active?.id) ?? null) : null,
   );
 
+  // A selection leaves with its terminal (switched, killed, removed elsewhere):
+  // the unmounted xterm never reports its selection cleared.
+  $effect(() => {
+    void active?.id;
+    void second?.id;
+    selection = '';
+  });
+
   // Drop ids whose sessions are gone (killed elsewhere, another machine).
   $effect(() => {
     if (!ws.listSettled) return;

@@ -83,6 +83,7 @@ export interface CostRow<T> {
 /** The rows of one "Where it went" view: biggest cost first (ties by tokens). */
 export function costRows<T extends CostRowSource>(items: readonly T[], keyOf: (t: T) => string, labelOf: (t: T) => string): CostRow<T>[] {
   const sorted = [...items].sort((a, b) => b.cost_usd - a.cost_usd || b.total_tokens - a.total_tokens);
-  const max = Math.max(0, ...sorted.map((t) => t.cost_usd));
+  // Sorted: the first is the largest (a spread of 65k+ costs throws in WebKit).
+  const max = Math.max(0, sorted[0]?.cost_usd ?? 0);
   return sorted.map((item) => ({ key: keyOf(item), label: labelOf(item), item, share: max > 0 ? (item.cost_usd / max) * 100 : 0 }));
 }

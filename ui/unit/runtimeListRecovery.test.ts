@@ -12,7 +12,7 @@ test('failed runtime list retains rows, exposes retryable error, and clears it a
     '../../../lib/live': { onLive: () => () => {}, appLive: { onResync: () => () => {} } }, '../../../lib/router.svelte': { router: {} },
     '../../../lib/stores/runtimeAttention.svelte': { noteRuntimeWaiting: () => {}, syncRuntimeWaiting: () => {} },
     '../../../lib/stores/uiControl.svelte': { uiControl: { addSource: () => {} } },
-    '../threadsStore.svelte': { threads: {} }, '../../../lib/stores/runtimeDrafts.svelte': { runtimeDrafts: { forget: () => {} } },
+    '../threadsStore.svelte': { threads: {} }, '../../../lib/stores/runtimeDrafts.svelte': { runtimeDrafts: { forget: () => () => {} } },
     '../../../lib/providers': { isRuntimeProvider: (p: string) => ['claude', 'codex', 'agy', 'gemini', 'grok', 'opencode', 'pi'].includes(p), RUNTIME_PROVIDERS: ['claude', 'codex', 'agy', 'gemini', 'grok', 'opencode', 'pi'] },
   });
   runtimeThreads.byId = { old: oldRow };
@@ -37,7 +37,7 @@ test('loadAll adds threads of every workspace (one started on the phone) without
     '../../../lib/live': { onLive: () => () => {}, appLive: { onResync: () => () => {} } }, '../../../lib/router.svelte': { router: {} },
     '../../../lib/stores/runtimeAttention.svelte': { noteRuntimeWaiting: () => {}, syncRuntimeWaiting: () => {} },
     '../../../lib/stores/uiControl.svelte': { uiControl: { addSource: () => {} } },
-    '../threadsStore.svelte': { threads: {} }, '../../../lib/stores/runtimeDrafts.svelte': { runtimeDrafts: { forget: () => {} } },
+    '../threadsStore.svelte': { threads: {} }, '../../../lib/stores/runtimeDrafts.svelte': { runtimeDrafts: { forget: () => () => {} } },
     '../../../lib/providers': { isRuntimeProvider: (p: string) => ['claude', 'codex', 'agy', 'gemini', 'grok', 'opencode', 'pi'].includes(p), RUNTIME_PROVIDERS: ['claude', 'codex', 'agy', 'gemini', 'grok', 'opencode', 'pi'] },
   });
   runtimeThreads.byId = { here: held };

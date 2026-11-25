@@ -6,6 +6,7 @@ import { expect, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { openPage } from './helpers';
 import { apiCtx, seedWorkspace, tempDir } from './seed';
 
 export interface CardRepo {
@@ -15,7 +16,7 @@ export interface CardRepo {
   branch: string;
 }
 
-export async function seedCardRepo(name: string): Promise<CardRepo> {
+export async function seedCardRepo(name: string, edit = 'hello world\n'): Promise<CardRepo> {
   const root = tempDir('otto-e2e-card-');
   const bare = join(root, 'remote.git');
   const dir = join(root, 'work');
@@ -35,7 +36,7 @@ export async function seedCardRepo(name: string): Promise<CardRepo> {
   git('checkout', '-q', '-b', branch);
   git('push', '-q', '-u', 'origin', branch);
   // The work: one edit and one new file.
-  writeFileSync(join(dir, 'app.txt'), 'hello world\n');
+  writeFileSync(join(dir, 'app.txt'), edit);
   writeFileSync(join(dir, 'notes.txt'), 'todo\n');
   const { ctx, base } = await apiCtx();
   const wsId = await seedWorkspace(ctx, base);
@@ -48,10 +49,10 @@ export async function seedCardRepo(name: string): Promise<CardRepo> {
 
 /** The forge side, offline: a GitHub account (so the PR lookup runs), no open
  *  PR yet, a drafted message, and fetches that never reach github.com. */
-export async function stubForge(page: Page, prs: () => unknown[] = () => []): Promise<void> {
+export async function stubForge(page: Page, prs: () => unknown[] = () => [], draft = true): Promise<void> {
   await page.route('**/api/v1/git/accounts', (r) => r.fulfill({ json: [{ id: 'acc1', provider: 'github', label: 'me', username: 'me' }] }));
   await page.route(/\/api\/v1\/repos\/[^/]+\/prs\?/, (r) => r.fulfill({ json: { items: prs(), has_more: false, page: 1, per_page: 50 } }));
-  await page.route('**/draft-commit-message', (r) =>
+  if (draft) await page.route('**/draft-commit-message', (r) =>
     r.fulfill({ json: { message: 'feat: ship the commit card\n\n- one primary that follows state', from_staged: true } }),
   );
   await page.route(/\/api\/v1\/repos\/[^/]+\/fetch(\?|$)/, (r) => r.fulfill({ status: 502, json: { code: 'upstream', message: 'offline in tests' } }));
@@ -77,4 +78,60 @@ export async function expectChangesFirst(page: Page): Promise<void> {
   // Drafted from the diff (the stubbed drafting agent), ready to send.
   await expect(card.locator('.subject-input')).toHaveValue('feat: ship the commit card', { timeout: 15_000 });
   await expect(card).toContainText('Drafted from the diff');
+}
+
+/** "Draft from the diff" against the daemon's real headless draft (the e2e
+ *  `claude` is otto-fake-claude): the message streams into the fields with
+ *  "Drafting… · Stop" beside it, Stop keeps what arrived, and the finished
+ *  draft commits and pushes. `fake-draft: slow` in the diff paces the
+ *  stream (four pieces, 1.5 s apart). */
+export async function expectDraftStreams(page: Page, name: string): Promise<void> {
+  const repo = await seedCardRepo(name, 'hello world\nfake-draft: slow\n');
+  await stubForge(page, () => [], false);
+  await openPage(page, `git/${repo.id}`);
+  const card = page.getByTestId('commit-card');
+  const subject = card.locator('.subject-input');
+  const body = card.locator('.body-input');
+  const drafting = card.getByTestId('commit-card-drafting');
+  // Opening drafts by itself (openPage waits that one out); drafting by hand
+  // after clearing the fields is the one watched here.
+  await expect(body).toHaveValue('- say hello world', { timeout: 20_000 });
+  const again = async (): Promise<void> => {
+    await subject.fill('');
+    await body.fill('');
+    await card.getByRole('button', { name: 'Draft from the diff' }).click();
+  };
+  await again();
+  // The subject arrives before the body, while "Drafting… · Stop" shows.
+  await expect(subject).toHaveValue('feat(app): greet the world', { timeout: 10_000 });
+  await expect(drafting).toBeVisible();
+  await expect(body).toHaveValue('');
+  await expect(body).toHaveValue('- say hello world', { timeout: 10_000 });
+  await expect(drafting).toHaveCount(0);
+  await expect(card.locator('.wc-commit')).toBeEnabled();
+  // Stopped mid-stream: what arrived stays.
+  await again();
+  await expect(subject).toHaveValue('feat(app): greet the world', { timeout: 10_000 });
+  await card.getByRole('button', { name: 'Stop' }).click();
+  await expect(drafting).toHaveCount(0);
+  await page.waitForTimeout(4000); // ui-guards: allow — proves nothing more streams in after Stop
+  await expect(subject).toHaveValue('feat(app): greet the world');
+  await expect(body).toHaveValue('');
+  await expect(card).toContainText('Drafted from the diff');
+  await card.locator('.wc-commit').click();
+  await expect.poll(() => remoteSubject(repo), { timeout: 20_000 }).toBe('feat(app): greet the world');
+}
+
+/** A draft that fails says why in one line, with Retry — never an idle card. */
+export async function expectDraftFailureSaysWhy(page: Page, name: string): Promise<void> {
+  const repo = await seedCardRepo(name, 'hello world\nfake-draft: fail\n');
+  await stubForge(page, () => [], false);
+  await openPage(page, `git/${repo.id}`);
+  const card = page.getByTestId('commit-card');
+  const why = card.getByTestId('load-error');
+  await expect(why).toContainText(/Couldn’t draft the message\. .*Not logged in/, { timeout: 20_000 });
+  await expect(card.getByRole('button', { name: 'Draft from the diff' })).toHaveCount(0);
+  await card.getByRole('button', { name: 'Retry' }).click();
+  await expect(why).toContainText('Not logged in', { timeout: 20_000 });
+  await expect(card.getByTestId('commit-card-drafting')).toHaveCount(0);
 }

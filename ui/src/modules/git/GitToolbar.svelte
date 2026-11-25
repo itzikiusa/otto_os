@@ -2,13 +2,20 @@
   import { plural } from '../../lib/plural';
   import { needResolution } from '../../lib/api/git';
   import { toastError } from '../../lib/toastError';
-  // Toolbar row: Fetch / Pull / Push / Branch / Stash / Pop + current branch chip.
-  // In the Git page header it is the repo's state in words + a visible Fetch;
-  // every other verb rides the header's ONE ⋯ (`menuItems`), grouped, and
-  // stays a ⌘K command (group "Git").
+  // The everyday git verbs — Fetch · Pull · Push · Stash · Pop — always one
+  // visible click away (the owner's rule: frequent actions never hide in ⋯).
+  //   header: the Git page's header row — the repo's state in words, the view
+  //           switch (children), then the five verbs. A tight row turns labels
+  //           into icons (Stash, Pop, Fetch first; Pull and Push last); it
+  //           never wraps or moves a verb into ⋯. ⋯ (menuItems) keeps the rare
+  //           ones. On a phone the verbs are the 'row' under the header.
+  //   row:    the phone's second row of finger-sized verbs.
+  //   sync:   Pull + Push beside a commit card (Agents' Git tab, Threads).
+  // The verbs are also ⌘K commands (group "Git", header copy only).
+  import { flushSync, untrack } from 'svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { api } from '../../lib/api/client';
-  import type { PullMode, PullModeResp, RemoteInfo, RepoStatusResp } from '../../lib/api/types';
+  import type { PullMode, PullModeResp, RemoteInfo, RepoStatusResp, StashInfo } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -17,6 +24,7 @@
   import { runPush } from './pushFlow';
   import { gitBridge } from '../../lib/diff/gitBridge.svelte';
   import { registry } from '../../lib/commands.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import type { MenuItem } from '../../lib/contextmenu.svelte';
@@ -29,22 +37,28 @@
     status: RepoStatusResp;
     onstatus: (s: RepoStatusResp) => void;
     /** Called after an op that may have MOVED refs/history (fetch/pull/push/
-     *  branch) so the parent can re-mount the graph — otherwise the commit graph
-     *  shows stale data until the repo tab is reopened. */
+     *  stash) so the parent can refresh the graph. */
     onrefresh?: () => void;
-    /** Rendered as direct children of the PageHeader's actions row (so they
-     *  overflow into its ⋯ by `data-overflow`) instead of in a `.toolbar` wrapper. */
-    inHeader?: boolean;
-    /** Opens the stash browser OUTSIDE the toolbar. In the header a dialog
-     *  mounted here lands in PageHeader's actions row, whose overflow
-     *  measurer hides it (and Pull with it). */
+    variant?: 'header' | 'row' | 'sync';
+    /** Header: Push may be the accent (false while a commit card's own
+     *  primary is on screen — one blue button per screen). */
+    accent?: boolean;
+    /** Opens the stash browser OUTSIDE the toolbar (a dialog mounted in
+     *  PageHeader's actions row would be measured and hidden with it). */
     onbrowsestashes?: () => void;
-    /** Header: rendered between the state words and Fetch (the view switch). */
-    children?: import('svelte').Snippet;
+    /** Header: the repo tabs' floor (PageHeader's tabsMin) — what they can still give up. */
+    tabsMin?: number;
+    /** sync: false while the card beside it already offers Push (its primary). */
+    push?: boolean;
+    /** Header: rendered between the state words and the verbs (the view switch). */
+    children?: import('svelte').Snippet<[views: 'words' | 'icons' | 'menu']>;
   }
-  let { repoId, status, onstatus, onrefresh, inHeader = false, onbrowsestashes, children }: Props = $props();
+  let { repoId, status, onstatus, onrefresh, variant = 'row', accent = false, tabsMin = 0.5, push = true, onbrowsestashes, children }: Props = $props();
 
   let busy = $state('');
+  const header = $derived(variant === 'header');
+  // The header's verbs move to the 'row' under it on a phone.
+  const showVerbs = $derived(!header || !viewport.isPhone);
 
   // Nothing to push: the branch tracks an upstream and has no local commits on
   // top of it. (No upstream → the button is Publish, always available.)
@@ -53,6 +67,7 @@
   // no branch to push or pull, so both would only fail with git's
   // "You are not currently on a branch".
   const detached = $derived(status.branch === '(detached)');
+  const clean = $derived(status.changes.length === 0);
   // A repo with no remote can't pull or publish (git's "No configured push
   // destination" / "no tracking information"). Re-read when refs move (a
   // remote added in Remotes… bumps them). Unknown (null) keeps both enabled.
@@ -82,12 +97,27 @@
   });
   const noRemote = $derived(remoteCount === 0);
   const NO_REMOTE = 'Add a remote first (⋯ → Remotes…)';
-  // Push is the header's primary action only while there is something to push.
-  const pushPrimary = $derived(status.upstream != null && status.ahead > 0 && !detached);
-  // Known-empty stash list → Pop can only fail, so say so up front. Unknown
-  // (the graph hasn't reported yet) keeps it enabled.
+  const syncWhy = $derived(detached ? 'HEAD is detached — check out a branch first' : noRemote ? NO_REMOTE : undefined);
+  // Push is the accent only with something to push and nothing to commit.
+  const pushPrimary = $derived(header && accent && clean && status.upstream != null && status.ahead > 0 && !detached);
+
+  // The stash list: the graph reports its count (gitBridge); where the graph
+  // isn't loaded (Changes) the toolbar reads it once, and after its own ops.
   const stashCount = $derived(gitBridge.stashCount[repoId]);
   const nothingToPop = $derived(stashCount === 0);
+  let stashes: StashInfo[] = [];
+  async function loadStashes(id = repoId): Promise<StashInfo[]> {
+    const list = await api.get<StashInfo[]>(`/repos/${id}/stashes`);
+    if (id === repoId) {
+      stashes = list;
+      gitBridge.stashCount[id] = list.length;
+    }
+    return list;
+  }
+  $effect(() => {
+    const id = repoId;
+    if (variant !== 'sync' && showVerbs && gitBridge.stashCount[id] === undefined) untrack(() => void loadStashes(id).catch(() => {}));
+  });
   /** The stash browser is open (files + patch, Apply / Pop / Drop). */
   let stashesOpen = $state(false);
   function browseStashes(): void {
@@ -116,21 +146,15 @@
     }
   }
 
-  // The repo's EFFECTIVE pull mode (its `pull.rebase`/`pull.ff` config), loaded
-  // once per repo so the button says what it will actually do. Until it is
-  // known (or when the read fails) the button says plain "Pull": guessing
-  // "merge" mislabelled a repo configured to rebase.
+  // The repo's EFFECTIVE pull mode (its `pull.rebase`/`pull.ff` config), read once
+  // per repo for the caret's "default" mark.
   let pullMode = $state<PullMode | null>(null);
   let pullModeFor = '';
-  // The header shows the mode only inside its ⋯: read it when that opens.
-  $effect(() => {
-    if (!inHeader) loadPullMode(repoId);
-  });
-  function loadPullMode(id: string): void {
-    if (pullModeFor === id) return;
+  function loadPullMode(id: string): Promise<void> {
+    if (pullModeFor === id) return Promise.resolve();
     pullModeFor = id;
     pullMode = null;
-    void api
+    return api
       .get<PullModeResp>(`/repos/${id}/pull-mode`)
       .then((r) => {
         if (pullModeFor === id) pullMode = r.mode;
@@ -140,13 +164,6 @@
         if (pullModeFor === id) pullModeFor = '';
       });
   }
-
-  const MODE_LABEL: Record<PullMode, string> = {
-    merge: 'merge',
-    rebase: 'rebase',
-    ff_only: 'ff-only',
-  };
-  const pullLabel = $derived(pullMode ? `Pull (${MODE_LABEL[pullMode]})` : 'Pull');
 
   async function doPull(mode?: PullMode): Promise<void> {
     busy = 'pull';
@@ -158,19 +175,28 @@
     }
   }
 
+  function pullModeItems(): MenuItem[] {
+    return (['merge', 'rebase', 'ff_only'] as const).map((m) => ({
+      label: `Pull (${m === 'ff_only' ? 'fast-forward only' : m})`,
+      icon: 'arrowDown',
+      hint: pullMode === m ? 'default' : undefined,
+      disabled: busy !== '' || !!syncWhy,
+      title: syncWhy,
+      action: () => void doPull(m),
+    }));
+  }
   function pullMenu(e: MouseEvent): void {
     if (noRemote) return;
-    ctxMenu.show(e, [
-      { label: 'Pull (merge)', icon: 'arrowDown', disabled: detached || noRemote, title: noRemote ? NO_REMOTE : undefined, action: () => void doPull('merge') },
-      { label: 'Pull (rebase)', icon: 'arrowDown', disabled: detached || noRemote, title: noRemote ? NO_REMOTE : undefined, action: () => void doPull('rebase') },
-      { label: 'Pull (fast-forward only)', icon: 'arrowDown', disabled: detached || noRemote, title: noRemote ? NO_REMOTE : undefined, action: () => void doPull('ff_only') },
-    ]);
+    ctxMenu.show(e, pullModeItems());
   }
-
-  // ⌘K: the open repo's everyday verbs (the header copy only — the side-panel
-  // toolbar would register a second, identical set).
+  // The caret marks the repo's default mode: read it with the repo.
   $effect(() => {
-    if (!inHeader) return;
+    if (header && showVerbs) void loadPullMode(repoId);
+  });
+
+  // ⌘K: the open repo's everyday verbs (the header copy only).
+  $effect(() => {
+    if (!header) return;
     const branch = status.branch;
     const upstream = status.upstream;
     const isDetached = detached;
@@ -180,7 +206,7 @@
       { id: 'git.fetch', title: 'Fetch', group: 'Git', keywords: 'remote refresh update', disabled: hasNoRemote, detail: hasNoRemote ? NO_REMOTE : undefined, run: () => { if (!hasNoRemote) void doFetch(); } },
       ...(isDetached
         ? []
-        : [{ id: 'git.pull', title: pullLabel, group: 'Git', keywords: 'upstream merge rebase', disabled: hasNoRemote, detail: hasNoRemote ? NO_REMOTE : undefined, run: () => { if (!hasNoRemote) void doPull(); } }]),
+        : [{ id: 'git.pull', title: 'Pull', group: 'Git', keywords: 'upstream merge rebase', disabled: hasNoRemote, detail: hasNoRemote ? NO_REMOTE : undefined, run: () => { if (!hasNoRemote) void doPull(); } }]),
       ...(canPush
         ? [{ id: 'git.push', title: upstream ? 'Push' : 'Publish branch', group: 'Git', keywords: `upload ${branch}`, disabled: hasNoRemote, detail: hasNoRemote ? NO_REMOTE : undefined, run: () => { if (!hasNoRemote) void doPush(); } }]
         : []),
@@ -189,11 +215,8 @@
   });
 
   async function doPush(): Promise<void> {
-    // No confirm: push is the most routine git action (the user asked for
-    // fewer nag dialogs, and no git client asks before a plain push). The
-    // button label already says Push vs Publish, and the toast reports it.
-    // A REJECTED push asks Pull vs Force-with-lease (runPush) — force is
-    // never sent without that explicit pick.
+    // No confirm: push is the most routine git action. A REJECTED push asks
+    // Pull vs Force-with-lease (runPush) — force is never sent without that pick.
     busy = 'push';
     try {
       await runPush(repoId, { branch: status.branch, upstream: status.upstream }, onstatus);
@@ -203,9 +226,7 @@
     }
   }
 
-  // Same sheet the graph's "Create branch here…" uses. (This used to be an
-  // absolutely-positioned inline popover, which the ≤1024px toolbar's
-  // horizontal scroller clipped — the input was unreachable on a tablet.)
+  // Same sheet the graph's "Create branch here…" uses.
   async function doCreateBranch(initial?: string): Promise<void> {
     const raw = await confirmer.promptText(`New branch from ${status.branch}`, {
       title: 'Create branch',
@@ -232,72 +253,52 @@
     if (failed) await doCreateBranch(name);
   }
 
-  async function doStash(): Promise<void> {
-    busy = 'stash';
+  const DONE = { save: 'Stashed', pop: 'Stash popped', apply: 'Stash applied', drop: 'Stash dropped' } as const;
+  /** save | pop (the newest) | pop/apply/drop one stash by its SHA. */
+  async function stashOp(op: 'save' | 'pop' | 'apply' | 'drop', s?: StashInfo): Promise<void> {
+    busy = op === 'save' ? 'stash' : 'pop';
     try {
-      const s = await api.post<RepoStatusResp>(`/repos/${repoId}/stash`, { op: 'save' });
-      onstatus(s);
-      // Re-mount the graph: its STASHES section + stash node only reload then.
+      const st = await api.post<RepoStatusResp>(`/repos/${repoId}/stash`, s ? { op, sha: s.sha } : { op });
+      onstatus(st);
+      // The graph's STASHES section + stash node reload with it.
       onrefresh?.();
-      toasts.success('Stashed');
-    } catch (e) {
-      toastError('Couldn’t stash', e);
-    } finally {
-      busy = '';
-    }
-  }
-
-  async function doPop(): Promise<void> {
-    busy = 'pop';
-    try {
-      const s = await api.post<RepoStatusResp>(`/repos/${repoId}/stash`, { op: 'pop' });
-      onstatus(s);
-      onrefresh?.();
-      // A conflicting pop is a 200 with unmerged paths (git keeps the stash
-      // entry) — guide the user into the resolver instead of claiming success.
-      const conflicts = s.changes.filter((c) => c.kind === 'conflicted').length;
-      if (conflicts > 0) {
-        toasts.warn(
-          'Stash popped with conflicts',
-          `${needResolution(conflicts)} — open "Resolve conflicts". The stash entry was kept.`,
-        );
+      void loadStashes().catch(() => {});
+      // A conflicting pop/apply is a 200 with unmerged paths (git keeps the
+      // stash entry) — guide the user into the resolver instead of claiming success.
+      const conflicts = st.changes.filter((c) => c.kind === 'conflicted').length;
+      if (conflicts > 0 && op !== 'drop') {
+        toasts.warn(`${DONE[op]} with conflicts`, `${needResolution(conflicts)} — open "Resolve conflicts". The stash entry was kept.`);
       } else {
-        toasts.success('Stash popped');
+        toasts.success(DONE[op], s?.ref);
       }
     } catch (e) {
-      toastError('Couldn’t pop', e);
+      toastError(op === 'save' ? 'Couldn’t stash' : `Couldn’t ${op} the stash`, e);
     } finally {
       busy = '';
     }
   }
 
-  /** The header's ⋯ rows for this repo, grouped: sync, then branch & stash. */
+  /** Pop's caret: every stash (pop / apply / drop), then the browser. */
+  async function stashMenu(e: MouseEvent): Promise<void> {
+    const el = e.currentTarget as HTMLElement;
+    const [list, m] = await Promise.all([loadStashes().catch(() => stashes), import('./StashBrowser.svelte')]);
+    ctxMenu.showAt(el, m.stashMenuItems(list, (op, s) => void stashOp(op, s), browseStashes));
+  }
+
+  /** The header's ⋯ rows: the rare ones only (the verbs are visible). On a
+   *  phone the verbs row has no carets, so the pull modes and the stash
+   *  browser ride ⋯ there. */
   export function menuItems(): MenuItem[] {
-    loadPullMode(repoId); // the "default" mark shows once it is known
-    const why = detached ? 'HEAD is detached — check out a branch first' : noRemote ? NO_REMOTE : undefined;
+    if (viewport.isPhone) void loadPullMode(repoId);
     return [
-      // The three pull modes; the repo's configured one says "default".
-      ...(['merge', 'rebase', 'ff_only'] as const).map((m) => ({
-        label: `Pull (${m === 'ff_only' ? 'fast-forward only' : m})`,
-        icon: 'arrowDown',
-        hint: pullMode === m ? 'default' : undefined,
-        disabled: busy !== '' || detached || noRemote,
-        title: why,
-        action: () => void doPull(m),
-      })),
-      {
-        label: status.upstream ? 'Push' : 'Publish branch',
-        icon: 'arrowUp',
-        hint: status.ahead > 0 ? `↑${status.ahead}` : undefined,
-        disabled: busy !== '' || nothingToPush || detached || noRemote,
-        title: why ?? (nothingToPush ? `Nothing to push — ${status.branch} has no commits that ${status.upstream} doesn’t` : undefined),
-        action: () => void doPush(),
-      },
-      { separator: true },
       { label: 'New branch…', icon: 'plus', title: `Create a new branch from ${status.branch} and switch to it`, action: () => void doCreateBranch() },
-      { label: 'Stash changes', icon: 'stash', disabled: status.changes.length === 0, title: status.changes.length === 0 ? 'Nothing to stash — the working tree is clean' : undefined, action: () => void doStash() },
-      { label: 'Pop stash', icon: 'archive', disabled: nothingToPop, title: nothingToPop ? 'There are no stashes' : undefined, action: () => void doPop() },
-      { label: stashCount ? `Browse stashes (${stashCount})…` : 'Browse stashes…', icon: 'eye', disabled: nothingToPop, action: browseStashes },
+      ...(viewport.isPhone
+        ? [
+            { separator: true },
+            ...pullModeItems(),
+            { label: stashCount ? `Browse stashes (${stashCount})…` : 'Browse stashes…', icon: 'eye', disabled: nothingToPop, action: browseStashes },
+          ]
+        : []),
       { separator: true },
       {
         label: 'Auto-fetch', checked: git.autoFetchEnabled, action: () => git.setAutoFetch(!git.autoFetchEnabled),
@@ -307,127 +308,171 @@
       },
     ];
   }
-  /** The repo's state in words for the header ("3 files changed · ↑2 not pushed"). */
+  /** The repo's state in words for the header ("↑2 not pushed · ↓1 to pull"). */
   // The file count rides the Changes badge (and the commit card), not this line.
   const words = $derived.by(() => {
     const w = stateWords({ changes: 0, ahead: status.ahead, behind: status.behind, upstream: status.upstream, branch: detached ? null : status.branch });
     return status.changes.length > 0 && w === 'Clean' ? '' : w;
   });
+
+  // ── Header fit: once the repo tabs are at their floor, the row gives way in
+  // this order before anything is clipped: the state words (they repeat the
+  // ↑/↓ counts) and "Auto-fetch paused" (⋯ has the toggle), then the view
+  // switch turns to icons, then each verb's label (the icon stays, the word
+  // is its name and title), then the views become one menu button.
+  // Measured against the header's actions wrap on
+  // every resize and whenever a label or count changes.
+  const SQUEEZE = ['state', 'views', 'stash', 'pop', 'fetch', 'pull', 'push', 'viewmenu'];
+  let squeeze = $state(0);
+  const iconOnly = (v: string): boolean => SQUEEZE.indexOf(v) !== -1 && SQUEEZE.indexOf(v) < squeeze;
+  let fetchEl = $state<HTMLButtonElement>();
+  function fit(): void {
+    const wrap = fetchEl?.closest<HTMLElement>('.ph-actions-wrap');
+    const row = wrap?.parentElement;
+    if (!wrap || !row) return;
+    // What the repo tabs can still give up (PageHeader shrinks them to their
+    // floor before anything scrolls).
+    const tabs = row.querySelector<HTMLElement>(':scope > .ph-tabs-inline');
+    // …and never below the room the repo strip says it needs (GitTabs'
+    // data-floor): below it give goes negative and the verbs give way.
+    // The state words (level 0) also yield to whole tabs with their branches (data-want).
+    const strip = tabs?.querySelector<HTMLElement>('[data-floor]');
+    const floor = Number(strip?.dataset.floor ?? 0);
+    const want = Math.max(floor, Number(strip?.dataset.want ?? 0));
+    const give = (): number => (tabs ? tabs.offsetWidth - Math.max(row.clientWidth * tabsMin, squeeze === 0 ? want : floor) : 0);
+    // Room to spare is the actions' auto start margin (scrollWidth never reads below clientWidth).
+    const actions = wrap.querySelector<HTMLElement>(':scope > .ph-actions');
+    const fits = (): boolean => wrap.scrollWidth - wrap.clientWidth - (actions ? parseFloat(getComputedStyle(actions).marginInlineStart) || 0 : 0) <= give() + 4;
+    const set = (n: number): void => {
+      squeeze = n;
+      flushSync();
+    };
+    // From the level it is at (each step is a forced layout): up while the row
+    // overflows, else down while the wider labels still fit.
+    if (!fits()) {
+      while (squeeze < SQUEEZE.length && !fits()) set(squeeze + 1);
+      return;
+    }
+    while (squeeze > 0) {
+      set(squeeze - 1);
+      if (!fits()) return set(squeeze + 1);
+    }
+  }
+  $effect(() => {
+    if (!header || !fetchEl) return;
+    const wrap = fetchEl.closest<HTMLElement>('.ph-actions-wrap');
+    if (!wrap) return;
+    let raf = 0;
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(fit);
+    });
+    ro.observe(wrap);
+    return () => {
+      ro.disconnect();
+      cancelAnimationFrame(raf);
+    };
+  });
+  // Content that changes the row's width (counts, "Pushing…", the state words).
+  $effect(() => {
+    if (!header) return;
+    void [busy, words, status.ahead, status.behind, stashCount, git.autoFetchEnabled];
+    const raf = requestAnimationFrame(fit);
+    return () => cancelAnimationFrame(raf);
+  });
 </script>
 
-{#snippet items()}
-<!-- Branch chip -->
-<span
-  class="branch-chip"
-  title="{status.branch}{status.upstream ? ` · tracks ${status.upstream}` : ''}{status.ahead > 0 ? ` · ${status.ahead} ahead` : ''}{status.behind > 0 ? ` · ${status.behind} behind` : ''}"
->
-  <Icon name="branch" size={12} />
-  <span class="mono branch-name">{status.branch}</span>
-  <!-- aria-label on a role-less span is not read: the glyph is hidden and an
-       sr-only twin carries the words. -->
-  {#if status.ahead > 0}<span class="ab up"><span aria-hidden="true">↑{status.ahead}</span><span class="sr-only">{status.ahead} ahead</span></span>{/if}
-  {#if status.behind > 0}<span class="ab down"><span aria-hidden="true">↓{status.behind}</span><span class="sr-only">{status.behind} behind</span></span>{/if}
-</span>
+{#snippet label(text: string, count?: string | number | null, hide = false)}
+  <!-- Icon-only: the word stays the accessible name (visually hidden). -->
+  <span class="vlbl" class:sr-only={hide}>{text}</span>{#if count}<span class="vcount">{count}</span>{/if}
+{/snippet}
+{#snippet glyph(v: string, icon: 'fetch' | 'arrowDown' | 'arrowUp' | 'stash' | 'archive')}
+  {#if busy === v}<span class="spinner" style="--spinner-size: 12px" aria-hidden="true"></span>{:else}<Icon name={icon} size={variant === 'row' ? 16 : 12} />{/if}
+{/snippet}
 
-<span class="divider"></span>
+{#snippet verbs()}
+  {#if variant !== 'sync'}
+    <button
+      bind:this={fetchEl}
+      class="btn small ghost tbtn"
+      class:icon-only={iconOnly('fetch')}
+      data-keep
+      disabled={busy !== '' || noRemote}
+      onclick={doFetch}
+      title={noRemote ? NO_REMOTE : 'Fetch from remote'}
+    >{@render glyph('fetch', 'fetch')}{@render label(busy === 'fetch' ? 'Fetching…' : 'Fetch', null, iconOnly('fetch'))}</button>
+  {/if}
 
-<!-- Fetch -->
-<button class="btn small ghost tbtn" data-overflow="3" data-icon="fetch" data-label="Fetch" disabled={busy !== '' || noRemote} onclick={doFetch} title={noRemote ? NO_REMOTE : 'Fetch from remote'}>
-  <Icon name="fetch" size={12} />
-  {busy === 'fetch' ? 'Fetching…' : 'Fetch'}
-</button>
+  <!-- Pull: the repo's configured mode; the caret picks another one once. -->
+  <span class="split" data-keep>
+    <button
+      class="btn small ghost tbtn"
+      class:icon-only={iconOnly('pull')}
+      disabled={busy !== '' || !!syncWhy}
+      onclick={() => void doPull()}
+      title={syncWhy ?? (status.behind > 0 ? `Pull ${plural(status.behind, 'commit')} from ${status.upstream}` : 'Pull from upstream using the repo’s configured mode')}
+    >{@render glyph('pull', 'arrowDown')}{@render label(busy === 'pull' ? 'Pulling…' : 'Pull', status.behind > 0 ? `↓${status.behind}` : null, iconOnly('pull'))}</button>
+    {#if header}
+      <button
+        class="btn small ghost tbtn caret"
+        disabled={busy !== '' || !!syncWhy}
+        aria-haspopup="menu"
+        onclick={pullMenu}
+        title={syncWhy ?? 'Pull with a different mode'}
+        aria-label="Pull options"
+      ><Icon name="chevronDown" size={12} /></button>
+    {/if}
+  </span>
 
-<!-- Pull (split button: the repo's configured mode, ▾ overrides it once) -->
-<span class="split">
+  {#if push}
   <button
-    class="btn small ghost tbtn"
-    data-icon="arrowDown"
-    data-label={pullLabel}
-    disabled={busy !== '' || detached || noRemote}
-    onclick={() => void doPull()}
-    title={detached
-      ? 'HEAD is detached — check out a branch to pull'
-      : noRemote
-      ? NO_REMOTE
-      : "Pull from upstream using the repo’s configured mode"}
-  >
-    <Icon name="arrowDown" size={12} />
-    {busy === 'pull' ? 'Pulling…' : pullLabel}
-  </button>
-  <button
-    class="btn small ghost tbtn caret"
-    data-icon="chevronDown"
-    data-label="Pull options…"
-    disabled={busy !== '' || noRemote || detached}
-    aria-haspopup="menu"
-    onclick={pullMenu}
-    title={noRemote ? NO_REMOTE : 'Pull with a different mode'}
-    aria-label="Pull options"
-  ><Icon name="chevronDown" size={12} /></button>
-</span>
+    class="btn small tbtn"
+    class:ghost={!pushPrimary}
+    class:primary={pushPrimary}
+    class:icon-only={iconOnly('push')}
+    data-keep
+    disabled={busy !== '' || nothingToPush || !!syncWhy}
+    onclick={() => void doPush()}
+    title={syncWhy ??
+      (status.upstream
+        ? status.ahead > 0
+          ? `Push ${plural(status.ahead, 'commit')} to ${status.upstream}`
+          : `Nothing to push — ${status.branch} has no commits that ${status.upstream} doesn’t`
+        : `Publish ${status.branch} to origin`)}
+  >{@render glyph('push', 'arrowUp')}{@render label(busy === 'push' ? (status.upstream ? 'Pushing…' : 'Publishing…') : status.upstream ? 'Push' : 'Publish', status.ahead > 0 && status.upstream ? `↑${status.ahead}` : null, iconOnly('push'))}</button>
+  {/if}
 
-<!-- Push -->
-<button
-  class="btn small tbtn"
-  class:ghost={!pushPrimary}
-  class:primary={pushPrimary}
-  data-overflow="4"
-  data-icon="arrowUp"
-  data-label={status.upstream ? 'Push' : 'Publish'}
-  disabled={busy !== '' || nothingToPush || detached || noRemote}
-  onclick={() => void doPush()}
-  title={detached
-    ? 'HEAD is detached — check out a branch to push'
-    : noRemote
-    ? NO_REMOTE
-    : status.upstream
-    ? status.ahead > 0
-      ? `Push ${plural(status.ahead, 'commit')} to ${status.upstream}`
-      : `Nothing to push — ${status.branch} has no commits that ${status.upstream} doesn’t`
-    : `Publish ${status.branch} to origin`}
->
-  <Icon name="arrowUp" size={12} />
-  {busy === 'push' ? 'Pushing…' : status.upstream ? 'Push' : 'Publish'}
-</button>
+  {#if variant !== 'sync'}
+    <button
+      class="btn small ghost tbtn"
+      class:icon-only={iconOnly('stash')}
+      data-keep
+      disabled={busy !== '' || clean}
+      onclick={() => void stashOp('save')}
+      title={clean ? 'Nothing to stash — the working tree is clean' : 'Stash working changes (including untracked files)'}
+    >{@render glyph('stash', 'stash')}{@render label(busy === 'stash' ? 'Stashing…' : 'Stash', null, iconOnly('stash'))}</button>
 
-<span class="divider"></span>
-
-<!-- Branch (create) -->
-<button class="btn small ghost tbtn" data-overflow="-2" data-icon="plus" data-label="New branch" disabled={busy !== ''} onclick={() => void doCreateBranch()} title="Create a new branch from {status.branch} and switch to it">
-  <Icon name="plus" size={12} />
-  {busy === 'branch' ? 'Creating…' : 'Branch'}
-</button>
-
-<span class="divider"></span>
-
-<!-- Stash -->
-<button
-  class="btn small ghost tbtn"
-  data-overflow="-3"
-  data-icon="stash"
-  data-label="Stash"
-  disabled={busy !== '' || status.changes.length === 0}
-  onclick={doStash}
-  title={status.changes.length === 0 ? 'Nothing to stash — the working tree is clean' : 'Stash working changes (including untracked files)'}
->
-  <Icon name="stash" size={12} />
-  {busy === 'stash' ? 'Stashing…' : 'Stash'}
-</button>
-
-<!-- Stashes: opens the browser (what each stash holds; Apply / Pop / Drop)
-     instead of a blind pop of whatever is on top. -->
-<button
-  class="btn small ghost tbtn"
-  data-overflow="-4"
-  data-icon="archive"
-  data-label="Stashes"
-  disabled={busy !== '' || nothingToPop}
-  onclick={browseStashes}
-  title={nothingToPop ? 'There are no stashes' : 'See what each stash holds, then apply, pop or drop it'}
->
-  <Icon name="archive" size={12} />
-  {busy === 'pop' ? 'Popping…' : stashCount ? `Stashes (${stashCount})` : 'Stashes'}
-</button>
+    <!-- Pop: the newest stash; the caret lists every stash (pop / apply / drop). -->
+    <span class="split" data-keep>
+      <button
+        class="btn small ghost tbtn"
+        class:icon-only={iconOnly('pop')}
+        disabled={busy !== '' || nothingToPop}
+        onclick={() => void stashOp('pop')}
+        title={nothingToPop ? 'There are no stashes' : 'Apply the newest stash and drop it'}
+      >{@render glyph('pop', 'archive')}{@render label(busy === 'pop' ? 'Popping…' : 'Pop', stashCount && stashCount > 1 ? stashCount : null, iconOnly('pop'))}</button>
+      {#if header}
+        <button
+          class="btn small ghost tbtn caret"
+          disabled={busy !== '' || nothingToPop}
+          aria-haspopup="menu"
+          onclick={stashMenu}
+          title={nothingToPop ? 'There are no stashes' : 'Pop, apply or drop a stash'}
+          aria-label="Stashes"
+        ><Icon name="chevronDown" size={12} /></button>
+      {/if}
+    </span>
+  {/if}
 {/snippet}
 
 {#if stashesOpen}
@@ -442,35 +487,33 @@
       onchanged: (st: RepoStatusResp) => {
         onstatus(st);
         onrefresh?.();
+        void loadStashes().catch(() => {});
       },
     }}
   />
 {/if}
 
-{#if inHeader}
-  <!-- The repo's state in words (its tab names the repo and branch), then the
-       one visible verb (Fetch); the rest is in the header's ⋯ (menuItems). -->
-  <span class="git-state" data-keep title="{status.branch}{status.upstream ? ` · tracks ${status.upstream}` : ''}" data-testid="git-state">
+{#if header}
+  <!-- The repo's state in words (its tab names the repo and branch), the view
+       switch, then the verbs; the rare ones are in the header's ⋯ (menuItems). -->
+  <span class="git-state" class:squeezed={iconOnly('state')} data-keep title="{status.branch}{status.upstream ? ` · tracks ${status.upstream}` : ''}" data-testid="git-state">
     <span class="git-state-words">{words}</span>
   </span>
   <!-- Auto-fetch lives in ⋯; paused is a lasting choice, so it says so here. -->
   {#if !git.autoFetchEnabled}
-    <button class="btn small ghost git-autofetch-paused" data-keep data-testid="git-autofetch-paused" onclick={() => git.setAutoFetch(true)}
+    <button class="btn small ghost git-autofetch-paused" class:squeezed={iconOnly('state')} data-keep data-testid="git-autofetch-paused" onclick={() => git.setAutoFetch(true)}
       title="Auto-fetch is paused — a repo is still fetched once when you open it. Click to resume.">Auto-fetch paused</button>
   {/if}
-  {@render children?.()}
-  <button class="btn small ghost tbtn" data-keep data-icon="fetch" data-label="Fetch" disabled={busy !== '' || noRemote} onclick={doFetch} title={noRemote ? NO_REMOTE : 'Fetch from remote'}>
-    <Icon name="fetch" size={12} />
-    {busy === 'fetch' ? 'Fetching…' : 'Fetch'}
-  </button>
+  {@render children?.(iconOnly('viewmenu') ? 'menu' : iconOnly('views') ? 'icons' : 'words')}
+  {#if showVerbs}{@render verbs()}{/if}
 {:else}
-  <div class="toolbar">
-    {@render items()}
+  <div class="verbs" class:phone-row={variant === 'row'} class:sync={variant === 'sync'} role="group" aria-label="Git" data-testid={variant === 'row' ? 'git-verbs-row' : 'git-verbs-sync'}>
+    {@render verbs()}
   </div>
 {/if}
 
 <style>
-  /* Header: "feat/x · 3 files changed · ↑2 not pushed" — shrinks first (ellipsis). */
+  /* Header: "↑2 not pushed · ↓1 to pull". */
   .git-state {
     display: inline-flex;
     align-items: baseline;
@@ -486,72 +529,34 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .squeezed {
+    display: none;
+  }
   .git-autofetch-paused {
     flex: none;
     color: var(--warning);
     white-space: nowrap;
   }
-  /* A phone's one header row is the repo switcher, Fetch and ⋯ (the Changes
-     count rides the view switch under it). */
   @media (max-width: 640px) {
     .git-state {
       display: none;
     }
   }
-  .toolbar {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    flex-wrap: nowrap;
-  }
-  /* Shrinks (never below its icon + counts) so a long branch name ellipsizes
-     instead of shoving Fetch…Pop out of the row; the full name is the title. */
-  .branch-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    min-width: 0;
-    max-width: 200px;
-    background: var(--accent-soft);
-    color: var(--accent-text);
-    border-radius: var(--radius-s);
-    padding: 2px 8px;
-    font-size: var(--fs-s);
-    font-weight: 500;
-    flex-shrink: 1;
-  }
-  .branch-chip > :global(svg),
-  .branch-chip .ab {
-    flex-shrink: 0;
-  }
-  .branch-name {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .ab {
-    display: inline-flex;
-    align-items: center;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-  }
-  .ab.up { color: var(--accent-text); }
-  .ab.down { color: var(--warning); }
-  .divider {
-    display: inline-block;
-    width: 1px;
-    height: 16px;
-    background: var(--border);
-    margin: 0 4px;
-    flex-shrink: 0;
-  }
-  /* Toolbar buttons are global .btn.ghost; only the quieter label tone and
-     the tighter toolbar padding are local. */
+  /* Quiet verbs: the global .btn.ghost with a dimmer label until hovered,
+     on the tighter toolbar padding (the header row holds five of them). */
   .tbtn {
-    padding: 0 8px;
     color: var(--text-dim);
-    font-size: var(--fs-s);
+  }
+  :global(.ph-actions) .tbtn {
+    padding-inline: 8px;
+    gap: 4px;
+  }
+  /* The last fit step (the views one menu button): the verbs pack tighter. */
+  :global(.ph-actions:has(.git-views-menu)) .tbtn.icon-only {
+    padding-inline: 4px;
+  }
+  :global(.ph-actions:has(.git-views-menu)) .tbtn.caret {
+    padding-inline: 2px;
   }
   .tbtn:hover:not(:disabled) {
     color: var(--text);
@@ -560,44 +565,72 @@
   .tbtn.primary:hover:not(:disabled) {
     color: var(--accent-contrast);
   }
-  /* Pull split button: one visual unit — the halves share a square seam with a
-     hairline between them, and hovering either half outlines both. */
+  .vcount {
+    font-size: var(--fs-s);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  /* Pull / Pop split buttons: one unit — the halves share a square seam. */
   .split {
     display: inline-flex;
     align-items: center;
+    flex: none;
   }
-  .split .tbtn:first-child {
-    padding-inline-end: 6px;
+  .split .tbtn:first-child:not(:only-child) {
+    padding-inline-end: 8px;
     border-start-end-radius: 0;
     border-end-end-radius: 0;
   }
-  .split .caret {
+  .split .tbtn.caret {
     padding: 0 4px;
     border-start-start-radius: 0;
     border-end-start-radius: 0;
-    border-inline-start-color: color-mix(in srgb, var(--border) 70%, transparent);
   }
   .split:hover .tbtn:not(:disabled) {
     border-color: var(--border);
   }
-
-  /* ── Mobile + tablet (≤1024px): the toolbar already scrolls horizontally
-     inside RepoView's header, so just give the buttons comfortable touch
-     heights. ── */
-  @media (max-width: 1024px) {
-    /* The toolbar scrolls here, so the chip needn't shrink — shrinking only
-       collapsed it to a bare icon on a phone. */
-    .branch-chip {
-      flex-shrink: 0;
-      max-width: 160px;
-    }
-    .tbtn {
-      height: 36px;
-      padding: 0 10px;
-      font-size: var(--fs-m);
-    }
+  .verbs {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  /* Phone: a second row of finger-sized verbs under the header — icon over a
+     short label, each an equal share of the width. */
+  .verbs.phone-row {
+    flex-shrink: 0;
+    gap: 6px;
+    padding-block: 4px 6px;
+    padding-inline: 10px;
+    border-block-end: 1px solid var(--separator);
+  }
+  .verbs.phone-row > .split {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+  .verbs.phone-row .tbtn {
+    position: relative;
+    flex: 1 1 0;
+    min-width: 44px;
+    min-height: 44px;
+    height: auto;
+    padding: 2px 4px;
+    flex-direction: column;
+    gap: 2px;
+    font-size: var(--fs-s);
+  }
+  .verbs.phone-row .vcount {
+    position: absolute;
+    inset-block-start: 2px;
+    inset-inline-start: calc(50% + 8px);
+    padding: 0 4px;
+    border-radius: 999px;
+    background: var(--accent-soft-strong);
+    color: var(--accent-text);
+    font-size: var(--fs-xs);
   }
   @media (pointer: coarse) {
-    .tbtn { min-block-size: 44px; } /* finger-sized (the header sets its height) */
+    .verbs.sync .tbtn {
+      min-block-size: 44px;
+    }
   }
 </style>

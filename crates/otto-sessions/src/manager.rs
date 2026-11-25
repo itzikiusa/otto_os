@@ -1888,6 +1888,15 @@ impl SessionManager {
         // Package managers / build tools cache into a private per-session dir
         // (under temp, which is writable): the user's shared caches hold code
         // unsandboxed programs run later, so they are not writable roots.
+        // Every session's MCP launcher files (tokens, Keychain-resolved env)
+        // live in `<tmp>/otto-mcp`, which `for_agent` closes: this one reads
+        // only its own there, and its cwd's launcher env files unless it is
+        // read-only (untrusted input never gets the user's server secrets).
+        let mut own = vec![format!("{}.", session.id)];
+        if !forced {
+            own.push(crate::mcp::launcher_env_prefix(&session.cwd));
+        }
+        policy = policy.private_dir(&std::env::temp_dir().join("otto-mcp"), &own);
         let cache = agent_cache_dir(&session.id);
         otto_sandbox::seed_agent_cache(&cache, &home, |k| std::env::var(k).ok());
         spec.env.extend(otto_sandbox::agent_cache_env(&cache));
@@ -5962,6 +5971,7 @@ async fn revoke_session_credentials(
 ) -> Result<()> {
     let _ = std::fs::remove_file(codex_creds_path(session_id));
     let _ = std::fs::remove_file(pi_mcp_extension_path(session_id));
+    let _ = std::fs::remove_file(runtime_spawn::claude_mcp_config_path(session_id));
     remove_codex_server_env_files(session_id).await;
     if let Some(auth) = auth {
         auth.revoke_session_tokens(owner, session_id).await?;

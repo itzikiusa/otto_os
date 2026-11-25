@@ -8,7 +8,7 @@
   import type { Snippet } from 'svelte';
   import type { CommitConfig } from '../../../lib/api/types';
   import Icon from '../../../lib/components/Icon.svelte';
-  import LazyTerminal from '../../../lib/components/LazyTerminal.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
   import { ctxMenu } from '../../../lib/contextmenu.svelte';
 
   interface Props {
@@ -16,14 +16,16 @@
     body: string;
     amend: boolean;
     signOn: boolean;
-    showDraftTerm: boolean;
     amendSubject: string;
     amendPublished: string | null;
     drafting: boolean;
     draftElapsed: number;
     draftable: boolean;
     draftedAt: number | null;
-    liveDraftId: string | null;
+    /** The draft so far, while it streams (shown under fields that held text). */
+    draftPreview: string;
+    /** Why the last draft failed — one line, with Retry. */
+    draftError: string | null;
     committing: boolean;
     canCommit: boolean;
     commitHint: string;
@@ -43,8 +45,8 @@
     onoptions?: () => Promise<void> | void;
   }
   let {
-    subject = $bindable(), body = $bindable(), amend = $bindable(), signOn = $bindable(), showDraftTerm = $bindable(),
-    amendSubject, amendPublished, drafting, draftElapsed, draftable, draftedAt, liveDraftId, committing, canCommit,
+    subject = $bindable(), body = $bindable(), amend = $bindable(), signOn = $bindable(),
+    amendSubject, amendPublished, drafting, draftElapsed, draftable, draftedAt, draftPreview, draftError, committing, canCommit,
     commitHint, stagedCount, totalCount, pushTo, signCfg, signError, onkey, ondraft, onstopdraft, oncommit, onoptions,
   }: Props = $props();
 
@@ -76,7 +78,6 @@
         title: draftable ? undefined : 'Include a file first — drafting can’t see new files',
         action: ondraft,
       },
-      ...(liveDraftId ? [{ label: showDraftTerm ? 'Hide the drafting agent' : 'Watch the drafting agent', icon: 'terminal', action: () => (showDraftTerm = !showDraftTerm) }] : []),
     ], { align: 'end' });
   }
 </script>
@@ -106,7 +107,7 @@
       <p class="wc-sub">
         {#if drafting}
           <span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span>
-          <span>Drafting from the diff{draftElapsed > 0 ? ` · ${draftElapsed}s` : ''}</span>
+          <span data-testid="commit-card-drafting">Drafting…{draftElapsed > 0 ? ` · ${draftElapsed}s` : ''}</span>
           {#if onstopdraft}<button type="button" class="wc-link" onclick={onstopdraft}>Stop</button>{/if}
           <span aria-hidden="true">·</span>
         {:else if draftedAt && (subject.trim() || body.trim())}
@@ -116,10 +117,13 @@
         {#if pushTo}<span>· pushes to <span class="mono" dir="ltr">{pushTo}</span></span>{/if}
         {#if amend}<span class="chip wc-chip">Amend</span>{/if}
         {#if signOn}<span class="chip wc-chip">Signed</span>{/if}
-        {#if !drafting && !subject.trim() && !body.trim() && draftable}
+        {#if !drafting && !draftError && !subject.trim() && !body.trim() && draftable}
           <button type="button" class="wc-link draft-btn" onclick={ondraft} disabled={committing}><Icon name="sparkle" size={12} /> Draft from the diff</button>
         {/if}
       </p>
+      {#if draftError && !drafting}
+        <LoadState variant="compact" what="the message" errorTitle="Couldn’t draft the message" error={draftError} empty onretry={ondraft} />
+      {/if}
       <!-- The description belongs to the message: under it, before the actions. -->
       <textarea dir="auto"
         class="input body-input"
@@ -156,10 +160,8 @@
       </button>
     </div>
   </div>
-  {#if liveDraftId && showDraftTerm}
-    <div class="draft-term">
-      <LazyTerminal sessionId={liveDraftId} preferDom showToolbar={false} />
-    </div>
+  {#if drafting && draftPreview}
+    <p class="wc-preview" dir="auto" data-testid="commit-card-draft-preview">{draftPreview}</p>
   {/if}
   {#if amendPublished}
     <div class="amend-warn" role="note">
@@ -263,12 +265,11 @@
     min-height: 40px;
     resize: vertical;
   }
-  .draft-term {
-    height: 220px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    overflow: hidden;
-    background: var(--term-bg);
+  .wc-preview {
+    margin: 0;
+    white-space: pre-wrap;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
   }
   .amend-warn {
     display: flex;

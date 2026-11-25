@@ -144,9 +144,9 @@ function createPrFixture(reply: Record<string, unknown>) {
     title: '',
     description: '',
     drafting: false,
-    draftSessionId: null,
     draftElapsed: 0,
-    draftStartedAt: null,
+    draftCtl: null,
+    AbortController,
     draftedAt: null,
     alive: true,
     setInterval: () => 0,
@@ -204,45 +204,23 @@ test('Cancel mid-push is inert; mid-draft it asks before discarding', async () =
   assert.equal(closed, 0);
 });
 
-test('confirming "Stop drafting and discard?" stops the drafting session (S20-305)', async () => {
-  const posts: string[] = [];
+test('the draft request is abortable: closing the sheet mid-draft stops the agent (S20-305)', async () => {
+  // The headless agent dies with its request (kill_on_drop); the sheet's unmount aborts it.
+  const f = createPrFixture({ title: 'T', description: 'D', source_branch: 'feature-x' });
+  let signal: AbortSignal | undefined;
+  f.state.api = { post: async (_u: string, _b: unknown, sig: AbortSignal) => ((signal = sig), { title: 'T', description: 'D', source_branch: 'feature-x' }) };
+  const s = componentFunctions(git('CreatePr.svelte'), ['draftWithAgent'], f.state);
+  await s.draftWithAgent();
+  assert.ok(signal && !signal.aborted);
+  s.draftCtl.abort();
+  assert.equal(signal!.aborted, true);
+  // Confirming the discard closes the sheet (Keep editing does not).
   let closed = 0;
-  const base = {
-    busy: false,
-    drafting: true,
-    title: '',
-    description: '',
-    reviewers: [],
-    revQuery: '',
-    liveDraftId: 'sess-draft',
-    onclose: () => closed++,
-    api: { post: async (url: string) => (posts.push(url), {}) },
-  };
-  // Keep editing: nothing is stopped, nothing closes.
-  const keep = componentFunctions(git('CreatePr.svelte'), ['requestClose', 'stopDraftSession'], {
-    ...base,
-    confirmer: { ask: async () => false },
-  });
-  await keep.requestClose();
-  assert.deepEqual(posts, []);
+  const base = { busy: false, drafting: true, title: '', description: '', reviewers: [], revQuery: '', onclose: () => closed++ };
+  await componentFunctions(git('CreatePr.svelte'), ['requestClose'], { ...base, confirmer: { ask: async () => false } }).requestClose();
   assert.equal(closed, 0);
-  // Discard: the agent's PTY is killed (row kept) and the sheet closes.
-  const s = componentFunctions(git('CreatePr.svelte'), ['requestClose', 'stopDraftSession'], {
-    ...base,
-    confirmer: { ask: async () => true },
-  });
-  await s.requestClose();
-  await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual(posts, ['/sessions/sess-draft/kill']);
+  await componentFunctions(git('CreatePr.svelte'), ['requestClose'], { ...base, confirmer: { ask: async () => true } }).requestClose();
   assert.equal(closed, 1);
-  // A failed stop (already exited) still closes and never throws.
-  const failing = componentFunctions(git('CreatePr.svelte'), ['requestClose', 'stopDraftSession'], {
-    ...base,
-    api: { post: async () => { throw new Error('gone'); } },
-    confirmer: { ask: async () => true },
-  });
-  await failing.requestClose();
-  assert.equal(closed, 2);
 });
 
 // ── S15-06 / S15-07 · review comments post exactly what was shown, once ─────
@@ -312,13 +290,16 @@ test('a commit draft landing after unmount opens no confirm and writes nothing',
   let asked = 0;
   const s = componentFunctions(git('WipPanel.svelte'), ['followDraft', 'applyDraft'], {
     alive: true,
+    liveDraftText: () => '',
     repoId: 'r1',
     subject: 'typed',
     body: '',
     drafting: false,
-    draftSessionId: null,
     draftElapsed: 0,
-    draftStartedAt: null,
+    draftPreview: '',
+    draftError: null,
+    previewShown: false,
+    streamed: null,
     draftedAt: null,
     Date,
     setInterval: () => 0,
@@ -333,6 +314,46 @@ test('a commit draft landing after unmount opens no confirm and writes nothing',
   await run;
   assert.equal(asked, 0);
   assert.equal(s.subject, 'typed');
+});
+
+// 0.5.1: the draft streams into EMPTY fields (subject first, then body); an
+// edit mid-stream stops it overwriting and the rest shows as a preview; Stop
+// keeps what arrived, with no "replace?" confirm over the agent's own text.
+test('a streamed commit draft fills empty fields, yields to an edit, and Stop keeps it', async () => {
+  let asked = 0;
+  const s = componentFunctions(git('WipPanel.svelte'), ['showStreamed', 'split', 'stopDraft', 'applyDraft'], {
+    alive: true,
+    repoId: 'r1',
+    subject: '',
+    body: '',
+    drafting: true,
+    draftGen: 0,
+    draftTick: null,
+    draftPreview: '',
+    previewShown: false,
+    streamed: { s: '', b: '' },
+    draftedAt: null,
+    quietDraft: false,
+    cancelDraft() {},
+    clearInterval() {},
+    confirmer: { ask: async () => (asked++, true) },
+    toasts: { info() {} },
+  });
+  s.showStreamed('feat(app): greet');
+  assert.equal(s.subject, 'feat(app): greet');
+  s.showStreamed('feat(app): greet the world\n\n- say');
+  assert.deepEqual([s.subject, s.body], ['feat(app): greet the world', '- say']);
+  s.stopDraft();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(asked, 0, 'the agent’s own streamed text is not "typed" text');
+  assert.deepEqual([s.subject, s.body, s.drafting], ['feat(app): greet the world', '- say', false]);
+  assert.ok(s.draftedAt, 'the byline says it was drafted');
+  // An edit mid-stream: the fields stay the person's, the rest is a preview.
+  s.streamed = { s: s.subject, b: s.body };
+  s.subject = 'mine';
+  s.showStreamed('feat(app): other');
+  assert.equal(s.subject, 'mine');
+  assert.equal(s.previewShown, true);
 });
 
 // ── S15-09 · local review: only timer polls spend the budget ─────────────────

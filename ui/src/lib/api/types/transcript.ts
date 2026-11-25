@@ -21,6 +21,9 @@ export type TranscriptUnavailableReason =
   | 'provider_unsupported'
   | 'codex_rollout_unresolved';
 
+/** A long transcript (> 8 MiB) is read as a window of its newest records:
+ *  then `cost_usd`, `input_tokens`, `output_tokens` and `duration_ms` are
+ *  `null` (a window's sums are not the conversation's) — see api.md. */
 export interface TranscriptStats {
   turns: number;
   tool_calls: number;
@@ -56,8 +59,9 @@ export interface Transcript {
   model: string | null;
   /** Opaque `"<record_index>"` of the FIRST record of the OLDEST returned turn —
    *  pass it back as `before` (exclusive) to page earlier. Records are
-   *  append-only so the index is stable; the live tail uses the WS delta's
-   *  `cursor` (index of the LAST folded record). */
+   *  append-only so the index is stable (and absolute in a long transcript's
+   *  window too); the live tail uses the WS delta's `cursor` (index of the
+   *  LAST folded record). */
   cursor: string;
   /** True when `before` can page further back ("Load earlier"). */
   has_earlier: boolean;

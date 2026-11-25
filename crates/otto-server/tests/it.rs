@@ -98,6 +98,8 @@ mod share_scope_guard;
 mod simulators_api;
 #[path = "slack_as_me.rs"]
 mod slack_as_me;
+#[path = "transcript_long_session.rs"]
+mod transcript_long_session;
 #[path = "ui_control.rs"]
 mod ui_control;
 #[path = "workflow_run_files.rs"]
@@ -127,5 +129,7 @@ fn every_integration_test_file_is_linked() {
     );
 }
 
+#[path = "draft_headless.rs"]
+mod draft_headless;
 #[path = "goal_graph_routes.rs"]
 mod goal_graph_routes;

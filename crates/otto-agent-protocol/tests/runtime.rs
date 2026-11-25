@@ -4803,6 +4803,39 @@ async fn idle_agent_processes_are_released_and_the_next_prompt_resumes() {
     rt.close(&child.id).await.unwrap();
 }
 
+/// Review R1-040: a thread closed again while reopen_fast's background
+/// watch waits for the agent stays closed; it is not turned into an error.
+#[tokio::test]
+async fn closing_right_after_reopen_fast_leaves_no_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create(&rt, cwd).await;
+    host.wait(is_ready).await;
+    rt.prompt(&s.id, "hello").await.unwrap();
+    host.wait(is_terminal).await;
+    assert!(rt.get(&s.id).await.unwrap().native_thread_id.is_some());
+    rt.close(&s.id).await.unwrap();
+    let seen = host.all().len();
+    rt.reopen_fast(&s.id).await.unwrap();
+    rt.close(&s.id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let errors = host.all()[seen..]
+        .iter()
+        .filter(|e| {
+            matches!(&e.body, RuntimeEventBody::ProviderSessionUpdated { provider_session }
+            if provider_session.status == ProviderSessionStatus::Error)
+        })
+        .count();
+    assert_eq!(errors, 0, "{:#?}", &host.all()[seen..]);
+    assert_eq!(
+        rt.get(&s.id).await.unwrap().status,
+        RuntimeSessionStatus::Closed
+    );
+}
+
 /// A revive is activity: the idle release (every 60 s) must not stop a
 /// thread just reopened because its last message is old.
 #[tokio::test]
@@ -5649,6 +5682,19 @@ async fn client_terminals_die_with_the_thread_and_wait_ignores_background_pipes(
     rt.prompt(&s.id, &ticker("close.txt")).await.unwrap();
     host.wait(is_terminal).await;
     assert!(alive("close.txt").await, "the command runs");
+    // Review R2-015: another runtime's shutdown (a test beside this one)
+    // leaves this runtime's terminals alone.
+    let other = AgentRuntime::new(
+        AgentRuntimeRepo::new(pool().await),
+        Arc::clone(&host) as Arc<dyn RuntimeHost>,
+        Arc::new(|_: RuntimeProvider| -> Option<Box<dyn StructuredDriver>> { None }),
+        RuntimeConfig::default(),
+    );
+    other.shutdown().await;
+    assert!(
+        alive("close.txt").await,
+        "another runtime's shutdown killed it"
+    );
     rt.close(&s.id).await.unwrap();
     assert!(!alive("close.txt").await, "closing the thread killed it");
 
@@ -5670,6 +5716,77 @@ async fn client_terminals_die_with_the_thread_and_wait_ignores_background_pipes(
     assert!(t0.elapsed() < Duration::from_secs(10), "{:?}", t0.elapsed());
     assert_eq!(last_assistant_text(&host), "term: bg-started");
     rt.close(&s3.id).await.unwrap();
+}
+
+/// Review R1-037: a terminal the person allowed is still starting when the
+/// thread closes; the close must not leave its command running.
+#[tokio::test]
+async fn a_terminal_starting_while_the_thread_closes_is_killed() {
+    use otto_agent_protocol::acp::AcpFlavor;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap().display().to_string();
+    let host = TestHost::new(&root, false);
+    let drivers: Arc<dyn DriverFactory> =
+        Arc::new(|p: RuntimeProvider| -> Option<Box<dyn StructuredDriver>> {
+            Some(Box::new(AcpDriver::with_flavor(
+                p,
+                AcpFlavor {
+                    program: fake_bin!("otto-fake-agent"),
+                    client_terminal: true,
+                    ..AcpFlavor::default()
+                },
+            )))
+        });
+    let rt = AgentRuntime::new(
+        AgentRuntimeRepo::new(pool().await),
+        Arc::clone(&host) as Arc<dyn RuntimeHost>,
+        drivers,
+        RuntimeConfig {
+            attachments_dir: dir.path().join("a"),
+            ..RuntimeConfig::default()
+        },
+    );
+    let s = rt
+        .create(
+            &"u1".into(),
+            &"w1".into(),
+            CreateRuntimeSessionReq {
+                provider: Some(RuntimeProvider::Grok),
+                cwd: Some(root.clone()),
+                access_mode: Some(RuntimeAccessMode::ApprovalRequired),
+                ..CreateRuntimeSessionReq::default()
+            },
+        )
+        .await
+        .unwrap();
+    let tick = dir.path().join("tick.txt");
+    rt.prompt(
+        &s.id,
+        &format!(
+            "term-keep (while true; do echo x >> {}; sleep 0.1; done) & wait",
+            tick.display()
+        ),
+    )
+    .await
+    .unwrap();
+    let req = host
+        .wait(|e| {
+            matches!(&e.body, RuntimeEventBody::RuntimeRequestUpdated { runtime_request }
+            if runtime_request.status == RuntimeRequestStatus::Pending)
+        })
+        .await;
+    let RuntimeEventBody::RuntimeRequestUpdated { runtime_request } = req.body else {
+        unreachable!()
+    };
+    rt.respond(&s.id, &runtime_request.id, ApprovalDecision::Accept)
+        .await
+        .unwrap();
+    rt.close(&s.id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let a = std::fs::metadata(&tick).map(|m| m.len()).unwrap_or(0);
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let b = std::fs::metadata(&tick).map(|m| m.len()).unwrap_or(0);
+    assert_eq!(a, b, "the command outlived the closed thread");
 }
 
 /// Security 3: an elicitation (MCP server / ACP agent asking the person)

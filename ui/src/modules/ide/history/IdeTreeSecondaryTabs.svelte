@@ -35,6 +35,7 @@
       return 'accent';
     }
     if (k.includes('const') || k.includes('enum')) return 'ok';
+    if (k === 'section' || k === 'document') return 'accent';
     return 'neutral';
   }
 
@@ -49,6 +50,8 @@
     if (k.includes('field') || k.includes('prop') || k.includes('key') || k.includes('col')) return 'prop';
     if (k === 'target') return 'target';
     if (k === 'variable') return 'var';
+    if (k === 'section') return 'group';
+    if (k === 'document') return 'doc';
     return kind.slice(0, 5);
   }
 
@@ -74,7 +77,7 @@
       {:else}
         <LoadState what="file outline" variant="compact" loading={ide.symbolsLoading} empty={flatSymbols.length === 0}>
           {#snippet emptyView()}
-            <EmptyState headingLevel={2} icon="layers" title="No outline symbols" body="Symbols appear automatically for Go, TypeScript, Java, Rust, Python, Shell, Makefile, Markdown, JSON, and CSV files." />
+            <EmptyState headingLevel={2} icon="layers" title="No outline symbols" body="Symbols appear automatically for Go, TypeScript, Java, Rust, Python, Shell, Makefile, Markdown, JSON, YAML, TOML, .properties, INI and CSV files." />
           {/snippet}
           <div class="sec-list">
             {#each flatSymbols as item, idx (`${item.sym.name}:${item.sym.line}:${idx}`)}

@@ -15,9 +15,9 @@ use tokio::sync::oneshot;
 
 use super::held_proc::{build_checkpoint, finalize_child_exit, pump_held, sync_holder_checkpoint};
 use super::{
-    descendants, dispatch_child_stdout, emit, evict_if_dead_after_flush, flush_held, has_pending,
-    record_claude_stdout_line, set_session_status, ActiveTurn, AgentRuntime, Live, PersistOp, Proc,
-    ProcTransport, RequestIds,
+    apply_step, descendants, dispatch_child_stdout, emit, evict_if_dead_after_flush, flush_held,
+    has_pending, record_claude_stdout_line, set_session_status, ActiveTurn, AgentRuntime, Live,
+    PersistOp, Proc, ProcTransport, RequestIds,
 };
 use crate::holder::{adopt_socket, best_effort_shutdown_socket, list_holder_sockets, LineStream};
 use crate::process::ChildControl;
@@ -33,9 +33,6 @@ impl AgentRuntime {
             self.shutdown().await;
             return;
         }
-        // Client terminals are the daemon's own children: nothing reaches
-        // them after this (the agents' pending calls are refused on adopt).
-        super::client_calls::drop_all();
         let lives: Vec<Arc<Live>> = self
             .inner
             .live
@@ -53,6 +50,9 @@ impl AgentRuntime {
                 if taken.is_some() {
                     live.proc_ended.notify_waiters();
                 }
+                // Client terminals are the daemon's own children: nothing
+                // reaches them after this (pending calls are refused on adopt).
+                super::client_calls::drop_session(&st.session.id);
                 taken
             };
             if let Some((proc, cp)) = taken {
@@ -321,6 +321,10 @@ impl AgentRuntime {
                 }
                 (epoch, false, false)
             } else {
+                if let Some(proc) = st.proc.as_mut() {
+                    let step = proc.driver.after_adopt();
+                    apply_step(&self.inner, &live, &mut st, step);
+                }
                 sync_holder_checkpoint(&mut st, true);
                 let alive = st.proc.is_some();
                 let kick = alive && st.turn.is_none() && !st.proj.queue.is_empty();

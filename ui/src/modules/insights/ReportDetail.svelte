@@ -69,6 +69,8 @@
     markdown: string;
     /** The summary file could not be read: say so with Retry, not a blank preview. */
     summaryError?: string | null;
+    /** The summary read (Retry) is under way. */
+    summaryLoading?: boolean;
     onretrysummary?: () => void;
     kpis: Kpi[];
     /** Label of the report the deltas compare against ("Tue 22 Sep"), if any. */
@@ -80,7 +82,7 @@
     onexportmd: () => void;
     ondownloadhtml: () => void;
   }
-  let { report, parsed, markdown, summaryError = null, onretrysummary, kpis, compareLabel, ledger, mode, onmode, onopenwindow, onexportmd, ondownloadhtml }: Props =
+  let { report, parsed, markdown, summaryError = null, summaryLoading = false, onretrysummary, kpis, compareLabel, ledger, mode, onmode, onopenwindow, onexportmd, ondownloadhtml }: Props =
     $props();
 
   const hasHtml = $derived(!!report.html_path);
@@ -252,13 +254,7 @@
       {#if report.created_at}
         <span class="dim r-created" title={new Date(report.created_at).toLocaleString()}>· generated {rel(report.created_at)}</span>
       {/if}
-    </div>
-    {#if parsed.headline}
-      <h2 class="r-headline">{parsed.headline}</h2>
-    {:else if parsed.title}
-      <h2 class="r-headline">{parsed.title}</h2>
-    {/if}
-    <div class="r-tools">
+      <span class="grow"></span>
       <div class="segmented" role="group" aria-label="Report view">
         <button aria-pressed={effectiveMode === 'preview'} class:active={effectiveMode === 'preview'} onclick={() => onmode('preview')}>Preview</button>
         <button aria-pressed={effectiveMode === 'markdown'} class:active={effectiveMode === 'markdown'} onclick={() => onmode('markdown')}>Markdown</button>
@@ -270,13 +266,17 @@
           onclick={() => onmode('html')}>HTML</button
         >
       </div>
-      <span class="grow"></span>
-      <button class="btn small ghost" onclick={onexportmd} title="Download the summary as a .md file"><Icon name="download" size={12} /> Export .md</button>
-      {#if hasHtml}
-        <button class="icon-btn" onclick={ondownloadhtml} aria-label="Download HTML report" title="Download HTML report"><Icon name="file" size={14} /></button>
-        <button class="icon-btn" onclick={onopenwindow} aria-label="Open in new window" title="Open in new window"><Icon name="external" size={14} /></button>
-      {/if}
+      <!-- Rare actions in ⋯: the view switch and the report share the meta row. -->
+      <button class="icon-btn" aria-haspopup="menu" aria-label="More report actions" title="More report actions" onclick={(e) => ctxMenu.showAt(e.currentTarget, [
+        { label: 'Export .md', icon: 'download', action: onexportmd },
+        ...(hasHtml ? [{ label: 'Download HTML report', icon: 'file' as const, action: ondownloadhtml }, { label: 'Open in new window', icon: 'external' as const, action: onopenwindow }] : []),
+      ], { align: 'end' })}><Icon name="more" size={14} /></button>
     </div>
+    {#if parsed.headline}
+      <h2 class="r-headline">{parsed.headline}</h2>
+    {:else if parsed.title}
+      <h2 class="r-headline">{parsed.title}</h2>
+    {/if}
   </header>
 
   {#if effectiveMode === 'html'}
@@ -309,7 +309,7 @@
   {:else}
     <div class="r-scroll">
       {#if summaryError}
-        <LoadState what="this report’s summary" variant="compact" error={summaryError} empty onretry={onretrysummary} />
+        <LoadState what="this report’s summary" variant="compact" error={summaryError} loading={summaryLoading} empty onretry={onretrysummary} />
       {/if}
       {#if kpis.length > 0}
         <section class="r-section" aria-labelledby="kf-title">
@@ -467,13 +467,6 @@
     line-height: 1.4;
     max-width: 90ch;
     color: var(--text);
-  }
-  .r-tools {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-wrap: wrap;
-    margin-top: 4px;
   }
   .segmented > button:disabled {
     opacity: var(--disabled-opacity);
@@ -749,13 +742,17 @@
   .r-html {
     flex: 1;
     min-height: 0;
+    padding: 8px;
     display: flex;
     flex-direction: column;
   }
   .r-frame {
     flex: 1;
     width: 100%;
-    border: none;
+    /* Framed as a page inside the app: in dark mode its white sheet reads as
+       the report's own paper, not as a page that failed to theme. */
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-m);
     /* User content preview: the report paints its own page. */
     background: var(--paper);
   }

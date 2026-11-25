@@ -320,7 +320,7 @@
       <span class="ref-count">{list.length}</span>
     </button>
     <button class="icon-btn ref-action" title="Delete several {section} branches…" aria-label="Delete several {section} branches"
-      disabled={list.length === 0 || checkoutBusy !== ''} onclick={() => actions.openBranchCleanup()}><Icon name="trash" size={13} /></button>
+      disabled={list.length === 0 || checkoutBusy !== ''} onclick={() => actions.openBranchCleanup([], section)}><Icon name="trash" size={13} /></button>
     </div>
     {#if open}
       {#if list.length === 0}

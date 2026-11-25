@@ -149,8 +149,6 @@ impl McpService {
         let url = server.url.clone().unwrap_or_default();
         let (auth_url, pending) = oauth::start(&url, manual).await.map_err(Error::Upstream)?;
         let host = pending.base.auth_host.clone();
-        // A new start replaces the pending one (its listener closes).
-        end_flow(&server.id);
         let (svc, id) = (self.clone(), server.id.clone());
         let task = tokio::spawn(async move {
             let done = oauth::finish(pending, now).await;
@@ -180,7 +178,9 @@ impl McpService {
             };
             set_status(&id, status);
         });
-        flows().insert(
+        // A new start replaces the pending one (its listener closes) in the
+        // same lock as the insert, so a concurrent start never leaks one.
+        let old = flows().insert(
             server.id.clone(),
             Flow {
                 status: OAuthStatus {
@@ -191,6 +191,9 @@ impl McpService {
                 task: Some(task.abort_handle()),
             },
         );
+        if let Some(old) = old.and_then(|f| f.task) {
+            old.abort();
+        }
         Ok((auth_url, host))
     }
 

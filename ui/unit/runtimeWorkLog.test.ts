@@ -137,12 +137,15 @@ test('tool-call visibility: hide successful keeps failures, gated and running ca
 test('a running stretch folds its finished steps before the live one; a failure stops the fold', () => {
   const part = (item: TurnItem) => ({ kind: 'item' as const, entry: { item } });
   const done = [cmd('a', 0, 1), cmd('b', 1, 2), cmd('c', 2, 3)].map(part);
-  assert.equal(wl.earlierSteps([...done, part(cmd('live', 3, null))], none), 3);
-  assert.equal(wl.earlierSteps(done, none), 0, 'nothing runs: the finished fold handles it');
-  assert.equal(wl.earlierSteps([done[0], part(cmd('live', 3, null))], none), 0, 'one earlier step stays as is');
+  assert.equal(wl.earlierSteps([...done, part(cmd('live', 3, null))], none, true), 3);
+  assert.equal(wl.earlierSteps(done, none, false), 0, 'the stretch is over: the finished fold handles it');
+  assert.equal(wl.earlierSteps(done, none, true), 2, 'a pause between steps (nothing live, turn running) keeps the fold');
+  assert.equal(wl.earlierSteps([done[0], part(cmd('live', 3, null))], none, true), 0, 'one earlier step stays as is');
   const bad = part(cmd('bad', 1, 2, { status: 'failed', error: 'Exit code 1' }));
-  assert.equal(wl.earlierSteps([done[0], done[1], bad, done[2], part(cmd('live', 3, null))], none), 2);
-  assert.equal(wl.earlierSteps([bad, done[0], done[1], part(cmd('live', 3, null))], none), 0);
+  assert.equal(wl.earlierSteps([done[0], done[1], bad, done[2], part(cmd('live', 3, null))], none, true), 2);
+  assert.equal(wl.earlierSteps([bad, done[0], done[1], part(cmd('live', 3, null))], none, true), 0);
+  const opened = (p: (typeof done)[number]) => p === done[2];
+  assert.equal(wl.earlierSteps([...done, part(cmd('live', 3, null))], none, true, opened as never), 2, 'a step the person opened stays in sight');
 });
 
 test('a short screen (or the keyboard up) folds every quiet notice; urgent ones still show', () => {
@@ -177,4 +180,30 @@ test('the thread’s next action (Revive / Reopen) is never folded behind "N mor
   // A live queue is a quiet notice; "Next message starts fresh" says what the next message does.
   assert.deepEqual(keys(splitBanners(buildRuntimeBanners(base))), [['fresh'], ['plan', 'queue']]);
   assert.deepEqual(keys(splitBanners(buildRuntimeBanners({ ...base, freshContext: false }))), [['plan'], ['queue']]);
+});
+
+test('incremental WS deltas keep a Thinking row under one id, so the person\u2019s open/closed choice (ROW_CHOICES) holds', async () => {
+  const { applyEvents, emptyProjection } = await import('../src/modules/threads/runtime/projection.ts');
+  const { timelineRows } = await import('../src/modules/threads/runtime/timeline.ts');
+  const think = (id: string, s: number, text: string, done: boolean): TurnItem =>
+    ({ id, turn_id: 't1', ordinal: s, status: done ? 'completed' : 'running', title: null, started_at: at(s), completed_at: done ? at(s + 1) : null, updated_at: at(s + 1), type: 'reasoning', text, streaming: !done }) as TurnItem;
+  const ev = (sequence: number, turn_item: TurnItem) => ({ session_id: 's', sequence, ts: at(sequence), type: 'turn_item.updated', turn_item }) as never;
+  const steps: TurnItem[] = [
+    think('r1', 0, 'plan', false), think('r1', 0, 'plan\nmore', false), think('r1', 0, 'plan\nmore\ndone', true),
+    cmd('c1', 2, 3), cmd('c2', 3, 4), think('r2', 4, 'next', false), think('r2', 4, 'next\nstep', false),
+  ];
+  let p = emptyProjection();
+  const kept = new Map<string, boolean>([['r1', true]]); // the person opened r1 while it streamed
+  const keptOpen = (part: { kind: string; entry?: { item: TurnItem } }) => part.kind === 'item' && kept.get(part.entry!.item.id) === true;
+  steps.forEach((item, i) => {
+    p = applyEvents(p, [ev(i + 1, item)]).projection;
+    const work = timelineRows(p.items, [turn('running')]).filter((r) => r.kind === 'work');
+    assert.equal(work.length, 1, `step ${i + 1}: one stretch`);
+    const parts = (work[0] as { parts: { kind: string; entry?: { item: TurnItem } }[] }).parts;
+    assert.equal(parts[0].entry?.item.id, 'r1', `step ${i + 1}: r1 keeps its key`);
+    assert.equal(wl.earlierSteps(parts as never, none, true, keptOpen as never), 0, `step ${i + 1}: an opened row is never folded away`);
+  });
+  assert.equal(p.items.find((x) => x.id === 'r1')?.type === 'reasoning' && (p.items.find((x) => x.id === 'r1') as { text: string }).text, 'plan\nmore\ndone');
+  const last = timelineRows(p.items, [turn('running')]).find((r) => r.kind === 'work');
+  assert.equal(wl.earlierSteps(last?.kind === 'work' ? last.parts : [], none, true), 3, 'untouched, the finished steps before the live one fold');
 });

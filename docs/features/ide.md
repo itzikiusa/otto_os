@@ -637,7 +637,7 @@ IDE and `⌘K` opens the app's command bar, so a `⌘K V` chord can't exist.
   `ui/src/modules/ide/editor/IdePreviewPane.svelte`,
   `IdePreviewModeToggle.svelte`, `idePreviewMode.svelte.ts`.
 
-### 13. Makefiles and writing Markdown
+### 13. Makefiles, config files and writing Markdown
 
 - **Makefiles** (`Makefile`, `makefile`, `GNUmakefile`, `Makefile.*`, `*.mk`,
   `*.make`, `*.mak`) get their own language, loaded with the file type:
@@ -656,6 +656,36 @@ IDE and `⌘K` opens the app's command bar, so a `⌘K V` chord can't exist.
   to its definition — in the file, else in a file it `include`s — and hovering
   one shows its defining line. All of it is read from the buffer: no language
   server and no request (`lib/components/makefileModel.ts`, `cm-lang-makefile.ts`).
+- **Config and infrastructure files** get their own language too, chosen by file
+  name first, then extension (`lib/components/langForPath.ts`), each loaded with
+  its file type: Java `.properties` (keys, `=` / `:` / space separators, `#` and
+  `!` comments, escapes, `\` continuations, `${placeholders}`, and a value that
+  is JSON highlighted as JSON — past column 300 a value is one colour, so 4 KB lines
+  scroll smoothly), YAML (anchors / aliases, tags, block scalars, documents),
+  TOML (tables, dotted keys, inline tables, multi-line strings, dates), INI /
+  `.cfg` / `.conf` / `.cnf` / systemd units / `.editorconfig` / `.npmrc` /
+  `hosts` / `~/.ssh/config`, `.env` and `.env.*`, ignore files (`.gitignore`,
+  `.dockerignore`, `.gitattributes`, `CODEOWNERS`), `requirements*.txt`,
+  `Dockerfile*` / `Containerfile` (RUN bodies as shell), nginx (`nginx.conf`,
+  `sites-available/`, `conf.d/`), `.proto`, Terraform / HCL (`.tf`, `.tfvars`,
+  `.hcl`), `.diff` / `.patch`, PowerShell, `.bat` / `.cmd`, and lock files that
+  are TOML (`Cargo.lock`, `poetry.lock`, `uv.lock`), YAML (`yarn.lock`) or JSON.
+  XML-family files (`.plist`, `.xsd`, `.csproj`…) use the HTML grammar,
+  `.groovy` / `Jenkinsfile` the Java one, Svelte / Vue the HTML one. A file with
+  no known name whose first lines read like `key = value`, `[section]` and
+  `# comments` (or YAML, JSON, a shebang) is sniffed and coloured as such.
+- **Structure** lists a `.properties` file's keys (dotted keys grouped by their
+  first segment), YAML's top two levels (by document in a multi-document file),
+  TOML tables and INI sections with their keys; a click jumps. A YAML syntax
+  error shows in Problems (`lib/components/configModel.ts`). YAML, TOML, INI,
+  HCL, proto and nginx fold by indentation or section.
+- **Gutters follow the language**: only a language with a debugger, a runner or
+  a language server keeps the breakpoint / ▶ column and the lint column; every
+  other file (config, data, prose, plain text) drops them by default, so its
+  text starts next to the line numbers (only a fold column when it folds).
+- Every language colours what scrolls into view in the same frame (no plain
+  lines filled in later), and the time from opening a file to its screen being
+  coloured is recorded as `ui.highlight` in Diagnostics.
 - **Markdown** (`.md`, `.markdown`): a formatting row above the editor —
   Heading ▾ (H1–H3), Bold (⌘B), Italic, Code, Link, Bulleted / Numbered list,
   Checklist, Quote, Table, and ⋯ (Format table, Code block, Divider, Callout).

@@ -48,7 +48,7 @@
   /** What the one Export saves, or null when the view shows nothing. Returns
    *  the file name it wrote. */
   export function exportShown(): string | null {
-    const d = usage.days;
+    const d = summary.days; // the period on screen, not one still loading
     switch (usageUi.where) {
       case 'provider':
         if (!summary.providers.length) return null;

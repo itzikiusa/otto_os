@@ -26,8 +26,7 @@
   );
 
   async function save(): Promise<void> {
-    await usage.saveConfig({ enabled: true, retention_days: retention, metrics_interval_secs: interval, clickhouse_path: chPath.trim() });
-    onclose();
+    if (await usage.saveConfig({ enabled: true, retention_days: retention, metrics_interval_secs: interval, clickhouse_path: chPath.trim() })) onclose();
   }
 </script>
 

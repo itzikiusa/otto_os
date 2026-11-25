@@ -50,6 +50,12 @@
     testIds,
   }: RuntimeThreadViewProps = $props();
 
+  // The id as a value: a host that spreads a props object (LazyMount) makes
+  // every read of `sessionId` depend on that whole object, which it rebuilds
+  // whenever the thread's row changes. The effects below key on this, so a
+  // row update never re-runs the row read (it replaced the row it was keyed
+  // on: an Agents pane read its thread at network speed).
+  const sid = $derived(sessionId);
   let picked = $state<string | null>(null);
   const shown = $derived(picked && runtimeThreads.group(sessionId).some((t) => t.id === picked) ? picked : sessionId);
   const current = $derived(runtimeThreads.get(shown));
@@ -126,19 +132,22 @@
     return untrack(() => runtimeThreads.watch(id));
   });
   $effect(() => {
-    const id = sessionId;
-    void attempt;
+    const id = sid;
+    const retry = attempt;
     if (!id) return;
     untrack(() => {
-      rowError = null;
-      runtimeThreads.loadOne(id).then(
-        () => runtimeThreads.loadLinked(id).catch((e: unknown) => console.warn('linked threads unavailable', e)),
+      // A remount within a moment (a layout switch, a pane moved) keeps the
+      // row the store just read (and its peers); Retry reads the row again.
+      const fresh = retry === 0 && runtimeThreads.readRecently(id);
+      if (!fresh) rowError = null;
+      (fresh ? Promise.resolve() : runtimeThreads.loadOne(id)).then(
+        () => runtimeThreads.loadLinked(id, 2000).catch((e: unknown) => console.warn('linked threads unavailable', e)),
         (e: unknown) => { if (id === sessionId) rowError = loadErrorText(e); },
       );
     });
   });
   $effect(() => {
-    void sessionId;
+    void sid;
     picked = null;
   });
 </script>

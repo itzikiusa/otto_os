@@ -1,3 +1,4 @@
+import * as langForPath from '../src/lib/components/langForPath.ts';
 // Regression tests for Wave 1 IDE MUST fixes (compare edit debouncer, collab room_closed,
 // stale target guards across debug/env/dbwatch/git, per-path collab edit timers, multi-repo
 // setLocalTarget guard, and split-pane path-targeted formatting).
@@ -63,6 +64,7 @@ function loadDebugAndEnv(api: Record<string, unknown>, extra: {
     '../../../lib/components/cm-ide-prefs': { readIdePreferences: () => ({ autoSave: false }) },
     './ideTypes': (() => {
       const real = loadSource(new URL('../src/modules/ide/store/ideTypes.ts', import.meta.url), {
+    '../../../lib/components/langForPath': langForPath,
         '../../../lib/api/client': { getToken: () => '', laneFetch: async () => new Response('{}') },
       });
       return {

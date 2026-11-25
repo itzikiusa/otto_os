@@ -2,7 +2,8 @@
 //! user's enabled MCP servers, and its own first-party `otto` tool server into
 //! the config each agent CLI actually reads:
 //!
-//!   - claude:     `<workspace>/.mcp.json`
+//!   - claude:     per-session `--mcp-config <tmp>/otto-mcp/<id>.claude-mcp.json`
+//!   - muse, opencode: `<workspace>/.mcp.json`
 //!   - agy:        `<workspace>/.agents/mcp_config.json` (never `.mcp.json`)
 //!   - grok:       `<workspace>/.grok/config.toml` (never `.mcp.json`)
 //!   - codex:      per-spawn `-c mcp_servers.*` overrides (never `.mcp.json`)
@@ -323,45 +324,7 @@ fn reconcile_json_launcher(
     let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
 
     // Desired managed entries, in file order: browser, otto tools, user servers.
-    let mut desired: Vec<(String, Value)> = Vec::new();
-    if cfg.browser {
-        let (command, args) = browser_command();
-        desired.push((
-            SERVER_KEY.to_string(),
-            json!({ "command": command, "args": args }),
-        ));
-    }
-    if let Some(t) = &cfg.otto_tools {
-        // Identity-neutral: command/args and env NAMES, never a session value.
-        let mut entry = json!({ "command": t.command, "args": t.args });
-        if forward_env {
-            let env: Map<String, Value> = OTTO_TOOLS_ENV_NAMES
-                .iter()
-                .map(|k| (k.to_string(), Value::String(format!("${{{k}:-}}"))))
-                .collect();
-            entry["env"] = Value::Object(env);
-        }
-        desired.push((OTTO_TOOLS_KEY.to_string(), entry));
-    }
-    for s in cfg.user_servers.iter().flatten() {
-        // Reserved for Otto's own entries — a user server named "otto-browser"
-        // or "otto" can't clobber them.
-        if s.name == SERVER_KEY || s.name == OTTO_TOOLS_KEY {
-            continue;
-        }
-        // The server's env (Keychain secrets included) never lands in the
-        // work tree: it goes to a private env file the entry execs through.
-        let Some((command, args)) = launch_via_env_file(workspace_root, s) else {
-            continue;
-        };
-        let mut entry = Map::new();
-        entry.insert("command".into(), Value::String(command));
-        entry.insert(
-            "args".into(),
-            Value::Array(args.into_iter().map(Value::String).collect()),
-        );
-        desired.push((s.name.clone(), Value::Object(entry)));
-    }
+    let desired = desired_entries(workspace_root, cfg, forward_env);
     let desired_names: Vec<String> = desired.iter().map(|(n, _)| n.clone()).collect();
 
     // Nothing to manage and nothing on disk: don't create a file just to hold
@@ -449,6 +412,70 @@ fn reconcile_json_launcher(
     Ok(desired_names)
 }
 
+/// Everything `cfg` asks Otto to manage, as `(name, mcpServers entry)` in
+/// file order: browser, otto tools, user servers.
+fn desired_entries(
+    workspace_root: &str,
+    cfg: &ManagedMcpConfig,
+    forward_env: bool,
+) -> Vec<(String, Value)> {
+    let mut desired: Vec<(String, Value)> = Vec::new();
+    if cfg.browser {
+        let (command, args) = browser_command();
+        desired.push((
+            SERVER_KEY.to_string(),
+            json!({ "command": command, "args": args }),
+        ));
+    }
+    if let Some(t) = &cfg.otto_tools {
+        // Identity-neutral: command/args and env NAMES, never a session value.
+        let mut entry = json!({ "command": t.command, "args": t.args });
+        if forward_env {
+            let env: Map<String, Value> = OTTO_TOOLS_ENV_NAMES
+                .iter()
+                .map(|k| (k.to_string(), Value::String(format!("${{{k}:-}}"))))
+                .collect();
+            entry["env"] = Value::Object(env);
+        }
+        desired.push((OTTO_TOOLS_KEY.to_string(), entry));
+    }
+    for s in cfg.user_servers.iter().flatten() {
+        // Reserved for Otto's own entries — a user server named "otto-browser"
+        // or "otto" can't clobber them.
+        if s.name == SERVER_KEY || s.name == OTTO_TOOLS_KEY {
+            continue;
+        }
+        // The server's env (Keychain secrets included) never lands in the
+        // work tree: it goes to a private env file the entry execs through.
+        let Some((command, args)) = launch_via_env_file(workspace_root, s) else {
+            continue;
+        };
+        let mut entry = Map::new();
+        entry.insert("command".into(), Value::String(command));
+        entry.insert(
+            "args".into(),
+            Value::Array(args.into_iter().map(Value::String).collect()),
+        );
+        desired.push((s.name.clone(), Value::Object(entry)));
+    }
+    desired
+}
+
+/// The managed set as one `claude --mcp-config` document, built in memory:
+/// nothing is written under `workspace_root` (a user server's env goes to its
+/// private file in `<tmp>/otto-mcp`, as for `.mcp.json`). Returns the
+/// document (`None` when nothing is managed) and the names in it.
+pub fn claude_mcp_config(
+    workspace_root: &str,
+    cfg: &ManagedMcpConfig,
+) -> (Option<String>, Vec<String>) {
+    let desired = desired_entries(workspace_root, cfg, true);
+    let names = desired.iter().map(|(n, _)| n.clone()).collect();
+    let servers: Map<String, Value> = desired.into_iter().collect();
+    let doc = (!servers.is_empty()).then(|| json!({ "mcpServers": servers }).to_string());
+    (doc, names)
+}
+
 /// The command/args a shared launcher file (JSON or grok TOML) carries for a
 /// user server. With env, that is `/bin/sh -c ENV_EXEC_SCRIPT <env file>
 /// <command> <args…>` — the codex mechanism — with the env in a 0600 file
@@ -497,14 +524,20 @@ fn launch_via_env_file(workspace_root: &str, s: &UserMcpServer) -> Option<(Strin
 /// deleted or disabled. A user server name is arbitrary text, so it is reduced
 /// to a safe segment.
 fn launcher_env_path(workspace_root: &str, server: &str) -> PathBuf {
+    std::env::temp_dir().join("otto-mcp").join(format!(
+        "{}{}",
+        launcher_env_prefix(workspace_root),
+        launcher_env_suffix(server)
+    ))
+}
+
+/// `launch-<cwd hash>.`: the name prefix every one of a cwd's launcher env
+/// files shares (a sandboxed session there may read exactly those).
+pub(crate) fn launcher_env_prefix(workspace_root: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     workspace_root.hash(&mut h);
-    std::env::temp_dir().join("otto-mcp").join(format!(
-        "launch-{:016x}.{}",
-        h.finish(),
-        launcher_env_suffix(server)
-    ))
+    format!("launch-{:016x}.", h.finish())
 }
 
 /// `<safe name>-<name hash>.env`, the server-specific tail of every
@@ -567,12 +600,15 @@ pub fn sweep_launcher_env_files(server: &str) -> usize {
 
 /// [`write_env_file`] to a temp sibling, then rename: a CLI starting from
 /// another session in the same cwd reads the old or the new env, never a
-/// half-written one.
+/// half-written one. The sibling's name is unique per write, so two spawns
+/// in that cwd (no lock held here) never share one.
 fn write_env_file_atomic(
     path: &Path,
     env: &std::collections::BTreeMap<String, String>,
 ) -> Result<(), String> {
-    let tmp = path.with_extension(format!("env.{}.tmp", std::process::id()));
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("env.{}.{n}.tmp", std::process::id()));
     write_env_file(&tmp, env)?;
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
@@ -1245,38 +1281,6 @@ fn write_grok_doc(dir: &Path, path: &Path, doc: &toml_edit::DocumentMut) -> Resu
 /// UTF-16 save, an I/O error) is propagated exactly like a parse error, so the
 /// reconcile is skipped and logged instead of atomically writing a fresh
 /// document over the user's hand-added servers.
-/// Only the Otto-MANAGED entries of the workspace `.mcp.json` (the
-/// `ottoManagedServers` marker), as a standalone `{"mcpServers": …}` document
-/// for `claude --mcp-config`: a structured (SDK-mode) Claude session gets
-/// exactly what Otto manages for this cwd, deterministically, without
-/// force-loading servers the user hand-added (those keep Claude's own
-/// project-approval flow). `None` when nothing is managed.
-pub fn managed_servers_document(workspace_root: &str) -> Result<Option<String>, String> {
-    let path = mcp_path(workspace_root);
-    let doc = {
-        let lock = cwd_lock(workspace_root);
-        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        read_doc(&path)?
-    };
-    let managed: Vec<&str> = doc
-        .get(MANAGED_KEY)
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    let Some(servers) = doc.get("mcpServers").and_then(Value::as_object) else {
-        return Ok(None);
-    };
-    let picked: Map<String, Value> = servers
-        .iter()
-        .filter(|(name, _)| managed.contains(&name.as_str()))
-        .map(|(n, v)| (n.clone(), v.clone()))
-        .collect();
-    if picked.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(json!({ "mcpServers": picked }).to_string()))
-}
-
 fn read_doc(path: &Path) -> Result<Map<String, Value>, String> {
     match read_launcher(path)? {
         Some(s) => serde_json::from_str(&s).map_err(|e| format!("parse {}: {e}", path.display())),
@@ -2460,5 +2464,37 @@ mod tests {
         assert!(!env_path.exists() && !other_path.exists());
         assert!(keep.exists(), "another server's env file is left alone");
         let _ = std::fs::remove_file(&keep);
+    }
+
+    /// R2-002: concurrent spawns in one cwd write the same launcher env file;
+    /// each write uses its own temp sibling, so none fails or leaves a torn
+    /// file (they shared `env.<pid>.tmp` and lost each other's rename).
+    #[test]
+    #[allow(clippy::disallowed_methods)] // a blocking dir listing in a test
+    fn concurrent_env_writes_in_one_cwd_all_land_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("launch-x.srv.env");
+        let env: std::collections::BTreeMap<String, String> =
+            [("TOKEN".to_string(), "v".repeat(64 * 1024))].into();
+        let failed: usize = std::thread::scope(|s| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| {
+                    s.spawn(|| {
+                        (0..50)
+                            .filter(|_| write_env_file_atomic(&path, &env).is_err())
+                            .count()
+                    })
+                })
+                .collect();
+            workers.into_iter().map(|w| w.join().unwrap()).sum()
+        });
+        assert_eq!(failed, 0);
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(body.len(), "TOKEN=''\n".len() + 64 * 1024);
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "no temp file left"
+        );
     }
 }

@@ -2,6 +2,7 @@
 //! `/draft-pr` and `/draft-commit` handlers, and the hosting-remote owner check.
 
 use super::*;
+use axum::response::IntoResponse;
 
 /// Helper: build provider + remote ref from a repo row in ServerCtx.
 ///
@@ -128,11 +129,6 @@ pub(crate) async fn draft_pr(
 
     // Empty base ⇒ detect the repo's default branch instead of erroring.
     let want = Some(body.base.as_str()).filter(|s| !s.trim().is_empty());
-    let ws = ctx
-        .workspaces
-        .get(&repo.workspace_id)
-        .await
-        .map_err(crate::error::ApiError)?;
     // `head` = the branch the PR is FOR (the modal's Source). Absent ⇒ the
     // checked-out branch, as before. A named head is diffed as
     // merge-base(base, head)..head, so drafting a PR for a branch that isn't
@@ -142,7 +138,7 @@ pub(crate) async fn draft_pr(
         .as_deref()
         .map(str::trim)
         .filter(|h| !h.is_empty());
-    let resp = draft_pr_core_for(&ctx, &ws, &user, &repo.path, want, head, None)
+    let resp = draft_pr_core_for(&ctx, &repo.path, want, head)
         .await
         .map_err(crate::error::ApiError)?;
     Ok(Json(resp))
@@ -150,54 +146,22 @@ pub(crate) async fn draft_pr(
 
 /// Core PR-draft logic for an explicit source branch `head` (`None` ⇒ the
 /// checkout's current branch). The reply's `source_branch` is `head`.
+/// Headless on the drafting model (`otto_agent_run::headless`): the prompt
+/// carries the diff and the `pull-request` skill, so a TUI, MCP servers and
+/// tools are pure latency — and a TUI start-up screen could swallow it. The
+/// workflow git_pr node uses `pr_draft_prompt` + `run_node_agent` instead so
+/// it can honor the node's chosen Provider/Model.
 pub(crate) async fn draft_pr_core_for(
     ctx: &ServerCtx,
-    ws: &otto_core::domain::Workspace,
-    user: &otto_core::domain::User,
     repo_path: &str,
     base: Option<&str>,
     head: Option<&str>,
-    run_id: Option<&Id>,
 ) -> Result<otto_core::api::DraftPrResp> {
-    // Runs as a REAL Otto session, not a throwaway orchestrator PTY. Drafting
-    // blocks a modal for as long as it takes, and the old headless PTY gave the
-    // user nothing to look at — no way to tell "thinking" from "wedged". As a
-    // session it appears in Agents the moment it is created (`on_ready` fires
-    // before the turn completes), so it can be opened in a pane and watched, or
-    // talked to, while the modal is still spinning.
-    //
-    // `lean_turn` + the configured drafting model are what make it quick: the
-    // prompt already carries the diff and the `pull-request` skill, so MCP
-    // servers and tool round trips are pure latency (see `lean_turn_args`).
-    //
-    // The workflow git_pr node uses `pr_draft_prompt` + `run_node_agent` instead
-    // so it can honor the node's chosen Provider/Model.
     let (prompt, source, base_branch) = pr_draft_prompt_for(ctx, repo_path, base, head).await?;
     let model = pr_draft_model(ctx).await;
-    let mut meta = serde_json::json!({
-        "source": "pr-draft",
-        "model": model,
-        "lean_turn": true,
-    });
-    if let Some(run_id) = run_id {
-        meta["run_id"] = serde_json::json!(run_id);
-    }
-    let title = format!("PR draft · {source}");
-    let (reply, session_id) = crate::agent_session::run_session_turn(
-        ctx,
-        ws,
-        user,
-        None,
-        &title,
-        repo_path,
-        "claude",
-        meta,
-        &prompt,
-        DRAFT_STUCK_AFTER,
-        |_id| {},
-    )
-    .await
-    .map_err(|e| e.0)?;
+    let reply =
+        otto_agent_run::headless::claude_draft(ctx.manager.providers(), &model, &prompt, |_| {})
+            .await?;
     let (mut title, description) = parse_pr_draft(&reply, &source);
     if let Some(key) = jira_key_from_branch(&source) {
         title = ensure_jira_in_subject(&title, &key);
@@ -207,14 +171,9 @@ pub(crate) async fn draft_pr_core_for(
         description,
         source_branch: source,
         target_branch: base_branch,
-        session_id: Some(session_id),
+        session_id: None,
     })
 }
-
-/// Idle trip for a drafting turn. Generous next to how long the turn *should*
-/// take (seconds), because the session is visible: a user watching it stall is
-/// better served by a live session they can inspect than by a fast error.
-pub(crate) const DRAFT_STUCK_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// The model that drafts PR titles/descriptions and commit messages, from the
 /// `pr_draft_model` setting. Falls back to the fast default when unset — never
@@ -382,7 +341,8 @@ pub(crate) async fn draft_commit_message(
     Path(repo_id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
-) -> crate::error::ApiResult<Json<otto_core::api::DraftCommitMessageResp>> {
+    body: Option<Json<otto_core::api::DraftCommitMessageReq>>, // none = `{}`
+) -> crate::error::ApiResult<axum::response::Response> {
     let repo = ctx
         .git_store
         .get_repo(&repo_id)
@@ -467,56 +427,48 @@ pub(crate) async fn draft_commit_message(
     let skill_text = resolve_skill_inline(&ctx.context_library, "commit-message");
     let prompt = compose_draft_prompt(&skill_text, &base_prompt);
 
-    // Same path as `draft_pr_core`: a REAL, visible session (watchable from
-    // the WIP panel while it runs) on the configured drafting model with
-    // `lean_turn` — not the headless orchestrator PTY on the user's default
-    // model, which was both invisible and slow.
-    let ws = ctx
-        .workspaces
-        .get(&repo.workspace_id)
-        .await
-        .map_err(crate::error::ApiError)?;
+    // Headless on the drafting model, like the PR draft (`draft_pr_core_for`);
+    // streamed when asked, so the card shows the message as it is written.
     let model = pr_draft_model(&ctx).await;
-    let meta = serde_json::json!({
-        "source": "commit-draft",
-        "model": model,
-        "lean_turn": true,
-    });
-    let title = format!(
-        "Commit draft · {}",
-        if branch.trim().is_empty() {
-            "HEAD"
-        } else {
-            branch.as_str()
+    let finish = move |reply: &str| {
+        let message = parse_commit_draft(reply);
+        // Always carry the Jira key in the subject line (the agent is asked to,
+        // but forgets under the Conventional-Commits format) — as the PR does.
+        let message = match jira_key_from_branch(&branch) {
+            Some(key) => ensure_jira_in_commit(&message, &key),
+            None => message,
+        };
+        otto_core::api::DraftCommitMessageResp {
+            message,
+            from_staged,
+            session_id: None,
         }
-    );
-    let (reply, session_id) = crate::agent_session::run_session_turn(
-        &ctx,
-        &ws,
-        &user,
-        None,
-        &title,
-        &repo.path,
-        "claude",
-        meta,
-        &prompt,
-        DRAFT_STUCK_AFTER,
-        |_id| {},
-    )
-    .await?;
-    let message = parse_commit_draft(&reply);
-    // Always carry the Jira key in the subject line (the agent is asked to, but
-    // forgets under the Conventional-Commits format) — same guarantee as the PR.
-    let message = match jira_key_from_branch(&branch) {
-        Some(key) => ensure_jira_in_commit(&message, &key),
-        None => message,
     };
-
-    Ok(Json(otto_core::api::DraftCommitMessageResp {
-        message,
-        from_staged,
-        session_id: Some(session_id),
-    }))
+    let draft = move |on_text: Box<dyn FnMut(&str) + Send>| async move {
+        otto_agent_run::headless::claude_draft(ctx.manager.providers(), &model, &prompt, on_text)
+            .await
+            .map(|reply| finish(&reply))
+    };
+    if !body.is_some_and(|b| b.stream) {
+        let resp = draft(Box::new(|_: &str| {})).await;
+        return Ok(Json(resp.map_err(crate::error::ApiError)?).into_response());
+    }
+    let lines = otto_agent_run::headless::ndjson_lines(|on_text| async move {
+        match draft(on_text).await {
+            Ok(done) => serde_json::json!({ "done": done }),
+            Err(Error::Upstream(why) | Error::Internal(why)) => serde_json::json!({ "error": why }),
+            Err(e) => serde_json::json!({ "error": e.to_string() }),
+        }
+    });
+    let body = axum::body::Body::from_stream(futures_util::StreamExt::map(
+        lines,
+        Ok::<_, std::convert::Infallible>,
+    ));
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "application/x-ndjson")],
+        body,
+    )
+        .into_response())
 }
 
 #[cfg(test)]

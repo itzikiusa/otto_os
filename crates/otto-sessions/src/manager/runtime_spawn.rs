@@ -36,7 +36,7 @@ pub struct RuntimeMcpServer {
 /// Per-session `claude --mcp-config` document (`<tmp>/otto-mcp/<id>.claude-mcp.json`,
 /// 0600). Identity-neutral (the token rides the process env), removed with
 /// the session's other credentials.
-fn claude_mcp_config_path(session_id: &Id) -> std::path::PathBuf {
+pub(super) fn claude_mcp_config_path(session_id: &Id) -> std::path::PathBuf {
     std::env::temp_dir()
         .join("otto-mcp")
         .join(format!("{session_id}.claude-mcp.json"))
@@ -251,7 +251,7 @@ impl SessionManager {
         let _mcp_activation = crate::mcp::activation_gate().read().await;
         let protocol_mcp = match delivery {
             RuntimeMcpDelivery::Launcher => {
-                self.apply_launcher_mcp(session, &cli_family, spec).await;
+                self.apply_launcher_mcp(session, spec).await;
                 Vec::new()
             }
             RuntimeMcpDelivery::Protocol => self.protocol_mcp_servers(session).await,
@@ -324,14 +324,9 @@ impl SessionManager {
         Ok(protocol_mcp)
     }
 
-    /// [`RuntimeMcpDelivery::Launcher`]: the PTY spawn's MCP steps, plus
-    /// `--mcp-config` for Claude.
-    async fn apply_launcher_mcp(
-        &self,
-        session: &Session,
-        cli_family: &str,
-        spec: &mut CommandSpec,
-    ) {
+    /// [`RuntimeMcpDelivery::Launcher`]: the PTY spawn's MCP steps (Claude's
+    /// `--mcp-config` included).
+    async fn apply_launcher_mcp(&self, session: &Session, spec: &mut CommandSpec) {
         let otto_tools = self.maybe_enable_otto_tools(session).await;
         let codex_otto = !otto_tools.args.is_empty();
         spec.args.extend(otto_tools.args);
@@ -340,32 +335,6 @@ impl SessionManager {
             .sync_workspace_mcp(session, otto_tools.server, codex_otto)
             .await;
         spec.args.extend(codex_user_args);
-        if cli_family != "claude" {
-            return;
-        }
-        let cwd = session.cwd.clone();
-        let path = claude_mcp_config_path(&session.id);
-        let written = tokio::task::spawn_blocking(move || -> std::result::Result<_, String> {
-            let Some(doc) = crate::mcp::managed_servers_document(&cwd)? else {
-                let _ = std::fs::remove_file(&path);
-                return Ok(None);
-            };
-            let env = std::collections::BTreeMap::new();
-            // Reuse the private 0600 writer, then replace its body.
-            crate::mcp::write_env_file(&path, &env)?;
-            std::fs::write(&path, doc).map_err(|e| format!("write {}: {e}", path.display()))?;
-            Ok(Some(path))
-        })
-        .await
-        .unwrap_or_else(|e| Err(format!("mcp config task failed: {e}")));
-        match written {
-            Ok(Some(path)) => spec.args.extend([
-                "--mcp-config".to_string(),
-                path.to_string_lossy().into_owned(),
-            ]),
-            Ok(None) => {}
-            Err(e) => tracing::warn!(session = %session.id, "claude --mcp-config: {e}"),
-        }
     }
 
     /// [`RuntimeMcpDelivery::Protocol`]: `otto` + the enabled user servers,
@@ -452,12 +421,12 @@ impl SessionManager {
     }
 
     /// A structured session's process ended (exit, close): revoke its `otto`
-    /// MCP credential and remove its per-session MCP files, as a PTY session's
-    /// retirement does. Every respawn mints a fresh one. Best-effort.
+    /// MCP credential and remove its per-session MCP files (the claude
+    /// `--mcp-config` included), as a PTY session's retirement does. Every
+    /// respawn mints a fresh one. Best-effort.
     pub async fn retire_runtime_credentials(&self, session: &Session) {
         self.networks.clear(&session.id);
         self.retire_credentials(session).await;
-        let _ = tokio::fs::remove_file(claude_mcp_config_path(&session.id)).await;
     }
 
     /// Whether the structured child of `session` will run Seatbelt-confined:

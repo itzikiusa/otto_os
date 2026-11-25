@@ -62,6 +62,8 @@ export function usageSummary(days = 30) {
     providers,
     daily,
     sessions,
+    // More sessions than the 50 the daemon lists: the count is the window's.
+    session_count: 137,
     by_kind: [
       { feature: 'agent', sessions: 30, ...tok(1_000_000_000, 620.4) },
       { feature: 'review', sessions: 6, ...tok(300_000_000, 180.2) },
@@ -81,7 +83,7 @@ export interface UsageRoutes {
 }
 
 /** Route every /usage/* call the page makes to canned data; `budgetRows` adds caps. */
-export async function routeUsage(page: Page, opts: { budgetRows?: unknown[]; empty?: boolean } = {}): Promise<UsageRoutes> {
+export async function routeUsage(page: Page, opts: { budgetRows?: unknown[]; empty?: boolean; extraModels?: unknown[] } = {}): Promise<UsageRoutes> {
   const calls: string[] = [];
   await routeLimits(page, cannedLimits());
   await page.route('**/api/v1/usage/**', async (route) => {
@@ -93,8 +95,9 @@ export async function routeUsage(page: Page, opts: { budgetRows?: unknown[]; emp
     const json = (body: unknown) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
     if (path === '/usage/status') return json(USAGE_STATUS);
     if (path === '/usage/summary') {
-      const s = usageSummary(Number(url.searchParams.get('days') ?? 30));
-      return json(opts.empty ? { ...s, total_events: 0, total_tokens: 0, total_cost_usd: 0, providers: [], daily: [], sessions: [], by_kind: [], models: [], daily_models: [] } : s);
+      const base = usageSummary(Number(url.searchParams.get('days') ?? 30));
+      const s = { ...base, models: [...base.models, ...(opts.extraModels ?? [])] };
+      return json(opts.empty ? { ...s, total_events: 0, total_tokens: 0, total_cost_usd: 0, providers: [], daily: [], sessions: [], session_count: 0, by_kind: [], models: [], daily_models: [] } : s);
     }
     if (path === '/usage/budgets') return json({ config: { enforce: false, block_on_exceed: false, window_days: 30, workspaces: [], providers: [] }, window_days: 30, rows: opts.budgetRows ?? [] });
     if (path === '/usage/metrics') return json(Array.from({ length: 30 }, (_, i) => ({ ts: new Date(Date.now() - (30 - i) * 60_000).toISOString(), cpu_pct: 10 + (i % 5) * 4, mem_used_mb: 9000, mem_total_mb: 16384, mem_pct: 55, load_avg_1: 2, process_rss_mb: 210, process_cpu_pct: 3, active_sessions: 4 })));

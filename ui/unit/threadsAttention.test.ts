@@ -181,7 +181,7 @@ function loadThreads() {
     '../../../lib/stores/runtimeAttention.svelte': { noteRuntimeWaiting: (id: string, w: boolean, title?: string) => noted.push([id, w, title]), syncRuntimeWaiting: (rows: unknown) => synced.push(rows) },
     '../../../lib/stores/uiControl.svelte': { uiControl: { addSource: () => {} } },
     '../threadsStore.svelte': { threads: { focusedSessionId: null } },
-    '../../../lib/stores/runtimeDrafts.svelte': { runtimeDrafts: { forget: () => {} } },
+    '../../../lib/stores/runtimeDrafts.svelte': { runtimeDrafts: { forget: () => () => {} } },
     '../../../lib/providers': { isRuntimeProvider: () => true, RUNTIME_PROVIDERS: ['codex'], sessionProviderSlug: (r: { provider: string }) => r.provider },
   });
   return { runtimeThreads, asThreadSession, turnOutcomeOf, keepOutcome, noted, synced };

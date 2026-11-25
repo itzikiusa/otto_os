@@ -22,6 +22,7 @@ pub fn validate_ui_batch(spans: &[SpanRecord]) -> Result<()> {
                 | "ui.response.decode"
                 | "ui.thread.open"
                 | "ui.thread.send"
+                | "ui.highlight"
         ) || !matches!(span.kind.as_str(), "client" | "internal")
             || !UI_COMPONENTS.contains(&span.component.as_str())
             || span.attributes.contains_key("http.route")
@@ -59,6 +60,7 @@ const UI_COMPONENTS: &[&str] = &[
     "mcp",
     "brokers",
     "kubernetes",
+    "containers",
     "aws",
     "insights",
     "usage",
@@ -86,6 +88,7 @@ mod tests {
             SpanRecord::new("ui.navigation", "ide", 9.0),
             SpanRecord::new("ui.thread.open", "threads", 24.0),
             SpanRecord::new("ui.thread.send", "threads", 3.0),
+            SpanRecord::new("ui.highlight", "ide", 4.0),
         ];
         for request in fixture["requests"].as_array().unwrap() {
             let mut span = SpanRecord::new(
@@ -106,6 +109,41 @@ mod tests {
         spans.last_mut().unwrap().name = "http.client".into();
         spans.last_mut().unwrap().component = "private-project".into();
         assert!(validate_ui_batch(&spans).is_err());
+    }
+    /// Every component the UI can send — each sidebar module and each entry
+    /// of its TELEMETRY_COMPONENTS — is accepted; one missing id failed the
+    /// whole batch with 400 on every visit to that page.
+    #[test]
+    fn every_ui_module_component_is_accepted() {
+        let between = |src: &'static str, from: &str, to: &str| {
+            let start = src.find(from).expect(from) + from.len();
+            &src[start..start + src[start..].find(to).expect(to)]
+        };
+        let sidebar = between(
+            include_str!("../../../ui/src/lib/sidebar.ts"),
+            "SIDEBAR_MODULES:",
+            "\n];",
+        );
+        let runtime = include_str!("../../../ui/src/lib/telemetryRuntime.ts");
+        let modules: Vec<&str> = sidebar
+            .split("id: '")
+            .skip(1)
+            .filter_map(|s| s.split('\'').next())
+            .collect();
+        let components: Vec<&str> = between(runtime, "TELEMETRY_COMPONENTS = [", "]")
+            .split('\'')
+            .skip(1)
+            .step_by(2)
+            .collect();
+        assert!(modules.len() > 15 && modules.contains(&"containers"));
+        assert!(components.contains(&"usage") && components.contains(&"other"));
+        for c in modules.iter().chain(&components) {
+            let span = SpanRecord::new("ui.navigation", *c, 1.0);
+            assert!(
+                validate_ui_batch(&[span]).is_ok(),
+                "UI component {c} rejected"
+            );
+        }
     }
     #[test]
     fn ingestion_rejects_dynamic_names_and_routes_atomically() {

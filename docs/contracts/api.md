@@ -160,11 +160,14 @@ failure on a read returns an error (500) — never a 200 with zero totals.
   and runs off the async runtime).
 - GET /usage/summary?days=N&otto_only=B → UsageSummary. `days` 1–3650 (default 30),
   `otto_only` (default true) excludes externally-recorded sessions. Carries provider,
-  daily, session, **`by_kind`** (per-feature), **`models: ModelUsage[]`**
+  daily, session (the biggest 50, plus **`session_count`**: every session with tokens or cost in
+  the window and scope), **`by_kind`** (per-feature), **`models: ModelUsage[]`**
   (`{provider, model, events, input_tokens, output_tokens, cache_read_tokens,
   cache_write_tokens, total_tokens, cost_usd}`, biggest first) and **`daily_models:
   DailyModelUsage[]`** (`{day, provider, model, …tokens, cost_usd}`) rollups, plus
-  `scope` (`"all"`|`"own"`).
+  `scope` (`"all"`|`"own"`). Providers, models and `daily_models` list only rows with
+  tokens or cost (the totals are the providers' sums); `daily[].events` counts every
+  event of the day, $0 ones included.
 - GET /usage/report?days=N&otto_only=B&sessions_limit=N&include=daily_models → UsageReport
   `{days, generated_at, priced_as_of,
   scope, otto_only, totals: TokenTotals, daily: DailyUsage[], monthly: MonthlyUsage[]
@@ -835,15 +838,31 @@ current assistant turn, or on the next one when none is open yet.
 `stats.output_tokens`; a resumed Codex rollout's stats include the earlier
 thread's tokens, its turns only this file's calls.
 
-Interactive transcript reads (session and history routes) return **413
-`payload_too_large`** with an explicit `transcript resource limit` message when
-source input exceeds 128 MiB, one JSONL record exceeds 16 MiB, estimated fold
-charge exceeds 256 MiB, or subagent metadata exceeds its separate 8 MiB charge
-budget (one sidecar may be at most 1 MiB). Parsing is streamed; limits are
-checked before accepting additional records. No transcript is deleted or
-silently truncated. The user can open the provider file directly or select a
-smaller subagent transcript. Live folds have stricter admission bounds and use
-coalesced file-change invalidations plus this read path when not admitted.
+**Long transcripts open on a window.** A transcript over 8 MiB is never
+folded whole for a page: the read folds only the newest ~4 MiB of records
+before the cursor (`otto_transcript::window`), starting on a turn boundary,
+so a 60–150 MB daily session opens in tens of milliseconds and older turns
+page in by `before` exactly as for a short file. Record indices — the
+cursor, Codex `r<idx>` turn ids, `transcript_appended.cursor` — stay
+absolute (a per-file line index maps record → byte offset with one streamed
+newline scan, extended as the file grows), so pages of a window and of a
+whole-file fold are interchangeable. A windowed page has `has_earlier: true`
+while records precede it, and its `stats.cost_usd` / `input_tokens` /
+`output_tokens` / `duration_ms` are `null` (a window's sums are not the
+conversation's). The live tail of a long transcript folds the same window and
+follows appends; when the appended output outgrows its budget it starts again
+on a fresh window and sends an empty-`turns` delta (the client re-reads the
+page). A window that holds no turn boundary grows ×4 up to 64 MiB.
+
+What is still refused answers **413 `payload_too_large`** with a sentence the
+UI shows as is ("This conversation is too large to show here (transcript
+resource limit). …"): a short (≤ 8 MiB) or subagent transcript whose fold
+charge exceeds 256 MiB or one of whose records exceeds 16 MiB, a single record
+over 64 MiB in a long one, or subagent metadata over its separate 8 MiB charge
+budget (one sidecar may be at most 1 MiB). A transcript file that vanished
+between resolution and read is **404**. None of these is ever reported as 500
+(the fold cache used to re-wrap every fold error as `internal`). No transcript is deleted or silently truncated; per-item caps (64 KB per
+tool result, images by reference) keep any one turn small.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
@@ -1872,8 +1891,8 @@ their credential. No response fields or request shapes change.
 | DELETE /repos/{id}/prs/{number}/request-changes | ws editor | — | 204 — withdraws the caller's change request: Bitbucket `DELETE …/request-changes`; GitHub dismisses the caller's own current `CHANGES_REQUESTED` review (409 when none / refused, as #54b); GitLab → 400 (its "request changes" is a plain note, nothing to withdraw) |
 | POST /repos/{id}/api-collections/pull | ws editor | — | pull API-client collections committed in the repo |
 | POST /repos/{id}/api-collections/push | ws editor | `{files:[{name,content}], message, branch?}` (`files` and `message` required) | `{commit, files}` — commit API-client collections into the repo |
-| POST /repos/{id}/pr/draft | ws editor | DraftPrReq `{base, head?}` | DraftPrResp (AI-drafted title+body, plus the `session_id` that drafted it). `head` (the PR's Source branch) drafts from `git diff <base>...<head>` — that branch's committed work vs its merge-base, never the checked-out branch or the working tree — and `source_branch` echoes it (400 for an unknown branch); absent ⇒ the checked-out branch, as before. When the bundled `pull-request` skill is installed it is prepended to the draft prompt; the branch Jira key (if any) is injected as the title prefix (never in the body). No AI attribution is added. Runs as a REAL Otto session titled `PR draft · <branch>` — it appears in Agents as soon as it spawns, so it can be opened in a pane and watched mid-draft. The turn uses the `pr_draft_model` setting (default `haiku`) and `lean_turn` (no MCP servers, no Bash/Edit/Web tools): the prompt already carries the diff and the skill, so both are pure latency. |
-| POST /repos/{id}/draft-commit-message | ws editor | DraftCommitMessageReq (empty `{}`) | DraftCommitMessageResp (AI-drafted Conventional-Commits message from the STAGED diff; falls back to the working diff when nothing is staged; plus the `session_id` that drafted it). When the bundled `commit-message` skill is installed it is prepended to the draft prompt; the branch Jira key (if any) is injected into the subject. No AI attribution is added. Runs exactly like `pr/draft`: a REAL session titled `Commit draft · <branch>` (source `commit-draft`, a background source — watchable from the WIP panel, not listed under Agents) on the `pr_draft_model` setting with `lean_turn`. |
+| POST /repos/{id}/pr/draft | ws editor | DraftPrReq `{base, head?}` | DraftPrResp (AI-drafted title+body; `session_id` is always null since 0.5.1). `head` (the PR's Source branch) drafts from `git diff <base>...<head>` — that branch's committed work vs its merge-base, never the checked-out branch or the working tree — and `source_branch` echoes it (400 for an unknown branch); absent ⇒ the checked-out branch, as before. When the bundled `pull-request` skill is installed it is prepended to the draft prompt; the branch Jira key (if any) is injected as the title prefix (never in the body). No AI attribution is added. Runs HEADLESS (`claude -p` with stream-json, in the temp dir, `--strict-mcp-config --tools= --setting-sources=`: no TUI, MCP servers, tools, hooks or project files) on the `pr_draft_model` setting (default `haiku`), with a 30 s limit that fails with a clear 502. |
+| POST /repos/{id}/draft-commit-message | ws editor | DraftCommitMessageReq `{stream?}` (`{}` or no body is fine) | DraftCommitMessageResp (AI-drafted Conventional-Commits message from the STAGED diff; falls back to the working diff when nothing is staged; `session_id` is always null since 0.5.1). With `stream: true` the answer is `application/x-ndjson`: one `{"delta": text}` line per piece of the message as the model writes it (subject first, then body), then `{"done": DraftCommitMessageResp}` or `{"error": why}`; closing the request stops the draft. When the bundled `commit-message` skill is installed it is prepended to the draft prompt; the branch Jira key (if any) is injected into the subject. No AI attribution is added. Runs headless exactly like `pr/draft` (30 s limit). |
 
 > Removed in this version: `POST /repos/{id}/checkout-update` (stash · pull · pop). A switch never pulls; use `POST /repos/{id}/checkout {auto_stash:true}` for the stash-around-switch, and `POST /repos/{id}/pull` to update.
 
@@ -3509,7 +3528,7 @@ Workspace-independent: one Mac, one daemon. `busy` = a background agent arriving
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /usage/status | Usage:View (paths redacted for non-root) | — | engine status (installed/available); optional `tailer?: {state: "running"\|"retrying"\|"stopped", cause?: string\|null}` — the transcript tailer's state (absent when unknown). `stopped` only for a corrupt checkpoint (the tailer could not restore its position and halted; `cause` says why) |
-| GET /usage/summary | Usage:View (non-root: own sessions) | `?days=N&otto_only=B` | token-first breakdown (input/output + cache read/write, per provider/day/session/model; canonicalizes `claude-work`/`claude:<dir>` onto its matching custom provider slug and hides disabled/orphan external providers when `otto_only=false`) |
+| GET /usage/summary | Usage:View (non-root: own sessions) | `?days=N&otto_only=B` | token-first breakdown (input/output + cache read/write, per provider/day/session/model; canonicalizes `claude-work`/`claude:<dir>` onto its matching custom provider slug; hides nothing, so `otto_only=false` ⊇ `otto_only=true`; a provider, model or session with no tokens and no cost in the window is not listed or counted; `session_count` = every session with usage, `sessions` the biggest 50) |
 | GET /usage/report | Usage:View (non-root: own sessions) | `sessions_limit` (1–1000, default 100), `include=daily_models` | UsageReport (daily/monthly/model/session tables; `daily_models` only when included) |
 | POST /usage/ccusage-check | root | `{days?}` | CcusageCheck (opt-in `npx ccusage` cross-check) |
 | GET /usage/metrics | root | — | system CPU/RAM metrics |
@@ -3530,7 +3549,7 @@ Workspace-independent: one Mac, one daemon. `busy` = a background agent arriving
 | GET /insights/config | Insights:View | — | insights scheduler config (`daily`/`weekly`/`monthly`, `provider`, `model`) plus `schedule_status: {<cadence>: {period, attempts, last_error, gave_up, at}}` — each cadence's last scheduled run that produced no report (persisted in `<insights>/schedule-state.json`, cleared once that cadence's report lands; ignored on PUT) |
 | PUT /insights/config | root | InsightsConfig | config |
 | GET /insights/reports | Insights:View | `?offset=0&limit=200&summaries=false&latest=false` | Newest-first `ReportView[]`; limit 1–200, default 200. Metadata-only by default (`summary:""`); `summaries=true` includes a preview capped at 80 lines / 64 KiB. `latest=true` returns at most one newest report per cadence (three total), ignoring offset. Only selected-page artifacts are hydrated; archive filenames are still enumerated. |
-| GET /insights/report | Insights:View | `?path=` (required; canonicalized — 403 outside the insights dir, 404 when missing) | one report's HTML |
+| GET /insights/report | root | `?path=` (required; canonicalized — 404 when missing, 403 outside the insights dir or for anything but `index.json` and `<kind>/{report,summary,metrics}-<kind>-<YYYYMMDD>_<YYYYMMDD>.{html,md,json}`) | the artifact's text: a report's HTML, its summary markdown or metrics JSON, or `index.json` |
 | GET /insights/report-status | Insights:View | `?key=daily:YYYYMMDD_YYYYMMDD&summary=false` (also weekly/monthly) | `{report:ReportView|null, html_revision:string|null}`. Exactly three artifact metadata checks, independent of archive size; optional bounded summary preview. Missing report is null. Bad key is 400. HTML revision changes when HTML length/mtime changes; a new summary alone does not mean completion. |
 | POST /insights/run | root | `{ period, offset? }` | `{ started, run_id?, report_key?, report_revision, reason?, attached? }` — `report_revision` is the HTML revision captured before starting (null if absent), for bounded completion polling; `run_id` when started; `report_key` identifies the requested daemon-local collector calendar period (`daily:YYYYMMDD_YYYYMMDD`, or `weekly`/`monthly`); offset 0 is current, 1 is the previous complete period. The calendar reference is frozen at acceptance and passed to a daemon-owned, content-addressed bundled collector under `insights/collectors/`, so a delayed start across midnight keeps this key. Installed skill instructions/customizations remain untouched. This manual endpoint explicitly regenerates an existing period (`--force`); scheduled catch-up remains idempotent. `reason` when not started (e.g. skill not installed). **One run per period:** while a run for the same `report_key` is still generating (its session alive and not idle for more than 10 min, its final completion manifest unpublished, inside a 2-hour hard cap — liveness follows the session, not a fixed window) the request starts nothing and returns that run with `attached: true` |
 | GET /insights/runs/active | View | — | `ActiveRun[]` = `{ run_id, report_key, report_revision, started_at }`, oldest first — runs still generating; finished/killed/timed-out runs are pruned. Lets the page restore its progress banner after it was left |
@@ -6786,7 +6805,9 @@ nullable `parent_span_id`, safe static `name`, `component`, `kind`,
 `start_unix_nano` (integer or decimal string on ingest), `duration_ms`, `status`,
 `attributes`. Browser spans accept only known module names and the operations
 `ui.navigation`, `ui.chunk`, `ui.render`, `ui.long_task`, `ui.frame_delay`, `http.client`,
-`ui.request.queue`, `ui.response.decode`. A `ui.navigation` span may carry
+`ui.request.queue`, `ui.response.decode`, `ui.thread.open`, `ui.thread.send`, and `ui.highlight`
+(component `ide`: an IDE editor's time from its language applying to the screen being
+coloured). A `ui.navigation` span may carry
 `otto.device` = `desktop` | `phone` | `tablet` (the device class, nothing more). Browser client spans remain exactly
 `http.client`; arbitrary endpoint-derived browser names and raw route/URL
 attributes reject the entire batch atomically. Endpoint attribution remains in

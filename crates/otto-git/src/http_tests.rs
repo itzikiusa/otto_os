@@ -1761,6 +1761,7 @@ async fn bulk_branch_delete_reports_per_branch_outcomes() {
         &repo_dir,
         &["commit", "--allow-empty", "-qm", "unmerged work"],
     );
+    git(&repo_dir, &["push", "-q", "origin", "wip"]);
     git(&repo_dir, &["checkout", "-q", "main"]);
     let repo = ctx
         .store
@@ -1789,13 +1790,23 @@ async fn bulk_branch_delete_reports_per_branch_outcomes() {
             Json(BranchesDeleteReq { items }),
         )
     };
-    let Json(resp) = call(vec![
+    // The remote leg queues behind a fetch / push (the remote lock), not
+    // holding the repo lock that stage / commit wait on.
+    let remote = remote_lock(&repo.id);
+    let held = remote.lock().await;
+    let mut first = std::pin::pin!(call(vec![
         item("done", Some("origin"), false),
-        item("wip", None, false),
+        item("wip", Some("origin"), false),
         item("main", Some("origin"), false),
-    ])
-    .await
-    .unwrap();
+    ]));
+    let early = tokio::time::timeout(std::time::Duration::from_millis(300), &mut first).await;
+    assert!(early.is_err(), "the push ran while a fetch held the remote");
+    assert!(
+        repo_lock(&repo.id).try_lock().is_ok(),
+        "the repo lock was held across the network"
+    );
+    drop(held);
+    let Json(resp) = first.await.unwrap();
     let r = &resp.results;
     assert!(
         r[0].local_deleted && r[0].remote_deleted && r[0].error.is_none(),
@@ -1809,12 +1820,45 @@ async fn bulk_branch_delete_reports_per_branch_outcomes() {
         &["for-each-ref", "--format=%(refname)", "refs/heads"],
     );
     assert!(!remote_heads.contains("refs/heads/done") && remote_heads.contains("refs/heads/main"));
+    // The unmerged local that stayed keeps its remote copy.
+    assert!(remote_heads.contains("refs/heads/wip"), "{remote_heads}");
 
     let Json(resp) = call(vec![item("wip", None, true)]).await.unwrap();
     assert!(resp.results[0].local_deleted, "{:?}", resp.results[0]);
     assert!(git(&repo_dir, &["branch", "--list", "wip"])
         .trim()
         .is_empty());
+
+    // Review R1-005: a qualified ref never slips past the protected names
+    // to the default branch or a tag on the remote.
+    git(&repo_dir, &["tag", "v1"]);
+    git(&repo_dir, &["push", "-q", "origin", "v1"]);
+    let remote_only = |name: &str, rb: Option<&str>| BranchDeleteItem {
+        name: name.into(),
+        local: Some(false),
+        remote: Some("origin".into()),
+        remote_branch: rb.map(str::to_string),
+        force: None,
+    };
+    let Json(resp) = call(vec![
+        remote_only("refs/heads/main", None),
+        remote_only("x", Some("tags/v1")),
+        remote_only("heads/main", None),
+    ])
+    .await
+    .unwrap();
+    assert!(
+        resp.results
+            .iter()
+            .all(|r| !r.remote_deleted && r.error.is_some()),
+        "{:?}",
+        resp.results
+    );
+    let refs = git(&origin, &["for-each-ref", "--format=%(refname)"]);
+    assert!(
+        refs.contains("refs/heads/main") && refs.contains("refs/tags/v1"),
+        "{refs}"
+    );
 }
 
 #[tokio::test]

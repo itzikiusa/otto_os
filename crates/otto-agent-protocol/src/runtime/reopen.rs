@@ -77,11 +77,18 @@ impl AgentRuntime {
             let live_bg = Arc::clone(&live);
             tokio::spawn(async move {
                 let started = resume_key.is_none() || rt.wait_started(&live_bg).await;
+                if started && resume_key.is_some() {
+                    rt.card_swarm_members(&live_bg).await;
+                }
                 if !started {
                     let _prompt = live_bg.prompt_lock.lock().await;
                     let idle = {
                         let st = live_bg.lock();
-                        st.proc.is_none() && st.turn.is_none() && st.starting == 0
+                        st.proc.is_none()
+                            && st.turn.is_none()
+                            && st.starting == 0
+                            // Closed again meanwhile: it stays closed.
+                            && st.session.status != RuntimeSessionStatus::Closed
                     };
                     if idle {
                         if let Err(e) = rt.spawn_resuming(&sid, &live_bg).await {

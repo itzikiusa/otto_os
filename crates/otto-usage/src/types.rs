@@ -353,6 +353,10 @@ pub struct UsageSummary {
     pub providers: Vec<ProviderUsage>,
     pub daily: Vec<DailyUsage>,
     pub sessions: Vec<SessionUsage>,
+    /// Sessions with usage (tokens or cost) in the window and scope; `sessions`
+    /// lists the biggest 50 of them.
+    #[serde(default)]
+    pub session_count: u64,
     /// Per-feature (by-kind) rollup — review / product / channel / agent / …
     /// Built server-side by classifying sessions, so it's `#[serde(default)]`
     /// (the engine itself returns it empty until the server fills it in).

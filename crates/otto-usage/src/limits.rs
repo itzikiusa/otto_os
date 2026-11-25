@@ -393,19 +393,14 @@ impl ActiveLimitProviders {
     }
 
     /// Resolve a recorded `usage_events.provider` label (`"claude-work"`,
-    /// `"claude:~/.claude-work"`, `"grok"`, …) to its canonical active slug,
-    /// or `None` when `filter_inactive` is set and the provider is disabled or
-    /// belongs to an orphan `~/.claude-*` directory.
-    pub fn resolve_usage_provider_in(
-        &self,
-        raw: &str,
-        filter_inactive: bool,
-        home: &Path,
-    ) -> Option<String> {
+    /// `"claude:~/.claude-work"`, `"grok"`, …) to its canonical active slug;
+    /// a label nothing matches stays as recorded (lower-cased). Nothing is
+    /// hidden: usage a provider recorded stays usage when it is turned off.
+    pub fn resolve_usage_provider_in(&self, raw: &str, home: &Path) -> String {
         let trimmed = raw.trim();
         let lc = trimmed.to_ascii_lowercase();
         if self.enabled_slugs.contains(&lc) {
-            return Some(lc);
+            return lc;
         }
         if let Some(rest) = trimmed
             .strip_prefix("claude:")
@@ -432,151 +427,112 @@ impl ActiveLimitProviders {
                     }
                 }
                 if let Some(slug) = matched_slug.filter(|_| !ambiguous) {
-                    return Some(slug.to_string());
+                    return slug.to_string();
                 }
                 if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
                     let norm = norm_alnum(name.trim_start_matches('.'));
                     if let Some(Some(slug)) = self.claude_norm_to_slug.get(&norm) {
-                        return Some(slug.clone());
+                        return slug.clone();
                     }
                 }
-                let default_dir = home.join(".claude");
-                let active = if dir == default_dir {
-                    self.is_default_claude_enabled(&default_dir)
-                } else {
-                    self.matches_claude_config_dir(&dir)
-                };
-                return (!filter_inactive || active).then_some(lc);
+                return lc;
             }
         }
         if lc.starts_with("claude-") {
             let norm = norm_alnum(&lc);
             if let Some(Some(slug)) = self.claude_norm_to_slug.get(&norm) {
-                return Some(slug.clone());
-            }
-            let active = self.claude_dir_hints.contains(&format!(".{lc}"))
-                || self.claude_tokens.contains(&norm);
-            return (!filter_inactive || active).then_some(lc);
-        }
-        if filter_inactive {
-            match lc.as_str() {
-                "claude" if !self.is_default_claude_enabled(&home.join(".claude")) => {
-                    return None;
-                }
-                "codex" | "agy" | "grok" | "opencode" | "pi" | "muse"
-                    if !self.is_family_enabled(&lc) =>
-                {
-                    return None;
-                }
-                _ => {}
+                return slug.clone();
             }
         }
-        Some(lc)
+        lc
     }
 
     /// Canonicalize `claude-work` / `claude:<dir>` rows onto their matching
-    /// custom provider slug (e.g. `claudework`) and, when `filter_inactive` is
-    /// true (`otto_only = false`), hide disabled built-ins and orphan
-    /// `~/.claude-*` directories from `summary`.
-    pub fn canonicalize_summary(&self, summary: &mut crate::UsageSummary, filter_inactive: bool) {
-        self.canonicalize_summary_in(summary, filter_inactive, &home_dir());
+    /// custom provider slug (e.g. `claudework`), merging the rows that meet.
+    /// Hides nothing, so "All" stays a superset of "Otto". Linear: rows are
+    /// merged through an index (a 180-day window has thousands of rows).
+    pub fn canonicalize_summary(&self, summary: &mut crate::UsageSummary) {
+        self.canonicalize_summary_in(summary, &home_dir());
     }
 
-    pub fn canonicalize_summary_in(
-        &self,
-        summary: &mut crate::UsageSummary,
-        filter_inactive: bool,
-        home: &Path,
-    ) {
-        let mut merged_providers: Vec<crate::ProviderUsage> =
-            Vec::with_capacity(summary.providers.len());
-        for mut row in std::mem::take(&mut summary.providers) {
-            let Some(canon) = self.resolve_usage_provider_in(&row.provider, filter_inactive, home)
-            else {
-                summary.total_events = summary.total_events.saturating_sub(row.events);
-                summary.total_input_tokens =
-                    summary.total_input_tokens.saturating_sub(row.input_tokens);
-                summary.total_output_tokens = summary
-                    .total_output_tokens
-                    .saturating_sub(row.output_tokens);
-                summary.total_cache_read_tokens = summary
-                    .total_cache_read_tokens
-                    .saturating_sub(row.cache_read_tokens);
-                summary.total_cache_write_tokens = summary
-                    .total_cache_write_tokens
-                    .saturating_sub(row.cache_write_tokens);
-                summary.total_tokens = summary.total_tokens.saturating_sub(row.total_tokens);
-                summary.total_cost_usd = (summary.total_cost_usd - row.cost_usd).max(0.0);
-                continue;
-            };
-            row.provider = canon;
-            if let Some(existing) = merged_providers
-                .iter_mut()
-                .find(|p| p.provider == row.provider)
-            {
-                existing.events += row.events;
-                existing.input_tokens += row.input_tokens;
-                existing.output_tokens += row.output_tokens;
-                existing.cache_read_tokens += row.cache_read_tokens;
-                existing.cache_write_tokens += row.cache_write_tokens;
-                existing.total_tokens += row.total_tokens;
-                existing.cost_usd += row.cost_usd;
-            } else {
-                merged_providers.push(row);
-            }
-        }
-        merged_providers.sort_by_key(|a| std::cmp::Reverse(a.total_tokens));
-        summary.providers = merged_providers;
-
-        let mut merged_models: Vec<crate::ModelUsage> = Vec::with_capacity(summary.models.len());
-        for mut m in std::mem::take(&mut summary.models) {
-            let Some(canon) = self.resolve_usage_provider_in(&m.provider, filter_inactive, home)
-            else {
-                continue;
-            };
-            m.provider = canon;
-            if let Some(existing) = merged_models
-                .iter_mut()
-                .find(|x| x.provider == m.provider && x.model == m.model)
-            {
-                existing.events += m.events;
-                existing.input_tokens += m.input_tokens;
-                existing.output_tokens += m.output_tokens;
-                existing.cache_read_tokens += m.cache_read_tokens;
-                existing.cache_write_tokens += m.cache_write_tokens;
-                existing.total_tokens += m.total_tokens;
-                existing.cost_usd += m.cost_usd;
-            } else {
-                merged_models.push(m);
-            }
-        }
-        merged_models.sort_by_key(|a| std::cmp::Reverse(a.total_tokens));
-        summary.models = merged_models;
-
-        let mut merged_daily_models: Vec<crate::DailyModelUsage> =
-            Vec::with_capacity(summary.daily_models.len());
-        for mut dm in std::mem::take(&mut summary.daily_models) {
-            let Some(canon) = self.resolve_usage_provider_in(&dm.provider, filter_inactive, home)
-            else {
-                continue;
-            };
-            dm.provider = canon;
-            if let Some(existing) = merged_daily_models
-                .iter_mut()
-                .find(|x| x.day == dm.day && x.provider == dm.provider && x.model == dm.model)
-            {
-                existing.input_tokens += dm.input_tokens;
-                existing.output_tokens += dm.output_tokens;
-                existing.cache_read_tokens += dm.cache_read_tokens;
-                existing.cache_write_tokens += dm.cache_write_tokens;
-                existing.total_tokens += dm.total_tokens;
-                existing.cost_usd += dm.cost_usd;
-            } else {
-                merged_daily_models.push(dm);
-            }
-        }
-        summary.daily_models = merged_daily_models;
+    pub fn canonicalize_summary_in(&self, summary: &mut crate::UsageSummary, home: &Path) {
+        let canon = |p: &str| self.resolve_usage_provider_in(p, home);
+        summary.providers = merge_rows(
+            std::mem::take(&mut summary.providers),
+            |r| {
+                r.provider = canon(&r.provider);
+                r.provider.clone()
+            },
+            |a, b| {
+                a.events += b.events;
+                a.input_tokens += b.input_tokens;
+                a.output_tokens += b.output_tokens;
+                a.cache_read_tokens += b.cache_read_tokens;
+                a.cache_write_tokens += b.cache_write_tokens;
+                a.total_tokens += b.total_tokens;
+                a.cost_usd = crate::engine::round6(a.cost_usd + b.cost_usd);
+            },
+        );
+        summary
+            .providers
+            .sort_by_key(|a| std::cmp::Reverse(a.total_tokens));
+        summary.models = merge_rows(
+            std::mem::take(&mut summary.models),
+            |m| {
+                m.provider = canon(&m.provider);
+                (m.provider.clone(), m.model.clone())
+            },
+            |a, b| {
+                a.events += b.events;
+                a.input_tokens += b.input_tokens;
+                a.output_tokens += b.output_tokens;
+                a.cache_read_tokens += b.cache_read_tokens;
+                a.cache_write_tokens += b.cache_write_tokens;
+                a.total_tokens += b.total_tokens;
+                a.cost_usd = crate::engine::round6(a.cost_usd + b.cost_usd);
+            },
+        );
+        summary
+            .models
+            .sort_by_key(|a| std::cmp::Reverse(a.total_tokens));
+        summary.daily_models = merge_rows(
+            std::mem::take(&mut summary.daily_models),
+            |dm| {
+                dm.provider = canon(&dm.provider);
+                (dm.day.clone(), dm.provider.clone(), dm.model.clone())
+            },
+            |a, b| {
+                a.input_tokens += b.input_tokens;
+                a.output_tokens += b.output_tokens;
+                a.cache_read_tokens += b.cache_read_tokens;
+                a.cache_write_tokens += b.cache_write_tokens;
+                a.total_tokens += b.total_tokens;
+                a.cost_usd = crate::engine::round6(a.cost_usd + b.cost_usd);
+            },
+        );
     }
+}
+
+/// Fold `rows` by `key` (which may rewrite the row first), keeping the first
+/// row of each key in place and `add`ing the later ones into it.
+fn merge_rows<T, K: std::hash::Hash + Eq>(
+    rows: Vec<T>,
+    mut key: impl FnMut(&mut T) -> K,
+    add: impl Fn(&mut T, &T),
+) -> Vec<T> {
+    let mut at: std::collections::HashMap<K, usize> =
+        std::collections::HashMap::with_capacity(rows.len());
+    let mut out: Vec<T> = Vec::with_capacity(rows.len());
+    for mut row in rows {
+        match at.entry(key(&mut row)) {
+            std::collections::hash_map::Entry::Occupied(i) => add(&mut out[*i.get()], &row),
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(out.len());
+                out.push(row);
+            }
+        }
+    }
+    out
 }
 
 /// Every login `user_id` may see, with its newest limits. Root also sees the
@@ -1518,15 +1474,79 @@ mod tests {
             ..Default::default()
         };
 
-        active.canonicalize_summary_in(&mut summary, true, &home);
-        assert_eq!(summary.providers.len(), 1);
-        assert_eq!(summary.providers[0].provider, "claudework");
-        assert_eq!(summary.providers[0].events, 7);
-        assert_eq!(summary.providers[0].total_tokens, 1_050);
-        assert_eq!(summary.total_events, 7);
-        assert_eq!(summary.total_tokens, 1_050);
-        assert_eq!(summary.models.len(), 1);
-        assert_eq!(summary.models[0].provider, "claudework");
-        assert_eq!(summary.models[0].total_tokens, 1_050);
+        // Merged onto the custom slug; the orphan dir and the disabled grok
+        // stay (All ⊇ Otto) and the totals are untouched.
+        active.canonicalize_summary_in(&mut summary, &home);
+        let p: Vec<_> = summary
+            .providers
+            .iter()
+            .map(|p| (p.provider.as_str(), p.events, p.total_tokens))
+            .collect();
+        assert_eq!(
+            p,
+            [
+                ("claudework", 7, 1_050),
+                ("claude-sub", 2, 300),
+                ("grok", 1, 150)
+            ]
+        );
+        assert_eq!((summary.total_events, summary.total_tokens), (10, 1_500));
+        let m: Vec<_> = summary
+            .models
+            .iter()
+            .map(|m| (m.provider.as_str(), m.total_tokens))
+            .collect();
+        assert_eq!(m, [("claudework", 1_050), ("claude-sub", 300)]);
+    }
+
+    #[test]
+    fn canonicalize_rounds_merged_costs_like_the_rollups() {
+        let active = ActiveLimitProviders::from_specs_with_env_in(
+            [("claudework", "claude-work", &[][..], Some("claude"), None)],
+            Path::new("/home/x"),
+        );
+        let mut summary = crate::UsageSummary::default();
+        for (provider, cost) in [("claudework", 0.1), ("claude-work", 0.2)] {
+            summary.providers.push(crate::ProviderUsage {
+                provider: provider.into(),
+                cost_usd: cost,
+                ..Default::default()
+            });
+        }
+        active.canonicalize_summary_in(&mut summary, Path::new("/home/x"));
+        assert_eq!(
+            summary.providers[0].cost_usd, 0.3,
+            "not 0.30000000000000004"
+        );
+    }
+
+    #[test]
+    fn canonicalize_merges_a_long_window_by_key() {
+        // 180 days x many distinct models (agy can record one per request):
+        // every row is visited once and same-key rows meet in one.
+        let active = ActiveLimitProviders::from_specs_with_env_in(
+            [("claudework", "claude-work", &[][..], Some("claude"), None)],
+            Path::new("/home/x"),
+        );
+        let mut summary = crate::UsageSummary::default();
+        for day in 0..180 {
+            for model in 0..100 {
+                for provider in ["claudework", "claude-work"] {
+                    summary.daily_models.push(crate::DailyModelUsage {
+                        day: format!("d{day}"),
+                        provider: provider.into(),
+                        model: format!("m{model}"),
+                        total_tokens: 1,
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+        active.canonicalize_summary_in(&mut summary, Path::new("/home/x"));
+        assert_eq!(summary.daily_models.len(), 18_000);
+        assert!(summary
+            .daily_models
+            .iter()
+            .all(|d| d.provider == "claudework" && d.total_tokens == 2));
     }
 }

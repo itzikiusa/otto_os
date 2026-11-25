@@ -328,9 +328,11 @@ pub(super) struct AcpDriverState {
     /// The agent's sandbox wrapper (`sandbox-exec -p <profile>`), reused for
     /// client terminals; empty when the agent runs unconfined.
     pub(super) confine: Vec<String>,
-    /// The agent's prepared env (a client terminal gets it too). Not in a
-    /// snapshot.
-    #[serde(skip)]
+    /// The agent's prepared env (a client terminal gets it too). In the
+    /// snapshot, which goes only to the runtime holder (memory, never disk)
+    /// that already got this env with the spawn spec: an adopted driver keeps
+    /// it and its override guard (review R3-003).
+    #[serde(default)]
     pub(super) child_env: Vec<(String, String)>,
     pub(super) terminals: u64,
     /// Each open client terminal's output so far (bounded), by terminal id.
@@ -2968,12 +2970,20 @@ impl StructuredDriver for AcpDriver {
         Ok(())
     }
 
+    fn after_adopt(&mut self) -> DriverStep {
+        // The agent waits on these answers and prints nothing until then.
+        let mut step = DriverStep::default();
+        self.answer_orphans(&mut step);
+        step
+    }
+
     fn needs_idle_turn_settle(&self) -> bool {
         self.state.autonomous
             && self.state.turn_id.is_some()
             && self.state.prompt_id.is_none()
             && self.state.pending.is_empty()
             && self.state.questions.is_empty()
+            && self.state.client_waits.is_empty()
             && !self.state.sideband.is_awaiting_followup()
             && !self.state.tools.values().any(|t| {
                 matches!(
@@ -3979,7 +3989,97 @@ mod tests {
         );
         let c = r#"{"jsonrpc":"2.0","id":"c1","method":"terminal/create","params":{"sessionId":"g","command":"make deploy","cwd":"/etc","env":[{"name":"AWS_PROFILE","value":"prod"}]}}"#;
         let p = prompt_of(&d.on_line(c));
-        assert_eq!(p, "make deploy\nin /etc\nenv: AWS_PROFILE");
+        assert_eq!(p, "make deploy\nin /etc\nenv: AWS_PROFILE=prod");
+    }
+
+    /// Review R1-003: the prompt shows each applied key with its value (a
+    /// secret-named one "(hidden)"); a key that is not a plain name, runs
+    /// other code, is Otto's own (any case) or has a value the prompt cannot
+    /// show in full is dropped and named; the command runs with the rest.
+    #[test]
+    fn a_command_env_that_runs_code_or_overrides_otto_is_dropped() {
+        let mut d = AcpDriver::grok();
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"g"}}"#);
+        d.state.child_env = vec![
+            ("OWN_KEY".into(), "otto".into()),
+            ("PATH".into(), "/otto/bin".into()),
+        ];
+        let env = json!([
+            {"name":"BASH_ENV","value":"/tmp/pwn.sh"},
+            {"name":"DYLD_INSERT_LIBRARIES","value":"/tmp/pwn.dylib"},
+            {"name":"node_options","value":"--require /tmp/pwn.js"},
+            {"name":"PATH","value":"/tmp/bin"},
+            {"name":"OTTO_TOKEN","value":"x"},
+            {"name":"OWN_KEY","value":"agent"},
+            {"name":"SHELLOPTS","value":"xtrace"},
+            {"name":"PS4","value":"$(touch /tmp/pwn)"},
+            {"name":"BASH_FUNC_ls%%","value":"() { touch /tmp/pwn; }"},
+            {"name":"X\nenv: FAKE","value":"1"},
+            {"name":"path","value":"/tmp/bin"},
+            {"name":"own_key","value":"agent"},
+            {"name":"BIG","value":"x".repeat(513)},
+            {"name":"TERM","value":"xterm-256color"},
+            {"name":"LC_ALL","value":"C"},
+            {"name":"PAGER","value":"cat"},
+            {"name":"MY_API_TOKEN","value":"s3cret"}
+        ]);
+        let c = json!({"jsonrpc":"2.0","id":"c1","method":"terminal/create","params":{"sessionId":"g","command":"npm test","env":env}});
+        d.state.access = RuntimeAccessMode::ApprovalRequired;
+        let s = d.on_line(&c.to_string());
+        let prompt = s
+            .events
+            .iter()
+            .find_map(|e| match e {
+                DriverEvent::Request { prompt, .. } => prompt.clone(),
+                _ => None,
+            })
+            .expect("still asks");
+        assert_eq!(
+            prompt,
+            "npm test\nin /w\nenv: TERM=xterm-256color, LC_ALL=C, PAGER=cat, MY_API_TOKEN=(hidden)\nenv ignored: BASH_ENV (not allowed), DYLD_INSERT_LIBRARIES (not allowed), node_options (not allowed), PATH (not allowed), OTTO_TOKEN (not allowed), OWN_KEY (set by Otto), SHELLOPTS (not allowed), PS4 (not allowed), a key that is not a plain name, a key that is not a plain name, path (not allowed), own_key (set by Otto), BIG (value multi-line or over 512 chars)"
+        );
+        d.state.access = RuntimeAccessMode::FullAccess;
+        let s = d.on_line(&c.to_string());
+        let env = s
+            .events
+            .iter()
+            .find_map(|e| match e {
+                DriverEvent::ClientCall {
+                    op: crate::driver::ClientOp::TerminalCreate { env, .. },
+                    ..
+                } => Some(env.clone()),
+                _ => None,
+            })
+            .expect("the command runs");
+        let got = |k: &str| {
+            env.iter()
+                .filter(|(n, _)| n == k)
+                .map(|(_, v)| v.as_str())
+                .collect::<Vec<_>>()
+        };
+        for k in [
+            "BASH_ENV",
+            "DYLD_INSERT_LIBRARIES",
+            "node_options",
+            "OTTO_TOKEN",
+            "SHELLOPTS",
+            "PS4",
+            "BASH_FUNC_ls%%",
+            "X\nenv: FAKE",
+            "path",
+            "own_key",
+            "BIG",
+        ] {
+            assert!(got(k).is_empty(), "{k} dropped");
+        }
+        assert_eq!(got("PATH"), ["/otto/bin"], "Otto's PATH stays");
+        assert_eq!(got("PAGER"), ["cat"]);
+        assert_eq!(got("MY_API_TOKEN"), ["s3cret"]);
+        assert_eq!(got("OWN_KEY"), ["otto"], "Otto's value wins");
+        assert_eq!(got("TERM"), ["xterm-256color"]);
+        assert_eq!(got("LC_ALL"), ["C"]);
     }
 
     /// Security 6: a chatty command's row keeps only the tail.
@@ -3999,6 +4099,42 @@ mod tests {
         }
         assert!(d.state.tools["c1"].output.len() <= 256 << 10);
         assert!(d.state.terminal_output["term-1"].len() <= 256 << 10);
+    }
+
+    /// Review R1-023: no client call is served before the session exists, no
+    /// new write or command while the turn is being cancelled, and an
+    /// autonomous turn waiting on a client call does not idle-settle.
+    #[test]
+    fn client_calls_respect_the_session_and_its_turn() {
+        let no_call = |s: &DriverStep| {
+            !s.events
+                .iter()
+                .any(|e| matches!(e, DriverEvent::ClientCall { .. }))
+        };
+        let mut d = AcpDriver::grok();
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.state.access = RuntimeAccessMode::FullAccess;
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":"r1","method":"fs/read_text_file","params":{"path":"/tmp/x/a.txt"}}"#);
+        assert!(no_call(&s), "before session/new");
+        assert_eq!(sent(&s, 0)["error"]["code"], -32602);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"g"}}"#);
+
+        d.state.cancelling = true;
+        for line in [
+            r#"{"jsonrpc":"2.0","id":"w1","method":"fs/write_text_file","params":{"sessionId":"g","path":"/tmp/x/a.txt","content":"hi"}}"#,
+            r#"{"jsonrpc":"2.0","id":"t1","method":"terminal/create","params":{"sessionId":"g","command":"make"}}"#,
+        ] {
+            let s = d.on_line(line);
+            assert!(no_call(&s), "while cancelling: {line}");
+            assert_eq!(sent(&s, 0)["error"]["code"], -32000);
+        }
+        d.state.cancelling = false;
+
+        d.on_line(r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"g","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"Timer fired"}}}}"#);
+        assert!(d.needs_idle_turn_settle());
+        d.on_line(r#"{"jsonrpc":"2.0","id":"t2","method":"terminal/wait_for_exit","params":{"sessionId":"g","terminalId":"term-1"}}"#);
+        assert!(!d.needs_idle_turn_settle(), "it waits on Otto's answer");
     }
 
     /// Review note: under Auto-accept edits a served command still asks
@@ -4053,6 +4189,34 @@ mod tests {
         assert_eq!(sent(&s, 0)["error"]["code"], -32000);
         let s = adopted.on_line(r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"g","update":{"sessionUpdate":"usage_update","used":1,"size":2}}}"#);
         assert!(s.writes.is_empty(), "answered once");
+    }
+
+    /// Review R3-003: after a daemon restart the adopted driver still passes
+    /// Otto's env to a client terminal and still refuses an override of it.
+    #[test]
+    fn an_adopted_driver_keeps_ottos_env_for_client_terminals() {
+        let mut d = AcpDriver::grok();
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"g"}}"#);
+        d.state.child_env = vec![("OWN_KEY".into(), "otto".into())];
+        let mut adopted = AcpDriver::grok();
+        adopted.restore_state(&d.snapshot_state()).unwrap();
+        adopted.state.access = RuntimeAccessMode::FullAccess;
+        let c = r#"{"jsonrpc":"2.0","id":"c1","method":"terminal/create","params":{"sessionId":"g","command":"ls","env":[{"name":"own_key","value":"agent"}]}}"#;
+        let env = adopted
+            .on_line(c)
+            .events
+            .into_iter()
+            .find_map(|e| match e {
+                DriverEvent::ClientCall {
+                    op: crate::driver::ClientOp::TerminalCreate { env, .. },
+                    ..
+                } => Some(env),
+                _ => None,
+            })
+            .expect("the command runs");
+        assert_eq!(env, [("OWN_KEY".to_string(), "otto".to_string())]);
     }
 
     /// Finding 1: a confined (Seatbelt) grok gets no `fs` capability and its

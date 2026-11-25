@@ -76,3 +76,8 @@ test('what is still loading is left out; rules and an approvals-off switch read 
   assert.equal(off[0].text, 'No external MCP servers yet.');
   assert.match(off[1].text, /turned off/);
 });
+
+test('denials not loaded (yet, or failed) say nothing instead of "No calls were denied"', () => {
+  const s = summarySentences({ servers: null, tools: null, rules: null, approvalsOn: true, approvals: null, now: Date.now() });
+  assert.deepEqual(s.map((x) => x.testid), []);
+});

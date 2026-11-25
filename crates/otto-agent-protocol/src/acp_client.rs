@@ -79,6 +79,23 @@ fn tail_cap(s: &mut String) {
     }
 }
 
+/// An env key whose name says it holds a secret: the prompt shows "(hidden)".
+fn secret_named(key: &str) -> bool {
+    let k = key.to_ascii_uppercase();
+    [
+        "TOKEN",
+        "KEY",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "AUTH",
+        "CREDENTIAL",
+        "COOKIE",
+    ]
+    .iter()
+    .any(|w| k.contains(w))
+}
+
 fn error_line(id: &Value, code: i64, message: &str) -> String {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}}).to_string()
 }
@@ -144,8 +161,15 @@ impl AcpDriver {
             ));
             return;
         }
-        if params.get("sessionId").and_then(Value::as_str) != self.state.session_id.as_deref() {
+        if params.get("sessionId").and_then(Value::as_str) != self.state.session_id.as_deref()
+            || self.state.session_id.is_none()
+        {
             step.write(error_line(&rpc_id, -32602, "not this session"));
+            return;
+        }
+        // A cancelled turn starts no new write or command.
+        if self.state.cancelling && matches!(method, "fs/write_text_file" | "terminal/create") {
+            step.write(error_line(&rpc_id, -32000, "The turn was cancelled."));
             return;
         }
         let s = |k: &str| params.get(k).and_then(Value::as_str).map(str::to_string);
@@ -219,20 +243,32 @@ impl AcpDriver {
                     ),
                     [] => (program, args),
                 };
+                // The prompt shows each applied key with its value (a
+                // secret-named one as "(hidden)"); what it could not show
+                // plainly is dropped and named (the command still runs).
+                let (mut extra, mut ignored) = (Vec::new(), Vec::<String>::new());
+                for e in params
+                    .get("env")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let (Some(k), Some(v)) = (
+                        e.get("name").and_then(Value::as_str),
+                        e.get("value").and_then(Value::as_str),
+                    ) else {
+                        continue;
+                    };
+                    match self.env_refusal(k, v) {
+                        Some(why) => ignored.push(why),
+                        None => extra.push((k.to_string(), v.to_string())),
+                    }
+                }
+                if !ignored.is_empty() {
+                    tracing::debug!(keys = ?ignored, "acp terminal/create: env ignored");
+                }
                 let mut env = self.state.child_env.clone();
-                env.extend(
-                    params
-                        .get("env")
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|e| {
-                            Some((
-                                e.get("name")?.as_str()?.to_string(),
-                                e.get("value")?.as_str()?.to_string(),
-                            ))
-                        }),
-                );
+                env.extend(extra.iter().cloned());
                 self.state.terminals += 1;
                 let terminal_id = format!("term-{}", self.state.terminals);
                 self.bind_terminal(&terminal_id, &line);
@@ -249,16 +285,19 @@ impl AcpDriver {
                 if self.state.access != RuntimeAccessMode::FullAccess {
                     let detail = match &op {
                         ClientOpRepr::Create { cwd, .. } => {
-                            let extra: Vec<&str> = params
-                                .get("env")
-                                .and_then(Value::as_array)
-                                .into_iter()
-                                .flatten()
-                                .filter_map(|e| e.get("name")?.as_str())
-                                .collect();
                             let mut d = format!("{}\nin {cwd}", preview(&line));
                             if !extra.is_empty() {
-                                d.push_str(&format!("\nenv: {}", extra.join(", ")));
+                                let shown: Vec<String> = extra
+                                    .iter()
+                                    .map(|(k, v)| match secret_named(k) {
+                                        true => format!("{k}=(hidden)"),
+                                        false => format!("{k}={v}"),
+                                    })
+                                    .collect();
+                                d.push_str(&format!("\nenv: {}", shown.join(", ")));
+                            }
+                            if !ignored.is_empty() {
+                                d.push_str(&format!("\nenv ignored: {}", ignored.join(", ")));
                             }
                             d
                         }
@@ -287,6 +326,61 @@ impl AcpDriver {
             }
         };
         self.call(step, ClientWait::Plain { rpc_id }, op);
+    }
+
+    /// Review R1-003: why a served command may not take this env entry
+    /// (`None` = it applies, shown with its value): a key that is not a plain
+    /// name, one that makes an innocent command run other code (loaders, shell
+    /// rc / xtrace hooks, interpreter hooks, proxies), one Otto set itself, or
+    /// a value the prompt cannot show in full.
+    fn env_refusal(&self, key: &str, value: &str) -> Option<String> {
+        let plain = key.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !plain {
+            return Some("a key that is not a plain name".into());
+        }
+        const KEYS: [&str; 20] = [
+            "PATH",
+            "BASH_ENV",
+            "ENV",
+            "ZDOTDIR",
+            "NODE_OPTIONS",
+            "PYTHONSTARTUP",
+            "PYTHONPATH",
+            "PERL5OPT",
+            "RUBYOPT",
+            "RUSTC_WRAPPER",
+            "GIT_SSH",
+            "GIT_SSH_COMMAND",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "SHELLOPTS",
+            "BASHOPTS",
+            "PS4",
+            "PROMPT_COMMAND",
+            "FPATH",
+        ];
+        let k = key.to_ascii_uppercase();
+        if KEYS.contains(&k.as_str())
+            || ["DYLD_", "LD_", "OTTO_", "GIT_CONFIG"]
+                .iter()
+                .any(|p| k.starts_with(p))
+        {
+            return Some(format!("{key} (not allowed)"));
+        }
+        if self
+            .state
+            .child_env
+            .iter()
+            .any(|(own, _)| own.eq_ignore_ascii_case(key))
+        {
+            return Some(format!("{key} (set by Otto)"));
+        }
+        if value.chars().count() > 512 || value.chars().any(char::is_control) {
+            return Some(format!("{key} (value multi-line or over 512 chars)"));
+        }
+        None
     }
 
     fn call(&mut self, step: &mut DriverStep, wait: ClientWait, op: ClientOp) {
