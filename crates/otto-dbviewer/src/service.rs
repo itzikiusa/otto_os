@@ -142,15 +142,15 @@ pub fn mcp_query_timeout_ms(requested: Option<u64>) -> u64 {
     }
 }
 
-/// Recursively PII-mask a result's cells in place (by column name, then each
-/// cell's own text — `otto_core::redact::redact_row`) and
+/// Recursively PII-mask a result's cells in place (via `otto_core::redact`) and
 /// flag it `masked`, including every later result set in a multi-statement
 /// batch's `more_results` — so an unmasked cell never leaks just because it was
 /// produced by the 2nd+ statement.
 fn mask_result(res: &mut QueryResult) {
-    let names: Vec<&str> = res.columns.iter().map(|c| c.name.as_str()).collect();
     for row in &mut res.rows {
-        redact::redact_row(&names, row);
+        for cell in row.iter_mut() {
+            *cell = redact::redact_json(cell).value;
+        }
     }
     res.masked = true;
     for more in &mut res.more_results {
@@ -3896,13 +3896,16 @@ mod tests {
 
     use super::*;
 
-    /// "Mask PII" (and every agent read) masks a secret COLUMN, not only
-    /// secret shapes — in every result set of a batch.
+    /// C1-022: "Mask PII" keeps its 0.5.3 rule — secret shapes and secret
+    /// JSON keys inside cells — so ordinary columns (`pass_rate`,
+    /// `season_pass`, `pwd`) and Docker refs are not mangled; in every
+    /// result set of a batch.
     #[test]
-    fn mask_result_masks_by_column_name_in_every_result_set() {
+    fn mask_result_keeps_ordinary_columns_and_masks_secret_shapes() {
+        use serde_json::json;
         let result = |rows: Vec<Vec<Value>>| {
             let mut r = QueryResult::empty();
-            r.columns = ["id", "password_hash"]
+            r.columns = ["pass_rate", "season_pass", "pwd", "image", "meta"]
                 .iter()
                 .map(|n| crate::types::Column {
                     name: n.to_string(),
@@ -3913,24 +3916,29 @@ mod tests {
             r.rows = rows;
             r
         };
-        let mut res = result(vec![vec![
-            serde_json::json!(1),
-            serde_json::json!("$2b$12$x"),
-        ]]);
-        res.more_results.push(result(vec![vec![
-            serde_json::json!(2),
-            serde_json::json!("$2b$12$y"),
-        ]]));
+        let row = vec![
+            json!(0.93),
+            json!("gold"),
+            json!("/srv/app"),
+            json!("alpine:3.19@sha256:abc123"),
+            json!({"password": "x", "plan": "pro"}),
+        ];
+        let mut res = result(vec![row.clone()]);
+        res.more_results.push(result(vec![row]));
         mask_result(&mut res);
         assert!(res.masked);
-        assert_eq!(
-            res.rows[0],
-            vec![serde_json::json!(1), serde_json::json!("[redacted]")]
-        );
-        assert_eq!(
-            res.more_results[0].rows[0][1],
-            serde_json::json!("[redacted]")
-        );
+        for rows in [&res.rows, &res.more_results[0].rows] {
+            assert_eq!(
+                rows[0][..4],
+                [
+                    json!(0.93),
+                    json!("gold"),
+                    json!("/srv/app"),
+                    json!("alpine:3.19@sha256:abc123")
+                ]
+            );
+            assert_eq!(rows[0][4], json!({"password": "[redacted]", "plan": "pro"}));
+        }
     }
 
     /// S16-08: widgets re-run unattended, so they always run read-only and a

@@ -389,11 +389,10 @@ registerUiCommands('ide', {
     });
     if (!ok) throw declined('the expression');
     const r = await ide.evaluate(expr, args.frame_id);
-    // A path-like expression is the result's key, so it masks by name.
-    const key = /^[\w.[\]"']+$/.test(expr) ? expr : 'result';
+    // The expression is the result's key, so it masks by name (`os.Getenv("DB_PASSWORD")` too).
     return {
       expression: expr,
-      values: { [key]: { value: clip(r.result, EVAL_MAX), ...(r.type ? { type: r.type } : {}), ...(r.variables_reference > 0 ? { ref: r.variables_reference } : {}) } },
+      values: { [expr]: { value: clip(r.result, EVAL_MAX), ...(r.type ? { type: r.type } : {}), ...(r.variables_reference > 0 ? { ref: r.variables_reference } : {}) } },
     };
   },
 

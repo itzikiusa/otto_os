@@ -314,7 +314,7 @@ test('evaluate: every expression confirms, showing it exactly; inspect reads by 
   assert.equal(c.confirms.length, 2);
   assert.ok(c.confirms[1].what.includes('cfg.Port + 1'));
   assert.equal(c.confirms[1].connId, undefined);
-  eq(r.values, { result: { value: '42', type: 'int' } });
+  eq(r.values, { 'cfg.Port + 1': { value: '42', type: 'int' } }, 'keyed by the expression, so redaction masks it by name');
   const no = { ...c, confirmWrite: async () => false };
   await rejectsWith(handlers.ide_debug_evaluate({ expression: 'os.Exit(1)' }, no), 'cancelled_by_user');
   assert.equal(ide.calls.filter((x: unknown[]) => x[0] === 'eval').length, 1);

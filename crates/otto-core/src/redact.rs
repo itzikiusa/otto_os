@@ -21,10 +21,18 @@
 //! `scheme://user:pw@host`). Entry points: [`redact_named`], [`redact_row`],
 //! [`redact_vars`], [`redact_data_json`], [`redact_data_text`].
 //!
+//! Text that is itself a JSON document or JSON string literal is redacted as
+//! JSON (recursively); escaped quotes (`\"password\":\"x\"`) are followed at
+//! any depth; a bare `Cookie:` / `Authorization:` value goes to the end of
+//! its line. Names: a bool or null is never masked, nor a number under a short
+//! name (`pass`, `pwd`, `dsn`, `salt`). [`redact_json`] keeps its 0.5.3 key
+//! list for its existing callers.
+//!
 //! Not caught (no parser): an unquoted value with spaces is masked up to its
 //! first space (`Password:two words` from Go `%+v` leaks `words`); a composite
 //! under a sensitive name that spans lines; secrets under innocent names that
-//! have no known shape (`Note: "hunter2"`); a DSN password containing `/`.
+//! have no known shape (`Note: "hunter2"`); a URL userinfo password with a raw
+//! `/`; a scheme-less `user:pw@host` that is not a Go `@tcp(`/`@unix(` DSN.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -51,6 +59,9 @@ const PLACEHOLDER: &str = "[redacted]";
 struct Tally(BTreeMap<&'static str, usize>);
 
 impl Tally {
+    fn total(&self) -> usize {
+        self.0.values().sum()
+    }
     fn bump(&mut self, kind: &'static str) {
         *self.0.entry(kind).or_insert(0) += 1;
     }
@@ -65,43 +76,48 @@ impl Tally {
     }
 }
 
-/// The redaction kind a NAME suggests — a JSON key, table column, variable or
+/// The 0.5.3 key rule of [`redact_json`] (lower-cased `contains`), kept
+/// exactly for its existing callers (MCP results, audit, settings).
+fn sensitive_key_kind(key_lower: &str) -> Option<&'static str> {
+    let k = key_lower;
+    if k.contains("password") || k.contains("passwd") {
+        Some("password")
+    } else if k.contains("api_key")
+        || k.contains("apikey")
+        || k.contains("access_key")
+        || k.contains("accesskey")
+    {
+        Some("api_key")
+    } else if k.contains("private_key") || k.contains("privatekey") {
+        Some("private_key")
+    } else if k.contains("client_secret") || k.contains("secret") {
+        Some("secret")
+    } else if k.contains("authorization") {
+        Some("authorization")
+    } else if k.contains("credential") {
+        Some("credential")
+    } else if k.contains("cookie") {
+        Some("cookie")
+    } else if k.contains("refresh_token")
+        || k.contains("access_token")
+        || k.contains("id_token")
+        || k.contains("session_token")
+        || k.contains("token")
+    {
+        Some("token")
+    } else {
+        None
+    }
+}
+
+/// The redaction kind a NAME suggests for DATA — a table column, variable or
 /// struct field (`cfg.DB.Password`: pass the whole path), env var, header or
 /// Redis key — if it looks sensitive. Case- and separator-insensitive
 /// (`api_key`, `X-Api-Key`, `apiKey` alike); short words only as a whole
-/// segment (`dbPwd`, `user_pass`, `DSN`, `salt`, but not `bypass`).
+/// segment (`dbPwd`, `DSN`, `salt`; `pass` only last: `user_pass`, not
+/// `pass_rate` or `bypass`).
 pub fn sensitive_name_kind(name: &str) -> Option<&'static str> {
-    let k: String = name
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    let has = |p: &str| k.contains(p);
-    if has("password") || has("passwd") || has("passphrase") {
-        Some("password")
-    } else if has("apikey") || has("accesskey") {
-        Some("api_key")
-    } else if has("privatekey") || has("signingkey") {
-        Some("private_key")
-    } else if has("secret") {
-        Some("secret")
-    } else if has("authorization") {
-        Some("authorization")
-    } else if has("credential") {
-        Some("credential")
-    } else if has("cookie") {
-        Some("cookie")
-    } else if has("token") || has("authcode") {
-        Some("token")
-    } else if has("connectionstring") || has("connstring") || k.ends_with("connstr") {
-        Some("connection_string")
-    } else {
-        match name_segment(name, &["pwd", "pass", "dsn", "salt"])? {
-            "dsn" => Some("connection_string"),
-            "salt" => Some("secret"),
-            _ => Some("password"),
-        }
-    }
+    name_kind(name).map(|(kind, _)| kind)
 }
 
 /// Whether [`sensitive_name_kind`] masks values stored under `name`.
@@ -109,11 +125,62 @@ pub fn is_sensitive_name(name: &str) -> bool {
     sensitive_name_kind(name).is_some()
 }
 
-/// The first of `wanted` that is a whole segment of `name`, split at
-/// non-alphanumerics and camel-case humps (`dbPWD`, `DBPass` → `PWD`, `Pass`).
-fn name_segment(name: &str, wanted: &[&'static str]) -> Option<&'static str> {
+/// [`sensitive_name_kind`] plus whether only a short segment matched
+/// (`pwd`, `pass`, `dsn`, `salt`: such a name masks strings only).
+fn name_kind(name: &str) -> Option<(&'static str, bool)> {
+    let k: String = name
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    let has = |p: &str| k.contains(p);
+    let kind = if has("password") || has("passwd") || has("passphrase") {
+        "password"
+    } else if has("apikey") || has("accesskey") {
+        "api_key"
+    } else if has("privatekey") || has("signingkey") {
+        "private_key"
+    } else if has("secret") {
+        "secret"
+    } else if has("authorization") {
+        "authorization"
+    } else if has("credential") {
+        "credential"
+    } else if has("cookie") {
+        "cookie"
+    } else if has("token") || has("authcode") {
+        "token"
+    } else if has("connectionstring") || has("connstring") || k.ends_with("connstr") {
+        "connection_string"
+    } else {
+        let kind = match name_segment(name)? {
+            "dsn" => "connection_string",
+            "salt" => "secret",
+            _ => "password",
+        };
+        return Some((kind, true));
+    };
+    Some((kind, false))
+}
+
+/// The kind a DATA value under `name` is masked as: never a null or a bool
+/// (no secret there), never a number under a short-segment name (a count).
+fn data_name_kind(name: &str, value: &Value) -> Option<&'static str> {
+    let (kind, short) = name_kind(name)?;
+    match value {
+        Value::Null | Value::Bool(_) => None,
+        Value::Number(_) if short => None,
+        _ => Some(kind),
+    }
+}
+
+/// `pwd`, `dsn` or `salt` as a whole segment of `name`, or `pass` as its
+/// LAST segment; split at non-alphanumerics and camel-case humps (`dbPWD`,
+/// `DBPass` → `PWD`, `Pass`).
+fn name_segment(name: &str) -> Option<&'static str> {
     let b = name.as_bytes();
     let mut start: Option<usize> = None;
+    let mut last = "";
     for i in 0..=b.len() {
         let alnum = i < b.len() && b[i].is_ascii_alphanumeric();
         let hump = alnum
@@ -125,7 +192,11 @@ fn name_segment(name: &str, wanted: &[&'static str]) -> Option<&'static str> {
                     && b.get(i + 1).is_some_and(u8::is_ascii_lowercase)));
         if !alnum || hump {
             if let Some(s) = start.take() {
-                if let Some(w) = wanted.iter().find(|w| name[s..i].eq_ignore_ascii_case(w)) {
+                last = &name[s..i];
+                if let Some(w) = ["pwd", "dsn", "salt"]
+                    .into_iter()
+                    .find(|w| last.eq_ignore_ascii_case(w))
+                {
                     return Some(w);
                 }
             }
@@ -134,7 +205,7 @@ fn name_segment(name: &str, wanted: &[&'static str]) -> Option<&'static str> {
             start = Some(i);
         }
     }
-    None
+    last.eq_ignore_ascii_case("pass").then_some("pass")
 }
 
 /// Trim a small set of surrounding punctuation that commonly wraps tokens in
@@ -426,8 +497,8 @@ pub fn redact_data_text(input: &str) -> Redacted<String> {
 /// non-empty `hits` means something was masked ("changed · hidden").
 pub fn redact_named(name: &str, value: &Value) -> Redacted<Value> {
     let mut tally = Tally::default();
-    let value = match sensitive_name_kind(name) {
-        Some(kind) if !value.is_null() => {
+    let value = match data_name_kind(name, value) {
+        Some(kind) => {
             tally.bump(kind);
             Value::String(PLACEHOLDER.to_string())
         }
@@ -474,7 +545,12 @@ fn redact_value(v: &Value, tally: &mut Tally, data: bool) -> Value {
         Value::Object(map) => {
             let mut out = serde_json::Map::with_capacity(map.len());
             for (k, val) in map {
-                if let Some(kind) = sensitive_name_kind(k) {
+                let kind = if data {
+                    data_name_kind(k, val)
+                } else {
+                    sensitive_key_kind(&k.to_lowercase())
+                };
+                if let Some(kind) = kind {
                     out.insert(k.clone(), Value::String(PLACEHOLDER.to_string()));
                     tally.bump(kind);
                 } else {
@@ -493,8 +569,26 @@ fn redact_value(v: &Value, tally: &mut Tally, data: bool) -> Value {
 }
 
 fn redact_data_text_into(input: &str, tally: &mut Tally) -> String {
+    if let Some(json) = redact_embedded_json(input, tally) {
+        return json;
+    }
     let shaped = redact_text_into(input, tally);
     mask_assignments(&shaped, tally).unwrap_or(shaped)
+}
+
+/// Text that IS a JSON document or JSON string literal (a JSON column, a
+/// response body, a Delve-quoted Go string holding JSON) is redacted as JSON:
+/// recursively (each level is a strictly shorter string), up to 1 MiB, and
+/// re-encoded only when something was masked.
+fn redact_embedded_json(input: &str, tally: &mut Tally) -> Option<String> {
+    let t = input.trim();
+    if t.len() > 1 << 20 || !matches!(t.as_bytes().first(), Some(b'{' | b'[' | b'"')) {
+        return None;
+    }
+    let v: Value = serde_json::from_str(t).ok()?;
+    let before = tally.total();
+    let out = redact_value(&v, tally, true);
+    (tally.total() > before).then(|| out.to_string())
 }
 
 /// Mask values written under a sensitive name, and DSN passwords, in `s`
@@ -522,8 +616,18 @@ fn mask_assignments(s: &str, tally: &mut Tally) -> Option<String> {
         }
         let sep_end = i + 1 + usize::from(c == b':' && rest.first() == Some(&b'='));
         let named = key_before(b, i)
-            .and_then(|(ks, ke)| sensitive_name_kind(&s[ks..ke]))
-            .and_then(|kind| value_after(b, sep_end).map(|span| (span, kind)));
+            .and_then(|(ks, ke)| name_kind(&s[ks..ke]))
+            .and_then(|(kind, short)| {
+                let span = match kind {
+                    "cookie" | "authorization" => header_value(b, sep_end, kind == "authorization"),
+                    _ => value_after(b, sep_end),
+                }?;
+                // A number under `pass` / `pwd` is a count, not a password.
+                let numeric = s[span.0..span.1]
+                    .bytes()
+                    .all(|c| c.is_ascii_digit() || c == b'.' || c == b'-');
+                (!(short && numeric)).then_some((span, kind))
+            });
         let span = named.or_else(|| {
             (c == b':')
                 .then(|| dsn_password(b, i))
@@ -569,8 +673,10 @@ fn key_before(b: &[u8], sep: usize) -> Option<(usize, usize)> {
     {
         start -= 1;
     }
-    // `auth:token:42` is a Redis-style path, not a `token` field.
-    let path_segment = b[sep] == b':' && start > 0 && b[start - 1] == b':';
+    // `auth:token:42` is a Redis-style path, not a `token` field (but
+    // `app::password` is a namespaced name).
+    let path_segment =
+        b[sep] == b':' && start > 0 && b[start - 1] == b':' && (start < 2 || b[start - 2] != b':');
     (start < end && !path_segment).then_some((start, end))
 }
 
@@ -580,14 +686,21 @@ fn key_before(b: &[u8], sep: usize) -> Option<(usize, usize)> {
 /// (`Secret: main.S {…}`). After an auth scheme (`Bearer x`) only the
 /// credential.
 fn value_after(b: &[u8], from: usize) -> Option<(usize, usize)> {
-    let skip_spaces = |mut j: usize| {
-        while j < b.len() && matches!(b[j], b' ' | b'\t') {
-            j += 1;
-        }
-        j
-    };
+    let skip_spaces = |j| skip_spaces(b, j);
     let j = skip_spaces(from);
     let first = *b.get(j)?;
+    // An escaped quote opens it (`\"hunter2\"`: JSON inside a rendered
+    // string, at any escape depth): up to the same escaped quote.
+    let escapes = b[j..].iter().take_while(|&&c| c == b'\\').count();
+    if escapes > 0 && matches!(b.get(j + escapes), Some(b'"' | b'\'')) {
+        let delim = &b[j..=j + escapes];
+        let vs = j + escapes + 1;
+        let mut k = vs;
+        while k < b.len() && b[k] != b'\n' && !b[k..].starts_with(delim) {
+            k += 1;
+        }
+        return Some((vs, k));
+    }
     if matches!(first, b'"' | b'\'' | b'`') {
         let mut k = j + 1;
         while k < b.len() && b[k] != first && b[k] != b'\n' {
@@ -611,6 +724,36 @@ fn value_after(b: &[u8], from: usize) -> Option<(usize, usize)> {
     Some((j, end))
 }
 
+fn skip_spaces(b: &[u8], mut j: usize) -> usize {
+    while j < b.len() && matches!(b[j], b' ' | b'\t') {
+        j += 1;
+    }
+    j
+}
+
+/// A Cookie / Authorization value: when bare, the whole rest of the line
+/// (`theme=dark; sid=x`, `AWS4-HMAC-SHA256 Credential=…, Signature=…`),
+/// keeping an Authorization scheme word; quoted or bracketed, as
+/// [`value_after`].
+fn header_value(b: &[u8], from: usize, keep_scheme: bool) -> Option<(usize, usize)> {
+    let j = skip_spaces(b, from);
+    if matches!(b.get(j)?, b'"' | b'\'' | b'`' | b'\\' | b'[' | b'{') {
+        return value_after(b, from);
+    }
+    let mut end = j + b[j..]
+        .iter()
+        .position(|&c| matches!(c, b'\n' | b'\r'))
+        .unwrap_or(b.len() - j);
+    while end > j && matches!(b[end - 1], b' ' | b'\t') {
+        end -= 1;
+    }
+    let scheme_end = b[j..end].iter().position(|&c| c == b' ');
+    match scheme_end {
+        Some(sp) if keep_scheme => Some((skip_spaces(b, j + sp), end)),
+        _ => Some((j, end)),
+    }
+}
+
 /// End of a bare value starting at `j`: brackets nest; at depth 0 a space,
 /// `, ; &`, a quote or an unbalanced closer ends it; a newline always does.
 fn bare_end(b: &[u8], mut j: usize) -> usize {
@@ -631,10 +774,12 @@ fn bare_end(b: &[u8], mut j: usize) -> usize {
     j
 }
 
-/// `user:PASSWORD@host` around the `:` at `colon` (Go `root:pw@tcp(…)/db`,
-/// or the userinfo of `scheme://user:pw@host`): the password span, up to the
-/// LAST `@` before a space, quote, bracket, `/`, `?` or `#` (a raw `@` in it stays
-/// covered), when a host follows.
+/// `user:PASSWORD@host` around the `:` at `colon`, in two forms only: the
+/// userinfo of `scheme://user:pw@host` (up to the LAST `@` before a space,
+/// quote, `/`, `?` or `#`), and a Go driver DSN `user:pw@tcp(…)` /
+/// `@tcp6(` / `@unix(` (up to the last such `@` before a space, quote or
+/// brace — any other character may be in the password). `alpine:3.19@sha256:…`
+/// and `mailto:a@b` are neither.
 fn dsn_password(b: &[u8], colon: usize) -> Option<(usize, usize)> {
     let is_user =
         |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-' | b'~' | b'%' | b'+');
@@ -642,11 +787,11 @@ fn dsn_password(b: &[u8], colon: usize) -> Option<(usize, usize)> {
     while u > 0 && is_user(b[u - 1]) {
         u -= 1;
     }
+    let scheme = b[..u].ends_with(b"://");
     let boundary = u == 0
         || matches!(
             b[u - 1],
-            b'/' | b' '
-                | b'\t'
+            b' ' | b'\t'
                 | b'\n'
                 | b'"'
                 | b'\''
@@ -659,38 +804,23 @@ fn dsn_password(b: &[u8], colon: usize) -> Option<(usize, usize)> {
                 | b'<'
                 | b':'
         );
-    // An empty user only right after `scheme://` (`redis://:pw@cache`).
-    let empty_user_ok = u == colon && b[..u].ends_with(b"//");
-    if (u == colon && !empty_user_ok) || !boundary {
+    if !scheme && (u == colon || !boundary) {
         return None;
     }
+    let stops: &[u8] = if scheme {
+        b" \t\r\n\"'`/?#<>"
+    } else {
+        b" \t\r\n\"'`{}[]"
+    };
+    let go_net = |at: usize| {
+        [&b"tcp("[..], b"tcp6(", b"unix("]
+            .iter()
+            .any(|n| b[at + 1..].starts_with(n))
+    };
     let mut end = colon + 1;
     let mut at = None;
-    while end < b.len()
-        && !matches!(
-            b[end],
-            b' ' | b'\t'
-                | b'\n'
-                | b'\r'
-                | b'"'
-                | b'\''
-                | b'`'
-                | b','
-                | b';'
-                | b'/'
-                | b'?'
-                | b'#'
-                | b'<'
-                | b'>'
-                | b'('
-                | b')'
-                | b'{'
-                | b'}'
-                | b'['
-                | b']'
-        )
-    {
-        if b[end] == b'@' {
+    while end < b.len() && !stops.contains(&b[end]) {
+        if b[end] == b'@' && (scheme || go_net(end)) {
             at = Some(end);
         }
         end += 1;
@@ -899,18 +1029,113 @@ mod tests {
     }
 
     #[test]
-    fn redact_json_masks_separator_variants_but_leaves_code_text_alone() {
-        let r = redact_json(&json!({"X-Api-Key": "k1", "dbPwd": "p", "note": "password: String"}));
-        assert_eq!(r.value["X-Api-Key"], json!(PLACEHOLDER));
-        assert_eq!(r.value["dbPwd"], json!(PLACEHOLDER));
-        // Code/prose strings keep the shapes-only pass (diffs, files, messages).
-        assert_eq!(r.value["note"], json!("password: String"));
+    fn redact_json_keeps_its_053_key_rule_and_leaves_code_text_alone() {
+        // C1-022: existing callers (MCP results, audit, settings) keep the
+        // 0.5.3 key list exactly; the wider name rule is for data only.
+        let v = json!({
+            "X-Api-Key": "k1", "dbPwd": "p", "require_proof_pass": true, "require_pass": true,
+            "pass_rate": 0.9, "pwd": "/x", "note": "password: String", "api_key": "k2",
+        });
+        let r = redact_json(&v);
+        let mut want = v.clone();
+        want["api_key"] = json!(PLACEHOLDER);
+        assert_eq!(r.value, want);
+        assert_eq!(
+            redact_data_json(&json!({"dbPwd": "p"})).value,
+            json!({"dbPwd": PLACEHOLDER})
+        );
         assert_eq!(
             redact_text("let password = get(); token: Option<String>")
                 .hits
                 .len(),
             0
         );
+    }
+
+    #[test]
+    fn data_names_never_mask_flags_and_short_names_only_mask_strings() {
+        // C1-022: a bool is never a secret; `pass`/`pwd`/`dsn`/`salt` hold
+        // strings, so a number under them is a count, not a credential.
+        let v = json!({"require_pass": true, "pass": 3, "pass_rate": 0.93, "season_pass": "gold",
+                       "user_pass": "hunter2", "password": 1234, "token_count": 5});
+        let r = redact_data_json(&v).value;
+        assert_eq!(r["require_pass"], json!(true));
+        assert_eq!(r["pass"], json!(3));
+        assert_eq!(r["pass_rate"], json!(0.93));
+        assert_eq!(r["user_pass"], json!(PLACEHOLDER));
+        assert_eq!(
+            r["password"],
+            json!(PLACEHOLDER),
+            "a long name still masks a numeric PIN"
+        );
+        assert_eq!(data("pass_rate: 0.93, pass: 3"), "pass_rate: 0.93, pass: 3");
+        assert!(!is_sensitive_name("pass_rate"));
+    }
+
+    #[test]
+    fn data_text_masks_escaped_json_inside_strings() {
+        // C1-007: a Go string holding JSON, as Delve renders it, and a JSON log line.
+        let delve = r#"body: "{\"password\":\"hunter2\",\"user\":\"bob\"}", n: 1"#;
+        let out = data(delve);
+        assert!(!out.contains("hunter2"), "{out}");
+        assert!(out.contains(r#"\"user\":\"bob\""#), "{out}");
+        // A value that IS a JSON document (a cell, a response body) is redacted as JSON.
+        let doc = r#"{"auth":{"access_token":"abc","scope":"r"},"msg":"{\"secret\":\"s1\"}"}"#;
+        let r = redact_data_text(doc);
+        assert!(
+            !r.value.contains("abc") && !r.value.contains("s1"),
+            "{}",
+            r.value
+        );
+        assert!(r.value.contains(r#""scope":"r""#), "{}", r.value);
+        // A Delve-quoted Go string that is itself JSON.
+        let quoted = r#""{\"api_key\":\"k-1\"}""#;
+        assert!(!data(quoted).contains("k-1"), "{}", data(quoted));
+        // Double-escaped (JSON inside a JSON string inside a Go string).
+        assert!(!data(r#"x: "{\\\"token\\\":\\\"t9\\\"}"#).contains("t9"));
+        // Nothing to mask: the text is returned exactly as given.
+        assert_eq!(data(r#"{ "a": 1 }"#), r#"{ "a": 1 }"#);
+    }
+
+    #[test]
+    fn data_text_masks_whole_cookie_and_authorization_values() {
+        // C1-021
+        assert_eq!(
+            data("Cookie: theme=dark; sid=SECRET123"),
+            "Cookie: [redacted]"
+        );
+        assert_eq!(
+            data("Authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/2026, SignedHeaders=host, Signature=deadbeef\nHost: x"),
+            "Authorization: AWS4-HMAC-SHA256 [redacted]\nHost: x"
+        );
+        assert_eq!(
+            data("Set-Cookie: sid=abc; Path=/; HttpOnly"),
+            "Set-Cookie: [redacted]"
+        );
+        assert_eq!(data("app::password: hunter2"), "app::password: [redacted]");
+        assert_eq!(
+            data("postgres://u:p(a)ss@host/db"),
+            "postgres://u:[redacted]@host/db"
+        );
+        assert_eq!(
+            data("root:p;a,ss@tcp(h:3306)/d"),
+            "root:[redacted]@tcp(h:3306)/d"
+        );
+        // An evaluate result keyed by its expression masks by name.
+        let r = redact_data_json(&json!({r#"os.Getenv("DB_PASSWORD")"#: {"value": "\"hunter2\""}}));
+        assert!(!r.value.to_string().contains("hunter2"));
+    }
+
+    #[test]
+    fn data_text_leaves_docker_refs_and_emails() {
+        // C1-022: only a URI userinfo or a Go `@tcp(` / `@unix(` DSN has a password.
+        for s in [
+            "image alpine:3.19@sha256:abc123",
+            "mailto:bob@example.org",
+            "ref repo/app:v1@sha256:0f",
+        ] {
+            assert_eq!(data(s), s);
+        }
     }
 
     #[test]
@@ -981,10 +1206,10 @@ mod tests {
             data(r#"cfg = {Secret: main.Secret {Value: "x", Id: 1}, Name: "n"}"#),
             r#"cfg = {Secret: [redacted], Name: "n"}"#
         );
-        assert_eq!(
-            data(r#"{"secrets": {"a": "b"}, "ok": 1}"#),
-            r#"{"secrets": [redacted], "ok": 1}"#
-        );
+        // A JSON document is redacted as JSON (and re-encoded).
+        let doc: Value =
+            serde_json::from_str(&data(r#"{"secrets": {"a": "b"}, "ok": 1}"#)).unwrap();
+        assert_eq!(doc, json!({"secrets": PLACEHOLDER, "ok": 1}));
         // Escaped quotes stay inside the masked string.
         assert_eq!(
             data(r#"Password: "a\"b", X: 1"#),
@@ -1018,10 +1243,7 @@ mod tests {
             data("Authorization: Token abc"),
             "Authorization: Token [redacted]"
         );
-        assert_eq!(
-            data("Cookie: sid=abc; theme=dark"),
-            "Cookie: [redacted]; theme=dark"
-        );
+        assert_eq!(data("Cookie: sid=abc; theme=dark"), "Cookie: [redacted]");
         assert_eq!(data("password := \"x\""), "password := \"[redacted]\"");
         assert_eq!(
             data(r#"{"access_token":"abc","expires_in":3600}"#),
