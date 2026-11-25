@@ -115,6 +115,10 @@ function notifySaved(path: string, content: string): void {
   for (const fn of fileSavedListeners) fn(path, content);
 }
 
+/** `defer`: add the tab without reading it (a restored strip); it is read when activated or
+ *  opened again. `lane: 'bg'`: read on the background lane (prefetching hidden tabs). */
+export type IdeOpenFileOpts = { line?: number; col?: number; preview?: boolean; inSplit?: boolean; reload?: boolean; background?: boolean; projectScoped?: boolean; defer?: boolean; lane?: 'bg' };
+
 export interface IdeBufferHost {
   target: IdeTargetSpec; readonly targetPayload: IdeTargetSpec; readonly projectRoots?: IdeProjectRoot[];
   tabs: IdeOpenTab[]; hasClosedAllTabs: boolean;
@@ -124,7 +128,7 @@ export interface IdeBufferHost {
   cursorInfo: { line: number; col: number; cursors: number; selections: { anchor: number; head: number }[] };
   resolvePath(p: string): string; targetQuery(extra?: Record<string, string | boolean | null | undefined>): string;
   replaceBufferContent?(path: string, nextContent: string, range?: { from: number; to: number }): boolean;
-  openFile(rawPath: string, opts?: { line?: number; col?: number; preview?: boolean; inSplit?: boolean; reload?: boolean; background?: boolean; projectScoped?: boolean }): Promise<void>;
+  openFile(rawPath: string, opts?: IdeOpenFileOpts): Promise<void>;
   closeSplit(): void; saveFile(path?: string, forceOverwrite?: boolean, opts?: { silent?: boolean }): Promise<boolean>;
   updateBuffer(path: string, content: string): void; sendCollabEdit(path: string, content: string, save?: boolean): Promise<boolean>;
   loadGutter(path: string, content?: string): Promise<void>; loadSymbols(path: string, content?: string): Promise<void>;
@@ -300,7 +304,8 @@ export class IdeBufferPerfController {
     this.flushHistorySnapshot(host);
     for (let i = 0; i < host.tabs.length; i++) {
       const t = host.tabs[i];
-      writeIdeUndoDraftImmediate(t.path, t.savedContent, t.content);
+      // A tab not read yet holds a placeholder: writing it would erase its saved draft.
+      if (!t.loading) writeIdeUndoDraftImmediate(t.path, t.savedContent, t.content);
     }
     if (host.target.root) {
       saveWorkspaceOpenTabs(host.target.root, host.tabs, host.activePath, host.splitPath);
@@ -500,7 +505,7 @@ export async function performOpenFile(
   perf: IdeBufferPerfController,
   isNavigatingHistory: boolean,
   rawPath: string,
-  opts: { line?: number; col?: number; preview?: boolean; inSplit?: boolean; reload?: boolean; background?: boolean; projectScoped?: boolean } = {},
+  opts: IdeOpenFileOpts = {},
 ): Promise<void> {
   const fullPath = host.resolvePath(rawPath);
   if (!opts.background && !isNavigatingHistory && host.activePath) host.pushNavLocation(host.activePath, host.cursorInfo.line, host.cursorInfo.col);
@@ -521,7 +526,54 @@ export async function performOpenFile(
     }
     return `/ide/fs/file?${host.targetQuery({ path: fullPath })}`;
   };
+  // Read the tab from disk, with the unsaved draft a page reload left behind (unless reloading).
+  const readTab = async (): Promise<void> => {
+    try {
+      const res = await (opts.lane === 'bg' ? api.bg : api).get<IdeFileReadResp>(readFileUrl());
+      const eol = detectTextEol(res.content);
+      const normContent = normalizeEditorLf(res.content);
+      const isReadOnly = Boolean(res.read_only) || Boolean(res.truncated) || sdkReadOnly;
+      const tab = host.tabs.find((t) => t.path === fullPath);
+      if (tab) {
+        tab.eol = eol; tab.diskEols = diskEolsOf(res.content);
+        const persisted = !opts.reload ? readIdeUndoDraft(fullPath) : null;
+        const persistedSaved = persisted && typeof persisted.savedContent === 'string' ? normalizeEditorLf(persisted.savedContent) : null;
+        const persistedDraft = persisted && typeof persisted.draftContent === 'string' ? normalizeEditorLf(persisted.draftContent) : null;
+        if (
+          persistedSaved !== null &&
+          persistedDraft !== null &&
+          persistedSaved === normContent &&
+          persistedDraft !== normContent &&
+          !isReadOnly
+        ) {
+          tab.savedContent = normContent;
+          tab.content = persistedDraft;
+          tab.dirty = true;
+          tab.sha256 = res.sha256;
+        } else {
+          perf.markClean(tab, normContent, res.sha256);
+        }
+        tab.language = ideTabLanguage(res.language, fullPath, normContent);
+        tab.truncated = Boolean(res.truncated);
+        tab.binary = Boolean(res.binary);
+        tab.readOnly = isReadOnly;
+        tab.loading = false;
+        if (host.target.root) saveWorkspaceOpenTabs(host.target.root, host.tabs, host.activePath, host.splitPath);
+      }
+      if (host.activePath === fullPath || host.splitPath === fullPath) {
+        void host.loadGutter(fullPath, normContent);
+        void host.loadSymbols(fullPath, normContent);
+      }
+    } catch (e) {
+      const tab = host.tabs.find((t) => t.path === fullPath);
+      if (tab) { tab.loading = false; tab.error = loadErrorText(e); }
+    }
+  };
   if (existing) {
+    // A restored tab that was never read is read by this call (cleared first, so the
+    // activation just below does not start a second read).
+    const unread = Boolean(existing.deferred);
+    existing.deferred = false;
     if (projectScoped) {
       existing.projectScoped = true;
       existing.readOnly = true;
@@ -529,20 +581,9 @@ export async function performOpenFile(
     existing.preview = false;
     existing.lastAccessedAt = nextTabAccessStamp();
     if (opts.inSplit) host.openInSplit(fullPath, host.splitDirection ?? 'right'); else if (!opts.background) host.activePath = fullPath;
-    if ((existing.error || opts.reload) && !isGuest) {
+    if ((existing.error || opts.reload || unread) && !isGuest) {
       existing.error = null; existing.loading = true;
-      try {
-        const res = await api.get<IdeFileReadResp>(readFileUrl());
-        const eol = detectTextEol(res.content);
-        const normContent = normalizeEditorLf(res.content);
-        existing.eol = eol; existing.diskEols = diskEolsOf(res.content);
-        perf.markClean(existing, normContent, res.sha256);
-        existing.language = ideTabLanguage(res.language, fullPath, normContent);
-        existing.truncated = Boolean(res.truncated);
-        existing.binary = Boolean(res.binary);
-        existing.readOnly = Boolean(res.read_only) || Boolean(res.truncated) || sdkReadOnly;
-        existing.loading = false;
-      } catch (e) { existing.loading = false; existing.error = loadErrorText(e); }
+      await readTab();
     }
     if (!opts.background && opts.line) host.jumpTo(fullPath, opts.line, opts.col ?? 1);
     if (!opts.background && !isNavigatingHistory) host.pushNavLocation(fullPath, opts.line ?? 1, opts.col ?? 1);
@@ -555,53 +596,16 @@ export async function performOpenFile(
     path: fullPath, name: ideBasename(fullPath), content: buf, savedContent: buf, dirty: false, eol: sharedEol, sha256: '',
     language: detectIdeLanguage(fullPath), readOnly: sdkReadOnly, truncated: false, loading: !isGuest, error: null,
     preview: false, pinned: false, external, projectScoped, lastAccessedAt: nextTabAccessStamp(),
+    ...(opts.defer && !isGuest ? { deferred: true } : {}),
   };
   host.tabs = [...host.tabs, placeholder];
   if (opts.inSplit) host.openInSplit(fullPath, host.splitDirection ?? 'right'); else if (!opts.background) host.activePath = fullPath;
   await enforceTabCap(host, perf, readIdePreferences().maxOpenTabs, [fullPath]);
   if (!opts.background && !isNavigatingHistory) host.pushNavLocation(fullPath, opts.line ?? 1, opts.col ?? 1);
   if (isGuest) { if (!opts.background && opts.line) host.jumpTo(fullPath, opts.line, opts.col ?? 1); return; }
-  try {
-    const res = await api.get<IdeFileReadResp>(readFileUrl());
-    const eol = detectTextEol(res.content);
-    const normContent = normalizeEditorLf(res.content);
-    const isReadOnly = Boolean(res.read_only) || Boolean(res.truncated) || sdkReadOnly;
-    const tab = host.tabs.find((t) => t.path === fullPath);
-    if (tab) {
-      tab.eol = eol; tab.diskEols = diskEolsOf(res.content);
-      const persisted = !opts.reload ? readIdeUndoDraft(fullPath) : null;
-      const persistedSaved = persisted && typeof persisted.savedContent === 'string' ? normalizeEditorLf(persisted.savedContent) : null;
-      const persistedDraft = persisted && typeof persisted.draftContent === 'string' ? normalizeEditorLf(persisted.draftContent) : null;
-      if (
-        persistedSaved !== null &&
-        persistedDraft !== null &&
-        persistedSaved === normContent &&
-        persistedDraft !== normContent &&
-        !isReadOnly
-      ) {
-        tab.savedContent = normContent;
-        tab.content = persistedDraft;
-        tab.dirty = true;
-        tab.sha256 = res.sha256;
-      } else {
-        perf.markClean(tab, normContent, res.sha256);
-      }
-      tab.language = ideTabLanguage(res.language, fullPath, normContent);
-      tab.truncated = Boolean(res.truncated);
-      tab.binary = Boolean(res.binary);
-      tab.readOnly = isReadOnly;
-      tab.loading = false;
-      if (host.target.root) saveWorkspaceOpenTabs(host.target.root, host.tabs, host.activePath, host.splitPath);
-    }
-    if (!opts.background && opts.line) host.jumpTo(fullPath, opts.line, opts.col ?? 1);
-    if (host.activePath === fullPath || host.splitPath === fullPath) {
-      void host.loadGutter(fullPath, normContent);
-      void host.loadSymbols(fullPath, normContent);
-    }
-  } catch (e) {
-    const tab = host.tabs.find((t) => t.path === fullPath);
-    if (tab) { tab.loading = false; tab.error = loadErrorText(e); }
-  }
+  if (opts.defer) return;
+  await readTab();
+  if (!opts.background && opts.line) host.jumpTo(fullPath, opts.line, opts.col ?? 1);
 }
 
 export function performSaveFile(
@@ -708,8 +712,9 @@ export async function reloadTabsFromDisk(host: IdeBufferHost, perf: IdeBufferPer
     normalized.add(resolved);
     normalized.add(normalizeMacPrivatePath(resolved));
   }
+  // A tab not read yet reads the new disk copy when it is opened.
   const matching = host.tabs.filter(
-    (tab) => normalized.has(tab.path) || normalized.has(normalizeMacPrivatePath(tab.path)),
+    (tab) => !tab.deferred && (normalized.has(tab.path) || normalized.has(normalizeMacPrivatePath(tab.path))),
   );
   await Promise.allSettled(
     matching.map(async (tab) => {
