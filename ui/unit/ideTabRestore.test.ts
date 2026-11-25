@@ -139,3 +139,19 @@ test('restoring more saved tabs than the tab cap keeps the active tab and opens 
   assert.equal(h.activePath, paths[0]);
   assert.deepEqual([...h.tabs.map((x) => x.path)], paths, 'no tab (least of all the active one) evicted or reordered by the restore itself');
 });
+
+test('Save on a tab not read yet that has a draft reads it first, then writes the draft', async () => {
+  const puts: { path: string; content: string }[] = [];
+  const { buf } = modules(
+    { get: async () => fileResp('disk'), put: async (_u: string, body: { path: string; content: string }) => { puts.push(body); return { sha256: 'sha-new' }; } },
+    { '/repo/a.ts': { savedContent: 'disk', draftContent: 'mine' } },
+  );
+  const { h, perf } = storeHost(buf);
+  (h as Record<string, unknown>).saveFile = (p?: string, f?: boolean, o?: { silent?: boolean }) => buf.performSaveFile(h, perf, p, f, o);
+  (h as Record<string, unknown>).updateBuffer = () => {};
+  await h.openFile('/repo/a.ts', { preview: false, background: true, defer: true });
+  assert.equal(h.tabs[0].dirty, true, 'the strip shows the unsaved dot before the read');
+  assert.equal(await buf.performSaveFile(h, perf, '/repo/a.ts', false, { silent: true }), true);
+  assert.deepEqual(puts.map((p) => p.content), ['mine']);
+  assert.equal(h.tabs[0].dirty, false);
+});

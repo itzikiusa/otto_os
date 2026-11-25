@@ -594,7 +594,7 @@ export async function performOpenFile(
   const sharedEol = detectTextEol(rawShared);
   const buf = normalizeEditorLf(rawShared);
   const placeholder: IdeOpenTab = {
-    path: fullPath, name: ideBasename(fullPath), content: buf, savedContent: buf, dirty: false, eol: sharedEol, sha256: '',
+    path: fullPath, name: ideBasename(fullPath), content: buf, savedContent: buf, dirty: Boolean(opts.defer && readIdeUndoDraft(fullPath)), eol: sharedEol, sha256: '',
     language: detectIdeLanguage(fullPath), readOnly: sdkReadOnly, truncated: false, loading: !isGuest, error: null,
     preview: false, pinned: false, external, projectScoped, lastAccessedAt: nextTabAccessStamp(),
     ...(opts.defer && !isGuest ? { deferred: true } : {}),
@@ -629,6 +629,7 @@ async function saveFileNow(
   opts: { silent?: boolean },
 ): Promise<boolean> {
   const targetPath = path ? host.resolvePath(path) : host.activePath;
+  if (targetPath && host.tabs.find((t) => t.path === targetPath)?.deferred) await host.openFile(targetPath, { background: true }); // unread (may hold a draft): read, then save
   const tab = targetPath ? host.tabs.find((t) => t.path === targetPath) : null;
   // A tab still loading (or whose read failed) holds a placeholder, not the file: saving it
   // would write an empty file over the real one. Checked before the flush, which would
