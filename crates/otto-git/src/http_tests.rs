@@ -2026,6 +2026,102 @@ async fn pr_detail_fresh_query_bypasses_provider_get_cache() {
     let _ = tokio::fs::remove_dir_all(&repo_dir).await;
 }
 
+/// P1-027: a pinned PR diff (`rev` = the head) also reads the PR's head from
+/// the forge to pick the memo lifetime. That read ran AFTER the diff, so a
+/// cold open paid two forge round trips in series; it now runs beside it.
+#[tokio::test]
+async fn pr_diff_reads_the_memo_lifetime_beside_the_diff() {
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let rtt = std::time::Duration::from_millis(300);
+    let mr = "/api/v4/projects/acme%2Fapp/merge_requests/102";
+    let head = json!({"diff_refs": {"base_sha": "0123456789ab", "head_sha": "abc1234def01"}});
+    for (p, body) in [
+        (mr.to_string(), head),
+        (format!("{mr}/changes"), json!({"changes": []})),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(p))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(body)
+                    .set_delay(rtt),
+            )
+            .mount(&server)
+            .await;
+    }
+    let pool = mem_pool().await;
+    let user = seed_user(&pool, "itzik").await;
+    let ws = seed_workspace(&pool).await;
+    let repo_dir = init_git_repo().await;
+    let remote = "ssh://git@gitlab.ssh.example/acme/app.git";
+    LocalGit::new(&repo_dir)
+        .remote_op(crate::ops::RemoteOp::Add, "origin", Some(remote))
+        .await
+        .unwrap();
+    let store = GitStore::new(pool.clone());
+    let account = store
+        .create_account(NewGitAccount {
+            user_id: user.clone(),
+            provider: GitProviderKind::Gitlab,
+            label: "gl".into(),
+            username: "itzik".into(),
+            token_ref: "gl-1".into(),
+            api_base_url: Some(server.uri()),
+            namespace: Some("acme".into()),
+            token_expires_at: None,
+        })
+        .await
+        .unwrap();
+    let repo = store
+        .create_repo(NewRepo {
+            workspace_id: ws,
+            name: "app".into(),
+            path: repo_dir.to_string_lossy().into_owned(),
+            remote_url: Some(remote.into()),
+            provider: Some(GitProviderKind::Gitlab),
+            git_account_id: Some(account.id),
+        })
+        .await
+        .unwrap();
+    let ctx = TestCtx {
+        store,
+        workspaces: WorkspacesRepo::new(pool),
+        secrets: Arc::new(FixedSecret),
+        roles: Arc::new(AllowAll),
+        events: tokio::sync::broadcast::channel(8).0,
+    };
+    let started = std::time::Instant::now();
+    let resp = pr_diff(
+        State(ctx),
+        Extension(auth(&user, false)),
+        Path((repo.id, 102)),
+        Query(PrDiffQuery {
+            summary: None,
+            path: None,
+            old_path: None,
+            full: None,
+            rev: Some("abc1234def01".into()),
+            ignore_whitespace: false,
+        }),
+    )
+    .await
+    .unwrap();
+    let took = started.elapsed();
+    assert!(resp.status().is_success());
+    let reads = server.received_requests().await.unwrap();
+    let reads: Vec<_> = reads.iter().map(|r| r.url.path()).collect();
+    assert!(reads.contains(&mr), "the head is still read: {reads:?}");
+    assert!(
+        took < 2 * rtt - std::time::Duration::from_millis(50),
+        "{took:?}"
+    );
+    let _ = tokio::fs::remove_dir_all(&repo_dir).await;
+}
+
 #[test]
 fn clone_repo_name_validation_requires_single_safe_normal_segment() {
     for good in ["otto", "my-repo_1.0", "repo name"] {
