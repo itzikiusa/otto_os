@@ -172,12 +172,21 @@ test('a failed restart says why and re-enables the button', async () => {
   assert.equal(mod.updates.actionError, '/Applications is not writable');
 });
 
+/** A copy of the shell's `apply_skip` (apps/desktop/src-tauri/src/updater/mod.rs): skipping the
+ *  offered version parks the phase at idle; unskipping while an update is known offers it again. */
+function applySkip(s: Mod.UpdateState, version: string | null): Mod.UpdateState {
+  const next = { ...s, skipped: version };
+  if (next.phase === 'available' && next.skipped === next.version) next.phase = 'idle';
+  else if (next.phase === 'idle' && next.skipped === null && next.version) next.phase = 'available';
+  return next;
+}
+
 test('skip, unskip and automatic download go through the shell and follow its answer', async () => {
   let fail = false;
   let shell = st({ phase: 'available', version: '0.5.4' });
   const { mod, calls, toasts } = load({
     invoke: (cmd, args) => {
-      if (cmd === 'update_skip') shell = { ...shell, skipped: (args?.version as string | null) ?? null };
+      if (cmd === 'update_skip') shell = applySkip(shell, (args?.version as string | null) ?? null);
       if (cmd === 'update_set_auto') { if (fail) throw new Error('disk full'); shell = { ...shell, auto_install: !!args?.on }; }
       return shell;
     },
@@ -187,9 +196,13 @@ test('skip, unskip and automatic download go through the shell and follow its an
   await mod.updates.skip('0.5.4');
   assert.equal(mod.updates.open, false);
   assert.equal(json(calls.at(-1)), json({ cmd: 'update_skip', args: { version: '0.5.4' } }));
+  assert.equal(mod.updates.state?.phase, 'idle');
   assert.equal(mod.updates.row, null);
+  assert.equal(mod.dialogView(mod.updates.state, null, null).primary.action, 'close', 'a skipped version offers no download');
   await mod.updates.skip(null);
+  assert.equal(mod.updates.state?.phase, 'available');
   assert.equal(mod.updates.row, 'Update to 0.5.4');
+  assert.equal(mod.dialogView(mod.updates.state, null, null).primary.action, 'download');
   await mod.updates.setAuto(true);
   assert.equal(mod.updates.state?.auto_install, true);
   fail = true;
