@@ -21,7 +21,7 @@ const inbox = await import('../src/modules/threads/threadInbox.ts');
 function load(patch: (path: string, body: unknown) => Promise<unknown>, rows: Record<string, Record<string, unknown>> = {}) {
   const toasts: string[] = [];
   const patched: [string, unknown][] = [];
-  const store = { byId: rows, get: (id: string) => rows[id] ?? null, loadAll: async () => {} };
+  const store = { byId: rows, get: (id: string) => rows[id] ?? null, removed: () => false, loadAll: async () => {} };
   const wsMock = { getSession: () => null, otherWsSessions: [], archivedSessions: [], updateSessionMeta: async () => {}, sessionsLoading: false, listSettled: true, refreshOtherSessions: async () => {} };
   const ls = new Map<string, string>();
   (globalThis as { localStorage?: unknown }).localStorage = { getItem: (k: string) => ls.get(k) ?? null, setItem: (k: string, v: string) => void ls.set(k, v) };
