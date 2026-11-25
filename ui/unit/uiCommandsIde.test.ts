@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
 import {
-  changedNames, childNamed, outputTail, pathSegments, shapeDbRead, shapeResponse, shapeResult, newMemory,
+  changedNames, childNamed, confirmSafe, outputTail, pathSegments, shapeDbRead, shapeResponse, shapeResult, newMemory,
   startConfirmText, STOP_MAX_CHARS, userMoved,
 } from '../src/lib/uiCommands/ideShape.ts';
 
@@ -97,7 +97,7 @@ test('shape: paths, children, responses, the start confirm and DB rows', () => {
   assert.equal(r.body_truncated, true);
   const text = startConfirmText({
     label: 'TestFlow', command: 'go test -tags=component -run ^TestFlow$ ./flow', cwd: '/w/app/flow', root: '/w/app',
-    build_flags: ['-tags=component'], env: { LOG_LEVEL: 'debug' }, breakpoints: 3,
+    build_flags: ['-tags=component'], env: { LOG_LEVEL: 'debug' }, breakpoints: [{ file: 'a', line: 1 }, { file: 'b', line: 2 }, { file: 'c', line: 3 }],
   });
   for (const part of ['go test -tags=component -run ^TestFlow$ ./flow', 'Working directory: flow', 'Build flags: -tags=component', 'LOG_LEVEL=debug', 'Breakpoints: 3', 'outside the agent’s sandbox']) {
     assert.ok(text.includes(part), `${part} missing from:\n${text}`);
@@ -169,12 +169,15 @@ function load() {
   const idePort = loadSource(new URL('../src/lib/uiCommands/idePort.ts', import.meta.url), { './pagePort': pagePort });
   const dbPort = loadSource(new URL('../src/lib/uiCommands/ideDbWatchPort.ts', import.meta.url), { './pagePort': pagePort });
   const shape = loadSource(new URL('../src/lib/uiCommands/ideShape.ts', import.meta.url), {});
-  const posts: { path: string; body: any; resolve: (v: unknown) => void }[] = [];
+  const posts: { path: string; body: any; resolve: (v: unknown) => void; signal?: AbortSignal }[] = [];
   const gets: string[] = [];
   const api = {
     get: async (path: string) => { gets.push(path); return { open: true }; },
     post: async () => ({ detected_objects: [], saved_connections: [], ephemeral_targets: [] }),
-    long: { post: (path: string, body: any) => new Promise((resolve) => posts.push({ path, body, resolve })) },
+    long: { post: (path: string, body: any, signal?: AbortSignal) => new Promise((resolve, reject) => {
+      posts.push({ path, body, resolve, signal });
+      signal?.addEventListener('abort', () => reject(new Error('aborted')));
+    }) },
   };
   loadSource(new URL('../src/lib/uiCommands/ide.ts', import.meta.url), {
     '../api/client': { api },
@@ -210,9 +213,9 @@ async function rejectsWith(p: Promise<unknown>, code: string) {
 
 const later = (fn: () => void, ms = 20) => setTimeout(fn, ms);
 
-test('start: the agent’s own folder only; every start confirms what runs, never remembered; a decline runs nothing', async () => {
+test('start: every start confirms what runs, never remembered; a decline runs nothing', async () => {
   const { handlers, ide } = load();
-  await rejectsWith(handlers.ide_debug_start({ root: '/etc', target: { kind: 'main', file: 'main.go' } }, ctx()), 'forbidden');
+  // The daemon resolved and confined `root` (ui_commands::confine_paths); the handler still refuses a relative or `..` one.
   await rejectsWith(handlers.ide_debug_start({ root: '/w/app/../x', target: { kind: 'main', file: 'main.go' } }, ctx()), 'invalid_args');
   const no = ctx(false);
   await rejectsWith(handlers.ide_debug_start({ target: { kind: 'test', file: 'flow/flow_test.go', name: 'TestFlow' }, breakpoints: [{ file: 'flow/flow.go', line: 21 }] }, no), 'cancelled_by_user');
@@ -329,10 +332,10 @@ test('request: returns at the stop it hit; the response that lands during the pa
   const req = handlers.ide_debug_request({ method: 'POST', url: 'http://localhost:8080/orders', headers: { 'Content-Type': 'application/json' }, body: '{}', wait_ms: 5_000 }, c);
   later(() => ide.emit(paused(1, 12, [['path', '"/orders"']])));
   const r = await req;
-  assert.equal(c.confirms.at(-1).connId, 'api:localhost', 'a loopback send may be remembered per host');
+  assert.equal(c.confirms.at(-1).connId, 'ide-debug-request:localhost:8080', 'remembered per host and port, apart from the API client');
   assert.equal(posts.length, 1);
   assert.equal(posts[0].path, '/workspaces/w1/api-client/execute');
-  assert.equal(posts[0].body.debug_session_id, 's1');
+  assert.equal(posts[0].body.debug_session_id, 'dbg1', 'the live debug session the daemon checks');
   assert.equal(posts[0].body.timeout_ms, 600_000, 'outlives a pause');
   assert.equal(posts[0].body.follow_redirects, false);
   eq(r.request, { in_flight: true });
@@ -386,4 +389,84 @@ test('db: without the IDE’s DB Watch bound it says so; with it, a stop carries
   const stop = await go;
   assert.equal(stop.db.objects[0].added, 1);
   eq(asked[0], ['previous_stop', { forAgent: true }], 'the agent always reads masked rows');
+});
+
+test('C1-001: breakpoint code is shown verbatim — in the start confirm, and as its own confirm when set later', async () => {
+  const { handlers, ide } = load();
+  const c = ctx();
+  const run = handlers.ide_debug_start({
+    target: { kind: 'main', file: 'main.go' }, wait_ms: 5_000,
+    breakpoints: [{ file: 'a.go', line: 3, condition: "__import__('os').system('x')" }, { file: 'b.go', line: 4, log_message: '{password}' }, { file: 'c.go', line: 5 }],
+  }, c);
+  later(() => ide.emit(paused(1, 3)));
+  await run;
+  const what = c.confirms[0].what as string;
+  assert.ok(what.includes("a.go:3 — condition __import__('os').system('x')"), what);
+  assert.ok(what.includes('b.go:4 — logs {password}'), what);
+  assert.ok(!what.includes('c.go'), 'a plain breakpoint is just counted');
+  // Later: a plain breakpoint asks nothing, one with code asks every time; a decline sets nothing.
+  await handlers.ide_debug_breakpoints({ set: [{ file: 'd.go', line: 1 }] }, c);
+  assert.equal(c.confirms.length, 1);
+  const no = { ...c, confirmWrite: async (o: any) => (c.confirms.push(o), false) };
+  const before = ide.calls.filter((x: unknown[]) => x[0] === 'bps').length;
+  await rejectsWith(handlers.ide_debug_breakpoints({ set: [{ file: 'e.go', line: 2, hit_condition: '> 3' }] }, no), 'cancelled_by_user');
+  assert.ok(c.confirms.at(-1).what.includes('e.go:2 — hit count > 3'));
+  assert.equal(c.confirms.at(-1).connId, undefined, 'never remembered');
+  assert.equal(ide.calls.filter((x: unknown[]) => x[0] === 'bps').length, before, 'nothing set after a decline');
+});
+
+test('C1-020: inspect expands only a ref the agent was shown, never one under a secret name', async () => {
+  const { handlers, ide } = load();
+  const c = ctx();
+  const run = handlers.ide_debug_start({ target: { kind: 'main', file: 'main.go' }, wait_ms: 5_000 }, c);
+  later(() => ide.emit(paused(1, 5, [['cfg', 'Config{…}', 11], ['secrets', '[]string len: 2', 12]])));
+  const stop = await run;
+  eq(stop.refs, { cfg: 11, secrets: 12 });
+  ide.children[11] = [{ name: 'DB', value: 'DB{…}', variables_reference: 21 }];
+  ide.children[12] = [{ name: '[0]', value: '"s3cret"', variables_reference: 0 }];
+  ide.children[21] = [{ name: 'Host', value: '"db"', variables_reference: 0 }];
+  await rejectsWith(handlers.ide_debug_inspect({ ref: 12 }, c), 'forbidden');
+  await rejectsWith(handlers.ide_debug_inspect({ ref: 13 }, c), 'forbidden');
+  const cfg = await handlers.ide_debug_inspect({ ref: 11 }, c);
+  eq(cfg.children.DB, { value: 'DB{…}', ref: 21 });
+  const db = await handlers.ide_debug_inspect({ ref: 21 }, c); // a ref inspect just showed
+  assert.equal(db.children.Host.value, '"db"');
+  // The next stop starts a new list.
+  const go = handlers.ide_debug_control({ action: 'continue', wait_ms: 5_000 }, c);
+  later(() => ide.emit(paused(2, 6, [['n', '1']])));
+  await go;
+  await rejectsWith(handlers.ide_debug_inspect({ ref: 11 }, c), 'forbidden');
+});
+
+test('C1-023 / C1-024: say lands after the launch; Stop during the build stops the run; stop aborts an in-flight request', async () => {
+  const { handlers, ide, posts } = load();
+  const c = ctx();
+  const run = handlers.ide_debug_start({ target: { kind: 'main', file: 'main.go' }, say: 'Starting orders', ready_pattern: 'up', wait_ms: 5_000 }, c);
+  later(() => ide.emit(snap({ state: 'running', output: [{ category: 'stdout', text: 'up\n', seq: 1 }] })));
+  await run;
+  const order = ide.calls.map((x: unknown[]) => x[0]);
+  assert.ok(order.indexOf('say') > order.indexOf('launch'), order.join(','));
+  // An in-flight request is aborted by the agent's stop.
+  const req = handlers.ide_debug_request({ url: 'http://localhost:8080/x', wait_ms: 30 }, c);
+  await req;
+  assert.equal(posts[0].signal?.aborted, false);
+  await handlers.ide_debug_control({ action: 'stop' }, c);
+  assert.equal(posts[0].signal?.aborted, true);
+  // Stop pressed while it was building: the run that started anyway is stopped.
+  const b = load();
+  const stopIt = new AbortController();
+  const slow = { ...ctx(), signal: stopIt.signal };
+  b.ide.launch = async () => { stopIt.abort(new UiCommandError('cancelled', 'Stopped')); b.ide.mine = 'dbg1'; return { debug_id: 'dbg1' }; };
+  await assert.rejects(b.handlers.ide_debug_start({ target: { kind: 'main', file: 'main.go' }, breakpoints: [{ file: 'a.go', line: 1 }] }, slow));
+  assert.ok(b.ide.calls.some((x: unknown[]) => x[0] === 'command' && x[1] === 'stop'), 'the orphaned run is stopped');
+  assert.equal(b.ide.bps.length, 0, 'and its breakpoints removed');
+});
+
+test('C1-025: confirm text carries no control / bidi characters and says where it was cut', () => {
+  const text = startConfirmText({
+    label: 'T', command: `go run .\u202e\n${'x'.repeat(3000)}`, cwd: '/w/app', root: '/w/app', build_flags: [], env: { A: 'v'.repeat(600) }, breakpoints: [],
+  });
+  assert.ok(!/[\u202e\n]/.test(text.split('\n')[1]), 'the command line is one clean line');
+  assert.ok(text.includes('more characters)'), 'a cut is announced');
+  assert.equal(confirmSafe('a\u2066b', 10), 'a�b');
 });
