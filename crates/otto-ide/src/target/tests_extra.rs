@@ -436,3 +436,56 @@ async fn ssh_stdin_env_preamble_exports_secrets_without_leaking_or_corrupting_st
         "top-secret-value-$Literal|dap-body"
     );
 }
+
+/// The walk keys files by the canonical root + relative path (no realpath per file)
+/// and skips files with no whole-file match before the per-line scan: a folder
+/// attached twice (once through a symlink) is still listed once, and every
+/// matching line is still reported, also case-insensitively.
+#[cfg(unix)]
+#[test]
+fn local_search_lists_a_file_once_across_overlapping_roots_and_keeps_every_line_hit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("ws");
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    std::fs::write(
+        root.join("sub/a.rs"),
+        "fn other() {}\nfn wanted_fn() {}\n// Wanted_Fn calls wanted_fn\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("b.rs"), "fn nothing_here() {}\n").unwrap();
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(root.join("sub"), &link).unwrap();
+
+    let req = |case_sensitive| IdeSearchReq {
+        target: IdeTargetSpec::local(root.to_string_lossy().into_owned()),
+        query: "wanted_fn".into(),
+        mode: IdeSearchMode::Text,
+        case_sensitive,
+        regex: false,
+        whole_word: true,
+        file_glob: None,
+        scope_path: None,
+        limit: Some(50),
+    };
+    let files =
+        search::collect_local_files_multi(&root, std::slice::from_ref(&link), false, None, 100)
+            .unwrap();
+    assert_eq!(files.len(), 2, "{files:?}");
+    for case_sensitive in [true, false] {
+        let resp = search::search_local_sync(
+            &root,
+            std::slice::from_ref(&link),
+            false,
+            &req(case_sensitive),
+            50,
+        )
+        .unwrap();
+        let lines: Vec<_> = resp.items.iter().map(|i| i.line).collect();
+        assert_eq!(
+            lines,
+            vec![Some(2), Some(3)],
+            "case_sensitive={case_sensitive}"
+        );
+        assert!(resp.items.iter().all(|i| i.path.ends_with("sub/a.rs")));
+    }
+}

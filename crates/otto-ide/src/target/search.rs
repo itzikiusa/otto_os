@@ -236,6 +236,11 @@ fn walk_one_root(
     out: &mut Vec<String>,
 ) {
     let root_buf = owning_root.to_path_buf();
+    // The walk follows no symlinks, so a file's canonical path is the canonical scan
+    // dir joined with its relative path: one realpath per root, not one per file.
+    let canon_scan = scan_dir
+        .canonicalize()
+        .unwrap_or_else(|_| scan_dir.to_path_buf());
     let walker = ignore::WalkBuilder::new(scan_dir)
         .hidden(false)
         .git_ignore(true)
@@ -278,7 +283,10 @@ fn walk_one_root(
             if seen.insert(canon.clone()) {
                 out.push(canon.to_string_lossy().into_owned());
             }
-        } else if seen.insert(p.canonicalize().unwrap_or_else(|_| p.to_path_buf())) {
+        } else if seen.insert(
+            p.strip_prefix(scan_dir)
+                .map_or_else(|_| p.to_path_buf(), |rel| canon_scan.join(rel)),
+        ) {
             out.push(p.to_string_lossy().into_owned());
         }
     }
@@ -375,6 +383,12 @@ pub(super) fn search_local_sync(
         let Ok(text) = std::str::from_utf8(&bytes) else {
             continue;
         };
+        // One search over the whole file (the regex's literal prefilter) before the
+        // per-line scans: most files hold no match. Only for plain queries, where a
+        // line match always implies a whole-file match (a user regex may use \A).
+        if !req.regex && !matcher.is_match(text) {
+            continue;
+        }
 
         if want_symbols {
             scan_symbols_in_file(full_path, text, &matcher, limit, &mut items, &mut truncated);
