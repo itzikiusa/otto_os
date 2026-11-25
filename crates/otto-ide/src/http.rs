@@ -39,7 +39,7 @@ use self::collab_sse::{
 };
 use self::db_watch::{
     db_watch_delete, db_watch_detect, db_watch_list, db_watch_objects, db_watch_read,
-    db_watch_snapshot, db_watch_snapshot_now, db_watch_start, db_watch_update,
+    db_watch_snapshot_now, db_watch_start, db_watch_update,
 };
 use self::intelligence::{
     fs_complete, history_entry, history_list, history_restore, history_snapshot, lsp_code_actions,
@@ -256,7 +256,6 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
             .route("/ide/plugins/{slug}", delete(uninstall_plugin::<S>))
             // G. Live Database Watch & Component-Test Watcher
             .route("/ide/db-watch/detect", post(db_watch_detect::<S>))
-            .route("/ide/db-watch/snapshot", post(db_watch_snapshot::<S>))
             .route("/ide/db-watch/objects", post(db_watch_objects::<S>))
             .route(
                 "/ide/db-watch/watches",

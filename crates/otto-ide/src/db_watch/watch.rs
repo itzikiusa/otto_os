@@ -536,7 +536,6 @@ async fn read_item(
         database: database.map(str::to_string),
         object_name: spec.object.clone(),
         statement,
-        is_custom_query: false,
         limit: MAX_DB_WATCH_LIMIT,
         op,
     };

@@ -159,14 +159,6 @@ pub struct DiffOpts {
     pub window_full: bool,
 }
 
-/// Compute structured row & cell differences between `previous` and `current`.
-pub fn compute_snapshot_diff(
-    previous: &IdeDbWatchSnapshotItem,
-    current: &IdeDbWatchSnapshotItem,
-) -> IdeDbWatchDiffSummary {
-    diff_snapshots(previous, current, &DiffOpts::default())
-}
-
 /// A Redis `ttl` counts down on its own: only a TTL that appears, goes away
 /// or goes UP (re-set) is a change (`-1` / `-2` / null = no TTL).
 fn ttl_changed(before: &Value, after: &Value) -> bool {
@@ -193,7 +185,8 @@ fn cmp_key(a: &Value, b: &Value) -> std::cmp::Ordering {
     }
 }
 
-/// [`compute_snapshot_diff`] with the watch's real primary key and window.
+/// Structured row & cell differences between `previous` and `current`,
+/// keyed by the real primary key when given.
 pub fn diff_snapshots(
     previous: &IdeDbWatchSnapshotItem,
     current: &IdeDbWatchSnapshotItem,
@@ -358,7 +351,7 @@ mod tests {
                 vec![json!(3), json!("10.00"), json!("active")],
             ],
         };
-        let diff = compute_snapshot_diff(&prev, &curr);
+        let diff = diff_snapshots(&prev, &curr, &DiffOpts::default());
         assert_eq!(diff.added_count, 1);
         assert_eq!(diff.modified_count, 1);
         assert_eq!(diff.removed_count, 1);

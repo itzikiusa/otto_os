@@ -82,7 +82,6 @@ pub struct WatchExecReq {
     pub database: Option<String>,
     pub object_name: String,
     pub statement: String,
-    pub is_custom_query: bool,
     pub limit: usize,
     #[serde(default)]
     pub op: WatchOp,
@@ -340,7 +339,8 @@ impl DbViewerService {
         limit: usize,
     ) -> Result<WatchExecOutcome> {
         ensure_read_only(req.engine, &req.statement)?;
-        if req.engine == Engine::Redis && !req.is_custom_query {
+        // Redis items read by key pattern (the statement is only the label).
+        if req.engine == Engine::Redis {
             let node = redis_node(database.as_deref());
             let (columns, rows) = match via {
                 Via::Saved { id, user } => {
@@ -351,8 +351,13 @@ impl DbViewerService {
                         .resolve(id, user, child.as_deref(), "db_browse")
                         .await?;
                     force_read_only_execution(&mut r.config.params);
-                    enrich_redis_prefix(&*r.driver, &r.config, &node, &req.object_name, limit)
-                        .await?
+                    // Values are data: the native privilege ceiling applies,
+                    // and a dead pooled session is retried like other reads.
+                    self.verify_native(id, user, &r).await?;
+                    r.read(|| {
+                        enrich_redis_prefix(&*r.driver, &r.config, &node, &req.object_name, limit)
+                    })
+                    .await?
                 }
                 Via::Direct(driver, cfg) => {
                     enrich_redis_prefix(&**driver, cfg, &node, &req.object_name, limit).await?
@@ -364,10 +369,7 @@ impl DbViewerService {
                 ..Default::default()
             });
         }
-        let node = match req.engine {
-            Engine::Redis => Some(redis_node(database.as_deref())),
-            _ => database.map(|d| format!("db:{d}")),
-        };
+        let node = database.map(|d| format!("db:{d}"));
         let qreq = QueryRequest {
             statement: req.statement.clone(),
             max_rows: Some(limit),
@@ -635,7 +637,7 @@ mod tests {
         let req: WatchExecReq = serde_json::from_value(serde_json::json!({
             "target": {"ephemeral_loopback": {"port": 1, "user": null, "password": null, "database": null}},
             "engine": "mysql", "database": null, "object_name": "t", "statement": "SELECT 1",
-            "is_custom_query": false, "limit": 5, "op": "describe"
+            "limit": 5, "op": "describe"
         }))
         .unwrap();
         assert_eq!(req.op, WatchOp::Describe);

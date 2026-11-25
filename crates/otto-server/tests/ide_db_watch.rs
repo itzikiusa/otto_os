@@ -1,5 +1,5 @@
 //! Integration suite for IDE Live Database Watch & Component-Test Watcher
-//! (`POST /api/v1/ide/db-watch/detect` and `POST /api/v1/ide/db-watch/snapshot`).
+//! (`POST /api/v1/ide/db-watch/detect` and the watch routes `…/watches`).
 //!
 //! Verifies:
 //! 1. Multi-language code scanner detects SQL tables, MongoDB collections,
@@ -9,8 +9,7 @@
 //!    `connections.owner_private`.
 //! 4. Ephemeral local targets require human `root_authority` (`403 Forbidden`
 //!    for non-root users).
-//! 5. Write/mutating statements (`SET`, `DEL`, `DROP`) are strictly refused on
-//!    both saved and ephemeral snapshot endpoints (`403 Forbidden`).
+//! 5. A watch runs only fixed reads (no custom statement reaches it).
 //! 6. Live loopback Redis `Before -> After` snapshots compute exact added,
 //!    modified (`before` -> `after`), and removed key/value diffs.
 
@@ -355,53 +354,30 @@ func load(ctx context.Context) {
     );
     assert!(nodb_detect["detected_objects"].as_array().unwrap().len() >= 4);
 
-    // 3. Editor without Database:View is denied saved snapshot (`403`) and ephemeral snapshot (`403`).
-    let nodb_snap = client
-        .post(format!("{base}/api/v1/ide/db-watch/snapshot"))
-        .bearer_auth(&editor_no_db_tok)
-        .json(&json!({
-            "root": ws1_root.to_string_lossy(),
-            "target_kind": "saved",
-            "connection_id": saved_redis.id,
-            "engine": "redis",
-            "object_name": "wallet:bal:*"
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(nodb_snap.status().as_u16(), 403);
+    let root_str = ws1_root.to_string_lossy().to_string();
+    let watches = format!("{base}/api/v1/ide/db-watch/watches");
+    let start = |target: Value| json!({ "root": root_str, "target": target, "items": [{ "object": "wallet:bal:" }] });
+    let saved_target = json!({ "kind": "saved", "connection_id": saved_redis.id });
+    let eph_target = json!({ "kind": "ephemeral", "ephemeral_id": "miniredis:test" });
 
-    let nonroot_eph = client
-        .post(format!("{base}/api/v1/ide/db-watch/snapshot"))
-        .bearer_auth(&editor_db_tok)
-        .json(&json!({
-            "root": ws1_root.to_string_lossy(),
-            "target_kind": "ephemeral",
-            "ephemeral_id": "miniredis:test",
-            "engine": "redis",
-            "object_name": "wallet:bal:*"
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(nonroot_eph.status().as_u16(), 403);
-
-    // 4. Write custom query (`SET wallet:bal:1 999`) is strictly refused (`403`).
-    let write_attempt = client
-        .post(format!("{base}/api/v1/ide/db-watch/snapshot"))
-        .bearer_auth(&root_tok)
-        .json(&json!({
-            "root": ws1_root.to_string_lossy(),
-            "target_kind": "ephemeral",
-            "ephemeral_id": "miniredis:test",
-            "engine": "redis",
-            "object_name": "wallet:bal:*",
-            "custom_query": "SET wallet:bal:1 999"
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(write_attempt.status().as_u16(), 403);
+    // 3. No Database:View: the saved connection is not visible (`404`); a
+    // non-root user gets no ephemeral watch (`403`).
+    let (s, _) = call(
+        reqwest::Method::POST,
+        watches.clone(),
+        &editor_no_db_tok,
+        Some(start(saved_target.clone())),
+    )
+    .await;
+    assert_eq!(s, 404);
+    let (s, _) = call(
+        reqwest::Method::POST,
+        watches.clone(),
+        &editor_db_tok,
+        Some(start(eph_target.clone())),
+    )
+    .await;
+    assert_eq!(s, 403);
 
     // 5. Root detect returns all 4 detected engines + saved connection + ephemeral target!
     let root_detect: Value = client
@@ -429,73 +405,64 @@ func load(ctx context.Context) {
         ephemeral.len()
     );
 
-    // 6. Capture Baseline ("Before") snapshot, mutate Redis state, capture "After" snapshot & verify diff!
-    let before_resp: Value = client
-        .post(format!("{base}/api/v1/ide/db-watch/snapshot"))
-        .bearer_auth(&root_tok)
-        .json(&json!({
-            "root": ws1_root.to_string_lossy(),
-            "target_kind": "ephemeral",
-            "ephemeral_id": "miniredis:test",
-            "engine": "redis",
-            "object_name": "wallet:bal:*"
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(before_resp["snapshot"]["rows"].as_array().unwrap().len(), 2);
-
+    // 6. Baseline, mutate Redis, checkpoint: added / modified / removed.
+    let (s, w) = call(
+        reqwest::Method::POST,
+        watches.clone(),
+        &root_tok,
+        Some(start(eph_target)),
+    )
+    .await;
+    assert_eq!(s, 200, "{w}");
+    let id = w["id"].as_str().unwrap().to_string();
+    let (_, before) = call(
+        reqwest::Method::GET,
+        format!("{watches}/{id}?rows=1"),
+        &root_tok,
+        None,
+    )
+    .await;
+    assert_eq!(
+        before["items"][0]["current"]["rows"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     {
         let mut guard = redis_data.lock().unwrap();
         guard.insert("wallet:bal:1".into(), "250.00".into()); // modified
         guard.remove("wallet:bal:2"); // removed
         guard.insert("wallet:bal:3".into(), "75.00".into()); // added
     }
+    let (_, after) = call(
+        reqwest::Method::POST,
+        format!("{watches}/{id}/snapshot"),
+        &root_tok,
+        Some(json!({})),
+    )
+    .await;
+    let item = &after["items"][0];
+    assert_eq!(item["added_count"], 1, "{item}");
+    assert_eq!(item["modified_count"], 1);
+    assert_eq!(item["removed_count"], 1);
+    assert_eq!(item["unchanged_count"], 0);
 
-    let after_resp: Value = client
-        .post(format!("{base}/api/v1/ide/db-watch/snapshot"))
-        .bearer_auth(&root_tok)
-        .json(&json!({
-            "root": ws1_root.to_string_lossy(),
-            "target_kind": "ephemeral",
-            "ephemeral_id": "miniredis:test",
-            "engine": "redis",
-            "object_name": "wallet:bal:*",
-            "previous": before_resp["snapshot"]
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    // 7a. A new connection fails closed (`404`) for non-root even with
+    // `Database:View` until a rule grants `discover` + `db_browse`.
+    let (s, _) = call(
+        reqwest::Method::POST,
+        watches.clone(),
+        &editor_db_tok,
+        Some(start(saved_target.clone())),
+    )
+    .await;
+    assert_eq!(s, 404);
 
-    assert_eq!(after_resp["diff"]["added_count"], 1);
-    assert_eq!(after_resp["diff"]["modified_count"], 1);
-    assert_eq!(after_resp["diff"]["removed_count"], 1);
-    assert_eq!(after_resp["diff"]["unchanged_count"], 0);
-
-    // 7a. Newly created connection fails closed (`404`) for non-root even with `Database:View`
-    // until an explicit resource-access rule grants `discover` + `db_browse`.
-    let ungranted_snap = client
-        .post(format!("{base}/api/v1/ide/db-watch/snapshot"))
-        .bearer_auth(&editor_db_tok)
-        .json(&json!({
-            "root": ws1_root.to_string_lossy(),
-            "target_kind": "saved",
-            "connection_id": saved_redis.id,
-            "engine": "redis",
-            "object_name": "wallet:bal:*"
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(ungranted_snap.status().as_u16(), 404);
-
-    // 7b. Grant `discover` + `db_browse` to `editor_db` -> saved snapshot succeeds!
+    // 7b. Grant `discover` + `db_browse` to `editor_db`: the watch is armed,
+    // but reading VALUES hits the same native privilege ceiling as a DB
+    // Explorer query on an enforced connection (C1-016; before, the watch's
+    // Redis path skipped `verify_native` and returned the 2 values).
     let access_repo = ResourceAccessRepo::new(pool.clone());
     let mut policy = access_repo
         .get_policy(ResourceKind::Connection, &saved_redis.id)
@@ -522,28 +489,24 @@ func load(ctx context.Context) {
         )
         .await
         .unwrap();
-
-    let saved_snap: Value = client
-        .post(format!("{base}/api/v1/ide/db-watch/snapshot"))
-        .bearer_auth(&editor_db_tok)
-        .json(&json!({
-            "root": ws1_root.to_string_lossy(),
-            "target_kind": "saved",
-            "connection_id": saved_redis.id,
-            "engine": "redis",
-            "object_name": "wallet:bal:*"
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert!(
-        saved_snap["snapshot"]["rows"].is_array(),
-        "unexpected saved_snap response: {saved_snap}"
-    );
-    assert_eq!(saved_snap["snapshot"]["rows"].as_array().unwrap().len(), 2);
+    let (s, w) = call(
+        reqwest::Method::POST,
+        watches.clone(),
+        &editor_db_tok,
+        Some(start(saved_target)),
+    )
+    .await;
+    assert_eq!(s, 200, "{w}");
+    let (_, r) = call(
+        reqwest::Method::GET,
+        format!("{watches}/{}?rows=1", w["id"].as_str().unwrap()),
+        &editor_db_tok,
+        None,
+    )
+    .await;
+    let err = r["items"][0]["error"].as_str().unwrap_or_default();
+    assert!(err.contains("native_scope_required"), "{r}");
+    assert!(r["items"][0]["current"].is_null(), "no values read: {r}");
 }
 
 // ── Watch engine (`/ide/db-watch/watches`) ────────────────────────────────
@@ -654,6 +617,19 @@ async fn a_watch_checkpoints_diffs_masks_for_agents_and_belongs_to_its_owner() {
         "target": {"kind": "ephemeral", "ephemeral_id": "miniredis:test"},
         "items": [{"object": "wallet:"}, {"object": "auth:"}],
     });
+
+    // The stateless route that ran a custom statement is gone.
+    let (s, _) = call(
+        reqwest::Method::POST,
+        url("/snapshot"),
+        &env.root_tok,
+        Some(json!({
+            "root": root, "target_kind": "ephemeral", "ephemeral_id": "miniredis:test",
+            "engine": "redis", "object_name": "wallet:", "custom_query": "KEYS *"
+        })),
+    )
+    .await;
+    assert!(s == 404 || s == 405, "{s}");
 
     // Ephemeral targets are root-only.
     let (s, _) = call(
