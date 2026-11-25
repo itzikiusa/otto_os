@@ -22,7 +22,9 @@ import { apiCtx, tempDir } from './seed';
 //      agent's control, the debug session stays usable.
 //   D. refusals: denylisted env, non-loopback request, a folder outside the
 //      session's, another agent's session; evaluate asks every time.
-//   B. a `//go:build component` testify suite with its own Testcontainer:
+//   B. a `//go:build component` testify suite on its own database — a MariaDB
+//      container the spec starts with Testcontainers' labels (what Otto
+//      recognises a run's database by; the fixture carries no testcontainers-go):
 //      start by test name + tag, first stop on the exact line, DB Watch armed
 //      on the run's container with zero clicks, "Since last stop | Since start".
 //
@@ -207,9 +209,6 @@ test.beforeAll(async ({}, info) => {
   const goEnv = ['GOMODCACHE', 'GOPROXY', 'GOFLAGS', 'GOCACHE', 'GOTOOLCHAIN']
     .filter((k) => process.env[k])
     .map((k) => ({ key: k, value: process.env[k] }));
-  // No Ryuk image offline: the person's project environment turns it off (an
-  // agent may not pass TESTCONTAINERS_* itself).
-  goEnv.push({ key: 'TESTCONTAINERS_RYUK_DISABLED', value: 'true' });
   await postJson(ctx, `${base}/api/v1/ide/environments`, {
     target: { kind: 'local', workspace_id: ws, root, connection_id: null },
     extra_path: [GO_DIR, '/opt/homebrew/bin', '/usr/local/bin'].filter(existsSync).join(':'),
@@ -570,7 +569,7 @@ test('A+C+D: an agent debugs a Go service end to end — request, stops, DB rows
   }
 });
 
-test('B: a tagged component test with its own Testcontainer — first stop on the exact line, DB Watch armed with zero clicks', async ({ page }) => {
+test('B: a tagged component test on its own (Testcontainers-labelled) database — first stop on the exact line, DB Watch armed with zero clicks', async ({ page }) => {
   test.setTimeout(420_000);
   const line = lineOf('orders_component_test.go', 's.Require().NoError(markPaid(db, id))');
   await page.goto(`/#/agents/${sessionId}`);
@@ -578,7 +577,21 @@ test('B: a tagged component test with its own Testcontainer — first stop on th
   // The other agent session: A ended with the person stopping orders-agent's
   // control, and an agent is not let ask again right away.
   const mcp = await startMcp(otherId, otherToken);
-  const tcBefore = new Set(docker(['ps', '-q', '--filter', 'label=org.testcontainers=true']).split('\n'));
+  // The run's own database, labelled the way Testcontainers labels its
+  // containers (real users' component tests start them with testcontainers-go).
+  const tc = docker(['run', '-d', '--rm', '--name', `otto-e2e-dbg-tc-${RUN}`,
+    '--label', 'org.testcontainers=true', '--label', `org.testcontainers.sessionId=${RUN}`, '--label', 'org.testcontainers.lang=go',
+    '-e', 'MARIADB_ROOT_PASSWORD=secret', '-e', 'MARIADB_DATABASE=shop', '-p', '127.0.0.1::3306', 'mariadb:11.8.9']);
+  containers.push(tc);
+  for (let i = 0; i < 120; i++) {
+    try {
+      docker(['exec', tc, 'mariadb', '-uroot', '-psecret', '-e', 'SELECT 1', 'shop'], 10_000);
+      break;
+    } catch {
+      await sleep(500);
+    }
+  }
+  const testDsn = `root:secret@tcp(127.0.0.1:${hostPort(tc, '3306/tcp')})/shop`;
   try {
     await page.locator('.shell').getByText('other-agent', { exact: true }).first().click();
     await grant(page, mcp, 'other-agent');
@@ -586,6 +599,7 @@ test('B: a tagged component test with its own Testcontainer — first stop on th
     const call = () => mcp.call('ide_debug_start', {
       target: { kind: 'test', file: 'orders_component_test.go', name: 'TestOrdersSuite/TestCreate' },
       build_tags: ['component'],
+      env: { ORDERS_TEST_DSN: testDsn },
       breakpoints: [{ file: 'orders_component_test.go', line }],
       wait_ms: 100_000,
     });
@@ -633,9 +647,6 @@ test('B: a tagged component test with its own Testcontainer — first stop on th
     expect(out.isError, out.text).toBeFalsy();
   } finally {
     mcp.kill();
-    // Stopping the debuggee skips TearDownSuite (and Ryuk is off here): remove the run's container.
-    for (const id of docker(['ps', '-q', '--filter', 'label=org.testcontainers=true']).split('\n')) {
-      if (id && !tcBefore.has(id)) docker(['rm', '-f', id]);
-    }
+    docker(['rm', '-f', tc]);
   }
 });
