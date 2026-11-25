@@ -152,6 +152,21 @@ export function unverifiedNames(detected: readonly IdeDetectedDbAccess[], engine
   return [...new Set(detected.filter((d) => matchesEngine(d, engine) && d.verified === false).map((d) => d.object_name))];
 }
 
+// ── A picked target that cannot be listed ───────────────────────────────
+
+export interface DbWatchTargetError {
+  /** `database`: the connection has no default database — ask which one. */
+  kind: 'unreachable' | 'database';
+  message: string;
+}
+
+/** The daemon's answer to listing a picked target, as the panel shows it. */
+export function targetErrorOf(status: number | undefined, message: string): DbWatchTargetError {
+  if (status === 400 && /database/i.test(message)) return { kind: 'database', message };
+  const short = message.replace(/^\s*(upstream|error|internal)\s*:\s*/i, '').trim();
+  return { kind: 'unreachable', message: short.length > 160 ? `${short.slice(0, 159)}…` : short || 'no answer' };
+}
+
 // ── Filters: `column = value` only (no free text in v1) ──────────────────
 
 /** The daemon writes the value into the statement itself, so text is limited

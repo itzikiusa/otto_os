@@ -537,3 +537,54 @@ test('CP-002: live poll never carries over to the next target', async () => {
   await h.store.start({ target: { kind: 'saved', connection_id: 'stg' }, items: [{ object: 'session_info' }] });
   assert.equal(h.store.liveWatch, false);
 });
+
+// ── An unreachable target after a pick ─────────────────────────────────────
+
+test('I: a picked target that cannot be reached carries its error; Retry sends exactly one detect naming it, and nothing else reaches it', async () => {
+  const remote = saved({ connection_id: 'ms', name: 'STGCI - MSDB', environment: 'dev', local: false });
+  let fail = true;
+  const h = harness({ routes: (c) => {
+    if (c.url.startsWith('/ide/db-watch/watches?')) return { watches: [] };
+    if (c.url === '/ide/db-watch/detect') {
+      if ((c.body as { target?: unknown }).target && fail) return new ApiError(502, { code: 'upstream', message: 'upstream: error communicating with database: dial tcp 10.0.4.12:1433: i/o timeout' });
+      return { detected_objects: [det('session_info')], saved_connections: [remote], ephemeral_targets: [] };
+    }
+    return undefined;
+  } });
+  h.store.follow({ root: '/r' });
+  await flush();
+  await h.store.discover();
+  await h.store.setTarget(remote);
+  assert.equal(h.store.targetError?.kind, 'unreachable');
+  assert.match(h.store.targetError?.message ?? '', /error communicating with database: dial tcp 10\.0\.4\.12:1433: i\/o timeout/);
+  assert.doesNotMatch(h.store.targetError?.message ?? '', /^upstream:/);
+  const named = () => h.calls.filter(namesTarget);
+  assert.equal(named().length, 1);
+  fail = false;
+  await h.store.retryTarget();
+  assert.equal(named().length, 2, 'Retry: exactly one more detect naming the target');
+  assert.ok(named().every((c) => c.url === '/ide/db-watch/detect'), 'nothing but detect');
+  assert.equal(h.store.targetError, null);
+});
+
+test('I: a connection without a default database asks for one; the answer lists that database’s tables', async () => {
+  const remote = saved({ connection_id: 'ms', name: 'STGCI - MSDB', database: null, local: false });
+  const h = harness({ routes: (c) => {
+    if (c.url.startsWith('/ide/db-watch/watches?')) return { watches: [] };
+    if (c.url === '/ide/db-watch/detect') {
+      const b = c.body as { target?: unknown; database?: string | null };
+      if (b.target && !b.database) return new ApiError(400, { code: 'invalid', message: 'choose a database to list its tables' });
+      return { detected_objects: [], saved_connections: [remote], ephemeral_targets: [] };
+    }
+    return undefined;
+  } });
+  h.store.follow({ root: '/r' });
+  await flush();
+  await h.store.setTarget(remote);
+  assert.equal(h.store.targetError?.kind, 'database');
+  await h.store.setPendingDatabase('pr_bo_1');
+  const last = h.calls.filter((c) => c.url === '/ide/db-watch/detect').at(-1)?.body as { database?: string };
+  assert.equal(last.database, 'pr_bo_1');
+  assert.equal(h.store.targetError, null);
+  assert.equal(h.store.pendingTarget?.database, 'pr_bo_1');
+});

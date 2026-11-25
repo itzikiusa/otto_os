@@ -41,6 +41,8 @@
   const w = $derived(ideDbWatch.watch);
   const read = $derived(ideDbWatch.read);
   const pending = $derived(ideDbWatch.pendingTarget);
+  const tErr = $derived(ideDbWatch.targetError);
+  const unreachable = $derived(tErr?.kind === 'unreachable');
   const engine = $derived(pending?.engine ?? w?.target.engine ?? null);
   const items = $derived<IdeDbWatchItemDiff[]>(read?.items ?? []);
   const changedItems = $derived(items.filter((i) => i.error || i.added_count + i.modified_count + i.removed_count > 0));
@@ -183,6 +185,15 @@
     else await ideDbWatch.addItem({ object: v });
   }
 
+  async function chooseDatabase(): Promise<void> {
+    const v = await confirmer.promptText(`The database (or schema) on ${pending?.name ?? 'this connection'} whose tables DB Watch lists.`, {
+      title: 'Choose a database',
+      confirmLabel: 'List tables',
+      placeholder: 'pr_bo_1',
+    });
+    if (v) await ideDbWatch.setPendingDatabase(v);
+  }
+
   async function editFilter(object: string): Promise<void> {
     const info = ideDbWatch.watch?.items.find((i) => i.object === object);
     const v = await confirmer.promptText(`Only rows of ${object} where a column equals a value. Leave empty to watch every row.`, {
@@ -265,7 +276,7 @@
       {#if targetEnv}<EnvBadge env={targetEnv} />{/if}
       <Icon name="chevronDown" size={12} />
     </button>
-    <button type="button" class="btn small ghost dbw-pick" bind:this={tablesBtn} aria-haspopup="menu" disabled={!engine} title={engine ? 'Choose the tables to watch' : 'Choose a target first'} onclick={() => void openTablesMenu()} data-testid="ide-dbw-tables">
+    <button type="button" class="btn small ghost dbw-pick" bind:this={tablesBtn} aria-haspopup="menu" disabled={!engine || Boolean(tErr)} title={tErr ? (tErr.kind === 'database' ? 'Choose a database first' : `Can’t list tables: ${tErr.message}`) : engine ? 'Choose the tables to watch' : 'Choose a target first'} onclick={() => void openTablesMenu()} data-testid="ide-dbw-tables">
       <span class="dbw-pick-label mono" dir="ltr">{tablesLabel}</span>
       <Icon name="chevronDown" size={12} />
     </button>
@@ -282,7 +293,7 @@
     {#if w && !pending}
       <button type="button" class="btn small primary" disabled={w.busy} title="Take a checkpoint now and compare" onclick={() => void ideDbWatch.snapshotNow()} data-testid="ide-dbw-snapshot">Snapshot</button>
     {:else}
-      <button type="button" class="btn small primary" title="Watch the run’s database and the tables your code touches" onclick={() => void startWatching()} data-testid="ide-dbw-start">Start watching</button>
+      <button type="button" class="btn small primary" disabled={Boolean(tErr)} title="Watch the run’s database and the tables your code touches" onclick={() => void startWatching()} data-testid="ide-dbw-start">Start watching</button>
     {/if}
     <button type="button" class="icon-btn" aria-label="DB Watch options" title="Live poll, keep containers, copy changes, stop watching" aria-haspopup="menu" onclick={openMore} data-testid="ide-dbw-options-btn">
       <Icon name="more" size={13} />
@@ -295,20 +306,25 @@
   <div class="dbw-body" bind:this={bodyEl}>
     <LoadState
       what="the database watch"
-      errorTitle={w ? `Couldn’t read ${w.target.label}` : 'Couldn’t start watching'}
+      errorTitle={unreachable && pending ? `Can’t reach ${pending.name}` : w ? `Couldn’t read ${w.target.label}` : 'Couldn’t start watching'}
       loading={ideDbWatch.loading && !read}
-      error={ideDbWatch.error}
+      error={unreachable ? tErr?.message : ideDbWatch.error}
       empty={!w || Boolean(pending)}
-      onretry={() => void (w ? ideDbWatch.snapshotNow() : startWatching())}
+      onretry={() => void (unreachable ? ideDbWatch.retryTarget() : w ? ideDbWatch.snapshotNow() : startWatching())}
       rows={4}
     >
       {#snippet errorActions()}
+        {#if unreachable}
+          <button type="button" class="btn small" onclick={() => void openTargetMenu()} data-testid="ide-dbw-other-target">Choose another target</button>
+        {/if}
         {#if (w?.target.kind ?? pending?.target_kind) === 'ephemeral' && !ide.keepTestcontainersAlive}
           <button type="button" class="btn small" onclick={() => (ide.keepTestcontainersAlive = true)}>Keep Testcontainers alive</button>
         {/if}
       {/snippet}
       {#snippet emptyView()}
-        {#if pending && ideDbWatch.pendingItems.length > 0}
+        {#if pending && tErr?.kind === 'database'}
+          <EmptyState icon="db" title="Choose a database" body="{pending.name} has no default database. Name the one whose tables to list." actionLabel="Choose database…" actionIcon="db" actionKind="secondary" onaction={() => void chooseDatabase()} />
+        {:else if pending && ideDbWatch.pendingItems.length > 0}
           <EmptyState icon="db" title="Ready to watch {pending.name}" body="Start watching reads {ideDbWatch.pendingItems.map((i) => i.object).join(', ')} on {pending.host}{pending.target_kind === 'saved' ? ` (${pending.environment || 'dev'})` : ''} now and at every stop. Nothing is read before." />
         {:else if pending}
           <EmptyState icon="db" title="Choose tables to watch" body="Pick the tables {pending.name} should compare at every stop." actionLabel="Tables" actionIcon="listBullet" actionKind="secondary" onaction={() => void openTablesMenu()} />
