@@ -19,7 +19,7 @@ import {
 } from './shell/ideProjectHelpers';
 import {
   applyFallbackPrefixSuffix, computeFallbackSelection, IdeBufferPerfController, nextTabAccessStamp,
-  performAgentEdit, performCloseTab, performOpenFile, performSaveFile, saveWorkspaceOpenTabs,
+  performAgentEdit, performCloseTab, performOpenFile, performSaveFile, saveWorkspaceOpenTabs, type IdeOpenFileOpts,
 } from './store/ideBufferPerf';
 import {
   computeIdeProjectRoots, fetchIdeWorkspaceTree, loadIdeWorkspaceTree, toggledExpansion, IdeCollabState, IdeDebugState, IdeTargetEnvState,
@@ -255,8 +255,8 @@ class IdeStore {
     }
     this.bufPerf.cancelHiddenLoads(this);
     if (next && !this.collabIsGuest) {
-      const tab = this.tabs.find((t) => t.path === next);
-      if (tab && !tab.loading && !tab.error) {
+      const tab = this.tabs.find((t) => t.path === next); // a restored tab not read yet is read now:
+      if (tab?.deferred) void this.openFile(next, { background: true }); else if (tab && !tab.loading && !tab.error) {
         if (this.gutterByPath[next] === undefined) void this.loadGutter(next, this.getBuffer(next));
         if (this.symbolsByPath[next] === undefined) void this.loadSymbols(next, this.getBuffer(next));
       }
@@ -438,7 +438,7 @@ class IdeStore {
       this.sharedBuffers = Object.fromEntries(Object.entries(this.sharedBuffers).filter(([k]) => !set.has(k)));
     }
   }
-  async openFile(rawPath: string, opts: { line?: number; col?: number; preview?: boolean; inSplit?: boolean; reload?: boolean; background?: boolean; projectScoped?: boolean } = {}): Promise<void> {
+  async openFile(rawPath: string, opts: IdeOpenFileOpts = {}): Promise<void> {
     await performOpenFile(this, this.bufPerf, this.isNavigatingHistory, rawPath, opts);
     saveWorkspaceOpenTabs(this.target.root, this.tabs, this._activePath, this.splitPath);
     this.syncWorkspacePort();
@@ -467,7 +467,7 @@ class IdeStore {
     this.bufPerf.flushAll(this);
     const tab = this.tabs.find((t) => t.path === path);
     if (tab) tab.lastAccessedAt = nextTabAccessStamp();
-    this.splitPath = path; this.splitDirection = dir;
+    this.splitPath = path; this.splitDirection = dir; if (tab?.deferred && !this.collabIsGuest) void this.openFile(path, { background: true });
   }
   closeSplit(): void { this.bufPerf.flushAll(this); this.splitPath = null; this.splitDirection = null; this.bufPerf.cancelHiddenLoads(this); }
   jumpTo(path: string, line: number, col = 1): void { this.jumpSeq += 1; this.jumpRequest = { path, line, col, seq: this.jumpSeq }; }
