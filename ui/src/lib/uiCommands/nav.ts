@@ -287,7 +287,11 @@ async function openInWindow(args: OpenArgs, ctx: UiCommandCtx): Promise<unknown>
     const windowId = await openPopout(route, label);
     return { ui_visible: true, pane: 'window', route, module: key, label, ...(windowId ? { window_id: windowId } : {}) };
   }
-  const shown = (await open({ ...args, placement: 'side' }, ctx)) as Record<string, unknown>;
+  // This window's side pane already shows it: detach it as it is — a window
+  // of its own needs no room beside the session, so no `fits` check.
+  const shown = !isEmbedded && sidePane.active && sidePane.key === key
+    ? { ui_visible: true, pane: 'side', route, module: key, label }
+    : ((await open({ ...args, placement: 'side' }, ctx)) as Record<string, unknown>);
   if (shown.pane !== 'side') return shown;
   const pane = nativePaneSnapshot();
   if (pane && pane.mode === 'attached') {

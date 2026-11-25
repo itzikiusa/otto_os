@@ -791,6 +791,54 @@ async fn debug_start_opens_the_ide_in_a_window_past_a_hidden_one() {
     assert_eq!(out["content"]["state"], "running", "{out}");
 }
 
+/// The rest of an agent's debug commands follow the IDE window its
+/// `ide_debug_start` ran in, even after the person focuses another IDE window
+/// (that one does not run the agent's session).
+#[tokio::test]
+async fn debug_commands_follow_the_window_that_started_the_session() {
+    let d = boot().await;
+    let caps = ["ide_debug_start", "ide_debug_control"];
+    let mut a = d.ws(&d.human).await;
+    let a_conn = hello(&mut a, "wa", "main", "ide", &caps).await;
+    d.grant(true).await;
+    let answer = |conn: String, id: Value| {
+        let (http, base, human) = (d.http.clone(), d.base.clone(), d.human.clone());
+        async move {
+            let url = format!("{base}/api/v1/ui/commands/{}/result", id.as_str().unwrap());
+            let body = json!({"ok": true, "result": {"state": "paused"}});
+            let req = http
+                .post(url)
+                .bearer_auth(human)
+                .header("X-Otto-Ui-Conn", conn);
+            assert_eq!(req.json(&body).send().await.unwrap().status().as_u16(), 204);
+        }
+    };
+    let target = json!({"kind": "main", "file": "main.go"});
+    let call = d.invoke("ui_ide_debug_start", json!({"target": target}));
+    let cmd = next_of(&mut a, "ui_command").await;
+    assert_eq!(cmd["command"], "ide_debug_start");
+    answer(a_conn.clone(), cmd["id"].clone()).await;
+    call.await.unwrap();
+    // The person opens a second IDE window and works in it.
+    let mut b = d.ws(&d.human).await;
+    let _b_conn = hello(&mut b, "wb", "main", "ide", &caps).await;
+    let blur =
+        json!({"type":"presence","route":"ide","module":"ide","focused":false,"visible":true});
+    a.send(Message::Text(blur.to_string().into()))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let call = d.invoke("ui_ide_debug_control", json!({"action": "status"}));
+    let cmd = next_of(&mut a, "ui_command").await;
+    assert_eq!(
+        cmd["command"], "ide_debug_control",
+        "the starting window drives it"
+    );
+    assert!(!gets(&mut b, "ui_command", Duration::from_millis(200)).await);
+    answer(a_conn, cmd["id"].clone()).await;
+    call.await.unwrap();
+}
+
 /// S8-302: the same, with the daemon's auth cache ENABLED and primed. Logout
 /// revokes through a cache-less repo; the shared cache must still be evicted,
 /// so REST refuses the token at once and the socket closes within ~2 s (not
@@ -1192,7 +1240,9 @@ async fn structured_threads_are_granted_and_drive_like_sessions() {
     let out = invoke("ui_state").await;
     assert_eq!(out["content"]["ui_visible"], json!(false), "{out}");
 
-    // Revoked: back to pending.
+    // Revoked: back to pending, and every window hears it (the driving bar
+    // and the write memory of an IDE window clear on this event).
+    let mut window = d.ws(&d.human).await;
     let (st, _) = d
         .post(
             &d.human,
@@ -1202,6 +1252,9 @@ async fn structured_threads_are_granted_and_drive_like_sessions() {
         )
         .await;
     assert_eq!(st, 200);
+    let ev = next_of(&mut window, "session_meta_updated").await;
+    assert_eq!(ev["session_id"], json!("thr1"), "{ev}");
+    assert_eq!(ev["meta"]["ui_control"]["enabled"], json!(false), "{ev}");
     let out = invoke("ui_state").await;
     assert_eq!(out["code"], "pending_grant", "{out}");
 }

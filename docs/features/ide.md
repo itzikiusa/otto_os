@@ -486,7 +486,8 @@ asks to drive Otto (one **Allow** for the session), then:
    its control; the session stays yours.
 
 Evaluating an expression can run code in the program, so each one asks, showing
-the exact expression. Reading a variable by path never asks. Values the agent
+the exact expression; so does a breakpoint condition, hit count or log message
+(the start confirm lists them, and setting one later asks again). Reading a variable by path never asks. Values the agent
 reads (locals, inspected paths, responses, DB rows) are redacted by name and
 shape before they reach it; what you see in the IDE is never redacted.
 Everything the agent reads goes to its model provider, as with any agent read.

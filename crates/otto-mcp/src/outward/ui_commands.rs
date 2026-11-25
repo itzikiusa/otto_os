@@ -402,6 +402,71 @@ pub fn validate_command(spec: &UiCommandSpec, args: &Value) -> Result<(), String
     Ok(())
 }
 
+/// Keep an `ide_debug_*` command inside the agent session's folder `cwd`:
+/// `ide_debug_start`'s `root` (default `cwd`) is resolved through symlinks
+/// and must lie in the resolved `cwd` — the canonical root is what the IDE
+/// gets —, and every file argument (`target.file`, `breakpoints`, `set`,
+/// `clear`, `file`) must be relative, without `..`, and (when it exists)
+/// resolve inside that root. Other commands pass through.
+pub fn confine_paths(spec: &UiCommandSpec, mut args: Value, cwd: &str) -> Result<Value, String> {
+    if spec.module != "ide" {
+        return Ok(args);
+    }
+    let canon =
+        |p: &std::path::Path| std::fs::canonicalize(p).map_err(|e| format!("{}: {e}", p.display()));
+    let home = canon(std::path::Path::new(cwd))
+        .map_err(|e| format!("your session's folder is unknown ({e})"))?;
+    let root = if spec.name == "ide_debug_start" {
+        let asked = args.get("root").and_then(Value::as_str).unwrap_or(cwd);
+        let root = canon(std::path::Path::new(asked))?;
+        if !root.starts_with(&home) {
+            return Err(format!(
+                "'{asked}' is outside your session's folder {}",
+                home.display()
+            ));
+        }
+        args["root"] = json!(root.to_string_lossy());
+        Some(root)
+    } else {
+        None
+    };
+    let mut files: Vec<&str> = Vec::new();
+    files.extend(args.pointer("/target/file").and_then(Value::as_str));
+    files.extend(args.get("file").and_then(Value::as_str));
+    for list in ["breakpoints", "set", "clear"] {
+        for b in args
+            .get(list)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            files.extend(b.get("file").and_then(Value::as_str));
+        }
+    }
+    for f in files {
+        let rel = std::path::Path::new(f);
+        if rel.is_absolute()
+            || f.contains("://")
+            || f.starts_with('~')
+            || rel
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+        {
+            return Err(format!(
+                "'{f}' must be a path inside the project, relative to it"
+            ));
+        }
+        if let Some(root) = &root {
+            if let Ok(real) = std::fs::canonicalize(root.join(rel)) {
+                if !real.starts_with(root) {
+                    return Err(format!("'{f}' resolves outside the project"));
+                }
+            }
+        }
+    }
+    Ok(args)
+}
+
 fn is_loopback_url(url: &str) -> bool {
     let Ok(u) = reqwest::Url::parse(url) else {
         return false;
@@ -1128,5 +1193,58 @@ mod tests {
         // Other commands are untouched by the URL rule.
         let send = get("api_send").unwrap();
         assert_eq!(validate_command(send, &json!({})), Ok(()));
+    }
+
+    #[test]
+    fn ide_paths_stay_inside_the_sessions_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("app");
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(home.join("svc")).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("evil.go"), "package main").unwrap();
+        std::os::unix::fs::symlink(&other, home.join("link")).unwrap();
+        std::os::unix::fs::symlink(other.join("evil.go"), home.join("svc/evil.go")).unwrap();
+        let cwd = home.to_string_lossy().into_owned();
+        let start = get("ide_debug_start").unwrap();
+        let canon = std::fs::canonicalize(&home).unwrap();
+        let run = |args: Value| confine_paths(start, args, &cwd);
+        // Default root = the canonical session folder; a sub-folder is fine.
+        let ok = run(json!({"target": {"kind": "main", "file": "main.go"}})).unwrap();
+        assert_eq!(ok["root"], json!(canon.to_string_lossy()));
+        let sub =
+            run(json!({"root": home.join("svc"), "target": {"kind": "main", "file": "main.go"}}))
+                .unwrap();
+        assert_eq!(sub["root"], json!(canon.join("svc").to_string_lossy()));
+        // A symlinked root, another folder, absolute / .. / symlinked-out files: refused.
+        for bad in [
+            json!({"root": home.join("link"), "target": {"kind": "main", "file": "main.go"}}),
+            json!({"root": other, "target": {"kind": "main", "file": "main.go"}}),
+            json!({"target": {"kind": "main", "file": other.join("evil.go")}}),
+            json!({"target": {"kind": "main", "file": "../other/evil.go"}}),
+            json!({"target": {"kind": "main", "file": "svc/evil.go"}}),
+            json!({"target": {"kind": "main", "file": "main.go"}, "breakpoints": [{"file": "/etc/hosts", "line": 1}]}),
+        ] {
+            assert!(run(bad.clone()).is_err(), "{bad}");
+        }
+        // Later commands: relative paths only.
+        let bps = get("ide_debug_breakpoints").unwrap();
+        assert!(confine_paths(bps, json!({"set": [{"file": "a.go", "line": 1}]}), &cwd).is_ok());
+        assert!(confine_paths(
+            bps,
+            json!({"set": [{"file": "/etc/hosts", "line": 1}]}),
+            &cwd
+        )
+        .is_err());
+        let control = get("ide_debug_control").unwrap();
+        assert!(confine_paths(
+            control,
+            json!({"action": "run_to_line", "file": "../x.go", "line": 1}),
+            &cwd
+        )
+        .is_err());
+        // Other modules pass through untouched.
+        let other_cmd = get("db_run_query").unwrap();
+        assert!(confine_paths(other_cmd, json!({"x": "/etc"}), "/nonexistent").is_ok());
     }
 }

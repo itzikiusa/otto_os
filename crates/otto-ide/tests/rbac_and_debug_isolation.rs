@@ -718,6 +718,11 @@ async fn debug_port_probe_reports_a_loopback_listener_to_the_session_owner_only(
         StatusCode::OK,
         "another user must not probe through alice's session"
     );
+    // Port 0 and the daemon's own port are no debuggee's.
+    for bad in [0, 7700] {
+        let (st, _) = probe_port(&alice, &sid, bad).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "port {bad}");
+    }
     drop(listener);
     let (st, body) = probe_port(&alice, &sid, port).await;
     assert_eq!(
@@ -725,4 +730,25 @@ async fn debug_port_probe_reports_a_loopback_listener_to_the_session_owner_only(
         (StatusCode::OK, &json!(false)),
         "{body}"
     );
+    // An ended session probes nothing.
+    let stop = json!({ "action": "stop" });
+    let path = format!("/ide/debug/sessions/{sid}/command");
+    send_json(&alice, Method::POST, &path, Some(stop)).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (_, s) = send_json(
+            &alice,
+            Method::GET,
+            &format!("/ide/debug/sessions/{sid}"),
+            None,
+        )
+        .await;
+        if matches!(s["session"]["state"].as_str(), Some("terminated" | "error")) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "session never ended: {s}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let (st, _) = probe_port(&alice, &sid, port).await;
+    assert_ne!(st, StatusCode::OK, "an ended session must not probe");
 }

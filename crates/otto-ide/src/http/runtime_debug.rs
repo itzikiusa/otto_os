@@ -15,9 +15,9 @@ use crate::dap::DapStartContext;
 use crate::types::{
     IdeCreatePythonVenvReq, IdeCreatePythonVenvResp, IdeDebugCommandReq, IdeDebugEvaluateReq,
     IdeDebugEvaluateResp, IdeDebugPortQuery, IdeDebugPortResp, IdeDebugSessionResp,
-    IdeDebugSessionsResp, IdeDebugVariablesReq, IdeDebugVariablesResp, IdeOkResp, IdeRunConfigResp,
-    IdeRunConfigsResp, IdeRunResp, IdeSetBreakpointsReq, IdeStartDebugReq, IdeStartRunReq,
-    IdeTargetKind, IdeTargetQuery, IdeTargetSpec, IdeUpsertRunConfigReq,
+    IdeDebugSessionsResp, IdeDebugState, IdeDebugVariablesReq, IdeDebugVariablesResp, IdeOkResp,
+    IdeRunConfigResp, IdeRunConfigsResp, IdeRunResp, IdeSetBreakpointsReq, IdeStartDebugReq,
+    IdeStartRunReq, IdeTargetKind, IdeTargetQuery, IdeTargetSpec, IdeUpsertRunConfigReq,
 };
 use crate::IdeCtx;
 
@@ -538,7 +538,16 @@ pub(super) async fn debug_port<S: IdeCtx>(
     Query(q): Query<IdeDebugPortQuery>,
 ) -> ApiResult<Json<IdeDebugPortResp>> {
     ctx.ide().authorize_debug_session(&user, &id)?;
-    ctx.ide().dap.get_session(&id)?;
+    if q.port == 0 || otto_netguard::is_daemon_port(q.port) {
+        Err(Error::Invalid(format!(
+            "port {} is not a debuggee's",
+            q.port
+        )))?;
+    }
+    let live = ctx.ide().dap.get_session(&id)?.state;
+    if matches!(live, IdeDebugState::Terminated | IdeDebugState::Error) {
+        Err(Error::Conflict("the debug session has ended".into()))?;
+    }
     let connect = |host: &'static str| async move {
         let dial = tokio::net::TcpStream::connect((host, q.port));
         matches!(

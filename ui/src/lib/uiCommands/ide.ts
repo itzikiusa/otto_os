@@ -24,32 +24,35 @@ import { registerUiCommands, UiCommandError, type UiCommandCtx } from '../uiComm
 import { ideDbWatchPort, type AgentDbTargetRef, type IdeDbWatchAgentOps } from './ideDbWatchPort';
 import { idePort, type IdeAgentBreakpointSpec, type IdeDebugCommand, type IdeDebugTarget, type IdePort } from './idePort';
 import {
-  childNamed, clip, EVAL_MAX, newMemory, pathSegments, relPath, shapeBreakpoints, shapeDbRead,
+  breakpointCode, childNamed, clip, confirmSafe, EVAL_MAX, sensitiveName, newMemory, pathSegments, relPath, shapeBreakpoints, shapeDbRead,
   shapeResponse, shapeResult, shapeVariable, SOURCE_RADIUS, startConfirmText, uniqueKey, userMoved, type DebugMemory,
 } from './ideShape';
 import { errText } from './pagePort';
 
-/** Every long call returns before the bridge's deadline (120 s from dispatch,
- *  also the cap after a confirm) with this margin. */
+/** Every long call returns before the bridge's deadline: 120 s from dispatch
+ *  without a confirm (minus a margin)… */
 const BUDGET_MS = 110_000;
+/** …and after a confirm, 120 s from when it was shown, never past dispatch +
+ *  150 s (ui_bridge `extended_deadline`). */
+const afterConfirm = (t0: number, askedAt: number): number => Math.min(askedAt + 120_000, t0 + 150_000) - 8_000;
 /** A debug request outlives a breakpoint pause (the engine default is 60 s). */
 const REQUEST_TIMEOUT_MS = 600_000;
 
 const memory = new Map<string, DebugMemory>();
+/** An agent session's debug request still in flight (aborted by its Stop, stop or a new start). */
+const inflight = new Map<string, AbortController>();
 
 const ended = (s: IdeDebugSessionSnapshot): boolean => s.state === 'terminated' || s.state === 'error';
 const basename = (p: string): string => p.replace(/\/+$/, '').split('/').pop() || p;
 const declined = (what: string): UiCommandError => new UiCommandError('cancelled_by_user', `The user declined ${what}.`);
 
-/** The project root: the agent's own folder or one inside it (D-008). */
+/** The project root. The daemon already resolved it through symlinks and
+ *  checked it lies in the agent's own folder (`ui_commands::confine_paths`),
+ *  and fills it in when the agent gave none. */
 export function checkRoot(raw: unknown, cwd: string): string {
-  const home = cwd.replace(/\/+$/, '');
-  const root = (typeof raw === 'string' && raw.trim() ? raw.trim() : home).replace(/\/+$/, '');
+  const root = (typeof raw === 'string' && raw.trim() ? raw.trim() : cwd).replace(/\/+$/, '');
   if (!root.startsWith('/') || root.split('/').includes('..')) {
     throw new UiCommandError('invalid_args', '`root` must be an absolute project folder.');
-  }
-  if (!home || (root !== home && !root.startsWith(`${home}/`))) {
-    throw new UiCommandError('forbidden', `You can debug your session’s folder (${home || 'unknown'}) or a folder inside it.`);
   }
   return root;
 }
@@ -140,8 +143,13 @@ async function result(ide: IdePort, ctx: UiCommandCtx, snap: IdeDebugSessionSnap
   const db = snap.state === 'paused' ? await stopDb(snap.id) : undefined;
   const late = mem.late ?? undefined;
   const shaped = shapeResult(snap, mem, { breakpoints: ide.agentBreakpoints(ctx.agent), source, sourceFrom, db, request: request ?? late });
+  // The refs shown at this stop (none under a secret-looking name) are the
+  // only ones inspect may expand: guessed neighbours stay closed.
+  const same = (snap.stop_seq ?? 0) === mem.stopSeq && snap.state === mem.state;
+  const shown = Object.entries((shaped.result.refs ?? {}) as Record<string, number>).filter(([n]) => !sensitiveName(n)).map(([, r]) => r);
+  const refs = snap.state === 'paused' ? [...(same ? (mem.refs ?? []) : []), ...shown] : [];
   // A late response rides on this result unless the call brought its own.
-  memory.set(ctx.agent.session_id, { ...shaped.mem, late: request ? mem.late : null });
+  memory.set(ctx.agent.session_id, { ...shaped.mem, refs, late: request ? mem.late : null });
   return shaped.result;
 }
 
@@ -241,17 +249,18 @@ registerUiCommands('ide', {
       if (typeof v !== 'string') throw new UiCommandError('invalid_args', `env ${k} must be a string.`);
     }
     const ide = await idePort.get(ctx.signal, 20_000);
-    if (args.say) ide.say(ctx.agent, args.say);
     ctx.progress(`Opening ${basename(root)} in the IDE`);
     await ide.openProject(ctx.agent, root, ctx.signal);
     const plan = await ide.resolveTarget(args.target, { build_tags: args.build_tags, args: args.args, env: args.env });
     const bps = args.breakpoints ?? [];
+    const askedAt = Date.now();
     const ok = await ctx.confirmWrite({
-      what: startConfirmText({ ...plan, breakpoints: bps.length }),
-      where: basename(plan.root),
+      what: startConfirmText({ ...plan, breakpoints: bps }),
+      where: confirmSafe(basename(plan.root), 100),
       verb: 'Debug',
     });
     if (!ok) throw declined('the debug run');
+    inflight.get(ctx.agent.session_id)?.abort();
     // Restarting: the agent's own earlier session ends first (a session the
     // person started asks "Stop and debug again" in the IDE).
     const prev = ide.agentDebugId(ctx.agent);
@@ -265,6 +274,13 @@ registerUiCommands('ide', {
       if (bps.length) await ide.clearAgentBreakpoints(ctx.agent, 'all').catch(() => 0); // nothing ran: leave no red dots
       throw e;
     });
+    if (ctx.signal.aborted) {
+      // Stopped while it built: nothing may stay running for an agent that let go.
+      await ide.command('stop').catch(() => null);
+      await ide.clearAgentBreakpoints(ctx.agent, 'all').catch(() => 0);
+      throw ctx.signal.reason;
+    }
+    if (args.say) ide.say(ctx.agent, args.say); // the driving bar knows the session only now
     ide.consoleNote(`▶ ${plan.command} (${agentName(ctx.agent)})`);
     memory.set(ctx.agent.session_id, newMemory(debug_id, plan.root));
     let ready = false;
@@ -272,7 +288,7 @@ registerUiCommands('ide', {
     const probe = args.ready_port
       ? async () => (ready ||= (await api.get<IdeDebugPortResp>(`/ide/debug/sessions/${encodeURIComponent(debug_id)}/port?port=${args.ready_port}`)).open)
       : undefined;
-    const wait = Math.min(args.wait_ms ?? 60_000, t0 + BUDGET_MS - Date.now());
+    const wait = Math.min(args.wait_ms ?? 60_000, afterConfirm(t0, askedAt) - Date.now());
     const snap = await waitFor(ide, wait, ctx.signal, (s) => {
       if (s.id !== debug_id) return false;
       if (pattern && s.output.map((o) => o.text).join('').includes(pattern)) ready = true;
@@ -303,6 +319,7 @@ registerUiCommands('ide', {
     const a = args.action;
     if (a === 'status' || (ended(snap) && a !== 'stop')) return result(ide, ctx, snap);
     if (a === 'stop') {
+      inflight.get(sid)?.abort();
       if (!ended(snap)) await ide.command('stop');
       const removed = args.keep_breakpoints ? 0 : await ide.clearAgentBreakpoints(ctx.agent, 'all');
       const end = await waitFor(ide, 5_000, ctx.signal, (s) => s.id === snap.id && ended(s), { poll: gone(ide, snap.id) });
@@ -335,6 +352,17 @@ registerUiCommands('ide', {
     const ide = await idePort.get(ctx.signal, 20_000);
     // Adding needs the agent's live session; removing its own never hurts.
     const root = args.set?.length ? mine(ide, ctx).mem.root : (memory.get(ctx.agent.session_id)?.root ?? ide.root);
+    // A condition, hit count or log message is code the debugger runs in the
+    // program: like evaluate, each one is the person's call, never remembered.
+    const code = breakpointCode(args.set ?? []);
+    if (code.length) {
+      const ok = await ctx.confirmWrite({
+        what: `Set breakpoints whose code the debugger runs in the program, on your Mac as you:\n\n${code.join('\n')}`,
+        where: confirmSafe(basename(root), 100),
+        verb: 'Set',
+      });
+      if (!ok) throw declined('the breakpoint code');
+    }
     let removed = 0;
     if (args.clear_mine) removed = await ide.clearAgentBreakpoints(ctx.agent, 'all');
     else if (args.clear?.length) removed = await ide.clearAgentBreakpoints(ctx.agent, args.clear);
@@ -347,7 +375,7 @@ registerUiCommands('ide', {
     ctx: UiCommandCtx,
   ) {
     const ide = await idePort.get(ctx.signal, 20_000);
-    const { snap } = mine(ide, ctx);
+    const { snap, mem } = mine(ide, ctx);
     if (args.threads) {
       return { count: snap.threads.length, stopped: snap.active_thread_id ?? null, threads: snap.threads.slice(0, 50).map((t) => ({ id: t.id, name: t.name })) };
     }
@@ -357,20 +385,33 @@ registerUiCommands('ide', {
     if ((args.frame_id != null && args.frame_id !== snap.active_frame_id) || (args.thread_id != null && args.thread_id !== snap.active_thread_id)) {
       cur = (await ide.command('select_frame', { frame_id: args.frame_id, thread_id: args.thread_id })) ?? snap;
     }
+    const allowed = new Set(mem.refs ?? []);
+    if (args.ref && !allowed.has(args.ref)) {
+      throw new UiCommandError('forbidden', 'Expand only a `ref` from your latest stop or inspect (one under a secret-looking name stays closed).');
+    }
     const out: Record<string, unknown> = {};
+    const shown: number[] = [];
+    const open = (name: string, v: IdeVariable): void => {
+      if (v.variables_reference > 0 && !sensitiveName(name)) shown.push(v.variables_reference);
+    };
     if (args.ref) {
       const kids = await ide.variables(args.ref, { start: args.start, count: args.count ?? 100 });
       const taken = new Set<string>();
-      out.children = Object.fromEntries(kids.slice(0, 100).map((k) => [uniqueKey(taken, k.name), shapeVariable(k, 200)]));
+      out.children = Object.fromEntries(kids.slice(0, 100).map((k) => {
+        open(k.name, k);
+        return [uniqueKey(taken, k.name), shapeVariable(k, 200)];
+      }));
     }
     if (args.paths?.length) {
       // Keyed by the path: the bridge's redaction checks every segment of it.
       const values: Record<string, unknown> = {};
       for (const p of args.paths) {
-        values[p] = await resolvePath(ide, cur, p).then((v) => shapeVariable(v), (e) => ({ error: errText(e) }));
+        values[p] = await resolvePath(ide, cur, p).then((v) => (open(p, v), shapeVariable(v)), (e) => ({ error: errText(e) }));
       }
       out.values = values;
     }
+    const m = memory.get(ctx.agent.session_id);
+    if (m) memory.set(ctx.agent.session_id, { ...m, refs: [...allowed, ...shown] });
     return out;
   },
 
@@ -383,8 +424,8 @@ registerUiCommands('ide', {
     const frame = snap.stack_frames.find((f) => f.id === (args.frame_id ?? snap.active_frame_id)) ?? snap.stack_frames[0];
     const where = frame ? `${frame.name} (${relPath(mem.root, frame.path)}:${frame.line})` : 'the paused frame';
     const ok = await ctx.confirmWrite({
-      what: `Evaluate in ${where}:\n\n${expr}\n\nAn expression can call functions and change the program’s state, on your Mac as you.`,
-      where: basename(mem.root),
+      what: `Evaluate in ${confirmSafe(where, 400)}:\n\n${confirmSafe(expr, 2000)}\n\nAn expression can call functions and change the program’s state, on your Mac as you.`,
+      where: confirmSafe(basename(mem.root), 100),
       verb: 'Evaluate',
     });
     if (!ok) throw declined('the expression');
@@ -415,32 +456,39 @@ registerUiCommands('ide', {
     const method = args.method ?? 'GET';
     const headers = Object.entries(args.headers ?? {}).map(([key, value]) => ({ key, value: String(value), enabled: true }));
     const what = [
-      `${method} ${args.url}`,
-      headers.length ? `Headers: ${headers.map((h) => h.key).join(', ')}` : '',
-      args.body?.trim() ? `Body: ${clip(args.body.trim(), 300)}` : '',
+      `${method} ${confirmSafe(args.url, 2000)}`,
+      headers.length ? `Headers: ${confirmSafe(headers.map((h) => h.key).join(', '), 1000)}` : '',
+      args.body?.trim() ? `Body: ${confirmSafe(args.body.trim(), 300)}` : '',
       `It goes to the app you are debugging, on this Mac (${url.host}).`,
     ].filter(Boolean).join('\n\n');
-    const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
-    const ok = await ctx.confirmWrite({ what, where: url.host, verb: 'Send', connId: `api:${host}` });
+    // Remembered per host AND port, apart from the API client's own sends.
+    const port = url.port || (url.protocol === 'https:' ? '443' : '80');
+    const askedAt = Date.now();
+    const ok = await ctx.confirmWrite({ what, where: url.host, verb: 'Send', connId: `ide-debug-request:${url.hostname.toLowerCase()}:${port}` });
     if (!ok) throw declined('to send the request');
     const sid = ctx.agent.session_id;
     ide.consoleNote(`→ ${method} ${url.host}${url.pathname}${url.search} (${agentName(ctx.agent)})`);
     memory.set(sid, { ...mem, expectMove: true });
     let response: Record<string, unknown> | null = null;
     let returned = false;
+    inflight.get(sid)?.abort();
+    const stop = new AbortController();
+    inflight.set(sid, stop);
+    ctx.signal.addEventListener('abort', () => stop.abort(), { once: true }); // the person's Stop
     const sent = api.long
       .post<ApiResponse>(`/workspaces/${encodeURIComponent(wid)}/api-client/execute`, {
         method, url: args.url, headers, query: [], body_mode: args.body ? 'raw' : 'none', body: args.body ?? '',
-        timeout_ms: REQUEST_TIMEOUT_MS, follow_redirects: false, verify_ssl: true, debug_session_id: sid,
-      })
+        timeout_ms: REQUEST_TIMEOUT_MS, follow_redirects: false, verify_ssl: true, debug_session_id: snap.id,
+      }, stop.signal)
       .then((r) => shapeResponse(r), (e) => ({ error: errText(e) }))
       .then((r) => {
+        if (inflight.get(sid) === stop) inflight.delete(sid);
         response = r;
         // Arrived after this call returned (the app was paused): the next result carries it.
         const m = memory.get(sid);
         if (returned && m?.debugId === snap.id) memory.set(sid, { ...m, late: { ...r, in_flight: false } });
       });
-    const wait = Math.min(args.wait_ms ?? 60_000, t0 + BUDGET_MS - Date.now());
+    const wait = Math.min(args.wait_ms ?? 60_000, afterConfirm(t0, askedAt) - Date.now());
     const after = snap.stop_seq ?? 0;
     const next = await waitFor(ide, wait, ctx.signal, nextStop(snap.id, after), { settled: sent });
     const cur = next?.id === snap.id ? next : (ide.debug?.id === snap.id ? ide.debug : snap);

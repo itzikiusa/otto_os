@@ -314,8 +314,9 @@ export interface ExecuteApiReq {
    */
   confirm_new_host?: boolean;
   /** An agent's IDE debug request the person confirmed (`otto.ui_ide_debug_request`):
-   *  that agent session's id. Loopback URLs only; reaches them without the
-   *  workspace's `allow_local` for a person's credential, scrubbed as an agent read. */
+   *  the LIVE debug session it rides on. http(s) loopback only, no tunnel, no
+   *  redirects; reaches loopback without the workspace's `allow_local` for a
+   *  person's credential, scrubbed as an agent read. */
   debug_session_id?: string;
 }
 
