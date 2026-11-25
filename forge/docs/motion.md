@@ -48,10 +48,13 @@ weights are present.
   the fit check, plus the wait for a heavy slot. CPU and MPS give different motions for the same seed, because
   the noise comes from a different generator. Each device repeats itself exactly. The quality is the same: the
   CPU jump is a running leap of 1.0 m and the MPS jump a two-footed jump of 1.4 m.
-- **Encoder load log:** transformers 5.1 prints a MISSING/UNEXPECTED table for the LoRA keys while it loads the
-  adapters. The adapters do load. Checked by hand: the merged mntp delta matches 2·B·A of the adapter file to
+- **Encoder load log:** transformers 5.10 (which needs peft 0.19 or later) lists only `lm_head.weight` as
+  UNEXPECTED, the LM head the encoder does not use. Transformers 5.1 printed a MISSING/UNEXPECTED table for the
+  LoRA keys, but the adapters did load. Checked by hand: the merged mntp delta matches 2·B·A of the adapter file to
   bf16 rounding, and the supervised adapter's weights equal the file's. Paraphrases score 0.87 cosine similarity
-  and unrelated prompts 0.54-0.63.
+  and unrelated prompts 0.54-0.63. The 5.10 embeddings match the 5.1 ones (cosine 0.99996, 2026-11-25).
+- **torch 2.13:** a CPU clip matches the torch 2.9.1 one to 8 mm. On MPS the same seed gives a different clip
+  than under 2.9.1, because the MPS noise changed, so the MPS clips in the table below do not reproduce exactly.
 - **Skeleton:** the BVH is written with Kimodo's standard T-pose rest. Eight SOMA joint names are renamed to Mixamo
   names so forge-animlib maps them correctly: SOMA `LeftLeg` is the thigh and `Chest` sits above `Spine2`.
   Fingers are not transferred.

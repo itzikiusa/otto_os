@@ -564,7 +564,7 @@ export function performCloseTabBatch(
   } else if (!host.tabs.some((t) => t.path === host.activePath)) {
     host.activePath = host.tabs[0].path;
   }
-  saveWorkspaceOpenTabs(host.target.root, host.tabs, host.activePath, host.splitPath);
+  saveWorkspaceOpenTabs(host);
   host.syncWorkspacePort();
 }
 

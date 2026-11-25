@@ -202,7 +202,7 @@ test('G8: a slow search that answers after a newer one cannot replace its result
 
 test('G9: restoring saved tabs stops once the project switched', async () => {
   const { buf, helpers } = bufModules({});
-  buf.saveWorkspaceOpenTabs('/old', ['/old/a.ts', '/old/b.ts', '/old/c.ts'], null, null);
+  buf.saveWorkspaceOpenTabs({ target: { root: '/old' }, tabs: ['/old/a.ts', '/old/b.ts', '/old/c.ts'].map((path) => ({ path })), activePath: null, splitPath: null, hasClosedAllTabs: false });
   const reads: string[] = [];
   const h = {
     target: { kind: 'local', root: '/old', connection_id: null }, collabIsGuest: false, tabs: [] as { path: string; deferred?: boolean }[], hasClosedAllTabs: false, activePath: null,
