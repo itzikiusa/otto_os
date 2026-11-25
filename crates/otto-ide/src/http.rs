@@ -48,10 +48,10 @@ use self::projects_deps::{
     list_projects, scan_repos, upsert_project,
 };
 use self::runtime_debug::{
-    create_python_venv, debug_command, debug_evaluate, debug_variables, delete_run_config,
-    get_debug_session, get_run, list_debug_sessions, list_run_configs, set_debug_breakpoints,
-    start_debug_session, start_run, stop_run, stream_debug_events, stream_run_events,
-    upsert_run_config,
+    create_python_venv, debug_command, debug_evaluate, debug_port, debug_variables,
+    delete_run_config, get_debug_session, get_run, list_debug_sessions, list_run_configs,
+    set_debug_breakpoints, start_debug_session, start_run, stop_run, stream_debug_events,
+    stream_run_events, upsert_run_config,
 };
 use self::toolchains_env::{
     add_project_folder, delete_local_sdk, get_environments, get_shell_env, get_toolchain_job,
@@ -232,6 +232,7 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
                 "/ide/debug/sessions/{id}/evaluate",
                 post(debug_evaluate::<S>),
             )
+            .route("/ide/debug/sessions/{id}/port", get(debug_port::<S>))
             // E. "Share with Friends" Host Routes
             .route(
                 "/ide/collab/rooms",

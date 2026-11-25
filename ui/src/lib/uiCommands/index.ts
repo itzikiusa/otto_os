@@ -90,6 +90,12 @@ registerLazyUiCommands(
   () => import('./home'),
   'home',
 );
+// ── IDE agent debugging (only when the person asked to "use Otto to debug") ──
+registerLazyUiCommands(
+  'ide',
+  ['ide_debug_start', 'ide_debug_control', 'ide_debug_breakpoints', 'ide_debug_inspect', 'ide_debug_evaluate', 'ide_debug_request', 'ide_debug_db'],
+  () => import('./ide'),
+);
 registerLazyUiCommands(
   'loops',
   ['loops_list', 'loops_open', 'loops_control'],

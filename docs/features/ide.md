@@ -404,6 +404,43 @@ of the build output.
   height resizer, inline ghost variable values, and an integrated **Git** dock
   tab reusing Otto's `DiffViewer` + stage/commit controls.
 
+### Debugging with an agent
+
+Ask an agent in an Otto session to debug with Otto ("use Otto to debug why
+`POST /orders` returns 500", "debug `TestFlowComponent` with Otto — the component
+test, build tag component"). Nothing happens unless you ask: the agent first
+asks to drive Otto (one **Allow** for the session), then:
+
+1. **The IDE opens** on the agent's folder — beside the conversation when it
+   runs in the IDE's agent dock, else in its own window.
+2. **One confirm per start**, attributed to the agent: the exact command line,
+   working directory, build flags (tags merged as the gutter does), extra
+   environment and how many breakpoints. It runs on your Mac as you, outside
+   the agent's sandbox, so it asks every time — a restart asks again. Loader and
+   toolchain variables (`PATH`, `DYLD_*`, `GOFLAGS`, `NODE_OPTIONS`, …) are
+   refused; secrets belong in the project environment, which the daemon applies.
+   A production network bridge or SSH target also asks for the typed confirm.
+3. **The agent's breakpoints** appear in the gutter, marked as its own. A test
+   (including a testify suite method or a Go test behind `//go:build component`)
+   stops at the first one. A service returns as soon as it is ready (its output
+   prints the agent's `ready_pattern`, or its `ready_port` accepts connections),
+   then the agent sends the request through the API client (`→ POST
+   localhost:8080/orders (Claude)` in the console). The request waits as long as
+   you keep the app paused — up to 10 minutes.
+4. **At each stop** you see the usual IDE stop (line, frames, variables, DB
+   Watch) and the agent explains it in the conversation. Reply ("what is
+   `cfg.Tax`?", "proceed", "step into") or press **Proceed** on the driving bar.
+5. **Taking over** is just using the debugger: your own Step/Continue work as
+   always, and the agent sees that you moved it. **Stop** on the driving bar ends
+   its control; the session stays yours.
+
+Evaluating an expression can run code in the program, so each one asks, showing
+the exact expression. Reading a variable by path never asks. Values the agent
+reads (locals, inspected paths, responses, DB rows) are redacted by name and
+shape before they reach it; what you see in the IDE is never redacted.
+Everything the agent reads goes to its model provider, as with any agent read.
+Local projects only: no SSH targets and no attach in this version.
+
 ### 7. LSP Intelligence, Quick-Doc, Manifest Inspector & Local History
 
 Combines live LSP multiplexing with zero-roundtrip editor intelligence:

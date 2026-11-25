@@ -24,6 +24,7 @@ summary: Multi-language IDE with rectangular & multi-cursor editing, LSP navigat
 - **Full DAP debugger** — Line, conditional, hit-count and logpoint breakpoints (`⌘F8`), step over/into/out, call stack frames, expandable local/global scopes, watch expressions, an interactive **Evaluate** REPL and inline ghost variable values next to paused source lines.
 - **Environments & run configurations** — Bind per-project SDK homes, `.venv` interpreters (or create a `.venv` in one click), `.env` files, Keychain-backed secret variables and named run/debug configurations.
 - **Remote SSH & live sharing** — Switch the target badge in the header to any saved SSH host to edit, search, build and debug remotely, or click **Share** to invite a teammate with viewer or co-debugger permissions and live multi-cursor presence.
+- **Debugging with an agent** — Ask an agent to "use Otto to debug …": it opens the project, sets its breakpoints, and after your **Debug** confirm (one per start, showing the exact command) runs the test or service, sends the request and explains each stop. Reply or press **Proceed** on the driving bar; your own Step/Continue always win.
 - **Runtime IDE plugins** — Install extension packs from a local folder, Git URL or curated catalog via **⋯ → Plugins** without rebuilding Otto.
 
 ## Keyboard shortcuts
