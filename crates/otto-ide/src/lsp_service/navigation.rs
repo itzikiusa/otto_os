@@ -81,7 +81,18 @@ pub(super) fn read_confined_nav_file(
 pub async fn goto_definition<S: IdeCtx>(
     ctx: &S,
     user: &User,
+    req: IdeReferencesReq,
+) -> Result<IdeReferencesResp> {
+    goto_definition_upto(ctx, user, req, 32).await
+}
+
+/// [`goto_definition`] that stops reading workspace candidates once it holds
+/// `max_locations` (hover shows only the first one).
+pub(super) async fn goto_definition_upto<S: IdeCtx>(
+    ctx: &S,
+    user: &User,
     mut req: IdeReferencesReq,
+    max_locations: usize,
 ) -> Result<IdeReferencesResp> {
     req.target.absorb_project_folders(&req.project_folders);
     let resolved = ctx.ide().targets.resolve(ctx, user, &req.target).await?;
@@ -336,7 +347,7 @@ pub async fn goto_definition<S: IdeCtx>(
                     }
                 }
             }
-            if locations.len() >= 32 {
+            if locations.len() >= max_locations {
                 break;
             }
         }
