@@ -10,7 +10,7 @@ import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
 import { getIdeMobileRunTarget } from '../devices/ideDeviceRunTarget';
 import { ideCollabNotices } from './ideCollabNotices.svelte';
-import { debugActionVerb, debugStartErrorFrom, ideDebugLaunch } from './ideDebugLaunch.svelte';
+import { debugActionVerb, debugStartErrorFrom, ideDebugLaunch, markDebugLaunchedHere } from './ideDebugLaunch.svelte';
 import {
   CURRENT_FILE_CONFIG_ID, loadLaunchMemory, planLaunch, resolveLaunchSelection, saveLaunchMemory, type LaunchPlan,
 } from './ideLaunchTarget';
@@ -693,6 +693,7 @@ export async function launchDebugSession(
       break_on_exceptions: Boolean(host.breakOnExceptions),
       ...(opts.confirmProdTargets ? { confirm_prod_targets: true } : {}),
     });
+    markDebugLaunchedHere(resp.session.id);
     if (stale()) { prevCtl?.abort(); return null; }
     host.lastDebugLaunch = { configId: persistedConfigId, language, launch: effectiveLaunch };
     rememberLaunchedConfig(host, rawCfgId);

@@ -20,6 +20,7 @@
   import { router } from '../router.svelte';
   import { providerName } from '../uiCommands/frames';
   import { ctxMenu, type MenuItem } from '../contextmenu.svelte';
+  import { debugBarView } from '../uiCommands/agentDebugBar';
 
   const d = $derived(uiControl.driving);
   const show = $derived(uiControl.visible(now()));
@@ -30,6 +31,8 @@
     return moduleLabel(m);
   });
   const who = $derived(d ? providerName(d.agent.provider) : '');
+  /** An agent-driven debug session here: its narration and Proceed. */
+  const dbg = $derived(debugBarView(d, uiControl.agentDebug));
   const title = $derived(d?.agent.title.trim() ?? '');
   let stopping = $state(false);
 
@@ -75,6 +78,10 @@
         <span class="adb-dot warn" aria-hidden="true"></span>Waiting for you to confirm
       {:else if d.running > 0}
         <span class="adb-dot live" aria-hidden="true"></span>{d.current ?? 'Working'}…
+      {:else if dbg.say}
+        <span class="adb-say" title={dbg.say} data-testid="agent-driving-say">{dbg.say}</span>
+      {:else if dbg.paused}
+        Paused — waiting for you
       {:else if last}
         <!-- The relative time ticks every second for a minute: kept out of the
              live region's spoken text, so only a new action is announced. -->
@@ -90,6 +97,15 @@
       title="This window’s recent agent actions"
       data-testid="agent-driving-recent"
     ><Icon name="clock" size={12} /><span class="adb-btn-label">Recent</span></button>
+    {#if dbg.proceed}
+      <button
+        class="btn small primary adb-btn"
+        onclick={() => void uiControl.proceed()}
+        title="Tell {who} to go on to the next breakpoint"
+        aria-label="Proceed: tell {who} to go on"
+        data-testid="agent-driving-proceed"
+      ><Icon name="play" size={12} /><span class="adb-btn-label">Proceed</span></button>
+    {/if}
     <button
       class="btn small adb-btn"
       onclick={stop}
@@ -98,7 +114,7 @@
       aria-label="Stop {who} driving Otto"
       data-testid="agent-driving-stop"
     ><Icon name="stop" size={12} /><span class="adb-btn-label">Stop</span></button>
-    {#if d.running === 0}
+    {#if d.running === 0 && !uiControl.agentDebug}
       <button
         class="icon-btn adb-hide"
         onclick={() => uiControl.dismiss()}
@@ -170,9 +186,13 @@
     color: var(--warning);
     font-weight: 500;
   }
-  .adb-last {
+  .adb-last,
+  .adb-say {
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .adb-say {
+    color: var(--text);
   }
   .adb-dot {
     width: 7px;

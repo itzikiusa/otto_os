@@ -249,11 +249,19 @@ describe('I2-03 one live debug session, never an orphan', () => {
   it('a project switch stops a live session best-effort, never the host’s as a guest', async () => {
     const posted: string[] = [];
     const m = modules({ post: async (url: string) => { posted.push(url); return {}; } });
+    m.launch.markDebugLaunchedHere(live.id);
     m.launch.leaveDebugSessionOnSwitch(live, true);
     m.launch.leaveDebugSessionOnSwitch({ ...live, state: 'terminated' }, false);
     assert.equal(posted.length, 0);
     m.launch.leaveDebugSessionOnSwitch(live, false);
     assert.deepEqual(posted, ['/ide/debug/sessions/dbg_old/command']);
+  });
+
+  it('a project switch never stops a session this IDE only re-attached to (another window’s, an agent’s)', async () => {
+    const posted: string[] = [];
+    const m = modules({ post: async (url: string) => { posted.push(url); return {}; } });
+    m.launch.leaveDebugSessionOnSwitch({ ...live, id: 'dbg_other_window' }, false);
+    assert.equal(posted.length, 0);
   });
 });
 
