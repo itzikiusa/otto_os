@@ -15,8 +15,8 @@
   import NotificationBell from './NotificationBell.svelte';
   import { router } from '../lib/router.svelte';
   import { navPending } from '../lib/navPending.svelte';
-  import { ui } from '../lib/stores/ui.svelte';
-  import { RAIL_MIN, RAIL_MAX } from '../lib/stores/ui.svelte';
+  import { ui, RAIL_MIN, RAIL_MAX } from '../lib/stores/ui.svelte';
+  import UpdateRow from './UpdateRow.svelte';
   import { paneResizer, pxWide, RESIZE_TITLE } from '../lib/paneResizer';
   import { startMouseDrag } from '../lib/dragCursor';
   import { ws } from '../lib/stores/workspace.svelte';
@@ -107,7 +107,6 @@
   // ── Workspace management: workspaceActions.ts; live counts per workspace row ──
   const wsActivity = $derived(workspaceActivity([...ws.foregroundActive, ...ws.otherWsSessions], ws.statusMap, ws.needsYou));
   let removedOpen = $state(false);
-
   const workspaceMenuItems = (w: WorkspaceWithRole): MenuItem[] => wsMenu(w, () => (removedOpen = true));
 
   // ── Module list: `resolved` = full order (incl. hidden), `visible` drops hidden;
@@ -647,6 +646,7 @@
         <span class="grow">Customize sidebar</span>
       </button>
     {/if}
+    <UpdateRow />
     <button
       class="nav-item"
       class:active={router.module === 'walkthroughs'}
