@@ -467,8 +467,12 @@ impl Watch {
     ) -> IdeDbWatchReadResp {
         let mut watch = self.view();
         if for_agent {
-            for f in watch.items.iter_mut().filter_map(|i| i.filter.as_mut()) {
-                f.value = mask_cell(&f.column, &f.value).0;
+            for item in &mut watch.items {
+                if let Some(f) = item.filter.as_mut() {
+                    f.value = mask_cell(&f.column, &f.value).0;
+                }
+                // A describe error can carry the driver's DSN.
+                item.error = item.error.as_deref().map(|e| scrub(e, &[]));
             }
         }
         let (engine, items) = {
@@ -861,7 +865,18 @@ fn mask_diff(columns: &[String], d: &mut IdeDbRowDiff) {
         *before = b;
         *after = a;
     }
-    d.key = scrub(&d.key, &secrets);
+    // A table without a key: the row key is the whole row as JSON (escaped,
+    // so the raw secrets do not match); rebuild it from the masked row.
+    let whole = serde_json::to_string(&raw).unwrap_or_default();
+    d.key = match d.key.strip_prefix(whole.as_str()) {
+        Some(occurrence) if any => {
+            format!(
+                "{}{occurrence}",
+                serde_json::to_string(&d.row).unwrap_or_default()
+            )
+        }
+        _ => scrub(&d.key, &secrets),
+    };
     d.masked = any;
 }
 
