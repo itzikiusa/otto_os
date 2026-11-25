@@ -99,9 +99,25 @@ test('shape: paths, children, responses, the start confirm and DB rows', () => {
     label: 'TestFlow', command: 'go test -tags=component -run ^TestFlow$ ./flow', cwd: '/w/app/flow', root: '/w/app',
     build_flags: ['-tags=component'], env: { LOG_LEVEL: 'debug' }, breakpoints: 3,
   });
-  for (const part of ['go test -tags=component -run ^TestFlow$ ./flow', 'Working directory: flow', 'Build flags: -tags=component', 'LOG_LEVEL=debug', 'Breakpoints: 3', 'outside the agent’s sandbox']) {
+  for (const part of ['go test -tags=component -run ^TestFlow$ ./flow', 'Working directory: flow', 'Build flags: -tags=component', 'LOG_LEVEL="debug"', 'Breakpoints: 3', 'outside the agent’s sandbox']) {
     assert.ok(text.includes(part), `${part} missing from:\n${text}`);
   }
+  // C1-002: a value is shown whole and as it is — padding can't push a payload
+  // out of view, and control / BiDi / zero-width characters are spelled out.
+  const payload = `${' '.repeat(80)}-toolexec=/bin/sh -c evil`;
+  const long = 'x'.repeat(300);
+  const shown = startConfirmText({
+    label: 'TestFlow', command: 'go test ./flow', cwd: '/w/app', root: '/w/app', build_flags: [],
+    env: { PAD: payload, LONG: long, BIDI: 'a\u202Egpj.exe', NL: 'a\nb', ZW: 'a\u200Bb' }, breakpoints: 0,
+  });
+  assert.ok(shown.includes(JSON.stringify(payload)), shown);
+  assert.ok(shown.includes(long), 'long values are not clipped');
+  assert.ok(shown.includes('BIDI="a\\u202Egpj.exe"'), shown);
+  assert.ok(shown.includes('NL="a\\nb"'), shown);
+  assert.ok(shown.includes('ZW="a\\u200Bb"'), shown);
+  const envLines = shown.split('\n').filter((l) => l.startsWith('  '));
+  assert.equal(envLines.length, 5, 'one line per variable');
+  for (const l of envLines) assert.ok(!/[\u202A-\u202E\u2066-\u2069\u200B-\u200F\uFEFF]/.test(l), l);
   const db = shapeDbRead({
     from_seq: 1, to_seq: 2,
     items: [{

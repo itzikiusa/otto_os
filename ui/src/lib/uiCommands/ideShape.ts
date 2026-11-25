@@ -253,6 +253,14 @@ export function shapeResponse(resp: ApiResponse): Record<string, unknown> {
 }
 
 /** The start confirm's text: exactly what will run. */
+/** A value as the person must see it before approving a run: quoted (so
+ *  leading / trailing spaces show), control, BiDi and zero-width characters
+ *  spelled out, never clipped (the daemon caps values at 4096 chars). */
+export function visibleValue(v: string): string {
+  return JSON.stringify(v).replace(/[\u061C\u200B-\u200F\u2028-\u202E\u2066-\u2069\uFEFF]/g, (c) =>
+    `\\u${c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`);
+}
+
 export function startConfirmText(p: {
   label: string; command: string; cwd: string; build_flags: readonly string[];
   env: Record<string, string>; breakpoints: number; root: string;
@@ -263,7 +271,7 @@ export function startConfirmText(p: {
     `Command: ${p.command}`,
     `Working directory: ${relPath(p.root, p.cwd) || '.'}`,
     p.build_flags.length ? `Build flags: ${p.build_flags.join(' ')}` : '',
-    env.length ? `Extra environment: ${env.map(([k, v]) => `${k}=${clip(v, 80)}`).join(', ')}` : 'Environment: the project environment',
+    env.length ? `Extra environment:\n${env.map(([k, v]) => `  ${k}=${visibleValue(v)}`).join('\n')}` : 'Environment: the project environment',
     `Breakpoints: ${p.breakpoints}`,
     'It runs on your Mac as you, outside the agent’s sandbox.',
   ]

@@ -4944,9 +4944,14 @@ audit — then through the UI bridge (`crates/otto-server/src/ui_bridge.rs`):
    no Otto window open it answers at once.
 3. **Validated + pre-checked.** Arguments are validated against the entry's
    `input_schema` (`invalid_args`), plus the catalog's own rules
-   (`ui_commands::validate_command`): an `env` argument may not name a loader,
-   shell or toolchain variable (`PATH`, `LD_*`, `DYLD_*`, `GOFLAGS`,
-   `NODE_OPTIONS`, `PYTHON*`, `JAVA_TOOL_OPTIONS`, …) and its values are strings;
+   (`ui_commands::validate_command`): an `env` argument has ≤ 50 entries with
+   plain names (`[A-Za-z_][A-Za-z0-9_]*`, ≤ 128) and string values ≤ 4096 chars
+   without control / BiDi / zero-width characters, and may not name a loader,
+   shell, toolchain, proxy or credential-file variable (`PATH`, `HOME`, `LD_*`,
+   `DYLD_*`, `GOFLAGS`, `GO_*` incl. `GO_BUILD_FLAGS`, `DLV_*`, `OTTO_*`,
+   `NODE_OPTIONS`, `PYTHON*`, `JAVA_TOOL_OPTIONS`, `DOCKER_*`, `KUBECONFIG`,
+   `AWS_CONFIG_FILE`, `*_PROXY`, `SSL_CERT_*`, …); `build_tags` are plain tag
+   names (`[A-Za-z0-9_.]`);
    `ide_debug_request`'s `url` must be http(s) on localhost / 127.0.0.0/8 / ::1; a `connection_id` (id OR name) is resolved
    as the owner — a connection they cannot list is `not_found` / `forbidden`.
 4. **One window.** The target is the owner's document that implements the
