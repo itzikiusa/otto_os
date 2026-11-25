@@ -519,6 +519,7 @@ impl UsageTailer {
             if new_baseline_sessions.contains(&session_id) {
                 if let Some(total) = read_last_codex_usage(&f, &model).await {
                     self.codex_counters.seed(&session_id, &total);
+                    self.codex_counters_dirty = true;
                     codex_baselines += 1;
                 }
             }
@@ -651,14 +652,31 @@ impl UsageTailer {
     /// The journal is authoritative after migration. The snapshot includes held
     /// responses and correction baselines, so cursors can safely point past a
     /// held response and late corrections remain exact after restart.
+    ///
+    /// Once a full state is stored, the four big parts go in only when their
+    /// dirty flag says they changed; the journal keeps the stored rows of the
+    /// parts left out. `native` alone is ~95% of a real journal's rows, and a
+    /// Claude-only pass never touches it. The small parts have no flags and
+    /// always go in (the journal still writes only their changed rows).
     fn checkpoint(&self) -> serde_json::Value {
-        serde_json::json!({
-            "native": self.native,
-            "version": 1, "cursors": self.cursors.checkpoint(),
-            "seen": self.seen.checkpoint(), "codex": self.codex_counters.checkpoint(),
-            "folder": self.folder, "held": self.held, "held_attr": self.held_attr,
+        let all = !self.checkpoint_initialized;
+        let mut state = serde_json::json!({
+            "version": 1, "folder": self.folder, "held": self.held, "held_attr": self.held_attr,
             "codex_meta": self.codex_meta, "held_providers": self.held_providers,
-        })
+        });
+        if all || self.cursors.is_dirty() {
+            state["cursors"] = self.cursors.checkpoint();
+        }
+        if all || self.seen.has_pending() {
+            state["seen"] = self.seen.checkpoint();
+        }
+        if all || self.codex_counters_dirty {
+            state["codex"] = self.codex_counters.checkpoint();
+        }
+        if all || self.native.dirty {
+            state["native"] = serde_json::json!(self.native);
+        }
+        state
     }
 
     fn restore_checkpoint(&mut self, mut state: serde_json::Value) -> Result<(), String> {
@@ -712,7 +730,7 @@ impl UsageTailer {
         let checkpoint = blocking_io(|| self.checkpoint());
         self.commit_failed = true;
         self.usage
-            .commit_ingestion(&checkpoint, &self.pending_events)
+            .commit_ingestion(checkpoint, &self.pending_events)
             .await
             .map_err(|e| e.to_string())?;
         self.pending_events.clear();
@@ -2604,6 +2622,83 @@ mod accounting_tests {
         assert_eq!(recovered.pending_events[0].input_tokens, 0);
         assert_eq!(recovered.pending_events[0].output_tokens, 10);
         assert_eq!(recovered.pending_events[0].cache_read_tokens, 40);
+        usage.shutdown().await;
+        pool.close().await;
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    fn native_usage(output: u64) -> crate::ParsedUsage {
+        crate::ParsedUsage {
+            model: "grok-4".into(),
+            output,
+            ..Default::default()
+        }
+    }
+
+    /// A pass that changed only Claude/Codex state must not rebuild the
+    /// native baselines (~95% of a real journal): the stored native rows stay
+    /// as they were. Before, every commit serialized, cloned and flattened
+    /// the whole state (~650 MB resident, ~350 ms a pass on a real journal).
+    #[tokio::test]
+    async fn a_pass_without_native_changes_leaves_native_rows_alone() {
+        let (root, pool, usage, mut tailer) = owner_fixture("native-skip").await;
+        tailer.persist().await.unwrap();
+        assert!(tailer
+            .native
+            .delta("grok:k", &native_usage(5), None)
+            .is_some());
+        tailer.persist().await.unwrap();
+        // An unflagged in-memory change: a pass that commits only a cursor
+        // must not carry it (proof that `native` was left out).
+        assert!(tailer
+            .native
+            .delta("grok:k", &native_usage(9), None)
+            .is_some());
+        tailer.native.dirty = false;
+        tailer.cursors.set(Path::new("/elsewhere.jsonl"), 7);
+        tailer.persist().await.unwrap();
+        let stored = usage.ingestion_checkpoint().await.unwrap().unwrap();
+        assert_eq!(stored["native"]["totals"]["grok:k"]["usage"]["output"], 5);
+        assert_eq!(stored["cursors"]["/elsewhere.jsonl"], 7);
+        usage.shutdown().await;
+        pool.close().await;
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    /// Exactly-once across a restart: a native delta's grown baseline commits
+    /// with its owed event, so re-reading the same record bills nothing.
+    #[tokio::test]
+    async fn a_native_delta_commits_its_baseline_with_its_event() {
+        let (root, pool, usage, mut tailer) = owner_fixture("native-once").await;
+        tailer.persist().await.unwrap();
+        assert!(!tailer.native.dirty);
+        let (delta, _) = tailer
+            .native
+            .delta("grok:turn", &native_usage(40), None)
+            .unwrap();
+        tailer.pending_events.push(UsageEvent {
+            provider: "grok".into(),
+            output_tokens: delta.output,
+            ..Default::default()
+        });
+        tailer.persist().await.unwrap();
+        let mut restarted = UsageTailer::new(
+            usage.clone(),
+            pool.clone(),
+            root.join("data"),
+            root.join("home"),
+        );
+        restarted
+            .restore_checkpoint(usage.ingestion_checkpoint().await.unwrap().unwrap())
+            .unwrap();
+        assert!(
+            restarted
+                .native
+                .delta("grok:turn", &native_usage(40), None)
+                .is_none(),
+            "the same record must not be billed twice"
+        );
+        assert_eq!(outbox(&root).await.len(), 1);
         usage.shutdown().await;
         pool.close().await;
         tokio::fs::remove_dir_all(root).await.unwrap();

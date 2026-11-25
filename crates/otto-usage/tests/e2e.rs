@@ -1076,7 +1076,7 @@ async fn durable_replay_and_parked_budget_include_pending_spend() {
     assert!(ch.is_parked());
     engine
         .commit_ingestion(
-            &serde_json::json!({"version":1,"offset":123}),
+            serde_json::json!({"version":1,"offset":123}),
             &[event("codex", "s", "gpt", "completion", 100, 0, 2.0)],
         )
         .await
@@ -1108,7 +1108,7 @@ async fn durable_replay_and_parked_budget_include_pending_spend() {
         .execute(&journal).await.unwrap();
     engine
         .commit_ingestion(
-            &serde_json::json!({"version":1,"offset":456}),
+            serde_json::json!({"version":1,"offset":456}),
             &[event("codex", "s", "gpt", "completion", 200, 0, 3.0)],
         )
         .await

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::SqlitePool;
+use std::ops::Bound;
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,18 +70,39 @@ impl IngestionJournal {
         inflate(&parts).map(Some)
     }
 
+    /// `checkpoint` carries only the top-level parts that may have changed;
+    /// stored rows under any other top-level key stay as they are. Rebuilding
+    /// and diffing the whole state (~400k rows on a real journal) on every
+    /// commit held ~650 MB resident and cost ~350 ms a pass.
     pub async fn commit(
         &self,
-        checkpoint: &Value,
+        checkpoint: Value,
         events: &[crate::UsageEvent],
     ) -> Result<(), sqlx::Error> {
         // Only changed leaves/chunks hit disk. Flattening a bounded checkpoint
         // runs on a blocking pool, not on a Tokio worker; idle scans skip commit.
-        let snapshot = checkpoint.clone();
-        let next = tokio::task::spawn_blocking(move || flatten(&snapshot))
-            .await
-            .map_err(|e| sqlx::Error::Protocol(format!("checkpoint worker: {e}")))?;
+        let (tops, next) = tokio::task::spawn_blocking(move || {
+            let tops: Vec<String> = checkpoint
+                .as_object()
+                .map(|m| m.keys().map(|k| top_prefix(k)).collect())
+                .unwrap_or_default();
+            (tops, flatten(&checkpoint))
+        })
+        .await
+        .map_err(|e| sqlx::Error::Protocol(format!("checkpoint worker: {e}")))?;
         let mut previous = self.parts.lock().await;
+        // Stored rows of the parts being rewritten that the new state lacks.
+        let stale: Vec<String> = tops
+            .iter()
+            .flat_map(|top| {
+                previous
+                    .range::<str, _>((Bound::Included(top.as_str()), Bound::Unbounded))
+                    .map(|(key, _)| key)
+                    .take_while(|key| key.starts_with(top.as_str()))
+                    .filter(|key| !next.contains_key(*key))
+                    .cloned()
+            })
+            .collect();
         let mut tx = self.pool.begin().await?;
         let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM outbox")
             .fetch_one(&mut *tx)
@@ -92,7 +114,7 @@ impl IngestionJournal {
                 "usage outbox full; source checkpoint retained".into(),
             ));
         }
-        for key in previous.keys().filter(|key| !next.contains_key(*key)) {
+        for key in &stale {
             sqlx::query("DELETE FROM checkpoint_parts WHERE path=?")
                 .bind(key)
                 .execute(&mut *tx)
@@ -118,7 +140,10 @@ impl IngestionJournal {
                 .await?;
         }
         tx.commit().await?;
-        *previous = next;
+        for key in &stale {
+            previous.remove(key);
+        }
+        previous.extend(next);
         Ok(())
     }
 
@@ -174,6 +199,15 @@ impl IngestionJournal {
         }
         tx.commit().await
     }
+}
+
+/// The stored-path prefix of every row under top-level key `key`: `["key"`
+/// (an encoded JSON string ends at its closing quote, so no other key's rows
+/// share it).
+fn top_prefix(key: &str) -> String {
+    let mut path = serde_json::to_string(&[key]).expect("string path");
+    path.pop();
+    path
 }
 
 // Maps become independent checkpoint rows; arrays/scalars remain leaves.
@@ -253,15 +287,19 @@ mod tests {
         let path = dir.path().join("journal.sqlite3");
         let journal = IngestionJournal::open(&path).await.unwrap();
         journal
-            .commit(&json!({"old":{"key":1},"kept":[1]}), &[])
+            .commit(json!({"old":{"key":1},"kept":[1],"other":{"a":1}}), &[])
             .await
             .unwrap();
-        journal.commit(&json!({"kept":[2]}), &[]).await.unwrap();
+        // A part left out of a commit keeps its stored rows.
+        journal
+            .commit(json!({"old":{"new":2},"kept":[2]}), &[])
+            .await
+            .unwrap();
         journal.pool.close().await;
         let recovered = IngestionJournal::open(&path).await.unwrap();
         assert_eq!(
             recovered.checkpoint().await.unwrap(),
-            Some(json!({"kept":[2]}))
+            Some(json!({"old":{"new":2},"kept":[2],"other":{"a":1}}))
         );
         sqlx::query("UPDATE checkpoint_parts SET payload='invalid JSON'")
             .execute(&recovered.pool)
@@ -291,7 +329,7 @@ mod tests {
         let journal = IngestionJournal::open(&path).await.unwrap();
         assert!(journal.checkpoint().await.unwrap().is_none());
         journal
-            .commit(&json!({"offset": 123}), &[event()])
+            .commit(json!({"offset": 123}), &[event()])
             .await
             .unwrap();
         let before = journal.pending(100).await.unwrap();
@@ -324,7 +362,7 @@ mod tests {
         let journal = IngestionJournal::open(&dir.path().join("journal.sqlite3"))
             .await
             .unwrap();
-        journal.commit(&json!({"offset": 7}), &[]).await.unwrap();
+        journal.commit(json!({"offset": 7}), &[]).await.unwrap();
         let row = DurableEvent {
             event_id: "runtime-turn:s:t".into(),
             event: event(),
@@ -346,11 +384,11 @@ mod tests {
         let journal = IngestionJournal::open(&dir.path().join("journal.sqlite3"))
             .await
             .unwrap();
-        journal.commit(&json!({"offset": 0}), &[]).await.unwrap();
+        journal.commit(json!({"offset": 0}), &[]).await.unwrap();
         sqlx::query("CREATE TRIGGER fail_outbox BEFORE INSERT ON outbox BEGIN SELECT RAISE(ABORT, 'simulated disk full'); END")
             .execute(&journal.pool).await.unwrap();
         assert!(journal
-            .commit(&json!({"offset": 123}), &[event()])
+            .commit(json!({"offset": 123}), &[event()])
             .await
             .is_err());
         assert_eq!(
@@ -358,6 +396,66 @@ mod tests {
             Some(json!({"offset": 0}))
         );
         assert!(journal.pending(100).await.unwrap().is_empty());
+    }
+
+    async fn stored_rows(journal: &IngestionJournal) -> std::collections::BTreeMap<String, String> {
+        sqlx::query_as::<_, (String, String)>("SELECT path,payload FROM checkpoint_parts")
+            .fetch_all(&journal.pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect()
+    }
+
+    /// Golden check against the old full-state path: committing only the
+    /// top-level parts that changed leaves EXACTLY the rows the old code wrote
+    /// (`flatten` of the whole state), so a previous build reads the file
+    /// unchanged. Covers removals, a part emptied to `{}` and refilled,
+    /// key prefixes that share leading characters, and a failed commit.
+    #[tokio::test]
+    async fn partial_commits_store_exactly_the_rows_of_a_full_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.sqlite3");
+        let journal = IngestionJournal::open(&path).await.unwrap();
+        let states = [
+            json!({"version":1,"cursors":{"/a":1,"/b":2},"cursors2":{"x":1},"native":{"totals":{"k":{"usage":{"input":1},"seq":1}},"aliases":{"a":"k"}},"held":{}}),
+            json!({"version":1,"cursors":{"/a":5},"cursors2":{"x":1},"native":{"totals":{"k":{"usage":{"input":1},"seq":1}},"aliases":{"a":"k"}},"held":{"/a":{"id":"r"}}}),
+            json!({"version":1,"cursors":{"/a":5},"cursors2":{"x":1},"native":{"totals":{},"aliases":{}},"held":{}}),
+            json!({"version":1,"cursors":{},"cursors2":{"x":2},"native":{"totals":{"j":{"usage":{"input":3},"seq":2}},"aliases":{"b":"j"}},"held":{}}),
+            json!({"version":1,"cursors":{"/c":9},"cursors2":{"x":2},"native":{"totals":{"j":{"usage":{"input":4},"seq":3}},"aliases":{"b":"j"}},"held":{}}),
+        ];
+        let mut stored = json!({});
+        for (i, state) in states.iter().enumerate() {
+            // What the tailer sends: `version` plus every part that changed.
+            let mut partial = serde_json::Map::new();
+            for (key, value) in state.as_object().unwrap() {
+                if key == "version" || stored.get(key) != Some(value) {
+                    partial.insert(key.clone(), value.clone());
+                }
+            }
+            if i == 3 {
+                // Crash boundary: the transaction aborts, nothing moves.
+                sqlx::query("CREATE TRIGGER fail_outbox BEFORE INSERT ON outbox BEGIN SELECT RAISE(ABORT, 'simulated disk full'); END")
+                    .execute(&journal.pool).await.unwrap();
+                assert!(journal
+                    .commit(Value::Object(partial.clone()), &[event()])
+                    .await
+                    .is_err());
+                assert_eq!(stored_rows(&journal).await, flatten(&stored));
+                sqlx::query("DROP TRIGGER fail_outbox")
+                    .execute(&journal.pool)
+                    .await
+                    .unwrap();
+            }
+            journal.commit(Value::Object(partial), &[]).await.unwrap();
+            stored = state.clone();
+            assert_eq!(stored_rows(&journal).await, flatten(state), "step {i}");
+            assert_eq!(journal.checkpoint().await.unwrap().as_ref(), Some(state));
+        }
+        journal.pool.close().await;
+        let reopened = IngestionJournal::open(&path).await.unwrap();
+        assert_eq!(reopened.checkpoint().await.unwrap().as_ref(), states.last());
+        assert!(reopened.pending(10).await.unwrap().is_empty());
     }
 
     #[tokio::test]
