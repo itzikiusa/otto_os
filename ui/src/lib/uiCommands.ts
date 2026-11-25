@@ -50,7 +50,7 @@ export interface UiCommandCtx {
   /** The command id (echoed in progress / result). */
   id: string;
   /** The agent session this runs for — attribute anything it creates to it. */
-  agent: { session_id: string; title: string; provider: string };
+  agent: UiAgentRef;
   /** Aborted on `ui_command_cancel` (deadline, the user's Stop, a revoked grant). */
   signal: AbortSignal;
   /** Tell the daemon (and the driving bar) what's happening. `awaitingHuman`
