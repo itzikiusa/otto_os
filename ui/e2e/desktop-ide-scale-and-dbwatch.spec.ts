@@ -26,8 +26,8 @@ import { processResources } from './process-resources';
 //   1. Opening and closing all IDE modals without console/page errors (`onclose` regression guard),
 //      default IntelliJ-style Auto-Save (`autoSave: true` — debounce, tab switch, close without
 //      discard prompt), Delve `__debug_bin*` noise filtering in the project tree, 20-tab LRU
-//      eviction (preserving dirty + active tabs), and Live DB Watch (`detect` -> `Capture baseline`
-//      -> live mutation -> `Refresh & diff` -> `Before -> After` cell diffs).
+//      eviction (preserving dirty + active tabs), and Live DB Watch (Target ▾ -> Tables ▾ -> baseline
+//      -> live mutation -> Snapshot -> `before -> after` changed cells).
 //   2. 7 Named Multi-Repo Projects (`2 Go`, `2 Java` Maven/Gradle, `1 Rust`, `1 TypeScript`,
 //      `1 Python`) × 50 real `.git` repositories per project (`350` repos total) × 20 open tabs
 //      per project (`140` tabs total), cycling across projects, repos, files, edits, LSP
@@ -795,49 +795,43 @@ test.describe('Desktop IDE — Auto-Save, Modal Lifecycle, Live DB Watch & 7-Pro
       .poll(() => readFileSync(mainGoPath, 'utf8'), { timeout: 5_000 })
       .toContain('// autosave-close-tab-verified');
 
-    // 1d) Live DB Watch: code-level detection + Capture baseline + live mutation + Before -> After diff
+    // 1d) Live DB Watch: pick target + detected table, baseline, live mutation, Snapshot, before -> after
     await expect(cmContent).toContainText('ScanActiveSessions');
     await openIdeToolWindow(page, /Live DB watch/i);
 
     const dbPanel = page.getByTestId('ide-dbwatch-panel');
     await expect(dbPanel).toBeVisible({ timeout: 10_000 });
 
-    // Verify code scanner detected Redis `session:*`, SQL `users`, and Mongo `audit_events`
-    const detectedBar = page.getByTestId('ide-dbw-detected-bar');
-    await expect(detectedBar).toBeVisible({ timeout: 10_000 });
-    await expect(detectedBar).toContainText('session:*');
-    await expect(detectedBar).toContainText('users');
-    await expect(detectedBar).toContainText('audit_events');
-
-    // Select the saved Redis target and click the detected `session:*` chip
-    const targetSelect = page.getByTestId('ide-dbw-target-select');
-    await targetSelect.selectOption(`saved:${savedRedisConnId}`);
-    await detectedBar.locator('.dbw-chip-select').filter({ hasText: 'session:*' }).first().click();
-    await expect(page.getByTestId('ide-dbw-object-input')).toHaveValue('session:*');
-
-    // Capture baseline (3 Redis keys: session:1001, session:1002, session:1003)
-    await page.getByTestId('ide-dbw-capture-baseline').click();
-    await expect(dbPanel).toContainText('Baseline active (3 rows)', { timeout: 10_000 });
+    // A saved connection is never picked for you: choose it in Target ▾, then a
+    // Redis key pattern in Tables ▾.
+    await page.getByTestId('ide-dbw-target').click();
+    await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: /e2e-watch-redis/ }).click();
+    await expect(dbPanel).toContainText('Choose tables to watch');
+    await page.getByTestId('ide-dbw-tables').click();
+    await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Key pattern…' }).click();
+    const prompt = page.locator('[role="dialog"]').last();
+    await prompt.getByRole('textbox').fill('session:*');
+    await prompt.getByRole('button', { name: 'Watch' }).click();
+    // Watching takes the baseline (3 Redis keys: session:1001, session:1002, session:1003)
+    await expect(page.getByTestId('ide-dbw-armed')).toContainText('Watching 1 table', { timeout: 10_000 });
 
     // Mutate live Redis store: modify session:1001, add session:1004, delete session:1003
     redisStore.set('session:1001', '{"player":"ava","balance":175}');
     redisStore.set('session:1004', '{"player":"liam","balance":90}');
     redisStore.delete('session:1003');
 
-    await page.getByTestId('ide-dbw-refresh-diff').click();
-    const diffSummary = page.getByTestId('ide-dbw-diff-summary');
-    await expect(diffSummary).toBeVisible({ timeout: 10_000 });
-    await expect(diffSummary).toContainText('+1 added');
-    await expect(diffSummary).toContainText('~1 modified');
-    await expect(diffSummary).toContainText('-1 removed');
-    await expect(diffSummary).toContainText('1 unchanged');
+    await page.getByTestId('ide-dbw-snapshot').click();
+    const counts = page.getByTestId('ide-dbw-table-counts');
+    await expect(counts).toContainText('+1 added', { timeout: 10_000 });
+    await expect(counts).toContainText('~1 changed');
+    await expect(counts).toContainText('−1 removed');
 
-    const diffTable = page.getByTestId('ide-dbw-diff-table');
-    await expect(diffTable).toBeVisible();
-    await expect(diffTable).toContainText('{"player":"ava","balance":50}');
-    await expect(diffTable).toContainText('{"player":"ava","balance":175}');
-    await expect(diffTable).toContainText('session:1004');
-    await expect(diffTable).toContainText('session:1003');
+    const rows = dbPanel.getByTestId('ide-dbw-diff-row');
+    await expect(rows.filter({ hasText: 'session:1001' })).toContainText('{"player":"ava","balance":50}');
+    await expect(rows.filter({ hasText: 'session:1001' })).toContainText('{"player":"ava","balance":175}');
+    await expect(rows.filter({ hasText: 'session:1004' })).toHaveAttribute('data-kind', 'added');
+    await expect(rows.filter({ hasText: 'session:1003' })).toHaveAttribute('data-kind', 'removed');
+    await expect(page.getByTestId('ide-tab-dbwatch')).toContainText('3');
 
     expect(consoleAndPageErrors, 'Zero console or page errors allowed').toEqual([]);
     expect(ideHttpErrors, 'Zero /api/v1/ide/* 4xx/5xx responses allowed').toEqual([]);
