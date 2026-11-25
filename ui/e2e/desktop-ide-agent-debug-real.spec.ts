@@ -207,6 +207,9 @@ test.beforeAll(async ({}, info) => {
   const goEnv = ['GOMODCACHE', 'GOPROXY', 'GOFLAGS', 'GOCACHE', 'GOTOOLCHAIN']
     .filter((k) => process.env[k])
     .map((k) => ({ key: k, value: process.env[k] }));
+  // No Ryuk image offline: the person's project environment turns it off (an
+  // agent may not pass TESTCONTAINERS_* itself).
+  goEnv.push({ key: 'TESTCONTAINERS_RYUK_DISABLED', value: 'true' });
   await postJson(ctx, `${base}/api/v1/ide/environments`, {
     target: { kind: 'local', workspace_id: ws, root, connection_id: null },
     extra_path: [GO_DIR, '/opt/homebrew/bin', '/usr/local/bin'].filter(existsSync).join(':'),
@@ -583,12 +586,12 @@ test('B: a tagged component test with its own Testcontainer — first stop on th
     const call = () => mcp.call('ide_debug_start', {
       target: { kind: 'test', file: 'orders_component_test.go', name: 'TestOrdersSuite/TestCreate' },
       build_tags: ['component'],
-      env: { TESTCONTAINERS_RYUK_DISABLED: 'true' },
       breakpoints: [{ file: 'orders_component_test.go', line }],
       wait_ms: 100_000,
     });
-    const { r: started, asked } = await confirmed(page, call, 'Debug', /component/);
+    const { r: started, asked, text: startText } = await confirmed(page, call, 'Debug', /component/);
     console.log(`[B confirm] ${asked}`);
+    expect(started.state, startText).toBeTruthy();
     let r = started;
     while (r.state !== 'paused' && r.state !== 'terminated' && Date.now() - t0 < 300_000) {
       r = (await mcp.call('ide_debug_control', { action: 'wait', wait_ms: 60_000 })).r;
