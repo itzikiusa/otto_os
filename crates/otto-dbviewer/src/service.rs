@@ -766,6 +766,22 @@ impl Resolved {
 }
 
 impl DbViewerService {
+    /// Live Database Explorer SSH tunnels a daemon restart closes (queries
+    /// through them fail; the next one opens a new tunnel).
+    pub fn restart_impact(&self) -> Vec<otto_core::restart::ImpactItem> {
+        let labels = (
+            "Database Explorer SSH tunnel",
+            "Database Explorer SSH tunnels",
+        );
+        vec![otto_core::restart::ImpactItem::new(
+            false,
+            "db_tunnels",
+            labels,
+            self.tunnels.live_len(),
+            vec![],
+        )]
+    }
+
     pub fn new(
         connections: ConnectionsRepo,
         secrets: Arc<dyn SecretStore>,

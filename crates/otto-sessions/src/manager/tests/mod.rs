@@ -4867,9 +4867,10 @@ async fn restart_impact_counts_live_sessions_by_bucket() {
     let (manager, _repo, workspace, user) = test_manager().await;
     for (title, meta) in [
         ("Fix the login bug", None),
+        // C1-031: engine-owned by its work ref alone (no background source).
         (
-            "nightly workflow",
-            Some(serde_json::json!({"source": "workflow"})),
+            "delegated step",
+            Some(serde_json::json!({"work": {"origin": "workflow"}})),
         ),
     ] {
         manager
@@ -4895,13 +4896,17 @@ async fn restart_impact_counts_live_sessions_by_bucket() {
     let mut ends: Vec<_> = impact
         .ends
         .iter()
-        .map(|i| (i.kind, i.count, i.detail.clone()))
+        .map(|i| {
+            let mut names = i.detail.clone();
+            names.sort();
+            (i.kind, i.count, names)
+        })
         .collect();
     ends.sort();
     assert_eq!(
         ends,
         [
-            ("background_agents", 1, vec!["nightly workflow".to_string()]),
+            ("background_agents", 1, vec!["delegated step".to_string()]),
             ("sessions", 1, vec!["Fix the login bug".to_string()]),
         ]
     );

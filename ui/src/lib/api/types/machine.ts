@@ -48,7 +48,7 @@ export interface MachineStatus {
 export interface RestartImpactItem {
   /** `sessions` | `background_agents` | `connection_terminals` | `ide_runs` |
    *  `debug_sessions` | `container_runtime` | `broker_tunnels` |
-   *  `session_rooms` | `live_browser` | `phones`. */
+   *  `session_rooms` | `live_browser` | `phones` | `db_tunnels` | `daemon_jobs`. */
   kind: string;
   /** Noun phrase already matching `count` ("1 debug session", "2 debug sessions"). */
   label: string;
