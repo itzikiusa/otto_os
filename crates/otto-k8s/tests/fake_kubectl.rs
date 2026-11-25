@@ -80,6 +80,8 @@ case " $* " in
   *" get deployments "*) cat "{fx}/deployments.json" ;;
   *" rollout restart "*) echo "deployment.apps/web restarted" ;;
   *" rollout status "*) echo "Waiting for deployment \"web\" rollout to finish: 1 of 3 updated replicas are available..." >&2; exit 1 ;;
+  *"/proxy/prom-metrics"*)
+    printf '%s\n' 'http_requests_total{{code="200"}} 10' 'http_request_duration_seconds_bucket{{code="200",le="0.1"}} 4' 'http_request_duration_seconds_bucket{{code="200",le="+Inf"}} 9' 'http_request_duration_seconds_count{{code="200"}} 9' 'http_request_duration_seconds_sum{{code="200"}} 0.5' ;;
   *"/proxy/app-404"*)
     echo 'Error from server (NotFound): the server could not find the requested resource' >&2; exit 1 ;;
   *"/proxy/api-denied"*)
@@ -1665,6 +1667,53 @@ async fn monitor_cycle_at_2k_pods_fits_the_spawn_and_time_budget() {
     for ms in &cycle_ms {
         assert!(*ms < 8_000, "2k-pod cycle took {ms} ms: {cycle_ms:?}");
     }
+}
+
+/// P1-001: histogram buckets feed the wide row's latency histogram only.
+/// Written per series (one row per `le` per label set) they were ~84 % of
+/// every raw row on a live install, re-folded by five views, read by nobody.
+#[tokio::test]
+async fn monitor_writes_histogram_buckets_only_into_the_wide_row() {
+    let (ctx, user) = TestCtx::new().await;
+    let c = create_cluster(&ctx, &user).await;
+    let id = c["id"].as_str().unwrap();
+    let mut cfg = monitor_cfg(true, 60);
+    cfg["probes"] = serde_json::json!([{
+        "name": "prom", "port": 9000, "path": "/prom-metrics", "format": "prometheus"
+    }]);
+    let path = format!("/k8s/clusters/{id}/monitor");
+    let (st, _, text) = call(&ctx, &user, "PUT", &path, Some(cfg)).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    let (st, _, text) = call(&ctx, &user, "POST", &format!("{path}/run"), None).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    let inserts = ctx.sink.inserts.lock().unwrap().clone();
+    let lines = |table: &str| -> Vec<String> {
+        inserts
+            .iter()
+            .filter(|(t, _)| t == table)
+            .flat_map(|(_, nd)| nd.lines().map(str::to_string).collect::<Vec<_>>())
+            .collect()
+    };
+    let raw = lines("k8s_samples");
+    assert!(
+        raw.iter()
+            .any(|l| l.contains("\"metric\":\"http_requests_total\"")),
+        "{raw:#?}"
+    );
+    assert!(
+        raw.iter()
+            .any(|l| l.contains("\"metric\":\"http_request_duration_seconds_count\"")),
+        "{raw:#?}"
+    );
+    assert!(!raw.iter().any(|l| l.contains("_bucket")), "{raw:#?}");
+    let wide = lines("k8s_pod_cycle");
+    assert!(
+        wide.iter().any(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).unwrap();
+            v["hist"].get("0.1").is_some() && v["hist"].get("+Inf").is_some()
+        }),
+        "{wide:#?}"
+    );
 }
 
 /// Run one monitor cycle whose only probe hits `path`; returns the status

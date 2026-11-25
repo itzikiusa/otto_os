@@ -564,11 +564,32 @@ pub fn parse_k9s_version(stdout: &str) -> Option<String> {
     (first.starts_with('v') && first.len() < 32).then(|| first.to_string())
 }
 
+/// [`verify`], remembered per binary path + mtime: the Kubernetes page shows
+/// a skeleton until `/k8s/status` answers, and its two version spawns cost
+/// ~135 ms of that on every visit. An install / upgrade changes the mtime.
+async fn cached_verify(tool: Tool, path: &Path) -> Option<String> {
+    type Seen = Mutex<HashMap<(PathBuf, std::time::SystemTime), String>>;
+    static SEEN: OnceLock<Seen> = OnceLock::new();
+    let seen = SEEN.get_or_init(Default::default);
+    let key = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .map(|t| (path.to_path_buf(), t));
+    if let Some(v) = key.as_ref().and_then(|k| seen.lock().ok()?.get(k).cloned()) {
+        return Some(v);
+    }
+    let v = verify(tool, path).await;
+    if let (Some(k), Some(v), Ok(mut m)) = (key, v.as_ref(), seen.lock()) {
+        m.insert(k, v.clone());
+    }
+    v
+}
+
 /// `ToolStatus` for `tool`: located path + version (or `installed: false`).
 pub async fn tool_status(tool: Tool, data_dir: &Path) -> ToolStatus {
     match locate(tool, data_dir) {
         Some(p) => {
-            let version = verify(tool, &p).await;
+            let version = cached_verify(tool, &p).await;
             ToolStatus {
                 installed: version.is_some(),
                 version,
@@ -586,6 +607,50 @@ pub async fn tool_status(tool: Tool, data_dir: &Path) -> ToolStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P1-033: `/k8s/status` spawns the version command once per binary
+    /// (path + mtime), not on every page visit; a changed binary re-probes.
+    #[tokio::test]
+    async fn status_version_is_probed_once_per_binary() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("kubectl");
+        let log = dir.path().join("calls");
+        let script = |v: &str| {
+            format!(
+                "#!/bin/sh\necho x >> '{}'\necho '{{\"clientVersion\":{{\"gitVersion\":\"{v}\"}}}}'\n",
+                log.display()
+            )
+        };
+        std::fs::write(&bin, script("v1.30.0")).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let calls = || {
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .count()
+        };
+        for _ in 0..3 {
+            assert_eq!(
+                cached_verify(Tool::Kubectl, &bin).await.as_deref(),
+                Some("v1.30.0")
+            );
+        }
+        assert_eq!(calls(), 1, "probed once");
+        std::fs::write(&bin, script("v1.31.0")).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&bin)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(
+            cached_verify(Tool::Kubectl, &bin).await.as_deref(),
+            Some("v1.31.0"),
+            "an upgraded binary re-probes"
+        );
+        assert_eq!(calls(), 2);
+    }
 
     /// S6-17: downloads are verified against the published digest.
     #[test]
