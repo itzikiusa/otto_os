@@ -808,3 +808,37 @@ async fn a_restart_mid_switch_does_not_adopt_the_new_agent() {
     assert!(host2.answers().last().is_some_and(|a| a.contains("again")));
     rt2.close(&s.id).await.unwrap();
 }
+
+/// D-016: the restart dialog counts a held child as kept and a direct one
+/// (here: a network-profile spawn) as ended.
+#[tokio::test]
+async fn restart_impact_tells_held_children_from_direct_ones() {
+    let impact = |rt: AgentRuntime| async move {
+        let i = otto_core::restart::RestartImpact::from(rt.restart_impact().await);
+        let side = |v: &[otto_core::restart::ImpactItem]| {
+            v.iter().map(|x| (x.kind, x.count)).collect::<Vec<_>>()
+        };
+        (side(&i.keeps), side(&i.ends))
+    };
+    let d = Dirs::new();
+    let pool = pool().await;
+    let host = d.host();
+    let rt = runtime(&pool, &host);
+    let s = create(&rt, d.cwd(), RuntimeProvider::Codex).await;
+    rt.prompt(&s.id, "hello").await.unwrap();
+    host.wait(is_terminal).await;
+    assert_eq!(impact(rt.clone()).await, (vec![("sessions", 1)], vec![]));
+    rt.close(&s.id).await.unwrap();
+
+    let d = Dirs::new();
+    let host = Arc::new(TestHost {
+        network: true,
+        ..Arc::into_inner(d.host()).unwrap()
+    });
+    let rt = runtime(&pool, &host);
+    let s = create(&rt, d.cwd(), RuntimeProvider::Codex).await;
+    rt.prompt(&s.id, "hello").await.unwrap();
+    host.wait(is_terminal).await;
+    assert_eq!(impact(rt.clone()).await, (vec![], vec![("sessions", 1)]));
+    rt.close(&s.id).await.unwrap();
+}

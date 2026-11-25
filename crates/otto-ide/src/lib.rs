@@ -172,6 +172,39 @@ impl IdeEngine {
         pids
     }
 
+    /// What a daemon restart ends here (the restart dialog): running runs and
+    /// dev servers, and debug sessions that are still alive.
+    pub fn restart_impact(&self) -> Vec<otto_core::restart::ImpactItem> {
+        use otto_core::restart::ImpactItem;
+        let debug = self
+            .dap
+            .list_sessions()
+            .into_iter()
+            .filter(|s| {
+                !matches!(
+                    s.state,
+                    types::IdeDebugState::Terminated | types::IdeDebugState::Error
+                )
+            })
+            .map(|s| s.title)
+            .collect();
+        let runs = self.environments.running_titles();
+        vec![
+            ImpactItem::named(
+                false,
+                "ide_runs",
+                ("IDE run or dev server", "IDE runs and dev servers"),
+                runs,
+            ),
+            ImpactItem::named(
+                false,
+                "debug_sessions",
+                ("debug session", "debug sessions"),
+                debug,
+            ),
+        ]
+    }
+
     pub fn authorize_debug_session(&self, user: &User, debug_id: &str) -> Result<()> {
         self.dap.authorize_session(user, debug_id)
     }

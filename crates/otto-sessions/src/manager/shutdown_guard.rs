@@ -23,6 +23,30 @@ impl SessionManager {
         killed
     }
 
+    /// What [`Self::shutdown_for_restart`] would keep and end right now (the
+    /// restart dialog): held sessions survive while persistence is on; every
+    /// other live PTY ends — connection terminals, background agents and
+    /// unheld sessions.
+    pub async fn restart_impact(&self) -> Vec<otto_core::restart::ImpactItem> {
+        let persist = self.persistence_enabled().await;
+        let live: Vec<(Id, bool)> = self
+            .live
+            .iter()
+            .map(|e| (e.key().clone(), persist && e.value().holder().is_some()))
+            .collect();
+        let mut out = Vec::with_capacity(live.len());
+        for (id, kept) in live {
+            if let Ok(s) = self.repo.get(&id).await {
+                let connection = s.kind == SessionKind::Connection;
+                let background = !connection && !s.is_foreground_agent();
+                out.push(otto_core::restart::ImpactItem::session(
+                    kept, connection, background, s.title,
+                ));
+            }
+        }
+        out
+    }
+
     /// `Conflict` while a shutdown sweep runs — a spawn now would land after
     /// it iterated `live` and outlive it (create and resume both check).
     pub(super) fn refuse_while_shutting_down(&self) -> Result<()> {

@@ -129,6 +129,19 @@ fn open_lock(
 }
 
 impl BrokersService {
+    /// Kafka tunnels (SSH + local proxy) a daemon restart closes; clients
+    /// connected through them disconnect (the restart dialog).
+    pub fn restart_impact(&self) -> Vec<otto_core::restart::ImpactItem> {
+        let labels = ("Kafka tunnel", "Kafka tunnels");
+        vec![otto_core::restart::ImpactItem::new(
+            false,
+            "broker_tunnels",
+            labels,
+            self.tunnels.len(),
+            vec![],
+        )]
+    }
+
     pub fn new(
         repo: BrokerClustersRepo,
         secrets: Arc<dyn SecretStore>,
