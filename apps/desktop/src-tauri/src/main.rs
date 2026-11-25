@@ -66,6 +66,7 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // Forward native menu-bar clicks to the SPA (which owns all behavior).
         // Registered on the Builder — the reliable place in Tauri v2 for an
         // app-wide menu set via `app.set_menu`. Window-lifecycle items
@@ -604,4 +605,29 @@ fn build_menu(app: &tauri::App) -> tauri::Result<()> {
     // Menu-event forwarding is registered on the Builder (see main()).
 
     Ok(())
+}
+
+#[cfg(test)]
+mod release_config_tests {
+    /// The updater plugin deserializes `plugins.updater` when it starts, so a
+    /// bad value there stops the app from launching: prove it parses here.
+    #[test]
+    fn updater_config_parses_and_points_at_github_releases() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let cfg: tauri_plugin_updater::Config =
+            serde_json::from_value(conf["plugins"]["updater"].clone()).unwrap();
+        assert!(cfg.require_signed_version);
+        assert!(!cfg.allow_downgrades && !cfg.dangerous_insecure_transport_protocol);
+        assert!(!cfg.pubkey.is_empty());
+        assert_eq!(cfg.endpoints.len(), 1);
+        let url = &cfg.endpoints[0];
+        assert_eq!(
+            (url.scheme(), url.host_str()),
+            ("https", Some("github.com"))
+        );
+        assert!(url
+            .path()
+            .ends_with("/releases/latest/download/latest.json"));
+    }
 }
