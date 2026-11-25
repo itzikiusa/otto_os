@@ -35,7 +35,7 @@
       error: s?.version && !updates.checkError ? `Otto ${s.version}` : 'Check for updates',
     }[view.kind as string] ?? `Otto ${s?.version ?? ''}`,
   );
-  const busy = $derived(updates.restarting);
+  const busy = $derived(updates.restarting || view.kind === 'restarting');
 
   // Entering the staged step (a download finishing while the dialog is open)
   // counts what a restart would end.
@@ -54,10 +54,10 @@
   function more(e: MouseEvent): void {
     const v = s?.version;
     ctxMenu.showAt(e.currentTarget as Element, [
-      { label: 'Skip this version', icon: 'x', disabled: !v, action: () => updates.skip() },
-      { label: 'View release on GitHub', icon: 'external', disabled: !v, action: () => void openExternal(`https://github.com/itzikiusa/otto_os/releases/tag/v${v}`) },
+      { label: 'Skip this version', icon: 'x', disabled: !v, action: () => void updates.skip(v ?? null) },
+      { label: 'View release on GitHub', icon: 'external', disabled: !s?.release_url, action: () => void openExternal(s?.release_url) },
       { separator: true },
-      { label: 'Install updates automatically', checked: updates.prefs.auto_install, title: 'Downloads in the background; you choose when to restart', action: () => void updates.setPrefs({ auto_install: !updates.prefs.auto_install }) },
+      { label: 'Install updates automatically', checked: !!s?.auto_install, title: 'Downloads in the background; you choose when to restart', action: () => void updates.setAuto(!s?.auto_install) },
     ]);
   }
 </script>
@@ -72,9 +72,9 @@
       <p>This is a source build — updates come from git.</p>
       <p class="dim">Pull the latest changes and run <code>packaging/deploy.sh</code>. Release builds update themselves.</p>
     {:else if view.kind === 'failed'}
-      <p>Otto {updates.failed?.from} is running again; {updates.failed?.to} was skipped so it isn’t tried again.</p>
+      <p>Otto {updates.failed?.from} is running again{updates.failed?.skip ? `; ${updates.failed.to} was skipped so it isn’t tried again` : ''}.</p>
       {#if updates.failed?.reason}<p class="dim">{updates.failed.reason}</p>{/if}
-      <button class="btn small" onclick={() => void updates.showLog()}><Icon name="file" size={12} /> Show the update log</button>
+      {#if updates.failed?.log}<button class="btn small" onclick={() => void updates.showLog()}><Icon name="file" size={12} /> Show the update log</button>{/if}
     {:else if view.kind === 'error' && (updates.checkError || !s?.version)}
       <LoadState what="updates" errorTitle="Couldn’t check for updates" error={updates.checkError ?? s?.error ?? 'Unknown cause'} empty onretry={() => void updates.check()} />
     {:else}
@@ -82,9 +82,9 @@
         <span>You have {s?.current}</span>
         {#if meta}<span class="dim">{meta}</span>{/if}
       </div>
-      {#if view.kind === 'error' && s?.error}<p class="err" use:announceShown={{ text: s.error, assertive: true }}>{s.error}</p>{/if}
+      {#if s?.blocked}<p class="warn">{s.blocked}</p>{:else if view.kind === 'error' && s?.error}<p class="err" use:announceShown={{ text: s.error, assertive: true }}>{s.error}</p>{/if}
       {#if view.kind === 'downloading'}
-        <progress max="100" value={s?.pct ?? undefined} aria-label="Download progress"></progress>
+        <progress max={s?.size ?? undefined} value={s?.size ? s.received : undefined} aria-label="Download progress"></progress>
       {/if}
       {#if view.kind === 'staged'}
         <div class="impact" data-testid="restart-impact">
@@ -139,7 +139,8 @@
   .err {
     color: var(--danger);
   }
-  .ends {
+  .ends,
+  .warn {
     color: var(--warning);
   }
   progress {

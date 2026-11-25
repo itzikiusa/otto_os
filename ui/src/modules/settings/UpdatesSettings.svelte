@@ -12,7 +12,7 @@
 
   const s = $derived(updates.state);
   const source = $derived(s?.channel === 'source');
-  const lastCheck = $derived(s?.last_check ? new Date(s.last_check).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : 'Not yet');
+  const lastCheck = $derived(s?.last_check ? new Date(s.last_check * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : 'Not yet');
 </script>
 
 <div class="settings-section">
@@ -30,21 +30,22 @@
         </div>
         <button class="btn" onclick={() => updates.openDialog(true)}>Check for updates</button>
       </div>
+      {#if s?.blocked}<div class="upd-blocked">{s.blocked}</div>{/if}
       {#if !source}
         <SettingToggle
           label="Install updates automatically"
           hint="Downloads and prepares a new version in the background. Otto never restarts on its own."
-          checked={updates.prefs.auto_install}
-          onchange={(v) => updates.setPrefs({ auto_install: v })}
+          checked={!!s?.auto_install}
+          onchange={(v) => updates.setAuto(v)}
           testid="updates-auto"
         />
-        {#if updates.prefs.skipped}
+        {#if s?.skipped}
           <div class="upd-row">
             <div class="grow">
               <div class="row-title">Skipped version</div>
-              <div class="row-desc">Otto {updates.prefs.skipped} isn’t offered in the sidebar.</div>
+              <div class="row-desc">Otto {s.skipped} isn’t offered in the sidebar.</div>
             </div>
-            <button class="btn" onclick={() => void updates.setPrefs({ skipped: null })}>Unskip</button>
+            <button class="btn" onclick={() => void updates.skip(null)}>Unskip</button>
           </div>
         {/if}
       {/if}
@@ -77,6 +78,10 @@
   }
   .row-title {
     font-weight: 500;
+  }
+  .upd-blocked {
+    color: var(--warning);
+    font-size: var(--fs-s);
   }
   .row-desc {
     color: var(--text-dim);

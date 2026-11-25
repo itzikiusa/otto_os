@@ -16,36 +16,43 @@ import { confirmer } from '../confirm.svelte';
 import { toasts } from '../toast.svelte';
 import { loadErrorText } from '../loadError';
 
-export type UpdatePhase = 'idle' | 'checking' | 'available' | 'downloading' | 'staged' | 'error' | 'source';
+export type UpdatePhase = 'idle' | 'checking' | 'up_to_date' | 'available' | 'downloading' | 'staged' | 'restarting' | 'error';
 
-/** How the last update went, read once after the relaunch. */
+/** How the last install went (the finisher's result), until `update_result_seen`. */
 export interface UpdateResult {
   ok: boolean;
+  /** The version itself failed, so the shell skipped it. */
+  skip?: boolean;
   from: string;
   to: string;
-  reason?: string | null;
-  log?: string | null;
+  reason?: string;
+  /** The finisher's log file. */
+  log?: string;
 }
 
-/** Mirrors the shell's `otto://update` payload. */
+/** Mirrors the shell's `otto://update` payload (updater/mod.rs `UpdateState`). */
 export interface UpdateState {
   phase: UpdatePhase;
+  channel: 'release' | 'source';
   current: string;
   version?: string | null;
   /** Release notes: UNTRUSTED markdown (rendered sanitised). */
   notes?: string | null;
+  /** RFC 3339. */
   date?: string | null;
+  /** Archive bytes. */
   size?: number | null;
-  pct?: number | null;
+  received?: number;
   error?: string | null;
-  channel: 'release' | 'source';
-  last_check?: string | null;
+  error_kind?: 'offline' | 'blocked' | 'disk' | 'verify' | 'failed' | null;
+  /** Why this copy can't install updates (not in /Applications, not writable…). */
+  blocked?: string | null;
+  skipped?: string | null;
+  auto_install?: boolean;
+  /** Unix seconds of the last finished check. */
+  last_check?: number | null;
   last_result?: UpdateResult | null;
-}
-
-export interface UpdatePrefs {
-  auto_install: boolean;
-  skipped: string | null;
+  release_url?: string | null;
 }
 
 /** One kind of work a restart keeps or ends ("2 connection terminals"). */
@@ -59,21 +66,25 @@ export interface RestartImpact {
   ends: ImpactLine[];
 }
 
-const pctText = (pct: number | null | undefined): string => (pct == null ? 'Downloading…' : `Downloading… ${Math.floor(pct)} %`);
+/** "Downloading… 42 %" (no percentage while the size is unknown). */
+export function progressText(s: UpdateState): string {
+  const pct = s.size ? Math.min(100, Math.floor(((s.received ?? 0) / s.size) * 100)) : null;
+  return pct === null ? 'Downloading…' : `Downloading… ${pct} %`;
+}
 
 /** The quiet sidebar row, or null when there is nothing to say. Silent for
  *  up-to-date, checking, a failed automatic check, a skipped version and a
  *  source build. */
-export function rowLabel(s: UpdateState | null, prefs: UpdatePrefs, failed: UpdateResult | null): string | null {
+export function rowLabel(s: UpdateState | null, failed: UpdateResult | null): string | null {
   if (failed) return 'Update failed and was undone';
   if (!s || s.channel !== 'release' || !s.version) return null;
-  if (s.phase === 'downloading') return pctText(s.pct);
-  if (s.phase === 'staged') return 'Restart to update';
-  if ((s.phase === 'available' || s.phase === 'error') && s.version !== prefs.skipped) return `Update to ${s.version}`;
+  if (s.phase === 'downloading') return progressText(s);
+  if (s.phase === 'staged' || s.phase === 'restarting') return 'Restart to update';
+  if ((s.phase === 'available' || s.phase === 'error') && s.version !== s.skipped) return `Update to ${s.version}`;
   return null;
 }
 
-export type DialogKind = 'checking' | 'uptodate' | 'available' | 'downloading' | 'staged' | 'error' | 'source' | 'failed';
+export type DialogKind = 'checking' | 'uptodate' | 'available' | 'downloading' | 'staged' | 'restarting' | 'error' | 'source' | 'failed';
 
 /** What the Update dialog shows, and its ONE primary button. `action` null =
  *  the button is a disabled progress label. */
@@ -83,7 +94,7 @@ export function dialogView(
   checkError: string | null,
 ): { kind: DialogKind; primary: { label: string; action: 'download' | 'restart' | 'close' | null } } {
   if (failed) return { kind: 'failed', primary: { label: 'Close', action: 'close' } };
-  if (s?.channel === 'source' || s?.phase === 'source') return { kind: 'source', primary: { label: 'Close', action: 'close' } };
+  if (s?.channel === 'source') return { kind: 'source', primary: { label: 'Close', action: 'close' } };
   // A failed check shows its own inline Retry (LoadState); the button closes.
   if (checkError) return { kind: 'error', primary: { label: 'Close', action: 'close' } };
   if (!s) return { kind: 'checking', primary: { label: 'Checking…', action: null } };
@@ -91,14 +102,18 @@ export function dialogView(
     case 'checking':
       return { kind: 'checking', primary: { label: 'Checking…', action: null } };
     case 'available':
+      // This copy can't install (outside /Applications, not writable): say why, nothing to press.
+      if (s.blocked) return { kind: 'available', primary: { label: 'Close', action: 'close' } };
       return { kind: 'available', primary: { label: 'Download and install', action: 'download' } };
     case 'downloading':
-      return { kind: 'downloading', primary: { label: pctText(s.pct), action: null } };
+      return { kind: 'downloading', primary: { label: progressText(s), action: null } };
     case 'staged':
       return { kind: 'staged', primary: { label: 'Restart to finish', action: 'restart' } };
+    case 'restarting':
+      return { kind: 'restarting', primary: { label: 'Restarting…', action: null } };
     case 'error':
       // A failed download keeps its version: retrying is downloading again.
-      return { kind: 'error', primary: s.version ? { label: 'Try again', action: 'download' } : { label: 'Close', action: 'close' } };
+      return { kind: 'error', primary: s.version && !s.blocked ? { label: 'Try again', action: 'download' } : { label: 'Close', action: 'close' } };
     default:
       return { kind: 'uptodate', primary: { label: 'Close', action: 'close' } };
   }
@@ -128,7 +143,6 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
 
 class UpdatesStore {
   state = $state<UpdateState | null>(null);
-  prefs = $state<UpdatePrefs>({ auto_install: false, skipped: null });
   /** The last update was rolled back (shown until dismissed). */
   failed = $state<UpdateResult | null>(null);
   open = $state(false);
@@ -149,7 +163,6 @@ class UpdatesStore {
     this.#started = true;
     this.#toasts = toastsHere;
     void call<UpdateState>('update_state').then((s) => this.apply(s)).catch(() => {});
-    void call<UpdatePrefs>('update_prefs_get').then((p) => (this.prefs = p)).catch(() => {});
     void import('@tauri-apps/api/event')
       .then(({ listen }) => listen<UpdateState>('otto://update', (e) => this.apply(e.payload)))
       .catch(() => {});
@@ -158,15 +171,18 @@ class UpdatesStore {
   apply(s: UpdateState): void {
     const r = s.last_result;
     if (r && this.#toasts) {
-      if (r.ok) toasts.success(`Updated to ${r.to}`);
-      else this.failed = r;
+      // A success is said once (then forgotten); a rollback stays until dismissed.
+      if (r.ok) {
+        toasts.success(`Updated to ${r.to}`);
+        void call('update_result_seen').catch(() => {});
+      } else this.failed = r;
     }
     this.state = s;
     if (s.phase !== 'staged') this.impact = null;
   }
 
   get row(): string | null {
-    return rowLabel(this.state, this.prefs, this.failed);
+    return rowLabel(this.state, this.failed);
   }
 
   /** `manual`: Otto ▸ Check for Updates… — check now and say the outcome. */
@@ -181,20 +197,29 @@ class UpdatesStore {
     this.open = false;
   }
 
+  /** A check the person asked for; its failure (offline…) arrives as an
+   *  error state and is shown, unlike an automatic one's. */
   async check(): Promise<void> {
     if (!isTauri) return;
     this.checkError = null;
     try {
-      this.apply(await call<UpdateState>('update_check'));
+      const s = await call<UpdateState>('update_check');
+      this.apply(s);
+      if (s.phase === 'error' && !s.version) this.checkError = s.error || 'The check failed.';
     } catch (e) {
       this.checkError = loadErrorText(e);
     }
   }
 
   async download(): Promise<void> {
+    await this.#act(() => call<UpdateState>('update_download'));
+  }
+
+  /** Run a shell command that answers with the new state; a throw shows inline. */
+  async #act(run: () => Promise<UpdateState>): Promise<void> {
     this.actionError = null;
     try {
-      await call('update_download');
+      this.apply(await run());
     } catch (e) {
       this.actionError = loadErrorText(e);
     }
@@ -231,34 +256,33 @@ class UpdatesStore {
     }
   }
 
-  async setPrefs(p: Partial<UpdatePrefs>): Promise<void> {
-    const before = this.prefs;
-    this.prefs = { ...before, ...p };
-    try {
-      await call('update_prefs_set', { prefs: p });
-    } catch (e) {
-      this.prefs = before;
-      this.actionError = loadErrorText(e);
-      toasts.error('Couldn’t save the update setting', loadErrorText(e));
-    }
+  /** "Install updates automatically": download + stage in the background. */
+  async setAuto(on: boolean): Promise<void> {
+    await this.#act(() => call<UpdateState>('update_set_auto', { on }));
+    if (this.actionError) toasts.error('Couldn’t save the update setting', this.actionError);
   }
 
-  skip(): void {
-    if (this.state?.version) void this.setPrefs({ skipped: this.state.version });
-    this.open = false;
+  /** Skip `version` (hidden from the sidebar), or unskip with null. */
+  async skip(version: string | null): Promise<void> {
+    if (version) this.open = false;
+    await this.#act(() => call<UpdateState>('update_skip', { version }));
   }
 
+  /** Reveal the finisher's log in Finder. */
   async showLog(): Promise<void> {
+    const log = this.failed?.log;
+    if (!log) return;
     try {
-      await call('update_open_log');
+      await call('plugin:opener|reveal_item_in_dir', { paths: [log] });
     } catch (e) {
-      toasts.error('Couldn’t open the update log', loadErrorText(e));
+      toasts.error('Couldn’t show the update log', loadErrorText(e));
     }
   }
 
   dismissFailed(): void {
     this.failed = null;
     this.open = false;
+    void call('update_result_seen').catch(() => {});
   }
 }
 

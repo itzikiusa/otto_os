@@ -13,7 +13,6 @@ const shot = async (page: Page, name: string) => {
 type Fx = {
   calls: { command: string; args: Record<string, unknown> }[];
   state: Record<string, unknown>;
-  prefs: { auto_install: boolean; skipped: string | null };
   checkFails: string | null;
   emit: (event: string, payload: unknown) => void;
 };
@@ -25,7 +24,7 @@ const NOTES = [
   '<script>window.__pwned = 1</script><img src=x onerror="window.__pwned = 2">',
 ].join('\n');
 
-async function shell(page: Page, init: { state: Record<string, unknown>; prefs?: Fx['prefs']; rail?: boolean; scheme: string }) {
+async function shell(page: Page, init: { state: Record<string, unknown>; rail?: boolean; scheme: string }) {
   const { ctx, base } = await apiCtx();
   const workspace = await seedWorkspace(ctx, base);
   await ctx.dispose();
@@ -40,7 +39,6 @@ async function shell(page: Page, init: { state: Record<string, unknown>; prefs?:
     const fx: Fx = {
       calls: [],
       state: init.state,
-      prefs: init.prefs ?? { auto_install: false, skipped: null },
       checkFails: null,
       emit(event, payload) {
         for (const h of listeners.get(event) ?? []) callbacks.get(h)?.({ event, id: 0, payload });
@@ -64,10 +62,12 @@ async function shell(page: Page, init: { state: Record<string, unknown>; prefs?:
           }
           if (command === 'windows_registry') return ['main'];
           if (command === 'update_state') return fx.state;
-          if (command === 'update_prefs_get') return fx.prefs;
-          if (command === 'update_prefs_set') { fx.prefs = { ...fx.prefs, ...(args.prefs as object) }; return null; }
+          if (command === 'update_skip') return (fx.state = { ...fx.state, skipped: args.version ?? null });
+          if (command === 'update_set_auto') return (fx.state = { ...fx.state, auto_install: !!args.on });
+          if (command === 'update_download') return fx.state;
           if (command === 'update_check') {
-            if (fx.checkFails) throw new Error(fx.checkFails);
+            // The shell answers a failed check with an error state (it never throws).
+            if (fx.checkFails) return { ...fx.state, phase: 'error', error: fx.checkFails, error_kind: 'offline', version: null };
             return fx.state;
           }
           return null;
@@ -84,7 +84,11 @@ const fx = (page: Page) => ({
   set: (patch: Partial<Pick<Fx, 'state' | 'checkFails'>>) => page.evaluate((p) => Object.assign((window as unknown as { __upd: Fx }).__upd, p), patch),
 });
 
-const AVAILABLE = { phase: 'available', current: '0.5.3', version: '0.5.4', channel: 'release', notes: NOTES, date: '2026-11-25T09:00:00Z', size: 131_000_000, last_check: '2026-11-25T10:00:00Z' };
+const AVAILABLE = {
+  phase: 'available', current: '0.5.3', version: '0.5.4', channel: 'release', notes: NOTES, date: '2026-11-25T09:00:00Z',
+  size: 131_000_000, received: 0, last_check: 1_795_600_000, auto_install: false, skipped: null,
+  release_url: 'https://github.com/itzikiusa/otto_os/releases/tag/v0.5.4',
+};
 
 for (const scheme of ['light', 'dark'] as const) {
   test(`update flow: row → notes → download → restart with what ends (${scheme})`, async ({ page }) => {
@@ -119,7 +123,7 @@ for (const scheme of ['light', 'dark'] as const) {
 
     await page.getByTestId('update-primary').click();
     await expect.poll(async () => (await fx(page).calls('update_download')).length).toBe(1);
-    await fx(page).emit({ ...AVAILABLE, phase: 'downloading', pct: 42 });
+    await fx(page).emit({ ...AVAILABLE, phase: 'downloading', received: 55_020_000 });
     await expect(page.getByTestId('update-primary')).toHaveText('Downloading… 42 %');
     await expect(page.getByTestId('update-primary')).toBeDisabled();
     await expect(row).toHaveText(/Downloading… 42 %/);
@@ -147,7 +151,7 @@ for (const scheme of ['light', 'dark'] as const) {
   });
 
   test(`Check for Updates… menu: up to date, offline with Retry, source build (${scheme})`, async ({ page }) => {
-    await shell(page, { state: { phase: 'idle', current: '0.5.3', channel: 'release', last_check: '2026-11-25T10:00:00Z' }, scheme });
+    await shell(page, { state: { phase: 'up_to_date', current: '0.5.3', channel: 'release', last_check: 1_795_600_000 }, scheme });
     await page.goto('/#/agents');
     await expect(page.locator('.navigator')).toBeVisible({ timeout: 30_000 });
     await expect(page.getByTestId('update-row')).toHaveCount(0);
@@ -170,7 +174,7 @@ for (const scheme of ['light', 'dark'] as const) {
     await expect(page.getByRole('dialog', { name: 'Otto 0.5.4' })).toBeVisible();
     await page.getByRole('button', { name: 'Later' }).click();
 
-    await fx(page).set({ state: { phase: 'source', current: '0.5.3', channel: 'source' } });
+    await fx(page).set({ state: { phase: 'idle', current: '0.5.3', channel: 'source' } });
     await fx(page).menu('check-updates');
     await expect(page.getByTestId('update-dialog')).toContainText('This is a source build — updates come from git.');
     await shot(page, `source-${scheme}`);
@@ -185,6 +189,9 @@ test('⋯ skips the version (row hides), Settings ▸ Updates unskips it and tog
   await page.getByTestId('update-more').click();
   await expect(page.getByRole('menuitemcheckbox', { name: /Install updates automatically/ })).toHaveAttribute('aria-checked', 'false');
   await shot(page, 'more-menu-light');
+  await page.getByRole('menuitem', { name: 'View release on GitHub' }).click();
+  await expect.poll(async () => (await fx(page).calls('plugin:opener|open_url')).map((c) => c.args.url)).toEqual(['https://github.com/itzikiusa/otto_os/releases/tag/v0.5.4']);
+  await page.getByTestId('update-more').click();
   await page.getByRole('menuitem', { name: 'Skip this version' }).click();
   await expect(page.getByTestId('update-dialog')).toHaveCount(0);
   await expect(page.getByTestId('update-row')).toHaveCount(0);
@@ -196,7 +203,8 @@ test('⋯ skips the version (row hides), Settings ▸ Updates unskips it and tog
   await expect(card).toContainText('Otto 0.5.4 isn’t offered in the sidebar.');
   await shot(page, 'settings-light');
   await card.getByRole('checkbox', { name: 'Install updates automatically' }).check();
-  await expect.poll(async () => (await fx(page).calls('update_prefs_set')).map((c) => JSON.stringify(c.args.prefs))).toEqual(['{"skipped":"0.5.4"}', '{"auto_install":true}']);
+  await expect.poll(async () => (await fx(page).calls('update_set_auto')).map((c) => c.args.on)).toEqual([true]);
+  expect((await fx(page).calls('update_skip')).map((c) => c.args.version)).toEqual(['0.5.4']);
   await card.getByRole('button', { name: 'Unskip' }).click();
   await expect(card).not.toContainText('isn’t offered');
   await expect(page.locator('.navigator [data-testid="update-row"]')).toHaveText(/Update to 0\.5\.4/);
@@ -206,7 +214,7 @@ test('after relaunch: a rolled-back update shows inline in the collapsed rail; a
   await shell(page, {
     rail: true,
     scheme: 'dark',
-    state: { phase: 'idle', current: '0.5.3', channel: 'release', last_result: { ok: false, from: '0.5.3', to: '0.5.4', reason: 'Otto 0.5.4 did not answer within 120 s.' } },
+    state: { phase: 'idle', current: '0.5.3', channel: 'release', last_result: { ok: false, skip: true, from: '0.5.3', to: '0.5.4', reason: 'Otto 0.5.4 did not answer within 120 s.', log: '/tmp/otto-updates/finish-1.log' } },
   });
   await page.goto('/#/agents');
   const railRow = page.locator('[data-testid="update-row"][aria-label="Update failed and was undone"]');
@@ -217,12 +225,22 @@ test('after relaunch: a rolled-back update shows inline in the collapsed rail; a
   const dialog = page.getByRole('dialog', { name: 'Update failed and was undone' });
   await expect(dialog).toContainText('did not answer within 120 s');
   await dialog.getByRole('button', { name: 'Show the update log' }).click();
-  await expect.poll(async () => (await fx(page).calls('update_open_log')).length).toBe(1);
+  await expect.poll(async () => (await fx(page).calls('plugin:opener|reveal_item_in_dir')).map((c) => c.args.paths)).toEqual([['/tmp/otto-updates/finish-1.log']]);
   await shot(page, 'failed-dialog-dark');
   await page.getByTestId('update-primary').click();
   await expect(page.getByTestId('update-row')).toHaveCount(0);
+  await expect.poll(async () => (await fx(page).calls('update_result_seen')).length).toBe(1);
   await fx(page).emit({ phase: 'idle', current: '0.5.4', channel: 'release', last_result: { ok: true, from: '0.5.3', to: '0.5.4' } });
   await expect(page.getByText('Updated to 0.5.4')).toBeVisible();
+});
+
+test('a copy outside /Applications says why it cannot install, with nothing to press', async ({ page }) => {
+  await shell(page, { state: { ...AVAILABLE, blocked: 'Move Otto to the Applications folder to get updates (it runs from /Users/me/Downloads/Otto.app).' }, scheme: 'light' });
+  await page.goto('/#/agents');
+  await page.locator('.navigator [data-testid="update-row"]').click({ timeout: 30_000 });
+  await expect(page.getByTestId('update-dialog')).toContainText('Move Otto to the Applications folder');
+  await expect(page.getByTestId('update-primary')).toHaveText('Close');
+  await shot(page, 'blocked-light');
 });
 
 test('outside the desktop app there is no update UI at all', async ({ page }) => {
