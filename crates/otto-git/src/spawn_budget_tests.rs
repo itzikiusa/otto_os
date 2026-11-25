@@ -129,6 +129,46 @@ async fn spawn_budget_per_action() {
     assert!(s.len() <= 2, "fetch ≤ 2 spawns: {s:?}");
 }
 
+/// A push preflight ran two git processes per outgoing commit (133 for a
+/// 64-commit push, one after another).
+#[tokio::test]
+async fn preflight_spawns_do_not_grow_with_the_commit_count() {
+    let f = Fixture::new();
+    let mut shas = Vec::new();
+    for i in 0..12 {
+        let (name, body) = match i {
+            4 => (
+                "cfg.txt".to_string(),
+                format!("token=ghp_{}\n", "C".repeat(36)),
+            ),
+            8 => (".env".to_string(), "X=1\n".to_string()),
+            _ => (format!("f{i}.txt"), "x\n".to_string()),
+        };
+        std::fs::write(f.repo.join(name), body).unwrap();
+        sh(&f.repo, &["add", "."]);
+        sh(&f.repo, &["commit", "-q", "-m", &format!("p{i}")]);
+        let out = std::process::Command::new("git")
+            .current_dir(&f.repo)
+            .args(["rev-parse", "--short=7", "HEAD"])
+            .output()
+            .unwrap();
+        shas.push(String::from_utf8_lossy(&out.stdout).trim().to_string());
+    }
+    f.take();
+    let r = f.git.push_preflight(&Default::default()).await.unwrap();
+    let s = f.take_fg();
+    assert!(s.len() <= 8, "preflight of 12 commits ≤ 8 spawns: {s:?}");
+    assert_eq!(r.commits_ahead, 12);
+    // Findings still name the commit that introduced them.
+    assert_eq!(r.secrets.len(), 1, "{r:?}");
+    assert_eq!(
+        (r.secrets[0].path.as_str(), r.secrets[0].commit.as_deref()),
+        ("cfg.txt", Some(shas[4].as_str()))
+    );
+    assert_eq!(r.control_paths.len(), 1, "{r:?}");
+    assert_eq!(r.control_paths[0].commit.as_deref(), Some(shas[8].as_str()));
+}
+
 /// Every repo open paid for `git submodule status` (a shell script, ~80 ms)
 /// in a repo without submodules.
 #[tokio::test]

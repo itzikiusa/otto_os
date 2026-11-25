@@ -15,7 +15,7 @@ use otto_core::redact::redact_text;
 use otto_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::local::{LocalGit, SpawnClass};
+use crate::local::{GitCmd, LocalGit, SpawnClass};
 
 /// Blobs strictly larger than 5 MiB trigger a `large_blobs` preflight warning.
 pub const LARGE_BLOB_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024;
@@ -333,70 +333,69 @@ impl LocalGit {
         let mut blob_candidates: Vec<(String, String, String)> = Vec::new(); // (oid, path, short_sha)
         let mut blob_oids_seen = HashSet::new();
 
+        // Two spawns for the whole range, not two per commit (a 64-commit
+        // push ran 133 git processes in a row, preflight p95 1 s):
+        // `diff-tree --stdin` prints each commit's sha ahead of its entries,
+        // and `git show` over every commit starts each patch with a `\x1e`
+        // line, which no diff line can start with.
+        let revs: String = commits.iter().map(|s| format!("{s}\n")).collect();
+        let raw_cmd = GitCmd::read(&["diff-tree", "--stdin", "--root", "-r", "--raw", "-z"]);
+        let (dt_ok, dt_out, _, _) = self.exec(&raw_cmd, Some(revs.as_bytes())).await?;
+        let dt_out = String::from_utf8_lossy(&dt_out);
+        let mut raw_by_commit: HashMap<String, Vec<(String, String, String)>> = HashMap::new();
+        for (commit, status, dst_oid, path) in
+            parse_raw_diff_tree_z(if dt_ok { &dt_out } else { "" })
+        {
+            raw_by_commit
+                .entry(commit)
+                .or_default()
+                .push((status, dst_oid, path));
+        }
+        let mut show = vec!["show", "--format=%x1e%H", "--unified=0", "--no-color"];
+        show.extend(["--no-ext-diff", "--no-textconv"]);
+        show.extend(commits.iter().map(String::as_str));
+        let (show_ok, show_out, _, _) = self
+            .run_raw_class(&show, &[], SpawnClass::LocalRead)
+            .await?;
+        let patches: HashMap<&str, &str> = show_out
+            .strip_prefix('\u{1e}')
+            .filter(|_| show_ok)
+            .unwrap_or("")
+            .split("\n\u{1e}")
+            .filter_map(|c| c.split_once('\n'))
+            .collect();
+
         for sha in &commits {
             let short = &sha[..sha.len().min(7)];
 
-            // 1. Inspect touched files and new blob OIDs via diff-tree --raw -z.
-            let (dt_ok, dt_out, _, _) = self
-                .run_raw_class(
-                    &[
-                        "diff-tree",
-                        "--no-commit-id",
-                        "--root",
-                        "-r",
-                        "--raw",
-                        "-z",
-                        sha,
-                    ],
-                    &[],
-                    SpawnClass::LocalRead,
-                )
-                .await?;
-            if dt_ok {
-                for (status, dst_oid, path) in parse_raw_diff_tree_z(&dt_out) {
-                    if status == "D" {
-                        continue;
-                    }
-                    if control_paths.len() < MAX_FINDINGS_PER_BUCKET {
-                        if let Some(reason) = classify_control_path(&path) {
-                            if control_seen.insert(path.clone()) {
-                                control_paths.push(PreflightFinding {
-                                    kind: "control_path".into(),
-                                    path: path.clone(),
-                                    detail: reason.into(),
-                                    commit: Some(short.to_string()),
-                                    line: None,
-                                    bytes: None,
-                                });
-                            }
+            // 1. Touched files and new blob OIDs (diff-tree --raw -z).
+            for (status, dst_oid, path) in raw_by_commit.remove(sha).unwrap_or_default() {
+                if status == "D" {
+                    continue;
+                }
+                if control_paths.len() < MAX_FINDINGS_PER_BUCKET {
+                    if let Some(reason) = classify_control_path(&path) {
+                        if control_seen.insert(path.clone()) {
+                            control_paths.push(PreflightFinding {
+                                kind: "control_path".into(),
+                                path: path.clone(),
+                                detail: reason.into(),
+                                commit: Some(short.to_string()),
+                                line: None,
+                                bytes: None,
+                            });
                         }
                     }
-                    if !dst_oid.chars().all(|c| c == '0') && blob_oids_seen.insert(dst_oid.clone())
-                    {
-                        blob_candidates.push((dst_oid, path, short.to_string()));
-                    }
+                }
+                if !dst_oid.chars().all(|c| c == '0') && blob_oids_seen.insert(dst_oid.clone()) {
+                    blob_candidates.push((dst_oid, path, short.to_string()));
                 }
             }
 
             // 2. Scan added diff lines for secrets.
-            if secrets.len() < MAX_FINDINGS_PER_BUCKET {
-                let (show_ok, patch, _, _) = self
-                    .run_raw_class(
-                        &[
-                            "show",
-                            "--format=",
-                            "--unified=0",
-                            "--no-color",
-                            "--no-ext-diff",
-                            "--no-textconv",
-                            sha,
-                        ],
-                        &[],
-                        SpawnClass::LocalRead,
-                    )
-                    .await?;
-                if show_ok {
-                    scan_patch_for_secrets(&patch, Some(short), &mut secrets, &mut secret_seen);
+            if let Some(patch) = patches.get(sha.as_str()) {
+                if secrets.len() < MAX_FINDINGS_PER_BUCKET {
+                    scan_patch_for_secrets(patch, Some(short), &mut secrets, &mut secret_seen);
                 }
             }
         }
@@ -535,13 +534,17 @@ impl LocalGit {
     }
 }
 
-/// Parse `git diff-tree --raw -z` NUL-delimited output into `(status_code, dst_oid, path)`.
-fn parse_raw_diff_tree_z(raw: &str) -> Vec<(String, String, String)> {
+/// Parse `git diff-tree --stdin --raw -z` NUL-delimited output into
+/// `(commit, status_code, dst_oid, path)`: a token in meta position that is
+/// not a `:` entry is the sha of the commit whose entries follow.
+fn parse_raw_diff_tree_z(raw: &str) -> Vec<(String, String, String, String)> {
     let mut out = Vec::new();
+    let mut commit = String::new();
     let mut parts = raw.split('\0').peekable();
     while let Some(meta) = parts.next() {
         let meta = meta.trim_start_matches('\n');
         if !meta.starts_with(':') {
+            commit = meta.to_string();
             continue;
         }
         // Format: `:oldmode newmode oldoid newoid status`
@@ -560,7 +563,7 @@ fn parse_raw_diff_tree_z(raw: &str) -> Vec<(String, String, String)> {
         };
         if let Some(p) = path {
             if !p.is_empty() && Path::new(p).components().next().is_some() {
-                out.push((code, dst_oid, p.to_string()));
+                out.push((commit.clone(), code, dst_oid, p.to_string()));
             }
         }
     }
