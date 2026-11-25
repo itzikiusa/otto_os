@@ -169,6 +169,35 @@ async fn preflight_spawns_do_not_grow_with_the_commit_count() {
     assert_eq!(r.control_paths[0].commit.as_deref(), Some(shas[8].as_str()));
 }
 
+/// A bulk remote delete where one branch is already gone on the remote: git
+/// refuses the whole push, and the caller fell back to one push per branch.
+#[tokio::test]
+async fn bulk_remote_delete_skips_a_branch_already_gone() {
+    let f = Fixture::new();
+    for b in ["y", "z"] {
+        sh(&f.repo, &["branch", b]);
+        sh(&f.repo, &["push", "-q", "origin", b]);
+    }
+    f.take();
+    let names: Vec<String> = ["y", "gone", "z"].map(String::from).to_vec();
+    f.git
+        .delete_remote_branches_on("origin", &names, None)
+        .await
+        .unwrap();
+    let pushes = f.take_fg().iter().filter(|l| l.starts_with("push")).count();
+    assert_eq!(pushes, 2, "one refused push + one for the rest");
+    let out = std::process::Command::new("git")
+        .current_dir(&f.repo)
+        .args(["ls-remote", "--heads", "origin"])
+        .output()
+        .unwrap();
+    let heads = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        !heads.contains("refs/heads/y") && !heads.contains("refs/heads/z"),
+        "{heads}"
+    );
+}
+
 /// Every repo open paid for `git submodule status` (a shell script, ~80 ms)
 /// in a repo without submodules.
 #[tokio::test]
