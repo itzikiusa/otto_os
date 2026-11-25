@@ -36,7 +36,7 @@ anything: pull and run `packaging/deploy.sh` instead.
 5. **After the relaunch** — a toast **Updated to 0.5.4**. If the new version
    did not start, the shell put the old app back; the row reads **Update failed
    and was undone · Details** and the dialog shows why, with **Show the update
-   log**. That version is skipped so it is not tried again.
+   log** (reveals it in Finder). That version is skipped so it is not tried again.
 
 **⋯ in the dialog**: **Skip this version** (the row hides it; a newer version
 shows again), **View release on GitHub**, **Install updates automatically**
@@ -70,7 +70,7 @@ automatically**, and the skipped version with **Unskip**.
 | Update dialog, per-window host | `ui/src/shell/UpdateDialog.svelte`, `UpdateHost.svelte` (lazy, `overlays.svelte.ts`) |
 | Menu item | `check-updates` in `ui/src/lib/menu.ts` |
 | Settings | `ui/src/modules/settings/UpdatesSettings.svelte` (`sections.ts` id `updates`, `desktopOnly`) |
-| Shell commands | `update_state`, `update_check`, `update_download`, `update_restart`, `update_prefs_get`, `update_prefs_set`, `update_open_log`; event `otto://update` |
+| Shell commands | `update_state`, `update_check`, `update_download`, `update_restart`, `update_set_auto`, `update_skip`, `update_result_seen`; event `otto://update` (the finisher's log is revealed with the opener's `reveal_item_in_dir`) |
 | Daemon | `GET /api/v1/system/restart-impact` (see `docs/contracts/api.md`) |
 
 ## Troubleshooting
