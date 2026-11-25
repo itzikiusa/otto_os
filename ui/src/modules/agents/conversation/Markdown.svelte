@@ -8,6 +8,7 @@
   import { createMdCache } from './mdCache';
   import { renderChatMarkdown } from './chatMarkdown';
   import { streamingBlocksRenderer } from './streamingMd';
+  import { assetUrls } from './assetUrls';
 
   // Shared across every mounted block: a re-derived block with an unchanged
   // string is a Map lookup, not marked + hljs + DOMParser (mdCache.ts).
@@ -31,6 +32,9 @@
   // output is not cached, and the block re-renders once when hljs arrives
   // (this used to ride on the next live delta re-rendering everything).
   let hlLoaded = false;
+  // Drawn diagrams by kind + scheme + source: a re-created block (the open tail
+  // of a stream, a remount) shows its SVG at once instead of drawing again.
+  const svgs = new Map<string, string>();
   const FENCE = /```|~~~/;
   let diagramSeq = 0;
 </script>
@@ -94,17 +98,25 @@
     const fenced = FENCE.test(md);
     const cacheable = !fenced || hlReady;
     const withEmoji = emoji && agentEmojiFor(md);
+    const key = `${withEmoji} ${cacheable}`;
     if (streaming) {
-      const key = `${withEmoji} ${cacheable}`;
       if (!streamRender || key !== streamKey) {
         streamKey = key;
         streamRender = streamingBlocksRenderer((b) => renderChatMarkdown(b, withEmoji));
       }
       return streamRender(md);
     }
-    streamRender = null;
     // Read hlReady only when it matters, so fence-free blocks never re-render.
-    return [(withEmoji ? emojiCache : cache).get(md, cacheable)];
+    const whole = (withEmoji ? emojiCache : cache).get(md, cacheable);
+    // The answer just finished: when its blocks put together are the very same
+    // html, keep them, so its DOM (drawn diagrams, loaded images, an expanded
+    // code block) stays as it streamed.
+    if (streamRender && key === streamKey) {
+      const kept = streamRender(md);
+      if (kept.join('') === whole) return kept;
+    }
+    streamRender = null;
+    return [whole];
   });
 
   // Mermaid / D2 fences render as diagrams (lazy libs, like the vault's reading
@@ -123,8 +135,15 @@
       }
       const src = el.dataset.diagramSrc;
       const kind = el.dataset.diagram;
-      const gen = String(++diagramSeq);
+      const svgKey = `${kind} ${scheme} ${src}`;
+      const drawn = svgs.get(svgKey);
       el.dataset.renderedScheme = scheme;
+      if (drawn) {
+        el.innerHTML = drawn;
+        el.classList.add('diagram-ok');
+        continue;
+      }
+      const gen = String(++diagramSeq);
       el.dataset.renderGen = gen;
       const id = `chat-diag-${gen}`;
       const isStale = () => !el.isConnected || el.dataset.renderGen !== gen;
@@ -132,6 +151,10 @@
         ? import('../../canvas/d2').then((m) => m.renderD2(id, src, { dark, isStale }))
         : import('../../../lib/render/mermaid').then((m) => m.renderMermaid(id, src, { dark, isStale }))
       ).then(({ svg, error, stale }: { svg?: string; error?: string; stale?: boolean }) => {
+        if (svg) {
+          svgs.set(svgKey, svg);
+          if (svgs.size > 64) svgs.delete(svgs.keys().next().value as string);
+        }
         if (isStale() || stale) return;
         if (svg) {
           el.innerHTML = svg;
@@ -149,13 +172,10 @@
 
   let lightboxImg = $state<{ src: string; alt: string; path: string | null } | null>(null);
 
-  // Hydrate inline `file://` / local workspace `<img data-asset="...">` thumbnails via `/fs/raw`.
-  // The blob URLs live as long as this block: a streaming answer re-runs the
-  // effect per delta while the images it already hydrated stay on screen.
-  const blobs: string[] = [];
-  $effect(() => () => {
-    for (const u of blobs) URL.revokeObjectURL(u);
-  });
+  // Hydrate inline `file://` / local workspace `<img data-asset="...">` thumbnails via `/fs/raw`:
+  // one fetch and one Blob URL per path for the block's lifetime (assetUrls.ts).
+  const assets = assetUrls((path) => authedBlobUrl(`/fs/raw?path=${encodeURIComponent(path)}`));
+  $effect(() => () => assets.revokeAll());
   $effect(() => {
     const host = rootEl;
     if (!host || !parts.some((p) => p.includes('data-asset'))) return;
@@ -165,14 +185,10 @@
       const resolved = resolvePath(raw, ctx?.cwd ?? null);
       if (!resolved) continue;
       img.dataset.resolvedPath = resolved;
-      void authedBlobUrl(`/fs/raw?path=${encodeURIComponent(resolved)}`)
+      void assets
+        .get(resolved)
         .then((u) => {
-          if (!img.isConnected) {
-            URL.revokeObjectURL(u);
-            return;
-          }
-          blobs.push(u);
-          img.src = u;
+          if (img.isConnected) img.src = u;
         })
         .catch(() => {
           if (img.isConnected) img.classList.add('asset-missing');

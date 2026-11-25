@@ -48,3 +48,30 @@ test('cuts only between whole blocks: fences, loose lists and tables stay in one
   assert.deepEqual(blocks, [`${long}\n\n- a\n\n- b\n\n1. one\n\n2. two\n\n| h |\n|---|\n\n| r |\n\n`, '```js\nlet a;\n\nlet b;\n```\n\n']);
   assert.equal(tail, 'Tail');
 });
+
+// P2-009: what CommonMark reads as no fence, or as one HTML block, never
+// changes where the stream is cut.
+const lead = `${'x'.repeat(400)}\n\n`;
+
+test('an indented code block or an inline ```span``` opens no fence: the blocks after it still settle', () => {
+  for (const odd of ['    ```not a fence\n    still code\n\n', 'Use ```foo``` inline.\n\n']) {
+    const md = `${lead}${odd}Next paragraph.\n\nThird paragraph.\n\nTail`;
+    const { blocks, tail } = splitStreamingMarkdown(md);
+    assert.equal(blocks.join('') + tail, md);
+    assert.equal(tail, 'Tail', JSON.stringify(odd));
+  }
+});
+
+test('a fence indented up to three spaces still holds its blank lines', () => {
+  const md = `${lead}   \`\`\`js\n   let a;\n\nlet b;\n   \`\`\`\n\nTail`;
+  // (An indented line never starts a block, so the paragraph before it is merged in.)
+  assert.deepEqual(splitStreamingMarkdown(md).blocks, [`${lead}   \`\`\`js\n   let a;\n\nlet b;\n   \`\`\`\n\n`]);
+});
+
+test('blank lines inside a <details> / <div> block are not cuts', () => {
+  const html = '<details>\n<summary>More</summary>\n\nBody text.\n\n<div>\n\ninner\n\n</div>\n\n</details>\n\n';
+  const md = `${lead}${html}After.\n\nTail`;
+  const { blocks, tail } = splitStreamingMarkdown(md);
+  assert.deepEqual(blocks, [lead, html, 'After.\n\n']);
+  assert.equal(tail, 'Tail');
+});

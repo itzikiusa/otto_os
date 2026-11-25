@@ -84,6 +84,15 @@ Object.assign(log(), {
       appLive.dispatch({ type: 'agent_runtime_event', event: { session_id: sid, sequence: seqs.get(sid) ?? 0, ts: now(), type: 'turn_item.updated', turn_item: it } });
     }
   },
+  /** One message of `sid`'s agent streaming in: call with the growing `text`,
+   *  then once more with `streaming: false` (the answer done). */
+  stream: (sid: string, messageId: string, text: string, streaming = true): void => {
+    const list = items.get(sid) ?? [];
+    const old = list.find((i) => (i as { message_id?: string }).message_id === messageId);
+    const it = old ? ({ ...old, text, streaming, updated_at: now() } as unknown as TurnItem) : item(sid, { type: 'assistant_message', message_id: messageId, text, streaming });
+    if (old) items.set(sid, list.map((i) => (i === old ? it : i)));
+    appLive.dispatch({ type: 'agent_runtime_event', event: { session_id: sid, sequence: bump(sid), ts: now(), type: 'turn_item.updated', turn_item: it } });
+  },
   /** `sid`'s agent starts (`running`) or stops (`ready`) working. */
   status: (sid: string, status: 'running' | 'ready'): void => {
     const t = threads.find((x) => x.id === sid);

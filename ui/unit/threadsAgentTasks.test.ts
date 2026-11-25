@@ -247,3 +247,16 @@ test('the conversation and the details card share one computation per change', (
   assert.notEqual(done, first);
   assert.equal(done.running.length, 0);
 });
+
+test('a streamed chunk of the answer does not recompute the tasks; a new step does (P2-015)', () => {
+  const counts: Record<string, number> = {};
+  (globalThis as { __ottoPerfCounts?: Record<string, number> }).__ottoPerfCounts = counts;
+  const msg = (text: string) => ({ ...base, id: 't1:msg', ordinal: 2, status: 'running', started_at: '2026-11-13T10:00:10Z', type: 'assistant_message', message_id: 'm', text, streaming: true }) as never;
+  const tool = card('t1:tool:a', 'alpha probe', 'running', '2026-11-13T10:00:00Z');
+  const first = sharedAgentTasks('s-stream', [tool, msg('a')], [], {});
+  for (const t of ['ab', 'abc', 'abcd']) assert.equal(sharedAgentTasks('s-stream', [tool, msg(t)], [], {}), first);
+  assert.equal(counts.agentTasks, 1, 'text deltas reuse the first computation');
+  sharedAgentTasks('s-stream', [tool, msg('abcd'), card('t1:tool:b', 'beta', 'running', '2026-11-13T10:00:20Z')], [], {});
+  assert.equal(counts.agentTasks, 2, 'a new item is computed');
+  delete (globalThis as { __ottoPerfCounts?: Record<string, number> }).__ottoPerfCounts;
+});

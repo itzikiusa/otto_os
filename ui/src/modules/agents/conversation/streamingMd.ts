@@ -4,6 +4,13 @@
 // on every delta). `blocks.join('') + tail === md`.
 
 const REF_DEF_OR_FOOTNOTE_RE = /(?:^\s*\[[^\]^]+\]:|\[\^[^\]]+\])/m;
+// A fence is indented 0–3 spaces (4 is an indented code block), and a backtick
+// fence's info string holds no backtick (``` ```foo``` ``` is inline code).
+const FENCE_RE = /^ {0,3}(```+|~~~+)(.*)$/;
+// Container HTML blocks a person writes across blank lines (<details>, <div>…):
+// counted on lines that start with a tag, so a `<div>` in prose never counts.
+const HTML_OPEN_RE = /<(?:details|div|section|table|blockquote|figure|dl)\b[^>]*>/gi;
+const HTML_CLOSE_RE = /<\/(?:details|div|section|table|blockquote|figure|dl)\s*>/gi;
 
 export interface StreamingMdSplit {
   blocks: string[];
@@ -19,6 +26,7 @@ export function splitStreamingMarkdown(md: string): StreamingMdSplit {
 
   const blocks: string[] = [];
   let openFence: string | null = null;
+  let htmlDepth = 0;
   let lastCut = 0;
   let pos = 0;
 
@@ -28,19 +36,17 @@ export function splitStreamingMarkdown(md: string): StreamingMdSplit {
     const rawLine = md.slice(pos, lineEnd);
     const trimmed = rawLine.trimStart();
 
-    const fenceMatch = /^(```+|~~~+)/.exec(trimmed);
-    if (fenceMatch) {
-      const marker = fenceMatch[1];
+    const fence = FENCE_RE.exec(rawLine);
+    if (fence && !(fence[1][0] === '`' && fence[2].includes('`'))) {
+      const marker = fence[1];
       if (!openFence) {
         openFence = marker;
-      } else if (
-        marker[0] === openFence[0] &&
-        marker.length >= openFence.length &&
-        trimmed.slice(marker.length).trim() === ''
-      ) {
+      } else if (marker[0] === openFence[0] && marker.length >= openFence.length && fence[2].trim() === '') {
         openFence = null;
       }
-    } else if (!openFence && trimmed === '' && pos > 0) {
+    } else if (!openFence && /^ {0,3}</.test(rawLine)) {
+      htmlDepth = Math.max(0, htmlDepth + (rawLine.match(HTML_OPEN_RE)?.length ?? 0) - (rawLine.match(HTML_CLOSE_RE)?.length ?? 0));
+    } else if (!openFence && !htmlDepth && trimmed === '' && pos > 0) {
       // Blank line outside any open fence: no cut when the next line continues
       // a list (an indented line, or the next item of a loose list) or a table.
       const nextStart = nl === -1 ? md.length : nl + 1;
