@@ -13,6 +13,35 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
 🎬 **[Watch the product tour](https://github.com/itzikiusa/otto_os/releases/download/v0.3.0/otto-tour-20261116.mp4)**
 (also in the app under **Help → Walkthroughs**).
 
+### What's new in 0.6.0
+
+- **Debug with an agent, in the IDE.** Ask an agent to "use Otto to debug
+  …" and it runs a real debug session you can watch: the IDE opens on the
+  project, the agent's breakpoints appear in the gutter marked as its own,
+  the service or the test starts under the debugger (a test by name, a
+  testify suite method, build tags), and the request that triggers the code
+  path is sent. At every stop the agent says what the values show and waits;
+  you answer in the conversation or press **Proceed**, and using the debugger
+  yourself takes over. Nothing runs without you: one prompt lets the agent
+  drive, and every start, every expression it wants to evaluate and every
+  breakpoint that carries code is a confirm showing exactly what will run.
+  Secrets in variables, rows and responses are masked before they reach the
+  agent; you still see the real values.
+- **DB Watch you can read.** While you debug or run a test, DB Watch shows
+  which rows your code wrote and what changed in them, at every stop, without
+  setup: it takes the database the run started (or the one you picked for the
+  project before), watches the tables the code path really touches, and lists
+  added and removed rows and, for changed rows, only the changed cells as
+  before → after. One toolbar row: Target, Tables, "Since last stop / Since
+  start", Snapshot. It never picks a saved connection on its own.
+- **Updates.** *Otto ▸ Check for Updates…* and a quiet row at the bottom of
+  the sidebar when a new version exists: release notes, download, then
+  "Restart to finish" with a list of what keeps running and what ends. The
+  new version is verified before it replaces the app, and a version that
+  fails to start is undone. Builds from source show that they update from
+  git. Published releases start with the first signed release (see
+  `docs/RELEASE.md`).
+
 ### What's new in 0.5.3
 
 - **IDE tabs survive a restart.** A named project comes back with the tabs it
