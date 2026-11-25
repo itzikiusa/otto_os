@@ -1,5 +1,5 @@
 {
-  "$comment": "Agent UI control — the ONE catalog of `otto.ui_*` tools (stdio `otto_ui_*`). Loaded by the daemon (crates/otto-mcp/src/outward/ui_commands.rs, include_str! + a validation test) and by the UI (ui/src/lib/uiCommands/catalog.ts, a parity test against the registered handlers). Entry fields: name (snake_case, unique; the tool is `otto.ui_<name>`), module (the paneKey — lib/sidePane.ts — of the document that runs it; `shell` = any Otto document, no module needs to be showing), route (the hash route opened when no document shows the module), risk (read | navigate | local_write | outward), timeout_ms (the default deadline the daemon gives the UI; 1000..=120000), headless (optional, `read` only: the daemon-side fallback used when no Otto window can run it — `presence`, `db_list_connections`, `db_mcp_query`), description (what the agent sees), input_schema (a JSON-Schema object: type object, properties, additionalProperties false), $comment (optional, ignored). Blocks: keep each agent's entries together and in order — nav, database (Agent 1 + Agent 4), api/git/browser (Agent 2), the other modules (Agent 5). Arguments named `connection_id` are resolved server-side by id OR name, like otto.query_db_readonly.",
+  "$comment": "Agent UI control — the ONE catalog of `otto.ui_*` tools (stdio `otto_ui_*`). Loaded by the daemon (crates/otto-mcp/src/outward/ui_commands.rs, include_str! + a validation test) and by the UI (ui/src/lib/uiCommands/catalog.ts, a parity test against the registered handlers). Entry fields: name (snake_case, unique; the tool is `otto.ui_<name>`), module (the paneKey — lib/sidePane.ts — of the document that runs it; `shell` = any Otto document, no module needs to be showing), route (the hash route opened when no document shows the module), risk (read | navigate | local_write | outward | execute — `execute` runs code on the user's Mac outside the agent's sandbox: confirmed every time, never remembered), timeout_ms (the default deadline the daemon gives the UI; 1000..=120000), headless (optional, `read` only: the daemon-side fallback used when no Otto window can run it — `presence`, `db_list_connections`, `db_mcp_query`), open_placement (optional, `side` | `window`: how the daemon opens the module when no visible document shows it; default `side`; `window` also skips hidden documents), description (what the agent sees), input_schema (a JSON-Schema object: type object, properties, additionalProperties false), $comment (optional, ignored). Blocks: keep each agent's entries together and in order — nav, database (Agent 1 + Agent 4), api/git/browser (Agent 2), the other modules (Agent 5), IDE agent debugging. An `env` argument never carries loader / toolchain variables (ui_commands.rs `validate_command`). Arguments named `connection_id` are resolved server-side by id OR name, like otto.query_db_readonly.",
   "version": 1,
   "commands": [
     { "$comment": "── Navigation / shell (Agent 1 schema, Agent 3 handlers) ──",
@@ -7,11 +7,12 @@
       "description": "Describe what the user's Otto window shows right now: each open document (main pane / side pane), its route and module, whether it is focused/visible, and the current module's own view state. Use it before driving a module. With no Otto window open it returns the daemon's view (`ui_visible:false`).",
       "input_schema": { "type": "object", "properties": {}, "additionalProperties": false } },
     { "name": "open", "module": "shell", "route": "", "risk": "navigate", "timeout_ms": 15000,
-      "description": "Open an Otto module (or a specific route inside it) where the user can see it. `placement: side` (default) opens it in the side pane next to your session or thread; `main` navigates the main pane; `window` (desktop app) opens it beside you and detaches that pane into its own window, keeping its tabs and results. Returns the route and pane it now shows in.",
+      "description": "Open an Otto module (or a specific route inside it) where the user can see it. `placement: side` (default) opens it in the side pane next to your session or thread; `main` navigates the main pane; `window` (desktop app) shows it in its own Otto window (a new one, or the side pane already showing it detaches, keeping its tabs and results). Returns the route and pane it now shows in, and for `window` the new window's `window_id`.",
       "input_schema": { "type": "object", "properties": {
         "module": { "type": "string", "description": "Sidebar module id, e.g. `connections`, `git`, `ide` (`workbench` = the IDE on the Scratches project), `threads`, `api`, `browser`, `kubernetes`, `aws`, `vault`, `workflows`." },
         "route": { "type": "string", "description": "Optional hash route inside the module (e.g. `database`, `git/<repo_id>`). Defaults to the module's home route." },
-        "placement": { "type": "string", "enum": ["side", "main", "window"], "description": "Where to show it. Default `side`." } },
+        "placement": { "type": "string", "enum": ["side", "main", "window"], "description": "Where to show it. Default `side`." },
+        "fallback": { "type": "string", "enum": ["side"], "description": "With `window`: use the side pane where this Otto window can't open windows (web, phone). Default: refuse." } },
         "additionalProperties": false } },
     { "name": "focus", "module": "shell", "route": "", "risk": "navigate", "timeout_ms": 5000,
       "description": "Bring the Otto window to the front and focus a pane (`side` or `main`, default the pane showing the most recently driven module).",
@@ -618,6 +619,96 @@
       "input_schema": { "type": "object", "required": ["loop", "action"], "properties": {
         "loop": { "type": "string" },
         "action": { "type": "string", "enum": ["start", "pause", "resume", "stop"] } },
+        "additionalProperties": false } },
+
+    { "$comment": "── IDE agent debugging (design-agent-debug.md; handlers ui/src/lib/uiCommands/ide.ts). Only when the user asked to debug with Otto. execute = runs code on the user's Mac outside the agent's sandbox: an attributed confirm EVERY time, never remembered. Scope rule: control/breakpoints/inspect/evaluate/request/db act only on the debug session this agent session started. ──",
+      "name": "ide_debug_start", "module": "ide", "route": "ide", "risk": "execute", "timeout_ms": 120000, "open_placement": "window",
+      "description": "Only when the user explicitly asked you to debug with Otto (\"use Otto to debug …\"); never on your own initiative. Opens the project in Otto's IDE (its own window, unless you run in the IDE's agent dock), sets your breakpoints, and launches the target the way the gutter Debug button does (build tags merged). The user confirms every start: it runs on their Mac as them, outside your sandbox. Local projects only. Calling it again while your session runs restarts it (asks again). Returns at the first stop (a Stop: {debug_id, stop_seq, reason, user_moved, location, source, frames, locals, changed, output_tail, breakpoints, db?, request?}), as soon as `ready_pattern` / `ready_port` says the app is up, or near the deadline (`state: running` — then use ide_debug_request or ide_debug_control `wait`). Always lists your breakpoints with `verified` and the line they bound to. At each stop explain what the values show in ≤ 3 sentences and end your turn; move on only when the user says so.",
+      "input_schema": { "type": "object", "required": ["target"], "properties": {
+        "root": { "type": "string", "maxLength": 4096, "description": "Project folder. Default: your session's working directory." },
+        "target": { "type": "object", "required": ["kind"], "additionalProperties": false, "description": "test: file + name (a test function or suite method, e.g. TestFlow/TestCreate); main: file; config: name of a run configuration.", "properties": {
+          "kind": { "type": "string", "enum": ["test", "main", "config"] },
+          "file": { "type": "string", "maxLength": 4096, "description": "Project-relative path." },
+          "name": { "type": "string", "maxLength": 500 } } },
+        "build_tags": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 1, "maxLength": 100 }, "description": "Go build tag names, e.g. [\"component\"] (letters, digits, _ and . only — no build flags)." },
+        "args": { "type": "array", "maxItems": 50, "items": { "type": "string", "maxLength": 1000 } },
+        "env": { "type": "object", "description": "Extra environment (≤ 50 plain names, values ≤ 4096 chars, no control or invisible characters), shown in full in the confirm. Variables that make a loader, toolchain or tool run other code or trust another server are refused (PATH, HOME, LD_*, DYLD_*, GOFLAGS, GO_*, DLV_*, OTTO_*, NODE_OPTIONS, PYTHON*, JAVA_TOOL_OPTIONS, MAVEN_*, M2_*, GRADLE_*, RUSTC_*, DOCKER_*, KUBECONFIG, AWS_*, SSH_*, OPENSSL_*, *_PROXY, TMPDIR, …). Secrets belong in the project environment." },
+        "breakpoints": { "type": "array", "maxItems": 50, "items": { "type": "object", "required": ["file", "line"], "additionalProperties": false, "properties": {
+          "file": { "type": "string", "maxLength": 4096 },
+          "line": { "type": "integer", "minimum": 1 },
+          "condition": { "type": "string", "maxLength": 500 },
+          "hit_condition": { "type": "string", "maxLength": 100 },
+          "log_message": { "type": "string", "maxLength": 500 } } } },
+        "break_on_exceptions": { "type": "boolean" },
+        "ready_pattern": { "type": "string", "minLength": 1, "maxLength": 200, "description": "Return `running` once the output contains this text (e.g. \"listening on\")." },
+        "ready_port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "Return `running` once this localhost port accepts connections." },
+        "db_watch": { "type": "boolean", "description": "Also watch the database tables the code touches (the run's local test database); each Stop then carries `db`." },
+        "wait_ms": { "type": "integer", "minimum": 1000, "maximum": 100000, "description": "Longest wait for a stop or readiness. Default 60000." },
+        "say": { "type": "string", "maxLength": 300, "description": "One line shown to the user in Otto while this runs." } },
+        "additionalProperties": false } },
+    { "name": "ide_debug_control", "module": "ide", "route": "ide", "risk": "navigate", "timeout_ms": 120000,
+      "description": "Drive the debug session you started: continue, step over / into / out, pause, run to a line, wait for the next stop, read the status, or stop it (stop removes your breakpoints unless `keep_breakpoints`). Returns the next Stop, `{state: running}` when `wait_ms` passes, or `{state: terminated, exit_code, output_tail}`. `user_moved: true` means the user stepped themselves: describe the new stop and ask before moving. To restart, call ide_debug_start again.",
+      "input_schema": { "type": "object", "required": ["action"], "properties": {
+        "action": { "type": "string", "enum": ["continue", "step_over", "step_into", "step_out", "pause", "run_to_line", "wait", "status", "stop"] },
+        "file": { "type": "string", "maxLength": 4096, "description": "run_to_line: project-relative path." },
+        "line": { "type": "integer", "minimum": 1, "description": "run_to_line: the line." },
+        "thread_id": { "type": "integer", "minimum": 0 },
+        "frame_id": { "type": "integer", "minimum": 0 },
+        "wait_ms": { "type": "integer", "minimum": 0, "maximum": 100000, "description": "Longest wait for the next stop. Default 30000; 0 = return at once." },
+        "keep_breakpoints": { "type": "boolean", "description": "stop: leave your breakpoints in the gutter." },
+        "say": { "type": "string", "maxLength": 300 } },
+        "additionalProperties": false } },
+    { "name": "ide_debug_breakpoints", "module": "ide", "route": "ide", "risk": "local_write", "timeout_ms": 120000,
+      "description": "Add or remove breakpoints in the debug session you started without moving execution. The user sees them in the gutter, marked as yours. Returns your breakpoints with `verified`, the line each bound to, and the debugger's message when one did not bind. The user confirms new breakpoints; one with a condition, hit count or log message (code the debugger runs) every time.",
+      "input_schema": { "type": "object", "properties": {
+        "set": { "type": "array", "maxItems": 50, "items": { "type": "object", "required": ["file", "line"], "additionalProperties": false, "properties": {
+          "file": { "type": "string", "maxLength": 4096 },
+          "line": { "type": "integer", "minimum": 1 },
+          "condition": { "type": "string", "maxLength": 500 },
+          "hit_condition": { "type": "string", "maxLength": 100 },
+          "log_message": { "type": "string", "maxLength": 500 } } } },
+        "clear": { "type": "array", "maxItems": 50, "items": { "type": "object", "required": ["file", "line"], "additionalProperties": false, "properties": {
+          "file": { "type": "string", "maxLength": 4096 },
+          "line": { "type": "integer", "minimum": 1 } } } },
+        "clear_mine": { "type": "boolean", "description": "Remove every breakpoint you set (the user's stay)." } },
+        "additionalProperties": false } },
+    { "name": "ide_debug_inspect", "module": "ide", "route": "ide", "risk": "read", "timeout_ms": 15000,
+      "description": "Read values in the paused debug session you started, without running code: variables by path (\"req.Header\", \"cfg.DB.Host\"), keyed by path; children of a structured value in pages (`ref` from a Stop, `start`/`count` ≤ 100); or the thread list. Values ≤ 2 KB each; secret-looking names and values come back redacted.",
+      "input_schema": { "type": "object", "properties": {
+        "paths": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 1, "maxLength": 300 } },
+        "ref": { "type": "integer", "minimum": 1, "description": "A variable's `ref` from a Stop or an earlier inspect: list its children." },
+        "start": { "type": "integer", "minimum": 0 },
+        "count": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "frame_id": { "type": "integer", "minimum": 0 },
+        "thread_id": { "type": "integer", "minimum": 0 },
+        "threads": { "type": "boolean", "description": "List the threads / goroutines (≤ 50, with the total count)." } },
+        "additionalProperties": false } },
+    { "name": "ide_debug_evaluate", "module": "ide", "route": "ide", "risk": "execute", "timeout_ms": 120000,
+      "description": "Evaluate an expression in the paused frame of the debug session you started. It can run code inside the program (call functions, change state), so the user confirms every one, shown the exact expression. To just read a value use ide_debug_inspect. Say in your message when an expression has side effects. Result ≤ 4 KB, redacted.",
+      "input_schema": { "type": "object", "required": ["expression"], "properties": {
+        "expression": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "frame_id": { "type": "integer", "minimum": 0 } },
+        "additionalProperties": false } },
+    { "name": "ide_debug_request", "module": "ide", "route": "ide", "risk": "local_write", "timeout_ms": 120000,
+      "description": "Send an HTTP request to the app you are debugging, on this Mac only (localhost / 127.0.0.1 / [::1]). The user confirms (they may allow that host:port for this session). It returns when the debugger stops or the response arrives, whichever is first: `{request: {status?, headers?, body ≤ 16 KB, in_flight}, stop?}`. A response that arrives while the app is paused comes with a later ide_debug_control result. Values are redacted.",
+      "input_schema": { "type": "object", "required": ["url"], "properties": {
+        "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"], "description": "Default GET." },
+        "url": { "type": "string", "minLength": 1, "maxLength": 8192, "description": "http(s)://localhost:<port>/… (or 127.0.0.1 / [::1])." },
+        "headers": { "type": "object", "maxProperties": 50, "description": "Header name → value (≤ 50; names, values and body together ≤ 8 KB)." },
+        "body": { "type": "string", "maxLength": 1000000 },
+        "wait_ms": { "type": "integer", "minimum": 1000, "maximum": 100000, "description": "Longest wait for a stop or the response. Default 60000." } },
+        "additionalProperties": false } },
+    { "name": "ide_debug_db", "module": "ide", "route": "ide", "risk": "read", "timeout_ms": 60000,
+      "description": "DB Watch for the debug session you started (read-only). `watch` starts or changes it (no `objects` = the tables the stopped code touches; the default database is the run's local test database), `unwatch` stops it, `diff` returns per object the added / removed / changed rows (changed cells only, ≤ 50 rows) since the previous stop or the start. A production connection always asks the user. Values are masked.",
+      "input_schema": { "type": "object", "required": ["action"], "properties": {
+        "action": { "type": "string", "enum": ["watch", "unwatch", "diff"] },
+        "objects": { "type": "array", "maxItems": 8, "items": { "type": "object", "required": ["object"], "additionalProperties": false, "properties": {
+          "object": { "type": "string", "minLength": 1, "maxLength": 300, "description": "Table / collection, or a Redis key prefix or glob (session:*)." },
+          "filter": { "type": "object", "required": ["column", "value"], "additionalProperties": false, "description": "Only rows where column = value (SQL / Mongo; Redis has none).", "properties": {
+            "column": { "type": "string", "minLength": 1, "maxLength": 200 },
+            "value": { "type": ["string", "number", "boolean"] } } } } } },
+        "connection_id": { "type": "string", "description": "A saved connection id or name instead of the run's local database." },
+        "since": { "type": "string", "enum": ["previous_stop", "start"], "description": "diff: compare with. Default previous_stop." } },
         "additionalProperties": false } }
   ]
 }

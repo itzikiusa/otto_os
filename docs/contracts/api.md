@@ -3142,7 +3142,7 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | GET /workspaces/{wid}/api-client/history?limit=&q=&status=&request_id=&source=agent\|human | ws viewer | — | filtered request history; `source=human` includes legacy rows with no source field |
 | GET /workspaces/{wid}/api-client/history/{id} | ws viewer | — | one history entry; cross-workspace ids return 404 |
 | DELETE /workspaces/{wid}/api-client/history | ws editor | — | clear history |
-| POST /workspaces/{wid}/api-client/execute | ws editor | `ExecuteApiReq` | execute an HTTP request. 409 `needs_confirm=new_host: a stored secret would be sent to host '<host>', which it is not bound to; …` when a `$secret` marker or Keychain env variable would leave its bound host (see **Secret host binding**) — a person re-sends with `confirm_new_host:true`; agent callers can never confirm. For an agent caller the returned response is also secret-scrubbed (like history) and carries no raw bytes (`body_base64` empty, no `body_id`) |
+| POST /workspaces/{wid}/api-client/execute | ws editor | `ExecuteApiReq` | execute an HTTP request. 409 `needs_confirm=new_host: a stored secret would be sent to host '<host>', which it is not bound to; …` when a `$secret` marker or Keychain env variable would leave its bound host (see **Secret host binding**) — a person re-sends with `confirm_new_host:true`; agent callers can never confirm. For an agent caller the returned response is also secret-scrubbed (like history) and carries no raw bytes (`body_base64` empty, no `body_id`). `debug_session_id` (an agent's IDE debug request the person confirmed, `otto.ui_ide_debug_request`): the id of a LIVE IDE debug session the caller may drive (else 400 `no live debug session`); the URL must be http(s) to loopback (`localhost`, 127.0.0.0/8, `[::1]`) with no `ssh_connection_id` (else 400); redirects are never followed; a person's credential then reaches it for this call without `settings.api_client.allow_local` (an agent credential never does); the send counts as an agent's (no new-host confirm, scrubbed response, history source `{kind: agent, via: ide_debug, debug_session_id}`) |
 | GET /workspaces/{wid}/api-client/responses/{id}/raw | ws editor | — | the full bytes (`{id}` = `ApiResponse.body_id`) of a recent `execute` response whose `body_id` was set (truncated or non-UTF-8 body), `Content-Type` = the upstream one, `Content-Disposition: attachment`. Held in a daemon-memory cache for 10 min, ≤ 128 MiB total (oldest evicted first), served only to the user + workspace that executed it; 404 once gone |
 | POST /workspaces/{wid}/api-client/secure-all | ws editor | — | `{requests_secured, env_keys_secured}` — one-pass Keychain sweep |
 | POST /workspaces/{wid}/api-client/grpc/describe | ws editor | GrpcDescribeReq | service/method descriptors |
@@ -3455,6 +3455,14 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 | GET /machine/status | any signed-in user (policy `Exempt`; share links refused by the scope guard) | — | MachineStatus `{load1: number\|null, cores, load_per_core, memory_pressure: "unknown"\|"normal"\|"warn"\|"critical", swap_used_bytes: number\|null, admission_enabled, max_load_per_core, max_wait_secs, background_live, background_max_live: number\|null, agents_live, busy, busy_reason: string\|null, queued: QueuedAgent[], disk_free_bytes: number\|null, low_disk_gb, low_disk}`; `QueuedAgent` = `{source, waiting_secs, reason: string\|null}` (oldest first) |
 
 Workspace-independent: one Mac, one daemon. `busy` = a background agent arriving now would queue (always false while `agent_admission_enabled` is off); `background_live` counts gated background agents running or admitted-and-starting against the `background_max_live` ceiling (`null` = no ceiling). Machine samples are cached 2 s and the settings 5 s, so polling it every few seconds costs a couple of syscalls. `disk_free_bytes` is what `df` calls "Avail" on the volume holding Otto's data dir; `low_disk` = below `machine_low_disk_gb` GiB (default 10; 0 = off). The read also notices low disk: the first read below the floor posts one `System` warning (`source_key` `machine:low_disk`) to the notification centre and the first read above it refreshes that row as an info notice. Types: `crates/otto-sessions/src/admission.rs`, mirrored in `ui/src/lib/api/types/machine.ts`.
+
+## Restart impact (what a daemon restart keeps and ends)
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /system/restart-impact | root, a person's own credential (policy `Settings:Admin` + handler `require_root` / `require_human`: an agent, MCP or share credential is refused) | — | RestartImpact `{keeps: RestartImpactItem[], ends: RestartImpactItem[]}`; `RestartImpactItem` = `{kind, label, count, detail?: string[]}` |
+
+Asked by the update dialog before "Restart to update" (and usable by any restart prompt), so it tells the truth about what ends. Each crate counts the work it owns, the way the daemon's shutdown treats it: PTY sessions in a holder (setting `session_persistence`, default on) and structured threads in a runtime-holder are `keeps` (`kind` `sessions` / `background_agents`); every other live session ends — `connection_terminals`, `background_agents` (`meta.source` in `BACKGROUND_SESSION_SOURCES`, or a `meta.work.origin` other than `manual`), unheld `sessions`. Also ending: running IDE runs and dev servers (`ide_runs`), live debug sessions (`debug_sessions`), Otto's own container runtime when it started it (`container_runtime`; an external Docker keeps running), Kafka tunnels (`broker_tunnels`), live Database Explorer SSH tunnels (`db_tunnels`), the daemon's own in-memory jobs (`daemon_jobs`: running Goal Loops, Blender renders and Vault docs runs; `detail` = e.g. `"Goal Loop × 2"`), every session room (`session_rooms`, in memory), live browser sessions (`live_browser`), and phones used in the last 10 minutes (`phones`; a phone's last use is recorded at most every 5 minutes, so this is "recently", not "connected now"). `label` already agrees with `count`; `detail` holds up to 5 titles; kinds with a zero count are omitted. Types: `crates/otto-core/src/restart.rs`, mirrored in `ui/src/lib/api/types/machine.ts`.
 
 ## Database maintenance
 
@@ -4926,7 +4934,7 @@ audit — then through the UI bridge (`crates/otto-server/src/ui_bridge.rs`):
    **default-enabled** (a saved tool list gains UI tools that did not exist when
    it was saved, tracked in `mcp_otto_server_ui_tools_known`; one the operator
    unticked stays off), never `DANGEROUS` (no per-call approval), and
-   `local_write` / `outward` ones count as mutating for a read-only token scope.
+   `local_write` / `outward` / `execute` ones count as mutating for a read-only token scope.
 2. **Granted per session.** `session.meta.ui_control.enabled` must be `true`.
    Otherwise the daemon emits the owner-scoped `ui_control_requested` event (see
    `ws.md`; at most once per 10 s per session), waits up to 15 s for the grant,
@@ -4935,7 +4943,18 @@ audit — then through the UI bridge (`crates/otto-server/src/ui_bridge.rs`):
    Stop within the last 60 s answers `pending_grant` without asking again; with
    no Otto window open it answers at once.
 3. **Validated + pre-checked.** Arguments are validated against the entry's
-   `input_schema` (`invalid_args`); a `connection_id` (id OR name) is resolved
+   `input_schema` (`invalid_args`), plus the catalog's own rules
+   (`ui_commands::validate_command`): an `env` argument has ≤ 50 entries with
+   plain names (`[A-Za-z_][A-Za-z0-9_]*`, ≤ 128) and string values ≤ 4096 chars
+   without control / BiDi / zero-width characters, and may not name a loader,
+   shell, toolchain, proxy or credential-file variable (`PATH`, `HOME`, `LD_*`,
+   `DYLD_*`, `GOFLAGS`, `GO_*` incl. `GO_BUILD_FLAGS`, `DLV_*`, `OTTO_*`,
+   `NODE_OPTIONS`, `PYTHON*`, `JAVA_TOOL_OPTIONS`, `MAVEN_*`, `M2_*`, `GRADLE_*`,
+   `RUSTC_*`, `DOCKER_*`, `KUBECONFIG`, `AWS_*`, `SSH_*`, `OPENSSL_*`, `*_PROXY`,
+   `SSL_CERT_*`, `TMPDIR`, …; a test fails when the IDE engine starts reading a
+   new env name nobody classified); `build_tags` are plain tag
+   names (`[A-Za-z0-9_.]`);
+   `ide_debug_request`'s `url` must be http(s) on localhost / 127.0.0.0/8 / ::1; a `connection_id` (id OR name) is resolved
    as the owner — a connection they cannot list is `not_found` / `forbidden`.
 4. **One window.** The target is the owner's document that implements the
    command (`hello.capabilities`), on the device that started the session
@@ -4944,8 +4963,14 @@ audit — then through the UI bridge (`crates/otto-server/src/ui_bridge.rs`):
    window at all, and then only a document already showing the module and
    focused), preferring a document showing the module (paneKey), then
    focused > visible > most recent. When none shows it, the daemon first sends
-   `open {module, route, placement:"side"}` to that device's main document and
-   waits ≤ 10 s for the module's document of that window to report.
+   `open {module, route, placement}` to that device's main document and
+   waits ≤ 10 s for the module's document of that window to report. `placement`
+   is the entry's `open_placement` (default `side`); a `window` entry
+   (`ide_debug_start`) is opened with `{…, placement:"window", fallback:"side"}`
+   (the side pane where the window can't open native windows), waits for the
+   document of the `window_id` the open result names (a new pop-out window) or
+   else of the opener's window, and never targets a document with
+   `visible:false` — a hidden IDE pane is passed over.
 5. **Delivered + awaited.** A per-connection `ui_command` frame goes to that
    document only (`ws.md` §2); the window runs the action **with the user's own
    login token** (so the endpoint's native RBAC runs again) and reports back on
@@ -4988,10 +5013,12 @@ control. Only a human credential's `/ws/events` socket may register as a window
 (`hello`). Error `code`s a window may report: `cancelled_by_user`,
 `invalid_args`, `not_found`, `forbidden`, `failed` (anything else → `failed`).
 
-`UiCommandSpec` = `{name, module, route, risk:"read"|"navigate"|"local_write"|"outward",
-timeout_ms, headless?, description, input_schema, $comment?}` — `module` is the
+`UiCommandSpec` = `{name, module, route, risk:"read"|"navigate"|"local_write"|"outward"|"execute",
+timeout_ms, headless?, open_placement?:"side"|"window", description, input_schema, $comment?}` — `module` is the
 paneKey of the document that runs it (`shell` = any document), `route` the hash
-route opened when no document shows it. Phase 1: `state`, `open`, `focus`,
+route opened when no document shows it. `execute` = runs code on the user's Mac
+outside the agent's sandbox (`ide_debug_start`, `ide_debug_evaluate`): the UI
+confirms every call and never offers "allow for this session". Phase 1: `state`, `open`, `focus`,
 `db_list_connections`, `db_open_connection`, `db_new_tab`, `db_set_statement`,
 `db_run_query`, `db_get_result`, `db_page`, `db_set_view`, `db_open_object`,
 `db_explain`, `db_stop`, `db_export`; later phases add entries per module.
@@ -7135,6 +7162,7 @@ Full multi-language IDE over Local (`kind: "local"`) and Remote SSH (`kind: "ssh
 | POST /ide/debug/sessions/{id}/command | human + Agents: Edit | `IdeDebugCommandReq` (`continue`, `pause`, `step_over`, `step_into`, `step_out`, `run_to_cursor`, `select_frame`, `restart`, `stop`). `select_frame` with only `thread_id` selects that thread's first frame with source (and moves `paused_*` to that thread's stop); with `frame_id` on the same thread it moves only `selected_frame_*`. `stop` answers once the session is terminated | `IdeDebugSessionResp` |
 | POST /ide/debug/sessions/{id}/variables | human + Agents: Edit | `IdeDebugVariablesReq` | `IdeDebugVariablesResp` |
 | POST /ide/debug/sessions/{id}/evaluate | human + Agents: Edit | `IdeDebugEvaluateReq` | `IdeDebugEvaluateResp` |
+| GET /ide/debug/sessions/{id}/port?port= | human + Agents: Edit [Admin] | query `port` | `IdeDebugPortResp` (`open`: something accepts TCP on 127.0.0.1 or [::1] at that port — a connect only, nothing is sent; an agent start's `ready_port`). The caller's own LIVE session only (409 once it ended); port 0 and the daemon's own ports → 400 |
 | GET /ide/collab/rooms | Agents: Edit | — | `IdeCollabRoomsResp` — each of the caller's OWN rooms also carries `share_hash` (the invite link, so a reloaded host can show it again); absent on other rooms and in every guest view |
 | POST /ide/collab/rooms | human + Agents: Edit | `IdeCreateCollabRoomReq` | `IdeCreateCollabRoomResp` (`room`, `invite_token`, `share_hash`, `host_peer_id`, `host_peer_secret`) |
 | POST /ide/collab/rooms/{room_id}/role | Agents: Edit | `IdeCollabRoleReq` (`viewer` \| `editor`) | `IdeCollabRoomResp` |
@@ -7149,8 +7177,14 @@ Full multi-language IDE over Local (`kind: "local"`) and Remote SSH (`kind: "ssh
 | POST /ide/plugins/install | human + Settings: Admin + root | `IdeInstallPluginReq` | `IdePluginResp` |
 | POST /ide/plugins/{slug}/toggle | human + Settings: Admin + root | `IdeTogglePluginReq` | `IdePluginResp` |
 | DELETE /ide/plugins/{slug} | human + Settings: Admin + root | — | `IdeOkResp` |
-| POST /ide/db-watch/detect | Agents: Edit (+ workspace target auth; ephemeral targets root-only) | `IdeDbWatchDetectReq` (`root`, `connection_id?`, `active_file?`, `additional_roots?`) | `IdeDbWatchDetectResp` (`detected_objects`, `saved_connections`, `ephemeral_targets` — each `source: "testcontainers" \| "process" \| "container"`; `container` is a local DB container without the `org.testcontainers` label, ranked below saved connections) |
-| POST /ide/db-watch/snapshot | Agents: Edit (+ `Database: View` & connection RBAC for `saved`, or `human + root` for `ephemeral`) | `IdeDbWatchSnapshotReq` (`root`, `target_kind`, `connection_id?`, `ephemeral_id?`, `engine`, `database?`, `object_name`, `custom_query?`, `limit?`, `previous?`) | `IdeDbWatchSnapshotResp` (`engine`, `target_label`, `object_name`, `executed_query`, `captured_at_ms`, `duration_ms`, `snapshot`, optional `diff` `Before -> After`) |
+| POST /ide/db-watch/detect | Agents: Edit (+ workspace target auth; ephemeral targets root-only) | `IdeDbWatchDetectReq` (`root`, `connection_id?`, `active_file?`, `additional_roots?`, `target?` `IdeDbWatchTargetRef`, `database?`, `debug_session_id?`, `confirm_target?` — a saved `target` that is not on this Mac (not `local`) is listed only with `confirm_target: true` from a person, else 403 before anything dials it) | `IdeDbWatchDetectResp` (`detected_objects` — names read from SQL string literals and ORM idioms only (never comments or prose), ranked best first: `score` 100 paused frame's file · 60 other stack file (the `debug_session_id`'s frames) · 40 the paused file's folder · 30 active file · 10 elsewhere, then writes before reads, then name — with a `target`, each carries `verified` against that target's real objects (Redis prefixes are never `false`); `saved_connections` (each `local`: loopback host AND no SSH tunnel), `ephemeral_targets` — each `source: "testcontainers" \| "process" \| "container"`; `container` is a local DB container without the `org.testcontainers` label, ranked below saved connections) |
+| POST /ide/db-watch/objects | Agents: Edit (+ the target's access, as for a watch) | `IdeDbWatchObjectsReq` (`root`, `target` `IdeDbWatchTargetRef`, `database?`, `confirm_target?` — as on detect: required from a person for a saved target that is not on this Mac, else 403 before any dial) | `IdeDbWatchObjectsResp` (`target` `IdeDbWatchTargetInfo`, `database?` — Postgres: the schema, default `public` — `objects[]` `{name, kind}` from the target's own catalog (MySQL/ClickHouse tables of the database, Postgres tables of the schema, Mongo collections, Redis first-segment key prefixes that exist now), ≤ 500 + `truncated`) |
+| POST /ide/db-watch/watches | Agents: Edit (+ `Database: View` &amp; connection RBAC for `saved`; `human + root` for `ephemeral`/`auto`; a `bind.debug_session_id` / `bind.run_id` must be the caller's) | `IdeDbWatchStartReq` (`root`, `target` `saved` \| `ephemeral` \| `auto(engine)`, `database?`, `items[1..8]` `{object, filter?}` — `filter` is `{column, value}` equality — `value` a number, `true`/`false`, `null` (`IS NULL`) or text of letters, digits and `_ . : @ -` only (≤ 128), spliced as a literal the server builds (no driver binds parameters; that charset cannot leave a quoted literal) / an equality match (Mongo); anything else → 400; Redis has none, its `object` is the key prefix or glob — `bind?` `{debug_session_id}` \| `{run_id}`, `confirm_production?`, `confirm_target?` — as on detect: a saved target that is not on this Mac needs it from a person, else 403 before any dial) | `IdeDbWatch` (`id`, `target` `IdeDbWatchTargetInfo` incl. `environment?` and `local`, `items[]` with `primary_key[]`, `row_estimate?`, `error?`, `bind?`, `bound_ended_at_ms?`, `checkpoint_count`, `latest?` `IdeDbWatchCheckpointInfo`, `busy`). Takes checkpoint 0 (the baseline) before answering. One watch per (user, root): a new one replaces the old; ≤ 4 watches per user (the least recently used goes). A prod-tagged saved target without `confirm_production` from a PERSON (an agent credential never confirms) → 403; an unknown object → the item carries `error`, the rest still run |
+| GET /ide/db-watch/watches?root= | Agents: Edit | query `root?` | `IdeDbWatchListResp` (`watches[]` `IdeDbWatch`, the caller's own only) |
+| GET /ide/db-watch/watches/{id}?compare=&amp;rows=&amp;for_agent= | Agents: Edit (owner only; another user's watch → 404) | query `compare?` `previous_stop` (default) \| `start`, `rows?` (`1` adds each item's `current` rows), `for_agent?` | `IdeDbWatchReadResp` (`watch`, `compare`, `from_seq?`, `to_seq?`, `items[]` `IdeDbWatchItemDiff`: `executed_query`, honest `window_note` + `window_full`, `columns`, counts, `diffs` (≤ 150; a modified row lists its changed cells only), `more_count`, `current?`, `error?`). Values are raw for a person; with `for_agent=1` or ANY agent credential they are masked through `otto_core::redact` (sensitive column / key names and secret-shaped values) and a changed masked cell carries `masked: true` |
+| POST /ide/db-watch/watches/{id}/snapshot | Agents: Edit (owner only) | `IdeDbWatchSnapshotNowReq` (`label?`, `compare?`, `for_agent?`) | `IdeDbWatchReadResp` after a manual checkpoint (coalesced with one already running) |
+| PATCH /ide/db-watch/watches/{id} | Agents: Edit (owner only; same target rules as start) | `IdeDbWatchUpdateReq` (`items?` replaces the list — kept items keep their checkpoints, new ones get their baseline now —, `bind?`, `confirm_production?`) | `IdeDbWatch` |
+| DELETE /ide/db-watch/watches/{id} | Agents: Edit (owner only) | — | `IdeOkResp`. A bound watch also goes 10 min after its debug session / run ended (one last `session_end` checkpoint first, if the target is still up) |
 
 ---
 

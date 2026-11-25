@@ -1,15 +1,31 @@
 #!/bin/bash
 # Sign ottod + Otto.app with the stable self-signed identity.
 # Usage: packaging/sign.sh <path-to-Otto.app> [path-to-ottod]
+#
+# OTTO_SIGN_IDENTITY  signing identity (default "Otto Dev Signing", this Mac's
+#                     own cert from make-cert.sh). Releases set the release one.
+# OTTO_SIGN_KEYCHAIN  sign from this keychain file only (CI: a temporary
+#                     keychain holding the release cert). It never needs to be
+#                     in the search list, and the login keychain's trust step
+#                     is skipped: trust is a property of the user's machine.
 set -euo pipefail
 
-CERT_NAME="Otto Dev Signing"
+CERT_NAME="${OTTO_SIGN_IDENTITY:-Otto Dev Signing}"
+KEYCHAIN="${OTTO_SIGN_KEYCHAIN:-}"
 APP="${1:?usage: sign.sh <Otto.app> [ottod]}"
 OTTOD="${2:-}"
 
+sign() {
+    if [[ -n "$KEYCHAIN" ]]; then
+        codesign --keychain "$KEYCHAIN" --force --options runtime --timestamp=none -s "$CERT_NAME" "$@"
+    else
+        codesign --force --options runtime --timestamp=none -s "$CERT_NAME" "$@"
+    fi
+}
+
 # No -v: a self-signed identity that hasn't been trust-approved yet is still
 # usable for signing; trust only affects verification UX.
-if ! security find-identity -p codesigning | grep -q "$CERT_NAME"; then
+if ! security find-identity -p codesigning ${KEYCHAIN:+"$KEYCHAIN"} | grep -qF "\"$CERT_NAME\""; then
     echo "Signing identity '$CERT_NAME' not found. Run packaging/make-cert.sh first." >&2
     exit 1
 fi
@@ -44,16 +60,16 @@ ensure_codesign_trust() {
     fi
     rm -f "$pem"
 }
-ensure_codesign_trust
+[[ -n "$KEYCHAIN" ]] || ensure_codesign_trust
 
 if [[ -n "$OTTOD" ]]; then
-    codesign --force --options runtime --timestamp=none -s "$CERT_NAME" "$OTTOD"
+    sign "$OTTOD"
     echo "signed: $OTTOD"
 fi
 
 # Sign nested sidecar first if present, then the bundle.
 SIDECAR="$APP/Contents/MacOS/ottod"
-[[ -f "$SIDECAR" ]] && codesign --force --options runtime --timestamp=none -s "$CERT_NAME" "$SIDECAR"
+[[ -f "$SIDECAR" ]] && sign "$SIDECAR"
 
 # Optional embedded headless Kiri sidecar: `kiri` requires
 # `com.apple.security.virtualization` on its own binary (NOT on Otto.app/ottod).
@@ -62,13 +78,11 @@ SIDECAR="$APP/Contents/MacOS/ottod"
 KIRI_SIDECAR="$APP/Contents/MacOS/kiri"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [[ -f "$KIRI_SIDECAR" ]]; then
-    codesign --force --options runtime --timestamp=none \
-        --entitlements "$SCRIPT_DIR/kiri.entitlements" \
-        -s "$CERT_NAME" "$KIRI_SIDECAR"
+    sign --entitlements "$SCRIPT_DIR/kiri.entitlements" "$KIRI_SIDECAR"
     echo "signed: $KIRI_SIDECAR (with virtualization entitlement)"
-    codesign --force --options runtime --timestamp=none -s "$CERT_NAME" "$APP"
+    sign "$APP"
 else
-    codesign --force --deep --options runtime --timestamp=none -s "$CERT_NAME" "$APP"
+    sign --deep "$APP"
 fi
 codesign -dv "$APP" 2>&1 | grep -E 'Identifier|Authority' || true
 echo "signed: $APP"

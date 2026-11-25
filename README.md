@@ -10,8 +10,37 @@ bridges so an agent can work a ticket from a chat thread.
 **Version 0.5.0** · macOS (Apple Silicon; Intel from source) · actively developed, so
 expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
 
-🎬 **[Watch the product tour](https://github.com/itzikiusa/otto_os/releases/download/v0.3.0/otto-tour-20261116.mp4)**
-(also in the app under **Help → Walkthroughs**).
+🎬 **[Watch the product tour](https://github.com/itzikiusa/otto_os/releases/download/walkthroughs/otto-tour-20261125.mp4)**
+(3 minutes, Otto 0.6.0; also in the app under **Help → Walkthroughs**).
+
+### What's new in 0.6.0
+
+- **Debug with an agent, in the IDE.** Ask an agent to "use Otto to debug
+  …" and it runs a real debug session you can watch: the IDE opens on the
+  project, the agent's breakpoints appear in the gutter marked as its own,
+  the service or the test starts under the debugger (a test by name, a
+  testify suite method, build tags), and the request that triggers the code
+  path is sent. At every stop the agent says what the values show and waits;
+  you answer in the conversation or press **Proceed**, and using the debugger
+  yourself takes over. Nothing runs without you: one prompt lets the agent
+  drive, and every start, every expression it wants to evaluate and every
+  breakpoint that carries code is a confirm showing exactly what will run.
+  Secrets in variables, rows and responses are masked before they reach the
+  agent; you still see the real values.
+- **DB Watch you can read.** While you debug or run a test, DB Watch shows
+  which rows your code wrote and what changed in them, at every stop, without
+  setup: it takes the database the run started (or the one you picked for the
+  project before), watches the tables the code path really touches, and lists
+  added and removed rows and, for changed rows, only the changed cells as
+  before → after. One toolbar row: Target, Tables, "Since last stop / Since
+  start", Snapshot. It never picks a saved connection on its own.
+- **Updates.** *Otto ▸ Check for Updates…* and a quiet row at the bottom of
+  the sidebar when a new version exists: release notes, download, then
+  "Restart to finish" with a list of what keeps running and what ends. The
+  new version is verified before it replaces the app, and a version that
+  fails to start is undone. Builds from source show that they update from
+  git. Published releases start with the first signed release (see
+  `docs/RELEASE.md`).
 
 ### What's new in 0.5.3
 
@@ -664,23 +693,32 @@ Otto is a Tauri 2 desktop app with a Rust backend daemon and a Svelte 5 frontend
 
 ## Download (prebuilt DMG)
 
-**Versioned releases:** [Otto 0.3.0](../../releases/tag/v0.3.0) ships
-`Otto_0.3.0_aarch64.dmg` with its `.sha256` and the tour film. 0.5.0 is on
-`main`; until its release is published, build it from source or use the
-rolling `latest` build below.
+The [latest release](../../releases/latest) has `Otto_<version>_aarch64.dmg`
+(Apple Silicon) and its `.sha256`. Open the DMG and drag **Otto** to
+`/Applications`. Older versions are on the [releases page](../../releases).
+The rolling `latest` build that the retired monthly workflow made is no longer
+updated.
 
-A GitHub Actions workflow builds the Apple-Silicon `.dmg` **monthly** (on the
-1st, 05:00 UTC; maintainers can also run it on demand via `workflow_dispatch`)
-and publishes it to the rolling [`latest` release](../../releases/tag/latest) —
-the newest build is always at the same URL:
-<https://github.com/itzikiusa/otto_os/releases/download/latest/Otto-macos-arm64.dmg>
-(alongside a versioned copy, `Otto-YYYY.MM.DD-<build>-macos-arm64.dmg`, and a
-`.sha256` file; the release is flagged pre-release). Download, open, drag
-**Otto** to `/Applications`; to **update**, download it again and replace the
-app (the bundled daemon self-deploys on launch). The CI build isn't notarized,
-so on first launch use **right-click → Open** or run
-`xattr -cr /Applications/Otto.app`. The DMG does not bundle the in-app
-walkthrough videos — they stream from the `walkthroughs` GitHub release.
+**First launch.** Releases are signed with Otto's own certificate but not
+notarized by Apple, so macOS blocks the first open.
+- **macOS 15 and later:** open Otto once, then click **Open Anyway** in
+  **System Settings ▸ Privacy & Security**. Control-click ▸ Open no longer
+  bypasses Gatekeeper there.
+- **macOS 12–14:** Control-click ▸ **Open**.
+- **Either:** run `xattr -dr com.apple.quarantine /Applications/Otto.app` once.
+
+**Updates.** From 0.5.4 on, a release build finds new releases by itself
+(**Otto ▸ Check for Updates…** and the sidebar) and installs them when you
+restart it.
+- A build from source never updates itself: pull and run
+  `packaging/deploy.sh`.
+- Switching from a source build to a release build changes the signing
+  certificate. macOS therefore asks once more for Accessibility, Screen
+  Recording and Microphone, and the Keychain asks once to let `ottod` read its
+  key.
+
+The DMG does not bundle the in-app walkthrough videos; they stream from the
+`walkthroughs` GitHub release.
 
 ## Prerequisites
 
@@ -735,7 +773,9 @@ packaging/make-cert.sh          # creates a self-signed "Otto Dev Signing" ident
 packaging/sign.sh /path/to/Otto.app /path/to/ottod
 ```
 
-`packaging/dmg.sh` builds a distributable `.dmg`, and
+Published releases are signed by CI with the release certificate instead
+(see [docs/RELEASE.md](docs/RELEASE.md)). `packaging/dmg.sh` builds a
+distributable `.dmg`, and
 `packaging/com.otto.daemon.plist` is the launchd template for running `ottod`
 in the background.
 
@@ -798,7 +838,7 @@ docs/features/  Per-feature guides (setup, walkthrough, API, limits)
 docs/design/    Build contracts for in-flight modules (AWS + Kubernetes consoles)
 docs/plugins/   Plugin authoring guide
 marketing/      Remotion sources for the in-app walkthrough videos
-.github/workflows/ CI gates + the monthly DMG release (`latest` tag)
+.github/workflows/ CI gates + the tag-driven signed release (release.yml)
 ```
 
 ## Documentation

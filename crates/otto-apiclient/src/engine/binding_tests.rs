@@ -41,6 +41,7 @@ fn exec(url: &str) -> ExecuteApiReq {
         vars: None,
         ssh_connection_id: None,
         confirm_new_host: false,
+        debug_session_id: None,
     }
 }
 

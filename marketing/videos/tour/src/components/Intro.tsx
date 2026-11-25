@@ -16,11 +16,11 @@ const CLAIMS = [
 /** Stills that rush past behind the logo — a wall of the real app. */
 export const WALL = [
   'capture/home.jpg',
-  'capture/threads-split.jpg',
+  'capture/threads-runtime.jpg',
   'capture/agents-tiled.jpg',
   'capture/git.jpg',
   'capture/design-versions.jpg',
-  'capture/council.jpg',
+  'capture/ide-debug.jpg',
   'capture/workflows.jpg',
   'capture/design-lobby.jpg',
   'capture/scheduled-tasks.jpg',

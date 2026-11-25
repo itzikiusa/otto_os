@@ -98,6 +98,8 @@ export const SETTINGS_SECTIONS = [
   { id: 'context-library', label: 'Context library', group: 'agents', keywords: 'skills souls snippets library materialize', gate: ADMIN, scope: 'everyone', settings: ['Global default soul', 'Skills', 'Souls', 'Snippets'] },
   // ── System ──
   { id: 'daemon', label: 'Daemon', group: 'system', keywords: 'ottod server port listener network sandbox isolation sessions restart persist suspend idle timeout machine resources cpu cores memory ram swap load busy queue queued parallel parallelism priority nice build workers jobs disk space', gate: 'root', scope: 'everyone', settings: ['Network listener', 'Port', 'Process sandbox', 'Run unconfined', 'Keep sessions running', 'Suspend idle sessions', 'Archive idle sessions', 'Auto-archive', 'Machine resources', 'Queue background agents', 'Background agents running at once', 'Lower priority', 'Build workers per agent session', 'Archive background agent sessions', 'Low disk warning', 'Log folder', 'Restart daemon'] },
+  // The desktop shell's updater: root only, and never on the phone / remote web.
+  { id: 'updates', label: 'Updates', group: 'system', keywords: 'update upgrade version release new download install restart automatic skip check', gate: 'root', desktopOnly: true, scope: 'device', settings: ['Check for updates', 'Install updates automatically', 'Skipped version'] },
   // Every /plugin-admin* handler is require_root (plugins.rs) — S17-303.
   { id: 'plugins', label: 'Plugins', group: 'system', keywords: 'custom plugin sidecar install git', gate: 'root', scope: 'everyone', settings: ['Install plugin', 'Enable plugin'] },
   { id: 'trust-safety', label: 'Trust & safety', group: 'system', keywords: 'security posture audit log trust secrets encrypt encryption keychain plaintext', gate: 'root', scope: 'everyone', settings: ['Secret storage', 'Secure secrets', 'Encrypt secrets', 'Security posture', 'Audit log', 'Active API tokens'] },
@@ -124,6 +126,8 @@ export const SETTINGS_SECTIONS = [
   movedTo?: string;
   /** Its ⌘K name at the new home ("Go to <movedLabel>"). */
   movedLabel?: string;
+  /** Only in the Otto desktop app (absent on the phone and the remote web). */
+  desktopOnly?: boolean;
 }[];
 
 export type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]['id'];
@@ -139,7 +143,11 @@ export interface SettingsSection {
   settings: readonly string[];
   movedTo?: string;
   movedLabel?: string;
+  desktopOnly?: boolean;
 }
+
+/** In the Otto desktop app (the Tauri webview) — false in Node and on the web. */
+const inDesktopApp = (): boolean => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
 const SECTIONS: readonly SettingsSection[] = SETTINGS_SECTIONS;
 
@@ -159,6 +167,7 @@ export function groupLabel(id: SettingsGroupId): string {
 
 /** Whether `access` may open `section` (ungated sections always pass). */
 export function canOpenSection(section: SettingsSection, access: SettingsAccess): boolean {
+  if (section.desktopOnly && !inDesktopApp()) return false;
   const g = section.gate;
   if (g == null) return true;
   if (g === 'root') return access.isRoot;

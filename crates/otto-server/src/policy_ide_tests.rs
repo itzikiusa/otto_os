@@ -94,4 +94,8 @@ fn ide_routes_require_agents_edit_except_guest_collab_and_person_only_admin() {
         route_class(&Method::GET, "/api/v1/ide/debug/sessions/{id}"),
         None
     );
+    assert_eq!(
+        route_class(&Method::GET, "/api/v1/ide/debug/sessions/{id}/port"),
+        Some(RouteClass::Admin)
+    );
 }

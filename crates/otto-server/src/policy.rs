@@ -91,6 +91,9 @@ fn is_resource_access_route(p: &str) -> bool {
     )
 }
 
+/// Root-only daemon diagnostics (`Settings:Admin`).
+const ROOT_DIAGNOSTICS: [&str; 3] = ["/capabilities", "/support-bundle", "/system/restart-impact"];
+
 /// Map an `(method, matched_path)` pair to its feature-axis [`PolicyDecision`].
 ///
 /// `matched_path` is the Axum route **template** with `{id}`-style placeholders,
@@ -1014,9 +1017,9 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/settings" {
         return Require(Settings, Admin);
     }
-    // Capability/health registry + support bundle — daemon diagnostics (root),
-    // same tier as the audit log / security posture below.
-    if matches!(p, "/capabilities" | "/support-bundle") {
+    // Capability/health registry, support bundle, restart impact — daemon
+    // diagnostics (root), same tier as the audit log / security posture below.
+    if ROOT_DIAGNOSTICS.contains(&p) {
         return Require(Settings, Admin);
     }
     if p.starts_with("/state/git/") {
@@ -1564,6 +1567,10 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
     ) {
         return Some(S);
     }
+    // An agent debug start's `ready_port`: a loopback port probe, people only.
+    if p == "/ide/debug/sessions/{id}/port" {
+        return Some(A);
+    }
     // Minting: a PAT (a laundered human credential), MCP tokens, share links
     // (a share token passes `agent_attach_rule` on /ws/term — S1-02; an IDE
     // collab room share token grants guest read/write on the workspace root).
@@ -1971,6 +1978,17 @@ mod tests {
     // Helper: every test path carries the `/api/v1` nest prefix the guard sees.
     fn pol(m: Method, path: &str) -> PolicyDecision {
         policy_for(&m, path)
+    }
+
+    #[test]
+    fn restart_impact_is_a_root_diagnostic() {
+        for p in ["/capabilities", "/support-bundle", "/system/restart-impact"] {
+            assert_eq!(
+                pol(Method::GET, &format!("/api/v1{p}")),
+                Require(Settings, Admin),
+                "{p}"
+            );
+        }
     }
 
     #[test]

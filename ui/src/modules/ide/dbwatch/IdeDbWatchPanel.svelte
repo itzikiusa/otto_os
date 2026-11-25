@@ -1,489 +1,362 @@
 <script lang="ts">
-  // Live DB Watch & Component-Test Watcher panel for the IDE Bottom Dock.
-  // Auto-detects tables, collections, and Redis key prefixes in DAO/source files,
-  // connects to saved Otto DB connections or live Testcontainers/local processes,
-  // and computes before -> after diffs automatically on debugger pauses and test runs.
-  import { untrack } from 'svelte';
-  import Badge from '../../../lib/components/Badge.svelte';
+  // DB Watch: what did my code just write? ONE toolbar row — Target ▾ (with its
+  // environment), Tables ▾ (ranked, checkable, "Add table…" from the target's
+  // real tables), Since last stop | Since start, one primary (Snapshot / Start
+  // watching) and ⋯ — then a section per watched table. The daemon takes the
+  // checkpoints (every debugger stop, a run's end); the store arms the watch
+  // and refetches, so this panel only reads and steers (ideDbWatchState).
+  import { tick, untrack } from 'svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
+  import EnvBadge from '../../../lib/components/EnvBadge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
+  import { copyWithToast } from '../../../lib/clipboard';
+  import { confirmer } from '../../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
+  import { plural } from '../../../lib/plural';
   import { pollWhileVisible } from '../../../lib/poll';
   import { router } from '../../../lib/router.svelte';
-  import type { IdeDbEngine, IdeDbFieldChange } from '../../../lib/api/types/ide-db-watch';
+  import type { IdeDbWatchItemDiff, IdeDbWatchSnapshotItem, IdeDbWatchTarget } from '../../../lib/api/types/ide-db-watch';
   import { ide, ideBasename } from '../ideStore.svelte';
   import { ideLayout } from '../shell/ideLayout.svelte';
-  import { isDbWatchPanelVisible } from './ideDbWatchModel';
+  import IdeDbWatchTable from './IdeDbWatchTable.svelte';
   import {
-    formatDbCellValue,
-    IDE_DB_ENGINES,
-    ideDbWatch,
+    canCompareStart,
+    changesAsText,
+    engineLabel,
+    filterText,
+    isDbWatchPanelVisible,
+    isProdTarget,
+    matchesEngine,
+    MAX_WATCH_ITEMS,
+    parseFilter,
+    pickAutoItems,
+    pickAutoTarget,
     targetKeyOf,
-  } from './ideDbWatchState.svelte';
+    targetPlace,
+    unverifiedNames,
+  } from './ideDbWatchModel';
+  import { ideDbWatch, refOfWatch } from './ideDbWatchState.svelte';
 
-  function refreshTargets(): void {
-    if (!ide.target.root) return;
-    void ideDbWatch.detect({
-      root: ide.target.root,
-      activeFile: ide.activePath,
-      connectionId: ide.target.connection_id,
-      additionalRoots: ide.additionalRoots,
+  const w = $derived(ideDbWatch.watch);
+  const read = $derived(ideDbWatch.read);
+  const pending = $derived(ideDbWatch.pendingTarget);
+  const tErr = $derived(ideDbWatch.targetError);
+  const unreachable = $derived(tErr?.kind === 'unreachable');
+  const engine = $derived(pending?.engine ?? w?.target.engine ?? null);
+  const items = $derived<IdeDbWatchItemDiff[]>(read?.items ?? []);
+  const changedItems = $derived(items.filter((i) => i.error || i.added_count + i.modified_count + i.removed_count > 0));
+  const quietItems = $derived(items.filter((i) => !i.error && i.added_count + i.modified_count + i.removed_count === 0));
+  const waiting = $derived(Boolean(read && read.from_seq === null));
+  const prod = $derived(isProdTarget(w?.target));
+  /** "Show current rows" per table. */
+  let currentRows = $state<Record<string, IdeDbWatchSnapshotItem | null>>({});
+  let bodyEl: HTMLElement | undefined = $state();
+  let targetBtn: HTMLButtonElement | undefined = $state();
+  let tablesBtn: HTMLButtonElement | undefined = $state();
+
+  const targetLabel = $derived(pending?.name ?? w?.target.label ?? 'Target');
+  const targetEnv = $derived(pending ? (pending.target_kind === 'saved' ? pending.environment : null) : w?.target.environment);
+  /** The tables of what the toolbar shows: the picked target's (not read yet) or the watch's. */
+  const shownItems = $derived<{ object: string }[]>(pending ? ideDbWatch.pendingItems : (w?.items ?? []));
+  const tablesLabel = $derived.by(() => {
+    const names = shownItems.map((i) => i.object);
+    if (names.length === 0) return 'Tables';
+    return names.length <= 2 ? names.join(', ') : `${names.slice(0, 2).join(', ')} +${names.length - 2}`;
+  });
+  const caption = $derived.by(() => {
+    const l = w?.latest;
+    if (!l) return '';
+    const where = l.file && l.line ? ` · ${ideBasename(l.file)}:${l.line}` : '';
+    const at = new Date(l.captured_at_ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const what = l.seq === 0 ? 'Baseline' : l.reason === 'manual' ? `Snapshot ${l.seq}` : l.reason === 'stop' ? `Stop ${l.seq}` : l.reason === 'run_end' ? 'Run ended' : l.reason === 'session_end' ? 'Session ended' : `Checkpoint ${l.seq}`;
+    return `${what}${where} · ${at}`;
+  });
+
+  // The strip in the Debug panel asks for one table: bring it into view.
+  $effect(() => {
+    const focus = ideDbWatch.focusObject;
+    if (!focus || !bodyEl || items.length === 0) return;
+    untrack(() => {
+      ideDbWatch.focusObject = '';
+      void tick().then(() => bodyEl?.querySelector(`[data-object="${CSS.escape(focus)}"]`)?.scrollIntoView({ block: 'start' }));
     });
-  }
-
-  // Re-detect accessed DB objects and ephemeral Testcontainers when project or active file changes.
-  $effect(() => {
-    const root = ide.target.root;
-    const activeFile = ide.activePath;
-    const connId = ide.target.connection_id;
-    const extraCount = ide.additionalRoots.length;
-    void activeFile;
-    void connId;
-    void extraCount;
-    if (!root) return;
-    untrack(() => refreshTargets());
-  });
-
-  // Auto-refresh snapshot diff when debugger pauses on a new location/frame or a test run finishes.
-  let lastPauseSig = '';
-  let lastRunSig = '';
-
-  $effect(() => {
-    const dbg = ide.activeDebug;
-    const pauseSig =
-      dbg && dbg.state === 'paused'
-        ? `${dbg.id}:${dbg.paused_file ?? ''}:${dbg.paused_line ?? 0}:${dbg.active_frame_id ?? 0}`
-        : '';
-    if (pauseSig && pauseSig !== lastPauseSig) {
-      lastPauseSig = pauseSig;
-      if (untrack(() => ideDbWatch.autoRefreshOnExec && ideDbWatch.canCapture && Boolean(ide.target.root))) {
-        untrack(() => void ideDbWatch.captureSnapshot(ide.target.root, 'diff'));
-      }
-    } else if (!pauseSig) {
-      lastPauseSig = '';
-    }
-  });
-
-  $effect(() => {
-    const run = ide.activeRun;
-    const runSig = run ? `${run.id}:${run.status}` : '';
-    const wasRunning = lastRunSig.endsWith(':running');
-    lastRunSig = runSig;
-    if (wasRunning && run && run.status !== 'running') {
-      if (untrack(() => ideDbWatch.autoRefreshOnExec && ideDbWatch.canCapture && Boolean(ide.target.root))) {
-        untrack(() => void ideDbWatch.captureSnapshot(ide.target.root, 'diff'));
-      }
-    }
   });
 
   const panelVisible = $derived(
-    isDbWatchPanelVisible({
-      stack: ideLayout.stack,
-      stackPane: ideLayout.pane,
-      bottomDockOpen: ide.bottomDockOpen,
-      activeBottomTab: ide.activeBottomTab,
-    }),
+    isDbWatchPanelVisible({ stack: ideLayout.stack, stackPane: ideLayout.pane, bottomDockOpen: ide.bottomDockOpen, activeBottomTab: ide.activeBottomTab }),
   );
-
-  // Optional 3s live watch poller — pauses automatically when dock, stack pane, or window is hidden.
+  // Optional 3 s poll (⋯), only while this panel shows and never on prod.
   $effect(() => {
-    if (!ideDbWatch.liveWatch || !panelVisible) return;
-    const root = ide.target.root;
-    if (!root) return;
-    const poller = pollWhileVisible(
-      async () => {
-        if (!untrack(() => ideDbWatch.canCapture) || untrack(() => ideDbWatch.snapshotLoading)) return;
-        await ideDbWatch.captureSnapshot(root, 'diff');
-      },
-      { ms: 3000, floorMs: 2000, immediate: false },
-    );
+    if (!ideDbWatch.liveWatch || !panelVisible || prod || !w) return;
+    const poller = pollWhileVisible(async () => { if (!untrack(() => ideDbWatch.refreshing)) await ideDbWatch.snapshotNow(); }, { ms: 3000, floorMs: 2000, immediate: false });
     return () => poller.stop();
   });
 
-  const resp = $derived(ideDbWatch.latestResp);
-  const diff = $derived(resp?.diff ?? null);
-  const snapshotCols = $derived(resp?.snapshot.columns ?? []);
-  const snapshotRows = $derived(resp?.snapshot.rows ?? []);
-  const selectedTarget = $derived(ideDbWatch.selectedTarget);
-
-  function changeForColumn(changes: readonly IdeDbFieldChange[], colName: string): IdeDbFieldChange | undefined {
-    return changes.find((c) => c.column === colName);
+  function codeRefOf(object: string): { file: string; line: number } | null {
+    const d = ideDbWatch.detected.find((x) => x.object_name === object);
+    return d ? { file: d.source_file, line: d.line } : null;
   }
 
-  function openOptionsMenu(e: MouseEvent): void {
-    const anchor = e.currentTarget as HTMLElement | null;
-    const items: MenuItem[] = [
-      {
-        label: 'Auto-diff on debug pause & run finish',
-        checked: ideDbWatch.autoRefreshOnExec,
-        action: () => {
-          ideDbWatch.autoRefreshOnExec = !ideDbWatch.autoRefreshOnExec;
-        },
-      },
-      {
-        label: 'Keep Testcontainers alive on exit',
-        checked: ide.keepTestcontainersAlive,
-        action: () => {
-          ide.keepTestcontainersAlive = !ide.keepTestcontainersAlive;
-        },
-      },
-      {
-        label: 'Live watch (poll every 3s)',
-        checked: ideDbWatch.liveWatch,
-        action: () => {
-          ideDbWatch.liveWatch = !ideDbWatch.liveWatch;
-        },
-      },
-    ];
-    if (selectedTarget?.target_kind === 'saved') {
-      items.push(
-        { separator: true },
-        {
-          label: 'Open in DB Explorer',
-          icon: 'external',
-          action: () => router.go('database'),
-        },
-      );
+  function targetHint(t: IdeDbWatchTarget): string {
+    const where = `${engineLabel(t.engine)} · ${t.host}:${t.port}`;
+    if (t.target_kind === 'saved') return [t.environment || 'dev', t.local ? 'local' : 'remote', where].join(' · ');
+    return t.container_image ? `${t.container_image} · :${t.port}` : where;
+  }
+
+  async function openTargetMenu(): Promise<void> {
+    await ideDbWatch.discover();
+    const cur = pending ? targetKeyOf(pending) : w ? (w.target.kind === 'saved' ? `saved:${w.target.connection_id}` : `ephemeral:${w.target.ephemeral_id}`) : '';
+    const row = (t: IdeDbWatchTarget): MenuItem => ({
+      label: t.name,
+      hint: targetHint(t),
+      checked: targetKeyOf(t) === cur,
+      danger: t.target_kind === 'saved' && isProdTarget(t),
+      action: () => void ideDbWatch.setTarget(t),
+    });
+    const run = ideDbWatch.ephemeralTargets.filter((t) => t.source !== 'container');
+    const other = ideDbWatch.ephemeralTargets.filter((t) => t.source === 'container');
+    const groups: MenuItem[][] = [run.map(row), ideDbWatch.savedConnections.map(row), other.map(row)].filter((g) => g.length > 0);
+    const list: MenuItem[] = groups.flatMap((g, i) => (i === 0 ? g : [{ separator: true }, ...g]));
+    if (list.length === 0) {
+      list.push({ label: ideDbWatch.detectError ?? 'No databases found: start a Testcontainer or add a saved connection', disabled: true });
     }
-    ctxMenu.showAt(anchor, items, { align: 'end' });
+    ctxMenu.showAt(targetBtn ?? null, list, { filter: list.length > 12, filterPlaceholder: 'Find a database…' });
+  }
+
+  async function openTablesMenu(): Promise<void> {
+    if (!engine) return;
+    // Tables ▾ names the target it lists (the picked one, else the watched one).
+    await ideDbWatch.discover(pending ? { target: pending } : w ? { target: refOfWatch(w), database: w.database } : {});
+    showTablesMenu();
+  }
+
+  function showTablesMenu(): void {
+    if (!engine) return;
+    const watched = new Set((ideDbWatch.pendingTarget ? ideDbWatch.pendingItems : (ideDbWatch.watch?.items ?? [])).map((i) => i.object));
+    const full = watched.size >= MAX_WATCH_ITEMS;
+    const ranked = pickAutoItems(ideDbWatch.detected, engine, true);
+    const extra = [...watched].filter((o) => !ranked.some((r) => r.object === o)).map((object) => ({ object }));
+    const rows: MenuItem[] = [...ranked, ...extra].map(({ object }) => {
+      const d = ideDbWatch.detected.find((x) => x.object_name === object && matchesEngine(x, engine));
+      const on = watched.has(object);
+      return {
+        label: object,
+        checked: on,
+        disabled: !on && full,
+        hint: d ? `${d.operations.join('/').toUpperCase() || 'READ'} · ${ideBasename(d.source_file)}:${d.line}` : undefined,
+        action: () => void (on ? ideDbWatch.removeItem(object) : ideDbWatch.addItem({ object })).then(showTablesMenu),
+      };
+    });
+    const missing = unverifiedNames(ideDbWatch.detected, engine);
+    const db = (pending ? pending.database : ideDbWatch.watch?.database) ?? 'the target';
+    const list: MenuItem[] = [
+      { label: engine === 'redis' ? 'Add key prefix…' : engine === 'mongodb' ? 'Add collection…' : 'Add table…', icon: 'plus', pinned: true, disabled: full, action: () => void openObjectsMenu() },
+      ...(engine === 'redis' ? [{ label: 'Key pattern…', icon: 'edit', pinned: true, disabled: full, action: () => void addPattern() } as MenuItem] : []),
+      { separator: true, pinned: true },
+      ...rows,
+    ];
+    if (rows.length === 0) list.push({ label: 'No tables found in the code yet', disabled: true });
+    if (missing.length > 0) {
+      list.push({ separator: true }, { label: `${plural(missing.length, 'name')} in code not found in ${db}`, disabled: true, title: missing.join(', ') });
+    }
+    ctxMenu.showAt(tablesBtn ?? null, list, { filter: rows.length > 10, filterPlaceholder: 'Find a table…' });
+  }
+
+  async function openObjectsMenu(): Promise<void> {
+    await ideDbWatch.loadObjects();
+    const watched = new Set((ideDbWatch.pendingTarget ? ideDbWatch.pendingItems : (ideDbWatch.watch?.items ?? [])).map((i) => i.object));
+    const list: MenuItem[] = ideDbWatch.objects
+      .filter((o) => !watched.has(o.name))
+      .map((o) => ({ label: o.name, action: () => void ideDbWatch.addItem({ object: o.name }) }));
+    if (list.length === 0) list.push({ label: ideDbWatch.detectError ?? 'Nothing else to add', disabled: true });
+    ctxMenu.showAt(tablesBtn ?? null, list, { filter: true, filterPlaceholder: 'Find a table…', maxVisible: 60 });
+  }
+
+  async function addPattern(initial = '', replace?: string): Promise<void> {
+    const v = await confirmer.promptText('Keys to watch: a prefix (session:) or a glob pattern (session:*:route).', {
+      title: replace ? 'Change key pattern' : 'Watch Redis keys',
+      confirmLabel: 'Watch',
+      initial,
+      placeholder: 'session:*',
+    });
+    if (!v) return;
+    if (replace) await ideDbWatch.replaceItem(replace, { object: v });
+    else await ideDbWatch.addItem({ object: v });
+  }
+
+  async function chooseDatabase(): Promise<void> {
+    const v = await confirmer.promptText(`The database (or schema) on ${pending?.name ?? 'this connection'} whose tables DB Watch lists.`, {
+      title: 'Choose a database',
+      confirmLabel: 'List tables',
+      placeholder: 'pr_bo_1',
+    });
+    if (v) await ideDbWatch.setPendingDatabase(v);
+  }
+
+  async function editFilter(object: string): Promise<void> {
+    const info = ideDbWatch.watch?.items.find((i) => i.object === object);
+    const v = await confirmer.promptText(`Only rows of ${object} where a column equals a value. Leave empty to watch every row.`, {
+      title: 'Filter rows',
+      confirmLabel: 'Apply',
+      initial: filterText(info?.filter),
+      placeholder: "status = 'open'",
+      allowEmpty: true,
+      validate: (s) => (s === '' || parseFilter(s) ? null : 'Write it as column = value, e.g. account_id = 77017 (text: letters, digits and _ . : @ -)'),
+    });
+    if (v === null) return;
+    await ideDbWatch.replaceItem(object, v === '' ? { object } : { object, filter: parseFilter(v) });
+  }
+
+  async function toggleCurrent(object: string): Promise<void> {
+    if (currentRows[object]) {
+      const { [object]: _, ...rest } = currentRows;
+      currentRows = rest;
+      return;
+    }
+    const resp = await ideDbWatch.diffSince(ideDbWatch.compare, { rows: true });
+    const it = resp?.items.find((i) => i.object === object);
+    currentRows = { ...currentRows, [object]: it?.current ?? { columns: it?.columns ?? [], rows: [] } };
+  }
+
+  function openTableMenu(e: MouseEvent, it: IdeDbWatchItemDiff): void {
+    const redis = it.engine === 'redis';
+    const menu: MenuItem[] = [
+      redis
+        ? { label: 'Change key pattern…', icon: 'edit', action: () => void addPattern(it.object, it.object) }
+        : { label: 'Filter rows…', icon: 'filter', action: () => void editFilter(it.object) },
+      { label: currentRows[it.object] ? 'Show changes' : 'Show current rows', icon: 'listBullet', action: () => void toggleCurrent(it.object) },
+      { label: 'Copy query', icon: 'copy', action: () => void copyWithToast(it.executed_query, 'query') },
+      { separator: true },
+      { label: 'Stop watching this table', icon: 'x', action: () => void ideDbWatch.removeItem(it.object) },
+    ];
+    ctxMenu.show(e, menu);
+  }
+
+  /** The primary when nothing is armed: the run's own database + the tables the
+   *  code touches, else the menus that are missing a choice. */
+  async function startWatching(): Promise<void> {
+    if (pending) return void (ideDbWatch.pendingItems.length > 0 ? ideDbWatch.startPending() : openTablesMenu());
+    await ideDbWatch.discover();
+    const t = pickAutoTarget(ideDbWatch.detected, ideDbWatch.ephemeralTargets);
+    if (!t) return void openTargetMenu();
+    await ideDbWatch.discover({ target: t });
+    const picked = pickAutoItems(ideDbWatch.detected, t.engine, true);
+    if (picked.length === 0) {
+      await ideDbWatch.setTarget(t);
+      return void openTablesMenu();
+    }
+    await ideDbWatch.start({ target: { kind: 'ephemeral', ephemeral_id: t.ephemeral_id }, database: t.database, items: picked });
+  }
+
+  function openMore(e: MouseEvent): void {
+    const menu: MenuItem[] = [
+      {
+        label: 'Live poll every 3 s',
+        checked: ideDbWatch.liveWatch,
+        disabled: !w || prod,
+        title: prod ? 'Not on a production database' : !w ? 'Start watching first' : 'Take a snapshot every 3 seconds while this panel shows',
+        action: () => (ideDbWatch.liveWatch = !ideDbWatch.liveWatch),
+      },
+      { label: 'Keep Testcontainers alive after a run', checked: ide.keepTestcontainersAlive, action: () => (ide.keepTestcontainersAlive = !ide.keepTestcontainersAlive) },
+      { separator: true },
+      { label: 'Copy changes as text', icon: 'copy', disabled: changedItems.length === 0, action: () => void copyWithToast(changesAsText(items), 'changes') },
+    ];
+    if (w?.target.kind === 'saved') menu.push({ label: 'Open in DB Explorer', icon: 'external', action: () => router.go('database') });
+    menu.push({ separator: true }, { label: 'Stop watching', icon: 'stop', disabled: !w, action: () => void ideDbWatch.stop() });
+    ctxMenu.show(e, menu);
   }
 </script>
 
-<div class="dbw-root" data-testid="ide-dbwatch-panel">
-  <header class="dbw-toolbar">
-    <div class="dbw-target-group">
-      <label class="dbw-field-label" for="ide-dbw-target">Target</label>
-      <select
-        id="ide-dbw-target"
-        class="input dbw-select"
-        aria-label="Database target"
-        value={ideDbWatch.selectedTargetKey}
-        onchange={(e) => ideDbWatch.selectTargetByKey((e.currentTarget as HTMLSelectElement).value)}
-        data-testid="ide-dbw-target-select"
-      >
-        {#if ideDbWatch.allTargets.length === 0}
-          <option value="">No targets detected</option>
-        {:else}
-          {#if ideDbWatch.ephemeralTargets.length > 0}
-            <optgroup label="Live Testcontainers & Local Processes">
-              {#each ideDbWatch.ephemeralTargets as ep (ep.ephemeral_id)}
-                <option value={targetKeyOf(ep)}>
-                  {ep.name} ({ep.engine} · {ep.host}:{ep.port})
-                </option>
-              {/each}
-            </optgroup>
-          {/if}
-          {#if ideDbWatch.savedConnections.length > 0}
-            <optgroup label="Saved DB Connections">
-              {#each ideDbWatch.savedConnections as sv (sv.connection_id)}
-                <option value={targetKeyOf(sv)}>
-                  {sv.name} ({sv.engine}{sv.database ? `/${sv.database}` : ''})
-                </option>
-              {/each}
-            </optgroup>
-          {/if}
-        {/if}
-      </select>
-
-      <button
-        type="button"
-        class="icon-btn"
-        aria-label="Refresh containers and targets"
-        title="Refresh live Testcontainers and detected DB objects"
-        disabled={ideDbWatch.detectLoading || !ide.target.root}
-        onclick={refreshTargets}
-        data-testid="ide-dbw-refresh-targets"
-      >
-        <Icon name="refresh" size={13} />
-      </button>
-
-      <select
-        class="input dbw-engine-select"
-        aria-label="Database engine"
-        value={ideDbWatch.selectedEngine}
-        onchange={(e) => (ideDbWatch.selectedEngine = (e.currentTarget as HTMLSelectElement).value as IdeDbEngine)}
-        data-testid="ide-dbw-engine-select"
-      >
-        {#each IDE_DB_ENGINES as eng (eng.id)}
-          <option value={eng.id}>{eng.label}</option>
-        {/each}
-      </select>
-
-      <input
-        class="input dbw-input mono"
-        type="text"
-        dir="ltr"
-        aria-label="Table, collection, or key prefix"
-        placeholder={ideDbWatch.selectedEngine === 'redis' ? 'Key prefix (e.g. session:*)' : ideDbWatch.selectedEngine === 'mongodb' ? 'Collection name' : 'Table name'}
-        bind:value={ideDbWatch.selectedObjectName}
-        onkeydown={(e) => {
-          if (e.key === 'Enter' && ideDbWatch.canCapture) {
-            e.preventDefault();
-            void ideDbWatch.captureSnapshot(ide.target.root, ideDbWatch.baselineSnapshot ? 'diff' : 'baseline');
-          }
-        }}
-        data-testid="ide-dbw-object-input"
-      />
-
-      <input
-        class="input dbw-query-input mono"
-        type="text"
-        dir="ltr"
-        aria-label="Optional filter or read-only query"
-        placeholder="Optional WHERE / custom read-only query…"
-        bind:value={ideDbWatch.customQuery}
-        onkeydown={(e) => {
-          if (e.key === 'Enter' && ideDbWatch.canCapture) {
-            e.preventDefault();
-            void ideDbWatch.captureSnapshot(ide.target.root, ideDbWatch.baselineSnapshot ? 'diff' : 'baseline');
-          }
-        }}
-        data-testid="ide-dbw-query-input"
-      />
-    </div>
-
-    <div class="dbw-actions">
-      <button
-        type="button"
-        class="btn small ghost"
-        disabled={!ideDbWatch.canCapture || ideDbWatch.snapshotLoading}
-        title="Capture current rows as the comparison baseline"
-        onclick={() => void ideDbWatch.captureSnapshot(ide.target.root, 'baseline')}
-        data-testid="ide-dbw-capture-baseline"
-      >
-        <Icon name="target" size={12} />
-        <span>Capture baseline</span>
-      </button>
-
-      <button
-        type="button"
-        class="btn small"
-        disabled={!ideDbWatch.canCapture || ideDbWatch.snapshotLoading}
-        title="Fetch latest rows and compare against baseline"
-        onclick={() => void ideDbWatch.captureSnapshot(ide.target.root, ideDbWatch.baselineSnapshot ? 'diff' : 'baseline')}
-        data-testid="ide-dbw-refresh-diff"
-      >
-        <Icon name="play" size={12} />
-        <span>{ideDbWatch.snapshotLoading ? 'Querying…' : ideDbWatch.baselineSnapshot ? 'Refresh & diff' : 'Query'}</span>
-      </button>
-
-      {#if ideDbWatch.liveWatch}
-        <Badge tone="accent" dot label="Live" title="Polling every 3 seconds while visible" />
-      {/if}
-
-      <button
-        type="button"
-        class="icon-btn"
-        aria-label="DB Watch options"
-        aria-haspopup="menu"
-        title="DB Watch options: auto-diff, keep containers, live watch"
-        onclick={openOptionsMenu}
-        data-testid="ide-dbw-options-btn"
-      >
-        <Icon name="more" size={14} />
-      </button>
-    </div>
+<div class="dbw" data-testid="ide-dbwatch-panel">
+  <header class="dbw-bar">
+    <button type="button" class="btn small ghost dbw-pick" bind:this={targetBtn} aria-haspopup="menu" title={w ? `${w.target.label} · ${targetPlace(w.target)}` : 'Choose the database to watch'} onclick={() => void openTargetMenu()} data-testid="ide-dbw-target">
+      <Icon name="db" size={12} />
+      <span class="dbw-pick-label">{targetLabel}</span>
+      {#if targetEnv}<EnvBadge env={targetEnv} />{/if}
+      <Icon name="chevronDown" size={12} />
+    </button>
+    <button type="button" class="btn small ghost dbw-pick" bind:this={tablesBtn} aria-haspopup="menu" disabled={!engine || Boolean(tErr)} title={tErr ? (tErr.kind === 'database' ? 'Choose a database first' : `Can’t list tables: ${tErr.message}`) : engine ? 'Choose the tables to watch' : 'Choose a target first'} onclick={() => void openTablesMenu()} data-testid="ide-dbw-tables">
+      <span class="dbw-pick-label mono" dir="ltr">{tablesLabel}</span>
+      <Icon name="chevronDown" size={12} />
+    </button>
+    <span class="dbw-caption" title={caption}>
+      {#if ideDbWatch.refreshing || w?.busy}<span class="spinner dbw-spin" aria-hidden="true"></span>{/if}
+      {caption}
+    </span>
+    {#if canCompareStart(w)}
+      <div class="segmented dbw-seg" role="group" aria-label="Compare with">
+        <button type="button" class:active={ideDbWatch.compare === 'previous_stop'} aria-pressed={ideDbWatch.compare === 'previous_stop'} onclick={() => void ideDbWatch.setCompare('previous_stop')} data-testid="ide-dbw-since-last">Since last stop</button>
+        <button type="button" class:active={ideDbWatch.compare === 'start'} aria-pressed={ideDbWatch.compare === 'start'} onclick={() => void ideDbWatch.setCompare('start')} data-testid="ide-dbw-since-start">Since start</button>
+      </div>
+    {/if}
+    {#if w && !pending}
+      <button type="button" class="btn small primary" disabled={w.busy} title="Take a checkpoint now and compare" onclick={() => void ideDbWatch.snapshotNow()} data-testid="ide-dbw-snapshot">Snapshot</button>
+    {:else}
+      <button type="button" class="btn small primary" disabled={Boolean(tErr)} title="Watch the run’s database and the tables your code touches" onclick={() => void startWatching()} data-testid="ide-dbw-start">Start watching</button>
+    {/if}
+    <button type="button" class="icon-btn" aria-label="DB Watch options" title="Live poll, keep containers, copy changes, stop watching" aria-haspopup="menu" onclick={openMore} data-testid="ide-dbw-options-btn">
+      <Icon name="more" size={13} />
+    </button>
   </header>
 
-  {#if ideDbWatch.detectedObjects.length > 0}
-    <div class="dbw-chips-bar" role="region" aria-label="Detected database objects in code" data-testid="ide-dbw-detected-bar">
-      <span class="dbw-chips-label">Detected in code:</span>
-      {#each ideDbWatch.detectedObjects as obj (`${obj.engine}:${obj.object_name}:${obj.source_file}:${obj.line}`)}
-        {@const active = ideDbWatch.selectedEngine === obj.engine && ideDbWatch.selectedObjectName === obj.object_name}
-        <div class="dbw-chip" class:is-active={active}>
-          <button
-            type="button"
-            class="dbw-chip-select"
-            aria-pressed={active}
-            title={`${obj.engine} ${obj.kind} · ${obj.operations.join(', ') || 'read'}`}
-            onclick={() => ideDbWatch.selectDetectedObject(obj)}
-          >
-            <Badge tone={active ? 'accent' : 'neutral'} variant="outline" label={obj.engine} />
-            <span class="mono">{obj.object_name}</span>
-          </button>
-          <button
-            type="button"
-            class="dbw-chip-jump mono"
-            aria-label="Jump to {ideBasename(obj.source_file)} line {obj.line}"
-            title="Open {obj.source_file}:{obj.line} in editor"
-            onclick={() => void ide.openFile(obj.source_file, { line: obj.line, preview: false })}
-          >
-            {ideBasename(obj.source_file)}:{obj.line}
-          </button>
-        </div>
-      {/each}
-    </div>
+  {#if ideDbWatch.prodWaiting}
+    <button type="button" class="dbw-prod" class:is-prod={ideDbWatch.prodWaiting.label.startsWith('Production')} onclick={() => void ideDbWatch.watchProd()} data-testid="ide-dbw-prod-waiting">{ideDbWatch.prodWaiting.label}</button>
   {/if}
-
-  {#if resp}
-    <div class="dbw-subbar">
-      <div class="segmented dbw-seg" role="group" aria-label="Snapshot view mode">
-        <button
-          type="button"
-          class:active={ideDbWatch.viewMode === 'changes'}
-          aria-pressed={ideDbWatch.viewMode === 'changes'}
-          onclick={() => (ideDbWatch.viewMode = 'changes')}
-          data-testid="ide-dbw-mode-changes"
-        >
-          Changes (Before → After)
-        </button>
-        <button
-          type="button"
-          class:active={ideDbWatch.viewMode === 'rows'}
-          aria-pressed={ideDbWatch.viewMode === 'rows'}
-          onclick={() => (ideDbWatch.viewMode = 'rows')}
-          data-testid="ide-dbw-mode-rows"
-        >
-          All rows ({snapshotRows.length})
-        </button>
-      </div>
-
-      {#if diff}
-        <div class="dbw-diff-badges" data-testid="ide-dbw-diff-summary">
-          <Badge tone="ok" label={`+${diff.added_count} added`} />
-          <Badge tone="warn" label={`~${diff.modified_count} modified`} />
-          <Badge tone="bad" label={`-${diff.removed_count} removed`} />
-          <Badge tone="neutral" variant="outline" label={`${diff.unchanged_count} unchanged`} />
-          {#if diff.added_count + diff.modified_count + diff.removed_count > 0}
-            <button
-              type="button"
-              class="btn small ghost"
-              title="Accept current snapshot as the new baseline"
-              onclick={() => ideDbWatch.promoteLatestToBaseline()}
-            >
-              Accept as baseline
-            </button>
-          {/if}
-        </div>
-      {:else}
-        <span class="dbw-meta-note">
-          Baseline active ({snapshotRows.length} rows) · {resp.duration_ms}ms on {resp.target_label}
-        </span>
-      {/if}
-
-      <span class="dbw-query-echo mono ellipsis" dir="ltr" title={resp.executed_query}>
-        {resp.executed_query}
-      </span>
-    </div>
-  {/if}
-
-  <div class="dbw-body">
+  <div class="dbw-body" bind:this={bodyEl}>
     <LoadState
-      what="database snapshot"
-      variant="panel"
-      loading={(ideDbWatch.detectLoading && !resp) || (ideDbWatch.snapshotLoading && !resp)}
-      error={ideDbWatch.snapshotError ?? ideDbWatch.detectError}
-      empty={!resp}
-      onretry={() => {
-        if (ideDbWatch.snapshotError && ideDbWatch.canCapture) {
-          void ideDbWatch.captureSnapshot(ide.target.root, ideDbWatch.baselineSnapshot ? 'diff' : 'baseline');
-        } else {
-          refreshTargets();
-        }
-      }}
+      what="the database watch"
+      errorTitle={unreachable && pending ? `Can’t reach ${pending.name}` : w ? `Couldn’t read ${w.target.label}` : 'Couldn’t start watching'}
+      loading={ideDbWatch.loading && !read}
+      error={unreachable ? tErr?.message : ideDbWatch.error}
+      empty={!w || Boolean(pending)}
+      onretry={() => void (unreachable ? ideDbWatch.retryTarget() : w ? ideDbWatch.snapshotNow() : startWatching())}
+      rows={4}
     >
+      {#snippet errorActions()}
+        {#if unreachable}
+          <button type="button" class="btn small" onclick={() => void openTargetMenu()} data-testid="ide-dbw-other-target">Choose another target</button>
+        {/if}
+        {#if (w?.target.kind ?? pending?.target_kind) === 'ephemeral' && !ide.keepTestcontainersAlive}
+          <button type="button" class="btn small" onclick={() => (ide.keepTestcontainersAlive = true)}>Keep Testcontainers alive</button>
+        {/if}
+      {/snippet}
       {#snippet emptyView()}
-        <EmptyState
-          headingLevel={2}
-          icon="db"
-          title={ideDbWatch.allTargets.length === 0 ? 'No database targets connected yet' : 'Ready to watch database state'}
-          body={ideDbWatch.allTargets.length === 0
-            ? 'Start a component test using Testcontainers (enable Keep containers to inspect after exit) or add a saved connection in Connections.'
-            : 'Pick a detected table, collection, or key prefix above and click Capture baseline before stepping through your code or running a test.'}
-          actionLabel={ideDbWatch.canCapture ? 'Capture baseline' : 'Refresh containers'}
-          actionIcon={ideDbWatch.canCapture ? 'target' : 'refresh'}
-          actionKind="secondary"
-          onaction={() => {
-            if (ideDbWatch.canCapture) {
-              void ideDbWatch.captureSnapshot(ide.target.root, 'baseline');
-            } else {
-              refreshTargets();
-            }
-          }}
-        />
+        {#if pending && tErr?.kind === 'database'}
+          <EmptyState icon="db" title="Choose a database" body="{pending.name} has no default database. Name the one whose tables to list." actionLabel="Choose database…" actionIcon="db" actionKind="secondary" onaction={() => void chooseDatabase()} />
+        {:else if pending && ideDbWatch.pendingItems.length > 0}
+          <EmptyState icon="db" title="Ready to watch {pending.name}" body="Start watching reads {ideDbWatch.pendingItems.map((i) => i.object).join(', ')} on {pending.host}{pending.target_kind === 'saved' ? ` (${pending.environment || 'dev'})` : ''} now and at every stop. Nothing is read before." />
+        {:else if pending}
+          <EmptyState icon="db" title="Choose tables to watch" body="Pick the tables {pending.name} should compare at every stop." actionLabel="Tables" actionIcon="listBullet" actionKind="secondary" onaction={() => void openTablesMenu()} />
+        {:else}
+          <EmptyState icon="db" title="No database to watch" body="Debug or run a test that starts a Testcontainer, or pick a saved connection." actionLabel="Choose target" actionIcon="db" actionKind="secondary" onaction={() => void openTargetMenu()} />
+        {/if}
       {/snippet}
 
-      {#if resp}
-        {#if ideDbWatch.viewMode === 'changes' && diff}
-          {#if diff.diffs.length === 0}
-            <div class="dbw-calm-banner" data-testid="ide-dbw-no-changes">
-              <Icon name="check" size={14} />
-              <span>No row changes since baseline ({diff.unchanged_count} rows identical).</span>
-            </div>
-          {:else}
-            <div class="dbw-table-scroll">
-              <table class="dbw-table mono" dir="ltr" data-testid="ide-dbw-diff-table">
-                <thead>
-                  <tr>
-                    <th class="dbw-status-col">State</th>
-                    {#each snapshotCols as col (col)}
-                      <th>{col}</th>
-                    {/each}
-                  </tr>
-                </thead>
-                <tbody>
-                  {#each diff.diffs as rowDiff (`${rowDiff.kind}:${rowDiff.key}`)}
-                    {@const displayCells = rowDiff.kind === 'removed' ? (rowDiff.previous_row ?? rowDiff.row) : rowDiff.row}
-                    <tr class="dbw-row-{rowDiff.kind}" data-testid="ide-dbw-diff-row">
-                      <td class="dbw-status-col">
-                        <Badge
-                          tone={rowDiff.kind === 'added' ? 'ok' : rowDiff.kind === 'removed' ? 'bad' : 'warn'}
-                          label={rowDiff.kind === 'added' ? '+ Added' : rowDiff.kind === 'removed' ? '− Removed' : '~ Modified'}
-                        />
-                      </td>
-                      {#each snapshotCols as col, colIdx (col)}
-                        {@const fieldChange = rowDiff.kind === 'modified' ? changeForColumn(rowDiff.changes, col) : undefined}
-                        <td class:dbw-cell-changed={Boolean(fieldChange)}>
-                          {#if fieldChange}
-                            <span class="dbw-val-before">{formatDbCellValue(fieldChange.before)}</span>
-                            <span class="dbw-val-arrow" aria-hidden="true">→</span>
-                            <span class="dbw-val-after">{formatDbCellValue(fieldChange.after)}</span>
-                          {:else}
-                            {formatDbCellValue(displayCells[colIdx])}
-                          {/if}
-                        </td>
-                      {/each}
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
-            </div>
-          {/if}
-        {:else}
-          {#if ideDbWatch.viewMode === 'changes' && !diff}
-            <div class="dbw-calm-banner" data-testid="ide-dbw-baseline-ready">
-              <Icon name="info" size={14} />
-              <span>Baseline captured ({snapshotRows.length} rows). Step in the debugger, finish a test run, or click Refresh &amp; diff to inspect mutations.</span>
-            </div>
-          {/if}
-          {#if snapshotRows.length === 0}
-            <div class="dbw-calm-banner">
-              <Icon name="db" size={14} />
-              <span>Query returned 0 rows on {resp.target_label}.</span>
-            </div>
-          {:else}
-            <div class="dbw-table-scroll">
-              <table class="dbw-table mono" dir="ltr" data-testid="ide-dbw-rows-table">
-                <thead>
-                  <tr>
-                    {#each snapshotCols as col (col)}
-                      <th>{col}</th>
-                    {/each}
-                  </tr>
-                </thead>
-                <tbody>
-                  {#each snapshotRows as row, rIdx (rIdx)}
-                    <tr>
-                      {#each snapshotCols as col, cIdx (col)}
-                        <td>{formatDbCellValue(row[cIdx])}</td>
-                      {/each}
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
-            </div>
-          {/if}
+      {#if read && w && !pending}
+        {#if waiting}
+          <p class="dbw-note" data-testid="ide-dbw-armed">
+            Watching {plural(w.items.length, 'table')} on {w.target.label}. Changes appear at the next stop.
+          </p>
+        {:else if changedItems.length === 0}
+          <p class="dbw-note" data-testid="ide-dbw-no-changes">
+            No changes since {ideDbWatch.compare === 'start' ? 'the start' : read.from_seq === 0 ? 'the baseline' : `stop ${read.from_seq}`} in {plural(items.length, 'table')}{w.target.engine === 'mysql' || w.target.engine === 'postgres' ? ' (writes the paused code has not committed are not visible yet)' : ''}.
+          </p>
+        {/if}
+        {#each waiting ? items : changedItems as it (it.object)}
+          <IdeDbWatchTable
+            item={it}
+            info={w.items.find((i) => i.object === it.object)}
+            current={currentRows[it.object] ?? null}
+            codeRef={codeRefOf(it.object)}
+            {waiting}
+            onmenu={(e) => openTableMenu(e, it)}
+            onretry={() => void ideDbWatch.snapshotNow()}
+            onjump={() => { const r = codeRefOf(it.object); if (r) void ide.openFile(r.file, { line: r.line, preview: false }); }}
+          />
+        {/each}
+        {#if !waiting && changedItems.length > 0 && quietItems.length > 0}
+          <p class="dbw-note dbw-quiet" data-testid="ide-dbw-quiet">No changes: {quietItems.map((i) => i.object).join(', ')}</p>
         {/if}
       {/if}
     </LoadState>
@@ -491,221 +364,25 @@
 </div>
 
 <style>
-  .dbw-root {
-    display: flex;
-    flex-direction: column;
-    block-size: 100%;
-    min-block-size: 0;
-    min-inline-size: 0;
-    background: var(--surface);
+  .dbw { container-type: inline-size; display: flex; flex-direction: column; block-size: 100%; min-block-size: 0; min-inline-size: 0; background: var(--surface); }
+  .dbw-bar {
+    display: flex; align-items: center; gap: var(--sp-2);
+    block-size: 32px; min-block-size: 32px; padding-inline: var(--sp-3);
+    border-block-end: 1px solid var(--border); flex-shrink: 0; overflow: hidden;
   }
-  .dbw-toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--sp-4);
-    padding: var(--sp-2) var(--sp-4);
-    border-block-end: 1px solid var(--border);
-    background: var(--surface);
-    flex-wrap: wrap;
-    flex-shrink: 0;
-  }
-  .dbw-target-group,
-  .dbw-actions {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-3);
-    flex-wrap: wrap;
-    min-inline-size: 0;
-  }
-  .dbw-field-label {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    font-weight: 500;
-  }
-  .dbw-select {
-    min-inline-size: 180px;
-    max-inline-size: 260px;
-    block-size: 26px;
-    padding-block: 0;
-    font-size: var(--fs-xs);
-  }
-  .dbw-engine-select {
-    inline-size: 112px;
-    block-size: 26px;
-    padding-block: 0;
-    font-size: var(--fs-xs);
-  }
-  .dbw-input {
-    inline-size: 150px;
-    block-size: 26px;
-    font-size: var(--fs-xs);
-  }
-  .dbw-query-input {
-    inline-size: 210px;
-    max-inline-size: 100%;
-    block-size: 26px;
-    font-size: var(--fs-xs);
-  }
-  .dbw-chips-bar {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-3);
-    padding: var(--sp-2) var(--sp-4);
-    border-block-end: 1px solid var(--separator);
-    background: var(--surface-2);
-    overflow-x: auto;
-    flex-shrink: 0;
-  }
-  .dbw-chips-label {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    white-space: nowrap;
-    flex-shrink: 0;
-  }
-  .dbw-chip {
-    display: inline-flex;
-    align-items: center;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface);
-    flex-shrink: 0;
-  }
-  .dbw-chip.is-active {
-    border-color: var(--accent-line);
-    background: var(--accent-faint);
-  }
-  .dbw-chip-select {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--sp-2);
-    padding: var(--sp-1) var(--sp-3);
-    border: 0;
-    background: transparent;
-    color: var(--text);
-    font-size: var(--fs-xs);
-    cursor: pointer;
-  }
-  .dbw-chip-select:hover {
-    color: var(--accent-text);
-  }
-  .dbw-chip-jump {
-    padding: var(--sp-1) var(--sp-3);
-    border: 0;
-    border-inline-start: 1px solid var(--separator);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-    cursor: pointer;
-  }
-  .dbw-chip-jump:hover {
-    color: var(--accent-text);
-    background: var(--hover);
-  }
-  .dbw-subbar {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-4);
-    padding: var(--sp-2) var(--sp-4);
-    border-block-end: 1px solid var(--border);
-    background: var(--surface);
-    flex-wrap: wrap;
-    flex-shrink: 0;
-  }
-  .dbw-seg button {
-    font-size: var(--fs-xs);
-    padding-inline: var(--sp-4);
-  }
-  .dbw-diff-badges {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--sp-2);
-    flex-wrap: wrap;
-  }
-  .dbw-meta-note {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .dbw-query-echo {
-    margin-inline-start: auto;
-    max-inline-size: 360px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .dbw-body {
-    flex: 1;
-    min-block-size: 0;
-    min-inline-size: 0;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
-  .dbw-calm-banner {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-3);
-    padding: var(--sp-4) var(--sp-5);
-    border-block-end: 1px solid var(--separator);
-    background: var(--surface-2);
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-    flex-shrink: 0;
-  }
-  .dbw-table-scroll {
-    flex: 1;
-    min-block-size: 0;
-    overflow: auto;
-  }
-  .dbw-table {
-    inline-size: 100%;
-    border-collapse: collapse;
-    font-size: var(--fs-xs);
-    text-align: start;
-  }
-  .dbw-table th {
-    position: sticky;
-    inset-block-start: 0;
-    z-index: var(--z-sticky);
-    padding: var(--sp-2) var(--sp-4);
-    background: var(--surface-2);
-    border-block-end: 1px solid var(--border);
-    color: var(--text-dim);
-    font-weight: 600;
-    white-space: nowrap;
-  }
-  .dbw-table td {
-    padding: var(--sp-2) var(--sp-4);
-    border-block-end: 1px solid var(--separator);
-    color: var(--text);
-    white-space: nowrap;
-    max-inline-size: 360px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .dbw-status-col {
-    inline-size: 1%;
-    white-space: nowrap;
-  }
-  .dbw-row-added td {
-    background: var(--success-soft);
-  }
-  .dbw-row-removed td {
-    background: var(--danger-soft);
-    color: var(--text-dim);
-  }
-  .dbw-cell-changed {
-    background: var(--warning-soft);
-  }
-  .dbw-val-before {
-    color: var(--danger);
-    text-decoration: line-through;
-  }
-  .dbw-val-arrow {
-    padding-inline: var(--sp-2);
-    color: var(--text-dim);
-  }
-  .dbw-val-after {
-    color: var(--success);
-    font-weight: 600;
-  }
+  .dbw-pick { display: inline-flex; align-items: center; gap: var(--sp-2); block-size: 24px; min-inline-size: 0; max-inline-size: 34%; flex: 0 1 auto; }
+  .dbw-pick-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
+  .dbw-caption { display: inline-flex; align-items: center; gap: var(--sp-2); flex: 1 1 0; min-inline-size: 0; color: var(--text-dim); font-size: var(--fs-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dbw-spin { --spinner-size: 12px; flex-shrink: 0; }
+  .dbw-seg { block-size: 24px; flex-shrink: 0; }
+  .dbw-seg button { padding-block: 0; padding-inline: var(--sp-4); font-size: var(--fs-xs); white-space: nowrap; }
+  .dbw-bar > :global(.btn.primary), .dbw-bar > :global(.icon-btn) { flex-shrink: 0; }
+  .dbw-body { flex: 1; min-block-size: 0; min-inline-size: 0; overflow: auto; }
+  .dbw-note { margin: 0; padding-block: var(--sp-3); padding-inline: var(--sp-4); color: var(--text-dim); font-size: var(--fs-xs); border-block-end: 1px solid var(--separator); }
+  .dbw-quiet { border-block-end: 0; }
+  .dbw-prod { flex-shrink: 0; padding-block: var(--sp-2); padding-inline: var(--sp-4); border: 0; border-block-end: 1px solid var(--separator); background: var(--warning-soft); color: var(--text); font-size: var(--fs-xs); text-align: start; cursor: pointer; }
+  .dbw-prod.is-prod { background: var(--danger-soft); color: var(--danger); }
+  .dbw-prod:hover { text-decoration: underline; }
+  @container (max-width: 620px) { .dbw-caption { display: none; } }
+  @container (max-width: 480px) { .dbw-seg { display: none; } }
 </style>

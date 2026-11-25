@@ -4014,12 +4014,18 @@ impl SessionManager {
         let _ = self.repo.get(id).await?;
         self.repo.replace_meta_keys(id, &patch).await?;
         let updated = self.repo.get(id).await?;
-        let _ = self.events.send(Event::SessionMetaUpdated {
-            session_id: updated.id.clone(),
-            workspace_id: updated.workspace_id.clone(),
-            meta: updated.meta.clone(),
-        });
+        self.announce_meta(&updated);
         Ok(updated)
+    }
+
+    /// Tell every Otto window a session's meta changed (also a Threads
+    /// session's, whose meta lives in the runtime's own table).
+    pub fn announce_meta(&self, s: &Session) {
+        let _ = self.events.send(Event::SessionMetaUpdated {
+            session_id: s.id.clone(),
+            workspace_id: s.workspace_id.clone(),
+            meta: s.meta.clone(),
+        });
     }
 
     /// Kill the PTY (if live) and mark the session exited.

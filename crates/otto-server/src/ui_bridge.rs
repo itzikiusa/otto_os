@@ -47,6 +47,7 @@ use tokio::sync::{mpsc, oneshot, Notify};
 use tokio::time::Instant;
 
 use crate::state::ServerCtx;
+pub use crate::ui_commands::deadline_for;
 use crate::ui_commands::{self, UiCommandSpec};
 
 /// Largest client→server text frame accepted on `/ws/events`.
@@ -148,6 +149,8 @@ pub struct UiBridge {
     presence_changed: Notify,
     grant_changed: Notify,
     last_request: Mutex<HashMap<Id, Instant>>,
+    /// Session → (its last `ide_debug_start`'s document, that start's root).
+    debug_doc: Mutex<HashMap<Id, (String, String)>>,
     seq: AtomicU64,
 }
 
@@ -159,6 +162,7 @@ impl Default for UiBridge {
             presence_changed: Notify::new(),
             grant_changed: Notify::new(),
             last_request: Mutex::new(HashMap::new()),
+            debug_doc: Mutex::new(HashMap::new()),
             seq: AtomicU64::new(1),
         }
     }
@@ -368,8 +372,9 @@ pub use otto_core::ui_grant::{grant_decided_at, grant_record, grant_state, META_
 // ===========================================================================
 
 /// Cap every array at [`MAX_AGENT_ROWS`] (marking `<key>_truncated: <n>` on the
-/// parent object), then redact. What the agent sees of any UI result.
-pub fn shape_result(v: Value) -> Value {
+/// parent object), then redact (`data`: the data rules too — debugger values,
+/// console output, responses). What the agent sees of any UI result.
+pub fn shape_result(v: Value, data: bool) -> Value {
     fn cap(v: Value) -> Value {
         match v {
             Value::Array(a) => Value::Array(a.into_iter().take(MAX_AGENT_ROWS).map(cap).collect()),
@@ -392,7 +397,12 @@ pub fn shape_result(v: Value) -> Value {
             other => other,
         }
     }
-    otto_core::redact::redact_json(&cap(v)).value
+    let redact = if data {
+        otto_core::redact::redact_data_json
+    } else {
+        otto_core::redact::redact_json
+    };
+    redact(&cap(v)).value
 }
 
 /// `{ui_visible, …result}` — the result object with the visibility flag
@@ -405,19 +415,6 @@ fn with_visibility(v: Value, visible: bool) -> Value {
         }
         other => json!({"ui_visible": visible, "result": other}),
     }
-}
-
-/// The deadline the daemon gives the UI for `spec` with these arguments:
-/// the catalog default, or for a statement carrying `timeout_ms` that + 15 s;
-/// capped at [`ui_commands::MAX_TIMEOUT_MS`].
-pub fn deadline_for(spec: &UiCommandSpec, args: &Value) -> Duration {
-    let ms = match args.get("timeout_ms").and_then(Value::as_u64) {
-        Some(t) if spec.input_schema["properties"].get("timeout_ms").is_some() => {
-            t.saturating_add(15_000).max(spec.timeout_ms)
-        }
-        _ => spec.timeout_ms,
-    };
-    Duration::from_millis(ms.min(ui_commands::MAX_TIMEOUT_MS))
 }
 
 /// The deadline after a `progress {awaiting_human}` at `now`: now + 120 s,
@@ -546,6 +543,9 @@ impl UiBridge {
         self.presence_changed.notify_waiters();
     }
 
+    fn debug_pin(&self, session_id: &Id) -> Option<(String, String)> {
+        self.debug_doc.lock().unwrap().get(session_id).cloned()
+    }
     /// Snapshot of the registered (hello'd) documents.
     pub fn docs(&self) -> Vec<DocInfo> {
         self.docs
@@ -608,6 +608,8 @@ impl UiBridge {
                 "session_id": session.id,
                 "title": session.title,
                 "provider": session.provider,
+                "cwd": session.cwd,
+                "runtime": session.meta["runtime"].as_str().unwrap_or("pty"),
             },
             "command": command,
             "args": args,
@@ -955,11 +957,14 @@ pub async fn store_grant(ctx: &ServerCtx, id: &Id, record: Value) -> otto_core::
         return ctx.manager.update_meta(id, record).await;
     }
     let grant = record.get(META_KEY).cloned().unwrap_or(Value::Null);
-    Ok(ctx
+    let session = ctx
         .agent_runtime
         .set_ui_control(id, grant)
         .await?
-        .into_session())
+        .into_session();
+    // Every window hears it (a Threads revoke clears the IDE window's bar too).
+    ctx.manager.announce_meta(&session);
+    Ok(session)
 }
 
 /// The message the agent gets while the user has not allowed UI control.
@@ -1002,8 +1007,11 @@ pub async fn run(
     } else {
         args.clone()
     };
-    ui_commands::validate_args(&spec.input_schema, &args)
-        .map_err(|m| UiError::new("invalid_args", m))?;
+    ui_commands::validate_command(spec, &args).map_err(|m| UiError::new("invalid_args", m))?;
+    let last = ctx.ui_bridge.debug_pin(&session.id); // its files stay in that start's root
+    let root = last.as_ref().map(|l| l.1.as_str());
+    let args = ui_commands::confine_paths(spec, args, &session.cwd, root)
+        .map_err(|m| UiError::new("forbidden", m))?;
 
     let session = ensure_grant(ctx, session, spec).await?;
     let args = resolve_refs(ctx, auth, &session, args).await?;
@@ -1015,8 +1023,18 @@ pub async fn run(
         .and_then(Value::as_str)
         .map(str::to_string);
     let budget = deadline_for(spec, &args);
+    let window = spec.open_placement.as_deref() == Some("window");
+    let mut docs = bridge.docs(); // a `window` command is for the person to watch: no hidden doc
+    let pinned = (spec.module == "ide" && spec.name != "ide_debug_start")
+        .then(|| last.map(|l| l.0))
+        .flatten()
+        .filter(|c| {
+            let ok = |d: &DocInfo| &d.conn_id == c && d.user_id == session.created_by;
+            docs.iter().any(|d| ok(d) && d.module == spec.module)
+        });
+    docs.retain(|d| !window || d.visible || d.module != spec.module);
     let target = match pick(
-        &bridge.docs(),
+        &docs,
         &session.created_by,
         device.as_deref(),
         &spec.module,
@@ -1024,14 +1042,21 @@ pub async fn run(
     ) {
         Pick::Direct(conn) => Some(conn),
         Pick::Open { via, window_id } => {
-            let open_args =
-                json!({"module": spec.module, "route": spec.route, "placement": "side"});
+            let open_args = if window {
+                json!({"module": spec.module, "route": spec.route, "placement": "window", "fallback": "side"})
+            } else {
+                json!({"module": spec.module, "route": spec.route, "placement": "side"})
+            };
             let open_budget = ui_commands::get("open")
                 .map(|o| Duration::from_millis(o.timeout_ms))
                 .unwrap_or(Duration::from_secs(15));
-            bridge
+            let opened = bridge
                 .dispatch(&via, &session, "open", &open_args, open_budget)
                 .await?;
+            // A new pop-out window reports its own id (not the opener's).
+            let window_id = opened["window_id"]
+                .as_str()
+                .map_or(window_id, str::to_string);
             let (user, module, command) = (
                 session.created_by.clone(),
                 spec.module.clone(),
@@ -1055,17 +1080,22 @@ pub async fn run(
         }
         Pick::None => None,
     };
-    match target {
+    match pinned.or(target) {
         Some(conn) => {
             let v = bridge
                 .dispatch(&conn, &session, &spec.name, &args, budget)
                 .await?;
-            Ok(with_visibility(shape_result(v), true))
+            if spec.name == "ide_debug_start" {
+                let root = args["root"].as_str().unwrap_or(&session.cwd).to_string();
+                let mut pins = bridge.debug_doc.lock().unwrap();
+                pins.insert(session.id.clone(), (conn, root));
+            }
+            Ok(with_visibility(shape_result(v, spec.module == "ide"), true))
         }
         None => match spec.headless.as_deref() {
             Some(h) => {
                 let v = headless(ctx, auth, &session, h, &args).await?;
-                let mut v = with_visibility(shape_result(v), false);
+                let mut v = with_visibility(shape_result(v, false), false);
                 v["note"] =
                     json!("no Otto window can show this right now — ran it in the daemon instead");
                 Ok(v)
@@ -1724,14 +1754,25 @@ mod tests {
     #[test]
     fn results_are_row_capped_and_redacted() {
         let rows: Vec<Value> = (0..250).map(|i| json!([i])).collect();
-        let v = shape_result(json!({"rows": rows, "note": "key AKIAIOSFODNN7EXAMPLE"}));
+        let v = shape_result(
+            json!({"rows": rows, "note": "key AKIAIOSFODNN7EXAMPLE"}),
+            false,
+        );
         assert_eq!(v["rows"].as_array().unwrap().len(), MAX_AGENT_ROWS);
         assert_eq!(v["rows_truncated"], json!(250));
         assert!(
             !v["note"].as_str().unwrap().contains("AKIAIOSFODNN7EXAMPLE"),
             "{v}"
         );
-        let small = shape_result(json!({"rows": [[1]]}));
+        let small = shape_result(json!({"rows": [[1]]}), false);
+        // IDE debugging results get the data rules: env pairs, DSNs, struct text.
+        let stop = json!({"locals": {"cfg": "Config{Password: \"hunter2\"}"},
+            "output_tail": ["DB_PASSWORD=s3cret", "dial mysql://root:pw9@127.0.0.1/app"]});
+        let masked = shape_result(stop.clone(), true).to_string();
+        for secret in ["hunter2", "s3cret", "pw9"] {
+            assert!(!masked.contains(secret), "{masked}");
+        }
+        assert!(shape_result(stop, false).to_string().contains("s3cret"));
         assert!(small.get("rows_truncated").is_none());
         assert_eq!(
             with_visibility(json!({"a":1}), true),
@@ -1868,8 +1909,22 @@ mod tests {
         assert_eq!(f["session_id"], "s1");
         assert_eq!(
             f["agent"],
-            json!({"session_id":"s1","title":"Fix the report","provider":"claude"})
+            json!({"session_id":"s1","title":"Fix the report","provider":"claude",
+                   "cwd":"/tmp","runtime":"pty"})
         );
+        // A Threads conversation says so: Proceed then queues a runtime prompt.
+        let mut thread = session("s2", "u");
+        thread.meta = json!({"runtime": "structured"});
+        let _ = b
+            .send_command(
+                &conn,
+                &thread,
+                "db_run_query",
+                &json!({}),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        assert_eq!(next_frame(&mut rx)["agent"]["runtime"], "structured");
         assert_eq!(f["command"], "db_run_query");
         assert_eq!(f["args"], json!({"tab_id":"t"}));
         assert_eq!(f["deadline_ms"], 5000);

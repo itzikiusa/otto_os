@@ -28,12 +28,15 @@
   import { ideChordLabel, ideKeymapPresetOf, ideShortcutChords, type IdeShortcutId } from './shell/ideShortcuts';
   import IdeConsoleView, { type ConsoleLineInput } from './debug/IdeConsoleView.svelte';
   import IdeDebugErrorCard from './debug/IdeDebugErrorCard.svelte';
+  import IdeAgentStoppedDriving from './agentDebug/IdeAgentStoppedDriving.svelte';
   import IdeDebuggerInspector from './debug/IdeDebuggerInspector.svelte';
   import { openBreakpointsList } from './debug/ideBreakpointsNav.svelte';
   import { lastOutputSeq, OutputSeqTracker, stitchOutput } from './debug/ideConsoleModel';
   import { chordAria, debugErrorCard, pickReattachSession, withKeyHint } from './debug/ideDebugPanelModel';
   import { ideDockPrefs } from './debug/ideDockPrefs.svelte';
   import { ideCollabNotices } from './store/ideCollabNotices.svelte';
+  import { ideDbWatch } from './dbwatch/ideDbWatchState.svelte';
+  import IdeDbWatchStrip from './dbwatch/IdeDbWatchStrip.svelte';
 
   let activeSubTab = $state<'debugger' | 'console'>('debugger');
   let replInput = $state('');
@@ -307,9 +310,12 @@
     </button>
   </header>
 
+  {#if dbg && (ideDbWatch.watch || ideDbWatch.prodWaiting)}<IdeDbWatchStrip />{/if}
+
   {#if errorCard}
     <IdeDebugErrorCard card={errorCard} onshowoutput={showConsole} ondismiss={dismissError} onretry={retryLaunch} />
   {/if}
+  <IdeAgentStoppedDriving />
 
   {#if !dbg}
     {#if !errorCard}

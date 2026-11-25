@@ -430,6 +430,21 @@ impl DevicesRepo {
         Ok(row.map(|r| device_from_row(&r, current)))
     }
 
+    /// Names of the unexpired devices any user used in the last `within_secs`.
+    /// Use is recorded at most every [`DEVICE_TOUCH_SECS`], so this answers
+    /// "recently", not "connected right now".
+    pub async fn recently_used(&self, within_secs: i64) -> Result<Vec<String>> {
+        let now = Utc::now().to_rfc3339();
+        let since = (Utc::now() - Duration::seconds(within_secs)).to_rfc3339();
+        sqlx::query_scalar("SELECT name FROM phone_devices WHERE last_seen_at > ? AND expires_at > ? AND idle_expires_at > ?")
+            .bind(since)
+            .bind(&now)
+            .bind(&now)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db("recently used devices"))
+    }
+
     /// `user_id`'s live devices, newest first.
     pub async fn list(&self, user_id: &Id, current: Option<&str>) -> Result<Vec<PhoneDevice>> {
         let now = Utc::now().to_rfc3339();
@@ -648,6 +663,23 @@ mod tests {
             repo.decide(&user, &id, true).await,
             Err(Error::Conflict(_))
         ));
+    }
+
+    /// D-016: the restart dialog's phones — devices used recently, by name.
+    #[tokio::test]
+    async fn recently_used_lists_devices_seen_since() {
+        let pool = mem_pool().await;
+        let repo = DevicesRepo::new(pool.clone());
+        let user = seed_user(&pool, "u").await;
+        let (_token, device_id) = pair(&repo, &user).await;
+        assert_eq!(repo.recently_used(3600).await.unwrap().len(), 1);
+        sqlx::query("UPDATE phone_devices SET last_seen_at = ? WHERE id = ?")
+            .bind((Utc::now() - Duration::hours(2)).to_rfc3339())
+            .bind(&device_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(repo.recently_used(3600).await.unwrap().is_empty());
     }
 
     #[tokio::test]

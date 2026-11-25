@@ -234,6 +234,19 @@ impl RoomRegistry {
     pub async fn all(&self) -> Vec<SharedRoom> {
         self.rooms.lock().await.values().cloned().collect()
     }
+    /// Rooms live in memory: a daemon restart ends every one (the restart dialog).
+    pub async fn restart_impact(&self) -> Vec<otto_core::restart::ImpactItem> {
+        let mut titles = Vec::new();
+        for room in self.all().await {
+            titles.push(room.lock().await.title.clone());
+        }
+        vec![otto_core::restart::ImpactItem::named(
+            false,
+            "session_rooms",
+            ("session room", "session rooms"),
+            titles,
+        )]
+    }
     pub async fn forget(&self, id: &str) {
         self.rooms.lock().await.remove(id);
     }

@@ -37,7 +37,10 @@ use self::collab_sse::{
     collab_guest_events, collab_guest_join, collab_guest_state, create_collab_room, install_plugin,
     list_collab_rooms, list_plugins, set_collab_role, toggle_plugin, uninstall_plugin,
 };
-use self::db_watch::{db_watch_detect, db_watch_snapshot};
+use self::db_watch::{
+    db_watch_delete, db_watch_detect, db_watch_list, db_watch_objects, db_watch_read,
+    db_watch_snapshot_now, db_watch_start, db_watch_update,
+};
 use self::intelligence::{
     fs_complete, history_entry, history_list, history_restore, history_snapshot, lsp_code_actions,
     lsp_definition, lsp_diagnostics, lsp_format, lsp_hover, lsp_implementation, lsp_references,
@@ -48,10 +51,10 @@ use self::projects_deps::{
     list_projects, scan_repos, upsert_project,
 };
 use self::runtime_debug::{
-    create_python_venv, debug_command, debug_evaluate, debug_variables, delete_run_config,
-    get_debug_session, get_run, list_debug_sessions, list_run_configs, set_debug_breakpoints,
-    start_debug_session, start_run, stop_run, stream_debug_events, stream_run_events,
-    upsert_run_config,
+    create_python_venv, debug_command, debug_evaluate, debug_port, debug_variables,
+    delete_run_config, get_debug_session, get_run, list_debug_sessions, list_run_configs,
+    set_debug_breakpoints, start_debug_session, start_run, stop_run, stream_debug_events,
+    stream_run_events, upsert_run_config,
 };
 use self::toolchains_env::{
     add_project_folder, delete_local_sdk, get_environments, get_shell_env, get_toolchain_job,
@@ -232,6 +235,7 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
                 "/ide/debug/sessions/{id}/evaluate",
                 post(debug_evaluate::<S>),
             )
+            .route("/ide/debug/sessions/{id}/port", get(debug_port::<S>))
             // E. "Share with Friends" Host Routes
             .route(
                 "/ide/collab/rooms",
@@ -252,7 +256,21 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
             .route("/ide/plugins/{slug}", delete(uninstall_plugin::<S>))
             // G. Live Database Watch & Component-Test Watcher
             .route("/ide/db-watch/detect", post(db_watch_detect::<S>))
-            .route("/ide/db-watch/snapshot", post(db_watch_snapshot::<S>)),
+            .route("/ide/db-watch/objects", post(db_watch_objects::<S>))
+            .route(
+                "/ide/db-watch/watches",
+                post(db_watch_start::<S>).get(db_watch_list::<S>),
+            )
+            .route(
+                "/ide/db-watch/watches/{id}",
+                get(db_watch_read::<S>)
+                    .patch(db_watch_update::<S>)
+                    .delete(db_watch_delete::<S>),
+            )
+            .route(
+                "/ide/db-watch/watches/{id}/snapshot",
+                post(db_watch_snapshot_now::<S>),
+            ),
     )
 }
 

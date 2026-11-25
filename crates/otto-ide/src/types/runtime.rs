@@ -304,6 +304,18 @@ pub struct IdeDebugEvaluateResp {
     pub variables_reference: i64,
 }
 
+/// `GET /ide/debug/sessions/{id}/port?port=` — an agent launch's `ready_port`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct IdeDebugPortQuery {
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeDebugPortResp {
+    /// Something accepts TCP on 127.0.0.1 or [::1] at that port.
+    pub open: bool,
+}
+
 // ---------------------------------------------------------------------------
 // E. "Share with Friends" Collaborative IDE
 // ---------------------------------------------------------------------------

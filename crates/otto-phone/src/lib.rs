@@ -21,6 +21,22 @@ use otto_core::auth::{AuthContext, BoxFuture};
 use otto_state::audit::NewAuditEntry;
 use otto_state::DbPool;
 
+/// Phones used in the last 10 minutes: a daemon restart drops their
+/// connection until Otto is back (the restart dialog).
+pub async fn restart_impact(pool: &DbPool) -> Vec<otto_core::restart::ImpactItem> {
+    let names = otto_rbac::devices::DevicesRepo::new(pool.clone())
+        .recently_used(600)
+        .await
+        .unwrap_or_default();
+    let labels = (
+        "phone used in the last 10 minutes",
+        "phones used in the last 10 minutes",
+    );
+    vec![otto_core::restart::ImpactItem::named(
+        false, "phones", labels, names,
+    )]
+}
+
 pub use routes::{protected_router, public_router};
 
 /// What the host (otto-server) hands the Phone access routes.

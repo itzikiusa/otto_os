@@ -686,3 +686,69 @@ async fn non_root_ide_writes_refuse_git_and_agent_control_paths() {
         assert_eq!(st, StatusCode::FORBIDDEN, "non-root IDE root at $HOME");
     }
 }
+
+async fn probe_port(app: &Router, sid: &str, port: u16) -> (StatusCode, Value) {
+    let path = format!("/ide/debug/sessions/{sid}/port?port={port}");
+    send_json(app, Method::GET, &path, None).await
+}
+
+/// An agent launch's `ready_port`: the session's owner learns whether the
+/// debuggee listens on loopback yet; nobody else can probe through it.
+#[tokio::test]
+async fn debug_port_probe_reports_a_loopback_listener_to_the_session_owner_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws-alice");
+    std::fs::create_dir_all(&ws).unwrap();
+    let script = write_bash_debug_fixture(&ws, "alice.sh");
+    let (ctx, _) = build_test_app(tmp.path().join("data"), &tmp.path().join("db.sqlite")).await;
+    let alice = router_as(&ctx, non_root_user("u_alice"), vec![ws.clone()]);
+    let bob = router_as(&ctx, non_root_user("u_bob"), vec![]);
+    let sid = start_owned_debug_session(&ctx, "u_alice", &ws.to_string_lossy(), &script).await;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (st, body) = probe_port(&alice, &sid, port).await;
+    assert_eq!(
+        (st, &body["open"]),
+        (StatusCode::OK, &json!(true)),
+        "{body}"
+    );
+    let (st, _) = probe_port(&bob, &sid, port).await;
+    assert_ne!(
+        st,
+        StatusCode::OK,
+        "another user must not probe through alice's session"
+    );
+    // Port 0 and the daemon's own port are no debuggee's.
+    for bad in [0, 7700] {
+        let (st, _) = probe_port(&alice, &sid, bad).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "port {bad}");
+    }
+    drop(listener);
+    let (st, body) = probe_port(&alice, &sid, port).await;
+    assert_eq!(
+        (st, &body["open"]),
+        (StatusCode::OK, &json!(false)),
+        "{body}"
+    );
+    // An ended session probes nothing.
+    let stop = json!({ "action": "stop" });
+    let path = format!("/ide/debug/sessions/{sid}/command");
+    send_json(&alice, Method::POST, &path, Some(stop)).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (_, s) = send_json(
+            &alice,
+            Method::GET,
+            &format!("/ide/debug/sessions/{sid}"),
+            None,
+        )
+        .await;
+        if matches!(s["session"]["state"].as_str(), Some("terminated" | "error")) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "session never ended: {s}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let (st, _) = probe_port(&alice, &sid, port).await;
+    assert_ne!(st, StatusCode::OK, "an ended session must not probe");
+}

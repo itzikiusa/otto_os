@@ -23,4 +23,6 @@ export const ShareModalChunk = lazyComponent(() => import('../modules/agents/Sha
 export const PaletteChunk = lazyComponent(() => import('./Palette.svelte'));
 export const TriageBarChunk = lazyComponent(() => import('./TriageBar.svelte'));
 export const ShortcutsOverlayChunk = lazyComponent(() => import('./ShortcutsOverlay.svelte'));
+/** Desktop updates: the shell's updater state + the Update dialog. */
+export const UpdateHostChunk = lazyComponent(() => import('./UpdateHost.svelte'));
 export const FloatingBarChunk = lazyComponent(() => import('../lib/components/FloatingBar.svelte'));

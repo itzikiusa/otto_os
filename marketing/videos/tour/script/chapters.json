@@ -1,6 +1,6 @@
 {
   "title": "Otto — product tour",
-  "edition": "20261116",
+  "edition": "20261125",
   "bpm": 120,
   "fps": 30,
   "chapters": [
@@ -40,37 +40,27 @@
       "id": "agents",
       "section": "agents",
       "title": "Agents",
-      "bars": 3,
+      "bars": 6,
       "captions": [
-        "Claude Code, Codex, Antigravity and shells run as real sessions.",
-        "Tile live terminals, or broadcast one prompt to many."
+        "Agents is one workspace: your sessions in an inbox beside the canvas, status in words.",
+        "Switch a session between Terminal and Chat, tile it with the rest, or broadcast one prompt to many."
       ]
     },
     {
       "id": "threads",
       "section": "threads",
       "title": "Threads",
-      "bars": 6,
+      "bars": 7,
       "captions": [
-        "Threads run every structured agent: Claude, Codex, Gemini, Grok, OpenCode, pi, Muse and more.",
-        "Plans, commands and diffs stream live. Approve inline, or ask another agent from inside the thread."
-      ]
-    },
-    {
-      "id": "council",
-      "section": "threads",
-      "title": "Council",
-      "bars": 4,
-      "captions": [
-        "Council sends one prompt to several agents, side by side.",
-        "A judge compares the answers. A follow-up goes to every seat as round 2."
+        "Threads run every structured agent: Claude, Codex, Antigravity, OpenCode, pi, Gemini, Grok and Muse.",
+        "Plans, commands and diffs stream live. Approve inline, or compare models side by side."
       ]
     },
     {
       "id": "loops",
       "section": "loops",
       "title": "Goal Loops",
-      "bars": 4,
+      "bars": 3,
       "music": "verse",
       "captions": [
         "Give a goal and acceptance checks.",
@@ -81,7 +71,7 @@
       "id": "workflows",
       "section": "workflows",
       "title": "Workflows and Scheduled Tasks",
-      "bars": 4,
+      "bars": 3,
       "captions": [
         "Workflows chain agents, approvals and tools.",
         "Scheduled tasks run agents on a cadence and report back."
@@ -91,29 +81,51 @@
       "id": "personal-agents",
       "section": "personal-agents",
       "title": "Personal Agents",
-      "bars": 4,
+      "bars": 2,
       "captions": [
-        "A personal agent's Chat is a thread on the same runtime, with its tools.",
-        "Each agent runs its routines on a schedule and reports back."
+        "A personal agent's Chat is a thread on the same runtime, with its tools and routines."
       ]
     },
     {
       "id": "ide",
       "section": "ide",
       "title": "IDE (Beta)",
-      "bars": 8,
+      "bars": 6,
       "music": "chorus",
       "captionBeats": [
-        10,
-        10,
-        6,
-        6
+        8,
+        8,
+        8
       ],
       "captions": [
-        "The IDE (Beta) opens your multi-language project. The git gutter marks your changes; the language server adds docs.",
-        "Type errors show as you read. Run configurations stream their output and a test tree.",
-        "Set a breakpoint and debug: frames, variables, evaluate.",
-        "Ask the agent beside your code, then apply its diff or undo it."
+        "The IDE keeps your projects in the order you added them, and brings back every tab after a restart.",
+        "Type with the language server beside you, run a test configuration and see the results.",
+        "Debug with breakpoints, frames and variables, or ask the agent about the selected code."
+      ]
+    },
+    {
+      "id": "agent-debug",
+      "section": "ide",
+      "title": "Debug with an agent",
+      "bars": 6,
+      "captionBeats": [
+        8,
+        8,
+        8
+      ],
+      "captions": [
+        "Ask an agent to debug with Otto. Before anything runs, you see exactly what it will start.",
+        "Its breakpoints are marked as its own. At every stop it says what the values show, and waits.",
+        "Press Proceed to let it go on, or use the debugger yourself to take over."
+      ]
+    },
+    {
+      "id": "dbwatch",
+      "section": "ide",
+      "title": "DB Watch",
+      "bars": 2,
+      "captions": [
+        "DB Watch shows the rows your code wrote at every stop: changed cells only, before → after."
       ]
     },
     {
@@ -122,15 +134,15 @@
       "title": "Git and AI review",
       "bars": 4,
       "captions": [
-        "A commit graph with your work in progress and pull requests.",
-        "Multi-agent code review turns findings into tracked fixes."
+        "Git opens on History. Your uncommitted changes are its top row.",
+        "Stage, commit and draft the message there. Multi-agent review turns findings into tracked fixes."
       ]
     },
     {
       "id": "product",
       "section": "product",
       "title": "Product and Design Hall",
-      "bars": 5,
+      "bars": 4,
       "captions": [
         "A story's Design tab lists the designs that implement it.",
         "Design Hall is the one home for designs: versions, compare, approve, and comments pinned on the design."
@@ -140,10 +152,9 @@
       "id": "vault",
       "section": "vault",
       "title": "Vault and Skills Lab",
-      "bars": 3,
+      "bars": 2,
       "captions": [
-        "The Vault links your markdown docs with backlinks and live context.",
-        "Skills Lab is the one home for your agent skills."
+        "The Vault links your docs with backlinks. Skills Lab is the one home for agent skills."
       ]
     },
     {
@@ -164,7 +175,7 @@
       "bars": 4,
       "captions": [
         "SSH, AWS, Kubernetes, APIs and the web.",
-        "MCP servers run native or governed. A dangerous tool call waits for a person."
+        "An MCP server that runs through Otto can be available in every workspace, with one set of credentials."
       ]
     },
     {
@@ -207,6 +218,16 @@
       "captions": [
         "Continue on phone: scan, approve the match on your Mac, and the thread opens.",
         "Or switch the phone to the light version: five tabs, one tap back."
+      ]
+    },
+    {
+      "id": "updates",
+      "section": "desktop-app",
+      "title": "Updates",
+      "bars": 4,
+      "captions": [
+        "Check for Updates… shows what is new and downloads the new version.",
+        "Restart to finish: Otto lists what keeps running first."
       ]
     },
     {

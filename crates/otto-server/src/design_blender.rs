@@ -212,6 +212,12 @@ fn claim_render(reg: &JobRegistry, id: &str) -> ApiResult<otto_core::cancel_sign
     })
 }
 
+/// Renders queued or running (a daemon restart stops them).
+pub fn running_jobs(reg: &JobRegistry) -> usize {
+    let map = reg.jobs.lock().unwrap_or_else(|p| p.into_inner());
+    map.values().filter(|j| j.finished_at.is_none()).count()
+}
+
 fn job_upsert(reg: &JobRegistry, job: RenderJob) {
     let mut map = reg.jobs.lock().unwrap_or_else(|p| p.into_inner());
     // Prune finished jobs past their TTL so the map stays bounded.

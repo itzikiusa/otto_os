@@ -1,0 +1,8 @@
+{
+  "name": "otto-release-signer",
+  "private": true,
+  "description": "The Tauri CLI that signs the updater archive in .github/workflows/release.yml (installed with npm ci --ignore-scripts from this lockfile).",
+  "dependencies": {
+    "@tauri-apps/cli": "2.12.6"
+  }
+}

@@ -23,6 +23,36 @@ use crate::holder::{adopt_socket, best_effort_shutdown_socket, list_holder_socke
 use crate::process::ChildControl;
 
 impl AgentRuntime {
+    /// What [`Self::shutdown_for_restart`] would keep (a child in a
+    /// runtime-holder, persistence on) and end (a direct child) right now —
+    /// the restart dialog's count. Sessions without a process are not counted.
+    pub async fn restart_impact(&self) -> Vec<otto_core::restart::ImpactItem> {
+        let persist = self.inner.host.session_persistence_enabled().await;
+        self.inner
+            .live
+            .iter()
+            .filter_map(|e| {
+                let st = e.value().lock();
+                let held = matches!(st.proc.as_ref()?.transport, ProcTransport::Held { .. });
+                // Engine-owned: a background `meta.source` or a non-manual
+                // `meta.work.origin` (the sessions' `is_user_started` rule).
+                let meta = st.session.meta.as_ref();
+                let field =
+                    |path: &str| meta.and_then(|m| m.pointer(path)).and_then(|v| v.as_str());
+                let background = field("/source")
+                    .is_some_and(|s| otto_core::domain::BACKGROUND_SESSION_SOURCES.contains(&s))
+                    || field("/work/origin").is_some_and(|o| o != "manual");
+                let title = st.session.title.clone();
+                Some(otto_core::restart::ImpactItem::session(
+                    persist && held,
+                    false,
+                    background,
+                    title,
+                ))
+            })
+            .collect()
+    }
+
     /// Graceful daemon restart teardown: flush coalesced streaming items, push
     /// a final [`crate::holder::HolderCheckpoint`] + `DETACH` to every live
     /// `runtime-holder` without killing child CLIs or Claude background

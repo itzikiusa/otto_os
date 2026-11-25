@@ -357,64 +357,8 @@ test('Fix 3a: launchDebugSession and attachDebugSessionStream guard against targ
   assert.equal(streamCtl.signal.aborted, true);
 });
 
-// ---------------------------------------------------------------------------
-// Fix 3c: ideDbWatchState reset() + generation guard + onIdeTargetReset hook
-// ---------------------------------------------------------------------------
-
-test('Fix 3c: ideDbWatch registers onIdeTargetReset, clears state, and discards in-flight calls on reset', async () => {
-  const resetHooks: Array<() => void> = [];
-  const detectDef = deferred<{ detected_objects: unknown[]; saved_connections: unknown[]; ephemeral_targets: unknown[] }>();
-  const snapDef = deferred<{ snapshot: { captured_at_ms: number; columns: string[]; rows: unknown[][] }; diff: null }>();
-  const mod = loadSource(
-    new URL('../src/modules/ide/dbwatch/ideDbWatchState.svelte.ts', import.meta.url),
-    {
-      '../../../lib/api/client': {
-        api: {
-          post: (url: string) => (url.includes('/detect') ? detectDef.promise : snapDef.promise),
-        },
-      },
-      '../store/ideStateSlices.svelte': {
-        onIdeTargetReset: (fn: () => void) => resetHooks.push(fn),
-      },
-    },
-    {},
-    { relative: true },
-  );
-  const watch = mod.ideDbWatch;
-  assert.equal(resetHooks.length, 1, 'must register reset hook with onIdeTargetReset');
-
-  watch.selectedObjectName = 'users';
-  watch.liveWatch = true;
-  watch.savedConnections = [{ target_kind: 'saved', connection_id: 'c1', name: 'MySQL', engine: 'mysql', host: '127.0.0.1', port: 3306, environment: 'dev', database: 'app' }];
-  watch.selectedTargetKey = 'saved:c1';
-  watch.baselineSnapshot = { captured_at_ms: 1, columns: ['id'], rows: [[1]] };
-
-  const pDetect = watch.detect({ root: '/repo-a' });
-  const pSnap = watch.captureSnapshot('/repo-a', 'diff');
-
-  // Target switches: reset hook fires while detect & snapshot are in flight.
-  resetHooks[0]();
-  assert.equal(watch.selectedObjectName, '');
-  assert.equal(watch.baselineSnapshot, null);
-  assert.equal(watch.latestResp, null);
-  assert.equal(watch.liveWatch, false);
-  assert.equal(watch.detectLoading, false);
-  assert.equal(watch.snapshotLoading, false);
-
-  detectDef.resolve({
-    detected_objects: [{ engine: 'mysql', object_name: 'stale_table' }],
-    saved_connections: [],
-    ephemeral_targets: [],
-  });
-  snapDef.resolve({ snapshot: { captured_at_ms: 2, columns: ['id'], rows: [[2]] }, diff: null });
-
-  await pDetect;
-  const snapOk = await pSnap;
-  assert.equal(snapOk, false);
-  assert.equal(watch.detectedObjects.length, 0, 'stale detect must not write after reset');
-  assert.equal(watch.selectedObjectName, '', 'stale detect must not re-select object after reset');
-  assert.equal(watch.latestResp, null, 'stale snapshot must not write after reset');
-});
+// Fix 3c (ideDbWatch reset + generation guard): covered by unit/ideDbWatch.test.ts
+// ("switching the IDE target drops in-flight reads").
 
 // ---------------------------------------------------------------------------
 // Fix 3e: ideGitController generation counter discards stale probes on reset()

@@ -486,6 +486,7 @@ pub fn request_to_execute(request: &ApiRequest) -> ExecuteApiReq {
         vars: None,
         ssh_connection_id: request.ssh_connection_id.clone(),
         confirm_new_host: false,
+        debug_session_id: None,
     }
 }
 

@@ -24,7 +24,7 @@
   import {
     SharePageChunk, HandoverChunk, AttachIssueChunk, AttachProductStoryChunk,
     BroadcastModalChunk, NewSessionChunk, NewWorkspaceChunk, SlackSendChunk,
-    PaletteChunk, TriageBarChunk, ShortcutsOverlayChunk, FloatingBarChunk,
+    PaletteChunk, TriageBarChunk, ShortcutsOverlayChunk, FloatingBarChunk, UpdateHostChunk,
   } from './overlays.svelte';
   import { triage } from './triage.svelte';
   import { loadErrorText } from '../lib/loadError';
@@ -1170,7 +1170,7 @@
 {#if ui.broadcastOpen}<LazyMount lazy={BroadcastModalChunk} what="the broadcast dialog" quiet onerror={() => (ui.broadcastOpen = false)} />{/if}
 {#if ui.newSessionOpen}<LazyMount lazy={NewSessionChunk} what="the new-session sheet" quiet onerror={closeNewSession} props={{ initialScratch: ui.newSessionScratch, onclose: closeNewSession }} />{/if}
 {#if ui.newWorkspaceOpen}<LazyMount lazy={NewWorkspaceChunk} what="the new-workspace dialog" quiet onerror={closeNewWorkspace} props={{ onclose: closeNewWorkspace }} />{/if}
-
+{#if isTauri && !isEmbedded}<LazyMount lazy={UpdateHostChunk} what="updates" quiet />{/if}
 <ConfirmDialog />
 {#if slackSend.req}<LazyMount lazy={SlackSendChunk} what="the Slack dialog" quiet onerror={() => slackSend.close()} />{/if}
 <ContextMenu />

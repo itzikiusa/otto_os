@@ -1,21 +1,216 @@
 # Release checklist
 
-Deterministic, gated steps to cut a local Otto release (macOS-only). Each gate
-must pass before moving on — stop on the first failure. There is no Makefile;
-these are the real commands (mirrors `README.md` + `packaging/`).
+Two ways to make an Otto build (macOS only; there is no Makefile):
 
-> **CI monthly DMG:** `.github/workflows/release-dmg.yml` runs this same build
-> (UI → `ottod --release --features embed-ui` → sidecar → `tauri build`) on a
-> macOS runner at 05:00 UTC on the 1st of every month (+ `workflow_dispatch`),
-> and publishes `Otto-macos-arm64.dmg` (+ a versioned copy and sha256) to the
-> rolling `latest` GitHub Release. These builds are versioned `YYYY.MM.DD-{buildnum}` (buildnum =
-> the workflow run number); the bundle itself is stamped with the semver-legal
-> unpadded form (e.g. `2026.9.7-3` — semver forbids leading zeros). The
-> CI bundle is ad-hoc signed unless the Apple Developer ID secrets
-> (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`,
-> and `APPLE_ID`/`APPLE_PASSWORD`/`APPLE_TEAM_ID` for notarization) are added
-> to the repo — first launch of an ad-hoc build needs right-click → Open or
-> `xattr -cr`. The checklist below remains the local, TCC-stable flow.
+- **Published release (CI).** A `v<version>` tag builds, signs and drafts a
+  GitHub Release with the DMG and the in-app updater's files
+  (`.github/workflows/release.yml`). This is what people download and what
+  installed release builds update to. One-time setup and the one-step release
+  are below.
+- **Local build** with your own certificate: the gated checklist from
+  [§0](#0-pre-flight) on (`packaging/deploy.sh` chains it). A local build never
+  updates itself.
+
+## Published releases
+
+### What the workflow does
+
+Only a pushed `v*` tag starts it. Every job checks out exactly the tagged
+commit, and nothing reads or writes a cache.
+
+1. **ci-gate.** The tag must be `v<semver>` and exist. Its commit must be on
+   `main`, with a green `ci.yml` push run there.
+2. **build** (no secrets in this job: it runs the npm and cargo build).
+   - The tag must equal the version in the root `Cargo.toml`,
+     `apps/desktop/src-tauri/Cargo.toml` and `tauri.conf.json`.
+   - `README.md` must have a `### What's new in <version>` section.
+   - Then UI → `ottod --release --features embed-ui` → sidecar → `tauri build
+     --bundles app`, as `deploy.sh` does. Kiri is not embedded; a default
+     `deploy.sh` build doesn't embed it either.
+   - The Tauri CLI comes from `packaging/signer`'s committed lockfile
+     (`npm ci --ignore-scripts`), here and in the sign job.
+3. **sign** runs in the GitHub Environment `release`. It waits for your approval
+   and is the only job that sees the secrets. Its token is read-only.
+   - It installs the signer before any secret is on the runner. It imports the
+     release `.p12` into a throwaway keychain.
+   - `release-artifacts.sh bundle`
+     ([source](../packaging/release-artifacts.sh)):
+     1. signs with `sign.sh`;
+     2. checks the app, `ottod` (and `kiri`) each against its own identifier and
+        the accepted certificates in
+        `apps/desktop/src-tauri/release-identity.json`;
+     3. packs `Otto_<v>_aarch64.app.tar.gz` with no AppleDouble files, and
+        proves its signature survives a literal extraction;
+     4. makes the DMG and its `.sha256`, and the notes.
+   - It deletes the keychain and the `.p12`, also on failure.
+   - `release-artifacts.sh update` signs the archive with the update key,
+     bound to `<v>`, and writes `latest.json`. The two private keys are never
+     on the runner at the same time.
+4. **publish** creates a **draft** release with those five files. It is the
+   only job with a write token, and it has no secrets and no checkout. A `-rc`
+   version becomes a prerelease draft.
+
+Nothing reaches anyone until you **publish** the draft. Installed apps read
+`https://github.com/itzikiusa/otto_os/releases/latest/download/latest.json`,
+which resolves only to the newest published release that is not a prerelease.
+
+### One-time setup (owner)
+
+Run these on your Mac. The private files never go into the repository.
+
+1. **Signing certificate** (self-signed; see the note on Developer ID below):
+
+   ```bash
+   OTTO_SIGN_IDENTITY="Otto Release Signing" OTTO_P12_PASSWORD='<a strong password>' \
+     packaging/make-cert.sh --export ~/otto-release
+   # prints: Leaf hash: <40 hex>
+   ```
+
+   - It writes `~/otto-release/Otto Release Signing.p12` (private) and `.cer`
+     (public).
+   - Keep the `.p12` and its password in your password manager.
+   - Losing it means the next release is signed differently, and every user
+     re-grants macOS permissions once.
+
+2. **Update key** (minisign; Tauri asks for a password):
+
+   ```bash
+   npx --yes @tauri-apps/cli@2.12.6 signer generate -w ~/otto-release/otto-update.key
+   ```
+
+   Back up `otto-update.key` and its password too. Without them no installed
+   copy can ever update again; it would need a manual DMG install.
+
+3. **Put the public halves in the repository** (one PR). Today they hold TEST
+   values that exist only on the machine that made them:
+   - `apps/desktop/src-tauri/tauri.conf.json` → `plugins.updater.pubkey` = the
+     content of `~/otto-release/otto-update.key.pub`.
+   - `apps/desktop/src-tauri/release-identity.json` → `"test": false`,
+     `"signingIdentity": "Otto Release Signing"`,
+     `"acceptedLeaves": ["<leaf hash from step 1>"]`.
+   - Until both are replaced, every release job stops at once
+     (`release-manifest.py check-release-config`), and an app built from the TEST
+     values stays on the source channel and never installs an update.
+     Installed apps refuse an update signed by any other certificate. To move
+     to another certificate later (for example Developer ID), first ship a
+     release that lists both.
+
+4. **GitHub Environment, secrets and tag protection** (`gh` as the repository
+   admin):
+
+   ```bash
+   R=itzikiusa/otto_os
+   gh api -X PUT repos/$R/environments/release --input - <<JSON
+   {"reviewers":[{"type":"User","id":$(gh api user --jq .id)}],
+    "deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}
+   JSON
+   gh api -X POST repos/$R/environments/release/deployment-branch-policies -f name='v*' -f type=tag
+   base64 -i ~/otto-release/"Otto Release Signing.p12" | gh secret set OTTO_SIGN_P12_BASE64 --repo $R --env release
+   gh secret set OTTO_SIGN_P12_PASSWORD --repo $R --env release            # paste the .p12 password
+   gh secret set TAURI_SIGNING_PRIVATE_KEY --repo $R --env release < ~/otto-release/otto-update.key
+   gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --repo $R --env release  # paste the key password
+   # Only admins may create, move or delete v* tags:
+   gh api -X POST repos/$R/rulesets --input - <<'JSON'
+   {"name":"release tags","target":"tag","enforcement":"active",
+    "conditions":{"ref_name":{"include":["refs/tags/v*"],"exclude":[]}},
+    "rules":[{"type":"creation"},{"type":"update"},{"type":"deletion"}],
+    "bypass_actors":[{"actor_id":5,"actor_type":"RepositoryRole","bypass_mode":"always"}]}
+   JSON
+   ```
+
+   - The rolling `latest` prerelease from the retired monthly workflow is no
+     longer updated. Delete it when you like:
+     `gh release delete latest --repo $R --cleanup-tag`.
+
+> **Developer ID instead** (Apple, $99/year): the first open is then
+> Gatekeeper-clean, and no one sees a Keychain prompt. Export the Developer ID
+> Application identity as the `.p12`. Set `signingIdentity` to its full name.
+> Add `(anchor apple generic and certificate leaf[subject.OU] = "<TEAM ID>")` to
+> the accepted list, through a release that still accepts the old certificate.
+> Notarization and `--timestamp` are not wired in yet.
+
+### Releasing a version (one step)
+
+1. Bump the version and add `### What's new in <version>` to `README.md` in the
+   release PR, as usual (§0). Merge it.
+2. Tag the merged commit and push the tag:
+
+   ```bash
+   git fetch origin && git tag v0.5.4 origin/main && git push origin v0.5.4
+   ```
+
+3. In **Actions ▸ Release**, approve the `release` deployment. About 40
+   minutes later the draft is ready.
+4. Open the draft.
+   - Check the notes and attach the tour film by hand.
+   - Optionally check an asset: `codesign -d -r- Otto.app` should show the
+     release leaf.
+   - Click **Publish**.
+5. Check what installed apps will see:
+   `curl -sL https://github.com/itzikiusa/otto_os/releases/latest/download/latest.json | jq .version`.
+
+A failed or wrong draft:
+- `gh release delete v0.5.4 --repo itzikiusa/otto_os --yes` deletes the draft
+  and keeps the tag.
+- A flaky failure: **Re-run all jobs** on that run. This builds the same commit.
+- A fix in the code needs a new commit, and therefore a new tag. Tag the next
+  version, or move the tag as admin:
+  `git push origin :refs/tags/v0.5.4`, then tag the fixed commit and push.
+  There is no manual "Run workflow". A run always builds the commit the tag
+  points to.
+
+The first release that contains the updater is 0.5.4. The first real update is
+therefore 0.5.4 → 0.5.5.
+
+### Before relying on updates: the clean-Mac check (owner, once)
+
+The updater's unit tests run on throwaway bundles in temp folders; these steps
+need a Mac (or a macOS VM) that has never had Otto, under a normal user
+account. Use release candidates built by the workflow, e.g. `0.5.4-rc.1`,
+`0.5.4-rc.2` and `0.5.4-rc.3`.
+
+Installed apps look only at `/releases/latest`, and GitHub never counts a
+pre-release as "latest". So publish each candidate as the **Latest release**,
+not as a pre-release. The workflow drafts `-rc` versions as pre-releases, so
+change that when you publish:
+`gh release edit v0.5.4-rc.2 --repo itzikiusa/otto_os --draft=false --prerelease=false --latest`.
+
+This is safe only **before 0.5.4 itself is published**. No installed copy has
+the updater until then, so only the test Mac ever sees a candidate.
+Afterwards:
+- delete the candidates: `gh release delete v0.5.4-rc.N --repo itzikiusa/otto_os --yes`;
+- publish 0.5.4. The test Mac then updates to it, since 0.5.4 > 0.5.4-rc.N.
+
+Once 0.5.4 is out, never mark a candidate Latest again; every installed copy
+would update to it.
+
+1. Download the rc.1 DMG with Safari, drag Otto to /Applications, open it:
+   Privacy & Security ▸ **Open Anyway** must be the only Gatekeeper step.
+2. Use what needs a permission once: paste from the clipboard history
+   (Accessibility), take a snip (Screen Recording), dictate (Microphone), save a
+   secret (one Keychain "Always Allow" for `ottod`).
+3. Start a shell session, a Threads conversation mid-turn and an SSH terminal.
+4. Publish rc.2 as Latest (above). Within 6 h (or Otto ▸ Check for
+   Updates…) the sidebar shows the update. Download it; the restart dialog must list the SSH terminal as
+   ending and the shell and thread as kept.
+5. Restart to update. Check:
+   - no "Background Items Added" banner blocks it, and no App Management
+     prompt ("Otto wants to modify apps") appears;
+   - Otto comes back on rc.2 (Otto ▸ About) within about 2 minutes, the shell
+     and thread are still there, the turn continued;
+   - no permission is asked again, and at most one Keychain prompt (none if
+     the release certificate was trusted);
+   - `~/Library/Application Support/Otto/updates/previous/Otto.app` is rc.1 and
+     `xattr -l /Applications/Otto.app` shows no `com.apple.quarantine`.
+6. Failure path: publish, as Latest, an rc.3 whose daemon exits at start.
+   The update must roll back to rc.2 by itself, say "failed and was undone", and not offer
+   rc.3 again.
+7. A standard (non-admin) account: the update row says the account can't
+   replace apps in /Applications and offers the DMG; nothing is downloaded.
+8. Leave the Keychain prompt of step 2 unanswered during an update: the
+   finisher must still see the new version (it reads only `/api/v1/meta`).
+
+## Local build
 
 > Prerequisites: macOS (Apple Silicon or Intel), Rust stable, Node 20+, and a
 > one-time signing identity (`packaging/make-cert.sh`). The Tauri CLI is invoked
@@ -179,8 +374,10 @@ packaging/publish-walkthroughs.sh   # 720p re-encode → gh release upload --clo
 
 ## 6. Publish (only when explicitly approved)
 
-- [ ] Tag the release and push the tag (`main` is protected — open a PR for code).
-- [ ] Attach the signed DMG to the release.
+- [ ] Publishing is the CI flow in [Published releases](#published-releases):
+      push the `v<version>` tag, approve, review the draft, Publish. A locally
+      signed DMG is signed with your own certificate, so installed release
+      builds would refuse it as an update; don't attach it to a release.
 
 ---
 

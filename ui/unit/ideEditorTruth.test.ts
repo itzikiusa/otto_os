@@ -118,6 +118,11 @@ describe('breakpoints tell the truth about binding (I2-07)', () => {
     assert.deepEqual(unbound, { kind: 'unbound', tooltip: 'Not bound: No code on this line', verified: false });
     assert.equal(breakpointAppearance(bp(6, { verified: false }), 6, true).kind, 'muted');
     assert.equal(breakpointAppearance(bp(6, { verified: true, condition: 'x' }), 6, false).kind, 'conditional');
+    // An agent's breakpoint says who set it (agent debugging, D-012).
+    const byAgent = { ...bp(8, { verified: true }), agent: { name: 'Claude · Fix orders' } };
+    assert.equal(breakpointAppearance(byAgent, 8, false).tooltip, 'Breakpoint at line 8 (bound) · Set by Claude · Fix orders');
+    const m = new Map([[8, bp(8, { verified: true })]]);
+    assert.equal(sameBreakpointLines(m, [byAgent]), false, 'the agent taking a line over re-renders its tooltip');
     const src = readFileSync(new URL('../src/lib/components/cm-ide-extensions.ts', import.meta.url), 'utf8');
     assert.doesNotMatch(src, /pausedLine != null\) && !muted/, 'a pause no longer marks every breakpoint verified');
   });

@@ -623,7 +623,9 @@ fn scope_of(event: &Event) -> Scope<'_> {
         // A notice-list change (read/dismiss) cues only the actor's windows.
         | Event::NotificationsChanged { user_id }
         // Folder paths of one IDE window's project: its user's alone.
-        | Event::IdeFsChanged { user_id, .. } => Scope::Owner(user_id),
+        | Event::IdeFsChanged { user_id, .. }
+        // A DB Watch checkpoint cue: the watch's creator alone.
+        | Event::IdeDbWatchCheckpoint { user_id, .. } => Scope::Owner(user_id),
     }
 }
 

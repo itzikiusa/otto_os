@@ -2412,7 +2412,7 @@ mod accounting_tests {
         assert_eq!(restarted.pending_events[0].workspace_id, "w");
         assert_eq!(restarted.pending_events[0].session_id, "s");
         pool.close().await;
-        tokio::fs::remove_dir_all(root).await.unwrap();
+        let _ = tokio::fs::remove_dir_all(root).await; // best-effort: the engine may still be closing files
     }
 
     #[tokio::test]
@@ -2453,7 +2453,7 @@ mod accounting_tests {
         want.sort();
         assert_eq!(got, want);
         pool.close().await;
-        tokio::fs::remove_dir_all(root).await.unwrap();
+        let _ = tokio::fs::remove_dir_all(root).await; // best-effort: the engine may still be closing files
     }
 
     #[tokio::test]
@@ -2511,7 +2511,7 @@ mod accounting_tests {
         restarted.tail_listed(&files, &[]).await;
         assert!(restarted.pending_events.is_empty(), "restart must neither replay the backfill nor import legacy default-Claude history twice");
         pool.close().await;
-        tokio::fs::remove_dir_all(root).await.unwrap();
+        let _ = tokio::fs::remove_dir_all(root).await; // best-effort: the engine may still be closing files
     }
 
     #[tokio::test]
@@ -2624,7 +2624,7 @@ mod accounting_tests {
         assert_eq!(recovered.pending_events[0].cache_read_tokens, 40);
         usage.shutdown().await;
         pool.close().await;
-        tokio::fs::remove_dir_all(root).await.unwrap();
+        let _ = tokio::fs::remove_dir_all(root).await; // best-effort: the engine may still be closing files
     }
 
     fn native_usage(output: u64) -> crate::ParsedUsage {
@@ -2662,7 +2662,7 @@ mod accounting_tests {
         assert_eq!(stored["cursors"]["/elsewhere.jsonl"], 7);
         usage.shutdown().await;
         pool.close().await;
-        tokio::fs::remove_dir_all(root).await.unwrap();
+        let _ = tokio::fs::remove_dir_all(root).await; // best-effort: the engine may still be closing files
     }
 
     /// Exactly-once across a restart: a native delta's grown baseline commits
@@ -2701,7 +2701,7 @@ mod accounting_tests {
         assert_eq!(outbox(&root).await.len(), 1);
         usage.shutdown().await;
         pool.close().await;
-        tokio::fs::remove_dir_all(root).await.unwrap();
+        let _ = tokio::fs::remove_dir_all(root).await; // best-effort: the engine may still be closing files
     }
 
     static OWNER_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

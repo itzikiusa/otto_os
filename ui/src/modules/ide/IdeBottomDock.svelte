@@ -12,6 +12,7 @@
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { startMouseDrag } from '../../lib/dragCursor';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
+  import { ideDbWatchPort } from '../../lib/uiCommands/ideDbWatchPort';
   import {
     loadPaneWidth,
     paneResizer,
@@ -77,6 +78,22 @@
     void ide.target.root;
     void ide.projectRoots.length;
     untrack(() => ideGit.syncVisibleRoots({ probeAll: false }));
+  });
+
+  // The agent-debug `db` command and every Stop read this same watch.
+  $effect(() => ideDbWatchPort.bind(ideDbWatch));
+
+  // DB Watch arms and follows debug sessions / runs from here (the dock is always
+  // mounted), so it works while the Debug tab is the one showing.
+  $effect(() => {
+    const d = ide.collabIsGuest ? null : ide.activeDebug;
+    const r = ide.activeRun;
+    const ctx = {
+      root: ide.target.root,
+      debug: d ? { id: d.id, state: d.state, stop_seq: d.stop_seq } : null,
+      run: r ? { id: r.id, status: r.status } : null,
+    };
+    untrack(() => ideDbWatch.follow({ ...ctx, activeFile: ide.activePath, additionalRoots: ide.additionalRoots }));
   });
 
   $effect(() => {
@@ -179,7 +196,7 @@
   function tabHasContent(id: DockTab): boolean {
     if (id === 'debug') return Boolean(ide.activeDebug);
     if (id === 'usages') return ide.usages.length > 0 || ide.usagesLoading;
-    if (id === 'dbwatch') return Boolean(ideDbWatch.baselineSnapshot || ideDbWatch.liveWatch);
+    if (id === 'dbwatch') return Boolean(ideDbWatch.watch || ideDbWatch.pendingTarget || ideDbWatch.prodWaiting);
     if (id === 'devices') return ideDevices.hasMobileContext;
     return true;
   }

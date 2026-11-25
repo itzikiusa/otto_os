@@ -1,235 +1,642 @@
-// Reactive state controller for the IDE Live DB Watch & Component-Test Watcher panel.
+// The IDE DB Watch store: a thin client of the daemon's watch engine
+// (/ide/db-watch/watches — the daemon keeps the checkpoints and takes one at
+// every debugger stop). It also arms the watch on its own, so it works while
+// the Debug tab is the one showing: `follow()` (called by the bottom dock,
+// which is always mounted) re-attaches the project's watch, binds it to each
+// new debug session / run, and at the first stop arms the remembered tables —
+// or, the first time, the run's own Testcontainer with the tables the code
+// touches. Never a saved connection nobody picked, never a prod one unasked.
+// The agent-debug `db` command drives the same actions (prod confirm included).
 
 import { api } from '../../../lib/api/client';
+import { confirmer } from '../../../lib/confirm.svelte';
+import { appLive } from '../../../lib/live';
 import { loadErrorText } from '../../../lib/loadError';
+import { lsGet, lsSet } from '../../../lib/storage';
 import { onIdeTargetReset } from '../store/ideStateSlices.svelte';
 import type {
-  IdeDbEngine,
+  IdeDbWatch,
+  IdeDbWatchBind,
+  IdeDbWatchCompare,
   IdeDbWatchDetectReq,
   IdeDbWatchDetectResp,
-  IdeDbWatchSnapshotItem,
-  IdeDbWatchSnapshotReq,
-  IdeDbWatchSnapshotResp,
+  IdeDbWatchItemSpec,
+  IdeDbWatchListResp,
+  IdeDbWatchObject,
+  IdeDbWatchObjectsResp,
+  IdeDbWatchReadResp,
+  IdeDbWatchStartReq,
   IdeDbWatchTarget,
+  IdeDbWatchTargetRef,
   IdeDetectedDbAccess,
   IdeEphemeralDbTarget,
   IdeSavedDbTarget,
 } from '../../../lib/api/types/ide-db-watch';
 import {
-  formatDbCellValue,
-  IDE_DB_ENGINES,
-  pickPreferredDbTarget,
-  targetKeyOf,
+  changedRowsOf,
+  DB_WATCH_OFF,
+  isProdTarget,
+  MAX_WATCH_ITEMS,
+  memoryKey,
+  memoryOf,
+  parseMemory,
+  pickAutoItems,
+  pickAutoTarget,
+  targetErrorOf,
+  targetRefOf,
+  type DbWatchMemory,
+  type DbWatchTargetError,
 } from './ideDbWatchModel';
 
-export { formatDbCellValue, IDE_DB_ENGINES, pickPreferredDbTarget, targetKeyOf };
+const W = '/ide/db-watch/watches';
+
+/** What the dock hands over on every change. */
+export interface DbWatchFollow {
+  root: string;
+  activeFile?: string | null;
+  additionalRoots?: string[];
+  debug?: { id: string; state: string; stop_seq?: number } | null;
+  run?: { id: string; status: string } | null;
+}
+
+export interface DbWatchStartOpts {
+  /** Armed by Otto itself: never confirms, so never touches a prod target. */
+  auto?: boolean;
+  /** Who asks, for the prod confirm ("Agent Messi"); default the person. */
+  asker?: string;
+  /** false: not remembered as the project's target (an agent's choice). */
+  persist?: boolean;
+}
+
+function sameBind(a: IdeDbWatchBind | null | undefined, b: IdeDbWatchBind | null | undefined): boolean {
+  if (!a || !b) return false;
+  return 'debug_session_id' in a && 'debug_session_id' in b
+    ? a.debug_session_id === b.debug_session_id
+    : 'run_id' in a && 'run_id' in b && a.run_id === b.run_id;
+}
+
+export function refOfWatch(w: IdeDbWatch): IdeDbWatchTargetRef {
+  return w.target.kind === 'saved'
+    ? { kind: 'saved', connection_id: w.target.connection_id ?? '' }
+    : { kind: 'ephemeral', ephemeral_id: w.target.ephemeral_id ?? '' };
+}
+
+/** The one line a launch leaves when it must not reach the database on its own. */
+function waitingLabel(name: string, prod: boolean): string {
+  return `${prod ? 'Production' : 'Remote'} database ${name} — click to watch`;
+}
 
 class IdeDbWatchController {
-  detectedObjects = $state<IdeDetectedDbAccess[]>([]);
+  root = $state('');
+  watch = $state<IdeDbWatch | null>(null);
+  read = $state<IdeDbWatchReadResp | null>(null);
+  compare = $state<IdeDbWatchCompare>('previous_stop');
+  /** A start / first read with nothing on screen yet. */
+  loading = $state(false);
+  /** A read / snapshot in flight while the last result stays on screen. */
+  refreshing = $state(false);
+  /** The watch or its target failed (start, read): shown inline with Retry. */
+  error = $state<string | null>(null);
+
+  detected = $state<IdeDetectedDbAccess[]>([]);
   savedConnections = $state<IdeSavedDbTarget[]>([]);
   ephemeralTargets = $state<IdeEphemeralDbTarget[]>([]);
   detectLoading = $state(false);
   detectError = $state<string | null>(null);
-
-  selectedTargetKey = $state('');
-  selectedEngine = $state<IdeDbEngine>('mysql');
-  selectedDatabase = $state('');
-  selectedObjectName = $state('');
-  customQuery = $state('');
-  limit = $state(100);
-
-  baselineSnapshot = $state<IdeDbWatchSnapshotItem | null>(null);
-  latestResp = $state<IdeDbWatchSnapshotResp | null>(null);
-  snapshotLoading = $state(false);
-  snapshotError = $state<string | null>(null);
-
-  autoRefreshOnExec = $state(true);
+  /** The target's real objects ("Add table…"), for `objectsFor`. */
+  objects = $state<IdeDbWatchObject[]>([]);
+  objectsFor = $state('');
+  /** Picked in Target ▾ before any table: the "Choose tables" state. */
+  pendingTarget = $state<IdeDbWatchTarget | null>(null);
+  /** The strip asked to show this table (the panel scrolls to it). */
+  focusObject = $state('');
   liveWatch = $state(false);
-  viewMode = $state<'changes' | 'rows'>('changes');
+  /** A launch found a production target: nothing is armed or asked on its own;
+   *  the panel / strip offer "Production target — click to watch". */
+  prodWaiting = $state<{ bind: IdeDbWatchBind; start?: Omit<IdeDbWatchStartReq, 'root'>; label: string } | null>(null);
+  /** The tables picked for `pendingTarget`: read only once the person presses Start watching. */
+  pendingItems = $state<IdeDbWatchItemSpec[]>([]);
+  /** The picked target could not be listed (unreachable / no default database). */
+  targetError = $state<DbWatchTargetError | null>(null);
 
   private gen = 0;
-  private detectSeq = 0;
-  private snapshotSeq = 0;
+  private readSeq = 0;
+  private restoring: Promise<void> = Promise.resolve();
+  /** Starts run one at a time: the agent's and the first stop's auto-arm can race. */
+  private starting: Promise<unknown> = Promise.resolve();
+  private activeFile: string | null = null;
+  private additionalRoots: string[] = [];
+  /** The live debug session / run this root is following, and the ones armed. */
+  private liveBind: IdeDbWatchBind | null = null;
+  private seenDebug = '';
+  private stoppedDebug = '';
+  private seenRun = '';
 
   constructor() {
     onIdeTargetReset(() => this.reset());
+    appLive.on(['ide_db_watch_checkpoint'], (ev) => {
+      if (this.watch && ev.watch_id === this.watch.id) void this.refresh();
+    });
+    appLive.onResync(() => {
+      if (this.watch) void this.refresh();
+    });
   }
 
   reset(): void {
     this.gen += 1;
-    this.detectSeq += 1;
-    this.snapshotSeq += 1;
-    this.detectedObjects = [];
+    this.readSeq += 1;
+    this.root = '';
+    this.watch = null;
+    this.read = null;
+    this.compare = 'previous_stop';
+    this.loading = false;
+    this.refreshing = false;
+    this.error = null;
+    this.detected = [];
     this.ephemeralTargets = [];
     this.detectLoading = false;
     this.detectError = null;
-    this.selectedTargetKey = '';
-    this.selectedDatabase = '';
-    this.selectedObjectName = '';
-    this.customQuery = '';
-    this.baselineSnapshot = null;
-    this.latestResp = null;
-    this.snapshotLoading = false;
-    this.snapshotError = null;
+    this.objects = [];
+    this.objectsFor = '';
+    this.pendingTarget = null;
+    this.focusObject = '';
     this.liveWatch = false;
+    this.prodWaiting = null;
+    this.pendingItems = [];
+    this.targetError = null;
+    this.liveBind = null;
+    this.seenDebug = '';
+    this.stoppedDebug = '';
+    this.seenRun = '';
+    this.restoring = Promise.resolve();
+  }
+
+  /** Changed rows in what the panel shows (the dock tab badge). */
+  get changeBadgeCount(): number | undefined {
+    const n = (this.read?.items ?? []).reduce((s, i) => s + changedRowsOf(i), 0);
+    return n > 0 ? n : undefined;
+  }
+
+  get isProd(): boolean {
+    return isProdTarget(this.watch?.target);
   }
 
   get allTargets(): IdeDbWatchTarget[] {
     return [...this.ephemeralTargets, ...this.savedConnections];
   }
 
-  get selectedTarget(): IdeDbWatchTarget | null {
-    return this.allTargets.find((t) => targetKeyOf(t) === this.selectedTargetKey) ?? null;
-  }
+  // ── Following the IDE (store-level auto-arm) ─────────────────────────────
 
-  get canCapture(): boolean {
-    return Boolean(
-      this.selectedTarget && (this.selectedObjectName.trim() || this.customQuery.trim()),
-    );
-  }
-
-  get changeBadgeCount(): number | undefined {
-    const d = this.latestResp?.diff;
-    if (!d) return undefined;
-    const total = d.added_count + d.modified_count + d.removed_count;
-    return total > 0 ? total : undefined;
-  }
-
-  selectDetectedObject(obj: IdeDetectedDbAccess): void {
-    const changedObject =
-      this.selectedEngine !== obj.engine || this.selectedObjectName !== obj.object_name;
-    this.selectedEngine = obj.engine;
-    this.selectedObjectName = obj.object_name;
-    if (obj.database_hint) {
-      this.selectedDatabase = obj.database_hint;
+  follow(ctx: DbWatchFollow): void {
+    this.activeFile = ctx.activeFile ?? null;
+    this.additionalRoots = ctx.additionalRoots ?? [];
+    if (ctx.root !== this.root) {
+      this.reset();
+      this.root = ctx.root;
+      if (ctx.root) this.restoring = this.restore(ctx.root);
     }
-    const picked = pickPreferredDbTarget(
-      obj.engine,
-      this.savedConnections,
-      this.ephemeralTargets,
-      this.selectedTargetKey,
-    );
-    if (picked) {
-      this.selectedTargetKey = targetKeyOf(picked);
-      if (!this.selectedDatabase && picked.database) {
-        this.selectedDatabase = picked.database;
-      }
+    if (!ctx.root) return;
+    const d = ctx.debug;
+    const live = d && d.state !== 'terminated' && d.state !== 'error' ? d : null;
+    const r = ctx.run?.status === 'running' ? ctx.run : null;
+    this.liveBind = live ? { debug_session_id: live.id } : r ? { run_id: r.id } : null;
+    if (live && live.id !== this.seenDebug) {
+      this.seenDebug = live.id;
+      void this.onSessionStart({ debug_session_id: live.id });
     }
-    if (changedObject) {
-      this.baselineSnapshot = null;
-      this.latestResp = null;
-      this.snapshotError = null;
+    // The first stop: a Testcontainer started in TestMain exists by now.
+    if (live && live.id !== this.stoppedDebug && (live.state === 'paused' || (live.stop_seq ?? 0) > 0)) {
+      this.stoppedDebug = live.id;
+      void this.armAtStop({ debug_session_id: live.id });
+    }
+    if (r && r.id !== this.seenRun) {
+      this.seenRun = r.id;
+      void this.onSessionStart({ run_id: r.id }).then(() => this.armAtStop({ run_id: r.id }));
     }
   }
 
-  selectTargetByKey(key: string): void {
-    if (this.selectedTargetKey === key) return;
-    this.selectedTargetKey = key;
-    const target = this.selectedTarget;
-    if (target) {
-      this.selectedEngine = target.engine;
-      if (!this.selectedDatabase && target.database) {
-        this.selectedDatabase = target.database;
-      }
-    }
-    this.baselineSnapshot = null;
-    this.latestResp = null;
-    this.snapshotError = null;
+  private memory(): DbWatchMemory | null {
+    return this.root ? parseMemory(lsGet(memoryKey(this.root))) : null;
   }
 
-  async detect(opts: {
-    root: string;
-    activeFile?: string | null;
-    connectionId?: string | null;
-    additionalRoots?: string[];
-  }): Promise<void> {
-    if (!opts.root) return;
+  private remember(w: IdeDbWatch): void {
+    const m = memoryOf(w);
+    if (m) lsSet(memoryKey(w.root), JSON.stringify(m));
+  }
+
+  private async restore(root: string): Promise<void> {
     const gen = this.gen;
-    const seq = ++this.detectSeq;
+    try {
+      const resp = await api.get<IdeDbWatchListResp>(`${W}?root=${encodeURIComponent(root)}`);
+      if (gen !== this.gen) return;
+      const w = (resp.watches ?? []).find((x) => x.root === root) ?? null;
+      if (w && !this.watch) {
+        this.watch = w;
+        await this.refresh();
+      }
+    } catch {
+      /* the panel's actions show their own errors; nothing to restore */
+    }
+  }
+
+  /** A new debug session / run: bind a saved-target watch now; arm a remembered
+   *  saved target (never a prod one) right away. */
+  private async onSessionStart(bind: IdeDbWatchBind): Promise<void> {
+    await this.restoring;
+    const w = this.watch;
+    if (w) {
+      if (w.target.kind !== 'saved' || sameBind(w.bind, bind)) return;
+      // Never a modal and never a remote read on a launch: a prod or remote
+      // watch waits for the person's click.
+      if (isProdTarget(w.target) || !w.target.local) this.prodWaiting = { bind, label: waitingLabel(w.target.label, isProdTarget(w.target)) };
+      else await this.bind(bind);
+      return;
+    }
+    const mem = this.memory();
+    if (mem?.target.kind !== 'saved') return;
+    const id = mem.target.connection_id;
+    await this.discover();
+    const conn = this.savedConnections.find((c) => c.connection_id === id);
+    if (!conn) return;
+    const req = { target: mem.target, database: mem.database, items: mem.items, bind };
+    // Only a database really on this Mac re-arms itself (most saved ones are tagged dev, prod or not).
+    if (isProdTarget(conn) || !conn.local) this.prodWaiting = { bind, start: req, label: waitingLabel(conn.name, isProdTarget(conn)) };
+    else await this.start(req, { auto: true });
+  }
+
+  /** The first stop (or a run's start): arm on the run's own database. */
+  private async armAtStop(bind: IdeDbWatchBind): Promise<void> {
+    await this.restoring;
+    const w = this.watch;
+    if (w && (w.target.kind === 'saved' || sameBind(w.bind, bind))) return;
+    const mem = this.memory();
+    if (mem?.target.kind === 'saved' || lsGet(memoryKey(this.root)) === DB_WATCH_OFF) return;
+    if (mem) {
+      await this.start({ target: mem.target, database: mem.database, items: mem.items, bind }, { auto: true });
+      return;
+    }
+    await this.discover({ debugSessionId: 'debug_session_id' in bind ? bind.debug_session_id : null });
+    const t = pickAutoTarget(this.detected, this.ephemeralTargets);
+    if (!t) return;
+    await this.discover({ debugSessionId: 'debug_session_id' in bind ? bind.debug_session_id : null, target: t });
+    const items = pickAutoItems(this.detected, t.engine, true);
+    if (items.length === 0) {
+      this.pendingTarget = t;
+      return;
+    }
+    await this.start({ target: targetRefOf(t), database: t.database, items, bind }, { auto: true });
+  }
+
+  // ── Discovery ────────────────────────────────────────────────────────────
+
+  /** Targets + ranked objects in code; with `target`, each object is verified
+   *  against that target's real tables. */
+  /** Resolves the failure (null when it answered). */
+  async discover(opts: { debugSessionId?: string | null; target?: IdeDbWatchTarget | IdeDbWatchTargetRef | null; database?: string | null } = {}): Promise<unknown> {
+    if (!this.root) return null;
+    const gen = this.gen;
     this.detectLoading = true;
     this.detectError = null;
+    const t = opts.target;
+    // Only a target the caller names (the person's act) reaches a database; never the watch by default.
+    const target = t ? ('target_kind' in t ? targetRefOf(t) : t) : null;
     try {
       const req: IdeDbWatchDetectReq = {
-        root: opts.root,
-        connection_id: opts.connectionId ?? null,
-        active_file: opts.activeFile ?? null,
-        additional_roots: opts.additionalRoots ?? [],
+        root: this.root,
+        active_file: this.activeFile,
+        additional_roots: this.additionalRoots,
+        target,
+        database: opts.database ?? (t && 'target_kind' in t ? (t.database ?? null) : null),
+        debug_session_id: opts.debugSessionId ?? (this.liveBind && 'debug_session_id' in this.liveBind ? this.liveBind.debug_session_id : null),
+        // The panel's target is the person's own pick (or their watch).
+        confirm_target: target ? true : undefined,
       };
       const resp = await api.post<IdeDbWatchDetectResp>('/ide/db-watch/detect', req);
-      if (gen !== this.gen || seq !== this.detectSeq) return;
-      this.detectedObjects = resp.detected_objects ?? [];
+      if (gen !== this.gen) return;
+      this.detected = resp.detected_objects ?? [];
       this.savedConnections = resp.saved_connections ?? [];
       this.ephemeralTargets = resp.ephemeral_targets ?? [];
-
-      if (!this.selectedObjectName && this.detectedObjects.length > 0) {
-        this.selectDetectedObject(this.detectedObjects[0]);
-      } else {
-        const picked = pickPreferredDbTarget(
-          this.selectedEngine,
-          this.savedConnections,
-          this.ephemeralTargets,
-          this.selectedTargetKey,
-        );
-        if (picked) {
-          this.selectedTargetKey = targetKeyOf(picked);
-          if (!this.selectedDatabase && picked.database) {
-            this.selectedDatabase = picked.database;
-          }
-        } else {
-          this.selectedTargetKey = '';
-        }
-      }
+      return null;
     } catch (e) {
-      if (gen !== this.gen || seq !== this.detectSeq) return;
-      this.detectError = loadErrorText(e);
+      if (gen === this.gen) this.detectError = loadErrorText(e);
+      return e;
     } finally {
-      if (gen === this.gen && seq === this.detectSeq) this.detectLoading = false;
+      if (gen === this.gen) this.detectLoading = false;
     }
   }
 
-  async captureSnapshot(root: string, mode: 'baseline' | 'diff' = 'diff'): Promise<boolean> {
-    const target = this.selectedTarget;
-    const objectName = this.selectedObjectName.trim();
-    const custom = this.customQuery.trim();
-    if (!root || !target || (!objectName && !custom)) return false;
-
+  /** The target's real tables / collections / key prefixes ("Add table…"). */
+  async loadObjects(): Promise<void> {
+    const ref = this.pendingTarget ? targetRefOf(this.pendingTarget) : this.watch ? refOfWatch(this.watch) : null;
+    if (!this.root || !ref) return;
+    const key = JSON.stringify(ref);
     const gen = this.gen;
-    const seq = ++this.snapshotSeq;
-    this.snapshotLoading = true;
-    this.snapshotError = null;
     try {
-      const req: IdeDbWatchSnapshotReq = {
-        root,
-        target_kind: target.target_kind,
-        connection_id: target.target_kind === 'saved' ? target.connection_id : null,
-        ephemeral_id: target.target_kind === 'ephemeral' ? target.ephemeral_id : null,
-        engine: this.selectedEngine,
-        database: this.selectedDatabase.trim() || target.database || null,
-        object_name: objectName || 'custom',
-        custom_query: custom || null,
-        limit: Math.max(1, Math.min(500, this.limit || 100)),
-        previous: mode === 'diff' ? this.baselineSnapshot : null,
-      };
-      const resp = await api.post<IdeDbWatchSnapshotResp>('/ide/db-watch/snapshot', req);
-      if (gen !== this.gen || seq !== this.snapshotSeq) return false;
-      this.latestResp = resp;
-      if (mode === 'baseline' || !this.baselineSnapshot) {
-        this.baselineSnapshot = resp.snapshot;
-      }
+      const resp = await api.post<IdeDbWatchObjectsResp>('/ide/db-watch/objects', {
+        root: this.root,
+        target: ref,
+        database: this.pendingTarget ? (this.pendingTarget.database ?? null) : (this.watch?.database ?? null),
+        confirm_target: true, // the person's own pick (or their watch)
+      });
+      if (gen !== this.gen) return;
+      this.objects = resp.objects ?? [];
+      this.objectsFor = key;
+    } catch (e) {
+      if (gen === this.gen) this.detectError = loadErrorText(e);
+    }
+  }
+
+  // ── Watch actions (the panel's, the strip's and the agent bridge's) ──────
+
+  private targetOf(ref: IdeDbWatchTargetRef): IdeDbWatchTarget | null {
+    if (ref.kind === 'saved') return this.savedConnections.find((c) => c.connection_id === ref.connection_id) ?? null;
+    if (ref.kind === 'ephemeral') return this.ephemeralTargets.find((c) => c.ephemeral_id === ref.ephemeral_id) ?? null;
+    return null;
+  }
+
+  /** The typed prod confirm: what runs, where, and who asks. Never remembered. */
+  private async confirmProd(name: string, items: readonly IdeDbWatchItemSpec[], asker: string): Promise<boolean> {
+    const tables = items.map((i) => i.object).join(', ');
+    const message = [
+      'PRODUCTION — read-only, but it runs on live data.',
+      `Asked by: ${asker}`,
+      `Where: ${name}`,
+      `What: up to ${items.length} SELECTs of at most 150 rows (${tables}) at the start, at every debugger stop and when you press Snapshot.`,
+      `Type “${name}” to confirm.`,
+    ].join('\n\n');
+    const v = await confirmer.promptText(message, {
+      title: 'Watch a production database?',
+      confirmLabel: 'Watch',
+      placeholder: name,
+      mustMatch: name,
+      danger: true,
+    });
+    return v === name;
+  }
+
+  start(req: Omit<IdeDbWatchStartReq, 'root'> & { root?: string }, opts: DbWatchStartOpts = {}): Promise<IdeDbWatch | null> {
+    const turn = this.starting.then(() => this.startNow(req, opts));
+    this.starting = turn.catch(() => null);
+    return turn;
+  }
+
+  private async startNow(req: Omit<IdeDbWatchStartReq, 'root'> & { root?: string }, opts: DbWatchStartOpts): Promise<IdeDbWatch | null> {
+    const root = req.root ?? this.root;
+    if (!root || req.items.length === 0) return null;
+    // The auto-arm never replaces a watch the agent (or the person) armed for this run.
+    if (opts.auto && this.watch && sameBind(this.watch.bind, req.bind)) return this.watch;
+    const gen = this.gen;
+    const body: IdeDbWatchStartReq = {
+      ...req,
+      root,
+      items: req.items.slice(0, MAX_WATCH_ITEMS),
+      bind: req.bind === undefined ? this.liveBind : req.bind,
+      // A saved target here is the person's pick, their remembered pick, or an agent's after its confirm.
+      ...(req.target.kind === 'saved' ? { confirm_target: true } : {}),
+    };
+    // An agent can name a saved connection the panel never listed: look it up, so prod still confirms.
+    if (req.target.kind === 'saved' && !this.targetOf(req.target)) await this.discover();
+    const conn = req.target.kind === 'saved' ? this.targetOf(req.target) : null;
+    if (conn && isProdTarget(conn)) {
+      if (opts.auto) return null;
+      if (!(await this.confirmProd(conn.name, body.items, opts.asker ?? 'You'))) return null;
+      body.confirm_production = true;
+    }
+    if (!this.watch) this.loading = true;
+    this.error = null;
+    try {
+      const w = await api.post<IdeDbWatch>(W, body);
+      if (gen !== this.gen) return null;
+      this.watch = w;
+      this.read = null;
+      this.pendingTarget = null;
+      this.pendingItems = [];
+      this.targetError = null;
+      this.prodWaiting = null;
+      this.liveWatch = false; // never carried over to another target
+      if (opts.persist !== false) this.remember(w);
+      await this.refresh();
+      return w;
+    } catch (e) {
+      if (gen === this.gen) this.error = loadErrorText(e);
+      return null;
+    } finally {
+      if (gen === this.gen) this.loading = false;
+    }
+  }
+
+  /** Watch the same tables on another target; with no watch yet, the target
+   *  waits for its first table. */
+  async setTarget(t: IdeDbWatchTargetRef | IdeDbWatchTarget, opts: DbWatchStartOpts = {}): Promise<void> {
+    const ref = 'target_kind' in t ? targetRefOf(t) : t;
+    const known = 'target_kind' in t ? t : this.targetOf(ref);
+    // A pick reads no rows: it lists the target's tables; Start watching reads.
+    this.pendingItems = this.pendingTarget ? this.pendingItems : this.specs();
+    this.pendingTarget = known;
+    this.error = null;
+    await this.listPending();
+  }
+
+  /** List the picked target's tables (a detect naming it); a failure is the target's error. */
+  private async listPending(): Promise<void> {
+    const t = this.pendingTarget;
+    if (!t) return;
+    this.targetError = null;
+    const err = await this.discover({ target: t });
+    if (err && this.pendingTarget === t) this.targetError = targetErrorOf((err as { status?: number }).status, (err as Error).message ?? '');
+  }
+
+  /** Retry listing the picked target — the person's click. */
+  async retryTarget(): Promise<void> {
+    await this.listPending();
+  }
+
+  /** The database to list for a picked connection that has no default one. */
+  async setPendingDatabase(database: string): Promise<void> {
+    const t = this.pendingTarget;
+    if (!t || !database.trim()) return;
+    this.pendingTarget = { ...t, database: database.trim() };
+    await this.listPending();
+  }
+
+  /** Start watching the picked target with the picked tables (the primary action). */
+  async startPending(opts: DbWatchStartOpts = {}): Promise<void> {
+    const t = this.pendingTarget;
+    if (!t || this.pendingItems.length === 0) return;
+    await this.start({ target: targetRefOf(t), database: t.database ?? null, items: this.pendingItems }, opts);
+  }
+
+  private async patch(body: { items?: IdeDbWatchItemSpec[]; bind?: IdeDbWatchBind }, opts: DbWatchStartOpts = {}): Promise<boolean> {
+    const w = this.watch;
+    if (!w) return false;
+    const gen = this.gen;
+    const req: Record<string, unknown> = { ...body };
+    // Prod: every PATCH needs the person's confirm; removing tables (it reads
+    // less) is that click itself, anything else asks for the typed name.
+    if (isProdTarget(w.target)) {
+      const cur = new Set(this.specs().map((i) => JSON.stringify(i)));
+      const shrink = !body.bind && !!body.items && body.items.length < cur.size && body.items.every((i) => cur.has(JSON.stringify(i)));
+      if (!shrink && !(await this.confirmProd(w.target.label, body.items ?? this.specs(), opts.asker ?? 'You'))) return false;
+      req.confirm_production = true;
+    }
+    this.refreshing = true;
+    try {
+      const next = await api.patch<IdeDbWatch>(`${W}/${encodeURIComponent(w.id)}`, req);
+      if (gen !== this.gen) return false;
+      this.watch = next;
+      if (body.items) this.remember(next);
+      await this.refresh();
       return true;
     } catch (e) {
-      if (gen !== this.gen || seq !== this.snapshotSeq) return false;
-      this.snapshotError = loadErrorText(e);
+      if (gen === this.gen) this.error = loadErrorText(e);
       return false;
     } finally {
-      if (gen === this.gen && seq === this.snapshotSeq) this.snapshotLoading = false;
+      if (gen === this.gen) this.refreshing = false;
     }
   }
 
-  promoteLatestToBaseline(): void {
-    if (!this.latestResp) return;
-    this.baselineSnapshot = this.latestResp.snapshot;
-    this.latestResp = { ...this.latestResp, diff: null };
+  private specs(): IdeDbWatchItemSpec[] {
+    return (this.watch?.items ?? []).map((i) => (i.filter ? { object: i.object, filter: i.filter } : { object: i.object }));
+  }
+
+  async addItem(item: IdeDbWatchItemSpec, opts: DbWatchStartOpts = {}): Promise<void> {
+    if (this.pendingTarget) {
+      const rest = this.pendingItems.filter((i) => i.object !== item.object);
+      if (rest.length < MAX_WATCH_ITEMS) this.pendingItems = [...rest, item];
+      return;
+    }
+    if (!this.watch) return;
+    const items = this.specs().filter((i) => i.object !== item.object);
+    if (items.length >= MAX_WATCH_ITEMS) return;
+    await this.patch({ items: [...items, item] }, opts);
+  }
+
+  /** Change one item in place (a filter, a Redis key pattern). */
+  async replaceItem(object: string, next: IdeDbWatchItemSpec, opts: DbWatchStartOpts = {}): Promise<void> {
+    await this.patch({ items: this.specs().map((i) => (i.object === object ? next : i)) }, opts);
+  }
+
+  async removeItem(object: string): Promise<void> {
+    if (this.pendingTarget) {
+      this.pendingItems = this.pendingItems.filter((i) => i.object !== object);
+      return;
+    }
+    const w = this.watch;
+    if (!w) return;
+    const items = this.specs().filter((i) => i.object !== object);
+    if (items.length > 0) {
+      await this.patch({ items });
+      return;
+    }
+    const target = this.targetOf(refOfWatch(w));
+    await this.stop();
+    this.pendingTarget = target;
+  }
+
+  /** "Production target — click to watch": the person's click, through the typed confirm. */
+  async watchProd(): Promise<void> {
+    const p = this.prodWaiting;
+    if (!p) return;
+    const ok = p.start ? Boolean(await this.start(p.start)) : await this.patch({ bind: p.bind });
+    if (ok && this.prodWaiting === p) this.prodWaiting = null;
+  }
+
+  async bind(b: IdeDbWatchBind, opts: DbWatchStartOpts = {}): Promise<void> {
+    await this.patch({ bind: b }, opts);
+  }
+
+  async snapshotNow(label?: string | null): Promise<IdeDbWatchReadResp | null> {
+    const w = this.watch;
+    if (!w) return null;
+    const gen = this.gen;
+    const seq = ++this.readSeq;
+    this.refreshing = true;
+    try {
+      const resp = await api.post<IdeDbWatchReadResp>(`${W}/${encodeURIComponent(w.id)}/snapshot`, { label: label ?? null, compare: this.compare });
+      if (gen !== this.gen || seq !== this.readSeq) return resp;
+      this.read = resp;
+      this.watch = resp.watch;
+      this.error = null;
+      return resp;
+    } catch (e) {
+      if (gen === this.gen && seq === this.readSeq) this.error = loadErrorText(e);
+      return null;
+    } finally {
+      if (gen === this.gen && seq === this.readSeq) this.refreshing = false;
+    }
+  }
+
+  /** The diff since the previous stop or the start. `forAgent` asks the daemon
+   *  to mask (the agent-debug `db` command always passes it) and never touches
+   *  what the panel shows. */
+  async diffSince(compare: IdeDbWatchCompare, opts: { forAgent?: boolean; rows?: boolean } = {}): Promise<IdeDbWatchReadResp | null> {
+    const w = this.watch;
+    if (!w) return null;
+    const q = new URLSearchParams({ compare });
+    if (opts.rows) q.set('rows', '1');
+    if (opts.forAgent) q.set('for_agent', '1');
+    const resp = await api.get<IdeDbWatchReadResp>(`${W}/${encodeURIComponent(w.id)}?${q}`);
+    if (!opts.forAgent && !opts.rows && compare === this.compare && this.watch?.id === w.id) {
+      this.read = resp;
+      this.watch = resp.watch;
+    }
+    return resp;
+  }
+
+  async setCompare(c: IdeDbWatchCompare): Promise<void> {
+    if (this.compare === c) return;
+    this.compare = c;
+    await this.refresh();
+  }
+
+  /** Re-read the panel's view (a checkpoint event, a compare switch, Retry). */
+  async refresh(): Promise<void> {
+    const w = this.watch;
+    if (!w) return;
+    const gen = this.gen;
+    const seq = ++this.readSeq;
+    if (this.read) this.refreshing = true;
+    else this.loading = true;
+    try {
+      const resp = await api.get<IdeDbWatchReadResp>(`${W}/${encodeURIComponent(w.id)}?compare=${this.compare}`);
+      if (gen !== this.gen || seq !== this.readSeq) return;
+      this.read = resp;
+      this.watch = resp.watch;
+      this.error = null;
+    } catch (e) {
+      if (gen !== this.gen || seq !== this.readSeq) return;
+      // The daemon dropped it (ended session + 10 min, or replaced): forget it.
+      if ((e as { status?: number })?.status === 404) {
+        this.watch = null;
+        this.read = null;
+      } else {
+        this.error = loadErrorText(e);
+      }
+    } finally {
+      if (gen === this.gen && seq === this.readSeq) {
+        this.refreshing = false;
+        this.loading = false;
+      }
+    }
+  }
+
+  /** Stop watching: the daemon drops it and this project stops re-arming it. */
+  async stop(): Promise<void> {
+    const w = this.watch;
+    if (!w) return;
+    const gen = this.gen;
+    try {
+      await api.del(`${W}/${encodeURIComponent(w.id)}`);
+    } catch (e) {
+      if (gen === this.gen) this.error = loadErrorText(e);
+      return;
+    }
+    if (gen !== this.gen) return;
+    lsSet(memoryKey(w.root), DB_WATCH_OFF);
+    this.watch = null;
+    this.read = null;
+    this.liveWatch = false;
+    this.prodWaiting = null;
   }
 }
 

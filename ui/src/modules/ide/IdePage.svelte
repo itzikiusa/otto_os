@@ -13,6 +13,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { keyContext } from '../../lib/keys';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
+  import { lazyModule } from '../../lib/lazyModule';
   import { loadPaneWidth } from '../../lib/paneResizer';
   import { plural } from '../../lib/plural';
   import { router } from '../../lib/router.svelte';
@@ -46,6 +47,7 @@
 
   const IdeProjectTreeLazy = lazyComponent(() => import('./IdeProjectTree.svelte'));
   const FolderPickerLazy = lazyComponent(() => import('../../lib/components/FolderPicker.svelte'));
+  const agentPort = lazyModule(() => import('./agentDebug/ideAgentPort.svelte'));
   const IdeBottomDockLazy = lazyComponent(() => import('./IdeBottomDock.svelte'));
   const IdeStatusStripLazy = lazyComponent(() => import('./editor/IdeStatusStrip.svelte'));
   const IdeAgentPanelLazy = lazyComponent(() => import('./IdeAgentPanel.svelte'));
@@ -296,6 +298,19 @@
   // Know the Scratches folder up front: the switcher names it "Scratches"
   // (a reload may restore it as the last project).
   loadScratchesRoot().catch(() => {});
+  // Agent debugging (`otto.ui_ide_debug_*`) drives this IDE through the port. Its code
+  // loads after the page (not in the IDE chunk); the handlers wait for the bind.
+  $effect(() => {
+    let unbind: (() => void) | null = null;
+    let mounted = true;
+    agentPort.use((m) => {
+      if (mounted) unbind = m.bindIdeAgentPort();
+    });
+    return () => {
+      mounted = false;
+      unbind?.();
+    };
+  });
 
   let lastHandledQuery = '';
   $effect(() => {

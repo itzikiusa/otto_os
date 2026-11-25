@@ -766,6 +766,22 @@ impl Resolved {
 }
 
 impl DbViewerService {
+    /// Live Database Explorer SSH tunnels a daemon restart closes (queries
+    /// through them fail; the next one opens a new tunnel).
+    pub fn restart_impact(&self) -> Vec<otto_core::restart::ImpactItem> {
+        let labels = (
+            "Database Explorer SSH tunnel",
+            "Database Explorer SSH tunnels",
+        );
+        vec![otto_core::restart::ImpactItem::new(
+            false,
+            "db_tunnels",
+            labels,
+            self.tunnels.live_len(),
+            vec![],
+        )]
+    }
+
     pub fn new(
         connections: ConnectionsRepo,
         secrets: Arc<dyn SecretStore>,
@@ -3895,6 +3911,51 @@ mod tests {
     //! query leaves no stale entry a later cancel could hit.
 
     use super::*;
+
+    /// C1-022: "Mask PII" keeps its 0.5.3 rule — secret shapes and secret
+    /// JSON keys inside cells — so ordinary columns (`pass_rate`,
+    /// `season_pass`, `pwd`) and Docker refs are not mangled; in every
+    /// result set of a batch.
+    #[test]
+    fn mask_result_keeps_ordinary_columns_and_masks_secret_shapes() {
+        use serde_json::json;
+        let result = |rows: Vec<Vec<Value>>| {
+            let mut r = QueryResult::empty();
+            r.columns = ["pass_rate", "season_pass", "pwd", "image", "meta"]
+                .iter()
+                .map(|n| crate::types::Column {
+                    name: n.to_string(),
+                    type_hint: None,
+                    binary: false,
+                })
+                .collect();
+            r.rows = rows;
+            r
+        };
+        let row = vec![
+            json!(0.93),
+            json!("gold"),
+            json!("/srv/app"),
+            json!("alpine:3.19@sha256:abc123"),
+            json!({"password": "x", "plan": "pro"}),
+        ];
+        let mut res = result(vec![row.clone()]);
+        res.more_results.push(result(vec![row]));
+        mask_result(&mut res);
+        assert!(res.masked);
+        for rows in [&res.rows, &res.more_results[0].rows] {
+            assert_eq!(
+                rows[0][..4],
+                [
+                    json!(0.93),
+                    json!("gold"),
+                    json!("/srv/app"),
+                    json!("alpine:3.19@sha256:abc123")
+                ]
+            );
+            assert_eq!(rows[0][4], json!({"password": "[redacted]", "plan": "pro"}));
+        }
+    }
 
     /// S16-08: widgets re-run unattended, so they always run read-only and a
     /// write/DDL statement is refused when saved.

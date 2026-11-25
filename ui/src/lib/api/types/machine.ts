@@ -42,3 +42,23 @@ export interface MachineStatus {
   /** Free space is below the floor. Shown, never acted on. */
   low_disk?: boolean;
 }
+
+/** One kind of work on one side of a daemon restart
+ *  (`GET /system/restart-impact`; `crates/otto-core/src/restart.rs`). */
+export interface RestartImpactItem {
+  /** `sessions` | `background_agents` | `connection_terminals` | `ide_runs` |
+   *  `debug_sessions` | `container_runtime` | `broker_tunnels` |
+   *  `session_rooms` | `live_browser` | `phones` | `db_tunnels` | `daemon_jobs`. */
+  kind: string;
+  /** Noun phrase already matching `count` ("1 debug session", "2 debug sessions"). */
+  label: string;
+  count: number;
+  /** Up to 5 names (session / run / room titles); omitted when none. */
+  detail?: string[];
+}
+
+/** What a restart keeps running and what it ends (empty kinds omitted). */
+export interface RestartImpact {
+  keeps: RestartImpactItem[];
+  ends: RestartImpactItem[];
+}

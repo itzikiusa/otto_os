@@ -262,6 +262,129 @@ impl Driver for RedisDriver {
         }
     }
 
+    async fn watch_keys(
+        &self,
+        cfg: &ResolvedConfig,
+        keyspace: &NodePath,
+        object: &str,
+        cap: usize,
+    ) -> Result<Vec<Vec<JsonValue>>> {
+        let db = keyspace
+            .get("kdb")
+            .and_then(parse_db_index)
+            .ok_or_else(|| types::invalid("redis: expected a keyspace node (kdb:<n>)"))?;
+        let mut conn = self.connect(cfg, db).await?;
+        let mut keys = scan_keys(&mut conn, Some(&watch_pattern(object)), cap)
+            .await?
+            .keys;
+        // SCAN may return a key twice.
+        let mut seen = std::collections::HashSet::new();
+        keys.retain(|k| seen.insert(k.clone()));
+        // Trip 2: TYPE + TTL + MEMORY USAGE of every key. Trip 3: every
+        // preview small enough that the reply stays far under the framing cap.
+        let mut pipe = redis::pipe();
+        pipe.ignore_errors();
+        for key in &keys {
+            pipe.cmd("TYPE").arg(key).cmd("TTL").arg(key);
+            pipe.cmd("MEMORY")
+                .arg("USAGE")
+                .arg(key)
+                .arg("SAMPLES")
+                .arg(0);
+        }
+        let header: Vec<RedisValue> = if keys.is_empty() {
+            Vec::new()
+        } else {
+            pipe.query_async(&mut conn).await.map_err(types::upstream)?
+        };
+        let rows = watch_headers(keys, header);
+        let mut pipe = redis::pipe();
+        pipe.ignore_errors();
+        let mut previews: Vec<JsonValue> = rows.iter().map(|_| JsonValue::Null).collect();
+        let mut previewed = Vec::new();
+        for (i, row) in rows.iter().enumerate() {
+            let key = &row.key;
+            // Range commands bound the element COUNT, not the element size:
+            // a value over the byte gate shows its size instead. Without a
+            // size (MEMORY USAGE unknown: miniredis, an ACL user, an old
+            // server) the element-bounded reads still run; only a JSON
+            // document, which has no bounded read, is not fetched.
+            let bounded = match row.bytes {
+                _ if row.ty == "string" => true,
+                Some(b) => b <= WATCH_VALUE_BYTES,
+                None => row.ty != "ReJSON-RL",
+            };
+            if !bounded {
+                previews[i] = json!(match row.bytes {
+                    Some(b) => format!("({b} bytes, too large to preview)"),
+                    None => "(size unknown, not previewed)".to_string(),
+                });
+                continue;
+            }
+            match row.ty.as_str() {
+                "string" => {
+                    pipe.cmd("GETRANGE")
+                        .arg(key)
+                        .arg(0)
+                        .arg(WATCH_STRING_BYTES - 1);
+                }
+                "list" => {
+                    pipe.cmd("LRANGE").arg(key).arg(0).arg(PREVIEW_LIMIT);
+                }
+                "zset" => {
+                    pipe.cmd("ZRANGE")
+                        .arg(key)
+                        .arg(0)
+                        .arg(PREVIEW_LIMIT)
+                        .arg("WITHSCORES");
+                }
+                "stream" => {
+                    pipe.cmd("XRANGE")
+                        .arg(key)
+                        .arg("-")
+                        .arg("+")
+                        .arg("COUNT")
+                        .arg(PREVIEW_LIMIT);
+                }
+                // One cursor page: the first members, never the whole value.
+                "hash" => {
+                    pipe.cmd("HSCAN")
+                        .arg(key)
+                        .arg(0)
+                        .arg("COUNT")
+                        .arg(PREVIEW_LIMIT);
+                }
+                "set" => {
+                    pipe.cmd("SSCAN")
+                        .arg(key)
+                        .arg(0)
+                        .arg("COUNT")
+                        .arg(PREVIEW_LIMIT);
+                }
+                "ReJSON-RL" => {
+                    pipe.cmd("JSON.GET").arg(key);
+                }
+                "TSDB-TYPE" => {
+                    pipe.cmd("TS.GET").arg(key);
+                }
+                _ => continue,
+            }
+            previewed.push(i);
+        }
+        if !previewed.is_empty() {
+            let replies: Vec<RedisValue> =
+                pipe.query_async(&mut conn).await.map_err(types::upstream)?;
+            for (i, reply) in previewed.into_iter().zip(replies) {
+                previews[i] = watch_preview(&rows[i].ty, reply);
+            }
+        }
+        Ok(rows
+            .into_iter()
+            .zip(previews)
+            .map(|(row, preview)| vec![json!(row.key), json!(row.ty), preview, json!(row.ttl)])
+            .collect())
+    }
+
     async fn object_detail(&self, cfg: &ResolvedConfig, path: &NodePath) -> Result<ObjectDetail> {
         let db = path
             .get("kdb")
@@ -674,6 +797,72 @@ fn truncation_hint(db: i64, msg: &str) -> SchemaNode {
     )
 }
 
+/// A DB Watch string preview's bytes (the watch keeps 4 KiB cells anyway).
+const WATCH_STRING_BYTES: isize = 16 * 1024;
+/// A non-string value previews only under this `MEMORY USAGE`: 50 keys at
+/// most stay a few MiB, far under the 32 MiB reply cap of the connection.
+const WATCH_VALUE_BYTES: i64 = 64 * 1024;
+
+/// One watched key after the header trip.
+struct WatchKeyHeader {
+    key: String,
+    ty: String,
+    ttl: i64,
+    bytes: Option<i64>,
+}
+
+/// Pair every key with its `TYPE, TTL, MEMORY USAGE` replies, dropping keys
+/// that were gone by then (`none` / TTL -2): no ghost rows.
+fn watch_headers(keys: Vec<String>, header: Vec<RedisValue>) -> Vec<WatchKeyHeader> {
+    let mut header = header.into_iter();
+    let mut out = Vec::with_capacity(keys.len());
+    for key in keys {
+        let mut next = || header.next();
+        let ty = next()
+            .and_then(|v| redis::from_redis_value::<String>(v).ok())
+            .unwrap_or_else(|| "unknown".into());
+        let ttl = next()
+            .and_then(|v| redis::from_redis_value::<i64>(v).ok())
+            .unwrap_or(-2);
+        let bytes = next().and_then(|v| redis::from_redis_value::<i64>(v).ok());
+        if ty != "none" && ttl != -2 {
+            out.push(WatchKeyHeader {
+                key,
+                ty,
+                ttl,
+                bytes,
+            });
+        }
+    }
+    out
+}
+
+/// A watched key's preview; a per-command error (the key changed type
+/// between trips) is no value, never the error text.
+fn watch_preview(ty: &str, reply: RedisValue) -> JsonValue {
+    match (ty, reply) {
+        (_, RedisValue::ServerError(_)) => JsonValue::Null,
+        ("hash" | "set", RedisValue::Array(mut parts)) if parts.len() == 2 => match parts.pop() {
+            Some(RedisValue::Array(items)) => items_preview(items, ty == "hash"),
+            _ => JsonValue::Null,
+        },
+        ("hash" | "set", _) => JsonValue::Null,
+        ("ReJSON-RL", reply) => types::cap_cell(value_to_json(reply)),
+        (_, reply) => value_to_json(reply),
+    }
+}
+
+/// The `SCAN MATCH` pattern of a DB Watch item: a glob (`session:*:route`)
+/// as typed, a plain prefix (`session:`) escaped with a trailing `*`.
+fn watch_pattern(object: &str) -> String {
+    let object = object.trim();
+    if object.contains(['*', '?', '[']) {
+        object.to_string()
+    } else {
+        format!("{}*", glob_escape(object))
+    }
+}
+
 /// Escape Redis glob metacharacters (`* ? [ ] \`) so a user-typed prefix is
 /// matched literally before the trailing `*` is appended.
 fn glob_escape(s: &str) -> String {
@@ -931,6 +1120,12 @@ async fn scan_preview(
             break;
         }
     }
+    items_preview(items, pairs)
+}
+
+/// The preview of `HSCAN` (field/value pairs → an object) or `SSCAN` items.
+fn items_preview(mut items: Vec<RedisValue>, pairs: bool) -> JsonValue {
+    let cap = PREVIEW_LIMIT as usize;
     if pairs {
         let mut obj = serde_json::Map::new();
         for chunk in items.chunks(2).take(cap) {
@@ -2337,6 +2532,55 @@ mod tests {
 #[cfg(test)]
 mod perf_tests {
     use super::*;
+
+    #[test]
+    fn watched_keys_gone_before_their_header_are_not_rows() {
+        let keys = vec!["a".to_string(), "gone".to_string(), "b".to_string()];
+        let header = vec![
+            RedisValue::SimpleString("string".into()),
+            RedisValue::Int(-1),
+            RedisValue::Int(56),
+            RedisValue::SimpleString("none".into()),
+            RedisValue::Int(-2),
+            RedisValue::Nil,
+            RedisValue::SimpleString("hash".into()),
+            RedisValue::Int(30),
+            RedisValue::Int(900_000),
+        ];
+        let rows = watch_headers(keys, header);
+        let got: Vec<_> = rows
+            .iter()
+            .map(|r| (r.key.as_str(), r.ty.as_str(), r.ttl, r.bytes))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("a", "string", -1, Some(56)),
+                ("b", "hash", 30, Some(900_000))
+            ]
+        );
+    }
+
+    #[test]
+    fn a_watch_preview_error_is_no_value() {
+        let err = redis::parse_redis_value(
+            b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n",
+        )
+        .unwrap();
+        assert_eq!(watch_preview("string", err), JsonValue::Null);
+        assert_eq!(
+            watch_preview("string", RedisValue::BulkString(b"v".to_vec())),
+            json!("v")
+        );
+    }
+
+    #[test]
+    fn a_watch_item_is_a_prefix_or_a_glob() {
+        assert_eq!(watch_pattern("session:"), "session:*");
+        assert_eq!(watch_pattern("session:*:route"), "session:*:route");
+        assert_eq!(watch_pattern("user:?"), "user:?");
+        assert_eq!(watch_pattern("a\\b"), "a\\\\b*");
+    }
 
     /// DB-07: a huge `KEYS`/`LRANGE 0 -1`-shaped reply is sliced to the row cap
     /// before conversion and charged against the response byte budget.

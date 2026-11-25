@@ -198,6 +198,7 @@ async fn resolve_exec_auth_resolves_own_and_rejects_foreign() {
         vars: None,
         ssh_connection_id: None,
         confirm_new_host: false,
+        debug_session_id: None,
     };
     // Same-workspace marker resolves in-memory only.
     let resolved = resolve_exec_auth(
@@ -466,6 +467,7 @@ fn exec_req(url: &str) -> ExecuteApiReq {
         vars: None,
         ssh_connection_id: None,
         confirm_new_host: false,
+        debug_session_id: None,
     }
 }
 
@@ -1380,4 +1382,110 @@ async fn oauth_token_fetch_keeps_metadata_and_the_daemon_blocked_with_private_al
         assert!(text.contains("SSRF guard"), "{token_url}: {text}");
         assert!(!text.contains("s3cret-value"), "{token_url}: {text}");
     }
+}
+
+/// `debug_session_id`: an agent's IDE debug request the person confirmed
+/// reaches this Mac without the workspace's `allow_local` — only for a
+/// person's credential, a LIVE debug session that person owns, an http(s)
+/// loopback URL, no tunnel, and never following a redirect.
+#[tokio::test]
+async fn debug_request_reaches_loopback_for_a_person_only() {
+    use axum::response::Redirect;
+    use axum::{routing::get, Router};
+    use otto_ide::dap::DapStartContext;
+    use otto_ide::types::{IdeBreakpoint, IdeDebugLaunchSpec, IdeStartDebugReq, IdeTargetSpec};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let app = Router::new()
+            .route("/orders", get(|| async { "ok" }))
+            .route("/away", get(|| async { Redirect::to("http://10.0.0.1/") }));
+        axum::serve(listener, app).await.unwrap();
+    });
+    let (tmp, ctx, wid) = engine_fixture("ws-debug-request").await;
+    let user = crate::routes::browser::tests::root_user();
+    // A live (paused) debug session of the person's.
+    let script = tmp.path().join("svc.sh");
+    std::fs::write(&script, "#!/bin/bash\nA=1\nB=2\necho done\n").unwrap();
+    let (script, root) = (
+        script.to_string_lossy().into_owned(),
+        tmp.path().to_string_lossy().into_owned(),
+    );
+    let start = IdeStartDebugReq {
+        target: IdeTargetSpec::local(root.clone()),
+        language: "shell".into(),
+        launch: IdeDebugLaunchSpec {
+            program: script.clone(),
+            cwd: Some(root),
+            ..Default::default()
+        },
+        breakpoints: vec![IdeBreakpoint {
+            path: script,
+            line: 3,
+            enabled: true,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let owner = DapStartContext::new()
+        .with_caller_is_root(true)
+        .with_owner_user_id(&user.id);
+    let (live, _events) = ctx.ide.dap.start_session_async(start, owner).unwrap();
+    let send = |auth: AuthContext, body: Value| {
+        let (ctx, wid, user) = (ctx.clone(), wid.clone(), user.clone());
+        async move {
+            let req = Json(serde_json::from_value(body).unwrap());
+            let auth = CurrentAuthContext(auth);
+            execute(
+                Path(wid),
+                State(ctx),
+                CurrentUser(user),
+                auth,
+                HeaderMap::new(),
+                req,
+            )
+            .await
+        }
+    };
+    let refused = |r: ApiResult<Json<ApiResponse>>| async move {
+        let Err(e) = r else { panic!("must be refused") };
+        wire(e).await
+    };
+    let url = format!("http://{addr}/orders");
+    // allow_local is off: a plain send to loopback is refused…
+    let (_, body) =
+        refused(send(auth_for(&user), json!({"method": "GET", "url": url})).await).await;
+    assert!(body.to_string().contains("SSRF guard"), "{body}");
+    // …a made-up session id opens nothing…
+    let fake = json!({"method": "GET", "url": url, "debug_session_id": "dbg_none"});
+    let (status, body) = refused(send(auth_for(&user), fake).await).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.to_string().contains("no live debug session"), "{body}");
+    // …the person's live session does…
+    let debug = json!({"method": "GET", "url": url, "debug_session_id": live.id});
+    let Json(resp) = send(auth_for(&user), debug.clone()).await.unwrap();
+    assert_eq!((resp.status, resp.body.as_str()), (200, "ok"));
+    // …never following a redirect off this Mac, even when asked to…
+    let hop = json!({"method": "GET", "url": format!("http://{addr}/away"),
+        "follow_redirects": true, "debug_session_id": live.id});
+    let Json(resp) = send(auth_for(&user), hop).await.unwrap();
+    assert_eq!(resp.status, 303, "the redirect comes back, unfollowed");
+    // …never through an SSH tunnel (127.0.0.1 there is another machine)…
+    let tunnel = json!({"method": "GET", "url": url, "ssh_connection_id": "c1", "debug_session_id": live.id});
+    let (status, body) = refused(send(auth_for(&user), tunnel).await).await;
+    assert_eq!(status, 400, "{body}");
+    // …an agent credential never opens loopback, flag or not…
+    let mut agent = auth_for(&user);
+    agent.managed_session_id = Some("sess-agent".into());
+    let (_, body) = refused(send(agent, debug).await).await;
+    assert!(body.to_string().contains("SSRF guard"), "{body}");
+    // …and the flag opens nothing but http(s) on this Mac.
+    for to in ["http://10.0.0.1/", "ftp://127.0.0.1/x"] {
+        let other = json!({"method": "GET", "url": to, "debug_session_id": live.id});
+        let (status, body) = refused(send(auth_for(&user), other).await).await;
+        assert_eq!(status, 400, "{to}: {body}");
+        assert!(body.to_string().contains("this Mac only"), "{to}: {body}");
+    }
+    ctx.ide.shutdown().await;
+    server.abort();
 }

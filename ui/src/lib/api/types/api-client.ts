@@ -313,6 +313,11 @@ export interface ExecuteApiReq {
    * `409 needs_confirm=new_host`. Honoured for a person's credential only.
    */
   confirm_new_host?: boolean;
+  /** An agent's IDE debug request the person confirmed (`otto.ui_ide_debug_request`):
+   *  the LIVE debug session it rides on. http(s) loopback only, no tunnel, no
+   *  redirects; reaches loopback without the workspace's `allow_local` for a
+   *  person's credential, scrubbed as an agent read. */
+  debug_session_id?: string;
 }
 
 export interface ApiResponse {

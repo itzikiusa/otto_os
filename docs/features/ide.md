@@ -404,6 +404,104 @@ of the build output.
   height resizer, inline ghost variable values, and an integrated **Git** dock
   tab reusing Otto's `DiffViewer` + stage/commit controls.
 
+### 6b. DB Watch: what did my code just write?
+
+The **DB Watch** dock tab answers one question while you debug or test: which
+rows did the code write, and what changed in them. It compares the tables
+your code touches at every debugger stop.
+
+**Zero clicks the first time.** Start a debug session of a test that starts a
+Testcontainers database (or `miniredis`). At the **first stop**, DB Watch picks
+that run's own database and the tables the code touches (names found in SQL
+strings and ORM calls, kept only when the database really has them) and
+takes the baseline. Every later stop is a checkpoint, taken by the daemon, so
+it works while the **Debug** tab is the one showing. The Debug panel shows one
+line, for example `DB · session_info +1 · session_route ~1 · Open`, and the
+DB Watch tab shows the changed-row count.
+
+**It never watches a database you did not pick.** A saved connection is only
+watched after you choose it in **Target ▾**, which shows each one's host and
+environment. Picking a target (and its tables) reads no rows: reading starts when
+you press **Start watching**. Only a database really on this Mac re-arms by
+itself when a debug session or run starts: this run's container, or a saved
+connection on a loopback host with no SSH tunnel (an SSH-tunnelled `127.0.0.1`
+is remote). A remembered remote connection, whatever its environment tag, is
+not contacted on its own: the panel and the Debug strip show "Remote database
+‹name› — click to watch", and the click watches it for this session. A
+connection tagged production asks you to type its name every time (the confirm
+says who asks, which tables and that it reads at every stop) and is never
+remembered. Another project's plain Docker container is listed but never
+chosen for you.
+
+**The panel, one row:**
+
+- **Target ▾**: the database, with its environment. Groups: this run's
+  containers, saved connections, other local containers.
+- **Tables ▾**: the tables ranked from your code (the paused file first), with
+  checkmarks; **Add table…** lists the target's real tables; a Redis watch uses
+  a key prefix or pattern (**Key pattern…**). Names the code mentions that the
+  database does not have are counted at the bottom, not offered.
+- **Since last stop | Since start** once there have been two stops.
+- **Snapshot** takes a checkpoint now (**Start watching** while nothing is armed).
+- **⋯**: poll every 3 s (never on production), keep Testcontainers alive after a
+  run, copy the changes as text, open the saved connection in DB Explorer,
+  stop watching (the project then stops re-arming by itself).
+
+**Each table** shows its counts and an honest window ("all 37 rows", or
+"newest 150 by id of ~1.2k — older rows not compared"). Added rows are green,
+removed rows red, and a changed row shows its key and only the cells that
+changed, `status: open → closed`; a nested document changes leaf by leaf
+(`context.geo.city: Valletta → Sliema`). Click a row for the whole record, one
+field per line with the changed fields first. A table's **⋯** has
+**Filter rows…** (`column = value` only), **Show current rows**, **Copy query**
+and **Stop watching this table**.
+
+Otto remembers, per project in this browser, the target you picked (never a
+production one, and for a Testcontainer only "this run's container") and the
+tables. No secrets are stored. Values are shown raw to you; what an agent reads
+through the agent-debug `db` command is masked by the daemon.
+
+### Debugging with an agent
+
+Ask an agent in an Otto session to debug with Otto ("use Otto to debug why
+`POST /orders` returns 500", "debug `TestFlowComponent` with Otto — the component
+test, build tag component"). Nothing happens unless you ask: the agent first
+asks to drive Otto (one **Allow** for the session), then:
+
+1. **The IDE opens** on the agent's folder — beside the conversation when it
+   runs in the IDE's agent dock, else in its own window.
+2. **One confirm per start**, attributed to the agent: the exact command line,
+   working directory, build flags (tags merged as the gutter does), extra
+   environment and how many breakpoints. It runs on your Mac as you, outside
+   the agent's sandbox, so it asks every time — a restart asks again. Extra
+   variables are shown in full and quoted. Loader, toolchain, proxy and
+   credential-file variables (`PATH`, `DYLD_*`, `GOFLAGS`, `GO_BUILD_FLAGS`,
+   `OTTO_*`, `NODE_OPTIONS`, `DOCKER_HOST`, `KUBECONFIG`, …) are refused; secrets belong in the project environment, which the daemon applies.
+   A production network bridge or SSH target also asks for the typed confirm.
+3. **The agent's breakpoints** appear in the gutter, marked as its own. A test
+   (including a testify suite method or a Go test behind `//go:build component`)
+   stops at the first one. A service returns as soon as it is ready (its output
+   prints the agent's `ready_pattern`, or its `ready_port` accepts connections),
+   then the agent sends the request through the API client (`→ POST
+   localhost:8080/orders (Claude)` in the console). The request waits as long as
+   you keep the app paused — up to 10 minutes.
+4. **At each stop** you see the usual IDE stop (line, frames, variables, DB
+   Watch) and the agent explains it in the conversation. Reply ("what is
+   `cfg.Tax`?", "proceed", "step into") or press **Proceed** on the driving bar.
+5. **Taking over** is just using the debugger: your own Step/Continue work as
+   always, and the agent sees that you moved it. **Stop** on the driving bar ends
+   its control; the session stays yours.
+
+Evaluating an expression can run code in the program, so each one asks, showing
+the exact expression; so does a breakpoint condition, hit count or log message
+(the start confirm lists them first, and setting one later asks again; a new start clears the
+agent's earlier breakpoints). An agent's start shows its arguments and environment whole — if they
+are too long to read (more than 8 KB together) the start is refused, as is a request body over 8 KB. Reading a variable by path never asks. Values the agent
+reads (locals, inspected paths, responses, DB rows) are redacted by name and
+shape before they reach it; what you see in the IDE is never redacted.
+Everything the agent reads goes to its model provider, as with any agent read.
+Local projects only: no SSH targets and no attach in this version.
+
 ### 7. LSP Intelligence, Quick-Doc, Manifest Inspector & Local History
 
 Combines live LSP multiplexing with zero-roundtrip editor intelligence:
@@ -749,11 +847,11 @@ Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api
   `/ide/collab/guest/{room_id}/debug-action`.
 - Runtime IDE Plugins: `GET /ide/plugins`, `POST /ide/plugins/install`,
   `POST /ide/plugins/{slug}/toggle`, `DELETE /ide/plugins/{slug}`.
-- Live Database Watch & Component-Test Watcher: `POST /ide/db-watch/detect`,
-  `POST /ide/db-watch/snapshot` (scans code for MySQL, PostgreSQL, MongoDB,
-  Redis, and ClickHouse tables/collections/key prefixes, pairs with saved DB
-  connections or live local Testcontainers / `miniredis` instances, and computes
-  read-only `Before -> After` row/field diffs across debug steps and test runs).
+- DB Watch (§6b): `POST /ide/db-watch/detect` (targets + ranked objects in
+  code), `POST /ide/db-watch/objects` (the target's real tables),
+  `POST|GET /ide/db-watch/watches`, `GET|PATCH|DELETE /ide/db-watch/watches/{id}`,
+  `POST /ide/db-watch/watches/{id}/snapshot`, and the `ide_db_watch_checkpoint`
+  event (the old stateless `POST /ide/db-watch/snapshot` is gone). Read-only on MySQL, PostgreSQL, MongoDB, Redis and ClickHouse.
 
 ## Troubleshooting
 

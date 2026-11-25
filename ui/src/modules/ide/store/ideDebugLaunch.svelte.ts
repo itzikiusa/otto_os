@@ -135,11 +135,25 @@ export async function guardDebugRelaunch(
   }
 }
 
-/** Project switch: a session left live in the project being closed is stopped
- *  on the daemon (best-effort, no dialog — a paused process holding a port in
- *  a project you left is a leak). A collab guest never stops the host's session. */
+/** Sessions THIS document started (an IDE that only re-attached to a session —
+ *  another IDE window's, an agent's — is a viewer of it). */
+const launchedHere = new Set<string>();
+
+export function markDebugLaunchedHere(id: string): void {
+  launchedHere.add(id);
+}
+
+export function isDebugLaunchedHere(id: string): boolean {
+  return launchedHere.has(id);
+}
+
+/** Project switch: a session this IDE started and left live in the project
+ *  being closed is stopped on the daemon (best-effort, no dialog — a paused
+ *  process holding a port in a project you left is a leak). One it only
+ *  re-attached to belongs to whoever started it: another IDE window, or an
+ *  agent driving it there. A collab guest never stops the host's session. */
 export function leaveDebugSessionOnSwitch(snap: IdeDebugSessionSnapshot | null, isGuest: boolean): void {
   ideDebugLaunch.startError = null;
-  if (isGuest || !isLiveDebug(snap)) return;
+  if (isGuest || !isLiveDebug(snap) || !launchedHere.has(snap.id)) return;
   void api.post(`/ide/debug/sessions/${encodeURIComponent(snap.id)}/command`, { action: 'stop' }).catch(() => {});
 }

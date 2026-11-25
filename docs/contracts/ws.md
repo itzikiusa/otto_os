@@ -602,7 +602,7 @@ Server → that ONE connection:
 
 ```json
 {"type":"hello_ack","conn_id":"01J…","boot_id":"01J…","boot_restore":{"kept_running":5,"suspended":2}}
-{"type":"ui_command","id":"01J…","session_id":"…","agent":{"session_id":"…","title":"Fix the report","provider":"claude"},"command":"db_run_query","args":{"tab_id":"…"},"deadline_ms":45000}
+{"type":"ui_command","id":"01J…","session_id":"…","agent":{"session_id":"…","title":"Fix the report","provider":"claude","cwd":"/Users/me/orders-svc","runtime":"pty"},"command":"db_run_query","args":{"tab_id":"…"},"deadline_ms":45000}
 {"type":"ui_command_cancel","id":"01J…","reason":"timeout"}
 ```
 
@@ -626,6 +626,11 @@ Server → that ONE connection:
   are validated against the entry's schema, with `connection_id` already
   resolved to the canonical id; `deadline_ms` is the DURATION (ms) the daemon
   waits before cancelling (extendable by `progress {awaiting_human:true}`).
+  `agent` (additive `cwd`, `runtime`): the calling session's working directory
+  (a debug handler's default project) and `runtime` — `structured` for a
+  Threads conversation (reply with `POST /runtime-sessions/{id}/prompt`), `pty`
+  for a terminal agent session (`POST /sessions/{id}/message`). An older daemon
+  omits both; the UI reads them as `''` / `pty`.
 - `ui_command_cancel` — stop the command and post nothing. `reason`:
   `timeout`, `revoked` (Stop / Deny — `POST /sessions/{id}/ui-control
   {enabled:false}`), `session_removed`, `caller_gone` (the agent's call ended).
@@ -703,7 +708,7 @@ Delivery scope: **session-family events** (`session_status`, `session_created`,
 `api_history_appended`) reach
 every member with `viewer`+ on the event's `workspace_id` (root receives all);
 **owner-scoped events** (`ui_control_requested`, `secret_request_updated`,
-`notifications_changed`, `ide_fs_changed`) reach only the user named by their `user_id` (not root);
+`notifications_changed`, `ide_fs_changed`, `ide_db_watch_checkpoint`) reach only the user named by their `user_id` (not root);
 **broadcast events** (`Notice`, `resource_access_changed`, `connections_changed`, a workspace-less
 `mcp_approval_changed`) reach every authenticated client. The sections below
 cover every variant (`Event::type_name()` in
@@ -1659,6 +1664,30 @@ changed the project on disk.
   listing per folder at a time). Window focus and a `resync` re-list every
   shown folder — also the only refresh a Remote SSH tree gets.
 - TypeScript type: `{ type: 'ide_fs_changed'; user_id: Id; client_id: string; dirs: string[] }`.
+
+### `ide_db_watch_checkpoint`
+
+Owner-scoped (the watch's creator only — not root, not workspace admins).
+Emitted by the DB Watch engine (`crates/otto-ide/src/db_watch/watch.rs`) after
+each checkpoint of a watch (`POST /ide/db-watch/watches`, `api.md`, IDE): the
+baseline at start, every debugger stop of the bound session (its `stop_seq`
+changed — selecting a frame never counts), a bound run leaving `running`, the
+bound session ending, and a manual `…/snapshot`.
+
+```json
+{ "type": "ide_db_watch_checkpoint", "user_id": "<Id>", "watch_id": "<id>", "root": "/abs/project",
+  "seq": 4, "reason": "stop", "changed_rows": 2, "failed_items": 0 }
+```
+
+- `seq` is the checkpoint number (0 = baseline). Under rapid stepping the daemon
+  takes one checkpoint at a time and coalesces every stop that arrives meanwhile
+  into ONE follow-up, so `seq` can advance by one while `stop_seq` advanced by
+  ten; it never goes backwards.
+- `changed_rows` counts added + modified + removed rows against the previous
+  checkpoint over all items; `failed_items` counts items whose read failed.
+- A cue only: no rows ride the event. The IDE refetches
+  `GET /ide/db-watch/watches/{watch_id}`, whichever dock tab is shown.
+- TypeScript type: `{ type: 'ide_db_watch_checkpoint'; user_id: Id; watch_id: string; root: string; seq: number; reason: 'start' | 'stop' | 'run_end' | 'session_end' | 'manual'; changed_rows: number; failed_items: number }`.
 
 ### `transcript_appended` / `transcript_live` / `artifact_added`
 

@@ -45,6 +45,9 @@ impl DbWatchRegistry {
     }
 
     /// Discover live Docker Testcontainers and child `miniredis` listeners on `127.0.0.1`.
+    /// Containers come newest first (`docker ps` order): with several of one
+    /// engine (a run left over, another package's test), the first is the
+    /// run that just started — what `auto` and the UI's first-stop pick take.
     pub async fn discover_local(&self, seed_pids: &[u32]) -> Vec<IdeEphemeralDbTarget> {
         self.evict_expired();
         let mut out: Vec<IdeEphemeralDbTarget> = self
@@ -53,6 +56,7 @@ impl DbWatchRegistry {
             .filter(|e| e.value().pinned_for_test)
             .map(|e| e.value().public.clone())
             .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
         let mut seen_ports: BTreeSet<u16> = out.iter().map(|t| t.port).collect();
 
         for found in discover_docker_testcontainers().await {
@@ -70,7 +74,6 @@ impl DbWatchRegistry {
             }
         }
 
-        out.sort_by(|a, b| a.name.cmp(&b.name));
         out
     }
 
@@ -106,6 +109,12 @@ impl DbWatchRegistry {
                 database: entry.public.database.clone(),
             },
         ))
+    }
+
+    /// The public view of a known, unexpired ephemeral target.
+    pub fn public_target(&self, ephemeral_id: &str) -> Option<IdeEphemeralDbTarget> {
+        self.evict_expired();
+        self.entries.get(ephemeral_id).map(|e| e.public.clone())
     }
 
     /// Register a verified `127.0.0.1` loopback target (used by integration tests).
